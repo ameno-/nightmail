@@ -3,7 +3,6 @@ import type { Env } from './env.js';
 import { addressHash, chatToken, MissingSecret, newId, readChatToken } from './tokens.js';
 import { readAttachmentLink, readCapped, serveAttachment } from './attachments.js';
 import { MAX_IMAGE_BYTES } from './image.js';
-import { staff } from './staff.js';
 import { daily } from './limits.js';
 import { acceptIntake, acceptSupport, blockUnconfigured, holdAtEdge, intakeAddress, ledgered, sweep } from './ledger.js';
 import { readiness } from './replay.js';
@@ -241,12 +240,6 @@ function confirm(env: Env): Response {
 
 // Route templates for the request line, never the raw path: paths carry conversation and ticket IDs and confirm tokens,
 // and queries carry chat tokens and attachment signatures.
-const STAFF_ROUTES = new Set(['/staff', '/staff/', '/staff/callback', '/staff/sign-out', '/staff/tickets', '/staff/tickets/:ticketId/resolve']);
-function staffRoute(path: string) {
-  const route = path.replace(/^\/staff\/tickets\/tkt_[a-z2-7]{16}\/resolve$/, '/staff/tickets/:ticketId/resolve');
-  return STAFF_ROUTES.has(route) ? route : '/staff/*';
-}
-
 async function route(request: Request, env: Env, url: URL, at: { route: string }, ctx: ExecutionContext): Promise<Response> {
   const path = url.pathname, name = (route: string) => { at.route = route; };
   if (path === '/health') {
@@ -273,7 +266,6 @@ async function route(request: Request, env: Env, url: URL, at: { route: string }
     name('/attachments/:conversationId/:attachmentId');
     return await readAttachmentLink(env, file[1]!, file[2]!, url.searchParams.get('exp'), url.searchParams.get('sig')) ? serveAttachment(env, file[1]!, file[2]!) : new Response(null, { status: 403 });
   }
-  if (path === '/staff' || path.startsWith('/staff/')) { name(staffRoute(path)); return staff(request, env); }
   if (request.method === 'POST' && path === '/hooks/bane-inbound') { name('/hooks/bane-inbound'); return inbound(request, env); }
   if (request.method === 'POST' && path === '/hooks/bane-intake') { name('/hooks/bane-intake'); return intake(request, env); }
   if (request.method === 'POST' && path === '/hooks/nightmail-wake') { name('/hooks/nightmail-wake'); return wake(request, env, ctx); }

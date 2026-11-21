@@ -1,4 +1,4 @@
-// The brand's tile in a browser tab, for this Worker's own pages (the confirmation page and the staff console). They are
+// The brand's tile in a browser tab, for this Worker's own pages (the page an old confirm link opens). They are
 // on their own origin, so the Worker serves the icon itself: the same drawing as the dashboard's app/public/favicon.svg
 // and favicon-dark.svg (docs/brand.md: keep them the same), ink for a browser's pale theme and paper for its dark one.
 const OUTLINE = 'M40 0H280C302 0 320 18 320 40V280C320 302 302 320 280 320H40C18 320 0 302 0 280V40C0 18 18 0 40 0ZM30 220H70V140L110 220H170V180L190 220H230L250 180V220H290V100H250L210 180L170 100H130V180L90 100H30V220Z';

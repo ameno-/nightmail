@@ -214,23 +214,23 @@ export class SupportConversation extends DurableObject<Env> {
       this.record({ id: progress.held, role: 'assistant', kind: 'held', text: typeof progress.text === 'string' ? progress.text : progress.model ?? '', at, tools: [], channel: 'email' }, false);
     }
     const settled = this.sql.exec("UPDATE _support_work SET state = 'held', updated_at = ? WHERE (kind = 'answer' AND state = 'parked') OR (kind = 'confirm' AND state IN ('pending', 'blocked'))", now).rowsWritten;
-    if (settled) this.sql.exec("UPDATE _support_inbox SET state = 'held' WHERE state = 'awaiting_confirmation'");
     if (written.length) log('warn', { event: 'email', code: 'EARLIER_ANSWERS_HELD', held: written.length });
     return settled + written.length > 0;
   }
 
   /**
-   * The earlier inbox (`_support_inbox`): its messages become work once each, and after a rollback to the code that used it
-   * (and back), what that code finished or decided meanwhile isn't done again here. Until the contract step the table is
-   * also kept current (`legacy`), so a rolled-back Worker processes only messages not finished here, and the frozen
-   * idempotency keys refuse a second send of anything that was.
+   * The earlier inbox (`_support_inbox`, from the builds before the work queue): what it still holds becomes work once,
+   * in one transaction with dropping the table. What that inbox finished or decided isn't done again here, and the frozen
+   * idempotency keys refuse a second send of anything it sent.
    */
   private importLegacy() {
+    if (!this.sql.exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_support_inbox'").toArray().length) return false;
     const now = Date.now(), finished = "('answered','dropped','held','rerouted')", decided = "('awaiting_confirmation','confirmed')", ofMessage = "json_extract(payload,'$.messageId') IN (SELECT message_id FROM _support_inbox WHERE state IN";
     // Only 'new' runs. 'failed' (six tries spent, possibly days ago) is kept for the record and never run again: a late
     // reply or link for old mail would only confuse. A message waiting for (or past) its confirmation was already decided
     // and its link sent: only its answer is left.
-    return [
+    return this.ctx.storage.transactionSync(() => {
+      const written = [
       this.sql.exec(`INSERT INTO _support_work(id,kind,state,payload,due_at,attempts,last_error,created_at,updated_at)
         SELECT 'msg:'||message_id,'message',CASE state WHEN 'new' THEN 'pending' WHEN 'held' THEN 'held' WHEN 'failed' THEN 'dead' ELSE 'done' END,
           json_object('messageId',message_id,'threadId',thread_id,'deliveryId',delivery_id),received_at,attempts,
@@ -244,21 +244,17 @@ export class SupportConversation extends DurableObject<Env> {
         AND kind IN ('message','answer','confirm','forward') AND ${ofMessage} ${finished})`, now),
       this.sql.exec(`UPDATE _support_work SET state='done',updated_at=? WHERE state IN ('pending','blocked') AND kind='message' AND ${ofMessage} ${decided})`, now),
       this.sql.exec(`UPDATE _support_work SET state='pending',due_at=?1,updated_at=?1 WHERE state='parked' AND kind='answer' AND ${ofMessage} ('confirmed'))`, now),
-    ].some(r => r.rowsWritten > 0);
+      ].some(r => r.rowsWritten > 0);
+      this.sql.exec('DROP TABLE _support_inbox');
+      return written;
+    });
   }
 
-  /** Mirrors a message's outcome into the earlier inbox table (importLegacy). */
-  private legacy(item: WorkRow, state: WorkState) {
+  /** A message or its answer that finished: one log line. */
+  private finished(item: WorkRow, state: WorkState) {
     const { messageId } = JSON.parse(item.payload) as { messageId?: string };
-    if (!messageId || !['message', 'answer', 'forward'].includes(item.kind) || state === 'pending' || state === 'blocked' || state === 'parked') return;
-    let mirrored: string | null = state === 'dead' ? 'failed' : state === 'held' ? 'held' : item.kind === 'answer' ? 'answered' : item.kind === 'forward' ? 'rerouted' : null;
-    if (!mirrored && item.kind === 'message') {
-      // Decided: still 'new' until its answer or forward is done, so a rolled-back Worker would finish it.
-      const children = this.sql.exec<{ kind: string; state: string }>('SELECT kind, state FROM _support_work WHERE parent = ?', item.id).toArray();
-      mirrored = !children.length ? 'dropped' : children.some(c => c.kind === 'answer' && c.state === 'parked') ? 'awaiting_confirmation' : null;
-    }
-    if (mirrored) this.sql.exec('UPDATE _support_inbox SET state = ? WHERE message_id = ?', mirrored, messageId);
-    if (item.kind !== 'forward') log(state === 'dead' ? 'error' : 'info', { event: 'email', channel: 'support', code: state === 'dead' ? 'EMAIL_FAILED' : undefined, kind: item.kind, state, messageId, attempt: item.attempts });
+    if (!messageId || !['message', 'answer'].includes(item.kind) || state === 'pending' || state === 'blocked' || state === 'parked') return;
+    log(state === 'dead' ? 'error' : 'info', { event: 'email', channel: 'support', code: state === 'dead' ? 'EMAIL_FAILED' : undefined, kind: item.kind, state, messageId, attempt: item.attempts });
   }
 
   /**
@@ -268,14 +264,14 @@ export class SupportConversation extends DurableObject<Env> {
    */
   private createTables() {
     const existing = new Set(this.sql.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table'").toArray().map(t => t.name));
-    for (const table of ['meta', 'grant', 'transcript', 'client_ids', 'inbox', 'attachments', 'consent']) {
+    for (const table of ['meta', 'transcript', 'client_ids', 'inbox', 'attachments', 'consent']) {
       if (existing.has(`support_${table}`) && !existing.has(`_support_${table}`)) this.sql.exec(`ALTER TABLE support_${table} RENAME TO _support_${table}`);
     }
-    this.sql.exec(`CREATE TABLE IF NOT EXISTS _support_meta (id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS _support_grant (id INTEGER PRIMARY KEY CHECK (id = 1), grant_id TEXT NOT NULL, token TEXT NOT NULL, expires_at INTEGER NOT NULL, workspace_ids TEXT NOT NULL, content_workspace_id TEXT);
+    // A grant from before the stamp (support_grant): Nightmail no longer has grants, so there is nothing to keep or revoke.
+    this.sql.exec(`DROP TABLE IF EXISTS _support_grant; DROP TABLE IF EXISTS support_grant;
+      CREATE TABLE IF NOT EXISTS _support_meta (id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS _support_transcript (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, role TEXT NOT NULL, kind TEXT, text TEXT NOT NULL, at TEXT NOT NULL, tools TEXT NOT NULL DEFAULT '[]');
       CREATE TABLE IF NOT EXISTS _support_client_ids (id TEXT PRIMARY KEY);
-      CREATE TABLE IF NOT EXISTS _support_inbox (message_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, delivery_id TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'new', attempts INTEGER NOT NULL DEFAULT 0, received_at INTEGER NOT NULL, subject TEXT);
       CREATE TABLE IF NOT EXISTS _support_attachments (id TEXT PRIMARY KEY, key TEXT NOT NULL, type TEXT NOT NULL, size INTEGER NOT NULL, width INTEGER, height INTEGER, source TEXT NOT NULL, name TEXT NOT NULL, message_id TEXT, created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS _support_consent (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, workspace_name TEXT NOT NULL, why TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS _support_actions (id TEXT PRIMARY KEY, kind TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open', created_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_check_at INTEGER NOT NULL DEFAULT 0);`);
@@ -440,10 +436,7 @@ export class SupportConversation extends DurableObject<Env> {
 
   async enqueueInbound(input: { conversationId: string; threadId: string; messageId: string; deliveryId: string }) {
     if (!this.meta()) { const meta = this.fresh(input.conversationId, 'email'); meta.threadId = input.threadId; this.save(meta); }
-    this.ctx.storage.transactionSync(() => {
-      this.sql.exec('INSERT INTO _support_inbox (message_id, thread_id, delivery_id, received_at) VALUES (?, ?, ?, ?) ON CONFLICT (message_id) DO NOTHING', input.messageId, input.threadId, input.deliveryId, Date.now());
-      this.work.insert({ id: `msg:${input.messageId}`, kind: 'message', payload: { messageId: input.messageId, threadId: input.threadId, deliveryId: input.deliveryId } satisfies Incoming });
-    });
+    this.work.insert({ id: `msg:${input.messageId}`, kind: 'message', payload: { messageId: input.messageId, threadId: input.threadId, deliveryId: input.deliveryId } satisfies Incoming });
     await this.arm();
     return { ok: true };
   }
@@ -552,7 +545,7 @@ export class SupportConversation extends DurableObject<Env> {
           return;
         }
         // Nightmail decides: the panel asked it first (POST /v1/support-conversations/{id}/content-access, the person's own
-        // session). The frame's handoff (still sent for the previous Worker) is ignored; only this conversation's scope counts.
+        // session). Only this conversation's scope counts, never the frame.
         if (!(await this.contentAllowed(consent.workspace_id))) {
           this.resolveConsent(id, 'deny');
           this.enqueueTurn({ text: '[Content access could not be granted (the dashboard was on another workspace, or the request expired). Continue without it, and say they can try again from that workspace.]', hidden: true });
@@ -1610,7 +1603,7 @@ export class SupportConversation extends DurableObject<Env> {
 
   override async alarm() {
     if (!this.meta()) return;
-    await this.work.drain(item => this.run(item), (item, state) => this.legacy(item, state), () => this.deadline());
+    await this.work.drain(item => this.run(item), (item, state) => this.finished(item, state), () => this.deadline());
     // The inbox: what a failed mirror left, and the state this drain changed (blocked work, a ticket).
     await this.mirror();
     let meta = this.meta()!;
@@ -1658,17 +1651,11 @@ export class SupportConversation extends DurableObject<Env> {
     catch (error) { logError(error, { event: 'support', code: 'CLOSE_FAILED' }, 'warn'); }
     await this.arm();
   }
-  /** Nightmail refuses every later request for the conversation, its grant from before the stamp is revoked, and D1 says closed. */
+  /** Nightmail refuses every later request for the conversation, and D1 says closed. */
   private async closeRemote() {
     const meta = this.meta()!;
     const closed = await external(this.env.BANE.closeConversation(this.own()));
     if (closed.status !== 200 && closed.status !== 404) throw platformError(closed, 'CLOSE_FAILED');
-    const grant = this.sql.exec<{ grant_id: string }>('SELECT grant_id FROM _support_grant WHERE id = 1').toArray()[0];
-    if (grant) {
-      const revoked = await external(this.env.BANE.revokeGrant(grant.grant_id));
-      if (revoked.status !== 200 && revoked.status !== 404) throw platformError(revoked, 'REVOKE_FAILED');
-      this.sql.exec('DELETE FROM _support_grant');
-    }
     await external(this.env.DB.prepare("UPDATE conversations SET status = 'closed', closed_at = coalesce(closed_at, ?), updated_at = ? WHERE id = ?").bind(meta.closedAt, Date.now(), meta.conversationId).run());
   }
 
@@ -1678,7 +1665,7 @@ export class SupportConversation extends DurableObject<Env> {
   private beforeStamp(meta: Meta) { return !meta.registered && (!!meta.userId || !!meta.verified || !!meta.retired); }
   /**
    * Retires a conversation from before the stamp, once: none of its unsent answers is ever sent (each is held, and the
-   * team gets one email listing them), its model session ends, and it closes like any other (its grant revoked).
+   * team gets one email listing them), its model session ends, and it closes like any other.
    */
   private async retireLegacy() {
     const meta = this.meta()!;
@@ -1693,7 +1680,6 @@ export class SupportConversation extends DurableObject<Env> {
     this.ctx.storage.transactionSync(() => {
       this.sql.exec("UPDATE _support_work SET state = 'held', updated_at = ? WHERE kind = 'answer' AND state IN ('pending', 'blocked', 'parked')", now);
       this.sql.exec("UPDATE _support_work SET state = 'done', updated_at = ? WHERE kind = 'confirm' AND state IN ('pending', 'blocked', 'parked')", now);
-      this.sql.exec("UPDATE _support_inbox SET state = 'held' WHERE state IN ('awaiting_confirmation', 'confirmed')");
       if (drafts.length) this.work.insert({ kind: 'alert', id: 'alert:held', payload: { key: `held-${meta.conversationId}`, input: { addressId: this.env.SUPPORT_ADDRESS_ID, to: [this.env.TICKET_TO],
         subject: `[${productName} support] Unsent answers held in ${meta.conversationId}`,
         text: [`A support conversation from before the current release had ${drafts.length} unsent answer${drafts.length > 1 ? 's' : ''}. None was sent, and the conversation is closed. Reply to the customer in the thread if they still need an answer.`, '',

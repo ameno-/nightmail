@@ -165,11 +165,6 @@ export class SupportPlatform extends WorkerEntrypoint<Env> {
     }, config);
   }
   async verifyHandoff(token: string) { return (await this.platform()).verifyHandoff(token); }
-  async verifyEmail(body: Parameters<SupportPlatformApi['verifyEmail']>[0]) { return (await this.platform()).verifyEmail(body); }
-  async mintGrant(body: Parameters<SupportPlatformApi['mintGrant']>[0]) { return (await this.platform()).mintGrant(body); }
-  async revokeGrant(grantId: string) { return (await this.platform()).revokeGrant(grantId); }
-  async verifyStaff(token: string) { return (await this.platform()).verifyStaff(token); }
-  async read(path: string, grant: string) { return (await this.platform()).read(path, grant); }
   async registerConversation(body: Parameters<SupportPlatformApi['registerConversation']>[0]) { return (await this.platform()).registerConversation(body); }
   async closeConversation(conversationId: string) { return (await this.platform()).closeConversation(conversationId); }
   async request(conversationId: string, method: string, path: string, body?: unknown) { return (await this.platform()).request(conversationId, method, path, body); }

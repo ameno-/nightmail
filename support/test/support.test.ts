@@ -3,7 +3,7 @@ import { createHmac, randomBytes } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { Miniflare } from 'miniflare';
 import { afterAll, beforeAll, describe, test } from 'vitest';
-import { control, FAKE_BANE, fakeGateway, GENERAL_ANSWER, GRANT_TOKEN, recorded, type Recorded } from './fakes.js';
+import { control, FAKE_BANE, fakeGateway, GENERAL_ANSWER, recorded, type Recorded } from './fakes.js';
 import { gate, LINK_ORIGINS } from '../src/gate.js';
 import { ticketEmail } from '../src/tickets.js';
 import { project, toolResult } from '../src/agent/projection.js';
@@ -60,7 +60,7 @@ export class SupportIntake extends Intake {
     if (input) await this.enqueue(input);
     if (tick) await super.alarm();
     return { rows: this.ctx.storage.sql.exec('SELECT id,kind,state,attempts,due_at,last_error FROM _support_work').toArray(), before, alarm: await this.ctx.storage.getAlarm(),
-      legacy: this.ctx.storage.sql.exec('SELECT message_id,state FROM intake_inbox').toArray() };
+      legacy: this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE name='intake_inbox'").toArray().length ? this.ctx.storage.sql.exec('SELECT message_id,state FROM intake_inbox').toArray() : [] };
   }
 }
 export default {
@@ -143,7 +143,7 @@ export class SupportConversation extends Conversation {
       if (!ctx.id.equals(env.CONVERSATION.idFromName(name)) || ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE name='_support_meta'").toArray().length) continue;
       if (grant) {
         ctx.storage.sql.exec('CREATE TABLE _support_grant (id INTEGER PRIMARY KEY CHECK (id = 1), grant_id TEXT NOT NULL, token TEXT NOT NULL, expires_at INTEGER NOT NULL, workspace_ids TEXT NOT NULL, content_workspace_id TEXT)');
-        ctx.storage.sql.exec('INSERT INTO _support_grant VALUES (1, ?, ?, ?, ?, NULL)', 'sgr_' + '1'.repeat(32), '${GRANT_TOKEN}', grant.expiresAt, '["ws_acme"]');
+        ctx.storage.sql.exec('INSERT INTO _support_grant VALUES (1, ?, ?, ?, ?, NULL)', 'sgr_' + '1'.repeat(32), 'bane_support_' + '5'.repeat(64), grant.expiresAt, '["ws_acme"]');
       }
       ctx.storage.sql.exec('CREATE TABLE _support_meta (id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL)');
       ctx.storage.sql.exec('INSERT INTO _support_meta VALUES (1, ?)', JSON.stringify({ conversationId: name, ...meta }));
@@ -176,7 +176,7 @@ export class SupportConversation extends Conversation {
     if (tick) await super.alarm();
     return { before, alarm: await this.ctx.storage.getAlarm(), meta: has('_support_meta') ? this.meta() : null,
       rows: has('_support_work') ? sql.exec('SELECT id,kind,state,attempts,due_at,last_error FROM _support_work ORDER BY created_at,rowid').toArray() : [],
-      legacy: has('_support_inbox') ? sql.exec('SELECT message_id,state FROM _support_inbox ORDER BY message_id').toArray() : [],
+      legacy: has('_support_inbox') ? sql.exec('SELECT message_id,state FROM _support_inbox ORDER BY message_id').toArray() : [], grant: has('_support_grant'),
       actions: has('_support_actions') ? sql.exec('SELECT id,state,attempts,next_check_at FROM _support_actions ORDER BY created_at').toArray() : [] };
   }
 }
@@ -216,7 +216,7 @@ const baseEnv = (overrides: Record<string, unknown> = {}) => ({
   INTAKE: { type: 'durable-object' as const, worker: 'support', exportName: 'SupportIntake' },
   INTAKE_ADDRESSES: text('abuse@dev.bane.mx,privacy@dev.bane.mx,legal@dev.bane.mx'), BANE_INTAKE_WEBHOOK_SECRET: text(INTAKE_SECRET), BANE_INTAKE_INBOX_KEY: text(`bane_mbx_${'8'.repeat(64)}`),
   // The main suite runs many conversations as one person in one day: caps high here, tested low in their own instance.
-  LIMIT_TICKETS_PER_PERSON: text('50'), LIMIT_TURNS_PER_PERSON: text('1000'), LIMIT_TURNS_PER_EMAIL_SENDER: text('1000'), LIMIT_MAIL_PER_SENDER: text('200'), LIMIT_CONFIRMS_PER_ADDRESS: text('20'), STAFF_RECHECK_SECONDS: text('6'),
+  LIMIT_TICKETS_PER_PERSON: text('50'), LIMIT_TURNS_PER_PERSON: text('1000'), LIMIT_TURNS_PER_EMAIL_SENDER: text('1000'), LIMIT_MAIL_PER_SENDER: text('200'), LIMIT_CONFIRMS_PER_ADDRESS: text('20'),
   DB: { type: 'd1' as const, id: 'support-test' },
   UPLOADS: { type: 'r2' as const, name: 'support-test-uploads' },
   BANE: { type: 'worker' as const, worker: 'fake-bane', exportName: 'SupportPlatform' },
@@ -420,9 +420,6 @@ describe('support Worker', () => {
     const toolTurn = recorded.slice(before).find(r => JSON.stringify(r.body.messages).includes('tool_result'))!;
     const fed = JSON.stringify(toolTurn.body.messages);
     assert.ok(fed.includes('<untrusted>') && !fed.includes('op_secret') && !fed.includes('never-shown'), fed.slice(-600));
-    // The grant token is in no model request and no frame.
-    assert.ok(!recorded.some(r => JSON.stringify(r).includes(GRANT_TOKEN)), 'The grant never reaches the model.');
-    assert.ok(!chat.frames.some(f => JSON.stringify(f).includes(GRANT_TOKEN) || JSON.stringify(f).includes('bane_support_')), 'The grant never reaches the panel.');
     const calls = await fakeCalls(), id = started.body.conversationId;
     // Nightmail registered the chat from the same handoff; every read is stamped with this conversation, in order: the
     // scope when the panel joined, the turn's scope, the account summary, then the tool.
@@ -838,11 +835,11 @@ describe('support Worker', () => {
   test('M3: a ticket from an unverified sender names no customer and says so first', () => {
     const base = { conversationId: 'conv_x', channel: 'email' as const, threadId: 'thr', costUsd: 0, model: 'm', attachments: [], customer: { userId: null, email: null, name: null, role: null, workspaces: [] } };
     const input = { type: 'billing' as const, title: 'Refund', severity: 'P3' as const, summary: 's', ask: 'refund', tried: [], recommendation: 'r', evidence: { ids: [] }, details: {} };
-    const unverified = ticketEmail({ PUBLIC_URL: SUPPORT }, { ...base, verified: null, dmarc: 'FAIL', sender: 'victim@acme.test' }, { id: 'tkt_x', dueAt: 0 }, input);
+    const unverified = ticketEmail({ BANE_ORIGIN: ORIGIN }, { ...base, verified: null, dmarc: 'FAIL', sender: 'victim@acme.test' }, { id: 'tkt_x', dueAt: 0 }, input);
     assert.ok(unverified.text.startsWith('UNVERIFIED SENDER (DMARC FAIL): not a confirmed customer.'), unverified.text);
     assert.ok(!unverified.text.includes('Customer:') && unverified.text.includes('Sender (unverified): victim@acme.test'));
     assert.equal(unverified.subject, '[Nightmail billing] [UNVERIFIED] tkt_x: Refund (P3)');
-    const verified = ticketEmail({ PUBLIC_URL: SUPPORT }, { ...base, verified: 'dmarc', dmarc: 'PASS', sender: null, customer: { userId: 'usr_ada', email: 'ada@acme.test', name: 'Ada', role: 'owner', workspaces: [] } }, { id: 'tkt_x', dueAt: 0 }, input);
+    const verified = ticketEmail({ BANE_ORIGIN: ORIGIN }, { ...base, verified: 'dmarc', dmarc: 'PASS', sender: null, customer: { userId: 'usr_ada', email: 'ada@acme.test', name: 'Ada', role: 'owner', workspaces: [] } }, { id: 'tkt_x', dueAt: 0 }, input);
     assert.ok(verified.text.includes('Verified: dmarc (DMARC PASS)') && verified.text.includes('Customer: Ada <ada@acme.test>, owner') && !verified.text.includes('UNVERIFIED'));
   });
 
@@ -1458,9 +1455,10 @@ describe('support Worker', () => {
 
     test('a legacy failed row is retried after deploy', async () => {
       const thread = 'thr_failed', message = 'msg_abuse_s2';
-      assert.deepEqual((await drive(thread)).legacy, [{ message_id: message, state: 'failed' }]);
+      const loaded = await drive(thread);
+      assert.deepEqual([loaded.legacy, loaded.rows.map(r => [r.id, r.state, r.attempts])], [[], [[`msg:${message}`, 'pending', 6]]], 'Imported once, and the earlier inbox dropped.');
       const run = await drive(thread, { tick: true }), row = run.rows.find(r => r.kind === 'message')!;
-      assert.deepEqual([row.state, row.attempts, run.legacy[0]?.state], ['done', 7, 'done']);
+      assert.deepEqual([row.state, row.attempts], ['done', 7]);
       assert.equal((await sends(`ack-${message}`)).length, 1);
     });
 
@@ -1490,7 +1488,7 @@ describe('support Worker', () => {
     });
     afterAll(() => instance?.dispose());
     type Row = { id: string; kind: string; state: string; attempts: number; due_at: number; last_error: string | null };
-    type Run = { rows: Row[]; legacy: { message_id: string; state: string }[]; alarm: number | null; before: number; meta: { closedAt: number | null } | null; actions: { id: string; state: string; attempts: number; next_check_at: number }[] };
+    type Run = { rows: Row[]; legacy: { message_id: string; state: string }[]; grant: boolean; alarm: number | null; before: number; meta: { closedAt: number | null } | null; actions: { id: string; state: string; attempts: number; next_check_at: number }[] };
     async function drive(id: string, options: { tick?: boolean; expire?: string; age?: number; unavailable?: string; route?: string; fail?: 'throw' | 'reply'; ageActions?: number; actionsDue?: boolean } = {}) {
       const res = await instance.dispatchFetch(`${SUPPORT}/__conversation`, { method: 'POST', body: JSON.stringify({ id, ...options }) });
       assert.equal(res.status, 200);
@@ -1736,7 +1734,7 @@ describe('support Worker', () => {
       assert.deepEqual(tries.map(c => c[6]), [503, 202]);
       assert.deepEqual(tries[1].slice(1, 6), tries[0].slice(1, 6), 'The same reply, resent.');
       assert.equal(tries[1][3].text, HELP_REPLY);
-      assert.deepEqual(run.legacy, [{ message_id: message, state: 'answered' }]);
+      assert.deepEqual(run.legacy, [], 'No earlier inbox is kept any more.');
     });
 
     test('a forward whose target is unavailable is retried, and the message is answered once in its own conversation', async () => {
@@ -1750,7 +1748,6 @@ describe('support Worker', () => {
       assert.deepEqual([forward?.state, forward?.attempts], ['pending', 1], 'The target failed: not marked forwarded.');
       run = await drive(id, { expire: forward.id, tick: true });
       assert.equal(states(run)[forward.id], 'done');
-      assert.equal(run.legacy.find(r => r.message_id === 'msg_d3_b')?.state, 'rerouted');
       const target = (await (await db()).prepare("SELECT id FROM conversations WHERE thread_id LIKE 'thr_d3#%'").first<{ id: string }>())!.id;
       await drive(target, { tick: true });
       const toStranger = (await replies(thread, instance)).filter(c => c[3].to[0] === 'stranger@else.test');
@@ -1857,11 +1854,12 @@ describe('support Worker', () => {
       assert.equal((await replies(thread, instance)).length, 1, 'One email.');
     });
 
-    test('a deploy imports what the earlier inbox left once; a bound conversation from before hands its new mail to a fresh one and holds its unsent answer for the team', async () => {
+    test('a deploy imports what the earlier inbox left once and drops it; a bound conversation from before hands its new mail to a fresh one and holds its unsent answer for the team', async () => {
       // Ada's conversation (bound before the stamp): one message answered, one new, one confirmed but unanswered.
       let run = await drive('conv_legacy_a');
       assert.deepEqual(states(run), { 'msg:msg_legacy_answered': 'done', 'msg:msg_legacy_new': 'pending', 'msg:msg_legacy_confirmed': 'done', 'answer:msg_legacy_confirmed': 'pending' });
       assert.ok(run.alarm !== null && run.alarm <= Date.now(), 'Armed when imported.');
+      assert.deepEqual(run.legacy, [], 'The earlier inbox is dropped once imported.');
       run = await drive('conv_legacy_a', { tick: true });
       assert.deepEqual(states(run), { 'msg:msg_legacy_answered': 'done', 'msg:msg_legacy_new': 'done', 'msg:msg_legacy_confirmed': 'done', 'answer:msg_legacy_confirmed': 'held',
         'alert:held': 'done', close: 'done', 'forward:msg_legacy_new': 'done' });
@@ -1874,7 +1872,6 @@ describe('support Worker', () => {
       assert.match(alert[0][3].text, /msg_legacy_confirmed: not answered yet/);
       assert.ok(run.meta?.closedAt && (run.meta as any).retired && (run.meta as any).modelRetired);
       assert.ok((await fakeCalls(instance)).some(c => c[0] === 'closeConversation' && c[1] === 'conv_legacy_a'));
-      assert.deepEqual(run.legacy, [{ message_id: 'msg_legacy_answered', state: 'answered' }, { message_id: 'msg_legacy_confirmed', state: 'held' }, { message_id: 'msg_legacy_new', state: 'rerouted' }]);
       // The new message is a fresh conversation's: Nightmail registers it from the message, it is answered like any email,
       // and it carries nothing over.
       const successor = (run.meta as any).successor as string;
@@ -1885,7 +1882,7 @@ describe('support Worker', () => {
       const calls = await fakeCalls(instance);
       assert.ok(calls.some(c => c[0] === 'registerConversation' && c[1] === successor));
       assert.deepEqual((await sends('reply-msg_legacy_new')).map(c => c[3].text), [GENERAL], 'A general answer, like any email.');
-      assert.ok(!calls.some(c => c[0] === 'read') && !calls.some(c => c[0] === 'request' && [successor, 'conv_legacy_a'].includes(c[2])), 'Nothing reads through a grant, the old conversation or the new one.');
+      assert.ok(!calls.some(c => c[0] === 'request' && [successor, 'conv_legacy_a'].includes(c[2])), 'Nothing reads through the old conversation or the new one.');
       // Pat's conversation: a message waiting for the confirmation whose link the old code sent. Email no longer waits for
       // one: the answer is settled as held when the object loads, and the old link's page changes nothing.
       run = await drive('conv_legacy_b', { tick: true });
@@ -1895,14 +1892,13 @@ describe('support Worker', () => {
       run = await drive('conv_legacy_b', { tick: true });
       assert.equal(states(run)['answer:msg_legacy_waiting'], 'held');
       assert.equal((await sends('reply-msg_legacy_waiting')).length + (await sends('confirm-msg_legacy_waiting')).length, 0, 'Never answered, no link.');
-      assert.deepEqual(run.legacy, [{ message_id: 'msg_legacy_waiting', state: 'held' }]);
     });
 
     test('a message the earlier inbox gave up on is kept for the record and never run again', async () => {
       // Six tries spent, in a conversation closed since: running it now would send a late fixed reply for old mail.
       const run = await drive('conv_legacy_c', { tick: true });
       assert.deepEqual(run.rows.map(r => [r.id, r.state]), [['msg:msg_legacy_gave_up', 'dead']]);
-      assert.deepEqual(run.legacy, [{ message_id: 'msg_legacy_gave_up', state: 'failed' }]);
+      assert.deepEqual(run.legacy, []);
       await drive('conv_legacy_c', { tick: true });
       assert.equal((await fakeCalls(instance)).filter(c => c[0] === 'api' && (c[2].includes('msg_legacy_gave_up') || c[2].includes('thr_legacy_c') || String(c[5]).includes('msg_legacy_gave_up'))).length, 0, 'Not read, answered or confirmed again.');
       assert.equal(await (await db()).prepare("SELECT count(*) AS n FROM conversations WHERE thread_id LIKE 'thr_legacy_c%'").first('n'), 0);
@@ -1923,18 +1919,16 @@ describe('support Worker', () => {
       chat.ws.close();
     });
 
-    test('a conversation opened before the stamp never reads through its grant: its waiting answer is held, the team told once, the grant revoked', async () => {
+    test('a conversation opened before the stamp drops its grant unused: its waiting answer is held and the team told once', async () => {
       for (const [id, thread] of [['conv_legacy_d', 'thr_legacy_d'], ['conv_legacy_e', 'thr_legacy_e']]) {
         let run = await drive(id, { tick: true });
+        assert.equal(run.grant, false, 'The grant from before the stamp is gone.');
         run = await drive(id, { tick: true });
         assert.deepEqual([states(run)['answer:' + (id === 'conv_legacy_d' ? 'msg_legacy_grant' : 'msg_legacy_lapsed')], states(run).close, states(run)['alert:held']], ['held', 'done', 'done'], id);
         assert.equal((await replies(thread, instance)).length, 0, 'Never answered.');
         assert.equal((await sends(`held-${id}`)).length, 1, 'The team is told once.');
       }
-      const calls = await fakeCalls(instance);
-      assert.ok(!calls.some(c => c[0] === 'read'), 'No grant read, live or lapsed.');
-      assert.equal(calls.filter(c => c[0] === 'revokeGrant').length, 2, 'Each grant is revoked.');
-      assert.ok(!calls.some(c => c[0] === 'request' && ['conv_legacy_d', 'conv_legacy_e'].includes(c[2])) && !calls.some(c => c[0] === 'mintGrant'));
+      assert.ok(!(await fakeCalls(instance)).some(c => c[0] === 'request' && ['conv_legacy_d', 'conv_legacy_e'].includes(c[2])), 'Nothing reads through them.');
     });
 
     test('a close Nightmail can’t take yet is retried until it can, and retention waits for it', async () => {
@@ -2417,46 +2411,6 @@ describe('support Worker', () => {
     assert.equal((await mf.dispatchFetch(link!.replace(/exp=\d+/, 'exp=1700000000'))).status, 403, 'An expired link is refused.');
     chat.ws.close();
   }, 180_000);
-
-  test('staff: Nightmail operator sign-in, single-use token, the ticket list by type and status, marking done with CSRF', async () => {
-    const signIn = await mf.dispatchFetch(`${SUPPORT}/staff`);
-    const html = await signIn.text();
-    assert.ok(html.includes(`${ORIGIN}/v1/operator/support/staff-sign-in?return=${encodeURIComponent(`${SUPPORT}/staff/callback`)}`.replaceAll('&', '&#38;')), html);
-    assert.equal((await mf.dispatchFetch(`${SUPPORT}/staff/tickets`)).status, 200, 'Without a session: the sign-in page, never tickets.');
-    assert.ok(!(await (await mf.dispatchFetch(`${SUPPORT}/staff/tickets`)).text()).includes('tkt_'));
-    assert.equal((await mf.dispatchFetch(`${SUPPORT}/staff/callback?staff=staff:j0:usr_ops:demoted`, { redirect: 'manual' })).status, 403);
-    const callback = await mf.dispatchFetch(`${SUPPORT}/staff/callback?staff=staff:j1:usr_ops:ok`, { redirect: 'manual' });
-    assert.equal(callback.status, 303);
-    const cookie = callback.headers.get('set-cookie')!;
-    assert.match(cookie, /^__Host-bane-support-staff=s1\.[^;]+; Path=\/; Secure; HttpOnly; SameSite=Strict; Max-Age=28800$/);
-    assert.equal((await mf.dispatchFetch(`${SUPPORT}/staff/callback?staff=staff:j1:usr_ops:ok`, { redirect: 'manual' })).status, 403, 'A sign-in token works once.');
-    const session = { cookie: cookie.split(';')[0]! };
-    const all = await (await mf.dispatchFetch(`${SUPPORT}/staff/tickets?status=all`, { headers: session })).text();
-    assert.ok(all.includes('Webhook test returns 500 for every endpoint') && all.includes('Duplicate $25 top-up') && all.includes('usr_ops@anoma.ly'));
-    assert.ok(all.includes('<ol><li>Open Webhooks</li>') && all.includes('<img alt="screenshot" src="https://support.dev.bane.mx/attachments/'), 'Bug reproduction and screenshots are shown.');
-    const billing = await (await mf.dispatchFetch(`${SUPPORT}/staff/tickets?type=billing&status=open`, { headers: session })).text();
-    assert.ok(billing.includes('Duplicate $25 top-up') && !billing.includes('Webhook test returns 500'));
-    const db = await mf.getD1Database('DB', 'support');
-    const bug = await db.prepare("SELECT id FROM tickets WHERE type = 'bug' ORDER BY created_at DESC").first<{ id: string }>();
-    const resolve = (headers: Record<string, string>, csrf: string) => mf.dispatchFetch(`${SUPPORT}/staff/tickets/${bug!.id}/resolve`, { method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/x-www-form-urlencoded', ...headers }, body: `csrf=${encodeURIComponent(csrf)}&resolution=Fixed%20in%20%23160` });
-    const csrf = all.match(/name="csrf" value="([^"]+)"/)![1]!.replaceAll('&#45;', '-').replaceAll('&#95;', '_');
-    assert.equal((await resolve({ ...session, origin: SUPPORT }, 'forged')).status, 403, 'No CSRF token, no write.');
-    assert.equal((await resolve({ ...session, origin: 'https://evil.test' }, csrf)).status, 403, 'Cross-origin form posts are refused.');
-    assert.equal((await resolve({ origin: SUPPORT }, csrf)).status, 403, 'No session, no write.');
-    assert.equal((await resolve({ ...session, origin: SUPPORT }, csrf)).status, 303);
-    const done = await db.prepare('SELECT status, resolved_by, resolution FROM tickets WHERE id = ?').bind(bug!.id).first<any>();
-    assert.deepEqual(done, { status: 'resolved', resolved_by: 'usr_ops', resolution: 'Fixed in #160' });
-    assert.ok(!(await (await mf.dispatchFetch(`${SUPPORT}/staff/tickets`, { headers: session })).text()).includes('Webhook test returns 500'), 'Open tickets no longer list it.');
-    // Review Low: the operator role is re-checked (hourly in production; 6 s here). A stale session goes back through
-    // Nightmail's sign-in on a page load, and can't write.
-    await new Promise(r => setTimeout(r, 6500));
-    const stale = await mf.dispatchFetch(`${SUPPORT}/staff/tickets`, { headers: session, redirect: 'manual' });
-    assert.deepEqual([stale.status, stale.headers.get('location')], [303, `${ORIGIN}/v1/operator/support/staff-sign-in?return=${encodeURIComponent(`${SUPPORT}/staff/callback`)}`]);
-    assert.equal((await resolve({ ...session, origin: SUPPORT }, csrf)).status, 403, 'A stale check can’t write.');
-    const fresh = await mf.dispatchFetch(`${SUPPORT}/staff/callback?staff=staff:j9:usr_ops:ok`, { redirect: 'manual' });
-    assert.equal((await mf.dispatchFetch(`${SUPPORT}/staff/tickets`, { headers: { cookie: fresh.headers.get('set-cookie')!.split(';')[0]! } })).status, 200);
-    assert.equal((await mf.dispatchFetch(`${SUPPORT}/staff/callback?staff=staff:j10:usr_ops:demoted`, { redirect: 'manual' })).status, 403, 'A demoted operator gets no new session.');
-  }, 60_000);
 
   test('email: image attachments are checked, stripped and shown to the model; other files are not opened', async () => {
     const before = recorded.length;

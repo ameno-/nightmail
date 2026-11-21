@@ -63,7 +63,7 @@ export async function modelImage(env: Env, attachment: Attachment): Promise<{ ur
   return { uri: `data:${type};base64,${b64(bytes)}`, name: attachment.name };
 }
 
-/** A link to one attachment that works for 7 days (the team's ticket email and the staff page). */
+/** A link to one attachment that works for 7 days (the team's ticket email). */
 export async function attachmentLink(env: Env, conversationId: string, attachment: Pick<Attachment, 'id'>, now = Date.now()) {
   const exp = Math.floor(now / 1000) + LINK_SECONDS, payload = `a1.${conversationId}.${attachment.id}.${exp}`;
   return `${env.PUBLIC_URL}/attachments/${conversationId}/${attachment.id}?exp=${exp}&sig=${await sign(await purposeKey(env.SUPPORT_ROOT_SECRET, 'attachment/v1'), payload)}`;

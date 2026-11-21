@@ -186,7 +186,7 @@ export function createDemoTransport({ firstName, workspace }: { firstName: strin
       else if (message.type === 'end') { clear(); conversation++; server({ type: 'closed', reason: 'ended' }); server({ type: 'status', busy: false }) }
       return true
     },
-    async allowContent(requestId) { await wait(500); transport.send({ type: 'consent.respond', requestId, decision: 'allow', handoff: 'demo' }) },
+    async allowContent(requestId) { await wait(500); transport.send({ type: 'consent.respond', requestId, decision: 'allow' }) },
     async readAction(actionId) {
       await wait(120)
       if (failRead) { failRead = false; throw new ApiError('The service is unavailable. Try again shortly.', 'UNAVAILABLE', {}, undefined, 503) }

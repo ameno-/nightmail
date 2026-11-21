@@ -147,8 +147,7 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
   // The audit trail past its retention (src/audit.ts RETENTION); the table refuses to delete anything earlier.
   await drain('audit_events', () => sql`WITH gone AS (DELETE FROM audit_events WHERE id IN (SELECT id FROM audit_events WHERE retain_until <= now() ORDER BY retain_until LIMIT ${RETENTION_BATCH}) RETURNING 1)
     SELECT count(*)::int AS n FROM gone`);
-  // Support grants live two hours; their trail is in audit_events. Handoffs expire after a week.
-  await drain('support_grants', batch(sql`support_grants`, sql`expires_at < ${cutoff}`));
+  // Handoffs go 30 days after they expire; what they opened is in audit_events.
   await drain('support_handoffs', batch(sql`support_handoffs`, sql`expires_at < ${cutoff}`));
   // Support transcripts (src/support-inbox.ts) and their subjects go 90 days after the conversation closed.
   const closedLongAgo = sql`SELECT id FROM support_conversations WHERE closed_at < now() - interval '90 days'`;

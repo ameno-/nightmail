@@ -154,8 +154,8 @@ export async function daily(env: Env, now = Date.now()) {
     await notice(env, `overflow-${day}`, { subject: `[${productName} support] ${total} message${total === 1 ? '' : 's'} over cap on ${day}`, text: lines.join('\n') });
   }
   // Retention: counters a week, single-use records and notices a month, overflow 30 days, finished work 35 days (the
-  // replay poller dedupes against it for the 30 days Nightmail keeps events), closed conversations and resolved tickets a
-  // year. Mail kept at the edge for an address nobody configured within 30 days is given up (it stays in Nightmail's inbox).
+  // replay poller dedupes against it for the 30 days Nightmail keeps events), closed conversations a year, and
+  // tickets a year after their last change (staff resolve them in Nightmail's Support inbox). Mail kept at the edge for an address nobody configured within 30 days is given up (it stays in Nightmail's inbox).
   const ago = (days: number) => now - days * 86_400_000;
   await env.DB.batch([
     env.DB.prepare("UPDATE support_work SET state = 'dead', updated_at = ? WHERE object = '' AND state = 'blocked' AND created_at < ?").bind(now, ago(30)),
@@ -166,9 +166,8 @@ export async function daily(env: Env, now = Date.now()) {
     env.DB.prepare('DELETE FROM webhook_deliveries WHERE received_at < ?').bind(ago(30)),
     env.DB.prepare('DELETE FROM handoffs_used WHERE used_at < ?').bind(ago(30)),
     env.DB.prepare('DELETE FROM confirmations WHERE used_at < ?').bind(ago(30)),
-    env.DB.prepare('DELETE FROM staff_tokens_used WHERE used_at < ?').bind(ago(7)),
     env.DB.prepare('DELETE FROM pending_confirms WHERE sent_at < ?').bind(ago(2)),
-    env.DB.prepare("DELETE FROM tickets WHERE status = 'resolved' AND resolved_at < ?").bind(ago(365)),
+    env.DB.prepare('DELETE FROM tickets WHERE updated_at < ?').bind(ago(365)),
     env.DB.prepare("DELETE FROM conversations WHERE status = 'closed' AND closed_at < ? AND id NOT IN (SELECT conversation_id FROM tickets)").bind(ago(365)),
   ]);
   return { digest: total };

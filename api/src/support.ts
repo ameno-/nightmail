@@ -1,16 +1,15 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql, type SQL } from 'drizzle-orm';
 import type { MiddlewareHandler } from 'hono';
-import { ApiError, denied, digest, errors, hasSessionCookie, id, json, log, notFound, randomSecret, response, timed, webhookUrlHint, type App, type AppEnv, type Ctx, type DbExecutor, type SupportScope } from './core.js';
-import { AuditEntry, AuditFilters, auditContext, auditInsert, customerTrail, operatorContext, operatorRequired, requireOperator, userEmail } from './audit.js';
+import { ApiError, denied, errors, hasSessionCookie, id, json, notFound, response, timed, webhookUrlHint, type App, type AppEnv, type Ctx, type DbExecutor, type SupportScope } from './core.js';
+import { AuditEntry, AuditFilters, auditContext, auditInsert, customerTrail, operatorRequired, requireOperator, userEmail } from './audit.js';
 import { budgetedRead } from './deliverability.js';
 import { GOOD_STANDING, limitRequest, type Step } from './standing-model.js';
 import { cached, registerSupportDeliverability } from './support-deliverability.js';
 import { ERROR_CODE, groupLines, LOG_RETENTION_DAYS, LOG_ROWS, LogsUnavailable, requestLines, ROUTE_TEMPLATE } from './support-logs.js';
-import { CONVERSATION_ID, keyId, signSupportToken, STAFF_AUDIENCE, STAFF_TOKEN_SECONDS, verifyStaffToken } from './support-platform.js';
+import { CONVERSATION_ID, keyId, signSupportToken } from './support-platform.js';
 import { ceilingFor, routedOnly, sectionIds } from './support-conversations.js';
-import { operatorRoleOf, type OperatorRole } from './operator-identity.js';
-import { productName, secretPrefixes } from './brand.js';
+import { productName } from './brand.js';
 
 // Support integration (api/README.md "Support integration"). Internal: these routes are for Nightmail's operators and its
 // support platform, never for customers.
@@ -18,19 +17,19 @@ import { productName, secretPrefixes } from './brand.js';
 // 1. A signed-in member presses "Contact support" (POST /v1/contact-support): Nightmail stores a handoff (workspace, user,
 //    page, recent request IDs, and whether they share message content for this request) and returns the support
 //    platform's URL carrying an Ed25519-signed handoff token.
-// 2. The support platform's server verifies who the customer is (that handoff, or an email whose From passed DMARC
-//    alignment or a magic link: POST /v1/operator/support/verify-email) and mints a grant for that one user
-//    (POST /v1/operator/support/grants) with its operator credential.
-// 3. The agent gets only the grant (nm_support_…) in its environment. Every /v1/support/* route derives the customer
-//    from the grant alone; a workspaceId filter can only narrow it. Every call is written to audit_events, and each
-//    workspace's Activity shows "Nightmail support viewed this workspace" once per grant. Never secrets; message content only
-//    with the customer's own opt-in from the handoff.
+// 2. The support platform registers a conversation from that handoff (src/support-conversations.ts): Nightmail checks
+//    its own signature and the unused handoff row, and binds the conversation to that person and workspace, once.
+// 3. The agent reads the account only through SupportPlatform.request(conversationId, …), which puts the conversation on
+//    the runtime, never in a request. Every /v1/support/* route derives the customer from the conversation's row; a
+//    workspaceId filter can only narrow it. Every call is written to audit_events, and each workspace's Activity shows
+//    "Nightmail support viewed this workspace" once per conversation. Never secrets; message content only with the
+//    customer's own opt-in in that chat.
 //
-// Access: /v1/operator/* answers only an operator (operatorGate), /v1/support/* only a live support grant (supportGate).
-// Every other credential, including a workspace owner's session, gets the same 403 for every path under them, real or not.
+// Access: /v1/operator/* answers only an operator (operatorGate), /v1/support/* only an open, registered conversation
+// (supportGate). Every other credential, including a workspace owner's session, gets the same 403 for every path under
+// them, real or not.
 
-const SUPPORT_TOKEN = /^(?:nm|bane)_support_[0-9a-f]{64}$/; // bane_: remove after rename cleanup
-/** Requests per minute per support grant. */
+/** Requests per minute per support conversation. */
 export const SUPPORT_RATE_PER_MINUTE = 120;
 /**
  * The deliverability reads (src/support-deliverability.ts) aggregate up to 30 days of mail, and the request reads ask
@@ -39,9 +38,7 @@ export const SUPPORT_RATE_PER_MINUTE = 120;
 export const SUPPORT_EXPENSIVE_WEIGHT = 5;
 const EXPENSIVE = /^\/v1\/support\/(?:deliverability\/[^/]+|screen|campaigns(?:\/[^/]+(?:\/lint)?)?|audience\/health|domains\/[^/]+\/health|emails\/[^/]+\/lint|requests(?:\/[^/]+)?)$/;
 export const supportWeight = (path: string) => EXPENSIVE.test(path) ? SUPPORT_EXPENSIVE_WEIGHT : 1;
-const GRANT_MAX_MINUTES = 120;
-const bearer = (c: Ctx) => c.req.header('authorization')?.match(/^Bearer (\S+)$/i)?.[1];
-const supportRequired = () => new ApiError(403, 'SUPPORT_GRANT_REQUIRED', `This area is for ${productName} support with an active support grant.`);
+const supportRequired = () => new ApiError(403, 'SUPPORT_GRANT_REQUIRED', `This area is for ${productName} support, for an open support conversation.`);
 
 /**
  * /v1/operator and /v1/operator/*: an operator's dashboard session, or the support platform through the SupportPlatform
@@ -77,61 +74,16 @@ export const operatorGate: MiddlewareHandler<AppEnv> = async (c, next) => {
 };
 
 /**
- * /v1/support/*: a live, unexpired, unrevoked support grant, else 403. One statement authenticates the grant, counts the
- * request against its minute budget (supportWeight: 5 for an aggregate read, else 1), narrows it to the workspaces its user still belongs to, writes this call to the
- * audit trail and, the first time a grant touches a workspace, the customer-visible "support.view" row.
+ * /v1/support/*: only SupportPlatform.request() names a conversation (Runtime.supportConversation, never a header,
+ * query parameter or body), and any credential on the request refuses it. One statement loads the open conversation (it
+ * must have a user), joins that user's live memberships within its scope and filters them by the roles this route's
+ * dashboard counterpart admits (SUPPORT_CEILINGS), charges the conversation's minute budget (supportWeight: 5 for an
+ * aggregate read, else 1), writes the internal support.read row and, the first time the conversation reads a workspace,
+ * the customer-visible "support.view". A route without a ceiling is refused.
  */
 export const supportGate: MiddlewareHandler<AppEnv> = async (c, next) => {
-  if (c.env.supportConversation !== undefined) return conversationGate(c, next);
-  const token = bearer(c);
-  if (!c.env.config.multiTenant || !token || !SUPPORT_TOKEN.test(token)) throw supportRequired();
-  const filter = c.req.query('workspaceId') ?? null, context = auditContext(c), limit = SUPPORT_RATE_PER_MINUTE, weight = supportWeight(c.req.path);
-  const query = Object.fromEntries(Object.entries(c.req.queries()).map(([k, v]) => [k.slice(0, 40), v.join(',').slice(0, 120)]).slice(0, 12));
-  const call = { route: c.req.path.slice(0, 200), method: c.req.method, query }, hash = await digest(token);
-  const { rows: [grant] } = await timed(c, 'support-db', () => c.env.db.execute<{ id: string; user_id: string; ticket_ref: string; operator_id: string; content_workspace_id: string | null; expires_at: string; used: number;
-    workspaces: SupportScope['workspaces'] }>(sql`WITH g AS (
-      UPDATE support_grants SET used = CASE WHEN window_start = date_trunc('minute', now()) THEN least(used + ${weight}::int, ${limit + 1}) ELSE ${weight}::int END,
-        window_start = date_trunc('minute', now()), last_used_at = now()
-      WHERE token_hash = ${hash} AND revoked_at IS NULL AND expires_at > now()
-      RETURNING id, user_id, workspace_ids, ticket_ref, operator_id, content_workspace_id, handoff_id, expires_at, used
-    ), scope AS (
-      SELECT m.workspace_id AS id, w.name, m.role FROM g JOIN workspace_members m ON m.user_id = g.user_id AND m.workspace_id = ANY(g.workspace_ids) JOIN workspaces w ON w.id = m.workspace_id
-    ), logged AS (
-      INSERT INTO audit_events(workspace_id, user_id, actor_type, actor_id, actor_label, via, action, target_type, target_id, summary, ticket_ref, request_id, ip_network, user_agent, internal, retain_until)
-      SELECT (SELECT id FROM scope WHERE id = ${filter}), g.user_id, 'support', g.id, ${`${productName} support`}::text, 'support', 'support.read', 'user', g.user_id,
-        ${JSON.stringify(call)}::jsonb || jsonb_build_object('operator', g.operator_id, 'workspaces', (SELECT coalesce(jsonb_agg(id), '[]') FROM scope)), g.ticket_ref,
-        ${context.requestId}, ${context.ipNetwork}, ${context.userAgent}, true, now() + interval '90 days' FROM g WHERE g.used <= ${limit}
-    ), viewed AS (
-      INSERT INTO audit_events(workspace_id, user_id, actor_type, actor_id, actor_label, via, action, target_type, target_id, summary, ticket_ref, request_id, internal, retain_until)
-      SELECT s.id, g.user_id, 'support', g.id, ${`${productName} support`}::text, 'support', 'support.view', 'workspace', s.id,
-        jsonb_strip_nulls(jsonb_build_object('ticket', g.ticket_ref, 'until', g.expires_at, 'handoff', g.handoff_id, 'member', g.user_id, 'contentShared', g.content_workspace_id = s.id)),
-        g.ticket_ref, ${context.requestId}, false, now() + interval '1 year' FROM g, scope s WHERE g.used <= ${limit} AND (${filter}::text IS NULL OR s.id = ${filter})
-      ON CONFLICT (actor_id, workspace_id) WHERE action = 'support.view' DO NOTHING
-    ) SELECT g.id, g.user_id, g.ticket_ref, g.operator_id, g.content_workspace_id, g.expires_at::text AS expires_at, g.used,
-      coalesce((SELECT json_agg(json_build_object('id', id, 'name', name, 'role', role) ORDER BY name, id) FROM scope), '[]') AS workspaces FROM g`));
-  if (!grant) throw supportRequired();
-  if (grant.used > limit) { c.header('Retry-After', '60'); throw new ApiError(429, 'REQUEST_RATE_LIMITED', `A support grant may make ${limit} requests a minute. Retry after the window resets.`, undefined, true); }
-  if (c.req.method !== 'GET' && c.req.method !== 'HEAD') throw new ApiError(403, 'SUPPORT_READ_ONLY', 'A support grant can only read.');
-  // Content only in the workspace the customer opted in from, and only while they still belong to it.
-  const contentWorkspaceId = grant.workspaces.some(w => w.id === grant.content_workspace_id) ? grant.content_workspace_id : null;
-  const scope: SupportScope = { grantId: grant.id, userId: grant.user_id, ticketRef: grant.ticket_ref, operatorId: grant.operator_id, contentWorkspaceId, expiresAt: new Date(grant.expires_at).toISOString(), workspaces: grant.workspaces };
-  if (filter !== null && !scope.workspaces.some(w => w.id === filter)) notFound('Workspace');
-  c.set('support', scope);
-  c.set('actor', { workspaceId: filter ?? scope.workspaces[0]?.id ?? '', permissions: [], domains: [], keyId: grant.id, credential: 'support' });
-  return next();
-};
-
-/**
- * /v1/support/* for a support conversation: only SupportPlatform.request() names one (Runtime.supportConversation,
- * never a header, query parameter or body), and any credential on the request refuses it. One statement loads the open
- * conversation (it must have a user), joins that user's live memberships within its scope and filters them by the
- * roles this route's dashboard counterpart admits (SUPPORT_CEILINGS), charges the conversation's minute budget, writes
- * the internal support.read row and, the first time the conversation reads a workspace, the customer-visible
- * "support.view". A route without a ceiling is refused.
- */
-async function conversationGate(c: Ctx, next: () => Promise<void>) {
-  const conversationId = c.env.supportConversation!;
-  if (!c.env.config.multiTenant || c.env.platformCaller !== 'bane-support' || !CONVERSATION_ID.test(conversationId) || c.req.header('authorization') !== undefined || hasSessionCookie(c.req.raw.headers)) throw supportRequired();
+  const conversationId = c.env.supportConversation;
+  if (conversationId === undefined || !c.env.config.multiTenant || c.env.platformCaller !== 'bane-support' || !CONVERSATION_ID.test(conversationId) || c.req.header('authorization') !== undefined || hasSessionCookie(c.req.raw.headers)) throw supportRequired();
   const ceiling = ceilingFor(c.req.method, c.req.path);
   if (!ceiling) {
     if (c.req.method !== 'GET' && c.req.method !== 'HEAD') throw new ApiError(403, 'SUPPORT_READ_ONLY', 'A support conversation can only read, choose its workspace and keep notes.');
@@ -167,17 +119,17 @@ async function conversationGate(c: Ctx, next: () => Promise<void>) {
   if (conv.used > limit) { c.header('Retry-After', '60'); throw new ApiError(429, 'REQUEST_RATE_LIMITED', `A support conversation may make ${limit} requests a minute. Retry after the window resets.`, undefined, true); }
   // Content only where the customer opted in (a chat's own workspace), and only while they still belong to it.
   const contentWorkspaceId = conv.workspaces.some(w => w.id === conv.content_workspace_id) ? conv.content_workspace_id : null;
-  const scope: SupportScope = { grantId: conv.id, userId: conv.user_id, ticketRef: conv.id, operatorId: 'service:bane-support', contentWorkspaceId, expiresAt: new Date().toISOString(), workspaces: conv.workspaces,
+  const scope: SupportScope = { userId: conv.user_id, contentWorkspaceId, workspaces: conv.workspaces,
     conversation: { id: conv.id, channel: conv.channel, verification: conv.verification, workspaceId: conv.workspace_id } };
   if (filter !== null && !scope.workspaces.some(w => w.id === filter)) notFound('Workspace');
   c.set('support', scope);
   c.set('actor', { workspaceId: filter ?? scope.workspaces[0]?.id ?? '', permissions: [], domains: [], keyId: conv.id, credential: 'support' });
   return next();
-}
+};
 
 // ---------- the customer's in-app handoff ----------
 
-/** A handoff opens at most one grant, within this many minutes; its signed token lives 10 minutes. */
+/** A handoff opens at most one conversation, within this many minutes; its signed token lives 10 minutes. */
 const HANDOFF_MINUTES = 30, HANDOFF_TOKEN_SECONDS = 600, HANDOFFS_PER_HOUR = 10;
 const Handoff = z.object({
   id: z.string().describe('The support reference (sho_…). Quote it to support.'),
@@ -189,12 +141,12 @@ const Handoff = z.object({
 
 // ---------- what support reads ----------
 
-const WorkspaceFilter = z.object({ workspaceId: z.string().max(100).optional().describe('Only this workspace; it must be one of the grant’s. Omit for all of them.') });
+const WorkspaceFilter = z.object({ workspaceId: z.string().max(100).optional().describe('Only this workspace; it must be one of the conversation’s. Omit for all of them.') });
 const Page = z.object({ cursor: z.string().max(200).optional().describe('nextCursor from the previous page.'), limit: z.coerce.number().int().min(1).max(100).default(25) });
 const Since = z.object({ since: z.iso.datetime().optional().describe('Only items at or after this time (default: 7 days ago).') });
 const tags = ['Support (internal)'];
 const supportSecurity: Record<string, string[]>[] = [{ bearerAuth: [] }];
-const describe = (text: string) => `${text} Internal: for ${productName} support with a support grant (${secretPrefixes.supportGrant}…), never for customers.`;
+const describe = (text: string) => `${text} Internal: for ${productName} support’s conversations, through the support platform’s binding, never for customers.`;
 function scoped(c: Ctx, roles?: ('owner' | 'admin' | 'member')[]) {
   const scope = c.get('support')!, filter = c.req.query('workspaceId');
   const workspaces = scope.workspaces.filter(w => (!filter || w.id === filter) && (!roles || roles.includes(w.role)));
@@ -202,8 +154,8 @@ function scoped(c: Ctx, roles?: ('owner' | 'admin' | 'member')[]) {
 }
 const ids = (list: string[]) => sql`${sql.param(list)}::text[]`;
 /** A conversation reads received mail as the dashboard shows it to the role (actorMailAccess): a member only mail on receiving addresses. */
-function receivedAsMember(c: Ctx, workspaces: SupportScope['workspaces']) {
-  const members = routedOnly(c, workspaces);
+function receivedAsMember(workspaces: SupportScope['workspaces']) {
+  const members = routedOnly(workspaces);
   return members.length ? sql`AND (workspace_id <> ALL(${ids(members)}) OR EXISTS (SELECT FROM mailbox_messages mm WHERE mm.message_id = mail_messages.id AND mm.workspace_id = mail_messages.workspace_id))` : sql``;
 }
 const sinceOf = (since: string | undefined, days = 7) => since ?? new Date(Date.now() - days * 86_400_000).toISOString();
@@ -301,161 +253,23 @@ async function failures(db: DbExecutor, list: string[], hooks = list) {
 /** The operator routes for the support platform. */
 export function registerSupportOperator(app: App) {
   const operatorSecurity: Record<string, string[]>[] = [{ bearerAuth: [] }, { dashboardSession: [] }, { secureDashboardSession: [] }];
-  const Workspaces = z.array(z.object({ id: z.string(), name: z.string(), role: z.enum(['owner', 'admin', 'member']) }));
-  app.openapi(createRoute({ hide: true, tags: ['Operator'], security: operatorSecurity, method: 'post', path: '/v1/operator/support/verify-email', operationId: 'operatorVerifySupportEmail',
-    request: { body: json(z.object({
-      email: z.email().max(254).describe('The From address of the support email.'),
-      evidence: z.discriminatedUnion('kind', [
-        z.object({ kind: z.literal('dmarc'), result: z.literal('pass'), aligned: z.literal(true), messageId: z.string().trim().min(1).max(300).describe('The Message-ID of the verified email, recorded with the lookup.') }).strict(),
-        z.object({ kind: z.literal('magic_link'), confirmedAt: z.iso.datetime() }).strict(),
-      ]).describe('How the support platform verified the sender: a DMARC-aligned pass, or a magic link the person opened.'),
-      ticketRef: z.string().trim().min(1).max(200).optional(),
-    }).strict()) },
-    responses: { 200: response(z.object({ verified: z.boolean(), user: z.object({ id: z.string(), name: z.string() }).nullable(), workspaces: Workspaces })), ...errors } }), async c => {
-    const operator = await requireOperator(c, 'operator:read'), body = c.req.valid('json');
-    if (body.evidence.kind === 'magic_link') {
-      const at = Date.parse(body.evidence.confirmedAt);
-      if (at > Date.now() + 60_000) throw new ApiError(422, 'EVIDENCE_INVALID', 'A magic link confirmation cannot be in the future.', 'evidence.confirmedAt');
-      if (at < Date.now() - 86_400_000) throw new ApiError(422, 'EVIDENCE_STALE', 'A magic link confirmation must be less than a day old.', 'evidence.confirmedAt');
-    }
-    // Only a verified email of a signed-in user maps to an account. One statement: the lookup and its audit row.
-    const audit = auditInsert(operatorContext(c, operator), { action: 'support.verify_email', workspaceId: null, userId: sql`u.id`, target: { type: 'user', id: sql`u.id` },
-      details: { evidence: body.evidence, ticket: body.ticketRef }, ticketRef: body.ticketRef ?? null, internal: true }, { from: sql`u` });
-    const { rows: [row] } = await c.env.db.execute<{ id: string; name: string; workspaces: z.infer<typeof Workspaces> }>(sql`WITH u AS (SELECT id, name FROM nightmail_users WHERE lower(email) = lower(${body.email}) AND email_verified LIMIT 1),
-      logged AS (${audit})
-      SELECT u.id, u.name, coalesce((SELECT json_agg(json_build_object('id', w.id, 'name', w.name, 'role', m.role) ORDER BY w.name, w.id) FROM workspace_members m JOIN workspaces w ON w.id = m.workspace_id
-        WHERE m.user_id = u.id), '[]') AS workspaces FROM u`);
-    return c.json({ verified: !!row, user: row ? { id: row.id, name: row.name } : null, workspaces: row?.workspaces ?? [] }, 200);
-  });
-
-  const Grant = z.object({ id: z.string(), userId: z.string(), workspaceIds: z.array(z.string()), ticketRef: z.string(), verification: z.enum(['handoff', 'dmarc', 'magic_link']), contentShared: z.boolean(),
-    contentWorkspaceId: z.string().nullable().describe('The one workspace whose message content the customer shared (the handoff’s), or null.'), handoffId: z.string().nullable(), createdAt: z.string(), expiresAt: z.string(), revokedAt: z.string().nullable(), lastUsedAt: z.string().nullable(), operatorId: z.string() }).openapi('SupportGrant');
-  const grantView = sql`id, user_id AS "userId", workspace_ids AS "workspaceIds", ticket_ref AS "ticketRef", verification, content_workspace_id IS NOT NULL AS "contentShared", content_workspace_id AS "contentWorkspaceId", handoff_id AS "handoffId", created_at::text AS "createdAt",
-    expires_at::text AS "expiresAt", revoked_at::text AS "revokedAt", last_used_at::text AS "lastUsedAt", operator_id AS "operatorId"`;
-  const iso = <T extends Record<string, unknown>>(row: T) => Object.fromEntries(Object.entries(row).map(([k, v]) => [k, typeof v === 'string' && /At$/.test(k) ? new Date(v).toISOString() : v])) as T;
-  app.openapi(createRoute({ hide: true, tags: ['Operator'], security: operatorSecurity, method: 'post', path: '/v1/operator/support/grants', operationId: 'operatorCreateSupportGrant',
-    request: { body: json(z.object({
-      userId: z.string().min(1).max(200).describe('The verified customer: from the signed handoff or verify-email, never from the agent.'),
-      ticketRef: z.string().trim().min(1).max(200).describe('The support ticket. One active grant per ticket.'),
-      reason: z.string().trim().min(10).max(1000),
-      verification: z.enum(['handoff', 'dmarc', 'magic_link']).describe('How the customer was verified. handoff needs handoffId.'),
-      handoffId: z.string().regex(/^sho_[0-9a-f]{32}$/).optional().describe('The in-app handoff: used once, within 30 minutes. The only way message content can be shared, and only in the handoff’s workspace, if the customer ticked it.'),
-      workspaceIds: z.array(z.string().max(100)).min(1).max(100).optional().describe('The user’s workspaces to cover. Default: the handoff’s workspace for a handoff, otherwise all of them.'),
-      ttlMinutes: z.number().int().min(1).max(GRANT_MAX_MINUTES).default(60),
-    }).strict()) },
-    responses: { 201: response(Grant.extend({ token: z.string().describe('nm_support_…, shown once. Give it to the support agent’s environment only.') })), ...errors } }), async c => {
-    const operator = await requireOperator(c, 'operator:read'), body = c.req.valid('json');
-    if ((body.verification === 'handoff') !== !!body.handoffId) throw new ApiError(422, 'VALIDATION_FAILED', 'A handoff verification needs handoffId, and only it.', 'handoffId');
-    const token = randomSecret(secretPrefixes.supportGrant), grantId = id('sgr'), context = operatorContext(c, operator);
-    const created = await c.env.db.transaction(async tx => {
-      // An expired grant no longer holds its ticket.
-      await tx.execute(sql`UPDATE support_grants SET revoked_at = expires_at WHERE ticket_ref = ${body.ticketRef} AND revoked_at IS NULL AND expires_at <= now()`);
-      // A handoff opens one grant (it is locked, then marked used in the same statement), covers by default only the
-      // workspace it came from, and shares content, if the customer ticked it, only in that workspace.
-      const { rows: [row] } = await tx.execute<z.infer<typeof Grant> & { handoff: boolean | null; handoff_used: boolean | null; active: number }>(sql`WITH h AS (
-          SELECT share_content, workspace_id, used_at FROM support_handoffs WHERE id = ${body.handoffId ?? null} AND user_id = ${body.userId} AND expires_at > now() FOR UPDATE
-        ), m AS (
-          SELECT array_agg(workspace_id ORDER BY workspace_id = (SELECT workspace_id FROM h) DESC, created_at) AS ws FROM workspace_members
-          WHERE user_id = ${body.userId} ${body.workspaceIds ? sql`AND workspace_id = ANY(${ids(body.workspaceIds)})` : body.verification === 'handoff' ? sql`AND workspace_id = (SELECT workspace_id FROM h)` : sql``}
-        ), active AS (SELECT count(*)::int AS n FROM support_grants WHERE user_id = ${body.userId} AND revoked_at IS NULL AND expires_at > now()),
-        g AS (
-          INSERT INTO support_grants(id, token_hash, user_id, workspace_ids, ticket_ref, verification, handoff_id, content_workspace_id, operator_id, operator_via, reason, expires_at)
-          SELECT ${grantId}, ${await digest(token)}, ${body.userId}, m.ws, ${body.ticketRef}, ${body.verification}, ${body.handoffId ?? null},
-            (SELECT workspace_id FROM h WHERE share_content AND workspace_id = ANY(m.ws)), ${operator.id}, ${operator.via}, ${body.reason}, now() + make_interval(mins => ${body.ttlMinutes})
-          FROM m WHERE cardinality(m.ws) > 0 AND (SELECT n FROM active) < 5 AND (${body.verification} <> 'handoff' OR EXISTS (SELECT FROM h WHERE used_at IS NULL))
-          ON CONFLICT (ticket_ref) WHERE revoked_at IS NULL DO NOTHING RETURNING *
-        ), used AS (UPDATE support_handoffs s SET used_at = now(), grant_id = g.id FROM g WHERE s.id = g.handoff_id
-        ), logged AS (${auditInsert(context, { action: 'support.grant', workspaceId: null, userId: body.userId, target: { type: 'support_grant', id: grantId }, reason: body.reason, ticketRef: body.ticketRef,
-          after: sql`(SELECT jsonb_build_object('workspaces', workspace_ids, 'contentWorkspace', content_workspace_id, 'verification', verification, 'handoff', handoff_id, 'expiresAt', expires_at) FROM g)`, internal: true },
-          { where: sql`EXISTS (SELECT FROM g)` })})
-        SELECT ${grantView}, (SELECT EXISTS (SELECT FROM h)) AS handoff, (SELECT used_at IS NOT NULL FROM h) AS handoff_used, (SELECT n FROM active) AS active,
-          (SELECT coalesce(cardinality(ws), 0) FROM m) AS memberships FROM g RIGHT JOIN (SELECT 1) one ON true`);
-      return row;
-    });
-    if (!created?.id) {
-      const facts = created as unknown as { handoff: boolean; handoff_used: boolean | null; active: number; memberships: number };
-      if (body.verification === 'handoff' && !facts.handoff) throw new ApiError(404, 'NOT_FOUND', 'Handoff was not found for that user, or it expired.');
-      if (body.verification === 'handoff' && facts.handoff_used) throw new ApiError(409, 'SUPPORT_HANDOFF_USED', 'This handoff already opened a support grant. The customer can contact support again for a new one.');
-      if (!facts.memberships) throw new ApiError(404, 'NOT_FOUND', 'That user has no workspaces in scope.');
-      if (facts.active >= 5) throw new ApiError(429, 'SUPPORT_GRANT_LIMIT', 'This user already has 5 active support grants. Revoke one first.');
-      throw new ApiError(409, 'SUPPORT_GRANT_ACTIVE', 'This ticket already has an active support grant. Revoke it before minting another.');
-    }
-    const { handoff: _h, handoff_used: _u, active: _a, memberships: _m, ...grant } = created as typeof created & { memberships?: number };
-    log('info', { code: 'SUPPORT_GRANT_CREATED', grantId, operator: operator.id, ticketRef: body.ticketRef });
-    return c.json({ ...iso(grant), token }, 201);
-  });
-  app.openapi(createRoute({ hide: true, tags: ['Operator'], security: operatorSecurity, method: 'get', path: '/v1/operator/support/grants', operationId: 'operatorListSupportGrants',
-    request: { query: z.object({ ticketRef: z.string().max(200).optional(), userId: z.string().max(200).optional(), active: z.enum(['true', 'false']).default('true') }) },
-    responses: { 200: response(z.object({ data: z.array(Grant) })), ...errors } }), async c => {
-    await requireOperator(c, 'operator:read');
-    const q = c.req.valid('query');
-    const { rows } = await c.env.db.execute<z.infer<typeof Grant>>(sql`SELECT ${grantView} FROM support_grants WHERE true
-      ${q.ticketRef ? sql`AND ticket_ref = ${q.ticketRef}` : sql``} ${q.userId ? sql`AND user_id = ${q.userId}` : sql``} ${q.active === 'true' ? sql`AND revoked_at IS NULL AND expires_at > now()` : sql``}
-      ORDER BY created_at DESC LIMIT 100`);
-    return c.json({ data: rows.map(iso) }, 200);
-  });
-  app.openapi(createRoute({ hide: true, tags: ['Operator'], security: operatorSecurity, method: 'post', path: '/v1/operator/support/grants/{id}/revoke', operationId: 'operatorRevokeSupportGrant',
-    request: { params: z.object({ id: z.string().max(100) }) }, responses: { 200: response(z.object({ id: z.string(), revoked: z.literal(true) })), ...errors } }), async c => {
-    const operator = await requireOperator(c, 'operator:read'), grantId = c.req.valid('param').id;
-    const { rows } = await c.env.db.execute(sql`WITH g AS (UPDATE support_grants SET revoked_at = now() WHERE id = ${grantId} AND revoked_at IS NULL RETURNING id, user_id, ticket_ref),
-      logged AS (${auditInsert(operatorContext(c, operator), { action: 'support.grant_revoke', workspaceId: null, userId: sql`g.user_id`, target: { type: 'support_grant', id: sql`g.id` }, internal: true }, { from: sql`g` })})
-      SELECT id FROM g`);
-    if (!rows.length) notFound('Active support grant');
-    return c.json({ id: grantId, revoked: true as const }, 200);
-  });
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security: operatorSecurity, method: 'get', path: '/v1/operator/support/handoffs/{id}', operationId: 'operatorGetSupportHandoff',
     request: { params: z.object({ id: z.string().regex(/^sho_[0-9a-f]{32}$/) }) },
     responses: { 200: response(z.object({ id: z.string(), userId: z.string(), workspaceId: z.string(), kind: z.string(), page: z.string().nullable(), requestIds: z.array(z.string()), message: z.string().nullable(),
-      shareContent: z.boolean(), createdAt: z.string(), expiresAt: z.string(), usedAt: z.string().nullable(), grantId: z.string().nullable() })), ...errors } }), async c => {
+      shareContent: z.boolean(), createdAt: z.string(), expiresAt: z.string(), usedAt: z.string().nullable(), conversationId: z.string().nullable() })), ...errors } }), async c => {
     await requireOperator(c, 'operator:read');
-    const { rows: [row] } = await c.env.db.execute<{ id: string; userId: string; workspaceId: string; kind: string; page: string | null; requestIds: string[]; message: string | null; shareContent: boolean; createdAt: string; expiresAt: string; usedAt: string | null; grantId: string | null }>(sql`SELECT id,
+    const { rows: [row] } = await c.env.db.execute<{ id: string; userId: string; workspaceId: string; kind: string; page: string | null; requestIds: string[]; message: string | null; shareContent: boolean; createdAt: string; expiresAt: string; usedAt: string | null; conversationId: string | null }>(sql`SELECT id,
       user_id AS "userId", workspace_id AS "workspaceId", kind, page, request_ids AS "requestIds", message, share_content AS "shareContent", created_at::text AS "createdAt", expires_at::text AS "expiresAt",
-      used_at::text AS "usedAt", grant_id AS "grantId" FROM support_handoffs WHERE id = ${c.req.valid('param').id}`);
+      used_at::text AS "usedAt", conversation_id AS "conversationId" FROM support_handoffs WHERE id = ${c.req.valid('param').id}`);
     if (!row) notFound('Handoff');
     return c.json({ ...row!, createdAt: new Date(row!.createdAt).toISOString(), expiresAt: new Date(row!.expiresAt).toISOString(), usedAt: row!.usedAt ? new Date(row!.usedAt).toISOString() : null }, 200);
   });
-
-  // Staff sign-in for the support Worker's internal pages: an operator's own dashboard session leaves Nightmail for the
-  // support site's /staff/callback with a 2-minute EdDSA JWS (aud bane-support-staff) naming them. The support Worker
-  // verifies it through the binding (staff/verify, which also checks they are still an operator) and accepts each jti
-  // once. The binding cannot mint one: staff-sign-in is not in its allow-list and refuses it here too.
-  app.openapi(createRoute({ hide: true, tags: ['Operator'], security: [{ dashboardSession: [] }, { secureDashboardSession: [] }] as Record<string, string[]>[], method: 'get', path: '/v1/operator/support/staff-sign-in', operationId: 'operatorSupportStaffSignIn',
-    request: { query: z.object({ return: z.string().max(500).describe('Exactly <the support site’s origin>/staff/callback.') }) },
-    responses: { 302: { description: 'To return?staff=<token>: a signed staff token that lives 2 minutes.' }, ...errors } }), async c => {
-    const operator = await requireOperator(c, 'operator:read'), support = c.env.config.support;
-    if (operator.via !== 'console' || !operator.userId) throw operatorRequired();
-    if (!support?.url || !support.signingKey) throw new ApiError(503, 'SUPPORT_NOT_CONFIGURED', 'Set NIGHTMAIL_SUPPORT_URL and NIGHTMAIL_SUPPORT_SIGNING_KEY to sign staff in to the support site.');
-    const callback = `${new URL(support.url).origin}/staff/callback`;
-    let target: URL | null = null;
-    try { target = new URL(c.req.valid('query').return); } catch { /* refused below */ }
-    if (!target || target.origin + target.pathname !== callback || target.search || target.hash || target.username || target.password) throw new ApiError(422, 'RETURN_URL_INVALID', `return must be ${callback}.`, 'return');
-    const jti = id('sst'), now = Math.floor(Date.now() / 1000), userId = operator.userId;
-    const { rows: [user] } = await c.env.db.execute<{ email: string | null }>(sql`WITH logged AS (${auditInsert(operatorContext(c, operator), { action: 'support.staff_sign_in', workspaceId: null, userId,
-      target: { type: 'user', id: userId }, details: { jti }, internal: true })}) SELECT ${userEmail(sql`${userId}`)} AS email`);
-    const token = await signSupportToken(support.signingKey, { iss: c.env.config.publicUrl, aud: STAFF_AUDIENCE, sub: userId, email: user?.email ?? '', role: operator.role, jti, iat: now, exp: now + STAFF_TOKEN_SECONDS });
-    c.header('cache-control', 'no-store');
-    return c.redirect(`${callback}?staff=${token}`, 302);
-  });
-  const StaffCheck = z.union([
-    z.object({ ok: z.literal(true), staff: z.object({ userId: z.string(), email: z.string(), role: z.string().describe('Their operator role now.') }), jti: z.string().describe('Accept each once.'), expiresAt: z.string() }),
-    z.object({ ok: z.literal(false), code: z.enum(['STAFF_INVALID', 'STAFF_EXPIRED', 'NOT_OPERATOR']) }),
-  ]);
-  app.openapi(createRoute({ hide: true, tags: ['Operator'], security: operatorSecurity, method: 'post', path: '/v1/operator/support/staff/verify', operationId: 'operatorVerifySupportStaff',
-    request: { body: json(z.object({ token: z.string().min(1).max(4096) }).strict()) }, responses: { 200: response(StaffCheck), ...errors } }), async c => {
-    if ((await requireOperator(c, 'operator:read')).via !== 'support') throw new ApiError(403, 'SUPPORT_PLATFORM_REQUIRED', 'Only the support platform verifies staff sign-ins.');
-    const checked = await verifyStaffToken(c.env.config, c.req.valid('json').token);
-    if (!checked.ok) return c.json({ ok: false as const, code: checked.code }, 200);
-    const { userId, jti, expiresAt } = checked.claims;
-    const { rows: [now] } = await c.env.db.execute<{ role: OperatorRole | null; email: string | null }>(sql`SELECT ${operatorRoleOf(userId)} AS role, ${userEmail(sql`${userId}`)} AS email`);
-    if (!now?.role) return c.json({ ok: false as const, code: 'NOT_OPERATOR' as const }, 200);
-    return c.json({ ok: true as const, staff: { userId, email: now.email ?? checked.claims.email, role: now.role }, jti, expiresAt }, 200);
-  });
 }
 
-/** The customer's "Contact support", the public signing keys and the grant's read routes. */
+/** The customer's "Contact support", the public signing keys and a conversation's read routes. */
 export function registerSupport(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/contact-support', operationId: 'contactSupport', tags: ['Workspaces'], security: [{ dashboardSession: [] }, { secureDashboardSession: [] }] as Record<string, string[]>[],
-    description: 'Hosted: start a support request from the dashboard. Returns a support reference and, when configured, the support site’s URL carrying a signed handoff (this workspace, you, the page and recent request IDs). Support reads message content only if shareContent is true, only in this workspace and only for this request (one grant, within 30 minutes). Any member may contact support.',
+    description: 'Hosted: start a support request from the dashboard. Returns a support reference and, when configured, the support site’s URL carrying a signed handoff (this workspace, you, the page and recent request IDs). Support reads message content only if shareContent is true, only in this workspace and only for this request (one conversation, within 30 minutes). Any member may contact support.',
     request: { body: json(z.object({
       kind: z.enum(['support', 'appeal', 'limit_request']).default('support'),
       page: z.string().trim().max(200).regex(/^\/[^\s]*$/).optional().describe('The dashboard path the person was on.'),
@@ -490,13 +304,13 @@ export function registerSupport(app: App) {
     return c.json({ keys: key ? [{ kty: 'OKP', crv: 'Ed25519', x: key.x, kid: await keyId(key.x), alg: 'EdDSA', use: 'sig' }] : [] });
   });
 
-  // ---------- GET /v1/support/* (supportGate has authenticated the grant and logged the call) ----------
+  // ---------- GET /v1/support/* (supportGate has loaded the conversation and logged the call) ----------
   const meta = (operationId: string, description: string) => ({ method: 'get' as const, operationId, tags, security: supportSecurity, description: describe(description) });
 
   const Context = z.object({
     grant: z.object({ id: z.string(), ticketRef: z.string(), expiresAt: z.string(), contentShared: z.boolean().describe('Whether this request may read email bodies (the customer opted in).'),
       contentWorkspaceId: z.string().nullable().describe('The one workspace whose email bodies this request may read, or null.') })
-      .describe('The grant, or for a support conversation the same facts: id and ticketRef are the conversation’s ID, and expiresAt is the time of this read, since a conversation’s access is checked on every request.'),
+      .describe('The support conversation: id and ticketRef are its ID, and expiresAt is the time of this read, since a conversation’s access is checked on every request.'),
     user: z.object({ id: z.string(), name: z.string().nullable(), email: z.string().nullable(), createdAt: z.string().nullable() }),
     workspaces: z.array(WorkspaceSummary), domains: z.array(DomainSummary).describe('Up to 50 domains across the workspaces.'),
     recentFailures: z.object({ since: z.string(), sends: z.array(z.record(z.string(), z.unknown())).describe('Failed, rejected, suppressed and bounced sends in the last 24 hours, by code.'),
@@ -505,26 +319,24 @@ export function registerSupport(app: App) {
       authErrors: z.null().describe(`${productName} does not store failed sign-ins or rejected API keys; look up a request ID instead.`) }),
     standing: z.array(Standing), recentActivity: z.array(AuditEntry).describe('The last 20 customer-visible audit entries (owner and admin workspaces).'),
     openEnforcement: z.array(z.object({ workspaceId: z.string(), kind: z.string(), since: z.string().nullable(), reason: z.string().nullable() })).describe('Paused sending and paused campaigns.'),
-    handoff: z.object({ id: z.string(), page: z.string().nullable(), requestIds: z.array(z.string()), message: z.string().nullable(), createdAt: z.string() }).nullable().describe('What the customer sent from "Contact support", if the grant came from it.'),
+    handoff: z.object({ id: z.string(), page: z.string().nullable(), requestIds: z.array(z.string()), message: z.string().nullable(), createdAt: z.string() }).nullable().describe('What the customer sent from "Contact support", for a chat opened from it.'),
     links: z.object({ requestIds: z.array(z.string()).describe('Request IDs to look up with /v1/support/requests/{requestId}.') }),
   }).openapi('SupportContext');
   app.openapi(createRoute({ ...meta('getSupportContext', 'Start here: one compact summary of the customer for a support conversation: who they are, their workspaces and roles, sending setup and limits, domains and their verification, failures in the last 24 hours, open enforcement, the last 20 audit entries and request IDs to drill into.'), path: '/v1/support/context', request: { query: WorkspaceFilter }, responses: { 200: response(Context), ...errors } }), async c => {
     const { scope, ids: list, workspaces } = scoped(c), admin = workspaces.filter(w => w.role !== 'member').map(w => w.id), db = c.env.db;
     // A conversation reads domains and webhook failures only where its role reads them in the dashboard (CONTEXT_SECTIONS).
-    const domainIds = sectionIds(c, 'domains', workspaces), hookIds = sectionIds(c, 'webhookDeliveries', workspaces);
+    const domainIds = sectionIds('domains', workspaces), hookIds = sectionIds('webhookDeliveries', workspaces);
     // Independent reads, in parallel (the support platform's runtime has a pool for this: src/worker.ts).
     const [{ rows: [user] }, { rows: [handoff] }, summaries, domains, recent, activity, stand, { rows: enforcement }] = await Promise.all([
       db.execute<{ id: string; name: string | null; email: string | null; created_at: string | null }>(sql`SELECT id, name, email, created_at::text FROM nightmail_users WHERE id = ${scope.userId}`),
-      db.execute<{ id: string; page: string | null; request_ids: string[]; message: string | null; created_at: string }>(scope.conversation
-        ? sql`SELECT h.id, h.page, h.request_ids, h.message, h.created_at::text FROM support_handoffs h WHERE h.conversation_id = ${scope.conversation.id}`
-        : sql`SELECT h.id, h.page, h.request_ids, h.message, h.created_at::text FROM support_grants g JOIN support_handoffs h ON h.id = g.handoff_id WHERE g.id = ${scope.grantId}`),
+      db.execute<{ id: string; page: string | null; request_ids: string[]; message: string | null; created_at: string }>(sql`SELECT h.id, h.page, h.request_ids, h.message, h.created_at::text FROM support_handoffs h WHERE h.conversation_id = ${scope.conversation.id}`),
       workspaceSummaries(db, workspaces), domainSummaries(db, domainIds, 50), failures(db, list, hookIds), customerTrail(db, admin, AuditFilters.parse({ limit: 20 })), standings(db, list),
       db.execute<{ workspaceId: string; kind: string; since: string | null; reason: string | null }>(sql`SELECT workspace_id AS "workspaceId", 'sending_paused' AS kind, paused_at::text AS since,
           left(to_jsonb(pc) ->> 'pause_reason', 300) AS reason FROM provider_connections pc WHERE workspace_id = ANY(${ids(list)}) AND paused_at IS NOT NULL
         UNION ALL SELECT workspace_id, 'campaign_paused:' || id, paused_at::text, left(pause_reason::text, 300) FROM sending_campaigns WHERE workspace_id = ANY(${ids(list)}) AND state = 'paused' LIMIT 20`),
     ]);
     const requestIds = [...new Set([...(handoff?.request_ids ?? []), ...activity.data.map(e => e.requestId).filter((r): r is string => !!r)])].slice(0, 10);
-    return c.json({ grant: { id: scope.grantId, ticketRef: scope.ticketRef, expiresAt: scope.expiresAt, contentShared: !!scope.contentWorkspaceId, contentWorkspaceId: scope.contentWorkspaceId },
+    return c.json({ grant: { id: scope.conversation.id, ticketRef: scope.conversation.id, expiresAt: new Date().toISOString(), contentShared: !!scope.contentWorkspaceId, contentWorkspaceId: scope.contentWorkspaceId },
       user: { id: scope.userId, name: user?.name ?? null, email: user?.email ?? null, createdAt: user?.created_at ? new Date(user.created_at).toISOString() : null },
       workspaces: summaries, domains, recentFailures: { since: new Date(Date.now() - 86_400_000).toISOString(), ...recent, authErrors: null }, standing: stand, recentActivity: activity.data,
       openEnforcement: enforcement.map(e => ({ ...e, since: e.since ? new Date(e.since).toISOString() : null })),
@@ -542,7 +354,7 @@ export function registerSupport(app: App) {
     address: z.string().trim().toLowerCase().max(254).optional().describe('Only mail to or from this exact address.'),
   });
   app.openapi(createRoute({ ...meta('listSupportEmails', 'Sent or received mail, newest first: addresses, subject, status and error codes. Never bodies; read one email for its events (and its body when the customer shared content).'), path: '/v1/support/emails', request: { query: EmailQuery }, responses: { 200: response(z.object({ data: z.array(EmailSummary), nextCursor: z.string().nullable() })), ...errors } }), async c => {
-    const q = c.req.valid('query'), { ids: list, workspaces } = scoped(c), cursor = keyset(q.cursor), routed = receivedAsMember(c, workspaces);
+    const q = c.req.valid('query'), { ids: list, workspaces } = scoped(c), cursor = keyset(q.cursor), routed = receivedAsMember(workspaces);
     if (!list.length) return c.json({ data: [], nextCursor: null }, 200);
     const rows = q.direction === 'sent' ? (await c.env.db.execute<z.infer<typeof EmailSummary> & { at_text: string; key: string }>(sql`SELECT workspace_id AS "workspaceId", id, 'sent' AS direction, created_at::text AS at_text,
         id AS key, created_at::text AS at, from_address AS "from", to_addresses AS "to", subject, status, error_code AS "errorCode", suppression_reason AS "suppressionReason", campaign_id AS "campaignId",
@@ -566,7 +378,7 @@ export function registerSupport(app: App) {
     content: z.object({ subject: z.string(), text: z.string().nullable(), html: z.string().nullable() }).nullable().describe('The body, only when the customer shared message content with this request and the email is in that workspace (grant.contentWorkspaceId); otherwise null.'),
   }).openapi('SupportEmailDetail');
   app.openapi(createRoute({ ...meta('getSupportEmail', 'One sent or received email with its delivery events; its body only when the customer shared message content with this request.'), path: '/v1/support/emails/{id}', request: { query: WorkspaceFilter, params: z.object({ id: z.string().max(120) }) }, responses: { 200: response(EmailDetail), ...errors } }), async c => {
-    const { scope, ids: list, workspaces } = scoped(c), emailId = c.req.valid('param').id, db = c.env.db, routed = receivedAsMember(c, workspaces), shared = (workspace: SQL) => scope.contentWorkspaceId ? sql`${workspace} = ${scope.contentWorkspaceId}` : sql`false`;
+    const { scope, ids: list, workspaces } = scoped(c), emailId = c.req.valid('param').id, db = c.env.db, routed = receivedAsMember(workspaces), shared = (workspace: SQL) => scope.contentWorkspaceId ? sql`${workspace} = ${scope.contentWorkspaceId}` : sql`false`;
     const { rows: [sent] } = await db.execute<z.infer<typeof EmailSummary> & { snapshot: { subject?: string; text?: string; html?: string } }>(sql`SELECT workspace_id AS "workspaceId", id, 'sent' AS direction,
         created_at::text AS at, from_address AS "from", to_addresses AS "to", subject, status, error_code AS "errorCode", suppression_reason AS "suppressionReason", campaign_id AS "campaignId",
         snapshot ->> 'kind' AS kind, simulated, provider_id AS "providerMessageId", CASE WHEN ${shared(sql`workspace_id`)} THEN jsonb_build_object('subject', snapshot -> 'subject', 'text', snapshot -> 'text', 'html', snapshot -> 'html') END AS snapshot
@@ -673,7 +485,7 @@ export function registerSupport(app: App) {
       truncated: z.boolean().describe(`More than ${LOG_ROWS.toLocaleString('en-US')} lines matched, so the counts are of a sample spread over the window: narrow it.`) }),
     computedAt: z.string(),
   }).openapi('SupportRequestLog');
-  app.openapi(createRoute({ ...meta('listSupportRequests', `The customer’s own failed API requests over at most the last ${LOG_RETENTION_DAYS} days, from Workers Logs: grouped by route template, method, status, error code and how the caller authenticated, with counts, first and last seen and up to 5 request IDs each. Only requests ${productName} could attribute to one of the grant’s workspaces (a rejected key cannot be); never messages, addresses, user agents, URLs or bodies. Cached 60 seconds.`),
+  app.openapi(createRoute({ ...meta('listSupportRequests', `The customer’s own failed API requests over at most the last ${LOG_RETENTION_DAYS} days, from Workers Logs: grouped by route template, method, status, error code and how the caller authenticated, with counts, first and last seen and up to 5 request IDs each. Only requests ${productName} could attribute to one of the conversation’s workspaces (a rejected key cannot be); never messages, addresses, user agents, URLs or bodies. Cached 60 seconds.`),
     path: '/v1/support/requests', request: { query: WorkspaceFilter.extend({
       status: z.enum(['error', '5xx', '4xx']).default('error').describe('error: every status of 400 or more (default); 5xx or 4xx only.'),
       since: z.iso.datetime().optional().describe(`Window start (default: 24 hours before until). At most ${LOG_RETENTION_DAYS} days back.`), until: z.iso.datetime().optional().describe('Window end (default: now).'),
@@ -697,7 +509,7 @@ export function registerSupport(app: App) {
   const RequestTrace = z.object({
     requestId: z.string(), found: z.boolean().describe(`Whether ${productName} logged or stored anything about this request for this customer.`),
     logs: z.array(z.object({ at: z.string(), route: z.string(), method: z.string(), status: z.number(), code: z.string().nullable(), durationMs: z.number().nullable(), principal: Principal, workspaceId: z.string() }))
-      .describe(`Its request lines from Workers Logs (the last ${LOG_RETENTION_DAYS} days), in the grant’s workspaces. Successful requests are sampled, so one may be missing.`),
+      .describe(`Its request lines from Workers Logs (the last ${LOG_RETENTION_DAYS} days), in the conversation’s workspaces. Successful requests are sampled, so one may be missing.`),
     logsAvailable: z.boolean().describe('False when this installation does not read Workers Logs or they did not answer; logs is then empty.'),
     auditEvents: z.array(AuditEntry).describe('Changes the request made.'),
     campaigns: z.array(z.object({ workspaceId: z.string(), id: z.string(), name: z.string(), state: z.string(), error: z.unknown().nullable() })).describe('Campaign launches the request started.'),
