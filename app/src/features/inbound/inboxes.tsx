@@ -43,18 +43,20 @@ export function NewInboxDialog({ open, onOpenChange }: { open: boolean; onOpenCh
   const [lifetime, setLifetime] = useState('86400')
   const [withKey, setWithKey] = useState(true)
   const [replies, setReplies] = useState(false)
+  // Read only unless asked: marking read and deleting is its own opt-in, as API keys do it.
+  const [organize, setOrganize] = useState(false)
   const [connecting, setConnecting] = useState(false)
   const [now, setNow] = useState(() => Date.now())
   // No toast: the dialog itself turns into "Agent inbox created".
   const create = useApiMutation((api, input: InboxInput) => api.inboxes.create(input))
   const created: CreatedInbox | undefined = create.data
   const noHost = !domains.isPending && !hosts.length
-  useEffect(() => { if (open) { create.reset(); setHost(''); setName(''); setLifetime('86400'); setWithKey(true); setReplies(false); setNow(Date.now()) } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (open) { create.reset(); setHost(''); setName(''); setLifetime('86400'); setWithKey(true); setReplies(false); setOrganize(false); setNow(Date.now()) } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
   // Without an active receiving host the only inbox that works is a sandbox.
   useEffect(() => { if (open) setType(noHost ? 'sandbox' : 'ephemeral') }, [open, noHost])
   async function submit(event: FormEvent) {
     event.preventDefault()
-    try { await create.mutateAsync({ type, ...(type === 'ephemeral' ? { domain: host || hosts[0] } : {}), ...(name.trim() ? { name: name.trim() } : {}), ttlSeconds: Number(lifetime), ...(type === 'ephemeral' && replies ? { send: { enabled: true } } : {}), ...(withKey ? { credential: { name: `${name.trim() || 'Agent inbox'} key`.slice(0, 100), permissions: replies && type === 'ephemeral' ? ['read', 'modify', 'send'] : ['read', 'modify'] } } : {}) }) } catch { /* Shown in the form. */ }
+    try { await create.mutateAsync({ type, ...(type === 'ephemeral' ? { domain: host || hosts[0] } : {}), ...(name.trim() ? { name: name.trim() } : {}), ttlSeconds: Number(lifetime), ...(type === 'ephemeral' && replies ? { send: { enabled: true } } : {}), ...(withKey ? { credential: { name: `${name.trim() || 'Agent inbox'} key`.slice(0, 100), permissions: ['read', ...(organize ? ['modify' as const] : []), ...(replies && type === 'ephemeral' ? ['send' as const] : [])] } } : {}) }) } catch { /* Shown in the form. */ }
   }
   const close = () => onOpenChange(false)
   // Created: the address, its key (shown once) already set up for each MCP client, so nothing more has to be minted.
@@ -86,7 +88,8 @@ export function NewInboxDialog({ open, onOpenChange }: { open: boolean; onOpenCh
       <Field label="Receives mail for" htmlFor="agent-inbox-lifetime">
         <Select id="agent-inbox-lifetime" value={lifetime} onValueChange={setLifetime} disabled={create.isPending} options={lifetimes(now)} />
       </Field>
-      <Checkbox checked={withKey} onCheckedChange={setWithKey} disabled={create.isPending} label="Create an API key that can only read this inbox" />
+      <Checkbox checked={withKey} onCheckedChange={setWithKey} disabled={create.isPending} label="Create an API key for this inbox" />
+      {withKey && <Checkbox checked={organize} onCheckedChange={setOrganize} disabled={create.isPending} label="The key can also mark read and delete" />}
       {type === 'ephemeral' && <Checkbox checked={replies} onCheckedChange={setReplies} disabled={create.isPending} label="Allow replies to senders" />}
     </form>
   </Dialog>
