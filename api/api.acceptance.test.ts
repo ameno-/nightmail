@@ -7653,6 +7653,57 @@ describe('Hosted MCP OAuth and tools', () => {
         } finally { runtime.config.aws = aws; runtime.config.support!.addressIds = configured; }
       });
 
+      await t.test('7c backfill: someone whose Google sign-in proved the address before proofs were recorded gets one from that live session and can continue an emailed request; a GitHub, expired or other-domain session gets none', async () => {
+        // Migration 381's backfill statement, run as the migration runs it (twice: it is idempotent).
+        const migration = await readFile(new URL('./migrations/381_support_email_signins.sql', import.meta.url), 'utf8'), at = migration.indexOf('UPDATE nightmail_users u SET mailbox_proved');
+        const backfill = migration.slice(at, migration.indexOf(';', at) + 1), issuer = process.env.ACCOUNT_ISSUER ?? 'https://account.anoma.ly';
+        assert.ok(at > 0 && backfill.endsWith(';'), 'The migration has the backfill.');
+        // A live session from a sign-in an hour ago (or 8 days ago: expired), as the sign-in log recorded it, and no proof yet.
+        const signedIn = async (f: SessionFixture, o: { acr: string; provider: string; hd: string | null; expired?: boolean }) => {
+          const when = o.expired ? `now() - interval '8 days'` : `now() - interval '1 hour'`;
+          await db.query('UPDATE nightmail_users SET mailbox_proved = NULL, mailbox_proved_at = NULL WHERE id = $1', [f.userId]);
+          await db.query(`UPDATE nightmail_sessions SET expires_at = ${when} + interval '7 days' WHERE user_id = $1`, [f.userId]);
+          await db.query(`INSERT INTO nightmail_signin_attempts(issuer, subject, acr, provider, provider_hd, email, outcome, last_at) VALUES ($1, $2, $3, $4, $5, $6, 'signed_in', ${when} + interval '1 second')`,
+            [issuer, f.userId, o.acr, o.provider, o.hd, f.email]);
+        };
+        const proof = async (f: SessionFixture) => (await db.query('SELECT mailbox_proved AS address, mailbox_proved_at AS at FROM nightmail_users WHERE id = $1', [f.userId])).rows[0];
+        const google = await sessionFixture(t), github = await sessionFixture(t), expired = await sessionFixture(t), elsewhere = await sessionFixture(t), hd = google.email.split('@')[1]!;
+        const wakes: string[] = [], previous = globalThis.fetch;
+        globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+          const request = new Request(input, init);
+          if (new URL(request.url).origin !== 'https://support.example.com') return previous(input, init);
+          wakes.push(new URL(request.url).pathname);
+          return new Response(null, { status: 202 });
+        };
+        try {
+          await signedIn(google, { acr: 'urn:anomaly:acr:google', provider: 'google', hd });
+          await signedIn(github, { acr: 'urn:anomaly:acr:github', provider: 'github', hd: null });
+          await signedIn(expired, { acr: 'urn:anomaly:acr:google', provider: 'google', hd, expired: true });
+          await signedIn(elsewhere, { acr: 'urn:anomaly:acr:google', provider: 'google', hd: `other-${hex().slice(0, 6)}.example` });
+          for (let run = 0; run < 2; run++) await db.query(backfill);
+          const { rows: [live] } = await db.query(`SELECT expires_at - interval '7 days' AS at FROM nightmail_sessions WHERE user_id = $1`, [google.userId]);
+          const got = await proof(google);
+          assert.deepEqual([got.address, got.at?.toISOString()], [google.email.toLowerCase(), live.at.toISOString()], 'Proved as of her Google sign-in.');
+          for (const [label, f] of [['GitHub', github], ['expired', expired], ['another domain than its Workspace', elsewhere]] as const) assert.deepEqual(await proof(f), { address: null, at: null }, label);
+          // She opens Continue from an email whose DMARC failed: the page reads which email it is, and her claim answers it.
+          const message = await mail(google.email, { dmarc: 'FAIL', subject: 'Signed in before the deploy' }), id = conversation();
+          ok(await register(id, { kind: 'email', messageId: message }), 201);
+          const shown = ok(await send('GET', `/v1/support-conversations/${id}/claim?messageId=${message}`, { cookie: google.cookie }));
+          assert.deepEqual([shown.subject, typeof shown.receivedAt], ['Signed in before the deploy', 'string']);
+          assert.equal(ok(await send('POST', `/v1/support-conversations/${id}/claim`, session(google), { messageId: message })).messageId, message);
+          assert.deepEqual(wakes, ['/hooks/nightmail-wake']);
+          // The GitHub session's person still reads and confirms nothing until a sign-in proves the mailbox.
+          const theirs = await mail(github.email, { dmarc: 'FAIL' }), other = conversation();
+          ok(await register(other, { kind: 'email', messageId: theirs }), 201);
+          error(await send('GET', `/v1/support-conversations/${other}/claim?messageId=${theirs}`, { cookie: github.cookie }), 404);
+          error(await send('POST', `/v1/support-conversations/${other}/claim`, session(github), { messageId: theirs }), 404);
+          for (const done of [id, other]) ok(reply(await platform.closeConversation(done)));
+        } finally {
+          globalThis.fetch = previous;
+          await db.query('DELETE FROM nightmail_signin_attempts WHERE issuer = $1 AND subject = ANY($2)', [issuer, [google, github, expired, elsewhere].map(f => f.userId)]);
+        }
+      });
+
       await t.test('8 content access: only the chat’s own person, while a member of its workspace', async () => {
         const id = await chat(owner), emailId = unique('email');
         await db.query(`INSERT INTO sending_emails(id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, status, snapshot, simulated)
