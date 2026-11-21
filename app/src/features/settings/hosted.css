@@ -28,8 +28,6 @@
 .settings-row__label { display: flex; flex-direction: column; min-width: 0; }
 .settings-row__label > span { overflow: clip; text-overflow: ellipsis; white-space: nowrap; }
 .settings-row__label .muted { font-size: var(--text-xs); line-height: var(--leading-xs); }
-/* A row's value reads as data: plain figures and text in mono; controls keep their own type. */
-.settings-row__control > span:not([class*='ui-'], [class*='private-address'], :has(button, input, select, .ui-button)), .settings-row__control > :is(b, strong, code) { font-family: var(--font-mono); font-size: var(--text-xs); }
 .settings-row__control { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-8); min-width: 0; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .settings-inline { flex-wrap: nowrap; }
 /* A connected AWS account's health finding: the message, in the warning tone. */
@@ -76,8 +74,8 @@
   .settings-row__label a::after { content: ''; position: absolute; inset-block: -14px; inset-inline: 0; }
   .settings-score { position: relative; }
   .settings-score::after { content: ''; position: absolute; inset-block: -12px; inset-inline: 0; }
-  .settings-row:has(.settings-name, .settings-inline > code, .private-address) { grid-template-columns: minmax(0, 1fr); gap: var(--space-8); padding-block: var(--space-12); }
-  .settings-row:has(.settings-name, .settings-inline > code, .private-address) .settings-row__control { justify-content: flex-start; text-align: left; }
+  .settings-row:has(.settings-name, .settings-inline:not(.settings-version) > code, .private-address) { grid-template-columns: minmax(0, 1fr); gap: var(--space-8); padding-block: var(--space-12); }
+  .settings-row:has(.settings-name, .settings-inline:not(.settings-version) > code, .private-address) .settings-row__control { justify-content: flex-start; text-align: left; }
   /* The score loads late: its control fills the row, so the figure arriving moves nothing. */
   .settings-row:has(.settings-score--late) { grid-template-columns: auto minmax(0, 1fr); }
   .settings-inline:has(> code) { flex-wrap: nowrap; min-width: 0; max-width: 100%; }

@@ -119,7 +119,7 @@ const pages = ids => [
   ['New campaign', '/campaigns/new', { from: '/campaigns', click: 'Create campaign' }],
   ['Campaign review', `/campaigns/${ids.campaign}/review`, { from: '/campaigns' }],
   ['Templates', '/campaigns/templates', { from: '/campaigns' }],
-  ['Template', `/campaigns/templates/${ids.template}`, { from: '/campaigns/templates', row: 'Receipt' }],
+  ['Template', `/campaigns/templates/${ids.template}`, { from: '/campaigns/templates', row: 'Receipt', leave: true }],
   ['Audience', '/audience', { from: '/overview' }],
   ['Contact', `/audience/contacts/${ids.contact}`, { from: '/audience' }],
   ['Lists', '/audience/lists', { from: '/audience' }],
@@ -499,6 +499,26 @@ async function measure(browser, job, fx) {
       await settle(page, net);
       if (job.mode === 'load') { const read = await page.evaluate(() => window.__cls.read()); Object.assign(result, { cls: sharp(read.total), entries: read.entries }); }
     }
+    if (job.leave) {
+      // Templates → Edit, after the measurement: Reply to keeps two typed addresses apart, and Back with an edit autosave
+      // hasn't sent asks first, then Save and leave saves it (templates.tsx's leave guard).
+      const replyTo = ['billing@example.invalid', 'ops@example.invalid'], subject = `Leave check ${Date.now()}`;
+      await page.fill('#template-reply', '');
+      await page.locator('#template-reply').pressSequentially(replyTo.join(', '));
+      const typed = await page.inputValue('#template-reply');
+      if (typed !== replyTo.join(', ')) problems.push(`Reply to turned "${replyTo.join(', ')}" into "${typed}"`);
+      await page.fill('#template-subject', subject);
+      await page.click('.ui-page-header a[href="/campaigns/templates"]');
+      const asked = await page.getByRole('dialog', { name: 'Leave without saving?' }).waitFor({ timeout: 5_000 }).then(() => true, () => false);
+      if (!asked) problems.push('Back with an unsaved template edit left without asking');
+      else {
+        await page.getByRole('button', { name: 'Save and leave' }).click();
+        await page.waitForURL(url => url.pathname === '/campaigns/templates', { timeout: 20_000 }).catch(async () => problems.push(`Save and leave stayed on the template${await page.locator('[role=alert], [role=status]').allInnerTexts().then(texts => texts.filter(Boolean).length ? `: ${texts.filter(Boolean).join(' / ').slice(0, 160)}` : '', () => '')}`));
+        const saved = await page.evaluate(id => fetch(`/v1/templates/${id}`).then(response => response.json()), job.path.split('/').pop());
+        if (saved?.draft?.subject !== subject) problems.push(`Save and leave didn't keep the new subject (saved: "${saved?.draft?.subject}")`);
+        if (JSON.stringify(saved?.draft?.replyTo) !== JSON.stringify(replyTo)) problems.push(`Reply to saved as ${JSON.stringify(saved?.draft?.replyTo)}`);
+      }
+    }
     if (job.user === 'rae') {
       const leak = await page.evaluate(async () => [document.querySelector('.uin-pill, .uin-pin, .uin-layer') && 'the notes layer', [...document.querySelectorAll('[role=tab], [role=menuitem]')].some(el => el.textContent.startsWith('UI notes')) && 'a UI notes control',
         await fetch('/v1/operator/ui-notes').then(r => r.status !== 404 && `GET /v1/operator/ui-notes answered ${r.status}`)].filter(Boolean));
@@ -584,10 +604,10 @@ try {
   console.log(`${elapsed()} seeded`);
   const jobs = [];
   const passes = [['desktop', 'light'], ['desktop', 'dark'], ...process.env.CLS_PHONE === '0' ? [] : [['phone', 'light']]];
-  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, notes, dialog, menu, still, alone, phoneOnly, notFound, waitlist }] of pages(ids)) {
+  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, leave, notes, dialog, menu, still, alone, phoneOnly, notFound, waitlist }] of pages(ids)) {
     if (only && !only.test(name) || device === 'phone' && !phonePages.has(name) || phoneOnly && device !== 'phone') continue;
     const slug = `${name}-${device === 'phone' ? 'phone' : scheme}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-    const load = { name, path, user, scheme, device, support, live, notes, dialog, menu, still, alone, notFound, waitlist, mode: 'load', slug: slug + '-load' };
+    const load = { name, path, user, scheme, device, support, live, leave: leave && device === 'desktop' && scheme === 'light', notes, dialog, menu, still, alone, notFound, waitlist, mode: 'load', slug: slug + '-load' };
     if (densityOnly && !density.wanted(load)) continue;
     jobs.push(load);
     if (from && !densityOnly) jobs.push({ name, path, user, from, click, row, switchTo, support, notes, still, alone, scheme, device, mode: 'in-app', slug: slug + '-in-app' });

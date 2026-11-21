@@ -14,7 +14,8 @@ export const contactColumns: SkeletonColumn[] = [
   { key: 'email', label: 'Email', width: '28%', skeleton: <AudienceCellSkeleton />, card: 'title' },
   { key: 'status', label: 'Status', width: '17%', skeleton: <SkeletonText width={92} />, card: 'aside' },
   { key: 'name', label: 'Name', width: '18%', card: 'line' },
-  { key: 'lists', label: 'Lists', width: '20%', card: 'inline' },
+  // A card puts the lists after the date (the created column's card line), so names arriving later move nothing.
+  { key: 'lists', label: 'Lists', width: '20%', card: 'hide' },
   { key: 'created', label: 'Added', width: '17%', skeleton: <SkeletonText width={95} />, card: 'inline' },
 ]
 export const memberColumns: SkeletonColumn[] = [contactColumns[0], contactColumns[1], { key: 'suppression', label: 'Suppression reason', width: '38%', card: 'line' }, contactColumns[4]]
@@ -58,14 +59,10 @@ export function ListDetailBodySkeleton() {
 }
 export function ContactDetailBodySkeleton() {
   return <><div className="audience-summary cluster"><SkeletonText width={240} /><SkeletonText width={94} /></div>
+    {/* Properties can grow by any number of custom rows, so Lists and Consent history appear with the contact, below
+        them, instead of as placeholders the loaded rows would push down. */}
     <div className="section audience-properties"><section><SectionHeader title="Properties" /><dl className="ui-facts">{['Full name', 'Country', 'Created', 'Last opened'].map(label => <Fragment key={label}><dt>{label}</dt><dd><SkeletonText width="65%" /></dd></Fragment>)}</dl></section></div>
-    <section className="section"><SectionHeader title="Lists" actions={<ControlSkeleton width={111} />} /><SkeletonText width={170} /></section>
-    <ConsentHistorySkeleton />
   </>
-}
-// Consent history renders before Matching emails; Matching emails waits until the history's height is known.
-export function ConsentHistorySkeleton() {
-  return <section className="section"><SectionHeader title="Consent history" /><TableSkeleton columns={consentColumns} rows={1} /></section>
 }
 export function SegmentEditorBodySkeleton() {
   return <div className="stack audience-editor"><div className="audience-name"><FieldSkeleton label="Segment name" /></div>
@@ -73,7 +70,7 @@ export function SegmentEditorBodySkeleton() {
     <section className="section stack"><SectionHeader title="Matching contacts" actions={<ControlSkeleton width={220} />} /><AudienceSummarySkeleton /></section></div>
 }
 export function AudienceRouteSkeleton({ kind, isNew = false }: { kind: 'contacts' | 'contact' | 'lists' | 'list' | 'segments' | 'segment'; isNew?: boolean }) {
-  if (kind === 'contact') return <LoadingRegion className="audience-page" label="Loading contact"><PageHeader title={<SkeletonText width={200} lineHeight={24} />} backTo="/audience" actions={<><ControlSkeleton width={109} /><ControlSkeleton width={111} /></>} /><ContactDetailBodySkeleton /></LoadingRegion>
+  if (kind === 'contact') return <LoadingRegion className="audience-page" label="Loading contact"><PageHeader title={<SkeletonText width={64} lineHeight={24} />} backTo="/audience" actions={<><ControlSkeleton width={109} /><ControlSkeleton width={111} /></>} /><ContactDetailBodySkeleton /></LoadingRegion>
   if (kind === 'list') return <LoadingRegion className="audience-page" label="Loading list"><PageHeader title={<SkeletonText width={96} lineHeight={24} />} backTo="/audience/lists" actions={<><ControlSkeleton width={85} /><ControlSkeleton width={120} /></>} /><AudienceMembersSkeleton /></LoadingRegion>
   if (kind === 'segment') return <LoadingRegion className="audience-page" label="Loading segment"><PageHeader title={isNew ? 'Create segment' : 'Edit segment'} backTo="/audience/segments" actions={<ControlSkeleton width={121} />} /><SegmentEditorBodySkeleton /></LoadingRegion>
   const contacts = kind === 'contacts'

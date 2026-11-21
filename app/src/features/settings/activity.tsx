@@ -4,6 +4,10 @@ import { Button, CopyButton, DataTable, Dialog, EmptyState, ErrorState, SectionH
 import { actionLabel, activityApi, activityAreas, type AuditEntry } from '../../data/activity'
 import { ago, shortDateTime } from '../../lib/format'
 import { PrivateAddress } from '../../components/PrivateAddress'
+import { AddressText } from '../../components/AddressText'
+import { usd } from '../../data/billing'
+import type { MailPermission } from '../../data/types'
+import { accessLabel, domainScope, mailLabel } from './key-labels'
 import { maskedParts } from '../../lib/private-address'
 import { settingsColumns } from './skeletons'
 import { productName } from '../../../../api/src/brand'
@@ -33,14 +37,15 @@ function whoText(actor: AuditEntry['actor']) {
 }
 const record = (value: unknown): Record<string, unknown> | null => typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null
 // The object's name from the summary when it has one (a key's name, a domain, an address), else its ID.
-function targetName(entry: AuditEntry) {
+function summaryName(entry: AuditEntry) {
   const after = record(entry.summary.after), before = record(entry.summary.before)
   for (const source of [after, before, entry.summary]) for (const key of ['name', 'description', 'address', 'domain', 'email']) {
     const value = source?.[key]
     if (typeof value === 'string' && value) return value
   }
-  return entry.target?.id ?? null
+  return null
 }
+const targetName = (entry: AuditEntry) => summaryName(entry) ?? entry.target?.id ?? null
 // Support's view names the request that let it in: whose request, and the ticket.
 const ticketOf = (entry: AuditEntry) => typeof entry.summary.ticket === 'string' ? entry.summary.ticket : null
 function Target({ entry }: { entry: AuditEntry }) {
@@ -90,9 +95,10 @@ export function ActivitySection() {
     {activity.error && !activity.data ? <ErrorState error={activity.error} onRetry={() => void activity.refetch()} /> : <DataTable className="activity-table" loading={activity.isPending} skeletonRows={8} minRows={3} rows={rows} rowKey={entry => entry.id} onRowClick={setOpen}
       empty={<EmptyState title={area ? 'No matching activity' : 'No activity yet'} />} columns={[
         { ...when, render: entry => <When at={entry.at} /> },
-        { ...who, render: entry => <Cell full={whoText(entry.actor)}><Who actor={entry.actor} /></Cell>, cardRender: entry => <Who actor={entry.actor} /> },
+        // A card names who did it and where from on one line, and the target only by its name: IDs are in the details.
+        { ...who, render: entry => <Cell full={whoText(entry.actor)}><Who actor={entry.actor} /></Cell>, cardRender: entry => <><Who actor={entry.actor} /><span className="muted"> · via {source(entry)}</span></> },
         { ...action, render: entry => <Cell full={actionLabel(entry.action)} hint={entry.action}>{actionLabel(entry.action)}</Cell>, cardRender: entry => actionLabel(entry.action) },
-        { ...target, render: entry => <Cell full={targetText(entry)}><Target entry={entry} /></Cell>, cardRender: entry => <Target entry={entry} /> },
+        { ...target, render: entry => <Cell full={targetText(entry)}><Target entry={entry} /></Cell>, cardRender: entry => entry.action === 'support.view' || summaryName(entry) ? <Target entry={entry} /> : <span className="muted">—</span> },
         { ...from, render: entry => <Cell full={fromText(entry)} className="activity-from"><span>{source(entry)}</span>{entry.network && <span> · {entry.network}</span>}</Cell>, cardRender: fromText },
       ]} />}
     {activity.hasNextPage && <div className="activity-more"><Button loading={activity.isFetchingNextPage} onClick={() => void activity.fetchNextPage()}>Load more</Button></div>}
@@ -101,20 +107,46 @@ export function ActivitySection() {
   </section>
 }
 
-// A summary value as one short line: strings as they are, everything else as compact JSON.
-const show = (value: unknown) => value === undefined ? '—' : typeof value === 'string' ? value : JSON.stringify(value)
+// A summary in words: each field gets a label (paidUc → Paid), money in dollars, times in UTC, a key's access as the
+// keys table words it, lists joined. Bookkeeping fields (the payment attempt, a promotion's code) are left out. Any
+// address is masked like every address (an invitation's email, a member's), so a shared screen never spells one out.
+const fieldLabels: Record<string, string> = { paidUc: 'Paid', amountUc: 'Amount', balanceAfterUc: 'Balance after', balanceBeforeUc: 'Balance before', expiresAt: 'Expires', mcpGrant: 'Agent grant', permissions: 'Access', mail: 'Mail', prefix: 'Key prefix', addressIds: 'Addresses', inboxId: 'Inbox', createdInboxIds: 'Created inboxes' }
+const hiddenFields = new Set(['source', 'promo', 'promoCode', 'attemptId'])
+const fieldLabel = (key: string) => fieldLabels[key] ?? (key.replace(/Uc$/, '').replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/_/g, ' ').toLowerCase().replace(/^./, c => c.toUpperCase()))
+const strings = (value: unknown): value is string[] => Array.isArray(value) && value.every(item => typeof item === 'string')
+function words(key: string, value: unknown): string {
+  if (value === null || value === undefined || value === '') return '—'
+  if (/Uc$/.test(key) && (typeof value === 'string' || typeof value === 'number') && /^-?\d+$/.test(String(value))) return usd(String(value))
+  if (/At$/.test(key) && typeof value === 'string' && !Number.isNaN(Date.parse(value))) return `${shortDateTime(value)} UTC`
+  if (key === 'permissions' && strings(value)) return accessLabel(value, false)
+  if (key === 'domains' && strings(value)) return domainScope(value)
+  if (key === 'mail' && strings(value)) return mailLabel(value as MailPermission[])
+  if (key === 'access' && record(value)) {
+    const access = record(value)!, mail = strings(access.mail) ? mailLabel(access.mail as MailPermission[]) : null
+    const scope = access.type === 'inbox' ? 'one inbox' : strings(access.addressIds) ? `${access.addressIds.length} ${access.addressIds.length === 1 ? 'address' : 'addresses'}` : null
+    return [mail, scope].filter(Boolean).join(' · ') || '—'
+  }
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No'
+  if (typeof value === 'number') return value.toLocaleString('en-US')
+  if (strings(value)) return value.length ? value.join(', ') : 'None'
+  const object = record(value)
+  if (object) return Object.entries(object).filter(([field, item]) => !hiddenFields.has(field) && item !== undefined && item !== null).map(([field, item]) => `${fieldLabel(field)}: ${words(field, item)}`).join(' · ') || '—'
+  return typeof value === 'string' ? value : JSON.stringify(value)
+}
+const show = (key: string, value: unknown): ReactNode => value === undefined ? '—' : <AddressText text={words(key, value)} />
 function Changes({ summary }: { summary: Record<string, unknown> }) {
   const before = record(summary.before), after = record(summary.after)
   const rows: { key: string; value: ReactNode }[] = []
   if (before || after) for (const key of [...new Set([...Object.keys(before ?? {}), ...Object.keys(after ?? {})])]) {
     const was = before?.[key], now = after?.[key]
     if (JSON.stringify(was) === JSON.stringify(now)) continue
-    rows.push({ key, value: before && after ? <><span className="muted">{show(was)}</span> → {show(now)}</> : show(after ? now : was) })
+    if (hiddenFields.has(key)) continue
+    rows.push({ key, value: before && after ? <><span className="muted">{show(key, was)}</span> → {show(key, now)}</> : show(key, after ? now : was) })
   }
-  else for (const key of ['before', 'after'].filter(key => key in summary)) rows.push({ key, value: show(summary[key]) })
-  for (const [key, value] of Object.entries(summary)) if (key !== 'before' && key !== 'after') rows.push({ key, value: show(value) })
+  else for (const key of ['before', 'after'].filter(key => key in summary)) rows.push({ key, value: show(key, summary[key]) })
+  for (const [key, value] of Object.entries(summary)) if (key !== 'before' && key !== 'after' && !hiddenFields.has(key)) rows.push({ key, value: show(key, value) })
   if (!rows.length) return <p className="muted activity-none">No details recorded.</p>
-  return <dl className="activity-changes">{rows.map(row => <div key={row.key}><dt>{row.key}</dt><dd>{row.value}</dd></div>)}</dl>
+  return <dl className="activity-changes">{rows.map(row => <div key={row.key}><dt>{fieldLabel(row.key)}</dt><dd>{row.value}</dd></div>)}</dl>
 }
 function ActivityDetails({ entry, onClose }: { entry: AuditEntry | null; onClose: () => void }) {
   // When it happened leads the facts; where it came from (the channel with its client and network) is From.

@@ -54,7 +54,7 @@ export function SendingLimitsGuide({ headings = 'h3', limit, compact = false }: 
       {!compact && <p>Hosted only: recipients per rolling 24 hours, set by the sender score. Good standing has none.</p>}
       <div className="limits-table-scroll"><table className="limits-table">
         <thead><tr><th scope="col">Score</th><th scope="col">Daily limit</th><th scope="col">Per minute</th></tr></thead>
-        <tbody>{bands.map(([score, cap, current, cell]) => <tr key={score} aria-current={limit && current(limit) ? 'true' : undefined}><td>{score}{limit && current(limit) && <span className="limits-table__now">Now</span>}</td><td>{cell ?? (cap === null ? 'None' : number(cap))}</td><td>{cap === null ? `${number(PACE.uncappedFloor)}+` : number(burstFor(cap))}</td></tr>)}</tbody>
+        <tbody>{bands.map(([score, cap, current, cell]) => <tr key={score} aria-current={limit && current(limit) ? 'true' : undefined}><td>{limit && current(limit) && <span className="limits-table__now">Now</span>}{score}</td><td>{cell ?? (cap === null ? 'None' : number(cap))}</td><td>{cap === null ? `${number(PACE.uncappedFloor)}+` : number(burstFor(cap))}</td></tr>)}</tbody>
       </table></div>
       <ul className="limits-notes">
         <li>The first {EVALUATION.recipients} wait for their results, about an hour. Then sending grows from {number(GROWTH.start)} an hour for {GROWTH.hours} hours.</li>

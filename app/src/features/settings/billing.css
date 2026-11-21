@@ -41,7 +41,8 @@ button.billing-balance__amount > svg { flex: none; color: var(--color-muted); tr
 /* A description takes the room the table has and wraps to a second line (a row fits two) before it is cut; the full text is in its title. */
 .billing-table td[data-col='description'], .billing-table td[data-col='kind'] { max-width: 0; }
 .billing-cell { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); }
-.billing-desc { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; min-width: 0; overflow: hidden; overflow-wrap: anywhere; }
+/* One line, so every history row keeps the 53px height; the full text is the cell's title. */
+.billing-desc { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .billing-stack { display: flex; flex-direction: column; min-width: 0; }
 .billing-stack__note { font-size: var(--text-xs); line-height: var(--leading-xs); }
 
@@ -74,10 +75,11 @@ button.billing-balance__amount > svg { flex: none; color: var(--color-muted); tr
   .billing-balance__amount { font-size: 32px; }
   .billing-dollars { width: 104px; }
   .billing-choice { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  /* Cards: a description wraps (up to three lines) instead of ending in an ellipsis; the card grows to fit. */
+  /* Cards: a description wraps onto two lines instead of ending at one. */
   .billing-table .ui-card { height: auto; min-height: var(--table-row-height); }
   .billing-table .ui-card__head { height: auto; min-height: 20px; align-items: flex-start; white-space: normal; }
   .billing-table .ui-card__title { overflow: visible; text-wrap: pretty; }
-  .billing-table .billing-desc { display: block; -webkit-line-clamp: unset; overflow: visible; }
+  /* Two lines for every description (longer ones end in an ellipsis, the full text is the title), so cards keep one height. */
+  .billing-table .billing-desc { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; min-height: 40px; line-height: 20px; overflow: hidden; white-space: normal; }
 }
 @media (prefers-reduced-motion: reduce) { .billing-choice__item, .billing-method, button.billing-balance__amount > svg { transition: none; } }

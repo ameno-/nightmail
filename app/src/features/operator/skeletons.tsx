@@ -74,10 +74,10 @@ export const waitlistColumnDefs: SkeletonColumn[] = [
   { key: 'attempts', label: 'Attempts', width: 96, align: 'right', card: 'inline' },
 ]
 
-// UI notes (/operator/notes): staff's design and bug notes on the dashboard. The screenshot and selection columns are
-// for the table; a phone's card shows the note, its status, page, type and age.
+// UI notes (/operator/notes): staff's design and bug notes on the dashboard. The screenshot column is for the table; a
+// phone's card shows the note, its status, page, type and age, with its selection checkbox at the end for the bulk menu.
 export const noteColumnDefs: SkeletonColumn[] = [
-  { key: 'select', label: '', width: 40, card: 'hide' },
+  { key: 'select', label: '', width: 40, card: 'end' },
   { key: 'shot', label: 'Screenshot', width: 96, card: 'hide' },
   { key: 'note', label: 'Note', card: 'title' },
   { key: 'status', label: 'Status', width: 124, card: 'aside' },

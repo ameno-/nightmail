@@ -9,9 +9,11 @@
 .limits-table th { color: var(--color-muted); font-family: var(--font-mono); font-size: 10px; font-weight: 400; letter-spacing: .1em; text-transform: uppercase; }
 .limits-table :is(th, td):nth-child(n + 2) { text-align: right; }
 .limits-table td:nth-child(n + 2) { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
-/* The row the workspace is on. */
-.limits-table tr[aria-current] td { font-weight: var(--font-weight-bold); }
-.limits-table__now { margin-left: var(--space-8); padding: 0; border-radius: 0; background: none; color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-label); font-weight: normal; letter-spacing: var(--tracking-label); text-transform: uppercase; white-space: nowrap; }
+/* The row the workspace is on: a neutral tint across the row, bold figures, and a Now tag ahead of its score. */
+.limits-table tr[aria-current] td { background: var(--color-active-bg); font-weight: var(--font-weight-bold); }
+.limits-table tr[aria-current] td:first-child { box-shadow: inset 2px 0 0 var(--color-text); }
+.limits-table:not(.limits-table--lines) :is(th, td):first-child { padding-left: var(--space-8); }
+.limits-table__now { display: inline-block; margin-right: var(--space-8); padding: 0 var(--space-6); border: 1px solid var(--color-border); border-radius: var(--radius-sm); color: var(--color-text); font-family: var(--font-mono); font-size: var(--text-label); font-weight: normal; line-height: 16px; letter-spacing: var(--tracking-label); text-transform: uppercase; vertical-align: 1px; }
 .limits-table :is(th, td):last-child { padding-right: 0; }
 .limits-notes { display: flex; flex-direction: column; gap: var(--space-4); margin: 0; padding-inline-start: var(--space-20); color: var(--color-muted); }
 .limits-notes--plain { color: var(--color-text); }
