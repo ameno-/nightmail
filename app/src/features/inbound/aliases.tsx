@@ -1,17 +1,20 @@
 import { useEffect, useId, useRef, useState, type ClipboardEvent, type KeyboardEvent } from 'react'
+import { Link } from 'react-router'
 import { X } from 'lucide-react'
 import { Button, IconButton } from '../../components/ui'
 import { Match } from './parts'
+import { catchAllNote } from './concepts'
 
 // The API's rules for aliases (UpdateInboundAddress): valid lowercase addresses of at most 254 characters,
 // on exactly the address's own domain, at most 50 per address, and none on temporary addresses.
 const ADDRESS = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/
 export const MAX_ALIASES = 50
 
-export type AliasMessage = { tone: 'error' | 'info'; text: string }
+/** link: where to go instead (a * alias is the catch-all's or a wildcard's). */
+export type AliasMessage = { tone: 'error' | 'info'; text: string; link?: { to: string; label: string } }
 export type AliasState = { list: string[]; draft: string; message: AliasMessage | null }
 type Rules = { address: string; temporary: boolean }
-type Reason = 'format' | 'domain' | 'length' | 'primary' | 'duplicate' | 'limit'
+type Reason = 'format' | 'domain' | 'length' | 'primary' | 'duplicate' | 'limit' | 'catchAll' | 'wildcard'
 
 export const aliasState = (list: string[]): AliasState => ({ list, draft: '', message: null })
 const domainOf = (address: string) => address.slice(address.lastIndexOf('@') + 1)
@@ -22,6 +25,9 @@ const reasons = (domain: string, address: string): Record<Reason, string> => ({
   primary: `${address} is this address itself.`,
   duplicate: 'Already an alias.',
   limit: `An address can have at most ${MAX_ALIASES} aliases.`,
+  // As New address says it: a * makes a catch-all or a wildcard, never an alias.
+  catchAll: catchAllNote,
+  wildcard: 'An address with * is a wildcard: add it under Wildcards.',
 })
 
 /** Adds every address in the draft; anything invalid stays in the draft. Typed text splits on commas and semicolons only, so a typed space is invalid; pasted lists also split on whitespace. */
@@ -37,6 +43,7 @@ export function commitAliases(state: AliasState, { address, temporary }: Rules, 
       : value.length > 254 ? 'length'
       : domainOf(value) !== domain ? 'domain'
       : !ADDRESS.test(value) ? 'format'
+      : value.split('@')[0]!.includes('*') ? (value.startsWith('*@') ? 'catchAll' : 'wildcard')
       : value === address ? 'primary'
       : list.includes(value) ? 'duplicate' : null
     if (problem === 'duplicate') { duplicates++; continue }
@@ -46,7 +53,7 @@ export function commitAliases(state: AliasState, { address, temporary }: Rules, 
   const added = list.slice(state.list.length)
   const text = reasons(domain, address)
   // Repeats are dropped quietly in a pasted list; a single repeat is worth saying.
-  const message: AliasMessage | null = reason ? { tone: 'error', text: `${added.length ? `Added ${added.length}. ` : ''}${text[reason]}` }
+  const message: AliasMessage | null = reason ? { tone: 'error', text: `${added.length ? `Added ${added.length}. ` : ''}${text[reason]}`, ...(reason === 'catchAll' ? { link: { to: `/receiving?kind=catch_all&domain=${encodeURIComponent(domain)}`, label: 'Edit the catch-all' } } : {}) }
     : !added.length && duplicates ? { tone: 'error', text: duplicates > 1 ? 'Already aliases.' : text.duplicate }
     : added.length > 1 ? { tone: 'info', text: `Added ${added.length} aliases.` } : null
   return { list, draft: rest.join(', '), message, ok: !reason, added }
@@ -115,7 +122,7 @@ export function AliasEditor({ id, address, saved, value, onChange, disabled, err
       </div>
       <Button disabled={locked || !value.draft.trim()} onClick={() => { add(); input.current?.focus() }}>Add</Button>
     </div>
-    {note && <div id={messageId} className={`ui-field__hint${shown?.tone === 'error' ? ' ui-field__error' : ''}`} role={shown?.tone === 'error' ? 'alert' : undefined}>{note}</div>}
+    {note && <div id={messageId} className={`ui-field__hint${shown?.tone === 'error' ? ' ui-field__error' : ''}`} role={shown?.tone === 'error' ? 'alert' : undefined}>{note}{value.message?.link && <> <Link to={value.message.link.to}>{value.message.link.label}</Link></>}</div>}
     <span className="sr-only" role="status">{announcement}</span>
   </div>
 }

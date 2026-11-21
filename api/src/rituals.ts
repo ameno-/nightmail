@@ -453,7 +453,7 @@ const recipeCatalog = (family: Family) => {
 export const RecipeInputParams = RuleRecipeRef.shape.params;
 const RecipeAddresses = z.array(z.string().min(1).max(254)).min(1).max(10).describe('Inbox IDs (mbx_…) or receiving addresses it runs on.');
 type TargetRow = { address: string; mailbox_id: string; kind: string };
-const targetRows = async (tx: DbExecutor, w: string, targets: string[]) => {
+export const targetRows = async (tx: DbExecutor, w: string, targets: string[]) => {
   const list = JSON.stringify([...new Set(targets)]);
   return (await tx.execute<TargetRow>(sql`SELECT address,mailbox_id,kind FROM mailbox_addresses WHERE workspace_id=${w}
     AND (address IN (SELECT jsonb_array_elements_text(${list}::jsonb)) OR mailbox_id IN (SELECT jsonb_array_elements_text(${list}::jsonb)))`)).rows;

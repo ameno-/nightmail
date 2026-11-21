@@ -299,7 +299,7 @@ export function ReceivingPage() {
     </div>}
     {data && <AddressBuilder open={!!creating} initial={creating?.address} onOpenChange={open => { if (!open) setCreating(null) }} domains={data.domains} onPattern={setPattern} />}
     {data && shown && <AddressBuilder open address={shown} rule={!building ? params.get('rule') ?? undefined : undefined} split={!building && splitParam && conditions.some(c => c.value === splitParam) ? splitParam : undefined} onOpenChange={open => { if (!open) closeBuilder() }} domains={data.domains} />}
-    {editing && <RouteEditor match={editing.match} route={editing.route} onClose={() => { setEditing(null); void overview.refetch() }} />}
-    {pattern && <RouteEditor match={pattern} route={data?.routes.data.find(r => r.match === pattern)?.route ?? null} onClose={() => { setPattern(null); void overview.refetch() }} />}
+    {editing && <RouteEditor match={editing.match} route={editing.route} version={data?.version} onClose={() => { setEditing(null); void overview.refetch() }} />}
+    {pattern && <RouteEditor match={pattern} route={data?.routes.data.find(r => r.match === pattern)?.route ?? null} version={data?.version} onClose={() => { setPattern(null); void overview.refetch() }} />}
   </div>
 }

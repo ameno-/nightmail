@@ -4,7 +4,8 @@ import { Link } from 'react-router'
 import { Alert, Button, Checkbox, ConfirmDialog, Dialog, ErrorState, Field, Input, Select, Switch, fieldError, MutationError } from '../../components/ui'
 import { useApiDef, useApiMutation } from '../../data/context'
 import { queries } from '../../data/queries'
-import type { ForwardEndpoint, InboundAddress, InboundWebhook, MailRoute } from '../../data/types'
+import { ApiError, type ForwardEndpoint, type InboundAddress, type InboundWebhook, type MailRoute } from '../../data/types'
+import { request } from '../../data/live'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { CreatedEndpointDialog, EndpointDialog, endpointStatusLabel, type Endpoint } from './ritual-connections'
 import { outcomes } from './concepts'
@@ -26,7 +27,7 @@ function destinationsOf(addresses: InboundAddress[], webhooks: InboundWebhook[],
 export const TITLE = 'Where should this mail go?'
 
 /** Loads what a route can deliver to (inboxes, webhooks and forwards) and opens the editor for one route, or a new one for `match`. */
-export function RouteEditor({ match, route, to, onClose }: { match: string; route?: { id: string; enabled: boolean; to: string[] | 'drop' } | null; to?: string[]; onClose: () => void }) {
+export function RouteEditor({ match, route, to, version, onClose }: { match: string; route?: { id: string; enabled: boolean; to: string[] | 'drop' } | null; to?: string[]; version?: number; onClose: () => void }) {
   const addresses = useApiDef(queries.inboundAddressOptions())
   const webhooks = useApiDef(queries.inboundWebhooks())
   const forwards = useApiDef(queries.forwardEndpoints())
@@ -37,12 +38,12 @@ export function RouteEditor({ match, route, to, onClose }: { match: string; rout
   // The dialog opens once everything it lists has loaded, so nothing moves in it.
   if (!addresses.data || !webhooks.data || !forwards.data) return null
   const draft = route ? { match, to: route.to, route: { id: route.id, enabled: route.enabled, match, to: route.to } as MailRoute } : { match, to: to ?? [] }
-  return <RouteDialog draft={draft} destinations={destinationsOf(addresses.data, webhooks.data, forwards.data)} owners={addresses.data} onClose={onClose}
+  return <RouteDialog draft={draft} version={version} destinations={destinationsOf(addresses.data, webhooks.data, forwards.data)} owners={addresses.data} onClose={onClose}
     refreshWebhooks={async () => (await webhooks.refetch()).data ?? []} refreshForwards={async () => { await forwards.refetch() }} />
 }
 
 type Action = 'deliver' | 'keep' | 'drop'
-function RouteDialog({ draft, destinations, owners, onClose, refreshWebhooks, refreshForwards }: { draft: { match: string; to: string[] | 'drop'; route?: MailRoute }; destinations: Destination[]; owners: InboundAddress[]; onClose: () => void; refreshWebhooks: () => Promise<InboundWebhook[]>; refreshForwards: () => Promise<void> }) {
+function RouteDialog({ draft, version, destinations, owners, onClose, refreshWebhooks, refreshForwards }: { draft: { match: string; to: string[] | 'drop'; route?: MailRoute }; version?: number; destinations: Destination[]; owners: InboundAddress[]; onClose: () => void; refreshWebhooks: () => Promise<InboundWebhook[]>; refreshForwards: () => Promise<void> }) {
   // A new webhook or forward endpoint is made here, without leaving, and ticked once it can take mail.
   const [creating, setCreating] = useState<'webhook' | 'forward' | null>(null)
   const [created, setCreated] = useState<(Endpoint & { secret?: string }) | null>(null)
@@ -53,8 +54,22 @@ function RouteDialog({ draft, destinations, owners, onClose, refreshWebhooks, re
   const [enabled, setEnabled] = useState(route?.enabled ?? true)
   const [problem, setProblem] = useState<string | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
-  const save = useApiMutation((api, input: { match: string; to: string[] | 'drop'; enabled: boolean }) => route ? api.routing.updateRoute(route.id, input) : api.routing.createRoute(input), 'Saved', false, true, route?.id)
-  const remove = useApiMutation((api, _: void) => api.routing.deleteRoute(route!.id), 'Removed', false, true, route?.id)
+  // Saved with the version this editor read (the overview's): a change made meanwhile to this route (or a new route for
+  // its address) is said, never overwritten. One elsewhere in the workspace only sends it again with the new version.
+  const versioned = async <T,>(send: (ifMatch: number | undefined) => Promise<T>): Promise<T> => {
+    try { return await send(version) } catch (error) {
+      if (version === undefined || !(error instanceof ApiError && error.code === 'VERSION_CONFLICT')) throw error
+      const now = await request<{ version: number; routes: MailRoute[] }>('/v1/routing')
+      const mine = route ? now.routes.find(r => r.id === route.id) : now.routes.find(r => r.match === draft.match)
+      const set = (to: string[] | 'drop') => Array.isArray(to) ? [...to].sort().join(',') : to
+      const same = route ? !!mine && mine.match === route.match && mine.enabled === route.enabled && set(mine.to) === set(route.to) : !mine
+      if (!same) throw new ApiError('This changed since you opened it. Close it and open it again to see the change.', 'VERSION_CONFLICT')
+      return send(now.version)
+    }
+  }
+  const path = route ? `/v1/routing/routes/${encodeURIComponent(route.id)}` : '/v1/routing/routes'
+  const save = useApiMutation((_api, input: { match: string; to: string[] | 'drop'; enabled: boolean }) => versioned(ifMatch => request<MailRoute>(path, { method: route ? 'PATCH' : 'POST', body: input, ifMatch })), 'Saved', false, true, route?.id)
+  const remove = useApiMutation((_api, _: void) => versioned(ifMatch => request(path, { method: 'DELETE', ifMatch })), 'Removed', false, true, route?.id)
   const normalized = match.trim().toLowerCase()
   const owner = owners.find(a => a.address === normalized || a.aliases.includes(normalized))
   const losesOwner = owner && (action !== 'deliver' || !selected.includes(owner.id))

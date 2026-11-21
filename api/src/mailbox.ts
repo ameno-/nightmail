@@ -487,6 +487,12 @@ function registerAddresses(app: App) {
     request: { params, body: json(patch) }, responses: { 200: response(InboundAddressSchema), ...errors } }), async c => {
     admin(c); const { mailbox, scope } = await mailboxFor(c, c.req.valid('param').addressId); const input = c.req.valid('json');
     if(mailbox.kind==='inbox')throw new ApiError(409,'MANAGED_INBOX','Use the inbox endpoint to edit a managed inbox.');
+    // As createInboundAddress refuses one: a * makes a catch-all or wildcard. An alias saved before this rule is kept.
+    const starred = (input.aliases ?? []).filter(alias => alias.split('@')[0]!.includes('*'));
+    if (starred.length) {
+      const saved = new Set((await c.env.db.execute<{ address: string }>(sql`SELECT address FROM mailbox_addresses WHERE workspace_id=${scope.workspaceId} AND mailbox_id=${mailbox.id} AND kind='alias'`)).rows.map(r => r.address));
+      if (starred.some(alias => !saved.has(alias))) throw new ApiError(422, 'INVALID_ADDRESS', 'A * makes a catch-all or wildcard, which is a route: create it with createRoute.', 'aliases');
+    }
     if (mailbox.expiresAt !== null) checkTemporaryMailboxRouting(input);
     const domain = mailbox.address.split('@')[1]!;
     await c.env.db.transaction(async tx => {

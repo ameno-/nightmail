@@ -23,7 +23,7 @@ import { FlowPanel } from './panel'
 import { receivingDomains, useOverview, type Overview, type OverviewRule, type RouteEntry, type Target } from './overview'
 import { Match, TargetIcon } from './parts'
 import { AwaitingConfirm, discordUrl, slackUrl, targetProblem, urlHint } from './ritual-connections'
-import { outcomes } from './concepts'
+import { catchAllNote, outcomes } from './concepts'
 import { RuleLine } from './recipes'
 
 const EMAIL = /^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/
@@ -220,7 +220,7 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
     const value = form.address.trim().toLowerCase(), sender = form.publicAddress.trim().toLowerCase(), found: Record<string, string> = {}
     if (!EMAIL.test(value)) found.address = 'Enter a full email address, such as support@example.com.'
     // A * makes a catch-all or wildcard (a route), never an address with a * in its name.
-    else if (value.split('@')[0]!.includes('*')) found.address = value.startsWith('*@') ? 'Mail to any address here goes to the domain’s catch-all.' : 'An address with * is a wildcard.'
+    else if (value.split('@')[0]!.includes('*')) found.address = value.startsWith('*@') ? catchAllNote : 'An address with * is a wildcard.'
     else if (receiving.length && !receiving.some(d => d.name === value.split('@')[1])) found.address = onDomains(receiving)
     else if ((boxes.data ?? []).some(b => b.address === value || b.aliases.includes(value))) found.address = 'That address exists.'
     if (sender && form.lifetime) found.publicAddress = 'Temporary addresses cannot have a public sender address.'
