@@ -78,6 +78,15 @@ function replyAuthorVerified(email:Email|null,address:string,mail:ReceivedNotifi
   if(v.spf==='PASS' && source && ADDRESS.test(source) && source.split('@')[1]===domain)return true;
   return v.dkim==='PASS' && soleAlignedSignature(email.headers.filter(h=>h.key==='dkim-signature').map(h=>h.value),domain);
 }
+/**
+ * Why the author check refused a message SES's DMARC passed, for the two reasons it is stricter than SES: a header name
+ * that isn't well formed, or no From of SES's own (commonHeaders.from). One stable code per reason, logged without
+ * addresses or header text, so such refusals can be seen.
+ */
+export function authorRefusals(email: Email | null, address: string, mail: ReceivedNotification['mail'], v: Verdicts) {
+  if (!email || v.dmarc !== 'PASS' || replyAuthorVerified(email, address, mail, v)) return [];
+  return [...email.headers.every(h => FIELD_NAME.test(h.key)) ? [] : ['AUTHOR_UNVERIFIED_HEADER_NAME'], ...mail?.commonHeaders?.from ? [] : ['AUTHOR_UNVERIFIED_SES_FROM_MISSING']];
+}
 function authenticatedFrom(email: Email | null, address: string, mail: ReceivedNotification['mail'], verdicts: Verdicts) {
   const dmarcPass = verdicts.dmarc === 'PASS', noDmarc = verdicts.dmarc === undefined || verdicts.dmarc === 'GRAY';
   if (!dmarcPass && !(noDmarc && verdicts.dkim === 'PASS')) return false;
@@ -616,6 +625,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
         verdicts, spam, automated: automated(email, raw, from.address), status,
       };
   const verifiedAuthor=replyAuthorVerified(email,from.address,notification.mail,verdicts);
+  for (const code of authorRefusals(email,from.address,notification.mail,verdicts)) log('warn', { code, workspaceId: scope.workspaceId });
   // A forward can be queued later than this first store (a reopened receipt, another receipt of the same email,
   // rules saved meanwhile) and reads these verdicts from the stored message. Forward eligibility is recorded for
   // every message; the author check by any workspace that routes, not only one whose rules already run.

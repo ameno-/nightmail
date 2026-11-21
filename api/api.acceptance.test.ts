@@ -7528,6 +7528,10 @@ describe('Hosted MCP OAuth and tools', () => {
         await db.query("INSERT INTO mailboxes(id, workspace_id, domain_id, address) VALUES ($1, $2, $3, $4)", [desk, wid, deskDomain, deskAddress]);
         await db.query("INSERT INTO mailbox_addresses(workspace_id, address, mailbox_id, kind) VALUES ($1, $2, $3, 'primary')", [wid, deskAddress, desk]);
         runtime.config.support!.addressIds = [desk];
+        // Ingest's warnings, read for the author check's refusal codes.
+        const warned: Json[] = [];
+        st.mock.method(console, 'warn', (line: string) => { try { warned.push(JSON.parse(line)); } catch { /* not a log line */ } });
+        const refusals = (from: number) => warned.slice(from).filter(l => String(l.code).startsWith('AUTHOR_UNVERIFIED'));
         const raw = new Map<string, Buffer>();
         st.mock.method(S3Client.prototype, 'send', async (cmd: any) => {
           const mid = String(cmd.input.Key).split('/').pop()!;
@@ -7610,12 +7614,19 @@ describe('Hosted MCP OAuth and tools', () => {
           // vouches for no author, so nothing binds.
           for (const [label, before] of [['From :', `From : x@evil-${hex().slice(0, 6)}.example`], ['From<TAB>:', `From\t: x@evil.example`], ['leading space', ` From: x@evil.example`],
             ['mbox line', `From x@evil.example Sat Nov 21 10:00:00 2026`]] as const) {
-            const shaped = await ingest(adaAddress, { before: [before] });
+            const mark = warned.length, shaped = await ingest(adaAddress, { before: [before] });
             assert.equal(shaped.author, false, label);
+            // SES passed DMARC, so the refusal is logged: its code and the workspace, nothing from the message.
+            assert.deepEqual(refusals(mark).map(l => [l.code, l.workspaceId]), [['AUTHOR_UNVERIFIED_HEADER_NAME', wid]], label);
+            assert.ok(refusals(mark).every(l => Object.keys(l).every(k => ['level', 'timestamp', 'service', 'deploy', 'code', 'workspaceId'].includes(k))), JSON.stringify(refusals(mark)));
             await nobodyBinds(label, shaped.id, 'pending_signin');
           }
-          const uncommon = await ingest(adaAddress, { common: false });
+          const mark = warned.length, uncommon = await ingest(adaAddress, { common: false });
           assert.equal(uncommon.author, false, 'No SES From, no author.');
+          assert.deepEqual(refusals(mark).map(l => [l.code, l.workspaceId]), [['AUTHOR_UNVERIFIED_SES_FROM_MISSING', wid]]);
+          const failed = warned.length;
+          await nobodyBinds('a DMARC failure logs no refusal', (await ingest(adaAddress, { common: false, verdicts: { dmarc: 'FAIL', dkim: 'FAIL', spf: 'FAIL' } })).id, 'pending_signin');
+          assert.deepEqual(refusals(failed), [], 'Only a DMARC pass the check refused is logged.');
           await nobodyBinds('no SES From', uncommon.id, 'pending_signin');
           // Only mail written to support: support in its To or Cc (not only on the envelope, as a Bcc), dated within days.
           await nobodyBinds('not written to support', (await ingest(adaAddress, { to: `someone@${adaDomain}` })).id, 'pending_signin');
