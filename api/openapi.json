@@ -21046,18 +21046,33 @@
                   "signin",
                   "none"
                 ]
+              },
+              "signedIn": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "The messages of an email conversation its person confirmed, signed in (the claim), oldest first: each is answered once. Empty otherwise."
               }
             },
             "required": [
               "id",
               "channel",
               "mode",
-              "verification"
+              "verification",
+              "signedIn"
             ]
           },
           "user": {
             "type": "object",
             "properties": {
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The person the conversation is bound to, as Nightmail stamps it; null when nobody is."
+              },
               "name": {
                 "type": [
                   "string",
@@ -21069,11 +21084,17 @@
                   "string",
                   "null"
                 ]
+              },
+              "emailVerified": {
+                "type": "boolean",
+                "description": "Whether email is the account’s verified address now. Only that address may receive an answer written from the account."
               }
             },
             "required": [
+              "id",
               "name",
-              "email"
+              "email",
+              "emailVerified"
             ]
           },
           "workspace": {

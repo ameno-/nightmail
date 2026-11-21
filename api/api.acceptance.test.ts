@@ -7135,7 +7135,7 @@ describe('Hosted MCP OAuth and tools', () => {
         [supportBox, home, homeDom, `support@${supportDomain}`, salesBox, `sales@${supportDomain}`, acmeBox, acme, acmeDom, `help@${acmeDomain}`]);
       /** A message Nightmail stored, as ingest would: its From header, DKIM signatures, SES's verdicts and ingest's author check. */
       const mail = async (from: string, o: { dmarc?: string; box?: string | null; workspace?: string; fromHeader?: string[]; direction?: string; text?: string; authorVerified?: boolean } = {}) => {
-        const id = `msg_${hex().slice(0, 32)}`, workspace = o.workspace ?? home, domain = from.split('@')[1];
+        const id = `msg_${hex().slice(0, 32)}`, workspace = o.workspace ?? home, domain = from.split('@')[1]?.toLowerCase();
         const headers = [...(o.fromHeader ?? [`"Synthetic sender" <${from}>`]).map(value => ({ name: 'From', value })), { name: 'DKIM-Signature', value: `v=1; a=rsa-sha256; d=${domain}; s=s1; bh=x; b=y` }];
         await db.query(`INSERT INTO mail_messages(id, workspace_id, direction, thread_id, region, subject, from_address, envelope_to, verdicts, headers, text) VALUES ($1, $2, $3, $4, $5, 'Help', $6, '[]', $7, $8, $9)`,
           [id, workspace, o.direction ?? 'inbound', workspace === home ? thread : acmeThread, REGION, from, JSON.stringify({ dmarc: o.dmarc ?? 'PASS', dkim: 'PASS', spf: 'PASS' }), JSON.stringify(headers), o.text ?? null]);
@@ -7167,22 +7167,30 @@ describe('Hosted MCP OAuth and tools', () => {
         await db.query('UPDATE workspace_members SET workspace_id = $1 WHERE user_id = $2 AND workspace_id = $3', [beta, member.userId, other]);
         error(await register(id, { kind: 'email', messageId: await mail(owner.email) }), 409, 'SUPPORT_CONVERSATION_EXISTS');
 
-        // Email: only a message received at a support address, and its stored From and DMARC verdict decide how it is
-        // answered: a sender that proved it is non_member (general answers), anyone else unverified. Whoever owns the
-        // address, an email conversation is never bound to an account.
+        // Email: only a message received at a support address, as Nightmail stored it. It binds its sender's account only
+        // when ingest vouched for its one literal From, SES's DMARC verdict is PASS, the From is exactly one account's
+        // verified email and that account has a workspace. Anything else binds nobody: a verified sender without such an
+        // account gets general answers (non_member), and the rest the fixed reply with a sign-in for that message.
+        const signins = async (id: string) => (await db.query('SELECT message_id, address, user_id FROM support_email_signins WHERE conversation_id = $1 ORDER BY created_at, message_id', [id])).rows;
         const pass = await email(owner.email);
-        assert.deepEqual([pass.body.channel, pass.body.mode, pass.body.verification, pass.body.workspaceId, pass.body.contentShared], ['email', 'non_member', 'dmarc', null, false]);
-        assert.deepEqual([(await row(pass.id)).user_id, (await row(pass.id)).pending_address, (await row(pass.id)).evidence.dkimAligned], [null, owner.email, true]);
+        assert.deepEqual([pass.body.channel, pass.body.mode, pass.body.verification, pass.body.workspaceId, pass.body.contentShared], ['email', 'member', 'dmarc', null, false]);
+        assert.deepEqual([(await row(pass.id)).user_id, (await row(pass.id)).pending_address, (await row(pass.id)).evidence.dkimAligned], [owner.userId, owner.email, true]);
+        assert.deepEqual(await signins(pass.id), [], 'A message that binds needs no sign-in.');
         const failing = await email(owner.email, { dmarc: 'FAIL' });
-        assert.deepEqual([failing.body.mode, failing.body.verification, (await row(failing.id)).user_id, (await row(failing.id)).pending_address], ['unverified', 'none', null, owner.email]);
-        assert.equal((await email(owner.email, { dmarc: 'GRAY' })).body.mode, 'unverified', 'Only PASS counts.');
-        assert.equal((await email(owner.email, { fromHeader: [`<${owner.email}>, <other@${acmeDomain}>`] })).body.mode, 'unverified', 'A From that is not one literal address proves nothing.');
-        assert.equal((await email(owner.email, { fromHeader: [owner.email, owner.email] })).body.mode, 'unverified', 'Two From fields prove nothing.');
-        assert.equal((await email(owner.email, { authorVerified: false })).body.mode, 'unverified', 'A DMARC pass ingest did not tie to the From address proves nothing.');
+        assert.deepEqual([failing.body.mode, failing.body.verification, (await row(failing.id)).user_id, (await row(failing.id)).pending_address], ['pending_signin', 'none', null, owner.email]);
+        assert.deepEqual((await signins(failing.id)).map(s => [s.address, s.user_id]), [[owner.email, null]], 'Its sign-in waits, for that message.');
+        assert.equal((await email(owner.email, { dmarc: 'GRAY' })).body.mode, 'pending_signin', 'Only PASS counts.');
+        assert.equal((await email(owner.email, { fromHeader: [`<${owner.email}>, <other@${acmeDomain}>`] })).body.mode, 'pending_signin', 'A From that is not one literal address proves nothing.');
+        assert.equal((await email(owner.email, { fromHeader: [owner.email, owner.email] })).body.mode, 'pending_signin', 'Two From fields prove nothing.');
+        assert.equal((await email(owner.email, { authorVerified: false })).body.mode, 'pending_signin', 'A DMARC pass ingest did not tie to the From address proves nothing.');
         const nobody = `nobody-${hex().slice(0, 8)}@elsewhere.example`;
         assert.deepEqual([(await email(nobody)).body.mode, (await email(nobody, { dmarc: 'FAIL' })).body.mode], ['non_member', 'unverified']);
         const alone = await email(lonely.email);
-        assert.deepEqual([alone.body.mode, (await row(alone.id)).user_id], ['non_member', null]);
+        assert.deepEqual([alone.body.mode, (await row(alone.id)).user_id], ['non_member', null], 'An account without a workspace binds nobody.');
+        // A verified address that stopped being verified binds nobody.
+        await db.query('UPDATE nightmail_users SET email_verified = false WHERE id = $1', [outsider.userId]);
+        assert.deepEqual([(await email(outsider.email)).body.mode], ['non_member']);
+        await db.query('UPDATE nightmail_users SET email_verified = true WHERE id = $1', [outsider.userId]);
         // Another workspace's message, another address, an unrouted copy and sent mail are not support mail.
         error(await register(conversation(), { kind: 'email', messageId: await mail(owner.email, { workspace: acme, box: acmeBox }) }), 404);
         error(await register(conversation(), { kind: 'email', messageId: await mail(owner.email, { workspace: acme, box: supportBox }) }), 404);
@@ -7190,19 +7198,23 @@ describe('Hosted MCP OAuth and tools', () => {
         error(await register(conversation(), { kind: 'email', messageId: await mail(owner.email, { box: null }) }), 404);
         error(await register(conversation(), { kind: 'email', messageId: await mail(owner.email, { direction: 'outbound' }) }), 404);
         error(await register(conversation(), { kind: 'email', messageId: `msg_${hex().slice(0, 32)}` }), 404);
-        // Each later message registers again, from the same sender only, and is judged on its own. Nothing binds a person.
+        // Each later message registers again, from the same sender only, and is judged on its own: an unbound conversation
+        // is bound by the first that binds its sender, and a bound one takes only mail that binds the same account again.
         const waiting = await email(admin.email, { dmarc: 'FAIL' });
+        assert.deepEqual((await db.query(`SELECT user_id FROM audit_events WHERE action = 'support.register' AND target_id = $1`, [waiting.id])).rows, [], 'Mail that binds nobody is on nobody’s trail.');
         const passed = ok(await register(waiting.id, { kind: 'email', messageId: await mail(admin.email) }));
-        assert.deepEqual([passed.mode, passed.created, (await row(waiting.id)).user_id], ['non_member', false, null]);
-        assert.equal(ok(await register(waiting.id, { kind: 'email', messageId: await mail(admin.email, { dmarc: 'FAIL' }) })).mode, 'unverified');
+        assert.deepEqual([passed.mode, passed.created, (await row(waiting.id)).user_id], ['member', false, admin.userId]);
+        assert.deepEqual((await db.query(`SELECT user_id FROM audit_events WHERE action = 'support.register' AND target_id = $1`, [waiting.id])).rows, [{ user_id: admin.userId }], 'The binding is on her trail.');
+        assert.equal(ok(await register(waiting.id, { kind: 'email', messageId: await mail(admin.email) })).mode, 'member');
+        error(await register(waiting.id, { kind: 'email', messageId: await mail(admin.email, { dmarc: 'FAIL' }) }), 409, 'SUPPORT_CONVERSATION_MISMATCH');
+        assert.deepEqual([(await row(waiting.id)).user_id, (await row(waiting.id)).mode], [admin.userId, 'member'], 'Never downgraded.');
         error(await register(waiting.id, { kind: 'email', messageId: await mail(owner.email) }), 409, 'SUPPORT_CONVERSATION_SENDER');
         error(await register(conversation(), { kind: 'chat', messageId: await mail(owner.email) }), 422);
-        // A conversation an earlier release bound to an account takes no new mail: it goes to one of its own.
+        // An address that now verifies as another account never joins a conversation bound to the earlier one.
         const bound = conversation();
-        await db.query(`INSERT INTO support_conversations(id, channel, user_id, pending_address, verification, mode) VALUES ($1, 'email', $2, $3, 'dmarc', 'member')`, [bound, admin.userId, admin.email]);
+        await db.query(`INSERT INTO support_conversations(id, channel, user_id, pending_address, verification, mode) VALUES ($1, 'email', $2, $3, 'dmarc', 'member')`, [bound, member.userId, admin.email]);
         error(await register(bound, { kind: 'email', messageId: await mail(admin.email) }), 409, 'SUPPORT_CONVERSATION_MISMATCH');
-        // Registering email opens no access, so it is on nobody's trail.
-        assert.deepEqual((await db.query(`SELECT user_id FROM audit_events WHERE action = 'support.register' AND target_id = $1`, [waiting.id])).rows, []);
+        ok(reply(await platform.closeConversation(waiting.id)));
         // Only the binding registers: an operator's own session and every customer get 403.
         error(await send('POST', '/v1/operator/support/conversations', session(operator), { conversationId: conversation(), evidence: { kind: 'email', messageId: await mail(owner.email) } }), 403, 'SUPPORT_PLATFORM_REQUIRED');
         error(await send('POST', '/v1/operator/support/conversations', session(owner, acme), { conversationId: conversation(), evidence: { kind: 'email', messageId: await mail(owner.email) } }), 403, 'OPERATOR_REQUIRED');
@@ -7240,8 +7252,11 @@ describe('Hosted MCP OAuth and tools', () => {
         error(await stamped(id, 'GET', '/v1/support/../operator/users/x/audit'), 404);
         error(await stamped('conv_unknown', 'GET', '/v1/support/context'), 403, 'SUPPORT_GRANT_REQUIRED');
         error(await stamped(conversation(), 'GET', '/v1/support/context'), 403, 'SUPPORT_GRANT_REQUIRED');
+        // Only an email conversation bound to its sender's account reads, and only that account.
         error(await stamped((await email(owner.email, { dmarc: 'FAIL' })).id, 'GET', '/v1/support/context'), 403, 'SUPPORT_GRANT_REQUIRED');
-        error(await stamped((await email(owner.email)).id, 'GET', '/v1/support/context'), 403, 'SUPPORT_GRANT_REQUIRED');
+        const mailed = await email(owner.email), read = ok(await stamped(mailed.id, 'GET', `/v1/support/context?userId=${outsider.userId}`));
+        assert.deepEqual([read.user.id, read.workspaces.map((w: Json) => w.id)], [owner.userId, [acme]]);
+        ok(reply(await platform.closeConversation(mailed.id)));
         error(await stamped((await email(`n-${hex().slice(0, 8)}@elsewhere.example`)).id, 'GET', '/v1/support/context'), 403, 'SUPPORT_GRANT_REQUIRED');
         const closed = ok(reply(await platform.closeConversation(id)));
         assert.equal(closed.status, 'closed');
@@ -7304,15 +7319,22 @@ describe('Hosted MCP OAuth and tools', () => {
         const inBeta = await chat(member, beta);
         assert.deepEqual(ok(await stamped(inBeta, 'GET', '/v1/support/workspaces')).data.map((w: Json) => w.id), [beta]);
         const before = ok(await stamped(inBeta, 'GET', '/v1/support/scope'));
-        assert.deepEqual([before.shrunk, before.workspace?.id, before.workspaces.length, before.conversation.mode, before.user.email], [false, beta, 1, 'member', member.email]);
-        assert.ok(!('id' in before.user), 'The scope names no user ID.');
+        assert.deepEqual([before.shrunk, before.workspace?.id, before.workspaces.length, before.conversation.mode, before.user.email, before.user.emailVerified, before.conversation.signedIn], [false, beta, 1, 'member', member.email, true, []]);
+        assert.equal(before.user.id, member.userId, 'The support platform keeps the stamped person (never shown to the model).');
         await db.query('DELETE FROM workspace_members WHERE user_id = $1 AND workspace_id = $2', [member.userId, beta]);
         assert.deepEqual(ok(await stamped(inBeta, 'GET', '/v1/support/workspaces')).data, []);
         error(await stamped(inBeta, 'GET', `/v1/support/workspaces?workspaceId=${beta}`), 404);
         const after = ok(await stamped(inBeta, 'GET', '/v1/support/scope'));
         assert.deepEqual([after.shrunk, after.workspace, after.workspaces], [true, null, []]);
-        // An email conversation has no person, so it has no scope to narrow; a chat stays where it came from.
-        error(await stamped((await email(owner.email)).id, 'POST', '/v1/support/scope', { workspaceId: acme }), 403, 'SUPPORT_GRANT_REQUIRED');
+        // An unbound email conversation has no person, so it has no scope to narrow. A bound one narrows to its person's
+        // own workspaces only, and keeps listing them all; a chat stays where it came from.
+        error(await stamped((await email(`n-${hex().slice(0, 8)}@elsewhere.example`)).id, 'POST', '/v1/support/scope', { workspaceId: acme }), 403, 'SUPPORT_GRANT_REQUIRED');
+        const narrowing = await email(member.email);
+        error(await stamped(narrowing.id, 'POST', '/v1/support/scope', { workspaceId: other }), 404);
+        const narrowed = ok(await stamped(narrowing.id, 'POST', '/v1/support/scope', { workspaceId: acme }));
+        assert.deepEqual([narrowed.workspace.id, narrowed.workspace.role, narrowed.workspaces.map((w: Json) => w.id)], [acme, 'member', [acme]]);
+        assert.deepEqual(ok(await stamped(narrowing.id, 'GET', '/v1/support/workspaces')).data.map((w: Json) => w.id), [acme], 'Reads follow the narrowed scope.');
+        ok(reply(await platform.closeConversation(narrowing.id)));
         const ownChat = await chat(admin);
         ok(await stamped(ownChat, 'GET', '/v1/support/workspaces'));
         error(await stamped(ownChat, 'POST', '/v1/support/scope', { workspaceId: beta }), 409, 'SUPPORT_SCOPE_FIXED');
@@ -7366,17 +7388,173 @@ describe('Hosted MCP OAuth and tools', () => {
         for (const extra of filler) await db.query(`INSERT INTO support_conversations(id, channel, user_id, verification, mode, workspace_id) VALUES ($1, 'chat', $2, 'handoff', 'member', $3)`, [extra, outsider.userId, other]);
         const over = await handoff(outsider, other);
         error(await register(conversation(), { kind: 'handoff', token: over.token }), 429, 'SUPPORT_CONVERSATION_LIMIT');
-        // Email binds nobody, so it never counts against a person's limit.
-        ok(await register(conversation(), { kind: 'email', messageId: await mail(outsider.email) }), 201);
+        // Email that binds the person counts against their limit; mail that binds nobody never does.
+        error(await register(conversation(), { kind: 'email', messageId: await mail(outsider.email) }), 429, 'SUPPORT_CONVERSATION_LIMIT');
+        ok(await register(conversation(), { kind: 'email', messageId: await mail(outsider.email, { dmarc: 'FAIL' }) }), 201);
         ok(reply(await platform.closeConversation(filler[0] ?? id)));
         ok(await register(conversation(), { kind: 'handoff', token: over.token }), 201);
       });
 
-      await t.test('7 claim: not offered; a signed-in session’s claim is 404 and changes nothing', async () => {
-        const waiting = await email(owner.email, { dmarc: 'FAIL' }), before = await row(waiting.id), path = `/v1/support-conversations/${waiting.id}/claim`;
-        for (const headers of [session(owner), session(owner, acme)]) error(await send('POST', path, headers), 404);
-        assert.deepEqual(await row(waiting.id), before, 'Unchanged: no person, no new verification.');
-        assert.equal((await db.query(`SELECT count(*)::int AS n FROM audit_events WHERE action = 'support.claim' AND target_id = $1`, [waiting.id])).rows[0].n, 0);
+      await t.test('7 claim: only the signed-in person whose verified email sent a message confirms it, that message only and once; it binds an unbound conversation, and anyone else gets 404', async () => {
+        // The support site: the claim's wake is recorded (the conversation's ID only); nothing else leaves the fixture.
+        const wakes: string[] = [], previous = globalThis.fetch;
+        globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+          const request = new Request(input, init);
+          if (new URL(request.url).origin !== 'https://support.example.com') return previous(input, init);
+          wakes.push(`${request.method} ${new URL(request.url).pathname} ${await request.text()}`);
+          return new Response(null, { status: 202 });
+        };
+        try {
+          const claim = (id: string, messageId: string, headers: Record<string, string>) => send('POST', `/v1/support-conversations/${id}/claim`, headers, { messageId });
+          const signedIn = async (id: string) => ok(await stamped(id, 'GET', '/v1/support/scope')).conversation.signedIn as string[];
+          const claims = async (id: string) => (await db.query(`SELECT user_id, internal, summary FROM audit_events WHERE action = 'support.claim' AND target_id = $1 ORDER BY id`, [id])).rows;
+          // Two messages from the owner's address whose DMARC failed: each waits for its own sign-in.
+          const first = await mail(owner.email, { dmarc: 'FAIL' }), second = await mail(owner.email, { dmarc: 'FAIL' }), waiting = conversation();
+          ok(await register(waiting, { kind: 'email', messageId: first }), 201);
+          ok(await register(waiting, { kind: 'email', messageId: second }));
+          const before = await row(waiting);
+          // Anyone else, a message this conversation never challenged, a bearer credential, the support platform: refused,
+          // and nothing changes.
+          for (const who of [admin, member, outsider, lonely, operator]) error(await claim(waiting, first, session(who)), 404);
+          error(await claim(waiting, `msg_${hex().slice(0, 32)}`, session(owner)), 404);
+          error(await claim(waiting, await mail(owner.email, { dmarc: 'FAIL' }), session(owner)), 404);
+          error(await claim(conversation(), first, session(owner)), 404);
+          error(await send('POST', `/v1/support-conversations/${waiting}/claim`, { authorization: `Bearer nm_${hex()}`, origin: PUBLIC_ORIGIN }, { messageId: first }), 403, 'DASHBOARD_AUTH_REQUIRED');
+          error(await send('POST', `/v1/support-conversations/${waiting}/claim`, { origin: PUBLIC_ORIGIN }, { messageId: first }), 401);
+          error(reply(await platform.call('POST', `/v1/support-conversations/${waiting}/claim`, { messageId: first })), 404);
+          error(await claim(waiting, 'msg_x', session(owner)), 422);
+          assert.deepEqual([await row(waiting), wakes, await claims(waiting)], [before, [], []]);
+          error(await stamped(waiting, 'GET', '/v1/support/scope'), 403, 'SUPPORT_GRANT_REQUIRED');
+          // The owner confirms the first message, signed in: the conversation is hers, and only that message is signed in.
+          assert.deepEqual(ok(await claim(waiting, first, session(owner))), { id: waiting, messageId: first, mode: 'member' });
+          assert.deepEqual([(await row(waiting)).user_id, (await row(waiting)).verification, (await row(waiting)).mode], [owner.userId, 'signin', 'member']);
+          assert.deepEqual(await signedIn(waiting), [first]);
+          assert.deepEqual(wakes, [`POST /hooks/nightmail-wake ${JSON.stringify({ conversationId: waiting })}`]);
+          // Again: the same answer and a new wake (a lost one recovers), still one sign-in on her trail.
+          ok(await claim(waiting, first, session(owner)));
+          assert.deepEqual([await signedIn(waiting), wakes.length], [[first], 2]);
+          assert.deepEqual((await claims(waiting)).map(r => [r.user_id, r.internal, r.summary.message]), [[owner.userId, true, first]]);
+          // Bound to her: nobody else confirms its other message; she does, and it is signed in on its own.
+          error(await claim(waiting, second, session(admin)), 404);
+          ok(await claim(waiting, second, session(owner)));
+          assert.deepEqual(await signedIn(waiting), [first, second]);
+          // A sign-in counts on a conversation a later message already bound to the same person.
+          const raced = conversation(), early = await mail(admin.email, { dmarc: 'FAIL' });
+          ok(await register(raced, { kind: 'email', messageId: early }), 201);
+          assert.equal(ok(await register(raced, { kind: 'email', messageId: await mail(admin.email) })).mode, 'member');
+          assert.deepEqual(await signedIn(raced), []);
+          error(await claim(raced, early, session(owner)), 404);
+          ok(await claim(raced, early, session(admin)));
+          assert.deepEqual(await signedIn(raced), [early]);
+          // A local part in another case binds nobody: its person confirms the message signed in instead.
+          const cased = await sessionFixture(t), stored = `Case.${hex().slice(0, 8)}@Example.com`;
+          await db.query('UPDATE nightmail_users SET email = $2 WHERE id = $1', [cased.userId, stored]);
+          await db.query('UPDATE nightmail_sessions SET verified_email = $2 WHERE user_id = $1', [cased.userId, stored]);
+          await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'member')`, [unique('mem'), acme, cased.userId]);
+          await db.query("DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=$1", [cased.userId]);
+          const lower = stored.toLowerCase(), casedMessage = await mail(lower), casedId = conversation();
+          const casedRegistered = ok(await register(casedId, { kind: 'email', messageId: casedMessage }), 201);
+          assert.deepEqual([casedRegistered.mode, (await row(casedId)).user_id], ['pending_signin', null]);
+          assert.deepEqual(ok(await claim(casedId, casedMessage, session(cased))).mode, 'member');
+          assert.deepEqual([await signedIn(casedId), (await row(casedId)).user_id], [[casedMessage], cased.userId]);
+          // A closed conversation takes no claim.
+          ok(reply(await platform.closeConversation(waiting)));
+          error(await claim(waiting, second, session(owner)), 404);
+          for (const done of [raced, casedId]) ok(reply(await platform.closeConversation(done)));
+        } finally { globalThis.fetch = previous; }
+      });
+
+      await t.test('7b sender evidence through ingest: a spoofed From, misaligned DKIM, lookalike and Unicode domains, a forward, another sender in a member’s thread and a local part in another case bind nobody and read nothing; only an aligned PASS from the member’s verified address binds her', async st => {
+        // The real ingest (acceptInboundNotification, then the mailbox.ingest job) stores each synthetic message and
+        // decides ingest's author check from its full headers and SES's verdicts; registration then reads what it stored.
+        const { acceptInboundNotification, mailboxIngestJobs } = await import('./src/mailbox-ingest.js'), { S3Client } = await import('@aws-sdk/client-s3');
+        const wid = runtime.config.workspaceId, bucket = unique('bucket'), topic = `arn:aws:sns:${REGION}:111122223333:support-evidence`, deskDomain = unique('mdom'), deskName = `desk-${hex().slice(0, 10)}.example`;
+        const aws = runtime.config.aws, configured = runtime.config.support!.addressIds;
+        runtime.config.aws = { accessKeyId: 'synthetic', secretAccessKey: 'synthetic' };
+        await db.query('INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING', [wid, REGION, bucket, topic]);
+        await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')", [deskDomain, wid, deskName, REGION]);
+        const desk = `mbx_${hex().slice(0, 32)}`, deskAddress = `support@${deskName}`;
+        await db.query("INSERT INTO mailboxes(id, workspace_id, domain_id, address) VALUES ($1, $2, $3, $4)", [desk, wid, deskDomain, deskAddress]);
+        await db.query("INSERT INTO mailbox_addresses(workspace_id, address, mailbox_id, kind) VALUES ($1, $2, $3, 'primary')", [wid, deskAddress, desk]);
+        runtime.config.support!.addressIds = [desk];
+        const raw = new Map<string, Buffer>();
+        st.mock.method(S3Client.prototype, 'send', async (cmd: any) => {
+          const mid = String(cmd.input.Key).split('/').pop()!;
+          if (cmd.constructor.name === 'HeadObjectCommand') return { ContentLength: raw.get(mid)!.length, ETag: '"fixture"' };
+          if (cmd.constructor.name === 'GetObjectCommand') return { Body: { transformToByteArray: async () => raw.get(mid)! } };
+          return {};
+        });
+        // One message: its raw headers and body, and SES's verdicts (DMARC is PASS only when DKIM or SPF aligned with the From).
+        const ingest = async (from: string, o: { verdicts?: { dmarc?: string; dkim?: string; spf?: string }; source?: string; headers?: string[]; body?: string; dkimDomain?: string } = {}) => {
+          const mid = `ses${hex().slice(0, 24)}`, domain = from.split('@')[1]!;
+          const lines = [`From: Sender <${from}>`, `To: ${deskAddress}`, `Subject: Help ${mid}`, `Message-ID: <${mid}@${domain}>`, `Date: ${new Date().toUTCString()}`,
+            `DKIM-Signature: v=1; a=rsa-sha256; d=${o.dkimDomain ?? domain}; s=s1; h=from:date:subject; bh=x; b=y`, ...(o.headers ?? [])];
+          raw.set(mid, Buffer.from(`${lines.join('\r\n')}\r\n\r\n${o.body ?? 'Why are my Gmail bounces up?'}`));
+          const v = { dmarc: 'PASS', dkim: 'PASS', spf: 'PASS', ...o.verdicts };
+          // The support address receives as a self-hosted workspace's address does (its own receiving bucket and topic).
+          runtime.config.multiTenant = false;
+          try {
+          assert.equal(await acceptInboundNotification(runtime, { region: REGION, topicArn: topic, message: { notificationType: 'Received', mail: { messageId: mid, source: o.source ?? from, commonHeaders: { from: [`Sender <${from}>`], subject: `Help ${mid}` } },
+            receipt: { ...cleanScans, dmarcVerdict: { status: v.dmarc }, dkimVerdict: { status: v.dkim }, spfVerdict: { status: v.spf }, timestamp: new Date().toISOString(), recipients: [deskAddress],
+              action: { type: 'S3', bucketName: bucket, topicArn: topic, objectKey: 'staging/' + mid } } } }), 1);
+          await mailboxIngestJobs['mailbox.ingest']!(runtime, { sesMessageId: mid }, { id: unique('job'), workspaceId: wid, attempts: 1 });
+          } finally { runtime.config.multiTenant = true; }
+          const { rows: [m] } = await db.query('SELECT m.id, mm.reply_author_verified AS author FROM mail_messages m JOIN mailbox_messages mm ON mm.message_id = m.id AND mm.mailbox_id = $3 WHERE m.workspace_id = $1 AND m.ses_message_id = $2', [wid, mid, desk]);
+          assert.ok(m, `ingested and linked to the support address: ${from}`);
+          return m as { id: string; author: boolean };
+        };
+        const judged = async (messageId: string, conversationId = conversation()) => {
+          const body = ok(await register(conversationId, { kind: 'email', messageId }), 201);
+          return { id: conversationId, mode: body.mode as string, userId: (await row(conversationId)).user_id as string | null, reads: (await stamped(conversationId, 'GET', '/v1/support/context')).status };
+        };
+        try {
+          // Ada is an owner in Acme, with a verified address at acme.test.
+          const ada = await sessionFixture(t), adaDomain = `acme-${hex().slice(0, 6)}.test`, adaAddress = `ada@${adaDomain}`;
+          await db.query('UPDATE nightmail_users SET email = $2 WHERE id = $1', [ada.userId, adaAddress]);
+          await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner')`, [unique('mem'), acme, ada.userId]);
+          await db.query("DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=$1", [ada.userId]);
+          const nobodyBinds = async (label: string, messageId: string, mode: string | string[]) => {
+            const got = await judged(messageId);
+            assert.ok([mode].flat().includes(got.mode), `${label}: ${got.mode}`);
+            assert.deepEqual([got.userId, got.reads], [null, 403], label);
+            ok(reply(await platform.closeConversation(got.id)));
+          };
+          // A spoofed From: Ada's address, DMARC FAIL (neither DKIM nor SPF aligned).
+          const spoof = await ingest(adaAddress, { verdicts: { dmarc: 'FAIL', dkim: 'FAIL', spf: 'FAIL' }, source: 'bounce@spoofer.example' });
+          assert.equal(spoof.author, false, 'Ingest vouches for no author.');
+          await nobodyBinds('spoofed From', spoof.id, 'pending_signin');
+          // Misaligned DKIM: a valid signature for another domain and SPF for another domain, so DMARC is not PASS.
+          const misaligned = await ingest(adaAddress, { verdicts: { dmarc: 'FAIL', dkim: 'PASS', spf: 'PASS' }, source: 'bounce@mailer.example', dkimDomain: 'mailer.example' });
+          assert.equal(misaligned.author, false);
+          await nobodyBinds('misaligned DKIM and SPF', misaligned.id, 'pending_signin');
+          // Lookalike domains, each passing DMARC for itself: a hyphenated twin, a punycode name and a homoglyph (rn for m)
+          // are verified senders of no account (general answers); a Unicode one (Cyrillic а) binds nobody either, whether
+          // or not ingest vouched for it.
+          for (const lookalike of [`ada@${adaDomain.replace('.test', '-test.example')}`, `ada@xn--${adaDomain}`, `ada@${adaDomain.replace('acme', 'acrne')}`])
+            await nobodyBinds(`lookalike ${lookalike}`, (await ingest(lookalike)).id, 'non_member');
+          await nobodyBinds('Unicode lookalike', (await ingest(`ada@${adaDomain.replace('a', '\u0430')}`)).id, ['non_member', 'unverified']);
+          // A forward: From is the forwarder; Ada's address only in Resent-From, Reply-To and the body.
+          const forwarded = await ingest(`fwd-${hex().slice(0, 6)}@forwarder.example`, { headers: [`Resent-From: ${adaAddress}`, `Reply-To: Ada <${adaAddress}>`, `Sender: ${adaAddress}`], body: `---------- Forwarded message ---------\nFrom: Ada <${adaAddress}>\nWhy are my bounces up?` });
+          await nobodyBinds('forwarded', forwarded.id, 'non_member');
+          // A local part in another case: the account's address is Ada@…, the From is ada@…, aligned and passing.
+          const cased = await sessionFixture(t), casedDomain = `case-${hex().slice(0, 6)}.test`;
+          await db.query('UPDATE nightmail_users SET email = $2 WHERE id = $1', [cased.userId, `Ada@${casedDomain}`]);
+          await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner')`, [unique('mem'), acme, cased.userId]);
+          await nobodyBinds('local part in another case', (await ingest(`ada@${casedDomain}`)).id, 'pending_signin');
+          // The positive case: an aligned PASS from Ada's verified address binds Ada, and reads only her account.
+          const real = await ingest(adaAddress);
+          assert.equal(real.author, true, 'Ingest vouches for the author.');
+          const bound = await judged(real.id);
+          assert.deepEqual([bound.mode, bound.userId, bound.reads], ['member', ada.userId, 200]);
+          const context = ok(await stamped(bound.id, 'GET', '/v1/support/context'));
+          assert.deepEqual([context.user.id, context.workspaces.map((w: Json) => w.id)], [ada.userId, [acme]]);
+          // Another sender in her thread (a non-member, passing DMARC for its own domain): another conversation's, never hers.
+          error(await register(bound.id, { kind: 'email', messageId: (await ingest(`colleague-${hex().slice(0, 6)}@elsewhere.example`)).id }), 409, 'SUPPORT_CONVERSATION_SENDER');
+          // A spoof of her address in her thread doesn't join it, and the bound conversation is unchanged.
+          error(await register(bound.id, { kind: 'email', messageId: (await ingest(adaAddress, { verdicts: { dmarc: 'FAIL', dkim: 'FAIL', spf: 'FAIL' } })).id }), 409, 'SUPPORT_CONVERSATION_MISMATCH');
+          assert.deepEqual([(await row(bound.id)).user_id, (await row(bound.id)).mode], [ada.userId, 'member']);
+          ok(reply(await platform.closeConversation(bound.id)));
+        } finally { runtime.config.aws = aws; runtime.config.support!.addressIds = configured; }
       });
 
       await t.test('8 content access: only the chat’s own person, while a member of its workspace', async () => {
@@ -7426,7 +7604,11 @@ describe('Hosted MCP OAuth and tools', () => {
         error(await stamped(inGamma, 'POST', `/v1/support/notes?workspaceId=${delta}`, { text: 'Outside the scope.' }), 404);
         const inDelta = await chat(writer, delta);
         assert.equal((await write(inDelta, 'Delta sends receipts.')).workspaceId, delta);
-        error(await stamped((await email(writer.email)).id, 'POST', '/v1/support/notes', { text: 'From email.' }), 403, 'SUPPORT_GRANT_REQUIRED');
+        // Notes are a chat's: an email conversation, even one bound to the writer, neither writes nor reads them.
+        const emailed = await email(writer.email);
+        error(await stamped(emailed.id, 'POST', '/v1/support/notes', { text: 'From email.' }), 403, 'SUPPORT_CHAT_ONLY');
+        error(await stamped(emailed.id, 'GET', '/v1/support/notes'), 403, 'SUPPORT_CHAT_ONLY');
+        ok(reply(await platform.closeConversation(emailed.id)));
         // Text: 1 to 1,000 characters.
         error(await stamped(inGamma, 'POST', '/v1/support/notes', { text: '   ' }), 422);
         error(await stamped(inGamma, 'POST', '/v1/support/notes', { text: 'x'.repeat(1001) }), 422);
@@ -7526,6 +7708,14 @@ describe('Hosted MCP OAuth and tools', () => {
         assert.equal(Date.parse(proposed.expiresAt) - Date.parse(proposed.createdAt), 24 * 3_600_000);
         assert.deepEqual((await db.query('SELECT conversation_id, user_id, workspace_id FROM support_actions WHERE id = $1', [proposed.id])).rows[0], { conversation_id: id, user_id: boss.userId, workspace_id: shop });
         assert.equal((await propose(id, retry, 200)).id, proposed.id, 'Proposing the same change again answers the open proposal.');
+        // Email never changes anything: a conversation bound to the same owner by her own aligned mail proposes nothing,
+        // reads no proposal and re-checks no domain, and nothing is charged or logged for it.
+        const emailed = await email(boss.email), logged = (await reads(emailed.id)).length;
+        for (const [method, path, body] of [['POST', `/v1/support/actions?workspaceId=${shop}`, retry], ['GET', `/v1/support/actions/${proposed.id}`, undefined], ['POST', `/v1/support/domains/dom_x/verify?workspaceId=${shop}`, undefined]] as const)
+          error(await stamped(emailed.id, method, path, body as Json | undefined), 403, 'SUPPORT_CHAT_ONLY');
+        assert.equal((await reads(emailed.id)).length, logged);
+        assert.equal((await db.query('SELECT count(*)::int AS n FROM support_actions WHERE conversation_id = $1', [emailed.id])).rows[0].n, 0);
+        ok(reply(await platform.closeConversation(emailed.id)));
         // The support platform names a kind and the IDs, nothing else: no summary, workspace or seventh kind.
         error(await stamped(id, 'POST', '/v1/support/actions', { ...retry, summary: 'Retry one delivery (and nothing else).' }), 422);
         error(await stamped(id, 'POST', '/v1/support/actions', { ...retry, workspaceId: shop }), 422);
@@ -8002,7 +8192,7 @@ describe('Hosted MCP OAuth and tools', () => {
           error(await send('GET', `${inbox}?limit=1&view=paused&cursor=${pageOne.nextCursor}`, session(reader)), 422, 'INVALID_CURSOR');
         });
 
-        await t.test('7 email names no account: a registered email conversation binds nobody, and its mirrored ticket shows no account; related mail is the same address’s', async () => {
+        await t.test('7 email names an account only when it binds one: an aligned PASS from a member’s verified address shows her on its ticket; a spoof of it binds nobody and shows only its sender; related mail follows the binding', async () => {
           // Real email registrations at a support address, from an address that belongs to Alice's account.
           const box = `mbx_${hex().slice(0, 32)}`, domainName = `sup-${hex().slice(0, 10)}.example`, domain = unique('mdom'), thread = unique('thread'), address = `alice-${hex().slice(0, 8)}@example.invalid`;
           await db.query("INSERT INTO mailbox_domains(id, workspace_id, domain_id, name, region, status) VALUES ($1, $2, $1, $3, $4, 'active')", [domain, home, domainName, REGION]);
@@ -8021,17 +8211,23 @@ describe('Hosted MCP OAuth and tools', () => {
           try {
             const alice = await sessionFixture(t);
             await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner')`, [unique('mem'), acme, alice.userId]);
+            await db.query("DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=$1", [alice.userId]);
             await db.query('UPDATE nightmail_users SET email = $2, email_verified = true WHERE id = $1', [alice.userId, address]);
             const fromAlice = await register();
-            assert.deepEqual([fromAlice.mode, fromAlice.userId], ['non_member', null], 'A DMARC pass from her verified address binds no account.');
+            assert.deepEqual([fromAlice.mode, fromAlice.userId], ['member', alice.userId], 'An aligned DMARC pass from her verified address binds her account.');
             const ticket = ticketId();
             ok(reply(await platform.mirrorState(fromAlice.id, { subject: 'Account question', ticket: { id: ticket, type: 'account', severity: 'P2' } })));
             const detail = ok(await send('GET', `${inbox}/${fromAlice.id}`, session(reader)));
-            assert.deepEqual([detail.conversation.ticket.id, detail.conversation.customer, detail.conversation.sender, detail.customer.user, detail.customer.workspaces, detail.customer.activity, detail.customer.notes],
-              [ticket, null, address, null, [], [], []], 'The ticket shows its sender, and no account.');
-            assert.equal(ok(await send('GET', `${inbox}?q=${fromAlice.id}`, session(reader))).data[0].customer, null);
-            const again = await register(), unproven = await register('FAIL');
-            assert.deepEqual(ok(await send('GET', `${inbox}/${fromAlice.id}`, session(reader))).customer.conversations.map((o: Json) => o.id).sort(), [again.id, unproven.id].sort(), 'Related: the same address’s mail, never an account’s.');
+            assert.deepEqual([detail.conversation.ticket.id, detail.conversation.customer?.userId, detail.conversation.sender, detail.customer.user?.id, detail.customer.workspaces.map((w: Json) => w.id)],
+              [ticket, alice.userId, address, alice.userId, [acme]], 'The ticket shows the account it bound.');
+            const unproven = await register('FAIL'), again = await register();
+            assert.deepEqual([unproven.mode, unproven.userId], ['pending_signin', null], 'A DMARC failure from her address binds nobody.');
+            const spoofed = ok(await send('GET', `${inbox}/${unproven.id}`, session(reader)));
+            assert.deepEqual([spoofed.conversation.customer, spoofed.conversation.sender, spoofed.customer.user, spoofed.customer.workspaces, spoofed.customer.activity, spoofed.customer.notes],
+              [null, address, null, [], [], []], 'Its ticket shows its sender, and no account.');
+            assert.equal(ok(await send('GET', `${inbox}?q=${unproven.id}`, session(reader))).data[0].customer, null);
+            assert.deepEqual(ok(await send('GET', `${inbox}/${fromAlice.id}`, session(reader))).customer.conversations.map((o: Json) => o.id), [again.id], 'Related: her account’s, never an unbound one’s.');
+            assert.deepEqual(spoofed.customer.conversations.map((o: Json) => o.id), [], 'Related to unbound mail: only the same address’s unbound mail.');
           } finally { runtime.config.support!.addressIds = configured; }
         });
 
