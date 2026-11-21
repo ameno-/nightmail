@@ -86,7 +86,7 @@ html:has(.support-overlay[data-open]) { overflow: hidden; }
 @keyframes support-roll-out { to { opacity: 0; transform: translateY(-6px); filter: blur(2px); } }
 
 /* Cards in the conversation: the consent request and the filed ticket. */
-.support-card { padding: var(--space-12); border-radius: var(--radius-sm); background: var(--color-layer-1); box-shadow: inset 0 0 0 1px var(--color-border-muted); font-size: var(--text-sm); line-height: var(--leading-sm); animation: support-card-in 280ms var(--ease-out-strong) both; }
+.support-card { padding: var(--space-12); border-radius: var(--radius-sm); background: none; box-shadow: inset 0 0 0 1px var(--color-border); font-size: var(--text-sm); line-height: var(--leading-sm); animation: support-card-in 280ms var(--ease-out-strong) both; }
 .support-message[data-restored] .support-card { animation: none; }
 .support-card p { margin: 0; overflow-wrap: anywhere; }
 .support-card__body { margin-top: var(--space-4); color: var(--color-muted); }
