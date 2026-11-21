@@ -113,6 +113,10 @@ const SendInput = z.object({
 const screenBytes = (n: number) => n.toLocaleString('en-US'), SCREEN = SEND_LIMITS.screen;
 const SCREEN_LIMIT_NOTE = `Screened-text limit: Hosted sending screens each message before delivery: it reads the HTML\u2019s text (with its alt and title text), the text part and raw MIME, and the hosts the message links to or loads from. It reads at most ${screenBytes(SCREEN.messageBytes)} UTF-8 bytes per message (installation default) and ${SCREEN.linkHosts} distinct link hosts (${screenBytes(SCREEN.linkHostBytes)} bytes of host names), counting link labels that name another host. Over either limit, a Hosted message is refused at once with 422 CONTENT_TOO_LARGE_TO_SCREEN and error.details[0] holding { screenedBytes, limitBytes } or { linkHosts, linkHostLimit }; in a batch, details also carry the item\u2019s index, and no message of the batch is queued.`;
 const CAMPAIGN_SCREEN_NOTE = `Hosted campaigns are screened copy by copy before they are released, as single messages are, but each distinct copy only once: recipients whose personalized copies read the same share one verdict, so a campaign personalized only with first names costs one screen per distinct first name, and one with a unique value per recipient costs one per recipient. Each copy is screened exactly as a single message is, and sent only under a verdict for its exact content. The campaign\u2019s own copy, placeholders unresolved, is screened first and may hold ${screenBytes(SCREEN.campaignBytes)} bytes of screened text (installation default; 422 CONTENT_TOO_LARGE_TO_SCREEN with error.details[0] { screenedBytes, limitBytes } otherwise); so may each copy, and a copy over it is refused alone. A copy the screen refuses is never sent (CONTENT_REJECTED_SPAM); when refused copies pass 5% and 10 recipients the campaign pauses once for review, and a positive verdict on the campaign\u2019s own copy fails it before anyone is sent to.`;
+// The audience is frozen inside the launch request (sending.ts launch): a large one takes seconds, and one statement of it
+// may run out of the database's time.
+const CAMPAIGN_CAPTURE_NOTE = 'The audience is captured in this request, which takes seconds for a large one. A capture that runs out of time is refused with 503 AUDIENCE_CAPTURE_TIMEOUT and one that waits for other large captures with 503 AUDIENCE_CAPTURE_BUSY; both are retryable and keep nothing, so retry with the same Idempotency-Key.';
+const captureTimedOut = () => new ApiError(503, 'AUDIENCE_CAPTURE_TIMEOUT', 'The audience capture ran out of time and nothing was kept. Retry the launch; if it keeps running out of time, send to a smaller list.', undefined, true);
 // SMTP already limits the entire MIME message to the advertised wire SIZE. Keep all
 // address, HTML and encoded-size checks, without imposing the public JSON body-part cap.
 const ProtocolBody = z.string().min(1).optional();
@@ -1623,10 +1627,10 @@ export function registerSending(app: App) {
     }, { batch: false, replayed: (db, receipt) => campaignReplay(a, campaignId)(db, receipt) });
     return c.json(Receipt.parse(result), 202);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/send', operationId: 'sendCampaign', description: 'Accept the current revision for durable background delivery: the audience is frozen now, every message is validated in the background, then recipients are released into the dispatch queue. The 202 count is accepted recipient intents, not SES acceptance or delivery; poll the campaign for its state. ' + CAMPAIGN_SCREEN_NOTE, tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(CampaignSend) }, responses: { 202: response(CampaignQueued), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/send', operationId: 'sendCampaign', description: 'Accept the current revision for durable background delivery: the audience is frozen now, every message is validated in the background, then recipients are released into the dispatch queue. The 202 count is accepted recipient intents, not SES acceptance or delivery; poll the campaign for its state. ' + CAMPAIGN_SCREEN_NOTE + ' ' + CAMPAIGN_CAPTURE_NOTE, tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(CampaignSend) }, responses: { 202: response(CampaignQueued), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json'); const result = await idempotent(c.env.db, keyed(c, a), input, db => launch(c.env, db, a, c.req.valid('param').id, input, c.get('requestId')), { replayed: campaignReplay(a, c.req.valid('param').id) }); return c.json(CampaignQueued.parse(result), 202);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/schedule', operationId: 'scheduleCampaign', description: 'Accept the current revision for durable scheduled delivery. The audience is frozen and validated now; no recipient is materialized or sent before scheduledAt. The 202 count is accepted recipient intents. ' + CAMPAIGN_SCREEN_NOTE, tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(CampaignSchedule) }, responses: { 202: response(CampaignQueued), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/schedule', operationId: 'scheduleCampaign', description: 'Accept the current revision for durable scheduled delivery. The audience is frozen and validated now; no recipient is materialized or sent before scheduledAt. The 202 count is accepted recipient intents. ' + CAMPAIGN_SCREEN_NOTE + ' ' + CAMPAIGN_CAPTURE_NOTE, tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(CampaignSchedule) }, responses: { 202: response(CampaignQueued), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
     const result = await idempotent(c.env.db, keyed(c, a), input, db => launch(c.env, db, a, c.req.valid('param').id, input, c.get('requestId')), { replayed: campaignReplay(a, c.req.valid('param').id) }); return c.json(CampaignQueued.parse(result), 202);
   });
@@ -1779,11 +1783,12 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   if (input.scheduledAt && (Date.parse(input.scheduledAt) <= Date.now() || Date.parse(input.scheduledAt) > Date.now() + 365 * 86400000)) throw new ApiError(422, 'INVALID_SCHEDULE', 'Schedule between now and one year from now.');
   // Campaign mail is never dispatched for a member origin (approvedOriginUser); refuse here instead of canceling later.
   if (a.role === 'member') throw denied('PERMISSION_DENIED', 'Only workspace owners and admins can send campaigns.', { permission: 'sendEmail', level: 'on', person: 'admin' });
-  // One launch of a campaign at a time, until this transaction ends: a second is refused at once instead of capturing the
-  // audience again. (275812 is the large-capture slot in audience.ts, 275813 public stats.)
-  if (!(await db.execute(sql`SELECT 1 WHERE pg_try_advisory_xact_lock(275814, hashtext(${campaignId}))`)).rowCount)
-    throw new ApiError(409, 'CAMPAIGN_LOCKED', 'Another request is sending this campaign; fetch it to see its state.', undefined, true);
   const row = await findCampaign(db, a, campaignId); editable(row, input.revision);
+  // One launch of a campaign at a time, until this transaction ends: a second is refused at once instead of capturing the
+  // audience again. Keyed on the workspace too, and taken only once the campaign is found in it. (Advisory lock classes:
+  // 275812 and 275815 large captures in audience.ts, 275813 public stats.)
+  if (!(await db.execute(sql`SELECT 1 WHERE pg_try_advisory_xact_lock(275814, hashtext(${a.workspaceId} || ':' || ${campaignId}))`)).rowCount)
+    throw new ApiError(409, 'CAMPAIGN_LOCKED', 'Another request is sending this campaign; fetch it to see its state.', undefined, true);
   const draft = readyCampaign(row.draft);
   const rendered = await renderCampaignContent(runtime, draft), cfg = runtime.config;
   // What the campaign's screen would refuse in the background, measured now; admission refuses it for screened mail.
@@ -1805,9 +1810,13 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   // through the capture (in the send locks' order they come after the admission row).
   await db.execute(sql`SAVEPOINT launch_check`);
   try { const check = await decide('none'); if (!check.allowed) throw refusal(runtime, check, local); }
-  finally { await db.execute(sql`ROLLBACK TO SAVEPOINT launch_check`); }
+  finally { await db.execute(sql`ROLLBACK TO SAVEPOINT launch_check`); await db.execute(sql`RELEASE SAVEPOINT launch_check`); }
   const reviewId = id('review'), propertyKeys = placeholderKeys(draft, rendered);
-  const counts = await (await wrapModuleLoad(() => import('./audience.js'))).snapshotCampaignAudience(db, a, draft.audience, reviewId, propertyKeys);
+  const counts = await (await wrapModuleLoad(() => import('./audience.js'))).snapshotCampaignAudience(db, a, draft.audience, reviewId, propertyKeys).catch(error => {
+    // A statement past the database's limit (or cancelled) ends the launch; its transaction keeps nothing.
+    if ([error, (error as { cause?: unknown })?.cause].some(e => (e as { code?: string } | null)?.code === '57014')) throw captureTimedOut();
+    throw error;
+  });
   // The send locks. The campaign is still the revision that was captured, or the launch fails and its capture rolls back.
   const held = await lockSendScope(db, a.workspaceId, { campaignId });
   editable(await findCampaign(db, a, campaignId, true), input.revision);
