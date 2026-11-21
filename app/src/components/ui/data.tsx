@@ -27,7 +27,8 @@ export function MetricRow({ label, hint, spark, value, unit, tone, meter, classN
 }
 
 /** A facet: a value, its tone's dot and its count. Selectable when it has onSelect; `slot` reserves an empty row. */
-export type Facet = { key: string; label?: ReactNode; count?: number | null; tone?: Tone; selected?: boolean; onSelect?: () => void; slot?: boolean };
+/** `series`: the data palette's hue for the value (sent, received, delivered, opened, clicked, bounced, complained); else its tone's. */
+export type Facet = { key: string; label?: ReactNode; count?: number | null; tone?: Tone; series?: string; selected?: boolean; onSelect?: () => void; slot?: boolean };
 export type FacetGroup = { key: string; title: ReactNode; items: Facet[] };
 /** The facets beside a list: each group a small caps title over its values, each value with its count. */
 export function FacetRail({ groups, label = 'Facets' }: { groups: FacetGroup[]; label?: string }) {
@@ -36,7 +37,7 @@ export function FacetRail({ groups, label = 'Facets' }: { groups: FacetGroup[]; 
       <h3 className="ui-facets__title">{group.title}</h3>
       <ul>{group.items.map(item => {
         if (item.slot) return <li key={item.key} className="ui-facet ui-facet--slot" aria-hidden="true" />;
-        const body = <><span className={cx('ui-facet__dot', `ui-tone--${item.tone ?? 'neutral'}`)} aria-hidden="true" /><span className="ui-facet__label">{item.label}</span><span className="ui-facet__count">{item.count === null || item.count === undefined ? '–' : item.count.toLocaleString()}</span></>;
+        const body = <><span className={cx('ui-facet__dot', `ui-tone--${item.tone ?? 'neutral'}`, item.series && `ui-series--${item.series}`)} aria-hidden="true" /><span className="ui-facet__label">{item.label}</span><span className="ui-facet__count">{item.count === null || item.count === undefined ? '–' : item.count.toLocaleString()}</span></>;
         return <li key={item.key}>{item.onSelect ? <button type="button" className="ui-facet" aria-pressed={item.selected ?? false} data-empty={!item.count || undefined} onClick={item.onSelect}>{body}</button> : <span className="ui-facet" data-empty={!item.count || undefined}>{body}</span>}</li>;
       })}</ul>
     </section>)}
@@ -48,27 +49,28 @@ export function SplitPane({ rail, children, collapse = 'hide', className }: { ra
   return <div className={cx('ui-split', className)} data-collapse={collapse}><div className="ui-split__rail">{rail}</div><div className="ui-split__main">{children}</div></div>;
 }
 
-/** Counts over time as thin bars, stacked by outcome (ok grey, warning amber, failure red), on a hairline with mono edge labels. */
-export type HistogramBin = { ok: number; warning?: number; danger?: number };
-export function Histogram({ bins, start, end, label, className }: { bins: HistogramBin[]; start?: ReactNode; end?: ReactNode; label: string; className?: string }) {
-  const max = Math.max(1, ...bins.map(bin => bin.ok + (bin.warning ?? 0) + (bin.danger ?? 0)));
+/** Counts over time as thin bars on a hairline with mono edge labels, stacked by series (the data palette's hues), the first at the bottom. */
+export type HistogramBin = Record<string, number>;
+export function Histogram({ bins, series, start, end, label, className }: { bins: HistogramBin[]; series: string[]; start?: ReactNode; end?: ReactNode; label: string; className?: string }) {
+  const sum = (bin: HistogramBin) => series.reduce((total, key) => total + (bin[key] ?? 0), 0);
+  const max = Math.max(1, ...bins.map(sum));
   return <div className={cx('ui-histogram', className)} role="img" aria-label={label}>
-    <div className="ui-histogram__bars">{bins.map((bin, i) => { const total = bin.ok + (bin.warning ?? 0) + (bin.danger ?? 0); return <span key={i} className="ui-histogram__bin" data-zero={!total || undefined} style={{ '--h': `${total / max * 100}%` } as CSSProperties}>
-      {(bin.danger ?? 0) > 0 && <i className="ui-tone--danger" style={{ flexGrow: bin.danger }} />}{(bin.warning ?? 0) > 0 && <i className="ui-tone--warning" style={{ flexGrow: bin.warning }} />}{bin.ok > 0 && <i style={{ flexGrow: bin.ok }} />}
+    <div className="ui-histogram__bars">{bins.map((bin, i) => { const total = sum(bin); return <span key={i} className="ui-histogram__bin" data-zero={!total || undefined} style={{ '--h': `${total / max * 100}%` } as CSSProperties}>
+      {[...series].reverse().map(key => (bin[key] ?? 0) > 0 && <i key={key} className={`ui-series--${key}`} style={{ flexGrow: bin[key] }} />)}
     </span> })}</div>
     <div className="ui-histogram__axis" aria-hidden="true"><span>{start}</span><span>{end}</span></div>
   </div>;
 }
 
 /** Events on one time axis, oldest first: a row each with its dot, name, a bar from when it happened to the next one, and the time since the first. */
-export type WaterfallRow = { key: string; label: ReactNode; tone: Tone; at: number; delta: ReactNode };
+export type WaterfallRow = { key: string; label: ReactNode; tone: Tone; series?: string; at: number; delta: ReactNode };
 // Mail moves in milliseconds, then waits minutes for an open: a log scale keeps both readable on one axis.
 const scale = (ms: number, span: number) => span <= 0 ? 0 : Math.log1p(Math.max(0, ms)) / Math.log1p(span);
 export function Waterfall({ rows, label, className }: { rows: WaterfallRow[]; label: string; className?: string }) {
   const first = rows[0]?.at ?? 0, span = Math.max(0, ...rows.map(row => row.at - first));
   return <ol className={cx('ui-waterfall', className)} aria-label={label}>{rows.map((row, i) => {
     const from = scale(row.at - first, span), next = rows[i + 1], to = next ? scale(next.at - first, span) : from;
-    return <li key={row.key} className={cx('ui-waterfall__row', `ui-tone--${row.tone}`)}>
+    return <li key={row.key} className={cx('ui-waterfall__row', `ui-tone--${row.tone}`, row.series && `ui-series--${row.series}`)}>
       <span className="ui-waterfall__dot" aria-hidden="true" /><span className="ui-waterfall__label">{row.label}</span>
       <span className="ui-waterfall__track" aria-hidden="true"><i style={{ left: `${from * 100}%`, width: next ? `max(2px, ${(to - from) * 100}%)` : '2px' }} /></span>
       <span className="ui-waterfall__delta">{row.delta}</span>

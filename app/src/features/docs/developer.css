@@ -58,7 +58,8 @@
 .developer-snippet > .developer-code.connect-agent__command { white-space: pre-wrap; overflow-wrap: anywhere; }
 .connect-agent__open { align-self: flex-start; gap: var(--space-6); }
 .connect-agent__open svg { width: 14px; height: 14px; }
-.connect-agent__heading { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); font-weight: var(--font-weight-bold); }
+.connect-agent__heading { margin: 0; color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-label); line-height: var(--leading-sm); font-weight: 400; letter-spacing: var(--tracking-label); text-transform: uppercase; }
+.connect-agent__who > :last-child:not(:first-child) { color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); }
 .connect-agent__agents { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--color-border-muted); }
 .connect-agent__agent { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); height: 53px; border-bottom: 1px solid var(--color-border-muted); font-size: var(--text-sm); line-height: var(--leading-sm); }
 .connect-agent__agent[data-fresh] { animation: ui-appear 240ms ease-out; }

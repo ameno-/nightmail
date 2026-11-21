@@ -194,6 +194,8 @@ const synonyms: Record<string, string> = { sent: 'send', delivered: 'delivery', 
 const eventKey = (type: string) => { const key = type.replace(/^email\./, ''); return synonyms[key] ?? key }
 const lifecycle = Object.keys(eventCopy)
 const suppressedTip = `${productName} skips this address from now on. Open the contact to change that.`
+// The data palette's hue for an event, where it has one (tokens.css); the rest take their tone.
+const seriesOf: Record<string, string> = { dispatch_attempt: 'sent', delivery: 'delivered', open: 'opened', click: 'clicked', bounce: 'bounced', non_permanent_bounce: 'bounced', complaint: 'complained' }
 const toneOf = (key: string): Tone => ['delivery', 'open', 'click'].includes(key) ? 'success'
   : ['complaint', 'reject', 'rendering_failure'].includes(key) ? 'danger'
   : ['bounce', 'non_permanent_bounce', 'validation_suppressed', 'delivery_delay', 'provider_throttled', 'dispatch_deferred', 'acceptance_unknown', 'suppressed'].includes(key) ? 'warning' : 'neutral'
@@ -261,7 +263,7 @@ function Delivery({ email, vertical }: { email: Email; vertical: boolean }) {
       const reason = step.key === 'bounce' || step.key === 'non_permanent_bounce' ? bounceReason(step.events[0]?.detail) : undefined
       if (step.at) last = step.at
       const at = Date.parse(last)
-      return { key: step.key, tone: toneOf(step.key), at,
+      return { key: step.key, tone: toneOf(step.key), series: seriesOf[step.key], at,
         label: <Tooltip content={<StepTip step={step} day={day} />}><span className="delivery__fact" tabIndex={0}><span className="delivery__name">{name}{step.events.length > 1 && <span className="delivery__count"> {step.events.length}×</span>}</span>{reason && <span className="delivery__note">{reason}</span>}</span></Tooltip>,
         delta: index === 0 ? <time dateTime={step.at}>{step.at ? time(step.at) : '—'}</time> : step.at ? `+${elapsed(at - start)}` : '—' }
     })

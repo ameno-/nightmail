@@ -61,3 +61,11 @@
   if (path === '/' && ready !== (workspace ?? '*')) responses['/health'] = start('/health')
   window.__nightmailEarly = { account, workspace: workspace || null, at: Date.now(), responses }
 })()
+
+// The colour palette (styles/tokens.css): ?palette= picks one and remembers it; otherwise the remembered one, else ember.
+;(() => {
+  const palettes = ['ember', 'orange', 'blue', 'green', 'deepsea']
+  let palette = new URLSearchParams(location.search).get('palette')
+  try { if (palette && palettes.includes(palette)) localStorage.setItem('nightmail.palette', palette); else palette = localStorage.getItem('nightmail.palette') } catch {}
+  if (palette && palettes.includes(palette)) document.documentElement.dataset.palette = palette
+})()

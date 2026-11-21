@@ -10,6 +10,11 @@ const failed = new Set(['bounced', 'complained', 'rejected', 'rendering_failed',
 const slowed = new Set(['delayed', 'deferred', 'acceptance_unknown', 'scheduled', 'queued', 'attempting'])
 export const logTone = (row: Pick<LogEntry, 'status'>): Tone => failed.has(row.status) ? 'danger' : slowed.has(row.status) ? 'warning' : row.status === 'delivered' || row.status === 'received' ? 'success' : 'neutral'
 const STATUSES = ['delivered', 'received', 'bounced', 'complained', 'scheduled'] as const
+// The data palette's hue for each facet value (tokens.css).
+const statusSeries: Record<(typeof STATUSES)[number], string> = { delivered: 'delivered', received: 'received', bounced: 'bounced', complained: 'complained', scheduled: 'info' }
+// A row in the volume strip: which way it went, unless it failed.
+export const LOG_SERIES = ['sent', 'received', 'pending', 'bounced', 'complained']
+const seriesOf = (row: LogEntry) => row.status === 'bounced' || row.status === 'suppressed' ? 'bounced' : failed.has(row.status) ? 'complained' : slowed.has(row.status) ? 'pending' : row.direction === 'received' ? 'received' : 'sent'
 const DOMAIN_SLOTS = 3
 const domainOf = (address?: string) => address && address.includes('@') ? address.slice(address.lastIndexOf('@') + 1).toLowerCase() : null
 
@@ -23,11 +28,11 @@ export function logFacetGroups(items: LogEntry[] | undefined, filters?: FacetFil
   const top = [...domains].sort((a, b) => b[1] - a[1]).slice(0, DOMAIN_SLOTS)
   return [
     { key: 'status', title: 'Status', items: [
-      ...STATUSES.map(status => ({ key: status, label: label(status), tone: logTone({ status }), count: count(row => row.status === status), ...pick('status', status, filters?.status) })),
+      ...STATUSES.map(status => ({ key: status, label: label(status), tone: logTone({ status }), series: statusSeries[status], count: count(row => row.status === status), ...pick('status', status, filters?.status) })),
       { key: 'other', label: 'Other', tone: 'neutral' as Tone, count: count(row => !known.has(row.status)) },
     ] },
-    { key: 'direction', title: 'Direction', items: (['sent', 'received'] as const).map(direction => ({ key: direction, label: direction === 'sent' ? 'Sent' : 'Received', count: count(row => row.direction === direction), ...pick('direction', direction, filters?.direction) })) },
-    { key: 'stream', title: 'Stream', items: (['transactional', 'marketing'] as const).map(stream => ({ key: stream, label: label(stream), count: count(row => row.stream === stream), ...pick('stream', stream, filters?.stream) })) },
+    { key: 'direction', title: 'Direction', items: (['sent', 'received'] as const).map(direction => ({ key: direction, label: direction === 'sent' ? 'Sent' : 'Received', series: direction, count: count(row => row.direction === direction), ...pick('direction', direction, filters?.direction) })) },
+    { key: 'stream', title: 'Stream', items: (['transactional', 'marketing'] as const).map(stream => ({ key: stream, label: label(stream), series: stream === 'transactional' ? 'sent' : 'opened', count: count(row => row.stream === stream), ...pick('stream', stream, filters?.stream) })) },
     { key: 'domain', title: 'Domain', items: Array.from({ length: DOMAIN_SLOTS }, (_, i) => top[i] ? { key: top[i][0], label: top[i][0], count: top[i][1] } : { key: `slot-${i}`, slot: true }) },
   ]
 }
@@ -35,10 +40,10 @@ export function logFacetGroups(items: LogEntry[] | undefined, filters?: FacetFil
 const BINS = 48
 const stamp = (at: string) => date(at, { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' })
 export function logBins(items: LogEntry[] | undefined): { bins: HistogramBin[]; start?: string; end?: string } {
-  const bins: HistogramBin[] = Array.from({ length: BINS }, () => ({ ok: 0, warning: 0, danger: 0 }))
+  const bins: HistogramBin[] = Array.from({ length: BINS }, () => ({}))
   if (!items?.length) return { bins }
   const times = items.map(row => Date.parse(row.at)), first = Math.min(...times), last = Math.max(...times), span = Math.max(1, last - first)
-  items.forEach((row, i) => { const bin = bins[Math.min(BINS - 1, Math.floor((times[i] - first) / span * BINS))], tone = logTone(row); if (tone === 'danger') bin.danger!++; else if (tone === 'warning') bin.warning!++; else bin.ok++ })
+  items.forEach((row, i) => { const bin = bins[Math.min(BINS - 1, Math.floor((times[i] - first) / span * BINS))], series = seriesOf(row); bin[series] = (bin[series] ?? 0) + 1 })
   return { bins, start: `${stamp(new Date(first).toISOString())} UTC`, end: `${stamp(new Date(last).toISOString())} UTC` }
 }
 
@@ -46,7 +51,7 @@ export function logBins(items: LogEntry[] | undefined): { bins: HistogramBin[]; 
 export function LogsBody({ items, filters, children }: { items: LogEntry[] | undefined; filters?: FacetFilters; children: ReactNode }) {
   const { bins, start, end } = logBins(items)
   return <SplitPane className="logs-split" rail={<FacetRail label="This page" groups={logFacetGroups(items, filters)} />}>
-    <Histogram className="logs-histogram" bins={bins} start={start} end={end} label="Volume on this page" />
+    <Histogram className="logs-histogram" bins={bins} series={LOG_SERIES} start={start} end={end} label="Volume on this page" />
     {children}
   </SplitPane>
 }

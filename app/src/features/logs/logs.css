@@ -212,16 +212,19 @@
 .email-detail .thread__count { color: var(--color-faint); }
 .thread-line__steps { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
 .thread-line__step { position: relative; }
-.thread-line__step:not(:last-child)::after { content: ''; position: absolute; top: 18px; bottom: -10px; left: 2.5px; width: 1px; background: var(--color-border); pointer-events: none; }
-/* One 28px line per message: dot, direction and sender, its status, when. */
-.thread-line__entry { display: grid; grid-template-columns: 6px minmax(0, 1fr) auto auto; grid-template-areas: 'dot top status time'; align-items: center; column-gap: var(--space-12); height: var(--row-height-dense); margin-inline: calc(-1 * var(--space-8)); padding: 0 var(--space-8); border-radius: 4px; color: var(--color-text); text-decoration: none; }
+.thread-line__step:not(:last-child)::after { content: ''; position: absolute; top: 22px; bottom: -10px; left: 2.5px; width: 1px; background: var(--color-border); pointer-events: none; }
+/* Two short lines per message: the sender first (it never gives way to the status), its time at the end; the status
+   under the sender in small mono. */
+.thread-line__entry { display: grid; grid-template-columns: 6px minmax(0, 1fr) auto; grid-template-areas: 'dot top time' '. status status'; align-items: center; column-gap: var(--space-12); min-height: 44px; margin-inline: calc(-1 * var(--space-8)); padding: var(--space-4) var(--space-8); border-radius: 4px; color: var(--color-text); text-decoration: none; }
 .thread-line__dot { grid-area: dot; width: 6px; height: 6px; border-radius: 50%; background: var(--color-faint); }
 .thread-line__dot[data-outbound] { background: var(--color-text); }
 .thread-line__top { display: flex; grid-area: top; align-items: center; gap: var(--space-8); min-width: 0; }
 .thread-line__entry > .thread__time { grid-area: time; }
-.thread-line__status { display: flex; grid-area: status; align-items: center; gap: var(--space-6); min-width: 0; color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); line-height: 18px; white-space: nowrap; }
+.thread-line__status { display: flex; grid-area: status; align-items: center; gap: var(--space-8); min-width: 0; color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); line-height: 16px; white-space: nowrap; }
+.thread-line__top { line-height: 20px; }
+.thread-line__dot[class*='ui-series--'] { background: var(--series); }
 .thread-line .thread__time { font-family: var(--font-mono); font-size: var(--text-xs); }
-.thread-line__here { color: var(--color-text); }
+.thread-line__here { color: var(--color-accent); }
 .thread-line__entry[data-focused] { background: var(--color-active-bg); }
 @media (hover: hover) and (pointer: fine) { a.thread-line__entry:hover { background: var(--color-hover); } }
 .email-detail-sheet .thread-line__steps { margin-inline: var(--space-8); }

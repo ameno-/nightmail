@@ -119,7 +119,7 @@ function Facts({ data, stale }: { data: Overview; stale: boolean }) {
   const bounceWarn = data.sent > 0 && data.bounced / data.sent >= BOUNCE_LINE, complaintWarn = data.sent > 0 && data.complaints / data.sent >= COMPLAINT_LINE
   const facts = [
     { title: factTitles[0], value: number(Math.round(sent)), aside: data.previousSent ? `${change >= 0 ? '+' : ''}${percent(change, 0)}` : '', series: data.points.map(p => p.sent), tone: 'sent' },
-    { title: factTitles[1], value: data.sent ? percent(delivered) : '—', aside: number(Math.round(deliveredCount)), series: data.points.map(p => p.delivered), tone: 'delivered', meter: <Meter value={data.sent ? delivered : 0} label="Delivered of all emails" /> },
+    { title: factTitles[1], value: data.sent ? percent(delivered) : '—', aside: number(Math.round(deliveredCount)), series: data.points.map(p => p.delivered), tone: 'delivered', meter: <Meter value={data.sent ? delivered : 0} tone="success" label="Delivered of all emails" /> },
     { title: factTitles[2], value: data.sent ? percent(bounced) : '—', aside: number(Math.round(bouncedCount)), series: data.points.map(p => p.bounced), tone: 'bounces', warn: bounceWarn, meter: <Meter value={data.sent ? bounced : 0} max={BOUNCE_LINE * 2} mark={BOUNCE_LINE} tone={data.bounced ? 'warning' : 'neutral'} label="Bounce rate" /> },
     { title: factTitles[3], value: data.sent ? percent(complaints) : '—', aside: number(Math.round(complaintCount)), series: data.points.map(p => p.complaints), tone: 'complaints', warn: complaintWarn, meter: <Meter value={data.sent ? complaints : 0} max={COMPLAINT_LINE * 2} mark={COMPLAINT_LINE} tone={data.complaints ? 'danger' : 'neutral'} label="Complaint rate" /> },
   ]

@@ -101,56 +101,19 @@
   color-scheme: light;
   --color-email-surface: #FFFFFF;
   --color-email-text: #181818;
-  --color-deep: #FAFAFA;
-  --color-canvas: #FAFAFA;
-  --color-surface: #FFFFFF;
-  --color-layer-1: #FAFAFA;
-  --color-layer-2: #F2F2F2;
-  --color-layer-3: #EEEEEE;
-  --color-text: #161616;
-  --color-muted: #5C5C5C;
-  --color-faint: #737373; /* 4.7:1 on surface (was #808080, 3.9:1) */
-  --color-border: rgb(0 0 0 / 9%);
-  --color-border-muted: rgb(0 0 0 / 6.5%);
-  --color-border-strong: rgb(0 0 0 / 18%);
-  /* Signal Log: data series are neutral ink; colour is kept for outcomes (green ok, amber warning, red failure). */
-  --color-series: rgb(0 0 0 / 30%);
-  --color-series-strong: rgb(0 0 0 / 62%);
-  --color-track: rgb(0 0 0 / 7%);
-  --color-accent: #3B5CF6;
-  --color-accent-hover: #3250DF;
   --color-brand: #798ABA; /* a periwinkle accent, oklch(0.638 0.075 269.2): 3.3:1 on deep, 3.0:1 on layer-2 */
   --color-logo: #0A0B0F; /* the brand's ink: the wordmark and the monogram on a pale ground; docs/brand.md */
-  --color-active-bg: #F3F3F3;
   --color-contrast: #161616;
   --color-contrast-hover: #333333;
   --color-on-contrast: #FFFFFF;
   --shadow-on-contrast: 0 .5px .5px rgb(0 0 0 / 30%);
-  --color-success: #167F3E; /* 4.6:1 on success-bg for 13 px badges (was #198B43, 4.0:1) */
-  --color-success-marker: #2EAF5A;
-  --color-success-bg: #E7F9EA;
-  --color-success-border: #B8E9C1;
-  --color-warning: #68552B;
-  --color-warning-marker: #E7AF36;
-  --color-warning-bg: #FEFAEC;
-  --color-warning-border: #F7E5B5;
-  --color-danger: #B82D35;
-  --color-danger-bg: #FCECEB;
-  --color-danger-border: #F2BBB7;
   --color-complaint: var(--color-danger);
-  --color-danger-marker: #D92E3C;
-  --color-info: #2C47C8;
-  --color-info-bg: #ECF1FE;
-  --color-info-border: #C3D4FD;
-  --color-info-marker: #3250DF;
   --color-neutral-marker: var(--color-faint);
   --color-overlay: rgb(0 0 0 / 40%);
   --color-shadow: rgb(0 0 0 / 8%);
   --color-hover: rgb(0 0 0 / 4%);
   --color-pressed: rgb(0 0 0 / 8%);
   --color-transparent: transparent;
-  --color-on-accent: #FFFFFF;
-  --color-focus: #7698FD;
   --font-body: 'Inter', 'Inter Fallback', sans-serif;
   --font-mono: 'OpenTUI Mono', 'OpenTUI Mono Fallback', monospace;
   --font-email: 'Inter', Arial, sans-serif;
@@ -219,52 +182,106 @@
 :root[data-theme='dark'] {
   --grade-aplus: #3DD68C; --grade-a: #6BD586; --grade-b: #A2BCFF; --grade-c: #F2CF76; --grade-d: #F59A5B; --grade-f: #F17471;
   color-scheme: dark;
-  --color-deep: #070707;
-  --color-canvas: #070707;
-  --color-surface: #0D0D0E;
-  --color-layer-1: #161618;
-  --color-layer-2: #1E1E21;
-  --color-layer-3: #2A2A2E;
-  --color-text: #EDEDED;
-  --color-muted: #A0A0A0;
-  --color-faint: #808080; /* 4.9:1 on surface */
-  --color-border: rgb(255 255 255 / 9%);
-  --color-border-muted: rgb(255 255 255 / 6.5%);
-  --color-border-strong: rgb(255 255 255 / 16%);
-  --color-series: rgb(255 255 255 / 30%);
-  --color-series-strong: rgb(255 255 255 / 70%);
-  --color-track: rgb(255 255 255 / 7%);
-  --color-accent: #A2BCFF;
-  --color-accent-hover: #C3D4FD;
   --color-brand: #798ABA; /* the same colour as light: 5.9:1 on deep */
   --color-logo: #F4F2EC; /* the brand's paper: the marks on a dark ground */
-  --color-active-bg: #1A1A1D;
   --color-contrast: #EDEDED;
   --color-contrast-hover: #FFFFFF;
   --color-on-contrast: #161616;
   --shadow-on-contrast: none;
-  --color-success: #6BD586;
-  --color-success-marker: #49C970;
-  --color-success-bg: #14361D;
-  --color-success-border: #1D783C;
-  --color-warning: #F2CF76;
-  --color-warning-marker: #E7AF36;
-  --color-warning-bg: #4B4025;
-  --color-warning-border: #AC8833;
-  --color-danger: #F17471;
-  --color-danger-bg: #461516;
-  --color-danger-border: #97252B;
-  --color-info: #7698FD;
-  --color-info-bg: #1B2852;
-  --color-info-border: #263FA9;
-  --color-info-marker: #7698FD;
   --color-overlay: rgb(0 0 0 / 60%);
   --color-shadow: rgb(0 0 0 / 30%);
   --color-hover: rgb(255 255 255 / 6%);
   --color-pressed: rgb(255 255 255 / 10%);
-  --color-on-accent: #161616;
   --shadow-raised: 0 0 0 1px var(--color-border-muted);
   --shadow-button: inset 0 0 0 1px var(--color-border);
   --shadow-popover: 0 8px 16px rgb(0 0 0 / 30%), 0 4px 8px rgb(0 0 0 / 30%), 0 0 0 .5px rgb(255 255 255 / 16%), 0 -.5px rgb(255 255 255 / 6%);
   --shadow-dialog: 0 16px 32px rgb(0 0 0 / 30%), 0 8px 16px rgb(0 0 0 / 30%), 0 0 0 .5px rgb(255 255 255 / 16%), 0 -.5px rgb(255 255 255 / 6%);
+}
+
+/* ── Colour (Signal Log) ──
+   OKLCH throughout, so lightness and chroma match across hues and a palette is a few numbers. A palette is a neutral
+   ramp (a hue and a whisper of chroma, never pure grey unless it wants to be), one accent, a data palette of matched
+   lightness and chroma, and status colours from the same family. <html data-palette> picks one (public/theme.js reads
+   ?palette= or localStorage nightmail.palette): ember (the default), orange, blue, green or deepsea.
+   Contrast (WCAG 2, checked on the surface): accents 4.9–5.9:1 on light (white text on them the same) and 7–11:1 on
+   dark; status inks 5.6:1 or more on light and 8:1 or more on dark; markers and series 3:1 or more, for graphics. */
+:root {
+  /* Ember: warm paper-and-soot neutrals, a desaturated amber accent, teal and violet for data. */
+  --n-h: 70; --n-c: .006;
+  --accent-h: 58; --accent-c: .13; --accent-l: .55; --accent-step: -.05;
+  --hue-ok: 152; --hue-warn: 92; --hue-error: 27; --hue-info: 250;
+  --hue-received: 190; --hue-opened: 300; --hue-clicked: 350;
+  /* Light: markers and series at L .62 (warnings .70, amber reads dirty lower), inks at L .50, tints at 10%. */
+  --mark-l: .62; --mark-c: .14; --warn-l: .70; --ink-l: .50; --ink-c: .12;
+  --l-deep: .985; --l-surface: 1; --l-layer-1: .982; --l-layer-2: .962; --l-layer-3: .945; --l-text: .205; --l-muted: .48; --l-faint: .555;
+  --color-on-accent: #FFFFFF;
+}
+:root[data-theme='dark'] {
+  --n-c: .008; --accent-l: .79; --accent-step: .05;
+  --mark-l: .74; --mark-c: .13; --warn-l: .80; --ink-l: .82; --ink-c: .11;
+  --l-deep: .135; --l-surface: .16; --l-layer-1: .195; --l-layer-2: .225; --l-layer-3: .27; --l-text: .945; --l-muted: .72; --l-faint: .62;
+  --color-on-accent: oklch(.16 .01 var(--accent-h));
+}
+/* (a) Signal orange: PlanetScale-like warmth on true greys. */
+:root[data-palette='orange'] { --n-c: 0; --accent-h: 45; --accent-c: .16; --accent-l: .56; --hue-warn: 85; --hue-received: 215; --hue-opened: 295; --hue-clicked: 345; }
+:root[data-theme='dark'][data-palette='orange'] { --n-c: 0; --accent-h: 50; --accent-l: .74; }
+/* (b) Electric blue-violet. */
+:root[data-palette='blue'] { --n-c: 0; --accent-h: 272; --accent-c: .19; --accent-l: .52; --hue-info: 235; --hue-received: 205; --hue-opened: 330; --hue-clicked: 175; }
+:root[data-theme='dark'][data-palette='blue'] { --n-c: 0; --accent-c: .15; --accent-l: .70; }
+/* (c) Phosphor green: a terminal nod; the neutrals lean green. */
+:root[data-palette='green'] { --n-h: 155; --n-c: .004; --accent-h: 150; --accent-c: .14; --accent-l: .52; --hue-ok: 168; --hue-received: 215; --hue-opened: 295; --hue-clicked: 345; }
+:root[data-theme='dark'][data-palette='green'] { --n-c: .006; --accent-c: .17; --accent-l: .82; }
+/* (e) Deep sea: cool blue-grey neutrals, a cyan accent, lime and coral for data. */
+:root[data-palette='deepsea'] { --n-h: 240; --n-c: .008; --accent-h: 222; --accent-c: .09; --accent-l: .52; --hue-warn: 82; --hue-error: 18; --hue-received: 130; --hue-opened: 295; --hue-clicked: 40; }
+:root[data-theme='dark'][data-palette='deepsea'] { --n-c: .016; --accent-h: 215; --accent-c: .11; --accent-l: .80; }
+/* What every palette derives. */
+:root {
+  --color-deep: oklch(var(--l-deep) var(--n-c) var(--n-h));
+  --color-canvas: var(--color-deep);
+  --color-surface: oklch(var(--l-surface) calc(var(--n-c) * .6) var(--n-h));
+  --color-layer-1: oklch(var(--l-layer-1) var(--n-c) var(--n-h));
+  --color-layer-2: oklch(var(--l-layer-2) var(--n-c) var(--n-h));
+  --color-layer-3: oklch(var(--l-layer-3) var(--n-c) var(--n-h));
+  --color-text: oklch(var(--l-text) calc(var(--n-c) * 1.5) var(--n-h));
+  --color-muted: oklch(var(--l-muted) var(--n-c) var(--n-h));
+  --color-faint: oklch(var(--l-faint) var(--n-c) var(--n-h));
+  --color-border: oklch(var(--l-text) var(--n-c) var(--n-h) / 9%);
+  --color-border-muted: oklch(var(--l-text) var(--n-c) var(--n-h) / 6.5%);
+  --color-border-strong: oklch(var(--l-text) var(--n-c) var(--n-h) / 17%);
+  /* Neutral ink for secondary series and tracks. */
+  --color-series: oklch(var(--l-text) var(--n-c) var(--n-h) / 30%);
+  --color-series-strong: oklch(var(--l-text) var(--n-c) var(--n-h) / 64%);
+  --color-track: oklch(var(--l-text) var(--n-c) var(--n-h) / 7%);
+  /* The accent: selection, the active page, focus, links, the primary series and key numbers. */
+  --color-accent: oklch(var(--accent-l) var(--accent-c) var(--accent-h));
+  --color-accent-hover: oklch(calc(var(--accent-l) + var(--accent-step)) var(--accent-c) var(--accent-h));
+  --color-accent-tint: oklch(var(--accent-l) var(--accent-c) var(--accent-h) / 11%);
+  --color-accent-line: oklch(var(--accent-l) var(--accent-c) var(--accent-h) / 45%);
+  --color-focus: var(--color-accent);
+  --color-active-bg: var(--color-accent-tint);
+  /* Status: ink for text, marker for dots and lines, a 10% tint and a 30% rule. */
+  --color-success: oklch(var(--ink-l) var(--ink-c) var(--hue-ok));
+  --color-success-marker: oklch(var(--mark-l) var(--mark-c) var(--hue-ok));
+  --color-success-bg: oklch(var(--mark-l) var(--mark-c) var(--hue-ok) / 10%);
+  --color-success-border: oklch(var(--mark-l) var(--mark-c) var(--hue-ok) / 30%);
+  --color-warning: oklch(var(--ink-l) var(--ink-c) var(--hue-warn));
+  --color-warning-marker: oklch(var(--warn-l) var(--mark-c) var(--hue-warn));
+  --color-warning-bg: oklch(var(--warn-l) var(--mark-c) var(--hue-warn) / 10%);
+  --color-warning-border: oklch(var(--warn-l) var(--mark-c) var(--hue-warn) / 34%);
+  --color-danger: oklch(var(--ink-l) calc(var(--ink-c) + .04) var(--hue-error));
+  --color-danger-marker: oklch(var(--mark-l) calc(var(--mark-c) + .04) var(--hue-error));
+  --color-danger-bg: oklch(var(--mark-l) calc(var(--mark-c) + .04) var(--hue-error) / 10%);
+  --color-danger-border: oklch(var(--mark-l) calc(var(--mark-c) + .04) var(--hue-error) / 32%);
+  --color-info: oklch(var(--ink-l) var(--ink-c) var(--hue-info));
+  --color-info-marker: oklch(var(--mark-l) var(--mark-c) var(--hue-info));
+  --color-info-bg: oklch(var(--mark-l) var(--mark-c) var(--hue-info) / 10%);
+  --color-info-border: oklch(var(--mark-l) var(--mark-c) var(--hue-info) / 30%);
+  /* Data: one hue per kind of mail, at the markers' lightness and chroma. Sent is the accent. */
+  --color-series-sent: var(--color-accent);
+  --color-series-received: oklch(var(--mark-l) var(--mark-c) var(--hue-received));
+  --color-series-delivered: var(--color-success-marker);
+  --color-series-opened: oklch(var(--mark-l) var(--mark-c) var(--hue-opened));
+  --color-series-clicked: oklch(var(--mark-l) var(--mark-c) var(--hue-clicked));
+  --color-series-bounced: var(--color-warning-marker);
+  --color-series-complained: var(--color-danger-marker);
 }

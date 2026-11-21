@@ -77,15 +77,14 @@
 .keys-guide .guide-link::before { content: ''; position: absolute; inset: -12px -8px; }
 .keys-guide__where { color: var(--color-faint); white-space: nowrap; }
 
-/* A row in full (click a row, or tap a card): label and value, values wrap instead of clipping. */
-.keys-details { display: flex; flex-direction: column; gap: var(--space-12); margin: 0; }
-.keys-details > div { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: var(--space-12); }
-.keys-details dt { color: var(--color-muted); }
-.keys-details dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
-/* A key's history under its fields: newest first, what changed and then when and who. */
-.keys-changes { margin-top: var(--space-16); }
-.keys-change-list { display: flex; flex-direction: column; gap: var(--space-12); margin: 0; padding: 0; list-style: none; font-size: var(--text-sm); line-height: var(--leading-sm); }
-.keys-change-list li { display: flex; flex-direction: column; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
+/* A row in full (click a row, or tap a card): what it reaches, then its life, as key/value rows; values wrap. */
+.keys-details { display: flex; flex-direction: column; }
+.keys-details > .ui-label { margin: var(--space-20) 0 var(--space-4); }
+.keys-details > .ui-label:first-child { margin-top: 0; }
+/* A key's changes: newest first, one hairline row each, what changed then when and who in mono. */
+.keys-change-list { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; font-size: var(--text-sm); line-height: var(--leading-sm); }
+.keys-change-list li { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-16); min-width: 0; min-height: 36px; padding-block: var(--space-8); border-bottom: 1px solid var(--color-border-muted); overflow-wrap: anywhere; }
+.keys-change-list li > .muted { flex: none; font-family: var(--font-mono); font-size: var(--text-xs); }
 /* Expiry's date and time sits under its two choices, as wide as a field. */
 .keys-purpose > .ui-input { max-width: 320px; }
 /* A card's title is a button once the card opens the details; keep its clipped name ending in an ellipsis. */
