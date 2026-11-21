@@ -4,16 +4,14 @@
 
 import { pngWithMetadata } from './images.js';
 
-export const GRANT_TOKEN = `bane_support_${'5'.repeat(64)}`;
 const EMAIL_PNG = Buffer.from(pngWithMetadata(80, 40)).toString('base64');
 
 /** The fake Nightmail, as a Worker module (it must export a real WorkerEntrypoint for RPC). */
 export const FAKE_BANE = `
 import { WorkerEntrypoint } from 'cloudflare:workers';
 const calls = [];
-const used = new Map(); // handoff id → the conversation it registered (or '' when a grant used it)
+const used = new Map(); // handoff id → the conversation it registered
 const shared = new Set();
-let grants = 0;
 // closeConversation answers 503 this many more times (a test hook): a close Nightmail can't take yet.
 let closeFailures = 0;
 // The staff inbox (api/src/support-inbox.ts), in memory: a conversation exists once a test registers it (/__inbox), like
@@ -206,29 +204,6 @@ export class SupportPlatform extends WorkerEntrypoint {
     return answer ? ok(answer) : refuse(404, 'NOT_FOUND');
   }
   async verifyHandoff(token) { calls.push(['verifyHandoff', token]); const h = handoff(token); if (h?.shareContent) shared.add(h.id); return h ? { ok: true, handoff: h } : { ok: false, code: 'HANDOFF_INVALID' }; }
-  async verifyEmail(body) {
-    calls.push(['verifyEmail', body]);
-    // Every @acme.test address is a Nightmail user (Ada, plus the review PoCs' victim@ and vera@).
-    const local = body.email.endsWith('@acme.test') ? body.email.split('@')[0] : null;
-    return local ? ok({ verified: true, user: { id: local === 'ada' ? 'usr_ada' : 'usr_' + local, name: local === 'ada' ? 'Ada Lovelace' : local[0].toUpperCase() + local.slice(1) }, workspaces: [{ id: 'ws_acme', name: 'Acme Prod', role: 'owner' }] }) : ok({ verified: false, user: null, workspaces: [] });
-  }
-  async mintGrant(body) {
-    calls.push(['mintGrant', body]);
-    if (body.handoffId) { if (used.has(body.handoffId)) return ok({ error: { code: 'SUPPORT_HANDOFF_USED' } }, 409); used.set(body.handoffId, ''); }
-    grants += 1;
-    return ok({ id: 'sgr_' + String(grants).padStart(32, '0'), token: '${GRANT_TOKEN}', userId: body.userId, workspaceIds: body.workspaceIds ?? ['ws_acme'], ticketRef: body.ticketRef,
-      contentShared: shared.has(body.handoffId), contentWorkspaceId: shared.has(body.handoffId) ? 'ws_acme' : null, expiresAt: new Date(Date.now() + 7200000).toISOString() }, 201);
-  }
-  async verifyStaff(token) {
-    calls.push(['verifyStaff', token]);
-    // Test staff tokens are "staff:<jti>:<userId>:<ok|demoted|expired>".
-    const [kind, jti, userId, state] = token.split(':');
-    if (kind !== 'staff') return { ok: false, code: 'STAFF_INVALID' };
-    if (state === 'demoted') return { ok: false, code: 'NOT_OPERATOR' };
-    if (state === 'expired') return { ok: false, code: 'STAFF_EXPIRED' };
-    return { ok: true, staff: { userId, email: userId + '@anoma.ly', role: 'operator:read' }, jti, expiresAt: new Date(Date.now() + 120000).toISOString() };
-  }
-  async revokeGrant(id) { calls.push(['revokeGrant', id]); return ok({ id, revoked: true }); }
   async mirrorMessages(id, messages) {
     calls.push(['mirrorMessages', id, messages.map(m => m.id)]);
     const c = inbox.get(id);
@@ -264,12 +239,6 @@ export class SupportPlatform extends WorkerEntrypoint {
     if (reply.delivery === 'sent' && status !== 'sent') return ok({ error: { code: 'SUPPORT_REPLY_DELIVERED' } }, 409);
     reply.delivery = status;
     return ok({ id: messageId, delivery: status, deliveredAt: status === 'sent' ? new Date().toISOString() : null });
-  }
-  async read(path, grant) {
-    calls.push(['read', path, grant === '${GRANT_TOKEN}' ? 'GRANT' : grant]);
-    if (grant !== '${GRANT_TOKEN}') return ok({ error: { code: 'SUPPORT_GRANT_REQUIRED' } }, 403);
-    const body = READS[path.split('?')[0]];
-    return body ? ok(body) : ok({ error: { code: 'NOT_FOUND', message: 'nope' } }, 404);
   }
 }
 // Idempotency-Key as Nightmail applies it (api/src/idempotency.ts): scoped to the API key and the path; the same key with

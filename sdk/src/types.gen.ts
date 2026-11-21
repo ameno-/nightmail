@@ -5348,7 +5348,7 @@ export type SupportHandoff = {
 
 export type SupportContext = {
     /**
-     * The grant, or for a support conversation the same facts: id and ticketRef are the conversation’s ID, and expiresAt is the time of this read, since a conversation’s access is checked on every request.
+     * The support conversation: id and ticketRef are its ID, and expiresAt is the time of this read, since a conversation’s access is checked on every request.
      */
     grant: {
         id: string;
@@ -5414,7 +5414,7 @@ export type SupportContext = {
         reason: string | null;
     }>;
     /**
-     * What the customer sent from "Contact support", if the grant came from it.
+     * What the customer sent from "Contact support", for a chat opened from it.
      */
     handoff: {
         id: string;
@@ -5721,7 +5721,7 @@ export type SupportRequestTrace = {
      */
     found: boolean;
     /**
-     * Its request lines from Workers Logs (the last 3 days), in the grant’s workspaces. Successful requests are sampled, so one may be missing.
+     * Its request lines from Workers Logs (the last 3 days), in the conversation’s workspaces. Successful requests are sampled, so one may be missing.
      */
     logs: Array<{
         at: string;
@@ -27058,7 +27058,7 @@ export type GetSupportContextData = {
     path?: never;
     query?: {
         /**
-         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         * Only this workspace; it must be one of the conversation’s. Omit for all of them.
          */
         workspaceId?: string;
     };
@@ -27124,7 +27124,7 @@ export type ListSupportWorkspacesData = {
     path?: never;
     query?: {
         /**
-         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         * Only this workspace; it must be one of the conversation’s. Omit for all of them.
          */
         workspaceId?: string;
     };
@@ -27192,7 +27192,7 @@ export type ListSupportDomainsData = {
     path?: never;
     query?: {
         /**
-         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         * Only this workspace; it must be one of the conversation’s. Omit for all of them.
          */
         workspaceId?: string;
     };
@@ -27260,7 +27260,7 @@ export type ListSupportEmailsData = {
     path?: never;
     query?: {
         /**
-         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         * Only this workspace; it must be one of the conversation’s. Omit for all of them.
          */
         workspaceId?: string;
         /**
@@ -27349,7 +27349,7 @@ export type GetSupportEmailData = {
     };
     query?: {
         /**
-         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         * Only this workspace; it must be one of the conversation’s. Omit for all of them.
          */
         workspaceId?: string;
     };
@@ -27415,7 +27415,7 @@ export type ListSupportEventsData = {
     path?: never;
     query?: {
         /**
-         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         * Only this workspace; it must be one of the conversation’s. Omit for all of them.
          */
         workspaceId?: string;
         /**
@@ -27495,7 +27495,7 @@ export type ListSupportWebhookDeliveriesData = {
     path?: never;
     query?: {
         /**
-         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         * Only this workspace; it must be one of the conversation’s. Omit for all of them.
          */
         workspaceId?: string;
         /**
@@ -27575,7 +27575,7 @@ export type GetSupportStandingData = {
     path?: never;
     query?: {
         /**
-         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         * Only this workspace; it must be one of the conversation’s. Omit for all of them.
          */
         workspaceId?: string;
         /**
@@ -27647,7 +27647,7 @@ export type GetSupportBillingData = {
     path?: never;
     query?: {
         /**
-         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         * Only this workspace; it must be one of the conversation’s. Omit for all of them.
          */
         workspaceId?: string;
     };
@@ -27713,7 +27713,7 @@ export type ListSupportAuditData = {
     path?: never;
     query?: {
         /**
-         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         * Only this workspace; it must be one of the conversation’s. Omit for all of them.
          */
         workspaceId?: string;
         /**
@@ -27802,7 +27802,7 @@ export type ListSupportRequestsData = {
     path?: never;
     query?: {
         /**
-         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         * Only this workspace; it must be one of the conversation’s. Omit for all of them.
          */
         workspaceId?: string;
         /**
@@ -27890,7 +27890,7 @@ export type GetSupportRequestData = {
     };
     query?: {
         /**
-         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         * Only this workspace; it must be one of the conversation’s. Omit for all of them.
          */
         workspaceId?: string;
     };
@@ -27956,7 +27956,7 @@ export type GetSupportDeliveryMetricsData = {
     path?: never;
     query?: {
         /**
-         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         * Only this workspace; it must be one of the conversation’s. Omit for all of them.
          */
         workspaceId?: string;
         /**
@@ -28038,7 +28038,7 @@ export type GetSupportBounceReasonsData = {
     path?: never;
     query?: {
         /**
-         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         * Only this workspace; it must be one of the conversation’s. Omit for all of them.
          */
         workspaceId?: string;
         /**
@@ -28121,7 +28121,7 @@ export type GetSupportDomainHealthData = {
     };
     query?: {
         /**
-         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         * Only this workspace; it must be one of the conversation’s. Omit for all of them.
          */
         workspaceId?: string;
     };
@@ -28187,7 +28187,7 @@ export type GetSupportScreenData = {
     path?: never;
     query?: {
         /**
-         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         * Only this workspace; it must be one of the conversation’s. Omit for all of them.
          */
         workspaceId?: string;
         /**
@@ -28257,7 +28257,7 @@ export type ListSupportCampaignsData = {
     path?: never;
     query?: {
         /**
-         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         * Only this workspace; it must be one of the conversation’s. Omit for all of them.
          */
         workspaceId?: string;
         /**
@@ -28335,7 +28335,7 @@ export type GetSupportCampaignData = {
     };
     query?: {
         /**
-         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         * Only this workspace; it must be one of the conversation’s. Omit for all of them.
          */
         workspaceId?: string;
     };
@@ -28403,7 +28403,7 @@ export type GetSupportEmailLintData = {
     };
     query?: {
         /**
-         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         * Only this workspace; it must be one of the conversation’s. Omit for all of them.
          */
         workspaceId?: string;
     };
@@ -28471,7 +28471,7 @@ export type GetSupportCampaignLintData = {
     };
     query?: {
         /**
-         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         * Only this workspace; it must be one of the conversation’s. Omit for all of them.
          */
         workspaceId?: string;
     };
@@ -28537,7 +28537,7 @@ export type GetSupportAudienceHealthData = {
     path?: never;
     query?: {
         /**
-         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         * Only this workspace; it must be one of the conversation’s. Omit for all of them.
          */
         workspaceId?: string;
         listId?: string;

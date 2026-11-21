@@ -7,7 +7,10 @@ import { productName } from '../../api/src/brand.js';
 // Tickets (design §7, with the owner's changes: email, not Slack; typed). One per conversation, stored in D1 (internal
 // only), emailed to the Nightmail team from the support address through Nightmail's own API with the type in the subject
 // ("[Nightmail bug] …"). For a chat, the customer also gets a short email that opens the follow-up thread the team replies in.
-// Staff list and close them on support.<host>/staff (staff.ts).
+// Staff work them in Nightmail's Support inbox, where each conversation's ticket shows (api/src/support-inbox.ts).
+
+/** The model an intake ticket names: no agent, and no conversation in the Support inbox. */
+export const INTAKE_MODEL = 'none (intake)';
 
 export type TicketContext = {
   conversationId: string; channel: 'chat' | 'email'; customer: { userId: string | null; email: string | null; name: string | null; role: string | null; workspaces: { id: string; name: string }[] };
@@ -87,7 +90,7 @@ export type TicketRow = {
 
 /**
  * A ticket as it was filed, rebuilt from its row (fileTicket wrote every field the team's email and the follow-up use).
- * Screenshot links aren't rebuilt: the staff page lists them.
+ * Screenshot links aren't rebuilt: they expired with the ticket's first email.
  */
 export function fromRow(row: TicketRow): { ctx: TicketContext; input: TicketInput; ticket: FiledTicket } {
   const who = JSON.parse(row.customer) as Partial<TicketContext['customer']> & { verified?: TicketContext['verified'] | false; sender?: string | null; dmarc?: string | null };
@@ -120,7 +123,7 @@ function detailLines(input: TicketInput) {
 }
 
 /** The team's email for a ticket: subject and plain text. Pure, so the verification marker is tested directly. */
-export function ticketEmail(env: Pick<Env, 'PUBLIC_URL'>, ctx: TicketContext, ticket: Pick<FiledTicket, 'id' | 'dueAt'>, input: TicketInput) {
+export function ticketEmail(env: Pick<Env, 'BANE_ORIGIN'>, ctx: TicketContext, ticket: Pick<FiledTicket, 'id' | 'dueAt'>, input: TicketInput) {
   const c = ctx.customer, verified = ctx.verified !== null;
   const who = verified
     ? [`Verified: ${ctx.verified}${ctx.dmarc ? ` (DMARC ${ctx.dmarc})` : ''}`, `Customer: ${c.name ?? '(no name)'} <${c.email ?? '—'}>, ${c.role ?? 'member'}`, `Workspaces: ${c.workspaces.map(w => `${w.name} (${w.id})`).join(', ') || '—'}`]
@@ -147,8 +150,8 @@ export function ticketEmail(env: Pick<Env, 'PUBLIC_URL'>, ctx: TicketContext, ti
     input.recommendation,
     '',
     ...(input.evidence.ids?.length ? [`Evidence: ${input.evidence.ids.join(', ')}`, ''] : []),
-    ...(ctx.attachments.length ? ['Screenshots (links expire in 7 days; also on the staff page)', ...ctx.attachments.map(a => `- ${a.name} (${a.type}, ${Math.ceil(a.size / 1024)} KB): ${a.url}`), ''] : []),
-    `Staff page: ${env.PUBLIC_URL}/staff/tickets?id=${ticket.id}`,
+    ...(ctx.attachments.length ? ['Screenshots (links expire in 7 days)', ...ctx.attachments.map(a => `- ${a.name} (${a.type}, ${Math.ceil(a.size / 1024)} KB): ${a.url}`), ''] : []),
+    `Ticket: ${ticket.id}${ctx.model === INTAKE_MODEL ? '' : ` · Support inbox: ${new URL(env.BANE_ORIGIN).origin}/support/${ctx.conversationId}`}`,
     `Cost so far: $${ctx.costUsd.toFixed(3)} on ${ctx.model}.`,
     ctx.channel === 'chat' ? `Reply to the customer in the follow-up thread in ${productName}’s support inbox (they were emailed).` : `Reply in the email thread in ${productName}’s support inbox.`,
   ];

@@ -751,6 +751,10 @@ const unique = (prefix: string) => `${prefix}-${randomUUID().replaceAll('-', '')
 const snsCertName = () => `SimpleNotificationService-${randomUUID().replaceAll('-', '')}.pem`;
 const address = () => `${unique('acceptance')}@example.com`;
 const REGION = process.env.API_TEST_REGION ?? 'us-east-1';
+/** A support test's request header naming the conversation a read goes through (its send() calls SupportPlatform.request). */
+const STAMP = 'x-acceptance-conversation';
+/** A fresh support signing key, so a test's handoffs can open conversations. */
+const supportSigningKey = () => { const { d, x } = generateKeyPairSync('ed25519').privateKey.export({ format: 'jwk' }) as { d: string; x: string }; return { kty: 'OKP' as const, crv: 'Ed25519' as const, d, x }; };
 // bun run test loads .env. Remote APIs require an explicitly paired fixture database;
 // never silently arrange a remote API's fixtures in the developer's default DB.
 const LOCAL_API = ['localhost', '127.0.0.1'].includes(new URL(BASE).hostname);
@@ -1241,7 +1245,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   const githubMe=await (await request('/v1/me','GET',githubSession)).json() as {id:string;operator:string|null;staffSignIn:boolean};
   assert.deepEqual([githubMe.id,githubMe.operator,githubMe.staffSignIn],[staffUser,null,true]);
   assert.deepEqual(await errorOf(await request('/v1/operator/waitlist','GET',githubSession)),[403,'OPERATOR_REQUIRED']);
-  assert.deepEqual(await errorOf(await request(`/v1/operator/support/staff-sign-in?return=${encodeURIComponent('https://support.example.org/staff/callback')}`,'GET',githubSession)),[403,'OPERATOR_REQUIRED']);
+  assert.deepEqual(await errorOf(await request('/v1/operator/support-inbox','GET',githubSession)),[403,'OPERATOR_REQUIRED']);
   assert.deepEqual(await errorOf(await request('/v1/workspaces','POST',githubSession,{name:'Through GitHub'})),[403,'SIGNUP_NOT_APPROVED']);
   // Sign in with Google: the account service is asked for Google, and that session is staff again.
   use('google');providerHd='example.org';
@@ -6817,7 +6821,7 @@ describe('Hosted MCP OAuth and tools', () => {
     }
   });
 
-  test('Support and operator routes: customers get 403 everywhere; operators read the audited trail; a support grant reads only its customer', async t => {
+  test('Support and operator routes: customers get 403 everywhere; operators read the audited trail; a support conversation reads only its customer; the grant routes answer 404', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const hex = () => (randomUUID() + randomUUID()).replaceAll('-', ''), sha = (v: string) => createHash('sha256').update(v).digest('hex');
       const signing = generateKeyPairSync('ed25519').privateKey.export({ format: 'jwk' }) as Json;
@@ -6831,8 +6835,8 @@ describe('Hosted MCP OAuth and tools', () => {
       };
       // The support platform: the SupportPlatform service-binding entrypoint (src/worker.ts) wraps exactly this, with
       // the runtime marked as the binding's caller. No token: the binding is the credential.
-      const { supportPlatform, supportPlatformAllows } = await import('./src/support-platform.js');
-      const platform = supportPlatform(async req => app.fetch(req, { ...runtime, platformCaller: 'bane-support' }), () => runtime.config);
+      const { supportPlatform, supportPlatformAllows, platformRuntime } = await import('./src/support-platform.js');
+      const platform = supportPlatform(async (req, conversation) => app.fetch(req, { ...runtime, ...platformRuntime(conversation) }), () => runtime.config);
       const service = async (method: string, path: string, body?: Json): Promise<Reply> => { const r = await platform.call<Json>(method, path, body); return { status: r.status, body: r.body, headers: new Headers(r.requestId ? { 'x-request-id': r.requestId } : {}) }; };
       const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN });
       const bearer = (token: string) => ({ authorization: `Bearer ${token}` });
@@ -6880,8 +6884,6 @@ describe('Hosted MCP OAuth and tools', () => {
         }
       }
       assert.deepEqual(refused, [], 'Every customer credential must get the same 403 on every internal route.');
-      // A support grant is not an operator, and reads nothing outside /v1/support.
-      // (Checked below once a grant exists.)
 
       // Changes customers make reach the trail with their request ID; the customer view hides operator internals.
       const created = await local('POST', '/v1/api-keys', { name: 'audit trail key', permissions: ['read'] });
@@ -6965,75 +6967,66 @@ describe('Hosted MCP OAuth and tools', () => {
       const otherKey = generateKeyPairSync('ed25519').privateKey.export({ format: 'jwk' }) as Json, { verifyHandoffToken } = await import('./src/support-platform.js');
       assert.deepEqual(await verifyHandoffToken({ ...runtime.config, support: { signingKey: { kty: 'OKP', crv: 'Ed25519', d: otherKey.d, x: otherKey.x } } }, handoff.token), { ok: false, code: 'HANDOFF_INVALID' }, 'Another installation’s key does not verify it.');
       assert.deepEqual(await verifyHandoffToken(runtime.config, handoff.token, Date.now() + 11 * 60_000), { ok: false, code: 'HANDOFF_EXPIRED' });
-      // The support platform verifies an emailed request and mints a grant for that one user.
-      const dmarc = { kind: 'dmarc', result: 'pass', aligned: true, messageId: '<support-1@example.com>' };
-      const verified = ok(await service('POST', '/v1/operator/support/verify-email', { email: manager!.email.toUpperCase(), evidence: dmarc, ticketRef: 'T-1' }));
-      assert.equal(verified.user.id, manager!.userId); assert.ok(verified.workspaces.some((w: Json) => w.id === wid && w.role === 'owner'));
-      assert.deepEqual(ok(await service('POST', '/v1/operator/support/verify-email', { email: 'nobody@example.org', evidence: { kind: 'magic_link', confirmedAt: new Date().toISOString() } })), { verified: false, user: null, workspaces: [] });
-      error(await service('POST', '/v1/operator/support/verify-email', { email: manager!.email, evidence: { ...dmarc, result: 'fail' } }), 422);
-      // Evidence the platform could not have: a DMARC pass without the verified message, a magic link opened in the future.
-      error(await service('POST', '/v1/operator/support/verify-email', { email: manager!.email, evidence: { kind: 'dmarc', result: 'pass', aligned: true } }), 422);
-      error(await service('POST', '/v1/operator/support/verify-email', { email: manager!.email, evidence: { kind: 'magic_link', confirmedAt: new Date(Date.now() + 3_600_000).toISOString() } }), 422, 'EVIDENCE_INVALID');
-      const mint = (body: Json) => service('POST', '/v1/operator/support/grants', { reason: 'Customer asked about a revoked key', ...body });
-      const grant = ok(await mint({ userId: manager!.userId, ticketRef: 'T-1', verification: 'handoff', handoffId: handoff.id }), 201);
-      assert.match(grant.token, /^nm_support_[0-9a-f]{64}$/); secrets.add(grant.token);
-      assert.deepEqual([grant.contentShared, grant.contentWorkspaceId, grant.workspaceIds, grant.handoffId], [true, wid, [wid], handoff.id], 'A handoff grant covers the handoff’s workspace.');
-      error(await mint({ userId: manager!.userId, ticketRef: 'T-8', verification: 'handoff', handoffId: handoff.id }), 409, 'SUPPORT_HANDOFF_USED');
-      assert.equal(ok(await service('GET', `/v1/operator/support/handoffs/${handoff.id}`)).grantId, grant.id);
-      error(await mint({ userId: manager!.userId, ticketRef: 'T-1', verification: 'dmarc' }), 409, 'SUPPORT_GRANT_ACTIVE');
-      error(await mint({ userId: member.userId, ticketRef: 'T-9', verification: 'handoff', handoffId: handoff.id }), 404);
-      const plain = ok(await mint({ userId: manager!.userId, ticketRef: 'T-2', verification: 'dmarc', ttlMinutes: 30 }), 201); secrets.add(plain.token);
-      assert.equal(plain.contentShared, false);
-      secrets.add(ok(await send('POST', '/v1/operator/support/grants', session(operator), { userId: manager!.userId, ticketRef: 'T-3', reason: 'Operator console grant', verification: 'dmarc' }), 201).token);
+      // The support platform opens a chat from that handoff: Nightmail registers the conversation for the handoff's person
+      // and workspace, once, and nothing else can use the handoff again.
+      const base32 = 'abcdefghijklmnopqrstuvwxyz234567', newConversation = () => `conv_${Array.from(crypto.getRandomValues(new Uint8Array(26)), b => base32[b & 31]).join('')}`;
+      const register = async (token: string) => { const id = newConversation(), r = await platform.registerConversation({ conversationId: id, evidence: { kind: 'handoff', token } }); return { id, status: r.status, body: r.body as Json }; };
+      const stamped = async (conversation: string, path: string, method = 'GET'): Promise<Reply> => {
+        const r = await platform.request(conversation, method, path);
+        return { status: r.status, body: r.body, headers: new Headers(r.requestId ? { 'x-request-id': r.requestId } : {}) };
+      };
+      const opened = await register(handoff.token), id = opened.id;
+      assert.equal(opened.status, 201, redact(opened.body));
+      assert.deepEqual([opened.body.channel, opened.body.workspaceId, opened.body.contentShared], ['chat', wid, true], 'A chat covers the handoff’s workspace.');
+      assert.equal((await register(handoff.token)).status, 409, 'A handoff opens one conversation.');
+      assert.equal(ok(await service('GET', `/v1/operator/support/handoffs/${handoff.id}`)).conversationId, id);
+      const plainChat = await register(ok(await local('POST', '/v1/contact-support', { shareContent: false }), 201).token), plain = plainChat.id;
+      assert.deepEqual([plainChat.status, plainChat.body.contentShared], [201, false]);
 
-      // The grant reads only its customer, through /v1/support/* alone, without secrets; content only with the opt-in.
-      const support = bearer(grant.token), emailId = unique('email');
+      // The conversation reads only its customer, through /v1/support/* alone, without secrets; content only with the opt-in.
+      const emailId = unique('email');
       await db.query(`INSERT INTO sending_emails(id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, status, snapshot, simulated, error_code)
         VALUES ($1, $2, $3, 'fixture', 'sender@example.com', '["bounce@example.org"]', '[]', '[]', 'Your receipt', 'bounced', $4, true, 'BOUNCED')`,
         [emailId, wid, REGION, JSON.stringify({ from: 'sender@example.com', to: ['bounce@example.org'], cc: [], bcc: [], replyTo: [], region: REGION, kind: 'transactional', subject: 'Your receipt', text: 'private body words', attachments: [], tracking: false })]);
-      const context = ok(await send('GET', '/v1/support/context', support));
-      assert.deepEqual([context.grant.contentShared, context.user.id, context.handoff.requestIds], [true, manager!.userId, [createdRequest]]);
+      const context = ok(await stamped(id, '/v1/support/context'));
+      assert.deepEqual([context.grant.id, context.grant.contentShared, context.user.id, context.handoff.requestIds], [id, true, manager!.userId, [createdRequest]]);
       assert.ok(context.workspaces.some((w: Json) => w.id === wid && w.role === 'owner') && !context.workspaces.some((w: Json) => w.id === other));
       assert.ok(context.recentActivity.some((e: Json) => e.action === 'api_key.create') && context.links.requestIds.includes(createdRequest));
       assert.ok(context.recentFailures.sends.some((f: Json) => f.workspaceId === wid && f.code === 'BOUNCED'), JSON.stringify(context.recentFailures));
-      const emails = ok(await send('GET', `/v1/support/emails?workspaceId=${wid}`, support));
+      const emails = ok(await stamped(id, `/v1/support/emails?workspaceId=${wid}`));
       assert.deepEqual(emails.data.map((e: Json) => e.id), [emailId]); assert.ok(!JSON.stringify(emails).includes('private body words'));
-      assert.equal(ok(await send('GET', `/v1/support/emails/${emailId}`, support)).content.text, 'private body words');
-      assert.equal(ok(await send('GET', `/v1/support/emails/${emailId}`, bearer(plain.token))).content, null, 'No content without the customer’s opt-in.');
+      assert.equal(ok(await stamped(id, `/v1/support/emails/${emailId}`)).content.text, 'private body words');
+      assert.equal(ok(await stamped(plain, `/v1/support/emails/${emailId}`)).content, null, 'No content without the customer’s opt-in.');
       for (const path of ['/v1/support/workspaces', '/v1/support/domains', '/v1/support/events', '/v1/support/webhook-deliveries', '/v1/support/standing', '/v1/support/billing', '/v1/support/audit']) {
-        const body = ok(await send('GET', path, support));
+        const body = ok(await stamped(id, path));
         assert.ok(!JSON.stringify(body).includes(keys.manage!.slice(5, 20)), path);
       }
-      const traced = ok(await send('GET', `/v1/support/requests/${createdRequest}`, support));
+      const traced = ok(await stamped(id, `/v1/support/requests/${createdRequest}`));
       assert.equal(traced.found, true); assert.deepEqual(traced.auditEvents.map((e: Json) => e.action), ['api_key.create']);
-      error(await send('GET', `/v1/support/workspaces?workspaceId=${other}`, support), 404);
-      error(await send('POST', '/v1/support/context', support, {}), 403, 'SUPPORT_READ_ONLY');
-      error(await send('GET', '/v1/api-keys', support), 401);
-      error(await send('GET', `/v1/operator/workspaces/${wid}/audit`, support), 403, 'OPERATOR_REQUIRED');
+      error(await stamped(id, `/v1/support/workspaces?workspaceId=${other}`), 404);
+      error(await stamped(id, '/v1/support/context', 'POST'), 404);
       error(await send('GET', '/v1/support/context', session(operator)), 403, 'SUPPORT_GRANT_REQUIRED');
-      // Every call is on the trail; the customer sees one "support viewed" per grant and workspace, not each call.
-      const calls = (await db.query(`SELECT count(*)::int AS n FROM audit_events WHERE action = 'support.read' AND actor_id = $1 AND internal AND user_id = $2`, [grant.id, manager!.userId])).rows[0].n;
-      assert.ok(calls >= 13, String(calls));
-      assert.equal((await db.query(`SELECT count(*)::int AS n FROM audit_events WHERE action = 'support.view' AND actor_id = $1 AND workspace_id = $2 AND NOT internal`, [grant.id, wid])).rows[0].n, 1);
+      // Every call is on the trail; the customer sees one "support viewed" per conversation and workspace, not each call.
+      const calls = (await db.query(`SELECT count(*)::int AS n FROM audit_events WHERE action = 'support.read' AND actor_id = $1 AND internal AND user_id = $2`, [id, manager!.userId])).rows[0].n;
+      assert.ok(calls >= 12, String(calls));
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM audit_events WHERE action = 'support.view' AND actor_id = $1 AND workspace_id = $2 AND NOT internal`, [id, wid])).rows[0].n, 1);
       const seen = ok(await local('GET', '/v1/activity?actorType=support')).data;
-      assert.deepEqual(seen.map((e: Json) => [e.action, e.actor.id]).sort(), [['support.view', grant.id], ['support.view', plain.id]].sort());
-      // Owners see whose request let support in, and which ticket.
-      const view = seen.find((e: Json) => e.actor.id === grant.id);
-      assert.deepEqual([view.subject, view.summary.ticket, view.summary.handoff, view.summary.contentShared], [{ userId: manager!.userId, email: manager!.email }, 'T-1', handoff.id, true]);
-      // Rate limit, revocation and expiry.
-      await db.query('UPDATE support_grants SET used = 120 WHERE id = $1', [plain.id]);
-      error(await send('GET', '/v1/support/context', bearer(plain.token)), 429, 'REQUEST_RATE_LIMITED');
-      ok(await service('POST', `/v1/operator/support/grants/${grant.id}/revoke`));
-      error(await send('GET', '/v1/support/context', support), 403, 'SUPPORT_GRANT_REQUIRED');
-      const again = ok(await mint({ userId: manager!.userId, ticketRef: 'T-1', verification: 'dmarc' }), 201); secrets.add(again.token);
-      await db.query(`UPDATE support_grants SET created_at = now() - interval '3 hours', expires_at = now() - interval '2 hours' WHERE id = $1`, [again.id]);
-      error(await send('GET', '/v1/support/context', bearer(again.token)), 403, 'SUPPORT_GRANT_REQUIRED');
-      // Another customer's grant sees only their own workspace.
-      const theirs = ok(await mint({ userId: outsider.userId, ticketRef: 'T-4', verification: 'magic_link' }), 201); secrets.add(theirs.token);
-      assert.deepEqual(ok(await send('GET', '/v1/support/workspaces', bearer(theirs.token))).data.map((w: Json) => w.id), [other]);
-      error(await send('GET', `/v1/support/emails/${emailId}`, bearer(theirs.token)), 404);
-      assert.deepEqual((await db.query(`SELECT action FROM audit_events WHERE user_id = $1 AND actor_type = 'operator' AND action LIKE 'support.%' ORDER BY id`, [manager!.userId])).rows.map(r => r.action),
-        ['support.verify_email', 'support.grant', 'support.grant', 'support.grant', 'support.grant_revoke', 'support.grant']);
+      assert.deepEqual(seen.map((e: Json) => [e.action, e.actor.id]).sort(), [['support.view', id], ['support.view', plain]].sort());
+      // Owners see whose request let support in, and which conversation.
+      const view = seen.find((e: Json) => e.actor.id === id);
+      assert.deepEqual([view.subject, view.summary.ticket, view.summary.channel, view.summary.contentShared], [{ userId: manager!.userId, email: manager!.email }, id, 'chat', true]);
+      // The rate limit, and closing.
+      await db.query('UPDATE support_conversations SET used = 120 WHERE id = $1', [plain]);
+      error(await stamped(plain, '/v1/support/context'), 429, 'REQUEST_RATE_LIMITED');
+      assert.equal((await platform.closeConversation(id)).status, 200);
+      error(await stamped(id, '/v1/support/context'), 403, 'SUPPORT_GRANT_REQUIRED');
+      // Another customer's conversation sees only their own workspace.
+      const theirs = await register(ok(await send('POST', '/v1/contact-support', { ...session(outsider), 'x-nightmail-workspace': other }, {}), 201).token);
+      assert.equal(theirs.status, 201, redact(theirs.body));
+      assert.deepEqual(ok(await stamped(theirs.id, '/v1/support/workspaces')).data.map((w: Json) => w.id), [other]);
+      error(await stamped(theirs.id, `/v1/support/emails/${emailId}`), 404);
+      assert.deepEqual((await db.query(`SELECT action, target_id FROM audit_events WHERE user_id = $1 AND actor_type = 'operator' AND action LIKE 'support.%' ORDER BY id`, [manager!.userId])).rows,
+        [{ action: 'support.register', target_id: id }, { action: 'support.register', target_id: plain }], 'Each registration that binds a person is on their trail.');
 
       // Review M1: sharing content from one workspace never opens another. The owner of this workspace is a plain
       // member of Beta and contacts support from Beta, ticking "share message content".
@@ -7044,25 +7037,30 @@ describe('Hosted MCP OAuth and tools', () => {
         VALUES ($1, $2, $3, 'fixture', 'beta@example.com', '["someone@example.org"]', '[]', '[]', 'Beta receipt', 'delivered', $4, true)`,
         [betaEmail, beta, REGION, JSON.stringify({ from: 'beta@example.com', to: ['someone@example.org'], cc: [], bcc: [], replyTo: [], region: REGION, kind: 'transactional', subject: 'Beta receipt', text: 'beta body words', attachments: [], tracking: false })]);
       const fromBeta = async () => ok(await local('POST', '/v1/contact-support', { shareContent: true }, 'live', { 'x-bane-workspace': beta }), 201);
-      const betaHandoff = await fromBeta(), wider = await fromBeta();
-      const betaGrant = ok(await mint({ userId: manager!.userId, ticketRef: 'T-5', verification: 'handoff', handoffId: betaHandoff.id }), 201); secrets.add(betaGrant.token);
-      assert.deepEqual([betaGrant.workspaceIds, betaGrant.contentWorkspaceId], [[beta], beta]);
-      error(await send('GET', `/v1/support/emails/${emailId}`, bearer(betaGrant.token)), 404, 'NOT_FOUND');
-      // Asked to cover both workspaces, the grant still reads bodies only where the customer opted in.
-      const both = ok(await mint({ userId: manager!.userId, ticketRef: 'T-6', verification: 'handoff', handoffId: wider.id, workspaceIds: [wid, beta] }), 201); secrets.add(both.token);
-      assert.deepEqual([both.workspaceIds.sort(), both.contentWorkspaceId], [[wid, beta].sort(), beta]);
-      assert.equal(ok(await send('GET', `/v1/support/emails/${betaEmail}`, bearer(both.token))).content.text, 'beta body words');
-      assert.equal(ok(await send('GET', `/v1/support/emails/${emailId}`, bearer(both.token))).content, null, 'No content from a workspace the customer did not opt in from.');
-      assert.equal(ok(await send('GET', '/v1/support/context', bearer(both.token))).grant.contentWorkspaceId, beta);
-      // A handoff opens one grant, within 30 minutes.
+      const betaChat = await register((await fromBeta()).token);
+      assert.deepEqual([betaChat.status, betaChat.body.workspaceId, ok(await stamped(betaChat.id, '/v1/support/workspaces')).data.map((w: Json) => w.id)], [201, beta, [beta]]);
+      error(await stamped(betaChat.id, `/v1/support/emails/${emailId}`), 404, 'NOT_FOUND');
+      assert.equal(ok(await stamped(betaChat.id, `/v1/support/emails/${betaEmail}`)).content.text, 'beta body words');
+      assert.equal(ok(await stamped(betaChat.id, '/v1/support/context')).grant.contentWorkspaceId, beta);
+      // A handoff opens one conversation, within 30 minutes.
       const late = await fromBeta();
       await db.query(`UPDATE support_handoffs SET created_at = now() - interval '1 hour', expires_at = now() - interval '31 minutes' WHERE id = $1`, [late.id]);
-      error(await mint({ userId: manager!.userId, ticketRef: 'T-7', verification: 'handoff', handoffId: late.id }), 404);
+      assert.equal((await register(late.token)).status, 404);
 
-      // The binding is narrow: only the support operator routes and grant reads, as service:bane-support, and no bearer
-      // token is an operator any more (the static platform token is retired).
-      error(await service('GET', '/v1/operator/support/grants?ticketRef=T-5'), 404, 'NOT_FOUND');
+      // The grant routes are gone: verifying an email sender, minting, listing and revoking grants, and staff sign-in
+      // answer 404, through the binding and to an operator's own session alike.
+      for (const [method, path] of [['POST', '/v1/operator/support/verify-email'], ['POST', '/v1/operator/support/grants'], ['GET', '/v1/operator/support/grants'],
+        ['POST', `/v1/operator/support/grants/sgr_${'0'.repeat(32)}/revoke`], ['GET', `/v1/operator/support/staff-sign-in?return=${encodeURIComponent('https://support.example.com/staff/callback')}`],
+        ['POST', '/v1/operator/support/staff/verify']] as const) {
+        const body = method === 'POST' ? { userId: manager!.userId, ticketRef: 'T-1', reason: 'A grant route that no longer exists', verification: 'dmarc' } : undefined;
+        error(await service(method, path, body), 404, 'NOT_FOUND');
+        error(await send(method, path, session(operator), body), 404);
+      }
+      // The binding is narrow: only the support operator routes, as service:bane-support, and /v1/support only through a
+      // conversation. No bearer token is an operator (the static platform token is retired) or reads /v1/support.
       error(await service('GET', `/v1/operator/users/${manager!.userId}/audit?limit=1`), 404, 'NOT_FOUND');
+      error(await service('GET', '/v1/support/workspaces'), 404, 'NOT_FOUND');
+      assert.equal(supportPlatformAllows('GET', '/v1/support/workspaces'), false);
       assert.equal(supportPlatformAllows('GET', '/v1/support/../operator/users/x/audit'), false);
       // Past its allow-list, the gate itself still refuses the binding everywhere else under /v1/operator.
       const bypass = await app.fetch(new Request(`${PUBLIC_ORIGIN}/v1/operator/users/${manager!.userId}/audit`), { ...runtime, platformCaller: 'bane-support' });
@@ -7070,12 +7068,9 @@ describe('Hosted MCP OAuth and tools', () => {
       // Any Authorization header on an operator route is refused, even through the binding's runtime.
       const withBearer = await app.fetch(new Request(`${PUBLIC_ORIGIN}/v1/operator/support/handoffs/${handoff.id}`, { headers: bearer(`bane_ops_${hex()}`) }), { ...runtime, platformCaller: 'bane-support' });
       assert.equal(withBearer.status, 403);
-      // Grant reads through the binding need the grant itself; the trail names the binding as the operator.
-      assert.equal((await platform.read('/v1/support/workspaces', theirs.token)).status, 200);
-      assert.equal((await platform.read('/v1/support/workspaces', `bane_support_${hex()}`)).status, 403);
-      assert.equal((await platform.call('GET', '/v1/support/workspaces')).status, 403, 'A /v1/support read without a grant.');
+      for (const token of [`nm_support_${hex()}`, `bane_support_${hex()}`]) error(await send('GET', '/v1/support/workspaces', bearer(token)), 403, 'SUPPORT_GRANT_REQUIRED');
       const used = await platform.verifyHandoff(handoff.token);
-      assert.ok(used.ok && used.handoff.usedAt && used.handoff.grantId === grant.id, JSON.stringify(used));
+      assert.ok(used.ok && used.handoff.usedAt && !('grantId' in used.handoff), JSON.stringify(used));
       assert.deepEqual((await db.query(`SELECT DISTINCT actor_id FROM audit_events WHERE actor_id LIKE 'service:%' ORDER BY 1`)).rows.map(r => r.actor_id), ['service:bane-support']);
       // Review L4: an operator script's platform row without a user is not mirrored, and does not fail the script.
       await db.query(`INSERT INTO hosted_operator_audit(workspace_id, action, details) VALUES ('platform', 'set-operator', '{"userId": null}')`);
@@ -7136,22 +7131,17 @@ describe('Hosted MCP OAuth and tools', () => {
       const handoff = async (f: SessionFixture, workspace: string, body: Json = {}) => ok(await send('POST', '/v1/contact-support', session(f, workspace), body), 201);
       const chat = async (f: SessionFixture, workspace = acme, body: Json = {}) => { const id = conversation(); ok(await register(id, { kind: 'handoff', token: (await handoff(f, workspace, body)).token }), 201); return id; };
       const email = async (from: string, o: Parameters<typeof mail>[1] = {}) => { const id = conversation(); const body = ok(await register(id, { kind: 'email', messageId: await mail(from, o) }), 201); return { id, body }; };
-      const mint = async (body: Json) => reply(await platform.mintGrant({ reason: 'Customer asked about their workspace', ticketRef: unique('T'), ...body } as never));
 
       await t.test('1 registration: Nightmail decides who a conversation is for from its own handoff, or from a support address’s stored From and DMARC verdict', async () => {
-        // A handoff binds its user and workspace, once, and is shared with grants either way.
+        // A handoff binds its user and workspace, once.
         const first = await handoff(owner, acme, { shareContent: true, page: '/domains' }), id = conversation();
         const created = ok(await register(id, { kind: 'handoff', token: first.token }), 201);
         assert.deepEqual([created.channel, created.mode, created.verification, created.workspaceId, created.contentShared, created.created], ['chat', 'member', 'handoff', acme, true, true]);
         assert.deepEqual([(await row(id)).user_id, (await row(id)).workspace_id], [owner.userId, acme]);
         assert.equal(ok(await register(id, { kind: 'handoff', token: first.token })).created, false, 'The same registration again answers its state.');
         error(await register(conversation(), { kind: 'handoff', token: first.token }), 409, 'SUPPORT_HANDOFF_USED');
-        error(await mint({ userId: owner.userId, verification: 'handoff', handoffId: first.id }), 409, 'SUPPORT_HANDOFF_USED');
         const used = await platform.verifyHandoff(first.token);
-        assert.ok(used.ok && used.handoff.usedAt && used.handoff.grantId === null, JSON.stringify(used));
-        const granted = await handoff(owner, acme);
-        secrets.add(ok(await mint({ userId: owner.userId, verification: 'handoff', handoffId: granted.id }), 201).token);
-        error(await register(conversation(), { kind: 'handoff', token: granted.token }), 409, 'SUPPORT_HANDOFF_USED');
+        assert.ok(used.ok && used.handoff.usedAt, JSON.stringify(used));
         const [header, payload] = first.token.split('.');
         error(await register(conversation(), { kind: 'handoff', token: `${header}.${payload}.${Buffer.from('forged').toString('base64url')}` }), 422, 'HANDOFF_INVALID');
         const late = await handoff(admin, acme);
@@ -7223,7 +7213,7 @@ describe('Hosted MCP OAuth and tools', () => {
           }
         assert.deepEqual(refused, []);
         error(await send('POST', '/v1/support/scope', session(owner, acme), { workspaceId: acme }), 403, 'SUPPORT_GRANT_REQUIRED');
-        error(reply(await platform.call('GET', '/v1/support/context')), 403, 'SUPPORT_GRANT_REQUIRED');
+        error(reply(await platform.call('GET', '/v1/support/context')), 404, 'NOT_FOUND');
         // A conversation never arrives with a credential beside it; the stamp reaches no operator route and writes only its scope.
         const direct = async (path: string, init: RequestInit = {}) => (await app.fetch(new Request(PUBLIC_ORIGIN + path, init), { ...runtime, ...platformRuntime(id) })).status;
         assert.equal(await direct('/v1/support/context', { headers: { authorization: `Bearer nm_support_${hex()}` } }), 403);
@@ -7294,9 +7284,6 @@ describe('Hosted MCP OAuth and tools', () => {
         ok(await stamped(chats.member, 'GET', `/v1/support/emails/${routed}`));
         error(await stamped(chats.member, 'GET', `/v1/support/emails/${stored}`), 404);
         ok(await stamped(chats.owner, 'GET', `/v1/support/emails/${stored}`));
-        // The grant path is unchanged: a grant still reads its member's domains.
-        const grant = ok(await mint({ userId: member.userId, verification: 'dmarc', workspaceIds: [acme] }), 201); secrets.add(grant.token);
-        assert.equal(ok(reply(await platform.read('/v1/support/domains', grant.token))).data.length, 1);
       });
 
       await t.test('4 removal: the next request drops a workspace the person left, and scope reports shrunk once it had been read', async () => {
@@ -7430,12 +7417,10 @@ describe('Hosted MCP OAuth and tools', () => {
         error(await stamped(inGamma, 'POST', '/v1/support/notes', { text: '   ' }), 422);
         error(await stamped(inGamma, 'POST', '/v1/support/notes', { text: 'x'.repeat(1001) }), 422);
         assert.equal((await write(inGamma, 'y'.repeat(1000))).text.length, 1000);
-        // Nothing but the binding's stamp writes or reads them: no session, no grant, no closed conversation.
+        // Nothing but the binding's stamp writes or reads them: no session, no bearer token, no closed conversation.
         error(await send('POST', '/v1/support/notes', session(writer, gamma), { text: 'From the dashboard.' }), 403, 'SUPPORT_GRANT_REQUIRED');
         error(await send('GET', '/v1/support/notes', session(colleague, gamma)), 403, 'SUPPORT_GRANT_REQUIRED');
-        const grant = ok(await mint({ userId: writer.userId, verification: 'dmarc', workspaceIds: [gamma] }), 201); secrets.add(grant.token);
-        error(reply(await platform.read('/v1/support/notes', grant.token)), 403, 'SUPPORT_CONVERSATION_REQUIRED');
-        error(await send('POST', '/v1/support/notes', { authorization: `Bearer ${grant.token}` }, { text: 'With a grant.' }), 403, 'SUPPORT_READ_ONLY');
+        error(await send('POST', '/v1/support/notes', { authorization: `Bearer nm_support_${hex()}` }, { text: 'With a bearer.' }), 403, 'SUPPORT_GRANT_REQUIRED');
 
         // Shown to the same person in any of their conversations, never to another member of the workspace.
         const expected = [['Prefers short answers.', gamma], ['Query ignored.', gamma], ['Delta sends receipts.', delta], ['y'.repeat(1000), gamma]];
@@ -8433,29 +8418,37 @@ describe('Hosted MCP OAuth and tools', () => {
 
   test('Support deliverability reads: weighted, one-workspace aggregates with rates, caps, redaction, findings and content consent', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
-      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [], support: { url: 'https://support.example.com/start' } });
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [], support: { url: 'https://support.example.com/start', signingKey: supportSigningKey() } });
       const wid = runtime.config.workspaceId, app = (await import('./src/app.js')).createApp();
       const send = async (method: string, path: string, headers: Record<string, string> = {}, body?: Json): Promise<Reply> => {
+        if (headers[STAMP]) {
+          const r = await platform.request(headers[STAMP], method, path, body);
+          return { status: r.status, body: r.body, headers: new Headers({ ...(r.requestId ? { 'x-request-id': r.requestId } : {}), ...(r.retryAfter ? { 'retry-after': r.retryAfter } : {}) }) };
+        }
         const res = await app.fetch(new Request(PUBLIC_ORIGIN + path, { method, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined }), runtime);
         const text = await res.text(); let parsed: unknown = text; try { parsed = JSON.parse(text); } catch { /* not JSON */ }
         return { status: res.status, body: parsed, headers: res.headers };
       };
-      const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN }), bearer = (token: string) => ({ authorization: `Bearer ${token}` });
-      // Grants come from an operator's dashboard session (the support platform mints them the same way).
+      const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN });
+      // Support reads go through conversations the support platform registered (SupportPlatform.request): a chat opened from
+      // "Contact support", or an email conversation an earlier release bound to an account (it covers every membership).
+      const { supportPlatform, platformRuntime } = await import('./src/support-platform.js');
+      const platform = supportPlatform(async (req, conversation) => app.fetch(req, { ...runtime, ...platformRuntime(conversation) }), () => runtime.config);
+      const base32 = 'abcdefghijklmnopqrstuvwxyz234567', newConversation = () => `conv_${Array.from(crypto.getRandomValues(new Uint8Array(26)), b => base32[b & 31]).join('')}`;
+      const stamp = (id: string) => ({ [STAMP]: id });
+      const opened = async (token: string) => { const id = newConversation(); assert.equal((await platform.registerConversation({ conversationId: id, evidence: { kind: 'handoff', token } })).status, 201); return { id }; };
+      const chat = async (f: SessionFixture, workspace: string) => opened(ok(await send('POST', '/v1/contact-support', { ...session(f), 'x-nightmail-workspace': workspace }, {}), 201).token);
+      const bound = async (f: SessionFixture) => { const id = newConversation(); await db.query(`INSERT INTO support_conversations(id, channel, user_id, pending_address, verification, mode) VALUES ($1, 'email', $2, $3, 'dmarc', 'member')`, [id, f.userId, f.email]); return { id }; };
       const operator = await sessionFixture(t, { staff: true }), outsider = await sessionFixture(t), other = unique('other-ws'), second = unique('second-ws'), ops = unique('ops-ws');
       await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1),($2,$2,$2),($3,$3,$3)', [other, second, ops]);
       await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner'),($4,$5,$6,'member'),($7,$8,$9,'member')`,
         [unique('mem'), other, outsider.userId, unique('mem'), second, manager!.userId, unique('mem'), ops, operator.userId]);
       await db.query("DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=ANY($1)", [[operator.userId, outsider.userId]]);
       await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator:read', 'support deliverability acceptance fixture')`, [operator.userId]);
-      const mint = async (body: Json) => { const grant = ok(await send('POST', '/v1/operator/support/grants', session(operator), { reason: 'Customer asked why mail goes to spam', ...body }), 201); secrets.add(grant.token); return grant; };
-      const handoff = ok(await local('POST', '/v1/contact-support', { shareContent: true, message: 'Gmail puts our newsletter in spam' }), 201);
-      const content = await mint({ userId: manager!.userId, ticketRef: 'D-1', verification: 'handoff', handoffId: handoff.id });
-      const plain = await mint({ userId: manager!.userId, ticketRef: 'D-2', verification: 'dmarc', workspaceIds: [wid] });
-      const both = await mint({ userId: manager!.userId, ticketRef: 'D-3', verification: 'dmarc' });
-      const theirs = await mint({ userId: outsider.userId, ticketRef: 'D-4', verification: 'magic_link' });
-      assert.deepEqual([content.contentWorkspaceId, plain.contentWorkspaceId, both.workspaceIds.length], [wid, null, 2]);
-      const support = bearer(content.token), get = async (path: string, who = support) => ok(await send('GET', path, who));
+      const content = await opened(ok(await local('POST', '/v1/contact-support', { shareContent: true, message: 'Gmail puts our newsletter in spam' }), 201).token);
+      const plain = await chat(manager!, wid), both = await bound(manager!), theirs = await chat(outsider, other);
+      const support = stamp(content.id), get = async (path: string, who = support) => ok(await send('GET', path, who));
+      assert.deepEqual([(await get('/v1/support/context')).grant.contentWorkspaceId, (await get('/v1/support/context', stamp(plain.id))).grant.contentWorkspaceId, (await get('/v1/support/workspaces', stamp(both.id))).data.length], [wid, null, 2]);
 
       // Synthetic mail of one workspace over the last days: providers, outcomes, a campaign, screen refusals, a simulated email.
       const tag = randomUUID().slice(0, 8), domain = `news-${tag}.example.com`, mailFrom = `mail.${domain}`, domainId = unique('dom'), campaignId = unique('cmp'), listId = unique('lst');
@@ -8594,12 +8587,12 @@ describe('Hosted MCP OAuth and tools', () => {
           [true, true, 2, '~all', 'none', false, 'live', true, false]);
         assert.deepEqual([health.dns.mailFrom.mx, health.volume.warmupAgeDays, health.streams.campaign], [[`feedback-smtp.${REGION}.amazonses.com`], 3, 20]);
         assert.deepEqual(health.findings.map((f: Json) => f.code).sort(), ['BIMI_NOT_READY', 'DMARC_NO_REPORTS']);
-        assert.equal((await get(`/v1/support/domains/${domainId}/health`, bearer(plain.token))).computedAt, health.computedAt, 'Results are cached 60 seconds per workspace and parameters.');
+        assert.equal((await get(`/v1/support/domains/${domainId}/health`, stamp(plain.id))).computedAt, health.computedAt, 'Results are cached 60 seconds per workspace and parameters.');
         lookups.length = 0;
         const { liveDns } = await import('./src/deliverability.js');
         assert.equal((await liveDns(domain, { domain: mailFrom, region: REGION }, null)).checkedAt, health.dns.checkedAt);
         assert.deepEqual(lookups, [], 'Live DNS is cached for 5 minutes.');
-        error(await send('GET', `/v1/support/domains/${domainId}/health`, bearer(theirs.token)), 404);
+        error(await send('GET', `/v1/support/domains/${domainId}/health`, stamp(theirs.id)), 404);
 
         // Route 4: the screen, with spam scores and subjects capped at 120 characters.
         const screen = await get('/v1/support/screen');
@@ -8610,8 +8603,8 @@ describe('Hosted MCP OAuth and tools', () => {
         const listed = campaigns.data.find((x: Json) => x.id === campaignId);
         assert.deepEqual([listed.audience.listName, listed.stats.rates.bounce, listed.previewTextLength, 'content' in listed], ['Newsletter', { numerator: 2, denominator: 20, value: 0.1 }, 8, false]);
         const detail = await get(`/v1/support/campaigns/${campaignId}`);
-        assert.match(detail.content.html, /hero\.png/); assert.equal((await get(`/v1/support/campaigns/${campaignId}`, bearer(plain.token))).content, null, 'No content without the customer’s opt-in.');
-        error(await send('GET', `/v1/support/campaigns/${campaignId}`, bearer(theirs.token)), 404);
+        assert.match(detail.content.html, /hero\.png/); assert.equal((await get(`/v1/support/campaigns/${campaignId}`, stamp(plain.id))).content, null, 'No content without the customer’s opt-in.');
+        error(await send('GET', `/v1/support/campaigns/${campaignId}`, stamp(theirs.id)), 404);
 
         // Route 6: lint; metadata always, content checks with consent (the probation screen's own HTML pass).
         const emailLint = await get(`/v1/support/emails/${lintable!.id}/lint`);
@@ -8619,7 +8612,7 @@ describe('Hosted MCP OAuth and tools', () => {
           [true, true, 5, ['bit.ly'], ['localhost'], ['name']]);
         assert.deepEqual(emailLint.findings.map((f: Json) => f.code).filter((code: string) => ['MISLEADING_REPLY_PREFIX', 'URL_SHORTENER', 'LINK_TEXT_MISMATCH', 'HIDDEN_TEXT', 'STAGING_LINKS', 'UNRESOLVED_TOKENS'].includes(code)).sort(),
           ['HIDDEN_TEXT', 'LINK_TEXT_MISMATCH', 'MISLEADING_REPLY_PREFIX', 'STAGING_LINKS', 'UNRESOLVED_TOKENS', 'URL_SHORTENER']);
-        const metadataOnly = ok(await send('GET', `/v1/support/emails/${lintable!.id}/lint`, bearer(plain.token)));
+        const metadataOnly = ok(await send('GET', `/v1/support/emails/${lintable!.id}/lint`, stamp(plain.id)));
         assert.deepEqual([metadataOnly.contentShared, metadataOnly.content], [false, null]); assert.ok(!JSON.stringify(metadataOnly).includes('bit.ly'));
         const campaignLint = await get(`/v1/support/campaigns/${campaignId}/lint`);
         assert.deepEqual([campaignLint.content.images.rulePasses, campaignLint.content.unresolvedTokens, campaignLint.content.links.plainHttp, campaignLint.metadata.listUnsubscribe], [false, ['plan'], 1, true]);
@@ -8634,51 +8627,63 @@ describe('Hosted MCP OAuth and tools', () => {
         assert.ok(!address.test(JSON.stringify(audience)), 'Audience health never shows an address.');
 
         // One workspace per aggregate; another customer's workspace is invisible; every read sets the 3-second timeout.
-        error(await send('GET', '/v1/support/deliverability/metrics', bearer(both.token)), 422, 'WORKSPACE_REQUIRED');
-        ok(await send('GET', `/v1/support/deliverability/metrics?workspaceId=${second}`, bearer(both.token)));
+        error(await send('GET', '/v1/support/deliverability/metrics', stamp(both.id)), 422, 'WORKSPACE_REQUIRED');
+        ok(await send('GET', `/v1/support/deliverability/metrics?workspaceId=${second}`, stamp(both.id)));
         error(await send('GET', `/v1/support/deliverability/metrics?workspaceId=${other}`, support), 404);
-        error(await send('GET', `/v1/support/emails/${lintable!.id}/lint`, bearer(theirs.token)), 404);
-        assert.equal(ok(await send('GET', '/v1/support/audience/health', bearer(theirs.token))).lists.length, 0);
+        error(await send('GET', `/v1/support/emails/${lintable!.id}/lint`, stamp(theirs.id)), 404);
+        assert.equal(ok(await send('GET', '/v1/support/audience/health', stamp(theirs.id))).lists.length, 0);
         // budgetedRead runs inside the fixture's transaction as a savepoint, so its SET LOCAL is still visible here.
         assert.equal((await db.query('SHOW statement_timeout')).rows[0].statement_timeout, '3s');
-        // Each aggregate costs 5 of the grant's 120 a minute: 24 of them use it up, a cheap read then gets 429 too.
-        const fresh = await mint({ userId: manager!.userId, ticketRef: 'D-5', verification: 'dmarc', workspaceIds: [wid] });
-        for (let i = 0; i < 24; i++) ok(await send('GET', '/v1/support/screen', bearer(fresh.token)));
-        assert.equal((await db.query('SELECT used FROM support_grants WHERE id = $1', [fresh.id])).rows[0].used, 120);
-        error(await send('GET', '/v1/support/screen', bearer(fresh.token)), 429, 'REQUEST_RATE_LIMITED');
-        error(await send('GET', '/v1/support/workspaces', bearer(fresh.token)), 429, 'REQUEST_RATE_LIMITED');
-        await db.query('UPDATE support_grants SET used = 119 WHERE id = $1', [fresh.id]);
-        ok(await send('GET', '/v1/support/workspaces', bearer(fresh.token)));
+        // Each aggregate costs 5 of the conversation's 120 a minute: 24 of them use it up, a cheap read then gets 429 too.
+        const fresh = await chat(manager!, wid);
+        for (let i = 0; i < 24; i++) ok(await send('GET', '/v1/support/screen', stamp(fresh.id)));
+        assert.equal((await db.query('SELECT used FROM support_conversations WHERE id = $1', [fresh.id])).rows[0].used, 120);
+        error(await send('GET', '/v1/support/screen', stamp(fresh.id)), 429, 'REQUEST_RATE_LIMITED');
+        error(await send('GET', '/v1/support/workspaces', stamp(fresh.id)), 429, 'REQUEST_RATE_LIMITED');
+        await db.query('UPDATE support_conversations SET used = 119 WHERE id = $1', [fresh.id]);
+        ok(await send('GET', '/v1/support/workspaces', stamp(fresh.id)));
         // Every read is audited like the other support routes.
         assert.ok((await db.query(`SELECT count(*)::int AS n FROM audit_events WHERE action = 'support.read' AND actor_id = $1 AND summary->>'route' = '/v1/support/deliverability/metrics'`, [content.id])).rows[0].n >= 8);
       } finally { globalThis.fetch = previous; }
     });
   });
 
-  test('Support request logs: Workers Logs lines of the grant’s workspaces only, allow-listed, grouped, weighted, and unavailable without Cloudflare', async t => {
+  test('Support request logs: Workers Logs lines of the conversation’s workspaces only, allow-listed, grouped, weighted, and unavailable without Cloudflare', async t => {
     // One clock for the whole test, as Postgres's now() is one for its transaction: the default window ends at the next
     // whole minute and keys the 60-second cache, so two reads either side of a minute boundary missed it (dev, Nov 17).
     t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
     await simulatedSesFixture(t, async ({ runtime, db }) => {
-      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [], support: { url: 'https://support.example.com/start' }, observability: undefined });
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [], support: { url: 'https://support.example.com/start', signingKey: supportSigningKey() }, observability: undefined });
       const wid = runtime.config.workspaceId, app = (await import('./src/app.js')).createApp();
       const send = async (method: string, path: string, headers: Record<string, string> = {}, body?: Json): Promise<Reply> => {
+        if (headers[STAMP]) {
+          const r = await platform.request(headers[STAMP], method, path, body);
+          return { status: r.status, body: r.body, headers: new Headers({ ...(r.requestId ? { 'x-request-id': r.requestId } : {}), ...(r.retryAfter ? { 'retry-after': r.retryAfter } : {}) }) };
+        }
         const res = await app.fetch(new Request(PUBLIC_ORIGIN + path, { method, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined }), runtime);
         const text = await res.text(); let parsed: unknown = text; try { parsed = JSON.parse(text); } catch { /* not JSON */ }
         return { status: res.status, body: parsed, headers: res.headers };
       };
-      const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN }), bearer = (token: string) => ({ authorization: `Bearer ${token}` });
+      const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN });
+      // Support reads go through conversations the support platform registered (SupportPlatform.request): a chat opened from
+      // "Contact support", or an email conversation an earlier release bound to an account (it covers every membership).
+      const { supportPlatform, platformRuntime } = await import('./src/support-platform.js');
+      const platform = supportPlatform(async (req, conversation) => app.fetch(req, { ...runtime, ...platformRuntime(conversation) }), () => runtime.config);
+      const base32 = 'abcdefghijklmnopqrstuvwxyz234567', newConversation = () => `conv_${Array.from(crypto.getRandomValues(new Uint8Array(26)), b => base32[b & 31]).join('')}`;
+      const stamp = (id: string) => ({ [STAMP]: id });
+      const opened = async (token: string) => { const id = newConversation(); assert.equal((await platform.registerConversation({ conversationId: id, evidence: { kind: 'handoff', token } })).status, 201); return { id }; };
+      const chat = async (f: SessionFixture, workspace: string) => opened(ok(await send('POST', '/v1/contact-support', { ...session(f), 'x-nightmail-workspace': workspace }, {}), 201).token);
+      const bound = async (f: SessionFixture) => { const id = newConversation(); await db.query(`INSERT INTO support_conversations(id, channel, user_id, pending_address, verification, mode) VALUES ($1, 'email', $2, $3, 'dmarc', 'member')`, [id, f.userId, f.email]); return { id }; };
       const rid = () => `req_${randomUUID().replaceAll('-', '')}`;
       const operator = await sessionFixture(t, { staff: true }), outsider = await sessionFixture(t), other = unique('other-ws'), second = unique('second-ws'), ops = unique('ops-ws');
       await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1),($2,$2,$2),($3,$3,$3)', [other, second, ops]);
-      await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner'),($4,$5,$6,'member'),($7,$8,$9,'member')`,
+      await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner'),($4,$5,$6,'admin'),($7,$8,$9,'member')`,
         [unique('mem'), other, outsider.userId, unique('mem'), second, manager!.userId, unique('mem'), ops, operator.userId]);
       await db.query("DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=ANY($1)", [[operator.userId, outsider.userId]]);
       await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator:read', 'support request logs acceptance fixture')`, [operator.userId]);
-      const mint = async (body: Json) => { const grant = ok(await send('POST', '/v1/operator/support/grants', session(operator), { reason: 'Customer asked why their sends fail', verification: 'dmarc', ...body }), 201); secrets.add(grant.token); return grant; };
-      const grant = await mint({ userId: manager!.userId, ticketRef: 'L-1', workspaceIds: [wid] }), both = await mint({ userId: manager!.userId, ticketRef: 'L-2' });
-      const support = bearer(grant.token), get = async (path: string, who = support) => ok(await send('GET', path, who));
-      assert.deepEqual(both.workspaceIds.sort(), [wid, second].sort());
+      const grant = await chat(manager!, wid), both = await bound(manager!);
+      const support = stamp(grant.id), get = async (path: string, who = support) => ok(await send('GET', path, who));
+      assert.deepEqual((await get('/v1/support/workspaces', stamp(both.id))).data.map((w: Json) => w.id).sort(), [wid, second].sort());
 
       // Not configured (a Node installation, or no token yet): available false, and nothing is asked.
       const unconfigured = await get('/v1/support/requests');
@@ -8687,7 +8692,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const untraced = await get(`/v1/support/requests/${rid()}`);
       assert.deepEqual([untraced.found, untraced.logs, untraced.logsAvailable], [false, [], false]);
 
-      // Workers Logs, answered here: the grant's lines, and lines it must never see even when Cloudflare returns them.
+      // Workers Logs, answered here: the conversation's lines, and lines it must never see even when Cloudflare returns them.
       runtime.config.observability = { token: 'cf-observability-fixture-token', accountId: 'f'.repeat(32), script: 'bane-fixture' };
       const minutes = (n: number) => Date.now() - n * 60_000, ids = Array.from({ length: 7 }, rid), domainIds = [rid(), rid()], failed = rid(), shared = rid(), older = rid();
       const line = (minutesAgo: number, source: Json, script = 'bane-fixture') => ({ dataset: 'cloudflare-workers', timestamp: minutes(minutesAgo),
@@ -8705,7 +8710,7 @@ describe('Hosted MCP OAuth and tools', () => {
         line(2, { requestId: shared, workspace: second, route: '/v1/campaigns', code: 'CAMPAIGN_NOT_READY' }),
         // Two days old: outside the 24-hour list and the first 6 hours a trace looks at.
         line(2880, { requestId: older }),
-        // Never this grant's: another customer's workspace, the grant's own support reads, another Worker, a non-request line.
+        // Never this conversation's: another customer's workspace, support's own reads, another Worker, a non-request line.
         line(3, { requestId: ids[0], workspace: other, route: '/v1/other-secret', code: 'OTHER_WORKSPACE_CODE' }),
         line(4, { requestId: rid(), workspace: other, status: 500, code: 'OTHER_WORKSPACE_CODE' }),
         line(5, { requestId: rid(), route: '/v1/support/context', principal: 'support', code: 'WORKSPACE_REQUIRED' }),
@@ -8731,7 +8736,7 @@ describe('Hosted MCP OAuth and tools', () => {
         const eq = (key: string, value: unknown, type = 'string') => ({ key, operation: 'eq', type, value });
         const workspaceGroup = (list: string[]) => ({ kind: 'group', filterCombination: 'or', filters: list.map(id => eq('workspace', id)) });
         const listed = await get('/v1/support/requests');
-        // The query: this account and Worker, the token, request lines of the grant's workspace only, errors only, 24 hours.
+        // The query: this account and Worker, the token, request lines of the conversation's workspace only, errors only, 24 hours.
         assert.equal(asked.length, 1);
         const [query] = asked;
         assert.equal(query!.url, `https://api.cloudflare.com/client/v4/accounts/${'f'.repeat(32)}/workers/observability/telemetry/query`);
@@ -8763,11 +8768,11 @@ describe('Hosted MCP OAuth and tools', () => {
         const narrowed = await get('/v1/support/requests?route=/v1/emails&code=VALIDATION_FAILED');
         assert.deepEqual(asked.at(-1)!.body.parameters.filters.slice(4), [eq('route', '/v1/emails'), eq('code', 'VALIDATION_FAILED')]);
         assert.deepEqual(narrowed.groups.map((g: Json) => g.count), [7]);
-        // A grant over two workspaces asks for both; workspaceId narrows to one.
-        const wide = await get('/v1/support/requests', bearer(both.token));
+        // A conversation over two workspaces asks for both; workspaceId narrows to one.
+        const wide = await get('/v1/support/requests', stamp(both.id));
         assert.deepEqual(asked.at(-1)!.body.parameters.filters[2].filters.map((f: Json) => f.value).sort(), [wid, second].sort());
         assert.equal(wide.totals.errors, 12); assert.ok(wide.groups.some((g: Json) => g.code === 'CAMPAIGN_NOT_READY' && g.sampleRequestIds[0] === shared));
-        const onlySecond = await get(`/v1/support/requests?workspaceId=${second}`, bearer(both.token));
+        const onlySecond = await get(`/v1/support/requests?workspaceId=${second}`, stamp(both.id));
         assert.deepEqual(asked.at(-1)!.body.parameters.filters[2], workspaceGroup([second]));
         assert.deepEqual(onlySecond.groups.map((g: Json) => [g.code, g.count]), [['CAMPAIGN_NOT_READY', 1]]);
         error(await send('GET', `/v1/support/requests?workspaceId=${other}`, support), 404);
@@ -8778,7 +8783,7 @@ describe('Hosted MCP OAuth and tools', () => {
         error(await send('GET', '/v1/support/requests?route=/v1/emails?to=x', support), 422);
         assert.equal(asked.length, before, 'A refused read asks nothing.');
 
-        // One request: its lines in the grant's workspaces only (the stub also returns another workspace's line with that ID),
+        // One request: its lines in the conversation's workspaces only (the stub also returns another workspace's line with that ID),
         // found in the last 6 hours with one query.
         const tracing = asked.length, traced = await get(`/v1/support/requests/${ids[0]}`);
         assert.deepEqual(asked.at(-1)!.body.parameters.filters, [eq('$workers.scriptName', 'bane-fixture'), eq('event', 'request'), workspaceGroup([wid]), eq('requestId', ids[0])]);
@@ -8789,8 +8794,8 @@ describe('Hosted MCP OAuth and tools', () => {
         const searching = asked.length, old = await get(`/v1/support/requests/${older}`);
         assert.deepEqual([asked.length - searching, old.found, old.logs.map((l: Json) => l.at)], [2, true, [new Date(events.find(e => (e.source as Json).requestId === older)!.timestamp).toISOString()]]);
         assert.ok(asked.at(-1)!.body.timeframe.to - asked.at(-1)!.body.timeframe.from >= 3 * 86_400_000);
-        assert.deepEqual((await get(`/v1/support/requests/${shared}`)).logs, [], 'A line of a workspace outside the grant is never shown.');
-        assert.equal((await get(`/v1/support/requests/${shared}`, bearer(both.token))).logs[0].workspaceId, second);
+        assert.deepEqual((await get(`/v1/support/requests/${shared}`)).logs, [], 'A line of a workspace outside the conversation is never shown.');
+        assert.equal((await get(`/v1/support/requests/${shared}`, stamp(both.id))).logs[0].workspaceId, second);
 
         // Cloudflare failing: 200 with available false, a warning with the HTTP status only, and no cached failure.
         warnings.length = 0; outage = { status: 500, body: { success: false, errors: [{ code: 10000, message: 'Authentication error for private@example.org' }] } };
@@ -8807,82 +8812,14 @@ describe('Hosted MCP OAuth and tools', () => {
         outage = null;
         assert.equal((await get(`/v1/support/requests?since=${since}`)).available, true, 'A failure is not cached.');
 
-        // Each request read costs 5 of the grant's 120 a minute.
-        const fresh = await mint({ userId: manager!.userId, ticketRef: 'L-3', workspaceIds: [wid] });
-        await get(`/v1/support/requests/${ids[2]}`, bearer(fresh.token));
-        assert.equal((await db.query('SELECT used FROM support_grants WHERE id = $1', [fresh.id])).rows[0].used, 5);
-        for (let i = 0; i < 23; i++) await get('/v1/support/requests', bearer(fresh.token));
-        assert.equal((await db.query('SELECT used FROM support_grants WHERE id = $1', [fresh.id])).rows[0].used, 120);
-        error(await send('GET', '/v1/support/requests', bearer(fresh.token)), 429, 'REQUEST_RATE_LIMITED');
+        // Each request read costs 5 of the conversation's 120 a minute.
+        const fresh = await chat(manager!, wid);
+        await get(`/v1/support/requests/${ids[2]}`, stamp(fresh.id));
+        assert.equal((await db.query('SELECT used FROM support_conversations WHERE id = $1', [fresh.id])).rows[0].used, 5);
+        for (let i = 0; i < 23; i++) await get('/v1/support/requests', stamp(fresh.id));
+        assert.equal((await db.query('SELECT used FROM support_conversations WHERE id = $1', [fresh.id])).rows[0].used, 120);
+        error(await send('GET', '/v1/support/requests', stamp(fresh.id)), 429, 'REQUEST_RATE_LIMITED');
       } finally { globalThis.fetch = previous; console.warn = warn; }
-    });
-  });
-
-  test('Support staff sign-in: an operator session gets a 2-minute staff token for the support site; only the binding verifies it, and only while they are an operator', async t => {
-    await simulatedSesFixture(t, async ({ runtime, db }) => {
-      const jwk = (generateKeyPairSync('ed25519').privateKey.export({ format: 'jwk' }) as Json), key = { kty: 'OKP' as const, crv: 'Ed25519' as const, d: jwk.d as string, x: jwk.x as string };
-      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [], support: { url: 'https://support.example.com/start', signingKey: key } });
-      const app = (await import('./src/app.js')).createApp();
-      const send = async (method: string, path: string, headers: Record<string, string> = {}, body?: Json): Promise<Reply> => {
-        const res = await app.fetch(new Request(PUBLIC_ORIGIN + path, { method, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined }), runtime);
-        const text = await res.text(); let parsed: unknown = text; try { parsed = JSON.parse(text); } catch { /* not JSON */ }
-        return { status: res.status, body: parsed, headers: res.headers };
-      };
-      const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN });
-      const { supportPlatform, supportPlatformAllows, signSupportToken } = await import('./src/support-platform.js');
-      const platform = supportPlatform(async req => app.fetch(req, { ...runtime, platformCaller: 'bane-support' }), () => runtime.config);
-      const operator = await sessionFixture(t, { staff: true }), member = await sessionFixture(t);
-      await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator:read', 'support staff sign-in acceptance fixture')`, [operator.userId]);
-      const callback = 'https://support.example.com/staff/callback';
-      const signIn = (to: string, who = operator) => send('GET', `/v1/operator/support/staff-sign-in?return=${encodeURIComponent(to)}`, session(who));
-
-      // An operator's dashboard session: 302 to exactly the callback, carrying a 2-minute EdDSA JWS with today's key ID.
-      const signed = await signIn(callback);
-      assert.equal(signed.status, 302, JSON.stringify(signed.body));
-      const location = new URL(signed.headers.get('location')!);
-      assert.deepEqual([location.origin + location.pathname, [...location.searchParams.keys()], signed.headers.get('cache-control')], [callback, ['staff'], 'no-store']);
-      const token = location.searchParams.get('staff')!, [header, payload, signature] = token.split('.') as [string, string, string];
-      const head = JSON.parse(Buffer.from(header, 'base64url').toString()), claims = JSON.parse(Buffer.from(payload, 'base64url').toString());
-      const jwks = ok(await send('GET', '/v1/public/support-keys'));
-      assert.deepEqual([head.alg, head.kid], ['EdDSA', jwks.keys[0].kid]);
-      const verifier = await crypto.subtle.importKey('jwk', jwks.keys[0], { name: 'Ed25519' }, false, ['verify']);
-      assert.ok(await crypto.subtle.verify({ name: 'Ed25519' }, verifier, Buffer.from(signature, 'base64url'), new TextEncoder().encode(`${header}.${payload}`)));
-      assert.deepEqual([claims.iss, claims.aud, claims.sub, claims.email, claims.role, claims.exp - claims.iat], [runtime.config.publicUrl, 'bane-support-staff', operator.userId, operator.email, 'operator:read', 120]);
-      assert.match(claims.jti, /^sst_[0-9a-f]{32}$/); assert.ok(Math.abs(claims.iat - Date.now() / 1000) < 60);
-      const audit = (await db.query(`SELECT actor_type, actor_id, user_id, workspace_id, internal, summary FROM audit_events WHERE action = 'support.staff_sign_in' AND actor_id = $1`, [operator.userId])).rows;
-      assert.deepEqual(audit.map(r => [r.actor_type, r.user_id, r.workspace_id, r.internal, r.summary.jti]), [['operator', operator.userId, null, true, claims.jti]]);
-
-      // The support Worker verifies it through the binding: the operator as they are now, and the jti and expiry for single use.
-      assert.deepEqual(await platform.verifyStaff(token), { ok: true, staff: { userId: operator.userId, email: operator.email, role: 'operator:read' }, jti: claims.jti, expiresAt: new Date(claims.exp * 1000).toISOString() });
-
-      // Refused: a session that is not an operator's, any other return, the binding asking for a sign-in, a dashboard verifying.
-      error(await signIn(callback, member), 403, 'OPERATOR_REQUIRED');
-      for (const wrong of [`${callback}?next=/tickets`, `${callback}#x`, `${callback}/`, 'https://support.example.com/staff/other', 'https://support.example.com/start', 'https://evil.example.com/staff/callback',
-        'http://support.example.com/staff/callback', 'https://support.example.com.evil.example/staff/callback', 'https://staff@support.example.com/staff/callback', '/staff/callback', 'not a url'])
-        error(await signIn(wrong), 422, 'RETURN_URL_INVALID');
-      assert.equal(supportPlatformAllows('GET', '/v1/operator/support/staff-sign-in'), false);
-      assert.equal(supportPlatformAllows('POST', '/v1/operator/support/staff/verify'), true);
-      const viaBinding = await platform.call<Json>('GET', `/v1/operator/support/staff-sign-in?return=${encodeURIComponent(callback)}`);
-      assert.deepEqual([viaBinding.status, viaBinding.body.error.code], [404, 'NOT_FOUND']);
-      // Past its allow-list, the route itself still refuses the binding.
-      const bypass = await app.fetch(new Request(`${PUBLIC_ORIGIN}/v1/operator/support/staff-sign-in?return=${encodeURIComponent(callback)}`), { ...runtime, platformCaller: 'bane-support' });
-      assert.deepEqual([bypass.status, bypass.headers.get('location')], [403, null]);
-      error(await send('POST', '/v1/operator/support/staff/verify', session(operator), { token }), 403, 'SUPPORT_PLATFORM_REQUIRED');
-      error(await send('POST', '/v1/operator/support/staff/verify', session(member), { token }), 403, 'OPERATOR_REQUIRED');
-
-      // Tokens Bane did not issue for staff sign-in, or that are past their two minutes, or whose subject is no operator.
-      const now = Math.floor(Date.now() / 1000), sign = (extra: Json, with_ = key) => signSupportToken(with_, { ...claims, ...extra });
-      const other = generateKeyPairSync('ed25519').privateKey.export({ format: 'jwk' }) as Json;
-      const invalid = [`${header}.${payload}.${Buffer.from('forged').toString('base64url')}`, `${header}.${Buffer.from(JSON.stringify({ ...claims, sub: member.userId })).toString('base64url')}.${signature}`,
-        await sign({ aud: 'bane-support' }), await sign({ iss: 'https://other.example.com' }), await sign({ exp: now + 3600 }), await sign({ jti: 'sho_' + '0'.repeat(32) }),
-        await sign({}, { kty: 'OKP', crv: 'Ed25519', d: other.d, x: other.x }), '', 'a.b.c'];
-      for (const bad of invalid) assert.deepEqual(await platform.verifyStaff(bad), { ok: false, code: 'STAFF_INVALID' }, bad);
-      assert.deepEqual(await platform.verifyStaff(await sign({ iat: now - 300, exp: now - 180 })), { ok: false, code: 'STAFF_EXPIRED' });
-      assert.deepEqual(await platform.verifyStaff(await sign({ sub: member.userId })), { ok: false, code: 'NOT_OPERATOR' });
-      // Demoted since: the same valid token no longer signs them in, nor can they ask for another.
-      await db.query('DELETE FROM platform_operators WHERE user_id = $1', [operator.userId]);
-      assert.deepEqual(await platform.verifyStaff(token), { ok: false, code: 'NOT_OPERATOR' });
-      error(await signIn(callback), 403, 'OPERATOR_REQUIRED');
     });
   });
 

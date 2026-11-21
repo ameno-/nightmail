@@ -124,7 +124,7 @@ While an answer is being worked on, the panel shows one status line in the messa
 
 Render a card: "Let support read emails in **Acme Prod**?" with the `why` and two buttons, **Allow for this chat** and **Not now**.
 
-- **Allow for this chat:** call `POST /v1/support-conversations/{conversationId}/content-access` on Nightmail (the dashboard session), then send `consent.respond` with `decision: "allow"` (§5), even if that call failed. Nightmail decides: the Worker allows content only when the conversation's scope says the person allowed it in the card's workspace. The `handoff` the panel still sends with it (`POST /v1/contact-support` with `shareContent: true`) is ignored by this Worker and kept for one release, for the previous one.
+- **Allow for this chat:** call `POST /v1/support-conversations/{conversationId}/content-access` on Nightmail (the dashboard session), then send `consent.respond` with `decision: "allow"` (§5), even if that call failed. Nightmail decides: the Worker allows content only when the conversation's scope says the person allowed it in the card's workspace.
 - **Not now:** send `consent.respond` with `decision: "deny"`.
 
 The agent finishes its current answer by saying it has asked, and continues on its own once the person decides: after `consent.resolved` a new `message.start` follows. A card whose request was resolved elsewhere (another tab) closes.
@@ -180,7 +180,7 @@ The agent ends its answer with the proposal and carries on once it is decided: o
 ```jsonc
 { "type": "user.message", "clientMessageId": "c_…", "text": "Why are Gmail opens down?" }  // ≤ 8,000 characters
 { "type": "user.message", "clientMessageId": "c_…", "text": "This is what I see", "attachments": ["att_…"] }  // uploaded first (§5.1); text may be empty
-{ "type": "consent.respond", "requestId": "cns_…", "decision": "allow", "handoff": "<JWS with shareContent>" }  // handoff: ignored, kept for one release
+{ "type": "consent.respond", "requestId": "cns_…", "decision": "allow" }
 { "type": "consent.respond", "requestId": "cns_…", "decision": "deny" }
 { "type": "action.resolved", "actionId": "sac_…" }   // after the person decides (§4.4): read what came of it from Nightmail
 { "type": "human.request" }                     // "Talk to a person": files a ticket (once per conversation)
@@ -224,7 +224,7 @@ X-Filename: <URI-encoded file name, optional>
 
 ## 6. What the panel can rely on
 
-- It never receives grant tokens, tool arguments, raw tool results, internal IDs other than the ones above, or other customers' data.
+- It never receives credentials, tool arguments, raw tool results, internal IDs other than the ones above, or other customers' data.
 - The final text of every assistant message has passed the output gate. Streamed deltas are shown as they arrive; if the gate trips, `message.end` replaces the text with `redacted: true`.
 - One conversation, one person: a chat token for one conversation is refused on another.
 

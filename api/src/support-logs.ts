@@ -3,7 +3,7 @@ import { log, type Config } from './core.js';
 // The customer's own requests, from this Worker's request lines in Workers Logs (api/README.md "Support integration"):
 // app.ts writes one `event: 'request'` line per request (route template, method, status, code, workspace, principal,
 // duration; PR #131) and Workers Logs keeps them about 3 days. Nightmail asks the Workers Observability telemetry API for
-// this Worker's request lines in the grant's workspaces only, then checks every returned line again here (defense in
+// this Worker's request lines in the conversation's workspaces only, then checks every returned line again here (defense in
 // depth: a line outside those workspaces is dropped, whatever the API answered) and builds its answer from an explicit
 // allow-list of fields. Never a message, address, user agent, URL, body or anything else a line might carry.
 
@@ -22,7 +22,7 @@ export class LogsUnavailable extends Error {}
 export const ROUTE_TEMPLATE = /^(?:unmatched|worker-runtime|group:[a-z-]{1,40}|(?:\/[A-Za-z0-9_.*:{}-]{0,80}){1,12})$/;
 export const ERROR_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
 const METHOD = /^[A-Z]{3,7}$/, PRINCIPAL = /^[A-Za-z][A-Za-z0-9_]{0,39}$/, REQUEST_ID = /^req_[0-9a-f]{32}$/;
-/** Callers that are not the customer: a support grant's own reads, the support platform's binding, and operators. */
+/** Callers that are not the customer: a support conversation's own reads, the support platform's binding, and operators. */
 const NOT_CUSTOMER = new Set(['support', 'operatorService']);
 const internalRoute = (route: string) => /^\/v1\/(?:support|operator)(?:\/|$)/.test(route);
 

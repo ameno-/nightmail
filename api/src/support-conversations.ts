@@ -9,7 +9,7 @@ import { productName } from './brand.js';
 // Support conversations (api/README.md "Support integration"). The support platform registers each chat or email
 // conversation it holds; Nightmail alone decides who it is for, from evidence it checks itself:
 //
-// - chat: its own signed handoff (POST /v1/contact-support) and the unused handoff row, once, shared with grants;
+// - chat: its own signed handoff (POST /v1/contact-support) and the unused handoff row, once;
 // - email: the stored From and DMARC verdict of a message it received at a support address (NIGHTMAIL_SUPPORT_ADDRESS_IDS),
 //   which decide only how the support platform answers. An email conversation is never bound to an account.
 //
@@ -73,13 +73,13 @@ export const ceilingFor = (method: string, path: string) => {
   const verb = method === 'HEAD' ? 'GET' : method;
   return compiled.find(entry => entry.method === verb && entry.pattern.test(path));
 };
-/** The workspaces of a conversation's scope whose role reads this context section (a grant: all of them). */
-export function sectionIds(c: Ctx, section: keyof typeof CONTEXT_SECTIONS, workspaces: { id: string; role: SupportRole }[]) {
+/** The workspaces of a conversation's scope whose role reads this context section. */
+export function sectionIds(section: keyof typeof CONTEXT_SECTIONS, workspaces: { id: string; role: SupportRole }[]) {
   const roles: readonly SupportRole[] = CONTEXT_SECTIONS[section].roles;
-  return c.get('support')?.conversation ? workspaces.filter(w => roles.includes(w.role)).map(w => w.id) : workspaces.map(w => w.id);
+  return workspaces.filter(w => roles.includes(w.role)).map(w => w.id);
 }
 /** A conversation's workspaces where it reads received mail as a member does: only mail on receiving addresses. */
-export const routedOnly = (c: Ctx, workspaces: { id: string; role: SupportRole }[]) => c.get('support')?.conversation ? workspaces.filter(w => w.role === 'member').map(w => w.id) : [];
+export const routedOnly = (workspaces: { id: string; role: SupportRole }[]) => workspaces.filter(w => w.role === 'member').map(w => w.id);
 
 /** Open chats per person, checked at registration. */
 export const OPEN_CONVERSATIONS = 10;
@@ -140,7 +140,7 @@ export function registerSupportConversations(app: App) {
   const ConversationParam = z.object({ id: z.string().regex(CONVERSATION_ID) });
 
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security: operatorSecurity, method: 'post', path: '/v1/operator/support/conversations', operationId: 'operatorRegisterSupportConversation',
-    description: 'The support platform registers a conversation (the binding only). Nightmail checks the evidence itself and decides who it is for. A handoff opens one conversation or one grant, once, for its person; an email registers again with each message, from its one sender, and is never bound to an account.',
+    description: 'The support platform registers a conversation (the binding only). Nightmail checks the evidence itself and decides who it is for. A handoff opens one conversation, once, for its person; an email registers again with each message, from its one sender, and is never bound to an account.',
     request: { body: json(z.object({
       conversationId: z.string().regex(CONVERSATION_ID),
       evidence: z.discriminatedUnion('kind', [
@@ -161,7 +161,7 @@ export function registerSupportConversations(app: App) {
       const claims = checked.claims;
       const result = await c.env.db.transaction(async tx => {
         await admit(tx, claims.userId);
-        // A handoff opens one conversation or one grant (it is locked, then marked used in the same statement), for the
+        // A handoff opens one conversation (it is locked, then marked used in the same statement), for the
         // user and workspace it names, while they are still a member there.
         const { rows: [row] } = await tx.execute<Row & { handoff: boolean; used: boolean; used_by: string | null; is_member: boolean; taken: boolean }>(sql`WITH h AS (
             SELECT id, user_id, workspace_id, share_content, used_at, conversation_id FROM support_handoffs

@@ -7,7 +7,7 @@
 const encoder = new TextEncoder();
 const b64url = (bytes: ArrayBuffer | Uint8Array) => btoa(String.fromCharCode(...new Uint8Array(bytes))).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
 
-export type Purpose = 'chat-token/v1' | 'confirm/v1' | 'attachment/v1' | 'staff/v1';
+export type Purpose = 'chat-token/v1' | 'confirm/v1' | 'attachment/v1';
 const keys = new Map<string, Promise<CryptoKey>>();
 
 /** The HMAC key for one purpose; the root never leaves this function. Fails closed when the secret is missing or weak. */

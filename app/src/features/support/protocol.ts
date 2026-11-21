@@ -47,9 +47,7 @@ export type ServerMessage =
 
 export type ClientMessage =
   | { type: 'user.message'; clientMessageId: string; text: string; attachments?: string[] }
-  // handoff: ignored by the current support Worker (Nightmail decides), kept for one release for the previous one.
-  | { type: 'consent.respond'; requestId: string; decision: 'allow'; handoff?: string }
-  | { type: 'consent.respond'; requestId: string; decision: 'deny' }
+  | { type: 'consent.respond'; requestId: string; decision: 'allow' | 'deny' }
   | { type: 'action.resolved'; actionId: string }
   | { type: 'human.request' }
   | { type: 'cancel' }

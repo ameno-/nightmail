@@ -65,7 +65,7 @@ export function registerSupportNotes(app: App) {
       return row;
     });
     // The gate admitted the conversation; it closed in between.
-    if (!note) throw new ApiError(403, 'SUPPORT_GRANT_REQUIRED', `This area is for ${productName} support with an active support grant.`);
+    if (!note) throw new ApiError(403, 'SUPPORT_GRANT_REQUIRED', `This area is for ${productName} support, for an open support conversation.`);
     return c.json(iso(note), 201);
   });
 

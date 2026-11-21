@@ -4,7 +4,7 @@ import type { Env } from './env.js';
 import { attachmentLink, safeName, storeImage } from './attachments.js';
 import { cleanImage, ImageRejected, IMAGE_TYPES, MAX_IMAGE_BYTES } from './image.js';
 import { countToday, holdOverCap, mailAllowed, ticketAllowed } from './limits.js';
-import { fileTicket, ticketEmail, type FiledTicket, type TicketContext } from './tickets.js';
+import { fileTicket, INTAKE_MODEL, ticketEmail, type FiledTicket, type TicketContext } from './tickets.js';
 import type { TicketInput, TicketType } from './agent/tools.js';
 import { addressHash, MissingSecret, newId } from './tokens.js';
 import { external, WorkQueue, type NewWork, type Outcome, type WorkRow } from './work.js';
@@ -44,24 +44,31 @@ export class SupportIntake extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
-    this.sql.exec(`CREATE TABLE IF NOT EXISTS intake_inbox (message_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, mailbox TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'new', attempts INTEGER NOT NULL DEFAULT 0, received_at INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS intake_meta (id INTEGER PRIMARY KEY CHECK (id = 1), conversation_id TEXT NOT NULL);`);
-    // The address the message was sent to, for the acknowledgement (rows queued before it was kept have none).
-    if (!this.sql.exec("SELECT 1 FROM pragma_table_info('intake_inbox') WHERE name = 'address'").toArray().length) this.sql.exec('ALTER TABLE intake_inbox ADD COLUMN address TEXT');
+    this.sql.exec('CREATE TABLE IF NOT EXISTS intake_meta (id INTEGER PRIMARY KEY CHECK (id = 1), conversation_id TEXT NOT NULL)');
     this.work = new WorkQueue(ctx.storage, { db: env.DB, flow: 'intake', object: ctx.id.toString() });
-    // Import once per row, retaining finished messages for webhook dedupe. Old 'failed' meant retries exhausted.
-    const imported = this.sql.exec(`INSERT INTO _support_work(id,kind,state,payload,due_at,attempts,created_at,updated_at)
-      SELECT 'msg:'||message_id,'message',CASE WHEN state IN ('done','held') THEN state ELSE 'pending' END,
-        json_object('messageId',message_id,'threadId',thread_id,'mailbox',mailbox,'address',address),received_at,attempts,received_at,?
-      FROM intake_inbox WHERE NOT EXISTS (SELECT 1 FROM _support_work WHERE id='msg:'||message_id)`, Date.now());
-    if (imported.rowsWritten) ctx.blockConcurrencyWhile(() => this.work.arm());
+    if (this.importLegacy()) ctx.blockConcurrencyWhile(() => this.work.arm());
+  }
+
+  /**
+   * The earlier inbox (`intake_inbox`, from the builds before the work queue): each row becomes a message once, finished
+   * ones kept for webhook dedupe, in one transaction with dropping the table. Old 'failed' meant retries exhausted: it runs
+   * again under the queue's rules. A row queued before the address it was sent to was kept names the team instead.
+   */
+  private importLegacy() {
+    if (!this.sql.exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'intake_inbox'").toArray().length) return false;
+    const address = this.sql.exec("SELECT 1 FROM pragma_table_info('intake_inbox') WHERE name = 'address'").toArray().length ? 'address' : 'NULL';
+    return this.ctx.storage.transactionSync(() => {
+      const imported = this.sql.exec(`INSERT INTO _support_work(id,kind,state,payload,due_at,attempts,created_at,updated_at)
+        SELECT 'msg:'||message_id,'message',CASE WHEN state IN ('done','held') THEN state ELSE 'pending' END,
+          json_object('messageId',message_id,'threadId',thread_id,'mailbox',mailbox,'address',${address}),received_at,attempts,received_at,?
+        FROM intake_inbox WHERE NOT EXISTS (SELECT 1 FROM _support_work WHERE id='msg:'||message_id)`, Date.now()).rowsWritten > 0;
+      this.sql.exec('DROP TABLE intake_inbox');
+      return imported;
+    });
   }
 
   async enqueue(input: Incoming) {
-    this.ctx.storage.transactionSync(() => {
-      this.sql.exec('INSERT INTO intake_inbox (message_id, thread_id, mailbox, address, received_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (message_id) DO NOTHING', input.messageId, input.threadId, input.mailbox, input.address ?? null, Date.now());
-      this.work.insert({ id: `msg:${input.messageId}`, kind: 'message', payload: input });
-    });
+    this.work.insert({ id: `msg:${input.messageId}`, kind: 'message', payload: input });
     await this.work.arm();
     return { ok: true };
   }
@@ -74,10 +81,7 @@ export class SupportIntake extends DurableObject<Env> {
   }
 
   override async alarm() {
-    await this.work.drain(item => this.run(item), (item, state) => {
-      if (item.kind === 'message' && (state === 'done' || state === 'held' || state === 'dead'))
-        this.sql.exec('UPDATE intake_inbox SET state=? WHERE message_id=?', state === 'dead' ? 'failed' : state, item.id.slice(4));
-    });
+    await this.work.drain(item => this.run(item), () => {});
   }
 
   private async run(item: WorkRow): Promise<Outcome> {
@@ -230,7 +234,7 @@ export class SupportIntake extends DurableObject<Env> {
       tried: [], recommendation: `Read it in ${productName}’s inbox (${mailbox}@ thread ${threadId}) and reply there.${omitted ? ` ${omitted === 1 ? 'One attachment' : `${omitted} attachments`} could not be stored.` : ''}${listed.length ? ` Other attachments, not opened here: ${listed.join('; ')}.` : ''}${automatic ? ' It was sent automatically (no acknowledgement was sent).' : ''}`,
       evidence: { ids: [messageId] }, details: { topic: mailbox },
     };
-    const ctx: TicketContext = { conversationId, channel: 'email', threadId, costUsd: 0, model: 'none (intake)', attachments: stored, verified, dmarc, sender, customer };
+    const ctx: TicketContext = { conversationId, channel: 'email', threadId, costUsd: 0, model: INTAKE_MODEL, attachments: stored, verified, dmarc, sender, customer };
     // Tickets come from separate budgets (R1): this address's own budget, by sender, so spoofed abuse@ mail can't use up
     // legal@, privacy@ or a customer's escalation.
     const children: NewWork[] = [];

@@ -6,8 +6,8 @@ import * as d from './deliverability.js';
 import type { CampaignDraft } from './db/sending.js';
 import { productName } from './brand.js';
 
-// The support grant's deliverability reads (support-agent-design §5.2): GET only, behind supportGate (each costs 5 of the
-// grant's 120 a minute, see supportWeight), x-internal like every /v1/support route. Each handler is one read-only
+// A support conversation's deliverability reads (support-agent-design §5.2): GET only, behind supportGate (each costs 5
+// of the conversation's 120 a minute, see supportWeight), x-internal like every /v1/support route. Each handler is one read-only
 // transaction with a 3-second statement timeout (budgetedRead) over the indexes listed in src/deliverability.ts, and its
 // result is cached 60 seconds per workspace, route and parameters, stamped computedAt. Windows are at most 30 days
 // (hourly at most 72 hours); at most 20 groups plus other and 50 rows. Recipients appear as domains and providers only,
@@ -16,18 +16,18 @@ import { productName } from './brand.js';
 type Meta = (operationId: string, description: string) => { method: 'get'; operationId: string; tags: string[]; security: Record<string, string[]>[]; description: string };
 const DAY = d.DAY_MS, HOUR = d.HOUR_MS;
 
-/** The one workspace an aggregate reads: the workspaceId filter, or the grant's only workspace. */
+/** The one workspace an aggregate reads: the workspaceId filter, or the conversation's only workspace. */
 function oneWorkspace(c: Ctx) {
   const scope = c.get('support')!, filter = c.req.query('workspaceId');
   const list = filter ? scope.workspaces.filter(w => w.id === filter) : scope.workspaces;
-  if (list.length !== 1) throw new ApiError(422, 'WORKSPACE_REQUIRED', `This grant covers ${list.length} workspaces; aggregates read one. Pass workspaceId (see GET /v1/support/workspaces).`, 'workspaceId');
+  if (list.length !== 1) throw new ApiError(422, 'WORKSPACE_REQUIRED', `This conversation covers ${list.length} workspaces; aggregates read one. Pass workspaceId (see GET /v1/support/workspaces).`, 'workspaceId');
   return { workspaceId: list[0]!.id };
 }
 const narrowed = (c: Ctx) => { const scope = c.get('support')!, filter = c.req.query('workspaceId'); return scope.workspaces.filter(w => !filter || w.id === filter).map(w => w.id); };
 const ids = (list: string[]) => sql`${sql.param(list)}::text[]`;
 /**
  * 60 seconds per (workspace, route, parameters) in the dashboard cache; the result says when it was computed. A read by
- * ID is keyed by the workspaces the grant narrows to, and every read that may hold content by whether it may.
+ * ID is keyed by the workspaces the conversation narrows to, and every read that may hold content by whether it may.
  */
 export async function cached<T extends object>(c: Ctx, route: string, workspace: string | string[], params: unknown, compute: () => Promise<T>) {
   const { value } = await cachedDashboardRead(new URL(c.req.url).origin, JSON.stringify(['support', route, workspace, params]),

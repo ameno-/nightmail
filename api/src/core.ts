@@ -174,13 +174,12 @@ export type WebhookFetch = (url: string, init: { method: 'POST'; headers: Record
 // scopeIds is an inbox key's configured scope, which never changes for that key.
 export type MailboxAccess = { keyId: string; grantId?:string; workspaceId: string; admin: boolean; mailboxIds: string[] | null; scopeIds?: string[] | null; permissions: import('./db/mailbox.js').MailboxPermission[] };
 /**
- * A support grant (src/support.ts): one user, the workspaces they still belong to, read-only, for one ticket. Or a
- * support conversation (src/support-conversations.ts, `conversation` set): grantId and ticketRef are the conversation's
- * ID, and its workspaces are those this route's dashboard counterpart lets the user's role read.
+ * A support conversation (src/support-conversations.ts) as supportGate loaded it: its person, the workspace whose content
+ * they shared, and the workspaces this route's dashboard counterpart lets the person's role read now.
  */
-export type SupportScope = { grantId: string; userId: string; ticketRef: string; operatorId: string; contentWorkspaceId: string | null; expiresAt: string;
+export type SupportScope = { userId: string; contentWorkspaceId: string | null;
   workspaces: { id: string; name: string; role: 'owner' | 'admin' | 'member' }[];
-  conversation?: { id: string; channel: 'chat' | 'email'; verification: string; workspaceId: string | null } };
+  conversation: { id: string; channel: 'chat' | 'email'; verification: string; workspaceId: string | null } };
 export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody?: boolean; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess;
   /** The error code and field a failed request answered with, for its request log line. `unmatched`: no route did. */
   failure?: { code: string; field?: string; databaseCode?: string; unmatched?: boolean };
