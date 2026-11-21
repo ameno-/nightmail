@@ -11,7 +11,7 @@ import { label, number, shortDateTime } from '../../lib/format'
 import { downloadCsv } from '../../lib/download'
 import { errorText } from '../../data/types'
 import { factorFormats } from '../score'
-import { actionColumnDefs, ActionsTrigger, campaignColumnDefs, domainColumnDefs, factorColumnDefs, facts, memberColumnDefs, operatorView, useOperatorTabs, OperatorWorkspaceSkeleton, StaffOnly, QueueToolbar, queueColumnDefs, timelineColumnDefs, waitlistColumnDefs, WaitlistToolbar } from './skeletons'
+import { actionColumnDefs, ActionsTrigger, dailyLimitError, campaignColumnDefs, domainColumnDefs, factorColumnDefs, facts, memberColumnDefs, operatorView, useOperatorTabs, OperatorWorkspaceSkeleton, StaffOnly, QueueToolbar, queueColumnDefs, timelineColumnDefs, waitlistColumnDefs, WaitlistToolbar } from './skeletons'
 import { useDebounced } from '../../lib/pagination'
 import { AbuseView } from './abuse'
 
@@ -400,7 +400,7 @@ function ActionForm({ action, workspace, onClose }: { action: PendingAction; wor
   const reasonError = reasonCheck(reason)
   const domainValue = Number(domainLimit), domainError = action.kind === 'domains' && !defaultDomains && !(Number.isInteger(domainValue) && domainValue >= 1 && domainValue <= 10_000) ? 'A whole number from 1 to 10,000.' : ''
   const ticketError = ticket.trim().length > 200 ? 'At most 200 characters.' : ''
-  const dailyValue = Number(daily), dailyError = action.kind === 'limit' && !clear && !(Number.isInteger(dailyValue) && dailyValue >= 1 && dailyValue <= 10_000_000) ? 'A whole number from 1 to 10,000,000.' : ''
+  const dailyValue = Number(daily), dailyError = action.kind === 'limit' && !clear && !(Number.isInteger(dailyValue) && dailyValue >= 1 && dailyValue <= 10_000_000) ? dailyLimitError : ''
   const expiresAt = Date.parse(expires), expiresError = action.kind === 'limit' && !clear && expires ? !(expiresAt > Date.now()) ? futureError : expiresAt > Date.now() + 366 * 86_400_000 ? 'At most a year ahead.' : '' : ''
   const mutation = useMutation({
     mutationFn: () => {

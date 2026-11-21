@@ -7,7 +7,7 @@ import { useSession } from '../../data/context'
 import type { StandingStep } from '../../data/types'
 import { isoTime, operatorApi, type AbuseAccount, type AbuseAlert, type AbuseBand, type AbuseCluster, type AbuseClusterDetail, type AbuseLink, type AbuseReason, type AbuseWorkspace, type SlackCard } from '../../data/operator'
 import { label, number, shortDateTime } from '../../lib/format'
-import { abuseFacets, abuseView, alertColumnDefs, bandLabel, bandTone, ClusterBodySkeleton, clusterAccountColumnDefs, clusterColumnDefs, clusterFacts, ClusterRailSkeleton, clusterWorkspaceColumnDefs, StaffOnly } from './skeletons'
+import { abuseFacets, abuseView, alertColumnDefs, bandLabel, bandTone, ClusterBodySkeleton, clusterAccountColumnDefs, clusterColumnDefs, clusterFacts, ClusterRailSkeleton, clusterWorkspaceColumnDefs, dailyLimitError, StaffOnly } from './skeletons'
 
 // Operator → Abuse: accounts and workspaces that abuse monitoring found related, by risk, for a person to review.
 // A cluster opens beside the list of the others: why it scored, what links its members (kinds and counts, never a
@@ -33,11 +33,14 @@ const clusterColumns: Column<AbuseCluster>[] = [
   { ...def(clusterColumnDefs, 'changed'), render: row => <At value={row.changedAt} />, cardRender: row => `changed ${when(row.changedAt)}` },
 ]
 const kindText: Record<AbuseAlert['kind'], string> = { new: 'New', raised: 'Risk raised', grew: 'New member' }
-const statusText: Record<AbuseAlert['status'], string> = { stored: 'Stored', sent: 'Sent', failed: 'Failed' }
+// Stored: waiting for the next post to Slack, or, with no webhook set, kept here only.
+const statusText: Record<AbuseAlert['status'], string> = { stored: 'Queued', sent: 'Sent', failed: 'Failed' }
 const statusTones: Record<AbuseAlert['status'], Tone> = { stored: 'neutral', sent: 'success', failed: 'danger' }
-const alertColumns: Column<AbuseAlert>[] = [
-  { ...def(alertColumnDefs, 'alert'), render: row => <span className="op-cell">{bandLabel[row.band]} risk · {kindText[row.kind]} · {row.score}</span> },
-  { ...def(alertColumnDefs, 'status'), render: row => <StatusBadge status={statusText[row.status]} tone={statusTones[row.status]} /> },
+const alertTitle = (row: AbuseAlert) => `${bandLabel[row.band]} risk · ${kindText[row.kind]} · ${row.score}`
+// The alert's name opens its card; on a phone the whole card does.
+const alertColumns = (open: (row: AbuseAlert) => void, posting: boolean): Column<AbuseAlert>[] => [
+  { ...def(alertColumnDefs, 'alert'), render: row => <button type="button" className="op-reason" onClick={event => { event.stopPropagation(); open(row) }}>{alertTitle(row)}</button>, cardRender: alertTitle },
+  { ...def(alertColumnDefs, 'status'), render: row => <StatusBadge status={row.status === 'stored' && !posting ? 'Not posted' : statusText[row.status]} tone={statusTones[row.status]} /> },
   { ...def(alertColumnDefs, 'workspaces'), render: row => number(row.workspaces), cardRender: row => `${number(row.workspaces)} ${row.workspaces === 1 ? 'workspace' : 'workspaces'}` },
   { ...def(alertColumnDefs, 'created'), render: row => <At value={row.createdAt} /> },
 ]
@@ -74,8 +77,7 @@ function Alerts() {
   const [shown, setShown] = useState<AbuseAlert | null>(null)
   if (alerts.isError && !alerts.data) return <ErrorState error={alerts.error} onRetry={() => void alerts.refetch()} />
   return <>
-    <DataTable className="op-table" loading={alerts.isPending} skeletonRows={6} rows={rows} rowKey={row => row.id} onRowClick={setShown} columns={alertColumns} empty={<EmptyState title="No alerts yet" />} />
-    {delivery === 'off' && rows.length > 0 && <p className="op-total muted">Not posted: no Slack webhook is set.</p>}
+    <DataTable className="op-table" loading={alerts.isPending} skeletonRows={6} rows={rows} rowKey={row => row.id} onRowClick={setShown} columns={alertColumns(setShown, delivery === 'slack')} empty={<EmptyState title="No alerts yet" />} />
     {alerts.hasNextPage && <Button className="op-more" loading={alerts.isFetchingNextPage} onClick={() => void alerts.fetchNextPage()}>Load more</Button>}
     {alerts.isError && alerts.data && <Alert tone="danger"><ErrorText error={alerts.error} /></Alert>}
     {shown && <Dialog open onOpenChange={next => { if (!next) setShown(null) }} title="Slack card" footer={<><Button onClick={() => setShown(null)}>Close</Button><Link className="ui-button ui-button--primary ui-button--md" to={`/operator/abuse/${shown.clusterId}`}>Open cluster</Link></>}>
@@ -121,7 +123,7 @@ function ClusterRail({ current }: { current: string }) {
   if (!list.data) return list.isError ? null : <ClusterRailSkeleton />
   return <ul className="op-cluster-rail" aria-label="Clusters">{list.data.items.map(cluster => <li key={cluster.id}>
     <Link className="op-cluster-rail__row" to={`/operator/abuse/${cluster.id}`} aria-current={cluster.id === current ? 'page' : undefined} replace>
-      <Risk band={cluster.band} score={cluster.score} /><span className="op-cluster-rail__meta">{number(cluster.accounts)} accounts · {number(cluster.workspaces)} ws</span>
+      <Risk band={cluster.band} score={cluster.score} /><span className="op-cell op-cluster-rail__why">{cluster.reasons.length ? reasonText([...cluster.reasons].sort((a, b) => b.points - a.points)[0]!) : ''}</span>
     </Link></li>)}</ul>
 }
 
@@ -133,7 +135,7 @@ function ClusterBody({ cluster, canAct, onAct }: { cluster: AbuseClusterDetail; 
   const navigate = useNavigate()
   const facts: Record<(typeof clusterFacts)[number], ReactNode> = {
     Risk: <StatusBadge status={bandLabel[cluster.band]} tone={bandTone[cluster.band]} />, Score: `${cluster.score} · peak ${cluster.peak}`, Accounts: number(cluster.accounts.length), Workspaces: number(cluster.workspaces.length),
-    'First seen': when(cluster.firstAt), Changed: when(cluster.changedAt),
+    'First seen': <span title={when(cluster.firstAt)}>{shortDateTime(isoTime(cluster.firstAt))}</span>, Changed: <span title={when(cluster.changedAt)}>{shortDateTime(isoTime(cluster.changedAt))}</span>,
   }
   const workspaceColumns: Column<AbuseWorkspace>[] = [
     { ...def(clusterWorkspaceColumnDefs, 'name'), render: w => <span className="op-ws" title={`${w.name} · ${w.id}`}><Link className="op-cell" to={`/operator/workspaces/${encodeURIComponent(w.id)}`}>{w.name}</Link><span className="op-muted-id">{w.id}</span></span>, cardRender: w => w.name },
@@ -141,7 +143,7 @@ function ClusterBody({ cluster, canAct, onAct }: { cluster: AbuseClusterDetail; 
     { ...def(clusterWorkspaceColumnDefs, 'plan'), render: w => planLabel[w.plan] },
     { ...def(clusterWorkspaceColumnDefs, 'sent'), render: w => use(w.sent), cardRender: w => `Sent ${use(w.sent)}` },
     { ...def(clusterWorkspaceColumnDefs, 'received'), render: w => use(w.received), cardRender: w => `Received ${use(w.received)}` },
-    { ...def(clusterWorkspaceColumnDefs, 'step'), render: w => w.step ? <StatusBadge status={stepLabel[w.step]} tone={stepTone[w.step]} /> : <span className="muted">{w.sending === 'byo' ? 'Own AWS' : 'Not sending'}</span> },
+    { ...def(clusterWorkspaceColumnDefs, 'step'), render: w => w.step ? <StatusBadge status={stepLabel[w.step]} tone={stepTone[w.step]} /> : <span className="muted">{w.sending === 'shared' ? 'Not graded' : w.sending === 'byo' ? 'Own AWS' : 'Not sending'}</span> },
     { ...def(clusterWorkspaceColumnDefs, 'actions'), render: w => {
       const items: MenuItem[] = [{ label: 'Open workspace', onSelect: () => navigate(`/operator/workspaces/${encodeURIComponent(w.id)}`) },
         ...(canAct && w.sending === 'shared' ? [...(w.paused ? [] : [{ label: 'Pause sending…', destructive: true, onSelect: () => onAct('pause', w) }]), { label: 'Set daily limit…', onSelect: () => onAct('limit', w) }] : [])]
@@ -176,11 +178,11 @@ const linkText = (link: AbuseLink) => label(link.kinds.map(kind => `same ${kindL
 // The cluster as a drawing: accounts on the left, workspaces on the right. A solid line is ownership, a dark one a link
 // strong enough to join the two, a dashed one a weaker link. The list under it says the same in words.
 function ClusterGraph({ cluster }: { cluster: AbuseClusterDetail }) {
-  const row = 30, pad = 18, width = 520, left = 96, right = width - 200
+  const row = 30, pad = 18, width = 400, left = 56, right = 220
   const accounts = cluster.accounts.map((account, i) => ({ key: account.key, text: account.key, x: left, y: pad + i * row }))
   const workspaces = cluster.workspaces.map((workspace, i) => ({ key: workspace.id, text: workspace.name.length > 22 ? `${workspace.name.slice(0, 21)}…` : workspace.name, x: right, y: pad + i * row }))
   const at = new Map([...accounts, ...workspaces].map(node => [node.key, node])), height = Math.max(accounts.length, workspaces.length, 1) * row + pad
-  return <div className="op-graph"><svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${accounts.length} accounts and ${workspaces.length} workspaces, with what links them`} preserveAspectRatio="xMidYMid meet">
+  return <div className="op-graph" style={{ height: Math.min(264, height) }}><svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${accounts.length} accounts and ${workspaces.length} workspaces, with what links them`} preserveAspectRatio="xMidYMid meet">
     {cluster.links.map(link => {
       const a = at.get(link.a), b = at.get(link.b)
       if (!a || !b) return null
@@ -194,12 +196,12 @@ function ClusterGraph({ cluster }: { cluster: AbuseClusterDetail }) {
 }
 
 // Pause or a daily limit, from the cluster. The note is for staff: the workspace is told only that it followed a review.
-const copy = { pause: { title: 'Pause sending?', description: 'Owners see a pause banner and get an email.', confirm: 'Pause sending', done: 'Sending paused' }, limit: { title: 'Set the daily limit', description: undefined, confirm: 'Save limit', done: 'Limit saved' } }
+const copy = { pause: { title: 'Pause sending?', confirm: 'Pause sending', done: 'Sending paused' }, limit: { title: 'Set the daily limit', confirm: 'Save limit', done: 'Limit saved' } }
 function ActionDialog({ action, cluster, onClose }: { action: Pending | null; cluster: string; onClose: () => void }) {
   const last = useRef(action)
   if (action) last.current = action
   const shown = action ?? last.current
-  return <Dialog open={action !== null} onOpenChange={next => { if (!next) onClose() }} title={shown ? copy[shown.kind].title : ''} description={shown ? copy[shown.kind].description : undefined}>
+  return <Dialog open={action !== null} onOpenChange={next => { if (!next) onClose() }} title={shown ? copy[shown.kind].title : ''}>
     {shown && <ActionForm key={shown.key} action={shown} cluster={cluster} onClose={onClose} />}
   </Dialog>
 }
@@ -207,7 +209,7 @@ function ActionForm({ action, cluster, onClose }: { action: Pending; cluster: st
   const client = useQueryClient(), toast = useToast()
   const [note, setNote] = useState(''), [ticket, setTicket] = useState(''), [daily, setDaily] = useState(action.workspace.dailyLimit ? String(action.workspace.dailyLimit) : ''), [tried, setTried] = useState(false)
   const noteError = note.trim().length < 10 ? 'At least 10 characters.' : note.trim().length > 1000 ? 'At most 1,000 characters.' : ''
-  const dailyValue = Number(daily), dailyError = action.kind === 'limit' && !(Number.isInteger(dailyValue) && dailyValue >= 1 && dailyValue <= 10_000_000) ? 'A whole number from 1 to 10,000,000.' : ''
+  const dailyValue = Number(daily), dailyError = action.kind === 'limit' && !(Number.isInteger(dailyValue) && dailyValue >= 1 && dailyValue <= 10_000_000) ? dailyLimitError : ''
   const mutation = useMutation({
     mutationFn: () => {
       const input = { cluster, note, ticketRef: ticket }, guard = { idempotencyKey: action.key }
@@ -218,7 +220,7 @@ function ActionForm({ action, cluster, onClose }: { action: Pending; cluster: st
   function submit(event: FormEvent) { event.preventDefault(); setTried(true); if (!noteError && !dailyError) mutation.mutate() }
   return <form className="op-dialog-fields" onSubmit={submit} noValidate>
     {action.kind === 'limit' && <Field label="Daily limit" error={tried ? dailyError : ''}><Input type="number" inputMode="numeric" min={1} max={10_000_000} step={1} value={daily} onChange={event => setDaily(event.target.value)} /></Field>}
-    <Field label="Staff note" hint="Stays in the staff audit. The workspace sees only that staff reviewed it." error={tried ? noteError : ''}><Textarea value={note} maxLength={1000} onChange={event => setNote(event.target.value)} /></Field>
+    <Field label="Note for the staff audit" error={tried ? noteError : ''}><Textarea value={note} maxLength={1000} onChange={event => setNote(event.target.value)} /></Field>
     <Field label="Ticket ID or URL"><Input value={ticket} maxLength={200} onChange={event => setTicket(event.target.value)} /></Field>
     <MutationError error={mutation.error} />
     <div className="ui-dialog__footer"><Button disabled={mutation.isPending} onClick={onClose}>Cancel</Button><Button type="submit" variant={action.kind === 'pause' ? 'danger' : 'primary'} loading={mutation.isPending}>{copy[action.kind].confirm}</Button></div>

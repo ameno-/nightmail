@@ -155,10 +155,11 @@ export function AbuseSkeleton({ search }: { search: string }) {
   const view = abuseView(search)
   return <SplitPane className="op-abuse" collapse="row" rail={<FacetRail label="Abuse views" groups={abuseFacets(view)} />}><TableSkeleton className="op-table" columns={view.alerts ? alertColumnDefs : clusterColumnDefs} rows={6} /></SplitPane>
 }
+export const dailyLimitError = 'A whole number from 1 to 10,000,000.'
 export const clusterFacts = ['Risk', 'Score', 'Accounts', 'Workspaces', 'First seen', 'Changed'] as const
-// The cluster's rail on a wide window: the other clusters, to step through them. Rows are 40px in every state.
+// The cluster's rail on a wide window: the other clusters, to step through them. Rows are 32px in every state.
 export function ClusterRailSkeleton() {
-  return <ul className="op-cluster-rail" aria-hidden="true">{Array.from({ length: 6 }, (_, i) => <li key={i}><span className="op-cluster-rail__row"><Skeleton width={72} height={12} /><Skeleton width={96} height={10} /></span></li>)}</ul>
+  return <ul className="op-cluster-rail" aria-hidden="true">{Array.from({ length: 6 }, (_, i) => <li key={i}><span className="op-cluster-rail__row"><Skeleton width={72} height={12} /><Skeleton width={96} height={12} /></span></li>)}</ul>
 }
 export function ClusterBodySkeleton() {
   return <div className="op-page" aria-hidden="true">
