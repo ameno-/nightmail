@@ -8151,6 +8151,7 @@ describe('Hosted MCP OAuth and tools', () => {
           assert.deepEqual(await order('agent'), [handled]);
           assert.equal((await ours('all')).find((c: Json) => c.id === handled).needsYou, null);
           assert.equal((await ours('all')).find((c: Json) => c.id === paused).firstLine, 'First question');
+          assert.ok((await list('all', reader, '&q=first%20QUESTION')).data.some((c: Json) => c.id === paused), 'A conversation with no subject is found by the opening line it is listed under.');
           const everything = await list('needs_you'), agent = await list('agent');
           assert.deepEqual([everything.nextCursor, everything.counts.needsYou, agent.counts.agent], [null, everything.data.length, agent.data.length]);
           // Pages follow the same order; a cursor from another view, or one edited, is refused.
@@ -8195,6 +8196,28 @@ describe('Hosted MCP OAuth and tools', () => {
           ok(reply(await platform.markDelivery(paused, queued.id, 'failed')));
           const failed = (await ours('needs_you')).find((c: Json) => c.id === paused);
           assert.deepEqual([failed.needsYou.reasons, failed.needsYou.urgent, failed.done], [['failed'], true, null]);
+
+          // Done resolves only the ticket that was on screen: one filed since (or none at all) refuses it and changes nothing.
+          const bound = await chat(member), filed = ticketId(), find = async (id: string) => (await list('all', reader, `&q=${id}`)).data[0];
+          ok(reply(await platform.mirrorState(bound, { ticket: { id: filed, type: 'bug', severity: 'P2' } })));
+          error(await send('POST', `${inbox}/${bound}/done`, keyed(operator), { ticketId: null }), 409, 'SUPPORT_TICKET_CHANGED');
+          error(await send('POST', `${inbox}/${bound}/done`, keyed(operator), { ticketId: ticketId() }), 409, 'SUPPORT_TICKET_CHANGED');
+          assert.deepEqual([(await find(bound)).done, (await find(bound)).ticket.resolvedAt, (await find(bound)).needsYou.reasons], [null, null, ['ticket']]);
+          const marked = ok(await send('POST', `${inbox}/${bound}/done`, keyed(operator), { ticketId: filed }));
+          assert.deepEqual([marked.needsYou, typeof marked.ticket.resolvedAt], [null, 'string']);
+          // Undo: only the operator who marked it, soon after; it reopens the ticket Done resolved, and is on the trail.
+          error(await send('DELETE', `${inbox}/${bound}/done`, keyed(reader)), 403, 'OPERATOR_REQUIRED');
+          const undone = ok(await send('DELETE', `${inbox}/${bound}/done`, keyed(operator)));
+          assert.deepEqual([undone.done, undone.ticket.resolvedAt, undone.needsYou.reasons], [null, null, ['ticket']]);
+          error(await send('DELETE', `${inbox}/${bound}/done`, keyed(operator)), 409, 'NOT_DONE');
+          assert.equal((await db.query(`SELECT count(*)::int AS n FROM audit_events WHERE action = 'support.undone' AND target_id = $1 AND internal`, [bound])).rows[0].n, 1);
+          // A ticket resolved on its own stays resolved; and the undo is only for a few minutes.
+          ok(await send('POST', `${inbox}/${bound}/resolve`, keyed(operator)));
+          ok(await send('POST', `${inbox}/${bound}/done`, keyed(operator), { ticketId: null }));
+          assert.equal(typeof ok(await send('DELETE', `${inbox}/${bound}/done`, keyed(operator))).ticket.resolvedAt, 'string');
+          ok(await send('POST', `${inbox}/${bound}/done`, keyed(operator)));
+          await db.query(`UPDATE support_conversations SET done_at = done_at - interval '11 minutes' WHERE id = $1`, [bound]);
+          error(await send('DELETE', `${inbox}/${bound}/done`, keyed(operator)), 409, 'UNDO_UNAVAILABLE');
 
           // Read markers: each operator's own; new messages are unread again; reading never moves the marker back.
           const unread = async (who: SessionFixture, id = handled) => (await list('all', who, `&q=${id}`)).data[0].unread;
