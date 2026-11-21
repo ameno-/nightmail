@@ -142,6 +142,9 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
   // Abuse-monitoring signals past their retention (src/abuse.ts abuseExpired). Expiry runs whether monitoring is on or off.
   await drain('abuse_signals', batch(sql`abuse_signals`, (await import('./abuse.js')).abuseExpired));
   await drain('abuse_sampling', batch(sql`abuse_sampling`, sql`sampled_through < now()-interval '30 days'`));
+  // Links leave with the signals they came from; a cluster nothing has rescored for 30 days (monitoring off, or its links gone) leaves too.
+  await drain('identity_links', batch(sql`identity_links`, (await import('./abuse.js')).linkExpired));
+  await drain('abuse_clusters', batch(sql`abuse_clusters`, sql`scored_at < now()-interval '30 days'`));
   // An erasure's floor outlives every record it could still apply to (the sign-in log, 30 days; signals, 90).
   await drain('abuse_floors', batch(sql`abuse_floors`, sql`ignore_through < now()-interval '90 days'`));
   // The audit trail past its retention (src/audit.ts RETENTION); the table refuses to delete anything earlier.
