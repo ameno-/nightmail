@@ -104,7 +104,8 @@ The tests run the deployed bundle in Miniflare, as Console's agent tests do. `@c
 - uploads: chat token, origin, 413, 415 and the 5-image cap. The model receives the stripped bytes;
 - a bug ticket: refused without its reproduction, then filed with request IDs from `api_errors`. The `[Nightmail bug]` email carries signed screenshot links, and tampered or expired links are refused;
 - the staff page: sign-in, single-use token, a demoted operator, filters, CSRF, origin and session checks on "mark done", and the hourly operator re-check;
-- email image attachments.
+- email image attachments;
+- the work queues, and the ledger and sweep: mail held at the edge for the digest, intake mail for an unlisted address accepted once it's listed, a ticket's lost team email sent once, and a failed digest resent once.
 
 They make no network or model calls. `test/*.local.ts` scripts, which are git-ignored, are for a few real turns against the gateway with a key read from a file.
 
@@ -119,6 +120,17 @@ Each email conversation is bound to the first address that writes in it, and onc
 - **Tickets from unverified senders** lead with "UNVERIFIED SENDER" and name no customer.
 - **Links in email replies** must point to Nightmail's own sites, or the reply is held.
 
+## Work and the sweep
+
+Each object's work (each email, its answer, confirm link or forward, each ticket's team email and follow-up) is an item in its own `_support_work` table (`src/work.ts`), retried until done without blocking the others.
+
+- **The ledger** (D1 `support_work`): a webhook writes a row for each message before it answers 200. Mail refused at the edge gets a row too: `held` (over the per-sender limit) or `blocked` (intake mail for an address missing from `INTAKE_ADDRESSES`). A later delivery of a message with a row changes nothing.
+- **The mirror:** at the end of each run, an object copies its changed items into the same table. The cron reads what is waiting there instead of waking every object. Copying is best effort: work never waits on it.
+- **The sweep** (every five minutes, `src/ledger.ts`):
+  - resends unsent notices (the digest, cap alerts) whose retry is due;
+  - accepts blocked intake mail once its address is listed;
+  - asks a ticket's object to queue its team email, and a chat ticket's follow-up within a day, when no item covers them (tickets filed before the queue). The email is rebuilt from the D1 row; an existing item is left alone, so each is sent once.
+
 ## Limits and retention
 
 - **Daily caps** (`src/limits.ts`; override each with a `LIMIT_*` var). The budgets are separate, so one can't starve another:
@@ -127,9 +139,10 @@ Each email conversation is bound to the first address that writes in it, and onc
   - mail: 20 a day per DMARC-passing sender, 30 per address for all unauthenticated mail together (a spoofed From can't spread across keys), and 2,000 in total;
   - confirm links: 3 per address a day, at most one an hour per open confirmation. Later mail from the address joins the open confirmation and is answered once it's confirmed.
 
-  Mail over a cap is never dropped. It's kept, bounded, in D1 `overflow`, and the daily cron (00:10 UTC) emails the team one "N messages over cap" digest. The first time a global cap is hit each day, the team gets an alert at once. The same cron runs the retention sweep.
+  Mail over a cap is never dropped. It's kept, bounded, in D1 `overflow`, and the daily cron (00:10 UTC) emails the team one "N messages over cap" digest. The first time a global cap is hit each day, the team gets an alert at once. Both emails are frozen when first queued (D1 `support_notices`) and resent by the five-minute sweep, under the same idempotency key, until Nightmail accepts them. The daily cron also runs the retention sweep.
+- **Per sender at the edge:** 10 messages a minute (the `EMAIL_IN` limiter). Mail over it is never read or answered, but it's recorded in the work ledger and listed in the digest.
 - **Per conversation:** 60 turns, and 500K tokens weighted by cost (cache reads count a tenth). Past either, the conversation files a ticket.
 - **Per person:** 10 chats a day.
 - **Per email thread:** 5 messages in 10 minutes.
 - **Tool steps:** 25 per turn.
-- **Retention:** chats close after 24 hours idle, email threads after 7 days. The DO deletes its storage 7 days after closing. D1 keeps the conversation index and tickets.
+- **Retention:** chats close after 24 hours idle, email threads after 7 days. The DO deletes its storage 7 days after closing. D1 keeps the conversation index and tickets, finished ledger rows for 35 days, and notices for 30. Intake mail blocked for 30 days is given up (it stays in Nightmail's inbox).
