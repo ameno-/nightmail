@@ -6710,9 +6710,9 @@ export type SupportScope = {
         name: string | null;
         email: string | null;
         /**
-         * Whether email is the account’s verified address now. Only that address may receive an answer written from the account.
+         * Whether email is the account’s verified address and a sign-in proved it a mailbox the person reads within the last 30 days. Only then may an answer written from the account go to it, and only to email as stored.
          */
-        emailVerified: boolean;
+        mailboxProven: boolean;
     };
     /**
      * The one workspace in scope (a chat’s, or the one an email narrowed to), while the person is still a member there; null otherwise.
