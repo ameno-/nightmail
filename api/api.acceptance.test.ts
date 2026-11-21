@@ -3487,7 +3487,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           assert.notEqual((await pool.query('SELECT status FROM jobs WHERE id=$1',[job.id])).rows[0].status,'running','The old running poll cannot complete the new MAIL FROM check.');
           // Removing it: SES gets no MailFromDomain, which returns the identity to the default MAIL FROM, and its MX and SPF rows go.
           const removedMailFrom = ok(await local('DELETE',`${detail}/mail-from`,undefined,b.cookie));
-          assert.deepEqual(mailFromWrites.at(-1),{EmailIdentity:domain}); assert.equal(identities.get(`${platform}:${domain}`).MailFromAttributes,undefined);
+          assert.deepEqual(mailFromWrites.at(-1),{EmailIdentity:domain}); assert.equal(identities.get(`${platform}:${domain}`)!.MailFromAttributes,undefined);
           assert.equal(removedMailFrom.mailFromDomain,null); assert.equal(removedMailFrom.mailFromStatus,null); assert.ok(!removedMailFrom.dns.some((r:Json)=>r.purpose==='mail_from'));
           assert.equal((await pool.query("SELECT identity->'ses'->'MailFromAttributes' AS m FROM domain_claims WHERE name=$1 AND workspace_id=$2",[domain,b.org.id])).rows[0].m,null);
           assert.equal(ok(await local('GET',detail,undefined,b.cookie)).mailFromDomain,null);
