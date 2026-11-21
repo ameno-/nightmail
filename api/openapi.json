@@ -20610,21 +20610,13 @@
                   "signin",
                   "none"
                 ]
-              },
-              "signedInAt": {
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "description": "When the person last signed in to continue this email conversation (a claim), also when it was already bound to them; null otherwise."
               }
             },
             "required": [
               "id",
               "channel",
               "mode",
-              "verification",
-              "signedInAt"
+              "verification"
             ]
           },
           "user": {

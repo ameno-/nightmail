@@ -6537,10 +6537,6 @@ export type SupportScope = {
         channel: 'chat' | 'email';
         mode: 'member' | 'non_member' | 'pending_signin' | 'unverified';
         verification: 'handoff' | 'dmarc' | 'signin' | 'none';
-        /**
-         * When the person last signed in to continue this email conversation (a claim), also when it was already bound to them; null otherwise.
-         */
-        signedInAt: string | null;
     };
     user: {
         name: string | null;

@@ -240,7 +240,7 @@ export function registerSupportConversations(app: App) {
   // ---------- the customer's own session ----------
   const Claimed = z.object({ id: z.string(), mode: Mode });
   app.openapi(createRoute({ hide: true, tags: ['Workspaces'], security: sessionSecurity, method: 'post', path: '/v1/support-conversations/{id}/claim', operationId: 'claimSupportConversation',
-    description: `Continue an emailed support request signed in: binds the conversation to you when your verified email is the address that wrote to ${productName} support, and ${productName} support answers the waiting email. Anyone else gets 404.`,
+    description: `Continue an emailed support request signed in: binds the conversation to you when your verified email is the address that wrote to ${productName} support. Anyone else gets 404.`,
     request: { params: ConversationParam }, responses: { 200: response(Claimed), ...errors } }), async c => {
     if (!c.env.config.multiTenant) return notFound('Endpoint');
     // Like accepting an invitation: a signed-in person whose session's verified email is still theirs, with or without a
@@ -257,12 +257,7 @@ export function registerSupportConversations(app: App) {
       // person's current verified address. A claim that lost the race answers only if it is already theirs.
       const { rows: [target] } = await tx.execute<Row>(sql`SELECT ${columns} FROM support_conversations WHERE id = ${conversationId} AND channel = 'email' AND status <> 'closed' FOR UPDATE`);
       if (!target) return null;
-      if (target.user_id) {
-        if (target.user_id !== userId) return null;
-        // Bound to them already (by a later message's DMARC pass): this sign-in still counts for the mail that waited for it.
-        await tx.execute(sql`UPDATE support_conversations SET evidence = coalesce(evidence, '{}'::jsonb) || jsonb_build_object('claimedAt', now()) WHERE id = ${conversationId}`);
-        return { id: target.id, mode: target.mode };
-      }
+      if (target.user_id) return target.user_id === userId ? { id: target.id, mode: target.mode } : null;
       const { rows: [row] } = await tx.execute<{ id: string | null; mode: z.infer<typeof Mode> | null; matches: boolean }>(sql`WITH me AS (
           SELECT id, lower(email) AS email FROM nightmail_users WHERE id = ${userId} AND email_verified AND email IS NOT NULL
         ), claimed AS (
@@ -278,11 +273,6 @@ export function registerSupportConversations(app: App) {
       return null;
     });
     if (!claimed) return notFound('Support conversation');
-    // The support platform answers what waited for this sign-in once it reads the binding: wake it with the ID only
-    // (again on a repeated claim, which recovers a lost wake). Nobody else's claim wakes anything.
-    const { wakeSupport } = await import('./support-inbox.js');
-    if (c.env.deferNudge) c.env.deferNudge(async () => { await wakeSupport(c.env.config, conversationId); });
-    else await wakeSupport(c.env.config, conversationId);
     return c.json(claimed!, 200);
   });
 
@@ -305,8 +295,7 @@ export function registerSupportConversations(app: App) {
   // ---------- stamped: the conversation's own scope (supportGate has checked and logged the call) ----------
   const Workspace = z.object({ id: z.string(), name: z.string(), role: z.enum(['owner', 'admin', 'member']) });
   const Scope = z.object({
-    conversation: z.object({ id: z.string(), channel: z.enum(['chat', 'email']), mode: Mode, verification: z.enum(['handoff', 'dmarc', 'signin', 'none']),
-      signedInAt: z.string().nullable().describe('When the person last signed in to continue this email conversation (a claim), also when it was already bound to them; null otherwise.') }),
+    conversation: z.object({ id: z.string(), channel: z.enum(['chat', 'email']), mode: Mode, verification: z.enum(['handoff', 'dmarc', 'signin', 'none']) }),
     user: z.object({ name: z.string().nullable(), email: z.string().nullable() }),
     workspace: Workspace.nullable().describe('The one workspace in scope (a chat’s, or the one an email narrowed to), while the person is still a member there; null otherwise.'),
     workspaces: z.array(Workspace).describe('What the conversation can read or choose now: a chat’s one workspace, or every workspace an email’s sender belongs to.'),
@@ -324,7 +313,7 @@ export function registerSupportConversations(app: App) {
   async function scopeOf(db: DbExecutor, conversationId: string) {
     const { rows: [row] } = await db.execute<z.infer<typeof Scope> & { workspace_id: string | null }>(sql`WITH s AS (SELECT * FROM support_conversations WHERE id = ${conversationId}),
       memberships AS (SELECT w.id, w.name, m.role FROM s JOIN workspace_members m ON m.user_id = s.user_id JOIN workspaces w ON w.id = m.workspace_id)
-      SELECT json_build_object('id', s.id, 'channel', s.channel, 'mode', s.mode, 'verification', s.verification, 'signedInAt', s.evidence->>'claimedAt') AS conversation,
+      SELECT json_build_object('id', s.id, 'channel', s.channel, 'mode', s.mode, 'verification', s.verification) AS conversation,
         (SELECT json_build_object('name', u.name, 'email', u.email) FROM nightmail_users u WHERE u.id = s.user_id) AS user,
         (SELECT json_build_object('id', id, 'name', name, 'role', role) FROM memberships WHERE id = s.workspace_id) AS workspace,
         coalesce((SELECT json_agg(json_build_object('id', id, 'name', name, 'role', role) ORDER BY name, id) FROM memberships WHERE s.workspace_id IS NULL OR s.channel = 'email' OR id = s.workspace_id), '[]') AS workspaces,
