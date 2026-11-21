@@ -288,12 +288,22 @@ function campaignUrl(runtime: Runtime, row: { id: string; state: CampaignState; 
   return url.href;
 }
 type CampaignRow = Omit<typeof campaigns.$inferSelect, 'draft'> & { draft: unknown };
-async function campaignViews<T extends CampaignRow>(runtime: Runtime, a: Actor, rows: T[], listOrigin?: string) {
+/** How long campaign detail reuses a large active campaign's per-status counts. The dashboard polls detail every 3 s while a campaign sends, and each count reads every recipient's email record. */
+export const CAMPAIGN_PROGRESS_CACHE_SECONDS = 20;
+/** Below this many recipients the count is cheap, so detail stays exact. */
+export const CAMPAIGN_PROGRESS_CACHE_MIN_RECIPIENTS = 10_000;
+const CAMPAIGN_PROGRESS_SCOPE = `while a campaign of at least ${CAMPAIGN_PROGRESS_CACHE_MIN_RECIPIENTS.toLocaleString('en-US')} recipients is preparing, scheduled, sending or paused`;
+const CAMPAIGN_PROGRESS_NOTE = `For every credential, counts may be up to ${CAMPAIGN_PROGRESS_CACHE_SECONDS} seconds old ${CAMPAIGN_PROGRESS_SCOPE}; state and delivery are always current. Counts are exact for smaller campaigns, once a campaign is done, canceled or failed, and in the campaign that pause, resume and other changes return.`;
+async function campaignViews<T extends CampaignRow>(runtime: Runtime, a: Actor, rows: T[], read?: { origin: string; detail?: boolean }) {
   if (!rows.length) return [];
   const load = async () => runtime.db.select({ campaignId: emails.campaignId, status: emails.status, count: sql<number>`count(*)::int` }).from(emails).where(and(scope(emails, a), inArray(emails.campaignId, rows.map(row => row.id)))).groupBy(emails.campaignId, emails.status);
-  // Only dashboard lists may reuse counts. Detail, mutations and machine credentials stay exact.
-  const grouped = a.domains.length ? [] : listOrigin && a.credential === 'dashboard'
-    ? (await cachedDashboardRead(listOrigin,JSON.stringify(['campaign-counts',a.workspaceId,rows.map(r=>[r.id,r.updatedAt])]),load)).value : await load();
+  const cached = async (scope: unknown[], ttlSeconds?: number) => (await cachedDashboardRead(read!.origin, JSON.stringify(scope), load, ttlSeconds)).value;
+  // Dashboard lists reuse counts for 60 s. Detail reuses a large active campaign's counts for every credential, keyed on its
+  // snapshot (review), not updatedAt, which every release step moves; delivery cursors come from the row and stay current.
+  // Mutations, small campaigns and finished ones stay exact.
+  const [one] = rows, progress = read?.detail && rows.length === 1 && (CAMPAIGN_ACTIVE as readonly string[]).includes(one!.state) && one!.total >= CAMPAIGN_PROGRESS_CACHE_MIN_RECIPIENTS;
+  const grouped = a.domains.length ? [] : progress ? await cached(['campaign-progress', a.workspaceId, one!.id, one!.reviewId], CAMPAIGN_PROGRESS_CACHE_SECONDS)
+    : read && !read.detail && a.credential === 'dashboard' ? await cached(['campaign-counts', a.workspaceId, rows.map(r => [r.id, r.updatedAt])]) : await load();
   return rows.map(row => {
     const counts = emptyCounts();
     for (const item of grouped) if (item.campaignId === row.id) { counts.byStatus[item.status] = Number(item.count); counts.total += Number(item.count); }
@@ -1503,7 +1513,7 @@ export function registerSending(app: App) {
     }, { replayed: campaignReplay(a) });
     return c.json(Campaign.parse({ ...result, archivedAt: result.archivedAt ?? null, url: campaignUrl(c.env, result), delivery: null }), 201);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns', operationId: 'listCampaigns', description: 'Returns bounded campaign metadata summaries. Fetch an individual campaign for its full editable draft; list drafts omit bodies, defaults, attachments and audience exclusions. Dashboard list counts may be cached for up to 60 seconds; API credentials and campaign detail remain exact.', tags: ['Campaigns'], security, request: { query: CampaignQuery }, responses: { 200: response(page(CampaignSummary)), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns', operationId: 'listCampaigns', description: `Returns bounded campaign metadata summaries. Fetch an individual campaign for its full editable draft; list drafts omit bodies, defaults, attachments and audience exclusions. Dashboard list counts may be cached for up to 60 seconds; API credentials get exact list counts. getCampaign may reuse counts for up to ${CAMPAIGN_PROGRESS_CACHE_SECONDS} seconds ${CAMPAIGN_PROGRESS_SCOPE}.`, tags: ['Campaigns'], security, request: { query: CampaignQuery }, responses: { 200: response(page(CampaignSummary)), ...errors } }), async c => {
     const a = actor(c), q = c.req.valid('query'), binding = await pageBinding(a, 'campaigns', q), cursor = readCursor(q.cursor, binding);
     if (q.region) region(c.env, q.region);
     const search = q.search ? literalSearch(q.search) : null;
@@ -1513,12 +1523,12 @@ export function registerSending(app: App) {
       q.region ? sql`${campaigns.draft}->>'region' = ${q.region}` : undefined, q.state ? eq(campaigns.state, q.state) : undefined,
       search ? sql`(${campaigns.id} ILIKE ${search} OR ${campaigns.draft}->>'name' ILIKE ${search} OR ${campaigns.draft}->>'subject' ILIKE ${search})` : undefined,
     )).orderBy(desc(campaigns.createdAt), desc(campaigns.id)).limit(q.limit + 1));
-    const views = await timed(c, 'campaign-counts-db', () => campaignViews(c.env, a, rows.slice(0, q.limit),new URL(c.req.url).origin));
+    const views = await timed(c, 'campaign-counts-db', () => campaignViews(c.env, a, rows.slice(0, q.limit), { origin: new URL(c.req.url).origin }));
     return c.json({ data: views.map(row => CampaignSummary.parse(row)), nextCursor: nextCursor(rows, q.limit, binding) }, 200);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}', operationId: 'getCampaign', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(Campaign), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}', operationId: 'getCampaign', description: `The campaign with its full draft, per-status email counts and delivery progress. ${CAMPAIGN_PROGRESS_NOTE}`, tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(Campaign), ...errors } }), async c => {
     const a = actor(c), row = await timed(c, 'campaign-db', () => findCampaign(c.env.db, a, c.req.valid('param').id));
-    const views = await timed(c, 'campaign-counts-db', () => campaignViews(c.env, a, [row]));
+    const views = await timed(c, 'campaign-counts-db', () => campaignViews(c.env, a, [row], { origin: new URL(c.req.url).origin, detail: true }));
     return c.json(Campaign.parse(views[0]!), 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/stats', operationId: 'getCampaignStats', description: 'Lifetime campaign delivery and unique open/click statistics, progress, tracking setting and rates with numeric numerators/denominators. Counts distinct emails across all stored feedback, not event occurrences. Delivery/bounce/complaint rates use accepted emails; open/click rates use delivered emails. Both rate counts exclude simulated emails. Rates are fractions, null for zero denominators; engagement rates are also null with tracking disabled. Delivered means receiving-server acceptance, not inbox placement. Engagement includes bots/privacy proxies. Done means dispatch finished; asynchronous feedback can still change totals.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignStats), ...errors } }), async c => {
