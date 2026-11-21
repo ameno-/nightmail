@@ -108,7 +108,7 @@ const pages = ids => [
   ['Receiving · recipe form', '/receiving/rules/new/slack', { from: '/receiving/rules/new', click: 'Post to Slack' }],
   ['Receiving · recipe rule', '/receiving/rules/label-by-meaning-support', { from: '/receiving?tab=rules', row: 'a refund request' }],
   ['Receiving · rule editor', '/receiving/rules/triage/code', { from: '/receiving?tab=rules', row: 'triage' }],
-  ['Receiving · rule editor · new script', '/receiving/rules/new/script', { user: 'nia', from: '/receiving/rules/new', click: 'Write a script' }],
+  ['Receiving · rule editor · new script', '/receiving/rules/new/script', { user: 'nia', from: '/receiving/rules/new', click: 'Write code' }],
   ['Receiving · rules · live update', '/receiving/rules/triage/code', { user: 'kai', live: 'apply' }],
   ['Receiving · rules · live conflict', '/receiving/rules/triage/code', { user: 'kai', live: 'conflict' }],
   ['Receiving · agent inboxes', '/receiving/inboxes', { from: '/receiving' }],

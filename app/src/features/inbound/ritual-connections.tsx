@@ -29,6 +29,15 @@ export function targetProblem(type: EndpointType, value: string) {
   if (type === 'discord' && !discordUrl.test(value)) return 'Use Discord’s webhook URL, starting https://discord.com/api/webhooks/.'
   return ''
 }
+/** A name for a new destination from where it points: a forward's local part, a webhook's site, else its type; free of
+ *  the names already taken (taken, -2, -3…). */
+function suggestName(type: EndpointType, value: string, taken: Set<string>) {
+  let base: string = type
+  if (type === 'forward' && value.includes('@')) base = value.split('@')[0]!
+  else if (type === 'webhook') { try { const host = new URL(value).hostname.split('.'); base = host.length > 1 ? host[host.length - 2]! : host[0]! } catch { /* Not a URL yet. */ } }
+  const stem = base.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 56) || type
+  for (let n = 1; ; n++) { const name = n === 1 ? stem : stem + '-' + n; if (!taken.has(name)) return name }
+}
 /** The endpoint as the edit form needs it: what it is and whether it's paused. Its URL is write-only and never here. */
 export type EditableEndpoint = { name: string; type: EndpointType; status: EndpointStatus; target: string }
 const chat = (type: EndpointType) => type === 'slack' || type === 'discord'
@@ -36,7 +45,7 @@ const chat = (type: EndpointType) => type === 'slack' || type === 'discord'
  * Creates an endpoint, or with `editing` edits one in place (PATCH, only what changed). Editing never shows the stored
  * URL: the field starts empty as "Replace URL", and left empty the endpoint keeps its URL.
  */
-export function EndpointDialog({ open, onOpenChange, onCreated, onSaved, editing, types = Object.keys(typeLabel) as EndpointType[] }: { open: boolean; onOpenChange: (open: boolean) => void; onCreated?: (e: Endpoint & { secret?: string }) => void; onSaved?: (e: Endpoint) => void; editing?: EditableEndpoint | null; types?: EndpointType[] }) {
+export function EndpointDialog({ open, onOpenChange, onCreated, onSaved, editing, types = Object.keys(typeLabel) as EndpointType[], taken = [] }: { open: boolean; onOpenChange: (open: boolean) => void; onCreated?: (e: Endpoint & { secret?: string }) => void; onSaved?: (e: Endpoint) => void; editing?: EditableEndpoint | null; types?: EndpointType[]; taken?: string[] }) {
   const boxes = useApiDef(queries.inboundAddressOptions(), { enabled: open && !editing })
   const [type, setType] = useState<EndpointType>(types[0]!)
   const [name, setName] = useState('')
@@ -53,17 +62,20 @@ export function EndpointDialog({ open, onOpenChange, onCreated, onSaved, editing
     setType(editing?.type ?? types[0]!); setName(editing?.name ?? ''); setTarget(''); setError(null); setPreverify(false); setTried(false); setEnabled(editing ? editing.status !== 'paused' : true)
   }, [open, editing]) // eslint-disable-line react-hooks/exhaustive-deps
   // Errors name the field and the fix, as soon as there's something to judge (or on Create).
-  const nameValid = /^[a-z0-9][a-z0-9-]{0,62}$/.test(name)
   const value = target.trim()
+  // A new destination names itself from where it points unless a name is typed: rules call it by this name.
+  const suggested = editing ? '' : suggestName(type, value, new Set(taken))
+  const finalName = name.trim() || suggested
+  const nameValid = /^[a-z0-9][a-z0-9-]{0,62}$/.test(finalName)
   const retyped = !!editing && type !== editing.type
   // Editing keeps the URL when the field is left empty, unless the type changed (a Discord endpoint needs a Discord URL).
   const targetRequired = !editing || retyped
   const targetError = !value ? (tried && targetRequired && !(editing?.type === 'forward') ? (retyped ? `Enter the ${typeLabel[type]} webhook URL to switch to ${typeLabel[type]}.` : `Enter the ${targetLabel[type].replace(/^HTTPS URL$/, 'URL').toLowerCase()}.`) : '')
     : targetProblem(type, value)
-  const nameError = name && !nameValid ? `Use lowercase letters, digits and hyphens, like ${name.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '') || 'support'}.` : !name && tried ? 'Name it, like support. Rules call it by this name.' : ''
+  const nameError = name && !nameValid ? `Use lowercase letters, digits and hyphens, like ${name.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '') || 'support'}.` : !finalName && tried ? 'Name it, like support. Rules call it by this name.' : ''
   // Only what changed goes to the API; an empty URL field is left out, so the stored URL stays.
   const changes = editing ? {
-    ...(name.trim() !== editing.name ? { name: name.trim() } : {}),
+    ...(finalName !== editing.name ? { name: finalName } : {}),
     ...(retyped ? { type } : {}),
     ...(value && editing.type !== 'forward' ? { url: value } : {}),
     ...(enabled !== (editing.status !== 'paused') ? { paused: !enabled } : {}),
@@ -76,7 +88,7 @@ export function EndpointDialog({ open, onOpenChange, onCreated, onSaved, editing
     try {
       if (editing) onSaved?.(await request<Endpoint>(`/v1/endpoints/${encodeURIComponent(editing.name)}`, { method: 'PATCH', body: changes }))
       else {
-        const body = { type, name: name.trim(), ...(type === 'forward' ? { address: value, ...(from ? { from } : {}), ...(preverify ? { preverify } : {}) } : { url: value }) }
+        const body = { type, name: finalName, ...(type === 'forward' ? { address: value, ...(from ? { from } : {}), ...(preverify ? { preverify } : {}) } : { url: value }) }
         onCreated?.(await request<Endpoint & { secret?: string }>('/v1/endpoints', { method: 'POST', body, idempotencyKey: idempotencyFor(attempt, body) }))
       }
     }
@@ -103,15 +115,16 @@ export function EndpointDialog({ open, onOpenChange, onCreated, onSaved, editing
       {typeOptions.length > 1 || editing ? <Field label="Type">
         <Select value={type} disabled={typeOptions.length === 1} onValueChange={v => { setType(v as EndpointType); setTarget(''); setTried(false); setError(null) }} options={typeOptions.map(value => ({ value, label: typeLabel[value] }))} />
       </Field> : null}
-      <Field label="Name" error={nameError || serverError('name') || undefined}>
-        <Input value={name} onChange={e => { setName(e.target.value.toLowerCase().replace(/[\s_]+/g, '-')); if (serverError('name')) setError(null) }} placeholder={type === 'forward' ? 'team' : type === 'webhook' ? 'crm' : type === 'discord' ? 'alerts' : 'support'} autoComplete="off" aria-invalid={!!(nameError || serverError('name')) || undefined} />
-      </Field>
       {editing?.type === 'forward'
         ? <Field label="Recipient address"><p className="endpoint-recipient"><PrivateAddress value={editing.target} /></p></Field>
         : <Field label={editing ? 'Replace URL' : targetLabel[type]} error={targetError || serverError('url') || undefined}>
           <SecretInput type={type === 'forward' ? 'email' : type === 'webhook' ? 'url' : 'password'} autoComplete="off" value={target} onChange={e => { setTarget(e.target.value); if (serverError('url')) setError(null) }}
             placeholder={type === 'forward' ? 'team@example.com' : editing && !retyped ? 'Keep the current URL' : 'https://'} aria-invalid={!!(targetError || serverError('url')) || undefined} />
         </Field>}
+      {/* Where it points first; its name (what rules call it) follows, filled in from that until typed over. */}
+      <Field label="Name" error={nameError || serverError('name') || undefined}>
+        <Input value={name} onChange={e => { setName(e.target.value.toLowerCase().replace(/[\s_]+/g, '-')); if (serverError('name')) setError(null) }} placeholder={editing ? editing.name : suggested || (type === 'forward' ? 'team' : type === 'webhook' ? 'crm' : type === 'discord' ? 'alerts' : 'support')} autoComplete="off" aria-invalid={!!(nameError || serverError('name')) || undefined} />
+      </Field>
       {dropsHeaders && <Alert tone="warning">A new URL drops the custom headers set on this webhook over the API.</Alert>}
       {!editing && type === 'forward' && <>
         <Field label="Forward from">

@@ -5,7 +5,7 @@
 import { lazy, Suspense, useState, type FormEvent, type ReactNode } from 'react'
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useQueryClient } from '@tanstack/react-query'
-import { Archive, Ban, CodeXml, Forward, Hash, MessageSquare, ShieldAlert, Sparkles, Star, Webhook, X, type LucideIcon } from 'lucide-react'
+import { Archive, Ban, CodeXml, Forward, Hash, MessageSquare, ShieldAlert, Sparkles, Split, Star, Webhook, X, type LucideIcon } from 'lucide-react'
 import { Alert, Button, ConfirmDialog, DataTable, DropdownMenu, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, SecretInput, Select, Switch, Textarea, useToast, type SelectOption } from '../../components/ui'
 import { FieldSkeleton, LoadingRegion, Skeleton } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
@@ -139,7 +139,8 @@ export function RulesTab({ overview, refresh }: { overview: Overview; refresh: (
   </div>
 }
 
-/** New rule: the recipes, grouped by what they do, then "Write a script" and the agent link. Each opens its own page. */
+/** New rule: splitting an address's mail two ways (the address builder), the recipes grouped by what they do, then the
+ *  tucked-away ways for those who code: write a script, or ask an agent. Each opens its own page. */
 export function NewRulePage() {
   const { canAdminister } = useWorkspaceAccess()
   const catalog = useRecipes(canAdminister)
@@ -153,12 +154,21 @@ export function NewRulePage() {
   const c = catalog.data && (overview.data || overview.error) && (options.data || options.error) ? catalog.data : undefined
   const used = (overview.data?.rules ?? []).flatMap(r => r.addresses)
   const agentAddress = (options.data ?? []).find(a => a.id === address)?.address ?? [...new Set(used)].sort((a, b) => used.filter(x => x === b).length - used.filter(x => x === a).length)[0] ?? null
+  // Splitting mail two ways is the address builder's: it opens for the address this came from, else the one rules run on most.
+  const buildFor = (options.data ?? []).find(a => a.id === address) ?? (options.data ?? []).find(a => a.address === agentAddress) ?? (options.data ?? []).find(a => a.kind !== 'inbox')
   return <div className="stack inbound-stack recipe-page">
     <PageHeader title="New rule" backTo={LIST} />
     {catalog.error && !c ? <ErrorState error={catalog.error} onRetry={() => void catalog.refetch()} />
       : !c ? <LoadingRegion label="Loading recipes"><div className="recipe-groups" aria-hidden="true">{[2, 2, 4, 2].map((n, g) => <section key={g} className="recipe-group">
         <Skeleton width={120} height={14} /><div className="recipe-tiles">{Array.from({ length: n }, (_, i) => <span key={i} className="recipe-tile recipe-tile--skeleton" />)}</div></section>)}</div></LoadingRegion>
       : <div className="recipe-groups">
+        {buildFor && <section className="recipe-group" aria-labelledby="recipes-split">
+          <h2 id="recipes-split">Split mail</h2>
+          <div className="recipe-tiles">
+            <Link className="recipe-tile" to={`/receiving?build=${encodeURIComponent(buildFor.id)}&split=subject`}><Split className="rcv-icon" size={16} aria-hidden="true" /><strong>Split by words</strong></Link>
+            <Link className="recipe-tile" to={`/receiving?build=${encodeURIComponent(buildFor.id)}&split=ai`}><Sparkles className="rcv-icon" size={16} aria-hidden="true" /><strong>Split by meaning</strong></Link>
+          </div>
+        </section>}
         {c.groups.map(g => {
           const recipes = c.data.filter(r => r.group === g.id)
           // A tile is its name under the group's heading. An AI recipe's price per email checked is on its form, above Save.
@@ -169,12 +179,10 @@ export function NewRulePage() {
             </Link>)}</div>
           </section>
         })}
-        <section className="recipe-group" aria-labelledby="recipes-script">
-          <h2 id="recipes-script">Anything else</h2>
-          <div className="recipe-tiles">
-            <Link className="recipe-tile" to="/receiving/rules/new/script"><RecipeIcon id={null} size={16} /><strong>Write a script</strong></Link>
-          </div>
-          <AskAgentLink address={agentAddress} />
+        {/* For those who code: tucked away, one line. */}
+        <section className="recipe-group recipe-advanced" aria-labelledby="recipes-script">
+          <h2 id="recipes-script">Advanced</h2>
+          <div className="cluster"><Link className="ui-button ui-button--ghost ui-button--sm recipe-agent-link" to="/receiving/rules/new/script"><CodeXml size={14} aria-hidden="true" />Write code</Link><AskAgentLink address={agentAddress} /></div>
         </section>
       </div>}
   </div>

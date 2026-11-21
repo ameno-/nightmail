@@ -105,7 +105,7 @@ function RouteDialog({ draft, destinations, owners, onClose, refreshWebhooks, re
         {!fieldError(save.error, 'match') && !fieldError(save.error, 'to') && <MutationError error={save.error} />}
       </form>
     </Dialog>
-    <EndpointDialog open={!!creating} onOpenChange={open => { if (!open) setCreating(null) }} types={[creating ?? 'webhook']} onCreated={async endpoint => {
+    <EndpointDialog open={!!creating} onOpenChange={open => { if (!open) setCreating(null) }} types={[creating ?? 'webhook']} taken={destinations.map(d => d.webhook?.key ?? '').filter(Boolean)} onCreated={async endpoint => {
       setCreating(null); setCreated(endpoint)
       if (endpoint.type === 'forward') {
         // A forward takes mail once its recipient confirms; one on a domain this workspace verified is ready at once.
