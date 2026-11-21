@@ -5121,7 +5121,7 @@ export const createInboundAddress = <ThrowOnError extends boolean = false>(optio
 });
 
 /**
- * Admin only. Releases this address and removes its per-address state. Stored messages are kept; future mail follows normal routing. If a route delivers to this inbox, pass detach=true to remove it from those routes in the same change.
+ * Admin only. Releases this address and removes its per-address state. Stored messages are kept; future mail follows normal routing. Its rule attachments go with it: a two-way rule (split, split-by-meaning) that ran only here is deleted, any other rule stays unattached, and a rule shared with another address keeps running there. If a route delivers to this inbox, pass detach=true to remove it from those routes in the same change.
  *
  * @deprecated
  */

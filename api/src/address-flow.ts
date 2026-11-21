@@ -141,6 +141,26 @@ export async function applyFlow(tx: DbExecutor, c: Ctx, w: string, box: Address,
   return { version: saved, route: await routeFor(tx, w, box.address), rule: rules.rule };
 }
 
+/**
+ * Deleting an address takes its rule attachments with it, in the caller's transaction (which holds the address lane).
+ * A two-way rule left running nowhere goes too (the builder made it for this address); any other rule stays,
+ * unattached, and a rule shared with another address keeps running there. Its domain leaves evaluateDomains when no
+ * rule that asks the AI is left on it. Routes are routing's: detachDestination takes the inbox out of them.
+ */
+export async function releaseAddress(tx: DbExecutor, c: Ctx, w: string, box: { id: string; addresses: string[] }) {
+  const version = await currentVersion(tx, w);
+  const before = await currentRules(tx, w), mine = (target: string) => target === box.id || box.addresses.includes(target);
+  const detached = new Set(before.config.attachments.filter(a => mine(a.target)).map(a => a.ritual));
+  if (!detached.size) return;
+  const attachments = before.config.attachments.filter(a => !mine(a.target));
+  const gone = before.config.rituals.filter(r => detached.has(r.key) && r.recipe && (SPLITS as readonly string[]).includes(r.recipe.id) && !attachments.some(a => a.ritual === r.key));
+  let config: Config = { ...before.config, attachments, rituals: before.config.rituals.filter(r => !gone.includes(r)) };
+  if (before.config.rituals.some(r => detached.has(r.key) && asksAi(r)))
+    for (const host of new Set(box.addresses.map(a => a.split('@')[1]!.toLowerCase()))) config = await forgetDomain(tx, w, config, host);
+  const result = await saveRules(tx, c, w, RitualConfig.parse(config), version);
+  await recordAudit(tx, c, { action: 'ritual.attach', workspaceId: w, target: { type: 'address', id: box.id }, before: { version }, after: { version: result.version, detached: [...detached], deleted: gone.map(r => r.key) } });
+}
+
 export function registerAddressFlow(app: App) {
   app.openapi(createRoute({
     method: 'patch', path: '/v1/inbound/addresses/{addressId}/flow', operationId: 'setInboundAddressFlow', tags: ['Inbound addresses'], security,

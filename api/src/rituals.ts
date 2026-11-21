@@ -131,6 +131,9 @@ async function analyze(tx: DbExecutor, w: string, c: Config, unchanged: Readonly
     for (const site of ir.sites ?? []) {
       const r = byRef.get(site.ref), name = site.ref.slice(site.ref.indexOf(':') + 1), inbox = site.ref.startsWith('inbox:');
       const report = (message: string, hint?: string) => diagnostics.push({ ritual, line: site.line, column: site.column, endLine: site.line, endColumn: site.column, message, ...(hint ? { hint } : {}) });
+      // A saved, unchanged rule naming an inbox deleted since doesn't block every other save: delivery skips the missing
+      // inbox (Unavailable). A new or changed rule naming it is refused.
+      if (!r && inbox && unchanged.has(ritual)) continue;
       if (!r) {
         const options = (await known())[inbox ? 'inboxes' : 'endpoints'], guess = closest(name, options);
         if (inbox) report(`No inbox has the key ${name}.`, guess ? `Did you mean inbox.deliver("${guess}")?` : 'Give the inbox a key with updateInboundAddress, or use one listed by listInboundAddresses.');
@@ -156,12 +159,13 @@ function invalidRules(code: string, diagnostics: Diagnostic[]) {
   error.details = diagnostics.map(ruleDiagnostic);
   return error;
 }
-async function prepare(tx: DbExecutor, w: string, c: Config, unchanged?: ReadonlySet<string>) {
+async function prepare(tx: DbExecutor, w: string, c: Config, unchanged?: ReadonlySet<string>, stale: ReadonlySet<string> = new Set()) {
+  // stale: bindings (target:rule) saved before their address was deleted, which an approval keeps unchecked.
   const { programs, diagnostics, code } = await analyze(tx, w, c, unchanged);
   if (!programs || diagnostics.length) throw invalidRules(code, diagnostics);
   const invalid = (
     await tx.execute<{ t: string }>(
-      sql`SELECT t FROM jsonb_array_elements_text(${JSON.stringify(c.attachments.map((a) => a.target))}::jsonb) t WHERE NOT EXISTS(SELECT FROM mailbox_addresses a WHERE a.workspace_id=${w} AND (a.address=t OR a.mailbox_id=t)) LIMIT 1`,
+      sql`SELECT t FROM jsonb_array_elements_text(${JSON.stringify(c.attachments.filter(a => !stale.has(a.target + ':' + a.ritual)).map((a) => a.target))}::jsonb) t WHERE NOT EXISTS(SELECT FROM mailbox_addresses a WHERE a.workspace_id=${w} AND (a.address=t OR a.mailbox_id=t)) LIMIT 1`,
     )
   ).rows[0];
   if (invalid) throw new ApiError(422, 'UNKNOWN_TARGET', `No receiving inbox or address ${invalid.t} in this workspace.`, 'attachments');
@@ -185,11 +189,18 @@ async function normalize(tx: DbExecutor, w: string, config: Config): Promise<Con
  *  next one, and its manifest, so the rules join that version instead of taking another. */
 export async function save(tx: DbExecutor, c: Ctx, w: string, input: Config, version: number,preview=false,routed=false) {
   const prior=(await tx.execute<{config:Config;owners:Record<string,string|null>}>(sql`SELECT config,owners FROM mail_ritual_configs WHERE workspace_id=${w} FOR UPDATE`)).rows[0];
-  const config = await normalize(tx, w, input);
-  const unchanged = new Set((prior?.config.rituals ?? []).filter(r => config.rituals.some(x => x.key === r.key && x.source === r.source)).map(r => r.key));
-  const p = await prepare(tx, w, config, unchanged),
-    next = routed ? version : version + 1;
   const bindingKey=(b:Config['attachments'][number])=>'attachment:'+b.target+':'+b.ritual;
+  let config = await normalize(tx, w, input);
+  // Attachments to an address deleted since (deletes before they detached rules left them) don't block a save. They
+  // are dropped, except for an approval, which keeps another owner's bindings as they were; a new attachment to a
+  // missing address is still refused.
+  const saved = new Set((prior?.config.attachments ?? []).map(bindingKey));
+  const kept = [...new Set(config.attachments.filter(a => saved.has(bindingKey(a))).map(a => a.target))];
+  const gone = new Set(kept.length ? (await tx.execute<{ t: string }>(sql`SELECT t FROM jsonb_array_elements_text(${JSON.stringify(kept)}::jsonb) t WHERE NOT EXISTS(SELECT FROM mailbox_addresses a WHERE a.workspace_id=${w} AND (a.address=t OR a.mailbox_id=t))`)).rows.map(r => r.t) : []);
+  if (gone.size && !c.get('actor').grantId) config = { ...config, attachments: config.attachments.filter(a => !(gone.has(a.target) && saved.has(bindingKey(a)))) };
+  const unchanged = new Set((prior?.config.rituals ?? []).filter(r => config.rituals.some(x => x.key === r.key && x.source === r.source)).map(r => r.key));
+  const p = await prepare(tx, w, config, unchanged, new Set(config.attachments.filter(a => gone.has(a.target) && saved.has(bindingKey(a))).map(a => a.target + ':' + a.ritual))),
+    next = routed ? version : version + 1;
   const parts=(cfg:Config)=>new Map<string,string>([
     ...cfg.rituals.map(r=>['ritual:'+r.key,r.source] as const),
     ...cfg.attachments.map(b=>[bindingKey(b),String(b.continue)] as const),

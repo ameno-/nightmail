@@ -25922,6 +25922,41 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await call('PUT', '/v1/rules', {});
         for (const box of [a, b]) { await call('DELETE', '/v1/routing/routes/' + (await call('GET', '/v1/routing/routes')).data.find((r: Json) => r.match === box.address).id); await call('DELETE', '/v1/inbound/addresses/' + box.id + '?detach=true'); }
       });
+      await t.test('address delete: its rules come off with it (a shared rule stays for the other address); attachments an earlier delete left behind no longer block a save', async () => {
+        const rules = async () => (await call('GET', '/v1/rules')).config;
+        const routeOf = async (address: string) => (await call('GET', '/v1/routing/routes')).data.find((r: Json) => r.match === address) ?? null;
+        const script = (key: string, body = 'label("x")') => local('PUT', '/v1/rules/scripts/' + key, { key, source: 'export default function route(email){ ' + body + ' }' });
+        const split = (key: string) => ({ recipe: 'split', params: { test: 'subject', value: 'refund', then: 'store', otherwise: 'inbox:' + key } });
+        await call('PUT', '/v1/rules', {});
+        const a = await call('POST', '/v1/inbound/addresses', { address: 'del-a@receive.example', key: 'del-a', flow: { deliver: [], split: split('del-a') } }, 201);
+        const b = await call('POST', '/v1/inbound/addresses', { address: 'del-b@receive.example', key: 'del-b' }, 201);
+        ok(await script('del-shared')); ok(await script('del-own'));
+        const attach = async (...pairs: [string, string][]) => ok(await local('PUT', '/v1/rules/attachments', { attachments: [...(await rules()).attachments, ...pairs.map(([rule, target]) => ({ rule, target, continue: true }))] }));
+        await attach(['del-shared', a.id], ['del-shared', b.id], ['del-own', a.id]);
+        const aSplit = (await rules()).attachments.find((x: Json) => x.target === a.id && x.rule.startsWith('split-')).rule;
+        ok(await local('DELETE', '/v1/inbound/addresses/' + a.id));
+        const after = await rules();
+        // Its attachments are gone, its own two-way rule with them; the shared rule still runs on the other address,
+        // and a rule it ran alone stays, unattached.
+        assert.deepEqual(after.attachments.filter((x: Json) => x.target === a.id || x.target === a.address), []);
+        assert.deepEqual(after.attachments.filter((x: Json) => x.target === b.id).map((x: Json) => x.rule), ['del-shared']);
+        assert.deepEqual([after.rules.some((r: Json) => r.key === aSplit), after.rules.some((r: Json) => r.key === 'del-own')], [false, true]);
+        ok(await script('del-after'));
+        // An address released before deletes detached its rules (here by inbox_end directly) left attachments to it and a
+        // rule naming its inbox. The next save keeps working: the stale attachments are dropped, the unchanged rule kept.
+        const c = await call('POST', '/v1/inbound/addresses', { address: 'del-c@receive.example', key: 'del-c', flow: { deliver: [], split: split('del-c') } }, 201);
+        await attach(['del-shared', c.id]);
+        const cSplit = (await rules()).attachments.find((x: Json) => x.target === c.id && x.rule.startsWith('split-')).rule;
+        await db.query('SELECT inbox_end($1,$2)', [wid, c.id]);
+        ok(await script('del-after-2'));
+        const cleaned = await rules();
+        assert.deepEqual([cleaned.attachments.filter((x: Json) => x.target === c.id), cleaned.rules.some((r: Json) => r.key === cSplit)], [[], true]);
+        // A new or changed rule naming an inbox that is gone is still refused.
+        error(await script('del-bad', 'inbox.deliver("del-c")'), 422, 'UNKNOWN_ENDPOINT');
+        await call('PUT', '/v1/rules', {});
+        for (const box of [a, c]) await call('DELETE', '/v1/routing/routes/' + (await routeOf(box.address)).id);
+        await call('DELETE', '/v1/inbound/addresses/' + b.id + '?detach=true');
+      });
       await t.test('rules: omens(…) compiles to the plan decisions(…) does and ingests to the same verdicts; the /v1/rituals aliases answer as they did before the rename', async it => {
         const path = '/v1/rules', legacy = '/v1/rituals', prior = runtime.config.screen;
         const source = (fn: string) => `export default function route(email,ctx){\n  const r = ${fn}(email, { refund: "Is the sender asking for a refund?", urgent: { prompt: "Does this need a reply today?", type: "boolean", threshold: 0.8 } })\n  if (r.refund >= 0.7) label("refund")\n  if (r.urgent) endpoints["support-hook"]({ subject: "urgent" })\n}`;
