@@ -16,8 +16,8 @@ import { concepts, kindNote, kinds, type KindFilter } from './concepts'
 import { NewInboxDialog } from './inboxes'
 import { ConnectAgentButton } from '../docs/connect-agent'
 import { ago, expiresIn, receivingDomains, typeLabel, useEndpointPage, useOverview, type Overview, type OverviewEndpoint, type RouteEntry } from './overview'
-import { Chain, Match, RouteIcon, TargetIcon, Targets, targetName } from './parts'
-import { RulesTab } from './recipes'
+import { Match, RouteIcon, TargetIcon, Targets, targetName } from './parts'
+import { RulesSummary, RulesTab } from './recipes'
 import { CreatedEndpointDialog, EndpointDialog, endpointStatusLabel, endpointStatusTone, type EditableEndpoint, type Endpoint } from './ritual-connections'
 import { RouteEditor } from './routing'
 import { actorText, useLiveVersion } from './live'
@@ -65,10 +65,11 @@ function GettingStarted({ overview, onCreate }: { overview: Overview; onCreate: 
     <span className="rcv-step__n" aria-hidden="true">{done ? <Check size={13} /> : n}</span><div className="rcv-step__body"><h3>{title}</h3>{action}</div></li>
   // Each step is its heading and the action that starts it; the second waits on the first (its button is off until a
   // domain receives). An agent inbox needs no DNS, so testing can start before any of it.
+  // The step to take now is the primary button; New address waits on the first, as the header's does.
   return <ol className="rcv-steps">
-    {step(1, live.length > 0, 'Receive on a domain', !live.length && <Link className="ui-button ui-button--secondary ui-button--md" to={sendOnly[0] ? `/domains/${sendOnly[0].id}` : '/domains'}>Set up receiving</Link>)}
-    {step(2, false, 'Create an address', <Button disabled={!live.length} onClick={onCreate}>New address</Button>)}
-    {step(3, false, 'Choose where mail goes', <div className="cluster"><Link className="ui-button ui-button--ghost ui-button--md" to="/receiving/rules/new">New rule</Link><Link className="ui-button ui-button--ghost ui-button--md" to="/receiving?tab=destinations">New destination</Link></div>)}
+    {step(1, live.length > 0, 'Receive on a domain', !live.length && <Link className="ui-button ui-button--primary ui-button--md" to={sendOnly[0] ? `/domains/${sendOnly[0].id}` : '/domains'}>Set up receiving</Link>)}
+    {step(2, false, 'Create an address', <Button variant={live.length ? 'primary' : 'secondary'} disabled={!live.length} onClick={onCreate}>New address</Button>)}
+    {step(3, false, 'Add a rule or a destination', <div className="cluster"><Link className="ui-button ui-button--ghost ui-button--md" to="/receiving/rules/new">New rule</Link><Link className="ui-button ui-button--ghost ui-button--md" to="/receiving?tab=destinations&new=1">New destination</Link></div>)}
     <li className="rcv-steps__aside"><Link className="ui-button ui-button--ghost ui-button--md" to="/receiving/inboxes">Try an agent inbox</Link></li>
   </ol>
 }
@@ -82,10 +83,12 @@ function RoutesTab({ overview, fetching, filters, setFilter, page, onPage, onCre
   if (!overview.manage && !total && !filters.q) return <EmptyState title="No addresses to show" />
   if (overview.manage && !hosts.length && !total) return <GettingStarted overview={overview} onCreate={onCreate} />
   const rows = overview.routes.data
-  const empty = filters.q ? 'Nothing matches' : filters.kind === 'all' ? 'No addresses yet' : `No ${kinds[filters.kind].label.toLowerCase()} yet`
+  const empty = filters.q ? 'Nothing matches' : kinds[filters.kind].empty
   const open = (r: RouteEntry) => { if (!hrefOf(r)) onEditRoute(r) }
+  const addRule = (r: RouteEntry) => overview.manage && r.address && r.kind !== 'pattern' ? <Link className="rcv-add" to={`/receiving/rules/new?address=${encodeURIComponent(r.address.id)}`} onClick={e => e.stopPropagation()}>Add a rule</Link> : null
   // The kinds are the rail's facets, each with its count; below 1200 px they are a row over the table.
-  const kindFacets = (Object.keys(kinds) as KindFilter[]).filter(k => overview.manage || ['all', 'address', 'inbox', 'auto'].includes(k))
+  // A kind with nothing in it is left out, unless it's the one chosen.
+  const kindFacets = (Object.keys(kinds) as KindFilter[]).filter(k => (overview.manage || ['all', 'address', 'inbox', 'auto'].includes(k)) && (k === 'all' || k === filters.kind || kindCount(overview.counts, k) > 0))
     .map(k => ({ key: k, label: kinds[k].label, count: kindCount(overview.counts, k), selected: filters.kind === k, onSelect: () => setFilter({ kind: k }) }))
   return <div className="stack rcv-tab"><SplitPane className="rcv-split" collapse="row" rail={<FacetRail label="Show" groups={[{ key: 'kind', title: 'Kind', items: kindFacets }]} />}>
     <div className="rcv-toolbar">
@@ -104,9 +107,9 @@ function RoutesTab({ overview, fetching, filters, setFilter, page, onPage, onCre
         { key: 'match', label: 'Address', width: '33%', render: r => <div className="rcv-cell"><RouteIcon entry={r} /><div className="settings-cell-stack"><Match value={r.match} host={!filters.domain} /><span className="muted receiving-clip" title={noteTitle(r)}>{note(r)}</span></div></div>,
           cardRender: r => <span className="rcv-cell"><RouteIcon entry={r} /><Match value={r.match} host={!filters.domain} /></span> },
         { key: 'note', label: 'Kind', table: false, card: 'line', render: r => note(r) },
-        { key: 'rules', label: 'Rules', width: '17%', card: 'hide', render: r => <Chain keys={r.rules} max={1} empty={overview.manage && r.address && r.kind !== 'pattern'
-          ? <Link className="rcv-add" to={`/receiving/addresses/${r.address.id}?tab=flow`} onClick={e => e.stopPropagation()}>No rule · add</Link> : <span className="muted">—</span>} /> },
-        { key: 'to', label: 'Delivers to', width: '32%', card: 'line', render: r => <span className="rcv-to" title={targetsTitle(r)}><Targets to={r.to} total={r.toTotal} ownId={r.address?.id} max={2} /></span>, cardRender: r => <span className="rcv-card-to">{r.rules.length > 0 && <><code className="rcv-card-to__ritual">{r.rules[0]}</code>{r.rules.length > 1 && <span className="muted">+{r.rules.length - 1}</span>}<span aria-hidden="true">→</span></>}<Targets to={r.to} total={r.toTotal} ownId={r.address?.id} max={2} /></span> },
+        // Rules in plain words; an address without one says how to add one, on a phone too.
+        { key: 'rules', label: 'Rules', width: '19%', card: 'hide', render: r => r.rules.length ? <RulesSummary keys={r.rules} rules={overview.rules} /> : addRule(r) ?? <span className="muted">—</span> },
+        { key: 'to', label: 'Destinations', width: '30%', card: 'line', render: r => <span className="rcv-to" title={targetsTitle(r)}><Targets to={r.to} total={r.toTotal} ownId={r.address?.id} max={2} /></span>, cardRender: r => <span className="rcv-card-to"><Targets to={r.to} total={r.toTotal} ownId={r.address?.id} max={2} />{!r.rules.length && addRule(r) && <><span aria-hidden="true">·</span>{addRule(r)}</>}</span> },
         { key: 'unread', label: 'Unread', align: 'right', width: '8%', card: 'hide', render: r => r.address && r.kind !== 'pattern' ? (r.address.stats.unreadThreads ? <strong>{number(r.address.stats.unreadThreads)}</strong> : <span className="muted">0</span>) : <span className="muted">—</span> },
         { key: 'last', label: 'Last mail', align: 'right', card: 'aside', render: r => r.address?.stats.lastMessageAt && r.kind !== 'pattern' ? ago(r.address.stats.lastMessageAt) : <span className="muted">—</span>,
           cardRender: r => r.address && r.kind !== 'pattern' ? <>{r.address.stats.unreadThreads > 0 && <strong className="rcv-unread">{number(r.address.stats.unreadThreads)} new</strong>}{r.address.stats.lastMessageAt ? ago(r.address.stats.lastMessageAt) : null}</> : null },
@@ -121,6 +124,10 @@ function RoutesTab({ overview, fetching, filters, setFilter, page, onPage, onCre
 }
 
 const ENDPOINT_PAGE = 50
+const destinationType: Record<OverviewEndpoint['type'], string> = { webhook: 'Webhook', slack: 'Slack', discord: 'Discord', forward: 'Forward' }
+// What a webhook subscribes to, in words: received mail is "all new mail".
+const eventWord: Record<string, string> = { 'message.received': 'All new mail', 'message.junk': 'Junk', 'message.stored': 'Stored mail' }
+const eventWords = (types: string[]) => types.length === 1 ? eventWord[types[0]!] ?? types[0]! : types.includes('message.received') ? `All new mail +${types.length - 1}` : `${types.length} events`
 /** Destinations (the API's endpoints): where processed mail is delivered. Webhooks, Slack, Discord and forwards. */
 function DestinationsTab({ overview, refresh }: { overview: Overview; refresh: () => void }) {
   const toast = useToast(), navigate = useNavigate(), client = useQueryClient()
@@ -135,7 +142,9 @@ function DestinationsTab({ overview, refresh }: { overview: Overview; refresh: (
   const showAll = () => { setParams(previous => { const next = new URLSearchParams(previous); next.delete('address'); return next }, { replace: true }); pagination.reset() }
   // The first page holds as many rows as the overview counted, so the list keeps its height while it loads.
   const expected = address ? 2 : Math.max(1, Math.min(ENDPOINT_PAGE, overview.endpoints.length))
-  const [creating, setCreating] = useState(false)
+  // ?new=1 (the first-run checklist's New destination) opens the form at once.
+  const [creating, setCreating] = useState(params.get('new') === '1')
+  useEffect(() => { if (params.get('new')) setParams(previous => { const next = new URLSearchParams(previous); next.delete('new'); return next }, { replace: true }) }, []) // eslint-disable-line react-hooks/exhaustive-deps
   const [created, setCreated] = useState<(Endpoint & { secret?: string }) | null>(null)
   // Kept after closing, so the dialog's title and fields don't change while it animates out.
   const [editing, setEditing] = useState<EditableEndpoint | null>(null), [editOpen, setEditOpen] = useState(false)
@@ -149,21 +158,22 @@ function DestinationsTab({ overview, refresh }: { overview: Overview; refresh: (
   }
   // A webhook opens its own page (events, deliveries, headers, secret), named or not.
   const webhookPage = (e: OverviewEndpoint) => e.type === 'webhook' ? `/receiving/webhooks/${e.id}` : null
-  const used = (e: OverviewEndpoint) => [e.routes ? `${number(e.routes)} ${e.routes === 1 ? 'address' : 'addresses'}` : null, e.rules.length ? `rule ${e.rules.join(', ')}` : null, e.eventTypes.length ? `${e.eventTypes.length === 1 ? e.eventTypes[0] : `${e.eventTypes.length} events`}` : null].filter(Boolean).join(' · ')
+  const used = (e: OverviewEndpoint) => [e.routes ? `${number(e.routes)} ${e.routes === 1 ? 'address' : 'addresses'}` : null, e.rules.length ? `${e.rules.join(', ')} ${e.rules.length === 1 ? 'rule' : 'rules'}` : null, e.eventTypes.length ? eventWords(e.eventTypes) : null].filter(Boolean).join(' · ')
   return <div className="stack rcv-tab">
     <div className="rcv-kindline">
       {address && <span className="rcv-filter-chip">{(a => a ? <PrivateAddress value={a} /> : 'One address')(addresses.data?.find(item => item.id === address)?.address)}<IconButton size="sm" label="Show every destination" onClick={showAll}><X size={14} aria-hidden="true" /></IconButton></span>}
-      <div className="cluster"><Button size="sm" onClick={() => setCreating(true)}>New destination</Button></div>
+      {/* With none yet, the empty list's own button is the one. */}
+      {!none && <div className="cluster"><Button onClick={() => setCreating(true)}>New destination</Button></div>}
     </div>
     {list.error && !list.data ? <ErrorState error={list.error} onRetry={() => void list.refetch()} /> : <DataTable className="rcv-table" rows={none ? [] : list.data?.data ?? []} rowKey={e => e.id} rowHref={webhookPage}
       loading={!none && !list.data} skeletonRows={expected} minRows={none ? 0 : Math.min(expected, list.data?.data.length ?? expected)}
       empty={address ? <EmptyState title="No webhook gets this address’s mail" /> : <EmptyState title="No destinations yet" action={<Button onClick={() => setCreating(true)}>New destination</Button>} />}
       columns={[
-        { key: 'name', label: 'Destination', width: '30%', render: e => <div className="rcv-cell"><TargetIcon type={e.type} /><div className="settings-cell-stack"><span className="receiving-clip" title={e.call ?? e.name}>{e.call ? <code>{e.call}</code> : e.name}</span><span className="muted receiving-clip"><PrivateAddress value={e.target} /></span></div></div>,
-          cardRender: e => <span className="rcv-cell"><TargetIcon type={e.type} />{e.call ? <code>{e.call}</code> : e.name}</span> },
-        { key: 'target', label: 'Target', table: false, card: 'line', render: e => <PrivateAddress value={e.target} /> },
-        { key: 'type', label: 'Type', width: '14%', card: 'hide', render: e => ({ webhook: 'Webhook', slack: 'Slack', discord: 'Discord', forward: 'Forward' }[e.type]) },
-        { key: 'used', label: 'Used by', width: '30%', card: 'line', render: e => used(e) || <span className="muted">Nothing yet</span> },
+        // Its name, then what it is and where it points: "crm · Webhook · ••••/crm". Never the code that calls it.
+        { key: 'name', label: 'Destination', width: '40%', render: e => <div className="rcv-cell"><TargetIcon type={e.type} /><div className="settings-cell-stack"><span className="receiving-clip" title={e.name}>{e.name}</span><span className="muted receiving-clip">{destinationType[e.type]} · <PrivateAddress value={e.target} /></span></div></div>,
+          cardRender: e => <span className="rcv-cell"><TargetIcon type={e.type} />{e.name}</span> },
+        { key: 'target', label: 'Target', table: false, card: 'line', render: e => <>{destinationType[e.type]} · <PrivateAddress value={e.target} /></> },
+        { key: 'used', label: 'Used by', width: '34%', card: 'line', render: e => used(e) || <span className="muted">Nothing yet</span> },
         { key: 'status', label: 'Status', width: '16%', card: 'aside', render: e => <StatusBadge status={endpointStatusLabel[e.status]} tone={endpointStatusTone[e.status]} /> },
         { key: 'actions', label: '', width: 52, align: 'right', render: e => e.source === 'inbound_webhook' ? <DropdownMenu label={`Actions for ${e.name}`} items={[{ label: 'Open', onSelect: () => navigate(webhookPage(e)!) }]} /> : <DropdownMenu label={`Actions for ${e.name}`} items={[
           ...(e.type === 'webhook' ? [{ label: 'Open', onSelect: () => navigate(webhookPage(e)!) }] : []),
@@ -219,7 +229,8 @@ export function ReceivingPage() {
   const counts = data && { addresses: kindCount(data.counts, 'all'), rules: data.rules.length, destinations: data.endpoints.length }
   return <div className="stack inbound-stack">
     {/* The page's one action. An address's mail is on its own page; every address's mail is in Logs. */}
-    <PageHeader title="Receiving" actions={manage && <Button variant="primary" disabled={!data || !receivingDomains(data.domains).length} onClick={() => setCreating(true)}>New address</Button>} />
+    {/* Until a domain receives, the first-run steps carry the way in; a dead button here would only say no. */}
+    <PageHeader title="Receiving" actions={manage && (!data || receivingDomains(data.domains).length > 0) && <Button variant="primary" disabled={!data} onClick={() => setCreating(true)}>New address</Button>} />
     {overview.error && !data ? <ErrorState error={overview.error} onRetry={() => void overview.refetch()} /> : !data || !counts ? <LoadingRegion label="Loading receiving"><div className="rcv-skeleton" aria-hidden="true"><span /><span /><span /><span /></div></LoadingRegion> : <div className="rcv-page">
       <Tabs label="Receiving" value={tab} onValueChange={value => update({ tab: value, kind: null, address: null })}
         items={[{ value: 'addresses', label: concepts.addresses.title, count: counts.addresses }, ...(data.manage ? [{ value: 'rules', label: concepts.rules.title, count: counts.rules }, { value: 'destinations', label: concepts.destinations.title, count: counts.destinations }] : [])]} />

@@ -27,16 +27,16 @@ The API keeps its names; only the dashboard's words are these. The words below a
 | **Rules** | Short scripts that run on an address's mail: label it, filter it, or send it on. | If the subject mentions a refund, label it and post it to Slack. |
 | **Destinations** (endpoints) | Places mail can be delivered: Slack, Discord, a webhook or a forward. A rule calls one by name; an address can deliver to a webhook or a forward, and a webhook can also subscribe to events. | `endpoints.support({ text: email.subject })` |
 
-Rules and destinations are described in full in [rules.md](rules.md); agent inboxes in [inboxes.md](inboxes.md).
+Rules and destinations are described in full in [rules.md](rules.md); agent inboxes in [inboxes.md](inboxes.md). A destination is listed by its name, its type and where it points (`crm · Webhook · ••••/crm`), never by the call a rule makes; a webhook subscribed to received mail is used by *All new mail*.
 
 ## Kinds of address
 
-The Addresses tab lists every kind in one table and filters by kind. Each row is one line: **Address | Rules | Delivers to | Unread | Last mail**.
+The Addresses tab lists every kind in one table and filters by kind; a kind with nothing in it is left out. Each row is one line: **Address | Rules | Destinations | Unread | Last mail**. Rules are their plain sentences (the first, and how many more); an address without one offers **Add a rule**, on a phone too.
 
 | Filter | What it shows | Example |
 |---|---|---|
 | All | Every address that receives mail, and where its mail goes. | `support@acme.com → triage → Inbox, Slack support` |
-| Addresses | Each keeps its own mail, on its page; it can send its mail elsewhere instead. | `support@acme.com` |
+| Exact | Each keeps its own mail, on its page; it can send its mail elsewhere instead. | `support@acme.com` |
 | Wildcards | A wildcard (the API's pattern) catches many addresses with `*`. | `reply+*@acme.com` catches `reply+4821@acme.com` |
 | Catch-alls | What happens to mail for an address that doesn't exist. | `*@acme.com` |
 | Agent inboxes | Expiring addresses that agents and tests create and read over the API or MCP. | |
@@ -48,7 +48,7 @@ An address that has no rule yet says so in its row (**No rule · add**), so what
 
 ## What happens to mail
 
-**Delivers to** lists where an address's mail ends up: routing first, then what its rules can send it to, marked *via* the rule (a rule may send only some mail there).
+**Destinations** lists where an address's mail ends up: routing first, then what its rules can send it to, marked *via a rule* (a rule may send only some mail there).
 
 | On screen | Meaning | API (`to[].type`) |
 |---|---|---|
@@ -68,9 +68,11 @@ An address's page has three tabs:
 
 | Tab | What's there |
 |---|---|
-| **Mail** | Its conversations: search, the views (Inbox, Starred, Archive, Spam, Trash, All), reading, replying and New message. |
-| **Where mail goes** | Receive → Process → Deliver: its addresses, aliases and wildcards; the rules that run, in order (attach, detach, New rule); where its mail is delivered (**Change**). **Test** runs an email to it through its rules. |
-| **Settings** | Its domain and dates, display name, aliases and wildcards, and Delete address. |
+| **Mail** | Its conversations: search, the view picker (Inbox, Starred, Archive, Spam, Trash, All), reading, replying and New message. A message sent from another address opens on that address's page. |
+| **Where mail goes** | Address → Rules → Destinations: what it receives; the rules that run, in order, in plain words (attach, detach with Undo, New rule); where its mail is delivered (**Change**, "Where should this mail go?": Deliver to these destinations, store it or drop it). **Test** runs an email to it through its rules. |
+| **Settings** | Its domain and dates, display name, aliases and wildcards (edited here only), and Delete address. |
+
+Switching tabs keeps the open conversation and a reply being written.
 
 Mail is the first tab: opening an address shows its mail. Every address's received mail together is in Logs, filtered to Received; `/receiving/inbox` opens there, and `/receiving/inbox?address=…` opens that address's Mail tab.
 

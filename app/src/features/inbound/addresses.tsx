@@ -11,6 +11,7 @@ import { AliasEditor, aliasState, commitAliases, type AliasState } from './alias
 import { steps } from './concepts'
 import { typeLabel, useOverview } from './overview'
 import { Match, RitualIcon, TargetIcon, targetName } from './parts'
+import { RuleLine } from './recipes'
 import { RouteEditor } from './routing'
 import '../settings/settings.css'
 import './inbound.css'
@@ -81,23 +82,33 @@ const sameList = (a: string[], b: string[]) => a.length === b.length && [...a].s
 
 type RuleConfig = { version: number; config: { attachments: { rule: string; target: string; continue: boolean }[] } }
 
-/** Receive → Process → Deliver for one address, with what can be done at each step right there. */
-function AddressPath({ address, overview, onAddAlias, onAddPattern }: { address: InboundAddress; overview: ReturnType<typeof useOverview>; onAddAlias: () => void; onAddPattern: () => void }) {
+/** Address → Rules → Destinations for one address, with what can be done at each step right there. Its aliases and
+ *  wildcards are edited in one place, its Settings tab. */
+function AddressPath({ address, overview }: { address: InboundAddress; overview: ReturnType<typeof useOverview> }) {
   const toast = useToast()
   const entry = overview.data?.routes.data.find(r => r.address?.id === address.id)
   const [ritual, setRitual] = useState('')
   const [busy, setBusy] = useState(false)
   const [routing, setRouting] = useState(false)
   // Single flight: attaching reads the saved version and writes against it, so a second click would conflict with the first.
-  const attach = useSingleFlight('rules.attachments', async (change: (list: RuleConfig['config']['attachments']) => RuleConfig['config']['attachments'], done: string) => {
+  type Attachments = RuleConfig['config']['attachments']
+  const attach = useSingleFlight('rules.attachments', async (change: (list: Attachments) => Attachments, done: string, undo?: (list: Attachments) => Attachments) => {
     setBusy(true)
     try {
       const current = await request<RuleConfig>('/v1/rules')
       await request('/v1/rules/attachments', { method: 'PUT', body: { attachments: change(current.config.attachments) }, ifMatch: current.version })
-      toast(done, 'success'); setRitual(''); await overview.refetch()
+      // Detaching changes how live mail is handled: Undo puts the rule back where it was.
+      toast(done, 'success', undo && { label: 'Undo', onSelect: () => void attach(undo, 'Rule put back.') }); setRitual(''); await overview.refetch()
     } catch (e) { toast(errorText(e), 'error') } finally { setBusy(false) }
   }, address.id)
-  const attached = entry?.rules ?? []
+  const detach = (key: string) => void attach(list => list.filter(b => !(b.rule === key && b.target === address.id)), 'Rule detached.', list => {
+    if (list.some(b => b.rule === key && b.target === address.id)) return list
+    const before = attachedNow.indexOf(key), after = attachedNow[before + 1]
+    const at = after ? list.findIndex(b => b.rule === after && b.target === address.id) : -1
+    const entry = { rule: key, target: address.id, continue: !!overview.data?.rules.find(r => r.key === key)?.recipe }
+    return at < 0 ? [...list, entry] : [...list.slice(0, at), entry, ...list.slice(at)]
+  })
+  const attached = entry?.rules ?? [], attachedNow = attached
   const available = (overview.data?.rules ?? []).filter(r => !attached.includes(r.key))
   return <div className="addr-path" aria-label="How mail to this address is handled">
     <section className="addr-step" id="route">
@@ -107,17 +118,16 @@ function AddressPath({ address, overview, onAddAlias, onAddPattern }: { address:
         {address.aliases.map(a => <li key={a}><Match value={a} /><span className="muted">alias</span></li>)}
         {address.rules.map(r => <li key={r}><Match value={r} /><span className="muted">wildcard</span></li>)}
       </ul>
-      {!address.expiresAt && <div className="addr-step__actions"><Button size="sm" variant="ghost" onClick={onAddAlias}>Add alias</Button><Button size="sm" variant="ghost" onClick={onAddPattern}>Add wildcard</Button></div>}
     </section>
     <span className="addr-arrow" aria-hidden="true">→</span>
     <section className="addr-step" id="rules">
       <h2>{steps.process.title}</h2>
-      {!entry ? <SkeletonText width="50%" /> : attached.length ? <ul>{attached.map((k, i) => <li key={k}><RitualIcon /><Link to={`/receiving/rules/${encodeURIComponent(k)}`}><code>{k}</code></Link>{i < attached.length - 1 && <span className="addr-then">then</span>}<span className="addr-grow" />
-        <IconButton size="sm" label={`Detach ${k}`} disabled={busy} onClick={() => void attach(list => list.filter(b => !(b.rule === k && b.target === address.id)), `${k} detached.`)}><X size={14} aria-hidden="true" /></IconButton></li>)}</ul>
+      {!entry ? <SkeletonText width="50%" /> : attached.length ? <ul>{attached.map((k, i) => <li key={k}><RitualIcon /><Link className="addr-rule" to={`/receiving/rules/${encodeURIComponent(k)}`}><RuleLine rule={overview.data?.rules.find(r => r.key === k)} keyName={k} /></Link>{i < attached.length - 1 && <span className="addr-then">then</span>}<span className="addr-grow" />
+        <IconButton size="sm" label={`Detach ${k}`} disabled={busy} onClick={() => detach(k)}><X size={14} aria-hidden="true" /></IconButton></li>)}</ul>
         : <p className="addr-step__empty">{steps.process.empty}</p>}
       <div className="addr-step__foot">
         {available.length > 0 && <div className="addr-step__actions">
-          <Select aria-label="Rule to attach" value={ritual} onValueChange={setRitual} options={[{ value: '', label: 'Attach a rule…' }, ...available.map(r => ({ value: r.key, label: r.key }))]} />
+          <Select aria-label="Rule to attach" value={ritual} onValueChange={setRitual} options={[{ value: '', label: 'Attach a rule…' }, ...available.map(r => ({ value: r.key, text: r.key, label: <RuleLine rule={r} keyName={r.key} /> }))]} />
           <Button size="sm" disabled={!ritual || busy || attached.length >= RITUALS_PER_ADDRESS} onClick={() => void attach(list => [...list, { rule: ritual, target: address.id, continue: !!available.find(r => r.key === ritual)?.recipe }], `${ritual} attached.`)}>Attach</Button>
         </div>}
         <div className="addr-step__actions"><Link className="ui-button ui-button--ghost ui-button--sm" to={`/receiving/rules/new?address=${encodeURIComponent(address.id)}`}>New rule</Link></div>
@@ -128,7 +138,7 @@ function AddressPath({ address, overview, onAddAlias, onAddPattern }: { address:
       <h2>{steps.deliver.title}</h2>
       {/* The list is where its mail goes, a route's changes included (no Inbox when the route sends it elsewhere,
           Dropped when it drops it); webhooks past the first 50 are one link away. */}
-      {!entry ? <SkeletonText width="50%" /> : <ul>{entry.to.map(t => <li key={`${t.type}:${t.id}`}><TargetIcon type={t.type} /><span>{targetName(t, address.id)}</span>{(t.via || t.status === 'paused' || t.type !== 'inbox' || t.id !== address.id) && <span className="muted">{t.via ? `via ${t.via}` : t.status === 'paused' ? 'Paused' : typeLabel[t.type]}</span>}</li>)}
+      {!entry ? <SkeletonText width="50%" /> : <ul>{entry.to.map(t => <li key={`${t.type}:${t.id}`}><TargetIcon type={t.type} /><span>{targetName(t, address.id)}</span>{(t.via || t.status === 'paused' || t.type !== 'inbox' || t.id !== address.id) && <span className="muted">{t.via ? 'via a rule' : t.status === 'paused' ? 'Paused' : typeLabel[t.type]}</span>}</li>)}
         {entry.toTruncated && <li><Link to={`/receiving?tab=destinations&address=${encodeURIComponent(address.id)}`}>{number(entry.toTotal - entry.to.length)} more {entry.toTotal - entry.to.length === 1 ? 'webhook' : 'webhooks'}</Link></li>}</ul>}
       <div className="addr-step__actions"><Button size="sm" onClick={() => setRouting(true)}>Change</Button></div>
     </section>
@@ -173,11 +183,11 @@ export function InboundAddressDetailPage() {
   // Mail first: opening an address shows its mail. Where its mail goes and its settings are for owners and admins.
   const asked = params.get('tab')
   const tab: AddressTab = canAdminister && (asked === 'flow' || asked === 'settings') ? asked : 'mail'
+  // The open conversation stays in the URL (and its unsent reply in the page) while another tab is looked at.
   const show = (next: AddressTab) => setParams(previous => {
     const query = new URLSearchParams()
     if (next !== 'mail') query.set('tab', next)
-    // A conversation's place in the URL belongs to the Mail tab.
-    else for (const key of ['view', 'thread', 'message']) { const value = previous.get(key); if (value) query.set(key, value) }
+    for (const key of ['view', 'thread', 'message']) { const value = previous.get(key); if (value) query.set(key, value) }
     return query
   }, { replace: true })
   const overview = useOverview({ q: current?.address ?? '', kind: current?.kind === 'inbox' ? 'inbox' : 'address', limit: 5 }, false, canAdminister && !!current && tab === 'flow')
@@ -205,11 +215,13 @@ export function InboundAddressDetailPage() {
   return <div className="stack inbound-stack addr-root" data-tab={tab}>
     <PageHeader title={current ? <PrivateAddress value={current.address} /> : <SkeletonText width={240} lineHeight={28} />} backTo="/receiving" />
     {canAdminister && <Tabs label="Address" value={tab} onValueChange={value => show(value as AddressTab)}
-      items={[{ value: 'mail', label: 'Mail', count: current ? current.stats.unreadThreads || undefined : undefined }, { value: 'flow', label: 'Where mail goes' }, { value: 'settings', label: 'Settings' }]} />}
+      items={[{ value: 'mail', label: 'Mail' }, { value: 'flow', label: 'Where mail goes' }, { value: 'settings', label: 'Settings' }]} />}
     {expired && <Alert tone="info">This temporary address expired. It can’t receive or send, but its mail stays readable.</Alert>}
-    {tab === 'mail' ? <AddressMail addressId={id} />
+    {/* Mail stays mounted, hidden, behind the other tabs: a reply being written survives a look at them. */}
+    <AddressMail addressId={id} hidden={tab !== 'mail'} />
+    {tab === 'mail' ? null
       : !current || (tab === 'flow' && overview.data === undefined && !overview.error) ? <LoadingRegion label="Loading address"><div className="addr-skeleton" aria-hidden="true"><span /><span /><span /></div></LoadingRegion>
-      : tab === 'flow' ? <div className="stack addr-page"><AddressPath address={current} overview={overview} onAddAlias={() => focusSettings(() => document.getElementById('inbound-address-aliases'))} onAddPattern={() => focusSettings(() => patternInput.current)} />
+      : tab === 'flow' ? <div className="stack addr-page"><AddressPath address={current} overview={overview} />
         <div className="cluster"><Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/trace" state={{ to: current.address }}>Test</Link></div></div>
       : <div className="stack addr-page">
         <KeyValues className="addr-facts" items={[

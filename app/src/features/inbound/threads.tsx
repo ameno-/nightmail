@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type RefObject } from 'react'
-import { Navigate, useLocation, useSearchParams } from 'react-router'
+import { Navigate, useLocation, useNavigate, useSearchParams } from 'react-router'
 import { Archive, ArrowLeft, Inbox, Mail, MailOpen, Paperclip, Reply, Search, Star, Trash2, Undo2, X } from 'lucide-react'
-import { Alert, Button, Checkbox, ConfirmDialog, Dialog, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, Pagination, Select, SkeletonText, StatusBadge, Tabs, Textarea, useToast, fieldError, MutationError, ErrorText } from '../../components/ui'
+import { Alert, Button, Checkbox, ConfirmDialog, Dialog, EmptyState, ErrorState, Field, IconButton, Input, Pagination, Select, SkeletonText, StatusBadge, Textarea, useToast, fieldError, MutationError, ErrorText } from '../../components/ui'
 import { ReceivedEmailPreview } from '../../components/EmailPreview'
 import { useApi, useApiDef, useApiMutation, useApiQuery } from '../../data/context'
 import { queries } from '../../data/queries'
@@ -266,7 +266,7 @@ function Composer({ thread, target, explicit, onClearTarget, addressId, addresse
   </form>
 }
 
-function NewThreadDialog({ open, onOpenChange, addresses, defaultAddress, onSent }: { open: boolean; onOpenChange: (open: boolean) => void; addresses: InboundAddress[]; defaultAddress?: string; onSent: (threadId: string) => void }) {
+function NewThreadDialog({ open, onOpenChange, addresses, defaultAddress, onSent }: { open: boolean; onOpenChange: (open: boolean) => void; addresses: InboundAddress[]; defaultAddress?: string; onSent: (threadId: string, fromAddressId: string) => void }) {
   const [from, setFrom] = useState('')
   const [to, setTo] = useState('')
   const [subject, setSubject] = useState('')
@@ -291,7 +291,7 @@ function NewThreadDialog({ open, onOpenChange, addresses, defaultAddress, onSent
     try {
       const message = await send.mutateAsync({ addressId: from, to: recipients, subject: subject.trim(), text: text.trim() })
       key.current = { key: '', body: '' }; setTo(''); setSubject(''); setText('')
-      onOpenChange(false); onSent(message.threadId)
+      onOpenChange(false); onSent(message.threadId, from)
     } catch { /* Shown in the form. */ }
   }
   return <Dialog open={open} onOpenChange={next => { if (!send.isPending) onOpenChange(next) }} title="New message" footer={<><Button disabled={send.isPending} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" type="submit" form="inbound-new-thread" loading={send.isPending}>Send</Button></>}>
@@ -309,8 +309,9 @@ function NewThreadDialog({ open, onOpenChange, addresses, defaultAddress, onSent
 
 /** One address's mail (its page's Mail tab): its conversations beside the open one, with search, views and New message.
  *  Received mail lives per address; every address's together is Logs, filtered to received. */
-export function AddressMail({ addressId }: { addressId: string }) {
+export function AddressMail({ addressId, hidden = false }: { addressId: string; hidden?: boolean }) {
   const [params, setParams] = useSearchParams()
+  const navigate = useNavigate()
   const view = (views.some(item => item.value === params.get('view')) ? params.get('view') : 'inbox') as InboundThreadView
   const threadId = params.get('thread')
   const [search, setSearch] = useState('')
@@ -331,14 +332,15 @@ export function AddressMail({ addressId }: { addressId: string }) {
       return next
     })
   }
-  return <div className="mailbox-page" data-thread-open={threadId ? true : undefined}>
+  return <div className="mailbox-page" hidden={hidden} data-thread-open={threadId ? true : undefined}>
     <div className="mailbox-layout">
       <aside className="mailbox-list" aria-label="Conversations">
         <div className="mailbox-toolbar">
           <div className="search-box mailbox-search"><Search size={16} /><Input type="search" aria-label="Search conversations" placeholder="Search mail" value={search} onChange={event => { setSearch(event.target.value); pagination.reset() }} /></div>
+          {/* The views are one picker beside search: the address's own tabs are the page's only row of tabs. */}
+          <Select className="mailbox-view" aria-label="Conversation view" value={view} onValueChange={value => { pagination.reset(); change({ view: value === 'inbox' ? null : value, thread: null, message: null }) }} options={views} />
           <Button onClick={() => setComposing(true)} disabled={!addresses.has(addressId)}>New message</Button>
         </div>
-        <Tabs label="Conversation views" value={view} onValueChange={value => { pagination.reset(); change({ view: value === 'inbox' ? null : value, thread: null, message: null }) }} items={views} />
         {threads.error ? <ErrorState error={threads.error} onRetry={() => void threads.refetch()} /> : threads.isPending ? <div className="mailbox-thread-skeleton">{[0, 1, 2, 3].map(index => <div key={index}><SkeletonText width="40%" /><SkeletonText width="60%" /><SkeletonText width="85%" /></div>)}</div>
           : threads.data.length ? <>
             <ThreadList threads={threads.data} threadId={threadId} addresses={addresses} own={own} addressId={addressId} onSelect={id => change({ thread: id, message: null })} />
@@ -352,7 +354,8 @@ export function AddressMail({ addressId }: { addressId: string }) {
           : <Conversation thread={thread.data} addressId={addressId} addresses={addresses} focusMessage={params.get('message')} onBack={() => change({ thread: null, message: null })} onAddress={() => undefined} />}
       </div>
     </div>
-    <NewThreadDialog open={composing} onOpenChange={setComposing} addresses={[...addresses.values()]} defaultAddress={addressId} onSent={id => change({ thread: id, message: null })} />
+    {/* A message sent from another of the workspace's addresses lives on that address's page. */}
+    <NewThreadDialog open={composing} onOpenChange={setComposing} addresses={[...addresses.values()]} defaultAddress={addressId} onSent={(id, from) => from === addressId ? change({ thread: id, message: null }) : navigate(`/receiving/addresses/${encodeURIComponent(from)}?thread=${encodeURIComponent(id)}`)} />
   </div>
 }
 

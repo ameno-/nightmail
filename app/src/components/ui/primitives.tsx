@@ -366,12 +366,14 @@ export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () =>
   return <div className="ui-error-state"><Alert tone="danger" title="Couldn’t load this content"><ErrorText error={error} />{onRetry && !notFound(error) && <div className="ui-error-state__retry"><Button onClick={onRetry}>Try again</Button></div>}</Alert></div>;
 }
 type ToastTone = 'success' | 'error' | 'info';
-type ToastFn = (message: string, tone?: ToastTone) => void;
+/** A toast's one action, such as Undo: it runs once and closes the toast. */
+type ToastAction = { label: string; onSelect: () => void };
+type ToastFn = (message: string, tone?: ToastTone, action?: ToastAction) => void;
 const ToastContext = createContext<ToastFn | null>(null);
 const KEPT_TOASTS = 'nightmail.kept-toasts';
 const TOAST_MS = 6000;
 // A toast stays 6 s, and the time stops while a pointer rests on it or focus is inside it.
-function Toast({ id, tone, message, dismiss }: { id: number; tone: ToastTone; message: string; dismiss: (id: number) => void }) {
+function Toast({ id, tone, message, action, dismiss }: { id: number; tone: ToastTone; message: string; action?: ToastAction; dismiss: (id: number) => void }) {
   const [paused, setPaused] = useState(false);
   const onDismiss = useCallback(() => dismiss(id), [dismiss, id]);
   const left = useRef(TOAST_MS);
@@ -380,13 +382,13 @@ function Toast({ id, tone, message, dismiss }: { id: number; tone: ToastTone; me
     const started = Date.now(), timer = setTimeout(onDismiss, left.current);
     return () => { clearTimeout(timer); left.current -= Date.now() - started; };
   }, [paused, onDismiss]);
-  return <Alert tone={tone === 'error' ? 'danger' : tone} onDismiss={onDismiss} timer={{ duration: TOAST_MS, paused }} onPointerEnter={() => setPaused(true)} onPointerLeave={() => setPaused(false)} onFocus={() => setPaused(true)} onBlur={() => setPaused(false)}>{message}</Alert>;
+  return <Alert tone={tone === 'error' ? 'danger' : tone} onDismiss={onDismiss} timer={{ duration: TOAST_MS, paused }} onPointerEnter={() => setPaused(true)} onPointerLeave={() => setPaused(false)} onFocus={() => setPaused(true)} onBlur={() => setPaused(false)}>{message}{action && <> <Button variant="ghost" size="sm" className="ui-toast__action" onClick={() => { onDismiss(); action.onSelect(); }}>{action.label}</Button></>}</Alert>;
 }
 export function ToastProvider({ children }: { children: ReactNode }) {
-  const [toasts, setToasts] = useState<{ id: number; message: string; tone: ToastTone }[]>([]);
+  const [toasts, setToasts] = useState<{ id: number; message: string; tone: ToastTone; action?: ToastAction }[]>([]);
   const sequence = useRef(0);
   const dismiss = useCallback((id: number) => setToasts(current => current.filter(toast => toast.id !== id)), []);
-  const toast = useCallback<ToastFn>((message, tone = 'info') => { const id = ++sequence.current; setToasts(current => [...current.slice(-3), { id, message, tone }]); }, []);
+  const toast = useCallback<ToastFn>((message, tone = 'info', action) => { const id = ++sequence.current; setToasts(current => [...current.slice(-3), { id, message, tone, action }]); }, []);
   // A reload for a new build (lib/preloadable.ts) keeps what was just confirmed, such as "Joined <workspace>".
   const shown = useRef(toasts); shown.current = toasts;
   useEffect(() => {
@@ -395,7 +397,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     window.addEventListener('nightmail:reloading', keep);
     return () => window.removeEventListener('nightmail:reloading', keep);
   }, [toast]);
-  return <ToastContext.Provider value={toast}>{children}<div className="ui-toasts" aria-label="Notifications">{toasts.map(item => <Toast key={item.id} id={item.id} tone={item.tone} message={item.message} dismiss={dismiss} />)}</div></ToastContext.Provider>;
+  return <ToastContext.Provider value={toast}>{children}<div className="ui-toasts" aria-label="Notifications">{toasts.map(item => <Toast key={item.id} id={item.id} tone={item.tone} message={item.message} action={item.action} dismiss={dismiss} />)}</div></ToastContext.Provider>;
 }
 export function useToast(): ToastFn {
   const toast = useContext(ToastContext);

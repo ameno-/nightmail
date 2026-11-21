@@ -422,7 +422,7 @@ async function conversation(db, workspaceId, box) {
   ];
   const stored = steps.filter(step => step.out !== 'header');
   await db.query('INSERT INTO mail_threads(id,workspace_id,subject,message_count,last_message_at) VALUES($1,$2,$3,$4,$5)', [thread, workspaceId, subject, stored.length, ago(7)]);
-  const ids = { email: null, received: null };
+  const ids = { email: null, received: null, thread };
   let previous = null, references = [];
   for (const [i, step] of steps.entries()) {
     const at = ago(step.minutes), id = rid('msg'), subj = i ? `Re: ${subject}` : subject;
@@ -790,7 +790,7 @@ export async function seed(fx) {
   await db.query("INSERT INTO nightmail_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at,profile,receiving) VALUES('mcp_at_cls_live','https://account.anoma.ly','user_kai','user_kai','opencode','ws_live','{read,send,manage}',now()+interval '1 day',0,'work',true)");
   fx.liveKey = agent.secret;
   return {
-    mcp, restricted: 'ws_harbor', email, junkEmail, receivedEmail: 'msg_northwind_invoice', threadEmail: thread.email, threadReceived: thread.received, domain: nw.id, sendingDomain: sendingDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
+    mcp, restricted: 'ws_harbor', email, junkEmail, receivedEmail: 'msg_northwind_invoice', threadEmail: thread.email, threadReceived: thread.received, supportThread: thread.thread, domain: nw.id, sendingDomain: sendingDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
     webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, template: template.id ?? template.template?.id, segment: segment.id, supportConversation,
   };
 }

@@ -21,7 +21,7 @@
 .rcv-targets { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-4) var(--space-12); min-width: 0; }
 .rcv-target { display: inline-flex; align-items: center; gap: var(--space-6); white-space: nowrap; }
 .rcv-target[data-muted] { color: var(--color-muted); }
-.rcv-via { color: var(--color-faint); font-size: var(--text-xs); }
+.rcv-via { margin-left: var(--space-6); color: var(--color-faint); font-size: var(--text-xs); }
 .rcv-chain { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-4); }
 /* One line in a list row: the first rule and how many more, cut short rather than wrapped. */
 .rcv-chain[data-line], .rcv-table .rcv-chain { flex-wrap: nowrap; max-width: 100%; min-width: 0; }
@@ -197,7 +197,8 @@ html:not([data-privacy='off']) .trace-to.private-field:not(:hover, :focus)::plac
   .rcv-foot { flex-wrap: wrap; }
 }
 /* A card's one line: its first rule (+ how many more), then where its mail goes; it clips at the card's edge. */
-.rcv-card-to { display: inline-flex; align-items: center; gap: var(--space-8); min-width: 0; overflow: hidden; mask-image: linear-gradient(90deg, #000 calc(100% - 20px), transparent); }
+.rcv-card-to { display: block; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.rcv-card-to > span[aria-hidden] { margin-right: var(--space-8); }
 .rcv-card-to__ritual { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--text-sm); }
 .rcv-card-to > span[aria-hidden] { color: var(--color-faint); }
 .rcv-card-to .rcv-targets { flex-wrap: nowrap; }
@@ -227,8 +228,17 @@ html:not([data-privacy='off']) .trace-to.private-field:not(:hover, :focus)::plac
 .routing-choices .settings-cell-stack > * { min-width: 0; max-width: 100%; }
 .routing-choices .ui-check-field { min-width: 0; max-width: 100%; }
 .routing-choices .ui-check-field > label { flex: 1 1 0; min-width: 0; }
-.rcv-to { display: block; min-width: 0; overflow: hidden; mask-image: linear-gradient(90deg, #000 calc(100% - 20px), transparent); }
-.rcv-to > .rcv-targets { flex-wrap: nowrap; }
+/* Destinations on one line, cut with an ellipsis only when they don't fit (a fade cut the last letters of every row). */
+.rcv-to { display: block; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.rcv-to > .rcv-targets, .rcv-card-to .rcv-targets { display: inline; }
+:is(.rcv-to, .rcv-card-to) .rcv-target { display: inline; margin-right: var(--space-12); }
+:is(.rcv-to, .rcv-card-to) .rcv-target > .rcv-icon { margin-right: var(--space-6); vertical-align: -2px; }
+/* A rule in plain words on one line, and how many more. */
+.rcv-rules { display: flex; align-items: baseline; gap: var(--space-6); min-width: 0; }
+.rcv-rules__first { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rcv-rules > .muted { flex: none; font-family: var(--font-mono); font-size: var(--text-xs); }
+.rcv-rules .recipe-blank { padding: 0; background: none; }
+.addr-rule { min-width: 0; overflow: hidden; color: var(--color-text); text-overflow: ellipsis; white-space: nowrap; }
 .addr-step li > .rcv-match { flex: 0 1 auto; }
 .rcv-step__body .cluster > .ui-button--ghost:first-child { margin-inline-start: calc(-1 * var(--button-pad-x, 11px)); }
 @media (max-width: 640px) {
