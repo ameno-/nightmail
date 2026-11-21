@@ -1,6 +1,6 @@
 import { sql, type SQL } from 'drizzle-orm';
 import { ApiError, type Runtime } from './core.js';
-import { log } from './core.js';
+import { log, logError } from './core.js';
 import { campaignActive } from './states.js';
 import { expireDomainClaims } from './operations.js';
 
@@ -10,7 +10,7 @@ const UPLOAD_BATCH = 1000;
 const DAY_MS = 24 * 3600_000;
 
 /**
- * Storage reconciliation, hourly after cleanup (the only retention step that calls storage). A put can
+ * Storage reconciliation, hourly with cleanup (the only retention step that calls storage). A put can
  * land at any time (see Storage.put): after its reservation expired, after the sweeper's deletion ran
  * and after the reservation's tombstone (158) was spent. The reconciler lists only the upload prefix
  * (uploadKey), takes only keys of its exact grammar (uploads/<existing workspace>/attachment_<32 hex>)
@@ -45,8 +45,8 @@ async function reconcilePages(runtime: Runtime, deadline: number) {
   }
   return queued;
 }
-// Hourly cron invocations may run up to 15 minutes; stop starting new batches after this and continue next hour.
-const RETENTION_BUDGET_MS = 4 * 60_000;
+// The hourly retention run, everything included: no statement starts after it. Hourly cron invocations may run 15 minutes.
+const RETENTION_BUDGET_MS = 5 * 60_000;
 
 /**
  * The hourly backstop for the ten-minute standing job (src/standing.ts): runs the ladder now, which also re-queues any
@@ -79,172 +79,325 @@ export async function sweepInboxes(runtime:Runtime, budgetMs:number,clock=Date.n
 }
 
 /**
- * Retention runs one table at a time in bounded batches, each its own transaction. It used to be one transaction
- * of unbounded deletes: a single statement over the 60 s limit (e.g. the 2M consent events of a bulk import all
- * crossing 30 days in the same hour) rolled back the whole run every hour, so nothing was ever retired again.
+ * One retention step: a bounded statement that removes (or retires) at most `size` rows, oldest first, and returns their
+ * count as n. `oldest` selects the time of the oldest row the step would still take, for the log. `lane` groups the steps in
+ * the log (sent mail, received mail, everything else); the sent ones also run every 15 minutes (retentionTick). `batches`
+ * caps the statements a step runs in one run.
+ */
+type Lane = 'sent' | 'inbound' | 'other';
+type Drain = { name: string; statement: () => SQL; size?: number; oldest?: SQL; lane?: Lane; batches?: number };
+// The 15-minute run of the sent-side tables, from the minute cron and the Node runner, everything included.
+const SENT_BUDGET_MS = 2 * 60_000;
+// The last part of a run's budget goes to finding the oldest row still waiting in each table behind.
+const OLDEST_RESERVE_MS = 15_000;
+// A run's lease outlasts its budget by the one statement that may still be running at its end (Hyperdrive stops any
+// statement at 60 s), so a run that died leaves no lease behind for longer than that.
+const LEASE_GRACE_MS = 2 * 60_000;
+
+/**
+ * The rows of `table` that match `where`, oldest first by `by` when an index gives that order (`unordered` when none
+ * does: a sort would read the whole backlog for each batch). A row another run holds is skipped, not waited for.
+ */
+function expired(name: string, table: string, by: SQL, where: SQL, extra: Partial<Drain> & { unordered?: true } = {}): Drain {
+  const t = sql.identifier(table), size = extra.size ?? RETENTION_BATCH, order = extra.unordered ? sql`` : sql` ORDER BY ${by}`;
+  return { name, oldest: sql`SELECT min(${by}) FROM ${t} WHERE ${where}`, size: extra.size, lane: extra.lane, batches: extra.batches,
+    statement: () => sql`WITH gone AS (DELETE FROM ${t} WHERE ctid IN (SELECT ctid FROM ${t} WHERE ${where}${order} LIMIT ${size} FOR UPDATE SKIP LOCKED) RETURNING 1) SELECT count(*)::int AS n FROM gone` };
+}
+const unordered = { unordered: true } as const;
+const at = (column: string) => sql`${sql.identifier(column)}`;
+
+/**
+ * Every retention step, in their usual order. Never erase contacts, consent, suppression, drafts, idempotency keys or
+ * active scheduled work.
+ */
+async function retentionDrains(runtime: Runtime): Promise<Drain[]> {
+  const cutoff = sql`now() - interval '30 days'`, { abuseExpired, linkExpired } = await import('./abuse.js');
+  const closedLongAgo = sql`SELECT id FROM support_conversations WHERE closed_at < now() - interval '90 days'`;
+  const sent = { lane: 'sent' } as const, inbound = { lane: 'inbound' } as const;
+  return [
+    { name: 'expired_uploads', oldest: sql`SELECT min(expires_at) FROM sending_upload_reservations WHERE expires_at<=now()`, statement: () => sql`WITH expired AS (DELETE FROM sending_upload_reservations WHERE id IN
+      (SELECT id FROM sending_upload_reservations WHERE expires_at<=now() ORDER BY expires_at LIMIT ${RETENTION_BATCH} FOR UPDATE SKIP LOCKED) RETURNING *),
+      cleanup AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'upload-cleanup:'||id,'maintenance.deleteAttachment',workspace_id,jsonb_build_object('key',storage_key) FROM expired)
+      SELECT count(*)::int AS n FROM expired` },
+    // A day after a reservation ended without its attachment (158), delete its object once more: a late
+    // put may have landed after the first deletion. An attachment that holds the object is never touched.
+    { name: 'upload_tombstones', oldest: sql`SELECT min(delete_after) FROM sending_upload_tombstones WHERE delete_after<=now()`, statement: () => sql`WITH due AS (DELETE FROM sending_upload_tombstones WHERE id IN
+      (SELECT id FROM sending_upload_tombstones WHERE delete_after<=now() ORDER BY delete_after LIMIT ${RETENTION_BATCH} FOR UPDATE SKIP LOCKED) RETURNING *),
+      cleanup AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'upload-tombstone:'||d.id,'maintenance.deleteAttachment',d.workspace_id,jsonb_build_object('key',d.storage_key) FROM due d
+        WHERE NOT EXISTS(SELECT FROM sending_attachments a WHERE a.id=d.id AND a.storage_key=d.storage_key) ON CONFLICT(id) DO NOTHING)
+      SELECT count(*)::int AS n FROM due` },
+    expired('api_request_budgets', 'api_request_budgets', at('window_start'), sql`window_start < now() - interval '1 day'`),
+    // Denied sign-ins operators haven't acted on in 90 days (the table is otherwise capped at 10,000 identities).
+    expired('access_requests', 'access_requests', at('last_requested_at'), sql`last_requested_at < now() - interval '90 days'`),
+    // Refused sign-ins an operator has not acted on in 30 days (one row per subject).
+    expired('nightmail_signin_attempts', 'nightmail_signin_attempts', at('last_at'), sql`last_at < now() - interval '30 days'`),
+    // The waitlist keeps an address a year after its last attempt at most (migration 366).
+    expired('nightmail_waitlist', 'nightmail_waitlist', at('last_at'), sql`last_at < now() - interval '1 year'`),
+    ...['auth_state_slots', 'nightmail_dpop_proofs', 'nightmail_sessions', 'nightmail_login_flows'].map(table => expired(table, table, at('expires_at'), sql`expires_at <= now()`)),
+    // Eight routing versions a year old per statement (migration 124).
+    { name: 'mail_routing_versions', size: 8, oldest: sql`SELECT min(created_at) FROM mail_routing_versions WHERE created_at<now()-interval '1 year'`, statement: () => sql`SELECT mail_prune_route_versions() AS n` },
+    expired('mail_receipts', 'mail_receipts', sql`coalesce(processed_at,created_at)`, sql`status IN ('processed','failed') AND coalesce(processed_at,created_at)<${cutoff}`, inbound),
+    expired('mail_receipt_holds', 'mail_receipt_holds', at('expires_at'), sql`status<>'held' AND expires_at<${cutoff}`, inbound),
+    // Received-mail events and webhook deliveries are kept 30 days. A delivery still held for a paused endpoint after that is
+    // dead-lettered with ENDPOINT_PAUSED_EXPIRED (unpause no longer resumes it) and kept 7 more days so the reason is seen.
+    expired('mailbox_events', 'mailbox_events', at('created_at'), sql`created_at<${cutoff}`, inbound),
+    expired('mail_ignored_staging', 'mail_ignored_staging', at('created_at'), sql`created_at<now()-interval '3 days'`, inbound),
+    { name: 'mailbox_webhook_deliveries_paused_expired', ...inbound, oldest: sql`SELECT min(created_at) FROM mailbox_webhook_deliveries WHERE created_at<${cutoff} AND status='paused'`,
+      statement: () => sql`WITH held AS (UPDATE mailbox_webhook_deliveries SET status='failed',last_error='ENDPOINT_PAUSED_EXPIRED',updated_at=now() WHERE id IN (SELECT id FROM mailbox_webhook_deliveries
+        WHERE created_at<${cutoff} AND status='paused' ORDER BY created_at LIMIT ${RETENTION_BATCH} FOR UPDATE SKIP LOCKED) RETURNING 1) SELECT count(*)::int AS n FROM held` },
+    expired('mailbox_webhook_deliveries', 'mailbox_webhook_deliveries', at('created_at'), sql`created_at<${cutoff} AND status IN ('delivered','failed') AND (last_error IS DISTINCT FROM 'ENDPOINT_PAUSED_EXPIRED' OR updated_at<now()-interval '7 days')`, inbound),
+    ...(runtime.config.multiTenant ? [
+      // The score's daily evidence decays with a 30-day half-life; past 400 days it no longer moves the score or the card.
+      expired('sender_score_daily', 'sender_score_daily', at('day'), sql`day < (now() AT TIME ZONE 'UTC')::date-400`, unordered),
+      expired('operator_idempotency', 'operator_idempotency', at('created_at'), sql`created_at < now()-interval '1 day'`, unordered),
+      // Keep only aggregate workspace evidence long enough to observe a 30-day clean span. Only the credits have an hour index.
+      ...['hosted_usage_hourly', 'hosted_health_hourly', 'hosted_health_credits', 'hosted_screen_hourly'].map(table => expired(table, table, at('hour'),
+        table === 'hosted_health_hourly' || table === 'hosted_screen_hourly' ? sql`hour < now()-interval '32 days'` : sql`hour < now()-interval '2 days'`,
+        table === 'hosted_health_credits' ? {} : unordered)),
+    ] : []),
+    expired('agent_tokens', 'agent_tokens', at('expires_at'), sql`expires_at < ${cutoff}`),
+    // Abuse-monitoring signals past their retention (src/abuse.ts abuseExpired). Expiry runs whether monitoring is on or off.
+    expired('abuse_signals', 'abuse_signals', at('last_at'), abuseExpired),
+    expired('abuse_sampling', 'abuse_sampling', at('sampled_through'), sql`sampled_through < now()-interval '30 days'`, unordered),
+    // Links leave with the signals they came from; a cluster nothing has rescored for 30 days (monitoring off, or its links gone) leaves too.
+    expired('identity_links', 'identity_links', at('last_at'), linkExpired),
+    expired('abuse_clusters', 'abuse_clusters', at('scored_at'), sql`scored_at < now()-interval '30 days'`),
+    expired('abuse_alerts', 'abuse_alerts', at('created_at'), sql`created_at < now()-interval '1 year'`),
+    // An erasure's floor outlives every record it could still apply to (the sign-in log, 30 days; signals, 90).
+    expired('abuse_floors', 'abuse_floors', at('ignore_through'), sql`ignore_through < now()-interval '90 days'`),
+    // The audit trail past its retention (src/audit.ts RETENTION); the table refuses to delete anything earlier. No row
+    // locks: the application may not update it (42501), and only the hourly run takes it.
+    { name: 'audit_events', oldest: sql`SELECT min(retain_until) FROM audit_events WHERE retain_until <= now()`, statement: () => sql`WITH gone AS (DELETE FROM audit_events WHERE id IN
+      (SELECT id FROM audit_events WHERE retain_until <= now() ORDER BY retain_until LIMIT ${RETENTION_BATCH}) RETURNING 1) SELECT count(*)::int AS n FROM gone` },
+    // Handoffs go 30 days after they expire; what they opened is in audit_events.
+    expired('support_handoffs', 'support_handoffs', at('expires_at'), sql`expires_at < ${cutoff}`, unordered),
+    // An email's sign-in nobody confirmed goes when it can no longer be confirmed (support-conversations.ts SIGNIN_DAYS), and
+    // with it the sender address it kept; a Message-ID's binding once its Date is too old to bind anyway.
+    expired('support_email_signins', 'support_email_signins', at('created_at'), sql`signed_in_at IS NULL AND created_at < now() - interval '7 days'`),
+    expired('support_email_bindings', 'support_email_bindings', at('created_at'), sql`created_at < now() - interval '7 days'`),
+    // Support transcripts (src/support-inbox.ts) and their subjects go 90 days after the conversation closed.
+    expired('support_messages', 'support_messages', at('created_at'), sql`conversation_id IN (${closedLongAgo})`, unordered),
+    { name: 'support_subjects', statement: () => sql`WITH gone AS (UPDATE support_conversations SET subject = NULL
+        WHERE id IN (${closedLongAgo} AND subject IS NOT NULL LIMIT ${RETENTION_BATCH}) RETURNING 1) SELECT count(*)::int AS n FROM gone` },
+    expired('audience_operation_plans', 'audience_operation_plans', at('expires_at'), sql`expires_at < now() - interval '1 day'`),
+    // A preview holds its whole parsed CSV (up to 5 MiB) and is replaced by each re-preview, so abandoned ones pile up.
+    // A week leaves room to come back and commit; committed imports stay because deliverability reads them.
+    expired('audience_import_previews', 'audience_imports', at('created_at'), sql`status = 'preview' AND created_at < now() - interval '7 days'`, { size: 100, unordered: true }),
+    expired('sending_email_events', 'sending_email_events', at('created_at'), sql`created_at < ${cutoff}`, sent),
+    // An email and its attachment links leave in the same statement, so no link can outlive its email.
+    { name: 'sending_emails', ...sent, oldest: sql`SELECT min(created_at) FROM sending_emails WHERE created_at < ${cutoff} AND status NOT IN ('queued','attempting','scheduled')`, statement: () => sql`WITH gone AS (
+        DELETE FROM sending_emails WHERE ctid IN (SELECT ctid FROM sending_emails WHERE created_at < ${cutoff} AND status NOT IN ('queued','attempting','scheduled')
+          ORDER BY created_at LIMIT ${RETENTION_BATCH} FOR UPDATE SKIP LOCKED)
+        RETURNING id, workspace_id
+      ), links AS (
+        DELETE FROM sending_attachment_links l USING gone e WHERE l.owner_type = 'email' AND l.owner_id = e.id AND l.workspace_id = e.workspace_id
+      ) SELECT count(*)::int AS n FROM gone` },
+    // Retire lightweight preparation rows after terminal/obsolete work ages out. Never purge a campaign's current
+    // snapshot or one with an outstanding reservation (including a failed launch).
+    { name: 'sending_review_recipients', ...sent, statement: () => sql`WITH expired AS (
+        SELECT r.review_id, r.ordinal FROM sending_review_recipients r
+        JOIN sending_campaign_reviews v ON v.id = r.review_id
+        WHERE v.created_at < ${cutoff}
+          AND NOT EXISTS (SELECT 1 FROM sending_emails e WHERE (e.review_id,e.review_ordinal)=(r.review_id,r.ordinal))
+          AND NOT EXISTS (SELECT 1 FROM sending_campaigns c WHERE c.id = v.campaign_id AND c.workspace_id = v.workspace_id
+            AND (c.updated_at >= ${cutoff} OR ${campaignActive()} OR c.review_id = v.id))
+        LIMIT ${RETENTION_BATCH} FOR UPDATE OF r SKIP LOCKED
+      ), gone AS (DELETE FROM sending_review_recipients r USING expired e WHERE r.review_id = e.review_id AND r.ordinal = e.ordinal RETURNING 1)
+      SELECT count(*)::int AS n FROM gone` },
+    // One statement: a review's links leave once nothing of it is left.
+    { name: 'review_attachment_links', size: Infinity, statement: () => sql`WITH gone AS (DELETE FROM sending_attachment_links l USING sending_campaign_reviews v
+      WHERE l.owner_type = 'review' AND l.owner_id = v.id AND l.workspace_id = v.workspace_id
+        AND v.created_at < ${cutoff}
+        AND NOT EXISTS (SELECT 1 FROM sending_review_recipients r WHERE r.review_id = v.id)
+        AND NOT EXISTS (SELECT 1 FROM sending_emails e WHERE e.review_id = v.id)
+        AND NOT EXISTS (SELECT 1 FROM sending_campaigns c WHERE c.id = v.campaign_id AND c.workspace_id = v.workspace_id
+          AND (${campaignActive()} OR c.review_id = v.id)) RETURNING 1) SELECT count(*)::int AS n FROM gone` },
+    expired('operation_delivery_attempts', 'operation_delivery_attempts', at('created_at'), sql`created_at < ${cutoff}`, sent),
+    // As in the inbound lane: a delivery still held for a paused endpoint after 30 days is dead-lettered with
+    // ENDPOINT_PAUSED_EXPIRED (unpausing no longer resumes it) and kept 7 more days so the reason is seen. Only endpoints
+    // that are still paused: an unpaused one's parked deliveries belong to its resume job. Oldest first through
+    // operation_deliveries_paused_age (migration 389), never a sort of the whole backlog.
+    { name: 'operation_deliveries_paused_expired', ...sent, statement: () => sql`WITH expired AS (UPDATE operation_deliveries SET status='failed', last_error='ENDPOINT_PAUSED_EXPIRED', updated_at=now()
+        WHERE ctid IN (SELECT d.ctid FROM operation_webhooks w JOIN operation_deliveries d ON d.workspace_id=w.workspace_id AND d.webhook_id=w.id
+          WHERE w.paused AND d.status='paused' AND d.created_at < ${cutoff} ORDER BY d.created_at LIMIT ${RETENTION_BATCH} FOR UPDATE OF d SKIP LOCKED) RETURNING 1)
+      SELECT count(*)::int AS n FROM expired` },
+    expired('operation_deliveries', 'operation_deliveries', at('created_at'), sql`created_at < ${cutoff} AND status NOT IN ('pending','paused') AND (last_error IS DISTINCT FROM 'ENDPOINT_PAUSED_EXPIRED' OR updated_at < now() - interval '7 days')`, sent),
+    expired('operation_events', 'operation_events', at('created_at'), sql`created_at < ${cutoff}`, sent),
+    expired('operation_sns_receipts', 'operation_sns_receipts', at('created_at'), sql`created_at < ${cutoff}`, sent),
+    expired('operation_feedback_failures', 'operation_feedback_failures', at('created_at'), sql`created_at < ${cutoff} AND reason NOT IN ('FEEDBACK_UNTAGGED','FEEDBACK_LEGACY_RECOVERY','FEEDBACK_QUEUE_RECOVERY')`, sent),
+    expired('jobs', 'jobs', at('created_at'), sql`status IN ('completed','failed') AND type NOT IN ('maintenance.deleteAttachment','mail.deleteObjects') AND created_at < ${cutoff}`, sent),
+    // Delete metadata only when no draft or message references it. The outbox retains the object key until deletion succeeds.
+    // A fixed 50 rows an hour fell behind any installation retiring more than about 1,200 uploads a day, so their objects and
+    // the workspace's stored-attachment usage were never released. Up to 5,000 a run now (120,000 a day), 1,000 per
+    // transaction in workspace order: each queues an object deletion that shares the 'other' job class with domain checks and
+    // alerts, and each row's usage trigger holds its workspace's usage row until the batch commits.
+    { name: 'unused_attachments', size: UPLOAD_BATCH, batches: 5, statement: () => sql`WITH old AS (
+        SELECT a.id FROM sending_attachments a WHERE a.created_at < ${cutoff}
+          AND NOT EXISTS (SELECT 1 FROM sending_attachment_links l WHERE l.workspace_id = a.workspace_id AND l.attachment_id = a.id)
+        ORDER BY a.workspace_id, a.id LIMIT ${UPLOAD_BATCH} FOR UPDATE SKIP LOCKED
+      ), gone AS (DELETE FROM sending_attachments a USING old WHERE a.id = old.id RETURNING a.storage_key, a.workspace_id, a.source_template_asset_id
+      ), queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||replace(gen_random_uuid()::text,'-',''),'maintenance.deleteAttachment',workspace_id,jsonb_build_object('key',storage_key)
+        FROM gone WHERE source_template_asset_id IS NULL
+      ) SELECT count(*)::int AS n FROM gone` },
+    { name: 'unused_template_assets', size: UPLOAD_BATCH, batches: 5, statement: () => sql`WITH old AS (
+        SELECT a.id FROM template_assets a WHERE a.created_at < ${cutoff}
+          AND NOT EXISTS (SELECT 1 FROM template_asset_links l WHERE l.workspace_id = a.workspace_id AND l.asset_id = a.id)
+          AND NOT EXISTS (SELECT 1 FROM sending_attachments s WHERE s.workspace_id = a.workspace_id AND s.source_template_asset_id = a.id)
+        ORDER BY a.workspace_id, a.id LIMIT ${UPLOAD_BATCH} FOR UPDATE SKIP LOCKED
+      ), gone AS (DELETE FROM template_assets a USING old WHERE a.id = old.id RETURNING a.storage_key, a.workspace_id
+      ), queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||replace(gen_random_uuid()::text,'-',''),'maintenance.deleteAttachment',workspace_id,jsonb_build_object('key',storage_key) FROM gone
+      ) SELECT count(*)::int AS n FROM gone` },
+    expired('jobs_attachment_deletes', 'jobs', at('created_at'), sql`status = 'completed' AND type IN ('maintenance.deleteAttachment','mail.deleteObjects') AND created_at < ${cutoff}`, sent),
+  ];
+}
+
+// Per lane, so no map in a log line passes the logger's 50 keys.
+type ByLane = Partial<Record<Lane, Record<string, number>>>;
+type Retired = { deleted: ByLane; waiting: ByLane; failed: string[]; timedOut: string[]; unreached: string[]; next: string | null; complete: boolean };
+const note = (map: ByLane, d: Drain, n: number) => { const lane = (map[d.lane ?? 'other'] ??= {}); lane[d.name] = (lane[d.name] ?? 0) + n; };
+const pause = (ms: number) => ms > 0 ? new Promise<void>(resolve => setTimeout(resolve, ms)) : Promise.resolve();
+// A statement or lock timeout: the step is too slow for now, not wrong.
+const timedOut = (error: unknown) => [error, (error as { cause?: unknown } | null)?.cause].some(e => ['57014', '55P03'].includes(String((e as { code?: unknown } | null)?.code)));
+
+/**
+ * Runs retention steps, starting with `first`, until the budget's end: no statement starts after it, so a run lasts its
+ * budget and at most the one statement still running then. Each step is isolated: one that fails is logged and the rest
+ * still run. Each gets a fair share of the time left (what's left divided by the steps still to go), so a backlog in one
+ * table can't starve the tables after it; time a step doesn't use goes to the steps still behind, shared the same way, in a
+ * second pass. Between two full batches of a step it rests as long as the last one took, so retention keeps the database
+ * busy at most half of its run. A step the budget didn't reach is in `unreached`, and `next` is where the next run should
+ * start: the first of those, otherwise the step after this run's first, so every table gets its turn over successive runs.
+ * Reports codes and counts only: rows removed per table (a table that removed none is left out) and, for each table with
+ * rows still waiting, the age in seconds of the oldest. A batch that comes back short because another run held its rows
+ * counts as done: those rows go in the next run.
+ */
+async function retire(runtime: Runtime, drains: Drain[], budgetMs: number, first = 0, clock = Date.now): Promise<Retired> {
+  const ceiling = clock() + budgetMs, until = ceiling - Math.min(OLDEST_RESERVE_MS, budgetMs / 4), deleted: ByLane = {};
+  const failed: string[] = [], slow: string[] = [], statements = new Map<Drain, number>(), reached = new Set<Drain>();
+  // Steps with rows still waiting: `behind` ran out of time, `capped` reached its statements for the run.
+  const behind = new Set<Drain>(), capped = new Set<Drain>();
+  const start = drains.length ? first % drains.length : 0, order = [...drains.slice(start), ...drains.slice(0, start)];
+  const step = async (d: Drain, sliceEnd: number) => {
+    for (;;) {
+      const began = performance.now();
+      const n = Number((await runtime.db.execute<{ n: number }>(d.statement())).rows[0]?.n ?? 0);
+      statements.set(d, (statements.get(d) ?? 0) + 1);
+      if (n) note(deleted, d, n);
+      if (n < (d.size ?? RETENTION_BATCH)) return 'done';
+      if (statements.get(d)! >= (d.batches ?? Infinity)) return 'capped';
+      await pause(Math.min(performance.now() - began, sliceEnd - clock()));
+      if (clock() >= sliceEnd) return 'behind';
+    }
+  };
+  const attempt = async (d: Drain, sliceEnd: number) => {
+    reached.add(d); behind.delete(d);
+    try { const outcome = await step(d, sliceEnd); if (outcome === 'behind') behind.add(d); else if (outcome === 'capped') capped.add(d); }
+    catch (error) { failed.push(d.name); if (timedOut(error)) slow.push(d.name); logError(error, { code: 'RETENTION_STEP_FAILED', table: d.name }, 'warn'); }
+  };
+  const pass = async (steps: Drain[]) => {
+    for (const [i, d] of steps.entries()) { if (clock() >= until) return; await attempt(d, clock() + (until - clock()) / (steps.length - i)); }
+  };
+  await pass(order);
+  await pass(order.filter(d => behind.has(d)));
+  const unreached = order.filter(d => !reached.has(d)).map(d => d.name);
+  const waiting: ByLane = {};
+  for (const d of [...order.filter(d => failed.includes(d.name)), ...order.filter(d => behind.has(d) || capped.has(d))]) {
+    if (!d.oldest || clock() >= ceiling) continue;
+    try {
+      const age = (await runtime.db.execute<{ s: string | null }>(sql`SELECT floor(extract(epoch FROM now() - (${d.oldest})))::bigint AS s`)).rows[0]?.s;
+      if (age != null) note(waiting, d, Number(age));
+    } catch { /* the step's failure is already logged */ }
+  }
+  const next = unreached[0] ?? order[1]?.name ?? order[0]?.name ?? null;
+  return { deleted, waiting, failed, timedOut: slow, unreached, next, complete: !behind.size && !capped.size && !failed.length && !unreached.length };
+}
+// A run that only fell behind is routine during a backlog (info); a failed step is a warning.
+const retentionLog = (scope: string, run: Retired, complete = run.complete) =>
+  log(run.failed.length ? 'warn' : 'info', { code: complete ? 'RETENTION_COMPLETED' : 'RETENTION_PARTIAL', scope, deleted: run.deleted, waiting: run.waiting,
+    failed: run.failed, unreached: run.unreached });
+const startAt = (drains: Drain[], name: string | null | undefined) => Math.max(0, drains.findIndex(d => d.name === name));
+const leaseFor = (budgetMs: number) => sql`now() + make_interval(secs => ${(budgetMs + LEASE_GRACE_MS) / 1000})`;
+
+/**
+ * Hourly retention: every table, each in bounded batches that are their own transactions, within one budget for the whole
+ * run (retire). It used to be one transaction of unbounded deletes: a single statement over the 60 s limit (e.g. the 2M
+ * consent events of a bulk import all crossing 30 days in the same hour) rolled back the whole run every hour, so nothing
+ * was ever retired again. Then it was one table after another under one deadline with no isolation: a failing statement
+ * skipped every table after it, and a backlog at the front used the whole budget. Its lease (retention_state, migration
+ * 388) makes the 15-minute run stand aside while it works. Throws after the run if a step failed, naming the tables, so
+ * hourlyUpkeep reports it.
  */
 export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) {
-  const inboxComplete=await sweepInboxes(runtime,Math.min(60_000,Math.floor(budgetMs/4)));
-  try { await checkHostedHealth(runtime); } catch { log('error', { code: 'HOSTED_HEALTH_CHECK_FAILED', message: 'Continuing retention; the next hourly check will retry.' }); }
-  const deadline = Date.now() + budgetMs, deleted: Record<string, number> = {};
-  // A durable daily election prevents two reconcilers from applying the same
-  // snapshot difference. Dispatch continues adding deltas while this runs.
-  await runtime.db.execute(sql`WITH elected AS (INSERT INTO job_schedule(workspace_id,next_wake_at)
-    VALUES ('maintenance:sending-depth',now()+interval '1 day') ON CONFLICT(workspace_id) DO UPDATE SET next_wake_at=excluded.next_wake_at
-    WHERE job_schedule.next_wake_at<=now() RETURNING 1) SELECT reconcile_sending_depth(),reconcile_asset_usage(),reconcile_ingest_turns() FROM elected`);
-  if (runtime.config.multiTenant) deleted.domain_claims=await expireDomainClaims(runtime,Math.min(deadline,Date.now()+60_000));
-  const cutoff = sql`now() - interval '30 days'`;
-  // Repeats one bounded statement until it deletes less than a full batch or the budget runs out.
-  const drain = async (name: string, statement: () => SQL, size = RETENTION_BATCH) => {
-    while (Date.now() < deadline) {
-      const result = await runtime.db.execute<{ n: number }>(statement());
-      const n = Number(result.rows[0]?.n ?? 0);
-      deleted[name] = (deleted[name] ?? 0) + n;
-      if (n < size) return;
+  const ceiling = Date.now() + budgetMs, failed: string[] = [];
+  const { rows: [state] } = await runtime.db.execute<{ next_step: string | null }>(sql`INSERT INTO retention_state(scope,lease_until) VALUES('hourly',${leaseFor(budgetMs)})
+    ON CONFLICT(scope) DO UPDATE SET lease_until=excluded.lease_until RETURNING next_step`);
+  let next: string | null = null, through: string[] = [];
+  try {
+    const inboxComplete = await sweepInboxes(runtime, Math.min(60_000, Math.floor(budgetMs / 5)));
+    // A durable daily election prevents two reconcilers from applying the same
+    // snapshot difference. Dispatch continues adding deltas while this runs.
+    try {
+      await runtime.db.execute(sql`WITH elected AS (INSERT INTO job_schedule(workspace_id,next_wake_at)
+        VALUES ('maintenance:sending-depth',now()+interval '1 day') ON CONFLICT(workspace_id) DO UPDATE SET next_wake_at=excluded.next_wake_at
+        WHERE job_schedule.next_wake_at<=now() RETURNING 1) SELECT reconcile_sending_depth(),reconcile_asset_usage(),reconcile_ingest_turns() FROM elected`);
+    } catch (error) { failed.push('reconcile'); logError(error, { code: 'RETENTION_STEP_FAILED', table: 'reconcile' }, 'warn'); }
+    let claims: number | undefined;
+    if (runtime.config.multiTenant && Date.now() < ceiling) {
+      try { claims = await expireDomainClaims(runtime, Math.min(ceiling, Date.now() + 60_000)); }
+      catch (error) { failed.push('domain_claims'); logError(error, { code: 'RETENTION_STEP_FAILED', table: 'domain_claims' }, 'warn'); }
     }
-  };
-  const batch = (table: SQL, where: SQL, size = RETENTION_BATCH) => () => sql`WITH gone AS (DELETE FROM ${table} WHERE ctid IN (SELECT ctid FROM ${table} WHERE ${where} LIMIT ${size}) RETURNING 1) SELECT count(*)::int AS n FROM gone`;
-  // Never erase contacts, consent, suppression, drafts, idempotency keys or active scheduled work.
-  await drain('expired_uploads',()=>sql`WITH expired AS (DELETE FROM sending_upload_reservations WHERE id IN
-    (SELECT id FROM sending_upload_reservations WHERE expires_at<=now() ORDER BY expires_at LIMIT ${RETENTION_BATCH} FOR UPDATE SKIP LOCKED) RETURNING *),
-    cleanup AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'upload-cleanup:'||id,'maintenance.deleteAttachment',workspace_id,jsonb_build_object('key',storage_key) FROM expired)
-    SELECT count(*)::int AS n FROM expired`);
-  // A day after a reservation ended without its attachment (158), delete its object once more: a late
-  // put may have landed after the first deletion. An attachment that holds the object is never touched.
-  await drain('upload_tombstones',()=>sql`WITH due AS (DELETE FROM sending_upload_tombstones WHERE id IN
-    (SELECT id FROM sending_upload_tombstones WHERE delete_after<=now() ORDER BY delete_after LIMIT ${RETENTION_BATCH} FOR UPDATE SKIP LOCKED) RETURNING *),
-    cleanup AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'upload-tombstone:'||d.id,'maintenance.deleteAttachment',d.workspace_id,jsonb_build_object('key',d.storage_key) FROM due d
-      WHERE NOT EXISTS(SELECT FROM sending_attachments a WHERE a.id=d.id AND a.storage_key=d.storage_key) ON CONFLICT(id) DO NOTHING)
-    SELECT count(*)::int AS n FROM due`);
-  await drain('api_request_budgets', batch(sql`api_request_budgets`, sql`window_start < now() - interval '1 day'`));
-  // Denied sign-ins operators haven't acted on in 90 days (the table is otherwise capped at 10,000 identities).
-  await drain('access_requests', batch(sql`access_requests`, sql`last_requested_at < now() - interval '90 days'`));
-  // Refused sign-ins an operator has not acted on in 30 days (one row per subject).
-  await drain('nightmail_signin_attempts', batch(sql`nightmail_signin_attempts`, sql`last_at < now() - interval '30 days'`));
-  // The waitlist keeps an address a year after its last attempt at most (migration 366).
-  await drain('nightmail_waitlist', batch(sql`nightmail_waitlist`, sql`last_at < now() - interval '1 year'`));
-  for (const table of ['auth_state_slots','nightmail_dpop_proofs','nightmail_sessions','nightmail_login_flows']) {
-    await drain(table,batch(sql`${sql.identifier(table)}`,sql`expires_at <= now()`));
+    const drains = await retentionDrains(runtime), run = await retire(runtime, drains, Math.max(0, ceiling - Date.now()), startAt(drains, state?.next_step));
+    if (claims) run.deleted.other = { domain_claims: claims, ...run.deleted.other };
+    run.failed.unshift(...failed);
+    retentionLog('hourly', run, inboxComplete && run.complete && !failed.length);
+    // The sent-side steps this run got through: the 15-minute run takes them again (retentionTick).
+    next = run.next; through = drains.filter(d => d.lane === 'sent' && !run.failed.includes(d.name) && !run.unreached.includes(d.name)).map(d => d.name);
+    if (run.failed.length) throw Object.assign(new Error('Retention steps failed'), { tables: run.failed });
+  } finally {
+    await runtime.db.execute(sql`WITH sent AS (UPDATE retention_state SET held=held-${sql.param(through)}::text[] WHERE scope='sent' AND held ?| ${sql.param(through)}::text[])
+      UPDATE retention_state SET lease_until=NULL,next_step=coalesce(${next},next_step) WHERE scope='hourly'`).catch(() => { /* the lease expires */ });
   }
-  await runtime.db.execute(sql`SELECT mail_prune_route_versions()`);
-  await drain('mail_receipts',batch(sql`mail_receipts`,sql`status IN ('processed','failed') AND coalesce(processed_at,created_at)<${cutoff}`));
-  await drain('mail_receipt_holds',batch(sql`mail_receipt_holds`,sql`status<>'held' AND expires_at<${cutoff}`));
-  if (runtime.config.multiTenant) {
-    // The score's daily evidence decays with a 30-day half-life; past 400 days it no longer moves the score or the card.
-    await drain('sender_score_daily', batch(sql`sender_score_daily`, sql`day < (now() AT TIME ZONE 'UTC')::date-400`));
-    await drain('operator_idempotency', batch(sql`operator_idempotency`, sql`created_at < now()-interval '1 day'`));
+}
 
-    for (const table of ['hosted_usage_hourly','hosted_health_hourly','hosted_health_credits','hosted_screen_hourly'])
-      // Keep only aggregate workspace evidence long enough to observe a 30-day clean span.
-      await drain(table, batch(sql`${sql.identifier(table)}`, table==='hosted_health_hourly' || table==='hosted_screen_hourly' ? sql`hour < now()-interval '32 days'` : sql`hour < now()-interval '2 days'`));
+/**
+ * The sent-side tables every 15 minutes (elected, from the minute cron and the Node runner), so a day's mail aging out
+ * is retired through the hour, not only in the hourly run, which still includes them. It stands aside while the hourly run
+ * holds its lease (it comes back the next minute), and skips a step whose statement or lock timed out here until the
+ * hourly run gets through it, so a slow table costs one attempt an hour rather than five. Concurrent runs skip each
+ * other's rows.
+ */
+export async function retentionTick(runtime: Runtime, budgetMs = SENT_BUDGET_MS) {
+  const { rows: [state] } = await runtime.db.execute<{ next_step: string | null; held: Record<string, string> }>(sql`INSERT INTO retention_state(scope,due_at,lease_until)
+    SELECT 'sent',now()+interval '15 minutes',${leaseFor(budgetMs)} WHERE NOT EXISTS (SELECT FROM retention_state WHERE scope='hourly' AND lease_until>now())
+    ON CONFLICT(scope) DO UPDATE SET due_at=excluded.due_at,lease_until=excluded.lease_until
+      WHERE retention_state.due_at<=now() AND (retention_state.lease_until IS NULL OR retention_state.lease_until<=now())
+        AND NOT EXISTS (SELECT FROM retention_state WHERE scope='hourly' AND lease_until>now())
+    RETURNING next_step,held`);
+  if (!state) return;
+  let next: string | null = null, slow: string[] = [];
+  try {
+    const drains = (await retentionDrains(runtime)).filter(d => d.lane === 'sent' && !(d.name in state.held));
+    const run = await retire(runtime, drains, budgetMs, startAt(drains, state.next_step));
+    retentionLog('sent', run);
+    next = run.next; slow = run.timedOut;
+  } finally {
+    await runtime.db.execute(sql`UPDATE retention_state SET lease_until=NULL,next_step=coalesce(${next},next_step),
+      held=held||(SELECT coalesce(jsonb_object_agg(name,now()),'{}') FROM unnest(${sql.param(slow)}::text[]) name) WHERE scope='sent'`).catch(() => { /* the lease expires */ });
   }
-  await drain('agent_tokens', batch(sql`agent_tokens`, sql`expires_at < ${cutoff}`));
-  // Abuse-monitoring signals past their retention (src/abuse.ts abuseExpired). Expiry runs whether monitoring is on or off.
-  await drain('abuse_signals', batch(sql`abuse_signals`, (await import('./abuse.js')).abuseExpired));
-  await drain('abuse_sampling', batch(sql`abuse_sampling`, sql`sampled_through < now()-interval '30 days'`));
-  // Links leave with the signals they came from; a cluster nothing has rescored for 30 days (monitoring off, or its links gone) leaves too.
-  await drain('identity_links', batch(sql`identity_links`, (await import('./abuse.js')).linkExpired));
-  await drain('abuse_clusters', batch(sql`abuse_clusters`, sql`scored_at < now()-interval '30 days'`));
-  await drain('abuse_alerts', batch(sql`abuse_alerts`, sql`created_at < now()-interval '1 year'`));
-  // An erasure's floor outlives every record it could still apply to (the sign-in log, 30 days; signals, 90).
-  await drain('abuse_floors', batch(sql`abuse_floors`, sql`ignore_through < now()-interval '90 days'`));
-  // The audit trail past its retention (src/audit.ts RETENTION); the table refuses to delete anything earlier.
-  await drain('audit_events', () => sql`WITH gone AS (DELETE FROM audit_events WHERE id IN (SELECT id FROM audit_events WHERE retain_until <= now() ORDER BY retain_until LIMIT ${RETENTION_BATCH}) RETURNING 1)
-    SELECT count(*)::int AS n FROM gone`);
-  // Handoffs go 30 days after they expire; what they opened is in audit_events.
-  await drain('support_handoffs', batch(sql`support_handoffs`, sql`expires_at < ${cutoff}`));
-  // An email's sign-in nobody confirmed goes when it can no longer be confirmed (support-conversations.ts SIGNIN_DAYS), and
-  // with it the sender address it kept; a Message-ID's binding once its Date is too old to bind anyway.
-  await drain('support_email_signins', batch(sql`support_email_signins`, sql`signed_in_at IS NULL AND created_at < now() - interval '7 days'`));
-  await drain('support_email_bindings', batch(sql`support_email_bindings`, sql`created_at < now() - interval '7 days'`));
-  // Support transcripts (src/support-inbox.ts) and their subjects go 90 days after the conversation closed.
-  const closedLongAgo = sql`SELECT id FROM support_conversations WHERE closed_at < now() - interval '90 days'`;
-  await drain('support_messages', batch(sql`support_messages`, sql`conversation_id IN (${closedLongAgo})`));
-  await drain('support_subjects', () => sql`WITH gone AS (UPDATE support_conversations SET subject = NULL
-      WHERE id IN (${closedLongAgo} AND subject IS NOT NULL LIMIT ${RETENTION_BATCH}) RETURNING 1) SELECT count(*)::int AS n FROM gone`);
-  await drain('audience_operation_plans', batch(sql`audience_operation_plans`, sql`expires_at < now() - interval '1 day'`));
-  // A preview holds its whole parsed CSV (up to 5 MiB) and is replaced by each re-preview, so abandoned ones pile up.
-  // A week leaves room to come back and commit; committed imports stay because deliverability reads them.
-  await drain('audience_import_previews', batch(sql`audience_imports`, sql`status = 'preview' AND created_at < now() - interval '7 days'`, 100), 100);
-  await drain('sending_email_events', batch(sql`sending_email_events`, sql`created_at < ${cutoff}`));
-  // An email and its attachment links leave in the same statement, so no link can outlive its email.
-  await drain('sending_emails', () => sql`WITH gone AS (
-      DELETE FROM sending_emails WHERE ctid IN (SELECT ctid FROM sending_emails WHERE created_at < ${cutoff} AND status NOT IN ('queued','attempting','scheduled') LIMIT ${RETENTION_BATCH})
-      RETURNING id, workspace_id
-    ), links AS (
-      DELETE FROM sending_attachment_links l USING gone e WHERE l.owner_type = 'email' AND l.owner_id = e.id AND l.workspace_id = e.workspace_id
-    ) SELECT count(*)::int AS n FROM gone`);
-  // Retire lightweight preparation rows after terminal/obsolete work ages out. Never purge a campaign's current
-  // snapshot or one with an outstanding reservation (including a failed launch).
-  await drain('sending_review_recipients', () => sql`WITH expired AS (
-      SELECT r.review_id, r.ordinal FROM sending_review_recipients r
-      JOIN sending_campaign_reviews v ON v.id = r.review_id
-      WHERE v.created_at < ${cutoff}
-        AND NOT EXISTS (SELECT 1 FROM sending_emails e WHERE (e.review_id,e.review_ordinal)=(r.review_id,r.ordinal))
-        AND NOT EXISTS (SELECT 1 FROM sending_campaigns c WHERE c.id = v.campaign_id AND c.workspace_id = v.workspace_id
-          AND (c.updated_at >= ${cutoff} OR ${campaignActive()} OR c.review_id = v.id))
-      LIMIT ${RETENTION_BATCH}
-    ), gone AS (DELETE FROM sending_review_recipients r USING expired e WHERE r.review_id = e.review_id AND r.ordinal = e.ordinal RETURNING 1)
-    SELECT count(*)::int AS n FROM gone`);
-  await runtime.db.execute(sql`DELETE FROM sending_attachment_links l USING sending_campaign_reviews v
-    WHERE l.owner_type = 'review' AND l.owner_id = v.id AND l.workspace_id = v.workspace_id
-      AND v.created_at < ${cutoff}
-      AND NOT EXISTS (SELECT 1 FROM sending_review_recipients r WHERE r.review_id = v.id)
-      AND NOT EXISTS (SELECT 1 FROM sending_emails e WHERE e.review_id = v.id)
-      AND NOT EXISTS (SELECT 1 FROM sending_campaigns c WHERE c.id = v.campaign_id AND c.workspace_id = v.workspace_id
-        AND (${campaignActive()} OR c.review_id = v.id))`);
-  await drain('operation_delivery_attempts', batch(sql`operation_delivery_attempts`, sql`created_at < ${cutoff}`));
-  // As in the inbound lane: a delivery still held for a paused endpoint after 30 days is dead-lettered with
-  // ENDPOINT_PAUSED_EXPIRED (unpausing no longer resumes it) and kept 7 more days so the reason is seen. Only endpoints
-  // that are still paused: an unpaused one's parked deliveries belong to its resume job.
-  await drain('operation_deliveries_paused_expired', () => sql`WITH expired AS (UPDATE operation_deliveries SET status='failed', last_error='ENDPOINT_PAUSED_EXPIRED', updated_at=now()
-      WHERE id IN (SELECT d.id FROM operation_webhooks w JOIN operation_deliveries d ON d.workspace_id=w.workspace_id AND d.webhook_id=w.id
-        WHERE w.paused AND d.status='paused' AND d.created_at < ${cutoff} LIMIT ${RETENTION_BATCH} FOR UPDATE OF d SKIP LOCKED) RETURNING 1)
-    SELECT count(*)::int AS n FROM expired`);
-  await drain('operation_deliveries', batch(sql`operation_deliveries`, sql`created_at < ${cutoff} AND status NOT IN ('pending','paused') AND (last_error IS DISTINCT FROM 'ENDPOINT_PAUSED_EXPIRED' OR updated_at < now() - interval '7 days')`));
-  await drain('operation_events', batch(sql`operation_events`, sql`created_at < ${cutoff}`));
-  await drain('operation_sns_receipts', batch(sql`operation_sns_receipts`, sql`created_at < ${cutoff}`));
-  await drain('operation_feedback_failures', batch(sql`operation_feedback_failures`, sql`created_at < ${cutoff} AND reason NOT IN ('FEEDBACK_UNTAGGED','FEEDBACK_LEGACY_RECOVERY','FEEDBACK_QUEUE_RECOVERY')`));
-  await drain('jobs', batch(sql`jobs`, sql`status IN ('completed','failed') AND type NOT IN ('maintenance.deleteAttachment','mail.deleteObjects') AND created_at < ${cutoff}`));
-  // Delete metadata only when no draft or message references it. The outbox retains the object key until deletion succeeds.
-  // A fixed 50 rows an hour fell behind any installation retiring more than about 1,200 uploads a day, so their objects and
-  // the workspace's stored-attachment usage were never released. Up to 5,000 a run now (120,000 a day), 1,000 per
-  // transaction in workspace order: each queues an object deletion that shares the 'other' job class with domain checks and
-  // alerts, and each row's usage trigger holds its workspace's usage row until the batch commits.
-  const uploads = async (name: string, statement: () => SQL) => {
-    for (let i = 0; i < 5 && Date.now() < deadline; i++) {
-      const n = Number((await runtime.db.execute<{ n: number }>(statement())).rows[0]?.n ?? 0);
-      deleted[name] = (deleted[name] ?? 0) + n;
-      if (n < UPLOAD_BATCH) return;
-    }
-  };
-  await uploads('unused_attachments', () => sql`WITH old AS (
-      SELECT a.id FROM sending_attachments a WHERE a.created_at < ${cutoff}
-        AND NOT EXISTS (SELECT 1 FROM sending_attachment_links l WHERE l.workspace_id = a.workspace_id AND l.attachment_id = a.id)
-      ORDER BY a.workspace_id, a.id LIMIT ${UPLOAD_BATCH} FOR UPDATE SKIP LOCKED
-    ), gone AS (DELETE FROM sending_attachments a USING old WHERE a.id = old.id RETURNING a.storage_key, a.workspace_id, a.source_template_asset_id
-    ), queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||replace(gen_random_uuid()::text,'-',''),'maintenance.deleteAttachment',workspace_id,jsonb_build_object('key',storage_key)
-      FROM gone WHERE source_template_asset_id IS NULL
-    ) SELECT count(*)::int AS n FROM gone`);
-  await uploads('unused_template_assets', () => sql`WITH old AS (
-      SELECT a.id FROM template_assets a WHERE a.created_at < ${cutoff}
-        AND NOT EXISTS (SELECT 1 FROM template_asset_links l WHERE l.workspace_id = a.workspace_id AND l.asset_id = a.id)
-        AND NOT EXISTS (SELECT 1 FROM sending_attachments s WHERE s.workspace_id = a.workspace_id AND s.source_template_asset_id = a.id)
-      ORDER BY a.workspace_id, a.id LIMIT ${UPLOAD_BATCH} FOR UPDATE SKIP LOCKED
-    ), gone AS (DELETE FROM template_assets a USING old WHERE a.id = old.id RETURNING a.storage_key, a.workspace_id
-    ), queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||replace(gen_random_uuid()::text,'-',''),'maintenance.deleteAttachment',workspace_id,jsonb_build_object('key',storage_key) FROM gone
-    ) SELECT count(*)::int AS n FROM gone`);
-  await drain('jobs_attachment_deletes', batch(sql`jobs`, sql`status = 'completed' AND type IN ('maintenance.deleteAttachment','mail.deleteObjects') AND created_at < ${cutoff}`));
-  const complete=inboxComplete && Date.now()<deadline;
-  log('info', { code: complete ? 'RETENTION_COMPLETED' : 'RETENTION_PARTIAL', deleted });
+}
+
+/** Received-mail events and webhook deliveries alone (the hourly run includes them): for checks that run just these. */
+export async function pruneMailboxEvents(runtime: Runtime, budgetMs = 60_000) {
+  const names = new Set(['mailbox_events', 'mail_ignored_staging', 'mailbox_webhook_deliveries_paused_expired', 'mailbox_webhook_deliveries']);
+  retentionLog('inbound', await retire(runtime, (await retentionDrains(runtime)).filter(d => names.has(d.name)), budgetMs));
 }
 /** The hourly upkeep. Every step is best-effort: a failing step (a retention statement that keeps timing out) must not
  * skip the steps after it, and on Node, where this used to run inside the dispatch loop, it must not stop job processing
- * and mail dispatch. Returns the codes of the steps that failed. */
+ * and mail dispatch. Retention runs last: it takes the most time, within its budget. Returns the codes of the steps that failed. */
 export async function hourlyUpkeep(runtime: Runtime, mailboxRuntime: () => Promise<Runtime> = async () => runtime) {
   const failed: string[] = [];
   for (const [code, step] of [
-    ['MAINTENANCE_CLEANUP_FAILED', () => cleanup(runtime)],
+    ['HOSTED_HEALTH_CHECK_FAILED', () => checkHostedHealth(runtime)],
     ['UPLOAD_RECONCILE_FAILED', () => reconcileUploads(runtime)],
     ['PREVIEW_SWEEP_FAILED', async () => (await import('./preview-images.js')).sweepPreviews(runtime)],
     ['REPUTATION_ALERT_CHECK_FAILED', async () => (await import('./reputation-alerts.js')).checkReputationAlerts(runtime)],
@@ -254,10 +407,15 @@ export async function hourlyUpkeep(runtime: Runtime, mailboxRuntime: () => Promi
     ['BILLING_HOURLY_FAILED', async () => { if (runtime.config.multiTenant) await (await import('./billing/cron.js')).billingHourly(runtime); }],
     // Connected AWS accounts: one health check each (byo-regional.ts).
     ['BYO_HEALTH_QUEUE_FAILED', async () => { await (await import('./byo-regional.js')).queueByoHealth(runtime); }],
-    // Abuse monitoring (src/abuse.ts), last so it never delays the steps above: a bounded, leased slice. Hosted, and only while it is on.
+    // Abuse monitoring (src/abuse.ts): a bounded, leased slice. Hosted, and only while it is on.
     ['ABUSE_HOURLY_FAILED', async () => { await (await import('./abuse.js')).abuseHourly(runtime); }],
+    ['MAINTENANCE_CLEANUP_FAILED', () => cleanup(runtime)],
   ] as const) {
-    try { await step(); } catch (error) { failed.push(code); log('warn', { code: error instanceof ApiError ? error.code : code, step: code }); }
+    try { await step(); } catch (error) {
+      failed.push(code);
+      const tables = (error as { tables?: unknown } | null)?.tables;
+      log('warn', { code: error instanceof ApiError ? error.code : code, step: code, ...(Array.isArray(tables) ? { tables } : {}) });
+    }
   }
   return failed;
 }
