@@ -91,7 +91,7 @@ export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 
       </section>
       <section className="campaign-fields campaign-message">
         <SectionHeader title="Message" actions={<><Button variant="ghost" disabled>Edit message</Button><Button variant="secondary" disabled>Send test</Button></>} />
-        <dl className="campaign-message-details"><dt>From</dt><dd><SkeletonText width="70%" /></dd><dt>Subject</dt><dd><SkeletonText width="85%" /></dd><dt>Preview</dt><dd><SkeletonText width="65%" /></dd></dl>
+        <dl className="ui-facts campaign-message-details"><dt>From</dt><dd><SkeletonText width="70%" /></dd><dt>Subject</dt><dd><SkeletonText width="85%" /></dd><dt>Preview</dt><dd><SkeletonText width="65%" /></dd></dl>
         <Skeleton height={400} />
       </section>
       <section className="campaign-delivery">
