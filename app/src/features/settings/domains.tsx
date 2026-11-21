@@ -1,11 +1,11 @@
 import { useState, type FormEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router'
+import { ArrowLeftRight } from 'lucide-react'
 import { Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, StatusBadge, StatusDot, fieldError, MutationError } from '../../components/ui'
 import { useApiMutation, useApiDef, useApiQuery, useRegion, useSession, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { usePrefetchQueries } from '../../data/prefetch'
-import { label } from '../../lib/format'
 import { ApiError, type DnsRecord, type Domain, type MailboxDomain, type ReceivingHost } from '../../data/types'
 import { request } from '../../data/live'
 import { domainPattern, normalizeDomain } from '../../lib/domain'
@@ -13,7 +13,7 @@ import { mxTone, receivingStatus } from '../inbound/status'
 import { receivingIssueReason, receivingIssueTitle } from './receiving-issue-title'
 import { AdminOnlyPage } from './admin-only'
 import { DomainCountSkeleton, DomainDetailSkeleton, domainColumns } from './skeletons'
-import { DnsRecordTable, DnsWaitNote, DomainRecords, domainState, recordsFor, useDnsSetup, useDomain, zoneLines } from './domain-records'
+import { DnsRecordTable, DnsWaitNote, DomainRecords, domainState, recordRow, recordsFor, useDnsSetup, useDomain, zoneLines } from './domain-records'
 import { resourceOf } from '../../data/invalidation'
 import { ReceivingHosts, useReceivingHosts } from './receiving-hosts'
 
@@ -52,7 +52,7 @@ function ReceivingCell({ domain, receiving, unknown = false, card = false }: { d
   return <StatusDot tone={status.tone} note={receiving.status !== 'active' ? status.label : card ? `${receiving.addressCount.toLocaleString('en-US')} ${receiving.addressCount === 1 ? 'address' : 'addresses'}` : undefined} title={[`${status.label} at ${receiving.name}`, detail].filter(Boolean).join('. ')}>{receiving.name}</StatusDot>
 }
 
-/** Hosted: the hosts the domain receives on, each with its status, addresses (which open its routes in Receiving) and catch-all. Only once receiving is set up: before that the Receiving records below say how to turn it on, and the status is in the page's facts. */
+/** Hosted: the hosts the domain receives on, each with its status, addresses (which open its routes in Receiving) and catch-all. Only once receiving is set up: before that the Receiving record above says how to turn it on. */
 /** The page reads the receiving domain and its hosts before it shows (so this section arrives at its final height) and passes them in. */
 function ReceivingSettings({ domainId, domainName, receiving, hosts }: { domainId: string; domainName: string; receiving: { data?: MailboxDomain; error: unknown; refetch: () => unknown }; hosts: { data?: ReceivingHost[]; error: unknown; refetch: () => unknown } }) {
   const check = useApiMutation((api, _: void) => api.mailboxes.checkDomain(domainId), 'MX records checked', false, true, domainId)
@@ -174,45 +174,25 @@ function DomainDetail() {
   if (domain.isPending || (!domain.error && (dns.pending || (multiTenant && ((receiving.isPending && !receiving.error) || (hosts.isPending && !hosts.error)))))) return <DomainDetailSkeleton />
   if (domain.error) return <div className="stack"><PageHeader title="Domain" backTo="/domains" /><ErrorState error={domain.error} onRetry={() => void domain.refetch()} /></div>
   const current = domain.data
-  const mailFromRecords = recordsFor(current, 'mail_from')
-  const mailFromName = current.mailFromDomain ?? mailFromRecords[0]?.name ?? null
   const state = domainState(current)
-  const sendingDetail = sendingNote(current)
   const receivingRecord = recordsFor(current, 'receiving')[0]
-  const receivingPending = !!receivingRecord && receivingRecord.status !== 'verified'
   const onRoot = receivingRecord?.name === current.name
-  // Check MX now also stays for a live host whose DNS changed (receivingIssue); choosing another host only before it receives.
-  const receivingActions = multiTenant && (receivingPending || current.receivingIssue) ? <>
-    {receivingPending && <Button loading={choose.isPending} onClick={() => void chooseHost(onRoot ? null : current.name)}>{onRoot ? 'Use a subdomain instead' : `Use ${current.name} instead`}</Button>}
-    <Button loading={verify.isPending} onClick={() => void checkNow()} title="Added the MX record? Check it now instead of waiting for the hourly check.">Check MX now</Button>
-  </> : undefined
+  // Before the domain receives, its own host's row offers the root or a subdomain instead (Check now in the header checks MX too).
+  const receivingActions = multiTenant && receivingRecord && receivingRecord.status !== 'verified' ? [{ label: onRoot ? 'Use a subdomain instead' : `Use ${current.name} instead`, icon: <ArrowLeftRight size={16} />, onSelect: () => void chooseHost(onRoot ? null : current.name) }] : undefined
   const sesUrl = `https://${current.regionId}.console.aws.amazon.com/ses/home?region=${encodeURIComponent(current.regionId)}#/identities/${encodeURIComponent(current.name)}`
   return <div className="stack">
     <PageHeader title={current.name} backTo="/domains" actions={<>
+      <StatusBadge status={state.status} tone={state.tone} />
       <Button loading={verify.isPending} onClick={() => void checkNow()} data-analytics="domains/check">Check now</Button>
       {!hosted && <a className="ui-button ui-button--secondary ui-button--md" href={sesUrl} target="_blank" rel="noreferrer">Open in SES</a>}
       {multiTenant && <Button variant="danger" onClick={() => { remove.reset(); setDeleteOpen(true) }}>Delete domain</Button>}
     </>} />
     <MutationError error={verify.error ?? choose.error} />
     {!multiTenant && regionId !== current.regionId && <Alert tone="info">This domain belongs to {current.regionId}. <Button variant="ghost" onClick={() => setRegionId(current.regionId)}>Switch to {current.regionId}</Button></Alert>}
-    <dl className="settings-facts domain-facts">
-      <div><dt>Sending</dt><dd><StatusBadge status={state.status} tone={state.tone} />{sendingDetail && <span className="muted domain-fact-note" title={sendingDetail}>{sendingDetail}</span>}</dd></div>
-      {multiTenant && receiving.data && <div><dt>Receiving</dt><dd><StatusBadge status={receiving.data.status === 'active' ? 'On' : receivingStatus[receiving.data.status].label} tone={receivingStatus[receiving.data.status].tone} /></dd></div>}
-      {!multiTenant && <div><dt>Region</dt><dd>{current.regionId}</dd></div>}
-    </dl>
-    {multiTenant && <ReceivingSettings domainId={id} domainName={current.name} receiving={receiving} hosts={hosts} />}
     <div className="domain-sections">
-      <DomainRecords domain={current} setup={dns.setup} receivingView={multiTenant ? { actions: receivingActions } : undefined} onAlignSpf={openMailFrom} actions={current.records.length > 0 && <Button onClick={() => downloadDnsRecords(current.name, current.records)}>Download .txt</Button>} />
+      <DomainRecords domain={current} setup={dns.setup} receivingView={multiTenant ? { off: receiving.data?.status === 'off', actions: receivingActions } : undefined} mailFrom={{ onEdit: openMailFrom }} actions={current.records.length > 0 && <Button onClick={() => downloadDnsRecords(current.name, current.records)}>Download .txt</Button>} />
       <DnsWaitNote domain={current} />
-      <details className="domain-advanced">
-        <summary>Advanced</summary>
-        <div className="domain-advanced-body">
-          <div className="ui-section-header"><div className="domain-group-title"><h3>Custom MAIL FROM{mailFromName && <span className="muted"> · {mailFromName}</span>}</h3></div>
-            <div className="cluster">{mailFromName && <StatusBadge status={label(current.mailFromStatus)} />}<Button aria-label={mailFromName ? 'Change custom MAIL FROM' : 'Add custom MAIL FROM'} onClick={openMailFrom}>{mailFromName ? 'Change' : 'Add'}</Button></div>
-          </div>
-          {mailFromRecords.length > 0 && <DnsRecordTable domain={current.name} records={mailFromRecords} />}
-        </div>
-      </details>
+      {multiTenant && <ReceivingSettings domainId={id} domainName={current.name} receiving={receiving} hosts={hosts} />}
       {!multiTenant && <MailboxReceiving domainId={id} domainName={current.name} />}
     </div>
     <ConfirmDialog open={!!moveMail} onOpenChange={open => { if (!open) setMoveMail(null) }} title={`Move mail for ${moveMail?.host ?? current.name}?`}
@@ -245,7 +225,7 @@ function MailboxReceiving({ domainId, domainName }: { domainId: string; domainNa
   const state = receiving.data
   const on = !!state && !['off', 'disabled'].includes(state.status)
   const status = state ? receivingStatus[state.status] : null
-  const records: DnsRecord[] = (state?.dns ?? []).map((record, index) => ({ id: `mx_${index}`, type: 'MX', name: record.name, value: `${record.priority} ${record.value}`, status: state?.mx?.state === 'active' ? 'verified' : 'pending' }))
+  const records: DnsRecord[] = (state?.dns ?? []).map((record, index) => ({ id: `mx_${index}`, type: 'MX', name: record.name, value: `${record.priority} ${record.value}`, status: state?.mx?.state === 'active' ? 'verified' : 'pending', purpose: 'receiving' }))
   return <section className="section stack">
     <div className="ui-section-header"><div className="domain-group-title"><h2>Receiving</h2></div>
       <div className="cluster">{on ? <>
@@ -262,7 +242,7 @@ function MailboxReceiving({ domainId, domainName }: { domainId: string; domainNa
       {state.lastError && <Alert tone="danger">{state.lastError}</Alert>}
       {state.status === 'provisioning' && <Alert tone="info">Setting up S3, SNS and the SES receipt rule. This takes about a minute.</Alert>}
       {state.mx && state.status !== 'provisioning' && <Alert tone={mxTone(state.mx.state)}>{state.mx.message}</Alert>}
-      <DnsRecordTable domain={domainName} records={records} />
+      <DnsRecordTable domain={domainName} rows={records.map(record => recordRow(record))} />
       {hosts.data && <ReceivingHosts domainId={domainId} domainName={domainName} hosts={hosts.data} title={<h3>Hosts</h3>} />}
     </>}
     <ConfirmDialog open={!!conflict} onOpenChange={open => { if (!open) setConflict(null) }} title={`Move mail for ${domainName}?`} description={`${conflict ?? ''} Mail stops arriving at that provider once the MX record changes.`} confirmLabel="Enable anyway" danger onConfirm={() => enable.mutateAsync(true)} />

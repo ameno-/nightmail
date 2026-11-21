@@ -77,12 +77,36 @@
    "score": 11,
    "findings": []
   },
+  "Domain · add custom MAIL FROM dialog · desktop": {
+   "score": 4,
+   "findings": []
+  },
+  "Domain · add custom MAIL FROM dialog · phone": {
+   "score": 4,
+   "findings": []
+  },
+  "Domain · change custom MAIL FROM dialog · desktop": {
+   "score": 4,
+   "findings": []
+  },
+  "Domain · change custom MAIL FROM dialog · phone": {
+   "score": 4,
+   "findings": []
+  },
+  "Domain · custom MAIL FROM · desktop": {
+   "score": 25,
+   "findings": []
+  },
+  "Domain · custom MAIL FROM · phone": {
+   "score": 14,
+   "findings": []
+  },
   "Domain · desktop": {
-   "score": 27,
+   "score": 22,
    "findings": []
   },
   "Domain · phone": {
-   "score": 19,
+   "score": 16,
    "findings": []
   },
   "Domains · add domain dialog · desktop": {
