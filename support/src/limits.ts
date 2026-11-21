@@ -16,6 +16,8 @@ export const DEFAULT_LIMITS = {
   /** Model turns, all conversations together (the Console key's own budget is the backstop), and per person. */
   turnsPerDay: 1500,
   turnsPerPerson: 100,
+  /** Model turns per email sender address (every email answer is general), instead of the per-person cap. */
+  turnsPerEmailSender: 5,
   /** Tickets for verified customers (chat, verified email, a DMARC-passing Nightmail user at an intake address). */
   ticketsVerifiedPerDay: 60,
   /** Tickets from everyone else, per intake address. */

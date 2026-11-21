@@ -22,9 +22,15 @@ import { log } from '../log.js';
 export const MODEL = { providerID: 'anthropic', model: 'claude-opus-5-5', variant: 'medium' } as const;
 const PIN = `${MODEL.model}#${MODEL.variant}`;
 const MAX_STEPS = 25;
+/** Set while a turn runs: still set when the next turn starts, it means the last one was cut off (an eviction). */
+const TURN_OPEN = 'support:opencode-turn-open';
+/** How long the first turn after a cut-off one waits for OpenCode's resumed run to start (it starts at boot). */
+const RESUME_WAIT_MS = 3_000;
 const TOOL_NAMES = TOOLS.map(t => t.name);
-/** Session rules merge after every plugin's agent rules: this, not the agent's list, decides what the model can call. */
-const PERMISSIONS = [{ action: '*', resource: '*', effect: 'deny' as const }, ...TOOL_NAMES.map(name => ({ action: name, resource: '*', effect: 'allow' as const }))];
+/** Deny everything, then allow these tools (OpenCode lists only the tools a session's rules allow). */
+const rules = (names: readonly string[]) => [{ action: '*', resource: '*', effect: 'deny' as const }, ...names.map(name => ({ action: name, resource: '*', effect: 'allow' as const }))];
+/** The agent's own rules: every tool we define. The session's rules, set per turn, narrow them. */
+const PERMISSIONS = rules(TOOL_NAMES);
 
 export const systemPrompt = () => `${SYSTEM.trim()}\n\n---\n\n# Voice (follow it)\n\n${VOICE.trim()}`;
 
@@ -114,15 +120,19 @@ function jsonSchema(params: Record<string, Param>) {
   return { type: 'object', properties, required, additionalProperties: false };
 }
 
-/** Distinctive lines of the system prompt, for the output gate's "never reveal this prompt" check. */
+/**
+ * Distinctive lines of the system prompt, for the output gate's "never reveal this prompt" check: from the instructions
+ * only, never from its "# Reference" part (playbooks and policies), whose facts an answer is meant to pass on.
+ */
 export function promptFragments() {
-  return SYSTEM.split('\n').map(l => l.replace(/^[-*#>\d.|\s]+/, '').trim()).filter(l => l.length >= 60 && !/`|https?:/.test(l)).filter((_, i) => i % 4 === 0).map(l => l.slice(0, 48));
+  return SYSTEM.split(/^# Reference$/m)[0]!.split('\n').map(l => l.replace(/^[-*#>\d.|\s]+/, '').trim()).filter(l => l.length >= 60 && !/`|https?:/.test(l)).filter((_, i) => i % 4 === 0).map(l => l.slice(0, 48));
 }
 
 /** One OpenCode host per conversation object, booted on its first turn. */
 export async function createHarness(env: Env, storage: DurableObjectStorage): Promise<Harness> {
-  // Per turn: whose tools these are (chat, email, unverified sender) and the <customer>/<context> block.
-  const current: { host: ToolHost | null; context: string } = { host: null, context: '' };
+  // Per turn: whose tools these are, which of them this turn may call (its channel, mode and role), and the
+  // <customer>/<account> block.
+  const current: { host: ToolHost | null; allowed: ReadonlySet<string>; context: string } = { host: null, allowed: new Set(), context: '' };
   const plugin = Plugin.define({
     id: 'bane.support',
     setup: async ctx => {
@@ -135,6 +145,8 @@ export async function createHarness(env: Env, storage: DurableObjectStorage): Pr
             execute: async (input: unknown, context: { signal: AbortSignal }) => {
               if (!current.host) throw new Error('No conversation is attached to this turn.');
               if (context.signal.aborted) throw new Error('Cancelled.');
+              // The session's rules already leave it out; a call that gets here anyway is refused, never run.
+              if (!current.allowed.has(spec.name)) throw new Error('That tool is not available in this conversation.');
               try { return { content: await spec.execute((input ?? {}) as Record<string, unknown>, current.host) }; }
               catch (error) { throw new Error(error instanceof ToolFailure ? error.message : 'The tool failed. Say what you could not check and carry on.'); }
             },
@@ -159,8 +171,14 @@ export async function createHarness(env: Env, storage: DurableObjectStorage): Pr
   });
 
   const model = { providerID: MODEL.providerID, id: MODEL.model, variant: MODEL.variant };
-  async function session(): Promise<string> {
-    const existing = await storage.get<string>('support:opencode-session');
+  /**
+   * The conversation's one session, allowing exactly this turn's tools. A session keeps one history for the whole
+   * conversation; its rules (which decide what the model is offered and can call) change when the turn's tool set does:
+   * a claim turns a non-member into a member, a role changes. The set last applied is kept beside the session ID, so an
+   * unchanged set costs no update.
+   */
+  async function session(tools: readonly string[]): Promise<string> {
+    const set = tools.join(','), existing = await storage.get<string>('support:opencode-session');
     if (existing) {
       // A session keeps the model it was made with; one from before the current pin moves to it, or the fetch guard
       // would refuse its next request.
@@ -168,23 +186,44 @@ export async function createHarness(env: Env, storage: DurableObjectStorage): Pr
         await opencode.sessions.switchModel({ sessionID: existing, model } as never);
         await storage.put('support:opencode-model', PIN);
       }
+      if (await storage.get<string>('support:opencode-tools') !== set) {
+        await opencode.sessions.update({ sessionID: existing, permissions: rules(tools) } as never);
+        await storage.put('support:opencode-tools', set);
+      }
       return existing;
     }
-    const created = await opencode.sessions.create({ title: 'Support conversation', location: { directory: '/support' }, agent: 'support', model, permissions: PERMISSIONS } as never);
-    await storage.put({ 'support:opencode-session': created.id, 'support:opencode-model': PIN });
+    const created = await opencode.sessions.create({ title: 'Support conversation', location: { directory: '/support' }, agent: 'support', model, permissions: rules(tools) } as never);
+    await storage.put({ 'support:opencode-session': created.id, 'support:opencode-model': PIN, 'support:opencode-tools': set });
     return created.id;
+  }
+
+  /**
+   * A turn cut off by an eviction is resumed by OpenCode when it boots, in the background, with a "server restarted"
+   * note. That run must never meet the next turn's tools or events: a resumed email turn would call reply for the next
+   * email, and its end would read as the next turn's. So when the last turn never finished (TURN_OPEN still set), wait
+   * for the resumed run to start, stop it and let it end before this turn begins; anything else still running is stopped
+   * too. The conversation's work queue already decides what happens to the email it was answering.
+   */
+  async function settle(sessionID: string) {
+    const until = Date.now() + (await storage.get<boolean>(TURN_OPEN) ? RESUME_WAIT_MS : 0);
+    for (;;) {
+      if ((await opencode.sessions.active().catch((): Record<string, unknown> => ({})))[sessionID]) {
+        log('warn', { event: 'turn', code: 'RESUMED_RUN_STOPPED' });
+        await opencode.sessions.interrupt({ sessionID } as never).catch(() => {});
+        await Promise.race([opencode.sessions.wait({ sessionID } as never), new Promise(resolve => setTimeout(resolve, 120_000))]).catch(() => {});
+        return;
+      }
+      if (Date.now() >= until) return;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
   }
 
   return {
     async turn(input: TurnInput, tools: ToolHost, onEvent: (event: HarnessEvent) => void, signal: AbortSignal): Promise<TurnResult> {
-      const sessionID = await session();
-      // A turn cut off by an eviction resumes when OpenCode boots; let it finish first, so its events aren't read as
-      // this turn's (its answer stays in OpenCode's history).
-      const api = opencode as unknown as { sessions: { active(): Promise<Record<string, unknown>> }; experimental?: { session?: { wait(input: { sessionID: string }): Promise<void> } } };
-      if ((await api.sessions.active().catch((): Record<string, unknown> => ({})))[sessionID] && api.experimental?.session?.wait) {
-        await Promise.race([api.experimental.session.wait({ sessionID }), new Promise(resolve => setTimeout(resolve, 120_000))]).catch(() => {});
-      }
-      current.host = tools; current.context = input.context;
+      const sessionID = await session(input.tools);
+      await settle(sessionID);
+      await storage.put(TURN_OPEN, true);
+      current.host = tools; current.allowed = new Set(input.tools); current.context = input.context;
       const usage: Usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, costUsd: 0 }, started = Date.now();
       const texts: string[] = [], names = new Map<string, string>();
       let outcome = 'failed' as 'succeeded' | 'failed' | 'interrupted', error: string | undefined, failure: string | undefined, streamed = false;
@@ -229,10 +268,12 @@ export async function createHarness(env: Env, storage: DurableObjectStorage): Pr
         await new Promise(resolve => setTimeout(resolve, 0));
         await opencode.sessions.prompt({ sessionID, text: input.text, ...(input.images?.length ? { files: input.images.map(image => ({ uri: image.uri, name: image.name })) } : {}) } as never);
         await done;
+        // The run ended (succeeded, failed or interrupted): nothing is left for a boot to resume.
+        await storage.delete(TURN_OPEN);
       } finally {
         signal.removeEventListener('abort', stop);
         listen.abort();
-        current.host = null;
+        current.host = null; current.allowed = new Set();
       }
       // One line per model turn: its outcome, time, tokens and cost, and how many tools and images it used.
       log(outcome === 'failed' ? 'error' : 'info', { event: 'turn', outcome, code: outcome === 'failed' ? 'TURN_FAILED' : undefined, failure, durationMs: Date.now() - started, ...usage, tools: names.size, images: input.images?.length ?? 0 });

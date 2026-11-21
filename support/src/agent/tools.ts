@@ -31,6 +31,8 @@ export interface ToolHost {
   chooseWorkspace(workspaceId: string): Promise<string>;
   requestContentAccess(workspaceId: string, why: string): Promise<string>;
   fileTicket(input: TicketInput): Promise<string>;
+  /** Email only: freezes this email's one answer (sent after the turn, only to the address that wrote). */
+  reply(text: string): Promise<string>;
 }
 export const TICKET_TYPES = ['billing', 'bug', 'deliverability', 'account', 'abuse_report', 'privacy', 'legal', 'feature_request', 'other'] as const;
 export type TicketType = typeof TICKET_TYPES[number];
@@ -175,8 +177,29 @@ export const TOOLS: ToolSpec[] = [
     },
     label: fixed(`Passing this to the ${productName} team…`, `Passed this to the ${productName} team`),
     execute: (a, h) => h.fileTicket(ticketInput(a)) },
+  { name: 'reply', description: 'Email only: your answer to this email, the only text the customer receives. Call it once, as your last step, with the whole email in plain text, from "Hi," to the sign-off. It goes to the sender only, in this thread, when your turn ends; a second call is refused.',
+    params: { text: { type: 'string', description: 'The whole email in plain text, under 250 words, signed "Nightmail support (AI)"', max: 6000 } },
+    label: fixed('Writing the reply…', 'Wrote the reply'), execute: (a, h) => h.reply(String(a.text ?? '')) },
 ];
 export const TOOL_NAMES = TOOLS.map(t => t.name);
+
+/**
+ * Tools whose /v1/support routes Nightmail lets only owners and admins read (SUPPORT_CEILINGS in
+ * api/src/support-conversations.ts): offered only when a workspace in scope has one of those roles.
+ */
+export const MANAGER_TOOLS: ReadonlySet<string> = new Set(['list_domains', 'domain_health', 'list_webhook_deliveries', 'get_billing', 'get_audit', 'api_errors', 'explain_request']);
+/** Email reads no account: its turns answer through reply and can file a ticket, nothing else. */
+const EMAIL_TOOLS: ReadonlySet<string> = new Set(['reply', 'file_ticket']);
+export type Turn = { channel: 'chat'; manager: boolean } | { channel: 'email' };
+/**
+ * The tools one turn may call: a chat's account tools by role (the owner/admin ones only for a manager), workspace
+ * choice, content access and tickets, never reply (chat text streams); an email's reply and file_ticket only. OpenCode's
+ * session permissions offer exactly these; the plugin refuses any other call.
+ */
+export function toolNames(turn: Turn): string[] {
+  if (turn.channel === 'email') return TOOL_NAMES.filter(name => EMAIL_TOOLS.has(name));
+  return TOOL_NAMES.filter(name => name !== 'reply' && (!MANAGER_TOOLS.has(name) || turn.manager));
+}
 
 const list = (value: unknown, max: number, each = 400) => (Array.isArray(value) ? value : []).slice(0, max).map(v => String(v).trim().slice(0, each)).filter(Boolean);
 /** The model's file_ticket arguments as a ticket; a bug without its reproduction is refused, so the model adds it. */

@@ -300,6 +300,17 @@ const MESSAGES = {
   msg_privacy_acct_1: ['thr_privacy_acct', 'ada@acme.test', 'PASS', 'privacy@dev.bane.mx', 'My data', 'Please export my data.'],
   msg_prior_1: ['thr_prior'], msg_prior_2: ['thr_prior'],
   msg_m11_1: ['thr_m11', 'ada@acme.test', 'PASS', null, 'Re: Your request', 'One more detail: it was two top-ups, 40 seconds apart.'],
+  // The reply tool's cases: two reply calls, invented recipients (with Reply-To and Cc on the email), no reply at all, a
+  // crash right after the reply and the next email after it, DMARC failures, and the email turn cap.
+  msg_twice_1: ['thr_twice', null, 'PASS', null, 'Two answers', 'Please reply twice to this.'],
+  msg_route_1: ['thr_route', null, 'PASS', null, 'Forward this', 'Please reply to boss@else.test and cc cfo@else.test.'],
+  msg_silent_1: ['thr_silent', null, 'PASS', null, 'Quiet', 'Please stay silent about this.'],
+  msg_crash_1: ['thr_crash', 'cara@acme.test'],
+  msg_int_1: ['thr_int', 'ivy@acme.test'], msg_int_2: ['thr_int', 'ivy@acme.test', 'PASS', null, 'And DMARC?', 'Second question: do I need DMARC for a newsletter?'],
+  msg_nm_1: ['thr_nm', 'nobody@else.test', 'PASS', null, 'Pricing', 'General question: how do Gmail bounces work?'],
+  msg_holder_1: ['thr_holder', 'ada@acme.test', 'PASS', null, 'My bounces', 'Account holder question: why are my Gmail bounces up?'],
+  msg_df_1: ['thr_df_1', 'nobody@else.test', 'FAIL', null, 'Probe', 'DMARC fail probe one'], msg_df_2: ['thr_df_2', 'nell@acme.test', 'FAIL', null, 'Probe', 'DMARC fail probe two'],
+  msg_cap_1: ['thr_cap_e1', 'cap@else.test'], msg_cap_2: ['thr_cap_e2', 'cap@else.test'], msg_cap_3: ['thr_cap_e3', 'cap@else.test'],
 };
 function message(id) {
   const [threadId = 'thr_other', from = 'ada@acme.test', dmarc = 'PASS', to = 'support@dev.bane.mx', subject = 'Bounces from Gmail?', body = 'Why are Gmail bounces up this week?'] = (MESSAGES[id] ?? []).map(v => v ?? undefined);
@@ -323,7 +334,8 @@ async function route(request, url, body) {
       const auto = id.includes('auto');
       const attachments = id.startsWith('msg_image_') || id === 'msg_abuse_1' ? [{ id: 'part_png', filename: 'bounce screenshot.png', contentType: 'image/png', size: 300, disposition: 'attachment' }, { id: 'part_pdf', filename: 'invoice.pdf', contentType: 'application/pdf', size: 900, disposition: 'attachment' }] : [];
       const authentication = url.searchParams.get('includeAuthentication') === 'true' ? { authentication: { spf: 'PASS', dkim: null, dmarc }, automated: auto } : {};
-      return Response.json({ id, threadId, addressIds: [addressId], direction: 'inbound', subject, from: { name: null, address: from }, to: [to], text: body, replyText: body, messageId: '<' + id + '@mail.test>', ...authentication, attachments });
+      const others = id === 'msg_route_1' ? { replyTo: [{ name: null, address: 'boss@else.test' }], cc: [{ name: null, address: 'cfo@else.test' }] } : {};
+      return Response.json({ id, threadId, addressIds: [addressId], direction: 'inbound', subject, from: { name: null, address: from }, to: [to], ...others, text: body, replyText: body, messageId: '<' + id + '@mail.test>', ...authentication, attachments });
     }
     if (request.method === 'POST' && url.pathname === '/v1/inbound/threads') return Response.json({ id: 'msg_new', threadId: 'thr_new_' + calls.length }, { status: 202 });
     if (request.method === 'POST' && /^\\/v1\\/inbound\\/threads\\/[^/]+\\/reply$/.test(url.pathname)) {
@@ -367,6 +379,23 @@ function lastUserText(body: any): string {
   }
   return '';
 }
+/** The tools this request offers (a turn's tool set: an email turn has reply and file_ticket, nothing that reads an account). */
+const offered = (body: any) => new Set<string>((body?.tools ?? []).map((t: any) => t.name));
+/** The tools called since the latest thing the customer (or the harness) said, in order. */
+function calledSince(body: any): string[] {
+  const messages: any[] = body?.messages ?? [];
+  const last = [...messages].reverse().find((m: any) => m.role === 'user' && blocks(m).some(b => b.type === 'text'));
+  return messages.slice(messages.indexOf(last) + 1).flatMap((m: any) => blocks(m)).filter((b: any) => b.type === 'tool_use').map((b: any) => b.name);
+}
+/**
+ * The model's answer: in chat, streamed text; in an email turn (the request offers reply), a reply call, then a short
+ * closing text once its result is back. That text is never sent: only the reply is.
+ */
+function say(body: any, chunks: string[]) {
+  if (!offered(body).has('reply')) return text(chunks);
+  if (calledSince(body).includes('reply')) return text(['Replied.']);
+  return toolUse(`toolu_reply_${body?.messages?.length ?? 0}`, 'reply', { text: chunks.join('') });
+}
 
 export async function fakeGateway(request: Request): Promise<Response> {
   const body = request.method === 'POST' ? await request.json().catch(() => undefined) as any : undefined;
@@ -375,41 +404,54 @@ export async function fakeGateway(request: Request): Promise<Response> {
   // Like a key allowed only the pinned model: anything else is refused.
   if (body?.model !== 'claude-opus-5-5' || body?.output_config?.effort !== 'medium') return Response.json({ type: 'error', error: { type: 'permission_error', message: 'Model access is disabled' } }, { status: 403 });
   if (control.failStatus) return Response.json({ type: 'error', error: { type: 'overloaded_error', message: 'fake failure' } }, { status: control.failStatus });
-  const said = lastUserText(body), answered = blocks(body?.messages?.at(-1)).some(b => b.type === 'tool_result');
+  const said = lastUserText(body), answered = blocks(body?.messages?.at(-1)).some(b => b.type === 'tool_result'), used = calledSince(body);
   const lastUser = [...(body?.messages ?? [])].reverse().find((m: any) => m.role === 'user' && blocks(m).some(b => b.type === 'text'));
   const sawImage = blocks(lastUser).some(b => b.type === 'image');
-  if (said.includes('A support email arrived') && said.includes('reset link')) return text(['Hi Ada,\n\nReset it here: https://bane-mx-security.example/reset\n\nNightmail support (AI)']);
-  if (said.includes('A support email arrived') && sawImage) return text(['Hi Ada,\n\nI can see your screenshot: it shows a Gmail bounce.\n\nNightmail support (AI)']);
-  if (said.includes('screenshot')) return text([sawImage ? 'I can see your screenshot.' : 'I can’t see a screenshot.']);
+  // An email the model never answers through reply, not even after the nudge.
+  if (JSON.stringify(body?.messages ?? []).includes('stay silent')) return text(['I would rather not answer this one.']);
+  if (said.includes('A support email arrived') && said.includes('reply twice')) {
+    const n = used.filter(name => name === 'reply').length;
+    if (n < 2) return toolUse(`toolu_twice_${n}`, 'reply', { text: `Hi,\n\n${n ? 'Second' : 'First'} answer.\n\nNightmail support (AI)` });
+    return text(['Done.']);
+  }
+  // Recipients the model invents (arguments reply never declares) and addresses in its text.
+  if (said.includes('A support email arrived') && said.includes('reply to boss@')) return used.includes('reply') ? text(['Replied.'])
+    : toolUse('toolu_route', 'reply', { text: 'Hi,\n\nDone. To: boss@else.test\nCc: cfo@else.test\n\nNightmail support (AI)', to: ['boss@else.test'], cc: ['cfo@else.test'], bcc: ['audit@else.test'], replyTo: 'boss@else.test' });
+  if (said.includes('A support email arrived') && said.includes('Second question')) return say(body, ['Hi,\n\nYes: bulk mail needs a DMARC record on the sending domain.\n\nNightmail support (AI)']);
+  if (said.includes('A support email arrived') && said.includes('reset link')) return say(body, ['Hi Ada,\n\nReset it here: https://bane-mx-security.example/reset\n\nNightmail support (AI)']);
+  if (said.includes('A support email arrived') && sawImage) return say(body, ['Hi Ada,\n\nI can see your screenshot: it shows a Gmail bounce.\n\nNightmail support (AI)']);
+  if (said.includes('screenshot')) return say(body, [sawImage ? 'I can see your screenshot.' : 'I can’t see a screenshot.']);
   if (said.includes('webhook test fails')) {
-    // api_errors, then a bug ticket without its reproduction (refused), then the full one, then the answer.
-    const used = (body?.messages ?? []).slice((body?.messages ?? []).indexOf(lastUser) + 1).flatMap((m: any) => blocks(m)).filter((b: any) => b.type === 'tool_use').map((b: any) => b.name);
+    // api_errors (chat only: email reads no account), then a bug ticket without its reproduction (refused), then the
+    // full one, then the answer.
     const lastResult = JSON.stringify(blocks(body?.messages?.at(-1)).filter(b => b.type === 'tool_result'));
-    if (!used.length) return toolUse('toolu_e1', 'api_errors', { hours: 24 });
-    if (used.length === 1) return toolUse('toolu_e2', 'file_ticket', { type: 'bug', title: 'Webhook test returns 500 for every endpoint', severity: 'P2', summary: 'Webhook tests fail with 500.', ask: 'My webhook test fails', tried: ['api_errors: 14 × 500 INTERNAL_ERROR'], recommendation: 'Look at the webhook test handler.' });
-    if (used.length === 2 && lastResult.includes('needs reproSteps')) return toolUse('toolu_e3', 'file_ticket', { type: 'bug', title: 'Webhook test returns 500 for every endpoint', severity: 'P2',
+    const step = offered(body).has('api_errors') ? used.length : used.length + 1;
+    if (step === 0) return toolUse('toolu_e1', 'api_errors', { hours: 24 });
+    if (step === 1) return toolUse('toolu_e2', 'file_ticket', { type: 'bug', title: 'Webhook test returns 500 for every endpoint', severity: 'P2', summary: 'Webhook tests fail with 500.', ask: 'My webhook test fails', tried: ['api_errors: 14 × 500 INTERNAL_ERROR'], recommendation: 'Look at the webhook test handler.' });
+    if (step === 2 && lastResult.includes('needs reproSteps')) return toolUse('toolu_e3', 'file_ticket', { type: 'bug', title: 'Webhook test returns 500 for every endpoint', severity: 'P2',
       summary: 'Every POST /v1/webhooks/{id}/test returns 500 since this morning. 14 failures in 2 hours, all INTERNAL_ERROR. The customer wants their webhooks tested.', ask: 'My webhook test fails',
       tried: ['api_errors: 14 × 500 INTERNAL_ERROR on POST /v1/webhooks/:id/test'], recommendation: 'Check the webhook test handler against req_' + 'a'.repeat(32) + '.',
       reproSteps: ['Open Webhooks', 'Press Send test on any endpoint'], affected: 'POST /v1/webhooks/{id}/test', requestIds: ['req_' + 'a'.repeat(32), 'req_' + 'b'.repeat(32)], errorCodes: ['500 INTERNAL_ERROR'],
       expected: 'A test delivery', actual: 'HTTP 500' });
-    return text(['That’s a Nightmail bug: I’ve passed it to the Nightmail team.']);
+    return say(body, ['That’s a Nightmail bug: I’ve passed it to the Nightmail team.']);
   }
   if (said.includes('someone else')) {
     // Arguments a tool never declares (another user, conversation, grant), then another customer's workspace.
-    const used = (body?.messages ?? []).slice((body?.messages ?? []).indexOf(lastUser) + 1).flatMap((m: any) => blocks(m)).filter((b: any) => b.type === 'tool_use').length;
-    if (used === 0) return toolUse('toolu_o1', 'bounce_reasons', { provider: 'gmail', userId: 'usr_bo', conversationId: 'conv_' + 'b'.repeat(26), grant: 'nm_support_' + '9'.repeat(64), token: 'tok_other' });
-    if (used === 1) return toolUse('toolu_o2', 'list_domains', { workspaceId: 'ws_other' });
-    return text(['I can only look at your own account.']);
+    if (used.length === 0) return toolUse('toolu_o1', 'bounce_reasons', { provider: 'gmail', userId: 'usr_bo', conversationId: 'conv_' + 'b'.repeat(26), grant: 'nm_support_' + '9'.repeat(64), token: 'tok_other' });
+    if (used.length === 1) return toolUse('toolu_o2', 'list_domains', { workspaceId: 'ws_other' });
+    return say(body, ['I can only look at your own account.']);
   }
-  // Email reads no account: the tool is refused, and the answer is a general one.
-  if (said.includes('A support email arrived')) return answered ? text([JSON.stringify(blocks(body?.messages?.at(-1))).includes('Email answers are general') ? GENERAL_ANSWER : 'Hi Ada,\n\nGmail hard-bounced 61 of 1,000 sends this week.\n\nNightmail support (AI)']) : toolUse('toolu_e', 'bounce_reasons', { provider: 'gmail' });
-  if (said.includes('Gmail bounces')) return answered ? text(['Gmail hard-bounced 61 of 1,000 sends (6.1%). Here’s what I’d do:\n\n1. Remove the import from Oct 25.']) : toolUse('toolu_b', 'bounce_reasons', { provider: 'gmail', days: 7 });
-  if (said.includes('refund')) return answered ? text(['I’ve passed this to the Nightmail team. Someone will reply by email.']) : toolUse('toolu_t', 'file_ticket', {
+  // Email reads no account: its turn offers no account tool, so the answer is a general one. (Were one offered, this
+  // would read the bounces, and the tests would see account data in an email.)
+  if (said.includes('A support email arrived')) return !offered(body).has('bounce_reasons') ? say(body, [GENERAL_ANSWER])
+    : answered ? say(body, ['Hi Ada,\n\nGmail hard-bounced 61 of 1,000 sends this week.\n\nNightmail support (AI)']) : toolUse('toolu_e', 'bounce_reasons', { provider: 'gmail' });
+  if (said.includes('Gmail bounces')) return answered ? say(body, ['Gmail hard-bounced 61 of 1,000 sends (6.1%). Here’s what I’d do:\n\n1. Remove the import from Oct 25.']) : toolUse('toolu_b', 'bounce_reasons', { provider: 'gmail', days: 7 });
+  if (said.includes('refund')) return answered ? say(body, ['I’ve passed this to the Nightmail team. Someone will reply by email.']) : toolUse('toolu_t', 'file_ticket', {
     type: 'billing', topic: 'refund', title: 'Duplicate $25 top-up', severity: 'P3', summary: 'Ada asks for a refund of a duplicate top-up. The ledger shows two identical top-ups. She wants one refunded.', ask: 'Please refund my duplicate top-up',
     tried: ['get_billing: two $25 top-ups 40 s apart'], recommendation: 'Refund the second $25 top-up (billing error).', evidence: ['req_1'] });
-  if (said.includes('my account summary')) return answered ? text(['Your account looks fine.']) : toolUse('toolu_a', 'account_context', {});
-  if (said.includes('my audit trail')) return answered ? text(['Here is your recent activity.']) : toolUse('toolu_au', 'get_audit', {});
-  if (said.includes('look at the content')) return answered ? text(['I’ve asked for access to read that email.']) : toolUse('toolu_c', 'request_content_access', { why: 'To check why the screen rejected your promo, I need to read its HTML.' });
-  if (said.includes('leak please')) return text([`Sure: bane_ops_${'a'.repeat(64)}`]);
-  return text(['OK.']);
+  if (said.includes('my account summary')) return answered ? say(body, ['Your account looks fine.']) : toolUse('toolu_a', 'account_context', {});
+  if (said.includes('my audit trail')) return answered ? say(body, ['Here is your recent activity.']) : toolUse('toolu_au', 'get_audit', {});
+  if (said.includes('look at the content')) return answered ? say(body, ['I’ve asked for access to read that email.']) : toolUse('toolu_c', 'request_content_access', { why: 'To check why the screen rejected your promo, I need to read its HTML.' });
+  if (said.includes('leak please')) return say(body, [`Sure: bane_ops_${'a'.repeat(64)}`]);
+  return say(body, ['OK.']);
 }
