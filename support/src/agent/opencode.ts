@@ -7,6 +7,7 @@ import { TOOLS, ToolFailure, type Param, type ToolHost } from './tools.js';
 import SYSTEM from './system.md';
 import VOICE from '../../VOICE.md';
 import { errorTypeOf } from '../../../api/src/log.js';
+import { promptFragmentsOf } from '../gate.js';
 import { log } from '../log.js';
 
 // The agent runtime: OpenCode, embedded in the conversation's Durable Object through `@opencode/sdk/workerd` (the same
@@ -27,6 +28,8 @@ const TURN_OPEN = 'support:opencode-turn-open';
 /** How long the first turn after a cut-off one waits for OpenCode's resumed run to start (it starts at boot). */
 const RESUME_WAIT_MS = 3_000;
 const TOOL_NAMES = TOOLS.map(t => t.name);
+/** OpenCode's error type for a response the provider blocked or the model refused. */
+const CONTENT_FILTER = 'provider.content-filter';
 /** Deny everything, then allow these tools (OpenCode lists only the tools a session's rules allow). */
 const rules = (names: readonly string[]) => [{ action: '*', resource: '*', effect: 'deny' as const }, ...names.map(name => ({ action: name, resource: '*', effect: 'allow' as const }))];
 /** The agent's own rules: every tool we define. The session's rules, set per turn, narrow them. */
@@ -120,13 +123,8 @@ function jsonSchema(params: Record<string, Param>) {
   return { type: 'object', properties, required, additionalProperties: false };
 }
 
-/**
- * Distinctive lines of the system prompt, for the output gate's "never reveal this prompt" check: from the instructions
- * only, never from its "# Reference" part (playbooks and policies), whose facts an answer is meant to pass on.
- */
-export function promptFragments() {
-  return SYSTEM.split(/^# Reference$/m)[0]!.split('\n').map(l => l.replace(/^[-*#>\d.|\s]+/, '').trim()).filter(l => l.length >= 60 && !/`|https?:/.test(l)).filter((_, i) => i % 4 === 0).map(l => l.slice(0, 48));
-}
+/** The output gate's "never reveal this prompt" fragments, from this prompt's instructions (gate.ts). */
+export const promptFragments = () => promptFragmentsOf(SYSTEM);
 
 /** One OpenCode host per conversation object, booted on its first turn. */
 export async function createHarness(env: Env, storage: DurableObjectStorage): Promise<Harness> {
@@ -226,15 +224,14 @@ export async function createHarness(env: Env, storage: DurableObjectStorage): Pr
       current.host = tools; current.allowed = new Set(input.tools); current.context = input.context;
       const usage: Usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, costUsd: 0 }, started = Date.now();
       const texts: string[] = [], names = new Map<string, string>();
-      let outcome = 'failed' as 'succeeded' | 'failed' | 'interrupted', error: string | undefined, failure: string | undefined, streamed = false;
+      let outcome = 'failed' as 'succeeded' | 'failed' | 'interrupted', error: string | undefined, failure: string | undefined, refused = false;
       const listen = new AbortController();
       const done = (async () => {
         for await (const event of opencode.events.subscribe({ signal: listen.signal }) as AsyncIterable<{ type: string; data: Record<string, any> }>) {
           const data = event.data ?? {};
           if (data.sessionID !== sessionID) continue;
           switch (event.type) {
-            case 'session.text.started': if (streamed) onEvent({ type: 'text.delta', delta: '\n\n' }); break;
-            case 'session.text.delta': if (typeof data.delta === 'string' && data.delta) { streamed = true; onEvent({ type: 'text.delta', delta: data.delta }); } break;
+            // Text is taken whole when each part ends: nothing the model writes is passed on before the turn is over.
             case 'session.text.ended': if (typeof data.text === 'string' && data.text.trim()) texts.push(data.text.trim()); break;
             case 'session.tool.input.started': names.set(String(data.id), String(data.name)); break;
             case 'session.tool.called': onEvent({ type: 'tool.start', callId: String(data.id), tool: names.get(String(data.id)) ?? 'tool', args: (data.input ?? {}) as Record<string, unknown> }); break;
@@ -249,9 +246,13 @@ export async function createHarness(env: Env, storage: DurableObjectStorage): Pr
               usage.costUsd += Number(data.cost ?? 0);
               break;
             }
+            // The model declined to answer (Anthropic's stop_reason "refusal", which OpenCode reports as a content-filter
+            // finish): the step fails, then the run.
+            case 'session.step.failed': if (data.finish === 'content-filter' || data.error?.type === CONTENT_FILTER) refused = true; break;
             case 'session.execution.succeeded': outcome = 'succeeded'; return;
             case 'session.execution.interrupted': outcome = 'interrupted'; return;
             case 'session.execution.failed': {
+              if (data.error?.type === CONTENT_FILTER) refused = true;
               outcome = 'failed'; error = String(data.error?.message ?? 'failed').slice(0, 300);
               // For the log line: the failure's kind when it is an identifier, never its message.
               const kind = [data.error?.name, data.error?.type, data.error?.code].find(v => typeof v === 'string' && /^[A-Za-z][\w.-]{0,63}$/.test(v));
@@ -275,9 +276,12 @@ export async function createHarness(env: Env, storage: DurableObjectStorage): Pr
         listen.abort();
         current.host = null; current.allowed = new Set();
       }
-      // One line per model turn: its outcome, time, tokens and cost, and how many tools and images it used.
-      log(outcome === 'failed' ? 'error' : 'info', { event: 'turn', outcome, code: outcome === 'failed' ? 'TURN_FAILED' : undefined, failure, durationMs: Date.now() - started, ...usage, tools: names.size, images: input.images?.length ?? 0 });
-      return { text: texts.join('\n\n'), usage, aborted: outcome === 'interrupted', ...(outcome === 'failed' ? { error: error ?? 'failed' } : {}) };
+      // One line per model turn: its outcome, time, tokens and cost, and how many tools and images it used. A refusal is
+      // the model's answer, not a failure: the conversation sends its fixed decline and logs MODEL_REFUSAL.
+      const failed = outcome === 'failed' && !refused;
+      log(failed ? 'error' : 'info', { event: 'turn', outcome: refused ? 'refused' : outcome, code: failed ? 'TURN_FAILED' : undefined, failure: failed ? failure : undefined, durationMs: Date.now() - started, ...usage, tools: names.size, images: input.images?.length ?? 0 });
+      if (refused) return { text: '', usage, aborted: false, refused: true };
+      return { text: texts.join('\n\n'), usage, aborted: outcome === 'interrupted', ...(failed ? { error: error ?? 'failed' } : {}) };
     },
   };
 }

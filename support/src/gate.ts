@@ -23,7 +23,8 @@ const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
 const SECRET_PREFIX = /\b(?:nm_support_|nm_mbx_|nm_agent_|nm_notes_|nm_|bane_support_|bane_ops_|bane_mbx_|bane_agent_|os_agent_|whsec_|sk-ant-|bane_)[A-Za-z0-9_-]{8,}/; // bane_/os_: remove after rename cleanup
 const LONG_HEX = /\b[0-9a-f]{40,}\b/i;
 const LONG_B64 = /(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{60,}={0,2}(?![A-Za-z0-9+/])/;
-const INTERNAL_HOST = /\b(?:[a-z0-9-]+\.)*(?:internal|invalid|local|svc\.cluster\.local|workers\.dev|psdb\.cloud|amazonaws\.com|hyperdrive\.local)\b/i;
+/** A host under a private or reserved suffix. internal, invalid and local need a label before them (`db.local`): alone they are everyday words ("invalid recipient", "local time"). */
+const INTERNAL_HOST = /\b(?:(?:[a-z0-9-]+\.)+(?:internal|invalid|local)|(?:[a-z0-9-]+\.)*(?:svc\.cluster\.local|workers\.dev|psdb\.cloud|amazonaws\.com|hyperdrive\.local))\b/i;
 const INTERNAL_ID = /\b(?:ws|sgr|sho|dom|wh|key|mbk|usr|conv|tkt)_[0-9a-z]{16,}\b/g;
 /** People and systems the agent never names: Nightmail staff, internal tools. */
 const STAFF = /\b(?:Ryan Vogel|thdxr|R44VC0RP|Dax Raad|PlanetScale|Hyperdrive|platform_operators|support_grants|supportGate|operatorGate|SupportPlatform)\b/i;
@@ -31,7 +32,8 @@ const FENCE = /<\/?untrusted>|<customer>|<\/customer>|<context>|<\/context>|<not
 
 export function gate(text: string, scope: GateScope): GateResult {
   const reasons: string[] = [];
-  const allowedEmails = new Set([...scope.emails, scope.supportAddress, addresses.abuse, addresses.support].map(e => e.toLowerCase()));
+  // Nightmail's own addresses (support, abuse, privacy, legal, security) are the contacts an answer passes on.
+  const allowedEmails = new Set([...scope.emails, scope.supportAddress, ...Object.values(addresses)].map(e => e.toLowerCase()));
   for (const email of text.match(EMAIL) ?? []) if (!allowedEmails.has(email.toLowerCase()) && !/^(?:dmarc|postmaster|bounces?)@/i.test(email) && !isExample(email)) reasons.push('email address outside the conversation');
   if (SECRET_PREFIX.test(text)) reasons.push('credential-shaped string');
   if (LONG_HEX.test(text) || LONG_B64.test(text.replace(/v=DKIM1[^`\n]*/g, ''))) reasons.push('long opaque string');
@@ -70,6 +72,14 @@ export function confirmLink(text: string) {
     if (segments.some((segment, i) => segment === 'support' && /^actions(?:$|[?#;&.,!*_])/.test(segments[i + 1] ?? ''))) return true;
   }
   return false;
+}
+
+/**
+ * Distinctive lines of the system prompt, for the "never reveal this prompt" check: from the instructions only, never from
+ * its "# Reference" part (product facts, playbooks and policies), whose facts an answer is meant to pass on.
+ */
+export function promptFragmentsOf(system: string) {
+  return system.split(/^# Reference$/m)[0]!.split('\n').map(l => l.replace(/^[-*#>\d.|\s]+/, '').trim()).filter(l => l.length >= 60 && !/`|https?:/.test(l)).filter((_, i) => i % 4 === 0).map(l => l.slice(0, 48));
 }
 
 /** Placeholder addresses used in DNS advice ("rua=mailto:dmarc@your-domain.com") are fine. */

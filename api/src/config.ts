@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { ApiError } from './core.js';
 import type { Config } from './core.js';
 import { envNames, settingNames } from './brand.js';
+import { mailServerHosts } from './mail-servers.js';
 import { SEND_LIMITS } from './send-limits.js';
 
 const optional = <T extends z.ZodType>(schema: T) => z.preprocess(v => v === '' ? undefined : v, schema.optional());
@@ -214,7 +215,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
   return {
     // Retained internal storage namespace, not an installation setting or browser-provided tenant ID.
     workspaceId: 'default', multiTenant: v.MULTI_TENANT === 'true', authSecret: v.NIGHTMAIL_ROOT_SECRET, previousAuthSecret: v.PREVIOUS_NIGHTMAIL_ROOT_SECRET,mailGatewayToken:v.MAILGW_API_TOKEN,
-    mailServers: v.MAILGW_API_TOKEN ? { imap: `imap.${v.MAILGW_PUBLIC_DOMAIN ?? url.hostname}`, smtp: `smtp.${v.MAILGW_PUBLIC_DOMAIN ?? url.hostname}` } : undefined,
+    mailServers: v.MAILGW_API_TOKEN ? mailServerHosts(v.MAILGW_PUBLIC_DOMAIN ?? url.hostname) : undefined,
     platformAccount: v.NIGHTMAIL_PLATFORM_AWS_ACCOUNT, platformDomainWorkspace: v.MULTI_TENANT==='true' ? v.NIGHTMAIL_PLATFORM_DOMAIN_WORKSPACE : undefined, notifyFrom: v.MULTI_TENANT==='true' ? v.NIGHTMAIL_NOTIFY_FROM : undefined,
     support: v.MULTI_TENANT==='true' ? { url: v.NIGHTMAIL_SUPPORT_URL, signingKey: supportSigningKey, addressIds: supportAddressIds } : undefined,
     observability: v.MULTI_TENANT==='true' && v.CF_OBSERVABILITY_TOKEN && v.CF_OBSERVABILITY_ACCOUNT_ID && v.CF_OBSERVABILITY_SCRIPT

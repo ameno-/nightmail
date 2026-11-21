@@ -51,11 +51,11 @@ server → hello                      (always first, on every connect)
 server → history                    (on reconnect; empty on a new conversation)
 client → user.message               (the panel takes it at once and sends it after history; §5)
 server → message.start  kind=reply
-server → tool.start / tool.end …    (zero or more, interleaved with text)
-server → text.delta …
+server → tool.start / tool.end …    (zero or more)
 server → consent.request            (optional)
 server → action.request             (optional)
 server → ticket.filed               (optional)
+server → text.delta                 (once: the whole answer, after the output gate)
 server → message.end
 ```
 
@@ -88,21 +88,23 @@ Every server message has `v: 1`, a `type` and a `seq`: a per-conversation counte
 { "v": 1, "type": "status", "seq": 9, "busy": true }   // a turn started (false when it ended)
 ```
 
-### 4.2 Streaming an answer
+### 4.2 An answer
 
 ```jsonc
 { "v": 1, "type": "message.start", "seq": 2, "messageId": "msg_…", "kind": "first" }  // "first" | "reply" | "notice" | "staff"
-{ "v": 1, "type": "text.delta",    "seq": 3, "messageId": "msg_…", "delta": "Hi Ada, I see you sent " }
+{ "v": 1, "type": "text.delta",    "seq": 7, "messageId": "msg_…", "delta": "Hi Ada, I see you sent …" }  // the whole checked answer, once
 { "v": 1, "type": "message.end",   "seq": 8, "messageId": "msg_…",
-  "text": "Hi Ada, I see you sent …",  // the final text: replace the streamed text with this
+  "text": "Hi Ada, I see you sent …",  // the final text: replace any text shown with this
   "redacted": false }                  // true when the output gate replaced it (§6)
 ```
+
+The server holds an answer until its turn ends and the output gate has checked it (§6), then sends it as one `text.delta` just before `message.end`; the panel reveals it from there. An older server sent several deltas as the model wrote them: append them as they arrive.
 
 - The server writes no greeting: the panel opens every conversation with its own fixed line, "Hey, what's up? How can we help?", and the customer writes first. Nothing else arrives unasked: a renewal (`/chat/resume`) adds no message, only allowing content access does ("Content access allowed for this conversation."). `kind: "first"` appears only in the history of conversations opened before Nov 16, 2026, when the agent wrote a greeting.
 - `kind: "notice"` is a short line from the harness, not the model (for example "Account access renewed"). Render it smaller.
 - `kind: "staff"` is a reply someone on the team wrote in the staff inbox, with their name as `author`; it arrives whole (`message.start` then `message.end`, no deltas) and never takes the place of an answer under way. In `history` it is `role: "staff"` with `author`. While staff are handling the conversation the agent doesn't answer: a message gets one `notice` ("Someone from the Nightmail team is handling this conversation and will reply here.") and no `status` or answer until they hand back.
 - Text is **Markdown, restricted**: paragraphs, `**bold**`, `` `code` ``, fenced code, numbered and bulleted lists, links. Render links only to `https://bane.mx`, `https://dev.bane.mx`, `https://support.bane.mx`, `https://support.dev.bane.mx` and `https://github.com/anomalyco/nightmail`; show any other URL as plain text. Never render images or raw HTML.
-- Always use `message.end.text` as the stored text. When `redacted` is true, it is a replacement such as "I've sent this to the team to check".
+- Always use `message.end.text` as the stored text. When `redacted` is true, it is a replacement such as "I've sent this to the team to check". When the model declines to answer, the text is a fixed, polite decline (`redacted: false`), never an error or a partial answer.
 
 ### 4.3 Tool activity, consent and tickets
 
@@ -113,7 +115,7 @@ Every server message has `v: 1`, a `type` and a `seq`: a per-conversation counte
   "ok": true, "label": "Checked your Gmail bounces" }   // ok:false → "Couldn't check …"; keep going
 ```
 
-While an answer is being worked on, the panel shows one status line in the message: the running step's `label` ("Checking your domain’s DNS…"), "Working on it…" before the first step and between steps, and the answer's text in its place once text arrives. Labels are fixed text written for people, never arguments or IDs; `tool` is for tests and analytics only. The panel never sees tool arguments or results.
+While an answer is being worked on, the panel shows one status line in the message: the running step's `label` ("Checking your domain’s DNS…"), "Working on it…" before the first step and between steps, and the answer's text in its place once it arrives (all at once, after the output gate). Labels are fixed text written for people, never arguments or IDs; `tool` is for tests and analytics only. The panel never sees tool arguments or results.
 
 ```jsonc
 { "v": 1, "type": "consent.request", "seq": 6, "requestId": "cns_…",
@@ -225,9 +227,9 @@ X-Filename: <URI-encoded file name, optional>
 ## 6. What the panel can rely on
 
 - It never receives credentials, tool arguments, raw tool results, internal IDs other than the ones above, or other customers' data.
-- The final text of every assistant message has passed the output gate. Streamed deltas are shown as they arrive; if the gate trips, `message.end` replaces the text with `redacted: true`.
+- Every assistant text it receives has passed the output gate. The server holds an answer until its turn ends, checks it, and only then sends it (one `text.delta`, then `message.end`). When the gate trips, that text is the replacement, with `redacted: true`: no part of the held answer is ever sent on the socket.
 - One conversation, one person: a chat token for one conversation is refused on another.
 
 ## 7. Testing without a model
 
-`support/test/fakes.ts` has the scripted model and the fake Nightmail the Worker's tests use. The model script decides its next move from the request: a reply with a tool step (`bounce_reasons`), a consent card ("look at the content"), a ticket ("refund") and a gated answer ("leak please"). A chat turn's request never offers `reply`, so its answer is the streamed text; an email turn answers through `reply` instead. `bun run test` in `support/` drives the real bundle through these, so the frame sequences in §3 are exactly what the tests assert.
+`support/test/fakes.ts` has the scripted model and the fake Nightmail the Worker's tests use. The model script decides its next move from the request: a reply with a tool step (`bounce_reasons`), a consent card ("look at the content"), a ticket ("refund"), a gated answer ("leak please", and "leak in pieces" over several deltas) and a refusal ("Refusal probe: none" or "partway"). A chat turn's request never offers `reply`, so its answer is its text; an email turn answers through `reply` instead. `bun run test` in `support/` drives the real bundle through these, so the frame sequences in §3 are exactly what the tests assert.

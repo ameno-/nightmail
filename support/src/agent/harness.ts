@@ -1,11 +1,11 @@
 import type { ToolHost } from './tools.js';
 
 // The seam between the conversation (Durable Object, protocol, stamp, gate) and the agent runtime (OpenCode, see
-// opencode.ts). The conversation only needs: run one turn of the agent with this input, stream what happens, report
-// usage. Keeping it this small is what keeps the OpenCode version upgradable.
+// opencode.ts). The conversation only needs: run one turn of the agent with this input, report its tool steps as they
+// happen, return its text and usage. Keeping it this small is what keeps the OpenCode version upgradable. The text comes
+// only with the result, so it can pass the output gate before anyone sees it.
 
 export type HarnessEvent =
-  | { type: 'text.delta'; delta: string }
   | { type: 'tool.start'; callId: string; tool: string; args: Record<string, unknown> }
   | { type: 'tool.end'; callId: string; tool: string; ok: boolean };
 /** inputTokens: uncached input plus cache writes; cacheReadTokens: cached input, billed at a tenth. */
@@ -20,7 +20,8 @@ export type TurnInput = {
   /** Screenshots for this message, as data URIs (checked and stripped by image.ts). */
   images?: { uri: string; name: string }[];
 };
-export type TurnResult = { text: string; usage: Usage; aborted: boolean; error?: string };
+/** refused: the model declined to answer (stop_reason "refusal"); `text` is then empty, whatever it wrote before stopping. */
+export type TurnResult = { text: string; usage: Usage; aborted: boolean; error?: string; refused?: boolean };
 
 export interface Harness {
   turn(input: TurnInput, tools: ToolHost, onEvent: (event: HarnessEvent) => void, signal: AbortSignal): Promise<TurnResult>;
