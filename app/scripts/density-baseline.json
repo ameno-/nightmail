@@ -185,6 +185,38 @@
    "score": 5,
    "findings": []
   },
+  "Operator · abuse · Slack card · desktop": {
+   "score": 13,
+   "findings": []
+  },
+  "Operator · abuse · Slack card · phone": {
+   "score": 13,
+   "findings": []
+  },
+  "Operator · abuse · alerts · desktop": {
+   "score": 8,
+   "findings": []
+  },
+  "Operator · abuse · alerts · phone": {
+   "score": 8,
+   "findings": []
+  },
+  "Operator · abuse · cluster · desktop": {
+   "score": 24,
+   "findings": []
+  },
+  "Operator · abuse · cluster · phone": {
+   "score": 19,
+   "findings": []
+  },
+  "Operator · abuse · desktop": {
+   "score": 8,
+   "findings": []
+  },
+  "Operator · abuse · phone": {
+   "score": 8,
+   "findings": []
+  },
   "Operator · desktop": {
    "score": 8,
    "findings": []

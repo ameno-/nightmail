@@ -11,14 +11,16 @@ import { label, number, shortDateTime } from '../../lib/format'
 import { downloadCsv } from '../../lib/download'
 import { errorText } from '../../data/types'
 import { factorFormats } from '../score'
-import { actionColumnDefs, ActionsTrigger, campaignColumnDefs, domainColumnDefs, factorColumnDefs, facts, memberColumnDefs, operatorView, useOperatorTabs, OperatorWorkspaceSkeleton, StaffOnly, QueueToolbar, queueColumnDefs, timelineColumnDefs, waitlistColumnDefs, WaitlistToolbar } from './skeletons'
+import { actionColumnDefs, ActionsTrigger, dailyLimitError, campaignColumnDefs, domainColumnDefs, factorColumnDefs, facts, memberColumnDefs, operatorView, useOperatorTabs, OperatorWorkspaceSkeleton, StaffOnly, QueueToolbar, queueColumnDefs, timelineColumnDefs, waitlistColumnDefs, WaitlistToolbar } from './skeletons'
 import { useDebounced } from '../../lib/pagination'
+import { AbuseView } from './abuse'
 
 // The operator console (lazy, /operator): Nightmail staff with a platform role review flagged Hosted workspaces and act on
 // them through the audited operator API. Impersonation-free: it reads standing, score, limits and evidence, never
 // message bodies, and every address is masked. `operator:read` sees everything and changes nothing.
 // UI notes (/operator/notes) live in ./notes and load with this chunk.
 export { OperatorNotesPage } from './notes'
+export { OperatorClusterPage } from './abuse'
 const useOperatorRole = () => useSession()?.identity?.operator ?? null
 const NotFound = StaffOnly
 const def = (defs: typeof queueColumnDefs, key: string) => defs.find(column => column.key === key)!
@@ -38,8 +40,8 @@ export function OperatorPage() {
   return <>
     <PageHeader title="Operator" />
     <div className="op-page">
-      <Tabs value={view} label="Operator views" items={tabs} onValueChange={value => value === 'notes' ? navigate('/operator/notes') : setParams(previous => { const next = new URLSearchParams(previous); if (value === 'queue') next.delete('view'); else next.set('view', value); return next }, { replace: true })} />
-      {view === 'queue' ? <Queue /> : view === 'waitlist' ? <Waitlist /> : <Actions />}
+      <Tabs value={view} label="Operator views" items={tabs} onValueChange={value => value === 'notes' ? navigate('/operator/notes') : setParams(previous => { const next = new URLSearchParams(previous); next.delete('band'); next.delete('show'); if (value === 'queue') next.delete('view'); else next.set('view', value); return next }, { replace: true })} />
+      {view === 'queue' ? <Queue /> : view === 'abuse' ? <AbuseView /> : view === 'waitlist' ? <Waitlist /> : <Actions />}
     </div>
   </>
 }
@@ -398,7 +400,7 @@ function ActionForm({ action, workspace, onClose }: { action: PendingAction; wor
   const reasonError = reasonCheck(reason)
   const domainValue = Number(domainLimit), domainError = action.kind === 'domains' && !defaultDomains && !(Number.isInteger(domainValue) && domainValue >= 1 && domainValue <= 10_000) ? 'A whole number from 1 to 10,000.' : ''
   const ticketError = ticket.trim().length > 200 ? 'At most 200 characters.' : ''
-  const dailyValue = Number(daily), dailyError = action.kind === 'limit' && !clear && !(Number.isInteger(dailyValue) && dailyValue >= 1 && dailyValue <= 10_000_000) ? 'A whole number from 1 to 10,000,000.' : ''
+  const dailyValue = Number(daily), dailyError = action.kind === 'limit' && !clear && !(Number.isInteger(dailyValue) && dailyValue >= 1 && dailyValue <= 10_000_000) ? dailyLimitError : ''
   const expiresAt = Date.parse(expires), expiresError = action.kind === 'limit' && !clear && expires ? !(expiresAt > Date.now()) ? futureError : expiresAt > Date.now() + 366 * 86_400_000 ? 'At most a year ahead.' : '' : ''
   const mutation = useMutation({
     mutationFn: () => {

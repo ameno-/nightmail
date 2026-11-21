@@ -165,7 +165,7 @@ async function score(runtime: Hosted, component: Component): Promise<Scored> {
   return { accounts, reasons, score: Math.min(100, reasons.reduce((sum, reason) => sum + reason.points, 0)) };
 }
 
-export type ClusterChange = { id: string; score: number; band: Band; reasons: Reason[]; workspaces: string[]; members: number; previous: { score: number; band: Band; members: number } | null };
+export type ClusterChange = { id: string; score: number; band: Band; reasons: Reason[]; workspaces: string[]; accounts: number; members: number; previous: { score: number; band: Band; members: number } | null };
 /**
  * Groups and scores what one entity belongs to and stores it. The cluster keeps the ID of the oldest stored cluster its
  * members were in; the others merge into it. A component of fewer than two accounts is no cluster: what was stored for
@@ -192,7 +192,7 @@ export async function recluster(runtime: Hosted, seed: Entity): Promise<ClusterC
         members=excluded.members,edges=excluded.edges,scored_at=now(),changed_at=CASE WHEN ${changed} THEN now() ELSE abuse_clusters.changed_at END`);
     await tx.execute(sql`DELETE FROM abuse_cluster_members WHERE cluster_id=${id}`);
     await tx.execute(sql`INSERT INTO abuse_cluster_members(entity_type,entity_id,cluster_id) SELECT type,id,${id} FROM jsonb_to_recordset(${JSON.stringify(members)}::jsonb) AS m(type text,id text)`);
-    return { id, score: scored.score, band, reasons: scored.reasons, workspaces, members: members.length, previous: kept ? { score: kept.score, band: kept.band, members: kept.members.length } : null };
+    return { id, score: scored.score, band, reasons: scored.reasons, workspaces, accounts: scored.accounts.length, members: members.length, previous: kept ? { score: kept.score, band: kept.band, members: kept.members.length } : null };
   });
 }
 /**
@@ -234,23 +234,24 @@ const ClusterDetail = ClusterSummary.extend({
 }).openapi('OperatorAbuseClusterDetail');
 const summaryColumns = sql`c.id,c.score,c.band,c.peak,c.accounts,c.workspaces,c.reasons,${utc(sql`c.first_at`)} AS "firstAt",${utc(sql`c.changed_at`)} AS "changedAt",${utc(sql`c.scored_at`)} AS "scoredAt"`;
 /** The staff-only record of a read, on the operator's own trail: who, what and when (kept 90 days). Never what was shown. */
-const accessed = (c: Ctx, operator: OperatorIdentity, action: 'abuse.list' | 'abuse.cluster_read', cluster?: string) => recordAudit(c.env.db, operatorContext(c, { id: operator.userId, role: operator.role, via: 'console', userId: operator.userId }),
+export const accessed = (c: Ctx, operator: OperatorIdentity, action: 'abuse.list' | 'abuse.cluster_read' | 'abuse.alerts', cluster?: string) => recordAudit(c.env.db, operatorContext(c, { id: operator.userId, role: operator.role, via: 'console', userId: operator.userId }),
   { action, workspaceId: null, target: cluster ? { type: 'abuse_cluster', id: cluster } : null, internal: true, retention: 'access' });
 
 export function registerAbuse(app: App) {
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'get', path: '/v1/operator/abuse/clusters', operationId: 'operatorListAbuseClusters',
     request: { query: z.object({ band: z.enum(BANDS).optional(), member: z.string().max(200).optional().describe('A workspace or user ID: only the cluster it is in.'),
       cursor: z.string().max(100).regex(/^\d{1,3}\|acl_[0-9a-f]{24}$/).optional(), limit: z.coerce.number().int().min(1).max(200).default(50) }) },
-    responses: { 200: response(z.object({ data: z.array(ClusterSummary), nextCursor: z.string().nullable(), counts: z.record(z.enum(BANDS), z.number().int()), monitoring: z.boolean().describe('Whether abuse monitoring is recording.') })), ...errors } }), async c => {
+    responses: { 200: response(z.object({ data: z.array(ClusterSummary), nextCursor: z.string().nullable(), counts: z.record(z.enum(BANDS), z.number().int()), alerts: z.number().int().describe('Alerts in the outbox.'), monitoring: z.boolean().describe('Whether abuse monitoring is recording.') })), ...errors } }), async c => {
     const operator = await operatorActor(c, 'operator:read'), q = c.req.valid('query'), [after, afterId] = q.cursor?.split('|') ?? [];
     await accessed(c, operator, 'abuse.list');
     const { rows } = await c.env.db.execute<z.infer<typeof ClusterSummary>>(sql`SELECT ${summaryColumns} FROM abuse_clusters c WHERE true ${q.band ? sql`AND c.band=${q.band}` : sql``}
       ${q.member ? sql`AND c.id IN (SELECT m.cluster_id FROM abuse_cluster_members m WHERE m.entity_id=${q.member} AND m.entity_type IN ('user','workspace'))` : sql``}
       ${after ? sql`AND (c.score,c.id)<(${Number(after)},${afterId})` : sql``} ORDER BY c.score DESC,c.id DESC LIMIT ${q.limit + 1}`);
     const { rows: bands } = await c.env.db.execute<{ band: Band; n: number }>(sql`SELECT band,count(*)::int AS n FROM abuse_clusters GROUP BY band`);
+    const { rows: [outbox] } = await c.env.db.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM abuse_alerts`);
     const page = rows.slice(0, q.limit), last = page.at(-1);
     return c.json({ data: page, nextCursor: rows.length > q.limit && last ? `${last.score}|${last.id}` : null,
-      counts: Object.fromEntries(BANDS.map(band => [band, bands.find(row => row.band === band)?.n ?? 0])) as Record<Band, number>, monitoring: monitoring(c.env.config) }, 200);
+      counts: Object.fromEntries(BANDS.map(band => [band, bands.find(row => row.band === band)?.n ?? 0])) as Record<Band, number>, alerts: outbox?.n ?? 0, monitoring: monitoring(c.env.config) }, 200);
   });
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'get', path: '/v1/operator/abuse/clusters/{id}', operationId: 'operatorGetAbuseCluster',
     request: { params: z.object({ id: z.string().regex(/^acl_[0-9a-f]{24}$/) }) }, responses: { 200: response(ClusterDetail), ...errors } }), async c => {

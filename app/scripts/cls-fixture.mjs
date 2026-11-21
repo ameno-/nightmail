@@ -802,6 +802,33 @@ export async function seed(fx) {
   // rules here (the page says it is connected), and the agent's own API key saves the rule while a job watches.
   const kai = await fx.signIn('kai', 'kai@driftwood.example', 'Kai Moana', { id: 'ws_live', name: 'Driftwood' });
   await domain(db, 'ws_live', await hosted(db, 'ws_live'), 'driftwood.example', { receiving: true });
+  // Operator · Abuse: two clusters of related accounts as abuse monitoring stores them (IDs, kinds and counts, never a
+  // value), with this month's free use, and the alert outbox with its Slack cards. Synthetic: the fixture runs no job.
+  const abuseCluster = 'acl_' + '1'.repeat(24), abuseWatch = 'acl_' + '2'.repeat(24), refused = 'att_' + 'a'.repeat(32);
+  const entity = (type, id) => ({ type, id }), owner = (user, workspace) => ({ a: `user:${user}`, b: `workspace:${workspace}`, owner: true, kinds: {} });
+  const cluster = (id, score, band, accounts, members, edges, reasons, days) => db.query(`INSERT INTO abuse_clusters(id,score,band,peak,accounts,workspaces,reasons,members,edges,first_at,changed_at)
+    VALUES($1,$2,$3,$2,$4,$5,$6::jsonb,$7::jsonb,$8::jsonb,now()-$9*interval '1 day',now()-$9*interval '1 hour')`, [id, score, band, accounts, members.filter(m => m.type === 'workspace').length, JSON.stringify(reasons), JSON.stringify(members), JSON.stringify(edges), days])
+    .then(() => db.query('INSERT INTO abuse_cluster_members(entity_type,entity_id,cluster_id) SELECT type,id,$2 FROM jsonb_to_recordset($1::jsonb) AS m(type text,id text)', [JSON.stringify(members), id]));
+  await cluster(abuseCluster, 85, 'high', 3, [entity('user', 'user_nia'), entity('workspace', 'ws_fresh'), entity('user', 'user_ona'), entity('workspace', 'ws_new'), entity('attempt', refused)],
+    [owner('user_nia', 'ws_fresh'), owner('user_ona', 'ws_new'), { a: 'user:user_nia', b: 'user:user_ona', kinds: { email_alias: 1, net: 1 }, sameBrowser: true }, { a: `attempt:${refused}`, b: 'user:user_ona', kinds: { email_alias: 1, net: 1 }, sameBrowser: true },
+      { a: 'workspace:ws_fresh', b: 'workspace:ws_new', kinds: { card: 1, content: 3, link: 1 } }],
+    [{ code: 'MULTI_ACCOUNT', points: 30, count: 3 }, { code: 'SHARED_CARD', points: 20, count: 1 }, { code: 'SIMILAR_CONTENT', points: 20, count: 1 }, { code: 'THROWAWAY_SIGNUP', points: 10, count: 2 }, { code: 'SHARED_LINKS', points: 5, count: 1 }], 3);
+  await cluster(abuseWatch, 40, 'watch', 2, [entity('user', 'user_kai'), entity('workspace', 'ws_live'), entity('user', 'user_rae'), entity('workspace', 'ws_harbor')],
+    [owner('user_kai', 'ws_live'), owner('user_rae', 'ws_harbor'), { a: 'user:user_kai', b: 'user:user_rae', kinds: { provider: 1 } }], [{ code: 'MULTI_ACCOUNT', points: 25, count: 2 }, { code: 'SENDER_STANDING', points: 15, count: 1 }], 9);
+  await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ('ws_new',date_trunc('hour',now(),'UTC'),'send',4200),('ws_new',date_trunc('hour',now(),'UTC'),'receive',310),('ws_live',date_trunc('hour',now(),'UTC'),'send',1800)
+    ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=excluded.quantity`);
+  // The cards as src/abuse-alerts.ts builds them: a level, counts, reason codes, workspace IDs and Operator links.
+  const card = (band, score, change, reasons) => { const title = `Related accounts: ${band} risk`, field = (name, value) => ({ type: 'mrkdwn', text: `*${name}*\n${value}` }), button = (action_id, text, path, style) => ({ type: 'button', action_id, ...(style ? { style } : {}), text: { type: 'plain_text', text, emoji: false }, url: `${fx.origin}${path}` });
+    return { text: `${title} (score ${score}, 3 accounts, 2 workspaces)`, unfurl_links: false, unfurl_media: false, blocks: [
+      { type: 'header', text: { type: 'plain_text', text: title, emoji: false } },
+      { type: 'section', fields: [field('Risk', `${band[0].toUpperCase()}${band.slice(1)} · ${score}`), field('Change', change), field('Accounts', '3'), field('Workspaces', '2')] },
+      { type: 'section', text: { type: 'mrkdwn', text: `*Reasons*\n${reasons.map(([code, points]) => `\`${code}\` ${points}`).join('\n')}` } },
+      { type: 'section', text: { type: 'mrkdwn', text: '*Workspaces*\n`ws_fresh`\n`ws_new`' } },
+      { type: 'actions', elements: [button('open_cluster', 'Open in Operator', `/operator/abuse/${abuseCluster}`, 'primary'), button('open_workspace_1', 'Workspace 1', '/operator/workspaces/ws_fresh'), button('open_workspace_2', 'Workspace 2', '/operator/workspaces/ws_new')] },
+      { type: 'context', elements: [{ type: 'mrkdwn', text: 'Monitoring only: nothing was blocked or paused. Details need a staff sign-in.' }] }] }; };
+  await db.query(`INSERT INTO abuse_alerts(id,cluster_id,band,score,kind,workspaces,payload,created_at) VALUES ($1,$3,'review',60,'new',2,$4::jsonb,now()-interval '3 days'),($2,$3,'high',85,'raised',2,$5::jsonb,now()-interval '3 hours')`,
+    ['aal_' + '1'.repeat(24), 'aal_' + '2'.repeat(24), abuseCluster, JSON.stringify(card('review', 60, 'New', [['MULTI_ACCOUNT', 30], ['SHARED_CARD', 20], ['THROWAWAY_SIGNUP', 10]])),
+      JSON.stringify(card('high', 85, 'Risk raised', [['MULTI_ACCOUNT', 30], ['SHARED_CARD', 20], ['SIMILAR_CONTENT', 20], ['THROWAWAY_SIGNUP', 10], ['SHARED_LINKS', 5]]))]);
   const desk = await kai.api('POST', '/v1/inbound/addresses', { address: 'support@driftwood.example', key: 'support', displayName: 'Support' }, 201);
   await kai.api('POST', '/v1/endpoints', { type: 'slack', name: 'support', url: 'https://hooks.slack.com/services/T0SYNTH/B0SYNTH/driftwoodfixture0a1' }, 201);
   await kai.api('PUT', '/v1/rules', { rules: [{ key: 'triage', source: liveSource(0) }], attachments: [{ rule: 'triage', target: desk.id, continue: false }] }, 200);
@@ -809,7 +836,7 @@ export async function seed(fx) {
   await db.query("INSERT INTO nightmail_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at,profile,receiving) VALUES('mcp_at_cls_live','https://account.anoma.ly','user_kai','user_kai','opencode','ws_live','{read,send,manage}',now()+interval '1 day',0,'work',true)");
   fx.liveKey = agent.secret;
   return {
-    mcp, restricted: 'ws_harbor', email, junkEmail, receivedEmail: 'msg_northwind_invoice', threadEmail: thread.email, threadReceived: thread.received, supportThread: thread.thread, domain: nw.id, sendingDomain: sendingDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
+    mcp, abuseCluster, restricted: 'ws_harbor', email, junkEmail, receivedEmail: 'msg_northwind_invoice', threadEmail: thread.email, threadReceived: thread.received, supportThread: thread.thread, domain: nw.id, sendingDomain: sendingDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
     webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, template: template.id ?? template.template?.id, segment: segment.id, supportConversation, supportAction,
   };
 }

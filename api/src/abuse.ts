@@ -465,7 +465,7 @@ async function sampleWorkspace(runtime: Hosted, tx: DbExecutor, run: Run, worksp
  * this one return), then reads the sign-in log and the payment records, samples accepted mail, and groups what
  * changed, each within its share of the time. A failing stage is logged and skipped. Returns what it did, or null when it did not run.
  */
-export async function abuseHourly(runtime: Hosted, options: { budgetMs?: number } = {}) {
+export async function abuseHourly(runtime: Hosted, options: { budgetMs?: number; post?: import('./abuse-alerts.js').SlackPost } = {}) {
   if (!runtime.config.multiTenant) return null;
   if (!monitoring(runtime.config)) {
     try { await bounded(runtime, tx => tx.execute(sql`DELETE FROM abuse_state WHERE lease_until IS NULL OR lease_until<=now()`)); } catch { log('warn', { code: 'ABUSE_STEP_FAILED', step: 'state' }); }
@@ -495,8 +495,14 @@ export async function abuseHourly(runtime: Hosted, options: { budgetMs?: number 
   await stage('payments', started + budget * .4, async () => { result.payments = await foldPayments(runtime, run); });
   await stage('sample', started + budget * .75, async () => { result.sampled = await sampleSends(runtime, run); });
   // Groups the entities whose links changed and rescores the clusters longest unscored (src/abuse-clusters.ts).
-  let clusters = { grouped: 0, rescored: 0 };
-  await stage('clusters', started + budget, async () => { clusters = await (await import('./abuse-clusters.js')).refreshClusters(runtime, started + budget); });
+  // A change worth a person's look leaves an alert in the outbox; stored alerts are posted to Slack only when a
+  // webhook is configured (src/abuse-alerts.ts).
+  const clusters = { grouped: 0, rescored: 0, alerts: 0, posted: 0 };
+  await stage('clusters', started + budget, async () => {
+    const [{ refreshClusters }, { noteAlert, deliverAlerts }] = await Promise.all([import('./abuse-clusters.js'), import('./abuse-alerts.js')]);
+    Object.assign(clusters, await refreshClusters(runtime, started + budget, async change => { if (await noteAlert(runtime, change)) clusters.alerts++; }));
+    clusters.posted = await deliverAlerts(runtime, started + budget, options.post);
+  });
   try { await bounded(runtime, tx => tx.execute(sql`UPDATE abuse_state SET lease_until=NULL WHERE id='monitor'`)); } catch { log('warn', { code: 'ABUSE_STEP_FAILED', step: 'release' }); }
   result.added = run.added;
   log('info', { code: 'ABUSE_HOURLY', ...result, ...clusters, ms: Date.now() - started });
@@ -539,8 +545,9 @@ export async function abuseSubject(runtime: Hosted, target: SubjectTarget, actio
       ON CONFLICT (entity_type,entity_id) DO UPDATE SET ignore_through=excluded.ignore_through`);
     if (action === 'erase' || action === 'exclude') {
       await tx.execute(sql`DELETE FROM abuse_signals WHERE (entity_type,entity_id) IN (${pairs})`);
-      // What was derived from them: their links, and the clusters they were in (the other members are grouped again).
+      // What was derived from them: their links, and the clusters they were in with their alerts (the other members are grouped again).
       await tx.execute(sql`DELETE FROM identity_links WHERE (a_type,a_id) IN (${pairs}) OR (b_type,b_id) IN (${pairs})`);
+      await tx.execute(sql`DELETE FROM abuse_alerts WHERE cluster_id IN (SELECT m.cluster_id FROM abuse_cluster_members m WHERE (m.entity_type,m.entity_id) IN (${pairs}))`);
       await tx.execute(sql`WITH left_behind AS (DELETE FROM abuse_clusters c USING abuse_cluster_members m WHERE m.cluster_id=c.id AND (m.entity_type,m.entity_id) IN (${pairs}) RETURNING c.members)
         UPDATE identity_links l SET pending=true FROM left_behind b, jsonb_to_recordset(b.members) AS e(type text,id text)
         WHERE NOT l.pending AND ((l.a_type,l.a_id)=(e.type,e.id) OR (l.b_type,l.b_id)=(e.type,e.id))`);
