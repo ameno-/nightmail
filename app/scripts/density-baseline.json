@@ -278,11 +278,11 @@
    "findings": []
   },
   "Receiving · address · desktop": {
-   "score": 7,
+   "score": 6,
    "findings": []
   },
   "Receiving · address · phone": {
-   "score": 7,
+   "score": 5,
    "findings": []
   },
   "Receiving · address · settings · desktop": {
@@ -294,11 +294,11 @@
    "findings": []
   },
   "Receiving · address · where mail goes · desktop": {
-   "score": 17,
+   "score": 14,
    "findings": []
   },
   "Receiving · address · where mail goes · phone": {
-   "score": 16,
+   "score": 14,
    "findings": []
   },
   "Receiving · agent inbox · desktop": {
@@ -318,7 +318,7 @@
    "findings": []
   },
   "Receiving · desktop": {
-   "score": 16,
+   "score": 21,
    "findings": []
   },
   "Receiving · destinations · desktop": {
@@ -334,6 +334,14 @@
    "findings": []
   },
   "Receiving · endpoints · phone": {
+   "score": 12,
+   "findings": []
+  },
+  "Receiving · flow panel · desktop": {
+   "score": 23,
+   "findings": []
+  },
+  "Receiving · flow panel · phone": {
    "score": 12,
    "findings": []
   },
@@ -374,7 +382,7 @@
    "findings": []
   },
   "Receiving · phone": {
-   "score": 14,
+   "score": 10,
    "findings": []
   },
   "Receiving · recipe form · desktop": {
@@ -394,15 +402,15 @@
    "findings": []
   },
   "Receiving · route editor dialog · desktop": {
-   "score": 16,
+   "score": 15,
    "findings": []
   },
   "Receiving · rule editor · desktop": {
-   "score": 18,
+   "score": 17,
    "findings": []
   },
   "Receiving · rule editor · new script · desktop": {
-   "score": 15,
+   "score": 14,
    "findings": []
   },
   "Receiving · rules · desktop": {
@@ -421,6 +429,18 @@
    "score": 20,
    "findings": []
   },
+  "Receiving · typed address · desktop": {
+   "score": 15,
+   "findings": [
+    "intro-restates|address|no address yet · the catch-all"
+   ]
+  },
+  "Receiving · typed address · phone": {
+   "score": 14,
+   "findings": [
+    "intro-restates|address|no address yet · the catch-all"
+   ]
+  },
   "Receiving · webhook · desktop": {
    "score": 14,
    "findings": []
@@ -431,6 +451,14 @@
   },
   "Receiving · webhooks · phone": {
    "score": 3,
+   "findings": []
+  },
+  "Receiving · why it went here dialog · desktop": {
+   "score": 8,
+   "findings": []
+  },
+  "Receiving · why it went here dialog · phone": {
+   "score": 8,
    "findings": []
   },
   "Segment · desktop": {
