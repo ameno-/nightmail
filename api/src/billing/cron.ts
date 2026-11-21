@@ -6,6 +6,9 @@ const LAG_ALERT_MS = 3 * 3_600_000, BYO_FAIR_USE = 10_000_000;
 // Closed hours only, and at least five minutes closed: the Node runner's hourly tick is not aligned to :07 like the
 // Worker cron, and a writer that started before the boundary may still be upserting the previous hour's row.
 const CLOSED_HOURS = sql`date_trunc('hour', now() - interval '5 minutes', 'UTC')`;
+// Workspace-hours with unsettled usage: billing_open (migration 382) lists the hours, and their rows say which still hold some.
+const OPEN_HOURS = sql`billing_open o WHERE EXISTS (SELECT FROM billing_usage_hourly u WHERE u.workspace_id=o.workspace_id AND u.hour=o.hour
+  AND (u.quantity <> u.settled_quantity OR u.refunds <> '{}'))`;
 
 /**
  * Hourly (worker.ts `7 * * * *`, runner.ts hourly), Hosted only: once a UTC day the storage day, the unpaid scan, the
@@ -120,8 +123,8 @@ export async function settleClosedHours(runtime: Runtime, cutoff?: string): Prom
   // Pages by workspace: one the settler skips this run (busy, or every row held by a writer) never keeps the next
   // page from being reached.
   while (Date.now() < deadline) {
-    const { rows } = await runtime.db.execute<{ workspace_id: string }>(sql`SELECT DISTINCT workspace_id FROM billing_usage_hourly
-      WHERE (quantity <> settled_quantity OR refunds <> '{}') AND hour<${at} AND workspace_id>${after} ORDER BY workspace_id LIMIT ${SETTLE_PAGE}`);
+    const { rows } = await runtime.db.execute<{ workspace_id: string }>(sql`SELECT DISTINCT o.workspace_id FROM ${OPEN_HOURS}
+      AND o.hour<${at} AND o.workspace_id>${after} ORDER BY o.workspace_id LIMIT ${SETTLE_PAGE}`);
     const queue = rows.map(r => r.workspace_id);
     if (!queue.length) break;
     after = queue[queue.length - 1]!;
@@ -135,7 +138,7 @@ export async function settleClosedHours(runtime: Runtime, cutoff?: string): Prom
     }));
   }
   log('info', { code: 'BILLING_SETTLED', workspaces, entries, busy, ms: Date.now() - started });
-  const { rows: [lag] } = await runtime.db.execute<{ oldest: string | null }>(sql`SELECT (extract(epoch FROM min(hour))*1000)::bigint::text AS oldest FROM billing_usage_hourly WHERE quantity <> settled_quantity OR refunds <> '{}'`);
+  const { rows: [lag] } = await runtime.db.execute<{ oldest: string | null }>(sql`SELECT (extract(epoch FROM min(o.hour))*1000)::bigint::text AS oldest FROM ${OPEN_HOURS}`);
   if (lag?.oldest && Date.now() - Number(lag.oldest) > LAG_ALERT_MS) log('error', { code: 'BILLING_SETTLE_LAG', oldestOpenHour: new Date(Number(lag.oldest)).toISOString() });
   return { workspaces, entries, busy };
 }
