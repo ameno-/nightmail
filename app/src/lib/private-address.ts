@@ -4,8 +4,8 @@
 // a label until it is revealed, so reading, copying or listening to the page gives only what is shown. Domain names
 // and domain-only labels (bane.mx, @bane.mx, *@bane.mx) are not mailbox addresses and stay readable. Forms where an
 // address is typed or chosen, one-time dialogs with a copy button, CSV exports and the waitlist screen a refused
-// sign-in lands on (the person's own address, data-own-address) show addresses in full. Privacy mode
-// (lib/privacy.ts) can turn the masking off for one browser. No React here, so the API acceptance suite can test it.
+// sign-in lands on (the person's own address, data-own-address) show addresses in full. The masking applies while
+// privacy mode (lib/privacy.ts) is on: off by default, turned on per browser. No React here, so the API acceptance suite can test it.
 
 /** A mailbox address or address pattern: something before the @ other than wildcards. */
 export function isMailbox(value: string) {
