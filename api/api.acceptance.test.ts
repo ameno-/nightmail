@@ -18074,7 +18074,13 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // rescan. Let an already claimed turn finish its legitimate short deferral.
       await db.query("UPDATE jobs SET available_at=now()+interval '1 hour' WHERE workspace_id=$1 AND status='pending'",[wid]);
       for(let n=0;(await db.query("SELECT FROM jobs WHERE workspace_id=$1 AND status='running'",[wid])).rowCount;n++){assert.ok(n<100);await new Promise(r=>setTimeout(r,10));}
-      const start=trace.length,operation=ok(await del(),202).operationId;
+      // The summary lists every identity that stays, with the DNS records of those Nightmail created, and is kept while the cleanup runs.
+      await db.query("UPDATE domain_claims SET identity=jsonb_set(coalesce(identity,'{}'::jsonb),'{ses}',$2::jsonb) WHERE workspace_id=$1 AND name='first.example'",[wid,JSON.stringify({VerificationStatus:'SUCCESS',DkimAttributes:{Tokens:['tok1','tok2','tok3'],SigningHostedZone:'dkim.amazonses.com',SigningAttributesOrigin:'AWS_SES'},MailFromAttributes:{MailFromDomain:'bounce.first.example'}})]);
+      const start=trace.length,first=ok(await del(),202),operation=first.operationId,kept=first.summary.retained.find((d:Json)=>d.domain==='first.example');
+      assert.equal(kept.createdByNightmail,true);assert.deepEqual(first.summary.leftBehind,[]);
+      assert.deepEqual(kept.records,[...['tok1','tok2','tok3'].map(t=>({type:'CNAME',name:t+'._domainkey.first.example',value:t+'.dkim.amazonses.com'})),{type:'MX',name:'bounce.first.example',value:`feedback-smtp.${kept.region}.amazonses.com`,priority:10},{type:'TXT',name:'bounce.first.example',value:'v=spf1 include:amazonses.com ~all'}]);
+      assert.ok(first.summary.retained.some((d:Json)=>!d.createdByNightmail) && first.summary.retained.every((d:Json)=>d.createdByNightmail || !d.records.length),'Imported identities were already the customer\'s');
+      assert.deepEqual((await poll()).cleanup.summary,first.summary);
       assert.equal((await poll()).state,'disconnecting');error(await post('/scan'),409,'CONNECTION_DISCONNECTING');
       error(await api('POST','/v1/emails/send',{from:'a@both.example',to:'success@simulator.amazonses.com',subject:'blocked',text:'blocked'}),409,'CONNECTION_REQUIRED');
       const retry=async()=>assert.equal(ok(await del(),202).operationId,operation);
@@ -18138,7 +18144,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     t.mock.method(STSClient.prototype,'send',async function(this:InstanceType<typeof STSClient>,cmd:any){
       const key=(await this.config.credentials()).accessKeyId,i=cmd.input;assert.equal(cmd.constructor.name,'AssumeRoleCommand');
       if(i.RoleArn===`arn:aws:iam::${platform}:role/nightmail-byo-broker`){assert.equal(key,'stack-fixture-platform');assert.equal(i.RoleSessionName,'nightmail-broker');return {Credentials:{AccessKeyId:'stack-fixture-broker',SecretAccessKey:'fixture-only',SessionToken:'broker',Expiration:new Date(Date.now()+3600000)}};}
-      assert.equal(key,'stack-fixture-broker');assert.equal(i.SourceIdentity,cid);assert.match(i.RoleSessionName,/^nightmail-(?:scan|stack|update|quota)$/);
+      assert.equal(key,'stack-fixture-broker');assert.equal(i.SourceIdentity,cid);assert.match(i.RoleSessionName,/^nightmail-(?:scan|stack|update|quota|cleanup)$/);
       if(propagating || i.RoleArn!==role || i.ExternalId!==external)throw Object.assign(new Error('fixture denial'),{name:'AccessDenied'});
       return {AssumedRoleUser:{Arn:`arn:aws:sts::${account}:assumed-role/${stack}/${i.RoleSessionName}`},Credentials:{AccessKeyId:'stack-fixture-customer',SecretAccessKey:'fixture-only',SessionToken:i.Policy,Expiration:new Date(Date.now()+900000)}};
     });
@@ -18249,11 +18255,29 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     assert.equal((await row()).stack_deleted_at,null);assert.equal((await row()).state,'scanning');
     // An update that removes the Connection resource keeps the role, and the connection.
     stackStatus='UPDATE_COMPLETE_CLEANUP_IN_PROGRESS';ok(await publish(request('Delete',{PhysicalResourceId:cid})),202);assert.equal(await run(),'done');assert.equal(last().Status,'SUCCESS');assert.match(last().Reason,/keeps its role/);assert.equal((await row()).stack_deleted_at,null);
-    // A failed create rolling back after its answer was lost: CloudFormation's own physical ID, and the role goes too.
-    stackStatus='ROLLBACK_IN_PROGRESS';physical='Nightmail-Connection-1A2B3C4D5E6F';ok(await publish(request('Delete',{PhysicalResourceId:physical})),202);assert.equal(await run(),'done');assert.equal(last().Status,'SUCCESS');assert.ok((await row()).stack_deleted_at);
-    // The stack itself being deleted.
-    await db.query('UPDATE provider_connections SET stack_deleted_at=NULL WHERE id=$1',[cid]);stackStatus='DELETE_IN_PROGRESS';physical=cid;
-    ok(await publish(request('Delete',{PhysicalResourceId:cid})),202);assert.equal(await run(),'done');assert.equal(last().Status,'SUCCESS');assert.ok((await row()).stack_deleted_at);
+    // A failed create rolling back after its answer was lost (CloudFormation's own physical ID): the role goes too, so
+    // sending stops at once, and the request is answered once the cleanup has run through the role, which CloudFormation
+    // deletes only after the answer.
+    const disconnect=async()=>{
+      const j=(await db.query("UPDATE jobs SET status='running',attempts=1,lease_until=now()+interval '3 minutes' WHERE id=$1 AND status='pending' RETURNING id,workspace_id,payload",['byo.disconnect:'+cid])).rows[0];assert.ok(j,'a queued disconnect');
+      try{await regionalByoJobs['byo.disconnect']!(runtime,j.payload,{workspaceId:j.workspace_id,id:j.id,attempts:1});await db.query("UPDATE jobs SET status='completed' WHERE id=$1",[j.id]);return 'done';}
+      catch(e){if(!(e instanceof JobDeferred))throw e;await db.query("UPDATE jobs SET status='pending' WHERE id=$1",[j.id]);return 'deferred';}
+    };
+    const leftover=`arn:aws:ses:us-east-2:${account}:configuration-set/nightmail-fixture-transactional`;
+    await db.query("UPDATE provider_connection_regions SET ownership_journal=$2::jsonb WHERE connection_id=$1 AND region='us-east-2'",[cid,JSON.stringify([{kind:'set',resource:leftover,state:'created'}])]);
+    stackStatus='ROLLBACK_IN_PROGRESS';physical='Nightmail-Connection-1A2B3C4D5E6F';const answered=answers.length;
+    ok(await publish(request('Delete',{PhysicalResourceId:physical})),202);assert.equal(await run(),'deferred');assert.equal(answers.length,answered);
+    assert.equal((await row()).state,'disconnecting');assert.ok((await row()).stack_deleted_at);
+    assert.deepEqual((await db.query('SELECT DISTINCT sending_state FROM provider_connection_regions WHERE connection_id=$1',[cid])).rows,[{sending_state:'disabled'}]);
+    assert.equal(ok(await api(wid,'GET','/v1/connection')).connection.cleanup.summary.stack,null,'No stack left to delete');
+    // The stack itself deleted while that cleanup runs is waited for the same way.
+    stackStatus='DELETE_IN_PROGRESS';physical=cid;ok(await publish(request('Delete',{PhysicalResourceId:cid})),202);assert.equal(await run(),'deferred');assert.equal(answers.length,answered);
+    // When the role refuses (here as if already gone), what's left is listed in both answers and the disconnect still finishes.
+    propagating=true;assert.equal(await disconnect(),'deferred');
+    for(let i=0;i<2;i++){assert.equal(await run(),'done');assert.equal(last().Status,'SUCCESS');assert.match(last().Reason,new RegExp("couldn't remove: "+leftover.replaceAll('/','\\/')));}
+    assert.equal(await disconnect(),'done');assert.equal(await row(),undefined);propagating=false;
+    assert.deepEqual((await db.query("SELECT action,summary->'after' AS after FROM audit_events WHERE workspace_id=$1 AND action IN ('connection.delete','connection.cleanup') ORDER BY at",[wid])).rows,
+      [{action:'connection.delete',after:null},{action:'connection.cleanup',after:{leftBehind:[{region:'us-east-2',kind:'set',resource:leftover}]}}]);
     // A typed account must match the stack's, and the platform's own account is never connected; nor can a stack move
     // to another connection. Each is answered at once.
     const typed=ok(await api(wid2,'POST','/v1/connection',{kind:'byo',awsAccountId:other}),202),stack2=new URLSearchParams(new URL(typed.quickCreateUrl).hash.split('?')[1]).get('stackName')!;
@@ -21870,6 +21894,133 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual([await recorded(shared), (await signals('user', second)).length > 0], [true, true]);
     });
   });
+  test('abuse monitoring: sign-ups that share enough form a cluster with a score and a reason for every point; one weak link or similar mail alone joins nobody; similar mail links workspaces with no content stored; multiplying the free allowance raises the score, on account signals only; an erasure leaves the cluster; the view is for staff operators and every read is recorded; a member of a high-risk cluster still sends', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const h = await abuseHarness(runtime, db), { mail, payment, offer, signIn } = h, wid = runtime.config.workspaceId;
+      const linked = async (a: string, b: string) => Object.fromEntries((await db.query('SELECT kind,shared FROM identity_links WHERE (a_id=$1 AND b_id=$2) OR (a_id=$2 AND b_id=$1) ORDER BY kind', [a, b])).rows.map((l: Json) => [l.kind, l.shared]));
+      const clusterOf = async (id: string) => (await db.query(`SELECT c.id,c.score,c.band,c.peak,c.accounts,c.workspaces,c.reasons,c.members FROM abuse_clusters c JOIN abuse_cluster_members m ON m.cluster_id=c.id WHERE m.entity_id=$1`, [id])).rows[0] as
+        { id: string; score: number; band: string; peak: number; accounts: number; workspaces: number; reasons: { code: string; points: number; count?: number }[]; members: { type: string; id: string }[] } | undefined;
+      const points = (cluster: { reasons: { code: string; points: number }[] } | undefined) => Object.fromEntries((cluster?.reasons ?? []).map(reason => [reason.code, reason.points]));
+      const used = (workspace: string, meter: 'send' | 'receive', quantity: number) => db.query(`INSERT INTO billing_usage_hourly AS u (workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC'),$2,$3)
+        ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=excluded.quantity`, [workspace, meter, quantity]);
+
+      // Two accounts, one person: the same Gmail mailbox under two aliases, from one /24 with one browser. A third
+      // account shares only A's network (another client), a fourth sends A's mail from its own domain: neither joins.
+      const a = await h.user('a', 'sub-a'), b = await h.user('b', 'sub-b'), c = await h.user('c', 'sub-c'), d = await h.user('d', 'sub-d'), e = await h.user('e', 'sub-e');
+      // A owns the fixture's workspace; the suite's own session stays in it as an admin.
+      await db.query(`UPDATE workspace_members SET role='admin' WHERE workspace_id=$1 AND user_id=$2`, [wid, manager!.userId]);
+      await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner')`, [unique('mem'), wid, a]);
+      const wsB = await h.workspace('b', [b]), wsC = await h.workspace('c', [c]), wsD = await h.workspace('d', [d]), wsE = await h.workspace('e', [e]);
+      await signIn('sub-a', 'Abuse.Fixture+one@gmail.com', '198.51.100.7', 'signed_in');
+      await signIn('sub-b', 'abusefixture+two@googlemail.com', '198.51.100.201', 'signed_in');
+      await signIn('sub-c', 'casey@abuse-c.example.com', '203.0.113.9', 'signed_in');
+      await signIn('sub-d', 'devon@abuse-d.example.com', '198.51.100.99', 'signed_in', 'curl/8.1');
+      await signIn('sub-e', 'ellis@abuse-e.example.com', '192.0.2.44', 'signed_in');
+      await mail({ workspace: wid, html: offer(1) });
+      await mail({ workspace: wsC, from: 'deals@abuse-c.example.org', html: offer(2) });
+      await h.hourly();
+      assert.deepEqual([await linked(a, b), await linked(a, d), await linked(wid, wsC), await linked(a, c)], [{ email_alias: 1, net: 1 }, { net: 1 }, { content: 3, link: 1 }, {}]);
+      const first = (await clusterOf(a))!;
+      assert.deepEqual([first.score, first.band, first.accounts, first.workspaces, points(first)], [40, 'watch', 2, 2, { MULTI_ACCOUNT: 25, THROWAWAY_SIGNUP: 10, FAST_FIRST_SEND: 5 }]);
+      assert.deepEqual(first.members.map(member => member.id).sort(), [a, b, wid, wsB].sort());
+      assert.deepEqual([await clusterOf(c), await clusterOf(d), await clusterOf(wsC), (await db.query('SELECT count(*)::int AS n FROM identity_links WHERE pending')).rows[0].n], [undefined, undefined, undefined, 0], 'One weak link, or similar mail alone, joins nobody.');
+
+      // Similar mail plus the same card joins C: a reason for the card, the content and the shared link domain.
+      await payment(wid, 'fp_abuse_cluster'); await payment(wsC, 'fp_abuse_cluster');
+      await h.hourly();
+      const second = (await clusterOf(c))!;
+      assert.deepEqual([second.id, second.score, second.band, second.accounts, second.workspaces, points(second)], [first.id, 100, 'high', 3, 3, { MULTI_ACCOUNT: 30, THROWAWAY_SIGNUP: 10, SIGNUP_BURST: 15, SHARED_CARD: 20, SIMILAR_CONTENT: 20, SHARED_LINKS: 5, FAST_FIRST_SEND: 5 }], 'The cluster keeps its ID as it grows.');
+      // E is joined through its mail alone: the same wording, sending domain and link as A.
+      await mail({ workspace: wsE, html: offer(3) });
+      await h.hourly();
+      assert.deepEqual([await linked(wid, wsE), (await clusterOf(e))!.id, (await clusterOf(e))!.accounts], [{ content: 3, link: 1, send_domain: 1 }, first.id, 4]);
+      // Nothing derived holds a signal's value, an address, a network or any wording.
+      const values = (await db.query('SELECT value FROM abuse_signals WHERE length(value)>=16')).rows.map((row: Json) => row.value as string);
+      const derived = JSON.stringify((await db.query('SELECT * FROM identity_links')).rows) + JSON.stringify((await db.query('SELECT * FROM abuse_clusters')).rows) + JSON.stringify((await db.query('SELECT * FROM abuse_cluster_members')).rows);
+      assert.ok(values.length > 20 && !values.some(value => derived.includes(value)));
+      for (const secret of ['abusefixture', 'abuse.fixture', 'casey', '198.51.100', 'Macintosh', 'fp_abuse', 'example.com', 'promo-fixture', 'warehouse', 'jacket', 'att_'])
+        assert.ok(!derived.toLowerCase().includes(secret.toLowerCase()), `${secret} is stored`);
+
+      // The free allowance, multiplied. Use is counted across workspaces joined by account and payment signals: A, B
+      // and C. E, joined only by what its mail looks like, never counts, however much it used.
+      const rescore = async () => { await db.query(`UPDATE abuse_clusters SET scored_at=now()-interval '1 hour'`); await h.hourly(); return points(await clusterOf(a)).FREE_TIER_MULTIPLIED; };
+      await used(wsE, 'send', 5000);
+      assert.equal(await rescore(), undefined);
+      await used(wid, 'send', 3000); await used(wsB, 'send', 1500);
+      assert.equal(await rescore(), undefined, '4,500 of one allowance.');
+      await used(wsB, 'send', 2500);
+      assert.deepEqual([await rescore(), (await clusterOf(a))!.score], [15, 100], 'Together past one allowance.');
+      await used(wid, 'send', 4200); await used(wsB, 'send', 4100);
+      assert.equal(await rescore(), 20, 'Two workspaces each near their own cap.');
+      await used(wsC, 'receive', 5000); await used(wsB, 'receive', 5000);
+      assert.equal(await rescore(), 35, 'Twice the allowance.');
+      // A workspace that bought credit, or one an operator made free, is not multiplying anything.
+      await db.query(`SELECT billing_post($1,'topup',$2,$3,$4,'{}','operator:fixture')`, [wsB, unique('topup'), '2000000000', '0']);
+      await db.query('UPDATE workspaces SET exempt_hosted_quotas=true WHERE id=$1', [wsC]);
+      assert.equal(await rescore(), undefined);
+      await db.query('UPDATE workspaces SET exempt_hosted_quotas=false WHERE id=$1', [wsC]);
+      assert.equal(await rescore(), 20, 'A and C: 4,200 sent and 5,000 received.');
+      // Standing and payments are read live: a paused member and a dispute raise the score without any link changing.
+      await db.query(`INSERT INTO sender_standing(workspace_id,step) VALUES ($1,'pause') ON CONFLICT (workspace_id) DO UPDATE SET step='pause'`, [wsB]);
+      await db.query(`SELECT billing_post($1,'dispute',$2,$3,$4,'{}','stripe')`, [wsC, unique('dispute'), '-1000000', '0']);
+      await rescore();
+      assert.deepEqual([points(await clusterOf(a)).SENDER_STANDING, points(await clusterOf(a)).PAYMENT_RISK, (await clusterOf(a))!.peak], [25, 30, 100]);
+
+      // The operator API: staff operators only. An owner, an API key and an operator's session without a staff sign-in
+      // are refused; operator:read reads. No answer carries a signal's value or a refused sign-in's stored key.
+      await signIn('sub-refused', 'abusefixture+three@gmail.com', '198.51.100.3'); await h.hourly();
+      const list = '/v1/operator/abuse/clusters', one = `${list}/${first.id}`;
+      error(await local('GET', list), 403, 'OPERATOR_REQUIRED'); error(await local('GET', one), 403, 'OPERATOR_REQUIRED');
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'Not an operator', permissions: ['manage'] }), 201); secrets.add(key.secret);
+      error(await request('GET', list, key.secret), 403, 'OPERATOR_REQUIRED');
+      const { setOperator } = await import('./scripts/set-operator.js');
+      await setOperator(db, [AUTH_SUBJECT, 'operator:read', '--reason', 'Synthetic abuse reviewer']);
+      await db.query('UPDATE nightmail_sessions SET staff=false WHERE user_id=$1', [manager!.userId]);
+      error(await local('GET', list), 403); error(await local('GET', one), 403);
+      await db.query('UPDATE nightmail_sessions SET staff=true WHERE user_id=$1', [manager!.userId]);
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM audit_events WHERE action LIKE 'abuse.%'`)).rows[0].n, 0, 'A refused read records nothing.');
+      const listed = ok(await local('GET', list));
+      assert.deepEqual([listed.data.map((row: Json) => row.id), listed.counts, listed.monitoring, listed.nextCursor], [[first.id], { low: 0, watch: 0, review: 0, high: 1 }, true, null]);
+      assert.deepEqual([ok(await local('GET', `${list}?band=watch`)).data, ok(await local('GET', `${list}?member=${wsB}`)).data[0].id, ok(await local('GET', `${list}?member=${wsD}`)).data], [[], first.id, []]);
+      error(await local('GET', `${list}/acl_${'0'.repeat(24)}`), 404, 'NOT_FOUND'); error(await local('GET', `${list}/nope`), 422);
+      const detail = ok(await local('GET', one));
+      assert.deepEqual([detail.score, detail.band, detail.workspaces.length, detail.accounts.map((account: Json) => account.key)], [100, 'high', 4, ['A1', 'A2', 'A3', 'A4', 'A5']]);
+      assert.deepEqual(detail.accounts.map((account: Json) => [account.kind, account.userId]).sort(), [['refused', null], ['user', a], ['user', b], ['user', c], ['user', e]].sort());
+      const row = (id: string) => detail.workspaces.find((workspace: Json) => workspace.id === id);
+      assert.deepEqual([row(wid).plan, row(wid).sent, row(wsB).plan, row(wsB).step, row(wsC).received, row(wsE).account === detail.accounts.find((account: Json) => account.userId === e).key],
+        ['free', { used: 4200, limit: 5000 }, 'paid', 'pause', { used: 5000, limit: 5000 }, true]);
+      const edge = (x: string, y: string) => detail.links.find((link: Json) => (link.a === x && link.b === y) || (link.a === y && link.b === x));
+      const keyOf = (userId: string) => detail.accounts.find((account: Json) => account.userId === userId).key as string;
+      assert.deepEqual([edge(keyOf(a), wid).strength, edge(keyOf(a), keyOf(b)).kinds.map((kind: Json) => kind.kind).sort(), edge(keyOf(a), keyOf(b)).strength, edge(wid, wsC).strength, edge(wid, wsE).strength],
+        ['owner', ['email_alias', 'net'], 'strong', 'strong', 'strong']);
+      const answers = JSON.stringify([listed, detail]);
+      assert.ok(!values.some(value => answers.includes(value)) && !answers.includes('att_') && !/198\.51|fp_abuse|gmail/.test(answers.replaceAll(AUTH_EMAIL, '')));
+      // Every read left a staff-only record: who, which cluster, when. Nothing of what was shown, and no workspace's Activity lists it.
+      const reads = (await db.query(`SELECT action,actor_type,actor_id,target_type,target_id,workspace_id,internal,summary,retain_until<now()+interval '91 days' AS short FROM audit_events WHERE action LIKE 'abuse.%' ORDER BY id`)).rows;
+      assert.deepEqual([reads.length, [...new Set(reads.map((read: Json) => read.action))].sort(), reads.every((read: Json) => read.actor_type === 'operator' && read.actor_id === manager!.userId && read.internal && read.workspace_id === null && read.short && JSON.stringify(read.summary) === '{}')],
+        [5, ['abuse.cluster_read', 'abuse.list'], true]);
+      assert.deepEqual(reads.filter((read: Json) => read.action === 'abuse.cluster_read').map((read: Json) => [read.target_type, read.target_id]), [['abuse_cluster', first.id]]);
+      assert.ok(!ok(await local('GET', '/v1/activity')).data.some((entry: Json) => String(entry.action).startsWith('abuse.')));
+
+      // An erasure takes the person out: their links go, and the others are grouped again without them.
+      await h.command('--user', b, '--erase');
+      assert.deepEqual([await clusterOf(a), await linked(a, b), (await db.query('SELECT count(*)::int AS n FROM identity_links WHERE pending')).rows[0].n > 0], [undefined, {}, true]);
+      await h.hourly();
+      const after = (await clusterOf(a))!;
+      assert.deepEqual([after.members.some(member => member.id === b || member.id === wsB), after.accounts, await clusterOf(b)], [false, 4, undefined]);
+
+      // Monitoring only: the workspace at the centre of a high-risk cluster sends as before, whatever the reserved flag says.
+      assert.equal(after.band, 'high');
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared','111122223333','ready')`, [wid, REGION]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ('abuse-a.example',$1,$1,'verified')`, [wid]);
+      await gradedSender(db, wid, 1000);
+      runtime.config.abuseEnforce = true;
+      const admission = t.mock.method(db, 'query');
+      ok(await local('POST', '/v1/emails/send', { from: 'offers@abuse-a.example', to: 'seed-inbox@abuse-recipient.example.com', subject: 'An exclusive spring offer', html: offer(4) }), 202);
+      assert.ok(!admission.mock.calls.some(call => /abuse_|identity_links/.test(String((call.arguments[0] as { text?: string })?.text ?? call.arguments[0]))));
+      admission.mock.restore();
+    });
+  });
   test('operator API: only platform operators read and act; every action needs a reason and is audited in its transaction', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const wid = runtime.config.workspaceId, pool = '111122223333', base = `/v1/operator/workspaces/${wid}`;
@@ -24001,11 +24152,11 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           // The launch stops at its review, after the locks it takes first. The disconnect then starts.
           await gate.query('LOCK TABLE sending_campaign_reviews IN SHARE MODE');
           launched=launch();await waiting(1);
-          disconnected=settled(disconnectV5(runtime,w,'con_missing'));await waiting(2);
+          disconnected=settled(disconnectV5(runtime,w,'con_missing',async()=>{}));await waiting(2);
         } else {
           // The disconnect stops at the settings row, holding admission. The launch then starts.
           await gate.query('SELECT FROM ses_installation_settings WHERE workspace_id=$1 FOR SHARE',[w]);
-          disconnected=settled(disconnectV5(runtime,w,'con_missing'));await waiting(1);
+          disconnected=settled(disconnectV5(runtime,w,'con_missing',async()=>{}));await waiting(1);
           launched=launch();await waiting(2);
         }
         await gate.query('COMMIT');

@@ -146,6 +146,12 @@ export interface CampaignTemplateSummary { id: string; url: string; revision: nu
 export interface AttachmentApi { upload(file: File, inline?: {contentId: string}): Promise<Attachment>; get(id: string, signal?: AbortSignal): Promise<Attachment>; content(id: string, signal?: AbortSignal): Promise<{id: string; filename: string; contentType: string; content: string}>; remove(id: string): Promise<void> }
 export type DnsRecordPurpose = 'sending' | 'receiving' | 'mail_from' | 'dmarc'
 type Dmarc = { status: 'missing' | 'invalid' | 'none' | 'quarantine' | 'reject'; record: string | null; source: string | null; adkim: 'r' | 's'; aspf: 'r' | 's'; alignment: { dkim: boolean; spf: boolean } }
+// What a connected AWS account's disconnect keeps in the account and couldn't remove (DELETE /v1/connection).
+export interface DisconnectSummary {
+  retained: { domain: string; region: string; regionLabel: string; createdByNightmail: boolean; records: { type: 'CNAME' | 'MX' | 'TXT'; name: string; value: string; priority?: number }[] }[]
+  leftBehind: { region: string; kind: string; resource: string }[]
+  stack: { name: string; consoleUrl: string } | null
+}
 export interface DnsRecord { id: string; type: 'TXT' | 'CNAME' | 'MX'; name: string; value: string; status: 'verified' | 'pending' | 'not_checked'; purpose?: DnsRecordPurpose; note?: string }
 // Why receiving at `host` needs attention, from the API's DNS checks. Blocking issues can't work until DNS or the choice changes.
 export interface ReceivingIssue { code: 'cname' | 'foreign_mx' | 'split' | 'wildcard' | 'bane_record' | 'host_taken' | 'claimed' | 'delegated' | 'mx_missing' | 'wrong_region' | 'null_mx' | 'proof_stale' | 'identity_stale'; host: string; blocking: boolean; message: string; provider?: string | null; target?: string | null; suggestion?: string | null }
@@ -396,6 +402,8 @@ export interface ProviderConnection { id: string; kind: ConnectionKind; region: 
   stack?: { version: string | null; latest?: string; updateAvailable?: boolean; features?: string[]; deleted: boolean; error: string | null } | null
   /** The connected account's last health check. */
   health?: { checkedAt: string; issues: { code: string; region?: string; message: string }[] } | null
+  /** While a connected AWS account disconnects: what's left to remove, and what stays in the account. */
+  cleanup?: { operationId: string; lastError: { region: string | null; code: string } | null; remaining: { region: string; resources: { kind: string; resource: string }[] }[]; summary: DisconnectSummary | null }
   /** The connected account's read-only inventory, region by region. */
   scan?: { revision: number; cursor: { checked: number; total: number }; state: 'awaiting_role' | 'failed' | 'scanning' | 'partial' | 'ready_to_import'; error: string | null; alreadySendsEmail: boolean | null; regions: ByoRegion[] }
   /** Verified domains found in the account, to import as they are. */

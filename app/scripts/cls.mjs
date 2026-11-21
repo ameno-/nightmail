@@ -39,7 +39,7 @@
 // Every measurement also checks the masked addresses on its page (lib/private-address.ts): nothing of a seeded address
 // beyond its first two characters is in the page's text, a title, a label or a link before it is revealed, and on a
 // cold desktop load, hovering the first few reveals them without anything moving, and so does turning privacy mode off
-// with ⇧P (then on again, which masks them as before).
+// with ⇧P (then on again, which masks them as before). Privacy mode is off by default; every page here starts with it on.
 //
 // CLS sums every layout-shift entry without recent input: stricter than the browser's largest session window. In-app
 // navigation clicks with an untrusted event, so no shift is excused as following user input. Measurement ends when
@@ -180,6 +180,7 @@ const pages = ids => [
   ['Onboarding · AWS sandbox', '/onboarding', { user: 'di' }],
   ['Onboarding · AWS production access', '/onboarding', { user: 'di', dialog: 'Request production access' }],
   ['Onboarding · AWS setting up', '/onboarding', { user: 'ed' }],
+  ['Onboarding · AWS disconnecting', '/onboarding', { user: 'hal' }],
   // Sending from a connected AWS account: its rows in Settings → Sending, and the banner for a health finding.
   ['Settings · sending · AWS', '/settings#sending', { user: 'gil' }],
   // Two accounts in one browser: a cold load as the default (dana), then switching to nia's workspace from the switcher.
@@ -231,7 +232,7 @@ const pages = ids => [
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Overview', 'Overview · range', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Sent email', 'Sent email · junk-like', 'Received email', 'Sent email · thread', 'Received email · thread', 'Received email · from its thread', 'Sent email · thread sheet', 'Receiving', 'Receiving · rules', 'Receiving · new rule', 'Receiving · recipe form', 'Receiving · recipe rule', 'Receiving · flow panel', 'Receiving · typed address', 'Receiving · why it went here dialog', 'Receiving · address', 'Receiving · address · where mail goes', 'Receiving · address · settings', 'Receiving · agent inboxes', 'Receiving · destinations', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Onboarding · AWS stack', 'Onboarding · AWS refused', 'Onboarding · AWS choose', 'Onboarding · AWS sandbox', 'Onboarding · AWS production access', 'Onboarding · AWS setting up', 'Settings · sending · AWS', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Operator · waitlist', 'Support', 'Support · agent handling', 'Support · conversation', 'Support · customer sheet', 'Support · confirm a change', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Signed out · deep link', 'Signed out · page not found', 'Signed out · waitlist', 'Legal', 'Legal · terms', 'Legal · privacy', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'Overview · connect agent sheet', 'API keys · create key dialog', 'API keys · SMTP login dialog', 'API keys · edit key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · add credit dialog']);
+const phonePages = new Set(['Overview', 'Overview · range', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Sent email', 'Sent email · junk-like', 'Received email', 'Sent email · thread', 'Received email · thread', 'Received email · from its thread', 'Sent email · thread sheet', 'Receiving', 'Receiving · rules', 'Receiving · new rule', 'Receiving · recipe form', 'Receiving · recipe rule', 'Receiving · flow panel', 'Receiving · typed address', 'Receiving · why it went here dialog', 'Receiving · address', 'Receiving · address · where mail goes', 'Receiving · address · settings', 'Receiving · agent inboxes', 'Receiving · destinations', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Onboarding · AWS stack', 'Onboarding · AWS refused', 'Onboarding · AWS choose', 'Onboarding · AWS sandbox', 'Onboarding · AWS production access', 'Onboarding · AWS setting up', 'Receiving · inbox', 'Receiving · endpoints', 'Onboarding · AWS disconnecting', 'Settings · sending · AWS', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Operator · waitlist', 'Support', 'Support · agent handling', 'Support · conversation', 'Support · customer sheet', 'Support · confirm a change', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Signed out · deep link', 'Signed out · page not found', 'Signed out · waitlist', 'Legal', 'Legal · terms', 'Legal · privacy', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'Overview · connect agent sheet', 'API keys · create key dialog', 'API keys · SMTP login dialog', 'API keys · edit key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · add credit dialog']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
@@ -374,7 +375,7 @@ async function masking(page, hover, shell) {
   const before = await states();
   await page.keyboard.press('Shift+P'); await frame();
   const off = await states(), root = await page.evaluate(() => ({ privacy: document.documentElement.dataset.privacy, pressed: document.querySelector('.privacy-toggle')?.getAttribute('aria-pressed') }));
-  if (root.privacy !== 'off' || root.pressed !== 'false') problems.push(`⇧P did not turn privacy mode off: ${JSON.stringify(root)}`);
+  if (root.privacy !== undefined || root.pressed !== 'false') problems.push(`⇧P did not turn privacy mode off: ${JSON.stringify(root)}`);
   off.forEach((state, i) => {
     if (!state.revealed || [...state.text].length <= 2) problems.push(`privacy mode off left ${before[i].text}… masked`);
     else if (state.own !== before[i].own || state.around !== before[i].around) problems.push(`privacy mode off moved ${before[i].text}…: ${before[i].own} → ${state.own}`);
@@ -397,6 +398,9 @@ async function measure(browser, job, fx) {
     if (job.waitlist) await context.addCookies([{ name: 'nightmail.waitlist', value: encodeURIComponent(job.waitlist), url: origin }]);
     if (job.user) await context.addCookies([job.user].flat().map((user, slot) => ({ name: slot ? `nightmail.session_token.${slot}` : 'nightmail.session_token', value: encodeURIComponent(fx.sessions[user].cookie), url: origin, httpOnly: true })));
     await context.addInitScript(probe);
+    // Privacy mode on (lib/privacy.ts; off by default), so the masking checks and the review screenshots see addresses masked.
+    // (Init scripts run in every frame too, and an email preview's sandboxed frame has no storage.)
+    await context.addInitScript(() => { try { localStorage.setItem('nightmail.privacy.v2', 'on'); } catch {} });
     // Data Saver turns off the shell's idle warm-up of every other sidebar section: in-app clicks then load the next
     // page's code and data cold, and cold loads (apart from Overview, which exercises the warm-up in each pass) measure
     // their own page rather than re-fetching all eight sections 170 times.

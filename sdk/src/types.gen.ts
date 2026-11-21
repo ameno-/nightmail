@@ -5326,7 +5326,49 @@ export type ProviderConnection = {
             }>;
         }>;
         retain: Array<string>;
+        summary: DisconnectSummary;
     };
+};
+
+export type DisconnectSummary = {
+    /**
+     * SES identities that stay in the AWS account. Delete one in the SES console, and its DNS records, once nothing sends from it.
+     */
+    retained: Array<{
+        domain: string;
+        region: string;
+        regionLabel: string;
+        /**
+         * Nightmail created the identity; otherwise it was already in the account.
+         */
+        createdByNightmail: boolean;
+        /**
+         * DNS records of an identity Nightmail created, to remove with it.
+         */
+        records: Array<DisconnectDnsRecord>;
+    }>;
+    /**
+     * Resources Nightmail created but couldn't remove: its role was gone, or they were changed in AWS.
+     */
+    leftBehind: Array<{
+        region: string;
+        kind: string;
+        resource: string;
+    }>;
+    /**
+     * The Nightmail stack, to delete in the CloudFormation console once the cleanup finishes.
+     */
+    stack: {
+        name: string;
+        consoleUrl: string;
+    } | null;
+} | null;
+
+export type DisconnectDnsRecord = {
+    type: 'CNAME' | 'MX' | 'TXT';
+    name: string;
+    value: string;
+    priority?: number;
 };
 
 export type ConnectionRegions = {
@@ -5363,6 +5405,11 @@ export type ConnectionStackUpdate = {
     version: string;
     changeSetId: string;
     consoleUrl: string;
+};
+
+export type ConnectionDisconnect = {
+    operationId: string;
+    summary: DisconnectSummary;
 };
 
 export type PublicStats = {
@@ -26347,9 +26394,7 @@ export type DeleteConnectionResponses = {
     /**
      * Success
      */
-    202: {
-        operationId: string;
-    };
+    202: ConnectionDisconnect;
 };
 
 export type DeleteConnectionResponse = DeleteConnectionResponses[keyof DeleteConnectionResponses];

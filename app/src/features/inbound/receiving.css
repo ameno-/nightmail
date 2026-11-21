@@ -116,7 +116,7 @@ li + li > .trace-recent__row { border-top: 1px solid var(--color-border-muted); 
 .trace-out { scroll-margin-top: var(--space-24); }
 /* Trace it as mail to: an address typed there is masked like any other, but its placeholder is the default it falls
    back to (the message's own recipients), not an address, so it stays readable. */
-html:not([data-privacy='off']) .trace-to.private-field:not(:hover, :focus)::placeholder { color: var(--color-muted); text-shadow: none; }
+html[data-privacy='on'] .trace-to.private-field:not(:hover, :focus)::placeholder { color: var(--color-muted); text-shadow: none; }
 
 .trace-view { display: grid; gap: var(--space-16); }
 .trace-view__bar { display: flex; align-items: center; justify-content: space-between; min-height: var(--control-height); font-size: var(--text-sm); }

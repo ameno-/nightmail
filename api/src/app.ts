@@ -87,8 +87,8 @@ function loadGroupRegistrar(group: Exclude<RouteGroup, 'mcp'>): Promise<(app: Ap
       case 'operator':
       case 'support': {
         const [{ registerOperator }, { registerAudit }, { registerSupport, registerSupportOperator }, { registerSupportConversations }, { registerSupportInbox }, { registerUiNotes }] = await Promise.all([import('./operator.js'), import('./audit.js'), import('./support.js'), import('./support-conversations.js'), import('./support-inbox.js'), import('./ui-notes.js')]);
-        const [{ registerSupportNotes }, { registerSupportActions }] = await Promise.all([import('./support-notes.js'), import('./support-actions.js')]);
-        return (target: App) => { registerOperator(target); registerAudit(target); registerSupport(target); registerSupportOperator(target); registerSupportConversations(target); registerSupportInbox(target); registerUiNotes(target); registerSupportNotes(target); registerSupportActions(target); };
+        const [{ registerSupportNotes }, { registerSupportActions }, { registerAbuse }] = await Promise.all([import('./support-notes.js'), import('./support-actions.js'), import('./abuse-clusters.js')]);
+        return (target: App) => { registerOperator(target); registerAbuse(target); registerAudit(target); registerSupport(target); registerSupportOperator(target); registerSupportConversations(target); registerSupportInbox(target); registerUiNotes(target); registerSupportNotes(target); registerSupportActions(target); };
       }
       case 'billing': {
         const [{ registerBilling }, { registerStripeWebhook }] = await Promise.all([import('./billing/routes.js'), import('./billing/stripe-webhook.js')]);
@@ -349,8 +349,8 @@ export async function createOpenApiApp(): Promise<App> {
   registerWorkspaces(full); registerProviderConnections(full); registerMcp(full); registerPublicStats(full); registerOverviewSetup(full); registerOperator(full);
   registerAudit(full); registerSupport(full); registerSupportOperator(full); registerSupportConversations(full); registerSupportInbox(full); registerUiNotes(full);
   registerBilling(full); registerStripeWebhook(full);
-  const [{ registerSupportNotes }, { registerSupportActions }, { registerAnalytics }] = await wrapModuleLoad(() => Promise.all([import('./support-notes.js'), import('./support-actions.js'), import('./analytics.js')]));
-  registerSupportNotes(full); registerSupportActions(full); registerAnalytics(full);
+  const [{ registerSupportNotes }, { registerSupportActions }, { registerAnalytics }, { registerAbuse }] = await wrapModuleLoad(() => Promise.all([import('./support-notes.js'), import('./support-actions.js'), import('./analytics.js'), import('./abuse-clusters.js')]));
+  registerSupportNotes(full); registerSupportActions(full); registerAnalytics(full); registerAbuse(full);
   return full;
 }
 

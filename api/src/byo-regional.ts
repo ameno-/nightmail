@@ -13,9 +13,10 @@ import { claimNameAllowed, domainLimitError, releaseConnectionClaims } from './d
 import { getRegionSettings } from './ses-region-state.js';
 import { lockSendScope } from './send-scope.js';
 import { byoEnabled } from './byo-pilot.js';
+import { recordAudit, systemContext } from './audit.js';
 
 export const regionLabels:Record<string,string>={'us-east-2':'Ohio','us-east-1':'N. Virginia','us-west-1':'N. California','us-west-2':'Oregon','af-south-1':'Cape Town','ap-south-1':'Mumbai','ap-south-2':'Hyderabad','ap-southeast-1':'Singapore','ap-southeast-2':'Sydney','ap-southeast-3':'Jakarta','ap-southeast-4':'Melbourne','ap-southeast-5':'Malaysia','ap-southeast-6':'New Zealand','ap-southeast-7':'Thailand','ap-northeast-1':'Tokyo','ap-northeast-2':'Seoul','ap-northeast-3':'Osaka','ca-central-1':'Canada Central','ca-west-1':'Calgary','eu-central-1':'Frankfurt','eu-central-2':'Zurich','eu-west-1':'Ireland','eu-west-2':'London','eu-west-3':'Paris','eu-south-1':'Milan','eu-south-2':'Spain','eu-north-1':'Stockholm','il-central-1':'Tel Aviv','mx-central-1':'Mexico Central','me-south-1':'Bahrain','me-central-1':'UAE','sa-east-1':'São Paulo'};
-export type V5Connection={id:string;stack_name:string|null;workspace_id:string;requested_account:string|null;stack_id:string|null;stack_template_version:string|null;stack_deleted_at:string|null;stack_error:string|null;resource_prefix:string;health:{checkedAt:string;issues:{code:string;region?:string;message:string}[]}|null;aws_account_id:string|null;role_arn:string|null;external_id:string;inventory_revision:number;state:string;region:string;disconnect_error:{region:string|null;code:string}|null};
+export type V5Connection={id:string;stack_name:string|null;workspace_id:string;requested_account:string|null;stack_id:string|null;stack_template_version:string|null;stack_deleted_at:string|null;stack_error:string|null;resource_prefix:string;disconnect_summary:z.infer<typeof DisconnectSummary>|null;health:{checkedAt:string;issues:{code:string;region?:string;message:string}[]}|null;aws_account_id:string|null;role_arn:string|null;external_id:string;inventory_revision:number;state:string;region:string;disconnect_error:{region:string|null;code:string}|null};
 type ScanRow={region:string;scan_state:string;scan_error:string|null;scan_facts:Inventory;scan_revision:string;sending_state:string;receiving_state:string;provision_error:string|null;ownership_journal:JournalEntry[]};
 const conflict=(code:string,message:string)=>new ApiError(409,code,message);
 const stale=()=>conflict('SCAN_STALE','Refresh the list and select verified domains from a completed regional scan.');
@@ -170,7 +171,32 @@ const FailedIntent=Pending.extend({error:z.string()});
 const Region=z.object({region:z.string(),regionLabel:z.string(),scanState:z.string(),scanError:z.string().nullable(),sendingState:z.string(),receivingState:z.string(),error:z.string().nullable(),facts:Facts,resources:z.array(z.object({kind:z.string(),resource:z.string(),target:z.string().optional(),state:z.enum(['creating','created']).optional()})),pending:z.array(Pending),failedIntents:z.array(FailedIntent)});
 export const RegionStatus=z.object({regions:z.array(Region)});
 export const ScanView=z.object({revision:z.number(),cursor:z.object({checked:z.number(),total:z.number()}),state:z.enum(['awaiting_role','failed','scanning','partial','ready_to_import']),error:z.string().nullable(),alreadySendsEmail:z.boolean().nullable(),regions:z.array(Region)});
-const Cleanup=z.object({operationId:z.string(),lastError:z.object({region:z.string().nullable(),code:z.string()}).nullable(),remaining:z.array(z.object({region:z.string(),resources:Region.shape.resources})),retain:z.array(z.string())});
+// What a disconnect keeps in the customer's account (their SES identities, with the DNS records of those Nightmail
+// created) and what it couldn't remove. Recorded when sending is fenced, shown while the cleanup runs.
+const DnsRecord=z.object({type:z.enum(['CNAME','MX','TXT']),name:z.string(),value:z.string(),priority:z.number().int().optional()}).openapi('DisconnectDnsRecord');
+export const DisconnectSummary=z.object({
+  retained:z.array(z.object({domain:z.string(),region:z.string(),regionLabel:z.string(),createdByNightmail:z.boolean().describe(`${productName} created the identity; otherwise it was already in the account.`),records:z.array(DnsRecord).describe(`DNS records of an identity ${productName} created, to remove with it.`)}))
+    .describe('SES identities that stay in the AWS account. Delete one in the SES console, and its DNS records, once nothing sends from it.'),
+  leftBehind:z.array(z.object({region:z.string(),kind:z.string(),resource:z.string()})).describe(`Resources ${productName} created but couldn't remove: its role was gone, or they were changed in AWS.`),
+  stack:z.object({name:z.string(),consoleUrl:z.url()}).nullable().describe(`The ${productName} stack, to delete in the CloudFormation console once the cleanup finishes.`),
+}).openapi('DisconnectSummary');
+type Summary=z.infer<typeof DisconnectSummary>;
+const stackConsoleUrl=(stackId:string)=>`https://us-east-2.console.aws.amazon.com/cloudformation/home?region=us-east-2#/stacks/stackinfo?stackId=${encodeURIComponent(stackId)}`;
+async function disconnectSummary(db:DbExecutor,c:V5Connection):Promise<Summary> {
+  const rows=(await db.execute<{name:string;region:string;claim_scope:string;ses:CandidateIdentity|null}>(sql`SELECT dc.name,b.region,dc.claim_scope,dc.identity->'ses' AS ses FROM domain_claims dc
+    JOIN domain_sending_bindings b ON b.workspace_id=dc.workspace_id AND b.name=dc.name AND b.connection_id=dc.connection_id
+    WHERE dc.workspace_id=${c.workspace_id} AND dc.connection_id=${c.id} ORDER BY dc.name,b.region LIMIT 500`)).rows;
+  const retained=rows.map(d=>{
+    // Imported identities (claim_scope 'account') were the customer's before; only those Nightmail created list records.
+    const created=d.claim_scope!=='account',dkim=d.ses?.DkimAttributes,zone=dkim?.SigningHostedZone,mailFrom=d.ses?.MailFromAttributes?.MailFromDomain;
+    const records:z.infer<typeof DnsRecord>[]=!created?[]:[
+      ...(zone && dkim?.SigningAttributesOrigin!=='EXTERNAL'?(dkim?.Tokens??[]).map(token=>({type:'CNAME' as const,name:`${token}._domainkey.${d.name}`,value:`${token}.${zone}`})):[]),
+      ...(mailFrom?[{type:'MX' as const,name:mailFrom,value:`feedback-smtp.${d.region}.amazonses.com`,priority:10},{type:'TXT' as const,name:mailFrom,value:'v=spf1 include:amazonses.com ~all'}]:[])];
+    return {domain:d.name,region:d.region,regionLabel:regionLabels[d.region]??d.region,createdByNightmail:created,records};
+  });
+  return {retained,leftBehind:[],stack:c.stack_id && c.stack_name && !c.stack_deleted_at?{name:c.stack_name,consoleUrl:stackConsoleUrl(c.stack_id)}:null};
+}
+const Cleanup=z.object({operationId:z.string(),lastError:z.object({region:z.string().nullable(),code:z.string()}).nullable(),remaining:z.array(z.object({region:z.string(),resources:Region.shape.resources})),retain:z.array(z.string()),summary:DisconnectSummary.nullable()});
 export const InventoryFields={scan:ScanView.optional(),candidates:z.array(Candidate).optional(),cleanup:Cleanup.optional()};
 export async function statuses(db:DbExecutor,cid:string) {
   const rows=(await db.execute<ScanRow & {pending:z.infer<typeof Pending>[];failed:z.infer<typeof FailedIntent>[]}>(sql`SELECT r.*,i.pending,i.failed FROM provider_connection_regions r CROSS JOIN LATERAL (SELECT
@@ -194,7 +220,7 @@ export async function inventory(db:DbExecutor,c:V5Connection) {
   const state=!c.aws_account_id?(c.state==='failed'?'failed':'awaiting_role'):checked<Object.keys(regionLabels).length?'scanning':regions.every(s=>s.scanError)?'failed':regions.some(s=>s.scanError)?'partial':'ready_to_import';
   const evidence=list.length>0 || regions.some(({facts:f})=>(f.sentLast24Hours??0)>0 || Object.keys(f.configurationSets??{}).length>0 || !!f.receiving?.rules.length);
   const scan={revision:c.inventory_revision,cursor:{checked,total:Object.keys(regionLabels).length},state,error:proof,regions,alreadySendsEmail:evidence?true:state==='ready_to_import'?false:null} satisfies z.infer<typeof ScanView>;
-  const cleanup=c.state==='disconnecting'?{operationId:disconnectId(c),lastError:c.disconnect_error,remaining:regions.map(r=>({region:r.region,resources:r.resources.filter(e=>e.kind!=='identity')})).filter(r=>r.resources.length),retain:['SES identities','DNS records','mailbox data']}:undefined;
+  const cleanup=c.state==='disconnecting'?{operationId:disconnectId(c),lastError:c.disconnect_error,remaining:regions.map(r=>({region:r.region,resources:r.resources.filter(e=>e.kind!=='identity')})).filter(r=>r.resources.length),retain:['SES identities','DNS records','mailbox data'],summary:c.disconnect_summary??null}:undefined;
   return {candidates:list,scan,cleanup};
 }
 
@@ -375,24 +401,35 @@ const bind=runV5(async(r,c,p,attempt)=>{
   }
 });
 const disconnectId=(c:V5Connection)=>'byo.disconnect:'+c.id;
-export async function disconnectV5(r:Runtime,wid:string,connectionId:string) {
+// Setup work for one connection. Stack requests, health checks and the disconnect itself aren't setup: they never
+// create anything in the account.
+const setupJobs=(c:V5Connection)=>sql`workspace_id=${c.workspace_id} AND ((type LIKE 'byo.%' AND type NOT IN ('byo.stack','byo.health','byo.disconnect') AND payload->>'connectionId'=${c.id}) OR type IN ('domain.verify','domain.mx','mailbox.reconcile'))`;
+// Stops sending from the connection and records what its disconnect keeps. A forced fence (the stack is being deleted, so
+// the role is about to go) doesn't wait for outstanding mail: the dispatcher cancels mail still queued for a disabled
+// region, and the cleanup waits for running setup jobs and mail mid-attempt before it finishes.
+async function fence(db:DbExecutor,c:V5Connection,forced:boolean) {
+  // A stack being deleted has nothing left to delete.
+  const summary=await disconnectSummary(db,forced?{...c,stack_deleted_at:c.stack_deleted_at??new Date().toISOString()}:c);
+  await db.execute(sql`UPDATE jobs SET status='completed',lease_until=NULL,last_error=NULL WHERE ${setupJobs(c)} AND status='pending'`);
+  await db.execute(sql`UPDATE provider_connections SET state='disconnecting',disconnect_summary=${JSON.stringify(summary)}::jsonb${forced?sql`,stack_deleted_at=coalesce(stack_deleted_at,now())`:sql``} WHERE id=${c.id}`);
+  await db.execute(sql`UPDATE provider_connection_regions SET sending_state='disabled',generation=generation+1,lease_until=NULL WHERE connection_id=${c.id}`);
+  await job(db,c,'byo.disconnect',disconnectId(c));
+  return summary;
+}
+export async function disconnectV5(r:Runtime,wid:string,connectionId:string,audit:(db:DbExecutor,c:V5Connection)=>Promise<unknown>) {
   await writable(r,wid);
   return r.db.transaction(async db=>{
     await lockSendScope(db,wid,{settings:'update'});
     const c=await connection(db,wid,true);if (!c || c.id!==connectionId) throw stale();
-    if (c.state!=='disconnecting') {
-      const busy=()=>conflict('CONNECTION_IN_USE','Finish outstanding mail, campaigns and running setup jobs before disconnecting.');
-      if ((await db.execute(sql`SELECT FROM sending_emails WHERE workspace_id=${wid} AND status IN ('queued','attempting','acceptance_unknown') LIMIT 1`)).rowCount ||
-          (await db.execute(sql`SELECT FROM sending_campaigns c WHERE workspace_id=${wid} AND ${campaignReserved()} LIMIT 1`)).rowCount) throw busy();
-      if ((await db.execute(sql`SELECT FROM provider_connection_regions WHERE connection_id=${c.id} AND (legacy OR receiving_state<>'off' OR inbound_topic_arn IS NOT NULL) LIMIT 1`)).rowCount) throw conflict('REGIONAL_DISCONNECT_REQUIRED','Receiving resources require separate reviewed cleanup.');
-      const setup=sql`workspace_id=${wid} AND ((type LIKE 'byo.%' AND payload->>'connectionId'=${c.id}) OR type IN ('domain.verify','domain.mx','mailbox.reconcile')) AND status IN ('pending','running')`;
-      const jobs=(await db.execute<{status:string}>(sql`SELECT status FROM jobs WHERE ${setup} ORDER BY id FOR UPDATE`)).rows;
-      if (jobs.some(j=>j.status==='running')) throw busy();
-      await db.execute(sql`UPDATE jobs SET status='completed',lease_until=NULL,last_error=NULL WHERE ${setup}`);
-      await db.execute(sql`UPDATE provider_connections SET state='disconnecting' WHERE id=${c.id}`);
-      await db.execute(sql`UPDATE provider_connection_regions SET sending_state='disabled',generation=generation+1,lease_until=NULL WHERE connection_id=${c.id}`);
-    }
-    await job(db,c,'byo.disconnect',disconnectId(c));return {operationId:disconnectId(c)};
+    if (c.state==='disconnecting') { await job(db,c,'byo.disconnect',disconnectId(c));return {operationId:disconnectId(c),summary:c.disconnect_summary??await disconnectSummary(db,c)}; }
+    const busy=()=>conflict('CONNECTION_IN_USE','Finish outstanding mail, campaigns and running setup jobs before disconnecting.');
+    if ((await db.execute(sql`SELECT FROM sending_emails WHERE workspace_id=${wid} AND status IN ('queued','attempting','acceptance_unknown') LIMIT 1`)).rowCount ||
+        (await db.execute(sql`SELECT FROM sending_campaigns c WHERE workspace_id=${wid} AND ${campaignReserved()} LIMIT 1`)).rowCount) throw busy();
+    if ((await db.execute(sql`SELECT FROM provider_connection_regions WHERE connection_id=${c.id} AND (legacy OR receiving_state<>'off' OR inbound_topic_arn IS NOT NULL) LIMIT 1`)).rowCount) throw conflict('REGIONAL_DISCONNECT_REQUIRED','Receiving resources require separate reviewed cleanup.');
+    const jobs=(await db.execute<{status:string}>(sql`SELECT status FROM jobs WHERE ${setupJobs(c)} AND status IN ('pending','running') ORDER BY id FOR UPDATE`)).rows;
+    if (jobs.some(j=>j.status==='running')) throw busy();
+    const summary=await fence(db,c,false);await audit(db,c);
+    return {operationId:disconnectId(c),summary};
   });
 }
 
@@ -408,18 +445,37 @@ const disconnect:JobHandler=retryDatabaseFailures(async(r,p,j)=>{
       // Fence the worker through one bounded AWS removal and its checkpoint. Losing
       // the response leaves the old journal; a retry proves absence or checks ownership anew.
       if (!(await db.execute(sql`SELECT FROM jobs WHERE ${ticket} AND lease_until>clock_timestamp() FOR UPDATE`)).rowCount) return false;
+      // After a forced fence, setup still running and mail still queued or mid-attempt settle before anything is removed:
+      // setup could create a resource after its region was cleaned, and the dispatcher cancels queued mail and marks an
+      // interrupted attempt unknown. Feedback SES sends later for mail already accepted is lost with the topic.
+      if ((await db.execute(sql`SELECT FROM jobs WHERE ${setupJobs(c)} AND status='running' AND lease_until>clock_timestamp() LIMIT 1`)).rowCount ||
+          (await db.execute(sql`SELECT FROM sending_emails WHERE workspace_id=${c.workspace_id} AND status IN ('queued','attempting') LIMIT 1`)).rowCount) return 'wait';
       const rr=(await db.execute<{region:string;ownership_journal:JournalEntry[];feedback_topic_arn:string|null}>(sql`SELECT region,ownership_journal,feedback_topic_arn FROM provider_connection_regions WHERE connection_id=${c.id} AND
         (feedback_topic_arn IS NOT NULL OR EXISTS(SELECT FROM jsonb_array_elements(ownership_journal) e WHERE e->>'kind' IS DISTINCT FROM 'identity')) ORDER BY region LIMIT 1 FOR UPDATE`)).rows[0];
       if (!rr) {
+        const left=c.disconnect_summary?.leftBehind??[];
+        if (left.length) await recordAudit(db,systemContext('job'),{action:'connection.cleanup',workspaceId:c.workspace_id,target:{type:'connection',id:c.id},after:{leftBehind:left.slice(0,50)},internal:false});
         await db.execute(sql`WITH ${releaseConnectionClaims(c.workspace_id,sql`SELECT ${c.id}::text AS id`)} SELECT 1`);
         await db.execute(sql`DELETE FROM provider_connections WHERE id=${c.id} AND state='disconnecting'`);return false;
       }
       region=rr.region;
-      const remaining=await removeByoFeedbackResource(await scoped(r,c,region,'cleanup'),region,c.id,rr.ownership_journal,rr.feedback_topic_arn);
+      let remaining:JournalEntry[];
+      try { remaining=await removeByoFeedbackResource(await scoped(r,c,region,'cleanup'),region,c.id,rr.ownership_journal,rr.feedback_topic_arn); }
+      catch(e) {
+        // Once the stack is deleted (stack_deleted_at), what the role can't remove now it never will, and what was
+        // changed in AWS isn't removed at all: list it in the summary and go on. Otherwise the owner fixes access and retries.
+        const code=awsError(e).code;
+        if (!c.stack_deleted_at || (code!=='AWS_ACCESS_DENIED' && code!=='BYO_CLEANUP_DRIFT')) throw e;
+        const entries=rr.ownership_journal.filter(e=>e.kind!=='identity');
+        const left=[...entries.map(e=>({region:rr.region,kind:e.kind,resource:e.resource})),...(rr.feedback_topic_arn && !entries.some(e=>e.resource===rr.feedback_topic_arn)?[{region:rr.region,kind:'topic',resource:rr.feedback_topic_arn}]:[])];
+        await db.execute(sql`UPDATE provider_connections SET disconnect_summary=jsonb_set(coalesce(disconnect_summary,'{"retained":[],"leftBehind":[],"stack":null}'::jsonb),'{leftBehind}',coalesce(disconnect_summary->'leftBehind','[]'::jsonb)||${JSON.stringify(left)}::jsonb) WHERE id=${c.id}`);
+        log('warn',{code:'BYO_CLEANUP_LEFT',connectionId:c.id,region:rr.region,reason:code,resources:left.length});
+        remaining=rr.ownership_journal.filter(e=>e.kind==='identity');
+      }
       await db.execute(sql`UPDATE provider_connection_regions SET ownership_journal=${JSON.stringify(remaining)}::jsonb,feedback_topic_arn=${remaining.some(e=>e.kind==='topic')?rr.feedback_topic_arn:null} WHERE connection_id=${c.id} AND region=${region}`);
       await db.execute(sql`UPDATE provider_connections SET disconnect_error=NULL WHERE id=${c.id}`);return true;
     });
-    if (more) throw defer(1000,p);
+    if (more) throw defer(more==='wait'?5000:1000,p);
   } catch(e) {
     if (e instanceof JobDeferred || e instanceof ModuleLoadError) throw e;
     const err=awsError(e);await r.db.execute(sql`UPDATE provider_connections SET disconnect_error=${JSON.stringify({region,code:err.code})}::jsonb WHERE id=${p.connectionId} AND state='disconnecting' AND EXISTS(SELECT FROM jobs WHERE ${ticket})`);throw err;
@@ -553,6 +609,18 @@ async function readStack(r:Runtime,c:V5Connection,stackName:string,verify=false)
   catch(e) { if (e instanceof ApiError) throw e; if (unreadable(e)) return null; throw awsError(e); }
   finally { client.destroy(); }
 }
+// Answers a stack deletion once the cleanup has removed what Nightmail created (or listed what it couldn't), or at the
+// deadline, well inside CloudFormation's wait. Polled; the disconnect job does the work.
+async function answerDeletion(r:Runtime,req:StackRequest,connectionId:string,deadline:number) {
+  const c=(await r.db.execute<V5Connection>(sql`SELECT * FROM provider_connections WHERE id=${connectionId}`)).rows[0];
+  const busy=c?(await r.db.execute<{n:number}>(sql`SELECT count(*)::int AS n FROM provider_connection_regions WHERE connection_id=${connectionId} AND
+    (feedback_topic_arn IS NOT NULL OR EXISTS(SELECT FROM jsonb_array_elements(ownership_journal) e WHERE e->>'kind' IS DISTINCT FROM 'identity'))`)).rows[0]!.n:0;
+  if (busy && Date.now()<deadline) throw defer(5000);
+  const left=c?.disconnect_summary?.leftBehind??[];
+  return answerStack(req,'SUCCESS',busy?`${productName} stopped using this account but didn't finish removing what it created in ${busy} region${busy===1?'':'s'}. Delete the remaining nightmail- configuration sets and SNS topics in the AWS console.`
+    :left.length?`${productName} stopped using this account. It couldn't remove: ${left.map(e=>e.resource).join(', ')}`
+    :`${productName} stopped using this account and removed the configuration sets and topics it created. SES identities stay.`);
+}
 const knownVersion=(v:unknown)=>typeof v==='string' && (BYO_TEMPLATE_VERSIONS as readonly string[]).includes(v) ? v : null;
 const parameters=(stack:OwnStack['stack'])=>Object.fromEntries((stack.Parameters??[]).map(p=>[p.ParameterKey,p.ParameterValue]));
 // A Create is this connection's when the stack named for it is that very stack, has its parameters, and is creating its
@@ -568,12 +636,23 @@ const deleting=(own:OwnStack,req:StackRequest)=>own.stack.StackId===req.StackId 
 export const roleGoing=(own:OwnStack)=>own.stack.StackStatus==='DELETE_IN_PROGRESS' || own.stack.StackStatus==='ROLLBACK_IN_PROGRESS';
 const unreadableStack=`${productName} couldn't read this stack through its role, so it kept the connection. Disconnect in ${productName} first, then delete the stack again.`;
 async function stackDelete(r:Runtime,c:V5Connection,req:StackRequest,deadline:number) {
+  // Once this stack's deletion was confirmed its role may already be gone: the cleanup is only waited for.
+  if (c.state==='disconnecting' && c.stack_deleted_at) return answerDeletion(r,req,c.id,deadline);
   const own=await readStack(r,c,c.stack_id!);
   if (!own) { if (Date.now()<deadline) throw defer(30_000);return answerStack(req,'FAILED',unreadableStack); }
   if (!deleting(own,req)) { log('warn',{code:'BYO_STACK_REQUEST_IGNORED',requestType:req.RequestType,stackStatus:own.stack.StackStatus,resourceStatus:own.resource?.ResourceStatus});return; }
   if (!roleGoing(own)) return answerStack(req,'SUCCESS',`The stack keeps its role, so ${productName} keeps using this account.`);
-  await r.db.execute(sql`UPDATE provider_connections SET stack_deleted_at=coalesce(stack_deleted_at,now()) WHERE id=${c.id} AND stack_id=${req.StackId}`);
-  return answerStack(req,'SUCCESS',`${productName} stopped using this account.`);
+  // The role is deleted only after this answer, so sending stops now and the cleanup runs through it first (a
+  // disconnect already under way goes on, now knowing the stack goes too).
+  await r.db.transaction(async db=>{
+    await lockSendScope(db,c.workspace_id,{settings:'update'});
+    const current=await connection(db,c.workspace_id,true);
+    if (!current || current.id!==c.id || current.stack_id!==req.StackId) return;
+    if (current.state==='disconnecting') { await db.execute(sql`UPDATE provider_connections SET stack_deleted_at=coalesce(stack_deleted_at,now()) WHERE id=${c.id}`);return; }
+    await fence(db,current,true);
+    await recordAudit(db,systemContext('job'),{action:'connection.delete',workspaceId:c.workspace_id,target:{type:'connection',id:c.id},before:{kind:'byo',region:c.region,state:c.state},reason:'The CloudFormation stack was deleted.',internal:false});
+  });
+  return answerDeletion(r,req,c.id,deadline);
 }
 const stackJob:JobHandler=retryDatabaseFailures(async(r,p)=>{
   const req=StackRequest.parse(p.request),[,account,name]=stackArn.exec(req.StackId)!,deadline=Number(p.deadline);
