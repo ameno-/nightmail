@@ -21,6 +21,7 @@ const settings = chunk(() => import('./features/settings'))
 const docs = chunk(() => import('./features/docs'))
 const inbound = chunk(() => import('./features/inbound'))
 const operator = chunk(() => import('./features/operator'))
+const supportInbox = chunk(() => import('./features/support-inbox'))
 const legal = chunk(() => import('./features/legal'))
 const loadOnboarding = onboarding.preload
 const loadOverview = overview.preload
@@ -31,8 +32,9 @@ const loadSettings = settings.preload
 const loadDocs = docs.preload
 const loadInbound = inbound.preload
 const loadOperator = operator.preload
+const loadSupportInbox = supportInbox.preload
 const loadLegal = legal.preload
-Object.assign(routeChunks, { '/overview': loadOverview, '/logs': loadLogs, '/receiving': loadInbound, '/campaigns': loadCampaigns, '/audience': loadAudience, '/domains': loadSettings, '/api-keys': loadSettings, '/settings': loadSettings, '/docs': loadDocs, '/operator': loadOperator, '/legal': loadLegal })
+Object.assign(routeChunks, { '/overview': loadOverview, '/logs': loadLogs, '/receiving': loadInbound, '/campaigns': loadCampaigns, '/audience': loadAudience, '/domains': loadSettings, '/api-keys': loadSettings, '/settings': loadSettings, '/docs': loadDocs, '/operator': loadOperator, '/support': loadSupportInbox, '/legal': loadLegal })
 const LogsPage = logs.page(m => m.LogsPage)
 const LogDetailPage = logs.page(m => m.LogDetailPage)
 const CampaignsPage = campaigns.page(m => m.CampaignsPage)
@@ -74,6 +76,8 @@ const OverviewPage = overview.page(m => m.OverviewPage)
 const OperatorPage = operator.page(m => m.OperatorPage)
 const OperatorWorkspacePage = operator.page(m => m.OperatorWorkspacePage)
 const OperatorNotesPage = operator.page(m => m.OperatorNotesPage)
+const SupportInboxPage = supportInbox.page(m => m.SupportInboxPage)
+const SupportConversationPage = supportInbox.page(m => m.SupportConversationPage)
 const OnboardingPage = onboarding.page(m => m.OnboardingPage)
 const LegalPage = legal.page(m => m.LegalPage)
 
@@ -100,6 +104,7 @@ else if (['/audience', '/contacts', '/lists', '/segments'].some(path => initialP
 else if (['/api-keys', '/domains', '/settings'].some(path => initialPath.startsWith(path))) loadSettings().catch(noop)
 else if (['/receiving', '/inbound', '/mailboxes'].some(path => initialPath.startsWith(path))) loadInbound().catch(noop)
 else if (initialPath.startsWith('/operator')) loadOperator().catch(noop)
+else if (initialPath === '/support' || initialPath.startsWith('/support/')) loadSupportInbox().catch(noop)
 
 class AppErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
   state = { failed: false }
@@ -168,6 +173,7 @@ const routes = <><Route path="legal/:doc?" element={<ChunkFallback.Provider valu
     <Route path="settings/webhooks" element={<Moved to={() => '/settings#webhooks'} />} /><Route path="settings/workspace" element={<Moved to={() => '/settings#workspace'} />} /><Route path="settings/account" element={<Moved to={() => '/settings#account'} />} />
     <Route path="docs/*" element={<DocsPage />} /><Route path="developer" element={<Moved to={() => '/docs'} />} />
     <Route path="operator" element={<OperatorPage />} /><Route path="operator/notes" element={<OperatorNotesPage />} /><Route path="operator/workspaces/:id" element={<OperatorWorkspacePage />} />
+    <Route path="support" element={<SupportInboxPage />} /><Route path="support/:id" element={<SupportConversationPage />} />
     <Route path="*" element={<EmptyState headingAs="h1" title="Page not found" action={<Link to="/overview">Return to overview</Link>} />} />
   </Route></>
 setRouteTable(createRoutesFromChildren(routes))

@@ -92,7 +92,7 @@ export class SupportConversation extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
-    this.work = new WorkQueue(ctx.storage);
+    this.work = new WorkQueue(ctx.storage, { db: env.DB, flow: 'support', object: ctx.id.toString() });
     // Only our own tables here, so opening a chat never waits on OpenCode: it boots in the background (warm()).
     void ctx.blockConcurrencyWhile(async () => { this.createTables(); if (this.importLegacy()) await this.arm(); });
   }
@@ -263,6 +263,20 @@ export class SupportConversation extends DurableObject<Env> {
     await this.arm();
     await this.env.DB.prepare('DELETE FROM pending_confirms WHERE address_hash = ? AND conversation_id = ?').bind(hash, meta.conversationId).run();
     return { ok: true };
+  }
+
+  /**
+   * The cron sweep (ledger.ts): a ticket's team email or chat follow-up that no item here covers (filed before this queue),
+   * rebuilt from its D1 row. An existing item, in any state, is left as it is. A conversation already deleted after its
+   * retention comes back closed, only to send it.
+   */
+  async ensure({ kind, ctx, input, ticket }: { kind: 'notify' | 'followup'; ctx: TicketContext; input: TicketInput; ticket: FiledTicket }) {
+    if (!this.meta()) this.save({ ...this.fresh(ctx.conversationId, ctx.channel), status: 'closed', closedAt: Date.now(), ticketId: ticket.id });
+    const added = this.work.insert(kind === 'notify'
+      ? { kind, id: `notify:${ticket.id}`, payload: { ticketId: ticket.id, key: `ticket-${ticket.id}`, input: { addressId: this.env.SUPPORT_ADDRESS_ID, to: [this.env.TICKET_TO], ...ticketEmail(this.env, ctx, ticket, input) } } satisfies Notify }
+      : { kind, id: `followup:${ticket.id}`, payload: { addressId: this.env.SUPPORT_ADDRESS_ID, ctx, ticket } satisfies FollowUp });
+    if (added) await this.arm();
+    return { added };
   }
 
   // ---------- the socket ----------

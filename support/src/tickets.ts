@@ -77,6 +77,31 @@ export async function fileTicket(env: Env, ctx: TicketContext, input: TicketInpu
   return { id, created: true, dueAt: due, replyTo: masked(ctx.customer.email) };
 }
 
+/** A D1 `tickets` row, as the cron sweep reads it. */
+export type TicketRow = {
+  id: string; conversation_id: string; channel: 'chat' | 'email'; type: TicketType; title: string; severity: TicketInput['severity']; due_at: number;
+  customer: string; summary: string; ask: string; tried: string; recommendation: string; evidence: string; details: string;
+  followup_thread_id: string | null; cost_usd: number | null; model: string | null;
+};
+
+/**
+ * A ticket as it was filed, rebuilt from its row (fileTicket wrote every field the team's email and the follow-up use).
+ * Screenshot links aren't rebuilt: the staff page lists them.
+ */
+export function fromRow(row: TicketRow): { ctx: TicketContext; input: TicketInput; ticket: FiledTicket } {
+  const who = JSON.parse(row.customer) as Partial<TicketContext['customer']> & { verified?: TicketContext['verified'] | false; sender?: string | null; dmarc?: string | null };
+  const verified = who.verified || null;
+  const ctx: TicketContext = {
+    conversationId: row.conversation_id, channel: row.channel, threadId: row.followup_thread_id, costUsd: row.cost_usd ?? 0, model: row.model ?? 'unknown', attachments: [],
+    verified, dmarc: verified ? null : who.dmarc ?? null, sender: verified ? null : who.sender ?? null,
+    customer: verified ? { userId: who.userId ?? null, email: who.email ?? null, name: who.name ?? null, role: who.role ?? null, workspaces: who.workspaces ?? [] }
+      : { userId: null, email: null, name: null, role: null, workspaces: [] },
+  };
+  const input: TicketInput = { type: row.type, title: row.title, severity: row.severity, summary: row.summary, ask: row.ask, tried: JSON.parse(row.tried),
+    recommendation: row.recommendation, evidence: JSON.parse(row.evidence), details: JSON.parse(row.details) };
+  return { ctx, input, ticket: { id: row.id, created: true, dueAt: row.due_at, replyTo: masked(ctx.customer.email) } };
+}
+
 /** The type-specific part of the team's email: a bug's reproduction, a feature's use case. */
 function detailLines(input: TicketInput) {
   const d = input.details, lines: string[] = [];

@@ -58,7 +58,7 @@ export function ListDetailBodySkeleton() {
 }
 export function ContactDetailBodySkeleton() {
   return <><div className="audience-summary cluster"><SkeletonText width={240} /><SkeletonText width={94} /></div>
-    <div className="section audience-properties"><section><SectionHeader title="Properties" /><dl>{['Full name', 'Country', 'Created', 'Last opened'].map(label => <Fragment key={label}><dt>{label}</dt><dd><SkeletonText width="65%" /></dd></Fragment>)}</dl></section></div>
+    <div className="section audience-properties"><section><SectionHeader title="Properties" /><dl className="ui-facts">{['Full name', 'Country', 'Created', 'Last opened'].map(label => <Fragment key={label}><dt>{label}</dt><dd><SkeletonText width="65%" /></dd></Fragment>)}</dl></section></div>
     <section className="section"><SectionHeader title="Lists" actions={<ControlSkeleton width={111} />} /><SkeletonText width={170} /></section>
     <ConsentHistorySkeleton />
   </>

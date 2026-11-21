@@ -166,6 +166,7 @@ export const OPERATION_PERMISSIONS: Record<string, OperationPermission> = {
   listSupportWebhookDeliveries: STAFF, getSupportStanding: STAFF, getSupportBilling: STAFF, listSupportAudit: STAFF, listSupportRequests: STAFF, getSupportRequest: STAFF,
   getSupportDeliveryMetrics: STAFF, getSupportBounceReasons: STAFF, getSupportDomainHealth: STAFF, getSupportScreen: STAFF, listSupportCampaigns: STAFF, getSupportCampaign: STAFF,
   getSupportEmailLint: STAFF, getSupportCampaignLint: STAFF, getSupportAudienceHealth: STAFF, getSupportScope: STAFF, updateSupportScope: STAFF, listSupportNotes: STAFF, createSupportNote: STAFF,
+  proposeSupportAction: STAFF, getSupportAction: STAFF, recheckSupportDomain: STAFF,
   // Billing: balance and usage read like settings; charges, the card and auto-recharge are an owner's or admin's in the dashboard.
   getBilling: needs('configuration', 'read', 'workspace'), getBillingUsage: needs('configuration', 'read', 'workspace'),
   listBillingLedger: needs('configuration', 'write', 'workspace', admin), listBillingPayments: needs('configuration', 'write', 'workspace', admin), getBillingPayment: needs('configuration', 'write', 'workspace', admin),

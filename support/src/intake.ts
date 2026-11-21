@@ -4,7 +4,7 @@ import type { Env } from './env.js';
 import { attachmentLink, safeName, storeImage } from './attachments.js';
 import { cleanImage, ImageRejected, IMAGE_TYPES, MAX_IMAGE_BYTES } from './image.js';
 import { countToday, holdOverCap, mailAllowed, ticketAllowed } from './limits.js';
-import { fileTicket, ticketEmail, type TicketContext } from './tickets.js';
+import { fileTicket, ticketEmail, type FiledTicket, type TicketContext } from './tickets.js';
 import type { TicketInput, TicketType } from './agent/tools.js';
 import { addressHash, MissingSecret, newId } from './tokens.js';
 import { external, WorkQueue, type NewWork, type Outcome, type WorkRow } from './work.js';
@@ -42,7 +42,7 @@ export class SupportIntake extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS intake_meta (id INTEGER PRIMARY KEY CHECK (id = 1), conversation_id TEXT NOT NULL);`);
     // The address the message was sent to, for the acknowledgement (rows queued before it was kept have none).
     if (!this.sql.exec("SELECT 1 FROM pragma_table_info('intake_inbox') WHERE name = 'address'").toArray().length) this.sql.exec('ALTER TABLE intake_inbox ADD COLUMN address TEXT');
-    this.work = new WorkQueue(ctx.storage);
+    this.work = new WorkQueue(ctx.storage, { db: env.DB, flow: 'intake', object: ctx.id.toString() });
     // Import once per row, retaining finished messages for webhook dedupe. Old 'failed' meant retries exhausted.
     const imported = this.sql.exec(`INSERT INTO _support_work(id,kind,state,payload,due_at,attempts,created_at,updated_at)
       SELECT 'msg:'||message_id,'message',CASE WHEN state IN ('done','held') THEN state ELSE 'pending' END,
@@ -115,10 +115,24 @@ export class SupportIntake extends DurableObject<Env> {
     if (!row) throw new Error('Missing ticket');
     const result = { ticketId: row.id };
     if (row.notified_at !== null) return { result };
+    return { result, children: [this.notify({ id: row.id, dueAt: row.due_at }, ctx, input)] };
+  }
+
+  /** The team's email for a ticket, built now and sent as built on every try. */
+  private notify(ticket: Pick<FiledTicket, 'id' | 'dueAt'>, ctx: TicketContext, input: TicketInput): NewWork {
     if (!this.env.SUPPORT_ADDRESS_ID || !this.env.TICKET_TO) throw new BaneError(503, 'SUPPORT_NOT_CONFIGURED', 'Missing ticket mail route');
-    const request: Send = { path: '/v1/inbound/threads', key: `ticket-${row.id}`, body: { addressId: this.env.SUPPORT_ADDRESS_ID, to: [this.env.TICKET_TO],
-      ...ticketEmail(this.env, ctx, { id: row.id, dueAt: row.due_at }, input) } };
-    return { result, children: [{ kind: 'notify', id: `notify:${row.id}`, payload: { ticketId: row.id, request } }] };
+    const request: Send = { path: '/v1/inbound/threads', key: `ticket-${ticket.id}`, body: { addressId: this.env.SUPPORT_ADDRESS_ID, to: [this.env.TICKET_TO], ...ticketEmail(this.env, ctx, ticket, input) } };
+    return { kind: 'notify', id: `notify:${ticket.id}`, payload: { ticketId: ticket.id, request } };
+  }
+
+  /**
+   * The cron sweep (ledger.ts): a ticket's team email that no item here covers (filed before this queue), rebuilt from
+   * its D1 row. An existing item, in any state, is left as it is.
+   */
+  async ensure({ ctx, input, ticket }: { ctx: TicketContext; input: TicketInput; ticket: FiledTicket }) {
+    const added = this.work.insert(this.notify(ticket, ctx, input));
+    if (added) await this.work.arm();
+    return { added };
   }
 
   /** The conversation row a thread's ticket hangs off (tickets.conversation_id), created once. */

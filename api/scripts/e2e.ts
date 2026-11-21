@@ -72,6 +72,8 @@ Object.assign(SKIP, {
   listSupportNotes: 'Internal: needs a support conversation the support platform registered through its service binding; covered by isolated acceptance.', createSupportNote: 'Internal: needs a support conversation the support platform registered through its service binding; covered by isolated acceptance.',
 });
 SKIP.retryInboundWebhookDelivery='Requires an exhausted run-owned inbound delivery; retries and leases are exercised offline.';
+// Support actions need a support conversation the support platform registered through its service binding.
+Object.assign(SKIP, Object.fromEntries(['proposeSupportAction', 'getSupportAction', 'recheckSupportDomain'].map(op => [op, 'Internal: needs a support conversation the support platform registered through its service binding; covered by isolated acceptance.'])));
 // The receiving MVP (routing, rules, endpoints, agent inboxes) is exercised end to end by the isolated acceptance
 // suite. Live steps need a run-owned receiving host and the R2 mail store on dev; until then each operation is
 // listed here by ID so the report shows it as skipped, never silently covered.

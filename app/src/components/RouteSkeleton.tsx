@@ -6,6 +6,8 @@ import { CampaignRouteSkeleton } from '../features/campaigns/skeletons'
 import { AudienceRouteSkeleton } from '../features/audience/skeletons'
 import { SettingsRouteSkeleton } from '../features/settings/skeletons'
 import { OperatorRouteSkeleton } from '../features/operator/skeletons'
+import { SupportRouteSkeleton } from '../features/support-inbox/skeletons'
+import { usePhone } from '../lib/media'
 import { DocsSkeleton } from '../features/docs/frame'
 import { useSession, useWorkspaceAccess } from '../data/context'
 import { Button, LoadingRegion, PageHeader } from './ui'
@@ -13,6 +15,7 @@ import { Button, LoadingRegion, PageHeader } from './ui'
 export function RouteSkeleton() {
   const { pathname } = useLocation()
   const operator = useSession()?.identity?.operator
+  const phone = usePhone()
   const [section, id, view] = pathname.split('/').filter(Boolean)
   if (!section) return <OverviewRouteSkeleton />
   if (section === 'logs') return !id ? <LogsRouteSkeleton /> : isReceivedId(id) ? <ReceivedEmailSkeleton /> : <EmailDetailSkeleton />
@@ -21,6 +24,7 @@ export function RouteSkeleton() {
   if (section === 'api-keys') return <SettingsRouteSkeleton kind="keys" />
   if (section === 'domains') return <SettingsRouteSkeleton kind={id ? 'domain' : 'domains'} />
   if (section === 'operator') return <OperatorRouteSkeleton operator={operator} />
+  if (section === 'support') return <SupportRouteSkeleton operator={operator} panel={!phone} />
   if (section === 'docs') return <DocsSkeleton />
   if (section === 'receiving' && !id) return <ReceivingRouteSkeleton />
   if (section === 'settings') return <SettingsRouteSkeleton kind={id === 'webhooks' && view ? 'webhook' : 'settings'} isNew={view === 'new'} />

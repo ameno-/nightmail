@@ -1,8 +1,9 @@
 import { errorCodeOf } from '../../api/src/log.js';
 import { BaneError } from './bane.js';
 import { MissingSecret } from './tokens.js';
-import { log } from './log.js';
+import { log, logError } from './log.js';
 
+export type Flow = 'support' | 'intake';
 export type WorkState = 'pending' | 'blocked' | 'parked' | 'done' | 'held' | 'dead';
 export type NewWork = { id: string; kind: string; payload: object; state?: 'pending' | 'parked' };
 export type WorkRow = { id: string; kind: string; payload: string; result: string; attempts: number; created_at: number };
@@ -31,9 +32,16 @@ function failure(e: unknown, attempts: number, now: number) {
 }
 
 const runnable = "state IN ('pending','blocked')";
+/** One item in D1 `support_work` (migrations/0005): the webhook's or poller's row is kept, only the item's progress changes. */
+const MIRROR = `INSERT INTO support_work (flow, object, id, kind, state, message_id, thread_id, attempts, due_at, last_error, created_at, updated_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (flow, object, id) DO UPDATE SET state = excluded.state, attempts = excluded.attempts,
+  due_at = excluded.due_at, last_error = excluded.last_error, updated_at = excluded.updated_at`;
+type Mirrored = { id: string; kind: string; state: WorkState; attempts: number; due_at: number; last_error: string | null; created_at: number; updated_at: number; message_id: string | null; thread_id: string | null };
+
 export class WorkQueue {
   private readonly sql: SqlStorage;
-  constructor(private readonly storage: DurableObjectStorage) {
+  /** `ledger`: where this object's items are mirrored (D1, its flow, and the object's own ID). */
+  constructor(private readonly storage: DurableObjectStorage, private readonly ledger: { db: D1Database; flow: Flow; object: string }) {
     this.sql = storage.sql;
     this.sql.exec(`CREATE TABLE IF NOT EXISTS _support_work (
       id TEXT PRIMARY KEY, kind TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending'
@@ -44,10 +52,11 @@ export class WorkQueue {
       CREATE INDEX IF NOT EXISTS _support_work_due ON _support_work(state,due_at)`);
   }
 
+  /** Adds an item once (its ID is the dedupe key); false when it already existed. */
   insert(item: NewWork, parent: string | null = null) {
     const now = Date.now();
-    this.sql.exec('INSERT INTO _support_work(id,kind,state,payload,parent,due_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING',
-      item.id, item.kind, item.state ?? 'pending', JSON.stringify(item.payload), parent, now, now, now);
+    return this.sql.exec('INSERT INTO _support_work(id,kind,state,payload,parent,due_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING',
+      item.id, item.kind, item.state ?? 'pending', JSON.stringify(item.payload), parent, now, now, now).rowsWritten > 0;
   }
 
   checkpoint(id: string, result: object) {
@@ -91,5 +100,26 @@ export class WorkQueue {
       }
     }
     await this.arm(deadline());
+    await this.mirror();
+  }
+
+  /**
+   * Copies the items changed since the last copy into D1 `support_work`, where the cron finds what is waiting without
+   * waking every object. Best effort: the work never waits on it, and what fails to copy is copied after the next drain.
+   */
+  async mirror() {
+    const { db, flow, object } = this.ledger;
+    try {
+      for (let round = 0; round < 10; round++) {
+        const rows = this.sql.exec<Mirrored>(`SELECT id,kind,state,attempts,due_at,last_error,created_at,updated_at,
+          json_extract(payload,'$.messageId') AS message_id, json_extract(payload,'$.threadId') AS thread_id
+          FROM _support_work WHERE mirrored_at IS NULL OR mirrored_at<updated_at ORDER BY updated_at LIMIT 50`).toArray();
+        if (!rows.length) return;
+        await db.batch(rows.map(r => db.prepare(MIRROR).bind(flow, object, r.id, r.kind, r.state, r.message_id, r.thread_id, r.attempts, r.due_at, r.last_error, r.created_at, r.updated_at)));
+        // An item that changed while D1 answered stays due for the next copy.
+        for (const r of rows) this.sql.exec('UPDATE _support_work SET mirrored_at=? WHERE id=? AND updated_at=?', r.updated_at, r.id, r.updated_at);
+        if (rows.length < 50) return;
+      }
+    } catch (error) { logError(error, { event: 'work', code: 'MIRROR_FAILED' }, 'warn'); }
   }
 }

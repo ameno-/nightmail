@@ -473,6 +473,14 @@ button.ui-facet:focus-visible { outline-offset: -2px; }
 .ui-waterfall__track > i { position: absolute; top: 1px; bottom: 1px; background: var(--color-series-strong); }
 .ui-waterfall__row:not(.ui-tone--neutral) .ui-waterfall__track > i { background: var(--tone-marker); }
 .ui-waterfall__delta { color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* Facts on a page or in a dialog (a <dl class="ui-facts">): muted mono-caps keys, mono values, a hairline per row. */
+.ui-facts { display: grid; grid-template-columns: minmax(96px, max-content) minmax(0, 1fr); column-gap: var(--space-24); margin: 0; }
+.ui-facts > :is(dt, dd) { min-height: 32px; margin: 0; padding-block: 7px; border-bottom: 1px solid var(--color-border-muted); line-height: 18px; overflow-wrap: anywhere; }
+.ui-facts > dt { color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); letter-spacing: var(--tracking-label); text-transform: uppercase; }
+.ui-facts > dd { font-family: var(--font-mono); font-size: var(--text-xs); }
+@media (max-width: 640px) { .ui-facts { grid-template-columns: 104px minmax(0, 1fr); column-gap: var(--space-12); } }
+/* Numbers in table cells read as data: right-aligned columns are mono. */
+.ui-table td[style*='text-align: right'] { font-family: var(--font-mono); font-size: var(--text-xs); }
 /* Facts: muted mono keys, mono values. */
 .ui-kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); column-gap: var(--space-16); margin: 0; }
 .ui-kv > div { display: contents; }

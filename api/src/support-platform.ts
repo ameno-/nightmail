@@ -44,6 +44,9 @@ const STAMPED_WRITES: [method: string, path: RegExp][] = [
   ['POST', /^\/v1\/support\/notes$/],
 ];
 
+/** The writes about the person's account (src/support-actions.ts): proposing a change they confirm signed in, and re-checking a domain's DNS. */
+const ACTION_WRITES: [method: string, path: RegExp][] = [['POST', /^\/v1\/support\/actions$/], ['POST', /^\/v1\/support\/domains\/[A-Za-z0-9_-]{1,120}\/verify$/]];
+
 /** Whether the binding may make this call: the operator support routes, or a grant's GET under /v1/support. */
 export function supportPlatformAllows(method: string, path: string) {
   if (path.includes('..') || path.includes('//')) return false;
@@ -53,6 +56,7 @@ export function supportPlatformAllows(method: string, path: string) {
 /** Whether request() may make this call for a conversation: a GET under /v1/support, or one of its writes. */
 export function stampedAllows(method: string, path: string) {
   if (path.includes('..') || path.includes('//')) return false;
+  if (ACTION_WRITES.some(([m, p]) => m === method && p.test(path))) return true;
   return (method === 'GET' && SUPPORT_READ.test(path)) || STAMPED_WRITES.some(([m, p]) => m === method && p.test(path));
 }
 
