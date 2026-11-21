@@ -1,6 +1,6 @@
 import type { ToolHost } from './tools.js';
 
-// The seam between the conversation (Durable Object, protocol, grant, gate) and the agent runtime (OpenCode, see
+// The seam between the conversation (Durable Object, protocol, stamp, gate) and the agent runtime (OpenCode, see
 // opencode.ts). The conversation only needs: run one turn of the agent with this input, stream what happens, report
 // usage. Keeping it this small is what keeps the OpenCode version upgradable.
 
@@ -13,8 +13,10 @@ export type Usage = { inputTokens: number; outputTokens: number; cacheReadTokens
 export type TurnInput = {
   /** What the agent reads as the next user message (the customer's words, or a harness note in brackets). */
   text: string;
-  /** Per-turn context the harness adds to the system prompt: <customer>, <context>, channel rules. */
+  /** Per-turn context the harness adds to the system prompt: <customer> and <account>. */
   context: string;
+  /** The tools this turn may call (toolNames in tools.ts): the model is offered these and no others. */
+  tools: readonly string[];
   /** Screenshots for this message, as data URIs (checked and stripped by image.ts). */
   images?: { uri: string; name: string }[];
 };

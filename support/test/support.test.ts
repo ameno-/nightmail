@@ -3,7 +3,7 @@ import { createHmac, randomBytes } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { Miniflare } from 'miniflare';
 import { afterAll, beforeAll, describe, test } from 'vitest';
-import { control, FAKE_BANE, fakeGateway, GENERAL_ANSWER, GRANT_TOKEN, recorded } from './fakes.js';
+import { control, FAKE_BANE, fakeGateway, GENERAL_ANSWER, GRANT_TOKEN, recorded, type Recorded } from './fakes.js';
 import { gate, LINK_ORIGINS } from '../src/gate.js';
 import { ticketEmail } from '../src/tickets.js';
 import { project, toolResult } from '../src/agent/projection.js';
@@ -75,7 +75,7 @@ const CONVERSATION_ENTRY = `
 import worker, { SupportConversation as Conversation } from './worker.js';
 export * from './worker.js';
 const unavailable = new Set(); // message IDs whose next delivery fails (module state: every object in this isolate)
-let failTurns = null; // the next usage update ('UPDATE conversations SET turns') throws, or evicts the object first
+let failTurns = null; // the next usage update ('UPDATE conversations SET turns') throws, or evicts the object first; 'reply': the object is evicted once a reply is frozen, mid-turn
 let abortRegister = false; // the next chat registration reaches Nightmail, then the object stops before it handles the answer
 function interruptible(ctx, bane) {
   return new Proxy(bane, { get(target, prop) {
@@ -148,6 +148,12 @@ export class SupportConversation extends Conversation {
       for (const [id, state, attempts] of rows) ctx.storage.sql.exec('INSERT INTO _support_inbox (message_id, thread_id, delivery_id, state, attempts, received_at) VALUES (?, ?, ?, ?, ?, 1)', id, meta.threadId, 'wh_legacy', state, attempts);
     }
     super(ctx, { ...env, DB: failingDb(ctx, env.DB), BANE: interruptible(ctx, env.BANE) });
+    // The reply tool's checkpoint: with fail 'reply', the object is evicted right after it, while the turn is still running.
+    const checkpoint = this.work.checkpoint.bind(this.work);
+    this.work.checkpoint = (id, result) => {
+      checkpoint(id, result);
+      if (failTurns === 'reply' && id.startsWith('answer:') && result.replied) { failTurns = null; void ctx.storage.sync().then(() => ctx.abort('fixture: evicted after the reply')); }
+    };
   }
   async alarm() {} // Tests call super.alarm() at the chosen instant.
   async enqueueInbound(input) {
@@ -204,7 +210,7 @@ const baseEnv = (overrides: Record<string, unknown> = {}) => ({
   INTAKE: { type: 'durable-object' as const, worker: 'support', exportName: 'SupportIntake' },
   INTAKE_ADDRESSES: text('abuse@dev.bane.mx,privacy@dev.bane.mx,legal@dev.bane.mx'), BANE_INTAKE_WEBHOOK_SECRET: text(INTAKE_SECRET), BANE_INTAKE_INBOX_KEY: text(`bane_mbx_${'8'.repeat(64)}`),
   // The main suite runs many conversations as one person in one day: caps high here, tested low in their own instance.
-  LIMIT_TICKETS_PER_PERSON: text('50'), LIMIT_TURNS_PER_PERSON: text('1000'), LIMIT_MAIL_PER_SENDER: text('200'), LIMIT_CONFIRMS_PER_ADDRESS: text('20'), STAFF_RECHECK_SECONDS: text('6'),
+  LIMIT_TICKETS_PER_PERSON: text('50'), LIMIT_TURNS_PER_PERSON: text('1000'), LIMIT_TURNS_PER_EMAIL_SENDER: text('1000'), LIMIT_MAIL_PER_SENDER: text('200'), LIMIT_CONFIRMS_PER_ADDRESS: text('20'), STAFF_RECHECK_SECONDS: text('6'),
   DB: { type: 'd1' as const, id: 'support-test' },
   UPLOADS: { type: 'r2' as const, name: 'support-test-uploads' },
   BANE: { type: 'worker' as const, worker: 'fake-bane', exportName: 'SupportPlatform' },
@@ -284,6 +290,19 @@ const HELP_REPLY = "Hi,\n\nThanks for writing to Nightmail support. I can’t an
 // What the Worker adds after every model-written email answer, and the scripted model's general email answer with it.
 const HELP_LINE = '\n\nFor anything about your account, sign in to Nightmail and press Help: https://dev.bane.mx';
 const GENERAL = GENERAL_ANSWER + HELP_LINE;
+const BUSY = 'Hi,\n\nThanks for writing to Nightmail support. I can’t answer automatically right now. The Nightmail team has your message and will reply here.\n\nNightmail support (AI)';
+const HELD = /^Thanks for writing\. I’ve passed this to the Nightmail team to check/;
+/** The tools a model request offered, sorted. */
+const offered = (r: Recorded) => (r.body?.tools ?? []).map((t: any) => t.name as string).sort();
+/** Whether a model request is about this text: the latest thing the customer (or the harness) said. */
+const about = (r: Recorded, needle: string) => {
+  const last = [...(r.body?.messages ?? [])].reverse().find((m: any) => m.role === 'user' && (typeof m.content === 'string' || m.content.some((b: any) => b.type === 'text')));
+  return JSON.stringify(last?.content ?? '').includes(needle);
+};
+/** The tools Nightmail lets only owners and admins read (MANAGER_TOOLS). */
+const MANAGER = ['api_errors', 'domain_health', 'explain_request', 'get_audit', 'get_billing', 'list_domains', 'list_webhook_deliveries'];
+/** An email turn's whole tool set: nothing that reads an account. */
+const EMAIL_TOOLS = 'file_ticket,reply';
 // The replies Nightmail delivered (a refused one, such as a 409, never reaches the customer, and a replay sends nothing new).
 const replies = async (thread: string, instance?: Miniflare) => (await fakeCalls(instance)).filter(c => c[0] === 'api' && c[2] === `/v1/inbound/threads/${thread}/reply` && c[6] < 300 && !c[7]);
 async function eventually<T>(read: () => Promise<T | undefined>, ms = 30_000): Promise<T | undefined> {
@@ -348,6 +367,7 @@ describe('support Worker', () => {
     assert.ok(firstRequest.url.startsWith('https://opencode.ai/inference/anthropic/v1/messages'));
     const tools = firstRequest.body.tools.map((t: any) => t.name).sort();
     assert.ok(tools.includes('bounce_reasons') && tools.includes('file_ticket') && !tools.some((n: string) => ['bash', 'read', 'edit', 'write', 'skill', 'task', 'webfetch', 'execute'].includes(n)), tools.join());
+    assert.ok(MANAGER.every(n => tools.includes(n)) && !tools.includes('reply'), `An owner's chat: the owner/admin tools, no reply. ${tools.join()}`);
     const system = JSON.stringify(firstRequest.body.system);
     assert.ok(system.includes('Acme Prod') && system.includes('How Nightmail support writes'), 'The customer block and VOICE.md reach the system prompt.');
     assert.match(system, /<account read=\\"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z\\">/, 'The account summary read at the turn’s start follows <customer>.');
@@ -569,10 +589,10 @@ describe('support Worker', () => {
 
   test('per-tool query allow-lists: a tool call with extra arguments sends none of them', async () => {
     const paths: string[] = [];
-    const host: ToolHost = { read: async path => { paths.push(path); return {}; }, workspaceId: () => 'ws_acme', hidden: () => [], chooseWorkspace: async () => '', requestContentAccess: async () => '', fileTicket: async () => '' };
+    const host: ToolHost = { read: async path => { paths.push(path); return {}; }, workspaceId: () => 'ws_acme', hidden: () => [], chooseWorkspace: async () => '', requestContentAccess: async () => '', fileTicket: async () => '', reply: async () => '' };
     const extra = { userId: 'usr_bo', conversationId: `conv_${'b'.repeat(26)}`, grant: `nm_support_${'9'.repeat(64)}`, token: 'tok', ticketRef: 'conv_x', email: 'bo@other.test' };
     const ids = { emailId: 'em_1', domainId: 'dom_1', campaignId: 'cmp_1', requestId: `req_${'a'.repeat(32)}`, days: 3, hours: 5, provider: 'gmail', status: 'bounced' };
-    const reads = TOOLS.filter(t => !['choose_workspace', 'request_content_access', 'file_ticket'].includes(t.name));
+    const reads = TOOLS.filter(t => !['choose_workspace', 'request_content_access', 'file_ticket', 'reply'].includes(t.name));
     for (const tool of reads) {
       paths.length = 0;
       await tool.execute({ ...ids, ...extra }, host);
@@ -622,7 +642,7 @@ describe('support Worker', () => {
     assert.ok(!calls.some(c => ['verifyEmail', 'mintGrant', 'read'].includes(c[0])));
     const turn = recorded.slice(before).map(r => JSON.stringify(r.body)).filter(b => b.includes('A support email arrived'));
     assert.ok(turn.length && turn.every(b => !b.includes('Ada Lovelace') && !b.includes('<account read=') && !b.includes('Acme Prod') && b.includes('general answers only')), 'The model gets no name, workspace or account.');
-    assert.ok(turn.some(b => b.includes('Email answers are general')), 'The account tool was refused.');
+    assert.ok(recorded.slice(before).filter(r => about(r, 'A support email arrived')).every(r => offered(r).join() === EMAIL_TOOLS), 'No account tool is even offered.');
     assert.equal(calls.filter(c => c[0] === 'api' && c[2] === '/v1/inbound/threads/thr_mail_1/reply').length, 1, 'One reply per inbound message.');
   }, 180_000);
 
@@ -720,6 +740,121 @@ describe('support Worker', () => {
     assert.ok(reply && !reply[3].text.includes('bane-mx-security') && /passed this to the Nightmail team to check/.test(reply[3].text), reply?.[3].text);
     const db = await mf.getD1Database('DB', 'support');
     assert.ok(await db.prepare("SELECT id FROM tickets WHERE title = 'Email reply held by the output gate' AND recommendation LIKE '%reply to the customer%'").first());
+  }, 120_000);
+
+
+  test('one reply per customer email: a second call is refused and exactly one email is sent', async () => {
+    const before = recorded.length;
+    assert.equal((await signedHook('msg_twice_1', 'thr_twice')).status, 200);
+    const sent = await eventually(async () => (await replies('thr_twice'))[0]);
+    assert.equal(sent?.[3].text, `Hi,\n\nFirst answer.\n\nNightmail support (AI)${HELP_LINE}`, 'The first reply, with the Help line once.');
+    const refused = recorded.slice(before).find(r => about(r, 'reply twice') && JSON.stringify(r.body.messages.at(-1)).includes('already replied'));
+    assert.ok(refused, 'The second reply was refused, in the same turn.');
+    await new Promise(r => setTimeout(r, 1000));
+    assert.equal((await fakeCalls()).filter(c => c[0] === 'api' && c[2] === '/v1/inbound/threads/thr_twice/reply').length, 1, 'One email.');
+  }, 120_000);
+
+  test('the recipient is the verified sender whatever the model writes (Reply-To, Cc, addresses in the text)', async () => {
+    // The email carries Reply-To and Cc; the model passes its own to, cc, bcc and replyTo, and names them in the text.
+    assert.equal((await signedHook('msg_route_1', 'thr_route')).status, 200);
+    const sent = await eventually(async () => (await replies('thr_route'))[0]);
+    assert.deepEqual([sent?.[3].to, sent?.[3].cc, sent?.[3].expectedRecipients, sent?.[3].replyTo, sent?.[3].bcc], [['ada@acme.test'], [], { to: ['ada@acme.test'], cc: [], bcc: [] }, undefined, undefined]);
+    assert.ok(HELD.test(sent[3].text) && !sent[3].text.includes('else.test') && !sent[3].text.includes('press Help'), `Addresses in the text hold the reply, with no Help line: ${sent[3].text}`);
+    await new Promise(r => setTimeout(r, 1000));
+    const recipients = (await fakeCalls()).filter(c => c[0] === 'api' && c[1] === 'POST').flatMap(c => [...(c[3]?.to ?? []), ...(c[3]?.cc ?? []), ...(c[3]?.bcc ?? []), ...(c[3]?.replyTo ? [c[3].replyTo] : [])]);
+    assert.ok(!recipients.some(a => /^(?:boss|cfo|audit)@else\.test$/.test(String(a))), 'No request sends to an address the model or the email named.');
+    assert.equal((await replies('thr_route')).length, 1);
+  }, 120_000);
+
+  test('no reply call → nudge → fixed reply and ticket', async () => {
+    const before = recorded.length;
+    assert.equal((await signedHook('msg_silent_1', 'thr_silent')).status, 200);
+    const sent = await eventually(async () => (await replies('thr_silent'))[0]);
+    assert.deepEqual([sent?.[3].text, sent?.[3].subject], [BUSY, 'Re: your message to Nightmail support']);
+    // The email, then one hidden nudge in the same session; the model's own text is never sent.
+    const asked = recorded.slice(before).filter(r => JSON.stringify(r.body?.messages ?? []).includes('stay silent'));
+    assert.equal(asked.length, 2, 'The turn, then one nudge.');
+    assert.ok(about(asked[1]!, 'Call reply now') && offered(asked[1]!).join() === EMAIL_TOOLS);
+    const thread = 'thr_silent', db = await mf.getD1Database('DB', 'support'), conv = (await (await mf.getD1Database('DB', 'support')).prepare('SELECT id FROM conversations WHERE thread_id = ?').bind(thread).first<{ id: string }>())!.id;
+    const ticket = await eventually(async () => (await db.prepare('SELECT type, title, details FROM tickets WHERE conversation_id = ?').bind(conv).first<any>()) ?? undefined);
+    assert.deepEqual([ticket.type, ticket.title, JSON.parse(ticket.details).topic], ['other', 'Email not answered by the agent', 'other']);
+    await new Promise(r => setTimeout(r, 1000));
+    assert.equal((await replies('thr_silent')).length, 1, 'One email.');
+    assert.equal(recorded.slice(before).filter(r => JSON.stringify(r.body?.messages ?? []).includes('stay silent')).length, 2, 'No third call.');
+  }, 120_000);
+
+  test('a non-member turn’s gateway request lists no account tool, and neither does an account holder’s', async () => {
+    // No account (DMARC passes on its own domain), and Ada's own address (DMARC passes; an owner in Acme Prod). Email binds
+    // no account, so Nightmail calls both non-members.
+    for (const [message, thread, from, mode] of [['msg_nm_1', 'thr_nm', 'nobody@else.test', 'non_member'], ['msg_holder_1', 'thr_holder', 'ada@acme.test', 'non_member']] as const) {
+      const before = recorded.length;
+      assert.equal((await signedHook(message, thread, from)).status, 200);
+      assert.equal((await eventually(async () => (await replies(thread))[0]))?.[3].text, GENERAL);
+      const id = (await (await mf.getD1Database('DB', 'support')).prepare('SELECT id FROM conversations WHERE thread_id = ?').bind(thread).first<{ id: string }>())!.id;
+      assert.equal((await (await (await mf.getWorker('fake-bane')).fetch(`http://fake-bane/__conversation?id=${id}`)).json() as any).mode, mode);
+      const turn = recorded.slice(before).filter(r => JSON.stringify(r.body?.messages ?? []).includes(message === 'msg_nm_1' ? 'General question' : 'Account holder question'));
+      assert.ok(turn.length && turn.every(r => offered(r).join() === EMAIL_TOOLS), `${mode}: ${JSON.stringify(turn.map(offered))}`);
+      assert.ok(turn.every(r => !JSON.stringify(r.body.system).includes('<account read=') && !JSON.stringify(r.body).includes('Acme Prod')), 'No account summary either.');
+      assert.ok(!(await fakeCalls()).some(c => c[0] === 'request' && c[2] === id), 'Nothing is read.');
+    }
+  }, 180_000);
+
+  test('a DMARC-fail sender gets no model call', async () => {
+    const before = recorded.length;
+    // No account, and an account's address: the same fixed reply, and nothing reaches a model.
+    for (const [id, thread, from] of [['msg_df_1', 'thr_df_1', 'nobody@else.test'], ['msg_df_2', 'thr_df_2', 'nell@acme.test']] as const) {
+      assert.equal((await signedHook(id, thread, from)).status, 200);
+      assert.equal((await eventually(async () => (await replies(thread))[0]))?.[3].text, HELP_REPLY);
+    }
+    await new Promise(r => setTimeout(r, 1000));
+    assert.ok(!recorded.slice(before).some(r => JSON.stringify(r.body?.messages ?? []).includes('DMARC fail probe')), 'No model call.');
+    assert.deepEqual([(await replies('thr_df_1')).length, (await replies('thr_df_2')).length], [1, 1]);
+  }, 120_000);
+
+  test('the email turn cap: every model-written email answer counts against its sender address', async () => {
+    // One model answer a day per address here (5 by default), and one ticket per sender: past the cap, the busy reply,
+    // and tickets only within their own caps.
+    const capped = new Miniflare({ cf: false, telemetry: { enabled: false }, workers: [worker('support', baseEnv({ LIMIT_TURNS_PER_EMAIL_SENDER: text('1'), LIMIT_TICKETS_PER_PERSON: text('1') })),
+      { config: { name: 'fake-bane', compatibilityDate: '2026-09-08', manifest: { mainModule: 'bane.js', modules: { 'bane.js': { type: 'esm', contents: FAKE_BANE } } }, env: {} } }] } as never);
+    try {
+      await migrate(capped);
+      const before = recorded.length;
+      for (const n of [1, 2, 3]) assert.equal((await signedHook(`msg_cap_${n}`, `thr_cap_e${n}`, 'cap@else.test', { instance: capped })).status, 200);
+      const texts = [];
+      for (const n of [1, 2, 3]) texts.push((await eventually(async () => (await replies(`thr_cap_e${n}`, capped))[0], 60_000))?.[3].text);
+      assert.deepEqual(texts.sort(), [BUSY, BUSY, GENERAL].sort(), 'One general answer, then the busy reply.');
+      const db = await capped.getD1Database('DB', 'support');
+      const counted = await db.prepare('SELECT n FROM daily_counters WHERE key = ?').bind(`sender:${await addressHash('cap@else.test')}:email_turns`).first<{ n: number }>();
+      assert.equal(counted?.n, 3, 'Each email charged once, before any model call.');
+      const turns = recorded.slice(before).filter(r => offered(r).join() === EMAIL_TOOLS);
+      assert.ok(turns.length >= 1 && turns.length <= 2, `One model turn: ${turns.length} requests`);
+      await new Promise(r => setTimeout(r, 1000));
+      const tickets = (await db.prepare("SELECT title FROM tickets WHERE title = 'Daily answer limit reached'").all<{ title: string }>()).results;
+      assert.equal(tickets.length, 1, `At most the ticket caps: ${JSON.stringify(tickets)}`);
+    } finally { await capped.dispose(); }
+  }, 180_000);
+
+  test('chat unchanged: no reply tool in a chat turn’s gateway request; the text streams', async () => {
+    // A member who is not an owner or admin (from before the panel joins): no owner/admin tools, and never reply.
+    const started = await post('/chat/start', { handoff: handoff('usr_mo') });
+    assert.equal(started.status, 200, JSON.stringify(started.body));
+    await fakeHook('/__role', { userId: 'usr_mo', workspaceId: 'ws_acme', role: 'member' });
+    const chat = await connect(started.body.socketUrl);
+    await chat.until(f => f.type === 'history');
+    const before = recorded.length;
+    chat.send({ type: 'user.message', clientMessageId: 'u0', text: 'Why are Gmail bounces up (chat check)?' });
+    const end = await chat.until(f => f.type === 'message.end' && /61 of 1,000/.test(f.text ?? ''), 60_000);
+    const member = recorded.slice(before).filter(r => about(r, '(chat check)'));
+    assert.ok(member.length >= 2 && member.every(r => offered(r).includes('bounce_reasons') && offered(r).includes('file_ticket') && !offered(r).includes('reply') && !MANAGER.some(n => offered(r).includes(n))), JSON.stringify(member.map(offered)));
+    assert.equal(chat.frames.filter(f => f.type === 'text.delta' && f.messageId === end.messageId).map(f => f.delta).join(''), end.text, 'The answer streams as deltas.');
+    assert.ok(!chat.frames.some(f => f.type === 'tool.start' && f.tool === 'reply'));
+    // Promoted to admin: the same session's next turn offers the owner/admin tools (its permissions follow the turn).
+    await fakeHook('/__role', { userId: 'usr_mo', workspaceId: 'ws_acme', role: 'admin' });
+    chat.send({ type: 'user.message', clientMessageId: 'u1', text: 'Why are Gmail bounces up (chat admin)?' });
+    await chat.until(f => f.type === 'message.end' && f.messageId !== end.messageId && /61 of 1,000/.test(f.text ?? ''), 60_000);
+    const admin = recorded.slice(before).filter(r => about(r, '(chat admin)'));
+    assert.ok(admin.length >= 2 && admin.every(r => MANAGER.every(n => offered(r).includes(n)) && !offered(r).includes('reply')), JSON.stringify(admin.map(offered)));
+    chat.ws.close();
   }, 120_000);
 
   test('M5: daily caps on turns, tickets, mail and confirm links; unverified email gets no model turn; the team is alerted once', async () => {
@@ -939,7 +1074,7 @@ describe('support Worker', () => {
     afterAll(() => instance?.dispose());
     type Row = { id: string; kind: string; state: string; attempts: number; due_at: number; last_error: string | null };
     type Run = { rows: Row[]; legacy: { message_id: string; state: string }[]; alarm: number | null; before: number; meta: { closedAt: number | null } | null };
-    async function drive(id: string, options: { tick?: boolean; expire?: string; age?: number; unavailable?: string; route?: string; fail?: 'throw' } = {}) {
+    async function drive(id: string, options: { tick?: boolean; expire?: string; age?: number; unavailable?: string; route?: string; fail?: 'throw' | 'reply' } = {}) {
       const res = await instance.dispatchFetch(`${SUPPORT}/__conversation`, { method: 'POST', body: JSON.stringify({ id, ...options }) });
       assert.equal(res.status, 200);
       return await res.json() as Run;
@@ -982,7 +1117,7 @@ describe('support Worker', () => {
       const thread = 'thr_busy', message = 'msg_busy_1';
       // Rita is over today's answers, so her email files a ticket for the team while it is processed.
       // An email's person is counted by their address (Nightmail keeps the account).
-      await (await db()).prepare("INSERT INTO daily_counters (day, key, n) VALUES (?, ?, 1000)").bind(new Date().toISOString().slice(0, 10), `sender:${await addressHash('rita@acme.test')}:turns`).run();
+      await (await db()).prepare("INSERT INTO daily_counters (day, key, n) VALUES (?, ?, 1000)").bind(new Date().toISOString().slice(0, 10), `sender:${await addressHash('rita@acme.test')}:email_turns`).run();
       await outage('/v1/inbound/threads', 503);
       await hook(message, thread, 'rita@acme.test');
       const id = await conversationOf(thread);
@@ -1203,6 +1338,27 @@ describe('support Worker', () => {
       await drive(target, { tick: true });
       const toStranger = (await replies(thread, instance)).filter(c => c[3].to[0] === 'stranger@else.test');
       assert.deepEqual(toStranger.map(c => [c[3].replyToMessageId, c[3].text]), [['msg_d3_b', GENERAL]]);
+    });
+
+    /** An email whose turn calls reply, then the object is evicted while the turn is still running. */
+    async function interrupted(thread: string, message: string, from: string) {
+      await hook(message, thread, from);
+      const id = await conversationOf(thread), models = recorded.length;
+      const res = await instance.dispatchFetch(`${SUPPORT}/__conversation`, { method: 'POST', body: JSON.stringify({ id, fail: 'reply', tick: true }) });
+      await res.body?.cancel();
+      await new Promise(r => setTimeout(r, 500));
+      assert.ok(recorded.slice(models).some(r => offered(r).includes('reply')), 'The turn ran.');
+      assert.equal((await replies(thread, instance)).length, 0, 'Not sent yet.');
+      return id;
+    }
+
+    test('a crash after the reply call sends the same text once, with no second model call', async () => {
+      const thread = 'thr_crash', message = 'msg_crash_1', id = await interrupted(thread, message, 'cara@acme.test'), asked = recorded.length;
+      let run = await drive(id, { expire: `answer:${message}`, tick: true });
+      assert.equal(states(run)[`answer:${message}`], 'done');
+      run = await drive(id, { tick: true });
+      assert.equal(recorded.length, asked, 'No second model call.');
+      assert.deepEqual((await replies(thread, instance)).map(c => [c[5], c[3].text]), [[`reply-${message}`, GENERAL]]);
     });
 
     test('an answer is resent with the same text and no second model call', async () => {
