@@ -7,7 +7,7 @@ import * as SwitchPrimitive from '@radix-ui/react-switch';
 import { ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, LoaderCircle, MoreHorizontal, Search, X } from 'lucide-react';
 import { Link, useLocation, useNavigate } from 'react-router';
 import { label as formatLabel } from '../../lib/format';
-import { ApiError, errorText, permissionCodes, tryAgain } from '../../data/types';
+import { ApiError, errorText, permissionCodes, tooBroadCode, tryAgain } from '../../data/types';
 import { PrivateAddress } from '../PrivateAddress';
 import { TOUCH, matches, usePhone, useTouch } from '../../lib/media';
 import { SkeletonText, PaginationSkeleton, ControlSkeleton } from './skeleton';
@@ -363,6 +363,8 @@ const permissionError = (error: unknown) => error instanceof Error && 'code' in 
 // Something that isn't there stays missing however often it is asked for: no retry beside it.
 const notFound = (error: unknown) => error instanceof Error && (('status' in error && error.status === 404) || ('code' in error && /not_found/i.test(String(error.code))));
 export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () => void }) {
+  // Too broad a read fails the same way again: one calm line asks for narrower filters, with no retry.
+  if (error instanceof ApiError && error.code === tooBroadCode) return <div className="ui-error-state"><Alert tone="neutral"><span>{error.message}</span></Alert></div>;
   if (permissionError(error)) return <div className="ui-error-state"><Alert tone="neutral" title="Owners and admins only"><span>{error instanceof ApiError ? error.message : 'Only workspace owners and admins can open this.'}</span></Alert></div>;
   return <div className="ui-error-state"><Alert tone="danger" title="Couldn’t load this content"><ErrorText error={error} />{onRetry && !notFound(error) && <div className="ui-error-state__retry"><Button onClick={onRetry}>Try again</Button></div>}</Alert></div>;
 }

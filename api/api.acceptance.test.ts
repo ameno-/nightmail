@@ -13918,6 +13918,44 @@ describe('Dashboard API capabilities', () => {
     });
   });
 
+  test('dashboard reads: a statement past its time limit is refused with READ_TOO_LARGE within the limit; a normal read is unchanged', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const wid = runtime.config.workspaceId, [sent, received, thread] = ['sent', 'received', 'thread'].map(name => unique(`read-limit-${name}-`));
+      await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, created_at)
+        VALUES ($1, $2, $3, 'fixture', 'hello@limits.example', '["ada@example.net"]', '[]', '[]', 'Within the limit', '{"kind":"transactional"}', false, 'delivered', now() - interval '1 minute')`, [sent, wid, REGION]);
+      await db.query('INSERT INTO mail_threads(id, workspace_id) VALUES ($1, $2)', [thread, wid]);
+      await db.query(`INSERT INTO mail_messages(id, workspace_id, direction, thread_id, region, subject, from_address, "to", envelope_to, spam, received_at)
+        VALUES ($1, $2, 'inbound', $3, $4, 'Received mail', 'linus@example.org', '[]', '[]', false, now())`, [received, wid, thread, REGION]);
+      const timeout = async () => (await db.query('SHOW statement_timeout')).rows[0].statement_timeout;
+
+      // A normal read answers as before. Inside the fixture's transaction a budgeted read is a savepoint, so its SET LOCAL
+      // outlives it: that shows which limit the read ran under.
+      const page = ok(await local('GET', '/v1/logs?limit=10&counts=true'));
+      assert.deepEqual([page.data.map((row: Json) => row.id), page.counts.status, page.counts.kind], [[received, sent], { delivered: 1, received: 1 }, { transactional: 1, marketing: 0 }]);
+      assert.equal(await timeout(), '5s');
+      assert.deepEqual(ok(await local('GET', '/v1/inbound/messages')).data.map((row: Json) => row.id), [received]);
+      assert.equal(await timeout(), '3s');
+
+      // A slow statement: a row-security policy sleeps on this workspace's received mail, inside a savepoint that undoes it.
+      const workspace = (await db.query('SELECT quote_literal($1::text) AS q', [wid])).rows[0].q as string;
+      const tooBroad = async (path: string, seconds: number) => {
+        await db.query(`SAVEPOINT slow_read; SET LOCAL statement_timeout = '60s';
+          ALTER TABLE mail_messages ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
+          CREATE POLICY slow_read ON mail_messages USING (CASE WHEN workspace_id = ${workspace} THEN pg_sleep(30) IS NOT NULL ELSE true END)`);
+        try {
+          const started = performance.now(), reply = await local('GET', path), elapsed = performance.now() - started;
+          assert.equal(error(reply, 422, 'READ_TOO_LARGE').message, `This request is too broad to answer within ${seconds} seconds. Narrow the dates or filters.`);
+          assert.ok(elapsed > seconds * 1000 - 100 && elapsed < seconds * 1000 + 1000, `${path} answered after ${Math.round(elapsed)} ms`);
+          t.diagnostic(`READ-LIMIT ${path}: 422 after ${Math.round(elapsed)} ms`);
+        } finally { await db.query('ROLLBACK TO SAVEPOINT slow_read; RELEASE SAVEPOINT slow_read'); }
+      };
+      await tooBroad('/v1/logs?direction=received', 5);
+      await tooBroad('/v1/inbound/messages', 3);
+      // The policy and its locks went with the savepoint: the same read answers again.
+      assert.deepEqual(ok(await local('GET', '/v1/logs?direction=received')).data.map((row: Json) => row.id), [received]);
+    });
+  });
+
   test('email threads: a detail and its Logs rows show the whole conversation, as far as each credential may read it', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const wid = runtime.config.workspaceId, at = (seconds: number) => new Date(Date.parse('2026-02-05T10:00:00Z') + seconds * 1000).toISOString();

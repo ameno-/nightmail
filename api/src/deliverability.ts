@@ -1,10 +1,10 @@
 import { sql, type SQL } from 'drizzle-orm';
-import { ApiError, type DbExecutor, type Runtime } from './core.js';
+import { ApiError, budgetedRead, type DbExecutor, type ReadBudget, type Runtime } from './core.js';
 import { productName } from './brand.js';
 
 // Deliverability aggregates over a workspace's retained mail (30 days of sending_emails and their events), shared by
 // the support grant's reads (src/support-deliverability.ts) and, later, a customer /v1/metrics?groupBy= (decision D9).
-// Every function takes the executor of one budgeted read (budgetedRead) and reads through these indexes only:
+// Every function takes the executor of one budgeted read (supportRead) and reads through these indexes only:
 //   sending_emails_created_page (workspace_id, created_at DESC, id DESC): the window of a workspace's mail;
 //   sending_emails_kind_created (workspace_id, (snapshot->>'kind'), created_at): a stream, without detoasting snapshot;
 //   sending_emails_campaign_status (workspace_id, campaign_id, status): one campaign;
@@ -21,21 +21,11 @@ export const SCREEN_CODES = ['CONTENT_REJECTED_SPAM', 'CONTENT_IMAGE_ONLY', 'CON
 const texts = (list: readonly string[]) => sql`${sql.param([...list])}::text[]`;
 
 /**
- * One read-only transaction whose every statement stops after 3 seconds. A read that needs longer is refused with
+ * A support read (budgetedRead) whose every statement stops after 3 seconds. A read that needs longer is refused with
  * 422 SUPPORT_READ_TOO_LARGE rather than holding a connection: the caller narrows the window or the filters.
  */
-export async function budgetedRead<T>(db: Runtime['db'], work: (tx: DbExecutor) => Promise<T>): Promise<T> {
-  try {
-    return await db.transaction(async tx => {
-      await tx.execute(sql`SET LOCAL statement_timeout = '3s'`);
-      return work(tx);
-    }, { accessMode: 'read only' });
-  } catch (error) {
-    if ([error, (error as { cause?: unknown })?.cause].some(e => (e as { code?: string } | null)?.code === '57014'))
-      throw new ApiError(422, 'SUPPORT_READ_TOO_LARGE', 'This read needs more than 3 seconds. Narrow the window or add a filter (campaignId, fromDomain, provider).');
-    throw error;
-  }
-}
+const SUPPORT_READ: ReadBudget = { seconds: 3, refusal: () => new ApiError(422, 'SUPPORT_READ_TOO_LARGE', 'This read needs more than 3 seconds. Narrow the window or add a filter (campaignId, fromDomain, provider).') };
+export const supportRead = <T>(db: Runtime['db'], work: (tx: DbExecutor) => Promise<T>) => budgetedRead(db, work, SUPPORT_READ);
 
 // ---------- recipient providers ----------
 /** Recipient domain → mailbox provider, a static map (support-agent-design §5.2). `families` match `<name>.<tld>`. */

@@ -1300,6 +1300,9 @@ export const previewEmail = <ThrowOnError extends boolean = false>(options: Opti
     }
 });
 
+/**
+ * Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.
+ */
 export const listEmails = <ThrowOnError extends boolean = false>(options?: Options<ListEmailsData, ThrowOnError>): RequestResult<ListEmailsResponses, ListEmailsErrors, ThrowOnError> => (options?.client ?? client).get<ListEmailsResponses, ListEmailsErrors, ThrowOnError>({
     security: [
         { scheme: 'bearer', type: 'http' },
@@ -1589,6 +1592,9 @@ export const deleteCampaign = <ThrowOnError extends boolean = false>(options: Op
     ...options
 });
 
+/**
+ * Each statement stops after 3 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.
+ */
 export const getCampaign = <ThrowOnError extends boolean = false>(options: Options<GetCampaignData, ThrowOnError>): RequestResult<GetCampaignResponses, GetCampaignErrors, ThrowOnError> => (options.client ?? client).get<GetCampaignResponses, GetCampaignErrors, ThrowOnError>({
     security: [
         { scheme: 'bearer', type: 'http' },
@@ -1633,7 +1639,7 @@ export const updateCampaign = <ThrowOnError extends boolean = false>(options: Op
 });
 
 /**
- * Lifetime campaign delivery and unique open/click statistics, progress, tracking setting and rates with numeric numerators/denominators. Counts distinct emails across all stored feedback, not event occurrences. Delivery/bounce/complaint rates use accepted emails; open/click rates use delivered emails. Both rate counts exclude simulated emails. Rates are fractions, null for zero denominators; engagement rates are also null with tracking disabled. Delivered means receiving-server acceptance, not inbox placement. Engagement includes bots/privacy proxies. Done means dispatch finished; asynchronous feedback can still change totals.
+ * Lifetime campaign delivery and unique open/click statistics, progress, tracking setting and rates with numeric numerators/denominators. Counts distinct emails across all stored feedback, not event occurrences. Delivery/bounce/complaint rates use accepted emails; open/click rates use delivered emails. Both rate counts exclude simulated emails. Rates are fractions, null for zero denominators; engagement rates are also null with tracking disabled. Delivered means receiving-server acceptance, not inbox placement. Engagement includes bots/privacy proxies. Done means dispatch finished; asynchronous feedback can still change totals. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.
  */
 export const getCampaignStats = <ThrowOnError extends boolean = false>(options: Options<GetCampaignStatsData, ThrowOnError>): RequestResult<GetCampaignStatsResponses, GetCampaignStatsErrors, ThrowOnError> => (options.client ?? client).get<GetCampaignStatsResponses, GetCampaignStatsErrors, ThrowOnError>({
     security: [
@@ -2531,7 +2537,7 @@ export const unsubscribeByLink = <ThrowOnError extends boolean = false>(options:
 export const unsubscribeOneClick = <ThrowOnError extends boolean = false>(options: Options<UnsubscribeOneClickData, ThrowOnError>): RequestResult<UnsubscribeOneClickResponses, UnsubscribeOneClickErrors, ThrowOnError> => (options.client ?? client).post<UnsubscribeOneClickResponses, UnsubscribeOneClickErrors, ThrowOnError>({ url: '/unsubscribe/{token}', ...options });
 
 /**
- * Operational created-cohort metrics, not invoicing or provider reputation. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event, or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results. Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour additionally returns hourly UTC creation buckets with canonical ISO dates such as 2026-09-12T01:00:00.000Z, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity.
+ * Operational created-cohort metrics, not invoicing or provider reputation. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event, or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results. Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour additionally returns hourly UTC creation buckets with canonical ISO dates such as 2026-09-12T01:00:00.000Z, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.
  */
 export const getMetrics = <ThrowOnError extends boolean = false>(options?: Options<GetMetricsData, ThrowOnError>): RequestResult<GetMetricsResponses, GetMetricsErrors, ThrowOnError> => (options?.client ?? client).get<GetMetricsResponses, GetMetricsErrors, ThrowOnError>({
     security: [
@@ -5244,7 +5250,7 @@ export const setInboundAddressFlow = <ThrowOnError extends boolean = false>(opti
 /**
  * List visible conversations
  *
- * Newest visible activity first, then descending thread ID. addressId narrows all projected messages and IDs. q searches visible messages; view matches state on any visible address. all (default) includes trash. Pass nextCursor to continue.
+ * Newest visible activity first, then descending thread ID. addressId narrows all projected messages and IDs. q searches visible messages; view matches state on any visible address. all (default) includes trash. Pass nextCursor to continue. Each statement stops after 3 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.
  */
 export const listInboundThreads = <ThrowOnError extends boolean = false>(options?: Options<ListInboundThreadsData, ThrowOnError>): RequestResult<ListInboundThreadsResponses, ListInboundThreadsErrors, ThrowOnError> => (options?.client ?? client).get<ListInboundThreadsResponses, ListInboundThreadsErrors, ThrowOnError>({
     security: [
@@ -5340,7 +5346,7 @@ export const updateInboundThread = <ThrowOnError extends boolean = false>(option
 /**
  * Search received and sent messages
  *
- * Newest first; default inbound. Unassigned stored mail is visible only to a workspace administrator without an address filter.
+ * Newest first; default inbound. Unassigned stored mail is visible only to a workspace administrator without an address filter. Each statement stops after 3 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.
  */
 export const listInboundMessages = <ThrowOnError extends boolean = false>(options?: Options<ListInboundMessagesData, ThrowOnError>): RequestResult<ListInboundMessagesResponses, ListInboundMessagesErrors, ThrowOnError> => (options?.client ?? client).get<ListInboundMessagesResponses, ListInboundMessagesErrors, ThrowOnError>({
     security: [
@@ -5428,7 +5434,7 @@ export const downloadInboundAttachment = <ThrowOnError extends boolean = false>(
 /**
  * List sent and received mail together
  *
- * Sent and received mail in one list, newest first, with an opaque cursor bound to the filters. Sent mail is what listEmails returns (keys restricted to domains see their own domains); received mail is what listInboundMessages returns for the same credential: administrators see every received message, including unrouted mail, with delivery details; dashboard members see mail on receiving addresses; other credentials get sent mail only. kind, campaignId and a sent-mail status filter sent mail and leave received mail out; status=received or status=spam filter received mail and leave sent mail out.
+ * Sent and received mail in one list, newest first, with an opaque cursor bound to the filters. Sent mail is what listEmails returns (keys restricted to domains see their own domains); received mail is what listInboundMessages returns for the same credential: administrators see every received message, including unrouted mail, with delivery details; dashboard members see mail on receiving addresses; other credentials get sent mail only. kind, campaignId and a sent-mail status filter sent mail and leave received mail out; status=received or status=spam filter received mail and leave sent mail out. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.
  */
 export const listLogs = <ThrowOnError extends boolean = false>(options?: Options<ListLogsData, ThrowOnError>): RequestResult<ListLogsResponses, ListLogsErrors, ThrowOnError> => (options?.client ?? client).get<ListLogsResponses, ListLogsErrors, ThrowOnError>({
     security: [

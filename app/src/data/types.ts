@@ -262,6 +262,8 @@ export type WebhookInput = Pick<Webhook, 'name' | 'url' | 'events'> & { regionId
 // A dashboard session that meets these is a member: say who can do it instead of the key jargon behind the code.
 const ownersOnly = 'Only workspace owners and admins can do this. Ask one to do it, or to make you an admin.'
 export const permissionCodes = new Set(['PERMISSION_DENIED', 'ADMIN_REQUIRED', 'OWNER_REQUIRED'])
+/** A read past its time limit: the same filters would fail again, so the person narrows them instead of retrying. */
+export const tooBroadCode = 'READ_TOO_LARGE'
 const friendlyErrors: Record<string, (detail: string) => string> = {
   PERMISSION_DENIED: detail => /permission|owner or admin|administration|principal/i.test(detail) ? ownersOnly : detail,
   ADMIN_REQUIRED: () => ownersOnly,
@@ -280,6 +282,7 @@ const friendlyErrors: Record<string, (detail: string) => string> = {
   AUDIENCEQL_LIMIT_EXCEEDED: () => 'A bulk change can update at most 10,000 contacts. Filter to a smaller list and try again.',
   AUDIENCE_PLAN_EXPIRED: () => 'This count is more than 15 minutes old. Count again, then confirm.',
   STALE_AUDIENCE_PLAN: () => 'Some of these contacts changed after they were counted. Count again, then confirm.',
+  [tooBroadCode]: () => 'Too much mail to load at once. Narrow the dates or filters.',
 }
 /**
  * A failed API call. `message` is what to show a person: plain language with a next step, so any `error.message`
