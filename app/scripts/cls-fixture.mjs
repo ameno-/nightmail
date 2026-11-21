@@ -528,7 +528,7 @@ async function billing(db) {
 // resolved chat. The agent keeps two notes about Sam. The support platform pulled the outbox a minute ago, so staff can
 // reply. IDs follow the support platform's shapes (conv_, msg_, tkt_, snt_).
 const supportId = (prefix, word, length) => `${prefix}_${word.padEnd(length, 'a')}`;
-async function supportInbox(db) {
+async function supportInbox(db, webhookId) {
   const conv = word => supportId('conv', word, 26), msg = word => supportId('msg', word, 16);
   const chat = conv('samdkimchat'), email = conv('leebouncemail'), stranger = conv('strangermail'), closed = conv('samclosedchat'), keys = conv('leekeyschat');
   await db.query(`INSERT INTO support_conversations(id,channel,thread_id,user_id,pending_address,verification,evidence,mode,workspace_id,status,subject,ticket_id,ticket_type,ticket_severity,
@@ -567,7 +567,17 @@ async function supportInbox(db) {
   await note('samdns', chat, 'DNS for northwind.example is managed by their agency; changes take a day.', 38);
   await note('samlimit', closed, 'Asked for 20,000 a day for a product launch.', 4318);
   await db.query("INSERT INTO support_outbox_polls(id,polled_at) VALUES (1,now()-interval '1 minute') ON CONFLICT (id) DO UPDATE SET polled_at=excluded.polled_at");
-  return chat;
+  // A change support proposed to Dana in her own (now closed) chat: a test event to her delivery webhook, which she
+  // confirms in the dialog its emailed link opens (/support/actions/<id>). Nightmail's sentence, as the API writes it.
+  const danaChat = conv('danawebhookchat'), action = 'sac_' + createHash('sha256').update('cls-support-action').digest('hex').slice(0, 32);
+  await db.query(`INSERT INTO support_conversations(id,channel,user_id,verification,evidence,mode,workspace_id,status,subject,agent_state,last_message_at,messages,turns,cost_usd,created_at,closed_at)
+    VALUES ($1,'chat','user_dana','handoff','{"handoff":"sho_00000000000000000000000000000009"}','member','ws_northwind','closed','Webhook deliveries failing','active',now()-interval '50 minutes',2,1,0.0390,
+      now()-interval '1 hour',now()-interval '20 minutes')`, [danaChat]);
+  const parts = { template: 'Send a test email.delivered event to your sending webhook ending {endpoint}, in the workspace {workspace}. No email is sent.', labels: { endpoint: '••••bane', workspace: 'Northwind' } };
+  await db.query(`INSERT INTO support_actions(id,conversation_id,user_id,workspace_id,kind,target,summary,parts,created_at,expires_at)
+    VALUES ($1,$2,'user_dana','ws_northwind','test_webhook',$3,$4,$5,now()-interval '45 minutes',now()+interval '23 hours 15 minutes')`,
+    [action, danaChat, JSON.stringify({ webhookId }), parts.template.replace(/\{([a-z]+)\}/g, (_, name) => JSON.stringify(parts.labels[name])), JSON.stringify(parts)]);
+  return { conversation: chat, action };
 }
 
 /** Driftwood's triage rule, version `n`: each agent save in a live job changes one line in place, so the line count
@@ -752,7 +762,7 @@ export async function seed(fx) {
     events: [{ at: ago(3 * 24 * 60), from: 'ok', to: 'warn', reasons: [{ ...complaints, code: 'COMPLAINTS_WARN', step: 'warn', count: 2, message: '2 of 1,830 accepted emails were marked as spam in 24 hours (0.11%; the warn line is 0.05% and 2).' }] }, { at: ago(2 * 24 * 60), from: 'warn', to: 'restrict', reasons: [complaints] }] });
 
   await billing(db);
-  const supportConversation = await supportInbox(db);
+  const { conversation: supportConversation, action: supportAction } = await supportInbox(db, hook.webhook?.id ?? hook.id);
 
   // Lumen Labs: verified domain, no key, no mail. Field Notes: no sending connection yet.
   const nia = await fx.signIn('nia', 'nia@lumenlabs.example', 'Nia Moreau', { id: 'ws_fresh', name: 'Lumen Labs' });
@@ -791,6 +801,6 @@ export async function seed(fx) {
   fx.liveKey = agent.secret;
   return {
     mcp, restricted: 'ws_harbor', email, junkEmail, receivedEmail: 'msg_northwind_invoice', threadEmail: thread.email, threadReceived: thread.received, domain: nw.id, sendingDomain: sendingDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
-    webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, template: template.id ?? template.template?.id, segment: segment.id, supportConversation,
+    webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, template: template.id ?? template.template?.id, segment: segment.id, supportConversation, supportAction,
   };
 }

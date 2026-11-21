@@ -1,5 +1,4 @@
 import { useEffect, useRef, type CSSProperties } from 'react'
-import { Link } from 'react-router'
 import { Button, Dialog, Disclosure, ErrorState, Meter, MetricRow, SkeletonText, type Tone } from '../../components/ui'
 import type { SenderScore, SenderScoreFactor } from '../../data/types'
 import { closeScoreAbout, useScoreAbout } from '../../lib/score-about'
@@ -28,7 +27,8 @@ export function evaluationLeft(report: SenderScore, now = Date.now()) {
 
 // What the sender score is and where each part stands: one dialog for the whole app, opened from the score card
 // (lib/score-about.ts). The status, the 14-day trend and (Hosted) the limit the score sets come first, then the six
-// parts, one line each (its weight and where it stands), then how it is graded, with what each part measures.
+// parts, one line each: its weight in the score (labelled as one, so 30% never reads as a rate), its score as a meter,
+// what was measured and its score out of 100. Then how it is graded, with what each part measures.
 export function ScoreAbout({ report, error, onRetry }: { report: SenderScore | undefined; error: unknown; onRetry: () => void }) {
   const { open, focus } = useScoreAbout()
   const list = useRef<HTMLUListElement>(null)
@@ -43,7 +43,7 @@ export function ScoreAbout({ report, error, onRetry }: { report: SenderScore | u
     limit.growth ? `growing: up to ${number(limit.growth.hourly)} this hour` : null,
     graded && limit.next ? limit.next.unlimited ? `none from ${limit.next.atScore}` : `next ${number(limit.next.limit)} at ${limit.next.atScore}` : null, `${number(limit.perMinute)} a minute`, limit.transactionalReserve ? `${number(limit.transactionalReserve)} kept for receipts` : null].filter(Boolean).join(' · ')
   return <Dialog open={open} onOpenChange={next => { if (!next) closeScoreAbout() }} className="score-about" title="Sender score"
-    footer={<><Link className="ui-button ui-button--ghost ui-button--md" to="/docs/api/getSenderScore" onClick={closeScoreAbout}>API reference</Link><Button variant="primary" onClick={closeScoreAbout}>Done</Button></>}>
+    footer={<Button variant="primary" onClick={closeScoreAbout}>Done</Button>}>
     {!report ? error ? <ErrorState error={error} onRetry={onRetry} /> : <div className="score-about__status"><SkeletonText width="60%" /></div> : <>
       <div className="score-about__status" data-grade={graded && report.grade ? gradeKey(report.grade) : undefined}>
         <b>{graded ? Math.round(report.score!) : '—'}</b>
@@ -58,10 +58,10 @@ export function ScoreAbout({ report, error, onRetry }: { report: SenderScore | u
         {limitLine && <span className="score-about__limit muted">{limitLine}</span>}
       </div>
       <ul ref={list} className="score-about__factors" aria-label="The six parts">{report.factors.map(factor => { const measured = graded && factor.source === 'measured'; return <li key={factor.key} data-key={factor.key} data-focus={focus === factor.key || undefined}>
-        <MetricRow label={factor.label} hint={`${factor.weight}%`}
-          spark={measured ? <Meter value={factor.score!} max={100} mark={80} label={`${factor.label}: ${Math.round(factor.score!)} of 100`} /> : <Meter value={0} />}
+        <MetricRow label={factor.label} hint={`${factor.weight}% weight`}
+          spark={measured ? <Meter value={factor.score!} max={100} label={`${factor.label}: ${Math.round(factor.score!)} of 100`} /> : <Meter value={0} />}
           value={measured ? factorFormats[factor.key](factor.value!) : <span className="muted">{graded ? 'No data' : '—'}</span>}
-          unit={measured ? <span className={`score-about__part-score ui-tone--${partTone(factor.score!)}`}>{Math.round(factor.score!)}</span> : undefined} />
+          unit={measured ? <span className={`score-about__part-score ui-tone--${partTone(factor.score!)}`}>{Math.round(factor.score!)}<span className="score-about__out-of">/100</span></span> : undefined} />
       </li> })}</ul>
       <Disclosure className="score-about__section" title="How it’s graded">
         <dl className="score-about__bases">{report.factors.map(factor => <div key={factor.key}><dt>{factor.label}</dt><dd>{factor.basis}</dd></div>)}</dl>

@@ -1,4 +1,6 @@
-import type { ConsentRequest, Connection, ConversationStatus, MessageKind, ServerMessage, SupportTransport, TicketFiled, TransportEvent } from './protocol'
+import type { ActionRequest, ConsentRequest, Connection, ConversationStatus, MessageKind, ServerMessage, SupportTransport, TicketFiled, TransportEvent } from './protocol'
+import type { SupportAction } from '../../data/support'
+import { ApiError } from '../../data/types'
 import { MAX_IMAGE_BYTES, MAX_IMAGES, MAX_MESSAGE, sniff } from './protocol'
 import { productName } from '../../../../api/src/brand'
 
@@ -11,6 +13,10 @@ export type Part =
   | { kind: 'tool'; id: string; label: string; state: ToolState }
   | { kind: 'consent'; request: ConsentRequest; state: 'open' | 'allowing' | 'allow' | 'deny' }
   | { kind: 'ticket'; ticket: TicketFiled; screenshots: number }
+  | ActionPart
+/** A proposed change (§4.4): `action` is Nightmail's record of it, read with the person's session (null until it loads);
+ *  `error` why it couldn't be read or decided. */
+export interface ActionPart { kind: 'action'; request: ActionRequest; action: SupportAction | null; state: 'loading' | 'ready' | 'confirming' | 'declining'; error: string | null }
 /** A screenshot in a sent message: its local preview, or none after a reload (the server never sends images back). */
 export interface ChatImage { url: string | null; name: string }
 /** `local`: only in this panel so far: a message waiting for the connection, or the reply being prepared for it (until
@@ -66,6 +72,31 @@ export function ticketTitle(ticket: TicketFiled) {
   return ticket.category === 'human_requested' ? `Passed to a person on the ${productName} team` : `Passed to the ${productName} team`
 }
 
+/** What a proposed change does, as the card's question. */
+export function actionTitle(kind: string) {
+  const titles: Record<string, string> = { retry_webhook_delivery: 'Retry a webhook delivery?', test_webhook: 'Send a test webhook?', retry_inbound_delivery: 'Retry an inbound webhook delivery?',
+    test_inbound_webhook: 'Send a test to your inbound webhook?', redeliver_message: 'Redeliver a received message?', pause_campaign: 'Pause a campaign?' }
+  return titles[kind] ?? 'Make this change?'
+}
+/** What came of a decided change, in a few words; null while it waits for the person. */
+export function actionOutcome(action: SupportAction): string | null {
+  const done: Record<string, string> = { retry_webhook_delivery: 'Delivery retried', test_webhook: 'Test event sent', retry_inbound_delivery: 'Delivery retried', test_inbound_webhook: 'Test message sent',
+    redeliver_message: 'Redelivery queued', pause_campaign: 'Campaign paused' }
+  switch (action.status) {
+    case 'proposed': return null
+    case 'running': return 'Sending the test…'
+    case 'done': return done[action.kind] ?? 'Done'
+    case 'failed': return `Didn’t run: ${action.error?.message ?? 'it failed.'}`
+    case 'declined': return 'Declined. Nothing changed.'
+    case 'expired': return 'Expired. Ask support again if you still want it.'
+  }
+}
+/** Why a proposal couldn't be read or decided, for the card. */
+function actionError(error: unknown) {
+  if (error instanceof ApiError && error.status === 404) return 'This change isn’t available to this account.'
+  return error instanceof Error && error.message ? error.message : `Couldn’t reach ${productName}. Try again.`
+}
+
 export class SupportStore {
   private state: ChatState = initial()
   private listeners = new Set<() => void>()
@@ -79,6 +110,7 @@ export class SupportStore {
   /** Local previews of sent screenshots by attachment ID, so history after a reconnect still shows them. */
   private previews = new Map<string, string>()
   private readonly unsubscribe: () => void
+  private disposed = false
 
   constructor(readonly transport: SupportTransport) {
     this.unsubscribe = transport.subscribe(event => this.handle(event))
@@ -200,6 +232,49 @@ export class SupportStore {
     this.set(current => ({ messages: current.messages.map(message => message.parts.some(part => part.kind === 'consent' && part.request.requestId === requestId)
       ? { ...message, parts: message.parts.map(part => part.kind === 'consent' && part.request.requestId === requestId ? { ...part, state } : part) } : message) }))
   }
+  /** Confirm or Not now on an action card: Nightmail decides it for the person's session, and the card shows what came of it. */
+  async decideAction(actionId: string, decision: 'confirm' | 'decline') {
+    const part = this.actionPart(actionId)
+    if (!part?.action || part.action.status !== 'proposed' || part.state !== 'ready') return
+    this.setAction(actionId, { state: decision === 'confirm' ? 'confirming' : 'declining', error: null })
+    try {
+      const action = await this.transport.decideAction(actionId, decision)
+      this.setAction(actionId, { action, state: 'ready' })
+      this.set({ announcement: actionOutcome(action) ?? '' })
+      if (action.status === 'running') this.followAction(actionId)
+    } catch (error) {
+      if (this.disposed) return
+      this.setAction(actionId, { state: 'ready', error: actionError(error) })
+      // Expired, or decided in another tab meanwhile: the card shows where it stands now.
+      void this.readAction(actionId)
+    }
+  }
+  private actionPart(actionId: string) {
+    for (const message of this.state.messages) for (const part of message.parts) if (part.kind === 'action' && part.request.actionId === actionId) return part
+    return null
+  }
+  private setAction(actionId: string, change: Partial<ActionPart>) {
+    this.set(current => ({ messages: current.messages.map(message => message.parts.some(part => part.kind === 'action' && part.request.actionId === actionId)
+      ? { ...message, parts: message.parts.map(part => part.kind === 'action' && part.request.actionId === actionId ? { ...part, ...change } : part) } : message) }))
+  }
+  /** A card for a proposal (once per action), filled from Nightmail's record. */
+  private proposeAction(request: ActionRequest) {
+    if (!this.actionPart(request.actionId)) this.append({ kind: 'action', request, action: null, state: 'loading', error: null })
+    void this.readAction(request.actionId)
+  }
+  private async readAction(actionId: string) {
+    try {
+      const action = await this.transport.readAction(actionId)
+      if (this.disposed) return
+      this.setAction(actionId, { action, state: this.actionPart(actionId)?.state === 'loading' ? 'ready' : this.actionPart(actionId)?.state })
+      if (action.status === 'running') this.followAction(actionId)
+    } catch (error) {
+      if (this.disposed || !this.actionPart(actionId)) return
+      this.setAction(actionId, { state: 'ready', error: actionError(error) })
+    }
+  }
+  /** A test still posting (another tab confirmed it): read it again until it has an answer. */
+  private followAction(actionId: string) { setTimeout(() => { if (!this.disposed) void this.readAction(actionId) }, 2000) }
   cancel() { this.transport.send({ type: 'cancel' }) }
   requestHuman() { if (this.transport.send({ type: 'human.request' })) this.set({ humanRequested: true }) }
   end() { this.transport.send({ type: 'end' }) }
@@ -211,7 +286,7 @@ export class SupportStore {
     this.transport.continueLast()
     this.set({ canContinue: this.transport.last() !== null })
   }
-  dispose() { for (const controller of this.uploads.values()) controller.abort(); this.unsubscribe(); this.transport.dispose(); this.listeners.clear() }
+  dispose() { this.disposed = true; for (const controller of this.uploads.values()) controller.abort(); this.unsubscribe(); this.transport.dispose(); this.listeners.clear() }
 
   private handle(event: TransportEvent) {
     if (event.type === 'connection') {
@@ -240,6 +315,7 @@ export class SupportStore {
         this.set({ messages: [...messages, ...local, ...answering ? [placeholder(messages.at(-1)!.id)] : []], imagesSent: imagesSent + this.outbox.reduce((sum, item) => sum + (item.attachments?.length ?? 0), 0) })
         if (message.pending.consent) this.append({ kind: 'consent', request: message.pending.consent, state: 'open' })
         if (message.pending.ticket) this.append({ kind: 'ticket', ticket: message.pending.ticket, screenshots: imagesSent })
+        for (const request of message.pending.actions ?? []) this.proposeAction(request)
         this.synced = true
         this.flush()
         break
@@ -288,6 +364,12 @@ export class SupportStore {
         this.set({ announcement: `${productName} support asks to read the content of your emails in ${message.workspace.name}. ${message.why}`, unread: this.state.unread || !this.visible })
         break
       case 'consent.resolved': this.setConsent(message.requestId, message.decision); break
+      case 'action.request':
+        this.proposeAction({ actionId: message.actionId, kind: message.kind, summary: message.summary })
+        this.set({ announcement: `${productName} support asks you to confirm a change. ${actionTitle(message.kind)}`, unread: this.state.unread || !this.visible })
+        break
+      // Decided elsewhere (another tab, the emailed link): the card reads where it stands.
+      case 'action.resolved': if (this.actionPart(message.actionId)) void this.readAction(message.actionId); break
       case 'ticket.filed': {
         // Screenshots sent in the conversation go with the ticket (§5.1).
         const ticket: TicketFiled = { ticketId: message.ticketId, ticketType: message.ticketType, category: message.category, replyTo: message.replyTo, expect: message.expect }

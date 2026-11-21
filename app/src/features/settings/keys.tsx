@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
 import { useSearchParams } from 'react-router'
 import { Button, Checkbox, ConfirmDialog, CopyButton, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, KeyValues, PageHeader, Pagination, StatusBadge, Tabs, useToast, SecretDialog } from '../../components/ui'
 import { useApiMutation, useApiDef, useWorkspaceAccess } from '../../data/context'
@@ -19,6 +19,7 @@ import { AddressList, PrivateAddress } from '../../components/PrivateAddress'
 import { ConnectAgentButton, ConnectAgentDialog, McpKeySetup } from '../docs/connect-agent'
 import { MailSettings, useMailServers } from '../docs/mail-settings'
 import { apiKeyEnv, productName } from '../../../../api/src/brand'
+import { usePhone } from '../../lib/media'
 
 // One table for the three credential types: API keys, agent tokens (a connected agent, with the short-lived tokens it
 // made nested under it) and app passwords.
@@ -91,13 +92,17 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
   const [revoking, setRevoking] = useState<Row | null>(null)
   const [viewing, setViewing] = useState<Row | null>(null)
   const [editing, setEditing] = useState<ApiKey | null>(null)
+  // The row or card a key's details opened from: Revoke and Edit replace the details dialog, so when they close, focus
+  // goes back there rather than to the page's top.
+  const opener = useRef<HTMLElement | null>(null)
+  const view = (row: Row) => { const focused = document.activeElement; opener.current = focused instanceof HTMLElement && focused !== document.body ? focused : null; setViewing(row) }
   const address = (id: string) => addresses.data?.find(item => item.id === id)?.address ?? id
   // Edit opens once what its form lists has loaded (a workspace key's domains, an inbox key's inboxes), so they don't
   // push its fields down as they arrive.
   const editDomains = useDomainOptions(editing?.access.type === 'workspace')
   const editInboxes = useInboxOptions('key-options', {}, editing?.access.type === 'inbox')
   const editReady = editing && !(editing.access.type === 'workspace' ? editDomains.isPending : editing.access.type === 'inbox' && editInboxes.isPending)
-  const actions = (row: Row) => [...editable(row) ? [{ label: 'Edit', onSelect: () => setEditing(row.key) }] : [], { label: revokeLabel(row), destructive: true, onSelect: () => setRevoking(row) }]
+  const actions = (row: Row) => [...editable(row) ? [{ label: 'Edit', onSelect: () => { opener.current = null; setEditing(row.key) } }] : [], { label: revokeLabel(row), destructive: true, onSelect: () => { opener.current = null; setRevoking(row) } }]
 
   // API keys page by cursor; agents and app passwords aren't paginated, so they join the first page. Each source fails
   // on its own: the others still list, with one error and a retry for every source that failed.
@@ -173,7 +178,7 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
     <div className="keys-sections">
       <section className="section stack" aria-label="Keys">
         <Tabs label="Type" value={type} onValueChange={value => { setType(value as KeyTypeFilter); pagination.reset() }} items={[...keyTypes]} />
-        {!listFailed && <DataTable className="keys-table keys-table--two-line" loading={listLoading} skeletonRows={3} rows={rows} rowKey={row => row.id} onRowClick={setViewing} empty={empty}
+        {!listFailed && <DataTable className="keys-table keys-table--two-line" loading={listLoading} skeletonRows={3} rows={rows} rowKey={row => row.id} onRowClick={view} empty={empty}
           columns={[
             { ...nameColumn, render: row => <TwoLines nested={row.kind === 'token'} first={name(row).first} second={name(row).second} />, cardRender: row => <span className={row.kind === 'token' ? 'keys-nested' : undefined}>{name(row).first}</span> },
             { ...typeColumn, render: row => typeName[row.kind] },
@@ -191,8 +196,8 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
     <ConnectAgentDialog open={connecting} onOpenChange={setConnecting} />
     <SecretDialog secret={secret?.secret ?? null} title={secret?.title ?? 'Key created'} description={secret?.description} onClose={() => setSecret(null)}>{secret?.sendExample && <KeySendExample apiKey={secret.secret} />}{secret?.agent && <McpKeySetup secret={secret.secret} env={apiKeyEnv} />}{secret?.mail && <MailSettings username={secret.mail.username} imap={secret.mail.imap} smtp={secret.mail.smtp} />}</SecretDialog>
     <KeyDetails row={viewing} fields={viewing ? details(viewing) : []} onClose={() => setViewing(null)} onRevoke={row => { setViewing(null); setRevoking(row) }} onEdit={key => { setViewing(null); setEditing(key) }} />
-    {editing && editReady && <EditKeyDialog apiKey={editing} onClose={() => setEditing(null)} />}
-    <RevokeDialog row={revoking} onClose={() => setRevoking(null)} pending={revokeKey.isPending || revokeAgent.isPending || revokeToken.isPending || revokePassword.isPending}
+    {editing && editReady && <EditKeyDialog apiKey={editing} onClose={() => setEditing(null)} returnFocus={opener} />}
+    <RevokeDialog row={revoking} returnFocus={opener} onClose={() => setRevoking(null)} pending={revokeKey.isPending || revokeAgent.isPending || revokeToken.isPending || revokePassword.isPending}
       onConfirm={async row => {
         if (row.kind === 'key') await revokeKey.mutateAsync(row.key.id)
         else if (row.kind === 'agent') await revokeAgent.mutateAsync(row.agent.id)
@@ -203,8 +208,9 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
 }
 
 // One row in full, with its actions: the way to read a long name or address list on a phone, where a card clips it. Its
-// state beside the title; what it can reach, then its life (prefix, ID, dates); a key's changes in a second tab, loaded
-// with the dialog, so switching to it moves nothing.
+// state beside the title; what it can reach, then its prefix, ID and dates; a key's changes in a second tab, loaded
+// with the dialog. Both tabs share one cell sized by the details, and the changes scroll inside it, so neither switching
+// tabs nor the history arriving moves the footer.
 const accessFacts = new Set(['Type', 'Access', 'Domains', 'Mail', 'Inbox', 'Client', 'Account', 'Agent approval'])
 const stateOf = (row: Row) => row.kind === 'key' ? keyState(row.key) : row.kind === 'token' ? tokenState(row.token) : row.kind === 'agent' ? agentState(row.agent) : null
 function KeyDetails({ row, fields, onClose, onRevoke, onEdit }: { row: Row | null; fields: [string, ReactNode][]; onClose: () => void; onRevoke: (row: Row) => void; onEdit: (key: ApiKey) => void }) {
@@ -212,23 +218,27 @@ function KeyDetails({ row, fields, onClose, onRevoke, onEdit }: { row: Row | nul
   const id = row?.id
   useEffect(() => { setTab('details') }, [id])
   const state = row ? stateOf(row) : null
+  // A phone's sheet closes with its X and a swipe: no Close beside Revoke and Edit.
+  const phone = usePhone()
   const facts = fields.filter(([label]) => label !== 'Status')
   const life: [string, ReactNode][] = [...facts.filter(([label]) => !accessFacts.has(label)), ...(row?.kind === 'key' ? [['ID', <span className="ui-kv__id"><code>{row.key.id}</code><CopyButton value={row.key.id} label="Copy key ID" /></span>] as [string, ReactNode]] : [])]
   return <Dialog size="lg" open={row !== null} onOpenChange={next => { if (!next) onClose() }} title={row ? rowName(row) : ''}
     status={row && <StatusBadge status={state ?? 'Active'} tone={state === 'Revoked' || state === 'Ended' ? 'danger' : state ? 'warning' : 'success'} />}
     footer={<>
       {row && !rowState(row) && <Button variant="danger" className="ui-dialog__footer-start" onClick={() => onRevoke(row)}>{revokeLabel(row)}</Button>}
-      <Button onClick={onClose}>Close</Button>
+      {!phone && <Button onClick={onClose}>Close</Button>}
       {row && editable(row) && <Button variant="primary" onClick={() => onEdit(row.key)}>Edit</Button>}
     </>}>
     {row?.kind === 'key' && <Tabs label="Key" value={tab} onValueChange={setTab} items={[{ value: 'details', label: 'Details' }, { value: 'changes', label: 'Changes' }]} />}
-    <div className="keys-details" hidden={tab !== 'details'}>
-      <h3 className="ui-label ui-label--rule">Access</h3>
-      <KeyValues items={facts.filter(([label]) => accessFacts.has(label))} />
-      <h3 className="ui-label ui-label--rule">Lifecycle</h3>
-      <KeyValues items={life} />
+    <div className="keys-panels">
+      <div className="keys-details" data-inactive={tab !== 'details' || undefined} inert={tab !== 'details'}>
+        <h3 className="ui-label ui-label--rule">Permissions</h3>
+        <KeyValues items={facts.filter(([label]) => accessFacts.has(label))} />
+        <h3 className="ui-label ui-label--rule">Dates</h3>
+        <KeyValues items={life} />
+      </div>
+      {row?.kind === 'key' && <div className="keys-changes" data-inactive={tab !== 'changes' || undefined} inert={tab !== 'changes'}><KeyChanges keyId={row.key.id} /></div>}
     </div>
-    {row?.kind === 'key' && <div className="keys-changes" hidden={tab !== 'changes'}><KeyChanges keyId={row.key.id} /></div>}
   </Dialog>
 }
 
@@ -250,14 +260,14 @@ function KeyChanges({ keyId }: { keyId: string }) {
 }
 
 // What revoking each one ends, said before it happens.
-function RevokeDialog({ row, onClose, onConfirm, pending }: { row: Row | null; onClose: () => void; onConfirm: (row: Row) => Promise<void>; pending: boolean }) {
+function RevokeDialog({ row, onClose, onConfirm, pending, returnFocus }: { row: Row | null; onClose: () => void; onConfirm: (row: Row) => Promise<void>; pending: boolean; returnFocus: RefObject<HTMLElement | null> }) {
   const description: ReactNode = !row ? ''
     : row.kind === 'key' ? row.key.access.type === 'workspace' ? 'Requests using this key will stop working. Revoking a key cannot be undone.' : 'Agents using this key stop working immediately, and queued mail it sent will not be dispatched. Revoking cannot be undone.'
     : row.kind === 'agent' ? row.agent.own ? 'This revokes its sign-in and every agent token it made: they stop working immediately. It can sign in again as a new agent.' : <>This revokes the agent tokens it made in this workspace. The sign-in belongs to <PrivateAddress value={row.agent.userEmail} />.</>
     : row.kind === 'token' ? 'This short-lived token stops working immediately. Revoking it cannot be undone.'
     : 'Mail apps using it are signed out and can’t sign in with it again. The inbox and its mail stay.'
   const label = row ? revokeLabel(row) : 'Revoke'
-  return <ConfirmDialog open={row !== null} onOpenChange={next => { if (!next) onClose() }} title={`Revoke ${row ? rowName(row) : 'key'}?`} description={description} confirmLabel={label} danger pending={pending} onConfirm={async () => { if (row) await onConfirm(row) }} />
+  return <ConfirmDialog open={row !== null} onOpenChange={next => { if (!next) onClose() }} title={`Revoke ${row ? rowName(row) : 'key'}?`} description={description} confirmLabel={label} danger pending={pending} returnFocus={returnFocus} onConfirm={async () => { if (row) await onConfirm(row) }} />
 }
 
 function TwoLines({ first, second, nested = false }: { first: ReactNode; second: ReactNode; nested?: boolean }) {

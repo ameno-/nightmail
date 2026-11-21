@@ -1,4 +1,4 @@
-import { supportApi } from '../../data/support'
+import { supportActionsApi, supportApi } from '../../data/support'
 import { ApiError } from '../../data/types'
 import { parseServerMessage, sniff, type ClientMessage, type Connection, type SupportTransport, type TransportEvent } from './protocol'
 import { hostedHosts, productName, supportHost } from '../../../../api/src/brand'
@@ -186,6 +186,14 @@ export function createSocketTransport({ origin, workspaceId, resume }: { origin:
     async allowContent(requestId) {
       try { if (send({ type: 'consent.respond', requestId, decision: 'allow', handoff: await handoff(true) })) return } catch { /* Not allowed: answer no. */ }
       send({ type: 'consent.respond', requestId, decision: 'deny' })
+    },
+    readAction: (actionId, signal) => supportActionsApi.get(actionId, signal),
+    // Nightmail runs the change for the person's session; the hint only wakes the agent, which reads what came of it
+    // from Nightmail itself. A hint lost to a closed socket costs nothing: the agent reads it at its next turn.
+    async decideAction(actionId, decision) {
+      const action = await supportActionsApi[decision](actionId)
+      send({ type: 'action.resolved', actionId })
+      return action
     },
     uploads: true,
     // POST /c/<conversationId>/attachments with the chat token (the one in the socket URL after a reload). A rejected

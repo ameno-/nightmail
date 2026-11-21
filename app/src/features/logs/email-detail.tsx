@@ -231,7 +231,9 @@ function StepTip({ step, day }: { step: Step; day: string }) {
   for (const event of step.events) if (event.diagnostic) lines.push(<code key={event.id}><AddressText text={event.diagnostic} /></code>)
   if (links.length) lines.push(<AddressText text={links.map(linkText).join(', ')} />)
   if (bots) lines.push(`${bots} likely from a bot or link scanner.`)
+  // When: the exact UTC time of a single event (the column shows the time since the first), every time for repeats.
   if (step.events.length > 1) lines.push(step.events.map(event => stamp(event.at, day)).join(', '))
+  else if (step.at) lines.push(`${date(step.at, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23', timeZone: 'UTC' })} UTC`)
   return <span className="delivery-tip">{lines.map((line, index) => <span key={index}>{line}</span>)}</span>
 }
 
@@ -256,16 +258,14 @@ function Delivery({ email, vertical }: { email: Email; vertical: boolean }) {
   }
   // In a column (or a phone's sheet): a waterfall, every event on one time axis with the time since the first.
   if (vertical) {
-    let last = steps.find(step => step.at)?.at ?? day
-    const start = Date.parse(last)
+    const start = Date.parse(steps.find(step => step.at)?.at ?? day)
     const rows = steps.map((step, index) => {
       const [name] = eventCopy[step.key] ?? [label(step.key)]
       const reason = step.key === 'bounce' || step.key === 'non_permanent_bounce' ? bounceReason(step.events[0]?.detail) : undefined
-      if (step.at) last = step.at
-      const at = Date.parse(last)
-      return { key: step.key, tone: toneOf(step.key), series: seriesOf[step.key], at,
+      return { key: step.key, tone: toneOf(step.key), series: seriesOf[step.key],
         label: <Tooltip content={<StepTip step={step} day={day} />}><span className="delivery__fact" tabIndex={0}><span className="delivery__name">{name}{step.events.length > 1 && <span className="delivery__count"> {step.events.length}×</span>}</span>{reason && <span className="delivery__note">{reason}</span>}</span></Tooltip>,
-        delta: index === 0 ? <time dateTime={step.at}>{step.at ? time(step.at) : '—'}</time> : step.at ? `+${elapsed(at - start)}` : '—' }
+        // A step with no time of its own (a status without its event) leaves the column empty rather than a bare dash.
+        delta: !step.at ? '' : index === 0 ? <time dateTime={step.at}>{time(step.at)}</time> : `+${elapsed(Date.parse(step.at) - start)}` }
     })
     return <div className="delivery" data-vertical>
       <Waterfall label="Delivery" rows={rows} />

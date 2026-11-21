@@ -30,7 +30,7 @@ const languages = [{ value: 'curl', label: 'cURL' }, { value: 'sdk', label: 'Typ
 
 // Sends a clearly labelled test from hello@<domain> to the signed-in user's own address. The server picks the
 // recipient and content (POST /v1/domains/{id}/test-send); the dashboard only names the domain.
-export function TestSend({ domain, onSent }: { domain: Domain; onSent?: (id: string) => void }) {
+export function TestSend({ domain, onSent, primary = false }: { domain: Domain; onSent?: (id: string) => void; primary?: boolean }) {
   const identity = useSession()?.identity
   const to = identity?.email
   const from = `hello@${domain.name}`
@@ -40,7 +40,7 @@ export function TestSend({ domain, onSent }: { domain: Domain; onSent?: (id: str
   if (!to) return null
   return <>
     <div className="first-send-test">
-      <Button loading={test.isPending} disabled={!verified || test.isSuccess} onClick={() => test.mutate()}><Send size={14} aria-hidden />Send a test email</Button>
+      <Button variant={primary ? 'primary' : undefined} loading={test.isPending} disabled={!verified || test.isSuccess} onClick={() => test.mutate()}><Send size={14} aria-hidden />Send a test email</Button>
       <span className="muted" role="status">{test.isSuccess ? <>Test email queued to <PrivateAddress value={to} />{test.data.simulated ? ' (simulated)' : ''}. <Link to={`/logs/${encodeURIComponent(test.data.id)}`}>View in Logs</Link></> : verified ? <>From <PrivateAddress value={from} /> to <PrivateAddress value={to} /></> : `Available once ${domain.name} is verified.`}</span>
     </div>
     {test.error ? <Alert tone="danger"><ErrorText error={test.error} /></Alert> : null}

@@ -214,7 +214,7 @@
    "findings": []
   },
   "Overview · connect agent sheet · phone": {
-   "score": 18,
+   "score": 15,
    "findings": []
   },
   "Overview · desktop": {
@@ -587,6 +587,14 @@
   },
   "Support · agent handling · phone": {
    "score": 7,
+   "findings": []
+  },
+  "Support · confirm a change · desktop": {
+   "score": 9,
+   "findings": []
+  },
+  "Support · confirm a change · phone": {
+   "score": 9,
    "findings": []
   },
   "Support · conversation · desktop": {

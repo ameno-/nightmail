@@ -117,11 +117,13 @@ function ExistingWebhook({ id }: { id: string }) {
   const { multiTenant } = useWorkspaceAccess()
   const regions = useRegionCatalog({ enabled: !multiTenant })
   if (webhook.isPending || (!multiTenant && regions.isPending)) return <SettingsRouteSkeleton kind="webhook" />
-  if (webhook.error || (!multiTenant && regions.error)) return <ErrorState error={webhook.error || regions.error} onRetry={() => { void webhook.refetch(); if (!multiTenant) void regions.refetch() }} />
-  return <WebhookEditor key={id} webhook={webhook.data} regions={regions.data?.data ?? []} />
+  // Only a failed first read takes the page. Once the editor is up, a failed refresh (a poll, or the reread after a
+  // test or retry) keeps it and its unsaved edits, and says so in Delivery history with its own retry.
+  if (!webhook.data || (!multiTenant && !regions.data)) return <ErrorState error={webhook.error || regions.error} onRetry={() => { void webhook.refetch(); if (!multiTenant) void regions.refetch() }} />
+  return <WebhookEditor key={id} webhook={webhook.data} regions={regions.data?.data ?? []} refreshError={webhook.error} onRefresh={() => void webhook.refetch()} />
 }
 
-function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: RegionCatalogEntry[] }) {
+function WebhookEditor({ webhook, regions, refreshError, onRefresh }: { webhook: Webhook; regions: RegionCatalogEntry[]; refreshError: unknown; onRefresh: () => void }) {
   const navigate = useNavigate()
   const { multiTenant } = useWorkspaceAccess()
   // Hosted users can't change the region scope, so their updates leave it out and keep the saved one.
@@ -137,7 +139,11 @@ function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: Region
   const [history, setHistory] = useState<{items: WebhookDelivery[]; nextCursor?: string | null} | null>(null)
   const [historyError, setHistoryError] = useState<unknown>(null)
   const [historyBusy, setHistoryBusy] = useState(false)
-  const [inspected, setInspected] = useState<WebhookDelivery | null>(null)
+  // The delivery open in the inspector, read from the current rows on every render, so a poll that settles it updates
+  // the dialog too; the row as opened stays shown if it leaves the page.
+  const [opened, setInspected] = useState<WebhookDelivery | null>(null)
+  const rows = history?.items ?? webhook.deliveries
+  const inspected = opened && (rows.find(delivery => delivery.id === opened.id) ?? opened)
   const save = useApiMutation((api, value: WebhookInput) => api.webhooks.save(value), 'Webhook saved')
   const status = useApiMutation((api, value: { id: string; status: 'active' | 'paused' }) => api.webhooks.setStatus(value.id, value.status), 'Webhook status updated')
   const rotate = useApiMutation((api, id: string) => api.webhooks.rotate(id), 'Signing secret rotated')
@@ -178,7 +184,8 @@ function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: Region
     <form id="edit-webhook" className="stack" onSubmit={submit} noValidate><MutationError error={save.error} /><EndpointFields input={input} savedUrl={save.data?.url ?? webhook.url} onChange={setInput} regions={regions} errors={errors} apiError={save.error} disabled={pending} headers={{ current: currentHeaders, draft: headers, onChange: setHeaders }} /></form>
     <section className="section stack settings-rule"><SectionHeader title={<span className="settings-guide-title">Signing secret<SigningGuide /></span>} actions={<><Button loading={reveal.isPending} disabled={pending} onClick={async () => { try { setSecret({ value: (await reveal.mutateAsync(webhook.id)).secret, rotated: false }) } catch { /* Shown inline. */ } }}>Reveal</Button><Button disabled={pending} onClick={() => setAction('rotate')}>Rotate</Button><Button loading={test.isPending} disabled={pending || webhook.status === 'paused'} title={webhook.status === 'paused' ? 'Resume this webhook to test delivery' : 'Sends a sample email.delivered event, marked as a test'} onClick={async () => { try { await test.mutateAsync(webhook.id); setHistory(null); historyPagination.reset() } catch { /* Shown inline. */ } }}>Test webhook</Button></>} /><MutationError error={test.error ?? reveal.error} /></section>
     <section className="section stack settings-rule"><SectionHeader title="Delivery history" /><MutationError error={retry.error} />
-      <DataTable minRows={3} rows={history?.items ?? webhook.deliveries} rowKey={delivery => delivery.id} empty={<EmptyState title="No deliveries yet" />} columns={[
+      {refreshError ? <ErrorState error={refreshError} onRetry={onRefresh} /> : null}
+      <DataTable minRows={3} rows={rows} rowKey={delivery => delivery.id} empty={<EmptyState title="No deliveries yet" />} columns={[
         { ...column(deliveryColumnSet, 'time'), render: (delivery: WebhookDelivery) => <div>{time(delivery.at)}<div className="muted">{date(delivery.at)}</div></div>, cardRender: (delivery: WebhookDelivery) => `${date(delivery.at, { month: 'short', day: 'numeric', timeZone: 'UTC' })} · ${time(delivery.at)}` },
         ...multiTenant ? [] : [{ ...column(deliveryColumnSet, 'region'), render: (delivery: WebhookDelivery) => delivery.regionId }],
         { ...column(deliveryColumnSet, 'event'), render: (delivery: WebhookDelivery) => delivery.test ? <span className="settings-cell-stack"><span>Test</span><span className="muted">{eventLabel(delivery.event)}</span></span> : eventLabel(delivery.event), cardRender: (delivery: WebhookDelivery) => `${delivery.test ? 'Test · ' : ''}${eventLabel(delivery.event)} · ${delivery.response || 'No response'}` },
@@ -197,12 +204,12 @@ function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: Region
     <SecretDialog secret={secret?.value ?? null} title={`${webhook.name} · ${secret?.rotated ? 'New signing secret' : 'Signing secret'}`} description={secret?.rotated ? undefined : `Keep it on your server: anyone with it can sign requests as ${productName}.`} onClose={() => { setSecret(null); rotate.reset(); reveal.reset() }}><SigningGuide /></SecretDialog>
     {/* A delivery in full: its facts as key/value rows, then the payload as sent, with copy for both the ID and the JSON. */}
     <Dialog size="lg" open={inspected !== null} onOpenChange={open => { if (!open) setInspected(null) }} title={inspected?.test ? 'Test delivery payload' : 'Delivery payload'}
-      status={inspected && <StatusBadge status={label(inspected.status)} />} actions={inspected && <CopyButton value={JSON.stringify(inspected.payload ?? {}, null, 2)} label="Copy payload" />}
-      footer={<Button variant="primary" onClick={() => setInspected(null)}>Close</Button>}>
+      status={inspected && <StatusBadge status={label(inspected.status)} />}
+      footer={<Button onClick={() => setInspected(null)}>Close</Button>}>
       {inspected && <>
         <h3 className="ui-label ui-label--rule">Delivery</h3>
         <KeyValues className="settings-delivery-facts" items={[['Event', <code>{inspected.event}</code>], ['Response', inspected.response ?? 'No response'], ['Attempts', number(inspected.attempts)], ['Created', `${shortDateTime(inspected.at)} UTC`], ...multiTenant ? [] : [['Region', inspected.regionId] as [string, ReactNode]], ['ID', <span className="ui-kv__id"><code>{inspected.id}</code><CopyButton value={inspected.id} label="Copy delivery ID" /></span>]]} />
-        <h3 className="ui-label ui-label--rule">Payload</h3>
+        <div className="settings-payload-head"><h3 className="ui-label ui-label--rule">Payload</h3><CopyButton value={JSON.stringify(inspected.payload ?? {}, null, 2)} label="Copy payload" /></div>
         <pre className="settings-payload">{JSON.stringify(inspected.payload ?? {}, null, 2)}</pre>
       </>}
     </Dialog>

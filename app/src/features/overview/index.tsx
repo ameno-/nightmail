@@ -53,7 +53,9 @@ export function OverviewPage() {
   // Latest emails and the figures above it must agree: when a new email (or a new outcome for one) shows in the list,
   // the figures are read again. The API keys its dashboard cache on the same mail activity, so that read is current.
   const count = useLatestRowCount()
-  const latest = useApiDef(queries.logs({ regionId, direction: 'all', page: 1, pageSize: count }), { interval: 60_000, keepPrevious: sameRegion(regionId) })
+  // A stream picked in the header scopes Latest emails too: its sent mail (received mail has no stream).
+  const latestParams = stream === 'all' ? { regionId, direction: 'all' as const, page: 1, pageSize: count } : { regionId, direction: 'sent' as const, stream, page: 1, pageSize: count }
+  const latest = useApiDef(queries.logs(latestParams), { interval: 60_000, keepPrevious: sameRegion(regionId) })
   const head = latest.data?.items.slice(0, 7).map(row => `${row.id}:${row.status}`).join(',')
   const seen = useRef<string | undefined>(undefined)
   const refetch = query.refetch
@@ -63,12 +65,13 @@ export function OverviewPage() {
     <div className="ov-split">
       <div className="ov-split__main">
         {stacked && setup.steps && <SetupRail steps={setup.steps} current={setup.current} open={setup.open} />}
+        {stacked && setup.error ? <ErrorState error={setup.error} onRetry={setup.retry} /> : null}
         <Fragment key={held ? 'held' : 'ready'}>
           {query.isError && !data ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
             {data && !held ? <Facts data={data} stale={query.isPlaceholderData} /> : <FactsSkeleton />}
             {data && !held ? <Chart data={data} range={shownRange} stale={query.isPlaceholderData} /> : <ChartSkeleton />}
           </>}
-          <LatestEmails count={count} held={held} />
+          <LatestEmails params={latestParams} held={held} />
         </Fragment>
       </div>
       <Aside setup={setup} showSetup={!stacked} campaigns={data?.recentCampaigns} />
@@ -97,9 +100,11 @@ function Aside({ setup, showSetup, campaigns }: { setup: ReturnType<typeof useSe
   return <aside className="ov-split__aside" aria-label="Status">{!ready ? <AsideSkeleton /> : <>
     {score.data && <StandingCard report={score.data} />}
     {showSetup && setup.steps && <SetupRail steps={setup.steps} current={setup.current} open={setup.open} />}
+    {showSetup && setup.error ? <ErrorState error={setup.error} onRetry={setup.retry} /> : null}
     {score.isError && !score.data ? <ErrorState error={score.error} onRetry={() => score.refetch()} /> : showScore && <SidebarScore />}
     <DailyLimit report={score.data} />
-    {!setup.steps && <NextSteps items={next.items} />}
+    {/* Next steps follow setup: never in its place while setup is unknown. */}
+    {!setup.steps && !setup.error && <NextSteps items={next.items} />}
     {campaigns && campaigns.length > 0 && <Campaigns rows={campaigns.slice(0, 3)} />}
   </>}</aside>
 }
@@ -109,9 +114,11 @@ const buckets = (points: ChartPoint[]) => `${points.length}:${points[0]?.at ?? '
 const swap = 200
 
 // Four metric rows (label · series · mono value), two by two. A rate's rule is its meter against its warning line (5%
-// bounces, 0.1% complaints, with a tick there); delivery's against 100%. Every number tweens (tabular figures, laid out
-// from the right, so nothing beside it moves) and every series morphs or crossfades.
+// bounces, 0.1% complaints, with a tick there), coloured only once the rate reaches that line: a healthy week is grey.
+// Every number tweens (tabular figures, laid out from the right, so nothing beside it moves) and every series morphs or crossfades.
 export const BOUNCE_LINE = 0.05, COMPLAINT_LINE = 0.001
+// An hour is marked only with enough mail for its rate to mean something: one bounce in four emails is not a trend.
+const BAND_VOLUME = 20
 function Facts({ data, stale }: { data: Overview; stale: boolean }) {
   const sent = useTween(data.sent, swap), delivered = useTween(data.sent ? data.delivered / data.sent : 0, swap), bounced = useTween(data.sent ? data.bounced / data.sent : 0, swap), complaints = useTween(data.sent ? data.complaints / data.sent : 0, swap)
   const deliveredCount = useTween(data.delivered, swap), bouncedCount = useTween(data.bounced, swap), complaintCount = useTween(data.complaints, swap)
@@ -119,9 +126,9 @@ function Facts({ data, stale }: { data: Overview; stale: boolean }) {
   const bounceWarn = data.sent > 0 && data.bounced / data.sent >= BOUNCE_LINE, complaintWarn = data.sent > 0 && data.complaints / data.sent >= COMPLAINT_LINE
   const facts = [
     { title: factTitles[0], value: number(Math.round(sent)), aside: data.previousSent ? `${change >= 0 ? '+' : ''}${percent(change, 0)}` : '', series: data.points.map(p => p.sent), tone: 'sent' },
-    { title: factTitles[1], value: data.sent ? percent(delivered) : '—', aside: number(Math.round(deliveredCount)), series: data.points.map(p => p.delivered), tone: 'delivered', meter: <Meter value={data.sent ? delivered : 0} label="Delivered of all emails" /> },
-    { title: factTitles[2], value: data.sent ? percent(bounced) : '—', aside: number(Math.round(bouncedCount)), series: data.points.map(p => p.bounced), tone: 'bounces', warn: bounceWarn, meter: <Meter value={data.sent ? bounced : 0} max={BOUNCE_LINE * 2} mark={BOUNCE_LINE} tone={data.bounced ? 'warning' : 'neutral'} label="Bounce rate" /> },
-    { title: factTitles[3], value: data.sent ? percent(complaints) : '—', aside: number(Math.round(complaintCount)), series: data.points.map(p => p.complaints), tone: 'complaints', warn: complaintWarn, meter: <Meter value={data.sent ? complaints : 0} max={COMPLAINT_LINE * 2} mark={COMPLAINT_LINE} tone={data.complaints ? 'danger' : 'neutral'} label="Complaint rate" /> },
+    { title: factTitles[1], value: data.sent ? percent(delivered) : '—', aside: number(Math.round(deliveredCount)), series: data.points.map(p => p.delivered), tone: 'delivered' },
+    { title: factTitles[2], value: data.sent ? percent(bounced) : '—', aside: number(Math.round(bouncedCount)), series: data.points.map(p => p.bounced), tone: 'bounces', warn: bounceWarn, meter: <Meter value={data.sent ? bounced : 0} max={BOUNCE_LINE * 2} mark={data.sent ? BOUNCE_LINE : undefined} tone={bounceWarn ? 'warning' : 'neutral'} label="Bounce rate" title={`Warning at ${percent(BOUNCE_LINE, 0)}`} /> },
+    { title: factTitles[3], value: data.sent ? percent(complaints) : '—', aside: number(Math.round(complaintCount)), series: data.points.map(p => p.complaints), tone: 'complaints', warn: complaintWarn, meter: <Meter value={data.sent ? complaints : 0} max={COMPLAINT_LINE * 2} mark={data.sent ? COMPLAINT_LINE : undefined} tone={complaintWarn ? 'danger' : 'neutral'} label="Complaint rate" title={`Warning at ${percent(COMPLAINT_LINE, 1)}`} /> },
   ]
   return <div className="ov-facts" role="group" aria-label="Figures" data-stale={stale || undefined}>{facts.map(fact => <MetricRow key={fact.title} label={fact.title} hint={fact.aside}
     spark={<Crossfade id={buckets(data.points)} className="ov-spark-stack"><Spark values={fact.series} tone={fact.tone} /></Crossfade>}
@@ -147,12 +154,12 @@ const sameRegion = (regionId: string) => (previous: readonly unknown[]) => (prev
 // The latest mail is the top of Logs: the same rows, columns and masking (features/logs/rows.tsx), compact. `count`
 // rows fill the column (latest.ts) and are always reserved, so loading, short and full lists are the same height; a new
 // count after a resize keeps the old rows up until the new page arrives. A new email or outcome crossfades the rows.
-function LatestEmails({ count, held }: { count: number; held: boolean }) {
-  const { regionId } = useRegion()
-  const logs = useApiDef(queries.logs({ regionId, direction: 'all', page: 1, pageSize: count }), { interval: 60_000, keepPrevious: sameRegion(regionId) }) // warmed with the page (data/prefetch.ts)
+function LatestEmails({ params, held }: { params: { regionId: string; direction: 'all' | 'sent'; stream?: string; page: number; pageSize: number }; held: boolean }) {
+  const { regionId, pageSize: count, stream } = params
+  const logs = useApiDef(queries.logs(params), { interval: 60_000, keepPrevious: sameRegion(regionId) }) // warmed with the page (data/prefetch.ts)
   const rowIntent = useLogRowIntent()
   const rows = (logs.data?.items ?? []).slice(0, count)
-  return <section className="ov-latest"><SectionHeader title="Latest emails" actions={<Link className="ui-button ui-button--ghost ui-button--sm" to="/logs">Logs <ArrowUpRight size={16} /></Link>} />
+  return <section className="ov-latest"><SectionHeader title="Latest emails" actions={<Link className="ui-button ui-button--ghost ui-button--sm" to={stream ? `/logs?view=sent&stream=${stream}` : '/logs'}>Logs <ArrowUpRight size={16} /></Link>} />
     {logs.isError && !logs.data ? <ErrorState error={logs.error} onRetry={() => logs.refetch()} /> : <Crossfade id={logs.data && rows.map(row => `${row.direction}:${row.id}:${row.status}`).join(',')}><DataTable<LogEntry> className="logs-table ov-table" loading={logs.isPending || held} skeletonRows={count} minRows={count} rows={rows} rowKey={row => `${row.direction}:${row.id}`} rowHref={logHref} rowLabel={logRowLabel} onRowIntent={rowIntent} empty={<EmptyState title="No emails yet" />} columns={logColumns} /></Crossfade>}
   </section>
 }
@@ -200,7 +207,9 @@ function ActivityChart({ points: target, range }: { points: ChartPoint[]; range:
   const count = target.length
   const hasOutcomes = target.every(point => Number.isFinite(point.bounced) && Number.isFinite(point.complaints))
   const maxSent = niceMax(Math.max(...target.map(p => p.sent)))
-  const maxException = niceMax(Math.max(...target.map(p => Math.max(p.bounced ?? 0, p.complaints ?? 0))))
+  // The outcomes' scale reaches at least a tenth of the busiest hour (twice the bounce line), so a peak on it means a high
+  // rate, not one bounce: a lone bounce stays a small bump instead of a spike to the top.
+  const maxException = niceMax(Math.max(...target.map(p => Math.max(p.bounced ?? 0, p.complaints ?? 0)), Math.max(...target.map(p => p.sent)) * BOUNCE_LINE * 2))
   const shown = useMorph([...target.map(p => p.sent), ...target.map(p => p.bounced ?? NaN), ...target.map(p => p.complaints ?? NaN), maxSent, maxException], 200)
   if (!count) return <EmptyState title="No activity" />
   const points = target.map((p, i) => ({ ...p, sent: shown[i], bounced: shown[count + i], complaints: shown[2 * count + i] }))
@@ -212,8 +221,8 @@ function ActivityChart({ points: target, range }: { points: ChartPoint[]; range:
   const x = (i: number) => left + (i + 0.5) * slot
   const barWidth = Math.max(1, Math.min(8, slot * 0.4))
   const y = (value: number, max: number) => bottom - value / max * (bottom - top)
-  const line = (key: 'sent' | 'bounced' | 'complaints', max: number) => {
-    const values = points.map(p => y(p[key], max))
+  const line = (key: 'bounced' | 'complaints', max: number) => {
+    const values = points.map(p => y(p[key], max)), raw = target.map(p => p[key] ?? 0)
     const slopes = values.slice(1).map((value, i) => value - values[i])
     // Monotone cubic interpolation passes through every count without overshooting
     // a peak or dipping below zero; opposite/flat slopes keep extrema horizontal.
@@ -223,7 +232,15 @@ function ActivityChart({ points: target, range }: { points: ChartPoint[]; range:
       const before = slopes[i - 1], after = slopes[i]
       return before * after <= 0 ? 0 : 2 * before * after / (before + after)
     })
-    return values.map((value, i) => i === 0 ? `M ${x(i)} ${value}` : `C ${x(i - 2 / 3)} ${values[i - 1] + tangents[i - 1] / 3} ${x(i - 1 / 3)} ${value - tangents[i] / 3} ${x(i)} ${value}`).join(' ')
+    // Only the stretches with something to show: an outcome's line rises from the baseline and returns to it, and never
+    // runs along it in red between them.
+    let path = '', open = false
+    for (let i = 1; i < values.length; i++) {
+      if (!raw[i - 1] && !raw[i]) { open = false; continue }
+      if (!open) { path += `M ${x(i - 1)} ${values[i - 1]} `; open = true }
+      path += `C ${x(i - 2 / 3)} ${values[i - 1] + tangents[i - 1] / 3} ${x(i - 1 / 3)} ${values[i] - tangents[i] / 3} ${x(i)} ${values[i]} `
+    }
+    return path
   }
   const hourly = range !== '30d'
   const pointLabel = (at: string) => `${date(at, { month: 'short', day: 'numeric', ...(hourly ? { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' as const } : {}), timeZone: 'UTC' })} UTC`
@@ -234,8 +251,8 @@ function ActivityChart({ points: target, range }: { points: ChartPoint[]; range:
   return <div ref={container} className="activity-chart" onMouseLeave={() => setActive(null)}>
     <div className="activity-chart__keys"><span className="chart-legend"><span><i className="legend-sent" />Emails</span></span>{hasOutcomes && <span className="chart-legend"><span><i className="legend-bounces" />Bounces</span><span><i className="legend-complaints" />Complaints</span></span>}</div>
     <svg viewBox={`0 0 ${width} ${height}`} role="group" aria-label={`Emails created per ${hourly ? 'hour' : 'day'} on the left scale; outcomes for those emails on the right scale.`}>
-    {/* Hours whose bounces or complaints crossed their warning line, as bands behind everything else. */}
-    {hasOutcomes && target.map((p, i) => p.sent > 0 && ((p.bounced ?? 0) / p.sent >= BOUNCE_LINE || (p.complaints ?? 0) / p.sent >= COMPLAINT_LINE) && <g key={`anomaly-${p.at}`}><rect x={left + i * slot} y={top} width={slot} height={bottom - top} className="chart-anomaly" /><rect x={left + i * slot} y={bottom + 2} width={slot} height={2} className="chart-anomaly-mark" /></g>)}
+    {/* Hours with real volume whose bounces or complaints crossed their warning line, as bands behind everything else. */}
+    {hasOutcomes && target.map((p, i) => p.sent >= BAND_VOLUME && ((p.bounced ?? 0) / p.sent >= BOUNCE_LINE || (p.complaints ?? 0) / p.sent >= COMPLAINT_LINE) && <g key={`anomaly-${p.at}`}><rect x={left + i * slot} y={top} width={slot} height={bottom - top} className="chart-anomaly" /><rect x={left + i * slot} y={bottom + 2} width={slot} height={2} className="chart-anomaly-mark" /></g>)}
     {[0, 1, 2, 3].map(i => <line key={i} x1={left} x2={right} y1={top + i * (bottom - top) / 3} y2={top + i * (bottom - top) / 3} className={i === 3 ? 'chart-grid chart-grid--base' : 'chart-grid'} />)}
     <Crossfade as="g" id={`${maxSent}:${hasOutcomes ? maxException : ''}`}>{[0, 1, 2, 3].map(i => <g key={i}><text x={0} y={top + i * (bottom - top) / 3 + 4} className="chart-label">{number(Math.round(maxSent * (1 - i / 3)))}</text>{hasOutcomes && <text x={width - 2} y={top + i * (bottom - top) / 3 + 4} textAnchor="end" className="chart-label">{number(Math.round(maxException * (1 - i / 3)))}</text>}</g>)}</Crossfade>
     {points.map((p, i) => p.sent > 0 && <rect key={p.at} x={x(i) - barWidth / 2} y={y(p.sent, sentScale)} width={barWidth} height={bottom - y(p.sent, sentScale)} rx={0} className={`chart-bar${active === i ? ' chart-bar--active' : ''}`} />)}{/* An outcome with nothing to show draws no line: a red rule along the baseline reads as trouble. */}

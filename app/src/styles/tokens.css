@@ -175,12 +175,12 @@
   --shadow-button: inset 0 0 0 1px var(--color-border);
   --shadow-popover: 0 8px 16px rgb(0 0 0 / 4%), 0 4px 8px rgb(0 0 0 / 8%), 0 0 0 .5px rgb(0 0 0 / 12%);
   --shadow-dialog: 0 16px 32px rgb(0 0 0 / 4%), 0 8px 16px rgb(0 0 0 / 8%), 0 0 0 .5px rgb(0 0 0 / 12%);
-  /* Sender score grade bands (the gauge's arcs). */
-  --grade-aplus: #13804A; --grade-a: #2EAF5A; --grade-b: #3B5CF6; --grade-c: #E7AF36; --grade-d: #EE7B30; --grade-f: #D92E3C;
+  /* Sender score grade bands (the gauge's arcs). B is the data navy: a bright blue read as a second accent. */
+  --grade-aplus: #13804A; --grade-a: #2EAF5A; --grade-b: var(--color-accent-data); --grade-c: #E7AF36; --grade-d: #EE7B30; --grade-f: #D92E3C;
 }
 
 :root[data-theme='dark'] {
-  --grade-aplus: #3DD68C; --grade-a: #6BD586; --grade-b: #A2BCFF; --grade-c: #F2CF76; --grade-d: #F59A5B; --grade-f: #F17471;
+  --grade-aplus: #3DD68C; --grade-a: #6BD586; --grade-b: var(--color-accent-data); --grade-c: #F2CF76; --grade-d: #F59A5B; --grade-f: #F17471;
   color-scheme: dark;
   --color-brand: #798ABA; /* the same colour as light: 5.9:1 on deep */
   --color-logo: #F4F2EC; /* the brand's paper: the marks on a dark ground */
@@ -215,6 +215,8 @@
   --hue-ok: 152; --hue-warn: 85; --hue-error: 27; --hue-info: 250;
   --hue-received: 190; --hue-opened: 300; --hue-clicked: 345;
   --l-deep: .985; --l-surface: 1; --l-layer-1: .982; --l-layer-2: .962; --l-layer-3: .945; --l-text: .205; --l-muted: .48; --l-faint: .555;
+  /* An unticked checkbox's or radio's edge: 3:1 or more against the control and the surface or dialog around it. */
+  --l-control-edge: .64;
   /* Ink navy: a fill with white text, hover and pressed steps (darker on light), its edge, text and charts. */
   --color-accent: oklch(.33 .07 263);
   --color-accent-hover: oklch(.29 .065 263);
@@ -227,6 +229,7 @@
 :root[data-theme='dark'] {
   --mark-l: .74; --mark-c: .13; --warn-l: .80; --ink-l: .82; --ink-c: .11;
   --l-deep: .135; --l-surface: .16; --l-layer-1: .195; --l-layer-2: .225; --l-layer-3: .27; --l-text: .945; --l-muted: .72; --l-faint: .62;
+  --l-control-edge: .52;
   /* On near-black the fill lifts a little, hover goes lighter (white stays 7:1) and a 1px edge outlines it. */
   --color-accent: oklch(.40 .075 262);
   --color-accent-hover: oklch(.45 .08 262);
@@ -248,6 +251,7 @@
   --color-border: oklch(var(--l-text) 0 0 / 9%);
   --color-border-muted: oklch(var(--l-text) 0 0 / 6.5%);
   --color-border-strong: oklch(var(--l-text) 0 0 / 17%);
+  --color-control-edge: oklch(var(--l-control-edge) 0 0);
   /* Neutral ink for secondary series and tracks. */
   --color-series: oklch(var(--l-text) 0 0 / 30%);
   --color-series-strong: oklch(var(--l-text) 0 0 / 64%);

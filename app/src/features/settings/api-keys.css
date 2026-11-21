@@ -37,24 +37,39 @@
 .keys-purpose > legend { padding: 0; margin-bottom: var(--space-8); }
 .keys-choice { display: flex; align-items: flex-start; gap: var(--space-8); cursor: pointer; }
 .keys-choice input { appearance: none; flex-shrink: 0; width: var(--space-16); height: var(--space-16); margin: 2px 0 0; border-radius: 50%; background: var(--color-surface); box-shadow: var(--shadow-button); cursor: inherit; transition: box-shadow var(--motion-duration), background var(--motion-duration); }
+.keys-choice input:not(:checked):enabled { box-shadow: inset 0 0 0 1px var(--color-control-edge); }
 .keys-choice input:checked { background: var(--color-on-contrast); box-shadow: inset 0 0 0 5px var(--color-contrast); }
 .keys-purpose:disabled .keys-choice { color: var(--color-muted); cursor: not-allowed; }
-/* Touch: radios grow with the checkboxes beside them (20 px), and a one-line choice is a 44 px target. */
+/* A checkbox among the radios (Organize, IMAP, SMTP) lines up with their two-line labels. */
+.keys-purpose .ui-check-field { align-items: flex-start; min-height: 0; }
+.keys-purpose .ui-checkbox { margin-top: 2px; }
+/* The less common choices, closed under More until asked for (or chosen). */
+.keys-more > summary { display: inline-flex; align-items: center; gap: var(--space-4); width: fit-content; border-radius: 2px; color: var(--color-muted); font-size: var(--text-sm); line-height: var(--leading-sm); list-style: none; cursor: pointer; }
+.keys-more > summary::-webkit-details-marker { display: none; }
+.keys-more > summary > svg { flex: none; transition: transform 180ms var(--ease-out-strong); }
+.keys-more[open] > summary { color: var(--color-text); }
+.keys-more[open] > summary > svg { transform: rotate(90deg); }
+@media (hover: hover) and (pointer: fine) { .keys-more > summary:hover { color: var(--color-text); } }
+.keys-more__choices { display: flex; flex-direction: column; gap: var(--space-12); margin-top: var(--space-12); }
+/* Touch: radios grow with the checkboxes beside them (20 px), and every one-line choice, radio or checkbox, is a 44 px
+   row; the rows touch, so the list stays as compact as the desktop's. */
 @media (pointer: coarse), (max-width: 899px) {
   .keys-choice input { width: 20px; height: 20px; margin-top: 0; }
   .keys-choice input:checked { box-shadow: inset 0 0 0 6px var(--color-contrast); }
   .settings-key-domain-options .keys-choice { min-height: 44px; align-items: center; }
+  .keys-purpose, .keys-more__choices { gap: 0; }
+  .keys-more__choices { margin-top: 0; }
+  .keys-purpose :is(.keys-choice, .ui-check-field), .keys-more > summary { min-height: 44px; align-items: center; }
+  .keys-purpose .ui-checkbox { margin-top: 0; }
+  .keys-purpose > .ui-input { margin-block: var(--space-4) var(--space-8); }
 }
 /* Forced colors drop box-shadow, which draws both the ring and the dot; draw them with system colors instead. */
 @media (forced-colors: active) {
-  .keys-choice input { forced-color-adjust: none; background: Canvas; box-shadow: inset 0 0 0 1px CanvasText; }
+  .keys-choice input, .keys-choice input:not(:checked):enabled { forced-color-adjust: none; background: Canvas; box-shadow: inset 0 0 0 1px CanvasText; }
   .keys-choice input:checked { background: Highlight; box-shadow: inset 0 0 0 1px Highlight, inset 0 0 0 4px Canvas; }
   .keys-purpose:disabled .keys-choice input { box-shadow: inset 0 0 0 1px GrayText; }
   .keys-purpose:disabled .keys-choice input:checked { background: GrayText; box-shadow: inset 0 0 0 1px GrayText, inset 0 0 0 4px Canvas; }
 }
-/* A checkbox among the radios (Organize, IMAP, SMTP) lines up with their two-line labels. */
-.keys-purpose .ui-check-field { align-items: flex-start; min-height: 0; }
-.keys-purpose .ui-checkbox { margin-top: 2px; }
 .keys-purpose > .ui-field__hint, .keys-purpose > .ui-field__error { margin: 0; }
 /* Which key do I need: one quiet line that opens the three credentials in place. */
 .keys-guide { display: flex; flex-direction: column; min-width: 0; margin-bottom: var(--space-8); }
@@ -77,13 +92,20 @@
 .keys-guide .guide-link::before { content: ''; position: absolute; inset: -12px -8px; }
 .keys-guide__where { color: var(--color-faint); white-space: nowrap; }
 
-/* A row in full (click a row, or tap a card): what it reaches, then its life, as key/value rows; values wrap. */
+/* A row in full (click a row, or tap a card): what it reaches, then its dates, as key/value rows; values wrap. The two
+   tabs share one cell: the details size it, the inactive tab is off screen and out of the accessibility tree, and a
+   key's changes scroll inside it (contain: size), so the footer never moves. */
+.keys-panels { display: grid; grid-template-columns: minmax(0, 1fr); }
+.keys-panels > * { grid-area: 1 / 1; min-width: 0; }
+.keys-panels > [data-inactive] { visibility: hidden; }
+.keys-changes { contain: size; overflow-y: auto; }
 .keys-details { display: flex; flex-direction: column; }
 .keys-details > .ui-label { margin: var(--space-20) 0 var(--space-4); }
 .keys-details > .ui-label:first-child { margin-top: 0; }
 /* A key's changes: newest first, one hairline row each, what changed then when and who in mono. */
 .keys-change-list { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; font-size: var(--text-sm); line-height: var(--leading-sm); }
-.keys-change-list li { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-16); min-width: 0; min-height: 36px; padding-block: var(--space-8); border-bottom: 1px solid var(--color-border-muted); overflow-wrap: anywhere; }
+/* The action wraps whole: when it and its date don't fit on one line, the date goes under it. */
+.keys-change-list li { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px var(--space-16); min-width: 0; min-height: 36px; padding-block: var(--space-8); border-bottom: 1px solid var(--color-border-muted); overflow-wrap: anywhere; }
 .keys-change-list li > .muted { flex: none; font-family: var(--font-mono); font-size: var(--text-xs); }
 /* Expiry's date and time sits under its two choices, as wide as a field. */
 .keys-purpose > .ui-input { max-width: 320px; }

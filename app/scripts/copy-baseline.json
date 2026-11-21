@@ -20,6 +20,11 @@
    "length/heading": [
     "13: sign in with google to use staff tools"
    ]
+  },
+  "app/src/features/score/about.tsx": {
+   "caption": [
+    "61: …% weight"
+   ]
   }
  }
 }

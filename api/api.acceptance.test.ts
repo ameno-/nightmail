@@ -13529,14 +13529,27 @@ describe('Dashboard API capabilities', () => {
       assert.deepEqual(ids(await list('search=reply')), [r1]); assert.deepEqual(ids(await list('search=Logs')), [s2, r2, r1, s1]);
       const first = await list('limit=1');
       assert.equal(error(await local('GET', `/v1/logs?limit=1&direction=sent&cursor=${first.nextCursor}`), 422).code, 'INVALID_CURSOR');
+      // counts=true: each facet counts under every other filter (status ignores status, kind ignores kind), for the whole list.
+      const counts = async (query: string) => (await list(`limit=1&counts=true${query}`)).counts;
+      assert.equal(first.counts, undefined, 'Counts only when asked.');
+      assert.deepEqual(await counts(''), { status: { delivered: 1, bounced: 1, received: 1, spam: 1 }, kind: { transactional: 1, marketing: 1 }, capped: { sent: false, received: false } });
+      assert.deepEqual(await counts('&status=bounced'), { status: { delivered: 1, bounced: 1, received: 1, spam: 1 }, kind: { transactional: 0, marketing: 1 }, capped: { sent: false, received: false } });
+      assert.deepEqual(await counts('&kind=transactional'), { status: { delivered: 1 }, kind: { transactional: 1, marketing: 1 }, capped: { sent: false, received: false } });
+      assert.deepEqual(await counts('&direction=received'), { status: { received: 1, spam: 1 }, kind: { transactional: 0, marketing: 0 }, capped: { sent: false, received: false } });
+      assert.deepEqual(await counts('&search=reply'), { status: { received: 1 }, kind: { transactional: 0, marketing: 0 }, capped: { sent: false, received: false } });
+      // A cursor from a page with counts reads the next page without them, and the other way round.
+      const counted = await list('limit=1&counts=true');
+      assert.deepEqual(ids(await list(`limit=1&cursor=${counted.nextCursor}`)), [r2]);
+      assert.deepEqual(ids(await list(`limit=1&counts=true&cursor=${first.nextCursor}`)), [r2]);
       // A dashboard member (hosted workspaces have members) reads mail on live addresses only, without delivery details or the spam verdict.
       Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [] });
       const { rows: [{ role }] } = await db.query('SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2', [wid, manager!.userId]);
       await db.query("UPDATE workspace_members SET role = 'member' WHERE workspace_id = $1 AND user_id = $2", [wid, manager!.userId]);
-      const member = await list('limit=10'), memberSpam = await list('status=spam'), memberClean = await list('status=received');
+      const member = await list('limit=10'), memberSpam = await list('status=spam'), memberClean = await list('status=received'), memberCounts = (await list('counts=true')).counts;
       await db.query('UPDATE workspace_members SET role = $3 WHERE workspace_id = $1 AND user_id = $2', [wid, manager!.userId, role]);
       // Members never see the spam verdict, so for them nothing is spam and every message they can read is received.
       assert.deepEqual([ids(memberSpam), ids(memberClean)], [[], [r1]]);
+      assert.deepEqual(memberCounts.status, { delivered: 1, bounced: 1, received: 1 }, 'A member counts only the mail they can read, and no spam.');
       assert.deepEqual([ids(member), member.received], [[s2, r1, s1], true]);
       const memberReceived = member.data.find((row: Json) => row.id === r1);
       assert.deepEqual([memberReceived.envelopeTo, memberReceived.region, memberReceived.status], [null, null, 'received']);
