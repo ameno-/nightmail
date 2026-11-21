@@ -38,8 +38,10 @@
     { "name": "EMAIL_IN", "namespace_id": "8794102", "simple": { "limit": 10, "period": 60 } },
     { "name": "EMAIL_IN_GLOBAL", "namespace_id": "8794103", "simple": { "limit": 120, "period": 60 } }
   ],
-  // 00:10 UTC: yesterday's over-cap digest to the team, and the retention sweep (src/limits.ts daily()).
-  "triggers": { "crons": ["10 0 * * *"] },
+  // 00:10 UTC: yesterday's over-cap digest to the team, and the retention sweep (src/limits.ts daily()). Every five
+  // minutes: the work sweep (src/ledger.ts sweep()): unsent team notices, intake mail for a newly listed address, and
+  // tickets no team email or follow-up covers.
+  "triggers": { "crons": ["10 0 * * *", "*/5 * * * *"] },
   "vars": {
     "STAGE": "production",
     "PUBLIC_URL": "https://support.nightmail.dev",

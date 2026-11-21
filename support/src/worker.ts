@@ -5,12 +5,12 @@ import { readAttachmentLink, readCapped, serveAttachment } from './attachments.j
 import { MAX_IMAGE_BYTES } from './image.js';
 import { staff } from './staff.js';
 import { daily } from './limits.js';
+import { acceptIntake, acceptSupport, blockUnconfigured, holdAtEdge, intakeAddress, ledgered, sweep } from './ledger.js';
 import { log, logError } from './log.js';
 import { FAVICON_LINKS, favicon } from './favicon.js';
 import { addresses, productName } from '../../api/src/brand.js';
 export { SupportConversation } from './conversation.js';
 export { SupportIntake, INTAKE, type Mailbox } from './intake.js';
-import { INTAKE, type Mailbox } from './intake.js';
 
 // The support Worker (support/README.md): chat starts and resumes, the conversation WebSocket, Nightmail's inbound webhook
 // for support@nightmail.dev, and the "Confirm it's me" page. Every conversation is one SupportConversation Durable Object,
@@ -132,7 +132,7 @@ async function upload(request: Request, env: Env, conversationId: string): Promi
   return added.ok ? json({ attachment: added.attachment }, 201, headers) : fail(added.status, added.code, added.message, headers);
 }
 
-type Hook = { type?: string; data?: { messageId?: string; recipients?: string[]; message?: { id?: string; threadId?: string | null; direction?: string; from?: { address?: string }; to?: unknown } } };
+type Hook = { type?: string; data?: { messageId?: string; recipients?: string[]; message?: { id?: string; threadId?: string | null; direction?: string; from?: { address?: string }; to?: unknown; subject?: unknown } } };
 
 /** A verified, parsed Nightmail webhook delivery, deduplicated by webhook-id (after parsing, so a malformed one is retried). */
 async function delivery(request: Request, env: Env, secret: string | undefined, name: string): Promise<{ event: Hook; deliveryId: string } | Response> {
@@ -170,19 +170,15 @@ async function inbound(request: Request, env: Env): Promise<Response> {
     const message = event.data?.message, messageId = message?.id ?? event.data?.messageId;
     if (event.type !== 'message.received' || !messageId || message?.direction === 'outbound') return new Response(null, { status: 200 });
     const threadId = message?.threadId ?? messageId, sender = message?.from?.address?.toLowerCase() ?? 'unknown';
-    if (env.EMAIL_IN && !(await env.EMAIL_IN.limit({ key: `sender:${await addressHash(sender)}` })).success) return new Response(null, { status: 200 });
-    const now = Date.now();
-    let row = await env.DB.prepare('SELECT id, status FROM conversations WHERE thread_id = ?').bind(threadId).first<{ id: string; status: string }>();
-    if (!row) {
-      const id = newId('conv');
-      await env.DB.prepare("INSERT INTO conversations (id, channel, thread_id, created_at, updated_at) VALUES (?, 'email', ?, ?, ?) ON CONFLICT (thread_id) DO NOTHING").bind(id, threadId, now, now).run();
-      row = await env.DB.prepare('SELECT id, status FROM conversations WHERE thread_id = ?').bind(threadId).first<{ id: string; status: string }>();
+    if (await ledgered(env, 'support', messageId)) return new Response(null, { status: 200 });
+    // Over the per-sender edge limit: kept in the ledger for the team's digest, never read or answered.
+    if (env.EMAIL_IN && !(await env.EMAIL_IN.limit({ key: `sender:${await addressHash(sender)}` })).success) {
+      await holdAtEdge(env, { messageId, threadId, sender, subject: typeof message?.subject === 'string' ? message.subject : null });
+      return new Response(null, { status: 200 });
     }
-    if (!row) return new Response(null, { status: 503 });
-    // The Durable Object stores the message and arms its alarm before this returns, so Nightmail's retry is never needed
-    // once we answer 200: the DO is the durable inbox.
-    await conversation(env, row.id).enqueueInbound({ conversationId: row.id, threadId, messageId, deliveryId });
-    return new Response(null, { status: 200 });
+    // The Durable Object stores the message and arms its alarm, and the ledger row is written, before this answers 200:
+    // from then on Nightmail's retry is never needed.
+    return new Response(null, { status: await acceptSupport(env, { messageId, threadId, deliveryId, source: 'webhook' }) ? 200 : 503 });
   });
 }
 
@@ -195,11 +191,13 @@ async function intake(request: Request, env: Env): Promise<Response> {
     if (event.type !== 'message.received' || !messageId || message?.direction === 'outbound') return new Response(null, { status: 200 });
     // The envelope recipients Nightmail matched (so Bcc counts), else the To header.
     const recipients = (event.data?.recipients?.length ? event.data.recipients : [JSON.stringify(message?.to ?? '')]).join(' ').toLowerCase();
-    // The intake address it was sent to: the acknowledgement names that one.
-    const address = env.INTAKE_ADDRESSES.split(',').map(a => a.trim().toLowerCase()).find(a => a && recipients.includes(a) && a.split('@')[0]! in INTAKE);
-    if (!address) return new Response(null, { status: 200 });
     const threadId = message?.threadId ?? messageId;
-    await env.INTAKE.get(env.INTAKE.idFromName(threadId)).enqueue({ threadId, messageId, mailbox: address.split('@')[0] as Mailbox, address });
+    if (await ledgered(env, 'intake', messageId)) return new Response(null, { status: 200 });
+    // The intake address it was sent to: the acknowledgement names that one. Mail for an address the Worker doesn't list
+    // is a configuration gap, not junk: kept, blocked, and accepted by the sweep once INTAKE_ADDRESSES lists it.
+    const address = intakeAddress(env, recipients);
+    if (!address) await blockUnconfigured(env, { messageId, threadId, recipients });
+    else await acceptIntake(env, { messageId, threadId, address, source: 'webhook' });
     return new Response(null, { status: 200 });
   });
 }
@@ -281,11 +279,14 @@ export default {
     else log(status >= 500 ? 'error' : status >= 400 ? 'warn' : 'info', { ...line, code: failures.get(response) });
     return response;
   },
-  /** Daily at 00:10 UTC: the team's over-cap digest for yesterday, and the retention sweep. */
+  /**
+   * Daily at 00:10 UTC: the team's over-cap digest for yesterday, and the retention sweep. Every five minutes: the work
+   * sweep (ledger.ts).
+   */
   async scheduled(controller, env, ctx) {
-    const started = Date.now();
-    ctx.waitUntil(daily(env, controller.scheduledTime).then(
-      result => log('info', { event: 'scheduled', code: 'SUPPORT_DAILY', durationMs: Date.now() - started, ...result }),
-      error => logError(error, { event: 'scheduled', code: 'SUPPORT_DAILY_FAILED', durationMs: Date.now() - started })));
+    const started = Date.now(), job = controller.cron === '10 0 * * *' ? 'DAILY' : 'SWEEP';
+    ctx.waitUntil((job === 'DAILY' ? daily(env, controller.scheduledTime) : sweep(env)).then(
+      result => log('info', { event: 'scheduled', code: `SUPPORT_${job}`, durationMs: Date.now() - started, ...result }),
+      error => logError(error, { event: 'scheduled', code: `SUPPORT_${job}_FAILED`, durationMs: Date.now() - started })));
   },
 } satisfies ExportedHandler<Env>;
