@@ -30430,6 +30430,75 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  test('campaign detail counts a large sending campaign once per cache window, keeps delivery current and is exact once done', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, request, run, db }) => {
+      const { CAMPAIGN_PROGRESS_CACHE_SECONDS: window, CAMPAIGN_PROGRESS_CACHE_MIN_RECIPIENTS: total } = await import('./src/sending.js');
+      const ws = runtime.config.workspaceId, tail = 900;
+      const list = ok(await local('POST', '/v1/lists', { name: unique('progress-cache') }), 201);
+      await db.query(`INSERT INTO audience_contacts (id, workspace_id, email, marketing_consent)
+        SELECT 'con_' || md5($1 || n::text), $1, 'progress-' || n || '@example.com', 'subscribed' FROM generate_series(1, $2::int) AS n`, [ws, tail]);
+      await db.query('INSERT INTO audience_list_members (workspace_id, list_id, contact_id) SELECT workspace_id, $2, id FROM audience_contacts WHERE workspace_id = $1', [ws, list.id]);
+      const key = ok(await local('POST', '/v1/api-keys', { name: unique('progress-cache'), permissions: ['read'] }), 201).secret;
+      const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('progress-cache'), from: 'sender@example.com', subject: 'Progress', html: '<p>Progress</p>', audience: { listId: list.id } }), 201);
+      const path = `/v1/campaigns/${campaign.id}`;
+      assert.equal(ok(await local('POST', `${path}/send`, { revision: campaign.revision }), 202).queued, tail);
+      // A campaign at the cache threshold whose earlier recipients are already behind its cursors, as at scale: only the
+      // last ${tail} remain to prepare, release and send.
+      await db.query(`INSERT INTO sending_review_recipients (review_id, ordinal, recipient, recipient_bytes)
+        SELECT review_id, ordinal + $2, recipient, recipient_bytes FROM sending_review_recipients WHERE review_id = (SELECT review_id FROM sending_campaigns WHERE id = $1)`, [campaign.id, total - tail]);
+      await db.query('UPDATE sending_campaigns SET total = $2, prepared = $3, expanded = $3, probe_cleared_at = now() WHERE id = $1', [campaign.id, total, total - tail]);
+      // No cached regional rate: the first run releases the 400-row floor and waits.
+      await db.query('DELETE FROM sending_region_limits WHERE workspace_id = $1 AND region = $2', [ws, REGION]);
+      const meter = t.mock.method(db, 'query');
+      const counted = () => meter.mock.calls.filter(call => /count\(\*\)::int.*group by "sending_emails"\."campaign_id", "sending_emails"\."status"/is.test(String((call.arguments[0] as any)?.text ?? call.arguments[0]))).length;
+      type Counts = { total: number; byStatus: Record<string, number> };
+      const nonzero = (counts: Counts) => ({ total: counts.total, byStatus: Object.fromEntries(Object.entries(counts.byStatus).filter(([, n]) => n > 0)) });
+      const truth = async () => {
+        const counts: Counts = { total: 0, byStatus: {} };
+        for (const row of (await db.query('SELECT status, count(*)::int AS n FROM sending_emails WHERE campaign_id = $1 GROUP BY status', [campaign.id])).rows) { counts.byStatus[row.status] = row.n; counts.total += row.n; }
+        return counts;
+      };
+      const cursors = async () => (await db.query('SELECT state, expanded FROM sending_campaigns WHERE id = $1', [campaign.id])).rows[0];
+      // Alternate dashboard and API key reads: every credential polling the campaign shares its counts.
+      let polls = 0;
+      const view = async () => {
+        polls++;
+        const body = ok(polls % 2 ? await local('GET', path) : await request('GET', path, key)), row = await cursors();
+        assert.deepEqual([body.state, body.delivery.expanded], [row.state, row.expanded], 'State and delivery cursors come from the campaign row on every read.');
+        return body;
+      };
+      await run('campaign.run');
+      const first = await view(), cached = nonzero(first.counts);
+      assert.deepEqual(cached, { total: 400, byStatus: { queued: 400 } });
+      assert.deepEqual(cached, nonzero(await truth()));
+      await run('email.dispatch');
+      const dispatched = await view();
+      await run('campaign.run');
+      const released = await view(), more = [await view(), await view()];
+      assert.equal(released.delivery.expanded, total, 'Release reached the end while the counts were reused.');
+      for (const body of [dispatched, released, ...more]) {
+        assert.equal(body.state, 'sending');
+        assert.deepEqual(nonzero(body.counts), cached, 'Counts are reused within the window.');
+      }
+      assert.notDeepEqual(nonzero(await truth()), cached);
+      assert.equal(counted(), 1, `${polls} polls inside one ${window} s window count recipients once.`);
+      // Past the window the next read counts again.
+      const real = Date.now.bind(Date), skew = t.mock.method(Date, 'now', () => real() + (window + 1) * 1000);
+      let expired; try { expired = await view(); } finally { skew.mock.restore(); }
+      assert.equal(counted(), 2);
+      assert.equal(expired.state, 'sending');
+      assert.deepEqual(nonzero(expired.counts), nonzero(await truth()));
+      // Drain it: once done the counts are exact at once, inside the window of the entry just cached.
+      for (let i = 0; i < 10 && (await cursors()).state !== 'done'; i++) await run('email.dispatch');
+      const before = counted(), done = await view(), again = await view(), exact = nonzero(await truth());
+      assert.equal(done.state, 'done');
+      assert.equal(exact.total, tail);
+      assert.deepEqual([nonzero(done.counts), nonzero(again.counts)], [exact, exact], 'A finished campaign reports exact counts immediately.');
+      assert.equal(counted(), before + 2, 'A finished campaign is never served from the cache.');
+      t.diagnostic(`${polls} detail polls, ${counted()} count statements`);
+    });
+  });
+
   test('paced campaigns release one daily window at a time, pause and resume in place, hold for the SES daily quota, and pause automatically on bounces', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
       const ws = runtime.config.workspaceId;

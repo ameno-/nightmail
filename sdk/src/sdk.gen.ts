@@ -1529,7 +1529,7 @@ export const getAttachmentContent = <ThrowOnError extends boolean = false>(optio
 });
 
 /**
- * Returns bounded campaign metadata summaries. Fetch an individual campaign for its full editable draft; list drafts omit bodies, defaults, attachments and audience exclusions. Dashboard list counts may be cached for up to 60 seconds; API credentials and campaign detail remain exact.
+ * Returns bounded campaign metadata summaries. Fetch an individual campaign for its full editable draft; list drafts omit bodies, defaults, attachments and audience exclusions. Dashboard list counts may be cached for up to 60 seconds; API credentials get exact list counts. getCampaign may reuse counts for up to 20 seconds while a campaign of at least 10,000 recipients is preparing, scheduled, sending or paused.
  */
 export const listCampaigns = <ThrowOnError extends boolean = false>(options?: Options<ListCampaignsData, ThrowOnError>): RequestResult<ListCampaignsResponses, ListCampaignsErrors, ThrowOnError> => (options?.client ?? client).get<ListCampaignsResponses, ListCampaignsErrors, ThrowOnError>({
     security: [
@@ -1593,7 +1593,7 @@ export const deleteCampaign = <ThrowOnError extends boolean = false>(options: Op
 });
 
 /**
- * Each statement stops after 3 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.
+ * The campaign with its full draft, per-status email counts and delivery progress. For every credential, counts may be up to 20 seconds old while a campaign of at least 10,000 recipients is preparing, scheduled, sending or paused; state and delivery are always current. Counts are exact for smaller campaigns, once a campaign is done, canceled or failed, and in the campaign that pause, resume and other changes return. Each statement stops after 3 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.
  */
 export const getCampaign = <ThrowOnError extends boolean = false>(options: Options<GetCampaignData, ThrowOnError>): RequestResult<GetCampaignResponses, GetCampaignErrors, ThrowOnError> => (options.client ?? client).get<GetCampaignResponses, GetCampaignErrors, ThrowOnError>({
     security: [
