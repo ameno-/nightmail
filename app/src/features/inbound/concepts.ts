@@ -52,6 +52,9 @@ export const steps = {
   deliver: { title: 'Destinations' },
 } as const
 
+/** What New address and an address's aliases say to a *@domain: it is the catch-all's. */
+export const catchAllNote = 'Mail to any address here goes to the domain’s catch-all.'
+
 export const catchAllSetting = {
   title: 'Catch-all',
   options: { store: outcomes.store, create_address: 'Create an address' },

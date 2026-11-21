@@ -25899,6 +25899,29 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         for (const name of ['flow-new-a', 'flow-new-b']) await call('DELETE', '/v1/endpoints/' + name);
         await call('DELETE', '/v1/inbound/addresses/' + desk.id + '?detach=true');
       });
+      await t.test('address flow: taking the last AI rule off a domain takes the domain off the AI-readable list; an edited address refuses a * alias', async () => {
+        const domains = async () => (await call('GET', '/v1/rules')).config.evaluateDomains;
+        const flow = (id: string, body: Json) => local('PATCH', '/v1/inbound/addresses/' + id + '/flow', body);
+        const meaning = (key: string) => ({ recipe: 'split-by-meaning', params: { meaning: 'a refund request', then: 'store', otherwise: 'inbox:' + key } });
+        await call('PUT', '/v1/rules', {});
+        const a = await call('POST', '/v1/inbound/addresses', { address: 'ai-a@receive.example', key: 'ai-a', flow: { deliver: [], split: meaning('ai-a') } }, 201);
+        const b = await call('POST', '/v1/inbound/addresses', { address: 'ai-b@receive.example', key: 'ai-b', flow: { deliver: [], split: meaning('ai-b') } }, 201);
+        const keyOf = async (id: string) => (await call('GET', '/v1/rules')).config.attachments.find((x: Json) => x.target === id).rule;
+        assert.deepEqual(await domains(), ['receive.example']);
+        // Another AI rule on the domain still needs it.
+        ok(await flow(a.id, { rule: await keyOf(a.id), split: null }));
+        assert.deepEqual(await domains(), ['receive.example']);
+        // The last one, rewritten to a split that doesn't ask the AI: the domain leaves the list.
+        ok(await flow(b.id, { rule: await keyOf(b.id), split: { recipe: 'split', params: { test: 'subject', value: 'refund', then: 'store', otherwise: 'inbox:ai-b' } } }));
+        assert.deepEqual(await domains(), []);
+        // A * alias is a catch-all or wildcard: refused on an edit as on New address, and nothing changes.
+        error(await local('PATCH', '/v1/inbound/addresses/' + a.id, { aliases: ['ai-*@receive.example'] }), 422, 'INVALID_ADDRESS');
+        error(await local('PATCH', '/v1/inbound/addresses/' + a.id, { aliases: ['*@receive.example'] }), 422, 'INVALID_ADDRESS');
+        assert.deepEqual((await call('GET', '/v1/inbound/addresses/' + a.id)).aliases, []);
+        ok(await local('PATCH', '/v1/inbound/addresses/' + a.id, { aliases: ['ai-alias@receive.example'] }));
+        await call('PUT', '/v1/rules', {});
+        for (const box of [a, b]) { await call('DELETE', '/v1/routing/routes/' + (await call('GET', '/v1/routing/routes')).data.find((r: Json) => r.match === box.address).id); await call('DELETE', '/v1/inbound/addresses/' + box.id + '?detach=true'); }
+      });
       await t.test('rules: omens(…) compiles to the plan decisions(…) does and ingests to the same verdicts; the /v1/rituals aliases answer as they did before the rename', async it => {
         const path = '/v1/rules', legacy = '/v1/rituals', prior = runtime.config.screen;
         const source = (fn: string) => `export default function route(email,ctx){\n  const r = ${fn}(email, { refund: "Is the sender asking for a refund?", urgent: { prompt: "Does this need a reply today?", type: "boolean", threshold: 0.8 } })\n  if (r.refund >= 0.7) label("refund")\n  if (r.urgent) endpoints["support-hook"]({ subject: "urgent" })\n}`;

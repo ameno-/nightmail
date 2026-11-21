@@ -90,7 +90,7 @@ function AddressPath({ address, overview }: { address: InboundAddress; overview:
         {entry.toTruncated && <li><Link to={`/receiving?tab=destinations&address=${encodeURIComponent(address.id)}`}>{number(entry.toTotal - entry.to.length)} more {entry.toTotal - entry.to.length === 1 ? 'webhook' : 'webhooks'}</Link></li>}</ul>}
       <div className="addr-step__actions"><Button size="sm" onClick={() => setRouting(true)}>Change</Button></div>
     </section>
-    {routing && <RouteEditor match={address.address} route={entry?.route} to={[address.id]} onClose={() => { setRouting(false); void overview.refetch() }} />}
+    {routing && <RouteEditor match={address.address} route={entry?.route} to={[address.id]} version={overview.data?.version} onClose={() => { setRouting(false); void overview.refetch() }} />}
   </div>
 }
 

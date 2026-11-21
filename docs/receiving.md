@@ -83,7 +83,7 @@ Choosing a row opens its flow, the same diagram everywhere: **Receive** (the add
 | Action | What it does |
 |---|---|
 | **Test** | Sends a sample email (a refund request unless changed under *Sample*, where it can carry an attachment) through the saved rules with the dry run (`testRules`). It shows what the dry run reports: the rules that acted, ticked, and where the mail went. Nothing is sent or saved, and the AI isn't asked: when a rule reads an AI decision, nothing is ticked for it and Destinations says "Decided by AI when real mail arrives", unless *Sample* → **The AI says** picks Yes or No for the test (sent as `scores` keyed by each decision's question, which the overview lists as `questions`): Yes takes **If yes**, No the other side. |
-| **Edit** | Opens the builder, or the address's steps when the builder can't draw its flow; a wildcard or catch-all opens "Where should this mail go?". |
+| **Edit** | Opens the builder, or the address's steps when the builder can't draw its flow; a wildcard or catch-all opens "Where should this mail go?", which saves with the version it read (`If-Match`): a change made meanwhile to that route is said and kept, one elsewhere doesn't stop it. |
 | **Mail** | The address's Mail tab. |
 
 Typing a full address in the search opens its row. One with no row of its own shows where its mail would go (a wildcard, the catch-all, or stored), from a test, with **Create this address**.
@@ -96,7 +96,7 @@ An address's page has three tabs:
 |---|---|
 | **Mail** | Its conversations: search, the view picker (Inbox, Starred, Archive, Spam, Trash, All), reading, replying and New message. A message sent from another address opens on that address's page. |
 | **Where mail goes** | The flow panel's diagram, with Test. **Edit** opens the builder (as above), or its steps: the rules that run, in order, in plain words (attach, detach with Undo, New rule) and where its mail is delivered (**Change**, "Where should this mail go?": Deliver to these destinations, store it or drop it). |
-| **Settings** | Its domain and dates, display name, aliases and wildcards (edited here only), and Delete address. |
+| **Settings** | Its domain and dates, display name, aliases and wildcards (edited here only), and Delete address. An alias can't have a `*`, as New address can't: `*@domain` points to the catch-all, any other `*` to Wildcards (the API refuses a new one with `INVALID_ADDRESS`). |
 
 Switching tabs keeps the open conversation and a reply being written.
 

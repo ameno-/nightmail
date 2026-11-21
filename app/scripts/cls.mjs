@@ -667,6 +667,34 @@ async function measure(browser, job, fx) {
       const retried = page.waitForResponse(r => r.url().endsWith('/v1/inbound/addresses') && r.request().method() === 'POST', { timeout: 20_000 });
       await builder.getByRole('button', { name: 'Save' }).click();
       if ((await retried).status() !== 201) problems.push(`Save again after a failed create returned ${(await retried).status()}`);
+      // The wildcard and catch-all route editor saves with the version it read: a change made meanwhile to its route is
+      // said and kept; one elsewhere in the workspace doesn't stop it.
+      const crm = (await api('/v1/inbound/overview?limit=50')).body.endpoints.find(e => e.name === 'crm' && e.source === 'endpoint');
+      const wild = (await api('/v1/routing/routes', 'POST', { match: 'guard-*@northwind.example', to: [crm.id] })).body;
+      const routeEditor = page.locator('[role=dialog]', { hasText: 'Where should this mail go?' });
+      const openEditor = async () => {
+        await page.goto(origin + '/receiving?kind=pattern&q=guard-');
+        await page.locator('.flow-panel').getByRole('button', { name: 'Edit', exact: true }).click({ timeout: 20_000 });
+        await routeEditor.locator('#routing-action').waitFor({ timeout: 20_000 });
+      };
+      const store = async () => { await routeEditor.locator('#routing-action').click(); await page.getByRole('option', { name: 'Stored, no inbox' }).click(); await routeEditor.getByRole('button', { name: 'Save' }).click(); };
+      await openEditor();
+      await api(`/v1/routing/routes/${wild.id}`, 'PATCH', { to: 'drop' });
+      await store();
+      await routeEditor.getByText('This changed since you opened it.', { exact: false }).waitFor({ timeout: 20_000 }).catch(() => problems.push('the route editor saved over a change made meanwhile, or didn\'t say so'));
+      if ((await api(`/v1/routing/routes/${wild.id}`)).body.to !== 'drop') problems.push('the route editor overwrote a change made meanwhile');
+      await openEditor();
+      await api('/v1/routing/routes', 'POST', { match: 'guard-other@northwind.example', to: [crm.id] });
+      await store();
+      await routeEditor.waitFor({ state: 'detached', timeout: 20_000 }).catch(() => problems.push('a change elsewhere in the workspace stopped the route editor\'s Save'));
+      if (JSON.stringify((await api(`/v1/routing/routes/${wild.id}`)).body.to) !== '[]') problems.push('the route editor\'s Save after a change elsewhere didn\'t land');
+      // An address's alias refuses a *, as New address does, pointing to the catch-all.
+      await page.goto(origin + `/receiving/addresses/${two.id}?tab=settings`);
+      await page.locator('.alias-input__field').waitFor({ state: 'attached', timeout: 20_000 });
+      await page.evaluate(() => document.querySelector('.alias-input__field')?.closest('details')?.setAttribute('open', ''));
+      await page.locator('.alias-input__field').fill('*', { timeout: 20_000 });
+      await page.keyboard.press('Enter');
+      if (!await page.getByRole('link', { name: 'Edit the catch-all' }).count()) problems.push('a * alias isn\'t pointed to the catch-all');
     }
   })();
   work.catch(() => {}); // After a timeout the context closes under it.

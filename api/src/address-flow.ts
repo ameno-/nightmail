@@ -9,9 +9,9 @@ import { recordAudit } from './audit.js';
 import { lockMailboxLane } from './mailbox-store.js';
 import { InboundAddressId } from './inbound-threads.js';
 import { RitualConfig, type Config } from './ritual-pipeline.js';
-import type { RecipeParams } from './ritual-schema.js';
+import { ritualRecipes, type RecipeParams } from './ritual-schema.js';
 import { checkVersion, currentVersion, listRoutes, makeRoute, MailRoute, routeFor, RouteFields, save as saveRoutes, type Route } from './routing.js';
-import { apply as applyRecipe, current as currentRules, freeKey, holdReceiving, RecipeInputParams, save as saveRules } from './rituals.js';
+import { apply as applyRecipe, current as currentRules, freeKey, holdReceiving, RecipeInputParams, save as saveRules, targetRows } from './rituals.js';
 import { createEndpointRecord } from './endpoints.js';
 import { legacyWebhookFormat } from './brand.js';
 import { rolledBack } from './idempotency.js';
@@ -59,6 +59,17 @@ type Address = { id: string; address: string };
 const canonical = (value: unknown) => JSON.stringify(value, (_, v) => v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : v);
 const same = (a: unknown, b: unknown) => canonical(a) === canonical(b);
 
+/** Whether a rule asks the AI: a recipe that decides by meaning, or a script that reads decisions(…) (omens(…) before the rename). */
+const asksAi = (rule: Config['rituals'][number]) => rule.recipe ? !!ritualRecipes.find(r => r.id === rule.recipe!.id)?.decisions : /\b(?:decisions|omens)\s*\(/.test(rule.source);
+/** The AI reads a domain's mail (evaluateDomains) while a rule there asks it: a change that took the last such rule off
+ *  the domain takes the domain off too. A rule attached anywhere on it keeps it, on or off. */
+async function forgetDomain(tx: DbExecutor, w: string, config: Config, host: string): Promise<Config> {
+  if (!config.evaluateDomains.includes(host)) return config;
+  const asking = new Set(config.rituals.filter(asksAi).map(r => r.key));
+  const targets = [...new Set(config.attachments.filter(a => asking.has(a.ritual)).map(a => a.target))];
+  const hosts = new Set((targets.length ? await targetRows(tx, w, targets) : []).map(r => r.address.split('@')[1]!.toLowerCase()));
+  return hosts.has(host) ? config : { ...config, evaluateDomains: config.evaluateDomains.filter(d => d !== host) };
+}
 /** The rule config after the split change, every refusal included, before anything is written. */
 async function nextRules(tx: DbExecutor, w: string, config: Config, box: Address, flow: Flow): Promise<{ config: Config; rule: string | null; action: string }> {
   const split = flow.split, base = `${split?.recipe}-${box.address.split('@')[0]}`;
@@ -75,17 +86,19 @@ async function nextRules(tx: DbExecutor, w: string, config: Config, box: Address
   const here = config.attachments.filter(a => a.ritual === key && mine(a.target));
   if (!here.length) throw new ApiError(422, 'RULE_NOT_ON_ADDRESS', `${key} does not run on ${box.address}. getInboundOverview lists the rules on each address.`, 'rule');
   const shared = config.attachments.some(a => a.ritual === key && !mine(a.target));
+  // Taking an AI split off this address, or rewriting it to one that doesn't ask, may leave its domain with no rule that asks the AI.
+  const host = box.address.split('@')[1]!.toLowerCase(), forget = (next: Config) => asksAi(prev) ? forgetDomain(tx, w, next, host) : next;
   if (!split) {
     const attachments = config.attachments.filter(a => !(a.ritual === key && mine(a.target)));
-    return { config: { ...config, attachments, rituals: shared ? config.rituals : config.rituals.filter(r => r.key !== key) }, rule: null, action: shared ? 'ritual.attach' : 'ritual.delete' };
+    return { config: await forget({ ...config, attachments, rituals: shared ? config.rituals : config.rituals.filter(r => r.key !== key) }), rule: null, action: shared ? 'ritual.attach' : 'ritual.delete' };
   }
   const rewritten = await applyRecipe(config, tx, w, key, split.recipe, split.params, undefined, undefined);
   if (same(rewritten.rituals.find(r => r.key === key), prev)) return { config, rule: key, action: '' };
-  if (!shared) return { config: rewritten, rule: key, action: 'ritual.recipe' };
+  if (!shared) return { config: await forget(rewritten), rule: key, action: 'ritual.recipe' };
   // Shared: the other addresses keep the rule as it is; this address's attachments run its own copy, in their places.
   const copy = freeKey(config, base);
   const moved = { ...config, attachments: config.attachments.map(a => a.ritual === key && mine(a.target) ? { ...a, ritual: copy } : a) };
-  return { config: await applyRecipe(moved, tx, w, copy, split.recipe, split.params, here.map(a => a.target), prev.enabled), rule: copy, action: 'ritual.recipe' };
+  return { config: await forget(await applyRecipe(moved, tx, w, copy, split.recipe, split.params, here.map(a => a.target), prev.enabled)), rule: copy, action: 'ritual.recipe' };
 }
 
 /**
