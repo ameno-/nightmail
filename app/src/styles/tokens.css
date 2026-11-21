@@ -199,34 +199,58 @@
 }
 
 /* ── Colour (Signal Log) ──
-   OKLCH throughout. True neutral greys for every surface, line and text; one blue accent used only on buttons and chart
+   OKLCH throughout. True neutral greys for every surface, line and text; one navy accent used only on buttons and chart
    items; a data palette of matched lightness and chroma for multi-series charts; status colours (ok, warn, error, info)
    only on status dots and words. Selection, the active page, tabs, toggles and focus are neutral: brighter text, a
    neutral fill or a rule, and a neutral high-contrast focus ring.
-   Contrast (WCAG 2): white on the accent 5.4:1 (light) and 4.8:1 (dark), on hover and pressed more; accent text on the
-   surface 5.4:1 (light) and 7.7:1 (dark); status inks 5.6:1 or more on light and 8:1 or more on dark. */
+   Navy is dark and the dashboard is dark-first, so the one hue (263) takes a role per lightness: true navy fills with
+   white text, a 1px lighter edge that keeps a fill visible on near-black (no glow), a lighter tint for chart items, and
+   a light navy-blue for link text on dark.
+   Contrast (WCAG 2): white on every fill step 7:1 or more (light 10.3:1, dark 8.7:1); the dark edge 4.1:1 on the
+   surface; links 9.5:1 (light) and 8.6:1 (dark); chart series 7.3:1 (light) and 6.2:1 (dark); status inks 5.6:1 or more
+   on light and 8:1 or more on dark.
+   data-accent="ink" on <html> swaps in the muted, slate-leaning comparison navy (n2); without it, classic navy (n1). */
 :root {
   /* Light: markers and series at L .62 (warnings .70: amber reads dirty lower), inks at L .50. */
   --mark-l: .62; --mark-c: .14; --warn-l: .70; --ink-l: .50; --ink-c: .12;
   --hue-ok: 152; --hue-warn: 85; --hue-error: 27; --hue-info: 250;
   --hue-received: 190; --hue-opened: 300; --hue-clicked: 345;
   --l-deep: .985; --l-surface: 1; --l-layer-1: .982; --l-layer-2: .962; --l-layer-3: .945; --l-text: .205; --l-muted: .48; --l-faint: .555;
-  /* The blue: a fill with white text, its hover and pressed steps (darker, so text keeps AA), text on the surface, and charts. */
-  --color-accent: oklch(.53 .19 259);
-  --color-accent-hover: oklch(.49 .19 259);
-  --color-accent-pressed: oklch(.45 .18 259);
-  --color-accent-text: oklch(.53 .19 259);
-  --color-accent-data: oklch(.53 .19 259);
+  /* Classic navy (n1): a fill with white text, hover and pressed steps (darker on light), its edge, text and charts. */
+  --color-accent: oklch(.38 .14 264);
+  --color-accent-hover: oklch(.33 .13 264);
+  --color-accent-pressed: oklch(.29 .12 264);
+  --color-accent-edge: transparent;
+  --color-accent-text: oklch(.40 .15 264);
+  --color-accent-data: oklch(.46 .16 262);
   --color-on-accent: #FFFFFF;
 }
 :root[data-theme='dark'] {
   --mark-l: .74; --mark-c: .13; --warn-l: .80; --ink-l: .82; --ink-c: .11;
   --l-deep: .135; --l-surface: .16; --l-layer-1: .195; --l-layer-2: .225; --l-layer-3: .27; --l-text: .945; --l-muted: .72; --l-faint: .62;
-  --color-accent: oklch(.56 .19 259);
-  --color-accent-hover: oklch(.52 .19 259);
-  --color-accent-pressed: oklch(.48 .18 259);
-  --color-accent-text: oklch(.72 .14 257);
-  --color-accent-data: oklch(.68 .16 257);
+  /* On near-black the fill lifts a little, hover goes lighter (white stays 7:1) and a 1px edge outlines it. */
+  --color-accent: oklch(.42 .14 263);
+  --color-accent-hover: oklch(.47 .15 263);
+  --color-accent-pressed: oklch(.37 .13 263);
+  --color-accent-edge: oklch(.56 .14 263);
+  --color-accent-text: oklch(.75 .10 260);
+  --color-accent-data: oklch(.66 .13 260);
+}
+/* Ink navy (n2): the same roles, muted and slate-leaning. */
+:root[data-accent='ink'] {
+  --color-accent: oklch(.33 .07 263);
+  --color-accent-hover: oklch(.29 .065 263);
+  --color-accent-pressed: oklch(.26 .06 263);
+  --color-accent-text: oklch(.40 .08 263);
+  --color-accent-data: oklch(.50 .08 262);
+}
+:root[data-theme='dark'][data-accent='ink'] {
+  --color-accent: oklch(.40 .075 262);
+  --color-accent-hover: oklch(.45 .08 262);
+  --color-accent-pressed: oklch(.35 .07 262);
+  --color-accent-edge: oklch(.54 .08 262);
+  --color-accent-text: oklch(.77 .065 260);
+  --color-accent-data: oklch(.68 .08 260);
 }
 :root {
   --color-deep: oklch(var(--l-deep) 0 0);
