@@ -24,6 +24,9 @@ import { useDebounced } from '../../lib/pagination'
 
 const clientTabs = mcpClients.map(value => ({ value, label: mcpClientNames[value] }))
 const signInTabs = mcpSignInClients.map(value => ({ value, label: mcpSignInNames[value] }))
+// The client chosen for signing in, carried to the inbox key's setup: the same client where the setup has it, else the
+// setup for any other MCP client (Other, Codex, ChatGPT, VS Code and Claude all take it).
+const inboxClient = (client: McpSignInClient): McpClient => (mcpClients as readonly string[]).includes(client) ? client as McpClient : 'generic'
 
 /** The hosted MCP URL on this installation's canonical address, or null until that is known. */
 export function useMcpUrl() { const origin = usePublicOrigin(); return origin ? mcpServerUrl(origin) : null }
@@ -179,7 +182,7 @@ export function ConnectAgentDialog({ open, onOpenChange, inboxId }: { open: bool
   const close = () => { if (!busy) onOpenChange(false) }
   const footer = !inboxView ? <>
       <Link className="ui-button ui-button--ghost ui-button--md connect-agent__aside" to={guides.mcp} onClick={close}>Docs</Link>
-      {canAdminister && <Button variant="ghost" className="connect-agent__aside" onClick={() => { if ((mcpClients as readonly string[]).includes(signIn)) setClient(signIn as McpClient); setView('inbox') }}>Limit to one inbox</Button>}
+      {canAdminister && <Button variant="ghost" className="connect-agent__aside" onClick={() => { setClient(inboxClient(signIn)); setView('inbox') }}>Limit to one inbox</Button>}
       <Button variant="primary" onClick={close}>Done</Button>
     </>
     : result ? <Button variant="primary" onClick={close}>Done</Button>
