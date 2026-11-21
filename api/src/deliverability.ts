@@ -9,7 +9,7 @@ import { productName } from './brand.js';
 //   sending_emails_kind_created (workspace_id, (snapshot->>'kind'), created_at): a stream, without detoasting snapshot;
 //   sending_emails_campaign_status (workspace_id, campaign_id, status): one campaign;
 //   sending_owner_sender_domain_page (workspace_id, reversed From domain, created_at DESC, id DESC): one From domain;
-//   sending_emails_page (workspace_id, id): an event's email;
+//   sending_emails_pkey (id): an event's email;
 //   sending_email_events_retention (workspace_id, created_at): the window's events;
 //   hosted_screen_hourly, sender_score_daily and sender_standing by their primary keys;
 //   audience_contacts_page, audience_members_contact, the audience_list_members and audience_imports primary keys.
