@@ -20113,7 +20113,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     await simulatedSesFixture(t,async({runtime,db,local,run,jobs})=>{
       const {CAMPAIGN_STATS,campaignStats}=await import('./src/sending.js'),{campaigns}=await import('./src/db/sending.js'),{eq}=await import('drizzle-orm');
       const lowered={...CAMPAIGN_STATS};t.after(()=>{Object.assign(CAMPAIGN_STATS,lowered);});
-      Object.assign(CAMPAIGN_STATS,{from:10,page:7,budgetMs:0});
+      Object.assign(CAMPAIGN_STATS,{from:10,page:7,runMs:0});
       const wid=runtime.config.workspaceId,review=unique('review'),c=ok(await local('POST','/v1/campaigns',{name:'Large'}),201),path=`/v1/campaigns/${c.id}/stats`;
       // Sending, 30 recipients released as the release writes them (review and ordinal), with up to three events each.
       await db.query("UPDATE sending_campaigns SET state='sending',review_id=$2,actor_key_id='fixture',total=30,prepared=30,expanded=30 WHERE id=$1",[c.id,review]);
@@ -20134,16 +20134,16 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const first=ok(await local('GET',path));
       assert.deepEqual(figures(first),figures(await live()));
       assert.equal((await job())?.status,'pending');
-      // 2. Each run of the job reads one page (budget 0): ordinals 1-7, 8-14, 15-21, 22-28, then 29-30, which ends the pass.
+      // 2. Each run of the job reads one page (runMs 0): ordinals 1-7, 8-14, 15-21, 22-28, then 29-30, which ends the pass.
       const cursors:number[]=[];
       for(let step=0;step<5;step++){await run('sending.campaignStats');cursors.push((await job()).payload.pass?.ordinal ?? -1);}
       assert.deepEqual(cursors,[7,14,21,28,-1],'Five steps of at most 7 ordinals each, the sums carried by the job between them.');
       const counted=(await stored()).stats!;
       assert.deepEqual([counted.reviewId,counted.emails],[review,30]);
-      // While the campaign sends, its next count waits about a minute (four times its length if that is longer).
+      // While the campaign sends, its next count starts a minute after this one did (later if its steps were slow).
       const next=await job();
       assert.deepEqual([next.status,next.payload],['pending',{campaignId:c.id}]);
-      assert.ok(Date.parse(next.available_at)-Date.now()>=55_000);
+      assert.ok(new Date(next.available_at).getTime()-Date.now()>=55_000);
       // 3. A read of a large campaign answers from that count: no aggregate over its emails and events.
       const q=t.mock.method(db,'query');let fromCount:Json;
       try{fromCount=ok(await local('GET',path));}finally{q.mock.restore();}
@@ -20183,6 +20183,45 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       CAMPAIGN_STATS.from=lowered.from;
       const small=ok(await local('GET',path));
       assert.deepEqual([figures(small),small.computedAt],[figures(done),done.computedAt]);
+    });
+  });
+  // The background count pays for its database time with idle time: a run takes steps (pages) for about 250 ms, then
+  // waits 32 times as long as the run took, at least a second, so it uses about 3% of a connection's time however large
+  // the campaign, spread over the pass instead of a burst, and a campaign whose steps are slow is counted less often. A
+  // fake clock lets each page statement take a chosen time.
+  test('campaign stats: the background count waits 32 times as long as each run took, so slow steps make it count less often',async t=>{
+    await simulatedSesFixture(t,async({runtime,db,local,run,jobs})=>{
+      const {CAMPAIGN_STATS}=await import('./src/sending.js');
+      const lowered={...CAMPAIGN_STATS};t.after(()=>{Object.assign(CAMPAIGN_STATS,lowered);});
+      Object.assign(CAMPAIGN_STATS,{from:10,page:10});
+      const wid=runtime.config.workspaceId,review=unique('review'),c=ok(await local('POST','/v1/campaigns',{name:'Paced'}),201);
+      await db.query("UPDATE sending_campaigns SET state='sending',review_id=$2,actor_key_id='fixture',total=20,prepared=20,expanded=20 WHERE id=$1",[c.id,review]);
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,campaign_id,review_id,review_ordinal,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status)
+        SELECT 'email_'||md5($2||n),$1,$3,'fixture',$2,$4,n,'news@example.com',jsonb_build_array('reader-'||n||'@example.net'),'[]','[]','Paced','{}',false,'delivered' FROM generate_series(1,20) n`,[wid,c.id,REGION,review]);
+      ok(await local('GET',`/v1/campaigns/${c.id}/stats`));
+      // Each page statement moves the clock by stepMs; nothing else does.
+      let clock=Date.now(),stepMs=2000;
+      const query=db.query.bind(db) as (...args:unknown[])=>unknown;
+      t.mock.method(Date,'now',()=>clock);
+      t.mock.method(db,'query',(...args:unknown[])=>{if(/count\(DISTINCT/.test(String((args[0] as any)?.text??args[0])))clock+=stepMs;return query(...args);});
+      const due=async()=>new Date((await jobs('sending.campaignStats'))[0].available_at).getTime()-clock;
+      // A 2-second step is followed by 64 seconds of nothing: 2 of every 66 seconds, 3%.
+      await run('sending.campaignStats');
+      assert.equal(await due(),64_000);
+      // The pass ends with its second step; the next pass waits the same, and at least a minute from this one's start.
+      await run('sending.campaignStats');
+      assert.ok((await db.query('SELECT stats FROM sending_campaigns WHERE id=$1',[c.id])).rows[0].stats.emails===20);
+      assert.ok(await due()>=60_000);
+      // A run stops once it has used 250 ms: a 300-ms step is one run of its own, followed by 9.6 seconds.
+      stepMs=300;
+      await db.query("UPDATE sending_campaigns SET stats=jsonb_set(stats,'{revision}','\"changed\"') WHERE id=$1",[c.id]);
+      await run('sending.campaignStats');
+      assert.equal(await due(),9600);
+      // Fast steps run together: the rest of the pass (one page) in one run, and a small campaign's next pass starts a
+      // minute after this one did.
+      stepMs=0;
+      await run('sending.campaignStats');
+      assert.ok(await due()>=50_000);
     });
   });
   test('MX: outstanding mail is a queue bound: good standing queues a day of its pace, the evaluation, growth and a daily limit keep 10,000', async t => {

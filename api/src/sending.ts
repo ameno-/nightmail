@@ -199,12 +199,14 @@ const CampaignStats = z.object({
 /**
  * Background counts of campaign outcomes (campaignStatsJob), for campaigns of at least `from` recipients, whose stats a
  * read could not aggregate within its limit. A step counts one page, a fixed range of review ordinals, so it costs the
- * same however large the campaign, and a job run stops after `budgetMs`. While a campaign sends it is counted again every
- * `everyMs`, or after four times its last count's length if that is longer, and only when the workspace's mail changed;
- * a finished campaign once more, and when read after `readRefreshMs`. Exported for the acceptance tests.
+ * same however large the campaign; a job run takes steps for about `runMs`, then waits `pace` times as long as the run
+ * took (at least `pauseMs`) before the next: with the job's own claim and settle the count uses about 3% of one
+ * connection's database time, spread over the whole pass instead of a burst, and a larger campaign is simply counted
+ * less often (2,000,000 recipients: 400 steps, a pass every 7 minutes or so on a fast core, longer on a slower one). A pass starts at most every `everyMs` while the campaign sends and only when the workspace's mail
+ * changed; a finished campaign is counted once more, and when read after `readRefreshMs`. Exported for the tests.
  */
-export const CAMPAIGN_STATS = { from: 20_000, page: 5_000, budgetMs: 3_000, everyMs: 60_000, readRefreshMs: 600_000 };
-const STATS_NOTE = `A campaign of at least ${CAMPAIGN_STATS.from.toLocaleString('en-US')} recipients is counted in the background: about once a minute while it sends (less often for the largest), once more when it finishes, and again when read more than ${CAMPAIGN_STATS.readRefreshMs / 60_000} minutes later if anything changed. Its figures are the last count, so they can be minutes old; computedAt says when. A finished campaign keeps its figures after its emails leave the 30-day history.`;
+export const CAMPAIGN_STATS = { from: 20_000, page: 5_000, runMs: 250, pace: 32, pauseMs: 1_000, everyMs: 60_000, readRefreshMs: 600_000 };
+const STATS_NOTE = `A campaign of at least ${CAMPAIGN_STATS.from.toLocaleString('en-US')} recipients is counted in the background: about once a minute while it sends (every few minutes for the largest, so counting stays a small share of the database's time), once more when it finishes, and again when read more than ${CAMPAIGN_STATS.readRefreshMs / 60_000} minutes later if anything changed. Its figures are the last count, so they can be minutes old; computedAt says when. A finished campaign keeps its figures after its emails leave the 30-day history.`;
 /**
  * Outcome counts per (campaign, status, simulated) of the emails `where` selects, each email counted once per outcome
  * over all its stored events, without loading mail bodies. Groups of disjoint sets of emails add up, so counts taken
@@ -283,16 +285,16 @@ function statsDue(row: typeof campaigns.$inferSelect) {
   if (!stored) return true;
   return !stored.frozen && !(CAMPAIGN_ACTIVE as readonly string[]).includes(row.state) && Date.now() - Date.parse(stored.computedAt) >= CAMPAIGN_STATS.readRefreshMs;
 }
-type StatsPass = { reviewId: string; computedAt: string; revision: string; ordinal: number; ms: number; groups: CampaignStatsGroup[] };
+type StatsPass = { reviewId: string; computedAt: string; revision: string; ordinal: number; groups: CampaignStatsGroup[] };
 /**
- * One campaign's background count: pages of its emails by review ordinal (sending_emails_review_ordinal), each its own
- * bounded statement, the running sums carried in the job's payload between runs, stored on the campaign when the pass
- * ends. Every email of a campaign belongs to its current review: the release is the only path that writes campaign
- * mail, and a launch takes a new review only while nothing was released.
+ * One campaign's background count: a page of its emails by review ordinal (sending_emails_review_ordinal) per run, each
+ * its own short statement outside any transaction, the running sums carried in the job's payload between runs, stored on
+ * the campaign when the pass ends. Every email of a campaign belongs to its current review: the release is the only path
+ * that writes campaign mail, and a launch takes a new review only while nothing was released.
  */
 const campaignStatsJob: JobHandler = retryDatabaseFailures(async (runtime, payload, job) => {
   if (typeof payload.campaignId !== 'string') throw new ApiError(422, 'INVALID_JOB', 'A campaign count needs its campaign.');
-  const campaignId = payload.campaignId, a = { workspaceId: job.workspaceId }, at = (ms: number) => new Date(Date.now() + ms).toISOString();
+  const campaignId = payload.campaignId, a = { workspaceId: job.workspaceId }, at = (ms: number) => new Date(Date.now() + ms).toISOString(), started = Date.now();
   const [row] = await runtime.db.select().from(campaigns).where(and(scope(campaigns, a), eq(campaigns.id, campaignId)));
   // Deleted, or a draft again: nothing to count until a launch queues this again.
   if (!row?.reviewId) return;
@@ -316,15 +318,18 @@ const campaignStatsJob: JobHandler = retryDatabaseFailures(async (runtime, paylo
     }
     // The database's clock, which also stamps updated_at, so "counted after it finished" never depends on this host's clock.
     const { rows: [clock] } = await runtime.db.execute<{ at: string }>(sql`SELECT to_json(clock_timestamp())#>>'{}' AS at`);
-    pass = { reviewId: row.reviewId, computedAt: new Date(clock!.at).toISOString(), revision, ordinal: 0, ms: 0, groups: [] };
+    pass = { reviewId: row.reviewId, computedAt: new Date(clock!.at).toISOString(), revision, ordinal: 0, groups: [] };
   }
-  const started = Date.now();
+  // Pages, each its own statement, until the run has used `runMs`: the job's own claim and settle are then a small part
+  // of each run.
   while (pass.ordinal < row.expanded) {
     const page = await statsGroups(runtime.db, a, and(eq(emails.campaignId, campaignId), eq(emails.reviewId, pass.reviewId), gt(emails.reviewOrdinal, pass.ordinal), lte(emails.reviewOrdinal, pass.ordinal + CAMPAIGN_STATS.page)));
     pass = { ...pass, ordinal: pass.ordinal + CAMPAIGN_STATS.page, groups: addGroups(pass.groups, page) };
-    if (pass.ordinal < row.expanded && Date.now() - started >= CAMPAIGN_STATS.budgetMs) throw new JobDeferred(now(), { campaignId, pass: { ...pass, ms: pass.ms + Date.now() - started } });
+    if (Date.now() - started >= CAMPAIGN_STATS.runMs) break;
   }
-  const ms = pass.ms + Date.now() - started;
+  // This run's database time, paid back as idle time before the next run or pass.
+  const pause = Math.max(CAMPAIGN_STATS.pauseMs, CAMPAIGN_STATS.pace * (Date.now() - started));
+  if (pass.ordinal < row.expanded) throw new JobDeferred(at(pause), { campaignId, pass });
   const counted: StoredCampaignStats = { reviewId: pass.reviewId, computedAt: pass.computedAt, revision: pass.revision, emails: pass.groups.reduce((n, g) => n + g.count, 0), groups: pass.groups };
   // A count never replaces one that saw more emails: the 30-day retention deleted those, so the stored figures stay, frozen.
   const kept = await runtime.db.execute(sql`UPDATE sending_campaigns SET stats=${JSON.stringify(counted)}::jsonb WHERE workspace_id=${a.workspaceId} AND id=${campaignId} AND review_id=${pass.reviewId}
@@ -333,9 +338,9 @@ const campaignStatsJob: JobHandler = retryDatabaseFailures(async (runtime, paylo
     await runtime.db.execute(sql`UPDATE sending_campaigns SET stats=stats||'{"frozen":true}'::jsonb WHERE workspace_id=${a.workspaceId} AND id=${campaignId} AND stats->>'reviewId'=${pass.reviewId}`);
     return;
   }
-  if (active) throw new JobDeferred(at(Math.max(CAMPAIGN_STATS.everyMs, 4 * ms)), { campaignId });
+  if (active) throw new JobDeferred(new Date(Math.max(Date.parse(pass.computedAt) + CAMPAIGN_STATS.everyMs, Date.now() + pause)).toISOString(), { campaignId });
   // A pass that started before the campaign finished is followed by one after it, so the finished figures are exact.
-  if (Date.parse(pass.computedAt) < Date.parse(row.updatedAt)) throw new JobDeferred(now(), { campaignId });
+  if (Date.parse(pass.computedAt) < Date.parse(row.updatedAt)) throw new JobDeferred(at(pause), { campaignId });
 });
 const CampaignState = Campaign.pick({ id: true, revision: true, updatedAt: true, state: true, scheduledAt: true, archivedAt: true }).describe('Compact state for draft sync polling. Compare all fields, not only revision: archival and delivery state can change without a new draft revision. Fetch the full campaign when state changes. No draft content or delivery counts.').openapi('CampaignState');
 const CampaignDraftSummary = CampaignDraftView.pick({ name: true, region: true, from: true, fromName: true, subject: true, previewText: true }).extend({ audience: AudienceSpec.pick({ listId: true, segmentId: true }).partial({ listId: true }).default({}) }).strict().openapi('CampaignDraftSummary');
