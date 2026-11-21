@@ -52,7 +52,7 @@ async function route(runtime:Runtime,source:SQL,replay:boolean) {
       last_recovered_at=CASE WHEN r.status='processed' THEN NULL ELSE r.last_recovered_at END
     WHERE r.bucket=excluded.bucket AND r.region=excluded.region AND r.status<>'failed' AND NOT r.recipients @> excluded.recipients
       AND (SELECT count(DISTINCT a) FROM jsonb_array_elements_text(r.recipients||excluded.recipients) v(a))<=200 RETURNING workspace_id,ses_message_id,status
-  ), queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.ingest',workspace_id,jsonb_build_object('sesMessageId',ses_message_id) FROM receipts WHERE status='pending' ORDER BY workspace_id,ses_message_id RETURNING 1),
+  ), queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT public.row_id('job'),'mailbox.ingest',workspace_id,jsonb_build_object('sesMessageId',ses_message_id) FROM receipts WHERE status='pending' ORDER BY workspace_id,ses_message_id RETURNING 1),
   unmatched AS (SELECT e.bucket,e.mid,jsonb_agg(DISTINCT e.addr ORDER BY e.addr) AS recipients ${replay?sql``:sql`,jsonb_object_agg(e.addr,setup.owners) AS owners`} FROM env e
     ${replay?sql``:sql`JOIN LATERAL (SELECT jsonb_agg(wid) AS owners FROM (
       SELECT m.workspace_id AS wid FROM mailbox_domains m WHERE (e.wid=m.workspace_id OR e.kind='shared') AND m.region=e.region AND (m.name=e.host OR m.receiving_host=e.host)

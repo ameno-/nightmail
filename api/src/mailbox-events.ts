@@ -22,22 +22,22 @@ export function mailboxEventCtes(source:SQL) {
   ), events AS (INSERT INTO mailbox_events(workspace_id,type,mailbox_id,thread_id,message_id,data)
     SELECT workspace_id,type,mailbox_id,thread_id,message_id,data FROM items JOIN lanes USING(workspace_id) ORDER BY workspace_id,ord RETURNING *
   ), deliveries AS (INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,event_seq,payload)
-    SELECT 'mwd_'||gen_random_uuid(),e.workspace_id,h.id,e.seq,jsonb_build_object('id','mev_'||e.seq,'cursor',e.seq::text,'type',e.type,'createdAt',to_char(e.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),'addressId',e.mailbox_id,'threadId',e.thread_id,'messageId',e.message_id,'data',e.data)
+    SELECT public.row_id('mwd'),e.workspace_id,h.id,e.seq,jsonb_build_object('id','mev_'||e.seq,'cursor',e.seq::text,'type',e.type,'createdAt',to_char(e.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),'addressId',e.mailbox_id,'threadId',e.thread_id,'messageId',e.message_id,'data',e.data)
     FROM events e CROSS JOIN LATERAL (SELECT h.id FROM mailbox_webhooks h WHERE h.workspace_id=e.workspace_id
       AND (h.mailbox_ids IS NULL OR (e.type<>'message.stored' AND h.mailbox_ids ? e.mailbox_id))
       AND h.event_types ? e.type ORDER BY h.paused,h.id LIMIT 64) h RETURNING id,workspace_id
-  ), queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.webhook',workspace_id,jsonb_build_object('deliveryId',id) FROM deliveries RETURNING 1)`;
+  ), queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT public.row_id('job'),'mailbox.webhook',workspace_id,jsonb_build_object('deliveryId',id) FROM deliveries RETURNING 1)`;
 }
 
 const fanout:JobHandler=retryDatabaseFailures(async(runtime,payload,job)=>{
   // Snapshot endpoint IDs at commit, not at expansion: a new subscription never receives historical mail.
   // A routed ref carries its recipient's junk decision (159); the event's type is only a fallback for older refs.
   const records=sql`deliveries AS (INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,event_seq,routed,format,payload)
-    SELECT CASE WHEN ref?'ritualAction' THEN 'mwd_'||md5(e.workspace_id||':'||(ref->>'ritualAction')||':'||h.id) ELSE 'mwd_'||gen_random_uuid() END,e.workspace_id,h.id,CASE WHEN NOT ref?'ritualAction' THEN e.seq END,jsonb_typeof(ref)='object' AND NOT ref?'subscription',h.format,jsonb_build_object('id','mev_'||e.seq,'cursor',e.seq::text,'type',CASE WHEN ref?'junk' THEN CASE WHEN (ref->>'junk')::boolean THEN 'message.junk' ELSE 'message.received' END ELSE e.type END,'createdAt',to_char(e.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),'addressId',e.mailbox_id,'threadId',e.thread_id,'messageId',e.message_id,'data',CASE WHEN jsonb_typeof(ref)='object' THEN e.data||jsonb_build_object('recipients',jsonb_build_array(ref->>'recipient'),'route',ref->'route','junk',CASE WHEN ref?'junk' THEN (ref->>'junk')::boolean ELSE e.type='message.junk' END,'subaddress',substring(split_part(ref->>'recipient','@',1) from '[+](.*)')) ELSE e.data END)||CASE WHEN ref?'body' THEN jsonb_build_object('ritualBody',ref->'body') ELSE '{}'::jsonb END||CASE WHEN ref?'ritualAction' THEN jsonb_build_object('ritualAction',ref->'ritualAction') ELSE '{}'::jsonb END||CASE WHEN ref?'grants' THEN jsonb_build_object('grants',ref->'grants') ELSE '{}'::jsonb END
+    SELECT CASE WHEN ref?'ritualAction' THEN 'mwd_'||md5(e.workspace_id||':'||(ref->>'ritualAction')||':'||h.id) ELSE public.row_id('mwd') END,e.workspace_id,h.id,CASE WHEN NOT ref?'ritualAction' THEN e.seq END,jsonb_typeof(ref)='object' AND NOT ref?'subscription',h.format,jsonb_build_object('id','mev_'||e.seq,'cursor',e.seq::text,'type',CASE WHEN ref?'junk' THEN CASE WHEN (ref->>'junk')::boolean THEN 'message.junk' ELSE 'message.received' END ELSE e.type END,'createdAt',to_char(e.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),'addressId',e.mailbox_id,'threadId',e.thread_id,'messageId',e.message_id,'data',CASE WHEN jsonb_typeof(ref)='object' THEN e.data||jsonb_build_object('recipients',jsonb_build_array(ref->>'recipient'),'route',ref->'route','junk',CASE WHEN ref?'junk' THEN (ref->>'junk')::boolean ELSE e.type='message.junk' END,'subaddress',substring(split_part(ref->>'recipient','@',1) from '[+](.*)')) ELSE e.data END)||CASE WHEN ref?'body' THEN jsonb_build_object('ritualBody',ref->'body') ELSE '{}'::jsonb END||CASE WHEN ref?'ritualAction' THEN jsonb_build_object('ritualAction',ref->'ritualAction') ELSE '{}'::jsonb END||CASE WHEN ref?'grants' THEN jsonb_build_object('grants',ref->'grants') ELSE '{}'::jsonb END
     FROM settled CROSS JOIN jsonb_each(${JSON.stringify(payload)}::jsonb) s(seq,hooks) JOIN mailbox_events e ON e.workspace_id=${job.workspaceId} AND e.seq=s.seq::bigint
     CROSS JOIN jsonb_array_elements(s.hooks) ref JOIN mailbox_webhooks h ON h.workspace_id=e.workspace_id AND h.id=coalesce(ref->>'id',ref#>>'{}')
     ON CONFLICT DO NOTHING RETURNING id,workspace_id),
-    queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.webhook',workspace_id,jsonb_build_object('deliveryId',id) FROM deliveries)`;
+    queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT public.row_id('job'),'mailbox.webhook',workspace_id,jsonb_build_object('deliveryId',id) FROM deliveries)`;
   if(job.recordWithSettlement)job.recordWithSettlement(records);else await runtime.db.execute(sql`WITH settled AS (SELECT 1),${records} SELECT 1`);
 });
 
@@ -88,7 +88,7 @@ const resumeDeliveries:JobHandler=async(runtime,payload,job)=>{
   const result=await runtime.db.execute(sql`WITH hook AS MATERIALIZED (SELECT id FROM mailbox_webhooks WHERE workspace_id=${job.workspaceId} AND id=${String(payload.hook)} AND NOT paused FOR SHARE),
     page AS (SELECT d.id FROM mailbox_webhook_deliveries d JOIN hook ON hook.id=d.webhook_id WHERE d.workspace_id=${job.workspaceId} AND d.status='paused' AND d.created_at>=now()-interval '30 days' ORDER BY d.id LIMIT 100 FOR UPDATE OF d),
     resumed AS (UPDATE mailbox_webhook_deliveries d SET status='pending',generation=generation+1,last_error=NULL,updated_at=now() FROM page WHERE d.id=page.id RETURNING d.*)
-    INSERT INTO jobs(id,type,workspace_id,payload,attempts) SELECT 'job_'||gen_random_uuid(),'mailbox.webhook',r.workspace_id,jsonb_build_object('deliveryId',r.id,'generation',r.generation),greatest(r.attempt_count,coalesce(a.attempts,0))
+    INSERT INTO jobs(id,type,workspace_id,payload,attempts) SELECT public.row_id('job'),'mailbox.webhook',r.workspace_id,jsonb_build_object('deliveryId',r.id,'generation',r.generation),greatest(r.attempt_count,coalesce(a.attempts,0))
     FROM resumed r LEFT JOIN mail_action_attempts a ON a.workspace_id=r.workspace_id AND a.delivery_id=r.id`);
   if(result.rowCount===100)throw new JobDeferred(new Date().toISOString());
 };

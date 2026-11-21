@@ -2,7 +2,7 @@ import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { S3Client } from '@aws-sdk/client-s3';
 import { serialize, type DefaultTreeAdapterMap } from 'parse5';
 import { boundedHtmlFragment } from './bounded-html.js';
-import { ApiError, isSimulatedSes, digest, id, log, uploadKey, ModuleLoadError, wrapModuleLoad, type Actor, type DbExecutor, type Runtime } from './core.js';
+import { ApiError, isSimulatedSes, digest, id, rowId, log, uploadKey, ModuleLoadError, wrapModuleLoad, type Actor, type DbExecutor, type Runtime } from './core.js';
 import {mimeIndex} from './mailbox-mime-index.js';
 import { attachmentLinks, attachments as sendingAttachments, emails } from './db/sending.js';
 import { splitThreadingHeaders } from './custom-headers.js';
@@ -288,7 +288,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   }));
   const now = new Date().toISOString();
   let threadId = message.threadId;
-  if (!threadId) { threadId = id('thr'); await tx.insert(mailThreads).values({ id: threadId, ...message.scope, subject: normalizeSubject(message.subject).slice(0, 998), messageCount: 0, lastMessageAt: now }); }
+  if (!threadId) { threadId = rowId('thr'); await tx.insert(mailThreads).values({ id: threadId, ...message.scope, subject: normalizeSubject(message.subject).slice(0, 998), messageCount: 0, lastMessageAt: now }); }
   await tx.update(mailThreads).set({ messageCount: sql`${mailThreads.messageCount} + 1`, lastMessageAt: sql`greatest(${mailThreads.lastMessageAt}, ${now}::timestamptz)` }).where(eq(mailThreads.id, threadId));
   const address = (value: string): MailAddress => ({ name: null, address: value });
   const [row] = await tx.insert(mailMessages).values({
