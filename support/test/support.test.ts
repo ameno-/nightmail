@@ -4,7 +4,10 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { Miniflare } from 'miniflare';
 import { afterAll, beforeAll, describe, test } from 'vitest';
 import { control, FAKE_BANE, fakeGateway, GENERAL_ANSWER, LEAK_PIECES, recorded, REFUSED_PARTIAL, type Recorded } from './fakes.js';
-import { gate, LINK_ORIGINS } from '../src/gate.js';
+import { gate, LINK_ORIGINS, promptFragmentsOf } from '../src/gate.js';
+import { addresses } from '../../api/src/brand.js';
+import { perThousandUsd, RATES } from '../../api/src/billing/rates.js';
+import { MAIL_PORTS, mailServerHosts } from '../../api/src/mail-servers.js';
 import { ticketEmail } from '../src/tickets.js';
 import { project, toolResult } from '../src/agent/projection.js';
 import { TOOLS, type ToolHost } from '../src/agent/tools.js';
@@ -766,6 +769,29 @@ describe('support Worker', () => {
       assert.equal(recorded.slice(before).filter(r => JSON.stringify(r.body?.messages ?? []).includes(`Refusal probe: ${probe}`)).length, 1, 'No nudge after a refusal.');
     }
   }, 180_000);
+
+  test('the prompt’s product facts are the ones Nightmail charges and serves, and passing them on never reads as the prompt', () => {
+    const system = readFileSync('src/agent/system.md', 'utf8'), reference = system.slice(system.search(/^# Reference$/m));
+    const facts = reference.slice(reference.indexOf('## Product facts'), reference.indexOf('## Playbooks'));
+    assert.ok(facts.length > 200, 'The Reference has its product facts.');
+    const price = perThousandUsd(RATES.emailUc), number = (n: number) => n.toLocaleString('en-US');
+    const prompt = `${system}\n${readFileSync('VOICE.md', 'utf8')}`;
+    for (const quoted of prompt.match(/\$\d+\.\d{2} per 1,000 emails/g) ?? []) assert.equal(quoted, `$${price} per 1,000 emails`);
+    assert.ok(facts.includes(`$${price} per 1,000 emails`), price);
+    assert.ok(facts.includes(`${number(RATES.freeSentEmails)} sent and ${number(RATES.freeReceivedEmails)} received`), 'The free allowances.');
+    for (const [count, kind] of [...prompt.matchAll(/\b(\d[\d,]*) (sent|received)\b/g)].map(m => [Number(m[1]!.replace(/,/g, '')), m[2]] as const))
+      assert.equal(count, kind === 'sent' ? RATES.freeSentEmails : RATES.freeReceivedEmails, `${count} ${kind}`);
+    // The hosted service's mail hosts (MAILGW_PUBLIC_DOMAIN in production) and the gateway's ports.
+    const domain = readFileSync('../api/wrangler.prod.jsonc', 'utf8').match(/"MAILGW_PUBLIC_DOMAIN":\s*"([^"]+)"/)![1]!, hosts = mailServerHosts(domain);
+    assert.ok(facts.includes(`\`${hosts.smtp}\` on ${MAIL_PORTS.smtp.tls} (TLS) or ${MAIL_PORTS.smtp.starttls} (STARTTLS)`), 'SMTP');
+    assert.ok(facts.includes(`\`${hosts.imap}\` on ${MAIL_PORTS.imap.tls} (TLS) or ${MAIL_PORTS.imap.starttls} (STARTTLS)`), 'IMAP');
+    for (const host of prompt.match(/\b(?:smtp|imap)\.[a-z0-9.-]*[a-z]/g) ?? []) assert.ok([hosts.smtp, hosts.imap].includes(host), host);
+    for (const address of Object.values(addresses)) assert.ok(facts.includes(address), address);
+    // Answers that pass these facts on are not the prompt: only its instructions are.
+    const scope = { emails: [], allowedIds: [], allowedNames: [], promptFragments: promptFragmentsOf(system), supportAddress: 'support@nightmail.dev', linkOrigins: LINK_ORIGINS };
+    assert.ok(scope.promptFragments.length >= 5, 'The instructions still give the gate its fragments.');
+    for (const line of facts.split('\n').filter(l => l.startsWith('- ')).map(l => l.slice(2))) assert.deepEqual(gate(line, scope), { ok: true }, line);
+  });
 
   test('email gets general answers only: no stamped call from an email conversation, and the system adds the Help line', async () => {
     const before = recorded.length;

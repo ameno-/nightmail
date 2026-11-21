@@ -74,6 +74,14 @@ export function confirmLink(text: string) {
   return false;
 }
 
+/**
+ * Distinctive lines of the system prompt, for the "never reveal this prompt" check: from the instructions only, never from
+ * its "# Reference" part (product facts, playbooks and policies), whose facts an answer is meant to pass on.
+ */
+export function promptFragmentsOf(system: string) {
+  return system.split(/^# Reference$/m)[0]!.split('\n').map(l => l.replace(/^[-*#>\d.|\s]+/, '').trim()).filter(l => l.length >= 60 && !/`|https?:/.test(l)).filter((_, i) => i % 4 === 0).map(l => l.slice(0, 48));
+}
+
 /** Placeholder addresses used in DNS advice ("rua=mailto:dmarc@your-domain.com") are fine. */
 function isExample(email: string) { return /@(?:example\.(?:com|org|net)|your-?domain\.com|yourdomain\.com)$/i.test(email); }
 

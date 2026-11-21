@@ -7,6 +7,7 @@ import { TOOLS, ToolFailure, type Param, type ToolHost } from './tools.js';
 import SYSTEM from './system.md';
 import VOICE from '../../VOICE.md';
 import { errorTypeOf } from '../../../api/src/log.js';
+import { promptFragmentsOf } from '../gate.js';
 import { log } from '../log.js';
 
 // The agent runtime: OpenCode, embedded in the conversation's Durable Object through `@opencode/sdk/workerd` (the same
@@ -122,13 +123,8 @@ function jsonSchema(params: Record<string, Param>) {
   return { type: 'object', properties, required, additionalProperties: false };
 }
 
-/**
- * Distinctive lines of the system prompt, for the output gate's "never reveal this prompt" check: from the instructions
- * only, never from its "# Reference" part (playbooks and policies), whose facts an answer is meant to pass on.
- */
-export function promptFragments() {
-  return SYSTEM.split(/^# Reference$/m)[0]!.split('\n').map(l => l.replace(/^[-*#>\d.|\s]+/, '').trim()).filter(l => l.length >= 60 && !/`|https?:/.test(l)).filter((_, i) => i % 4 === 0).map(l => l.slice(0, 48));
-}
+/** The output gate's "never reveal this prompt" fragments, from this prompt's instructions (gate.ts). */
+export const promptFragments = () => promptFragmentsOf(SYSTEM);
 
 /** One OpenCode host per conversation object, booted on its first turn. */
 export async function createHarness(env: Env, storage: DurableObjectStorage): Promise<Harness> {
