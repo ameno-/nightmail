@@ -2446,6 +2446,12 @@ describe('support Worker', () => {
       const result = gate(text, scope);
       assert.ok(!result.ok && result.reasons.includes(reason), `${text} → ${JSON.stringify(result)}`);
     }
+    // internal, invalid and local are hostnames only after a label: alone they are everyday words.
+    for (const text of ['Some sends fail with "invalid recipient".', 'Invalid API key means the key was revoked.', 'Set it in your local time.', 'The local part is before the @.', 'I can’t share the internal blocks.'])
+      assert.deepEqual(gate(text, scope), { ok: true }, text);
+    for (const host of ['api.internal', 'db.local', 'mail.invalid', 'x.svc.cluster.local', 'bane-dev.workers.dev']) assert.deepEqual(gate(`It runs on ${host}.`, scope), { ok: false, reasons: ['internal hostname'] }, host);
+    // Nightmail's own addresses are contacts an answer may pass on.
+    assert.deepEqual(gate('Write to privacy@nightmail.dev, legal@nightmail.dev or security@nightmail.dev.', scope), { ok: true });
     const chat = await chatToken(ROOT, 'conv_aaaaaaaaaaaaaaaaaaaaaaaaaa', 'usr_ada');
     assert.deepEqual(await readChatToken(ROOT, chat.token, 'conv_aaaaaaaaaaaaaaaaaaaaaaaaaa'), { userId: 'usr_ada' });
     assert.equal(await readChatToken(ROOT, chat.token, 'conv_bbbbbbbbbbbbbbbbbbbbbbbbbb'), null, 'Another conversation.');
