@@ -198,6 +198,10 @@ export type ConnectionSummary = {
         total: number;
         verified: number;
     };
+    /**
+     * A connected AWS account's most pressing health finding, for a banner; absent when nothing needs attention.
+     */
+    attention?: string;
 } | null;
 
 export type Workspace = {
@@ -5056,6 +5060,18 @@ export type ProviderConnection = {
          */
         version: string | null;
         /**
+         * The newest published role template.
+         */
+        latest: string;
+        /**
+         * updateConnectionStack can prepare an update to the newest template.
+         */
+        updateAvailable: boolean;
+        /**
+         * Features the stack's template grants.
+         */
+        features: Array<string>;
+        /**
          * The stack was deleted in AWS.
          */
         deleted: boolean;
@@ -5063,6 +5079,17 @@ export type ProviderConnection = {
          * Why the last stack was refused, to show in setup.
          */
         error: string | null;
+    } | null;
+    /**
+     * The connected account's last health check: what needs attention.
+     */
+    health: {
+        checkedAt: string;
+        issues: Array<{
+            code: string;
+            region?: string;
+            message: string;
+        }>;
     } | null;
     scan?: {
         revision: number;
@@ -5190,6 +5217,12 @@ export type ProductionAccessRequest = {
     useCase: string;
     mailType: 'TRANSACTIONAL' | 'MARKETING';
     confirm: true;
+};
+
+export type ConnectionStackUpdate = {
+    version: string;
+    changeSetId: string;
+    consoleUrl: string;
 };
 
 export type PublicStats = {
@@ -26381,6 +26414,67 @@ export type RequestConnectionProductionAccessResponses = {
 };
 
 export type RequestConnectionProductionAccessResponse = RequestConnectionProductionAccessResponses[keyof RequestConnectionProductionAccessResponses];
+
+export type UpdateConnectionStackData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/connection/stack/update';
+};
+
+export type UpdateConnectionStackErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type UpdateConnectionStackError = UpdateConnectionStackErrors[keyof UpdateConnectionStackErrors];
+
+export type UpdateConnectionStackResponses = {
+    /**
+     * Success
+     */
+    200: ConnectionStackUpdate;
+};
+
+export type UpdateConnectionStackResponse = UpdateConnectionStackResponses[keyof UpdateConnectionStackResponses];
 
 export type GetConnectionRegionStatusData = {
     body?: never;

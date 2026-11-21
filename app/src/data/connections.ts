@@ -12,6 +12,8 @@ export const connectionApi = {
   // A connected AWS account: import domains found in it, add a new one in a region, and ask AWS for production access.
   importDomains: (revision: number, candidateIds: string[]) => request<{ operationId: string; regions: string[] }>(`${path}/imports`, { method: 'POST', body: { revision, candidateIds, confirm: true } }),
   addDomain: (name: string, region: string) => request<{ operationId: string; regions: string[] }>('/v1/domains', { method: 'POST', body: { name, region } }),
+  // Prepares a change set of the account's stack to the newest template; the customer reviews and runs it in AWS.
+  updateStack: () => request<{ version: string; changeSetId: string; consoleUrl: string }>(`${path}/stack/update`, { method: 'POST' }),
   rescan: () => request<{ operationId: string; revision: number }>(`${path}/scan`, { method: 'POST' }),
   requestProductionAccess: (region: string, input: { websiteUrl: string; useCase: string; mailType: 'TRANSACTIONAL' | 'MARKETING' }) => request<{ region: string; production: boolean; review: { status: string; caseId: string | null } | null }>(`${path}/regions/${encodeURIComponent(region)}/production-access`, { method: 'POST', body: { ...input, confirm: true } }),
 }

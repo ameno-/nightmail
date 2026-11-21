@@ -388,7 +388,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     : home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage start={{ signedIn: false, onSignIn: login, onSignInIntent: prepareLogin, busy }} notice={authNotice} /></Suspense>
     // A dashboard page (a deep link from an email, or a bookmark) asks to sign in and opens once signed in; any other
     // address says there is no page there.
-    : signedOut ? isKnownPath(pathname) ? <SignedOutPage title="Sign in with GitHub or Google">
+    : signedOut ? isKnownPath(pathname) ? <SignedOutPage title={`Sign in to ${productName}`}>
         {authNotice}
         <Button variant="primary" loading={busy} onClick={login} onPointerDown={prepareLogin} data-analytics="sign-in/continue">Continue to sign in</Button>
         <SignInConsent className="muted" />

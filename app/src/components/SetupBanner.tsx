@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Clock } from 'lucide-react'
+import { Clock, TriangleAlert } from 'lucide-react'
+import { Link } from 'react-router'
 import { useSession, useWorkspaceAccess } from '../data/context'
 import { Button } from './ui'
 
@@ -12,6 +13,8 @@ export function SetupBanner() {
   const { multiTenant, canAdminister } = useWorkspaceAccess()
   const client = useQueryClient()
   const [checking, setChecking] = useState(false)
+  const attention = identity?.connection?.state === 'ready' ? identity.connection.attention : null
+  if (multiTenant && attention) return <ConnectionAttention message={attention} />
   if (!multiTenant || canAdminister || !identity || identity.connection?.state === 'ready') return null
   async function check() { setChecking(true); try { await client.refetchQueries({ queryKey: ['identity'], exact: true }) } finally { setChecking(false) } }
   return <div className="standing-banner setup-banner ui-tone--warning" role="status" data-setup="sending">
@@ -21,5 +24,14 @@ export function SetupBanner() {
       <p className="standing-banner__did">An owner or admin sets it up. Until then, this workspace can’t send or receive mail.</p>
     </div>
     <Button className="standing-banner__fix" size="sm" loading={checking} onClick={() => void check()}>Check again</Button>
+  </div>
+}
+
+// A connected AWS account's health check found something (GET /v1/me): one line, and where to look.
+function ConnectionAttention({ message }: { message: string }) {
+  return <div className="standing-banner setup-banner ui-tone--warning" role="status" data-setup="aws">
+    <TriangleAlert className="standing-banner__icon" size={16} aria-hidden="true" />
+    <div className="standing-banner__text"><p className="standing-banner__what">{message}</p></div>
+    <Link className="ui-button ui-button--secondary ui-button--sm standing-banner__fix" to="/settings#sending">Sending settings</Link>
   </div>
 }

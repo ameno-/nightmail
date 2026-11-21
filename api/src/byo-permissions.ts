@@ -2,12 +2,22 @@ import { ApiError } from './core.js';
 import { setupResources } from './ses-setup.js';
 
 /** Why a connected account's role is assumed: the session's name is nightmail-<purpose>. */
-export type ByoPurpose = 'scan' | 'provision' | 'cleanup' | 'send' | 'template' | 'quota' | 'verify' | 'read' | 'delete' | 'mailfrom' | 'stack' | 'account';
-export type ByoScope = { region: string; account: string; connectionId: string; domain?: string; template?: string; stack?: string };
+export type ByoPurpose = 'scan' | 'provision' | 'cleanup' | 'send' | 'template' | 'quota' | 'verify' | 'read' | 'delete' | 'mailfrom' | 'stack' | 'account' | 'update';
+export type ByoScope = { region: string; account: string; connectionId: string; domain?: string; template?: string; stack?: string; templateUrl?: string; changeSet?: string };
 /** The published role templates (api/byo-templates/<version>.yaml) a connected account may run. */
 export const BYO_TEMPLATE_VERSIONS = ['6.0'] as const;
 export const BYO_TEMPLATE_BUCKET = (platformAccount: string) => `nightmail-byo-templates-${platformAccount}`;
 export const byoTemplateUrl = (platformAccount: string, version: string = BYO_TEMPLATE_VERSIONS.at(-1)!) => `https://${BYO_TEMPLATE_BUCKET(platformAccount)}.s3.us-east-2.amazonaws.com/byo/${version}.yaml`;
+/** What each feature needs from a connected account's stack: the first published template version that grants it. A feature an
+ * older stack lacks is offered with an update instead, and nothing else changes. */
+export const BYO_FEATURES = { 'production-access': '6.0', 'stack-update': '6.0' } as const;
+export function versionAtLeast(version: string | null | undefined, minimum: string) {
+  const parse = (v: string) => v.split('.').map(Number) as [number, number];
+  if (!version || !/^\d+\.\d+$/.test(version)) return false;
+  const [a, b] = parse(version), [c, d] = parse(minimum);
+  return a > c || (a === c && b >= d);
+}
+export const byoFeatures = (version: string | null | undefined) => (Object.keys(BYO_FEATURES) as (keyof typeof BYO_FEATURES)[]).filter(feature => versionAtLeast(version, BYO_FEATURES[feature]));
 type Statement = { Effect: 'Allow'; Action: string[]; Resource: string | string[]; Condition?: { StringEquals: Record<string, string> } };
 const domainName = /^(?:[a-z0-9-]+\.)+[a-z]{2,63}$/;
 
@@ -46,6 +56,11 @@ export function byoSessionStatements(purpose: ByoPurpose, s: ByoScope): Statemen
     case 'delete': return identity(['ses:DeleteEmailIdentity']);
     case 'mailfrom': return identity(['ses:PutEmailIdentityMailFromAttributes']);
     // The stack is always in us-east-2 (the template asserts it); Nightmail reads its status and outputs.
+    // Preparing an update of the stack from Nightmail's published template; only the customer can run it.
+    case 'update':
+      if (!s.stack || !/^Nightmail-[0-9a-f]{20}$/.test(s.stack) || !s.templateUrl || !s.changeSet || !/^nightmail-update-[a-z0-9-]{1,80}$/.test(s.changeSet)) throw new ApiError(409, 'BYO_SESSION_SCOPE_REQUIRED', 'A purpose-scoped regional AWS session is required.');
+      return [{ Effect: 'Allow', Action: ['cloudformation:DescribeStacks'], Resource: `arn:aws:cloudformation:us-east-2:${s.account}:stack/${s.stack}/*`, Condition: { StringEquals: { 'aws:RequestedRegion': 'us-east-2' } } },
+        { Effect: 'Allow', Action: ['cloudformation:CreateChangeSet'], Resource: `arn:aws:cloudformation:us-east-2:${s.account}:stack/${s.stack}/*`, Condition: { StringEquals: { 'aws:RequestedRegion': 'us-east-2', 'cloudformation:TemplateUrl': s.templateUrl, 'cloudformation:ChangeSetName': s.changeSet } } }];
     case 'stack':
       if (!s.stack || !/^Nightmail-[0-9a-f]{20}$/.test(s.stack)) throw new ApiError(409, 'BYO_SESSION_SCOPE_REQUIRED', 'A purpose-scoped regional AWS session is required.');
       return [{ Effect: 'Allow', Action: ['cloudformation:DescribeStacks', 'cloudformation:DescribeStackResource'], Resource: `arn:aws:cloudformation:us-east-2:${s.account}:stack/${s.stack}/*`, Condition: { StringEquals: { 'aws:RequestedRegion': 'us-east-2' } } }];

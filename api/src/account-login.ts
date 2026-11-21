@@ -96,7 +96,7 @@ export async function beginAccountLogin(runtime: Runtime, returnUrl: URL, peer: 
   if (prompt) params.set('prompt', prompt);
   // The required authentication context, and the provider identity behind the sign-in (hosted: staff and what is bound
   // to an address are decided from it). The account service asks for a requested context's first method only, so an
-  // installation that accepts several (hosted: GitHub and Google) requests none: the account service offers every
+  // installation that accepts several (hosted: GitHub, Google and email) requests none: the account service offers every
   // method it has, and the callback checks the one used. Staff tools ask for Google (`method`), the only proof of staff.
   const requiredAcr = runtime.config.accountRequiredAcr;
   if (method && requiredAcr && !requiredAcr.includes(METHOD_ACR[method])) throw loginFailed();
