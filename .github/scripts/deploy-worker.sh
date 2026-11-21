@@ -12,10 +12,10 @@ set +x
 umask 077
 secrets_file=$(mktemp "${RUNNER_TEMP:?}/bane-app-secrets.XXXXXX.json")
 trap 'rm -f -- "$secrets_file"' EXIT
-# Hosted sign-in and MCP accept only the account service's GitHub and Google sign-ins: config.ts refuses to start
+# Hosted sign-in and MCP accept only the account service's own sign-in methods: config.ts refuses to start
 # without them, so fail here, before secrets sync or migrations, instead of deploying a 503.
 acr=$(node -e "const ts=require('typescript');const c=ts.parseConfigFileTextToJson('w',require('fs').readFileSync(process.argv[1],'utf8')).config;process.stdout.write(String(c?.vars?.MULTI_TENANT)+' '+String(c?.vars?.ACCOUNT_REQUIRED_ACR))" "$config")
-[[ $acr =~ ^true\ urn:anomaly:acr:(github|google)(\ urn:anomaly:acr:(github|google))*$ ]] || { echo "::error::$config must set MULTI_TENANT=true and ACCOUNT_REQUIRED_ACR to urn:anomaly:acr:github and/or urn:anomaly:acr:google"; exit 1; }
+[[ $acr =~ ^true\ urn:anomaly:acr:(github|google|email|password)(\ urn:anomaly:acr:(github|google|email|password))*$ ]] || { echo "::error::$config must set MULTI_TENANT=true and ACCOUNT_REQUIRED_ACR to the account service's methods (urn:anomaly:acr:github, google, email, password)"; exit 1; }
 for name in BANE_ROOT_SECRET ACCOUNT_CLIENT_PRIVATE_KEY TYPESAFE_API_KEY; do
   [[ -n ${!name:-} ]] || { echo "::error::Missing required app secret: $name"; exit 1; }
 done

@@ -21,11 +21,12 @@ export function providerIdentity(source: Record<string, unknown> | null | undefi
     hd: typeof p.hd === 'string' && p.hd ? p.hd : null };
 }
 
-const methodNames: Record<string, string> = { [METHOD_ACR.github]: 'GitHub', [METHOD_ACR.google]: 'Google' };
+const methodNames: Record<string, string> = { [METHOD_ACR.github]: 'GitHub', [METHOD_ACR.google]: 'Google', [METHOD_ACR.email]: 'email link', [METHOD_ACR.password]: 'password' };
 /** The accepted sign-in methods by name ("GitHub or Google"); null when one isn't the account service's. */
 export function acceptedMethods(acr: readonly string[] | undefined) {
-  const names = acr?.map(value => methodNames[value]);
-  return names?.length && names.every(Boolean) ? [...new Set(names)].sort().join(' or ') : null;
+  if (!acr?.length || !acr.every(value => methodNames[value])) return null;
+  const names = Object.keys(methodNames).filter(value => acr.includes(value)).map(value => methodNames[value]!);
+  return names.length > 1 ? `${names.slice(0, -1).join(', ')} or ${names.at(-1)}` : names[0]!;
 }
 
 /** Hosted staff, exactly as the account service defines it: a Google sign-in whose Google account has a verified

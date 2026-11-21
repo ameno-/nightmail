@@ -7,8 +7,10 @@ import { SEND_LIMITS } from './send-limits.js';
 
 const optional = <T extends z.ZodType>(schema: T) => z.preprocess(v => v === '' ? undefined : v, schema.optional());
 const accountId = z.string().regex(/^\d{12}$/);
-// The account service's authentication context for each sign-in method it offers (its acr_values_supported).
-export const METHOD_ACR = { google: 'urn:anomaly:acr:google', github: 'urn:anomaly:acr:github' } as const;
+// The account service's authentication context for each sign-in method it offers: Google and GitHub (its
+// acr_values_supported), and its own email sign-ins, an emailed link or code and an email with a password, which it
+// reports but doesn't let an app request.
+export const METHOD_ACR = { google: 'urn:anomaly:acr:google', github: 'urn:anomaly:acr:github', email: 'urn:anomaly:acr:email', password: 'urn:anomaly:acr:password' } as const;
 export const GOOGLE_ACR = METHOD_ACR.google;
 const methodAcrs: readonly string[] = Object.values(METHOD_ACR);
 const REMOVED_ALLOWLISTS = ['AUTH_ALLOWED_EMAILS', 'AUTH_ALLOWED_DOMAINS']; // Refused at startup when self-hosted, never read. premerge-identity: allowed
@@ -152,7 +154,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
   if (!parsed.success) throw new ApiError(503, 'CONFIG_INVALID', `Missing or invalid server configuration: ${parsed.error.issues.map(i => i.path.join('.')).join(', ')}.`);
   const v = parsed.data;
   if (Boolean(v.ACCOUNT_CLIENT_ID) !== Boolean(v.ACCOUNT_CLIENT_PRIVATE_KEY)) throw new ApiError(503,'CONFIG_INVALID','Set both ACCOUNT_CLIENT_ID and ACCOUNT_CLIENT_PRIVATE_KEY.');
-  // Hosted sign-in and MCP accept only the account service's GitHub and Google sign-ins. A missing, empty or misspelled
+  // Hosted sign-in and MCP accept only the account service's own methods (METHOD_ACR). A missing, empty or misspelled
   // value must stop the installation instead of silently accepting every authentication method.
   const requiredAcr = v.ACCOUNT_REQUIRED_ACR ? [...new Set(v.ACCOUNT_REQUIRED_ACR.split(' '))] : undefined;
   const methodsOnly = !!requiredAcr?.every(acr => methodAcrs.includes(acr));

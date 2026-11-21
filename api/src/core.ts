@@ -66,7 +66,7 @@ export interface Config {
   byoStackPrefix?: 'Bane' | 'Nightmail';
   accountClient?: { id: string; privateKey: string; algorithm: 'RS256' | 'ES256' };
   /** The `acr` values accepted on ID tokens and on every MCP access token, one of which each must carry. Hosted
-   * installations accept only the account service's sign-in methods (GitHub and Google). */
+   * installations accept only the account service's sign-in methods (GitHub, Google and email). */
   accountRequiredAcr?: string[];
   /** Self-hosted access policy: exact issuer subjects. Identity is (issuer, subject); addresses never admit anyone. */
   allowedSubjects: string[];
