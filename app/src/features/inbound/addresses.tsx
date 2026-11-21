@@ -15,6 +15,7 @@ import { steps } from './concepts'
 import { typeLabel, useOverview } from './overview'
 import { Match, RitualIcon, TargetIcon, targetName } from './parts'
 import { RuleLine } from './recipes'
+import { rulePath, splitBuilderPath } from './shared'
 import { RouteEditor } from './routing'
 import '../settings/settings.css'
 import './inbound.css'
@@ -58,6 +59,11 @@ function AddressPath({ address, overview }: { address: InboundAddress; overview:
   })
   const attached = entry?.rules ?? [], attachedNow = attached
   const available = (overview.data?.rules ?? []).filter(r => !attached.includes(r.key))
+  // A rule opens on its page, its code. A two-way rule that runs only here (the address builder's) opens the builder on it.
+  const ruleLink = (k: string) => {
+    const r = overview.data?.rules.find(x => x.key === k)
+    return (r?.recipe?.id === 'split' || r?.recipe?.id === 'split-by-meaning' ? splitBuilderPath(k, r.attachedTo, [address]) : null) ?? rulePath(k)
+  }
   return <div className="addr-path" aria-label="How mail to this address is handled">
     <section className="addr-step" id="route">
       <h2>{steps.receive.title}</h2>
@@ -70,7 +76,7 @@ function AddressPath({ address, overview }: { address: InboundAddress; overview:
     <span className="addr-arrow" aria-hidden="true">→</span>
     <section className="addr-step" id="rules">
       <h2>{steps.process.title}</h2>
-      {!entry ? <SkeletonText width="50%" /> : attached.length ? <ul>{attached.map((k, i) => <li key={k}><RitualIcon /><Link className="addr-rule" to={`/receiving/rules/${encodeURIComponent(k)}`}><RuleLine rule={overview.data?.rules.find(r => r.key === k)} keyName={k} endpoints={overview.data?.endpoints} /></Link>{i < attached.length - 1 && <span className="addr-then">then</span>}<span className="addr-grow" />
+      {!entry ? <SkeletonText width="50%" /> : attached.length ? <ul>{attached.map((k, i) => <li key={k}><RitualIcon /><Link className="addr-rule" to={ruleLink(k)}><RuleLine rule={overview.data?.rules.find(r => r.key === k)} keyName={k} endpoints={overview.data?.endpoints} /></Link>{i < attached.length - 1 && <span className="addr-then">then</span>}<span className="addr-grow" />
         <IconButton size="sm" label={`Detach ${k}`} disabled={busy} onClick={() => detach(k)}><X size={14} aria-hidden="true" /></IconButton></li>)}</ul>
         : <p className="addr-step__empty">{steps.process.empty}</p>}
       <div className="addr-step__foot">

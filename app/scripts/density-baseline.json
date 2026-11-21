@@ -458,11 +458,11 @@
    "findings": []
   },
   "Receiving · recipe rule · desktop": {
-   "score": 11,
+   "score": 6,
    "findings": []
   },
   "Receiving · recipe rule · phone": {
-   "score": 10,
+   "score": 6,
    "findings": []
   },
   "Receiving · route editor dialog · desktop": {
@@ -470,11 +470,19 @@
    "findings": []
   },
   "Receiving · rule editor · desktop": {
-   "score": 17,
+   "score": 5,
    "findings": []
   },
   "Receiving · rule editor · new script · desktop": {
-   "score": 14,
+   "score": 6,
+   "findings": []
+  },
+  "Receiving · rule editor · new script · phone": {
+   "score": 6,
+   "findings": []
+  },
+  "Receiving · rule editor · phone": {
+   "score": 5,
    "findings": []
   },
   "Receiving · rules · desktop": {

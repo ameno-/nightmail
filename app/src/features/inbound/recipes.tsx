@@ -1,9 +1,9 @@
 // Rules as most people use them: the list (the Receiving page's Rules tab), the add screen with ready-made rules
-// (recipes) grouped by what they do, and the short form a recipe opens. Every write goes through the public API
-// (createRuleFromRecipe, updateRuleFromRecipe, updateRule, deleteRule, createEndpoint). A recipe's rule is an
-// ordinary script the API wrote; "Edit as code" opens it in the editor (rituals.tsx), and a hand edit makes it a script.
+// (recipes) grouped by what they do, and the short form a recipe opens to make its rule. Every write goes through the
+// public API (createRuleFromRecipe, updateRule, deleteRule, createEndpoint). A recipe's rule is an ordinary script the
+// API wrote: like every rule it opens as its code (rituals.tsx), and saving a hand edit there makes it a script.
 import { lazy, Suspense, useState, type FormEvent, type ReactNode } from 'react'
-import { Link, Navigate, useNavigate, useParams, useSearchParams } from 'react-router'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useQueryClient } from '@tanstack/react-query'
 import { Archive, Ban, CodeXml, Forward, Hash, MessageSquare, ShieldAlert, Sparkles, Split, Star, Webhook, X, type LucideIcon } from 'lucide-react'
 import { Alert, Button, ConfirmDialog, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, SecretInput, Select, Switch, Textarea, useToast, type SelectOption } from '../../components/ui'
@@ -22,12 +22,12 @@ import { ago, firstOverview, useOverview, type Overview, type OverviewEndpoint, 
 import { AwaitingConfirm, CreatedEndpointDialog, discordUrl, slackUrl, targetProblem, type Endpoint } from './ritual-connections'
 import { AskAgentLink } from './ritual-agent'
 import type { Condition } from './builder'
-import { addressOption, idempotencyFor } from './shared'
+import { addressOption, idempotencyFor, openBuilder, rulePath, splitBuilderPath } from './shared'
 import './inbound.css'
 import './receiving.css'
 import './recipes.css'
 
-const RulesPage = lazy(() => import('./rituals').then(m => ({ default: m.RulesPage })))
+const RulePage = lazy(() => import('./rituals').then(m => ({ default: m.RulePage })))
 const LIST = '/receiving?tab=rules'
 
 // listRuleRecipes, as the add screen and the form read it.
@@ -43,17 +43,6 @@ const icons: Record<string, LucideIcon> = {
   split: Split, 'split-by-meaning': Sparkles,
 }
 const RecipeIcon = ({ id, size = 15 }: { id: string | null; size?: number }) => { const Icon = (id && icons[id]) || CodeXml; return <Icon className="rcv-icon" size={size} aria-hidden="true" /> }
-const rulePath = (key: string) => `/receiving/rules/${encodeURIComponent(key)}`
-// A rule named "new" shares its path with the add screen, so its editor is /new/code, which NewRecipeRoute serves.
-const codePath = (key: string) => `${rulePath(key)}/code`
-const editPath = (r: Pick<OverviewRule, 'key' | 'recipe'>) => r.recipe && r.key !== 'new' ? rulePath(r.key) : codePath(r.key)
-/** A two-way rule (the address builder's) is changed in the builder, on the one address it runs on; one that runs on
- *  several, or none, in the editor. */
-const splitPath = (r: Pick<OverviewRule, 'key' | 'attachedTo'>, options: { id: string; address: string }[] | undefined) => {
-  const target = r.attachedTo.length === 1 ? r.attachedTo[0]! : null
-  const id = target && (target.startsWith('mbx_') ? target : options?.find(a => a.address === target)?.id)
-  return id ? `/receiving?tab=rules&build=${encodeURIComponent(id)}&rule=${encodeURIComponent(r.key)}` : codePath(r.key)
-}
 const isSplitRule = (r: Pick<OverviewRule, 'recipe'>) => r.recipe?.id === 'split' || r.recipe?.id === 'split-by-meaning'
 
 /** What a rule does, in a sentence with its blanks filled in. Its recipe's wording comes from the shared catalogue
@@ -109,7 +98,9 @@ export function RulesTab({ overview, refresh }: { overview: Overview; refresh: (
   const navigate = useNavigate(), toast = useToast()
   useRecipes() // warms the add screen
   const options = useApiDef(queries.inboundAddressOptions())
-  const pathOf = (r: OverviewRule) => isSplitRule(r) ? splitPath(r, options.data) : editPath(r)
+  // Every rule opens on its page, its code. A two-way rule (the address builder's) can also be changed in the builder,
+  // on the one address it runs on.
+  const builderPath = (r: OverviewRule) => isSplitRule(r) ? splitBuilderPath(r.key, r.attachedTo, options.data) : null
   const [switching, setSwitching] = useState<Record<string, boolean>>({})
   const [deleting, setDeleting] = useState<OverviewRule | null>(null), [deleteOpen, setDeleteOpen] = useState(false)
   const toggle = useSingleFlight('rules.toggle', async (r: OverviewRule, enabled: boolean) => {
@@ -130,10 +121,10 @@ export function RulesTab({ overview, refresh }: { overview: Overview; refresh: (
     : r.lastMatchedAt ? <time dateTime={r.lastMatchedAt} title={new Date(r.lastMatchedAt).toLocaleString()}>{ago(r.lastMatchedAt)}</time>
     : <span className="muted" title="Not in the last 1,000 emails">Not lately</span>
   const runsOn = (r: OverviewRule) => r.addresses.length ? <Addresses list={r.addresses} />
-    : <Link className="rcv-add" to={r.recipe && !isSplitRule(r) ? editPath(r) : `${codePath(r.key)}#attach`} onClick={e => e.stopPropagation()}>Not attached · attach</Link>
+    : <Link className="rcv-add" to={`${rulePath(r.key)}#attach`} onClick={e => e.stopPropagation()}>Not attached · attach</Link>
   return <div className="stack rcv-tab">
     {overview.rules.length > 0 && <div className="rcv-kindline"><Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/rules/new">New rule</Link></div>}
-    <DataTable className="rcv-table recipe-table" rows={overview.rules} rowKey={r => r.key} rowHref={pathOf}
+    <DataTable className="rcv-table recipe-table" rows={overview.rules} rowKey={r => r.key} rowHref={r => rulePath(r.key)}
       empty={<EmptyState title="No rules yet" action={<Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/rules/new">New rule</Link>} />}
       columns={[
         { key: 'what', label: 'Rule', width: '50%', card: 'title', render: r => <span className="recipe-row" data-off={!r.enabled || undefined}><RecipeIcon id={r.recipe?.id ?? null} /><span className="recipe-sentence"><RuleLine rule={r} keyName={r.key} endpoints={overview.endpoints} /></span></span> },
@@ -142,8 +133,8 @@ export function RulesTab({ overview, refresh }: { overview: Overview; refresh: (
         { key: 'actions', label: '', align: 'right', card: 'end', render: r => <span className="recipe-controls">
           <Switch checked={switching[r.key] ?? r.enabled} disabled={r.key in switching} onCheckedChange={v => void toggle(r, v)} label={<span className="sr-only">Run {r.key}</span>} />
           <DropdownMenu label={`Actions for ${r.key}`} title={<RuleLine rule={r} keyName={r.key} endpoints={overview.endpoints} />} items={[
-            { label: 'Edit', onSelect: () => navigate(pathOf(r)) },
-            ...(r.recipe ? [{ label: 'Edit as code', onSelect: () => navigate(codePath(r.key)) }] : []),
+            { label: 'Edit', onSelect: () => navigate(rulePath(r.key)) },
+            ...(builderPath(r) ? [{ label: openBuilder, onSelect: () => navigate(builderPath(r)!) }] : []),
             { label: 'Delete', destructive: true, onSelect: () => { setDeleting(r); setDeleteOpen(true) } },
           ]} />
         </span> },
@@ -201,7 +192,7 @@ export function NewRulePage() {
         {/* For those who code: tucked away, one line. */}
         <section className="recipe-group recipe-advanced" aria-labelledby="recipes-script">
           <h2 id="recipes-script">Advanced</h2>
-          <div className="cluster"><Link className="ui-button ui-button--ghost ui-button--sm recipe-agent-link" to="/receiving/rules/new/script"><CodeXml size={14} aria-hidden="true" />Write code</Link><AskAgentLink address={agentAddress} /></div>
+          <div className="cluster"><Link className="ui-button ui-button--ghost ui-button--sm recipe-agent-link" to={`/receiving/rules/new/script${suffix}`}><CodeXml size={14} aria-hidden="true" />Write code</Link><AskAgentLink address={agentAddress} /></div>
         </section>
       </div>}
     <SplitChooser condition={choosing} onClose={() => setChoosing(null)} addresses={splittable} />
@@ -221,19 +212,15 @@ function SplitChooser({ condition, onClose, addresses }: { condition: Condition 
   </Dialog>
 }
 
-/** /receiving/rules/new/:recipe: a recipe's form. "code" is the editor of a script named new (see codePath). */
+/** /receiving/rules/new/:recipe: a recipe's form, which makes a rule. "code" is the page of a rule named new (see rulePath). */
 export function NewRecipeRoute() {
   const { recipe } = useParams()
-  if (recipe === 'code') return <Suspense fallback={null}><RulesPage /></Suspense>
+  if (recipe === 'code') return <Suspense fallback={null}><RulePage /></Suspense>
   return <RecipeForm recipeId={recipe ?? ''} />
 }
-/** /receiving/rules/:key: a recipe rule's form; a script opens in the editor. */
-export function RuleRoute() {
-  const { key } = useParams()
-  return <RecipeForm ritualKey={key ?? ''} />
-}
 
-function RecipeForm({ recipeId, ritualKey }: { recipeId?: string; ritualKey?: string }) {
+/** A recipe's one or two fields and the addresses to run on: it makes the rule, whose own page is then its code (rituals.tsx). */
+function RecipeForm({ recipeId }: { recipeId: string }) {
   const { canAdminister } = useWorkspaceAccess()
   const catalog = useRecipes(canAdminister)
   const overview = useOverview(firstOverview, false, canAdminister)
@@ -242,23 +229,18 @@ function RecipeForm({ recipeId, ritualKey }: { recipeId?: string; ritualKey?: st
   const client = useQueryClient()
   // Endpoints confirmed or added elsewhere (a forward's recipient agreeing) show up in the pickers.
   useLiveVersion(canAdminister && !!overview.data, change => { if (!change.first && change.endpointsMoved) void overview.refetch() }, { endpoints: true })
-  const existing = ritualKey ? overview.data?.rules.find(r => r.key === ritualKey) : undefined
-  const id = recipeId ?? existing?.recipe?.id
-  const recipe = catalog.data?.data.find(r => r.id === id)
-  const back = ritualKey ? LIST : '/receiving/rules/new'
-  const title = recipe?.name ?? (ritualKey ? ritualKey : ritualRecipes.find(r => r.id === recipeId)?.name ?? 'New rule')
+  const recipe = catalog.data?.data.find(r => r.id === recipeId)
+  const back = '/receiving/rules/new'
+  const title = recipe?.name ?? ritualRecipes.find(r => r.id === recipeId)?.name ?? 'New rule'
   const header = (actions?: ReactNode) => <PageHeader title={title} backTo={back} actions={actions} />
   if (!canAdminister) return <div className="stack inbound-stack">{header()}<EmptyState title={concepts.rules.adminOnly} /></div>
   const error = catalog.error ?? overview.error ?? options.error
   if (error && !(catalog.data && overview.data && options.data)) return <div className="stack inbound-stack">{header()}<ErrorState error={error} onRetry={() => { void catalog.refetch(); void overview.refetch(); void options.refetch() }} /></div>
   if (!catalog.data || !overview.data || !options.data) return <div className="stack inbound-stack recipe-page">{header()}
     <LoadingRegion label="Loading the form"><div className="recipe-form" aria-hidden="true">{ritualRecipes.find(r => r.id === recipeId)?.decisions && <Skeleton width="50%" height={14} />}<FieldSkeleton /><FieldSkeleton /></div></LoadingRegion></div>
-  if (ritualKey && !existing) return <div className="stack inbound-stack">{header()}<EmptyState title={`No rule named ${ritualKey}`} action={<Link className="ui-button ui-button--secondary ui-button--md" to={LIST}>Rules</Link>} /></div>
-  if (existing && !existing.recipe) return <Navigate replace to={codePath(existing.key)} />
-  if (existing && isSplitRule(existing)) return <Navigate replace to={splitPath(existing, options.data)} />
-  if (!recipe) return <div className="stack inbound-stack">{header()}<EmptyState title={`No recipe named ${id}`} action={<Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/rules/new">New rule</Link>} /></div>
+  if (!recipe) return <div className="stack inbound-stack">{header()}<EmptyState title={`No recipe named ${recipeId}`} action={<Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/rules/new">New rule</Link>} /></div>
   const preset = params.get('address')
-  return <RecipeEditor key={existing?.key ?? recipe.id} recipe={recipe} existing={existing} overview={overview.data}
+  return <RecipeEditor key={recipe.id} recipe={recipe} overview={overview.data}
     addresses={options.data} preset={preset} header={header} back={back}
     refresh={() => client.invalidateQueries({ predicate: query => staleAfterWrite(query.queryKey, false) })} />
 }
@@ -289,8 +271,8 @@ const freeName = (base: string, taken: Set<string>) => { const stem = slug(base)
 const splitSenders = (text: string) => [...new Set(text.split(/[\s,;]+/).map(s => s.trim().toLowerCase()).filter(Boolean))]
 type Made = { name: string; type: EndpointType; status: OverviewEndpoint['status']; target: string }
 
-function RecipeEditor({ recipe, existing, overview, addresses, preset, header, back, refresh }: {
-  recipe: Recipe; existing?: OverviewRule; overview: Overview; addresses: AddressOption[]; preset: string | null
+function RecipeEditor({ recipe, overview, addresses, preset, header, back, refresh }: {
+  recipe: Recipe; overview: Overview; addresses: AddressOption[]; preset: string | null
   header: (actions?: ReactNode) => ReactNode; back: string; refresh: () => Promise<unknown>
 }) {
   const navigate = useNavigate(), toast = useToast()
@@ -301,8 +283,6 @@ function RecipeEditor({ recipe, existing, overview, addresses, preset, header, b
   const endpoints = [...overview.endpoints.filter(e => e.source === 'endpoint'), ...made.filter(m => !overview.endpoints.some(e => e.name === m.name))]
   const choices = (f: RecipeField) => endpoints.filter(e => endpointTypes[f.type]!.includes(e.type))
   const [values, setValues] = useState<Record<string, string>>(() => Object.fromEntries(recipe.fields.map(f => {
-    const saved = existing?.recipe?.params[f.name]
-    if (saved !== undefined) return [f.name, Array.isArray(saved) ? saved.join(', ') : saved]
     if (!endpointTypes[f.type]) return [f.name, '']
     const first = choices(f).find(e => e.status === 'ready')
     return [f.name, first?.name ?? NEW]
@@ -311,7 +291,7 @@ function RecipeEditor({ recipe, existing, overview, addresses, preset, header, b
   // A new rule starts on the address the workspace's rules run on most (else its first permanent one).
   const uses = (value: string) => overview.rules.reduce((n, r) => n + r.attachedTo.filter(t => t === value).length, 0)
   const firstAddress = targetsList.filter(t => !t.expires).reduce<typeof targetsList[number] | undefined>((best, t) => !best || uses(t.value) > uses(best.value) ? t : best, undefined)?.value
-  const [targets, setTargets] = useState<string[]>(() => existing ? existing.attachedTo : [preset && targetsList.some(t => t.value === preset) ? preset : firstAddress].filter((t): t is string => !!t))
+  const [targets, setTargets] = useState<string[]>(() => [preset && targetsList.some(t => t.value === preset) ? preset : firstAddress].filter((t): t is string => !!t))
   const [tried, setTried] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<unknown>(null)
@@ -368,13 +348,12 @@ function RecipeEditor({ recipe, existing, overview, addresses, preset, header, b
           params[f.name] = created.name
         } else params[f.name] = f.type === 'senders' ? splitSenders(value) : value
       }
-      if (existing) await request(`/v1/rules/scripts/${encodeURIComponent(existing.key)}/recipe`, { method: 'PUT', body: { params, addresses: targets } })
-      else await request('/v1/rules/recipes', { method: 'POST', body: { recipe: recipe.id, params, addresses: targets } })
+      await request('/v1/rules/recipes', { method: 'POST', body: { recipe: recipe.id, params, addresses: targets } })
       await refresh()
-      toast(existing ? `${existing.key} saved` : `${recipe.name} is on`, 'success')
+      toast(`${recipe.name} is on`, 'success')
       if (webhook) setSecret(webhook); else navigate(LIST)
     } catch (e) { setError(e) } finally { setBusy(false) }
-  }, existing?.key ?? recipe.id)
+  }, recipe.id)
   function submit(event: FormEvent) {
     event.preventDefault(); setTried(true); setError(null)
     const invalid = recipe.fields.some(f => {
@@ -388,7 +367,7 @@ function RecipeEditor({ recipe, existing, overview, addresses, preset, header, b
   const remaining = targetsList.filter(t => !targets.includes(t.value))
   const domains = [...new Set(targets.map(t => labelOf(t).split('@')[1]).filter(Boolean))]
   return <div className="stack inbound-stack recipe-page">
-    {header(existing && <Link className="ui-button ui-button--secondary ui-button--md" to={codePath(existing.key)}>Edit as code</Link>)}
+    {header()}
     <form className="recipe-form" onSubmit={submit} noValidate>
       {recipe.decisions && <p className="recipe-ai"><Sparkles size={14} aria-hidden="true" /><span>AI rules are free{domains.length ? <> · reads mail at {domains.join(', ')}</> : null}</span></p>}
       <Field label="Runs on mail to" error={targetsError || undefined}>
