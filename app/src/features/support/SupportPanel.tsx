@@ -160,7 +160,8 @@ function AgentMessage({ message, store, closed }: { message: ChatMessage; store:
   const running = [...message.parts].reverse().find(part => part.kind === 'tool' && part.state === 'running')
   const shown = message.parts.map((part, index) => ({ part, index })).filter(({ part }) => part.kind !== 'tool')
   if (!working && !shown.length) return null
-  return <article className={cx('support-message', 'support-message--agent', message.kind === 'notice' && 'support-message--notice')} data-restored={message.restored || undefined}>
+  return <article className={cx('support-message', 'support-message--agent', message.kind === 'notice' && 'support-message--notice', message.kind === 'staff' && 'support-message--staff')} data-restored={message.restored || undefined}>
+    {message.kind === 'staff' && <p className="support-message__author">{message.author || `The ${productName} team`}</p>}
     {shown.map(({ part, index }) => part.kind === 'text' ? <StreamText key={index} text={part.text} live={message.streaming} last={index === message.parts.length - 1} restored={message.restored} />
       : part.kind === 'consent' ? <ConsentCard key={index} part={part} closed={closed} onDecide={decision => decide(store, part.request.requestId, decision)} />
       : part.kind === 'ticket' ? <TicketCard key={index} part={part} /> : null)}

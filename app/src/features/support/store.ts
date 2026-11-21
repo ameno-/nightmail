@@ -15,7 +15,7 @@ export type Part =
 export interface ChatImage { url: string | null; name: string }
 /** `local`: only in this panel so far: a message waiting for the connection, or the reply being prepared for it (until
  *  the server's message.start adopts it; `key` keeps it the same element when it does). */
-export interface ChatMessage { id: string; key?: string; role: 'assistant' | 'user'; kind: MessageKind; parts: Part[]; streaming: boolean; restored: boolean; local?: boolean; failed?: string; images?: ChatImage[] }
+export interface ChatMessage { id: string; key?: string; role: 'assistant' | 'user'; kind: MessageKind; parts: Part[]; streaming: boolean; restored: boolean; local?: boolean; failed?: string; images?: ChatImage[]; author?: string | null }
 /** A screenshot in the message box: uploading as soon as it is added, sent with the next message. */
 export interface Attachment { key: string; name: string; url: string; state: 'uploading' | 'ready' | 'failed'; progress: number; attachmentId?: string; error?: string }
 type Hello = Extract<ServerMessage, { type: 'hello' }>
@@ -228,7 +228,8 @@ export class SupportStore {
       case 'history': {
         // History replaces what the panel shows; an open consent card or a filed ticket comes back with it. Screenshots
         // come back as names only (the server never returns the images): this tab's own previews, else placeholders.
-        const messages: ChatMessage[] = message.messages.map(item => ({ id: item.id, role: item.role, kind: item.kind ?? 'reply', restored: true, streaming: false,
+        // A staff reply shows as the team's, with its author's name.
+        const messages: ChatMessage[] = message.messages.map(item => ({ id: item.id, role: item.role === 'staff' ? 'assistant' : item.role, kind: item.role === 'staff' ? 'staff' : item.kind ?? 'reply', author: item.author ?? null, restored: true, streaming: false,
           images: item.attachments?.map(attachment => ({ url: this.previews.get(attachment.id) ?? null, name: attachment.name || 'Screenshot' })),
           parts: [...(item.tools ?? []).map(tool => ({ kind: 'tool' as const, id: tool.id, label: tool.label, state: tool.ok ? 'done' as const : 'failed' as const })), ...item.text ? [{ kind: 'text' as const, text: item.text }] : []] }))
         const imagesSent = message.messages.reduce((sum, item) => sum + (item.attachments?.length ?? 0), 0)
@@ -246,9 +247,15 @@ export class SupportStore {
       case 'status': this.set({ busy: message.busy }); break
       case 'message.start':
         if (this.state.messages.some(item => item.id === message.messageId)) break
-        // The reply's placeholder becomes this message (same element, its status line carries on); else a new one.
-        if (this.adopt(message.messageId, message.kind)) break
-        this.set(state => ({ messages: [...state.messages, { id: message.messageId, role: 'assistant', kind: message.kind, parts: [], streaming: true, restored: false }] }))
+        // The reply's placeholder becomes this message (same element, its status line carries on); else a new one. A staff
+        // reply is never the agent's answer: it is its own message, before any placeholder.
+        if (message.kind !== 'staff' && this.adopt(message.messageId, message.kind)) break
+        this.set(state => {
+          const entry: ChatMessage = { id: message.messageId, role: 'assistant', kind: message.kind, author: message.author ?? null, parts: [], streaming: true, restored: false }
+          if (message.kind !== 'staff') return { messages: [...state.messages, entry] }
+          const pending = state.messages.findIndex(item => item.local && item.role === 'assistant')
+          return { messages: pending < 0 ? [...state.messages, entry] : [...state.messages.slice(0, pending), entry, ...state.messages.slice(pending)] }
+        })
         break
       case 'text.delta':
         this.adopt(message.messageId)

@@ -129,7 +129,16 @@ Each object's work (each email, its answer, confirm link or forward, each ticket
 - **The sweep** (every five minutes, `src/ledger.ts`):
   - resends unsent notices (the digest, cap alerts) whose retry is due;
   - accepts blocked intake mail once its address is listed;
-  - asks a ticket's object to queue its team email, and a chat ticket's follow-up within a day, when no item covers them (tickets filed before the queue). The email is rebuilt from the D1 row; an existing item is left alone, so each is sent once.
+  - asks a ticket's object to queue its team email, and a chat ticket's follow-up within a day, when no item covers them (tickets filed before the queue). The email is rebuilt from the D1 row; an existing item is left alone, so each is sent once;
+  - pulls the staff inbox's replies from Nightmail and hands each to its conversation (below).
+
+## The staff inbox
+
+Nightmail's staff Support inbox (`/support` in the dashboard, `api/src/support-inbox.ts`) shows every conversation registered there. Each object keeps it current over the `BANE` binding:
+
+- **Mirror:** every transcript entry (the customer's messages as they arrive, the agent's answers and tool labels, the harness's notices, held drafts) goes to `mirrorMessages` in order, from a cursor, and the conversation's subject, ticket, turns, cost and blocked work to `mirrorState`. A failed mirror is retried from the same place (1, 2, 5, 15, 30, 60 minutes); a conversation Nightmail hasn't registered waits for its next entry.
+- **Pause:** before every chat turn and every email answer the object reads `inboxState`. While staff have paused the agent it records and mirrors the customer's messages but runs no turn: chat shows one notice, an email gets no answer, and an answer already written but not sent stays a held draft in the inbox. Handing back resumes with the next message. An emailed ticket shows as paused for the ticket, as the agent answers no later mail there.
+- **Staff replies:** Nightmail queues a staff reply, then POSTs `{ conversationId }` (nothing else) to `/hooks/nightmail-wake` (rate-limited by `WAKE`); that conversation pulls its replies with `pullOutbox` at once, and the five-minute sweep pulls everyone's. Each reply is a `staff:` item, delivered once: an email reply in the thread to its last customer message, only to the address whose mail passed DMARC; a chat reply into the transcript and open sockets (`kind: "staff"`, PROTOCOL.md), or by email to the account address when no socket is open. Then `markDelivery` records it sent, or failed when it can't be delivered.
 
 ## Limits and retention
 

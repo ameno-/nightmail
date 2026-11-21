@@ -182,6 +182,21 @@ async function inbound(request: Request, env: Env): Promise<Response> {
   });
 }
 
+/**
+ * Nightmail's wake after a staff reply (api/src/support-inbox.ts): `{ conversationId }` and nothing else, unsigned. It only
+ * makes that conversation pull its staff replies from Nightmail over the binding now instead of at the next sweep, so it
+ * answers 202 whatever the ID (an unknown or closed conversation does nothing) and is rate-limited.
+ */
+async function wake(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const accepted = new Response(null, { status: 202 });
+  if (env.WAKE && !(await env.WAKE.limit({ key: 'wake' })).success) return new Response(null, { status: 429, headers: { 'retry-after': '60' } });
+  const body = await readCapped(request.body, 1024).then(bytes => { try { return bytes ? JSON.parse(new TextDecoder().decode(bytes)) as { conversationId?: unknown } : null; } catch { return null; } }, () => null);
+  const id = typeof body?.conversationId === 'string' && CONVERSATION_ID.test(body.conversationId) ? body.conversationId : null;
+  if (!id || !(await env.DB.prepare('SELECT 1 FROM conversations WHERE id = ?').bind(id).first())) return accepted;
+  ctx.waitUntil(conversation(env, id).wake().then(r => log('info', { event: 'inbox', code: 'SUPPORT_WOKEN', queued: r.queued }), error => logError(error, { event: 'inbox', code: 'SUPPORT_WAKE_FAILED' }, 'warn')));
+  return accepted;
+}
+
 /** abuse@, privacy@, legal@ (route → webhook:support-intake): tickets only, never the agent (intake.ts). */
 async function intake(request: Request, env: Env): Promise<Response> {
   const got = await delivery(request, env, env.BANE_INTAKE_WEBHOOK_SECRET, 'BANE_INTAKE_WEBHOOK_SECRET');
@@ -232,7 +247,7 @@ function staffRoute(path: string) {
   return STAFF_ROUTES.has(route) ? route : '/staff/*';
 }
 
-async function route(request: Request, env: Env, url: URL, at: { route: string }): Promise<Response> {
+async function route(request: Request, env: Env, url: URL, at: { route: string }, ctx: ExecutionContext): Promise<Response> {
   const path = url.pathname, name = (route: string) => { at.route = route; };
   if (path === '/health') { name('/health'); return json({ status: 'ok', service: 'bane-support', stage: env.STAGE }); }
   // (The brand's tile, for the tabs of this Worker's own pages.)
@@ -256,16 +271,17 @@ async function route(request: Request, env: Env, url: URL, at: { route: string }
   if (path === '/staff' || path.startsWith('/staff/')) { name(staffRoute(path)); return staff(request, env); }
   if (request.method === 'POST' && path === '/hooks/bane-inbound') { name('/hooks/bane-inbound'); return inbound(request, env); }
   if (request.method === 'POST' && path === '/hooks/bane-intake') { name('/hooks/bane-intake'); return intake(request, env); }
+  if (request.method === 'POST' && path === '/hooks/nightmail-wake') { name('/hooks/nightmail-wake'); return wake(request, env, ctx); }
   const link = path.match(/^\/confirm\/([A-Za-z0-9_.-]{20,400})$/);
   if (link && (request.method === 'GET' || request.method === 'POST')) { name('/confirm/:token'); return confirm(request, env, link[1]!); }
   return new Response(null, { status: 404 });
 }
 
 export default {
-  async fetch(request, env): Promise<Response> {
+  async fetch(request, env, ctx): Promise<Response> {
     const started = Date.now(), at = { route: 'unmatched' };
     let response: Response, failed: { error: unknown; code: string } | null = null;
-    try { response = await route(request, env, new URL(request.url), at); }
+    try { response = await route(request, env, new URL(request.url), at, ctx); }
     catch (error) {
       // Fail closed, loudly: a missing secret is a deploy mistake, never a reason to run without it.
       const missing = error instanceof MissingSecret ? error.secret : null;

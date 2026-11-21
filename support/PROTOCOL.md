@@ -90,7 +90,7 @@ Every server message has `v: 1`, a `type` and a `seq`: a per-conversation counte
 ### 4.2 Streaming an answer
 
 ```jsonc
-{ "v": 1, "type": "message.start", "seq": 2, "messageId": "msg_…", "kind": "first" }  // "first" | "reply" | "notice"
+{ "v": 1, "type": "message.start", "seq": 2, "messageId": "msg_…", "kind": "first" }  // "first" | "reply" | "notice" | "staff"
 { "v": 1, "type": "text.delta",    "seq": 3, "messageId": "msg_…", "delta": "Hi Ada, I see you sent " }
 { "v": 1, "type": "message.end",   "seq": 8, "messageId": "msg_…",
   "text": "Hi Ada, I see you sent …",  // the final text: replace the streamed text with this
@@ -99,6 +99,7 @@ Every server message has `v: 1`, a `type` and a `seq`: a per-conversation counte
 
 - The server writes no greeting: the panel opens every conversation with its own fixed line, "Hey, what's up? How can we help?", and the customer writes first. Nothing else arrives unasked: a renewal (`/chat/resume`) adds no message, only allowing content access does ("Content access allowed for this conversation."). `kind: "first"` appears only in the history of conversations opened before Nov 16, 2026, when the agent wrote a greeting.
 - `kind: "notice"` is a short line from the harness, not the model (for example "Account access renewed"). Render it smaller.
+- `kind: "staff"` is a reply someone on the team wrote in the staff inbox, with their name as `author`; it arrives whole (`message.start` then `message.end`, no deltas) and never takes the place of an answer under way. In `history` it is `role: "staff"` with `author`. While staff are handling the conversation the agent doesn't answer: a message gets one `notice` ("Someone from the Nightmail team is handling this conversation and will reply here.") and no `status` or answer until they hand back.
 - Text is **Markdown, restricted**: paragraphs, `**bold**`, `` `code` ``, fenced code, numbered and bulleted lists, links. Render links only to `https://bane.mx`, `https://dev.bane.mx`, `https://support.bane.mx`, `https://support.dev.bane.mx` and `https://github.com/anomalyco/nightmail`; show any other URL as plain text. Never render images or raw HTML.
 - Always use `message.end.text` as the stored text. When `redacted` is true, it is a replacement such as "I've sent this to the team to check".
 

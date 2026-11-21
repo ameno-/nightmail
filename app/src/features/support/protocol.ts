@@ -2,7 +2,8 @@
 // WebSocket. Unknown fields are ignored and unknown types skipped, so the server can add both without breaking an older
 // panel. The scripted demo transport (demo.ts) speaks the same messages.
 
-export type MessageKind = 'first' | 'reply' | 'notice'
+/** staff: a reply from someone on the team, written in the staff inbox (it carries their name as author). */
+export type MessageKind = 'first' | 'reply' | 'notice' | 'staff'
 export type ConversationStatus = 'open' | 'ticketed' | 'closed'
 export type Decision = 'allow' | 'deny'
 
@@ -18,7 +19,7 @@ export interface TicketFiled {
 }
 /** A screenshot as the server keeps it (§5.1); the image itself never comes back. */
 export interface AttachmentInfo { id: string; type: string; width: number | null; height: number | null; name: string | null }
-export interface HistoryMessage { id: string; role: 'assistant' | 'user'; kind?: MessageKind; text: string; at: string; tools?: { id: string; label: string; ok: boolean }[]; attachments?: AttachmentInfo[] }
+export interface HistoryMessage { id: string; role: 'assistant' | 'user' | 'staff'; kind?: MessageKind; text: string; at: string; tools?: { id: string; label: string; ok: boolean }[]; attachments?: AttachmentInfo[]; author?: string | null }
 export type ErrorCode = 'GRANT_EXPIRED' | 'RATE_LIMITED' | 'TURN_FAILED' | 'BAD_MESSAGE' | 'BUDGET_EXHAUSTED' | (string & {})
 
 type Server<T> = T & { v: 1; seq: number }
@@ -26,7 +27,7 @@ export type ServerMessage =
   | Server<{ type: 'hello'; conversationId: string; channel: 'chat' | 'email'; status: ConversationStatus; agent: { name: string; ai: boolean }; customer: { firstName: string | null }; workspace: { id: string; name: string }; contentAccess: boolean; busy: boolean }>
   | Server<{ type: 'history'; messages: HistoryMessage[]; pending: { consent: ConsentRequest | null; ticket: TicketFiled | null } }>
   | Server<{ type: 'status'; busy: boolean }>
-  | Server<{ type: 'message.start'; messageId: string; kind: MessageKind }>
+  | Server<{ type: 'message.start'; messageId: string; kind: MessageKind; author?: string }>
   | Server<{ type: 'text.delta'; messageId: string; delta: string }>
   | Server<{ type: 'message.end'; messageId: string; text: string; redacted: boolean }>
   | Server<{ type: 'tool.start'; messageId: string; toolCallId: string; tool: string; label: string }>
