@@ -19,7 +19,7 @@ import { ritualRecipes } from '../../../../api/src/ritual-schema'
 import { concepts } from './concepts'
 import { useLiveVersion } from './live'
 import { ago, firstOverview, useOverview, type Overview, type OverviewEndpoint, type OverviewRule } from './overview'
-import { CreatedEndpointDialog, discordUrl, slackUrl, targetProblem, type Endpoint } from './ritual-connections'
+import { AwaitingConfirm, CreatedEndpointDialog, discordUrl, slackUrl, targetProblem, type Endpoint } from './ritual-connections'
 import { AskAgentLink } from './ritual-agent'
 import { addressOption, idempotencyFor } from './shared'
 import './inbound.css'
@@ -61,6 +61,7 @@ export function Sentence({ ritual }: { ritual: Pick<OverviewRule, 'key' | 'recip
 }
 /** A rule in plain words wherever it appears: a ready-made rule's sentence, or a script as Custom code rule and its name. */
 export function RuleLine({ rule, keyName }: { rule?: Pick<OverviewRule, 'key' | 'recipe'>; keyName: string }) {
+  if (rule?.recipe && (rule.recipe.id === 'split' || rule.recipe.id === 'split-by-meaning')) return <SplitSentence params={rule.recipe.params} meaning={rule.recipe.id === 'split-by-meaning'} />
   if (rule?.recipe) return <Sentence ritual={rule} />
   return <>Custom code rule <code className="recipe-code">{keyName}</code></>
 }
@@ -69,6 +70,20 @@ export function RulesSummary({ keys, rules }: { keys: string[]; rules: OverviewR
   const first = keys[0]
   if (!first) return null
   return <span className="rcv-rules"><span className="rcv-rules__first"><RuleLine rule={rules.find(r => r.key === first)} keyName={first} /></span>{keys.length > 1 && <span className="muted">+{keys.length - 1}</span>}</span>
+}
+/** A two-way rule (the address builder's) in words: "If the subject mentions refund, send to refunds; otherwise to the support inbox". */
+const testWords: Record<string, string> = { from: 'the sender is', subject: 'the subject mentions', text: 'the email mentions', attachment: 'it has an attachment' }
+const destinationWords = (value: string | string[] | undefined) => {
+  const v = typeof value === 'string' ? value : ''
+  return v === 'store' ? 'keep it' : v === 'drop' ? 'drop it' : v.startsWith('inbox:') ? `the ${v.slice(6)} inbox` : v
+}
+function SplitSentence({ params, meaning }: { params: Record<string, string | string[]>; meaning: boolean }) {
+  const blank = (text: ReactNode) => <span className="recipe-blank">{text}</span>
+  const words = (v: string | string[] | undefined) => Array.isArray(v) ? v.join(', ') : v ?? ''
+  if (!meaning && params.test === 'always') return <>Send all mail to {blank(destinationWords(params.then))}</>
+  const condition = meaning ? <>it looks like {blank(words(params.meaning))}</> : params.test === 'from' ? <>{testWords.from} {blank(<Senders list={[params.value ?? []].flat()} />)}</>
+    : params.test === 'attachment' ? testWords.attachment : <>{testWords[words(params.test)] ?? words(params.test)} {blank(words(params.value))}</>
+  return <>If {condition}, send to {blank(destinationWords(params.then))}; otherwise to {blank(destinationWords(params.otherwise))}</>
 }
 function Senders({ list }: { list: string[] }) {
   return <>{list.slice(0, 2).map((s, i) => <span key={s}>{i > 0 && ', '}<PrivateAddress value={s} /></span>)}{list.length > 2 && ` +${list.length - 2}`}</>
@@ -366,7 +381,7 @@ function RecipeEditor({ recipe, price, existing, overview, addresses, preset, he
             : <Input id={id} value={value} placeholder={f.placeholder ?? undefined} autoComplete="off" aria-invalid={!!err || undefined} onChange={e => { setValues({ ...values, [f.name]: f.type === 'label' ? e.target.value.toLowerCase().replace(/\s+/g, '-') : e.target.value }); setError(null) }} />}
         </Field>
       })}
-      {waiting && <Alert tone="info">We emailed <PrivateAddress value={waiting.target} /> to confirm. Save once they agree.</Alert>}
+      {waiting && <AwaitingConfirm address={waiting.target} />}
       {general && <Alert tone="danger">{general}</Alert>}
       <div className="recipe-form__actions">
         <Link className="ui-button ui-button--ghost ui-button--md" to={back}>Cancel</Link>

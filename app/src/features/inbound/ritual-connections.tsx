@@ -137,3 +137,7 @@ export function CreatedEndpointDialog({ created, onClose, writeRule = true }: { 
   </Dialog>
 }
 export { statusLabel as endpointStatusLabel, statusTone as endpointStatusTone }
+/** A new forward waits for its recipient: what Save is waiting for, said once wherever a forward is made. */
+export function AwaitingConfirm({ address }: { address: string }) {
+  return <Alert tone="info">We emailed <PrivateAddress value={address} /> to confirm. Save once they agree.</Alert>
+}

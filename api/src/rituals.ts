@@ -501,7 +501,7 @@ function registerRecipes(app: App, item: string, keyParams: z.ZodObject<{ key: z
     const [asks, price] = family === 'rules' ? ['decisions', 'decisionPricePerThousand'] : ['omens', 'omenPricePerThousand'];
     return c.json({
       groups: recipeGroups,
-      data: ritualRecipes.map(r => ({ id: r.id, group: r.group, name: r.name, description: r.description, sentence: r.sentence, [asks]: r.decisions, fields: r.fields.map(f => ({ name: f.name, type: f.type, label: f.label, placeholder: f.placeholder ?? null, hint: f.hint ?? null })) })),
+      data: ritualRecipes.filter(r => r.listed !== false).map(r => ({ id: r.id, group: r.group, name: r.name, description: r.description, sentence: r.sentence, [asks]: r.decisions, fields: r.fields.map(f => ({ name: f.name, type: f.type, label: f.label, placeholder: f.placeholder ?? null, hint: f.hint ?? null })) })),
       [price]: (Number(RATES.omenUc) * 1000 / 1e8).toFixed(2),
     }, 200);
   }, { responses: { 200: response(recipeCatalog('rituals')), ...errors } });
@@ -523,7 +523,7 @@ function registerRecipes(app: App, item: string, keyParams: z.ZodObject<{ key: z
   both(app, {
     ...meta, method: 'post', path: path + '/recipes', operationId: 'createRuleFromRecipe',
     summary: 'Create a rule from a recipe and attach it to addresses',
-    description: 'Writes the recipe’s script, saves it as a new rule (key from the recipe and address unless given) and attaches it to each address, after their other recipes and before their own scripts. An AI recipe lets the AI read mail at those addresses’ domains. Returns the new version and key.',
+    description: 'Writes the recipe’s script, saves it as a new rule (key from the recipe and address unless given) and attaches it to each address, after their other recipes and before their own scripts. An AI recipe lets the AI read mail at those addresses’ domains. Returns the new version and key. Besides listRuleRecipes, it takes the two-way rules the dashboard builds: split ({ test: always, from, subject, text or attachment; value: words, or senders for from; then; otherwise }) and split-by-meaning ({ meaning, then, otherwise }), where then and otherwise are inbox:<key>, an endpoint name, store or drop. Give the address the route [] (createRoute) so each side gets exactly its destination.',
     request: { headers: versionHeader, body: json(z.object({ recipe: z.string().max(40), params: RecipeInputParams, addresses: RecipeAddresses, key: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/).optional(), enabled: z.boolean().optional() }).strict()) },
     responses: { 201: response(created(state)), ...errors },
   }, async (c, family) => {

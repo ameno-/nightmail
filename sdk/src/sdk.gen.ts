@@ -3572,7 +3572,7 @@ export const listRuleRecipes = <ThrowOnError extends boolean = false>(options?: 
 /**
  * Create a rule from a recipe and attach it to addresses
  *
- * Writes the recipe’s script, saves it as a new rule (key from the recipe and address unless given) and attaches it to each address, after their other recipes and before their own scripts. An AI recipe lets the AI read mail at those addresses’ domains. Returns the new version and key.
+ * Writes the recipe’s script, saves it as a new rule (key from the recipe and address unless given) and attaches it to each address, after their other recipes and before their own scripts. An AI recipe lets the AI read mail at those addresses’ domains. Returns the new version and key. Besides listRuleRecipes, it takes the two-way rules the dashboard builds: split ({ test: always, from, subject, text or attachment; value: words, or senders for from; then; otherwise }) and split-by-meaning ({ meaning, then, otherwise }), where then and otherwise are inbox:<key>, an endpoint name, store or drop. Give the address the route [] (createRoute) so each side gets exactly its destination.
  */
 export const createRuleFromRecipe = <ThrowOnError extends boolean = false>(options: Options<CreateRuleFromRecipeData, ThrowOnError>): RequestResult<CreateRuleFromRecipeResponses, CreateRuleFromRecipeErrors, ThrowOnError> => (options.client ?? client).post<CreateRuleFromRecipeResponses, CreateRuleFromRecipeErrors, ThrowOnError>({
     security: [

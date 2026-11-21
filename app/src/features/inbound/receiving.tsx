@@ -8,12 +8,12 @@ import { Button, ConfirmDialog, DataTable, Dialog, DropdownMenu, EmptyState, Err
 import { useApiDef, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { request } from '../../data/live'
-import { errorText } from '../../data/types'
+import { errorText, type InboundAddress } from '../../data/types'
 import { number } from '../../lib/format'
 import { useMediaQuery } from '../../lib/media'
 import { FlowPanel, mailOf } from './panel'
 import { useCursorPagination, useSearchDraft } from '../../lib/pagination'
-import { CreateAddressDialog } from './addresses'
+import { AddressBuilder } from './builder'
 import { concepts, kindNote, kinds, type KindFilter } from './concepts'
 import { NewInboxDialog } from './inboxes'
 import { ConnectAgentButton } from '../docs/connect-agent'
@@ -86,7 +86,7 @@ function KindFilter({ overview, value, onChange }: { overview: Overview; value: 
   </button>)}</div>
 }
 
-function AddressesTab({ overview, fetching, filters, setFilter, page, onPage, onCreate, onEditRoute }: { overview: Overview; fetching: boolean; filters: { kind: KindFilter; domain: string; q: string }; setFilter: (patch: Partial<{ kind: KindFilter; domain: string; q: string }>) => void; page: number; onPage: (next: number) => void; onCreate: (address?: string) => void; onEditRoute: (r: RouteEntry) => void }) {
+function AddressesTab({ overview, fetching, filters, setFilter, page, onPage, onCreate, onEditRoute, onBuild }: { overview: Overview; fetching: boolean; filters: { kind: KindFilter; domain: string; q: string }; setFilter: (patch: Partial<{ kind: KindFilter; domain: string; q: string }>) => void; page: number; onPage: (next: number) => void; onCreate: (address?: string) => void; onEditRoute: (r: RouteEntry) => void; onBuild: (address: InboundAddress) => void }) {
   const { canAdminister } = useWorkspaceAccess()
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
@@ -106,7 +106,8 @@ function AddressesTab({ overview, fetching, filters, setFilter, page, onPage, on
   // Beside the list, the panel always shows one: the chosen row, the typed one, or the first.
   const selected = chosen ?? exact ?? (docked && !lookup ? rows[0] : undefined)
   const choose = (r: RouteEntry | null) => setParams(previous => { const next = new URLSearchParams(previous); if (r) next.set('open', r.id); else next.delete('open'); return next }, { replace: true })
-  const edit = (r: RouteEntry) => { const own = r.address && r.kind !== 'pattern'; if (own && r.kind === 'inbox') navigate(`/receiving/inboxes/${r.address!.id}`); else if (own) navigate(`/receiving/addresses/${r.address!.id}?tab=flow&edit=1`); else onEditRoute(r) }
+  // An address opens the builder (where its mail goes); an agent inbox its own page; a wildcard or catch-all its route.
+  const edit = (r: RouteEntry) => { const own = r.address && r.kind !== 'pattern'; if (own && r.kind === 'inbox') navigate(`/receiving/inboxes/${r.address!.id}`); else if (own) onBuild(r.address!); else onEditRoute(r) }
   const showPanel = overview.manage && (!!selected || !!lookup)
   const empty = filters.q ? 'Nothing matches' : kinds[filters.kind].empty
   const addRule = (r: RouteEntry) => overview.manage && r.address && r.kind !== 'pattern' ? <Link className="rcv-add" to={`/receiving/rules/new?address=${encodeURIComponent(r.address.id)}`} onClick={e => e.stopPropagation()}>Add a rule</Link> : null
@@ -240,7 +241,9 @@ export function ReceivingPage() {
   const pagination = useCursorPagination()
   const overview = useOverview({ ...kindQuery[filters.kind], domain: filters.domain || undefined, q: filters.q.trim() || undefined, cursor: pagination.cursor, limit: PAGE }, true)
   // New address, or Create this address from a typed one (its address filled in).
+  // New address (or Create this address, its address filled in), or an address's flow to change: one builder.
   const [creating, setCreating] = useState<{ address: string } | null>(null)
+  const [building, setBuilding] = useState<InboundAddress | null>(null)
   const [editing, setEditing] = useState<RouteEntry | null>(null)
   function update(patch: Record<string, string | null | undefined>) {
     // From the latest URL: a debounced search write must not undo a filter picked while it waited.
@@ -272,10 +275,11 @@ export function ReceivingPage() {
         items={[{ value: 'addresses', label: concepts.addresses.title, count: counts.addresses }, ...(data.manage ? [{ value: 'rules', label: concepts.rules.title, count: counts.rules }, { value: 'destinations', label: concepts.destinations.title, count: counts.destinations }] : [])]} />
       {tab === 'rules' && data.manage ? <RulesTab overview={data} refresh={() => overview.refetch()} />
         : tab === 'destinations' && data.manage ? <DestinationsTab overview={data} refresh={() => void overview.refetch()} />
-        : <AddressesTab overview={data} fetching={overview.isFetching} filters={filters} onCreate={address => setCreating({ address: address ?? '' })} onEditRoute={setEditing}
+        : <AddressesTab overview={data} fetching={overview.isFetching} filters={filters} onCreate={address => setCreating({ address: address ?? '' })} onEditRoute={setEditing} onBuild={setBuilding}
           page={pagination.page} onPage={next => pagination.onPageChange(next, data.routes.nextCursor)} setFilter={patch => update(patch)} />}
     </div>}
-    {data && <CreateAddressDialog open={!!creating} initial={creating?.address} onOpenChange={open => { if (!open) setCreating(null) }} domains={data.domains} />}
+    {data && <AddressBuilder open={!!creating} initial={creating?.address} onOpenChange={open => { if (!open) setCreating(null) }} domains={data.domains} />}
+    {data && building && <AddressBuilder open address={building} onOpenChange={open => { if (!open) { setBuilding(null); void overview.refetch() } }} domains={data.domains} />}
     {editing && <RouteEditor match={editing.match} route={editing.route} onClose={() => { setEditing(null); void overview.refetch() }} />}
   </div>
 }

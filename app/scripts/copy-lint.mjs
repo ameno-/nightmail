@@ -120,6 +120,7 @@ export const KEEP = [
   { why: 'billing', file: 'features/settings/billing.tsx', text: /^Pays for email at \S+ per 1,000 sent or received, plus any tax\.$/ },
   { why: 'billing', file: 'features/settings/billing.tsx', text: /^Charges your saved card when the balance runs low, up to a monthly limit\.$/ },
   { why: 'billing', file: 'features/settings/create-key.tsx', text: /^Billed by the day while the inbox has an app password\.$/ },
+  { why: 'billing', file: 'features/inbound/builder.tsx', text: /^Checked by AI · \$… per 1,000 emails$/ },
   { why: 'secret', file: 'features/settings/create-key.tsx', text: /^Shown once: copy it now/ },
   { why: 'secret', file: 'features/inbound/shared.tsx', text: /^It won’t be shown again\.$/ },
   { why: 'secret', file: 'features/settings/webhooks.tsx', text: /^Keep it on your server: anyone with it can sign requests as …\.$|^Keep it on your server: anyone with it can sign requests as Nightmail\.$/ },

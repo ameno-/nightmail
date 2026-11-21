@@ -1,13 +1,14 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { X } from 'lucide-react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
-import { Alert, Button, ConfirmDialog, Dialog, Disclosure, ErrorState, Field, IconButton, Input, KeyValues, LoadingRegion, PageHeader, Select, SkeletonText, Tabs, useToast, fieldError, MutationError } from '../../components/ui'
+import { Alert, Button, ConfirmDialog, Disclosure, ErrorState, Field, IconButton, Input, KeyValues, LoadingRegion, PageHeader, Select, SkeletonText, Tabs, useToast, fieldError, MutationError } from '../../components/ui'
 import { useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
 import { date, number } from '../../lib/format'
 import { AddressMail } from './threads'
 import { FlowPanel } from './panel'
+import { AddressBuilder } from './builder'
 import { request } from '../../data/live'
-import { errorText, type InboundAddress, type InboundAddressInput, type InboundAddressPatch, type MailboxDomain } from '../../data/types'
+import { errorText, type InboundAddress, type InboundAddressPatch } from '../../data/types'
 import { AliasEditor, aliasState, commitAliases, type AliasState } from './aliases'
 import { steps } from './concepts'
 import { typeLabel, useOverview } from './overview'
@@ -20,61 +21,6 @@ import './receiving.css'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { useSingleFlight } from '../../lib/single-flight'
 import { RITUALS_PER_ADDRESS } from '../../../../api/src/ritual-schema'
-
-const EMAIL = /^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/
-// How long an address receives: always, or for a while, then it stops (its mail stays readable).
-const lifetimes = [{ value: '', label: 'Always' }, { value: '3600', label: '1 hour' }, { value: '86400', label: '1 day' }, { value: '604800', label: '7 days' }, { value: '2592000', label: '30 days' }]
-export const receivingDomains = <D extends Pick<MailboxDomain, 'status'>>(domains: D[]) => domains.filter(domain => !['off', 'disabled'].includes(domain.status))
-
-export function CreateAddressDialog({ open, onOpenChange, domains, initial = '' }: { open: boolean; onOpenChange: (open: boolean) => void; domains: Pick<MailboxDomain, 'id' | 'name' | 'status'>[]; initial?: string }) {
-  const navigate = useNavigate()
-  const [address, setAddress] = useState('')
-  const [displayName, setDisplayName] = useState('')
-  const [publicAddress, setPublicAddress] = useState('')
-  const [lifetime, setLifetime] = useState('')
-  const [errors, setErrors] = useState<Record<string, string>>({})
-  const create = useApiMutation((api, input: InboundAddressInput) => api.inbound.createAddress(input), 'Address created')
-  const receiving = receivingDomains(domains)
-  useEffect(() => { if (open) { create.reset(); setErrors({}); setAddress(initial); setDisplayName(''); setPublicAddress(''); setLifetime('') } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
-  async function submit(event: FormEvent) {
-    event.preventDefault()
-    const value = address.trim().toLowerCase()
-    const next: Record<string, string> = {}
-    if (!EMAIL.test(value)) next.address = 'Enter a full email address, such as support@example.com.'
-    else if (receiving.length && !receiving.some(domain => domain.name === value.split('@')[1])) next.address = `Use a receiving domain: ${receiving.map(domain => domain.name).join(', ')}.`
-    const sender = publicAddress.trim().toLowerCase()
-    // The API accepts a public sender only on permanent addresses; the form keeps the two exclusive.
-    if (sender && lifetime) next.publicAddress = 'Temporary addresses cannot have a public sender address.'
-    else if (sender && !EMAIL.test(sender)) next.publicAddress = 'Enter a full email address.'
-    else if (sender && EMAIL.test(value) && (sender.split('@')[0] !== value.split('@')[0] || !value.split('@')[1]!.endsWith(`.${sender.split('@')[1]}`))) next.publicAddress = `Use ${value.split('@')[0]}@ on a parent domain of ${value.split('@')[1]}.`
-    setErrors(next)
-    if (Object.keys(next).length) return
-    try { const row = await create.mutateAsync({ address: value, displayName: displayName.trim() || null, ...(sender ? { publicAddress: sender } : {}), ...(lifetime ? { ttlSeconds: Number(lifetime) } : {}) }); onOpenChange(false); navigate(`/receiving/addresses/${row.id}`) } catch { /* Shown in the form. */ }
-  }
-  return <Dialog open={open} onOpenChange={next => { if (!create.isPending) onOpenChange(next) }} title="New address" footer={<><Button disabled={create.isPending} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" type="submit" form="inbound-create-address" loading={create.isPending}>Create address</Button></>}>
-    <form id="inbound-create-address" className="stack" onSubmit={submit} noValidate>
-      <MutationError error={create.error} />
-      {/* A domain that doesn't receive is named in the error, with the ones that do. */}
-      <Field label="Address" htmlFor="inbound-address" error={errors.address || fieldError(create.error, 'address')}>
-        <Input id="inbound-address" type="email" value={address} onChange={event => setAddress(event.target.value)} disabled={create.isPending} placeholder={`support@${receiving[0]?.name ?? 'example.com'}`} autoFocus autoComplete="off" />
-      </Field>
-      <Field label="Display name" htmlFor="inbound-address-name" error={fieldError(create.error, 'displayName')}><Input id="inbound-address-name" value={displayName} onChange={event => setDisplayName(event.target.value)} disabled={create.isPending} placeholder="Support" /></Field>
-      {/* Most people never need these: folded away, both left empty by default. Reply as is for permanent addresses only,
-          so it goes away while a lifetime is set; its placeholder is the address it would answer as. */}
-      <details className="inbound-advanced" open={!!lifetime || !!publicAddress || !!errors.publicAddress || undefined}>
-        <summary>Lifetime and reply-as</summary>
-        <div className="stack inbound-advanced__body">
-          <Field label="Receives mail for" htmlFor="inbound-address-lifetime" error={fieldError(create.error, 'ttlSeconds')}>
-            <Select id="inbound-address-lifetime" value={lifetime} onValueChange={value => { setLifetime(value); if (value) setPublicAddress('') }} disabled={create.isPending} options={lifetimes} />
-          </Field>
-          {!lifetime && <Field label="Reply as" htmlFor="inbound-address-public" error={errors.publicAddress || fieldError(create.error, 'publicAddress')}>
-            <Input id="inbound-address-public" type="email" value={publicAddress} onChange={event => setPublicAddress(event.target.value)} disabled={create.isPending} placeholder={address.includes('@') ? `${address.split('@')[0]}@${address.split('@')[1]!.split('.').slice(1).join('.') || 'example.com'}` : `support@${receiving[0] ? receiving[0].name.split('.').slice(receiving[0].name.split('.').length > 2 ? 1 : 0).join('.') : 'example.com'}`} autoComplete="off" />
-          </Field>}
-        </div>
-      </details>
-    </form>
-  </Dialog>
-}
 
 // `base` is the saved address the edit started from, so a just-saved form doesn't wait on the refetch.
 type AddressForm = { base: InboundAddress; displayName: string; aliases: AliasState }
@@ -194,7 +140,9 @@ export function InboundAddressDetailPage() {
   const overview = useOverview({ q: current?.address ?? '', kind: current?.kind === 'inbox' ? 'inbox' : 'address', limit: 5 }, false, canAdminister && !!current && tab === 'flow')
   // Where its mail goes is the flow panel's diagram; Edit (or ?edit from the panel) opens its steps to change them.
   const entry = overview.data?.routes.data.find(r => r.address?.id === id)
+  // Edit opens the builder; ?edit=1 (from the builder's "All rules") lists every rule it runs, to attach or detach them.
   const [editing, setEditing] = useState(params.get('edit') !== null)
+  const [building, setBuilding] = useState(false)
   const input = edited ?? (current ? formOf(current) : null)
   // Only a failed first load replaces the page: a later refetch that fails keeps the Settings form and its edits.
   if (address.error && !current) return <><PageHeader title="Address" backTo="/receiving" /><ErrorState error={address.error} onRetry={() => void address.refetch()} /></>
@@ -228,7 +176,7 @@ export function InboundAddressDetailPage() {
       : tab === 'flow' ? <div className="stack addr-page">{editing || !entry || !overview.data
         ? <><AddressPath address={current} overview={overview} />
           {entry && <div className="cluster"><Button onClick={() => setEditing(false)}>Done</Button></div>}</>
-        : <div className="addr-flow"><FlowPanel entry={entry} overview={overview.data} onEdit={() => setEditing(true)} mailLink={false} /></div>}</div>
+        : <div className="addr-flow"><FlowPanel entry={entry} overview={overview.data} onEdit={() => setBuilding(true)} mailLink={false} /></div>}</div>
       : <div className="stack addr-page">
         <KeyValues className="addr-facts" items={[
           ['Domain', <Link key="d" to="/domains">{current.domain}</Link>],
@@ -248,6 +196,7 @@ export function InboundAddressDetailPage() {
         </form>}
         <div className="addr-danger"><Button variant="danger" onClick={() => setConfirmDelete(true)}>Delete address</Button></div>
       </div>}
+    {building && current && <AddressBuilder open address={current} domains={[{ id: '', name: current.domain, status: 'active' }]} onOpenChange={open => { if (!open) { setBuilding(false); void overview.refetch() } }} />}
     <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title="Delete this address?" description="Its mail stays in Logs. New mail to it and its aliases follows the domain’s catch-all, and nothing else delivers here." confirmLabel="Delete address" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(); navigate('/receiving') }} />
   </div>
 }
