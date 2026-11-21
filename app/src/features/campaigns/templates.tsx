@@ -106,7 +106,10 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
   const phone = usePhone()
   const composer = useRef<EmailComposerRef>(null)
   const attachments = useRef<CampaignAttachmentsRef>(null)
-  const [template, setTemplate] = useState(initial)
+  const [template, setTemplateState] = useState(initial)
+  // The latest saved template, for a save that starts before the render after the last one (Save and leave).
+  const templateRef = useRef(initial)
+  const setTemplate = (value: CampaignTemplate) => { templateRef.current = value; setTemplateState(value) }
   const [draft, setDraft] = useState(initial.draft)
   const draftRef = useRef(draft)
   const [ready, setReady] = useState(false)
@@ -152,7 +155,7 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
       const content = await composer.current?.prepare()
       if (!content) throw new Error('The editor is still loading. Try again in a moment.')
       const submitted = templateDraft({...draftRef.current, html: content.html, attachments: [...new Set([...(draftRef.current.attachments ?? []), ...(content.inlineAttachmentIds ?? [])])]})
-      const updated = await api.templates.update(template.id, template.revision, submitted)
+      const updated = await api.templates.update(templateRef.current.id, templateRef.current.revision, submitted)
       remember(updated)
       await refreshLists()
       setTemplate(updated); draftRef.current = version.current === submittedVersion ? updated.draft : draftRef.current; if (version.current === submittedVersion) { setDraft(updated.draft); setDirty(false) }
@@ -162,7 +165,7 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
   }
   // Publish and Archive run one at a time per action: a second press before the first answers would send the same revision again.
   const publish = useSingleFlight('templates.publish', async () => {
-    const current = dirty || error ? await save() : template
+    const current = dirty || error ? await save() : templateRef.current
     if (!current) return
     try { const updated = await api.templates.publish(current.id, current.revision); setTemplate(updated); remember(updated); await refreshLists(); toast('Template published. Use it to start a campaign.', 'success') }
     catch (cause) { toast(errorText(cause), 'error') }

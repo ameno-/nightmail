@@ -506,7 +506,7 @@ async function measure(browser, job, fx) {
       if (!asked) problems.push('Back with an unsaved template edit left without asking');
       else {
         await page.getByRole('button', { name: 'Save and leave' }).click();
-        await page.waitForURL(url => url.pathname === '/campaigns/templates', { timeout: 20_000 }).catch(() => problems.push('Save and leave stayed on the template'));
+        await page.waitForURL(url => url.pathname === '/campaigns/templates', { timeout: 20_000 }).catch(async () => problems.push(`Save and leave stayed on the template${await page.locator('[role=alert], [role=status]').allInnerTexts().then(texts => texts.filter(Boolean).length ? `: ${texts.filter(Boolean).join(' / ').slice(0, 160)}` : '', () => '')}`));
         const saved = await page.evaluate(id => fetch(`/v1/templates/${id}`).then(response => response.json()), job.path.split('/').pop());
         if (saved?.draft?.subject !== subject) problems.push(`Save and leave didn't keep the new subject (saved: "${saved?.draft?.subject}")`);
         if (JSON.stringify(saved?.draft?.replyTo) !== JSON.stringify(replyTo)) problems.push(`Reply to saved as ${JSON.stringify(saved?.draft?.replyTo)}`);
