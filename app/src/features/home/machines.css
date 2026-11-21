@@ -90,7 +90,7 @@
 .mx-row b { font-weight: 550; }
 .mx-row time { color: var(--mx-screen-dim); font-size: var(--mx-small); font-variant-numeric: tabular-nums; }
 .mx-row span { grid-column: 1 / -1; color: var(--mx-screen-dim); }
-.mx-row[data-open] { background: color-mix(in oklab, var(--mx-accent) 16%, transparent); box-shadow: inset 3px 0 0 var(--mx-accent), 0 1px 0 var(--mx-hair); }
+.mx-row[data-open] { background: color-mix(in oklab, var(--mx-accent) 16%, transparent); box-shadow: 0 1px 0 var(--mx-hair); }
 .mx-row[data-open] span { color: var(--mx-screen-text); }
 .mx-thread { display: grid; align-content: start; row-gap: 10px; padding: 12px 16px; }
 .mx-thread-head { padding-bottom: 4px; font-weight: 600; line-height: 1.3; }
@@ -103,7 +103,7 @@
 .mx-call { color: var(--mx-accent); }
 .mx-call::before { content: '▸ '; color: var(--mx-screen-dim); }
 .mx-agent .mx-dim, .mx-quote, .mx-draft { padding-left: 2ch; }
-.mx-quote { margin-left: 2ch !important; padding-left: 1.2ch; box-shadow: inset 2px 0 0 var(--mx-screen-dim); font-family: var(--font-body); text-wrap: pretty; }
+.mx-quote { margin-left: 2ch !important; padding-inline: 1.2ch; border-radius: 3px; background: var(--mx-hair); font-family: var(--font-body); text-wrap: pretty; }
 /* (Typed a letter at a time by uncovering it, the caret stepping along with it: nothing on the screen changes size.) */
 .mx-draft { position: relative; }
 .mx-draft span { white-space: nowrap; }
