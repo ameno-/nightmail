@@ -2,7 +2,7 @@ import { ArrowUpRight } from 'lucide-react'
 import { useRegion, useSession, useWorkspaceAccess } from '../../data/context'
 import type { RegionCatalogEntry } from '../../data/types'
 import { label } from '../../lib/format'
-import { LoadingRegion, PageHeader, SectionHeader, Select, Skeleton, StatusBadge, TableSkeleton, Tabs, type Column, type SkeletonColumn } from '../../components/ui'
+import { LoadingRegion, MetricRow, PageHeader, SectionHeader, Select, Skeleton, StatusBadge, TableSkeleton, Tabs, type Column, type SkeletonColumn } from '../../components/ui'
 import type { LogEntry } from '../../data/types'
 import { logColumnDefs, logColumns } from '../logs/rows'
 import { useLatestRowCount } from './latest'
@@ -28,10 +28,10 @@ export const latestColumns: Column<LogEntry>[] = latestColumnDefs.map(column => 
 
 // Each skeleton has exactly the loaded block's dimensions (see overview.css), so swapping in the data moves nothing.
 export function FactsSkeleton() {
-  return <dl className="ov-facts" aria-hidden="true">{factTitles.map(title => <div key={title}><dt><span>{title}</span></dt><dd><span className="ov-facts__value"><Skeleton width={72} height={22} /></span><span className="ov-spark ov-spark--skeleton" /></dd></div>)}</dl>
+  return <div className="ov-facts" aria-hidden="true">{factTitles.map(title => <MetricRow key={title} label={title} spark={<span className="ov-spark ov-spark--skeleton" />} value={<Skeleton width={56} height={16} />} />)}</div>
 }
 export function ChartSkeleton() {
-  return <section className="ov-chart" aria-hidden="true"><div className="ov-chart__head"><h2>Activity</h2></div><div className="ov-chart__plot ov-chart__plot--loading" /></section>
+  return <section className="ov-chart" aria-hidden="true"><div className="ov-chart__head"><h2 className="ui-label ui-label--rule">Activity</h2></div><div className="ov-chart__plot ov-chart__plot--loading" /></section>
 }
 export function AsideSkeleton() {
   return <div className="ov-aside-skeleton" aria-hidden="true"><span /><span /></div>

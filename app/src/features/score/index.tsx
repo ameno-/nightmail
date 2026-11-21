@@ -27,14 +27,13 @@ export function SidebarScore() {
   const { data: report, isError } = useSenderScore()
   const shown = useTween(!report ? undefined : report.state === 'graded' ? report.score ?? 0 : 0)
   // A failed read keeps the card's frame with a dash, instead of an empty box; the explainer it opens has the error and Retry.
-  if (!report && isError) return <button type="button" onClick={() => openScoreAbout()} className="gauge-card gauge-card--compact" aria-label="Sender score unavailable. About the sender score"><Texture /><span className="gauge-stack"><span className="gauge-eyebrow">Sender score</span><span className="gauge-readout"><b>—</b></span></span></button>
+  if (!report && isError) return <button type="button" onClick={() => openScoreAbout()} className="gauge-card gauge-card--compact" aria-label="Sender score unavailable. About the sender score"><span className="gauge-stack"><span className="gauge-eyebrow">Sender score</span><span className="gauge-readout"><b>—</b></span></span></button>
   if (!report) return <div className="gauge-card gauge-card--compact" aria-hidden="true"><span className="gauge-skeleton" /></div>
   const graded = report.state === 'graded'
   // A dot from Warn up, and the card then goes to Overview's standing card; otherwise it opens the explainer.
   const raised = stepAtLeast(report.standing?.step, 'warn') ? report.standing!.step as RaisedStep : null
   const label = (graded ? `Sender score ${whole(report.score!)}, grade ${report.grade}` : `Sender score not graded yet: ${progressLabel(report)}`) + (raised ? `. ${standingTitle[raised]}` : '. About the sender score')
   const inner = <>
-    <Texture />
     {raised && <span className={`gauge-alert ui-tone--${standingTone(raised)}`} aria-hidden="true" />}
     <Dial report={report} />
     <span className="gauge-stack">
@@ -50,8 +49,6 @@ export function ScoreAboutHost() {
   const score = useSenderScore()
   return <ScoreAbout report={score.data} error={score.error} onRetry={() => void score.refetch()} />
 }
-// Faint film grain and a tick ruler: texture, never content.
-function Texture({ ruler = true }: { ruler?: boolean }) { return <><span className="gauge-grain" aria-hidden="true" />{ruler && <span className="gauge-ruler" aria-hidden="true" />}</> }
 
 // Overview's notes under the daily limit, each only while it applies: an adjustment of the limit itself, and a
 // standing below Warn worth knowing (a notice, a marketing release). From Warn up the standing card says it.

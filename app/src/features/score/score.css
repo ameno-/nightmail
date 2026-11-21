@@ -1,4 +1,4 @@
-/* Sender score. Flat instrument styling on the surface; the only texture is faint grain and a tick ruler.
+/* Sender score. Flat: a hairline card, mono figures, colour only on the grade bands and the parts' states.
    Every block has a fixed height in every state (loading, calibrating, graded), so loading never shifts layout. */
 [data-grade='aplus'] { --grade-fill: var(--grade-aplus); }
 [data-grade='a'] { --grade-fill: var(--grade-a); }
@@ -7,20 +7,11 @@
 [data-grade='d'] { --grade-fill: var(--grade-d); }
 [data-grade='f'] { --grade-fill: var(--grade-f); }
 
-.gauge-card {
-  /* Grain: fractal noise turned into an alpha mask, tinted with the text colour, so it follows the theme. */
-  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 .7 .7 .7 0 -.62'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-  /* Ruler: a minor tick every 4px and a major tick every 24px. */
-  --ruler: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='8'%3E%3Cpath d='M.5 0v8M4.5 5v3M8.5 5v3M12.5 3v5M16.5 5v3M20.5 5v3' stroke='%23000' stroke-width='1'/%3E%3C/svg%3E");
-  position: relative; isolation: isolate; display: block; overflow: hidden; border-radius: var(--radius-sm); background: var(--color-surface); box-shadow: inset 0 0 0 1px var(--color-border); color: var(--color-text); text-decoration: none; font-variant-numeric: tabular-nums;
-}
-.gauge-card > :not(.gauge-grain, .gauge-ruler) { position: relative; z-index: 1; }
+.gauge-card { position: relative; isolation: isolate; display: block; overflow: hidden; border-radius: var(--radius-sm); background: var(--color-surface); box-shadow: inset 0 0 0 1px var(--color-border-muted); color: var(--color-text); text-decoration: none; font-variant-numeric: tabular-nums; }
+.gauge-card > * { position: relative; z-index: 1; }
 /* Every score view is a button that opens the explainer. */
 button.gauge-card { width: 100%; border: 0; font: inherit; text-align: left; cursor: pointer; }
 button.gauge-card:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
-.gauge-grain { position: absolute; inset: 0; background: var(--color-text); -webkit-mask: var(--grain) 0 0 / 140px 140px; mask: var(--grain) 0 0 / 140px 140px; opacity: .05; pointer-events: none; }
-:root[data-theme='dark'] .gauge-grain { opacity: .07; }
-.gauge-ruler { position: absolute; inset: auto 0 0; height: 8px; background: var(--color-border-strong); -webkit-mask: var(--ruler) 0 100% / 24px 8px repeat-x; mask: var(--ruler) 0 100% / 24px 8px repeat-x; opacity: .7; pointer-events: none; }
 .gauge-skeleton { position: absolute; inset: 0; border-radius: inherit; background: var(--color-layer-1); animation: ui-pulse 1.2s ease-in-out infinite alternate; }
 
 .gauge-dial { display: block; overflow: visible; }
@@ -42,14 +33,13 @@ button.gauge-card:focus-visible { outline: 2px solid var(--color-focus); outline
 .gauge-card--compact { display: flex; align-items: center; gap: 12px; height: 56px; padding: 0 14px 0 10px; transition: background var(--motion-duration), transform 160ms var(--ease-out-strong); }
 .gauge-card--compact:active { transform: scale(.98); }
 @media (hover: hover) and (pointer: fine) { .gauge-card--compact:hover { background: var(--color-layer-1); } }
-.gauge-card--compact .gauge-ruler { height: 5px; opacity: .5; }
 .gauge-card--compact .gauge-dial { flex: none; width: 60px; height: 34px; }
 .gauge-card--compact:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 .gauge-stack { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
 .gauge-card--compact .gauge-eyebrow { font-size: 9px; line-height: 12px; letter-spacing: .14em; }
 /* One 24px line in every state: the graded number keeps a fixed slot before its grade; ungraded or unread, a dash. */
 .gauge-readout { display: flex; align-items: baseline; gap: 8px; height: 24px; line-height: 24px; }
-.gauge-readout b { display: inline-block; min-width: 1.5em; font-size: 21px; line-height: 24px; font-weight: 600; letter-spacing: -.03em; }
+.gauge-readout b { display: inline-block; min-width: 1.5em; font-family: var(--font-mono); font-size: 20px; line-height: 24px; font-weight: 400; letter-spacing: -.02em; }
 .gauge-readout .gauge-grade { font-size: 13px; letter-spacing: .04em; }
 
 /* Next steps: a short list of places to go; rows fade up in sequence. */
@@ -98,25 +88,31 @@ button.gauge-card:focus-visible { outline: 2px solid var(--color-focus); outline
 .score-about .ui-dialog__body { display: flex; flex-direction: column; gap: var(--space-16); }
 /* The body scrolls; its blocks keep their full height instead of shrinking into each other. */
 .score-about .ui-dialog__body > * { flex-shrink: 0; }
-.score-about__status { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: var(--space-12); row-gap: var(--space-8); min-height: 56px; padding: var(--space-12); border-radius: var(--radius-sm); background: var(--color-surface); box-shadow: inset 0 0 0 1px var(--color-border); font-variant-numeric: tabular-nums; }
-.score-about__status > b { min-width: 2ch; font-size: 30px; line-height: 32px; font-weight: 600; letter-spacing: -.04em; text-align: center; }
+.score-about__status { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: var(--space-16); row-gap: var(--space-8); min-height: 56px; padding: var(--space-12) 0; border-block: 1px solid var(--color-border-muted); font-variant-numeric: tabular-nums; }
+.score-about__status > b { min-width: 2ch; font-family: var(--font-mono); font-size: 30px; line-height: 32px; font-weight: 400; letter-spacing: -.03em; text-align: left; }
 .score-about__status-text { display: flex; flex-direction: column; gap: 2px; font-size: var(--text-sm); line-height: var(--leading-sm); }
 .score-about__status-text .muted { font-size: var(--text-xs); line-height: var(--leading-xs); }
 .score-about__grade { color: var(--grade-fill, inherit); font-family: var(--font-mono); }
 .score-about__status:has(.score-about__history) { grid-template-columns: auto minmax(0, 1fr) auto; }
 .score-about__history { display: flex; align-items: flex-end; gap: 2px; width: 98px; height: 20px; }
-.score-about__history > span { flex: 1; height: 100%; border-radius: 1px; background: var(--color-layer-3); transform-origin: bottom; }
-.score-about__history > span[data-last] { background: var(--color-contrast); }
-.score-about__limit { grid-column: 1 / -1; padding-top: var(--space-8); border-top: 1px solid var(--color-border-muted); font-size: var(--text-xs); line-height: var(--leading-xs); text-wrap: pretty; }
+.score-about__history > span { flex: 1; height: 100%; border-radius: 0; background: var(--color-series); transform-origin: bottom; }
+.score-about__history > span[data-last] { background: var(--color-series-strong); }
+.score-about__limit { grid-column: 1 / -1; padding-top: var(--space-8); border-top: 1px solid var(--color-border-muted); font-family: var(--font-mono); font-size: var(--text-xs); line-height: var(--leading-xs); text-wrap: pretty; }
 .score-about__section ul { display: flex; flex-direction: column; gap: var(--space-4); margin: 0; padding-inline-start: var(--space-20); text-wrap: pretty; }
 .score-about__progress { grid-column: 1 / -1; position: relative; display: block; height: 4px; overflow: hidden; border-radius: 2px; background: var(--color-layer-2); }
 .score-about__progress > i { position: absolute; inset: 0 auto 0 0; width: var(--share); border-radius: inherit; background: var(--color-contrast); }
 .score-about__section { font-size: var(--text-sm); line-height: var(--leading-sm); }
 .score-about__section h3 { font-size: var(--text-sm); font-weight: var(--font-weight-bold); }
 .score-about__section code { font-size: .92em; }
-.score-about__factors { margin: 0; padding: 0; list-style: none; }
-.score-about__factors > li { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--space-12); padding: var(--space-8) var(--focus-reach); margin: 0 calc(-1 * var(--focus-reach)); border-top: 1px solid var(--color-border-muted); border-radius: var(--radius-sm); font-size: var(--text-sm); line-height: var(--leading-sm); scroll-margin: var(--space-8); }
-.score-about__factors > li[data-focus] { background: var(--color-layer-2); }
+/* The six parts as metric rows: name and weight, the part's score as a meter (a tick at 80), its measured value and score. */
+.score-about__factors { margin: 0; padding: 0; list-style: none; --metric-spark: 140px; --metric-value: 120px; }
+.score-about__factors > li { margin: 0 calc(-1 * var(--focus-reach)); padding: 0 var(--focus-reach); border-radius: 4px; font-size: var(--text-sm); line-height: var(--leading-sm); scroll-margin: var(--space-8); }
+.score-about__factors > li[data-focus] { background: var(--color-active-bg); }
+.score-about__factors .ui-metric__spark > .ui-meter { height: 2px; }
+.score-about__factors .ui-metric__unit { margin-left: var(--space-6); }
+.score-about__part-score { color: var(--tone-ink); }
+.score-about__part-score.ui-tone--neutral { color: var(--color-muted); }
+@media (max-width: 640px) { .score-about__factors { --metric-spark: 56px; --metric-value: 104px; } }
 /* How it's graded: what each part measures, its name leading its definition. */
 .score-about__bases { display: flex; flex-direction: column; gap: var(--space-4); margin: 0; text-wrap: pretty; }
 .score-about__bases dt { display: inline; margin-right: var(--space-6); font-weight: var(--font-weight-bold); }

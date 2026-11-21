@@ -10,12 +10,12 @@
 .email-detail .ui-page-header__text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .page-surface .email-detail > .ui-page-header h1 { --title-line: 24px; min-width: 0; padding-block: calc((var(--control-height) - var(--title-line)) / 2); line-height: var(--title-line); overflow-wrap: anywhere; }
 /* To · From · stream · date · ID on one line; the sender gives way first, then the recipient. */
-.email-facts { display: flex; align-items: center; min-width: 0; min-height: 24px; color: var(--color-muted); white-space: nowrap; }
+.email-facts { display: flex; align-items: center; min-width: 0; min-height: 24px; color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); white-space: nowrap; }
 .email-facts__item { display: inline-flex; flex: none; align-items: center; min-width: 0; }
 .email-facts__item ~ .email-facts__item::before { content: '·'; flex: none; margin-inline: var(--space-8); color: var(--color-faint); }
 .email-facts__item:is(:first-child, .email-facts__from) { flex: 0 1 auto; overflow: clip; }
 .email-facts__from { flex-shrink: 10; }
-.email-facts__label { flex: none; margin-right: var(--space-6); color: var(--color-faint); }
+.email-facts__label { flex: none; margin-right: var(--space-6); color: var(--color-faint); font-size: var(--text-label); letter-spacing: var(--tracking-label); text-transform: uppercase; }
 .email-facts .email-sender { flex-wrap: nowrap; min-width: 0; }
 .email-facts :is(.email-sender > span, .email-sender__address) { min-width: 0; overflow: clip; text-overflow: ellipsis; }
 .email-facts .private-address__value { flex: 0 1 auto; min-width: 0; overflow: clip; }
@@ -57,6 +57,9 @@
 .delivery[data-vertical] .delivery__note::before { content: none; }
 .delivery[data-vertical] > .ui-button { align-self: flex-start; }
 .delivery__skeleton { display: flex; flex-direction: column; }
+.delivery[data-vertical] > .ui-waterfall .delivery__fact { display: inline-flex; gap: var(--space-6); cursor: default; }
+.delivery[data-vertical] > .ui-waterfall .delivery__note { font-size: var(--text-xs); }
+.delivery[data-vertical] > .delivery__contact { display: inline-flex; gap: var(--space-6); align-self: flex-start; }
 /* The preview, then (a phone) the score under it, or beside it the details column: the delivery, then the score. */
 .email-detail__body { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-24); min-width: 0; }
 .email-detail__preview { min-width: 0; }
@@ -68,7 +71,8 @@
   .email-detail__body { flex: 1 1 0; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: minmax(0, 1fr); min-height: 0; }
   .email-detail__preview { display: flex; flex-direction: column; min-height: 0; }
   /* It scrolls down only; its sides keep room for the fixes' hover fill (8 px) and focus rings. */
-  .email-detail__side { --fade-pad-y: var(--focus-reach); display: flex; flex-direction: column; gap: var(--space-32); width: calc(var(--side-width) + 2 * var(--space-8)); min-height: 0; margin: calc(-1 * var(--focus-reach)) calc(-1 * var(--space-8)); padding: var(--focus-reach) var(--space-8); overflow: hidden auto; }
+  /* The split: the preview, a hairline, the details column. */
+  .email-detail__side { --fade-pad-y: var(--focus-reach); display: flex; flex-direction: column; gap: var(--space-28); width: calc(var(--side-width) + var(--space-8) + var(--space-24)); min-height: 0; margin: calc(-1 * var(--focus-reach)) calc(-1 * var(--space-8)) calc(-1 * var(--focus-reach)) 0; padding: var(--focus-reach) var(--space-8) var(--focus-reach) var(--space-24); border-left: 1px solid var(--color-border-muted); overflow: hidden auto; }
   .email-detail__side[hidden] { display: none; }
   .email-detail__side:focus-visible { outline-offset: calc(-1 * var(--focus-width)); }
   /* Opened from the toolbar, the score's panel starts at the preview's top, under its toggle. */
@@ -126,7 +130,12 @@
 .page-surface .email-detail-page > .ui-page-header > .cluster:last-child:not(:first-child) { flex: none; align-items: center; min-height: var(--control-height); }
 .page-surface .email-detail-page > .ui-page-header h1 { --title-line: 24px; min-width: 0; padding-block: calc((var(--control-height) - var(--title-line)) / 2); line-height: var(--title-line); overflow-wrap: anywhere; }
 /* The surface is a fixed-height flex column; headers, notices and toolbars keep their height when content overflows. */
-.page-surface .email-detail-page > :not(.email-detail-grid), .page-surface .logs-page > :not(.logs-table) { flex-shrink: 0; }
+.page-surface .email-detail-page > :not(.email-detail-grid), .page-surface .logs-page > :not(.logs-table, .logs-split) { flex-shrink: 0; }
+/* Logs' body (facets.tsx): the facet rail beside the volume strip and the stream. */
+.logs-split { flex: 1; min-height: 0; }
+.logs-split > .ui-split__main > :not(.logs-table) { flex-shrink: 0; }
+.logs-histogram { margin-bottom: var(--space-12); }
+.logs-split .ui-facets { padding-top: 2px; }
 .page-surface .logs-page .search-box { min-width: 0; }
 @media (max-width: 850px) {
   .page-surface .email-detail-page { min-height: auto; }
@@ -197,15 +206,21 @@
 :is(.thread-line__entry, .thread-rows__row):focus-visible { outline: 2px solid var(--color-accent); outline-offset: -2px; }
 .thread-line { display: flex; flex: none; flex-direction: column; gap: var(--space-8); }
 .thread-line__title { display: flex; align-items: center; gap: var(--space-6); min-height: var(--control-height); margin: 0; }
-.thread-line__steps { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
+/* Section titles beside an email: small mono caps over their data, a hairline to the edge. */
+:is(.email-detail, .email-detail-page) :is(.ss__title, .thread-line__title) { display: flex; align-items: center; gap: var(--space-8); color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-label); font-weight: 400; letter-spacing: var(--tracking-label); text-transform: uppercase; }
+:is(.email-detail, .email-detail-page) .thread-line__title::after, .email-detail__delivery > .ss__title::after { content: ''; flex: 1; height: 1px; background: var(--color-border-muted); }
+.email-detail .thread__count { color: var(--color-faint); }
+.thread-line__steps { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
 .thread-line__step { position: relative; }
-.thread-line__step:not(:last-child)::after { content: ''; position: absolute; top: 20px; bottom: -8px; left: 2.5px; width: 1px; background: var(--color-border-strong); pointer-events: none; }
-.thread-line__entry { display: grid; grid-template-columns: 6px minmax(0, 1fr) auto; grid-template-areas: 'dot top time' '. status status'; align-items: center; column-gap: var(--space-12); row-gap: 4px; margin-inline: calc(-1 * var(--space-8)); padding: var(--space-6) var(--space-8); border-radius: var(--radius-sm); color: var(--color-text); text-decoration: none; }
+.thread-line__step:not(:last-child)::after { content: ''; position: absolute; top: 18px; bottom: -10px; left: 2.5px; width: 1px; background: var(--color-border); pointer-events: none; }
+/* One 28px line per message: dot, direction and sender, its status, when. */
+.thread-line__entry { display: grid; grid-template-columns: 6px minmax(0, 1fr) auto auto; grid-template-areas: 'dot top status time'; align-items: center; column-gap: var(--space-12); height: var(--row-height-dense); margin-inline: calc(-1 * var(--space-8)); padding: 0 var(--space-8); border-radius: 4px; color: var(--color-text); text-decoration: none; }
 .thread-line__dot { grid-area: dot; width: 6px; height: 6px; border-radius: 50%; background: var(--color-faint); }
 .thread-line__dot[data-outbound] { background: var(--color-text); }
 .thread-line__top { display: flex; grid-area: top; align-items: center; gap: var(--space-8); min-width: 0; }
 .thread-line__entry > .thread__time { grid-area: time; }
-.thread-line__status { display: flex; grid-area: status; align-items: center; gap: var(--space-6); min-width: 0; color: var(--color-muted); font-size: var(--text-xs); line-height: 18px; }
+.thread-line__status { display: flex; grid-area: status; align-items: center; gap: var(--space-6); min-width: 0; color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); line-height: 18px; white-space: nowrap; }
+.thread-line .thread__time { font-family: var(--font-mono); font-size: var(--text-xs); }
 .thread-line__here { color: var(--color-text); }
 .thread-line__entry[data-focused] { background: var(--color-active-bg); }
 @media (hover: hover) and (pointer: fine) { a.thread-line__entry:hover { background: var(--color-hover); } }

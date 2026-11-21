@@ -5,6 +5,13 @@
 .rcv-cell { display: flex; align-items: center; gap: var(--space-8); min-width: 0; }
 .rcv-cell > .rcv-icon { align-self: flex-start; margin-top: 3px; }
 .rcv-table { --table-row-height: 53px; }
+/* Routes beside their kinds (the facet rail); counts, times and rule names in mono. */
+.rcv-split > .ui-split__main { gap: var(--space-12); }
+.rcv-split .rcv-toolbar { justify-content: flex-end; }
+.rcv-table td:is([data-col='unread'], [data-col='last']) { font-family: var(--font-mono); font-size: var(--text-xs); }
+.rcv-table td[data-col='unread'] strong { color: var(--color-text); font-weight: 400; }
+.rcv-table td[data-col='unread'] strong::before { content: ''; display: inline-block; width: 6px; height: 6px; margin: 0 var(--space-6) 1px 0; border-radius: 50%; background: var(--color-info-marker); }
+.rcv-foot { font-family: var(--font-mono); font-size: var(--text-xs); }
 .rcv-match { display: inline-flex; min-width: 0; max-width: 100%; font-family: var(--font-mono); font-size: var(--text-sm); letter-spacing: -.01em; }
 .rcv-match__local { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rcv-match__host { flex: none; color: var(--color-faint); }

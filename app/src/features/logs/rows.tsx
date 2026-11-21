@@ -11,12 +11,14 @@ import { receivedTo } from '../../lib/private-address'
 // One log row, shared by Logs and Overview's latest emails: the same columns, masking and click-through in both.
 // On a phone each row is a card: the subject (the link) and the time, then direction, status and the other party.
 export const logColumnDefs: SkeletonColumn[] = [
-  { key: 'time', label: 'Time · UTC', width: 140, card: 'aside' }, { key: 'direction', label: <span className="sr-only">Direction</span>, width: 48, card: 'line' },
+  { key: 'time', label: 'Time · UTC', width: 148, card: 'aside' }, { key: 'direction', label: <span className="sr-only">Direction</span>, width: 48, card: 'line' },
   { key: 'status', label: 'Status', width: 124, card: 'inline' }, { key: 'from', label: 'From', width: '14%', card: 'inline' }, { key: 'to', label: 'To', width: '14%', card: 'hide' },
   { key: 'subject', label: 'Subject', card: 'title' }, { key: 'stream', label: 'Stream', width: 116, card: 'hide' }, { key: 'open', label: '', width: 28, card: 'hide' },
 ]
 
 export const logTimestamp = (value: string) => date(value, { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23', timeZone: 'UTC' })
+// A stream's time: the date muted, the time bright (both UTC).
+const LogTime = ({ at }: { at: string }) => <span className="log-time" title={at}><span className="log-time__date">{date(at, { month: 'short', day: '2-digit', timeZone: 'UTC' })}</span> {date(at, { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23', timeZone: 'UTC' })}</span>
 // A card's time: the hour today, the date before that (UTC, like the table).
 const cardTime = (value: string) => date(value, value.slice(0, 10) === new Date().toISOString().slice(0, 10) ? { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' } : { month: 'short', day: 'numeric', timeZone: 'UTC' })
 // The row link's name (its visible text is only the time): which way, how it went, the subject and when.
@@ -46,7 +48,7 @@ function SentTo({ to }: { to: string[] }) {
 }
 
 export const logColumns: Column<LogEntry>[] = [
-  { ...logColumnDefs[0]!, render: row => <span className="muted" title={row.at}>{logTimestamp(row.at)}</span>, cardRender: row => <time dateTime={row.at} title={`${logTimestamp(row.at)} UTC`}>{cardTime(row.at)}</time> },
+  { ...logColumnDefs[0]!, render: row => <LogTime at={row.at} />, cardRender: row => <time dateTime={row.at} title={`${logTimestamp(row.at)} UTC`}>{cardTime(row.at)}</time> },
   { ...logColumnDefs[1]!, render: row => <span className="log-direction" data-direction={row.direction} title={row.direction === 'sent' ? 'Sent' : 'Received'}>{row.direction === 'sent' ? 'Out' : 'In'}</span> },
   { ...logColumnDefs[2]!, render: row => row.direction === 'sent' ? <StatusBadge status={row.status} /> : row.status === 'spam' ? <StatusBadge status="Spam" tone="danger" /> : <StatusBadge status="Received" tone="success" /> },
   { ...logColumnDefs[3]!, render: row => <PrivateAddress value={row.from.address} />, cardRender: row => row.direction === 'sent' ? <>To <SentTo to={row.to} /></> : <>From <PrivateAddress value={row.from.address} /></> },
@@ -56,9 +58,10 @@ export const logColumns: Column<LogEntry>[] = [
   { ...logColumnDefs[7]!, render: () => <ChevronRight size={14} aria-hidden /> },
 ]
 
-// The Logs page gives Status the room its longest label needs ("Acceptance unknown"); Overview keeps the compact column.
+// The Logs page gives Status the room its longest label needs ("Acceptance unknown", in mono); Overview keeps the compact column.
 // Its last column also holds a scheduled email's menu (features/logs/scheduled.tsx), at the end of its card on a phone.
-const wide = <T extends { key: string; width?: number | string; card?: SkeletonColumn['card'] }>(columns: T[]): T[] => columns.map(column => column.key === 'status' ? { ...column, width: 172 } : column.key === 'open' ? { ...column, width: 40, card: 'end' } : column)
+// Beside the facet rail the subject keeps the room: the addresses and the stream take less.
+const wide = <T extends { key: string; width?: number | string; card?: SkeletonColumn['card'] }>(columns: T[]): T[] => columns.map(column => column.key === 'status' ? { ...column, width: 164 } : column.key === 'open' ? { ...column, width: 40, card: 'end' } : column.key === 'from' || column.key === 'to' ? { ...column, width: '12%' } : column.key === 'stream' ? { ...column, width: 104 } : column)
 export const logsPageColumns = wide(logColumns)
 export const logsPageColumnDefs = wide(logColumnDefs)
 

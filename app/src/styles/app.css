@@ -22,7 +22,7 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .main-navigation { flex-shrink: 0; margin-top: var(--space-16); display: flex; flex-direction: column; gap: var(--space-4); }
 .main-navigation a { min-height: 32px; display: flex; align-items: center; padding-inline: var(--sidebar-inset); border-radius: 4px; font-size: var(--text-sm); line-height: var(--leading-sm); color: var(--color-muted); text-decoration: none; transition: color var(--motion-duration), background var(--motion-duration); }
 .main-navigation a:hover { color: var(--color-text); background: var(--color-hover); }
-.main-navigation a.active { color: var(--color-text); background: var(--color-layer-2); font-weight: var(--font-weight-bold); }
+.main-navigation a.active { color: var(--color-text); background: var(--color-layer-1); box-shadow: inset 0 0 0 1px var(--color-border-muted); font-weight: var(--font-weight-bold); }
 .main-navigation a[data-locked] { justify-content: space-between; }
 .main-navigation a[data-locked] svg { color: var(--color-faint); }
 .sidebar-footer { flex-shrink: 0; display: flex; flex-direction: column; gap: var(--space-16); margin-top: auto; padding-inline: var(--sidebar-inset); }
@@ -58,8 +58,8 @@ html:not([data-privacy='off']) .private-field:not(:hover, :focus)::placeholder {
 .quota-label span:last-child { color: var(--color-text); }
 .quota-meter { display: block; height: 3px; width: 100%; border: 0; border-radius: 2px; background: var(--color-layer-2); appearance: none; overflow: hidden; }
 .quota-meter::-webkit-meter-bar { background: var(--color-layer-2); border: 0; border-radius: 2px; height: 3px; }
-.quota-meter::-webkit-meter-optimum-value { background: var(--color-accent); }
-.quota-meter::-moz-meter-bar { background: var(--color-accent); }
+.quota-meter::-webkit-meter-optimum-value { background: var(--color-series-strong); }
+.quota-meter::-moz-meter-bar { background: var(--color-series-strong); }
 .page-surface { display: flex; flex-direction: column; margin: var(--page-inset) var(--page-inset) var(--page-inset) var(--sidebar-width); padding: var(--space-24) var(--space-32); height: calc(100dvh - 2 * var(--page-inset)); min-height: 0; background: var(--color-surface); border-radius: var(--radius-lg); box-shadow: var(--shadow-raised); position: relative; min-width: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
 .page-surface > :is(.stack, .audience-page, .ui-loading-layout) { flex: 1; }
 .page-surface > .stack { gap: var(--page-gap); }
@@ -125,26 +125,31 @@ html:not([data-privacy='off']) .private-field:not(:hover, :focus)::placeholder {
 .between { justify-content: space-between; }
 .nowrap { white-space: nowrap; }
 .text-warning { color: var(--color-warning); }
-.chart-legend { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-20); color: var(--color-muted); font-size: var(--text-xs); }
+.chart-legend { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-16); color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); letter-spacing: var(--tracking-label); text-transform: uppercase; }
 .chart-legend > span { display: flex; align-items: center; gap: var(--space-6); }
-.chart-legend i { width: 8px; height: 8px; border-radius: 2px; }
-.legend-sent { background: var(--color-accent); }
+.chart-legend i { width: 8px; height: 2px; border-radius: 0; }
+.legend-sent { background: var(--color-series-strong); }
 .legend-bounces { background: var(--color-warning-marker); }
 .legend-complaints { background: var(--color-complaint); }
 .activity-chart { position: relative; width: 100%; min-height: 232px; flex: 1; }
 .activity-chart > svg { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
-.chart-label { fill: var(--color-muted); font-family: var(--font-body); font-size: 12px; }
-.chart-label--date { fill: var(--color-faint); }
-.chart-grid { stroke: var(--color-border); stroke-dasharray: 3 5; }
-.chart-line { fill: none; stroke-width: 2; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
-.chart-line--bounces { stroke: var(--color-warning-marker); stroke-dasharray: 4 3; stroke-width: 1.5; }
-.chart-line--complaints { stroke: var(--color-complaint); stroke-width: 1.5; }
-.chart-bar { fill: color-mix(in srgb, var(--color-accent) 70%, var(--color-transparent)); }
-.chart-bar--active { fill: var(--color-accent); }
-.chart-crosshair { stroke: var(--color-muted); stroke-dasharray: 3 4; pointer-events: none; }
+/* Charts: a hairline grid, muted mono axes, thin neutral bars; colour only on outcomes and on anomaly bands. */
+.chart-label { fill: var(--color-faint); font-family: var(--font-mono); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.chart-label--date { fill: var(--color-faint); opacity: .7; }
+.chart-grid { stroke: var(--color-border-muted); shape-rendering: crispEdges; }
+.chart-grid--base { stroke: var(--color-border); }
+.chart-line { fill: none; stroke-width: 1.5; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.chart-line--bounces { stroke: var(--color-warning-marker); stroke-width: 1.25; }
+.chart-line--complaints { stroke: var(--color-complaint); stroke-width: 1.25; }
+.chart-bar { fill: var(--color-series); }
+.chart-bar--active { fill: var(--color-series-strong); }
+/* An hour whose bounces or complaints crossed their warning line: a faint red band over the plot, a mark on the axis. */
+.chart-anomaly { fill: color-mix(in srgb, var(--color-danger-marker) 9%, transparent); }
+.chart-anomaly-mark { fill: var(--color-danger-marker); }
+.chart-crosshair { stroke: var(--color-faint); pointer-events: none; shape-rendering: crispEdges; }
 .chart-tooltip { position: absolute; right: var(--space-40); top: var(--space-8); display: flex; flex-direction: column; gap: var(--space-6); min-width: 200px; padding: var(--space-12); border: 0; border-radius: var(--radius-sm); background: var(--color-layer-1); box-shadow: var(--shadow-popover); font-size: var(--text-xs); pointer-events: none; }
-.chart-tooltip span { display: flex; justify-content: space-between; gap: var(--space-24); }
-.chart-tooltip b, .chart-tooltip strong { font-weight: var(--font-weight-regular); }
+.chart-tooltip span { display: flex; justify-content: space-between; gap: var(--space-24); color: var(--color-muted); }
+.chart-tooltip b, .chart-tooltip strong { color: var(--color-text); font-family: var(--font-mono); font-weight: var(--font-weight-regular); }
 .search-box { display: flex; align-items: center; position: relative; width: 392px; max-width: 100%; min-width: 220px; flex-shrink: 1; }
 .search-box > svg { position: absolute; left: var(--space-12); color: var(--color-muted); pointer-events: none; }
 .search-box .ui-input { padding-left: var(--space-32); width: min(392px, 100%); }
@@ -152,17 +157,25 @@ html:not([data-privacy='off']) .private-field:not(:hover, :focus)::placeholder {
 .logs-page { display: flex; flex: 1; min-height: 0; flex-direction: column; }
 .logs-page > .ui-page-header { margin-bottom: var(--space-12); }
 .logs-page > .data-toolbar { padding-bottom: var(--space-12); }
-.logs-table { --table-row-height: 34px; }
-.logs-table .ui-table { font-size: var(--text-xs); }
+/* A log stream: 28px mono rows (--row-height-dense), the one exception to the tables' row height. */
+.logs-table { --table-row-height: var(--row-height-dense); }
+.logs-table .ui-table { font-family: var(--font-mono); font-size: var(--text-xs); letter-spacing: -.01em; }
+.logs-table .ui-table .log-subject { font-family: var(--font-body); font-size: var(--text-sm); letter-spacing: 0; }
+.logs-table .ui-table td { border-bottom-color: transparent; }
+@media (hover: hover) and (pointer: fine) { .logs-table .ui-table tbody tr.ui-table__clickable:hover { background: var(--color-hover); } }
+.logs-table .ui-status { font-family: var(--font-mono); font-size: var(--text-xs); }
+/* The time: a muted date, the bright time. */
+.log-time { color: var(--color-text); white-space: nowrap; }
+.log-time__date { color: var(--color-faint); text-transform: uppercase; }
 /* The direction tabs sit in the page header, at control height, like Overview's range. */
 .logs-controls { flex-wrap: nowrap; gap: var(--space-12); }
 .logs-controls .ui-tabs { min-height: var(--control-height); border-bottom: 0; }
 .logs-controls .ui-tab { height: var(--control-height); }
 .logs-table .ui-table th { height: 30px; padding-block: var(--space-4); }
-.logs-table .ui-table td { padding-block: var(--space-4); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.logs-table .ui-table td { padding-block: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .logs-table .ui-table :is(th, td):last-child { padding-inline: var(--space-6); text-overflow: clip; }
 .logs-table .ui-table td:last-child svg { display: block; }
-.logs-table .ui-table tbody tr:nth-child(odd):not(.ui-table-spacer) { background: var(--color-hover); }
+.logs-table .ui-table tbody tr:nth-child(even):not(.ui-table-spacer) { background: color-mix(in srgb, var(--color-hover) 45%, transparent); }
 .logs-table + .ui-pagination, .logs-table .ui-pagination { min-height: 48px; padding-block: var(--space-8); }
 /* Every mailbox address (PrivateAddress): its first two characters, then a blurred run where the rest will be. The rest
    is not in the page until the address is hovered or focused; the run is drawn from filler, never from the address.
@@ -187,7 +200,7 @@ html:not([data-privacy='off']) .private-field:not(:hover, :focus)::placeholder {
 .log-direction[data-direction='received'] { color: var(--color-text); }
 .email-metadata { display: grid; grid-template-columns: 1fr 1.3fr .7fr; gap: var(--space-32); margin: 0; padding: 0 0 var(--space-24); }
 .email-detail-page { display: flex; flex: 1; min-height: 0; flex-direction: column; }
-.email-metadata dt { color: var(--color-muted); font-size: var(--text-xs); margin-bottom: var(--space-8); }
+.email-metadata dt { color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); letter-spacing: var(--tracking-label); text-transform: uppercase; margin-bottom: var(--space-8); }
 .email-metadata dd { margin: 0; overflow-wrap: anywhere; }
 .email-detail-grid { display: grid; flex: 1; min-height: 498px; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: var(--space-32); padding: var(--space-28) 0 var(--space-24); }
 .email-detail-grid > section { min-width: 0; min-height: 0; }
@@ -208,11 +221,11 @@ html:not([data-privacy='off']) .private-field:not(:hover, :focus)::placeholder {
 .log-subject > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .received-details { display: flex; flex-direction: column; gap: var(--space-20); }
 .received-group { display: grid; gap: var(--space-12); }
-.received-heading { margin: 0; font-size: var(--text-sm); font-weight: 500; }
+.received-heading { margin: 0; color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-label); font-weight: 400; letter-spacing: var(--tracking-label); text-transform: uppercase; }
 .received-facts { display: grid; gap: var(--space-12); margin: 0; }
 .received-facts > div { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: var(--space-12); align-items: baseline; }
-.received-facts dt { color: var(--color-muted); font-size: var(--text-xs); }
-.received-facts dd { margin: 0; overflow-wrap: anywhere; }
+.received-facts dt { color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); letter-spacing: var(--tracking-label); text-transform: uppercase; }
+.received-facts dd { margin: 0; font-family: var(--font-mono); font-size: var(--text-xs); overflow-wrap: anywhere; }
 .received-attachments { display: grid; gap: var(--space-8); margin: 0; padding: 0; list-style: none; }
 .received-attachments li { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; gap: var(--space-8); align-items: center; }
 .received-attachments li > :nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

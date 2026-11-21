@@ -6,6 +6,7 @@ import { rememberedPageSize } from '../../lib/pagination'
 import { logsPageColumnDefs } from './rows'
 import { label } from '../../lib/format'
 import { useDetailLayout } from './detail-layout'
+import { LogsBody } from './facets'
 import './logs.css'
 // The sent email's skeleton draws the preview's toolbar and frame, whose styles live with EmailInsight (a lazy chunk):
 // they load with the skeleton, so its placeholders hold their size before that chunk arrives.
@@ -21,7 +22,7 @@ export function LogsRouteSkeleton() {
   const statusLabel = status && status !== 'all' ? label(status) : 'All statuses', streamLabel = direction !== 'received' && status !== 'received' && status !== 'spam' && (stream === 'transactional' || stream === 'marketing') ? label(stream) : 'All streams'
   return <div className="logs-page"><PageHeader title="Logs" actions={<div className="cluster logs-controls">{!multiTenant && !canAdminister && <span className="muted">{regionId}</span>}<Tabs label="Direction" value={direction} onValueChange={() => {}} disabled items={[{ value: 'all', label: 'All' }, { value: 'sent', label: 'Sent' }, { value: 'received', label: 'Received' }]} /></div>} />
     <div className="data-toolbar"><div className="cluster">{campaign && <Skeleton width={160} height={28} />}<div className="search-box"><Search size={16} /><Input type="search" aria-label="Search logs" placeholder="Search logs" disabled /></div><Select value="all" onValueChange={() => {}} disabled options={[{ value: 'all', label: statusLabel }]} /><Select value="all" onValueChange={() => {}} disabled options={[{ value: 'all', label: streamLabel }]} /></div><Button className="logs-export" disabled><Download size={16} /><span>Export CSV</span></Button></div>
-    <TableSkeleton className="logs-table" columns={logsPageColumnDefs} rows={rememberedPageSize('logs') || 16} pagination /></div>
+    <LogsBody items={undefined}><TableSkeleton className="logs-table" columns={logsPageColumnDefs} rows={rememberedPageSize('logs') || 16} pagination /></LogsBody></div>
 }
 // A sent email in the window's layout (detail-layout.ts): the header, the delivery, the preview's toolbar and its empty
 // stage, and from 1200 px the details column. The score's place has a placeholder only in that column: elsewhere it

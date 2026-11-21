@@ -4,7 +4,7 @@ import { ArrowUpRight, ChevronRight } from 'lucide-react'
 import { useApi, useApiDef, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { Email, EmailEvent, EmailEventDetail } from '../../data/types'
-import { Alert, Button, CopyButton, ErrorState, PageHeader, Sheet, StatusBadge, Tooltip, type Tone } from '../../components/ui'
+import { Alert, Button, CopyButton, elapsed, ErrorState, PageHeader, Sheet, StatusBadge, Tooltip, Waterfall, type Tone } from '../../components/ui'
 import { useEmailDocument } from '../../components/EmailPreview'
 import { EmailViews, SendabilityChip, SendabilityDetails, SendabilityTitle, SendabilityToggle, useSendability, type InsightSource } from '../../components/EmailInsight'
 import { AddressList, Sender } from '../../components/PrivateAddress'
@@ -193,6 +193,7 @@ const eventCopy: Record<string, [name: string, meaning: string]> = {
 const synonyms: Record<string, string> = { sent: 'send', delivered: 'delivery', bounced: 'bounce', complained: 'complaint', rejected: 'reject', rendering_failed: 'rendering_failure', delivery_delayed: 'delivery_delay', opened: 'open', clicked: 'click', delayed: 'delivery_delay', deferred: 'delivery_delay' }
 const eventKey = (type: string) => { const key = type.replace(/^email\./, ''); return synonyms[key] ?? key }
 const lifecycle = Object.keys(eventCopy)
+const suppressedTip = `${productName} skips this address from now on. Open the contact to change that.`
 const toneOf = (key: string): Tone => ['delivery', 'open', 'click'].includes(key) ? 'success'
   : ['complaint', 'reject', 'rendering_failure'].includes(key) ? 'danger'
   : ['bounce', 'non_permanent_bounce', 'validation_suppressed', 'delivery_delay', 'provider_throttled', 'dispatch_deferred', 'acceptance_unknown', 'suppressed'].includes(key) ? 'warning' : 'neutral'
@@ -251,7 +252,29 @@ function Delivery({ email, vertical }: { email: Email; vertical: boolean }) {
     try { const next = await api.emailEvents(email.id, cursor!); setEvents(previous => [...previous, ...next.items]); setCursor(next.nextCursor) }
     catch (cause) { setError(errorText(cause, 'Couldn’t load events.')) } finally { setBusy(false) }
   }
-  return <div className="delivery" data-vertical={vertical || undefined}>
+  // In a column (or a phone's sheet): a waterfall, every event on one time axis with the time since the first.
+  if (vertical) {
+    let last = steps.find(step => step.at)?.at ?? day
+    const start = Date.parse(last)
+    const rows = steps.map((step, index) => {
+      const [name] = eventCopy[step.key] ?? [label(step.key)]
+      const reason = step.key === 'bounce' || step.key === 'non_permanent_bounce' ? bounceReason(step.events[0]?.detail) : undefined
+      if (step.at) last = step.at
+      const at = Date.parse(last)
+      return { key: step.key, tone: toneOf(step.key), at,
+        label: <Tooltip content={<StepTip step={step} day={day} />}><span className="delivery__fact" tabIndex={0}><span className="delivery__name">{name}{step.events.length > 1 && <span className="delivery__count"> {step.events.length}×</span>}</span>{reason && <span className="delivery__note">{reason}</span>}</span></Tooltip>,
+        delta: index === 0 ? <time dateTime={step.at}>{step.at ? time(step.at) : '—'}</time> : step.at ? `+${elapsed(at - start)}` : '—' }
+    })
+    return <div className="delivery" data-vertical>
+      <Waterfall label="Delivery" rows={rows} />
+      {suppressed && <Tooltip content={suppressedTip}>
+        <Link className="delivery__fact delivery__contact" to={`/audience/contacts/${encodeURIComponent(contact!.id)}`}><span className="delivery__dot ui-tone--danger" aria-hidden="true" /><span className="delivery__name">Suppressed</span><ArrowUpRight size={12} aria-hidden="true" /></Link>
+      </Tooltip>}
+      {cursor && <Button variant="ghost" size="sm" loading={busy} onClick={() => void more()}>More events</Button>}
+      {error && <Alert tone="danger">{error}</Alert>}
+    </div>
+  }
+  return <div className="delivery">
     <ol className="delivery__steps ui-scroll-fade" aria-label="Delivery">
       {steps.map((step, index) => {
         const [name] = eventCopy[step.key] ?? [label(step.key)]
@@ -268,7 +291,7 @@ function Delivery({ email, vertical }: { email: Email; vertical: boolean }) {
           </Tooltip>
         </li>
       })}
-      {suppressed && <li className="delivery__step"><Tooltip content={`${productName} skips this address from now on. Open the contact to change that.`}>
+      {suppressed && <li className="delivery__step"><Tooltip content={suppressedTip}>
         <Link className="delivery__fact delivery__contact" to={`/audience/contacts/${encodeURIComponent(contact!.id)}`}><span className="delivery__dot ui-tone--danger" aria-hidden="true" /><span className="delivery__name">Suppressed</span><ArrowUpRight size={12} aria-hidden="true" /></Link>
       </Tooltip></li>}
     </ol>
