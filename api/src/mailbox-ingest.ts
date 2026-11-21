@@ -12,7 +12,6 @@ import { and, eq, sql } from 'drizzle-orm';
 import { ApiError, digest, lazyModule, log, ModuleLoadError, type JobHandler, type Runtime } from './core.js';
 import { JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
 import { mailAttachments, mailReceipts, type MailAddress, type MailHeader, type Verdicts } from './db/mailbox.js';
-import { pruneMailboxEvents } from './mailbox-events.js';
 import { mailboxS3, STAGING_PREFIX, refreshMailboxDns } from './mailbox-setup.js';
 import { ADDRESS, messageIdList, normalizeMessageId, snippetOf, type Scope } from './mailbox-store.js';
 import type { ReceivedNotification } from './mailbox-receipts.js';
@@ -675,9 +674,9 @@ export async function recoverMailReceipts(runtime: Runtime,continuation=false) {
   }
 }
 
-/** Hourly mailbox upkeep: MX status, lost-receipt recovery and event retention. Each step is best-effort. */
+/** Hourly mailbox upkeep: MX status and lost-receipt recovery. Each step is best-effort. Event retention is cleanup()'s. */
 export async function mailboxHourly(runtime: Runtime) {
-  for (const [code, work] of [['MAILBOX_DNS_REFRESH_FAILED', refreshMailboxDns], ['MAILBOX_RECEIPT_RECOVERY_FAILED', recoverMailReceipts], ['MAILBOX_STAGING_SWEEP_FAILED', scheduleMailRecovery], ['MAILBOX_EVENT_PRUNE_FAILED', pruneMailboxEvents]] as const) {
+  for (const [code, work] of [['MAILBOX_DNS_REFRESH_FAILED', refreshMailboxDns], ['MAILBOX_RECEIPT_RECOVERY_FAILED', recoverMailReceipts], ['MAILBOX_STAGING_SWEEP_FAILED', scheduleMailRecovery]] as const) {
     try { await work(runtime); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : code }); }
   }
 }

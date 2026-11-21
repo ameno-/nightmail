@@ -141,7 +141,7 @@ export async function snapshotCampaignAudience(db: DbExecutor, identity: Actor, 
   const matched = (range?: SQL) => sql`SELECT ${spec.priority ? sql`coalesce(array_position(ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(spec.priority.values)}::jsonb)), ${contacts.properties} ->> ${spec.priority.property}), ${spec.priority.values.length + 1})` : sql`0`} AS rank,
         ${contacts.id}, jsonb_strip_nulls(jsonb_build_object('id', ${contacts.id}, 'email', ${contacts.email}, 'name', nullif(CASE WHEN ${propertyKeys.includes('name')} THEN ${contacts.name} END, ''),
           'properties', ${propertyKeys.length ? sql`coalesce((SELECT jsonb_object_agg(p.key, p.value) FROM jsonb_each(${contacts.properties}) p
-            WHERE p.key IN (SELECT jsonb_array_elements_text(${JSON.stringify(propertyKeys)}::jsonb))), '{}'::jsonb)` : sql`'{}'::jsonb`})) AS recipient,
+            WHERE p.key = ANY(ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(propertyKeys)}::jsonb)))), '{}'::jsonb)` : sql`'{}'::jsonb`})) AS recipient,
         NOT ${contacts.suppressed} AND ${contacts.marketingConsent} = 'subscribed' AS eligible, ${contacts.suppressed}
       FROM ${contacts} WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), range, ...conditions)}`;
   const ordered = sql`SELECT (row_number() OVER w)::int AS ordinal, recipient, bytes, sum(bytes) OVER w AS running_bytes
@@ -149,10 +149,20 @@ export async function snapshotCampaignAudience(db: DbExecutor, identity: Actor, 
     WINDOW w AS (ORDER BY rank, id ROWS UNBOUNDED PRECEDING)`;
   const counts = sql`count(*)::int AS matched,count(*) FILTER (WHERE eligible)::int AS eligible,
     count(*) FILTER (WHERE suppressed)::int AS suppressed,count(*) FILTER (WHERE NOT eligible AND NOT suppressed)::int AS unsubscribed`;
+  // The audience's contacts and list members are joined whole, by hash, whatever the statistics say. With stale ones
+  // (tables autovacuum found empty, then a list imported before the next analyze) the planner expects one row on each
+  // side and compares every contact with every member in a nested loop: minutes at 50,000 members, never done at
+  // 2,000,000. The property filter inside each row is an array test, not a join, so the setting leaves it alone.
+  const wholeJoins = async <T extends Record<string, unknown>>(statement: SQL) => {
+    await db.execute(sql`SET LOCAL enable_nestloop = off`);
+    const result = await db.execute<T>(statement);
+    await db.execute(sql`SET LOCAL enable_nestloop TO DEFAULT`);
+    return result;
+  };
   // Bound the fast path by the base list, not an unbounded count of the filtered audience.
   const large = await db.execute(sql`SELECT 1 FROM audience_list_members WHERE workspace_id=${identity.workspaceId} AND list_id=${spec.listId} OFFSET 50000 LIMIT 1`);
   if (!large.rowCount) {
-    const { rows } = await db.execute<SnapshotCounts>(sql`WITH audience_snapshot AS MATERIALIZED (${matched()}), ordered AS (${ordered}),
+    const { rows } = await wholeJoins<SnapshotCounts>(sql`WITH audience_snapshot AS MATERIALIZED (${matched()}), ordered AS (${ordered}),
       captured AS (INSERT INTO sending_review_recipients(review_id,ordinal,recipient,recipient_bytes)
         SELECT ${reviewId},ordinal,recipient,bytes FROM ordered WHERE bytes<=1048576 AND running_bytes<=1073741824 RETURNING recipient_bytes)
       SELECT ${counts},(SELECT count(*)::int FROM captured) AS captured,(SELECT coalesce(sum(recipient_bytes),0) FROM captured) AS bytes FROM audience_snapshot`);
@@ -160,11 +170,14 @@ export async function snapshotCampaignAudience(db: DbExecutor, identity: Actor, 
   }
   // One MVCC statement snapshot for membership, consent and properties, even under
   // READ COMMITTED. Never paginate the live audience over independent snapshots.
+  // Two large captures at a time across the installation (275812), and one of them per workspace (275815), so one
+  // workspace's launches never hold both.
+  if (!(await db.execute(sql`SELECT 1 WHERE pg_try_advisory_xact_lock(275815, hashtext(${identity.workspaceId}))`)).rowCount) throw new ApiError(503,'AUDIENCE_CAPTURE_BUSY','Another large audience capture is running in this workspace; retry the launch when it finishes.',undefined,true);
   if (!(await db.execute(sql`SELECT 1 WHERE pg_try_advisory_xact_lock(275812,1) OR pg_try_advisory_xact_lock(275812,2)`)).rowCount) throw new ApiError(503,'AUDIENCE_CAPTURE_BUSY','Large audience captures are busy; retry the launch.',undefined,true);
   await db.execute(sql`SET LOCAL work_mem = '64MB'`);
   // A launch that fails after this point and is retried inside the same transaction (tests) must not trip over its own staging tables.
   await db.execute(sql`DROP TABLE IF EXISTS pg_temp.audience_snapshot, pg_temp.audience_ordered`);
-  const staged=await db.execute(sql`CREATE TEMP TABLE audience_snapshot ON COMMIT DROP AS ${matched()} LIMIT 2000001`);
+  const staged=await wholeJoins(sql`CREATE TEMP TABLE audience_snapshot ON COMMIT DROP AS ${matched()} LIMIT 2000001`);
   if ((staged.rowCount??0)>2000000) throw new ApiError(422,'AUDIENCE_LIMIT_EXCEEDED','Campaign reviews support at most 2,000,000 matching contacts. No recipients were truncated.');
   // One sort assigns the send order (priority, then contact ID) and the running size used for the 1 GiB cap.
   await db.execute(sql`CREATE TEMP TABLE audience_ordered ON COMMIT DROP AS ${ordered}`);

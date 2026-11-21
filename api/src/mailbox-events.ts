@@ -1,6 +1,6 @@
 import {ActionRetry,deliverEndpoint} from './endpoint-delivery.js';
 import { and, eq, gt, inArray, isNotNull, max, sql, type SQL } from 'drizzle-orm';
-import { ApiError, lazyModule, log, ModuleLoadError, type DbExecutor, type JobHandler, type Runtime } from './core.js';
+import { ApiError, lazyModule, ModuleLoadError, type DbExecutor, type JobHandler, type Runtime } from './core.js';
 import { mailboxEvents } from './db/mailbox.js';
 import { inboundHookClaim,JobDeferred,mailboxWebhookAttempts,retryDatabaseFailures } from './jobs.js';
 
@@ -81,16 +81,6 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
   if(actionError&&retry)throw actionError;
   if (error) throw new ApiError(503, error, 'Mailbox webhook delivery failed; it will be retried.', undefined, retry);
 };
-
-// Deliveries are kept 30 days. One still held for a paused endpoint after that is dead-lettered with
-// ENDPOINT_PAUSED_EXPIRED (unpause no longer resumes it) and kept 7 more days so the reason is seen.
-export async function pruneMailboxEvents(runtime: Runtime) {
-  await runtime.db.execute(sql`WITH expired AS (DELETE FROM mailbox_events WHERE seq IN (SELECT seq FROM mailbox_events WHERE created_at<now()-interval '30 days' ORDER BY created_at LIMIT 5000 FOR UPDATE SKIP LOCKED)),
-    ignored AS (DELETE FROM mail_ignored_staging WHERE (bucket,ses_message_id) IN (SELECT bucket,ses_message_id FROM mail_ignored_staging WHERE created_at<now()-interval '3 days' ORDER BY created_at LIMIT 5000 FOR UPDATE SKIP LOCKED)),
-    held AS (UPDATE mailbox_webhook_deliveries SET status='failed',last_error='ENDPOINT_PAUSED_EXPIRED',updated_at=now() WHERE id IN (SELECT id FROM mailbox_webhook_deliveries WHERE created_at<now()-interval '30 days' AND status='paused' ORDER BY created_at LIMIT 5000 FOR UPDATE SKIP LOCKED))
-    DELETE FROM mailbox_webhook_deliveries WHERE id IN (SELECT id FROM mailbox_webhook_deliveries WHERE created_at<now()-interval '30 days' AND status IN ('delivered','failed') AND (last_error IS DISTINCT FROM 'ENDPOINT_PAUSED_EXPIRED' OR updated_at<now()-interval '7 days') ORDER BY created_at LIMIT 5000 FOR UPDATE SKIP LOCKED)`);
-  log('info', { code: 'MAILBOX_EVENTS_PRUNED' });
-}
 
 // A resumed delivery keeps the attempts it already made, recorded or not (the action fence counts
 // every attempt it let through): a pause holds the retries, it does not refill them.

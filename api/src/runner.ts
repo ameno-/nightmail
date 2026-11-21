@@ -4,7 +4,7 @@ import { nodeRuntime, postgresConnection } from './adapters/node.js';
 import { drain,drainJobs } from './dispatch.js';
 import type { GateState } from './dispatcher.js';
 import { jobConcurrency } from './jobs.js';
-import { hourlyUpkeep } from './maintenance.js';
+import { hourlyUpkeep, retentionTick } from './maintenance.js';
 import { reconcileSharedConnections } from './provider-connections.js';
 import { publicStatsTick } from './public-stats.js';
 import { standingTick } from './standing.js';
@@ -19,7 +19,7 @@ try {
   let stopped = false; let lastCleanup = 0; let lastOutboundSync = 0; let lastRecovery = 0;
   let sharedSetup: Promise<void> | undefined, lastSharedSetup = 0;
   let publicStats: Promise<void> | undefined, lastPublicStats = 0;
-  let hourly: Promise<unknown> | undefined;
+  let hourly: Promise<unknown> | undefined, sentRetention: Promise<unknown> | undefined, lastSentRetention = 0;
   // In-process pacing state per account/region. Run one runner per installation (or split
   // the quota explicitly): separate processes do not share this gate.
   const gates = new Map<string, GateState>();
@@ -59,6 +59,11 @@ try {
           lastCleanup = Date.now();
           hourly = hourlyUpkeep(runtime).finally(() => { hourly = undefined; });
         }
+        // The sent-side tables every 15 minutes (elected in the database), in the background too.
+        if (!sentRetention && Date.now() - lastSentRetention >= 60_000) {
+          lastSentRetention = Date.now();
+          sentRetention = retentionTick(runtime).catch(error => log('warn', { code: error instanceof ApiError ? error.code : 'RETENTION_TICK_FAILED' })).finally(() => { sentRetention = undefined; });
+        }
         if (Date.now() - lastOutboundSync > 15000) {
           lastOutboundSync = Date.now();
           try { await syncOutboundMessages(runtime); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'MAILBOX_OUTBOUND_SYNC_FAILED' }); }
@@ -74,7 +79,7 @@ try {
         await setTimeout(5000);
       }
     }
-  } finally { stopped=true;await hooks;await sharedSetup;await publicStats;await hourly; await listener?.end(); await close(); }
+  } finally { stopped=true;await hooks;await sharedSetup;await publicStats;await hourly;await sentRetention; await listener?.end(); await close(); }
 } catch (error) {
   logError(error, { code: error instanceof ApiError ? error.code : 'STARTUP_FAILED' });
   process.exitCode = 1;

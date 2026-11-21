@@ -21155,7 +21155,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     await simulatedSesFixture(t, async ({ runtime }) => {
       const { hourlyUpkeep } = await import('./src/maintenance.js'), { PgDialect } = await import('drizzle-orm/pg-core');
       const dialect = new PgDialect(), seen: string[] = [], execute = runtime.db.execute.bind(runtime.db);
-      const failing = /^DELETE FROM sending_attachment_links l USING sending_campaign_reviews/;
+      const failing = /DELETE FROM sending_attachment_links l USING sending_campaign_reviews/;
       // Swapped by hand, not with t.mock: node:test restores every mock again at the end of the test, which would reinstall
       // the fixture's own fetch mock over the real fetch for the tests after this one.
       const fixtureFetch = globalThis.fetch;
@@ -21165,11 +21165,169 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         if (failing.test(text)) throw new Error('canceling statement due to statement timeout');
         return execute(query);
       });
-      // Only the cleanup step fails; the Node runner runs this in the background, so dispatch never waits on it either.
-      try { assert.equal((await hourlyUpkeep(runtime))[0], 'MAINTENANCE_CLEANUP_FAILED'); } finally { globalThis.fetch = fixtureFetch; }
+      // The cleanup step fails; the Node runner runs this in the background, so dispatch never waits on it either.
+      let failed: string[];
+      try { failed = [...await hourlyUpkeep(runtime)]; } finally { globalThis.fetch = fixtureFetch; }
+      assert.ok(failed.includes('MAINTENANCE_CLEANUP_FAILED'), failed.join());
       const failedAt = seen.findIndex(text => failing.test(text));
       assert.ok(failedAt >= 0, 'the retention statement ran and failed');
-      assert.ok(seen.slice(failedAt + 1).some(text => text.includes("FROM mail_receipts r WHERE r.status='pending'")), 'receipt recovery still ran after it');
+      // Retention runs last, so receipt recovery ran before it; and its other tables still ran.
+      assert.ok(seen.slice(0, failedAt).some(text => text.includes("FROM mail_receipts r WHERE r.status='pending'")), 'receipt recovery ran');
+      assert.ok(seen.some(text => text.includes('DELETE FROM "operation_events"')), 'the other retention steps ran');
+    });
+  });
+  // Retention (maintenance.ts retire): a hard budget per run, every table its turn and share, and its own failure.
+  test('retention: within a hard budget every table gets its turn, a backlog its share oldest first, a failing table stops nothing, the sent side runs every 15 minutes, and the inbound prune passes 5,000', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { cleanup, retentionTick } = await import('./src/maintenance.js'), { PgDialect } = await import('drizzle-orm/pg-core');
+      const wid = runtime.config.workspaceId, tag = 'rt' + randomUUID().replaceAll('-', '').slice(0, 12);
+      const [identity] = (await db.query('SELECT issuer,subject FROM nightmail_oidc_identities WHERE user_id=$1 LIMIT 1', [manager!.userId])).rows;
+      // Each statement reads its values from p and makes three rows (g) a day past its table's window.
+      const p = (day: number) => [wid, tag, day, REGION, manager!.userId, identity.issuer, identity.subject];
+      const prefix = 'WITH p AS (SELECT $1::text AS wid,$2::text AS tag,$3::int AS day,$4::text AS region,$5::text AS uid,$6::text AS iss,$7::text AS sub), g AS (SELECT generate_series(1,3) AS i) ';
+      // Every retention step, by the name it logs: what makes a day's rows, and how many of them are left.
+      const steps: Record<string, [string | null, string]> = {
+        expired_uploads: ["INSERT INTO sending_upload_reservations(id,workspace_id,storage_key,size,expires_at) SELECT 'res_'||p.tag||p.day||'x'||i,p.wid,'uploads/'||p.wid||'/attachment_'||md5(p.tag||p.day||'x'||i),1,now()-interval '0 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM sending_upload_reservations,p WHERE starts_with(id,'res_'||p.tag)"],
+        upload_tombstones: ["INSERT INTO sending_upload_tombstones(id,workspace_id,storage_key,delete_after) SELECT 'tomb_'||p.tag||p.day||'x'||i,p.wid,'uploads/fixture/'||p.tag||p.day||'x'||i,now()-interval '0 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM sending_upload_tombstones,p WHERE starts_with(id,'tomb_'||p.tag)"],
+        api_request_budgets: ["INSERT INTO api_request_budgets(workspace_id,key_id,window_start,used) SELECT p.wid,'key_'||p.tag||p.day||'x'||i,now()-interval '25 hours'-make_interval(days=>p.day),1 FROM p,g","SELECT count(*) FROM api_request_budgets,p WHERE starts_with(key_id,'key_'||p.tag)"],
+        access_requests: ["INSERT INTO access_requests(email,last_requested_at) SELECT p.tag||p.day||'x'||i||'@example.invalid',now()-interval '91 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM access_requests,p WHERE starts_with(email,p.tag)"],
+        nightmail_signin_attempts: ["INSERT INTO nightmail_signin_attempts(issuer,subject,outcome,last_at) SELECT 'https://issuer.invalid','sub_'||p.tag||p.day||'x'||i,'refused',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM nightmail_signin_attempts,p WHERE starts_with(subject,'sub_'||p.tag)"],
+        nightmail_waitlist: ["INSERT INTO nightmail_waitlist(email,last_at) SELECT p.tag||p.day||'x'||i||'@example.invalid',now()-interval '366 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM nightmail_waitlist,p WHERE starts_with(email,p.tag)"],
+        auth_state_slots: ["INSERT INTO auth_state_slots(peer,slot,expires_at) SELECT 'peer_'||p.tag||p.day,i,now()-interval '0 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM auth_state_slots,p WHERE starts_with(peer,'peer_'||p.tag)"],
+        nightmail_dpop_proofs: ["INSERT INTO nightmail_dpop_proofs(id,expires_at) SELECT 'dpop_'||p.tag||p.day||'x'||i,now()-interval '0 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM nightmail_dpop_proofs,p WHERE starts_with(id,'dpop_'||p.tag)"],
+        nightmail_sessions: ["INSERT INTO nightmail_sessions(token_hash,user_id,issuer,subject,expires_at) SELECT 'tok_'||p.tag||p.day||'x'||i,p.uid,p.iss,p.sub,now()-interval '0 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM nightmail_sessions,p WHERE starts_with(token_hash,'tok_'||p.tag)"],
+        nightmail_login_flows: ["INSERT INTO nightmail_login_flows(state_hash,cookie_hash,issuer,client_id,nonce,verifier,return_url,expires_at) SELECT 'st_'||p.tag||p.day||'x'||i,'c','https://issuer.invalid','fixture','n','v','/',now()-interval '0 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM nightmail_login_flows,p WHERE starts_with(state_hash,'st_'||p.tag)"],
+        mail_routing_versions: ["INSERT INTO mail_routing_versions(workspace_id,version,route_ids,changed_ids,actor_type,actor_id,created_at) SELECT p.wid,p.day*10+i,'{}','{}','system',p.tag,now()-interval '366 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM mail_routing_versions,p WHERE workspace_id=p.wid AND actor_id=p.tag"],
+        mail_receipts: ["INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,notification,recipients,status,processed_at,created_at) SELECT p.wid,'mr_'||p.tag||p.day||'x'||i,p.region,p.wid,'key','{}','[]','processed',now()-interval '31 days'-make_interval(days=>p.day),now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM mail_receipts,p WHERE starts_with(ses_message_id,'mr_'||p.tag)"],
+        mail_receipt_holds: ["INSERT INTO mail_receipt_holds(bucket,ses_message_id,region,topic_arn,owners,recipients,notification,received_at,expires_at,status) SELECT p.wid,'mh_'||p.tag||p.day||'x'||i,p.region,'topic','{}','[]','{}',now(),now()-interval '31 days'-make_interval(days=>p.day),'released' FROM p,g","SELECT count(*) FROM mail_receipt_holds,p WHERE starts_with(ses_message_id,'mh_'||p.tag)"],
+        mailbox_events: ["INSERT INTO mailbox_events(workspace_id,type,data,created_at) SELECT p.wid,'fixture.retention',jsonb_build_object('tag',p.tag),now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM mailbox_events,p WHERE data->>'tag'=p.tag"],
+        mail_ignored_staging: ["INSERT INTO mail_ignored_staging(bucket,ses_message_id,created_at) SELECT p.wid,'mi_'||p.tag||p.day||'x'||i,now()-interval '73 hours'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM mail_ignored_staging,p WHERE starts_with(ses_message_id,'mi_'||p.tag)"],
+        mailbox_webhook_deliveries_paused_expired: ["INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,payload,status,created_at) SELECT 'mwdp_'||p.tag||p.day||'x'||i,p.wid,'mwh_'||p.tag,'{}','paused',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM mailbox_webhook_deliveries,p WHERE starts_with(id,'mwdp_'||p.tag) AND status='paused'"],
+        mailbox_webhook_deliveries: ["INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,payload,status,created_at) SELECT 'mwd_'||p.tag||p.day||'x'||i,p.wid,'mwh_'||p.tag,'{}','delivered',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM mailbox_webhook_deliveries,p WHERE starts_with(id,'mwd_'||p.tag)"],
+        sender_score_daily: ["INSERT INTO sender_score_daily(workspace_id,day) SELECT p.wid,(now() AT TIME ZONE 'UTC')::date-401-p.day*5-i FROM p,g","SELECT count(*) FROM sender_score_daily s,p WHERE s.workspace_id=p.wid AND s.day<(now() AT TIME ZONE 'UTC')::date-400"],
+        operator_idempotency: ["INSERT INTO operator_idempotency(operator_id,key,request_hash,response,created_at) SELECT 'op_'||p.tag,p.tag||p.day||'x'||i,'h','{}',now()-interval '25 hours'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM operator_idempotency,p WHERE operator_id='op_'||p.tag"],
+        hosted_usage_hourly: ["INSERT INTO hosted_usage_hourly(workspace_id,hour,recipients) SELECT p.wid,date_trunc('hour',now())-interval '49 hours'-make_interval(days=>p.day,hours=>i),1 FROM p,g","SELECT count(*) FROM hosted_usage_hourly,p WHERE workspace_id=p.wid AND hour<now()-interval '2 days'"],
+        hosted_health_hourly: ["INSERT INTO hosted_health_hourly(workspace_id,epoch,hour,accepted,bounces,complaints) SELECT p.wid,now(),date_trunc('hour',now())-interval '33 days'-make_interval(days=>p.day,hours=>i),1,0,0 FROM p,g","SELECT count(*) FROM hosted_health_hourly,p WHERE workspace_id=p.wid AND hour<now()-interval '32 days'"],
+        hosted_health_credits: ["INSERT INTO hosted_health_credits(workspace_id,email_id,epoch,hour,accepted,bounces,complaints) SELECT p.wid,'e_'||p.tag||p.day||'x'||i,now(),date_trunc('hour',now())-interval '49 hours'-make_interval(days=>p.day,hours=>i),1,0,0 FROM p,g","SELECT count(*) FROM hosted_health_credits,p WHERE workspace_id=p.wid AND hour<now()-interval '2 days'"],
+        hosted_screen_hourly: ["INSERT INTO hosted_screen_hourly(workspace_id,epoch,hour) SELECT p.wid,now(),date_trunc('hour',now())-interval '33 days'-make_interval(days=>p.day,hours=>i) FROM p,g","SELECT count(*) FROM hosted_screen_hourly,p WHERE workspace_id=p.wid AND hour<now()-interval '32 days'"],
+        agent_tokens: ["INSERT INTO agent_tokens(id,workspace_id,grant_id,permissions,domains,purpose,expires_at) SELECT 'agt_'||p.tag||p.day||'x'||i,p.wid,'g','[]','[]','fixture',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM agent_tokens,p WHERE starts_with(id,'agt_'||p.tag)"],
+        abuse_signals: ["INSERT INTO abuse_signals(entity_type,entity_id,kind,value,last_at) SELECT 'user','u_'||p.tag||p.day||'x'||i,'fixture',p.tag,now()-interval '91 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM abuse_signals,p WHERE value=p.tag"],
+        abuse_sampling: ["INSERT INTO abuse_sampling(workspace_id,sampled_through) SELECT 'ws_'||p.tag||p.day||'x'||i,now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM abuse_sampling,p WHERE starts_with(workspace_id,'ws_'||p.tag)"],
+        identity_links: ["INSERT INTO identity_links(a_type,a_id,b_type,b_id,kind,shared,first_at,last_at) SELECT 'user','a_'||p.tag||p.day||'x'||i,'workspace','b_'||p.tag||p.day||'x'||i,'fixture',1,now()-interval '100 days'-make_interval(days=>p.day),now()-interval '91 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM identity_links,p WHERE starts_with(a_id,'a_'||p.tag)"],
+        abuse_clusters: ["INSERT INTO abuse_clusters(id,score,band,peak,accounts,workspaces,reasons,members,edges,scored_at) SELECT 'acl_'||left(md5(p.tag||p.day||'x'||i),24),1,'low',1,2,0,jsonb_build_array(p.tag),'[]','[]',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM abuse_clusters,p WHERE reasons->>0=p.tag"],
+        abuse_alerts: ["INSERT INTO abuse_alerts(id,cluster_id,band,score,kind,workspaces,payload,created_at) SELECT 'aal_'||left(md5(p.tag||p.day||'x'||i),24),'c_'||p.tag,'review',1,'new',0,'{}',now()-interval '366 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM abuse_alerts,p WHERE cluster_id='c_'||p.tag"],
+        abuse_floors: ["INSERT INTO abuse_floors(entity_type,entity_id,ignore_through) SELECT 'subject','f_'||p.tag||p.day||'x'||i,now()-interval '91 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM abuse_floors,p WHERE starts_with(entity_id,'f_'||p.tag)"],
+        audit_events: ["INSERT INTO audit_events(actor_type,via,action,workspace_id,ticket_ref,at,retain_until) SELECT 'system','job','fixture.retention',p.wid,p.tag,now()-interval '400 days',now()-interval '0 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM audit_events,p WHERE ticket_ref=p.tag"],
+        support_handoffs: ["INSERT INTO support_handoffs(id,user_id,workspace_id,kind,page,created_at,expires_at) SELECT 'sho_'||md5(p.tag||p.day||'x'||i),'u',p.wid,'support',p.tag,now()-interval '31 days'-make_interval(days=>p.day),now()-interval '31 days'-make_interval(days=>p.day)+interval '5 minutes' FROM p,g","SELECT count(*) FROM support_handoffs,p WHERE page=p.tag"],
+        support_email_signins: [", c AS (INSERT INTO support_conversations(id,channel,verification,mode) SELECT 'conv_'||left(translate(md5(p.tag||p.day||'x'||i)||md5(p.tag||p.day||'x'||i||'y'),'0189','ghij'),26),'email','none','unverified' FROM p,g RETURNING id)\n    INSERT INTO support_email_signins(conversation_id,message_id,address,created_at) SELECT c.id,'msg_'||md5(c.id),p.tag||'@example.invalid',now()-interval '8 days'-make_interval(days=>p.day) FROM c,p","SELECT count(*) FROM support_email_signins,p WHERE address=p.tag||'@example.invalid'"],
+        support_email_bindings: ["INSERT INTO support_email_bindings(user_id,rfc_message_id,message_id,created_at) SELECT p.uid,'<'||p.tag||p.day||'x'||i||'@example.invalid>','msg_'||md5(p.tag||p.day||'x'||i),now()-interval '8 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM support_email_bindings,p WHERE starts_with(rfc_message_id,'<'||p.tag)"],
+        support_messages: [", c AS (INSERT INTO support_conversations(id,channel,verification,mode,status,closed_at,subject) SELECT 'conv_'||left(translate(md5('closed'||p.tag||p.day||'x'||i)||md5('closed'||p.tag||p.day||'x'||i||'y'),'0189','ghij'),26),'email','none','unverified','closed',now()-interval '91 days'-make_interval(days=>p.day),p.tag FROM p,g RETURNING id)\n    INSERT INTO support_messages(id,conversation_id,seq,author,text) SELECT 'msg_'||left(translate(md5(c.id),'0189','ghij'),16),c.id,1,'customer',p.tag FROM c,p","SELECT count(*) FROM support_messages,p WHERE text=p.tag"],
+        support_subjects: [null,"SELECT count(*) FROM support_conversations,p WHERE subject=p.tag"],
+        audience_operation_plans: ["INSERT INTO audience_operation_plans(id,workspace_id,actor_key_id,statement,operation,matched,expires_at) SELECT 'aop_'||p.tag||p.day||'x'||i,p.wid,'k','fixture','{}',0,now()-interval '25 hours'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM audience_operation_plans,p WHERE starts_with(id,'aop_'||p.tag)"],
+        audience_import_previews: ["INSERT INTO audience_imports(id,workspace_id,rows,errors,status,created_at) SELECT 'aim_'||p.tag||p.day||'x'||i,p.wid,'[]','[]','preview',now()-interval '8 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM audience_imports,p WHERE starts_with(id,'aim_'||p.tag)"],
+        sending_email_events: ["INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated,created_at) SELECT 'event_'||md5(p.tag||p.day||'x'||i),p.wid,'email_'||p.tag,'dispatch_attempt',true,now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM sending_email_events,p WHERE email_id='email_'||p.tag"],
+        sending_emails: ["INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,created_at) SELECT 'email_'||md5(p.tag||p.day||'x'||i),p.wid,p.region,'fixture','a@example.org','[]','[]','[]',p.tag,'{}',true,'delivered',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM sending_emails,p WHERE workspace_id=p.wid AND subject=p.tag"],
+        sending_review_recipients: [", v AS (INSERT INTO sending_campaign_reviews(id,workspace_id,campaign_id,revision,draft,content_hash,created_at) SELECT 'rev_'||p.tag||p.day,p.wid,'cmp_'||p.tag,p.day,'{}','x',now()-interval '31 days'-make_interval(days=>p.day) FROM p RETURNING id)\n    INSERT INTO sending_review_recipients(review_id,ordinal,recipient,recipient_bytes) SELECT v.id,i,'{}',1 FROM v,g","SELECT count(*) FROM sending_review_recipients,p WHERE starts_with(review_id,'rev_'||p.tag)"],
+        review_attachment_links: [", v AS (INSERT INTO sending_campaign_reviews(id,workspace_id,campaign_id,revision,draft,content_hash,created_at) SELECT 'revl_'||p.tag||p.day||'x'||i,p.wid,'cmp_'||p.tag,100+p.day*10+i,'{}','x',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g RETURNING id,workspace_id)\n    INSERT INTO sending_attachment_links(workspace_id,attachment_id,owner_type,owner_id) SELECT v.workspace_id,'att_keep_'||p.tag,'review',v.id FROM v,p","SELECT count(*) FROM sending_attachment_links,p WHERE owner_type='review' AND starts_with(owner_id,'revl_'||p.tag)"],
+        operation_delivery_attempts: ["INSERT INTO operation_delivery_attempts(id,workspace_id,delivery_id,duration_ms,created_at) SELECT 'opa_'||p.tag||p.day||'x'||i,p.wid,'d',1,now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM operation_delivery_attempts,p WHERE starts_with(id,'opa_'||p.tag)"],
+        operation_deliveries_paused_expired: ["INSERT INTO operation_deliveries(id,workspace_id,webhook_id,event_id,payload,status,created_at) SELECT 'opdp_'||p.tag||p.day||'x'||i,p.wid,'owh_'||p.tag,'ep'||p.day||'x'||i,'{}','paused',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM operation_deliveries,p WHERE starts_with(id,'opdp_'||p.tag) AND status='paused'"],
+        operation_deliveries: ["INSERT INTO operation_deliveries(id,workspace_id,webhook_id,event_id,payload,status,created_at) SELECT 'opd_'||p.tag||p.day||'x'||i,p.wid,'owh_'||p.tag,'ed'||p.day||'x'||i,'{}','delivered',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM operation_deliveries,p WHERE starts_with(id,'opd_'||p.tag)"],
+        operation_events: ["INSERT INTO operation_events(id,workspace_id,type,data,created_at) SELECT 'oev_'||p.tag||p.day||'x'||i,p.wid,'fixture.retention','{}',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM operation_events,p WHERE starts_with(id,'oev_'||p.tag)"],
+        operation_sns_receipts: ["INSERT INTO operation_sns_receipts(topic_arn,message_id,workspace_id,created_at) SELECT 'arn:aws:sns:fixture:'||p.tag,p.tag||p.day||'x'||i,p.wid,now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM operation_sns_receipts,p WHERE topic_arn='arn:aws:sns:fixture:'||p.tag"],
+        operation_feedback_failures: ["INSERT INTO operation_feedback_failures(id,payload,created_at) SELECT 'off_'||p.tag||p.day||'x'||i,p.tag,now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM operation_feedback_failures,p WHERE payload=p.tag"],
+        jobs: ["INSERT INTO jobs(id,workspace_id,type,payload,status,created_at) SELECT 'jobr_'||p.tag||p.day||'x'||i,p.wid,'fixture.retention','{}','completed',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM jobs,p WHERE starts_with(id,'jobr_'||p.tag)"],
+        unused_attachments: ["INSERT INTO sending_attachments(id,workspace_id,filename,content_type,size,disposition,storage_key,checksum,created_at) SELECT 'att_'||p.tag||p.day||'x'||i,p.wid,'old.txt','text/plain',1,'attachment',p.wid||'/attachments/att_'||p.tag||p.day||'x'||i,'x',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM sending_attachments,p WHERE starts_with(id,'att_'||p.tag)"],
+        unused_template_assets: ["INSERT INTO template_assets(id,workspace_id,filename,content_type,size,disposition,storage_key,checksum,created_at) SELECT 'tas_'||p.tag||p.day||'x'||i,p.wid,'old.png','image/png',1,'inline',p.wid||'/templates/assets/tas_'||p.tag||p.day||'x'||i,'x',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM template_assets,p WHERE starts_with(id,'tas_'||p.tag)"],
+        jobs_attachment_deletes: ["INSERT INTO jobs(id,workspace_id,type,payload,status,created_at) SELECT 'jobd_'||p.tag||p.day||'x'||i,p.wid,'maintenance.deleteAttachment',jsonb_build_object('key','fixture'),'completed',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM jobs,p WHERE starts_with(id,'jobd_'||p.tag)"],
+      };
+      const seed = async (day: number, names = Object.keys(steps)) => { for (const name of names) { const [make] = steps[name]!; if (make) await db.query(prefix + make, p(day)); } };
+      const left = async () => { const counts: Record<string, number> = {}; for (const [name, [, count]] of Object.entries(steps)) counts[name] = Number((await db.query(prefix + count, p(0))).rows[0].count); return counts; };
+      const only = (counts: Record<string, number>, n: number, except: Record<string, number> = {}) => Object.fromEntries(Object.keys(counts).map(name => [name, except[name] ?? n]));
+      await db.query(`INSERT INTO mailbox_webhooks(id,workspace_id,url,event_types,encrypted_secret) VALUES('mwh_'||$2,$1,'https://fixture.invalid/','["message.received"]','fixture')`, [wid, tag]);
+      await db.query(`INSERT INTO operation_webhooks(id,workspace_id,url,event_types,encrypted_secret,paused) VALUES('owh_'||$2,$1,'https://example.com/hook','[]','x',true)`, [wid, tag]);
+      await db.query(`INSERT INTO sending_campaigns(id,workspace_id,draft,updated_at) VALUES('cmp_'||$2,$1,'{}',now()-interval '60 days')`, [wid, tag]);
+      await db.query(`INSERT INTO sending_attachments(id,workspace_id,filename,content_type,size,disposition,storage_key,checksum) VALUES('att_keep_'||$2,$1,'kept.txt','text/plain',1,'attachment',$1||'/attachments/att_keep_'||$2,'x')`, [wid, tag]);
+
+      // The inbound prune deleted at most 5,000 of each table an hour. One run now takes 6,000 of each.
+      await db.query(`INSERT INTO mailbox_events(workspace_id,type,data,created_at) SELECT $1,'fixture.retention',jsonb_build_object('tag',$2::text),now()-interval '31 days' FROM generate_series(1,6000)`, [wid, tag]);
+      await db.query(`INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,payload,status,created_at) SELECT 'mwdb_'||$2||i,$1,'mwh_'||$2,'{}','delivered',now()-interval '31 days' FROM generate_series(1,6000) i`, [wid, tag]);
+      await cleanup(runtime);
+      assert.deepEqual((await db.query(`SELECT (SELECT count(*) FROM mailbox_events WHERE data->>'tag'=$1)::int events,(SELECT count(*) FROM mailbox_webhook_deliveries WHERE starts_with(id,'mwdb_'||$1))::int deliveries`, [tag])).rows[0], { events: 0, deliveries: 0 });
+
+      // A slow database: every statement takes 5 s and a batch of operation_events 60 s, and sending_email_events always
+      // times out. operation_events also holds 25,000 expired rows, and the run starts there.
+      runtime.config.multiTenant = true;
+      await db.query(`INSERT INTO operation_events(id,workspace_id,type,data,created_at) SELECT 'oevb_'||$2||'_'||i,$1,'fixture.retention','{}',now()-interval '31 days'-make_interval(secs=>i)
+        FROM generate_series(1,25000) i`, [wid, tag]);
+      // The backlog's rows left, and the oldest of them (row i is i seconds older than row 1).
+      const backlog = async () => (await db.query(`SELECT count(*)::int AS n,coalesce(max(substr(id,length($1)+1)::int),0) AS oldest FROM operation_events WHERE starts_with(id,$1)`, [`oevb_${tag}_`])).rows[0] as { n: number; oldest: number };
+      await db.query("INSERT INTO retention_state(scope,next_step) VALUES('hourly','operation_events') ON CONFLICT(scope) DO UPDATE SET next_step=excluded.next_step");
+      const dialect = new PgDialect(), execute = runtime.db.execute.bind(runtime.db), now = Date.now.bind(Date); let skew = 0;
+      const sql = (query: unknown) => dialect.sqlToQuery((query as { getSQL(): import('drizzle-orm').SQL }).getSQL()).sql;
+      const timeout = () => Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' });
+      const clock = t.mock.method(Date, 'now', () => now() + skew);
+      const slow = t.mock.method(runtime.db, 'execute', async (query: Parameters<typeof execute>[0]) => {
+        const text = sql(query);
+        skew += /DELETE FROM "operation_events"/.test(text) ? 60_000 : 5_000;
+        if (/DELETE FROM "sending_email_events"/.test(text)) throw timeout();
+        return execute(query);
+      });
+      const lines: Json[] = [], capture = (line: string) => { try { lines.push(JSON.parse(line)); } catch { /* not a log line */ } };
+      const logs = [t.mock.method(console, 'info', capture), t.mock.method(console, 'warn', capture)];
+      // One hourly run: it lasts its 5 minutes and at most the one statement still running then, plus its closing write.
+      const hourly = async () => {
+        const began = skew, error = await cleanup(runtime).then(() => null, (e: Error & { tables?: string[] }) => e);
+        assert.ok(skew - began <= 5 * 60_000 + 60_000 + 5_000, `the run took ${(skew - began) / 1000} s`);
+        const run = lines.filter(line => String(line.code).startsWith('RETENTION_') && line.scope === 'hourly').at(-1)!;
+        assert.deepEqual(error?.tables ?? [], run.failed, 'a failed step fails the hourly upkeep step, naming the table');
+        return run;
+      };
+      const removed = (runs: Json[]) => Object.assign({}, ...runs.flatMap(run => Object.values(run.deleted))) as Record<string, number>;
+      for (const day of [1, 2]) {
+        await seed(day);
+        const runs: Json[] = [], start = await backlog();
+        while (runs.length < 3 && Object.entries(await left()).some(([name, n]) => name !== 'sending_email_events' && Number(n) > 0)) runs.push(await hourly());
+        const counts = await left();
+        assert.deepEqual(counts, only(counts, 0, { sending_email_events: 3 * day }), `day ${day}: every other table retired its rows over ${runs.length} runs`);
+        assert.deepEqual(Object.keys(steps).filter(name => name !== 'sending_email_events' && !(removed(runs)[name] > 0)), [], 'and the log says how many rows each removed');
+        // The budget ended the first run before every step; the next run started at the first it hadn't reached.
+        assert.ok(runs.length === 2 && runs[0].unreached.length > 0, `${runs.length} runs, ${runs[0].unreached.length} steps left by the first`);
+        const resumed = runs[0].unreached[0];
+        assert.ok(removed(runs.slice(1))[resumed] > 0 || runs[1].failed.includes(resumed), `the second run took ${resumed}`);
+        // The backlog got its share, a 60 s batch a run, oldest first; the other tables still got theirs.
+        if (day === 1) assert.equal(removed([runs[0]]).operation_events, 5000, 'the first run started at the backlog and gave it one batch, not the budget');
+        const end = await backlog();
+        assert.ok(end.n < start.n && end.n > 0 && end.oldest === end.n, `backlog ${start.n} -> ${end.n} rows, oldest left ${end.oldest}`);
+        const failing = runs.find(run => run.failed.includes('sending_email_events'))!;
+        assert.ok(failing.waiting.sent.sending_email_events >= 31 * 86_400, 'the log says how old the failing table\'s oldest row is');
+        assert.ok(runs.some(run => run.waiting.sent?.operation_events >= 31 * 86_400), 'and the backlog\'s');
+      }
+      for (const mock of [clock, slow, ...logs]) mock.mock.restore();
+
+      // Every 15 minutes the sent side alone, elected once per quarter hour, standing aside while the hourly run works.
+      const sent = ['sending_email_events', 'sending_emails', 'sending_review_recipients', 'operation_delivery_attempts', 'operation_deliveries_paused_expired', 'operation_deliveries',
+        'operation_events', 'operation_sns_receipts', 'operation_feedback_failures', 'jobs', 'jobs_attachment_deletes'];
+      const held = async () => (await db.query("SELECT held FROM retention_state WHERE scope='sent'")).rows[0]?.held ?? {};
+      await db.query("DELETE FROM retention_state WHERE scope='sent'");
+      await seed(3);
+      await db.query("UPDATE retention_state SET lease_until=now()+interval '5 minutes' WHERE scope='hourly'");
+      await retentionTick(runtime);
+      assert.equal((await left()).sending_emails, 3, 'the hourly run holds its lease: the 15-minute run stands aside');
+      await db.query("UPDATE retention_state SET lease_until=NULL WHERE scope='hourly'");
+      // A step that times out there is held until the hourly run gets through it.
+      const failing = t.mock.method(runtime.db, 'execute', async (query: Parameters<typeof execute>[0]) => { if (/DELETE FROM "sending_email_events"/.test(sql(query))) throw timeout(); return execute(query); });
+      await retentionTick(runtime); failing.mock.restore();
+      let counts = await left();
+      assert.deepEqual(counts, only(counts, 3, Object.fromEntries(sent.map(name => [name, name === 'sending_email_events' ? 9 : 0]))));
+      assert.deepEqual(Object.keys(await held()), ['sending_email_events']);
+      await db.query("UPDATE retention_state SET due_at=now() WHERE scope='sent'");
+      await seed(4, ['sending_email_events', 'operation_events']); await retentionTick(runtime);
+      counts = await left();
+      assert.deepEqual([counts.sending_email_events, counts.operation_events], [12, 0], 'the next 15-minute run skips the held step');
+      await cleanup(runtime);
+      assert.deepEqual([(await left()).sending_email_events, await held()], [0, {}], 'the hourly run gets through it and frees it');
+      await seed(5, ['operation_events']); await retentionTick(runtime);
+      assert.equal((await left()).operation_events, 3, 'a second 15-minute run within the quarter hour does nothing');
     });
   });
   test('MX: disconnect and reconnect cannot reset operator policy', async t => {
@@ -21225,12 +21383,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   });
   test('MX: an hourly health-check timeout does not prevent retention', async t => {
     await simulatedSesFixture(t,async ({runtime,db})=>{
-      const {cleanup}=await import('./src/maintenance.js');
+      const {hourlyUpkeep}=await import('./src/maintenance.js');
       runtime.config.multiTenant=true;
       const expired=unique('expired');
       await db.query(`INSERT INTO jobs(id,type,workspace_id,payload,status,created_at) VALUES($1,'tenant.provision',$2,'{}','completed',now()-interval '31 days')`,[expired,runtime.config.workspaceId]);
+      // The health check is the hourly upkeep's first step, and its first statement times out. Swapped by hand, as above.
       const check=t.mock.method(runtime.db,'execute'); check.mock.mockImplementationOnce(()=>{throw Object.assign(new Error('statement timeout'),{code:'57014'});});
-      await cleanup(runtime);
+      const fixtureFetch=globalThis.fetch; globalThis.fetch=async()=>{throw new Error('Offline fixture: DNS refreshes and alerts fail here.');};
+      let failed:string[]; try { failed=[...await hourlyUpkeep(runtime)]; } finally { globalThis.fetch=fixtureFetch; }
+      assert.ok(failed.includes('HOSTED_HEALTH_CHECK_FAILED') && !failed.includes('MAINTENANCE_CLEANUP_FAILED'),failed.join());
       assert.equal((await db.query('SELECT 1 FROM jobs WHERE id=$1',[expired])).rowCount,0);
     });
   });
@@ -25102,6 +25263,174 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal(await disconnected,'SCAN_STALE',`${first} first: the disconnect gets past its locks (no connection to disconnect here).`);
     }
   });
+  // A Hosted workspace with a verified sender, an API key and a runtime of its own, for the campaign launch tests below. Its
+  // connections carry their own application_name, so a test finds its launch among the database's sessions.
+  const launchFixture=async(t:TestContext)=>{
+    const {nodeRuntime}=await import('./src/adapters/node.js'),{createApp}=await import('./src/app.js');
+    const appName=unique('capture'),url=new URL(FIXTURE_DATABASE_URL!);url.searchParams.set('application_name',appName);
+    const {runtime,close}=nodeRuntime({...process.env,DATABASE_URL:url.toString()});cleanup(t,close);
+    const g=await fixtureDatabase(t),w=unique('capture'),host=w+'.invalid',region='us-east-2';
+    // Simulated sends cost nothing against Hosted limits; the workspace is billed as any customer's is.
+    Object.assign(runtime.config,{multiTenant:true,regionalSending:true,liveEnabled:false});
+    const secret='nm_'+(randomUUID()+randomUUID()).replaceAll('-','');
+    cleanup(t,async()=>{
+      await g.query('DELETE FROM sending_review_recipients WHERE review_id IN (SELECT id FROM sending_campaign_reviews WHERE workspace_id=$1)',[w]);
+      const tables=(await g.query(`SELECT c.table_name FROM information_schema.columns c JOIN information_schema.tables x USING (table_schema, table_name)
+        WHERE c.table_schema='public' AND c.column_name='workspace_id' AND x.table_type='BASE TABLE'`)).rows.map(r=>r.table_name as string);
+      for(let pass=0;pass<3;pass++)for(const table of tables)await g.query(`DELETE FROM "${table}" WHERE workspace_id=$1`,[w]).catch(()=>{});
+      await g.query('DELETE FROM workspaces WHERE id=$1',[w]);
+    });
+    await g.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[w]);
+    await g.query("INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,$1,$2,jsonb_build_array($2::text))",[w,region]);
+    await g.query("INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES($1,$1,$2,'ready','shared','111122223333','ready')",[w,region]);
+    await g.query("INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES($1,$2,$2,'verified')",[host,w]);
+    await g.query('INSERT INTO operation_domains(id,name,workspace_id,region) VALUES($1,$2,$1,$3)',[w,host,region]);
+    await g.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES($1,$1,'capture',$2,$3,'["read","send","manage"]','[]')`,[w,createHash('sha256').update(secret).digest('hex'),secret.slice(0,14)]);
+    const app=createApp(),call=async(method:string,path:string,body?:Json,headers:Record<string,string>={})=>{
+      const res=await app.fetch(new Request(PUBLIC_ORIGIN+path,{method,headers:{authorization:`Bearer ${secret}`,'content-type':'application/json',...headers},body:body&&JSON.stringify(body)}),runtime);
+      return {status:res.status,body:await res.json() as Json};
+    };
+    // A list of n contacts, one in every `every` subscribed.
+    const audience=async(n:number,every:number,extra='')=>{
+      const list=(await call('POST','/v1/lists',{name:'Capture '+n})).body;
+      await g.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent,suppressed)
+        SELECT 'con_'||md5($1||$5||n),$1,'reader-'||$5||n||'@'||$3,CASE WHEN n%$6=0 THEN 'subscribed' ELSE 'unknown' END,n=$6 AND $5='' FROM generate_series(1,$4::int) n RETURNING workspace_id,id)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT workspace_id,$2,id FROM c`,[w,list.id,`${w}.example.com`,n,extra,every]);
+      return list.id as string;
+    };
+    const draft=async(name:string,listId:string)=>{const c=await call('POST','/v1/campaigns',{name,from:`news@${host}`,subject:'Capture',html:'<p>Fixture</p>',audience:{listId}});assert.equal(c.status,201,JSON.stringify(c.body));return c.body;};
+    const launch=(c:Json,headers:Record<string,string>={})=>call('POST',`/v1/campaigns/${c.id}/send`,{revision:c.revision},headers);
+    // The launch's session, waiting on a lock at its first recipient insert, or any of its sessions still at work.
+    const capturing=async()=>{
+      for(let i=0;i<1000;i++){
+        const {rows}=await g.query("SELECT pid FROM pg_stat_activity WHERE application_name=$1 AND wait_event_type='Lock' AND query LIKE '%INSERT INTO sending_review_recipients%'",[appName]);
+        if(rows.length)return rows[0].pid as number;
+        await new Promise(r=>setTimeout(r,5));
+      }
+      return assert.fail('The launch never reached its recipient insert.');
+    };
+    const working=async()=>(await g.query("SELECT pid FROM pg_stat_activity WHERE application_name=$1 AND state='active'",[appName])).rows[0]?.pid as number|undefined;
+    return {runtime,g,w,host,call,audience,draft,launch,capturing,working};
+  };
+  // A Request in flight: whether and when it finished.
+  type Settled={done:boolean;ms:number;value?:{status:number;body:Json};promise:Promise<unknown>};
+  const settled=(work:Promise<{status:number;body:Json}>):Settled=>{const started=performance.now(),s:Settled={done:false,ms:0,promise:work};s.promise=work.then(v=>{s.done=true;s.value=v;s.ms=performance.now()-started;});return s;};
+  // A launch captured its audience (up to 2,000,000 contacts, minutes at that size) while it held the campaign row and
+  // the workspace's admission row (job_schedule), which every send in the workspace takes: each send waited for the whole
+  // capture. The capture now runs first, from one snapshot, and the send locks are held only for the decision, the
+  // review, the reserve and the state change after it. A gate stops the capture at its first recipient insert, after its
+  // snapshot: sends, an edit and a second launch go on meanwhile, nothing that changes then reaches the frozen list, and a
+  // launch that fails or is cancelled there leaves nothing behind.
+  test('campaign launch: sends in the workspace never wait for the audience capture, and the frozen list is one snapshot',async t=>{
+    const {g,w,host,call,audience,draft,launch,capturing}=await launchFixture(t);
+    // More than 50,000 members takes the large capture (a snapshot table, then recipient inserts in pages), as a list of
+    // millions does. Every 2,500th contact is subscribed; the first of those is also suppressed.
+    const listId=await audience(50_010,2500);
+    const contact=(n:number)=>'con_'+createHash('md5').update(w+n).digest('hex');
+    // The audience as it stands before any launch: subscribed, not suppressed, in send order (contact ID).
+    const before=(await g.query("SELECT email FROM audience_contacts WHERE workspace_id=$1 AND marketing_consent='subscribed' AND NOT suppressed ORDER BY id",[w])).rows.map(r=>r.email);
+    assert.equal(before.length,19);
+    const blockedBy=async(pid:number)=>(await g.query('SELECT count(*)::int AS n FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))',[pid])).rows[0].n as number;
+    const within=(p:Promise<unknown>,ms:number)=>Promise.race([p,new Promise(r=>setTimeout(r,ms))]);
+    const staged=async()=>(await g.query(`SELECT (SELECT count(*)::int FROM sending_review_recipients r WHERE NOT EXISTS (SELECT FROM sending_campaign_reviews v WHERE v.id=r.review_id)) AS orphans,
+      (SELECT count(*)::int FROM sending_campaign_reviews WHERE workspace_id=$1) AS reviews`,[w])).rows[0] as {orphans:number;reviews:number};
+    const baseline=await staged();
+    const gate=await fixtureDatabase(t);
+
+    // 1. Sends and a second launch while the first launch is capturing.
+    const first=await draft('First',listId);
+    await gate.query('BEGIN');
+    let launched:Settled|undefined,sends:Settled[]=[],second:Settled|undefined,unsubscribe:Settled|undefined,subscribe:Settled|undefined,blocked=0,sentDuringCapture=false;
+    try {
+      await gate.query('LOCK TABLE sending_review_recipients IN SHARE MODE');
+      launched=settled(launch(first));
+      const pid=await capturing();
+      sends=[0,1,2].map(i=>settled(call('POST','/v1/emails/send',{from:`alerts@${host}`,to:'success@simulator.amazonses.com',subject:`Sign-in code ${i}`,text:'Synthetic.'})));
+      second=settled(launch(first));
+      // Consent changes and a new member after the snapshot: none of them reaches this launch's frozen list.
+      unsubscribe=settled(call('POST',`/v1/contacts/${contact(5000)}/consent`,{status:'unsubscribed'}));
+      subscribe=settled(call('POST',`/v1/contacts/${contact(1)}/consent`,{status:'subscribed',source:'acceptance-fixture',policyVersion:'acceptance-v1',evidence:'Synthetic consent on a reserved fixture address.'}));
+      await g.query("WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES('con_late_'||md5($1),$1,'late@'||$3,'subscribed') RETURNING workspace_id,id) INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT workspace_id,$2,id FROM c",[w,listId,`${w}.example.com`]);
+      await within(Promise.all([...sends,second,unsubscribe,subscribe].map(s=>s.promise)),3000);
+      blocked=await blockedBy(pid);
+      sentDuringCapture=sends.every(s=>s.done);
+      assert.equal(launched.done,false,'The launch is still capturing.');
+    } finally { await gate.query('ROLLBACK'); }
+    await Promise.all([launched!,...sends,second!,unsubscribe!,subscribe!].map(s=>s.promise));
+    const result=launched!.value!;
+    assert.equal(result.status,202,JSON.stringify(result.body));
+    assert.equal(result.body.queued,19);
+    // The frozen list is the audience as of the snapshot: the contact who unsubscribed after it is in it (dispatch
+    // rechecks consent before every send), the one who subscribed and the member added after it are not.
+    const review=(await g.query('SELECT review_id FROM sending_campaigns WHERE id=$1',[first.id])).rows[0].review_id;
+    const frozen=(await g.query("SELECT recipient->>'email' AS email FROM sending_review_recipients WHERE review_id=$1 ORDER BY ordinal",[review])).rows.map(r=>r.email);
+    assert.deepEqual(frozen,before);
+    assert.deepEqual(await staged(),{orphans:baseline.orphans,reviews:baseline.reviews+1},'One capture, under its review.');
+    t.diagnostic(`While the capture was held: ${blocked} requests waited on the launch; sends took ${sends.map(s=>Math.round(s.ms)).join(', ')} ms; the launch took ${Math.round(launched!.ms)} ms.`);
+    assert.equal(blocked,0,'No request waits on the capturing launch.');
+    assert.equal(sentDuringCapture,true,'Every send finished while the capture was held.');
+    for(const s of sends)assert.equal(s.value!.status,202,JSON.stringify(s.value!.body));
+    assert.deepEqual([second!.value!.status,second!.value!.body.error?.code],[409,'CAMPAIGN_LOCKED'],'A second launch of the same campaign is refused at once instead of capturing again.');
+    assert.ok(second!.ms<launched!.ms);
+    assert.deepEqual([unsubscribe!.value!.status,subscribe!.value!.status],[200,200]);
+
+    // 2. A launch that fails after its capture (the campaign was edited meanwhile) and one cancelled during it, as the
+    // statement limit cancels one, leave nothing staged. Neither the edit nor anything else waited for the capture.
+    for(const ending of ['edited','cancelled'] as const){
+      const c=await draft(ending,listId),key={'Idempotency-Key':unique('capture-launch')};
+      await gate.query('BEGIN');
+      let attempt:Settled|undefined,edit:Settled|undefined;
+      try {
+        await gate.query('LOCK TABLE sending_review_recipients IN SHARE MODE');
+        attempt=settled(launch(c,key));
+        const pid=await capturing();
+        if(ending==='edited'){
+          edit=settled(call('PATCH',`/v1/campaigns/${c.id}`,{revision:c.revision,draft:{name:'edited',from:`news@${host}`,subject:'Edited',html:'<p>Fixture</p>',audience:{listId}}}));
+          await within(edit.promise,3000);
+          assert.equal(edit.done,true,'The edit never waits for the capture.');
+        } else await g.query('SELECT pg_cancel_backend($1)',[pid]);
+      } finally { await gate.query('ROLLBACK'); }
+      await attempt!.promise;const failed=attempt!.value!;
+      if(ending==='edited'){assert.equal(edit!.value!.status,200,JSON.stringify(edit!.value!.body));assert.deepEqual([failed.status,failed.body.error?.code],[409,'STALE_CAMPAIGN_REVISION']);}
+      else assert.deepEqual([failed.status,failed.body.error?.code,failed.body.error?.retryable],[503,'AUDIENCE_CAPTURE_TIMEOUT',true]);
+      assert.deepEqual(await staged(),{orphans:baseline.orphans,reviews:baseline.reviews+1},`The ${ending} launch left no review or recipients.`);
+      const row=(await g.query('SELECT state,review_id,total FROM sending_campaigns WHERE id=$1',[c.id])).rows[0];
+      assert.deepEqual(row,{state:'draft',review_id:null,total:0});
+      assert.equal((await g.query("SELECT count(*)::int AS n FROM jobs WHERE workspace_id=$1 AND type='campaign.run' AND payload->>'campaignId'=$2",[w,c.id])).rows[0].n,0);
+      // Its Idempotency-Key was released with the rollback, so the same request launches, from its own snapshot: with the
+      // contact who subscribed and the member added during the first capture, without the one who unsubscribed.
+      if(ending==='cancelled'){const retried=await launch(c,key);assert.equal(retried.status,202,JSON.stringify(retried.body));assert.equal(retried.body.queued,20);}
+    }
+  });
+  // The capture joins the audience's contacts and list members whole. When the statistics say both tables are empty
+  // (autovacuum found them empty, then a list was imported before the next analyze) the planner expected one row on
+  // each side and compared every contact with every member in a nested loop: minutes at 50,000 members, and never done
+  // at 2,000,000. Both capture paths now join whole lists by hash, whatever the statistics say.
+  test('campaign launch: the audience capture finishes in seconds when the statistics say its tables are empty',async t=>{
+    const {g,draft,launch,audience,working}=await launchFixture(t);
+    // The statistics as autovacuum leaves them for tables it found empty: no rows, in the pages the tables have now.
+    // ANALYZE counts rows this transaction deleted as dead and keeps their pages; the rollback keeps those numbers.
+    const stale=async()=>{
+      await g.query('BEGIN');
+      try { await g.query('DELETE FROM audience_list_members; DELETE FROM audience_contacts; ANALYZE audience_contacts, audience_list_members'); }
+      finally { await g.query('ROLLBACK'); }
+      return (await g.query("SELECT relname,reltuples::int,relpages FROM pg_class WHERE relname IN ('audience_contacts','audience_list_members') ORDER BY 1")).rows.map(r=>`${r.relname} ${r.reltuples}/${r.relpages}`).join(', ');
+    };
+    cleanup(t,async()=>{await g.query('ANALYZE audience_contacts, audience_list_members');});
+    // The large path (more than 50,000 members), then the single-statement path.
+    for(const [members,every,name] of [[50_010,10,'large'],[20_000,10,'small']] as const){
+      const c=await draft(name,await audience(members,every,name));
+      const statistics=await stale();
+      const attempt=settled(launch(c));
+      await Promise.race([attempt.promise,new Promise(r=>setTimeout(r,15_000))]);
+      // A nested loop over both lists would run for minutes: stop it rather than hold the shard.
+      if(!attempt.done){const pid=await working();if(pid)await g.query('SELECT pg_cancel_backend($1)',[pid]);await attempt.promise;}
+      t.diagnostic(`${name} capture of ${members} members with statistics ${statistics}: ${Math.round(attempt.ms)} ms`);
+      assert.equal(attempt.value!.status,202,JSON.stringify(attempt.value!.body));
+      assert.equal(attempt.value!.body.queued,Math.floor(members/every));
+      assert.ok(attempt.ms<5000,`The ${name} capture took ${Math.round(attempt.ms)} ms.`);
+    }
+  });
   // Migration 332 decides the inbound mail stored without forwardEligible; a message committed after the page that
   // would have seen it is never decided on read any more: a forward refuses it.
   test('forward rollout: mail committed without forwardEligible after migration 332 ran is refused, not decided on read',async t=>{
@@ -27592,7 +27921,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await t.test('delivery: a paused endpoint holds mail that arrives during the pause and sends it on unpause, until retention dead-letters it',async()=>{
         // tear/delivery witnesses: pause W, ingest m1 a, run K m1:W, unpause W, run K m1:W, reply K 200;
         // ingest m1 a, pause W, run K m1:W, age m1:W, prune.
-        const {mailboxEventJobs,pruneMailboxEvents}=await import('./src/mailbox-events.js');
+        const [{mailboxEventJobs},{pruneMailboxEvents}]=await Promise.all([import('./src/mailbox-events.js'),import('./src/maintenance.js')]);
         await call('POST','/v1/endpoints',{type:'webhook',name:'held-w',url:'https://hooks.example.org/held-w'},201);
         const hookId=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='held-w'",[wid])).rows[0].id;
         await route('held@receive.example',['webhook:held-w'],'held-route');
@@ -28261,7 +28590,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const resume=async()=>mailboxEventJobs['mailbox.resumeDeliveries']!(runtime,{hook:allHook.id},{id:'page',attempts:1,workspaceId:scope});
         await assert.rejects(resume(),(await import('./src/jobs.js')).JobDeferred);assert.equal((await db.query("SELECT FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND status='paused'",[allHook.id])).rowCount,2);
         // Held past the 30-day retention: not resumed, and dead-lettered with its reason rather than deleted.
-        await resume();await (await import('./src/mailbox-events.js')).pruneMailboxEvents(runtime);assert.deepEqual((await db.query('SELECT status,last_error FROM mailbox_webhook_deliveries WHERE id=$1',[clone+'101'])).rows,[{status:'failed',last_error:'ENDPOINT_PAUSED_EXPIRED'}]);
+        await resume();await (await import('./src/maintenance.js')).pruneMailboxEvents(runtime);assert.deepEqual((await db.query('SELECT status,last_error FROM mailbox_webhook_deliveries WHERE id=$1',[clone+'101'])).rows,[{status:'failed',last_error:'ENDPOINT_PAUSED_EXPIRED'}]);
         assert.equal((await state()).generation,1);await mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:clone},{id:'old',attempts:1,workspaceId:scope});assert.equal(attempts,0);
         // The reaper runs in a savepoint with only the spent lease visible; no unrelated delivery is dispatched.
         await runtime.db.transaction(async tx=>{const {sql}=await import('drizzle-orm');await tx.execute(sql`CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP`);await tx.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload,status,attempts,lease_until) VALUES('spent','mailbox.webhook',${scope},${JSON.stringify({deliveryId:clone,generation:1})}::jsonb,'running',10,now()-interval '1 minute')`);assert.equal(await processJobs({...runtime,db:tx},{},1,1),0);await tx.execute(sql`DROP TABLE pg_temp.jobs`);});

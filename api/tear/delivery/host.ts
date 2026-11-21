@@ -43,8 +43,8 @@ const DATABASE_URL = await (async () => {
 })();
 
 const { S3Client } = await import('@aws-sdk/client-s3');
-const [{ createApp }, { nodeRuntime }, { acceptInboundNotification, mailboxIngestJobs }, { mailboxEventJobs, pruneMailboxEvents }, { processJobs }] = await Promise.all([
-  import('../../src/app.js'), import('../../src/adapters/node.js'), import('../../src/mailbox-ingest.js'), import('../../src/mailbox-events.js'), import('../../src/jobs.js'),
+const [{ createApp }, { nodeRuntime }, { acceptInboundNotification, mailboxIngestJobs }, { mailboxEventJobs }, { pruneMailboxEvents }, { processJobs }] = await Promise.all([
+  import('../../src/app.js'), import('../../src/adapters/node.js'), import('../../src/mailbox-ingest.js'), import('../../src/mailbox-events.js'), import('../../src/maintenance.js'), import('../../src/jobs.js'),
 ]);
 const ENCRYPTION = hex(64), REGION_DEFAULT = 'us-east-1';
 const { ensureRegionSettings } = await import('../../src/ses-region-state.js');
