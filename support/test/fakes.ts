@@ -49,6 +49,18 @@ const inScope = c => memberships(c.userId).filter(w => !c.workspaceId || w.id ==
 // Support notes (api/src/support-notes.ts): a person's own, tagged with the conversation's workspace when written, read
 // back while untagged or while they still belong to that workspace.
 const notes = new Map(); // userId → [note]
+// Support actions (api/src/support-actions.ts): proposed per conversation, for a target in its scope (a target ID's last
+// segment names its workspace: whd_1_acme is in ws_acme) where the person is an owner or admin, narrowed by ?workspaceId=,
+// at most 3 open, worded by Nightmail (with the hook's label in it) and answered in the API's shapes. Nothing the Worker
+// sends decides one: only the hook does, as the person's own Confirm or Decline would. A stamped outage refuses one path.
+const ACTION_FIELDS = { retry_webhook_delivery: [['webhookId', 'deliveryId'], []], test_webhook: [['webhookId'], []], retry_inbound_delivery: [['webhookId', 'deliveryId'], []],
+  test_inbound_webhook: [['webhookId'], []], redeliver_message: [['messageId'], ['webhookId']], pause_campaign: [['campaignId'], []] };
+const actions = new Map(), stampedOutages = new Map();
+let actionIds = 0, actionLabel = '';
+const targetWorkspace = id => 'ws_' + String(id).split('_').pop();
+const actionView = a => ({ id: a.id, kind: a.kind, status: a.status, summary: a.summary, parts: { template: a.summary, labels: {} }, workspaceId: a.workspaceId, target: a.target,
+  url: 'https://dev.bane.mx/support/actions/' + a.id, result: a.result, error: a.error, delivery: a.delivery, createdAt: a.createdAt, expiresAt: a.expiresAt, resolvedAt: a.resolvedAt });
+const managed = w => w.role === 'owner' || w.role === 'admin';
 let noteIds = 0;
 function scopeOf(c) {
   const all = memberships(c.userId), workspace = c.workspaceId ? all.find(w => w.id === c.workspaceId) ?? null : null;
@@ -135,6 +147,40 @@ export class SupportPlatform extends WorkerEntrypoint {
     const c = conversations.get(conversationId);
     if (!c || c.closed || !c.userId) return refuse(403, 'SUPPORT_GRANT_REQUIRED');
     const url = new URL(path, 'https://internal.invalid');
+    const outage = stampedOutages.get(url.pathname);
+    if (outage) return { status: outage.status, body: { error: { code: outage.code ?? 'UNAVAILABLE' } }, requestId: null, retryAfter: outage.retryAfter ?? null };
+    const only = url.searchParams.get('workspaceId'), allowed = inScope(c).filter(w => !only || w.id === only);
+    if (url.pathname === '/v1/support/actions' && method === 'POST') {
+      const [required, optional] = ACTION_FIELDS[body?.kind] ?? [null, []], keys = Object.keys(body ?? {}).filter(k => k !== 'kind').sort();
+      if (!required || keys.some(k => !required.includes(k) && !optional.includes(k)) || required.some(k => !keys.includes(k)) || keys.some(k => !/^[A-Za-z0-9_-]{1,120}$/.test(String(body[k])))) return refuse(422, 'VALIDATION_FAILED');
+      const target = Object.fromEntries(keys.map(k => [k, body[k]])), homes = [...new Set(keys.map(k => targetWorkspace(body[k])))];
+      const workspace = homes.length === 1 ? allowed.find(w => w.id === homes[0]) : null;
+      if (!workspace) return refuse(404, 'NOT_FOUND');
+      if (!managed(workspace)) return refuse(403, 'PERMISSION_DENIED');
+      const mine = [...actions.values()].filter(a => a.conversationId === c.id && a.status === 'proposed');
+      const open = mine.find(a => a.kind === body.kind && JSON.stringify(a.target) === JSON.stringify(target));
+      if (open) return ok(actionView(open));
+      if (mine.length >= 3) return refuse(409, 'SUPPORT_ACTIONS_OPEN');
+      const id = 'sac_' + (++actionIds).toString(16).padStart(32, '0'), now = new Date();
+      const a = { id, conversationId: c.id, kind: body.kind, target, workspaceId: workspace.id, status: 'proposed', result: null, error: null, delivery: null, hidden: false, refused: false,
+        summary: 'Nightmail: ' + body.kind + ' in the workspace ' + JSON.stringify(workspace.name) + (actionLabel ? ', webhook ' + JSON.stringify(actionLabel) : '') + '.',
+        createdAt: now.toISOString(), expiresAt: new Date(now.getTime() + 86400000).toISOString(), resolvedAt: null };
+      actions.set(id, a);
+      return ok(actionView(a), 201);
+    }
+    const proposal = url.pathname.match(/^\\/v1\\/support\\/actions\\/(sac_[0-9a-f]{32})$/);
+    if (proposal && method === 'GET') {
+      const a = actions.get(proposal[1]);
+      if (a?.refused) return refuse(403, 'SUPPORT_GRANT_REQUIRED');
+      return a && !a.hidden && a.conversationId === c.id && allowed.some(w => w.id === a.workspaceId && managed(w)) ? ok(actionView(a)) : refuse(404, 'NOT_FOUND');
+    }
+    const recheck = url.pathname.match(/^\\/v1\\/support\\/domains\\/([A-Za-z0-9_-]{1,120})\\/verify$/);
+    if (recheck && method === 'POST') {
+      const workspace = allowed.find(w => w.id === targetWorkspace(recheck[1]));
+      if (!workspace) return refuse(404, 'NOT_FOUND');
+      if (!managed(workspace)) return refuse(403, 'PERMISSION_DENIED');
+      return ok({ id: recheck[1], workspaceId: workspace.id, name: 'news.' + workspace.id.slice(3) + '.test', verificationStatus: 'pending', verified: false, dkimStatus: 'pending', sending: 'pending', receiving: 'off', mailFromStatus: null, recheckQueued: true });
+    }
     if (url.pathname === '/v1/support/scope') {
       if (method === 'POST') {
         if (c.channel === 'chat' && body?.workspaceId !== c.workspaceId) return refuse(409, 'SUPPORT_SCOPE_FIXED');
@@ -252,6 +298,21 @@ export default {
     if (url.pathname === '/__remove') { const { userId, workspaceId } = await request.json(); members.get(userId)?.delete(workspaceId); members.get(userId)?.set('!' + workspaceId, 'gone'); return new Response(null, { status: 204 }); }
     if (url.pathname === '/__role') { const { userId, workspaceId, role } = await request.json(); members.get(userId)?.set(workspaceId, role); return new Response(null, { status: 204 }); }
     if (url.pathname === '/__close') { closeFailures = (await request.json()).fail ?? 0; return new Response(null, { status: 204 }); }
+    // Support actions: read them all; the person decides one (status, with the API's result, error and delivery); its
+    // read is refused or answers 404, or its sentence changes; the label the next proposals' sentences carry; a stamped
+    // path answers with an outage.
+    if (url.pathname === '/__actions') {
+      if (request.method === 'GET') return Response.json([...actions.values()]);
+      const { id, status, result, error, delivery, hidden, refused, summary, label, outage } = await request.json();
+      if (label !== undefined) actionLabel = label;
+      if (outage) { if (outage.status) stampedOutages.set(outage.path, outage); else stampedOutages.delete(outage.path); }
+      const a = id ? actions.get(id) : null;
+      if (a && status) Object.assign(a, { status, result: result ?? null, error: error ?? null, delivery: delivery ?? null, resolvedAt: new Date().toISOString() });
+      if (a && hidden !== undefined) a.hidden = hidden;
+      if (a && refused !== undefined) a.refused = refused;
+      if (a && summary) a.summary = summary;
+      return new Response(null, { status: 204 });
+    }
     if (url.pathname === '/__content') { const c = conversations.get((await request.json()).conversationId); c.content = c.workspaceId; return new Response(null, { status: 204 }); }
     if (url.pathname === '/__conversation') { const c = conversations.get(url.searchParams.get('id')); return Response.json(c ? { ...c, read: [...c.read] } : null); }
     // An outage refuses the request; a lost one (lost: true) carries it out, then the answer never arrives (the Worker
@@ -316,6 +377,9 @@ const MESSAGES = {
   // The reply tool's cases: two reply calls, invented recipients (with Reply-To and Cc on the email), no reply at all, a
   // crash right after the reply and the next email after it, DMARC failures, and the email turn cap.
   msg_notes_1: ['thr_notes', 'ida@acme.test', 'PASS', null, 'Last time', 'Email notes probe: what did we set up last time?'],
+  // Proposed changes are chat-only: an email asks for one, and another asks for the confirm link.
+  msg_action_email: ['thr_action_email', null, 'PASS', null, 'Webhook', 'Please retry my webhook delivery whd_1_acme.'],
+  msg_link_email: ['thr_link_email', null, 'PASS', null, 'Link', 'Please send me the confirm link for the retry.'],
   msg_twice_1: ['thr_twice', null, 'PASS', null, 'Two answers', 'Please reply twice to this.'],
   msg_route_1: ['thr_route', null, 'PASS', null, 'Forward this', 'Please reply to boss@else.test and cc cfo@else.test.'],
   msg_silent_1: ['thr_silent', null, 'PASS', null, 'Quiet', 'Please stay silent about this.'],
@@ -366,7 +430,8 @@ async function route(request, url, body) {
 
 export type Recorded = { url: string; headers: Record<string, string>; body: any };
 export const recorded: Recorded[] = [];
-export const control = { failStatus: 0 };
+/** failStatus: the gateway's next answers fail; beforeTool: runs before the script asks for that tool (something changes mid-turn). */
+export const control: { failStatus: number; beforeTool: null | ((tool: string) => Promise<void>) } = { failStatus: 0, beforeTool: null };
 /** The scripted model's answer to an email once its account tool is refused: general, with no account data. */
 export const GENERAL_ANSWER = 'Hi,\n\nBounces at Gmail usually come from old or mistyped addresses: remove the ones that hard-bounce, and check your domain’s DKIM and DMARC records.\n\nNightmail support (AI)';
 
@@ -426,6 +491,30 @@ export async function fakeGateway(request: Request): Promise<Response> {
   // A fact to keep: add_note with what follows "remember this:", then a short answer.
   const remember = said.match(/remember this: ([\s\S]*?)(?:<\/untrusted>|$)/);
   if (remember) return answered ? say(body, ['Noted.']) : toolUse('toolu_n', 'add_note', { text: remember[1]!.trim() });
+  // Proposed changes. A turn they aren't offered in (a member's chat, any email) calls them anyway.
+  const propose = async (id: string, input: object) => { await control.beforeTool?.('propose_action'); return toolUse(id, 'propose_action', input); };
+  const offers = offered(body).has('propose_action'), emailed = offered(body).has('reply');
+  if (said.includes('retry my webhook delivery') || said.includes('Yes, do it')) {
+    // Extra arguments (another kind's ID, a user, a conversation) never reach Nightmail.
+    if (!used.includes('propose_action')) return propose(`toolu_p${body?.messages?.length ?? 0}`, { kind: 'retry_webhook_delivery', webhookId: 'wh_acme', deliveryId: 'whd_1_acme', campaignId: 'cmp_x_acme', userId: 'usr_bo', conversationId: 'conv_' + 'b'.repeat(26) });
+    if (!offers) return say(body, [emailed ? 'Hi,\n\nAn owner or admin can retry that delivery from the dashboard.\n\nNightmail support (AI)' : 'Only an owner or admin of the workspace can retry it, from the dashboard.']);
+    return say(body, [said.includes('Yes, do it') ? 'It runs once you confirm it on the card.' : 'I’ve proposed retrying that delivery. It runs once you confirm it on the card.']);
+  }
+  for (const [needle, kind, webhookId] of [['test my inbound webhook', 'test_inbound_webhook', 'wh_in_acme'], ['test my sending webhook', 'test_webhook', 'wh_acme']] as const) {
+    if (said.includes(needle)) return used.includes('propose_action') ? say(body, ['I’ve proposed a test. It runs once you confirm it on the card.']) : propose(`toolu_t${body?.messages?.length ?? 0}`, { kind, webhookId });
+  }
+  if (said.includes('propose four retries')) {
+    const n = used.filter(name => name === 'propose_action').length;
+    if (n < 4) return propose(`toolu_p4_${n}`, { kind: 'retry_webhook_delivery', webhookId: 'wh_acme', deliveryId: `whd_${n + 1}_acme` });
+    return say(body, ['I’ve proposed three of them; the fourth has to wait.']);
+  }
+  if (said.includes('recheck my')) {
+    if (!used.includes('recheck_domain')) return toolUse(`toolu_dns${body?.messages?.length ?? 0}`, 'recheck_domain', { domainId: said.includes('other domain') ? 'dom_ws_other' : 'dom_ws_acme' });
+    return say(body, [offered(body).has('recheck_domain') ? 'I’ve asked Nightmail to re-check your DNS now.' : 'Only an owner or admin can re-check it.']);
+  }
+  if (said.includes('A change you proposed was decided')) return say(body, ['Here is what came of it.']);
+  // A confirm link the model writes itself, spelled so a plain link check would miss it.
+  if (said.includes('the confirm link')) return say(body, [emailed ? `Hi,\n\nConfirm it at dev.bane.mx//support/./Actions/sac_${'0'.repeat(31)}1 when you can.\n\nNightmail support (AI)` : `Confirm it here: [Retry](https://dev.bane.mx/support/%2561ctions/sac_${'0'.repeat(31)}1)`]);
   if (said.includes('A support email arrived') && said.includes('reply twice')) {
     const n = used.filter(name => name === 'reply').length;
     if (n < 2) return toolUse(`toolu_twice_${n}`, 'reply', { text: `Hi,\n\n${n ? 'Second' : 'First'} answer.\n\nNightmail support (AI)` });

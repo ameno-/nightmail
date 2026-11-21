@@ -46,6 +46,18 @@ export type Scope = {
   shrunk: boolean;
 };
 
+/**
+ * A change proposed for a chat's person (POST and GET /v1/support/actions, api/src/support-actions.ts): Nightmail wrote its
+ * summary and runs it only on the person's own signed-in Confirm. `result` and `error` are the public route's answer;
+ * `delivery`, for a done test or retry of a webhook delivery, where that delivery stands now (done only means queued).
+ */
+export type SupportAction = {
+  id: string; kind: string; status: 'proposed' | 'running' | 'done' | 'failed' | 'declined' | 'expired'; summary: string; url: string;
+  result: Record<string, unknown> | null; error: { code: string; message: string } | null;
+  delivery?: { status: 'pending' | 'delivered' | 'failed' | 'paused'; attempts: number; statusCode: number | null } | null;
+  createdAt: string; expiresAt: string; resolvedAt: string | null;
+};
+
 /** The methods of Nightmail's SupportPlatform entrypoint, as this Worker calls them over RPC. */
 export interface SupportPlatform {
   verifyHandoff(token: string): Promise<HandoffCheck>;
@@ -57,7 +69,7 @@ export interface SupportPlatform {
   registerConversation(body: { conversationId: string; evidence: ConversationEvidence }): Promise<PlatformReply<RegisteredConversation>>;
   /** Every later request for the conversation is refused. Repeating it is harmless. */
   closeConversation(conversationId: string): Promise<PlatformReply<{ id: string; status: 'closed'; closedAt: string }>>;
-  /** A /v1/support GET, or POST /v1/support/scope or notes, for one registered conversation: Nightmail stamps the person. */
+  /** A /v1/support GET, or a POST to scope, notes, actions or a domain's verify, for one registered chat: Nightmail stamps the person. */
   request<T = unknown>(conversationId: string, method: string, path: string, body?: unknown): Promise<PlatformReply<T>>;
   /** A staff sign-in token from Nightmail's operator check: still an active operator? (staff.ts) */
   verifyStaff(token: string): Promise<{ ok: true; staff: { userId: string; email: string; role: string }; jti: string; expiresAt: string } | { ok: false; code: 'STAFF_INVALID' | 'STAFF_EXPIRED' | 'NOT_OPERATOR' }>;
