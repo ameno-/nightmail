@@ -523,13 +523,14 @@ async function billing(db) {
   await month(db, 'ws_harbor', 5000, 5000, 3_240_000_000n);
 }
 
-// The support inbox (Operator → Support): Sam's ticketed chat that Dana answered (agent paused), Lee's emailed question
-// the agent answered, a sender who proved nothing with blocked work, and a closed, resolved chat. The support platform
-// pulled the outbox a minute ago, so staff can reply. IDs follow the support platform's shapes (conv_, msg_, tkt_).
+// The support inbox (/support): Sam's ticketed chat that Dana answered (agent paused) and a sender who proved nothing
+// with blocked work need staff; Lee's emailed question and Lee's chat the agent is answering on its own; and a closed,
+// resolved chat. The agent keeps two notes about Sam. The support platform pulled the outbox a minute ago, so staff can
+// reply. IDs follow the support platform's shapes (conv_, msg_, tkt_, snt_).
 const supportId = (prefix, word, length) => `${prefix}_${word.padEnd(length, 'a')}`;
 async function supportInbox(db) {
   const conv = word => supportId('conv', word, 26), msg = word => supportId('msg', word, 16);
-  const chat = conv('samdkimchat'), email = conv('leebouncemail'), stranger = conv('strangermail'), closed = conv('samclosedchat');
+  const chat = conv('samdkimchat'), email = conv('leebouncemail'), stranger = conv('strangermail'), closed = conv('samclosedchat'), keys = conv('leekeyschat');
   await db.query(`INSERT INTO support_conversations(id,channel,thread_id,user_id,pending_address,verification,evidence,mode,workspace_id,status,subject,ticket_id,ticket_type,ticket_severity,
       ticket_resolved_at,ticket_resolved_by,agent_state,paused_by,paused_at,last_message_at,messages,turns,cost_usd,blocked_work,created_at,closed_at) VALUES
     ($1,'chat',NULL,'user_sam',NULL,'handoff','{"handoff":"sho_00000000000000000000000000000001"}','member','ws_northwind','ticketed','DKIM will not verify for mail.northwind.example',$5,'bug','P2',
@@ -539,8 +540,11 @@ async function supportInbox(db) {
     ($3,'email','thr_cls_stranger',NULL,'someone@example.org','none','{"message":"msg_00000000000000000000000000000003","dmarc":"FAIL","dkimAligned":false}','unverified',NULL,'open','Account access',NULL,NULL,NULL,
       NULL,NULL,'active',NULL,NULL,now()-interval '2 hours',1,0,0,1,now()-interval '2 hours',NULL),
     ($4,'chat',NULL,'user_sam',NULL,'handoff','{"handoff":"sho_00000000000000000000000000000004"}','member','ws_northwind','closed','Raise the daily limit',$6,'account','P3',
-      now()-interval '2 days','user_dana','active',NULL,NULL,now()-interval '3 days',2,2,0.0920,0,now()-interval '3 days',now()-interval '2 days')`,
-    [chat, email, stranger, closed, supportId('tkt', 'samdkim', 16), supportId('tkt', 'samlimit', 16)]);
+      now()-interval '2 days','user_dana','active',NULL,NULL,now()-interval '3 days',2,2,0.0920,0,now()-interval '3 days',now()-interval '2 days'),
+    ($7,'chat',NULL,'user_lee',NULL,'handoff','{"handoff":"sho_00000000000000000000000000000007"}','member','ws_northwind','open',NULL,NULL,NULL,NULL,
+      NULL,NULL,'active',NULL,NULL,now()-interval '6 minutes',2,1,0.0410,0,now()-interval '8 minutes',NULL)`,
+    [chat, email, stranger, closed, supportId('tkt', 'samdkim', 16), supportId('tkt', 'samlimit', 16), keys]);
+  await db.query(`UPDATE support_conversations SET ticket_at = created_at + interval '2 minutes' WHERE ticket_id IS NOT NULL AND id = ANY($1)`, [[chat, closed]]);
   const line = (id, conversation, seq, author, text, minutes, extra = {}) => db.query(`INSERT INTO support_messages(id,conversation_id,seq,author,kind,text,tools,staff_user_id,delivery,delivered_at,created_at)
     VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,CASE WHEN $9 = 'sent' AND $4 = 'staff' THEN now()-make_interval(mins=>$10) END,now()-make_interval(mins=>$10))`,
     [id, conversation, seq, author, extra.kind ?? null, text, JSON.stringify(extra.tools ?? []), extra.staff ?? null, extra.delivery ?? null, minutes]);
@@ -555,6 +559,13 @@ async function supportInbox(db) {
   await line(msg('strangerone'), stranger, 1, 'customer', 'I can’t sign in to my account. Please reset it for this address.', 120);
   await line(msg('closedone'), closed, 1, 'customer', 'Can we send 20,000 a day starting next week?', 4320);
   await line(msg('closedtwo'), closed, 2, 'agent', 'I filed this as a limit request; the team replies within two business days.', 4319, { kind: 'reply', delivery: 'sent' });
+  await line(msg('keysone'), keys, 1, 'customer', 'How do I rotate the Production API key without downtime?', 8);
+  await line(msg('keystwo'), keys, 2, 'agent', 'Create a second key with the same access, deploy it, then revoke the old one from **API keys**.', 6,
+    { kind: 'reply', tools: [{ label: 'Read your API keys', ok: true }], delivery: 'sent' });
+  const note = (word, conversation, text, minutes) => db.query(`INSERT INTO support_notes(id,user_id,workspace_id,conversation_id,author,text,created_at) VALUES ($1,'user_sam','ws_northwind',$2,'agent',$3,now()-make_interval(mins=>$4))`,
+    ['snt_' + Buffer.from(word).toString('hex').padEnd(32, '0'), conversation, text, minutes]);
+  await note('samdns', chat, 'DNS for northwind.example is managed by their agency; changes take a day.', 38);
+  await note('samlimit', closed, 'Asked for 20,000 a day for a product launch.', 4318);
   await db.query("INSERT INTO support_outbox_polls(id,polled_at) VALUES (1,now()-interval '1 minute') ON CONFLICT (id) DO UPDATE SET polled_at=excluded.polled_at");
   return chat;
 }

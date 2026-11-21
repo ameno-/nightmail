@@ -92,7 +92,9 @@ export function Switch({ checked, onCheckedChange, label, disabled, id: supplied
   const id = suppliedId ?? generatedId;
   return <div data-component="Switch" className="ui-check-field"><SwitchPrimitive.Root {...props} id={id} checked={checked} onCheckedChange={onCheckedChange} disabled={disabled} className="ui-switch"><SwitchPrimitive.Thumb className="ui-switch__thumb" /></SwitchPrimitive.Root><label htmlFor={id}>{label}</label></div>;
 }
-export function Tabs({ value, onValueChange, items, label = 'Sections', disabled = false }: { value: string; onValueChange: (value: string) => void | boolean | Promise<void | boolean>; items: { value: string; label: string; count?: number }[]; label?: string; disabled?: boolean }) {
+// A count of null is one still loading: its slot is drawn empty, so a page can reserve the count's width (min-width on
+// .ui-tab__count) and the tabs after it never move when it arrives.
+export function Tabs({ value, onValueChange, items, label = 'Sections', disabled = false }: { value: string; onValueChange: (value: string) => void | boolean | Promise<void | boolean>; items: { value: string; label: string; count?: number | null }[]; label?: string; disabled?: boolean }) {
   const refs = useRef<(HTMLButtonElement | null)[]>([]);
   const activating = useRef(false);
   const [focusTarget, setFocusTarget] = useState<string | null>(null);
@@ -134,7 +136,7 @@ export function Tabs({ value, onValueChange, items, label = 'Sections', disabled
     for (const tab of refs.current) if (tab) observer.observe(tab);
     return () => observer.disconnect();
   }, [index, order]);
-  return <div data-component="Tabs" className="ui-tabs ui-tabs--marker" role="tablist" aria-label={label}><span ref={marker} className="ui-tabs__marker" aria-hidden="true" />{items.map((item, index) => <button key={item.value} ref={node => { refs.current[index] = node; }} type="button" role="tab" disabled={disabled} aria-selected={value === item.value} tabIndex={value === item.value ? 0 : -1} className="ui-tab" onClick={() => void activate(index)} onKeyDown={event => { const next = event.key === 'ArrowRight' ? (index + 1) % items.length : event.key === 'ArrowLeft' ? (index + items.length - 1) % items.length : event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : null; if (next !== null) { event.preventDefault(); void activate(next); } }}>{item.label}{item.count !== undefined && <span className="ui-tab__count">{item.count.toLocaleString()}</span>}</button>)}</div>;
+  return <div data-component="Tabs" className="ui-tabs ui-tabs--marker" role="tablist" aria-label={label}><span ref={marker} className="ui-tabs__marker" aria-hidden="true" />{items.map((item, index) => <button key={item.value} ref={node => { refs.current[index] = node; }} type="button" role="tab" disabled={disabled} aria-selected={value === item.value} tabIndex={value === item.value ? 0 : -1} className="ui-tab" onClick={() => void activate(index)} onKeyDown={event => { const next = event.key === 'ArrowRight' ? (index + 1) % items.length : event.key === 'ArrowLeft' ? (index + items.length - 1) % items.length : event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : null; if (next !== null) { event.preventDefault(); void activate(next); } }}>{item.label}{item.count === null ? <span className="ui-tab__count" aria-hidden="true" /> : item.count !== undefined && <span className="ui-tab__count">{item.count.toLocaleString()}</span>}</button>)}</div>;
 }
 // `sensitive`: the dialog shows a secret (a one-time key, a signing secret, an invitation link). Staff UI notes can't be
 // left inside it and capture none of it (features/ui-notes).

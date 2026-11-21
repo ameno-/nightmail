@@ -158,7 +158,8 @@ html:not([data-privacy='off']) .private-field:not(:hover, :focus)::placeholder {
 .logs-page { display: flex; flex: 1; min-height: 0; flex-direction: column; }
 .logs-page > .ui-page-header { margin-bottom: var(--space-12); }
 .logs-page > .data-toolbar { padding-bottom: var(--space-12); }
-/* A log stream: 28px mono rows (--row-height-dense), the one exception to the tables' row height. */
+/* A log stream: 28px mono rows (--row-height-dense), the exception to the tables' row height it shares with the
+   support inbox's list (features/support-inbox). */
 .logs-table { --table-row-height: var(--row-height-dense); }
 .logs-table .ui-table { font-family: var(--font-mono); font-size: var(--text-xs); letter-spacing: -.01em; }
 .logs-table .ui-table .log-subject { font-family: var(--font-body); font-size: var(--text-sm); letter-spacing: 0; }

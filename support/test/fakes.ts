@@ -126,6 +126,9 @@ const MESSAGES = {
   msg_legacy_waiting: ['thr_legacy_b', 'pat@acme.test', 'FAIL'], msg_legacy_gave_up: ['thr_legacy_c'],
   msg_ticket_throw: ['thr_ticket_throw', null, 'PASS', null, 'Webhook test', 'My webhook test fails with a 500 every time.'],
   msg_ticket_abort: ['thr_ticket_abort', null, 'PASS', null, 'Webhook test', 'My webhook test fails with a 500 every time.'],
+  // The work ledger's cases.
+  msg_rate_1: ['thr_rate_1', 'rate@else.test'], msg_rate_2: ['thr_rate_2', 'rate@else.test'],
+  msg_legal_late_1: ['thr_legal_late', 'counsel@late.test', 'PASS', 'legal@dev.bane.mx', 'Preservation', 'Please preserve the records.'],
 };
 function message(id) {
   const [threadId = 'thr_other', from = 'ada@acme.test', dmarc = 'PASS', to = 'support@dev.bane.mx', subject = 'Bounces from Gmail?', body = 'Why are Gmail bounces up this week?'] = (MESSAGES[id] ?? []).map(v => v ?? undefined);

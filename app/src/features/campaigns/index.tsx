@@ -668,7 +668,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
       </section>
       <section className="campaign-fields campaign-message">
         <SectionHeader title="Message" actions={draft ? <><Button variant="ghost" onClick={() => navigate(campaignRoute(campaign, 'edit'))}>Edit message</Button><Button variant="secondary" disabled={Boolean(readinessError)} onClick={() => setTestOpen(true)}>Send test</Button></> : undefined} />
-        <dl className="campaign-message-details"><dt>From</dt><dd><NamedAddress name={campaign.fromName} address={campaign.fromEmail} /></dd>{campaign.replyTo.length > 0 && <><dt>Reply to</dt><dd><AddressList values={campaign.replyTo} /></dd></>}<dt>Subject</dt><dd>{campaign.subject}</dd>{campaign.previewText && <><dt>Inbox preview</dt><dd>{campaign.previewText}</dd></>}</dl>
+        <dl className="ui-facts campaign-message-details"><dt>From</dt><dd><NamedAddress name={campaign.fromName} address={campaign.fromEmail} /></dd>{campaign.replyTo.length > 0 && <><dt>Reply to</dt><dd><AddressList values={campaign.replyTo} /></dd></>}<dt>Subject</dt><dd>{campaign.subject}</dd>{campaign.previewText && <><dt>Inbox preview</dt><dd>{campaign.previewText}</dd></>}</dl>
         <CampaignRenderedPreview campaign={campaign} transform={previewHtml} />
       </section>
       {draft && <section className="campaign-delivery">

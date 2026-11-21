@@ -1,0 +1,117 @@
+/* The support inbox (/support), Signal Log: a dense list beside its facet rail (cards on a phone), and a conversation
+   with its transcript, a hairline, and the customer panel (a sheet on a phone). Labels are small mono caps, facts muted
+   keys with mono values, statuses a dot and a word; the accent stays on buttons. */
+.sinbox-page { display: flex; flex-direction: column; gap: var(--page-gap); min-width: 0; }
+.sinbox-page > .sinbox-toolbar { padding-bottom: 0; }
+/* A tab's count holds its width while it loads (Tabs draws the slot empty), so the tabs after it never move. */
+.sinbox-tabs .ui-tab__count { min-width: 16px; text-align: left; }
+.sinbox-toolbar { justify-content: space-between; }
+.sinbox-more { align-self: flex-start; margin-top: var(--space-12); }
+.sinbox-cell { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* The list: dense rows like the log stream; who and what in the body face, everything else in small mono. */
+.sinbox-table { --table-row-height: var(--row-height-dense); }
+.sinbox-table .ui-table td:is([data-col='status'], [data-col='ticket'], [data-col='agent'], [data-col='activity']) { font-family: var(--font-mono); font-size: var(--text-xs); letter-spacing: -.01em; }
+.sinbox-table .ui-table td[data-col='activity'] { color: var(--color-muted); }
+.sinbox-who { display: flex; align-items: center; gap: var(--space-8); min-width: 0; }
+.sinbox-unread { flex: none; width: 6px; height: 6px; border-radius: 50%; }
+.sinbox-who[data-unread] .sinbox-unread { background: var(--color-text); }
+.sinbox-who[data-unread] .sinbox-who__name { font-weight: var(--font-weight-bold); }
+.sinbox-channel { display: inline-flex; flex: none; color: var(--color-faint); }
+.sinbox-channel svg { width: 14px; height: 14px; }
+.sinbox-who__name { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sinbox-who__name .private-address__value { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+.sinbox-subject { display: flex; align-items: baseline; gap: var(--space-8); min-width: 0; }
+.sinbox-subject__text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sinbox-subject__text[data-placeholder] { color: var(--color-muted); }
+.sinbox-count { flex: none; color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); font-variant-numeric: tabular-nums; }
+.sinbox-split .ui-facets { padding-top: 2px; }
+
+/* One conversation. Its title and facts hold one line each, so the header is as tall loaded as loading. */
+.sinbox-conversation-page .ui-page-header { flex-wrap: nowrap; }
+.sinbox-conversation-page .ui-page-header > .cluster:first-child { flex: 1 1 auto; flex-wrap: nowrap; min-width: 0; }
+.sinbox-conversation-page .ui-page-header > .cluster:last-child:not(:first-child) { flex: none; flex-wrap: nowrap; }
+.sinbox-conversation-page .ui-page-header__text { flex: 1; min-width: 0; }
+.sinbox-conversation-page .ui-page-header h1 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sinbox-title-skeleton { display: inline-flex; align-items: center; height: var(--leading-lg); vertical-align: top; }
+.sinbox-subtitle { display: flex; align-items: center; height: 20px; margin: 0; overflow: hidden; color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); line-height: 20px; white-space: nowrap; }
+.sinbox-fact { display: inline-flex; flex: none; align-items: center; gap: var(--space-6); }
+.sinbox-fact ~ .sinbox-fact::before { content: '·'; margin-inline: var(--space-8); color: var(--color-faint); }
+.sinbox-fact svg { width: 14px; height: 14px; color: var(--color-faint); }
+.sinbox-fact .ui-status { font-family: var(--font-mono); }
+.sinbox-fact__key { color: var(--color-faint); font-size: var(--text-label); letter-spacing: var(--tracking-label); text-transform: uppercase; }
+.sinbox-conversation { display: grid; grid-template-columns: minmax(0, 1fr) 340px; align-items: start; }
+.sinbox-transcript { display: flex; flex-direction: column; min-width: 0; padding-right: var(--space-24); }
+.sinbox-earlier { margin: 0 0 var(--space-12); color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-xs); }
+.sinbox-messages { margin: 0; padding: 0; list-style: none; }
+.sinbox-message { min-width: 0; padding-block: var(--space-16); border-top: 1px solid var(--color-border-muted); }
+.sinbox-message:first-child { padding-top: 0; border-top: 0; }
+.sinbox-message[data-pending] { opacity: .7; }
+.sinbox-message__meta { display: flex; align-items: center; gap: var(--space-8); min-height: 20px; font-size: var(--text-sm); line-height: 20px; }
+.sinbox-message__author { font-weight: var(--font-weight-bold); }
+.sinbox-message__role { color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); letter-spacing: var(--tracking-label); text-transform: uppercase; }
+.sinbox-message[data-author='agent'] .sinbox-message__author, .sinbox-message[data-author='system'] .sinbox-message__author { color: var(--color-muted); }
+.sinbox-message__meta .ui-status { font-family: var(--font-mono); }
+.sinbox-message__time { margin-left: auto; color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sinbox-message__body { padding-top: var(--space-8); font-size: var(--text-sm); line-height: 22px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.sinbox-text { padding-top: var(--space-8); font-size: var(--text-sm); line-height: 22px; overflow-wrap: anywhere; }
+.sinbox-text > * { margin: 0; }
+.sinbox-text > * + * { margin-top: var(--space-8); }
+.sinbox-text :is(ul, ol) { padding-left: 20px; }
+.sinbox-text strong { font-weight: var(--font-weight-bold); }
+.sinbox-text code { padding: 1px 4px; border-radius: 4px; background: var(--color-layer-2); font-family: var(--font-mono); font-size: 12px; }
+.sinbox-text pre { padding: var(--space-8) var(--space-12); white-space: pre-wrap; border-radius: 4px; background: var(--color-layer-1); font-size: 12px; line-height: 18px; }
+.sinbox-text pre code { padding: 0; background: none; }
+.sinbox-tools { display: flex; flex-wrap: wrap; gap: var(--space-4) var(--space-16); margin: var(--space-8) 0 0; padding: 0; list-style: none; color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); line-height: 16px; }
+.sinbox-tools li { display: inline-flex; align-items: center; gap: var(--space-6); }
+.sinbox-tools svg { width: 12px; height: 12px; }
+
+/* The reply, held at the bottom of the window while the transcript scrolls. */
+.sinbox-composer { position: sticky; bottom: 0; z-index: 1; display: grid; gap: var(--space-8); margin-top: auto; padding: var(--space-12) 0 var(--space-16); border-top: 1px solid var(--color-border-muted); background: var(--color-surface); }
+.sinbox-composer .ui-textarea { min-height: 88px; resize: vertical; }
+.sinbox-composer--idle { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); color: var(--color-muted); font-size: var(--text-sm); }
+.sinbox-composer__actions { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); }
+.sinbox-composer__hint { min-width: 0; color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-xs); line-height: var(--leading-xs); }
+
+/* The customer panel beside the transcript: a hairline, then labelled sections. */
+.sinbox-panel { position: sticky; top: 0; min-width: 0; padding-left: var(--space-24); border-left: 1px solid var(--color-border-muted); }
+.sinbox-panel__body { display: flex; flex-direction: column; gap: var(--space-20); min-width: 0; }
+.sinbox-panel__body .ui-label { margin-bottom: var(--space-4); }
+.sinbox-kv { grid-template-columns: 96px minmax(0, 1fr); }
+.sinbox-kv :is(dt, dd) { border-bottom: 1px solid var(--color-border-muted); }
+.sinbox-address { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 var(--space-8); min-width: 0; }
+.sinbox-ticket { display: inline-flex; flex-wrap: wrap; gap: 0 var(--space-8); min-width: 0; }
+.sinbox-faint { color: var(--color-faint); }
+.sinbox-list, .sinbox-notes { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
+.sinbox-list li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); min-height: var(--row-height-dense); border-bottom: 1px solid var(--color-border-muted); font-size: var(--text-sm); line-height: 20px; }
+.sinbox-list__main { min-width: 0; overflow: hidden; color: var(--color-text); text-overflow: ellipsis; white-space: nowrap; }
+a.sinbox-list__main { text-decoration: none; }
+@media (hover: hover) and (pointer: fine) { a.sinbox-list__main:hover { text-decoration: underline; text-underline-offset: 3px; } }
+.sinbox-list__meta { flex: none; max-width: 65%; overflow: hidden; color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
+.sinbox-notes li { display: grid; gap: 2px; padding-block: var(--space-6); border-bottom: 1px solid var(--color-border-muted); font-size: var(--text-sm); line-height: 20px; }
+.sinbox-notes p { margin: 0; overflow-wrap: anywhere; }
+.sinbox-notes .sinbox-list__meta { max-width: none; }
+.sinbox-none { display: flex; align-items: center; min-height: var(--row-height-dense); margin: 0; border-bottom: 1px solid var(--color-border-muted); color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-xs); }
+
+/* The shortcuts sheet. */
+.sinbox-keys { display: grid; margin: 0; font-size: var(--text-sm); }
+.sinbox-keys > div { display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: center; gap: var(--space-12); min-height: var(--row-height-dense); border-bottom: 1px solid var(--color-border-muted); }
+.sinbox-keys dt { display: flex; gap: var(--space-4); }
+.sinbox-keys dd { margin: 0; }
+.sinbox-keys kbd { min-width: 20px; padding: 0 5px; border-radius: 4px; background: var(--color-layer-2); box-shadow: inset 0 0 0 1px var(--color-border); font-family: var(--font-mono); font-size: var(--text-label); line-height: 18px; text-align: center; }
+
+@media (max-width: 1100px) { .sinbox-conversation { grid-template-columns: minmax(0, 1fr) 280px; } }
+@media (max-width: 899px) {
+  .sinbox-conversation { grid-template-columns: minmax(0, 1fr); }
+  .sinbox-transcript { padding-right: 0; }
+  .sinbox-panel { margin-top: var(--space-24); padding: var(--space-20) 0 0; border-top: 1px solid var(--color-border-muted); border-left: 0; }
+  .sinbox-composer { bottom: calc(var(--tab-bar-height) + env(safe-area-inset-bottom)); }
+  /* The reply is one line until it is used, so the transcript keeps the screen. */
+  .sinbox-composer .ui-textarea { min-height: 44px; height: 44px; resize: none; transition: height var(--motion-duration, 120ms); }
+  .sinbox-composer:focus-within .ui-textarea, .sinbox-composer[data-filled] .ui-textarea { height: 112px; }
+  .sinbox-composer:not(:focus-within):not([data-filled]):not([data-unavailable]) .sinbox-composer__actions { display: none; }
+}
+@media (pointer: coarse) { .data-toolbar > .sinbox-shortcuts-button { display: none; } }
+/* A card leaves out what a row has nothing for (no ticket). */
+.sinbox-table .ui-card__segment:empty { display: none; }
+.sinbox-sheet .sinbox-panel__body { padding-bottom: var(--space-8); }

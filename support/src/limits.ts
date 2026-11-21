@@ -9,7 +9,8 @@ import { productName } from '../../api/src/brand.js';
 // mail at abuse@ can't starve legal@, privacy@ or a customer's escalation. A sender is identified by the DMARC-aligned
 // From when DMARC passes; otherwise all unauthenticated mail to one address shares a coarse bucket (a spoofed From
 // can't spread itself across many keys). Mail over a cap is kept (bounded) and listed in one daily digest to the team,
-// never silently dropped; the first time a global cap is hit each day the team is also told at once.
+// never silently dropped; the first time a global cap is hit each day the team is also told at once. Both emails are
+// notices: frozen when first queued and resent by the cron sweep until Nightmail accepts them.
 
 export const DEFAULT_LIMITS = {
   /** Model turns, all conversations together (the Console key's own budget is the backstop), and per person. */
@@ -81,28 +82,62 @@ export async function ticketAllowed(env: Env, input: { verifiedUserId: string | 
   return { ok: true };
 }
 
+export type Held = { channel: Mailbox; reason: string; sender: string | null; dmarc: string | null; subject: string | null; text: string | null; messageId: string; threadId: string | null };
+/** The row that keeps a message for the team's digest, unless it is already kept for that reason. */
+export function overflowRow(env: Env, held: Held) {
+  return env.DB.prepare(`INSERT INTO overflow (day, channel, reason, sender, dmarc, subject, text, message_id, thread_id, created_at) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    WHERE NOT EXISTS (SELECT 1 FROM overflow WHERE message_id = ? AND channel = ? AND reason = ?)`)
+    .bind(today(), held.channel, held.reason, held.sender?.slice(0, 254) ?? null, held.dmarc, held.subject?.slice(0, 200) ?? null, held.text?.slice(0, 4000) ?? null, held.messageId, held.threadId, Date.now(), held.messageId, held.channel, held.reason);
+}
+
 /** Keeps a message that went over a cap for the team's digest (bounded: 4,000 characters, 2,000 messages a day). */
-export async function holdOverCap(env: Env, held: { channel: Mailbox; reason: string; sender: string | null; dmarc: string | null; subject: string | null; text: string | null; messageId: string; threadId: string | null }, count = countToday) {
+export async function holdOverCap(env: Env, held: Held, count = countToday) {
   const n = await count(env, 'overflow:kept', 2000);
   log('warn', { event: 'email', code: 'OVER_CAP_HELD', channel: held.channel, reason: held.reason, kept: n.ok });
   if (!n.ok) return;
-  await env.DB.prepare('INSERT INTO overflow (day, channel, reason, sender, dmarc, subject, text, message_id, thread_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-    .bind(today(), held.channel, held.reason, held.sender?.slice(0, 254) ?? null, held.dmarc, held.subject?.slice(0, 200) ?? null, held.text?.slice(0, 4000) ?? null, held.messageId, held.threadId, Date.now()).run();
+  await overflowRow(env, held).run();
 }
 
 /** Tells the team once a day that a global cap was reached (idempotent per day and kind). */
 export async function alertOnce(env: Env, kind: 'turns' | 'tickets' | 'mail', limit: number) {
-  const first = await countToday(env, `alert:${kind}`, 1);
   log('error', { event: 'cap', code: 'SUPPORT_DAILY_CAP_REACHED', kind, limit });
-  if (!first.ok) return;
   const what = { turns: 'model-turn budget', tickets: 'verified-customer ticket reserve', mail: 'inbound mail cap' }[kind];
+  await notice(env, `cap-${kind}-${today()}`, { subject: `[${productName} support] Daily ${what} reached (${limit})`,
+    text: [`The support agent reached its daily ${what} of ${limit} on ${today()} (UTC).`, '', kind === 'turns'
+      ? 'Until midnight UTC, chats show "support is busy" and support emails get a fixed reply saying the team will answer.'
+      : 'Until midnight UTC, mail over the cap is kept and listed in tomorrow’s over-cap digest; nothing is dropped.', '',
+      'Raise it with the matching LIMIT_* var, or check the conversations for abuse.'].join('\n') });
+}
+
+type Notice = { addressId?: string; to: string[]; subject: string; text: string };
+/**
+ * A team email sent once under its idempotency key: the request is frozen when first queued, and the cron sweep resends
+ * exactly it (resendNotices) until Nightmail accepts it. A later call with the same key does nothing.
+ */
+export async function notice(env: Env, key: string, email: { subject: string; text: string }) {
+  const now = Date.now(), request: Notice = { addressId: env.SUPPORT_ADDRESS_ID, to: [env.TICKET_TO], ...email };
+  const queued = await env.DB.prepare('INSERT INTO support_notices (key, request, due_at, created_at) VALUES (?, ?, ?, ?) ON CONFLICT (key) DO NOTHING').bind(key, JSON.stringify(request), now, now).run();
+  if (queued.meta.changes) await sendNotice(env, key, request, 0);
+}
+
+async function sendNotice(env: Env, key: string, request: Notice, attempts: number) {
   try {
-    await baneApi(env).startThread({ to: [env.TICKET_TO], subject: `[${productName} support] Daily ${what} reached (${limit})`,
-      text: [`The support agent reached its daily ${what} of ${limit} on ${today()} (UTC).`, '', kind === 'turns'
-        ? 'Until midnight UTC, chats show "support is busy" and support emails get a fixed reply saying the team will answer.'
-        : 'Until midnight UTC, mail over the cap is kept and listed in tomorrow’s over-cap digest; nothing is dropped.', '',
-        'Raise it with the matching LIMIT_* var, or check the conversations for abuse.'].join('\n') }, `cap-${kind}-${today()}`);
-  } catch (error) { logError(error, { event: 'cap', code: 'SUPPORT_CAP_ALERT_FAILED' }); }
+    await baneApi(env).startThread(request, key);
+    await env.DB.prepare('UPDATE support_notices SET sent_at = ?, attempts = ?, last_error = NULL WHERE key = ?').bind(Date.now(), attempts + 1, key).run();
+  } catch (error) {
+    logError(error, { event: 'notice', code: 'SUPPORT_NOTICE_FAILED', attempt: attempts + 1 });
+    const status = (error as { status?: number }).status ?? 0, code = (error as { code?: string }).code ?? 'ERROR';
+    await env.DB.prepare('UPDATE support_notices SET attempts = ?, due_at = ?, last_error = ? WHERE key = ?')
+      .bind(attempts + 1, Date.now() + Math.min(60, 5 * 2 ** attempts) * 60_000, `${status}:${String(code).slice(0, 60)}`, key).run();
+  }
+}
+
+/** The sweep's part: unsent notices from the last two days whose retry is due, each resent as first queued. */
+export async function resendNotices(env: Env, now = Date.now()) {
+  const due = (await env.DB.prepare('SELECT key, request, attempts FROM support_notices WHERE sent_at IS NULL AND due_at <= ? AND created_at > ? ORDER BY created_at LIMIT 10')
+    .bind(now, now - 2 * 86_400_000).all<{ key: string; request: string; attempts: number }>()).results;
+  for (const row of due) await sendNotice(env, row.key, JSON.parse(row.request) as Notice, row.attempts);
+  return due.length;
 }
 
 /** The daily cron (00:10 UTC): yesterday's over-cap digest to the team, and the retention sweep (review L2). */
@@ -114,11 +149,16 @@ export async function daily(env: Env, now = Date.now()) {
     const lines = [`${total} message${total === 1 ? ' was' : 's were'} over a daily cap on ${day} (UTC) and kept here instead of being answered or ticketed. Everything is also in ${productName}'s inbox.`, '',
       ...rows.map(r => `- ${r.channel}@ · ${r.reason} · ${r.sender ?? 'unknown'} (DMARC ${r.dmarc ?? 'none'}) · "${(r.subject ?? '').replace(/[\r\n]+/g, ' ').slice(0, 120)}" · ${r.message_id}${r.thread_id ? ` · thread ${r.thread_id}` : ''}`),
       ...(total > rows.length ? [`…and ${total - rows.length} more (D1 overflow, day ${day}).`] : []), '', 'Subjects and senders are untrusted.'];
-    await baneApi(env).startThread({ to: [env.TICKET_TO], subject: `[${productName} support] ${total} message${total === 1 ? '' : 's'} over cap on ${day}`, text: lines.join('\n') }, `overflow-${day}`);
+    await notice(env, `overflow-${day}`, { subject: `[${productName} support] ${total} message${total === 1 ? '' : 's'} over cap on ${day}`, text: lines.join('\n') });
   }
-  // Retention: counters a week, single-use records a month, overflow 30 days, closed conversations and resolved tickets a year.
+  // Retention: counters a week, single-use records and notices a month, overflow 30 days, finished work 35 days (the
+  // replay poller dedupes against it for the 30 days Nightmail keeps events), closed conversations and resolved tickets a
+  // year. Mail kept at the edge for an address nobody configured within 30 days is given up (it stays in Nightmail's inbox).
   const ago = (days: number) => now - days * 86_400_000;
   await env.DB.batch([
+    env.DB.prepare("UPDATE support_work SET state = 'dead', updated_at = ? WHERE object = '' AND state = 'blocked' AND created_at < ?").bind(now, ago(30)),
+    env.DB.prepare("DELETE FROM support_work WHERE state IN ('done', 'held', 'dead', 'parked') AND updated_at < ?").bind(ago(35)),
+    env.DB.prepare('DELETE FROM support_notices WHERE created_at < ?').bind(ago(30)),
     env.DB.prepare('DELETE FROM daily_counters WHERE day < ?').bind(today(ago(7))),
     env.DB.prepare('DELETE FROM overflow WHERE created_at < ?').bind(ago(30)),
     env.DB.prepare('DELETE FROM webhook_deliveries WHERE received_at < ?').bind(ago(30)),

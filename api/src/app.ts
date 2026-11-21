@@ -25,6 +25,7 @@ function routeGroupFor(pathname: string): RouteGroup | null {
   // Billing: balance, usage, ledger, payments, the Stripe webhook and the operator's billing tools (behind the operator gate).
   if (pathname === '/v1/billing' || pathname.startsWith('/v1/billing/') || pathname.startsWith('/v1/operator/billing/')) return 'billing';
   if (operatorPath(pathname) || pathname.startsWith('/v1/ui-notes/')) return 'operator';
+  if (pathname.startsWith('/v1/support-actions/')) return 'support';
   if (supportPath(pathname) || pathname === '/v1/activity' || pathname === '/v1/contact-support' || pathname === '/v1/public/support-keys' || pathname.startsWith('/v1/support-conversations/')) return 'support';
   if (pathname === '/v1/me' || pathname === '/v1/mcp-connections' || pathname.startsWith('/v1/mcp-connections/') || pathname === '/v1/agents' || pathname.startsWith('/v1/agents/') || pathname === '/api/auth' || pathname.startsWith('/api/auth/') || pathname.startsWith('/.well-known/') || pathname === '/mcp/login' || pathname === '/mcp/consent') return 'auth-ui';
   if (pathname === '/mcp' || pathname.startsWith('/mcp/')) return 'mcp';
@@ -86,8 +87,8 @@ function loadGroupRegistrar(group: Exclude<RouteGroup, 'mcp'>): Promise<(app: Ap
       case 'operator':
       case 'support': {
         const [{ registerOperator }, { registerAudit }, { registerSupport, registerSupportOperator }, { registerSupportConversations }, { registerSupportInbox }, { registerUiNotes }] = await Promise.all([import('./operator.js'), import('./audit.js'), import('./support.js'), import('./support-conversations.js'), import('./support-inbox.js'), import('./ui-notes.js')]);
-        const { registerSupportNotes } = await import('./support-notes.js');
-        return (target: App) => { registerOperator(target); registerAudit(target); registerSupport(target); registerSupportOperator(target); registerSupportConversations(target); registerSupportInbox(target); registerUiNotes(target); registerSupportNotes(target); };
+        const [{ registerSupportNotes }, { registerSupportActions }] = await Promise.all([import('./support-notes.js'), import('./support-actions.js')]);
+        return (target: App) => { registerOperator(target); registerAudit(target); registerSupport(target); registerSupportOperator(target); registerSupportConversations(target); registerSupportInbox(target); registerUiNotes(target); registerSupportNotes(target); registerSupportActions(target); };
       }
       case 'billing': {
         const [{ registerBilling }, { registerStripeWebhook }] = await Promise.all([import('./billing/routes.js'), import('./billing/stripe-webhook.js')]);
@@ -215,6 +216,8 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     if (c.req.method === 'GET' && /^\/v1\/workspaces\/invitations\/[^/]+$/.test(c.req.path)) return next();
     // Claiming an emailed support conversation authenticates the same way: a person may have no workspace yet.
     if (c.req.method === 'POST' && /^\/v1\/support-conversations\/[^/]+\/claim$/.test(c.req.path)) return next();
+    // A support action is confirmed by the person it was proposed to, in its own workspace (src/support-actions.ts).
+    if (c.req.method === 'GET' ? /^\/v1\/support-actions\/[^/]+$/.test(c.req.path) : c.req.method === 'POST' && /^\/v1\/support-actions\/[^/]+\/(?:confirm|decline)$/.test(c.req.path)) return next();
     // Provider redirects cannot carry a workspace header. This route authenticates the OIDC
     // session itself, then authorizes and selects the workspace from the signed return token.
     if (c.req.method === 'GET' && /^\/v1\/domains\/[^/]+\/dns-setup\/return\/[^/]+$/.test(c.req.path)) return next();
@@ -348,8 +351,8 @@ export async function createOpenApiApp(): Promise<App> {
   registerWorkspaces(full); registerProviderConnections(full); registerMcp(full); registerPublicStats(full); registerOverviewSetup(full); registerOperator(full);
   registerAudit(full); registerSupport(full); registerSupportOperator(full); registerSupportConversations(full); registerSupportInbox(full); registerUiNotes(full);
   registerBilling(full); registerStripeWebhook(full);
-  const [{ registerSupportNotes }, { registerAnalytics }] = await wrapModuleLoad(() => Promise.all([import('./support-notes.js'), import('./analytics.js')]));
-  registerSupportNotes(full); registerAnalytics(full);
+  const [{ registerSupportNotes }, { registerSupportActions }, { registerAnalytics }] = await wrapModuleLoad(() => Promise.all([import('./support-notes.js'), import('./support-actions.js'), import('./analytics.js')]));
+  registerSupportNotes(full); registerSupportActions(full); registerAnalytics(full);
   return full;
 }
 

@@ -141,6 +141,23 @@ export default {
   },
 };`;
 
+// Test-only entrypoint for the ledger: INTAKE_ADDRESSES as the test sets it, for the webhooks and the cron alike (an
+// address added to the configuration after its mail arrived).
+const LEDGER_ENTRY = `
+import worker from './worker.js';
+export * from './worker.js';
+let intake = null;
+const configured = env => intake === null ? env : { ...env, INTAKE_ADDRESSES: intake };
+export default {
+  ...worker,
+  async fetch(request, env, ctx) {
+    if (new URL(request.url).pathname !== '/__intake-addresses') return worker.fetch(request, configured(env), ctx);
+    intake = (await request.json()).addresses;
+    return new Response(null, { status: 204 });
+  },
+  scheduled(controller, env, ctx) { return worker.scheduled(controller, configured(env), ctx); },
+};`;
+
 const baseEnv = (overrides: Record<string, unknown> = {}) => ({
   STAGE: text('dev'), PUBLIC_URL: text(SUPPORT), DASHBOARD_ORIGINS: text(`${ORIGIN},http://localhost:5173`), BANE_ORIGIN: text(ORIGIN),
   SUPPORT_ADDRESS: text('support@dev.bane.mx'), SUPPORT_ADDRESS_ID: text('adr_support'), TICKET_TO: text('ryan@anoma.ly'), GATEWAY_URL: text('https://opencode.ai/inference/anthropic/v1'),
@@ -939,6 +956,125 @@ describe('support Worker', () => {
       assert.deepEqual((await replies(thread, instance)).map(c => c[3].text), ['That’s a Nightmail bug: I’ve passed it to the Nightmail team.']);
       assert.equal(recorded.length, turns, 'No second model call.');
       assert.deepEqual(JSON.parse((await ticket())!.notes), [], 'Its own ticket gets no “wrote again” note.');
+    });
+  });
+
+  describe('work ledger and sweep', () => {
+    let instance: Miniflare;
+    beforeAll(async () => {
+      // One message a minute per sender, and legal@ missing from INTAKE_ADDRESSES until a test lists it.
+      const support = worker('support', baseEnv({ INTAKE_ADDRESSES: text('abuse@dev.bane.mx,privacy@dev.bane.mx'), EMAIL_IN: { type: 'rate-limit' as const, namespace: '8794102', simple: { limit: 1, period: 60 } } }));
+      Object.assign(support.config.manifest.modules, { 'ledger-test.js': { type: 'esm', contents: LEDGER_ENTRY } });
+      support.config.manifest.mainModule = 'ledger-test.js';
+      instance = new Miniflare({ cf: false, telemetry: { enabled: false }, workers: [support,
+        { config: { name: 'fake-bane', compatibilityDate: '2026-09-08', manifest: { mainModule: 'bane.js', modules: { 'bane.js': { type: 'esm', contents: FAKE_BANE } } }, env: {} } }] } as never);
+      await migrate(instance);
+    });
+    afterAll(() => instance?.dispose());
+    const db = () => instance.getD1Database('DB', 'support');
+    const ledger = async (messageId: string) => (await (await db()).prepare("SELECT object, state, reason, source FROM support_work WHERE message_id = ? AND kind = 'message' ORDER BY object").bind(messageId).all<any>()).results;
+    const cron = async (cron: string, at = Date.now()) => (await instance.getWorker('support')).scheduled({ cron, scheduledTime: new Date(at) });
+    const sweep = () => cron('*/5 * * * *');
+    const settle = () => new Promise(r => setTimeout(r, 1500));
+    async function outage(path: string, status = 0, code = 'UNAVAILABLE') {
+      const res = await (await instance.getWorker('fake-bane')).fetch('http://fake-bane/__outage', { method: 'POST', body: JSON.stringify({ path, status, code }) });
+      assert.equal(res.status, 204);
+    }
+    const sent = async (key: string) => (await fakeCalls(instance)).filter(c => c[0] === 'api' && c[5] === key);
+    const delivered = async (key: string) => (await sent(key)).filter(c => c[6] < 300 && !c[7]);
+
+    test('an edge rate limit keeps the message for the digest', async () => {
+      assert.equal((await signedHook('msg_rate_1', 'thr_rate_1', 'rate@else.test', { instance })).status, 200);
+      assert.equal((await signedHook('msg_rate_2', 'thr_rate_2', 'rate@else.test', { instance })).status, 200);
+      assert.ok(await eventually(async () => (await replies('thr_rate_1', instance))[0]), 'The first is answered.');
+      // The second is over the sender's limit: kept, and never read, answered or given a conversation.
+      assert.deepEqual(await ledger('msg_rate_2'), [{ object: '', state: 'held', reason: 'rate', source: 'webhook' }]);
+      const d = await db();
+      assert.equal(await d.prepare("SELECT id FROM conversations WHERE thread_id = 'thr_rate_2'").first(), null);
+      assert.ok(!(await fakeCalls(instance)).some(c => c[0] === 'api' && String(c[2]).startsWith('/v1/inbound/messages/msg_rate_2')));
+      const kept = async () => (await d.prepare("SELECT channel, reason, sender, dmarc FROM overflow WHERE message_id = 'msg_rate_2'").all()).results;
+      assert.deepEqual(await kept(), [{ channel: 'support', reason: 'mail per minute per sender', sender: 'rate@else.test', dmarc: 'not checked' }]);
+      // A redelivery under a new webhook ID finds the row and changes nothing.
+      assert.equal((await signedHook('msg_rate_2', 'thr_rate_2', 'rate@else.test', { instance })).status, 200);
+      assert.equal((await kept()).length, 1);
+      // The answered message's row is its object's, mirrored once its work finished.
+      const first = await eventually(async () => (await ledger('msg_rate_1')).find(r => r.state === 'done'));
+      assert.ok(first?.object.length === 64 && first.source === 'webhook', JSON.stringify(await ledger('msg_rate_1')));
+      await cron('10 0 * * *', Date.now() + 86_400_000);
+      const digest = await eventually(async () => (await fakeCalls(instance)).find(c => c[0] === 'api' && c[2] === '/v1/inbound/threads' && /over cap on /.test(c[3].subject ?? '')));
+      assert.ok(digest?.[3].text.includes('support@ · mail per minute per sender · rate@else.test (DMARC not checked)'), digest?.[3].text);
+    });
+
+    test('intake mail to an unconfigured address is blocked, then admitted once configured', async () => {
+      const hook = () => signedHook('msg_legal_late_1', 'thr_legal_late', 'counsel@late.test', { intake: true, to: 'legal@dev.bane.mx', instance });
+      const waiting = [{ object: '', state: 'blocked', reason: 'unconfigured', source: 'webhook' }];
+      assert.equal((await hook()).status, 200);
+      assert.deepEqual(await ledger('msg_legal_late_1'), waiting);
+      await sweep(); await settle();
+      assert.deepEqual(await ledger('msg_legal_late_1'), waiting, 'Waits while the address is unlisted.');
+      assert.equal((await replies('thr_legal_late', instance)).length, 0);
+      await (await instance.dispatchFetch(`${SUPPORT}/__intake-addresses`, { method: 'POST', body: JSON.stringify({ addresses: 'abuse@dev.bane.mx,privacy@dev.bane.mx,legal@dev.bane.mx' }) })).body?.cancel();
+      await sweep();
+      const ack = await eventually(async () => (await replies('thr_legal_late', instance))[0]);
+      assert.match(ack?.[3].text, /^Hi,\n\nThanks for writing to legal@dev\.bane\.mx\. We've received your message and logged it as tkt_/);
+      const d = await db();
+      const ticket = await eventually(async () => (await d.prepare("SELECT id, type, notified_at FROM tickets WHERE title = 'Preservation'").first<any>()) ?? undefined);
+      assert.equal(ticket.type, 'legal');
+      // Once: another sweep and a redelivery change nothing.
+      await sweep(); assert.equal((await hook()).status, 200); await settle();
+      assert.equal((await replies('thr_legal_late', instance)).length, 1, 'Acknowledged once.');
+      assert.equal((await delivered(`ticket-${ticket.id}`)).length, 1, 'The team is emailed once.');
+      const rows = await ledger('msg_legal_late_1');
+      assert.deepEqual(rows.map(r => [r.object === '' ? 'edge' : 'object', r.state]), [['edge', 'done'], ['object', 'done']]);
+      const items = (await d.prepare('SELECT kind, state FROM support_work WHERE flow = ? AND object = ? ORDER BY kind').bind('intake', rows[1].object).all()).results;
+      assert.deepEqual(items, [{ kind: 'ack', state: 'done' }, { kind: 'message', state: 'done' }, { kind: 'notify', state: 'done' }, { kind: 'ticket', state: 'done' }], 'Its object mirrors every item.');
+    });
+
+    test('a legacy ticket with notified_at NULL is emailed once by the sweep', async () => {
+      const d = await db(), filed = Date.now() - 20 * 60_000;
+      const ada = { verified: 'handoff', userId: 'usr_ada', email: 'ada@acme.test', name: 'Ada Lovelace', role: 'owner', workspaces: [{ id: 'ws_acme', name: 'Acme Prod' }] };
+      // Filed before the work queue, their team email never sent: an email thread's, an intake thread's and a chat's (with
+      // its follow-up never opened either).
+      const tickets = [
+        ['tkt_legacyemail23456', `conv_${'a'.repeat(26)}`, 'email', 'thr_legacy_ticket', 'bug', { ...ada, verified: 'dmarc' }],
+        ['tkt_legacyintake2345', `conv_${'b'.repeat(26)}`, 'email', 'intake:thr_legacy_intake', 'abuse_report', { verified: false, sender: 'old@isp.test', dmarc: 'FAIL' }],
+        ['tkt_legacychat234567', `conv_${'c'.repeat(26)}`, 'chat', null, 'billing', ada],
+      ] as const;
+      for (const [id, conversation, channel, thread, type, customer] of tickets) {
+        await d.prepare("INSERT INTO conversations (id, channel, thread_id, status, ticket_id, created_at, updated_at) VALUES (?, ?, ?, 'ticketed', ?, ?, ?)").bind(conversation, channel, thread, id, filed, filed).run();
+        await d.prepare(`INSERT INTO tickets (id, conversation_id, channel, category, type, title, severity, due_at, customer, summary, ask, tried, recommendation, evidence, details, followup_thread_id, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, 'P2', ?, ?, 'Filed before the work queue.', 'Help', '[]', 'Reply to them.', '{"ids":[]}', '{}', ?, ?, ?)`)
+          .bind(id, conversation, channel, type, type, `Legacy ${type}`, filed + 86_400_000, JSON.stringify(customer), thread?.replace('intake:', '') ?? null, filed, filed).run();
+      }
+      await Promise.all([sweep(), sweep()]);
+      for (const [id] of tickets) assert.ok(await eventually(async () => (await d.prepare('SELECT notified_at FROM tickets WHERE id = ?').bind(id).first<any>())?.notified_at), `${id} is emailed.`);
+      assert.ok(await eventually(async () => (await d.prepare("SELECT followup_thread_id FROM tickets WHERE id = 'tkt_legacychat234567'").first<any>())?.followup_thread_id), 'The chat follow-up is opened.');
+      await sweep(); await settle();
+      for (const [id] of tickets) assert.equal((await delivered(`ticket-${id}`)).length, 1, `${id} once.`);
+      const intake = (await delivered('ticket-tkt_legacyintake2345'))[0], followup = await delivered('followup-tkt_legacychat234567');
+      assert.equal(intake[3].subject, '[Nightmail abuse] [UNVERIFIED] tkt_legacyintake2345: Legacy abuse_report (P2)');
+      assert.ok(intake[3].text.startsWith('UNVERIFIED SENDER (DMARC FAIL)'), intake[3].text);
+      assert.deepEqual([followup.length, followup[0][3].to], [1, ['ada@acme.test']]);
+    });
+
+    test('a failed digest is resent once', async () => {
+      const d = await db(), at = Date.now() + 2 * 86_400_000, day = new Date(at - 86_400_000).toISOString().slice(0, 10), key = `overflow-${day}`;
+      await d.prepare("INSERT INTO overflow (day, channel, reason, sender, dmarc, subject, text, message_id, thread_id, created_at) VALUES (?, 'abuse', 'tickets for abuse@', 's9@spoof.test', 'FAIL', 'Spam 9', 'spam', 'msg_abuse_s9', 'thr_s9', ?)").bind(day, Date.now()).run();
+      const notice = () => d.prepare('SELECT attempts, sent_at, last_error FROM support_notices WHERE key = ?').bind(key).first<any>();
+      await outage('/v1/inbound/threads', 503);
+      await cron('10 0 * * *', at);
+      assert.deepEqual(await eventually(async () => (await notice())?.attempts ? notice() : undefined), { attempts: 1, sent_at: null, last_error: '503:UNAVAILABLE' });
+      await outage('/v1/inbound/threads');
+      await sweep(); await settle();
+      assert.equal((await sent(key)).length, 1, 'Not before its retry is due.');
+      await d.prepare('UPDATE support_notices SET due_at = 0 WHERE key = ?').bind(key).run();
+      await sweep();
+      assert.ok(await eventually(async () => (await notice())?.sent_at));
+      await sweep(); await settle();
+      const attempts = await sent(key);
+      assert.deepEqual(attempts.map(c => c[6]), [503, 202]);
+      assert.deepEqual(attempts[1].slice(1, 6), attempts[0].slice(1, 6), 'Resent exactly as first built.');
+      assert.match(attempts[1][3].subject, /^\[Nightmail support\] 1 message over cap on \d{4}-\d{2}-\d{2}$/);
     });
   });
 
