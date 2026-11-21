@@ -144,7 +144,14 @@ function DomainDetail() {
   // Invalidate only after leaving: refetching this domain would 404 while the dialog closes.
   const remove = useApiMutation((api, domainId: string) => api.domains.remove(domainId), 'Domain deleted', true, false)
   const configureMailFrom = useApiMutation((api, input: {id: string; mailFromDomain: string}) => api.domains.configureMailFrom(input.id, input.mailFromDomain), 'Custom MAIL FROM configured', true)
+  const removeMailFrom = useApiMutation(async (api, domainId: string) => {
+    const updated = await api.domains.removeMailFrom(domainId)
+    client.setQueryData(['nightmail', 'domain', domainId], updated)
+    return updated
+  }, 'Custom MAIL FROM removed', true)
   const [deleteOpen, setDeleteOpen] = useState(false)
+  // The name stays in the dialog's text while it closes, after the domain no longer has one.
+  const [removingMailFrom, setRemovingMailFrom] = useState({ open: false, name: '' })
   const [mailFromOpen, setMailFromOpen] = useState(false)
   const [mailFromDomain, setMailFromDomain] = useState('')
   const [mailFromInvalid, setMailFromInvalid] = useState('')
@@ -190,7 +197,7 @@ function DomainDetail() {
     <MutationError error={verify.error ?? choose.error} />
     {!multiTenant && regionId !== current.regionId && <Alert tone="info">This domain belongs to {current.regionId}. <Button variant="ghost" onClick={() => setRegionId(current.regionId)}>Switch to {current.regionId}</Button></Alert>}
     <div className="domain-sections">
-      <DomainRecords domain={current} setup={dns.setup} receivingView={multiTenant ? { off: receiving.data?.status === 'off', actions: receivingActions } : undefined} mailFrom={{ onEdit: openMailFrom }} actions={current.records.length > 0 && <Button onClick={() => downloadDnsRecords(current.name, current.records)}>Download .txt</Button>} />
+      <DomainRecords domain={current} setup={dns.setup} receivingView={multiTenant ? { off: receiving.data?.status === 'off', actions: receivingActions } : undefined} mailFrom={{ onEdit: openMailFrom, onRemove: () => { removeMailFrom.reset(); setRemovingMailFrom({ open: true, name: current.mailFromDomain ?? '' }) } }} actions={current.records.length > 0 && <Button onClick={() => downloadDnsRecords(current.name, current.records)}>Download .txt</Button>} />
       <DnsWaitNote domain={current} />
       {multiTenant && <ReceivingSettings domainId={id} domainName={current.name} receiving={receiving} hosts={hosts} />}
       {!multiTenant && <MailboxReceiving domainId={id} domainName={current.name} />}
@@ -199,6 +206,8 @@ function DomainDetail() {
       description={`${moveMail?.message ?? ''} Mail stops arriving there once the MX record changes.`} confirmLabel={`Use ${moveMail?.host ?? current.name} anyway`} danger
       onConfirm={() => choose.mutateAsync({ host: moveMail!.host, confirm: true })} />
     <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} title={`Delete ${current.name}?`} description="Sending from it stops. Its DNS records stay at your DNS provider until you remove them." confirmLabel="Delete domain" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(id); navigate('/domains', { replace: true }); client.removeQueries({ predicate: query => query.queryKey[0] === 'nightmail' && resourceOf(query.queryKey) === 'domain' && query.queryKey[2] === id }); void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'nightmail' && resourceOf(query.queryKey) === 'domains' }) }} />
+    <ConfirmDialog open={removingMailFrom.open} onOpenChange={open => setRemovingMailFrom(state => ({ ...state, open }))} title="Remove custom MAIL FROM?"
+      description={`Mail from ${current.name} goes back to the default MAIL FROM, amazonses.com. You can then delete the MX and SPF records for ${removingMailFrom.name} at your DNS provider.`} confirmLabel="Remove" danger pending={removeMailFrom.isPending} onConfirm={() => removeMailFrom.mutateAsync(id)} />
     <Dialog open={mailFromOpen} onOpenChange={next => {if (!configureMailFrom.isPending) setMailFromOpen(next)}} title={current.mailFromDomain ? 'Change custom MAIL FROM' : 'Add custom MAIL FROM'} footer={<><Button disabled={configureMailFrom.isPending} onClick={() => setMailFromOpen(false)}>Cancel</Button><Button variant="primary" loading={configureMailFrom.isPending} type="submit" form="configure-mail-from">Save</Button></>}>
       <form id="configure-mail-from" className="stack" onSubmit={submitMailFrom} noValidate>
         <MutationError error={configureMailFrom.error} />

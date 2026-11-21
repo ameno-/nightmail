@@ -2694,7 +2694,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           const wait=holdAssume;holdAssume=undefined;if(wait) await wait();
           assumptions++; return { AssumedRoleUser:{Arn:`arn:aws:sts::${wrongArn?platform:customer}:assumed-role/${command.input.RoleArn.split('/')[1]}/${command.input.RoleSessionName}`}, Credentials: { AccessKeyId: 'synthetic-customer', SecretAccessKey: 'synthetic-secret', SessionToken: 'synthetic-temporary', Expiration: new Date(Date.now() + 3600_000) } };
         });
-        const calls: string[] = [], sets = new Map<string, Json>(), topics = new Map<string, Json>();
+        const calls: string[] = [], sets = new Map<string, Json>(), topics = new Map<string, Json>(), mailFromWrites: Json[] = [];
         const identities = new Map<string, Json>(), associations = new Set<string>();
         const {S3Client}=await import('@aws-sdk/client-s3'),{SESClient}=await import('@aws-sdk/client-ses');
         const objects=new Map<string,Buffer>(),rules=new Map<string,Json>();let failNextArchive=false;
@@ -2745,7 +2745,11 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
               const listed=(name:string)=>({IdentityType:'DOMAIN',IdentityName:name,SendingEnabled:true,VerificationStatus:'SUCCESS'});
               return i.NextToken ? {EmailIdentities:[listed(imported),listed(`mail.${reserved}`),listed(reserved)]} : {EmailIdentities:[{...listed(domain),VerificationStatus:'PENDING'}, {...listed('me@'+domain),IdentityType:'EMAIL_ADDRESS'}],NextToken:'second'};
             }
-            case 'PutEmailIdentityMailFromAttributesCommand': identities.get(`${account}:${i.EmailIdentity}`)!.MailFromAttributes = { MailFromDomain:i.MailFromDomain, MailFromDomainStatus:'SUCCESS' }; return {};
+            case 'PutEmailIdentityMailFromAttributesCommand': {
+              const identity=identities.get(`${account}:${i.EmailIdentity}`)!; mailFromWrites.push(i);
+              if (i.MailFromDomain) identity.MailFromAttributes = { MailFromDomain:i.MailFromDomain, MailFromDomainStatus:'SUCCESS' }; else delete identity.MailFromAttributes;
+              return {};
+            }
             case 'SubscribeCommand': {
               assert.equal(i.Endpoint, `${origin}/v1/events/ses`);
               const allowed = await pool.query('SELECT 1 FROM provider_pool_regions WHERE feedback_topic_arn=$1 OR inbound_topic_arn=$1 UNION SELECT 1 FROM provider_connections WHERE feedback_topic_arn=$1 UNION SELECT 1 FROM mailbox_regions WHERE topic_arn=$1', [i.TopicArn]);
@@ -3481,6 +3485,15 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           assert.ok(configured.dns.some((r:Json) => r.type==='MX')); assert.ok(configured.dns.some((r:Json) => r.value===proof.value));
           assert.equal(configured.ready,true); assert.equal(configured.mailFromStatus,'PENDING');
           assert.notEqual((await pool.query('SELECT status FROM jobs WHERE id=$1',[job.id])).rows[0].status,'running','The old running poll cannot complete the new MAIL FROM check.');
+          // Removing it: SES gets no MailFromDomain, which returns the identity to the default MAIL FROM, and its MX and SPF rows go.
+          const removedMailFrom = ok(await local('DELETE',`${detail}/mail-from`,undefined,b.cookie));
+          assert.deepEqual(mailFromWrites.at(-1),{EmailIdentity:domain}); assert.equal(identities.get(`${platform}:${domain}`).MailFromAttributes,undefined);
+          assert.equal(removedMailFrom.mailFromDomain,null); assert.equal(removedMailFrom.mailFromStatus,null); assert.ok(!removedMailFrom.dns.some((r:Json)=>r.purpose==='mail_from'));
+          assert.equal((await pool.query("SELECT identity->'ses'->'MailFromAttributes' AS m FROM domain_claims WHERE name=$1 AND workspace_id=$2",[domain,b.org.id])).rows[0].m,null);
+          assert.equal(ok(await local('GET',detail,undefined,b.cookie)).mailFromDomain,null);
+          const writesBefore=mailFromWrites.length;
+          assert.equal(ok(await local('DELETE',`${detail}/mail-from`,undefined,b.cookie)).mailFromDomain,null); assert.equal(mailFromWrites.length,writesBefore,'Removing a MAIL FROM that is not set is a no-op.');
+          error(await local('DELETE',`${detail}/mail-from`,undefined,a.cookie),404);
           assert.equal(ok(await add(b.cookie,domain),201).id,created.id,'The creating claim can resume safely.');
           error(await local('DELETE',detail,undefined,a.cookie),404);
           await pool.query("UPDATE jobs SET status='pending',available_at=now()+interval '1 hour' WHERE id=$1",[job.id]);
@@ -9175,6 +9188,7 @@ describe('DB region catalog and explicit SES setup', () => {
           assert.notEqual(input.EmailIdentity, 'disabled.example.com', 'Default domain listing must not refresh disabled regions.');
           return { VerifiedForSendingStatus: true, VerificationStatus: 'SUCCESS', DkimAttributes: { Status: 'SUCCESS', SigningHostedZone: 'dkim.amazonses.com', Tokens: ['synthetic'] }, ...(mailFrom.has(input.EmailIdentity) ? { MailFromAttributes: { MailFromDomain: mailFrom.get(input.EmailIdentity), MailFromDomainStatus: 'PENDING', BehaviorOnMxFailure: 'USE_DEFAULT_VALUE' } } : {}) };
         case 'PutEmailIdentityMailFromAttributesCommand':
+          if (!input.MailFromDomain) { assert.deepEqual(input, { EmailIdentity: input.EmailIdentity }); mailFrom.delete(input.EmailIdentity); return {}; }
           assert.equal(input.BehaviorOnMxFailure, 'USE_DEFAULT_VALUE');
           mailFrom.set(input.EmailIdentity, input.MailFromDomain); return {};
         case 'GetConfigurationSetCommand': return sets.get(input.ConfigurationSetName) ?? missing();
@@ -9416,6 +9430,13 @@ describe('DB region catalog and explicit SES setup', () => {
         assert.equal(configuredMailFrom.mailFromStatus, 'PENDING');
         assert.ok(configuredMailFrom.dns.some((record: Json) => record.type === 'MX' && record.name === 'email.example.com' && record.priority === 10));
         assert.ok(configuredMailFrom.dns.some((record: Json) => record.type === 'TXT' && record.value === 'v=spf1 include:amazonses.com ~all'));
+        error(await local('DELETE', `/v1/domains/${configuredDomain.id}/mail-from`, undefined, reader), 403, 'PERMISSION_DENIED');
+        const removedMailFrom = ok(await local('DELETE', `/v1/domains/${configuredDomain.id}/mail-from`, undefined, admin));
+        assert.equal(mailFrom.has('example.com'), false); assert.equal(removedMailFrom.mailFromDomain, null); assert.ok(!removedMailFrom.dns.some((record: Json) => record.purpose === 'mail_from'));
+        const removeWrites = writes().length;
+        assert.equal(ok(await local('DELETE', `/v1/domains/${configuredDomain.id}/mail-from`, undefined, admin)).mailFromDomain, null);
+        assert.equal(writes().length, removeWrites, 'Removing a MAIL FROM that is not set is a no-op.');
+        ok(await local('POST', `/v1/domains/${configuredDomain.id}/mail-from`, { mailFromDomain: 'email.example.com' }, admin));
         const beforeWrongOwner = writes().length;
         wrongOwner = true;
         const conflict = ok(await local('GET', `${discoveryPath}?refresh=true`, undefined, reader));
@@ -17842,7 +17863,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const api=async(method:string,path:string,body?:Json,key?:string):Promise<Reply>=>{const res=await app.fetch(new Request(PUBLIC_ORIGIN+path,{method,headers:{cookie:user.cookie,origin:PUBLIC_ORIGIN,'x-bane-workspace':wid,'content-type':'application/json',...(key?{'idempotency-key':key}:{})},body:body?JSON.stringify(body):undefined}),runtime);return {status:res.status,headers:res.headers,body:await res.json()};};
     const signedKey=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey;
     const pem=await selfSignedPem(signedKey);
-    const topics=new Map<string,Json>(),sets=new Map<string,Json>(),trace:{region:string;op:string}[]=[], policies:string[]=[];
+    const topics=new Map<string,Json>(),sets=new Map<string,Json>(),trace:{region:string;op:string}[]=[], policies:string[]=[], sessionNames:string[]=[], mailFromWrites:Json[]=[];
     const denied=()=>Object.assign(new Error('fixture denial'),{name:'AccessDenied'}), missing=()=>Object.assign(new Error('fixture missing'),{name:'NotFoundException'});
     const granted=new Set([va,west]),reviews=new Map<string,Json>(),accountRequests:Json[]=[];let denyAccountRequests=false;
     let external='',failOnce=true,revoked:boolean|string=false,loseSubscribe=true,throttlePoll=false,failDelete=true,createdIdentity:Json|undefined,denyCleanup=false,loseSetDelete=false;
@@ -17854,7 +17875,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       if(cmd.input.RoleArn===`arn:aws:iam::${platform}:role/nightmail-byo-broker`){assert.equal(key,'v5-fixture-platform');assert.equal(cmd.input.RoleSessionName,'nightmail-broker');assert.equal(cmd.input.SourceIdentity,undefined);
         return {Credentials:{AccessKeyId:'v5-fixture-broker',SecretAccessKey:'fixture-only',SessionToken:'broker',Expiration:new Date(Date.now()+3600000)}};}
       assert.equal(key,'v5-fixture-broker');assert.match(cmd.input.RoleSessionName,/^nightmail-(?:scan|provision|cleanup|send|template|quota|verify|read|delete|mailfrom|account)$/);assert.equal(cmd.input.SourceIdentity,v5.id);
-      assert.equal(cmd.input.DurationSeconds,900);assert.ok(cmd.input.Policy.length<=2048);policies.push(cmd.input.Policy);
+      assert.equal(cmd.input.DurationSeconds,900);assert.ok(cmd.input.Policy.length<=2048);policies.push(cmd.input.Policy);sessionNames.push(cmd.input.RoleSessionName);
       if (!external || cmd.input.ExternalId!==external) throw denied();
       return {AssumedRoleUser:{Arn:`arn:aws:sts::${account}:assumed-role/${cmd.input.RoleArn.split('/')[1]}/${cmd.input.RoleSessionName}`},Credentials:{AccessKeyId:'v5-fixture-customer',SecretAccessKey:'fixture-only',SessionToken:cmd.input.Policy,Expiration:new Date(Date.now()+900000)}};
     });
@@ -17879,6 +17900,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         case 'ListEmailIdentitiesCommand':if(region===west)return {EmailIdentities:[]};if(region===ie&&i.NextToken)throw denied();return i.NextToken?{EmailIdentities:[{IdentityType:'DOMAIN',IdentityName:region+'.example'},{IdentityType:'DOMAIN',IdentityName:'reselect.example'}]}:{NextToken:'domains2',EmailIdentities:[{IdentityType:'DOMAIN',IdentityName:'both.example'},{IdentityType:'EMAIL_ADDRESS',IdentityName:'x@both.example'}]};
         case 'GetEmailIdentityCommand':{assert.ok(!i.EmailIdentity.includes('@'));if(i.EmailIdentity==='new.example'){if(!createdIdentity)throw missing();return createdIdentity;}const invalid=revoked===true || revoked===i.EmailIdentity;return {VerificationStatus:invalid?'FAILED':'SUCCESS',VerifiedForSendingStatus:!invalid,DkimAttributes:{Status:'SUCCESS',SigningEnabled:true},ConfigurationSetName:'existing'};}
         case 'CreateEmailIdentityCommand':assert.equal(i.EmailIdentity,'new.example');assert.match(i.Tags.find((t:Json)=>t.Key==='bane:domain-claim').Value,/^[a-f0-9-]{36}$/);assert.deepEqual(i.Tags.slice(1),[{Key:'bane:owner',Value:'bane'},{Key:'bane:installation-id',Value:v5.id},{Key:'bane:purpose',Value:'domain-identity'}]);createdIdentity={Tags:i.Tags,DkimAttributes:{Status:'PENDING',Tokens:['a','b','c']}};return createdIdentity;
+        case 'PutEmailIdentityMailFromAttributesCommand':{assert.equal(i.EmailIdentity,'new.example');assert.ok(createdIdentity);const [s]=JSON.parse((await this.config.credentials()).sessionToken!).Statement;
+          assert.deepEqual(s.Action,['ses:GetEmailIdentity','ses:PutEmailIdentityMailFromAttributes']);assert.equal(s.Resource,`arn:aws:ses:${region}:${account}:identity/new.example`);mailFromWrites.push(i);
+          if(i.MailFromDomain)createdIdentity.MailFromAttributes={MailFromDomain:i.MailFromDomain,MailFromDomainStatus:'PENDING',BehaviorOnMxFailure:i.BehaviorOnMxFailure};else delete createdIdentity.MailFromAttributes;return {};}
         case 'DeleteEmailIdentityCommand':assert.equal(i.EmailIdentity,'new.example');assert.ok(createdIdentity);if(failDelete){failDelete=false;throw Object.assign(Error('synthetic delete denied'),{name:'AccessDenied'});}createdIdentity=undefined;return {};
         case 'CreateConfigurationSetCommand':if(region===va&&failOnce){failOnce=false;throw Object.assign(Error('synthetic throttle'),{name:'ThrottlingException'});}assert.ok(!sets.has(key));assert.ok(i.Tags.some((t:Json)=>t.Key==='bane:owner'&&t.Value==='bane'));sets.set(key,{...i,dest:[]});return {};
         case 'PutConfigurationSetSuppressionOptionsCommand':sets.get(key)!.SuppressionOptions=i;return {};
@@ -18050,6 +18074,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         ok(await select(va+':reselect.example'),202);await run('byo.bind',va);
       } finally {await db.query("DELETE FROM domain_claims WHERE workspace_id=$1 AND name LIKE 'filler-%.total.test'",[wid]);}
       assert.equal((await db.query("SELECT region FROM domain_sending_bindings WHERE workspace_id=$1 AND name='reselect.example'",[wid])).rows[0].region,va);
+    });
+    await t.test('a managed identity sets and removes its custom MAIL FROM with the mailfrom-scoped session only',async()=>{
+      const path='/v1/domains/'+verify.payload.domainId+'/mail-from',sessions=sessionNames.length;
+      assert.equal(ok(await api('POST',path,{mailFromDomain:'bounce.new.example'})).mailFromDomain,'bounce.new.example');
+      const removed=ok(await api('DELETE',path));
+      assert.deepEqual(mailFromWrites.map(w=>w.MailFromDomain),['bounce.new.example',undefined]);assert.equal(createdIdentity!.MailFromAttributes,undefined);
+      assert.equal(removed.mailFromDomain,null);assert.ok(!removed.dns.some((r:Json)=>r.purpose==='mail_from'));
+      const used=sessionNames.slice(sessions);assert.ok(used.length>0 && used.every(name=>name==='nightmail-mailfrom'),used.join());
+      ok(await api('DELETE',path));assert.equal(mailFromWrites.length,2,'Removing a MAIL FROM that is not set is a no-op.');
     });
     await t.test('deleting a managed identity prunes only the matching journal and only on success',async()=>{
       const journal=async():Promise<Json[]> => (await db.query('SELECT ownership_journal FROM provider_connection_regions WHERE connection_id=$1 AND region=$2',[v5.id,oh])).rows[0].ownership_journal;

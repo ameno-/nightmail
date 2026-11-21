@@ -40131,6 +40131,167 @@
             "source": "curl --request POST \\\n  --url 'https://nightmail.dev/v1/domains/resource_123/mail-from' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"mailFromDomain\": \"example\"\n}'"
           }
         ]
+      },
+      "delete": {
+        "operationId": "removeDomainMailFrom",
+        "tags": [
+          "Domains"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "description": "Remove the custom MAIL FROM subdomain. Mail goes back to the default amazonses.com MAIL FROM, and the MAIL FROM MX and SPF records are no longer needed. Removing a MAIL FROM that isn't set changes nothing and returns the domain.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DomainReadiness"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "write",
+          "scope": "domain",
+          "person": "admin",
+          "text": "Needs Configuration: write for the sender domain. A person needs to be an owner or admin."
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { removeDomainMailFrom } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await removeDomainMailFrom({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request DELETE \\\n  --url 'https://nightmail.dev/v1/domains/resource_123/mail-from' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\""
+          }
+        ]
       }
     },
     "/v1/domains/{id}/receiving-host": {

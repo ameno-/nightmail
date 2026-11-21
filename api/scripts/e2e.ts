@@ -336,6 +336,7 @@ async function devBoundaries() {
   await denied('requestConnectionProductionAccess',{path:{region:'us-east-2'},body:{websiteUrl:'https://example.com',useCase:'Fixture request that must be refused before it reaches AWS.',mailType:'TRANSACTIONAL',confirm:true}},403,'PERMISSION_DENIED');
   await denied('getDomainDnsSetup',{path},403,'PERMISSION_DENIED');
   await denied('configureDomainMailFrom',{path,body:{mailFromDomain:domain}},422,'MAIL_FROM_DOMAIN_INVALID');
+  await denied('removeDomainMailFrom',{path:fake},404,'NOT_FOUND');
   await denied('deleteDomain',{path:fake},404,'NOT_FOUND');
   await denied('configureRegion',{path:{region},body:{enabled:true}},409,'CONNECTION_MANAGED_REGION');
   await denied('getInboundSubdomain',{path:child},404,'NOT_FOUND');

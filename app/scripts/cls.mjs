@@ -216,6 +216,7 @@ const pages = ids => [
   ['Domains · add domain dialog', '/domains', { dialog: 'Add domain' }],
   ['Domain · add custom MAIL FROM dialog', `/domains/${ids.domain}`, { dialog: 'Add custom MAIL FROM' }],
   ['Domain · change custom MAIL FROM dialog', `/domains/${ids.sendingDomain}`, { menu: ['Actions for MAIL FROM MX record', 'Change custom MAIL FROM', 'Change custom MAIL FROM'] }],
+  ['Domain · remove custom MAIL FROM dialog', `/domains/${ids.sendingDomain}`, { menu: ['Actions for MAIL FROM MX record', 'Remove custom MAIL FROM', 'Remove custom MAIL FROM?'] }],
   ['API keys · create key dialog', '/api-keys', { dialog: 'Create key' }],
   // /api-keys?create=smtp opens Create key on an SMTP login: its domains load after it opens.
   ['API keys · SMTP login dialog', '/api-keys?create=smtp', {}],

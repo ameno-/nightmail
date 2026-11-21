@@ -264,6 +264,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
   app.on('GET', ['/v1/settings/ses', '/v1/domains/:id'], selfHostedRegions);
   app.on('GET', '/v1/domains', (c, next) => c.req.query('region') !== undefined ? regions(c, next) : selfHostedRegions(c, next));
   app.on('POST', ['/v1/domains', '/v1/domains/:id/mail-from', '/v1/domains/:id/verify'], selfHostedRegions);
+  app.on('DELETE', '/v1/domains/:id/mail-from', selfHostedRegions);
   // A campaign test needs none: the admission decision reads the workspace's regions in its own statement.
   app.on('POST', ['/v1/campaigns', ...['reviews', 'send', 'schedule', 'cancel', 'pause', 'resume', 'pacing'].map(action => `/v1/campaigns/:id/${action}`)], regions);
   app.on('PATCH', ['/v1/campaigns/:id', '/v1/campaigns/:id/archive'], regions);
