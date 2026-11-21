@@ -22,7 +22,7 @@ const labels: Record<string, string> = {
   'api_key.create': 'Created an API key', 'api_key.update': 'Changed an API key', 'api_key.revoke': 'Revoked an API key',
   'agent_token.create': 'Created an agent token', 'agent_token.revoke': 'Revoked an agent token', 'mcp_connection.revoke': 'Revoked an agent', 'mcp_connection.bind': 'Set an agent’s default workspace',
   'inbox_key.create': 'Created an API key', 'inbox_key.revoke': 'Revoked an API key', 'inbox_connection.create': 'Connected an agent to inboxes', 'app_password.create': 'Created an app password', 'app_password.revoke': 'Revoked an app password',
-  'domain.create': 'Added a domain', 'domain.delete': 'Deleted a domain', 'domain.mail_from': 'Set a MAIL FROM domain', 'domain.receiving_host': 'Chose a receiving host',
+  'domain.create': 'Added a domain', 'domain.delete': 'Deleted a domain', 'domain.mail_from': 'Set a MAIL FROM domain', 'domain.mail_from_remove': 'Removed a MAIL FROM domain', 'domain.receiving_host': 'Chose a receiving host',
   'inbound_domain.enable': 'Turned on receiving', 'inbound_domain.disable': 'Turned off receiving', 'inbound_domain.update': 'Updated a receiving domain',
   'inbound_host.create': 'Added a receiving host', 'inbound_host.update': 'Updated a receiving host', 'inbound_host.delete': 'Removed a receiving host', 'inbound_subdomain.create': 'Added a receiving subdomain', 'inbound_subdomain.update': 'Updated a receiving subdomain', 'inbound_subdomain.delete': 'Deleted a receiving subdomain',
   'address.create': 'Created an address', 'address.update': 'Updated an address', 'address.delete': 'Deleted an address', 'address.release': 'Released an address',

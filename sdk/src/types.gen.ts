@@ -13542,6 +13542,69 @@ export type CreateDomainResponses = {
 
 export type CreateDomainResponse = CreateDomainResponses[keyof CreateDomainResponses];
 
+export type RemoveDomainMailFromData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/domains/{id}/mail-from';
+};
+
+export type RemoveDomainMailFromErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type RemoveDomainMailFromError = RemoveDomainMailFromErrors[keyof RemoveDomainMailFromErrors];
+
+export type RemoveDomainMailFromResponses = {
+    /**
+     * Success
+     */
+    200: DomainReadiness;
+};
+
+export type RemoveDomainMailFromResponse = RemoveDomainMailFromResponses[keyof RemoveDomainMailFromResponses];
+
 export type ConfigureDomainMailFromData = {
     body: ConfigureDomainMailFrom;
     path: {

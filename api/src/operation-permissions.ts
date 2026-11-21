@@ -102,7 +102,7 @@ export const OPERATION_PERMISSIONS: Record<string, OperationPermission> = {
   // Settings, domains and sending webhooks.
   getWorkspaceSettings: needs('configuration', 'read', 'workspace'), updateWorkspaceSettings: needs('configuration', 'write', 'workspace', admin), getSesSettings: needs('configuration', 'read', 'workspace', admin),
   listDomains: needs('configuration', 'read', 'domain', admin), createDomain: needs('configuration', 'write', 'domain', admin),
-  configureDomainMailFrom: needs('configuration', 'write', 'domain', admin), chooseReceivingHost: needs('receivingRules', 'write', 'domain', adminLasting),
+  configureDomainMailFrom: needs('configuration', 'write', 'domain', admin), removeDomainMailFrom: needs('configuration', 'write', 'domain', admin), chooseReceivingHost: needs('receivingRules', 'write', 'domain', adminLasting),
   sendDomainTestEmail: people('admin', 'dashboard'), getDomainDnsSetup: people('admin', 'dashboard'), completeDomainDnsSetup: PUBLIC,
   getDomain: needs('configuration', 'read', 'domain', admin), deleteDomain: needs('configuration', 'write', 'domain', admin), verifyDomain: needs('configuration', 'write', 'domain', admin),
   listWebhooks: needs('configuration', 'read', 'workspace', admin), createWebhook: needs('configuration', 'write', 'workspace', adminLasting), getWebhook: needs('configuration', 'read', 'workspace', admin),

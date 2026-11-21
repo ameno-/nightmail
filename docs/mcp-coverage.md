@@ -110,6 +110,7 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `listDomains` | `domains` · `list` · admin |
 | `createDomain` | `domains` · `create` · admin |
 | `configureDomainMailFrom` | `domains` · `mailFrom` · admin |
+| `removeDomainMailFrom` | `domains` · `removeMailFrom` · admin |
 | `chooseReceivingHost` | `domains` · `receivingHost` · admin |
 | `sendDomainTestEmail` | Human step: sends only to the signed-in person’s own address. Agents use sendEmail. |
 | `getDomainDnsSetup` | Human step: Domain Connect opens the DNS provider in a browser. Agents can read the domain’s DNS records instead. |

@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { ArrowRight, Copy, Pencil, Plus } from 'lucide-react'
+import { ArrowRight, Copy, Pencil, Plus, Trash2 } from 'lucide-react'
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { Alert, Button, CopyButton, DataTable, DropdownMenu, StatusBadge, useCopy, type MenuItem, type Tone } from '../../components/ui'
 import { CopyAction, LiveStatus, type LiveState } from '../../components/motion'
@@ -203,9 +203,9 @@ function receivingWarning(domain: string, receiving: DnsRecord[]) {
 }
 
 // The domain page's receiving records (hosted): Off until the domain receives (publishing the record turns it on), and its own host's row offers
-// choosing the root or a subdomain instead. Custom MAIL FROM: changed from its records' rows, or added from the row under the table.
+// choosing the root or a subdomain instead. Custom MAIL FROM: changed or removed from its records' rows, or added from the row under the table.
 export type ReceivingView = { off: boolean; actions?: MenuItem[] }
-export type MailFromView = { onEdit: () => void }
+export type MailFromView = { onEdit: () => void; onRemove: () => void }
 
 // What the API's DNS checks found for the receiving host: blocking issues in red, the rest as warnings.
 export function ReceivingIssueAlert({ issue }: { issue: ReceivingIssue }) {
@@ -242,7 +242,7 @@ export function DomainRecords({ domain, actions, guided = false, setup = null, r
     return index === 0 && receivingView.actions?.length ? { ...row, actions: receivingView.actions } : row
   })
   const mailFromRecords = recordsFor(domain, 'mail_from'), dmarc = dmarcRow(domain)
-  const change: MenuItem[] = mailFrom ? [{ label: 'Change custom MAIL FROM', icon: <Pencil size={16} />, onSelect: mailFrom.onEdit }] : []
+  const change: MenuItem[] = mailFrom ? [{ label: 'Change custom MAIL FROM', icon: <Pencil size={16} />, onSelect: mailFrom.onEdit }, { label: 'Remove custom MAIL FROM', icon: <Trash2 size={16} />, destructive: true, onSelect: mailFrom.onRemove }] : []
   const rows = [...sending.map(record => recordRow(record)), ...dmarc ? [dmarc] : [], ...receivingRows, ...mailFromRecords.map(record => ({ ...recordRow(record), actions: change }))]
   // Copy all: every record the table lists, but not a DMARC policy that is already published.
   const all = rows.flatMap(row => row.record.id === 'dmarc-policy' ? [] : [row.record])

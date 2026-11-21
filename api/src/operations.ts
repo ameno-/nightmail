@@ -971,40 +971,55 @@ export function registerOperations(app: App) {
       SELECT id,name,region FROM saved`);
     return c.json(await domainReadiness(c.env, row!, identity,'create'), 201);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/domains/{id}/mail-from', operationId: 'configureDomainMailFrom', tags: ['Domains'], security, description: 'Configure a custom SES MAIL FROM subdomain with fallback to the default amazonses.com MAIL FROM value while DNS is unavailable.', request: { params: IdParams, body: json(z.object({ mailFromDomain: domainName }).strict().openapi('ConfigureDomainMailFrom')) }, responses: { 200: response(domainSchema), ...errors } }), async c => {
-    const a = actor(c, 'manage'); const [row] = await c.env.db.select().from(domains).where(and(scoped(domains, a), eq(domains.id, c.req.valid('param').id)));
+  // Sets (mailFromDomain) or removes (null) a domain's custom MAIL FROM. Removing it calls SES without a MailFromDomain, which
+  // returns the identity to the default amazonses.com MAIL FROM, and drops its MX and SPF records and SPF alignment. Removing
+  // a MAIL FROM that isn't set changes nothing.
+  async function putMailFrom(c: Ctx, domainId: string, mailFromDomain: string | null) {
+    const a = actor(c, 'manage'); const [row] = await c.env.db.select().from(domains).where(and(scoped(domains, a), eq(domains.id, domainId)));
     if (!row) return notFound('Domain'); allowedDomain(a, row.name);
-    const { mailFromDomain } = c.req.valid('json');
-    if (mailFromDomain === row.name || !mailFromDomain.endsWith(`.${row.name}`)) throw new ApiError(422, 'MAIL_FROM_DOMAIN_INVALID', `Use a subdomain of ${row.name}.`, 'mailFromDomain');
-    const mailFromAudit = { action: 'domain.mail_from', workspaceId: a.workspaceId, target: { type: 'domain', id: row.id }, after: { name: row.name, mailFromDomain } };
+    if (mailFromDomain !== null && (mailFromDomain === row.name || !mailFromDomain.endsWith(`.${row.name}`))) throw new ApiError(422, 'MAIL_FROM_DOMAIN_INVALID', `Use a subdomain of ${row.name}.`, 'mailFromDomain');
+    const mailFromAudit = { action: mailFromDomain ? 'domain.mail_from' : 'domain.mail_from_remove', workspaceId: a.workspaceId, target: { type: 'domain', id: row.id }, after: { name: row.name, mailFromDomain } };
+    const put = (client: Awaited<ReturnType<typeof getSes>>) => sesCall(({ PutEmailIdentityMailFromAttributesCommand }) => client.send(new PutEmailIdentityMailFromAttributesCommand(mailFromDomain ? { EmailIdentity: row.name, MailFromDomain: mailFromDomain, BehaviorOnMxFailure: 'USE_DEFAULT_VALUE' } : { EmailIdentity: row.name })));
     if (c.env.config.multiTenant) {
       const report=await c.env.db.transaction(async db=>{
         const current=await hostedDomain(db,a.workspaceId,row.id,true) ?? notFound('Domain');
         // The receiving host's MX points to inbound-smtp; a MAIL FROM subdomain needs its own MX to feedback-smtp. One name can't hold both.
         const receivingHosts=new Set([...derivedReadiness(current).dns.filter(r=>r.purpose==='receiving').map(r=>r.name),...current.hosts.filter(h=>h.status!=='disabled').map(h=>h.host)]);
-        if (receivingHosts.has(mailFromDomain)) throw new ApiError(409,'MAIL_FROM_RECEIVING_CONFLICT',`${mailFromDomain} is one of ${row.name}’s receiving hosts, so its MX points to inbound-smtp.${row.region}.amazonaws.com. A custom MAIL FROM subdomain needs its own MX to feedback-smtp.${row.region}.amazonses.com. Use another subdomain, such as email.${row.name}.`);
+        if (mailFromDomain && receivingHosts.has(mailFromDomain)) throw new ApiError(409,'MAIL_FROM_RECEIVING_CONFLICT',`${mailFromDomain} is one of ${row.name}’s receiving hosts, so its MX points to inbound-smtp.${row.region}.amazonaws.com. A custom MAIL FROM subdomain needs its own MX to feedback-smtp.${row.region}.amazonses.com. Use another subdomain, such as email.${row.name}.`);
         const client=await getSes({...c.env,config:{...c.env.config,workspaceId:a.workspaceId,regions:[row.region]}},row.region,{...current.connection,identitySession:{name:row.name,purpose:'mailFrom'}});
         if (current.identity?.imported) throw new ApiError(409,'IMPORTED_IDENTITY_READ_ONLY','Manage this imported identity’s MAIL FROM settings in AWS.');
         const identity=await sesCall(({ GetEmailIdentityCommand })=>client.send(new GetEmailIdentityCommand({EmailIdentity:row.name})));
         if (!ownsIdentity(identity,current.token)) throw unavailableDomain();
-        await sesCall(({ PutEmailIdentityMailFromAttributesCommand })=>client.send(new PutEmailIdentityMailFromAttributesCommand({EmailIdentity:row.name,MailFromDomain:mailFromDomain,BehaviorOnMxFailure:'USE_DEFAULT_VALUE'})));
+        const known=current.identity ?? identityOnly(sesFacts(identity)), ses={...(current.identity?.ses ?? sesFacts(identity))};
+        if (!mailFromDomain && !identity.MailFromAttributes?.MailFromDomain && !ses.MailFromAttributes?.MailFromDomain) return derivedReadiness(current);
+        await put(client);
         // Changing MAIL FROM is a new fact, not a state change: ownership, sending and routing stay as they are.
-        const facts:IdentityFacts={...(current.identity ?? identityOnly(sesFacts(identity))),ses:{...(current.identity?.ses ?? sesFacts(identity)),MailFromAttributes:{MailFromDomain:mailFromDomain,MailFromDomainStatus:'PENDING',BehaviorOnMxFailure:'USE_DEFAULT_VALUE'}}};
+        if (mailFromDomain) ses.MailFromAttributes={MailFromDomain:mailFromDomain,MailFromDomainStatus:'PENDING',BehaviorOnMxFailure:'USE_DEFAULT_VALUE'};
+        else delete ses.MailFromAttributes;
+        const facts:IdentityFacts={...known,ses,...(!mailFromDomain && known.dmarc ? {dmarc:{...known.dmarc,alignedMailFrom:null}} : {})};
         await db.execute(sql`WITH saved AS (UPDATE domain_claims SET identity=${JSON.stringify(facts)}::jsonb WHERE token=${current.token} AND connection_id=${current.connection.id} RETURNING ${current.id}::text AS id,token)
           ${recheckJob(a.workspaceId,sql`SELECT id,token FROM saved`,'supersede')}`);
         await recordAudit(db,c,mailFromAudit);
         return derivedReadiness({...current,identity:facts});
-      }); a.wakeJobs=1; return c.json(report,200);
+      }); a.wakeJobs=1; return report;
     }
     const client = await getSes(c.env, row.region);
+    if (!mailFromDomain) {
+      const identity = await sesCall(({ GetEmailIdentityCommand }) => client.send(new GetEmailIdentityCommand({ EmailIdentity: row.name })));
+      if (!identity.MailFromAttributes?.MailFromDomain) return domainReadiness(c.env, row, identity);
+    }
     // The change is in SES, not in a database row. Fail closed: the audit row is written first and committed only once SES
     // accepted the change, so a change without its row needs a lost commit (the client then sees 500 and retries).
     await c.env.db.transaction(async tx => {
       await recordAudit(tx, c, mailFromAudit);
-      await sesCall(({ PutEmailIdentityMailFromAttributesCommand }) => client.send(new PutEmailIdentityMailFromAttributesCommand({ EmailIdentity: row.name, MailFromDomain: mailFromDomain, BehaviorOnMxFailure: 'USE_DEFAULT_VALUE' })));
+      await put(client);
     });
-    return c.json(await domainReadiness(c.env, row), 200);
-  });
+    return domainReadiness(c.env, row);
+  }
+  app.openapi(createRoute({ method: 'post', path: '/v1/domains/{id}/mail-from', operationId: 'configureDomainMailFrom', tags: ['Domains'], security, description: 'Configure a custom SES MAIL FROM subdomain with fallback to the default amazonses.com MAIL FROM value while DNS is unavailable.', request: { params: IdParams, body: json(z.object({ mailFromDomain: domainName }).strict().openapi('ConfigureDomainMailFrom')) }, responses: { 200: response(domainSchema), ...errors } }), async c =>
+    c.json(await putMailFrom(c, c.req.valid('param').id, c.req.valid('json').mailFromDomain), 200));
+  app.openapi(createRoute({ method: 'delete', path: '/v1/domains/{id}/mail-from', operationId: 'removeDomainMailFrom', tags: ['Domains'], security, description: 'Remove the custom MAIL FROM subdomain. Mail goes back to the default amazonses.com MAIL FROM, and the MAIL FROM MX and SPF records are no longer needed. Removing a MAIL FROM that isn\'t set changes nothing and returns the domain.', request: { params: IdParams }, responses: { 200: response(domainSchema), ...errors } }), async c =>
+    c.json(await putMailFrom(c, c.req.valid('param').id, null), 200));
   app.openapi(createRoute({method:'post',path:'/v1/domains/{id}/receiving-host',operationId:'chooseReceivingHost',tags:['Domains'],security,
     description:`Hosted only. Choose a host for this domain to receive on, its root or one of its subdomains. Until the domain receives anywhere, the choice replaces the automatic suggestion (the first of reply., inbound., mail. and so on with no MX and no CNAME), and null returns to it. Once it receives, the chosen host is added beside the hosts it already receives on, as POST /v1/inbound/domains/{id}/hosts does: nothing that receives is moved or stopped. Public DNS is checked first. A CNAME (RFC 1034), one of ${productName}’s own names (custom MAIL FROM, ownership TXT, DKIM), a host another domain receives on (in any workspace), a name another workspace has claimed (send-only included) or a delegated zone (its own NS records) is refused with a free subdomain to use instead. A host whose mail another provider receives, or whose MX is split, needs confirm: true, because publishing ${productName}’s MX moves that mail. A wildcard (*.domain) answer only flags receivingIssue. Nothing changes in DNS or SES.`,
     request:{params:IdParams,body:json(z.object({host:domainName.nullable(),confirm:z.boolean().default(false)}).strict().openapi('ChooseReceivingHost'))},
