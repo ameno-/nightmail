@@ -379,6 +379,16 @@ const proofTime=(at:Date|string|null|undefined)=>at?new Date(at).getTime():0;
 const proofUntil=(row:ProofTimes)=>Math.min(proofTime(row.receiving_proved_at)+72*hour,row.receiving_proof_missed_at?proofTime(row.receiving_proof_missed_at)+48*hour:Infinity);
 const observeProof=(positive:boolean)=>sql`receiving_proved_at=CASE WHEN ${positive} THEN now() ELSE receiving_proved_at END,receiving_proof_missed_at=CASE WHEN NOT ${positive} THEN coalesce(receiving_proof_missed_at,now()) END`;
 const sends = (row: Pick<ClaimState,'sending_state'>) => row.sending_state==='verified' || row.sending_state==='lost';
+/**
+ * A Hosted domain's re-check on request (POST /v1/domains/{id}/verify, and support's DNS re-check): queues a background
+ * verification unless one is already due, and returns the stored status.
+ */
+export async function verifyHostedDomain(runtime: Runtime, a: Actor, domainId: string) {
+  const row=await hostedDomain(runtime.db,a.workspaceId,domainId,false,{domains:a.domains,mode:'manual',platformAccount:runtime.config.platformAccount}) ?? notFound('Domain'); allowedDomain(a,row.name);
+  assertSharedAccount(runtime,row.connection);
+  if (row.queued) a.wakeJobs=1;
+  return derivedReadiness(row);
+}
 /** The readiness document is derived: SES/DNS facts give the records, the explicit states give every boolean. */
 export function derivedReadiness(row: ClaimRow): Readiness {
   const facts=row.identity, held=sends(row);
@@ -829,7 +839,27 @@ async function account(runtime: Runtime, wid: string, requested?: string) {
   const selectedRegion=connection?.template_version==='v5' && !requested ? (await getRegionSettings(runtime.db,wid)).defaultRegion : connection?.region ?? requested ?? runtime.config.regions[0]!;
   if (connection) runtime={...runtime,config:{...runtime.config,workspaceId:wid,regions:[selectedRegion]}};
   const a = await sesCall(async ({ GetAccountCommand }) => (await getSes(runtime, selectedRegion,forDelivery(connection,{purpose:'quota'}))).send(new GetAccountCommand({}))); return { region: selectedRegion, productionAccess: a.ProductionAccessEnabled === true, sendingEnabled: a.SendingEnabled === true, enforcementStatus: a.EnforcementStatus ?? 'UNKNOWN', quota: { max24HourSend: a.SendQuota?.Max24HourSend ?? 0, maxSendRate: a.SendQuota?.MaxSendRate ?? 0, sentLast24Hours: a.SendQuota?.SentLast24Hours ?? 0 } }; }
-async function getWebhook(runtime: Runtime, a: Actor, webhookId: string) { const [row] = await runtime.db.select().from(webhooks).where(and(scoped(webhooks, a), eq(webhooks.id, webhookId))); return row ?? notFound('Webhook'); }
+async function getWebhook(runtime: Runtime, a: Actor, webhookId: string, db: DbExecutor = runtime.db) { const [row] = await db.select().from(webhooks).where(and(scoped(webhooks, a), eq(webhooks.id, webhookId))); return row ?? notFound('Webhook'); }
+/**
+ * Testing a sending webhook (POST /v1/webhooks/{id}/test, and a support action the customer confirmed signed in): one
+ * synthetic email.delivered delivery, charged as one manual post, in the caller's transaction.
+ */
+export async function testSendingWebhook(runtime: Runtime, tx: DbExecutor, a: Actor, webhookId: string) {
+  const endpoint = await getWebhook(runtime, a, webhookId, tx); webhookUrl(runtime, endpoint.url);
+  if (endpoint.reconfirm) throw webhookNeedsUrl();
+  const deliveryId = id('whd'), event: PublishedEvent = { id: id('evt_test'), type: 'email.delivered', createdAt: now(), workspaceId: a.workspaceId, region: null, data: { synthetic: true, test: true, message: 'Explicit webhook endpoint test. No email was sent.' } };
+  await chargeManualDelivery(tx, a.workspaceId, 1); await tx.insert(deliveries).values({ id: deliveryId, workspaceId: a.workspaceId, webhookId: endpoint.id, eventId: event.id, payload: event, synthetic: true }); await enqueue(tx, { type: 'operation.webhook', workspaceId: a.workspaceId, payload: { deliveryId, generation: 0 } });
+  return { id: deliveryId, status: 'pending' as const };
+}
+/** Retrying a sending-webhook delivery (POST /v1/webhooks/{id}/deliveries/{deliveryId}/retry, and a confirmed support action), in the caller's transaction. */
+export async function retrySendingDelivery(runtime: Runtime, tx: DbExecutor, a: Actor, webhookId: string, deliveryId: string) {
+  await getWebhook(runtime, a, webhookId, tx);
+  const [row] = await tx.select().from(deliveries).where(and(scoped(deliveries, a), eq(deliveries.webhookId, webhookId), eq(deliveries.id, deliveryId))).for('update'); if (!row) return notFound('Delivery');
+  if (row.status === 'pending') throw new ApiError(409, 'DELIVERY_PENDING', 'This delivery already has a pending attempt.');
+  const generation = row.generation + 1; await tx.update(deliveries).set({ status: 'pending', generation, updatedAt: now() }).where(eq(deliveries.id, row.id)); await enqueue(tx, { type: 'operation.webhook', workspaceId: a.workspaceId, payload: { deliveryId: row.id, generation } });
+  await chargeManualDelivery(tx, a.workspaceId, 1);
+  return { id: deliveryId, status: 'pending' as const };
+}
 
 /** listDomains' own checks (the notMember path guard runs first): read permission and, self-hosted, a configured region with live SES. */
 export function domainReader(c: Ctx, requested?: string) {
@@ -1073,10 +1103,10 @@ export function registerOperations(app: App) {
   for (const verifyRoute of [false, true]) app.openapi(createRoute({ method: verifyRoute ? 'post' : 'get', path: verifyRoute ? '/v1/domains/{id}/verify' : '/v1/domains/{id}', operationId: verifyRoute ? 'verifyDomain' : 'getDomain', description: verifyRoute ? 'On MX, request a background verification and return the current stored status. Read the domain again for updates.' : 'On MX, read the stored DNS records and verification status without an AWS call.', tags: ['Domains'], security, request: { params: IdParams }, responses: { 200: response(domainSchema), ...errors } }), async c => {
     const a = actor(c, verifyRoute ? 'manage' : 'read');
     if (c.env.config.multiTenant) {
-      const mode=verifyRoute ? 'manual' : a.credential==='dashboard' && c.req.method==='GET' ? 'dashboard' : undefined;
+      if (verifyRoute) return c.json(await verifyHostedDomain(c.env,a,c.req.valid('param').id),200);
+      const mode=a.credential==='dashboard' && c.req.method==='GET' ? 'dashboard' : undefined;
       const row=await hostedDomain(c.env.db,a.workspaceId,c.req.valid('param').id,false,mode ? {domains:a.domains,mode,platformAccount:c.env.config.platformAccount} : undefined) ?? notFound('Domain'); allowedDomain(a,row.name);
       // A stale dashboard may read persisted facts; its opportunistic recheck was fenced in SQL.
-      if (verifyRoute) assertSharedAccount(c.env,row.connection);
       if (row.queued) a.wakeJobs=1;
       return c.json(derivedReadiness(row),200);
     }
@@ -1192,11 +1222,8 @@ export function registerOperations(app: App) {
     return c.json({ secret }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/webhooks/{id}/test', operationId: 'testWebhook', tags: ['Webhooks'], security, request: { params: IdParams }, responses: { 202: response(queuedSchema), ...errors } }), async c => {
-    const a = workspaceActor(c, 'manage'), endpoint = await getWebhook(c.env, a, c.req.valid('param').id); webhookUrl(c.env, endpoint.url);
-    if (endpoint.reconfirm) throw webhookNeedsUrl();
-    const deliveryId = id('whd'), event: PublishedEvent = { id: id('evt_test'), type: 'email.delivered', createdAt: now(), workspaceId: a.workspaceId, region: null, data: { synthetic: true, test: true, message: 'Explicit webhook endpoint test. No email was sent.' } };
-    await c.env.db.transaction(async tx => { await chargeManualDelivery(tx, a.workspaceId, 1); await tx.insert(deliveries).values({ id: deliveryId, workspaceId: a.workspaceId, webhookId: endpoint.id, eventId: event.id, payload: event, synthetic: true }); await enqueue(tx, { type: 'operation.webhook', workspaceId: a.workspaceId, payload: { deliveryId, generation: 0 } }); });
-    return c.json({ id: deliveryId, status: 'pending' as const }, 202);
+    const a = workspaceActor(c, 'manage'), webhookId = c.req.valid('param').id;
+    return c.json(await c.env.db.transaction(tx => testSendingWebhook(c.env, tx, a, webhookId)), 202);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/webhooks/{id}/deliveries', operationId: 'listWebhookDeliveries', tags: ['Webhooks'], security, request: { params: IdParams, query: PageQuery }, responses: { 200: response(listSchema(deliverySchema, 'WebhookDeliveryPage')), ...errors } }), async c => {
     // Newest first by creation time: delivery IDs are random, so ordering by ID showed an arbitrary sample, not the latest.
@@ -1209,14 +1236,8 @@ export function registerOperations(app: App) {
     const a = workspaceActor(c), p = c.req.valid('param'); const [row] = await c.env.db.select().from(deliveries).where(and(scoped(deliveries, a), eq(deliveries.webhookId, p.id), eq(deliveries.id, p.deliveryId))); if (!row) return notFound('Delivery'); const attempts = await c.env.db.select().from(deliveryAttempts).where(and(scoped(deliveryAttempts, a), eq(deliveryAttempts.deliveryId, row.id))).orderBy(asc(deliveryAttempts.createdAt)); return c.json({ ...visibleDelivery(row, a), attempts: attempts.map(row => attemptSchema.parse(row)) }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/webhooks/{id}/deliveries/{deliveryId}/retry', operationId: 'retryWebhookDelivery', tags: ['Webhooks'], security, request: { params: deliveryParams }, responses: { 202: response(queuedSchema), ...errors } }), async c => {
-    const a = workspaceActor(c, 'manage'), p = c.req.valid('param'); await getWebhook(c.env, a, p.id);
-    await c.env.db.transaction(async tx => {
-      const [row] = await tx.select().from(deliveries).where(and(scoped(deliveries, a), eq(deliveries.webhookId, p.id), eq(deliveries.id, p.deliveryId))).for('update'); if (!row) return notFound('Delivery');
-      if (row.status === 'pending') throw new ApiError(409, 'DELIVERY_PENDING', 'This delivery already has a pending attempt.');
-      const generation = row.generation + 1; await tx.update(deliveries).set({ status: 'pending', generation, updatedAt: now() }).where(eq(deliveries.id, row.id)); await enqueue(tx, { type: 'operation.webhook', workspaceId: a.workspaceId, payload: { deliveryId: row.id, generation } });
-      await chargeManualDelivery(tx, a.workspaceId, 1);
-    });
-    return c.json({ id: p.deliveryId, status: 'pending' as const }, 202);
+    const a = workspaceActor(c, 'manage'), p = c.req.valid('param');
+    return c.json(await c.env.db.transaction(tx => retrySendingDelivery(c.env, tx, a, p.id, p.deliveryId)), 202);
   });
   registerPublicEvents(app);
   registerMetrics(app);

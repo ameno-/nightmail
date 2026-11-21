@@ -21405,6 +21405,319 @@
           "conversationId",
           "createdAt"
         ]
+      },
+      "SupportAction": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "retry_webhook_delivery",
+              "test_webhook",
+              "retry_inbound_delivery",
+              "test_inbound_webhook",
+              "redeliver_message",
+              "pause_campaign"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "proposed",
+              "running",
+              "done",
+              "failed",
+              "declined",
+              "expired"
+            ],
+            "description": "proposed: waiting for the customer; running: a test is posting; done or failed: what the public route answered (failed with SUPPORT_ACTION_OUTCOME_UNKNOWN when a test's answer was never recorded within 5 minutes; it is never posted again); declined; expired after 24 hours."
+          },
+          "summary": {
+            "type": "string",
+            "description": "What the customer approves, as plain text: never render it as Markdown or HTML. Nightmail's own sentence from its records, with each name a person typed (a workspace, a campaign, the end of a webhook URL) inserted as a JSON-quoted string, its control and formatting characters (bidirectional ones included) removed."
+          },
+          "parts": {
+            "type": "object",
+            "properties": {
+              "template": {
+                "type": "string",
+                "description": "The same sentence with a {placeholder} where each typed name goes. Nothing in it was typed by a person."
+              },
+              "labels": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "The typed names, as data: put each in place of its {placeholder} once, as text."
+              }
+            },
+            "required": [
+              "template",
+              "labels"
+            ],
+            "description": "The summary in parts, to render the typed names apart from the sentence."
+          },
+          "workspaceId": {
+            "type": "string"
+          },
+          "target": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "url": {
+            "type": "string",
+            "description": "Where the customer confirms or declines it, signed in."
+          },
+          "result": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {},
+            "description": "The public route’s answer when it ran."
+          },
+          "error": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "description": "The public route’s error when it refused."
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "type": "string"
+          },
+          "resolvedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "status",
+          "summary",
+          "parts",
+          "workspaceId",
+          "target",
+          "url",
+          "result",
+          "error",
+          "createdAt",
+          "expiresAt",
+          "resolvedAt"
+        ]
+      },
+      "SupportActionProposal": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "retry_webhook_delivery"
+                ]
+              },
+              "webhookId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,120}$"
+              },
+              "deliveryId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,120}$"
+              }
+            },
+            "required": [
+              "kind",
+              "webhookId",
+              "deliveryId"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "test_webhook"
+                ]
+              },
+              "webhookId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,120}$"
+              }
+            },
+            "required": [
+              "kind",
+              "webhookId"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "retry_inbound_delivery"
+                ]
+              },
+              "webhookId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,120}$"
+              },
+              "deliveryId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,120}$"
+              }
+            },
+            "required": [
+              "kind",
+              "webhookId",
+              "deliveryId"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "test_inbound_webhook"
+                ]
+              },
+              "webhookId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,120}$"
+              }
+            },
+            "required": [
+              "kind",
+              "webhookId"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "redeliver_message"
+                ]
+              },
+              "messageId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,120}$"
+              },
+              "webhookId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,120}$",
+                "description": "Only this endpoint; omit for every route webhook that finished with the message."
+              }
+            },
+            "required": [
+              "kind",
+              "messageId"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "pause_campaign"
+                ]
+              },
+              "campaignId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,120}$"
+              }
+            },
+            "required": [
+              "kind",
+              "campaignId"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "SupportDomainRecheck": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "workspaceId": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "verificationStatus": {
+            "type": "string"
+          },
+          "verified": {
+            "type": "boolean"
+          },
+          "dkimStatus": {
+            "type": "string"
+          },
+          "sending": {
+            "type": "string"
+          },
+          "receiving": {
+            "type": "string"
+          },
+          "mailFromStatus": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "recheckQueued": {
+            "type": "boolean",
+            "description": "False when a re-check was already due: read the domain’s health again shortly."
+          }
+        },
+        "required": [
+          "id",
+          "workspaceId",
+          "name",
+          "verificationStatus",
+          "verified",
+          "dkimStatus",
+          "sending",
+          "receiving",
+          "mailFromStatus",
+          "recheckQueued"
+        ]
       }
     },
     "parameters": {}
@@ -82714,6 +83027,477 @@
             "lang": "Shell",
             "label": "cURL",
             "source": "curl --request POST \\\n  --url 'https://nightmail.dev/v1/support/notes' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"text\": \"Your message is ready.\"\n}'"
+          }
+        ]
+      }
+    },
+    "/v1/support/actions": {
+      "post": {
+        "operationId": "proposeSupportAction",
+        "tags": [
+          "Support (internal)"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Propose a change the customer confirms signed in: retry or redeliver webhook mail, test a webhook, or pause a campaign. Nightmail checks the target is in the conversation’s scope and that the customer’s role may make it there, writes the summary from its own records, and keeps it open 24 hours. At most 3 are open per conversation; proposing the same change again answers the open one. Internal: for Nightmail support, for one support conversation, never for customers.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SupportActionProposal"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupportAction"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupportAction"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-internal": true,
+        "x-nightmail-permission": {
+          "access": "staff",
+          "text": "Nightmail staff only."
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { proposeSupportAction } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await proposeSupportAction({\n  client,\n  body: {\n    \"kind\": \"retry_webhook_delivery\",\n    \"webhookId\": \"webhook_123\",\n    \"deliveryId\": \"delivery_123\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://nightmail.dev/v1/support/actions' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"kind\": \"retry_webhook_delivery\",\n  \"webhookId\": \"webhook_123\",\n  \"deliveryId\": \"delivery_123\"\n}'"
+          }
+        ]
+      }
+    },
+    "/v1/support/actions/{id}": {
+      "get": {
+        "operationId": "getSupportAction",
+        "tags": [
+          "Support (internal)"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "One of this conversation’s proposals and what came of it: the state the customer left it in, and the public route’s answer. Read it after the customer acts; never take the outcome from anywhere else. Internal: for Nightmail support, for one support conversation, never for customers.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^sac_[0-9a-f]{32}$"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupportAction"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-internal": true,
+        "x-nightmail-permission": {
+          "access": "staff",
+          "text": "Nightmail staff only."
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { getSupportAction } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await getSupportAction({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://nightmail.dev/v1/support/actions/resource_123' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/support/domains/{id}/verify": {
+      "post": {
+        "operationId": "recheckSupportDomain",
+        "tags": [
+          "Support (internal)"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Re-check a domain’s DNS now, as the customer’s own “Verify” does (an owner or admin’s domain only): queues a background verification and answers the stored status. Needs no confirmation. Internal: for Nightmail support, for one support conversation, never for customers.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,120}$"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupportDomainRecheck"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-internal": true,
+        "x-nightmail-permission": {
+          "access": "staff",
+          "text": "Nightmail staff only."
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { recheckSupportDomain } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await recheckSupportDomain({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://nightmail.dev/v1/support/domains/resource_123/verify' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\""
           }
         ]
       }

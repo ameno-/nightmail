@@ -466,15 +466,59 @@ const IdParam = z.object({ id: z.string().min(1).max(120) });
 export const Ok = z.object({ ok: z.literal(true) }).openapi('InboundOk');
 type Access = { access: (c: Ctx) => MailboxAccess; admin: (c: Ctx) => MailboxAccess };
 
+const isWebhook = (w: string, webhookId: string) => and(eq(endpoints.workspaceId, w), eq(endpoints.id, webhookId), eq(endpoints.type, 'webhook'));
+const notFound = () => new ApiError(404, 'NOT_FOUND', 'Webhook was not found.');
+const getWebhook = async (db: DbExecutor, w: string, webhookId: string) => { const [row] = await db.select().from(endpoints).where(isWebhook(w, webhookId)); if (!row) throw notFound(); return row; };
+// Charge actual queued copies, not API requests. A rejected charge rolls the requeue and its jobs back.
+const requeue=(wid:string,condition:ReturnType<typeof sql>)=>sql`WITH resumed AS (UPDATE mailbox_webhook_deliveries SET last_redelivery_at=now(),status='pending',generation=generation+1,last_error=NULL,updated_at=now() WHERE workspace_id=${wid} AND ${condition} RETURNING *), reset_success AS (DELETE FROM mail_action_attempts a USING resumed r WHERE a.workspace_id=r.workspace_id AND a.delivery_id=r.id AND a.state='delivered') INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.webhook',workspace_id,jsonb_build_object('deliveryId',id,'generation',generation) FROM resumed`;
+// The manual posts a person asks for, shared by their public routes and the support actions they confirm signed in.
+type InboundTest = { format?: z.infer<typeof FormatInput>; overrideUrl?: string };
+/** Testing an inbound webhook (POST /v1/inbound/webhooks/{id}/test): posts a synthetic message.received and returns the receiver's status. */
+export async function testInboundWebhook(runtime: Runtime, w: string, webhookId: string, input: InboundTest = {}) {
+  return postInboundTest(runtime, await prepareInboundTest(runtime.db, w, webhookId, input), input);
+}
+/** A test's checks and its one manual post's charge, in `db` (a support action commits them with its decision). */
+export async function prepareInboundTest(db: DbExecutor, w: string, webhookId: string, input: InboundTest = {}) {
+  const row = await getWebhook(db, w, webhookId);
+  // Nothing is posted to a held webhook's saved URL, a test included; a test to another URL is not affected.
+  if (row.paused && row.reconfirm && !input.overrideUrl) throw resumeNeedsUrl();
+  await chargeManualDelivery(db, row.workspaceId, 1);
+  return row;
+}
+/** Posts a prepared test and returns the receiver's status. */
+export async function postInboundTest(runtime: Runtime, row: EndpointRecord, input: InboundTest = {}) {
+  const { sendTestWebhook } = await import('./inbound-webhook.js');
+  try { return { statusCode: (await sendTestWebhook(runtime, row, { ...input, format: input.format && storedFormat(input.format) })).status }; }
+  catch (error) {
+    if (error instanceof JobDeferred) throw new ApiError(503, 'WEBHOOK_COOLING_DOWN', `This endpoint timed out three times in a row; ${productName} tries it again after ${error.availableAt}.`, undefined, true);
+    if (error instanceof ApiError) throw error;
+    // The receiver timed out, refused the connection or failed its TLS handshake: the test's result, not a server failure (a 500).
+    // Node reports a socket or certificate code; a Worker's fetch reports a TypeError. Anything else is a bug and stays a 500.
+    const timedOut = error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError'), code = (error as { code?: unknown }).code;
+    if (!timedOut && !(error instanceof TypeError) && !(typeof code === 'string' && /^(?:E[A-Z]+|ERR_TLS_\w+|CERT_\w+|UNABLE_TO_\w+|DEPTH_ZERO_\w+|SELF_SIGNED_\w+)$/.test(code))) throw error;
+    throw new ApiError(503, 'WEBHOOK_UNREACHABLE', timedOut ? `The endpoint did not answer within ${row.timeoutSeconds} seconds.` : 'The endpoint could not be reached.', undefined, true);
+  }
+}
+/** Redelivering a received message (POST /v1/inbound/messages/{messageId}/redeliver), in the caller's transaction: how many copies it queued and charged. */
+export async function redeliverMessage(tx: DbExecutor, w: string, messageId: string, destination?: string) {
+  const n = (await tx.execute(requeue(w, sql`routed AND payload->>'messageId'=${messageId} AND status IN ('delivered','failed') AND (status='failed' OR last_redelivery_at IS NULL OR last_redelivery_at<=now()-interval '10 minutes') AND webhook_id IN (SELECT id FROM mailbox_webhooks WHERE workspace_id=${w} AND NOT paused ${destination ? sql`AND id=${destination}` : sql``})`))).rowCount ?? 0;
+  await chargeManualDelivery(tx, w, n); return n;
+}
+/** Retrying a failed inbound-webhook delivery (POST /v1/inbound/webhooks/{id}/deliveries/{deliveryId}/retry), in the caller's transaction. */
+export async function retryInboundDelivery(tx: DbExecutor, w: string, webhookId: string, deliveryId: string) {
+  const [row] = await tx.select().from(endpoints).where(isWebhook(w, webhookId)).for('update');
+  if (!row) throw notFound();
+  if (row.paused) throw new ApiError(409, 'ENDPOINT_PAUSED', 'Resume the webhook before retrying.');
+  if (!(await tx.execute(requeue(w, sql`webhook_id=${row.id} AND id=${deliveryId} AND status='failed'`))).rowCount) throw new ApiError(409, 'DELIVERY_NOT_FAILED', 'No failed delivery on this endpoint.');
+  await chargeManualDelivery(tx, w, 1);
+}
+
 export function registerInboundWebhooks(app: App, deps: Access) {
   const path = '/v1/inbound/webhooks', tags = ['Inbound webhooks'];
   const idFilter = z.array(z.string().min(1).max(120)).min(1).max(500).nullable().describe('Only events for these receiving addresses; null for all.');
   const readAccess = (c: Ctx) => c.get('actor')?.credential === 'apiKey' ? deps.access(c) : deps.admin(c);
   // A webhook outlives the credential that sets it up (requireReceivingConsent already refused approvals without consent).
   const manageHook = (c: Ctx) => { const value = deps.admin(c); lasting(c, WEBHOOK_CHANGE); return value; };
-  const isWebhook = (w: string, webhookId: string) => and(eq(endpoints.workspaceId, w), eq(endpoints.id, webhookId), eq(endpoints.type, 'webhook'));
-  const notFound = () => new ApiError(404, 'NOT_FOUND', 'Webhook was not found.');
-  const getWebhook = async (db: DbExecutor, w: string, webhookId: string) => { const [row] = await db.select().from(endpoints).where(isWebhook(w, webhookId)); if (!row) throw notFound(); return row; };
   const lockWebhook = async (tx: DbExecutor, c: Ctx, w: string, webhookId: string, hold = true) => { const row = await lockEndpoint(tx, c, w, { id: webhookId }, hold); if (!row || row.type !== 'webhook') throw notFound(); return row; };
   const webhookView = async (c: Ctx, row: EndpointRecord) => ({ key: row.key, name: row.name, format: shownFormat(row.format), junk: row.junk, include: row.include, timeoutSeconds: row.timeoutSeconds, retryAttempts: row.retryAttempts,
     id: row.id, url: webhookUrlHint(row.url!), description: row.description, eventTypes: row.eventTypes as (typeof inboundEventTypes[number])[], addressIds: row.mailboxIds, paused: row.paused,
@@ -484,8 +528,6 @@ export function registerInboundWebhooks(app: App, deps: Access) {
   const createFields = { ...webhookFields, description: webhookFields.description.default(''), eventTypes: webhookFields.eventTypes.default(['message.received']), paused: webhookFields.paused.default(false) };
   const create = z.object({ ...createFields, addressIds: idFilter.default(null) }).strict();
   const patch = z.object({ ...webhookFields, addressIds: idFilter }).partial().strict();
-  // Charge actual queued copies, not API requests. A rejected charge rolls the requeue and its jobs back.
-  const requeue=(wid:string,condition:ReturnType<typeof sql>)=>sql`WITH resumed AS (UPDATE mailbox_webhook_deliveries SET last_redelivery_at=now(),status='pending',generation=generation+1,last_error=NULL,updated_at=now() WHERE workspace_id=${wid} AND ${condition} RETURNING *), reset_success AS (DELETE FROM mail_action_attempts a USING resumed r WHERE a.workspace_id=r.workspace_id AND a.delivery_id=r.id AND a.state='delivered') INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.webhook',workspace_id,jsonb_build_object('deliveryId',id,'generation',generation) FROM resumed`;
   const inboundToken = async (format: string, secret: string) => format === 'inbound' ? { verificationToken: await (await import('./inbound-webhook.js')).verificationToken(secret) } : {};
 
   app.openapi(createRoute({ method: 'post', path, operationId: 'createInboundWebhook', security, tags, summary: 'Subscribe to inbound events', description: 'Deliveries are signed with Standard Webhooks headers (Webhook-Id, Webhook-Timestamp, Webhook-Signature) and retried with backoff. The endpoint must be a public HTTPS URL. The signing secret, and for the inbound format its verification token, are returned once. A webhook with a key is also a named endpoint (listEndpoints). Set up over MCP, or with a key that was, it is tied to that approval: approval and nextStep in the result say until when.', request: { body: json(create.openapi('CreateInboundWebhook')) }, responses: { 201: response(InboundWebhookSchema.extend({ secret: z.string(), verificationToken: z.string().optional().describe('inbound format: the X-Webhook-Verification-Token value.'), nextStep: z.string().optional().describe('Only for a webhook tied to an MCP approval: what it depends on and how to make a lasting one.') }).openapi('InboundWebhookSecret')), ...errors } }), async c => {
@@ -547,30 +589,14 @@ export function registerInboundWebhooks(app: App, deps: Access) {
   app.openapi(createRoute({ method: 'post', path: `${path}/{id}/test`, operationId: 'testInboundWebhook', security, tags, summary: 'Send a test delivery',
     description: 'Posts a synthetic message.received for an example message, in the webhook\'s format or the one given, and returns the response status. overrideUrl sends it elsewhere, signed with a throwaway secret and without the webhook\'s custom headers.',
     request: { params: IdParam, body: json(z.object({ format: FormatInput.optional(), overrideUrl: z.string().max(2048).optional() }).strict().openapi('TestInboundWebhook')) }, responses: { 200: response(z.object({ statusCode: z.number().int() }).openapi('InboundWebhookTestResult')), ...errors } }), async c => {
-    const row = await getWebhook(c.env.db, deps.admin(c).workspaceId, c.req.valid('param').id), input = c.req.valid('json');
-    // Nothing is posted to a held webhook's saved URL, a test included; a test to another URL is not affected.
-    if (row.paused && row.reconfirm && !input.overrideUrl) throw resumeNeedsUrl();
-    await chargeManualDelivery(c.env.db, row.workspaceId, 1);
-    const { sendTestWebhook } = await import('./inbound-webhook.js');
-    try { return c.json({ statusCode: (await sendTestWebhook(c.env, row, { ...input, format: input.format && storedFormat(input.format) })).status }, 200); }
-    catch (error) {
-      if (error instanceof JobDeferred) throw new ApiError(503, 'WEBHOOK_COOLING_DOWN', `This endpoint timed out three times in a row; ${productName} tries it again after ${error.availableAt}.`, undefined, true);
-      if (error instanceof ApiError) throw error;
-      // The receiver timed out, refused the connection or failed its TLS handshake: the test's result, not a server failure (a 500).
-      // Node reports a socket or certificate code; a Worker's fetch reports a TypeError. Anything else is a bug and stays a 500.
-      const timedOut = error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError'), code = (error as { code?: unknown }).code;
-      if (!timedOut && !(error instanceof TypeError) && !(typeof code === 'string' && /^(?:E[A-Z]+|ERR_TLS_\w+|CERT_\w+|UNABLE_TO_\w+|DEPTH_ZERO_\w+|SELF_SIGNED_\w+)$/.test(code))) throw error;
-      throw new ApiError(503, 'WEBHOOK_UNREACHABLE', timedOut ? `The endpoint did not answer within ${row.timeoutSeconds} seconds.` : 'The endpoint could not be reached.', undefined, true);
-    }
+    const w = deps.admin(c).workspaceId;
+    return c.json(await testInboundWebhook(c.env, w, c.req.valid('param').id, c.req.valid('json')), 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/inbound/messages/{messageId}/redeliver', operationId: 'redeliverInboundMessage', security, tags, summary: 'Redeliver a message to its route webhooks',
     description: `Queues this message again for every route webhook that already finished with it (delivered or failed), or only destination. Returns how many deliveries were queued; 0 means none are eligible. Previously redelivered successes have a 10-minute cooldown. The workspace gets ${MANUAL_DELIVERY_BUDGET.toLocaleString('en-US')} manual posts per hour. Receivers deduplicate by Webhook-Id.`,
     request: { params: z.object({ messageId: z.string().max(120) }), body: json(z.object({ destination: z.string().max(128).optional().describe('A webhook ID: redeliver to that webhook only.') }).strict().openapi('RedeliverInboundMessage')) }, responses: { 202: response(z.object({ queued: z.number().int() }).openapi('InboundRedelivery')), ...errors } }), async c => {
     const { workspaceId: w } = deps.admin(c), { messageId } = c.req.valid('param'), { destination } = c.req.valid('json');
-    const queued = await c.env.db.transaction(async tx => {
-      const n = (await tx.execute(requeue(w, sql`routed AND payload->>'messageId'=${messageId} AND status IN ('delivered','failed') AND (status='failed' OR last_redelivery_at IS NULL OR last_redelivery_at<=now()-interval '10 minutes') AND webhook_id IN (SELECT id FROM mailbox_webhooks WHERE workspace_id=${w} AND NOT paused ${destination ? sql`AND id=${destination}` : sql``})`))).rowCount ?? 0;
-      await chargeManualDelivery(tx, w, n); return n;
-    });
+    const queued = await c.env.db.transaction(tx => redeliverMessage(tx, w, messageId, destination));
     c.get('actor').wakeJobs = queued;
     return c.json({ queued }, 202);
   });
@@ -587,13 +613,7 @@ export function registerInboundWebhooks(app: App, deps: Access) {
   });
   app.openapi(createRoute({ method: 'post', path: `${path}/{id}/deliveries/{deliveryId}/retry`, operationId: 'retryInboundWebhookDelivery', security, tags, description: 'Retry a failed delivery to its original active endpoint. Receivers must deduplicate by Webhook-Id.', request: { params: IdParam.extend({ deliveryId: z.string().max(200) }) }, responses: { 202: response(Ok), ...errors } }), async c => {
     const p = c.req.valid('param'), w = deps.admin(c).workspaceId;
-    await c.env.db.transaction(async tx => {
-      const [row] = await tx.select().from(endpoints).where(isWebhook(w, p.id)).for('update');
-      if (!row) throw notFound();
-      if (row.paused) throw new ApiError(409, 'ENDPOINT_PAUSED', 'Resume the webhook before retrying.');
-      if (!(await tx.execute(requeue(w, sql`webhook_id=${row.id} AND id=${p.deliveryId} AND status='failed'`))).rowCount) throw new ApiError(409, 'DELIVERY_NOT_FAILED', 'No failed delivery on this endpoint.');
-      await chargeManualDelivery(tx, w, 1);
-    });
+    await c.env.db.transaction(tx => retryInboundDelivery(tx, w, p.id, p.deliveryId));
     c.get('actor').wakeJobs = 1;
     return c.json({ ok: true as const }, 202);
   });
