@@ -3,7 +3,7 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { Check, X } from 'lucide-react'
-import { Button, ConfirmDialog, DataTable, DropdownMenu, EmptyState, ErrorState, IconButton, LoadingRegion, PageHeader, Pagination, SearchField, Select, StatusBadge, Tabs, useToast } from '../../components/ui'
+import { Button, ConfirmDialog, DataTable, DropdownMenu, EmptyState, ErrorState, FacetRail, IconButton, LoadingRegion, PageHeader, Pagination, SearchField, Select, SplitPane, StatusBadge, Tabs, useToast } from '../../components/ui'
 import { useApiDef, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { request } from '../../data/live'
@@ -81,10 +81,11 @@ function RoutesTab({ overview, fetching, filters, setFilter, page, onPage, onCre
   const rows = overview.routes.data
   const empty = filters.q ? 'Nothing matches' : filters.kind === 'all' ? 'No routes yet' : `No ${kinds[filters.kind].label.toLowerCase()} yet`
   const open = (r: RouteEntry) => { if (!hrefOf(r)) onEditRoute(r) }
-  return <div className="stack rcv-tab">
+  // The kinds are the rail's facets, each with its count; below 1200 px they are a row over the table.
+  const kindFacets = (Object.keys(kinds) as KindFilter[]).filter(k => overview.manage || ['all', 'address', 'inbox', 'auto'].includes(k))
+    .map(k => ({ key: k, label: kinds[k].label, count: kindCount(overview.counts, k), selected: filters.kind === k, onSelect: () => setFilter({ kind: k }) }))
+  return <div className="stack rcv-tab"><SplitPane className="rcv-split" collapse="row" rail={<FacetRail label="Show" groups={[{ key: 'kind', title: 'Kind', items: kindFacets }]} />}>
     <div className="rcv-toolbar">
-      <div className="rcv-filters" role="group" aria-label="Show">{(Object.keys(kinds) as KindFilter[]).filter(k => overview.manage || ['all', 'address', 'inbox', 'auto'].includes(k)).map(k =>
-        <button key={k} type="button" className="rcv-filter" aria-pressed={filters.kind === k} onClick={() => setFilter({ kind: k })}>{kinds[k].label}<span>{number(kindCount(overview.counts, k))}</span></button>)}</div>
       <div className="rcv-toolbar__end">
         {hosts.length > 1 && <Select className="rcv-domain" aria-label="Domain" value={filters.domain || 'all'} onValueChange={v => setFilter({ domain: v === 'all' ? '' : v })} options={[{ value: 'all', label: 'All domains' }, ...hosts.map(d => ({ value: d.name, label: d.name }))]} />}
         <SearchField className="search-box--list" aria-label="Search routes" placeholder="Search address or name" value={draft} onChange={e => type(e.target.value)} />
@@ -110,6 +111,7 @@ function RoutesTab({ overview, fetching, filters, setFilter, page, onPage, onCre
       <span className="muted">{number(kindCount(overview.counts, filters.kind))} {kindCount(overview.counts, filters.kind) === 1 ? 'route' : 'routes'}{filters.domain ? ` at ${filters.domain}` : ''}</span>
       <Pagination page={page} pageSize={PAGE} total={kindCount(overview.counts, filters.kind)} nextCursor={overview.routes.nextCursor} onPageChange={onPage} />
     </div>
+  </SplitPane>
     <NewInboxDialog open={newInbox} onOpenChange={setNewInbox} />
   </div>
 }

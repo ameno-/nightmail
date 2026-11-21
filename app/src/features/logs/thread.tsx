@@ -61,7 +61,7 @@ export function ThreadTimeline({ thread, items, open, titled = true }: { thread:
           <span className="thread-line__dot" data-outbound={item.outbound || undefined} aria-hidden="true" />
           <span className="thread-line__top"><Direction outbound={item.outbound} /><Who item={item} /><Clip count={item.attachments} /></span>
           <Time at={item.at} />
-          <span className="thread-line__status">{label(item.status)}{item.focused && <span className="thread-line__here">· Viewing</span>}</span>
+          <span className="thread-line__status">{label(item.status)}{item.focused && <span className="thread-line__here">Viewing</span>}</span>
         </Entry>
       </li>)}
     </ol>

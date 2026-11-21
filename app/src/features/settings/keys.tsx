@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { useSearchParams } from 'react-router'
-import { Button, Checkbox, ConfirmDialog, DataTable, Dialog, Disclosure, DropdownMenu, EmptyState, ErrorState, PageHeader, Pagination, Tabs, useToast, SecretDialog } from '../../components/ui'
+import { Button, Checkbox, ConfirmDialog, CopyButton, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, KeyValues, PageHeader, Pagination, StatusBadge, Tabs, useToast, SecretDialog } from '../../components/ui'
 import { useApiMutation, useApiDef, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { Agent, AgentTokenSummary, ApiKey, AppPassword, ApprovalTie } from '../../data/types'
@@ -202,16 +202,33 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
   </div>
 }
 
-// One row in full, with its actions: the way to read a long name or address list on a phone, where a card clips it. A
-// key's history opens below its fields; it loads with the dialog, closed, so its arrival moves nothing.
+// One row in full, with its actions: the way to read a long name or address list on a phone, where a card clips it. Its
+// state beside the title; what it can reach, then its life (prefix, ID, dates); a key's changes in a second tab, loaded
+// with the dialog, so switching to it moves nothing.
+const accessFacts = new Set(['Type', 'Access', 'Domains', 'Mail', 'Inbox', 'Client', 'Account', 'Agent approval'])
+const stateOf = (row: Row) => row.kind === 'key' ? keyState(row.key) : row.kind === 'token' ? tokenState(row.token) : row.kind === 'agent' ? agentState(row.agent) : null
 function KeyDetails({ row, fields, onClose, onRevoke, onEdit }: { row: Row | null; fields: [string, ReactNode][]; onClose: () => void; onRevoke: (row: Row) => void; onEdit: (key: ApiKey) => void }) {
-  return <Dialog open={row !== null} onOpenChange={next => { if (!next) onClose() }} title={row ? rowName(row) : ''} footer={<>
-    <Button onClick={onClose}>Close</Button>
-    {row && editable(row) && <Button onClick={() => onEdit(row.key)}>Edit</Button>}
-    {row && !rowState(row) && <Button variant="danger" onClick={() => onRevoke(row)}>{revokeLabel(row)}</Button>}
-  </>}>
-    <dl className="keys-details">{fields.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
-    {row?.kind === 'key' && <Disclosure className="keys-changes" title="Changes"><KeyChanges keyId={row.key.id} /></Disclosure>}
+  const [tab, setTab] = useState('details')
+  const id = row?.id
+  useEffect(() => { setTab('details') }, [id])
+  const state = row ? stateOf(row) : null
+  const facts = fields.filter(([label]) => label !== 'Status')
+  const life: [string, ReactNode][] = [...facts.filter(([label]) => !accessFacts.has(label)), ...(row?.kind === 'key' ? [['ID', <span className="ui-kv__id"><code>{row.key.id}</code><CopyButton value={row.key.id} label="Copy key ID" /></span>] as [string, ReactNode]] : [])]
+  return <Dialog size="lg" open={row !== null} onOpenChange={next => { if (!next) onClose() }} title={row ? rowName(row) : ''}
+    status={row && <StatusBadge status={state ?? 'Active'} tone={state === 'Revoked' || state === 'Ended' ? 'danger' : state ? 'warning' : 'success'} />}
+    footer={<>
+      {row && !rowState(row) && <Button variant="danger" className="ui-dialog__footer-start" onClick={() => onRevoke(row)}>{revokeLabel(row)}</Button>}
+      <Button onClick={onClose}>Close</Button>
+      {row && editable(row) && <Button variant="primary" onClick={() => onEdit(row.key)}>Edit</Button>}
+    </>}>
+    {row?.kind === 'key' && <Tabs label="Key" value={tab} onValueChange={setTab} items={[{ value: 'details', label: 'Details' }, { value: 'changes', label: 'Changes' }]} />}
+    <div className="keys-details" hidden={tab !== 'details'}>
+      <h3 className="ui-label ui-label--rule">Access</h3>
+      <KeyValues items={facts.filter(([label]) => accessFacts.has(label))} />
+      <h3 className="ui-label ui-label--rule">Lifecycle</h3>
+      <KeyValues items={life} />
+    </div>
+    {row?.kind === 'key' && <div className="keys-changes" hidden={tab !== 'changes'}><KeyChanges keyId={row.key.id} /></div>}
   </Dialog>
 }
 

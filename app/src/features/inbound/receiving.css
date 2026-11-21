@@ -5,11 +5,18 @@
 .rcv-cell { display: flex; align-items: center; gap: var(--space-8); min-width: 0; }
 .rcv-cell > .rcv-icon { align-self: flex-start; margin-top: 3px; }
 .rcv-table { --table-row-height: 53px; }
+/* Routes beside their kinds (the facet rail); counts, times and rule names in mono. */
+.rcv-split > .ui-split__main { gap: var(--space-12); }
+.rcv-split .rcv-toolbar { justify-content: flex-end; }
+.rcv-table td:is([data-col='unread'], [data-col='last']) { font-family: var(--font-mono); font-size: var(--text-xs); }
+.rcv-table td[data-col='unread'] strong { color: var(--color-text); font-weight: 400; }
+.rcv-table td[data-col='unread'] strong::before { content: ''; display: inline-block; width: 6px; height: 6px; margin: 0 var(--space-6) 1px 0; border-radius: 50%; background: var(--color-info-marker); }
+.rcv-foot { font-family: var(--font-mono); font-size: var(--text-xs); }
 .rcv-match { display: inline-flex; min-width: 0; max-width: 100%; font-family: var(--font-mono); font-size: var(--text-sm); letter-spacing: -.01em; }
 .rcv-match__local { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rcv-match__host { flex: none; color: var(--color-faint); }
 /* Its own font must not make its line taller than the lines without one. */
-.rcv-wild { padding: 0 1px; color: var(--color-accent); font-family: var(--font-body); font-weight: var(--font-weight-bold); line-height: 0; }
+.rcv-wild { padding: 0 1px; color: var(--color-text); font-family: var(--font-body); font-weight: var(--font-weight-bold); line-height: 0; }
 .rcv-targets { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-4) var(--space-12); min-width: 0; }
 .rcv-target { display: inline-flex; align-items: center; gap: var(--space-6); white-space: nowrap; }
 .rcv-target[data-muted] { color: var(--color-muted); }
@@ -138,7 +145,7 @@ html:not([data-privacy='off']) .trace-to.private-field:not(:hover, :focus)::plac
 .trace-omen { display: grid; grid-template-columns: minmax(64px, auto) minmax(60px, 1fr) 36px; align-items: center; gap: var(--space-8); }
 .trace-omen code { font-family: var(--font-mono); font-size: var(--text-xs); }
 .trace-omen__bar { height: 6px; border-radius: 3px; background: var(--color-layer-2); overflow: hidden; }
-.trace-omen__bar > span { display: block; height: 100%; background: var(--color-accent); transform-origin: left; transition: transform 520ms var(--ease-out-strong); }
+.trace-omen__bar > span { display: block; height: 100%; background: var(--color-accent-data); transform-origin: left; transition: transform 520ms var(--ease-out-strong); }
 .trace-omen__value { color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); text-align: right; font-variant-numeric: tabular-nums; }
 .trace-result { display: flex; align-items: center; gap: var(--space-16); min-height: 44px; padding: var(--space-8) var(--space-12); border-radius: var(--radius-lg); background: var(--color-layer-1); transition: opacity 260ms ease-out, transform 300ms var(--ease-out-strong); }
 .trace-result[data-state='pending'] { opacity: 0; transform: translateY(4px); }
@@ -169,7 +176,7 @@ html:not([data-privacy='off']) .trace-to.private-field:not(:hover, :focus)::plac
 .addr-skeleton > span:nth-child(2) { height: 200px; }
 .addr-skeleton > span:nth-child(3) { height: 240px; }
 .ritual-try__options { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 360px)); gap: var(--space-16); align-items: start; }
-.ritual-try__range { width: 100%; height: var(--control-height); margin: 0; accent-color: var(--color-accent); }
+.ritual-try__range { width: 100%; height: var(--control-height); margin: 0; accent-color: var(--color-contrast); }
 .ritual-try__score { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .rcv-filter-chip { display: inline-flex; align-items: center; gap: 2px; min-width: 0; max-width: 100%; height: var(--control-height); padding: 0 2px 0 10px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: var(--text-sm); }
 /* Phone: the kind filters scroll sideways in one row, the domain picker and search take full rows, and a route's card

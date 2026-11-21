@@ -16,6 +16,7 @@ import { EmailDetailPage } from './email-detail'
 import { useScheduledActions } from './scheduled'
 import { ThreadChip, ThreadTimeline, threaded, threadItems, useThreadPrefetch } from './thread'
 import { useMediaQuery } from '../../lib/media'
+import { LogsBody, type FacetFilters } from './facets'
 
 const directions = [{ value: 'all', label: 'All' }, { value: 'sent', label: 'Sent' }, { value: 'received', label: 'Received' }]
 // Sent statuses, most looked-for first; received and spam filter received mail (spam is visible to owners and admins).
@@ -83,13 +84,17 @@ function Logs({ regionId, campaignId }: { regionId: string; campaignId?: string 
   const filtered = Boolean(search.trim() || campaignId || status !== 'all' || stream !== 'all')
   // A campaign's own empty state needs its summary: wait for it, or offer to retry it, before calling the list unmatched.
   const campaignOnly = Boolean(campaignId) && !search.trim() && status === 'all' && stream === 'all'
+  // The facets set the same URL filters as the toolbar's controls, where those allow the value.
+  const facets: FacetFilters = { status, direction, stream,
+    can: (key, value) => key === 'status' ? allowed.has(value) : key === 'direction' ? !campaignId : !receivedOnly && value !== 'all',
+    set: (key, value) => key === 'status' ? update({ status: value, ...receivedStatuses.includes(value) ? { stream: null } : {} }) : key === 'direction' ? setDirection(value as LogDirection) : update({ stream: value }) }
   return <div className="logs-page"><LogsHeader regionId={campaign.data?.regionId ?? regionId} direction={direction} onDirection={setDirection} locked={Boolean(campaignId)} />
     <div className="data-toolbar"><div className="cluster">{campaignId && <Button variant="secondary" aria-label={`Remove campaign filter: ${campaign.data?.name ?? campaignId}`} onClick={clearCampaign} title={campaign.data?.name}><span className="logs-campaign-chip">Campaign: {campaign.data?.name ?? campaignId}</span><X size={14} aria-hidden /></Button>}<div className="search-box"><Search size={16} /><Input type="search" aria-label="Search logs" placeholder="Search logs" maxLength={200} value={draft} onChange={event => type(event.target.value)} /></div>
       <Select aria-label="Email status" value={status} onValueChange={value => update({ status: value, ...receivedStatuses.includes(value) ? { stream: null } : {} })} options={['all', ...[...allowed].sort((a, b) => [...receivedStatuses, ...sentStatuses].indexOf(a) - [...receivedStatuses, ...sentStatuses].indexOf(b))].map(option)} />
       <Select aria-label="Email stream filter" value={stream} disabled={receivedOnly} onValueChange={value => update({ stream: value })} options={streams} /></div>
       <Button className="logs-export" aria-label="Export this page as CSV" title="Download the rows on this page as a CSV file" disabled={!query.data?.items.length} onClick={() => downloadCsv(campaignId ? `nightmail-${campaignId}-logs-page.csv` : 'nightmail-logs-page.csv', logCsvRows(query.data?.items ?? [], !multiTenant))}><Download size={16} /><span>Export CSV</span></Button>
     </div>
-    {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
+    {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <LogsBody items={query.data?.items} filters={facets}>
       <DataTable<LogEntry> className="logs-table" tableRef={tableRef} loading={query.isPending || (campaignOnly && campaign.isPending)} skeletonRows={pageSize} minRows={pageSize} rows={query.data?.items ?? []} rowKey={row => `${query.isPlaceholderData ? 'previous:' : ''}${row.direction}:${row.id}`} rowHref={logHref} rowLabel={logRowLabel} onRowIntent={rowIntent} columns={scheduled.columns(logsPageColumns)}
         empty={campaignOnly && campaign.isError && !campaign.data ? <ErrorState error={campaign.error} onRetry={() => campaign.refetch()} />
           // A campaign that hasn't sent says when it will, in its heading.
@@ -98,7 +103,7 @@ function Logs({ regionId, campaignId }: { regionId: string; campaignId?: string 
           : <EmptyState title={direction === 'received' ? 'No mail received yet' : direction === 'sent' ? 'No mail sent yet' : 'No mail yet'} action={direction === 'received' ? <Link className="ui-button ui-button--secondary ui-button--md" to="/receiving">Set up receiving</Link> : <Link className="ui-button ui-button--secondary ui-button--md" to="/docs#quickstart">Send your first email</Link>} />} />
       {scheduled.dialogs}
       {query.data ? <Pagination page={query.data.page} pageSize={query.data.pageSize} total={query.data.total} nextCursor={query.data.nextCursor} count={query.data.items.length} onPageChange={next => update({ page: next === 1 ? null : String(next) }, true)} /> : <PaginationSkeleton />}
-    </>}
+    </LogsBody>}
   </div>
 }
 

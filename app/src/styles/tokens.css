@@ -101,55 +101,25 @@
   color-scheme: light;
   --color-email-surface: #FFFFFF;
   --color-email-text: #181818;
-  --color-deep: #FAFAFA;
-  --color-canvas: #FAFAFA;
-  --color-surface: #FFFFFF;
-  --color-layer-1: #FAFAFA;
-  --color-layer-2: #F2F2F2;
-  --color-layer-3: #EEEEEE;
-  --color-text: #161616;
-  --color-muted: #5C5C5C;
-  --color-faint: #737373; /* 4.7:1 on surface (was #808080, 3.9:1) */
-  --color-border: rgb(0 0 0 / 10%);
-  --color-border-muted: rgb(0 0 0 / 8%);
-  --color-border-strong: rgb(0 0 0 / 20%);
-  --color-accent: #3B5CF6;
-  --color-accent-hover: #3250DF;
   --color-brand: #798ABA; /* a periwinkle accent, oklch(0.638 0.075 269.2): 3.3:1 on deep, 3.0:1 on layer-2 */
   --color-logo: #0A0B0F; /* the brand's ink: the wordmark and the monogram on a pale ground; docs/brand.md */
-  --color-active-bg: #F2F2F2;
-  --color-contrast: #242424;
-  --color-contrast-hover: #3F3F3F;
+  --color-contrast: #161616;
+  --color-contrast-hover: #333333;
   --color-on-contrast: #FFFFFF;
   --shadow-on-contrast: 0 .5px .5px rgb(0 0 0 / 30%);
-  --color-success: #167F3E; /* 4.6:1 on success-bg for 13 px badges (was #198B43, 4.0:1) */
-  --color-success-marker: #2EAF5A;
-  --color-success-bg: #E7F9EA;
-  --color-success-border: #B8E9C1;
-  --color-warning: #68552B;
-  --color-warning-marker: #E7AF36;
-  --color-warning-bg: #FEFAEC;
-  --color-warning-border: #F7E5B5;
-  --color-danger: #B82D35;
-  --color-danger-bg: #FCECEB;
-  --color-danger-border: #F2BBB7;
   --color-complaint: var(--color-danger);
-  --color-danger-marker: #D92E3C;
-  --color-info: #2C47C8;
-  --color-info-bg: #ECF1FE;
-  --color-info-border: #C3D4FD;
-  --color-info-marker: #3250DF;
   --color-neutral-marker: var(--color-faint);
   --color-overlay: rgb(0 0 0 / 40%);
   --color-shadow: rgb(0 0 0 / 8%);
   --color-hover: rgb(0 0 0 / 4%);
   --color-pressed: rgb(0 0 0 / 8%);
   --color-transparent: transparent;
-  --color-on-accent: #FFFFFF;
-  --color-focus: #7698FD;
   --font-body: 'Inter', 'Inter Fallback', sans-serif;
   --font-mono: 'OpenTUI Mono', 'OpenTUI Mono Fallback', monospace;
   --font-email: 'Inter', Arial, sans-serif;
+  /* Labels over data: small, muted, in the mono face, tracked out. */
+  --text-label: 11px;
+  --tracking-label: .06em;
   --tracking-email: -0.01em;
   --text-xs: 12px;
   --text-sm: 13px;
@@ -182,6 +152,9 @@
   --focus-reach: 4px;
   --row-height: 44px;
   --row-height-lg: 56px;
+  /* Log and event streams only (Logs, Overview's latest mail, delivery and thread timelines): one mono line. */
+  --row-height-dense: 28px;
+  --facet-width: 192px;
   --sidebar-width: 232px;
   /* The sidebar's edge padding, and the inset of content inside its boxes (workspace picker, navigation links). The
      wordmark, the picker's name and the navigation labels share one left edge: gutter + inset. */
@@ -197,8 +170,9 @@
   --ease-swap: cubic-bezier(.2, .8, .2, 1);
   /* Sheets: the iOS drawer curve. */
   --ease-drawer: cubic-bezier(.32, .72, 0, 1);
-  --shadow-raised: 0 2px 4px rgb(0 0 0 / 4%), 0 1px 2px -1px rgb(0 0 0 / 8%), 0 0 0 .5px rgb(0 0 0 / 12%);
-  --shadow-button: 0 1px 1.5px rgb(0 0 0 / 10%), 0 0 0 .5px rgb(0 0 0 / 14%);
+  /* Flat: surfaces and controls are drawn by a hairline, never lifted by a shadow. Overlays (popovers, dialogs) keep one. */
+  --shadow-raised: 0 0 0 1px var(--color-border-muted);
+  --shadow-button: inset 0 0 0 1px var(--color-border);
   --shadow-popover: 0 8px 16px rgb(0 0 0 / 4%), 0 4px 8px rgb(0 0 0 / 8%), 0 0 0 .5px rgb(0 0 0 / 12%);
   --shadow-dialog: 0 16px 32px rgb(0 0 0 / 4%), 0 8px 16px rgb(0 0 0 / 8%), 0 0 0 .5px rgb(0 0 0 / 12%);
   /* Sender score grade bands (the gauge's arcs). */
@@ -208,49 +182,102 @@
 :root[data-theme='dark'] {
   --grade-aplus: #3DD68C; --grade-a: #6BD586; --grade-b: #A2BCFF; --grade-c: #F2CF76; --grade-d: #F59A5B; --grade-f: #F17471;
   color-scheme: dark;
-  --color-deep: #080808;
-  --color-canvas: #080808;
-  --color-surface: #161616;
-  --color-layer-1: #242424;
-  --color-layer-2: #2E2E2E;
-  --color-layer-3: #3A3A3A;
-  --color-text: #FAFAFA;
-  --color-muted: #AEAEAE;
-  --color-faint: #8A8A8A; /* 4.5:1 on layer-1 (was #808080, 3.9:1) */
-  --color-border: rgb(255 255 255 / 10%);
-  --color-border-muted: rgb(255 255 255 / 8%);
-  --color-border-strong: rgb(255 255 255 / 20%);
-  --color-accent: #A2BCFF;
-  --color-accent-hover: #C3D4FD;
   --color-brand: #798ABA; /* the same colour as light: 5.9:1 on deep */
   --color-logo: #F4F2EC; /* the brand's paper: the marks on a dark ground */
-  --color-active-bg: #2E2E2E;
   --color-contrast: #EDEDED;
   --color-contrast-hover: #FFFFFF;
   --color-on-contrast: #161616;
   --shadow-on-contrast: none;
-  --color-success: #6BD586;
-  --color-success-marker: #49C970;
-  --color-success-bg: #14361D;
-  --color-success-border: #1D783C;
-  --color-warning: #F2CF76;
-  --color-warning-marker: #E7AF36;
-  --color-warning-bg: #4B4025;
-  --color-warning-border: #AC8833;
-  --color-danger: #F17471;
-  --color-danger-bg: #461516;
-  --color-danger-border: #97252B;
-  --color-info: #7698FD;
-  --color-info-bg: #1B2852;
-  --color-info-border: #263FA9;
-  --color-info-marker: #7698FD;
   --color-overlay: rgb(0 0 0 / 60%);
   --color-shadow: rgb(0 0 0 / 30%);
   --color-hover: rgb(255 255 255 / 6%);
   --color-pressed: rgb(255 255 255 / 10%);
-  --color-on-accent: #161616;
-  --shadow-raised: 0 2px 4px rgb(0 0 0 / 30%), 0 1px 2px rgb(0 0 0 / 30%), 0 0 0 .5px rgb(255 255 255 / 16%), 0 -.5px rgb(255 255 255 / 6%);
-  --shadow-button: 0 1px 2px rgb(0 0 0 / 40%), 0 0 0 .5px rgb(255 255 255 / 20%), 0 -.5px rgb(255 255 255 / 10%);
+  --shadow-raised: 0 0 0 1px var(--color-border-muted);
+  --shadow-button: inset 0 0 0 1px var(--color-border);
   --shadow-popover: 0 8px 16px rgb(0 0 0 / 30%), 0 4px 8px rgb(0 0 0 / 30%), 0 0 0 .5px rgb(255 255 255 / 16%), 0 -.5px rgb(255 255 255 / 6%);
   --shadow-dialog: 0 16px 32px rgb(0 0 0 / 30%), 0 8px 16px rgb(0 0 0 / 30%), 0 0 0 .5px rgb(255 255 255 / 16%), 0 -.5px rgb(255 255 255 / 6%);
+}
+
+/* ── Colour (Signal Log) ──
+   OKLCH throughout. True neutral greys for every surface, line and text; one navy accent used only on buttons and chart
+   items; a data palette of matched lightness and chroma for multi-series charts; status colours (ok, warn, error, info)
+   only on status dots and words. Selection, the active page, tabs, toggles and focus are neutral: brighter text, a
+   neutral fill or a rule, and a neutral high-contrast focus ring.
+   The accent is an ink navy: muted and slate-leaning, one hue (263) with a role per lightness. A navy fill with white
+   text, a 1px lighter edge that keeps a fill visible on near-black (no glow), a lighter tint for chart items, and a
+   light navy-blue for link text on dark.
+   Contrast (WCAG 2): white on every fill step 7:1 or more (light 12.3:1, dark 9.3:1); the dark edge 3.8:1 on the
+   surface; links 9.3:1 (light) and 9.3:1 (dark); chart series 6.0:1 (light) and 6.7:1 (dark); status inks 5.6:1 or
+   more on light and 8:1 or more on dark. */
+:root {
+  /* Light: markers and series at L .62 (warnings .70: amber reads dirty lower), inks at L .50. */
+  --mark-l: .62; --mark-c: .14; --warn-l: .70; --ink-l: .50; --ink-c: .12;
+  --hue-ok: 152; --hue-warn: 85; --hue-error: 27; --hue-info: 250;
+  --hue-received: 190; --hue-opened: 300; --hue-clicked: 345;
+  --l-deep: .985; --l-surface: 1; --l-layer-1: .982; --l-layer-2: .962; --l-layer-3: .945; --l-text: .205; --l-muted: .48; --l-faint: .555;
+  /* Ink navy: a fill with white text, hover and pressed steps (darker on light), its edge, text and charts. */
+  --color-accent: oklch(.33 .07 263);
+  --color-accent-hover: oklch(.29 .065 263);
+  --color-accent-pressed: oklch(.26 .06 263);
+  --color-accent-edge: transparent;
+  --color-accent-text: oklch(.40 .08 263);
+  --color-accent-data: oklch(.50 .08 262);
+  --color-on-accent: #FFFFFF;
+}
+:root[data-theme='dark'] {
+  --mark-l: .74; --mark-c: .13; --warn-l: .80; --ink-l: .82; --ink-c: .11;
+  --l-deep: .135; --l-surface: .16; --l-layer-1: .195; --l-layer-2: .225; --l-layer-3: .27; --l-text: .945; --l-muted: .72; --l-faint: .62;
+  /* On near-black the fill lifts a little, hover goes lighter (white stays 7:1) and a 1px edge outlines it. */
+  --color-accent: oklch(.40 .075 262);
+  --color-accent-hover: oklch(.45 .08 262);
+  --color-accent-pressed: oklch(.35 .07 262);
+  --color-accent-edge: oklch(.54 .08 262);
+  --color-accent-text: oklch(.77 .065 260);
+  --color-accent-data: oklch(.68 .08 260);
+}
+:root {
+  --color-deep: oklch(var(--l-deep) 0 0);
+  --color-canvas: var(--color-deep);
+  --color-surface: oklch(var(--l-surface) 0 0);
+  --color-layer-1: oklch(var(--l-layer-1) 0 0);
+  --color-layer-2: oklch(var(--l-layer-2) 0 0);
+  --color-layer-3: oklch(var(--l-layer-3) 0 0);
+  --color-text: oklch(var(--l-text) 0 0);
+  --color-muted: oklch(var(--l-muted) 0 0);
+  --color-faint: oklch(var(--l-faint) 0 0);
+  --color-border: oklch(var(--l-text) 0 0 / 9%);
+  --color-border-muted: oklch(var(--l-text) 0 0 / 6.5%);
+  --color-border-strong: oklch(var(--l-text) 0 0 / 17%);
+  /* Neutral ink for secondary series and tracks. */
+  --color-series: oklch(var(--l-text) 0 0 / 30%);
+  --color-series-strong: oklch(var(--l-text) 0 0 / 64%);
+  --color-track: oklch(var(--l-text) 0 0 / 7%);
+  /* Selected rows, the active page, pressed facets, text selection: a neutral fill. Focus: the text colour's ring. */
+  --color-active-bg: oklch(var(--l-text) 0 0 / 8%);
+  --color-focus: var(--color-text);
+  /* Status: ink for words, marker for dots, a 10% tint and a 30% rule (alerts and banners). */
+  --color-success: oklch(var(--ink-l) var(--ink-c) var(--hue-ok));
+  --color-success-marker: oklch(var(--mark-l) var(--mark-c) var(--hue-ok));
+  --color-success-bg: oklch(var(--mark-l) var(--mark-c) var(--hue-ok) / 10%);
+  --color-success-border: oklch(var(--mark-l) var(--mark-c) var(--hue-ok) / 30%);
+  --color-warning: oklch(var(--ink-l) var(--ink-c) var(--hue-warn));
+  --color-warning-marker: oklch(var(--warn-l) var(--mark-c) var(--hue-warn));
+  --color-warning-bg: oklch(var(--warn-l) var(--mark-c) var(--hue-warn) / 10%);
+  --color-warning-border: oklch(var(--warn-l) var(--mark-c) var(--hue-warn) / 34%);
+  --color-danger: oklch(var(--ink-l) calc(var(--ink-c) + .04) var(--hue-error));
+  --color-danger-marker: oklch(var(--mark-l) calc(var(--mark-c) + .04) var(--hue-error));
+  --color-danger-bg: oklch(var(--mark-l) calc(var(--mark-c) + .04) var(--hue-error) / 10%);
+  --color-danger-border: oklch(var(--mark-l) calc(var(--mark-c) + .04) var(--hue-error) / 32%);
+  --color-info: oklch(var(--ink-l) var(--ink-c) var(--hue-info));
+  --color-info-marker: oklch(var(--mark-l) var(--mark-c) var(--hue-info));
+  --color-info-bg: oklch(var(--mark-l) var(--mark-c) var(--hue-info) / 10%);
+  --color-info-border: oklch(var(--mark-l) var(--mark-c) var(--hue-info) / 30%);
+  /* Data: one hue per kind of mail for multi-series charts, at the markers' lightness and chroma. Sent is the blue. */
+  --color-series-sent: var(--color-accent-data);
+  --color-series-received: oklch(var(--mark-l) var(--mark-c) var(--hue-received));
+  --color-series-delivered: var(--color-success-marker);
+  --color-series-opened: oklch(var(--mark-l) var(--mark-c) var(--hue-opened));
+  --color-series-clicked: oklch(var(--mark-l) var(--mark-c) var(--hue-clicked));
+  --color-series-bounced: var(--color-warning-marker);
+  --color-series-complained: var(--color-danger-marker);
 }

@@ -1,6 +1,6 @@
 import { useEffect, useRef, type CSSProperties } from 'react'
 import { Link } from 'react-router'
-import { Button, Dialog, Disclosure, ErrorState, SkeletonText } from '../../components/ui'
+import { Button, Dialog, Disclosure, ErrorState, Meter, MetricRow, SkeletonText, type Tone } from '../../components/ui'
 import type { SenderScore, SenderScoreFactor } from '../../data/types'
 import { closeScoreAbout, useScoreAbout } from '../../lib/score-about'
 import { number, relativeTime } from '../../lib/format'
@@ -10,6 +10,8 @@ import { EVALUATION, GOOD_STANDING, GRADE_BANDS } from '../../../../api/src/stan
 const percent = (digits: number) => (value: number) => `${(value * 100).toFixed(digits)}%`
 // Engagement is the marketing unsubscribe rate.
 export const factorFormats: Record<SenderScoreFactor['key'], (value: number) => string> = { complaints: percent(2), content: percent(1), bounces: percent(1), hygiene: percent(1), auth: value => `${Math.round(value * 100)}%`, engagement: percent(2) }
+// A part's score as a state: 90 and up good, under 50 failing, under 75 worth a look.
+const partTone = (score: number): Tone => score >= 90 ? 'success' : score < 50 ? 'danger' : score < 75 ? 'warning' : 'neutral'
 const grades = `${GRADE_BANDS.map((band, i) => band.min ? `${band.grade} from ${band.min}` : `${band.grade} below ${GRADE_BANDS[i - 1].min}`).join(', ')}.`
 // A time in the viewer's own time zone, with the day when it isn't today.
 function clock(value: string) {
@@ -55,10 +57,12 @@ export function ScoreAbout({ report, error, onRetry }: { report: SenderScore | u
         {!graded && <span className="score-about__progress" role="meter" aria-label="Real emails before the first grade" aria-valuemin={0} aria-valuemax={report.needed} aria-valuenow={report.emails.firstEmails} style={{ '--share': `${Math.min(100, report.emails.firstEmails / Math.max(1, report.needed) * 100)}%` } as CSSProperties}><i /></span>}
         {limitLine && <span className="score-about__limit muted">{limitLine}</span>}
       </div>
-      <ul ref={list} className="score-about__factors" aria-label="The six parts">{report.factors.map(factor => <li key={factor.key} data-key={factor.key} data-focus={focus === factor.key || undefined}>
-        <div className="score-about__factor-name"><span>{factor.label}</span><span className="muted">{factor.weight}%</span></div>
-        <span className="score-about__factor-now">{graded && factor.source === 'measured' ? <>{factorFormats[factor.key](factor.value!)}<span className="muted"> · {Math.round(factor.score!)}/100</span></> : <span className="muted">{graded ? 'No data, left out' : '—'}</span>}</span>
-      </li>)}</ul>
+      <ul ref={list} className="score-about__factors" aria-label="The six parts">{report.factors.map(factor => { const measured = graded && factor.source === 'measured'; return <li key={factor.key} data-key={factor.key} data-focus={focus === factor.key || undefined}>
+        <MetricRow label={factor.label} hint={`${factor.weight}%`}
+          spark={measured ? <Meter value={factor.score!} max={100} mark={80} label={`${factor.label}: ${Math.round(factor.score!)} of 100`} /> : <Meter value={0} />}
+          value={measured ? factorFormats[factor.key](factor.value!) : <span className="muted">{graded ? 'No data' : '—'}</span>}
+          unit={measured ? <span className={`score-about__part-score ui-tone--${partTone(factor.score!)}`}>{Math.round(factor.score!)}</span> : undefined} />
+      </li> })}</ul>
       <Disclosure className="score-about__section" title="How it’s graded">
         <dl className="score-about__bases">{report.factors.map(factor => <div key={factor.key}><dt>{factor.label}</dt><dd>{factor.basis}</dd></div>)}</dl>
         <ul>
