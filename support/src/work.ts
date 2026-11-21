@@ -63,6 +63,12 @@ export class WorkQueue {
     this.sql.exec('UPDATE _support_work SET result=?, updated_at=? WHERE id=?', JSON.stringify(result), Date.now(), id);
   }
 
+  /** Blocked items become due now (the sweep, once a key covers its addresses again); nothing else moves. */
+  retryBlocked() {
+    const now = Date.now();
+    return this.sql.exec("UPDATE _support_work SET due_at=?, updated_at=? WHERE state='blocked'", now, now).rowsWritten;
+  }
+
   /** Whether any item still has to run (parked items wait for someone else and don't count). */
   open() {
     return this.sql.exec(`SELECT 1 FROM _support_work WHERE ${runnable} LIMIT 1`).toArray().length > 0;
@@ -96,7 +102,8 @@ export class WorkQueue {
           this.sql.exec('UPDATE _support_work SET state=?, due_at=?, last_error=?, updated_at=? WHERE id=?', state, due, error, now, item.id);
           transitioned(item, state);
         });
-        log('warn', { event: 'work', kind: item.kind, state, attempts: item.attempts, error });
+        // A blocked item waits for a person or a fix (a key, a route, a secret): an alert can watch WORK_BLOCKED.
+        log(state === 'blocked' ? 'error' : 'warn', { event: 'work', code: state === 'blocked' ? 'WORK_BLOCKED' : undefined, kind: item.kind, state, attempts: item.attempts, error });
       }
     }
     await this.arm(deadline());

@@ -6,6 +6,7 @@ import { MAX_IMAGE_BYTES } from './image.js';
 import { staff } from './staff.js';
 import { daily } from './limits.js';
 import { acceptIntake, acceptSupport, blockUnconfigured, holdAtEdge, intakeAddress, ledgered, sweep } from './ledger.js';
+import { readiness } from './replay.js';
 import { log, logError } from './log.js';
 import { FAVICON_LINKS, favicon } from './favicon.js';
 import { addresses, productName } from '../../api/src/brand.js';
@@ -181,7 +182,7 @@ async function inbound(request: Request, env: Env): Promise<Response> {
     if (await ledgered(env, 'support', messageId)) return new Response(null, { status: 200 });
     // Over the per-sender edge limit: kept in the ledger for the team's digest, never read or answered.
     if (env.EMAIL_IN && !(await env.EMAIL_IN.limit({ key: `sender:${await addressHash(sender)}` })).success) {
-      await holdAtEdge(env, { messageId, threadId, sender, subject: typeof message?.subject === 'string' ? message.subject : null });
+      await holdAtEdge(env, { messageId, threadId, sender, subject: typeof message?.subject === 'string' ? message.subject : null, reason: 'rate' });
       return new Response(null, { status: 200 });
     }
     // The Durable Object stores the message and arms its alarm, and the ledger row is written, before this answers 200:
@@ -248,7 +249,12 @@ function staffRoute(path: string) {
 
 async function route(request: Request, env: Env, url: URL, at: { route: string }, ctx: ExecutionContext): Promise<Response> {
   const path = url.pathname, name = (route: string) => { at.route = route; };
-  if (path === '/health') { name('/health'); return json({ status: 'ok', service: 'bane-support', stage: env.STAGE }); }
+  if (path === '/health') {
+    name('/health');
+    // Liveness is `status` (the deploy reads it), whatever readiness says.
+    const ready = await readiness(env).catch(error => { logError(error, { event: 'health', code: 'READINESS_UNAVAILABLE' }, 'warn'); return { ready: false }; });
+    return json({ status: 'ok', service: 'bane-support', stage: env.STAGE, ...ready });
+  }
   // (The brand's tile, for the tabs of this Worker's own pages.)
   const icon = request.method === 'GET' ? favicon(path) : null;
   if (icon) { name('/favicon'); return icon; }

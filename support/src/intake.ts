@@ -66,6 +66,13 @@ export class SupportIntake extends DurableObject<Env> {
     return { ok: true };
   }
 
+  /** The sweep (replay.ts), once a key covers its addresses again: blocked work runs now. */
+  async retryBlocked() {
+    const woken = this.work.retryBlocked();
+    await this.work.arm();
+    return { woken };
+  }
+
   override async alarm() {
     await this.work.drain(item => this.run(item), (item, state) => {
       if (item.kind === 'message' && (state === 'done' || state === 'held' || state === 'dead'))

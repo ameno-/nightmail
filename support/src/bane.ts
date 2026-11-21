@@ -121,6 +121,15 @@ export function baneApi(env: Env, which: 'support' | 'intake' = 'support') {
       if (Number(response.headers.get('content-length') ?? 0) > limit) { await response.body?.cancel(); return null; }
       return readCapped(response.body, limit);
     },
+    /** One page of the receiving addresses this key can read (replay.ts: the key self-check). */
+    addresses: (cursor: string | null) =>
+      call<{ data: { id: string; address: string }[]; nextCursor: string | null }>('GET', `/v1/inbound/addresses?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`),
+    /**
+     * `message.received` events after a cursor, for one address this key can read (replay.ts). Without `after`, none and
+     * the cursor at the current end of the log.
+     */
+    events: (query: { addressId?: string; after?: string; limit: number }) =>
+      call<{ data: InboundEvent[]; cursor: string }>('GET', `/v1/inbound/events?${new URLSearchParams({ types: 'message.received', limit: String(query.limit), ...(query.addressId ? { addressId: query.addressId } : {}), ...(query.after ? { after: query.after } : {}) })}`),
     /** A new conversation from the support address, or from `addressId` when the caller pinned one (ticket emails, the chat follow-up thread). */
     startThread: (input: { to: string[]; subject: string; text: string; replyTo?: string[]; addressId?: string }, idempotencyKey: string) =>
       call<{ id: string; threadId: string }>('POST', '/v1/inbound/threads', { addressId: env.SUPPORT_ADDRESS_ID, ...input }, idempotencyKey),
@@ -137,6 +146,7 @@ export function baneApi(env: Env, which: 'support' | 'intake' = 'support') {
   };
 }
 export type BaneApi = ReturnType<typeof baneApi>;
+export type InboundEvent = { cursor: string; type: string; addressId: string | null; threadId: string | null; messageId: string | null };
 
 export type InboundMessage = {
   id: string; threadId: string | null; direction: 'inbound' | 'outbound'; subject: string | null;
