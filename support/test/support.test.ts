@@ -48,7 +48,10 @@ export class SupportIntake extends Intake {
     super(ctx, env);
   }
   async alarm() {} // Tests call super.alarm() at the chosen instant.
-  async fixture({ expire, tick, input, changeRoute, interruptTicket }) {
+  async fixture({ expire, tick, input, changeRoute, interruptTicket, queuedTicket }) {
+    // A ticket item as an earlier build queued it, for this thread's conversation.
+    if (queuedTicket) { const conversationId = await this.conversationId(queuedTicket.threadId);
+      this.work.insert({ kind: 'ticket', id: 'ticket:' + conversationId + ':' + queuedTicket.messageId, payload: { ...queuedTicket.payload, messageId: queuedTicket.messageId, ctx: { ...queuedTicket.payload.ctx, conversationId } } }); }
     if (interruptTicket === true) this.ctx.storage.sql.exec("CREATE TRIGGER interrupt_ticket BEFORE INSERT ON _support_work WHEN NEW.kind='notify' BEGIN SELECT RAISE(ABORT,'fixture'); END");
     if (interruptTicket === false) this.ctx.storage.sql.exec('DROP TRIGGER interrupt_ticket');
     if (expire) this.ctx.storage.sql.exec('UPDATE _support_work SET due_at=1 WHERE id=?', expire);
@@ -803,7 +806,7 @@ describe('support Worker', () => {
     });
     afterAll(() => instance?.dispose());
     type Row = { id: string; kind: string; state: string; attempts: number; due_at: number; last_error: string | null };
-    async function drive(threadId: string, options: { message?: string; tick?: boolean; expire?: string; changeRoute?: boolean; interruptTicket?: boolean } = {}) {
+    async function drive(threadId: string, options: { message?: string; tick?: boolean; expire?: string; changeRoute?: boolean; interruptTicket?: boolean; queuedTicket?: object } = {}) {
       const input = options.message ? { threadId, messageId: options.message, mailbox: 'abuse', address: 'abuse@dev.bane.mx' } : undefined;
       const res = await instance.dispatchFetch(`${SUPPORT}/__intake`, { method: 'POST', body: JSON.stringify({ threadId, ...options, input }) });
       assert.equal(res.status, 200);
@@ -833,6 +836,20 @@ describe('support Worker', () => {
       assert.equal((await replies(thread, instance)).length, 1);
       const sent = await sends(`ticket-${ticket.id}`); assert.deepEqual(sent.map(c => c[6]), [202]);
       assert.doesNotMatch(sent[0][3].text, /bounce screenshot\.png|\/attachments\//);
+    });
+
+    test('a ticket item an earlier build queued with an account still files a ticket that names no customer', async () => {
+      const thread = 'thr_queued_owner', message = 'msg_queued_owner_1', ticketId = 'tkt_queuedowner23456';
+      // As the build before the change queued it: the customer it looked up from a DMARC-passing sender address.
+      const payload = { ticketId, input: { type: 'privacy', title: 'Export my data', severity: 'P2', ask: 'Please export my data.', summary: 'An email to privacy@.', tried: [], recommendation: 'Reply in the inbox.', evidence: { ids: [message] }, details: { topic: 'privacy' } },
+        ctx: { channel: 'email', threadId: thread, costUsd: 0, model: 'none (intake)', attachments: [], verified: 'dmarc', dmarc: 'PASS', sender: null,
+          customer: { userId: 'usr_ada', email: 'ada@acme.test', name: 'Ada Lovelace', role: 'owner', workspaces: [{ id: 'ws_acme', name: 'Acme Prod' }] } } };
+      const run = await drive(thread, { queuedTicket: { threadId: thread, messageId: message, payload }, tick: true });
+      assert.equal(run.rows.find(r => r.kind === 'ticket')?.state, 'done');
+      const ticket = await (await instance.getD1Database('DB', 'support')).prepare('SELECT customer FROM tickets WHERE id=?').bind(ticketId).first<{ customer: string }>();
+      assert.deepEqual(JSON.parse(ticket!.customer), { verified: false, sender: 'ada@acme.test', dmarc: 'PASS' });
+      const team = (await sends(`ticket-${ticketId}`))[0];
+      assert.ok(team[3].text.startsWith('UNVERIFIED SENDER (DMARC PASS)') && !/Customer:|Workspaces:|usr_ada|Acme Prod|Ada Lovelace/.test(team[3].text), team[3].text);
     });
 
     test('a retry that finds the ticket still emails the team, then acks once', async () => {

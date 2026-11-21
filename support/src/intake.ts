@@ -29,6 +29,12 @@ type Decision = {
   ticket?: { id: string } | { reason: string };
 };
 type Ticket = { ctx: TicketContext; input: TicketInput; ticketId: string; messageId: string };
+/**
+ * An intake ticket names no account, only the sender as contact data. A ticket item an earlier build queued may still
+ * carry the customer it looked up from the sender's address: whatever the payload says, that is dropped here.
+ */
+const unowned = (ctx: TicketContext): TicketContext => ({ ...ctx, verified: null, sender: ctx.sender ?? ctx.customer?.email ?? null,
+  customer: { userId: null, email: null, name: null, role: null, workspaces: [] } });
 type Send = { path: string; body: object; key: string };
 type Receipt = { id: string; due_at: number; notified_at: number | null; evidence: string; notes: string };
 
@@ -103,7 +109,8 @@ export class SupportIntake extends DurableObject<Env> {
     return external(this.env.DB.prepare('SELECT id,due_at,notified_at,evidence,notes FROM tickets WHERE conversation_id=?').bind(conversationId).first<Receipt>());
   }
 
-  private async ticket(item: WorkRow, { ctx, input, ticketId, messageId }: Ticket): Promise<Outcome> {
+  private async ticket(item: WorkRow, queued: Ticket): Promise<Outcome> {
+    const { input, ticketId, messageId } = queued, ctx = unowned(queued.ctx);
     let row = await this.receipt(ctx.conversationId);
     // The first message is in evidence; subsequent messages are in notes. Either D1 write may have committed
     // before this object observed its response. Never append another copy on retry.
