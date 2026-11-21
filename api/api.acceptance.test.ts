@@ -20906,15 +20906,19 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         if (failing.test(text)) throw new Error('canceling statement due to statement timeout');
         return execute(query);
       });
-      // Only the cleanup step fails; the Node runner runs this in the background, so dispatch never waits on it either.
-      try { assert.equal((await hourlyUpkeep(runtime))[0], 'MAINTENANCE_CLEANUP_FAILED'); } finally { globalThis.fetch = fixtureFetch; }
+      // The cleanup step fails; the Node runner runs this in the background, so dispatch never waits on it either.
+      let failed: string[];
+      try { failed = [...await hourlyUpkeep(runtime)]; } finally { globalThis.fetch = fixtureFetch; }
+      assert.ok(failed.includes('MAINTENANCE_CLEANUP_FAILED'), failed.join());
       const failedAt = seen.findIndex(text => failing.test(text));
       assert.ok(failedAt >= 0, 'the retention statement ran and failed');
-      assert.ok(seen.slice(failedAt + 1).some(text => text.includes("FROM mail_receipts r WHERE r.status='pending'")), 'receipt recovery still ran after it');
+      // Retention runs last, so receipt recovery ran before it; and its other tables still ran.
+      assert.ok(seen.slice(0, failedAt).some(text => text.includes("FROM mail_receipts r WHERE r.status='pending'")), 'receipt recovery ran');
+      assert.ok(seen.some(text => text.includes('DELETE FROM "operation_events"')), 'the other retention steps ran');
     });
   });
-  // Retention (maintenance.ts retire): every table has its own share of the budget, and its own failure.
-  test('retention: with one table failing and every statement slow, every other table retires each day, the sent side every 15 minutes, and the inbound prune passes 5,000', async t => {
+  // Retention (maintenance.ts retire): a hard budget per run, every table its turn and share, and its own failure.
+  test('retention: within a hard budget every table gets its turn, a backlog its share oldest first, a failing table stops nothing, the sent side runs every 15 minutes, and the inbound prune passes 5,000', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
       const { cleanup, retentionTick } = await import('./src/maintenance.js'), { PgDialect } = await import('drizzle-orm/pg-core');
       const wid = runtime.config.workspaceId, tag = 'rt' + randomUUID().replaceAll('-', '').slice(0, 12);
@@ -20978,7 +20982,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         jobs_attachment_deletes: ["INSERT INTO jobs(id,workspace_id,type,payload,status,created_at) SELECT 'jobd_'||p.tag||p.day||'x'||i,p.wid,'maintenance.deleteAttachment',jsonb_build_object('key','fixture'),'completed',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM jobs,p WHERE starts_with(id,'jobd_'||p.tag)"],
       };
       const seed = async (day: number, names = Object.keys(steps)) => { for (const name of names) { const [make] = steps[name]!; if (make) await db.query(prefix + make, p(day)); } };
-      const left = async () => Object.fromEntries(await Promise.all(Object.entries(steps).map(async ([name, [, count]]) => [name, Number((await db.query(prefix + count, p(0))).rows[0].count)])));
+      const left = async () => { const counts: Record<string, number> = {}; for (const [name, [, count]] of Object.entries(steps)) counts[name] = Number((await db.query(prefix + count, p(0))).rows[0].count); return counts; };
       const only = (counts: Record<string, number>, n: number, except: Record<string, number> = {}) => Object.fromEntries(Object.keys(counts).map(name => [name, except[name] ?? n]));
       await db.query(`INSERT INTO mailbox_webhooks(id,workspace_id,url,event_types,encrypted_secret) VALUES('mwh_'||$2,$1,'https://fixture.invalid/','["message.received"]','fixture')`, [wid, tag]);
       await db.query(`INSERT INTO operation_webhooks(id,workspace_id,url,event_types,encrypted_secret,paused) VALUES('owh_'||$2,$1,'https://example.com/hook','[]','x',true)`, [wid, tag]);
@@ -20991,38 +20995,80 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await cleanup(runtime);
       assert.deepEqual((await db.query(`SELECT (SELECT count(*) FROM mailbox_events WHERE data->>'tag'=$1)::int events,(SELECT count(*) FROM mailbox_webhook_deliveries WHERE starts_with(id,'mwdb_'||$1))::int deliveries`, [tag])).rows[0], { events: 0, deliveries: 0 });
 
-      // Every statement takes ten seconds, so the 4-minute budget covers 24 of them, and sending_email_events always times out.
+      // A slow database: every statement takes 5 s and a batch of operation_events 60 s, and sending_email_events always
+      // times out. operation_events also holds 25,000 expired rows, and the run starts there.
       runtime.config.multiTenant = true;
+      await db.query(`INSERT INTO operation_events(id,workspace_id,type,data,created_at) SELECT 'oevb_'||$2||'_'||i,$1,'fixture.retention','{}',now()-interval '31 days'-make_interval(secs=>i)
+        FROM generate_series(1,25000) i`, [wid, tag]);
+      // The backlog's rows left, and the oldest of them (row i is i seconds older than row 1).
+      const backlog = async () => (await db.query(`SELECT count(*)::int AS n,coalesce(max(substr(id,length($1)+1)::int),0) AS oldest FROM operation_events WHERE starts_with(id,$1)`, [`oevb_${tag}_`])).rows[0] as { n: number; oldest: number };
+      await db.query("INSERT INTO retention_state(scope,next_step) VALUES('hourly','operation_events') ON CONFLICT(scope) DO UPDATE SET next_step=excluded.next_step");
       const dialect = new PgDialect(), execute = runtime.db.execute.bind(runtime.db), now = Date.now.bind(Date); let skew = 0;
+      const sql = (query: unknown) => dialect.sqlToQuery((query as { getSQL(): import('drizzle-orm').SQL }).getSQL()).sql;
+      const timeout = () => Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' });
       const clock = t.mock.method(Date, 'now', () => now() + skew);
       const slow = t.mock.method(runtime.db, 'execute', async (query: Parameters<typeof execute>[0]) => {
-        skew += 10_000;
-        if (/DELETE FROM "?sending_email_events"? WHERE ctid/.test(dialect.sqlToQuery((query as { getSQL(): import('drizzle-orm').SQL }).getSQL()).sql)) throw new Error('canceling statement due to statement timeout');
+        const text = sql(query);
+        skew += /DELETE FROM "operation_events"/.test(text) ? 60_000 : 5_000;
+        if (/DELETE FROM "sending_email_events"/.test(text)) throw timeout();
         return execute(query);
       });
-      const lines: Json[] = [], warn = t.mock.method(console, 'warn', (line: string) => { try { lines.push(JSON.parse(line)); } catch { /* not a log line */ } });
+      const lines: Json[] = [], capture = (line: string) => { try { lines.push(JSON.parse(line)); } catch { /* not a log line */ } };
+      const logs = [t.mock.method(console, 'info', capture), t.mock.method(console, 'warn', capture)];
+      // One hourly run: it lasts its 5 minutes and at most the one statement still running then, plus its closing write.
+      const hourly = async () => {
+        const began = skew, error = await cleanup(runtime).then(() => null, (e: Error & { tables?: string[] }) => e);
+        assert.ok(skew - began <= 5 * 60_000 + 60_000 + 5_000, `the run took ${(skew - began) / 1000} s`);
+        const run = lines.filter(line => String(line.code).startsWith('RETENTION_') && line.scope === 'hourly').at(-1)!;
+        assert.deepEqual(error?.tables ?? [], run.failed, 'a failed step fails the hourly upkeep step, naming the table');
+        return run;
+      };
+      const removed = (runs: Json[]) => Object.assign({}, ...runs.flatMap(run => Object.values(run.deleted))) as Record<string, number>;
       for (const day of [1, 2]) {
         await seed(day);
-        await assert.rejects(cleanup(runtime), /sending_email_events/);
+        const runs: Json[] = [], start = await backlog();
+        while (runs.length < 3 && Object.entries(await left()).some(([name, n]) => name !== 'sending_email_events' && Number(n) > 0)) runs.push(await hourly());
         const counts = await left();
-        assert.deepEqual(counts, only(counts, 0, { sending_email_events: 3 * day }), `day ${day}: every other table retired its rows`);
-        const run = lines.filter(line => line.code === 'RETENTION_PARTIAL').at(-1)!;
-        assert.deepEqual([run.scope, run.failed], ['hourly', ['sending_email_events']]);
-        assert.ok(run.waiting.sent.sending_email_events >= 31 * 86_400, 'the log names how old the oldest waiting row is');
-        const deleted: Record<string, number> = Object.assign({}, ...Object.values(run.deleted));
-        assert.deepEqual(Object.keys(steps).filter(name => name !== 'sending_email_events' && !(deleted[name] > 0)), [], 'and how many rows each table removed');
+        assert.deepEqual(counts, only(counts, 0, { sending_email_events: 3 * day }), `day ${day}: every other table retired its rows over ${runs.length} runs`);
+        assert.deepEqual(Object.keys(steps).filter(name => name !== 'sending_email_events' && !(removed(runs)[name] > 0)), [], 'and the log says how many rows each removed');
+        // The budget ended the first run before every step; the next run started at the first it hadn't reached.
+        assert.ok(runs.length === 2 && runs[0].unreached.length > 0, `${runs.length} runs, ${runs[0].unreached.length} steps left by the first`);
+        const resumed = runs[0].unreached[0];
+        assert.ok(removed(runs.slice(1))[resumed] > 0 || runs[1].failed.includes(resumed), `the second run took ${resumed}`);
+        // The backlog got its share, a 60 s batch a run, oldest first; the other tables still got theirs.
+        if (day === 1) assert.equal(removed([runs[0]]).operation_events, 5000, 'the first run started at the backlog and gave it one batch, not the budget');
+        const end = await backlog();
+        assert.ok(end.n < start.n && end.n > 0 && end.oldest === end.n, `backlog ${start.n} -> ${end.n} rows, oldest left ${end.oldest}`);
+        const failing = runs.find(run => run.failed.includes('sending_email_events'))!;
+        assert.ok(failing.waiting.sent.sending_email_events >= 31 * 86_400, 'the log says how old the failing table\'s oldest row is');
+        assert.ok(runs.some(run => run.waiting.sent?.operation_events >= 31 * 86_400), 'and the backlog\'s');
       }
-      for (const mock of [clock, slow, warn]) mock.mock.restore();
+      for (const mock of [clock, slow, ...logs]) mock.mock.restore();
 
-      // Every 15 minutes the sent side alone: elected, so a second tick in the same quarter hour does nothing.
+      // Every 15 minutes the sent side alone, elected once per quarter hour, standing aside while the hourly run works.
       const sent = ['sending_email_events', 'sending_emails', 'sending_review_recipients', 'operation_delivery_attempts', 'operation_deliveries_paused_expired', 'operation_deliveries',
         'operation_events', 'operation_sns_receipts', 'operation_feedback_failures', 'jobs', 'jobs_attachment_deletes'];
-      await db.query("DELETE FROM job_schedule WHERE workspace_id='maintenance:sent-retention'");
-      await seed(3); await retentionTick(runtime);
-      const counts = await left();
-      assert.deepEqual(counts, only(counts, 3, Object.fromEntries(sent.map(name => [name, 0]))));
-      await seed(4, ['operation_events']); await retentionTick(runtime);
-      assert.equal((await left()).operation_events, 3);
+      const held = async () => (await db.query("SELECT held FROM retention_state WHERE scope='sent'")).rows[0]?.held ?? {};
+      await db.query("DELETE FROM retention_state WHERE scope='sent'");
+      await seed(3);
+      await db.query("UPDATE retention_state SET lease_until=now()+interval '5 minutes' WHERE scope='hourly'");
+      await retentionTick(runtime);
+      assert.equal((await left()).sending_emails, 3, 'the hourly run holds its lease: the 15-minute run stands aside');
+      await db.query("UPDATE retention_state SET lease_until=NULL WHERE scope='hourly'");
+      // A step that times out there is held until the hourly run gets through it.
+      const failing = t.mock.method(runtime.db, 'execute', async (query: Parameters<typeof execute>[0]) => { if (/DELETE FROM "sending_email_events"/.test(sql(query))) throw timeout(); return execute(query); });
+      await retentionTick(runtime); failing.mock.restore();
+      let counts = await left();
+      assert.deepEqual(counts, only(counts, 3, Object.fromEntries(sent.map(name => [name, name === 'sending_email_events' ? 9 : 0]))));
+      assert.deepEqual(Object.keys(await held()), ['sending_email_events']);
+      await db.query("UPDATE retention_state SET due_at=now() WHERE scope='sent'");
+      await seed(4, ['sending_email_events', 'operation_events']); await retentionTick(runtime);
+      counts = await left();
+      assert.deepEqual([counts.sending_email_events, counts.operation_events], [12, 0], 'the next 15-minute run skips the held step');
+      await cleanup(runtime);
+      assert.deepEqual([(await left()).sending_email_events, await held()], [0, {}], 'the hourly run gets through it and frees it');
+      await seed(5, ['operation_events']); await retentionTick(runtime);
+      assert.equal((await left()).operation_events, 3, 'a second 15-minute run within the quarter hour does nothing');
     });
   });
   test('MX: disconnect and reconnect cannot reset operator policy', async t => {
@@ -21078,12 +21124,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   });
   test('MX: an hourly health-check timeout does not prevent retention', async t => {
     await simulatedSesFixture(t,async ({runtime,db})=>{
-      const {cleanup}=await import('./src/maintenance.js');
+      const {hourlyUpkeep}=await import('./src/maintenance.js');
       runtime.config.multiTenant=true;
       const expired=unique('expired');
       await db.query(`INSERT INTO jobs(id,type,workspace_id,payload,status,created_at) VALUES($1,'tenant.provision',$2,'{}','completed',now()-interval '31 days')`,[expired,runtime.config.workspaceId]);
+      // The health check is the hourly upkeep's first step, and its first statement times out. Swapped by hand, as above.
       const check=t.mock.method(runtime.db,'execute'); check.mock.mockImplementationOnce(()=>{throw Object.assign(new Error('statement timeout'),{code:'57014'});});
-      await cleanup(runtime);
+      const fixtureFetch=globalThis.fetch; globalThis.fetch=async()=>{throw new Error('Offline fixture: DNS refreshes and alerts fail here.');};
+      let failed:string[]; try { failed=[...await hourlyUpkeep(runtime)]; } finally { globalThis.fetch=fixtureFetch; }
+      assert.ok(failed.includes('HOSTED_HEALTH_CHECK_FAILED') && !failed.includes('MAINTENANCE_CLEANUP_FAILED'),failed.join());
       assert.equal((await db.query('SELECT 1 FROM jobs WHERE id=$1',[expired])).rowCount,0);
     });
   });

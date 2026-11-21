@@ -10,7 +10,7 @@ const UPLOAD_BATCH = 1000;
 const DAY_MS = 24 * 3600_000;
 
 /**
- * Storage reconciliation, hourly after cleanup (the only retention step that calls storage). A put can
+ * Storage reconciliation, hourly with cleanup (the only retention step that calls storage). A put can
  * land at any time (see Storage.put): after its reservation expired, after the sweeper's deletion ran
  * and after the reservation's tombstone (158) was spent. The reconciler lists only the upload prefix
  * (uploadKey), takes only keys of its exact grammar (uploads/<existing workspace>/attachment_<32 hex>)
@@ -45,8 +45,8 @@ async function reconcilePages(runtime: Runtime, deadline: number) {
   }
   return queued;
 }
-// Hourly cron invocations may run up to 15 minutes; stop starting new batches after this and continue next hour.
-const RETENTION_BUDGET_MS = 4 * 60_000;
+// The hourly retention run, everything included: no statement starts after it. Hourly cron invocations may run 15 minutes.
+const RETENTION_BUDGET_MS = 5 * 60_000;
 
 /**
  * The hourly backstop for the ten-minute standing job (src/standing.ts): runs the ladder now, which also re-queues any
@@ -82,20 +82,28 @@ export async function sweepInboxes(runtime:Runtime, budgetMs:number,clock=Date.n
  * One retention step: a bounded statement that removes (or retires) at most `size` rows, oldest first, and returns their
  * count as n. `oldest` selects the time of the oldest row the step would still take, for the log. `lane` groups the steps in
  * the log (sent mail, received mail, everything else); the sent ones also run every 15 minutes (retentionTick). `batches`
- * caps the statements a step runs per pass.
+ * caps the statements a step runs in one run.
  */
 type Lane = 'sent' | 'inbound' | 'other';
 type Drain = { name: string; statement: () => SQL; size?: number; oldest?: SQL; lane?: Lane; batches?: number };
-const HOUR_MS = 3600_000, SENT_PERIOD_MS = 15 * 60_000;
-// A 15-minute run of the sent-side tables, from the minute cron: well inside the cron's 15-minute wall time.
-const SENT_BUDGET_MS = 3 * 60_000;
+// The 15-minute run of the sent-side tables, from the minute cron and the Node runner, everything included.
+const SENT_BUDGET_MS = 2 * 60_000;
+// The last part of a run's budget goes to finding the oldest row still waiting in each table behind.
+const OLDEST_RESERVE_MS = 15_000;
+// A run's lease outlasts its budget by the one statement that may still be running at its end (Hyperdrive stops any
+// statement at 60 s), so a run that died leaves no lease behind for longer than that.
+const LEASE_GRACE_MS = 2 * 60_000;
 
-/** The rows of `table` that match `where`, oldest first by `by`. A row another run holds is skipped, not waited for. */
-function expired(name: string, table: string, by: SQL, where: SQL, extra: Partial<Drain> = {}): Drain {
-  const t = sql.identifier(table), size = extra.size ?? RETENTION_BATCH;
-  return { name, oldest: sql`SELECT min(${by}) FROM ${t} WHERE ${where}`, ...extra,
-    statement: () => sql`WITH gone AS (DELETE FROM ${t} WHERE ctid IN (SELECT ctid FROM ${t} WHERE ${where} ORDER BY ${by} LIMIT ${size} FOR UPDATE SKIP LOCKED) RETURNING 1) SELECT count(*)::int AS n FROM gone` };
+/**
+ * The rows of `table` that match `where`, oldest first by `by` when an index gives that order (`unordered` when none
+ * does: a sort would read the whole backlog for each batch). A row another run holds is skipped, not waited for.
+ */
+function expired(name: string, table: string, by: SQL, where: SQL, extra: Partial<Drain> & { unordered?: true } = {}): Drain {
+  const t = sql.identifier(table), size = extra.size ?? RETENTION_BATCH, order = extra.unordered ? sql`` : sql` ORDER BY ${by}`;
+  return { name, oldest: sql`SELECT min(${by}) FROM ${t} WHERE ${where}`, size: extra.size, lane: extra.lane, batches: extra.batches,
+    statement: () => sql`WITH gone AS (DELETE FROM ${t} WHERE ctid IN (SELECT ctid FROM ${t} WHERE ${where}${order} LIMIT ${size} FOR UPDATE SKIP LOCKED) RETURNING 1) SELECT count(*)::int AS n FROM gone` };
 }
+const unordered = { unordered: true } as const;
 const at = (column: string) => sql`${sql.identifier(column)}`;
 
 /**
@@ -140,16 +148,17 @@ async function retentionDrains(runtime: Runtime): Promise<Drain[]> {
     expired('mailbox_webhook_deliveries', 'mailbox_webhook_deliveries', at('created_at'), sql`created_at<${cutoff} AND status IN ('delivered','failed') AND (last_error IS DISTINCT FROM 'ENDPOINT_PAUSED_EXPIRED' OR updated_at<now()-interval '7 days')`, inbound),
     ...(runtime.config.multiTenant ? [
       // The score's daily evidence decays with a 30-day half-life; past 400 days it no longer moves the score or the card.
-      expired('sender_score_daily', 'sender_score_daily', at('day'), sql`day < (now() AT TIME ZONE 'UTC')::date-400`),
-      expired('operator_idempotency', 'operator_idempotency', at('created_at'), sql`created_at < now()-interval '1 day'`),
-      // Keep only aggregate workspace evidence long enough to observe a 30-day clean span.
+      expired('sender_score_daily', 'sender_score_daily', at('day'), sql`day < (now() AT TIME ZONE 'UTC')::date-400`, unordered),
+      expired('operator_idempotency', 'operator_idempotency', at('created_at'), sql`created_at < now()-interval '1 day'`, unordered),
+      // Keep only aggregate workspace evidence long enough to observe a 30-day clean span. Only the credits have an hour index.
       ...['hosted_usage_hourly', 'hosted_health_hourly', 'hosted_health_credits', 'hosted_screen_hourly'].map(table => expired(table, table, at('hour'),
-        table === 'hosted_health_hourly' || table === 'hosted_screen_hourly' ? sql`hour < now()-interval '32 days'` : sql`hour < now()-interval '2 days'`)),
+        table === 'hosted_health_hourly' || table === 'hosted_screen_hourly' ? sql`hour < now()-interval '32 days'` : sql`hour < now()-interval '2 days'`,
+        table === 'hosted_health_credits' ? {} : unordered)),
     ] : []),
     expired('agent_tokens', 'agent_tokens', at('expires_at'), sql`expires_at < ${cutoff}`),
     // Abuse-monitoring signals past their retention (src/abuse.ts abuseExpired). Expiry runs whether monitoring is on or off.
     expired('abuse_signals', 'abuse_signals', at('last_at'), abuseExpired),
-    expired('abuse_sampling', 'abuse_sampling', at('sampled_through'), sql`sampled_through < now()-interval '30 days'`),
+    expired('abuse_sampling', 'abuse_sampling', at('sampled_through'), sql`sampled_through < now()-interval '30 days'`, unordered),
     // Links leave with the signals they came from; a cluster nothing has rescored for 30 days (monitoring off, or its links gone) leaves too.
     expired('identity_links', 'identity_links', at('last_at'), linkExpired),
     expired('abuse_clusters', 'abuse_clusters', at('scored_at'), sql`scored_at < now()-interval '30 days'`),
@@ -161,19 +170,19 @@ async function retentionDrains(runtime: Runtime): Promise<Drain[]> {
     { name: 'audit_events', oldest: sql`SELECT min(retain_until) FROM audit_events WHERE retain_until <= now()`, statement: () => sql`WITH gone AS (DELETE FROM audit_events WHERE id IN
       (SELECT id FROM audit_events WHERE retain_until <= now() ORDER BY retain_until LIMIT ${RETENTION_BATCH}) RETURNING 1) SELECT count(*)::int AS n FROM gone` },
     // Handoffs go 30 days after they expire; what they opened is in audit_events.
-    expired('support_handoffs', 'support_handoffs', at('expires_at'), sql`expires_at < ${cutoff}`),
+    expired('support_handoffs', 'support_handoffs', at('expires_at'), sql`expires_at < ${cutoff}`, unordered),
     // An email's sign-in nobody confirmed goes when it can no longer be confirmed (support-conversations.ts SIGNIN_DAYS), and
     // with it the sender address it kept; a Message-ID's binding once its Date is too old to bind anyway.
     expired('support_email_signins', 'support_email_signins', at('created_at'), sql`signed_in_at IS NULL AND created_at < now() - interval '7 days'`),
     expired('support_email_bindings', 'support_email_bindings', at('created_at'), sql`created_at < now() - interval '7 days'`),
     // Support transcripts (src/support-inbox.ts) and their subjects go 90 days after the conversation closed.
-    expired('support_messages', 'support_messages', at('created_at'), sql`conversation_id IN (${closedLongAgo})`),
+    expired('support_messages', 'support_messages', at('created_at'), sql`conversation_id IN (${closedLongAgo})`, unordered),
     { name: 'support_subjects', statement: () => sql`WITH gone AS (UPDATE support_conversations SET subject = NULL
         WHERE id IN (${closedLongAgo} AND subject IS NOT NULL LIMIT ${RETENTION_BATCH}) RETURNING 1) SELECT count(*)::int AS n FROM gone` },
     expired('audience_operation_plans', 'audience_operation_plans', at('expires_at'), sql`expires_at < now() - interval '1 day'`),
     // A preview holds its whole parsed CSV (up to 5 MiB) and is replaced by each re-preview, so abandoned ones pile up.
     // A week leaves room to come back and commit; committed imports stay because deliverability reads them.
-    expired('audience_import_previews', 'audience_imports', at('created_at'), sql`status = 'preview' AND created_at < now() - interval '7 days'`, { size: 100 }),
+    expired('audience_import_previews', 'audience_imports', at('created_at'), sql`status = 'preview' AND created_at < now() - interval '7 days'`, { size: 100, unordered: true }),
     expired('sending_email_events', 'sending_email_events', at('created_at'), sql`created_at < ${cutoff}`, sent),
     // An email and its attachment links leave in the same statement, so no link can outlive its email.
     { name: 'sending_emails', ...sent, oldest: sql`SELECT min(created_at) FROM sending_emails WHERE created_at < ${cutoff} AND status NOT IN ('queued','attempting','scheduled')`, statement: () => sql`WITH gone AS (
@@ -206,9 +215,10 @@ async function retentionDrains(runtime: Runtime): Promise<Drain[]> {
     expired('operation_delivery_attempts', 'operation_delivery_attempts', at('created_at'), sql`created_at < ${cutoff}`, sent),
     // As in the inbound lane: a delivery still held for a paused endpoint after 30 days is dead-lettered with
     // ENDPOINT_PAUSED_EXPIRED (unpausing no longer resumes it) and kept 7 more days so the reason is seen. Only endpoints
-    // that are still paused: an unpaused one's parked deliveries belong to its resume job.
+    // that are still paused: an unpaused one's parked deliveries belong to its resume job. Oldest first through
+    // operation_deliveries_paused_age (migration 389), never a sort of the whole backlog.
     { name: 'operation_deliveries_paused_expired', ...sent, statement: () => sql`WITH expired AS (UPDATE operation_deliveries SET status='failed', last_error='ENDPOINT_PAUSED_EXPIRED', updated_at=now()
-        WHERE id IN (SELECT d.id FROM operation_webhooks w JOIN operation_deliveries d ON d.workspace_id=w.workspace_id AND d.webhook_id=w.id
+        WHERE ctid IN (SELECT d.ctid FROM operation_webhooks w JOIN operation_deliveries d ON d.workspace_id=w.workspace_id AND d.webhook_id=w.id
           WHERE w.paused AND d.status='paused' AND d.created_at < ${cutoff} ORDER BY d.created_at LIMIT ${RETENTION_BATCH} FOR UPDATE OF d SKIP LOCKED) RETURNING 1)
       SELECT count(*)::int AS n FROM expired` },
     expired('operation_deliveries', 'operation_deliveries', at('created_at'), sql`created_at < ${cutoff} AND status NOT IN ('pending','paused') AND (last_error IS DISTINCT FROM 'ENDPOINT_PAUSED_EXPIRED' OR updated_at < now() - interval '7 days')`, sent),
@@ -243,103 +253,151 @@ async function retentionDrains(runtime: Runtime): Promise<Drain[]> {
 
 // Per lane, so no map in a log line passes the logger's 50 keys.
 type ByLane = Partial<Record<Lane, Record<string, number>>>;
-type Retired = { deleted: ByLane; waiting: ByLane; failed: string[]; complete: boolean };
+type Retired = { deleted: ByLane; waiting: ByLane; failed: string[]; timedOut: string[]; unreached: string[]; next: string | null; complete: boolean };
 const note = (map: ByLane, d: Drain, n: number) => { const lane = (map[d.lane ?? 'other'] ??= {}); lane[d.name] = (lane[d.name] ?? 0) + n; };
+const pause = (ms: number) => ms > 0 ? new Promise<void>(resolve => setTimeout(resolve, ms)) : Promise.resolve();
+// A statement or lock timeout: the step is too slow for now, not wrong.
+const timedOut = (error: unknown) => [error, (error as { cause?: unknown } | null)?.cause].some(e => ['57014', '55P03'].includes(String((e as { code?: unknown } | null)?.code)));
+
 /**
- * Runs retention steps within one budget. Each step is isolated: one that fails is logged and the rest still run. Each
- * gets at least one statement and a fair share of the time left (what's left divided by the steps still to go), so a
- * backlog in one table can't starve the tables after it; the time steps don't use goes to those still behind, in a
- * second pass. The first step changes every period, as sweepInboxes alternates its phases. Reports codes and counts only:
- * rows removed per table (a table that removed none is left out: every step ran unless it is in `failed`) and, for each
- * table with rows still waiting, the age in seconds of the oldest.
+ * Runs retention steps, starting with `first`, until the budget's end: no statement starts after it, so a run lasts its
+ * budget and at most the one statement still running then. Each step is isolated: one that fails is logged and the rest
+ * still run. Each gets a fair share of the time left (what's left divided by the steps still to go), so a backlog in one
+ * table can't starve the tables after it; time a step doesn't use goes to the steps still behind, shared the same way, in a
+ * second pass. Between two full batches of a step it rests as long as the last one took, so retention keeps the database
+ * busy at most half of its run. A step the budget didn't reach is in `unreached`, and `next` is where the next run should
+ * start: the first of those, otherwise the step after this run's first, so every table gets its turn over successive runs.
+ * Reports codes and counts only: rows removed per table (a table that removed none is left out) and, for each table with
+ * rows still waiting, the age in seconds of the oldest. A batch that comes back short because another run held its rows
+ * counts as done: those rows go in the next run.
  */
-async function retire(runtime: Runtime, drains: Drain[], budgetMs: number, periodMs: number, clock = Date.now): Promise<Retired> {
-  const start = clock(), deadline = start + budgetMs, deleted: ByLane = {}, failed: string[] = [];
+async function retire(runtime: Runtime, drains: Drain[], budgetMs: number, first = 0, clock = Date.now): Promise<Retired> {
+  const ceiling = clock() + budgetMs, until = ceiling - Math.min(OLDEST_RESERVE_MS, budgetMs / 4), deleted: ByLane = {};
+  const failed: string[] = [], slow: string[] = [], statements = new Map<Drain, number>(), reached = new Set<Drain>();
   // Steps with rows still waiting: `behind` ran out of time, `capped` reached its statements for the run.
   const behind = new Set<Drain>(), capped = new Set<Drain>();
-  const first = drains.length ? Math.floor(start / periodMs) % drains.length : 0, order = [...drains.slice(first), ...drains.slice(0, first)];
-  // Statements until one comes back short (nothing left), `until` passes or the step's cap. The first always runs.
-  const step = async (d: Drain, until: number) => {
-    for (let batches = 1; ; batches++) {
+  const start = drains.length ? first % drains.length : 0, order = [...drains.slice(start), ...drains.slice(0, start)];
+  const step = async (d: Drain, sliceEnd: number) => {
+    for (;;) {
+      const began = performance.now();
       const n = Number((await runtime.db.execute<{ n: number }>(d.statement())).rows[0]?.n ?? 0);
+      statements.set(d, (statements.get(d) ?? 0) + 1);
       if (n) note(deleted, d, n);
       if (n < (d.size ?? RETENTION_BATCH)) return 'done';
-      if (batches >= (d.batches ?? Infinity)) return 'capped';
-      if (clock() >= until) return 'behind';
+      if (statements.get(d)! >= (d.batches ?? Infinity)) return 'capped';
+      await pause(Math.min(performance.now() - began, sliceEnd - clock()));
+      if (clock() >= sliceEnd) return 'behind';
     }
   };
-  const attempt = async (d: Drain, until: number) => {
-    behind.delete(d);
-    try { const outcome = await step(d, until); if (outcome === 'behind') behind.add(d); else if (outcome === 'capped') capped.add(d); }
-    catch (error) { failed.push(d.name); logError(error, { code: 'RETENTION_STEP_FAILED', table: d.name }, 'warn'); }
+  const attempt = async (d: Drain, sliceEnd: number) => {
+    reached.add(d); behind.delete(d);
+    try { const outcome = await step(d, sliceEnd); if (outcome === 'behind') behind.add(d); else if (outcome === 'capped') capped.add(d); }
+    catch (error) { failed.push(d.name); if (timedOut(error)) slow.push(d.name); logError(error, { code: 'RETENTION_STEP_FAILED', table: d.name }, 'warn'); }
   };
-  for (const [i, d] of order.entries()) await attempt(d, clock() + Math.max(0, deadline - clock()) / (order.length - i));
-  for (const d of order) if (behind.has(d) && clock() < deadline) await attempt(d, deadline);
+  const pass = async (steps: Drain[]) => {
+    for (const [i, d] of steps.entries()) { if (clock() >= until) return; await attempt(d, clock() + (until - clock()) / (steps.length - i)); }
+  };
+  await pass(order);
+  await pass(order.filter(d => behind.has(d)));
+  const unreached = order.filter(d => !reached.has(d)).map(d => d.name);
   const waiting: ByLane = {};
-  for (const d of order) if (d.oldest && (behind.has(d) || capped.has(d) || failed.includes(d.name))) {
+  for (const d of [...order.filter(d => failed.includes(d.name)), ...order.filter(d => behind.has(d) || capped.has(d))]) {
+    if (!d.oldest || clock() >= ceiling) continue;
     try {
       const age = (await runtime.db.execute<{ s: string | null }>(sql`SELECT floor(extract(epoch FROM now() - (${d.oldest})))::bigint AS s`)).rows[0]?.s;
       if (age != null) note(waiting, d, Number(age));
     } catch { /* the step's failure is already logged */ }
   }
-  return { deleted, waiting, failed, complete: !behind.size && !capped.size && !failed.length };
+  const next = unreached[0] ?? order[1]?.name ?? order[0]?.name ?? null;
+  return { deleted, waiting, failed, timedOut: slow, unreached, next, complete: !behind.size && !capped.size && !failed.length && !unreached.length };
 }
+// A run that only fell behind is routine during a backlog (info); a failed step is a warning.
 const retentionLog = (scope: string, run: Retired, complete = run.complete) =>
-  log(complete ? 'info' : 'warn', { code: complete ? 'RETENTION_COMPLETED' : 'RETENTION_PARTIAL', scope, deleted: run.deleted, waiting: run.waiting, failed: run.failed });
+  log(run.failed.length ? 'warn' : 'info', { code: complete ? 'RETENTION_COMPLETED' : 'RETENTION_PARTIAL', scope, deleted: run.deleted, waiting: run.waiting,
+    failed: run.failed, unreached: run.unreached });
+const startAt = (drains: Drain[], name: string | null | undefined) => Math.max(0, drains.findIndex(d => d.name === name));
+const leaseFor = (budgetMs: number) => sql`now() + make_interval(secs => ${(budgetMs + LEASE_GRACE_MS) / 1000})`;
 
 /**
- * Hourly retention: every table, each in bounded batches that are their own transactions. It used to be one transaction
- * of unbounded deletes: a single statement over the 60 s limit (e.g. the 2M consent events of a bulk import all crossing
- * 30 days in the same hour) rolled back the whole run every hour, so nothing was ever retired again. Then it was one table
- * after another under one deadline with no isolation: a failing statement skipped every table after it, and a backlog at
- * the front used the whole budget. Throws after the run if a step failed, so hourlyUpkeep reports it.
+ * Hourly retention: every table, each in bounded batches that are their own transactions, within one budget for the whole
+ * run (retire). It used to be one transaction of unbounded deletes: a single statement over the 60 s limit (e.g. the 2M
+ * consent events of a bulk import all crossing 30 days in the same hour) rolled back the whole run every hour, so nothing
+ * was ever retired again. Then it was one table after another under one deadline with no isolation: a failing statement
+ * skipped every table after it, and a backlog at the front used the whole budget. Its lease (retention_state, migration
+ * 388) makes the 15-minute run stand aside while it works. Throws after the run if a step failed, naming the tables, so
+ * hourlyUpkeep reports it.
  */
 export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) {
-  const inboxComplete=await sweepInboxes(runtime,Math.min(60_000,Math.floor(budgetMs/4)));
-  try { await checkHostedHealth(runtime); } catch { log('error', { code: 'HOSTED_HEALTH_CHECK_FAILED', message: 'Continuing retention; the next hourly check will retry.' }); }
-  const deadline = Date.now() + budgetMs, failed: string[] = [];
-  // A durable daily election prevents two reconcilers from applying the same
-  // snapshot difference. Dispatch continues adding deltas while this runs.
+  const ceiling = Date.now() + budgetMs, failed: string[] = [];
+  const { rows: [state] } = await runtime.db.execute<{ next_step: string | null }>(sql`INSERT INTO retention_state(scope,lease_until) VALUES('hourly',${leaseFor(budgetMs)})
+    ON CONFLICT(scope) DO UPDATE SET lease_until=excluded.lease_until RETURNING next_step`);
+  let next: string | null = null, through: string[] = [];
   try {
-    await runtime.db.execute(sql`WITH elected AS (INSERT INTO job_schedule(workspace_id,next_wake_at)
-      VALUES ('maintenance:sending-depth',now()+interval '1 day') ON CONFLICT(workspace_id) DO UPDATE SET next_wake_at=excluded.next_wake_at
-      WHERE job_schedule.next_wake_at<=now() RETURNING 1) SELECT reconcile_sending_depth(),reconcile_asset_usage(),reconcile_ingest_turns() FROM elected`);
-  } catch (error) { failed.push('reconcile'); logError(error, { code: 'RETENTION_STEP_FAILED', table: 'reconcile' }, 'warn'); }
-  let claims: number | undefined;
-  if (runtime.config.multiTenant) {
-    try { claims = await expireDomainClaims(runtime, Math.min(deadline, Date.now() + 60_000)); }
-    catch (error) { failed.push('domain_claims'); logError(error, { code: 'RETENTION_STEP_FAILED', table: 'domain_claims' }, 'warn'); }
+    const inboxComplete = await sweepInboxes(runtime, Math.min(60_000, Math.floor(budgetMs / 5)));
+    // A durable daily election prevents two reconcilers from applying the same
+    // snapshot difference. Dispatch continues adding deltas while this runs.
+    try {
+      await runtime.db.execute(sql`WITH elected AS (INSERT INTO job_schedule(workspace_id,next_wake_at)
+        VALUES ('maintenance:sending-depth',now()+interval '1 day') ON CONFLICT(workspace_id) DO UPDATE SET next_wake_at=excluded.next_wake_at
+        WHERE job_schedule.next_wake_at<=now() RETURNING 1) SELECT reconcile_sending_depth(),reconcile_asset_usage(),reconcile_ingest_turns() FROM elected`);
+    } catch (error) { failed.push('reconcile'); logError(error, { code: 'RETENTION_STEP_FAILED', table: 'reconcile' }, 'warn'); }
+    let claims: number | undefined;
+    if (runtime.config.multiTenant && Date.now() < ceiling) {
+      try { claims = await expireDomainClaims(runtime, Math.min(ceiling, Date.now() + 60_000)); }
+      catch (error) { failed.push('domain_claims'); logError(error, { code: 'RETENTION_STEP_FAILED', table: 'domain_claims' }, 'warn'); }
+    }
+    const drains = await retentionDrains(runtime), run = await retire(runtime, drains, Math.max(0, ceiling - Date.now()), startAt(drains, state?.next_step));
+    if (claims) run.deleted.other = { domain_claims: claims, ...run.deleted.other };
+    run.failed.unshift(...failed);
+    retentionLog('hourly', run, inboxComplete && run.complete && !failed.length);
+    // The sent-side steps this run got through: the 15-minute run takes them again (retentionTick).
+    next = run.next; through = drains.filter(d => d.lane === 'sent' && !run.failed.includes(d.name) && !run.unreached.includes(d.name)).map(d => d.name);
+    if (run.failed.length) throw Object.assign(new Error('Retention steps failed'), { tables: run.failed });
+  } finally {
+    await runtime.db.execute(sql`WITH sent AS (UPDATE retention_state SET held=held-${sql.param(through)}::text[] WHERE scope='sent' AND held ?| ${sql.param(through)}::text[])
+      UPDATE retention_state SET lease_until=NULL,next_step=coalesce(${next},next_step) WHERE scope='hourly'`).catch(() => { /* the lease expires */ });
   }
-  const run = await retire(runtime, await retentionDrains(runtime), Math.max(0, deadline - Date.now()), HOUR_MS);
-  if (claims) run.deleted.other = { domain_claims: claims, ...run.deleted.other };
-  run.failed.unshift(...failed);
-  retentionLog('hourly', run, inboxComplete && run.complete && !failed.length);
-  if (run.failed.length) throw new Error('Retention steps failed: ' + run.failed.join(', '));
 }
 
 /**
  * The sent-side tables every 15 minutes (elected, from the minute cron and the Node runner), so a day's mail aging out
- * is retired through the hour, not only in the hourly run, which still includes them. Concurrent runs skip each other's rows.
+ * is retired through the hour, not only in the hourly run, which still includes them. It stands aside while the hourly run
+ * holds its lease (it comes back the next minute), and skips a step whose statement or lock timed out here until the
+ * hourly run gets through it, so a slow table costs one attempt an hour rather than five. Concurrent runs skip each
+ * other's rows.
  */
 export async function retentionTick(runtime: Runtime, budgetMs = SENT_BUDGET_MS) {
-  const { rows } = await runtime.db.execute(sql`INSERT INTO job_schedule(workspace_id,next_wake_at) VALUES ('maintenance:sent-retention',now()+interval '15 minutes')
-    ON CONFLICT(workspace_id) DO UPDATE SET next_wake_at=excluded.next_wake_at WHERE job_schedule.next_wake_at<=now() RETURNING 1`);
-  if (!rows.length) return;
-  retentionLog('sent', await retire(runtime, (await retentionDrains(runtime)).filter(d => d.lane === 'sent'), budgetMs, SENT_PERIOD_MS));
+  const { rows: [state] } = await runtime.db.execute<{ next_step: string | null; held: Record<string, string> }>(sql`INSERT INTO retention_state(scope,due_at,lease_until)
+    SELECT 'sent',now()+interval '15 minutes',${leaseFor(budgetMs)} WHERE NOT EXISTS (SELECT FROM retention_state WHERE scope='hourly' AND lease_until>now())
+    ON CONFLICT(scope) DO UPDATE SET due_at=excluded.due_at,lease_until=excluded.lease_until
+      WHERE retention_state.due_at<=now() AND (retention_state.lease_until IS NULL OR retention_state.lease_until<=now())
+        AND NOT EXISTS (SELECT FROM retention_state WHERE scope='hourly' AND lease_until>now())
+    RETURNING next_step,held`);
+  if (!state) return;
+  let next: string | null = null, slow: string[] = [];
+  try {
+    const drains = (await retentionDrains(runtime)).filter(d => d.lane === 'sent' && !(d.name in state.held));
+    const run = await retire(runtime, drains, budgetMs, startAt(drains, state.next_step));
+    retentionLog('sent', run);
+    next = run.next; slow = run.timedOut;
+  } finally {
+    await runtime.db.execute(sql`UPDATE retention_state SET lease_until=NULL,next_step=coalesce(${next},next_step),
+      held=held||(SELECT coalesce(jsonb_object_agg(name,now()),'{}') FROM unnest(${sql.param(slow)}::text[]) name) WHERE scope='sent'`).catch(() => { /* the lease expires */ });
+  }
 }
 
 /** Received-mail events and webhook deliveries alone (the hourly run includes them): for checks that run just these. */
 export async function pruneMailboxEvents(runtime: Runtime, budgetMs = 60_000) {
   const names = new Set(['mailbox_events', 'mail_ignored_staging', 'mailbox_webhook_deliveries_paused_expired', 'mailbox_webhook_deliveries']);
-  retentionLog('inbound', await retire(runtime, (await retentionDrains(runtime)).filter(d => names.has(d.name)), budgetMs, HOUR_MS));
+  retentionLog('inbound', await retire(runtime, (await retentionDrains(runtime)).filter(d => names.has(d.name)), budgetMs));
 }
 /** The hourly upkeep. Every step is best-effort: a failing step (a retention statement that keeps timing out) must not
  * skip the steps after it, and on Node, where this used to run inside the dispatch loop, it must not stop job processing
- * and mail dispatch. Returns the codes of the steps that failed. */
+ * and mail dispatch. Retention runs last: it takes the most time, within its budget. Returns the codes of the steps that failed. */
 export async function hourlyUpkeep(runtime: Runtime, mailboxRuntime: () => Promise<Runtime> = async () => runtime) {
   const failed: string[] = [];
   for (const [code, step] of [
-    ['MAINTENANCE_CLEANUP_FAILED', () => cleanup(runtime)],
+    ['HOSTED_HEALTH_CHECK_FAILED', () => checkHostedHealth(runtime)],
     ['UPLOAD_RECONCILE_FAILED', () => reconcileUploads(runtime)],
     ['PREVIEW_SWEEP_FAILED', async () => (await import('./preview-images.js')).sweepPreviews(runtime)],
     ['REPUTATION_ALERT_CHECK_FAILED', async () => (await import('./reputation-alerts.js')).checkReputationAlerts(runtime)],
@@ -349,10 +407,15 @@ export async function hourlyUpkeep(runtime: Runtime, mailboxRuntime: () => Promi
     ['BILLING_HOURLY_FAILED', async () => { if (runtime.config.multiTenant) await (await import('./billing/cron.js')).billingHourly(runtime); }],
     // Connected AWS accounts: one health check each (byo-regional.ts).
     ['BYO_HEALTH_QUEUE_FAILED', async () => { await (await import('./byo-regional.js')).queueByoHealth(runtime); }],
-    // Abuse monitoring (src/abuse.ts), last so it never delays the steps above: a bounded, leased slice. Hosted, and only while it is on.
+    // Abuse monitoring (src/abuse.ts): a bounded, leased slice. Hosted, and only while it is on.
     ['ABUSE_HOURLY_FAILED', async () => { await (await import('./abuse.js')).abuseHourly(runtime); }],
+    ['MAINTENANCE_CLEANUP_FAILED', () => cleanup(runtime)],
   ] as const) {
-    try { await step(); } catch (error) { failed.push(code); log('warn', { code: error instanceof ApiError ? error.code : code, step: code }); }
+    try { await step(); } catch (error) {
+      failed.push(code);
+      const tables = (error as { tables?: unknown } | null)?.tables;
+      log('warn', { code: error instanceof ApiError ? error.code : code, step: code, ...(Array.isArray(tables) ? { tables } : {}) });
+    }
   }
   return failed;
 }
