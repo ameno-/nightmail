@@ -462,6 +462,14 @@ export class SupportConversation extends DurableObject<Env> {
     return { added };
   }
 
+  /** The sweep (replay.ts), once a key covers its addresses again: blocked work runs now. */
+  async retryBlocked() {
+    if (!this.meta()) return { woken: 0 };
+    const woken = this.work.retryBlocked();
+    await this.arm();
+    return { woken };
+  }
+
   // ---------- the socket ----------
 
   /**

@@ -347,8 +347,8 @@ async function eventually<T>(read: () => Promise<T | undefined>, ms = 30_000): P
 
 describe('support Worker', () => {
   test('health, origin and handoff checks on /chat/start', async () => {
-    const health = await mf.dispatchFetch(`${SUPPORT}/health`);
-    assert.deepEqual(await health.json(), { status: 'ok', service: 'bane-support', stage: 'dev' });
+    const health = await (await mf.dispatchFetch(`${SUPPORT}/health`)).json() as any;
+    assert.deepEqual([health.status, health.service, health.stage, health.ready, health.checks.keys], ['ok', 'bane-support', 'dev', false, { support: 'unchecked', intake: 'unchecked' }], 'Live, not ready before any sweep.');
     assert.equal((await post('/chat/start', { handoff: handoff() }, { origin: 'https://evil.test' })).status, 403);
     assert.equal((await post('/chat/start', {})).status, 400);
     assert.equal((await post('/chat/start', { handoff: 'forged' })).status, 401);
@@ -2155,6 +2155,108 @@ describe('support Worker', () => {
       assert.deepEqual(attempts.map(c => c[6]), [503, 202]);
       assert.deepEqual(attempts[1].slice(1, 6), attempts[0].slice(1, 6), 'Resent exactly as first built.');
       assert.match(attempts[1][3].subject, /^\[Nightmail support\] 1 message over cap on \d{4}-\d{2}-\d{2}$/);
+    });
+  });
+
+  describe('replay and readiness', () => {
+    let instance: Miniflare;
+    beforeAll(async () => {
+      instance = new Miniflare({ cf: false, telemetry: { enabled: false }, workers: [worker('support', baseEnv({ SUPPORT_ADDRESSES: text('support@dev.bane.mx,help@dev.bane.mx') })),
+        { config: { name: 'fake-bane', compatibilityDate: '2026-09-08', manifest: { mainModule: 'bane.js', modules: { 'bane.js': { type: 'esm', contents: FAKE_BANE } } }, env: {} } }] } as never);
+      await migrate(instance);
+    });
+    afterAll(() => instance?.dispose());
+    const SUPPORT_KEY = `Bearer bane_mbx_${'7'.repeat(64)}`, INTAKE_KEY = `Bearer bane_mbx_${'8'.repeat(64)}`;
+    const db = () => instance.getD1Database('DB', 'support');
+    async function control(path: string, body: unknown) {
+      const res = await (await instance.getWorker('fake-bane')).fetch(`http://fake-bane${path}`, { method: 'POST', body: JSON.stringify(body) });
+      assert.equal(res.status, 204);
+    }
+    const reads = (authorization: string, addressIds: string[]) => control('/__readable', { authorization, addressIds });
+    const received = (addressId: string, messageId: string, threadId: string) => control('/__events', { addressId, messageId, threadId });
+    const outage = (path: string, status = 0, code = 'NOT_FOUND') => control('/__outage', { path, status, code });
+    /** One sweep, finished: the intake flow's poll is its last step. */
+    async function swept() {
+      const start = Date.now();
+      await (await instance.getWorker('support')).scheduled({ cron: '*/5 * * * *', scheduledTime: new Date(start) });
+      assert.ok(await eventually(async () => ((await (await db()).prepare("SELECT updated_at FROM replay_cursors WHERE flow = 'intake' AND address_id = '*'").first<{ updated_at: number }>())?.updated_at ?? 0) >= start), 'The sweep finished.');
+    }
+    const health = async () => (await instance.dispatchFetch(`${SUPPORT}/health`)).json() as Promise<any>;
+    const ledger = async (messageId: string) => (await (await db()).prepare("SELECT flow, object = '' AS edge, state, reason, source FROM support_work WHERE message_id = ? AND kind = 'message' ORDER BY flow, object").bind(messageId).all<any>()).results;
+    const settle = () => new Promise(r => setTimeout(r, 1500));
+
+    test('mail stored before any route is admitted once by the poller, and the later webhook is a no-op', async () => {
+      await swept(); // Installed: each flow starts at the end of the event log.
+      await received('adr_support', 'msg_early_1', 'thr_early');
+      await swept();
+      const reply = await eventually(async () => (await replies('thr_early', instance))[0]);
+      assert.equal(reply?.[5], 'reply-msg_early_1');
+      assert.ok(await eventually(async () => (await ledger('msg_early_1')).find(r => r.state === 'done' && r.source === 'poller')), JSON.stringify(await ledger('msg_early_1')));
+      assert.equal((await signedHook('msg_early_1', 'thr_early', 'early@else.test', { instance })).status, 200);
+      await swept(); await settle();
+      assert.equal((await replies('thr_early', instance)).length, 1, 'Answered once.');
+      // A thread whose conversation closed more than 7 days ago (its object is gone): kept for the digest, never reopened.
+      const closed = Date.now() - 8 * 86_400_000;
+      await (await db()).prepare("INSERT INTO conversations (id, channel, thread_id, status, created_at, updated_at, closed_at) VALUES (?, 'email', 'thr_closed', 'closed', ?, ?, ?)").bind(`conv_${'d'.repeat(26)}`, closed, closed, closed).run();
+      await received('adr_support', 'msg_closed_1', 'thr_closed');
+      await swept(); await settle();
+      assert.deepEqual(await ledger('msg_closed_1'), [{ flow: 'support', edge: 1, state: 'held', reason: 'replay_closed', source: 'poller' }]);
+      assert.equal((await replies('thr_closed', instance)).length, 0);
+    });
+
+    test("the poller never admits another flow's address", async () => {
+      // The support key also reads abuse@ (a key made too wide): only the intake flow, with its own key, takes that mail.
+      await reads(SUPPORT_KEY, ['adr_support', 'adr_abuse']);
+      await received('adr_abuse', 'msg_abuse_replay_1', 'thr_abuse_replay');
+      await swept();
+      const ack = await eventually(async () => (await replies('thr_abuse_replay', instance))[0]);
+      assert.match(ack?.[3].text, /^Hi,\n\nThanks for writing to abuse@dev\.bane\.mx\./);
+      assert.equal(ack[4], INTAKE_KEY);
+      await swept(); await settle();
+      assert.equal((await replies('thr_abuse_replay', instance)).length, 1);
+      assert.equal(await (await db()).prepare("SELECT id FROM conversations WHERE thread_id = 'thr_abuse_replay'").first(), null, 'Never a support conversation.');
+      assert.deepEqual((await ledger('msg_abuse_replay_1')).map(r => [r.flow, r.source]), [['intake', 'poller']]);
+      await reads(SUPPORT_KEY, ['adr_support']);
+    });
+
+    test("when a key gains an address, that address's mail since the cursor is replayed", async () => {
+      // help@ is listed but the support key can't read it: it isn't polled, and its mail waits.
+      await received('adr_help', 'msg_help_1', 'thr_help');
+      // Meanwhile a support email the key can't read yet is blocked, due again in minutes.
+      await outage('/v1/inbound/messages/msg_wake_1', 404);
+      assert.equal((await signedHook('msg_wake_1', 'thr_wake', 'waker@else.test', { instance })).status, 200);
+      assert.ok(await eventually(async () => (await ledger('msg_wake_1')).find(r => r.state === 'blocked')));
+      await swept(); await settle();
+      assert.equal((await health()).checks.keys.support, 'missing');
+      assert.equal((await replies('thr_help', instance)).length, 0);
+      await outage('/v1/inbound/messages/msg_wake_1');
+      await reads(SUPPORT_KEY, ['adr_support', 'adr_help']);
+      await swept();
+      const help = await eventually(async () => (await replies('thr_help', instance))[0]);
+      assert.deepEqual([help?.[3].addressId, help?.[5]], [undefined, 'reply-msg_help_1:received'], 'Answered from the address it came in on.');
+      // Coverage is complete again, so blocked work runs now instead of at its next retry.
+      assert.ok(await eventually(async () => (await replies('thr_wake', instance))[0]), 'The blocked message is answered at once.');
+      await swept(); await settle();
+      assert.deepEqual([(await replies('thr_help', instance)).length, (await replies('thr_wake', instance)).length], [1, 1]);
+    });
+
+    test('health is ok but not ready with a missing address or blocked work, and shows counts only', async () => {
+      const shape = (h: any) => ({ ...h, checks: { ...h.checks, replay: { ...h.checks.replay, lagSeconds: typeof h.checks.replay.lagSeconds }, checkedAt: typeof h.checks.checkedAt } });
+      const ready = { status: 'ok', service: 'bane-support', stage: 'dev', ready: true, checks: { keys: { support: 'ok', intake: 'ok' }, work: { blocked: 0, overdue: 0, dead: 0 },
+        replay: { lagSeconds: 'number', routeGaps24h: 4 }, checkedAt: 'string' } };
+      assert.deepEqual(shape(await health()), ready);
+      // Blocked work: not ready.
+      await outage('/v1/inbound/messages/msg_block_1', 404);
+      assert.equal((await signedHook('msg_block_1', 'thr_block', 'blocked@else.test', { instance })).status, 200);
+      const blocked = await eventually(async () => { const h = await health(); return h.checks.work.blocked ? h : undefined; });
+      assert.deepEqual(shape(blocked), { ...ready, ready: false, checks: { ...ready.checks, work: { blocked: 1, overdue: 0, dead: 0 } } });
+      // A configured address the key can't read: not ready either.
+      await reads(SUPPORT_KEY, ['adr_support']);
+      await swept();
+      const missing = await health();
+      assert.deepEqual([missing.status, missing.ready, missing.checks.keys], ['ok', false, { support: 'missing', intake: 'ok' }]);
+      assert.doesNotMatch(JSON.stringify(missing), /@|adr_|msg_|thr_|conv_|req_/, 'Counts and states only.');
+      await outage('/v1/inbound/messages/msg_block_1');
     });
   });
 

@@ -276,6 +276,10 @@ export class SupportPlatform extends WorkerEntrypoint {
 // the same body replays the stored result, with a different body it is 409 IDEMPOTENCY_CONFLICT; a refusal stores nothing.
 const keys = new Map();
 const outages = new Map();
+// Which receiving addresses each API key reads (the support and intake keys), and the inbound event log.
+const ADDRESSES = { adr_support: 'support@dev.bane.mx', adr_help: 'help@dev.bane.mx', adr_abuse: 'abuse@dev.bane.mx', adr_privacy: 'privacy@dev.bane.mx', adr_legal: 'legal@dev.bane.mx' };
+const readable = new Map([['Bearer bane_mbx_7777777777777777777777777777777777777777777777777777777777777777', ['adr_support']], ['Bearer bane_mbx_8888888888888888888888888888888888888888888888888888888888888888', ['adr_abuse', 'adr_privacy', 'adr_legal']]]);
+const events = [];
 const canonical = value => Array.isArray(value) ? '[' + value.map(canonical).join(',') + ']'
   : value && typeof value === 'object' ? '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ':' + canonical(value[k])).join(',') + '}' : JSON.stringify(value) ?? 'null';
 const failure = outage => Response.json({ error: { code: outage.code } }, { status: outage.status, headers: outage.retryAfter ? { 'retry-after': outage.retryAfter } : {} });
@@ -322,6 +326,9 @@ export default {
       if (status) outages.set(path, { status, code, retryAfter, lost }); else outages.delete(path);
       return new Response(null, { status: 204 });
     }
+    // Test setup: what a key reads, and a message an address received (routed or not).
+    if (url.pathname === '/__readable') { const { authorization, addressIds } = await request.json(); readable.set(authorization, addressIds); return new Response(null, { status: 204 }); }
+    if (url.pathname === '/__events') { const { addressId, messageId, threadId } = await request.json(); events.push({ seq: events.length + 1, addressId, messageId, threadId }); return new Response(null, { status: 204 }); }
     // Test setup: a key already used for another body (a send that committed but whose response never arrived).
     if (url.pathname === '/__used') { const { authorization, path, key, body } = await request.json(); keys.set(authorization + ' ' + path + ' ' + key, { hash: canonical(body), status: 202, result: { id: 'msg_earlier', threadId: path.split('/')[4] } }); return new Response(null, { status: 204 }); }
     const body = request.method === 'POST' ? await request.json() : null;
@@ -389,6 +396,9 @@ const MESSAGES = {
   msg_holder_1: ['thr_holder', 'ada@acme.test', 'PASS', null, 'My bounces', 'Account holder question: why are my Gmail bounces up?'],
   msg_df_1: ['thr_df_1', 'nobody@else.test', 'FAIL', null, 'Probe', 'DMARC fail probe one'], msg_df_2: ['thr_df_2', 'nell@acme.test', 'FAIL', null, 'Probe', 'DMARC fail probe two'],
   msg_cap_1: ['thr_cap_e1', 'cap@else.test'], msg_cap_2: ['thr_cap_e2', 'cap@else.test'], msg_cap_3: ['thr_cap_e3', 'cap@else.test'],
+  // Replay's cases.
+  msg_early_1: ['thr_early', 'early@else.test'], msg_help_1: ['thr_help', 'helpme@else.test', 'PASS', 'help@dev.bane.mx'], msg_wake_1: ['thr_wake', 'waker@else.test'], msg_block_1: ['thr_block', 'blocked@else.test'],
+  msg_abuse_replay_1: ['thr_abuse_replay', 'reporter2@isp.test', 'PASS', 'abuse@dev.bane.mx', 'Spam again', 'More spam.'],
 };
 function message(id) {
   const [threadId = 'thr_other', from = 'ada@acme.test', dmarc = 'PASS', to = 'support@dev.bane.mx', subject = 'Bounces from Gmail?', body = 'Why are Gmail bounces up this week?'] = (MESSAGES[id] ?? []).map(v => v ?? undefined);
@@ -414,6 +424,17 @@ async function route(request, url, body) {
       const authentication = url.searchParams.get('includeAuthentication') === 'true' ? { authentication: { spf: 'PASS', dkim: null, dmarc }, automated: auto } : {};
       const others = id === 'msg_route_1' ? { replyTo: [{ name: null, address: 'boss@else.test' }], cc: [{ name: null, address: 'cfo@else.test' }] } : {};
       return Response.json({ id, threadId, addressIds: [addressId], direction: 'inbound', subject, from: { name: null, address: from }, to: [to], ...others, text: body, replyText: body, messageId: '<' + id + '@mail.test>', ...authentication, attachments });
+    }
+    // Like Nightmail: a key lists only the addresses it reads, and polls only their events.
+    const reads = readable.get(request.headers.get('authorization'));
+    if (request.method === 'GET' && url.pathname === '/v1/inbound/addresses') return reads ? Response.json({ data: reads.map(id => ({ id, address: ADDRESSES[id] })), nextCursor: null }) : Response.json({ error: { code: 'UNAUTHORIZED' } }, { status: 401 });
+    if (request.method === 'GET' && url.pathname === '/v1/inbound/events') {
+      const visible = events.filter(e => (reads ?? []).includes(e.addressId) && (!url.searchParams.get('addressId') || e.addressId === url.searchParams.get('addressId')));
+      const after = url.searchParams.get('after');
+      if (after === null) return Response.json({ data: [], cursor: String(Math.max(0, ...visible.map(e => e.seq))) });
+      const page = visible.filter(e => e.seq > Number(after)).slice(0, Number(url.searchParams.get('limit') ?? 25));
+      return Response.json({ data: page.map(e => ({ id: 'mev_' + e.seq, cursor: String(e.seq), type: 'message.received', createdAt: new Date().toISOString(), addressId: e.addressId, threadId: e.threadId, messageId: e.messageId, data: {} })),
+        cursor: page.length ? String(page.at(-1).seq) : after });
     }
     if (request.method === 'POST' && url.pathname === '/v1/inbound/threads') return Response.json({ id: 'msg_new', threadId: 'thr_new_' + calls.length }, { status: 202 });
     if (request.method === 'POST' && /^\\/v1\\/inbound\\/threads\\/[^/]+\\/reply$/.test(url.pathname)) {

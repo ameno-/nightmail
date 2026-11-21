@@ -112,7 +112,8 @@ The tests run the deployed bundle in Miniflare, as Console's agent tests do. `@c
 - a bug ticket: refused without its reproduction, then filed with request IDs from `api_errors`. The `[Nightmail bug]` email carries signed screenshot links, and tampered or expired links are refused;
 - the staff page: sign-in, single-use token, a demoted operator, filters, CSRF, origin and session checks on "mark done", and the hourly operator re-check;
 - email image attachments;
-- the work queues, and the ledger and sweep: mail held at the edge for the digest, intake mail for an unlisted address accepted once it's listed, a ticket's lost team email sent once, and a failed digest resent once.
+- the work queues, and the ledger and sweep: mail held at the edge for the digest, intake mail for an unlisted address accepted once it's listed, a ticket's lost team email sent once, and a failed digest resent once;
+- replay and readiness: mail stored before any route is answered once, a key that gains an address replays its mail, no flow takes another's address, and health reports readiness as counts only.
 
 They make no network or model calls. `test/*.local.ts` scripts, which are git-ignored, are for a few real turns against the gateway with a key read from a file.
 
@@ -139,7 +140,8 @@ Each object's work (each email, its answer or forward, each ticket's team email 
   - resends unsent notices (the digest, cap alerts) whose retry is due;
   - accepts blocked intake mail once its address is listed;
   - asks a ticket's object to queue its team email, and a chat ticket's follow-up within a day, when no item covers them (tickets filed before the queue). The email is rebuilt from the D1 row; an existing item is left alone, so each is sent once;
-  - pulls the staff inbox's replies from Nightmail and hands each to its conversation (below).
+  - pulls the staff inbox's replies from Nightmail and hands each to its conversation (the staff inbox, below);
+  - checks each key and replays missed mail (replay and readiness, below).
 
 ## The staff inbox
 
@@ -148,6 +150,15 @@ Nightmail's staff Support inbox (`/support` in the dashboard, `api/src/support-i
 - **Mirror:** every transcript entry (the customer's messages as they arrive, the agent's answers and tool labels, the harness's notices, held drafts) goes to `mirrorMessages` in order, from a cursor, and the conversation's subject, ticket, turns, cost and blocked work to `mirrorState`. A failed mirror is retried from the same place (1, 2, 5, 15, 30, 60 minutes); a conversation Nightmail hasn't registered waits for its next entry.
 - **Pause:** before every chat turn and every email answer the object reads `inboxState`. While staff have paused the agent it records and mirrors the customer's messages but runs no turn: chat shows one notice, an email gets no answer, and an answer already written but not sent stays a held draft in the inbox. Handing back resumes with the next message. An emailed ticket shows as paused for the ticket, as the agent answers no later mail there.
 - **Staff replies:** Nightmail queues a staff reply, then POSTs `{ conversationId }` (nothing else) to `/hooks/nightmail-wake` (rate-limited by `WAKE`); that conversation pulls its replies with `pullOutbox` at once, and the five-minute sweep pulls everyone's. Each reply is a `staff:` item, delivered once: an email reply in the thread to its last customer message, only to the address whose mail passed DMARC; a chat reply into the transcript and open sockets (`kind: "staff"`, PROTOCOL.md), or by email to the account address when no socket is open. Then `markDelivery` records it sent, or failed when it can't be delivered.
+
+## Replay and readiness
+
+Nightmail records a `message.received` event for every message an address receives, whether or not a route exists, and keeps it 30 days. The sweep reads those events with each flow's own key (`src/replay.ts`), so mail that arrived before its route existed, or whose webhook never came, is still answered once.
+
+- **Key self-check:** each sweep lists the addresses each key reads (`GET /v1/inbound/addresses`) and compares them with the flow's list: `SUPPORT_ADDRESSES` (default `SUPPORT_ADDRESS`) or `INTAKE_ADDRESSES`. The result is `ok`, `missing`, `extra`, `unauthorized` or `unavailable` (D1 `support_checks`). When a flow's coverage becomes complete again, objects with blocked work are woken, and that work runs at once.
+- **Replay:** only addresses that are both listed and readable are polled, up to 50 events per flow per sweep, each from its own cursor (D1 `replay_cursors`). An address the key can't read isn't polled, so its cursor never passes mail it couldn't see; once the key reads it, its mail since the cursor is replayed. Polling starts at the end of the log when first installed. A message with a ledger row is skipped. A message for a thread whose conversation closed more than 7 days ago is kept for the digest instead of reopening it.
+- **`GET /health`:** `status` stays `ok` (the deploy reads it as liveness). `ready` and `checks` come from D1 alone, as counts and states, never addresses, IDs or error text. `ready` means both keys are `ok`, nothing is blocked, nothing has failed six or more times, and the poller caught up within 15 minutes. `routeGaps24h` counts mail the poller found before any webhook did.
+- **Changing a key:** expand an existing key's addresses rather than replacing the key: idempotency keys are scoped to the API key, so a replaced key could resend a reply. Replace a key only when health shows nothing blocked. Every move into `blocked` logs `WORK_BLOCKED` at error level.
 
 ## Limits and retention
 

@@ -36,6 +36,8 @@ export interface Env {
   /** support@nightmail.dev and its inbound address ID in the platform workspace. */
   SUPPORT_ADDRESS: string;
   SUPPORT_ADDRESS_ID: string;
+  /** Every address whose mail the agent answers, comma-separated (default SUPPORT_ADDRESS): the replay poller's list. */
+  SUPPORT_ADDRESSES?: string;
   /** The intake addresses, e.g. "abuse@nightmail.dev,privacy@nightmail.dev,legal@nightmail.dev" (local part = the mailbox). */
   INTAKE_ADDRESSES: string;
   /** Where tickets are emailed. */

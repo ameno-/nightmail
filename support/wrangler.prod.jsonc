@@ -55,6 +55,8 @@
     // support@bane.mx (mbx_7e7e64495349496691b2ca188cf48b6e) keeps its route to the same webhook, and replies in its
     // threads go out from it (src/bane.ts reply), so BANE_SUPPORT_INBOX_KEY must cover both addresses.
     "SUPPORT_ADDRESS_ID": "mbx_8969af953f9148ef9deb3cfee54bfe37",
+    // Every address the agent answers (the replay poller and the key self-check): exactly what BANE_SUPPORT_INBOX_KEY reads.
+    "SUPPORT_ADDRESSES": "support@nightmail.dev,support@bane.mx",
     "TICKET_TO": "ryan@anoma.ly",
     // Straight to tickets, never to the agent (src/intake.ts): their own webhook and API key.
     // bane.mx's three stay listed (and in BANE_INTAKE_INBOX_KEY) until the cutover; acknowledgements go out from the

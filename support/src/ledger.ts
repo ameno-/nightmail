@@ -2,6 +2,7 @@ import type { Env } from './env.js';
 import { platformBody, type OutboxReply } from './bane.js';
 import { INTAKE, type Mailbox } from './intake.js';
 import { countToday, overflowRow, resendNotices } from './limits.js';
+import { replay } from './replay.js';
 import { fromRow, type TicketRow } from './tickets.js';
 import type { Flow } from './work.js';
 import { newId } from './tokens.js';
@@ -10,9 +11,10 @@ import { log, logError } from './log.js';
 // The work ledger (D1 `support_work`, migrations/0005). Every message a flow accepts gets a row before its webhook
 // answers, mail refused at the edge is kept as a row instead of vanishing, and each object mirrors its work items here
 // (work.ts). The cron sweep (every five minutes) reads it, never each object, to finish what an earlier step left:
-// unsent team notices, intake mail for an address configured since, and tickets no team email or follow-up covers. It
-// also pulls the staff inbox's replies (api/src/support-inbox.ts) and hands each to its conversation: a wake does the
-// same for one conversation at once, and pulling is what lets staff reply at all (they can only while it happens).
+// unsent team notices, intake mail for an address configured since, tickets no team email or follow-up covers, and the
+// replay poller (replay.ts), which accepts mail no webhook delivered. It also pulls the staff inbox's replies
+// (api/src/support-inbox.ts) and hands each to its conversation: a wake does the same for one conversation at once, and
+// pulling is what lets staff reply at all (they can only while it happens).
 
 export type Source = 'webhook' | 'poller';
 const DAY = 86_400_000, MINUTES_10 = 600_000;
@@ -29,12 +31,12 @@ function accepted(env: Env, flow: Flow, object: string, messageId: string, threa
     ON CONFLICT (flow, object, id) DO UPDATE SET source = coalesce(support_work.source, excluded.source)`).bind(flow, object, `msg:${messageId}`, source, messageId, threadId, now, now).run();
 }
 
-/** A message kept at the edge, before any object: held for the digest, or blocked until its address is configured. */
-function edge(env: Env, flow: Flow, input: { messageId: string; threadId: string; state: 'held' | 'blocked'; reason: 'rate' | 'unconfigured'; detail?: object }) {
+/** A message kept before any object: held for the digest, or blocked until its address is configured. */
+function edge(env: Env, flow: Flow, input: { messageId: string; threadId: string; state: 'held' | 'blocked'; reason: 'rate' | 'unconfigured' | 'replay_closed'; source: Source; detail?: object }) {
   const now = Date.now();
   return env.DB.prepare(`INSERT INTO support_work (flow, object, id, kind, state, reason, source, message_id, thread_id, detail, created_at, updated_at)
-    VALUES (?, '', ?, 'message', ?, ?, 'webhook', ?, ?, ?, ?, ?) ON CONFLICT (flow, object, id) DO NOTHING`)
-    .bind(flow, `msg:${input.messageId}`, input.state, input.reason, input.messageId, input.threadId, input.detail ? JSON.stringify(input.detail) : null, now, now);
+    VALUES (?, '', ?, 'message', ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (flow, object, id) DO NOTHING`)
+    .bind(flow, `msg:${input.messageId}`, input.state, input.reason, input.source, input.messageId, input.threadId, input.detail ? JSON.stringify(input.detail) : null, now, now);
 }
 
 /**
@@ -67,26 +69,31 @@ export async function acceptIntake(env: Env, input: { messageId: string; threadI
   await accepted(env, 'intake', object.toString(), messageId, threadId, input.source);
 }
 
-/** Support mail over the per-sender edge limit: no object and no API read, only a row the digest lists. */
-export async function holdAtEdge(env: Env, input: { messageId: string; threadId: string; sender: string; subject: string | null }) {
+const HELD = { rate: 'mail per minute per sender', replay_closed: 'replayed after its thread closed' };
+/**
+ * Support mail kept before any object, never read or answered, only a row the digest lists: over the per-sender edge
+ * limit (a webhook), or replayed for a thread whose conversation is closed and gone (the poller).
+ */
+export async function holdAtEdge(env: Env, input: { messageId: string; threadId: string; sender: string | null; subject: string | null; reason: keyof typeof HELD }) {
   const kept = await countToday(env, 'overflow:kept', 2000);
-  log('warn', { event: 'email', code: 'OVER_CAP_HELD', channel: 'support', reason: 'rate', kept: kept.ok });
+  log('warn', { event: 'email', code: 'OVER_CAP_HELD', channel: 'support', reason: input.reason, kept: kept.ok });
   await env.DB.batch([
-    edge(env, 'support', { ...input, state: 'held', reason: 'rate' }),
-    ...(kept.ok ? [overflowRow(env, { channel: 'support', reason: 'mail per minute per sender', sender: input.sender, dmarc: 'not checked', subject: input.subject, text: null, messageId: input.messageId, threadId: input.threadId })] : []),
+    edge(env, 'support', { ...input, state: 'held', source: input.reason === 'rate' ? 'webhook' : 'poller' }),
+    ...(kept.ok ? [overflowRow(env, { channel: 'support', reason: HELD[input.reason], sender: input.sender, dmarc: 'not checked', subject: input.subject, text: null, messageId: input.messageId, threadId: input.threadId })] : []),
   ]);
 }
 
 /** Intake mail for an address the Worker doesn't list: kept, blocked, until the sweep finds the address configured. */
 export async function blockUnconfigured(env: Env, input: { messageId: string; threadId: string; recipients: string }) {
   log('error', { event: 'email', code: 'INTAKE_ADDRESS_UNCONFIGURED' });
-  await edge(env, 'intake', { ...input, state: 'blocked', reason: 'unconfigured', detail: { recipients: input.recipients.slice(0, 4000) } }).run();
+  await edge(env, 'intake', { ...input, state: 'blocked', reason: 'unconfigured', source: 'webhook', detail: { recipients: input.recipients.slice(0, 4000) } }).run();
 }
 
 /** Every five minutes: each step on its own, so one failing never stops the others. */
 export async function sweep(env: Env, now = Date.now()) {
   const result: Record<string, number> = {};
-  const steps: [string, () => Promise<number>][] = [['notices', () => resendNotices(env, now)], ['intake', () => acceptConfigured(env, now)], ['tickets', () => ticketMail(env, now)], ['staff', () => staffReplies(env)]];
+  const steps: [string, () => Promise<number>][] = [['notices', () => resendNotices(env, now)], ['intake', () => acceptConfigured(env, now)], ['tickets', () => ticketMail(env, now)], ['staff', () => staffReplies(env)],
+    ['replaySupport', () => replay(env, 'support', now)], ['replayIntake', () => replay(env, 'intake', now)]];
   for (const [name, step] of steps) {
     try { result[name] = await step(); }
     catch (error) { logError(error, { event: 'scheduled', code: 'SUPPORT_SWEEP_STEP_FAILED', step: name }); }
