@@ -26,7 +26,7 @@ const receivedOnly = (types: MailboxEventType[]) => types.filter(type => type ==
 function validate(input: Draft, editing = false) {
   const errors: Record<string, string> = {}
   if (!editing || input.url.trim()) {
-    try { const url = new URL(input.url.trim()); if (url.protocol !== 'https:' || url.username || url.password) errors.url = 'Enter an HTTPS URL without embedded credentials.' } catch { errors.url = 'Enter a valid HTTPS endpoint URL.' }
+    try { const url = new URL(input.url.trim()); if (url.protocol !== 'https:' || url.username || url.password) errors.url = 'Enter an HTTPS URL without embedded credentials.' } catch { errors.url = 'Enter a valid HTTPS URL.' }
   }
   if (!input.routeOnly && !input.eventTypes.length) errors.eventTypes = 'Choose at least one event.'
   if (input.addressIds && !input.addressIds.length) errors.addressIds = 'Choose at least one address, or send events for every address.'
@@ -48,7 +48,7 @@ function WebhookFields({ input, urlHint, onChange, addresses, errors, apiError, 
       <Field label="Addresses" htmlFor="mailbox-webhook-scope" error={errors.addressIds || fieldError(apiError, 'addressIds')}>
         <Select id="mailbox-webhook-scope" value={input.routeOnly ? 'routed' : input.addressIds === null ? 'all' : 'selected'} disabled={disabled}
           onValueChange={value => onChange({ ...input, routeOnly: value === 'routed', addressIds: value === 'selected' ? [] : null, eventTypes: value === 'selected' ? input.eventTypes.filter(type => type !== 'message.stored') : input.eventTypes.length ? input.eventTypes : ['message.received'] })}
-          options={[{ value: 'all', label: 'Every address, new ones too' }, { value: 'selected', label: 'Selected addresses' }, { value: 'routed', label: 'Only mail a route sends here' }]} />
+          options={[{ value: 'all', label: 'Every address, new ones too' }, { value: 'selected', label: 'Selected addresses' }, { value: 'routed', label: 'Only mail an address sends here' }]} />
       </Field>
       <Field label="Payload" htmlFor="mailbox-webhook-format">
         <Select id="mailbox-webhook-format" value={input.format ?? 'nightmail'} disabled={disabled} onValueChange={value => onChange({ ...input, format: value as Draft['format'], junk: undefined, eventTypes: value === 'inbound' ? receivedOnly(input.eventTypes).length ? receivedOnly(input.eventTypes) : ['message.received'] : input.eventTypes })} options={[{ value: 'nightmail', label: `${productName} event` }, { value: 'inbound', label: 'inbound.new email.received' }]} />
@@ -72,7 +72,7 @@ function AdminOnly({ title, backTo }: { title: string; backTo: string }) {
 export function InboundWebhookDetailPage() { return useWorkspaceAccess().canAdminister ? <WebhookDetail /> : <AdminOnly title="Webhook" backTo="/receiving" /> }
 
 // Webhooks are endpoints: their list is Receiving's Endpoints tab.
-const list = '/receiving?tab=endpoints'
+const list = '/receiving?tab=destinations'
 function WebhookDetail() {
   const { id = '' } = useParams()
   const navigate = useNavigate()
@@ -88,7 +88,8 @@ function WebhookDetail() {
   const [secret, setSecret] = useState<string | null>(null)
   const [confirm, setConfirm] = useState<'rotate' | 'delete' | null>(null)
   useEffect(() => { if (webhook.data && !input) setInput(draftOf(webhook.data)) }, [webhook.data, input])
-  if (webhook.error) return <><PageHeader title="Webhook" backTo={list} /><ErrorState error={webhook.error} onRetry={() => void webhook.refetch()} /></>
+  // Only a failed first load replaces the page: a later refetch that fails keeps the form and its unsaved edits.
+  if (webhook.error && !webhook.data) return <><PageHeader title="Webhook" backTo={list} /><ErrorState error={webhook.error} onRetry={() => void webhook.refetch()} /></>
   const current = webhook.data
   // The saved response is newer than the cached endpoint until the refetch lands.
   const currentHeaders = save.data?.headers ?? current?.headers ?? []
@@ -133,8 +134,8 @@ function WebhookDetail() {
         </form>}
       </section>
     </>}
-    <ConfirmDialog open={confirm === 'rotate'} onOpenChange={open => { if (!open) setConfirm(null) }} title="Rotate signing secret?" description="The old secret stops working at once. Update your endpoint with the new one." confirmLabel="Rotate secret" pending={rotate.isPending} onConfirm={async () => { setSecret((await rotate.mutateAsync()).secret) }} />
-    <ConfirmDialog open={confirm === 'delete'} onOpenChange={open => { if (!open) setConfirm(null) }} title="Delete this webhook?" description="Pending deliveries are dropped and routes stop delivering to it. Events stay readable through the events API." confirmLabel="Delete webhook" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(); navigate(list) }} />
+    <ConfirmDialog open={confirm === 'rotate'} onOpenChange={open => { if (!open) setConfirm(null) }} title="Rotate signing secret?" description="The old secret stops working at once. Update your server with the new one." confirmLabel="Rotate secret" pending={rotate.isPending} onConfirm={async () => { setSecret((await rotate.mutateAsync()).secret) }} />
+    <ConfirmDialog open={confirm === 'delete'} onOpenChange={open => { if (!open) setConfirm(null) }} title="Delete this webhook?" description="Pending deliveries are dropped and addresses stop delivering to it. Events stay readable through the events API." confirmLabel="Delete webhook" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(); navigate(list) }} />
     <SecretDialog secret={secret} title="New signing secret" onClose={() => setSecret(null)} />
   </div>
 }

@@ -1,4 +1,4 @@
-/* Receiving: Routes, Rules, Endpoints and Trace. Nightmail tokens only; addresses and code in OpenTUI Mono. */
+/* Receiving: Addresses, Rules and Destinations, and an address's page. Nightmail tokens only; addresses and code in OpenTUI Mono. */
 .rcv-icon { flex: none; color: var(--color-faint); }
 .rcv-page { display: flex; flex-direction: column; gap: var(--space-16); min-width: 0; }
 .rcv-tab { gap: var(--space-12); }
@@ -10,7 +10,8 @@
 .rcv-split .rcv-toolbar { justify-content: flex-end; }
 .rcv-table td:is([data-col='unread'], [data-col='last']) { font-family: var(--font-mono); font-size: var(--text-xs); }
 .rcv-table td[data-col='unread'] strong { color: var(--color-text); font-weight: 400; }
-.rcv-table td[data-col='unread'] strong::before { content: ''; display: inline-block; width: 6px; height: 6px; margin: 0 var(--space-6) 1px 0; border-radius: 50%; background: var(--color-info-marker); }
+/* Unread is a fact, not a second accent: a dot in the text's own colour. */
+.rcv-table td[data-col='unread'] strong::before { content: ''; display: inline-block; width: 6px; height: 6px; margin: 0 var(--space-6) 1px 0; border-radius: 50%; background: var(--color-text); }
 .rcv-foot { font-family: var(--font-mono); font-size: var(--text-xs); }
 .rcv-match { display: inline-flex; min-width: 0; max-width: 100%; font-family: var(--font-mono); font-size: var(--text-sm); letter-spacing: -.01em; }
 .rcv-match__local { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -22,10 +23,15 @@
 .rcv-target[data-muted] { color: var(--color-muted); }
 .rcv-via { color: var(--color-faint); font-size: var(--text-xs); }
 .rcv-chain { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-4); }
+/* One line in a list row: the first rule and how many more, cut short rather than wrapped. */
+.rcv-chain[data-line], .rcv-table .rcv-chain { flex-wrap: nowrap; max-width: 100%; min-width: 0; }
+.rcv-table .rcv-chain > span:has(code) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rcv-chain > .muted { flex: none; white-space: nowrap; font-family: var(--font-mono); font-size: var(--text-xs); }
 .rcv-chain code, .rcv-cell code, .rcv-step code, .addr-path code { font-family: var(--font-mono); font-size: var(--text-sm); }
 .rcv-chain__then { margin-right: var(--space-4); color: var(--color-faint); }
-.rcv-add { color: var(--color-muted); text-decoration: none; white-space: nowrap; transition: color var(--motion-duration); }
-.rcv-add:hover { color: var(--color-text); text-decoration: underline; text-underline-offset: 3px; }
+/* An empty cell's way to fill it reads as a link: the text's colour, underlined. */
+.rcv-add { color: var(--color-text); text-decoration: underline; text-decoration-color: var(--color-border-strong); text-underline-offset: 3px; white-space: nowrap; transition: text-decoration-color var(--motion-duration); }
+.rcv-add:hover { text-decoration-color: currentColor; }
 
 /* One fixed-height loading block, replaced by the tabs once the one read arrives. */
 .rcv-skeleton { display: grid; gap: var(--space-16); }
@@ -239,3 +245,10 @@ html:not([data-privacy='off']) .trace-to.private-field:not(:hover, :focus)::plac
 .rcv-toolbar__end > .cluster { flex: none; flex-wrap: nowrap; }
 /* A ghost button that starts the row sits on the column's edge. */
 .rcv-steps__aside > .ui-button--ghost:first-child { margin-inline-start: calc(-1 * var(--button-pad-x, 11px)); }
+
+/* An address's page: Mail, Where mail goes and Settings. The Mail tab's reader fills the page below the tabs. */
+.page-surface > .addr-root[data-tab='mail'] { min-height: 0; }
+.addr-root[data-tab='mail'] > .mailbox-page { flex: 1; min-height: 0; }
+.addr-root > .ui-tabs + .mailbox-page .mailbox-toolbar { padding-top: 0; }
+.addr-facts { max-width: 640px; }
+.addr-danger { padding-top: var(--space-16); border-top: 1px solid var(--color-border-muted); }

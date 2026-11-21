@@ -8,7 +8,7 @@ export { ReceivingPage } from './receiving'
 export { TracePage } from './trace'
 export { InboundWebhookDetailPage } from './webhooks'
 
-// Former /mailboxes links keep working: a mailbox is now an address filter on the thread-first inbox.
+// Former /mailboxes links keep working: a mailbox's mail is its address's Mail tab.
 function LegacyRedirect({ to, address }: { to: string; address?: string }) {
   const location = useLocation()
   const search = new URLSearchParams(location.search)
@@ -17,11 +17,11 @@ function LegacyRedirect({ to, address }: { to: string; address?: string }) {
   return <Navigate replace to={`${to}${query ? `?${query}` : ''}${location.hash}`} />
 }
 export const LegacyMailboxesRedirect = () => <LegacyRedirect to="/receiving" />
-export function LegacyMailboxRedirect() { const { id = '' } = useParams(); return <LegacyRedirect to="/receiving/inbox" address={id} /> }
-// Webhooks are endpoints: their list is Receiving's Endpoints tab, and an address's subscribers its address filter.
+export function LegacyMailboxRedirect() { const { id = '' } = useParams(); return <LegacyRedirect to="/receiving/inbox" address={id} /> } // InboundPage forwards it on.
+// Webhooks are destinations: their list is Receiving's Destinations tab, and an address's subscribers its address filter.
 export function WebhooksListRedirect() {
   const address = new URLSearchParams(useLocation().search).get('address')
-  return <Navigate replace to={`/receiving?tab=endpoints${address ? `&address=${encodeURIComponent(address)}` : ''}`} />
+  return <Navigate replace to={`/receiving?tab=destinations${address ? `&address=${encodeURIComponent(address)}` : ''}`} />
 }
 export const LegacyMailboxWebhooksRedirect = WebhooksListRedirect
 export function LegacyMailboxWebhookRedirect() { const { id = '' } = useParams(); return <LegacyRedirect to={`/receiving/webhooks/${encodeURIComponent(id)}`} /> }

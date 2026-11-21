@@ -9,7 +9,7 @@ import { useApiDef, useApiQuery } from '../../data/context'
 import { queries } from '../../data/queries'
 import { request } from '../../data/live'
 import { errorText } from '../../data/types'
-import { concepts, outcomes } from './concepts'
+import { outcomes } from './concepts'
 import { useOverview, type Overview } from './overview'
 import { Match, RitualIcon, TargetIcon } from './parts'
 import { MaskedText } from '../docs/agent-setup'
@@ -210,6 +210,7 @@ export function TracePage() {
   const options = useApiDef(queries.inboundAddressOptions())
   // An address page hands its address over in the navigation state, so a link never spells it out; ?to= still works.
   const preferred = (useLocation().state as { to?: string } | null)?.to ?? params.get('to') ?? undefined
+  const preferredId = options.data?.find(a => a.address === preferred)?.id
   const overview = useOverview({ limit: 100 })
   const saved = useApiQuery(['rule-config'], (_api, signal) => request<{ config: { rules: { key: string; source: string }[] } }>('/v1/rules', { signal }))
   const addresses = (overview.data?.routes.data ?? []).filter(r => r.kind === 'address' && r.address).map(r => r.match)
@@ -233,20 +234,20 @@ export function TracePage() {
     requestAnimationFrame(() => view.current?.scrollIntoView({ behavior: reduced() ? 'auto' : 'smooth', block: 'start' }))
   }
   return <div className="stack inbound-stack">
-    <PageHeader title={concepts.trace.title} backTo="/receiving" />
+    <PageHeader title="Test" backTo={preferredId ? `/receiving/addresses/${preferredId}?tab=flow` : '/receiving'} />
     {ready && <>
     <form className="trace-form" onSubmit={submit}>
       <EmailPicker value={choice} onChange={next => { setChoice(next); dry.clear() }} addresses={addresses} preferredTo={preferred} />
-      {choice.mode !== 'sample' && <Field label="Trace it as mail to" htmlFor="trace-to">
+      {choice.mode !== 'sample' && <Field label="Test it as mail to" htmlFor="trace-to">
         <Input id="trace-to" className="private-field trace-to" list="trace-addresses" value={to} onChange={e => { setTo(e.target.value); dry.clear() }} placeholder="The message’s own recipients" autoComplete="off" />
       </Field>}
       {/* Rules run as saved, and AI decisions give their default answer; a rule's own Try it sets the answers. */}
-      <div className="cluster"><Button variant="primary" type="submit" loading={dry.pending} disabled={!input}>Trace</Button></div>
+      <div className="cluster"><Button variant="primary" type="submit" loading={dry.pending} disabled={!input}>Run test</Button></div>
     </form>
     <div ref={view} className="trace-out">
-      {dry.error ? <Alert tone="danger" title="The trace didn’t run">{dry.error}</Alert>
+      {dry.error ? <Alert tone="danger" title="The test didn’t run">{dry.error}</Alert>
         : dry.result ? <TraceView result={dry.result} sources={sources} overview={overview.data} inboxes={new Map((options.data ?? []).map(a => [a.id, a.address]))} runId={dry.runId} />
-        : <EmptyState title="Pick an email and trace it" action={<Link className="ui-button ui-button--secondary ui-button--md" to="/receiving?tab=rules">Rules</Link>} />}
+        : <EmptyState title="Pick an email to test" />}
     </div>
     </>}
   </div>

@@ -432,6 +432,8 @@ button.ui-facet:focus-visible { outline-offset: -2px; }
 .ui-facet[data-empty] { color: var(--color-faint); }
 .ui-facet__dot { width: 6px; height: 6px; border-radius: 50%; background: var(--tone-marker); }
 .ui-facet__dot.ui-tone--neutral { background: var(--color-series); }
+/* A value that says nothing about how mail went has no dot: its column stays, so the labels line up. */
+.ui-facet__dot--none.ui-facet__dot { background: none; }
 .ui-facet__dot[class*='ui-series--'] { background: var(--series); }
 .ui-facet__label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ui-facet__count { color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
@@ -446,7 +448,11 @@ button.ui-facet:focus-visible { outline-offset: -2px; }
   .ui-split[data-collapse='row'] > .ui-split__rail { padding: 0 0 var(--space-12); border-right: 0; }
   .ui-split[data-collapse='row'] .ui-facets__title { display: none; }
   .ui-split[data-collapse='row'] .ui-facets__group ul { flex-direction: row; flex-wrap: nowrap; gap: var(--space-4); overflow-x: auto; }
-  .ui-split[data-collapse='row'] button.ui-facet { width: auto; margin: 0; padding-inline: var(--space-8); grid-template-columns: 6px auto auto; height: var(--control-height); }
+  /* Each value keeps its whole label: the row scrolls sideways instead of squeezing them to a letter. */
+  .ui-split[data-collapse='row'] .ui-facets__group li { flex: none; }
+  .ui-split[data-collapse='row'] button.ui-facet { width: auto; margin: 0; padding-inline: var(--space-8); grid-template-columns: auto auto auto; height: var(--control-height); }
+  .ui-split[data-collapse='row'] button.ui-facet[aria-pressed='true'] { box-shadow: none; }
+  .ui-split[data-collapse='row'] .ui-facet__dot--none { display: none; }
 }
 /* Histogram: thin bars on a hairline, stacked by outcome; 56px with its axis. */
 .ui-histogram { display: flex; flex-direction: column; gap: var(--space-4); height: 56px; }
