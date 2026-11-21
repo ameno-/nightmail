@@ -44,15 +44,19 @@ html, .page-surface { scroll-padding-block: var(--focus-reach); }
 ::selection { background: var(--color-active-bg); color: var(--color-text); }
 .ui-button { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-6); height: var(--control-height); padding: 0 11px; border: 0; border-radius: var(--radius-sm); background: var(--color-surface); color: var(--color-text); box-shadow: var(--shadow-button); font: inherit; font-weight: var(--font-weight-bold); line-height: var(--leading-sm); white-space: nowrap; text-decoration: none; user-select: none; flex-shrink: 0; transition: background var(--motion-duration), color var(--motion-duration), opacity var(--motion-duration), transform 160ms var(--ease-out-strong); }
 .ui-button svg { flex-shrink: 0; }
-.ui-button--primary { background: var(--color-contrast); color: var(--color-on-contrast); box-shadow: none; }
+/* The accent lives on buttons: the primary fill (white text, AA in both themes, darker on hover and press), and the
+   blue text of link-style ghost actions. Secondary buttons stay neutral. */
+.ui-button--primary { background: var(--color-accent); color: var(--color-on-accent); box-shadow: none; }
+.ui-button--ghost:not(.ui-icon-button) { color: var(--color-accent-text); }
 .ui-button--danger { color: var(--color-danger); }
 .ui-button--ghost { background: var(--color-transparent); box-shadow: none; color: var(--color-muted); }
 .ui-button--sm { --button-pad-x: 9px; height: 24px; padding-inline: var(--button-pad-x); border-radius: 4px; font-size: var(--text-xs); }
 /* Hover fills only where a pointer can hover: on a touch screen a tap would leave them stuck on the control. */
 @media (hover: hover) and (pointer: fine) { .ui-button--secondary:hover:not(:disabled), .ui-button--danger:hover:not(:disabled) { background: linear-gradient(var(--color-hover), var(--color-hover)), var(--color-surface); } }
-@media (hover: hover) and (pointer: fine) { .ui-button--ghost:hover:not(:disabled) { background: var(--color-hover); color: var(--color-text); } }
-@media (hover: hover) and (pointer: fine) { .ui-button--primary:hover:not(:disabled) { background: var(--color-contrast-hover); } }
+@media (hover: hover) and (pointer: fine) { .ui-button--ghost:hover:not(:disabled) { background: var(--color-hover); color: var(--color-text); } .ui-button--ghost:not(.ui-icon-button):hover:not(:disabled) { color: var(--color-accent-text); } }
+@media (hover: hover) and (pointer: fine) { .ui-button--primary:hover:not(:disabled) { background: var(--color-accent-hover); } }
 .ui-button:active:not(:disabled) { background-color: var(--color-pressed); transform: scale(.97); }
+.ui-button--primary:active:not(:disabled) { background: var(--color-accent-pressed); }
 .ui-icon-button { width: var(--control-height); padding: 0; }
 .ui-icon-button.ui-button--sm { width: 28px; }
 .ui-input { display: block; width: 100%; min-width: 0; height: var(--control-height); border: 0; border-radius: var(--radius-sm); outline: 1px solid transparent; padding: 0 var(--space-8); background: var(--color-surface); box-shadow: var(--shadow-button); color: var(--color-text); font: inherit; line-height: var(--leading-sm); transition: background var(--motion-duration), outline-color var(--motion-duration), box-shadow var(--motion-duration); }
@@ -82,7 +86,7 @@ html, .page-surface { scroll-padding-block: var(--focus-reach); }
 .ui-select-item[data-disabled], .ui-menu-item[data-disabled] { cursor: not-allowed; }
 .ui-select-item { justify-content: space-between; }
 .ui-select-item[data-highlighted], .ui-menu-item[data-highlighted] { background: var(--color-hover); }
-.ui-select-item[data-state='checked'] { color: var(--color-accent); }
+.ui-select-item[data-state='checked'] { color: var(--color-text); font-weight: var(--font-weight-bold); }
 .ui-select-scroll { display: flex; justify-content: center; align-items: center; height: var(--space-24); }
 .ui-rotate { transform: rotate(180deg); }
 .ui-menu { min-width: 180px; }
@@ -93,10 +97,10 @@ html, .page-surface { scroll-padding-block: var(--focus-reach); }
 .ui-check-field label { cursor: pointer; }
 .ui-check-field:has([disabled]) label { color: var(--color-muted); cursor: not-allowed; }
 .ui-checkbox { display: inline-flex; align-items: center; justify-content: center; width: var(--space-16); height: var(--space-16); padding: 0; border: 0; border-radius: 4px; background: var(--color-surface); box-shadow: var(--shadow-button); flex-shrink: 0; }
-.ui-checkbox[data-state='checked'] { background: var(--color-accent); border-color: var(--color-accent); color: var(--color-on-accent); }
+.ui-checkbox[data-state='checked'] { background: var(--color-contrast); border-color: var(--color-contrast); color: var(--color-on-contrast); }
 .ui-checkbox > span { display: flex; }
 .ui-switch { display: inline-flex; align-items: center; width: 32px; height: 20px; padding: 2px; border: 0; border-radius: 10px; background: var(--color-layer-3); box-shadow: inset 0 1px 1px var(--color-border-muted); flex-shrink: 0; transition: background var(--motion-duration); }
-.ui-switch[data-state='checked'] { background: var(--color-accent); }
+.ui-switch[data-state='checked'] { background: var(--color-contrast); }
 .ui-switch__thumb { width: 16px; height: 16px; border-radius: 50%; background: var(--color-surface); box-shadow: var(--shadow-button); transform: translateX(0); transition: transform var(--motion-duration); }
 .ui-switch__thumb[data-state='checked'] { transform: translateX(12px); }
 .ui-tabs { display: flex; align-items: center; gap: var(--space-6); min-height: 32px; overflow-x: auto; border-bottom: 1px solid var(--color-border-muted); }
@@ -105,12 +109,12 @@ html, .page-surface { scroll-padding-block: var(--focus-reach); }
 .ui-tab:focus-visible { outline-offset: -3px; }
 .ui-tab[aria-selected='true'], .ui-tab[aria-current='page'] { color: var(--color-text); background: transparent; }
 .ui-tab { position: relative; transition: color var(--motion-duration); }
-.ui-tab::after { content: ''; position: absolute; inset: auto 0 0; height: 1px; background: var(--color-accent); opacity: 0; transform: scaleX(.4); transition: transform 200ms var(--ease-out-strong), opacity 160ms ease-out; pointer-events: none; }
+.ui-tab::after { content: ''; position: absolute; inset: auto 0 0; height: 1px; background: var(--color-text); opacity: 0; transform: scaleX(.4); transition: transform 200ms var(--ease-out-strong), opacity 160ms ease-out; pointer-events: none; }
 .ui-tab[aria-selected='true']::after, .ui-tab[aria-current='page']::after { opacity: 1; transform: none; }
 /* Tabs (role=tablist) draw one marker that slides to the selected tab instead of each tab's own underline. */
 .ui-tabs--marker { position: relative; }
 .ui-tabs--marker > .ui-tab::after { content: none; }
-.ui-tabs__marker { position: absolute; top: 0; left: 0; width: 1px; height: 1px; background: var(--color-accent); opacity: 0; transform-origin: 0 0; pointer-events: none; }
+.ui-tabs__marker { position: absolute; top: 0; left: 0; width: 1px; height: 1px; background: var(--color-text); opacity: 0; transform-origin: 0 0; pointer-events: none; }
 .ui-tabs__marker[data-animate] { transition: transform 200ms var(--ease-swap); }
 a.ui-tab { text-decoration: none; }
 @media (hover: hover) and (pointer: fine) { .ui-tab:hover:not([aria-selected='true'], [aria-current='page']) { color: var(--color-text); } }
@@ -398,7 +402,7 @@ select.ui-native-select:disabled { background-color: var(--color-layer-1); }
 .ui-mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 /* Meter: a 2px track, the share in its tone, and a tick at the limit. */
 .ui-meter { position: relative; display: block; height: 2px; background: var(--color-track); }
-.ui-meter > i { position: absolute; inset: 0 auto 0 0; width: var(--share); background: var(--color-series); }
+.ui-meter > i { position: absolute; inset: 0 auto 0 0; width: var(--share); background: var(--color-accent-data); }
 .ui-meter:not(.ui-tone--neutral) > i { background: var(--tone-marker); }
 .ui-meter > b { position: absolute; top: -3px; left: var(--mark); width: 1px; height: 8px; background: var(--color-faint); }
 /* Metric row: label · series · value, 40px, its rule a hairline or its meter. */
@@ -422,7 +426,7 @@ select.ui-native-select:disabled { background-color: var(--color-layer-1); }
 li.ui-facet--slot { height: 26px; }
 button.ui-facet { cursor: pointer; transition: background var(--motion-duration); }
 @media (hover: hover) and (pointer: fine) { button.ui-facet:hover { background: var(--color-hover); } }
-button.ui-facet[aria-pressed='true'] { background: var(--color-active-bg); box-shadow: inset 2px 0 var(--color-accent); }
+button.ui-facet[aria-pressed='true'] { background: var(--color-active-bg); box-shadow: inset 2px 0 var(--color-text); }
 button.ui-facet:focus-visible { outline-offset: -2px; }
 .ui-facet[data-empty] { color: var(--color-faint); }
 .ui-facet__dot { width: 6px; height: 6px; border-radius: 50%; background: var(--tone-marker); }

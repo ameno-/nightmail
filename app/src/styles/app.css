@@ -22,8 +22,8 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .main-navigation { flex-shrink: 0; margin-top: var(--space-16); display: flex; flex-direction: column; gap: var(--space-4); }
 .main-navigation a { min-height: 32px; display: flex; align-items: center; padding-inline: var(--sidebar-inset); border-radius: 4px; font-size: var(--text-sm); line-height: var(--leading-sm); color: var(--color-muted); text-decoration: none; transition: color var(--motion-duration), background var(--motion-duration); }
 .main-navigation a:hover { color: var(--color-text); background: var(--color-hover); }
-/* The page you're on: the accent's tint and a 2px accent rule on its left edge. */
-.main-navigation a.active { color: var(--color-text); background: var(--color-accent-tint); box-shadow: inset 2px 0 var(--color-accent); font-weight: var(--font-weight-bold); }
+/* The page you're on: a neutral fill and the brighter text. */
+.main-navigation a.active { color: var(--color-text); background: var(--color-active-bg); font-weight: var(--font-weight-bold); }
 .main-navigation a[data-locked] { justify-content: space-between; }
 .main-navigation a[data-locked] svg { color: var(--color-faint); }
 .sidebar-footer { flex-shrink: 0; display: flex; flex-direction: column; gap: var(--space-16); margin-top: auto; padding-inline: var(--sidebar-inset); }
@@ -35,7 +35,7 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 /* The sender score card spans the sidebar's inner width and always holds 56px. */
 .sidebar-score-slot { height: 56px; margin-inline: calc(-1 * var(--sidebar-gutter)); }
 .sidebar-setup { display: flex; flex-direction: column; gap: var(--space-4); color: var(--color-text); font-size: var(--text-xs); line-height: var(--leading-xs); text-decoration: none; }
-.sidebar-setup-action { color: var(--color-accent); }
+.sidebar-setup-action { color: var(--color-accent-text); }
 .sidebar-setup:hover .sidebar-setup-action { text-decoration: underline; text-underline-offset: 3px; }
 .sidebar-quota:empty { display: none; }
 .sidebar-quota { flex-shrink: 0; display: flex; flex-direction: column; gap: var(--space-8); color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
@@ -59,8 +59,8 @@ html:not([data-privacy='off']) .private-field:not(:hover, :focus)::placeholder {
 .quota-label span:last-child { color: var(--color-text); }
 .quota-meter { display: block; height: 3px; width: 100%; border: 0; border-radius: 2px; background: var(--color-layer-2); appearance: none; overflow: hidden; }
 .quota-meter::-webkit-meter-bar { background: var(--color-layer-2); border: 0; border-radius: 2px; height: 3px; }
-.quota-meter::-webkit-meter-optimum-value { background: var(--color-accent); }
-.quota-meter::-moz-meter-bar { background: var(--color-accent); }
+.quota-meter::-webkit-meter-optimum-value { background: var(--color-accent-data); }
+.quota-meter::-moz-meter-bar { background: var(--color-accent-data); }
 .page-surface { display: flex; flex-direction: column; margin: var(--page-inset) var(--page-inset) var(--page-inset) var(--sidebar-width); padding: var(--space-24) var(--space-32); height: calc(100dvh - 2 * var(--page-inset)); min-height: 0; background: var(--color-surface); border-radius: var(--radius-lg); box-shadow: var(--shadow-raised); position: relative; min-width: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
 .page-surface > :is(.stack, .audience-page, .ui-loading-layout) { flex: 1; }
 .page-surface > .stack { gap: var(--page-gap); }
@@ -129,7 +129,7 @@ html:not([data-privacy='off']) .private-field:not(:hover, :focus)::placeholder {
 .chart-legend { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-16); color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); letter-spacing: var(--tracking-label); text-transform: uppercase; }
 .chart-legend > span { display: flex; align-items: center; gap: var(--space-6); }
 .chart-legend i { width: 8px; height: 2px; border-radius: 0; }
-.legend-sent { background: var(--color-accent); }
+.legend-sent { background: var(--color-accent-data); }
 .legend-bounces { background: var(--color-warning-marker); }
 .legend-complaints { background: var(--color-complaint); }
 .activity-chart { position: relative; width: 100%; min-height: 232px; flex: 1; }
@@ -142,8 +142,8 @@ html:not([data-privacy='off']) .private-field:not(:hover, :focus)::placeholder {
 .chart-line { fill: none; stroke-width: 1.5; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
 .chart-line--bounces { stroke: var(--color-warning-marker); stroke-width: 1.25; }
 .chart-line--complaints { stroke: var(--color-complaint); stroke-width: 1.25; }
-.chart-bar { fill: color-mix(in oklch, var(--color-accent) 62%, transparent); }
-.chart-bar--active { fill: var(--color-accent); }
+.chart-bar { fill: color-mix(in oklch, var(--color-accent-data) 62%, transparent); }
+.chart-bar--active { fill: var(--color-accent-data); }
 /* An hour whose bounces or complaints crossed their warning line: a faint red band over the plot, a mark on the axis. */
 .chart-anomaly { fill: color-mix(in srgb, var(--color-danger-marker) 9%, transparent); }
 .chart-anomaly-mark { fill: var(--color-danger-marker); }
@@ -357,7 +357,7 @@ html:has(.app-shell--compact) { scroll-padding-bottom: calc(56px + env(safe-area
 /* Workspaces sit under their account's name. */
 .account-menu__workspace { padding-left: calc(var(--space-8) * 2 + 28px); }
 .account-menu__workspace-name { flex: 1; min-width: 0; }
-.account-menu__check { flex: none; margin-left: auto; color: var(--color-accent); }
+.account-menu__check { flex: none; margin-left: auto; color: var(--color-text); }
 .account-menu__toggle { display: flex; flex: 1; align-items: center; justify-content: space-between; gap: var(--space-8); min-width: 0; }
 .account-menu__toggle-state { display: inline-flex; align-items: center; gap: var(--space-8); color: var(--color-muted); font-size: var(--text-xs); }
 .account-menu__toggle-state kbd { font-family: var(--font-mono); font-size: var(--text-xs); }
@@ -386,7 +386,7 @@ body:has(.support-launcher) .ui-toasts { right: var(--launcher-inset); bottom: c
 body:has(.support-launcher[aria-expanded='true']) .ui-toasts { right: calc(var(--launcher-inset) + min(400px, 100vw - var(--sidebar-width) - 2 * var(--launcher-inset)) + var(--space-12)); }
 .support-trigger { position: relative; }
 .support-trigger:not(.support-launcher)[aria-expanded='true'] { background: var(--color-layer-2); color: var(--color-text); }
-.support-trigger::before { content: ''; position: absolute; top: 3px; right: 5px; width: 6px; height: 6px; border-radius: 50%; background: var(--color-accent); box-shadow: 0 0 0 2px var(--color-deep); opacity: 0; transform: scale(.4); transition: opacity 160ms ease-out, transform 240ms var(--ease-out-strong); pointer-events: none; }
+.support-trigger::before { content: ''; position: absolute; top: 3px; right: 5px; width: 6px; height: 6px; border-radius: 50%; background: var(--color-text); box-shadow: 0 0 0 2px var(--color-deep); opacity: 0; transform: scale(.4); transition: opacity 160ms ease-out, transform 240ms var(--ease-out-strong); pointer-events: none; }
 .support-launcher::before { top: -2px; right: -2px; box-shadow: 0 0 0 2px var(--color-surface); }
 .support-trigger[data-unread]::before { opacity: 1; transform: none; }
 .mobile-bar .support-trigger { flex: none; width: 44px; height: 44px; margin-right: -8px; }

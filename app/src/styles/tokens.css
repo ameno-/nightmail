@@ -199,67 +199,56 @@
 }
 
 /* ── Colour (Signal Log) ──
-   OKLCH throughout, so lightness and chroma match across hues and a palette is a few numbers. A palette is a neutral
-   ramp (a hue and a whisper of chroma, never pure grey unless it wants to be), one accent, a data palette of matched
-   lightness and chroma, and status colours from the same family. <html data-palette> picks one (public/theme.js reads
-   ?palette= or localStorage nightmail.palette): ember (the default), orange, blue, green or deepsea.
-   Contrast (WCAG 2, checked on the surface): accents 4.9–5.9:1 on light (white text on them the same) and 7–11:1 on
-   dark; status inks 5.6:1 or more on light and 8:1 or more on dark; markers and series 3:1 or more, for graphics. */
+   OKLCH throughout. True neutral greys for every surface, line and text; one blue accent used only on buttons and chart
+   items; a data palette of matched lightness and chroma for multi-series charts; status colours (ok, warn, error, info)
+   only on status dots and words. Selection, the active page, tabs, toggles and focus are neutral: brighter text, a
+   neutral fill or a rule, and a neutral high-contrast focus ring.
+   Contrast (WCAG 2): white on the accent 5.4:1 (light) and 4.8:1 (dark), on hover and pressed more; accent text on the
+   surface 5.4:1 (light) and 7.7:1 (dark); status inks 5.6:1 or more on light and 8:1 or more on dark. */
 :root {
-  /* Ember: warm paper-and-soot neutrals, a desaturated amber accent, teal and violet for data. */
-  --n-h: 70; --n-c: .006;
-  --accent-h: 58; --accent-c: .13; --accent-l: .55; --accent-step: -.05;
-  --hue-ok: 152; --hue-warn: 92; --hue-error: 27; --hue-info: 250;
-  --hue-received: 190; --hue-opened: 300; --hue-clicked: 350;
-  /* Light: markers and series at L .62 (warnings .70, amber reads dirty lower), inks at L .50, tints at 10%. */
+  /* Light: markers and series at L .62 (warnings .70: amber reads dirty lower), inks at L .50. */
   --mark-l: .62; --mark-c: .14; --warn-l: .70; --ink-l: .50; --ink-c: .12;
+  --hue-ok: 152; --hue-warn: 85; --hue-error: 27; --hue-info: 250;
+  --hue-received: 190; --hue-opened: 300; --hue-clicked: 345;
   --l-deep: .985; --l-surface: 1; --l-layer-1: .982; --l-layer-2: .962; --l-layer-3: .945; --l-text: .205; --l-muted: .48; --l-faint: .555;
+  /* The blue: a fill with white text, its hover and pressed steps (darker, so text keeps AA), text on the surface, and charts. */
+  --color-accent: oklch(.53 .19 259);
+  --color-accent-hover: oklch(.49 .19 259);
+  --color-accent-pressed: oklch(.45 .18 259);
+  --color-accent-text: oklch(.53 .19 259);
+  --color-accent-data: oklch(.53 .19 259);
   --color-on-accent: #FFFFFF;
 }
 :root[data-theme='dark'] {
-  --n-c: .008; --accent-l: .79; --accent-step: .05;
   --mark-l: .74; --mark-c: .13; --warn-l: .80; --ink-l: .82; --ink-c: .11;
   --l-deep: .135; --l-surface: .16; --l-layer-1: .195; --l-layer-2: .225; --l-layer-3: .27; --l-text: .945; --l-muted: .72; --l-faint: .62;
-  --color-on-accent: oklch(.16 .01 var(--accent-h));
+  --color-accent: oklch(.56 .19 259);
+  --color-accent-hover: oklch(.52 .19 259);
+  --color-accent-pressed: oklch(.48 .18 259);
+  --color-accent-text: oklch(.72 .14 257);
+  --color-accent-data: oklch(.68 .16 257);
 }
-/* (a) Signal orange: PlanetScale-like warmth on true greys. */
-:root[data-palette='orange'] { --n-c: 0; --accent-h: 45; --accent-c: .16; --accent-l: .56; --hue-warn: 85; --hue-received: 215; --hue-opened: 295; --hue-clicked: 345; }
-:root[data-theme='dark'][data-palette='orange'] { --n-c: 0; --accent-h: 50; --accent-l: .74; }
-/* (b) Electric blue-violet. */
-:root[data-palette='blue'] { --n-c: 0; --accent-h: 272; --accent-c: .19; --accent-l: .52; --hue-info: 235; --hue-received: 205; --hue-opened: 330; --hue-clicked: 175; }
-:root[data-theme='dark'][data-palette='blue'] { --n-c: 0; --accent-c: .15; --accent-l: .70; }
-/* (c) Phosphor green: a terminal nod; the neutrals lean green. */
-:root[data-palette='green'] { --n-h: 155; --n-c: .004; --accent-h: 150; --accent-c: .14; --accent-l: .52; --hue-ok: 168; --hue-received: 215; --hue-opened: 295; --hue-clicked: 345; }
-:root[data-theme='dark'][data-palette='green'] { --n-c: .006; --accent-c: .17; --accent-l: .82; }
-/* (e) Deep sea: cool blue-grey neutrals, a cyan accent, lime and coral for data. */
-:root[data-palette='deepsea'] { --n-h: 240; --n-c: .008; --accent-h: 222; --accent-c: .09; --accent-l: .52; --hue-warn: 82; --hue-error: 18; --hue-received: 130; --hue-opened: 295; --hue-clicked: 40; }
-:root[data-theme='dark'][data-palette='deepsea'] { --n-c: .016; --accent-h: 215; --accent-c: .11; --accent-l: .80; }
-/* What every palette derives. */
 :root {
-  --color-deep: oklch(var(--l-deep) var(--n-c) var(--n-h));
+  --color-deep: oklch(var(--l-deep) 0 0);
   --color-canvas: var(--color-deep);
-  --color-surface: oklch(var(--l-surface) calc(var(--n-c) * .6) var(--n-h));
-  --color-layer-1: oklch(var(--l-layer-1) var(--n-c) var(--n-h));
-  --color-layer-2: oklch(var(--l-layer-2) var(--n-c) var(--n-h));
-  --color-layer-3: oklch(var(--l-layer-3) var(--n-c) var(--n-h));
-  --color-text: oklch(var(--l-text) calc(var(--n-c) * 1.5) var(--n-h));
-  --color-muted: oklch(var(--l-muted) var(--n-c) var(--n-h));
-  --color-faint: oklch(var(--l-faint) var(--n-c) var(--n-h));
-  --color-border: oklch(var(--l-text) var(--n-c) var(--n-h) / 9%);
-  --color-border-muted: oklch(var(--l-text) var(--n-c) var(--n-h) / 6.5%);
-  --color-border-strong: oklch(var(--l-text) var(--n-c) var(--n-h) / 17%);
+  --color-surface: oklch(var(--l-surface) 0 0);
+  --color-layer-1: oklch(var(--l-layer-1) 0 0);
+  --color-layer-2: oklch(var(--l-layer-2) 0 0);
+  --color-layer-3: oklch(var(--l-layer-3) 0 0);
+  --color-text: oklch(var(--l-text) 0 0);
+  --color-muted: oklch(var(--l-muted) 0 0);
+  --color-faint: oklch(var(--l-faint) 0 0);
+  --color-border: oklch(var(--l-text) 0 0 / 9%);
+  --color-border-muted: oklch(var(--l-text) 0 0 / 6.5%);
+  --color-border-strong: oklch(var(--l-text) 0 0 / 17%);
   /* Neutral ink for secondary series and tracks. */
-  --color-series: oklch(var(--l-text) var(--n-c) var(--n-h) / 30%);
-  --color-series-strong: oklch(var(--l-text) var(--n-c) var(--n-h) / 64%);
-  --color-track: oklch(var(--l-text) var(--n-c) var(--n-h) / 7%);
-  /* The accent: selection, the active page, focus, links, the primary series and key numbers. */
-  --color-accent: oklch(var(--accent-l) var(--accent-c) var(--accent-h));
-  --color-accent-hover: oklch(calc(var(--accent-l) + var(--accent-step)) var(--accent-c) var(--accent-h));
-  --color-accent-tint: oklch(var(--accent-l) var(--accent-c) var(--accent-h) / 11%);
-  --color-accent-line: oklch(var(--accent-l) var(--accent-c) var(--accent-h) / 45%);
-  --color-focus: var(--color-accent);
-  --color-active-bg: var(--color-accent-tint);
-  /* Status: ink for text, marker for dots and lines, a 10% tint and a 30% rule. */
+  --color-series: oklch(var(--l-text) 0 0 / 30%);
+  --color-series-strong: oklch(var(--l-text) 0 0 / 64%);
+  --color-track: oklch(var(--l-text) 0 0 / 7%);
+  /* Selected rows, the active page, pressed facets, text selection: a neutral fill. Focus: the text colour's ring. */
+  --color-active-bg: oklch(var(--l-text) 0 0 / 8%);
+  --color-focus: var(--color-text);
+  /* Status: ink for words, marker for dots, a 10% tint and a 30% rule (alerts and banners). */
   --color-success: oklch(var(--ink-l) var(--ink-c) var(--hue-ok));
   --color-success-marker: oklch(var(--mark-l) var(--mark-c) var(--hue-ok));
   --color-success-bg: oklch(var(--mark-l) var(--mark-c) var(--hue-ok) / 10%);
@@ -276,8 +265,8 @@
   --color-info-marker: oklch(var(--mark-l) var(--mark-c) var(--hue-info));
   --color-info-bg: oklch(var(--mark-l) var(--mark-c) var(--hue-info) / 10%);
   --color-info-border: oklch(var(--mark-l) var(--mark-c) var(--hue-info) / 30%);
-  /* Data: one hue per kind of mail, at the markers' lightness and chroma. Sent is the accent. */
-  --color-series-sent: var(--color-accent);
+  /* Data: one hue per kind of mail for multi-series charts, at the markers' lightness and chroma. Sent is the blue. */
+  --color-series-sent: var(--color-accent-data);
   --color-series-received: oklch(var(--mark-l) var(--mark-c) var(--hue-received));
   --color-series-delivered: var(--color-success-marker);
   --color-series-opened: oklch(var(--mark-l) var(--mark-c) var(--hue-opened));

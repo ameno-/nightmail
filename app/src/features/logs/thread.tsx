@@ -58,7 +58,7 @@ export function ThreadTimeline({ thread, items, open, titled = true }: { thread:
     <ol className="thread-line__steps">
       {items.map(item => <li key={item.key} className="thread-line__step">
         <Entry item={item} className="thread-line__entry" open={open}>
-          <span className={`thread-line__dot ui-series--${item.outbound ? 'sent' : 'received'}`} data-outbound={item.outbound || undefined} aria-hidden="true" />
+          <span className="thread-line__dot" data-outbound={item.outbound || undefined} aria-hidden="true" />
           <span className="thread-line__top"><Direction outbound={item.outbound} /><Who item={item} /><Clip count={item.attachments} /></span>
           <Time at={item.at} />
           <span className="thread-line__status">{label(item.status)}{item.focused && <span className="thread-line__here">Viewing</span>}</span>

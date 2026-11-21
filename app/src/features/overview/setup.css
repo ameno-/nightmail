@@ -34,5 +34,5 @@ li[data-done] > .setup-rail__mark > svg { opacity: 1; transform: none; }
 .limit-row__note > span { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--color-warning-marker); transform: translateY(-1px); }
 .limit-row__text { display: flex; justify-content: space-between; gap: var(--space-8); font-variant-numeric: tabular-nums; }
 .limit-row__track { position: relative; height: 4px; overflow: hidden; border-radius: 2px; background: var(--color-layer-2); }
-.limit-row__track > i { position: absolute; inset: 0 auto 0 0; border-radius: inherit; background: var(--color-accent); }
+.limit-row__track > i { position: absolute; inset: 0 auto 0 0; border-radius: inherit; background: var(--color-accent-data); }
 .limit-row__track[data-full] > i { background: var(--color-warning-marker); }

@@ -148,7 +148,7 @@
 .reputation-chart { min-width: 0; overflow: hidden; }
 .reputation-chart svg { display: block; }
 .reputation-line { stroke-width: 1.5; stroke-dasharray: 4 4; }
-.reputation-series { fill: none; stroke: var(--color-accent); stroke-width: 2; stroke-linejoin: round; }
+.reputation-series { fill: none; stroke: var(--color-accent-data); stroke-width: 2; stroke-linejoin: round; }
 .reputation-empty { display: flex; align-items: center; min-height: 132px; }
 @media (max-width: 900px) {
   .settings-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }

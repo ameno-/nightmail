@@ -59,7 +59,7 @@ export function ScoreAbout({ report, error, onRetry }: { report: SenderScore | u
       </div>
       <ul ref={list} className="score-about__factors" aria-label="The six parts">{report.factors.map(factor => { const measured = graded && factor.source === 'measured'; return <li key={factor.key} data-key={factor.key} data-focus={focus === factor.key || undefined}>
         <MetricRow label={factor.label} hint={`${factor.weight}%`}
-          spark={measured ? <Meter value={factor.score!} max={100} mark={80} tone={partTone(factor.score!)} label={`${factor.label}: ${Math.round(factor.score!)} of 100`} /> : <Meter value={0} />}
+          spark={measured ? <Meter value={factor.score!} max={100} mark={80} label={`${factor.label}: ${Math.round(factor.score!)} of 100`} /> : <Meter value={0} />}
           value={measured ? factorFormats[factor.key](factor.value!) : <span className="muted">{graded ? 'No data' : '—'}</span>}
           unit={measured ? <span className={`score-about__part-score ui-tone--${partTone(factor.score!)}`}>{Math.round(factor.score!)}</span> : undefined} />
       </li> })}</ul>
