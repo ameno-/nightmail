@@ -58,6 +58,9 @@ export const webhookFormat = productSlug;
 /** The client's address as the entry point (server.ts, worker.ts) saw it, on the request the API handles. The entry
  *  point overwrites any value the request carried. */
 export const clientIpHeader = `x-${productSlug}-client-ip`;
+/** The client's network as Cloudflare saw it, "AS<number>;<country>", on the request the API handles. The entry point
+ *  (server.ts, worker.ts) removes any value the request carried; only the Worker sets one. Read by src/abuse.ts. */
+export const clientNetworkHeader = `x-${productSlug}-client-network`;
 /** Environment variable names, current first: NIGHTMAIL_<name>, then its earlier names (legacyEnvPrefixes). */
 export const envNames = (name: string) => [`NIGHTMAIL_${name}`, ...legacyEnvPrefixes.map(prefix => prefix + name)];
 /** The names of a server setting (config.ts and the operator scripts): NIGHTMAIL_<name>, then legacySettingPrefixes. */

@@ -47,6 +47,8 @@
     "UI_NOTES_SUBJECTS": "https://account.anoma.ly 0YLDsWUOonmIl3RQqb3yHQ",
     // Dashboard usage analytics (docs/analytics.md): batches go to the ANALYTICS bucket, never Postgres. "off" discards them.
     "DASHBOARD_ANALYTICS": "on",
+    // Abuse monitoring (src/abuse.ts) is off in production: NIGHTMAIL_ABUSE_MONITORING is deliberately unset. Turning it on
+    // (an activation instant, RFC 3339) is the owner's decision; the privacy policy names the date first.
     "ACCOUNT_CLIENT_ID": "bane-production",
     "MULTI_TENANT": "true",
     "BANE_PLATFORM_AWS_ACCOUNT": "009882681002",

@@ -8,7 +8,7 @@ import { createApp } from './app.js';
 import { nodeRuntime } from './adapters/node.js';
 import { sql } from 'drizzle-orm';
 import { dispatchWakeKey } from './dispatcher.js';
-import { clientIpHeader, legacyClientIpHeaders } from './brand.js';
+import { clientIpHeader, clientNetworkHeader, legacyClientIpHeaders } from './brand.js';
 import { admissionDenied, admissionPeer, ApiError, digest, log, logError, guardPublicRequest, setLogContext, snsIngress } from './core.js';
 import { brotliCompress, constants, gzip } from 'node:zlib';
 import { promisify } from 'node:util';
@@ -91,6 +91,7 @@ try {
     const headers = new Headers(request.headers);
     for (const name of legacyClientIpHeaders) headers.delete(name);
     headers.set(clientIpHeader, address);
+    headers.delete(clientNetworkHeader);
     const path = getPath(request);
     const response = await dashboardFile(request, path, await guardPublicRequest(path, headers, await digest(address), async () => app.fetch(new Request(request, { headers }), runtime)));
     // A size rejection can leave upload bytes unread. Do not offer that HTTP/1 socket for reuse.
