@@ -22700,6 +22700,36 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  test('dispatch claim: stays on the primary key when the statistics were taken with nothing queued',async t=>{
+    await simulatedSesFixture(t,async({runtime,local,db})=>{
+      const {runDispatcher}=await import('./src/dispatcher.js'),{SESv2Client,GetAccountCommand}=await import('@aws-sdk/client-sesv2');
+      const f=await hostedHoldFixture(runtime,db);
+      t.mock.method(SESv2Client.prototype,'send',async(cmd:any)=>cmd instanceof GetAccountCommand?{SendingEnabled:true,SendQuota:{MaxSendRate:1000,Max24HourSend:100000,SentLast24Hours:0}}:{MessageId:randomUUID()});
+      // Autovacuum analyzes the table between sends, while nothing is queued, so the statistics say every queued-only partial
+      // index is empty; then a campaign's release queues thousands of rows, and the next analyze waits for 10% of the table
+      // to change. At 10 million emails, a claim of six that scanned the 20,000 queued rows took 5 seconds.
+      const rows=(n:number,status:string)=>db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status)
+        SELECT $1||i,$2,'xx-test-1','fixture','a@example.invalid','[]','[]','[]','fixture','{"kind":"marketing"}',true,$3 FROM generate_series(1,$4::int)i`,[unique(status),unique('owner'),status,n]);
+      await rows(20000,'delivered');await db.query('ANALYZE sending_emails');await rows(5000,'queued');
+      const estimate=(await db.query("EXPLAIN (FORMAT JSON) SELECT 1 FROM sending_emails WHERE status='queued'")).rows[0]['QUERY PLAN'][0].Plan['Plan Rows'];
+      assert.ok(estimate<100,`The planner believes almost nothing is queued (${estimate} rows)`);
+      ok(await local('POST','/v1/emails/batch',{emails:Array.from({length:6},(_,i)=>({from:f.from,to:`reader-${i}@example.net`,subject:'Claim plan',text:'Synthetic claim message'}))}),202);
+      const query=t.mock.method(db,'query');await runDispatcher(runtime,{region:REGION,accountId:f.pool,lanes:1});query.mock.restore();
+      const claim=query.mock.calls.map(c=>c.arguments).find(([q]:any)=>q?.text?.includes('claimed AS (')) as any;
+      assert.ok(claim);
+      // Back in the queue as the lease left them, so the same statement claims the same six again.
+      assert.equal((await db.query("UPDATE sending_emails SET status='queued' WHERE workspace_id=$1 AND status='accepted'",[f.wid])).rowCount,6);
+      const plan=(await db.query('EXPLAIN (ANALYZE,BUFFERS,TIMING OFF,FORMAT JSON) '+claim[0].text,claim[1])).rows[0]['QUERY PLAN'][0];
+      const visit=(n:Json):Json[]=>[n,...(n.Plans??[]).flatMap(visit)];
+      const update=visit(plan.Plan).find(n=>n['Node Type']==='ModifyTable' && n['Relation Name']==='sending_emails')!;
+      const reads=visit(update).filter(n=>n!==update && n['Relation Name']==='sending_emails');
+      t.diagnostic(`claim of 6 with 5,000 queued: ${reads.map(n=>`${n['Node Type']} ${n['Index Name']??''} rows=${n['Actual Rows']} loops=${n['Actual Loops']}`).join(', ')}; ${plan['Execution Time']} ms`);
+      assert.equal(update['Actual Rows'],6);
+      assert.deepEqual(reads.map(n=>n['Index Name']),['sending_emails_pkey'],'The claim reaches sending_emails only by primary key from its input rows.');
+      assert.ok(reads[0]['Actual Rows']*reads[0]['Actual Loops']<=6,'It reads only the rows it claims, not the queue.');
+    });
+  });
+
   test('hosted limits count sibling usage and follow the stored score limit, its marketing reserve, override expiry and burst caps',async t=>{
     await simulatedSesFixture(t,async({db,runtime})=>{
       const wid=runtime.config.workspaceId, sibling=wid+'-sibling',sponsor=unique('sponsor');
