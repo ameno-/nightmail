@@ -10,14 +10,14 @@
 .dns-group-copy { margin-top: var(--space-4); font-size: var(--text-sm); line-height: var(--leading-sm); text-wrap: pretty; }
 
 .dns-columns, .dns-row { display: grid; grid-template-columns: var(--dns-columns); gap: var(--space-16); }
-.dns-columns { margin-top: var(--space-16); padding-bottom: var(--space-6); border-bottom: 1px solid var(--color-border-muted); color: var(--color-faint); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.dns-columns { margin-top: var(--space-16); padding-bottom: var(--space-6); border-bottom: 1px solid var(--color-border-muted); color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); line-height: var(--leading-xs); letter-spacing: var(--tracking-label); text-transform: uppercase; }
 .dns-rows { margin: 0; padding: 0; list-style: none; }
 .dns-row { align-items: start; padding-block: var(--space-8); }
 .dns-row + .dns-row { border-top: 1px solid var(--color-border-muted); }
 .dns-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
 .dns-cell { min-width: 0; font-size: var(--text-sm); line-height: var(--leading-sm); }
 .dns-cell code { font-size: var(--text-sm); line-height: var(--leading-sm); }
-.dns-type, .dns-type code { color: var(--color-muted); }
+.dns-type, .dns-type code { color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); }
 .dns-status { display: flex; justify-content: flex-end; padding-top: 2px; }
 /* Text, then a reserved icon slot: the copy affordance never moves anything when it appears. */
 .dns-text { display: flex; align-items: flex-start; gap: var(--space-4); min-width: 0; }
@@ -98,6 +98,8 @@
 
 /* DNS records are for copying: values wrap instead of ending in an ellipsis, and Copy sits right after its text. */
 .ui-table-scroll.domain-records .settings-copy-cell { justify-content: flex-start; gap: var(--space-4); }
+/* The record type is data: mono, muted. */
+.ui-table-scroll.domain-records td:first-child { color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); }
 .ui-table-scroll.domain-records .settings-copy-cell code { flex: 0 1 auto; overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; }
 .ui-table-scroll.domain-records .settings-copy-cell > .ui-button { flex: none; }
 @media (pointer: coarse) {
