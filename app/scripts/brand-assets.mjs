@@ -50,8 +50,8 @@ async function sorterCard(browser) {
   const across = 800, scale = 1200 / across;
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: scale, colorScheme: 'dark' });
   try {
-    // Night, and the shorter day of a returning visitor.
-    await context.addInitScript(() => { localStorage.setItem('nightmail.theme', 'dark'); localStorage.setItem('sorter.seen', '1') });
+    // Night, the shorter day of a returning visitor, and the cards' addresses masked (privacy mode on, lib/privacy.ts).
+    await context.addInitScript(() => { localStorage.setItem('nightmail.theme', 'dark'); localStorage.setItem('sorter.seen', '1'); localStorage.setItem('nightmail.privacy.v2', 'on') });
     const page = await context.newPage();
     // (A desktop window gets the factory: the card is the sorter's, asked for by name.)
     await page.goto(`http://127.0.0.1:${server.address().port}/?home=sorter`);
