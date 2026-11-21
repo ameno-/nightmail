@@ -7503,7 +7503,7 @@ describe('Hosted MCP OAuth and tools', () => {
       await db.query("DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=ANY($1)", [[boss, deputy, clerk].map(f => f.userId)]);
       await (await import('./src/ses-region-state.js')).ensureRegionSettings(runtime.db, { ...runtime.config, workspaceId: shop });
       const hook = unique('whk'), acmeHook = unique('whk');
-      await db.query(`INSERT INTO operation_webhooks(id, workspace_id, url, event_types, encrypted_secret) VALUES ($1, $2, 'https://example.com/hooks/shop-7a1f', '[]', 'fixture'), ($3, $4, 'https://example.com/hooks/acme', '[]', 'fixture')`, [hook, shop, acmeHook, acme]);
+      await db.query(`INSERT INTO operation_webhooks(id, workspace_id, url, description, event_types, encrypted_secret) VALUES ($1, $2, 'https://hooks.example.com/shop-7a1f', 'Order events', '[]', 'fixture'), ($3, $4, 'https://example.com/hooks/acme', '', '[]', 'fixture')`, [hook, shop, acmeHook, acme]);
       /** A sending-webhook delivery of Shop's webhook. */
       const delivery = async (status: string) => {
         const id = unique('whd'), event = unique('evt');
@@ -7539,7 +7539,10 @@ describe('Hosted MCP OAuth and tools', () => {
         const proposed = await propose(id, retry);
         assert.deepEqual([proposed.status, proposed.kind, proposed.workspaceId, proposed.target, proposed.url, proposed.result, proposed.error],
           ['proposed', 'retry_webhook_delivery', shop, { webhookId: hook, deliveryId: failed }, `${PUBLIC_ORIGIN}/support/actions/${proposed.id}`, null, null]);
-        assert.equal(proposed.summary, `Retry the email.delivered webhook delivery ${failed} to your sending webhook ending "••••7a1f", in the workspace "${shop}". It is failed after 3 attempts.`);
+        // In plain words: the webhook by its name and site (never its URL), when the delivery was, and how it ended.
+        const minute = '[A-Z][a-z]{2} \\d{1,2}, \\d\\d:\\d\\d UTC', quoted = (value: string) => JSON.stringify(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        assert.match(proposed.summary, new RegExp(`^Retry the email\\.delivered delivery from ${minute} to your sending webhook "Order events" at "example\\.com", in the workspace ${quoted(shop)}\\. It failed after 3 attempts\\.$`));
+        assert.doesNotMatch(proposed.summary, new RegExp(`${failed}|hooks\\.|7a1f`), 'No delivery ID, and nothing of the URL but its site.');
         assert.equal(Date.parse(proposed.expiresAt) - Date.parse(proposed.createdAt), 24 * 3_600_000);
         assert.deepEqual((await db.query('SELECT conversation_id, user_id, workspace_id FROM support_actions WHERE id = $1', [proposed.id])).rows[0], { conversation_id: id, user_id: boss.userId, workspace_id: shop });
         assert.equal((await propose(id, retry, 200)).id, proposed.id, 'Proposing the same change again answers the open proposal.');
@@ -7559,8 +7562,8 @@ describe('Hosted MCP OAuth and tools', () => {
         for (const body of [retry, { kind: 'pause_campaign', campaignId: campaign }, { kind: 'test_inbound_webhook', webhookId: live.id }, {}]) error(await stamped(memberChat, 'POST', '/v1/support/actions', body), 404);
         // Every summary is Nightmail's, from its own rows.
         const summaries = [
-          [await propose(id, { kind: 'test_webhook', webhookId: hook }), `Send a test email.delivered event to your sending webhook ending "••••7a1f", in the workspace "${shop}". No email is sent.`],
-          [await propose(id, { kind: 'pause_campaign', campaignId: campaign }), `Pause the campaign "Winter sale" (${campaign}) in the workspace "${shop}". It stops releasing new recipients (2 of 10 released so far); resuming continues from the same place.`],
+          [await propose(id, { kind: 'test_webhook', webhookId: hook }), `Send a test email.delivered event to your sending webhook "Order events" at "example.com", in the workspace "${shop}". No email is sent.`],
+          [await propose(id, { kind: 'pause_campaign', campaignId: campaign }), `Pause the campaign "Winter sale" in the workspace "${shop}". It stops releasing new recipients (2 of 10 released so far); resuming continues from the same place.`],
         ];
         for (const [action, summary] of summaries) assert.equal(action.summary, summary);
         // At most 3 open: the fourth waits until one is confirmed, declined or expires.
@@ -7568,13 +7571,13 @@ describe('Hosted MCP OAuth and tools', () => {
         error(await stamped(id, 'POST', '/v1/support/actions', fourth), 409, 'SUPPORT_ACTIONS_OPEN');
         await db.query(`UPDATE support_actions SET expires_at = now() - interval '1 second' WHERE id = $1`, [proposed.id]);
         const opened = await propose(id, fourth);
-        assert.equal(opened.summary, `Retry delivery ${fourth.deliveryId} of received mail to your inbound webhook ending "••••live", in the workspace "${shop}". It is failed after 2 attempts.`);
+        assert.match(opened.summary, new RegExp(`^Retry the delivery of received mail from ${minute} to your inbound webhook at "example\\.com", in the workspace ${quoted(shop)}\\. It failed after 2 attempts\\.$`));
         assert.equal(ok(await stamped(id, 'GET', `/v1/support/actions/${proposed.id}`)).status, 'expired');
         // A conversation reads only its own proposals.
         error(await stamped(await chat(boss, shop), 'GET', `/v1/support/actions/${opened.id}`), 404);
         error(await stamped(memberChat, 'GET', `/v1/support/actions/${opened.id}`), 404);
         const redeliver = await propose(await chat(deputy, shop), { kind: 'redeliver_message', messageId: received });
-        assert.match(redeliver.summary, new RegExp(`^Redeliver the message ${received}, received \\d{4}-\\d\\d-\\d\\dT[\\d:.]+Z, to every route webhook that already finished with it, in the workspace "${shop}"\\.$`));
+        assert.match(redeliver.summary, new RegExp(`^Redeliver the email received ${minute} to every route webhook that already finished with it, in the workspace ${quoted(shop)}\\.$`));
         for (const done of [id, ownerElsewhere, memberChat]) ok(reply(await platform.closeConversation(done)));
       });
 
@@ -7600,7 +7603,12 @@ describe('Hosted MCP OAuth and tools', () => {
         assert.deepEqual(ok(await send('GET', path, session(boss))), action);
         const done = ok(await confirm(action.id));
         assert.deepEqual([done.status, done.result.status, done.error], ['done', 'pending', null]);
+        assert.deepEqual(done.delivery, { status: 'pending', attempts: 0, statusCode: null }, 'Confirmed means queued: its delivery has not reached the endpoint yet.');
         assert.deepEqual(ok(await stamped(id, 'GET', `/v1/support/actions/${action.id}`)), done, 'The conversation reads the outcome from Nightmail.');
+        // Each read says where the test's delivery stands now.
+        await db.query(`UPDATE operation_deliveries SET status = 'failed', attempt_count = 3, last_status_code = 503 WHERE id = $1`, [done.result.id]);
+        assert.deepEqual(ok(await send('GET', path, session(boss))).delivery, { status: 'failed', attempts: 3, statusCode: 503 });
+        assert.equal(action.delivery, null, 'A proposal has no delivery yet.');
         ok(reply(await platform.closeConversation(id)));
       });
 
@@ -7612,6 +7620,7 @@ describe('Hosted MCP OAuth and tools', () => {
         const first = ok(await confirm(retry.id)), again = ok(await confirm(retry.id));
         assert.deepEqual(again, first, 'Confirming again answers the same.');
         assert.deepEqual([first.status, first.result, first.error], ['done', { id: failed, status: 'pending' }, null]);
+        assert.deepEqual(first.delivery, { status: 'pending', attempts: 3, statusCode: 500 }, 'Retried, not yet delivered: its earlier answer is still the last.');
         assert.equal(await charged(), before + 1);
         assert.deepEqual((await db.query('SELECT status, generation FROM operation_deliveries WHERE id = $1', [failed])).rows[0], { status: 'pending', generation: 1 });
         assert.equal((await db.query(`SELECT count(*)::int AS n FROM jobs WHERE type = 'operation.webhook' AND payload->>'deliveryId' = $1`, [failed])).rows[0].n, 1);
@@ -7761,15 +7770,15 @@ describe('Hosted MCP OAuth and tools', () => {
         await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$2,$1)', [lab, typed('Lab')]);
         await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner'),($4,$2,$5,'member')`, [unique('mem'), lab, boss.userId, unique('mem'), clerk.userId]);
         await (await import('./src/ses-region-state.js')).ensureRegionSettings(runtime.db, { ...runtime.config, workspaceId: lab });
-        await db.query(`INSERT INTO operation_webhooks(id, workspace_id, url, event_types, encrypted_secret) VALUES ($1, $2, $3, '[]', 'fixture')`, [labHook, lab, 'https://example.com/hooks/x\u202e<b>']);
+        await db.query(`INSERT INTO operation_webhooks(id, workspace_id, url, description, event_types, encrypted_secret) VALUES ($1, $2, $3, $4, '[]', 'fixture')`, [labHook, lab, 'https://example.com/hooks/x\u202e<b>', typed('Hook')]);
         // A member names a campaign through the public API, as anyone in the workspace can.
         const sale = ok(await send('POST', '/v1/campaigns', session(clerk, lab), { name: typed('Sale') }), 201);
         const id = await chat(boss, lab);
         const pause = await propose(id, { kind: 'pause_campaign', campaignId: sale.id }), test = await propose(id, { kind: 'test_webhook', webhookId: labHook });
         assert.deepEqual(pause.parts, { labels: { workspace: clean('Lab'), campaign: clean('Sale') },
-          template: `Pause the campaign {campaign} (${sale.id}) in the workspace {workspace}. It stops releasing new recipients (0 of 0 released so far); resuming continues from the same place.` });
-        assert.equal(pause.summary, `Pause the campaign ${JSON.stringify(clean('Sale'))} (${sale.id}) in the workspace ${JSON.stringify(clean('Lab'))}. It stops releasing new recipients (0 of 0 released so far); resuming continues from the same place.`);
-        assert.deepEqual(test.parts, { labels: { workspace: clean('Lab'), endpoint: '••••<b>' }, template: 'Send a test email.delivered event to your sending webhook ending {endpoint}, in the workspace {workspace}. No email is sent.' });
+          template: 'Pause the campaign {campaign} in the workspace {workspace}. It stops releasing new recipients (0 of 0 released so far); resuming continues from the same place.' });
+        assert.equal(pause.summary, `Pause the campaign ${JSON.stringify(clean('Sale'))} in the workspace ${JSON.stringify(clean('Lab'))}. It stops releasing new recipients (0 of 0 released so far); resuming continues from the same place.`);
+        assert.deepEqual(test.parts, { labels: { workspace: clean('Lab'), webhook: clean('Hook'), site: 'example.com' }, template: 'Send a test email.delivered event to your sending webhook {webhook} at {site}, in the workspace {workspace}. No email is sent.' });
         for (const action of [pause, test]) {
           assert.doesNotMatch(action.summary, /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u);
           assert.doesNotMatch(action.parts.template, /evil|<b>|RESUME|"/);

@@ -12,7 +12,8 @@ import { productName } from '../../../../api/src/brand'
 // timings are the point: the panel is reviewed and screenshotted against them, so steps take a beat and text streams in
 // uneven chunks. Uploads are simulated with progress.
 //
-// In demo mode, window.__baneSupportDemo can drop the connection (offline) or fail the next turn, for the error states.
+// In demo mode, window.__baneSupportDemo can drop the connection (offline), fail the next turn or fail the next read of
+// a proposed change, for the error states.
 
 type Step =
   | { tool: string; running: string; done: string; ms: number; ok?: boolean }
@@ -54,8 +55,8 @@ const webhook = (workspace: string): Step[] => [
   { pause: 300 },
   { tool: 'webhook_deliveries', running: 'Checking your webhook deliveries…', done: 'Checked your webhook deliveries for the last 24 hours', ms: 1100 },
   { say: 'Your endpoint ending **/hooks/nightmail** answered `503` three times to the **email.bounced** delivery from 09:14, then the retries ran out. It has answered `200` to everything since 09:40, so it’s back up.\n\nI can retry that delivery now. It goes out once you confirm.' },
-  { action: 'retry_webhook_delivery', template: 'Retry the email.bounced webhook delivery whd_7c1e9a40b25f4d6e8a13c0f2d9b8e571 to your sending webhook ending {endpoint}, in the workspace {workspace}. It is failed after 3 attempts.',
-    labels: { endpoint: '/hooks/nightmail', workspace },
+  { action: 'retry_webhook_delivery', template: 'Retry the email.bounced delivery from Nov 21, 09:14 UTC to your sending webhook {webhook} at {site}, in the workspace {workspace}. It failed after 3 attempts.',
+    labels: { webhook: 'Bounce events', site: 'acme.com', workspace },
     done: [{ tool: 'webhook_delivery', running: 'Checking the retry…', done: 'Checked the retry', ms: 900 }, { say: 'Done. Your endpoint answered `200` this time, so that bounce has reached your system.' }],
     declined: [{ say: 'Okay, nothing was retried. If you want it later, ask me again.' }] },
 ]
@@ -66,7 +67,7 @@ const random = (seed: number) => () => { seed = (seed * 16807) % 2147483647; ret
 export function createDemoTransport({ firstName, workspace }: { firstName: string; workspace: { id: string; name: string } }): SupportTransport {
   const listeners = new Set<(event: TransportEvent) => void>()
   const emit = (event: TransportEvent) => { for (const listener of listeners) listener(event) }
-  let seq = 0, conversation = 0, turn = 0, online = true, failNext = false, filed = false, cancelled = false
+  let seq = 0, conversation = 0, turn = 0, online = true, failNext = false, failRead = false, filed = false, cancelled = false
   let busy = false, queue: { text: string; attachments: number }[] = [], consent: { requestId: string; allow: Step[]; deny: Step[] } | null = null, proposed = false
   // The proposals, as Nightmail would keep them, with what the agent says once each is decided.
   const actions = new Map<string, { action: SupportAction; done: Step[]; declined: Step[] }>()
@@ -114,7 +115,7 @@ export function createDemoTransport({ firstName, workspace }: { firstName: strin
         const actionId = `sac_demo${String(seq).padStart(4, '0')}`, at = new Date()
         const summary = step.template.replace(/\{([a-z]+)\}/g, (_, name: string) => JSON.stringify(step.labels[name] ?? ''))
         actions.set(actionId, { done: step.done, declined: step.declined, action: { id: actionId, kind: step.action, status: 'proposed', summary, parts: { template: step.template, labels: step.labels }, workspaceId: workspace.id,
-          target: {}, url: `/support/actions/${actionId}`, result: null, error: null, createdAt: at.toISOString(), expiresAt: new Date(at.getTime() + 86_400_000).toISOString(), resolvedAt: null } })
+          target: {}, url: `/support/actions/${actionId}`, result: null, error: null, delivery: null, createdAt: at.toISOString(), expiresAt: new Date(at.getTime() + 86_400_000).toISOString(), resolvedAt: null } })
         proposed = true
         server({ type: 'action.request', actionId, kind: step.action, summary })
         break
@@ -188,6 +189,7 @@ export function createDemoTransport({ firstName, workspace }: { firstName: strin
     async allowContent(requestId) { await wait(500); transport.send({ type: 'consent.respond', requestId, decision: 'allow', handoff: 'demo' }) },
     async readAction(actionId) {
       await wait(120)
+      if (failRead) { failRead = false; throw new ApiError('The service is unavailable. Try again shortly.', 'UNAVAILABLE', {}, undefined, 503) }
       const entry = actions.get(actionId)
       if (!entry) throw new ApiError('Support action was not found.', 'NOT_FOUND', {}, undefined, 404)
       return entry.action
@@ -196,7 +198,10 @@ export function createDemoTransport({ firstName, workspace }: { firstName: strin
       const entry = actions.get(actionId)
       if (!entry) throw new ApiError('Support action was not found.', 'NOT_FOUND', {}, undefined, 404)
       await wait(decision === 'confirm' ? 800 : 300)
-      if (entry.action.status === 'proposed') entry.action = { ...entry.action, status: decision === 'confirm' ? 'done' : 'declined', result: decision === 'confirm' ? { status: 'pending' } : null, resolvedAt: new Date().toISOString() }
+      if (entry.action.status === 'proposed') entry.action = { ...entry.action, status: decision === 'confirm' ? 'done' : 'declined', result: decision === 'confirm' ? { status: 'pending' } : null, resolvedAt: new Date().toISOString(),
+        delivery: decision === 'confirm' ? { status: 'pending', attempts: 3, statusCode: 503 } : null }
+      // The retry is queued first; the endpoint accepts it a moment later, and the card's next read says so.
+      if (decision === 'confirm') { const timer = setTimeout(() => { timers.delete(timer); entry.action = { ...entry.action, delivery: { status: 'delivered', attempts: 4, statusCode: 200 } } }, 1800); timers.add(timer) }
       transport.send({ type: 'action.resolved', actionId })
       return entry.action
     },
@@ -227,6 +232,8 @@ export function createDemoTransport({ firstName, workspace }: { firstName: strin
     online() { online = true; emit({ type: 'connection', state: 'open' }) },
     /** The next reply fails with TURN_FAILED. */
     failNextTurn() { failNext = true },
+    /** The next read of a proposed change fails with a 503. */
+    failNextRead() { failRead = true },
   };
   (window as { __baneSupportDemo?: typeof debug }).__baneSupportDemo = debug
   return transport

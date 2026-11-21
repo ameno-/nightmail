@@ -6859,6 +6859,20 @@ export type SupportAction = {
         code: string;
         message: string;
     } | null;
+    /**
+     * For a done test or retry of a sending or inbound webhook delivery: that delivery as it stands now. done means it was queued; this says whether it has reached the endpoint.
+     */
+    delivery: {
+        /**
+         * pending: queued or retrying, its endpoint has not accepted it yet; delivered: the endpoint accepted it; failed: it gave up; paused: held while the webhook is paused.
+         */
+        status: 'pending' | 'delivered' | 'failed' | 'paused';
+        attempts: number;
+        /**
+         * The endpoint’s last HTTP answer, if any.
+         */
+        statusCode: number | null;
+    } | null;
     createdAt: string;
     expiresAt: string;
     resolvedAt: string | null;

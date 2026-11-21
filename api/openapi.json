@@ -21553,6 +21553,40 @@
             ],
             "description": "The public route’s error when it refused."
           },
+          "delivery": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "delivered",
+                  "failed",
+                  "paused"
+                ],
+                "description": "pending: queued or retrying, its endpoint has not accepted it yet; delivered: the endpoint accepted it; failed: it gave up; paused: held while the webhook is paused."
+              },
+              "attempts": {
+                "type": "integer"
+              },
+              "statusCode": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "description": "The endpoint’s last HTTP answer, if any."
+              }
+            },
+            "required": [
+              "status",
+              "attempts",
+              "statusCode"
+            ],
+            "description": "For a done test or retry of a sending or inbound webhook delivery: that delivery as it stands now. done means it was queued; this says whether it has reached the endpoint."
+          },
           "createdAt": {
             "type": "string"
           },
@@ -21577,6 +21611,7 @@
           "url",
           "result",
           "error",
+          "delivery",
           "createdAt",
           "expiresAt",
           "resolvedAt"

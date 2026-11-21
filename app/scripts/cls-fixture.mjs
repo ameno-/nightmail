@@ -573,7 +573,7 @@ async function supportInbox(db, webhookId) {
   await db.query(`INSERT INTO support_conversations(id,channel,user_id,verification,evidence,mode,workspace_id,status,subject,agent_state,last_message_at,messages,turns,cost_usd,created_at,closed_at)
     VALUES ($1,'chat','user_dana','handoff','{"handoff":"sho_00000000000000000000000000000009"}','member','ws_northwind','closed','Webhook deliveries failing','active',now()-interval '50 minutes',2,1,0.0390,
       now()-interval '1 hour',now()-interval '20 minutes')`, [danaChat]);
-  const parts = { template: 'Send a test email.delivered event to your sending webhook ending {endpoint}, in the workspace {workspace}. No email is sent.', labels: { endpoint: '••••bane', workspace: 'Northwind' } };
+  const parts = { template: 'Send a test email.delivered event to your sending webhook {webhook} at {site}, in the workspace {workspace}. No email is sent.', labels: { webhook: 'Delivery events', site: 'northwind.example', workspace: 'Northwind' } };
   await db.query(`INSERT INTO support_actions(id,conversation_id,user_id,workspace_id,kind,target,summary,parts,created_at,expires_at)
     VALUES ($1,$2,'user_dana','ws_northwind','test_webhook',$3,$4,$5,now()-interval '45 minutes',now()+interval '23 hours 15 minutes')`,
     [action, danaChat, JSON.stringify({ webhookId }), parts.template.replace(/\{([a-z]+)\}/g, (_, name) => JSON.stringify(parts.labels[name])), JSON.stringify(parts)]);

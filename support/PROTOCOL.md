@@ -143,19 +143,20 @@ Show a small card: "Passed to the Nightmail team as **tkt_…**. Someone will re
 
 ```jsonc
 { "v": 1, "type": "action.request", "seq": 8, "actionId": "sac_…", "kind": "retry_webhook_delivery",
-  "summary": "Retry the email.bounced webhook delivery whd_… to your sending webhook ending \"/hooks/in\", in the workspace \"Acme Prod\". It is failed after 3 attempts." }
+  "summary": "Retry the email.bounced delivery from Nov 21, 09:14 UTC to your sending webhook \"Order events\" at \"acme.com\", in the workspace \"Acme Prod\". It failed after 3 attempts." }
 { "v": 1, "type": "action.resolved", "seq": 9, "actionId": "sac_…" }   // decided somewhere: read it again
 ```
 
 The agent can propose a few changes (retry or redeliver webhook mail, test a webhook, pause a campaign; `api/README.md` "Support actions") but never makes one. Nightmail writes each proposal's sentence from its own records and keeps it open 24 hours; only the person it is for, signed in to the dashboard, decides it.
 
-Render a card titled by `kind` ("Retry a webhook delivery?") with **Confirm** and **Not now**:
+Render a card titled by `kind` ("Retry a webhook delivery?") with **Decline** and the change's own verb (**Retry delivery**, **Send test**, **Redeliver**, **Pause campaign**), in that order. Left alone, the proposal stays open until it expires:
 
 - **What it shows comes from Nightmail, not the frame.** Read `GET /v1/support-actions/{actionId}` with the dashboard session and show its `parts`: the `template` with each name in `labels` put in as text and set apart, never as Markdown or HTML. The buttons wait for that read. `summary` is for the transcript and screen readers.
-- **Confirm** or **Not now:** `POST /v1/support-actions/{actionId}/confirm` or `…/decline` with the dashboard session. Its answer is the outcome (`done`, `failed` with the change's `error`, `declined`); show it on the card, then send `action.resolved` (§5), which carries no outcome.
-- A proposal for another account, or in a workspace the person has left, answers `404`: say it isn't available to this account.
+- **The verb** or **Decline:** `POST /v1/support-actions/{actionId}/confirm` or `…/decline` with the dashboard session. Its answer is the outcome; show it on the card, then send `action.resolved` (§5), which carries no outcome. `done` for a test or retry only means it was queued: show its `delivery` (queued, delivered, or not accepted with the endpoint's HTTP status) and read again until it answers. `failed` with `SUPPORT_ACTION_OUTCOME_UNKNOWN` is not "didn't run": the test may have arrived, so say the outcome is unknown and what to check. `declined` changed nothing.
+- **A read that fails** for a passing reason (a 5xx, the network) keeps both buttons, with the frame's `summary` and **Try again**; Nightmail checks the proposal again when the person decides.
+- A proposal for another account, or in a workspace the person has left, answers `404`: say it isn't available to this account (and the same for any other refusal of the request itself, such as a malformed ID).
 
-The agent ends its answer with the proposal and carries on once it is decided: on the panel's `action.resolved` it reads the outcome from Nightmail (`GET /v1/support/actions/{id}`), never from the frame, and a new `message.start` follows. The server sends `action.resolved` to every open panel of the conversation, so a card in another tab reads it again. `history.pending.actions` lists the proposals still open, to show their cards again after a reconnect. Over email the reply ends with a link to `/support/actions/<actionId>` on Nightmail's origin, where a dialog does the same as the card.
+The agent ends its answer with the proposal and carries on once it is decided: on the panel's `action.resolved` it reads the outcome from Nightmail (`GET /v1/support/actions/{id}`), never from the frame, and a new `message.start` follows. The server sends `action.resolved` to every open panel of the conversation, so a card in another tab reads it again. `history.pending.actions` lists the proposals still open, to show their cards again after a reconnect. Over email the reply ends with a link to `/support/actions/<actionId>` on Nightmail's origin, where a dialog does the same as the card, with **Not now** to close it and come back while it's open.
 
 ### 4.5 Errors and the end
 
@@ -181,7 +182,7 @@ The agent ends its answer with the proposal and carries on once it is decided: o
 { "type": "user.message", "clientMessageId": "c_…", "text": "This is what I see", "attachments": ["att_…"] }  // uploaded first (§5.1); text may be empty
 { "type": "consent.respond", "requestId": "cns_…", "decision": "allow", "handoff": "<JWS with shareContent>" }
 { "type": "consent.respond", "requestId": "cns_…", "decision": "deny" }
-{ "type": "action.resolved", "actionId": "sac_…" }   // after Confirm or Not now (§4.4): read what came of it from Nightmail
+{ "type": "action.resolved", "actionId": "sac_…" }   // after the person decides (§4.4): read what came of it from Nightmail
 { "type": "human.request" }                     // "Talk to a person": files a ticket (once per conversation)
 { "type": "cancel" }                            // stop the answer being written
 { "type": "feedback", "rating": "up" }          // or "down"; optional, once per conversation

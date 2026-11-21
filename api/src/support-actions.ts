@@ -1,6 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql, type SQL } from 'drizzle-orm';
-import { actorMailAccess, ApiError, errors, id, isoTime, json, log, memberRefused, notFound, response, webhookUrlHint, wrapModuleLoad, type Actor, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
+import { actorMailAccess, ApiError, errors, id, isoTime, json, log, memberRefused, notFound, response, wrapModuleLoad, type Actor, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
+import { placementRoot } from './domain-registry.js';
 import { auditContext, auditInsert, systemContext, type AuditContext, type AuditEvent } from './audit.js';
 import { productName } from './brand.js';
 import type { EndpointRecord } from './db/mailbox.js';
@@ -63,6 +64,10 @@ const Action = z.object({
   url: z.string().describe('Where the customer confirms or declines it, signed in.'),
   result: z.record(z.string(), z.unknown()).nullable().describe('The public route’s answer when it ran.'),
   error: z.object({ code: z.string(), message: z.string() }).nullable().describe('The public route’s error when it refused.'),
+  delivery: z.object({
+    status: z.enum(['pending', 'delivered', 'failed', 'paused']).describe('pending: queued or retrying, its endpoint has not accepted it yet; delivered: the endpoint accepted it; failed: it gave up; paused: held while the webhook is paused.'),
+    attempts: z.number().int(), statusCode: z.number().int().nullable().describe('The endpoint’s last HTTP answer, if any.'),
+  }).nullable().describe('For a done test or retry of a sending or inbound webhook delivery: that delivery as it stands now. done means it was queued; this says whether it has reached the endpoint.'),
   createdAt: z.string(), expiresAt: z.string(), resolvedAt: z.string().nullable(),
 }).openapi('SupportAction');
 type Parts = { template: string; labels: Record<string, string> };
@@ -71,30 +76,47 @@ type Row = { id: string; conversation_id: string; user_id: string; workspace_id:
 const running = sql`${`${RUNNING_MINUTES} minutes`}::interval`;
 const columns = sql`id, conversation_id, user_id, workspace_id, kind, target, summary, parts, status, result, created_at::text, expires_at::text, resolved_at::text, expires_at <= now() AS expired,
   status = 'running' AND started_at <= now() - ${running} AS stale`;
-const view = (c: Ctx, row: Row): z.infer<typeof Action> => ({
+type Delivery = z.infer<typeof Action>['delivery'];
+const view = (c: Ctx, row: Row, delivery: Delivery = null): z.infer<typeof Action> => ({
   id: row.id, kind: row.kind, status: row.status === 'proposed' && row.expired ? 'expired' : row.status, summary: row.summary, parts: row.parts, workspaceId: row.workspace_id, target: row.target as Record<string, string>,
-  url: `${new URL(c.env.config.publicUrl).origin}/support/actions/${row.id}`, result: row.result?.body ?? null, error: row.result?.error ?? null,
+  url: `${new URL(c.env.config.publicUrl).origin}/support/actions/${row.id}`, result: row.result?.body ?? null, error: row.result?.error ?? null, delivery,
   createdAt: isoTime(row.created_at)!, expiresAt: isoTime(row.expires_at)!, resolvedAt: isoTime(row.resolved_at),
 });
+/** The delivery a done test or retry queued, as it stands now: confirming only queues it, so "done" never means it arrived. */
+async function deliveryOf(db: DbExecutor, row: Row): Promise<Delivery> {
+  if (row.status !== 'done') return null;
+  const id = row.kind === 'test_webhook' ? row.result?.body?.id : row.kind === 'retry_webhook_delivery' || row.kind === 'retry_inbound_delivery' ? row.target.deliveryId : null;
+  if (typeof id !== 'string') return null;
+  const table = row.kind === 'retry_inbound_delivery' ? sql`mailbox_webhook_deliveries` : sql`operation_deliveries`;
+  const { rows: [d] } = await db.execute<{ status: string; attempts: number; code: number | null }>(sql`SELECT status, attempt_count AS attempts, last_status_code AS code FROM ${table}
+    WHERE id = ${id} AND workspace_id = ${row.workspace_id}`);
+  if (!d) return null;
+  const status = (['delivered', 'failed', 'paused'] as const).find(known => known === d.status) ?? 'pending';
+  return { status, attempts: d.attempts, statusCode: d.code };
+}
+/** A proposal as its reader gets it, with its delivery where it has one. */
+const shown = async (c: Ctx, row: Row) => view(c, row, await deliveryOf(c.env.db, row));
 
 // ---------- the summary, from Nightmail's own rows ----------
 
-type Facts = { workspace_id: string; workspace: string; url?: string | null; status?: string; attempts?: number; event?: string | null; at?: string; campaign?: string; expanded?: number; total?: number };
+type Facts = { workspace_id: string; workspace: string; url?: string | null; name?: string | null; status?: string; attempts?: number; event?: string | null; at?: string; campaign?: string; expanded?: number; total?: number };
 /** The target's row in one of these workspaces, with what its summary names. */
 function factsOf(kind: Kind, t: Targets, ids: string[]): SQL {
   const scope = sql`${sql.param(ids)}::text[]`;
   switch (kind) {
-    case 'retry_webhook_delivery': return sql`SELECT d.workspace_id, w.name AS workspace, h.url, d.status, d.attempt_count AS attempts, d.payload->>'type' AS event
+    case 'retry_webhook_delivery': return sql`SELECT d.workspace_id, w.name AS workspace, h.url, h.description AS name, d.status, d.attempt_count AS attempts, d.payload->>'type' AS event,
+        d.created_at::text AS at
       FROM operation_deliveries d JOIN operation_webhooks h ON h.id = d.webhook_id AND h.workspace_id = d.workspace_id JOIN workspaces w ON w.id = d.workspace_id
       WHERE d.id = ${t.deliveryId} AND d.webhook_id = ${t.webhookId} AND d.workspace_id = ANY(${scope})`;
-    case 'test_webhook': return sql`SELECT h.workspace_id, w.name AS workspace, h.url FROM operation_webhooks h JOIN workspaces w ON w.id = h.workspace_id
+    case 'test_webhook': return sql`SELECT h.workspace_id, w.name AS workspace, h.url, h.description AS name FROM operation_webhooks h JOIN workspaces w ON w.id = h.workspace_id
       WHERE h.id = ${t.webhookId} AND h.workspace_id = ANY(${scope})`;
-    case 'retry_inbound_delivery': return sql`SELECT d.workspace_id, w.name AS workspace, h.url, d.status, d.attempt_count AS attempts
+    case 'retry_inbound_delivery': return sql`SELECT d.workspace_id, w.name AS workspace, h.url, coalesce(h.name, h.description) AS name, d.status, d.attempt_count AS attempts,
+        d.created_at::text AS at
       FROM mailbox_webhook_deliveries d JOIN mailbox_webhooks h ON h.id = d.webhook_id AND h.workspace_id = d.workspace_id AND h.type = 'webhook' JOIN workspaces w ON w.id = d.workspace_id
       WHERE d.id = ${t.deliveryId} AND d.webhook_id = ${t.webhookId} AND d.workspace_id = ANY(${scope})`;
-    case 'test_inbound_webhook': return sql`SELECT h.workspace_id, w.name AS workspace, h.url FROM mailbox_webhooks h JOIN workspaces w ON w.id = h.workspace_id
+    case 'test_inbound_webhook': return sql`SELECT h.workspace_id, w.name AS workspace, h.url, coalesce(h.name, h.description) AS name FROM mailbox_webhooks h JOIN workspaces w ON w.id = h.workspace_id
       WHERE h.id = ${t.webhookId} AND h.type = 'webhook' AND h.workspace_id = ANY(${scope})`;
-    case 'redeliver_message': return sql`SELECT m.workspace_id, w.name AS workspace, m.received_at::text AS at, h.url, h.id IS NOT NULL OR ${t.webhookId ?? null}::text IS NULL AS found
+    case 'redeliver_message': return sql`SELECT m.workspace_id, w.name AS workspace, m.received_at::text AS at, h.url, coalesce(h.name, h.description) AS name, h.id IS NOT NULL OR ${t.webhookId ?? null}::text IS NULL AS found
       FROM mail_messages m JOIN workspaces w ON w.id = m.workspace_id LEFT JOIN mailbox_webhooks h ON h.id = ${t.webhookId ?? null} AND h.workspace_id = m.workspace_id
       WHERE m.id = ${t.messageId} AND m.direction = 'inbound' AND m.workspace_id = ANY(${scope})`;
     case 'pause_campaign': return sql`SELECT c.workspace_id, w.name AS workspace, c.draft->>'name' AS campaign, c.state AS status, c.expanded, c.total
@@ -102,25 +124,51 @@ function factsOf(kind: Kind, t: Targets, ids: string[]): SQL {
   }
 }
 /**
- * A name someone typed (a workspace, a campaign, the end of a webhook URL), as data: control, formatting (bidirectional
+ * A name someone typed (a workspace, a campaign, a webhook and the site it posts to), as data: control, formatting (bidirectional
  * ones included), surrogate, private-use and unassigned characters removed, on one line, at most 80 characters.
  */
 const label = (value: string | null | undefined) => Array.from((value ?? '').replace(/[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}]/gu, '').replace(/\s+/gu, ' ').trim()).slice(0, 80).join('');
 /** The sentence with each typed name in place, JSON-quoted: a name can never end its quotes or read as the sentence. */
 const render = ({ template, labels }: Parts) => template.replace(/\{([a-z]+)\}/g, (_, name: string) => JSON.stringify(labels[name] ?? ''));
 const tries = (n = 0) => `${n} attempt${n === 1 ? '' : 's'}`;
-/** Nightmail's sentence for a proposal: only its own values (IDs, states, counts, times) inline, typed names as labels. */
-function partsOf(kind: Kind, t: Targets, f: Facts): Parts {
+const minute = new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+/** A time as a person reads it: "Nov 21, 09:14 UTC". */
+const readable = (value: string | null | undefined) => value ? `${minute.format(new Date(isoTime(value)!))} UTC` : 'earlier';
+/** Where a delivery stands, in words. */
+function standing(status: string | undefined, attempts = 0) {
+  switch (status) {
+    case 'failed': return `It failed after ${tries(attempts)}.`;
+    case 'delivered': return `It was delivered after ${tries(attempts)}.`;
+    case 'paused': return `It is held while the webhook is paused (${tries(attempts)} so far).`;
+    case 'pending': return attempts ? `It is waiting for its next try (${tries(attempts)} so far).` : 'It hasn’t been tried yet.';
+    default: return `It is ${/^[a-z_]{1,20}$/.test(status ?? '') ? status!.replace(/_/g, ' ') : 'in an unknown state'} after ${tries(attempts)}.`;
+  }
+}
+/**
+ * A webhook as its owner knows it: its name and the site it posts to, both labels. The site is the URL's registrable
+ * domain, never the rest: URLs stay write-only, and a service can make a subdomain or path an endpoint's secret.
+ */
+async function webhookOf(f: Facts, labels: Record<string, string>, fallback: string | undefined) {
+  const name = label(f.name);
+  let host = '';
+  try { host = f.url ? new URL(f.url).hostname : ''; } catch { /* An unreadable URL names no site. */ }
+  const site = host ? label((await placementRoot(host)).root ?? host) : '';
+  if (name) labels.webhook = name;
+  if (site) labels.site = site;
+  return [name && '{webhook}', site && 'at {site}'].filter(Boolean).join(' ') || fallback || '';
+}
+/** Nightmail's sentence for a proposal, in plain words: only its own values (states, counts, times) inline, typed names as labels. */
+async function partsOf(kind: Kind, t: Targets, f: Facts): Promise<Parts> {
   const labels: Record<string, string> = { workspace: label(f.workspace) }, where = 'in the workspace {workspace}';
-  const endpoint = f.url ? (labels.endpoint = label(webhookUrlHint(f.url)), 'ending {endpoint}') : t.webhookId;
-  const event = /^[a-z][a-z_.]{0,39}$/.test(f.event ?? '') ? f.event : 'event', status = /^[a-z_]{1,20}$/.test(f.status ?? '') ? f.status : 'unknown';
+  const webhook = await webhookOf(f, labels, t.webhookId);
+  const event = /^[a-z][a-z_.]{0,39}$/.test(f.event ?? '') ? f.event : 'event';
   const template = (() => { switch (kind) {
-    case 'retry_webhook_delivery': return `Retry the ${event} webhook delivery ${t.deliveryId} to your sending webhook ${endpoint}, ${where}. It is ${status} after ${tries(f.attempts)}.`;
-    case 'test_webhook': return `Send a test email.delivered event to your sending webhook ${endpoint}, ${where}. No email is sent.`;
-    case 'retry_inbound_delivery': return `Retry delivery ${t.deliveryId} of received mail to your inbound webhook ${endpoint}, ${where}. It is ${status} after ${tries(f.attempts)}.`;
-    case 'test_inbound_webhook': return `Send a test message.received event for an example message to your inbound webhook ${endpoint}, ${where}.`;
-    case 'redeliver_message': return `Redeliver the message ${t.messageId}, received ${isoTime(f.at)}, to ${t.webhookId ? `your endpoint ${endpoint}` : 'every route webhook that already finished with it'}, ${where}.`;
-    case 'pause_campaign': labels.campaign = label(f.campaign); return `Pause the campaign {campaign} (${t.campaignId}) ${where}. It stops releasing new recipients (${Number(f.expanded)} of ${Number(f.total)} released so far); resuming continues from the same place.`;
+    case 'retry_webhook_delivery': return `Retry the ${event} delivery from ${readable(f.at)} to your sending webhook ${webhook}, ${where}. ${standing(f.status, f.attempts)}`;
+    case 'test_webhook': return `Send a test email.delivered event to your sending webhook ${webhook}, ${where}. No email is sent.`;
+    case 'retry_inbound_delivery': return `Retry the delivery of received mail from ${readable(f.at)} to your inbound webhook ${webhook}, ${where}. ${standing(f.status, f.attempts)}`;
+    case 'test_inbound_webhook': return `Send a test message.received event for an example message to your inbound webhook ${webhook}, ${where}.`;
+    case 'redeliver_message': return `Redeliver the email received ${readable(f.at)} to ${t.webhookId ? `your inbound webhook ${webhook}` : 'every route webhook that already finished with it'}, ${where}.`;
+    case 'pause_campaign': labels.campaign = label(f.campaign); return `Pause the campaign {campaign} ${where}. It stops releasing new recipients (${Number(f.expanded)} of ${Number(f.total)} released so far); resuming continues from the same place.`;
   } })();
   return { template, labels };
 }
@@ -209,7 +257,7 @@ export function registerSupportActions(app: App) {
       if (open) return { row: open, created: false };
       const { rows: [count] } = await tx.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM support_actions WHERE conversation_id = ${conversation.id} AND status = 'proposed' AND expires_at > now()`);
       if (count!.n >= OPEN_ACTIONS) throw new ApiError(409, 'SUPPORT_ACTIONS_OPEN', `This conversation already has ${OPEN_ACTIONS} open proposals. Wait until the customer confirms or declines one, or it expires.`);
-      const parts = partsOf(kind, targets, facts);
+      const parts = await partsOf(kind, targets, facts);
       const { rows: [row] } = await tx.execute<Row>(sql`INSERT INTO support_actions(id, conversation_id, user_id, workspace_id, kind, target, summary, parts, expires_at)
         VALUES (${id('sac')}, ${conversation.id}, ${conversation.userId}, ${facts.workspace_id}, ${kind}, ${JSON.stringify(targets)}::jsonb, ${render(parts)}, ${JSON.stringify(parts)}::jsonb,
           now() + ${`${ACTION_HOURS} hours`}::interval)
@@ -228,7 +276,7 @@ export function registerSupportActions(app: App) {
     const { rows: [row] } = await c.env.db.execute<Row>(sql`SELECT ${columns} FROM support_actions WHERE id = ${c.req.valid('param').id} AND conversation_id = ${conversation.id}
       AND workspace_id = ANY(${sql.param(conversation.workspaces.map(w => w.id))}::text[])`);
     if (!row) notFound('Support action');
-    return c.json(view(c, await settled(c.env.db, row!)), 200);
+    return c.json(await shown(c, await settled(c.env.db, row!)), 200);
   });
 
   const Recheck = z.object({ id: z.string(), workspaceId: z.string(), name: z.string(), verificationStatus: z.string(), verified: z.boolean(), dkimStatus: z.string(), sending: z.string(), receiving: z.string(),
@@ -284,7 +332,7 @@ export function registerSupportActions(app: App) {
     const { rows: [row] } = await c.env.db.execute<Row>(sql`SELECT ${columns} FROM support_actions s WHERE id = ${c.req.valid('param').id} AND user_id = ${userId}
       AND EXISTS (SELECT FROM workspace_members m WHERE m.workspace_id = s.workspace_id AND m.user_id = s.user_id)`);
     if (!row) notFound('Support action');
-    return c.json(view(c, await settled(c.env.db, row!)), 200);
+    return c.json(await shown(c, await settled(c.env.db, row!)), 200);
   });
 
   app.openapi(createRoute({ hide: true, tags: ['Workspaces'], security: sessionSecurity, method: 'post', path: '/v1/support-actions/{id}/confirm', operationId: 'confirmSupportAction',
@@ -318,14 +366,14 @@ export function registerSupportActions(app: App) {
       }
       return { row: (await tx.execute<Row>(finish(context, row, result, 'proposed'))).rows[0]! };
     });
-    if (!claimed.post) return c.json(view(c, claimed.row), 200);
+    if (!claimed.post) return c.json(await shown(c, claimed.row), 200);
     // Posted once: a request that dies from here on leaves it running until settled() calls the outcome unknown.
     let result: NonNullable<Row['result']>, failure: unknown;
     try { result = { body: await (await wrapModuleLoad(() => import('./endpoints.js'))).postInboundTest(runtime, claimed.post) }; }
     catch (error) { failure = refusedBy(error) ? undefined : error; result = refusedBy(error) ?? { error: { code: 'INTERNAL_ERROR', message: 'Unexpected server failure.' } }; }
     const { rows: [finished] } = await c.env.db.execute<Row>(finish(auditContext(c), claimed.row, result, 'running'));
     if (failure) throw failure;
-    return c.json(view(c, finished ?? (await c.env.db.execute<Row>(sql`SELECT ${columns} FROM support_actions WHERE id = ${actionId}`)).rows[0]!), 200);
+    return c.json(await shown(c, finished ?? (await c.env.db.execute<Row>(sql`SELECT ${columns} FROM support_actions WHERE id = ${actionId}`)).rows[0]!), 200);
   });
 
   app.openapi(createRoute({ hide: true, tags: ['Workspaces'], security: sessionSecurity, method: 'post', path: '/v1/support-actions/{id}/decline', operationId: 'declineSupportAction',
