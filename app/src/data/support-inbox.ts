@@ -37,7 +37,7 @@ export interface SupportDetail {
   replyAvailable: boolean
 }
 export interface SupportInboxPage { data: SupportConversation[]; nextCursor: string | null; replyAvailable: boolean; counts: { needsYou: number; agent: number } }
-export type SupportAction = 'pause' | 'resume' | 'resolve' | 'done'
+export type SupportAction = 'pause' | 'resume' | 'resolve'
 
 const base = '/v1/operator/support-inbox', id = encodeURIComponent
 export const supportInboxApi = {
@@ -51,6 +51,10 @@ export const supportInboxApi = {
   detail: (conversationId: string, signal?: AbortSignal) => request<SupportDetail>(`${base}/${id(conversationId)}`, { signal }),
   reply: (conversationId: string, text: string, idempotencyKey: string) => request<SupportMessage>(`${base}/${id(conversationId)}/replies`, { method: 'POST', body: { text }, idempotencyKey }),
   act: (conversationId: string, action: SupportAction, idempotencyKey: string) => request<SupportConversation>(`${base}/${id(conversationId)}/${action}`, { method: 'POST', idempotencyKey }),
+  /** Mark done, for the ticket on screen (null for none): one filed since refuses it (409 SUPPORT_TICKET_CHANGED). */
+  done: (conversationId: string, ticketId: string | null, idempotencyKey: string) => request<SupportConversation>(`${base}/${id(conversationId)}/done`, { method: 'POST', body: { ticketId }, idempotencyKey }),
+  /** Undo Mark done (whoever marked it, for a few minutes): a ticket Done resolved opens again. */
+  undoDone: (conversationId: string, idempotencyKey: string) => request<SupportConversation>(`${base}/${id(conversationId)}/done`, { method: 'DELETE', idempotencyKey }),
   wake: (conversationId: string) => request<{ id: string; woken: boolean }>(`${base}/${id(conversationId)}/wake`, { method: 'POST' }),
   read: (conversationId: string, read: boolean, seq?: number) => request<{ id: string; unread: boolean }>(`${base}/${id(conversationId)}/read`, { method: 'PUT', body: seq === undefined ? { read } : { read, seq } }),
 }
@@ -111,4 +115,42 @@ export function patchConversation(client: QueryClient, conversationId: string, c
 export function snapshotInbox(client: QueryClient) {
   const saved = client.getQueriesData({ queryKey: inboxKeys.all })
   return () => { for (const [key, data] of saved) client.setQueryData(key, data) }
+}
+
+// ---------- unsent replies ----------
+
+// A reply staff are writing, per staff member and conversation, kept in this tab (sessionStorage) until it is sent or
+// discarded: it survives moving between conversations and a reload, and a reply that fails comes back into its box with
+// why, wherever staff are when it fails. `key` is its Idempotency-Key: sent again unedited, it is never sent twice.
+export type InboxDraft = { text: string; key: string; failed: string | null; sending: { text: string; key: string } | null }
+const DRAFTS = 'nightmail.support-inbox.drafts'
+const draftListeners = new Set<() => void>()
+let drafts: { user: string; map: Record<string, InboxDraft> } | null = null
+function draftsOf(user: string) {
+  if (drafts?.user === user) return drafts.map
+  let map: Record<string, InboxDraft> = {}
+  try { map = JSON.parse(sessionStorage.getItem(`${DRAFTS}:${user}`) ?? '{}') ?? {} } catch { /* None kept. */ }
+  // A reply still sending when the page went away may or may not have arrived: it is back in its box, with its own key.
+  for (const [id, draft] of Object.entries(map)) if (draft.sending) map[id] = { text: [draft.sending.text, draft.text].filter(Boolean).join('\n\n'), key: draft.text ? crypto.randomUUID() : draft.sending.key,
+    failed: 'The page closed while this was sending. Check the conversation before sending it again.', sending: null }
+  drafts = { user, map }
+  return map
+}
+export const inboxDraft = (user: string, conversationId: string): InboxDraft | undefined => draftsOf(user)[conversationId]
+export const subscribeInboxDrafts = (listener: () => void) => { draftListeners.add(listener); return () => { draftListeners.delete(listener) } }
+/** Changes one conversation's draft (null discards it); a draft with nothing in it is dropped. */
+export function updateInboxDraft(user: string, conversationId: string, change: (draft: InboxDraft) => Partial<InboxDraft> | null) {
+  const map = { ...draftsOf(user) }, current = map[conversationId] ?? { text: '', key: crypto.randomUUID(), failed: null, sending: null }
+  const patch = change(current), next = patch && { ...current, ...patch }
+  if (next && (next.text || next.failed || next.sending)) map[conversationId] = next
+  else delete map[conversationId]
+  drafts = { user, map }
+  try { if (Object.keys(map).length) sessionStorage.setItem(`${DRAFTS}:${user}`, JSON.stringify(map)); else sessionStorage.removeItem(`${DRAFTS}:${user}`) } catch { /* Kept for this page only. */ }
+  for (const listener of draftListeners) listener()
+}
+/** Signing out forgets every unsent reply in this tab. */
+export function forgetInboxDrafts() {
+  drafts = null
+  try { for (const key of Object.keys(sessionStorage)) if (key.startsWith(`${DRAFTS}:`)) sessionStorage.removeItem(key) } catch { /* Nothing kept. */ }
+  for (const listener of draftListeners) listener()
 }

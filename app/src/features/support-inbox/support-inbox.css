@@ -6,6 +6,9 @@
 /* A tab's count holds its width while it loads (Tabs draws the slot empty), so the tabs after it never move. */
 .sinbox-tabs .ui-tab__count { min-width: 16px; text-align: left; }
 .sinbox-toolbar { justify-content: space-between; }
+/* The channel filter, where the rail (which has it) is hidden. */
+.sinbox-toolbar .sinbox-channel-select { width: 148px; }
+@media (min-width: 1200px) { .sinbox-toolbar .sinbox-channel-select { display: none; } }
 .sinbox-more { align-self: flex-start; margin-top: var(--space-12); }
 .sinbox-cell { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -13,6 +16,11 @@
 .sinbox-table { --table-row-height: var(--row-height-dense); }
 .sinbox-table .ui-table td:is([data-col='status'], [data-col='ticket'], [data-col='agent'], [data-col='activity']) { font-family: var(--font-mono); font-size: var(--text-xs); letter-spacing: -.01em; }
 .sinbox-table .ui-table td[data-col='activity'] { color: var(--color-muted); }
+/* A tablet's list: the agent without who paused it (the conversation says), so the conversation keeps its room. */
+@media (max-width: 1199px) {
+  .sinbox-table { --sinbox-customer: 20%; --sinbox-ticket: 96px; --sinbox-agent: 104px; }
+  .sinbox-table td[data-col='agent'] .ui-status-dot__note { display: none; }
+}
 .sinbox-who { display: flex; align-items: center; gap: var(--space-8); min-width: 0; }
 .sinbox-unread { flex: none; width: 6px; height: 6px; border-radius: 50%; }
 .sinbox-who[data-unread] .sinbox-unread { background: var(--color-text); }
@@ -72,13 +80,18 @@
 .sinbox-composer--idle { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); color: var(--color-muted); font-size: var(--text-sm); }
 .sinbox-composer__actions { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); }
 .sinbox-composer__hint { min-width: 0; color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.sinbox-composer__failed { min-width: 0; color: var(--color-danger); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.sinbox-composer__buttons { flex: none; flex-wrap: nowrap; }
+.sinbox-composer--idle[data-blocked] > span:first-child { color: var(--color-warning); }
 
 /* The customer panel beside the transcript: a hairline, then labelled sections. */
 .sinbox-panel { position: sticky; top: 0; min-width: 0; padding-left: var(--space-24); border-left: 1px solid var(--color-border-muted); }
 .sinbox-panel__body { display: flex; flex-direction: column; gap: var(--space-20); min-width: 0; }
 .sinbox-panel__body .ui-label { margin-bottom: var(--space-4); }
-.ui-kv.sinbox-kv { grid-template-columns: 96px minmax(0, 1fr); }
+/* One unbroken hairline per row: the key's padding keeps it from its value, not a gap between two rules. */
+.ui-kv.sinbox-kv { grid-template-columns: 112px minmax(0, 1fr); column-gap: 0; }
 .ui-kv.sinbox-kv :is(dt, dd) { border-bottom: 1px solid var(--color-border-muted); }
+.ui-kv.sinbox-kv dt { padding-right: var(--space-16); }
 .sinbox-address { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 var(--space-8); min-width: 0; }
 .sinbox-ticket { display: inline-flex; flex-wrap: wrap; gap: 0 var(--space-8); min-width: 0; }
 .sinbox-faint { color: var(--color-faint); }
@@ -112,6 +125,15 @@ a.sinbox-list__main { text-decoration: none; }
   .sinbox-composer:not(:focus-within):not([data-filled]):not([data-unavailable]) .sinbox-composer__actions { display: none; }
 }
 @media (pointer: coarse) { .data-toolbar > .sinbox-shortcuts-button { display: none; } }
+/* A phone's conversation header: the title, then its facts on two full-width lines (where it is, then the agent), then
+   the actions on a line of their own, so nothing is cut off. The skeleton has the same lines. */
+@media (max-width: 639px) {
+  .sinbox-conversation-page .ui-page-header { flex-wrap: wrap; row-gap: var(--space-12); }
+  .sinbox-conversation-page .ui-page-header > .cluster:last-child:not(:first-child) { flex: 1 1 100%; justify-content: flex-start; }
+  .sinbox-subtitle { flex-wrap: wrap; align-content: flex-start; height: 40px; }
+  .sinbox-subtitle > .sinbox-fact:nth-child(3) { flex-basis: 100%; min-width: 0; }
+  .sinbox-subtitle > .sinbox-fact:nth-child(3)::before { content: none; }
+}
 /* A card leaves out what a row has nothing for (no ticket). */
 .sinbox-table .ui-card__segment:empty { display: none; }
 .sinbox-sheet .sinbox-panel__body { padding-bottom: var(--space-8); }

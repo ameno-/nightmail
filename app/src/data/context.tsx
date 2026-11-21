@@ -5,6 +5,7 @@ import { ApiError, type Identity, type Api, type WorkspaceInvitationPreview, err
 import { roleLabel, workspaceApi } from './workspaces'
 import { createLiveApi, request, selectAccount, selectedAccount, selectedWorkspace, selectWorkspace } from './live'
 import { accountApi, accountsKey, announce, expectAccount, onAccountEvent, POPUP_PATH, takeExpectedAccount, type AccountList } from './accounts'
+import { forgetInboxDrafts } from './support-inbox'
 import { regionCatalogKey } from './regions'
 import { dashboardLikelyReady, identityOnboardingStage, rememberDashboardReady, useDomainStep, onboardingStage } from './onboarding'
 import { Alert, Button, PageHeader, useToast } from '../components/ui'
@@ -243,6 +244,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   }
   async function signOutAccount(id = selectedAccount() ?? undefined) {
     const result = await accountApi.signOut(id ? { account: id } : {})
+    forgetInboxDrafts()
     if (id) announce({ type: 'signed-out', accounts: [id] })
     if (id && id !== selectedAccount()) { void cache.invalidateQueries({ queryKey: accountsKey }); return }
     rememberDashboardReady(selectedWorkspace(), false)
@@ -251,6 +253,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   }
   async function signOutAll() {
     await accountApi.signOut({ all: true })
+    forgetInboxDrafts()
     announce({ type: 'signed-out', accounts: 'all' })
     rememberDashboardReady(selectedWorkspace(), false)
     selectAccount(null); selectWorkspace(null); cache.clear(); await identity.refetch()
