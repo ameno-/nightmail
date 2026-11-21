@@ -19,7 +19,10 @@ export type SupportActionKind = 'retry_webhook_delivery' | 'test_webhook' | 'ret
 export type SupportAction = {
   id: string; kind: SupportActionKind; status: 'proposed' | 'running' | 'done' | 'failed' | 'declined' | 'expired'; summary: string
   parts: { template: string; labels: Record<string, string> }; workspaceId: string; target: Record<string, string>; url: string
-  result: Record<string, unknown> | null; error: { code: string; message: string } | null; createdAt: string; expiresAt: string; resolvedAt: string | null
+  result: Record<string, unknown> | null; error: { code: string; message: string } | null
+  /** A done test or retry's delivery as it stands now: done only means it was queued. */
+  delivery: { status: 'pending' | 'delivered' | 'failed' | 'paused'; attempts: number; statusCode: number | null } | null
+  createdAt: string; expiresAt: string; resolvedAt: string | null
 }
 // Only the person it was proposed to reads or decides it, with their own dashboard session; anyone else gets 404.
 const action = (id: string) => `/v1/support-actions/${encodeURIComponent(id)}`

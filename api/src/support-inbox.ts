@@ -41,6 +41,8 @@ const newMessageId = () => `msg_${Array.from(crypto.getRandomValues(new Uint8Arr
 const TICKET_TYPES = ['billing', 'bug', 'deliverability', 'account', 'abuse_report', 'privacy', 'legal', 'feature_request', 'other'] as const;
 /** How recently the support platform must have pulled the outbox for staff to reply. */
 const REPLY_WINDOW = sql`interval '10 minutes'`;
+/** How long the operator who marked a conversation done can undo it. */
+const UNDO_MINUTES = 10, UNDO_WINDOW = sql`${`${UNDO_MINUTES} minutes`}::interval`;
 const WAKE_TIMEOUT_MS = 3000;
 const TRANSCRIPT_LIMIT = 500;
 
@@ -49,6 +51,7 @@ const Delivery = z.enum(['queued', 'sent', 'failed', 'held']);
 const Tool = z.object({ label: z.string().trim().min(1).max(80), ok: z.boolean() }).strict();
 const Ticket = z.object({ id: z.string(), type: z.string().nullable(), severity: z.string().nullable(), resolvedAt: z.string().nullable() });
 const ConversationParam = z.object({ id: z.string().regex(CONVERSATION_ID) });
+const DoneBody = z.object({ ticketId: z.string().max(100).nullable().optional().describe('The ticket on screen when Done was pressed (null for none). Omit to resolve whatever ticket is open.') }).strict();
 const TRIAGE_REASONS = ['ticket', 'blocked', 'failed', 'paused'] as const;
 
 const Message = z.object({
@@ -365,7 +368,8 @@ export function registerSupportInbox(app: App) {
     }[q.view]];
     if (q.channel) filters.push(sql`c.channel = ${q.channel}`);
     if (q.status) filters.push(sql`c.status = ${q.status}`);
-    if (q.q) filters.push(sql`(c.id = ${q.q} OR c.ticket_id = ${q.q} OR c.user_id = ${q.q} OR c.pending_address ILIKE ${pattern} OR u.email ILIKE ${pattern} OR u.name ILIKE ${pattern} OR c.subject ILIKE ${pattern})`);
+    if (q.q) filters.push(sql`(c.id = ${q.q} OR c.ticket_id = ${q.q} OR c.user_id = ${q.q} OR c.pending_address ILIKE ${pattern} OR u.email ILIKE ${pattern} OR u.name ILIKE ${pattern} OR c.subject ILIKE ${pattern}
+      OR (c.subject IS NULL AND opening.text ILIKE ${pattern}))`);
     // Needs you pages by (urgency, waiting since, ID): the cursor carries the urgency with the ID.
     if (after && triaged) {
       const [, urgency, id] = /^([1-4]):(conv_[a-z2-7]{26})$/.exec(after.id) ?? [];
@@ -435,13 +439,14 @@ export function registerSupportInbox(app: App) {
   });
 
   // Every staff change is one transaction with its internal audit row, and repeats safely with an Idempotency-Key.
-  type Locked = { status: string; user_id: string | null; agent_state: string; ticket_id: string | null; ticket_resolved_at: string | null; done_at: string | null };
+  type Locked = { status: string; user_id: string | null; agent_state: string; ticket_id: string | null; ticket_resolved_at: string | null; done_at: string | null; done_by: string | null; undoable: boolean };
   const changeHeaders = z.object({ 'idempotency-key': z.string().min(1).max(200).optional() });
   async function change<T>(c: Ctx, id: string, action: string, work: (tx: DbExecutor, operator: OperatorIdentity, conversation: Locked) => Promise<{ result: T; message?: string }>, body?: unknown) {
     const operator = await staff(c, 'operator');
     let subject: string | null = null, messageId: string | undefined;
     return mutate(c, operator, '', body, async tx => {
-      const { rows: [conversation] } = await tx.execute<Locked>(sql`SELECT status, user_id, agent_state, ticket_id, ticket_resolved_at::text AS ticket_resolved_at, done_at::text AS done_at
+      const { rows: [conversation] } = await tx.execute<Locked>(sql`SELECT status, user_id, agent_state, ticket_id, ticket_resolved_at::text AS ticket_resolved_at, done_at::text AS done_at,
+          done_by, done_at > now() - ${UNDO_WINDOW} AS undoable
         FROM support_conversations WHERE id = ${id} FOR NO KEY UPDATE`);
       if (!conversation) notFound('Support conversation');
       subject = conversation!.user_id;
@@ -510,14 +515,34 @@ export function registerSupportInbox(app: App) {
     }), 200);
   });
   app.openapi(createRoute({ hide: true, tags, security: sessionSecurity, method: 'post', path: '/v1/operator/support-inbox/{id}/done', operationId: 'operatorMarkSupportConversationDone',
-    description: 'Mark the conversation done (the operator role): it leaves Needs you, and its open ticket, if any, is resolved. Anything new (a message, a failed delivery, more blocked work, a ticket or a pause) brings it back.',
-    request: { params: ConversationParam, headers: changeHeaders }, responses: { 200: response(Item), ...errors } }), async c => {
-    const id = c.req.valid('param').id;
+    description: 'Mark the conversation done (the operator role): it leaves Needs you, and its open ticket, if any, is resolved. Anything new (a message, a failed delivery, more blocked work, a ticket or a pause) brings it back. Send the ticket on screen as ticketId (null for none): a different open ticket answers 409 SUPPORT_TICKET_CHANGED and nothing changes.',
+    request: { params: ConversationParam, headers: changeHeaders, body: { ...json(DoneBody), required: false } }, responses: { 200: response(Item), ...errors } }), async c => {
+    const id = c.req.valid('param').id, body: z.infer<typeof DoneBody> = c.req.valid('json') ?? {};
     return c.json(await change(c, id, 'support.done', async (tx, operator, conversation) => {
       if (conversation.done_at) throw new ApiError(409, 'ALREADY_DONE', 'This conversation is already marked done.');
+      // The ticket the operator saw, never one filed since: Done resolves exactly what was on screen.
+      const open = conversation.ticket_id && !conversation.ticket_resolved_at ? conversation.ticket_id : null;
+      if (body.ticketId !== undefined && body.ticketId !== open)
+        throw new ApiError(409, 'SUPPORT_TICKET_CHANGED', 'This conversation’s ticket changed since it was shown. Open it again before marking it done.');
       await tx.execute(sql`UPDATE support_conversations SET done_at = now(), done_by = ${operator.userId},
+          done_ticket_id = CASE WHEN ticket_id IS NOT NULL AND ticket_resolved_at IS NULL THEN ticket_id END,
           ticket_resolved_by = CASE WHEN ticket_id IS NOT NULL AND ticket_resolved_at IS NULL THEN ${operator.userId} ELSE ticket_resolved_by END,
           ticket_resolved_at = CASE WHEN ticket_id IS NOT NULL AND ticket_resolved_at IS NULL THEN now() ELSE ticket_resolved_at END
+        WHERE id = ${id}`);
+      return { result: await one(tx, id, operator.userId) };
+    }, body), 200);
+  });
+  app.openapi(createRoute({ hide: true, tags, security: sessionSecurity, method: 'delete', path: '/v1/operator/support-inbox/{id}/done', operationId: 'operatorUndoSupportConversationDone',
+    description: `Undo Mark done (the operator role, the operator who marked it, within ${UNDO_MINUTES} minutes): the conversation is back where it was, and a ticket that Done resolved is open again.`,
+    request: { params: ConversationParam, headers: changeHeaders }, responses: { 200: response(Item), ...errors } }), async c => {
+    const id = c.req.valid('param').id;
+    return c.json(await change(c, id, 'support.undone', async (tx, operator, conversation) => {
+      if (!conversation.done_at) throw new ApiError(409, 'NOT_DONE', 'This conversation isn’t marked done (something new may have brought it back).');
+      if (conversation.done_by !== operator.userId || !conversation.undoable) throw new ApiError(409, 'UNDO_UNAVAILABLE', `Only the person who marked it done can undo it, within ${UNDO_MINUTES} minutes.`);
+      // Only the ticket this Done resolved opens again; one resolved any other way stays resolved.
+      await tx.execute(sql`UPDATE support_conversations SET done_at = NULL, done_by = NULL, done_ticket_id = NULL,
+          ticket_resolved_by = CASE WHEN ticket_id = done_ticket_id THEN NULL ELSE ticket_resolved_by END,
+          ticket_resolved_at = CASE WHEN ticket_id = done_ticket_id THEN NULL ELSE ticket_resolved_at END
         WHERE id = ${id}`);
       return { result: await one(tx, id, operator.userId) };
     }), 200);

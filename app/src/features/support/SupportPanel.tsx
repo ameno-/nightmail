@@ -7,8 +7,8 @@ import { TOUCH, matches, usePhone, useTouch } from '../../lib/media'
 import { Markdown, settled } from './markdown'
 import { createDemoTransport } from './demo'
 import { createSocketTransport, supportOrigin } from './socket'
-import { actionOutcome, actionTitle, plural, supportStore, ticketTitle, type ActionPart, type Attachment, type ChatMessage, type ChatState, type Part, type SupportStore } from './store'
-import { ActionSummary, actionTone } from './actions'
+import { actionResult, actionTitle, actionVerb, plural, supportStore, ticketTitle, type ActionPart, type Attachment, type ChatMessage, type ChatState, type Part, type SupportStore } from './store'
+import { ActionSummary } from './actions'
 import { IMAGE_TYPES, MAX_MESSAGE } from './protocol'
 import './support.css'
 import { NightmailMark } from '../../components/NightmailLogo'
@@ -257,12 +257,16 @@ function ConsentCard({ part, closed, onDecide }: { part: Extract<Part, { kind: '
 }
 
 // A change the agent proposed. The card shows Nightmail's own sentence for it, read with this session (never the agent's
-// words), and the buttons wait for it; Confirm has Nightmail make the change for this person, exactly as its own route
-// does, and the card then says what came of it from Nightmail's answer.
+// words), and the buttons wait for it: Decline, then the change's own verb (Retry delivery, Send test…), in the order the
+// emailed link's dialog has them. The verb has Nightmail make the change for this person, exactly as its own route does,
+// and the card then says what came of it from Nightmail's answer. Left alone, it stays open until it expires.
 function ActionCard({ part, store }: { part: ActionPart; store: SupportStore }) {
-  const { action, state } = part
-  const open = action?.status === 'proposed', deciding = state === 'confirming' || state === 'declining'
-  const outcome = action ? actionOutcome(action) : null
+  const { action, state, error } = part
+  const deciding = state === 'confirming' || state === 'declining'
+  const outcome = action ? actionResult(action) : null
+  // Decidable once Nightmail's record is in, or after a read that failed for a passing reason: then the card shows the
+  // sentence the server sent with the proposal, and Try again. Only a proposal that isn't this person's has no decision.
+  const decidable = !part.unavailable && (action ? action.status === 'proposed' : state !== 'loading' && Boolean(error))
   const decide = (decision: 'confirm' | 'decline') => {
     void store.decideAction(part.request.actionId, decision)
     if (!matches(TOUCH)) requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('#support-panel .support-composer__input')?.focus({ preventScroll: true }))
@@ -270,15 +274,17 @@ function ActionCard({ part, store }: { part: ActionPart; store: SupportStore }) 
   return <div className="support-card support-action" data-state={action?.status ?? state} role="group" aria-label="Confirm a change" aria-busy={state === 'loading' || undefined}>
     <p className="support-card__title">{actionTitle(part.request.kind)}</p>
     {action ? <p className="support-card__body"><ActionSummary action={action} /></p>
-      : state === 'loading' ? <div className="support-card__body support-action__loading" aria-hidden="true"><Skeleton width="94%" height={10} /><Skeleton width="58%" height={10} /></div> : null}
-    {part.error && <p className="support-card__error" role="alert">{part.error}</p>}
-    {(action || state === 'loading') && <div className="support-card__actions">
-      <div className="support-card__choice" data-active={!outcome || undefined} aria-hidden={outcome ? true : undefined}>
-        <Button variant="primary" size="sm" loading={state === 'confirming'} disabled={!open || deciding} tabIndex={outcome ? -1 : undefined} onClick={() => decide('confirm')}>Confirm</Button>
-        <Button size="sm" disabled={!open || deciding} tabIndex={outcome ? -1 : undefined} onClick={() => decide('decline')}>Not now</Button>
+      : state === 'loading' ? <div className="support-card__body support-action__loading" aria-hidden="true"><Skeleton width="94%" height={10} /><Skeleton width="58%" height={10} /></div>
+      : !part.unavailable ? <p className="support-card__body">{part.request.summary}</p> : null}
+    {error && <p className="support-card__error" role="alert"><span>{error}</span>
+      {!part.unavailable && <Button variant="ghost" size="sm" disabled={state === 'loading'} onClick={() => store.retryAction(part.request.actionId)}>Try again</Button>}</p>}
+    {(decidable || outcome || state === 'loading') && <div className="support-card__actions">
+      <div className="support-card__choice support-action__choice" data-active={!outcome || undefined} aria-hidden={outcome ? true : undefined}>
+        <Button size="sm" loading={state === 'declining'} disabled={!decidable || deciding} tabIndex={outcome ? -1 : undefined} onClick={() => decide('decline')}>Decline</Button>
+        <Button variant="primary" size="sm" loading={state === 'confirming'} disabled={!decidable || deciding} tabIndex={outcome ? -1 : undefined} onClick={() => decide('confirm')}>{actionVerb(part.request.kind)}</Button>
       </div>
-      <p className="support-card__resolved" data-active={outcome ? true : undefined} data-tone={action ? actionTone(action) : undefined} aria-hidden={outcome ? undefined : true}>
-        {action?.status === 'done' && <Check size={14} strokeWidth={2.5} aria-hidden="true" />}{outcome}
+      <p className="support-card__resolved" data-active={outcome ? true : undefined} data-tone={outcome?.tone} aria-hidden={outcome ? undefined : true}>
+        {outcome?.tone === 'success' && <Check size={14} strokeWidth={2.5} aria-hidden="true" />}<span>{outcome?.text}</span>
       </p>
     </div>}
   </div>

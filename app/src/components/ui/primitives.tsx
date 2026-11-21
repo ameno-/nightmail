@@ -224,12 +224,12 @@ const cardLabel = (label: ReactNode) => typeof label === 'string' && label ? <sp
 // "open in new tab"); a click anywhere else on the row follows it too, opening a new tab with a modifier or the middle
 // button, while links and buttons inside the row keep their own action. Rows without an href use onRowClick (for
 // example, opening a dialog). A card's title is the link (or button), stretched over the whole card.
-type DataTableProps<T> = { columns: Column<T>[]; rows: T[]; rowKey: (row: T) => string; onRowClick?: (row: T) => void; onRowIntent?: (row: T) => void; rowHref?: (row: T) => string | null | undefined; rowLabel?: (row: T) => string; selectedId?: string; empty?: ReactNode; loading?: boolean; skeletonRows?: number; minRows?: number; tableRef?: (node: HTMLDivElement | null) => void; className?: string; card?: boolean };
+type DataTableProps<T> = { columns: Column<T>[]; rows: T[]; rowKey: (row: T) => string; onRowClick?: (row: T) => void; onRowIntent?: (row: T) => void; onRowFocus?: (row: T) => void; rowHref?: (row: T) => string | null | undefined; rowLabel?: (row: T) => string; selectedId?: string; empty?: ReactNode; loading?: boolean; skeletonRows?: number; minRows?: number; tableRef?: (node: HTMLDivElement | null) => void; className?: string; card?: boolean };
 export function DataTable<T>(props: DataTableProps<T>) {
   const phone = usePhone();
   return phone && props.card !== false ? <CardList {...props} /> : <Table {...props} />;
 }
-function Table<T>({ columns: all, rows, rowKey, onRowClick, onRowIntent, rowHref, rowLabel, selectedId, empty, loading = false, skeletonRows = 5, minRows = 0, tableRef, className }: DataTableProps<T>) {
+function Table<T>({ columns: all, rows, rowKey, onRowClick, onRowIntent, onRowFocus, rowHref, rowLabel, selectedId, empty, loading = false, skeletonRows = 5, minRows = 0, tableRef, className }: DataTableProps<T>) {
   const columns = all.filter(column => column.table !== false)
   const intent = useRef<number | undefined>(undefined)
   useEffect(() => () => window.clearTimeout(intent.current), [])
@@ -242,7 +242,7 @@ function Table<T>({ columns: all, rows, rowKey, onRowClick, onRowIntent, rowHref
   return <div ref={tableRef} data-component="DataTable" className={cx('ui-table-scroll', className)} aria-busy={loading || undefined}>
     {loading && <span className="sr-only" role="status">Loading table</span>}
     <table className="ui-table"><thead><tr>{columns.map(column => <th scope="col" key={column.key} data-col={column.key} style={{ width: column.width, textAlign: column.align }}>{column.label}</th>)}</tr></thead>
-      <tbody>{loading ? Array.from({ length: skeletonRows }, (_, index) => <tr key={index} aria-hidden="true">{columns.map((column, columnIndex) => <td key={column.key} data-col={column.key} data-skeleton-align={column.align}>{column.skeleton ?? <SkeletonText width={columnIndex === 0 ? '72%' : '58%'} />}</td>)}</tr>) : rows.map(row => { const id = rowKey(row), href = rowHref?.(row) || undefined, clickable = Boolean(href || onRowClick); return <tr key={id} data-selected={selectedId === id || undefined} className={href ? 'ui-table__clickable ui-table__linked' : onRowClick ? 'ui-table__clickable' : undefined} tabIndex={!href && onRowClick ? 0 : undefined} onClick={event => { if (own(event)) return; if (href) follow(href, event); else onRowClick?.(row); }} onAuxClick={event => { if (href && event.button === 1 && !own(event)) follow(href, event); }} onKeyDown={event => { if (!href && onRowClick && event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); onRowClick(row); } }} onPointerEnter={onRowIntent && (() => rest(row))} onPointerLeave={onRowIntent && (() => window.clearTimeout(intent.current))} onFocus={onRowIntent && (() => onRowIntent(row))} data-clickable={clickable || undefined}>{columns.map((column, index) => <td key={column.key} data-col={column.key} data-align={column.align} style={{ textAlign: column.align }}>{href && index === 0 ? <Link className="ui-row-link" to={href} aria-label={rowLabel?.(row)}>{column.render(row)}</Link> : column.render(row)}</td>)}</tr>; })}
+      <tbody>{loading ? Array.from({ length: skeletonRows }, (_, index) => <tr key={index} aria-hidden="true">{columns.map((column, columnIndex) => <td key={column.key} data-col={column.key} data-skeleton-align={column.align}>{column.skeleton ?? <SkeletonText width={columnIndex === 0 ? '72%' : '58%'} />}</td>)}</tr>) : rows.map(row => { const id = rowKey(row), href = rowHref?.(row) || undefined, clickable = Boolean(href || onRowClick); return <tr key={id} data-selected={selectedId === id || undefined} className={href ? 'ui-table__clickable ui-table__linked' : onRowClick ? 'ui-table__clickable' : undefined} tabIndex={!href && onRowClick ? 0 : undefined} onClick={event => { if (own(event)) return; if (href) follow(href, event); else onRowClick?.(row); }} onAuxClick={event => { if (href && event.button === 1 && !own(event)) follow(href, event); }} onKeyDown={event => { if (!href && onRowClick && event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); onRowClick(row); } }} onPointerEnter={onRowIntent && (() => rest(row))} onPointerLeave={onRowIntent && (() => window.clearTimeout(intent.current))} onFocus={onRowIntent || onRowFocus ? () => { onRowIntent?.(row); onRowFocus?.(row); } : undefined} data-clickable={clickable || undefined}>{columns.map((column, index) => <td key={column.key} data-col={column.key} data-align={column.align} style={{ textAlign: column.align }}>{href && index === 0 ? <Link className="ui-row-link" to={href} aria-label={rowLabel?.(row)}>{column.render(row)}</Link> : column.render(row)}</td>)}</tr>; })}
         {!loading && rows.length > 0 && rows.length < minRows && <tr className="ui-table-spacer" aria-hidden="true"><td colSpan={columns.length} style={{ height: `calc(${minRows - rows.length} * var(--table-row-height))` }} /></tr>}
       </tbody></table>
     {!loading && rows.length === 0 && <div className="ui-table-empty" style={{ minHeight: `calc(${minRows} * var(--table-row-height))` }}>{empty ?? <EmptyState title="No results" />}</div>}
@@ -257,7 +257,7 @@ function sayTruncated(event: { target: EventTarget }) {
     part.title = [part, ...part.querySelectorAll<HTMLElement>('*')].some(node => node.scrollWidth > node.clientWidth + 1) ? part.textContent ?? '' : '';
   }
 }
-function CardList<T>({ columns, rows, rowKey, onRowClick, onRowIntent, rowHref, selectedId, empty, loading = false, skeletonRows = 5, minRows = 0, tableRef, className }: DataTableProps<T>) {
+function CardList<T>({ columns, rows, rowKey, onRowClick, onRowIntent, onRowFocus, rowHref, selectedId, empty, loading = false, skeletonRows = 5, minRows = 0, tableRef, className }: DataTableProps<T>) {
   const shape = cardShape(columns), height = cardHeight(shape);
   const cell = (column: Column<T>, row: T) => (column.cardRender ?? column.render)(row);
   const style = { '--table-row-height': `${height}px` } as CSSProperties;
@@ -269,7 +269,7 @@ function CardList<T>({ columns, rows, rowKey, onRowClick, onRowIntent, rowHref, 
       {shape.end.length > 0 && <div className="ui-card__end"><ControlSkeleton width={44} /></div>}
     </li>) : rows.map(row => {
       const id = rowKey(row), href = rowHref?.(row) || undefined, title = shape.title ? cell(shape.title, row) : null;
-      return <li key={id} className="ui-card" data-selected={selectedId === id || undefined} data-clickable={href || onRowClick ? true : undefined} onPointerDown={onRowIntent && (() => onRowIntent(row))} onFocus={onRowIntent && (() => onRowIntent(row))}>
+      return <li key={id} className="ui-card" data-selected={selectedId === id || undefined} data-clickable={href || onRowClick ? true : undefined} onPointerDown={onRowIntent && (() => onRowIntent(row))} onFocus={onRowIntent || onRowFocus ? () => { onRowIntent?.(row); onRowFocus?.(row); } : undefined}>
         <div className="ui-card__main">
           <div className="ui-card__head"><span className="ui-card__title">{href ? <Link className="ui-row-link ui-card__link" to={href}>{title}</Link> : onRowClick ? <button type="button" className="ui-row-link ui-card__link" onClick={() => onRowClick(row)}>{title}</button> : title}</span>{shape.aside.map(column => <span key={column.key} className="ui-card__aside">{cell(column, row)}</span>)}</div>
           {shape.lines.map((segments, line) => <div key={line} className="ui-card__line">{segments.map(({ column, labelled }) => <span key={column.key} className="ui-card__segment">{labelled && cardLabel(column.label)}{cell(column, row)}</span>)}</div>)}
@@ -367,36 +367,41 @@ export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () =>
   return <div className="ui-error-state"><Alert tone="danger" title="Couldn’t load this content"><ErrorText error={error} />{onRetry && !notFound(error) && <div className="ui-error-state__retry"><Button onClick={onRetry}>Try again</Button></div>}</Alert></div>;
 }
 type ToastTone = 'success' | 'error' | 'info';
-type ToastFn = (message: string, tone?: ToastTone) => void;
+/** `action`: one button on the toast (Undo), which dismisses it; `duration` in ms, 6 s by default. */
+type ToastOptions = { action?: { label: string; onSelect: () => void }; duration?: number };
+type ToastFn = (message: string, tone?: ToastTone, options?: ToastOptions) => void;
 const ToastContext = createContext<ToastFn | null>(null);
 const KEPT_TOASTS = 'nightmail.kept-toasts';
 const TOAST_MS = 6000;
-// A toast stays 6 s, and the time stops while a pointer rests on it or focus is inside it.
-function Toast({ id, tone, message, dismiss }: { id: number; tone: ToastTone; message: string; dismiss: (id: number) => void }) {
+// A toast stays 6 s (or its own duration), and the time stops while a pointer rests on it or focus is inside it.
+function Toast({ id, tone, message, dismiss, action, duration = TOAST_MS }: { id: number; tone: ToastTone; message: string; dismiss: (id: number) => void } & ToastOptions) {
   const [paused, setPaused] = useState(false);
   const onDismiss = useCallback(() => dismiss(id), [dismiss, id]);
-  const left = useRef(TOAST_MS);
+  const left = useRef(duration);
   useEffect(() => {
     if (paused) return;
     const started = Date.now(), timer = setTimeout(onDismiss, left.current);
     return () => { clearTimeout(timer); left.current -= Date.now() - started; };
   }, [paused, onDismiss]);
-  return <Alert tone={tone === 'error' ? 'danger' : tone} onDismiss={onDismiss} timer={{ duration: TOAST_MS, paused }} onPointerEnter={() => setPaused(true)} onPointerLeave={() => setPaused(false)} onFocus={() => setPaused(true)} onBlur={() => setPaused(false)}>{message}</Alert>;
+  return <Alert tone={tone === 'error' ? 'danger' : tone} onDismiss={onDismiss} timer={{ duration, paused }} onPointerEnter={() => setPaused(true)} onPointerLeave={() => setPaused(false)} onFocus={() => setPaused(true)} onBlur={() => setPaused(false)}>
+    {action ? <span className="ui-toast__body"><span>{message}</span><Button size="sm" className="ui-toast__action" onClick={() => { onDismiss(); action.onSelect(); }}>{action.label}</Button></span> : message}
+  </Alert>;
 }
 export function ToastProvider({ children }: { children: ReactNode }) {
-  const [toasts, setToasts] = useState<{ id: number; message: string; tone: ToastTone }[]>([]);
+  const [toasts, setToasts] = useState<({ id: number; message: string; tone: ToastTone } & ToastOptions)[]>([]);
   const sequence = useRef(0);
   const dismiss = useCallback((id: number) => setToasts(current => current.filter(toast => toast.id !== id)), []);
-  const toast = useCallback<ToastFn>((message, tone = 'info') => { const id = ++sequence.current; setToasts(current => [...current.slice(-3), { id, message, tone }]); }, []);
+  const toast = useCallback<ToastFn>((message, tone = 'info', options = {}) => { const id = ++sequence.current; setToasts(current => [...current.slice(-3), { id, message, tone, ...options }]); }, []);
   // A reload for a new build (lib/preloadable.ts) keeps what was just confirmed, such as "Joined <workspace>".
   const shown = useRef(toasts); shown.current = toasts;
   useEffect(() => {
     try { const kept = sessionStorage.getItem(KEPT_TOASTS); sessionStorage.removeItem(KEPT_TOASTS); if (kept) for (const { message, tone } of JSON.parse(kept) as { message: string; tone: ToastTone }[]) toast(message, tone); } catch { /* Nothing to restore. */ }
-    const keep = () => { try { sessionStorage.setItem(KEPT_TOASTS, JSON.stringify(shown.current.map(({ message, tone }) => ({ message, tone })))); } catch { /* The toasts go with the page. */ } };
+    // A toast's action belongs to this page: one with an action (Undo) isn't kept.
+    const keep = () => { try { sessionStorage.setItem(KEPT_TOASTS, JSON.stringify(shown.current.filter(item => !item.action).map(({ message, tone }) => ({ message, tone })))); } catch { /* The toasts go with the page. */ } };
     window.addEventListener('nightmail:reloading', keep);
     return () => window.removeEventListener('nightmail:reloading', keep);
   }, [toast]);
-  return <ToastContext.Provider value={toast}>{children}<div className="ui-toasts" aria-label="Notifications">{toasts.map(item => <Toast key={item.id} id={item.id} tone={item.tone} message={item.message} dismiss={dismiss} />)}</div></ToastContext.Provider>;
+  return <ToastContext.Provider value={toast}>{children}<div className="ui-toasts" aria-label="Notifications">{toasts.map(item => <Toast key={item.id} id={item.id} tone={item.tone} message={item.message} action={item.action} duration={item.duration} dismiss={dismiss} />)}</div></ToastContext.Provider>;
 }
 export function useToast(): ToastFn {
   const toast = useContext(ToastContext);

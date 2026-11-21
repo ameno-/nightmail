@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type FormEvent, type ReactNode, type RefObject } from 'react'
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode, type RefObject } from 'react'
 import { Link, useLocation, useNavigate, useNavigationType, useParams, useSearchParams } from 'react-router'
 import { useInfiniteQuery, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { Check, Mail, MessageSquare, X } from 'lucide-react'
@@ -6,7 +6,7 @@ import { Button, ConfirmDialog, DataTable, Dialog, DropdownMenu, EmptyState, Err
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { useSession } from '../../data/context'
 import { ApiError } from '../../data/types'
-import { detailQuery, inboxKeys, listQuery, patchConversation, prefetchConversation, snapshotInbox, supportInboxApi, type Channel, type InboxView, type SupportAction, type SupportConversation, type SupportDetail, type SupportInboxPage, type SupportMessage } from '../../data/support-inbox'
+import { detailQuery, inboxDraft, inboxKeys, listQuery, patchConversation, prefetchConversation, snapshotInbox, subscribeInboxDrafts, supportInboxApi, updateInboxDraft, type Channel, type InboxView, type SupportAction, type SupportConversation, type SupportDetail, type SupportInboxPage, type SupportMessage } from '../../data/support-inbox'
 import { ago, label, number, shortDateTime } from '../../lib/format'
 import { useSearchDraft } from '../../lib/pagination'
 import { usePhone } from '../../lib/media'
@@ -17,13 +17,14 @@ import { channelOf, ConversationActions, ConversationBodySkeleton, InboxBody, In
 // The support inbox (lazy, /support): Nightmail staff triage every support conversation. Needs you (the default) is
 // what only a person can move forward, most urgent first (api/src/support-inbox.ts); Agent handling is what the agent
 // answers on its own; All is everything. Keyboard first: j and k move, Enter or o opens, Esc goes back, r replies,
-// e marks done (and moves on), h hands back, u marks read or unread, / searches, ? lists the keys. Lists and
+// e marks done (and moves on; Undo on its toast), h hands back, u marks read or unread, / searches, ? lists the keys. In
+// the list the selected row and the focused one are always the same, so a key acts on what is on screen. Lists and
 // conversations come from the query cache at once and refresh behind it; a conversation is read ahead on hover, on
 // selection and next to the open one, so moving between them never waits. Changes show before the API answers.
 
-// What the inbox keeps between its pages in this visit: the list a conversation was opened from (j and k follow it),
-// the row selected in each view, and unsent replies.
-const memory: { list: { view: InboxView; q: string; channel: Channel | '' }; selected: Partial<Record<InboxView, string>>; drafts: Map<string, string> } = { list: { view: 'needs_you', q: '', channel: '' }, selected: {}, drafts: new Map() }
+// What the inbox keeps between its pages in this visit: the list a conversation was opened from (j and k follow it) and
+// the row selected in each view. Unsent replies are kept per conversation in this tab (data/support-inbox.ts).
+const memory: { list: { view: InboxView; q: string; channel: Channel | '' }; selected: Partial<Record<InboxView, string>> } = { list: { view: 'needs_you', q: '', channel: '' }, selected: {} }
 const CONVERSATION = /^conv_[a-z2-7]{26}$/
 const listPath = () => { const params = new URLSearchParams(); if (memory.list.view !== 'needs_you') params.set('view', memory.list.view); if (memory.list.q) params.set('q', memory.list.q); if (memory.list.channel) params.set('channel', memory.list.channel); const query = params.toString(); return query ? `/support?${query}` : '/support' }
 const useRole = () => useSession()?.identity?.operator ?? null
@@ -61,7 +62,7 @@ function useShortcuts(keys: Record<string, () => void>, enabled = true) {
     return () => document.removeEventListener('keydown', onKey)
   }, [enabled])
 }
-const shortcuts: [string[], string][] = [[['j', 'k'], 'Next or previous conversation'], [['Enter', 'o'], 'Open'], [['Esc'], 'Back to the list'], [['r'], 'Reply'], [['e'], 'Mark done and move on'],
+const shortcuts: [string[], string][] = [[['j', 'k'], 'Next or previous conversation'], [['Enter', 'o'], 'Open'], [['Esc'], 'Back to the list'], [['r'], 'Reply'], [['e'], 'Mark done and move on (Undo on its toast)'],
   [['h'], 'Hand back to the agent'], [['u'], 'Mark read or unread'], [['/'], 'Search'], [['⌘', '↵'], 'Send a reply'], [['?'], 'These shortcuts']]
 function ShortcutsDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   return <Dialog open={open} onOpenChange={next => { if (!next) onClose() }} title="Keyboard shortcuts" className="sinbox-shortcuts">
@@ -107,9 +108,17 @@ function useInboxActions() {
   const now = () => new Date().toISOString()
   const act = (c: SupportConversation, action: SupportAction, predict: (c: SupportConversation) => SupportConversation, options: { done?: string; quiet?: boolean } = {}) =>
     run(c, predict, () => supportInboxApi.act(c.id, action, crypto.randomUUID()), options)
+  // Undo puts back what that Done changed: the conversation, and the ticket it resolved.
+  const undo = (c: SupportConversation, ticketId: string | null) => run(c, x => ({ ...x, done: null, ticket: ticketId && x.ticket?.id === ticketId ? { ...x.ticket, resolvedAt: null } : x.ticket }),
+    () => supportInboxApi.undoDone(c.id, crypto.randomUUID()), { done: 'Back in Needs you' }).catch(() => {})
   return {
-    done: (c: SupportConversation) => act(c, 'done', x => ({ ...x, done: { at: now(), userId: me.userId, name: me.name }, ticket: x.ticket && !x.ticket.resolvedAt ? { ...x.ticket, resolvedAt: now() } : x.ticket }),
-      { done: c.ticket && !c.ticket.resolvedAt ? 'Marked done. Ticket resolved.' : 'Marked done' }).catch(() => {}),
+    // Done is for this conversation and the ticket it showed when the key was pressed: one filed since refuses it.
+    done: (c: SupportConversation) => {
+      const ticketId = c.ticket && !c.ticket.resolvedAt ? c.ticket.id : null
+      return run(c, x => ({ ...x, done: { at: now(), userId: me.userId, name: me.name }, ticket: ticketId && x.ticket ? { ...x.ticket, resolvedAt: now() } : x.ticket }),
+        () => supportInboxApi.done(c.id, ticketId, crypto.randomUUID()),
+        { after: () => toast(ticketId ? 'Marked done. Ticket resolved.' : 'Marked done', 'success', { action: { label: 'Undo', onSelect: () => void undo(c, ticketId) }, duration: 5000 }) }).catch(() => {})
+    },
     confirm: ({ action, conversation }: Confirming) => act(conversation, action, action === 'pause' ? x => ({ ...x, agentState: 'paused', pausedBy: { kind: 'staff', userId: me.userId, name: me.name }, pausedAt: now(), done: null })
       : action === 'resume' ? x => ({ ...x, agentState: 'active', pausedBy: null, pausedAt: null }) : x => ({ ...x, ticket: x.ticket && { ...x.ticket, resolvedAt: now() } }), { done: confirmCopy[action].done, quiet: true }),
     read: (c: SupportConversation, read: boolean, seq?: number) => run(c, x => ({ ...x, unread: !read }), () => supportInboxApi.read(c.id, read, seq), { reread: false }).catch(() => {}),
@@ -123,10 +132,11 @@ function useInboxActions() {
   }
 }
 type Actions = ReturnType<typeof useInboxActions>
-function menuItems(c: SupportConversation, { canAct, actions, onConfirm, open }: { canAct: boolean; actions: Actions; onConfirm: (confirming: Confirming) => void; open?: () => void }): MenuItem[] {
+/** onDone: a conversation's own Mark done, which also opens the next one. */
+function menuItems(c: SupportConversation, { canAct, actions, onConfirm, open, onDone }: { canAct: boolean; actions: Actions; onConfirm: (confirming: Confirming) => void; open?: () => void; onDone?: () => void }): MenuItem[] {
   const items: (MenuItem | false)[] = [
     Boolean(open) && { label: 'Open', onSelect: open! },
-    canAct && c.needsYou !== null && { label: c.ticket && !c.ticket.resolvedAt ? 'Mark done and resolve ticket' : 'Mark done', onSelect: () => void actions.done(c) },
+    canAct && c.needsYou !== null && { label: c.ticket && !c.ticket.resolvedAt ? 'Mark done and resolve ticket' : 'Mark done', onSelect: onDone ?? (() => void actions.done(c)) },
     { label: c.unread ? 'Mark read' : 'Mark unread', onSelect: () => void actions.read(c, c.unread) },
     canAct && c.status !== 'closed' && (c.agentState === 'paused' ? { label: 'Hand back to the agent…', onSelect: () => onConfirm({ action: 'resume', conversation: c }) } : { label: 'Pause agent…', onSelect: () => onConfirm({ action: 'pause', conversation: c }) }),
     canAct && Boolean(c.ticket && !c.ticket.resolvedAt) && { label: 'Resolve ticket…', onSelect: () => onConfirm({ action: 'resolve', conversation: c }) },
@@ -175,6 +185,8 @@ export function SupportInboxPage() {
   // A search keeps the rows it replaces until its answer arrives; another tab never shows this one's.
   const list = useInfiniteQuery({ ...listQuery(view, q, channel), enabled: Boolean(role), staleTime: 5_000, refetchInterval: 30_000,
     placeholderData: (previous, query) => query?.queryKey[2] === view ? previous : undefined })
+  // The rail counts each channel before the channel filter (this view and search, every channel).
+  const everyChannel = useInfiniteQuery({ ...listQuery(view, q, ''), enabled: Boolean(role && channel), staleTime: 5_000 })
   const rows = flatten(list.data?.pages), counts = list.data?.pages[0]?.counts ?? null
   // Each view keeps its own selected row.
   const [selection, setSelection] = useState(() => ({ ...memory.selected }))
@@ -196,14 +208,26 @@ export function SupportInboxPage() {
     return () => window.clearTimeout(timer)
   }, [selected?.id])
   const open = (c: SupportConversation, reply = false) => { memory.selected[view] = c.id; navigate(`/support/${c.id}`, { state: { reply } }) }
+  // Selecting a row from inside the list takes focus with it, so the focused row is always the one a key acts on.
+  const select = (id: string) => {
+    setSelectedId(id)
+    if (document.activeElement?.closest('.sinbox-table')) requestAnimationFrame(() => document.querySelector<HTMLElement>('.sinbox-table [data-selected="true"] .ui-row-link')?.focus({ preventScroll: true }))
+  }
   const move = (step: number) => {
     const next = rows[index + step]
-    if (next) setSelectedId(next.id)
+    if (next) select(next.id)
     if (step > 0 && index + step >= rows.length - 3 && list.hasNextPage && !list.isFetchingNextPage) void list.fetchNextPage()
   }
   useShortcuts({
     j: () => move(1), k: () => move(-1), Enter: () => selected && open(selected), o: () => selected && open(selected), r: () => selected && canAct && open(selected, true),
-    e: () => { if (!selected || !canAct || !selected.needsYou) return; const after = rows[index + 1] ?? rows[index - 1]; if (view === 'needs_you' && after) setSelectedId(after.id); void actions.done(selected) },
+    // e acts on the row on screen when it is pressed; with nothing to mark it only moves on.
+    e: () => {
+      if (!selected) return
+      if (!canAct || !selected.needsYou) { move(1); return }
+      const target = selected, after = rows[index + 1] ?? rows[index - 1]
+      if (view === 'needs_you' && after) select(after.id)
+      void actions.done(target)
+    },
     h: () => { if (selected && canAct && selected.agentState === 'paused' && selected.status !== 'closed') setConfirming({ action: 'resume', conversation: selected }) },
     u: () => selected && void actions.read(selected, selected.unread), '?': () => setKeysOpen(true),
   }, Boolean(role))
@@ -224,10 +248,10 @@ export function SupportInboxPage() {
     <PageHeader title="Support" />
     <div className="sinbox-page">
       <InboxTabs view={view} counts={counts} onChange={next => setParams(previous => { const params = new URLSearchParams(previous); if (next === 'needs_you') params.delete('view'); else params.set('view', next); return params }, { replace: true })} />
-      <InboxToolbar search={search} onSearch={setSearch} onShortcuts={() => setKeysOpen(true)} />
-      {list.isError && !list.data ? <ErrorState error={list.error} onRetry={() => void list.refetch()} /> : <InboxBody rows={rows} channel={channel} setChannel={setChannel}>
+      <InboxToolbar search={search} onSearch={setSearch} channel={channel} onChannel={setChannel} onShortcuts={() => setKeysOpen(true)} />
+      {list.isError && !list.data ? <ErrorState error={list.error} onRetry={() => void list.refetch()} /> : <InboxBody rows={rows} everyChannel={channel ? everyChannel.data && flatten(everyChannel.data.pages) : rows} channel={channel} setChannel={setChannel}>
         <DataTable className="sinbox-table" rows={rows} rowKey={c => c.id} columns={columns} selectedId={phone ? undefined : selected?.id} empty={empty}
-          rowHref={c => `/support/${c.id}`} rowLabel={titleOf} onRowIntent={c => void prefetchConversation(client, c.id)} />
+          rowHref={c => `/support/${c.id}`} rowLabel={titleOf} onRowIntent={c => void prefetchConversation(client, c.id)} onRowFocus={phone ? undefined : c => setSelectedId(c.id)} />
         {list.hasNextPage && <Button className="sinbox-more" loading={list.isFetchingNextPage} onClick={() => void list.fetchNextPage()}>Load more</Button>}
       </InboxBody>}
     </div>
@@ -277,19 +301,30 @@ export function SupportConversationPage() {
   useEffect(() => { if (wantsReply && detail.data) composer.current?.focus() }, [Boolean(detail.data), wantsReply])
   const go = (to: string | undefined) => { if (to) navigate(`/support/${to}`, { replace: true }) }
   const back = () => { if (location.key !== 'default') navigate(-1); else navigate(listPath()) }
+  // Done (e, the button, the menu's Mark done): marks this conversation done if it needs you, then opens the next one, or
+  // goes back to the list after the last.
+  const finish = () => {
+    if (!conversation) return
+    const after = next ?? previous
+    if (canAct && conversation.needsYou) void actions.done(conversation)
+    if (after) go(after); else back()
+  }
+  // The customer sheet belongs to the conversation it was opened on: another one (from its own links) closes it.
+  useEffect(() => { setSheet(false) }, [id])
   useShortcuts({
-    j: () => go(next), k: () => go(previous), Escape: back, r: () => composer.current?.focus(), '?': () => setKeysOpen(true),
-    e: () => { if (!conversation || !canAct || !conversation.needsYou) return; const after = next ?? previous; void actions.done(conversation); if (after) go(after); else back() },
+    j: () => go(next), k: () => go(previous), Escape: back, r: () => composer.current?.focus(), '?': () => setKeysOpen(true), e: finish,
     h: () => { if (conversation && canAct && conversation.agentState === 'paused' && conversation.status !== 'closed') setConfirming({ action: 'resume', conversation }) },
     u: () => conversation && void actions.read(conversation, conversation.unread, conversation.unread ? conversation.messageCount : undefined),
   }, Boolean(role && valid))
   if (!role) return <StaffOnly />
   if (!valid) return <EmptyState headingAs="h1" title="Page not found" action={<Link to="/support">Return to support</Link>} />
   if (!conversation) return detail.isError ? <div className="sinbox-conversation-page"><PageHeader backTo="/support" title="Conversation" /><ErrorState error={detail.error} onRetry={() => void detail.refetch()} /></div> : <SupportConversationSkeleton panel={!phone} />
-  const menu = <DropdownMenu label="Conversation actions" title={titleOf(conversation)} trigger={phone ? undefined : <ActionsTrigger />} items={menuItems(conversation, { canAct, actions, onConfirm: setConfirming })} />
+  const menu = <DropdownMenu label="Conversation actions" title={titleOf(conversation)} trigger={phone ? undefined : <ActionsTrigger />} items={menuItems(conversation, { canAct, actions, onConfirm: setConfirming, onDone: finish })} />
+  const marks = canAct && conversation.needsYou !== null
   return <div className="sinbox-conversation-page">
     <PageHeader backTo="/support" title={<span className="sinbox-title" title={titleOf(conversation)}>{titleOf(conversation)}</span>} subtitle={<Facts c={conversation} />}
-      actions={<ConversationActions panel={!phone} customer={detail.data ? () => setSheet(true) : undefined} menu={menu} />} />
+      actions={<ConversationActions panel={!phone} customer={detail.data ? () => setSheet(true) : undefined} menu={menu}
+        done={{ onClick: finish, title: `${marks ? 'Mark done and open' : 'Open'} ${next ?? previous ? 'the next conversation' : 'the list'} (e)` }} />} />
     {detail.data ? <div className="sinbox-conversation">
       <Transcript key={id} detail={detail.data} canAct={canAct} actions={actions} composer={composer} />
       {!phone && <aside className="sinbox-panel" aria-label="Customer"><CustomerPanel detail={detail.data} /></aside>}
@@ -338,32 +373,47 @@ function Transcript({ detail, canAct, actions, composer }: { detail: SupportDeta
 }
 
 type ComposerHandle = { focus: () => void }
-// The staff reply. While the agent is handling the conversation it waits behind Take over (r); sending pauses the agent.
+// The staff reply. While the agent is handling the conversation it waits behind Take over (r), or, when the agent is
+// blocked, behind Retry now; sending pauses the agent. What is typed, and a reply that failed with why, stay with the
+// conversation until sent or discarded, wherever staff go meanwhile.
 const Composer = forwardRef<ComposerHandle, { detail: SupportDetail; actions: Actions }>(function Composer({ detail, actions }, ref) {
-  const c = detail.conversation
-  const [text, setText] = useState(() => memory.drafts.get(c.id) ?? ''), [taken, setTaken] = useState(false)
-  const field = useRef<HTMLTextAreaElement>(null), key = useRef(crypto.randomUUID())
-  useEffect(() => { if (text) memory.drafts.set(c.id, text); else memory.drafts.delete(c.id) }, [c.id, text])
-  useImperativeHandle(ref, () => ({ focus: () => { setTaken(true); requestAnimationFrame(() => field.current?.focus()) } }), [])
+  const c = detail.conversation, user = useSession()?.identity?.id ?? ''
+  const draft = useSyncExternalStore(subscribeInboxDrafts, () => inboxDraft(user, c.id)), text = draft?.text ?? ''
+  const [taken, setTaken] = useState(false)
+  const field = useRef<HTMLTextAreaElement>(null)
+  const take = () => { setTaken(true); requestAnimationFrame(() => field.current?.focus()) }
+  useImperativeHandle(ref, () => ({ focus: take }), [])
   if (c.status === 'closed') return null
   const handling = c.agentState === 'active'
-  if (handling && !taken && !text) return <div className="sinbox-composer sinbox-composer--idle"><span>The agent is handling this.</span><Button onClick={() => { setTaken(true); requestAnimationFrame(() => field.current?.focus()) }}>Take over</Button></div>
+  if (handling && !taken && !text && !draft?.failed) {
+    const blocked = c.blockedWork > 0
+    return <div className="sinbox-composer sinbox-composer--idle" data-blocked={blocked || undefined}>
+      <span>{blocked ? 'The agent is blocked: its work here is waiting.' : 'The agent is handling this.'}</span>
+      <span className="cluster">{blocked && <Button onClick={() => void actions.wake(c)}>Retry now</Button>}<Button onClick={take}>Take over</Button></span>
+    </div>
+  }
   function send(event?: FormEvent) {
     event?.preventDefault()
     const reply = text.trim()
-    if (!reply || !detail.replyAvailable) return
-    const sent = key.current
-    setText('')
+    if (!reply || !detail.replyAvailable || !draft) return
+    const sent = { text: reply, key: draft.key }
+    updateInboxDraft(user, c.id, () => ({ text: '', key: crypto.randomUUID(), failed: null, sending: sent }))
     // Sent: the keys are the inbox's again (e marks it done, j moves on).
     field.current?.blur()
-    actions.reply(c, reply, sent).then(() => { key.current = crypto.randomUUID() }, () => setText(current => current || reply))
+    // A failure puts the reply back in this conversation's box (before anything typed since), with its own key.
+    actions.reply(c, reply, sent.key).then(() => updateInboxDraft(user, c.id, () => ({ sending: null })),
+      error => updateInboxDraft(user, c.id, now => ({ sending: null, failed: error instanceof ApiError ? error.message : failedText,
+        ...now.text ? { text: `${sent.text}\n\n${now.text}`, key: crypto.randomUUID() } : { text: sent.text, key: sent.key } })))
   }
   return <form className="sinbox-composer" data-filled={text ? true : undefined} data-unavailable={detail.replyAvailable ? undefined : true} onSubmit={send}>
     <Textarea ref={field} aria-label="Reply" placeholder={`Reply to ${c.customer?.name ?? 'the customer'}`} value={text} maxLength={8000} disabled={!detail.replyAvailable}
-      onChange={event => { setText(event.target.value); key.current = crypto.randomUUID() }}
+      onChange={event => { const value = event.target.value; updateInboxDraft(user, c.id, () => ({ text: value, key: crypto.randomUUID() })) }}
       onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); send() } else if (event.key === 'Escape') { event.preventDefault(); event.currentTarget.blur() } }} />
-    <div className="sinbox-composer__actions"><span className="sinbox-composer__hint">{!detail.replyAvailable ? 'The support service is offline, so replies are off.' : handling ? 'Sending pauses the agent.' : ''}</span>
-      <Button type="submit" variant="primary" disabled={!text.trim() || !detail.replyAvailable}>Send reply</Button></div>
+    <div className="sinbox-composer__actions">
+      {draft?.failed ? <span className="sinbox-composer__failed" role="alert">Not sent: {draft.failed}</span>
+        : <span className="sinbox-composer__hint">{!detail.replyAvailable ? 'The support service is offline, so replies are off.' : handling ? 'Sending pauses the agent.' : ''}</span>}
+      <span className="cluster sinbox-composer__buttons">{draft?.failed && <Button variant="ghost" onClick={() => updateInboxDraft(user, c.id, () => null)}>Discard</Button>}
+        <Button type="submit" variant="primary" disabled={!text.trim() || !detail.replyAvailable}>Send reply</Button></span></div>
   </form>
 })
 
