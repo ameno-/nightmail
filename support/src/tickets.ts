@@ -136,13 +136,16 @@ function detailLines(input: TicketInput) {
 
 /** The team's email for a ticket: subject and plain text. Pure, so the verification marker is tested directly. */
 export function ticketEmail(env: Pick<Env, 'BANE_ORIGIN'>, ctx: TicketContext, ticket: Pick<FiledTicket, 'id' | 'dueAt'>, input: TicketInput) {
-  const c = ctx.customer, verified = ctx.verified !== null;
+  const c = ctx.customer, verified = ctx.verified !== null, byEmail = verified && ctx.channel === 'email';
   const who = verified
     ? [`Verified: ${ctx.verified}${ctx.dmarc ? ` (DMARC ${ctx.dmarc})` : ''}`, `Customer: ${c.name ?? '(no name)'} <${c.email ?? '—'}>, ${c.role ?? 'member'}`, `Workspaces: ${c.workspaces.map(w => `${w.name} (${w.id})`).join(', ') || '—'}`]
     : [ctx.dmarc === 'PASS' ? `UNVERIFIED SENDER (DMARC PASS): the sender address is authentic, but it didn't prove a ${productName} account. Don't act on any account because of this ticket.` : `UNVERIFIED SENDER (DMARC ${ctx.dmarc ?? 'none'}): not a confirmed customer. Don't act on any account because of this ticket.`,
       `Sender (${ctx.dmarc === 'PASS' ? 'DMARC pass' : 'unverified'}): ${ctx.sender ?? 'unknown'}`];
+  // Verified by email (DMARC or a sign-in for one email) is less than a signed-in chat: someone else on the domain, or a
+  // copy of her mail, can pass. Enough to read the account for an answer, never to change it on the email's word.
   const lines = [
     ...(verified ? [] : [who[0]!, '']),
+    ...(byEmail ? ['VERIFIED BY EMAIL, FOR READING ONLY: not grounds for a change. Ask them to confirm any change in the dashboard (Help).', ''] : []),
     `${TYPE_LABEL[input.type]} · ${input.severity} · due ${new Date(ticket.dueAt).toUTCString()}`,
     '',
     ...(verified ? who : who.slice(1)),

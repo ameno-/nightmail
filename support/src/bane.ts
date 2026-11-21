@@ -40,7 +40,7 @@ export type Scope = {
     /** An email conversation's messages its person confirmed signed in (the claim): each is answered once. */
     signedIn?: string[] };
   /** The person Nightmail stamps (id: never shown to the model), and whether `email` is their verified address now. */
-  user: { id?: string | null; name: string | null; email: string | null; emailVerified?: boolean };
+  user: { id?: string | null; name: string | null; email: string | null; mailboxProven?: boolean };
   workspace: ScopeWorkspace | null; workspaces: ScopeWorkspace[]; contentWorkspaceId: string | null; page: string | null;
   /** The person lost a workspace this conversation read: end it without restating anything. */
   shrunk: boolean;
@@ -158,7 +158,7 @@ export type InboundMessage = {
   id: string; threadId: string | null; direction: 'inbound' | 'outbound'; subject: string | null;
   from: { name: string | null; address: string } | string | null; fromAddress?: string;
   to?: unknown; cc?: unknown; replyTo?: unknown; text?: string | null;
-  replyText?: string | null; messageId?: string | null; inReplyTo?: string | null; references?: unknown;
+  replyText?: string | null; messageId?: string | null; inReplyTo?: string | null; references?: unknown; receivedAt?: string;
   attachments?: { id: string; filename: string | null; contentType: string; size: number; disposition?: string }[];
   /** With includeAuthentication=true. dmarc is PASS when the From domain aligns with a passing SPF or DKIM result. */
   authentication?: { spf: string | null; dkim: string | null; dmarc: string | null };
