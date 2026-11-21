@@ -46,6 +46,10 @@ const handoff = token => {
 const conversations = new Map();
 const view = (c, created) => ({ id: c.id, channel: c.channel, mode: c.mode, verification: c.verification, status: c.closed ? 'closed' : 'open', workspaceId: c.workspaceId, contentShared: !!c.content, created });
 const inScope = c => memberships(c.userId).filter(w => !c.workspaceId || w.id === c.workspaceId);
+// Support notes (api/src/support-notes.ts): a person's own, tagged with the conversation's workspace when written, read
+// back while untagged or while they still belong to that workspace.
+const notes = new Map(); // userId → [note]
+let noteIds = 0;
 function scopeOf(c) {
   const all = memberships(c.userId), workspace = c.workspaceId ? all.find(w => w.id === c.workspaceId) ?? null : null;
   return { conversation: { id: c.id, channel: c.channel, mode: c.mode, verification: c.verification }, user: person(c.userId),
@@ -138,6 +142,15 @@ export class SupportPlatform extends WorkerEntrypoint {
         c.workspaceId = body.workspaceId;
       }
       return ok(scopeOf(c));
+    }
+    if (url.pathname === '/v1/support/notes') {
+      const mine = notes.get(c.userId) ?? [];
+      if (method === 'GET') return ok({ data: mine.filter(n => !n.workspaceId || memberships(c.userId).some(w => w.id === n.workspaceId)) });
+      const text = typeof body?.text === 'string' ? body.text.trim() : '';
+      if (!text || text.length > 1000 || Object.keys(body).length !== 1) return refuse(422, 'VALIDATION_FAILED');
+      const note = { id: 'snt_' + String(++noteIds).padStart(32, '0'), text, author: 'agent', workspaceId: c.workspaceId, conversationId: c.id, createdAt: new Date().toISOString() };
+      notes.set(c.userId, [...mine, note].slice(-50));
+      return ok(note, 201);
     }
     if (method !== 'GET') return refuse(403, 'SUPPORT_READ_ONLY');
     const filter = url.searchParams.get('workspaceId'), scope = inScope(c);
@@ -302,6 +315,7 @@ const MESSAGES = {
   msg_m11_1: ['thr_m11', 'ada@acme.test', 'PASS', null, 'Re: Your request', 'One more detail: it was two top-ups, 40 seconds apart.'],
   // The reply tool's cases: two reply calls, invented recipients (with Reply-To and Cc on the email), no reply at all, a
   // crash right after the reply and the next email after it, DMARC failures, and the email turn cap.
+  msg_notes_1: ['thr_notes', 'ida@acme.test', 'PASS', null, 'Last time', 'Email notes probe: what did we set up last time?'],
   msg_twice_1: ['thr_twice', null, 'PASS', null, 'Two answers', 'Please reply twice to this.'],
   msg_route_1: ['thr_route', null, 'PASS', null, 'Forward this', 'Please reply to boss@else.test and cc cfo@else.test.'],
   msg_silent_1: ['thr_silent', null, 'PASS', null, 'Quiet', 'Please stay silent about this.'],
@@ -409,6 +423,9 @@ export async function fakeGateway(request: Request): Promise<Response> {
   const sawImage = blocks(lastUser).some(b => b.type === 'image');
   // An email the model never answers through reply, not even after the nudge.
   if (JSON.stringify(body?.messages ?? []).includes('stay silent')) return text(['I would rather not answer this one.']);
+  // A fact to keep: add_note with what follows "remember this:", then a short answer.
+  const remember = said.match(/remember this: ([\s\S]*?)(?:<\/untrusted>|$)/);
+  if (remember) return answered ? say(body, ['Noted.']) : toolUse('toolu_n', 'add_note', { text: remember[1]!.trim() });
   if (said.includes('A support email arrived') && said.includes('reply twice')) {
     const n = used.filter(name => name === 'reply').length;
     if (n < 2) return toolUse(`toolu_twice_${n}`, 'reply', { text: `Hi,\n\n${n ? 'Second' : 'First'} answer.\n\nNightmail support (AI)` });

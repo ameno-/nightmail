@@ -14,12 +14,14 @@ const UNTRUSTED = new Set(['subject', 'diagnostic', 'diagnosticCode', 'text', 'h
  * - every identifier inside a user, actor (of any type), subject or member object;
  * - an audit summary's references to a support conversation, ticket, handoff, grant or member;
  * - any value shaped like a support conversation ID, a user ID (a UUID), an agent token, API key, inbox key or app
- *   password ID, an MCP grant, or a support grant or handoff, whatever field holds it.
+ *   password ID, an MCP grant, or a support grant, handoff or note, whatever field holds it.
  */
 const PERSON_KEYS = new Set(['userId', 'user_id', 'actorId', 'actor_id', 'memberId', 'member_id', 'member', 'ticketRef', 'ticket_ref', 'grantId', 'grant_id', 'handoffId', 'handoff_id', 'conversationId', 'conversation_id']);
 const PERSON_OBJECTS = new Set(['user', 'actor', 'subject', 'member']);
 const SUMMARY_KEYS = new Set(['ticket', 'member', 'handoff', 'grant', 'conversation']);
-const INTERNAL = [/^conv_[a-z2-7]{26}$/, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, /^(?:agt|key|mbk|apw|sgr|sho)_[0-9a-f]{32}$/, /^mcp_[A-Za-z0-9_-]{1,200}$/];
+const INTERNAL = [/^conv_[a-z2-7]{26}$/, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, /^(?:agt|key|mbk|apw|sgr|sho|snt)_[0-9a-f]{32}$/, /^mcp_[A-Za-z0-9_-]{1,200}$/];
+/** The same shapes inside free text (a note written earlier), wherever they stand in it. */
+const EMBEDDED = new RegExp(INTERNAL.map(shape => `(?<![A-Za-z0-9_-])(?:${shape.source.slice(1, -1)})(?![A-Za-z0-9_-])`).join('|'), 'gi');
 const idLike = (key: string) => key === 'id' || /(?:Id|_id)$/.test(key);
 const HIDDEN = Symbol('hidden');
 export const RESULT_LIMIT = 8192;
@@ -46,6 +48,13 @@ export function project(value: unknown, depth = 0, key = '', hidden: readonly st
     return UNTRUSTED.has(key) && capped.length > 0 && /[A-Za-z]{3}/.test(capped) ? `<untrusted>${capped.replaceAll('</untrusted>', '')}</untrusted>` : capped;
   }
   return value;
+}
+
+/** Free text with every internal ID and `hidden` value inside it replaced by "[hidden]". */
+export function scrubIds(text: string, hidden: readonly string[] = []): string {
+  let out = text.replace(EMBEDDED, '[hidden]');
+  for (const value of hidden) if (value.length >= 4) out = out.replaceAll(value, '[hidden]');
+  return out;
 }
 
 /** The tool result as the model reads it: projected JSON, at most RESULT_LIMIT bytes, without the `hidden` values. */

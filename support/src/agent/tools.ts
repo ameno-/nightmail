@@ -33,7 +33,11 @@ export interface ToolHost {
   fileTicket(input: TicketInput): Promise<string>;
   /** Email only: freezes this email's one answer (sent after the turn, only to the address that wrote). */
   reply(text: string): Promise<string>;
+  /** Chat only: keeps a note about this conversation's person for their later chats (Nightmail picks person and workspace). */
+  note(text: string): Promise<string>;
 }
+/** The longest note Nightmail keeps (NOTE_MAX_LENGTH in api/src/support-notes.ts). */
+export const NOTE_MAX = 1000;
 export const TICKET_TYPES = ['billing', 'bug', 'deliverability', 'account', 'abuse_report', 'privacy', 'legal', 'feature_request', 'other'] as const;
 export type TicketType = typeof TICKET_TYPES[number];
 export const TICKET_TOPICS = ['refund', 'billing_dispute', 'charge', 'credit', 'plan', 'account_closure', 'limit_increase', 'enforcement_review', 'access', 'security', 'legal', 'human_requested', 'guardrail', 'other'] as const;
@@ -180,6 +184,9 @@ export const TOOLS: ToolSpec[] = [
   { name: 'reply', description: 'Email only: your answer to this email, the only text the customer receives. Call it once, as your last step, with the whole email in plain text, from "Hi," to the sign-off. It goes to the sender only, in this thread, when your turn ends; a second call is refused.',
     params: { text: { type: 'string', description: 'The whole email in plain text, under 250 words, signed "Nightmail support (AI)"', max: 6000 } },
     label: fixed('Writing the reply…', 'Wrote the reply'), execute: (a, h) => h.reply(String(a.text ?? '')) },
+  { name: 'add_note', description: `Keep a short note about this customer for a later support chat with them: a durable fact that would help next time, such as their setup, what was tried and what it showed, a preference, or something you or the ${productName} team promised. The customer never sees notes. Never put secrets, credentials, codes or keys in one, and never copy their messages or email content wholesale: write the fact in a sentence or two. At most one or two per conversation.`,
+    params: { text: { type: 'string', description: `The note, under ${NOTE_MAX} characters, e.g. "Sends from news.acme.com through Cloudflare DNS; DKIM CNAMEs were proxied, fixed Nov 4."`, max: NOTE_MAX } },
+    label: fixed('Noting that for next time…', 'Noted that for next time'), execute: (a, h) => h.note(String(a.text ?? '')) },
 ];
 export const TOOL_NAMES = TOOLS.map(t => t.name);
 
@@ -193,7 +200,7 @@ const EMAIL_TOOLS: ReadonlySet<string> = new Set(['reply', 'file_ticket']);
 export type Turn = { channel: 'chat'; manager: boolean } | { channel: 'email' };
 /**
  * The tools one turn may call: a chat's account tools by role (the owner/admin ones only for a manager), workspace
- * choice, content access and tickets, never reply (chat text streams); an email's reply and file_ticket only. OpenCode's
+ * choice, content access, tickets and add_note, never reply (chat text streams); an email's reply and file_ticket only. OpenCode's
  * session permissions offer exactly these; the plugin refuses any other call.
  */
 export function toolNames(turn: Turn): string[] {
