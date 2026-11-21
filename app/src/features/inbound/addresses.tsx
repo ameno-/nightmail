@@ -99,7 +99,7 @@ function AddressPath({ address, overview }: { address: InboundAddress; overview:
       const current = await request<RuleConfig>('/v1/rules')
       await request('/v1/rules/attachments', { method: 'PUT', body: { attachments: change(current.config.attachments) }, ifMatch: current.version })
       // Detaching changes how live mail is handled: Undo puts the rule back where it was.
-      toast(done, 'success', undo && { label: 'Undo', onSelect: () => void attach(undo, 'Rule put back.') }); setRitual(''); await overview.refetch()
+      toast(done, 'success', undo ? { action: { label: 'Undo', onSelect: () => void attach(undo, 'Rule put back.') } } : undefined); setRitual(''); await overview.refetch()
     } catch (e) { toast(errorText(e), 'error') } finally { setBusy(false) }
   }, address.id)
   const detach = (key: string) => void attach(list => list.filter(b => !(b.rule === key && b.target === address.id)), 'Rule detached.', list => {

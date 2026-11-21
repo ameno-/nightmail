@@ -1,20 +1,21 @@
 import type { ReactNode } from 'react'
 import { Keyboard, MoreHorizontal } from 'lucide-react'
 import { useLocation } from 'react-router'
-import { Button, FacetRail, IconButton, LoadingRegion, PageHeader, SearchField, Skeleton, SkeletonText, SplitPane, TableSkeleton, Tabs, type FacetGroup, type SkeletonColumn, type Tone } from '../../components/ui'
+import { Button, FacetRail, IconButton, LoadingRegion, PageHeader, SearchField, Select, Skeleton, SkeletonText, SplitPane, TableSkeleton, Tabs, type FacetGroup, type SkeletonColumn, type Tone } from '../../components/ui'
 import type { Channel, InboxView, SupportConversation } from '../../data/support-inbox'
 import { label } from '../../lib/format'
 import { ActionsTrigger } from '../operator/skeletons'
 import './support-inbox.css'
 
 // The support inbox's column definitions (card slots included), shared by the route skeleton and the loaded list. A
-// phone's card: the customer and last activity, the conversation, then its status, ticket and agent on one line.
+// phone's card: the customer and last activity, the conversation, then its status, ticket and agent on one line. Ticket
+// and agent are as wide as their words on a desktop; a tablet drops who paused the agent instead (support-inbox.css).
 export const inboxColumnDefs: SkeletonColumn[] = [
-  { key: 'customer', label: 'Customer', width: '20%', card: 'title' },
+  { key: 'customer', label: 'Customer', width: 'var(--sinbox-customer, 16%)', card: 'title' },
   { key: 'subject', label: 'Conversation', card: 'line' },
-  { key: 'status', label: 'Status', width: 152, card: 'line' },
-  { key: 'ticket', label: 'Ticket', width: 96, card: 'inline' },
-  { key: 'agent', label: 'Agent', width: 132, card: 'inline' },
+  { key: 'status', label: 'Status', width: 'var(--sinbox-status, 152px)', card: 'line' },
+  { key: 'ticket', label: 'Ticket', width: 'var(--sinbox-ticket, 120px)', card: 'inline' },
+  { key: 'agent', label: 'Agent', width: 'var(--sinbox-agent, 176px)', card: 'inline' },
   { key: 'activity', label: 'Last', width: 64, align: 'right', card: 'aside' },
   { key: 'actions', label: '', width: 40, align: 'right', card: 'end' },
 ]
@@ -34,12 +35,13 @@ export function triageOf(c: SupportConversation): Triage {
   return { key: 'paused', text: 'Waiting on you', tone: 'info' }
 }
 const whyFacets: [Triage['key'], string, Tone][] = [['waiting', 'Customer waiting', 'warning'], ['blocked', 'Blocked', 'warning'], ['failed', 'Not sent', 'danger'], ['ticket', 'Ticket open', 'info'], ['paused', 'Waiting on you', 'info']]
-/** The rail beside the list, from the rows on screen: why they need you, their channel (which filters the list) and open tickets. */
-export function inboxFacetGroups(rows: SupportConversation[] | undefined, channel: Channel | '', setChannel?: (channel: Channel | '') => void): FacetGroup[] {
-  const count = (test: (c: SupportConversation) => boolean) => rows ? rows.filter(test).length : null
+/** The rail beside the list, from the rows on screen: the one reason each needs you, and its open tickets; and their channel,
+ *  which filters the list, counted before that filter (`everyChannel`), so choosing Email never reads as "no chats". */
+export function inboxFacetGroups(rows: SupportConversation[] | undefined, channel: Channel | '', setChannel?: (channel: Channel | '') => void, everyChannel = rows): FacetGroup[] {
+  const count = (test: (c: SupportConversation) => boolean, list = rows) => list ? list.filter(test).length : null
   return [
-    { key: 'why', title: 'Why', items: whyFacets.map(([key, text, tone]) => ({ key, label: text, tone, count: count(c => triageOf(c).key === key) })) },
-    { key: 'channel', title: 'Channel', items: (['chat', 'email'] as const).map(value => ({ key: value, label: value === 'chat' ? 'Chat' : 'Email', count: count(c => c.channel === value),
+    { key: 'why', title: 'Primary reason', items: whyFacets.map(([key, text, tone]) => ({ key, label: text, tone, count: count(c => triageOf(c).key === key) })) },
+    { key: 'channel', title: 'Channel', items: (['chat', 'email'] as const).map(value => ({ key: value, label: value === 'chat' ? 'Chat' : 'Email', count: count(c => c.channel === value, everyChannel),
       ...setChannel ? { selected: channel === value, onSelect: () => setChannel(channel === value ? '' : value) } : {} })) },
     { key: 'ticket', title: 'Open tickets', items: (['P1', 'P2', 'P3'] as const).map(severity => ({ key: severity, label: severity, tone: (severity === 'P1' ? 'danger' : severity === 'P2' ? 'warning' : 'neutral') as Tone,
       count: count(c => Boolean(c.ticket && !c.ticket.resolvedAt && c.ticket.severity === severity)) })) },
@@ -50,20 +52,23 @@ export function InboxTabs({ view, counts, onChange, disabled = false }: { view: 
   return <div className="sinbox-tabs"><Tabs value={view} label="Support views" disabled={disabled} onValueChange={value => onChange?.(value as InboxView)}
     items={inboxViews.map(item => ({ ...item, count: item.value === 'all' ? undefined : counts ? counts[item.value === 'needs_you' ? 'needsYou' : 'agent'] : null }))} /></div>
 }
-export function InboxToolbar({ search = '', onSearch, onShortcuts, disabled = false }: { search?: string; onSearch?: (value: string) => void; onShortcuts?: () => void; disabled?: boolean }) {
-  return <div className="data-toolbar sinbox-toolbar"><div className="cluster">
+const channelOptions = [{ value: 'all', label: 'All channels' }, { value: 'chat', label: 'Chat' }, { value: 'email', label: 'Email' }]
+/** Search, and the channel filter where the rail is hidden (below 1200 px), so a filter is always visible and can be cleared. */
+export function InboxToolbar({ search = '', onSearch, channel = '', onChannel, onShortcuts, disabled = false }: { search?: string; onSearch?: (value: string) => void; channel?: Channel | ''; onChannel?: (channel: Channel | '') => void; onShortcuts?: () => void; disabled?: boolean }) {
+  return <div className="data-toolbar sinbox-toolbar"><div className="cluster sinbox-toolbar__filters">
     <SearchField className="search-box--list" aria-label="Search conversations" placeholder="Search conversations" value={search} disabled={disabled} onChange={event => onSearch?.(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') event.currentTarget.blur() }} />
+    <Select className="sinbox-channel-select" aria-label="Channel" value={channel || 'all'} options={channelOptions} disabled={disabled || !onChannel} onValueChange={value => onChannel?.(value === 'all' ? '' : value as Channel)} />
   </div><IconButton className="sinbox-shortcuts-button" label="Keyboard shortcuts" disabled={disabled} onClick={onShortcuts}><Keyboard size={16} /></IconButton></div>
 }
 /** The list beside its rail. */
-export const InboxBody = ({ rows, channel, setChannel, children }: { rows: SupportConversation[] | undefined; channel: Channel | ''; setChannel?: (channel: Channel | '') => void; children: ReactNode }) =>
-  <SplitPane className="sinbox-split" rail={<FacetRail label="These conversations" groups={inboxFacetGroups(rows, channel, setChannel)} />}>{children}</SplitPane>
+export const InboxBody = ({ rows, everyChannel, channel, setChannel, children }: { rows: SupportConversation[] | undefined; everyChannel?: SupportConversation[]; channel: Channel | ''; setChannel?: (channel: Channel | '') => void; children: ReactNode }) =>
+  <SplitPane className="sinbox-split" rail={<FacetRail label="These conversations" groups={inboxFacetGroups(rows, channel, setChannel, everyChannel)} />}>{children}</SplitPane>
 export function SupportInboxSkeleton({ view, channel }: { view: InboxView; channel: Channel | '' }) {
   return <>
     <PageHeader title="Support" />
     <LoadingRegion label="Loading support conversations"><div className="sinbox-page">
       <InboxTabs view={view} counts={null} disabled />
-      <InboxToolbar disabled />
+      <InboxToolbar channel={channel} disabled />
       <InboxBody rows={undefined} channel={channel}><TableSkeleton className="sinbox-table" columns={inboxColumnDefs} rows={12} /></InboxBody>
     </div></LoadingRegion>
   </>
@@ -79,9 +84,12 @@ export function ConversationBodySkeleton({ panel }: { panel: boolean }) {
     {panel && <aside className="sinbox-panel"><div className="sinbox-panel__body"><h3 className="ui-label ui-label--rule">Account</h3><Skeleton height={140} /><h3 className="ui-label ui-label--rule">Conversation</h3><Skeleton height={112} /></div></aside>}
   </div>
 }
-/** The header's actions: Customer (the panel, on a phone) and the actions menu. */
-export function ConversationActions({ panel, customer, menu }: { panel: boolean; customer?: () => void; menu?: ReactNode }) {
-  return <>{!panel && <Button disabled={!customer} onClick={customer}>Customer</Button>}{menu ?? (panel ? <ActionsTrigger disabled /> : <IconButton label="Conversation actions" disabled><MoreHorizontal size={16} /></IconButton>)}</>
+/** The header's actions: Customer (the panel, on a phone), Done (e: marks it done if it needs you, and opens the next) and
+ *  the actions menu. On a phone they are a line of their own under the title and facts. */
+export function ConversationActions({ panel, customer, done, menu }: { panel: boolean; customer?: () => void; done?: { onClick: () => void; title: string }; menu?: ReactNode }) {
+  return <>{!panel && <Button disabled={!customer} onClick={customer}>Customer</Button>}
+    <Button disabled={!done} title={done?.title} onClick={done?.onClick}>Done</Button>
+    {menu ?? (panel ? <ActionsTrigger disabled /> : <IconButton label="Conversation actions" disabled><MoreHorizontal size={16} /></IconButton>)}</>
 }
 export function SupportConversationSkeleton({ panel }: { panel: boolean }) {
   return <div className="sinbox-conversation-page">
