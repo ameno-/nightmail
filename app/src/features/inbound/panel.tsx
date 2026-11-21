@@ -26,8 +26,8 @@ export function FlowPanel({ entry, lookup, overview, onEdit, onCreate, mailLink 
     return () => clearTimeout(timer)
   }, [lookup]) // eslint-disable-line react-hooks/exhaustive-deps
   const outcome = test.address === address ? test.outcome : null
-  // The AI decisions its rules read: a test can assume their answer.
-  const decisions = [...new Set((entry?.rules ?? []).flatMap(key => overview.rules.find(r => r.key === key)?.decisions ?? []))]
+  // The questions its rules ask the AI: a test can assume their answer, keyed by question as the rules read it.
+  const decisions = [...new Set((entry?.rules ?? []).flatMap(key => overview.rules.find(r => r.key === key)?.questions ?? []))]
   const mail = entry && mailLink ? mailOf(entry) : null
   return <section className="flow-panel" aria-label="Where its mail goes">
     {/* Test last: its spinner widens it while it runs, and nothing sits after it to move. */}

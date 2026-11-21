@@ -4046,6 +4046,20 @@ export type CreateInboundAddress = {
  */
 export type CreateInboundAddressFlow = {
     /**
+     * New endpoints this change uses, made with it: a refusal or failure makes none of them.
+     */
+    endpoints?: Array<{
+        type: 'webhook' | 'slack' | 'discord';
+        /**
+         * Endpoint name, unique in the workspace across every type.
+         */
+        name: string;
+        /**
+         * As createEndpoint takes it: a Slack or Discord webhook URL, or a public HTTPS URL for a webhook (its signing secret is not returned here).
+         */
+        url: string;
+    }>;
+    /**
      * Where the address's mail goes: the destinations of the route for its own address, as createRoute takes them (inbox, webhook and forward IDs or keys, [] to keep it without an inbox, or 'drop'). Creates the route when there is none; null deletes it.
      */
     deliver?: 'drop' | Array<string | string> | null;
@@ -4117,6 +4131,20 @@ export type InboundAddressFlow = {
 };
 
 export type SetInboundAddressFlow = {
+    /**
+     * New endpoints this change uses, made with it: a refusal or failure makes none of them.
+     */
+    endpoints?: Array<{
+        type: 'webhook' | 'slack' | 'discord';
+        /**
+         * Endpoint name, unique in the workspace across every type.
+         */
+        name: string;
+        /**
+         * As createEndpoint takes it: a Slack or Discord webhook URL, or a public HTTPS URL for a webhook (its signing secret is not returned here).
+         */
+        url: string;
+    }>;
     /**
      * Where the address's mail goes: the destinations of the route for its own address, as createRoute takes them (inbox, webhook and forward IDs or keys, [] to keep it without an inbox, or 'drop'). Creates the route when there is none; null deletes it.
      */
@@ -4477,6 +4505,10 @@ export type InboundOverview = {
          */
         decisions: Array<string>;
         /**
+         * The question each of those decisions asks the AI, in the same order: testRules takes scores keyed by these.
+         */
+        questions: Array<string>;
+        /**
          * Address IDs or addresses it runs on.
          */
         attachedTo: Array<string>;
@@ -4515,6 +4547,10 @@ export type InboundOverview = {
          * The names of the AI decisions it asks for.
          */
         omens: Array<string>;
+        /**
+         * The question each of those decisions asks the AI, in the same order: testRules takes scores keyed by these.
+         */
+        questions: Array<string>;
         /**
          * Address IDs or addresses it runs on.
          */

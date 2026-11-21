@@ -12978,6 +12978,40 @@
       "CreateInboundAddressFlow": {
         "type": "object",
         "properties": {
+          "endpoints": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "webhook",
+                    "slack",
+                    "discord"
+                  ]
+                },
+                "name": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+                  "description": "Endpoint name, unique in the workspace across every type."
+                },
+                "url": {
+                  "type": "string",
+                  "maxLength": 2048,
+                  "description": "As createEndpoint takes it: a Slack or Discord webhook URL, or a public HTTPS URL for a webhook (its signing secret is not returned here)."
+                }
+              },
+              "required": [
+                "type",
+                "name",
+                "url"
+              ],
+              "additionalProperties": false
+            },
+            "maxItems": 4,
+            "description": "New endpoints this change uses, made with it: a refusal or failure makes none of them."
+          },
           "deliver": {
             "anyOf": [
               {
@@ -13168,6 +13202,40 @@
       "SetInboundAddressFlow": {
         "type": "object",
         "properties": {
+          "endpoints": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "webhook",
+                    "slack",
+                    "discord"
+                  ]
+                },
+                "name": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+                  "description": "Endpoint name, unique in the workspace across every type."
+                },
+                "url": {
+                  "type": "string",
+                  "maxLength": 2048,
+                  "description": "As createEndpoint takes it: a Slack or Discord webhook URL, or a public HTTPS URL for a webhook (its signing secret is not returned here)."
+                }
+              },
+              "required": [
+                "type",
+                "name",
+                "url"
+              ],
+              "additionalProperties": false
+            },
+            "maxItems": 4,
+            "description": "New endpoints this change uses, made with it: a refusal or failure makes none of them."
+          },
           "deliver": {
             "anyOf": [
               {
@@ -14324,6 +14392,13 @@
                   },
                   "description": "The names of the AI decisions it asks for."
                 },
+                "questions": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "The question each of those decisions asks the AI, in the same order: testRules takes scores keyed by these."
+                },
                 "attachedTo": {
                   "type": "array",
                   "items": {
@@ -14369,6 +14444,7 @@
                 "calls",
                 "delivers",
                 "decisions",
+                "questions",
                 "attachedTo",
                 "addresses",
                 "recipe",
@@ -14406,6 +14482,13 @@
                     "type": "string"
                   },
                   "description": "The names of the AI decisions it asks for."
+                },
+                "questions": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "The question each of those decisions asks the AI, in the same order: testRules takes scores keyed by these."
                 },
                 "attachedTo": {
                   "type": "array",
@@ -14452,6 +14535,7 @@
                 "calls",
                 "delivers",
                 "omens",
+                "questions",
                 "attachedTo",
                 "addresses",
                 "recipe",

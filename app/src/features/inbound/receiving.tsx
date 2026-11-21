@@ -298,7 +298,7 @@ export function ReceivingPage() {
           page={pagination.page} onPage={next => pagination.onPageChange(next, data.routes.nextCursor)} setFilter={patch => update(patch)} />}
     </div>}
     {data && <AddressBuilder open={!!creating} initial={creating?.address} onOpenChange={open => { if (!open) setCreating(null) }} domains={data.domains} onPattern={setPattern} />}
-    {data && shown && <AddressBuilder open address={shown} split={!building && splitParam && conditions.some(c => c.value === splitParam) ? splitParam : undefined} onOpenChange={open => { if (!open) closeBuilder() }} domains={data.domains} />}
+    {data && shown && <AddressBuilder open address={shown} rule={!building ? params.get('rule') ?? undefined : undefined} split={!building && splitParam && conditions.some(c => c.value === splitParam) ? splitParam : undefined} onOpenChange={open => { if (!open) closeBuilder() }} domains={data.domains} />}
     {editing && <RouteEditor match={editing.match} route={editing.route} onClose={() => { setEditing(null); void overview.refetch() }} />}
     {pattern && <RouteEditor match={pattern} route={data?.routes.data.find(r => r.match === pattern)?.route ?? null} onClose={() => { setPattern(null); void overview.refetch() }} />}
   </div>

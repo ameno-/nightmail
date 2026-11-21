@@ -25566,9 +25566,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.deepEqual(byMatch('ov-drop@receive.example').to.map((t: Json) => t.type), ['drop']);
         assert.equal(overview.manage, true); assert.ok(overview.counts.address >= 1 && overview.counts.route >= 2 && overview.counts.pattern >= 1);
         const listed = { key: 'ovtriage', calls: ['support-hook'], delivers: [], attachedTo: [box2.id], addresses: [box2.address], recipe: null, enabled: true, lastMatchedAt: null };
-        assert.deepEqual(overview.rules.find((r: Json) => r.key === 'ovtriage'), { ...listed, decisions: [] });
+        assert.deepEqual(overview.rules.find((r: Json) => r.key === 'ovtriage'), { ...listed, decisions: [], questions: [] });
         // The deprecated rituals list is the same list under the names from before the rename.
-        assert.deepEqual(overview.rituals.find((r: Json) => r.key === 'ovtriage'), { ...listed, omens: [] });
+        assert.deepEqual(overview.rituals.find((r: Json) => r.key === 'ovtriage'), { ...listed, omens: [], questions: [] });
         const endpoint = overview.endpoints.find((e: Json) => e.id === hook.id);
         assert.deepEqual([endpoint.source, endpoint.name, endpoint.rules, endpoint.rituals], ['endpoint', 'support-hook', ['ovtriage'], ['ovtriage']]); assert.ok(endpoint.routes >= 1);
         assert.ok(!JSON.stringify(overview).includes('hooks.example.org'), 'webhook URLs stay write-only');
@@ -25923,6 +25923,43 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await call('PUT', path, {});
         for (const box of [desk, other]) { await call('DELETE', `/v1/routing/routes/${(await routeOf(box.address)).id}`); await call('DELETE', `/v1/inbound/addresses/${box.id}?detach=true`); }
         await call('DELETE', '/v1/endpoints/flow-hook');
+      });
+      await t.test('address flow: new endpoints are made with the flow, a create that rolled back runs again with its Idempotency-Key, and a test takes the AI answer by its question', async () => {
+        const send = async (to: string, subject: string, scores?: Record<string, number>) => { const r = (await call('POST', '/v1/rules/test', { mime: 'From: a@example.net\r\nTo: ' + to + '\r\nSubject: ' + subject + '\r\n\r\nHello', ...(scores ? { scores } : {}) })).recipients[0]; return [r.inboxes, [...r.webhooks].sort()]; };
+        const status = async (name: string) => (await local('GET', '/v1/endpoints/' + name)).status;
+        const boxes = async () => (await db.query("SELECT count(*)::int AS n FROM mailboxes WHERE workspace_id=$1 AND address='flow-new@receive.example'", [wid])).rows[0].n;
+        const body = { address: 'flow-new@receive.example', key: 'flow-new', flow: {
+          endpoints: [{ type: 'webhook', name: 'flow-new-a', url: 'https://hooks.example.com/new-a' }, { type: 'webhook', name: 'flow-new-b', url: 'https://hooks.example.com/new-b' }],
+          deliver: ['webhook:flow-new-b'], split: { recipe: 'split', params: { test: 'subject', value: 'refund', then: 'flow-new-a', otherwise: 'inbox:flow-new' } } } };
+        // A failure inside the transaction (here the rule write, refused by a trigger) makes none of it, its new endpoints
+        // included, and frees the Idempotency-Key: nothing was committed, so the same request retried runs again.
+        await db.query("CREATE FUNCTION flow_refused_fixture() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'rule write refused'; END $$");
+        await db.query("CREATE TRIGGER flow_refused_fixture BEFORE INSERT OR UPDATE ON mail_ritual_configs FOR EACH ROW WHEN (NEW.workspace_id = '" + wid + "') EXECUTE FUNCTION flow_refused_fixture()");
+        let failed: Reply;
+        try { failed = await local('POST', '/v1/inbound/addresses', body, 'live', { 'idempotency-key': 'flow-new-retry' }); }
+        finally { await db.query('DROP TRIGGER flow_refused_fixture ON mail_ritual_configs'); await db.query('DROP FUNCTION flow_refused_fixture()'); }
+        assert.equal(failed.status, 500);
+        assert.deepEqual([await status('flow-new-a'), await status('flow-new-b'), await boxes()], [404, 404, 0]);
+        const desk = ok(await local('POST', '/v1/inbound/addresses', body, 'live', { 'idempotency-key': 'flow-new-retry' }), 201);
+        const a = (await call('GET', '/v1/endpoints/flow-new-a')).id, b = (await call('GET', '/v1/endpoints/flow-new-b')).id;
+        const route = (await call('GET', '/v1/routing/routes')).data.find((r: Json) => r.match === desk.address);
+        // The route took the new webhook by its ID; the rule names both endpoints by name.
+        assert.deepEqual(route.to, [b]);
+        assert.deepEqual([await send(desk.address, 'Refund 1'), await send(desk.address, 'Hello')], [[[], [a, b].sort()], [[desk.id], [b]]]);
+        // The same key and body again replays the create instead of making a second address.
+        const replay = await local('POST', '/v1/inbound/addresses', body, 'live', { 'idempotency-key': 'flow-new-retry' });
+        assert.deepEqual([replay.status, replay.body.id, replay.headers.get('idempotent-replayed'), await boxes()], [201, desk.id, 'true', 1]);
+        // A test takes the AI's answer keyed by the question the overview lists: 1 takes the If yes side, 0 the other.
+        const key = (await call('GET', '/v1/rules')).config.attachments.find((x: Json) => x.target === desk.id).rule;
+        const changed = ok(await local('PATCH', '/v1/inbound/addresses/' + desk.id + '/flow', { rule: key, split: { recipe: 'split-by-meaning', params: { meaning: 'a refund request', then: 'flow-new-a', otherwise: 'inbox:flow-new' } } }));
+        const rule = (await call('GET', '/v1/inbound/overview?q=flow-new')).rules.find((r: Json) => r.key === changed.rule);
+        assert.equal(rule.questions.length, 1);
+        const question = rule.questions[0];
+        assert.deepEqual([await send(desk.address, 'Broken blender', { [question]: 1 }), await send(desk.address, 'Broken blender', { [question]: 0 })], [[[], [a, b].sort()], [[desk.id], [b]]]);
+        await call('DELETE', '/v1/routing/routes/' + route.id);
+        await call('PUT', '/v1/rules', {});
+        for (const name of ['flow-new-a', 'flow-new-b']) await call('DELETE', '/v1/endpoints/' + name);
+        await call('DELETE', '/v1/inbound/addresses/' + desk.id + '?detach=true');
       });
       await t.test('rules: omens(…) compiles to the plan decisions(…) does and ingests to the same verdicts; the /v1/rituals aliases answer as they did before the rename', async it => {
         const path = '/v1/rules', legacy = '/v1/rituals', prior = runtime.config.screen;

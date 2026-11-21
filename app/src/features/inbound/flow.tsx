@@ -219,7 +219,7 @@ export const testAddress = (match: string) => match.startsWith('*@') ? 'someone'
 /** Runs the dry run (testRules) for one address with a sample email: nothing is sent or saved, and the AI isn't asked. */
 export function useFlowTest() {
   const [state, setState] = useState<{ address: string; outcome: TestOutcome | null; error: string | null; pending: boolean } | null>(null)
-  // decisions: the AI decisions the address's rules read, answered with the sample's chosen answer (1 yes, 0 no).
+  // decisions: the questions the address's rules ask the AI, answered with the sample's chosen answer (1 yes, 0 no).
   async function run(address: string, sample: Sample, decisions: string[] = []) {
     setState({ address, outcome: null, error: null, pending: true })
     try {

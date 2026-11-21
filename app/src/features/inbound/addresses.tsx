@@ -7,6 +7,7 @@ import { date, number } from '../../lib/format'
 import { AddressMail } from './threads'
 import { FlowPanel } from './panel'
 import { AddressBuilder, builderFits } from './builder'
+import { isSplit } from './flow'
 import { request } from '../../data/live'
 import { errorText, type InboundAddress, type InboundAddressPatch } from '../../data/types'
 import { AliasEditor, aliasState, commitAliases, type AliasState } from './aliases'
@@ -177,7 +178,8 @@ export function InboundAddressDetailPage() {
     {tab === 'mail' ? null
       : !current || (tab === 'flow' && overview.data === undefined && !overview.error) ? <LoadingRegion label="Loading address"><div className="addr-skeleton" aria-hidden="true"><span /><span /><span /></div></LoadingRegion>
       : tab === 'flow' ? <div className="stack addr-page">{editing || !entry || !overview.data
-        ? <><AddressPath address={current} overview={overview} />
+        ? <>{entry && overview.data && entry.rules.filter(key => isSplit(overview.data!.rules.find(r => r.key === key))).length > 1 && <Alert tone="info">It splits its mail with more than one rule. Open a rule to change it.</Alert>}
+          <AddressPath address={current} overview={overview} />
           {entry && <div className="cluster"><Button onClick={() => setEditing(false)}>Done</Button></div>}</>
         : <div className="addr-flow"><FlowPanel entry={entry} overview={overview.data} onEdit={() => { if (builderFits(entry, overview.data!)) setBuilding(true); else setEditing(true) }} mailLink={false} /></div>}
         {building && overview.data && <AddressBuilder open address={current} domains={overview.data.domains} onOpenChange={open => { if (!open) { setBuilding(false); void overview.refetch() } }} />}</div>

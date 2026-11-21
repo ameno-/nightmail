@@ -215,6 +215,8 @@ const pages = ids => [
   ['Receiving · address builder dialog', `/receiving?open=${ids.address}`, { dialog: 'Edit' }],
   // New rule's Split by words with no address yet asks which address, then opens the builder on it, split on that check.
   ['Receiving · split chooser dialog', '/receiving/rules/new', { dialog: 'Split by words' }],
+  // guard: two splits, New rule on a split address, Test's AI answer, a failed create. Alone: it adds addresses and rules.
+  ['Receiving · split edits', `/receiving/addresses/${ids.address}?tab=flow`, { alone: true, guard: 'receiving-splits' }],
   ['Receiving · address builder from New rule', `/receiving?tab=rules&build=${ids.address}&split=ai`, {}],
   // Where its mail goes (the route editor) opens once its inboxes, webhooks and forwards have loaded.
   // Why a received message went where it did, from its conversation on the address's Mail tab.
@@ -390,6 +392,7 @@ async function measure(browser, job, fx) {
   const result = { page: job.name, path: job.path, scheme: job.scheme, device: job.device, mode: job.mode, cls: null, entries: [], longTask: null, error: null };
   let page, net;
   const problems = [];
+  let expected500 = null;
   const work = (async () => {
     if (job.waitlist) await context.addCookies([{ name: 'nightmail.waitlist', value: encodeURIComponent(job.waitlist), url: origin }]);
     if (job.user) await context.addCookies([job.user].flat().map((user, slot) => ({ name: slot ? `nightmail.session_token.${slot}` : 'nightmail.session_token', value: encodeURIComponent(fx.sessions[user].cookie), url: origin, httpOnly: true })));
@@ -408,7 +411,8 @@ async function measure(browser, job, fx) {
     page = await context.newPage();
     net = network(page);
     page.on('request', request => { const url = request.url(); if (/^https?:\/\//i.test(url) && !url.startsWith(origin)) problems.push(`external request ${url}`); });
-    page.on('response', response => { if (response.url().startsWith(origin + '/v1/') && (response.status() >= 500 || response.status() === 429)) problems.push(`${response.status()} ${response.request().method()} ${response.url().slice(origin.length)}`); });
+    // A guard that makes a write fail on purpose expects its one 500 (expected500), and says so itself if it doesn't come.
+    page.on('response', response => { if (response.url().startsWith(origin + '/v1/') && (response.status() >= 500 || response.status() === 429) && !(expected500 && response.status() === 500 && expected500(response))) problems.push(`${response.status()} ${response.request().method()} ${response.url().slice(origin.length)}`); });
     page.on('pageerror', error => problems.push(`page error: ${error.message}`));
     // The fixture's proxy shapes the traffic (cls-fixture.mjs): apiDelay on /v1/*, fonts from memory at once, and this
     // page's latency and bandwidth, for the requests carrying its x-cls-page. Not in Chrome: CDP Fetch interception
@@ -591,6 +595,78 @@ async function measure(browser, job, fx) {
       page.off('request', onRequest);
       if (writes.length) problems.push(`Edit wrote to the API: ${writes.join(', ')}`);
       if (await snapshot() !== before) problems.push('Edit changed the address\'s routes or rules');
+    }
+    if (job.guard === 'receiving-splits') {
+      // Runs alone, after every shared page: it adds addresses and rules. An address with two splits opens its steps
+      // (never a loop back to the same message), and each rule opens the builder on that rule; New rule's Split on an
+      // address that splits already asks before replacing; Test's AI answer takes its side; a new address whose one
+      // write fails leaves no endpoint behind, and Save again creates it.
+      const api = (path, method = 'GET', body) => page.evaluate(async ([path, method, body]) => { const r = await fetch(path, { method, headers: { 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) }); return { status: r.status, body: await r.json().catch(() => null) }; }, [path, method, body]);
+      const builder = page.locator('.builder[role=dialog]');
+      const split = (value, then, otherwise) => ({ recipe: 'split', params: { test: 'subject', value, then, otherwise } });
+      const two = (await api('/v1/inbound/addresses', 'POST', { address: 'guard-two@northwind.example', key: 'guard-two', flow: { deliver: [], split: split('invoice', 'crm', 'inbox:guard-two') } })).body;
+      const second = (await api(`/v1/inbound/addresses/${two.id}/flow`, 'PATCH', { split: split('refund', 'store', 'inbox:guard-two') })).body;
+      const config = (await api('/v1/rules')).body;
+      const mine = config.config.attachments.filter(a => a.target === two.id), rest = config.config.attachments.filter(a => a.target !== two.id);
+      await api('/v1/rules/attachments', 'PUT', { attachments: [...rest, ...mine.reverse()] });
+      await page.goto(origin + `/receiving/addresses/${two.id}?tab=flow`);
+      await page.locator('.flow-panel').getByRole('button', { name: 'Edit', exact: true }).click({ timeout: 20_000 });
+      await page.waitForURL(/edit=1/, { timeout: 10_000 }).catch(() => problems.push('Edit on an address with two splits didn\'t open its steps'));
+      if (await page.$('.builder')) problems.push('Edit on an address with two splits opened the builder');
+      await page.getByText('It splits its mail with more than one rule.', { exact: false }).waitFor({ timeout: 20_000 }).catch(() => problems.push('the steps of an address with two splits don\'t say why'));
+      await page.locator('.addr-rule', { hasText: 'refund' }).first().click({ timeout: 20_000 });
+      const value = await builder.locator('#builder-value').inputValue({ timeout: 20_000 }).catch(() => null);
+      if (value !== 'refund') problems.push(`its refund rule opened ${value === null ? 'no builder field' : `the builder on "${value}"`}`);
+      if (await builder.getByRole('button', { name: 'One destination' }).count()) problems.push('the builder on one rule offers to reroute the address');
+      await builder.getByRole('button', { name: 'Cancel' }).click().catch(() => {});
+      // New rule → Split by words on an address with one split: asked, and Cancel writes nothing.
+      const one = (await api('/v1/inbound/addresses', 'POST', { address: 'guard-one@northwind.example', key: 'guard-one', flow: { deliver: [], split: { recipe: 'split-by-meaning', params: { meaning: 'a refund request', then: 'crm', otherwise: 'inbox:guard-one' } } } })).body;
+      const writes = [];
+      const onRequest = request => { if (request.method() !== 'GET' && request.url().startsWith(origin + '/v1/') && !request.url().includes('/v1/rules/test')) writes.push(`${request.method()} ${request.url().slice(origin.length)}`); };
+      page.on('request', onRequest);
+      await page.goto(origin + `/receiving/rules/new?address=${one.id}`);
+      await page.getByRole('link', { name: 'Split by words' }).click({ timeout: 20_000 });
+      await page.getByText('Replace the existing split?').waitFor({ timeout: 20_000 }).catch(() => problems.push('New rule\'s Split on an address that splits already didn\'t ask to replace it'));
+      if (await builder.locator('#builder-value').count()) problems.push('New rule\'s Split opened the existing split to change without asking');
+      await builder.getByRole('button', { name: 'Cancel' }).click().catch(() => {});
+      await page.waitForTimeout(300);
+      page.off('request', onRequest);
+      if (writes.length) problems.push(`Cancel on Replace the existing split? wrote: ${writes.join(', ')}`);
+      // The AI says Yes takes If yes (crm), No the other side (its inbox).
+      for (const [answer, want] of [['Yes', 'crm'], ['No', 'inbox']]) {
+        await page.goto(origin + `/receiving/addresses/${one.id}?tab=flow`);
+        await page.locator('.flow-sample summary').click({ timeout: 20_000 });
+        await page.locator('.flow-sample button[role=combobox]').click();
+        await page.getByRole('option', { name: answer, exact: true }).click();
+        await page.locator('.flow-panel').getByRole('button', { name: 'Test', exact: true }).click();
+        await page.waitForSelector('.flow-panel .flow[data-tested]', { timeout: 20_000 }).catch(() => {});
+        const ticked = await page.locator('.flow-panel .flow-stage').last().locator('.flow-item[data-hit=yes]').allInnerTexts();
+        if (ticked.length !== 1 || !ticked[0].toLowerCase().includes(want)) problems.push(`Test with The AI says ${answer} delivered to ${JSON.stringify(ticked)}, not ${want}`);
+      }
+      // A new address with two new webhooks whose one write fails (its rule write refused) leaves neither behind.
+      await page.goto(origin + '/receiving');
+      await page.getByRole('button', { name: 'New address', exact: true }).click({ timeout: 20_000 });
+      await builder.locator('#builder-address-input').fill('guard-fails@northwind.example');
+      await builder.getByRole('button', { name: 'Next' }).click();
+      await builder.getByRole('button', { name: 'Split with a rule' }).click({ timeout: 20_000 });
+      await builder.locator('#builder-value').fill('refund');
+      for (const [side, url] of [['then', 'https://hooks.northwind.example/guard-one'], ['otherwise', 'https://hooks.northwind.example/guard-two']]) {
+        await builder.locator(`#builder-${side}`).click();
+        await page.getByRole('option', { name: 'New webhook' }).click();
+        await builder.locator(`#builder-${side}-target`).fill(url);
+      }
+      await fx.db.query("CREATE FUNCTION cls_rule_refused() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'rule write refused'; END $$");
+      await fx.db.query('CREATE TRIGGER cls_rule_refused BEFORE INSERT OR UPDATE ON mail_ritual_configs FOR EACH ROW EXECUTE FUNCTION cls_rule_refused()');
+      expected500 = r => r.url().endsWith('/v1/inbound/addresses') && r.request().method() === 'POST';
+      try {
+        const failed = page.waitForResponse(r => r.url().endsWith('/v1/inbound/addresses') && r.request().method() === 'POST', { timeout: 20_000 });
+        await builder.getByRole('button', { name: 'Save' }).click();
+        if ((await failed).status() !== 500) problems.push('the refused create didn\'t fail');
+      } finally { expected500 = null; await fx.db.query('DROP TRIGGER cls_rule_refused ON mail_ritual_configs'); await fx.db.query('DROP FUNCTION cls_rule_refused()'); }
+      for (const name of ['guard-fails-webhook', 'guard-fails-webhook-2']) if ((await api('/v1/endpoints/' + name)).status !== 404) problems.push(`a failed create left ${name} behind`);
+      const retried = page.waitForResponse(r => r.url().endsWith('/v1/inbound/addresses') && r.request().method() === 'POST', { timeout: 20_000 });
+      await builder.getByRole('button', { name: 'Save' }).click();
+      if ((await retried).status() !== 201) problems.push(`Save again after a failed create returned ${(await retried).status()}`);
     }
   })();
   work.catch(() => {}); // After a timeout the context closes under it.

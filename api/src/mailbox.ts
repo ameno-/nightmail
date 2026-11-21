@@ -20,7 +20,7 @@ import { SEND_LIMITS } from './send-limits.js';
 import { CustomHeaders, splitThreadingHeaders } from './custom-headers.js';
 import { assertRegisteredSender, assertReplyable, DEFAULT_SEND_LIMITS, safeForwardHtml, replyParentId, replyRecipients, replyReferences, replySubject, resolveAttachments, sendLimitsFor } from './mailbox-send.js';
 import { withRegionSettings } from './ses-region-state.js';
-import { mailboxCreates } from './idempotency.js';
+import { mailboxCreates, rolledBack } from './idempotency.js';
 import { registerLogs } from './logs.js';
 import { registerInboundOverview } from './inbound-overview.js';
 import { AddressState, assertInboundRecipients, createInboundThreadRoute, InboundAddressId, inboundReplyTarget, queueInboundThreadMessage, registerInboundThreadReads, replyToInboundThreadRoute, visibleThreadAddresses } from './inbound-threads.js';
@@ -455,7 +455,8 @@ function registerAddresses(app: App) {
       if (identity.DkimAttributes?.SigningEnabled !== true || identity.DkimAttributes.Status !== 'SUCCESS') throw new ApiError(409, 'PUBLIC_DOMAIN_DKIM_NOT_READY', `Enable and verify DKIM signing for ${publicHost} in ${domain.region}.`, 'publicAddress');
       }
     }
-    const { row, runnable } = await c.env.db.transaction(async tx => {
+    // A failure inside this transaction rolled all of it back: its Idempotency-Key is released for a retry.
+    const { row, runnable } = await c.env.db.transaction(async tx => { try {
       await lockMailboxLane(tx,scope.workspaceId, 'address');
       if (publicAddress && c.env.config.multiTenant) {
         const host=publicAddress.split('@')[1]!;
@@ -472,7 +473,7 @@ function registerAddresses(app: App) {
       // Temporary addresses are agent working state, created at a high rate: only permanent ones are audited.
       if (input.ttlSeconds === undefined) await recordAudit(tx, c, { action: 'address.create', workspaceId: scope.workspaceId, target: { type: 'address', id: created.id }, after: { address: created.address, key: input.key ?? null, publicAddress: publicAddress ?? null, aliases: input.aliases.length, rules: created.rules.length } });
       return { row: created, runnable: await recordEvents(tx, scope.workspaceId, [{ type: 'address.created', mailboxId: created.id, data: { origin: 'api', address: created.address } }]) };
-    });
+    } catch (e) { rolledBack(c); throw e; } });
     if (runnable) try { await c.env.wake?.(runnable,'webhook'); } catch { /* durable */ }
     return c.json((await mailboxViews(c.env, [row]))[0]!, 201);
   });

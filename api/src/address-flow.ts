@@ -12,6 +12,9 @@ import { RitualConfig, type Config } from './ritual-pipeline.js';
 import type { RecipeParams } from './ritual-schema.js';
 import { checkVersion, currentVersion, listRoutes, makeRoute, MailRoute, routeFor, RouteFields, save as saveRoutes, type Route } from './routing.js';
 import { apply as applyRecipe, current as currentRules, freeKey, holdReceiving, RecipeInputParams, save as saveRules } from './rituals.js';
+import { createEndpointRecord } from './endpoints.js';
+import { legacyWebhookFormat } from './brand.js';
+import { rolledBack } from './idempotency.js';
 
 /** The two-way rules the dashboard's address builder draws (ritual-schema.ts splitRecipes). */
 const SPLITS = ['split', 'split-by-meaning'] as const;
@@ -22,12 +25,21 @@ const Split = z.object({
   params: RecipeInputParams.describe('The fields createRuleFromRecipe takes for this recipe: split { test, value, then, otherwise }, split-by-meaning { meaning, then, otherwise }.'),
 }).strict().openapi('InboundAddressSplit');
 const RuleKey = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/);
+/** Slack, Discord and webhook endpoints made in the same transaction, as createEndpoint makes them: split params name
+ *  them, and deliver names a webhook as webhook:<name>. A forward is made with createEndpoint first: its recipient confirms. */
+const NewEndpoints = z.array(z.object({
+  type: z.enum(['webhook', 'slack', 'discord']),
+  name: RuleKey.describe('Endpoint name, unique in the workspace across every type.'),
+  url: z.string().max(2048).describe('As createEndpoint takes it: a Slack or Discord webhook URL, or a public HTTPS URL for a webhook (its signing secret is not returned here).'),
+}).strict()).max(4).describe('New endpoints this change uses, made with it: a refusal or failure makes none of them.');
 /** createInboundAddress's flow: the same change for the address it creates. */
 export const CreateFlow = z.object({
+  endpoints: NewEndpoints.optional(),
   deliver: Deliver.optional(),
   split: Split.optional().describe('Adds a two-way rule on the new address. Its params may name the new address as inbox:<key>.'),
 }).strict().openapi('CreateInboundAddressFlow');
 const SetFlow = z.object({
+  endpoints: NewEndpoints.optional(),
   deliver: Deliver.optional(),
   rule: RuleKey.optional().describe('The key of the two-way rule (split or split-by-meaning) on this address that split changes.'),
   split: Split.nullable().optional().describe('With rule: rewrites that rule. A rule other addresses also run is left as it is for them, and this address gets its own copy under a new key. Without rule: adds a new two-way rule on this address. null, with rule: takes the rule off this address, and deletes it once no address runs it.'),
@@ -41,7 +53,7 @@ const FlowResult = z.object({
   rule: z.string().nullable().describe('The two-way rule this change left on the address: the rule it named, its own copy when the rule was shared, or the new rule. null when it was taken off, or no rule was named or added.'),
 }).openapi('InboundAddressFlow');
 
-type Flow = { deliver?: z.infer<typeof Deliver>; rule?: string; split?: { recipe: string; params: RecipeParams } | null };
+type Flow = { endpoints?: z.infer<typeof NewEndpoints>; deliver?: z.infer<typeof Deliver>; rule?: string; split?: { recipe: string; params: RecipeParams } | null };
 type Address = { id: string; address: string };
 // Stored configs come back from jsonb with their keys reordered, so compare them key-order-free.
 const canonical = (value: unknown) => JSON.stringify(value, (_, v) => v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : v);
@@ -83,6 +95,17 @@ async function nextRules(tx: DbExecutor, w: string, config: Config, box: Address
  */
 export async function applyFlow(tx: DbExecutor, c: Ctx, w: string, box: Address, flow: Flow, version: number) {
   await holdReceiving(tx, c);
+  // New endpoints first: the rule names them, and the route takes a new webhook by its ID.
+  const made = new Map<string, string>();
+  for (const e of flow.endpoints ?? []) {
+    const spec = e.type === 'webhook'
+      ? { type: 'webhook' as const, key: e.name, name: e.name, url: e.url, description: '', eventTypes: [], addressIds: null, paused: false, format: legacyWebhookFormat }
+      : { type: e.type, key: e.name, url: e.url };
+    const { row } = await createEndpointRecord(tx, c, w, spec as Parameters<typeof createEndpointRecord>[3], 'endpoints');
+    await recordAudit(tx, c, { action: 'endpoint.create', workspaceId: w, target: { type: 'endpoint', id: row.id }, after: { name: e.name, type: e.type } });
+    if (e.type === 'webhook') made.set('webhook:' + e.name, row.id);
+  }
+  if (Array.isArray(flow.deliver)) flow = { ...flow, deliver: flow.deliver.map(ref => made.get(ref) ?? ref) };
   const before = await currentRules(tx, w), rules = await nextRules(tx, w, before.config, box, flow);
   let saved = version;
   if (flow.deliver !== undefined) {
@@ -118,14 +141,14 @@ export function registerAddressFlow(app: App) {
     responses: { 200: response(FlowResult), ...errors },
   }), async c => {
     const w = receivingAdmin(c, 'change routes and rules').workspaceId, { addressId } = c.req.valid('param');
-    const result = await c.env.db.transaction(async tx => {
+    const result = await c.env.db.transaction(async tx => { try {
       await lockMailboxLane(tx, w, 'address');
       const version = await currentVersion(tx, w);
       checkVersion(c, version);
       const box = (await tx.execute<Address>(sql`SELECT id,address FROM mailboxes WHERE workspace_id=${w} AND id=${addressId} AND (delete_after IS NULL OR delete_after>now())`)).rows[0];
       if (!box) throw new ApiError(404, 'NOT_FOUND', 'Receiving address was not found.');
-      return applyFlow(tx, c, w, box, c.req.valid('json'), version);
-    });
+      return await applyFlow(tx, c, w, box, c.req.valid('json'), version);
+    } catch (e) { rolledBack(c); throw e; } });
     c.header('ETag', `"${result.version}"`);
     return c.json(result, 200);
   });

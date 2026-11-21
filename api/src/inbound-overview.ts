@@ -107,7 +107,7 @@ function decodeEndpoint(cursor: string | undefined) {
 type WorkspaceResult = { config: Partial<Config> | null; programs: Programs | null; acted: Record<string, string>; names: Record<string, string>; endpoints: (EndpointRow & { routes: number; listed: boolean })[]; endpoints_more: boolean; hooks: Hook[]; hooks_more: boolean; keyed: (Slim & { key: string })[]; domains: { id: string; name: string; status: string; catchAll: string }[] };
 
 /** One rule as the overview lists it. `asks` names its AI decisions: decisions, or omens in the deprecated rituals list. */
-const overviewRule = (recipe: typeof RecipeRef, asks: 'decisions' | 'omens') => z.object({ key: z.string(), calls: z.array(z.string()).describe('Endpoint names it can call.'), delivers: z.array(z.string()).describe('Inbox keys it can deliver to.'), [asks]: z.array(z.string()).describe('The names of the AI decisions it asks for.'), attachedTo: z.array(z.string()).describe('Address IDs or addresses it runs on.'),
+const overviewRule = (recipe: typeof RecipeRef, asks: 'decisions' | 'omens') => z.object({ key: z.string(), calls: z.array(z.string()).describe('Endpoint names it can call.'), delivers: z.array(z.string()).describe('Inbox keys it can deliver to.'), [asks]: z.array(z.string()).describe('The names of the AI decisions it asks for.'), questions: z.array(z.string()).describe('The question each of those decisions asks the AI, in the same order: testRules takes scores keyed by these.'), attachedTo: z.array(z.string()).describe('Address IDs or addresses it runs on.'),
   addresses: z.array(z.string()).describe('attachedTo as addresses: an inbox ID reads as its primary address.'),
   recipe: recipe.nullable().describe('The recipe it was made from (listRuleRecipes), while its source is still what the recipe writes; null for a script.'),
   enabled: z.boolean().describe('False when it is turned off: it keeps its addresses and doesn’t run.'),
@@ -341,7 +341,7 @@ export function registerInboundOverview(app: App, deps: Deps) {
       return { id: r.id, kind: r.kind, match: r.match, host: r.host, address: null, route, catchAll: null, rules: ritualKeys, rituals: ritualKeys, ...complete(merge(route ? routed(route) : [], viaRituals(ritualKeys))) };
     });
     const rules = ritualCalls(ws.config, ws.programs).map(({ ritual: { key, recipe, enabled }, ir, calls, delivers }) => ({ key, calls, delivers,
-      decisions: Object.keys(ir?.omens ?? {}), attachedTo: attachments.filter(a => a.ritual === key).map(a => a.target), addresses: attachments.filter(a => a.ritual === key).map(a => ws.names[a.target] ?? a.target), recipe: recipe ?? null, enabled: enabled !== false, lastMatchedAt: ws.acted[key] ?? null }));
+      decisions: Object.keys(ir?.omens ?? {}), questions: Object.values(ir?.omens ?? {}).map(o => o.prompt), attachedTo: attachments.filter(a => a.ritual === key).map(a => a.target), addresses: attachments.filter(a => a.ritual === key).map(a => ws.names[a.target] ?? a.target), recipe: recipe ?? null, enabled: enabled !== false, lastMatchedAt: ws.acted[key] ?? null }));
     const callers = (name: string) => rules.filter(r => r.calls.includes(name)).map(r => r.key);
     const listed = ws.endpoints.filter(e => e.listed).sort((a, b) => a.key! < b.key! ? -1 : 1).slice(0, OVERVIEW_ENDPOINTS);
     const endpoints = [

@@ -59,6 +59,10 @@ async function claim(db: DbExecutor, s: IdempotencyScope, hash: string) {
 }
 const complete = (db: DbExecutor, s: IdempotencyScope, result: unknown) => db.execute(sql`UPDATE sending_idempotency SET result = ${JSON.stringify(result)}::jsonb WHERE ${where(s)}`);
 // Frees a claim that has no result: one whose request was refused or never wrote.
+// Requests whose handler failed inside a transaction that rolled back: nothing was committed, so their key is
+// released like a refusal's, and a retry runs again (rolledBack). A failure that may follow a commit keeps the unknown outcome.
+const rolledBackRequests = new WeakSet<Request>();
+export const rolledBack = (c: Ctx) => { rolledBackRequests.add(c.req.raw); };
 const release = (db: DbExecutor, s: IdempotencyScope) => db.execute(sql`DELETE FROM sending_idempotency WHERE ${where(s)} AND result IS NULL`);
 
 const inProgress = () => new ApiError(409, 'IDEMPOTENCY_IN_PROGRESS', 'Another request with this Idempotency-Key is still running. Retry with the same key after Retry-After; do not repeat the request with a new key.', undefined, true);
@@ -182,7 +186,7 @@ function idempotentCreates(paths: RegExp[]) {
     // twice. Once the handler succeeds, a failure recording its result must not permit another.
     let wrote = false;
     c.env = { ...c.env, db: attemptedWrites(db, () => { wrote = true; }) };
-    const settle = (status: number) => status < 500 || !wrote ? release(db, identity) : complete(db, identity, { status, unknown: true });
+    const settle = (status: number) => status < 500 || !wrote || rolledBackRequests.has(c.req.raw) ? release(db, identity) : complete(db, identity, { status, unknown: true });
     try { await next(); }
     catch (error) { await settle(500); throw error; }
     finally { c.env = { ...c.env, db }; }
