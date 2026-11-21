@@ -1,8 +1,11 @@
 -- bane:no-transaction
--- Retention deletes a finished send's Idempotency-Key with its email's log after 30 days (maintenance.ts SEND_KEYS,
--- whose predicate this repeats exactly). The table had only its primary key, so the hourly delete would scan it all.
--- A B-tree, not BRIN: rows arrive in created_at order, but the delete frees space the next inserts reuse and every other
+-- Retention deletes a finished send's Idempotency-Key with its email's log (maintenance.ts SEND_KEYS and SCHEDULED_KEYS,
+-- whose predicates these repeat exactly): after 30 days, or after 60 for a scheduled send. The table had only its primary
+-- key, so the hourly delete would scan it all.
+-- B-trees, not BRIN: rows arrive in created_at order, but the delete frees space the next inserts reuse and every other
 -- key stays forever, so after one 30-day cycle each BRIN range spans the whole window and never narrows again (BRIN
--- summaries only widen). Partial: only finished sends, the rows the delete takes, so kept keys are never rescanned and
--- the index holds about 30 days of sends at roughly 20 bytes each. Built concurrently: sends keep writing meanwhile.
-CREATE INDEX CONCURRENTLY IF NOT EXISTS sending_idempotency_expiry ON sending_idempotency (created_at) WHERE result IS NOT NULL AND (path IN ('/v1/emails/send','/v1/emails/batch','/v1/inbound/threads') OR path LIKE '/v1/campaigns/%/test' OR path LIKE '/v1/domains/%/test-send' OR path LIKE '/v1/inbound/threads/%/reply');
+-- summaries only widen). Partial: each holds only the rows its delete takes (about 20 bytes each), so kept keys are never
+-- rescanned, and the scheduled keys, which wait longer, have their own index instead of sitting in front of the others.
+-- Built concurrently: sends keep writing meanwhile.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS sending_idempotency_expiry ON sending_idempotency (created_at) WHERE result IS NOT NULL AND NOT (result ? 'scheduledAt') AND path ~ '^/v1/(emails/(send|batch)|campaigns/[^/]+/test|domains/[^/]+/test-send|inbound/threads(/[^/]+/reply)?)$';
+CREATE INDEX CONCURRENTLY IF NOT EXISTS sending_idempotency_scheduled_expiry ON sending_idempotency (created_at) WHERE result ? 'scheduledAt' AND path ~ '^/v1/(emails/(send|batch)|campaigns/[^/]+/test|domains/[^/]+/test-send|inbound/threads(/[^/]+/reply)?)$';
