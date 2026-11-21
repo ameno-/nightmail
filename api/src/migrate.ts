@@ -90,13 +90,15 @@ try {
     if(source.startsWith('-- bane:no-transaction\n')) {
       await client.query("SET lock_timeout='2s'; SET statement_timeout='10min'");
       for(const statement of source.split('\n').map(s=>s.trim()).filter(s=>s && !s.startsWith('--'))) {
-        if(/^DROP INDEX CONCURRENTLY IF EXISTS [a-z_][a-z0-9_]*;$/i.test(statement)){await client.query(statement);continue;}
-        const match=/^CREATE (?:UNIQUE )?INDEX CONCURRENTLY IF NOT EXISTS ([a-z_][a-z0-9_]*) ON .+;$/i.exec(statement);
+        const drop=/^DROP INDEX CONCURRENTLY IF EXISTS ([a-z_][a-z0-9_]*);$/i.exec(statement);
+        const match=drop??/^CREATE (?:UNIQUE )?INDEX CONCURRENTLY IF NOT EXISTS ([a-z_][a-z0-9_]*) ON .+;$/i.exec(statement);
         if(!match)throw new Error(`Invalid online index statement in ${name}`);
         const idx=match[1]!;
+        // Both wait for every transaction that has used the table. A drop that times out leaves the index invalid but still
+        // maintained (so updates of its columns are still not HOT); the next attempt finishes it.
         for(let attempt=1;;attempt++) {
           try {
-            if((await client.query('SELECT FROM pg_index WHERE indexrelid=to_regclass($1) AND NOT indisvalid',[idx])).rowCount)await client.query(`DROP INDEX CONCURRENTLY "${idx}"`);
+            if(!drop&&(await client.query('SELECT FROM pg_index WHERE indexrelid=to_regclass($1) AND NOT indisvalid',[idx])).rowCount)await client.query(`DROP INDEX CONCURRENTLY "${idx}"`);
             await client.query(statement); break;
           } catch(error) {
             if((error as {code?:string}).code!=='55P03' || attempt>=5) throw error;
