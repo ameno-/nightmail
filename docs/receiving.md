@@ -96,7 +96,7 @@ An address's page has three tabs:
 |---|---|
 | **Mail** | Its conversations: search, the view picker (Inbox, Starred, Archive, Spam, Trash, All), reading, replying and New message. A message sent from another address opens on that address's page. |
 | **Where mail goes** | The flow panel's diagram, with Test. **Edit** opens the builder (as above), or its steps: the rules that run, in order, in plain words (attach, detach with Undo, New rule) and where its mail is delivered (**Change**, "Where should this mail go?": Deliver to these destinations, store it or drop it). |
-| **Settings** | Its domain and dates, display name, aliases and wildcards (edited here only), and Delete address. An alias can't have a `*`, as New address can't: `*@domain` points to the catch-all, any other `*` to Wildcards (the API refuses a new one with `INVALID_ADDRESS`). |
+| **Settings** | Its domain and dates, display name, aliases and wildcards (edited here only), and Delete address (its rule attachments go with it: a two-way rule it alone ran is deleted, other rules stay unattached, and a rule shared with another address keeps running there). An alias can't have a `*`, as New address can't: `*@domain` points to the catch-all, any other `*` to Wildcards (the API refuses a new one with `INVALID_ADDRESS`). |
 
 Switching tabs keeps the open conversation and a reply being written.
 

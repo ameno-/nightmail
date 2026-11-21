@@ -12,7 +12,7 @@ import { eventView, inboundEventTypes, latestCursor, readEvents, recordEvents } 
 import { queueReconcile,saveMailboxMx } from './mailbox-setup.js';
 import { attachToMailboxes, checkRuleCapacity, checkTemporaryMailboxRouting, createMailbox, htmlToPlain, lockMailboxLane, ruleMatches, validateRule, ADDRESS, type Scope } from './mailbox-store.js';
 import { currentVersion, detachDestination, registerRouting, RoutingKey } from './routing.js';
-import { applyFlow, CreateFlow, registerAddressFlow } from './address-flow.js';
+import { applyFlow, CreateFlow, registerAddressFlow, releaseAddress } from './address-flow.js';
 import { registerRituals } from './rituals.js';
 import { Ok, registerInboundWebhooks } from './endpoints.js';
 import { AttachmentContentId, AttachmentContentType, AttachmentDisposition, AttachmentFilename, MAX_ATTACHMENT_BASE64 } from './outbound-content.js';
@@ -521,13 +521,17 @@ function registerAddresses(app: App) {
     const [row] = await c.env.db.select().from(mailboxes).where(eq(mailboxes.id, mailbox.id));
     return c.json((await mailboxViews(c.env, [row!]))[0]!, 200);
   });
-  app.openapi(createRoute({ ...meta, method: 'delete', path: detail, ...addressAlias('deleteInboundAddress'), description: 'Admin only. Releases this address and removes its per-address state. Stored messages are kept; future mail follows normal routing. If a route delivers to this inbox, pass detach=true to remove it from those routes in the same change.', request: { params, query: z.object({ detach: z.enum(['true', 'false']).optional().describe('Also remove this inbox from every route that delivers to it, as one routing version.') }) }, responses: { 200: response(Ok), ...errors } }), async c => {
+  app.openapi(createRoute({ ...meta, method: 'delete', path: detail, ...addressAlias('deleteInboundAddress'), description: 'Admin only. Releases this address and removes its per-address state. Stored messages are kept; future mail follows normal routing. Its rule attachments go with it: a two-way rule (split, split-by-meaning) that ran only here is deleted, any other rule stays unattached, and a rule shared with another address keeps running there. If a route delivers to this inbox, pass detach=true to remove it from those routes in the same change.', request: { params, query: z.object({ detach: z.enum(['true', 'false']).optional().describe('Also remove this inbox from every route that delivers to it, as one routing version.') }) }, responses: { 200: response(Ok), ...errors } }), async c => {
     admin(c); const { mailbox, scope } = await mailboxFor(c, c.req.valid('param').addressId);
     if(mailbox.kind==='inbox'){await endInbox(c.env.db,sql`b.workspace_id=${scope.workspaceId} AND b.id=${mailbox.id}`,auditContext(c));return c.json({ok:true as const},200);}
     const runnable = await c.env.db.transaction(async tx => {
       // inbox_end releases it (one delete path and lock order for every inbox). Lanes are taken ingest first, then address.
       await lockMailboxLane(tx, scope.workspaceId, 'ingest');
       await detachDestination(tx,c,scope.workspaceId,mailbox.id);
+      // Its rule attachments go with it: left behind, an attachment to a missing address made every later rule save in
+      // the workspace fail.
+      const own = (await tx.execute<{ address: string }>(sql`SELECT address FROM mailbox_addresses WHERE workspace_id=${scope.workspaceId} AND mailbox_id=${mailbox.id}`)).rows.map(r => r.address);
+      await releaseAddress(tx, c, scope.workspaceId, { id: mailbox.id, addresses: [...new Set([mailbox.address, ...own])] });
       await tx.execute(sql`SELECT inbox_end(${scope.workspaceId},${mailbox.id})`);
       if (mailbox.expiresAt === null) await recordAudit(tx, c, { action: 'address.delete', workspaceId: scope.workspaceId, target: { type: 'address', id: mailbox.id }, before: { address: mailbox.address, key: mailbox.key } });
       return recordEvents(tx, scope.workspaceId, [{ type: 'address.deleted', mailboxId: mailbox.id, data: { address: mailbox.address } }]);
