@@ -4,7 +4,7 @@ A **rule** is a short script that runs when mail reaches an inbox or address. It
 
 ![The rule editor: source with live checks, Try it on an email, where it runs, sender lists and AI decision opt-in](images/rules/editor.png)
 
-In the dashboard, rules and destinations (the API's endpoints) are tabs of **Receiving**, next to Addresses. [receiving.md](receiving.md) explains how they fit together. The Rules tab lists every rule as a sentence ("Post new mail to support in Slack"), with its addresses, when it last matched, an on/off switch and a menu (Edit, Edit as code, Delete). **New rule** offers splitting an address's mail two ways (**Split by words**, **Split by meaning**: the address builder), then the [recipes](#recipes); under **Advanced**, **Write code** opens the editor and **Ask your agent** has an agent write one.
+In the dashboard, rules and destinations (the API's endpoints) are tabs of **Receiving**, next to Addresses. [receiving.md](receiving.md) explains how they fit together. The Rules tab lists every rule as a sentence ("Post new mail to support in Slack"), with its addresses, when it last matched, an on/off switch and a menu (Edit, Edit as code, Delete). **New rule** offers the [recipes](#recipes); under **Advanced**, **Write code** opens the editor and **Ask your agent** has an agent write one.
 
 Rules were called rituals, and AI decisions omens, until November 2026. The earlier names still work in the API as deprecated aliases: see [Earlier names](#earlier-names).
 

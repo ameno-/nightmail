@@ -70,7 +70,7 @@ The list is complete: routing targets and rule targets always show, and webhooks
 - **One way:** one destination, picked from its inbox, another inbox, a destination (Slack, Discord, a webhook, a forward), keep it with no inbox, drop it, or a new Slack, Discord, webhook or forward made right there.
 - **Split it two ways:** a rule checks one thing (the subject mentions, the email mentions, the sender is, it has an attachment, or it looks like something, which the AI checks at $0.10 per 1,000 emails) and the flow forks: **If yes** to one destination, **Otherwise** to another.
 
-Save shows the result with **Test**. **Edit** on the flow panel, or on an address's Where mail goes tab, opens the same builder for that address; rules it doesn't draw keep running (**All rules** lists them). Saving composes the public API's own calls: `createInboundAddress`, `createEndpoint` for a new destination, a two-way rule (`createRuleFromRecipe` with `split` or `split-by-meaning`, see [rules.md](rules.md#recipes)) and the address's route. Each step adds before it removes, so no mail is lost halfway.
+Save shows the result with **Test**. The builder only creates: it turns away an address that exists, and a `*` (a catch-all or wildcard) gets a button to that route's editor instead. **Edit** on the flow panel, or on an address's Where mail goes tab, opens the address's steps (below), never the builder. Saving composes the public API's own calls: `createInboundAddress`, `createEndpoint` for a new destination, a two-way rule (`createRuleFromRecipe` with `split` or `split-by-meaning`, see [rules.md](rules.md#recipes)) and the address's route, each created, never updated.
 
 ## The flow panel
 
@@ -78,7 +78,7 @@ Choosing a row opens its flow, the same diagram everywhere: **Receive** (the add
 
 | Action | What it does |
 |---|---|
-| **Test** | Sends a sample email (a refund request unless changed under *Sample*) through the saved rules with the dry run (`testRules`). What the email took is ticked; the rest goes quiet. Nothing is sent or saved, and an AI decision gives its default answer. |
+| **Test** | Sends a sample email (a refund request unless changed under *Sample*) through the saved rules with the dry run (`testRules`). It shows what the dry run reports: the rules that acted, ticked, and where the mail went. Nothing is sent or saved, and the AI isn't asked: when a rule reads an AI decision, nothing is ticked for it and Destinations says "Decided by AI when real mail arrives". |
 | **Edit** | Opens the address's Where mail goes tab to change it; a wildcard or catch-all opens "Where should this mail go?". |
 | **Mail** | The address's Mail tab. |
 

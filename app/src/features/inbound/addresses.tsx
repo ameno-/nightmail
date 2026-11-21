@@ -6,7 +6,6 @@ import { useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/cont
 import { date, number } from '../../lib/format'
 import { AddressMail } from './threads'
 import { FlowPanel } from './panel'
-import { AddressBuilder } from './builder'
 import { request } from '../../data/live'
 import { errorText, type InboundAddress, type InboundAddressPatch } from '../../data/types'
 import { AliasEditor, aliasState, commitAliases, type AliasState } from './aliases'
@@ -140,9 +139,8 @@ export function InboundAddressDetailPage() {
   const overview = useOverview({ q: current?.address ?? '', kind: current?.kind === 'inbox' ? 'inbox' : 'address', limit: 5 }, false, canAdminister && !!current && tab === 'flow')
   // Where its mail goes is the flow panel's diagram; Edit (or ?edit from the panel) opens its steps to change them.
   const entry = overview.data?.routes.data.find(r => r.address?.id === id)
-  // Edit opens the builder; ?edit=1 (from the builder's "All rules") lists every rule it runs, to attach or detach them.
+  // Edit (and ?edit=1) shows the steps: its route, changed in the route editor, and every rule it runs, to attach or detach.
   const [editing, setEditing] = useState(params.get('edit') !== null)
-  const [building, setBuilding] = useState(false)
   const input = edited ?? (current ? formOf(current) : null)
   // Only a failed first load replaces the page: a later refetch that fails keeps the Settings form and its edits.
   if (address.error && !current) return <><PageHeader title="Address" backTo="/receiving" /><ErrorState error={address.error} onRetry={() => void address.refetch()} /></>
@@ -176,7 +174,7 @@ export function InboundAddressDetailPage() {
       : tab === 'flow' ? <div className="stack addr-page">{editing || !entry || !overview.data
         ? <><AddressPath address={current} overview={overview} />
           {entry && <div className="cluster"><Button onClick={() => setEditing(false)}>Done</Button></div>}</>
-        : <div className="addr-flow"><FlowPanel entry={entry} overview={overview.data} onEdit={() => setBuilding(true)} mailLink={false} /></div>}</div>
+        : <div className="addr-flow"><FlowPanel entry={entry} overview={overview.data} onEdit={() => setEditing(true)} mailLink={false} /></div>}</div>
       : <div className="stack addr-page">
         <KeyValues className="addr-facts" items={[
           ['Domain', <Link key="d" to="/domains">{current.domain}</Link>],
@@ -196,7 +194,6 @@ export function InboundAddressDetailPage() {
         </form>}
         <div className="addr-danger"><Button variant="danger" onClick={() => setConfirmDelete(true)}>Delete address</Button></div>
       </div>}
-    {building && current && <AddressBuilder open address={current} domains={[{ id: '', name: current.domain, status: 'active' }]} onOpenChange={open => { if (!open) { setBuilding(false); void overview.refetch() } }} />}
     <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title="Delete this address?" description="Its mail stays in Logs. New mail to it and its aliases follows the domain’s catch-all, and nothing else delivers here." confirmLabel="Delete address" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(); navigate('/receiving') }} />
   </div>
 }

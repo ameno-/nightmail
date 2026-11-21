@@ -26,6 +26,9 @@ import './inbound.css'
 import './receiving.css'
 import './recipes.css'
 
+// New rule's Split by words and Split by meaning open the address builder on an existing address, which only creates
+// for now: off until the builder edits existing addresses safely.
+const SPLIT_ENTRY = false
 const RulesPage = lazy(() => import('./rituals').then(m => ({ default: m.RulesPage })))
 const LIST = '/receiving?tab=rules'
 
@@ -162,7 +165,7 @@ export function NewRulePage() {
       : !c ? <LoadingRegion label="Loading recipes"><div className="recipe-groups" aria-hidden="true">{[2, 2, 4, 2].map((n, g) => <section key={g} className="recipe-group">
         <Skeleton width={120} height={14} /><div className="recipe-tiles">{Array.from({ length: n }, (_, i) => <span key={i} className="recipe-tile recipe-tile--skeleton" />)}</div></section>)}</div></LoadingRegion>
       : <div className="recipe-groups">
-        {buildFor && <section className="recipe-group" aria-labelledby="recipes-split">
+        {SPLIT_ENTRY && buildFor && <section className="recipe-group" aria-labelledby="recipes-split">
           <h2 id="recipes-split">Split mail</h2>
           <div className="recipe-tiles">
             <Link className="recipe-tile" to={`/receiving?build=${encodeURIComponent(buildFor.id)}&split=subject`}><Split className="rcv-icon" size={16} aria-hidden="true" /><strong>Split by words</strong></Link>

@@ -2,7 +2,7 @@
 // destinations). The address panel and an address's page show it, and a test marks the path one email took: what it
 // took is ticked, the rest goes quiet. Neutral throughout: the accent is for buttons and charts.
 import { useState, type FormEvent, type ReactNode } from 'react'
-import { AtSign, Check, Send, Workflow, type LucideIcon } from 'lucide-react'
+import { AtSign, Check, Send, Sparkles, Workflow, type LucideIcon } from 'lucide-react'
 import { Alert, Field, Input, LoadingRegion, StatusDot, Textarea } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { request } from '../../data/live'
@@ -78,6 +78,7 @@ function receiveNote(entry: RouteEntry): ReactNode {
   return [a?.displayName, a?.expiresAt ? expiresIn(a.expiresAt) : null, also.length ? `also ${also.join(', ')}` : null].filter(Boolean).join(' · ') || null
 }
 
+const aiUndecided = 'Decided by AI when real mail arrives'
 /** What one test run did for one recipient: where its mail went and which rules acted. */
 export type TestOutcome = { recipient: TraceRecipient | null; rows: TraceRow[] }
 export const outcomeOf = (result: DryRun, address: string): TestOutcome => ({
@@ -165,14 +166,18 @@ function matchedBy(r: TraceRecipient, overview: Overview, addresses: Pick<Inboun
 /** The path one email took, from a test: where it was received and how, the rules that ran (ticked when they acted),
  *  and where it was delivered. Until the test answers it is one loading block, replaced whole (a stage that grew as
  *  its rules arrived would push the next one down); the caller says what failed. */
-export function OutcomeFlow({ address, overview, outcome, error, addresses = [] }: { address: string; overview: Overview; outcome: TestOutcome | null; error: string | null; addresses?: InboundAddress[] }) {
+export function OutcomeFlow({ address, overview, outcome, error, addresses = [], unasked = false }: { address: string; overview: Overview; outcome: TestOutcome | null; error: string | null; addresses?: InboundAddress[]; unasked?: boolean }) {
   const r = outcome?.recipient ?? null
+  // A test never asks the AI (unasked): a rule that read an AI answer got its fallback, so neither it nor where the mail
+  // went is ticked, and Destinations says the AI decides on real mail.
+  const byAi = (row: TraceRow) => unasked && row.timeline.some(step => step.kind === 'decisions')
+  const undecided = !!r && (outcome?.rows ?? []).some(byAi)
   if (!r && !error) return <LoadingRegion label="Testing"><div className="flow-skeleton" aria-hidden="true"><span /><span /><span /></div></LoadingRegion>
   return <Flow label="Mail flow" tested={!!r}>
     <FlowStage kind="receive"><FlowItem hit={r ? true : undefined} note={r ? matchedBy(r, overview, addresses) : undefined}><Match value={r?.address ?? address} /></FlowItem></FlowStage>
-    <FlowStage kind="process">{!r ? <FlowItem><span className="muted">—</span></FlowItem> : outcome!.rows.length ? outcome!.rows.map(row => <FlowItem key={row.key} hit={row.actions.length > 0} note={row.error ?? undefined}><RuleLine rule={overview.rules.find(x => x.key === row.key)} keyName={row.key} /></FlowItem>)
+    <FlowStage kind="process">{!r ? <FlowItem><span className="muted">—</span></FlowItem> : outcome!.rows.length ? outcome!.rows.map(row => <FlowItem key={row.key} hit={byAi(row) ? undefined : row.actions.length > 0} note={row.error ?? undefined}><RuleLine rule={overview.rules.find(x => x.key === row.key)} keyName={row.key} /></FlowItem>)
       : <FlowItem><span className="muted">{steps.process.empty}</span></FlowItem>}</FlowStage>
-    <FlowStage kind="deliver">{!r ? <FlowItem><span className="muted">—</span></FlowItem> : <Delivered recipient={r} overview={overview} addresses={addresses} />}</FlowStage>
+    <FlowStage kind="deliver">{!r ? <FlowItem><span className="muted">—</span></FlowItem> : undecided ? <FlowItem icon={<Sparkles className="rcv-icon" size={16} aria-hidden="true" />}><span className="muted">{aiUndecided}</span></FlowItem> : <Delivered recipient={r} overview={overview} addresses={addresses} />}</FlowStage>
   </Flow>
 }
 
