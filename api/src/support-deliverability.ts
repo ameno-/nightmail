@@ -8,7 +8,7 @@ import { productName } from './brand.js';
 
 // A support conversation's deliverability reads (support-agent-design §5.2): GET only, behind supportGate (each costs 5
 // of the conversation's 120 a minute, see supportWeight), x-internal like every /v1/support route. Each handler is one read-only
-// transaction with a 3-second statement timeout (budgetedRead) over the indexes listed in src/deliverability.ts, and its
+// transaction with a 3-second statement timeout (supportRead) over the indexes listed in src/deliverability.ts, and its
 // result is cached 60 seconds per workspace, route and parameters, stamped computedAt. Windows are at most 30 days
 // (hourly at most 72 hours); at most 20 groups plus other and 50 rows. Recipients appear as domains and providers only,
 // diagnostics are redacted, and message content only in the workspace whose content the customer shared.
@@ -79,7 +79,7 @@ export function registerSupportDeliverability(app: App, meta: Meta, WorkspaceFil
     const w = windowOf(q, q.granularity, q.granularity === 'hour' ? 48 * HOUR : 14 * DAY, q.granularity === 'hour' ? d.LIMITS.hourlyHours * HOUR : d.LIMITS.windowDays * DAY);
     const params = { ...w, granularity: q.granularity, groupBy: q.groupBy, stream: q.stream, campaignId: q.campaignId, fromDomain: q.fromDomain };
     return c.json(await cached(c, 'metrics', workspaceId, params, async () => ({ workspaceId, window: { ...w, granularity: q.granularity }, groupBy: q.groupBy, stream: q.stream,
-      filters: { campaignId: q.campaignId ?? null, fromDomain: q.fromDomain ?? null }, ...await d.budgetedRead(c.env.db, tx => d.deliveryMetrics(tx, workspaceId, params)) })), 200);
+      filters: { campaignId: q.campaignId ?? null, fromDomain: q.fromDomain ?? null }, ...await d.supportRead(c.env.db, tx => d.deliveryMetrics(tx, workspaceId, params)) })), 200);
   });
 
   // ---------- 2. bounces ----------
@@ -99,7 +99,7 @@ export function registerSupportDeliverability(app: App, meta: Meta, WorkspaceFil
       type: z.enum(['bounce', 'deferral', 'complaint']).optional().describe('Default: all three.') }) }, responses: { 200: response(Bounces), ...errors } }), async c => {
     const q = c.req.valid('query'), { workspaceId } = oneWorkspace(c), w = windowOf(q, 'day', 14 * DAY, d.LIMITS.windowDays * DAY);
     const params = { ...w, provider: q.provider, campaignId: q.campaignId, fromDomain: q.fromDomain, type: q.type };
-    return c.json(await cached(c, 'bounces', workspaceId, params, async () => ({ workspaceId, window: w, ...await d.budgetedRead(c.env.db, tx => d.bounceReasons(tx, workspaceId, params)) })), 200);
+    return c.json(await cached(c, 'bounces', workspaceId, params, async () => ({ workspaceId, window: w, ...await d.supportRead(c.env.db, tx => d.bounceReasons(tx, workspaceId, params)) })), 200);
   });
 
   // ---------- 3. domain health ----------
@@ -137,7 +137,7 @@ export function registerSupportDeliverability(app: App, meta: Meta, WorkspaceFil
       const identity = (r.claim?.identity ?? {}) as { ses?: { DkimAttributes?: { Status?: string; SigningEnabled?: boolean }; MailFromAttributes?: { MailFromDomain?: string; MailFromDomainStatus?: string } };
         dmarc?: { status?: string; record?: string | null; source?: string | null; checkedAt?: number; aspf?: string } | null };
       const ses = identity.ses ?? {}, stored = identity.dmarc ?? null, mailFromDomain = ses.MailFromAttributes?.MailFromDomain?.toLowerCase() ?? null;
-      const activity = await d.budgetedRead(c.env.db, tx => d.domainActivity(tx, r.workspace_id, name));
+      const activity = await d.supportRead(c.env.db, tx => d.domainActivity(tx, r.workspace_id, name));
       const region = r.region ?? r.connection?.region ?? c.env.config.regions[0]!;
       const dns = await d.liveDns(name, mailFromDomain ? { domain: mailFromDomain, region } : null, stored ? { record: stored.record ?? null, checkedAt: stored.checkedAt ?? null } : null);
       const align = await d.alignment(name, { dkim: ses.DkimAttributes?.Status ?? null, signing: ses.DkimAttributes?.SigningEnabled === true, mailFrom: mailFromDomain, mailFromStatus: ses.MailFromAttributes?.MailFromDomainStatus ?? null }, dns.dmarc.aspf);
@@ -172,7 +172,7 @@ export function registerSupportDeliverability(app: App, meta: Meta, WorkspaceFil
   app.openapi(createRoute({ ...meta('getSupportScreen', 'The Hosted content screen over at most 7 days: hourly screened and rejected counts, and the last 50 rejections with subject, error code and spam score. Never bodies.'),
     path: '/v1/support/screen', request: { query: WorkspaceFilter.extend({ since: z.iso.datetime().optional().describe('Default and limit: 7 days ago.') }) }, responses: { 200: response(Screen), ...errors } }), async c => {
     const q = c.req.valid('query'), { workspaceId } = oneWorkspace(c), w = windowOf({ since: q.since }, 'day', 7 * DAY, 7 * DAY);
-    return c.json(await cached(c, 'screen', workspaceId, w.since, async () => ({ workspaceId, since: w.since, ...await d.budgetedRead(c.env.db, tx => d.screenActivity(tx, workspaceId, w.since)) })), 200);
+    return c.json(await cached(c, 'screen', workspaceId, w.since, async () => ({ workspaceId, since: w.since, ...await d.supportRead(c.env.db, tx => d.screenActivity(tx, workspaceId, w.since)) })), 200);
   });
 
   // ---------- 5. campaigns ----------
@@ -215,7 +215,7 @@ export function registerSupportDeliverability(app: App, meta: Meta, WorkspaceFil
     path: '/v1/support/campaigns', request: { query: WorkspaceFilter.extend({ since: z.iso.datetime().optional().describe('Created at or after (default: 30 days ago).'), state: z.string().max(40).optional(),
       limit: z.coerce.number().int().min(1).max(d.LIMITS.rows).default(20) }) }, responses: { 200: response(z.object({ workspaceId: z.string(), computedAt: z.string(), data: z.array(CampaignSummary) })), ...errors } }), async c => {
     const q = c.req.valid('query'), { workspaceId } = oneWorkspace(c), since = q.since ?? new Date(Math.ceil(Date.now() / 60_000) * 60_000 - 30 * DAY).toISOString();
-    return c.json(await cached(c, 'campaigns', workspaceId, [since, q.state, q.limit], () => d.budgetedRead(c.env.db, async tx => {
+    return c.json(await cached(c, 'campaigns', workspaceId, [since, q.state, q.limit], () => d.supportRead(c.env.db, async tx => {
       const { rows } = await campaignRows(tx, sql`p.workspace_id = ${workspaceId} AND p.created_at >= ${since}::timestamptz ${q.state ? sql`AND p.state = ${q.state}` : sql``}`, q.limit);
       const stats = await statsOf(tx, workspaceId, rows);
       return { workspaceId, data: rows.map(row => summary(row, stats.get(row.id))) };
@@ -230,7 +230,7 @@ export function registerSupportDeliverability(app: App, meta: Meta, WorkspaceFil
   app.openapi(createRoute({ ...meta('getSupportCampaign', 'One campaign: what the list shows, plus hourly send pacing and, only when the customer shared message content in its workspace, the draft content.'),
     path: '/v1/support/campaigns/{id}', request: { query: WorkspaceFilter, params: z.object({ id: z.string().max(120) }) }, responses: { 200: response(CampaignDetail), ...errors } }), async c => {
     const id = c.req.valid('param').id, scope = c.get('support')!;
-    return c.json(await cached(c, 'campaign', narrowed(c), [id, scope.contentWorkspaceId], () => d.budgetedRead(c.env.db, async tx => {
+    return c.json(await cached(c, 'campaign', narrowed(c), [id, scope.contentWorkspaceId], () => d.supportRead(c.env.db, async tx => {
       const row = await campaignById(c, tx, id);
       const stats = await statsOf(tx, row.workspace_id, [row]), shared = scope.contentWorkspaceId === row.workspace_id;
       const { rows: pacing } = await tx.execute<{ at: string; emails: number }>(sql`SELECT to_char(date_trunc('hour', created_at, 'UTC') AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24":00:00.000Z"') AS at, count(*)::int AS emails
@@ -262,7 +262,7 @@ export function registerSupportDeliverability(app: App, meta: Meta, WorkspaceFil
     path: '/v1/support/emails/{id}/lint', request: { query: WorkspaceFilter, params: z.object({ id: z.string().max(120) }) }, responses: { 200: response(Lint), ...errors } }), async c => {
     const id = c.req.valid('param').id, list = narrowed(c), scope = c.get('support')!;
     if (!list.length) notFound('Sent email');
-    return c.json(await cached(c, 'email-lint', list, [id, scope.contentWorkspaceId], () => d.budgetedRead(c.env.db, async tx => {
+    return c.json(await cached(c, 'email-lint', list, [id, scope.contentWorkspaceId], () => d.supportRead(c.env.db, async tx => {
       const { rows: [row] } = await tx.execute<{ workspace_id: string; from_address: string; subject: string; campaign_id: string | null; snapshot: Snapshot; size: number }>(sql`SELECT workspace_id, from_address, subject, campaign_id,
           snapshot, octet_length(snapshot::text)::int AS size FROM sending_emails WHERE id = ${id} AND workspace_id = ANY(${ids(list)})`);
       if (!row) notFound('Sent email');
@@ -281,7 +281,7 @@ export function registerSupportDeliverability(app: App, meta: Meta, WorkspaceFil
   app.openapi(createRoute({ ...meta('getSupportCampaignLint', 'Checks one campaign’s draft the same way as an email: metadata always, content checks only with the customer’s content consent.'),
     path: '/v1/support/campaigns/{id}/lint', request: { query: WorkspaceFilter, params: z.object({ id: z.string().max(120) }) }, responses: { 200: response(Lint), ...errors } }), async c => {
     const id = c.req.valid('param').id, scope = c.get('support')!;
-    return c.json(await cached(c, 'campaign-lint', narrowed(c), [id, scope.contentWorkspaceId], () => d.budgetedRead(c.env.db, async tx => {
+    return c.json(await cached(c, 'campaign-lint', narrowed(c), [id, scope.contentWorkspaceId], () => d.supportRead(c.env.db, async tx => {
       const row = await campaignById(c, tx, id), draft = row.draft, files = await attachmentsOf(tx, row.workspace_id, draft.attachments ?? []);
       let html: string | null = null, text: string | null = null;
       // The email a valid draft becomes (as the campaign preview renders it); a draft that is not valid block HTML as written.
@@ -316,6 +316,6 @@ export function registerSupportDeliverability(app: App, meta: Meta, WorkspaceFil
   app.openapi(createRoute({ ...meta('getSupportAudienceHealth', 'List hygiene: per list (the 20 largest) and overall, consent mix, suppressions by reason, engagement recency and stale share, role, free-mail and mistyped addresses, providers; recent imports with their bounce and complaint outcomes; findings. Counts only, never an address.'),
     path: '/v1/support/audience/health', request: { query: WorkspaceFilter.extend({ listId: z.string().max(120).optional() }) }, responses: { 200: response(Audience), ...errors } }), async c => {
     const q = c.req.valid('query'), { workspaceId } = oneWorkspace(c);
-    return c.json(await cached(c, 'audience', workspaceId, q.listId ?? null, async () => ({ workspaceId, ...await d.budgetedRead(c.env.db, tx => d.audienceHealth(tx, workspaceId, q.listId)) })), 200);
+    return c.json(await cached(c, 'audience', workspaceId, q.listId ?? null, async () => ({ workspaceId, ...await d.supportRead(c.env.db, tx => d.audienceHealth(tx, workspaceId, q.listId)) })), 200);
   });
 }
