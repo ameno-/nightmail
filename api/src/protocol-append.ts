@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { ApiError, id, logError, type Ctx } from './core.js';
+import { ApiError, id, rowId, logError, type Ctx } from './core.js';
 import { principal } from './mail-gateway.js';
 import { boundMailBucket, mailKey, withMailObjects, readMailBytes } from './mail-objects.js';
 import { parseInboundMime } from './mailbox-ingest.js';
@@ -79,7 +79,7 @@ export async function streamedAppend(c: Ctx, encoded: string, digest: string) {
       if (!(await tx.execute(quota)).rowCount) throw new ApiError(409, 'OVERQUOTA', 'Append quota exceeded.');
       const r = (
         await tx.execute<{ r: { pairs: number[][]; validity: number; error?: string } }>(
-          sql`SELECT mailgw_append(${who.w},${who.b},${p.folder},${mid},${id('thr')},${m?.messageId ?? null},${m?.subject ?? ''},${m?.from?.address ?? ''},'',${p.date}::timestamptz,${p.size},${bucket},${key},${header === null ? null : JSON.stringify({ headerLength: header })}::jsonb,${sql.param(p.flags)}::text[]) r`,
+          sql`SELECT mailgw_append(${who.w},${who.b},${p.folder},${mid},${rowId('thr')},${m?.messageId ?? null},${m?.subject ?? ''},${m?.from?.address ?? ''},'',${p.date}::timestamptz,${p.size},${bucket},${key},${header === null ? null : JSON.stringify({ headerLength: header })}::jsonb,${sql.param(p.flags)}::text[]) r`,
         )
       ).rows[0]!.r;
       if (r.error) throw new ApiError(409, r.error === 'OVERQUOTA' ? 'OVERQUOTA' : 'APPEND_REFUSED', 'Append refused.');

@@ -10,7 +10,7 @@ import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import type { GetEmailIdentityCommandOutput } from '@aws-sdk/client-sesv2';
 import { X509Certificate, verify } from 'node:crypto';
 import { isIP } from 'node:net';
-import { actor, ApiError, assertSesConfigured, chargeBudget, denied, requiredOf, unrestrictedRequired, assertSharedAccount, isSimulatedSes, digest, errors, getSes, id, IdParams, json, lazyModule, log, logError, ModuleLoadError, notFound, PageQuery, preloadSesTransport, randomSecret, redactCapabilityData, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, wrapModuleLoad, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Permission, type Runtime } from './core.js';
+import { actor, ApiError, assertSesConfigured, chargeBudget, denied, requiredOf, unrestrictedRequired, assertSharedAccount, isSimulatedSes, digest, errors, getSes, id, rowId, IdParams, json, lazyModule, log, logError, ModuleLoadError, notFound, PageQuery, preloadSesTransport, randomSecret, redactCapabilityData, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, wrapModuleLoad, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Permission, type Runtime } from './core.js';
 import { chargeManualDelivery, claimedWithWebhooks, enqueue, JobDeferred, WEBHOOK_ATTEMPTS, retryDatabaseFailures, webhookClaimCtes } from './jobs.js';
 import { applyClaim, connectionReady, domainHosts, receivingSetup, type ReceivingSetup, hostGraceStart, identityOnly, LOST_GRACE_MS, poolReceives, poolSends, transitionClaim, type ClaimEvidence, type ClaimState, type HostEvidence, type HostStatus, type HostWrite, type IdentityFacts, type TenantState, PROOF_LABELS, proofRecordName, type ProofLabel } from './states.js';
 import { jobs } from './db/core.js';
@@ -261,7 +261,7 @@ export async function publishEvent(runtime: Runtime, event: PublishedEvent, wake
     let count = 0;
     for (const endpoint of endpoints) {
       if (!endpoint.eventTypes.includes(event.type) || (endpoint.regions && event.region !== null && !endpoint.regions.includes(event.region))) continue;
-      const deliveryId = id('whd');
+      const deliveryId = rowId('whd');
       await tx.insert(deliveries).values({ id: deliveryId, workspaceId: event.workspaceId, webhookId: endpoint.id, eventId: event.id, payload: event });
       await enqueue(tx, { type: 'operation.webhook', workspaceId: event.workspaceId, payload: { deliveryId, generation: 0 } });
       count++;
@@ -847,7 +847,7 @@ async function getWebhook(runtime: Runtime, a: Actor, webhookId: string, db: DbE
 export async function testSendingWebhook(runtime: Runtime, tx: DbExecutor, a: Actor, webhookId: string) {
   const endpoint = await getWebhook(runtime, a, webhookId, tx); webhookUrl(runtime, endpoint.url);
   if (endpoint.reconfirm) throw webhookNeedsUrl();
-  const deliveryId = id('whd'), event: PublishedEvent = { id: id('evt_test'), type: 'email.delivered', createdAt: now(), workspaceId: a.workspaceId, region: null, data: { synthetic: true, test: true, message: 'Explicit webhook endpoint test. No email was sent.' } };
+  const deliveryId = rowId('whd'), event: PublishedEvent = { id: id('evt_test'), type: 'email.delivered', createdAt: now(), workspaceId: a.workspaceId, region: null, data: { synthetic: true, test: true, message: 'Explicit webhook endpoint test. No email was sent.' } };
   await chargeManualDelivery(tx, a.workspaceId, 1); await tx.insert(deliveries).values({ id: deliveryId, workspaceId: a.workspaceId, webhookId: endpoint.id, eventId: event.id, payload: event, synthetic: true }); await enqueue(tx, { type: 'operation.webhook', workspaceId: a.workspaceId, payload: { deliveryId, generation: 0 } });
   return { id: deliveryId, status: 'pending' as const };
 }
@@ -1702,7 +1702,7 @@ async function resumeParked(db: DbExecutor, workspaceId: string, webhookId: stri
       UPDATE operation_deliveries d SET status='pending', generation=d.generation+1, updated_at=now() FROM parked p WHERE d.id=p.id AND p.attempt_count<${WEBHOOK_ATTEMPTS} RETURNING d.id, d.generation, d.attempt_count
     ), queued AS (
       INSERT INTO jobs(id, workspace_id, type, payload, attempts)
-      SELECT 'job_'||replace(gen_random_uuid()::text,'-',''), ${workspaceId}, 'operation.webhook', jsonb_build_object('deliveryId', id, 'generation', generation), attempt_count FROM resumed
+      SELECT public.row_id('job'), ${workspaceId}, 'operation.webhook', jsonb_build_object('deliveryId', id, 'generation', generation), attempt_count FROM resumed
     ) SELECT count(*)::int AS n FROM parked`);
   return Number(rows[0]?.n ?? 0);
 }
@@ -2130,12 +2130,12 @@ const publishBatchJob: JobHandler = async (runtime, payload, job) => {
     const endpoints = await tx.select().from(webhooks).where(and(scoped(webhooks, unique[0]!), eq(webhooks.paused, false)));
     const queued = unique.filter(event => accepted.has(event.id)).flatMap(event => endpoints.filter(endpoint =>
       endpoint.eventTypes.includes(event.type) && (!endpoint.regions || event.region === null || endpoint.regions.includes(event.region))
-    ).map(endpoint => ({ event, endpoint, deliveryId: id('whd') })));
+    ).map(endpoint => ({ event, endpoint, deliveryId: rowId('whd') })));
     if (!queued.length) return;
     for (let offset = 0; offset < queued.length; offset += 1000) {
       const group = queued.slice(offset, offset + 1000);
       await tx.insert(deliveries).values(group.map(({ event, endpoint, deliveryId }) => ({ id: deliveryId, workspaceId: event.workspaceId, webhookId: endpoint.id, eventId: event.id, payload: event })));
-      await tx.insert(jobs).values(group.map(({ event, deliveryId }) => ({ id: id('job'), type: 'operation.webhook', workspaceId: event.workspaceId, payload: { deliveryId, generation: 0 } })));
+      await tx.insert(jobs).values(group.map(({ event, deliveryId }) => ({ id: rowId('job'), type: 'operation.webhook', workspaceId: event.workspaceId, payload: { deliveryId, generation: 0 } })));
     }
   });
 };

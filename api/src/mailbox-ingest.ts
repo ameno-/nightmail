@@ -666,7 +666,7 @@ export async function recoverMailReceipts(runtime: Runtime,continuation=false) {
     UPDATE mail_receipts r SET recovery_attempts=r.recovery_attempts+1,last_recovered_at=now(),status=CASE WHEN d.young THEN 'pending' ELSE 'failed' END,
       error=CASE WHEN d.young THEN NULL WHEN d.exhausted THEN 'MAILBOX_INGEST_EXHAUSTED' ELSE 'MAILBOX_RECOVERY_EXHAUSTED' END,processed_at=CASE WHEN d.young THEN NULL ELSE now() END
     FROM due d WHERE r.workspace_id=d.workspace_id AND r.ses_message_id=d.ses_message_id RETURNING r.workspace_id,r.ses_message_id,r.status,d.seasoned),
-    queued AS (INSERT INTO jobs(id,type,workspace_id,payload,attempts) SELECT 'job_'||gen_random_uuid(),'mailbox.ingest',workspace_id,jsonb_build_object('sesMessageId',ses_message_id),
+    queued AS (INSERT INTO jobs(id,type,workspace_id,payload,attempts) SELECT public.row_id('job'),'mailbox.ingest',workspace_id,jsonb_build_object('sesMessageId',ses_message_id),
       CASE WHEN seasoned THEN ${MAX_ATTEMPTS-1}::int ELSE 0 END FROM recovered WHERE status='pending' ORDER BY workspace_id,ses_message_id)
     SELECT count(*)::int AS n FROM recovered`);
   if(result.rows[0]!.n===100){

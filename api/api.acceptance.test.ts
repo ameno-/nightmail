@@ -29588,6 +29588,80 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  // Time-ordered IDs (migration 392): emails, events, webhook and inbound webhook deliveries, jobs and threads get a UUIDv7
+  // in id()'s prefix_<32 hex> form, so their inserts land at the end of each index. Every other kind stays random, and
+  // nothing may rely on these being strictly increasing: within one millisecond they come in no particular order.
+  test('IDs: high-volume rows get time-ordered IDs in the same format, sorted by creation time; other IDs stay random', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, run, db }) => {
+      const { id, rowId, taggedEmailId } = await import('./src/core.js');
+      const v7 = /^[a-z]+_[0-9a-f]{12}7[0-9a-f]{3}[89ab][0-9a-f]{15}$/, v4 = /^[a-z]+_[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$/;
+      const at = (value: string) => parseInt(value.slice(value.lastIndexOf('_') + 1, value.lastIndexOf('_') + 13), 16);
+      const wid = runtime.config.workspaceId, began = Date.now() - 1000;
+      const ids = async (query: string) => (await db.query(query, [wid])).rows.map(row => row.id as string);
+      // id()'s format and length, the creation time first.
+      for (const prefix of ['email', 'event', 'whd', 'job', 'mwd', 'thr']) {
+        const made = rowId(prefix);
+        assert.match(made, v7); assert.ok(made.startsWith(prefix + '_')); assert.equal(made.length, id(prefix).length);
+        assert.ok(Math.abs(at(made) - Date.now()) < 1000);
+      }
+      // Sorted by creation time across milliseconds, by JavaScript and by the database's collation.
+      const made: string[] = [], base = Date.now(), clock = t.mock.method(Date, 'now', () => base + Math.floor(made.length / 4));
+      try { while (made.length < 400) made.push(rowId('email')); } finally { clock.mock.restore(); }
+      assert.equal(new Set(made).size, made.length);
+      assert.deepEqual([...made].reverse().sort().map(at), made.map(at));
+      assert.deepEqual((await db.query('SELECT array_agg(v ORDER BY v) AS v FROM unnest($1::text[]) v', [[...made].reverse()])).rows[0].v.map(at), made.map(at));
+      // row_id() in SQL builds the same, from the database's clock.
+      const fromSql: string[] = [];
+      for (let i = 0; i < 5; i++) fromSql.push((await db.query("SELECT row_id('job') AS id FROM pg_sleep(0.002)")).rows[0].id);
+      for (const value of fromSql) { assert.match(value, v7); assert.equal(value.length, id('job').length); assert.ok(Math.abs(at(value) - Date.now()) < 1000); }
+      assert.deepEqual([...fromSql].reverse().sort(), fromSql); assert.equal(new Set(fromSql.map(at)).size, fromSql.length);
+      // id() is unchanged: random, in no order.
+      const random = Array.from({ length: 400 }, () => id('email'));
+      for (const value of random) assert.match(value, v4);
+      assert.notDeepEqual([...random].sort(), random);
+      // Consecutive IDs still spread evenly over the sending depth stripes (hashtext(id) & 15).
+      const stripes = (await db.query('SELECT hashtext(v) & 15 AS s, count(*)::int AS n FROM unnest($1::text[]) v GROUP BY 1', [[...made, ...Array.from({ length: 1200 }, () => rowId('email'))]])).rows;
+      assert.equal(stripes.length, 16); assert.ok(stripes.every(row => row.n > 50 && row.n < 200), JSON.stringify(stripes));
+
+      // Sending: a direct, batch and scheduled send, dispatch and feedback, with a webhook for both public events.
+      const hook = ok(await local('POST', '/v1/webhooks', { url: 'https://example.com/hooks/ids', eventTypes: ['email.sent', 'email.delivered'] }), 201);
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'IDs fixture', permissions: ['send'] }), 201);
+      const direct = ok(await local('POST', '/v1/emails/send', mail()), 202);
+      const batch = ok(await local('POST', '/v1/emails/batch', { emails: [mail(), mail()] }), 202).data.map((e: Json) => e.id as string);
+      const scheduled = ok(await local('POST', '/v1/emails/send', mail({ scheduledAt: new Date(Date.now() + 3_600_000).toISOString() })), 202);
+      await run('email.dispatch');
+      await run('operation.simulatedFeedback');
+      const events = (await db.query('SELECT id,type FROM sending_email_events WHERE workspace_id=$1', [wid])).rows;
+      assert.deepEqual([...new Set(events.map(e => e.type))].sort(), ['accepted', 'delivery', 'dispatch_attempt', 'scheduled', 'send']);
+      const sending = { emails: [direct.id, ...batch, scheduled.id], events: events.map(e => e.id as string), published: await ids('SELECT id FROM operation_events WHERE workspace_id=$1'),
+        deliveries: await ids('SELECT id FROM operation_deliveries WHERE workspace_id=$1'), jobs: await ids("SELECT id FROM jobs WHERE workspace_id=$1 AND type IN ('operation.webhook','operation.simulatedFeedback')") };
+      // Received mail: the thread mail_store_ritual_plan makes, its fanout job, the inbound webhook delivery and its job.
+      await db.query('INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,$3,$4)', [wid, REGION, unique('bucket'), `arn:aws:sns:${REGION}:111122223333:inbound`]);
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'ids.example',$3,'active','store')", [unique('mdom'), wid, REGION]);
+      const box = ok(await local('POST', '/v1/inbound/addresses', { address: 'orders@ids.example' }), 201);
+      const inbound = ok(await local('POST', '/v1/inbound/webhooks', { url: 'https://example.com/hooks/ids-inbound', eventTypes: ['message.received'] }), 201);
+      const mid = unique('msg');
+      await db.query("INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) VALUES($1,$2,$3,'fixture','fixture',$4,'{}')", [wid, mid, REGION, JSON.stringify([box.address])]);
+      await db.query("SELECT * FROM mail_store_incoming($1,'[]','[]',$2,false,false,NULL,NULL)", [{ id: mid, workspace_id: wid, ses_message_id: mid, lifecycle: 'kept', envelope_to: [box.address], direction: 'inbound',
+        subject: 'Order', from_address: 'customer@example.org', to: [], cc: [], bcc: [], reply_to: [], references: [], received_at: new Date().toISOString(), body_truncated: false, snippet: 'Order',
+        headers: [], size_bytes: 42, attachment_count: 0, verdicts: {}, spam: false, automated: false, status: 'received' }, JSON.stringify([{ addr: box.address, n: 0, valid: true }])]);
+      const fanout = await ids("SELECT id FROM jobs WHERE workspace_id=$1 AND type='mailbox.fanout'");
+      await expandFixtureOutbox(runtime, wid);
+      const receiving = { threads: [(await db.query('SELECT thread_id FROM mail_messages WHERE id=$1', [mid])).rows[0].thread_id as string], fanout,
+        deliveries: (await db.query('SELECT id FROM mailbox_webhook_deliveries WHERE webhook_id=$1', [inbound.id])).rows.map(row => row.id as string),
+        jobs: await ids("SELECT id FROM jobs WHERE workspace_id=$1 AND type='mailbox.webhook'") };
+      for (const [kind, values] of Object.entries({ ...sending, ...Object.fromEntries(Object.entries(receiving).map(([k, v]) => ['received ' + k, v])) })) {
+        assert.ok(values.length, kind);
+        for (const value of values) { assert.match(value, v7, kind); assert.ok(at(value) >= began && at(value) <= Date.now() + 1000, kind); }
+      }
+      // What depends on the format still works: the SES tag check takes a new email ID, and the scheduled send's release
+      // job is still named by its email. The other IDs these flows made stay random.
+      assert.equal(taggedEmailId({ mail: { tags: { bane_email_id: [direct.id] } } }), direct.id);
+      assert.deepEqual(await ids("SELECT id FROM jobs WHERE workspace_id=$1 AND type='sending.release'"), ['release:' + scheduled.id]);
+      for (const value of [hook.id, key.id, box.id, inbound.id]) assert.match(value, v4);
+    });
+  });
+
   test('duplicate/out-of-order simulated feedback fans out once and cannot impersonate public SNS feedback', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
       const { operationJobs } = await import('./src/operations.js');

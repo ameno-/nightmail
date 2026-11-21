@@ -1,7 +1,7 @@
 import {ActionRetry,actionDelay} from './ritual-retry.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { and, eq, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
-import { ApiError, databaseConflict, databaseUnavailable, id, log, logError, ModuleLoadError, transientDatabaseError } from './core.js';
+import { ApiError, databaseConflict, databaseUnavailable, rowId, log, logError, ModuleLoadError, transientDatabaseError } from './core.js';
 import type { ClaimedWebhook, DbExecutor, JobHandler, Runtime } from './core.js';
 import { jobs } from './db/core.js';
 import { resolveRegionRuntime } from './ses-region-state.js';
@@ -51,7 +51,7 @@ export async function countEnqueued(work: () => Promise<void>) {
   return scope.count;
 }
 export async function enqueue(db: DbExecutor, input: { type: string; workspaceId: string; payload: Record<string, unknown>; availableAt?: string }) {
-  const jobId = id('job');
+  const jobId = rowId('job');
   await db.insert(jobs).values({ id: jobId, ...input });
   const scope = enqueued.getStore();
   if (scope) scope.count++;

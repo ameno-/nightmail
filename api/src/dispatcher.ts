@@ -1,6 +1,6 @@
 import { getTableColumns, sql, type SQL } from 'drizzle-orm';
 import type { Attachment, SESv2Client, SendEmailCommandInput } from '@aws-sdk/client-sesv2';
-import { ApiError, getSes, isSimulatedSes, id, lazyModule, log, logError, ModuleLoadError, preloadSesTransport, wrapModuleLoad, type Actor, type DbExecutor, type Runtime } from './core.js';
+import { ApiError, getSes, isSimulatedSes, rowId, lazyModule, log, logError, ModuleLoadError, preloadSesTransport, wrapModuleLoad, type Actor, type DbExecutor, type Runtime } from './core.js';
 import { attachments, emails, type EmailSnapshot, type EmailStatus, type CampaignDraft, type ReviewedRecipient } from './db/sending.js';
 import { approvedOriginUser, campaignVerdicts, checkedDispatchAttachments, formattedSender, inlineMessage, materializeCampaignEmail, originAllowed, publicEventType, QUOTA_REFRESH_MS, queueSimulatedFeedback, rank, sesDailyReserve, sizeCheck, statusForEvent, terminalColumns, terminalEvents, verifiedAttachment } from './sending.js';
 import { receivingPolicy } from './mailbox-ingest-input.js';
@@ -545,7 +545,7 @@ async function claimGroup(runtime: Runtime, prepared: Prepared[], origins: Map<s
     feedback_topic: item.owner.feedbackTopic, binding:item.review?.draft.binding ?? item.mail.snapshot.binding, destinations: [...item.snapshot.to, ...item.snapshot.cc, ...item.snapshot.bcc].map(email => email.toLowerCase()),
     hosted:!!item.owner.tenantName,marketing: item.snapshot.kind === 'marketing', held_stream: item.snapshot.kind !== 'transactional' || !!item.mail.campaignId || !!item.snapshot.bulk, reply_authors: item.snapshot.replyAuthors, snapshot: item.unsubscribe ? item.stored ?? null : null,
     token_hash: item.unsubscribe?.tokenHash ?? null, token_email: item.unsubscribe?.email ?? null, token_page: item.unsubscribe?.page ?? null,
-    event_id: id('event'), external_id: `attempt-start:${item.mail.id}:${item.mail.dispatchVersion}`, attempt: item.mail.dispatchVersion + 1,
+    event_id: rowId('event'), external_id: `attempt-start:${item.mail.id}:${item.mail.dispatchVersion}`, attempt: item.mail.dispatchVersion + 1,
   }));
   const rows = sql`SELECT * FROM jsonb_to_recordset(${JSON.stringify(input)}::jsonb)
         AS x(id text, workspace_id text, dispatch_version int, campaign_id text, actor_key_id text, sender text, mcp_allowed boolean, hosted boolean, feedback_topic text, binding jsonb, destinations jsonb, marketing boolean, held_stream boolean, reply_authors jsonb, snapshot jsonb, token_hash text, token_email text, token_page text, event_id text, external_id text, attempt int)`;
@@ -734,7 +734,7 @@ async function recordOutcomes(runtime: Runtime, outcomes: Outcome[]) {
   const simulated = isSimulatedSes(runtime);
   const input = outcomes.map(o => ({
     email_id: o.mail.id, workspace_id: o.mail.workspaceId, dispatch_version: o.mail.dispatchVersion, type: o.type, provider_id: o.providerId ?? null,
-    event_id: id('event'), external_id: `attempt-result:${o.mail.id}:${o.mail.dispatchVersion}`, data: o.type === 'acceptance_unknown' ? {...o.data,status:o.type} : o.data, error_code: o.errorCode ?? null,
+    event_id: rowId('event'), external_id: `attempt-result:${o.mail.id}:${o.mail.dispatchVersion}`, data: o.type === 'acceptance_unknown' ? {...o.data,status:o.type} : o.data, error_code: o.errorCode ?? null,
     next_status: requeued(o) ? 'queued' : statusForEvent[o.type] ?? null,
     next_rank: requeued(o) ? 0 : rank[statusForEvent[o.type]!], public_type: publicEventType[o.type] ?? null,
     wait_ms: o.requeueAt ? Math.max(0, Date.parse(o.requeueAt) - Date.now()) : null, screened: !!o.screened,
@@ -770,14 +770,14 @@ async function recordOutcomes(runtime: Runtime, outcomes: Outcome[]) {
       FROM inserted i JOIN input x ON x.event_id = i.id JOIN mail m ON m.id = i.email_id WHERE x.public_type IS NOT NULL ON CONFLICT DO NOTHING RETURNING *
     ), deliveries AS (
       INSERT INTO operation_deliveries(id, workspace_id, webhook_id, event_id, payload)
-      SELECT 'whd_' || replace(gen_random_uuid()::text, '-', ''), p.workspace_id, w.id, p.id,
+      SELECT public.row_id('whd'), p.workspace_id, w.id, p.id,
         jsonb_build_object('id', p.id, 'workspaceId', p.workspace_id, 'type', p.type, 'region', p.region, 'createdAt', p.created_at, 'data', p.data)
       FROM published p JOIN operation_webhooks w ON w.workspace_id = p.workspace_id
       WHERE NOT w.paused AND w.event_types ? p.type AND (w.regions IS NULL OR p.region IS NULL OR w.regions ? p.region)
       ON CONFLICT DO NOTHING RETURNING id, workspace_id
     ), webhook_jobs AS (
       INSERT INTO jobs(id, workspace_id, type, payload)
-      SELECT 'job_' || replace(gen_random_uuid()::text, '-', ''), workspace_id, 'operation.webhook', jsonb_build_object('deliveryId', id, 'generation', 0) FROM deliveries RETURNING id
+      SELECT public.row_id('job'), workspace_id, 'operation.webhook', jsonb_build_object('deliveryId', id, 'generation', 0) FROM deliveries RETURNING id
     ), simulated_callbacks AS (
       SELECT 'urn:bane:simulated-ses:' || m.region AS topic_arn, m.id || ':' || kind AS message_id, i.workspace_id, m.region, x.provider_id,
         i.created_at + CASE WHEN kind = 'Delivery' THEN ${runtime.config.simulatedSes.deliveryDelayMs}::int ELSE 0 END * interval '1 millisecond' AS created_at, kind
@@ -785,7 +785,7 @@ async function recordOutcomes(runtime: Runtime, outcomes: Outcome[]) {
       WHERE ${simulated && !runtime.feedback}::boolean AND x.type = 'accepted' AND x.provider_id LIKE 'sim\\_%'
     ), simulated_jobs AS (
       INSERT INTO jobs(id, workspace_id, type, available_at, payload)
-      SELECT 'job_' || replace(gen_random_uuid()::text, '-', ''), r.workspace_id, 'operation.simulatedFeedback', r.created_at,
+      SELECT public.row_id('job'), r.workspace_id, 'operation.simulatedFeedback', r.created_at,
         jsonb_build_object('topicArn', r.topic_arn, 'messageId', r.message_id, 'region', r.region,
           'message', jsonb_build_object('eventType', r.kind, 'mail', jsonb_build_object('messageId', r.provider_id), lower(r.kind), jsonb_build_object('timestamp', r.created_at)))
       FROM simulated_callbacks r RETURNING id
