@@ -7071,6 +7071,7 @@ describe('Hosted MCP OAuth and tools', () => {
       for (const token of [`nm_support_${hex()}`, `bane_support_${hex()}`]) error(await send('GET', '/v1/support/workspaces', bearer(token)), 403, 'SUPPORT_GRANT_REQUIRED');
       const used = await platform.verifyHandoff(handoff.token);
       assert.ok(used.ok && used.handoff.usedAt && !('grantId' in used.handoff), JSON.stringify(used));
+      assert.equal((await db.query("SELECT FROM information_schema.columns WHERE table_name = 'support_handoffs' AND column_name = 'grant_id'")).rowCount, 0, 'Handoffs keep no grant.');
       assert.deepEqual((await db.query(`SELECT DISTINCT actor_id FROM audit_events WHERE actor_id LIKE 'service:%' ORDER BY 1`)).rows.map(r => r.actor_id), ['service:bane-support']);
       // Review L4: an operator script's platform row without a user is not mirrored, and does not fail the script.
       await db.query(`INSERT INTO hosted_operator_audit(workspace_id, action, details) VALUES ('platform', 'set-operator', '{"userId": null}')`);
