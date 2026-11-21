@@ -774,10 +774,14 @@ export async function seed(fx) {
 
   // Lumen Labs: verified domain, no key, no mail. Field Notes: no sending connection yet.
   const nia = await fx.signIn('nia', 'nia@lumenlabs.example', 'Nia Moreau', { id: 'ws_fresh', name: 'Lumen Labs' });
-  // Nia emailed support from an address whose DMARC failed; the reply's link confirms that email signed in (Support ·
-  // continue email). Her session's sign-in proved her address, as a Google one does, so the claim answers it.
+  // Nia emailed support from an address whose DMARC failed; the reply's link shows which email it is (its subject and
+  // when it arrived) and confirms it signed in (Support · continue email). Her session's sign-in proved her address a
+  // mailbox, as a Google one does, and recorded that proof, so the page shows the email and the claim answers it.
   const continueConversation = supportId('conv', 'niacontinue', 26), continueMessage = `msg_${'c'.repeat(32)}`;
   await db.query("UPDATE nightmail_sessions SET verified_email = 'nia@lumenlabs.example' WHERE user_id = 'user_nia'");
+  await db.query("UPDATE nightmail_users SET mailbox_proved = email, mailbox_proved_at = now() WHERE id = 'user_nia'");
+  await db.query("INSERT INTO mail_threads(id, workspace_id) VALUES ('thr_niacontinue', 'ws_fresh')");
+  await db.query("INSERT INTO mail_messages(id, workspace_id, direction, thread_id, subject, from_address, received_at) VALUES ($1, 'ws_fresh', 'inbound', 'thr_niacontinue', 'Why did my first campaign bounce at Outlook?', 'nia@lumenlabs.example', now() - interval '2 hours')", [continueMessage]);
   await db.query("INSERT INTO support_conversations(id, channel, pending_address, verification, mode) VALUES ($1, 'email', 'nia@lumenlabs.example', 'none', 'pending_signin')", [continueConversation]);
   await db.query("INSERT INTO support_email_signins(conversation_id, message_id, address) VALUES ($1, $2, 'nia@lumenlabs.example')", [continueConversation, continueMessage]);
   await domain(db, 'ws_fresh', await hosted(db, 'ws_fresh'), 'lumenlabs.example');
