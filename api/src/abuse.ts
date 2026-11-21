@@ -26,7 +26,7 @@ import { placementRoot } from './domain-registry.js';
 // that names no person (an ASN, a country, a browser from a closed list, a flag). The service holds the key, so it can
 // test a candidate value against the store; nobody without the key can.
 
-type Hosted = Pick<Runtime, 'db' | 'config'>;
+export type Hosted = Pick<Runtime, 'db' | 'config'>;
 export type Entity = { type: 'user' | 'workspace' | 'attempt'; id: string };
 /** One fact. `at`: when it was true (the provider accepted the mail, the payment changed); now when absent. */
 export type Signal = { kind: string; value: string; detail?: Record<string, string | number | boolean>; at?: string };
@@ -125,7 +125,7 @@ function networkSignals(config: Runtime['config'], network: RequestNetwork | nul
 export type Guard = { type: 'user' | 'workspace' | 'subject'; id: string };
 const subjectGuard = (issuer: string, subject: string): Guard => ({ type: 'subject', id: `${issuer} ${subject}` });
 /** One short transaction with the module's statement and lock timeouts: a slow or blocked statement ends, it never waits. */
-function bounded<T>(runtime: Hosted, work: (tx: DbExecutor) => Promise<T>): Promise<T> {
+export function bounded<T>(runtime: Hosted, work: (tx: DbExecutor) => Promise<T>): Promise<T> {
   return runtime.db.transaction(async tx => {
     await tx.execute(sql`SELECT set_config('statement_timeout',${String(STATEMENT_MS)},true),set_config('lock_timeout',${String(LOCK_MS)},true)`);
     return work(tx);
@@ -138,7 +138,7 @@ async function lockGuards(tx: DbExecutor, guards: Guard[]) {
 }
 const guardPairs = (guards: Guard[]) => sql.join(guards.map(guard => sql`(${guard.type},${guard.id})`), sql`, `);
 /** Whether a workspace is excluded: by an exclusion of its own, or by one of a current owner's. */
-const workspaceExcluded = (workspaceId: SQL) => sql`(EXISTS (SELECT FROM abuse_exclusions x WHERE x.entity_type='workspace' AND x.entity_id=${workspaceId})
+export const workspaceExcluded = (workspaceId: SQL) => sql`(EXISTS (SELECT FROM abuse_exclusions x WHERE x.entity_type='workspace' AND x.entity_id=${workspaceId})
   OR EXISTS (SELECT FROM abuse_exclusions x JOIN workspace_members m ON m.user_id=x.entity_id AND m.role='owner' WHERE x.entity_type='user' AND m.workspace_id=${workspaceId}))`;
 /** Whether any of these guards is excluded (a workspace also through its owners). */
 const excluded = (guards: Guard[]) => sql`(EXISTS (SELECT FROM abuse_exclusions x WHERE (x.entity_type,x.entity_id) IN (${guardPairs(guards)}))${
@@ -167,6 +167,39 @@ async function writeSignals(tx: DbExecutor, entity: Entity, guards: Guard[], sig
 const trimSignals = (tx: DbExecutor, entity: Entity) => tx.execute(sql`DELETE FROM abuse_signals s USING (SELECT kind,value,row_number() OVER (PARTITION BY kind ORDER BY last_at DESC,value) AS n
     FROM abuse_signals WHERE entity_type=${entity.type} AND entity_id=${entity.id}) old
   WHERE s.entity_type=${entity.type} AND s.entity_id=${entity.id} AND s.kind=old.kind AND s.value=old.value AND old.n>${ENTITY_KIND_MOST}`);
+
+// ----- Links -------------------------------------------------------------------------------------------------------------
+// Values two entities can share. A value held by more than LINK_HOLDERS_MOST entities is common infrastructure (a campus
+// network, a popular link shortener) and links nobody.
+export const LINK_KINDS = ['email', 'email_alias', 'email_domain', 'provider', 'net', 'card', 'send_domain', 'content', 'link'];
+const LINK_HOLDERS_MOST = 25, LINK_PARTNERS_MOST = 100;
+const rare = (kind: SQL, value: SQL) => sql`(SELECT count(*) FROM (SELECT FROM abuse_signals h WHERE h.kind=${kind} AND h.value=${value} LIMIT ${LINK_HOLDERS_MOST + 1}) held)<=${LINK_HOLDERS_MOST}`;
+/** A link expires with the signals it came from: its last_at is the latest moment both sides held a shared value. */
+export const linkExpired = sql`last_at < now() - interval '30 days' AND (kind = ANY(${sql.param(MAIL_KINDS)}::text[]) OR last_at < now() - interval '90 days')`;
+/**
+ * Links one entity to the others that hold a value it was just given, inside the transaction that wrote the values:
+ * at most LINK_PARTNERS_MOST other entities, each pair with the number of rare values of that kind they share now.
+ * Incremental by construction: only the values just written are looked at, never the whole store.
+ */
+async function linkEntity(tx: DbExecutor, entity: Entity, signals: Signal[]) {
+  const values = [...new Map(signals.filter(s => LINK_KINDS.includes(s.kind)).map(s => [`${s.kind}\n${s.value}`, { kind: s.kind, value: s.value }])).values()];
+  if (!values.length) return;
+  const mine = sql`mine.entity_type=${entity.type} AND mine.entity_id=${entity.id}`;
+  await tx.execute(sql`WITH touched AS (SELECT t.kind,t.value FROM jsonb_to_recordset(${JSON.stringify(values)}::jsonb) AS t(kind text,value text)
+      WHERE EXISTS (SELECT FROM abuse_signals mine WHERE ${mine} AND mine.kind=t.kind AND mine.value=t.value) AND ${rare(sql`t.kind`, sql`t.value`)}),
+    partners AS (SELECT DISTINCT o.entity_type,o.entity_id,o.kind FROM touched t JOIN abuse_signals o ON o.kind=t.kind AND o.value=t.value
+      WHERE (o.entity_type,o.entity_id)<>(${entity.type},${entity.id}) LIMIT ${LINK_PARTNERS_MOST}),
+    pairs AS (SELECT p.entity_type,p.entity_id,p.kind,count(*)::int AS shared,min(greatest(mine.first_at,theirs.first_at)) AS first_at,max(least(mine.last_at,theirs.last_at)) AS last_at
+      FROM partners p JOIN abuse_signals mine ON ${mine} AND mine.kind=p.kind
+      JOIN abuse_signals theirs ON theirs.entity_type=p.entity_type AND theirs.entity_id=p.entity_id AND theirs.kind=mine.kind AND theirs.value=mine.value
+      WHERE ${rare(sql`mine.kind`, sql`mine.value`)} GROUP BY 1,2,3)
+    INSERT INTO identity_links(a_type,a_id,b_type,b_id,kind,shared,first_at,last_at)
+    SELECT CASE WHEN first THEN ${entity.type} ELSE entity_type END,CASE WHEN first THEN ${entity.id} ELSE entity_id END,
+      CASE WHEN first THEN entity_type ELSE ${entity.type} END,CASE WHEN first THEN entity_id ELSE ${entity.id} END,kind,shared,first_at,last_at
+    FROM (SELECT p.*,(${entity.type}::text,${entity.id}::text)<(p.entity_type,p.entity_id) AS first FROM pairs p) ordered
+    ON CONFLICT (a_type,a_id,b_type,b_id,kind) DO UPDATE SET shared=excluded.shared,first_at=least(identity_links.first_at,excluded.first_at),
+      last_at=greatest(identity_links.last_at,excluded.last_at),pending=identity_links.pending OR identity_links.shared<>excluded.shared`);
+}
 
 // ----- Sign-ins ----------------------------------------------------------------------------------------------------------
 const attemptEntity = (config: Runtime['config'], issuer: string, subject: string) => `att_${signalHash(config, 'attempt', `${issuer}\n${subject}`)}`;
@@ -292,7 +325,7 @@ const SIGN_INS_A_RUN = 200, PAYMENTS_A_RUN = 200, WORKSPACE_PAGE = 200, WORKSPAC
 type Cursors = { signIns?: { at: string; key: string }; payments?: { at: string; id: string }; workspaces?: string };
 type Run = { since: string; cursors: Cursors; added: number; deadline: number };
 const spent = (run: Run) => Date.now() >= run.deadline || run.added >= NEW_ROWS_A_RUN;
-const utc = (column: SQL) => sql`to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+export const utc = (column: SQL) => sql`to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 
 /**
  * Sign-ins from the sign-in log, in the order they happened: what each observed (signInSignals), dated by the sign-in,
@@ -314,7 +347,7 @@ async function foldSignIns(runtime: Hosted, run: Run) {
       if (!signals) throw new Error('malformed');
       const dated = signals.map(signal => ({ ...signal, at: row.at }));
       run.added += await bounded(runtime, async tx => {
-        if (!row.user_id) { await lockGuards(tx, [subject]); const added = await writeSignals(tx, attempt, [subject], dated, true); await trimSignals(tx, attempt); return added; }
+        if (!row.user_id) { await lockGuards(tx, [subject]); const added = await writeSignals(tx, attempt, [subject], dated, true); await trimSignals(tx, attempt); await linkEntity(tx, attempt, dated); return added; }
         const user: Entity = { type: 'user', id: row.user_id }, guards: Guard[] = [user as Guard, subject];
         await lockGuards(tx, guards);
         const added = await writeSignals(tx, user, guards, dated, true);
@@ -324,6 +357,8 @@ async function foldSignIns(runtime: Hosted, run: Run) {
           WHERE NOT ${excluded(guards)} AND last_at>${floorOf(guards)}
           ON CONFLICT (entity_type,entity_id,kind,value) DO UPDATE SET seen=abuse_signals.seen+excluded.seen,first_at=least(abuse_signals.first_at,excluded.first_at),last_at=greatest(abuse_signals.last_at,excluded.last_at)`);
         await trimSignals(tx, user);
+        // Everything the user holds now, the adopted rows included.
+        await linkEntity(tx, user, (await tx.execute<Signal>(sql`SELECT kind,value FROM abuse_signals WHERE entity_type='user' AND entity_id=${user.id} AND kind=ANY(${sql.param(LINK_KINDS)}::text[])`)).rows);
         return added;
       });
     } catch { log('warn', { code: 'ABUSE_STEP_FAILED', step: 'signIn' }); }
@@ -347,8 +382,10 @@ async function foldPayments(runtime: Hosted, run: Run) {
     // A payment whose write fails or times out is passed over: the cursor never waits on one row.
     if (row.fingerprint) try { run.added += await bounded(runtime, async tx => {
       await lockGuards(tx, [workspace as Guard]);
-      const added = await writeSignals(tx, workspace, [workspace as Guard], [{ kind: 'card', value: signalHash(runtime.config, 'card', row.fingerprint!), at: row.at }], false);
+      const card = [{ kind: 'card', value: signalHash(runtime.config, 'card', row.fingerprint!), at: row.at }];
+      const added = await writeSignals(tx, workspace, [workspace as Guard], card, false);
       await trimSignals(tx, workspace);
+      await linkEntity(tx, workspace, card);
       return added;
     }); } catch { log('warn', { code: 'ABUSE_STEP_FAILED', step: 'payment' }); }
     run.cursors.payments = { at: row.at, id: row.id };
@@ -417,6 +454,7 @@ async function sampleWorkspace(runtime: Hosted, tx: DbExecutor, run: Run, worksp
   }
   run.added += await writeSignals(tx, workspace, guards, signals, false);
   await trimSignals(tx, workspace);
+  await linkEntity(tx, workspace, signals);
   await tx.execute(sql`INSERT INTO abuse_sampling(workspace_id,sampled_through) VALUES(${workspaceId},${recent[0]!.at}::timestamptz)
     ON CONFLICT (workspace_id) DO UPDATE SET sampled_through=excluded.sampled_through,sampled_at=now()`);
   return true;
@@ -424,8 +462,8 @@ async function sampleWorkspace(runtime: Hosted, tx: DbExecutor, run: Run, worksp
 /**
  * The hourly job (maintenance.ts hourlyUpkeep, last of its steps), the only writer of signals. Off, it forgets when
  * monitoring started, so turning it on again starts from that moment. On, it takes the lease (a run in progress makes
- * this one return), then reads the sign-in log and the payment records for a quarter of its time each and samples
- * accepted mail with the rest. A failing stage is logged and skipped. Returns what it did, or null when it did not run.
+ * this one return), then reads the sign-in log and the payment records, samples accepted mail, and groups what
+ * changed, each within its share of the time. A failing stage is logged and skipped. Returns what it did, or null when it did not run.
  */
 export async function abuseHourly(runtime: Hosted, options: { budgetMs?: number } = {}) {
   if (!runtime.config.multiTenant) return null;
@@ -453,12 +491,15 @@ export async function abuseHourly(runtime: Hosted, options: { budgetMs?: number 
     try { await work(); } catch { log('warn', { code: 'ABUSE_STEP_FAILED', step: name }); }
     try { await bounded(runtime, tx => tx.execute(sql`UPDATE abuse_state SET cursors=${JSON.stringify(run.cursors)}::jsonb WHERE id='monitor'`)); } catch { log('warn', { code: 'ABUSE_STEP_FAILED', step: 'cursor' }); }
   };
-  await stage('signIns', started + budget / 4, async () => { result.signIns = await foldSignIns(runtime, run); });
-  await stage('payments', started + budget / 2, async () => { result.payments = await foldPayments(runtime, run); });
-  await stage('sample', started + budget, async () => { result.sampled = await sampleSends(runtime, run); });
+  await stage('signIns', started + budget * .2, async () => { result.signIns = await foldSignIns(runtime, run); });
+  await stage('payments', started + budget * .4, async () => { result.payments = await foldPayments(runtime, run); });
+  await stage('sample', started + budget * .75, async () => { result.sampled = await sampleSends(runtime, run); });
+  // Groups the entities whose links changed and rescores the clusters longest unscored (src/abuse-clusters.ts).
+  let clusters = { grouped: 0, rescored: 0 };
+  await stage('clusters', started + budget, async () => { clusters = await (await import('./abuse-clusters.js')).refreshClusters(runtime, started + budget); });
   try { await bounded(runtime, tx => tx.execute(sql`UPDATE abuse_state SET lease_until=NULL WHERE id='monitor'`)); } catch { log('warn', { code: 'ABUSE_STEP_FAILED', step: 'release' }); }
   result.added = run.added;
-  log('info', { code: 'ABUSE_HOURLY', ...result, ms: Date.now() - started });
+  log('info', { code: 'ABUSE_HOURLY', ...result, ...clusters, ms: Date.now() - started });
   return result;
 }
 
@@ -498,6 +539,11 @@ export async function abuseSubject(runtime: Hosted, target: SubjectTarget, actio
       ON CONFLICT (entity_type,entity_id) DO UPDATE SET ignore_through=excluded.ignore_through`);
     if (action === 'erase' || action === 'exclude') {
       await tx.execute(sql`DELETE FROM abuse_signals WHERE (entity_type,entity_id) IN (${pairs})`);
+      // What was derived from them: their links, and the clusters they were in (the other members are grouped again).
+      await tx.execute(sql`DELETE FROM identity_links WHERE (a_type,a_id) IN (${pairs}) OR (b_type,b_id) IN (${pairs})`);
+      await tx.execute(sql`WITH left_behind AS (DELETE FROM abuse_clusters c USING abuse_cluster_members m WHERE m.cluster_id=c.id AND (m.entity_type,m.entity_id) IN (${pairs}) RETURNING c.members)
+        UPDATE identity_links l SET pending=true FROM left_behind b, jsonb_to_recordset(b.members) AS e(type text,id text)
+        WHERE NOT l.pending AND ((l.a_type,l.a_id)=(e.type,e.id) OR (l.b_type,l.b_id)=(e.type,e.id))`);
       // What a sign-in observed and the job has not read yet.
       for (const s of subjects) await tx.execute(sql`UPDATE nightmail_signin_attempts SET observed=NULL WHERE issuer=${s.issuer} AND subject=${s.subject} AND observed IS NOT NULL`);
     }
