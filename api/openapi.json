@@ -12965,12 +12965,99 @@
             "type": "boolean",
             "default": false,
             "description": "Hold received mail without a DMARC pass for its From domain: it is stored with the unverified label and does not emit message.received."
+          },
+          "flow": {
+            "$ref": "#/components/schemas/CreateInboundAddressFlow"
           }
         },
         "required": [
           "address"
         ],
         "additionalProperties": false
+      },
+      "CreateInboundAddressFlow": {
+        "type": "object",
+        "properties": {
+          "deliver": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "drop"
+                ]
+              },
+              {
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 128,
+                      "pattern": "^(?:(?:mbx|mwh)_[a-zA-Z0-9_-]+|(?:inbox|webhook):[a-z0-9][a-z0-9-]{0,62})$",
+                      "description": "An inbox (mbx_… or inbox:<key>) or a webhook (mwh_… or webhook:<key>)."
+                    },
+                    {
+                      "type": "string",
+                      "maxLength": 128,
+                      "pattern": "^(?:con_[a-zA-Z0-9_-]+|forward:[a-z0-9][a-z0-9-]{0,62})$",
+                      "description": "A forward endpoint (con_… or forward:<name>) its recipient confirmed: it gets the whole message, as a rule's endpoints.<name>() call sends it."
+                    }
+                  ],
+                  "description": "An inbox (mbx_… or inbox:<key>), a webhook (mwh_… or webhook:<key>) or a confirmed forward (con_… or forward:<name>)."
+                },
+                "maxItems": 10
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where the address's mail goes: the destinations of the route for its own address, as createRoute takes them (inbox, webhook and forward IDs or keys, [] to keep it without an inbox, or 'drop'). Creates the route when there is none; null deletes it."
+          },
+          "split": {
+            "$ref": "#/components/schemas/InboundAddressSplit"
+          }
+        },
+        "additionalProperties": false,
+        "description": "Where the new address’s mail goes, saved with the address in one transaction and one routing version: deliver creates the route for its own address, split adds a two-way rule on it (setInboundAddressFlow changes both later). If any part is refused, nothing is created. Needs what changing routes and rules needs."
+      },
+      "InboundAddressSplit": {
+        "type": "object",
+        "properties": {
+          "recipe": {
+            "type": "string",
+            "enum": [
+              "split",
+              "split-by-meaning"
+            ],
+            "description": "split, or split-by-meaning to let the AI decide."
+          },
+          "params": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 500
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "maxLength": 254
+                  },
+                  "maxItems": 100
+                }
+              ]
+            },
+            "default": {},
+            "description": "The fields createRuleFromRecipe takes for this recipe: split { test, value, then, otherwise }, split-by-meaning { meaning, then, otherwise }."
+          }
+        },
+        "required": [
+          "recipe"
+        ],
+        "additionalProperties": false,
+        "description": "Adds a two-way rule on the new address. Its params may name the new address as inbox:<key>."
       },
       "UpdateInboundAddress": {
         "type": "object",
@@ -13042,6 +13129,126 @@
           },
           "requireDmarc": {
             "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "InboundAddressFlow": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "integer",
+            "description": "The routing and rules version after the change, also the ETag; unchanged when nothing changed."
+          },
+          "route": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MailRoute"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The route for the address's own address, as getRoute returns it; null when there is none."
+          },
+          "rule": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The two-way rule this change left on the address: the rule it named, its own copy when the rule was shared, or the new rule. null when it was taken off, or no rule was named or added."
+          }
+        },
+        "required": [
+          "version",
+          "route",
+          "rule"
+        ]
+      },
+      "SetInboundAddressFlow": {
+        "type": "object",
+        "properties": {
+          "deliver": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "drop"
+                ]
+              },
+              {
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 128,
+                      "pattern": "^(?:(?:mbx|mwh)_[a-zA-Z0-9_-]+|(?:inbox|webhook):[a-z0-9][a-z0-9-]{0,62})$",
+                      "description": "An inbox (mbx_… or inbox:<key>) or a webhook (mwh_… or webhook:<key>)."
+                    },
+                    {
+                      "type": "string",
+                      "maxLength": 128,
+                      "pattern": "^(?:con_[a-zA-Z0-9_-]+|forward:[a-z0-9][a-z0-9-]{0,62})$",
+                      "description": "A forward endpoint (con_… or forward:<name>) its recipient confirmed: it gets the whole message, as a rule's endpoints.<name>() call sends it."
+                    }
+                  ],
+                  "description": "An inbox (mbx_… or inbox:<key>), a webhook (mwh_… or webhook:<key>) or a confirmed forward (con_… or forward:<name>)."
+                },
+                "maxItems": 10
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where the address's mail goes: the destinations of the route for its own address, as createRoute takes them (inbox, webhook and forward IDs or keys, [] to keep it without an inbox, or 'drop'). Creates the route when there is none; null deletes it."
+          },
+          "rule": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+            "description": "The key of the two-way rule (split or split-by-meaning) on this address that split changes."
+          },
+          "split": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "recipe": {
+                "type": "string",
+                "enum": [
+                  "split",
+                  "split-by-meaning"
+                ],
+                "description": "split, or split-by-meaning to let the AI decide."
+              },
+              "params": {
+                "type": "object",
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 500
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "maxLength": 254
+                      },
+                      "maxItems": 100
+                    }
+                  ]
+                },
+                "default": {},
+                "description": "The fields createRuleFromRecipe takes for this recipe: split { test, value, then, otherwise }, split-by-meaning { meaning, then, otherwise }."
+              }
+            },
+            "required": [
+              "recipe"
+            ],
+            "additionalProperties": false,
+            "description": "With rule: rewrites that rule. A rule other addresses also run is left as it is for them, and this address gets its own copy under a new key. Without rule: adds a new two-way rule on this address. null, with rule: takes the rule off this address, and deletes it once no address runs it."
           }
         },
         "additionalProperties": false
@@ -14276,6 +14483,10 @@
           "manage": {
             "type": "boolean",
             "description": "False for members and scoped keys: they see their addresses, without routes, rules, endpoints or domains."
+          },
+          "version": {
+            "type": "integer",
+            "description": "The routing and rules version this overview was read at: send it as If-Match to setInboundAddressFlow."
           }
         },
         "required": [
@@ -14286,7 +14497,8 @@
           "endpoints",
           "endpointsTruncated",
           "domains",
-          "manage"
+          "manage",
+          "version"
         ]
       },
       "InboundOverviewRoute": {
@@ -67195,6 +67407,194 @@
             "lang": "Shell",
             "label": "cURL",
             "source": "curl --request DELETE \\\n  --url 'https://nightmail.dev/v1/inbound/addresses/address_123' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/inbound/addresses/{addressId}/flow": {
+      "patch": {
+        "operationId": "setInboundAddressFlow",
+        "tags": [
+          "Inbound addresses"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "summary": "Change where one address’s mail goes, in one version",
+        "description": "Changes the route for the address’s own address and its two-way rule together: one transaction and one routing version, so all of it is saved or none of it. Omitted fields stay as they are, a field equal to what is saved writes nothing, and when nothing changes the version stays. deliver replaces only the route’s destinations (a paused route stays paused). Send the version from getInboundOverview or getRouting as If-Match; a stale one is refused with 409 and nothing changes.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120,
+              "description": "Opaque inbound address ID (mbx_…)."
+            },
+            "required": true,
+            "description": "Opaque inbound address ID (mbx_…).",
+            "name": "addressId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 32,
+              "description": "Apply only if routes and rules are still at this version, from getInboundOverview, GET /v1/routing or a previous ETag."
+            },
+            "required": false,
+            "description": "Apply only if routes and rules are still at this version, from getInboundOverview, GET /v1/routing or a previous ETag.",
+            "name": "if-match",
+            "in": "header"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetInboundAddressFlow"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InboundAddressFlow"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-nightmail-permission": {
+          "permission": "receivingRules",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "credential": "lasting",
+          "text": "Needs Receiving rules: write on the whole workspace. A person needs to be an owner or admin. Not a temporary agent token."
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { setInboundAddressFlow } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await setInboundAddressFlow({\n  client,\n  path: {\n    \"addressId\": \"address_123\"\n  },\n  body: {},\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request PATCH \\\n  --url 'https://nightmail.dev/v1/inbound/addresses/address_123/flow' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{}'"
           }
         ]
       }

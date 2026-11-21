@@ -25842,6 +25842,88 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await call('DELETE', '/v1/endpoints/split-hook');
         await call('DELETE', `/v1/inbound/addresses/${desk.id}`);
       });
+      await t.test('address flow: an address, its route and its two-way rule change in one version, or not at all', async () => {
+        const path = '/v1/rules', rules = async () => (await call('GET', path)).config;
+        const version = async () => (await call('GET', '/v1/routing')).version;
+        const flow = (id: string, body: Json, headers: Record<string, string> = {}) => local('PATCH', `/v1/inbound/addresses/${id}/flow`, body, 'live', headers);
+        const routeOf = async (address: string) => (await call('GET', '/v1/routing/routes')).data.find((r: Json) => r.match === address) ?? null;
+        const on = async (...ids: string[]) => (await rules()).attachments.filter((a: Json) => ids.includes(a.target)).map((a: Json) => [a.rule, a.target]);
+        const send = async (to: string, subject: string) => { const r = (await call('POST', path + '/test', { mime: `From: a@example.net\r\nTo: ${to}\r\nSubject: ${subject}\r\n\r\nHello` })).recipients[0]; return [r.inboxes, r.webhooks]; };
+        const split = (value: string, otherwise = 'inbox:flow-desk') => ({ recipe: 'split', params: { test: 'subject', value, then: 'flow-hook', otherwise } });
+        await call('POST', '/v1/endpoints', { type: 'webhook', name: 'flow-hook', url: 'https://hooks.example.com/flow' }, 201);
+        const hook = (await call('GET', '/v1/endpoints/flow-hook')).id;
+        // A * makes a catch-all or wildcard: a route, never an address or an alias.
+        error(await local('POST', '/v1/inbound/addresses', { address: '*@receive.example' }), 422, 'INVALID_ADDRESS');
+        error(await local('POST', '/v1/inbound/addresses', { address: 'flow-star@receive.example', aliases: ['flow-*@receive.example'] }), 422, 'INVALID_ADDRESS');
+        // A refused part creates nothing: no address, no route, no rule. The unknown inbox is found only once the address
+        // and its route are written, so the rollback is what keeps them out.
+        const v0 = await version(), config0 = await rules(), nothing = async () => (await db.query("SELECT count(*)::int AS n FROM mailboxes WHERE workspace_id=$1 AND address='flow@receive.example'", [wid])).rows[0].n;
+        error(await local('POST', '/v1/inbound/addresses', { address: 'flow@receive.example', key: 'flow-desk', flow: { deliver: [], split: split('refund', 'inbox:missing-box') } }), 422, 'UNKNOWN_ENDPOINT');
+        error(await local('POST', '/v1/inbound/addresses', { address: 'flow@receive.example', key: 'flow-desk', flow: { deliver: [], split: split('refund', 'no-such-hook') } }), 422, 'INVALID_RECIPE');
+        assert.equal(error(await local('POST', '/v1/inbound/addresses', { address: 'flow@receive.example', key: 'flow-desk', flow: { deliver: ['webhook:no-such-hook'], split: split('refund') } }), 422, 'UNKNOWN_DESTINATION').field, 'deliver');
+        assert.deepEqual([await nothing(), await version(), await rules(), await routeOf('flow@receive.example')], [0, v0, config0, null]);
+        // One body: the address, its route [] and a split on it naming its own inbox by key, all in one version.
+        const desk = await call('POST', '/v1/inbound/addresses', { address: 'flow@receive.example', key: 'flow-desk', flow: { deliver: [], split: split('refund') } }, 201);
+        const v1 = v0 + 1, own = await routeOf(desk.address);
+        assert.deepEqual([await version(), (await call('GET', path)).version, (await call('GET', '/v1/inbound/overview?q=flow')).version], [v1, v1, v1]);
+        assert.deepEqual([own.to, own.enabled, await on(desk.id)], [[], true, [['split-flow', desk.id]]]);
+        assert.deepEqual([await send(desk.address, 'Refund for order 7'), await send(desk.address, 'Hello')], [[[], [hook]], [[desk.id], []]]);
+        // What is saved already writes nothing, and the version stays.
+        const unchanged = await flow(desk.id, { deliver: [], rule: 'split-flow', split: split('Refund') }, { 'if-match': `"${v1}"` });
+        assert.deepEqual(ok(unchanged), { version: v1, route: own, rule: 'split-flow' });
+        assert.deepEqual([unchanged.headers.get('etag'), ok(await flow(desk.id, {})).version, await version()], [`"${v1}"`, v1, v1]);
+        // A stale If-Match changes nothing.
+        error(await flow(desk.id, { deliver: [hook] }, { 'if-match': `"${v0}"` }), 409, 'VERSION_CONFLICT');
+        assert.deepEqual([await version(), (await routeOf(desk.address)).to], [v1, []]);
+        // Refusals name what is wrong, and write nothing.
+        error(await flow(desk.id, { rule: 'split-flow' }), 422, 'VALIDATION_FAILED');
+        error(await flow(desk.id, { split: null }), 422, 'VALIDATION_FAILED');
+        error(await flow(desk.id, { rule: 'no-such-rule', split: null }), 404, 'NOT_FOUND');
+        error(await flow('mbx_missing', { deliver: [] }), 404, 'NOT_FOUND');
+        // All or nothing: a valid split with an unknown destination, and a valid route with a split whose inbox is unknown.
+        const saved = await rules();
+        error(await flow(desk.id, { deliver: ['webhook:no-such-hook'], rule: 'split-flow', split: split('invoice') }), 422, 'UNKNOWN_DESTINATION');
+        error(await flow(desk.id, { deliver: [hook], rule: 'split-flow', split: split('invoice', 'inbox:missing-box') }), 422, 'UNKNOWN_ENDPOINT');
+        assert.deepEqual([await version(), await rules(), await routeOf(desk.address)], [v1, saved, own]);
+        assert.deepEqual(saved.rules.find((r: Json) => r.key === 'split-flow').recipe.params.value, ['refund']);
+        // deliver changes only the destinations: a paused route stays paused, with its ID.
+        await call('PATCH', `/v1/routing/routes/${own.id}`, { enabled: false });
+        const paused = ok(await flow(desk.id, { deliver: [desk.id, hook] }));
+        assert.deepEqual([paused.version, paused.route.id, paused.route.enabled, paused.route.to, paused.rule], [v1 + 2, own.id, false, [desk.id, hook], null]);
+        await call('PATCH', `/v1/routing/routes/${own.id}`, { enabled: true, to: [] });
+        // A split only this address runs is rewritten in place: its key, place and on/off stay.
+        const rewritten = ok(await flow(desk.id, { rule: 'split-flow', split: split('invoice') }));
+        assert.deepEqual([rewritten.version, rewritten.rule, await on(desk.id)], [v1 + 4, 'split-flow', [['split-flow', desk.id]]]);
+        assert.deepEqual(await send(desk.address, 'Invoice 7'), [[], [hook]]);
+        // Shared with another address: this address gets its own copy in the same place; the other keeps the rule.
+        const other = await call('POST', '/v1/inbound/addresses', { address: 'flow-other@receive.example', key: 'flow-other', flow: { deliver: [] } }, 201);
+        const config = await rules();
+        await call('PUT', path + '/attachments', { attachments: [...config.attachments, { rule: 'split-flow', target: other.id, continue: true }] });
+        const theirs = await send(other.address, 'Invoice 8'), shared = (await rules()).rules.find((r: Json) => r.key === 'split-flow'), v2 = await version();
+        assert.deepEqual(theirs, [[], [hook]]);
+        error(await flow(other.id, { rule: 'split-flow' + '-x', split: split('x') }), 404, 'NOT_FOUND');
+        const copied = ok(await flow(desk.id, { rule: 'split-flow', split: split('refund') }, { 'if-match': `"${v2}"` }));
+        assert.deepEqual([copied.version, copied.rule, await on(desk.id, other.id)], [v2 + 1, 'split-flow-2', [['split-flow-2', desk.id], ['split-flow', other.id]]]);
+        assert.deepEqual([(await rules()).rules.find((r: Json) => r.key === 'split-flow'), await send(other.address, 'Invoice 8')], [shared, theirs]);
+        assert.deepEqual([await send(desk.address, 'Refund 9'), await send(desk.address, 'Invoice 9')], [[[], [hook]], [[desk.id], []]]);
+        error(await flow(desk.id, { rule: 'split-flow', split: null }), 422, 'RULE_NOT_ON_ADDRESS');
+        // split: null on a shared rule takes it off this address only; on the last address it deletes the rule.
+        const now = await rules();
+        await call('PUT', path + '/attachments', { attachments: [...now.attachments, { rule: 'split-flow-2', target: other.id, continue: true }] });
+        const detached = ok(await flow(other.id, { rule: 'split-flow-2', split: null }));
+        assert.deepEqual([detached.rule, await on(desk.id, other.id), (await rules()).rules.some((r: Json) => r.key === 'split-flow-2')], [null, [['split-flow-2', desk.id], ['split-flow', other.id]], true]);
+        assert.deepEqual(await send(desk.address, 'Refund 10'), [[], [hook]]);
+        ok(await flow(desk.id, { rule: 'split-flow-2', split: null }));
+        assert.deepEqual([await on(desk.id, other.id), (await rules()).rules.some((r: Json) => r.key === 'split-flow-2')], [[['split-flow', other.id]], false]);
+        // Not a split: a rule written by hand is not this operation's to change.
+        await call('PUT', path + '/scripts/flow-script', { key: 'flow-script', source: 'export default function route(email){ label("x") }' });
+        const scripted = await rules();
+        await call('PUT', path + '/attachments', { attachments: [...scripted.attachments, { rule: 'flow-script', target: desk.id, continue: true }] });
+        error(await flow(desk.id, { rule: 'flow-script', split: split('x') }), 422, 'NOT_A_SPLIT');
+        await call('PUT', path, {});
+        for (const box of [desk, other]) { await call('DELETE', `/v1/routing/routes/${(await routeOf(box.address)).id}`); await call('DELETE', `/v1/inbound/addresses/${box.id}?detach=true`); }
+        await call('DELETE', '/v1/endpoints/flow-hook');
+      });
       await t.test('rules: omens(…) compiles to the plan decisions(…) does and ingests to the same verdicts; the /v1/rituals aliases answer as they did before the rename', async it => {
         const path = '/v1/rules', legacy = '/v1/rituals', prior = runtime.config.screen;
         const source = (fn: string) => `export default function route(email,ctx){\n  const r = ${fn}(email, { refund: "Is the sender asking for a refund?", urgent: { prompt: "Does this need a reply today?", type: "boolean", threshold: 0.8 } })\n  if (r.refund >= 0.7) label("refund")\n  if (r.urgent) endpoints["support-hook"]({ subject: "urgent" })\n}`;

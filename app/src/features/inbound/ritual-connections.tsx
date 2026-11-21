@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { Alert, Button, Checkbox, CopyButton, Dialog, Field, Input, SecretInput, Select, type Tone } from '../../components/ui'
@@ -20,6 +20,11 @@ const statusTone: Record<EndpointStatus, Tone> = { ready: 'success', pending: 'w
 const statusLabel: Record<EndpointStatus, string> = { ready: 'Ready', pending: 'Awaiting recipient', expired: 'Link expired', declined: 'Declined', paused: 'Paused' }
 const targetLabel: Record<EndpointType, string> = { slack: 'Slack incoming webhook URL', discord: 'Discord webhook URL', webhook: 'HTTPS URL', forward: 'Recipient address' }
 
+/** Where a chat's webhook URL comes from, one line under its field (here and in the address builder). */
+export const urlHint: Record<'slack' | 'discord', ReactNode> = {
+  slack: <>Paste the URL from Slack’s Incoming Webhooks app. <a href="https://api.slack.com/messaging/webhooks" target="_blank" rel="noreferrer">Get one</a></>,
+  discord: <>Paste the URL from the channel’s Integrations, then Webhooks. <a href="https://support.discord.com/hc/en-us/articles/228383668" target="_blank" rel="noreferrer">Get one</a></>,
+}
 export const slackUrl = /^https:\/\/hooks\.slack\.com\//i, discordUrl = /^https:\/\/(?:\w+\.)?discord(?:app)?\.com\/api\/webhooks\//i
 /** What is wrong with an endpoint's URL or forward address, or '' when it will do. The recipe form checks with it too. */
 export function targetProblem(type: EndpointType, value: string) {
@@ -117,7 +122,7 @@ export function EndpointDialog({ open, onOpenChange, onCreated, onSaved, editing
       </Field> : null}
       {editing?.type === 'forward'
         ? <Field label="Recipient address"><p className="endpoint-recipient"><PrivateAddress value={editing.target} /></p></Field>
-        : <Field label={editing ? 'Replace URL' : targetLabel[type]} error={targetError || serverError('url') || undefined}>
+        : <Field label={editing ? 'Replace URL' : targetLabel[type]} error={targetError || serverError('url') || undefined} hint={!editing && (type === 'slack' || type === 'discord') ? urlHint[type] : undefined}>
           <SecretInput type={type === 'forward' ? 'email' : type === 'webhook' ? 'url' : 'password'} autoComplete="off" value={target} onChange={e => { setTarget(e.target.value); if (serverError('url')) setError(null) }}
             placeholder={type === 'forward' ? 'team@example.com' : editing && !retyped ? 'Keep the current URL' : 'https://'} aria-invalid={!!(targetError || serverError('url')) || undefined} />
         </Field>}

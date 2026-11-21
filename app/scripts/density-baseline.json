@@ -277,6 +277,14 @@
    "score": 12,
    "findings": []
   },
+  "Receiving · address builder dialog · desktop": {
+   "score": 8,
+   "findings": []
+  },
+  "Receiving · address builder from New rule · desktop": {
+   "score": 12,
+   "findings": []
+  },
   "Receiving · address · desktop": {
    "score": 6,
    "findings": []
@@ -419,6 +427,10 @@
   },
   "Receiving · rules · phone": {
    "score": 16,
+   "findings": []
+  },
+  "Receiving · split chooser dialog · desktop": {
+   "score": 5,
    "findings": []
   },
   "Receiving · test · desktop": {
@@ -651,7 +663,7 @@
    "findings": []
   },
   "Template · desktop": {
-   "score": 14,
+   "score": 6,
    "findings": []
   },
   "Templates · desktop": {

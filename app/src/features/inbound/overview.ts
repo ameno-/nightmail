@@ -26,6 +26,8 @@ export type Overview = {
   counts: { address: number; auto: number; route: number; pattern: number; catch_all: number; inbox: number }
   routes: { data: RouteEntry[]; nextCursor: string | null }
   rules: OverviewRule[]; endpoints: OverviewEndpoint[]; endpointsTruncated: boolean; domains: OverviewDomain[]; manage: boolean
+  /** The routing and rules version this was read at: setInboundAddressFlow's If-Match. */
+  version?: number
 }
 export type OverviewQuery = { kind?: string; origin?: 'api' | 'auto'; domain?: string; q?: string; cursor?: string; limit?: number }
 

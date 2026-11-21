@@ -99,7 +99,7 @@ export async function ownReceiving(tx:DbExecutor,c:Ctx,kind:'endpoint'|'rituals'
 /** Removing an approval holds the endpoints it created or changed. An endpoint URL is write-only, so nothing is posted
  * to a held endpoint, a test included, until its URL is sent again. */
 export const resumeNeedsUrl = () => new ApiError(409, 'ENDPOINT_URL_REQUIRED', 'Deliveries were held when the approval that created or changed this endpoint was removed, and its URL is write-only. Send the URL again to resume.', 'url');
-async function current(tx: DbExecutor, w: string) {
+export async function current(tx: DbExecutor, w: string) {
   const r = (
     await tx.execute<{ version: number; config: Config | null }>(
       sql`SELECT coalesce(s.version,0) AS version,h.config FROM (SELECT 1) one LEFT JOIN mail_routing_state s ON s.workspace_id=${w} LEFT JOIN mail_ritual_configs h ON h.workspace_id=${w}`,
@@ -181,12 +181,14 @@ async function normalize(tx: DbExecutor, w: string, config: Config): Promise<Con
     return { ...r, ...(built?.ok && recipeWrote(built, r.source) ? { recipe: { id: built.recipe.id, params: built.params } } : {}), ...(enabled === false ? { enabled } : {}) };
   }) };
 }
-async function save(tx: DbExecutor, c: Ctx, w: string, input: Config, version: number,preview=false) {
+/** Saves the rule config as the next version. routed: a route write in this transaction already took version, the
+ *  next one, and its manifest, so the rules join that version instead of taking another. */
+export async function save(tx: DbExecutor, c: Ctx, w: string, input: Config, version: number,preview=false,routed=false) {
   const prior=(await tx.execute<{config:Config;owners:Record<string,string|null>}>(sql`SELECT config,owners FROM mail_ritual_configs WHERE workspace_id=${w} FOR UPDATE`)).rows[0];
   const config = await normalize(tx, w, input);
   const unchanged = new Set((prior?.config.rituals ?? []).filter(r => config.rituals.some(x => x.key === r.key && x.source === r.source)).map(r => r.key));
   const p = await prepare(tx, w, config, unchanged),
-    next = version + 1;
+    next = routed ? version : version + 1;
   const bindingKey=(b:Config['attachments'][number])=>'attachment:'+b.target+':'+b.ritual;
   const parts=(cfg:Config)=>new Map<string,string>([
     ...cfg.rituals.map(r=>['ritual:'+r.key,r.source] as const),
@@ -209,14 +211,14 @@ async function save(tx: DbExecutor, c: Ctx, w: string, input: Config, version: n
       throw new ApiError(403,'RULE_BINDING_NOT_OWNED','This approval cannot turn off another owner’s rule.','enabled');
   }
   p.owners=Object.fromEntries([...parts(config)].map(([k,v])=>[k,before?.get(k)===v?prior?.owners[k]??null:preview?null:grant]));
-  await tx.execute(
+  if (!routed) await tx.execute(
     sql`INSERT INTO mail_routing_state(workspace_id,version) VALUES(${w},${next}) ON CONFLICT(workspace_id) DO UPDATE SET version=excluded.version`,
   );
   await tx.execute(
     sql`INSERT INTO mail_ritual_configs(workspace_id,version,config,programs,owners) VALUES(${w},${next},${JSON.stringify(config)}::jsonb,${p.attachments.length ? JSON.stringify(p) : null}::jsonb,${JSON.stringify(p.owners)}::jsonb) ON CONFLICT(workspace_id) DO UPDATE SET version=excluded.version,config=excluded.config,programs=excluded.programs,owners=excluded.owners`,
   );
   const who = c.get('actor');
-  await tx.execute(
+  if (!routed) await tx.execute(
     sql`INSERT INTO mail_routing_versions(workspace_id,version,route_ids,changed_ids,actor_type,actor_id,note) VALUES(${w},${next},ARRAY(SELECT id FROM mail_routes WHERE workspace_id=${w} ORDER BY match),ARRAY[]::text[],${who.credential ?? 'apiKey'},${who.keyId},'Rule configuration')`,
   );
   await tx.execute(
@@ -448,7 +450,7 @@ const recipeCatalog = (family: Family) => {
     [price]: z.string().describe('USD per 1,000 emails an AI decision checks.'),
   }).openapi(`${name}Recipes`);
 };
-const RecipeInputParams = RuleRecipeRef.shape.params;
+export const RecipeInputParams = RuleRecipeRef.shape.params;
 const RecipeAddresses = z.array(z.string().min(1).max(254)).min(1).max(10).describe('Inbox IDs (mbx_…) or receiving addresses it runs on.');
 type TargetRow = { address: string; mailbox_id: string; kind: string };
 const targetRows = async (tx: DbExecutor, w: string, targets: string[]) => {
@@ -485,10 +487,24 @@ function placeRecipe(config: Config, key: string, targets: string[], inbox: (tar
   }
   return list;
 }
-const freeKey = (config: Config, base: string) => {
+export const freeKey = (config: Config, base: string) => {
   const stem = base.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 56) || 'rule';
   for (let n = 1; ; n++) { const key = n === 1 ? stem : `${stem}-${n}`; if (!config.rituals.some(r => r.key === key)) return key; }
 };
+/** Writes a recipe's rule into the config: its source, its recipe, where it runs (addresses, or where it runs now) and,
+ *  for an AI recipe, the decision opt-in for the domains of those addresses. */
+export async function apply(config: Config, tx: DbExecutor, w: string, key: string, recipeId: string, input: RecipeParams, addresses: string[] | undefined, enabled: boolean | undefined) {
+  const built = buildRecipe(recipeId, input, await endpointKinds(tx, w));
+  if (!built.ok) throw new ApiError(422, built.field === 'recipe' ? 'UNKNOWN_RECIPE' : 'INVALID_RECIPE', built.message, built.field);
+  const prev = config.rituals.find(r => r.key === key);
+  const rule = { key, source: built.source, recipe: { id: built.recipe.id, params: built.params }, ...((enabled ?? prev?.enabled) === false ? { enabled: false } : {}) };
+  const next: Config = { ...config, rituals: prev ? config.rituals.map(r => r.key === key ? rule : r) : [...config.rituals, rule] };
+  const targets = addresses ? [...new Set(addresses)] : config.attachments.filter(a => a.ritual === key).map(a => a.target);
+  const named = addresses || built.recipe.decisions ? await targetAddresses(tx, w, targets) : [];
+  const hosts = built.recipe.decisions ? named.map(a => a.split('@')[1]!.toLowerCase()) : [];
+  const inbox = await targetInboxes(tx, w, [...targets, ...next.attachments.map(a => a.target)]);
+  return { ...next, attachments: placeRecipe(next, key, targets, inbox), evaluateDomains: [...new Set([...next.evaluateDomains, ...hosts])] };
+}
 function registerRecipes(app: App, item: string, keyParams: z.ZodObject<{ key: z.ZodString }>) {
   both(app, {
     ...meta, method: 'get', path: path + '/recipes', operationId: 'listRuleRecipes',
@@ -505,20 +521,6 @@ function registerRecipes(app: App, item: string, keyParams: z.ZodObject<{ key: z
       [price]: (Number(RATES.omenUc) * 1000 / 1e8).toFixed(2),
     }, 200);
   }, { responses: { 200: response(recipeCatalog('rituals')), ...errors } });
-  // Writes a recipe's rule into the config: its source, its recipe, where it runs and, for an AI recipe, the decision
-  // opt-in for the domains of those addresses.
-  async function apply(config: Config, tx: DbExecutor, w: string, key: string, recipeId: string, input: RecipeParams, addresses: string[] | undefined, enabled: boolean | undefined) {
-    const built = buildRecipe(recipeId, input, await endpointKinds(tx, w));
-    if (!built.ok) throw new ApiError(422, built.field === 'recipe' ? 'UNKNOWN_RECIPE' : 'INVALID_RECIPE', built.message, built.field);
-    const prev = config.rituals.find(r => r.key === key);
-    const rule = { key, source: built.source, recipe: { id: built.recipe.id, params: built.params }, ...((enabled ?? prev?.enabled) === false ? { enabled: false } : {}) };
-    const next: Config = { ...config, rituals: prev ? config.rituals.map(r => r.key === key ? rule : r) : [...config.rituals, rule] };
-    const targets = addresses ? [...new Set(addresses)] : config.attachments.filter(a => a.ritual === key).map(a => a.target);
-    const named = addresses || built.recipe.decisions ? await targetAddresses(tx, w, targets) : [];
-    const hosts = built.recipe.decisions ? named.map(a => a.split('@')[1]!.toLowerCase()) : [];
-    const inbox = await targetInboxes(tx, w, [...targets, ...next.attachments.map(a => a.target)]);
-    return { ...next, attachments: placeRecipe(next, key, targets, inbox), evaluateDomains: [...new Set([...next.evaluateDomains, ...hosts])] };
-  }
   const created = (s: typeof state | typeof legacyState) => s.extend({ key: z.string().describe('The new rule’s key.') });
   both(app, {
     ...meta, method: 'post', path: path + '/recipes', operationId: 'createRuleFromRecipe',

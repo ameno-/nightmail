@@ -211,6 +211,11 @@ const pages = ids => [
   // Edit key: a row's menu, then Edit; the dialog opens once the key's domains have loaded.
   ['API keys · edit key dialog', '/api-keys', { menu: ['Actions for Production', 'Edit', 'Edit key'] }],
   ['Receiving · new address dialog', '/receiving', { dialog: 'New address' }],
+  // The address builder over the list for the chosen address (one it can draw): its flow, read back from its route and rules.
+  ['Receiving · address builder dialog', `/receiving?open=${ids.address}`, { dialog: 'Edit' }],
+  // New rule's Split by words with no address yet asks which address, then opens the builder on it, split on that check.
+  ['Receiving · split chooser dialog', '/receiving/rules/new', { dialog: 'Split by words' }],
+  ['Receiving · address builder from New rule', `/receiving?tab=rules&build=${ids.address}&split=ai`, {}],
   // Where its mail goes (the route editor) opens once its inboxes, webhooks and forwards have loaded.
   // Why a received message went where it did, from its conversation on the address's Mail tab.
   ['Receiving · why it went here dialog', `/receiving/addresses/${ids.address}?thread=${ids.supportThread}`, { dialog: 'Why it went here' }],
@@ -545,8 +550,8 @@ async function measure(browser, job, fx) {
     }
     if (density?.wanted(job)) result.density = await density.collect(page, job).catch(error => { result.densityError = error.message.split('\n')[0]; return null; });
     if (job.guard === 'receiving-edit') {
-      // The address builder only creates. Edit on an existing address's flow opens its route editor (the steps on its
-      // page, whose Change opens "Where should this mail go?"), and getting there writes nothing to its routes or rules.
+      // Saving through the address builder never changes an address's routes or rules it wasn't told to: New address
+      // turns away one that exists and a *, an unchanged Save writes nothing, and closing with a change asks first.
       const writes = [];
       const onRequest = request => { if (request.method() !== 'GET' && request.url().startsWith(origin + '/v1/')) writes.push(`${request.method()} ${request.url().slice(origin.length)}`); };
       page.on('request', onRequest);
@@ -563,15 +568,25 @@ async function measure(browser, job, fx) {
         if (!await dialog.locator('#builder-address-input').count()) problems.push(`New address went past its first step for ${typed.startsWith('*') ? 'a catch-all' : 'an address that exists'}`);
         if (typed.startsWith('*') && !await dialog.getByRole('button', { name: 'Edit the catch-all' }).count()) problems.push('New address with * offers no way to the catch-all');
         await dialog.getByRole('button', { name: 'Cancel' }).click();
+        // What was typed is a change: closing asks first.
+        await page.getByRole('button', { name: 'Discard', exact: true }).click({ timeout: 3_000 }).catch(() => problems.push('Cancel with an address typed closed New address without asking'));
         await page.waitForTimeout(300);
       }
-      const edited = await page.evaluate(() => { const button = [...document.querySelectorAll('.flow-panel button')].find(el => el.textContent.trim() === 'Edit'); button?.click(); return Boolean(button); });
-      if (!edited) problems.push('no Edit on the flow panel');
+      const edit = async () => { const clicked = await page.evaluate(() => { const button = [...document.querySelectorAll('.flow-panel button')].find(el => el.textContent.trim() === 'Edit'); button?.click(); return Boolean(button); }); if (clicked) await page.waitForSelector('.builder #builder-flow', { timeout: 10_000 }).catch(() => problems.push('Edit on the flow panel opened no builder for an address it can draw')); return clicked; };
+      if (!await edit()) problems.push('no Edit on the flow panel');
       else {
-        await page.waitForURL(/\/receiving\/addresses\/[^/?]+\?tab=flow&edit=1$/, { timeout: 10_000 }).catch(() => problems.push(`Edit on the flow panel landed on ${new URL(page.url()).pathname}${new URL(page.url()).search}, not the address's route editor`));
-        await settle(page, net);
-        if (await page.$('.builder')) problems.push('Edit on the flow panel opened the address builder');
-        if (!await page.evaluate(() => [...document.querySelectorAll('button')].some(el => el.textContent.trim() === 'Change'))) problems.push('the address\'s route editor has no Change');
+        // Save with nothing changed: the result, and no write.
+        await page.locator('.builder').getByRole('button', { name: 'Save' }).click();
+        await page.locator('.builder').getByRole('button', { name: 'Done' }).click({ timeout: 10_000 }).catch(() => problems.push('an unchanged Save showed no result'));
+        await page.waitForTimeout(300);
+        // A change, then Cancel: asked, and discarded.
+        if (await edit()) {
+          await page.locator('.builder').getByRole('button', { name: 'Split with a rule' }).click();
+          await page.locator('.builder').getByRole('button', { name: 'Cancel' }).click();
+          await page.getByRole('button', { name: 'Discard', exact: true }).click({ timeout: 3_000 }).catch(() => problems.push('Cancel after a change closed the builder without asking'));
+          await page.waitForTimeout(300);
+          if (await page.$('.builder')) problems.push('Discard left the builder open');
+        }
       }
       page.off('request', onRequest);
       if (writes.length) problems.push(`Edit wrote to the API: ${writes.join(', ')}`);

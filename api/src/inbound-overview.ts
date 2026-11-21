@@ -3,9 +3,9 @@
 // plus counts per kind, the rules, the endpoints and the domains.
 //
 // Database budget: two statements, run one after the other (one connection at a time), whatever the route count.
-//   1. routes: counts per kind and one page of routes, with everything a page row refers to (its address, aliases and
-//      thread stats, its explicit route, the inboxes and webhooks that route delivers to, and per address its webhook
-//      subscribers, active first, at most OVERVIEW_SUBSCRIBERS, with exact totals).
+//   1. routes: the routing version, counts per kind and one page of routes, with everything a page row refers to (its
+//      address, aliases and thread stats, its explicit route, the inboxes and webhooks that route delivers to, and per
+//      address its webhook subscribers, active first, at most OVERVIEW_SUBSCRIBERS, with exact totals).
 //   2. workspace (managers only): the rule config, the first 100 endpoints and 100 inbound webhooks (plus endpoints
 //      and inboxes a rule names), their route counts from one probe of the destinations index, and the domains.
 // withRegionSettings adds one single-row read on hosted regional sending only.
@@ -75,7 +75,7 @@ type PageRow = { id: string; kind: Kind; match: string; host: string; rank: numb
 type Slim = { id: string; address: string; displayName: string | null };
 type Hook = { id: string; name: string | null; description: string; url: string; event_types: string[]; mailbox_ids: string[] | null; paused: boolean; routes?: number };
 type Subscribers = { list: Hook[]; total: number; active: number };
-type RoutesResult = { counts: Record<string, number>; page: PageRow[]; boxes: { row: MailboxRow; addresses: { address: string; kind: string }[]; stat: { threads: number; unread: number; last: string | null } | null }[]; dest_boxes: Slim[]; dest_endpoints: EndpointRow[]; dest_hooks: Hook[]; subscribers: Record<string, Subscribers> };
+type RoutesResult = { version: number; counts: Record<string, number>; page: PageRow[]; boxes: { row: MailboxRow; addresses: { address: string; kind: string }[]; stat: { threads: number; unread: number; last: string | null } | null }[]; dest_boxes: Slim[]; dest_endpoints: EndpointRow[]; dest_hooks: Hook[]; subscribers: Record<string, Subscribers> };
 type ListedEndpoint = EndpointRow & { routes: number };
 /** One endpoint as the overview and listInboundEndpoints show it: a named endpoint of any type, or a webhook without a name. */
 async function endpointEntry(env: Ctx['env'], w: string, row: ListedEndpoint, calls: (name: string) => string[]): Promise<z.infer<typeof OverviewEndpoint>> {
@@ -142,6 +142,7 @@ export function registerInboundOverview(app: App, deps: Deps) {
     endpointsTruncated: z.boolean().describe(`True when the workspace has more endpoints or inbound webhooks than listed. Read them all with listEndpoints and listInboundWebhooks, following nextCursor until it is null.`),
     domains: z.array(OverviewDomain).describe('Every domain with its receiving status, including domains that only send.'),
     manage: z.boolean().describe('False for members and scoped keys: they see their addresses, without routes, rules, endpoints or domains.'),
+    version: z.number().int().describe('The routing and rules version this overview was read at: send it as If-Match to setInboundAddressFlow.'),
   }).openapi('InboundOverview');
 
   app.openapi(createRoute({
@@ -208,6 +209,7 @@ export function registerInboundOverview(app: App, deps: Deps) {
           AND h.event_types ? 'message.received' AND (h.mailbox_ids IS NULL OR h.mailbox_ids ?| ARRAY(SELECT id FROM ids))
       )
       SELECT
+        coalesce((SELECT version FROM mail_routing_state WHERE workspace_id=${w}),0) AS version,
         (SELECT coalesce(jsonb_object_agg(k, n),'{}'::jsonb) FROM (SELECT CASE WHEN kind='address' AND origin='auto' THEN 'auto' ELSE kind END AS k, count(*)::int AS n FROM f GROUP BY 1) x) AS counts,
         (SELECT coalesce(jsonb_agg(jsonb_build_object('id',pr.id,'kind',pr.kind,'match',pr.match,'host',pr.host,'rank',pr.rank,'address_id',pr.address_id,'domain_id',pr.domain_id,'catch_all',pr.catch_all,
           'route',CASE WHEN pr.rid IS NULL THEN NULL ELSE jsonb_build_object('id',pr.rid,'to',pr.rto,'enabled',pr.ren) END) ORDER BY pr.host,pr.rank,pr.match,pr.id),'[]'::jsonb) FROM pr) AS page,
@@ -348,7 +350,7 @@ export function registerInboundOverview(app: App, deps: Deps) {
     ];
     // rituals (deprecated) is the same list under the names from before the rename.
     const rituals = rules.map(({ decisions, ...r }) => ({ ...r, omens: decisions }));
-    return c.json({ counts, routes: { data, nextCursor: last ? encode(last) : null }, rules, rituals, endpoints, endpointsTruncated: ws.endpoints_more || ws.hooks_more, domains: ws.domains, manage } as never, 200);
+    return c.json({ counts, routes: { data, nextCursor: last ? encode(last) : null }, rules, rituals, endpoints, endpointsTruncated: ws.endpoints_more || ws.hooks_more, domains: ws.domains, manage, version: routes.version } as never, 200);
   });
 
   // Every endpoint, a page at a time: what the Receiving screen's Endpoints list reads (the overview lists the first 100 of each kind).

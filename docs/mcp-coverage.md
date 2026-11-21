@@ -243,6 +243,7 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `getInboundAddress` | `addresses` · `get` · inboxes |
 | `updateInboundAddress` | `addresses` · `update` · inboxes |
 | `deleteInboundAddress` | `addresses` · `delete` · inboxes |
+| `setInboundAddressFlow` | `addresses` · `flow` · inboxes |
 | `listInboundThreads` | `threads` · `list` · inboxes |
 | `createInboundThread` | `reply` · `start` · inboxes |
 | `getInboundThread` | `threads` · `get` · inboxes |

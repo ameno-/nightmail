@@ -3,7 +3,7 @@
 // took is ticked, the rest goes quiet. Neutral throughout: the accent is for buttons and charts.
 import { useState, type FormEvent, type ReactNode } from 'react'
 import { AtSign, Check, Send, Sparkles, Workflow, type LucideIcon } from 'lucide-react'
-import { Alert, Field, Input, LoadingRegion, StatusDot, Textarea } from '../../components/ui'
+import { Alert, Checkbox, Field, Input, LoadingRegion, Select, StatusDot, Textarea } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { request } from '../../data/live'
 import { errorText, type InboundAddress } from '../../data/types'
@@ -80,10 +80,12 @@ function receiveNote(entry: RouteEntry): ReactNode {
 
 const aiUndecided = 'Decided by AI when real mail arrives'
 /** What one test run did for one recipient: where its mail went and which rules acted. */
-export type TestOutcome = { recipient: TraceRecipient | null; rows: TraceRow[] }
-export const outcomeOf = (result: DryRun, address: string): TestOutcome => ({
+/** What one test run did for one recipient; assumed: the AI answer a test took for its AI decisions, when one was chosen. */
+export type TestOutcome = { recipient: TraceRecipient | null; rows: TraceRow[]; assumed?: 'yes' | 'no' }
+export const outcomeOf = (result: DryRun, address: string, assumed?: 'yes' | 'no'): TestOutcome => ({
   recipient: result.recipients.find(r => r.address === address) ?? result.recipients[0] ?? null,
   rows: result.trace.filter(row => row.recipient === address),
+  ...(assumed ? { assumed } : {}),
 })
 const reached = (t: Target, r: TraceRecipient) => t.type === 'inbox' ? !!t.id && (r.inboxes ?? []).includes(t.id)
   : t.type === 'drop' ? !!r.dropped
@@ -104,12 +106,14 @@ function sideOf(param: string | undefined, entry: RouteEntry, overview: Overview
   return { type: e?.type ?? 'webhook', name: param, status: e?.status ?? null, hit: r => !!e && (r.webhooks ?? []).includes(e.id) }
 }
 export const isSplit = (rule?: Pick<OverviewRule, 'recipe'>) => !!rule?.recipe && (rule.recipe.id === 'split' || rule.recipe.id === 'split-by-meaning')
+/** The two-way rule an address's flow draws (and the builder changes): the first in the order its rules run. */
+export const splitOf = (entry: Pick<RouteEntry, 'rules'>, overview: Pick<Overview, 'rules'>) => entry.rules.map(key => overview.rules.find(r => r.key === key)).find(isSplit)
 
 /** The flow of one address, catch-all or wildcard, from the overview's row; a test outcome marks the path taken. An
  *  address whose mail a two-way rule splits draws the fork the builder makes: its two destinations side by side. */
 export function EntryFlow({ entry, overview, outcome, boxes = [] }: { entry: RouteEntry; overview: Overview; outcome?: TestOutcome | null; boxes?: InboundAddress[] }) {
   const rules = new Map(overview.rules.map(r => [r.key, r]))
-  const split = entry.rules.map(key => rules.get(key)).find(isSplit)
+  const split = splitOf(entry, overview)
   const params = split?.recipe?.params ?? {}, one = (v: unknown) => typeof v === 'string' ? v : undefined
   const ways = split && (split.recipe!.id === 'split-by-meaning' || params.test !== 'always') ? [sideOf(one(params.then), entry, overview, boxes), sideOf(one(params.otherwise), entry, overview, boxes)] : null
   const single = split && !ways ? sideOf(one(params.then), entry, overview, boxes) : null
@@ -131,7 +135,7 @@ export function EntryFlow({ entry, overview, outcome, boxes = [] }: { entry: Rou
       {entry.rules.length ? entry.rules.map(key => {
         const rule = rules.get(key)
         return <FlowItem key={key} hit={tested ? acted.has(key) : undefined} note={failed.get(key)} aside={rule && !rule.enabled ? <StatusDot tone="neutral" muted>Off</StatusDot> : undefined}>
-          <RuleLine rule={rule} keyName={key} />
+          <RuleLine rule={rule} keyName={key} endpoints={overview.endpoints} />
         </FlowItem>
       }) : <FlowItem><span className="muted">{steps.process.empty}</span></FlowItem>}
     </FlowStage>
@@ -170,12 +174,15 @@ export function OutcomeFlow({ address, overview, outcome, error, addresses = [],
   const r = outcome?.recipient ?? null
   // A test never asks the AI (unasked): a rule that read an AI answer got its fallback, so neither it nor where the mail
   // went is ticked, and Destinations says the AI decides on real mail.
-  const byAi = (row: TraceRow) => unasked && row.timeline.some(step => step.kind === 'decisions')
+  // With an answer chosen for the test (Sample → The AI says), the result is real for that answer and says so.
+  const readsAi = (row: TraceRow) => row.timeline.some(step => step.kind === 'decisions')
+  const byAi = (row: TraceRow) => unasked && !outcome?.assumed && readsAi(row)
   const undecided = !!r && (outcome?.rows ?? []).some(byAi)
+  const assumedNote = (row: TraceRow) => outcome?.assumed && readsAi(row) ? (outcome.assumed === 'yes' ? 'If the AI says yes' : 'If the AI says no') : undefined
   if (!r && !error) return <LoadingRegion label="Testing"><div className="flow-skeleton" aria-hidden="true"><span /><span /><span /></div></LoadingRegion>
   return <Flow label="Mail flow" tested={!!r}>
     <FlowStage kind="receive"><FlowItem hit={r ? true : undefined} note={r ? matchedBy(r, overview, addresses) : undefined}><Match value={r?.address ?? address} /></FlowItem></FlowStage>
-    <FlowStage kind="process">{!r ? <FlowItem><span className="muted">—</span></FlowItem> : outcome!.rows.length ? outcome!.rows.map(row => <FlowItem key={row.key} hit={byAi(row) ? undefined : row.actions.length > 0} note={row.error ?? undefined}><RuleLine rule={overview.rules.find(x => x.key === row.key)} keyName={row.key} /></FlowItem>)
+    <FlowStage kind="process">{!r ? <FlowItem><span className="muted">—</span></FlowItem> : outcome!.rows.length ? outcome!.rows.map(row => <FlowItem key={row.key} hit={byAi(row) ? undefined : row.actions.length > 0} note={row.error ?? assumedNote(row)}><RuleLine rule={overview.rules.find(x => x.key === row.key)} keyName={row.key} endpoints={overview.endpoints} /></FlowItem>)
       : <FlowItem><span className="muted">{steps.process.empty}</span></FlowItem>}</FlowStage>
     <FlowStage kind="deliver">{!r ? <FlowItem><span className="muted">—</span></FlowItem> : undecided ? <FlowItem icon={<Sparkles className="rcv-icon" size={16} aria-hidden="true" />}><span className="muted">{aiUndecided}</span></FlowItem> : <Delivered recipient={r} overview={overview} addresses={addresses} />}</FlowStage>
   </Flow>
@@ -197,42 +204,55 @@ export function Delivered({ recipient: r, overview, addresses = [] }: { recipien
 
 // ---------------------------------------------------------------- test: send a sample and see where it goes
 
-export type Sample = { from: string; subject: string; text: string }
+/** A test's sample email; attachment adds a small file, ai the answer its AI decisions take (unset: not asked, so not decided). */
+export type Sample = { from: string; subject: string; text: string; attachment?: boolean; ai?: 'yes' | 'no' }
 export const defaultSample: Sample = { from: 'dana@example.net', subject: 'Refund for order 4821', text: 'Hi, the blender arrived broken. Could I get a refund? Order 4821.' }
-const mimeOf = (to: string, s: Sample) => ['From: ' + s.from, 'To: ' + to, 'Subject: ' + s.subject.replace(/[\r\n]+/g, ' '), 'Message-ID: <sample@example.net>', 'Content-Type: text/plain; charset=utf-8', '', s.text].join('\r\n')
+const mimeOf = (to: string, s: Sample) => {
+  const head = ['From: ' + s.from, 'To: ' + to, 'Subject: ' + s.subject.replace(/[\r\n]+/g, ' '), 'Message-ID: <sample@example.net>', 'MIME-Version: 1.0']
+  if (!s.attachment) return [...head, 'Content-Type: text/plain; charset=utf-8', '', s.text].join('\r\n')
+  return [...head, 'Content-Type: multipart/mixed; boundary="sample"', '', '--sample', 'Content-Type: text/plain; charset=utf-8', '', s.text, '--sample',
+    'Content-Type: text/plain; name="receipt.txt"', 'Content-Disposition: attachment; filename="receipt.txt"', '', 'Order 4821', '--sample--', ''].join('\r\n')
+}
 /** The address a test sends to for a row: its own, or one its wildcard or catch-all would catch. */
 export const testAddress = (match: string) => match.startsWith('*@') ? 'someone' + match.slice(1) : match.replace(/\*/g, 'test')
 
 /** Runs the dry run (testRules) for one address with a sample email: nothing is sent or saved, and the AI isn't asked. */
 export function useFlowTest() {
   const [state, setState] = useState<{ address: string; outcome: TestOutcome | null; error: string | null; pending: boolean } | null>(null)
-  async function run(address: string, sample: Sample) {
+  // decisions: the AI decisions the address's rules read, answered with the sample's chosen answer (1 yes, 0 no).
+  async function run(address: string, sample: Sample, decisions: string[] = []) {
     setState({ address, outcome: null, error: null, pending: true })
     try {
-      const result = await request<DryRun>('/v1/rules/test', { method: 'POST', body: { mime: mimeOf(address, sample) } })
-      setState({ address, outcome: outcomeOf(result, address), error: null, pending: false })
+      const assumed = sample.ai && decisions.length ? sample.ai : undefined
+      const scores = assumed ? Object.fromEntries(decisions.map(name => [name, assumed === 'yes' ? 1 : 0])) : undefined
+      const result = await request<DryRun>('/v1/rules/test', { method: 'POST', body: { mime: mimeOf(address, sample), ...(scores ? { scores } : {}) } })
+      setState({ address, outcome: outcomeOf(result, address, assumed), error: null, pending: false })
     } catch (error) { setState({ address, outcome: null, error: errorText(error), pending: false }) }
   }
   return { address: state?.address ?? null, outcome: state?.outcome ?? null, error: state?.error ?? null, pending: state?.pending ?? false, run, clear: () => setState(null) }
 }
 export type FlowTest = ReturnType<typeof useFlowTest>
-/** The sample a test sends: a refund request unless changed. One line until opened. */
-export function SampleFields({ sample, onChange, disabled, id = 'flow-sample' }: { sample: Sample; onChange: (next: Sample) => void; disabled?: boolean; id?: string }) {
+const aiAnswers = [{ value: 'unset', label: 'Not assumed' }, { value: 'yes', label: 'Yes' }, { value: 'no', label: 'No' }]
+/** The sample a test sends: a refund request unless changed. One line until opened. ai: the address's rules ask the AI,
+ *  so the answer a test assumes can be chosen (a test never asks it). */
+export function SampleFields({ sample, onChange, disabled, id = 'flow-sample', ai = false }: { sample: Sample; onChange: (next: Sample) => void; disabled?: boolean; id?: string; ai?: boolean }) {
   return <details className="flow-sample">
-    <summary>Sample: <span className="flow-sample__subject">{sample.subject || '(no subject)'}</span></summary>
+    <summary>Sample: <span className="flow-sample__subject">{sample.subject || '(no subject)'}</span>{sample.attachment && <span className="muted"> · attachment</span>}{ai && sample.ai && <span className="muted"> · AI says {sample.ai}</span>}</summary>
     <div className="stack flow-sample__fields">
       <Field label="From" htmlFor={id + '-from'}><Input id={id + '-from'} value={sample.from} disabled={disabled} onChange={e => onChange({ ...sample, from: e.target.value })} autoComplete="off" /></Field>
       <Field label="Subject" htmlFor={id + '-subject'}><Input id={id + '-subject'} value={sample.subject} disabled={disabled} onChange={e => onChange({ ...sample, subject: e.target.value })} autoComplete="off" /></Field>
       <Field label="Text" htmlFor={id + '-text'}><Textarea id={id + '-text'} rows={3} value={sample.text} disabled={disabled} onChange={e => onChange({ ...sample, text: e.target.value })} /></Field>
+      <Checkbox checked={!!sample.attachment} disabled={disabled} onCheckedChange={on => onChange({ ...sample, attachment: on === true })} label="With an attachment" />
+      {ai && <Field label="The AI says" htmlFor={id + '-ai'}><Select id={id + '-ai'} value={sample.ai ?? 'unset'} disabled={disabled} onValueChange={v => onChange({ ...sample, ai: v === 'unset' ? undefined : v as 'yes' | 'no' })} options={aiAnswers} /></Field>}
     </div>
   </details>
 }
 /** Test: the sample it sends, and what went wrong when it didn't run. The Test button sits with the panel's actions. */
-export function TestBar({ address, test, sample, onSample, id = 'flow-test' }: { address: string; test: FlowTest; sample: Sample; onSample: (next: Sample) => void; id?: string }) {
-  const submit = (event: FormEvent) => { event.preventDefault(); void test.run(address, sample) }
+export function TestBar({ address, test, sample, onSample, id = 'flow-test', decisions = [] }: { address: string; test: FlowTest; sample: Sample; onSample: (next: Sample) => void; id?: string; decisions?: string[] }) {
+  const submit = (event: FormEvent) => { event.preventDefault(); void test.run(address, sample, decisions) }
   // Its id names the form its Test button submits: two panels on one screen (the builder over the list) each have their own.
   return <form className="flow-test" id={id} onSubmit={submit}>
-    <SampleFields id={id + '-sample'} sample={sample} onChange={next => { onSample(next); test.clear() }} disabled={test.pending} />
+    <SampleFields id={id + '-sample'} sample={sample} onChange={next => { onSample(next); test.clear() }} disabled={test.pending} ai={decisions.length > 0} />
     {test.error && test.address === address && <Alert tone="danger">{test.error}</Alert>}
   </form>
 }

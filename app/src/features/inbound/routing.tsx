@@ -7,6 +7,7 @@ import { queries } from '../../data/queries'
 import type { ForwardEndpoint, InboundAddress, InboundWebhook, MailRoute } from '../../data/types'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { CreatedEndpointDialog, EndpointDialog, endpointStatusLabel, type Endpoint } from './ritual-connections'
+import { outcomes } from './concepts'
 import '../settings/settings.css'
 import './inbound.css'
 type Kind = 'inbox' | 'webhook' | 'forward'
@@ -52,8 +53,8 @@ function RouteDialog({ draft, destinations, owners, onClose, refreshWebhooks, re
   const [enabled, setEnabled] = useState(route?.enabled ?? true)
   const [problem, setProblem] = useState<string | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
-  const save = useApiMutation((api, input: { match: string; to: string[] | 'drop'; enabled: boolean }) => route ? api.routing.updateRoute(route.id, input) : api.routing.createRoute(input), route ? 'Route saved' : 'Route added', false, true, route?.id)
-  const remove = useApiMutation((api, _: void) => api.routing.deleteRoute(route!.id), 'Route deleted', false, true, route?.id)
+  const save = useApiMutation((api, input: { match: string; to: string[] | 'drop'; enabled: boolean }) => route ? api.routing.updateRoute(route.id, input) : api.routing.createRoute(input), 'Saved', false, true, route?.id)
+  const remove = useApiMutation((api, _: void) => api.routing.deleteRoute(route!.id), 'Removed', false, true, route?.id)
   const normalized = match.trim().toLowerCase()
   const owner = owners.find(a => a.address === normalized || a.aliases.includes(normalized))
   const losesOwner = owner && (action !== 'deliver' || !selected.includes(owner.id))
@@ -91,7 +92,7 @@ function RouteDialog({ draft, destinations, owners, onClose, refreshWebhooks, re
         </Field>
         <Field label="Deliver to" htmlFor="routing-action" error={fieldError(save.error, 'to')}>
           <Select id="routing-action" value={action} disabled={save.isPending} onValueChange={value => { setAction(value as Action); setProblem(null) }}
-            options={[{ value: 'deliver', label: 'These destinations' }, { value: 'keep', label: 'Store it, no inbox' }, { value: 'drop', label: 'Drop it' }]} />
+            options={[{ value: 'deliver', label: 'These destinations' }, { value: 'keep', label: outcomes.store }, { value: 'drop', label: outcomes.drop }]} />
         </Field>
         {action === 'deliver' && <>
           {group('inbox', 'Inboxes', <>No addresses yet. <Link to="/receiving">Create one</Link>.</>)}

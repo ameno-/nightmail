@@ -121,6 +121,7 @@ Object.assign(SKIP, {
   listRuleTemplates: receivingMvp,
   listRuleRecipes: receivingMvp,
   createRuleFromRecipe: receivingMvp,
+  setInboundAddressFlow: 'Changes shared routes and rules; covered by api.acceptance.test.ts.',
   updateRuleFromRecipe: receivingMvp,
   updateRule: receivingMvp,
   getRule: receivingMvp,

@@ -4038,6 +4038,34 @@ export type CreateInboundAddress = {
      * Hold received mail without a DMARC pass for its From domain: it is stored with the unverified label and does not emit message.received.
      */
     requireDmarc?: boolean;
+    flow?: CreateInboundAddressFlow;
+};
+
+/**
+ * Where the new address’s mail goes, saved with the address in one transaction and one routing version: deliver creates the route for its own address, split adds a two-way rule on it (setInboundAddressFlow changes both later). If any part is refused, nothing is created. Needs what changing routes and rules needs.
+ */
+export type CreateInboundAddressFlow = {
+    /**
+     * Where the address's mail goes: the destinations of the route for its own address, as createRoute takes them (inbox, webhook and forward IDs or keys, [] to keep it without an inbox, or 'drop'). Creates the route when there is none; null deletes it.
+     */
+    deliver?: 'drop' | Array<string | string> | null;
+    split?: InboundAddressSplit;
+};
+
+/**
+ * Adds a two-way rule on the new address. Its params may name the new address as inbox:<key>.
+ */
+export type InboundAddressSplit = {
+    /**
+     * split, or split-by-meaning to let the AI decide.
+     */
+    recipe: 'split' | 'split-by-meaning';
+    /**
+     * The fields createRuleFromRecipe takes for this recipe: split { test, value, then, otherwise }, split-by-meaning { meaning, then, otherwise }.
+     */
+    params?: {
+        [key: string]: string | Array<string>;
+    };
 };
 
 export type UpdateInboundAddress = {
@@ -4071,6 +4099,47 @@ export type UpdateInboundAddress = {
         perThreadPer10Minutes?: number;
     };
     requireDmarc?: boolean;
+};
+
+export type InboundAddressFlow = {
+    /**
+     * The routing and rules version after the change, also the ETag; unchanged when nothing changed.
+     */
+    version: number;
+    /**
+     * The route for the address's own address, as getRoute returns it; null when there is none.
+     */
+    route: MailRoute | null;
+    /**
+     * The two-way rule this change left on the address: the rule it named, its own copy when the rule was shared, or the new rule. null when it was taken off, or no rule was named or added.
+     */
+    rule: string | null;
+};
+
+export type SetInboundAddressFlow = {
+    /**
+     * Where the address's mail goes: the destinations of the route for its own address, as createRoute takes them (inbox, webhook and forward IDs or keys, [] to keep it without an inbox, or 'drop'). Creates the route when there is none; null deletes it.
+     */
+    deliver?: 'drop' | Array<string | string> | null;
+    /**
+     * The key of the two-way rule (split or split-by-meaning) on this address that split changes.
+     */
+    rule?: string;
+    /**
+     * With rule: rewrites that rule. A rule other addresses also run is left as it is for them, and this address gets its own copy under a new key. Without rule: adds a new two-way rule on this address. null, with rule: takes the rule off this address, and deletes it once no address runs it.
+     */
+    split?: {
+        /**
+         * split, or split-by-meaning to let the AI decide.
+         */
+        recipe: 'split' | 'split-by-meaning';
+        /**
+         * The fields createRuleFromRecipe takes for this recipe: split { test, value, then, otherwise }, split-by-meaning { meaning, then, otherwise }.
+         */
+        params?: {
+            [key: string]: string | Array<string>;
+        };
+    } | null;
 };
 
 export type InboundThreadPage = {
@@ -4482,6 +4551,10 @@ export type InboundOverview = {
      * False for members and scoped keys: they see their addresses, without routes, rules, endpoints or domains.
      */
     manage: boolean;
+    /**
+     * The routing and rules version this overview was read at: send it as If-Match to setInboundAddressFlow.
+     */
+    version: number;
 };
 
 export type InboundOverviewRoute = {
@@ -23540,6 +23613,78 @@ export type UpdateInboundAddressResponses = {
 };
 
 export type UpdateInboundAddressResponse = UpdateInboundAddressResponses[keyof UpdateInboundAddressResponses];
+
+export type SetInboundAddressFlowData = {
+    body: SetInboundAddressFlow;
+    headers?: {
+        /**
+         * Apply only if routes and rules are still at this version, from getInboundOverview, GET /v1/routing or a previous ETag.
+         */
+        'if-match'?: string;
+    };
+    path: {
+        /**
+         * Opaque inbound address ID (mbx_…).
+         */
+        addressId: string;
+    };
+    query?: never;
+    url: '/v1/inbound/addresses/{addressId}/flow';
+};
+
+export type SetInboundAddressFlowErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type SetInboundAddressFlowError = SetInboundAddressFlowErrors[keyof SetInboundAddressFlowErrors];
+
+export type SetInboundAddressFlowResponses = {
+    /**
+     * Success
+     */
+    200: InboundAddressFlow;
+};
+
+export type SetInboundAddressFlowResponse = SetInboundAddressFlowResponses[keyof SetInboundAddressFlowResponses];
 
 export type ListInboundThreadsData = {
     body?: never;

@@ -65,12 +65,16 @@ The list is complete: routing targets and rule targets always show, and webhooks
 
 ## New address and where its mail goes
 
-**New address** asks for the address (and, folded away, its lifetime and reply-as address), then **Where should this mail go?**, drawn as the flow is:
+**New address** asks for the address (and, folded away, its lifetime and reply-as address), then where its mail goes, drawn as the flow is:
 
-- **One way:** one destination, picked from its inbox, another inbox, a destination (Slack, Discord, a webhook, a forward), keep it with no inbox, drop it, or a new Slack, Discord, webhook or forward made right there.
+- **One destination:** picked from its inbox, another inbox, a destination (Slack, Discord, a webhook, a forward), stored with no inbox, dropped, or a new inbox, Slack, Discord, webhook or forward made right there. Slack's and Discord's fields say where their URL comes from.
 - **Split it two ways:** a rule checks one thing (the subject mentions, the email mentions, the sender is, it has an attachment, or it looks like something, which the AI checks at $0.10 per 1,000 emails) and the flow forks: **If yes** to one destination, **Otherwise** to another.
 
-Save shows the result with **Test**. The builder only creates: it turns away an address that exists, and a `*` (a catch-all or wildcard) gets a button to that route's editor instead. **Edit** on the flow panel, or on an address's Where mail goes tab, opens the address's steps (below), never the builder. Saving composes the public API's own calls: `createInboundAddress`, `createEndpoint` for a new destination, a two-way rule (`createRuleFromRecipe` with `split` or `split-by-meaning`, see [rules.md](rules.md#recipes)) and the address's route, each created, never updated.
+Save shows the result, titled with the address, with **Test**. New address turns away an address that exists (with **Open it**), and a `*` (a catch-all or wildcard) gets a button to that route's editor. Closing it with something typed asks first.
+
+**Edit** (the flow panel's, a row's, or an address's Where mail goes tab) opens the same builder when it can draw the address's flow: one destination, or one two-way rule (the route's other destinations, if any, shown under it as **Also** and kept), and a route that isn't paused. Anything more (several two-way rules, a paused route, a route to several places with no rule) opens the address's steps instead. A rule another address shares is said so, and a change gives this address its own copy.
+
+Saving makes a new destination first (`createEndpoint`, or `createInboundAddress` for a new inbox), then writes the flow in one version. A new address is one `createInboundAddress` with its `flow`: if any of it fails, nothing is created. An address that exists is `setInboundAddressFlow` with only what changed (an unchanged Save writes nothing) and the version the builder read: when the address's flow changed meanwhile, Save says so and keeps the draft, with **Show the saved flow**; a change elsewhere in the workspace doesn't stop it.
 
 ## The flow panel
 
@@ -78,8 +82,8 @@ Choosing a row opens its flow, the same diagram everywhere: **Receive** (the add
 
 | Action | What it does |
 |---|---|
-| **Test** | Sends a sample email (a refund request unless changed under *Sample*) through the saved rules with the dry run (`testRules`). It shows what the dry run reports: the rules that acted, ticked, and where the mail went. Nothing is sent or saved, and the AI isn't asked: when a rule reads an AI decision, nothing is ticked for it and Destinations says "Decided by AI when real mail arrives". |
-| **Edit** | Opens the address's Where mail goes tab to change it; a wildcard or catch-all opens "Where should this mail go?". |
+| **Test** | Sends a sample email (a refund request unless changed under *Sample*, where it can carry an attachment) through the saved rules with the dry run (`testRules`). It shows what the dry run reports: the rules that acted, ticked, and where the mail went. Nothing is sent or saved, and the AI isn't asked: when a rule reads an AI decision, nothing is ticked for it and Destinations says "Decided by AI when real mail arrives", unless *Sample* → **The AI says** picks Yes or No for the test. |
+| **Edit** | Opens the builder, or the address's steps when the builder can't draw its flow; a wildcard or catch-all opens "Where should this mail go?". |
 | **Mail** | The address's Mail tab. |
 
 Typing a full address in the search opens its row. One with no row of its own shows where its mail would go (a wildcard, the catch-all, or stored), from a test, with **Create this address**.
@@ -91,12 +95,12 @@ An address's page has three tabs:
 | Tab | What's there |
 |---|---|
 | **Mail** | Its conversations: search, the view picker (Inbox, Starred, Archive, Spam, Trash, All), reading, replying and New message. A message sent from another address opens on that address's page. |
-| **Where mail goes** | The flow panel's diagram, with Test. **Edit** opens its steps: the rules that run, in order, in plain words (attach, detach with Undo, New rule) and where its mail is delivered (**Change**, "Where should this mail go?": Deliver to these destinations, store it or drop it). |
+| **Where mail goes** | The flow panel's diagram, with Test. **Edit** opens the builder (as above), or its steps: the rules that run, in order, in plain words (attach, detach with Undo, New rule) and where its mail is delivered (**Change**, "Where should this mail go?": Deliver to these destinations, store it or drop it). |
 | **Settings** | Its domain and dates, display name, aliases and wildcards (edited here only), and Delete address. |
 
 Switching tabs keeps the open conversation and a reply being written.
 
-Mail is the first tab: opening an address shows its mail. On a received message, **Why it went here** replays it through today's rules (`testRules` with its message ID and its recorded AI answers) and draws the path it took. Every address's received mail together is in Logs, filtered to Received; `/receiving/inbox` opens there, and `/receiving/inbox?address=…` opens that address's Mail tab.
+Mail is the first tab: opening an address shows its mail. On a received message, **Why it went here** ("Replayed with today's rules") replays it through today's rules (`testRules` with its message ID and its recorded AI answers) and draws the path it took. Every address's received mail together is in Logs, filtered to Received; `/receiving/inbox` opens there, and `/receiving/inbox?address=…` opens that address's Mail tab.
 
 ![An address's page](images/receiving/address.png)
 

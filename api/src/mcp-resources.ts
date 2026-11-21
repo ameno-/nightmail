@@ -22,7 +22,7 @@ const resources: Record<string, { label: string; actions: Record<string, string>
     upload: 'uploadAttachment', get: 'getAttachment', content: 'getAttachmentContent', delete: 'deleteAttachment', getInbox: 'getInboxAttachment', getInbound: 'getInboundAttachment',
   } },
   addresses: { label: 'Receiving addresses', actions: {
-    list: 'listInboundAddresses', overview: 'getInboundOverview', get: 'getInboundAddress', create: 'createInboundAddress', update: 'updateInboundAddress', delete: 'deleteInboundAddress', release: 'releaseRetiredAddress',
+    list: 'listInboundAddresses', overview: 'getInboundOverview', get: 'getInboundAddress', create: 'createInboundAddress', update: 'updateInboundAddress', delete: 'deleteInboundAddress', release: 'releaseRetiredAddress', flow: 'setInboundAddressFlow',
   } },
   routes: { label: 'Inbound routes', actions: {
     list: 'listRoutes', get: 'getRoute', create: 'createRoute', update: 'updateRoute', delete: 'deleteRoute',
@@ -174,11 +174,12 @@ export function resourceTools(operations: ReadonlyMap<string, McpOperation>): To
     const description = [label,...notes].join('. ')+'.';
     const oneOf = visible.map(({ action, op }) => {
       const { $defs = {}, properties = {}, required = [] } = op.tool.inputSchema;
-      const fields = Object.entries(properties).filter(([k]) => required.includes(k) || commonArgs.has(k));
+      const fields = Object.entries(properties).filter(([k]) => k !== 'confirm' && (required.includes(k) || commonArgs.has(k)));
       return { properties: { action: { const: action }, ...Object.fromEntries(fields.map(([k, v]) => [k, fieldSummary(v as Schema, $defs as Schema)])) }, ...(required.length ? { required } : {}) };
     });
-    // The optional retry key, like pagination, is uniform. List it once per resource instead of on every write.
-    const shared=Object.fromEntries(['cursor','limit','idempotencyKey'].flatMap(k=>{const op=visible.find(x=>x.op.tool.inputSchema.properties?.[k])?.op;return op?[[k,k==='idempotencyKey'?{type:'string'}:{}]]:[]}));
+    // The optional retry key and the write confirmation, like pagination, are uniform. List them once per resource instead
+    // of on every write; each write's branch still requires confirm.
+    const shared=Object.fromEntries(['cursor','limit','idempotencyKey','confirm'].flatMap(k=>{const op=visible.find(x=>x.op.tool.inputSchema.properties?.[k])?.op;return op?[[k,k==='idempotencyKey'?{type:'string'}:k==='confirm'?{const:true}:{}]]:[]}));
     return [{ name, description, inputSchema: { type: 'object' as const, properties: { action: { enum: visible.map(x => x.action) },...shared }, required: ['action'], oneOf },
       annotations: { readOnlyHint: visible.every(x => x.op.tool.annotations?.readOnlyHint), destructiveHint: visible.some(x => x.op.tool.annotations?.destructiveHint), openWorldHint: true } }];
   }).concat([describeTool]);

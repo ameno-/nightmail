@@ -6,6 +6,7 @@ import { useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/cont
 import { date, number } from '../../lib/format'
 import { AddressMail } from './threads'
 import { FlowPanel } from './panel'
+import { AddressBuilder, builderFits } from './builder'
 import { request } from '../../data/live'
 import { errorText, type InboundAddress, type InboundAddressPatch } from '../../data/types'
 import { AliasEditor, aliasState, commitAliases, type AliasState } from './aliases'
@@ -68,12 +69,12 @@ function AddressPath({ address, overview }: { address: InboundAddress; overview:
     <span className="addr-arrow" aria-hidden="true">→</span>
     <section className="addr-step" id="rules">
       <h2>{steps.process.title}</h2>
-      {!entry ? <SkeletonText width="50%" /> : attached.length ? <ul>{attached.map((k, i) => <li key={k}><RitualIcon /><Link className="addr-rule" to={`/receiving/rules/${encodeURIComponent(k)}`}><RuleLine rule={overview.data?.rules.find(r => r.key === k)} keyName={k} /></Link>{i < attached.length - 1 && <span className="addr-then">then</span>}<span className="addr-grow" />
+      {!entry ? <SkeletonText width="50%" /> : attached.length ? <ul>{attached.map((k, i) => <li key={k}><RitualIcon /><Link className="addr-rule" to={`/receiving/rules/${encodeURIComponent(k)}`}><RuleLine rule={overview.data?.rules.find(r => r.key === k)} keyName={k} endpoints={overview.data?.endpoints} /></Link>{i < attached.length - 1 && <span className="addr-then">then</span>}<span className="addr-grow" />
         <IconButton size="sm" label={`Detach ${k}`} disabled={busy} onClick={() => detach(k)}><X size={14} aria-hidden="true" /></IconButton></li>)}</ul>
         : <p className="addr-step__empty">{steps.process.empty}</p>}
       <div className="addr-step__foot">
         {available.length > 0 && <div className="addr-step__actions">
-          <Select aria-label="Rule to attach" value={ritual} onValueChange={setRitual} options={[{ value: '', label: 'Attach a rule…' }, ...available.map(r => ({ value: r.key, text: r.key, label: <RuleLine rule={r} keyName={r.key} /> }))]} />
+          <Select aria-label="Rule to attach" value={ritual} onValueChange={setRitual} options={[{ value: '', label: 'Attach a rule…' }, ...available.map(r => ({ value: r.key, text: r.key, label: <RuleLine rule={r} keyName={r.key} endpoints={overview.data?.endpoints} /> }))]} />
           <Button size="sm" disabled={!ritual || busy || attached.length >= RITUALS_PER_ADDRESS} onClick={() => void attach(list => [...list, { rule: ritual, target: address.id, continue: !!available.find(r => r.key === ritual)?.recipe }], `${ritual} attached.`)}>Attach</Button>
         </div>}
         <div className="addr-step__actions"><Link className="ui-button ui-button--ghost ui-button--sm" to={`/receiving/rules/new?address=${encodeURIComponent(address.id)}`}>New rule</Link></div>
@@ -139,8 +140,12 @@ export function InboundAddressDetailPage() {
   const overview = useOverview({ q: current?.address ?? '', kind: current?.kind === 'inbox' ? 'inbox' : 'address', limit: 5 }, false, canAdminister && !!current && tab === 'flow')
   // Where its mail goes is the flow panel's diagram; Edit (or ?edit from the panel) opens its steps to change them.
   const entry = overview.data?.routes.data.find(r => r.address?.id === id)
-  // Edit (and ?edit=1) shows the steps: its route, changed in the route editor, and every rule it runs, to attach or detach.
-  const [editing, setEditing] = useState(params.get('edit') !== null)
+  // Edit opens the builder when it can draw the flow. ?edit=1 (Edit otherwise, or a builder's "more rules") shows the
+  // steps: its route, changed in the route editor, and every rule it runs, to attach or detach. From the URL, so a link
+  // to them works on this page too.
+  const editing = params.get('edit') !== null
+  const setEditing = (on: boolean) => setParams(previous => { const next = new URLSearchParams(previous); if (on) next.set('edit', '1'); else next.delete('edit'); return next }, { replace: true })
+  const [building, setBuilding] = useState(false)
   const input = edited ?? (current ? formOf(current) : null)
   // Only a failed first load replaces the page: a later refetch that fails keeps the Settings form and its edits.
   if (address.error && !current) return <><PageHeader title="Address" backTo="/receiving" /><ErrorState error={address.error} onRetry={() => void address.refetch()} /></>
@@ -174,7 +179,8 @@ export function InboundAddressDetailPage() {
       : tab === 'flow' ? <div className="stack addr-page">{editing || !entry || !overview.data
         ? <><AddressPath address={current} overview={overview} />
           {entry && <div className="cluster"><Button onClick={() => setEditing(false)}>Done</Button></div>}</>
-        : <div className="addr-flow"><FlowPanel entry={entry} overview={overview.data} onEdit={() => setEditing(true)} mailLink={false} /></div>}</div>
+        : <div className="addr-flow"><FlowPanel entry={entry} overview={overview.data} onEdit={() => { if (builderFits(entry, overview.data!)) setBuilding(true); else setEditing(true) }} mailLink={false} /></div>}
+        {building && overview.data && <AddressBuilder open address={current} domains={overview.data.domains} onOpenChange={open => { if (!open) { setBuilding(false); void overview.refetch() } }} />}</div>
       : <div className="stack addr-page">
         <KeyValues className="addr-facts" items={[
           ['Domain', <Link key="d" to="/domains">{current.domain}</Link>],

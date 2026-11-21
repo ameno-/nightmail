@@ -74,7 +74,8 @@ function WhyItWentHere({ message, address, open, onOpenChange }: { message: Inbo
   const recipient = why.data?.recipients.find(r => mine.has(r.address))?.address ?? why.data?.recipients[0]?.address ?? address?.address ?? ''
   const error = why.error ?? overview.error
   // A full-height sheet on a phone: the path arrives after the sheet opens and fills it from the top, moving nothing.
-  return <Dialog size="lg" open={open} onOpenChange={onOpenChange} title="Why it went here">
+  // A replay, not the record: rules changed since it arrived would send it elsewhere today, and the title says so.
+  return <Dialog size="lg" open={open} onOpenChange={onOpenChange} title="Replayed with today’s rules" analytics="why-it-went-here">
     {error ? <ErrorState error={error} onRetry={() => { void why.refetch(); void overview.refetch() }} />
       : <OutcomeFlow address={recipient} overview={overview.data ?? emptyOverview} outcome={why.data && overview.data ? outcomeOf(why.data, recipient) : null} error={null} addresses={address ? [address] : []} />}
   </Dialog>
