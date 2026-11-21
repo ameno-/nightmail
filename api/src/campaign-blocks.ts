@@ -283,7 +283,7 @@ const styles: Record<string, string> = {
   h3: `${BASE}font-size:18px;line-height:1.4;font-weight:600;margin:20px 0 12px;`,
   li: `${BASE}font-size:16px;line-height:1.6;margin:0 0 6px;`,
   list: 'margin:0 0 16px;padding-left:24px;',
-  blockquote: `margin:0 0 16px;padding:4px 0 4px 16px;border-left:3px solid ${RULE};color:${MUTED};`,
+  blockquote: `margin:0 0 16px;padding:12px 16px 4px 19px;background-color:#f4f4f4;border-radius:4px;color:${MUTED};`,
   pre: `margin:0 0 16px;padding:14px 16px;background:#f4f4f4;border-radius:4px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;color:${TEXT};`,
   code: 'font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:0.92em;background:#f4f4f4;padding:1px 4px;border-radius:3px;',
   hr: `border:0;border-top:1px solid ${RULE};margin:24px 0;`,

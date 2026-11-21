@@ -31,7 +31,7 @@ body:has(.email-composer[data-inactive]) :is([data-re-bubble-menu], [data-re-sla
 .composer-document .tiptap .align-right { text-align: right; }
 .composer-document .tiptap :is(ul, ol) { margin: 0 0 16px; padding-inline-start: 24px; }
 .composer-document .tiptap li { margin: 0 0 6px; font-size: 16px; line-height: 1.6; }
-.composer-document .tiptap blockquote { margin: 0 0 16px; padding: 4px 0 4px 16px; border-inline-start: 3px solid #e2e2e2; color: #595959; }
+.composer-document .tiptap blockquote { margin: 0 0 16px; padding: 12px 16px 4px 19px; border-radius: 4px; background: #f4f4f4; color: #595959; }
 .composer-document .tiptap pre { margin: 0 0 16px; padding: 14px 16px; border-radius: 4px; background: #f4f4f4; color: #181818; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
 .composer-document .tiptap :not(pre) > code { padding: 1px 4px; border-radius: 3px; background: #f4f4f4; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .92em; }
 .composer-document .tiptap hr { margin: 24px 0; border: 0; border-top: 1px solid #e2e2e2; }

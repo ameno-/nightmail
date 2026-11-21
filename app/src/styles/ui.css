@@ -435,7 +435,7 @@ select.ui-native-select:disabled { background-color: var(--color-layer-1); }
 li.ui-facet--slot { height: 26px; }
 button.ui-facet { cursor: pointer; transition: background var(--motion-duration); }
 @media (hover: hover) and (pointer: fine) { button.ui-facet:hover { background: var(--color-hover); } }
-button.ui-facet[aria-pressed='true'] { background: var(--color-active-bg); box-shadow: inset 2px 0 var(--color-text); }
+button.ui-facet[aria-pressed='true'] { background: var(--color-active-bg); }
 button.ui-facet:focus-visible { outline-offset: -2px; }
 .ui-facet[data-empty] { color: var(--color-faint); }
 .ui-facet__dot { width: 6px; height: 6px; border-radius: 50%; background: var(--tone-marker); }
@@ -461,7 +461,6 @@ button.ui-facet:focus-visible { outline-offset: -2px; }
   /* Each value keeps its whole label: the row scrolls sideways instead of squeezing them to a letter. */
   .ui-split[data-collapse='row'] .ui-facets__group li { flex: none; }
   .ui-split[data-collapse='row'] button.ui-facet { width: auto; margin: 0; padding-inline: var(--space-8); grid-template-columns: auto auto auto; height: var(--control-height); }
-  .ui-split[data-collapse='row'] button.ui-facet[aria-pressed='true'] { box-shadow: none; }
   .ui-split[data-collapse='row'] .ui-facet__dot--none { display: none; }
 }
 /* Waterfall: 28px rows, a dot, the name and the time since the first event. */

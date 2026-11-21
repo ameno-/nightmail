@@ -75,7 +75,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
       button: { fontFamily, letterSpacing, fontSize: '15px', backgroundColor: '#181818', color: '#ffffff', padding: '12px 20px', borderRadius: '4px' },
       link: { color: '#3156c7', textDecoration: 'underline' },
       image: { maxWidth: '100%', height: 'auto' },
-      blockquote: { margin: '0 0 16px', padding: '4px 0 4px 16px', borderLeft: '3px solid #e2e2e2', color: '#595959' },
+      blockquote: { margin: '0 0 16px', padding: '12px 16px 4px 19px', backgroundColor: '#f4f4f4', borderRadius: '4px', color: '#595959' },
       codeBlock: { margin: '0 0 16px', padding: '14px 16px', backgroundColor: '#f4f4f4', borderRadius: '4px', fontSize: '13px', lineHeight: '1.5' },
       inlineCode: { backgroundColor: '#f4f4f4', borderRadius: '3px' },
       list: { margin: '0 0 16px', paddingLeft: '24px' },
