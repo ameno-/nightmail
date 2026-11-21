@@ -7768,7 +7768,7 @@ describe('Hosted MCP OAuth and tools', () => {
           assert.deepEqual(detail.customer.workspaces.map((w: Json) => [w.id, w.role, w.inScope]).sort(), [[acme, 'owner', true], [beta, 'admin', false]].sort());
           assert.ok(detail.customer.conversations.some((o: Json) => o.id === other) && !detail.customer.conversations.some((o: Json) => o.id === chatId || o.id === emailId));
           const actions = detail.customer.activity.map((e: Json) => e.action);
-          assert.ok(actions.includes('support.view') && !actions.includes('support.read'), actions.join());
+          assert.ok(actions.includes('support.view') && !actions.includes('support.read') && !actions.includes('support.inbox_view'), actions.join());
           assert.deepEqual(detail.customer.notes.map((n: Json) => [n.id, n.text, n.workspaceId, n.conversationId]), [[note.id, note.text, acme, chatId]]);
           assert.deepEqual((await db.query(`SELECT DISTINCT user_id, actor_id, internal FROM audit_events WHERE action = 'support.inbox_view' AND target_id = $1 AND actor_id = $2`, [chatId, reader.userId])).rows,
             [{ user_id: owner.userId, actor_id: reader.userId, internal: true }]);
@@ -7841,6 +7841,86 @@ describe('Hosted MCP OAuth and tools', () => {
           await (await import('./src/maintenance.js')).cleanup(runtime);
           assert.deepEqual([(await messages(old)).length, (await messages(recent)).length, (await messages(chatId)).length], [0, 1, 4]);
           assert.deepEqual((await db.query('SELECT id, subject FROM support_conversations WHERE id = ANY($1) ORDER BY id = $2 DESC', [[old, recent], old])).rows.map(r => r.subject), [null, 'Hello']);
+        });
+
+        await t.test('9 triage: Needs you holds open tickets, blocked work, failed answers and what staff owe on a paused agent, most urgent and longest waiting first; Done takes one out until something new happens; Agent handling is the rest; read markers are each operator’s own', async () => {
+          ok(reply(await platform.pullOutbox()));
+          const at = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+          const list = async (view: string, who = reader, extra = '') => ok(await send('GET', `${inbox}?view=${view}&limit=100${extra}`, session(who)));
+          const handled = await chat(member), p3 = await chat(member), p1 = await chat(owner), blocked = await stranger(), paused = await chat(owner), mine = [handled, p3, p1, blocked, paused];
+          const ours = async (view: string) => (await list(view)).data.filter((c: Json) => mine.includes(c.id));
+          const order = async (view: string) => (await ours(view)).map((c: Json) => c.id);
+          ok(reply(await platform.mirrorMessages(handled, [{ id: msg(), author: 'customer', text: 'How do I add a domain?', at: at(30) }, { id: msg(), author: 'agent', text: 'Open Domains and press Add domain.', delivery: 'sent', at: at(29) }])));
+          ok(reply(await platform.mirrorState(p3, { ticket: { id: ticketId(), type: 'feature_request', severity: 'P3' } })));
+          ok(reply(await platform.mirrorState(p1, { ticket: { id: ticketId(), type: 'bug', severity: 'P1' } })));
+          ok(reply(await platform.mirrorMessages(blocked, [{ id: msg(), author: 'customer', text: 'Hello?', at: at(50) }])));
+          ok(reply(await platform.mirrorState(blocked, { blockedWork: 2 })));
+          ok(reply(await platform.mirrorMessages(paused, [{ id: msg(), author: 'customer', text: '\n  First question \nwith detail', at: at(40) }])));
+          ok(await send('POST', `${inbox}/${paused}/pause`, keyed(operator)));
+
+          // A P1 ticket first, then customers nobody else will answer (the longest waiting first), then the rest.
+          assert.deepEqual(await order('needs_you'), [p1, blocked, paused, p3]);
+          assert.deepEqual((await ours('needs_you')).map((c: Json) => [c.needsYou.reasons, c.needsYou.urgent]), [[['ticket'], true], [['blocked'], true], [['paused'], true], [['ticket'], false]]);
+          assert.deepEqual([(await ours('needs_you'))[1].needsYou.since, (await ours('needs_you'))[2].needsYou.since].map(s => Math.round((Date.now() - Date.parse(s)) / 60_000)), [50, 40], 'Waiting since the customer wrote.');
+          assert.deepEqual(await order('agent'), [handled]);
+          assert.equal((await ours('all')).find((c: Json) => c.id === handled).needsYou, null);
+          assert.equal((await ours('all')).find((c: Json) => c.id === paused).firstLine, 'First question');
+          const everything = await list('needs_you'), agent = await list('agent');
+          assert.deepEqual([everything.nextCursor, everything.counts.needsYou, agent.counts.agent], [null, everything.data.length, agent.data.length]);
+          // Pages follow the same order; a cursor from another view, or one edited, is refused.
+          const walked: string[] = [];
+          for (let cursor: string | null = null, i = 0; i < 200; i++) {
+            const page: Json = ok(await send('GET', `${inbox}?view=needs_you&limit=2${cursor ? `&cursor=${cursor}` : ''}`, session(reader)));
+            walked.push(...page.data.map((c: Json) => c.id));
+            if (!(cursor = page.nextCursor)) break;
+            error(await send('GET', `${inbox}?view=agent&limit=2&cursor=${cursor}`, session(reader)), 422, 'INVALID_CURSOR');
+          }
+          assert.deepEqual(walked, everything.data.map((c: Json) => c.id));
+          const forged = Buffer.from(JSON.stringify([new Date().toISOString(), p1, 'support-inbox:needs_you:::'])).toString('base64url');
+          error(await send('GET', `${inbox}?view=needs_you&cursor=${forged}`, session(reader)), 422, 'INVALID_CURSOR');
+
+          // A staff reply: staff no longer owe the next message, and the agent stays paused (in neither view); the customer's answer brings it back.
+          ok(await send('POST', `${inbox}/${paused}/replies`, keyed(operator), { text: 'Looking now.' }), 201);
+          assert.deepEqual([(await order('needs_you')).includes(paused), (await order('agent')).includes(paused)], [false, false]);
+          ok(reply(await platform.mirrorMessages(paused, [{ id: msg(), author: 'customer', text: 'Thanks, any news?' }])));
+          assert.deepEqual((await ours('needs_you')).find((c: Json) => c.id === paused).needsYou.reasons, ['paused']);
+
+          // Done: the operator role; it resolves an open ticket and is on the trail; only something new undoes it.
+          error(await send('POST', `${inbox}/${p3}/done`, keyed(reader)), 403, 'OPERATOR_REQUIRED');
+          const done = ok(await send('POST', `${inbox}/${p3}/done`, keyed(operator)));
+          assert.deepEqual([done.needsYou, done.done.userId, typeof done.ticket.resolvedAt], [null, operator.userId, 'string']);
+          error(await send('POST', `${inbox}/${p3}/done`, session(operator)), 409, 'ALREADY_DONE');
+          assert.deepEqual((await db.query(`SELECT actor_id, internal FROM audit_events WHERE action = 'support.done' AND target_id = $1`, [p3])).rows, [{ actor_id: operator.userId, internal: true }]);
+          ok(await send('POST', `${inbox}/${blocked}/done`, keyed(operator)));
+          ok(reply(await platform.mirrorState(blocked, { blockedWork: 2, turns: 1 })));
+          assert.deepEqual(await order('needs_you'), [p1, paused], 'The same blocked work stays done.');
+          ok(reply(await platform.mirrorState(blocked, { blockedWork: 3 })));
+          assert.deepEqual(await order('needs_you'), [p1, blocked, paused], 'More blocked work brings it back.');
+          ok(reply(await platform.mirrorMessages(p3, [{ id: msg(), author: 'customer', text: 'One more thing' }])));
+          assert.deepEqual([(await order('needs_you')).includes(p3), (await order('agent')).includes(p3)], [false, true], 'Its ticket is resolved, so the agent has it.');
+          // A reply marked done, then failed: back, and urgent.
+          ok(await send('POST', `${inbox}/${paused}/replies`, keyed(operator), { text: 'Fixed on our side.' }), 201);
+          ok(await send('POST', `${inbox}/${paused}/done`, keyed(operator)));
+          const queued = (await messages(paused)).filter(m => m.author === 'staff').at(-1)!;
+          ok(reply(await platform.markDelivery(paused, queued.id, 'failed')));
+          const failed = (await ours('needs_you')).find((c: Json) => c.id === paused);
+          assert.deepEqual([failed.needsYou.reasons, failed.needsYou.urgent, failed.done], [['failed'], true, null]);
+
+          // Read markers: each operator's own; new messages are unread again; reading never moves the marker back.
+          const unread = async (who: SessionFixture, id = handled) => (await list('all', who, `&q=${id}`)).data[0].unread;
+          assert.deepEqual([await unread(reader), await unread(operator)], [true, true]);
+          error(await send('PUT', `${inbox}/${handled}/read`, session(owner, acme), { read: true }), 403, 'OPERATOR_REQUIRED');
+          error(await send('PUT', `${inbox}/${conversation()}/read`, session(reader), { read: true }), 404);
+          assert.deepEqual(ok(await send('PUT', `${inbox}/${handled}/read`, session(reader), { read: true, seq: 1 })), { id: handled, unread: true });
+          assert.deepEqual(ok(await send('PUT', `${inbox}/${handled}/read`, session(reader), { read: true })), { id: handled, unread: false });
+          assert.deepEqual(ok(await send('PUT', `${inbox}/${handled}/read`, session(reader), { read: true, seq: 0 })), { id: handled, unread: false });
+          assert.deepEqual([await unread(reader), await unread(operator)], [false, true]);
+          ok(reply(await platform.mirrorMessages(handled, [{ id: msg(), author: 'customer', text: 'And a second domain?' }])));
+          assert.equal(await unread(reader), true);
+          ok(await send('PUT', `${inbox}/${handled}/read`, session(reader), { read: true }));
+          assert.deepEqual(ok(await send('PUT', `${inbox}/${handled}/read`, session(reader), { read: false })), { id: handled, unread: true });
+          assert.equal(ok(await send('GET', `${inbox}/${handled}`, session(reader))).conversation.unread, true, 'Opening the page alone marks nothing.');
+          assert.equal(await unread(operator, paused), false, 'A staff reply is read by its author.');
         });
       } finally { globalThis.fetch = previous; }
     });

@@ -553,6 +553,39 @@
    "score": 6,
    "findings": []
   },
+  "Support · agent handling · desktop": {
+   "score": 14,
+   "findings": []
+  },
+  "Support · agent handling · phone": {
+   "score": 7,
+   "findings": []
+  },
+  "Support · conversation · desktop": {
+   "score": 57,
+   "findings": [
+    "long-block|two of the three dkim records are publis"
+   ]
+  },
+  "Support · conversation · phone": {
+   "score": 36,
+   "findings": [
+    "inert|two of the three dkim records are publis",
+    "long-block|two of the three dkim records are publis"
+   ]
+  },
+  "Support · customer sheet · phone": {
+   "score": 24,
+   "findings": []
+  },
+  "Support · desktop": {
+   "score": 13,
+   "findings": []
+  },
+  "Support · phone": {
+   "score": 6,
+   "findings": []
+  },
   "Template · desktop": {
    "score": 14,
    "findings": []
