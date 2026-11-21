@@ -48,7 +48,7 @@
     // Dashboard usage analytics (docs/analytics.md): batches go to the ANALYTICS bucket, never Postgres. "off" discards them.
     "DASHBOARD_ANALYTICS": "on",
     // Abuse monitoring (src/abuse.ts) records from this instant on, monitor-only (NIGHTMAIL_ABUSE_ENFORCE stays unset).
-    "NIGHTMAIL_ABUSE_MONITORING": "2026-11-21T18:00:00Z",
+    "NIGHTMAIL_ABUSE_MONITORING": "2026-11-21T15:30:00Z",
     "ACCOUNT_CLIENT_ID": "bane-production",
     "MULTI_TENANT": "true",
     "BANE_PLATFORM_AWS_ACCOUNT": "009882681002",
