@@ -294,8 +294,8 @@ function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial, editing
     try {
       const result = await create.mutateAsync(input)
       onOpenChange(false)
-      // The sending example only for a key that can send; a read-only key's receipt doesn't teach it to.
-      onCreated({ secret: result.secret, title: 'API key created', sendExample: isWorkspace(purpose) && (workspacePermissions[purpose] as readonly string[]).includes('send'), agent: true })
+      // The sending example only for a key that can send.
+      onCreated({ secret: result.secret, title: 'API key created', sendExample: workspace && result.key.permissions.includes('send'), agent: true })
     } catch { /* Shown in the form. */ }
   }
 

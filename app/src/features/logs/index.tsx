@@ -16,7 +16,7 @@ import { EmailDetailPage } from './email-detail'
 import { useScheduledActions } from './scheduled'
 import { ThreadChip, ThreadTimeline, threaded, threadItems, useThreadPrefetch } from './thread'
 import { useMediaQuery } from '../../lib/media'
-import { LogsBody, logStatuses, receivedStatuses, sentStatuses, type LogFilters } from './facets'
+import { LogsBody, logStatuses, receivedStatuses, sentStatuses, withStream, type LogFilters } from './facets'
 
 const directions = [{ value: 'all', label: 'All' }, { value: 'sent', label: 'Sent' }, { value: 'received', label: 'Received' }]
 const option = (value: string) => ({ value, label: value === 'all' ? 'All statuses' : label(value) })
@@ -89,11 +89,12 @@ function Logs({ regionId, campaignId }: { regionId: string; campaignId?: string 
   const filters: LogFilters = { statuses, status, stream, streams: !receivedOnly, setStatus, setStream: value => update({ stream: value }) }
   // No mail at all yet: the first-run message alone, without a rail of zeros (its place stays, so nothing moves).
   const blank = Boolean(query.data && !query.isPlaceholderData && !query.data.items.length && !filtered && page === 1)
-  // An export is the rows on screen for the filters shown: while the next filter's rows load, the previous rows stay up but can't be exported.
-  const exportable = Boolean(query.data?.items.length) && !query.isPlaceholderData
+  // An export is the rows on screen for the filters shown: while the next filter's rows load, the previous rows stay up
+  // but can't be exported, and neither can rows while the search box holds text the list hasn't searched for yet.
+  const exportable = Boolean(query.data?.items.length) && !query.isPlaceholderData && draft.trim() === search.trim()
   return <div className="logs-page"><LogsHeader regionId={campaign.data?.regionId ?? regionId} direction={direction} onDirection={setDirection} locked={Boolean(campaignId)} />
     <div className="data-toolbar"><div className="cluster">{campaignId && <Button variant="secondary" aria-label={`Remove campaign filter: ${campaign.data?.name ?? campaignId}`} onClick={clearCampaign} title={campaign.data?.name}><span className="logs-campaign-chip">Campaign: {campaign.data?.name ?? campaignId}</span><X size={14} aria-hidden /></Button>}<div className="search-box"><Search size={16} /><Input type="search" aria-label="Search logs" placeholder="Search logs" maxLength={200} value={draft} onChange={event => type(event.target.value)} /></div>
-      <Select className="logs-filter" aria-label="Email status" value={status} onValueChange={setStatus} options={['all', ...statuses].map(option)} />
+      <Select className="logs-filter" aria-label="Email status" value={status} onValueChange={setStatus} options={['all', ...statuses].map(value => ({ ...option(value), disabled: !withStream(value, stream) }))} />
       <Select className="logs-filter" aria-label="Email stream filter" value={stream} disabled={receivedOnly} onValueChange={value => update({ stream: value })} options={streams} /></div>
       <Button className="logs-export" aria-label="Export this page as CSV" title="Download the rows on this page as a CSV file" disabled={!exportable} onClick={() => downloadCsv(campaignId ? `nightmail-${campaignId}-logs-page.csv` : 'nightmail-logs-page.csv', logCsvRows(query.data?.items ?? [], !multiTenant))}><Download size={16} /><span>Export CSV</span></Button>
     </div>

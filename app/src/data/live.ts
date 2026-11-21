@@ -4,6 +4,7 @@ import type { Agent, ApiKey, AppPassword, AuditEntry, CreatedAppPassword, Domain
 import type { CreatedInbox, Inbox, InboxMessageDetail, InboxMessagePage, LogDirection, LogEntry, SenderScore } from './types'
 import { headerPrefix, productName } from '../../../api/src/brand'
 import { analytics } from '../lib/analytics'
+import { webhookPatchBody } from '../features/settings/webhook-patch'
 type Json = Record<string, any>
 const idPath = (id: string) => encodeURIComponent(id)
 // The account this tab acts as (a browser can connect several, data/accounts.ts), sent as X-Nightmail-Account. It is per tab
@@ -114,7 +115,7 @@ const mapDomain = (r: Json): Domain => {
   return { ...r, regionId: r.region, status: r.ready ? 'verified' : r.verificationStatus === 'FAILED' ? 'issue' : 'pending', dkimStatus, mailFromStatus, sending: r.sending ?? (r.ready ? 'verified' : 'pending'), receiving: r.receiving ?? 'pending', records: (r.dns ?? []).map((d: Json, i: number) => ({ ...d, id: String(i), value: d.priority === undefined ? d.value : `${d.priority} ${d.value}`, status: recordStatus(d) })) } as Domain
 }
 const mapDelivery = (r: Json): WebhookDelivery => ({ id: r.id, at: r.createdAt, regionId: r.payload.region ?? 'Workspace', event: r.payload.type, response: r.lastStatusCode, attempts: r.attemptCount, status: r.status, payload: r.payload, test: r.synthetic === true || r.payload?.data?.test === true })
-const mapWebhook = (r: Json): Webhook => ({ id: r.id, name: r.description || r.url, url: r.url, regionIds: r.regions ?? 'all', events: r.eventTypes, status: r.paused ? 'paused' : 'active', secretHint: 'Hidden. Reveal it to copy, or rotate it to replace it.', headers: r.headers ?? [], deliveries: [], ...typeof r.secret === 'string' ? { secret: r.secret } : {} })
+const mapWebhook = (r: Json): Webhook => ({ id: r.id, name: r.description || r.url, url: r.url, regionIds: r.regions ?? 'all', events: r.eventTypes, status: r.paused ? 'paused' : 'active', secretHint: 'Hidden. Reveal it to copy, or rotate it to replace it.', headers: r.headers ?? [], deliveries: [], updatedAt: r.updatedAt, ...typeof r.secret === 'string' ? { secret: r.secret } : {} })
 function regionCatalog(value: unknown): RegionCatalog {
   const record = (v: unknown): v is Json => typeof v === 'object' && v !== null && !Array.isArray(v)
   const nullableString = (v: unknown) => v === null || typeof v === 'string'
@@ -378,7 +379,9 @@ export function createLiveApi(): Api {
     webhooks: {
       list: async (signal, cursor) => {const result = await call(`/webhooks?limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, 'GET', undefined, signal); return Object.assign(result.data.map(mapWebhook), {nextCursor: result.nextCursor})},
       get: async (id, signal) => { const [row, history] = await Promise.all([call(`/webhooks/${idPath(id)}`, 'GET', undefined, signal), deliveries(id)]); return {...mapWebhook(row), deliveries: history.items, nextCursor: history.nextCursor} },
-      save: async (input, signal) => mapWebhook(await call(input.id ? `/webhooks/${idPath(input.id)}` : '/webhooks', input.id ? 'PATCH' : 'POST', {description: input.name, url: input.url || undefined, ...(input.regionIds === undefined ? {} : {regions: input.regionIds === 'all' ? null : input.regionIds}), eventTypes: input.events, headers: input.headers}, signal)),
+      create: async (input, signal) => mapWebhook(await call('/webhooks', 'POST', {description: input.name, url: input.url || undefined, ...(input.regionIds === undefined ? {} : {regions: input.regionIds === 'all' ? null : input.regionIds}), eventTypes: input.events, headers: input.headers}, signal)),
+      // A changed field at a time: a field the form didn't change keeps whatever the webhook has now.
+      update: async (id, edits, headers, signal) => mapWebhook(await call(`/webhooks/${idPath(id)}`, 'PATCH', webhookPatchBody(edits, headers), signal)),
       setStatus: async (id, status, signal) => mapWebhook(await call(`/webhooks/${idPath(id)}`, 'PATCH', {paused: status === 'paused'}, signal)),
       test: async (id, signal) => { const queued = await call(`/webhooks/${idPath(id)}/test`, 'POST', undefined, signal); return mapDelivery(await call(`/webhooks/${idPath(id)}/deliveries/${idPath(queued.id)}`, 'GET', undefined, signal)) },
       retry: async (id, deliveryId, signal) => { await call(`/webhooks/${idPath(id)}/deliveries/${idPath(deliveryId)}/retry`, 'POST', undefined, signal); return mapDelivery(await call(`/webhooks/${idPath(id)}/deliveries/${idPath(deliveryId)}`, 'GET', undefined, signal)) },
