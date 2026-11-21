@@ -306,6 +306,7 @@ const MESSAGES = {
   msg_route_1: ['thr_route', null, 'PASS', null, 'Forward this', 'Please reply to boss@else.test and cc cfo@else.test.'],
   msg_silent_1: ['thr_silent', null, 'PASS', null, 'Quiet', 'Please stay silent about this.'],
   msg_crash_1: ['thr_crash', 'cara@acme.test'],
+  msg_int_1: ['thr_int', 'ivy@acme.test'], msg_int_2: ['thr_int', 'ivy@acme.test', 'PASS', null, 'And DMARC?', 'Second question: do I need DMARC for a newsletter?'],
   msg_nm_1: ['thr_nm', 'nobody@else.test', 'PASS', null, 'Pricing', 'General question: how do Gmail bounces work?'],
   msg_holder_1: ['thr_holder', 'ada@acme.test', 'PASS', null, 'My bounces', 'Account holder question: why are my Gmail bounces up?'],
   msg_df_1: ['thr_df_1', 'nobody@else.test', 'FAIL', null, 'Probe', 'DMARC fail probe one'], msg_df_2: ['thr_df_2', 'nell@acme.test', 'FAIL', null, 'Probe', 'DMARC fail probe two'],

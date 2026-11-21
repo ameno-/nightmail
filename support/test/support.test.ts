@@ -1361,6 +1361,17 @@ describe('support Worker', () => {
       assert.deepEqual((await replies(thread, instance)).map(c => [c[5], c[3].text]), [[`reply-${message}`, GENERAL]]);
     });
 
+    test('an email after an interrupted turn is answered by its own reply call', async () => {
+      const thread = 'thr_int', id = await interrupted(thread, 'msg_int_1', 'ivy@acme.test'), before = recorded.length;
+      // The next email in the same conversation: its own turn answers it, with no nudge, and the first answer goes once.
+      await hook('msg_int_2', thread, 'ivy@acme.test');
+      await drive(id, { expire: 'answer:msg_int_1', tick: true });
+      await drive(id, { tick: true });
+      const sent = await replies(thread, instance);
+      assert.deepEqual(sent.map(c => [c[5], c[3].text]), [['reply-msg_int_1', GENERAL], ['reply-msg_int_2', `Hi,\n\nYes: bulk mail needs a DMARC record on the sending domain.\n\nNightmail support (AI)${HELP_LINE}`]]);
+      assert.ok(!recorded.slice(before).some(r => about(r, 'Call reply now')), 'No nudge.');
+    });
+
     test('an answer is resent with the same text and no second model call', async () => {
       const thread = 'thr_resend', message = 'msg_resend_1', path = `/v1/inbound/threads/${thread}/reply`;
       await outage(path, 503);

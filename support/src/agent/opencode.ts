@@ -22,6 +22,10 @@ import { log } from '../log.js';
 export const MODEL = { providerID: 'anthropic', model: 'claude-opus-5-5', variant: 'medium' } as const;
 const PIN = `${MODEL.model}#${MODEL.variant}`;
 const MAX_STEPS = 25;
+/** Set while a turn runs: still set when the next turn starts, it means the last one was cut off (an eviction). */
+const TURN_OPEN = 'support:opencode-turn-open';
+/** How long the first turn after a cut-off one waits for OpenCode's resumed run to start (it starts at boot). */
+const RESUME_WAIT_MS = 3_000;
 const TOOL_NAMES = TOOLS.map(t => t.name);
 /** Deny everything, then allow these tools (OpenCode lists only the tools a session's rules allow). */
 const rules = (names: readonly string[]) => [{ action: '*', resource: '*', effect: 'deny' as const }, ...names.map(name => ({ action: name, resource: '*', effect: 'allow' as const }))];
@@ -190,15 +194,32 @@ export async function createHarness(env: Env, storage: DurableObjectStorage): Pr
     return created.id;
   }
 
+  /**
+   * A turn cut off by an eviction is resumed by OpenCode when it boots, in the background, with a "server restarted"
+   * note. That run must never meet the next turn's tools or events: a resumed email turn would call reply for the next
+   * email, and its end would read as the next turn's. So when the last turn never finished (TURN_OPEN still set), wait
+   * for the resumed run to start, stop it and let it end before this turn begins; anything else still running is stopped
+   * too. The conversation's work queue already decides what happens to the email it was answering.
+   */
+  async function settle(sessionID: string) {
+    const until = Date.now() + (await storage.get<boolean>(TURN_OPEN) ? RESUME_WAIT_MS : 0);
+    for (;;) {
+      if ((await opencode.sessions.active().catch((): Record<string, unknown> => ({})))[sessionID]) {
+        log('warn', { event: 'turn', code: 'RESUMED_RUN_STOPPED' });
+        await opencode.sessions.interrupt({ sessionID } as never).catch(() => {});
+        await Promise.race([opencode.sessions.wait({ sessionID } as never), new Promise(resolve => setTimeout(resolve, 120_000))]).catch(() => {});
+        return;
+      }
+      if (Date.now() >= until) return;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+  }
+
   return {
     async turn(input: TurnInput, tools: ToolHost, onEvent: (event: HarnessEvent) => void, signal: AbortSignal): Promise<TurnResult> {
       const sessionID = await session(input.tools);
-      // A turn cut off by an eviction resumes when OpenCode boots; let it finish first, so its events aren't read as
-      // this turn's (its answer stays in OpenCode's history).
-      const api = opencode as unknown as { sessions: { active(): Promise<Record<string, unknown>> }; experimental?: { session?: { wait(input: { sessionID: string }): Promise<void> } } };
-      if ((await api.sessions.active().catch((): Record<string, unknown> => ({})))[sessionID] && api.experimental?.session?.wait) {
-        await Promise.race([api.experimental.session.wait({ sessionID }), new Promise(resolve => setTimeout(resolve, 120_000))]).catch(() => {});
-      }
+      await settle(sessionID);
+      await storage.put(TURN_OPEN, true);
       current.host = tools; current.allowed = new Set(input.tools); current.context = input.context;
       const usage: Usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, costUsd: 0 }, started = Date.now();
       const texts: string[] = [], names = new Map<string, string>();
@@ -244,6 +265,8 @@ export async function createHarness(env: Env, storage: DurableObjectStorage): Pr
         await new Promise(resolve => setTimeout(resolve, 0));
         await opencode.sessions.prompt({ sessionID, text: input.text, ...(input.images?.length ? { files: input.images.map(image => ({ uri: image.uri, name: image.name })) } : {}) } as never);
         await done;
+        // The run ended (succeeded, failed or interrupted): nothing is left for a boot to resume.
+        await storage.delete(TURN_OPEN);
       } finally {
         signal.removeEventListener('abort', stop);
         listen.abort();
