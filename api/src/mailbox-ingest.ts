@@ -57,19 +57,35 @@ export function soleAlignedSignature(signatures: string[], domain: string) {
     return tags.length===1 && /^d[ \t]*=[ \t]*([^\s]+)$/i.exec(tags[0]!)?.[1]?.toLowerCase()===domain;
   })();
 }
-function singleFrom(email:Email,address:string,mail:ReceivedNotification['mail']) {
+/** A header field name as RFC 5322 defines it: printable ASCII but the colon. The parser keeps a name as written, so "From :",
+ * "From<TAB>:", a first line that starts with a space or an mbox "From " line would each be a field it doesn't count as a From. */
+const FIELD_NAME = /^[\x21-\x39\x3b-\x7e]+$/;
+/** One From, and only one: every field name well formed, one From field that is exactly `address`, and SES's own From (when
+ * it gave one; the author check requires it) agreeing. */
+function singleFrom(email:Email,address:string,mail:ReceivedNotification['mail'],requireSes=false) {
+  if (!email.headers.every(h => FIELD_NAME.test(h.key))) return false;
   const from = email.headers.filter(h => h.key === 'from');
   const sesFrom = mail?.commonHeaders?.from;
+  if (requireSes && !sesFrom) return false;
   return from.length===1 && literalFrom(from[0]!.value,address) && (!sesFrom || (sesFrom.length===1 && literalFrom(sesFrom[0]!,address)));
 }
 // SES authenticates domains, not display names or Reply-To. An aggregate DKIM
 // PASS cannot identify which of several differently aligned signatures passed.
 function replyAuthorVerified(email:Email|null,address:string,mail:ReceivedNotification['mail'],v:Verdicts){
-  if(!email || !ADDRESS.test(address) || !singleFrom(email,address,mail))return false;
+  if(!email || !ADDRESS.test(address) || !singleFrom(email,address,mail,true))return false;
   if(v.dmarc==='PASS')return true;
   const domain=address.split('@')[1]!,source=mail?.source?.toLowerCase();
   if(v.spf==='PASS' && source && ADDRESS.test(source) && source.split('@')[1]===domain)return true;
   return v.dkim==='PASS' && soleAlignedSignature(email.headers.filter(h=>h.key==='dkim-signature').map(h=>h.value),domain);
+}
+/**
+ * Why the author check refused a message SES's DMARC passed, for the two reasons it is stricter than SES: a header name
+ * that isn't well formed, or no From of SES's own (commonHeaders.from). One stable code per reason, logged without
+ * addresses or header text, so such refusals can be seen.
+ */
+export function authorRefusals(email: Email | null, address: string, mail: ReceivedNotification['mail'], v: Verdicts) {
+  if (!email || v.dmarc !== 'PASS' || replyAuthorVerified(email, address, mail, v)) return [];
+  return [...email.headers.every(h => FIELD_NAME.test(h.key)) ? [] : ['AUTHOR_UNVERIFIED_HEADER_NAME'], ...mail?.commonHeaders?.from ? [] : ['AUTHOR_UNVERIFIED_SES_FROM_MISSING']];
 }
 function authenticatedFrom(email: Email | null, address: string, mail: ReceivedNotification['mail'], verdicts: Verdicts) {
   const dmarcPass = verdicts.dmarc === 'PASS', noDmarc = verdicts.dmarc === undefined || verdicts.dmarc === 'GRAY';
@@ -609,6 +625,7 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
         verdicts, spam, automated: automated(email, raw, from.address), status,
       };
   const verifiedAuthor=replyAuthorVerified(email,from.address,notification.mail,verdicts);
+  for (const code of authorRefusals(email,from.address,notification.mail,verdicts)) log('warn', { code, workspaceId: scope.workspaceId });
   // A forward can be queued later than this first store (a reopened receipt, another receipt of the same email,
   // rules saved meanwhile) and reads these verdicts from the stored message. Forward eligibility is recorded for
   // every message; the author check by any workspace that routes, not only one whose rules already run.
