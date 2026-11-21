@@ -63,6 +63,8 @@ Every kind of send is decided by one SQL function, `send_admission` (migration 3
 
 The eight-shard fixture is unchanged: 36.0, 186.6 and 269.9/s at 50, 200 and 1,000/s, against 36.0, 185.7 and 267.7/s before.
 
+**Campaign launch: the capture before the send locks (2026-11-21).** A launch captures its audience before it locks the campaign row and the workspace's admission row, then takes both only for the admission, the review, the reserve and the state change, all in one transaction. Sends in the workspace no longer wait for the capture. Locally, with 2,000,000 subscribed contacts and one single send every 50 ms in the same workspace during the launch, those sends took 5.1 s p50, 9.2 s p95 and 9.6 s at most before, and 4 ms, 7 ms and 17 ms after (2–3 ms with no launch); the launch took 9.7 and 9.5 s. A launch now makes 20 calls instead of 15: a per-campaign launch lock, an unlocked read, and the admission checked once more before the capture, in a savepoint it rolls back so the claim and attachment locks it takes are not held through the capture. Row versions are unchanged.
+
 ### Feedback, webhook and screening operations
 
 `FEEDBACK_BATCH.retiredUnmatched` counts unresolved callbacks acknowledged after one short retry: these came from a verified BYO topic or name mail older than the 30-day detail window. Recent unmatched Hosted feedback and failed persistence still retry. BYO ingress uses a per-topic limit after signature verification; one customer's SNS topic cannot consume another's allowance.

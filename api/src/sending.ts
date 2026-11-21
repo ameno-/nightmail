@@ -33,7 +33,7 @@ import { CheckInput, CheckResult, splitMailbox, type CheckMail } from './sendabi
 import { headerPrefix, requestHeader } from './brand.js';
 import { canonical, idempotencyGate, idempotencyKey, idempotent, IdempotencyHeaders, idempotentRequest, replay, requestHash, validIdempotencyKey, type ClaimState, type IdempotentRequest } from './idempotency.js';
 import { PREVIEW_ROUTE_NOTE, previewResponses, refuseHead, registerPreviewImages, renderPreview } from './preview-images.js';
-import { actorJson, admission, admitted, charges, duplicateAttachment, shadowBilling, type AdmissionMail, type Admitted, type Refused, type Released } from './admission.js';
+import { actorJson, admission, admitted, charges, duplicateAttachment, refusal, shadowBilling, type AdmissionMail, type Admitted, type Refused, type Released } from './admission.js';
 import { contentBytes, estimatedMimeBytes, SEND_LIMITS } from './send-limits.js';
 import { reserveMemory, withMemory } from './isolate-memory.js';
 import { RATES } from './billing/money.js';
@@ -1769,14 +1769,21 @@ function backgroundFailure(error: unknown) {
   return { code, message: `Campaign work could not finish (${code}). Correct the cause and send again, or cancel the campaign.` };
 }
 // Send and schedule: freeze the audience and content now, reserve the recipients, and hand the one run job the rest.
+// The audience capture (up to 2,000,000 recipients: minutes at that size) runs before the send locks. The campaign row
+// and the workspace's admission row, which every send in the workspace takes, are locked after it, only for what decides
+// the launch: the admission, the review, the reserve and the state change. The capture stays in this transaction, so
+// the frozen list is one snapshot and a launch that fails or is cancelled before it commits leaves nothing behind.
 async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: string, input: { revision: number; scheduledAt?: string; pacing?: z.infer<typeof Pacing> }, requestId?: string) {
   // A campaign launch is one job that must start now; ask the response path for an uncoalesced scheduler wake.
   a.wakeJobs = Math.max(a.wakeJobs ?? 0, 12);
   if (input.scheduledAt && (Date.parse(input.scheduledAt) <= Date.now() || Date.parse(input.scheduledAt) > Date.now() + 365 * 86400000)) throw new ApiError(422, 'INVALID_SCHEDULE', 'Schedule between now and one year from now.');
   // Campaign mail is never dispatched for a member origin (approvedOriginUser); refuse here instead of canceling later.
   if (a.role === 'member') throw denied('PERMISSION_DENIED', 'Only workspace owners and admins can send campaigns.', { permission: 'sendEmail', level: 'on', person: 'admin' });
-  const held = await lockSendScope(db, a.workspaceId, { campaignId });
-  const row = await findCampaign(db, a, campaignId, true); editable(row, input.revision);
+  // One launch of a campaign at a time, until this transaction ends: a second is refused at once instead of capturing the
+  // audience again. (275812 is the large-capture slot in audience.ts, 275813 public stats.)
+  if (!(await db.execute(sql`SELECT 1 WHERE pg_try_advisory_xact_lock(275814, hashtext(${campaignId}))`)).rowCount)
+    throw new ApiError(409, 'CAMPAIGN_LOCKED', 'Another request is sending this campaign; fetch it to see its state.', undefined, true);
+  const row = await findCampaign(db, a, campaignId); editable(row, input.revision);
   const draft = readyCampaign(row.draft);
   const rendered = await renderCampaignContent(runtime, draft), cfg = runtime.config;
   // What the campaign's screen would refuse in the background, measured now; admission refuses it for screened mail.
@@ -1787,16 +1794,27 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
     catch (error) { if (!(error instanceof ApiError) || error.code !== 'CONTENT_TOO_LARGE_TO_SCREEN') throw error; oversize = error; }
   }
   // The sender, a marketing hold, the balance (402 now, so the owner learns before the campaign waits) and the attachments.
-  const ids = distinctAttachmentIds(draft.attachments);
-  const decision = await admission(runtime, a.workspaceId, actorJson(a), { stage: 'launch', locks: held, billable: 1, autoPause: input.pacing?.autoPause !== false,
-    mails: [{ host: draft.from.split('@')[1]!.toLowerCase(), region: campaignSendRegion(runtime, row.draft), kind: 'marketing', attachments: ids, bodyBytes: 0, oversize: !!oversize }] }, undefined, actorAssets(a, ids));
-  const route = admitted(runtime, (await db.execute<{ s: Admitted | Refused }>(sql`SELECT ${decision} AS s`)).rows[0]!.s, a.workspaceId, { oversize: () => oversize }).mails[0]!;
-  const reviewId = id('review');
+  const ids = distinctAttachmentIds(draft.attachments), local = { oversize: () => oversize };
+  const decide = async (locks: SendScope | 'none') => {
+    const decision = await admission(runtime, a.workspaceId, actorJson(a), { stage: 'launch', locks, billable: 1, autoPause: input.pacing?.autoPause !== false,
+      mails: [{ host: draft.from.split('@')[1]!.toLowerCase(), region: campaignSendRegion(runtime, row.draft), kind: 'marketing', attachments: ids, bodyBytes: 0, oversize: !!oversize }] }, undefined, actorAssets(a, ids));
+    return (await db.execute<{ s: Admitted | Refused }>(sql`SELECT ${decision} AS s`)).rows[0]!.s;
+  };
+  // Decided once before the capture, so a refused launch captures nothing, and again under the send locks after it. This
+  // check locks the sender claim and the attachments it reads; rolling back its savepoint releases them, so none is held
+  // through the capture (in the send locks' order they come after the admission row).
+  await db.execute(sql`SAVEPOINT launch_check`);
+  try { const check = await decide('none'); if (!check.allowed) throw refusal(runtime, check, local); }
+  finally { await db.execute(sql`ROLLBACK TO SAVEPOINT launch_check`); }
+  const reviewId = id('review'), propertyKeys = placeholderKeys(draft, rendered);
+  const counts = await (await wrapModuleLoad(() => import('./audience.js'))).snapshotCampaignAudience(db, a, draft.audience, reviewId, propertyKeys);
+  // The send locks. The campaign is still the revision that was captured, or the launch fails and its capture rolls back.
+  const held = await lockSendScope(db, a.workspaceId, { campaignId });
+  editable(await findCampaign(db, a, campaignId, true), input.revision);
+  const route = admitted(runtime, await decide(held), a.workspaceId, local).mails[0]!;
   const reviewed=route.binding ? {...row.draft,region:route.region,binding:route.binding} : row.draft;
   const contentHash = await digest(canonical({ version: 2, draft: reviewed, rendered }));
   await db.insert(campaignReviews).values({ id: reviewId, rendererVersion: CAMPAIGN_RENDERER_VERSION, workspaceId: a.workspaceId, campaignId, revision: row.revision, draft: reviewed, contentHash, rendered });
-  const propertyKeys = placeholderKeys(draft, rendered);
-  const counts = await (await wrapModuleLoad(() => import('./audience.js'))).snapshotCampaignAudience(db, a, draft.audience, reviewId, propertyKeys);
   await reserveCampaign(runtime, db, held, a, a.keyId, counts.eligible);
   if (ids.length) await db.insert(attachmentLinks).values(ids.map(attachmentId => ({ workspaceId: a.workspaceId, attachmentId, ownerType: 'review' as const, ownerId: reviewId }))).onConflictDoNothing();
   const ref = campaignRef(a, campaignId);
