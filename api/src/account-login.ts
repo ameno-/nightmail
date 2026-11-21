@@ -8,6 +8,7 @@ import { acceptedMethods, isStaffSignIn, provenMailbox, PROVIDER_IDENTITY_CLAIM,
 import { clientIpHeader, productName, requestHeader } from './brand.js';
 import { METHOD_ACR } from './config.js';
 import { ANALYTICS_SESSION_PARAM } from './analytics-events.js';
+import { observeSignIn, requestNetwork, type RequestNetwork } from './abuse.js';
 
 const verifiedEmail = z.email().max(320);
 const loginFailed = () => new ApiError(403, 'SIGN_IN_DENIED', 'This account cannot sign in.');
@@ -120,7 +121,10 @@ export async function beginAccountLogin(runtime: Runtime, returnUrl: URL, peer: 
 
 // Every verified sign-in, refused or admitted: one row per subject for the operator (scripts/list-signin-attempts.ts),
 // who may then bind that subject explicitly. The address and name are shown, never trusted.
-async function recordAttempt(runtime: Runtime, claims: oidc.IDToken, upstream: ProviderIdentity | null, address: string | null, outcome: string) {
+async function recordAttempt(runtime: Runtime, claims: oidc.IDToken, upstream: ProviderIdentity | null, address: string | null, outcome: string,
+  observed?: { userId: string | null; created: boolean; email: string | null; network?: RequestNetwork }) {
+  // Hosted: what the sign-in shares with others (src/abuse.ts). Monitoring only; it never changes the outcome.
+  if (observed) await observeSignIn(runtime, { issuer: claims.iss, subject: claims.sub, outcome, provider: upstream, ...observed });
   const acr = typeof claims.acr === 'string' ? claims.acr.slice(0, 200) : null, name = typeof claims.name === 'string' ? claims.name.slice(0, 200) : null;
   if (outcome.startsWith('signed_in')) log('info', { code: 'SIGN_IN', outcome, subject: claims.sub, acr });
   else log('warn', { code: 'SIGN_IN_NOT_APPROVED', reason: outcome, subject: claims.sub, acr });
@@ -145,7 +149,7 @@ async function retryDPoPNonce<T>(attempt: () => Promise<T>) {
 }
 
 class AccountLimit extends Error {}
-export async function finishAccountLogin(runtime: Runtime, url: URL, binding: string, jar: Jar = { slots: [], selected: null, preferred: null }, onFlow?: (returnUrl: string) => void) {
+export async function finishAccountLogin(runtime: Runtime, url: URL, binding: string, jar: Jar = { slots: [], selected: null, preferred: null }, onFlow?: (returnUrl: string) => void, network?: RequestNetwork) {
   const state = url.searchParams.get('state');
   if (!state || state.length > 256 || !binding || binding.length > 256) throw loginFailed();
   const {rows:[flow]} = await runtime.db.execute<{nonce:string;verifier:string;return_url:string}>(sql`
@@ -243,7 +247,7 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
     });
   } catch (error) {
     if (!(error instanceof NotAdmitted)) throw error;
-    await recordAttempt(runtime, claims, upstream, address, error.reason);
+    await recordAttempt(runtime, claims, upstream, address, error.reason, { userId: null, created: false, email: emailAtLogin, network });
     // Hosted, and no invitation: the verified address joins the waitlist, and the refusal says we'll email it at launch.
     // Without a verified address, or when the write fails, nothing is promised.
     if (error.reason === 'not_approved' && runtime.config.multiTenant && emailAtLogin) {
@@ -252,7 +256,7 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
     }
     throw loginFailed();
   }
-  await recordAttempt(runtime, claims, upstream, address, admitted);
+  await recordAttempt(runtime, claims, upstream, address, admitted, { userId, created: admitted !== 'signed_in', email: emailAtLogin, network });
   // Admitted with a verified address: nothing is left to tell it at launch.
   if (emailAtLogin && runtime.config.multiTenant) await runtime.db.execute(sql`DELETE FROM nightmail_waitlist WHERE email=lower(${emailAtLogin})`).catch(() => {});
   return {session, slot, userId, returnUrl:returnUrl.href};
@@ -413,7 +417,7 @@ export async function accountBrowserRoute(c: Ctx) {
     clearCookie(c,'login');
     let started: string | undefined;
     try {
-      const { session,slot,userId,returnUrl } = await finishAccountLogin(runtime,new URL(c.req.url),binding,await jar(),url => { started = url; });
+      const { session,slot,userId,returnUrl } = await finishAccountLogin(runtime,new URL(c.req.url),binding,await jar(),url => { started = url; },requestNetwork(c.req.raw.headers));
       setCookie(c,cookieName(runtime,slotName(slot)),session,cookieOptions(runtime,SESSION_SECONDS));
       // The account just signed in becomes this browser's default, and the page it returns to opens as it.
       setCookie(c,cookieName(runtime,'account'),userId,cookieOptions(runtime,SESSION_SECONDS));

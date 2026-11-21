@@ -15,7 +15,7 @@ Nightmail handles personal data in two different roles.
 | --- | --- | --- |
 | **About our customers:** people who sign in, workspace members, billing contacts, people who contact support or report abuse | Ours | **Controller.** This policy applies in full. |
 | **In our customers' mail:** the people our customers email, the people who email them, contacts and lists, and message content | The customer's | **Processor** (a "service provider" under US state privacy laws). The customer's own privacy policy applies. We process this data on the customer's instructions, under our [Terms of Service](/legal/terms) and, where one is signed, our Data Processing Addendum. |
-| **Customer mail we screen to prevent abuse and to compute sender scores** | Ours, for this purpose only | **Controller**, only to keep the service safe for recipients and customers ([section 5](#automated-screening-and-ai)). We don't use it for anything else. |
+| **Customer mail we screen or fingerprint to prevent abuse and to compute sender scores** | Ours, for this purpose only | **Controller**, only to keep the service safe for recipients and customers ([section 5](#automated-screening-and-ai)). We don't use it for anything else. |
 
 **If you got an email sent through Nightmail, or sent mail to an address that uses Nightmail,** the business that uses Nightmail decides what happens to your data. Contact them first. If you contact us, we'll pass your request to them where we can identify them ([section 12](#rights-of-people-in-our-customers-mail)).
 
@@ -26,9 +26,10 @@ Nightmail handles personal data in two different roles.
 | **Identity** | Name, email address, and the account identifier from Anomaly's sign-in service (account.anoma.ly). You sign in there with GitHub, with Google, with a link or code emailed to you, or with your email and a password. If you use GitHub or Google: its account ID, its email address and whether it's verified, and for Google the Google Workspace domain if there is one. | You, through the sign-in service (and GitHub or Google, if you use one) |
 | **Workspaces** | Workspaces you belong to, your role (owner, admin or member), and invitations (email address and role) | You and other members |
 | **Credentials** | API keys, MCP grants, agent tokens, inbox keys and app passwords. Keys are stored as hashes; we can't read them back. | You |
-| **Sessions** | A session cookie, valid for up to 7 days. Sessions don't record your IP address or browser. | Your browser |
+| **Sessions** | A session cookie, valid for up to 7 days. Sessions don't record your IP address or browser; signing in keeps one-way codes of them (see **Abuse and fraud signals**). | Your browser |
 | **Sign-in attempts** | Issuer, account ID, sign-in method and provider, email and name, outcome and time. Kept 30 days; refused sign-in requests 90 days. | Sign-in service |
 | **Waitlist** | If we refuse a sign-in because Nightmail isn't open to you yet: the email address and name from that sign-in, when you first and last tried, and how many times. Used only to tell you when Nightmail opens. Kept until we've emailed you that it's open, or 1 year after your last attempt. | Sign-in service (and GitHub or Google, if you use one) |
+| **Abuse and fraud signals** | When you sign in or create a workspace: one-way codes of your network (shortened as in the audit trail), your browser, your email address with any "+tag" removed, and the GitHub or Google account you signed in with; your network provider and country; and the domain of your email address when it's your own rather than a public mailbox provider's. When you pay: a one-way code of your card's fingerprint, the card's country, and whether a payment failed, was disputed or was flagged as fraud. We can't turn a code back into the original value. We use these to notice when several accounts belong to the same person or operation ([section 5.7](#linking-related-accounts)). | Your browser, the sign-in service, Stripe and our systems |
 | **Activity (audit trail)** | Who did what in a workspace (for example, created a key or changed a role), when, the reason, the request ID, your network (shortened to the first three parts of an IPv4 address, or a /48 for IPv6) and browser family. Never secrets or message content. | Our systems |
 | **Billing** | Stripe customer ID; card brand, last four digits, expiry and fingerprint; top-ups, refunds, disputes, balance and usage history. **Stripe holds your full card number; we never see it.** | You and Stripe |
 | **Usage** | How much each workspace sends, receives and stores, and its sender score and standing | Our systems |
@@ -66,7 +67,7 @@ Customers can send their data to places they choose: their webhooks, Slack or Di
 | --- | --- | --- |
 | Provide the service: sign you in, run workspaces, send and receive mail as customers instruct | Account data; customer mail as processor | Contract |
 | Billing: take payments, keep the balance, send receipts and notices, handle refunds and disputes | Billing and usage data | Contract; legal obligation (tax and accounting records) |
-| Security, fraud and abuse prevention: spam screening, sender scores and limits, card-fraud checks, investigating abuse reports | Usage data; screening results; message metadata and content as screened ([section 5](#automated-screening-and-ai)) | Legitimate interests (protecting recipients, customers and our infrastructure) |
+| Security, fraud and abuse prevention: spam screening, sender scores and limits, card-fraud checks, noticing related accounts, investigating abuse reports | Usage data; abuse and fraud signals; screening results; message metadata and content as screened or fingerprinted ([section 5](#automated-screening-and-ai)) | Legitimate interests (protecting recipients, customers and our infrastructure) |
 | Support, including the AI support agent | Account data; support conversations; message content only with your permission | Contract; consent for message content |
 | Service and policy notices | Contact details | Contract; legitimate interests |
 | Improve the dashboard: find where people get stuck or run into errors | Dashboard usage | Legitimate interests (making the product easier to use) |
@@ -115,6 +116,14 @@ The classifier is **Jev**, from **TypeSafe AI**. Nightmail calls TypeSafe's API 
 - The agent's answers can be wrong. You can ask for a person at any time: say so, or use **Talk to a person** in the chat.
 - **Neither Anomaly nor Anthropic uses support conversations to train AI models.**
 
+### 5.7 Linking related accounts
+
+- To notice one person or operation using several accounts (for example, to multiply the free allowance or to come back after a pause), we compare the abuse and fraud signals of accounts ([section 2](#data-about-our-customers)).
+- For workspaces that use Hosted sending, we also take **fingerprints** from a sample of the messages they send: a numeric summary of the wording, the domains the message links to, and one-way codes of its recipients. **We keep no message text**, and nobody can read the wording or identify a recipient from a fingerprint.
+- Anomaly staff who review abuse see which accounts and workspaces look related and which kinds of signal they share, never the values behind the codes.
+- **Nothing is blocked, paused or limited automatically** because accounts look related. A person decides, and a workspace can ask for a review as in [section 5.4](#people-and-automated-decisions).
+- We don't use these signals for anything else, and we don't share them.
+
 ## 6. Support access
 
 - **An AI agent answers first.** Mail to [support@nightmail.dev](mailto:support@nightmail.dev) and the dashboard's **Help** chat go first to our AI support agent ([section 5.6](#ai-support-agent)).
@@ -159,6 +168,7 @@ Nightmail stores and processes data mainly in the **United States**. Cloudflare 
 | Stripe webhook events | 90 days |
 | Sign-in attempts | 30 days; refused sign-in requests 90 days |
 | Waitlist | Until we've emailed you that Nightmail is open, or 1 year after your last sign-in attempt |
+| Abuse and fraud signals | Network and browser codes: 90 days after we last saw them. Email, sign-in account, card and domain signals, and payment flags: 1 year after we last saw them. Fingerprints of sent mail: 30 days. |
 | Sessions | Until they expire (up to 7 days) |
 | Request logs | About 3 days; IMAP and SMTP gateway logs 30 days |
 | Dashboard usage | 400 days |

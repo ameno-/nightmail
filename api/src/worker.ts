@@ -5,7 +5,7 @@ import type { Config, FeedbackItem, Runtime } from './core.js';
 import { DispatcherShard, dispatcherName, shardCount } from './dispatcher-do.js';
 import type { SupportPlatformApi } from './support-platform.js';
 import { SECURITY_HEADERS } from './security-headers.js';
-import { clientIpHeader, healthService, legacyClientIpHeaders, requestHeaderNames, setting } from './brand.js';
+import { clientIpHeader, clientNetworkHeader, healthService, legacyClientIpHeaders, requestHeaderNames, setting } from './brand.js';
 export { DispatcherShard };
 
 // Keep top-level evaluation empty so cold-started isolates answer /health without
@@ -228,6 +228,10 @@ export default {
       const headers = new Headers(request.headers);
       for (const name of legacyClientIpHeaders) headers.delete(name);
       headers.set(clientIpHeader, address);
+      // The network Cloudflare resolved the client to, never a value the request carried.
+      headers.delete(clientNetworkHeader);
+      const cf = (request as Request & { cf?: { asn?: unknown; country?: unknown } }).cf;
+      if (typeof cf?.asn === 'number' || typeof cf?.country === 'string') headers.set(clientNetworkHeader, `${typeof cf.asn === 'number' ? `AS${cf.asn}` : ''};${typeof cf.country === 'string' ? cf.country : ''}`);
       const runtimeStarted = performance.now();
       const response = staticDoc
         ? await app.fetch(new Request(request, { headers }), {} as Runtime)

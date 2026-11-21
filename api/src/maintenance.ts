@@ -133,6 +133,9 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
     // The score's daily evidence decays with a 30-day half-life; past 400 days it no longer moves the score or the card.
     await drain('sender_score_daily', batch(sql`sender_score_daily`, sql`day < (now() AT TIME ZONE 'UTC')::date-400`));
     await drain('operator_idempotency', batch(sql`operator_idempotency`, sql`created_at < now()-interval '1 day'`));
+    // Abuse-monitoring signals past their retention by kind (src/abuse.ts abuseExpired); links follow at the next hourly rebuild.
+    await drain('abuse_signals', batch(sql`abuse_signals`, (await import('./abuse.js')).abuseExpired));
+    await drain('abuse_sampling', batch(sql`abuse_sampling`, sql`sampled_through < now()-interval '30 days'`));
     for (const table of ['hosted_usage_hourly','hosted_health_hourly','hosted_health_credits','hosted_screen_hourly'])
       // Keep only aggregate workspace evidence long enough to observe a 30-day clean span.
       await drain(table, batch(sql`${sql.identifier(table)}`, table==='hosted_health_hourly' || table==='hosted_screen_hourly' ? sql`hour < now()-interval '32 days'` : sql`hour < now()-interval '2 days'`));
@@ -239,6 +242,8 @@ export async function hourlyUpkeep(runtime: Runtime, mailboxRuntime: () => Promi
     ['ANALYTICS_COMPACT_FAILED', async () => { if (runtime.config.dashboardAnalytics) await (await import('./analytics.js')).compactAnalytics(runtime); }],
     // Billing settles the closed hours (and once a UTC day its storage, unpaid, drift and expiry work).
     ['BILLING_HOURLY_FAILED', async () => { if (runtime.config.multiTenant) await (await import('./billing/cron.js')).billingHourly(runtime); }],
+    // Abuse monitoring (src/abuse.ts): sample sent mail and rebuild the links between entities. Hosted only.
+    ['ABUSE_HOURLY_FAILED', async () => { await (await import('./abuse.js')).abuseHourly(runtime); }],
     // Connected AWS accounts: one health check each (byo-regional.ts).
     ['BYO_HEALTH_QUEUE_FAILED', async () => { await (await import('./byo-regional.js')).queueByoHealth(runtime); }],
   ] as const) {

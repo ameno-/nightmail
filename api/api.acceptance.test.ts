@@ -1048,6 +1048,16 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   }
   // Every code exchange proved a DPoP key and fetched the server's nonce first (production failed with invalid_dpop_proof).
   assert.deepEqual(exchanges,{refused:0,nonce:5,issued:5});
+  // Abuse monitoring (src/abuse.ts) notes each verified sign-in, refused ones included, under a keyed hash of its subject:
+  // the address, the provider account and the network as keyed hashes, the address's own domain, and that it was refused.
+  const {signalHash}=await import('./src/abuse.js');
+  const attemptOf=(sub:string)=>`att_${signalHash(runtime.config,'attempt',`${issuer}\n${sub}`)}`;
+  const signalsOf=async(type:string,id:string)=>(await db.query('SELECT kind,value FROM abuse_signals WHERE entity_type=$1 AND entity_id=$2 ORDER BY kind,value',[type,id])).rows as {kind:string;value:string}[];
+  cleanup(t,async()=>{await db.query(`DELETE FROM abuse_signals WHERE (entity_type='attempt' AND entity_id=ANY($1)) OR (entity_type='user' AND entity_id IN (SELECT user_id FROM nightmail_oidc_identities WHERE issuer=$2 AND subject=ANY($3)))`,[subjects.map(attemptOf),issuer,subjects]);});
+  const refusedSignals=await signalsOf('attempt',attemptOf(subject));
+  assert.deepEqual(refusedSignals.map(s=>s.kind==='flag'||s.kind==='email_domain'?`${s.kind}:${s.value}`:s.kind),['email','email_domain:example.org','flag:waitlisted','net','provider','provider']);
+  assert.ok(refusedSignals.filter(s=>['email','net','provider'].includes(s.kind)).every(s=>/^[0-9a-f]{32}$/.test(s.value)));
+  assert.ok(!JSON.stringify(refusedSignals).includes(approved.split('@')[0]!) && !JSON.stringify(refusedSignals).includes('192.0.2') && !JSON.stringify(refusedSignals).includes(subject));
   // One row per address, every attempt counted, whatever the address's case or the subject; the name when one is given.
   assert.deepEqual(await waitlisted(approved),[{email:approved,name:null,attempts:5}]);
   const firstSubject=subject;subject=randomUUID();subjects.push(subject);email=approved.toUpperCase();givenName='Avery Example';
@@ -1072,6 +1082,9 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   assert.deepEqual(await waitlisted(approved),[],'Admitted with its verified address, it leaves the waitlist');
   const session=result.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.session_token='))!.split(';')[0]!;
   const me=await (await request('/v1/me','GET',session)).json() as {id:string;workspaceId:string;workspaces:{id:string;name:string}[]};
+  // What its refused attempts left now belongs to the user it became.
+  assert.deepEqual(await signalsOf('attempt',attemptOf(subject)),[]);
+  assert.deepEqual([...new Set((await signalsOf('user',me.id)).map(s=>s.kind))],['email','email_domain','flag','net','provider']);
   // A staff sign-up starts its own workspace, named after the person (#92's naming).
   assert.equal(me.workspaces.find(w=>w.id===me.workspaceId)?.name,`${approved}'s workspace`);
   const members=await (await request('/v1/workspaces/current/members','GET',session)).json() as {data:{userId:string;email:string}[]};
@@ -13699,7 +13712,7 @@ async function stripeFixture(t: TestContext) {
   const wid = `ws_${randomUUID().replaceAll('-', '')}`;
   await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $2, $1)', [wid, 'Billing\nfixture']);
   // Money history outlives the workspace by design (no FK, append-only ledger); only the workspace and its jobs go.
-  cleanup(t, async () => { await db.query('DELETE FROM jobs WHERE workspace_id = $1', [wid]); await db.query('DELETE FROM workspaces WHERE id = $1', [wid]); });
+  cleanup(t, async () => { await db.query('DELETE FROM jobs WHERE workspace_id = $1', [wid]); await db.query('DELETE FROM workspaces WHERE id = $1', [wid]); await db.query(`DELETE FROM abuse_signals WHERE entity_type='workspace' AND entity_id = $1`, [wid]); });
   t.after(() => assert.deepEqual(fake.violations, [], 'No Stripe request may run inside a database transaction.'));
   const app = createApp();
   const send = (body: string, signature?: string) => app.fetch(new Request(`${PUBLIC_ORIGIN}/v1/billing/stripe`, { method: 'POST',
@@ -13758,6 +13771,10 @@ describe('Billing: Stripe', () => {
     const saved = await account();
     assert.equal(saved.balance, String(5000n * UC));
     assert.deepEqual([saved.card_brand, saved.card_last4, saved.card_fingerprint], ['visa', '4242', fake.card.fingerprint], 'A paid Checkout saves its card for later top-ups.');
+    // Abuse monitoring notes the card for the workspace as a keyed hash, never the fingerprint.
+    const noted = (await db.query(`SELECT kind,value FROM abuse_signals WHERE entity_type='workspace' AND entity_id=$1`, [wid])).rows;
+    assert.deepEqual(noted.map((s: Json) => s.kind), ['card']);
+    assert.ok(/^[0-9a-f]{32}$/.test(noted[0].value) && !JSON.stringify(noted).includes(fake.card.fingerprint));
     assert.equal(fake.objects.get(saved.stripe_customer)!.invoice_settings.default_payment_method, saved.stripe_payment_method);
     // The same delivery again, a second event for the same payment, and Checkout's own invoice.paid: credited once.
     const again = await deliver('checkout.session.completed', session, { id: first.id });
@@ -14035,6 +14052,7 @@ describe('Billing: Stripe', () => {
     const errors = t.mock.method(console, 'error', () => {});
     assert.equal((await deliver('charge.dispute.created', dispute)).body.outcome, 'processed');
     assert.equal((await deliver('charge.dispute.created', dispute)).body.outcome, 'processed', 'A second event for the same dispute debits nothing more.');
+    assert.deepEqual((await db.query(`SELECT value,seen FROM abuse_signals WHERE entity_type='workspace' AND entity_id=$1 AND kind='flag'`, [wid])).rows, [{ value: 'dispute', seen: 1 }], 'Abuse monitoring notes the dispute once.');
     assert.ok(errors.mock.calls.some(c => String(c.arguments[0]).includes('BILLING_DISPUTE_OPENED')));
     assert.deepEqual((await ledger()).map(r => [r.kind, r.paid]), [['topup', String(4000n * UC)], ['dispute', String(-4000n * UC)]]);
     const blocked = await account();
@@ -21070,6 +21088,137 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  test('abuse monitoring: sign-ins, payments and sampled sends leave keyed hashes and domains, never an address, a network or message text; entities that share them are linked; nothing runs on the send path and no failure reaches a caller', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const abuse = await import('./src/abuse.js'), { sql } = await import('drizzle-orm'), { loadConfig } = await import('./src/config.js');
+      const wid = runtime.config.workspaceId, twin = unique('abuse-twin'), stranger = unique('abuse-stranger'), pool = '111122223333', from = 'offers@abuse-a.example';
+      const issuer = 'https://account.fixture.example', ids = { a: unique('abuse-user-a'), b: unique('abuse-user-b'), c: unique('abuse-user-c') };
+      const person = (subject: string, email: string, ip: string, userAgent: string, userId: string | null, outcome = 'signed_in:subject') => ({ issuer, subject, userId, created: !!userId, outcome, email,
+        provider: { provider: 'github', sub: `gh-${subject}` }, network: { ip, userAgent, asn: 'AS64500', country: 'US' } });
+      const signals = async (type: string, id: string) => (await db.query('SELECT kind,value,seen,detail FROM abuse_signals WHERE entity_type=$1 AND entity_id=$2 ORDER BY kind,value', [type, id])).rows as { kind: string; value: string; seen: number; detail: Json | null }[];
+      const kinds = async (type: string, id: string) => [...new Set((await signals(type, id)).map(s => s.kind === 'flag' ? `flag:${s.value}` : s.kind))];
+      const links = async (a: string, b: string) => Object.fromEntries((await db.query('SELECT kind,shared FROM identity_links WHERE (a_id=$1 AND b_id=$2) OR (a_id=$2 AND b_id=$1) ORDER BY kind', [a, b])).rows.map((l: Json) => [l.kind, l.shared]));
+
+      // Self-hosted installations collect nothing.
+      await abuse.observeSignIn(runtime, person('sub-self-hosted', 'self.hosted@abuse-self.example', '198.51.100.7', 'FixtureBrowser/1.0', unique('abuse-user-self')));
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM abuse_signals WHERE kind='email_domain' AND value='abuse-self.example'`)).rows[0].n, 0);
+      assert.equal(await abuse.abuseHourly(runtime), null);
+      Object.assign(runtime.config, { multiTenant: true, liveEnabled: true, aws: { accessKeyId: 'fixture-platform', secretAccessKey: 'fixture-only' } });
+
+      // The request's network comes only from the entry point's headers.
+      assert.deepEqual(abuse.requestNetwork(new Headers({ 'x-nightmail-client-ip': '198.51.100.7', 'x-nightmail-client-network': 'AS64500;US', 'user-agent': 'FixtureBrowser/1.0' })),
+        { ip: '198.51.100.7', userAgent: 'FixtureBrowser/1.0', asn: 'AS64500', country: 'US' });
+      assert.deepEqual(abuse.requestNetwork(new Headers({ 'x-nightmail-client-network': 'AS1 OR 1=1;usa' })), { ip: null, userAgent: null, asn: null, country: null });
+      assert.deepEqual(abuse.normalizeEmail('Abuse.Fixture+one@GoogleMail.com'), { normal: 'abusefixture@gmail.com', domain: 'gmail.com', alias: true, disposable: false, publicMailbox: true });
+
+      // Sign-ups. A is refused once, then admitted: what the refusal left moves to the user. B is the same mailbox under
+      // another alias, from the same /24 and browser. C is unrelated. Two refused sign-ins use domains with one mail host.
+      await abuse.observeSignIn(runtime, person('sub-a', 'Abuse.Fixture+one@gmail.com', '198.51.100.7', 'FixtureBrowser/1.0', null, 'not_approved'));
+      const attempt = `att_${abuse.signalHash(runtime.config, 'attempt', `${issuer}\nsub-a`)}`;
+      assert.deepEqual(await kinds('attempt', attempt), ['asn', 'email', 'flag:plus_alias', 'flag:waitlisted', 'net', 'provider', 'ua']);
+      await abuse.observeSignIn(runtime, person('sub-a', 'Abuse.Fixture+one@gmail.com', '198.51.100.7', 'FixtureBrowser/1.0', ids.a));
+      assert.deepEqual(await signals('attempt', attempt), []);
+      assert.deepEqual(await kinds('user', ids.a), ['asn', 'email', 'flag:plus_alias', 'flag:waitlisted', 'net', 'provider', 'ua']);
+      const noted = await signals('user', ids.a);
+      assert.deepEqual(noted.find(s => s.kind === 'asn'), { kind: 'asn', value: 'AS64500', seen: 2, detail: { country: 'US' } });
+      assert.ok(noted.filter(s => ['email', 'net', 'ua', 'provider'].includes(s.kind)).every(s => /^[0-9a-f]{32}$/.test(s.value) && s.seen === 2), 'Hashed, and counted across the refusal and the admission.');
+      await abuse.observeSignIn(runtime, person('sub-b', 'abusefixture+two@googlemail.com', '198.51.100.201', 'FixtureBrowser/1.0', ids.b));
+      await abuse.observeSignIn(runtime, person('sub-c', 'casey@abuse-c.example', '203.0.113.9', 'OtherBrowser/2.0', ids.c));
+      await abuse.observeSignIn(runtime, person('sub-d', 'one@abuse-d.example', '192.0.2.10', 'D/1', null, 'not_approved'));
+      await abuse.observeSignIn(runtime, person('sub-e', 'two@abuse-e.example', '198.18.7.200', 'E/1', null, 'not_approved'));
+      await abuse.observeSignIn(runtime, person('sub-f', 'burner@mailinator.com', '203.0.113.77', 'F/1', null, 'not_approved'));
+      const attemptOf = (subject: string) => `att_${abuse.signalHash(runtime.config, 'attempt', `${issuer}\n${subject}`)}`;
+      assert.ok((await kinds('attempt', attemptOf('sub-f'))).includes('flag:disposable_email'));
+      assert.deepEqual((await signals('attempt', attemptOf('sub-f'))).find(s => s.kind === 'email_domain'), { kind: 'email_domain', value: 'mailinator.com', seen: 1, detail: { class: 'disposable' } });
+      assert.ok(!(await kinds('user', ids.a)).includes('email_domain'), 'A public mailbox provider\'s domain links nobody.');
+
+      // Two Hosted-sending workspaces and a stranger. The fixture's own workspace sends through the API.
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
+      for (const id of [twin, stranger]) await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [id]);
+      for (const id of [wid, twin, stranger]) await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [id, REGION, pool]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ('mail.abuse-a.example',$1,$1,'verified'),('abuse-a.example',$1,$1,'verified')`, [wid]);
+      await gradedSender(db, wid, 1000);
+      const offer = (name: string, order: number) => `<html><head><title>Not shown</title><style>.offer{color:#b00}</style></head><body><h1>An exclusive spring offer for ${name}</h1>
+        <p>Our warehouse is clearing every remaining winter jacket this week, and members who order before Friday get free delivery on order ${order}. The sale covers boots, scarves, gloves and
+        every waterproof shell in the catalogue, in all sizes, while stock lasts. Returns stay free for thirty days, and gift wrapping is included when you ask for it at the checkout.</p>
+        <p>Visit <a href="https://shop.promo-fixture.example/deals?u=${order}">the sale page</a> or write to help@promo-fixture.example to reserve your size today. <img src="https://cdn.promo-fixture.example/pixel.gif"></p></body></html>`;
+      // The send path: admission runs no abuse statement, whatever the reserved enforce flag says.
+      assert.deepEqual([loadConfig({ PUBLIC_URL: 'https://abuse.example', BANE_ROOT_SECRET: 'local-fixture-'.repeat(4) }).abuseEnforce, loadConfig({ PUBLIC_URL: 'https://abuse.example', BANE_ROOT_SECRET: 'local-fixture-'.repeat(4), MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google', NIGHTMAIL_ABUSE_ENFORCE: 'true' }).abuseEnforce], [false, true]);
+      runtime.config.abuseEnforce = true;
+      const queries = t.mock.method(db, 'query');
+      const sent = ok(await local('POST', '/v1/emails/send', { from, to: 'seed-inbox@abuse-recipient.example', subject: 'An exclusive spring offer', html: offer('Jordan', 48213) }), 202);
+      const statements = queries.mock.calls.map(call => String((call.arguments[0] as { text?: string })?.text ?? call.arguments[0]));
+      queries.mock.restore();
+      assert.ok(statements.length > 0 && !statements.some(text => /abuse_|identity_links/.test(text)), 'Admission reads and writes nothing of abuse monitoring.');
+      // The twin sends the same offer to another name and order number; the stranger sends something else to the same seed inbox.
+      const copy = (id: string, workspace: string, subject: string, body: Json) => db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,status,snapshot,simulated)
+        SELECT $1,$2,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,$3,'delivered',snapshot||$4::jsonb,simulated FROM sending_emails WHERE id=$5`, [id, workspace, subject, JSON.stringify(body), sent.id]);
+      await copy(unique('email'), twin, 'An exclusive spring offer', { html: offer('Casey', 99310) });
+      await copy(unique('email'), stranger, 'Your sign-in code', { html: null, text: 'Hello. Someone asked to sign in to your account from a new device a moment ago. If this was you, enter the six digit code 483920 on the page that asked for it. If it was not you, ignore this message and nothing will change. The code stops working after ten minutes.' });
+
+      // Payments: the twin pays with the same card.
+      await abuse.observeCard(runtime, wid, { fingerprint: 'fp_abuse_fixture', country: 'US' });
+      await abuse.observeCard(runtime, twin, { fingerprint: 'fp_abuse_fixture', country: 'GB', blocked: true });
+      await abuse.observeBilling(runtime, twin, 'payment_failed'); await abuse.observeBilling(runtime, twin, 'payment_failed');
+      await abuse.observeWorkspaceCreated(runtime, twin, { ip: '198.51.100.44', userAgent: 'FixtureBrowser/1.0', asn: 'AS64500', country: 'US' });
+
+      // The hourly job: sample what was sent, note the domains, look up the sign-up domains' mail hosts, rebuild the links.
+      const lookups: string[] = [];
+      const resolveMx = async (domain: string) => { lookups.push(domain); return domain === 'abuse-c.example' ? [] : domain === 'mailinator.com' ? ['mail.mailinator.com'] : ['mx1.shared-drop.example']; };
+      const first = await abuse.abuseHourly(runtime, { resolveMx });
+      assert.deepEqual([first!.sampled, first!.domains, first!.resolved], [3, 1, 4]);
+      assert.deepEqual(lookups.sort(), ['abuse-c.example', 'abuse-d.example', 'abuse-e.example', 'mailinator.com']);
+      const mine = await signals('workspace', wid);
+      assert.deepEqual(mine.filter(s => s.kind !== 'content' && s.kind !== 'rcpt' && s.kind !== 'card').map(s => `${s.kind}:${s.value}`), ['card_country:US', 'link:promo-fixture.example', 'send_domain:abuse-a.example']);
+      assert.equal(mine.filter(s => s.kind === 'content' && /^[0-9a-f]{16}$/.test(s.value)).length, 4);
+      assert.equal(mine.filter(s => s.kind === 'rcpt' && /^[0-9a-f]{32}$/.test(s.value)).length, 1);
+      assert.deepEqual(await kinds('workspace', twin), ['asn', 'card', 'card_country', 'content', 'flag:card_blocked', 'flag:payment_failed', 'link', 'net', 'rcpt', 'ua']);
+      assert.equal((await signals('workspace', twin)).find(s => s.value === 'payment_failed')!.seen, 2);
+      assert.ok((await kinds('user', ids.c)).includes('flag:no_mx') && !(await kinds('user', ids.c)).includes('mx'));
+      assert.deepEqual((await signals('attempt', attemptOf('sub-d'))).filter(s => s.kind === 'mx').map(s => s.value), ['shared-drop.example']);
+      // Nothing stored can be read back: no address, network, browser, card, recipient or wording, in any column.
+      const everything = JSON.stringify((await db.query('SELECT * FROM abuse_signals')).rows) + JSON.stringify((await db.query('SELECT * FROM identity_links')).rows) + JSON.stringify((await db.query('SELECT * FROM abuse_sampling')).rows);
+      for (const secret of ['abusefixture', 'abuse.fixture', 'casey@', 'burner', '198.51.100', '203.0.113', 'FixtureBrowser', 'fp_abuse_fixture', 'seed-inbox', 'abuse-recipient', 'warehouse', 'jacket', 'Jordan', 'sign-in code', 'gh-sub', 'sub-a'])
+        assert.ok(!everything.toLowerCase().includes(secret.toLowerCase()), `${secret} is stored`);
+
+      // Links. The two aliases of one mailbox: same address, network and browser. The twin workspaces: the same card,
+      // near-identical content, link domain and recipient. The stranger shares only the seed inbox with them.
+      assert.deepEqual(await links(ids.a, ids.b), { email: 1, net: 1, ua: 1 });
+      assert.deepEqual(await links(ids.a, ids.c), {});
+      assert.deepEqual(await links(wid, twin), { card: 1, content: 4, link: 1, rcpt: 1 });
+      assert.deepEqual(await links(wid, stranger), { rcpt: 1 });
+      assert.deepEqual(await links(twin, ids.a), { net: 1, ua: 1 }, 'A workspace made from the same network and browser as a sign-up.');
+      assert.deepEqual(await links(attemptOf('sub-d'), attemptOf('sub-e')), { mx: 1 });
+      // A value most of the installation holds is infrastructure, not a link.
+      await db.query(`INSERT INTO abuse_signals(entity_type,entity_id,kind,value) SELECT 'workspace','abuse-crowd-'||n,'link','promo-fixture.example' FROM generate_series(1,30) n`);
+      // A second run samples only mail sent since the first, and finds the link gone.
+      const second = await abuse.abuseHourly(runtime, { resolveMx });
+      assert.deepEqual([second!.sampled, second!.domains, second!.resolved, lookups.length], [0, 0, 0, 4]);
+      assert.deepEqual(await links(wid, twin), { card: 1, content: 4, rcpt: 1 });
+
+      // Retention by kind: networks and browsers 90 days, fingerprints of sent mail 30, the rest a year. Links follow.
+      await db.query(`UPDATE abuse_signals SET last_at=now()-interval '91 days' WHERE entity_id=ANY($1)`, [[ids.a, wid]]);
+      await runtime.db.execute(sql`DELETE FROM abuse_signals WHERE ${abuse.abuseExpired}`);
+      assert.deepEqual(await kinds('user', ids.a), ['email', 'flag:plus_alias', 'flag:waitlisted', 'provider']);
+      assert.deepEqual(await kinds('workspace', wid), ['card', 'card_country', 'send_domain']);
+      await db.query(`UPDATE abuse_signals SET last_at=now()-interval '366 days' WHERE entity_id=$1`, [wid]);
+      await runtime.db.execute(sql`DELETE FROM abuse_signals WHERE ${abuse.abuseExpired}`);
+      assert.deepEqual(await signals('workspace', wid), []);
+      await abuse.refreshLinks(runtime);
+      assert.deepEqual([await links(ids.a, ids.b), await links(wid, twin)], [{ email: 1 }, {}]);
+
+      // A collector or the hourly job that cannot reach the database logs and returns: nothing reaches its caller, and
+      // the workspace the monitoring knows most about still sends.
+      const down = { config: runtime.config, db: { transaction: async () => { throw new Error('down'); }, execute: async () => { throw new Error('down'); } } } as unknown as typeof runtime;
+      const warnings = t.mock.method(console, 'warn', () => {});
+      await abuse.observeSignIn(down, person('sub-down', 'down@abuse-c.example', '198.51.100.7', 'FixtureBrowser/1.0', ids.c));
+      await abuse.observeCard(down, wid, { fingerprint: 'fp_down' }); await abuse.observeBilling(down, wid, 'dispute'); await abuse.observeWorkspaceCreated(down, wid, { ip: null, userAgent: 'x', asn: null, country: null });
+      assert.deepEqual(await abuse.abuseHourly(down), { sampled: 0, domains: 0, resolved: 0, links: 0, removed: 0 });
+      assert.ok(warnings.mock.calls.some(call => String(call.arguments[0]).includes('ABUSE_COLLECT_FAILED')) && warnings.mock.calls.some(call => String(call.arguments[0]).includes('ABUSE_STEP_FAILED')));
+      warnings.mock.restore();
+      ok(await local('POST', '/v1/emails/send', { from, to: 'seed-inbox@abuse-recipient.example', subject: 'An exclusive spring offer', html: offer('Jordan', 48214) }), 202);
+    });
+  });
   test('operator API: only platform operators read and act; every action needs a reason and is audited in its transaction', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const wid = runtime.config.workspaceId, pool = '111122223333', base = `/v1/operator/workspaces/${wid}`;
