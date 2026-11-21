@@ -83176,6 +83176,10 @@
           }
         },
         "x-internal": true,
+        "x-nightmail-permission": {
+          "access": "staff",
+          "text": "Nightmail staff only."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -83326,6 +83330,10 @@
           }
         },
         "x-internal": true,
+        "x-nightmail-permission": {
+          "access": "staff",
+          "text": "Nightmail staff only."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
@@ -83476,6 +83484,10 @@
           }
         },
         "x-internal": true,
+        "x-nightmail-permission": {
+          "access": "staff",
+          "text": "Nightmail staff only."
+        },
         "x-codeSamples": [
           {
             "lang": "TypeScript",
