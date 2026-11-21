@@ -540,7 +540,7 @@ async function originDecisions(prepared: Prepared[], db: DbExecutor) {
 // first too); the campaign itself is never written here, so concurrent shards never serialize on it.
 async function claimGroup(runtime: Runtime, prepared: Prepared[], origins: Map<string, boolean>, db: DbExecutor) {
   const input = prepared.map(item => ({
-    id: item.mail.id, workspace_id: item.mail.workspaceId, dispatch_version: item.mail.dispatchVersion, campaign_id: item.mail.campaignId,
+    id: item.mail.id, workspace_id: item.mail.workspaceId, dispatch_version: item.mail.dispatchVersion, status: 'queued', campaign_id: item.mail.campaignId,
     actor_key_id: item.mail.actorKeyId, sender: item.snapshot.from.toLowerCase(), mcp_allowed: item.mail.actorKeyId.startsWith('mcp_') && origins.get(mcpOrigin(item)) === true,
     feedback_topic: item.owner.feedbackTopic, binding:item.review?.draft.binding ?? item.mail.snapshot.binding, destinations: [...item.snapshot.to, ...item.snapshot.cc, ...item.snapshot.bcc].map(email => email.toLowerCase()),
     hosted:!!item.owner.tenantName,marketing: item.snapshot.kind === 'marketing', held_stream: item.snapshot.kind !== 'transactional' || !!item.mail.campaignId || !!item.snapshot.bulk, reply_authors: item.snapshot.replyAuthors, snapshot: item.unsubscribe ? item.stored ?? null : null,
@@ -548,7 +548,7 @@ async function claimGroup(runtime: Runtime, prepared: Prepared[], origins: Map<s
     event_id: id('event'), external_id: `attempt-start:${item.mail.id}:${item.mail.dispatchVersion}`, attempt: item.mail.dispatchVersion + 1,
   }));
   const rows = sql`SELECT * FROM jsonb_to_recordset(${JSON.stringify(input)}::jsonb)
-        AS x(id text, workspace_id text, dispatch_version int, campaign_id text, actor_key_id text, sender text, mcp_allowed boolean, hosted boolean, feedback_topic text, binding jsonb, destinations jsonb, marketing boolean, held_stream boolean, reply_authors jsonb, snapshot jsonb, token_hash text, token_email text, token_page text, event_id text, external_id text, attempt int)`;
+        AS x(id text, workspace_id text, dispatch_version int, status text, campaign_id text, actor_key_id text, sender text, mcp_allowed boolean, hosted boolean, feedback_topic text, binding jsonb, destinations jsonb, marketing boolean, held_stream boolean, reply_authors jsonb, snapshot jsonb, token_hash text, token_email text, token_page text, event_id text, external_id text, attempt int)`;
   const claimed = await db.execute<{ id: string; status: EmailStatus; webhooks:number }>(sql`WITH ${claimCtes(runtime, prepared[0]!.mail.region, rows)} SELECT id,status,(SELECT count(*)::int FROM webhook_jobs) AS webhooks FROM claimed`);
   return {statuses:new Map(claimed.rows.map(row => [row.id, row.status])),webhooks:claimed.rows[0]?.webhooks??0};
 }
@@ -638,7 +638,11 @@ function claimCtes(runtime: Runtime, region: string, input: SQL) {
         suppression_reason = CASE WHEN el.origin_ok AND el.binding_ok AND el.campaign_allowed THEN el.suppression_reason END,
         ${runtime.config.multiTenant && !isSimulatedSes(runtime) ? sql`feedback_topic_arn=x.feedback_topic,` : sql``} snapshot = CASE WHEN b.allowed THEN coalesce(x.snapshot, e.snapshot) ELSE e.snapshot END, lease_until = NULL, updated_at = clock_timestamp()
       FROM input x JOIN eligibility el ON el.id = x.id JOIN budget b ON b.id=x.id
-      WHERE e.workspace_id = x.workspace_id AND e.id = x.id AND e.status = 'queued' AND e.dispatch_version = x.dispatch_version
+      -- e.status is compared with x.status ('queued' in every input row), never a literal, so sending_emails has no condition
+      -- of its own: the planner reaches it only by primary key from each input row, since any other way reads the whole
+      -- table. With a literal it could scan a queued-only partial index instead, and when the statistics were taken while
+      -- nothing was queued it did: every queued row for each batch, the hold check for each pair (20,000 rows, 5 seconds).
+      WHERE e.workspace_id = x.workspace_id AND e.id = x.id AND e.status = x.status AND e.dispatch_version = x.dispatch_version
         ${runtime.config.multiTenant ? sql`AND EXISTS (SELECT 1 FROM provider_connections pc WHERE pc.workspace_id=x.workspace_id AND pc.paused_at IS NULL
           AND NOT (x.held_stream AND hosted_marketing_held(x.workspace_id)) FOR SHARE)
           AND NOT EXISTS (SELECT 1 FROM sponsor_state ss WHERE ss.workspace_id=x.workspace_id AND ss.paused)` : sql``}
@@ -892,9 +896,10 @@ function pacedSender(gate: GateState, options: DispatcherOptions, pacing: Pacing
 }
 
 // Quota exhausted for the day: give the leases back untouched and stop this run.
+// The status comes with each input row, not as a literal, to keep this on the primary key (see the claim in claimCtes).
 async function releaseLeases(runtime: Runtime, mails: Mail[], until?: number) {
-  await runtime.db.execute(sql`UPDATE sending_emails e SET lease_until = clock_timestamp() + ${until ? Math.max(0, until - Date.now()) : null}::float8 * interval '1 millisecond' FROM jsonb_to_recordset(${JSON.stringify(mails.map(m => ({ workspace_id: m.workspaceId, id: m.id, version: m.dispatchVersion })))}::jsonb) x(workspace_id text, id text, version int)
-    WHERE e.workspace_id = x.workspace_id AND e.id = x.id AND e.dispatch_version = x.version AND e.status = 'queued'`);
+  await runtime.db.execute(sql`UPDATE sending_emails e SET lease_until = clock_timestamp() + ${until ? Math.max(0, until - Date.now()) : null}::float8 * interval '1 millisecond' FROM jsonb_to_recordset(${JSON.stringify(mails.map(m => ({ workspace_id: m.workspaceId, id: m.id, version: m.dispatchVersion, status: 'queued' })))}::jsonb) x(workspace_id text, id text, version int, status text)
+    WHERE e.workspace_id = x.workspace_id AND e.id = x.id AND e.dispatch_version = x.version AND e.status = x.status`);
 }
 
 // One batch: lease up to batchSize rows and prepare them (CPU), then for each group of sendConcurrency
@@ -1023,9 +1028,10 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
     const prepared = await phase('prepare', () => Promise.all(ready.map(prepare)));
     await dispatchPrepared(base, lane, prepared.filter((item): item is Prepared => item !== undefined));
   }
+  // The status comes with each input row, not as a literal, to keep this on the primary key (see the claim in claimCtes).
   if(screenDeferred.length) await base.db.execute(sql`UPDATE sending_emails e SET lease_until=NULL,error_code='CONTENT_SCREEN_UNAVAILABLE',scheduled_at=clock_timestamp()+interval '30 seconds'
-    FROM jsonb_to_recordset(${JSON.stringify(screenDeferred.map(m=>({id:m.id,version:m.dispatchVersion})))}::jsonb) x(id text,version int)
-    WHERE e.id=x.id AND e.dispatch_version=x.version AND e.status='queued'`);
+    FROM jsonb_to_recordset(${JSON.stringify(screenDeferred.map(m=>({id:m.id,version:m.dispatchVersion,status:'queued'})))}::jsonb) x(id text,version int,status text)
+    WHERE e.id=x.id AND e.dispatch_version=x.version AND e.status=x.status`);
   return { processed: ready.length, blocked: false };
 }
 const logLost = (count:number) => log('warn', { code:'DISPATCH_CLAIM_LOST', count, message:'Rows changed between lease and claim; they will be reconsidered on the next pass.' });
