@@ -98,12 +98,20 @@ html:has(.support-overlay[data-open]) { overflow: hidden; }
 .support-card__resolved { gap: var(--space-6); color: var(--color-muted); }
 .support-card__resolved[data-decision='allow'], .support-card__resolved[data-tone='success'] { color: var(--color-success); }
 .support-card__resolved[data-tone='danger'] { color: var(--color-danger); }
-.support-card .support-card__error { margin-top: var(--space-6); color: var(--color-danger); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.support-card__resolved[data-tone='warning'] { color: var(--color-warning); }
+.support-card .support-card__error { display: flex; align-items: center; justify-content: space-between; gap: var(--space-8); margin-top: var(--space-6); color: var(--color-danger); font-size: var(--text-xs); line-height: var(--leading-xs); }
 /* A proposed change: the names a person typed, inside Nightmail's sentence, read as data (as the consent card's workspace). */
 .support-action__name { color: var(--color-text); font-weight: var(--font-weight-bold); }
 .support-action__loading { display: grid; gap: 8px; padding-block: 5px 3px; }
+/* What will happen is the card's main text; its buttons sit at the end, Decline then the change, as in the dialog. */
+.support-action .support-card__body { color: var(--color-text); }
+.support-action__choice { justify-content: flex-end; }
 .support-action-dialog__summary { margin: 0; overflow-wrap: anywhere; }
 .support-action-dialog__status { margin: var(--space-12) 0 0; font-size: var(--text-sm); line-height: var(--leading-sm); }
+/* An outcome can be a sentence (outcome unknown, and what to check): it wraps beside its dot instead of clipping. */
+.support-action-dialog__status .ui-status-dot { align-items: flex-start; white-space: normal; }
+.support-action-dialog__status .ui-status__dot { flex: none; margin-top: calc((var(--leading-sm) - 6px) / 2); }
+.support-action-dialog__status .ui-status-dot__value { overflow: visible; }
 .support-ticket { display: flex; align-items: flex-start; gap: var(--space-12); }
 .support-ticket__mark { display: grid; flex: none; place-items: center; width: 18px; height: 18px; margin-top: 1px; border-radius: 50%; background: var(--color-success-bg); color: var(--color-success); box-shadow: inset 0 0 0 1px var(--color-success-border); animation: support-mark-in 320ms var(--ease-out-strong) 100ms both; }
 .support-message[data-restored] .support-ticket__mark { animation: none; }

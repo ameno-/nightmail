@@ -16,7 +16,9 @@ export type Part =
   | ActionPart
 /** A proposed change (§4.4): `action` is Nightmail's record of it, read with the person's session (null until it loads);
  *  `error` why it couldn't be read or decided. */
-export interface ActionPart { kind: 'action'; request: ActionRequest; action: SupportAction | null; state: 'loading' | 'ready' | 'confirming' | 'declining'; error: string | null }
+/** `unavailable`: Nightmail refused the read itself (another account, gone): final, no decision. Any other failed read
+ *  keeps both decisions, with the sentence the server sent and Try again. */
+export interface ActionPart { kind: 'action'; request: ActionRequest; action: SupportAction | null; state: 'loading' | 'ready' | 'confirming' | 'declining'; error: string | null; unavailable: boolean }
 /** A screenshot in a sent message: its local preview, or none after a reload (the server never sends images back). */
 export interface ChatImage { url: string | null; name: string }
 /** `local`: only in this panel so far: a message waiting for the connection, or the reply being prepared for it (until
@@ -78,22 +80,49 @@ export function actionTitle(kind: string) {
     test_inbound_webhook: 'Send a test to your inbound webhook?', redeliver_message: 'Redeliver a received message?', pause_campaign: 'Pause a campaign?' }
   return titles[kind] ?? 'Make this change?'
 }
-/** What came of a decided change, in a few words; null while it waits for the person. */
-export function actionOutcome(action: SupportAction): string | null {
-  const done: Record<string, string> = { retry_webhook_delivery: 'Delivery retried', test_webhook: 'Test event sent', retry_inbound_delivery: 'Delivery retried', test_inbound_webhook: 'Test message sent',
-    redeliver_message: 'Redelivery queued', pause_campaign: 'Campaign paused' }
+/** What Confirm does, as its button says it. */
+export function actionVerb(kind: string) {
+  const verbs: Record<string, string> = { retry_webhook_delivery: 'Retry delivery', test_webhook: 'Send test', retry_inbound_delivery: 'Retry delivery', test_inbound_webhook: 'Send test',
+    redeliver_message: 'Redeliver', pause_campaign: 'Pause campaign' }
+  return verbs[kind] ?? 'Confirm'
+}
+export type OutcomeTone = 'success' | 'danger' | 'warning' | 'info' | 'neutral'
+/** What came of a decided change, in a few words, from Nightmail's answer: done only queues a test or retry, so its
+ *  delivery says whether it has reached the endpoint yet. `waiting`: it may still change (read it again). Null while the
+ *  proposal waits for the person. The Help card and the emailed link's dialog both show this. */
+export function actionResult(action: SupportAction): { text: string; tone: OutcomeTone; waiting: boolean } | null {
+  const test = action.kind === 'test_webhook', http = (code: number | null) => code ? ` (HTTP ${code})` : ''
   switch (action.status) {
     case 'proposed': return null
-    case 'running': return 'Sending the test…'
-    case 'done': return done[action.kind] ?? 'Done'
-    case 'failed': return `Didn’t run: ${action.error?.message ?? 'it failed.'}`
-    case 'declined': return 'Declined. Nothing changed.'
-    case 'expired': return 'Expired. Ask support again if you still want it.'
+    case 'running': return { text: 'Sending the test…', tone: 'info', waiting: true }
+    case 'declined': return { text: 'Declined. Nothing changed.', tone: 'neutral', waiting: false }
+    case 'expired': return { text: 'Expired. Ask support again if you still want it.', tone: 'neutral', waiting: false }
+    case 'failed':
+      // The test was posted, and its answer never recorded: it may or may not have arrived.
+      if (action.error?.code === 'SUPPORT_ACTION_OUTCOME_UNKNOWN') return { text: 'Outcome unknown: the test may have reached your endpoint. Check its logs for a test message.received event before testing again.', tone: 'warning', waiting: false }
+      return { text: `Didn’t run: ${action.error?.message ?? 'it failed.'}`, tone: 'danger', waiting: false }
+    case 'done': {
+      if (action.kind === 'pause_campaign') return { text: 'Campaign paused', tone: 'success', waiting: false }
+      if (action.kind === 'redeliver_message') return { text: 'Redelivery queued', tone: 'info', waiting: false }
+      if (action.kind === 'test_inbound_webhook') {
+        const code = typeof action.result?.statusCode === 'number' ? action.result.statusCode : null
+        return code !== null && code >= 200 && code < 300 ? { text: `Test message delivered${http(code)}`, tone: 'success', waiting: false }
+          : { text: `Your endpoint didn’t accept the test${http(code)}`, tone: 'danger', waiting: false }
+      }
+      const delivery = action.delivery
+      if (delivery?.status === 'delivered') return { text: test ? 'Test event delivered' : 'Delivered', tone: 'success', waiting: false }
+      if (delivery?.status === 'failed') return { text: `Your endpoint didn’t accept it${http(delivery.statusCode)}`, tone: 'danger', waiting: false }
+      if (delivery?.status === 'paused') return { text: 'Queued, and held while the webhook is paused', tone: 'warning', waiting: false }
+      return { text: test ? 'Test event queued' : 'Delivery queued', tone: 'info', waiting: true }
+    }
   }
 }
+/** A proposal that isn't this person's, no longer exists, or a link cut short: every refusal of the request itself. */
+export const ACTION_UNAVAILABLE = 'This change isn’t available to this account.'
+export const unavailable = (error: unknown) => error instanceof ApiError && error.status !== undefined && error.status >= 400 && error.status < 500 && error.status !== 409 && error.status !== 429
 /** Why a proposal couldn't be read or decided, for the card. */
 function actionError(error: unknown) {
-  if (error instanceof ApiError && error.status === 404) return 'This change isn’t available to this account.'
+  if (unavailable(error)) return ACTION_UNAVAILABLE
   return error instanceof Error && error.message ? error.message : `Couldn’t reach ${productName}. Try again.`
 }
 
@@ -142,7 +171,7 @@ export class SupportStore {
     return true
   }
 
-  setVisible(visible: boolean) { this.visible = visible; if (visible && this.state.unread) this.set({ unread: false }) }
+  setVisible(visible: boolean) { this.visible = visible; if (visible && this.state.unread) this.set({ unread: false }); if (visible) this.rereadFailed() }
   start() { if (this.state.connection === 'idle' && !this.state.hello) this.transport.connect() }
   reconnect() { this.transport.connect() }
   setDraft(draft: string) { this.set({ draft: draft.slice(0, MAX_MESSAGE) }) }
@@ -232,23 +261,27 @@ export class SupportStore {
     this.set(current => ({ messages: current.messages.map(message => message.parts.some(part => part.kind === 'consent' && part.request.requestId === requestId)
       ? { ...message, parts: message.parts.map(part => part.kind === 'consent' && part.request.requestId === requestId ? { ...part, state } : part) } : message) }))
   }
-  /** Confirm or Not now on an action card: Nightmail decides it for the person's session, and the card shows what came of it. */
+  /** The change's verb or Decline on an action card: Nightmail decides it for the person's session, and the card shows
+   *  what came of it. Open to a decision once Nightmail's record is in, or after a read that failed for a reason other
+   *  than the proposal being unavailable (Nightmail checks it anyway, and answers its record). */
   async decideAction(actionId: string, decision: 'confirm' | 'decline') {
     const part = this.actionPart(actionId)
-    if (!part?.action || part.action.status !== 'proposed' || part.state !== 'ready') return
+    if (!part || part.state !== 'ready' || part.unavailable || (part.action ? part.action.status !== 'proposed' : !part.error)) return
     this.setAction(actionId, { state: decision === 'confirm' ? 'confirming' : 'declining', error: null })
     try {
       const action = await this.transport.decideAction(actionId, decision)
-      this.setAction(actionId, { action, state: 'ready' })
-      this.set({ announcement: actionOutcome(action) ?? '' })
-      if (action.status === 'running') this.followAction(actionId)
+      this.setAction(actionId, { action, state: 'ready', error: null, unavailable: false })
+      this.set({ announcement: actionResult(action)?.text ?? '' })
+      this.followAction(action)
     } catch (error) {
       if (this.disposed) return
-      this.setAction(actionId, { state: 'ready', error: actionError(error) })
+      this.setAction(actionId, { state: 'ready', error: actionError(error), unavailable: unavailable(error) })
       // Expired, or decided in another tab meanwhile: the card shows where it stands now.
-      void this.readAction(actionId)
+      if (!unavailable(error)) void this.readAction(actionId)
     }
   }
+  /** Try again on a card whose read failed. */
+  retryAction(actionId: string) { void this.readAction(actionId) }
   private actionPart(actionId: string) {
     for (const message of this.state.messages) for (const part of message.parts) if (part.kind === 'action' && part.request.actionId === actionId) return part
     return null
@@ -259,22 +292,33 @@ export class SupportStore {
   }
   /** A card for a proposal (once per action), filled from Nightmail's record. */
   private proposeAction(request: ActionRequest) {
-    if (!this.actionPart(request.actionId)) this.append({ kind: 'action', request, action: null, state: 'loading', error: null })
+    if (!this.actionPart(request.actionId)) this.append({ kind: 'action', request, action: null, state: 'loading', error: null, unavailable: false })
     void this.readAction(request.actionId)
   }
   private async readAction(actionId: string) {
     try {
       const action = await this.transport.readAction(actionId)
       if (this.disposed) return
-      this.setAction(actionId, { action, state: this.actionPart(actionId)?.state === 'loading' ? 'ready' : this.actionPart(actionId)?.state })
-      if (action.status === 'running') this.followAction(actionId)
+      const state = this.actionPart(actionId)?.state
+      this.setAction(actionId, { action, state: state === 'loading' ? 'ready' : state, error: null, unavailable: false })
+      this.followAction(action)
     } catch (error) {
       if (this.disposed || !this.actionPart(actionId)) return
-      this.setAction(actionId, { state: 'ready', error: actionError(error) })
+      // A failed read keeps what was shown (an earlier read, or the server's sentence) and both decisions.
+      this.setAction(actionId, { state: 'ready', error: unavailable(error) ? ACTION_UNAVAILABLE : `Couldn’t load this from ${productName}.`, unavailable: unavailable(error) })
     }
   }
-  /** A test still posting (another tab confirmed it): read it again until it has an answer. */
-  private followAction(actionId: string) { setTimeout(() => { if (!this.disposed) void this.readAction(actionId) }, 2000) }
+  /** Failed reads, again: the panel opened, or the connection came back. */
+  private rereadFailed() {
+    for (const message of this.state.messages) for (const part of message.parts)
+      if (part.kind === 'action' && part.error && !part.unavailable && part.state === 'ready') void this.readAction(part.request.actionId)
+  }
+  /** A test still posting, or a test or retry Nightmail has queued: read it again until its delivery has an answer
+   *  (for two minutes after it was decided; a later read, or reopening the link, says the rest). */
+  private followAction(action: SupportAction) {
+    if (!actionResult(action)?.waiting || Date.now() - Date.parse(action.resolvedAt ?? new Date().toISOString()) > 120_000) return
+    setTimeout(() => { if (!this.disposed && this.actionPart(action.id)) void this.readAction(action.id) }, 2500)
+  }
   cancel() { this.transport.send({ type: 'cancel' }) }
   requestHuman() { if (this.transport.send({ type: 'human.request' })) this.set({ humanRequested: true }) }
   end() { this.transport.send({ type: 'end' }) }
@@ -293,6 +337,7 @@ export class SupportStore {
       if (event.state !== 'open') this.synced = false
       this.set({ connection: event.state, retryAt: event.retryAt ?? null, reason: event.reason ?? null })
       if (event.state === 'unavailable') this.settle('Not sent: support chat isn’t available.')
+      if (event.state === 'open') this.rereadFailed()
       return
     }
     const message = event.message
