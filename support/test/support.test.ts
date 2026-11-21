@@ -2234,16 +2234,16 @@ describe('support Worker', () => {
       assert.deepEqual([(await replies('thr_help', instance)).length, (await replies('thr_wake', instance)).length], [1, 1]);
     });
 
-    test('health is ok but not ready with a missing address or blocked work, and shows counts only', async () => {
+    test('health is ok but not ready with a missing address, a key this Worker lacks or blocked work, and shows counts and causes only', async () => {
       const shape = (h: any) => ({ ...h, checks: { ...h.checks, replay: { ...h.checks.replay, lagSeconds: typeof h.checks.replay.lagSeconds }, checkedAt: typeof h.checks.checkedAt } });
-      const ready = { status: 'ok', service: 'bane-support', stage: 'dev', ready: true, checks: { keys: { support: 'ok', intake: 'ok' }, work: { blocked: 0, overdue: 0, dead: 0 },
+      const ready = { status: 'ok', service: 'bane-support', stage: 'dev', ready: true, checks: { keys: { support: 'ok', intake: 'ok' }, work: { blocked: 0, blockedBy: {}, overdue: 0, dead: 0 },
         replay: { lagSeconds: 'number', routeGaps24h: 4 }, checkedAt: 'string' } };
       assert.deepEqual(shape(await health()), ready);
       // Blocked work: not ready.
       await outage('/v1/inbound/messages/msg_block_1', 404);
       assert.equal((await signedHook('msg_block_1', 'thr_block', 'blocked@else.test', { instance })).status, 200);
       const blocked = await eventually(async () => { const h = await health(); return h.checks.work.blocked ? h : undefined; });
-      assert.deepEqual(shape(blocked), { ...ready, ready: false, checks: { ...ready.checks, work: { blocked: 1, overdue: 0, dead: 0 } } });
+      assert.deepEqual(shape(blocked), { ...ready, ready: false, checks: { ...ready.checks, work: { blocked: 1, blockedBy: { NOT_FOUND: 1 }, overdue: 0, dead: 0 } } }, 'Blocked work names its cause.');
       // A configured address the key can't read: not ready either.
       await reads(SUPPORT_KEY, ['adr_support']);
       await swept();
@@ -2251,6 +2251,15 @@ describe('support Worker', () => {
       assert.deepEqual([missing.status, missing.ready, missing.checks.keys], ['ok', false, { support: 'missing', intake: 'ok' }]);
       assert.doesNotMatch(JSON.stringify(missing), /@|adr_|msg_|thr_|conv_|req_/, 'Counts and states only.');
       await outage('/v1/inbound/messages/msg_block_1');
+      // A stage whose Worker has no support key (its secret unset) says so, apart from a key Nightmail refuses.
+      const bare = new Miniflare({ cf: false, telemetry: { enabled: false }, workers: [worker('support', baseEnv({ BANE_SUPPORT_INBOX_KEY: text('') })),
+        { config: { name: 'fake-bane', compatibilityDate: '2026-09-08', manifest: { mainModule: 'bane.js', modules: { 'bane.js': { type: 'esm', contents: FAKE_BANE } } }, env: {} } }] } as never);
+      try {
+        await migrate(bare);
+        await (await bare.getWorker('support')).scheduled({ cron: '*/5 * * * *', scheduledTime: new Date() });
+        const unset = await eventually(async () => { const h = await (await bare.dispatchFetch(`${SUPPORT}/health`)).json() as any; return h.checks.keys.intake !== 'unchecked' ? h : undefined; });
+        assert.deepEqual([unset?.ready, unset?.checks.keys], [false, { support: 'not_configured', intake: 'ok' }]);
+      } finally { await bare.dispose(); }
     });
   });
 
