@@ -1,7 +1,7 @@
 ---
 title: Terms of Service
 description: The agreement between you and Anomaly for using Nightmail: accounts, prepaid billing, refunds and credit expiry, sending limits, your data, and how disputes are resolved.
-updated: 20 November 2026
+updated: 21 November 2026
 effective: 20 November 2026
 ---
 
@@ -62,14 +62,14 @@ By creating an account, joining a workspace or using the Service, you accept the
 | What | Price | How it's counted |
 | --- | --- | --- |
 | Email | **$0.20 per 1,000** | Sent: per recipient. Received: per message accepted for your domains. |
-| AI decisions | **$0.10 per 1,000** evaluations | One evaluation is one classifier call about one message. One call answers every question a rule asks about that message, up to ten. |
+| AI decisions | Free | AI rules are free. We count the classifier calls they make, but don't charge for them. |
 | Storage | **$0.25 per GB-month** | Received mail older than 90 days, above 1 GB per workspace, measured daily. |
 | IMAP and SMTP access | Free | Fair use: downloads up to 5 GB a day and 30 GB a month per inbox; above that, downloads slow down. |
 | BYO AWS | Free | Fair use: about 10 million emails a month. |
 
 - **Not charged:** mail Nightmail suppresses or cancels before it goes out, and mail rejected before sending for reasons other than the spam screen.
 - **Charged:** a message the spam screen rejects is charged as a send.
-- **Free:** received mail that Amazon's spam scan flags as spam. AI decisions asked about it are still charged.
+- **Free:** received mail that Amazon's spam scan flags as spam.
 - **Storage starts later.** Storage charges start **90 days after we notify you** that they apply. Until then, stored mail is free.
 
 ### 5.3 Free tier
@@ -89,7 +89,7 @@ By creating an account, joining a workspace or using the Service, you accept the
 
 If a workspace's balance and its free usage are used up:
 
-1. **Sending stops.** The API returns `402 BALANCE_EXHAUSTED`, campaigns wait, and SMTP submission is deferred. AI decisions return their fallback answer without asking the classifier.
+1. **Sending stops.** The API returns `402 BALANCE_EXHAUSTED`, campaigns wait, and SMTP submission is deferred.
 2. **Receiving continues for 7 days.** Mail is still accepted and charged, so the balance can go below $0. That amount is a debt you owe.
 3. **After 7 days, new received mail is held.** It's stored but not delivered to your inboxes, webhooks or rules until you add credit. Mail you already have stays available.
 4. **Nothing is deleted** because the balance is empty.

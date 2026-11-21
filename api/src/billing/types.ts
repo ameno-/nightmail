@@ -28,8 +28,6 @@ export interface BillingPosition {
   /** Receive holds are on for the installation (billing_config.receive_hold). */
   receiveHold: boolean;
   receiveHeld: boolean;
-  /** Whether AI decisions may run (false only when enforced, prepaid and nothing is available). */
-  omens: boolean;
   canRecharge: boolean;
   thresholdUc: string;
 }

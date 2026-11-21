@@ -29,7 +29,7 @@ import {
 } from './ritual-pipeline.js';
 import { compileRitual, type Diagnostic } from './ritual-engine.js';
 import { buildRecipe, closest, endpointCall, endpointPayloads, recipeGroups, recipeWrote, ritualCompletions, ritualRecipes, ritualTemplates, ritualTypings, type EndpointType, type RecipeParams } from './ritual-schema.js';
-import { RATES } from './billing/money.js';
+import { perThousandUsd, RATES } from './billing/rates.js';
 import type { RoutingInput } from './routing-match.js';
 import { registerEndpoints } from './endpoints.js';
 import { registerRitualVersion } from './ritual-version.js';
@@ -456,9 +456,9 @@ const recipeCatalog = (family: Family) => {
       id: z.string(), group: z.string(), name: z.string(), description: z.string(),
       sentence: z.string().describe('What a rule made from it does, with {field} where each parameter goes.'),
       fields: z.array(recipeField.openapi(`${name}RecipeField`)),
-      [asks]: z.boolean().describe('Asks the AI about each email (an AI decision), billed per email checked. Saving one lets the AI read mail at those addresses’ domains.'),
+      [asks]: z.boolean().describe('Asks the AI about each email (an AI decision). AI rules are free. Saving one lets the AI read mail at those addresses’ domains.'),
     }).openapi(`${name}Recipe`)),
-    [price]: z.string().describe('USD per 1,000 emails an AI decision checks.'),
+    [price]: z.string().openapi({ deprecated: true, description: 'Deprecated: AI decisions are free, so this is always "0.00".' }),
   }).openapi(`${name}Recipes`);
 };
 export const RecipeInputParams = RuleRecipeRef.shape.params;
@@ -529,7 +529,7 @@ function registerRecipes(app: App, item: string, keyParams: z.ZodObject<{ key: z
     return c.json({
       groups: recipeGroups,
       data: ritualRecipes.filter(r => r.listed !== false).map(r => ({ id: r.id, group: r.group, name: r.name, description: r.description, sentence: r.sentence, [asks]: r.decisions, fields: r.fields.map(f => ({ name: f.name, type: f.type, label: f.label, placeholder: f.placeholder ?? null, hint: f.hint ?? null })) })),
-      [price]: (Number(RATES.omenUc) * 1000 / 1e8).toFixed(2),
+      [price]: perThousandUsd(RATES.omenUc),
     }, 200);
   }, { responses: { 200: response(recipeCatalog('rituals')), ...errors } });
   const created = (s: typeof state | typeof legacyState) => s.extend({ key: z.string().describe('The new rule’s key.') });

@@ -779,6 +779,10 @@ describe('support Worker', () => {
     for (const quoted of prompt.match(/\$\d+\.\d{2} per 1,000 emails/g) ?? []) assert.equal(quoted, `$${price} per 1,000 emails`);
     assert.ok(facts.includes(`$${price} per 1,000 emails`), price);
     assert.ok(facts.includes(`${number(RATES.freeSentEmails)} sent and ${number(RATES.freeReceivedEmails)} received`), 'The free allowances.');
+    // AI decisions are free (rate version 3): the facts say so, and nothing in the prompt prices them.
+    assert.equal(RATES.omenUc, 0n);
+    assert.ok(facts.includes('AI rules are free'), 'AI rules are free.');
+    assert.deepEqual(prompt.match(/\$\d+\.\d{2} per 1,000 (?!emails)[^\n.]*/g) ?? [], [], 'Only emails have a price per 1,000.');
     for (const [count, kind] of [...prompt.matchAll(/\b(\d[\d,]*) (sent|received)\b/g)].map(m => [Number(m[1]!.replace(/,/g, '')), m[2]] as const))
       assert.equal(count, kind === 'sent' ? RATES.freeSentEmails : RATES.freeReceivedEmails, `${count} ${kind}`);
     // The hosted service's mail hosts (MAILGW_PUBLIC_DOMAIN in production) and the gateway's ports.

@@ -20,7 +20,7 @@ import { productName } from '../brand.js';
 
 const MicroCents = MicroCentsJson;
 const FreeAllowance = z.object({ limit: z.number().int(), used: z.number().int().describe('Used this month, settled and unsettled.'), left: z.number().int() });
-const Prices = z.object({ emailPerThousand: z.string().describe('USD per 1,000 emails, sent (per recipient) or received (per message).'), decisionPerThousand: z.string().describe('USD per 1,000 emails an AI decision checks.'), omenPerThousand: z.string().openapi({ deprecated: true, description: 'Deprecated: decisionPerThousand.' }), storagePerGbMonth: z.string().describe('USD per GB-month for received mail older than 90 days, beyond the free GB.'),
+const Prices = z.object({ emailPerThousand: z.string().describe('USD per 1,000 emails, sent (per recipient) or received (per message).'), decisionPerThousand: z.string().openapi({ deprecated: true, description: 'Deprecated: AI decisions are free, so this is always "0.00".' }), omenPerThousand: z.string().openapi({ deprecated: true, description: 'Deprecated: decisionPerThousand, always "0.00".' }), storagePerGbMonth: z.string().describe('USD per GB-month for received mail older than 90 days, beyond the free GB.'),
   freeEmails: z.number().int().describe('Free emails each calendar month (UTC) in each direction, counted separately (freeSentEmails, freeReceivedEmails).'),
   freeSentEmails: z.number().int().describe('Sent emails (each recipient) free each calendar month (UTC).'),
   freeReceivedEmails: z.number().int().describe('Received messages free each calendar month (UTC), separate from the sent allowance.'),
@@ -63,7 +63,7 @@ const Payment = z.object({
   failure: z.object({ code: z.string(), message: z.string() }).nullable(),
 }).openapi('BillingPayment');
 const UsagePoint = z.object({ start: z.string().describe('Start of the period, UTC.'), meter: z.enum(['send', 'receive', 'omen', 'storage', 'byo_send', 'byo_receive']),
-  quantity: z.string().describe('send: recipients; receive: messages; omen: emails checked by AI decisions (the meter keeps its name from before the rename); storage: billable byte-days beyond the free GB; byo_*: reported only, $0.') }).openapi('BillingUsagePoint');
+  quantity: z.string().describe('send: recipients; receive: messages; omen: emails checked by AI decisions, which are free (the meter keeps its name from before the rename); storage: billable byte-days beyond the free GB; byo_*: reported only, $0.') }).openapi('BillingUsagePoint');
 const TopUpAmount = z.number().int().min(2000).max(1_000_000).describe('Whole US cents, $20 to $10,000, excluding tax.');
 const Cursor = z.string().regex(/^\d{1,19}$/).optional();
 
@@ -104,9 +104,11 @@ function period(from: unknown, to: unknown) {
 function describe(kind: LedgerKind, detail: Record<string, unknown>) {
   switch (kind) {
     case 'usage': {
-      // A month settled at an earlier rate version, posted again at the larger free allowance that replaced it (migration 367).
-      const repriced = detail.repriced as { freeSent?: unknown; freeReceived?: unknown } | undefined;
-      if (repriced && typeof repriced === 'object') return `Usage ${detail.usageMonth}: repriced at ${count(repriced.freeSent)} sent and ${count(repriced.freeReceived)} received free`;
+      // A month settled at an earlier rate version, posted again at the version that replaced it: the larger free
+      // allowance (migration 367), or free AI decisions (377).
+      const repriced = detail.repriced as { freeSent?: unknown; freeReceived?: unknown; decisionUc?: unknown } | undefined;
+      if (repriced && typeof repriced === 'object') return 'decisionUc' in repriced ? `Usage ${detail.usageMonth}: AI decisions refunded, as AI rules are free`
+        : `Usage ${detail.usageMonth}: repriced at ${count(repriced.freeSent)} sent and ${count(repriced.freeReceived)} received free`;
       const meters = (typeof detail.meters === 'object' && detail.meters ? detail.meters : detail) as Record<string, MeterDetail | undefined>;
       const q = (m: string) => Number(meters[m]?.quantity ?? 0);
       const parts = [q('send') + q('receive') ? `${count(q('send') + q('receive'))} emails` : '', q('omen') ? `${count(q('omen'))} AI decisions` : '', q('storage') ? 'stored mail' : '',
@@ -151,7 +153,7 @@ export function registerBilling(app: App) {
   });
 
   app.openapi(createRoute({ method: 'get', path: '/v1/billing/usage', operationId: 'getBillingUsage', tags: ['Billing'], security, summary: 'Metered usage by day, hour or month',
-    description: 'Hosted only. Metered quantities per meter and period, UTC, the same counts billing prices (sent recipients, received messages, emails checked by AI decisions, stored bytes). Received mail and AI decisions are listed only for credentials that may read every received message (owners, admins and manage credentials). At most 400 days, or 31 days by the hour.',
+    description: 'Hosted only. Metered quantities per meter and period, UTC: the counts billing prices (sent recipients, received messages, stored bytes) and the emails AI decisions checked, which are free. Received mail and AI decisions are listed only for credentials that may read every received message (owners, admins and manage credentials). At most 400 days, or 31 days by the hour.',
     request: { query: z.object({ from: z.iso.date().optional().describe('First day, UTC (default: the first of this month).'), to: z.iso.date().optional().describe('Last day, inclusive (default: today).'),
       granularity: z.enum(['hour', 'day', 'month']).default('day'), meter: z.enum(['send', 'receive', 'omen', 'decision', 'storage', 'byo_send', 'byo_receive']).optional().describe('decision is the omen meter: AI decisions.') }) },
     responses: { 200: response(z.object({ data: z.array(UsagePoint) })), ...errors } }), async c => {
@@ -309,15 +311,17 @@ const OperatorFree = z.object({ free: z.boolean(), via: z.enum(['workspace', 'ac
 function registerOperatorBilling(app: App) {
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'get', path: '/v1/operator/billing/{wid}', operationId: 'operatorGetBilling', request: { params: WorkspaceParam },
     responses: { 200: response(z.object({ account: z.unknown().nullable(), position: z.unknown(), ledger: z.array(z.unknown()), payments: z.array(z.unknown()), refunds: z.array(z.unknown()), notices: z.array(z.unknown()),
-      free: OperatorFree })), ...errors } }), async c => {
+      free: OperatorFree, decisions: z.object({ month: z.number().int(), day: z.number().int() }).describe('AI decisions metered this UTC month and in the last 24 hours. They are free, so this is what they cost Nightmail.') })), ...errors } }), async c => {
     await operatorActor(c, 'operator:read');
     const wid = c.req.valid('param').wid;
     await existingWorkspace(c.env.db, wid);
-    const { rows: [row] } = await c.env.db.execute<{ account: unknown; position: BillingPosition; ledger: unknown[]; notices: unknown[]; refunds: unknown[]; free: unknown }>(sql`SELECT
+    const { rows: [row] } = await c.env.db.execute<{ account: unknown; position: BillingPosition; ledger: unknown[]; notices: unknown[]; refunds: unknown[]; free: unknown; decisions: { month: number; day: number } }>(sql`SELECT
       (SELECT to_jsonb(a) FROM billing_accounts a WHERE a.workspace_id=${wid}) AS account, billing_position(${wid}) AS position,
       coalesce((SELECT jsonb_agg(to_jsonb(l) ORDER BY l.id DESC) FROM (SELECT * FROM billing_ledger WHERE workspace_id=${wid} ORDER BY id DESC LIMIT 50) l),'[]') AS ledger,
       coalesce((SELECT jsonb_agg(to_jsonb(n) ORDER BY n.created_at DESC) FROM (SELECT * FROM billing_notices WHERE workspace_id=${wid} ORDER BY created_at DESC LIMIT 50) n),'[]') AS notices,
       coalesce((SELECT jsonb_agg(to_jsonb(r) ORDER BY r.created_at DESC) FROM (SELECT * FROM billing_refunds WHERE workspace_id=${wid} ORDER BY created_at DESC LIMIT 50) r),'[]') AS refunds,
+      (SELECT jsonb_build_object('month', coalesce(sum(quantity) FILTER (WHERE hour >= date_trunc('month', now(), 'UTC')), 0), 'day', coalesce(sum(quantity) FILTER (WHERE hour > date_trunc('hour', now(), 'UTC') - interval '1 day'), 0))
+        FROM billing_usage_hourly WHERE workspace_id=${wid} AND meter='omen' AND hour >= least(date_trunc('month', now(), 'UTC'), date_trunc('hour', now(), 'UTC') - interval '1 day')) AS decisions,
       billing_free_state(${wid}) || jsonb_build_object(
         'workspace', (SELECT jsonb_build_object('at',${isoAt(sql`free_at`)},'until',${isoAt(sql`free_until`)},'reason',free_reason,'by',free_by,'expired',coalesce(free_until<=now(),false))
           FROM billing_accounts WHERE workspace_id=${wid} AND free_at IS NOT NULL),
@@ -328,7 +332,7 @@ function registerOperatorBilling(app: App) {
           WHERE m.workspace_id=${wid}),'[]')) AS free`);
     const payments = (await listPayments(c.env.db, wid, null, 50)).data;
     const free = row!.free as z.infer<typeof OperatorFree>;
-    return c.json({ account: row!.account, position: row!.position, ledger: row!.ledger, payments, refunds: row!.refunds, notices: row!.notices,
+    return c.json({ account: row!.account, position: row!.position, ledger: row!.ledger, payments, refunds: row!.refunds, notices: row!.notices, decisions: row!.decisions,
       free: { ...free, until: free.until ? new Date(free.until).toISOString() : null } }, 200);
   });
 

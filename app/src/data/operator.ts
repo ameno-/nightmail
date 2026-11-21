@@ -24,7 +24,7 @@ export interface OperatorBillingFree {
   workspace: { at: string; until: string | null; reason: string | null; by: string | null; expired: boolean } | null
   people: { userId: string; email: string; role: string; free: { reason: string; until: string | null; grantedAt: string; grantedBy: string; live: boolean } | null }[]
 }
-export interface OperatorBilling { account: { mode?: string; balance_uc?: number; promo_uc?: number } | null; free: OperatorBillingFree }
+export interface OperatorBilling { account: { mode?: string; balance_uc?: number; promo_uc?: number } | null; free: OperatorBillingFree; decisions: { month: number; day: number } }
 export type FreeInput = OperatorWhy & { free: boolean; until?: string | null }
 export type TimelineKind = 'standing' | 'limit' | 'quarantine' | 'release' | 'tenant' | 'operator' | 'score' | 'audit' | 'bounces' | 'rejection'
 export interface OperatorTimelineItem { at: string; kind: TimelineKind; title: string; detail: unknown }

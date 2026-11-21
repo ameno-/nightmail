@@ -269,6 +269,7 @@ function WorkspaceBody({ data, canAct, onReleaseCampaign }: { data: OperatorWork
           {free.workspace && <span className="muted op-cell" title={free.workspace.reason ?? undefined}>{`${free.workspace.expired ? 'Ended' : 'Since'} ${when(free.workspace.expired ? free.workspace.until : free.workspace.at)}${!free.workspace.expired && free.workspace.until ? ` · until ${when(free.workspace.until)}` : ''} · ${free.workspace.reason ?? ''}`}</span>}
         </>}</dd></div>
         <div><dt>Free owners</dt><dd>{!free ? <SkeletonText width={160} /> : number(free.people.filter(p => p.role === 'owner' && p.free?.live).length)}</dd></div>
+        <div><dt>AI decisions</dt><dd>{!billing.data ? <SkeletonText width={200} /> : `${number(billing.data.decisions.month)} this month · ${number(billing.data.decisions.day)} in 24 hours`}</dd></div>
       </dl>}
     </section>
     <section className="op-section"><SectionHeader title="Members" /><DataTable className="op-table" rows={data.members} rowKey={m => m.userId} columns={memberColumns} empty={<EmptyState title="No members" />} /></section>

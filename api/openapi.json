@@ -10607,7 +10607,8 @@
           },
           "decisionPricePerThousand": {
             "type": "string",
-            "description": "USD per 1,000 emails an AI decision checks."
+            "deprecated": true,
+            "description": "Deprecated: AI decisions are free, so this is always \"0.00\"."
           }
         },
         "required": [
@@ -10643,7 +10644,7 @@
           },
           "decisions": {
             "type": "boolean",
-            "description": "Asks the AI about each email (an AI decision), billed per email checked. Saving one lets the AI read mail at those addresses’ domains."
+            "description": "Asks the AI about each email (an AI decision). AI rules are free. Saving one lets the AI read mail at those addresses’ domains."
           }
         },
         "required": [
@@ -10730,7 +10731,8 @@
           },
           "omenPricePerThousand": {
             "type": "string",
-            "description": "USD per 1,000 emails an AI decision checks."
+            "deprecated": true,
+            "description": "Deprecated: AI decisions are free, so this is always \"0.00\"."
           }
         },
         "required": [
@@ -10766,7 +10768,7 @@
           },
           "omens": {
             "type": "boolean",
-            "description": "Asks the AI about each email (an AI decision), billed per email checked. Saving one lets the AI read mail at those addresses’ domains."
+            "description": "Asks the AI about each email (an AI decision). AI rules are free. Saving one lets the AI read mail at those addresses’ domains."
           }
         },
         "required": [
@@ -21352,12 +21354,13 @@
               },
               "decisionPerThousand": {
                 "type": "string",
-                "description": "USD per 1,000 emails an AI decision checks."
+                "deprecated": true,
+                "description": "Deprecated: AI decisions are free, so this is always \"0.00\"."
               },
               "omenPerThousand": {
                 "type": "string",
                 "deprecated": true,
-                "description": "Deprecated: decisionPerThousand."
+                "description": "Deprecated: decisionPerThousand, always \"0.00\"."
               },
               "storagePerGbMonth": {
                 "type": "string",
@@ -21466,7 +21469,7 @@
           },
           "quantity": {
             "type": "string",
-            "description": "send: recipients; receive: messages; omen: emails checked by AI decisions (the meter keeps its name from before the rename); storage: billable byte-days beyond the free GB; byo_*: reported only, $0."
+            "description": "send: recipients; receive: messages; omen: emails checked by AI decisions, which are free (the meter keeps its name from before the rename); storage: billable byte-days beyond the free GB; byo_*: reported only, $0."
           }
         },
         "required": [
@@ -81673,7 +81676,7 @@
           }
         ],
         "summary": "Metered usage by day, hour or month",
-        "description": "Hosted only. Metered quantities per meter and period, UTC, the same counts billing prices (sent recipients, received messages, emails checked by AI decisions, stored bytes). Received mail and AI decisions are listed only for credentials that may read every received message (owners, admins and manage credentials). At most 400 days, or 31 days by the hour.",
+        "description": "Hosted only. Metered quantities per meter and period, UTC: the counts billing prices (sent recipients, received messages, stored bytes) and the emails AI decisions checked, which are free. Received mail and AI decisions are listed only for credentials that may read every received message (owners, admins and manage credentials). At most 400 days, or 31 days by the hour.",
         "parameters": [
           {
             "schema": {

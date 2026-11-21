@@ -1,5 +1,5 @@
 import { z } from '@hono/zod-openapi';
-import { digest, log, type Runtime } from './core.js';
+import { digest, type Runtime } from './core.js';
 import { jevQuestions } from './screen.js';
 import { visibleMail } from './inbox-content.js';
 import { safeForwardHtml } from './mailbox-send.js';
@@ -272,11 +272,8 @@ export async function ritualPipeline(
   recorded?: Record<string, number>,
   preview = false,
   receiptCreatedAt?: string,
-  options: { omens?: boolean } = {},
 ) {
-  // Billing: with an enforced empty balance decisions are not evaluated; each returns its onError value (a deferral
-  // becomes the type's default instead, since a top-up can take longer than the deferral window).
-  const skipOmens = options.omens === false && !preview && !recorded, calls = { n: 0 };
+  const calls = { n: 0 };
   const base = matchRouting(input, email.envelope.to, email.spam.junk, email.auth.dmarc.toUpperCase(), email.receivedAt),
     p = input.programs!;
   const owner=(key:string)=>p.owners?.[key]??null, active=(key:string)=>!owner(key)||input.grants?.includes(owner(key)!);
@@ -339,7 +336,7 @@ export async function ritualPipeline(
       for (const [name, e] of Object.entries(ir.omens)) {
         const enabled = !!opt,
           n = enabled && Object.hasOwn(answers, e.prompt) ? answers[e.prompt] : undefined;
-        const fallback = enabled && !(skipOmens && e.onError === 'defer') ? e.onError : e.type === 'boolean' ? false : 0;
+        const fallback = enabled ? e.onError : e.type === 'boolean' ? false : 0;
         if (n === undefined) {
           if (fallback === 'defer') {
              if (!preview) {
@@ -413,8 +410,7 @@ export async function ritualPipeline(
       }),
     ),
   ].sort();
-  if (skipOmens && prompts.length) log('info', { code: 'OMEN_SKIPPED_BALANCE', workspaceId: w, omens: prompts.length });
-  else if (!recorded && !preview && prompts.length <= 10) answers = await evaluate(runtime, w, email, prompts, calls);
+  if (!recorded && !preview && prompts.length <= 10) answers = await evaluate(runtime, w, email, prompts, calls);
   for (const run of runs) run();
   return {
     plan: {...matchRouting(
