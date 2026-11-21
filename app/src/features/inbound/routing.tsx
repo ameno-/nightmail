@@ -89,9 +89,9 @@ function RouteDialog({ draft, destinations, owners, onClose, refreshWebhooks, re
         <Field label="Mail to" htmlFor="routing-match" error={fieldError(save.error, 'match')}>
           <Input id="routing-match" value={match} autoFocus={!draft.match} disabled={save.isPending} placeholder="support@acme.com or *@acme.com" onChange={e => { setMatch(e.target.value); setProblem(null) }} />
         </Field>
-        <Field label="Goes to" htmlFor="routing-action" error={fieldError(save.error, 'to')}>
+        <Field label="Deliver to" htmlFor="routing-action" error={fieldError(save.error, 'to')}>
           <Select id="routing-action" value={action} disabled={save.isPending} onValueChange={value => { setAction(value as Action); setProblem(null) }}
-            options={[{ value: 'deliver', label: 'These inboxes, webhooks and forwards' }, { value: 'keep', label: 'Store it, no inbox' }, { value: 'drop', label: 'Drop it' }]} />
+            options={[{ value: 'deliver', label: 'These destinations' }, { value: 'keep', label: 'Store it, no inbox' }, { value: 'drop', label: 'Drop it' }]} />
         </Field>
         {action === 'deliver' && <>
           {group('inbox', 'Inboxes', <>No addresses yet. <Link to="/receiving">Create one</Link>.</>)}

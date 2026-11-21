@@ -40,7 +40,7 @@ export function Targets({ to, ownId, max = 3, total = to.length }: { to: Target[
   if (!to.length) return <span className="muted">—</span>
   return <span className="rcv-targets">{to.slice(0, max).map(t => <span key={`${t.type}:${t.id}`} className="rcv-target" data-muted={t.type === 'store' || t.type === 'drop' || t.status === 'paused' || undefined}
     title={`${typeLabel[t.type]}${t.via ? ` · sent by the ${t.via} rule, for the mail it chooses` : ''}`}>
-    <TargetIcon type={t.type} size={13} /><span>{t.type === 'inbox' && t.id !== ownId ? <><PrivateAddress value={t.name} /> inbox</> : <PrivateAddress value={targetName(t, ownId)} />}</span>{t.via && <span className="rcv-via">via {t.via}</span>}
+    <TargetIcon type={t.type} size={13} /><span>{t.type === 'inbox' && t.id !== ownId ? <><PrivateAddress value={t.name} /> inbox</> : <PrivateAddress value={targetName(t, ownId)} />}</span>{t.via && <span className="rcv-via">via a rule</span>}
   </span>)}{total > Math.min(max, to.length) && <span className="muted">+{total - Math.min(max, to.length)}</span>}</span>
 }
 

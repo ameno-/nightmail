@@ -1,9 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type RefObject } from 'react'
 import { Navigate, useLocation, useNavigate, useSearchParams } from 'react-router'
 import { Archive, ArrowLeft, Inbox, Mail, MailOpen, Paperclip, Reply, Search, Star, Trash2, Undo2, X } from 'lucide-react'
-import { Alert, Button, Checkbox, ConfirmDialog, Dialog, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, Pagination, Select, SkeletonText, StatusBadge, Tabs, Textarea, useToast, fieldError, MutationError, ErrorText } from '../../components/ui'
+import { Alert, Button, Checkbox, ConfirmDialog, Dialog, EmptyState, ErrorState, Field, IconButton, Input, Pagination, Select, SkeletonText, StatusBadge, Textarea, useToast, fieldError, MutationError, ErrorText } from '../../components/ui'
 import { ReceivedEmailPreview } from '../../components/EmailPreview'
-import { useApi, useApiDef, useApiMutation, useApiQuery } from '../../data/context'
+import { useApi, useApiDef, useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
+import { request } from '../../data/live'
+import { OutcomeFlow, outcomeOf } from './flow'
+import { firstOverview, useOverview, type Overview } from './overview'
+import type { DryRun } from './trace'
 import { queries } from '../../data/queries'
 import { ApiError, type InboundAddress, type InboundMessage, type InboundThread, type InboundThreadDetail, type InboundThreadPatch, type InboundThreadView, type MailAddress, errorText } from '../../data/types'
 import { date, label, time } from '../../lib/format'
@@ -15,6 +19,8 @@ import '../settings/settings.css'
 import './inbound.css'
 import { AddressList, NamedAddress, PrivateAddress, Sender } from '../../components/PrivateAddress'
 
+// Until the overview arrives the flow holds its lines; it names nothing yet.
+const emptyOverview: Overview = { counts: { address: 0, auto: 0, route: 0, pattern: 0, catch_all: 0, inbox: 0 }, routes: { data: [], nextCursor: null }, rules: [], endpoints: [], endpointsTruncated: false, domains: [], manage: true }
 const views: { value: InboundThreadView; label: string }[] = [{ value: 'inbox', label: 'Inbox' }, { value: 'starred', label: 'Starred' }, { value: 'archive', label: 'Archive' }, { value: 'spam', label: 'Spam' }, { value: 'trash', label: 'Trash' }, { value: 'all', label: 'All' }]
 const statusTone = (status: string) => status === 'delivered' ? 'success' as const : ['bounced', 'complained', 'rejected', 'suppressed', 'rendering_failed', 'canceled'].includes(status) ? 'danger' as const : status === 'delayed' ? 'warning' as const : 'neutral' as const
 const EMAIL = /^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/
@@ -59,11 +65,28 @@ function ThreadList({ threads, threadId, onSelect, ...row }: { threads: InboundT
   </ul>
 }
 
+/** Why a received message went where it did: the address and rules it met and where it was delivered, replayed with
+ *  its recorded AI answers through today's rules (testRules). Nothing is sent again. */
+function WhyItWentHere({ message, address, open, onOpenChange }: { message: InboundMessage; address?: InboundAddress; open: boolean; onOpenChange: (open: boolean) => void }) {
+  const overview = useOverview(firstOverview, false, open)
+  const why = useApiQuery(['why-it-went-here', message.id], (_api, signal) => request<DryRun>('/v1/rules/test', { method: 'POST', body: { messageId: message.id }, signal }), { enabled: open })
+  const mine = new Set([address?.address, ...(address?.aliases ?? [])].filter((value): value is string => !!value))
+  const recipient = why.data?.recipients.find(r => mine.has(r.address))?.address ?? why.data?.recipients[0]?.address ?? address?.address ?? ''
+  const error = why.error ?? overview.error
+  // A full-height sheet on a phone: the path arrives after the sheet opens and fills it from the top, moving nothing.
+  return <Dialog size="lg" open={open} onOpenChange={onOpenChange} title="Why it went here">
+    {error ? <ErrorState error={error} onRetry={() => { void why.refetch(); void overview.refetch() }} />
+      : <OutcomeFlow address={recipient} overview={overview.data ?? emptyOverview} outcome={why.data && overview.data ? outcomeOf(why.data, recipient) : null} error={null} addresses={address ? [address] : []} />}
+  </Dialog>
+}
+
 function MessageCard({ message, addressId, parent, expanded, onToggle, onReply, isTarget, showAddresses, addresses, own }: {
   message: InboundMessage; addressId?: string; parent?: InboundMessage; expanded: boolean; onToggle: () => void; onReply: () => void; isTarget: boolean; showAddresses: boolean; addresses: Addresses; own: Set<string>
 }) {
   const api = useApi()
   const toast = useToast()
+  const { canAdminister } = useWorkspaceAccess()
+  const [why, setWhy] = useState(false)
   const [showQuoted, setShowQuoted] = useState(false)
   const [formatted, setFormatted] = useState(false)
   // Timeline bodies are previews; the full body, HTML and attachments load from the message itself only when asked for.
@@ -110,10 +133,12 @@ function MessageCard({ message, addressId, parent, expanded, onToggle, onReply, 
           {loaded?.html ? <Button variant="ghost" size="sm" onClick={() => setFormatted(value => !value)}>{formatted ? 'Show plain text' : 'Show formatted'}</Button>
             : !loaded ? <Button variant="ghost" size="sm" loading={pending && wanted === 'formatted'} onClick={() => setWanted('formatted')}>Show formatted</Button>
             : wanted === 'formatted' && <Button variant="ghost" size="sm" disabled>No formatted version</Button>}
+          {!outbound && canAdminister && <Button variant="ghost" size="sm" onClick={() => setWhy(true)}>Why it went here</Button>}
         </div>
         {message.attachmentCount > 0 && (loaded ? loaded.attachments.length > 0 && <ul className="mailbox-attachments">{loaded.attachments.map(file => <li key={file.id}><button type="button" onClick={() => void download(file.id)}><Paperclip size={12} aria-hidden="true" />{file.filename}<span className="muted">{Math.max(1, Math.round(file.size / 1024))} KB</span></button></li>)}</ul>
           : <div className="mailbox-attachments"><Button variant="ghost" size="sm" loading={pending && wanted === 'attachments'} onClick={() => setWanted('attachments')}><Paperclip size={12} aria-hidden="true" />Show {message.attachmentCount} attachment{message.attachmentCount === 1 ? '' : 's'}</Button></div>)}
       </> : <p className="mailbox-message__snippet muted">{message.snippet}</p>}
+      {!outbound && canAdminister && <WhyItWentHere message={message} address={addressId ? addresses.get(addressId) : undefined} open={why} onOpenChange={setWhy} />}
     </article>
   </li>
 }
@@ -337,9 +362,10 @@ export function AddressMail({ addressId, hidden = false }: { addressId: string; 
       <aside className="mailbox-list" aria-label="Conversations">
         <div className="mailbox-toolbar">
           <div className="search-box mailbox-search"><Search size={16} /><Input type="search" aria-label="Search conversations" placeholder="Search mail" value={search} onChange={event => { setSearch(event.target.value); pagination.reset() }} /></div>
+          {/* The views are one picker beside search: the address's own tabs are the page's only row of tabs. */}
+          <Select className="mailbox-view" aria-label="Conversation view" value={view} onValueChange={value => { pagination.reset(); change({ view: value === 'inbox' ? null : value, thread: null, message: null }) }} options={views} />
           <Button onClick={() => setComposing(true)} disabled={!addresses.has(addressId)}>New message</Button>
         </div>
-        <Tabs label="Conversation views" value={view} onValueChange={value => { pagination.reset(); change({ view: value === 'inbox' ? null : value, thread: null, message: null }) }} items={views} />
         {threads.error ? <ErrorState error={threads.error} onRetry={() => void threads.refetch()} /> : threads.isPending ? <div className="mailbox-thread-skeleton">{[0, 1, 2, 3].map(index => <div key={index}><SkeletonText width="40%" /><SkeletonText width="60%" /><SkeletonText width="85%" /></div>)}</div>
           : threads.data.length ? <>
             <ThreadList threads={threads.data} threadId={threadId} addresses={addresses} own={own} addressId={addressId} onSelect={id => change({ thread: id, message: null })} />
@@ -349,7 +375,8 @@ export function AddressMail({ addressId, hidden = false }: { addressId: string; 
       <div className="mailbox-reader">
         {!threadId ? <EmptyState title="Select a conversation" />
           : thread.error ? <ErrorState error={thread.error} onRetry={() => void thread.refetch()} />
-          : thread.isPending || !thread.data ? <div className="mailbox-thread-skeleton"><SkeletonText width="50%" lineHeight={24} /><SkeletonText width="80%" /><SkeletonText width="70%" /></div>
+          // Its names wait for the addresses too: a conversation drawn before them rewrites "you" and its senders in place.
+          : thread.isPending || !thread.data || addressList.isPending ? <div className="mailbox-thread-skeleton"><SkeletonText width="50%" lineHeight={24} /><SkeletonText width="80%" /><SkeletonText width="70%" /></div>
           : <Conversation thread={thread.data} addressId={addressId} addresses={addresses} focusMessage={params.get('message')} onBack={() => change({ thread: null, message: null })} onAddress={() => undefined} />}
       </div>
     </div>

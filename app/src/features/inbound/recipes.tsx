@@ -59,6 +59,17 @@ export function Sentence({ ritual }: { ritual: Pick<OverviewRule, 'key' | 'recip
     return <span key={i} className="recipe-blank">{Array.isArray(value) ? <Senders list={value} /> : value}</span>
   })}</>
 }
+/** A rule in plain words wherever it appears: a ready-made rule's sentence, or a script as Custom code rule and its name. */
+export function RuleLine({ rule, keyName }: { rule?: Pick<OverviewRule, 'key' | 'recipe'>; keyName: string }) {
+  if (rule?.recipe) return <Sentence ritual={rule} />
+  return <>Custom code rule <code className="recipe-code">{keyName}</code></>
+}
+/** An address's rules on one line: the first in plain words, and how many more. */
+export function RulesSummary({ keys, rules }: { keys: string[]; rules: OverviewRule[] }) {
+  const first = keys[0]
+  if (!first) return null
+  return <span className="rcv-rules"><span className="rcv-rules__first"><RuleLine rule={rules.find(r => r.key === first)} keyName={first} /></span>{keys.length > 1 && <span className="muted">+{keys.length - 1}</span>}</span>
+}
 function Senders({ list }: { list: string[] }) {
   return <>{list.slice(0, 2).map((s, i) => <span key={s}>{i > 0 && ', '}<PrivateAddress value={s} /></span>)}{list.length > 2 && ` +${list.length - 2}`}</>
 }
@@ -92,7 +103,7 @@ export function RulesTab({ overview, refresh }: { overview: Overview; refresh: (
   const runsOn = (r: OverviewRule) => r.addresses.length ? <Addresses list={r.addresses} />
     : <Link className="rcv-add" to={r.recipe ? editPath(r) : `${codePath(r.key)}#attach`} onClick={e => e.stopPropagation()}>Not attached · attach</Link>
   return <div className="stack rcv-tab">
-    <div className="rcv-kindline"><Link className="ui-button ui-button--secondary ui-button--sm" to="/receiving/rules/new">New rule</Link></div>
+    {overview.rules.length > 0 && <div className="rcv-kindline"><Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/rules/new">New rule</Link></div>}
     <DataTable className="rcv-table recipe-table" rows={overview.rules} rowKey={r => r.key} rowHref={editPath}
       empty={<EmptyState title="No rules yet" action={<Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/rules/new">New rule</Link>} />}
       columns={[

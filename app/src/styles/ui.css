@@ -469,20 +469,3 @@ button.ui-facet:focus-visible { outline-offset: -2px; }
 .ui-waterfall__row { display: grid; grid-template-columns: 6px minmax(0, 1fr) auto; align-items: center; gap: var(--space-12); height: var(--row-height-dense); border-bottom: 1px solid var(--color-border-muted); }
 .ui-waterfall__row:last-child { border-bottom: 0; }
 .ui-waterfall__dot { width: 6px; height: 6px; border-radius: 50%; background: var(--tone-marker); }
-.ui-waterfall__row.ui-tone--neutral .ui-waterfall__dot { background: var(--color-series-strong); }
-.ui-waterfall__row[class*='ui-series--'] .ui-waterfall__dot { background: var(--series); }
-.ui-waterfall__label { min-width: 0; white-space: nowrap; }
-.ui-waterfall__delta { color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
-/* Facts on a page or in a dialog (a <dl class="ui-facts">): muted mono-caps keys, mono values, a hairline per row. */
-.ui-facts { display: grid; grid-template-columns: minmax(96px, max-content) minmax(0, 1fr); column-gap: 0; margin: 0; }
-.ui-facts > :is(dt, dd) { min-height: 32px; margin: 0; padding-block: 7px; border-bottom: 1px solid var(--color-border-muted); line-height: 18px; overflow-wrap: anywhere; }
-.ui-facts > dt { padding-right: var(--space-24); color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); letter-spacing: var(--tracking-label); text-transform: uppercase; }
-.ui-facts > dd { font-family: var(--font-mono); font-size: var(--text-xs); }
-@media (max-width: 640px) { .ui-facts { grid-template-columns: 104px minmax(0, 1fr); } .ui-facts > dt { padding-right: var(--space-12); } }
-/* Numbers in table cells read as data: right-aligned columns are mono. */
-.ui-table td[style*='text-align: right'] { font-family: var(--font-mono); font-size: var(--text-xs); }
-/* Facts: muted mono keys, mono values. */
-.ui-kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); column-gap: var(--space-16); margin: 0; }
-.ui-kv > div { display: contents; }
-.ui-kv dt { min-height: var(--row-height-dense); padding-block: 6px; color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); line-height: 16px; letter-spacing: var(--tracking-label); text-transform: uppercase; }
-.ui-kv dd { min-width: 0; min-height: var(--row-height-dense); margin: 0; padding-block: 6px; font-family: var(--font-mono); font-size: var(--text-xs); line-height: 16px; overflow-wrap: anywhere; }
