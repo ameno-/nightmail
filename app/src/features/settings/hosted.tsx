@@ -1,11 +1,13 @@
 import { useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Link, useLocation } from 'react-router'
+import { useQueryClient } from '@tanstack/react-query'
 import { ArrowUpRight, ChevronRight, Lock } from 'lucide-react'
 import { Button, ConfirmDialog, CopyButton, ErrorState, Input, SectionHeader, Select, Skeleton, StatusBadge, MutationError } from '../../components/ui'
 import { useApiDef, useApiMutation, useSession, useWorkspaceAccess } from '../../data/context'
 import { connectionApi, connectionKindLabel, useConnectionCache } from '../../data/connections'
 import { queries } from '../../data/queries'
-import type { Agent, ProviderConnection, WorkspaceMembership } from '../../data/types'
+import type { Agent, DisconnectSummary, ProviderConnection, WorkspaceMembership } from '../../data/types'
+import { AwsDisconnectDialog } from './aws-disconnect'
 import { roleLabel, useMembershipCache, workspaceApi } from '../../data/workspaces'
 import { ago, label, number } from '../../lib/format'
 import { useSenderScore } from '../score'
@@ -130,7 +132,7 @@ function SendingRows() {
       {limit && limit.cap !== null && <Row title="Daily limit"><Link to="/settings#usage" replace className="settings-score" title={limitSummary(limit, evaluating)}><span>{number(limit.used)} / {number(limit.cap)}</span><span className="muted">Plan & usage</span><ArrowUpRight size={14} aria-hidden="true" /></Link></Row>}
     </div>
     {/* Hosted mail is the only connection to switch to without an operator's go-ahead, and onboarding would start it again. */}
-    {(kind === 'byo' || offerByo) && <DisconnectRow kind={kind} />}
+    {(kind === 'byo' || offerByo) && <DisconnectRow kind={kind} connection={current} />}
   </>
 }
 // A connected AWS account: its stack's template and the update to the newest one, each sending region's production
@@ -161,14 +163,24 @@ function ScoreRow() {
     {!report ? <span className="settings-score settings-score--late"><Skeleton width={96} height={20} /></span> : <button type="button" onClick={() => openScoreAbout()} className="settings-score settings-score--late">{report.state !== 'graded' ? <><span>Not graded yet</span><span className="muted">{number(report.emails.firstEmails)}/{number(report.needed)} real emails</span></> : compact ? <><b>{Math.round(report.score!)}</b><span className="settings-score__grade">{report.grade}</span></> : <span>Breakdown</span>}<ChevronRight size={14} aria-hidden="true" /></button>}
   </Row>
 }
-function DisconnectRow({ kind }: { kind: 'shared' | 'byo' | undefined }) {
-  const disconnect = useApiMutation(() => connectionApi.remove(), 'Disconnected', true)
+// A connected AWS account's disconnect runs a cleanup in the account: its summary opens once confirmed.
+function DisconnectRow({ kind, connection }: { kind: 'shared' | 'byo' | undefined; connection: ProviderConnection | null | undefined }) {
+  const regional = connection?.templateVersion === 'v5'
+  const disconnect = useApiMutation(() => connectionApi.remove(), regional ? undefined : 'Disconnected', true)
   const [confirming, setConfirming] = useState(false)
+  const [summary, setSummary] = useState<DisconnectSummary | null>(null)
   const sync = useConnectionCache()
+  const client = useQueryClient()
   if (!kind) return null
   const keeps = 'Domains, DNS records, API keys and received mail stay. It isn’t possible while emails or campaigns are still sending.'
-  return <div className="settings-rows settings-danger"><Row title="Disconnect sending"><Button variant="danger" onClick={() => setConfirming(true)}>Disconnect</Button></Row>
-    <ConfirmDialog open={confirming} onOpenChange={setConfirming} title="Disconnect sending?" description={kind === 'byo' ? `Sending stops until you connect again. ${keeps} AWS resources stay in your account; delete the ${productName} stack in AWS to revoke access.` : `Sending stops until you connect again. ${keeps}`} confirmLabel="Disconnect" danger pending={disconnect.isPending} onConfirm={async () => { await disconnect.mutateAsync(undefined); sync(null) }} />
+  const description = regional ? `Sending stops, and ${productName} removes the configuration sets and topics it created in your AWS account. Your SES identities stay, and you get their list. ${keeps}`
+    : kind === 'byo' ? `Sending stops until you connect again. ${keeps} AWS resources stay in your account; delete the ${productName} stack in AWS to revoke access.` : `Sending stops until you connect again. ${keeps}`
+  function close() { setSummary(null); sync(client.getQueryData<ProviderConnection | null>(['nightmail', 'connection']) ?? null) }
+  return <div className="settings-rows settings-danger">
+    <Row title="Disconnect sending"><Button variant="danger" onClick={() => setConfirming(true)}>Disconnect</Button></Row>
+    <ConfirmDialog open={confirming} onOpenChange={setConfirming} title="Disconnect sending?" description={description} confirmLabel="Disconnect" danger pending={disconnect.isPending}
+      onConfirm={async () => { const result = await disconnect.mutateAsync(undefined); if ('summary' in result) setSummary(result.summary); else sync(null) }} />
+    {summary && <AwsDisconnectDialog open summary={summary} onClose={close} />}
   </div>
 }
 // The account service's connected apps page, on the installations that sign in with Anomaly account.

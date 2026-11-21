@@ -4,8 +4,8 @@ import { measuredWidth, onRulerChange } from '../lib/text-ruler'
 import { useMasking } from '../lib/privacy'
 
 // Renders any address by the dashboard's one rule (lib/private-address.ts): a mailbox address is masked after its first
-// two characters until hovered or focused; a domain or domain-only label renders as it is. With privacy mode off
-// (lib/privacy.ts) every address is revealed, and keeps the same reserved width.
+// two characters until hovered or focused, while privacy mode (lib/privacy.ts) is on; a domain or domain-only label renders
+// as it is. With privacy mode off, the default, every address is revealed, and keeps the same reserved width.
 //
 // Masked, the rest of the address is not in the page: the box holds the two characters and an empty, blurred run. The
 // box is given the width of the whole address up front (measured without rendering it, lib/text-ruler.ts) and keeps it

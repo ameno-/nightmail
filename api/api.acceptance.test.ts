@@ -17999,7 +17999,13 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // rescan. Let an already claimed turn finish its legitimate short deferral.
       await db.query("UPDATE jobs SET available_at=now()+interval '1 hour' WHERE workspace_id=$1 AND status='pending'",[wid]);
       for(let n=0;(await db.query("SELECT FROM jobs WHERE workspace_id=$1 AND status='running'",[wid])).rowCount;n++){assert.ok(n<100);await new Promise(r=>setTimeout(r,10));}
-      const start=trace.length,operation=ok(await del(),202).operationId;
+      // The summary lists every identity that stays, with the DNS records of those Nightmail created, and is kept while the cleanup runs.
+      await db.query("UPDATE domain_claims SET identity=jsonb_set(coalesce(identity,'{}'::jsonb),'{ses}',$2::jsonb) WHERE workspace_id=$1 AND name='first.example'",[wid,JSON.stringify({VerificationStatus:'SUCCESS',DkimAttributes:{Tokens:['tok1','tok2','tok3'],SigningHostedZone:'dkim.amazonses.com',SigningAttributesOrigin:'AWS_SES'},MailFromAttributes:{MailFromDomain:'bounce.first.example'}})]);
+      const start=trace.length,first=ok(await del(),202),operation=first.operationId,kept=first.summary.retained.find((d:Json)=>d.domain==='first.example');
+      assert.equal(kept.createdByNightmail,true);assert.deepEqual(first.summary.leftBehind,[]);
+      assert.deepEqual(kept.records,[...['tok1','tok2','tok3'].map(t=>({type:'CNAME',name:t+'._domainkey.first.example',value:t+'.dkim.amazonses.com'})),{type:'MX',name:'bounce.first.example',value:`feedback-smtp.${kept.region}.amazonses.com`,priority:10},{type:'TXT',name:'bounce.first.example',value:'v=spf1 include:amazonses.com ~all'}]);
+      assert.ok(first.summary.retained.some((d:Json)=>!d.createdByNightmail) && first.summary.retained.every((d:Json)=>d.createdByNightmail || !d.records.length),'Imported identities were already the customer\'s');
+      assert.deepEqual((await poll()).cleanup.summary,first.summary);
       assert.equal((await poll()).state,'disconnecting');error(await post('/scan'),409,'CONNECTION_DISCONNECTING');
       error(await api('POST','/v1/emails/send',{from:'a@both.example',to:'success@simulator.amazonses.com',subject:'blocked',text:'blocked'}),409,'CONNECTION_REQUIRED');
       const retry=async()=>assert.equal(ok(await del(),202).operationId,operation);
@@ -18063,7 +18069,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     t.mock.method(STSClient.prototype,'send',async function(this:InstanceType<typeof STSClient>,cmd:any){
       const key=(await this.config.credentials()).accessKeyId,i=cmd.input;assert.equal(cmd.constructor.name,'AssumeRoleCommand');
       if(i.RoleArn===`arn:aws:iam::${platform}:role/nightmail-byo-broker`){assert.equal(key,'stack-fixture-platform');assert.equal(i.RoleSessionName,'nightmail-broker');return {Credentials:{AccessKeyId:'stack-fixture-broker',SecretAccessKey:'fixture-only',SessionToken:'broker',Expiration:new Date(Date.now()+3600000)}};}
-      assert.equal(key,'stack-fixture-broker');assert.equal(i.SourceIdentity,cid);assert.match(i.RoleSessionName,/^nightmail-(?:scan|stack|update|quota)$/);
+      assert.equal(key,'stack-fixture-broker');assert.equal(i.SourceIdentity,cid);assert.match(i.RoleSessionName,/^nightmail-(?:scan|stack|update|quota|cleanup)$/);
       if(propagating || i.RoleArn!==role || i.ExternalId!==external)throw Object.assign(new Error('fixture denial'),{name:'AccessDenied'});
       return {AssumedRoleUser:{Arn:`arn:aws:sts::${account}:assumed-role/${stack}/${i.RoleSessionName}`},Credentials:{AccessKeyId:'stack-fixture-customer',SecretAccessKey:'fixture-only',SessionToken:i.Policy,Expiration:new Date(Date.now()+900000)}};
     });
@@ -18174,11 +18180,29 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     assert.equal((await row()).stack_deleted_at,null);assert.equal((await row()).state,'scanning');
     // An update that removes the Connection resource keeps the role, and the connection.
     stackStatus='UPDATE_COMPLETE_CLEANUP_IN_PROGRESS';ok(await publish(request('Delete',{PhysicalResourceId:cid})),202);assert.equal(await run(),'done');assert.equal(last().Status,'SUCCESS');assert.match(last().Reason,/keeps its role/);assert.equal((await row()).stack_deleted_at,null);
-    // A failed create rolling back after its answer was lost: CloudFormation's own physical ID, and the role goes too.
-    stackStatus='ROLLBACK_IN_PROGRESS';physical='Nightmail-Connection-1A2B3C4D5E6F';ok(await publish(request('Delete',{PhysicalResourceId:physical})),202);assert.equal(await run(),'done');assert.equal(last().Status,'SUCCESS');assert.ok((await row()).stack_deleted_at);
-    // The stack itself being deleted.
-    await db.query('UPDATE provider_connections SET stack_deleted_at=NULL WHERE id=$1',[cid]);stackStatus='DELETE_IN_PROGRESS';physical=cid;
-    ok(await publish(request('Delete',{PhysicalResourceId:cid})),202);assert.equal(await run(),'done');assert.equal(last().Status,'SUCCESS');assert.ok((await row()).stack_deleted_at);
+    // A failed create rolling back after its answer was lost (CloudFormation's own physical ID): the role goes too, so
+    // sending stops at once, and the request is answered once the cleanup has run through the role, which CloudFormation
+    // deletes only after the answer.
+    const disconnect=async()=>{
+      const j=(await db.query("UPDATE jobs SET status='running',attempts=1,lease_until=now()+interval '3 minutes' WHERE id=$1 AND status='pending' RETURNING id,workspace_id,payload",['byo.disconnect:'+cid])).rows[0];assert.ok(j,'a queued disconnect');
+      try{await regionalByoJobs['byo.disconnect']!(runtime,j.payload,{workspaceId:j.workspace_id,id:j.id,attempts:1});await db.query("UPDATE jobs SET status='completed' WHERE id=$1",[j.id]);return 'done';}
+      catch(e){if(!(e instanceof JobDeferred))throw e;await db.query("UPDATE jobs SET status='pending' WHERE id=$1",[j.id]);return 'deferred';}
+    };
+    const leftover=`arn:aws:ses:us-east-2:${account}:configuration-set/nightmail-fixture-transactional`;
+    await db.query("UPDATE provider_connection_regions SET ownership_journal=$2::jsonb WHERE connection_id=$1 AND region='us-east-2'",[cid,JSON.stringify([{kind:'set',resource:leftover,state:'created'}])]);
+    stackStatus='ROLLBACK_IN_PROGRESS';physical='Nightmail-Connection-1A2B3C4D5E6F';const answered=answers.length;
+    ok(await publish(request('Delete',{PhysicalResourceId:physical})),202);assert.equal(await run(),'deferred');assert.equal(answers.length,answered);
+    assert.equal((await row()).state,'disconnecting');assert.ok((await row()).stack_deleted_at);
+    assert.deepEqual((await db.query('SELECT DISTINCT sending_state FROM provider_connection_regions WHERE connection_id=$1',[cid])).rows,[{sending_state:'disabled'}]);
+    assert.equal(ok(await api(wid,'GET','/v1/connection')).connection.cleanup.summary.stack,null,'No stack left to delete');
+    // The stack itself deleted while that cleanup runs is waited for the same way.
+    stackStatus='DELETE_IN_PROGRESS';physical=cid;ok(await publish(request('Delete',{PhysicalResourceId:cid})),202);assert.equal(await run(),'deferred');assert.equal(answers.length,answered);
+    // When the role refuses (here as if already gone), what's left is listed in both answers and the disconnect still finishes.
+    propagating=true;assert.equal(await disconnect(),'deferred');
+    for(let i=0;i<2;i++){assert.equal(await run(),'done');assert.equal(last().Status,'SUCCESS');assert.match(last().Reason,new RegExp("couldn't remove: "+leftover.replaceAll('/','\\/')));}
+    assert.equal(await disconnect(),'done');assert.equal(await row(),undefined);propagating=false;
+    assert.deepEqual((await db.query("SELECT action,summary->'after' AS after FROM audit_events WHERE workspace_id=$1 AND action IN ('connection.delete','connection.cleanup') ORDER BY at",[wid])).rows,
+      [{action:'connection.delete',after:null},{action:'connection.cleanup',after:{leftBehind:[{region:'us-east-2',kind:'set',resource:leftover}]}}]);
     // A typed account must match the stack's, and the platform's own account is never connected; nor can a stack move
     // to another connection. Each is answered at once.
     const typed=ok(await api(wid2,'POST','/v1/connection',{kind:'byo',awsAccountId:other}),202),stack2=new URLSearchParams(new URL(typed.quickCreateUrl).hash.split('?')[1]).get('stackName')!;
@@ -24053,11 +24077,11 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           // The launch stops at its review, after the locks it takes first. The disconnect then starts.
           await gate.query('LOCK TABLE sending_campaign_reviews IN SHARE MODE');
           launched=launch();await waiting(1);
-          disconnected=settled(disconnectV5(runtime,w,'con_missing'));await waiting(2);
+          disconnected=settled(disconnectV5(runtime,w,'con_missing',async()=>{}));await waiting(2);
         } else {
           // The disconnect stops at the settings row, holding admission. The launch then starts.
           await gate.query('SELECT FROM ses_installation_settings WHERE workspace_id=$1 FOR SHARE',[w]);
-          disconnected=settled(disconnectV5(runtime,w,'con_missing'));await waiting(1);
+          disconnected=settled(disconnectV5(runtime,w,'con_missing',async()=>{}));await waiting(1);
           launched=launch();await waiting(2);
         }
         await gate.query('COMMIT');

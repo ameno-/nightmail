@@ -50,9 +50,9 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .privacy-toggle { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); width: 100%; padding: 0; border: 0; border-radius: 2px; background: none; color: var(--color-text); font: inherit; font-size: var(--text-xs); line-height: var(--leading-xs); text-align: left; cursor: pointer; }
 .privacy-toggle:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 /* Fields that hold addresses (sender lists, a dry run's recipient): blurred like every address, revealed by hover or focus,
-   and in the clear with privacy mode off. */
-html:not([data-privacy='off']) .private-field:not(:hover, :focus) { color: transparent; text-shadow: 0 0 .31em var(--color-text); }
-html:not([data-privacy='off']) .private-field:not(:hover, :focus)::placeholder { color: transparent; text-shadow: 0 0 .31em var(--color-muted); }
+   and in the clear with privacy mode off (the default). */
+html[data-privacy='on'] .private-field:not(:hover, :focus) { color: transparent; text-shadow: 0 0 .31em var(--color-text); }
+html[data-privacy='on'] .private-field:not(:hover, :focus)::placeholder { color: transparent; text-shadow: 0 0 .31em var(--color-muted); }
 /* "By continuing you agree to…" under a sign-in button. */
 .sign-in-consent a { color: inherit; text-decoration-line: underline; text-decoration-thickness: from-font; text-underline-offset: .18em; transition: color var(--motion-duration); }
 .sign-in-consent a:hover { color: var(--color-text); }
