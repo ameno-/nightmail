@@ -36,6 +36,7 @@ export function FlowPanel({ entry, lookup, overview, onEdit, onCreate, mailLink 
       <Button type="submit" form={formId} loading={test.pending}>Test</Button>
     </div>
     <TestBar id={formId} address={address} test={test} sample={sample} onSample={setSample} />
-    {entry ? <EntryFlow entry={entry} overview={overview} outcome={outcome} boxes={addresses.data ?? []} /> : <OutcomeFlow address={address} overview={overview} outcome={addresses.data || addresses.error || !lookup ? outcome : null} error={test.address === address ? test.error : null} addresses={addresses.data ?? []} />}
+    {/* A test shows what the server reports: the rules that acted and where the mail went, not ticks on the drawn branches. */}
+    {entry && !outcome ? <EntryFlow entry={entry} overview={overview} boxes={addresses.data ?? []} /> : entry ? <OutcomeFlow address={address} overview={overview} outcome={outcome} error={null} addresses={addresses.data ?? []} unasked /> : <OutcomeFlow address={address} overview={overview} outcome={addresses.data || addresses.error || !lookup ? outcome : null} error={test.address === address ? test.error : null} addresses={addresses.data ?? []} unasked />}
   </section>
 }

@@ -94,7 +94,8 @@ const pages = ids => [
   ['Receiving · destinations', '/receiving?tab=destinations', { from: '/receiving', click: 'Destinations' }],
   // The flow panel: an address chosen in the list (a full-height sheet on a phone), and an address typed in the search
   // that has none of its own, whose panel says where its mail would go once its test answers.
-  ['Receiving · flow panel', `/receiving?open=${ids.address}`, { from: '/receiving?tab=rules' }],
+  // guard: Edit on the panel opens the address's route editor (never the builder, which only creates) and writes nothing.
+  ['Receiving · flow panel', `/receiving?open=${ids.address}`, { from: '/receiving?tab=rules', guard: 'receiving-edit' }],
   ['Receiving · typed address', '/receiving?q=orders%40northwind.example', {}],
   // An address's page opens on its mail; Where mail goes and Settings are its other tabs.
   ['Receiving · address', `/receiving/addresses/${ids.address}`, { from: '/receiving' }],
@@ -210,8 +211,6 @@ const pages = ids => [
   // Edit key: a row's menu, then Edit; the dialog opens once the key's domains have loaded.
   ['API keys · edit key dialog', '/api-keys', { menu: ['Actions for Production', 'Edit', 'Edit key'] }],
   ['Receiving · new address dialog', '/receiving', { dialog: 'New address' }],
-  // The address builder over the list, for the chosen address: its flow to change, read back from its route and rules.
-  ['Receiving · address builder dialog', `/receiving?open=${ids.address}`, { dialog: 'Edit' }],
   // Where its mail goes (the route editor) opens once its inboxes, webhooks and forwards have loaded.
   // Why a received message went where it did, from its conversation on the address's Mail tab.
   ['Receiving · why it went here dialog', `/receiving/addresses/${ids.address}?thread=${ids.supportThread}`, { dialog: 'Why it went here' }],
@@ -545,6 +544,39 @@ async function measure(browser, job, fx) {
       await page.screenshot({ path: join(out, result.screenshot) });
     }
     if (density?.wanted(job)) result.density = await density.collect(page, job).catch(error => { result.densityError = error.message.split('\n')[0]; return null; });
+    if (job.guard === 'receiving-edit') {
+      // The address builder only creates. Edit on an existing address's flow opens its route editor (the steps on its
+      // page, whose Change opens "Where should this mail go?"), and getting there writes nothing to its routes or rules.
+      const writes = [];
+      const onRequest = request => { if (request.method() !== 'GET' && request.url().startsWith(origin + '/v1/')) writes.push(`${request.method()} ${request.url().slice(origin.length)}`); };
+      page.on('request', onRequest);
+      const snapshot = () => page.evaluate(async () => JSON.stringify([await (await fetch('/v1/routing/routes')).json(), (await (await fetch('/v1/rules')).json()).config]));
+      const before = await snapshot();
+      // New address turns away an address that exists and a *, writing nothing: it only creates.
+      const existing = await page.evaluate(async id => (await (await fetch('/v1/inbound/addresses/' + id)).json()).address, new URL(page.url()).searchParams.get('open'));
+      for (const typed of [existing, '*@' + existing.split('@')[1]]) {
+        await page.getByRole('button', { name: 'New address', exact: true }).click();
+        const dialog = page.locator('[role=dialog][data-state=open]');
+        await dialog.locator('#builder-address-input').fill(typed);
+        await dialog.getByRole('button', { name: 'Next' }).click();
+        await page.waitForTimeout(300);
+        if (!await dialog.locator('#builder-address-input').count()) problems.push(`New address went past its first step for ${typed.startsWith('*') ? 'a catch-all' : 'an address that exists'}`);
+        if (typed.startsWith('*') && !await dialog.getByRole('button', { name: 'Edit the catch-all' }).count()) problems.push('New address with * offers no way to the catch-all');
+        await dialog.getByRole('button', { name: 'Cancel' }).click();
+        await page.waitForTimeout(300);
+      }
+      const edited = await page.evaluate(() => { const button = [...document.querySelectorAll('.flow-panel button')].find(el => el.textContent.trim() === 'Edit'); button?.click(); return Boolean(button); });
+      if (!edited) problems.push('no Edit on the flow panel');
+      else {
+        await page.waitForURL(/\/receiving\/addresses\/[^/?]+\?tab=flow&edit=1$/, { timeout: 10_000 }).catch(() => problems.push(`Edit on the flow panel landed on ${new URL(page.url()).pathname}${new URL(page.url()).search}, not the address's route editor`));
+        await settle(page, net);
+        if (await page.$('.builder')) problems.push('Edit on the flow panel opened the address builder');
+        if (!await page.evaluate(() => [...document.querySelectorAll('button')].some(el => el.textContent.trim() === 'Change'))) problems.push('the address\'s route editor has no Change');
+      }
+      page.off('request', onRequest);
+      if (writes.length) problems.push(`Edit wrote to the API: ${writes.join(', ')}`);
+      if (await snapshot() !== before) problems.push('Edit changed the address\'s routes or rules');
+    }
   })();
   work.catch(() => {}); // After a timeout the context closes under it.
   let timer;
@@ -604,10 +636,10 @@ try {
   console.log(`${elapsed()} seeded`);
   const jobs = [];
   const passes = [['desktop', 'light'], ['desktop', 'dark'], ...process.env.CLS_PHONE === '0' ? [] : [['phone', 'light']]];
-  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, leave, notes, dialog, menu, still, alone, phoneOnly, notFound, waitlist }] of pages(ids)) {
+  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, leave, notes, dialog, menu, still, alone, phoneOnly, notFound, waitlist, guard }] of pages(ids)) {
     if (only && !only.test(name) || device === 'phone' && !phonePages.has(name) || phoneOnly && device !== 'phone') continue;
     const slug = `${name}-${device === 'phone' ? 'phone' : scheme}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-    const load = { name, path, user, scheme, device, support, live, leave: leave && device === 'desktop' && scheme === 'light', notes, dialog, menu, still, alone, notFound, waitlist, mode: 'load', slug: slug + '-load' };
+    const load = { name, path, user, scheme, device, support, live, leave: leave && device === 'desktop' && scheme === 'light', notes, dialog, menu, still, alone, notFound, waitlist, guard: guard && device === 'desktop' && scheme === 'light' ? guard : undefined, mode: 'load', slug: slug + '-load' };
     if (densityOnly && !density.wanted(load)) continue;
     jobs.push(load);
     if (from && !densityOnly) jobs.push({ name, path, user, from, click, row, switchTo, support, notes, still, alone, scheme, device, mode: 'in-app', slug: slug + '-in-app' });

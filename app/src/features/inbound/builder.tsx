@@ -1,11 +1,12 @@
-// New address, and where its mail goes, in one place; the same builder changes an address later. The address first,
+// New address, and where its mail goes, in one place. It only creates: an existing address changes where its mail goes
+// in the route editor on its page, and nothing here writes to an address, route or rule that existed before. The address first,
 // then the flow it will run, drawn as the flow panel draws it: the email at the top, an optional rule that forks it two
 // ways, and the destination slots below. Saving composes the public API's own calls: createInboundAddress,
 // createEndpoint for a new destination, the two-way rules (createRuleFromRecipe or updateRuleFromRecipe with split or
 // split-by-meaning) and the address's route. Each step adds before it removes, so mail is never lost halfway: a new rule
 // runs before the route stops the inbox, and the route is back on the inbox before an old rule goes.
-import { useEffect, useState, type FormEvent } from 'react'
-import { Link } from 'react-router'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { Link, useNavigate } from 'react-router'
 import { useQueryClient } from '@tanstack/react-query'
 import { Alert, Button, Dialog, Field, Input, Select, type SelectOption } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
@@ -82,7 +83,7 @@ function DestinationPicker({ id, value, onChange, target, onTarget, own, boxes, 
   const named = overview.endpoints.filter(e => e.source === 'endpoint')
   const options: SelectOption[] = [
     { value: 'own', label: <>Its inbox</> , text: 'Its inbox' },
-    ...boxes.filter(b => b.address !== own && b.kind !== 'inbox').map(b => ({ ...addressOption(`inbox:${b.id}`, b.address, b.displayName ?? undefined), label: <>{b.displayName ? `${b.displayName} inbox` : <><PrivateAddress value={b.address} /> inbox</>}</> })),
+    ...boxes.filter(b => b.address !== own && b.kind !== 'inbox' && b.key).map(b => ({ ...addressOption(`inbox:${b.id}`, b.address, b.displayName ?? undefined), label: <>{b.displayName ? `${b.displayName} inbox` : <><PrivateAddress value={b.address} /> inbox</>}</> })),
     ...named.map(e => ({ value: `endpoint:${e.name}`, text: e.name, disabled: e.type === 'forward' && e.status !== 'ready', label: <span className="builder-option"><TargetIcon type={e.type} />{e.name}<span className="muted"> · {typeWord[e.type]}</span></span> })),
     ...(routeOnly ? overview.endpoints.filter(e => e.source === 'inbound_webhook').map(e => ({ value: `hook:${e.id}`, text: e.name, label: <span className="builder-option"><TargetIcon type="webhook" />{e.name}<span className="muted"> · Webhook</span></span> })) : []),
     { value: 'store', label: 'Keep it, no inbox' },
@@ -105,37 +106,43 @@ type Step = 'address' | 'flow' | 'done'
  * The builder. New: the address, then where its mail goes, then the result with Test. Editing (address given): where its
  * mail goes, then the result. Wildcards and catch-alls keep "Where should this mail go?" (routing.tsx).
  */
-export function AddressBuilder({ open, onOpenChange, domains, initial = '', address, onSaved, split }: { open: boolean; onOpenChange: (open: boolean) => void; domains: Pick<MailboxDomain, 'id' | 'name' | 'status'>[] | Overview['domains']; initial?: string; address?: InboundAddress; onSaved?: (address: InboundAddress) => void; split?: Condition }) {
+export function AddressBuilder({ open, onOpenChange, domains, initial = '', onSaved, onPattern }: { open: boolean; onOpenChange: (open: boolean) => void; domains: Pick<MailboxDomain, 'id' | 'name' | 'status'>[] | Overview['domains']; initial?: string; onSaved?: (address: InboundAddress) => void; onPattern?: (match: string) => void }) {
   const api = useApi(), client = useQueryClient()
   const receiving = receivingDomains(domains)
-  const [step, setStep] = useState<Step>(address ? 'flow' : 'address')
-  const [saved, setSaved] = useState<InboundAddress | null>(address ?? null)
+  const navigate = useNavigate()
+  const [step, setStep] = useState<Step>('address')
+  const [saved, setSaved] = useState<InboundAddress | null>(null)
   const [form, setForm] = useState({ address: initial, displayName: '', lifetime: '', publicAddress: '' })
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [problem, setProblem] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
   const [waiting, setWaiting] = useState<string | null>(null)
   const [attempt] = useState({ key: '', body: '' })
+  // Names given to destinations made in this save: two new ones never get the same name.
+  const madeNames = useRef<string[]>([])
   const boxes = useApiDef(queries.inboundAddressOptions(), { enabled: open })
   const current = saved?.address ?? form.address.trim().toLowerCase()
   const overview = useOverview({ q: current, kind: 'address', limit: 5 }, false, open && (step !== 'address'))
   const entry = overview.data?.routes.data.find(r => r.address?.id === saved?.id)
   const decoded = planOf(entry, overview.data, boxes.data ?? [])
   const [plan, setPlan] = useState<Plan | null>(null)
-  // Opened from New rule's "Send mail two ways": the address's flow, already split on that kind of check.
-  useEffect(() => { if (open && split && overview.data && !plan) setPlan({ ...decoded.plan, split: true, condition: split }) }, [open, split, overview.data]) // eslint-disable-line react-hooks/exhaustive-deps
   // Rules the builder doesn't draw (ready-made ones, scripts) keep running beside it.
   const others = (entry?.rules ?? []).filter(key => key !== decoded.rule?.key).length
   const draft = plan ?? decoded.plan
   const catalog = useApiQuery(['rule-recipes'], (_api, signal) => request<{ decisionPricePerThousand: string }>('/v1/rules/recipes', { signal }), { enabled: open && draft.condition === 'ai' })
-  useEffect(() => { if (open) { setStep(address ? 'flow' : 'address'); setSaved(address ?? null); setForm({ address: initial, displayName: '', lifetime: '', publicAddress: '' }); setErrors({}); setProblem(null); setPlan(null); setWaiting(null) } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (open) { setStep('address'); setSaved(null); setForm({ address: initial, displayName: '', lifetime: '', publicAddress: '' }); setErrors({}); setProblem(null); setPlan(null); setWaiting(null) } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
   const set = (patch: Partial<Plan>) => { setPlan({ ...draft, ...patch }); setProblem(null); setErrors({}) }
   const refresh = () => client.invalidateQueries({ predicate: query => staleAfterWrite(query.queryKey, false) })
 
+  // The * the address step turned away, for its button to the catch-all's or wildcard's route editor.
+  const typed = form.address.trim().toLowerCase()
+  const pattern = errors.address && EMAIL.test(typed) && typed.split('@')[0]!.includes('*') && receiving.some(d => d.name === typed.split('@')[1]) ? typed : null
   function next(event: FormEvent) {
     event.preventDefault()
     const value = form.address.trim().toLowerCase(), sender = form.publicAddress.trim().toLowerCase(), found: Record<string, string> = {}
     if (!EMAIL.test(value)) found.address = 'Enter a full email address, such as support@example.com.'
+    // A * makes a catch-all or wildcard (a route), never an address with a * in its name.
+    else if (value.split('@')[0]!.includes('*')) found.address = value.startsWith('*@') ? 'Mail to any address here goes to the domain’s catch-all.' : 'An address with * is a wildcard.'
     else if (receiving.length && !receiving.some(d => d.name === value.split('@')[1])) found.address = `Use a receiving domain: ${receiving.map(d => d.name).join(', ')}.`
     else if ((boxes.data ?? []).some(b => b.address === value || b.aliases.includes(value))) found.address = 'That address exists. Open it from the list to change where its mail goes.'
     if (sender && form.lifetime) found.publicAddress = 'Temporary addresses cannot have a public sender address.'
@@ -158,14 +165,15 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
     if (pick === 'own') return { param: `inbox:${await keyed(self)}`, route: null, chat: false }
     if (pick === 'store') return { param: 'store', route: [], chat: false }
     if (pick === 'drop') return { param: 'drop', route: 'drop', chat: false }
-    if (pick.startsWith('inbox:')) { const box = (boxes.data ?? []).find(b => b.id === pick.slice(6))!; return { param: `inbox:${await keyed(box)}`, route: [box.id], chat: false } }
+    // Another inbox is offered only when it has a key already, so nothing is written to it.
+    if (pick.startsWith('inbox:')) { const box = (boxes.data ?? []).find(b => b.id === pick.slice(6))!; return { param: `inbox:${box.key}`, route: [box.id], chat: false } }
     if (pick.startsWith('hook:')) return { param: '', route: [pick.slice(5)], chat: false }
     if (pick.startsWith('endpoint:')) {
       const e = overview.data!.endpoints.find(x => x.source === 'endpoint' && x.name === pick.slice(9))!
       return { param: e.name, route: e.type === 'webhook' || e.type === 'forward' ? [e.id] : null, chat: e.type === 'slack' || e.type === 'discord' }
     }
     const type = pick.slice(4) as NewType, value = target.trim()
-    const taken = new Set(overview.data!.endpoints.map(e => e.name))
+    const taken = new Set([...overview.data!.endpoints.map(e => e.name), ...madeNames.current])
     const name = freeName(type === 'forward' ? value.split('@')[0]! : `${self.address.split('@')[0]}-${type}`, taken)
     const post = (body: Record<string, unknown>) => request<{ id: string; name: string; status: string }>('/v1/endpoints', { method: 'POST', body, idempotencyKey: idempotencyFor(attempt, body) })
     let created: { id: string; name: string; status: string }
@@ -174,6 +182,7 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
       try { created = await post({ ...body, preverify: true }) } catch (e) { if (!(e instanceof ApiError && e.code === 'PREVERIFY_NOT_ALLOWED')) throw e; created = await post(body) }
       if (created.status !== 'ready') { setWaiting(value); await refresh(); return 'waiting' }
     } else created = await post({ type, name, url: value })
+    madeNames.current.push(created.name)
     return { param: created.name, route: type === 'webhook' || type === 'forward' ? [created.id] : null, chat: type === 'slack' || type === 'discord' }
   }
   const targetError = (pick: Slot, value: string) => {
@@ -191,39 +200,29 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
     if (otherProblem) found.otherwise = otherProblem
     setErrors(found)
     if (Object.keys(found).length) return
+    // Create-only: once the address exists (a save that failed partway), nothing here changes it again.
+    if (saved) return
     setBusy(true); setProblem(null); setWaiting(null)
     try {
       // 1. The address (a new one receives into its own inbox until the route below says otherwise).
-      let self = saved
-      if (!self) {
-        const value = form.address.trim().toLowerCase(), sender = form.publicAddress.trim().toLowerCase()
-        self = await api.inbound.createAddress({ address: value, displayName: form.displayName.trim() || null, ...(sender ? { publicAddress: sender } : {}), ...(form.lifetime ? { ttlSeconds: Number(form.lifetime) } : {}) })
-        setSaved(self)
-      }
+      const value = form.address.trim().toLowerCase(), sender = form.publicAddress.trim().toLowerCase()
+      const self: InboundAddress = await api.inbound.createAddress({ address: value, displayName: form.displayName.trim() || null, ...(sender ? { publicAddress: sender } : {}), ...(form.lifetime ? { ttlSeconds: Number(form.lifetime) } : {}) })
+      setSaved(self)
       // 2. Its destinations, made first when new.
       const then = await realize(draft.then, draft.targets.then ?? '', self)
       const otherwise = draft.split ? await realize(draft.otherwise, draft.targets.otherwise ?? '', self) : null
       if (then === 'waiting' || otherwise === 'waiting') return
       // 3. A rule when the mail forks, or when its one destination is a channel (only a rule writes a post).
       const rule = draft.split || then.chat || (then.param && then.route === null && draft.then !== 'own')
-      const route = entry?.route ?? null
-      const setRoute = async (to: string[] | 'drop' | null) => {
-        if (to === null) { if (route) await api.routing.deleteRoute(route.id); return }
-        if (route) await api.routing.updateRoute(route.id, { to, enabled: true }); else await api.routing.createRoute({ match: self!.address, to })
-      }
-      const existing = decoded.rule
+      // The address is new: its rule is created (never another address's), and its route is created, never updated.
       if (rule) {
         const recipe = draft.split && draft.condition === 'ai' ? 'split-by-meaning' : 'split'
         const params = !draft.split ? { test: 'always', then: then.param }
           : draft.condition === 'ai' ? { meaning: draft.value, then: then.param, otherwise: otherwise!.param }
           : { test: draft.condition, ...(draft.condition === 'attachment' ? {} : { value: draft.value }), then: then.param, otherwise: otherwise!.param }
-        if (existing) await request(`/v1/rules/scripts/${encodeURIComponent(existing.key)}/recipe`, { method: 'PUT', body: { recipe, params } })
-        else await request('/v1/rules/recipes', { method: 'POST', body: { recipe, params, addresses: [self.id] } })
-        await setRoute([])
-      } else {
-        await setRoute(then.route)
-        if (existing) await request(`/v1/rules/scripts/${encodeURIComponent(existing.key)}`, { method: 'DELETE' })
-      }
+        await request('/v1/rules/recipes', { method: 'POST', body: { recipe, params, addresses: [self.id] } })
+        await api.routing.createRoute({ match: self.address, to: [] })
+      } else if (then.route !== null) await api.routing.createRoute({ match: self.address, to: then.route })
       await refresh()
       onSaved?.(self)
       // Edit after Done reads the saved flow back, not this draft.
@@ -239,13 +238,14 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   const title = step === 'address' ? 'New address' : step === 'flow' ? TITLE : 'Done'
   const ready = step !== 'flow' || (!!boxes.data && overview.data !== undefined)
   const footer = step === 'address' ? <><Button onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" type="submit" form="builder-address">Next</Button></>
-    : step === 'flow' ? <>{!address && !saved && <Button disabled={busy} onClick={() => setStep('address')}>Back</Button>}<Button variant="primary" type="submit" form="builder-flow" loading={busy} disabled={!ready}>Save</Button></>
-    : <>{!address && saved && <Link className="ui-button ui-button--secondary ui-button--md" to={`/receiving/addresses/${saved.id}`} onClick={() => onOpenChange(false)}>Open address</Link>}<Button variant="primary" onClick={() => onOpenChange(false)}>Done</Button></>
+    : step === 'flow' ? <>{!saved && <Button disabled={busy} onClick={() => setStep('address')}>Back</Button>}<Button variant="primary" type="submit" form="builder-flow" loading={busy} disabled={!ready || !!saved}>Save</Button></>
+    : <>{saved && <Link className="ui-button ui-button--secondary ui-button--md" to={`/receiving/addresses/${saved.id}`} onClick={() => onOpenChange(false)}>Open address</Link>}<Button variant="primary" onClick={() => onOpenChange(false)}>Done</Button></>
   return <Dialog size="lg" open={open} onOpenChange={next => { if (!busy) onOpenChange(next) }} title={title} footer={footer} className="builder">
     {step === 'address' ? <form id="builder-address" className="stack" onSubmit={next} noValidate>
       <Field label="Address" htmlFor="builder-address-input" error={errors.address}>
         <Input id="builder-address-input" type="email" value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} placeholder={`support@${receiving[0]?.name ?? 'example.com'}`} autoFocus autoComplete="off" />
       </Field>
+      {onPattern && pattern && <div className="cluster"><Button size="sm" onClick={() => { onOpenChange(false); onPattern(pattern) }}>{pattern.startsWith('*@') ? 'Edit the catch-all' : 'Set up the wildcard'}</Button></div>}
       <Field label="Display name" htmlFor="builder-address-name"><Input id="builder-address-name" value={form.displayName} onChange={e => setForm({ ...form, displayName: e.target.value })} placeholder="Support" /></Field>
       <details className="inbound-advanced" open={!!form.lifetime || !!form.publicAddress || !!errors.publicAddress || undefined}>
         <summary>Lifetime and reply-as</summary>
@@ -279,9 +279,10 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
       </Flow>}
       {decoded.extra && <Alert tone="warning">Its mail also goes to other destinations now. Saving keeps only the ones here.</Alert>}
       {waiting && <AwaitingConfirm address={waiting} />}
-      {problem !== null && <Alert tone="danger">{errorText(problem)}</Alert>}
+      {waiting && saved && <p><Link to={`/receiving/addresses/${saved.id}?tab=flow&edit=1`} onClick={() => onOpenChange(false)}>Finish on its page</Link></p>}
+      {problem !== null && <Alert tone="danger">{errorText(problem)}{saved && <> <Link to={`/receiving/addresses/${saved.id}?tab=flow&edit=1`} onClick={() => onOpenChange(false)}>Finish on its page</Link></>}</Alert>}
     </form>
-    : entry && overview.data ? <div className="addr-flow"><FlowPanel entry={entry} overview={overview.data} onEdit={() => setStep('flow')} mailLink={false} /></div>
+    : entry && overview.data ? <div className="addr-flow"><FlowPanel entry={entry} overview={overview.data} onEdit={() => { onOpenChange(false); navigate(`/receiving/addresses/${saved!.id}?tab=flow&edit=1`) }} mailLink={false} /></div>
     : <div className="flow-skeleton" aria-hidden="true"><span /><span /><span /></div>}
   </Dialog>
 }
