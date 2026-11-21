@@ -22,15 +22,33 @@ CREATE TABLE abuse_signals (
 CREATE INDEX abuse_signals_value ON abuse_signals(kind, value);
 CREATE INDEX abuse_signals_last ON abuse_signals(last_at);
 
--- abuse_exclusions: entities monitoring never records (an upheld objection, or an agreement that rules it out). Set by
--- an operator (scripts/abuse-subject.ts); kept until removed.
+-- abuse_exclusions: who monitoring never records, one row per reason ("source"): an upheld objection, an agreement
+-- that rules monitoring out, an operator's decision. Each is lifted on its own. Held on a user, a workspace, or a
+-- sign-in subject ("issuer subject", for someone never admitted; it survives a change of the root secret). A user's
+-- exclusion covers the workspaces they own for as long as they own them. Set by scripts/abuse-subject.ts.
 CREATE TABLE abuse_exclusions (
-  entity_type text NOT NULL CHECK (entity_type IN ('user','workspace','attempt')),
-  entity_id text NOT NULL CHECK (length(entity_id) BETWEEN 1 AND 200),
+  entity_type text NOT NULL CHECK (entity_type IN ('user','workspace','subject')),
+  entity_id text NOT NULL CHECK (length(entity_id) BETWEEN 1 AND 600),
+  source text NOT NULL CHECK (source IN ('objection','agreement','operator')),
   reason text NOT NULL CHECK (length(reason) BETWEEN 10 AND 500),
   created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (entity_type, entity_id, source)
+);
+CREATE INDEX abuse_exclusions_entity ON abuse_exclusions(entity_id) WHERE entity_type='user';
+
+-- abuse_floors: the instant of an entity's last erasure (or the end of its last exclusion). Nothing observed at or
+-- before it is ever recorded, whatever record it is later read from. Kept 90 days.
+CREATE TABLE abuse_floors (
+  entity_type text NOT NULL CHECK (entity_type IN ('user','workspace','subject')),
+  entity_id text NOT NULL CHECK (length(entity_id) BETWEEN 1 AND 600),
+  ignore_through timestamptz NOT NULL,
   PRIMARY KEY (entity_type, entity_id)
 );
+CREATE INDEX abuse_floors_through ON abuse_floors(ignore_through);
+
+-- What a sign-in observed while monitoring is on, already pseudonymised by the request (src/abuse.ts signInSignals):
+-- it rides the row the sign-in log writes anyway and leaves with it after 30 days. Null while monitoring is off.
+ALTER TABLE nightmail_signin_attempts ADD COLUMN observed jsonb CHECK (observed IS NULL OR octet_length(observed::text) <= 4000);
 
 -- abuse_sampling: how far the hourly sampler has read each workspace's accepted Hosted mail.
 CREATE TABLE abuse_sampling (

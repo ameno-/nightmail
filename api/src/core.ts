@@ -142,9 +142,6 @@ export interface Runtime {
   placementEdge?: { probesPerJob:number };
   wake?: (readyJobs?: number, immediate?: 'webhook'|'ingest') => Promise<void>;
   deferNudge?: (work: (runtime: Runtime) => Promise<void>) => void;
-  // Where a request hands an abuse-monitoring event (src/abuse.ts): the Worker sends it to a queue after the response.
-  // It is never awaited and opens no database connection. Absent (Node): a bounded in-process buffer.
-  abuseEvents?: (event: import('./abuse.js').AbuseEvent) => void | Promise<void>;
   // Nudges the long-lived dispatcher for one account/region after queued mail commits. Dispatch
   // never depends on it: the dispatcher also polls and the scheduler pings it every minute.
   dispatch?: (region: string, accountId?: string, emails?: number, kind?: ReadyConnection['kind'], priority?: boolean) => Promise<void>;

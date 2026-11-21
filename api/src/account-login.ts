@@ -8,7 +8,7 @@ import { acceptedMethods, isStaffSignIn, provenMailbox, PROVIDER_IDENTITY_CLAIM,
 import { clientIpHeader, productName, requestHeader } from './brand.js';
 import { METHOD_ACR } from './config.js';
 import { ANALYTICS_SESSION_PARAM } from './analytics-events.js';
-import { observeSignIn, requestNetwork, type RequestNetwork } from './abuse.js';
+import { requestNetwork, signInSignals, type RequestNetwork } from './abuse.js';
 
 const verifiedEmail = z.email().max(320);
 const loginFailed = () => new ApiError(403, 'SIGN_IN_DENIED', 'This account cannot sign in.');
@@ -122,16 +122,17 @@ export async function beginAccountLogin(runtime: Runtime, returnUrl: URL, peer: 
 // Every verified sign-in, refused or admitted: one row per subject for the operator (scripts/list-signin-attempts.ts),
 // who may then bind that subject explicitly. The address and name are shown, never trusted.
 async function recordAttempt(runtime: Runtime, claims: oidc.IDToken, upstream: ProviderIdentity | null, address: string | null, outcome: string,
-  observed?: { userId: string | null; created: boolean; email: string | null; network?: RequestNetwork }) {
-  // Hosted, when monitoring is on (src/abuse.ts): one pseudonymised event is handed over. Nothing is awaited or written here.
-  if (observed) observeSignIn(runtime, { issuer: claims.iss, subject: claims.sub, outcome, provider: upstream, ...observed });
+  observed?: { email: string | null; network?: RequestNetwork }) {
+  // Hosted, while abuse monitoring is on (src/abuse.ts): what this sign-in shows, hashed here, rides the row this log
+  // writes anyway. No other statement, connection or wait; the hourly job reads the log later. Off, the column is null.
+  const noted = observed ? signInSignals(runtime.config, { outcome, provider: upstream, ...observed }) : null;
   const acr = typeof claims.acr === 'string' ? claims.acr.slice(0, 200) : null, name = typeof claims.name === 'string' ? claims.name.slice(0, 200) : null;
   if (outcome.startsWith('signed_in')) log('info', { code: 'SIGN_IN', outcome, subject: claims.sub, acr });
   else log('warn', { code: 'SIGN_IN_NOT_APPROVED', reason: outcome, subject: claims.sub, acr });
-  await runtime.db.execute(sql`INSERT INTO nightmail_signin_attempts(issuer,subject,acr,provider,provider_hd,email,name,outcome)
-    VALUES(${claims.iss},${claims.sub},${acr},${upstream?.provider ?? null},${upstream?.hd ?? null},${address},${name},${outcome})
+  await runtime.db.execute(sql`INSERT INTO nightmail_signin_attempts(issuer,subject,acr,provider,provider_hd,email,name,outcome,observed)
+    VALUES(${claims.iss},${claims.sub},${acr},${upstream?.provider ?? null},${upstream?.hd ?? null},${address},${name},${outcome},${noted ? JSON.stringify(noted) : null}::jsonb)
     ON CONFLICT(issuer,subject) DO UPDATE SET acr=excluded.acr,provider=excluded.provider,provider_hd=excluded.provider_hd,email=excluded.email,
-      name=excluded.name,outcome=excluded.outcome,attempts=nightmail_signin_attempts.attempts+1,last_at=now()`).catch(() => {});
+      name=excluded.name,outcome=excluded.outcome,observed=excluded.observed,attempts=nightmail_signin_attempts.attempts+1,last_at=now()`).catch(() => {});
 }
 
 // The waitlist (migration 366): a verified address nothing admitted, one row per address, every attempt counted. An
@@ -247,7 +248,7 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
     });
   } catch (error) {
     if (!(error instanceof NotAdmitted)) throw error;
-    await recordAttempt(runtime, claims, upstream, address, error.reason, { userId: null, created: false, email: emailAtLogin, network });
+    await recordAttempt(runtime, claims, upstream, address, error.reason, { email: emailAtLogin, network });
     // Hosted, and no invitation: the verified address joins the waitlist, and the refusal says we'll email it at launch.
     // Without a verified address, or when the write fails, nothing is promised.
     if (error.reason === 'not_approved' && runtime.config.multiTenant && emailAtLogin) {
@@ -256,7 +257,7 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
     }
     throw loginFailed();
   }
-  await recordAttempt(runtime, claims, upstream, address, admitted, { userId, created: admitted !== 'signed_in', email: emailAtLogin, network });
+  await recordAttempt(runtime, claims, upstream, address, admitted, { email: emailAtLogin, network });
   // Admitted with a verified address: nothing is left to tell it at launch.
   if (emailAtLogin && runtime.config.multiTenant) await runtime.db.execute(sql`DELETE FROM nightmail_waitlist WHERE email=lower(${emailAtLogin})`).catch(() => {});
   return {session, slot, userId, returnUrl:returnUrl.href};
