@@ -99,10 +99,14 @@ export const recordRow = (record: DnsRecord, status?: RecordRow['status']): Reco
 
 // Every record in one table: what it is for, its type, name and value (each with Copy), its status, and the row's
 // actions (a menu, only on rows that have any). On a phone each record is a card: what it is for and its type as the
-// title, the status beside it, the name and value under it, and Copy with the row's actions in its action sheet. A copy
-// button inside a card's line would clip the wrapped value under it.
+// title (numbered when several share a purpose, such as the three DKIM records, so no two cards share one), the status
+// beside it, the name and value under it, and Copy with the row's actions in its action sheet. A copy button inside a
+// card's line would clip the wrapped value under it.
 export function DnsRecordTable({ domain, rows }: { domain: string; rows: RecordRow[] }) {
   const { copy } = useCopy()
+  const titles = new Map<RecordRow, string>(), shared = new Map<string, number>()
+  for (const row of rows) shared.set(row.purpose, (shared.get(row.purpose) ?? 0) + 1)
+  for (const row of rows) titles.set(row, shared.get(row.purpose)! > 1 ? `${row.purpose} ${[...titles.keys()].filter(other => other.purpose === row.purpose).length + 1}` : row.purpose)
   const [purpose, type, name, value, status, actions] = settingsColumns.dns
   const copyItems = ({ record }: RecordRow): MenuItem[] => [
     { label: 'Copy full name', icon: <Copy size={16} />, onSelect: () => void copy(record.name, 'Copied name') },
@@ -110,7 +114,7 @@ export function DnsRecordTable({ domain, rows }: { domain: string; rows: RecordR
   ]
   const menu = (row: RecordRow, items: MenuItem[]) => <DropdownMenu label={`Actions for ${row.purpose} ${row.record.type} record`} title={`${row.record.type} ${relativeHost(row.record.name, domain)}`} items={items} />
   return <DataTable className="domain-records" rows={rows} rowKey={row => row.record.id} columns={[
-    { ...purpose, render: row => row.purpose, cardRender: row => <>{row.purpose} <span className="domain-record-type">{row.record.type}</span></> },
+    { ...purpose, render: row => row.purpose, cardRender: row => <>{titles.get(row)} <span className="domain-record-type">{row.record.type}</span></> },
     { ...type, render: row => row.record.type },
     { ...name, render: ({ record }) => <div className="settings-copy-cell"><code title={record.name}>{breakable(relativeHost(record.name, domain))}</code><CopyButton value={record.name} label={`Copy full ${record.type} name`} /></div>, cardRender: ({ record }) => <code>{breakable(relativeHost(record.name, domain))}</code> },
     { ...value, render: ({ record }) => record.value ? <div className="settings-copy-cell"><code title={record.value}>{breakable(record.value)}</code><CopyButton value={record.value} label={`Copy ${record.type} value`} /></div> : '—', cardRender: ({ record }) => record.value ? <code>{breakable(record.value)}</code> : '—' },
