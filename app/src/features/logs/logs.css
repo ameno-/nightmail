@@ -105,6 +105,8 @@
 .email-fact-list dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
 .email-fact-list .email-sender { flex-wrap: wrap; }
 .email-fact-list__id { display: flex; align-items: center; gap: var(--space-4); }
+/* The ID's copy button makes its row taller: its label sits level with the ID, not above it. */
+.email-fact-list dt:has(+ .email-fact-list__id) { align-self: center; }
 .email-fact-list__id .identifier { min-width: 0; overflow: hidden; font-size: var(--text-xs); text-overflow: ellipsis; }
 /* A phone: the email from edge to edge. */
 @media (max-width: 640px) {
@@ -131,11 +133,21 @@
 .page-surface .email-detail-page > .ui-page-header h1 { --title-line: 24px; min-width: 0; padding-block: calc((var(--control-height) - var(--title-line)) / 2); line-height: var(--title-line); overflow-wrap: anywhere; }
 /* The surface is a fixed-height flex column; headers, notices and toolbars keep their height when content overflows. */
 .page-surface .email-detail-page > :not(.email-detail-grid), .page-surface .logs-page > :not(.logs-table, .logs-split) { flex-shrink: 0; }
-/* Logs' body (facets.tsx): the facet rail beside the volume strip and the stream. */
-.logs-split { flex: 1; min-height: 0; }
+/* Logs' body (facets.tsx): the filters beside the stream from 1440 px, where the subject still has room; narrower, the
+   toolbar's pickers filter instead. The stream column needs a wider window still: Transactional reads in full or not at all. */
+.ui-split.logs-split { --facet-width: 176px; flex: 1; min-height: 0; }
 .logs-split > .ui-split__main > :not(.logs-table) { flex-shrink: 0; }
-.logs-histogram { margin-bottom: var(--space-12); }
 .logs-split .ui-facets { padding-top: 2px; }
+@media (max-width: 1439px) {
+  .ui-split.logs-split { grid-template-columns: minmax(0, 1fr); }
+  .ui-split.logs-split > .ui-split__rail { display: none; }
+  .ui-split.logs-split > .ui-split__main { padding-left: 0; }
+}
+@media (min-width: 1440px) { .logs-page .logs-filter { display: none; } }
+.ui-split.logs-split > .ui-split__rail:empty { border-right-color: transparent; }
+/* Collapsed to no width rather than removed: a short list's spacer row spans every column, and a removed one would
+   leave an empty column at the table's end. */
+@media (max-width: 1759px) { .logs-page .logs-table :is(th, td)[data-col='stream'] { width: 0 !important; padding: 0 !important; visibility: hidden; } }
 .page-surface .logs-page .search-box { min-width: 0; }
 @media (max-width: 850px) {
   .page-surface .email-detail-page { min-height: auto; }
@@ -149,7 +161,6 @@
 /* Tablet: the toolbar in one row (search, both filters, an icon-only export), and the table drops its stream column to
    fit without scrolling sideways. Phone: search on its own row, then the filters and export; rows are cards. */
 @media (max-width: 1100px) {
-  .logs-table [data-col='stream'] { display: none; }
   .page-surface .logs-page .logs-table .ui-table { min-width: 720px; }
 }
 @media (max-width: 1100px) {
@@ -180,6 +191,9 @@
   .page-surface .email-detail-page > .ui-page-header h1 { --title-line: 28px; }
   .page-surface .email-detail-grid { margin-top: var(--space-20); padding-block: var(--space-16); }
   .email-detail-grid .ui-email-preview, .plain-text-preview, .message-source { min-height: 320px; }
+  /* A plain-text message is as tall as its text: two lines don't push the details below the first screen. */
+  .email-detail-grid .plain-text-preview { flex: none; min-height: 0; }
+  .page-surface .email-detail-grid { min-height: 0; }
   .email-detail-grid .ui-tabs { padding-bottom: var(--space-8); }
   .page-surface .message-identifiers { flex-direction: column; align-items: flex-start; gap: var(--space-8); }
   .message-identifiers .identifier { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
@@ -220,7 +234,7 @@
 .thread-line__dot[data-outbound] { background: var(--color-text); }
 .thread-line__top { display: flex; grid-area: top; align-items: center; gap: var(--space-8); min-width: 0; }
 .thread-line__entry > .thread__time { grid-area: time; }
-.thread-line__status { display: flex; grid-area: status; align-items: center; gap: var(--space-8); min-width: 0; color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); line-height: 16px; white-space: nowrap; }
+.thread-line__status { display: flex; grid-area: status; align-items: center; gap: var(--space-8); min-width: 0; color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-label); line-height: 16px; white-space: nowrap; }
 .thread-line__top { line-height: 20px; }
 .thread-line .thread__time { font-family: var(--font-mono); font-size: var(--text-xs); }
 .thread-line__here { color: var(--color-text); }

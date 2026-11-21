@@ -60,8 +60,8 @@ export const logColumns: Column<LogEntry>[] = [
 
 // The Logs page gives Status the room its longest label needs ("Acceptance unknown", in mono); Overview keeps the compact column.
 // Its last column also holds a scheduled email's menu (features/logs/scheduled.tsx), at the end of its card on a phone.
-// Beside the facet rail the subject keeps the room: the addresses and the stream take less.
-const wide = <T extends { key: string; width?: number | string; card?: SkeletonColumn['card'] }>(columns: T[]): T[] => columns.map(column => column.key === 'status' ? { ...column, width: 164 } : column.key === 'open' ? { ...column, width: 40, card: 'end' } : column.key === 'from' || column.key === 'to' ? { ...column, width: '12%' } : column.key === 'stream' ? { ...column, width: 104 } : column)
+// The subject keeps the room: the addresses take less, and the stream shows only on a wide window (logs.css).
+const wide = <T extends { key: string; width?: number | string; card?: SkeletonColumn['card'] }>(columns: T[]): T[] => columns.map(column => column.key === 'status' ? { ...column, width: 164 } : column.key === 'open' ? { ...column, width: 40, card: 'end' } : column.key === 'from' || column.key === 'to' ? { ...column, width: '12%' } : column.key === 'stream' ? { ...column, width: 124 } : column)
 export const logsPageColumns = wide(logColumns)
 export const logsPageColumnDefs = wide(logColumnDefs)
 

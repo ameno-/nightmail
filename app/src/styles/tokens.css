@@ -175,12 +175,12 @@
   --shadow-button: inset 0 0 0 1px var(--color-border);
   --shadow-popover: 0 8px 16px rgb(0 0 0 / 4%), 0 4px 8px rgb(0 0 0 / 8%), 0 0 0 .5px rgb(0 0 0 / 12%);
   --shadow-dialog: 0 16px 32px rgb(0 0 0 / 4%), 0 8px 16px rgb(0 0 0 / 8%), 0 0 0 .5px rgb(0 0 0 / 12%);
-  /* Sender score grade bands (the gauge's arcs). */
-  --grade-aplus: #13804A; --grade-a: #2EAF5A; --grade-b: #3B5CF6; --grade-c: #E7AF36; --grade-d: #EE7B30; --grade-f: #D92E3C;
+  /* Sender score grade bands (the gauge's arcs). B is the data navy: a bright blue read as a second accent. */
+  --grade-aplus: #13804A; --grade-a: #2EAF5A; --grade-b: var(--color-accent-data); --grade-c: #E7AF36; --grade-d: #EE7B30; --grade-f: #D92E3C;
 }
 
 :root[data-theme='dark'] {
-  --grade-aplus: #3DD68C; --grade-a: #6BD586; --grade-b: #A2BCFF; --grade-c: #F2CF76; --grade-d: #F59A5B; --grade-f: #F17471;
+  --grade-aplus: #3DD68C; --grade-a: #6BD586; --grade-b: var(--color-accent-data); --grade-c: #F2CF76; --grade-d: #F59A5B; --grade-f: #F17471;
   color-scheme: dark;
   --color-brand: #798ABA; /* the same colour as light: 5.9:1 on deep */
   --color-logo: #F4F2EC; /* the brand's paper: the marks on a dark ground */

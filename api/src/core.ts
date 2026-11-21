@@ -94,6 +94,10 @@ export interface Config {
   allowSesSandbox?: boolean;
   requireDmarcForBulk?: boolean;
   hostedScreen?: boolean;
+  /** NIGHTMAIL_ABUSE_MONITORING: abuse monitoring (src/abuse.ts) records from this instant on. Undefined: off. */
+  abuseMonitoring?: { since: string };
+  /** NIGHTMAIL_ABUSE_ENFORCE. Reserved: abuse monitoring never blocks, and no code reads this yet. */
+  abuseEnforce?: boolean;
   /** Hosted billing. stripe is undefined until STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET are set (money routes answer 503 BILLING_NOT_CONFIGURED). */
   billing?: { stripe?: { secretKey: string; webhookSecret: string; automaticTax: boolean; apiBase: string } };
   placementShadow?: boolean;

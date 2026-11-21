@@ -2,7 +2,7 @@
 title: Terms of Service
 description: The agreement between you and Anomaly for using Nightmail: accounts, prepaid billing, refunds and credit expiry, sending limits, your data, and how disputes are resolved.
 updated: 20 November 2026
-effective: 13 November 2026
+effective: 20 November 2026
 ---
 
 These Terms of Service (the "Terms") are a binding agreement between you and **Anomaly Innovations, Inc.** ("Anomaly", "we", "us"). They cover Nightmail: the hosted email service at nightmail.dev, its API, dashboard, SDK, MCP server, and IMAP and SMTP access (together, the "Service").
@@ -189,8 +189,8 @@ We'll tell you why and what to do, unless the law or an active investigation pre
 - **What you allow us to do.** You give us a worldwide, non-exclusive license to host, copy, process, transmit and display Customer Data only as needed to provide, secure and support the Service, to prevent abuse, to bill you, and as the law requires.
 - **What we don't do.** We don't sell Customer Data, don't use it for advertising, and **don't use it to train AI models**. This covers the content we send to our AI provider for screening and AI decisions too: our AI provider, TypeSafe AI, has confirmed to us in writing that it doesn't retain or train on that content.
 - **Aggregated data.** We may use data about how the Service is used (volumes, delivery and bounce rates, performance) to run and improve it, and to publish aggregate statistics that don't identify you, your recipients or your content.
-- **People at Anomaly.** Support can't read your message content unless you allow it for a specific support request ([section 10](#support-access)). Staff who review abuse see message metadata, such as recipient domains and the subject line of a message the screen rejected, but not message bodies. Any other access to systems that hold message content is limited to Anomaly personnel who need it to run, secure or repair the Service.
-- **Personal data.** For personal data in Customer Data, you're the controller and we're your processor (a "service provider" under US state privacy laws), as described in the [Privacy Policy](/legal/privacy). A Data Processing Addendum is available to business customers on request at [privacy@nightmail.dev](mailto:privacy@nightmail.dev).
+- **People at Anomaly.** Support can't read your message content unless you allow it for a specific support request ([section 10](#support-access)). Staff who review abuse see message metadata, such as recipient domains and the subject line of a message the screen rejected, but not message bodies. They can also see which accounts look related to each other ([Privacy Policy, section 5.7](/legal/privacy#linking-related-accounts)). Any other access to systems that hold message content is limited to Anomaly personnel who need it to run, secure or repair the Service.
+- **Personal data.** For personal data in Customer Data, you're the controller and we're your processor (a "service provider" under US state privacy laws), as described in the [Privacy Policy](/legal/privacy). The exception is what we do to keep the Service safe: spam screening, sender scores and abuse monitoring, where we act as a controller as that policy describes. A Data Processing Addendum is available to business customers on request at [privacy@nightmail.dev](mailto:privacy@nightmail.dev).
 - **Your responsibilities.** You must have a lawful basis to send and receive the personal data you put into Nightmail, give the notices your recipients need, and not send us special-category data you don't need.
 
 ## 10. Support access
@@ -243,6 +243,7 @@ You'll defend and indemnify Anomaly against third-party claims, fines and costs 
 - **After closing:** you have **30 days** to export your data, unless we closed the account for abuse or the law forbids it. After that, we delete the workspace's Customer Data from our active systems within 90 days, except:
   - billing and payment records, kept for **7 years** for tax and accounting;
   - the account's audit trail, kept for up to **1 year** (billing events 7 years);
+  - abuse and fraud signals, kept for up to **90 days** after we last saw them ([Privacy Policy, section 5.7](/legal/privacy#linking-related-accounts));
   - unsubscribe and suppression records, where we need them to keep honoring opt-outs;
   - copies in backups, until those backups expire;
   - anything the law requires us to keep.

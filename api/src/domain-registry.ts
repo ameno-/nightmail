@@ -22,12 +22,24 @@ export async function placementRoot(host:string) {
     suffixes??={icann:new Set(icannRules.trim().split(/\s+/)),private:new Set([...privateRules.trim().split(/\s+/),
       'wordpress.com','weebly.com','myshopify.com','tumblr.com','squarespace.com'])}; // Not every host registers its suffix.
   }
-  const labels=host.split('.'),{icann,private:platform}=suffixes; let suffix=1,shared=false;
+  const labels=host.split('.'),{icann,private:platform}=suffixes; let suffix=1,shared=false,known=false;
   for(let i=0;i<labels.length;i++) {
     const name=labels.slice(i).join('.'),wildcard='*.'+labels.slice(i+1).join('.');
-    if(platform.has('!'+name) || icann.has('!'+name)) { suffix=labels.length-i-1; shared=platform.has('!'+name); break; }
-    if(platform.has(name) || platform.has(wildcard) || platform.has('*.'+name)) { suffix=labels.length-i; shared=true; break; }
-    if(icann.has(name) || icann.has(wildcard) || icann.has('*.'+name)) { suffix=labels.length-i; break; }
+    if(platform.has('!'+name) || icann.has('!'+name)) { suffix=labels.length-i-1; shared=platform.has('!'+name); known=true; break; }
+    if(platform.has(name) || platform.has(wildcard) || platform.has('*.'+name)) { suffix=labels.length-i; shared=true; known=true; break; }
+    if(icann.has(name) || icann.has(wildcard) || icann.has('*.'+name)) { suffix=labels.length-i; known=true; break; }
   }
-  return {root:labels.length>suffix ? labels.slice(-suffix-1).join('.') : null,shared};
+  // known: a public-suffix rule matched, or the last label is a top-level domain. False: the name is under nothing the
+  // snapshot knows, and the root is only the default rule's guess.
+  return {root:labels.length>suffix ? labels.slice(-suffix-1).join('.') : null,shared,known:known || await topLevel(labels.at(-1)!)};
+}
+let topLevels:Set<string>|undefined;
+// The snapshot leaves one-label suffixes implicit, so a top-level domain is one it names (an RDAP service, or the
+// last label of a suffix rule) or a two-letter country code.
+async function topLevel(label:string) {
+  if(!topLevels) {
+    const {icannRules,rdapServices}=await loadRegistries();
+    topLevels??=new Set([...icannRules.trim().split(/\s+/).map(rule=>rule.slice(rule.lastIndexOf('.')+1)),...rdapServices.flatMap(([names])=>names.split(' '))]);
+  }
+  return /^[a-z]{2}$/.test(label) || topLevels.has(label);
 }

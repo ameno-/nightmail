@@ -1,57 +1,50 @@
 import type { ReactNode } from 'react'
-import { FacetRail, Histogram, SplitPane, type FacetGroup, type HistogramBin, type Tone } from '../../components/ui'
-import type { LogEntry } from '../../data/types'
-import { date, label } from '../../lib/format'
+import { FacetRail, SplitPane, statusTone, type FacetGroup, type Tone } from '../../components/ui'
+import type { LogCounts, LogDirection, LogEntry } from '../../data/types'
+import { label, number } from '../../lib/format'
 
-// Logs' facet rail and volume strip (Signal Log), from the rows on screen: what this page holds by status, direction,
-// stream and domain, and when it was sent or received. Both have fixed slots, so the route skeleton, a loading page and
-// any loaded page hold the same space. A status, direction or stream filters the list as the toolbar's controls do.
-const failed = new Set(['bounced', 'complained', 'rejected', 'rendering_failed', 'suppressed', 'spam'])
-const slowed = new Set(['delayed', 'deferred', 'acceptance_unknown', 'scheduled', 'queued', 'attempting'])
-export const logTone = (row: Pick<LogEntry, 'status'>): Tone => failed.has(row.status) ? 'danger' : slowed.has(row.status) ? 'warning' : row.status === 'delivered' || row.status === 'received' ? 'success' : 'neutral'
-const STATUSES = ['delivered', 'received', 'bounced', 'complained', 'scheduled'] as const
-// The data palette's hue for each facet value (tokens.css).
-const statusSeries: Record<(typeof STATUSES)[number], string> = { delivered: 'delivered', received: 'received', bounced: 'bounced', complained: 'complained', scheduled: 'info' }
-// A row in the volume strip: which way it went, unless it failed.
-export const LOG_SERIES = ['sent', 'received', 'pending', 'bounced', 'complained']
-const seriesOf = (row: LogEntry) => row.status === 'bounced' || row.status === 'suppressed' ? 'bounced' : failed.has(row.status) ? 'complained' : slowed.has(row.status) ? 'pending' : row.direction === 'received' ? 'received' : 'sent'
-const DOMAIN_SLOTS = 3
-const domainOf = (address?: string) => address && address.includes('@') ? address.slice(address.lastIndexOf('@') + 1).toLowerCase() : null
+// Logs' filters beside the list (Signal Log), from 1440 px; narrower, the toolbar's status and stream pickers filter
+// instead, so each filter is on screen once. Each value counts what choosing it would list: the whole log under the other
+// filters (GET /v1/logs?counts=true), not the page on screen. A direction lists a fixed set of rows, so the route
+// skeleton, a loading page and a loaded one hold the same space, and counts arriving move nothing.
+// A status's colour is its badge's in the table (rows.tsx): received mail is green, spam red, sent mail its StatusBadge tone.
+export const logTone = (row: Pick<LogEntry, 'status'>): Tone => row.status === 'received' ? 'success' : row.status === 'spam' ? 'danger' : statusTone(row.status)
 
-export type FacetFilters = { status: string; direction: string; stream: string; can: (key: 'status' | 'direction' | 'stream', value: string) => boolean; set: (key: 'status' | 'direction' | 'stream', value: string) => void }
-export function logFacetGroups(items: LogEntry[] | undefined, filters?: FacetFilters): FacetGroup[] {
-  const count = (test: (row: LogEntry) => boolean) => items ? items.filter(test).length : null
-  const pick = (key: 'status' | 'direction' | 'stream', value: string, current?: string) => filters && filters.can(key, value) ? { selected: current === value, onSelect: () => filters.set(key, current === value ? 'all' : value) } : {}
-  const known = new Set<string>(STATUSES)
-  const domains = new Map<string, number>()
-  for (const row of items ?? []) { const domain = domainOf(row.direction === 'sent' ? row.to[0] : row.from.address); if (domain) domains.set(domain, (domains.get(domain) ?? 0) + 1) }
-  const top = [...domains].sort((a, b) => b[1] - a[1]).slice(0, DOMAIN_SLOTS)
-  return [
-    { key: 'status', title: 'Status', items: [
-      ...STATUSES.map(status => ({ key: status, label: label(status), tone: logTone({ status }), series: statusSeries[status], count: count(row => row.status === status), ...pick('status', status, filters?.status) })),
-      { key: 'other', label: 'Other', tone: 'neutral' as Tone, count: count(row => !known.has(row.status)) },
-    ] },
-    { key: 'direction', title: 'Direction', items: (['sent', 'received'] as const).map(direction => ({ key: direction, label: direction === 'sent' ? 'Sent' : 'Received', series: direction, count: count(row => row.direction === direction), ...pick('direction', direction, filters?.direction) })) },
-    { key: 'stream', title: 'Stream', items: (['transactional', 'marketing'] as const).map(stream => ({ key: stream, label: label(stream), series: stream === 'transactional' ? 'sent' : 'opened', count: count(row => row.stream === stream), ...pick('stream', stream, filters?.stream) })) },
-    { key: 'domain', title: 'Domain', items: Array.from({ length: DOMAIN_SLOTS }, (_, i) => top[i] ? { key: top[i][0], label: top[i][0], count: top[i][1] } : { key: `slot-${i}`, slot: true }) },
-  ]
+// Sent statuses, most looked-for first; received and spam filter received mail (spam is visible to owners and admins).
+export const sentStatuses = ['delivered', 'bounced', 'complained', 'delayed', 'suppressed', 'rejected', 'rendering_failed', 'scheduled', 'queued', 'attempting', 'accepted', 'sent', 'canceled', 'acceptance_unknown', 'simulated']
+export const receivedStatuses = ['received', 'spam']
+/** The statuses a list can filter by, in the order the pickers show them. */
+export function logStatuses(direction: LogDirection, { campaign, canAdminister }: { campaign: boolean; canAdminister: boolean }) {
+  const allowed = new Set([...direction === 'received' ? [] : sentStatuses, ...campaign || direction === 'sent' ? [] : canAdminister ? receivedStatuses : ['received']])
+  return [...receivedStatuses, ...sentStatuses].filter(status => allowed.has(status))
+}
+// Always a row of their own: the outcomes people come for. Every other status is in one Other row's menu.
+const PINNED = ['delivered', 'received', 'bounced', 'complained', 'scheduled', 'spam']
+
+export type LogFilters = { statuses: string[]; status: string; stream: string; streams: boolean; setStatus: (value: string) => void; setStream: (value: string) => void }
+type RailFilters = Pick<LogFilters, 'statuses' | 'streams'> & Partial<LogFilters>
+export function logFacetGroups(counts: LogCounts | undefined, filters: RailFilters): FacetGroup[] {
+  const count = (status: string) => counts ? counts.status[status] ?? 0 : null
+  // A direction with more matching mail than the API counts has lower bounds: they read 5,000+.
+  const atLeast = (status: string) => Boolean(counts && (receivedStatuses.includes(status) ? counts.capped.received : counts.capped.sent))
+  const choose = (status: string) => filters.setStatus?.(filters.status === status ? 'all' : status)
+  const pinned = PINNED.filter(status => filters.statuses.includes(status)), others = filters.statuses.filter(status => !PINNED.includes(status))
+  const chosen = filters.status && others.includes(filters.status) ? filters.status : null
+  // Other opens the statuses with mail (all of them until the counts arrive), each with its count; none, and it is just a zero.
+  const listed = others.filter(status => !counts || status === chosen || (count(status) ?? 0) > 0)
+  const menu = filters.setStatus && listed.length ? listed.map(status => ({ label: counts ? `${label(status)} · ${number(count(status) ?? 0)}${atLeast(status) ? '+' : ''}` : label(status), onSelect: () => choose(status) })) : undefined
+  const groups: FacetGroup[] = [{ key: 'status', title: 'Status', items: [
+    ...pinned.map(status => ({ key: status, label: label(status), tone: logTone({ status }), count: count(status), atLeast: atLeast(status), ...filters.setStatus && { selected: filters.status === status, onSelect: () => choose(status) } })),
+    ...others.length ? [{ key: 'other', label: chosen ? label(chosen) : 'Other', tone: chosen ? logTone({ status: chosen }) : 'neutral' as Tone, dot: Boolean(chosen),
+      count: counts ? chosen ? count(chosen) : others.reduce((sum, status) => sum + (count(status) ?? 0), 0) : null, atLeast: atLeast(others[0]!), selected: Boolean(chosen), menuLabel: chosen ? `Other statuses: ${label(chosen)}` : 'Other statuses', menu }] : [],
+  ] }]
+  // Streams are sent mail's: received mail has none, so the group leaves with it.
+  if (filters.streams) groups.push({ key: 'stream', title: 'Stream', items: (['transactional', 'marketing'] as const).map(stream => ({ key: stream, label: label(stream), dot: false, count: counts ? counts.stream[stream] : null, atLeast: Boolean(counts?.capped.sent),
+    ...filters.setStream && { selected: filters.stream === stream, onSelect: () => filters.setStream!(filters.stream === stream ? 'all' : stream) } })) })
+  return groups
 }
 
-const BINS = 48
-const stamp = (at: string) => date(at, { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' })
-export function logBins(items: LogEntry[] | undefined): { bins: HistogramBin[]; start?: string; end?: string } {
-  const bins: HistogramBin[] = Array.from({ length: BINS }, () => ({}))
-  if (!items?.length) return { bins }
-  const times = items.map(row => Date.parse(row.at)), first = Math.min(...times), last = Math.max(...times), span = Math.max(1, last - first)
-  items.forEach((row, i) => { const bin = bins[Math.min(BINS - 1, Math.floor((times[i] - first) / span * BINS))], series = seriesOf(row); bin[series] = (bin[series] ?? 0) + 1 })
-  return { bins, start: `${stamp(new Date(first).toISOString())} UTC`, end: `${stamp(new Date(last).toISOString())} UTC` }
-}
-
-/** The list's body: the facets beside it, the volume strip over it. */
-export function LogsBody({ items, filters, children }: { items: LogEntry[] | undefined; filters?: FacetFilters; children: ReactNode }) {
-  const { bins, start, end } = logBins(items)
-  return <SplitPane className="logs-split" rail={<FacetRail label="This page" groups={logFacetGroups(items, filters)} />}>
-    <Histogram className="logs-histogram" bins={bins} series={LOG_SERIES} start={start} end={end} label="Volume on this page" />
-    {children}
-  </SplitPane>
+/** The list's body with its filters beside it. `blank`: a log with no mail at all keeps the rail's place, empty. */
+export function LogsBody({ counts, filters, blank, children }: { counts: LogCounts | undefined; filters: RailFilters; blank?: boolean; children: ReactNode }) {
+  return <SplitPane className="logs-split" rail={blank ? null : <FacetRail label="Filters" groups={logFacetGroups(counts, filters)} />}>{children}</SplitPane>
 }

@@ -13805,6 +13805,9 @@
           "received": {
             "type": "boolean",
             "description": "Whether received mail is included: false for direction=sent, with a sent-only filter, or when the credential cannot read inbound mail."
+          },
+          "counts": {
+            "$ref": "#/components/schemas/LogCounts"
           }
         },
         "required": [
@@ -13977,6 +13980,56 @@
           "region",
           "envelopeTo"
         ]
+      },
+      "LogCounts": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "description": "Matching emails per status (sent statuses, received and spam), with every filter but status. A status with none is left out."
+          },
+          "kind": {
+            "type": "object",
+            "properties": {
+              "transactional": {
+                "type": "integer"
+              },
+              "marketing": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "transactional",
+              "marketing"
+            ],
+            "description": "Matching sent emails per kind, with every filter but kind."
+          },
+          "capped": {
+            "type": "object",
+            "properties": {
+              "sent": {
+                "type": "boolean"
+              },
+              "received": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "sent",
+              "received"
+            ],
+            "description": "Per direction: true when it has more than 50,000 matching emails. Its counts then cover that many of its newest and are lower bounds."
+          }
+        },
+        "required": [
+          "status",
+          "kind",
+          "capped"
+        ],
+        "description": "With counts=true only."
       },
       "InboundOverview": {
         "type": "object",
@@ -68849,6 +68902,20 @@
             },
             "required": false,
             "name": "region",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "description": "true adds counts: how many emails match each status and kind for these filters, whatever the cursor and limit."
+            },
+            "required": false,
+            "description": "true adds counts: how many emails match each status and kind for these filters, whatever the cursor and limit.",
+            "name": "counts",
             "in": "query"
           }
         ],

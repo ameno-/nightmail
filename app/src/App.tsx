@@ -22,6 +22,7 @@ const docs = chunk(() => import('./features/docs'))
 const inbound = chunk(() => import('./features/inbound'))
 const operator = chunk(() => import('./features/operator'))
 const supportInbox = chunk(() => import('./features/support-inbox'))
+const supportAction = chunk(() => import('./features/support/actions'))
 const legal = chunk(() => import('./features/legal'))
 const loadOnboarding = onboarding.preload
 const loadOverview = overview.preload
@@ -78,6 +79,7 @@ const OperatorWorkspacePage = operator.page(m => m.OperatorWorkspacePage)
 const OperatorNotesPage = operator.page(m => m.OperatorNotesPage)
 const SupportInboxPage = supportInbox.page(m => m.SupportInboxPage)
 const SupportConversationPage = supportInbox.page(m => m.SupportConversationPage)
+const SupportActionDialog = supportAction.page(m => m.SupportActionDialog)
 const OnboardingPage = onboarding.page(m => m.OnboardingPage)
 const LegalPage = legal.page(m => m.LegalPage)
 
@@ -104,6 +106,8 @@ else if (['/audience', '/contacts', '/lists', '/segments'].some(path => initialP
 else if (['/api-keys', '/domains', '/settings'].some(path => initialPath.startsWith(path))) loadSettings().catch(noop)
 else if (['/receiving', '/inbound', '/mailboxes'].some(path => initialPath.startsWith(path))) loadInbound().catch(noop)
 else if (initialPath.startsWith('/operator')) loadOperator().catch(noop)
+// A change support proposed (its emailed link) opens over Overview.
+else if (initialPath.startsWith('/support/actions/')) { loadOverview().catch(noop); supportAction.preload().catch(noop) }
 else if (initialPath === '/support' || initialPath.startsWith('/support/')) loadSupportInbox().catch(noop)
 
 class AppErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
@@ -174,6 +178,7 @@ const routes = <><Route path="legal/:doc?" element={<ChunkFallback.Provider valu
     <Route path="docs/*" element={<DocsPage />} /><Route path="developer" element={<Moved to={() => '/docs'} />} />
     <Route path="operator" element={<OperatorPage />} /><Route path="operator/notes" element={<OperatorNotesPage />} /><Route path="operator/workspaces/:id" element={<OperatorWorkspacePage />} />
     <Route path="support" element={<SupportInboxPage />} /><Route path="support/:id" element={<SupportConversationPage />} />
+    <Route path="support/actions/:id" element={<><OverviewPage /><ChunkFallback.Provider value={null}><SupportActionDialog /></ChunkFallback.Provider></>} />
     <Route path="*" element={<EmptyState headingAs="h1" title="Page not found" action={<Link to="/overview">Return to overview</Link>} />} />
   </Route></>
 setRouteTable(createRoutesFromChildren(routes))
