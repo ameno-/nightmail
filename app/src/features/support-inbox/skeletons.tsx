@@ -1,24 +1,50 @@
 import type { ReactNode } from 'react'
 import { Keyboard, MoreHorizontal } from 'lucide-react'
 import { useLocation } from 'react-router'
-import { Button, IconButton, LoadingRegion, PageHeader, SearchField, SectionHeader, Skeleton, SkeletonText, TableSkeleton, Tabs, type SkeletonColumn } from '../../components/ui'
-import type { InboxView } from '../../data/support-inbox'
+import { Button, FacetRail, IconButton, LoadingRegion, PageHeader, SearchField, Skeleton, SkeletonText, SplitPane, TableSkeleton, Tabs, type FacetGroup, type SkeletonColumn, type Tone } from '../../components/ui'
+import type { Channel, InboxView, SupportConversation } from '../../data/support-inbox'
+import { label } from '../../lib/format'
 import { ActionsTrigger } from '../operator/skeletons'
 import './support-inbox.css'
 
 // The support inbox's column definitions (card slots included), shared by the route skeleton and the loaded list. A
 // phone's card: the customer and last activity, the conversation, then its status, ticket and agent on one line.
 export const inboxColumnDefs: SkeletonColumn[] = [
-  { key: 'customer', label: 'Customer', width: '22%', card: 'title' },
+  { key: 'customer', label: 'Customer', width: '20%', card: 'title' },
   { key: 'subject', label: 'Conversation', card: 'line' },
   { key: 'status', label: 'Status', width: 152, card: 'line' },
-  { key: 'ticket', label: 'Ticket', width: 120, card: 'inline' },
-  { key: 'agent', label: 'Agent', width: 148, card: 'inline' },
-  { key: 'activity', label: 'Last activity', width: 104, align: 'right', card: 'aside' },
-  { key: 'actions', label: '', width: 48, align: 'right', card: 'end' },
+  { key: 'ticket', label: 'Ticket', width: 96, card: 'inline' },
+  { key: 'agent', label: 'Agent', width: 132, card: 'inline' },
+  { key: 'activity', label: 'Last', width: 64, align: 'right', card: 'aside' },
+  { key: 'actions', label: '', width: 40, align: 'right', card: 'end' },
 ]
 export const inboxViews: { value: InboxView; label: string }[] = [{ value: 'needs_you', label: 'Needs you' }, { value: 'agent', label: 'Agent handling' }, { value: 'all', label: 'All' }]
 export const viewOf = (search: string): InboxView => { const view = new URLSearchParams(search).get('view'); return view === 'agent' || view === 'all' ? view : 'needs_you' }
+export const channelOf = (search: string): Channel | '' => { const channel = new URLSearchParams(search).get('channel'); return channel === 'chat' || channel === 'email' ? channel : '' }
+
+// Why a conversation needs you, the most pressing first: a failed send, blocked work, a customer waiting, a ticket.
+export type Triage = { key: 'failed' | 'blocked' | 'waiting' | 'ticket' | 'paused' | 'status'; text: string; tone: Tone }
+export function triageOf(c: SupportConversation): Triage {
+  const reasons = c.needsYou?.reasons
+  if (!reasons) return { key: 'status', text: label(c.status), tone: 'neutral' }
+  if (reasons.includes('failed')) return { key: 'failed', text: 'Not sent', tone: 'danger' }
+  if (reasons.includes('blocked')) return { key: 'blocked', text: 'Blocked', tone: 'warning' }
+  if (reasons.includes('paused') && c.lastAuthor === 'customer') return { key: 'waiting', text: 'Customer waiting', tone: 'warning' }
+  if (reasons.includes('ticket')) return { key: 'ticket', text: 'Ticket open', tone: c.needsYou!.urgent ? 'warning' : 'info' }
+  return { key: 'paused', text: 'Waiting on you', tone: 'info' }
+}
+const whyFacets: [Triage['key'], string, Tone][] = [['waiting', 'Customer waiting', 'warning'], ['blocked', 'Blocked', 'warning'], ['failed', 'Not sent', 'danger'], ['ticket', 'Ticket open', 'info'], ['paused', 'Waiting on you', 'info']]
+/** The rail beside the list, from the rows on screen: why they need you, their channel (which filters the list) and open tickets. */
+export function inboxFacetGroups(rows: SupportConversation[] | undefined, channel: Channel | '', setChannel?: (channel: Channel | '') => void): FacetGroup[] {
+  const count = (test: (c: SupportConversation) => boolean) => rows ? rows.filter(test).length : null
+  return [
+    { key: 'why', title: 'Why', items: whyFacets.map(([key, text, tone]) => ({ key, label: text, tone, count: count(c => triageOf(c).key === key) })) },
+    { key: 'channel', title: 'Channel', items: (['chat', 'email'] as const).map(value => ({ key: value, label: value === 'chat' ? 'Chat' : 'Email', count: count(c => c.channel === value),
+      ...setChannel ? { selected: channel === value, onSelect: () => setChannel(channel === value ? '' : value) } : {} })) },
+    { key: 'ticket', title: 'Open tickets', items: (['P1', 'P2', 'P3'] as const).map(severity => ({ key: severity, label: severity, tone: (severity === 'P1' ? 'danger' : severity === 'P2' ? 'warning' : 'neutral') as Tone,
+      count: count(c => Boolean(c.ticket && !c.ticket.resolvedAt && c.ticket.severity === severity)) })) },
+  ]
+}
 
 export function InboxTabs({ view, counts, onChange, disabled = false }: { view: InboxView; counts: { needsYou: number; agent: number } | null; onChange?: (view: InboxView) => void; disabled?: boolean }) {
   return <div className="sinbox-tabs"><Tabs value={view} label="Support views" disabled={disabled} onValueChange={value => onChange?.(value as InboxView)}
@@ -29,13 +55,16 @@ export function InboxToolbar({ search = '', onSearch, onShortcuts, disabled = fa
     <SearchField className="search-box--list" aria-label="Search conversations" placeholder="Search conversations" value={search} disabled={disabled} onChange={event => onSearch?.(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') event.currentTarget.blur() }} />
   </div><IconButton className="sinbox-shortcuts-button" label="Keyboard shortcuts" disabled={disabled} onClick={onShortcuts}><Keyboard size={16} /></IconButton></div>
 }
-export function SupportInboxSkeleton({ view }: { view: InboxView }) {
+/** The list beside its rail. */
+export const InboxBody = ({ rows, channel, setChannel, children }: { rows: SupportConversation[] | undefined; channel: Channel | ''; setChannel?: (channel: Channel | '') => void; children: ReactNode }) =>
+  <SplitPane className="sinbox-split" rail={<FacetRail label="These conversations" groups={inboxFacetGroups(rows, channel, setChannel)} />}>{children}</SplitPane>
+export function SupportInboxSkeleton({ view, channel }: { view: InboxView; channel: Channel | '' }) {
   return <>
     <PageHeader title="Support" />
     <LoadingRegion label="Loading support conversations"><div className="sinbox-page">
       <InboxTabs view={view} counts={null} disabled />
       <InboxToolbar disabled />
-      <TableSkeleton className="sinbox-table" columns={inboxColumnDefs} rows={8} />
+      <InboxBody rows={undefined} channel={channel}><TableSkeleton className="sinbox-table" columns={inboxColumnDefs} rows={12} /></InboxBody>
     </div></LoadingRegion>
   </>
 }
@@ -47,7 +76,7 @@ export function ConversationBodySkeleton({ panel }: { panel: boolean }) {
       <div className="sinbox-message__meta"><Skeleton width={96} height={12} /></div>
       <div className="sinbox-message__body"><SkeletonText width={`${width}%`} lineHeight={22} /><SkeletonText width={`${width - 24}%`} lineHeight={22} /></div>
     </li>)}</ol></div>
-    {panel && <aside className="sinbox-panel"><section className="op-section"><SectionHeader title="Customer" /><Skeleton height={128} /></section><section className="op-section"><SectionHeader title="Workspaces" /><Skeleton height={64} /></section></aside>}
+    {panel && <aside className="sinbox-panel"><div className="sinbox-panel__body"><h3 className="ui-label ui-label--rule">Account</h3><Skeleton height={140} /><h3 className="ui-label ui-label--rule">Conversation</h3><Skeleton height={112} /></div></aside>}
   </div>
 }
 /** The header's actions: Customer (the panel, on a phone) and the actions menu. */
@@ -64,5 +93,5 @@ export function SupportConversationSkeleton({ panel }: { panel: boolean }) {
 export function SupportRouteSkeleton({ operator, panel }: { operator: 'operator' | 'operator:read' | null | undefined; panel: boolean }) {
   const { pathname, search } = useLocation()
   if (!operator) return null
-  return pathname.startsWith('/support/') ? <SupportConversationSkeleton panel={panel} /> : <SupportInboxSkeleton view={viewOf(search)} />
+  return pathname.startsWith('/support/') ? <SupportConversationSkeleton panel={panel} /> : <SupportInboxSkeleton view={viewOf(search)} channel={channelOf(search)} />
 }

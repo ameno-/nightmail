@@ -95,7 +95,7 @@ const Detail = z.object({
     conversations: z.array(z.object({ id: z.string(), channel: z.string(), mode: z.string(), verification: z.string(), status: z.string(), subject: z.string().nullable(), ticket: Ticket.nullable(),
       createdAt: z.string(), lastMessageAt: z.string().nullable() })).describe('Their other support conversations, newest first: the same person’s; for a conversation bound to nobody, the others from its address that are bound to nobody either.'),
     activity: z.array(z.object({ id: z.string(), at: z.string(), action: z.string(), workspaceId: z.string().nullable(), actorType: z.string(), via: z.string(), internal: z.boolean(),
-      summary: z.record(z.string(), z.unknown()) })).describe('Their latest 20 audit entries, without support’s own per-request reads.'),
+      summary: z.record(z.string(), z.unknown()) })).describe('Their latest 20 audit entries, without support’s own per-request reads or staff opening the inbox.'),
     notes: z.array(z.object({ id: z.string(), text: z.string(), author: z.enum(['agent', 'staff']), workspaceId: z.string().nullable(), conversationId: z.string(), createdAt: z.string() }))
       .describe('Every live note support keeps about the person (src/support-notes.ts), whatever their memberships now, newest first.'),
   }),
@@ -410,7 +410,7 @@ export function registerSupportInbox(app: App) {
             ELSE o.user_id IS NULL AND lower(o.pending_address) = lower(conv.pending_address) END
           ORDER BY coalesce(o.last_message_at, o.created_at) DESC, o.id DESC LIMIT 20) x) AS conversations,
         (SELECT coalesce(json_agg(x ORDER BY x.at DESC, x.n DESC), '[]') FROM (SELECT 'aud_' || e.id AS id, e.id AS n, e.at, e.action, e.workspace_id AS "workspaceId", e.actor_type AS "actorType", e.via,
-            e.internal, e.summary FROM audit_events e WHERE e.user_id = conv.user_id AND e.action <> 'support.read' ORDER BY e.at DESC, e.id DESC LIMIT 20) x) AS activity,
+            e.internal, e.summary FROM audit_events e WHERE e.user_id = conv.user_id AND e.action NOT IN ('support.read', 'support.inbox_view') ORDER BY e.at DESC, e.id DESC LIMIT 20) x) AS activity,
         (SELECT coalesce(json_agg(x ORDER BY x."createdAt" DESC, x.id DESC), '[]') FROM (SELECT n.id, n.text, n.author, n.workspace_id AS "workspaceId", n.conversation_id AS "conversationId",
             n.created_at AS "createdAt" FROM support_notes n WHERE n.user_id = conv.user_id AND n.deleted_at IS NULL ORDER BY n.created_at DESC, n.id DESC LIMIT 50) x) AS notes,
         ${replyAvailable} AS available

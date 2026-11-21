@@ -2,17 +2,17 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type Form
 import { Link, useLocation, useNavigate, useNavigationType, useParams, useSearchParams } from 'react-router'
 import { useInfiniteQuery, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { Check, Mail, MessageSquare, X } from 'lucide-react'
-import { Button, ConfirmDialog, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, PageHeader, SectionHeader, StatusBadge, StatusDot, Textarea, useToast, type Column, type MenuItem, type Tone } from '../../components/ui'
+import { Button, ConfirmDialog, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, KeyValues, PageHeader, StatusBadge, StatusDot, Textarea, useToast, type Column, type MenuItem, type Tone } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { useSession } from '../../data/context'
 import { ApiError } from '../../data/types'
-import { detailQuery, inboxKeys, listQuery, patchConversation, prefetchConversation, snapshotInbox, supportInboxApi, type InboxView, type SupportAction, type SupportConversation, type SupportDetail, type SupportInboxPage, type SupportMessage } from '../../data/support-inbox'
+import { detailQuery, inboxKeys, listQuery, patchConversation, prefetchConversation, snapshotInbox, supportInboxApi, type Channel, type InboxView, type SupportAction, type SupportConversation, type SupportDetail, type SupportInboxPage, type SupportMessage } from '../../data/support-inbox'
 import { ago, label, number, shortDateTime } from '../../lib/format'
 import { useSearchDraft } from '../../lib/pagination'
 import { usePhone } from '../../lib/media'
 import { Markdown } from '../support/markdown'
-import { ActionsTrigger } from '../operator/skeletons'
-import { ConversationActions, ConversationBodySkeleton, InboxTabs, InboxToolbar, inboxColumnDefs, SupportConversationSkeleton, SupportInboxSkeleton, viewOf } from './skeletons'
+import { ActionsTrigger, StaffOnly } from '../operator/skeletons'
+import { channelOf, ConversationActions, ConversationBodySkeleton, InboxBody, InboxTabs, InboxToolbar, inboxColumnDefs, SupportConversationSkeleton, SupportInboxSkeleton, triageOf, viewOf } from './skeletons'
 
 // The support inbox (lazy, /support): Nightmail staff triage every support conversation. Needs you (the default) is
 // what only a person can move forward, most urgent first (api/src/support-inbox.ts); Agent handling is what the agent
@@ -23,10 +23,9 @@ import { ConversationActions, ConversationBodySkeleton, InboxTabs, InboxToolbar,
 
 // What the inbox keeps between its pages in this visit: the list a conversation was opened from (j and k follow it),
 // the row selected in each view, and unsent replies.
-const memory: { list: { view: InboxView; q: string }; selected: Partial<Record<InboxView, string>>; drafts: Map<string, string> } = { list: { view: 'needs_you', q: '' }, selected: {}, drafts: new Map() }
+const memory: { list: { view: InboxView; q: string; channel: Channel | '' }; selected: Partial<Record<InboxView, string>>; drafts: Map<string, string> } = { list: { view: 'needs_you', q: '', channel: '' }, selected: {}, drafts: new Map() }
 const CONVERSATION = /^conv_[a-z2-7]{26}$/
-const listPath = () => { const params = new URLSearchParams(); if (memory.list.view !== 'needs_you') params.set('view', memory.list.view); if (memory.list.q) params.set('q', memory.list.q); const query = params.toString(); return query ? `/support?${query}` : '/support' }
-const NotFound = () => <EmptyState headingAs="h1" title="Page not found" action={<Link to="/overview">Return to overview</Link>} />
+const listPath = () => { const params = new URLSearchParams(); if (memory.list.view !== 'needs_you') params.set('view', memory.list.view); if (memory.list.q) params.set('q', memory.list.q); if (memory.list.channel) params.set('channel', memory.list.channel); const query = params.toString(); return query ? `/support?${query}` : '/support' }
 const useRole = () => useSession()?.identity?.operator ?? null
 const def = (key: string) => inboxColumnDefs.find(column => column.key === key)!
 const titleOf = (c: SupportConversation) => c.subject ?? c.firstLine ?? 'No messages yet'
@@ -144,16 +143,6 @@ function ConfirmAction({ confirming, onClose, actions }: { confirming: Confirmin
 
 // ---------------------------------------------------------------- cells
 
-const reasonText = { ticket: 'Ticket open', blocked: 'Blocked', failed: 'Not sent', paused: 'Waiting on you' } as const
-// Why a conversation needs you, the most pressing first: a failed send, blocked work, a customer waiting, a ticket.
-function statusOf(c: SupportConversation): { text: string; tone: Tone } {
-  const reasons = c.needsYou?.reasons
-  if (!reasons) return { text: label(c.status), tone: 'neutral' }
-  if (reasons.includes('failed')) return { text: reasonText.failed, tone: 'danger' }
-  if (reasons.includes('blocked')) return { text: reasonText.blocked, tone: 'warning' }
-  if (reasons.includes('paused') && c.lastAuthor === 'customer') return { text: 'Customer waiting', tone: 'warning' }
-  return { text: reasonText[reasons[0]!], tone: c.needsYou!.urgent ? 'warning' : 'info' }
-}
 const ticketText = (c: SupportConversation) => !c.ticket ? null : `${[c.ticket.severity, c.ticket.type && label(c.ticket.type)].filter(Boolean).join(' ') || 'Ticket'}${c.ticket.resolvedAt ? ' · resolved' : ''}`
 function agentOf(c: SupportConversation): { text: string; by?: string; tone: Tone } {
   if (c.agentState === 'active') return { text: c.status === 'closed' ? 'Closed' : 'Active', tone: c.status === 'closed' ? 'neutral' : 'success' }
@@ -179,11 +168,12 @@ export function SupportInboxPage() {
   const role = useRole(), canAct = role === 'operator'
   const location = useLocation(), navigate = useNavigate(), client = useQueryClient(), phone = usePhone()
   const [params, setParams] = useSearchParams()
-  const view = viewOf(location.search), q = (params.get('q') ?? '').trim()
+  const view = viewOf(location.search), channel = channelOf(location.search), q = (params.get('q') ?? '').trim()
   const [search, setSearch] = useSearchDraft(params.get('q') ?? '', value => setParams(previous => { const next = new URLSearchParams(previous); if (value.trim()) next.set('q', value.trim()); else next.delete('q'); return next }, { replace: true }))
-  useEffect(() => { memory.list = { view, q } }, [view, q])
+  useEffect(() => { memory.list = { view, q, channel } }, [view, q, channel])
+  const setChannel = (next: Channel | '') => setParams(previous => { const params = new URLSearchParams(previous); if (next) params.set('channel', next); else params.delete('channel'); return params }, { replace: true })
   // A search keeps the rows it replaces until its answer arrives; another tab never shows this one's.
-  const list = useInfiniteQuery({ ...listQuery(view, q), enabled: Boolean(role), staleTime: 5_000, refetchInterval: 30_000,
+  const list = useInfiniteQuery({ ...listQuery(view, q, channel), enabled: Boolean(role), staleTime: 5_000, refetchInterval: 30_000,
     placeholderData: (previous, query) => query?.queryKey[2] === view ? previous : undefined })
   const rows = flatten(list.data?.pages), counts = list.data?.pages[0]?.counts ?? null
   // Each view keeps its own selected row.
@@ -217,29 +207,29 @@ export function SupportInboxPage() {
     h: () => { if (selected && canAct && selected.agentState === 'paused' && selected.status !== 'closed') setConfirming({ action: 'resume', conversation: selected }) },
     u: () => selected && void actions.read(selected, selected.unread), '?': () => setKeysOpen(true),
   }, Boolean(role))
-  if (!role) return <NotFound />
-  if (!list.data && !list.isError) return <SupportInboxSkeleton view={view} />
+  if (!role) return <StaffOnly />
+  if (!list.data && !list.isError) return <SupportInboxSkeleton view={view} channel={channel} />
   const columns: Column<SupportConversation>[] = [
     { ...def('customer'), render: c => <Who c={c} /> },
     { ...def('subject'), render: c => <Subject c={c} /> },
-    { ...def('status'), render: c => { const s = statusOf(c); return <StatusBadge status={s.text} tone={s.tone} /> }, cardRender: c => statusOf(c).text },
-    { ...def('ticket'), render: c => <span className="op-cell">{ticketText(c) ?? '—'}</span>, cardRender: c => c.ticket && !c.ticket.resolvedAt ? c.ticket.severity ?? 'Ticket' : null },
+    { ...def('status'), render: c => { const s = triageOf(c); return <StatusBadge status={s.text} tone={s.tone} /> }, cardRender: c => triageOf(c).text },
+    { ...def('ticket'), render: c => <span className="sinbox-cell">{ticketText(c) ?? '—'}</span>, cardRender: c => c.ticket && !c.ticket.resolvedAt ? c.ticket.severity ?? 'Ticket' : null },
     { ...def('agent'), render: c => { const a = agentOf(c); return <StatusDot tone={a.tone} note={a.by}>{a.text}</StatusDot> }, cardRender: c => `Agent ${agentOf(c).text.toLowerCase()}` },
     { ...def('activity'), render: c => <time className="nowrap" dateTime={lastActivity(c)} title={when(lastActivity(c))}>{ago(lastActivity(c))}</time> },
     { ...def('actions'), render: c => <DropdownMenu label="Conversation actions" title={titleOf(c)} items={menuItems(c, { canAct, actions, onConfirm: setConfirming, open: () => open(c) })} /> },
   ]
-  const empty = q ? <EmptyState title="No conversation matches" action={<Button onClick={() => setSearch('')}>Clear search</Button>} />
+  const empty = q || channel ? <EmptyState title="No conversation matches" action={<Button onClick={() => { setSearch(''); setChannel('') }}>Clear filters</Button>} />
     : <EmptyState title={view === 'needs_you' ? 'Nothing needs you' : view === 'agent' ? 'The agent has no open conversations' : 'No support conversations yet'} />
   return <>
     <PageHeader title="Support" />
     <div className="sinbox-page">
       <InboxTabs view={view} counts={counts} onChange={next => setParams(previous => { const params = new URLSearchParams(previous); if (next === 'needs_you') params.delete('view'); else params.set('view', next); return params }, { replace: true })} />
       <InboxToolbar search={search} onSearch={setSearch} onShortcuts={() => setKeysOpen(true)} />
-      {list.isError && !list.data ? <ErrorState error={list.error} onRetry={() => void list.refetch()} /> : <>
+      {list.isError && !list.data ? <ErrorState error={list.error} onRetry={() => void list.refetch()} /> : <InboxBody rows={rows} channel={channel} setChannel={setChannel}>
         <DataTable className="sinbox-table" rows={rows} rowKey={c => c.id} columns={columns} selectedId={phone ? undefined : selected?.id} empty={empty}
           rowHref={c => `/support/${c.id}`} rowLabel={titleOf} onRowIntent={c => void prefetchConversation(client, c.id)} />
         {list.hasNextPage && <Button className="sinbox-more" loading={list.isFetchingNextPage} onClick={() => void list.fetchNextPage()}>Load more</Button>}
-      </>}
+      </InboxBody>}
     </div>
     <ConfirmAction confirming={confirming} onClose={() => setConfirming(null)} actions={actions} />
     <ShortcutsDialog open={keysOpen} onClose={() => setKeysOpen(false)} />
@@ -266,7 +256,7 @@ export function SupportConversationPage() {
   const id = useParams().id ?? '', valid = CONVERSATION.test(id)
   const client = useQueryClient(), navigate = useNavigate(), location = useLocation(), phone = usePhone()
   const detail = useQuery({ ...detailQuery(id), enabled: Boolean(role && valid), refetchInterval: 30_000 })
-  const list = useInfiniteQuery({ ...listQuery(memory.list.view, memory.list.q), enabled: Boolean(role), staleTime: 5_000 })
+  const list = useInfiniteQuery({ ...listQuery(memory.list.view, memory.list.q, memory.list.channel), enabled: Boolean(role), staleTime: 5_000 })
   const rows = flatten(list.data?.pages)
   const { next, previous } = useNeighbors(id, rows)
   const conversation = detail.data?.conversation ?? rows.find(c => c.id === id) ?? (valid ? cached(client, id) : undefined)
@@ -293,7 +283,8 @@ export function SupportConversationPage() {
     h: () => { if (conversation && canAct && conversation.agentState === 'paused' && conversation.status !== 'closed') setConfirming({ action: 'resume', conversation }) },
     u: () => conversation && void actions.read(conversation, conversation.unread, conversation.unread ? conversation.messageCount : undefined),
   }, Boolean(role && valid))
-  if (!role || !valid) return <NotFound />
+  if (!role) return <StaffOnly />
+  if (!valid) return <EmptyState headingAs="h1" title="Page not found" action={<Link to="/support">Return to support</Link>} />
   if (!conversation) return detail.isError ? <div className="sinbox-conversation-page"><PageHeader backTo="/support" title="Conversation" /><ErrorState error={detail.error} onRetry={() => void detail.refetch()} /></div> : <SupportConversationSkeleton panel={!phone} />
   const menu = <DropdownMenu label="Conversation actions" title={titleOf(conversation)} trigger={phone ? undefined : <ActionsTrigger />} items={menuItems(conversation, { canAct, actions, onConfirm: setConfirming })} />
   return <div className="sinbox-conversation-page">
@@ -309,10 +300,11 @@ export function SupportConversationPage() {
   </div>
 }
 
+// The facts line under the title, in mono: the channel, why it is here (dot and word) and the agent.
 function Facts({ c }: { c: SupportConversation }) {
-  const status = statusOf(c), agent = agentOf(c)
-  return <p className="sinbox-subtitle"><span className="sinbox-channel"><ChannelIcon channel={c.channel} /></span><span>{c.channel === 'email' ? 'Email' : 'Chat'}</span>
-    <span>{status.text}</span><span>Agent {agent.text.toLowerCase()}{agent.by ? ` by ${agent.by}` : ''}</span></p>
+  const status = triageOf(c), agent = agentOf(c)
+  return <p className="sinbox-subtitle"><span className="sinbox-fact"><ChannelIcon channel={c.channel} />{c.channel === 'email' ? 'Email' : 'Chat'}</span>
+    <span className="sinbox-fact"><StatusBadge status={status.text} tone={status.tone} /></span><span className="sinbox-fact"><span className="sinbox-fact__key">Agent</span>{agent.text.toLowerCase()}{agent.by ? ` by ${agent.by}` : ''}</span></p>
 }
 
 const deliveryBadge: Record<string, { text: string; tone: Tone } | undefined> = { queued: { text: 'Queued', tone: 'warning' }, failed: { text: 'Not sent', tone: 'danger' }, held: { text: 'Held', tone: 'neutral' } }
@@ -320,7 +312,7 @@ function Message({ m, c }: { m: SupportMessage; c: SupportDetail['conversation']
   const author = m.author === 'customer' ? c.customer?.name ?? 'Customer' : m.author === 'agent' ? 'Agent' : m.author === 'staff' ? m.staff?.name ?? 'Staff' : 'System'
   const badge = m.delivery ? deliveryBadge[m.delivery] : undefined
   return <li className="sinbox-message" data-author={m.author} data-pending={m.id.startsWith('pending:') || undefined}>
-    <div className="sinbox-message__meta"><span className="sinbox-message__author">{author}</span>{m.author === 'staff' && <span className="muted">Staff</span>}{badge && <StatusBadge status={badge.text} tone={badge.tone} />}
+    <div className="sinbox-message__meta"><span className="sinbox-message__author">{author}</span>{m.author === 'staff' && <span className="sinbox-message__role">Staff</span>}{badge && <StatusBadge status={badge.text} tone={badge.tone} />}
       <time className="sinbox-message__time" dateTime={m.at}>{when(m.at)}</time></div>
     {m.author === 'agent' ? <div className="sinbox-text"><Markdown text={m.text} /></div> : <div className="sinbox-message__body">{m.text}</div>}
     {m.tools.length > 0 && <ul className="sinbox-tools" aria-label="What the agent checked">{m.tools.map((tool, index) => <li key={index}>{tool.ok ? <Check size={12} aria-label="Done" /> : <X size={12} aria-label="Failed" />}{tool.label}</li>)}</ul>}
@@ -379,47 +371,48 @@ const Composer = forwardRef<ComposerHandle, { detail: SupportDetail; actions: Ac
 
 const verification: Record<SupportConversation['verification'], string> = { handoff: 'Signed in (chat)', dmarc: 'Email passed DMARC', signin: 'Signed in to claim it', none: 'Not verified' }
 const mode: Record<SupportConversation['mode'], string> = { member: 'Member', non_member: 'No workspace', pending_signin: 'Waiting for sign-in', unverified: 'Unverified' }
-const Rows = ({ rows }: { rows: [string, ReactNode][] }) => <dl className="op-rows sinbox-rows">{rows.map(([title, value]) => <div key={title}><dt>{title}</dt><dd>{value}</dd></div>)}</dl>
+// The customer panel (Signal Log): each section a small caps label with its rule over muted keys and mono values, or a short list.
+const Label = ({ children }: { children: ReactNode }) => <h3 className="ui-label ui-label--rule">{children}</h3>
+const None = ({ children }: { children: ReactNode }) => <p className="sinbox-none">{children}</p>
 function CustomerPanel({ detail }: { detail: SupportDetail }) {
   const { conversation: c, customer } = detail, user = customer.user, evidence = c.evidence
   const others = customer.conversations
+  const facts: [string, ReactNode][] = [
+    ...c.workspace ? [['Workspace', c.workspace.name] as [string, ReactNode]] : [],
+    ...c.page ? [['Opened from', c.page] as [string, ReactNode]] : [],
+    ...evidence.dmarc ? [['DMARC', `${evidence.dmarc}${evidence.dkimAligned === null ? '' : evidence.dkimAligned ? ' · DKIM aligned' : ' · DKIM not aligned'}`] as [string, ReactNode]] : [],
+    ['Ticket', c.ticket ? <span className="sinbox-ticket"><span>{ticketText(c)}</span><span className="sinbox-faint">{c.ticket.id}</span></span> : 'None'],
+    ['Agent', `${number(c.turns)} ${c.turns === 1 ? 'turn' : 'turns'} · $${c.costUsd.toFixed(2)}`],
+    ['Started', when(c.createdAt)],
+  ]
   return <div className="sinbox-panel__body">
-    <section className="op-section"><SectionHeader title="Account" />
-      {user ? <Rows rows={[
+    <section><Label>Account</Label>
+      <KeyValues className="sinbox-kv" items={user ? [
         ['Name', user.name ?? '—'],
-        ['Email', user.email ? <span className="sinbox-address"><PrivateAddress value={user.email} />{user.emailVerified ? <span className="sinbox-verified"><Check size={12} aria-hidden="true" />Verified</span> : <span className="muted">Unverified</span>}</span> : '—'],
+        ['Email', user.email ? <span className="sinbox-address"><PrivateAddress value={user.email} />{user.emailVerified ? <StatusBadge status="Verified" tone="success" /> : <StatusBadge status="Unverified" tone="warning" />}</span> : '—'],
         ['Proof', verification[c.verification]], ['Access', mode[c.mode]], ['Signed up', when(user.createdAt)],
-      ]} /> : <Rows rows={[['Sender', c.sender ? <span className="sinbox-address"><PrivateAddress value={c.sender} /></span> : '—'], ['Proof', verification[c.verification]], ['Access', 'No account linked']]} />}
+      ] : [['Sender', c.sender ? <span className="sinbox-address"><PrivateAddress value={c.sender} /></span> : '—'], ['Proof', verification[c.verification]], ['Access', 'No account linked']]} />
     </section>
-    <section className="op-section"><SectionHeader title="Conversation" />
-      <Rows rows={[
-        ...c.workspace ? [['Workspace', c.workspace.name] as [string, ReactNode]] : [],
-        ...c.page ? [['Opened from', <code>{c.page}</code>] as [string, ReactNode]] : [],
-        ...evidence.dmarc ? [['DMARC', `${evidence.dmarc}${evidence.dkimAligned === null ? '' : evidence.dkimAligned ? ' · DKIM aligned' : ' · DKIM not aligned'}`] as [string, ReactNode]] : [],
-        ['Ticket', c.ticket ? <span>{ticketText(c)} <span className="op-muted-id">{c.ticket.id}</span></span> : 'None'],
-        ['Agent', `${number(c.turns)} ${c.turns === 1 ? 'turn' : 'turns'} · $${c.costUsd.toFixed(2)}`],
-        ['Started', when(c.createdAt)],
-      ]} />
-    </section>
-    {user && <section className="op-section"><SectionHeader title="Workspaces" />
+    <section><Label>Conversation</Label><KeyValues className="sinbox-kv" items={facts} /></section>
+    {user && <section><Label>Workspaces</Label>
       {customer.workspaces.length ? <ul className="sinbox-list">{customer.workspaces.map(w => <li key={w.id}>
-        <Link to={`/operator/workspaces/${encodeURIComponent(w.id)}`} className="op-cell">{w.name}</Link>
-        <span className="muted">{[label(w.role), w.standing && w.standing !== 'ok' ? label(w.standing) : null, w.sending?.paused ? 'sending paused' : null, w.inScope ? 'in scope' : null].filter(Boolean).join(' · ')}</span>
-      </li>)}</ul> : <p className="sinbox-none">No workspaces</p>}
+        <Link to={`/operator/workspaces/${encodeURIComponent(w.id)}`} className="sinbox-list__main">{w.name}</Link>
+        <span className="sinbox-list__meta">{[w.role, w.standing && w.standing !== 'ok' ? w.standing : null, w.sending?.paused ? 'paused' : null, w.inScope ? 'in scope' : null].filter(Boolean).join(' · ')}</span>
+      </li>)}</ul> : <None>No workspaces</None>}
     </section>}
-    {user && <section className="op-section"><SectionHeader title="Notes" />
-      {customer.notes.length ? <ul className="sinbox-notes">{customer.notes.map(n => <li key={n.id}><p>{n.text}</p><span className="muted">{n.author === 'agent' ? 'Agent' : 'Staff'} · {when(n.createdAt)}</span></li>)}</ul> : <p className="sinbox-none">No notes</p>}
+    {user && <section><Label>Notes</Label>
+      {customer.notes.length ? <ul className="sinbox-notes">{customer.notes.map(n => <li key={n.id}><p>{n.text}</p><span className="sinbox-list__meta">{n.author} · {when(n.createdAt)}</span></li>)}</ul> : <None>No notes</None>}
     </section>}
-    <section className="op-section"><SectionHeader title="Other conversations" />
+    <section><Label>Other conversations</Label>
       {others.length ? <ul className="sinbox-list">{others.map(o => <li key={o.id}>
-        <Link to={`/support/${o.id}`} className="op-cell">{o.subject ?? (o.channel === 'email' ? 'Email' : 'Chat')}</Link>
-        <span className="muted">{[label(o.status), o.ticket && `${o.ticket.severity ?? ''} ticket${o.ticket.resolvedAt ? ', resolved' : ''}`.trim(), ago(o.lastMessageAt ?? o.createdAt)].filter(Boolean).join(' · ')}</span>
-      </li>)}</ul> : <p className="sinbox-none">No other conversations</p>}
+        <Link to={`/support/${o.id}`} className="sinbox-list__main">{o.subject ?? (o.channel === 'email' ? 'Email' : 'Chat')}</Link>
+        <span className="sinbox-list__meta">{[o.status, o.ticket?.severity, ago(o.lastMessageAt ?? o.createdAt)].filter(Boolean).join(' · ')}</span>
+      </li>)}</ul> : <None>No other conversations</None>}
     </section>
-    {user && <section className="op-section"><SectionHeader title="Recent activity" />
+    {user && <section><Label>Recent activity</Label>
       {customer.activity.length ? <ul className="sinbox-list">{customer.activity.slice(0, 10).map(e => <li key={e.id}>
-        <span className="op-cell">{label(e.action.replace(/[._]/g, ' '))}</span><time className="muted nowrap" dateTime={e.at} title={when(e.at)}>{ago(e.at)}</time>
-      </li>)}</ul> : <p className="sinbox-none">No activity yet</p>}
+        <span className="sinbox-list__main">{label(e.action.replace(/[._]/g, ' '))}</span><time className="sinbox-list__meta" dateTime={e.at} title={when(e.at)}>{ago(e.at)}</time>
+      </li>)}</ul> : <None>No activity yet</None>}
     </section>}
   </div>
 }

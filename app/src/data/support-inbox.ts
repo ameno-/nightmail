@@ -5,6 +5,7 @@ import { request } from './live'
 // staff. Like the rest of the operator API it is left out of the public SDK, so the inbox calls it with the dashboard's
 // own request helper. Its views: Needs you (what only a person can move forward, most urgent first), Agent handling and All.
 export type InboxView = 'needs_you' | 'agent' | 'all'
+export type Channel = 'chat' | 'email'
 export type SupportAuthor = 'customer' | 'agent' | 'staff' | 'system'
 export type TriageReason = 'ticket' | 'blocked' | 'failed' | 'paused'
 export interface SupportTicket { id: string; type: string | null; severity: string | null; resolvedAt: string | null }
@@ -40,9 +41,10 @@ export type SupportAction = 'pause' | 'resume' | 'resolve' | 'done'
 
 const base = '/v1/operator/support-inbox', id = encodeURIComponent
 export const supportInboxApi = {
-  list: ({ view, q, cursor }: { view: InboxView; q?: string; cursor?: string }, signal?: AbortSignal) => {
+  list: ({ view, q, channel, cursor }: { view: InboxView; q?: string; channel?: Channel; cursor?: string }, signal?: AbortSignal) => {
     const params = new URLSearchParams({ view, limit: '50' })
     if (q) params.set('q', q)
+    if (channel) params.set('channel', channel)
     if (cursor) params.set('cursor', cursor)
     return request<SupportInboxPage>(`${base}?${params}`, { signal })
   },
@@ -56,12 +58,12 @@ export const supportInboxApi = {
 export const inboxKeys = {
   all: ['support-inbox'] as const,
   lists: ['support-inbox', 'list'] as const,
-  list: (view: InboxView, q: string) => ['support-inbox', 'list', view, q] as const,
+  list: (view: InboxView, q: string, channel: Channel | '') => ['support-inbox', 'list', view, q, channel] as const,
   detail: (conversationId: string) => ['support-inbox', 'detail', conversationId] as const,
 }
-export const listQuery = (view: InboxView, q: string) => ({
-  queryKey: inboxKeys.list(view, q), initialPageParam: undefined as string | undefined,
-  queryFn: ({ pageParam, signal }: { pageParam: string | undefined; signal: AbortSignal }) => supportInboxApi.list({ view, q: q || undefined, cursor: pageParam }, signal),
+export const listQuery = (view: InboxView, q: string, channel: Channel | '' = '') => ({
+  queryKey: inboxKeys.list(view, q, channel), initialPageParam: undefined as string | undefined,
+  queryFn: ({ pageParam, signal }: { pageParam: string | undefined; signal: AbortSignal }) => supportInboxApi.list({ view, q: q || undefined, channel: channel || undefined, cursor: pageParam }, signal),
   getNextPageParam: (page: SupportInboxPage) => page.nextCursor ?? undefined,
 })
 // A conversation stays fresh for 15 seconds: hovering it, opening it and moving past it read it once.
@@ -81,6 +83,7 @@ export function triage(c: SupportConversation): SupportConversation['needsYou'] 
   return { reasons, urgent: (ticket && c.ticket?.severity === 'P1') || failed || (c.lastAuthor === 'customer' && (paused || blocked)), since: c.needsYou?.since ?? new Date().toISOString() }
 }
 export const inView = (c: SupportConversation, view: InboxView) => view === 'all' ? true : view === 'needs_you' ? c.needsYou !== null : c.status !== 'closed' && c.agentState === 'active' && c.needsYou === null
+const inList = (c: SupportConversation, key: readonly unknown[]) => inView(c, key[2] as InboxView) && (!key[4] || c.channel === key[4])
 
 type ListData = InfiniteData<SupportInboxPage, string | undefined>
 /** Every cached list and the conversation's own page, after `change`: rows that leave a view leave it, and the counts follow. */
@@ -94,12 +97,11 @@ export function patchConversation(client: QueryClient, conversationId: string, c
   const delta = { needsYou: Number(inView(changed, 'needs_you')) - Number(inView(before, 'needs_you')), agent: Number(inView(changed, 'agent')) - Number(inView(before, 'agent')) }
   for (const [key, data] of client.getQueriesData<ListData>({ queryKey: inboxKeys.lists })) {
     if (!data) continue
-    const view = key[2] as InboxView
     client.setQueryData<ListData>(key, {
       ...data,
       pages: data.pages.map(page => ({
         ...page, counts: { needsYou: Math.max(0, page.counts.needsYou + delta.needsYou), agent: Math.max(0, page.counts.agent + delta.agent) },
-        data: page.data.flatMap(c => c.id !== conversationId ? [c] : inView(changed, view) ? [changed] : []),
+        data: page.data.flatMap(c => c.id !== conversationId ? [c] : inList(changed, key) ? [changed] : []),
       })),
     })
   }

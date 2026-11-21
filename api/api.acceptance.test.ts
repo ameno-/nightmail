@@ -7768,7 +7768,7 @@ describe('Hosted MCP OAuth and tools', () => {
           assert.deepEqual(detail.customer.workspaces.map((w: Json) => [w.id, w.role, w.inScope]).sort(), [[acme, 'owner', true], [beta, 'admin', false]].sort());
           assert.ok(detail.customer.conversations.some((o: Json) => o.id === other) && !detail.customer.conversations.some((o: Json) => o.id === chatId || o.id === emailId));
           const actions = detail.customer.activity.map((e: Json) => e.action);
-          assert.ok(actions.includes('support.view') && !actions.includes('support.read'), actions.join());
+          assert.ok(actions.includes('support.view') && !actions.includes('support.read') && !actions.includes('support.inbox_view'), actions.join());
           assert.deepEqual(detail.customer.notes.map((n: Json) => [n.id, n.text, n.workspaceId, n.conversationId]), [[note.id, note.text, acme, chatId]]);
           assert.deepEqual((await db.query(`SELECT DISTINCT user_id, actor_id, internal FROM audit_events WHERE action = 'support.inbox_view' AND target_id = $1 AND actor_id = $2`, [chatId, reader.userId])).rows,
             [{ user_id: owner.userId, actor_id: reader.userId, internal: true }]);

@@ -554,7 +554,7 @@
    "findings": []
   },
   "Support · agent handling · desktop": {
-   "score": 8,
+   "score": 14,
    "findings": []
   },
   "Support · agent handling · phone": {
@@ -562,7 +562,7 @@
    "findings": []
   },
   "Support · conversation · desktop": {
-   "score": 60,
+   "score": 57,
    "findings": [
     "long-block|two of the three dkim records are publis"
    ]
@@ -575,11 +575,11 @@
    ]
   },
   "Support · customer sheet · phone": {
-   "score": 25,
+   "score": 24,
    "findings": []
   },
   "Support · desktop": {
-   "score": 7,
+   "score": 13,
    "findings": []
   },
   "Support · phone": {
