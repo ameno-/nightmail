@@ -6,8 +6,9 @@ import { productName } from '../../api/src/brand.js';
 // Nightmail, from the support Worker's side. Two bindings to the same Nightmail Worker in the same account:
 //
 // - `BANE` → the `SupportPlatform` entrypoint (api/src/support-platform.ts, its source of truth): verify a handoff or an
-//   email sender, mint and revoke a support grant, and grant-scoped GET /v1/support/* reads. No token: the binding is
-//   the credential.
+//   email sender, mint and revoke a support grant, grant-scoped GET /v1/support/* reads, and the staff inbox: mirror each
+//   conversation's transcript and state, read whether staff paused the agent, and pull and acknowledge staff replies.
+//   No token: the binding is the credential.
 // - `BANE_API` → the default entrypoint, Nightmail's public API, as a customer of Nightmail would use it: the support@nightmail.dev
 //   inbound address's own API key (BANE_SUPPORT_INBOX_KEY, limited to that address) reads support mail and sends replies and ticket emails.
 
@@ -20,6 +21,14 @@ export type Handoff = {
 export type HandoffCheck = { ok: true; handoff: Handoff } | { ok: false; code: 'HANDOFF_INVALID' | 'HANDOFF_EXPIRED' | 'HANDOFF_NOT_FOUND' | 'SUPPORT_NOT_CONFIGURED' };
 export type Evidence = { kind: 'dmarc'; result: 'pass'; aligned: true; messageId: string } | { kind: 'magic_link'; confirmedAt: string };
 export type Grant = { id: string; token: string; userId: string; workspaceIds: string[]; ticketRef: string; contentShared: boolean; contentWorkspaceId: string | null; expiresAt: string };
+/** A transcript entry mirrored into the staff inbox. Staff replies come from the inbox, never from here. */
+export type MirroredMessage = { id: string; author: 'customer' | 'agent' | 'system'; kind?: string | null; text: string; tools?: { label: string; ok: boolean }[]; attachments?: string[];
+  delivery?: 'sent' | 'failed' | 'held'; at?: string };
+export type MirroredState = { subject?: string; ticket?: { id: string; type: string; severity: 'P1' | 'P2' | 'P3' }; turns?: number; costUsd?: number; blockedWork?: number; pauseForTicket?: true };
+/** Whether staff paused the agent: checked before every turn and every send. */
+export type InboxState = { id: string; status: 'open' | 'ticketed' | 'closed'; agentState: 'active' | 'paused'; pausedBy: 'staff' | 'ticket' | null; pausedAt: string | null; queuedReplies: number };
+/** A staff reply waiting for this Worker to deliver it. */
+export type OutboxReply = { id: string; conversationId: string; channel: 'chat' | 'email'; text: string; staffName: string | null; createdAt: string };
 
 /** The methods of Nightmail's SupportPlatform entrypoint, as this Worker calls them over RPC. */
 export interface SupportPlatform {
@@ -30,6 +39,18 @@ export interface SupportPlatform {
   read<T = unknown>(path: string, grant: string): Promise<PlatformReply<T>>;
   /** A staff sign-in token from Nightmail's operator check: still an active operator? (staff.ts) */
   verifyStaff(token: string): Promise<{ ok: true; staff: { userId: string; email: string; role: string }; jti: string; expiresAt: string } | { ok: false; code: 'STAFF_INVALID' | 'STAFF_EXPIRED' | 'NOT_OPERATOR' }>;
+  // The staff inbox (api/src/support-inbox.ts). A conversation Nightmail doesn't know (not registered) answers 404.
+  mirrorMessages(conversationId: string, messages: MirroredMessage[]): Promise<PlatformReply<{ data: { id: string; seq: number; created: boolean }[] }>>;
+  mirrorState(conversationId: string, state: MirroredState): Promise<PlatformReply<InboxState>>;
+  inboxState(conversationId: string): Promise<PlatformReply<InboxState>>;
+  pullOutbox(conversationId?: string): Promise<PlatformReply<{ data: OutboxReply[] }>>;
+  markDelivery(conversationId: string, messageId: string, status: 'sent' | 'failed'): Promise<PlatformReply<{ id: string; delivery: 'sent' | 'failed'; deliveredAt: string | null }>>;
+}
+/** A platform reply's body, or (any other status than `ok`) a BaneError the work queue can classify. */
+export function platformBody<T>(reply: PlatformReply<T>, ok = [200, 201]): T {
+  if (ok.includes(reply.status)) return reply.body;
+  const code = (reply.body as { error?: { code?: string } } | null)?.error?.code ?? `HTTP_${reply.status}`;
+  throw new BaneError(reply.status, code, `Nightmail answered ${reply.status} (${code})`, reply.requestId, reply.retryAfter);
 }
 
 export class BaneError extends Error {

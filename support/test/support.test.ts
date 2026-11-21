@@ -831,6 +831,139 @@ describe('support Worker', () => {
       assert.ok(ticket.notified_at && ticket.followup_thread_id);
     });
 
+    // The staff inbox (Nightmail's /support): the fake keeps it in memory, and a conversation is in it once registered.
+    const fakeBane = async (path: string, init?: RequestInit) => (await instance.getWorker('fake-bane')).fetch(`http://fake-bane${path}`, init);
+    const inboxOf = async (id: string) => await (await fakeBane(`/__inbox?id=${id}`)).json() as any;
+    const setInbox = async (body: object) => assert.equal((await fakeBane('/__inbox', { method: 'POST', body: JSON.stringify(body) })).status, 204);
+    const wake = (conversationId: unknown) => instance.dispatchFetch(`${SUPPORT}/hooks/nightmail-wake`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ conversationId }) });
+    const marked = async (messageId: string) => (await fakeCalls(instance)).filter(c => c[0] === 'markDelivery' && c[2] === messageId).map(c => c[3]);
+    /** The wake has queued this staff reply (its pull runs after the 202). */
+    const queued = (id: string, reply: string) => eventually(async () => (await drive(id)).rows.some(r => r.id === `staff:${reply}`) || undefined);
+    async function chat() {
+      const start = await instance.dispatchFetch(`${SUPPORT}/chat/start`, { method: 'POST', headers: { 'content-type': 'application/json', origin: ORIGIN }, body: JSON.stringify({ handoff: handoff() }) });
+      const started = await start.json() as any;
+      const socket = await instance.dispatchFetch(started.socketUrl.replace('wss:', 'https:'), { headers: { upgrade: 'websocket', origin: ORIGIN } });
+      const ws = (socket as any).webSocket; ws.accept();
+      const frames: any[] = []; ws.addEventListener('message', (e: MessageEvent) => frames.push(JSON.parse(String(e.data))));
+      const until = async (match: (f: any) => boolean) => { for (let i = 0; i < 600 && !frames.some(match); i++) await new Promise(r => setTimeout(r, 100)); return frames.find(match); };
+      await until(f => f.type === 'history');
+      return { id: started.conversationId as string, ws, frames, until, say: (clientMessageId: string, text: string) => ws.send(JSON.stringify({ type: 'user.message', clientMessageId, text })) };
+    }
+
+    test('the staff inbox: a chat’s transcript and state are mirrored in order; with Nightmail down they wait and catch up in order', async () => {
+      const c = await chat();
+      await setInbox({ id: c.id, channel: 'chat' });
+      c.say('i1', 'Why are Gmail bounces up?');
+      assert.ok(await c.until(f => f.type === 'message.end' && /Gmail hard-bounced/.test(f.text)));
+      const first = await eventually(async () => { const box = await inboxOf(c.id); return box?.messages.length === 2 && box.state.turns === 1 ? box : undefined; });
+      assert.deepEqual(first.messages.map((m: any) => [m.author, m.kind]), [['customer', null], ['agent', 'reply']]);
+      assert.deepEqual([first.messages[0].text, first.messages[1].tools, first.messages[1].delivery], ['Why are Gmail bounces up?', [{ label: 'Checked your Gmail bounces', ok: true }], undefined]);
+      assert.deepEqual([first.state.blockedWork, first.state.pauseForTicket], [0, undefined]);
+      await setInbox({ down: true });
+      c.say('i2', 'And Gmail bounces today?');
+      assert.ok(await c.until(f => f.type === 'message.end' && /Gmail hard-bounced/.test(f.text) && f.messageId !== first.messages[1].id));
+      const failed = await eventually(async () => { const run = await drive(c.id) as any; return run.meta?.mirrorAttempts ? run : undefined; });
+      assert.ok(failed.meta.mirrorDueAt >= failed.before + 50_000 && failed.alarm === failed.meta.mirrorDueAt, 'Retried on its own schedule, before the idle close.');
+      assert.equal((await inboxOf(c.id)).messages.length, 2, 'Nothing reached the inbox while it was down.');
+      await setInbox({ down: false });
+      await drive(c.id, { tick: true });
+      const caught = await eventually(async () => { const box = await inboxOf(c.id); return box?.messages.length === 4 ? box : undefined; });
+      assert.deepEqual(caught.messages.map((m: any) => [m.author, m.text.slice(0, 13)]), [['customer', 'Why are Gmail'], ['agent', 'Gmail hard-bo'], ['customer', 'And Gmail bou'], ['agent', 'Gmail hard-bo']]);
+      assert.equal((await drive(c.id) as any).meta.mirrorAttempts, 0);
+      c.ws.close();
+    }, 180_000);
+
+    test('the staff inbox: while staff have paused the agent, a chat records and mirrors what the customer writes, takes no turn and says so once; after hand back it answers', async () => {
+      const c = await chat();
+      await setInbox({ id: c.id, channel: 'chat', paused: true });
+      const before = recorded.length;
+      c.say('p1', 'Why are Gmail bounces up?');
+      assert.ok(await c.until(f => f.type === 'message.end' && f.text === 'Someone from the Nightmail team is handling this conversation and will reply here.'));
+      c.say('p2', 'Hello?');
+      const box = await eventually(async () => { const box = await inboxOf(c.id); return box?.messages.length === 3 ? box : undefined; });
+      assert.deepEqual(box.messages.map((m: any) => [m.author, m.text.slice(0, 12)]), [['customer', 'Why are Gmai'], ['system', 'Someone from'], ['customer', 'Hello?']]);
+      await new Promise(r => setTimeout(r, 500));
+      assert.equal(recorded.length, before, 'No model call while paused.');
+      assert.equal(c.frames.filter(f => f.type === 'message.end' && f.text.startsWith('Someone from')).length, 1, 'Told once per pause.');
+      assert.ok(!c.frames.some(f => f.type === 'status' && f.busy));
+      await setInbox({ id: c.id, paused: false });
+      c.say('p3', 'Why are Gmail bounces up now?');
+      assert.ok(await c.until(f => f.type === 'message.end' && /Gmail hard-bounced/.test(f.text)), 'Handed back: the next message gets a turn.');
+      c.ws.close();
+    }, 180_000);
+
+    test('the staff inbox: a staff reply reaches the chat once through the wake, by email when no panel is open, and is marked sent; a wake for an unknown conversation does nothing', async () => {
+      const c = await chat();
+      await setInbox({ id: c.id, channel: 'chat' });
+      const one = 'msg_staffchatoneaaaa', two = 'msg_staffchattwoaaaa';
+      await setInbox({ id: c.id, reply: { id: one, text: 'Hi Ada, I fixed the record on our side.', staffName: 'Dana Rivera' } });
+      assert.equal((await wake(c.id)).status, 202);
+      await queued(c.id, one);
+      await drive(c.id, { tick: true });
+      const start = await c.until(f => f.type === 'message.start' && f.kind === 'staff');
+      assert.deepEqual([start.messageId, start.author], [one, 'Dana Rivera']);
+      assert.ok(await c.until(f => f.type === 'message.end' && f.messageId === one && f.text === 'Hi Ada, I fixed the record on our side.'));
+      assert.deepEqual(await marked(one), ['sent']);
+      // Again: nothing new.
+      assert.equal((await wake(c.id)).status, 202);
+      await new Promise(r => setTimeout(r, 300));
+      await drive(c.id, { tick: true });
+      assert.equal(c.frames.filter(f => f.type === 'message.start' && f.kind === 'staff').length, 1);
+      assert.ok(!(await inboxOf(c.id)).messages.some((m: any) => m.id === one), 'A staff reply is never mirrored back.');
+      c.ws.close();
+      // No panel open: by email to the account address.
+      await setInbox({ id: c.id, reply: { id: two, text: 'One more thing: verification finished.', staffName: 'Dana Rivera' } });
+      await wake(c.id);
+      await queued(c.id, two);
+      await drive(c.id, { tick: true });
+      const emailed = await sends(`staff-${two}`);
+      assert.deepEqual([emailed.length, emailed[0][2], emailed[0][3].to, emailed[0][3].subject], [1, '/v1/inbound/threads', ['ada@acme.test'], 'Re: your Nightmail support chat']);
+      assert.equal(emailed[0][3].text, 'Hi there,\n\nOne more thing: verification finished.\n\nDana Rivera, Nightmail');
+      assert.deepEqual(await marked(two), ['sent']);
+      // Unknown or malformed: 202, and nothing is pulled.
+      const pulls = (await fakeCalls(instance)).filter(x => x[0] === 'pullOutbox').length;
+      for (const id of [`conv_${'z'.repeat(26)}`, 'nope', 42]) assert.equal((await wake(id)).status, 202);
+      await new Promise(r => setTimeout(r, 300));
+      assert.equal((await fakeCalls(instance)).filter(x => x[0] === 'pullOutbox').length, pulls);
+    }, 180_000);
+
+    test('the staff inbox: an email answer written before staff took over is held and never sent; while paused nothing is answered; a staff reply goes only to the verified sender', async () => {
+      const thread = 'thr_held', path = `/v1/inbound/threads/${thread}/reply`;
+      await outage(path, 503);
+      await hook('msg_held_1', thread);
+      const id = await conversationOf(thread);
+      await setInbox({ id, channel: 'email' });
+      let run = await drive(id, { tick: true });
+      assert.equal(states(run)['answer:msg_held_1'], 'pending', 'Written, not sent yet.');
+      const arrived = await eventually(async () => { const box = await inboxOf(id); return box?.messages.length ? box : undefined; });
+      assert.deepEqual([arrived.messages.map((m: any) => [m.author, m.text]), arrived.state.subject], [[['customer', 'Why are Gmail bounces up this week?']], 'Bounces from Gmail?']);
+      await setInbox({ id, paused: true });
+      await outage(path);
+      run = await drive(id, { expire: 'answer:msg_held_1', tick: true });
+      assert.equal(states(run)['answer:msg_held_1'], 'done');
+      assert.equal((await replies(thread, instance)).length, 0, 'Held: never sent.');
+      const held = await eventually(async () => (await inboxOf(id))?.messages.find((m: any) => m.delivery === 'held'));
+      assert.deepEqual([held.author, held.text], ['agent', 'Hi Ada,\n\nGmail hard-bounced 61 of 1,000 sends this week.\n\nNightmail support (AI)']);
+      // Another email while paused: in the inbox, no model call, no answer.
+      const before = recorded.length;
+      await hook('msg_held_2', thread);
+      run = await drive(id, { tick: true });
+      assert.equal(states(run)['answer:msg_held_2'], 'done');
+      assert.equal(recorded.length, before, 'No model call while paused.');
+      assert.equal((await replies(thread, instance)).length, 0);
+      await eventually(async () => (await inboxOf(id))?.messages.filter((m: any) => m.author === 'customer').length === 2 || undefined);
+      // The staff reply: in the thread, to its last message, only to the verified sender, once.
+      const staff = 'msg_staffmailoneaaaa';
+      await setInbox({ id, reply: { id: staff, text: 'Hi Ada, the bounces came from one old import.', staffName: 'Dana Rivera' } });
+      await wake(id);
+      await queued(id, staff);
+      await drive(id, { tick: true });
+      await drive(id, { tick: true });
+      const sent = await sends(`staff-${staff}`);
+      assert.deepEqual([sent.length, sent[0][2], sent[0][3].to, sent[0][3].replyToMessageId, sent[0][3].text], [1, path, ['ada@acme.test'], 'msg_held_2', 'Hi Ada, the bounces came from one old import.']);
+      assert.deepEqual(await marked(staff), ['sent']);
+    }, 180_000);
+
     test('a confirm link that fails to send is retried, and the answer waits for the confirmation', async () => {
       const thread = 'thr_d2', message = 'msg_d2', path = `/v1/inbound/threads/${thread}/reply`;
       await outage(path, 503);

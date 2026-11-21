@@ -14,6 +14,12 @@ const calls = [];
 const used = new Set();
 const shared = new Set();
 let grants = 0;
+// The staff inbox (api/src/support-inbox.ts), in memory: a conversation exists once a test registers it (/__inbox), like
+// Nightmail's 404 for one it never registered; down makes every inbox call answer 503.
+const inbox = new Map();
+let inboxDown = false;
+const missing = () => ok({ error: { code: 'NOT_FOUND' } }, 404), unavailable = () => ok({ error: { code: 'UNAVAILABLE' } }, 503);
+const inboxState = (id, c) => ({ id, status: c.status, agentState: c.paused ? 'paused' : 'active', pausedBy: c.paused || null, pausedAt: c.paused ? new Date().toISOString() : null, queuedReplies: c.outbox.filter(r => !r.delivery).length });
 const ok = (body, status = 200) => ({ status, body, requestId: 'req_' + '0'.repeat(32), retryAfter: null });
 const handoff = token => {
   // Test handoffs are "handoff:<id>:<userId>:<workspaceId>:<share>".
@@ -59,6 +65,42 @@ export class SupportPlatform extends WorkerEntrypoint {
     return { ok: true, staff: { userId, email: userId + '@anoma.ly', role: 'operator:read' }, jti, expiresAt: new Date(Date.now() + 120000).toISOString() };
   }
   async revokeGrant(id) { calls.push(['revokeGrant', id]); return ok({ id, revoked: true }); }
+  async mirrorMessages(id, messages) {
+    calls.push(['mirrorMessages', id, messages.map(m => m.id)]);
+    const c = inbox.get(id);
+    if (inboxDown) return unavailable();
+    if (!c) return missing();
+    return ok({ data: messages.map(m => { const known = c.messages.find(x => x.id === m.id); if (!known) c.messages.push(m); return { id: m.id, seq: c.messages.findIndex(x => x.id === m.id) + 1, created: !known }; }) });
+  }
+  async mirrorState(id, state) {
+    calls.push(['mirrorState', id, state]);
+    const c = inbox.get(id);
+    if (inboxDown) return unavailable();
+    if (!c) return missing();
+    c.state = { ...c.state, ...state };
+    if (state.ticket && c.status === 'open') c.status = 'ticketed';
+    if (state.pauseForTicket && !c.paused) c.paused = 'ticket';
+    return ok(inboxState(id, c));
+  }
+  async inboxState(id) {
+    calls.push(['inboxState', id]);
+    const c = inbox.get(id);
+    if (inboxDown) return unavailable();
+    return c ? ok(inboxState(id, c)) : missing();
+  }
+  async pullOutbox(id) {
+    calls.push(['pullOutbox', id ?? null]);
+    if (inboxDown) return unavailable();
+    return ok({ data: [...inbox].filter(([cid]) => id === undefined || cid === id).flatMap(([cid, c]) => c.outbox.filter(r => !r.delivery).map(r => ({ id: r.id, conversationId: cid, channel: c.channel, text: r.text, staffName: r.staffName, createdAt: r.createdAt }))) });
+  }
+  async markDelivery(id, messageId, status) {
+    calls.push(['markDelivery', id, messageId, status]);
+    const reply = inbox.get(id)?.outbox.find(r => r.id === messageId);
+    if (!reply) return missing();
+    if (reply.delivery === 'sent' && status !== 'sent') return ok({ error: { code: 'SUPPORT_REPLY_DELIVERED' } }, 409);
+    reply.delivery = status;
+    return ok({ id: messageId, delivery: status, deliveredAt: status === 'sent' ? new Date().toISOString() : null });
+  }
   async read(path, grant) {
     calls.push(['read', path, grant === '${GRANT_TOKEN}' ? 'GRANT' : grant]);
     if (grant !== '${GRANT_TOKEN}') return ok({ error: { code: 'SUPPORT_GRANT_REQUIRED' } }, 403);
@@ -77,6 +119,17 @@ export default {
   async fetch(request) {
     const url = new URL(request.url);
     if (url.pathname === '/__calls') return Response.json(calls);
+    // The staff inbox: register a conversation, pause or resume its agent, queue a staff reply, take Nightmail down; and read it.
+    if (url.pathname === '/__inbox') {
+      if (request.method === 'GET') { const c = inbox.get(url.searchParams.get('id')); return Response.json(c ?? null); }
+      const { id, channel, paused, reply, down } = await request.json();
+      if (down !== undefined) inboxDown = down;
+      if (id && !inbox.has(id)) inbox.set(id, { channel: channel ?? 'chat', status: 'open', paused: null, messages: [], state: {}, outbox: [] });
+      const c = id ? inbox.get(id) : null;
+      if (c && paused !== undefined) c.paused = paused ? 'staff' : null;
+      if (c && reply) { c.outbox.push({ ...reply, createdAt: new Date().toISOString(), delivery: null }); c.paused = 'staff'; }
+      return new Response(null, { status: 204 });
+    }
     // An outage refuses the request; a lost one (lost: true) carries it out, then the answer never arrives (the Worker
     // sees the error status, as when a connection drops after Nightmail committed).
     if (url.pathname === '/__outage') {
@@ -126,6 +179,8 @@ const MESSAGES = {
   msg_legacy_waiting: ['thr_legacy_b', 'pat@acme.test', 'FAIL'], msg_legacy_gave_up: ['thr_legacy_c'],
   msg_ticket_throw: ['thr_ticket_throw', null, 'PASS', null, 'Webhook test', 'My webhook test fails with a 500 every time.'],
   msg_ticket_abort: ['thr_ticket_abort', null, 'PASS', null, 'Webhook test', 'My webhook test fails with a 500 every time.'],
+  // The staff inbox's cases.
+  msg_held_1: ['thr_held'], msg_held_2: ['thr_held'],
   // The work ledger's cases.
   msg_rate_1: ['thr_rate_1', 'rate@else.test'], msg_rate_2: ['thr_rate_2', 'rate@else.test'],
   msg_legal_late_1: ['thr_legal_late', 'counsel@late.test', 'PASS', 'legal@dev.bane.mx', 'Preservation', 'Please preserve the records.'],

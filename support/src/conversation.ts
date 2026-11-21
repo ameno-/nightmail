@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { baneApi, BaneError, senderOf, type Handoff, type InboundMessage, type PlatformReply } from './bane.js';
+import { baneApi, BaneError, platformBody, senderOf, type Handoff, type InboundMessage, type MirroredMessage, type MirroredState, type OutboxReply, type PlatformReply } from './bane.js';
 import type { Env } from './env.js';
 import { gate, LINK_ORIGINS, plainText } from './gate.js';
 import { expectation, fileTicket, openFollowUp, ticketEmail, type FiledTicket, type TicketContext } from './tickets.js';
@@ -19,7 +19,11 @@ import { addresses, productName } from '../../api/src/brand.js';
 // - the transcript the panel sees, pending consent, and its work (work.ts): each email, its answer or confirm link or
 //   forward, and each ticket's team email and follow-up are items of their own, retried until done without blocking
 //   the others;
-// - the agent (OpenCode, agent/opencode.ts), whose tools are closures over this object's grant.
+// - the agent (OpenCode, agent/opencode.ts), whose tools are closures over this object's grant;
+// - its place in Nightmail's staff inbox (api/src/support-inbox.ts): every transcript entry and the conversation's state
+//   are mirrored there in order (a cursor over the transcript, retried until Nightmail has them), staff replies arrive as
+//   `staff:` work items (a wake from Nightmail, or the five-minute sweep), and while staff have paused the agent it
+//   records and mirrors what the customer writes but takes no turn and sends no answer (checked before each).
 // The protocol to the panel is support/PROTOCOL.md.
 
 const TURNS_PER_CONVERSATION = 60;
@@ -39,6 +43,12 @@ const FIXED = {
   busy: `Hi,\n\nThanks for writing to ${productName} support. I can’t answer automatically right now. The ${productName} team has your message and will reply here.\n\n${productName} support (AI)`,
 };
 const HELD = `Thanks for writing. I’ve passed this to the ${productName} team to check, and someone will reply here, usually within one business day.\n\n${productName} support (AI)`;
+/** What chat shows when the customer writes while staff have paused the agent (once per pause). */
+const PAUSED = `Someone from the ${productName} team is handling this conversation and will reply here.`;
+/** The fixed replies, as the staff inbox shows them. */
+const FIXED_LABEL: Record<string, string> = { confirm: 'Sent a link to confirm the address', no_account: 'Sent the no-account reply', busy: 'Sent the busy reply' };
+/** Retrying the inbox mirror while Nightmail can't take it: minutes after each failed try. */
+const MIRROR_DELAYS = [1, 2, 5, 15, 30, 60];
 
 type Meta = {
   conversationId: string; channel: 'chat' | 'email'; status: 'open' | 'ticketed' | 'closed';
@@ -48,8 +58,14 @@ type Meta = {
   threadId: string | null; greeted: boolean; turns: number; inputTokens: number; outputTokens: number; cacheReadTokens?: number; costUsd: number;
   ticketId: string | null; lastActivity: number; closedAt: number | null;
   pendingSender: string | null; confirmSentAt: number | null;
+  // The staff inbox: the subject and ticket it lists, the transcript seq mirrored so far and the state last mirrored, the
+  // mirror's retry, the last customer email (a staff reply answers it), the sender whose mail passed DMARC, and whether
+  // chat already said the agent is paused.
+  subject?: string | null; ticket?: { id: string; type: string; severity: 'P1' | 'P2' | 'P3' } | null; mirrored?: number; mirroredState?: string | null;
+  mirrorDueAt?: number | null; mirrorAttempts?: number; lastInbound?: { messageId: string; threadId: string; addressIds?: string[] } | null; dmarcSender?: string | null; pauseNotice?: boolean;
 };
-type Transcript = { id: string; role: 'user' | 'assistant'; kind: 'first' | 'reply' | 'notice' | null; text: string; at: string; tools: { id: string; label: string; ok: boolean }[]; attachments?: { id: string; type: string; width: number | null; height: number | null; name: string }[] };
+type Transcript = { id: string; role: 'user' | 'assistant' | 'staff'; kind: 'first' | 'reply' | 'notice' | 'held' | 'staff' | null; text: string; at: string; tools: { id: string; label: string; ok: boolean }[];
+  attachments?: { id: string; type: string; width: number | null; height: number | null; name: string }[]; author?: string | null; channel?: 'email' };
 type Outgoing = Record<string, unknown> & { type: string };
 type GrantRow = { grant_id: string; token: string; expires_at: number; workspace_ids: string; content_workspace_id: string | null };
 
@@ -62,7 +78,7 @@ type Snapshot = {
 };
 type Incoming = { messageId: string; threadId: string; deliveryId: string };
 type Charges = Record<string, Awaited<ReturnType<typeof countToday>>>;
-type Decision = { message?: Snapshot; charges?: Charges; admission?: Awaited<ReturnType<typeof mailAllowed>>; burst?: boolean; forward?: { target: string; key: string | null } };
+type Decision = { message?: Snapshot; charges?: Charges; admission?: Awaited<ReturnType<typeof mailAllowed>>; burst?: boolean; forward?: { target: string; key: string | null }; recorded?: string };
 /** Where a reply to one message is sent from, and its idempotency key: chosen once, when the reply is queued. */
 type Route = { addressId: string | null; key: string };
 type Answer = { messageId: string; threadId: string; sender: string; dmarc: string; route: Route; fixed?: 'no_account' };
@@ -70,12 +86,14 @@ type Answer = { messageId: string; threadId: string; sender: string; dmarc: stri
 type Imported = { messageId: string; threadId: string; legacy: 1 };
 type Composed = {
   message?: Snapshot; settled?: Answer; owned?: boolean; charges?: Charges; refused?: string | null; allowed?: boolean; images?: Record<string, string>;
-  model?: string; ticketed?: boolean; fixed?: 'no_account' | 'busy'; text?: string | null;
+  model?: string; ticketed?: boolean; fixed?: 'no_account' | 'busy'; text?: string | null; paused?: boolean; held?: string;
 };
 type Confirm = { messageId: string; threadId: string; sender: string; route: Route; text: string };
 type Forward = { messageId: string; threadId: string; target: string; deliveryId: string };
 type Notify = { ticketId: string; key: string; input: { addressId?: string; to: string[]; subject: string; text: string } };
 type FollowUp = { addressId?: string; ctx: TicketContext; ticket: FiledTicket };
+/** A staff reply to deliver, as Nightmail's outbox gave it. */
+type StaffReply = Pick<OutboxReply, 'id' | 'text' | 'staffName'>;
 
 export class SupportConversation extends DurableObject<Env> {
   private readonly sql: SqlStorage;
@@ -88,6 +106,8 @@ export class SupportConversation extends DurableObject<Env> {
   private abort: AbortController | null = null;
   /** Frame sequence: increases across restarts (it starts from the clock), without a storage write per streamed delta. */
   private seq = Date.now() * 1000;
+  /** One inbox mirror at a time, so the cursor only moves forward. */
+  private mirroring: Promise<void> = Promise.resolve();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -156,6 +176,10 @@ export class SupportConversation extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS _support_inbox (message_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, delivery_id TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'new', attempts INTEGER NOT NULL DEFAULT 0, received_at INTEGER NOT NULL, subject TEXT);
       CREATE TABLE IF NOT EXISTS _support_attachments (id TEXT PRIMARY KEY, key TEXT NOT NULL, type TEXT NOT NULL, size INTEGER NOT NULL, width INTEGER, height INTEGER, source TEXT NOT NULL, name TEXT NOT NULL, message_id TEXT, created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS _support_consent (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, workspace_name TEXT NOT NULL, why TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL);`);
+    // A staff reply's author, and an entry that arrived by email (the inbox marks a delivered agent answer sent).
+    const columns = new Set(this.sql.exec<{ name: string }>('PRAGMA table_info(_support_transcript)').toArray().map(c => c.name));
+    if (!columns.has('author')) this.sql.exec('ALTER TABLE _support_transcript ADD COLUMN author TEXT');
+    if (!columns.has('channel')) this.sql.exec('ALTER TABLE _support_transcript ADD COLUMN channel TEXT');
   }
 
   // ---------- state ----------
@@ -354,18 +378,153 @@ export class SupportConversation extends DurableObject<Env> {
       workspace: meta.workspace, contentAccess: meta.contentAccess, busy: this.abort !== null };
   }
   private history() {
-    return this.sql.exec<{ id: string; role: string; kind: string | null; text: string; at: string; tools: string }>('SELECT id, role, kind, text, at, tools FROM _support_transcript ORDER BY seq').toArray()
+    // Held drafts are the inbox's (never sent); email entries never reach a panel.
+    return this.sql.exec<{ id: string; role: string; kind: string | null; text: string; at: string; tools: string; author: string | null }>("SELECT id, role, kind, text, at, tools, author FROM _support_transcript WHERE kind IS NOT 'held' ORDER BY seq").toArray()
       .map(r => {
         const stored = JSON.parse(r.tools) as Transcript['tools'] | { tools: Transcript['tools']; attachments: NonNullable<Transcript['attachments']> };
         const tools = Array.isArray(stored) ? stored : stored.tools, attachments = Array.isArray(stored) ? [] : stored.attachments;
-        return { id: r.id, role: r.role, ...(r.kind ? { kind: r.kind } : {}), text: r.text, at: r.at, ...(r.role === 'assistant' ? { tools } : {}), ...(attachments.length ? { attachments } : {}) };
+        return { id: r.id, role: r.role, ...(r.kind ? { kind: r.kind } : {}), text: r.text, at: r.at, ...(r.role === 'assistant' ? { tools } : {}), ...(r.role === 'staff' ? { author: r.author } : {}), ...(attachments.length ? { attachments } : {}) };
       });
   }
   private pendingConsent() {
     const c = this.sql.exec<{ id: string; workspace_id: string; workspace_name: string; why: string }>("SELECT id, workspace_id, workspace_name, why FROM _support_consent WHERE state = 'pending' ORDER BY created_at DESC LIMIT 1").toArray()[0];
     return c ? { requestId: c.id, workspace: { id: c.workspace_id, name: c.workspace_name }, why: c.why } : null;
   }
-  private record(t: Transcript) { this.sql.exec('INSERT INTO _support_transcript (id, role, kind, text, at, tools) VALUES (?, ?, ?, ?, ?, ?)', t.id, t.role, t.kind, t.text, t.at, JSON.stringify(t.attachments?.length ? { tools: t.tools, attachments: t.attachments } : t.tools)); }
+  private record(t: Transcript) {
+    // An entry is written once (a retried work item records the same ID again).
+    const written = this.sql.exec('INSERT INTO _support_transcript (id, role, kind, text, at, tools, author, channel) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING', t.id, t.role, t.kind, t.text, t.at,
+      JSON.stringify(t.attachments?.length ? { tools: t.tools, attachments: t.attachments } : t.tools), t.author ?? null, t.channel ?? null).rowsWritten;
+    if (written) this.mirrorSoon();
+  }
+
+  // ---------- the staff inbox ----------
+
+  /** Sends what the inbox hasn't seen yet, in the background (the caller never waits on Nightmail). */
+  private mirrorSoon() { this.ctx.waitUntil(this.mirror()); }
+  /** Mirrors in order: one run at a time, from the cursor. */
+  private mirror() { return this.mirroring = this.mirroring.then(() => this.pushMirror()).catch(error => logError(error, { event: 'inbox', code: 'MIRROR_FAILED' }, 'warn')); }
+  /** What the inbox lists about this conversation: its subject, ticket, counters, blocked work and an emailed ticket's pause. */
+  private inboxSnapshot(meta: Meta): MirroredState {
+    const blocked = this.sql.exec<{ n: number }>("SELECT count(*) AS n FROM _support_work WHERE state = 'blocked'").one().n;
+    return { ...meta.subject ? { subject: meta.subject.slice(0, 200) } : {}, ...meta.ticket ? { ticket: meta.ticket } : {}, turns: meta.turns, costUsd: Math.round(meta.costUsd * 10_000) / 10_000, blockedWork: blocked,
+      // After an emailed ticket the team owns the thread: the agent answers no later mail (compose), so the inbox shows it paused.
+      ...meta.channel === 'email' && meta.status === 'ticketed' ? { pauseForTicket: true as const } : {} };
+  }
+  private async pushMirror() {
+    let meta = this.meta();
+    if (!meta) return;
+    try {
+      for (let round = 0; round < 10; round++) {
+        const rows = this.sql.exec<{ seq: number; id: string; role: Transcript['role']; kind: Transcript['kind']; text: string; at: string; tools: string; channel: string | null }>(
+          'SELECT seq, id, role, kind, text, at, tools, channel FROM _support_transcript WHERE seq > ? ORDER BY seq LIMIT 50', meta.mirrored ?? 0).toArray();
+        if (!rows.length) break;
+        // Staff replies are the inbox's own: they are never mirrored back.
+        const messages = rows.filter(r => r.role !== 'staff').map(mirrored);
+        if (messages.length && !this.reachable(await this.env.BANE.mirrorMessages(meta.conversationId, messages))) return;
+        meta = this.update(m => { m.mirrored = rows.at(-1)!.seq; });
+      }
+      const state = this.inboxSnapshot(meta), wanted = JSON.stringify(state);
+      if (wanted !== meta.mirroredState) {
+        if (!this.reachable(await this.env.BANE.mirrorState(meta.conversationId, state))) return;
+        meta = this.update(m => { m.mirroredState = wanted; });
+      }
+      if (meta.mirrorDueAt || meta.mirrorAttempts) this.update(m => { m.mirrorDueAt = null; m.mirrorAttempts = 0; });
+    } catch (error) {
+      // Nightmail is unreachable or refused it: try again later, from the same place.
+      const attempts = (meta.mirrorAttempts ?? 0) + 1, minutes = MIRROR_DELAYS[Math.min(attempts, MIRROR_DELAYS.length) - 1]!;
+      this.update(m => { m.mirrorAttempts = attempts; m.mirrorDueAt = Date.now() + minutes * 60_000; });
+      logError(error, { event: 'inbox', code: 'MIRROR_RETRY', attempts }, 'warn');
+      await this.arm();
+    }
+  }
+  /**
+   * Whether Nightmail took a mirror call. A conversation it hasn't registered (404) waits, without retrying, until the
+   * next entry or registration; anything else that isn't a success is retried.
+   */
+  private reachable(reply: PlatformReply<unknown>) {
+    if (reply.status === 404) { if (this.meta()?.mirrorDueAt) this.update(m => { m.mirrorDueAt = null; m.mirrorAttempts = 0; }); return false; }
+    platformBody(reply);
+    return true;
+  }
+  /**
+   * Whether staff have paused the agent here. A conversation Nightmail hasn't registered is never paused. `strict`: a
+   * send waits (throws, so its work is retried) when Nightmail can't say; a chat turn goes ahead.
+   */
+  private async paused(meta: Meta, strict: boolean): Promise<boolean> {
+    try {
+      const reply = await this.env.BANE.inboxState(meta.conversationId);
+      if (reply.status === 404) return false;
+      return platformBody(reply).agentState === 'paused';
+    } catch (error) {
+      if (strict) throw error instanceof BaneError ? error : new BaneError(503, 'INBOX_STATE_UNAVAILABLE', 'The inbox state could not be read');
+      logError(error, { event: 'inbox', code: 'INBOX_STATE_UNAVAILABLE' }, 'warn');
+      return false;
+    }
+  }
+
+  /** Nightmail's wake (worker.ts /hooks/nightmail-wake): this conversation's staff replies, pulled now. */
+  async wake(): Promise<{ ok: boolean; queued: number }> {
+    const meta = this.meta();
+    if (!meta || meta.status === 'closed') return { ok: false, queued: 0 };
+    const pulled = platformBody(await this.env.BANE.pullOutbox(meta.conversationId));
+    return { ok: true, queued: await this.deliver({ replies: pulled.data }) };
+  }
+  /** Staff replies for this conversation (from its wake, or the sweep's pull of every conversation's): each one item. */
+  async deliver({ replies }: { replies: (StaffReply & { conversationId?: string })[] }): Promise<number> {
+    const meta = this.meta();
+    if (!meta) return 0;
+    let queued = 0;
+    for (const reply of replies) {
+      if (reply.conversationId && reply.conversationId !== meta.conversationId) continue;
+      if (this.work.insert({ kind: 'staff', id: `staff:${reply.id}`, payload: { id: reply.id, text: reply.text, staffName: reply.staffName } satisfies StaffReply })) queued++;
+    }
+    if (queued) await this.arm();
+    return queued;
+  }
+  /**
+   * One staff reply, delivered once. Email: a reply in the thread to its last customer message, only to the address whose
+   * mail passed DMARC there. Chat: into the transcript and every open socket, or, with none open, an email to the account
+   * address the dashboard handoff vouched for. Then Nightmail records it sent; one that can't be delivered is marked failed.
+   */
+  private async staffReply(item: WorkRow, reply: StaffReply): Promise<Outcome> {
+    const progress: { recorded?: boolean; emailed?: boolean; failed?: string } = JSON.parse(item.result), save = () => this.work.checkpoint(item.id, progress);
+    const meta = this.meta()!, author = reply.staffName ?? `The ${productName} team`, at = new Date().toISOString();
+    const recipient = meta.email && (meta.verified || meta.dmarcSender === meta.email) ? meta.email : null;
+    const settle = async (status: 'sent' | 'failed') => { platformBody(await external(this.env.BANE.markDelivery(meta.conversationId, reply.id, status))); return { result: progress }; };
+    try {
+      if (meta.channel === 'email') {
+        const last = meta.lastInbound;
+        if (!recipient || !last) { progress.failed = recipient ? 'no message to reply to' : 'sender not verified'; save(); return settle('failed'); }
+        if (!progress.emailed) {
+          await external(baneApi(this.env).reply(last.threadId, { replyToMessageId: last.messageId, text: reply.text, to: recipient, addressId: this.route({ addressIds: last.addressIds } as Snapshot, last.messageId, 'reply').addressId }, `staff-${reply.id}`));
+          progress.emailed = true; save();
+        }
+      } else {
+        const open = this.ctx.getWebSockets().length > 0;
+        if (!progress.recorded) {
+          this.record({ id: reply.id, role: 'staff', kind: 'staff', text: reply.text, at, tools: [], author });
+          this.broadcast({ type: 'message.start', messageId: reply.id, kind: 'staff', author });
+          this.broadcast({ type: 'message.end', messageId: reply.id, text: reply.text, redacted: false });
+          progress.recorded = true; save();
+        }
+        if (!open && !progress.emailed) {
+          if (!recipient) { progress.failed = 'no account address'; save(); return settle('failed'); }
+          const first = meta.name?.split(/\s+/)[0] ?? 'there';
+          await external(baneApi(this.env).startThread({ to: [recipient], subject: `Re: your ${productName} support chat`, text: [`Hi ${first},`, '', reply.text, '', `${author}, ${productName}`].join('\n') }, `staff-${reply.id}`));
+          progress.emailed = true; save();
+        }
+      }
+    } catch (error) {
+      // A reply Nightmail refuses for good (no reply target, recipients changed): failed, so staff see it wasn't sent.
+      if (error instanceof BaneError && error.status >= 400 && error.status < 500 && error.status !== 429 && !['IDEMPOTENCY_IN_PROGRESS'].includes(error.code)) {
+        progress.failed = error.code; save();
+        return settle('failed');
+      }
+      throw error;
+    }
+    if (meta.channel === 'email' && !progress.recorded) { this.record({ id: reply.id, role: 'staff', kind: 'staff', text: reply.text, at, tools: [], author }); progress.recorded = true; save(); }
+    return settle('sent');
+  }
   private broadcast(message: Outgoing) {
     const frame = JSON.stringify({ v: 1, ...message, seq: ++this.seq });
     for (const ws of this.ctx.getWebSockets()) { try { ws.send(frame); } catch { /* closed */ } }
@@ -420,6 +579,13 @@ export class SupportConversation extends DurableObject<Env> {
       await this.harnessTicket(meta, internal('Conversation limit reached', `The conversation reached its ${refused === 'turns' ? `${TURNS_PER_CONVERSATION}-turn` : 'token'} limit before it was resolved.`, input.text ?? '', 'Read the conversation and reply to the customer.'));
       return;
     }
+    // Staff have paused the agent (api/src/support-inbox.ts): the message is recorded and mirrored, and no turn runs. The
+    // customer is told once per pause.
+    if (await this.paused(meta, false)) {
+      if (!meta.pauseNotice) { this.notice(PAUSED); this.update(m => { m.pauseNotice = true; }); }
+      return;
+    }
+    if (meta.pauseNotice) meta = this.update(m => { m.pauseNotice = false; });
     // Daily caps (review M5): this person's turns and everyone's, before any model call.
     const allowed = await this.turnAllowed(meta);
     if (!allowed.ok) {
@@ -553,12 +719,13 @@ export class SupportConversation extends DurableObject<Env> {
       // Emailing the team and, for a chat, opening the customer's follow-up thread are work of their own, retried until
       // sent. Each is the request built now (its screenshot links signed once), from the address configured now.
       this.ctx.storage.transactionSync(() => {
-        this.update(m => { m.ticketId = filed.id; m.status = 'ticketed'; });
+        this.update(m => { m.ticketId = filed.id; m.status = 'ticketed'; m.ticket = { id: filed.id, type: input.type, severity: input.severity }; });
         this.work.insert({ kind: 'notify', id: `notify:${filed.id}`, payload: { ticketId: filed.id, key: `ticket-${filed.id}`,
           input: { addressId: this.env.SUPPORT_ADDRESS_ID, to: [this.env.TICKET_TO], ...ticketEmail(this.env, ctx, filed, input) } } satisfies Notify });
         if (meta.channel === 'chat') this.work.insert({ kind: 'followup', id: `followup:${filed.id}`, payload: { addressId: this.env.SUPPORT_ADDRESS_ID, ctx, ticket: filed } satisfies FollowUp });
       });
       log('info', { event: 'ticket', code: 'TICKET_FILED', ticket: filed.id, type: input.type, channel: meta.channel });
+      this.mirrorSoon();
       await this.arm();
       if (meta.channel === 'chat') this.broadcast({ type: 'ticket.filed', ticketId: filed.id, ticketType: input.type, category: input.details.topic ?? input.type, replyTo: filed.replyTo, expect: expectation(input) });
     }
@@ -590,7 +757,7 @@ export class SupportConversation extends DurableObject<Env> {
       case 'confirm': {
         const link = payload as Confirm;
         await external(baneApi(this.env).reply(link.threadId, { replyToMessageId: link.messageId, text: link.text, to: link.sender, subject: FIXED_SUBJECT, addressId: link.route.addressId }, link.route.key));
-        this.record({ id: newId('msg'), role: 'assistant', kind: 'notice', text: '[fixed reply: confirm]', at: new Date().toISOString(), tools: [] });
+        this.record({ id: newId('msg'), role: 'assistant', kind: 'notice', text: FIXED_LABEL.confirm!, at: new Date().toISOString(), tools: [], channel: 'email' });
         return {};
       }
       case 'forward': {
@@ -616,6 +783,7 @@ export class SupportConversation extends DurableObject<Env> {
         if (sent) this.update(m => { m.threadId ??= sent.threadId; });
         return {};
       }
+      case 'staff': return this.staffReply(item, payload as StaffReply);
       default: throw new Error('Unknown work kind');
     }
   }
@@ -684,6 +852,7 @@ export class SupportConversation extends DurableObject<Env> {
       const still = await external(this.env.BANE.verifyEmail({ email: sender, evidence: { kind: 'dmarc', result: 'pass', aligned: true, messageId: message.messageId ?? next.messageId }, ticketRef: meta.conversationId }));
       if (still.status !== 200) throw new BaneError(still.status, 'VERIFY_FAILED', 'verify-email failed', still.requestId, still.retryAfter);
       if (!still.body.verified || still.body.user?.id !== meta.userId) return this.forward(next, progress, save, sender, 'account_changed');
+      this.arrived(next, message, progress, save, sender, dmarcPass);
       return { result: progress, children: [this.answerFor(message, next, sender, dmarc)] };
     }
 
@@ -691,6 +860,7 @@ export class SupportConversation extends DurableObject<Env> {
     if (!meta.email) meta = this.update(m => { m.email = sender; });
     if (dmarcPass) {
       const verified = await this.verifySender(meta, sender, { kind: 'dmarc', result: 'pass', aligned: true, messageId: message.messageId ?? next.messageId });
+      this.arrived(next, message, progress, save, sender, dmarcPass);
       return { result: progress, children: [this.answerFor(message, next, sender, dmarc, verified ? undefined : 'no_account')] };
     }
     // No DMARC pass (review R2): the answer waits for a confirmation, and nothing vanishes.
@@ -700,6 +870,7 @@ export class SupportConversation extends DurableObject<Env> {
     const hash = await addressHash(sender), cap = limits(this.env), now = Date.now();
     const pending = await external(this.env.DB.prepare('SELECT conversation_id, sent_at FROM pending_confirms WHERE address_hash = ? AND sent_at > ?').bind(hash, now - 86_400_000).first<{ conversation_id: string; sent_at: number }>());
     if (pending && pending.conversation_id !== meta.conversationId && !meta.confirmSentAt) return this.forward(next, progress, save, sender, 'pending_confirm', pending.conversation_id);
+    this.arrived(next, message, progress, save, sender, dmarcPass);
     const answer: NewWork = { ...this.answerFor(message, next, sender, dmarc), state: 'parked' };
     if (meta.confirmSentAt && now - meta.confirmSentAt < cap.confirmResendMinutes * 60_000) return { result: progress, children: [answer] };
     if (!(await count(this.env, `sender:${hash}:confirm`, cap.confirmsPerAddress)).ok) {
@@ -713,6 +884,21 @@ export class SupportConversation extends DurableObject<Env> {
     this.update(m => { m.pendingSender = sender; m.confirmSentAt = now; });
     const confirm: Confirm = { messageId: next.messageId, threadId: message.threadId ?? next.threadId, sender, route: this.route(message, next.messageId, 'confirm'), text: FIXED.confirm(link) };
     return { result: progress, children: [{ kind: 'confirm', id: `confirm:${next.messageId}`, payload: confirm }, answer] };
+  }
+
+  /**
+   * A customer email this conversation answers: in its transcript, and so the staff inbox, as it arrives (once), with what a
+   * staff reply needs: the message to answer, and whether its sender passed DMARC. The first one's subject names the
+   * conversation in the inbox.
+   */
+  private arrived(next: Incoming, message: Snapshot, progress: Decision, save: () => void, sender: string, dmarcPass: boolean) {
+    this.update(m => {
+      m.subject ??= message.subject ?? null;
+      m.lastInbound = { messageId: next.messageId, threadId: message.threadId ?? next.threadId, ...(message.addressIds ? { addressIds: message.addressIds } : {}) };
+      if (dmarcPass) m.dmarcSender = sender;
+    });
+    if (!progress.recorded) { progress.recorded = newId('msg'); save(); }
+    this.record({ id: progress.recorded, role: 'user', kind: null, text: bodyOf(message), at: new Date().toISOString(), tools: [], channel: 'email' });
   }
 
   /**
@@ -746,15 +932,23 @@ export class SupportConversation extends DurableObject<Env> {
     if (!('route' in queued) && !progress.settled) { progress.settled = { messageId: queued.messageId, threadId: message.threadId ?? queued.threadId, sender: message.from ?? '', dmarc: dmarcOf(message), route: this.route(message, queued.messageId, 'reply') }; save(); }
     const answer = 'route' in queued ? queued : progress.settled!;
     if (progress.text === undefined) await this.compose(answer, message, progress, save);
-    // Added to the ticket instead: the team owns the thread.
+    // Added to the ticket instead (the team owns the thread), or not written at all (staff had paused the agent).
     if (progress.text === null || progress.text === undefined) return { result: progress };
+    // Staff took over after this answer was written: it stays a held draft in the inbox and is never sent.
+    if (!progress.fixed && await this.paused(this.meta()!, true)) {
+      if (!progress.held) { progress.held = newId('msg'); save(); }
+      this.record({ id: progress.held, role: 'assistant', kind: 'held', text: progress.text, at: new Date().toISOString(), tools: [], channel: 'email' });
+      return { result: progress };
+    }
     // Only ever to the address that wrote; Reply-To and Cc are ignored.
     await external(baneApi(this.env).reply(answer.threadId, { replyToMessageId: answer.messageId, text: progress.text, to: answer.sender, addressId: answer.route.addressId, ...(progress.fixed ? { subject: FIXED_SUBJECT } : {}) }, answer.route.key));
     const at = new Date().toISOString();
-    if (progress.fixed) this.record({ id: newId('msg'), role: 'assistant', kind: 'notice', text: `[fixed reply: ${progress.fixed}]`, at, tools: [] });
+    if (progress.fixed) this.record({ id: newId('msg'), role: 'assistant', kind: 'notice', text: FIXED_LABEL[progress.fixed]!, at, tools: [], channel: 'email' });
     else {
-      this.record({ id: newId('msg'), role: 'user', kind: null, text: bodyOf(message), at, tools: [] });
-      this.record({ id: newId('msg'), role: 'assistant', kind: 'reply', text: progress.text, at, tools: [] });
+      // The customer's message was recorded when it arrived; one from before that (imported) is recorded with its answer.
+      const decided = this.sql.exec<{ result: string }>('SELECT result FROM _support_work WHERE id = ?', `msg:${answer.messageId}`).toArray()[0];
+      if (!(decided && (JSON.parse(decided.result) as Decision).recorded)) this.record({ id: newId('msg'), role: 'user', kind: null, text: bodyOf(message), at, tools: [], channel: 'email' });
+      this.record({ id: newId('msg'), role: 'assistant', kind: 'reply', text: progress.text, at, tools: [], channel: 'email' });
     }
     return { result: progress };
   }
@@ -774,6 +968,8 @@ export class SupportConversation extends DurableObject<Env> {
       progress.text = null; save();
       return;
     }
+    // Staff have paused the agent: no model turn, and nothing is sent. Decided once, before the model runs.
+    if (progress.model === undefined && progress.allowed === undefined && await this.paused(meta, true)) { progress.paused = true; progress.text = null; save(); return; }
     // Fail closed: without the gateway key the answer waits, blocked, until the key is set.
     if (!this.env.CONSOLE_GATEWAY_KEY) throw new MissingSecret('CONSOLE_GATEWAY_KEY');
     if (!meta.verified || meta.email !== answer.sender) throw new Error('An agent answer needs the verified sender');
@@ -897,6 +1093,8 @@ export class SupportConversation extends DurableObject<Env> {
   override async alarm() {
     if (!this.meta()) return;
     await this.work.drain(item => this.run(item), (item, state) => this.legacy(item, state), () => this.deadline());
+    // The inbox: what a failed mirror left, and the state this drain changed (blocked work, a ticket).
+    await this.mirror();
     let meta = this.meta()!;
     const now = Date.now();
     if (!meta.closedAt && now >= meta.lastActivity + this.idle(meta)) { await this.close('idle'); meta = this.meta()!; }
@@ -917,9 +1115,9 @@ export class SupportConversation extends DurableObject<Env> {
   private deadline() {
     const meta = this.meta();
     if (!meta) return null;
-    if (!meta.closedAt) return meta.lastActivity + this.idle(meta);
-    const keep = meta.closedAt + KEEP_AFTER_CLOSE_MS;
-    return keep > Date.now() || !this.work.open() ? keep : null;
+    const own = !meta.closedAt ? meta.lastActivity + this.idle(meta) : meta.closedAt + KEEP_AFTER_CLOSE_MS > Date.now() || !this.work.open() ? meta.closedAt + KEEP_AFTER_CLOSE_MS : null;
+    // A mirror that failed is retried at its time, beside the rest.
+    return meta.mirrorDueAt ? own === null ? meta.mirrorDueAt : Math.min(own, meta.mirrorDueAt) : own;
   }
   private arm() { return this.work.arm(this.deadline()); }
 
@@ -937,6 +1135,16 @@ import { log, logError } from './log.js';
 const SPECS = new Map(TOOLS.map(t => [t.name, t]));
 function labels(tool: string, args: Record<string, unknown>) {
   return SPECS.get(tool)?.label(args) ?? { running: 'Working on it…', done: 'Done' };
+}
+
+/** A transcript row as the staff inbox stores it: who wrote it, its tools by label and outcome, its screenshots by ID. */
+function mirrored(row: { id: string; role: Transcript['role']; kind: Transcript['kind']; text: string; at: string; tools: string; channel: string | null }): MirroredMessage {
+  const stored = JSON.parse(row.tools) as Transcript['tools'] | { tools: Transcript['tools']; attachments: NonNullable<Transcript['attachments']> };
+  const tools = (Array.isArray(stored) ? stored : stored.tools).map(t => ({ label: t.label.slice(0, 80) || 'Done', ok: t.ok })).slice(0, 50);
+  const attachments = (Array.isArray(stored) ? [] : stored.attachments).map(a => a.id).filter(id => /^att_[a-z2-7]{16}$/.test(id)).slice(0, 20);
+  const author = row.role === 'user' ? 'customer' : row.kind === 'notice' ? 'system' : 'agent';
+  return { id: row.id, author, kind: row.kind, text: row.text.slice(0, 16_000), tools: author === 'agent' ? tools : [], attachments,
+    ...author === 'agent' && row.kind === 'held' ? { delivery: 'held' as const } : author === 'agent' && row.channel === 'email' ? { delivery: 'sent' as const } : {}, at: row.at };
 }
 
 /** A ticket the harness files itself (limits, the output gate, later mail): typed `other`, never shown as the model's. */

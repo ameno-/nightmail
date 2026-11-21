@@ -17,6 +17,8 @@ export interface Env {
   EMAIL_IN?: RateLimit;
   /** One key across all inbound mail, at a higher rate (the Worker answers 503 so Nightmail retries later). */
   EMAIL_IN_GLOBAL?: RateLimit;
+  /** Nightmail's wakes after a staff reply (content-free; one key for all). */
+  WAKE?: RateLimit;
   /** Screenshots: the stage's private uploads bucket (bane-support[-dev]-uploads, 90-day lifecycle). */
   UPLOADS: R2Bucket;
   /** Optional: downscales large screenshots before the model sees them (Cloudflare Images binding). */

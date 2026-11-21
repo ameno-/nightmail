@@ -1,4 +1,5 @@
 import type { Env } from './env.js';
+import { platformBody, type OutboxReply } from './bane.js';
 import { INTAKE, type Mailbox } from './intake.js';
 import { countToday, overflowRow, resendNotices } from './limits.js';
 import { fromRow, type TicketRow } from './tickets.js';
@@ -9,7 +10,9 @@ import { log, logError } from './log.js';
 // The work ledger (D1 `support_work`, migrations/0005). Every message a flow accepts gets a row before its webhook
 // answers, mail refused at the edge is kept as a row instead of vanishing, and each object mirrors its work items here
 // (work.ts). The cron sweep (every five minutes) reads it, never each object, to finish what an earlier step left:
-// unsent team notices, intake mail for an address configured since, and tickets no team email or follow-up covers.
+// unsent team notices, intake mail for an address configured since, and tickets no team email or follow-up covers. It
+// also pulls the staff inbox's replies (api/src/support-inbox.ts) and hands each to its conversation: a wake does the
+// same for one conversation at once, and pulling is what lets staff reply at all (they can only while it happens).
 
 export type Source = 'webhook' | 'poller';
 const DAY = 86_400_000, MINUTES_10 = 600_000;
@@ -83,12 +86,25 @@ export async function blockUnconfigured(env: Env, input: { messageId: string; th
 /** Every five minutes: each step on its own, so one failing never stops the others. */
 export async function sweep(env: Env, now = Date.now()) {
   const result: Record<string, number> = {};
-  const steps: [string, () => Promise<number>][] = [['notices', () => resendNotices(env, now)], ['intake', () => acceptConfigured(env, now)], ['tickets', () => ticketMail(env, now)]];
+  const steps: [string, () => Promise<number>][] = [['notices', () => resendNotices(env, now)], ['intake', () => acceptConfigured(env, now)], ['tickets', () => ticketMail(env, now)], ['staff', () => staffReplies(env)]];
   for (const [name, step] of steps) {
     try { result[name] = await step(); }
     catch (error) { logError(error, { event: 'scheduled', code: 'SUPPORT_SWEEP_STEP_FAILED', step: name }); }
   }
   return result;
+}
+
+/** Every staff reply waiting in Nightmail's outbox, to its conversation (each queues it once). */
+async function staffReplies(env: Env) {
+  const pulled = platformBody(await env.BANE.pullOutbox());
+  const byConversation = new Map<string, OutboxReply[]>();
+  for (const reply of pulled.data) byConversation.set(reply.conversationId, [...byConversation.get(reply.conversationId) ?? [], reply]);
+  let n = 0;
+  for (const [id, replies] of byConversation) {
+    try { n += await env.CONVERSATION.get(env.CONVERSATION.idFromName(id)).deliver({ replies }); }
+    catch (error) { logError(error, { event: 'inbox', code: 'STAFF_REPLY_HANDOFF_FAILED' }, 'warn'); }
+  }
+  return n;
 }
 
 /** Intake mail blocked for an unlisted address, accepted once INTAKE_ADDRESSES lists it. */
