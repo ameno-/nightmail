@@ -106,7 +106,7 @@ export const campaigns = pgTable('sending_campaigns', {
   probeSkippedAt: time('probe_skipped_at'),
   // After an owner resumed a failed list probe: the rest is released only to contacts the workspace delivered to before.
   deliveredOnly: boolean('delivered_only').notNull().default(false),
-  // The last background count of its outcomes (migration 390).
+  // The last background count of its outcomes (migration 391).
   stats: jsonb('stats').$type<StoredCampaignStats>(),
   createdAt: time('created_at').notNull().defaultNow(), updatedAt: time('updated_at').notNull().defaultNow(),
 }, t => [index('sending_campaigns_page').on(t.workspaceId, t.id), index('sending_campaigns_created_page').on(t.workspaceId, t.createdAt.desc(), t.id.desc()), index('sending_campaigns_archive_page').on(t.workspaceId, t.archivedAt, t.createdAt.desc(), t.id.desc())]);
