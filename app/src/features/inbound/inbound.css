@@ -3,6 +3,8 @@
 
 /* Inbound reader: conversations on the left, the open conversation on the right. */
 .mailbox-page { display: flex; flex: 1; min-height: 0; flex-direction: column; }
+/* Kept mounted behind an address's other tabs (its unsent reply with it): its display must not override hidden. */
+.mailbox-page[hidden] { display: none; }
 .mailbox-layout { display: grid; flex: 1; min-height: 0; grid-template-columns: minmax(280px, 360px) minmax(0, 1fr); }
 .mailbox-list { display: flex; flex-direction: column; min-height: 0; padding-right: var(--space-16); border-right: 1px solid var(--color-border-muted); }
 .mailbox-list .ui-tabs { flex: none; padding-top: var(--space-8); }

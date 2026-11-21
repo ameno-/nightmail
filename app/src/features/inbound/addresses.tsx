@@ -173,11 +173,11 @@ export function InboundAddressDetailPage() {
   // Mail first: opening an address shows its mail. Where its mail goes and its settings are for owners and admins.
   const asked = params.get('tab')
   const tab: AddressTab = canAdminister && (asked === 'flow' || asked === 'settings') ? asked : 'mail'
+  // The open conversation stays in the URL (and its unsent reply in the page) while another tab is looked at.
   const show = (next: AddressTab) => setParams(previous => {
     const query = new URLSearchParams()
     if (next !== 'mail') query.set('tab', next)
-    // A conversation's place in the URL belongs to the Mail tab.
-    else for (const key of ['view', 'thread', 'message']) { const value = previous.get(key); if (value) query.set(key, value) }
+    for (const key of ['view', 'thread', 'message']) { const value = previous.get(key); if (value) query.set(key, value) }
     return query
   }, { replace: true })
   const overview = useOverview({ q: current?.address ?? '', kind: current?.kind === 'inbox' ? 'inbox' : 'address', limit: 5 }, false, canAdminister && !!current && tab === 'flow')
@@ -207,7 +207,9 @@ export function InboundAddressDetailPage() {
     {canAdminister && <Tabs label="Address" value={tab} onValueChange={value => show(value as AddressTab)}
       items={[{ value: 'mail', label: 'Mail', count: current ? current.stats.unreadThreads || undefined : undefined }, { value: 'flow', label: 'Where mail goes' }, { value: 'settings', label: 'Settings' }]} />}
     {expired && <Alert tone="info">This temporary address expired. It can’t receive or send, but its mail stays readable.</Alert>}
-    {tab === 'mail' ? <AddressMail addressId={id} />
+    {/* Mail stays mounted, hidden, behind the other tabs: a reply being written survives a look at them. */}
+    <AddressMail addressId={id} hidden={tab !== 'mail'} />
+    {tab === 'mail' ? null
       : !current || (tab === 'flow' && overview.data === undefined && !overview.error) ? <LoadingRegion label="Loading address"><div className="addr-skeleton" aria-hidden="true"><span /><span /><span /></div></LoadingRegion>
       : tab === 'flow' ? <div className="stack addr-page"><AddressPath address={current} overview={overview} onAddAlias={() => focusSettings(() => document.getElementById('inbound-address-aliases'))} onAddPattern={() => focusSettings(() => patternInput.current)} />
         <div className="cluster"><Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/trace" state={{ to: current.address }}>Test</Link></div></div>
