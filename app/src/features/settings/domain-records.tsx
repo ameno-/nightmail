@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
-import { ArrowRight, Copy } from 'lucide-react'
+import { ArrowRight, Copy, Pencil, Plus } from 'lucide-react'
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
-import { Alert, Button, CopyButton, DataTable, DropdownMenu, StatusBadge, useCopy } from '../../components/ui'
+import { Alert, Button, CopyButton, DataTable, DropdownMenu, StatusBadge, useCopy, type MenuItem, type Tone } from '../../components/ui'
 import { CopyAction, LiveStatus, type LiveState } from '../../components/motion'
 import { useApi, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
@@ -89,49 +89,48 @@ export function zoneLines(records: DnsRecord[]) {
   }).join('\n')
 }
 
-// On a phone each record is a card: its type and name as the title (so no two cards share one), the value under it,
-// and Copy in the row's action sheet. A copy button inside a card's 20 px line would clip it and the wrapped value under it.
-export function DnsRecordTable({ domain, records, status }: { domain: string; records: DnsRecord[]; status?: string }) {
+// One row of a domain's records table: the record, what it is for, its status (with any detail on hover) and the row's own actions.
+export type RecordRow = { record: DnsRecord; purpose: string; status: { label: string; tone: Tone; detail?: string }; actions?: MenuItem[] }
+const purposeLabel = (record: DnsRecord) => {
+  const purpose = purposeOf(record)
+  return purpose === 'sending' ? record.type === 'CNAME' ? 'DKIM' : 'Ownership' : purpose === 'mail_from' ? record.type === 'MX' ? 'MAIL FROM' : 'SPF' : purpose === 'dmarc' ? 'DMARC' : 'Receiving'
+}
+export const recordRow = (record: DnsRecord, status?: RecordRow['status']): RecordRow => ({ record, purpose: purposeLabel(record), status: status ?? (record.status === 'verified' ? { label: 'Verified', tone: 'success', detail: record.note } : { label: 'Missing', tone: 'warning', detail: record.note }) })
+
+// Every record in one table: what it is for, its type, name and value (each with Copy), its status, and the row's
+// actions (a menu, only on rows that have any). On a phone each record is a card: what it is for and its type as the
+// title, the status beside it, the name and value under it, and Copy with the row's actions in its action sheet. A copy
+// button inside a card's line would clip the wrapped value under it.
+export function DnsRecordTable({ domain, rows }: { domain: string; rows: RecordRow[] }) {
   const { copy } = useCopy()
-  return <DataTable className="domain-records" rows={records} rowKey={record => record.id} columns={[
-    { ...settingsColumns.dns[0], render: record => record.type, cardRender: record => <>{record.type} <code>{breakable(relativeHost(record.name, domain))}</code></> },
-    { ...settingsColumns.dns[1], width: '36%', render: record => <div className="settings-copy-cell"><code title={record.name}>{breakable(relativeHost(record.name, domain))}</code><CopyButton value={record.name} label={`Copy full ${record.type} name`} /></div> },
-    { ...settingsColumns.dns[2], render: record => record.value ? <div className="settings-copy-cell"><code title={record.value}>{breakable(record.value)}</code><CopyButton value={record.value} label={`Copy ${record.type} value`} /></div> : '—', cardRender: record => record.value ? <code>{breakable(record.value)}</code> : '—' },
-    { key: 'status', label: 'Status', width: 136, card: 'aside', render: record => <StatusBadge status={status ?? (record.status === 'verified' ? 'Verified' : 'Pending')} /> },
-    { key: 'copy', label: '', card: 'end', table: false, render: record => <DropdownMenu label={`Copy ${record.type} record`} title={`${record.type} ${relativeHost(record.name, domain)}`} items={[
-      { label: 'Copy full name', icon: <Copy size={16} />, onSelect: () => void copy(record.name, 'Copied name') },
-      { label: 'Copy value', icon: <Copy size={16} />, disabled: !record.value, onSelect: () => void copy(record.value, 'Copied value') },
-    ]} /> },
+  const [purpose, type, name, value, status, actions] = settingsColumns.dns
+  const copyItems = ({ record }: RecordRow): MenuItem[] => [
+    { label: 'Copy full name', icon: <Copy size={16} />, onSelect: () => void copy(record.name, 'Copied name') },
+    { label: 'Copy value', icon: <Copy size={16} />, disabled: !record.value, onSelect: () => void copy(record.value, 'Copied value') },
+  ]
+  const menu = (row: RecordRow, items: MenuItem[]) => <DropdownMenu label={`Actions for ${row.purpose} ${row.record.type} record`} title={`${row.record.type} ${relativeHost(row.record.name, domain)}`} items={items} />
+  return <DataTable className="domain-records" rows={rows} rowKey={row => row.record.id} columns={[
+    { ...purpose, render: row => row.purpose, cardRender: row => <>{row.purpose} <span className="domain-record-type">{row.record.type}</span></> },
+    { ...type, render: row => row.record.type },
+    { ...name, render: ({ record }) => <div className="settings-copy-cell"><code title={record.name}>{breakable(relativeHost(record.name, domain))}</code><CopyButton value={record.name} label={`Copy full ${record.type} name`} /></div>, cardRender: ({ record }) => <code>{breakable(relativeHost(record.name, domain))}</code> },
+    { ...value, render: ({ record }) => record.value ? <div className="settings-copy-cell"><code title={record.value}>{breakable(record.value)}</code><CopyButton value={record.value} label={`Copy ${record.type} value`} /></div> : '—', cardRender: ({ record }) => record.value ? <code>{breakable(record.value)}</code> : '—' },
+    { ...status, render: row => <span className="domain-record-status" title={row.status.detail}><StatusBadge status={row.status.label} tone={row.status.tone} /></span> },
+    { ...actions, render: row => row.actions?.length ? menu(row, row.actions) : null, cardRender: row => menu(row, [...copyItems(row), ...row.actions ?? []]) },
   ]} />
 }
 
-// DMARC passes when either alignment does, so one "not aligned" is often fine: only a failure says so, and SPF that
-// doesn't align offers the custom MAIL FROM that aligns it.
-function DmarcRecords({ domain, onAlignSpf }: { domain: Domain; onAlignSpf?: () => void }) {
+// DMARC passes when either alignment does, so the row says how each aligns on hover, and only a failure says more.
+// The API recommends a record only when no policy exists; otherwise the row shows the policy it found (published,
+// inherited from the parent domain or invalid), never as an instruction to publish a new TXT record.
+function dmarcRow(domain: Domain): RecordRow | null {
   const policy = domain.dmarc, recommendation = recordsFor(domain, 'dmarc')[0]
   if (!policy && !recommendation) return null // Nothing to show until the first background check.
   const mode = (value: 's' | 'r') => value === 's' ? 'strict' : 'relaxed'
   const alignment = (aligned: boolean) => aligned ? 'aligned' : 'not aligned'
-  // One table row in every state, including the first background check. Never present an
-  // observed or inherited policy as an instruction to publish a new TXT record.
-  const row: DnsRecord = recommendation ?? { id: 'policy', type: 'TXT', name: `_dmarc.${policy?.source ?? domain.name}`, value: policy?.record ?? '', status: 'not_checked' }
-  return <div className="stack domain-group">
-    <div className="ui-section-header"><div className="domain-group-title"><h3>DMARC <span className="muted">· {policy?.status ?? 'not checked'}</span></h3>
-      <p className="muted dmarc-alignment"><span title={policy ? `${mode(policy.adkim)}: ${policy.adkim === 's' ? 'only this exact domain counts' : 'subdomains of this domain count too'}` : undefined}>DKIM {policy ? `${alignment(policy.alignment.dkim)} (${mode(policy.adkim)})` : 'not checked'}</span> <span title={policy ? `${mode(policy.aspf)}: ${policy.aspf === 's' ? 'only this exact domain counts' : 'subdomains of this domain count too'}` : undefined}>SPF {policy ? `${alignment(policy.alignment.spf)} (${mode(policy.aspf)})` : 'not checked'}</span></p></div>
-      {policy && !policy.alignment.spf && !domain.mailFromDomain && onAlignSpf && <div className="cluster"><Button onClick={onAlignSpf}>Align SPF</Button></div>}</div>
-    {policy && !policy.alignment.dkim && !policy.alignment.spf && <Alert tone="warning">DMARC fails: publish the DKIM records above, then check again.</Alert>}
-    <DnsRecordTable domain={domain.name} records={[row]} status={recommendation ? 'Recommended' : !policy ? 'Not checked' : policy.status === 'invalid' ? 'Invalid' : policy.source && policy.source !== domain.name ? 'Inherited' : policy.record ? 'Published' : 'Missing'} />
-  </div>
-}
-
-// A group is its heading (what the records are for, and where for receiving) and its records. `warning` is said only
-// where publishing the records would move mail that goes elsewhere today.
-function RecordGroup({ title, optional = false, warning, notes = [], alert, domain, records, actions, status }: { title: string; optional?: boolean; warning?: string | null; notes?: string[]; alert?: ReactNode; domain: string; records: DnsRecord[]; actions?: ReactNode; status?: string }) {
-  return <div className="stack domain-group">
-    <div className="ui-section-header"><div className="domain-group-title"><h3>{title}{optional && <span className="muted"> · optional</span>}</h3>{warning && <p className="muted">{warning}</p>}{notes.map(note => <p key={note}>{note}</p>)}</div>{actions && <div className="cluster">{actions}</div>}</div>
-    {alert}
-    <DnsRecordTable domain={domain} records={records} status={status} />
-  </div>
+  const record: DnsRecord = recommendation ?? { id: 'dmarc-policy', type: 'TXT', name: `_dmarc.${policy?.source ?? domain.name}`, value: policy?.record ?? '', status: 'not_checked', purpose: 'dmarc' }
+  const label = recommendation ? 'Recommended' : !policy ? 'Not checked' : policy.status === 'invalid' ? 'Invalid' : policy.source && policy.source !== domain.name ? 'Inherited' : policy.record ? 'Published' : 'Missing'
+  const detail = [policy && `DKIM ${alignment(policy.alignment.dkim)} (${mode(policy.adkim)}), SPF ${alignment(policy.alignment.spf)} (${mode(policy.aspf)})`, recommendation?.note].filter(Boolean).join('. ')
+  return { record, purpose: 'DMARC', status: { label, tone: label === 'Published' ? 'success' : label === 'Invalid' ? 'danger' : label === 'Missing' ? 'warning' : 'neutral', detail: detail || undefined } }
 }
 
 const liveState = (verified: boolean): LiveState => verified ? 'verified' : 'pending'
@@ -199,8 +198,10 @@ function receivingWarning(domain: string, receiving: DnsRecord[]) {
     : null
 }
 
-// The domain page adds its receiving actions (choose the root or a subdomain, Check MX now) to the receiving group.
-export type ReceivingView = { actions?: ReactNode }
+// The domain page's receiving records (hosted): Off until the domain receives (publishing the record turns it on), and its own host's row offers
+// choosing the root or a subdomain instead. Custom MAIL FROM: changed from its records' rows, or added from the row under the table.
+export type ReceivingView = { off: boolean; actions?: MenuItem[] }
+export type MailFromView = { onEdit: () => void }
 
 // What the API's DNS checks found for the receiving host: blocking issues in red, the rest as warnings.
 export function ReceivingIssueAlert({ issue }: { issue: ReceivingIssue }) {
@@ -209,35 +210,52 @@ export function ReceivingIssueAlert({ issue }: { issue: ReceivingIssue }) {
 }
 
 const NO_RECORDS = 'DNS records are not available yet.'
-// Sending and receiving records. MAIL FROM is optional and lives in the domain's Advanced section.
-export function DomainRecords({ domain, actions, guided = false, setup = null, receivingView, onAlignSpf }: { domain: Domain; actions?: ReactNode; guided?: boolean; setup?: DnsSetup | null; receivingView?: ReceivingView; onAlignSpf?: () => void }) {
+// Onboarding: sending and receiving records in guided groups. The domain page: every record in one table, custom MAIL FROM last.
+export function DomainRecords({ domain, actions, guided = false, setup = null, receivingView, mailFrom }: { domain: Domain; actions?: ReactNode; guided?: boolean; setup?: DnsSetup | null; receivingView?: ReceivingView; mailFrom?: MailFromView }) {
   const sending = recordsFor(domain, 'sending'), receiving = recordsFor(domain, 'receiving'), issue = domain.receivingIssue ?? null
-  // Onboarding copies only what sending needs; receiving is optional and copied on its own.
-  const all = guided ? sending : [...sending, ...receiving]
-  const notes = [...new Set(receiving.flatMap(record => record.note && record.note !== issue?.message ? [record.note] : []))]
   const alert = issue && <ReceivingIssueAlert issue={issue} />
   const warning = receivingWarning(domain.name, receiving)
   const { copy } = useCopy()
-  const copyAll = () => copy(`${zoneLines(all)}\n`, `Copied ${all.length} ${guided ? 'sending ' : ''}records`)
-  const sendingVerified = (domain.sending ?? (domain.status === 'verified' ? 'verified' : 'pending')) === 'verified'
-  const receivingVerified = (domain.receiving ?? (allVerified(receiving) ? 'verified' : 'pending')) === 'verified'
   // Stays in place (invisible) once every record verifies, so nothing below moves.
   const connect = setup && <DnsConnect setup={setup} open={domain.records.some(record => record.purpose !== 'dmarc' && record.status !== 'verified')} />
-  if (guided) return <section className="dns-guided" aria-label="DNS records">
-    {connect}
-    <div className="dns-guided-bar"><h2>DNS records</h2>{all.length > 0 && <Button onClick={() => void copyAll()}><Copy size={14} aria-hidden />Copy sending records</Button>}</div>
-    {domain.dnsStatus === 'unavailable' && <p className="muted">{domain.dnsUnavailableReason || NO_RECORDS}</p>}
-    {sending.length > 0 && <RecordRows title="Sending" verified={sendingVerified} domain={domain.name} records={sending} />}
-    {receiving.length > 0 && <RecordRows title="Receiving" optional warning={warning} notes={notes} alert={alert} verified={receivingVerified} domain={domain.name} records={receiving} />}
-  </section>
-  return <section className="section stack">
+  if (guided) {
+    const notes = [...new Set(receiving.flatMap(record => record.note && record.note !== issue?.message ? [record.note] : []))]
+    const sendingVerified = (domain.sending ?? (domain.status === 'verified' ? 'verified' : 'pending')) === 'verified'
+    const receivingVerified = (domain.receiving ?? (allVerified(receiving) ? 'verified' : 'pending')) === 'verified'
+    // Onboarding copies only what sending needs; receiving is optional and copied on its own.
+    const copySending = () => copy(`${zoneLines(sending)}\n`, `Copied ${sending.length} sending records`)
+    return <section className="dns-guided" aria-label="DNS records">
+      {connect}
+      <div className="dns-guided-bar"><h2>DNS records</h2>{sending.length > 0 && <Button onClick={() => void copySending()}><Copy size={14} aria-hidden />Copy sending records</Button>}</div>
+      {domain.dnsStatus === 'unavailable' && <p className="muted">{domain.dnsUnavailableReason || NO_RECORDS}</p>}
+      {sending.length > 0 && <RecordRows title="Sending" verified={sendingVerified} domain={domain.name} records={sending} />}
+      {receiving.length > 0 && <RecordRows title="Receiving" optional warning={warning} notes={notes} alert={alert} verified={receivingVerified} domain={domain.name} records={receiving} />}
+    </section>
+  }
+  // Self-hosted receiving has its own section (MailboxReceiving), with its records once it is on.
+  const receivingRows = !receivingView ? [] : receiving.map((record, index): RecordRow => {
+    const row = recordRow(record, issue && record.name === issue.host ? { label: 'Attention', tone: 'warning', detail: issue.message } : record.status !== 'verified' && receivingView.off ? { label: 'Off', tone: 'neutral', detail: record.note } : undefined)
+    return index === 0 && receivingView.actions?.length ? { ...row, actions: receivingView.actions } : row
+  })
+  const mailFromRecords = recordsFor(domain, 'mail_from'), dmarc = dmarcRow(domain)
+  const change: MenuItem[] = mailFrom ? [{ label: 'Change custom MAIL FROM', icon: <Pencil size={16} />, onSelect: mailFrom.onEdit }] : []
+  const rows = [...sending.map(record => recordRow(record)), ...dmarc ? [dmarc] : [], ...receivingRows, ...mailFromRecords.map(record => ({ ...recordRow(record), actions: change }))]
+  // Copy all: every record the table lists, but not a DMARC policy that is already published.
+  const all = rows.flatMap(row => row.record.id === 'dmarc-policy' ? [] : [row.record])
+  const copyAll = () => copy(`${zoneLines(all)}\n`, `Copied ${all.length} records`)
+  const policy = domain.dmarc
+  return <section className="section stack domain-records-section">
     <div className="ui-section-header"><div className="domain-group-title"><h2>DNS records</h2></div>
       <div className="cluster">{actions}{all.length > 0 && <Button onClick={() => void copyAll()}><Copy size={14} aria-hidden />Copy all</Button>}</div>
     </div>
     {connect}
     {domain.dnsStatus === 'unavailable' && <p className="muted">{domain.dnsUnavailableReason || NO_RECORDS}</p>}
-    {sending.length > 0 && <RecordGroup title="Sending" domain={domain.name} records={sending} />}
-    {receiving.length > 0 && <RecordGroup title="Receiving" optional warning={warning} notes={notes} alert={alert} domain={domain.name} records={receiving} actions={receivingView?.actions} status={issue && receiving.some(record => record.name === issue.host) ? 'Attention' : undefined} />}
-    <DmarcRecords domain={domain} onAlignSpf={onAlignSpf} />
+    {receivingView && alert}
+    {receivingView && warning && <Alert tone="warning">{warning}</Alert>}
+    {policy && !policy.alignment.dkim && !policy.alignment.spf && <Alert tone="warning">DMARC fails: publish the DKIM records, then check again.</Alert>}
+    {rows.length > 0 && <div className="domain-records-list">
+      <DnsRecordTable domain={domain.name} rows={rows} />
+      {mailFrom && !domain.mailFromDomain && mailFromRecords.length === 0 && <div className="domain-records-add"><Button variant="ghost" onClick={mailFrom.onEdit}><Plus size={14} aria-hidden />Add custom MAIL FROM</Button></div>}
+    </div>}
   </section>
 }

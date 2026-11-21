@@ -38,11 +38,16 @@ export const settingsColumns = {
     { key: 'catchAll', label: 'Catch-all', card: 'field' },
     { key: 'actions', label: '', align: 'right', width: 56, skeleton: <ControlSkeleton width={32} />, card: 'end' },
   ],
+  // A record's card: what it is for and its type, its status, then its name and value; Copy is in the row's menu.
   dns: [
-    { key: 'type', label: 'Type', width: 80 },
-    // A card shows the name in its title, beside the type.
-    { key: 'name', label: 'Name', width: '30%', card: 'hide', skeleton: <div className="settings-copy-cell"><SkeletonText width="75%" /><ControlSkeleton width={34} /></div> },
-    { key: 'value', label: 'Value', skeleton: <div className="settings-copy-cell"><SkeletonText width="80%" /><ControlSkeleton width={34} /></div> },
+    { key: 'purpose', label: 'Purpose', width: 112, card: 'title' },
+    // A card shows the type in its title, beside the purpose.
+    { key: 'type', label: 'Type', width: 72, card: 'hide' },
+    { key: 'name', label: 'Name', width: '28%', card: 'field', skeleton: <SkeletonText width="70%" /> },
+    { key: 'value', label: 'Value', card: 'field', skeleton: <SkeletonText width="64%" /> },
+    { key: 'status', label: 'Status', width: 128, card: 'aside' },
+    // Only rows with actions of their own (custom MAIL FROM, the receiving host) have a menu in the table; every card has one.
+    { key: 'actions', label: '', align: 'right', width: 56, skeleton: <span />, card: 'end' },
   ],
   regions: [
     { key: 'region', label: 'Region', width: '45%' },
@@ -164,9 +169,8 @@ export function WebhookBodySkeleton({ isNew = false, selectedRegions = false }: 
 export function DomainDetailSkeleton() {
   const { multiTenant } = useWorkspaceAccess()
   return <LoadingRegion className="stack" label="Loading domain">
-    <PageHeader title={<SkeletonText width={260} lineHeight={28} />} backTo="/domains" actions={<><ControlSkeleton width={112} /><ControlSkeleton width={124} /></>} />
-    <dl className="settings-facts domain-facts">{(multiTenant ? ['Sending', 'Receiving'] : ['Sending', 'Region']).map(term => <div key={term}><dt>{term}</dt><dd><Skeleton width={90} /></dd></div>)}</dl>
-    <div className="domain-sections"><section className="section stack"><div className="ui-section-header"><div className="domain-group-title"><h2>DNS records</h2></div><ControlSkeleton width={120} /></div><div className="stack domain-group"><div className="ui-section-header"><div className="domain-group-title"><h3>Sending</h3></div></div><TableSkeleton columns={settingsColumns.dns} rows={3} /></div></section></div>
+    <PageHeader title={<SkeletonText width={260} lineHeight={28} />} backTo="/domains" actions={<><Skeleton className="domain-status-skeleton" width={72} height={20} /><ControlSkeleton width={112} /><ControlSkeleton width={124} /></>} />
+    <div className="domain-sections"><section className="section stack domain-records-section"><div className="ui-section-header"><div className="domain-group-title"><h2>DNS records</h2></div><div className="cluster"><ControlSkeleton width={128} /><ControlSkeleton width={104} /></div></div><div className="domain-records-list"><TableSkeleton className="domain-records" columns={settingsColumns.dns} rows={multiTenant ? 6 : 4} /><div className="domain-records-add"><SkeletonText width={176} /></div></div></section></div>
   </LoadingRegion>
 }
 
