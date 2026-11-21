@@ -25102,6 +25102,174 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal(await disconnected,'SCAN_STALE',`${first} first: the disconnect gets past its locks (no connection to disconnect here).`);
     }
   });
+  // A Hosted workspace with a verified sender, an API key and a runtime of its own, for the campaign launch tests below. Its
+  // connections carry their own application_name, so a test finds its launch among the database's sessions.
+  const launchFixture=async(t:TestContext)=>{
+    const {nodeRuntime}=await import('./src/adapters/node.js'),{createApp}=await import('./src/app.js');
+    const appName=unique('capture'),url=new URL(FIXTURE_DATABASE_URL!);url.searchParams.set('application_name',appName);
+    const {runtime,close}=nodeRuntime({...process.env,DATABASE_URL:url.toString()});cleanup(t,close);
+    const g=await fixtureDatabase(t),w=unique('capture'),host=w+'.invalid',region='us-east-2';
+    // Simulated sends cost nothing against Hosted limits; the workspace is billed as any customer's is.
+    Object.assign(runtime.config,{multiTenant:true,regionalSending:true,liveEnabled:false});
+    const secret='nm_'+(randomUUID()+randomUUID()).replaceAll('-','');
+    cleanup(t,async()=>{
+      await g.query('DELETE FROM sending_review_recipients WHERE review_id IN (SELECT id FROM sending_campaign_reviews WHERE workspace_id=$1)',[w]);
+      const tables=(await g.query(`SELECT c.table_name FROM information_schema.columns c JOIN information_schema.tables x USING (table_schema, table_name)
+        WHERE c.table_schema='public' AND c.column_name='workspace_id' AND x.table_type='BASE TABLE'`)).rows.map(r=>r.table_name as string);
+      for(let pass=0;pass<3;pass++)for(const table of tables)await g.query(`DELETE FROM "${table}" WHERE workspace_id=$1`,[w]).catch(()=>{});
+      await g.query('DELETE FROM workspaces WHERE id=$1',[w]);
+    });
+    await g.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[w]);
+    await g.query("INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,$1,$2,jsonb_build_array($2::text))",[w,region]);
+    await g.query("INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES($1,$1,$2,'ready','shared','111122223333','ready')",[w,region]);
+    await g.query("INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES($1,$2,$2,'verified')",[host,w]);
+    await g.query('INSERT INTO operation_domains(id,name,workspace_id,region) VALUES($1,$2,$1,$3)',[w,host,region]);
+    await g.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES($1,$1,'capture',$2,$3,'["read","send","manage"]','[]')`,[w,createHash('sha256').update(secret).digest('hex'),secret.slice(0,14)]);
+    const app=createApp(),call=async(method:string,path:string,body?:Json,headers:Record<string,string>={})=>{
+      const res=await app.fetch(new Request(PUBLIC_ORIGIN+path,{method,headers:{authorization:`Bearer ${secret}`,'content-type':'application/json',...headers},body:body&&JSON.stringify(body)}),runtime);
+      return {status:res.status,body:await res.json() as Json};
+    };
+    // A list of n contacts, one in every `every` subscribed.
+    const audience=async(n:number,every:number,extra='')=>{
+      const list=(await call('POST','/v1/lists',{name:'Capture '+n})).body;
+      await g.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent,suppressed)
+        SELECT 'con_'||md5($1||$5||n),$1,'reader-'||$5||n||'@'||$3,CASE WHEN n%$6=0 THEN 'subscribed' ELSE 'unknown' END,n=$6 AND $5='' FROM generate_series(1,$4::int) n RETURNING workspace_id,id)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT workspace_id,$2,id FROM c`,[w,list.id,`${w}.example.com`,n,extra,every]);
+      return list.id as string;
+    };
+    const draft=async(name:string,listId:string)=>{const c=await call('POST','/v1/campaigns',{name,from:`news@${host}`,subject:'Capture',html:'<p>Fixture</p>',audience:{listId}});assert.equal(c.status,201,JSON.stringify(c.body));return c.body;};
+    const launch=(c:Json,headers:Record<string,string>={})=>call('POST',`/v1/campaigns/${c.id}/send`,{revision:c.revision},headers);
+    // The launch's session, waiting on a lock at its first recipient insert, or any of its sessions still at work.
+    const capturing=async()=>{
+      for(let i=0;i<1000;i++){
+        const {rows}=await g.query("SELECT pid FROM pg_stat_activity WHERE application_name=$1 AND wait_event_type='Lock' AND query LIKE '%INSERT INTO sending_review_recipients%'",[appName]);
+        if(rows.length)return rows[0].pid as number;
+        await new Promise(r=>setTimeout(r,5));
+      }
+      return assert.fail('The launch never reached its recipient insert.');
+    };
+    const working=async()=>(await g.query("SELECT pid FROM pg_stat_activity WHERE application_name=$1 AND state='active'",[appName])).rows[0]?.pid as number|undefined;
+    return {runtime,g,w,host,call,audience,draft,launch,capturing,working};
+  };
+  // A Request in flight: whether and when it finished.
+  type Settled={done:boolean;ms:number;value?:{status:number;body:Json};promise:Promise<unknown>};
+  const settled=(work:Promise<{status:number;body:Json}>):Settled=>{const started=performance.now(),s:Settled={done:false,ms:0,promise:work};s.promise=work.then(v=>{s.done=true;s.value=v;s.ms=performance.now()-started;});return s;};
+  // A launch captured its audience (up to 2,000,000 contacts, minutes at that size) while it held the campaign row and
+  // the workspace's admission row (job_schedule), which every send in the workspace takes: each send waited for the whole
+  // capture. The capture now runs first, from one snapshot, and the send locks are held only for the decision, the
+  // review, the reserve and the state change after it. A gate stops the capture at its first recipient insert, after its
+  // snapshot: sends, an edit and a second launch go on meanwhile, nothing that changes then reaches the frozen list, and a
+  // launch that fails or is cancelled there leaves nothing behind.
+  test('campaign launch: sends in the workspace never wait for the audience capture, and the frozen list is one snapshot',async t=>{
+    const {g,w,host,call,audience,draft,launch,capturing}=await launchFixture(t);
+    // More than 50,000 members takes the large capture (a snapshot table, then recipient inserts in pages), as a list of
+    // millions does. Every 2,500th contact is subscribed; the first of those is also suppressed.
+    const listId=await audience(50_010,2500);
+    const contact=(n:number)=>'con_'+createHash('md5').update(w+n).digest('hex');
+    // The audience as it stands before any launch: subscribed, not suppressed, in send order (contact ID).
+    const before=(await g.query("SELECT email FROM audience_contacts WHERE workspace_id=$1 AND marketing_consent='subscribed' AND NOT suppressed ORDER BY id",[w])).rows.map(r=>r.email);
+    assert.equal(before.length,19);
+    const blockedBy=async(pid:number)=>(await g.query('SELECT count(*)::int AS n FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))',[pid])).rows[0].n as number;
+    const within=(p:Promise<unknown>,ms:number)=>Promise.race([p,new Promise(r=>setTimeout(r,ms))]);
+    const staged=async()=>(await g.query(`SELECT (SELECT count(*)::int FROM sending_review_recipients r WHERE NOT EXISTS (SELECT FROM sending_campaign_reviews v WHERE v.id=r.review_id)) AS orphans,
+      (SELECT count(*)::int FROM sending_campaign_reviews WHERE workspace_id=$1) AS reviews`,[w])).rows[0] as {orphans:number;reviews:number};
+    const baseline=await staged();
+    const gate=await fixtureDatabase(t);
+
+    // 1. Sends and a second launch while the first launch is capturing.
+    const first=await draft('First',listId);
+    await gate.query('BEGIN');
+    let launched:Settled|undefined,sends:Settled[]=[],second:Settled|undefined,unsubscribe:Settled|undefined,subscribe:Settled|undefined,blocked=0,sentDuringCapture=false;
+    try {
+      await gate.query('LOCK TABLE sending_review_recipients IN SHARE MODE');
+      launched=settled(launch(first));
+      const pid=await capturing();
+      sends=[0,1,2].map(i=>settled(call('POST','/v1/emails/send',{from:`alerts@${host}`,to:'success@simulator.amazonses.com',subject:`Sign-in code ${i}`,text:'Synthetic.'})));
+      second=settled(launch(first));
+      // Consent changes and a new member after the snapshot: none of them reaches this launch's frozen list.
+      unsubscribe=settled(call('POST',`/v1/contacts/${contact(5000)}/consent`,{status:'unsubscribed'}));
+      subscribe=settled(call('POST',`/v1/contacts/${contact(1)}/consent`,{status:'subscribed',source:'acceptance-fixture',policyVersion:'acceptance-v1',evidence:'Synthetic consent on a reserved fixture address.'}));
+      await g.query("WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES('con_late_'||md5($1),$1,'late@'||$3,'subscribed') RETURNING workspace_id,id) INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT workspace_id,$2,id FROM c",[w,listId,`${w}.example.com`]);
+      await within(Promise.all([...sends,second,unsubscribe,subscribe].map(s=>s.promise)),3000);
+      blocked=await blockedBy(pid);
+      sentDuringCapture=sends.every(s=>s.done);
+      assert.equal(launched.done,false,'The launch is still capturing.');
+    } finally { await gate.query('ROLLBACK'); }
+    await Promise.all([launched!,...sends,second!,unsubscribe!,subscribe!].map(s=>s.promise));
+    const result=launched!.value!;
+    assert.equal(result.status,202,JSON.stringify(result.body));
+    assert.equal(result.body.queued,19);
+    // The frozen list is the audience as of the snapshot: the contact who unsubscribed after it is in it (dispatch
+    // rechecks consent before every send), the one who subscribed and the member added after it are not.
+    const review=(await g.query('SELECT review_id FROM sending_campaigns WHERE id=$1',[first.id])).rows[0].review_id;
+    const frozen=(await g.query("SELECT recipient->>'email' AS email FROM sending_review_recipients WHERE review_id=$1 ORDER BY ordinal",[review])).rows.map(r=>r.email);
+    assert.deepEqual(frozen,before);
+    assert.deepEqual(await staged(),{orphans:baseline.orphans,reviews:baseline.reviews+1},'One capture, under its review.');
+    t.diagnostic(`While the capture was held: ${blocked} requests waited on the launch; sends took ${sends.map(s=>Math.round(s.ms)).join(', ')} ms; the launch took ${Math.round(launched!.ms)} ms.`);
+    assert.equal(blocked,0,'No request waits on the capturing launch.');
+    assert.equal(sentDuringCapture,true,'Every send finished while the capture was held.');
+    for(const s of sends)assert.equal(s.value!.status,202,JSON.stringify(s.value!.body));
+    assert.deepEqual([second!.value!.status,second!.value!.body.error?.code],[409,'CAMPAIGN_LOCKED'],'A second launch of the same campaign is refused at once instead of capturing again.');
+    assert.ok(second!.ms<launched!.ms);
+    assert.deepEqual([unsubscribe!.value!.status,subscribe!.value!.status],[200,200]);
+
+    // 2. A launch that fails after its capture (the campaign was edited meanwhile) and one cancelled during it, as the
+    // statement limit cancels one, leave nothing staged. Neither the edit nor anything else waited for the capture.
+    for(const ending of ['edited','cancelled'] as const){
+      const c=await draft(ending,listId),key={'Idempotency-Key':unique('capture-launch')};
+      await gate.query('BEGIN');
+      let attempt:Settled|undefined,edit:Settled|undefined;
+      try {
+        await gate.query('LOCK TABLE sending_review_recipients IN SHARE MODE');
+        attempt=settled(launch(c,key));
+        const pid=await capturing();
+        if(ending==='edited'){
+          edit=settled(call('PATCH',`/v1/campaigns/${c.id}`,{revision:c.revision,draft:{name:'edited',from:`news@${host}`,subject:'Edited',html:'<p>Fixture</p>',audience:{listId}}}));
+          await within(edit.promise,3000);
+          assert.equal(edit.done,true,'The edit never waits for the capture.');
+        } else await g.query('SELECT pg_cancel_backend($1)',[pid]);
+      } finally { await gate.query('ROLLBACK'); }
+      await attempt!.promise;const failed=attempt!.value!;
+      if(ending==='edited'){assert.equal(edit!.value!.status,200,JSON.stringify(edit!.value!.body));assert.deepEqual([failed.status,failed.body.error?.code],[409,'STALE_CAMPAIGN_REVISION']);}
+      else assert.deepEqual([failed.status,failed.body.error?.code,failed.body.error?.retryable],[503,'AUDIENCE_CAPTURE_TIMEOUT',true]);
+      assert.deepEqual(await staged(),{orphans:baseline.orphans,reviews:baseline.reviews+1},`The ${ending} launch left no review or recipients.`);
+      const row=(await g.query('SELECT state,review_id,total FROM sending_campaigns WHERE id=$1',[c.id])).rows[0];
+      assert.deepEqual(row,{state:'draft',review_id:null,total:0});
+      assert.equal((await g.query("SELECT count(*)::int AS n FROM jobs WHERE workspace_id=$1 AND type='campaign.run' AND payload->>'campaignId'=$2",[w,c.id])).rows[0].n,0);
+      // Its Idempotency-Key was released with the rollback, so the same request launches, from its own snapshot: with the
+      // contact who subscribed and the member added during the first capture, without the one who unsubscribed.
+      if(ending==='cancelled'){const retried=await launch(c,key);assert.equal(retried.status,202,JSON.stringify(retried.body));assert.equal(retried.body.queued,20);}
+    }
+  });
+  // The capture joins the audience's contacts and list members whole. When the statistics say both tables are empty
+  // (autovacuum found them empty, then a list was imported before the next analyze) the planner expected one row on
+  // each side and compared every contact with every member in a nested loop: minutes at 50,000 members, and never done
+  // at 2,000,000. Both capture paths now join whole lists by hash, whatever the statistics say.
+  test('campaign launch: the audience capture finishes in seconds when the statistics say its tables are empty',async t=>{
+    const {g,draft,launch,audience,working}=await launchFixture(t);
+    // The statistics as autovacuum leaves them for tables it found empty: no rows, in the pages the tables have now.
+    // ANALYZE counts rows this transaction deleted as dead and keeps their pages; the rollback keeps those numbers.
+    const stale=async()=>{
+      await g.query('BEGIN');
+      try { await g.query('DELETE FROM audience_list_members; DELETE FROM audience_contacts; ANALYZE audience_contacts, audience_list_members'); }
+      finally { await g.query('ROLLBACK'); }
+      return (await g.query("SELECT relname,reltuples::int,relpages FROM pg_class WHERE relname IN ('audience_contacts','audience_list_members') ORDER BY 1")).rows.map(r=>`${r.relname} ${r.reltuples}/${r.relpages}`).join(', ');
+    };
+    cleanup(t,async()=>{await g.query('ANALYZE audience_contacts, audience_list_members');});
+    // The large path (more than 50,000 members), then the single-statement path.
+    for(const [members,every,name] of [[50_010,10,'large'],[20_000,10,'small']] as const){
+      const c=await draft(name,await audience(members,every,name));
+      const statistics=await stale();
+      const attempt=settled(launch(c));
+      await Promise.race([attempt.promise,new Promise(r=>setTimeout(r,15_000))]);
+      // A nested loop over both lists would run for minutes: stop it rather than hold the shard.
+      if(!attempt.done){const pid=await working();if(pid)await g.query('SELECT pg_cancel_backend($1)',[pid]);await attempt.promise;}
+      t.diagnostic(`${name} capture of ${members} members with statistics ${statistics}: ${Math.round(attempt.ms)} ms`);
+      assert.equal(attempt.value!.status,202,JSON.stringify(attempt.value!.body));
+      assert.equal(attempt.value!.body.queued,Math.floor(members/every));
+      assert.ok(attempt.ms<5000,`The ${name} capture took ${Math.round(attempt.ms)} ms.`);
+    }
+  });
   // Migration 332 decides the inbound mail stored without forwardEligible; a message committed after the page that
   // would have seen it is never decided on read any more: a forward refuses it.
   test('forward rollout: mail committed without forwardEligible after migration 332 ran is refused, not decided on read',async t=>{
