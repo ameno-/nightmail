@@ -6,9 +6,9 @@ import { queries } from '../../data/queries'
 import { campaignEditable, errorText, type Campaign, type Newsletter, type NewsletterReaders } from '../../data/types'
 import { Button, DataTable, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, SkeletonText, StatusBadge, type Column } from '../../components/ui'
 import { date, number, percent } from '../../lib/format'
-import { NamedAddress } from '../../components/PrivateAddress'
+import { PrivateAddress } from '../../components/PrivateAddress'
 import { AdminOnlyPage } from '../settings/admin-only'
-import { CampaignSenderInput } from '../campaigns/CampaignSenderInput'
+import { CampaignSenderInput, SenderLines } from '../campaigns/CampaignSenderInput'
 import { campaignDisplayStatus, campaignPollInterval } from '../campaigns/CampaignProgress'
 import { composer } from '../campaigns/composer-chunk'
 import { issuesRequest, newIssuePath, newsletterPath, readersPath, rememberIssuesShape, useNewsletters, useRememberNewsletter } from './shared'
@@ -150,7 +150,7 @@ function NewslettersList() {
     {query.isError ? <ErrorState error={query.error} onRetry={() => void query.refetch()} /> : <DataTable className="newsletters-table" loading={query.isPending} skeletonRows={4} rows={query.data ?? []} rowKey={row => row.id} rowHref={row => newsletterPath(row.id)}
       empty={<EmptyState title="No newsletters yet" />} columns={[
         { ...newsletterColumns[0]!, render: row => row.name },
-        { ...newsletterColumns[1]!, render: row => <NamedAddress name={row.fromName ?? ''} address={row.from} /> },
+        { ...newsletterColumns[1]!, render: row => <SenderLines name={row.fromName ?? ''} address={row.from} />, cardRender: row => <PrivateAddress value={row.from} /> },
       ]} />}
   </div>
 }

@@ -30,12 +30,12 @@ import './campaigns.css'
 import type { EmailComposerRef } from './EmailComposer'
 import { composer as composerChunk, EmailComposer } from './composer-chunk'
 import { ChunkFallback } from '../../lib/preloadable'
-import { CampaignSenderInput } from './CampaignSenderInput'
+import { CampaignSenderInput, SenderLines } from './CampaignSenderInput'
 import { CampaignAttachments, type CampaignAttachmentsRef } from './CampaignAttachments'
 import { campaignVersion, useCampaignSync } from './useCampaignSync'
 import { ComposerSkeleton } from './skeletons'
 import { composerLoading, invalidSender } from './copy'
-import { AddressList, NamedAddress, PrivateAddress } from '../../components/PrivateAddress'
+import { AddressList, PrivateAddress } from '../../components/PrivateAddress'
 import { localLabel, parseUtc, ScheduleField, scheduleError, utcLabel } from '../../components/ScheduleField'
 import { useSingleFlight } from '../../lib/single-flight'
 import { usePhone } from '../../lib/media'
@@ -764,7 +764,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
           <div className="review-message">
             <div className="review-message__details">
               <dl className="review-facts">
-                <dt>From</dt><dd>{campaign.fromEmail ? <NamedAddress name={campaign.fromName} address={campaign.fromEmail} /> : <span className="muted">Not set</span>}</dd>
+                <dt>From</dt><dd>{campaign.fromEmail ? <SenderLines name={campaign.fromName} address={campaign.fromEmail} /> : <span className="muted">Not set</span>}</dd>
                 {campaign.replyTo.length > 0 && <><dt>Reply to</dt><dd><AddressList values={campaign.replyTo} /></dd></>}
                 <dt>Subject</dt><dd>{campaign.subject || <span className="muted">Not set</span>}</dd>
                 {campaign.previewText && <><dt>Inbox preview</dt><dd>{campaign.previewText}</dd></>}
@@ -826,7 +826,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
       </section>
       <section className="campaign-fields campaign-message">
         <SectionHeader title="Message" />
-        <dl className="ui-facts campaign-message-details"><dt>From</dt><dd><NamedAddress name={campaign.fromName} address={campaign.fromEmail} /></dd>{campaign.replyTo.length > 0 && <><dt>Reply to</dt><dd><AddressList values={campaign.replyTo} /></dd></>}<dt>Subject</dt><dd>{campaign.subject}</dd>{campaign.previewText && <><dt>Inbox preview</dt><dd>{campaign.previewText}</dd></>}</dl>
+        <dl className="ui-facts campaign-message-details"><dt>From</dt><dd><SenderLines name={campaign.fromName} address={campaign.fromEmail} /></dd>{campaign.replyTo.length > 0 && <><dt>Reply to</dt><dd><AddressList values={campaign.replyTo} /></dd></>}<dt>Subject</dt><dd>{campaign.subject}</dd>{campaign.previewText && <><dt>Inbox preview</dt><dd>{campaign.previewText}</dd></>}</dl>
         <CampaignRenderedPreview campaign={campaign} transform={previewHtml} />
       </section>
     </div>

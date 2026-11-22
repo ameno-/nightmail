@@ -1,7 +1,8 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import { Input } from '../../components/ui'
-import { NamedAddress } from '../../components/PrivateAddress'
+import { NameText, PrivateAddress } from '../../components/PrivateAddress'
+import { nameParts } from '../../lib/private-address'
 import { invalidSender } from './copy'
 import './sender-input.css'
 
@@ -48,6 +49,12 @@ function suggestSenders(text: string, domains: string[]): Sender[] {
   const local = typedLocal || name.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/['’]/g, '').replace(/[^a-z0-9]+/g, '.').replace(/^\.|\.$/g, '').slice(0, 64).replace(/\.$/, '')
   if (!local) return []
   return domains.filter(domain => domain.startsWith(prefix.toLowerCase())).map(domain => ({ name, email: `${local}@${domain}` })).filter(sender => validEmail(sender.email))
+}
+
+/** A sender: the display name over its address (no angle brackets), or on one line with `inline`. The address alone when the name is missing or repeats it. */
+export function SenderLines({ name, address, inline = false }: { name?: string | null; address: string; inline?: boolean }) {
+  const parts = nameParts(name, address)
+  return <span className={inline ? 'sender-lines sender-lines--inline' : 'sender-lines'}>{parts && <span className="sender-lines__name"><NameText parts={parts} /></span>}<span className="sender-lines__address"><PrivateAddress value={address} /></span></span>
 }
 
 export function CampaignSenderInput({ name, email, domains, anyDomain = false, disabled = false, onChange }: CampaignSenderInputProps) {
@@ -119,7 +126,7 @@ export function CampaignSenderInput({ name, email, domains, anyDomain = false, d
     if (parsed && allowed(parsed)) choose(parsed, false)
   }}>
     {masked && <div className="ui-input campaign-sender-mask" role="button" aria-label="From: edit sender" aria-disabled={disabled || undefined} tabIndex={disabled ? undefined : 0} onClick={edit} onFocus={edit}>
-      <span className="campaign-sender-mask__text"><NamedAddress name={parsed.name} address={parsed.email} /></span>
+      <span className="campaign-sender-mask__text"><SenderLines name={parsed.name} address={parsed.email} inline /></span>
     </div>}
     <Input ref={input} hidden={masked || undefined} id="campaign-from-email" role="combobox" type="text" autoComplete="off" autoCapitalize="none" spellCheck={false}
       placeholder={`Name <sender@${verified[0] ?? 'example.com'}>`} value={draft} maxLength={460} disabled={disabled} required

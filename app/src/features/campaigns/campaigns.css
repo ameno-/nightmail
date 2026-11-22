@@ -317,3 +317,4 @@ button.review-stage__head { cursor: pointer; }
 .campaigns-table .ui-card__segment:empty { display: none; }
 .campaigns-table .ui-card__line > .ui-card__segment::before { content: none; }
 .campaigns-table .ui-card__line > .ui-card__segment:not(:empty) ~ .ui-card__segment:not(:empty)::before { content: '·'; }
+@media (max-width: 640px) { .review-facts { grid-template-columns: minmax(0, 1fr); row-gap: 0; } .review-facts dd + dt { margin-top: var(--space-8); } }

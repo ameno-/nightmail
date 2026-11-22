@@ -10,3 +10,11 @@
 .campaign-sender-mask:focus-visible { outline: 0; }
 .campaign-sender .ui-input[hidden] { display: none; }
 .campaign-sender-mask, .campaign-sender-mask:hover { background: transparent; }
+/* A sender as name over address: each line stays one line; a long address ends in an ellipsis instead of breaking. */
+.sender-lines { display: inline-flex; flex-direction: column; min-width: 0; max-width: 100%; vertical-align: top; }
+.sender-lines--inline { flex-direction: row; align-items: baseline; gap: .3em; }
+.sender-lines__name { min-width: 0; overflow: clip; text-overflow: ellipsis; white-space: nowrap; }
+.sender-lines--inline .sender-lines__name { flex: none; }
+.sender-lines__address { display: flex; min-width: 0; color: var(--color-muted); }
+.sender-lines__address > .private-address { min-width: 0; }
+.sender-lines .sender-lines__address .private-address__value, .sender-lines .sender-lines__address .private-address[data-revealed] > .private-address__value { flex: 0 1 auto; min-width: 0; overflow: clip; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
