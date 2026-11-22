@@ -108,6 +108,16 @@ Connected AWS accounts run a published role template (`api/byo-templates/<major>
 
 **Fix:** revert the published file and add the change as a new version. A minor version only adds permissions. The acceptance test `BYO contract` checks every session the code asks for (`api/src/byo-permissions.ts`) against the current draft and every published version; a call outside its session policy fails the BYO v5 enrollment test.
 
+### Price pages
+
+The public price pages (`/pricing` and `/compare/*`, `app/src/features/pricing`) compare Nightmail with named competitors, so a wrong figure is a false claim. The check renders them with React as a browser gets them, at their own sizes and at inputs a visitor might type (empty, negative, decimals, commas, past a billion). **Fails when:**
+
+- a Nightmail figure isn't what `api/src/billing/rates.ts` charges for the usage it is marked with (`data-nightmail-sent` and `data-nightmail-received`), or the pages don't quote the rate, the free allowances, storage, or the top-up minimum and expiry (`CREDIT`) as the billing code has them;
+- a competitor price in `prices.ts` has no source, or a source lacks an https link to the vendor's page, the day it was read (not in the future) or the text it was read from;
+- a competitor row has no date and link, or a comparison shows a size without a verified price.
+
+**Fix:** take prices from `rates.ts` and `prices.ts`, never as literals in the page; give a new figure its `source`. A price that changed is re-read on the vendor's page and updated in `prices.ts` with the new day; one that can't be re-read is removed, not left stale. The pages stay out of the site's links and search engines until `PRICE_PAGES_LIVE` in `app/src/features/pricing/live.ts` is true.
+
 ## Copy and density lint (`build`, `cls`)
 
 Both are ratchets: a baseline holds today's findings, only a new one fails, and a clean local run drops fixed ones from it (`--update-baseline` accepts a deliberate exception). A finding keeps its identity when its line moves or its text is edited in place, and the product's name counts as one neutral word, so a rename is never new.

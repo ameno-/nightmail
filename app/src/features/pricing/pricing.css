@@ -1,0 +1,104 @@
+/* The price pages (calculator and comparisons): the legal pages' header and type, a figure-first layout, hairlines
+   between rows and no side rules. The accent is only on the primary button. Measures in em (see legal.css). */
+.price-page { --price-header: 58px; display: flex; flex-direction: column; min-height: 100dvh; background: var(--color-surface); color: var(--color-text); }
+.price-header { position: sticky; z-index: 5; top: 0; display: flex; align-items: center; gap: var(--space-24); height: var(--price-header); padding-inline: var(--space-24); border-bottom: 1px solid var(--color-border); background: var(--color-surface); }
+.price-header .wordmark, .price-header .theme-toggle { position: relative; inset: auto; }
+.price-header .theme-toggle { margin-inline-start: auto; }
+.price-switcher { display: flex; gap: var(--space-4); min-width: 0; font-size: var(--text-sm); }
+.price-switcher a { display: flex; align-items: center; height: var(--control-height); padding-inline: var(--space-8); border-radius: var(--radius-sm); color: var(--color-muted); text-decoration: none; white-space: nowrap; transition: color var(--motion-duration), background-color var(--motion-duration); }
+.price-switcher a:hover { color: var(--color-text); }
+.price-switcher a[aria-current='page'] { background: var(--color-active-bg); color: var(--color-text); }
+
+.price-main { flex: 1; width: min(100%, 1040px); margin-inline: auto; padding: var(--space-40) var(--space-24) 72px; }
+.price-intro { display: flex; flex-direction: column; gap: var(--space-8); margin-bottom: var(--space-32); }
+.price-intro h1 { font-family: var(--font-mono); font-size: var(--text-xl); line-height: 1.2; letter-spacing: -.02em; text-wrap: balance; }
+.price-intro p { max-width: 40em; color: var(--color-muted); font-size: 16px; line-height: 1.6; font-variant-numeric: normal; text-wrap: pretty; }
+.price-section { margin-top: var(--space-40); scroll-margin-top: calc(var(--price-header) + var(--space-16)); }
+.price-section h2 { margin-bottom: var(--space-12); font-family: var(--font-mono); font-size: var(--text-lg); font-weight: 700; line-height: 1.3; }
+.price-section h3 { margin-bottom: var(--space-8); font-family: var(--font-mono); font-size: 15px; font-weight: 700; line-height: 1.4; }
+.price-note { margin-top: var(--space-12); color: var(--color-muted); font-size: var(--text-sm); line-height: var(--leading-sm); font-variant-numeric: normal; }
+.price-checked { color: var(--color-muted); font-size: var(--text-sm); white-space: nowrap; }
+.price-checked a, .price-link { color: var(--color-text); text-decoration-line: underline; text-decoration-thickness: from-font; text-underline-offset: .18em; text-decoration-color: var(--color-border-strong); transition: text-decoration-color var(--motion-duration); }
+.price-checked a:hover, .price-link:hover { text-decoration-color: currentColor; }
+.price-checked svg { margin-inline-start: 1px; vertical-align: -1px; }
+.price-cite { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; margin: -2px 0 -2px 1px; border-radius: var(--radius-sm); color: var(--color-muted); vertical-align: middle; transition: color var(--motion-duration), background-color var(--motion-duration); }
+.price-cite:hover { background: var(--color-hover); color: var(--color-text); }
+
+/* The calculator: the usage on the left, Nightmail's bill and its arithmetic on the right. */
+.price-calculator { display: grid; grid-template-columns: minmax(0, 300px) minmax(0, 1fr); gap: var(--space-40); align-items: start; }
+.price-inputs { display: flex; flex-direction: column; gap: var(--space-16); }
+.price-presets { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-8); }
+.price-presets .ui-button[aria-pressed='true'] { background: var(--color-active-bg); box-shadow: inset 0 0 0 1px var(--color-border-strong); }
+.price-field { display: flex; flex-direction: column; gap: var(--space-6); font-size: var(--text-sm); }
+.price-field span { color: var(--color-muted); }
+.price-field .ui-input { height: 36px; font-size: 15px; }
+.price-ours { padding: var(--space-20) var(--space-24); border: 1px solid var(--color-border); border-radius: var(--radius-lg); }
+.price-ours__head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--space-8) var(--space-16); }
+.price-ours__head h2 { font-family: var(--font-mono); font-size: var(--text-lg); font-weight: 700; }
+.price-total { color: var(--color-muted); font-size: var(--text-md); }
+.price-total span { color: var(--color-text); font-family: var(--font-mono); font-size: var(--text-xl); font-weight: 700; letter-spacing: -.02em; }
+.price-math { margin-top: var(--space-16); border-top: 1px solid var(--color-border-muted); }
+.price-math > div { display: grid; grid-template-columns: minmax(0, 13em) minmax(0, 1fr) auto; gap: var(--space-4) var(--space-16); padding-block: var(--space-12); border-bottom: 1px solid var(--color-border-muted); font-size: var(--text-md); line-height: var(--leading-sm); }
+.price-math dd { margin: 0; color: var(--color-muted); }
+.price-math dd:last-child { color: var(--color-text); text-align: end; }
+.price-terms { display: flex; flex-direction: column; gap: var(--space-6); margin: var(--space-16) 0 0; padding: 0; list-style: none; color: var(--color-muted); font-size: var(--text-sm); line-height: var(--leading-sm); font-variant-numeric: normal; }
+
+/* Other vendors: one row each, the price at the end of its first line. */
+.price-rows { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--color-border-muted); }
+.price-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-4) var(--space-16); padding-block: var(--space-12); border-bottom: 1px solid var(--color-border-muted); font-size: var(--text-md); line-height: var(--leading-sm); }
+.price-row__name { font-weight: var(--font-weight-bold); }
+.price-row__plan { margin-inline-start: var(--space-8); color: var(--color-muted); font-weight: var(--font-weight-regular); }
+.price-row__price { font-family: var(--font-mono); font-weight: 700; text-align: end; }
+.price-row__price--none { color: var(--color-muted); font-family: var(--font-body); font-weight: var(--font-weight-regular); }
+.price-row__meta { grid-column: 1 / -1; max-width: 48em; color: var(--color-muted); font-size: var(--text-sm); font-variant-numeric: normal; text-wrap: pretty; }
+.price-facts { display: flex; flex-direction: column; gap: var(--space-8); margin: 0; padding-inline-start: 1.1em; font-size: var(--text-md); line-height: 1.55; font-variant-numeric: normal; }
+.price-facts li { max-width: 48em; padding-inline-start: .2em; text-wrap: pretty; }
+.price-facts li::marker { color: var(--color-faint); }
+
+/* A comparison: three sizes in a table, then what differs. */
+.price-table { width: 100%; border-collapse: collapse; font-size: var(--text-md); line-height: var(--leading-sm); }
+.price-table th { padding: var(--space-8) var(--space-16) var(--space-8) 0; border-bottom: 1px solid var(--color-border); color: var(--color-muted); font-size: var(--text-sm); font-weight: var(--font-weight-bold); text-align: start; vertical-align: bottom; }
+.price-table :is(td, tbody th) { padding: var(--space-12) var(--space-16) var(--space-12) 0; border-bottom: 1px solid var(--color-border-muted); color: var(--color-text); font-size: var(--text-md); font-weight: var(--font-weight-regular); vertical-align: top; }
+.price-table strong { font-family: var(--font-mono); font-weight: 700; }
+.price-table__sub { display: block; color: var(--color-muted); font-size: var(--text-sm); }
+.price-table :is(th, td):last-child { padding-inline-end: 0; }
+.price-diff__lists { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-32); }
+.price-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-12) var(--space-24); margin-top: var(--space-24); font-size: var(--text-md); }
+.price-actions .ui-button { height: 36px; padding-inline: var(--space-16); }
+
+.price-footer { padding: var(--space-20) var(--space-24); border-top: 1px solid var(--color-border); color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
+
+/* Tablets and phones: the header as on the legal pages, one column, and each table row as a block. */
+@media (max-width: 900px) {
+  .price-page { --price-header: 0px; }
+  .price-header { position: static; flex-wrap: wrap; row-gap: 0; height: auto; padding: var(--space-8) var(--space-16) 0; }
+  .price-header .wordmark { height: 44px; }
+  .price-switcher { order: 3; flex-basis: 100%; margin: calc(-1 * var(--focus-reach)) calc(-1 * var(--space-16)) 0; padding: var(--focus-reach) var(--space-16) var(--space-8); overflow-x: auto; }
+  .price-switcher a { height: 36px; }
+  .price-header .theme-toggle { width: 44px; height: 44px; }
+  .price-main { padding: var(--space-28) var(--space-16) var(--space-40); }
+  .price-intro { margin-bottom: var(--space-24); }
+  .price-intro h1 { font-size: 26px; }
+  .price-calculator { grid-template-columns: minmax(0, 1fr); gap: var(--space-28); }
+  .price-footer { padding: var(--space-16); }
+}
+@media (max-width: 640px) {
+  .price-inputs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-12); }
+  .price-presets { grid-column: 1 / -1; }
+  .price-presets .ui-button { height: 40px; }
+  .price-field .ui-input { height: 44px; font-size: 16px; }
+  .price-ours { padding: var(--space-16); }
+  .price-math > div { grid-template-columns: minmax(0, 1fr) auto; }
+  .price-math dd:not(:last-child) { grid-row: 2; grid-column: 1 / -1; }
+  .price-math dd:last-child { grid-row: 1; grid-column: 2; }
+  .price-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .price-table, .price-table tbody, .price-table tr { display: block; }
+  .price-table tr { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-8) var(--space-16); padding-block: var(--space-12); border-bottom: 1px solid var(--color-border-muted); }
+  .price-table :is(td, tbody th) { display: block; padding: 0; border: 0; }
+  .price-table tbody th { grid-column: 1 / -1; font-weight: var(--font-weight-bold); }
+  .price-table tbody th .price-table__sub { display: inline; font-weight: var(--font-weight-regular); }
+  .price-table tbody th .price-table__sub::before { content: ' · '; }
+  .price-table td::before { content: attr(data-label); display: block; color: var(--color-muted); font-size: var(--text-sm); }
+  .price-diff__lists { grid-template-columns: minmax(0, 1fr); gap: var(--space-20); }
+  .price-actions .ui-button { width: 100%; height: 44px; }
+}

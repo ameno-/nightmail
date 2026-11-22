@@ -49,6 +49,14 @@ for (const [path, show] of [['/commercial/', true], ['/commercial', true], ['/co
   const html = await response.text();
   if (response.status !== 200 || html.includes('<canvas class="gl"') !== show || html.includes('<div id="root"') === show) failures.push(`GET ${path}: expected ${show ? 'the commercial’s page' : 'the dashboard HTML'} from assets, got HTTP ${response.status}.`);
 }
+// Each price page is its own HTML file (app/price-pages.ts): assets answer its address with it (its own og:url and title,
+// and noindex until it is published), and a comparison that doesn't exist is the dashboard's.
+for (const [path, own] of [['/pricing', true], ['/compare/mailchimp', true], ['/compare/resend', true], ['/compare/does-not-exist', false]] as const) {
+  const response = await fetch(origin + path, { signal: AbortSignal.timeout(20_000) });
+  const html = await response.text();
+  const page = new RegExp(`<meta property="og:url" content="[^"]*${path}" />`).test(html);
+  if (response.status !== 200 || !html.includes('<div id="root"') || page !== own) failures.push(`GET ${path}: expected ${own ? 'its own page' : 'the dashboard HTML'} from assets, got HTTP ${response.status}.`);
+}
 const missing = await fetch(origin + '/assets/does-not-exist.js');
 if (missing.status !== 404) failures.push(`Missing chunk: expected 404, got ${missing.status}.`);
 for (const failure of failures) console.log(`::error title=Preview smoke::${failure}`);
