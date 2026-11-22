@@ -11,6 +11,8 @@
 .recipe-card-line > span[aria-hidden] { color: var(--color-faint); }
 .recipe-controls { display: inline-flex; align-items: center; justify-content: flex-end; gap: var(--space-8); }
 .recipe-table .ui-check-field { gap: 0; }
+/* On a phone card the sentence's one line cuts a revealed address with its ellipsis rather than dropping it from its blank. */
+.recipe-table .ui-card__title .recipe-sentence .private-address[data-revealed], .recipe-table .ui-card__title .recipe-sentence .private-address[data-revealed] > .private-address__value { display: inline; white-space: nowrap; inline-size: auto; }
 
 /* New rule: one section per group, tiles in a grid that fills the width. */
 .recipe-groups { display: grid; gap: var(--space-24); }
