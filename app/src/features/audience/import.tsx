@@ -151,7 +151,7 @@ export function ImportContactsDialog({ listId: initialListId = '', onClose }: { 
     const imported = result.imported, subscribed = result.subscribed ?? 0
     return <Dialog open onOpenChange={open => { if (!open) onClose() }} title="Import complete" footer={<>{!consent && imported > 0 && <Link className="ui-button ui-button--secondary ui-button--md" to={unknownHref} onClick={onClose}>Review unknown contacts</Link>}<Button variant="primary" onClick={onClose}>Done</Button></>}><div className="stack audience-result">
       <p>{plural(imported, 'contact')} imported{consent ? ` · ${number(subscribed)} marked subscribed${subscribed < imported ? ` · ${number(imported - subscribed)} kept their earlier consent` : ''}` : ''}.</p>
-      {!consent && imported > 0 && <p className="muted">They can’t receive campaigns until they consent. Once they do, choose Review unknown contacts, then Mark as subscribed.</p>}
+      {!consent && imported > 0 && <p>They can’t receive campaigns until they consent. Once they do, choose Review unknown contacts, then Mark as subscribed.</p>}
       {result.errorCount > 0 && <RejectedRows errors={result.errors} count={result.errorCount} skipped />}
     </div></Dialog>
   }
