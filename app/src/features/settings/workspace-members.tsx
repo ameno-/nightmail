@@ -108,7 +108,7 @@ export function InviteDialog({ open, owner, onOpenChange }: { open: boolean; own
   }
   function close() { onOpenChange(false); setCreated(null); setEmail(''); setRole('member'); setEmailError(''); create.reset() }
   // The link works only for the invited address; its expiry is in Invitations, where it can be copied again.
-  if (created) return <Dialog sensitive open={open} onOpenChange={next => { if (!next) close() }} title="Share this invitation link" footer={<Button variant="primary" onClick={close}>Done</Button>}>
+  if (created) return <Dialog sensitive open={open} onOpenChange={next => { if (!next) close() }} title="Share this invitation link" description={<>Only <PrivateAddress value={created.email} /> can accept it, signed in with an emailed link to that address or its Google account.</>} footer={<Button variant="primary" onClick={close}>Done</Button>}>
     <div className="ui-secret"><SecretCode>{created.acceptUrl}</SecretCode><CopyButton value={created.acceptUrl} label="Copy invitation link" /></div>
     {canShare() && <Button className="settings-share" onClick={() => void shareLink(created.acceptUrl, toast)}><Share size={16} />Share link</Button>}
   </Dialog>

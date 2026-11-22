@@ -1220,7 +1220,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   // A method the installation doesn't list is refused before anything else.
   use('github');tokenAcr='urn:anomaly:acr:passkey';fresh(`other-${randomUUID()}@example.org`);
   assert.equal((await login()).headers.get('location'),origin+'/?auth=method_required');
-  // Review 3: an invitation needs a mailbox the sign-in proves now, a Google-hosted one (Gmail or Workspace). GitHub's
+  // Review 3: an invitation needs a mailbox the sign-in proves now: through Google, a Google-hosted one (Gmail or Workspace). GitHub's
   // verified address doesn't prove it, even matching the invitation and following its link; nor does a Google account
   // on another provider's address.
   const staffWorkspace=((await (await request('/v1/me','GET',staffSession)).json()) as {workspaceId:string}).workspaceId;
@@ -1269,7 +1269,8 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   use('github');subject=randomUUID();subjects.push(subject);email=staffEmail;
   assert.equal((await login()).headers.get('location'),origin+'/?auth=error');
   // The account service's email sign-ins, an emailed link or code and an email with a password: ordinary sign-ins once
-  // listed, refused before. They carry no provider identity, so they are never staff and prove no mailbox for an invitation.
+  // listed, refused before. They carry no provider identity, so they are never staff. An emailed link or code proves the
+  // account's verified address is a mailbox its person reads, whoever hosts it; a password proves none.
   const emailMethods=['urn:anomaly:acr:email','urn:anomaly:acr:password'];
   const viaEmail=(acr:string)=>{providerName=null;providerHd=null;providerEmail=null;providerVerified=true;tokenAcr=acr;};
   viaEmail(emailMethods[0]!);fresh(`unlisted-${randomUUID()}@example.net`);
@@ -1295,13 +1296,56 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
     assert.equal((await login()).headers.get('location'),origin+'/?auth=error',acr);
     assert.equal((await attempt()).outcome,'email_unverified');
     assert.deepEqual(await waitlisted(email),[]);
-    // No invitation: following its link admits no new subject, and the invited person's email session can't accept one.
     viaEmail(acr);const address=`invited-${randomUUID()}@example.net`, link=await invite(address);fresh(address);
-    assert.equal((await login(undefined,link.url)).headers.get('location'),origin+'/?auth=error',acr);
+    if (acr==='urn:anomaly:acr:password') {
+      // A password: following an invitation link admits no new subject, and the invited person's password session can't accept one.
+      assert.equal((await login(undefined,link.url)).headers.get('location'),origin+'/?auth=error',acr);
+      assert.equal((await attempt()).outcome,'invitation');
+      viaEmail(acr);subject=gmailSubject;email=gmail;
+      assert.deepEqual(await errorOf(await request(`/v1/workspaces/invitations/${again.id}/accept`,'POST',sessionOf(await login()),{})),[403,'MAILBOX_SIGN_IN_REQUIRED']);
+      continue;
+    }
+    // An emailed link or code, for a mailbox Google doesn't host. Another verified address is refused, even the invited
+    // one's +tag: the match is exact.
+    fresh(address.replace('@','+team@'));
+    assert.equal((await login(undefined,link.url)).headers.get('location'),origin+'/?auth=error');
     assert.equal((await attempt()).outcome,'invitation');
+    assert.equal((await db.query('SELECT FROM nightmail_oidc_identities WHERE issuer=$1 AND subject=$2',[issuer,subject])).rowCount,0);
+    // The invited address joins: the link admits the new subject, whose session reviews and accepts it, and the
+    // sign-in is recorded as proof of the mailbox, as Google's is (account-policy.ts mailboxProven).
+    fresh(address);
+    const joinedByEmail=await login(undefined,link.url), invitee=sessionOf(joinedByEmail);
+    assert.equal(landed(joinedByEmail),link.url);
+    assert.deepEqual(await attempt(),{acr,provider:null,provider_hd:null,outcome:'signed_in:invitation'});
+    assert.equal((await request(`/v1/workspaces/invitations/${link.id}`,'GET',invitee)).status,200);
+    assert.deepEqual(await (await request(`/v1/workspaces/invitations/${link.id}/accept`,'POST',invitee,{})).json(),{workspaceId:staffWorkspace});
+    assert.deepEqual((await db.query("SELECT mailbox_proved,mailbox_proved_at>now()-interval '1 minute' AS fresh FROM nightmail_users WHERE id=$1",[accountOf(joinedByEmail)])).rows[0],{mailbox_proved:address,fresh:true});
+    // Accepted, the link is spent: another subject with the same verified address following it is refused.
+    fresh(address);
+    assert.equal((await login(undefined,link.url)).headers.get('location'),origin+'/?auth=error');
+    assert.equal((await attempt()).outcome,'invitation');
+    // Revoked or expired, a link admits nobody, and an invited person's email session can't review or accept it.
+    const end=async(address:string,how:'revoked'|'expired')=>{
+      const ended=await invite(address);
+      if (how==='revoked') assert.equal((await request(`/v1/workspaces/current/invitations?id=${ended.id}`,'DELETE',staffSession)).status,200);
+      else await db.query("UPDATE workspace_invitations SET expires_at=now()-interval '1 second' WHERE id=$1",[ended.id]);
+      return ended;
+    };
+    for (const how of ['revoked','expired'] as const) {
+      const ended=`invited-${randomUUID()}@example.net`, endedLink=await end(ended,how);
+      viaEmail(acr);fresh(ended);
+      assert.equal((await login(undefined,endedLink.url)).headers.get('location'),origin+'/?auth=error',how);
+      assert.equal((await attempt()).outcome,'invitation',how);
+    }
+    // An existing account signed in by email: its session accepts a live invitation to its address, never an ended one.
     viaEmail(acr);subject=gmailSubject;email=gmail;
-    const invitee=sessionOf(await login());
-    assert.deepEqual(await errorOf(await request(`/v1/workspaces/invitations/${again.id}/accept`,'POST',invitee,{})),[403,'MAILBOX_SIGN_IN_REQUIRED']);
+    const existing=sessionOf(await login());
+    assert.deepEqual(await (await request(`/v1/workspaces/invitations/${again.id}/accept`,'POST',existing,{})).json(),{workspaceId:staffWorkspace});
+    await db.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[staffWorkspace,accountOf(joined)]);
+    for (const ended of [await end(gmail,'revoked'),await end(gmail,'expired')]) {
+      assert.deepEqual(await errorOf(await request(`/v1/workspaces/invitations/${ended.id}`,'GET',existing)),[404,'NOT_FOUND']);
+      assert.deepEqual(await errorOf(await request(`/v1/workspaces/invitations/${ended.id}/accept`,'POST',existing,{})),[404,'NOT_FOUND']);
+    }
   }
   runtime.config.accountRequiredAcr=[googleAcr];
 });
