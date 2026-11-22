@@ -69,7 +69,7 @@ export function ThreadTimeline({ thread, items, open, titled = true }: { thread:
 /** A phone's way in: one control on the status line with the message count, opening the thread in a sheet. `words`:
  *  "5 messages" without the icon, where the chip has its row to itself (a received message). */
 export function ThreadChip({ count, onOpen, words }: { count: number; onOpen: (opener: HTMLElement) => void; words?: boolean }) {
-  return <button type="button" className="thread-chip" aria-haspopup="dialog" onClick={event => onOpen(event.currentTarget)}>{words ? <span>{count} messages<span className="sr-only"> in this thread</span></span> : <><Reply size={14} aria-hidden="true" /><span>{count}<span className="sr-only"> messages in this thread</span></span></>}<ChevronRight size={14} aria-hidden="true" /></button>
+  return <button type="button" className="thread-chip" aria-haspopup="dialog" onClick={event => onOpen(event.currentTarget)}>{words ? <span>{count} messages</span> : <><Reply size={14} aria-hidden="true" /><span>{count}<span className="sr-only"> messages in this thread</span></span></>}<ChevronRight size={14} aria-hidden="true" /></button>
 }
 
 /** Without a details column: the messages before this one as rows above the preview, the ones after it under the preview. */
