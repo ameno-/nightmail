@@ -189,6 +189,7 @@
 .ui-cards.logs-table .ui-card__segment + .ui-card__segment::before { content: none; }
 .ui-cards.logs-table .ui-card__line { gap: var(--space-8); }
 .ui-cards.logs-table .log-direction { display: inline-block; width: 22px; }
+.ui-cards.logs-table .ui-card__segment:empty { display: none; }
 .ui-cards.logs-table .ui-card__segment:not(:last-child) { flex: none; }
 .ui-cards.logs-table .ui-card__segment:last-child { flex: 1 1 0; }
 /* Phone: a message's facts are label · value rows, its status sits under the title, and the body and its timeline stack. */
