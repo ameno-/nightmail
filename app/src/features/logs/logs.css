@@ -225,7 +225,6 @@
 .thread__time { flex: none; color: var(--color-muted); font-variant-numeric: tabular-nums; }
 .thread__clip { flex: none; color: var(--color-muted); }
 .thread__count { color: var(--color-muted); font-weight: normal; font-variant-numeric: tabular-nums; }
-:is(.thread-line, .thread-rows) .log-direction { flex: none; }
 :is(.thread-line__entry, .thread-rows__row):focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
 .thread-line { display: flex; flex: none; flex-direction: column; gap: var(--space-8); }
 .thread-line__title { display: flex; align-items: center; gap: var(--space-6); min-height: var(--control-height); margin: 0; }
@@ -245,7 +244,6 @@
 .thread-line__status { display: flex; grid-area: status; align-items: center; gap: var(--space-8); min-width: 0; color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-label); line-height: 16px; white-space: nowrap; }
 .thread-line__top { line-height: 20px; }
 .thread-line .thread__time { font-family: var(--font-mono); font-size: var(--text-xs); }
-.thread-line__here { color: var(--color-text); }
 .thread-line__entry[data-focused] { background: var(--color-active-bg); }
 @media (hover: hover) and (pointer: fine) { a.thread-line__entry:hover { background: var(--color-hover); } }
 .email-detail-sheet .thread-line__steps { margin-inline: var(--space-8); }
@@ -259,9 +257,9 @@
 .thread-chip + :is(.ss-chip, .ss-chip-skeleton) { margin-left: 0; }
 .thread-rows { display: flex; flex: none; flex-direction: column; margin: 0 calc(-1 * var(--space-8)) var(--space-12); padding: 0; list-style: none; }
 .thread-rows[data-part='after'] { margin-block: var(--space-12) 0; }
-.thread-rows__row { display: grid; grid-template-columns: 28px minmax(0, 180px) minmax(0, 1fr) auto auto; align-items: center; column-gap: var(--space-12); width: 100%; height: 36px; padding: 0 var(--space-8); border: 0; border-radius: var(--radius-sm); background: none; color: var(--color-text); font: inherit; text-align: left; text-decoration: none; }
+.thread-rows__row { display: grid; grid-template-columns: minmax(0, 180px) minmax(0, 1fr) auto auto; align-items: center; column-gap: var(--space-12); width: 100%; height: 36px; padding: 0 var(--space-8); border: 0; border-radius: var(--radius-sm); background: none; color: var(--color-text); font: inherit; text-align: left; text-decoration: none; }
 .thread-rows__row[data-focused] { background: var(--color-active-bg); }
 .thread-rows__status { min-width: 0; overflow: hidden; color: var(--color-muted); text-overflow: ellipsis; white-space: nowrap; }
-.thread-rows__more { display: flex; padding-left: calc(28px + var(--space-12) + var(--space-8)); color: var(--color-muted); cursor: pointer; }
+.thread-rows__more { display: flex; padding-left: var(--space-8); color: var(--color-muted); cursor: pointer; }
 @media (hover: hover) and (pointer: fine) { .thread-rows__row:is(a, button):hover { background: var(--color-hover); } }
 .log-subject > .log-thread { display: inline-flex; flex: none; align-items: center; gap: 3px; height: 20px; padding: 0 7px 0 6px; overflow: visible; border-radius: 10px; background: var(--color-hover); color: var(--color-muted); font-size: 11px; font-variant-numeric: tabular-nums; line-height: 20px; }

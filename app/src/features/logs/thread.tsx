@@ -39,7 +39,6 @@ export function useThreadPrefetch(items: ThreadItem[]) {
 }
 
 const when = (at: string) => date(at, at.slice(0, 10) === new Date().toISOString().slice(0, 10) ? { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' } : { month: 'short', day: 'numeric', timeZone: 'UTC' })
-const Direction = ({ outbound }: { outbound: boolean }) => <span className="log-direction" data-direction={outbound ? 'sent' : 'received'}>{outbound ? 'Out' : 'In'}</span>
 const Who = ({ item }: { item: ThreadItem }) => <bdi className="thread__who"><Sender name={item.from.name} address={item.from.address} nameOnly /></bdi>
 const Time = ({ at }: { at: string }) => <time className="thread__time" dateTime={at} title={`${date(at)} UTC`}>{when(at)}</time>
 const Clip = ({ count }: { count: number }) => count > 0 ? <Paperclip className="thread__clip" size={12} aria-label={`${count} attachment${count === 1 ? '' : 's'}`} /> : null
@@ -59,9 +58,9 @@ export function ThreadTimeline({ thread, items, open, titled = true }: { thread:
       {items.map(item => <li key={item.key} className="thread-line__step">
         <Entry item={item} className="thread-line__entry" open={open}>
           <span className="thread-line__dot" data-outbound={item.outbound || undefined} aria-hidden="true" />
-          <span className="thread-line__top"><Direction outbound={item.outbound} /><Who item={item} /><Clip count={item.attachments} /></span>
+          <span className="thread-line__top"><Who item={item} /><Clip count={item.attachments} /></span>
           <Time at={item.at} />
-          <span className="thread-line__status">{label(item.status)}{item.focused && <span className="thread-line__here">Viewing</span>}</span>
+          <span className="thread-line__status">{label(item.status)}</span>
         </Entry>
       </li>)}
     </ol>
@@ -84,6 +83,6 @@ export function ThreadRows({ items, part, open }: { items: ThreadItem[]; part: '
   return <ol className="thread-rows" data-part={part} aria-label={part === 'before' ? 'Earlier in this thread' : 'Later in this thread'}>
     {rows.map(row => typeof row === 'number'
       ? <li key="more"><button type="button" className="thread-rows__row thread-rows__more" onClick={() => setUnfolded(true)}>{row} earlier</button></li>
-      : <li key={row.key}><Entry item={row} className="thread-rows__row" open={open}><Direction outbound={row.outbound} /><Who item={row} /><span className="thread-rows__status">{label(row.status)}</span><Clip count={row.attachments} /><Time at={row.at} /></Entry></li>)}
+      : <li key={row.key}><Entry item={row} className="thread-rows__row" open={open}><Who item={row} /><span className="thread-rows__status">{label(row.status)}</span><Clip count={row.attachments} /><Time at={row.at} /></Entry></li>)}
   </ol>
 }
