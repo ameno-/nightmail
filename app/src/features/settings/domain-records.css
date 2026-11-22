@@ -56,6 +56,7 @@
 .settings-facts.domain-facts { display: flex; flex-wrap: wrap; gap: var(--space-8) var(--space-40); }
 .ui-section-header:has(> .domain-group-title) { align-items: flex-start; }
 .domain-records-section > .dns-issue { margin-top: 0; }
+.domain-records-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: var(--space-8); }
 .ui-page-header .domain-status-skeleton { border-radius: var(--radius-sm); }
 
 /* Pending records: quiet guidance under the records, no box. */

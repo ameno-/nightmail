@@ -251,9 +251,7 @@ export function DomainRecords({ domain, actions, guided = false, setup = null, r
   const copyAll = () => copy(`${zoneLines(all)}\n`, `Copied ${all.length} records`)
   const policy = domain.dmarc
   return <section className="section stack domain-records-section">
-    <div className="ui-section-header"><div className="domain-group-title"><h2>DNS records</h2></div>
-      <div className="cluster">{actions}{all.length > 0 && <Button onClick={() => void copyAll()}><Copy size={14} aria-hidden />Copy all</Button>}</div>
-    </div>
+    {(actions || all.length > 0) && <div className="domain-records-actions">{actions}{all.length > 0 && <Button onClick={() => void copyAll()}><Copy size={14} aria-hidden />Copy all</Button>}</div>}
     {connect}
     {domain.dnsStatus === 'unavailable' && <p className="muted">{domain.dnsUnavailableReason || NO_RECORDS}</p>}
     {receivingView && alert}
