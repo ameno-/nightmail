@@ -4,7 +4,7 @@ import { ArrowUpRight, ChevronRight } from 'lucide-react'
 import { useApi, useApiDef, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { Email, EmailEvent, EmailEventDetail } from '../../data/types'
-import { Alert, Button, CopyButton, elapsed, ErrorState, PageHeader, Sheet, StatusBadge, Tooltip, Waterfall, type Tone } from '../../components/ui'
+import { Alert, Button, CopyButton, elapsed, ErrorState, PageHeader, Sheet, Tooltip, Waterfall, type Tone } from '../../components/ui'
 import { useEmailDocument } from '../../components/EmailPreview'
 import { EmailViews, SendabilityChip, SendabilityDetails, SendabilityTitle, SendabilityToggle, useSendability, type InsightSource } from '../../components/EmailInsight'
 import { AddressList, Sender } from '../../components/PrivateAddress'
@@ -62,7 +62,7 @@ function EmailDetail({ email, focus }: { email: Email; focus: string }) {
   const subject = email.subject || '(no subject)'
   return <div className="email-detail" data-mode={mode}>
     {compact ? <PageHeader title={<Subject text={subject} />} backTo="/logs" subtitle={<StatusLine email={email} chip={<>{thread && <ThreadChip count={thread.count} onOpen={openSheet('thread')} />}<SendabilityChip check={check} onOpen={openSheet('sendability')} /></>} onOpen={openSheet('details')} />} />
-      : <PageHeader title={subject} backTo="/logs" subtitle={<EmailFacts email={email} />} actions={<StatusBadge status={statusOf(email)} />} />}
+      : <PageHeader title={subject} backTo="/logs" subtitle={<EmailFacts email={email} />} />}
     {mode === 'panel' && delivery}
     <div className="email-detail__body">
       <section className="email-detail__preview" aria-label="Preview">
@@ -146,18 +146,18 @@ function FactList({ email }: { email: Email }) {
   </dl>
 }
 
-// To · From · stream · date · ID, on one line under the subject. The recipient opens its contact when there is one.
+// To on one line; From, the stream, the date and the ID on the next. The recipient opens its contact when there is one.
 function EmailFacts({ email }: { email: Email }) {
   const { multiTenant } = useWorkspaceAccess()
   const to = email.to.split(', ').filter(Boolean)
   return <div className="email-facts">
-    <span className="email-facts__item"><span className="email-facts__label">To</span>{email.contact ? <Link className="email-facts__contact" to={`/audience/contacts/${encodeURIComponent(email.contact.id)}`} aria-label="Open contact"><AddressList values={to} /><ArrowUpRight size={12} aria-hidden="true" /></Link> : <AddressList values={to} />}</span>
-    <span className="email-facts__item email-facts__from"><span className="email-facts__label">From</span><Sender name={email.fromName} address={email.from} /></span>
+    <div className="email-facts__line"><span className="email-facts__item"><span className="email-facts__label">To</span>{email.contact ? <Link className="email-facts__contact" to={`/audience/contacts/${encodeURIComponent(email.contact.id)}`} aria-label="Open contact"><AddressList values={to} /><ArrowUpRight size={12} aria-hidden="true" /></Link> : <AddressList values={to} />}</span></div>
+    <div className="email-facts__line"><span className="email-facts__item email-facts__from"><span className="email-facts__label">From</span><Sender name={email.fromName} address={email.from} /></span>
     <span className="email-facts__item">{label(email.stream)}</span>
     <span className="email-facts__item"><time dateTime={email.sentAt}>{date(email.sentAt)}</time></span>
     {!multiTenant && <span className="email-facts__item">{email.regionId}</span>}
     {email.simulated && <Tooltip content="Simulated: never sent to SES."><span className="email-facts__item" tabIndex={0}>Simulated</span></Tooltip>}
-    <span className="email-facts__item email-facts__id"><code className="identifier">{email.id}</code><CopyButton value={email.id} label="Copy email ID" /></span>
+    <span className="email-facts__item email-facts__id"><code className="identifier">{email.id}</code><CopyButton value={email.id} label="Copy email ID" /></span></div>
   </div>
 }
 

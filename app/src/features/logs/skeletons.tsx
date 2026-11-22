@@ -37,7 +37,7 @@ export function EmailDetailSkeleton() {
     <LoadingRegion label="Loading email"><div className="email-detail__body"><section className="email-detail__preview"><div className="ev" data-compact><div className="ev-toolbar"><Skeleton width={112} height={28} /></div>
       <div className="ev-stage"><div className="ev-canvas"><div className="ev-placeholder" /></div></div></div></section></div></LoadingRegion></div>
   const delivery = <div className="delivery" data-vertical={mode !== 'panel' || undefined}>{mode === 'panel' ? <SkeletonText width={300} lineHeight={28} /> : <div className="delivery__skeleton">{[96, 80, 112].map(width => <SkeletonText key={width} width={width} lineHeight={28} />)}</div>}</div>
-  return <div className="email-detail" data-mode={mode}><PageHeader title={<SkeletonText width={320} lineHeight={24} />} backTo="/logs" subtitle={<div className="email-facts"><SkeletonText width={420} /></div>} actions={<Skeleton width={80} height={22} />} />
+  return <div className="email-detail" data-mode={mode}><PageHeader title={<SkeletonText width={320} lineHeight={24} />} backTo="/logs" subtitle={<div className="email-facts"><div className="email-facts__line"><SkeletonText width={240} /></div><div className="email-facts__line"><SkeletonText width={420} /></div></div>} />
     <LoadingRegion label="Loading email">
       {mode === 'panel' && delivery}
       <div className="email-detail__body">
