@@ -30,11 +30,9 @@
 })()
 
 ;(() => {
-  // The homepage has no theme switch: it is in the system's theme, and a campaign's Write and Review pages are always light
-  // (lib/theme.tsx). Elsewhere a saved choice wins.
+  // The homepage has no theme switch: it is in the system's theme (lib/theme.tsx). Elsewhere a saved choice wins.
   let saved = null
   try { if (location.pathname !== '/') saved = localStorage.getItem('nightmail.theme') } catch {}
-  if (/^\/campaigns\/(?:new|[^/]+\/(?:edit|review))\/?$/.test(location.pathname)) saved = 'light'
   const theme = saved === 'light' || saved === 'dark'
     ? saved
     : matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'

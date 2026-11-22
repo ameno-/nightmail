@@ -34,7 +34,7 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 /* The email paper stays light; the surrounding application retains its theme. */
 /* The email sheet stays light in either theme, so it takes the light theme's accent set: its ghost buttons
    (Inbox preview, Insert) keep readable ink on white in dark mode too. */
-.campaign-compose-workspace { --color-surface: var(--color-email-surface); --color-canvas: #F3F3F3; --color-text: var(--color-email-text); --color-muted: #707070; --color-border: #E4E4E4; --color-accent: oklch(.33 .07 263); --color-accent-hover: oklch(.29 .065 263); --color-accent-pressed: oklch(.26 .06 263); --color-accent-edge: transparent; --color-accent-text: oklch(.40 .08 263); --color-active-bg: #F0F0F0; --color-on-accent: #FFFFFF; --color-focus: var(--color-muted); --color-info: #315EFB; --color-danger: #995168; --color-warning: #A85E30; display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; overflow: hidden; background: var(--color-canvas); color: var(--color-email-text); color-scheme: light; border-radius: var(--radius-sm); }
+.campaign-compose-page:not(.campaign-studio) .campaign-compose-workspace { --color-surface: var(--color-email-surface); --color-canvas: #F3F3F3; --color-text: var(--color-email-text); --color-muted: #707070; --color-border: #E4E4E4; --color-accent: oklch(.33 .07 263); --color-accent-hover: oklch(.29 .065 263); --color-accent-pressed: oklch(.26 .06 263); --color-accent-edge: transparent; --color-accent-text: oklch(.40 .08 263); --color-active-bg: #F0F0F0; --color-on-accent: #FFFFFF; --color-focus: var(--color-muted); --color-info: #315EFB; --color-danger: #995168; --color-warning: #A85E30; display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; overflow: hidden; background: var(--color-canvas); color: var(--color-email-text); color-scheme: light; border-radius: var(--radius-sm); }
 /* In dark mode only the email paper stays light: the desk around it follows the theme instead of a bright grey field. */
 :root[data-theme='dark'] .campaign-compose-workspace { background: #0D0D0D; }
 :root[data-theme='dark'] .campaign-compose-sheet { border-color: transparent; box-shadow: 0 0 0 1px rgb(255 255 255 / 8%); }
@@ -171,11 +171,10 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 @media (min-width: 1200px) { .campaign-compose-workspace:has(.composer-inspector:not([hidden])) { padding-inline-end: 320px; } }
 
 /* The campaign's two steps, Write and Review (as in Loops, Kit and beehiiv): a top bar across the page with the name,
-   the steps and the actions, then one roomy column. Both pages are always light (lib/theme.tsx), like the email. */
+   the steps and the actions, then one roomy column. Both follow the app's theme: in dark mode the email is written on
+   the dark page too, so opening a campaign never flashes white. */
 .page-surface:has(:is(.campaign-studio, .campaign-review)), .app-shell--compact .page-surface:has(:is(.campaign-studio, .campaign-review)), body:has(.campaign-studio) .app-shell--compact .page-surface:has(.campaign-studio) { padding: 0; }
 .page-surface:has(.campaign-studio) { overflow: hidden; }
-/* These pages are always light, so the theme switch would do nothing here. It keeps its place so nothing moves. */
-body:has(:is(.campaign-studio, .campaign-review)) .theme-toggle { visibility: hidden; }
 .studio-bar { position: sticky; top: 0; z-index: 4; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: var(--space-16); flex-shrink: 0; min-height: 64px; padding: var(--space-12) var(--space-24); border-bottom: 1px solid var(--color-border); background: var(--color-surface); }
 .studio-bar__start { display: flex; align-items: center; gap: var(--space-12); min-width: 0; }
 .studio-bar__end { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-8); min-width: 0; }
@@ -196,7 +195,24 @@ body:has(:is(.campaign-studio, .campaign-review)) .theme-toggle { visibility: hi
 .campaign-steps > li[aria-current] .campaign-steps__mark { border-color: var(--color-text); background: var(--color-text); color: var(--color-surface); }
 .campaign-studio > .ui-alert { margin: var(--space-16) var(--space-24) 0; }
 /* Write: the email on a plain page, with room around it. */
-.campaign-studio .campaign-compose-workspace, :root[data-theme='dark'] .campaign-studio .campaign-compose-workspace { background: var(--color-surface); border-radius: 0; }
+.campaign-studio .campaign-compose-workspace { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; overflow: hidden; background: var(--color-surface); color: var(--color-text); }
+/* Dark mode: the email's own colours (light paper, near-black ink) give way to the page's, here only. */
+:root[data-theme='dark'] .campaign-studio { --color-email-surface: var(--color-surface); --color-email-text: var(--color-text); }
+:root[data-theme='dark'] .campaign-studio .campaign-compose-sheet { box-shadow: none; }
+.campaign-studio .composer-toolbar { background: color-mix(in srgb, var(--color-surface) 96%, transparent); }
+/* The editor's theme (EmailComposer) paints delivered-email colours; on the dark page the text takes the page's ink.
+   Colours set on a span (the Design panel's text colour) still win, being on the text itself. */
+:root[data-theme='dark'] .campaign-studio .composer-document .tiptap.ProseMirror, :root[data-theme='dark'] .campaign-studio .composer-document .tiptap.ProseMirror .node-container { background-color: transparent !important; color: var(--color-text) !important; }
+:root[data-theme='dark'] .campaign-studio .composer-document .tiptap.ProseMirror :is(p, h1, h2, h3, li) { color: var(--color-text) !important; }
+:root[data-theme='dark'] .campaign-studio .composer-document .tiptap.ProseMirror :is(blockquote, pre, :not(pre) > code) { background: var(--color-layer-2) !important; color: var(--color-text) !important; }
+:root[data-theme='dark'] .campaign-studio .composer-document .tiptap.ProseMirror a { color: var(--color-accent-text) !important; }
+/* The Design panel, dark with the page. */
+:root[data-theme='dark'] .campaign-studio .composer-inspector { --re-bg: var(--color-surface); --re-text: var(--color-text); --re-text-muted: var(--color-muted); --re-border: var(--color-border-strong); --re-hover: var(--color-layer-2); --re-active: var(--color-layer-3); --re-pressed: var(--color-layer-3); --re-bg-active: var(--color-layer-2); --re-separator: var(--color-border); border-color: var(--color-border-strong); background: var(--color-surface); color: var(--color-text); color-scheme: dark; }
+:root[data-theme='dark'] .campaign-studio .composer-inspector :is(select, textarea, [data-re-inspector-toggle-item]) { border-color: var(--color-border-strong); background: var(--color-surface); color: var(--color-text); }
+:root[data-theme='dark'] .campaign-studio .composer-inspector :is([data-re-inspector-input], [data-re-inspector-color-hex], [data-re-inspector-breadcrumb-button]) { color: var(--color-text); }
+:root[data-theme='dark'] .campaign-studio .composer-inspector [data-re-inspector-breadcrumb-button][data-clickable] { color: var(--color-muted); }
+:root[data-theme='dark'] .campaign-studio .composer-inspector [data-re-inspector-toggle-item][data-active] { background: var(--color-text); color: var(--color-surface); }
+:root[data-theme='dark'] .campaign-studio .composer-document .tiptap.ProseMirror hr { border-top-color: var(--color-border-strong) !important; }
 .campaign-studio .campaign-compose-scroll { padding-block: var(--space-24) 96px; }
 .campaign-studio .campaign-compose-sheet { max-width: 664px; min-height: 100%; padding: 0 var(--space-32); border: 0; border-radius: 0; box-shadow: none; }
 .campaign-studio .campaign-compose-row { grid-template-columns: 88px minmax(0, 1fr); min-height: 40px; gap: var(--space-8); }
