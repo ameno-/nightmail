@@ -252,7 +252,7 @@ function RechargeDialog({ settings, hasCard, enable, capped, Row, onClose }: { s
 // History: the balance's changes and the card payments, a page at a time. Both are cursor lists with card slots on phones.
 // The ledger has one usage entry an hour; the page shows one line a day (UTC), its emails and its cost added up from
 // those entries, so a month reads as its days. Everything else on the ledger (credit, refunds, adjustments) keeps its own line.
-type Line = { key: string; day: string; at: string | null; text: string; /** A top-up's credit expires on this day. */ expires: string | null; amount: bigint; invoiceUrl: string | null }
+type Line = { key: string; day: string; text: string; /** A top-up's credit expires on this day. */ expires: string | null; amount: bigint; invoiceUrl: string | null }
 type LedgerPage = { data: LedgerEntry[]; nextCursor: string | null }
 type Meters = Record<string, { quantity?: number | string } | undefined>
 /** The UTC day an hourly usage entry is for; null for anything that isn't one day's usage (a repricing, or a settlement
@@ -276,11 +276,11 @@ function historyLines(entries: LedgerEntry[]): Line[] {
   for (const entry of entries) {
     const day = usageDay(entry)
     if (!day) {
-      lines.push({ key: `entry-${entry.id}`, day: entry.at.slice(0, 10), at: entry.at, text: entry.description, expires: entry.kind === 'topup' && entry.expiresAt ? fullDay(entry.expiresAt) : null, amount: BigInt(entry.amount), invoiceUrl: entry.invoiceUrl })
+      lines.push({ key: `entry-${entry.id}`, day: entry.at.slice(0, 10), text: entry.description, expires: entry.kind === 'topup' && entry.expiresAt ? fullDay(entry.expiresAt) : null, amount: BigInt(entry.amount), invoiceUrl: entry.invoiceUrl })
       continue
     }
     let group = days.get(day)
-    if (!group) { group = { line: { key: `day-${day}`, day, at: null, text: '', expires: null, amount: 0n, invoiceUrl: null }, sum: {}, charged: false }; days.set(day, group); lines.push(group.line) }
+    if (!group) { group = { line: { key: `day-${day}`, day, text: '', expires: null, amount: 0n, invoiceUrl: null }, sum: {}, charged: false }; days.set(day, group); lines.push(group.line) }
     const meters = (typeof entry.detail.meters === 'object' && entry.detail.meters ? entry.detail.meters : entry.detail) as Meters
     for (const meter of ['send', 'receive', 'storage', 'byo_send', 'byo_receive']) group.sum[meter] = (group.sum[meter] ?? 0) + Number(meters[meter]?.quantity ?? 0)
     if (entry.detail.charged !== false) group.charged = true
@@ -320,10 +320,9 @@ async function historyPage(cursor: string | undefined, signal: AbortSignal): Pro
   }
 }
 const lineDescription = (line: Line) => <span className="billing-desc" title={`${line.text}${line.expires ? ` · Expires ${line.expires}` : ''}`}>{line.text}{line.expires && <span className="muted"> · Expires {line.expires}</span>}</span>
-const lineDay = (line: Line) => <span title={line.at ? `${date(line.at, { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' })} UTC` : undefined}>{monthDay(line.day)}</span>
 const lineColumns: Column<Line>[] = [
   { key: 'description', label: 'Description', render: line => <span className="billing-cell">{lineDescription(line)}{line.invoiceUrl && <InvoiceLink href={line.invoiceUrl} label="Invoice" />}</span>, cardRender: line => <span className="billing-desc">{line.text}</span>, card: 'title' },
-  { key: 'day', label: 'Date', width: 124, render: lineDay, cardRender: line => <>{lineDay(line)}{line.expires && <> · Expires {line.expires}</>}{line.invoiceUrl && <> · <InvoiceLink href={line.invoiceUrl} label="Invoice" /></>}</>, card: 'line' },
+  { key: 'day', label: 'Date', width: 124, render: line => monthDay(line.day), cardRender: line => <>{monthDay(line.day)}{line.expires && <> · Expires {line.expires}</>}{line.invoiceUrl && <> · <InvoiceLink href={line.invoiceUrl} label="Invoice" /></>}</>, card: 'line' },
   { key: 'amount', label: 'Amount', width: 104, align: 'right', render: line => <span className="billing-amount" data-sign={line.amount > 0n ? 'in' : undefined}>{usd(line.amount, { sign: true })}</span>, card: 'aside' },
 ]
 function InvoiceLink({ href, label }: { href: string; label: string }) {
