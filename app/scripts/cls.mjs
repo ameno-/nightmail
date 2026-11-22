@@ -72,10 +72,10 @@ const pages = ids => [
   ['Overview', '/overview', { from: '/logs' }],
   ['Overview · setup', '/overview', { user: 'nia' }],
   // Switching the time range keeps the old figures up while the new ones load, then tweens, morphs and crossfades them.
-  ['Overview · range', '/overview', { from: '/overview', click: '24h' }],
+  ['Overview · range', '/overview', { from: '/overview', click: '30d' }],
   // A stream scopes the figures and Latest emails; a figure's tile opens Logs on that status, over the same range.
   ['Overview · stream', '/overview?stream=marketing', {}],
-  ['Logs · from an Overview tile', '/logs?view=sent&status=bounced', { from: '/overview', click: 'Bounced' }],
+  ['Logs · from an Overview tile', '/logs?view=sent&status=bounced&range=24h', { from: '/overview', click: 'Bounced' }],
   // "/" is the homepage signed in too: its button opens Overview (cold, then in the app).
   ['Homepage · signed in', '/', { still: true }],
   ['Overview · from the homepage', '/overview', { from: '/', click: 'Open dashboard', still: true }],
