@@ -1433,10 +1433,15 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
     await db.query('UPDATE nightmail_signup_limit SET places=$1',[initial]);
     await db.query('UPDATE nightmail_waitlist SET let_in_at=NULL WHERE let_in_at>=$1',[started]);
     await db.query('DELETE FROM nightmail_waitlist WHERE email=ANY($1)',[people.map(p=>p.email.toLowerCase())]);
+    await db.query(`DELETE FROM jobs WHERE type='operator.alert' AND workspace_id IN (SELECT m.workspace_id FROM workspace_members m JOIN nightmail_oidc_identities i ON i.user_id=m.user_id WHERE i.issuer=$1)`,[issuer]);
     await db.query('DELETE FROM nightmail_users WHERE id IN (SELECT user_id FROM nightmail_oidc_identities WHERE issuer=$1)',[issuer]);
   });
   type Places = { limit: number; signedUp: number; held: number; waiting: number; open: number };
 
+  // The operators' Slack hears about each sign-up (operator-alerts.ts); the card is queued, and posted by its job.
+  runtime.config.operatorSlackWebhookUrl = 'https://hooks.slack.com/services/T0FIXTURE/B0FIXTURE/signupcards';
+  const cards = async () => (await db.query(`SELECT DISTINCT j.id,j.workspace_id,j.payload FROM jobs j JOIN workspace_members m ON m.workspace_id=j.workspace_id
+    JOIN nightmail_oidc_identities i ON i.user_id=m.user_id WHERE j.type='operator.alert' AND i.issuer=$1 ORDER BY j.id`,[issuer])).rows;
   // Staff sign up as before and take no place; one is the operator who sets the limit.
   const staff = await signIn(someone(`staff-${randomUUID()}@example.org`,googleAcr,'google','example.org'));
   assert.ok(staff.session && !await placeOf(staff.account));
@@ -1495,6 +1500,17 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   const me = await (await request('/v1/me','GET',first.session)).json() as {workspaces:{id:string;role:string}[]};
   assert.deepEqual(me.workspaces.map(w=>w.role),['owner']);
   assert.deepEqual([await placeOf(first.account),await waiting(oldest)],['waitlist',null]);
+  // Its card, once, after the sign-up committed: its place of the limit ("91 of 100"). Staff took no place and have none.
+  const signedUp = await places();
+  assert.deepEqual((await cards()).map(c => c.payload),[{kind:'signup',signedUp:signedUp.signedUp,limit:signedUp.limit}]);
+  await t.test('the sign-up card is posted to Slack', async t => {
+    const posted: Json[] = [], { operatorAlertJobs } = await import('./src/operator-alerts.js'), [card] = await cards();
+    t.mock.method(globalThis,'fetch',async (url: RequestInfo|URL, init?: RequestInit) => { assert.equal(String(url),runtime.config.operatorSlackWebhookUrl); posted.push(JSON.parse(String(init!.body))); return new Response(null); });
+    await operatorAlertJobs['operator.alert']!(runtime, card.payload, { id: card.id, workspaceId: card.workspace_id, attempts: 1 });
+    assert.equal(posted.length, 1);
+    assert.match(posted[0].blocks[0].text.text, new RegExp(`^:wave: \\*New sign-up\\* [^@]+\\. ${signedUp.signedUp} of ${signedUp.limit}\\.$`));
+    assert.equal(posted[0].blocks[0].accessory.url, `${origin}/operator/workspaces/${card.workspace_id}`);
+  });
   // Admission rests on what the sign-in proves: GitHub vouches for the second address but proves no mailbox, so its
   // place stays held; an emailed link proves it.
   // The refusal tells it how: an emailed link or Google (?place=ready on the waitlist screen).
@@ -1504,6 +1520,7 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   Object.assign(second,{acr:emailAcr,provider:null});
   const viaLink = await signIn(second);
   assert.deepEqual([await outcome(second),await placeOf(viaLink.account)],['signed_in:signup','waitlist']);
+  assert.equal((await cards()).length,2,'Each sign-up has its one card; the refused GitHub sign-in has none.');
   // One place per person: another account with an address that is already a verified user's takes none.
   assert.equal((await signIn(someone(oldest.email))).auth,'error');
   const taken = await places();

@@ -81,16 +81,16 @@ export function operatorCard(publicUrl: string, p: Record<string, unknown>, work
  * Queues one card, in one statement that never fails its caller: a card that can't be queued is logged. Inside a
  * transaction pass `savepoint`, so a failed insert leaves the transaction usable. `daily`: at most one in 24 hours.
  */
-async function queue(db: DbExecutor, workspaceId: string, kind: Kind, data: Record<string, unknown> | SQL, options: { daily: boolean; savepoint?: boolean }) {
-  const key = `operator-alert:${kind}:${workspaceId}`, day = (ago: string) => sql`${key}||':'||to_char((now() AT TIME ZONE 'UTC')-${ago}::interval,'YYYYMMDD')`;
+async function queue(db: DbExecutor, workspace: string | SQL, kind: Kind, data: Record<string, unknown> | SQL, options: { daily: boolean; savepoint?: boolean }) {
+  const workspaceId = typeof workspace === 'string' ? workspace : undefined;
+  const key = sql`${`operator-alert:${kind}:`}||w.id`, day = (ago: string) => sql`${key}||':'||to_char((now() AT TIME ZONE 'UTC')-${ago}::interval,'YYYYMMDD')`;
   const payload = data instanceof SQL ? data : sql`${JSON.stringify(data)}::jsonb`;
   try {
     if (options.savepoint) await db.execute(sql`SAVEPOINT operator_alert`);
-    const { rows } = await db.execute(options.daily
-      ? sql`INSERT INTO jobs(id,type,workspace_id,payload) SELECT ${day('0')},${JOB},${workspaceId},jsonb_build_object('kind',${kind}::text)||${payload}
-          WHERE NOT EXISTS (SELECT FROM jobs WHERE id=${day('0')}) AND NOT EXISTS (SELECT FROM jobs WHERE id=${day('1 day')} AND created_at>now()-interval '24 hours')
-          ON CONFLICT (id) DO NOTHING RETURNING id`
-      : sql`INSERT INTO jobs(id,type,workspace_id,payload) VALUES (${key},${JOB},${workspaceId},jsonb_build_object('kind',${kind}::text)||${payload}) ON CONFLICT (id) DO NOTHING RETURNING id`);
+    const { rows } = await db.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload) SELECT ${options.daily ? day('0') : key},${JOB},w.id,jsonb_build_object('kind',${kind}::text)||${payload}
+      FROM (SELECT ${typeof workspace === 'string' ? sql`${workspace}::text` : workspace} AS id) w WHERE w.id IS NOT NULL
+      ${options.daily ? sql`AND NOT EXISTS (SELECT FROM jobs WHERE id=${day('0')}) AND NOT EXISTS (SELECT FROM jobs WHERE id=${day('1 day')} AND created_at>now()-interval '24 hours')` : sql``}
+      ON CONFLICT (id) DO NOTHING RETURNING id`);
     if (options.savepoint) await db.execute(sql`RELEASE SAVEPOINT operator_alert`);
     return rows.length > 0;
   } catch {
@@ -101,13 +101,14 @@ async function queue(db: DbExecutor, workspaceId: string, kind: Kind, data: Reco
 }
 
 /**
- * New sign-up: "Driftwood. 91 of 100", for the workspace the new account owns, in the transaction that signed it up.
- * The one call site for the sign-up limit (pull request #575): after its account and workspace exist, with its places.
+ * New sign-up: "Driftwood. 91 of 100", for the workspace the new account owns. Called by account-login.ts
+ * finishAccountLogin after the sign-up committed, with the sign-up limit's places (signups.ts readPlaces), so it can't
+ * block or fail it. One statement; never throws.
  */
 export async function alertNewSignup(runtime: Runtime, db: DbExecutor, userId: string, places: { signedUp: number; limit: number }) {
   if (!runtime.config.operatorSlackWebhookUrl) return false;
-  const [owned] = (await db.execute<{ workspace_id: string }>(sql`SELECT workspace_id FROM workspace_members WHERE user_id=${userId} AND role='owner' ORDER BY created_at,id LIMIT 1`)).rows;
-  return !!owned && queue(db, owned.workspace_id, 'signup', { signedUp: places.signedUp, limit: places.limit }, { daily: false, savepoint: true });
+  const owned = sql`(SELECT workspace_id FROM workspace_members WHERE user_id=${userId} AND role='owner' ORDER BY created_at,id LIMIT 1)`;
+  return queue(db, owned, 'signup', { signedUp: places.signedUp, limit: places.limit }, { daily: false });
 }
 
 const PAUSE_WHY: Record<string, keyof typeof REASONS> = { bounces: 'bounces', marketing_bounces: 'bounces', transactional_bounces: 'bounces', complaints: 'complaints', screen: 'screen' };
