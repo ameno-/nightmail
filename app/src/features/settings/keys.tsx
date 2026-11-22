@@ -13,13 +13,11 @@ import { actionLabel } from '../../data/activity'
 import { Who } from './activity'
 import { accessLabel, agentAccess, approvalLabel, connectionTitle, domainScope, mailLabel, protocolLabel } from './key-labels'
 import { keyTypes, settingsColumns, type KeyTypeFilter } from './skeletons'
-import { KeysGuide } from './keys-guide'
 import './api-keys.css'
 import { AddressList, PrivateAddress } from '../../components/PrivateAddress'
 import { ConnectAgentButton, ConnectAgentDialog, McpKeySetup } from '../docs/connect-agent'
 import { MailSettings, useMailServers } from '../docs/mail-settings'
 import { apiKeyEnv, productName } from '../../../../api/src/brand'
-import { usePhone } from '../../lib/media'
 
 // One table for the three credential types: API keys, agent tokens (a connected agent, with the short-lived tokens it
 // made nested under it) and app passwords.
@@ -174,14 +172,13 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
 
   return <div className="stack">
     <PageHeader title="API keys" actions={<><Checkbox label="Show inactive" checked={showRevoked} onCheckedChange={checked => { setShowRevoked(checked); pagination.reset() }} /><Button variant="primary" onClick={() => setOpen(true)} data-analytics="keys/create">Create key</Button></>} />
-    <KeysGuide />
     <div className="keys-sections">
       <section className="section stack" aria-label="Keys">
         <Tabs label="Type" value={type} onValueChange={value => { setType(value as KeyTypeFilter); pagination.reset() }} items={[...keyTypes]} />
         {!listFailed && <DataTable className="keys-table keys-table--two-line" loading={listLoading} skeletonRows={3} rows={rows} rowKey={row => row.id} onRowClick={view} empty={empty}
           columns={[
             { ...nameColumn, render: row => <TwoLines nested={row.kind === 'token'} first={name(row).first} second={name(row).second} />, cardRender: row => <span className={row.kind === 'token' ? 'keys-nested' : undefined}>{name(row).first}</span> },
-            { ...typeColumn, render: row => typeName[row.kind] },
+            ...(type === 'all' ? [{ ...typeColumn, render: (row: Row) => typeName[row.kind] }] : []),
             { ...accessColumn, render: row => <TwoLines first={access(row).first} second={access(row).second} />, cardRender: row => <span className={row.kind === 'token' ? 'keys-nested' : undefined}>{access(row).first} · {access(row).second}</span> },
             { ...prefixColumn, render: row => row.kind === 'key' ? <code>{row.key.prefix}</code> : <span className="muted">—</span> },
             { ...lastColumn, render: used, cardRender: row => <span className={row.kind === 'token' ? 'keys-nested' : undefined}>{cardLast(row)}</span> },
@@ -220,17 +217,14 @@ function KeyDetails({ row, fields, onClose, onRevoke, onEdit }: { row: Row | nul
   const id = row?.id
   useEffect(() => { setTab('details') }, [id])
   const state = row ? stateOf(row) : null
-  // A phone's sheet closes with its X and a swipe: no Close beside Revoke and Edit.
-  const phone = usePhone()
   const facts = fields.filter(([label]) => label !== 'Status')
   const life: [string, ReactNode][] = [...facts.filter(([label]) => !accessFacts.has(label)), ...(row?.kind === 'key' ? [['ID', <span className="ui-kv__id"><code>{row.key.id}</code><CopyButton value={row.key.id} label="Copy key ID" /></span>] as [string, ReactNode]] : [])]
   return <Dialog size="lg" open={row !== null} onOpenChange={next => { if (!next) onClose() }} title={row ? rowName(row) : ''}
     status={row && <StatusBadge status={state ?? 'Active'} tone={state === 'Revoked' || state === 'Ended' ? 'danger' : state ? 'warning' : 'success'} />}
-    footer={<>
-      {row && !rowState(row) && <Button variant="danger" className="ui-dialog__footer-start" onClick={() => onRevoke(row)}>{revokeLabel(row)}</Button>}
-      {!phone && <Button onClick={onClose}>Close</Button>}
-      {row && editable(row) && <Button variant="primary" onClick={() => onEdit(row.key)}>Edit</Button>}
-    </>}>
+    footer={row && (!rowState(row) || editable(row)) ? <>
+      {!rowState(row) && <Button variant="danger" className="ui-dialog__footer-start" onClick={() => onRevoke(row)}>{revokeLabel(row)}</Button>}
+      {editable(row) && <Button variant="primary" onClick={() => onEdit(row.key)}>Edit</Button>}
+    </> : undefined}>
     {row?.kind === 'key' && <Tabs label="Key" value={tab} onValueChange={setTab} items={[{ value: 'details', label: 'Details' }, { value: 'changes', label: 'Changes' }]} />}
     <div className="keys-panels">
       <div className="keys-details" data-inactive={tab !== 'details' || undefined} inert={tab !== 'details'}>

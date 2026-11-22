@@ -2,7 +2,7 @@ import { useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } fro
 import { Link, useLocation } from 'react-router'
 import { useQueryClient } from '@tanstack/react-query'
 import { ArrowUpRight, ChevronRight, Lock } from 'lucide-react'
-import { Button, ConfirmDialog, CopyButton, ErrorState, Input, SectionHeader, Select, Skeleton, StatusBadge, MutationError } from '../../components/ui'
+import { Button, ConfirmDialog, CopyButton, ErrorState, Input, Select, Skeleton, StatusBadge, MutationError } from '../../components/ui'
 import { useApiDef, useApiMutation, useSession, useWorkspaceAccess } from '../../data/context'
 import { connectionApi, connectionKindLabel, useConnectionCache } from '../../data/connections'
 import { queries } from '../../data/queries'
@@ -32,10 +32,10 @@ import { PostalAddressDialog, postalAddressLine } from '../../components/PostalA
 // control on the right, each 53px tall so values loading in never move anything. Old #workspace and #webhooks links still land.
 type SectionKey = 'general' | 'members' | 'sending' | 'webhooks' | 'activity' | 'usage' | 'billing' | 'account'
 // Members see every section in the rail: owner and admin ones carry a lock and open a short explanation instead of
-// controls they can't use, so nothing is silently missing. Sections of rows keep a readable column; a section that is
-// a table (`width: 'full'`) takes the whole panel, to the same right edge as the app's other tables.
-const groups: { title: string; items: { key: SectionKey; label: string; admin?: boolean; width?: 'full' }[] }[] = [
-  { title: 'Workspace', items: [{ key: 'general', label: 'General' }, { key: 'members', label: 'Members', admin: true, width: 'full' }, { key: 'sending', label: 'Sending', admin: true }, { key: 'webhooks', label: 'Webhooks', admin: true, width: 'full' }, { key: 'activity', label: 'Activity', admin: true, width: 'full' }, { key: 'usage', label: 'Plan & usage' }, { key: 'billing', label: 'Billing', admin: true }] },
+// controls they can't use, so nothing is silently missing. Every section takes the whole panel, to the same right edge
+// as the app's other tables.
+const groups: { title: string; items: { key: SectionKey; label: string; admin?: boolean }[] }[] = [
+  { title: 'Workspace', items: [{ key: 'general', label: 'General' }, { key: 'members', label: 'Members', admin: true }, { key: 'sending', label: 'Sending', admin: true }, { key: 'webhooks', label: 'Webhooks', admin: true }, { key: 'activity', label: 'Activity', admin: true }, { key: 'usage', label: 'Plan & usage' }, { key: 'billing', label: 'Billing', admin: true }] },
   { title: 'You', items: [{ key: 'account', label: 'Account' }] },
 ]
 const items = groups.flatMap(group => group.items)
@@ -59,22 +59,22 @@ export function HostedSettings() {
   return <div className="hosted-settings">
     <nav className="settings-rail" aria-label="Settings">
       <h1 className="settings-rail__title">Settings</h1>
-      <div ref={rail} className="settings-rail__groups">{groups.map(group => <div key={group.title} className="settings-rail__group"><span className="settings-rail__group-title">{group.title}</span>
+      <div ref={rail} className="settings-rail__groups">{groups.map(group => <div key={group.title} className="settings-rail__group">
         {group.items.map(item => <Link key={item.key} to={`/settings#${item.key}`} replace aria-current={item.key === section ? 'page' : undefined} data-locked={locked(item) || undefined} title={locked(item) ? 'Owners and admins only' : undefined}>{item.label}{locked(item) && <Lock size={12} aria-label="Owners and admins only" />}</Link>)}
       </div>)}</div>
     </nav>
     {/* Keyed, so switching sections fades the new one in. */}
-    <div key={section} className="hosted-settings__content" data-width={locked(current) ? undefined : current.width}>
+    <div key={section} className="hosted-settings__content">
       {locked(current) ? <AdminOnly title={current.label} />
         : <>
-          {section === 'general' && <><SectionHeader title="General" /><WorkspaceRows /></>}
+          {section === 'general' && <WorkspaceRows />}
           {section === 'members' && <Team />}
-          {section === 'sending' && <><SectionHeader title="Sending" /><SendingRows /></>}
+          {section === 'sending' && <SendingRows />}
           {section === 'webhooks' && <WebhooksSection />}
           {section === 'activity' && <ActivitySection />}
           {section === 'usage' && <PlanUsage row={Row} />}
           {section === 'billing' && <BillingSection row={Row} />}
-          {section === 'account' && <><SectionHeader title="Account" /><AccountRows /></>}
+          {section === 'account' && <AccountRows />}
         </>}
     </div>
   </div>

@@ -3,7 +3,6 @@ import { useRegion, useWorkspaceAccess } from '../../data/context'
 import './settings.css'
 import './domain-records.css'
 import './api-keys.css'
-import { KeysGuide } from './keys-guide'
 
 const twoLines = <div><SkeletonText width="74%" /><SkeletonText width="88%" /></div>
 /** The API keys page's type filter: every credential, or one of its three types. */
@@ -27,8 +26,6 @@ export const settingsColumns = {
     { key: 'receiving', label: 'Receiving', width: '32%', card: 'line' },
     { key: 'addresses', label: 'Addresses', align: 'right', card: 'hide' },
     { key: 'region', label: 'Region', card: 'hide' },
-    // What sending still waits for (a card has no room for it beside the status); the table shows it in the Sending cell.
-    { key: 'note', label: 'Setup', table: false, card: 'line' },
   ],
   // A receiving host's card: the host and its status, then its addresses and catch-all; Remove is in the row's menu.
   hosts: [
@@ -94,21 +91,21 @@ export const settingsColumns = {
     { key: 'attempts', label: 'Attempts', card: 'inline' },
     { key: 'actions', label: '', align: 'right', width: 220, skeleton: <ControlSkeleton width={85} />, card: 'end' },
   ],
-  // An activity card: what happened and when, then labelled lines for who (and where from) and the target.
+  // An activity card: what happened and when, then plain lines for who (and where from) and the target.
   activity: [
     { key: 'when', label: 'When', width: 112, card: 'aside' },
-    { key: 'who', label: 'Who', width: '20%', card: 'field' },
+    { key: 'who', label: 'Who', width: '20%', card: 'line' },
     { key: 'action', label: 'Action', width: '22.5%', card: 'title' },
-    { key: 'target', label: 'Target', width: '22.5%', card: 'field' },
+    { key: 'target', label: 'Target', width: '22.5%', card: 'line' },
     { key: 'from', label: 'From', card: 'hide' },
   ],
 } satisfies Record<string, SkeletonColumn[]>
 // Hosted workspaces span every region, so their domains table has no Region column.
-const [domainName, domainStatus, domainReceiving, domainAddresses, domainRegion, domainNote] = settingsColumns.domains
+const [domainName, domainStatus, domainReceiving, domainAddresses, domainRegion] = settingsColumns.domains
 // The widths the loaded table forces (domain-records.css), so the skeleton and the list agree.
 export const domainColumns = (multiTenant: boolean): SkeletonColumn[] => multiTenant
-  ? [{ ...domainName, width: '38%' }, { ...domainStatus, key: 'sending', label: 'Sending', width: '29%' }, { ...domainReceiving, width: '23%' }, { ...domainAddresses, width: '10%' }, domainNote]
-  : [{ ...domainName, width: '34%' }, { ...domainStatus, key: 'sending', label: 'Sending', width: '26%' }, { ...domainReceiving, width: '21%' }, { ...domainAddresses, width: '9%' }, { ...domainRegion, width: '10%' }, domainNote]
+  ? [{ ...domainName, width: '38%' }, { ...domainStatus, key: 'sending', label: 'Sending', width: '29%' }, { ...domainReceiving, width: '23%' }, { ...domainAddresses, width: '10%' }]
+  : [{ ...domainName, width: '34%' }, { ...domainStatus, key: 'sending', label: 'Sending', width: '26%' }, { ...domainReceiving, width: '21%' }, { ...domainAddresses, width: '9%' }, { ...domainRegion, width: '10%' }]
 // Hosted webhooks cover every region, so they have no region scope or region columns.
 const hostedWebhookColumns: SkeletonColumn[] = [{ ...settingsColumns.webhooks[0], width: '54%' }, settingsColumns.webhooks[1], { ...settingsColumns.webhooks[3], width: '16%' }, { ...settingsColumns.webhooks[4], width: '12%' }, settingsColumns.webhooks[5]]
 const hostedDeliveryColumns: SkeletonColumn[] = [settingsColumns.deliveries[0], { ...settingsColumns.deliveries[2], width: '30%' }, ...settingsColumns.deliveries.slice(3)]
@@ -132,7 +129,7 @@ export function SesSendingSkeleton({ regionId }: { regionId: string }) {
 // Members and invitations as they will be, so the section holds its place while the two lists load.
 export function TeamSkeleton() {
   return <LoadingRegion label="Loading members" className="settings-loading-body">
-    <section className="section stack settings-rule"><SectionHeader title="Members" actions={<ControlSkeleton width={134} />} /><TableSkeleton className="settings-people" columns={settingsColumns.members} rows={3} /></section>
+    <section className="section stack settings-rule"><div className="settings-actions"><ControlSkeleton width={134} /></div><TableSkeleton className="settings-people" columns={settingsColumns.members} rows={3} /></section>
     <section className="section stack settings-rule"><SectionHeader title="Invitations" /><TableSkeleton className="settings-people" columns={settingsColumns.invitations} rows={2} /></section>
   </LoadingRegion>
 }
@@ -146,7 +143,7 @@ export function WorkspaceFormSkeleton() {
 export function EndpointFieldsSkeleton({ isNew = false, selectedRegions = false }: { isNew?: boolean; selectedRegions?: boolean }) {
   const { multiTenant } = useWorkspaceAccess()
   return <div className="stack">
-    <div className="form-grid"><FieldSkeleton label="Name" /><FieldSkeleton label="Endpoint URL" /></div>
+    <div className="form-grid webhook-fields"><FieldSkeleton label="Name" /><FieldSkeleton label="Endpoint URL" /></div>
     {!multiTenant && <div className="stack settings-region-scope"><div className="ui-field"><span className="ui-field__label">Region scope</span><ControlSkeleton /></div>
     {selectedRegions && <div className="settings-choices"><ControlSkeleton width={135} /><ControlSkeleton width={135} /></div>}</div>}
     <div className="stack"><div>Events</div><div className="settings-choices settings-choices--events">{['Sent', 'Delivered', 'Bounced', 'Complained', 'Rejected', 'Rendering failed', 'Delivery delayed', 'Opened', 'Clicked', 'Contact subscription changed', 'Sending standing changed'].map(event => <div className="ui-check-field" key={event} aria-hidden="true"><Skeleton width={14} height={14} /><span>{event}</span></div>)}</div></div>
@@ -157,9 +154,9 @@ export function EndpointFieldsSkeleton({ isNew = false, selectedRegions = false 
 export function WebhookBodySkeleton({ isNew = false, selectedRegions = false }: { isNew?: boolean; selectedRegions?: boolean }) {
   const { multiTenant } = useWorkspaceAccess()
   return <LoadingRegion label={isNew ? 'Loading webhook form' : 'Loading webhook endpoint'} className="settings-loading-body">
-    {isNew ? <div className="stack"><EndpointFieldsSkeleton isNew /><div className="cluster"><ControlSkeleton width={76} /><ControlSkeleton width={128} /></div></div> : <>
+    {isNew ? <div className="stack"><EndpointFieldsSkeleton isNew /><div className="cluster"><ControlSkeleton width={128} /></div></div> : <>
       <EndpointFieldsSkeleton selectedRegions={selectedRegions} />
-      <section className="section stack settings-rule"><SectionHeader title={<span className="settings-guide-title">Signing secret<span className="guide-link">Guide</span></span>} actions={<><ControlSkeleton width={76} /><ControlSkeleton width={138} /></>} /></section>
+      <section className="section stack settings-rule settings-secret"><SectionHeader title={<span className="settings-guide-title">Signing secret<span className="guide-link">Guide</span></span>} actions={<><ControlSkeleton width={76} /><ControlSkeleton width={138} /></>} /></section>
       <section className="section stack settings-rule"><SectionHeader title="Delivery history" /><TableSkeleton columns={deliveryColumns(multiTenant)} rows={2} /></section>
       <div><ControlSkeleton width={146} /></div>
     </>}
@@ -170,7 +167,7 @@ export function DomainDetailSkeleton() {
   const { multiTenant } = useWorkspaceAccess()
   return <LoadingRegion className="stack" label="Loading domain">
     <PageHeader title={<SkeletonText width={260} lineHeight={28} />} backTo="/domains" actions={<><Skeleton className="domain-status-skeleton" width={72} height={20} /><ControlSkeleton width={112} /><ControlSkeleton width={124} /></>} />
-    <div className="domain-sections"><section className="section stack domain-records-section"><div className="ui-section-header"><div className="domain-group-title"><h2>DNS records</h2></div><div className="cluster"><ControlSkeleton width={128} /><ControlSkeleton width={104} /></div></div><div className="domain-records-list"><TableSkeleton className="domain-records" columns={settingsColumns.dns} rows={multiTenant ? 6 : 4} /><div className="domain-records-add"><SkeletonText width={176} /></div></div></section></div>
+    <div className="domain-sections"><section className="section stack domain-records-section"><div className="domain-records-actions"><ControlSkeleton width={128} /><ControlSkeleton width={104} /></div><div className="domain-records-list"><TableSkeleton className="domain-records" columns={settingsColumns.dns} rows={multiTenant ? 6 : 4} /><div className="domain-records-add"><SkeletonText width={176} /></div></div></section></div>
   </LoadingRegion>
 }
 
@@ -179,14 +176,12 @@ function KeysHeaderActions() {
   return <><Checkbox label="Show inactive" checked={false} onCheckedChange={() => {}} disabled /><Button variant="primary" disabled>Create key</Button></>
 }
 
-// Hosted: the domain count and limit beside Add domain, at its loaded width while the list loads.
-export const DomainCountSkeleton = () => <span className="domains-count"><SkeletonText width={128} /></span>
 export function SettingsRouteSkeleton({ kind, isNew = false }: { kind: 'keys' | 'domains' | 'domain' | 'settings' | 'webhook'; isNew?: boolean }) {
   const { regionId } = useRegion()
   const { multiTenant } = useWorkspaceAccess()
   if (kind === 'domain') return <DomainDetailSkeleton />
   if (kind === 'webhook') return <LoadingRegion className="stack settings-page" label="Loading webhook"><PageHeader title={isNew ? 'Add webhook' : <SkeletonText width={240} lineHeight={28} />} backTo="/settings#webhooks" actions={isNew ? undefined : <><Skeleton width={70} /><ControlSkeleton width="calc(5ch + 26px)" /><ControlSkeleton width={128} /></>} /><WebhookBodySkeleton isNew={isNew} /></LoadingRegion>
   if (kind === 'settings') return <LoadingRegion className="stack settings-ses settings-page" label="Loading settings"><PageHeader title="Settings" />{!multiTenant && <><SesSendingSkeleton regionId={regionId} /><WorkspaceFormSkeleton /></>}</LoadingRegion>
-  if (kind === 'keys') return <LoadingRegion className="stack" label="Loading API keys"><PageHeader title="API keys" actions={<KeysHeaderActions />} /><KeysGuide /><div className="keys-sections"><section className="section stack"><Tabs label="Type" value="all" onValueChange={() => {}} disabled items={[...keyTypes]} /><TableSkeleton className="keys-table keys-table--two-line" columns={settingsColumns.keys} rows={3} /></section></div></LoadingRegion>
-  return <LoadingRegion className="stack" label="Loading domains"><PageHeader title="Domains" actions={<>{multiTenant && <DomainCountSkeleton />}<ControlSkeleton width="calc(10ch + 26px)" /></>} /><TableSkeleton className="domains-table" columns={domainColumns(multiTenant)} rows={3} pagination /></LoadingRegion>
+  if (kind === 'keys') return <LoadingRegion className="stack" label="Loading API keys"><PageHeader title="API keys" actions={<KeysHeaderActions />} /><div className="keys-sections"><section className="section stack"><Tabs label="Type" value="all" onValueChange={() => {}} disabled items={[...keyTypes]} /><TableSkeleton className="keys-table keys-table--two-line" columns={settingsColumns.keys} rows={3} /></section></div></LoadingRegion>
+  return <LoadingRegion className="stack" label="Loading domains"><PageHeader title="Domains" actions={<ControlSkeleton width="calc(10ch + 26px)" />} /><TableSkeleton className="domains-table" columns={domainColumns(multiTenant)} rows={3} pagination /></LoadingRegion>
 }

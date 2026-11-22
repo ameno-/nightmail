@@ -13,11 +13,11 @@
 .usage-limit > summary:focus-visible { outline-offset: calc(-1 * var(--focus-width)); }
 .usage-steps-section { display: flex; flex-direction: column; gap: var(--space-12); padding-top: var(--space-12); }
 .usage-limit__title .ui-status { margin-left: var(--space-4); }
-/* The prices behind Estimated cost: label and value lines, then the terms' full table. */
+/* The prices behind this month's usage: label and value lines, then the terms' full table. */
 .usage-prices { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-12); padding: var(--space-12) 0; border-bottom: 1px solid var(--color-border-muted); font-size: var(--text-sm); line-height: var(--leading-sm); }
 .usage-prices dl { display: flex; flex-direction: column; gap: var(--space-8); align-self: stretch; margin: 0; }
 .usage-prices dl > div { display: flex; justify-content: space-between; gap: var(--space-12); }
-.usage-prices dt { color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); letter-spacing: var(--tracking-label); text-transform: uppercase; }
+.usage-prices dt { color: var(--color-muted); font-size: var(--text-xs); }
 .usage-prices dd { margin: 0; text-align: right; font-family: var(--font-mono); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
 .usage-steps { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--color-border-muted); }
 .usage-steps > li { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: var(--space-12); align-items: start; min-height: 80px; padding: var(--space-12) 0; border-bottom: 1px solid var(--color-border-muted); }
@@ -27,7 +27,7 @@
 .usage-steps__body { display: flex; flex-direction: column; gap: 2px; min-width: 0; font-size: var(--text-sm); line-height: var(--leading-sm); }
 .usage-steps__body b { font-variant-numeric: tabular-nums; }
 .usage-steps__body .muted { font-size: var(--text-xs); line-height: var(--leading-xs); text-wrap: pretty; }
-.usage-steps__badge { margin-left: var(--space-8); padding: 0; border-radius: 0; background: none; color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-label); line-height: var(--leading-xs); letter-spacing: var(--tracking-label); text-transform: uppercase; }
+.usage-steps__badge { margin-left: var(--space-8); padding: 0; border-radius: 0; background: none; color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
 
 /* Phone: rows keep the value column one width (so values arriving never move it); the label takes the rest and wraps. */
 @media (max-width: 640px) {

@@ -40,10 +40,10 @@ export function BillingSection({ row: Row }: { row: (props: RowProps) => ReactNo
   const [about, setAbout] = useState(false)
   const b = query.data
   useCheckoutReturn()
-  if (query.isError && !b) return <><SectionHeader title="Billing" /><ErrorState error={query.error} onRetry={() => void query.refetch()} /></>
+  if (query.isError && !b) return <ErrorState error={query.error} onRetry={() => void query.refetch()} />
   if (state?.free) return <FreePlan summary={b} Row={Row} />
   return <>
-    <SectionHeader title="Billing" actions={<Button variant="primary" disabled={!b?.balance} onClick={() => setAdding(true)}>Add credit</Button>} />
+    <div className="settings-actions"><Button variant="primary" disabled={!b?.balance} onClick={() => setAdding(true)}>Add credit</Button></div>
     {state && <BillingAlerts state={state} summary={b} />}
     <div className="settings-rows billing-rows">
       <div className="billing-balance">
@@ -67,7 +67,7 @@ const MonthLink = ({ children }: { children: ReactNode }) => <Link to="/settings
 function BalanceDetails({ open, onOpenChange, balance, enforced }: { open: boolean; onOpenChange: (open: boolean) => void; balance: NonNullable<BillingSummary['balance']>; enforced: boolean }) {
   const paid = BigInt(balance.paid)
   const parts: [string, string][] = [paid < 0n ? ['Unpaid usage', usd(-paid)] : ['Paid credit', usd(paid)], ...BigInt(balance.promo) > 0n ? [['Promotional credit', usd(balance.promo)] as [string, string]] : [], ...BigInt(balance.unsettled) !== 0n ? [['Usage not yet settled', usd(balance.unsettled)] as [string, string]] : []]
-  return <Dialog open={open} onOpenChange={onOpenChange} title={`Balance ${usd(total(balance))}`} className="billing-about" footer={<Button onClick={() => onOpenChange(false)}>Close</Button>}>
+  return <Dialog open={open} onOpenChange={onOpenChange} title={`Balance ${usd(total(balance))}`} className="billing-about">
     <dl className="billing-facts">{parts.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
     <ul className="billing-rules">{enforced ? <>
       <li>Usage is taken from it every hour.</li>
@@ -82,7 +82,6 @@ function BalanceDetails({ open, onOpenChange, balance, enforced }: { open: boole
 // would cost, since it is still measured. The history keeps its $0 usage rows.
 function FreePlan({ summary: b, Row }: { summary: BillingSummary | undefined; Row: (props: RowProps) => ReactNode }) {
   return <>
-    <SectionHeader title="Billing" />
     <div className="settings-rows billing-rows">
       <div className="billing-balance">
         <span className="billing-balance__label">Plan</span>
@@ -195,9 +194,9 @@ function RechargeDialog({ settings, hasCard, enable, capped, Row, onClose }: { s
 }
 
 // History: the balance's ledger and the card payments, a page at a time. Both are cursor lists with card slots on phones.
-// An hourly usage line leads with its hour and ends with its counts: "Usage Nov 20, 20:00 · 2,330 emails, 44 AI decisions",
-// so a one-line cell keeps the numbers; the cell's title is the same text, whole.
-const shortDescription = (text: string) => text.replace(/^(Usage [A-Z][a-z]{2} \d{1,2}, \d{2}:\d{2})–\d{2}:\d{2} UTC: /, '$1 · ')
+// An hourly usage line leads with its day and ends with its counts: "Usage Nov 20 · 2,330 emails, 44 AI decisions", so a
+// one-line cell keeps the numbers (the Date column has the time); the cell's title is the same text, whole.
+const shortDescription = (text: string) => text.replace(/^Usage ([A-Z][a-z]{2} \d{1,2}), \d{2}:\d{2}–\d{2}:\d{2} UTC: /, 'Usage $1 · ')
 const ledgerText = (e: LedgerEntry) => `${shortDescription(e.description)}${e.kind === 'topup' && e.expiresAt ? ` · Expires ${fullDay(e.expiresAt)}` : ''}`
 const ledgerDescription = (e: LedgerEntry) => <span className="billing-desc" title={ledgerText(e)}>{shortDescription(e.description)}{e.kind === 'topup' && e.expiresAt && <span className="muted"> · Expires {fullDay(e.expiresAt)}</span>}</span>
 const ledgerColumns: Column<LedgerEntry>[] = [

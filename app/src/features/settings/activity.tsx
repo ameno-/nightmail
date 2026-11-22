@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import { keepPreviousData, useInfiniteQuery } from '@tanstack/react-query'
-import { Button, CopyButton, DataTable, Dialog, EmptyState, ErrorState, SectionHeader, Select, StatusBadge } from '../../components/ui'
+import { Button, CopyButton, DataTable, Dialog, EmptyState, ErrorState, Select, StatusBadge } from '../../components/ui'
 import { actionLabel, activityApi, activityAreas, type AuditEntry } from '../../data/activity'
 import { ago, shortDateTime } from '../../lib/format'
 import { PrivateAddress } from '../../components/PrivateAddress'
@@ -60,6 +60,8 @@ function Target({ entry }: { entry: AuditEntry }) {
 const channel: Record<string, string> = { dashboard: 'Dashboard', api: 'API', mcp: 'MCP', imap: 'IMAP', smtp: 'SMTP', console: productName, support: `${productName} support`, script: productName, job: productName, webhook: 'Webhook' }
 const source = (entry: AuditEntry) => entry.client ?? channel[entry.via] ?? entry.via
 const fromText = (entry: AuditEntry) => [source(entry), entry.network].filter(Boolean).join(' · ')
+// The client without its version (Chrome on macOS); the full source and network are its hover title and in the details.
+const shortSource = (entry: AuditEntry) => source(entry).replace(/ \d+(?:\.\d+)*(?= on )/, '')
 function targetText(entry: AuditEntry) {
   if (entry.action === 'support.view') return entry.subject?.email ? null : ['Support request', ticketOf(entry)].filter(Boolean).join(' · ')
   return plain(targetName(entry))
@@ -91,15 +93,15 @@ export function ActivitySection() {
   const rows = activity.data?.pages.flatMap(page => page.data) ?? []
   const [when, who, action, target, from] = settingsColumns.activity
   return <section className="section stack activity">
-    <SectionHeader title="Activity" actions={<Select className="activity-filter" aria-label="Show activity for" value={area} onValueChange={setArea} options={[{ value: '', label: 'All activity' }, ...activityAreas]} />} />
+    <div className="settings-actions"><Select className="activity-filter" aria-label="Show activity for" value={area} onValueChange={setArea} options={[{ value: '', label: 'All activity' }, ...activityAreas]} /></div>
     {activity.error && !activity.data ? <ErrorState error={activity.error} onRetry={() => void activity.refetch()} /> : <DataTable className="activity-table" loading={activity.isPending} skeletonRows={8} minRows={3} rows={rows} rowKey={entry => entry.id} onRowClick={setOpen}
       empty={<EmptyState title={area ? 'No matching activity' : 'No activity yet'} />} columns={[
         { ...when, render: entry => <When at={entry.at} /> },
         // A card names who did it and where from on one line, and the target only by its name: IDs are in the details.
-        { ...who, render: entry => <Cell full={whoText(entry.actor)}><Who actor={entry.actor} /></Cell>, cardRender: entry => <><Who actor={entry.actor} /><span className="muted"> · via {source(entry)}</span></> },
+        { ...who, render: entry => <Cell full={whoText(entry.actor)}><Who actor={entry.actor} /></Cell>, cardRender: entry => <><Who actor={entry.actor} /><span className="muted"> · via {shortSource(entry)}</span></> },
         { ...action, render: entry => <Cell full={actionLabel(entry.action)} hint={entry.action}>{actionLabel(entry.action)}</Cell>, cardRender: entry => actionLabel(entry.action) },
-        { ...target, render: entry => <Cell full={targetText(entry)}><Target entry={entry} /></Cell>, cardRender: entry => entry.action === 'support.view' || summaryName(entry) ? <Target entry={entry} /> : <span className="muted">—</span> },
-        { ...from, render: entry => <Cell full={fromText(entry)} className="activity-from"><span>{source(entry)}</span>{entry.network && <span> · {entry.network}</span>}</Cell>, cardRender: fromText },
+        { ...target, render: entry => <Cell full={targetText(entry)}><Target entry={entry} /></Cell>, cardRender: entry => entry.action === 'support.view' || summaryName(entry) ? <Target entry={entry} /> : null },
+        { ...from, render: entry => <Cell full={fromText(entry)} hint={fromText(entry)} className="activity-from"><span>{shortSource(entry)}</span></Cell>, cardRender: fromText },
       ]} />}
     {activity.hasNextPage && <div className="activity-more"><Button loading={activity.isFetchingNextPage} onClick={() => void activity.fetchNextPage()}>Load more</Button></div>}
     {activity.isFetchNextPageError ? <ErrorState error={activity.error} onRetry={() => void activity.fetchNextPage()} /> : null}
@@ -150,7 +152,7 @@ function Changes({ summary }: { summary: Record<string, unknown> }) {
 }
 function ActivityDetails({ entry, onClose }: { entry: AuditEntry | null; onClose: () => void }) {
   // When it happened leads the facts; where it came from (the channel with its client and network) is From.
-  return <Dialog open={entry !== null} onOpenChange={open => { if (!open) onClose() }} title={entry ? actionLabel(entry.action) : ''} footer={<Button onClick={onClose}>Close</Button>}>
+  return <Dialog open={entry !== null} onOpenChange={open => { if (!open) onClose() }} title={entry ? actionLabel(entry.action) : ''}>
     {entry && <div className="stack">
       <dl className="settings-facts activity-facts">
         <div><dt>When</dt><dd>{shortDateTime(entry.at)} UTC</dd></div>

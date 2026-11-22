@@ -97,7 +97,7 @@ const purposeLabel = (record: DnsRecord) => {
 }
 export const recordRow = (record: DnsRecord, status?: RecordRow['status']): RecordRow => ({ record, purpose: purposeLabel(record), status: status ?? (record.status === 'verified' ? { label: 'Verified', tone: 'success', detail: record.note } : { label: 'Missing', tone: 'warning', detail: record.note }) })
 
-// Every record in one table: what it is for, its type, name and value (each with Copy), its status, and the row's
+// Every record in one table: what it is for, its type, name and value (each with Copy), its status when not done, and the row's
 // actions (a menu, only on rows that have any). On a phone each record is a card: what it is for and its type as the
 // title (numbered when several share a purpose, such as the three DKIM records, so no two cards share one), the status
 // beside it, the name and value under it, and Copy with the row's actions in its action sheet. A copy button inside a
@@ -112,13 +112,15 @@ export function DnsRecordTable({ domain, rows }: { domain: string; rows: RecordR
     { label: 'Copy full name', icon: <Copy size={16} />, onSelect: () => void copy(record.name, 'Copied name') },
     { label: 'Copy value', icon: <Copy size={16} />, disabled: !record.value, onSelect: () => void copy(record.value, 'Copied value') },
   ]
+  // A row says its status only while it isn't done; once every row is, the Status column goes (the header says Verified).
+  const done = rows.every(row => row.status.tone === 'success')
   const menu = (row: RecordRow, items: MenuItem[]) => <DropdownMenu label={`Actions for ${row.purpose} ${row.record.type} record`} title={`${row.record.type} ${relativeHost(row.record.name, domain)}`} items={items} />
   return <DataTable className="domain-records" rows={rows} rowKey={row => row.record.id} columns={[
     { ...purpose, render: row => row.purpose, cardRender: row => <>{titles.get(row)} <span className="domain-record-type">{row.record.type}</span></> },
     { ...type, render: row => row.record.type },
     { ...name, render: ({ record }) => <div className="settings-copy-cell"><code title={record.name}>{breakable(relativeHost(record.name, domain))}</code><CopyButton value={record.name} label={`Copy full ${record.type} name`} /></div>, cardRender: ({ record }) => <code>{breakable(relativeHost(record.name, domain))}</code> },
     { ...value, render: ({ record }) => record.value ? <div className="settings-copy-cell"><code title={record.value}>{breakable(record.value)}</code><CopyButton value={record.value} label={`Copy ${record.type} value`} /></div> : '—', cardRender: ({ record }) => record.value ? <code>{breakable(record.value)}</code> : '—' },
-    { ...status, render: row => <span className="domain-record-status" title={row.status.detail}><StatusBadge status={row.status.label} tone={row.status.tone} /></span> },
+    ...done ? [] : [{ ...status, render: (row: RecordRow) => row.status.tone === 'success' ? null : <span className="domain-record-status" title={row.status.detail}><StatusBadge status={row.status.label} tone={row.status.tone} /></span> }],
     { ...actions, render: row => row.actions?.length ? menu(row, row.actions) : null, cardRender: row => menu(row, [...copyItems(row), ...row.actions ?? []]) },
   ]} />
 }
@@ -184,7 +186,7 @@ const hoursLeft = (at: string) => Math.max(0, Math.ceil((Date.parse(at) - Date.n
 export function DnsWaitNote({ domain }: { domain: Domain }) {
   if (domain.status === 'verified' || (domain.sending ?? 'pending') === 'verified') return null
   return <div className="dns-wait">
-    {domain.releasesAt && <p>If the sending records aren’t found within 72 hours, {domain.name} is released and you’d add it again ({hoursLeft(domain.releasesAt)} h left).</p>}
+    {domain.releasesAt && <p>Add these records at your DNS provider within {hoursLeft(domain.releasesAt)} h.</p>}
     <p className="dns-guides">Guides: {guides.map(([name, url], index) => <span key={name}>{index > 0 && <span className="dns-guides-dot" aria-hidden="true"> · </span>}<a href={url} target="_blank" rel="noreferrer">{name}</a></span>)}</p>
   </div>
 }
@@ -249,9 +251,7 @@ export function DomainRecords({ domain, actions, guided = false, setup = null, r
   const copyAll = () => copy(`${zoneLines(all)}\n`, `Copied ${all.length} records`)
   const policy = domain.dmarc
   return <section className="section stack domain-records-section">
-    <div className="ui-section-header"><div className="domain-group-title"><h2>DNS records</h2></div>
-      <div className="cluster">{actions}{all.length > 0 && <Button onClick={() => void copyAll()}><Copy size={14} aria-hidden />Copy all</Button>}</div>
-    </div>
+    {(actions || all.length > 0) && <div className="domain-records-actions">{actions}{all.length > 0 && <Button onClick={() => void copyAll()}><Copy size={14} aria-hidden />Copy all</Button>}</div>}
     {connect}
     {domain.dnsStatus === 'unavailable' && <p className="muted">{domain.dnsUnavailableReason || NO_RECORDS}</p>}
     {receivingView && alert}

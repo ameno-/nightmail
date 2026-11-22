@@ -46,7 +46,7 @@ function EndpointFields({ input, savedUrl, onChange, regions, errors, apiError, 
   // Hosted endpoints leave regionIds out: they cover every region and an update keeps the saved scope.
   const scope = input.regionIds
   return <div className="stack">
-    <div className="form-grid">
+    <div className="form-grid webhook-fields">
       <Field label="Name" htmlFor="endpoint-name" error={errors.name || fieldError(apiError, 'name')}><Input id="endpoint-name" value={input.name} onChange={event => onChange({ ...input, name: event.target.value })} required disabled={disabled} placeholder="Support notifications" /></Field>
       <Field label="Endpoint URL" htmlFor="endpoint-url" error={errors.url || fieldError(apiError, 'url')}><SecretInput id="endpoint-url" type="url" value={input.url} onChange={event => onChange({ ...input, url: event.target.value })} required={!input.id} disabled={disabled} placeholder={savedUrl ?? 'https://support.acme.com/hooks/email'} /></Field>
     </div>
@@ -66,14 +66,16 @@ export function WebhooksSection() {
   const webhooks = useWebhooks(pagination.cursor)
   const { multiTenant } = useWorkspaceAccess()
   const columns = webhookColumns(multiTenant)
+  // Headers only when a webhook has some: while loading it isn't shown either, so the usual case never shifts.
+  const withHeaders = webhooks.data?.some(webhook => webhook.headers.length > 0) ?? false
   return <section id="webhooks" className="section stack settings-group settings-rule">
-    <SectionHeader title="Webhooks" actions={<Button onClick={() => navigate('/settings/webhooks/new')}>Add webhook</Button>} />
+    {multiTenant ? <div className="settings-actions"><Button onClick={() => navigate('/settings/webhooks/new')}>Add webhook</Button></div> : <SectionHeader title="Webhooks" actions={<Button onClick={() => navigate('/settings/webhooks/new')}>Add webhook</Button>} />}
     {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable className="settings-webhooks-table" loading={webhooks.isPending} skeletonRows={2} minRows={2} rows={webhooks.data ?? []} rowKey={webhook => webhook.id} rowHref={webhook => `/settings/webhooks/${webhook.id}`} empty={<EmptyState title="No webhooks" />} columns={[
       { ...column(columns, 'name'), render: (webhook: Webhook) => <div className="settings-webhook-name"><span title={webhook.name}>{webhook.name}</span><span className="muted" title={webhook.url}>{webhook.url}</span></div>, cardRender: (webhook: Webhook) => webhook.name },
       { ...column(columns, 'url'), render: (webhook: Webhook) => webhook.url },
       ...multiTenant ? [] : [{ ...column(columns, 'scope'), render: (webhook: Webhook) => scopeText(webhook.regionIds) }],
       { ...column(columns, 'events'), render: (webhook: Webhook) => <span className="settings-webhook-events" title={webhook.events.map(eventLabel).join(', ')}>{eventSummary(webhook.events)}</span>, cardRender: (webhook: Webhook) => eventSummary(webhook.events) },
-      { ...column(columns, 'headers'), render: (webhook: Webhook) => <HeaderNames headers={webhook.headers} /> },
+      ...withHeaders ? [{ ...column(columns, 'headers'), render: (webhook: Webhook) => <HeaderNames headers={webhook.headers} /> }] : [],
       { ...column(columns, 'status'), render: (webhook: Webhook) => <StatusBadge status={label(webhook.status)} /> },
     ]} />}
     {webhooks.data && <Pagination page={pagination.page} pageSize={20} nextCursor={webhooks.data.nextCursor} onPageChange={next => pagination.onPageChange(next, webhooks.data.nextCursor)} />}
@@ -107,7 +109,7 @@ function NewWebhook() {
     {!multiTenant && regions.isPending ? <WebhookBodySkeleton isNew /> : !multiTenant && regions.error ? <ErrorState error={regions.error} onRetry={() => void regions.refetch()} /> : <form className="stack" onSubmit={submit} noValidate>
       <MutationError error={save.error} />
       <EndpointFields input={input} onChange={setInput} regions={regions.data?.data ?? []} errors={errors} apiError={save.error} disabled={save.isPending} headers={{ current: [], draft: headers, onChange: setHeaders }} />
-      <div className="cluster form-actions"><Button disabled={save.isPending} onClick={() => navigate('/settings#webhooks')}>Cancel</Button><Button variant="primary" type="submit" loading={save.isPending}>Add webhook</Button></div>
+      <div className="cluster form-actions"><Button variant="primary" type="submit" loading={save.isPending}>Add webhook</Button></div>
     </form>}
     <SecretDialog secret={created?.secret ?? null} title="Webhook created · Signing secret" onClose={() => { const id = created?.id; setCreated(null); if (id) navigate(`/settings/webhooks/${id}`, { replace: true }) }}><SigningGuide /></SecretDialog>
   </div>
@@ -195,7 +197,7 @@ function WebhookEditor({ webhook: read, regions, refreshError, onRefresh }: { we
   return <div className="stack settings-page">
     <PageHeader title={webhook.name} backTo="/settings#webhooks" actions={<><StatusBadge status={label(webhook.status)} /><Button disabled={pending} onClick={() => setAction(webhook.status === 'active' ? 'pause' : 'resume')}>{webhook.status === 'active' ? 'Pause' : 'Resume'}</Button><Button variant="primary" form="edit-webhook" type="submit" loading={save.isPending} disabled={pending || !dirty}>Save changes</Button></>} />
     <form id="edit-webhook" className="stack" onSubmit={submit} noValidate><MutationError error={save.error} /><EndpointFields input={input} savedUrl={webhook.url} onChange={setInput} regions={regions} errors={errors} apiError={save.error} disabled={pending} headers={{ current: currentHeaders, draft: headers, onChange: setHeaders }} /></form>
-    <section className="section stack settings-rule"><SectionHeader title={<span className="settings-guide-title">Signing secret<SigningGuide /></span>} actions={<><Button loading={reveal.isPending} disabled={pending} onClick={async () => { try { setSecret({ value: (await reveal.mutateAsync(webhook.id)).secret, rotated: false }) } catch { /* Shown inline. */ } }}>Reveal</Button><Button disabled={pending} onClick={() => setAction('rotate')}>Rotate</Button><Button loading={test.isPending} disabled={pending || webhook.status === 'paused'} title={webhook.status === 'paused' ? 'Resume this webhook to test delivery' : 'Sends a sample email.delivered event, marked as a test'} onClick={async () => { try { await test.mutateAsync(webhook.id); setHistory(null); historyPagination.reset() } catch { /* Shown inline. */ } }}>Test webhook</Button></>} /><MutationError error={test.error ?? reveal.error} /></section>
+    <section className="section stack settings-rule settings-secret"><SectionHeader title={<span className="settings-guide-title">Signing secret<SigningGuide /></span>} actions={<><Button loading={reveal.isPending} disabled={pending} onClick={async () => { try { setSecret({ value: (await reveal.mutateAsync(webhook.id)).secret, rotated: false }) } catch { /* Shown inline. */ } }}>Reveal</Button><Button disabled={pending} onClick={() => setAction('rotate')}>Rotate</Button><Button loading={test.isPending} disabled={pending || webhook.status === 'paused'} title={webhook.status === 'paused' ? 'Resume this webhook to test delivery' : 'Sends a sample email.delivered event, marked as a test'} onClick={async () => { try { await test.mutateAsync(webhook.id); setHistory(null); historyPagination.reset() } catch { /* Shown inline. */ } }}>Test webhook</Button></>} /><MutationError error={test.error ?? reveal.error} /></section>
     <section className="section stack settings-rule"><SectionHeader title="Delivery history" /><MutationError error={retry.error} />
       {refreshError ? <ErrorState error={refreshError} onRetry={onRefresh} /> : null}
       <DataTable minRows={3} rows={rows} rowKey={delivery => delivery.id} empty={<EmptyState title="No deliveries yet" />} columns={[
@@ -218,10 +220,8 @@ function WebhookEditor({ webhook: read, regions, refreshError, onRefresh }: { we
     <SecretDialog secret={secret?.value ?? null} title={`${webhook.name} · ${secret?.rotated ? 'New signing secret' : 'Signing secret'}`} description={secret?.rotated ? undefined : `Keep it on your server: anyone with it can sign requests as ${productName}.`} onClose={() => { setSecret(null); rotate.reset(); reveal.reset() }}><SigningGuide /></SecretDialog>
     {/* A delivery in full: its facts as key/value rows, then the payload as sent, with copy for both the ID and the JSON. */}
     <Dialog size="lg" open={inspected !== null} onOpenChange={open => { if (!open) setInspected(null) }} title={inspected?.test ? 'Test delivery payload' : 'Delivery payload'}
-      status={inspected && <StatusBadge status={label(inspected.status)} />}
-      footer={<Button onClick={() => setInspected(null)}>Close</Button>}>
+      status={inspected && <StatusBadge status={label(inspected.status)} />}>
       {inspected && <>
-        <h3 className="ui-label ui-label--rule">Delivery</h3>
         <KeyValues className="settings-delivery-facts" items={[['Event', <code>{inspected.event}</code>], ['Response', inspected.response ?? 'No response'], ['Attempts', number(inspected.attempts)], ['Created', `${shortDateTime(inspected.at)} UTC`], ...multiTenant ? [] : [['Region', inspected.regionId] as [string, ReactNode]], ['ID', <span className="ui-kv__id"><code>{inspected.id}</code><CopyButton value={inspected.id} label="Copy delivery ID" /></span>]]} />
         <div className="settings-payload-head"><h3 className="ui-label ui-label--rule">Payload</h3><CopyButton value={JSON.stringify(inspected.payload ?? {}, null, 2)} label="Copy payload" /></div>
         <pre className="settings-payload">{JSON.stringify(inspected.payload ?? {}, null, 2)}</pre>
