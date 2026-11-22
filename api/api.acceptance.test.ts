@@ -16912,7 +16912,7 @@ describe('Campaign postal address', () => {
         error(await local('PATCH', '/v1/settings/workspace', { postalAddress: invalid }), 422, 'VALIDATION_FAILED');
       error(await local('PATCH', '/v1/settings/workspace', {}), 422, 'VALIDATION_FAILED');
       const settings = ok(await local('GET', '/v1/settings/workspace'));
-      assert.deepEqual(settings, { name: settings.name, postalAddress: address });
+      assert.deepEqual(settings, { name: settings.name, postalAddress: address, requiredNotices: false });
       // The test, the preview and the sent email show the same footer.
       const test = await content(ok(await local('POST', `/v1/campaigns/${sent.id}/test`, { to: 'tester@example.net' }), 202).id);
       const preview = ok(await local('GET', `/v1/campaigns/${sent.id}/preview`));
@@ -16994,12 +16994,247 @@ describe('Campaign postal address', () => {
       }
       assert.equal((await db.query('SELECT postal_address FROM workspaces WHERE id = $1', [wid])).rows[0].postal_address, FIXTURE_POSTAL_ADDRESS);
       assert.equal(ok(await as({ cookie: admin.cookie })('PATCH', { postalAddress: 'Admin Fixture Co.\n2 Admin Road' })).postalAddress, 'Admin Fixture Co.\n2 Admin Road');
-      assert.deepEqual(ok(await local('PATCH', '/v1/settings/workspace', { postalAddress: null })), { name: wid, postalAddress: null });
+      assert.deepEqual(ok(await local('PATCH', '/v1/settings/workspace', { postalAddress: null })), { name: wid, postalAddress: null, requiredNotices: false });
       const audits = (await db.query("SELECT summary FROM audit_events WHERE workspace_id = $1 AND action = 'settings.update' ORDER BY id", [wid])).rows.map(r => r.summary);
       assert.deepEqual(audits.map(a => [a.before?.postalAddress, a.after?.postalAddress, a.fields]), [[FIXTURE_POSTAL_ADDRESS, 'Admin Fixture Co.\n2 Admin Road', ['postalAddress']], ['Admin Fixture Co.\n2 Admin Road', '', ['postalAddress']]]);
       // Renaming alone leaves the address as it is.
       ok(await local('PATCH', '/v1/settings/workspace', { postalAddress: 'Kept Fixture Co.' }));
-      assert.deepEqual(ok(await local('PATCH', '/v1/settings/workspace', { name: 'Postal renamed' })), { name: 'Postal renamed', postalAddress: 'Kept Fixture Co.' });
+      assert.deepEqual(ok(await local('PATCH', '/v1/settings/workspace', { name: 'Postal renamed' })), { name: 'Postal renamed', postalAddress: 'Kept Fixture Co.', requiredNotices: false });
+    });
+  });
+});
+
+describe('Required notices', () => {
+  // A required notice (a sales tax change, new terms) goes to everyone on the list who can receive email: marketing
+  // opt-outs don't apply to it, suppression (hard bounces, complaints) always does.
+  const turn = async (db: pg.Client, wid: string, state: 'on' | 'off') => (await import('./scripts/set-required-notices.js')).setRequiredNotices(db, [wid, state, '--reason', 'Acceptance: synthetic sales tax notice.']);
+  test('required notice: reaches unsubscribed and never-subscribed contacts but never suppressed or deleted ones, with no unsubscribe link, header or token, and changes nobody\'s consent; a marketing campaign to the same list reaches only subscribers', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, run }) => {
+      const wid = runtime.config.workspaceId, from = 'sender@example.com';
+      const list = ok(await local('POST', '/v1/lists', { name: unique('notice') }), 201);
+      // One contact in each state; "later" unsubscribes and "unknown" complains after the launch.
+      const states = { subscribed: ['subscribed', null], unsubscribed: ['unsubscribed', null], unknown: ['unknown', null], later: ['subscribed', null], bounced: ['subscribed', 'hard_bounce'], complained: ['unsubscribed', 'complaint'], deleted: ['subscribed', null] } as const;
+      const email = Object.fromEntries(Object.keys(states).map(name => [name, `${name}-${unique('notice')}@example.net`])) as Record<keyof typeof states, string>;
+      for (const [name, [consent, reason]] of Object.entries(states) as [keyof typeof states, readonly [string, string | null]][]) {
+        await db.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent,suppressed,suppression_reason,deleted_at) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id)
+          INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $2,$8,id FROM c`, [unique('con'), wid, email[name], consent, reason !== null, reason, name === 'deleted' ? new Date().toISOString() : null, list.id]);
+      }
+      const consentBefore = (await db.query('SELECT count(*)::int AS n FROM audience_consent_audit WHERE workspace_id = $1', [wid])).rows[0].n;
+      const draft = (name: string, extra: Json = {}) => ({ name, from, subject: 'A change to sales tax', html: '<p>From January 1, sales tax applies to your plan.</p>', audience: { listId: list.id }, ...extra });
+      await turn(db, wid, 'on');
+      assert.equal(ok(await local('GET', '/v1/settings/workspace')).requiredNotices, true);
+      const notice = ok(await local('POST', '/v1/campaigns', draft('Sales tax notice', { requiredNotice: true })), 201);
+      const marketing = ok(await local('POST', '/v1/campaigns', draft('Newsletter')), 201);
+      assert.equal(notice.draft.requiredNotice, true);
+      assert.equal(marketing.draft.requiredNotice, undefined);
+      // The live counts: the notice is for everyone not suppressed; marketing only for subscribers.
+      assert.deepEqual(ok(await local('GET', `/v1/campaigns/${notice.id}/audience`)), { matched: 6, eligible: 4, suppressed: 2, unsubscribed: 0 });
+      assert.deepEqual(ok(await local('GET', `/v1/campaigns/${marketing.id}/audience`)), { matched: 6, eligible: 2, suppressed: 2, unsubscribed: 2 });
+      // The preview and the Checks show no unsubscribe: a notice is checked as the transactional message it is.
+      const preview = ok(await local('GET', `/v1/campaigns/${notice.id}/preview`));
+      assert.ok(!/unsubscribe/i.test(preview.html) && !/unsubscribe/i.test(preview.text), 'A notice has no unsubscribe link.');
+      assert.ok(preview.text.endsWith(`\n\n${FIXTURE_POSTAL_ADDRESS}`) && preview.html.includes(`margin:24px 0 0">${FIXTURE_POSTAL_ADDRESS.split('\n').join('<br>')}</p>`), 'It keeps the postal address, in the place of the link.');
+      const checks = ok(await local('POST', '/v1/emails/check', { campaignId: notice.id }));
+      assert.deepEqual(checks.findings.filter((f: Json) => /^unsubscribe|^postal/.test(f.ruleId)), []);
+      // Sending one needs the sender's confirmation, recorded with who and when; nothing is captured without it.
+      for (const [path, body] of [['send', { revision: notice.revision }], ['schedule', { revision: notice.revision, scheduledAt: new Date(Date.now() + 86_400_000).toISOString() }]] as const)
+        assert.equal(error(await local('POST', `/v1/campaigns/${notice.id}/${path}`, body), 422, 'REQUIRED_NOTICE_UNCONFIRMED').field, 'confirmRequiredNotice');
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM sending_campaign_reviews WHERE campaign_id = $1', [notice.id])).rows[0].n, 0);
+      assert.equal(ok(await local('POST', `/v1/campaigns/${notice.id}/send`, { revision: notice.revision, confirmRequiredNotice: true }), 202).queued, 4);
+      assert.equal(ok(await local('POST', `/v1/campaigns/${marketing.id}/send`, { revision: marketing.revision }), 202).queued, 2);
+      const [confirmed] = (await db.query("SELECT actor_type, actor_id, target_id, summary, at FROM audit_events WHERE workspace_id = $1 AND action = 'campaign.required_notice_confirmed'", [wid])).rows;
+      assert.equal(confirmed.target_id, notice.id);
+      assert.ok(confirmed.actor_type === 'member' && confirmed.actor_id && confirmed.at, 'Who confirmed it, and when.');
+      assert.deepEqual([confirmed.summary.confirmation, confirmed.summary.recipients, confirmed.summary.revision], ['This is a required notice with no promotion.', 4, notice.revision]);
+      // After the launch: one subscriber opts out of marketing, and one never-subscribed contact complains (suppressed).
+      const later = ok(await local('GET', `/v1/contacts?email=${encodeURIComponent(email.later)}`)).data[0];
+      ok(await local('POST', `/v1/contacts/${later.id}/consent`, { status: 'unsubscribed', source: 'acceptance', evidence: 'Synthetic opt-out.' }));
+      await db.query("UPDATE audience_contacts SET suppressed = true, suppression_reason = 'complaint' WHERE workspace_id = $1 AND email = $2", [wid, email.unknown]);
+      const released = async (id: string) => (await db.query('SELECT id, to_addresses->>0 AS email FROM sending_emails WHERE campaign_id = $1 ORDER BY id', [id])).rows as { id: string; email: string }[];
+      for (let i = 0; i < 8 && ((await released(notice.id)).length < 4 || (await released(marketing.id)).length < 2); i++) await run('campaign.run');
+      await run('email.dispatch');
+      const outcome = async (id: string) => Object.fromEntries(await Promise.all((await released(id)).map(async row => { const e = ok(await local('GET', `/v1/emails/${row.id}`)); return [row.email, e.status === 'suppressed' ? 'suppressed' : e.providerId ? 'sent' : e.status]; })));
+      // Dispatch rechecks suppression for both, and consent only for marketing.
+      assert.deepEqual(await outcome(notice.id), { [email.subscribed]: 'sent', [email.unsubscribed]: 'sent', [email.unknown]: 'suppressed', [email.later]: 'sent' });
+      assert.deepEqual(await outcome(marketing.id), { [email.subscribed]: 'sent', [email.later]: 'suppressed' });
+      // The notice's emails: the postal address and no unsubscribe link, header or token.
+      const [{ sentCampaignContent }, { emails }, { eq }] = await Promise.all([import('./src/sending.js'), import('./src/db/sending.js'), import('drizzle-orm')]);
+      for (const row of (await released(notice.id)).filter(row => row.email !== email.unknown)) {
+        const content = ok(await local('GET', `/v1/emails/${row.id}/content`));
+        assert.ok(!/unsubscribe/i.test(content.html) && !/unsubscribe/i.test(content.text) && content.text.includes('sales tax applies to your plan.') && content.text.endsWith(`\n\n${FIXTURE_POSTAL_ADDRESS}`), 'The notice as delivered.');
+        const [stored] = await runtime.db.select().from(emails).where(eq(emails.id, row.id));
+        assert.deepEqual(stored!.snapshot, { kind: 'marketing', deferredCampaign: true, requiredNotice: true });
+        const rebuilt = await sentCampaignContent(runtime, { workspaceId: wid, keyId: 'acceptance', permissions: ['manage'], domains: [] }, stored!);
+        assert.deepEqual(rebuilt.headers.filter(h => /^list-unsubscribe/i.test(h.Name)), [], 'No List-Unsubscribe.');
+      }
+      // The marketing campaign's email keeps its link and its one-click headers.
+      const [newsletter] = await released(marketing.id).then(rows => rows.filter(row => row.email === email.subscribed));
+      assert.match(ok(await local('GET', `/v1/emails/${newsletter!.id}/content`)).text, /\n\nUnsubscribe: \S+\/unsubscribe\/u_[0-9a-f]{64}\n/);
+      assert.deepEqual((await db.query('SELECT email FROM operation_unsubscribe_tokens WHERE workspace_id = $1', [wid])).rows.map(r => r.email), [email.subscribed], 'Only the marketing email made an unsubscribe token.');
+      // Nobody's consent changed except by their own opt-out.
+      const consent = Object.fromEntries((await db.query('SELECT email, marketing_consent FROM audience_contacts WHERE workspace_id = $1', [wid])).rows.map(r => [r.email, r.marketing_consent]));
+      assert.deepEqual(consent, { [email.subscribed]: 'subscribed', [email.unsubscribed]: 'unsubscribed', [email.unknown]: 'unknown', [email.later]: 'unsubscribed', [email.bounced]: 'subscribed', [email.complained]: 'unsubscribed', [email.deleted]: 'subscribed' });
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM audience_consent_audit WHERE workspace_id = $1', [wid])).rows[0].n, consentBefore + 1);
+      // A sent notice's email is checked as sent: still no unsubscribe expected.
+      const sent = (await released(notice.id)).find(row => row.email === email.unsubscribed)!;
+      assert.deepEqual(ok(await local('POST', '/v1/emails/check', { emailId: sent.id })).findings.filter((f: Json) => /^unsubscribe/.test(f.ruleId)), []);
+    });
+  });
+
+  test('required notice: only a workspace an operator turned them on for makes, changes or sends one, by API key or dashboard session; it can always go back to marketing', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const wid = runtime.config.workspaceId;
+      // The fixture's requests are a signed-in owner's dashboard session; an API key is the other way in.
+      const dashboard = {}, key = ok(await local('POST', '/v1/api-keys', { name: unique('notice-key'), permissions: ['read', 'send'] }), 201);
+      secrets.add(key.secret);
+      const apiKey = { authorization: `Bearer ${key.secret}` };
+      const list = ok(await local('POST', '/v1/lists', { name: unique('notice-off') }), 201);
+      await db.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES ($1,$2,$3,'unsubscribed') RETURNING id)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $2,$4,id FROM c`, [unique('con'), wid, address(), list.id]);
+      const body = { name: 'Notice', from: 'sender@example.com', subject: 'Terms', html: '<p>Our terms change.</p>', audience: { listId: list.id }, requiredNotice: true };
+      const campaigns = async () => (await db.query('SELECT count(*)::int AS n FROM sending_campaigns WHERE workspace_id = $1', [wid])).rows[0].n;
+      // Off by default: the dashboard reads that and offers no choice; the API refuses it either way.
+      for (const headers of [apiKey, dashboard]) {
+        assert.equal(ok(await local('GET', '/v1/settings/workspace', undefined, 'live', headers)).requiredNotices, false);
+        const refused = error(await local('POST', '/v1/campaigns', body, 'live', headers), 403, 'REQUIRED_NOTICES_OFF');
+        assert.equal(refused.field, 'requiredNotice');
+      }
+      assert.equal(await campaigns(), 0);
+      const plain = ok(await local('POST', '/v1/campaigns', { ...body, requiredNotice: undefined }, 'live', apiKey), 201);
+      for (const headers of [apiKey, dashboard]) error(await local('PATCH', `/v1/campaigns/${plain.id}`, { revision: plain.revision, draft: { ...plain.draft, requiredNotice: true } }, 'live', headers), 403, 'REQUIRED_NOTICES_OFF');
+      // Turned on by an operator (audited): the same session makes one.
+      await turn(db, wid, 'on');
+      assert.deepEqual((await db.query("SELECT details->>'old' AS old, details->>'new' AS new, details->>'via' AS via FROM hosted_operator_audit WHERE workspace_id = $1 AND action = 'set-required-notices'", [wid])).rows, [{ old: 'false', new: 'true', via: 'script' }]);
+      const made = ok(await local('PATCH', `/v1/campaigns/${plain.id}`, { revision: plain.revision, draft: { ...plain.draft, requiredNotice: true } }, 'live', dashboard));
+      assert.equal(made.draft.requiredNotice, true);
+      // Turned off again: a notice draft can't be sent, nothing is captured, and it can go back to being marketing.
+      await turn(db, wid, 'off');
+      error(await local('POST', `/v1/campaigns/${made.id}/send`, { revision: made.revision, confirmRequiredNotice: true }, 'live', dashboard), 403, 'REQUIRED_NOTICES_OFF');
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM sending_campaign_reviews WHERE campaign_id = $1', [made.id])).rows[0].n, 0);
+      assert.equal(ok(await local('PATCH', `/v1/campaigns/${made.id}`, { revision: made.revision, draft: { ...made.draft, requiredNotice: false } }, 'live', dashboard)).draft.requiredNotice, false);
+      await assert.rejects(turn(db, unique('missing-workspace'), 'on'), /No workspace/);
+    });
+  });
+
+  test('required notice: paced, held for the transactional reserve and paused automatically on bounces, like any campaign', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
+      const ws = runtime.config.workspaceId;
+      await turn(db, ws, 'on');
+      const list = ok(await local('POST', '/v1/lists', { name: unique('notice-paced') }), 201);
+      // Everyone unsubscribed from marketing: only a required notice reaches them.
+      await db.query(`INSERT INTO audience_contacts (id, workspace_id, email, marketing_consent) SELECT 'con_' || md5($1 || n::text), $1, 'notice-paced-' || n || '@example.com', 'unsubscribed' FROM generate_series(1, 1400) AS n`, [ws]);
+      await db.query('INSERT INTO audience_list_members (workspace_id, list_id, contact_id) SELECT workspace_id, $2, id FROM audience_contacts WHERE workspace_id = $1', [ws, list.id]);
+      await db.query(`INSERT INTO sending_region_limits (workspace_id, region, max_send_rate, checked_at) VALUES ($1, $2, 5000, clock_timestamp())
+        ON CONFLICT ON CONSTRAINT sending_region_limits_pkey DO UPDATE SET max_send_rate = 5000, max_24_hour_send = 0, sent_last_24_hours = 0, checked_at = clock_timestamp()`, [ws, REGION]);
+      const draft = (requiredNotice: boolean) => ({ name: unique('notice-paced'), from: 'sender@example.com', subject: 'Sales tax', html: '<p>Sales tax applies from January.</p>', audience: { listId: list.id }, requiredNotice });
+      const marketing = ok(await local('POST', '/v1/campaigns', draft(false)), 201);
+      error(await local('POST', `/v1/campaigns/${marketing.id}/send`, { revision: marketing.revision }), 422, 'EMPTY_AUDIENCE');
+      const campaign = ok(await local('POST', '/v1/campaigns', draft(true)), 201);
+      assert.equal(ok(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision, confirmRequiredNotice: true, pacing: { perDay: 1100, rateShare: 1 } }), 202).queued, 1400);
+      // The daily cap: one window at a time.
+      await run('campaign.run');
+      await run('campaign.run');
+      let view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
+      assert.deepEqual([view.state, view.delivery.expanded, view.delivery.waiting.reason], ['sending', 1100, 'pacing_window']);
+      // Bounces above 2% of at least 1,000 accepted pause it before the next window.
+      await db.query("UPDATE sending_emails SET status = CASE WHEN review_ordinal <= 50 THEN 'bounced' ELSE 'delivered' END, provider_id = 'sim_' || id WHERE campaign_id = $1", [campaign.id]);
+      await db.query("UPDATE sending_campaigns SET window_started_at = window_started_at - interval '25 hours', health_checked_at = health_checked_at - interval '25 hours' WHERE id = $1", [campaign.id]);
+      await db.query("UPDATE jobs SET available_at = clock_timestamp() WHERE type = 'campaign.run' AND status = 'pending' AND workspace_id = $1", [ws]);
+      await run('campaign.run');
+      view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
+      assert.deepEqual([view.state, view.delivery.pauseReason.code, view.delivery.expanded], ['paused', 'BOUNCE_RATE_HIGH', 1100]);
+      // Resumed, it is counted against the SES day like marketing: nothing goes into the transactional reserve.
+      // 2,000 a day with 1,900 sent leaves only the 10% reserve, which is for transactional mail.
+      ok(await local('POST', `/v1/campaigns/${campaign.id}/resume`, {}));
+      await db.query('UPDATE sending_region_limits SET max_24_hour_send = 2000, sent_last_24_hours = 1900, checked_at = clock_timestamp() WHERE workspace_id = $1 AND region = $2', [ws, REGION]);
+      await run('campaign.run');
+      view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
+      assert.deepEqual([view.state, view.delivery.expanded, view.delivery.waiting?.reason], ['sending', 1100, 'ses_daily_quota']);
+      assert.equal((await jobs('campaign.run')).filter(job => job.status === 'pending').length, 1);
+      assert.equal(ok(await local('POST', `/v1/campaigns/${campaign.id}/cancel`)).state, 'canceled');
+    });
+  });
+
+  test('required notice: turned off, a scheduled or paced notice pauses before releasing anyone more, can\'t be resumed or rescheduled, and continues where it stopped once on again', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
+      const ws = runtime.config.workspaceId;
+      // Each run takes every pending campaign run, due or not; stop once none is left (a paused campaign has none).
+      const runs = async (n: number) => { for (let i = 0; i < n && (await jobs('campaign.run')).some(job => job.status === 'pending'); i++) await run('campaign.run'); };
+      await turn(db, ws, 'on');
+      const list = ok(await local('POST', '/v1/lists', { name: unique('notice-off-later') }), 201);
+      await db.query(`INSERT INTO audience_contacts (id, workspace_id, email, marketing_consent) SELECT 'con_' || md5($1 || n::text), $1, 'notice-off-' || n || '@example.com', 'unsubscribed' FROM generate_series(1, 150) AS n`, [ws]);
+      await db.query('INSERT INTO audience_list_members (workspace_id, list_id, contact_id) SELECT workspace_id, $2, id FROM audience_contacts WHERE workspace_id = $1', [ws, list.id]);
+      await db.query(`INSERT INTO sending_region_limits (workspace_id, region, max_send_rate, checked_at) VALUES ($1, $2, 5000, clock_timestamp())
+        ON CONFLICT ON CONSTRAINT sending_region_limits_pkey DO UPDATE SET max_send_rate = 5000, max_24_hour_send = 0, sent_last_24_hours = 0, checked_at = clock_timestamp()`, [ws, REGION]);
+      const notice = async (name: string) => ok(await local('POST', '/v1/campaigns', { name, from: 'sender@example.com', subject: 'Sales tax', html: '<p>Sales tax applies from January.</p>', audience: { listId: list.id }, requiredNotice: true }), 201);
+      const view = async (id: string) => ok(await local('GET', `/v1/campaigns/${id}`));
+      const sent = async (id: string) => (await db.query('SELECT count(*)::int AS n FROM sending_emails WHERE campaign_id = $1', [id])).rows[0].n;
+      // A paced notice that released its first 100, and one scheduled for tomorrow.
+      const paced = await notice('Paced notice'), scheduled = await notice('Scheduled notice');
+      ok(await local('POST', `/v1/campaigns/${paced.id}/send`, { revision: paced.revision, confirmRequiredNotice: true, pacing: { perDay: 100, rateShare: 1 } }), 202);
+      ok(await local('POST', `/v1/campaigns/${scheduled.id}/schedule`, { revision: scheduled.revision, confirmRequiredNotice: true, scheduledAt: new Date(Date.now() + 86_400_000).toISOString() }), 202);
+      await runs(3);
+      assert.deepEqual([(await view(paced.id)).delivery.expanded, (await view(paced.id)).delivery.waiting?.reason, (await view(scheduled.id)).state], [100, 'pacing_window', 'scheduled']);
+      // Turned off: the schedule can't move, and when each is next due it pauses before anyone more is released.
+      await turn(db, ws, 'off');
+      error(await local('POST', `/v1/campaigns/${scheduled.id}/reschedule`, { scheduledAt: new Date(Date.now() + 2 * 86_400_000).toISOString() }), 403, 'REQUIRED_NOTICES_OFF');
+      await db.query("UPDATE sending_campaigns SET window_started_at = window_started_at - interval '25 hours' WHERE id = $1", [paced.id]);
+      await db.query('UPDATE sending_campaigns SET scheduled_at = now() WHERE id = $1', [scheduled.id]);
+      await db.query("UPDATE jobs SET available_at = clock_timestamp() WHERE type = 'campaign.run' AND status = 'pending' AND workspace_id = $1", [ws]);
+      await runs(3);
+      for (const [c, released] of [[paced, 100], [scheduled, 0]] as const) {
+        const paused = await view(c.id);
+        assert.deepEqual([paused.state, paused.delivery.pauseReason?.code, paused.delivery.expanded, await sent(c.id)], ['paused', 'REQUIRED_NOTICES_OFF', released, released]);
+        assert.match(paused.delivery.pauseReason.message, /turned off/);
+        error(await local('POST', `/v1/campaigns/${c.id}/resume`, {}), 403, 'REQUIRED_NOTICES_OFF');
+      }
+      // On again: each resumes where it stopped, and everyone captured is released once.
+      await turn(db, ws, 'on');
+      for (const c of [paced, scheduled]) ok(await local('POST', `/v1/campaigns/${c.id}/resume`, {}));
+      await runs(4);
+      for (const c of [paced, scheduled]) {
+        assert.deepEqual([(await view(c.id)).delivery.expanded, await sent(c.id)], [150, 150]);
+        assert.equal((await db.query('SELECT count(DISTINCT review_ordinal)::int AS n FROM sending_emails WHERE campaign_id = $1', [c.id])).rows[0].n, 150, 'Nobody twice.');
+      }
+    });
+  });
+
+  test('required notice: resumed after a list-probe quarantine, it goes on to everyone captured for it, while a marketing campaign goes only to contacts delivered to before', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, run }) => {
+      const wid = runtime.config.workspaceId, pool = '111122223335', domain = 'notice-probe.example', from = `news@${domain}`;
+      Object.assign(runtime.config, { multiTenant: true, liveEnabled: true, aws: { accessKeyId: 'fixture-platform', secretAccessKey: 'fixture-only' } });
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, pool]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`, [domain, wid]);
+      await gradedSender(db, wid, 10000);
+      await turn(db, wid, 'on');
+      const list = ok(await local('POST', '/v1/lists', { name: unique('notice-probe') }), 201);
+      // Contact IDs in the order of n, so the review's order (by contact ID) is too: the probe is customers 1 to 100.
+      await db.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_'||$1||lpad(n::text,4,'0'),$1,'customer-'||n||'@example.net','subscribed' FROM generate_series(1,150)n RETURNING id)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM c`, [wid, list.id]);
+      // Ten of the last fifty were delivered to before, by an earlier receipt.
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,created_at)
+        SELECT 'email_prior_'||n,$1,$2,'fixture',$3,jsonb_build_array('customer-'||n||'@example.net'),'[]','[]','Receipt','{}',false,'delivered','prior-'||n,now()-interval '20 days' FROM generate_series(141,150) n`, [wid, REGION, from]);
+      // A quarantined probe and the owner's resume, for a notice and for a marketing campaign to the same list.
+      const quarantinedAndResumed = async (body: Json, confirm: Json) => {
+        const c = ok(await local('POST', '/v1/campaigns', { from, subject: 'Probe', html: '<p>Fixture.</p>', audience: { listId: list.id }, ...body }), 201), path = `/v1/campaigns/${c.id}`;
+        ok(await local('POST', `${path}/send`, { revision: c.revision, ...confirm }), 202);
+        await run('campaign.run');
+        assert.equal(ok(await local('GET', path)).delivery.expanded, 100, 'Only the probe is released.');
+        await db.query(`UPDATE sending_emails SET status=CASE WHEN review_ordinal<=4 THEN 'bounced' ELSE 'delivered' END,provider_id='probe-'||id WHERE campaign_id=$1`, [c.id]);
+        await run('campaign.run');
+        await db.query(`UPDATE sending_campaigns SET probe_wait_until=now()-interval '1 second',waiting_until=now()-interval '1 second' WHERE id=$1`, [c.id]);
+        await db.query(`UPDATE jobs SET available_at=now() WHERE id=$1`, [`campaign.run:${c.id}`]);
+        await run('campaign.run');
+        assert.deepEqual([ok(await local('GET', path)).state, ok(await local('GET', path)).delivery.pauseReason?.code], ['paused', 'LIST_QUALITY']);
+        ok(await local('POST', `${path}/resume`, {}));
+        await run('campaign.run');
+        const after = ok(await local('GET', path)).delivery;
+        const emails = (await db.query('SELECT to_addresses->>0 AS email FROM sending_emails WHERE campaign_id=$1 AND review_ordinal>100', [c.id])).rows.map(r => r.email);
+        return { deliveredOnly: after.deliveredOnly, expanded: after.expanded, canceled: after.canceled, rest: emails.length };
+      };
+      assert.deepEqual(await quarantinedAndResumed({ name: 'Sales tax notice', requiredNotice: true }, { confirmRequiredNotice: true }), { deliveredOnly: false, expanded: 150, canceled: 0, rest: 50 });
+      assert.deepEqual(await quarantinedAndResumed({ name: 'Newsletter' }, {}), { deliveredOnly: true, expanded: 150, canceled: 40, rest: 10 });
     });
   });
 });

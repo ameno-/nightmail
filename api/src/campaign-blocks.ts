@@ -106,6 +106,14 @@ To send people to your own unsubscribe or preference page, set the campaign's or
 Every opt-out marks the contact \`unsubscribed\`, stops later campaigns to them and sends a
 \`contact.subscription_changed\` webhook event.
 
+## Required notices
+
+A required notice (\`requiredNotice: true\`, where the workspace has them) has no Unsubscribe link:
+its footer is the postal address alone, and it also reaches people who unsubscribed from marketing.
+Its content is the notice and nothing else, no offer or promotion. Say in it why the reader gets it
+(for example "You're getting this because you have an account with us and this change affects
+your invoices") and where to ask about it (a reply address or a help page).
+
 ## Not allowed
 
 Any other element (\`div\` without \`data-columns\`/\`data-column\`, \`table\`,

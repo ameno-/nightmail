@@ -260,6 +260,8 @@ button.review-stage__head { cursor: pointer; }
 .review-stage__content { display: flex; flex-direction: column; gap: var(--space-16); flex: 1; min-height: 0; overflow: auto; padding: var(--space-4) var(--space-20) var(--space-20) 52px; }
 .review-stage__footer { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-16); flex: none; padding: var(--space-12) var(--space-20); border-top: 1px solid var(--color-border); }
 .review-stage__footer .campaign-notes { flex: 1; }
+/* A required notice's confirmation sits beside Send; on a phone it has its own line above it. */
+@media (max-width: 640px) { .review-stage__footer:has(.review-confirm) { flex-wrap: wrap; } .review-confirm { flex-basis: 100%; } }
 .review-stage .campaign-audience-picker { display: grid; grid-template-columns: repeat(2, minmax(0, 320px)); gap: var(--space-16); }
 .review-message { display: grid; grid-template-columns: minmax(0, 320px) minmax(0, 1fr); gap: var(--space-32); flex: 1; min-height: 0; }
 .review-message__details { display: flex; flex-direction: column; gap: var(--space-16); min-width: 0; }

@@ -75,7 +75,9 @@ const domainSchema = z.object({ id: z.string(), name: z.string(), region: z.stri
   releasesAt: z.string().nullable().optional().describe('Hosted only: when this domain is released if its records are still unproven (72 hours after it was added). Null once ownership has been proven.'),
   receivingIssue: receivingIssueSchema.nullable().optional().describe('Hosted only: receiving needs attention. Set by the DNS checks that run when a receiving host is suggested or chosen, on Check now and in the hourly recheck. Null when the receiving record is clear.') }).openapi('DomainReadiness');
 const accountSchema = z.object({ region: z.string(), productionAccess: z.boolean(), sendingEnabled: z.boolean(), enforcementStatus: z.string(), quota: z.object({ max24HourSend: z.number(), maxSendRate: z.number(), sentLast24Hours: z.number() }) }).openapi('SesAccount');
-const settingsSchema = z.object({ name: z.string(), postalAddress: z.string().nullable().describe('The postal address every campaign footer and marketing send shows under Unsubscribe; null until one is set. Campaigns can\'t be sent or scheduled without it.') }).openapi('WorkspaceSettings');
+const settingsSchema = z.object({ name: z.string(), postalAddress: z.string().nullable().describe('The postal address every campaign footer and marketing send shows under Unsubscribe; null until one is set. Campaigns can\'t be sent or scheduled without it.'),
+  requiredNotices: z.boolean().describe('Whether campaigns in this workspace may be required notices (requiredNotice), which also reach people who unsubscribed from marketing. Only an operator turns this on.') }).openapi('WorkspaceSettings');
+const requiredNoticesOf = (workspaceId: string) => sql<boolean>`coalesce((SELECT required_notices FROM workspaces WHERE id=${workspaceId}),false)`;
 const queuedSchema = z.object({ id: z.string(), status: z.literal('pending') }).openapi('QueuedWebhookDelivery');
 const deletedSchema = z.object({ deleted: z.boolean() }).openapi('WebhookDeleted');
 const regionQuery = z.object({ region: z.string().optional() }).openapi('RegionQuery');
@@ -902,10 +904,10 @@ export async function domainPage(c: Ctx, a: Actor, q: DomainQuery): Promise<z.in
 
 export function registerOperations(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/settings/workspace', operationId: 'getWorkspaceSettings', tags: ['Settings'], security, responses: { 200: response(settingsSchema), ...errors } }), async c => {
-    const a = workspaceActor(c); const { rows: [row] } = await c.env.db.execute<{ name: string; postal_address: string | null }>(c.env.config.multiTenant
-      ? sql`SELECT name,postal_address FROM workspaces WHERE id=${a.workspaceId}`
-      : sql`SELECT name,postal_address FROM operation_settings WHERE workspace_id=${a.workspaceId}`);
-    return c.json({ name: row?.name ?? productName, postalAddress: row?.postal_address ?? null }, 200);
+    const a = workspaceActor(c); const { rows: [row] } = await c.env.db.execute<{ name: string | null; postal_address: string | null; required_notices: boolean }>(c.env.config.multiTenant
+      ? sql`SELECT name,postal_address,${requiredNoticesOf(a.workspaceId)} AS required_notices FROM workspaces WHERE id=${a.workspaceId}`
+      : sql`SELECT s.name,s.postal_address,${requiredNoticesOf(a.workspaceId)} AS required_notices FROM (SELECT) one LEFT JOIN operation_settings s ON s.workspace_id=${a.workspaceId}`);
+    return c.json({ name: row?.name ?? productName, postalAddress: row?.postal_address ?? null, requiredNotices: row?.required_notices ?? false }, 200);
   });
   app.openapi(createRoute({ method: 'patch', path: '/v1/settings/workspace', operationId: 'updateWorkspaceSettings', description: 'Change the workspace\'s name, its postal address, or both; omitted fields keep their value. The postal address appears under the Unsubscribe link of every campaign email and marketing send, as US law (CAN-SPAM) requires: campaigns can\'t be sent or scheduled without one (422 POSTAL_ADDRESS_REQUIRED). null removes it. Owners and admins only.', tags: ['Settings'], security,
     request: { body: json(z.object({ name: z.string().trim().min(1).max(120).optional(), postalAddress: PostalAddress.nullable().optional() }).refine(body => body.name !== undefined || body.postalAddress !== undefined, 'Send name, postalAddress or both.')
@@ -918,13 +920,13 @@ export function registerOperations(app: App) {
     const audit = auditInsert(auditContext(c), { action: 'settings.update', workspaceId: a.workspaceId, target: { type: 'workspace', id: a.workspaceId },
       before: sql`(SELECT jsonb_strip_nulls(jsonb_build_object('name',CASE WHEN ${name}::text IS NOT NULL THEN name END,'postalAddress',CASE WHEN ${setAddress}::boolean THEN coalesce(postal_address,'') END)) FROM old)`,
       after: { ...input.name !== undefined ? { name: input.name } : {}, ...setAddress ? { postalAddress: address ?? '' } : {} }, details: { fields } }, { from: sql`changed` });
-    const { rows: [row] } = await c.env.db.execute<{ name: string; postal_address: string | null }>(c.env.config.multiTenant
+    const { rows: [row] } = await c.env.db.execute<{ name: string; postal_address: string | null; required_notices: boolean }>(c.env.config.multiTenant
       ? sql`WITH old AS (SELECT name,postal_address FROM workspaces WHERE id=${a.workspaceId}), changed AS (UPDATE workspaces SET name=coalesce(${name}::text,name),
-        postal_address=CASE WHEN ${setAddress}::boolean THEN ${address ?? null}::text ELSE postal_address END WHERE id=${a.workspaceId} RETURNING name,postal_address), audit AS (${audit}) SELECT * FROM changed`
+        postal_address=CASE WHEN ${setAddress}::boolean THEN ${address ?? null}::text ELSE postal_address END WHERE id=${a.workspaceId} RETURNING name,postal_address,required_notices), audit AS (${audit}) SELECT * FROM changed`
       : sql`WITH old AS (SELECT name,postal_address FROM operation_settings WHERE workspace_id=${a.workspaceId}), changed AS (INSERT INTO operation_settings(workspace_id,name,postal_address)
         VALUES (${a.workspaceId},coalesce(${name}::text,${productName}),${address ?? null}::text) ON CONFLICT ON CONSTRAINT operation_settings_pkey DO UPDATE SET name=coalesce(${name}::text,operation_settings.name),
-        postal_address=CASE WHEN ${setAddress}::boolean THEN excluded.postal_address ELSE operation_settings.postal_address END,updated_at=now() RETURNING name,postal_address), audit AS (${audit}) SELECT * FROM changed`);
-    return c.json({ name: row?.name ?? input.name ?? productName, postalAddress: row?.postal_address ?? null }, 200);
+        postal_address=CASE WHEN ${setAddress}::boolean THEN excluded.postal_address ELSE operation_settings.postal_address END,updated_at=now() RETURNING name,postal_address), audit AS (${audit}) SELECT *,${requiredNoticesOf(a.workspaceId)} AS required_notices FROM changed`);
+    return c.json({ name: row?.name ?? input.name ?? productName, postalAddress: row?.postal_address ?? null, requiredNotices: row?.required_notices ?? false }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/settings/ses', operationId: 'getSesSettings', tags: ['Settings'], security, request: { query: regionQuery }, responses: { 200: response(accountSchema), ...errors } }), async c => { const a = workspaceActor(c); return c.json(await account(c.env,a.workspaceId,c.req.valid('query').region), 200); });
   app.openapi(createRoute({ method: 'get', path: '/v1/domains', operationId: 'listDomains', description: 'MX returns persisted DNS records and background verification status without AWS calls. Self-hosted installations refresh up to ten identities unless refresh=false.', tags: ['Domains'], security, request: { query: PageQuery.extend({ limit: z.coerce.number().int().min(1).max(10).default(5), region: z.string().optional(), refresh: z.enum(['true', 'false']).default('true') }).openapi('ListDomainsQuery') }, responses: { 200: response(DomainPage), ...errors } }), async c => {

@@ -171,7 +171,8 @@ const AttachmentInfo = z.object({ id: z.string(), filename: z.string(), contentT
 const Removed = z.object({ id: z.string(), deleted: z.literal(true) }).openapi('DeletedSendingResource');
 const DraftAudience = AudienceSpec.partial({ listId: true }).default({});
 const BlockHtml = z.string().max(MAX_BODY).describe('Block HTML: h1-h3, p, ul/ol, blockquote, pre>code, hr, img, buttons, columns and styled sections with inline formatting. A constrained email-safe style attribute supports color, typography, spacing, borders, radius and dimensions; arbitrary CSS remains rejected. No wrappers, tables, class or id. Call getContentGuide in MCP or GET /v1/campaign-content-guide for the full vocabulary and examples.');
-const CampaignDraftFields = { name: z.string().trim().min(1).max(200), from: z.union([Address, z.literal('')]).default(''), fromName: FromName.optional(), previewText: PreviewText.optional(), replyTo: z.array(Address).max(10).default([]), region: Region, regionPinned:z.boolean().optional().describe('Regional MX only. False follows the From domain; the displayed region is a hint. A supplied region on create or a changed region on edit pins it. To unpin, pass false and omit region.'), subject: z.union([Subject, z.literal('')]).default(''), attachments: AttachmentIds, tracking: z.boolean().default(true), audience: DraftAudience, defaults: Data, unsubscribePageUrl: unsubscribePageUrl().optional() };
+const CampaignDraftFields = { name: z.string().trim().min(1).max(200), from: z.union([Address, z.literal('')]).default(''), fromName: FromName.optional(), previewText: PreviewText.optional(), replyTo: z.array(Address).max(10).default([]), region: Region, regionPinned:z.boolean().optional().describe('Regional MX only. False follows the From domain; the displayed region is a hint. A supplied region on create or a changed region on edit pins it. To unpin, pass false and omit region.'), subject: z.union([Subject, z.literal('')]).default(''), attachments: AttachmentIds, tracking: z.boolean().default(true), audience: DraftAudience, defaults: Data, unsubscribePageUrl: unsubscribePageUrl().optional(),
+  requiredNotice: z.boolean().optional().describe('A required notice: a message every recipient must get whatever their marketing choice, such as a change to terms, prices or taxes, never a promotion. It goes to everyone in the audience who is not suppressed, people who unsubscribed from marketing included, without an Unsubscribe link or List-Unsubscribe header, and is paced, limited and paused like any campaign. Only where an operator turned required notices on for the workspace (requiredNotices in getWorkspaceSettings); 403 REQUIRED_NOTICES_OFF otherwise. Sending or scheduling one needs confirmRequiredNotice. Turned off later, a launched notice pauses before releasing anyone more (pause reason REQUIRED_NOTICES_OFF) and is resumed or rescheduled only once they are on again. Resumed after a list-probe quarantine, it goes on to everyone captured for it (never deliveredOnly).') };
 const CAMPAIGN_INPUT_NOTES = 'Drafts may omit sender, subject, content and audience until review or send, except that domain-restricted keys must supply a From address on one of their domains. Content is block HTML (see html); the same form is what the dashboard composer reads and writes, so people and agents edit one document. Simple {{name}} personalization works in text and quoted href/alt attributes; values are HTML-escaped and rendered URLs are validated. Durable campaign preparation is bounded and runs in background jobs.';
 const CampaignInput = z.object({ ...CampaignDraftFields, html: BlockHtml.optional() }).strict().describe(CAMPAIGN_INPUT_NOTES).openapi('CampaignDraftInput');
 // Stored drafts predating block HTML remain readable; they are revalidated when saved or reviewed.
@@ -185,7 +186,7 @@ const Failure = z.object({ code: z.string(), message: z.string() });
 const Delivery = z.object({ total: z.number().int().describe('Fixed recipient count frozen at send or schedule.'), prepared: z.number().int().describe('Recipients whose message was validated.'), expanded: z.number().int().describe('Recipients materialized as immutable email records.'), canceled: z.number().int().describe('Recipients canceled before materialization. Materialized cancellations remain in counts.byStatus.canceled.'), error: Failure.nullable().describe('Why the campaign failed or was canceled by the system.'),
   pacing: z.object({ perDay: z.number().int().nullable().describe('Maximum recipients released per rolling 24-hour window; null means no daily cap.'), autoPause: z.boolean().describe('Pause automatically when bounce or complaint rates exceed safe thresholds.'), rateShare: z.number().describe('Maximum fraction of the SES per-second send rate this campaign uses; 1 is the full rate.'), windowStartedAt: z.string().nullable(), windowExpanded: z.number().int().describe('Recipients released in the current 24-hour window.'), nextWindowAt: z.string().nullable().describe('When the next 24-hour window opens, when a daily cap is set.') }),
   pausedAt: z.string().nullable(), pauseReason: Failure.nullable(),
-  deliveredOnly: z.boolean().describe('After a resumed list-probe quarantine: the rest goes only to contacts this workspace delivered to before; the others are counted in canceled.'),
+  deliveredOnly: z.boolean().describe('After a resumed list-probe quarantine: the rest goes only to contacts this workspace delivered to before; the others are counted in canceled. Never for a required notice.'),
   waiting: z.object({ reason: z.enum(['pacing_window', 'ses_daily_quota', 'hosted_daily_quota', 'list_probe', 'balance']), until: z.string() }).nullable().describe('Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest.') }).describe('The current launch: null until the campaign is sent or scheduled, and cleared by a new revision.').openapi('CampaignDelivery');
 function deliveryView(row: Omit<typeof campaigns.$inferSelect, 'draft' | 'stats'>) {
   if (!row.reviewId) return null;
@@ -371,7 +372,7 @@ const EmailQuery = PageQuery.extend({ campaignId: z.string().max(120).optional()
 const CampaignQuery = PageQuery.extend({ region: Region.optional(), state: CampaignStateValue.optional(), archived: z.enum(['true', 'false']).default('false').describe('False lists active campaigns; true lists archived campaigns only.'), search: z.string().trim().min(1).max(200).optional(),
   listId: z.string().min(1).max(120).optional().describe('Only campaigns whose audience list is this one: a newsletter\u2019s issues.'),
   newsletter: z.enum(['true', 'false']).optional().describe('true: only campaigns whose audience list is a newsletter. false: only the others, with no list or a list that is not a newsletter.') }).describe('Newest created campaigns first, excluding archived campaigns by default, with an opaque cursor bound to the filters. Search is literal, case-insensitive name, subject or ID text.').openapi('ListCampaignsQuery');
-const AudienceCounts = z.object({ matched: z.number().int(), eligible: z.number().int(), suppressed: z.number().int(), unsubscribed: z.number().int() }).describe('Live counts for the saved audience: matched contacts, those eligible for marketing, and the suppressed or unsubscribed remainder. Read-only; sending freezes its own snapshot and rechecks consent at dispatch.').openapi('CampaignAudienceCounts');
+const AudienceCounts = z.object({ matched: z.number().int(), eligible: z.number().int(), suppressed: z.number().int(), unsubscribed: z.number().int() }).describe('Live counts for the saved audience: matched contacts, those eligible for marketing, and the suppressed or unsubscribed remainder. For a required notice everyone not suppressed is eligible and unsubscribed is 0. Read-only; sending freezes its own snapshot and rechecks consent at dispatch.').openapi('CampaignAudienceCounts');
 
 const CampaignUpdate = z.object({ revision: z.number().int().positive(), draft: z.object({ ...CampaignInput.shape, region: Region.optional().describe('Omit to keep the current region selection. An unpinned regional MX draft follows its From domain.') }).strict() }).strict().openapi('CampaignUpdateInput');
 const CampaignArchive = z.object({ archived: z.boolean() }).strict().openapi('CampaignArchiveInput');
@@ -380,7 +381,8 @@ const CampaignPreview = z.object({ html: z.string().describe('Complete rendered 
 const CampaignPreviewImage = z.object({ data: z.string().describe('Canonical base64 PNG screenshot.'), mimeType: z.literal('image/png') }).openapi('CampaignPreviewImage');
 const Pacing = z.object({ perDay: z.number().int().min(100).max(10000000).nullable().optional().describe('Release at most this many recipients per rolling 24-hour window. Omit or null for no daily cap. Delivery always also respects the SES 24-hour quota.'), autoPause: z.boolean().default(true).describe('Pause automatically if the bounce rate exceeds 2% (after 1,000 accepted) or the complaint rate exceeds 0.08% (after 5,000 accepted). Hosted shared sending requires true; false is rejected.'),
   rateShare: z.number().min(0.05).max(1).optional().describe('Maximum fraction of the SES per-second send rate this campaign may use; the rest stays free for transactional mail and other campaigns. Defaults to 0.5 for paced campaigns; campaigns sent without pacing use the full rate.') }).strict().openapi('CampaignPacing');
-const CampaignSend = z.object({ revision: z.number().int().positive(), pacing: Pacing.optional() }).strict().openapi('CampaignSendInput');
+const CampaignSend = z.object({ revision: z.number().int().positive(), pacing: Pacing.optional(),
+  confirmRequiredNotice: z.literal(true).optional().describe('Required for a required notice (422 REQUIRED_NOTICE_UNCONFIRMED without it): the sender confirms it is a required notice with no promotion. Recorded with who and when. An agent asks the person first.') }).strict().openapi('CampaignSendInput');
 const CampaignSchedule = z.object({ ...CampaignSend.shape, scheduledAt: z.string().datetime({ offset: true }) }).strict().openapi('CampaignScheduleInput');
 const CampaignQueued = z.object({ id: z.string(), state: z.literal('preparing'), queued: z.number().int(), scheduledAt: z.string().nullable(), simulated: z.boolean() }).openapi('CampaignQueued');
 const CampaignCanceled = z.object({ id: z.string(), state: z.literal('canceled'), canceled: z.number().int(), inFlight: z.number().int() }).openapi('CampaignCanceled');
@@ -552,7 +554,7 @@ async function findEmail(db: DbExecutor, a: Actor, emailId: string) {
 }
 async function visibleEmailContent(runtime: Runtime,a: Actor,row: typeof emails.$inferSelect, untrustedContent: boolean) {
   // Sent campaign emails store a stub; queued ones have no body yet (html/text null, as before).
-  const s = row.snapshot.deferredCampaign && row.snapshot.unsubscribeUrl ? await sentCampaignContent(runtime, a, row) : row.snapshot.deferredCampaign && !row.snapshot.attachments
+  const s = sentCampaignEmail(row.snapshot) ? await sentCampaignContent(runtime, a, row) : row.snapshot.deferredCampaign && !row.snapshot.attachments
     ? {...row.snapshot,subject:row.subject,attachments:(await runtime.db.execute<{ids:string[]}>(sql`SELECT draft->'attachments' AS ids FROM sending_campaign_reviews WHERE workspace_id=${a.workspaceId} AND id=${row.reviewId}`)).rows[0]?.ids??[]} : row.snapshot;
   const manage = a.permissions.includes('manage');
   // App-owned capabilities only, not a general sanitizer for transactional bearer links.
@@ -861,24 +863,35 @@ function renderedMimeHeaders(block:string) {
 async function workspacePostalAddress(runtime: Runtime, db: DbExecutor, workspaceId: string) {
   return (await db.execute<{ address: string | null }>(sql`SELECT ${postalAddressOf(runtime.config.multiTenant, workspaceId)} AS address`)).rows[0]?.address ?? null;
 }
+/** A required notice ignores marketing opt-outs, so a workspace makes, sends, resumes or releases one only while an
+ *  operator has them turned on (scripts/set-required-notices.ts). `message` replaces the refusal's, for the run's pause. */
+async function requiredNoticesAllowed(db: DbExecutor, draft: Pick<CampaignDraft, 'requiredNotice'>, workspaceId: string, message = `Required notices are off for this workspace. Ask ${productName} to turn them on.`) {
+  if (!draft.requiredNotice) return;
+  const { rows: [row] } = await db.execute<{ on: boolean | null }>(sql`SELECT required_notices AS on FROM workspaces WHERE id=${workspaceId}`);
+  if (!row?.on) throw new ApiError(403, 'REQUIRED_NOTICES_OFF', message, 'requiredNotice');
+}
 // `postalAddress`: the workspace's (CAN-SPAM), under the link in the same quiet style, one line per line.
-export type Footer = { unsubscribePageUrl?: string; postalAddress?: string | null };
+// `requiredNotice`: a required notice has no unsubscribe, so its footer is the postal address alone and it gets no
+// List-Unsubscribe headers; `url` is then unused.
+export type Footer = { unsubscribePageUrl?: string; postalAddress?: string | null; requiredNotice?: boolean };
 function marketingFooter(snapshot: EmailSnapshot, url: string, footer: Footer = {}) {
   footerParts(snapshot, url, footer);
+  if (footer.requiredNotice) return;
   // Keep caller headers; the unsubscribe pair is always Nightmail's own.
   snapshot.headers = [...snapshot.headers.filter(header => !/^list-unsubscribe/i.test(header.Name)), { Name: 'List-Unsubscribe', Value: `<${url}>` }, { Name: 'List-Unsubscribe-Post', Value: 'List-Unsubscribe=One-Click' }];
 }
 /** The footer's visible part, in the HTML and the text: what a preview and a campaign test show without the headers. */
-function footerParts(parts: { html?: string; text?: string }, url: string, { unsubscribePageUrl: page, postalAddress }: Footer) {
-  const link = page ? unsubscribePageLink(page, url.slice(url.lastIndexOf('/') + 1)) : url, lines = postalAddress ? postalAddress.split('\n') : [];
+function footerParts(parts: { html?: string; text?: string }, url: string, { unsubscribePageUrl: page, postalAddress, requiredNotice }: Footer) {
+  const link = requiredNotice ? null : page ? unsubscribePageLink(page, url.slice(url.lastIndexOf('/') + 1)) : url, lines = postalAddress ? postalAddress.split('\n') : [];
+  if (!link && !lines.length) return;
   if (parts.html) {
     const style = "font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:13px;line-height:1.5;color:#595959";
-    const footer = `<p style="${style};margin:24px 0 0"><a href="${escaped(link)}" style="color:#595959;text-decoration:underline">Unsubscribe</a></p>`
-      + (lines.length ? `<p style="${style};margin:8px 0 0">${lines.map(escaped).join('<br>')}</p>` : '');
+    const footer = (link ? `<p style="${style};margin:24px 0 0"><a href="${escaped(link)}" style="color:#595959;text-decoration:underline">Unsubscribe</a></p>` : '')
+      + (lines.length ? `<p style="${style};margin:${link ? 8 : 24}px 0 0">${lines.map(escaped).join('<br>')}</p>` : '');
     const close = parts.html.search(/<\/td>\s*<\/tr>\s*<\/table>\s*<\/td>\s*<\/tr>\s*<\/table>\s*<\/body>/i);
     parts.html = close >= 0 ? parts.html.slice(0, close) + footer + parts.html.slice(close) : parts.html + footer;
   }
-  parts.text = (parts.text ?? '') + `\n\nUnsubscribe: ${link}` + (lines.length ? `\n${lines.join('\n')}` : '');
+  parts.text = (parts.text ?? '') + '\n\n' + [...link ? [`Unsubscribe: ${link}`] : [], ...lines].join('\n');
 }
 function structuredSnapshot(input:SendRequest & {region:string}):EmailSnapshot {
   return { testCampaignId: null, untrustedContent: !!input.headers?.some(h => h.name.toLowerCase() === 'in-reply-to'), from: input.from, ...(input.fromName !== undefined ? { fromName: input.fromName } : {}), to: Array.isArray(input.to) ? input.to : [input.to], cc: input.cc, bcc: input.bcc, replyTo: input.replyTo, region: input.region, kind: input.kind, subject: input.subject ?? '', html: input.html, text: input.text, attachments: input.attachments, tracking: input.tracking ?? input.kind === 'marketing', headers: (input.headers ?? []).map(header => ({ Name: header.name, Value: header.value })), ...(input.screen && input.kind === 'transactional' ? { screen: true } : {}) };
@@ -1401,7 +1414,7 @@ async function campaignWithFooter(runtime: Runtime, a: Actor, campaignId: string
       THEN (SELECT r.draft->>'postalAddress' FROM sending_campaign_reviews r WHERE r.workspace_id=${a.workspaceId} AND r.id=${campaigns.reviewId})
       ELSE ${postalAddressOf(runtime.config.multiTenant, a.workspaceId)} END` }).from(campaigns).where(campaignWhere(a, campaignId));
   if (!found) return notFound('Campaign');
-  return { row: found.row, footer: { unsubscribePageUrl: found.row.draft.unsubscribePageUrl, postalAddress: found.address } };
+  return { row: found.row, footer: { unsubscribePageUrl: found.row.draft.unsubscribePageUrl, postalAddress: found.address, requiredNotice: found.row.draft.requiredNotice } };
 }
 /** A campaign's preview: its rendered draft with the footer its emails get, the link a placeholder. */
 async function previewParts(runtime: Runtime, draft: CampaignDraft, footer: Footer) {
@@ -1451,19 +1464,22 @@ export function registerSending(app: App) {
     if ('emailId' in input) {
       const row=await findEmail(c.env.db,a,input.emailId);
       // Rehydrate the frozen campaign snapshot once so From name, headers, and tracking describe the same copy as the body.
-      const s=row.snapshot.deferredCampaign && row.snapshot.unsubscribeUrl ? await sentCampaignContent(c.env,a,row) : row.snapshot;
+      const s=sentCampaignEmail(row.snapshot) ? await sentCampaignContent(c.env,a,row) : row.snapshot;
       const body=await visibleEmailContent(c.env,a,{...row,snapshot:s},row.untrustedContent);
       if (!body.html && !body.text) throw new ApiError(422,'EMAIL_BODY_UNAVAILABLE','No retained HTML or plain text is available for checking.','emailId');
-      mail={from:row.from,fromName:s.fromName,subject:body.subject??'',stream:s.kind??'transactional',text:body.text??undefined,html:body.html??undefined,
+      // A required notice is checked as the transactional message it is: it has no unsubscribe, by design.
+      const notice=!!row.snapshot.requiredNotice;
+      mail={from:row.from,fromName:s.fromName,subject:body.subject??'',stream:notice ? 'transactional' : s.kind??'transactional',text:body.text??undefined,html:body.html??undefined,
         headers:Object.fromEntries([...(s.headers??[]).map(h=>[h.Name,h.Value]),...(s.replyTo?.length ? [['Reply-To',s.replyTo[0]!]] : [])]),
         // Marketing mail went out with the unsubscribe headers and link (and the workspace's postal address) Nightmail adds, however its copy is stored.
-        previewText:s.previewText,tracking:s.tracking,...(s.kind==='marketing' ? {generatedUnsubscribe:true,postalAddress:!!await workspacePostalAddress(c.env,c.env.db,a.workspaceId)} : {}),attachments:await attachmentRows(c.env.db,a,body.attachments,false,!!s.mailbox && !!actorMailAccess(a))};
+        previewText:s.previewText,tracking:s.tracking,...(s.kind==='marketing' && !notice ? {generatedUnsubscribe:true,postalAddress:!!await workspacePostalAddress(c.env,c.env.db,a.workspaceId)} : {}),attachments:await attachmentRows(c.env.db,a,body.attachments,false,!!s.mailbox && !!actorMailAccess(a))};
     } else if ('campaignId' in input) {
       const {row,footer}=await campaignWithFooter(c.env,a,input.campaignId), d=row.draft, audience=AudienceSpec.safeParse(d.audience);
       const [rendered,recipients,files]=await Promise.all([renderCampaignContent(c.env,d,false),row.reviewId ? row.total : audience.success && !a.domains.length
-        ? wrapModuleLoad(()=>import('./audience.js')).then(m=>m.countCampaignAudience(c.env.db,a,audience.data)).then(r=>r.eligible) : undefined,attachmentRows(c.env.db,a,d.attachments)]);
+        ? wrapModuleLoad(()=>import('./audience.js')).then(m=>m.countCampaignAudience(c.env.db,a,audience.data,d.requiredNotice===true)).then(r=>r.eligible) : undefined,attachmentRows(c.env.db,a,d.attachments)]);
       if (!d.from || (!rendered.html && !rendered.text)) throw new ApiError(422,'CAMPAIGN_INCOMPLETE','Set a sender and add content before checking this campaign.','campaignId');
-      mail={from:d.from,fromName:d.fromName,subject:d.subject,stream:'marketing',...rendered,previewText:d.previewText,tracking:d.tracking,generatedUnsubscribe:true,postalAddress:!!footer.postalAddress,
+      mail={from:d.from,fromName:d.fromName,subject:d.subject,...rendered,previewText:d.previewText,tracking:d.tracking,
+        ...d.requiredNotice ? {stream:'transactional' as const} : {stream:'marketing' as const,generatedUnsubscribe:true,postalAddress:!!footer.postalAddress},
         recipientCount:recipients===undefined ? undefined : Math.min(recipients,row.pacePerDay??Infinity),attachments:files,headers:d.replyTo?.[0]?{'Reply-To':d.replyTo[0]}:undefined};
     } else mail=input;
     const domain=splitMailbox(mail.from).address.split('@').at(-1)!.toLowerCase();
@@ -1680,8 +1696,9 @@ export function registerSending(app: App) {
     await assertBlockContent(input.html);
     const result = await idempotent(c.env.db, keyed(c, a), input, async db => {
       const campaignId = id('campaign'); const source = input.templateId ? await (await wrapModuleLoad(() => import('./templates.js'))).instantiateTemplate(c.env, db, a, input.templateId) : null;
-      const draft = { name: input.name, from: input.from, ...(input.fromName ?? source?.draft.fromName ? { fromName: input.fromName ?? source?.draft.fromName } : {}), ...(input.previewText ?? source?.draft.previewText ? { previewText: input.previewText ?? source?.draft.previewText } : {}), replyTo: input.replyTo.length ? input.replyTo : source?.draft.replyTo ?? [], ...await draftRegion(c.env,db,a,input), subject: input.subject || source?.draft.subject || '', attachments: [...new Set([...(source?.draft.attachments ?? []), ...input.attachments])], tracking: input.tracking ?? source?.draft.tracking ?? true, audience: input.audience, defaults: { ...(source?.draft.defaults ?? {}), ...input.defaults }, ...(input.html ?? source?.draft.html ? { html: input.html ?? source?.draft.html } : {}), ...(input.unsubscribePageUrl ?? source?.draft.unsubscribePageUrl ? { unsubscribePageUrl: input.unsubscribePageUrl ?? source?.draft.unsubscribePageUrl } : {}) };
+      const draft = { name: input.name, from: input.from, ...(input.fromName ?? source?.draft.fromName ? { fromName: input.fromName ?? source?.draft.fromName } : {}), ...(input.previewText ?? source?.draft.previewText ? { previewText: input.previewText ?? source?.draft.previewText } : {}), replyTo: input.replyTo.length ? input.replyTo : source?.draft.replyTo ?? [], ...await draftRegion(c.env,db,a,input), subject: input.subject || source?.draft.subject || '', attachments: [...new Set([...(source?.draft.attachments ?? []), ...input.attachments])], tracking: input.tracking ?? source?.draft.tracking ?? true, audience: input.audience, defaults: { ...(source?.draft.defaults ?? {}), ...input.defaults }, ...(input.html ?? source?.draft.html ? { html: input.html ?? source?.draft.html } : {}), ...(input.unsubscribePageUrl ?? source?.draft.unsubscribePageUrl ? { unsubscribePageUrl: input.unsubscribePageUrl ?? source?.draft.unsubscribePageUrl } : {}), ...(input.requiredNotice ? { requiredNotice: true } : {}) };
       draftSender(c.env, a, draft);
+      await requiredNoticesAllowed(db, draft, a.workspaceId);
       await linkAttachments(db, a, draft.attachments, 'campaign', campaignId);
       const [row] = await db.insert(campaigns).values({ id: campaignId, workspaceId: a.workspaceId, draft, sourceTemplateId: source?.templateId ?? null, sourceTemplateRevision: source?.templateRevision ?? null }).returning();
       return { ...row!, counts: emptyCounts() };
@@ -1740,7 +1757,7 @@ export function registerSending(app: App) {
     const a = actor(c), row = await findCampaign(c.env.db, a, c.req.valid('param').id);
     const audience = AudienceSpec.safeParse(row.draft.audience);
     if (!audience.success) throw new ApiError(422, 'CAMPAIGN_INCOMPLETE', 'Choose an audience list before counting recipients.', 'audience.listId');
-    return c.json(AudienceCounts.parse(await (await wrapModuleLoad(() => import('./audience.js'))).countCampaignAudience(c.env.db, a, audience.data)), 200);
+    return c.json(AudienceCounts.parse(await (await wrapModuleLoad(() => import('./audience.js'))).countCampaignAudience(c.env.db, a, audience.data, row.draft.requiredNotice === true)), 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/preview-image', operationId: 'renderCampaignPreviewImage', description: 'Renders the saved campaign draft as a full-page, 720 px wide PNG for visual review. Inline CID images are embedded; remote HTTPS images are loaded by the isolated renderer.' + PREVIEW_ROUTE_NOTE, tags: ['Campaigns'], security, request: { params: IdParams }, responses: { ...previewResponses(CampaignPreviewImage), ...errors } }), async c => {
     refuseHead(c);
@@ -1772,6 +1789,7 @@ export function registerSending(app: App) {
       const draft = {...input.draft,...await draftRegion(c.env,db,a,input.draft,current.draft)};
       draftSender(c.env, a, draft);
       draftSender(c.env, a, current.draft); editable(current, input.revision);
+      await requiredNoticesAllowed(db, draft, a.workspaceId);
       await attachmentRows(db, a, input.draft.attachments, true);
       await db.delete(attachmentLinks).where(and(scope(attachmentLinks, a), eq(attachmentLinks.ownerType, 'campaign'), eq(attachmentLinks.ownerId, campaignId)));
       await linkAttachments(db, a, input.draft.attachments, 'campaign', campaignId);
@@ -1815,11 +1833,11 @@ export function registerSending(app: App) {
     return c.json(Receipt.parse(result), 202);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/send', operationId: 'sendCampaign', description: 'Accept the current revision for durable background delivery: the audience is frozen now, every message is validated in the background, then recipients are released into the dispatch queue. The 202 count is accepted recipient intents, not SES acceptance or delivery; poll the campaign for its state. ' + CAMPAIGN_POSTAL_NOTE + ' ' + CAMPAIGN_SCREEN_NOTE + ' ' + CAMPAIGN_CAPTURE_NOTE, tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(CampaignSend) }, responses: { 202: response(CampaignQueued), ...errors } }), async c => {
-    const a = actor(c, 'send'); const input = c.req.valid('json'); const result = await idempotent(c.env.db, keyed(c, a), input, db => launch(c.env, db, a, c.req.valid('param').id, input, c.get('requestId')), { replayed: campaignReplay(a, c.req.valid('param').id) }); return c.json(CampaignQueued.parse(result), 202);
+    const a = actor(c, 'send'); const input = c.req.valid('json'); const result = await idempotent(c.env.db, keyed(c, a), input, db => launch(c.env, db, a, c.req.valid('param').id, input, c.get('requestId'), c), { replayed: campaignReplay(a, c.req.valid('param').id) }); return c.json(CampaignQueued.parse(result), 202);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/schedule', operationId: 'scheduleCampaign', description: 'Accept the current revision for durable scheduled delivery. The audience is frozen and validated now; no recipient is materialized or sent before scheduledAt. The 202 count is accepted recipient intents. ' + CAMPAIGN_POSTAL_NOTE + ' ' + CAMPAIGN_SCREEN_NOTE + ' ' + CAMPAIGN_CAPTURE_NOTE, tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(CampaignSchedule) }, responses: { 202: response(CampaignQueued), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
-    const result = await idempotent(c.env.db, keyed(c, a), input, db => launch(c.env, db, a, c.req.valid('param').id, input, c.get('requestId')), { replayed: campaignReplay(a, c.req.valid('param').id) }); return c.json(CampaignQueued.parse(result), 202);
+    const result = await idempotent(c.env.db, keyed(c, a), input, db => launch(c.env, db, a, c.req.valid('param').id, input, c.get('requestId'), c), { replayed: campaignReplay(a, c.req.valid('param').id) }); return c.json(CampaignQueued.parse(result), 202);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/cancel', operationId: 'cancelCampaign', description: 'Stop a preparing, scheduled, sending, paused or failed campaign: unreleased recipients are never materialized and queued mail is canceled; mail already attempting or accepted is reported as inFlight.', tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders }, responses: { 200: response(CampaignCanceled), ...errors } }), async c => {
     const a = actor(c, 'send'); const campaignId = c.req.valid('param').id;
@@ -1845,12 +1863,14 @@ export function registerSending(app: App) {
     if (!campaignResumable(campaign)) throw new ApiError(409, 'CAMPAIGN_NOT_PAUSED', 'Only a paused campaign, or one that failed after releasing recipients, can be resumed.');
     if (campaign.state === 'paused' && campaign.quarantines >= 2 && ['LIST_QUALITY', 'BOUNCE_RATE_HIGH', 'COMPLAINT_RATE_HIGH'].includes(campaign.pauseReason?.code ?? ''))
       throw new ApiError(409, 'QUARANTINE_REVIEW_REQUIRED', 'This campaign was quarantined twice for list quality. An operator reviews it before it sends again: ask for a review from the dashboard.');
+    await requiredNoticesAllowed(db, campaign.draft, a.workspaceId);
     const ref = { workspaceId: a.workspaceId, id: campaign.id }, next = runningState(campaign);
     await db.execute(resumeCampaign(ref, next));
     // The owner's one resume of a failed list probe releases the rest only to contacts this workspace delivered to
     // before (the others are skipped and counted as canceled), and the campaign's own health check runs at once.
-    // A second quarantine needs an operator (above).
-    if (campaign.pauseReason?.code === 'LIST_QUALITY') { await db.execute(clearProbe(ref)); await db.execute(restrictToDelivered(ref)); }
+    // A required notice goes on to everyone captured for it: those never delivered to before are exactly who it must
+    // reach. The automatic pauses still apply to it. A second quarantine needs an operator (above).
+    if (campaign.pauseReason?.code === 'LIST_QUALITY') { await db.execute(clearProbe(ref)); if (!campaign.draft.requiredNotice) await db.execute(restrictToDelivered(ref)); }
     if (campaign.state==='failed' && campaign.error?.code==='JOB_LEASE_EXHAUSTED') await reserveCampaign(c.env,db,await lockSendScope(db,a.workspaceId,{campaignId:campaign.id}),a,campaign.actorKeyId??a.keyId,0);
     await db.execute(queueCampaignRun(ref, campaign.requestId ? { requestId: campaign.requestId } : {}, next === 'scheduled' ? campaign.scheduledAt : null));
     await db.execute(queueCampaignStats(ref));
@@ -1877,6 +1897,7 @@ export function registerSending(app: App) {
   }, unreleasedSchedule));
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/reschedule', operationId: 'rescheduleCampaign', description: 'Move the send time of a scheduled campaign that has not started sending. The frozen audience and content stay as they are; unschedule it to edit them.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(z.object({ scheduledAt: CampaignSchedule.shape.scheduledAt }).strict().openapi('CampaignRescheduleInput')) }, responses: { 200: response(Campaign), ...errors } }), async c => control(c, async (db, a, campaign) => {
     if (a.role === 'member') throw denied('PERMISSION_DENIED', 'Only workspace owners and admins can schedule campaigns.', { permission: 'sendEmail', level: 'on', person: 'admin' });
+    await requiredNoticesAllowed(db, campaign.draft, a.workspaceId);
     const at = Date.parse(c.req.valid('json').scheduledAt);
     if (at <= Date.now() || at > Date.now() + 365 * 86400000) throw new ApiError(422, 'INVALID_SCHEDULE', 'Schedule between now and one year from now.', 'scheduledAt');
     const ref = campaignRef(a, campaign.id);
@@ -1965,7 +1986,7 @@ function backgroundFailure(error: unknown) {
 // and the workspace's admission row, which every send in the workspace takes, are locked after it, only for what decides
 // the launch: the admission, the review, the reserve and the state change. The capture stays in this transaction, so
 // the frozen list is one snapshot and a launch that fails or is cancelled before it commits leaves nothing behind.
-async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: string, input: { revision: number; scheduledAt?: string; pacing?: z.infer<typeof Pacing> }, requestId?: string) {
+async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: string, input: { revision: number; scheduledAt?: string; pacing?: z.infer<typeof Pacing>; confirmRequiredNotice?: true }, requestId: string | undefined, c: Ctx) {
   // A campaign launch is one job that must start now; ask the response path for an uncoalesced scheduler wake.
   a.wakeJobs = Math.max(a.wakeJobs ?? 0, 12);
   if (input.scheduledAt && (Date.parse(input.scheduledAt) <= Date.now() || Date.parse(input.scheduledAt) > Date.now() + 365 * 86400000)) throw new ApiError(422, 'INVALID_SCHEDULE', 'Schedule between now and one year from now.');
@@ -1981,6 +2002,9 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   // shows the same one. Without it the launch is refused after the admission check below, before anything is captured.
   const postalAddress = await workspacePostalAddress(runtime, db, a.workspaceId);
   const draft = { ...readyCampaign(row.draft), ...postalAddress ? { postalAddress } : {} };
+  // A required notice: still allowed for this workspace, and confirmed by the sender as having no promotion.
+  await requiredNoticesAllowed(db, draft, a.workspaceId);
+  if (draft.requiredNotice && !input.confirmRequiredNotice) throw new ApiError(422, 'REQUIRED_NOTICE_UNCONFIRMED', 'Confirm that this is a required notice with no promotion (confirmRequiredNotice: true).', 'confirmRequiredNotice');
   const rendered = await renderCampaignContent(runtime, draft), cfg = runtime.config;
   // What the campaign's screen would refuse in the background, measured now; admission refuses it for screened mail.
   let oversize: ApiError | undefined;
@@ -2004,7 +2028,7 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   finally { await db.execute(sql`ROLLBACK TO SAVEPOINT launch_check`); await db.execute(sql`RELEASE SAVEPOINT launch_check`); }
   if (!postalAddress) throw postalAddressRequired();
   const reviewId = id('review'), propertyKeys = placeholderKeys(draft, rendered);
-  const counts = await (await wrapModuleLoad(() => import('./audience.js'))).snapshotCampaignAudience(db, a, draft.audience, reviewId, propertyKeys).catch(error => {
+  const counts = await (await wrapModuleLoad(() => import('./audience.js'))).snapshotCampaignAudience(db, a, draft.audience, reviewId, propertyKeys, draft.requiredNotice === true).catch(error => {
     // A statement past the database's limit (or cancelled) ends the launch; its transaction keeps nothing.
     if ([error, (error as { cause?: unknown })?.cause].some(e => (e as { code?: string } | null)?.code === '57014')) throw captureTimedOut();
     throw error;
@@ -2017,6 +2041,9 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   const contentHash = await digest(canonical({ version: 2, draft: reviewed, rendered }));
   await db.insert(campaignReviews).values({ id: reviewId, rendererVersion: CAMPAIGN_RENDERER_VERSION, workspaceId: a.workspaceId, campaignId, revision: row.revision, draft: reviewed, contentHash, rendered });
   await reserveCampaign(runtime, db, held, a, a.keyId, counts.eligible);
+  // Who confirmed the notice and when, in the workspace's Activity.
+  if (draft.requiredNotice) await recordAudit(db, c, { action: 'campaign.required_notice_confirmed', workspaceId: a.workspaceId, target: { type: 'campaign', id: campaignId },
+    details: { confirmation: 'This is a required notice with no promotion.', revision: row.revision, reviewId, recipients: counts.eligible, ...input.scheduledAt ? { scheduledAt: input.scheduledAt } : {} } });
   if (ids.length) await db.insert(attachmentLinks).values(ids.map(attachmentId => ({ workspaceId: a.workspaceId, attachmentId, ownerType: 'review' as const, ownerId: reviewId }))).onConflictDoNothing();
   const ref = campaignRef(a, campaignId);
   const moved = await db.execute(launchCampaign(ref, { reviewId, resolvedRegion:route.region!==row.draft.region ? route.region : undefined, actorKeyId: a.keyId, simulated: isSimulatedSes(runtime), total: counts.eligible, requestId: requestId ?? null, scheduledAt: input.scheduledAt ?? null,
@@ -2345,6 +2372,13 @@ export async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail:
   if (!review?.rendered || !review.contentHash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The reviewed recipient is unavailable.');
   const customer = await campaignMessage(runtime, review.draft, review.recipient, false, rows, review.rendered, true, !review.rendered.html?.includes('{{'), review.version);
   if (await digest(canonical(customer)) !== review.contentHash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_CHANGED', 'The renderer no longer reproduces the reviewed message. No provider attempt was made.');
+  // `keyed`: the same customer copy with the footer generated for the placeholder link, as campaign screening keys it.
+  const keyed = screenedAs(runtime, customer, review.draft);
+  // A required notice has no unsubscribe link: it goes out exactly as it is keyed, and no token is made for it.
+  if (review.draft.requiredNotice) {
+    sizeCheck(keyed, rows);
+    return { mail: { ...mail, snapshot: { ...keyed, headers: [...keyed.headers] } }, rows, unsubscribe: undefined, stored: { kind: 'marketing' as const, deferredCampaign: true, requiredNotice: true as const }, keyed };
+  }
   // A retried row (throttled requeue) reuses the link it was first rendered with, so every attempt sends the same message.
   const reused = mail.snapshot.unsubscribeUrl;
   const unsubscribe = reused
@@ -2356,16 +2390,17 @@ export async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail:
   // Persist only the compact stub plus the unsubscribe URL: the body is reproducible from the frozen review and
   // recipient (verified by contentHash), so storing ~2-3 KB of rendered HTML per recipient bought nothing.
   const stored = { kind:'marketing' as const,deferredCampaign:true,unsubscribeUrl:unsubscribe.url };
-  // `keyed`: the same customer copy with the footer generated for the placeholder link, as campaign screening keys it.
-  return { mail: { ...mail, snapshot }, rows, unsubscribe: { ...unsubscribe.record, page }, stored, keyed: screenedAs(runtime, customer, review.draft) };
+  return { mail: { ...mail, snapshot }, rows, unsubscribe: { ...unsubscribe.record, page }, stored, keyed };
 }
 // Bump when interpolation, preheader or footer output changes, and keep the previous renderer for older reviews.
 export const CAMPAIGN_RENDERER_VERSION = 2;
+/** A campaign email that was rendered and sent: its stub keeps the unsubscribe URL, or marks a required notice. */
+const sentCampaignEmail = (s: EmailSnapshot) => !!s.deferredCampaign && !!(s.unsubscribeUrl || s.requiredNotice);
 // Rebuilds a sent campaign email from its frozen review, recipient values and stored unsubscribe URL, and refuses to
 // show anything that does not match the hash of what was reviewed and sent.
 type SentReview = { draft: CampaignDraft; rendered: { html?: string; text?: string } | null; renderer_version: number; recipient: ReviewedRecipient; content_hash: string | null };
 export async function sentCampaignContent(runtime: Runtime, a: Actor, mail: typeof emails.$inferSelect): Promise<EmailSnapshot> {
-  if (!mail.reviewId || mail.reviewOrdinal === null || !mail.snapshot.unsubscribeUrl) throw new ApiError(409, 'EMAIL_CONTENT_UNAVAILABLE', 'This campaign email has no stored content to rebuild.');
+  if (!mail.reviewId || mail.reviewOrdinal === null || !sentCampaignEmail(mail.snapshot)) throw new ApiError(409, 'EMAIL_CONTENT_UNAVAILABLE', 'This campaign email has no stored content to rebuild.');
   const found = await runtime.db.execute<SentReview>(sql`
     SELECT v.draft, v.rendered, v.renderer_version, r.recipient, r.content_hash
     FROM sending_campaign_reviews v JOIN sending_review_recipients r ON r.review_id = v.id AND r.ordinal = ${mail.reviewOrdinal}
@@ -2376,10 +2411,10 @@ export async function sentCampaignContent(runtime: Runtime, a: Actor, mail: type
 export async function rebuildCampaignEmail(runtime: Runtime, a: Actor, stub: EmailSnapshot, review: SentReview | undefined, rows: (typeof attachments.$inferSelect)[]): Promise<EmailSnapshot> {
   if (!review?.rendered || !review.content_hash) throw new ApiError(410, 'EMAIL_CONTENT_EXPIRED', 'The campaign review this email was rendered from has been retired.');
   if (![1, CAMPAIGN_RENDERER_VERSION].includes(review.renderer_version)) throw new ApiError(409, 'CAMPAIGN_RENDERER_CHANGED', `This email was rendered by campaign renderer v${review.renderer_version}; this release supports v1 and v${CAMPAIGN_RENDERER_VERSION}.`);
-  if (!stub.unsubscribeUrl) throw new ApiError(409, 'EMAIL_CONTENT_UNAVAILABLE', 'This campaign email has no stored content to rebuild.');
+  if (!(review.draft.requiredNotice ? stub.requiredNotice : stub.unsubscribeUrl)) throw new ApiError(409, 'EMAIL_CONTENT_UNAVAILABLE', 'This campaign email has no stored content to rebuild.');
   const snapshot = await campaignMessage(runtime, review.draft, review.recipient, false, rows, review.rendered, true, !review.rendered.html?.includes('{{'), review.renderer_version);
   if (await digest(canonical(snapshot)) !== review.content_hash) throw new ApiError(409, 'CAMPAIGN_CONTENT_UNREPRODUCIBLE', 'The renderer no longer reproduces the message that was sent.');
-  marketingFooter(snapshot, stub.unsubscribeUrl, review.draft);
+  marketingFooter(snapshot, stub.unsubscribeUrl ?? '', review.draft);
   return snapshot;
 }
 // Accepted means provider acceptance evidence; bounce and complaint rates are over accepted mail. Suppressed mail
@@ -2856,6 +2891,9 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     if (campaign.state !== 'sending' || campaign.reviewId !== row.reviewId || campaign.expanded >= campaign.total) return null;
     const authorized = await originAllowed(runtime, db, { ...a, actorKeyId: a.keyId, campaignId: campaign.id, snapshot: { from: draft.from } });
     if (!authorized) { await cancelCampaignWork(db, a, campaign, 'ORIGIN_KEY_REVOKED'); return null; }
+    // A required notice whose workspace no longer has them pauses here (runCampaign), before anyone more is released:
+    // a scheduled one at its time, a paced one at its next window. Turned on again, a resume continues from here.
+    await requiredNoticesAllowed(db, draft, a.workspaceId, 'Paused: required notices were turned off for this workspace, so nobody more is sent this notice. Resume it once they are on again, or cancel it.');
     // The admission decision on this release: a pause or hold, the reviewed binding (fencing the insert against a
     // disable or reclaim since the precheck), and how many recipients the Hosted limit and the balance afford.
     const release = await admission(runtime, a.workspaceId, actorJson(a), { stage: 'release', locks: held, mails: [reviewedMail(draft)] }, sql`jsonb_build_object('simulated',${campaign.simulated}::boolean)`);
@@ -2968,7 +3006,7 @@ const runCampaign: JobHandler = async (runtime, payload, job) => {
     }
   } catch (error) {
     if (error instanceof JobDeferred || error instanceof ModuleLoadError) throw error;
-    if (error instanceof ApiError && ['HOSTED_SENDING_PAUSED', 'MARKETING_HELD', 'POSTAL_ADDRESS_REQUIRED'].includes(error.code)) {
+    if (error instanceof ApiError && ['HOSTED_SENDING_PAUSED', 'MARKETING_HELD', 'POSTAL_ADDRESS_REQUIRED', 'REQUIRED_NOTICES_OFF'].includes(error.code)) {
       await runtime.db.execute(pauseCampaign(ref, { code: error.code, message: error.message }));
       return;
     }

@@ -32,6 +32,8 @@ export type EmailSnapshot = {
   screen?: boolean;
   /** Sent campaign emails keep only their unsubscribe URL; the body is re-rendered from the frozen review on read. */
   unsubscribeUrl?: string;
+  /** A sent required notice's email, which has no unsubscribe URL to keep: its body is re-rendered the same way. */
+  requiredNotice?: true;
   /** Bane-authored notice with a recipient-only capability; reads withhold it. */
   sealed?: boolean;
   /** Sent from a receiving address or inbox: a reply, a new conversation, a forward or a mail-client submission. Reading it needs mailbox access. */
@@ -48,6 +50,8 @@ export type CampaignDraft = {
   postalAddress?: string;
   name: string; from: string; fromName?: string; previewText?: string; replyTo?: string[]; region: string; subject: string; html?: string;
   attachments: string[]; tracking: boolean; unsubscribePageUrl?: string;
+  /** A required notice (src/sending.ts): to everyone in the audience but the suppressed, without an unsubscribe link. */
+  requiredNotice?: boolean;
   audience: { listId?: string; segmentId?: string; excludeListIds?: string[]; excludeSegmentIds?: string[] };
   defaults: Record<string, string | number | boolean | null>;
 };
