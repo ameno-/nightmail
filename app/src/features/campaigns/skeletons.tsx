@@ -1,4 +1,4 @@
-import { ChevronRight, MoreHorizontal } from 'lucide-react'
+import { ChevronRight, Clock, Gauge, Mail, MoreHorizontal, UsersRound } from 'lucide-react'
 import {
   Button, ControlSkeleton, Field, IconButton, LoadingRegion, PageHeader, SearchField, SectionHeader,
   Select, Skeleton, SkeletonText, TableSkeleton, Tabs, type SkeletonColumn,
@@ -74,7 +74,7 @@ export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 
     <LoadingRegion label="Loading campaign editor" className="campaign-compose-workspace">
       <div className="campaign-compose-scroll"><div className="campaign-compose-sheet">
         <div className="campaign-compose-metadata" aria-hidden="true">
-          <div className="campaign-compose-row campaign-compose-sender"><span className="muted">From</span><ControlSkeleton /><Button variant="ghost" size="sm" className="campaign-sender-toggle" disabled>Reply-to<ChevronRight size={14} aria-hidden="true" /></Button></div>
+          <div className="campaign-compose-row campaign-compose-sender"><span className="muted">From</span><ControlSkeleton /><Button variant="ghost" size="sm" className="campaign-sender-toggle" disabled>Reply to<ChevronRight size={14} aria-hidden="true" /></Button></div>
           <div className="campaign-compose-row campaign-compose-subject"><span className="muted">Subject</span><ControlSkeleton /><Button className="campaign-preview-toggle" variant="ghost" size="sm" disabled>Inbox preview</Button></div>
         </div>
         <ComposerSkeleton />
@@ -83,26 +83,9 @@ export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 
   </div>
   return <div className="campaign-review">
     <CampaignBar title={<h1 className="studio-title"><SkeletonText width={220} lineHeight={24} /></h1>} actions={<SkeletonText width={65} lineHeight={20} />} />
-    <LoadingRegion label="Loading campaign review" className="campaign-review__body campaign-review-layout">
-      <section className="campaign-fields campaign-recipients">
-        <SectionHeader title="Recipients" />
-        <div className="campaign-audience-picker">
-          <Field label="List" htmlFor="campaign-list-loading"><Select id="campaign-list-loading" aria-label="Recipient list" value="" onValueChange={() => {}} options={[{ value: '', label: 'Loading lists…' }]} disabled /></Field>
-          <Field label="Segment" htmlFor="campaign-segment-loading"><Select id="campaign-segment-loading" aria-label="Segment" value="" onValueChange={() => {}} options={[{ value: '', label: 'Everyone on the list' }]} disabled /></Field>
-        </div>
-        <CampaignAudienceSkeleton />
-      </section>
-      <section className="campaign-fields campaign-message">
-        <SectionHeader title="Message" actions={<><Button variant="ghost" disabled>Edit message</Button><Button variant="secondary" disabled>Send test</Button></>} />
-        <dl className="ui-facts campaign-message-details"><dt>From</dt><dd><SkeletonText width="70%" /></dd><dt>Subject</dt><dd><SkeletonText width="85%" /></dd><dt>Preview</dt><dd><SkeletonText width="65%" /></dd></dl>
-        <Skeleton height={400} />
-      </section>
-      <section className="campaign-delivery">
-        <SectionHeader title="Delivery" />
-        <Tabs value="now" onValueChange={() => {}} items={[{ value: 'now', label: 'Send now' }, { value: 'schedule', label: 'Schedule' }]} />
-        <div className="campaign-pacing-options"><div className="campaign-pacing-head"><Button variant="ghost" size="sm" className="campaign-pacing-toggle" disabled><ChevronRight size={14} aria-hidden="true" />Pace sending</Button></div></div>
-        <div className="campaign-delivery-actions"><Button variant="secondary" disabled>Back to editing</Button><Button variant="primary" disabled>Send campaign now</Button></div>
-      </section>
+    <LoadingRegion label="Loading campaign review" className="review-flow">
+      {([[UsersRound, 160], [Mail, 280], [Gauge, 200], [Clock, 120]] as const).map(([Icon, width]) => <section className="review-row" key={width}><div className="review-row__head"><span className="review-row__icon" aria-hidden="true"><Icon size={16} /></span><span className="review-row__summary"><SkeletonText width={width} /></span></div></section>)}
+      <div className="review-send"><Button variant="primary" className="review-send__button" disabled>Send now</Button></div>
     </LoadingRegion>
   </div>
 }

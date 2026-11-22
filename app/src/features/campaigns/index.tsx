@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { ChevronRight, MoreHorizontal, Send } from 'lucide-react'
+import { ChevronDown, ChevronRight, Clock, Gauge, Mail, MoreHorizontal, UsersRound } from 'lucide-react'
 import { Link, Navigate, useLocation, useNavigate, useParams } from 'react-router'
 import { useApiDef, useApiMutation, useApiQuery, useRegion, useApi, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
@@ -15,7 +15,7 @@ import {
   StatusBadge, Tabs, useToast,
 } from '../../components/ui'
 import { EmailPreview } from '../../components/EmailPreview'
-import { EmailInsight, LOW_SENDABILITY, useSendability } from '../../components/EmailInsight'
+import { LOW_SENDABILITY, topFixes, useSendability } from '../../components/EmailInsight'
 import { date, number } from '../../lib/format'
 import { CampaignAudienceSkeleton, CampaignRouteSkeleton } from './skeletons'
 import { CampaignPacing, CampaignProgress, campaignDisplayStatus, campaignPollInterval, maxPerDay, maxRatePercent, minPerDay, minRatePercent, perDayError, ratePercentError } from './CampaignProgress'
@@ -118,6 +118,8 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
   // Body placeholders are known from the last saved body; subject and inbox preview are read as they are typed.
   const [bodyKeys, setBodyKeys] = useState(() => placeholders(initial?.html))
   const [replyToText, setReplyToText] = useState(() => (initial?.replyTo ?? []).join(', '))
+  // Checked once you leave the field, not on every keystroke of an address still being typed.
+  const [replyToLeft, setReplyToLeft] = useState(true)
   const formRef = useRef(form)
   function updateForm(next: CampaignInput) { formRef.current = next; setForm(next) }
   const editVersion = useRef(0)
@@ -216,10 +218,11 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
   const unavailable = Boolean(sync.error && 'status' in sync.error && [401, 403, 404].includes(Number(sync.error.status)))
   const readOnly = unavailable || Boolean(current && (current.archivedAt || !campaignEditable(current)))
   const controlsDisabled = preparing || attachmentsBusy || composerBusy || loadingLatest || readOnly
-  const replyToValidation = replyToError(replyToText)
+  const replyToProblem = replyToError(replyToText)
+  const replyToValidation = replyToLeft ? replyToProblem : ''
   const unsubscribePageValidation = unsubscribePageError(form.unsubscribePageUrl)
   const fallbackKeys = [...new Set([...placeholders(form.subject, form.previewText), ...bodyKeys])].filter(key => key !== 'email')
-  const saveDisabled = options.isPending || options.isError || !composerReady || readOnly || Boolean(remote) || Boolean(replyToValidation) || Boolean(unsubscribePageValidation)
+  const saveDisabled = options.isPending || options.isError || !composerReady || readOnly || Boolean(remote) || Boolean(replyToProblem) || Boolean(unsubscribePageValidation)
   useEffect(() => {
     if (!dirty || pending || saveDisabled || autosavePaused || !form.name.trim()) return
     const timer = setTimeout(() => { void save('auto') }, 800)
@@ -352,10 +355,10 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
       <div className="campaign-compose-scroll">
         <div className="campaign-compose-sheet">
           <div className="campaign-compose-metadata">
-            <div className="campaign-compose-row campaign-compose-sender"><label htmlFor="campaign-from-email">From</label><CampaignSenderInput key={generation} name={form.fromName} email={form.fromEmail} domains={choices.domains.map(domain => domain.name)} disabled={controlsDisabled || options.isPending} onChange={({name, email}) => {const domain = email.split('@')[1]?.toLowerCase(); const supports = (parent: string) => domain === parent || domain?.endsWith(`.${parent}`); const match = choices.domains.find(item => supports(item.name) && item.regionId === formRef.current.regionId) ?? choices.domains.find(item => supports(item.name)); if (name !== formRef.current.fromName || email !== formRef.current.fromEmail || (match && match.regionId !== formRef.current.regionId)) updateForm({...formRef.current, fromName: name, fromEmail: email, ...(match ? {regionId: match.regionId} : {})}); markDirty()}} /><Button variant="ghost" size="sm" className="campaign-sender-toggle" aria-expanded={senderDetailsOpen} aria-controls="campaign-sender-details" onClick={toggleSender}>Reply-to<ChevronRight size={14} aria-hidden="true" /></Button></div>
+            <div className="campaign-compose-row campaign-compose-sender"><label htmlFor="campaign-from-email">From</label><CampaignSenderInput key={generation} name={form.fromName} email={form.fromEmail} domains={choices.domains.map(domain => domain.name)} disabled={controlsDisabled || options.isPending} onChange={({name, email}) => {const domain = email.split('@')[1]?.toLowerCase(); const supports = (parent: string) => domain === parent || domain?.endsWith(`.${parent}`); const match = choices.domains.find(item => supports(item.name) && item.regionId === formRef.current.regionId) ?? choices.domains.find(item => supports(item.name)); if (name !== formRef.current.fromName || email !== formRef.current.fromEmail || (match && match.regionId !== formRef.current.regionId)) updateForm({...formRef.current, fromName: name, fromEmail: email, ...(match ? {regionId: match.regionId} : {})}); markDirty()}} /><Button variant="ghost" size="sm" className="campaign-sender-toggle" aria-expanded={senderDetailsOpen} aria-controls="campaign-sender-details" onClick={toggleSender}>Reply to<ChevronRight size={14} aria-hidden="true" /></Button></div>
             <div id="campaign-sender-details" className="campaign-compose-preview" data-open={senderDetailsOpen || undefined} aria-hidden={!senderDetailsOpen} inert={!senderDetailsOpen}>
               <div>
-                <div className="campaign-compose-row"><label htmlFor="campaign-reply-to">Reply to</label><Input id="campaign-reply-to" type="text" inputMode="email" autoCapitalize="none" spellCheck={false} placeholder="reply@example.com" value={replyToText} aria-invalid={Boolean(replyToValidation) || undefined} aria-describedby={replyToValidation ? 'campaign-reply-to-error' : undefined} onChange={event => { const value = event.target.value; setReplyToText(value); updateForm({...formRef.current, replyTo: replyToAddresses(value)}); markDirty() }} disabled={controlsDisabled} /></div>
+                <div className="campaign-compose-row"><label htmlFor="campaign-reply-to">Reply to</label><Input id="campaign-reply-to" type="text" inputMode="email" autoCapitalize="none" spellCheck={false} placeholder="reply@example.com" value={replyToText} aria-invalid={Boolean(replyToValidation) || undefined} aria-describedby={replyToValidation ? 'campaign-reply-to-error' : undefined} onChange={event => { const value = event.target.value; setReplyToText(value); setReplyToLeft(false); updateForm({...formRef.current, replyTo: replyToAddresses(value)}); markDirty() }} onBlur={() => setReplyToLeft(true)} disabled={controlsDisabled} /></div>
                 {replyToValidation && <div id="campaign-reply-to-error" className="campaign-compose-feedback ui-field__error" role="alert">{replyToValidation}</div>}
                 <div className="campaign-compose-row"><label htmlFor="campaign-unsubscribe-page">Unsubscribe</label><Input id="campaign-unsubscribe-page" type="url" inputMode="url" autoCapitalize="none" spellCheck={false} maxLength={1000} placeholder="https://example.com/unsubscribe" value={form.unsubscribePageUrl ?? ''} aria-invalid={Boolean(unsubscribePageValidation) || undefined} aria-describedby={unsubscribePageValidation ? 'campaign-unsubscribe-page-error' : undefined} onChange={event => change('unsubscribePageUrl', event.target.value)} disabled={controlsDisabled} /></div>
                 {unsubscribePageValidation && <div id="campaign-unsubscribe-page-error" className="campaign-compose-feedback ui-field__error" role="alert">{unsubscribePageValidation}</div>}
@@ -517,6 +520,19 @@ function CancelCampaignButton({ campaign }: { campaign: Campaign }) {
   </>
 }
 
+type ReviewRowId = 'to' | 'message' | 'score' | 'when'
+// A Review row: one line that says what is set (who, what, when), opening in place to change it.
+function ReviewRow({ id, label, icon, summary, open, onToggle, disabled = false, children }: { id: ReviewRowId; label: string; icon: ReactNode; summary: ReactNode; open: boolean; onToggle: () => void; disabled?: boolean; children: ReactNode }) {
+  return <section className="review-row" data-open={open || undefined} aria-label={label}>
+    <button type="button" className="review-row__head" aria-expanded={open} aria-controls={`review-${id}`} disabled={disabled} onClick={onToggle}>
+      <span className="review-row__icon" aria-hidden="true">{icon}</span>
+      <span className="review-row__summary">{summary}</span>
+      {!disabled && <ChevronDown size={16} className="review-row__chevron" aria-hidden="true" />}
+    </button>
+    <div id={`review-${id}`} className="review-row__body" inert={!open} aria-hidden={!open}><div><div className="review-row__inner">{children}</div></div></div>
+  </section>
+}
+
 // The Review step's recipient list and segment: choosing one saves the draft, and the counts under it follow.
 function AudiencePicker({ campaign, disabled }: { campaign: Campaign; disabled?: boolean }) {
   const api = useApi()
@@ -587,6 +603,10 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
   const [testOpen, setTestOpen] = useState(false)
   const [pace, setPace] = useState({ limit: false, perDay: '50000', autoPause: true, share: '100' })
   const [paceToggled, setPaceToggled] = useState(false)
+  // One row of the Review step open at a time.
+  const [openRow, setOpenRow] = useState<ReviewRowId | null>(null)
+  const [seen, setSeen] = useState(() => new Set<ReviewRowId>())
+  useEffect(() => { if (openRow && !seen.has(openRow)) setSeen(new Set([...seen, openRow])) }, [openRow, seen])
   const guard = useRef(false)
   const { canAdminister, multiTenant } = useWorkspaceAccess()
   const origin = multiTenant ? '' : ` from ${campaign.regionId}`
@@ -599,6 +619,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
   // A live count of the saved audience, read as the page opens; the send freezes its own snapshot.
   const audience = useApiQuery(['campaign-audience', campaign.id, campaign.revision ?? 0], (api, signal) => api.campaigns.audience({ id: campaign.id, listId: campaign.listId, segmentId: campaign.segmentId }, signal), { enabled: draft && Boolean(campaign.listId) })
   const listName = useApiQuery(['lists', campaign.listId], (api, signal) => api.lists.get(campaign.listId, signal), { enabled: Boolean(campaign.listId) }).data?.name
+  const segmentName = useApiQuery(['segments', campaign.segmentId ?? ''], (api, signal) => api.segments.get(campaign.segmentId!, signal), { enabled: Boolean(campaign.segmentId) }).data?.name
   const perDay = Number(pace.perDay.trim().replaceAll(',', ''))
   const paceError = pace.limit ? perDayError(perDay) : ''
   const paceDays = pace.limit && !paceError && audience.data?.eligible ? Math.ceil(audience.data.eligible / perDay) : null
@@ -668,31 +689,79 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
   const writeLink = <Link to={campaignRoute(campaign, 'edit')}>Write</Link>
   const notes: ['neutral' | 'warning' | 'danger', ReactNode][] = !draft ? [] : [
     ...(missing.length ? [['neutral', <>Add {missing.join(', ').replace(/, ([^,]*)$/, ' and $1')} in {writeLink}.</>] as ['neutral', ReactNode]] : []),
-    ...(!campaign.listId ? [['neutral', 'Choose a list under Recipients.'] as ['neutral', ReactNode]] : !readinessError && audience.data && !audience.data.eligible ? [['warning', nobodyEligible] as ['warning', ReactNode]] : []),
     ...(missingFallbacks.length ? [['warning', <>{missingFallbacks.map(key => `{{${key}}}`).join(', ')} {missingFallbacks.length === 1 ? 'needs' : 'need'} a fallback in {writeLink}, or contacts without a value stop the send.</>] as ['warning', ReactNode]] : []),
-    ...(lowScore ? [['warning', `Sendability is ${sendability.data!.score} of 100. The findings are beside the message.`] as ['warning', ReactNode]] : []),
     ...(!canAdminister ? [['neutral', 'Only owners and admins can send or schedule campaigns.'] as ['neutral', ReactNode]] : []),
     ...(error ? [['danger', error] as ['danger', ReactNode]] : []),
   ]
+  const bar = <CampaignBar back={campaign.archivedAt ? '/campaigns?archived=true' : '/campaigns'} title={<h1 className="studio-title">{campaign.name}</h1>} steps={draft && <CampaignSteps step="review" writeTo={campaignRoute(campaign, 'edit')} />} actions={<>{stale && <span className="campaign-note" data-tone="warning" title="Showing the last available counts.">Couldn’t refresh</span>}{!campaignEditable(campaign) && (sentSomething ? <Link className="ui-button ui-button--secondary ui-button--md" to={`/logs?campaign=${encodeURIComponent(campaign.id)}`}>View logs</Link> : <Button disabled title="Each email appears in Logs once sending starts">View logs</Button>)}<StatusBadge status={campaignDisplayStatus(campaign)} />{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</>} />
+  const dialogs = <>
+    <ConfirmDialog open={confirmation !== null} onOpenChange={open => { if (!open && !sendMutation.isPending) setConfirmation(null) }} title={confirmation?.mode === 'schedule' ? 'Schedule this campaign?' : 'Send this campaign now?'} description={confirmation?.mode === 'schedule' ? `Send “${campaign.name}”${origin} to ${recipients}${audienceName} on ${utcLabel(confirmation.scheduledAt!)} (${localLabel(confirmation.scheduledAt!)}).${paceSummary(confirmation)}${cost}${scoreNote} You can change this until sending starts.` : `Send “${campaign.name}”${origin} to ${recipients}${audienceName} now.${paceSummary(confirmation)}${cost} Consent is checked again as each email sends.${scoreNote} You can’t undo this.`} confirmLabel={confirmation?.mode === 'schedule' ? 'Schedule' : 'Send now'} onConfirm={confirmSend} pending={sendMutation.isPending} />
+    {draft && testOpen && <TestEmailDialog campaign={campaign} open={testOpen} onOpenChange={setTestOpen} />}
+    {addressFor && <PostalAddressDialog open onOpenChange={open => { if (!open) setAddressFor(null) }} initial={null} required title="Add your postal address" submitLabel="Continue"
+      onSaved={() => { if (addressFor.confirmed) void send(addressFor.input); else setConfirmation(addressFor.input) }} />}
+  </>
+  if (draft) {
+    const toggle = (row: ReviewRowId) => setOpenRow(openRow === row ? null : row)
+    const eligible = audience.data?.eligible ?? 0
+    const segmentLabel = segmentName ? ` · only ${segmentName}` : ''
+    const toSummary = !campaign.listId ? <span className="review-cta">Choose who gets it</span>
+      : !audience.data ? <><strong>{listName ?? 'Your list'}</strong><span className="muted">{audience.isError ? 'Couldn’t count' : 'Counting…'}</span></>
+      : eligible ? <><strong>{number(eligible)} {eligible === 1 ? 'contact' : 'contacts'}</strong><span className="muted">in {listName}{segmentLabel}</span></>
+      : <><strong>{listName}{segmentLabel}</strong><span className="review-warn">Nobody can receive it yet</span></>
+    const fixes = sendability.data ? topFixes(sendability.data) : []
+    const sendabilitySummary = !sendability.data ? <span className="muted">{missing.length ? 'Checked once the message is complete' : !campaign.listId ? 'Checked once you choose a list' : 'Checking…'}</span>
+      : <><strong>Sendability {sendability.data.score}</strong><span className={lowScore ? 'review-warn' : 'muted'}>{fixes.length ? `${fixes.length} ${fixes.length === 1 ? 'suggestion' : 'suggestions'}` : 'Looks good'}</span></>
+    const scheduledAt = mode === 'schedule' && scheduled && !scheduleError(scheduled) ? parseUtc(scheduled)!.toISOString() : null
+    const paced = pace.limit || sharePercent < 100 || !pace.autoPause
+    const whenSummary = mode === 'now' ? <><strong>Right now</strong>{paced && <span className="muted">{paceLine}</span>}</> : scheduledAt ? <><strong>{utcLabel(scheduledAt)}</strong><span className="muted">{localLabel(scheduledAt)}</span></> : <span className="muted">Pick a time</span>
+    return <div className="campaign-review">
+      {bar}
+      <div className="review-flow">
+        <ReviewRow id="to" label="Recipients" icon={<UsersRound size={16} />} open={openRow === 'to'} onToggle={() => toggle('to')} summary={toSummary}>
+          <AudiencePicker campaign={campaign} disabled={sendMutation.isPending} />
+          {audience.data && campaign.listId && <p className="review-detail">{number(audience.data.matched)} on the list{audience.data.suppressed ? ` · ${number(audience.data.suppressed)} suppressed` : ''}{audience.data.unsubscribed ? <> · {number(audience.data.unsubscribed)} not subscribed · <Link to={`/audience/lists/${encodeURIComponent(campaign.listId)}?status=unknown`}>Fix</Link></> : null}</p>}
+        </ReviewRow>
+        <ReviewRow id="message" label="Message" icon={<Mail size={16} />} open={openRow === 'message'} onToggle={() => toggle('message')} summary={campaign.subject ? <strong>{campaign.subject}</strong> : <span className="muted">No subject yet</span>}>
+          <p className="review-detail">From {campaign.fromEmail ? <NamedAddress name={campaign.fromName} address={campaign.fromEmail} /> : 'no sender yet'}</p>
+          <div className="review-actions"><Link className="ui-button ui-button--secondary ui-button--sm" to={`${campaignRoute(campaign, 'edit')}#message`}>Edit</Link><Button size="sm" disabled={!campaignMessageReady(campaign)} onClick={() => setTestOpen(true)}>Send test</Button></div>
+          {seen.has('message') && <CampaignRenderedPreview campaign={campaign} transform={previewHtml} />}
+        </ReviewRow>
+        <ReviewRow id="score" label="Sendability" icon={<Gauge size={16} />} open={openRow === 'score'} onToggle={() => toggle('score')} disabled={!fixes.length} summary={sendabilitySummary}>
+          <ol className="review-fixes">{fixes.map(finding => <li key={finding.ruleId}>{finding.fix}</li>)}</ol>
+        </ReviewRow>
+        <ReviewRow id="when" label="When" icon={<Clock size={16} />} open={openRow === 'when'} onToggle={() => toggle('when')} summary={whenSummary}>
+          <Tabs value={mode} onValueChange={value => { if (!sendMutation.isPending) { setMode(value as 'now' | 'schedule'); setError(''); setScheduleProblem('') } }} items={[{ value: 'now', label: 'Send now' }, { value: 'schedule', label: 'Schedule' }]} />
+          {mode === 'schedule' && <ScheduleField id="campaign-schedule" value={scheduled} onChange={value => { setScheduled(value); setScheduleProblem(''); setError('') }} error={scheduleProblem} disabled={sendMutation.isPending} />}
+          <div className="campaign-pacing-options" role="group" aria-labelledby="campaign-pacing-label">
+            <div className="campaign-pacing-head"><Button id="campaign-pacing-label" variant="ghost" size="sm" className="campaign-pacing-toggle" aria-expanded={paceOpen} aria-controls="campaign-pacing-fields" onClick={() => setPaceToggled(!paceOpen)}><ChevronRight size={14} aria-hidden="true" />Pace sending</Button></div>
+            {paceOpen && <div id="campaign-pacing-fields" className="campaign-pacing-fields">
+              <Checkbox label="Limit recipients per day" checked={pace.limit} disabled={sendMutation.isPending} onCheckedChange={limit => { setPace({ ...pace, limit }); setError('') }} />
+              {pace.limit && <Field label="Recipients per day" htmlFor="campaign-per-day" error={paceError}><Input id="campaign-per-day" type="number" inputMode="numeric" min={minPerDay} max={maxPerDay} step={1} value={pace.perDay} onChange={event => { setPace({ ...pace, perDay: event.target.value }); setError('') }} disabled={sendMutation.isPending} /></Field>}
+              <Field label="Sending speed limit (%)" htmlFor="campaign-rate-share" error={shareError}><Input id="campaign-rate-share" type="number" inputMode="numeric" min={minRatePercent} max={maxRatePercent} step={1} value={pace.share} onChange={event => { setPace({ ...pace, share: event.target.value }); setError('') }} disabled={sendMutation.isPending} /></Field>
+              {/* Hosted always pauses on high bounces or complaints. */}
+              {!multiTenant && <Checkbox label="Pause automatically on high bounces or complaints" checked={pace.autoPause} disabled={sendMutation.isPending} onCheckedChange={autoPause => setPace({ ...pace, autoPause })} />}
+            </div>}
+          </div>
+        </ReviewRow>
+        <div className="review-send">
+          <Button variant="primary" className="review-send__button" loading={sendMutation.isPending} disabled={!canAdminister || Boolean(readinessError) || Boolean(audience.data && !audience.data.eligible)} onClick={requestConfirmation} data-analytics={mode === 'schedule' ? 'campaigns/schedule' : 'campaigns/send'}>{mode === 'schedule' ? 'Schedule' : eligible ? `Send to ${number(eligible)} ${eligible === 1 ? 'contact' : 'contacts'}` : 'Send now'}</Button>
+          {/* What stops the send and isn't shown in a row above: one line each, under the button. */}
+          {notes.length > 0 && <ul className="campaign-notes">{notes.map(([tone, text], index) => <li key={index} className="campaign-note" data-tone={tone} role={tone === 'danger' ? 'alert' : undefined}><span>{text}</span></li>)}</ul>}
+        </div>
+      </div>
+      {dialogs}
+    </div>
+  }
   return <div className="campaign-review">
-    <CampaignBar back={campaign.archivedAt ? '/campaigns?archived=true' : '/campaigns'} title={<h1 className="studio-title">{campaign.name}</h1>} steps={draft && <CampaignSteps step="review" writeTo={campaignRoute(campaign, 'edit')} />} actions={<>{stale && <span className="campaign-note" data-tone="warning" title="Showing the last available counts.">Couldn’t refresh</span>}{!campaignEditable(campaign) && (sentSomething ? <Link className="ui-button ui-button--secondary ui-button--md" to={`/logs?campaign=${encodeURIComponent(campaign.id)}`}>View logs</Link> : <Button disabled title="Each email appears in Logs once sending starts">View logs</Button>)}<StatusBadge status={campaignDisplayStatus(campaign)} />{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</>} />
+    {bar}
     <div className="campaign-review__body stack">
     {scheduledView && <ScheduledBanner campaign={campaign} />}
     <div className="campaign-review-layout">
       <section className="campaign-fields campaign-recipients">
         {campaign.delivery?.error && <p className="campaign-note" data-tone="danger" role="alert">{campaign.delivery.error.message}</p>}
-        <SectionHeader title={campaignEditable(campaign) || scheduledView ? 'Recipients' : 'Delivery'} actions={draft ? undefined : <div className="cluster">{cancellable && <CancelCampaignButton campaign={campaign} />}<Button variant="secondary" size="sm" onClick={refresh} disabled={refreshing} title="This page also updates by itself">Refresh</Button></div>} />
+        <SectionHeader title={scheduledView ? 'Recipients' : 'Delivery'} actions={<div className="cluster">{cancellable && <CancelCampaignButton campaign={campaign} />}<Button variant="secondary" size="sm" onClick={refresh} disabled={refreshing} title="This page also updates by itself">Refresh</Button></div>} />
         {/* Eligible recipients is matched contacts less the suppressed and not subscribed lines under it. */}
-        {draft && <AudiencePicker campaign={campaign} disabled={sendMutation.isPending} />}
-        {draft ? !campaign.listId ? null : audience.isPending ? <CampaignAudienceSkeleton /> : audience.isError ? <ErrorState error={audience.error} onRetry={() => void audience.refetch()} /> : <>
-          <div className="campaign-audience-summary">
-            <div className="campaign-summary-line"><strong>Eligible recipients</strong><strong>{number(audience.data.eligible)}</strong></div>
-            <div className="campaign-summary-line"><span>Matched contacts</span><span>{number(audience.data.matched)}</span></div>
-            <div className="campaign-summary-line muted"><span>Suppressed</span><span>{audience.data.suppressed ? `−${number(audience.data.suppressed)}` : '0'}</span></div>
-            <div className="campaign-summary-line muted"><span>Not subscribed{audience.data.unsubscribed > 0 && <> · <Link to={`/audience/lists/${encodeURIComponent(campaign.listId)}?status=unknown`}>Fix</Link></>}</span><span>{audience.data.unsubscribed ? `−${number(audience.data.unsubscribed)}` : '0'}</span></div>
-          </div>
-          <Button disabled={sendMutation.isPending || audience.isFetching} onClick={() => void audience.refetch()}>Refresh count</Button>
-        </> : <>
+        {<>
           {scheduledView ? <div className="campaign-audience-summary">
             <div className="campaign-summary-line"><span>Recipients, frozen when scheduled</span><span>{number(campaign.delivery?.total ?? campaign.recipients)}</span></div>
             <AudienceSource listId={campaign.listId} segmentId={campaign.segmentId} />
@@ -705,36 +774,12 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
         </>}
       </section>
       <section className="campaign-fields campaign-message">
-        <SectionHeader title="Message" actions={draft ? <><Button variant="ghost" onClick={() => navigate(`${campaignRoute(campaign, 'edit')}#message`)}>Edit message</Button><Button variant="secondary" disabled={!campaignMessageReady(campaign)} onClick={() => setTestOpen(true)}>Send test</Button></> : undefined} />
+        <SectionHeader title="Message" />
         <dl className="ui-facts campaign-message-details"><dt>From</dt><dd><NamedAddress name={campaign.fromName} address={campaign.fromEmail} /></dd>{campaign.replyTo.length > 0 && <><dt>Reply to</dt><dd><AddressList values={campaign.replyTo} /></dd></>}<dt>Subject</dt><dd>{campaign.subject}</dd>{campaign.previewText && <><dt>Inbox preview</dt><dd>{campaign.previewText}</dd></>}</dl>
-        {draft && !readinessError ? <div className="email-insight campaign-insight"><EmailInsight source={{ kind: 'campaign', id: campaign.id, revision: campaign.revision ?? 0 }} warnBelow={LOW_SENDABILITY} /></div> : <CampaignRenderedPreview campaign={campaign} transform={previewHtml} />}
+        <CampaignRenderedPreview campaign={campaign} transform={previewHtml} />
       </section>
-      {draft && <section className="campaign-delivery">
-        <SectionHeader title="Delivery" />
-        <Tabs value={mode} onValueChange={value => { if (!sendMutation.isPending) { setMode(value as 'now' | 'schedule'); setError(''); setScheduleProblem('') } }} items={[{ value: 'now', label: 'Send now' }, { value: 'schedule', label: 'Schedule' }]} />
-        {mode === 'schedule' && <ScheduleField id="campaign-schedule" value={scheduled} onChange={value => { setScheduled(value); setScheduleProblem(''); setError('') }} error={scheduleProblem} disabled={sendMutation.isPending} />}
-        <div className="campaign-pacing-options" role="group" aria-labelledby="campaign-pacing-label">
-          <div className="campaign-pacing-head">
-            <Button id="campaign-pacing-label" variant="ghost" size="sm" className="campaign-pacing-toggle" aria-expanded={paceOpen} aria-controls="campaign-pacing-fields" onClick={() => setPaceToggled(!paceOpen)}><ChevronRight size={14} aria-hidden="true" />Pace sending</Button>
-            {!paceOpen && <span className="muted campaign-pacing-summary">{paceLine}</span>}
-          </div>
-          {paceOpen && <div id="campaign-pacing-fields" className="campaign-pacing-fields">
-            <Checkbox label="Limit recipients per day" checked={pace.limit} disabled={sendMutation.isPending} onCheckedChange={limit => { setPace({ ...pace, limit }); setError('') }} />
-            {pace.limit && <Field label="Recipients per day" htmlFor="campaign-per-day" error={paceError}><Input id="campaign-per-day" type="number" inputMode="numeric" min={minPerDay} max={maxPerDay} step={1} value={pace.perDay} onChange={event => { setPace({ ...pace, perDay: event.target.value }); setError('') }} disabled={sendMutation.isPending} /></Field>}
-            <Field label="Sending speed limit (%)" htmlFor="campaign-rate-share" error={shareError}><Input id="campaign-rate-share" type="number" inputMode="numeric" min={minRatePercent} max={maxRatePercent} step={1} value={pace.share} onChange={event => { setPace({ ...pace, share: event.target.value }); setError('') }} disabled={sendMutation.isPending} /></Field>
-            {/* Hosted always pauses on high bounces or complaints. */}
-            {!multiTenant && <Checkbox label="Pause automatically on high bounces or complaints" checked={pace.autoPause} disabled={sendMutation.isPending} onCheckedChange={autoPause => setPace({ ...pace, autoPause })} />}
-          </div>}
-        </div>
-        <div className="campaign-delivery-actions"><Button variant="secondary" disabled={sendMutation.isPending} onClick={() => navigate(campaignRoute(campaign, 'edit'))}>Back to editing</Button><Button variant="primary" loading={sendMutation.isPending} disabled={!canAdminister || Boolean(readinessError) || Boolean(audience.data && !audience.data.eligible)} onClick={requestConfirmation} data-analytics={mode === 'schedule' ? 'campaigns/schedule' : 'campaigns/send'}>{mode === 'schedule' ? 'Schedule campaign' : 'Send campaign now'}</Button></div>
-        {/* What stops or risks the send, under the button, each where it's fixed: no banners above the page. */}
-        {notes.length > 0 && <ul className="campaign-notes">{notes.map(([tone, text], index) => <li key={index} className="campaign-note" data-tone={tone} role={tone === 'danger' ? 'alert' : undefined}><span>{text}</span></li>)}</ul>}
-      </section>}
     </div>
     </div>
-    <ConfirmDialog open={confirmation !== null} onOpenChange={open => { if (!open && !sendMutation.isPending) setConfirmation(null) }} title={confirmation?.mode === 'schedule' ? 'Schedule this campaign?' : 'Send this campaign now?'} description={confirmation?.mode === 'schedule' ? `Send “${campaign.name}”${origin} to ${recipients}${audienceName} on ${utcLabel(confirmation.scheduledAt!)} (${localLabel(confirmation.scheduledAt!)}).${paceSummary(confirmation)}${cost}${scoreNote} You can change this until sending starts.` : `Send “${campaign.name}”${origin} to ${recipients}${audienceName} now.${paceSummary(confirmation)}${cost} Consent is checked again as each email sends.${scoreNote} You can’t undo this.`} confirmLabel={confirmation?.mode === 'schedule' ? 'Schedule' : 'Send now'} onConfirm={confirmSend} pending={sendMutation.isPending} />
-    {draft && testOpen && <TestEmailDialog campaign={campaign} open={testOpen} onOpenChange={setTestOpen} />}
-    {addressFor && <PostalAddressDialog open onOpenChange={open => { if (!open) setAddressFor(null) }} initial={null} required title="Add your postal address" submitLabel="Continue"
-      onSaved={() => { if (addressFor.confirmed) void send(addressFor.input); else setConfirmation(addressFor.input) }} />}
+    {dialogs}
   </div>
 }
