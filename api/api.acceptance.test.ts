@@ -18253,12 +18253,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         return Response.json({ answers: { spam: { noul: 0.01 } } });
       });
       const logs: Json[] = []; for (const level of ['info', 'warn'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch {} });
-      // A message long enough for two classifier requests, one after the other.
-      const send = async () => ok(await local('POST', '/v1/emails/send', { from: 'a@bench.invalid', to: 'r@example.invalid', subject: 'Your sign-in code', text: 'Your sign-in code. '.repeat(500) }, 'live', { authorization: `Bearer ${key.secret}` }), 202).id as string;
+      // A message long enough for two classifier requests, one after the other; distinct, so no verdict is reused.
+      const send = async (code: string) => ok(await local('POST', '/v1/emails/send', { from: 'a@bench.invalid', to: 'r@example.invalid', subject: `Your sign-in code is ${code}`, text: `Your sign-in code is ${code}. `.repeat(400) }, 'live', { authorization: `Bearer ${key.secret}` }), 202).id as string;
       const row = async (id: string) => (await db.query('SELECT status,error_code,lease_until,scheduled_at FROM sending_emails WHERE id=$1', [id])).rows[0];
       // 1. A request lands while the run's first classifier request is in flight: the second is not made. The email goes back
       // to the queue as it was (no deferral, error code or breaker), the run ends, and the follow-up alarm screens it whole.
-      const first = await send();
+      const first = await send('111111');
       await deliver();
       during = async at => { if (at === 'classifier') { during = undefined; assert.equal((await deliver()).running, true); } };
       await fire();
@@ -18272,7 +18272,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(sent.at(-1), first);
       // 2. A request that lands as the alarm begins, before the run is marked running: the run makes no classifier call and
       // leases nothing; the follow-up alarm sends the email.
-      const second = await send();
+      const second = await send('222222');
       await deliver();
       during = async at => { if (at === 'get:displacedAlarm') { during = undefined; await deliver(); } };
       await fire();
