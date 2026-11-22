@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Check, ChevronRight, MoreHorizontal } from 'lucide-react'
-import { Link, Navigate, useLocation, useNavigate, useParams } from 'react-router'
+import { Link, Navigate, useLocation, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useApiDef, useApiMutation, useApiQuery, useRegion, useApi, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { priceUc, total, usd } from '../../data/billing'
 import { useRefreshListsOnChange } from '../../data/invalidation'
 import { useRegionCatalog } from '../../data/regions'
-import { ApiError, campaignEditable, errorText, campaignResumable, type Campaign, type CampaignInput, type SendCampaignInput } from '../../data/types'
+import { ApiError, campaignEditable, errorText, campaignResumable, type Campaign, type CampaignInput, type Newsletter, type SendCampaignInput } from '../../data/types'
 import { PostalAddressDialog } from '../../components/PostalAddress'
+import { newsletterPath, useNewsletterOf, useShowNewsletter } from '../newsletters/shared'
 import {
   Button, Checkbox, ConfirmDialog, Dialog, DropdownMenu, EmptyState, ErrorState,
   Field, IconButton, Input, PageHeader, SectionHeader, Select, SkeletonText,
@@ -90,6 +91,9 @@ export function CampaignEditorPage() {
 
 function CampaignEditorLoader({ id, fallbackRegion, preserveEditor }: { id?: string; fallbackRegion: string; preserveEditor: (campaign: Campaign) => void }) {
   const query = useApiQuery<Campaign | null>(['campaign', id ?? 'new'], (api, signal) => id ? api.campaigns.get(id, signal) : Promise.resolve(null))
+  // "New issue" on a newsletter's page (?newsletter=): the draft starts with that newsletter's sender and readers.
+  const [search] = useSearchParams(), issueOf = id ? '' : search.get('newsletter') ?? ''
+  const newsletter = useApiDef(queries.newsletter(issueOf), { enabled: Boolean(issueOf) })
   const opened = useRef<Campaign | null | undefined>(undefined)
   useEffect(() => { void composerChunk.preload().catch(() => {}) }, [])
   useEffect(() => {
@@ -97,7 +101,8 @@ function CampaignEditorLoader({ id, fallbackRegion, preserveEditor }: { id?: str
   }, [query.data])
   if (opened.current === undefined && query.data !== undefined && (query.data === null || (!query.data.archivedAt && campaignEditable(query.data)))) opened.current = query.data
   // Once opened, background refetches must never unmount an unsaved working copy.
-  if (opened.current !== undefined) return <CampaignEditor initial={opened.current} fallbackRegion={fallbackRegion} preserveEditor={preserveEditor} />
+  if (issueOf && opened.current === null && !newsletter.data) return newsletter.isError ? <ErrorState error={newsletter.error} onRetry={() => newsletter.refetch()} /> : <CampaignRouteSkeleton kind="editor" isNew />
+  if (opened.current !== undefined) return <CampaignEditor initial={opened.current} newsletter={newsletter.data} fallbackRegion={fallbackRegion} preserveEditor={preserveEditor} />
   if (query.isPending) return <CampaignRouteSkeleton kind="editor" isNew={!id} />
   if (query.isError) return <ErrorState error={query.error} onRetry={() => query.refetch()} />
   // Archived and sent campaigns can't be edited: their review page is where to read, restore or follow them.
@@ -105,7 +110,7 @@ function CampaignEditorLoader({ id, fallbackRegion, preserveEditor }: { id?: str
   return null
 }
 
-function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: Campaign | null; fallbackRegion: string; preserveEditor: (campaign: Campaign) => void }) {
+function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }: { initial: Campaign | null; newsletter?: Newsletter; fallbackRegion: string; preserveEditor: (campaign: Campaign) => void }) {
   const toast = useToast()
   const phone = usePhone()
   const { multiTenant } = useWorkspaceAccess()
@@ -113,7 +118,10 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
   const navigate = useNavigate()
   const [accepted, setAccepted] = useState(initial)
   const acceptedRef = useRef(initial)
-  const [form, setForm] = useState<CampaignInput>(() => initial ? campaignInput(initial) : { regionId: fallbackRegion, name: '', subject: '', previewText: '', fromName: '', fromEmail: '', replyTo: [], listId: '', segmentId: null, html: '', defaults: {} })
+  const [form, setForm] = useState<CampaignInput>(() => initial ? campaignInput(initial) : { regionId: fallbackRegion, name: '', subject: '', previewText: '', fromName: newsletter?.fromName ?? '', fromEmail: newsletter?.from ?? '', replyTo: [], listId: newsletter?.id ?? '', segmentId: null, html: '', defaults: {} })
+  // A campaign to a newsletter's list is its issue: the page says so and goes back to the newsletter, and the sidebar marks it.
+  const issueOf = useNewsletterOf(form.listId), thing = issueOf ? 'issue' : 'campaign'
+  useShowNewsletter(issueOf?.id ?? null)
   const [templatesOpen, setTemplatesOpen] = useState(false)
   // Body placeholders are known from the last saved body; subject and inbox preview are read as they are typed.
   const [bodyKeys, setBodyKeys] = useState(() => placeholders(initial?.html))
@@ -245,7 +253,7 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
   const syncLabel = autosaving || preparing || saveMutation.isPending ? 'Saving…' : remote ? 'Update available' : autosavePaused ? 'Save failed' : error ? 'Check draft' : unavailable ? 'Unavailable' : readOnly ? 'Read only' : sync.connection === 'offline' ? 'Sync interrupted' : dirty ? form.name.trim() ? 'Unsaved changes' : 'Name required' : accepted ? 'Saved' : 'New draft'
   const syncActionable = Boolean(remote || error || autosavePaused || sync.connection === 'offline')
   const syncState = error || autosavePaused || sync.connection === 'offline' ? 'offline' : remote || dirty || autosaving ? 'changed' : sync.connection
-  const syncTitle = error || sync.error?.message || (remote ? 'A newer version is available.' : autosavePaused ? 'Autosave paused. Retry saving your changes.' : readOnly ? 'This campaign is no longer editable.' : 'Changes save automatically and sync with MCP and the API.')
+  const syncTitle = error || sync.error?.message || (remote ? 'A newer version is available.' : autosavePaused ? 'Autosave paused. Retry saving your changes.' : readOnly ? `This ${thing} is no longer editable.` : 'Changes save automatically and sync with MCP and the API.')
   function syncAction() { if (remote) setReviewUpdate(true); else if (autosavePaused) void save('edit'); else if (error) toast(error, 'error'); else sync.checkNow() }
   function reportError(value: string) { setError(value); toast(value, 'error') }
   async function save(next: 'auto' | 'edit' | 'review' | 'test') {
@@ -255,7 +263,7 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
     const continuing = next === 'review' || next === 'test'
     const input = creation.current?.input ?? formRef.current
     const version = creation.current?.version ?? editVersion.current
-    const validation = !input.name.trim() ? 'Enter a campaign name.'
+    const validation = !input.name.trim() ? issueOf ? 'Enter an issue name.' : 'Enter a campaign name.'
       : continuing && !input.subject.trim() ? 'Enter a subject before continuing.'
       : (continuing || input.fromEmail.trim()) && !emailIsValid(input.fromEmail.trim()) ? invalidSender
       : !multiTenant && (!input.regionId.trim() || input.regionId.trim().length > 40) ? 'Enter a region identifier of 1–40 characters.' : ''
@@ -323,15 +331,15 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
   }
   // In-app links ask before dropping edits autosave hasn't stored: a draft without a name, a failed save, or typing
   // inside autosave's 800 ms wait. Closing or reloading the tab gets the browser's prompt.
-  const leaveGuard = useLeaveGuard(dirty || autosavePaused, { what: 'this campaign', save: async () => { await save('edit'); return !dirtyRef.current && !creation.current } })
+  const leaveGuard = useLeaveGuard(dirty || autosavePaused, { what: `this ${thing}`, save: async () => { await save('edit'); return !dirtyRef.current && !creation.current } })
   const senderValidation = replyToValidation
   const senderDetailsOpen = senderOpen || Boolean(senderValidation)
   const toggleSender = () => { const next = !senderOpen; setSenderOpen(next); if (next) requestAnimationFrame(() => document.getElementById('campaign-reply-to')?.focus({ preventScroll: true })) }
   const review = () => void save('review')
   return <div className="campaign-compose-page campaign-studio">
-    <CampaignBar title={<>
-      <h1 className="sr-only">{accepted ? 'Edit campaign' : 'Create campaign'}</h1>
-      <Input id="campaign-name" className="studio-name" aria-label="Campaign name" placeholder="Untitled campaign" value={form.name} onChange={event => change('name', event.target.value)} required disabled={controlsDisabled} />
+    <CampaignBar back={issueOf ? newsletterPath(issueOf.id) : undefined} title={<>
+      <h1 className="sr-only">{issueOf ? accepted ? 'Edit issue' : 'New issue' : accepted ? 'Edit campaign' : 'Create campaign'}</h1>
+      <Input id="campaign-name" className="studio-name" aria-label={issueOf ? 'Issue name' : 'Campaign name'} placeholder={issueOf ? 'Untitled issue' : 'Untitled campaign'} value={form.name} onChange={event => change('name', event.target.value)} required disabled={controlsDisabled} />
     </>} steps={<CampaignSteps step="write" onReview={saveDisabled || pending || autosavePaused ? undefined : review} />} actions={<>
       {!phone && <div className="campaign-sync-status" role="status" data-state={syncState} data-actionable={syncActionable || undefined} title={syncTitle}>
         <span className="campaign-sync-dot" aria-hidden="true" />
@@ -346,12 +354,12 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
         ]} />
       </> : <>
         {!accepted && <Button variant="ghost" disabled={pending} onClick={() => setTemplatesOpen(true)}>Use a template</Button>}
-        <Button variant="secondary" disabled={!accepted || saveDisabled || pending || autosavePaused} title={!accepted ? 'Name the campaign first' : undefined} onClick={() => save('test')}>Send test</Button>
+        <Button variant="secondary" disabled={!accepted || saveDisabled || pending || autosavePaused} title={!accepted ? `Name the ${thing} first` : undefined} onClick={() => save('test')}>Send test</Button>
         <Button variant="primary" disabled={saveDisabled || pending || autosavePaused} loading={preparing} onClick={review} data-analytics="campaigns/review">Continue</Button>
       </>}
     </>} />
     {options.isError && <ErrorState error={options.error} onRetry={() => options.refetch()} />}
-    <section className="campaign-compose-workspace" aria-label="Campaign composer">
+    <section className="campaign-compose-workspace" aria-label={issueOf ? 'Issue composer' : 'Campaign composer'}>
       <div className="campaign-compose-scroll">
         <div className="campaign-compose-sheet">
           <div className="campaign-compose-metadata">
@@ -379,7 +387,7 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
         </div>
       </div>
     </section>
-    <ConfirmDialog open={reviewUpdate} onOpenChange={value => {if (!loadingLatest) setReviewUpdate(value)}} title="Load the latest campaign?" description="This campaign changed elsewhere. Loading the latest version discards your unsaved changes." confirmLabel="Load latest" onConfirm={loadLatest} pending={loadingLatest} />
+    <ConfirmDialog open={reviewUpdate} onOpenChange={value => {if (!loadingLatest) setReviewUpdate(value)}} title={`Load the latest ${thing}?`} description={`This ${thing} changed elsewhere. Loading the latest version discards your unsaved changes.`} confirmLabel="Load latest" onConfirm={loadLatest} pending={loadingLatest} />
     {accepted && testOpen && <TestEmailDialog campaign={accepted} open={testOpen} onOpenChange={setTestOpen} />}
     {templatesOpen && <TemplatePickerDialog onOpenChange={setTemplatesOpen} />}
     {leaveGuard}
@@ -617,6 +625,9 @@ function CampaignResults({ campaign }: { campaign: Campaign }) {
 
 function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Campaign; stale: boolean; refreshing: boolean; refresh: () => void }) {
   const navigate = useNavigate()
+  // An issue goes back to its newsletter, and the sidebar marks it.
+  const issueOf = useNewsletterOf(campaign.listId), thing = issueOf ? 'issue' : 'campaign'
+  useShowNewsletter(issueOf?.id ?? null)
   const [mode, setMode] = useState<'now' | 'schedule'>('now')
   const [scheduled, setScheduled] = useState('')
   const [error, setError] = useState('')
@@ -663,7 +674,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
   const billing = useApiDef(queries.billing(), { enabled: draft && multiTenant && canAdminister }).data
   const cost = billing && billing.enforcement === 'enforce' && billing.mode === 'prepaid' && billing.balance && audience.data ? (() => {
     const beyond = Math.max(0, audience.data.eligible - billing.free.sent.left), uc = BigInt(beyond) * priceUc(billing.prices.emailPerThousand) / 1000n
-    return ` Estimated cost ${usd(uc)} (${number(beyond)} ${beyond === 1 ? 'recipient' : 'recipients'} beyond your free sends). Balance ${usd(total(billing.balance))}.${BigInt(billing.balance.available) < uc ? ' The campaign pauses when the balance runs out and resumes after you add credit.' : ''}`
+    return ` Estimated cost ${usd(uc)} (${number(beyond)} ${beyond === 1 ? 'recipient' : 'recipients'} beyond your free sends). Balance ${usd(total(billing.balance))}.${BigInt(billing.balance.available) < uc ? ` The ${thing} pauses when the balance runs out and resumes after you add credit.` : ''}`
   })() : ''
   function requestConfirmation() {
     if (!draft || sendMutation.isPending) return
@@ -711,12 +722,12 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
   const writeLink = <Link to={campaignRoute(campaign, 'edit')}>Write</Link>
   const notes: ['neutral' | 'warning' | 'danger', ReactNode][] = !draft ? [] : [
     ...(missing.length ? [['neutral', <>Add {missing.join(', ').replace(/, ([^,]*)$/, ' and $1')} in {writeLink}.</>] as ['neutral', ReactNode]] : !campaign.listId ? [['neutral', 'Choose a list in Recipients.'] as ['neutral', ReactNode]] : []),
-    ...(!canAdminister ? [['neutral', 'Only owners and admins can send or schedule campaigns.'] as ['neutral', ReactNode]] : []),
+    ...(!canAdminister ? [['neutral', `Only owners and admins can send or schedule ${thing}s.`] as ['neutral', ReactNode]] : []),
     ...(error ? [['danger', error] as ['danger', ReactNode]] : []),
   ]
-  const bar = <CampaignBar back={campaign.archivedAt ? '/campaigns?archived=true' : '/campaigns'} title={<h1 className="studio-title">{campaign.name}</h1>} steps={draft && <CampaignSteps step="review" writeTo={campaignRoute(campaign, 'edit')} />} actions={<>{stale && <span className="campaign-note" data-tone="warning" title="Showing the last available counts.">Couldn’t refresh</span>}{!campaignEditable(campaign) && (sentSomething ? <Link className="ui-button ui-button--secondary ui-button--md" to={`/logs?campaign=${encodeURIComponent(campaign.id)}`}>View logs</Link> : <Button disabled title="Each email appears in Logs once sending starts">View logs</Button>)}<StatusBadge status={campaignDisplayStatus(campaign)} />{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</>} />
+  const bar = <CampaignBar back={campaign.archivedAt ? '/campaigns?archived=true' : issueOf ? newsletterPath(issueOf.id) : '/campaigns'} title={<h1 className="studio-title">{campaign.name}</h1>} steps={draft && <CampaignSteps step="review" writeTo={campaignRoute(campaign, 'edit')} />} actions={<>{stale && <span className="campaign-note" data-tone="warning" title="Showing the last available counts.">Couldn’t refresh</span>}{!campaignEditable(campaign) && (sentSomething ? <Link className="ui-button ui-button--secondary ui-button--md" to={`/logs?campaign=${encodeURIComponent(campaign.id)}`}>View logs</Link> : <Button disabled title="Each email appears in Logs once sending starts">View logs</Button>)}<StatusBadge status={campaignDisplayStatus(campaign)} />{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</>} />
   const dialogs = <>
-    <ConfirmDialog open={confirmation !== null} onOpenChange={open => { if (!open && !sendMutation.isPending) setConfirmation(null) }} title={confirmation?.mode === 'schedule' ? 'Schedule this campaign?' : 'Send this campaign now?'} description={confirmation?.mode === 'schedule' ? `Send “${campaign.name}”${origin} to ${recipients}${audienceName} on ${utcLabel(confirmation.scheduledAt!)} (${localLabel(confirmation.scheduledAt!)}).${paceSummary(confirmation)}${cost}${scoreNote} You can change this until sending starts.` : `Send “${campaign.name}”${origin} to ${recipients}${audienceName} now.${paceSummary(confirmation)}${cost} Consent is checked again as each email sends.${scoreNote} You can’t undo this.`} confirmLabel={confirmation?.mode === 'schedule' ? 'Schedule' : 'Send now'} onConfirm={confirmSend} pending={sendMutation.isPending} />
+    <ConfirmDialog open={confirmation !== null} onOpenChange={open => { if (!open && !sendMutation.isPending) setConfirmation(null) }} title={confirmation?.mode === 'schedule' ? `Schedule this ${thing}?` : `Send this ${thing} now?`} description={confirmation?.mode === 'schedule' ? `Send “${campaign.name}”${origin} to ${recipients}${audienceName} on ${utcLabel(confirmation.scheduledAt!)} (${localLabel(confirmation.scheduledAt!)}).${paceSummary(confirmation)}${cost}${scoreNote} You can change this until sending starts.` : `Send “${campaign.name}”${origin} to ${recipients}${audienceName} now.${paceSummary(confirmation)}${cost} Consent is checked again as each email sends.${scoreNote} You can’t undo this.`} confirmLabel={confirmation?.mode === 'schedule' ? 'Schedule' : 'Send now'} onConfirm={confirmSend} pending={sendMutation.isPending} />
     {draft && testOpen && <TestEmailDialog campaign={campaign} open={testOpen} onOpenChange={setTestOpen} />}
     {addressFor && <PostalAddressDialog open onOpenChange={open => { if (!open) setAddressFor(null) }} initial={null} required title="Add your postal address" submitLabel="Continue"
       onSaved={() => { if (addressFor.confirmed) void send(addressFor.input); else setConfirmation(addressFor.input) }} />}

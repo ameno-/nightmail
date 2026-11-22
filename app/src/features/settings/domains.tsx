@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Link, useNavigate, useParams } from 'react-router'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { ArrowLeftRight } from 'lucide-react'
 import { Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, StatusBadge, StatusDot, fieldError, MutationError } from '../../components/ui'
 import { useApiMutation, useApiDef, useApiQuery, useRegion, useSession, useWorkspaceAccess } from '../../data/context'
@@ -69,8 +69,12 @@ function ReceivingSettings({ domainId, domainName, receiving, hosts }: { domainI
 export function DomainsPage() {
   return useWorkspaceAccess().canAdminister ? <DomainsList /> : <AdminOnlyPage title="Domains" button="Add domain" />
 }
+// A newsletter created from an address on a domain the workspace hasn't verified sends its creator here (?add= opens Add
+// domain with the name filled in) and on to the domain's records; `then` is the newsletter's page, where Back returns.
+const returnTo = (params: URLSearchParams) => { const then = params.get('then') ?? ''; return /^\/newsletters\/[^/?#]+$/.test(then) ? then : '' }
 function DomainsList() {
   const { regionId } = useRegion()
+  const [params] = useSearchParams(), then = returnTo(params)
   const warm = usePrefetchQueries()
   const { multiTenant } = useWorkspaceAccess()
   const columns = domainColumns(multiTenant)
@@ -82,8 +86,8 @@ function DomainsList() {
   const receivingOf = (id: string) => inbound.data?.find(d => d.id === id)
   const quota = domains.data?.quota
   const create = useApiMutation((api, input: { regionId: string; name: string }) => api.domains.create(input), 'Domain added', true)
-  const [open, setOpen] = useState(false)
-  const [name, setName] = useState('')
+  const [open, setOpen] = useState(() => Boolean(params.get('add')))
+  const [name, setName] = useState(() => params.get('add') ?? '')
   const [invalid, setInvalid] = useState('')
   function openCreate() { create.reset(); setName(''); setInvalid(''); setOpen(true) }
   async function submit(event: FormEvent) {
@@ -95,7 +99,7 @@ function DomainsList() {
     try {
       const domain = await create.mutateAsync({ regionId, name: value })
       setOpen(false)
-      navigate(`/domains/${domain.id}`)
+      navigate(`/domains/${domain.id}${then ? `?then=${encodeURIComponent(then)}` : ''}`)
     } catch { /* Shown inline. */ }
   }
   return <div className="stack">
@@ -129,6 +133,7 @@ export function DomainDetailPage() {
   return useWorkspaceAccess().canAdminister ? <DomainDetail /> : <AdminOnlyPage title="Domain" backTo="/domains" />
 }
 function DomainDetail() {
+  const then = returnTo(useSearchParams()[0])
   const { id = '' } = useParams()
   const navigate = useNavigate()
   const { regionId, setRegionId } = useRegion()
@@ -188,7 +193,7 @@ function DomainDetail() {
   const receivingActions = multiTenant && receivingRecord && receivingRecord.status !== 'verified' ? [{ label: onRoot ? 'Use a subdomain instead' : `Use ${current.name} instead`, icon: <ArrowLeftRight size={16} />, onSelect: () => void chooseHost(onRoot ? null : current.name) }] : undefined
   const sesUrl = `https://${current.regionId}.console.aws.amazon.com/ses/home?region=${encodeURIComponent(current.regionId)}#/identities/${encodeURIComponent(current.name)}`
   return <div className="stack">
-    <PageHeader title={current.name} backTo="/domains" actions={<>
+    <PageHeader title={current.name} backTo={then || '/domains'} actions={<>
       <StatusBadge status={state.status} tone={state.tone} />
       <Button loading={verify.isPending} onClick={() => void checkNow()} data-analytics="domains/check">Check now</Button>
       {!hosted && <a className="ui-button ui-button--secondary ui-button--md" href={sesUrl} target="_blank" rel="noreferrer">Open in SES</a>}

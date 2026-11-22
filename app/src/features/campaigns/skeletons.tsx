@@ -5,6 +5,9 @@ import {
 } from '../../components/ui'
 import { CampaignsHeader } from './header'
 import { usePhone } from '../../lib/media'
+import { useSearchParams } from 'react-router'
+import { useWorkspaceAccess } from '../../data/context'
+import { newsletterPath } from '../newsletters/shared'
 import './campaigns.css'
 import { CampaignBar, CampaignSteps } from './steps'
 
@@ -47,10 +50,13 @@ export function ComposerSkeleton() {
 
 export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 'editor' | 'review' | 'templates' | 'template'; isNew?: boolean }) {
   const phone = usePhone()
+  const { canAdminister } = useWorkspaceAccess()
+  // "New issue" on a newsletter's page opens the composer for that newsletter.
+  const [search] = useSearchParams(), issueOf = isNew ? search.get('newsletter') : null
   if (kind === 'list' || kind === 'templates') {
     const templates = kind === 'templates'
     return <>
-      <CampaignsHeader actions={<Button variant="primary" disabled>{templates ? 'Create template' : 'Create campaign'}</Button>} />
+      <CampaignsHeader actions={<>{!templates && canAdminister && <Button disabled>New newsletter</Button>}<Button variant="primary" disabled>{templates ? 'Create template' : 'Create campaign'}</Button></>} />
       <div className="data-toolbar"><div className="cluster"><SearchField className="search-box--list" aria-label={templates ? 'Search templates' : 'Search campaigns'} placeholder={templates ? 'Search templates' : 'Search campaigns'} disabled /><Select aria-label={templates ? 'Filter templates' : 'Filter by status'} value="all" onValueChange={() => {}} options={[{ value: 'all', label: templates ? 'Active' : 'All campaigns' }]} disabled /></div></div>
       <TableSkeleton className="campaigns-table" columns={templates ? templateColumns : campaignColumns} rows={4} pagination />
     </>
@@ -67,7 +73,7 @@ export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 
     </LoadingRegion>
   </div>
   if (kind === 'editor') return <div className="campaign-compose-page campaign-studio">
-    <CampaignBar title={<><h1 className="sr-only">{isNew ? 'Create campaign' : 'Edit campaign'}</h1><div className="studio-name studio-name--loading">{isNew ? <span className="muted">Untitled campaign</span> : <SkeletonText width={180} />}</div></>} steps={<CampaignSteps step="write" />} actions={<>
+    <CampaignBar back={issueOf ? newsletterPath(issueOf) : undefined} title={<><h1 className="sr-only">{issueOf ? 'New issue' : isNew ? 'Create campaign' : 'Edit campaign'}</h1><div className="studio-name studio-name--loading">{isNew ? <span className="muted">{issueOf ? 'Untitled issue' : 'Untitled campaign'}</span> : <SkeletonText width={180} />}</div></>} steps={<CampaignSteps step="write" />} actions={<>
       {!phone && <span className="campaign-sync-status"><span className="campaign-sync-dot" />{isNew ? 'New draft' : 'Connecting…'}</span>}
       {phone ? <><Button variant="primary" disabled>Continue</Button><IconButton label="More actions" disabled><MoreHorizontal size={16} /></IconButton></> : <>{isNew && <Button variant="ghost" disabled>Use a template</Button>}<Button variant="secondary" disabled>Send test</Button><Button variant="primary" disabled>Continue</Button></>}
     </>} />

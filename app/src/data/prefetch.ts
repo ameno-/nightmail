@@ -8,6 +8,7 @@ import type { Api } from './types'
 import { openApiQuery } from '../features/docs/openapi'
 import { latestRowCount } from '../features/overview/latest'
 import { rangeStart } from '../features/logs/range'
+import { issuesRequest, useNewsletters } from '../features/newsletters/shared'
 
 // A warmed result stays fresh this long, so repeated hovers and the idle sweep never refetch it.
 const FRESH = 30_000
@@ -15,16 +16,21 @@ export const sidebarPaths = ['/overview', '/logs', '/receiving', '/campaigns', '
 // Filled by App.tsx with each route's chunk preload.
 export const routeChunks: Record<string, () => Promise<unknown>> = {}
 
-type Scope = { regionId: string; multiTenant: boolean; canAdminister: boolean }
+// newsletters: whether the workspace has any (Campaigns then leaves their issues out).
+type Scope = { regionId: string; multiTenant: boolean; canAdminister: boolean; newsletters: boolean }
 // The first screen of each page with its default filters: exactly what the page asks for when it opens.
-function firstScreen(path: string, { regionId, multiTenant, canAdminister }: Scope): QueryDef<unknown>[] {
+function firstScreen(path: string, { regionId, multiTenant, canAdminister, newsletters }: Scope): QueryDef<unknown>[] {
   const scoped = multiTenant || Boolean(regionId)
+  // One newsletter's page: the newsletter with its readers, and its newest issues.
+  const newsletter = /^\/newsletters\/(?!new$)([^/]+)$/.exec(path)?.[1]
+  if (newsletter) { const id = decodeURIComponent(newsletter); return [queries.newsletter(id), queries.campaigns(issuesRequest(id))] }
   switch (path) {
     case '/overview': return scoped ? [queries.overview(regionId, '24h', 'all'), queries.senderScore(), queries.logs({ regionId, direction: 'all', page: 1, pageSize: latestRowCount() }), ...(canAdminister ? [queries.overviewSetup()] : [])] : []
     case '/logs': { const pageSize = rememberedPageSize('logs'); return scoped && pageSize ? [queries.logs({ regionId, direction: 'all', search: '', status: undefined, stream: undefined, from: rangeStart('30d'), page: 1, pageSize })] : [] }
     // Receiving is one read: addresses (routes), counts, rules, destinations (endpoints) and domains.
     case '/receiving': return [overviewQuery(firstOverview) as QueryDef<unknown>]
-    case '/campaigns': return [queries.campaigns({ search: '', archived: false, status: undefined, page: 1, pageSize: 10 })]
+    case '/campaigns': return [queries.campaigns(campaignsRequest(newsletters))]
+    case '/newsletters': return [queries.newsletters()]
     case '/audience': { const pageSize = rememberedPageSize('contacts'); return [queries.audienceLists(), ...(pageSize ? [queries.contacts({ page: 1, pageSize, search: '', status: '', listId: '' })] : [])] }
     // Self-hosted domain reads call SES for every identity (the list refreshes by default), so only hosted workspaces warm it.
     case '/domains': return multiTenant && canAdminister ? [queries.domains(regionId, 1)] : []
@@ -34,6 +40,9 @@ function firstScreen(path: string, { regionId, multiTenant, canAdminister }: Sco
     default: return []
   }
 }
+
+/** The Campaigns page's first request. With newsletters, their issues are on their own pages, not here. */
+export const campaignsRequest = (newsletters: boolean) => ({ search: '', archived: false, status: undefined, page: 1, pageSize: 10, ...(newsletters ? { newsletter: false } : {}) })
 
 export function prefetchQueries(cache: QueryClient, api: Api, defs: QueryDef<unknown>[]) {
   return Promise.allSettled(defs.map(query => cache.prefetchQuery({ queryKey: ['nightmail', ...query.key], queryFn: ({ signal }) => query.read(api, signal), staleTime: FRESH })))
@@ -52,13 +61,14 @@ export function usePrefetchRoute() {
   const api = useApi()
   const { regionId } = useRegion()
   const { multiTenant, canAdminister } = useWorkspaceAccess()
+  const newsletters = useNewsletters().length > 0
   return useCallback(async (path: string) => {
-    const chunk = routeChunks[path]?.().catch(() => {})
-    const data = prefetchQueries(cache, api, firstScreen(path, { regionId, multiTenant, canAdminister }))
+    const chunk = routeChunks[path.startsWith('/newsletters/') ? '/newsletters' : path]?.().catch(() => {})
+    const data = prefetchQueries(cache, api, firstScreen(path, { regionId, multiTenant, canAdminister, newsletters }))
     // The docs read the public API definition, not the workspace's API.
     const docs = path === '/docs' ? cache.prefetchQuery(openApiQuery) : undefined
     await Promise.all([chunk, data, docs])
-  }, [cache, api, regionId, multiTenant, canAdminister])
+  }, [cache, api, regionId, multiTenant, canAdminister, newsletters])
 }
 
 // Hover intent: a pointer that rests on a link for a moment (not one crossing it) or focuses/presses it starts the warm-up.

@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
+import { useQueryClient } from '@tanstack/react-query'
 import { useApiMutation, useApiQuery } from '../../data/context'
+import { useNewsletters } from '../newsletters/shared'
 import type { AudienceList } from '../../data/types'
 import { SearchField, Button, ConfirmDialog, ControlSkeleton, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SkeletonText, Tabs, fieldError, MutationError } from '../../components/ui'
 import { listColumns, ListDetailBodySkeleton } from './skeletons'
@@ -42,7 +44,9 @@ export function ListDetailPage() {
   const [importing, setImporting] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const remove = useApiMutation((api, listId: string) => api.lists.remove(listId), 'List deleted')
-  async function deleteList() { await remove.mutateAsync(id); navigate('/audience/lists') }
+  // A newsletter is its list: deleting the list takes its sidebar item with it (the session's copy of /v1/me).
+  const cache = useQueryClient(), newsletter = useNewsletters().some(item => item.id === id)
+  async function deleteList() { await remove.mutateAsync(id); if (newsletter) void cache.invalidateQueries({ queryKey: ['identity'] }); navigate('/audience/lists') }
   return <div className="audience-page"><PageHeader title={query.isPending ? <SkeletonText width={96} lineHeight={24} /> : query.data?.name || 'List'} backTo="/audience/lists" actions={query.isPending ? <><ControlSkeleton width={85} /><ControlSkeleton width={120} /></> : query.data && <><Button variant="danger" onClick={() => {remove.reset(); setConfirmDelete(true)}}>Delete list</Button><Button variant="primary" onClick={() => setImporting(true)}>Import contacts</Button></>} />
     {query.isPending ? <ListDetailBodySkeleton /> : query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <ListMembers key={id} list={query.data} onImport={() => setImporting(true)} />}
     {importing && <ImportContactsDialog listId={id} onClose={() => setImporting(false)} />}

@@ -230,8 +230,13 @@ export function createLiveApi(): Api {
       check: (input, signal) => call<import('./types').SendabilityReport>('/emails/check', 'POST', input, signal),
       preview: async ({ source, ...options }, signal) => (await call<{ previews: import('./types').ClientPreview[] }>('/emails/preview', 'POST', { ...source, ...options }, signal)).previews,
     },
+    newsletters: {
+      list: async signal => (await call<{ data: import('./types').Newsletter[] }>('/newsletters?limit=100', 'GET', undefined, signal)).data,
+      get: (id, signal) => call<import('./types').Newsletter>(`/newsletters/${idPath(id)}`, 'GET', undefined, signal),
+      create: (input, signal) => call<import('./types').Newsletter>('/newsletters', 'POST', input, signal),
+    },
     campaigns: {
-      list: (input, signal) => page('/campaigns', input, mapCampaignSummary, {region: input.regionId, state: input.status, search: input.search, archived: input.archived === true ? 'true' : 'false'}, signal), get: getCampaign,
+      list: (input, signal) => page('/campaigns', input, mapCampaignSummary, {region: input.regionId, state: input.status, search: input.search, archived: input.archived === true ? 'true' : 'false', listId: input.listId, newsletter: input.newsletter === undefined ? undefined : String(input.newsletter)}, signal), get: getCampaign,
       state: async (id, signal) => { const r = await call<Record<string, any>>(`/campaigns/${idPath(id)}/state`, 'GET', undefined, signal); return { ...r, status: r.state } as CampaignState },
       preview: (id, signal) => call(`/campaigns/${idPath(id)}/preview`, 'GET', undefined, signal),
       setArchived: async (input, signal) => mapCampaign(await call(`/campaigns/${idPath(input.id)}/archive`, 'PATCH', {archived: input.archived}, signal)),

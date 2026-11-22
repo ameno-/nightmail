@@ -33,7 +33,9 @@ export const queries = {
   campaign: (id: string) => def(['campaign', id], (api, signal) => api.campaigns.get(id, signal)),
   template: (id: string) => def(['template', id], (api, signal) => api.templates.get(id, signal)),
   domain: (id: string) => def(['domain', id], (api, signal) => api.domains.get(id, signal)),
-  campaigns: (request: PageRequest & { archived?: boolean }) => def(['campaigns', request], (api, signal) => api.campaigns.list(request, signal)),
+  newsletter: (id: string) => def(['newsletter', id], (api, signal) => api.newsletters.get(id, signal)),
+  newsletters: () => def(['newsletters'], (api, signal) => api.newsletters.list(signal)),
+  campaigns: (request: PageRequest & { archived?: boolean; listId?: string; newsletter?: boolean }) => def(['campaigns', request], (api, signal) => api.campaigns.list(request, signal)),
   contacts: (params: PageRequest) => def(['contacts', params], (api, signal) => api.contacts.list(params, signal)),
   audienceLists: (search = '', cursor?: string) => def(['lists', 'options', { pageSize: 100, search, cursor }], async (api, signal) => {
     const page = await api.lists.list({ pageSize: 100, search, cursor, counts: false }, signal)
