@@ -241,7 +241,7 @@ export class ApiError extends Error {
   logField?: string;
   /** What a permission refusal needs (denied): error.required and the Nightmail-Required-Permission header. */
   required?: Required;
-  /** The workspace whose daily limit refused this send (admission.ts): the error handler queues its once-a-day operator alert. */
+  /** The workspace whose daily limit refused this send (admission.ts): the error handler queues its once-a-day email and operator alert. */
   limitReachedFor?: string;
   constructor(public status: number, public code: string, message: string, public field?: string, public retryable = false, public resetAt?: string) { super(message); }
 }

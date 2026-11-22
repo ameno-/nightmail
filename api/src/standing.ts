@@ -1,6 +1,8 @@
 import { sql } from 'drizzle-orm';
 import { ApiError, id, isSimulatedSes, log, type DbExecutor, type JobHandler, type Runtime } from './core.js';
-import { enqueue, retryDatabaseFailures } from './jobs.js';
+import { enqueue, JobDeferred, retryDatabaseFailures } from './jobs.js';
+import { deliverNotice, evaluationFinished, noticeRecipients } from './account-notices.js';
+import { customerNotice, type NoticeInput } from './notices.js';
 import { queueTenantStatus, resumeHostedConnection, tenantStatusDrift, terminalColumns, terminalEvents, type HostedCaps } from './states.js';
 import { dailyLimit, ESTABLISHED, GOOD_STANDING, establishedBy, EVALUATION, evaluated, FREEZE_FLOOR, GROWTH, moveScore, nextGrowth, nextStanding, quality, stepRank, type DayEvidence, type GrowthHour, type DomainAuth, type Factor, type LadderInput, type Reason, type ScoreState, type Step, type TrackRecord, type Window } from './standing-model.js';
 import { productName } from './brand.js';
@@ -97,13 +99,21 @@ export async function applyChange(db: DbExecutor, change: Change): Promise<{ eve
       since: step !== previousStep ? at : row.since, version, sequence, actor: { kind: actor.kind }, change: change.kind, marketingHeld: (stepRank(step) >= stepRank('restrict') && !change.release) || marketingHold };
     await enqueue(db, { type: 'operation.publish', workspaceId: wid, payload: { event: { id: `evt_standing_${eventId.slice(5)}`, type: STANDING_EVENT, createdAt: at, workspaceId: wid, region: null, data } } });
   }
-  // Owners and admins hear about a rise to warn or above, at most once per step per 24 hours.
-  const last = row.notified[step];
+  // Owners and admins hear about a rise to warn or above, at most once per step per 24 hours. A warning and a campaign's
+  // pause wait NOTICE_WAIT_MINUTES before they are sent, so the job can see what else the same problem did and send
+  // only the most serious email (notifyJob).
+  const last = row.notified[step], later = new Date(now.getTime() + NOTICE_WAIT_MINUTES * 60_000).toISOString();
   if (stepRank(step) > stepRank(previousStep) && stepRank(step) >= stepRank('warn') && (!last || now.getTime() - Date.parse(last) >= 86_400_000)) {
     await db.execute(sql`UPDATE sender_standing SET notified=notified||jsonb_build_object(${step}::text,${at}::text) WHERE workspace_id=${wid}`);
-    await enqueue(db, { type: 'standing.notify', workspaceId: wid, payload: { eventId } });
+    await enqueue(db, { type: 'standing.notify', workspaceId: wid, payload: { eventId }, ...(step === 'warn' ? { availableAt: later } : {}) });
   }
-  if (change.kind === 'quarantine') await enqueue(db, { type: 'standing.notify', workspaceId: wid, payload: { eventId } });
+  // The end of a pause is told once, and only when its start was (a pause inside the 24 hours above started silently).
+  const told = row.notified.pause, ended = row.notified.resumed;
+  if (previousStep === 'pause' && step !== 'pause' && told && !(ended && ended > told)) {
+    await db.execute(sql`UPDATE sender_standing SET notified=notified||jsonb_build_object('resumed',${at}::text) WHERE workspace_id=${wid}`);
+    await enqueue(db, { type: 'standing.notify', workspaceId: wid, payload: { eventId, notice: 'resumed' } });
+  }
+  if (change.kind === 'quarantine') await enqueue(db, { type: 'standing.notify', workspaceId: wid, payload: { eventId }, availableAt: later });
   return { eventId, version, sequence, step, previousStep };
 }
 
@@ -272,6 +282,7 @@ export async function refreshStanding(runtime: Runtime, options: { now?: Date; o
   const rows = await candidates(runtime, limit, options.only);
   const today = now.toISOString().slice(0, 10), routine: Record<string, unknown>[] = [];
   const lastHour = new Date(Math.floor(now.getTime() / 3600_000) * 3600_000 - 3600_000).toISOString();
+  const finished: { workspaceId: string; limited: boolean }[] = [];
   let changed = 0;
   for (const row of rows) {
     const q = quality(row.days ?? [], row.domains ?? [], row.screened_workspace, today);
@@ -307,6 +318,10 @@ export async function refreshStanding(runtime: Runtime, options: { now?: Date; o
     const exempt = graduated || pacing ? establishedBy({ override: row.override, history, score: moved.score, step: next.step }) : null, established = exempt !== null;
     const counts = !established && pacing && next.step === 'ok' && (row.pace === null || was.cap! < 60 * row.pace) && (!was.hour || Date.parse(lastHour) > Date.parse(was.hour));
     const growth = nextGrowth(was, { graduated, established, step: next.step, quality: q.quality, hour: lastHour, evidence: counts ? await growthHour(runtime, row.sponsor_key, lastHour) : null, now });
+    // The evaluation's end is emailed once: not to a first-party workspace (no limit applies to it), not to one that
+    // skips the growth pace (its track record or an operator's limit says more than this email), and not when it
+    // ends in a warning, a hold or a pause, which has its own email.
+    if (graduated && !row.exempt && !established && !row.paused_at && stepRank(next.step) < stepRank('warn')) finished.push({ workspaceId: row.workspace_id, limited: limits.limit !== null });
     // An owner's marketing release and an operator's hold after a self-resume both end on their own.
     const releaseExpired = !!row.release_until && Date.parse(row.release_until) <= now.getTime();
     if (next.step !== prev.step || releaseExpired || row.legacy_hold) {
@@ -362,6 +377,7 @@ export async function refreshStanding(runtime: Runtime, options: { now?: Date; o
       strike_until=r.strike_until,growth_until=r.growth_until,growth_cap=r.growth_cap,growth_hour=r.growth_hour,growth_quality=r.growth_quality,computed_at=now() FROM r WHERE s.workspace_id=r.workspace_id RETURNING s.*)
     INSERT INTO sender_score_daily(workspace_id,day,score,quality,target,daily_limit,step) SELECT workspace_id,(now() AT TIME ZONE 'UTC')::date,score,quality,target,daily_limit,step FROM updated
     ON CONFLICT(workspace_id,day) DO UPDATE SET score=excluded.score,quality=excluded.quality,target=excluded.target,daily_limit=excluded.daily_limit,step=excluded.step`);
+  for (const f of finished) await evaluationFinished(runtime.db, f.workspaceId, f.limited);
   await settlePaused(runtime);
   await runtime.db.execute(sql`DELETE FROM hosted_growth_minutes WHERE minute<now()-interval '2 hours'`);
   // Any workspace whose SES tenants differ from what Nightmail wants (a missed job, a tenant ready after the pause) is queued.
@@ -461,37 +477,45 @@ export async function ingestTenantStatus(runtime: Runtime, event: NonNullable<Re
 }
 
 // ---------- owner emails ----------
-const stepWords: Record<Step, string> = { ok: 'in good standing', notice: 'noted', warn: 'warned', restrict: 'restricted: marketing is held', pause: 'paused' };
-export function noticeText(o: { workspace: string; step: Step; reasons: Reason[]; quarantine?: { campaign: string; message: string } | null; origin: string; marketingHeld: boolean }) {
-  const did = o.quarantine ? `${productName} paused the campaign "${o.quarantine.campaign}". Your other mail is unaffected.`
-    : o.step === 'pause' ? `${productName} paused all sending from this workspace. Receiving, inboxes, reads and the dashboard keep working. Queued mail is held for 72 hours, then canceled.`
-    : o.step === 'restrict' ? `${productName} holds marketing (campaigns and marketing sends). Receipts, password resets and other transactional mail still send.`
-    : `Nothing is held yet. Until this clears your daily limit is frozen: it will not rise, and a workspace without one is limited to what SES accepted from it in the last 24 hours (at least ${FREEZE_FLOOR.toLocaleString('en-US')}).`;
-  const fix = o.quarantine ? ['Remove the contacts that bounced and any you have not mailed before.', 'Check where the list came from and that every contact opted in.', 'Resume the campaign from its page, or ask for a review.']
-    : ['Find the campaign or domain named above and stop sending to the addresses that bounced or complained.', 'Remove contacts you cannot show opted in, and old or bought lists.', o.step === 'warn' ? 'Keep sending as usual: the warning clears by itself after 24 hours under the line.' : 'Open the dashboard to follow the checklist, release it when allowed, or ask for a review.'];
-  const base = o.origin.replace(/\/$/, '')
-  const what = o.quarantine ? o.quarantine.message : o.reasons.filter(r => r.step !== 'notice').map(r => `- ${r.message}`).join('\n') || '- Sending standing changed.';
-  return { subject: o.quarantine ? `${productName} paused a campaign in ${o.workspace}` : `${productName}: ${o.workspace} is ${stepWords[o.step]}`,
-    text: `What happened\n${what}\n\nWhat ${productName} did\n${did}\n\nHow to fix it\n${fix.map((s, i) => `${i + 1}. ${s}`).join('\n')}\n\nOpen the dashboard: ${base}/overview\nThe thresholds are published at ${base}/docs#sending-limits\n` };
-}
 /**
- * Emails the workspace's owners and admins about a standing change, through the platform workspace's own sending
- * (NIGHTMAIL_NOTIFY_FROM on the platform domain). Without that configuration the dashboard and webhook still carry it.
+ * A warning's and a campaign pause's email wait this long. One problem (a bad list) can pause a campaign, warn the
+ * workspace and then hold or pause it within a standing run or two: the job sends what is most serious by then.
+ */
+export const NOTICE_WAIT_MINUTES = 15;
+type NoticeEvent = { kind: string; to_step: Step; age: number; details: Record<string, unknown>; name: string; exempt: boolean; recipients: string[]; outranked: boolean; repeated: boolean; paused: boolean | null; pending: boolean | null };
+/**
+ * Emails the workspace's owners and admins about a standing change (src/notices.ts writes it; account-notices.ts sends
+ * it from the platform workspace's own sender). Without that sender the dashboard and webhook still carry the change.
+ * One event, one email: a pause or a marketing hold is always sent; a campaign's pause is not when the workspace was
+ * held or paused around it (or the campaign already had its email in the last 24 hours), and a warning is not when a
+ * campaign's pause, a hold or a pause tells the same story. A resume (payload.notice) waits for sending to be on.
  */
 export const notifyJob: JobHandler = retryDatabaseFailures(async (runtime, payload, job) => {
-  const from = runtime.config.notifyFrom, sender = runtime.config.platformDomainWorkspace;
-  const [event] = (await runtime.db.execute<{ kind: string; to_step: Step; reasons: Reason[]; details: Record<string, unknown>; name: string; recipients: string[] }>(sql`SELECT e.kind,e.to_step,e.reasons,e.details,w.name,
-      ARRAY(SELECT u.email FROM workspace_members m JOIN nightmail_users u ON u.id=m.user_id WHERE m.workspace_id=e.workspace_id AND m.role IN ('owner','admin') AND u.email_verified ORDER BY u.email LIMIT 20) AS recipients
-    FROM standing_events e JOIN workspaces w ON w.id=e.workspace_id WHERE e.id=${String(payload.eventId)} AND e.workspace_id=${job.workspaceId}`)).rows;
+  const eventId = String(payload.eventId), resumed = payload.notice === 'resumed';
+  const rose = sql`((r.to_step='pause' AND r.from_step<>'pause') OR (r.to_step='restrict' AND r.from_step IN ('ok','notice','warn')))`;
+  const [event] = (await runtime.db.execute<NoticeEvent>(sql`SELECT e.kind,e.to_step,extract(epoch FROM now()-e.at)::int AS age,e.details,w.name,w.exempt_hosted_quotas AS exempt,${noticeRecipients(sql`e.workspace_id`)} AS recipients,
+      CASE WHEN e.kind='quarantine' THEN EXISTS (SELECT FROM standing_events r WHERE r.workspace_id=e.workspace_id AND ${rose} AND r.at>=e.at-make_interval(mins=>${NOTICE_WAIT_MINUTES}))
+        WHEN e.to_step='warn' THEN EXISTS (SELECT FROM standing_events r WHERE r.workspace_id=e.workspace_id AND ((r.kind='quarantine' AND r.at>=e.at-make_interval(mins=>${2 * NOTICE_WAIT_MINUTES})) OR (${rose} AND r.at>e.at)))
+        ELSE false END AS outranked,
+      e.kind='quarantine' AND EXISTS (SELECT FROM standing_events q WHERE q.workspace_id=e.workspace_id AND q.kind='quarantine' AND q.id<>e.id AND q.details->>'campaignId'=e.details->>'campaignId'
+        AND q.at<=e.at AND q.at>e.at-interval '24 hours') AS repeated,
+      pc.paused_at IS NOT NULL AS paused,pc.resume_pending_at IS NOT NULL AS pending
+    FROM standing_events e JOIN workspaces w ON w.id=e.workspace_id LEFT JOIN provider_connections pc ON pc.workspace_id=e.workspace_id AND pc.kind='shared'
+    WHERE e.id=${eventId} AND e.workspace_id=${job.workspaceId}`)).rows;
   if (!event || !event.recipients.length) return;
-  if (!from || !sender || !runtime.config.multiTenant) { log('info', { code: 'STANDING_NOTIFY_SKIPPED', workspaceId: job.workspaceId, step: event.to_step, reason: 'NIGHTMAIL_NOTIFY_FROM or the platform workspace is not configured' }); return; }
-  const quarantine = event.kind === 'quarantine' ? { campaign: String(event.details.campaignName ?? 'campaign'), message: String(event.details.message ?? '') } : null;
-  // Workspace and campaign names are the customer's: one line, bounded, so the subject is always a valid header.
-  const oneLine = (v: string) => v.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, 100) || 'your workspace';
-  if (quarantine) quarantine.campaign = oneLine(quarantine.campaign);
-  const notice = noticeText({ workspace: oneLine(event.name), step: event.to_step, reasons: event.reasons, quarantine, origin: runtime.config.publicUrl, marketingHeld: event.to_step === 'restrict' });
-  const { sendSystemEmail } = await import('./sending.js');
-  await sendSystemEmail(runtime, sender, { from, to: event.recipients, subject: notice.subject, text: notice.text, idempotencyKey: `standing:${String(payload.eventId)}`, standingEvent: String(payload.eventId) });
-  log('info', { code: 'STANDING_NOTIFIED', workspaceId: job.workspaceId, step: event.to_step, recipients: event.recipients.length, simulated: isSimulatedSes(runtime) });
+  const skip = (reason: string) => log('info', { code: 'STANDING_NOTIFY_SKIPPED', workspaceId: job.workspaceId, step: event.to_step, reason });
+  if (resumed && event.paused) {
+    // Its SES tenants are still being enabled: sending is not on yet. Otherwise it was paused again, and has that email.
+    if (event.pending && event.age < 6 * 3600) throw new JobDeferred(new Date(Date.now() + 120_000).toISOString());
+    return skip('The workspace is paused.');
+  }
+  if (!resumed && event.kind !== 'quarantine' && stepRank(event.to_step) < stepRank('warn')) return;
+  if (!resumed && (event.outranked || event.repeated)) return skip(event.repeated ? 'This campaign had its email in the last 24 hours.' : 'A more serious email covers this event.');
+  const workspace = event.name;
+  const input: NoticeInput = resumed ? { kind: 'resumed', workspace, limit: !event.exempt }
+    : event.kind === 'quarantine' ? { kind: 'campaign_paused', workspace, campaign: { id: String(event.details.campaignId ?? ''), name: String(event.details.campaignName ?? '') } }
+    : { kind: event.to_step === 'pause' ? 'paused' : event.to_step === 'restrict' ? 'restricted' : 'warned', workspace };
+  if (await deliverNotice(runtime, event.recipients, customerNotice(runtime.config.publicUrl, input), { standingEvent: eventId }) === 'unconfigured') return skip('NIGHTMAIL_NOTIFY_FROM or the platform workspace is not configured');
+  log('info', { code: 'STANDING_NOTIFIED', workspaceId: job.workspaceId, notice: input.kind, recipients: event.recipients.length, simulated: isSimulatedSes(runtime) });
 });
 export const standingJobs: Record<string, JobHandler> = { 'standing.notify': notifyJob };
