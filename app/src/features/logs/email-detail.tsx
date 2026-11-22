@@ -113,18 +113,18 @@ function Subject({ text }: { text: string }) {
     onClick={toggle ? () => setOpen(!open) : undefined} onKeyDown={toggle ? event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setOpen(!open) } } : undefined}>{text}</span>
 }
 
-// A phone's one line under the subject: the status as of its last step, with when and the stream, opening the delivery
+// A phone's one line under the subject: the status as of its last step (a scheduled email: when it goes), with when and the stream, opening the delivery
 // and the facts; and the score's chip.
 function StatusLine({ email, chip, onOpen }: { email: Email; chip: ReactNode; onOpen: (opener: HTMLElement) => void }) {
-  const key = eventKey(email.status), steps = stepsOf(email.events, email)
-  const at = [...steps].reverse().find(step => step.key === key)?.at ?? steps[steps.length - 1]?.at ?? email.sentAt
+  const key = eventKey(email.status), steps = stepsOf(email.events, email), sendsAt = sendTime(email)
+  const at = sendsAt ?? [...steps].reverse().find(step => step.key === key)?.at ?? steps[steps.length - 1]?.at ?? email.sentAt
   // Today, the time; before that, the day (the Details sheet has both).
   const when = sameDay(at, new Date().toISOString()) ? date(at, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' })
     : date(at, { month: 'short', day: 'numeric', ...(at.slice(0, 4) === new Date().toISOString().slice(0, 4) ? {} : { year: 'numeric' }), timeZone: 'UTC' })
   return <div className="email-status">
     <button type="button" className="email-status__facts" aria-haspopup="dialog" onClick={event => onOpen(event.currentTarget)}>
       <span className={`delivery__dot ui-tone--${toneOf(key)}`} aria-hidden="true" />
-      <span className="email-status__text"><span className="sr-only">Details: </span>{label(statusOf(email))} <time dateTime={at}>{when}</time> · {label(email.stream)}</span>
+      <span className="email-status__text"><span className="sr-only">Details: </span>{label(statusOf(email))}{sendsAt && ' for'} <time dateTime={at}>{when}</time> · {label(email.stream)}</span>
       <ChevronRight size={14} aria-hidden="true" />
     </button>
     {chip}
@@ -218,6 +218,9 @@ function stepsOf(events: EmailEvent[], email: Email): Step[] {
   return [{ key: 'queued', events: [], at: email.sentAt }, ...!['queued', 'attempting'].includes(email.status) ? [{ key: status, events: [] }] : []]
 }
 const sameDay = (a: string, b: string) => a.slice(0, 10) === b.slice(0, 10)
+// When a scheduled email goes, while it waits.
+const sendTime = (email: Email) => email.scheduled && email.scheduledAt ? email.scheduledAt : null
+const scheduledFor = (at: string) => `Scheduled for ${date(at, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' })} UTC`
 const stamp = (at: string, day: string) => sameDay(at, day) ? time(at) : date(at, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' })
 const linkText = (link: string) => link.replace(/^https?:\/\//, '').slice(0, 64) + (link.replace(/^https?:\/\//, '').length > 64 ? '…' : '')
 
@@ -244,13 +247,17 @@ function Delivery({ email, vertical }: { email: Email; vertical: boolean }) {
   const [cursor, setCursor] = useState(email.eventsNextCursor)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-  const steps = stepsOf(events, email)
+  // A scheduled email hasn't gone yet; its queued step says when it will.
+  const sendsAt = sendTime(email)
+  const steps = stepsOf(events, email).map(step => sendsAt && step.key === 'queued' ? { ...step, key: 'scheduled' } : step)
+  const sends = (step: Step) => Boolean(sendsAt) && step.key === 'scheduled'
+  const nameOf = (step: Step) => sends(step) ? scheduledFor(sendsAt!) : (eventCopy[step.key] ?? [label(step.key)])[0]
   const day = email.sentAt
   const contact = email.contact
   const suppressed = Boolean(contact?.suppressed) && ['bounced', 'complained', 'complaint'].includes(email.status)
   // A time shows where it moves on from the step before; the last one shown says the zone.
   let previous = '', lastShown = -1
-  const times = steps.map((step, index) => { const at = step.at ? stamp(step.at, day) : ''; if (!at || at === previous) return ''; previous = at; lastShown = index; return at })
+  const times = steps.map((step, index) => { const at = step.at && !sends(step) ? stamp(step.at, day) : ''; if (!at || at === previous) return ''; previous = at; lastShown = index; return at })
   const more = async () => {
     setBusy(true); setError('')
     try { const next = await api.emailEvents(email.id, cursor!); setEvents(previous => [...previous, ...next.items]); setCursor(next.nextCursor) }
@@ -260,12 +267,12 @@ function Delivery({ email, vertical }: { email: Email; vertical: boolean }) {
   if (vertical) {
     const start = Date.parse(steps.find(step => step.at)?.at ?? day)
     const rows = steps.map((step, index) => {
-      const [name] = eventCopy[step.key] ?? [label(step.key)]
+      const name = nameOf(step)
       const reason = step.key === 'bounce' || step.key === 'non_permanent_bounce' ? bounceReason(step.events[0]?.detail) : undefined
       return { key: step.key, tone: toneOf(step.key), series: seriesOf[step.key],
         label: <Tooltip content={<StepTip step={step} day={day} />}><span className="delivery__fact" tabIndex={0}><span className="delivery__name">{name}{step.events.length > 1 && <span className="delivery__count"> {step.events.length}×</span>}</span>{reason && <span className="delivery__note">{reason}</span>}</span></Tooltip>,
         // A step with no time of its own (a status without its event) leaves the column empty rather than a bare dash.
-        delta: !step.at ? '' : index === 0 ? <time dateTime={step.at}>{time(step.at)}</time> : `+${elapsed(Date.parse(step.at) - start)}` }
+        delta: !step.at || sends(step) ? '' : index === 0 ? <time dateTime={step.at}>{time(step.at)}</time> : `+${elapsed(Date.parse(step.at) - start)}` }
     })
     return <div className="delivery" data-vertical>
       <Waterfall label="Delivery" rows={rows} />
@@ -279,7 +286,7 @@ function Delivery({ email, vertical }: { email: Email; vertical: boolean }) {
   return <div className="delivery">
     <ol className="delivery__steps ui-scroll-fade" aria-label="Delivery">
       {steps.map((step, index) => {
-        const [name] = eventCopy[step.key] ?? [label(step.key)]
+        const name = nameOf(step)
         const at = times[index]
         const reason = step.key === 'bounce' || step.key === 'non_permanent_bounce' ? bounceReason(step.events[0]?.detail) : undefined
         return <li key={step.key} className="delivery__step">
