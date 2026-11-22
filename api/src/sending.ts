@@ -172,7 +172,7 @@ const Removed = z.object({ id: z.string(), deleted: z.literal(true) }).openapi('
 const DraftAudience = AudienceSpec.partial({ listId: true }).default({});
 const BlockHtml = z.string().max(MAX_BODY).describe('Block HTML: h1-h3, p, ul/ol, blockquote, pre>code, hr, img, buttons, columns and styled sections with inline formatting. A constrained email-safe style attribute supports color, typography, spacing, borders, radius and dimensions; arbitrary CSS remains rejected. No wrappers, tables, class or id. Call getContentGuide in MCP or GET /v1/campaign-content-guide for the full vocabulary and examples.');
 const CampaignDraftFields = { name: z.string().trim().min(1).max(200), from: z.union([Address, z.literal('')]).default(''), fromName: FromName.optional(), previewText: PreviewText.optional(), replyTo: z.array(Address).max(10).default([]), region: Region, regionPinned:z.boolean().optional().describe('Regional MX only. False follows the From domain; the displayed region is a hint. A supplied region on create or a changed region on edit pins it. To unpin, pass false and omit region.'), subject: z.union([Subject, z.literal('')]).default(''), attachments: AttachmentIds, tracking: z.boolean().default(true), audience: DraftAudience, defaults: Data, unsubscribePageUrl: unsubscribePageUrl().optional(),
-  requiredNotice: z.boolean().optional().describe('A required notice: a message every recipient must get whatever their marketing choice, such as a change to terms, prices or taxes, never a promotion. It goes to everyone in the audience who is not suppressed, people who unsubscribed from marketing included, without an Unsubscribe link or List-Unsubscribe header, and is paced, limited and paused like any campaign. Only where an operator turned required notices on for the workspace (requiredNotices in getWorkspaceSettings); 403 REQUIRED_NOTICES_OFF otherwise. Sending or scheduling one needs confirmRequiredNotice.') };
+  requiredNotice: z.boolean().optional().describe('A required notice: a message every recipient must get whatever their marketing choice, such as a change to terms, prices or taxes, never a promotion. It goes to everyone in the audience who is not suppressed, people who unsubscribed from marketing included, without an Unsubscribe link or List-Unsubscribe header, and is paced, limited and paused like any campaign. Only where an operator turned required notices on for the workspace (requiredNotices in getWorkspaceSettings); 403 REQUIRED_NOTICES_OFF otherwise. Sending or scheduling one needs confirmRequiredNotice. Turned off later, a launched notice pauses before releasing anyone more (pause reason REQUIRED_NOTICES_OFF) and is resumed or rescheduled only once they are on again. Resumed after a list-probe quarantine, it goes on to everyone captured for it (never deliveredOnly).') };
 const CAMPAIGN_INPUT_NOTES = 'Drafts may omit sender, subject, content and audience until review or send, except that domain-restricted keys must supply a From address on one of their domains. Content is block HTML (see html); the same form is what the dashboard composer reads and writes, so people and agents edit one document. Simple {{name}} personalization works in text and quoted href/alt attributes; values are HTML-escaped and rendered URLs are validated. Durable campaign preparation is bounded and runs in background jobs.';
 const CampaignInput = z.object({ ...CampaignDraftFields, html: BlockHtml.optional() }).strict().describe(CAMPAIGN_INPUT_NOTES).openapi('CampaignDraftInput');
 // Stored drafts predating block HTML remain readable; they are revalidated when saved or reviewed.
@@ -186,7 +186,7 @@ const Failure = z.object({ code: z.string(), message: z.string() });
 const Delivery = z.object({ total: z.number().int().describe('Fixed recipient count frozen at send or schedule.'), prepared: z.number().int().describe('Recipients whose message was validated.'), expanded: z.number().int().describe('Recipients materialized as immutable email records.'), canceled: z.number().int().describe('Recipients canceled before materialization. Materialized cancellations remain in counts.byStatus.canceled.'), error: Failure.nullable().describe('Why the campaign failed or was canceled by the system.'),
   pacing: z.object({ perDay: z.number().int().nullable().describe('Maximum recipients released per rolling 24-hour window; null means no daily cap.'), autoPause: z.boolean().describe('Pause automatically when bounce or complaint rates exceed safe thresholds.'), rateShare: z.number().describe('Maximum fraction of the SES per-second send rate this campaign uses; 1 is the full rate.'), windowStartedAt: z.string().nullable(), windowExpanded: z.number().int().describe('Recipients released in the current 24-hour window.'), nextWindowAt: z.string().nullable().describe('When the next 24-hour window opens, when a daily cap is set.') }),
   pausedAt: z.string().nullable(), pauseReason: Failure.nullable(),
-  deliveredOnly: z.boolean().describe('After a resumed list-probe quarantine: the rest goes only to contacts this workspace delivered to before; the others are counted in canceled.'),
+  deliveredOnly: z.boolean().describe('After a resumed list-probe quarantine: the rest goes only to contacts this workspace delivered to before; the others are counted in canceled. Never for a required notice.'),
   waiting: z.object({ reason: z.enum(['pacing_window', 'ses_daily_quota', 'hosted_daily_quota', 'list_probe', 'balance']), until: z.string() }).nullable().describe('Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest.') }).describe('The current launch: null until the campaign is sent or scheduled, and cleared by a new revision.').openapi('CampaignDelivery');
 function deliveryView(row: Omit<typeof campaigns.$inferSelect, 'draft' | 'stats'>) {
   if (!row.reviewId) return null;
@@ -863,12 +863,12 @@ function renderedMimeHeaders(block:string) {
 async function workspacePostalAddress(runtime: Runtime, db: DbExecutor, workspaceId: string) {
   return (await db.execute<{ address: string | null }>(sql`SELECT ${postalAddressOf(runtime.config.multiTenant, workspaceId)} AS address`)).rows[0]?.address ?? null;
 }
-/** A required notice ignores marketing opt-outs, so a workspace makes or sends one only once an operator turned them on
- *  (scripts/set-required-notices.ts). */
-async function requiredNoticesAllowed(db: DbExecutor, draft: Pick<CampaignDraft, 'requiredNotice'>, workspaceId: string) {
+/** A required notice ignores marketing opt-outs, so a workspace makes, sends, resumes or releases one only while an
+ *  operator has them turned on (scripts/set-required-notices.ts). `message` replaces the refusal's, for the run's pause. */
+async function requiredNoticesAllowed(db: DbExecutor, draft: Pick<CampaignDraft, 'requiredNotice'>, workspaceId: string, message = `Required notices are off for this workspace. Ask ${productName} to turn them on.`) {
   if (!draft.requiredNotice) return;
   const { rows: [row] } = await db.execute<{ on: boolean | null }>(sql`SELECT required_notices AS on FROM workspaces WHERE id=${workspaceId}`);
-  if (!row?.on) throw new ApiError(403, 'REQUIRED_NOTICES_OFF', `Required notices are off for this workspace. Ask ${productName} to turn them on.`, 'requiredNotice');
+  if (!row?.on) throw new ApiError(403, 'REQUIRED_NOTICES_OFF', message, 'requiredNotice');
 }
 // `postalAddress`: the workspace's (CAN-SPAM), under the link in the same quiet style, one line per line.
 // `requiredNotice`: a required notice has no unsubscribe, so its footer is the postal address alone and it gets no
@@ -1863,12 +1863,14 @@ export function registerSending(app: App) {
     if (!campaignResumable(campaign)) throw new ApiError(409, 'CAMPAIGN_NOT_PAUSED', 'Only a paused campaign, or one that failed after releasing recipients, can be resumed.');
     if (campaign.state === 'paused' && campaign.quarantines >= 2 && ['LIST_QUALITY', 'BOUNCE_RATE_HIGH', 'COMPLAINT_RATE_HIGH'].includes(campaign.pauseReason?.code ?? ''))
       throw new ApiError(409, 'QUARANTINE_REVIEW_REQUIRED', 'This campaign was quarantined twice for list quality. An operator reviews it before it sends again: ask for a review from the dashboard.');
+    await requiredNoticesAllowed(db, campaign.draft, a.workspaceId);
     const ref = { workspaceId: a.workspaceId, id: campaign.id }, next = runningState(campaign);
     await db.execute(resumeCampaign(ref, next));
     // The owner's one resume of a failed list probe releases the rest only to contacts this workspace delivered to
     // before (the others are skipped and counted as canceled), and the campaign's own health check runs at once.
-    // A second quarantine needs an operator (above).
-    if (campaign.pauseReason?.code === 'LIST_QUALITY') { await db.execute(clearProbe(ref)); await db.execute(restrictToDelivered(ref)); }
+    // A required notice goes on to everyone captured for it: those never delivered to before are exactly who it must
+    // reach. The automatic pauses still apply to it. A second quarantine needs an operator (above).
+    if (campaign.pauseReason?.code === 'LIST_QUALITY') { await db.execute(clearProbe(ref)); if (!campaign.draft.requiredNotice) await db.execute(restrictToDelivered(ref)); }
     if (campaign.state==='failed' && campaign.error?.code==='JOB_LEASE_EXHAUSTED') await reserveCampaign(c.env,db,await lockSendScope(db,a.workspaceId,{campaignId:campaign.id}),a,campaign.actorKeyId??a.keyId,0);
     await db.execute(queueCampaignRun(ref, campaign.requestId ? { requestId: campaign.requestId } : {}, next === 'scheduled' ? campaign.scheduledAt : null));
     await db.execute(queueCampaignStats(ref));
@@ -1895,6 +1897,7 @@ export function registerSending(app: App) {
   }, unreleasedSchedule));
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/reschedule', operationId: 'rescheduleCampaign', description: 'Move the send time of a scheduled campaign that has not started sending. The frozen audience and content stay as they are; unschedule it to edit them.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(z.object({ scheduledAt: CampaignSchedule.shape.scheduledAt }).strict().openapi('CampaignRescheduleInput')) }, responses: { 200: response(Campaign), ...errors } }), async c => control(c, async (db, a, campaign) => {
     if (a.role === 'member') throw denied('PERMISSION_DENIED', 'Only workspace owners and admins can schedule campaigns.', { permission: 'sendEmail', level: 'on', person: 'admin' });
+    await requiredNoticesAllowed(db, campaign.draft, a.workspaceId);
     const at = Date.parse(c.req.valid('json').scheduledAt);
     if (at <= Date.now() || at > Date.now() + 365 * 86400000) throw new ApiError(422, 'INVALID_SCHEDULE', 'Schedule between now and one year from now.', 'scheduledAt');
     const ref = campaignRef(a, campaign.id);
@@ -2888,6 +2891,9 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     if (campaign.state !== 'sending' || campaign.reviewId !== row.reviewId || campaign.expanded >= campaign.total) return null;
     const authorized = await originAllowed(runtime, db, { ...a, actorKeyId: a.keyId, campaignId: campaign.id, snapshot: { from: draft.from } });
     if (!authorized) { await cancelCampaignWork(db, a, campaign, 'ORIGIN_KEY_REVOKED'); return null; }
+    // A required notice whose workspace no longer has them pauses here (runCampaign), before anyone more is released:
+    // a scheduled one at its time, a paced one at its next window. Turned on again, a resume continues from here.
+    await requiredNoticesAllowed(db, draft, a.workspaceId, 'Paused: required notices were turned off for this workspace, so nobody more is sent this notice. Resume it once they are on again, or cancel it.');
     // The admission decision on this release: a pause or hold, the reviewed binding (fencing the insert against a
     // disable or reclaim since the precheck), and how many recipients the Hosted limit and the balance afford.
     const release = await admission(runtime, a.workspaceId, actorJson(a), { stage: 'release', locks: held, mails: [reviewedMail(draft)] }, sql`jsonb_build_object('simulated',${campaign.simulated}::boolean)`);
@@ -3000,7 +3006,7 @@ const runCampaign: JobHandler = async (runtime, payload, job) => {
     }
   } catch (error) {
     if (error instanceof JobDeferred || error instanceof ModuleLoadError) throw error;
-    if (error instanceof ApiError && ['HOSTED_SENDING_PAUSED', 'MARKETING_HELD', 'POSTAL_ADDRESS_REQUIRED'].includes(error.code)) {
+    if (error instanceof ApiError && ['HOSTED_SENDING_PAUSED', 'MARKETING_HELD', 'POSTAL_ADDRESS_REQUIRED', 'REQUIRED_NOTICES_OFF'].includes(error.code)) {
       await runtime.db.execute(pauseCampaign(ref, { code: error.code, message: error.message }));
       return;
     }

@@ -17154,6 +17154,89 @@ describe('Required notices', () => {
       assert.equal(ok(await local('POST', `/v1/campaigns/${campaign.id}/cancel`)).state, 'canceled');
     });
   });
+
+  test('required notice: turned off, a scheduled or paced notice pauses before releasing anyone more, can\'t be resumed or rescheduled, and continues where it stopped once on again', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
+      const ws = runtime.config.workspaceId;
+      // Each run takes every pending campaign run, due or not; stop once none is left (a paused campaign has none).
+      const runs = async (n: number) => { for (let i = 0; i < n && (await jobs('campaign.run')).some(job => job.status === 'pending'); i++) await run('campaign.run'); };
+      await turn(db, ws, 'on');
+      const list = ok(await local('POST', '/v1/lists', { name: unique('notice-off-later') }), 201);
+      await db.query(`INSERT INTO audience_contacts (id, workspace_id, email, marketing_consent) SELECT 'con_' || md5($1 || n::text), $1, 'notice-off-' || n || '@example.com', 'unsubscribed' FROM generate_series(1, 150) AS n`, [ws]);
+      await db.query('INSERT INTO audience_list_members (workspace_id, list_id, contact_id) SELECT workspace_id, $2, id FROM audience_contacts WHERE workspace_id = $1', [ws, list.id]);
+      await db.query(`INSERT INTO sending_region_limits (workspace_id, region, max_send_rate, checked_at) VALUES ($1, $2, 5000, clock_timestamp())
+        ON CONFLICT ON CONSTRAINT sending_region_limits_pkey DO UPDATE SET max_send_rate = 5000, max_24_hour_send = 0, sent_last_24_hours = 0, checked_at = clock_timestamp()`, [ws, REGION]);
+      const notice = async (name: string) => ok(await local('POST', '/v1/campaigns', { name, from: 'sender@example.com', subject: 'Sales tax', html: '<p>Sales tax applies from January.</p>', audience: { listId: list.id }, requiredNotice: true }), 201);
+      const view = async (id: string) => ok(await local('GET', `/v1/campaigns/${id}`));
+      const sent = async (id: string) => (await db.query('SELECT count(*)::int AS n FROM sending_emails WHERE campaign_id = $1', [id])).rows[0].n;
+      // A paced notice that released its first 100, and one scheduled for tomorrow.
+      const paced = await notice('Paced notice'), scheduled = await notice('Scheduled notice');
+      ok(await local('POST', `/v1/campaigns/${paced.id}/send`, { revision: paced.revision, confirmRequiredNotice: true, pacing: { perDay: 100, rateShare: 1 } }), 202);
+      ok(await local('POST', `/v1/campaigns/${scheduled.id}/schedule`, { revision: scheduled.revision, confirmRequiredNotice: true, scheduledAt: new Date(Date.now() + 86_400_000).toISOString() }), 202);
+      await runs(3);
+      assert.deepEqual([(await view(paced.id)).delivery.expanded, (await view(paced.id)).delivery.waiting?.reason, (await view(scheduled.id)).state], [100, 'pacing_window', 'scheduled']);
+      // Turned off: the schedule can't move, and when each is next due it pauses before anyone more is released.
+      await turn(db, ws, 'off');
+      error(await local('POST', `/v1/campaigns/${scheduled.id}/reschedule`, { scheduledAt: new Date(Date.now() + 2 * 86_400_000).toISOString() }), 403, 'REQUIRED_NOTICES_OFF');
+      await db.query("UPDATE sending_campaigns SET window_started_at = window_started_at - interval '25 hours' WHERE id = $1", [paced.id]);
+      await db.query('UPDATE sending_campaigns SET scheduled_at = now() WHERE id = $1', [scheduled.id]);
+      await db.query("UPDATE jobs SET available_at = clock_timestamp() WHERE type = 'campaign.run' AND status = 'pending' AND workspace_id = $1", [ws]);
+      await runs(3);
+      for (const [c, released] of [[paced, 100], [scheduled, 0]] as const) {
+        const paused = await view(c.id);
+        assert.deepEqual([paused.state, paused.delivery.pauseReason?.code, paused.delivery.expanded, await sent(c.id)], ['paused', 'REQUIRED_NOTICES_OFF', released, released]);
+        assert.match(paused.delivery.pauseReason.message, /turned off/);
+        error(await local('POST', `/v1/campaigns/${c.id}/resume`, {}), 403, 'REQUIRED_NOTICES_OFF');
+      }
+      // On again: each resumes where it stopped, and everyone captured is released once.
+      await turn(db, ws, 'on');
+      for (const c of [paced, scheduled]) ok(await local('POST', `/v1/campaigns/${c.id}/resume`, {}));
+      await runs(4);
+      for (const c of [paced, scheduled]) {
+        assert.deepEqual([(await view(c.id)).delivery.expanded, await sent(c.id)], [150, 150]);
+        assert.equal((await db.query('SELECT count(DISTINCT review_ordinal)::int AS n FROM sending_emails WHERE campaign_id = $1', [c.id])).rows[0].n, 150, 'Nobody twice.');
+      }
+    });
+  });
+
+  test('required notice: resumed after a list-probe quarantine, it goes on to everyone captured for it, while a marketing campaign goes only to contacts delivered to before', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, run }) => {
+      const wid = runtime.config.workspaceId, pool = '111122223335', domain = 'notice-probe.example', from = `news@${domain}`;
+      Object.assign(runtime.config, { multiTenant: true, liveEnabled: true, aws: { accessKeyId: 'fixture-platform', secretAccessKey: 'fixture-only' } });
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, pool]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`, [domain, wid]);
+      await gradedSender(db, wid, 10000);
+      await turn(db, wid, 'on');
+      const list = ok(await local('POST', '/v1/lists', { name: unique('notice-probe') }), 201);
+      // Contact IDs in the order of n, so the review's order (by contact ID) is too: the probe is customers 1 to 100.
+      await db.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_'||$1||lpad(n::text,4,'0'),$1,'customer-'||n||'@example.net','subscribed' FROM generate_series(1,150)n RETURNING id)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM c`, [wid, list.id]);
+      // Ten of the last fifty were delivered to before, by an earlier receipt.
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,created_at)
+        SELECT 'email_prior_'||n,$1,$2,'fixture',$3,jsonb_build_array('customer-'||n||'@example.net'),'[]','[]','Receipt','{}',false,'delivered','prior-'||n,now()-interval '20 days' FROM generate_series(141,150) n`, [wid, REGION, from]);
+      // A quarantined probe and the owner's resume, for a notice and for a marketing campaign to the same list.
+      const quarantinedAndResumed = async (body: Json, confirm: Json) => {
+        const c = ok(await local('POST', '/v1/campaigns', { from, subject: 'Probe', html: '<p>Fixture.</p>', audience: { listId: list.id }, ...body }), 201), path = `/v1/campaigns/${c.id}`;
+        ok(await local('POST', `${path}/send`, { revision: c.revision, ...confirm }), 202);
+        await run('campaign.run');
+        assert.equal(ok(await local('GET', path)).delivery.expanded, 100, 'Only the probe is released.');
+        await db.query(`UPDATE sending_emails SET status=CASE WHEN review_ordinal<=4 THEN 'bounced' ELSE 'delivered' END,provider_id='probe-'||id WHERE campaign_id=$1`, [c.id]);
+        await run('campaign.run');
+        await db.query(`UPDATE sending_campaigns SET probe_wait_until=now()-interval '1 second',waiting_until=now()-interval '1 second' WHERE id=$1`, [c.id]);
+        await db.query(`UPDATE jobs SET available_at=now() WHERE id=$1`, [`campaign.run:${c.id}`]);
+        await run('campaign.run');
+        assert.deepEqual([ok(await local('GET', path)).state, ok(await local('GET', path)).delivery.pauseReason?.code], ['paused', 'LIST_QUALITY']);
+        ok(await local('POST', `${path}/resume`, {}));
+        await run('campaign.run');
+        const after = ok(await local('GET', path)).delivery;
+        const emails = (await db.query('SELECT to_addresses->>0 AS email FROM sending_emails WHERE campaign_id=$1 AND review_ordinal>100', [c.id])).rows.map(r => r.email);
+        return { deliveredOnly: after.deliveredOnly, expanded: after.expanded, canceled: after.canceled, rest: emails.length };
+      };
+      assert.deepEqual(await quarantinedAndResumed({ name: 'Sales tax notice', requiredNotice: true }, { confirmRequiredNotice: true }), { deliveredOnly: false, expanded: 150, canceled: 0, rest: 50 });
+      assert.deepEqual(await quarantinedAndResumed({ name: 'Newsletter' }, {}), { deliveredOnly: true, expanded: 150, canceled: 40, rest: 10 });
+    });
+  });
 });
 
 describe('Operational configuration and public event boundaries', () => {
