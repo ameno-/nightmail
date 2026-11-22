@@ -305,7 +305,7 @@ function NumberedPagination({ page, pageSize, total, onPageChange }: { page: num
 // The back arrow returns to where you came from, like the browser's Back, when you got here inside the dashboard: the
 // previous page comes back with its tab, filters and scroll. Opened directly (a pasted or new-tab link), it goes up to
 // backTo instead. It is a real link to backTo either way, so it still opens in a new tab.
-function BackLink({ to }: { to: string }) {
+export function BackLink({ to }: { to: string }) {
   const navigate = useNavigate(), location = useLocation()
   return <Link className="ui-button ui-button--secondary ui-icon-button" to={to} aria-label="Go back" onClick={event => {
     if (location.key === 'default' || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return

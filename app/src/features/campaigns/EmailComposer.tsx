@@ -3,7 +3,7 @@ import { EmailEditor, type EmailEditorRef } from '@react-email/editor'
 import type {} from '@react-email/editor/extensions'
 import { defaultSlashCommands, Inspector } from '@react-email/editor/ui'
 import { AlignCenter, AlignLeft, AlignRight, Bold, Box, ChevronDown, Columns2, Heading2, ImagePlus, Italic, List, Minus, MousePointer2, Paperclip, Plus, Redo2, SlidersHorizontal, Type, Undo2, UserRound, X } from 'lucide-react'
-import { Alert, Button, DropdownMenu, IconButton, SkeletonText } from '../../components/ui'
+import { Button, DropdownMenu, IconButton, SkeletonText } from '../../components/ui'
 import { useApi } from '../../data/context'
 import type { Attachment, AttachmentApi } from '../../data/types'
 import { attachmentLimit, composerLoading, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS } from './copy'
@@ -309,7 +309,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
         <input ref={fileInput} type="file" hidden accept="image/png,image/jpeg,image/gif,image/webp,image/avif" onChange={event => void insertImage(event.target.files?.[0])} />
       </div>
     </div>
-    {error && <Alert tone="danger">{error}</Alert>}
+    {error && <p className="campaign-note composer-error" data-tone="danger" role="alert">{error}</p>}
     <div className="composer-visual">
       <div className="composer-canvas" onClickCapture={event => { if ((event.target as HTMLElement).closest('a')) event.preventDefault() }}>
         {!ready && <div className="composer-starting" role="status"><SkeletonText width="55%" lineHeight={36} /><SkeletonText /><SkeletonText width="80%" /><span className="sr-only">Loading visual composer</span></div>}
