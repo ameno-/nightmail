@@ -74,8 +74,8 @@ function WhyItWentHere({ message, address, open, onOpenChange }: { message: Inbo
   const recipient = why.data?.recipients.find(r => mine.has(r.address))?.address ?? why.data?.recipients[0]?.address ?? address?.address ?? ''
   const error = why.error ?? overview.error
   // A full-height sheet on a phone: the path arrives after the sheet opens and fills it from the top, moving nothing.
-  // A replay, not the record: rules changed since it arrived would send it elsewhere today, and the title says so.
-  return <Dialog size="lg" open={open} onOpenChange={onOpenChange} title="Replayed with today’s rules" analytics="why-it-went-here">
+  // A replay with today's rules, not the record.
+  return <Dialog size="lg" open={open} onOpenChange={onOpenChange} title="Why it went here" analytics="why-it-went-here">
     {error ? <ErrorState error={error} onRetry={() => { void why.refetch(); void overview.refetch() }} />
       : <OutcomeFlow address={recipient} overview={overview.data ?? emptyOverview} outcome={why.data && overview.data ? outcomeOf(why.data, recipient) : null} error={null} addresses={address ? [address] : []} />}
   </Dialog>
@@ -373,7 +373,7 @@ export function AddressMail({ addressId, hidden = false }: { addressId: string; 
           </> : <EmptyState title={q ? 'No matching conversations' : view === 'inbox' ? 'No mail yet' : `Nothing in ${views.find(item => item.value === view)!.label.toLowerCase()}`} />}
       </aside>
       <div className="mailbox-reader">
-        {!threadId ? <EmptyState title="Select a conversation" />
+        {!threadId ? null
           : thread.error ? <ErrorState error={thread.error} onRetry={() => void thread.refetch()} />
           // Its names wait for the addresses too: a conversation drawn before them rewrites "you" and its senders in place.
           : thread.isPending || !thread.data || addressList.isPending ? <div className="mailbox-thread-skeleton"><SkeletonText width="50%" lineHeight={24} /><SkeletonText width="80%" /><SkeletonText width="70%" /></div>
