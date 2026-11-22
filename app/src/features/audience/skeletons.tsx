@@ -34,7 +34,7 @@ export const segmentColumns: SkeletonColumn[] = [
   { key: 'rules', label: 'Rules', width: '22%', card: 'line' },
   { key: 'matched', label: 'Matched', width: '14%', align: 'right', card: 'hide' },
   { key: 'eligible', label: 'Eligible', width: '14%', align: 'right', card: 'hide' },
-  { key: 'updated', label: 'Updated', width: '20%', card: 'inline' },
+  { key: 'updated', label: 'Updated', width: '20%', card: 'hide' },
 ]
 export const activityColumns: SkeletonColumn[] = [
   { key: 'subject', label: 'Email', width: '55%' },
