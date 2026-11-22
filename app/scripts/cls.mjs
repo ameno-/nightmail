@@ -220,7 +220,7 @@ const pages = ids => [
   ['Legal · privacy', '/legal/privacy', { user: null, from: '/legal' }],
   ['Legal · subprocessors', '/legal/subprocessors', { user: null, from: '/legal/privacy' }],
   ['Support chat', '/logs', { from: '/overview', support: true }],
-  ['Overview · sending limits dialog', '/overview', { dialog: 'Daily limit' }],
+  ['Overview · sending limits dialog', '/overview', { user: 'rae', dialog: 'Daily limit' }],
   ['Overview · sender score dialog', '/overview', { dialog: 'Sender score' }],
   // Connect an agent: the sidebar's item on a desktop, the account sheet's on a phone. The agents list loads (and polls)
   // inside a dialog of fixed height.
