@@ -676,27 +676,27 @@
    "findings": []
   },
   "Settings · billing · desktop": {
-   "score": 11,
+   "score": 15,
    "findings": []
   },
   "Settings · billing · free · desktop": {
-   "score": 8,
+   "score": 14,
    "findings": []
   },
   "Settings · billing · free · phone": {
-   "score": 8,
+   "score": 14,
    "findings": []
   },
   "Settings · billing · owed · desktop": {
-   "score": 25,
+   "score": 30,
    "findings": []
   },
   "Settings · billing · owed · phone": {
-   "score": 25,
+   "score": 29,
    "findings": []
   },
   "Settings · billing · phone": {
-   "score": 11,
+   "score": 15,
    "findings": []
   },
   "Settings · desktop": {
@@ -727,14 +727,6 @@
    "score": 7,
    "findings": []
   },
-  "Settings · plan & usage · desktop": {
-   "score": 11,
-   "findings": []
-  },
-  "Settings · plan & usage · phone": {
-   "score": 11,
-   "findings": []
-  },
   "Settings · postal address dialog · desktop": {
    "score": 6,
    "findings": []
@@ -749,10 +741,6 @@
   },
   "Settings · sending · AWS · phone": {
    "score": 15,
-   "findings": []
-  },
-  "Settings · sending · desktop": {
-   "score": 5,
    "findings": []
   },
   "Settings · webhook · desktop": {
