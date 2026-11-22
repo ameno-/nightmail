@@ -54,6 +54,11 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `queryAudience` | `audience` · `query` · sending |
 | `planAudienceMutation` | `audience` · `plan` · sending |
 | `applyAudiencePlan` | `audience` · `apply` · sending |
+| `listNewsletters` | `newsletters` · `list` · sending |
+| `createNewsletter` | `newsletters` · `create` · sending |
+| `getNewsletter` | `newsletters` · `get` · sending |
+| `updateNewsletter` | `newsletters` · `update` · sending |
+| `deleteNewsletter` | `newsletters` · `delete` · sending |
 | `listCampaignTemplates` | `templates` · `list` · sending |
 | `createCampaignTemplate` | `templates` · `create` · sending |
 | `getCampaignTemplate` | `templates` · `get` · sending |

@@ -258,7 +258,7 @@ const PERMISSION_ROUTES: [PermissionName, RegExp][] = [
   ['sentMail', /^\w+ \/v1\/(?:emails|events|logs|metrics|sender-score|usage|overview|attachments)(?:\/|$)|^\w+ \/v1\/campaigns\/[^/]+\/stats$/],
   ['receivedMail', /^\w+ \/v1\/(?:inbound\/(?:messages|threads|events)|inboxes\/[^/]+\/(?:messages|folders|changes|simulate))(?:\/|$)/],
   ['inboxes', /^\w+ \/v1\/(?:inboxes|inbound\/(?:addresses|retired))(?:\/|$)/],
-  ['audience', /^\w+ \/v1\/(?:contacts|lists|segments|contact-imports|audience-query|templates|template-assets|campaign-content-guide|campaigns)(?:\/|$)/],
+  ['audience', /^\w+ \/v1\/(?:contacts|lists|newsletters|segments|contact-imports|audience-query|templates|template-assets|campaign-content-guide|campaigns)(?:\/|$)/],
   ['receivingRules', /^\w+ \/v1\/(?:routing|rules|rituals|endpoints|inbox-connections|inbound\/(?:endpoints|policy|domains|overview))(?:\/|$)|^\w+ \/v1\/domains\/[^/]+\/receiving-host$/],
 ];
 /**
@@ -453,7 +453,7 @@ export const ownerRoute = (method: string, path: string) => {
 };
 /** UNRESTRICTED_KEY_REQUIRED (app.ts): a sender-domain credential is refused these workspace-wide areas. Audience records
  *  have no sender domain, and a campaign's audience and delivery act on the workspace audience (a draft stays editable). */
-export const unrestrictedRoute = (path: string) => /^\/v1\/(?:contacts|lists|segments|contact-imports|audience-query|settings|webhooks|metrics|sender-score|usage|billing|regions|app-passwords)(?:\/|$)/.test(path)
+export const unrestrictedRoute = (path: string) => /^\/v1\/(?:contacts|lists|newsletters|segments|contact-imports|audience-query|settings|webhooks|metrics|sender-score|usage|billing|regions|app-passwords)(?:\/|$)/.test(path)
   || !['state', 'preview', 'preview-image', 'archive', undefined].includes(/^\/v1\/campaigns\/[^/]+\/([^/]+)$/.exec(path)?.[1]);
 // The routes of the guards above that handlers call, for the MCP listing (each verified against REST's answers for reads).
 /** receivingAdmin's routes: routing, rules (and their deprecated /v1/rituals aliases), endpoints, inbox connections and an

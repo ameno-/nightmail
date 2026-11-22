@@ -112,7 +112,10 @@ export const campaigns = pgTable('sending_campaigns', {
   // The last background count of its outcomes (migration 391).
   stats: jsonb('stats').$type<StoredCampaignStats>(),
   createdAt: time('created_at').notNull().defaultNow(), updatedAt: time('updated_at').notNull().defaultNow(),
-}, t => [index('sending_campaigns_page').on(t.workspaceId, t.id), index('sending_campaigns_created_page').on(t.workspaceId, t.createdAt.desc(), t.id.desc()), index('sending_campaigns_archive_page').on(t.workspaceId, t.archivedAt, t.createdAt.desc(), t.id.desc())]);
+  // draft.audience.listId, written by a trigger on every write of draft (migration 394): filters by list never read a draft.
+  listId: text('list_id'),
+}, t => [index('sending_campaigns_page').on(t.workspaceId, t.id), index('sending_campaigns_created_page').on(t.workspaceId, t.createdAt.desc(), t.id.desc()), index('sending_campaigns_archive_page').on(t.workspaceId, t.archivedAt, t.createdAt.desc(), t.id.desc()),
+  index('sending_campaigns_list_page').on(t.workspaceId, t.listId, t.createdAt.desc(), t.id.desc()).where(sql`${t.listId} IS NOT NULL`)]);
 // The frozen snapshot a launch sends from: the draft and rendered base every recipient is interpolated into, and the
 // recipient list (sending_review_recipients). It has no status; the campaign's state and cursors describe its use.
 export const campaignReviews = pgTable('sending_campaign_reviews', {

@@ -519,6 +519,20 @@ async function audience() {
     const updated = await api('getContact', { path: c });
     check(updated.name === name && updated.email === success && updated.listIds.includes(l.id) && updated.marketingConsent === 'subscribed', 'import lost membership or consent');
   });
+  await step('Newsletter: this run’s list with a sender, and a new list that is one', async () => {
+    // A newsletter is its list: the campaigns below, to this list, are its issues until cleanup stops it being one.
+    const made = await api('createNewsletter', { body: { listId: l.id, from, fromName: prefix } });
+    defer(`stop newsletter ${l.id}`, async () => { const gone = await api('deleteNewsletter', { path: l }); check(gone.deleted && gone.listId === l.id, 'newsletter not deleted'); });
+    check(made.id === l.id && made.name === prefix && made.from === from && made.fromName === prefix, 'newsletter is not this run’s list');
+    const changed = await api('updateNewsletter', { path: l, body: { fromName: null } });
+    check(changed.fromName === null && changed.from === from && changed.name === prefix, 'newsletter sender not changed');
+    const read = await api('getNewsletter', { path: l });
+    check(read.readers?.count === 1 && read.readers.daily.length === 182 && read.readers.daily.reduce((n, day) => n + day, 0) === 1, 'newsletter readers are not this run’s one subscribed member');
+    check((await listed(l.id, cursor => api('listNewsletters', { query: { cursor, limit: 100 } }))).from === from, 'newsletter not listed');
+    const fresh = await api('createNewsletter', { body: { name: `${prefix}-newsletter`, from } });
+    defer(`delete newsletter list ${fresh.id}`, async () => check((await api('deleteContactList', { path: { id: fresh.id } })).deleted, 'newsletter list not deleted'));
+    check((await api('getContactList', { path: { id: fresh.id } })).name === `${prefix}-newsletter`, 'a new newsletter is not a list');
+  });
   return { listId: l.id, segmentId: s.id };
 }
 
@@ -644,6 +658,7 @@ async function campaign(audience: Audience, templateId?: string) {
   const saved = await api('updateCampaign', { path, body: { revision: item.revision, draft: { ...item.draft, name: subject } } });
   check(saved.revision > item.revision && saved.draft.name === subject, 'revision did not advance');
   check(hasId(await api('listCampaigns', { query: { search: prefix } }), item.id), 'campaign not listed');
+  check(hasId(await api('listCampaigns', { query: { listId: audience.listId, newsletter: 'true' } }), item.id), 'campaign not listed as an issue of its newsletter');
   const preview = await api('previewCampaign', { path });
   check(preview.html.includes(text) && preview.text.includes(text) && preview.text.endsWith(E2E_POSTAL_ADDRESS), 'campaign preview differs or lacks the postal address');
   await step('Render campaign PNG', async () => checkScreenshot(await api('renderCampaignPreviewImage', { client: previews, path })));
@@ -998,7 +1013,7 @@ async function prepare() {
 // must be exactly one minted by this suite (including the pre-rename form), and
 // both its embedded timestamp and the server's creation timestamp must be old.
 function staleRun(label: string | null | undefined, createdAt: string) {
-  const m = label?.match(/^(?:(?:Bane|OpenSend MX) E2E )?(e2e-(\d{13})-[a-f0-9]{8}-[a-f0-9]{3})(?:-(?:cli|schedule|attachment|import))?$/);
+  const m = label?.match(/^(?:(?:Bane|OpenSend MX) E2E )?(e2e-(\d{13})-[a-f0-9]{8}-[a-f0-9]{3})(?:-(?:cli|schedule|attachment|import|newsletter))?$/);
   if (!m) return null;
   const minted = Number(m[2]), created = Date.parse(createdAt), cutoff = started - 30*60_000;
   return minted < cutoff && created < cutoff && Math.abs(created-minted) < 5*60_000 ? m[1] : null;

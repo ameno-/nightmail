@@ -223,7 +223,7 @@ function freeze(value: unknown): void {
 const TAG_TOOLSET: Record<string, Toolset> = {
   'Agent inboxes': 'inboxes', 'Inbound addresses': 'inboxes', 'Inbound threads': 'inboxes', 'Inbound events': 'inboxes',
   Routing: 'routing', Rules: 'rules', Endpoints: 'endpoints', 'Inbound webhooks': 'endpoints',
-  Emails: 'sending', Campaigns: 'sending', Templates: 'sending', Audience: 'sending', Consent: 'sending', Attachments: 'admin', Metrics: 'sending',
+  Emails: 'sending', Campaigns: 'sending', Newsletters: 'sending', Templates: 'sending', Audience: 'sending', Consent: 'sending', Attachments: 'admin', Metrics: 'sending',
   Auth: 'admin', ApiKeys: 'admin', Settings: 'admin', Workspaces: 'admin', Billing: 'admin', Domains: 'admin', Regions: 'admin', Webhooks: 'admin', 'Inbound domains': 'admin', 'Inbound keys': 'admin',
 };
 const UNTRUSTED_READS = new Set(['listEmails', 'getEmail', 'getEmailDetail', 'getEmailContent', 'previewEmail', 'listLogs', 'testRouting', 'testRules', 'testRituals', 'getInboxMessage', 'listInboxMessages', 'getInboxAttachment', 'getInboundMessage', 'listInboundMessages', 'getInboundThread', 'listInboundThreads', 'getInboundAttachment', 'listInboundEvents']);
@@ -235,6 +235,9 @@ const INBOX_PERMISSIONS: Record<string, McpOperation['inbox']> = {
 /** Better descriptions for directly published receiving tools, where the operation summary alone is thin. */
 const DESCRIPTIONS: Record<string, string> = {
   updateWorkspaceSettings: 'Rename the workspace or set its postal address (plain text, up to 6 lines and 300 characters, no HTML; null removes it). Every campaign email and marketing send shows the address under Unsubscribe, as US law (CAN-SPAM) requires; sendCampaign and scheduleCampaign refuse with POSTAL_ADDRESS_REQUIRED until it is set. Confirm the exact address with the user.',
+  createNewsletter: 'Make a newsletter: a contact list with a sender. Pass name to create a new list, or listId to make an existing list one. Its issues are ordinary campaigns to that list: createCampaign with audience.listId set to the newsletter ID, then test and send it as any campaign. There are no issue operations.',
+  getNewsletter: 'Read a newsletter (a contact list with a sender) and its readers: subscribed, unsuppressed members, with how many joined each day for 182 days. Its issues are the campaigns to its list: listCampaigns with listId.',
+  deleteNewsletter: 'Stop a list being a newsletter. The list, its contacts and its campaigns stay; deleteContactList deletes the list itself.',
   cancelEmail: 'Cancel an email scheduled with sendEmail scheduledAt, before its time: it is never sent. List the ones still waiting with listEmails status=scheduled. Confirm with the user which email to cancel.',
   rescheduleEmail: 'Move an email scheduled with sendEmail scheduledAt to another time (a UTC instant, up to 30 days ahead) before it starts sending. Confirm the new time with the user first.',
   createInbox: 'Create an expiring or persistent inbox. Give its address to the sender, then call waitForMessage with inboxId. Use body.type="sandbox" to receive simulated mail without DNS.',
@@ -296,7 +299,7 @@ const EARLIER_DESCRIPTIONS: Record<string, string> = {
 };
 const PATH_IDS: Record<string, string> = {
   'mcp-connections': 'connectionId', agents: 'agentId', 'agent-tokens': 'tokenId', 'api-keys': 'keyId', keys: 'keyId',
-  contacts: 'contactId', lists: 'listId', segments: 'segmentId', 'contact-imports': 'importId', templates: 'templateId', 'template-assets': 'assetId',
+  contacts: 'contactId', lists: 'listId', newsletters: 'newsletterId', segments: 'segmentId', 'contact-imports': 'importId', templates: 'templateId', 'template-assets': 'assetId',
   emails: 'emailId', payments: 'paymentId', attachments: 'attachmentId', campaigns: 'campaignId', domains: 'domainId', webhooks: 'webhookId', routes: 'routeId', inboxes: 'inboxId',
 };
 
