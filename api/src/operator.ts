@@ -7,6 +7,7 @@ import { applyChange, type Change } from './standing.js';
 import { loadStanding, scoreView, StandingSchema } from './sender-score.js';
 import { clearProbe, queueCampaignRun, resumeCampaign } from './states.js';
 import { productName } from './brand.js';
+import { placesOpened, readPlaces, setLimit } from './signups.js';
 
 // The operator API: Anomaly staff with a platform role act on any Hosted workspace through one audited path. The
 // /operator dashboard area, Ryan's support platform (phase 2) and scripts are its clients. Roles live in
@@ -55,11 +56,17 @@ const WorkspaceParam = z.object({ id: z.string().min(1).max(100) });
 const Mutation = { 'Idempotency-Key': z.string().min(1).max(200).optional(), 'If-Match': z.string().regex(/^"?\d+"?$/).optional().describe('The standing version this action was decided on.') };
 const QueueItem = z.object({ workspaceId: z.string(), name: z.string(), step: z.enum(['ok', 'notice', 'warn', 'restrict', 'pause']), since: z.string(), score: z.number().nullable(), dailyLimit: z.number().int().nullable().describe('Null: no daily limit.'),
   reasons: z.array(z.object({ code: z.string(), message: z.string() })), paused: z.boolean(), quarantined: z.number().int(), watch: z.boolean(), strikes: z.number().int() }).openapi('OperatorQueueItem');
-const Action = z.object({ at: z.string(), workspaceId: z.string(), action: z.string(), operatorId: z.string().nullable(), via: z.string().nullable(), reason: z.string().nullable(), ticketRef: z.string().nullable(),
+const Action = z.object({ at: z.string(), workspaceId: z.string().describe("'platform': a change to no one workspace."), action: z.string(), operatorId: z.string().nullable(), operatorEmail: z.string().nullable(), via: z.string().nullable(), reason: z.string().nullable(), ticketRef: z.string().nullable(),
   requestId: z.string().nullable(), before: z.unknown().nullable(), after: z.unknown().nullable(), details: z.unknown() }).openapi('OperatorAction');
 const TimelineItem = z.object({ at: z.string(), kind: z.enum(['standing', 'limit', 'quarantine', 'release', 'tenant', 'operator', 'score', 'audit', 'bounces', 'rejection']),
   title: z.string(), detail: z.unknown() }).openapi('OperatorTimelineItem');
 const WaitlistEntry = z.object({ email: z.string(), name: z.string().nullable(), attempts: z.number().int(), firstAt: z.string(), lastAt: z.string() }).openapi('OperatorWaitlistEntry');
+const SignupPlaces = z.object({ limit: z.number().int().describe('How many accounts may sign up on their own; 0 lets nobody in this way.'), signedUp: z.number().int().describe('Accounts that signed up on their own, each counted once.'),
+  held: z.number().int().describe('Places a raise held for waiting addresses whose person has not signed in yet.'), waiting: z.number().int().describe('Addresses on the waitlist without a place.'),
+  open: z.number().int().describe('Places left for whoever signs in next: limit less signed up and held, at least 0.') }).openapi('OperatorSignupPlaces');
+const WorkspaceSummary = z.object({ id: z.string(), name: z.string(), createdAt: z.string(), owner: z.string().nullable().describe('The first owner\'s address.'),
+  domain: z.string().nullable().describe('A verified sending domain (the first by name), or null.'), domains: z.number().int().describe('Verified sending domains.'),
+  sent: z.number().describe('Recipients sent to, ever (the send meters).'), standing: z.enum(['ok', 'notice', 'warn', 'restrict', 'pause']).nullable().describe('Hosted sending standing, pause while sending is paused; null without hosted sending.') }).openapi('OperatorWorkspaceSummary');
 const DomainLimit = z.object({ used: z.number().int(), limit: z.number().int(), custom: z.boolean().describe('An operator set this limit; otherwise it is the default of 100.') }).openapi('OperatorDomainLimit');
 const domainLimitOf = (wid: string) => sql`SELECT json_build_object('used',(SELECT count(*)::int FROM domain_claims WHERE workspace_id=${wid}),'limit',workspace_domain_limit(${wid}),'custom',domain_limit IS NOT NULL) FROM workspaces WHERE id=${wid}`;
 const WorkspaceView = z.object({ workspace: z.object({ id: z.string(), name: z.string(), createdAt: z.string() }), score: z.unknown(), standing: StandingSchema.nullable(),
@@ -83,12 +90,12 @@ function readCursor(cursor?: string) {
   if (!Number.isFinite(Date.parse(at))) throw new ApiError(422, 'INVALID_CURSOR', 'Use nextCursor from the previous page.', 'cursor');
   return { at, key: cursor.slice(split + 1) };
 }
-export type OperatorAudit = { action: string; before?: unknown; after?: unknown; reason: string; ticketRef?: string; /** Staff-only detail, kept in the audit row alone. */ internal?: Record<string, unknown> };
+export type OperatorAudit = { action: string; before?: unknown; after?: unknown; reason?: string; ticketRef?: string; /** Staff-only detail, kept in the audit row alone. */ internal?: Record<string, unknown> };
 /** What an Idempotency-Key is bound to: the method, path and body of the request that first used it. */
 export const operatorRequestHash = (c: Ctx, body: unknown) => createHash('sha256').update(JSON.stringify([c.req.method, c.req.path, body])).digest('hex');
 /** The audit row for one operator change. Call it inside the transaction that makes the change. */
 export const writeOperatorAudit = (tx: DbExecutor, c: Ctx, operator: OperatorIdentity, workspaceId: string, audit: OperatorAudit) => tx.execute(sql`INSERT INTO hosted_operator_audit(workspace_id,action,details,operator_id,via,reason,ticket_ref,request_id,before,after)
-  VALUES(${workspaceId},${audit.action},${JSON.stringify({ operatorRole: operator.role, ...audit.internal })}::jsonb,${operator.userId},'console',${audit.reason},${audit.ticketRef ?? null},${c.get('requestId') ?? null},
+  VALUES(${workspaceId},${audit.action},${JSON.stringify({ operatorRole: operator.role, ...audit.internal })}::jsonb,${operator.userId},'console',${audit.reason ?? null},${audit.ticketRef ?? null},${c.get('requestId') ?? null},
     ${JSON.stringify(audit.before ?? null)}::jsonb,${JSON.stringify(audit.after ?? null)}::jsonb)`);
 /**
  * Idempotency, If-Match and the audit row around one mutation, all in one transaction. Billing's operator tools use it
@@ -308,7 +315,8 @@ export function registerOperator(app: App) {
     responses: { 200: response(z.object({ data: z.array(Action), nextCursor: z.string().nullable() })), ...errors } }), async c => {
     await operatorActor(c, 'operator:read');
     const q = c.req.valid('query'), after = readCursor(q.cursor);
-    const { rows } = await c.env.db.execute<z.infer<typeof Action> & { key: string; ts: string }>(sql`SELECT * FROM (SELECT ${isoAt(sql`at`)} AS at,at AS ts,${auditKey} AS key,workspace_id AS "workspaceId",action,operator_id AS "operatorId",via,
+    const { rows } = await c.env.db.execute<z.infer<typeof Action> & { key: string; ts: string }>(sql`SELECT * FROM (SELECT ${isoAt(sql`at`)} AS at,at AS ts,${auditKey} AS key,workspace_id AS "workspaceId",action,operator_id AS "operatorId",
+      (SELECT email FROM nightmail_users WHERE id=operator_id) AS "operatorEmail",via,
       coalesce(reason,details->>'reason') AS reason,ticket_ref AS "ticketRef",request_id AS "requestId",before,after,details FROM hosted_operator_audit
       WHERE true ${q.workspaceId ? sql`AND workspace_id=${q.workspaceId}` : sql``} ${q.operator ? sql`AND operator_id=${q.operator}` : sql``} ${after ? sql`AND at<=${after.at}::timestamptz` : sql``}) a
       ${after ? sql`WHERE (a.ts,a.key)<(${after.at}::timestamptz,${after.key})` : sql``} ORDER BY a.ts DESC,a.key DESC LIMIT ${q.limit + 1}`);
@@ -328,5 +336,46 @@ export function registerOperator(app: App) {
     const { rows: [count] } = await c.env.db.execute<{ total: number }>(sql`SELECT count(*)::int AS total FROM nightmail_waitlist WHERE ${match}`);
     const page = rows.slice(0, q.limit), last = page.at(-1);
     return c.json({ data: page, nextCursor: rows.length > q.limit && last ? `${last.lastAt}|${last.email}` : null, total: count?.total ?? 0 }, 200);
+  });
+
+  // The sign-up limit (src/signups.ts): how many accounts may sign up on their own, and what fills it. A raise lets the
+  // oldest waiting addresses in first; lowering it removes nobody. Every change is audited (workspace 'platform').
+  app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'get', path: '/v1/operator/signups', operationId: 'operatorGetSignups',
+    responses: { 200: response(SignupPlaces), ...errors } }), async c => {
+    await operatorActor(c, 'operator:read');
+    return c.json(await readPlaces(c.env.db), 200);
+  });
+  app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'put', path: '/v1/operator/signups', operationId: 'operatorSetSignupLimit',
+    request: { headers: z.object({ 'Idempotency-Key': Mutation['Idempotency-Key'] }), body: json(z.object({ limit: z.number().int().min(0).max(1_000_000), reason: Reason.optional(), ticketRef: TicketRef }).strict()) },
+    responses: { 200: response(SignupPlaces.extend({ letIn: z.number().int().describe('Waiting addresses this change let in, oldest first.') })), ...errors } }), async c => {
+    const body = c.req.valid('json'), operator = await operatorActor(c, 'operator');
+    // Set only when this request made the change: a replayed Idempotency-Key lets nobody in twice.
+    let letIn: string[] = [];
+    const result = await mutate(c, operator, 'platform', body, async tx => {
+      const change = await setLimit(tx, body.limit);
+      letIn = change.letIn;
+      return { result: { ...change.after, letIn: change.letIn.length },
+        audit: { action: 'operator-set-signup-limit', before: { limit: change.before.limit }, after: { limit: body.limit, letIn: change.letIn.length }, reason: body.reason, ticketRef: body.ticketRef } };
+    });
+    await placesOpened(c.env, letIn);
+    return c.json(result, 200);
+  });
+  // Every workspace, newest first, with what judging sign-ups needs: when it joined, its owner, a verified domain, what
+  // it sent and its standing. Paged by the API's cursor.
+  app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'get', path: '/v1/operator/signups/workspaces', operationId: 'operatorListAllWorkspaces',
+    request: { query: z.object({ cursor: Cursor, limit: z.coerce.number().int().min(1).max(200).default(100) }) },
+    responses: { 200: response(z.object({ data: z.array(WorkspaceSummary), nextCursor: z.string().nullable() })), ...errors } }), async c => {
+    await operatorActor(c, 'operator:read');
+    const q = c.req.valid('query'), after = readCursor(q.cursor);
+    const verified = (w: SQL) => sql`FROM domain_claims dc WHERE dc.workspace_id=${w} AND dc.sending_state IN ('verified','lost')`;
+    const { rows } = await c.env.db.execute<z.infer<typeof WorkspaceSummary>>(sql`SELECT w.id,w.name,${isoAt(sql`w.created_at`)} AS "createdAt",
+        (SELECT u.email FROM workspace_members m JOIN nightmail_users u ON u.id=m.user_id WHERE m.workspace_id=w.id AND m.role='owner' ORDER BY m.created_at,m.id LIMIT 1) AS owner,
+        (SELECT min(dc.name) ${verified(sql`w.id`)}) AS domain,(SELECT count(*)::int ${verified(sql`w.id`)}) AS domains,
+        (SELECT coalesce(sum(b.quantity),0)::float8 FROM billing_usage_hourly b WHERE b.workspace_id=w.id AND b.meter IN ('send','byo_send')) AS sent,
+        CASE WHEN pc.workspace_id IS NULL THEN NULL WHEN pc.paused_at IS NOT NULL THEN 'pause' ELSE coalesce(s.step,'ok') END AS standing
+      FROM workspaces w LEFT JOIN provider_connections pc ON pc.workspace_id=w.id AND pc.kind='shared' LEFT JOIN sender_standing s ON s.workspace_id=w.id
+      ${after ? sql`WHERE (w.created_at,w.id)<(${after.at}::timestamptz,${after.key})` : sql``} ORDER BY w.created_at DESC,w.id DESC LIMIT ${q.limit + 1}`);
+    const page = rows.slice(0, q.limit), last = page.at(-1);
+    return c.json({ data: page, nextCursor: rows.length > q.limit && last ? `${last.createdAt}|${last.id}` : null }, 200);
   });
 }

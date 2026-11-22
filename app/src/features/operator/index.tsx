@@ -6,12 +6,12 @@ import { Alert, Button, Checkbox, ControlSkeleton, DataTable, Dialog, DropdownMe
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { useSession } from '../../data/context'
 import { ApiError, type SenderScoreFactor, type StandingReason, type StandingStep } from '../../data/types'
-import { isoTime, operatorApi, type OperatorAction, type OperatorCampaign, type OperatorDomain, type OperatorMember, type OperatorQueueItem, type OperatorTimelineItem, type OperatorWorkspace, type TimelineKind, type WaitlistEntry } from '../../data/operator'
+import { isoTime, operatorApi, type OperatorAction, type OperatorCampaign, type OperatorDomain, type OperatorMember, type OperatorQueueItem, type OperatorTimelineItem, type OperatorWorkspace, type SignupPlaces, type TimelineKind, type WaitlistEntry, type WorkspaceSummary } from '../../data/operator'
 import { label, number, shortDateTime } from '../../lib/format'
 import { downloadCsv } from '../../lib/download'
 import { errorText } from '../../data/types'
 import { factorFormats } from '../score'
-import { actionColumnDefs, ActionsTrigger, dailyLimitError, campaignColumnDefs, domainColumnDefs, factorColumnDefs, facts, memberColumnDefs, operatorView, useOperatorTabs, OperatorWorkspaceSkeleton, StaffOnly, QueueToolbar, queueColumnDefs, timelineColumnDefs, waitlistColumnDefs, WaitlistToolbar } from './skeletons'
+import { actionColumnDefs, ActionsTrigger, dailyLimitError, campaignColumnDefs, domainColumnDefs, factorColumnDefs, facts, memberColumnDefs, operatorView, useOperatorTabs, OperatorWorkspaceSkeleton, StaffOnly, QueueToolbar, queueColumnDefs, SetLimitTrigger, SignupFacts, signupColumnDefs, timelineColumnDefs, waitlistColumnDefs, WaitlistToolbar } from './skeletons'
 import { useDebounced } from '../../lib/pagination'
 import { AbuseView } from './abuse'
 
@@ -38,12 +38,75 @@ export function OperatorPage() {
   const navigate = useNavigate(), tabs = useOperatorTabs()
   if (!role) return <NotFound />
   return <>
-    <PageHeader title="Operator" />
+    <PageHeader title="Operator" actions={view === 'signups' && role === 'operator' ? <SetLimit /> : undefined} />
     <div className="op-page">
       <Tabs value={view} label="Operator views" items={tabs} onValueChange={value => value === 'notes' ? navigate('/operator/notes') : setParams(previous => { const next = new URLSearchParams(previous); next.delete('band'); next.delete('show'); if (value === 'queue') next.delete('view'); else next.set('view', value); return next }, { replace: true })} />
-      {view === 'queue' ? <Queue /> : view === 'abuse' ? <AbuseView /> : view === 'waitlist' ? <Waitlist /> : <Actions />}
+      {view === 'queue' ? <Queue /> : view === 'signups' ? <Signups /> : view === 'abuse' ? <AbuseView /> : view === 'waitlist' ? <Waitlist /> : <Actions />}
     </div>
   </>
+}
+
+// Sign-ups: how many accounts may sign up on their own (api/src/signups.ts), what fills that, and every workspace with
+// what judging it needs: when it joined, its owner, a verified domain, what it sent and its standing.
+const useSignupPlaces = () => useQuery({ queryKey: ['operator', 'signups'], queryFn: ({ signal }) => operatorApi.signups(signal) })
+const standingText: Record<StandingStep, string> = { ok: 'Good', notice: 'Notice', warn: 'Warned', restrict: 'Restricted', pause: 'Paused' }
+const signupColumns: Column<WorkspaceSummary>[] = [
+  { ...def(signupColumnDefs, 'name'), render: row => <span className="op-ws" title={`${row.name} · ${row.id}`}><span className="op-cell">{row.name}</span><span className="op-muted-id">{row.id}</span></span>, cardRender: row => row.name },
+  { ...def(signupColumnDefs, 'owner'), render: row => row.owner ? <span className="op-email"><PrivateAddress value={row.owner} /></span> : <span className="muted">—</span>, cardRender: row => row.owner ? <PrivateAddress value={row.owner} /> : 'No owner' },
+  { ...def(signupColumnDefs, 'joined'), render: row => <At value={row.createdAt} />, cardRender: row => `joined ${when(row.createdAt)}` },
+  { ...def(signupColumnDefs, 'domain'), render: row => row.domain ? <span className="op-cell" title={row.domain}>{row.domain}{row.domains > 1 && <span className="muted">{` +${row.domains - 1}`}</span>}</span> : <span className="muted">None</span>,
+    cardRender: row => row.domain ? `${row.domain}${row.domains > 1 ? ` +${row.domains - 1}` : ''}` : 'No verified domain' },
+  { ...def(signupColumnDefs, 'sent'), render: row => number(row.sent), cardRender: row => `${number(row.sent)} sent` },
+  { ...def(signupColumnDefs, 'standing'), render: row => !row.standing ? <span className="muted">—</span> : <span className={row.standing === 'ok' ? 'muted' : undefined}>{standingText[row.standing]}</span> },
+]
+function Signups() {
+  const query = useSignupPlaces(), places = query.data, unknown = query.isError && !places
+  const list = useInfiniteQuery({
+    queryKey: ['operator', 'signups', 'workspaces'], initialPageParam: undefined as string | undefined,
+    queryFn: ({ pageParam, signal }) => operatorApi.allWorkspaces({ cursor: pageParam }, signal), getNextPageParam: page => page.nextCursor ?? undefined,
+  })
+  const rows = (list.data?.pages ?? []).flatMap(page => page.items)
+  return <>
+    <SignupFacts values={places ? { 'Signed up': `${number(places.signedUp)} of ${number(places.limit)}`, 'Held for the waitlist': number(places.held), Waiting: number(places.waiting), Open: number(places.open) }
+      : unknown ? { 'Signed up': '—', 'Held for the waitlist': '—', Waiting: '—', Open: '—' } : undefined} />
+    {list.isError && !list.data ? <ErrorState error={list.error} onRetry={() => void list.refetch()} /> : <>
+      <DataTable className="op-table" loading={list.isPending} skeletonRows={6} rows={rows} rowKey={row => row.id} columns={signupColumns}
+        rowHref={row => row.standing ? `/operator/workspaces/${encodeURIComponent(row.id)}` : undefined} empty={<EmptyState title="No workspaces yet" />} />
+      {list.hasNextPage && <Button className="op-more" loading={list.isFetchingNextPage} onClick={() => void list.fetchNextPage()}>Load more</Button>}
+      {list.isError && list.data && <Alert tone="danger"><ErrorText error={list.error} /></Alert>}
+    </>}
+  </>
+}
+// One number. A raise lets the oldest on the waitlist in first; lowering it removes no one. The change is audited.
+function SetLimit() {
+  const places = useSignupPlaces().data
+  const [key, setKey] = useState<string | null>(null)
+  // The form decides on the places as they were when it opened, and keeps them while the dialog closes.
+  const shown = useRef<{ key: string; places: SignupPlaces } | null>(null)
+  if (key && places && shown.current?.key !== key) shown.current = { key, places }
+  return <>
+    <SetLimitTrigger disabled={!places} onClick={() => setKey(crypto.randomUUID())} />
+    <Dialog open={key !== null} onOpenChange={next => { if (!next) setKey(null) }} title="Set the sign-up limit">
+      {shown.current && <SignupLimitForm key={shown.current.key} idempotencyKey={shown.current.key} places={shown.current.places} onClose={() => setKey(null)} />}
+    </Dialog>
+  </>
+}
+function SignupLimitForm({ places, idempotencyKey, onClose }: { places: SignupPlaces; idempotencyKey: string; onClose: () => void }) {
+  const client = useQueryClient(), toast = useToast()
+  const [value, setValue] = useState(String(places.limit)), [tried, setTried] = useState(false)
+  const limit = Number(value), error = value.trim() === '' || !(Number.isInteger(limit) && limit >= 0 && limit <= 1_000_000) ? 'A whole number from 0 to 1,000,000.' : ''
+  const letIn = error ? 0 : Math.min(places.waiting, Math.max(0, limit - places.signedUp - places.held))
+  const hint = error ? '' : limit < places.limit ? 'Lowering it removes no one.' : letIn ? `Lets in ${number(letIn)} from the waitlist, oldest first.` : ''
+  const mutation = useMutation({
+    mutationFn: () => operatorApi.setSignupLimit(limit, { idempotencyKey }),
+    onSuccess: () => { toast('Limit saved', 'success'); void client.invalidateQueries({ queryKey: ['operator'] }); onClose() },
+  })
+  function submit(event: FormEvent) { event.preventDefault(); setTried(true); if (!error) mutation.mutate() }
+  return <form className="op-dialog-fields" onSubmit={submit} noValidate>
+    <Field label={`Places (${number(places.signedUp)} signed up)`} error={tried ? error : ''} hint={hint}><Input type="number" inputMode="numeric" min={0} max={1_000_000} step={1} autoFocus value={value} onChange={event => setValue(event.target.value)} /></Field>
+    <MutationError error={mutation.error} />
+    <div className="ui-dialog__footer"><Button disabled={mutation.isPending} onClick={onClose}>Cancel</Button><Button type="submit" variant="primary" loading={mutation.isPending}>Save limit</Button></div>
+  </form>
 }
 
 const flags = (row: OperatorQueueItem) => [row.paused && 'paused', row.quarantined > 0 && `${row.quarantined} quarantined`, row.watch && 'watched', row.strikes > 0 && `${row.strikes} ${row.strikes === 1 ? 'strike' : 'strikes'}`].filter(Boolean).join(' · ')
@@ -68,12 +131,19 @@ function Queue() {
   </>
 }
 
-const actionLabel = (row: OperatorAction) => label(row.action.replace(/^operator-/, '').replaceAll('-', '_'))
+const actionLabel = (row: OperatorAction) => row.action === 'operator-set-signup-limit' ? 'Set sign-up limit' : label(row.action.replace(/^operator-/, '').replaceAll('-', '_'))
+// 'platform' is no workspace: an operator role, a person's billing or the sign-up limit.
+const actionWorkspace = (row: OperatorAction) => row.workspaceId === 'platform' ? <span className="muted">—</span> : <Link to={`/operator/workspaces/${encodeURIComponent(row.workspaceId)}`} className="op-muted-id">{row.workspaceId}</Link>
+// What a change without a reason changed, from its before and after: the sign-up limit's old and new number.
+const actionReason = (row: OperatorAction) => {
+  const from = record(row.before).limit, to = record(row.after).limit
+  return row.reason ?? (row.action === 'operator-set-signup-limit' && typeof from === 'number' && typeof to === 'number' ? `${number(from)} → ${number(to)}` : null)
+}
 const actionColumns: Column<OperatorAction>[] = [
   { ...def(actionColumnDefs, 'action'), render: actionLabel },
   { ...def(actionColumnDefs, 'at'), render: row => <At value={row.at} /> },
-  { ...def(actionColumnDefs, 'workspace'), render: row => <Link to={`/operator/workspaces/${encodeURIComponent(row.workspaceId)}`} className="op-muted-id">{row.workspaceId}</Link> },
-  { ...def(actionColumnDefs, 'reason'), render: row => <span className="op-cell" title={row.reason ?? undefined}>{row.reason ?? '—'}</span> },
+  { ...def(actionColumnDefs, 'workspace'), render: actionWorkspace },
+  { ...def(actionColumnDefs, 'reason'), render: row => { const reason = actionReason(row); return <span className="op-cell" title={reason ?? undefined}>{reason ?? '—'}</span> } },
   { ...def(actionColumnDefs, 'ticket'), render: row => <span className="op-cell">{row.ticketRef ?? '—'}</span>, cardRender: row => row.ticketRef ? `Ticket ${row.ticketRef}` : row.via ?? '' },
 ]
 // A table row's whole story, for what a cell cuts short (a phone has no hover to show it).
@@ -96,8 +166,8 @@ function Actions() {
       {actions.isError && actions.data && <Alert tone="danger"><ErrorText error={actions.error} /></Alert>}
     </>}
     {shown && <DetailDialog title={actionLabel(shown)} onClose={() => setShown(null)} rows={[
-      ['When', when(shown.at)], ['Workspace', <Link to={`/operator/workspaces/${encodeURIComponent(shown.workspaceId)}`}>{shown.workspaceId}</Link>],
-      ['Reason', shown.reason], ['Ticket', shown.ticketRef], ['Via', shown.via], ['Request', shown.requestId ? <span className="op-muted-id">{shown.requestId}</span> : null],
+      ['When', when(shown.at)], ['By', shown.operatorEmail ? <PrivateAddress value={shown.operatorEmail} /> : shown.operatorId], ['Workspace', shown.workspaceId === 'platform' ? null : <Link to={`/operator/workspaces/${encodeURIComponent(shown.workspaceId)}`}>{shown.workspaceId}</Link>],
+      ['Reason', actionReason(shown)], ['Ticket', shown.ticketRef], ['Via', shown.via], ['Request', shown.requestId ? <span className="op-muted-id">{shown.requestId}</span> : null],
     ]} />}
   </>
 }

@@ -20,6 +20,8 @@
 .op-facts { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: var(--space-24); margin: 0; }
 .op-facts > div { min-width: 0; height: 56px; padding-top: var(--space-12); border-top: 1px solid var(--color-border); }
 .op-facts dt { height: 16px; color: var(--color-muted); font-family: var(--font-body); font-size: var(--text-xs); line-height: var(--leading-xs); }
+/* Sign-ups: four facts in one row; two rows of two on a phone. */
+.op-facts.op-facts--four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .op-facts dd { display: flex; align-items: center; height: 24px; margin: var(--space-4) 0 0; min-width: 0; overflow: hidden; font-family: var(--font-mono); font-size: var(--text-sm); font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Label and value rows, 32px each. */
@@ -107,7 +109,7 @@ a.op-cluster-rail__row[aria-current='page'] { background: var(--color-active-bg)
 @media (max-width: 640px) {
   .op-key-form { grid-template-columns: minmax(0, 1fr); }
   .op-note-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .op-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 var(--space-16); }
+  .op-facts, .op-facts.op-facts--four { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 var(--space-16); }
   .op-rows > div { grid-template-columns: 112px minmax(0, 1fr); }
   .data-toolbar.op-waitlist-tools { flex-wrap: nowrap; gap: var(--space-8); }
   .data-toolbar.op-waitlist-tools > .cluster { flex: 1 1 auto; width: auto; }

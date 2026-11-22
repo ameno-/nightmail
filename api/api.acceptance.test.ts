@@ -1363,6 +1363,184 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   runtime.config.accountRequiredAcr=[googleAcr];
 });
 
+// The sign-up limit (src/signups.ts): an operator opens a number of places. A new account signing in with a mailbox
+// its sign-in proves takes one while there is one, a raise lets the oldest waiting addresses in first, two people racing
+// for the last place can't both have it, and staff and invitees sign in as before, uncounted.
+test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one each, and staff and invitees pass uncounted', async t => {
+  const {drizzle} = await import('drizzle-orm/node-postgres');
+  const {loadConfig} = await import('./src/config.js');
+  const {createApp} = await import('./src/app.js');
+  const {PROVIDER_IDENTITY_CLAIM} = await import('./src/account-policy.js');
+  const db = await fixtureDatabase(t), app = createApp();
+  // A pool: two sign-ins race in their own transactions.
+  const pool = new pg.Pool({connectionString:FIXTURE_DATABASE_URL, max:4, connectionTimeoutMillis:5_000}); cleanup(t,()=>pool.end());
+  const origin = 'https://dashboard.example.org', issuer = 'https://signup-limit.example.org';
+  const googleAcr = 'urn:anomaly:acr:google', githubAcr = 'urn:anomaly:acr:github', emailAcr = 'urn:anomaly:acr:email';
+  const keys = generateKeyPairSync('ec',{namedCurve:'P-256'}), rp = generateKeyPairSync('ec',{namedCurve:'P-256'});
+  const runtime: import('./src/core.js').Runtime = { config:loadConfig({PUBLIC_URL:origin, ACCOUNT_ISSUER:issuer, ACCOUNT_CLIENT_ID:'dashboard',
+    ACCOUNT_CLIENT_PRIVATE_KEY:JSON.stringify({...rp.privateKey.export({format:'jwk'}),kid:'rp'}), BANE_ROOT_SECRET:'local-fixture-'.repeat(4), MULTI_TENANT:'true',
+    ACCOUNT_REQUIRED_ACR:`${googleAcr} ${githubAcr} ${emailAcr}`, AUTH_STAFF_GOOGLE_DOMAINS:'example.org'}),
+    db:drizzle(pool), snsCertificateState:new SnsCertificateState(), storage:{async put(){throw Error('unused');},async delete(){throw Error('unused');},async get(){throw Error('unused');}} };
+  type Person = { subject: string; email: string; acr: string; provider: 'google' | 'github' | null; hd: string | null };
+  // Each sign-in's code names its flow, so concurrent exchanges each get their own person and nonce.
+  const flows = new Map<string, { person: Person; nonce: string }>();
+  let pushed: URLSearchParams | undefined, peer = 0;
+  t.mock.method(globalThis,'fetch',async (url: string|URL, init?: RequestInit) => {
+    assert.equal(new URL(url).origin,issuer);
+    switch(new URL(url).pathname) {
+      case '/.well-known/openid-configuration': return Response.json({issuer,authorization_endpoint:issuer+'/authorize',token_endpoint:issuer+'/token',jwks_uri:issuer+'/keys',pushed_authorization_request_endpoint:issuer+'/par',response_modes_supported:['query']});
+      case '/par': pushed = new URLSearchParams(String(init?.body)); return Response.json({request_uri:'urn:fixture:request',expires_in:60},{status:201});
+      case '/keys': return Response.json({keys:[{...keys.publicKey.export({format:'jwk'}),kid:'op',alg:'ES256'}]});
+      case '/token': {
+        const flow = flows.get(new URLSearchParams(String(init?.body)).get('code')!)!, p = flow.person, now = Math.floor(Date.now()/1000);
+        const upstream = p.provider ? {[PROVIDER_IDENTITY_CLAIM]:{provider:p.provider,sub:`${p.provider}-${p.subject}`,email:p.email,email_verified:true,...p.hd ? {hd:p.hd} : {}}} : {};
+        const body=[{alg:'ES256',kid:'op'},{iss:issuer,aud:'dashboard',iat:now,exp:now+300,sub:p.subject,nonce:flow.nonce,acr:p.acr,email:p.email,email_verified:true,...upstream}].map(v=>Buffer.from(JSON.stringify(v)).toString('base64url')).join('.');
+        return Response.json({access_token:'fixture',token_type:'Bearer',id_token:body+'.'+Buffer.from(sign('sha256',Buffer.from(body),{key:keys.privateKey,dsaEncoding:'ieee-p1363'})).toString('base64url')});
+      }
+      default: throw Error('unexpected issuer endpoint');
+    }
+  });
+  const ip = () => `203.0.113.${peer}`;
+  const request = (path: string, method = 'GET', cookie = '', body?: object) => app.fetch(new Request(origin+path,{method,headers:{origin,cookie,'content-type':'application/json','x-nightmail-client-ip':ip()},body:body?JSON.stringify(body):undefined}),runtime);
+  // A sign-in in two halves: started here, finished when the account service sends the browser back.
+  async function begin(p: Person, callbackURL = origin+'/') {
+    peer++;
+    const start = await request('/api/auth/sign-in/account','POST','',{callbackURL});
+    assert.equal(start.status,200);
+    const code = randomUUID(), state = pushed!.get('state')!, cookie = start.headers.getSetCookie()[0]!.split(';')[0]!, from = ip();
+    flows.set(code,{person:p,nonce:pushed!.get('nonce')!});
+    return async () => {
+      const done = await app.fetch(new Request(origin+'/api/auth/callback/account?'+new URLSearchParams({code,state,iss:issuer}),{headers:{cookie,'sec-fetch-site':'cross-site','x-nightmail-client-ip':from}}),runtime);
+      const location = new URL(done.headers.get('location')!);
+      return { auth: location.searchParams.get('auth'), account: location.searchParams.get('account'), session: done.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.session_token='))?.split(';')[0] ?? '' };
+    };
+  }
+  const signIn = async (p: Person, callbackURL?: string) => (await begin(p, callbackURL))();
+  const people: Person[] = [];
+  const someone = (email: string, acr = googleAcr, provider: Person['provider'] = 'google', hd: string | null = null) => { const p = {subject:randomUUID(),email,acr,provider,hd}; people.push(p); return p; };
+  const gmail = (name: string) => someone(`${name}-${randomUUID().slice(0,8)}@gmail.com`);
+  const outcome = async (p: Person) => (await db.query('SELECT outcome FROM nightmail_signin_attempts WHERE issuer=$1 AND subject=$2',[issuer,p.subject])).rows[0]?.outcome;
+  const waiting = async (p: Person) => (await db.query('SELECT let_in_at IS NOT NULL AS held FROM nightmail_waitlist WHERE email=lower($1)',[p.email])).rows[0] ?? null;
+  const placeOf = async (account: string | null) => (await db.query('SELECT via FROM nightmail_signups WHERE user_id=$1',[account])).rows[0]?.via ?? null;
+  const started = (await db.query('SELECT now() AS at')).rows[0].at, initial = (await db.query('SELECT places FROM nightmail_signup_limit')).rows[0].places;
+  cleanup(t,async()=>{
+    await db.query('UPDATE nightmail_signup_limit SET places=$1',[initial]);
+    await db.query('UPDATE nightmail_waitlist SET let_in_at=NULL WHERE let_in_at>=$1',[started]);
+    await db.query('DELETE FROM nightmail_waitlist WHERE email=ANY($1)',[people.map(p=>p.email.toLowerCase())]);
+    await db.query('DELETE FROM nightmail_users WHERE id IN (SELECT user_id FROM nightmail_oidc_identities WHERE issuer=$1)',[issuer]);
+  });
+  type Places = { limit: number; signedUp: number; held: number; waiting: number; open: number };
+
+  // Staff sign up as before and take no place; one is the operator who sets the limit.
+  const staff = await signIn(someone(`staff-${randomUUID()}@example.org`,googleAcr,'google','example.org'));
+  assert.ok(staff.session && !await placeOf(staff.account));
+  await db.query("INSERT INTO platform_operators(user_id,role,reason) VALUES($1,'operator','sign-up limit acceptance fixture')",[staff.account]);
+  // The operator's numbers are the gate's: a place is a sign-up or one held for the waitlist, each counted once.
+  const places = async () => {
+    const response = await request('/v1/operator/signups','GET',staff.session);
+    assert.equal(response.status,200);
+    const seen = await response.json() as Places;
+    const {rows:[counted]} = await db.query(`SELECT (SELECT places FROM nightmail_signup_limit) AS "limit",(SELECT count(*)::int FROM nightmail_signups) AS "signedUp",
+      (SELECT count(*)::int FROM nightmail_waitlist WHERE let_in_at IS NOT NULL) AS held,(SELECT count(*)::int FROM nightmail_waitlist WHERE let_in_at IS NULL) AS waiting`);
+    assert.deepEqual(seen,{...counted,open:Math.max(0,counted.limit-counted.signedUp-counted.held)},'The count the operator sees is the one the gate keeps');
+    return seen;
+  };
+  const setLimit = async (limit: number) => {
+    const response = await request('/v1/operator/signups','PUT',staff.session,{limit});
+    assert.equal(response.status,200);
+    return await response.json() as Places & { letIn: number };
+  };
+  // Closed: no place open, so a new person is waitlisted exactly as before.
+  const before = await places();
+  await setLimit(before.signedUp+before.held);
+  const [oldest, second, third] = [gmail('oldest'), someone(`second-${randomUUID().slice(0,8)}@example.net`,emailAcr,null), gmail('third')];
+  for (const p of [oldest, second, third]) {
+    assert.equal((await signIn(p)).auth,'waitlist');
+    assert.equal(await outcome(p),'not_approved');
+  }
+  // The oldest waiting addresses in the whole list, so a raise reaches them first.
+  for (const [i, p] of [oldest, second, third].entries()) await db.query("UPDATE nightmail_waitlist SET first_at=timestamptz '2001-01-01'+$2*interval '1 day' WHERE email=lower($1)",[p.email,i]);
+  const closed = await places();
+  assert.equal(closed.open,0);
+
+  // A raise of two lets the two oldest in: their places are held, and nobody else gets them.
+  const raised = await setLimit(closed.limit+2);
+  assert.deepEqual([raised.letIn,raised.held,raised.open],[2,closed.held+2,0]);
+  assert.deepEqual([await waiting(oldest),await waiting(second),await waiting(third)],[{held:true},{held:true},{held:false}]);
+  const audit = (await db.query("SELECT workspace_id,operator_id,before,after FROM hosted_operator_audit WHERE action='operator-set-signup-limit' AND operator_id=$1 ORDER BY at DESC LIMIT 1",[staff.account])).rows[0];
+  assert.deepEqual(audit,{workspace_id:'platform',operator_id:staff.account,before:{limit:closed.limit},after:{limit:closed.limit+2,letIn:2}},'Every change is audited: who, before and after');
+  const latecomer = gmail('latecomer');
+  assert.equal((await signIn(third)).auth,'waitlist','A place held for an older address is not the next arrival\'s');
+  assert.equal((await signIn(latecomer)).auth,'waitlist');
+
+  // The oldest signs in with the Gmail address it waited with: in, with a workspace of its own, on the place held for it.
+  const first = await signIn(oldest);
+  assert.ok(first.session);
+  assert.equal(await outcome(oldest),'signed_in:signup');
+  const me = await (await request('/v1/me','GET',first.session)).json() as {workspaces:{id:string;role:string}[]};
+  assert.deepEqual(me.workspaces.map(w=>w.role),['owner']);
+  assert.deepEqual([await placeOf(first.account),await waiting(oldest)],['waitlist',null]);
+  // Admission rests on what the sign-in proves: GitHub vouches for the second address but proves no mailbox, so its
+  // place stays held; an emailed link proves it.
+  Object.assign(second,{acr:githubAcr,provider:'github'});
+  assert.equal((await signIn(second)).auth,'waitlist');
+  assert.deepEqual(await waiting(second),{held:true});
+  Object.assign(second,{acr:emailAcr,provider:null});
+  const viaLink = await signIn(second);
+  assert.deepEqual([await outcome(second),await placeOf(viaLink.account)],['signed_in:signup','waitlist']);
+  // One place per person: another account with an address that is already a verified user's takes none.
+  assert.equal((await signIn(someone(oldest.email))).auth,'error');
+  const taken = await places();
+  assert.deepEqual([taken.signedUp,taken.held,taken.open],[closed.signedUp+2,closed.held,0]);
+
+  // Two people race for the last place: every waiting address is let in first, leaving one open place, and both
+  // decide while it is free. Exactly one gets it; the other is waitlisted.
+  const all = await setLimit(taken.limit+taken.waiting+1);
+  assert.deepEqual([all.letIn,all.open],[taken.waiting,1]);
+  const [left, right] = [gmail('left'), gmail('right')];
+  const finish = [await begin(left), await begin(right)], watcher = await fixtureDatabase(t);
+  await db.query('BEGIN');
+  await db.query('SELECT FROM nightmail_signup_limit WHERE singleton FOR UPDATE');
+  const racing = Promise.all(finish.map(done=>done()));
+  let queued = 0;
+  for (let i = 0; i < 100 && queued < 2; i++) {
+    queued = (await watcher.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE '%nightmail_signup_limit%FOR UPDATE%'")).rows[0].n;
+    if (queued < 2) await new Promise(resolve=>setTimeout(resolve,50));
+  }
+  await db.query('COMMIT');
+  const raced = await racing;
+  assert.equal(queued,2,'Both sign-ins waited for the last place at once');
+  assert.deepEqual(raced.map(r=>r.auth).sort(),[null,'waitlist']);
+  const winner = raced.find(r=>r.session)!;
+  assert.equal(await placeOf(winner.account),'open');
+  assert.equal(((await (await request('/v1/me','GET',winner.session)).json()) as {workspaces:unknown[]}).workspaces.length,1,'A new person under the limit gets in with a workspace');
+  const full = await places();
+  assert.deepEqual([full.signedUp,full.open],[taken.signedUp+1,0]);
+
+  // At the limit, staff and an invitee sign in as before, and neither takes a place.
+  const staffer = someone(`staff-${randomUUID()}@example.org`,googleAcr,'google','example.org'), moreStaff = await signIn(staffer);
+  assert.deepEqual([await outcome(staffer),await placeOf(moreStaff.account)],['signed_in:staff',null]);
+  const invitee = gmail('invitee');
+  const invitation = await (await request('/v1/workspaces/current/invitations','POST',staff.session,{email:invitee.email,role:'member'})).json() as {acceptUrl:string};
+  const joined = await signIn(invitee, invitation.acceptUrl);
+  assert.deepEqual([await outcome(invitee),await placeOf(joined.account)],['signed_in:invitation',null]);
+  assert.deepEqual(await places(),full);
+
+  // Lowering it removes no one: every account that took a place keeps it and still signs in, and held places stay.
+  const lowered = await setLimit(0);
+  assert.deepEqual([lowered.letIn,lowered.signedUp,lowered.held],[0,full.signedUp,full.held]);
+  for (const session of [first.session,viaLink.session,winner.session]) assert.equal((await request('/v1/me','GET',session)).status,200);
+  assert.equal((await signIn(gmail('after'))).auth,'waitlist');
+
+  // Every workspace, newest first, with its owner: the one the oldest waiting address made is there.
+  const listed = await (await request('/v1/operator/signups/workspaces?limit=200','GET',staff.session)).json() as {data:{id:string;owner:string|null;sent:number;standing:string|null}[]};
+  const mine = me.workspaces[0]!.id;
+  assert.deepEqual(listed.data.filter(w=>w.id===mine).map(w=>[w.owner,w.sent]),[[oldest.email,0]]);
+  const page = await (await request('/v1/operator/signups/workspaces?limit=1','GET',staff.session)).json() as {data:{id:string}[];nextCursor:string};
+  const next = await (await request(`/v1/operator/signups/workspaces?limit=1&cursor=${encodeURIComponent(page.nextCursor)}`,'GET',staff.session)).json() as {data:{id:string}[]};
+  assert.deepEqual([page.data[0]!.id,next.data[0]!.id],listed.data.slice(0,2).map(w=>w.id));
+});
+
 // Several accounts in one browser (account switcher): one session cookie per connected account, each request acts as
 // exactly one of them (X-Bane-Account, else the browser default), and nothing of one account reaches another.
 test('Account switcher: two accounts in one browser switch, stay apart on every route and sign out alone', async t => {
