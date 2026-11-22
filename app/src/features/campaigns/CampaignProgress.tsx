@@ -27,8 +27,8 @@ const atUtc = (value: string) => `${date(value)} · ${time(value)} UTC`
 /** What people see as the state: a launch still checking messages for a future send is already "scheduled" to them. */
 export const campaignDisplayStatus = (campaign: Pick<Campaign, 'status' | 'scheduledAt' | 'archivedAt'>) => campaign.archivedAt ? 'archived' : campaign.status === 'preparing' && campaign.scheduledAt && Date.parse(campaign.scheduledAt) > Date.now() ? 'scheduled' : campaign.status
 
-/** A sent or sending campaign's mail in Logs, all of it or one status's. */
-export const campaignLogs = (id: string, status?: string) => `/logs?campaign=${encodeURIComponent(id)}${status ? `&status=${status}` : ''}`
+/** A sent or sending campaign's mail in Logs, all of it or one status's, over the 30 days Logs keeps (never its default range). */
+export const campaignLogs = (id: string, status?: string) => `/logs?campaign=${encodeURIComponent(id)}${status ? `&status=${status}` : ''}&range=30d`
 /** A metric row: the label, then its figure. With `to`, the row opens that campaign mail in Logs. */
 export function SummaryLine({ label, figure, to }: { label: ReactNode; figure: ReactNode; to?: string }) {
   return to ? <Link className="campaign-summary-line campaign-summary-link" to={to}><span>{label}</span><span>{figure}</span></Link>
@@ -61,12 +61,12 @@ export function CampaignProgress({ campaign }: { campaign: Campaign }) {
   const queued = byStatus.queued ?? 0
   const processing = byStatus.attempting ?? 0
   const processed = Math.min(total, Math.max(0, materialized - queued - processing + canceledBeforeQueue))
-  // Each outcome opens its emails in Logs; recipients canceled before they were queued have none.
+  // Each outcome opens its emails in Logs. Canceled doesn't: recipients canceled before they were queued have no email.
   const outcomes = [
     ['Delivered', byStatus.delivered, 'delivered'], ['Bounced', byStatus.bounced, 'bounced'],
     ['Complaints', byStatus.complained, 'complained'], ['Rejected', byStatus.rejected, 'rejected'],
     ['Rendering failed', byStatus.rendering_failed, 'rendering_failed'], ['Suppressed', byStatus.suppressed, 'suppressed'],
-    ['Canceled', (byStatus.canceled ?? 0) + canceledBeforeQueue, byStatus.canceled ? 'canceled' : undefined], ['Acceptance unknown', byStatus.acceptance_unknown, 'acceptance_unknown'],
+    ['Canceled', (byStatus.canceled ?? 0) + canceledBeforeQueue, undefined], ['Acceptance unknown', byStatus.acceptance_unknown, 'acceptance_unknown'],
     ['Simulated', byStatus.simulated, 'simulated'],
   ] as const
   return <div className="campaign-audience-summary">

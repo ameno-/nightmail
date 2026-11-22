@@ -612,6 +612,7 @@ const useCampaignStats = (campaign: Campaign | undefined) => useApiQuery(['campa
 const day = (value: string) => date(value, { month: 'short', day: 'numeric', ...(new Date(value).getFullYear() === new Date().getFullYear() ? {} : { year: 'numeric' }) })
 
 // Only the outcomes that happened, each opening its emails in Logs; opens and clicks as the newsletter's issues show them.
+// A count links only when Logs lists exactly that many: Canceled, and Recipients with some never queued, stay plain.
 function CampaignResults({ campaign }: { campaign: Campaign }) {
   const byStatus = campaign.counts?.byStatus ?? {}
   const total = Math.max(campaign.counts?.total ?? 0, campaign.delivery?.total ?? 0)
@@ -633,10 +634,10 @@ function CampaignResults({ campaign }: { campaign: Campaign }) {
     ...expired ? [{ label: 'Failed', count: totals?.failed ?? null }]
       : failures.map(status => ({ label: failures.length > 1 ? label(status) : 'Failed', count: byStatus[status]!, status })),
     { label: 'Suppressed', count: expired ? null : byStatus.suppressed ?? 0, status: 'suppressed' },
-    { label: 'Canceled', count: expired ? null : (byStatus.canceled ?? 0) + (campaign.delivery?.canceled ?? 0), status: byStatus.canceled ? 'canceled' : undefined },
+    { label: 'Canceled', count: expired ? null : (byStatus.canceled ?? 0) + (campaign.delivery?.canceled ?? 0) },
   ]
   return <div className="campaign-audience-summary">
-    <SummaryLine label={<strong>Recipients</strong>} figure={number(total)} to={campaign.counts?.total ? logs() : undefined} />
+    <SummaryLine label={<strong>Recipients</strong>} figure={number(total)} to={campaign.counts?.total && campaign.counts.total === total ? logs() : undefined} />
     {rows.filter(row => row.always || (typeof row.count === 'number' ? row.count > 0 : Boolean(row.count))).map(row => <SummaryLine key={row.label} label={row.label}
       figure={row.count === null ? '—' : typeof row.count === 'number' ? number(row.count) : row.count} to={row.status && typeof row.count === 'number' && row.count > 0 ? logs(row.status) : undefined} />)}
   </div>
