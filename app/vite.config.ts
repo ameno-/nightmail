@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { defineConfig, type Plugin } from 'vite'
@@ -33,8 +33,7 @@ const fileHeaders = (): Plugin => {
         first.add(name)
         if (file.type === 'chunk') for (const dependency of [...file.imports, ...file.viteMetadata?.importedCss ?? []]) add(dependency)
       }
-      // The dashboard's entry only: the commercial's two files (below) take their turn in the sorted list after it. Then
-      // what the homepage's first screen loads (home-shell.ts).
+      // The dashboard's entry, then what the homepage's first screen loads (home-shell.ts).
       for (const file of Object.values(bundle)) if (file.type === 'chunk' && file.isEntry && file.name === 'index') add(file.fileName)
       for (const file of homeFirstFiles(Object.keys(bundle))) add(file)
       const fonts = readdirSync(resolve(publicDir, 'fonts')).sort().map(name => `fonts/${name}`)
@@ -88,33 +87,11 @@ const brandedBootScript = (): Plugin => {
   }
 }
 
-// /commercial/ is the television commercial (commercial/README.md): a page of its own with one script and one stylesheet,
-// so no dashboard page loads any of it and it loads none of the dashboard. The dev server serves commercial/index.html
-// as it is. The build takes the page's script as a second entry and writes the page with the built files' names here:
-// as a second HTML entry it would share Vite's module-preload polyfill with the dashboard as a chunk, and every
-// dashboard page would fetch one more file.
-const commercial = { page: fileURLToPath(new URL('./commercial/index.html', import.meta.url)), script: fileURLToPath(new URL('./commercial/src/main.js', import.meta.url)), tag: '<script type="module" src="./src/main.js"></script>' }
-const commercialPage = (): Plugin => {
-  let outDir = ''
-  return {
-    name: 'nightmail:commercial-page', apply: 'build',
-    configResolved(config) { outDir = resolve(config.root, config.build.outDir) },
-    writeBundle(_options, bundle) {
-      const entry = Object.values(bundle).find(file => file.type === 'chunk' && file.isEntry && file.name === 'commercial')
-      const source = readFileSync(commercial.page, 'utf8')
-      if (entry?.type !== 'chunk' || !source.includes(commercial.tag)) return this.error(`The commercial's page needs its entry and ${commercial.tag}.`)
-      const styles = [...entry.viteMetadata?.importedCss ?? []].map(file => `    <link rel="stylesheet" href="/${file}" />\n`).join('')
-      mkdirSync(resolve(outDir, 'commercial'), { recursive: true })
-      writeFileSync(resolve(outDir, 'commercial/index.html'), source.replace('  </head>', `${styles}  </head>`).replace(commercial.tag, `<script type="module" src="/${entry.fileName}"></script>`))
-    },
-  }
-}
-
 export default defineConfig({
   define: { __NIGHTMAIL_BUILD__: JSON.stringify(buildSha) },
   // (The homepage's station kit is inlined whatever its size: it is one lazily loaded stylesheet, features/home/machines.tsx.)
-  build: { assetsInlineLimit: file => file.includes('/features/home/kit/') || undefined, rolldownOptions: { input: { index: fileURLToPath(new URL('./index.html', import.meta.url)), commercial: commercial.script } } },
-  plugins: [slimReactEmail, legalMarkdown, react(), fileHeaders(), publicOrigin, brandedBootScript(), commercialPage(), homeShell()],
+  build: { assetsInlineLimit: file => file.includes('/features/home/kit/') || undefined, rolldownOptions: { input: { index: fileURLToPath(new URL('./index.html', import.meta.url)) } } },
+  plugins: [slimReactEmail, legalMarkdown, react(), fileHeaders(), publicOrigin, brandedBootScript(), homeShell()],
   server: {
     host: '127.0.0.1', port: 5173, strictPort: true,
     proxy: Object.fromEntries(['/v1', '/api/auth', '/mcp', '/.well-known', '/unsubscribe', '/health', '/openapi.json', '/internal'].map(path => [path, {target: 'http://127.0.0.1:8793', changeOrigin: false}])),

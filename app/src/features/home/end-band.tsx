@@ -2,11 +2,11 @@
 // is. It is nine solids in the machine's make, seen as the machine is seen: each letter's face is the brand's outline
 // itself (lib/marks.ts: unchanged, in the brand's ink by day and its paper by night), given depth, with its top and the
 // side that is seen in the machine's tones. A few of the machine's letters have come to rest on top of them.
-import { DX, DY, type Inset } from './sorter/plan'
+import { DX, DY, type Inset } from './plan'
 import { WORDMARK } from '../../lib/marks'
 import { contours, edges } from './outline'
 
-// Towards the machine's light, across and up the page (sorter/gl.ts LIGHT; not imported: that is the renderer's chunk).
+// Towards the machine's light, across and up the page.
 const LIGHT = [.24, .8]
 /** How much of the cap height stands over the page's edge. (More, and it is not cut; less, and the L loses its foot.) */
 const SEEN = .86

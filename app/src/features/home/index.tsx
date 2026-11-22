@@ -2,7 +2,6 @@ import { useEffect, useSyncExternalStore, type ReactNode } from 'react'
 import { productName } from '../../../../api/src/brand'
 import { FactoryHome } from './factory-home'
 import { afterFirstPicture, shown, UPRIGHT } from './first-picture'
-import { SorterHome } from './sorter-home'
 
 /** What the page's button does: signs a visitor in (Get started), or opens the dashboard for someone signed in. */
 export type HomeStart = { signedIn: true } | { signedIn: false; onSignIn: () => void; onSignInIntent: (event: { button: number }) => void; busy: boolean }
@@ -34,5 +33,5 @@ export function HomePage(props: HomeProps) {
     })
     return () => { wait(); cancel() }
   }, [signedIn])
-  return home === 'sorter' ? <SorterHome {...props} /> : <FactoryHome key={home} format={home} {...props} />
+  return <FactoryHome key={home} format={home} {...props} />
 }

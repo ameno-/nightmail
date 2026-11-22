@@ -18,12 +18,10 @@ import { UPRIGHT } from './frame'
 // (App.tsx, beside the session check): which frame a window gets, and its poster. home.html paints the same pictures
 // before any of the app's code (home-shell.ts), so the page's own takes them from the cache.
 
-// Which homepage a window gets (frame.ts: by its shape). `?home=` shows one anywhere: `phone`, `desktop`, or `sorter`
-// (sorter-home.tsx, the machine the page had before the renders; og.png is still its card).
+// Which homepage a window gets (frame.ts: by its shape). `?home=` shows one anywhere: `phone` or `desktop`.
 export { UPRIGHT }
-export type Shown = Format | 'sorter'
-const forced = () => { const home = new URLSearchParams(location.search).get('home'); return home === 'sorter' || home === 'phone' || home === 'desktop' ? home : null }
-export const shown = (): Shown => forced() ?? (matchMedia(UPRIGHT).matches ? 'phone' : 'desktop')
+const forced = () => { const home = new URLSearchParams(location.search).get('home'); return home === 'phone' || home === 'desktop' ? home : null }
+export const shown = (): Format => forced() ?? (matchMedia(UPRIGHT).matches ? 'phone' : 'desktop')
 
 // Each poster in AVIF at three sizes, and in JPEG at two for a browser without AVIF, the smallest each window has pixels
 // for: the frame is about the window's width (`sizes`), a little wider where it covers a squarer one. A phone's has
@@ -40,7 +38,7 @@ export const STILL_SPRITES = [phoneBoard0, phoneBoard1, phoneBoard2], STILL_BOAR
  *  it finds its JPEG when the page renders). */
 export function preloadFirstPicture() {
   const format = shown()
-  if (format === 'sorter' || document.getElementById('home-shell')) return
+  if (document.getElementById('home-shell')) return
   const link = document.createElement('link')
   link.rel = 'preload'; link.as = 'image'; link.type = 'image/avif'; link.href = POSTERS[format].src; link.fetchPriority = 'high'
   link.setAttribute('imagesrcset', POSTERS[format].avif); link.setAttribute('imagesizes', POSTER_SIZES)

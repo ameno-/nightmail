@@ -17,7 +17,7 @@ Every change reaches production through `dev`: a PR merges into `dev`, the dev d
 
 | When | Job | What it proves |
 | --- | --- | --- |
-| PR, merge group, `dev` push | `build` | Types, SDK and docs regenerate cleanly, both Workers bundle, the public API stays compatible, the commercial at `/commercial/` plays through without a GPU (`app/commercial/README.md`), and the **pre-merge invariants** below |
+| PR, merge group, `dev` push | `build` | Types, SDK and docs regenerate cleanly, both Workers bundle, the public API stays compatible, and the **pre-merge invariants** below |
 | PR, merge group, `dev` push | `acceptance` | Three isolated Postgres/S3 shards (integration, simulated, simulated-heavy), each with the **deadlock guard** |
 | PR, merge group, `dev` push | `preview` | The real Worker under `wrangler dev` on a database upgraded from `dev`'s schema; see **Preview stack** |
 | PR, merge group, `dev` push | `audit`, `gateway`, `cls`, `support` | Dependency advisories, the Rust mail gateway (built only when `gateway/` or `ci.yml` changed), layout shift on every main page in one job, and the support Worker tests |
@@ -149,7 +149,7 @@ With late fonts the fallbacks keep most pages still, but no fallback wraps every
 
 1. **Migrations, fresh and upgraded.** `dev`'s migrations (from the commit the PR lands on) then the PR's, on one database; the PR's alone on another. Both must apply, and `pg_dump --schema-only` of the two must be identical. A migration numbered before one `dev` already applied changes the column order between them, so this fails with "renumber".
 2. **The real Worker.** `wrangler dev` (workerd) with `wrangler.dev.jsonc` as is: `assets` and `run_worker_first`, Durable Objects, queues, rate limits, crons. Only what exists solely on Cloudflare is dropped (custom domain, account, placement, Browser Rendering, observability). Hyperdrive points at the upgraded database, and SES is simulated.
-3. **Every route reaches the Worker.** `api/scripts/preview-smoke.ts` asks each of the ~290 routes anonymously. Each must answer with an `x-request-id` and below 500, so Workers Assets never answers (405 or the dashboard HTML) and no module fails to load in workerd. The dashboard's own paths must still serve its HTML, `/commercial/` its own page, and the scheduled handler runs once.
+3. **Every route reaches the Worker.** `api/scripts/preview-smoke.ts` asks each of the ~290 routes anonymously. Each must answer with an `x-request-id` and below 500, so Workers Assets never answers (405 or the dashboard HTML) and no module fails to load in workerd. The dashboard's own paths must still serve its HTML, and the scheduled handler runs once.
 
 **When it fails:** the annotation names the route or the schema difference. For a route, add its prefix to `run_worker_first` in both wrangler configs (the `build` check usually catches it first). For a schema difference, renumber the migration after `dev`'s newest. For a 5xx, find the request ID in the job's wrangler log. Locally, from `api/` with the dashboard built and a disposable Postgres: `BASE=$(git merge-base HEAD origin/dev) PGPORT=<port> PG_CONTAINER=<container> bash ../.github/scripts/preview.sh`.
 

@@ -4,7 +4,7 @@ import type { Plugin } from 'vite'
 import { productName } from '../api/src/brand.ts'
 import type { Format, Manifest } from './src/features/home/factory/manifest.ts'
 import { frameOf, UPRIGHT } from './src/features/home/frame.ts'
-import { toneVars } from './src/features/home/sorter/tones.ts'
+import { toneVars } from './src/features/home/tones.ts'
 
 // home.html: the homepage's first screen, painted from the HTML alone. A hosted installation's Worker answers "/" with
 // it (api/src/worker.ts); every other path, and "/" on a self-hosted one, gets index.html as before. It is index.html

@@ -59,8 +59,6 @@ jobs:
           if [[ $GITHUB_EVENT_NAME == pull_request ]]; then BASE=$(git rev-parse HEAD^1); fi
           node --import tsx scripts/check-premerge.ts --base "$BASE"
       - run: cd app && bun run build
-      # /commercial/ draws in WebGPU, which no runner has: this plays the whole show into its display lists instead.
-      - run: cd app && bun run commercial:smoke
       - name: Build API and bundle both Workers without deploying
         working-directory: api
         env:
