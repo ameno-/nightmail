@@ -1,4 +1,5 @@
 import { Fragment } from 'react'
+import { useSearchParams } from 'react-router'
 import { SearchField, ControlSkeleton, FieldSkeleton, LoadingRegion, PageHeader, SectionHeader, Select, SkeletonText, TableSkeleton, Tabs, type SkeletonColumn } from '../../components/ui'
 import { AudienceHeader } from './header'
 import { consentTitle, statusOptions } from './consent'
@@ -18,7 +19,10 @@ export const contactColumns: SkeletonColumn[] = [
   { key: 'lists', label: 'Lists', width: '20%', card: 'hide' },
   { key: 'created', label: 'Added', width: '17%', skeleton: <SkeletonText width={95} />, card: 'inline' },
 ]
-export const memberColumns: SkeletonColumn[] = [contactColumns[0], contactColumns[1], { key: 'suppression', label: 'Suppression reason', width: '38%', card: 'line' }, contactColumns[4]]
+const memberColumns: SkeletonColumn[] = [contactColumns[0], contactColumns[1], { key: 'suppression', label: 'Suppression reason', width: '38%', card: 'line' }, contactColumns[4]]
+// A consent tab already names the status, and only Suppressed has reasons to show; a card keeps the reason column's
+// line, which shows the name when there is no reason.
+export const memberColumnsFor = (status: string): SkeletonColumn[] => memberColumns.filter(column => !(status && column.key === 'status')).map(column => column.key === 'suppression' && status !== 'suppressed' ? { ...column, table: false } : column)
 export const listColumns: SkeletonColumn[] = [
   { key: 'name', label: 'Name', width: '24%', card: 'title' },
   // A phone card gives consent two lines, two counts each, so all four fit at any width a count reaches.
@@ -52,7 +56,9 @@ export function AudienceSummarySkeleton() {
   return <div className="audience-summary cluster">{[100, 115, 110, 125].map(width => <SkeletonText key={width} width={width} />)}</div>
 }
 export function AudienceMembersSkeleton() {
-  return <><Tabs value="" onValueChange={() => {}} items={[{ value: '', label: 'All members' }, ...statusOptions]} /><div className="data-toolbar"><ControlSkeleton width={320} /></div><TableSkeleton columns={memberColumns} rows={8} pagination /></>
+  const [params] = useSearchParams()
+  const status = statusOptions.some(option => option.value === params.get('status')) ? params.get('status')! : ''
+  return <><Tabs value="" onValueChange={() => {}} items={[{ value: '', label: 'All members' }, ...statusOptions]} /><div className="data-toolbar"><ControlSkeleton width={320} /></div><TableSkeleton columns={memberColumnsFor(status)} rows={8} pagination /></>
 }
 export function ListDetailBodySkeleton() {
   return <LoadingRegion label="Loading list"><AudienceMembersSkeleton /></LoadingRegion>

@@ -4,7 +4,7 @@ import { useApiDef, useApiQuery } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { AudienceList, Contact } from '../../data/types'
 import { DataTable, Input, SkeletonText, StatusBadge } from '../../components/ui'
-import { contactColumns, memberColumns } from './skeletons'
+import { contactColumns, memberColumnsFor } from './skeletons'
 import { date as formatDate, number } from '../../lib/format'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { AddressText } from '../../components/AddressText'
@@ -79,8 +79,8 @@ function listsText(row: Contact, lists: AudienceList[]) {
   return !count ? '—' : first ? count > 1 ? `${first} +${count - 1}` : first : `${count} list${count === 1 ? '' : 's'}`
 }
 const listsTitle = (row: Contact, lists: AudienceList[]) => listNames(row, lists).join(', ') || undefined
-export function ContactTable({ contacts, lists = [], members = false, loading = false, minRows = pageSize, listsLoading = false, tableRef, empty }: { contacts: Contact[]; lists?: AudienceList[]; members?: boolean; loading?: boolean; minRows?: number; listsLoading?: boolean; tableRef?: (node: HTMLDivElement | null) => void; empty?: ReactNode }) {
-  const columns = members ? memberColumns : contactColumns
+export function ContactTable({ contacts, lists = [], members = false, status, loading = false, minRows = pageSize, listsLoading = false, tableRef, empty }: { contacts: Contact[]; lists?: AudienceList[]; members?: boolean; status?: string; loading?: boolean; minRows?: number; listsLoading?: boolean; tableRef?: (node: HTMLDivElement | null) => void; empty?: ReactNode }) {
+  const columns = members ? memberColumnsFor(status ?? '') : contactColumns
   return <DataTable className="audience-contacts" tableRef={tableRef} rows={contacts} loading={loading} skeletonRows={minRows} minRows={minRows} rowKey={row => row.id} rowHref={row => `/audience/contacts/${row.id}`} empty={empty} columns={columns.map(column => ({ ...column, cardRender: column.key === 'name' ? (row: Contact) => <span title={nameTitle(row.name)}>{row.name ? <AddressText text={row.name} /> : 'No name'}</span>
     // A member card's second line: the suppression reason when there is one, else the name (never an empty dash).
     : column.key === 'suppression' ? (row: Contact) => row.suppressionReason ? <span title={suppressionText(row.suppressionReason)}>{suppressionText(row.suppressionReason)}</span> : <span title={nameTitle(row.name)}>{row.name ? <AddressText text={row.name} /> : 'No name'}</span>
