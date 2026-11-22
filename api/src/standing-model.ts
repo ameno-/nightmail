@@ -4,12 +4,13 @@ import { productName } from './brand.js'
 //
 //   factor score  s = 100 × clamp((bad − x) ÷ (bad − good), 0, 1), x a rate decayed with a 30-day half-life
 //   quality       Q = Σ weight·s ÷ Σ weight over measured factors (neutral ones drop out, the rest re-weigh)
-//   evaluation    a new workspace's first 100 real recipients: 100 a day until they were accepted and their delivery
-//                 results are in (90% of them, or an hour after the 100th), then the score is their quality alone
+//   evaluation    a new workspace's first EVALUATION.recipients real recipients, at most that many in 24 hours, until
+//                 they were accepted and their delivery results are in (90% of them, or an hour after the last), then
+//                 the score is their quality alone
 //   score         Q, recomputed from all the evidence (counted hourly; no prior, no daily movement limit): complaints
 //                 that arrive days after the evaluation move it as soon as they are counted
-//   growth        for 72 clean hours after a new sender's evaluation, a sponsor's growing workspaces may send at most 1,000
-//                 recipients in a rolling hour, then twice the distinct recipients of its last mature, clean hour; a
+//   growth        for GROWTH.hours clean hours after a new sender's evaluation, a sponsor's growing workspaces may send at
+//                 most 1,000 recipients in a rolling hour, then twice the distinct recipients of its last mature, clean hour; a
 //                 workspace with a clean track record from before the pace existed, or an operator override, skips it
 //   limit         none at 75 and up (good standing); under it the bands below, dropping only 2 points under a band
 //   ladder        notice → warn → restrict (marketing held) → pause (all sending), each line a count and a rate; a
@@ -26,12 +27,16 @@ export const GOOD_STANDING = 75;
 export const LIMIT_BANDS: readonly { min: number; limit: number | null }[] = [
   { min: GOOD_STANDING, limit: null }, { min: 70, limit: 500 }, { min: 65, limit: 200 }, { min: -Infinity, limit: 100 },
 ];
+/** The bottom band's limit: a second strike halves a limit no lower than this. */
+const LOWEST_BAND = LIMIT_BANDS[LIMIT_BANDS.length - 1]!.limit!;
 /**
- * The evaluation: a new workspace's first 100 real recipients go at the normal pace and it can send no more until their
- * delivery results are in (90% of them delivered or bounced, or an hour after the 100th was accepted). Hard bounces and
- * the spam screen, the signs of a bad list, arrive within minutes, so this is the smallest wait that has them.
+ * The evaluation: a new workspace's first 500 real recipients go at the normal pace and it can send no more until their
+ * delivery results are in (90% of them delivered or bounced, or an hour after the last was accepted). Hard bounces and
+ * the spam screen, the signs of a bad list, arrive within minutes, so this is the smallest wait that has them. 500 lets a
+ * launch to a few hundred users through without a stop; the ladder's bounce and complaint lines apply to them as to any
+ * mail. The one definition: config's hostedSendCaps, the job and the API's and dashboard's copy read it from here.
  */
-export const EVALUATION = { recipients: 100, limit: 100, resolved: 0.9, waitMinutes: 60 } as const;
+export const EVALUATION = { recipients: 500, limit: 500, resolved: 0.9, waitMinutes: 60 } as const;
 /** prior: the score with nothing measured at all (no real mail in 180 days). */
 export const SCORE = { prior: 60, halfLifeDays: 30, hysteresis: 2, historyDays: 180 };
 /**
@@ -41,19 +46,19 @@ export const SCORE = { prior: 60, halfLifeDays: 30, hysteresis: 2, historyDays: 
 export const FREEZE_FLOOR = 10_000;
 /**
  * Growth after the evaluation, so a clean evaluation cannot be followed by a full-pace blast before any feedback exists.
- * For 72 clean hours (a ladder step from warn up starts them again) a sponsor's growing workspaces share one rolling-hour
+ * For 24 clean hours (a ladder step from warn up starts them again) a sponsor's growing workspaces share one rolling-hour
  * allowance, enforced in the dispatch claim for every stream (hosted_burst_ok): 1,000 recipients, and after each
  * completed hour that is feedback-mature (90% of its accepted recipients delivered or bounced) and clean (hard bounces
  * under 2%, no complaints, quality no more than 2 points below the last growth), twice that hour's distinct real
  * recipients if that is more. Stale feedback, a notice or worse, or worsening quality stop the growth; nothing lowers
  * it. An operator can lift it for a workspace. A good sender doubles every hour: about a million an hour after ten.
  */
-export const GROWTH = { start: 1_000, factor: 2, hours: 72, resolved: 0.9, bounceRate: 0.02, qualityDrop: 2 } as const;
+export const GROWTH = { start: 1_000, factor: 2, hours: 24, resolved: 0.9, bounceRate: 0.02, qualityDrop: 2 } as const;
 /**
  * The growth pace is for new senders only. A workspace skips it (and leaves it, if it is on it) with an active operator
  * daily-limit override, or with a clean track record from before the pace existed: SES acceptances before its baseline
  * (the pace's rollout, for workspaces that existed then; none for later ones) and before its evaluation, in the 30
- * completed UTC days before that, leaving out its first 100 (its evaluation's seeds). The record needs mail on 3 days, 300
+ * completed UTC days before that, leaving out its evaluation's recipients (its seeds). The record needs mail on 3 days, 300
  * distinct real recipients at more than one domain, 90% of them resolved, hard bounces under 2% and no complaints, and the
  * workspace in good standing at ok. Mail accepted later, or without an acceptance event, never counts.
  */
@@ -77,10 +82,14 @@ export function establishedBy(o: { override: boolean; history: TrackRecord | nul
 export const PACE = { floor: 50, ceiling: 500, perDay: 20, uncappedFloor: 500, poolShare: 4 } as const;
 export const bandFor = (score: number) => LIMIT_BANDS.find(b => score >= b.min)!;
 export const nextBand = (score: number) => [...LIMIT_BANDS].reverse().find(b => b.min > score) ?? null;
-/** Per minute for a daily limit (null: the uncapped floor; the API reports the pool-based figure); marketing per hour max(25, limit ÷ 4); the reserve max(100, 10%). */
+/**
+ * Per minute for a daily limit (null: the uncapped floor; the API reports the pool-based figure); marketing per hour
+ * max(25, limit ÷ 4); the transactional reserve max(100, 10%), none during the evaluation: it lifts within about an hour
+ * of its last recipient, and a sender of newsletters alone must be able to finish it (hosted_allowance_read, migration 400).
+ */
 export const burstFor = (limit: number | null) => limit === null ? PACE.uncappedFloor : Math.min(PACE.ceiling, Math.max(PACE.floor, Math.floor(limit / PACE.perDay)));
 export const marketingHourFor = (limit: number) => Math.max(25, Math.floor(limit / 4));
-export const reserveFor = (limit: number) => Math.max(Math.min(100, limit), Math.ceil(limit * 0.1));
+export const reserveFor = (limit: number, evaluating = false) => evaluating ? 0 : Math.max(Math.min(100, limit), Math.ceil(limit * 0.1));
 
 // No daily limit ranks above every number.
 const rank = (limit: number | null) => limit ?? Infinity;
@@ -154,7 +163,7 @@ export function quality(days: DayEvidence[], domains: DomainAuth[], screened: bo
   });
   const measured = factors.filter(f => f.source === 'measured'), weight = measured.reduce((s, f) => s + f.weight, 0);
   const q = weight ? measured.reduce((s, f) => s + f.weight * f.score! / 100, 0) / weight * 100 : SCORE.prior;
-  // No volume prior: the evaluation's 100 recipients establish the score on their own, and later mail moves it as it comes.
+  // No volume prior: the evaluation's recipients establish the score on their own, and later mail moves it as it comes.
   return { quality: round(q, 2), volume: round(t.accepted, 2), target: round(q, 2), factors };
 }
 
@@ -173,7 +182,7 @@ export function moveScore(prev: ScoreState, target: number, mail: Evaluated, now
     return { phase: 'graded', firstRecipients: recipients, calibratedAt: prev.calibratedAt ?? now.toISOString(), score, dayScore: score, scoreDay: today };
   }
   if (prev.phase === 'calibrating') {
-    // calibratedAt: when the job first counted the 100th accepted recipient.
+    // calibratedAt: when the job first counted the evaluation's last accepted recipient.
     const calibratedAt = prev.calibratedAt ?? (recipients >= EVALUATION.recipients ? now.toISOString() : null);
     const resultsIn = mail.accepted > 0 && mail.resolved >= EVALUATION.resolved * mail.accepted;
     if (!calibratedAt || (!resultsIn && now.getTime() - Date.parse(calibratedAt) < EVALUATION.waitMinutes * 60_000)) return { ...prev, firstRecipients: recipients, calibratedAt };
@@ -301,7 +310,7 @@ export function dailyLimit(o: { phase: ScoreState['phase']; score: number | null
   // From warn up, and for as long as a strike halves it, the limit is frozen: no rises, and no limit becomes the last
   // 24 hours' accepted volume. The stored band is the reference, so the halving cannot drift between runs.
   if (stepRank(o.step) >= stepRank('warn') || o.strikeCapped) band = tighter(band, o.band ?? Math.max(FREEZE_FLOOR, o.acceptedDay));
-  const limit = o.strikeCapped && band !== null ? Math.max(EVALUATION.limit, Math.floor(band / 2)) : band;
+  const limit = o.strikeCapped && band !== null ? Math.max(LOWEST_BAND, Math.floor(band / 2)) : band;
   return { band, limit };
 }
 
@@ -318,7 +327,7 @@ export function nextGrowth(prev: Growth, o: { graduated: boolean; established?: 
   const later = new Date(o.now.getTime() + GROWTH.hours * 3600_000).toISOString();
   if (o.graduated) return { until: later, cap: GROWTH.start, hour: o.hour, quality: o.quality };
   if (!prev.until || Date.parse(prev.until) <= o.now.getTime() || prev.cap === null) return NO_GROWTH;
-  // A ladder step from warn up starts the 72 clean hours again; nothing grows meanwhile.
+  // A ladder step from warn up starts the clean hours again; nothing grows meanwhile.
   if (stepRank(o.step) >= stepRank('warn')) return { ...prev, until: Date.parse(prev.until) < Date.parse(later) ? later : prev.until };
   const e = o.evidence;
   if (o.step !== 'ok' || !e || (prev.hour !== null && Date.parse(o.hour) <= Date.parse(prev.hour))) return prev;

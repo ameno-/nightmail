@@ -2283,26 +2283,26 @@ export type Metrics = {
 
 export type SenderScore = {
     /**
-     * warmup during the evaluation: until 100 real recipients were accepted and their delivery results are in (90% of them, or an hour after the 100th) (Hosted), or the first 100 emails (self-hosted).
+     * warmup during the evaluation: until 500 real recipients were accepted and their delivery results are in (90% of them, or an hour after the 500th) (Hosted), or the first 500 emails (self-hosted).
      */
     state: 'warmup' | 'graded';
     emails: {
         /**
-         * Real recipients accepted, counted up to 100.
+         * Real recipients accepted, counted up to 500.
          */
         firstEmails: number;
         last30Days: number;
     };
     /**
-     * Accepted recipients before the first score (100).
+     * Accepted recipients before the first score (500).
      */
     needed: number;
     /**
-     * When the 100th recipient was counted; the score starts once their delivery results are in, at most an hour later plus the ten-minute job run (gradedBy).
+     * When the 500th recipient was counted; the score starts once their delivery results are in, at most an hour later plus the ten-minute job run (gradedBy).
      */
     calibratedAt: string | null;
     /**
-     * Hosted, during the evaluation once the 100th recipient was counted: the latest the first grade comes (an hour after it, plus the ten-minute job run), sooner once 90% of them have a delivery result. Null otherwise.
+     * Hosted, during the evaluation once the 500th recipient was counted: the latest the first grade comes (an hour after it, plus the ten-minute job run), sooner once 90% of them have a delivery result. Null otherwise.
      */
     gradedBy: string | null;
     /**
@@ -2390,7 +2390,7 @@ export type SenderLimit = {
      */
     unlimited: boolean;
     /**
-     * calibrating: the evaluation (the first 100 real recipients); score: set by the score and the ladder, none in good standing; override: set by Nightmail; exempt: none.
+     * calibrating: the evaluation (the first 500 real recipients); score: set by the score and the ladder, none in good standing; override: set by Nightmail; exempt: none.
      */
     source: 'calibrating' | 'score' | 'override' | 'exempt';
     /**
@@ -2424,7 +2424,7 @@ export type SenderLimit = {
     } | null;
     strikeCapUntil: string | null;
     /**
-     * For 72 clean hours after the evaluation, while it limits more than the per-minute pace: sending grows from 1,000 recipients an hour (shared by the account's workspaces, every stream) to twice the distinct recipients of the last completed hour whose results are in and clean. Null otherwise. Mail over it waits in the queue.
+     * For 24 clean hours after the evaluation, while it limits more than the per-minute pace: sending grows from 1,000 recipients an hour (shared by the account's workspaces, every stream) to twice the distinct recipients of the last completed hour whose results are in and clean. Null otherwise. Mail over it waits in the queue.
      */
     growth: {
         /**
@@ -2436,7 +2436,7 @@ export type SenderLimit = {
          */
         used: number;
         /**
-         * When the growth pace ends, after 72 clean hours.
+         * When the growth pace ends, after 24 clean hours.
          */
         until: string;
     } | null;
@@ -2449,7 +2449,7 @@ export type SenderLimit = {
      */
     marketingPerHour: number;
     /**
-     * Recipients of the daily limit marketing may not use, kept for transactional mail: max(100, 10%). 0 without a daily limit.
+     * Recipients of the daily limit marketing may not use, kept for transactional mail: max(100, 10%). 0 without a daily limit and during the evaluation, whose recipients may all be marketing.
      */
     transactionalReserve: number;
 } | null;
@@ -2495,7 +2495,7 @@ export type SenderStanding = {
     version: number;
     sequence: number;
     /**
-     * Why Nightmail still checks this workspace as a new sender; null in good standing, which it reaches by itself. evaluation: its first 100 real recipients; growth: the growth pace after them; standing: a daily limit set by the score, a freeze or a strike, or a step from warn up. Until then a campaign over 100 recipients sends a list probe first, and mail is delivered as the copy the content screen read (style sheets inlined, @media and dark-mode rules left out) with the attachment allowlist, except from domains Nightmail placed on its trusted tier. The image-to-text rule applies in good standing too.
+     * Why Nightmail still checks this workspace as a new sender; null in good standing, which it reaches by itself. evaluation: its first 500 real recipients; growth: the growth pace after them; standing: a daily limit set by the score, a freeze or a strike, or a step from warn up. Until then a campaign over 500 recipients sends a list probe first, and mail is delivered as the copy the content screen read (style sheets inlined, @media and dark-mode rules left out) with the attachment allowlist, except from domains Nightmail placed on its trusted tier. The image-to-text rule applies in good standing too.
      */
     probation: 'evaluation' | 'growth' | 'standing' | null;
 } | null;

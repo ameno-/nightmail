@@ -1062,9 +1062,10 @@ impl Send {
                     let error = if w.paused {
                         Some("409:HOSTED_SENDING_PAUSED")
                     } else if self.cap(w).is_some_and(|cap| {
-                        // An override keeps the plain headroom; a score limit reserves max(100, headroom%).
+                        // An override keeps the plain headroom. Without one these workspaces are in their
+                        // evaluation (the standing job has not seen them), which reserves nothing (migration 400).
                         let headroom = (cap * self.headroom + 99) / 100;
-                        let mcap = if w.send_cap.is_some() { cap - headroom } else { (cap - headroom.max(cap.min(100))).max(0) };
+                        let mcap = if w.send_cap.is_some() { cap - headroom } else { cap };
                         used + cost > cap || (marketing > 0 && used + marketing > mcap)
                     }) {
                         Some("429:SEND_LIMIT_REACHED")
