@@ -58,11 +58,11 @@ export function Sentence({ ritual }: { ritual: Pick<OverviewRule, 'key' | 'recip
     return <span key={i} className="recipe-blank">{Array.isArray(value) ? <Senders list={value} /> : value}</span>
   })}</>
 }
-/** A rule in plain words wherever it appears: a ready-made rule's sentence, or a script as Custom code rule and its name. */
+/** A rule in plain words wherever it appears: a ready-made rule's sentence, or a script by its name. */
 export function RuleLine({ rule, keyName, endpoints }: { rule?: Pick<OverviewRule, 'key' | 'recipe'>; keyName: string; endpoints?: Pick<OverviewEndpoint, 'name' | 'type'>[] }) {
   if (rule?.recipe && (rule.recipe.id === 'split' || rule.recipe.id === 'split-by-meaning')) return <SplitSentence params={rule.recipe.params} meaning={rule.recipe.id === 'split-by-meaning'} endpoints={endpoints} />
   if (rule?.recipe) return <Sentence ritual={rule} />
-  return <>Custom code rule <code className="recipe-code">{keyName}</code></>
+  return <code className="recipe-code">{keyName}</code>
 }
 /** An address's rules on one line: the first in plain words, and how many more. */
 export function RulesSummary({ keys, rules, endpoints }: { keys: string[]; rules: OverviewRule[]; endpoints?: Pick<OverviewEndpoint, 'name' | 'type'>[] }) {
@@ -117,7 +117,7 @@ export function RulesTab({ overview, refresh }: { overview: Overview; refresh: (
     await refresh()
     toast(`${r.key} deleted`, 'success')
   }
-  const last = (r: OverviewRule) => !r.enabled ? <span className="muted">Off</span>
+  const last = (r: OverviewRule) => !r.enabled ? null
     : r.lastMatchedAt ? <time dateTime={r.lastMatchedAt} title={new Date(r.lastMatchedAt).toLocaleString()}>{ago(r.lastMatchedAt)}</time>
     : <span className="muted" title="Not in the last 1,000 emails">Not lately</span>
   const runsOn = (r: OverviewRule) => r.addresses.length ? <Addresses list={r.addresses} />
