@@ -1,6 +1,17 @@
 // Customer-safe projection (design §4.1): every support-route response passes through here before the model sees it.
 // The model's context is, in effect, shown to the customer, so it gets only what the customer may see: no grant or
-// operator internals, third-party text fenced as untrusted, and a bounded size.
+// operator internals, third-party text fenced as untrusted, no angle bracket in any string or key, and a bounded size.
+
+/** Characters that are an angle bracket, or become one under Unicode normalization (NFKC, NFKD, NFD): ＜ ﹤ ≮ and their pairs. */
+const BRACKETS = /[<>\u226E\u226F\uFE64\uFE65\uFF1C\uFF1E]/g;
+/**
+ * Outside text placed inside the harness's tags, with every angle bracket escaped (`&lt;`, `&gt;`; a look-alike as its
+ * numeric reference), so no input, however it is written, can close a fence or open a tag. Never strip instead: removing a
+ * marker in one pass leaves `</untr</untrusted>usted>` a marker. Escaping again changes nothing.
+ */
+export const fenced = (text: string) => text.replace(BRACKETS, c => c === '<' ? '&lt;' : c === '>' ? '&gt;' : `&#x${c.charCodeAt(0).toString(16).toUpperCase()};`);
+/** Outside text as the model reads it: fenced, inside <untrusted> (naming where it came from, when the harness knows). */
+export const untrusted = (text: string, source?: 'chat' | 'email') => `<untrusted${source ? ` source="${source}"` : ''}>${fenced(text)}</untrusted>`;
 
 /** Fields support routes return that are about Nightmail's side of the conversation, never the customer's data. */
 const DROP = new Set(['grant', 'operatorId', 'operator', 'ticketRef', 'token', 'tokenHash', 'internal', 'ipNetwork', 'userAgent', 'actorLabel', 'retainUntil', 'watch', 'watchFlag', 'handoffId', 'via']);
@@ -38,14 +49,16 @@ export function project(value: unknown, depth = 0, key = '', hidden: readonly st
     for (const [k, v] of Object.entries(value)) {
       if (DROP.has(k) || PERSON_KEYS.has(k) || (PERSON_OBJECTS.has(key) && idLike(k)) || (key === 'summary' && SUMMARY_KEYS.has(k))) continue;
       const projected = project(v, depth + 1, k, hidden);
-      if (projected !== HIDDEN) out[k] = projected;
+      if (projected !== HIDDEN) out[fenced(k)] = projected;
     }
     return out;
   }
   if (typeof value === 'string' && (hidden.includes(value) || INTERNAL.some(shape => shape.test(value)))) return HIDDEN;
   if (typeof value === 'string') {
     const capped = value.length > 2000 ? `${value.slice(0, 2000)}… [${value.length - 2000} more characters]` : value;
-    return UNTRUSTED.has(key) && capped.length > 0 && /[A-Za-z]{3}/.test(capped) ? `<untrusted>${capped.replaceAll('</untrusted>', '')}</untrusted>` : capped;
+    // Every non-empty value of these keys, whatever its script: a rule on letters would let look-alikes or zero-width
+    // characters through unmarked.
+    return UNTRUSTED.has(key) && capped.length > 0 ? untrusted(capped) : fenced(capped);
   }
   return value;
 }

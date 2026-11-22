@@ -2,7 +2,7 @@
 // who is verified and what the agent may act on. Account facts come from the tools, when a question needs them, and what
 // support noted about this person in earlier chats from <notes>.
 
-import { scrubIds, toolResult } from './projection.js';
+import { fenced, scrubIds, toolResult } from './projection.js';
 
 export type Customer = {
   channel: 'chat' | 'email'; userId: string | null; name: string | null; email: string | null; role: string | null;
@@ -10,7 +10,7 @@ export type Customer = {
   verified: 'handoff' | 'dmarc' | 'signin' | 'magic_link' | null; contentAccess: boolean; page: string | null;
 };
 
-const esc = (s: unknown) => String(s ?? '').replace(/[<>]/g, '').slice(0, 200);
+const esc = (s: unknown) => fenced(String(s ?? '').slice(0, 200));
 export const firstName = (name: string | null | undefined) => (name ?? '').trim().split(/\s+/)[0]?.slice(0, 40) || null;
 
 export function customerBlock(c: Customer) {
@@ -34,8 +34,8 @@ export function customerBlock(c: Customer) {
 /** A note as GET /v1/support/notes returns it (api/src/support-notes.ts). */
 export type Note = { id: string; text: string; author: 'agent' | 'staff'; workspaceId: string | null; conversationId: string; createdAt: string };
 const NOTES_SHOWN = 20, NOTES_CHARS = 4000;
-/** A note's text with markup escaped (it can't close the block or forge a tag) and its IDs removed, on one line. */
-const noteText = (s: string, hidden: readonly string[]) => scrubIds(s, hidden).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\s+/g, ' ').trim().slice(0, 1200);
+/** A note's text with its IDs removed, on one line; the projection fences it (it can't close the block or forge a tag). */
+const noteText = (s: string, hidden: readonly string[]) => scrubIds(s, hidden).replace(/\s+/g, ' ').trim().slice(0, 1200);
 
 /**
  * What support noted about this person in earlier chats, as data after <customer>: the newest NOTES_SHOWN that fit in
