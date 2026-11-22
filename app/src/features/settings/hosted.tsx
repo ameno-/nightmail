@@ -32,10 +32,10 @@ import { PostalAddressDialog, postalAddressLine } from '../../components/PostalA
 // control on the right, each 53px tall so values loading in never move anything. Old #workspace and #webhooks links still land.
 type SectionKey = 'general' | 'members' | 'sending' | 'webhooks' | 'activity' | 'usage' | 'billing' | 'account'
 // Members see every section in the rail: owner and admin ones carry a lock and open a short explanation instead of
-// controls they can't use, so nothing is silently missing. Sections of rows keep a readable column; a section that is
-// a table (`width: 'full'`) takes the whole panel, to the same right edge as the app's other tables.
-const groups: { title: string; items: { key: SectionKey; label: string; admin?: boolean; width?: 'full' }[] }[] = [
-  { title: 'Workspace', items: [{ key: 'general', label: 'General' }, { key: 'members', label: 'Members', admin: true, width: 'full' }, { key: 'sending', label: 'Sending', admin: true }, { key: 'webhooks', label: 'Webhooks', admin: true, width: 'full' }, { key: 'activity', label: 'Activity', admin: true, width: 'full' }, { key: 'usage', label: 'Plan & usage' }, { key: 'billing', label: 'Billing', admin: true }] },
+// controls they can't use, so nothing is silently missing. Every section takes the whole panel, to the same right edge
+// as the app's other tables.
+const groups: { title: string; items: { key: SectionKey; label: string; admin?: boolean }[] }[] = [
+  { title: 'Workspace', items: [{ key: 'general', label: 'General' }, { key: 'members', label: 'Members', admin: true }, { key: 'sending', label: 'Sending', admin: true }, { key: 'webhooks', label: 'Webhooks', admin: true }, { key: 'activity', label: 'Activity', admin: true }, { key: 'usage', label: 'Plan & usage' }, { key: 'billing', label: 'Billing', admin: true }] },
   { title: 'You', items: [{ key: 'account', label: 'Account' }] },
 ]
 const items = groups.flatMap(group => group.items)
@@ -64,7 +64,7 @@ export function HostedSettings() {
       </div>)}</div>
     </nav>
     {/* Keyed, so switching sections fades the new one in. */}
-    <div key={section} className="hosted-settings__content" data-width={locked(current) ? undefined : current.width}>
+    <div key={section} className="hosted-settings__content">
       {locked(current) ? <AdminOnly title={current.label} />
         : <>
           {section === 'general' && <WorkspaceRows />}
