@@ -10298,6 +10298,26 @@ describe('Newsletters', () => {
       assert.deepEqual((await statsOf(`?listId=${news.id}`))[issue.id], expected);
       assert.deepEqual((await statsOf(''))[issue.id], expected, 'Every listing shows a stored count.');
       assert.equal((await jobs('sending.campaignStats'))[0].status, 'completed', 'A fresh count is not queued again.');
+      // Once stale (the refresh interval is lowered to now), a count is queued again only when the job would count again:
+      // reads of a quiet workspace queue nothing; a read after a new event for its mail, or new mail, does.
+      const { CAMPAIGN_STATS } = await import('./src/sending.js');
+      const refresh = CAMPAIGN_STATS.readRefreshMs; t.after(() => { CAMPAIGN_STATS.readRefreshMs = refresh; });
+      CAMPAIGN_STATS.readRefreshMs = 0;
+      const job = async () => (await jobs('sending.campaignStats'))[0];
+      const read = async () => ok(await local('GET', `/v1/campaigns?listId=${news.id}`));
+      await read(); await read();
+      assert.equal((await job()).status, 'completed', 'Nothing new in the workspace: nothing queued.');
+      await db.query("INSERT INTO operation_events(id,workspace_id,type,region,data,created_at) VALUES ($1,$2,'email.opened',$3,$4::jsonb,clock_timestamp())",
+        [unique('evt'), wid, REGION, JSON.stringify({ emailId: `email_${createHash('md5').update(`${issue.id}3`).digest('hex')}` })]);
+      await read();
+      assert.equal((await job()).status, 'pending', 'A new event for its mail: queued.');
+      await run('sending.campaignStats');
+      await read();
+      assert.equal((await job()).status, 'completed', 'Counted since: nothing queued.');
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,created_at)
+        VALUES ($1,$2,$3,'fixture',$4,'["later@example.net"]','[]','[]','Later','{}',false,'delivered',clock_timestamp())`, [unique('email'), wid, REGION, sender]);
+      await read();
+      assert.equal((await job()).status, 'pending', 'New mail in the workspace: queued.');
     });
   });
 
