@@ -122,6 +122,8 @@ const pages = ids => [
   ['Campaign editor', `/campaigns/${ids.campaign}/edit`, { from: '/campaigns' }],
   ['New campaign', '/campaigns/new', { from: '/campaigns', click: 'Create campaign' }],
   ['Campaign review', `/campaigns/${ids.campaign}/review`, { from: '/campaigns' }],
+  // A sent issue's results (its emails still in the history), and one whose emails are past it: only the stored figures.
+  ['Campaign results', `/campaigns/${ids.issueSent}/review`, { user: 'mara', from: `/newsletters/${ids.newsletter}` }],
   ['Templates', '/campaigns/templates', { from: '/campaigns' }],
   // Newsletters (cls-fixture.mjs newsletters): a newsletter's page with twelve sent issues, one with a single draft, one
   // made a moment ago; the form that makes one; the composer as "New issue" opens it; Campaigns beside two newsletters,

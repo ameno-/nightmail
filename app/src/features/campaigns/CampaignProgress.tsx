@@ -1,5 +1,6 @@
-import { useState, type FormEvent } from 'react'
+import { useState, type FormEvent, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { Link } from 'react-router'
 import { useApiMutation, useWorkspaceAccess } from '../../data/context'
 import { campaignResumable, errorText, type Campaign, type CampaignPacingInput } from '../../data/types'
 import { Button, Checkbox, Input } from '../../components/ui'
@@ -25,6 +26,14 @@ const waitingLabel = { pacing_window: 'Waiting for the next daily slice', ses_da
 const atUtc = (value: string) => `${date(value)} · ${time(value)} UTC`
 /** What people see as the state: a launch still checking messages for a future send is already "scheduled" to them. */
 export const campaignDisplayStatus = (campaign: Pick<Campaign, 'status' | 'scheduledAt' | 'archivedAt'>) => campaign.archivedAt ? 'archived' : campaign.status === 'preparing' && campaign.scheduledAt && Date.parse(campaign.scheduledAt) > Date.now() ? 'scheduled' : campaign.status
+
+/** A sent or sending campaign's mail in Logs, all of it or one status's. */
+export const campaignLogs = (id: string, status?: string) => `/logs?campaign=${encodeURIComponent(id)}${status ? `&status=${status}` : ''}`
+/** A metric row: the label, then its figure. With `to`, the row opens that campaign mail in Logs. */
+export function SummaryLine({ label, figure, to }: { label: ReactNode; figure: ReactNode; to?: string }) {
+  return to ? <Link className="campaign-summary-line campaign-summary-link" to={to}><span>{label}</span><span>{figure}</span></Link>
+    : <div className="campaign-summary-line"><span>{label}</span><span>{figure}</span></div>
+}
 
 // Poll only while a send can still change; a future schedule waits until it is due.
 // While paused or waiting for the next window, poll slowly unless queued mail is still draining.
@@ -52,12 +61,13 @@ export function CampaignProgress({ campaign }: { campaign: Campaign }) {
   const queued = byStatus.queued ?? 0
   const processing = byStatus.attempting ?? 0
   const processed = Math.min(total, Math.max(0, materialized - queued - processing + canceledBeforeQueue))
+  // Each outcome opens its emails in Logs; recipients canceled before they were queued have none.
   const outcomes = [
-    ['Delivered', byStatus.delivered], ['Bounced', byStatus.bounced],
-    ['Complaints', byStatus.complained], ['Rejected', byStatus.rejected],
-    ['Rendering failed', byStatus.rendering_failed], ['Suppressed', byStatus.suppressed],
-    ['Canceled', (byStatus.canceled ?? 0) + canceledBeforeQueue], ['Acceptance unknown', byStatus.acceptance_unknown],
-    ['Simulated', byStatus.simulated],
+    ['Delivered', byStatus.delivered, 'delivered'], ['Bounced', byStatus.bounced, 'bounced'],
+    ['Complaints', byStatus.complained, 'complained'], ['Rejected', byStatus.rejected, 'rejected'],
+    ['Rendering failed', byStatus.rendering_failed, 'rendering_failed'], ['Suppressed', byStatus.suppressed, 'suppressed'],
+    ['Canceled', (byStatus.canceled ?? 0) + canceledBeforeQueue, byStatus.canceled ? 'canceled' : undefined], ['Acceptance unknown', byStatus.acceptance_unknown, 'acceptance_unknown'],
+    ['Simulated', byStatus.simulated, 'simulated'],
   ] as const
   return <div className="campaign-audience-summary">
     <div className="campaign-summary-line"><strong>Send progress</strong><span>{number(processed)} / {number(total)} processed</span></div>
@@ -65,7 +75,7 @@ export function CampaignProgress({ campaign }: { campaign: Campaign }) {
     {awaitingQueue > 0 && <div className="campaign-summary-line"><span>Awaiting queue</span><span>{number(awaitingQueue)}</span></div>}
     {queued > 0 && <div className="campaign-summary-line"><span>Queued</span><span>{number(queued)}</span></div>}
     {processing > 0 && <div className="campaign-summary-line"><span>Processing</span><span>{number(processing)}</span></div>}
-    {outcomes.filter(([, count]) => count && count > 0).map(([label, count]) => <div className="campaign-summary-line" key={label}><span>{label}</span><span>{number(count)}</span></div>)}
+    {outcomes.filter(([, count]) => count && count > 0).map(([label, count, status]) => <SummaryLine key={label} label={label} figure={number(count)} to={status && campaignLogs(campaign.id, status)} />)}
   </div>
 }
 
