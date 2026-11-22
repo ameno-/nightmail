@@ -6,7 +6,7 @@ import { number, relativeTime } from '../../lib/format'
 import { gradeKey } from '../../lib/standing'
 import { EVALUATION, GOOD_STANDING, GRADE_BANDS } from '../../../../api/src/standing-model'
 
-const percent = (digits: number) => (value: number) => `${(value * 100).toFixed(digits)}%`
+const percent = (digits: number) => (value: number) => `${Number((value * 100).toFixed(digits))}%`
 // Engagement is the marketing unsubscribe rate.
 export const factorFormats: Record<SenderScoreFactor['key'], (value: number) => string> = { complaints: percent(2), content: percent(1), bounces: percent(1), hygiene: percent(1), auth: value => `${Math.round(value * 100)}%`, engagement: percent(2) }
 // A part's score as a state: 90 and up good, under 50 failing, under 75 worth a look.
@@ -27,8 +27,7 @@ export function evaluationLeft(report: SenderScore, now = Date.now()) {
 
 // What the sender score is and where each part stands: one dialog for the whole app, opened from the score card
 // (lib/score-about.ts). The status, the 14-day trend and (Hosted) the limit the score sets come first, then the six
-// parts, one line each: its weight in the score (labelled as one, so 30% never reads as a rate), its score as a meter,
-// what was measured and its score out of 100. Then how it is graded, with what each part measures.
+// parts, one line each: its score as a meter, what was measured and its score out of 100. Then how it is graded, with what each part measures.
 export function ScoreAbout({ report, error, onRetry }: { report: SenderScore | undefined; error: unknown; onRetry: () => void }) {
   const { open, focus } = useScoreAbout()
   const list = useRef<HTMLUListElement>(null)
@@ -58,7 +57,7 @@ export function ScoreAbout({ report, error, onRetry }: { report: SenderScore | u
         {limitLine && <span className="score-about__limit muted">{limitLine}</span>}
       </div>
       <ul ref={list} className="score-about__factors" aria-label="The six parts">{report.factors.map(factor => { const measured = graded && factor.source === 'measured'; return <li key={factor.key} data-key={factor.key} data-focus={focus === factor.key || undefined}>
-        <MetricRow label={factor.label} hint={`${factor.weight}% weight`}
+        <MetricRow label={factor.label}
           spark={measured ? <Meter value={factor.score!} max={100} label={`${factor.label}: ${Math.round(factor.score!)} of 100`} /> : <Meter value={0} />}
           value={measured ? factorFormats[factor.key](factor.value!) : <span className="muted">{graded ? 'No data' : '—'}</span>}
           unit={measured ? <span className={`score-about__part-score ui-tone--${partTone(factor.score!)}`}>{Math.round(factor.score!)}<span className="score-about__out-of">/100</span></span> : undefined} />
