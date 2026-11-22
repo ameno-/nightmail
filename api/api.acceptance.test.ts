@@ -21985,6 +21985,46 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     }));
   });
 
+  test('hosted screen records: a line per classifier request and per email sent or deferred, with timings and no content',async t=>{
+    await simulatedSesFixture(t,async({runtime,db,local})=>t.test('synthetic transports',async t=>{
+      const {runDispatcher,initialGate}=await import('./src/dispatcher.js'),{SESv2Client,GetAccountCommand}=await import('@aws-sdk/client-sesv2');
+      const wid=runtime.config.workspaceId,acct='112223330002',origin='https://screen.synthetic.invalid',topic=`arn:aws:sns:${REGION}:${acct}:fixture`;
+      const key=ok(await local('POST','/v1/api-keys',{name:'records',permissions:['send','read']}),201);
+      Object.assign(runtime.config,{multiTenant:true,hostedScreen:true,liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture'},screen:{endpoint:origin,apiKey:'classifier-fixture-key',model:'fixture',mode:'reject',threshold:0.7}});
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,$2,'ready',$3)`,[REGION,acct,topic]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,region,aws_account_id,tenant_state) VALUES($1,$1,'shared','ready',$2,$3,'ready')`,[wid,REGION,acct]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('bench.invalid',$1,$1,'verified')`,[wid]);
+      // The classifier answers, fails with 503, or stalls past the deadline before or after its headers.
+      let answer:'ok'|'503'|'stall'|'stall-body'='ok';
+      t.mock.method(globalThis,'fetch',async(_url:RequestInfo|URL,init:RequestInit)=>{
+        if(answer==='stall')return new Promise<never>((_,reject)=>init.signal!.addEventListener('abort',()=>reject(init.signal!.reason)));
+        if(answer==='stall-body')return new Response(new ReadableStream({start:c=>{init.signal!.addEventListener('abort',()=>c.error(init.signal!.reason));}}),{headers:{'x-typesafe-request-id':'req_fixture_body'}});
+        if(answer==='503')return new Response(null,{status:503,headers:{'x-typesafe-request-id':'req_fixture_503','retry-after':'2'}});
+        return Response.json({answers:{spam:{noul:.01}}},{headers:{'x-typesafe-request-id':'req_fixture_ok','server-timing':'model;dur=120'}});
+      });
+      t.mock.method(SESv2Client.prototype,'send',async(cmd:any)=>cmd instanceof GetAccountCommand?{SendingEnabled:true,SendQuota:{MaxSendRate:10000,Max24HourSend:100000,SentLast24Hours:0}}:{MessageId:randomUUID()});
+      const logs:Json[]=[];for(const level of ['error','warn','info'] as const)t.mock.method(console,level,(line:string)=>{try{logs.push(JSON.parse(line));}catch{}});
+      const gate=initialGate(),ids:Record<string,string>={};
+      for(const [name,code] of [['ok','111111'],['503','222222'],['stall','333333'],['stall-body','444444']] as const){
+        answer=name;gate.screenRetryAt=undefined;
+        ids[name]=ok(await local('POST','/v1/emails/send',{from:'a@bench.invalid',to:'private.person@example.invalid',subject:`Your sign-in code is ${code}`,text:`Private body ${code}`},'live',{authorization:`Bearer ${key.secret}`}),202).id;
+        await runDispatcher(runtime,{region:REGION,accountId:acct,batchSize:24,lanes:1,gate});
+      }
+      const call=(name:string)=>logs.find(l=>l.code==='CONTENT_SCREEN_CALL' && l.emailId===ids[name])!,email=(name:string)=>logs.find(l=>l.code==='DISPATCH_EMAIL' && l.emailId===ids[name])!;
+      assert.deepEqual([call('ok').outcome,call('503').outcome,call('stall').outcome,call('stall-body').outcome],['ok','http_503','timeout','timeout']);
+      assert.deepEqual([call('ok').level,call('ok').requestId,call('ok').serverTiming,call('ok').httpStatus,call('ok').workspaceId,call('ok').kind,call('ok').required,call('ok').window,call('ok').windows],['info','req_fixture_ok','model;dur=120',200,wid,'transactional',true,0,1]);
+      assert.deepEqual([call('503').level,call('503').retryAfter,call('stall').phase,call('stall-body').phase,call('stall-body').requestId],['warn','2','headers','body','req_fixture_body']);
+      assert.ok(['headersMs','ms','requestBytes','responseBytes','inFlight'].every(f=>typeof call('ok')[f]==='number') && call('stall').ms>=500 && call('stall').headersMs===undefined);
+      // Each email's line: where its time went, and why it was deferred. The deferral itself is unchanged.
+      assert.deepEqual([email('ok').outcome,email('ok').screen,email('ok').screenCall,email('503').outcome,email('503').reason,email('503').screenCall,email('stall').screenCall,email('stall-body').screenCall],
+        ['accepted','call','ok','deferred','CONTENT_SCREEN_UNAVAILABLE','http_503','timeout','timeout']);
+      assert.ok(['queueMs','ageMs','screenMs','paceMs','sesMs','totalMs'].every(f=>typeof email('ok')[f]==='number') && email('503').sesMs===undefined && email('stall').screenMs>=500);
+      assert.deepEqual((await db.query('SELECT error_code FROM sending_emails WHERE id=ANY($1) ORDER BY array_position($1,id)',[[ids['503'],ids.stall]])).rows.map(r=>r.error_code),['CONTENT_SCREEN_UNAVAILABLE','CONTENT_SCREEN_UNAVAILABLE']);
+      const written=JSON.stringify(logs.filter(l=>l.code==='CONTENT_SCREEN_CALL' || l.code==='DISPATCH_EMAIL'));
+      for(const secret of ['sign-in code','111111','Private body','private.person','a@bench','classifier-fixture-key'])assert.ok(!written.includes(secret),secret);
+    }));
+  });
+
   test('sending review benchmark: healthy hook tenant behind slow tenant',async t=>{
     await simulatedSesFixture(t,async({runtime,db})=>{
       const {processJobs}=await import('./src/jobs.js');
