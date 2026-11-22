@@ -479,8 +479,8 @@ button.ui-facet:focus-visible { outline-offset: -2px; }
 .ui-facts > dt { padding-right: var(--space-24); color: var(--color-muted); font-family: var(--font-body); font-size: var(--text-xs); }
 .ui-facts > dd { font-variant-numeric: tabular-nums; }
 @media (max-width: 640px) { .ui-facts { grid-template-columns: 104px minmax(0, 1fr); } .ui-facts > dt { padding-right: var(--space-12); } }
-/* Numbers in table cells read as data: a right-aligned (numeric) column is mono. */
-.ui-table td[data-align='right'] { font-family: var(--font-mono); font-size: var(--text-xs); }
+/* Numbers in table cells read as data: a right-aligned (numeric) column is mono; a cell holding a control keeps the body type. */
+.ui-table td[data-align='right']:not(:has(.ui-button, .ui-input)) { font-family: var(--font-mono); font-size: var(--text-xs); }
 /* Facts: muted keys, mono values. */
 .ui-kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); column-gap: var(--space-16); margin: 0; }
 .ui-kv > div { display: contents; }
