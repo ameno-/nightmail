@@ -10599,6 +10599,7 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
       // and a sent marketing email are told only that the workspace has no address yet, and where to add it.
       const marketing=unique('checked-marketing');await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,status,simulated) VALUES ($1,$2,$3,'fixture','orders@shop.example.com','[]','[]','[]',$4,$5,'delivered',true)`,[marketing,wid,REGION,good.subject,{...good,kind:'marketing',testCampaignId:null,attachments:[]}]);
       const advice=async(input:Json)=>ok(await check(input)).findings.filter((f:Json)=>f.ruleId.startsWith('unsubscribe-') || f.ruleId==='postal-address').map((f:Json)=>[f.ruleId,f.fix,f.fixIn]);
+      await db.query('UPDATE operation_settings SET postal_address=NULL WHERE workspace_id=$1',[wid]);
       for(const input of [{campaignId:await campaign(wid)},{emailId:marketing}]) assert.deepEqual(await advice(input),[['postal-address','Add your postal address.','workspace']]);
       ok(await local('PATCH','/v1/settings/workspace',{postalAddress:'Fixture Co.\n9 Synthetic Road\nTestville, CA 94000'}));
       for(const input of [{campaignId:await campaign(wid)},{emailId:marketing}]) assert.deepEqual(await advice(input),[]);
