@@ -47,13 +47,13 @@ export function ListDetailPage() {
   const cache = useQueryClient(), newsletter = useNewsletters().some(item => item.id === id)
   async function deleteList() { await remove.mutateAsync(id); if (newsletter) void cache.invalidateQueries({ queryKey: ['identity'] }); navigate('/audience/lists') }
   return <div className="audience-page"><PageHeader title={query.isPending ? <SkeletonText width={96} lineHeight={24} /> : query.data?.name || 'List'} backTo="/audience/lists" actions={query.isPending ? <><ControlSkeleton width={85} /><ControlSkeleton width={120} /></> : query.data && <><Button variant="danger" onClick={() => {remove.reset(); setConfirmDelete(true)}}>Delete list</Button><Button variant="primary" onClick={() => setImporting(true)}>Import contacts</Button></>} />
-    {query.isPending ? <ListDetailBodySkeleton /> : query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <ListMembers key={id} list={query.data} onImport={() => setImporting(true)} />}
+    {query.isPending ? <ListDetailBodySkeleton /> : query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <ListMembers key={id} list={query.data} />}
     {importing && <ImportContactsDialog listId={id} onClose={() => setImporting(false)} />}
     <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title={`Delete ${query.data?.name ?? 'list'}?`} description="Deletes the list, not its contacts." confirmLabel="Delete list" danger pending={remove.isPending} onConfirm={deleteList} />
   </div>
 }
 // The consent tab and search are in the URL (status, q): campaign review links straight to /audience/lists/<id>?status=unknown.
-function ListMembers({ list, onImport }: { list: AudienceList; onImport: () => void }) {
+function ListMembers({ list }: { list: AudienceList }) {
   const { pageSize, tableRef } = useAdaptivePageSize()
   const [params, setParams] = useSearchParams()
   const status = statusOptions.some(option => option.value === params.get('status')) ? params.get('status')! : '', search = params.get('q') ?? ''
@@ -67,7 +67,7 @@ function ListMembers({ list, onImport }: { list: AudienceList; onImport: () => v
   const unknown = list.unknown ?? 0
   return <><Tabs value={status} onValueChange={value => update('status', value)} items={[{ value: '', label: 'All members', count: list.total }, ...statusOptions.map(option => ({ ...option, count: list[option.value as 'subscribed' | 'unknown' | 'unsubscribed' | 'suppressed'] }))]} />
     <div className="data-toolbar"><SearchField className="search-box--list" aria-label="Search members" placeholder="Search members" value={draft} onChange={event => type(event.target.value)} />{unknown > 0 && <Button onClick={() => setBulk(true)}>Mark {number(unknown)} as subscribed…</Button>}</div>
-    {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><ContactTable tableRef={tableRef} contacts={query.data?.items || []} members loading={query.isPending} minRows={pageSize} empty={search ? <EmptyState title="No matching members" /> : status === 'unknown' ? <EmptyState title={noUnknown} /> : status ? <EmptyState title={`No ${statusOptions.find(option => option.value === status)?.label.toLowerCase()} members`} /> : <EmptyState title="No contacts in this list" action={<Button onClick={onImport}>Import contacts</Button>} />} />{query.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={pageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={setPage} />}</>}
+    {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><ContactTable tableRef={tableRef} contacts={query.data?.items || []} members loading={query.isPending} minRows={pageSize} empty={search ? <EmptyState title="No matching members" /> : status === 'unknown' ? <EmptyState title={noUnknown} /> : status ? <EmptyState title={`No ${statusOptions.find(option => option.value === status)?.label.toLowerCase()} members`} /> : <EmptyState title="No contacts in this list" />} />{query.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={pageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={setPage} />}</>}
     {bulk && <BulkSubscribeDialog listId={list.id} listName={list.name} searchIgnored={Boolean(search)} onClose={() => setBulk(false)} />}
   </>
 }
