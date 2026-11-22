@@ -2081,9 +2081,10 @@ export async function ingestRoutineSesEvent(runtime: Runtime, input: RoutineIngr
   return result;
 }
 /** An email event's data as its webhook carries it (the published event and each delivery's payload): the receiving
- *  server's reply without addresses or IP addresses, cut at 160 characters (withRedactedReply). A webhook has never held a
- *  recipient's address, and adding one later would be an addition where removing it would be a break. The email's own
- *  events keep the reply as stored. Undefined when the data has no reply: the webhook then carries the event's data. */
+ *  server's reply with its addresses and IP addresses replaced, cut at 160 characters (withRedactedReply). An email
+ *  webhook carried no recipient address before the reply, and giving the whole reply later would be an addition where
+ *  taking it back would be a break. The email's own events keep the reply as stored. Undefined when the data has no
+ *  reply: the webhook then carries the event's data. */
 const webhookData = (data: Record<string, unknown> | undefined) => typeof data?.diagnosticCode === 'string' ? withRedactedReply(data) : undefined;
 export type RoutineIngress = Omit<EmailEventInput, 'workspaceId'> & { workspaceId?: string; providerId: string; taggedEmailId?: string; ingress: IncomingReceipt;
   effects?: { reported: (string | null)[] | null; suppress: string | null; observe: string | null; receiptTime: boolean } };

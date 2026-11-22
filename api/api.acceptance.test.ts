@@ -31401,6 +31401,17 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // payload and the delivery log) gets it without the recipient's address or an IP address, at most 160 characters.
       assert.equal(ok(await local('GET',`/v1/emails/${bounced.id}/events`)).data.find((event:Json)=>event.type==='bounce').data.diagnosticCode,reply);
       const redacted=`smtp; 550 5.1.1 <<address>>: user unknown at <ip> ${'x'.repeat(600)}`.slice(0,160);
+      // The replacement is by pattern. The rarer forms of an address and of an IP address go whole too, and the plain
+      // forms as they always did.
+      const {redactDiagnostic}=await import('./src/deliverability.js');
+      for(const [said,read] of [
+        ['550 5.1.1 "mary smith"@example.com rejected','550 5.1.1 <address> rejected'],
+        ['550 5.1.1 bob(work)@example.com rejected','550 5.1.1 <address> rejected'],
+        ['550 5.1.1 <o\'brien@example.com>: no such user','550 5.1.1 <<address>>: no such user'],
+        ['550 5.1.1 bob@[192.0.2.1] refused','550 5.1.1 <address> refused'],
+        ['554 5.7.1 host 2001:db8::1 blocked, also fe80::1ff:fe23:4567:890a, [::1]:25 and [IPv6:2001:db8::25]','554 5.7.1 host <ip> blocked, also <ip>, [<ip>]:25 and [IPv6:<ip>]'],
+        ['550 5.1.1 <person@example.com>: rejected by 192.0.2.44 (\'postmaster@example.net\') via ::ffff:192.0.2.9 and 2001:0db8:85a3:0000:0000:8a2e:0370:7334','550 5.1.1 <<address>>: rejected by <ip> (\'<address>\') via <ip> and <ip>'],
+      ]) assert.equal(redactDiagnostic(said),read,said);
       assert.equal((await published(bounced.id,'email.bounced')).diagnosticCode,redacted);
       const payload=await delivered(bounced.id);
       assert.equal(payload.diagnosticCode,redacted);assert.equal(payload.bounceType,'Permanent');assert.ok(!JSON.stringify(posted).includes(bounced.to));
