@@ -683,9 +683,12 @@ async function campaign(audience: Audience, templateId?: string) {
   check(logs.data.length === 1 && logs.data[0].to[0] === success, 'wrong campaign recipient');
   await outcome(logs.data[0].id, success, 'delivered');
   await step('Read unsubscribe confirmation without changing consent', async () => {
+    // The footer ends the text: the recipient's Unsubscribe link, then the workspace's postal address under it.
     const { text } = await api('getEmailContent', { path: { id: logs.data[0].id } });
-    const token = text?.match(/\/unsubscribe\/(u_[a-f0-9]{64})\s*$/)?.[1];
-    check(token, 'no unsubscribe capability in run-owned marketing email');
+    const footer = text?.match(/\n\nUnsubscribe: \S*\/unsubscribe\/(u_[a-f0-9]{64})\n([^]*)$/);
+    check(footer, 'no unsubscribe capability in run-owned marketing email');
+    check(footer[2] === E2E_POSTAL_ADDRESS, 'the footer lacks the postal address under the unsubscribe link');
+    const token = footer[1]!;
     const page = await api('unsubscribeByLink', { path: { token }, parseAs: 'text' });
     check(page.includes('<form method="post">'), 'GET must display a confirmation form');
     check((await api('previewCampaignAudience', { path })).eligible === 1, 'GET changed audience consent');

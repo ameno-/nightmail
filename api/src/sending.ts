@@ -1698,8 +1698,12 @@ export function registerSending(app: App) {
     )).orderBy(desc(campaigns.createdAt), desc(campaigns.id)).limit(q.limit + 1));
     const listed = rows.slice(0, q.limit);
     // A newsletter's issues: finished campaigns whose stored count is missing or stale are counted in the background (the
-    // job deduplicates), so their figures appear on a later read. This read counts nothing.
-    const due = q.listId ? listed.filter(row => !(CAMPAIGN_ACTIVE as readonly string[]).includes(row.state) && statsDue(row)).map(row => row.id) : [];
+    // job deduplicates), so their figures appear on a later read. This read counts nothing. A stale count is queued only
+    // when the job would count again (campaignStatsJob): the workspace's mail changed since, or the campaign did, so a read
+    // of a quiet workspace queues nothing.
+    const finished = q.listId ? listed.filter(row => !(CAMPAIGN_ACTIVE as readonly string[]).includes(row.state) && statsDue(row)) : [];
+    const revision = finished.some(row => storedStats(row)) ? await mailRevision(c.env, a.workspaceId) : null;
+    const due = finished.filter(row => { const stored = storedStats(row); return !stored || stored.revision !== revision || Date.parse(stored.computedAt) < Date.parse(row.updatedAt); }).map(row => row.id);
     if (due.length) await c.env.db.execute(queueCampaignsStats(a.workspaceId, due));
     const views = await timed(c, 'campaign-counts-db', () => campaignViews(c.env, a, listed.map(({ stats: _stats, tracking: _tracking, ...row }) => row), { origin: new URL(c.req.url).origin }));
     return c.json({ data: views.map((row, i) => CampaignSummary.parse({ ...row, stats: listedStats(listed[i]!) })), nextCursor: nextCursor(rows, q.limit, binding) }, 200);

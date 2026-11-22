@@ -10298,6 +10298,26 @@ describe('Newsletters', () => {
       assert.deepEqual((await statsOf(`?listId=${news.id}`))[issue.id], expected);
       assert.deepEqual((await statsOf(''))[issue.id], expected, 'Every listing shows a stored count.');
       assert.equal((await jobs('sending.campaignStats'))[0].status, 'completed', 'A fresh count is not queued again.');
+      // Once stale (the refresh interval is lowered to now), a count is queued again only when the job would count again:
+      // reads of a quiet workspace queue nothing; a read after a new event for its mail, or new mail, does.
+      const { CAMPAIGN_STATS } = await import('./src/sending.js');
+      const refresh = CAMPAIGN_STATS.readRefreshMs; t.after(() => { CAMPAIGN_STATS.readRefreshMs = refresh; });
+      CAMPAIGN_STATS.readRefreshMs = 0;
+      const job = async () => (await jobs('sending.campaignStats'))[0];
+      const read = async () => ok(await local('GET', `/v1/campaigns?listId=${news.id}`));
+      await read(); await read();
+      assert.equal((await job()).status, 'completed', 'Nothing new in the workspace: nothing queued.');
+      await db.query("INSERT INTO operation_events(id,workspace_id,type,region,data,created_at) VALUES ($1,$2,'email.opened',$3,$4::jsonb,clock_timestamp())",
+        [unique('evt'), wid, REGION, JSON.stringify({ emailId: `email_${createHash('md5').update(`${issue.id}3`).digest('hex')}` })]);
+      await read();
+      assert.equal((await job()).status, 'pending', 'A new event for its mail: queued.');
+      await run('sending.campaignStats');
+      await read();
+      assert.equal((await job()).status, 'completed', 'Counted since: nothing queued.');
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,created_at)
+        VALUES ($1,$2,$3,'fixture',$4,'["later@example.net"]','[]','[]','Later','{}',false,'delivered',clock_timestamp())`, [unique('email'), wid, REGION, sender]);
+      await read();
+      assert.equal((await job()).status, 'pending', 'New mail in the workspace: queued.');
     });
   });
 
@@ -10358,6 +10378,51 @@ describe('Newsletters', () => {
       ok(await local('DELETE', `/v1/newsletters/${list.id}`));
       await run('audience.newsletterReaders');
       assert.equal((await db.query('SELECT newsletter_readers FROM audience_lists WHERE id=$1', [list.id])).rows[0].newsletter_readers, null);
+    });
+  });
+
+  // The probe, the exact count and the background page walk the members' primary key, which reads the same entries however
+  // large the list. With statistics taken while the list was small the planner prefers a bitmap scan of every member
+  // instead (src/newsletters.ts walkingTheKey). Here they are taken with 1,000 members, then the list grows to 12,000, and
+  // each of those statements is explained where it runs: on its connection, in its transaction, with its settings. What
+  // the default settings would choose in this state depends on the rest of the table, so it is reported, not asserted.
+  test('newsletters: the probe, the exact count and the background page walk the primary key, with statistics taken while the list was smaller', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, run }) => {
+      const { NEWSLETTER_READERS } = await import('./src/newsletters.js');
+      const lowered = { ...NEWSLETTER_READERS }; t.after(() => { Object.assign(NEWSLETTER_READERS, lowered); });
+      const wid = runtime.config.workspaceId;
+      const list = ok(await local('POST', '/v1/lists', { name: 'Grows' }), 201), other = ok(await local('POST', '/v1/lists', { name: 'Other' }), 201);
+      const members = (listId: string, from: number, to: number) => db.query(`INSERT INTO audience_list_members(workspace_id,list_id,contact_id)
+        SELECT $1,$2,'con_'||md5($2||n) FROM generate_series($3::int,$4::int) n`, [wid, listId, from, to]);
+      await members(list.id, 1, 1000); await members(other.id, 1, 2000);
+      await db.query('ANALYZE audience_list_members');
+      await members(list.id, 1001, 12_000);
+      ok(await local('POST', '/v1/newsletters', { listId: list.id, from: sender }), 201);
+      const scans = (plan: Json, out: string[] = []): string[] => {
+        if (plan['Relation Name'] === 'audience_list_members') out.push(`${plan['Node Type']}${plan['Index Name'] ? ` ${plan['Index Name']}` : ''}`);
+        for (const child of plan.Plans ?? []) scans(child, out);
+        return out;
+      };
+      const query = db.query.bind(db) as (...args: unknown[]) => Promise<any>;
+      const explain = async (text: string, values?: unknown[]) => scans((await query({ text: `EXPLAIN (FORMAT JSON) ${text}`, values })).rows[0]['QUERY PLAN'][0].Plan);
+      const plans: [string, string[]][] = [];
+      t.mock.method(db, 'query', async (...args: unknown[]) => {
+        const config = args[0] as { text?: string; values?: unknown[] } | string, text = typeof config === 'string' ? config : config?.text ?? '';
+        const label = /ORDER BY contact_id OFFSET/.test(text) ? 'probe' : /WITH page AS MATERIALIZED/.test(text) ? 'page' : null;
+        if (label) plans.push([label, await explain(text, (typeof config === 'string' ? undefined : config.values) ?? args[1] as unknown[])]);
+        return query(...args);
+      });
+      ok(await local('GET', `/v1/newsletters/${list.id}`));
+      NEWSLETTER_READERS.exactUpTo = 20_000;
+      ok(await local('GET', `/v1/newsletters/${list.id}`));
+      Object.assign(NEWSLETTER_READERS, { exactUpTo: lowered.exactUpTo, runMs: 0 });
+      await run('audience.newsletterReaders'); await run('audience.newsletterReaders');
+      // A large read's probe; a small read's probe and exact count; the job's first two pages of 5,000.
+      assert.deepEqual(plans.map(([label]) => label), ['probe', 'probe', 'page', 'page', 'page']);
+      for (const [label, nodes] of plans) assert.ok(nodes.length && nodes.every(node => /^Index (Only )?Scan audience_list_members_pkey$/.test(node)), `${label}: ${nodes.join(', ')}`);
+      // Only those statements: everything after them plans with the defaults again.
+      assert.deepEqual((await query("SELECT current_setting('enable_bitmapscan') AS bitmap, current_setting('enable_seqscan') AS seq")).rows[0], { bitmap: 'on', seq: 'on' });
+      t.diagnostic(`The probe with the default settings in this state: ${(await explain('SELECT 1 FROM audience_list_members WHERE workspace_id = $1 AND list_id = $2 ORDER BY contact_id OFFSET 10000 LIMIT 1', [wid, list.id])).join(', ')}`);
     });
   });
 
@@ -16790,6 +16855,17 @@ describe('Campaign postal address', () => {
         assert.ok(url && url !== placeholder && copy.html.includes(`Unsubscribe</a></p><p style="`) && copy.html.includes(footerOf(address)), 'The HTML footer carries the address under the link.');
         assert.ok(copy.text.endsWith(`\n\nUnsubscribe: ${url}\n${address}`), 'So does the text.');
       }
+      // The copy as dispatched (rebuilt by the same footer) keeps the one-click headers on the recipient's own link.
+      const [{ sentCampaignContent }, { emails }, { eq }] = await Promise.all([import('./src/sending.js'), import('./src/db/sending.js'), import('drizzle-orm')]);
+      const unsubscribeHeaders = (snapshot: { headers: { Name: string; Value: string }[]; text?: string }) => {
+        const url = snapshot.text?.match(/\n\nUnsubscribe: (\S+)/)?.[1];
+        assert.ok(url?.includes('/unsubscribe/u_'));
+        assert.deepEqual(snapshot.headers.filter(h => /^list-unsubscribe/i.test(h.Name)), [{ Name: 'List-Unsubscribe', Value: `<${url}>` }, { Name: 'List-Unsubscribe-Post', Value: 'List-Unsubscribe=One-Click' }]);
+      };
+      for (const id of await released(sent.id)) {
+        const [row] = await runtime.db.select().from(emails).where(eq(emails.id, id));
+        unsubscribeHeaders(await sentCampaignContent(runtime, { workspaceId: wid, keyId: 'acceptance', permissions: ['manage'], domains: [] }, row!));
+      }
       // Frozen with the launch: a later change reaches new launches, never what was sent.
       ok(await local('PATCH', '/v1/settings/workspace', { postalAddress: 'Moved Fixture Co.\n10 Other Road' }));
       assert.ok((await content((await released(sent.id))[0]!)).text.endsWith(address));
@@ -16802,8 +16878,10 @@ describe('Campaign postal address', () => {
       assert.equal(receipt.text, 'Receipt');
       // A marketing send without an address still goes, with the link alone: its caller wrote the whole message.
       await db.query('UPDATE operation_settings SET postal_address = NULL WHERE workspace_id = $1', [wid]);
-      const unaddressed = await content(ok(await local('POST', '/v1/emails/send', { from, to: 'reader@example.net', subject: 'News', text: 'News', kind: 'marketing' }), 202).id);
-      assert.match(unaddressed.text, /^News\n\nUnsubscribe: \S+$/);
+      const unaddressedId = ok(await local('POST', '/v1/emails/send', { from, to: 'reader@example.net', subject: 'News', text: 'News', kind: 'marketing' }), 202).id;
+      assert.match((await content(unaddressedId)).text, /^News\n\nUnsubscribe: \S+$/);
+      // Marketing sends keep the one-click headers with an address and without one.
+      for (const id of [marketing.id, unaddressedId]) unsubscribeHeaders((await db.query('SELECT snapshot FROM sending_emails WHERE id = $1', [id])).rows[0].snapshot);
       // A campaign scheduled before postal addresses existed froze none: at its time it pauses while the workspace has
       // none, and once one is added and it is resumed it sends with that one, stamped into its review.
       await db.query("UPDATE sending_campaign_reviews SET draft = draft - 'postalAddress' WHERE campaign_id = $1", [scheduled.id]);
