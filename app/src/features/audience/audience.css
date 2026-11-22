@@ -39,6 +39,7 @@
 .audience-consent { display: flex; flex-direction: column; gap: var(--space-8); padding-top: var(--space-16); border-top: 1px solid var(--color-border-muted); }
 /* Under the preview the table's last rule already divides: no second one. */
 .audience-import-preview + .audience-consent { padding-top: 0; border-top: 0; }
+.audience-result p { margin: 0; }
 .audience-review-bar { justify-content: space-between; gap: var(--space-8) var(--space-16); }
 /* The count (up to two lines) and five sample addresses fit this height, so the dialog keeps its size when the count arrives. */
 .audience-plan { display: flex; flex-direction: column; gap: var(--space-8); min-height: calc(7 * var(--leading-sm) + 6 * var(--space-8)); }

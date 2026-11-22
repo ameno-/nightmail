@@ -149,9 +149,9 @@ export function ImportContactsDialog({ listId: initialListId = '', onClose }: { 
   const unknownHref = listId ? `/audience/lists/${listId}?status=unknown` : '/audience?status=unknown'
   if (result) {
     const imported = result.imported, subscribed = result.subscribed ?? 0
-    return <Dialog open onOpenChange={open => { if (!open) onClose() }} title="Import complete" footer={<>{!consent && imported > 0 && <Link className="ui-button ui-button--secondary ui-button--md" to={unknownHref} onClick={onClose}>Review unknown contacts</Link>}<Button variant="primary" onClick={onClose}>Done</Button></>}><div className="stack">
-      <Alert tone="success">{plural(imported, 'contact')} imported{consent ? ` · ${number(subscribed)} marked subscribed${subscribed < imported ? ` · ${number(imported - subscribed)} kept their earlier consent` : ''}` : ''}.</Alert>
-      {!consent && imported > 0 && <Alert tone="info">They can’t receive campaigns until they consent. Once they do, choose Review unknown contacts, then Mark as subscribed.</Alert>}
+    return <Dialog open onOpenChange={open => { if (!open) onClose() }} title="Import complete" footer={<>{!consent && imported > 0 && <Link className="ui-button ui-button--secondary ui-button--md" to={unknownHref} onClick={onClose}>Review unknown contacts</Link>}<Button variant="primary" onClick={onClose}>Done</Button></>}><div className="stack audience-result">
+      <p>{plural(imported, 'contact')} imported{consent ? ` · ${number(subscribed)} marked subscribed${subscribed < imported ? ` · ${number(imported - subscribed)} kept their earlier consent` : ''}` : ''}.</p>
+      {!consent && imported > 0 && <p className="muted">They can’t receive campaigns until they consent. Once they do, choose Review unknown contacts, then Mark as subscribed.</p>}
       {result.errorCount > 0 && <RejectedRows errors={result.errors} count={result.errorCount} skipped />}
     </div></Dialog>
   }
@@ -183,5 +183,8 @@ export function ImportContactsDialog({ listId: initialListId = '', onClose }: { 
 }
 
 function RejectedRows({ errors, count, skipped = false }: { errors: Issue[]; count: number; skipped?: boolean }) {
-  return <Alert tone="warning" title={`${plural(count, 'row')} ${skipped ? 'skipped' : 'will be skipped'}`}>{errors.slice(0, 10).map((issue, index) => <div key={index}>Row {issue.row}: {issue.message}</div>)}{count > 10 && <div>and {number(count - 10)} more</div>}</Alert>
+  const rows = <>{errors.slice(0, 10).map((issue, index) => <div key={index}>Row {issue.row}: {issue.message}</div>)}{count > 10 && <div>and {number(count - 10)} more</div>}</>
+  // After the import the rows are a plain record; before it, a warning.
+  if (skipped) return <div><p>{plural(count, 'row')} skipped</p><div className="muted">{rows}</div></div>
+  return <Alert tone="warning" title={`${plural(count, 'row')} will be skipped`}>{rows}</Alert>
 }
