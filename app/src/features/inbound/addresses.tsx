@@ -1,7 +1,7 @@
 import { useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { X } from 'lucide-react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
-import { Alert, Button, ConfirmDialog, Disclosure, ErrorState, Field, IconButton, Input, KeyValues, LoadingRegion, PageHeader, Select, SkeletonText, Tabs, useToast, fieldError, MutationError } from '../../components/ui'
+import { Alert, Button, ConfirmDialog, ErrorState, Field, IconButton, Input, KeyValues, LoadingRegion, PageHeader, Select, SkeletonText, Tabs, useToast, fieldError, MutationError } from '../../components/ui'
 import { useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
 import { date, number } from '../../lib/format'
 import { AddressMail } from './threads'
@@ -170,8 +170,7 @@ export function InboundAddressDetailPage() {
     setInput({ ...input, aliases: { list: aliases.list, draft: '', message: null } })
     try { setInput(formOf(await save.mutateAsync(patch))) } catch { /* Shown in the form. */ }
   }
-  // Opens the aliases and wildcards (on the Settings tab) first when the field is inside them.
-  const focus = (target: () => HTMLElement | null) => { const el = target(); el?.closest('details')?.setAttribute('open', ''); el?.scrollIntoView({ block: 'center' }); el?.focus() }
+  const focus = (target: () => HTMLElement | null) => { const el = target(); el?.scrollIntoView({ block: 'center' }); el?.focus() }
   const focusSettings = (target: () => HTMLElement | null) => { show('settings'); requestAnimationFrame(() => requestAnimationFrame(() => focus(target))) }
   const expired = !!current?.expiresAt && Date.parse(current.expiresAt) <= Date.now()
   return <div className="stack inbound-stack addr-root" data-tab={tab}>
@@ -191,7 +190,6 @@ export function InboundAddressDetailPage() {
         {building && overview.data && <AddressBuilder open address={current} domains={overview.data.domains} onOpenChange={open => { if (!open) { setBuilding(false); void overview.refetch() } }} />}</div>
       : <div className="stack addr-page">
         <KeyValues className="addr-facts" items={[
-          ['Domain', <Link key="d" to="/domains">{current.domain}</Link>],
           ...(current.publicAddress && current.publicAddress !== current.address ? [['Sends as', <PrivateAddress key="s" value={current.publicAddress} />] as [string, ReactNode]] : []),
           ['Created', `${current.origin === 'auto' ? 'By the catch-all, ' : ''}${date(current.createdAt)}`],
           ...(current.expiresAt ? [['Expires', date(current.expiresAt)] as [string, ReactNode]] : []),
@@ -200,10 +198,10 @@ export function InboundAddressDetailPage() {
           <MutationError error={save.error} />
           <Field label="Display name" htmlFor="inbound-address-display" error={fieldError(save.error, 'displayName')}><Input id="inbound-address-display" value={input.displayName} onChange={event => setInput({ ...input, displayName: event.target.value })} disabled={save.isPending} placeholder="Support" /></Field>
           {/* A temporary address can have neither aliases nor wildcards, so it has no editor for them. */}
-          {!current.expiresAt && <Disclosure className="addr-more" title="Aliases and wildcards" defaultOpen={!!fieldError(save.error, 'aliases') || current.aliases.length + current.rules.length > 0}>
+          {!current.expiresAt && <>
             <AliasEditor id="inbound-address-aliases" address={current.address} saved={input.base.aliases} value={input.aliases} onChange={aliases => setInput({ ...input, aliases })} disabled={save.isPending} error={fieldError(save.error, 'aliases')} />
             <PatternsField key={current.updatedAt} address={current} inputRef={patternInput} />
-          </Disclosure>}
+          </>}
           <div className="cluster form-actions"><Button variant="primary" type="submit" loading={save.isPending} disabled={!dirty}>Save changes</Button>{dirty && !save.isPending && <Button onClick={() => { setInput(null); save.reset() }}>Discard</Button>}</div>
         </form>}
         <div className="addr-danger"><Button variant="danger" onClick={() => setConfirmDelete(true)}>Delete address</Button></div>
