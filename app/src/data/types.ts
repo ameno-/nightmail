@@ -44,7 +44,9 @@ export interface SesDiscovery {
 }
 export interface SesReputation { available: boolean; reason: string | null; bounceRate: number | null; complaintRate: number | null; series: { at: string; bounceRate: number | null; complaintRate: number | null }[] }
 interface SesConfigurationSet { name: string; exists: boolean | null; owned: boolean | null; sendingEnabled: boolean | null; eventDestinationExists: boolean | null; eventWired: boolean | null; autoValidation: AutoValidationMode | null }
-export interface Workspace { id: string; name: string; accountId?: string; role: string; members?: { id: string; name: string; email: string; role: string }[] }
+export interface Workspace { id: string; name: string; postalAddress: string | null; accountId?: string; role: string; members?: { id: string; name: string; email: string; role: string }[] }
+/** GET /v1/settings/workspace: the name and the postal address every campaign footer shows (null until set). */
+export interface WorkspaceSettings { name: string; postalAddress: string | null }
 /** What a provider event recorded: a bounce's SES type and subtype, a complaint's feedback type, a click's link, and whether SES thought an open or click came from a bot. */
 export interface EmailEventDetail { bounceType?: string; bounceSubType?: string; feedbackType?: string; link?: string; bot?: boolean }
 export interface EmailEvent { id: string; type: string; at: ISODate; description: string; diagnostic?: string; detail?: EmailEventDetail }
@@ -322,7 +324,7 @@ export interface Api {
   audienceQuery: { plan(statement: string): Promise<AudiencePlan>; apply(input: { planId: string; confirmResubscribe?: boolean; evidence?: string }): Promise<{ affected: number }> }
   webhookDeliveries: (id: string, cursor?: string) => Promise<{items: WebhookDelivery[]; nextCursor: string | null}>
   regions: { list(signal?: AbortSignal): Promise<RegionCatalog>; configure(region: string, input: RegionConfigureInput, signal?: AbortSignal): Promise<RegionCatalog>; discover(region: string, options?: { refresh?: boolean }, signal?: AbortSignal): Promise<SesDiscovery>; provision(region: string, signal?: AbortSignal): Promise<RegionProvisionReceipt>; updateAutoValidation(region: string, stream: Stream, mode: Exclude<AutoValidationMode, 'inherit' | 'unknown'>, signal?: AbortSignal): Promise<{stream: Stream; mode: AutoValidationMode}> }
-  workspace: { get(signal?: AbortSignal): Promise<Workspace>; update(input: { name: string }, signal?: AbortSignal): Promise<Workspace> }
+  workspace: { get(signal?: AbortSignal): Promise<Workspace>; update(input: { name?: string; postalAddress?: string | null }, signal?: AbortSignal): Promise<Workspace>; settings(signal?: AbortSignal): Promise<WorkspaceSettings>; updateSettings(input: { postalAddress: string | null }, signal?: AbortSignal): Promise<WorkspaceSettings> }
   overview: { get(input: { regionId: string; range: TimeRange; stream?: Stream }, signal?: AbortSignal): Promise<Overview>; setup(signal?: AbortSignal): Promise<OverviewSetup> }
   senderScore: { get(signal?: AbortSignal): Promise<SenderScore>; release(input: StandingReleaseInput, signal?: AbortSignal): Promise<SenderScore> }
   emails: { list(input: PageRequest, signal?: AbortSignal): Promise<PageResult<Email>>; get(id: string, signal?: AbortSignal): Promise<Email>; cancel(id: string, signal?: AbortSignal): Promise<Email>; reschedule(id: string, scheduledAt: ISODate, signal?: AbortSignal): Promise<Email>; check(input: EmailCheckInput, signal?: AbortSignal): Promise<SendabilityReport>; preview(input: EmailPreviewRequest, signal?: AbortSignal): Promise<ClientPreview[]> }

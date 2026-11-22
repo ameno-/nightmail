@@ -27,7 +27,7 @@ import { mailboxAddresses, mailboxKeys } from './db/mailbox.js';
 import { CustomHeaders } from './custom-headers.js';
 import { EmailThread, joinReplies, mailboxMail, sentThreadId, threadBlock, threadView, type RawThread } from './thread-view.js';
 import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, emails, type CampaignStatsGroup, type StoredCampaignStats, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
-import { AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_ATTACHMENT_BYTES, MAX_JSON_ATTACHMENT_BYTES, mib, senderDisplayName, unsubscribePageLink, unsubscribePageUrl, validateAttachment, type AttachmentMetadataInput } from './outbound-content.js';
+import { AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_ATTACHMENT_BYTES, MAX_JSON_ATTACHMENT_BYTES, mib, postalAddressOf, postalAddressRequired, senderDisplayName, unsubscribePageLink, unsubscribePageUrl, validateAttachment, type AttachmentMetadataInput } from './outbound-content.js';
 import { clients, type Client } from './email-preview/support.js';
 import { CheckInput, CheckResult, splitMailbox, type CheckMail } from './sendability-schema.js';
 import { headerPrefix, requestHeader } from './brand.js';
@@ -99,7 +99,7 @@ const AttachmentIds = z.array(z.string().min(1).max(120)).max(SEND_LIMITS.attach
 const ContentFields = { subject: Subject.optional(), html: z.string().min(1).max(MAX_BODY).optional(), text: z.string().min(1).max(MAX_BODY).optional() };
 const SendInput = z.object({
   from: Address, fromName: FromName.optional(), to: z.union([Address, z.array(Address).min(1).max(50)]), cc: z.array(Address).max(49).default([]), bcc: z.array(Address).max(49).default([]), replyTo: z.array(Address).max(10).default([]),
-  region: Region.optional().describe(`Usually omitted: hosted ${productName} sends from the region bound to the sender domain, and a different value fails with SENDER_REGION_MISMATCH. Self-hosted installations default to their default region.`), kind: z.enum(['transactional', 'marketing']).default('transactional'), ...ContentFields,
+  region: Region.optional().describe(`Usually omitted: hosted ${productName} sends from the region bound to the sender domain, and a different value fails with SENDER_REGION_MISMATCH. Self-hosted installations default to their default region.`), kind: z.enum(['transactional', 'marketing']).default('transactional').describe(`marketing adds ${productName}'s footer (an Unsubscribe link, with the workspace's postal address under it when it has one) and the one-click List-Unsubscribe headers.`), ...ContentFields,
   template: z.object({ name: z.string().min(1).max(64).regex(/^[a-zA-Z0-9_-]+$/), data: StoredTemplateData }).strict().describe('Uses native SES stored-template rendering and snapshots its rendered MIME. SES does not automatically escape HTML; callers must escape untrusted HTML-context values. Simulated deployments do not render AWS templates.').optional(),
   attachments: AttachmentIds, tracking: z.boolean().optional(), headers: CustomHeaders.optional(),
   screen: z.boolean().optional().describe('Request Jev screening for live transactional mail. Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Probation and marketing mail defer on classifier outages; trusted transactional mail can proceed. Simulated mail is not screened. A positive reject verdict records CONTENT_REJECTED_SPAM before calling SES.'),
@@ -115,6 +115,7 @@ const SCREEN_LIMIT_NOTE = `Screened-text limit: Hosted sending screens each mess
 const CAMPAIGN_SCREEN_NOTE = `Hosted campaigns are screened copy by copy before they are released, as single messages are, but each distinct copy only once: recipients whose personalized copies read the same share one verdict, so a campaign personalized only with first names costs one screen per distinct first name, and one with a unique value per recipient costs one per recipient. Each copy is screened exactly as a single message is, and sent only under a verdict for its exact content. The campaign\u2019s own copy, placeholders unresolved, is screened first and may hold ${screenBytes(SCREEN.campaignBytes)} bytes of screened text (installation default; 422 CONTENT_TOO_LARGE_TO_SCREEN with error.details[0] { screenedBytes, limitBytes } otherwise); so may each copy, and a copy over it is refused alone. A copy the screen refuses is never sent (CONTENT_REJECTED_SPAM); when refused copies pass 5% and 10 recipients the campaign pauses once for review, and a positive verdict on the campaign\u2019s own copy fails it before anyone is sent to.`;
 // The audience is frozen inside the launch request (sending.ts launch): a large one takes seconds, and one statement of it
 // may run out of the database's time.
+const CAMPAIGN_POSTAL_NOTE = 'Every email\u2019s footer shows the workspace\u2019s postal address under the Unsubscribe link, as US law (CAN-SPAM) requires, frozen as it is now: without one the request is refused with 422 POSTAL_ADDRESS_REQUIRED (set postalAddress with updateWorkspaceSettings).';
 const CAMPAIGN_CAPTURE_NOTE = 'The audience is captured in this request, which takes seconds for a large one. A capture that runs out of time is refused with 503 AUDIENCE_CAPTURE_TIMEOUT and one that waits for other large captures with 503 AUDIENCE_CAPTURE_BUSY; both are retryable and keep nothing, so retry with the same Idempotency-Key.';
 const captureTimedOut = () => new ApiError(503, 'AUDIENCE_CAPTURE_TIMEOUT', 'The audience capture ran out of time and nothing was kept. Retry the launch; if it keeps running out of time, send to a smaller list.', undefined, true);
 // SMTP already limits the entire MIME message to the advertised wire SIZE. Keep all
@@ -837,16 +838,28 @@ function renderedMimeHeaders(block:string) {
 // `url` is Nightmail's own link for the recipient. A campaign with its own unsubscribe page (`page`) links the footer
 // there, with the same token; List-Unsubscribe keeps Nightmail's link, as RFC 8058 allows the header one HTTPS URI and
 // the one-click POST must reach Nightmail, which records it and redirects a confirming browser to the page.
-function marketingFooter(snapshot: EmailSnapshot, url: string, page?: string) {
-  const link = page ? unsubscribePageLink(page, url.slice(url.lastIndexOf('/') + 1)) : url;
-  if (snapshot.html) {
-    const footer = `<p style="font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:13px;line-height:1.5;color:#595959;margin:24px 0 0"><a href="${escaped(link)}" style="color:#595959;text-decoration:underline">Unsubscribe</a></p>`;
-    const close = snapshot.html.search(/<\/td>\s*<\/tr>\s*<\/table>\s*<\/td>\s*<\/tr>\s*<\/table>\s*<\/body>/i);
-    snapshot.html = close >= 0 ? snapshot.html.slice(0, close) + footer + snapshot.html.slice(close) : snapshot.html + footer;
-  }
-  snapshot.text = (snapshot.text ?? '') + `\n\nUnsubscribe: ${link}`;
+/** The workspace's postal address now, or null when it has none. */
+async function workspacePostalAddress(runtime: Runtime, db: DbExecutor, workspaceId: string) {
+  return (await db.execute<{ address: string | null }>(sql`SELECT ${postalAddressOf(runtime.config.multiTenant, workspaceId)} AS address`)).rows[0]?.address ?? null;
+}
+// `postalAddress`: the workspace's (CAN-SPAM), under the link in the same quiet style, one line per line.
+export type Footer = { unsubscribePageUrl?: string; postalAddress?: string | null };
+function marketingFooter(snapshot: EmailSnapshot, url: string, footer: Footer = {}) {
+  footerParts(snapshot, url, footer);
   // Keep caller headers; the unsubscribe pair is always Nightmail's own.
   snapshot.headers = [...snapshot.headers.filter(header => !/^list-unsubscribe/i.test(header.Name)), { Name: 'List-Unsubscribe', Value: `<${url}>` }, { Name: 'List-Unsubscribe-Post', Value: 'List-Unsubscribe=One-Click' }];
+}
+/** The footer's visible part, in the HTML and the text: what a preview and a campaign test show without the headers. */
+function footerParts(parts: { html?: string; text?: string }, url: string, { unsubscribePageUrl: page, postalAddress }: Footer) {
+  const link = page ? unsubscribePageLink(page, url.slice(url.lastIndexOf('/') + 1)) : url, lines = postalAddress ? postalAddress.split('\n') : [];
+  if (parts.html) {
+    const style = "font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:13px;line-height:1.5;color:#595959";
+    const footer = `<p style="${style};margin:24px 0 0"><a href="${escaped(link)}" style="color:#595959;text-decoration:underline">Unsubscribe</a></p>`
+      + (lines.length ? `<p style="${style};margin:8px 0 0">${lines.map(escaped).join('<br>')}</p>` : '');
+    const close = parts.html.search(/<\/td>\s*<\/tr>\s*<\/table>\s*<\/td>\s*<\/tr>\s*<\/table>\s*<\/body>/i);
+    parts.html = close >= 0 ? parts.html.slice(0, close) + footer + parts.html.slice(close) : parts.html + footer;
+  }
+  parts.text = (parts.text ?? '') + `\n\nUnsubscribe: ${link}` + (lines.length ? `\n${lines.join('\n')}` : '');
 }
 function structuredSnapshot(input:SendRequest & {region:string}):EmailSnapshot {
   return { testCampaignId: null, untrustedContent: !!input.headers?.some(h => h.name.toLowerCase() === 'in-reply-to'), from: input.from, ...(input.fromName !== undefined ? { fromName: input.fromName } : {}), to: Array.isArray(input.to) ? input.to : [input.to], cc: input.cc, bcc: input.bcc, replyTo: input.replyTo, region: input.region, kind: input.kind, subject: input.subject ?? '', html: input.html, text: input.text, attachments: input.attachments, tracking: input.tracking ?? input.kind === 'marketing', headers: (input.headers ?? []).map(header => ({ Name: header.name, Value: header.value })), ...(input.screen && input.kind === 'transactional' ? { screen: true } : {}) };
@@ -1023,8 +1036,9 @@ async function endRelease(runtime: Runtime, wid: string, emailId: string, run: u
 
 /** One message of a send, as built before admission: what TypeScript alone found wrong with it waits in `invalid`. */
 type Outgoing = { snapshot: EmailSnapshot; recipients: number; marketing: boolean; template?: SendRequest['template']; token?: { hash: string; email: string }; duplicate?: boolean; invalid?: unknown; oversize?: ApiError };
-/** A direct send's messages, built and checked without the database: URLs, headers, duplicates and the batch's size. */
-async function directMessages(runtime: Runtime, mails: SendRequest[], batch: boolean): Promise<Outgoing[]> {
+/** A direct send's messages, built and checked without the database: URLs, headers, duplicates and the batch's size.
+ *  `postalAddress`: the workspace's, for the footer of its marketing mail (admitEmails reads it). */
+async function directMessages(runtime: Runtime, mails: SendRequest[], batch: boolean, postalAddress?: string | null): Promise<Outgoing[]> {
   const bulk = bulkFlags(mails), out: Outgoing[] = [];
   for (const [i, m] of mails.entries()) {
     const snapshot = structuredSnapshot({ ...m, region: m.region ?? '' });
@@ -1040,7 +1054,7 @@ async function directMessages(runtime: Runtime, mails: SendRequest[], batch: boo
       if (m.kind === 'marketing') {
         // Only the token's hash and destination come from local preparation; the statement gives it the workspace.
         const link = await (await loadOpsUnsub()).createUnsubscribeLink(runtime, '', snapshot.to[0]!);
-        marketingFooter(snapshot, link.url); message.token = { hash: link.record.tokenHash, email: link.record.email };
+        marketingFooter(snapshot, link.url, { postalAddress }); message.token = { hash: link.record.tokenHash, email: link.record.email };
       }
     } catch (e) { if (e instanceof ModuleLoadError) throw e; message.invalid = atItem(e, batch ? i : undefined); }
     out.push(message);
@@ -1141,7 +1155,11 @@ async function renderTemplates(runtime: Runtime, a: Actor, out: Outgoing[], batc
 }
 /** POST /v1/emails/send and /batch after authentication, the dashboard's test email and the platform's notices. */
 async function admitEmails(call: SendCall, a: Actor, input: SendRequest | { emails: SendRequest[] }, scheduledAt?: string) {
-  const batch = 'emails' in input, mails = batch ? input.emails : [input], out = await directMessages(call.runtime, mails, batch);
+  const batch = 'emails' in input, mails = batch ? input.emails : [input];
+  // Marketing mail's footer carries the workspace's postal address when it has one. Unlike a campaign, a marketing send
+  // without one is not refused: its caller writes the whole message and may include the address itself.
+  const address = mails.some(m => m.kind === 'marketing') ? await workspacePostalAddress(call.runtime, call.db ?? call.runtime.db, a.workspaceId) : null;
+  const out = await directMessages(call.runtime, mails, batch, address);
   // A reply by header joins the conversation it answers only when its sender can read that message.
   await joinReplies(call.db ?? call.runtime.db, actorMailAccess(a), out.map(m => m.snapshot));
   if (!out.some(m => m.template)) return admitSends(call, input, out, { actor: a }, { batch, scheduledAt });
@@ -1186,8 +1204,9 @@ export async function admitRelayed(runtime: Runtime, inputs: RelayedMessage[], c
   return 'data' in receipt ? receipt.data : [receipt];
 }
 // Auth middleware calls this only for ordinary bearer keys, after the request size gate. Malformed inputs, mailbox
-// tracking, provider-rendered templates and replies by In-Reply-To (whose thread depends on what the key can read,
-// joinReplies) keep their normal authenticated handler (including error ordering).
+// tracking, provider-rendered templates, replies by In-Reply-To (whose thread depends on what the key can read,
+// joinReplies) and marketing mail (whose footer needs the workspace's postal address before the statement that finds
+// the workspace) keep their normal authenticated handler (including error ordering).
 export async function tryAtomicKeyAdmission(c:Ctx,credentialCtes:(charge?:SQL)=>SQL) {
   if(!/^application\/json(?:\s*;|$)/i.test(c.req.header('content-type')??''))return;
   await boundRequestBody(c);
@@ -1195,7 +1214,7 @@ export async function tryAtomicKeyAdmission(c:Ctx,credentialCtes:(charge?:SQL)=>
   const parsed=batch?BatchInput.safeParse(body):SingleSendInput.safeParse(body);
   if(!parsed.success)return;
   const input=parsed.data,mails='emails' in input?input.emails:[input];
-  if(('replyAddressId' in input && input.replyAddressId)||('replyMailboxId' in input && input.replyMailboxId)||('scheduledAt' in input && input.scheduledAt)||mails.some(m=>m.template || m.attachments.some(a=>a.includes('\0')) || m.headers?.some(h=>h.name.toLowerCase()==='in-reply-to')))return;
+  if(('replyAddressId' in input && input.replyAddressId)||('replyMailboxId' in input && input.replyMailboxId)||('scheduledAt' in input && input.scheduledAt)||mails.some(m=>m.template || m.kind==='marketing' || m.attachments.some(a=>a.includes('\0')) || m.headers?.some(h=>h.name.toLowerCase()==='in-reply-to')))return;
   const key=c.req.header('Idempotency-Key');if(key!==undefined && !validIdempotencyKey(key))return;
   if(batch && batchContent(mails)>SEND_LIMITS.batchContentChars)return;
   // The statement authenticates the key and answers 401, 429 and 403 before any admission answer. A duplicate of a
@@ -1354,6 +1373,22 @@ async function renderCampaignContent(runtime: Runtime, draft: Pick<CampaignDraft
   await assertBlockContent(draft.html, complete);
   const { renderBlockHtml, renderBlockText } = await loadCampaignBlocks();
   return { html: renderBlockHtml(draft.html, { fontBase: `${runtime.config.publicUrl}/fonts/`, title: draft.subject }), text: renderBlockText(draft.html) || undefined };
+}
+/** A campaign, in one read with the footer its copies show: the postal address its launch froze, or the workspace's
+ *  while it is still editable (campaignEditable). */
+async function campaignWithFooter(runtime: Runtime, a: Actor, campaignId: string): Promise<{ row: typeof campaigns.$inferSelect; footer: Footer }> {
+  const frozen = sql`${campaigns.reviewId} IS NOT NULL AND NOT (${campaigns.state}='draft' OR (${campaigns.state}='failed' AND ${campaigns.expanded}=0))`;
+  const [found] = await runtime.db.select({ row: campaigns, address: sql<string | null>`CASE WHEN ${frozen}
+      THEN (SELECT r.draft->>'postalAddress' FROM sending_campaign_reviews r WHERE r.workspace_id=${a.workspaceId} AND r.id=${campaigns.reviewId})
+      ELSE ${postalAddressOf(runtime.config.multiTenant, a.workspaceId)} END` }).from(campaigns).where(campaignWhere(a, campaignId));
+  if (!found) return notFound('Campaign');
+  return { row: found.row, footer: { unsubscribePageUrl: found.row.draft.unsubscribePageUrl, postalAddress: found.address } };
+}
+/** A campaign's preview: its rendered draft with the footer its emails get, the link a placeholder. */
+async function previewParts(runtime: Runtime, draft: CampaignDraft, footer: Footer) {
+  const rendered = await renderCampaignContent(runtime, draft, false);
+  if (rendered.html || rendered.text) footerParts(rendered, unsubscribePlaceholder(runtime), footer);
+  return rendered;
 }
 const RECIPIENT_CONTENT_ERRORS = new Set(['CAMPAIGN_RECIPIENT_INVALID', 'MISSING_TEMPLATE_VARIABLE', 'UNSUPPORTED_TEMPLATE_SYNTAX', 'UNSAFE_TEMPLATE_CONTEXT', 'UNSAFE_HTML_URL', 'ENCODED_MESSAGE_TOO_LARGE', 'RENDERED_CONTENT_TOO_LARGE']);
 // rendered: the content the review already rendered and checked, or undefined to render the draft now (a test).
@@ -1662,9 +1697,9 @@ export function registerSending(app: App) {
     const { CAMPAIGN_CONTENT_GUIDE } = await loadCampaignBlocks();
     return c.json({ format: 'markdown' as const, markdown: CAMPAIGN_CONTENT_GUIDE }, 200);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/preview', operationId: 'previewCampaign', description: 'Renders the saved draft’s block HTML as the styled email and its plain-text alternative, without personalization or the unsubscribe footer. Placeholders remain visible as {{name}}.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignPreview), ...errors } }), async c => {
-    const a = actor(c), row = await findCampaign(c.env.db, a, c.req.valid('param').id);
-    const rendered = await renderCampaignContent(c.env, row.draft, false);
+  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/preview', operationId: 'previewCampaign', description: 'Renders the saved draft’s block HTML as the styled email and its plain-text alternative, with the footer every email gets (the Unsubscribe link, a placeholder here, and the workspace’s postal address) and without personalization. Placeholders remain visible as {{name}}.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignPreview), ...errors } }), async c => {
+    const { row, footer } = await campaignWithFooter(c.env, actor(c), c.req.valid('param').id);
+    const rendered = await previewParts(c.env, row.draft, footer);
     return c.json({ html: rendered.html ?? '', text: rendered.text ?? '' }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/audience', operationId: 'previewCampaignAudience', description: 'Counts the saved audience right now: matched contacts and how many are eligible, suppressed or unsubscribed. Read-only and never frozen; send or schedule takes its own snapshot and consent is rechecked at dispatch.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(AudienceCounts), ...errors } }), async c => {
@@ -1675,12 +1710,12 @@ export function registerSending(app: App) {
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/preview-image', operationId: 'renderCampaignPreviewImage', description: 'Renders the saved campaign draft as a full-page, 720 px wide PNG for visual review. Inline CID images are embedded; remote HTTPS images are loaded by the isolated renderer.' + PREVIEW_ROUTE_NOTE, tags: ['Campaigns'], security, request: { params: IdParams }, responses: { ...previewResponses(CampaignPreviewImage), ...errors } }), async c => {
     refuseHead(c);
-    const a = actor(c, 'send'), row = await findCampaign(c.env.db, a, c.req.valid('param').id);
+    const a = actor(c, 'send'), { row, footer } = await campaignWithFooter(c.env, a, c.req.valid('param').id);
     if (!c.env.renderHtmlImage) throw new ApiError(503, 'PREVIEW_RENDERING_UNAVAILABLE', 'Visual campaign preview rendering is not configured.', undefined, true);
     await chargeRenderBudget(c, a.workspaceId);
     const inline = (await attachmentRows(c.env.db, a, row.draft.attachments)).filter(item => item.disposition === 'inline' && item.contentId), render = c.env.renderHtmlImage;
     // The page is passed on, not kept here: renderPreview drops it once it is rendered.
-    const link = await renderPreview(c.env, a.workspaceId, (await renderCampaignContent(c.env, row.draft, false)).html ?? '', inline, async item => {
+    const link = await renderPreview(c.env, a.workspaceId, (await previewParts(c.env, row.draft, footer)).html ?? '', inline, async item => {
       const asset = await c.env.storage.get(item.storageKey);
       if (!asset || asset.body.length !== item.size || await bytesDigest(asset.body) !== item.checksum) throw new ApiError(503, 'ATTACHMENT_STORAGE_UNAVAILABLE', 'An inline campaign image is missing or changed.', undefined, true);
       return asset.body;
@@ -1730,22 +1765,25 @@ export function registerSending(app: App) {
     await c.env.db.transaction(async db => { const current = await findCampaign(db, a, campaignId, true); draftSender(c.env, a, current.draft); editable(current); await db.execute(sql`DELETE FROM sending_attachment_links l USING sending_campaign_reviews r WHERE l.owner_type = 'review' AND l.owner_id = r.id AND l.workspace_id = r.workspace_id AND r.workspace_id = ${a.workspaceId} AND r.campaign_id = ${campaignId}`); await db.delete(campaignReviews).where(and(scope(campaignReviews, a), eq(campaignReviews.campaignId, campaignId))); await db.delete(attachmentLinks).where(and(scope(attachmentLinks, a), eq(attachmentLinks.ownerType, 'campaign'), eq(attachmentLinks.ownerId, campaignId))); await db.delete(campaigns).where(campaignWhere(a, campaignId)); });
     return c.json({ id: campaignId, deleted: true as const }, 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/test', operationId: 'testCampaign', description: `Send the current draft, personalized with data, to one address as a transactional test. On Hosted sending a test is screened on its own, with the campaign limit (${screenBytes(SCREEN.campaignBytes)} bytes of screened text by default; 422 CONTENT_TOO_LARGE_TO_SCREEN with error.details[0] { screenedBytes, limitBytes } over it).`, tags: ['Campaigns'], security, request: { params: IdParams, headers: SendIdempotencyHeaders, body: json(TestCampaign) }, responses: { 202: response(Receipt), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/test', operationId: 'testCampaign', description: `Send the current draft, personalized with data, to one address as a transactional test. It shows the footer as recipients get it (the Unsubscribe link, a placeholder here, and the workspace’s postal address, if set) without List-Unsubscribe headers, and needs no postal address. On Hosted sending a test is screened on its own, with the campaign limit (${screenBytes(SCREEN.campaignBytes)} bytes of screened text by default; 422 CONTENT_TOO_LARGE_TO_SCREEN with error.details[0] { screenedBytes, limitBytes } over it).`, tags: ['Campaigns'], security, request: { params: IdParams, headers: SendIdempotencyHeaders, body: json(TestCampaign) }, responses: { 202: response(Receipt), ...errors } }), async c => {
     const a = actor(c, 'send'), input = c.req.valid('json'), campaignId = c.req.valid('param').id;
     // With its key claimed, read and render the draft, then admit the test in one statement that locks the campaign
     // and requires the revision it rendered. A replay rechecks that the caller may still read the campaign.
     const result = await claimedSend(sendCall(c), a, input, async () => {
-      const row = await findCampaign(c.env.db, a, campaignId);
+      const { row, footer } = await campaignWithFooter(c.env, a, campaignId);
       if (row.archivedAt) throw new ApiError(409, 'CAMPAIGN_ARCHIVED', 'Restore this campaign before sending a test.');
-      const snapshot = { ...await campaignMessage(c.env, row.draft, { id: 'test-recipient', email: input.to, properties: input.data }, true, null), testCampaignId: campaignId };
+      const message = await campaignMessage(c.env, row.draft, { id: 'test-recipient', email: input.to, properties: input.data }, true, null);
+      // The footer as recipients get it, its link the placeholder: a test is transactional, without List-Unsubscribe.
+      const snapshot = { ...message, testCampaignId: campaignId };
+      footerParts(snapshot, unsubscribePlaceholder(c.env), footer);
       return { out: [{ snapshot, recipients: hostedCost(input.to), marketing: false }], campaign: { id: campaignId, revision: row.revision } };
     }, { batch: false, replayed: (db, receipt) => campaignReplay(a, campaignId)(db, receipt) });
     return c.json(Receipt.parse(result), 202);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/send', operationId: 'sendCampaign', description: 'Accept the current revision for durable background delivery: the audience is frozen now, every message is validated in the background, then recipients are released into the dispatch queue. The 202 count is accepted recipient intents, not SES acceptance or delivery; poll the campaign for its state. ' + CAMPAIGN_SCREEN_NOTE + ' ' + CAMPAIGN_CAPTURE_NOTE, tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(CampaignSend) }, responses: { 202: response(CampaignQueued), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/send', operationId: 'sendCampaign', description: 'Accept the current revision for durable background delivery: the audience is frozen now, every message is validated in the background, then recipients are released into the dispatch queue. The 202 count is accepted recipient intents, not SES acceptance or delivery; poll the campaign for its state. ' + CAMPAIGN_POSTAL_NOTE + ' ' + CAMPAIGN_SCREEN_NOTE + ' ' + CAMPAIGN_CAPTURE_NOTE, tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(CampaignSend) }, responses: { 202: response(CampaignQueued), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json'); const result = await idempotent(c.env.db, keyed(c, a), input, db => launch(c.env, db, a, c.req.valid('param').id, input, c.get('requestId')), { replayed: campaignReplay(a, c.req.valid('param').id) }); return c.json(CampaignQueued.parse(result), 202);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/schedule', operationId: 'scheduleCampaign', description: 'Accept the current revision for durable scheduled delivery. The audience is frozen and validated now; no recipient is materialized or sent before scheduledAt. The 202 count is accepted recipient intents. ' + CAMPAIGN_SCREEN_NOTE + ' ' + CAMPAIGN_CAPTURE_NOTE, tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(CampaignSchedule) }, responses: { 202: response(CampaignQueued), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/schedule', operationId: 'scheduleCampaign', description: 'Accept the current revision for durable scheduled delivery. The audience is frozen and validated now; no recipient is materialized or sent before scheduledAt. The 202 count is accepted recipient intents. ' + CAMPAIGN_POSTAL_NOTE + ' ' + CAMPAIGN_SCREEN_NOTE + ' ' + CAMPAIGN_CAPTURE_NOTE, tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(CampaignSchedule) }, responses: { 202: response(CampaignQueued), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
     const result = await idempotent(c.env.db, keyed(c, a), input, db => launch(c.env, db, a, c.req.valid('param').id, input, c.get('requestId')), { replayed: campaignReplay(a, c.req.valid('param').id) }); return c.json(CampaignQueued.parse(result), 202);
   });
@@ -1905,7 +1943,10 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   // 275812 and 275815 large captures in audience.ts, 275813 public stats.)
   if (!(await db.execute(sql`SELECT 1 WHERE pg_try_advisory_xact_lock(275814, hashtext(${a.workspaceId} || ':' || ${campaignId}))`)).rowCount)
     throw new ApiError(409, 'CAMPAIGN_LOCKED', 'Another request is sending this campaign; fetch it to see its state.', undefined, true);
-  const draft = readyCampaign(row.draft);
+  // The footer's postal address (CAN-SPAM), read once and frozen in the review: every copy and rebuild of this launch
+  // shows the same one. Without it the launch is refused after the admission check below, before anything is captured.
+  const postalAddress = await workspacePostalAddress(runtime, db, a.workspaceId);
+  const draft = { ...readyCampaign(row.draft), ...postalAddress ? { postalAddress } : {} };
   const rendered = await renderCampaignContent(runtime, draft), cfg = runtime.config;
   // What the campaign's screen would refuse in the background, measured now; admission refuses it for screened mail.
   let oversize: ApiError | undefined;
@@ -1927,6 +1968,7 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   await db.execute(sql`SAVEPOINT launch_check`);
   try { const check = await decide('none'); if (!check.allowed) throw refusal(runtime, check, local); }
   finally { await db.execute(sql`ROLLBACK TO SAVEPOINT launch_check`); await db.execute(sql`RELEASE SAVEPOINT launch_check`); }
+  if (!postalAddress) throw postalAddressRequired();
   const reviewId = id('review'), propertyKeys = placeholderKeys(draft, rendered);
   const counts = await (await wrapModuleLoad(() => import('./audience.js'))).snapshotCampaignAudience(db, a, draft.audience, reviewId, propertyKeys).catch(error => {
     // A statement past the database's limit (or cancelled) ends the launch; its transaction keeps nothing.
@@ -1937,7 +1979,7 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   const held = await lockSendScope(db, a.workspaceId, { campaignId });
   editable(await findCampaign(db, a, campaignId, true), input.revision);
   const route = admitted(runtime, await decide(held), a.workspaceId, local).mails[0]!;
-  const reviewed=route.binding ? {...row.draft,region:route.region,binding:route.binding} : row.draft;
+  const reviewed={...row.draft,...route.binding ? {region:route.region,binding:route.binding} : {},postalAddress};
   const contentHash = await digest(canonical({ version: 2, draft: reviewed, rendered }));
   await db.insert(campaignReviews).values({ id: reviewId, rendererVersion: CAMPAIGN_RENDERER_VERSION, workspaceId: a.workspaceId, campaignId, revision: row.revision, draft: reviewed, contentHash, rendered });
   await reserveCampaign(runtime, db, held, a, a.keyId, counts.eligible);
@@ -2269,13 +2311,13 @@ export async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail:
     ? { url: reused, record: { tokenHash: await digest(reused.slice(reused.lastIndexOf('/') + 1)), workspaceId: a.workspaceId, email: customer.to[0]!.trim().toLowerCase() } }
     : await (await loadOpsUnsub()).createUnsubscribeLink(runtime, a.workspaceId, customer.to[0]!);
   const page = review.draft.unsubscribePageUrl;
-  const snapshot = withUnsubscribe(runtime, customer, unsubscribe.url, page);
+  const snapshot = withUnsubscribe(runtime, customer, unsubscribe.url, review.draft);
   sizeCheck(snapshot, rows);
   // Persist only the compact stub plus the unsubscribe URL: the body is reproducible from the frozen review and
   // recipient (verified by contentHash), so storing ~2-3 KB of rendered HTML per recipient bought nothing.
   const stored = { kind:'marketing' as const,deferredCampaign:true,unsubscribeUrl:unsubscribe.url };
   // `keyed`: the same customer copy with the footer generated for the placeholder link, as campaign screening keys it.
-  return { mail: { ...mail, snapshot }, rows, unsubscribe: { ...unsubscribe.record, page }, stored, keyed: screenedAs(runtime, customer, page) };
+  return { mail: { ...mail, snapshot }, rows, unsubscribe: { ...unsubscribe.record, page }, stored, keyed: screenedAs(runtime, customer, review.draft) };
 }
 // Bump when interpolation, preheader or footer output changes, and keep the previous renderer for older reviews.
 export const CAMPAIGN_RENDERER_VERSION = 2;
@@ -2297,7 +2339,7 @@ export async function rebuildCampaignEmail(runtime: Runtime, a: Actor, stub: Ema
   if (!stub.unsubscribeUrl) throw new ApiError(409, 'EMAIL_CONTENT_UNAVAILABLE', 'This campaign email has no stored content to rebuild.');
   const snapshot = await campaignMessage(runtime, review.draft, review.recipient, false, rows, review.rendered, true, !review.rendered.html?.includes('{{'), review.renderer_version);
   if (await digest(canonical(snapshot)) !== review.content_hash) throw new ApiError(409, 'CAMPAIGN_CONTENT_UNREPRODUCIBLE', 'The renderer no longer reproduces the message that was sent.');
-  marketingFooter(snapshot, stub.unsubscribeUrl, review.draft.unsubscribePageUrl);
+  marketingFooter(snapshot, stub.unsubscribeUrl, review.draft);
   return snapshot;
 }
 // Accepted means provider acceptance evidence; bounce and complaint rates are over accepted mail. Suppressed mail
@@ -2394,7 +2436,7 @@ export async function campaignCopy(runtime: Runtime, draft: CampaignDraft, rende
   const copy: EmailSnapshot = { testCampaignId: null, from: draft.from, ...(draft.fromName ? { fromName: draft.fromName } : {}), ...(draft.previewText !== undefined ? { previewText: draft.previewText } : {}),
     to: [], cc: [], bcc: [], replyTo: draft.replyTo ?? [], region: draft.region, kind: 'marketing', subject: draft.subject, html: withPreheader(rendered.html, draft.previewText, parse, version), text: rendered.text,
     attachments: draft.attachments, tracking: draft.tracking, headers: [] };
-  marketingFooter(copy, unsubscribePlaceholder(runtime), draft.unsubscribePageUrl);
+  marketingFooter(copy, unsubscribePlaceholder(runtime), draft);
   return copy;
 }
 export type CampaignScreenRef = { workspaceId: string; campaignId: string; reviewId: string };
@@ -2471,15 +2513,15 @@ export function generatedUnsubscribeUrl(runtime: Runtime, value: string): string
  * (withUnsubscribe), from the same customer copy, so the two differ only there: nothing is ever found or replaced in the
  * customer's content, and the customer's bytes, whatever they hold, are part of the key.
  */
-export function screenedAs(runtime: Runtime, customer: EmailSnapshot, page?: string): EmailSnapshot {
+export function screenedAs(runtime: Runtime, customer: EmailSnapshot, footer: Footer = {}): EmailSnapshot {
   const copy = { ...customer, headers: [...customer.headers] };
-  marketingFooter(copy, unsubscribePlaceholder(runtime), page);
+  marketingFooter(copy, unsubscribePlaceholder(runtime), footer);
   return copy;
 }
 /** A campaign copy as delivered: the customer's copy with the footer and headers generated for the recipient's link. */
-export function withUnsubscribe(runtime: Runtime, customer: EmailSnapshot, url: string, page?: string): EmailSnapshot {
+export function withUnsubscribe(runtime: Runtime, customer: EmailSnapshot, url: string, footer: Footer = {}): EmailSnapshot {
   const copy = { ...customer, headers: [...customer.headers] };
-  marketingFooter(copy, generatedUnsubscribeUrl(runtime, url), page);
+  marketingFooter(copy, generatedUnsubscribeUrl(runtime, url), footer);
   return copy;
 }
 const SCREEN_AHEAD = 2000, SCREEN_PAGE = 500, SCREEN_BUDGET_MS = 8000, SCREEN_CONCURRENCY = 4, SCREEN_BYTES_IN_FLIGHT = 8 * 1024 * 1024;
@@ -2526,7 +2568,7 @@ async function screenAhead(runtime: Runtime, a: Actor, row: RunRow, state: Campa
   // Copies that are the same up to their recipient share one screen: by a digest of the copy, never the copy itself.
   const forms = new Map<string, Promise<CopyVerdict>>();
   const verdictOf = async (recipient: ReviewedRecipient) => {
-    const keyed = screenedAs(runtime, await campaignMessage(runtime, draft, recipient, false, assets, rendered, true, !rendered.html?.includes('{{'), row.reviewVersion!), draft.unsubscribePageUrl);
+    const keyed = screenedAs(runtime, await campaignMessage(runtime, draft, recipient, false, assets, rendered, true, !rendered.html?.includes('{{'), row.reviewVersion!), draft);
     // The copy as the dispatcher keys it (probation senders' rewritten, src/dispatcher.ts prepareMail).
     const copy = probationCopy ? probationCopy({ ...keyed, to: [] }) : { ...keyed, to: [] };
     const size = Buffer.byteLength(copy.html ?? '') + Buffer.byteLength(copy.text ?? ''), form = await screen.copyKey(runtime, copy);
@@ -2617,7 +2659,7 @@ async function prepareStep(runtime: Runtime, a: Actor, row: RunRow, jobId: strin
         ? { ...staticSnapshot, to: [recipient.recipient.email], headers: [...staticSnapshot.headers] }
         : await campaignMessage(runtime, review.draft, recipient.recipient, false, lockedAttachments, review.rendered, true, htmlStatic, row.reviewVersion!);
       const contentHash = await digest(canonical(snapshot));
-      marketingFooter(snapshot, unsubscribePlaceholder(runtime), review.draft.unsubscribePageUrl);
+      marketingFooter(snapshot, unsubscribePlaceholder(runtime), review.draft);
       sizeCheck(snapshot, lockedAttachments);
       const size = Buffer.byteLength(JSON.stringify(snapshot), 'utf8');
       if (prepared.length && bytes + size > CAMPAIGN_PREPARE_BYTES) break;
@@ -2631,6 +2673,22 @@ async function prepareStep(runtime: Runtime, a: Actor, row: RunRow, jobId: strin
     await db.execute(recordPrepared(ref, cursor, runningState({ prepared: cursor, total: campaign.total, scheduledAt: campaign.scheduledAt })));
   });
 }
+/**
+ * A campaign launched before postal addresses existed froze none in its review. Before its first release it takes the
+ * workspace's, stamped into the review once, so it never sends without one and every copy and rebuild of it shows the
+ * same address. With none set it pauses with POSTAL_ADDRESS_REQUIRED (runCampaign); resuming after one is added
+ * continues it. One that had already released recipients finishes as it started, so all its copies read the same.
+ */
+async function frozenPostalAddress(runtime: Runtime, a: Actor, row: RunRow) {
+  const review = sql`workspace_id=${a.workspaceId} AND id=${row.reviewId}`;
+  const { rows: [found] } = await runtime.db.execute<{ address: string | null }>(sql`WITH current AS (SELECT ${postalAddressOf(runtime.config.multiTenant, a.workspaceId)} AS address),
+    stamped AS (UPDATE sending_campaign_reviews SET draft=draft||jsonb_build_object('postalAddress',c.address) FROM current c
+      WHERE ${review} AND c.address IS NOT NULL AND NOT draft ? 'postalAddress' RETURNING draft->>'postalAddress' AS address)
+    SELECT coalesce((SELECT address FROM stamped),(SELECT draft->>'postalAddress' FROM sending_campaign_reviews WHERE ${review})) AS address`);
+  if (!found?.address) throw new ApiError(409, 'POSTAL_ADDRESS_REQUIRED', 'Paused before sending anyone: the workspace has no postal address, which US law (CAN-SPAM) requires in every marketing email. Add it in Settings, then resume this campaign.', 'postalAddress');
+  log('info', { code: 'CAMPAIGN_POSTAL_ADDRESS_FROZEN', campaignId: row.id });
+  return found.address;
+}
 // sending: release the next recipients into the dispatch queue within the buffer, pacing, rate share and SES quota.
 // Returns 'again' when another release can start at once, 'done' when this run has nothing more to do, and waits in
 // place (JobDeferred on the same job row) otherwise.
@@ -2638,6 +2696,7 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
   const ref = campaignRef(a, row.id), nowMs = Date.now();
   // Every recipient is released: the dispatcher marks the campaign done when its last row leaves the queue.
   if (row.expanded >= row.total) return 'done';
+  if (row.expanded === 0 && row.reviewDraft!.postalAddress === undefined) row.reviewDraft = { ...row.reviewDraft!, postalAddress: await frozenPostalAddress(runtime, a, row) };
   // Do not turn a retired generation into a pacing/quota wait, or refresh its provider quota.
   if (row.reviewDraft?.binding && row.account?.generation!==row.reviewDraft.binding.generation) throw staleReview();
   // Poll a full buffer with one bounded count, before the locks and origin checks; the transaction rechecks capacity under the admission lock.
@@ -2860,7 +2919,7 @@ const runCampaign: JobHandler = async (runtime, payload, job) => {
     }
   } catch (error) {
     if (error instanceof JobDeferred || error instanceof ModuleLoadError) throw error;
-    if (error instanceof ApiError && (error.code === 'HOSTED_SENDING_PAUSED' || error.code === 'MARKETING_HELD')) {
+    if (error instanceof ApiError && ['HOSTED_SENDING_PAUSED', 'MARKETING_HELD', 'POSTAL_ADDRESS_REQUIRED'].includes(error.code)) {
       await runtime.db.execute(pauseCampaign(ref, { code: error.code, message: error.message }));
       return;
     }

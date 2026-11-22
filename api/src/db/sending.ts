@@ -43,6 +43,9 @@ export type CampaignDraft = {
   regionPinned?: boolean;
   /** Only stored in the internal, immutable launch review. */
   binding?: SendingBinding;
+  /** Only stored in the launch review: the workspace's postal address its footer shows. A review from before postal
+   *  addresses has none until the campaign starts sending (src/sending.ts frozenPostalAddress). */
+  postalAddress?: string;
   name: string; from: string; fromName?: string; previewText?: string; replyTo?: string[]; region: string; subject: string; html?: string;
   attachments: string[]; tracking: boolean; unsubscribePageUrl?: string;
   audience: { listId?: string; segmentId?: string; excludeListIds?: string[]; excludeSegmentIds?: string[] };

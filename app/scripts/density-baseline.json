@@ -673,6 +673,14 @@
    "score": 13,
    "findings": []
   },
+  "Settings · postal address dialog · desktop": {
+   "score": 6,
+   "findings": []
+  },
+  "Settings · postal address dialog · phone": {
+   "score": 6,
+   "findings": []
+  },
   "Settings · sending · AWS · desktop": {
    "score": 15,
    "findings": []

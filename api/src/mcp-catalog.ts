@@ -234,6 +234,7 @@ const INBOX_PERMISSIONS: Record<string, McpOperation['inbox']> = {
 };
 /** Better descriptions for directly published receiving tools, where the operation summary alone is thin. */
 const DESCRIPTIONS: Record<string, string> = {
+  updateWorkspaceSettings: 'Rename the workspace or set its postal address (plain text, up to 6 lines and 300 characters, no HTML; null removes it). Every campaign email and marketing send shows the address under Unsubscribe, as US law (CAN-SPAM) requires; sendCampaign and scheduleCampaign refuse with POSTAL_ADDRESS_REQUIRED until it is set. Confirm the exact address with the user.',
   cancelEmail: 'Cancel an email scheduled with sendEmail scheduledAt, before its time: it is never sent. List the ones still waiting with listEmails status=scheduled. Confirm with the user which email to cancel.',
   rescheduleEmail: 'Move an email scheduled with sendEmail scheduledAt to another time (a UTC instant, up to 30 days ahead) before it starts sending. Confirm the new time with the user first.',
   createInbox: 'Create an expiring or persistent inbox. Give its address to the sender, then call waitForMessage with inboxId. Use body.type="sandbox" to receive simulated mail without DNS.',
