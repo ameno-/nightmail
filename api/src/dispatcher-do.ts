@@ -34,6 +34,7 @@ function loadDeps() {
 type Identity = { region: string; accountId?: string; shard: { index: number; count: number } };
 const RUN_MS = 45000;      // Re-arm well inside the alarm wall-clock and default CPU budgets.
 const RETRY_MS = 15000;    // Dependency failure (database, quota) backoff.
+const OVERDUE_MS = 3000;   // An alarm this far past due with no run in progress is waiting out a platform retry: arm it again.
 
 export function dispatcherName(identity: Identity) { return `dispatcher:${identity.accountId ? `${identity.accountId}:` : ''}${identity.region}:${identity.shard.index}/${identity.shard.count}`; }
 export function shardCount(value: unknown) { const n = Number(value); return Number.isInteger(n) && n >= 1 ? Math.min(n, 256) : 1; }
@@ -94,11 +95,13 @@ export class DispatcherShard extends DurableObject<Env> {
   }
 
   /** Sets the alarm for now unless one is already due. A later time it replaces (a quota, pace or failure retry) is kept as
-   *  displacedAlarm, and every run until one starts at or after it re-arms it (rearm), so a wake never loses a retry. */
+   *  displacedAlarm, and every run until one starts at or after it re-arms it (rearm), so a wake never loses an armed retry.
+   *  An alarm overdue by OVERDUE_MS with no run in progress is set again: after alarm() throws, the platform waits 2 to 64 s
+   *  before retrying and getAlarm keeps the past time, and a new setAlarm ends that wait. */
   private async armNow() {
     const now = Date.now(), alarm = await this.ctx.storage.getAlarm();
-    if (alarm !== null && alarm <= now) return;
-    if (alarm !== null) {
+    if (alarm !== null && alarm <= now && (this.running || now - alarm < OVERDUE_MS)) return;
+    if (alarm !== null && alarm > now) {
       const kept = await this.ctx.storage.get<number>('displacedAlarm');
       if (kept === undefined || alarm < kept) await this.ctx.storage.put('displacedAlarm', alarm);
     }
@@ -117,12 +120,13 @@ export class DispatcherShard extends DurableObject<Env> {
     if (!identity || 'environment' in identity) return; // Retire alarms from the old shard names.
     // The platform never runs two alarm() at once and nothing else calls it, so this guards only a direct call.
     if (this.running) { await this.ctx.storage.setAlarm(Date.now() + 1000); return; }
+    // A retry a wake displaced that is due by now is this run's to serve. Read before `running` is set, so a storage call
+    // that rejects here only fails this alarm (the platform retries it) and can't leave the shard marked as running.
+    const displaced = await this.ctx.storage.get<number>('displacedAlarm');
+    if (displaced !== undefined && displaced <= Date.now()) await this.ctx.storage.delete('displacedAlarm');
     this.running = true;
     const started = Date.now(), wakeMs = this.wokenAt === undefined ? undefined : started - this.wokenAt;
     this.wokenAt = undefined;
-    // A retry a wake displaced that is due by now is this run's to serve.
-    const displaced = await this.ctx.storage.get<number>('displacedAlarm');
-    if (displaced !== undefined && displaced <= started) await this.ctx.storage.delete('displacedAlarm');
     let deps: Awaited<ReturnType<typeof loadDeps>> | undefined, next: number | undefined;
     try {
       deps = await loadDeps();
@@ -138,8 +142,9 @@ export class DispatcherShard extends DurableObject<Env> {
         onGate: async state => { await this.ctx.storage.put('gate', state); },
       });
       if (!this.placementLogged) { this.placementLogged = true; this.ctx.waitUntil(this.logPlacement(identity, runtime)); }
-      // Work remained when the run budget ended: continue immediately. Otherwise sleep until the
-      // next API nudge or the scheduler's minute ping; queued mail never depends on this alarm alone.
+      // Work remained when the run budget ended: continue immediately. Otherwise sleep until the next wake (an API nudge or
+      // the scheduler's minute ping) or the run's own retry. A wake only arms this alarm, so every run, and all queued mail,
+      // now depends on the alarm firing; armNow re-arms one left overdue by a platform retry wait.
       const retry = Math.min(report.quotaRetryAt ?? Infinity, report.paceRetryAt ?? Infinity);
       next = !report.idle ? Date.now() : retry === Infinity ? undefined : retry;
     } catch (error) {
