@@ -40,12 +40,12 @@ case $flags in
      else echo "::error::bane:mailGatewayEnabled in Pulumi.$STAGE.yaml must be true or false"; exit 1; fi ;;
   *) echo "::error::bane:mailGatewayEnabled is set more than once in Pulumi.$STAGE.yaml"; exit 1 ;;
 esac
-bound() { # Whether the deployed Worker has the binding. Any failure stops the deploy.
-  local listed
+bound() { # Whether the deployed Worker has the secret $1 (MAILGW_API_TOKEN by default). Any failure stops the deploy.
+  local listed name=${1:-MAILGW_API_TOKEN}
   listed=$("$wrangler" secret list --config "$config") || { echo "::error::Could not list the Worker's secrets"; exit 1; }
   jq -e 'type == "array" and all(.[]; type == "object" and (.name | type) == "string")' <<< "$listed" >/dev/null ||
     { echo "::error::Unexpected output from wrangler secret list"; exit 1; }
-  jq -e 'any(.[]; .name == "MAILGW_API_TOKEN")' <<< "$listed" >/dev/null
+  jq -e --arg name "$name" 'any(.[]; .name == $name)' <<< "$listed" >/dev/null
 }
 if [[ $gateway == true ]]; then
   # Missing, pending deletion, unreadable and malformed all stop here.
@@ -89,6 +89,43 @@ else
   fi
   echo "::warning::Billing is ${billing:-off} on $STAGE and its Stripe keys are not set: payments answer 503 BILLING_NOT_CONFIGURED."
 fi
+# The operator alerts' Slack webhook (api/src/operator-alerts.ts), optional: nightmail/<stage>/OPERATOR_SLACK_WEBHOOK_URL.
+# Set and a Slack incoming webhook URL, it is bound with the app secrets. Not set (or scheduled for deletion), the Worker
+# keeps none: a deploy inherits a Worker secret its file leaves out, so one left from before is deleted here, and
+# taking the secret out of Secrets Manager turns the cards off at the next deploy. Malformed, the cards stay off. Any
+# other read failure leaves the Worker as it is. None of these fails the deploy; the value never reaches argv or the log.
+hook_err=$(mktemp "${RUNNER_TEMP:?}/bane-operator-hook.XXXXXX")
+trap 'rm -f -- "$secrets_file" "$hook_err"' EXIT
+operator_hook=off
+if hook=$(aws secretsmanager get-secret-value --secret-id "nightmail/$STAGE/OPERATOR_SLACK_WEBHOOK_URL" --query SecretString --output text 2>"$hook_err"); then
+  # Check before masking: a workflow command masks one line and unescapes %XX.
+  if [[ $hook =~ ^https://hooks\.slack\.com/[A-Za-z0-9/_-]+$ ]]; then
+    echo "::add-mask::$hook"
+    # shellcheck disable=SC2016 # A jq program: $ENV is jq's, not the shell's.
+    with_hook=$(OPERATOR_SLACK_WEBHOOK_URL=$hook jq '. + ($ENV | {OPERATOR_SLACK_WEBHOOK_URL})' "$secrets_file") && printf '%s\n' "$with_hook" > "$secrets_file"
+    unset with_hook
+    operator_hook=bound
+  else
+    echo "::warning::nightmail/$STAGE/OPERATOR_SLACK_WEBHOOK_URL is not a Slack incoming webhook URL (https://hooks.slack.com/...): operator alerts are off."
+  fi
+elif grep -qE 'ResourceNotFoundException|marked for deletion' "$hook_err"; then
+  operator_hook='not set'
+else
+  operator_hook=unknown
+  echo "::warning::nightmail/$STAGE/OPERATOR_SLACK_WEBHOOK_URL could not be read; the Worker's operator alerts are left as they were."
+fi
+unset hook
+if [[ $operator_hook == off || $operator_hook == 'not set' ]]; then
+  # Before the deploy, so a failed deploy still leaves the cards off. Best effort: the next deploy tries again.
+  if listed=$("$wrangler" secret list --config "$config" 2>/dev/null) && jq -e 'any(.[]?; .name == "OPERATOR_SLACK_WEBHOOK_URL")' <<< "$listed" >/dev/null 2>&1; then
+    if WRANGLER_LOG=error "$wrangler" secret delete OPERATOR_SLACK_WEBHOOK_URL --config "$config" >/dev/null 2>&1; then
+      echo "Operator alerts: removed OPERATOR_SLACK_WEBHOOK_URL from the Worker."
+    else
+      echo "::warning::Could not remove OPERATOR_SLACK_WEBHOOK_URL from the Worker; the next deploy tries again."
+    fi
+  fi
+fi
+echo "Operator alerts: nightmail/$STAGE/OPERATOR_SLACK_WEBHOOK_URL is $operator_hook."
 args+=(--secrets-file "$secrets_file")
 # Every log line names the commit it runs (core.ts setLogContext), for the nightly report's 5xx-by-deploy table.
 if [[ ${DEPLOY_SHA:-} =~ ^[0-9a-f]{40}$ ]]; then args+=(--var "DEPLOY_SHA:$DEPLOY_SHA"); fi

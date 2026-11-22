@@ -418,10 +418,13 @@ export async function standingTick(runtime: Runtime) {
     const { rows } = await runtime.db.execute(sql`INSERT INTO job_schedule(workspace_id,next_wake_at) VALUES ('maintenance:standing',now()+interval '10 minutes')
       ON CONFLICT(workspace_id) DO UPDATE SET next_wake_at=excluded.next_wake_at WHERE job_schedule.next_wake_at<=now() RETURNING 1`);
     if (!rows.length) return;
-    // Slow sign-in mail, on the same schedule (src/operator-alerts.ts). It never throws.
-    await checkSignInMail(runtime);
-    const result = await refreshStanding(runtime);
-    log('info', { code: 'STANDING_REFRESHED', ...result });
+    try {
+      const result = await refreshStanding(runtime);
+      log('info', { code: 'STANDING_REFRESHED', ...result });
+    } finally {
+      // Slow sign-in mail, after the run so it never delays it (src/operator-alerts.ts). Time-limited; it never throws.
+      await checkSignInMail(runtime);
+    }
   } catch (error) { log('warn', { code: 'STANDING_REFRESH_FAILED', message: error instanceof ApiError ? error.code : 'The next run retries.' }); }
 }
 

@@ -9,7 +9,7 @@ import { clientIpHeader, productName, requestHeader } from './brand.js';
 import { METHOD_ACR } from './config.js';
 import { ANALYTICS_SESSION_PARAM } from './analytics-events.js';
 import { requestNetwork, signInSignals, type RequestNetwork } from './abuse.js';
-import { placeReady, recordSignup, takePlace } from './signups.js';
+import { placeReady, readPlaces, recordSignup, takePlace } from './signups.js';
 
 const verifiedEmail = z.email().max(320);
 const loginFailed = () => new ApiError(403, 'SIGN_IN_DENIED', 'This account cannot sign in.');
@@ -200,7 +200,7 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
   // Google-hosted mailbox (provenMailbox).
   const mailbox = runtime.config.multiTenant ? provenMailbox(claims.acr, upstream, emailAtLogin) : emailAtLogin;
   const session = oidc.generateRandomState();
-  let admitted = 'signed_in', slot = 0, userId = '';
+  let admitted = 'signed_in', slot = 0, userId = '', signedUp = false;
   try {
     await runtime.db.transaction(async db => {
       await db.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify([claims.iss,claims.sub])},83062))`);
@@ -232,7 +232,7 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
         await db.execute(sql`INSERT INTO nightmail_oidc_identities(issuer,subject,user_id) VALUES(${claims.iss},${claims.sub},${userId})`);
         admitted = `signed_in:${staff ? 'staff' : invited ? 'invitation' : signup ? 'signup' : 'subject'}`;
         log('info', { code: 'SIGN_IN_USER_CREATED', userId, subject: claims.sub, admission: admitted });
-        if (signup) await recordSignup(db, userId, signup);
+        if (signup) { await recordSignup(db, userId, signup); signedUp = true; }
         if (runtime.config.multiTenant) {
           if (!await onboardNewUser(db,{id:userId,email:staff ? emailAtLogin : mailbox,name},staff || !!signup,runtime.config.regions[0]!,invitation)) throw new NotAdmitted('invitation');
         } else if (runtime.config.defaultWorkspaceOwners === '*' || runtime.config.defaultWorkspaceOwners.includes(claims.sub)) {
@@ -274,6 +274,8 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
     throw loginFailed();
   }
   await recordAttempt(runtime, claims, upstream, address, admitted, { email: emailAtLogin, network });
+  // A sign-up is told to the operators (operator-alerts.ts) once it has committed, so the card can't block or fail it.
+  if (signedUp && runtime.config.operatorSlackWebhookUrl) await readPlaces(runtime.db).then(async places => (await import('./operator-alerts.js')).alertNewSignup(runtime, runtime.db, userId, places)).catch(() => false);
   // Admitted with a verified address: nothing is left to tell it at launch.
   if (emailAtLogin && runtime.config.multiTenant) await runtime.db.execute(sql`DELETE FROM nightmail_waitlist WHERE email=lower(${emailAtLogin})`).catch(() => {});
   return {session, slot, userId, returnUrl:returnUrl.href};

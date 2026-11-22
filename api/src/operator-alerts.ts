@@ -28,14 +28,22 @@ const CARDS = {
 } as const;
 type Kind = keyof typeof CARDS;
 const REASONS = { bounces: 'too many bounces', complaints: 'too many spam complaints', screen: 'too much mail flagged as spam', review: 'after a review' } as const;
-/** Sign-in mail is slow when, of at least `minimum` transactional emails in `minutes`, `share` or more waited over `seconds` for their first attempt. */
-export const SLOW_SIGN_IN = { minutes: 15, seconds: 10, share: 1 / 20, minimum: 20 } as const;
+/**
+ * Sign-in mail is slow when, of at least `minimum` transactional emails in `minutes` that were free to go, `share` or
+ * more waited over `seconds` for their first attempt: at least two, so one email can never raise it. The check reads
+ * `lookback` minutes of each workspace's mail to know when its own pace was behind, and stops after `timeoutMs`.
+ */
+export const SLOW_SIGN_IN = { minutes: 15, seconds: 10, share: 1 / 20, minimum: 40, lookback: 45, timeoutMs: 5000 } as const;
 
 // Slack mrkdwn has no escape for its emphasis characters, so a name shows look-alikes instead of turning bold or code.
 const LOOKALIKE: Record<string, string> = { '*': '\u2217', '_': '\u02cd', '~': '\u223c', '`': '\u02cb' };
-/** A workspace's name as card text: one line, an address cut to its local part, at most 80 characters, no markup. */
+const graphemes = new Intl.Segmenter('en', { granularity: 'grapheme' });
+/** A workspace's name as card text: one line, an address cut to its local part, at most 80 whole characters, no markup. */
 export function cardName(name: string) {
-  const plain = name.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').replace(/([^\s@]+)@[A-Za-z0-9.-]+/g, '$1').replace(/\s+/g, ' ').trim().slice(0, 80) || 'A workspace';
+  const line = name.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').replace(/([^\s@]+)@[A-Za-z0-9.-]+/g, '$1').replace(/\s+/g, ' ').trim();
+  // Cut on whole characters (an emoji with its joiners and modifiers is one), never inside one: half a character can
+  // make Slack refuse the message.
+  const plain = Array.from(graphemes.segment(line), s => s.segment).slice(0, 80).join('') || 'A workspace';
   return plain.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/[*_~`]/g, c => LOOKALIKE[c]!);
 }
 const count = (n: unknown) => Number(n).toLocaleString('en-US');
@@ -73,16 +81,16 @@ export function operatorCard(publicUrl: string, p: Record<string, unknown>, work
  * Queues one card, in one statement that never fails its caller: a card that can't be queued is logged. Inside a
  * transaction pass `savepoint`, so a failed insert leaves the transaction usable. `daily`: at most one in 24 hours.
  */
-async function queue(db: DbExecutor, workspaceId: string, kind: Kind, data: Record<string, unknown> | SQL, options: { daily: boolean; savepoint?: boolean }) {
-  const key = `operator-alert:${kind}:${workspaceId}`, day = (ago: string) => sql`${key}||':'||to_char((now() AT TIME ZONE 'UTC')-${ago}::interval,'YYYYMMDD')`;
+async function queue(db: DbExecutor, workspace: string | SQL, kind: Kind, data: Record<string, unknown> | SQL, options: { daily: boolean; savepoint?: boolean }) {
+  const workspaceId = typeof workspace === 'string' ? workspace : undefined;
+  const key = sql`${`operator-alert:${kind}:`}||w.id`, day = (ago: string) => sql`${key}||':'||to_char((now() AT TIME ZONE 'UTC')-${ago}::interval,'YYYYMMDD')`;
   const payload = data instanceof SQL ? data : sql`${JSON.stringify(data)}::jsonb`;
   try {
     if (options.savepoint) await db.execute(sql`SAVEPOINT operator_alert`);
-    const { rows } = await db.execute(options.daily
-      ? sql`INSERT INTO jobs(id,type,workspace_id,payload) SELECT ${day('0')},${JOB},${workspaceId},jsonb_build_object('kind',${kind}::text)||${payload}
-          WHERE NOT EXISTS (SELECT FROM jobs WHERE id=${day('0')}) AND NOT EXISTS (SELECT FROM jobs WHERE id=${day('1 day')} AND created_at>now()-interval '24 hours')
-          ON CONFLICT (id) DO NOTHING RETURNING id`
-      : sql`INSERT INTO jobs(id,type,workspace_id,payload) VALUES (${key},${JOB},${workspaceId},jsonb_build_object('kind',${kind}::text)||${payload}) ON CONFLICT (id) DO NOTHING RETURNING id`);
+    const { rows } = await db.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload) SELECT ${options.daily ? day('0') : key},${JOB},w.id,jsonb_build_object('kind',${kind}::text)||${payload}
+      FROM (SELECT ${typeof workspace === 'string' ? sql`${workspace}::text` : workspace} AS id) w WHERE w.id IS NOT NULL
+      ${options.daily ? sql`AND NOT EXISTS (SELECT FROM jobs WHERE id=${day('0')}) AND NOT EXISTS (SELECT FROM jobs WHERE id=${day('1 day')} AND created_at>now()-interval '24 hours')` : sql``}
+      ON CONFLICT (id) DO NOTHING RETURNING id`);
     if (options.savepoint) await db.execute(sql`RELEASE SAVEPOINT operator_alert`);
     return rows.length > 0;
   } catch {
@@ -93,13 +101,14 @@ async function queue(db: DbExecutor, workspaceId: string, kind: Kind, data: Reco
 }
 
 /**
- * New sign-up: "Driftwood. 91 of 100", for the workspace the new account owns, in the transaction that signed it up.
- * The one call site for the sign-up limit (pull request #575): after its account and workspace exist, with its places.
+ * New sign-up: "Driftwood. 91 of 100", for the workspace the new account owns. Called by account-login.ts
+ * finishAccountLogin after the sign-up committed, with the sign-up limit's places (signups.ts readPlaces), so it can't
+ * block or fail it. One statement; never throws.
  */
 export async function alertNewSignup(runtime: Runtime, db: DbExecutor, userId: string, places: { signedUp: number; limit: number }) {
   if (!runtime.config.operatorSlackWebhookUrl) return false;
-  const [owned] = (await db.execute<{ workspace_id: string }>(sql`SELECT workspace_id FROM workspace_members WHERE user_id=${userId} AND role='owner' ORDER BY created_at,id LIMIT 1`)).rows;
-  return !!owned && queue(db, owned.workspace_id, 'signup', { signedUp: places.signedUp, limit: places.limit }, { daily: false, savepoint: true });
+  const owned = sql`(SELECT workspace_id FROM workspace_members WHERE user_id=${userId} AND role='owner' ORDER BY created_at,id LIMIT 1)`;
+  return queue(db, owned, 'signup', { signedUp: places.signedUp, limit: places.limit }, { daily: false });
 }
 
 const PAUSE_WHY: Record<string, keyof typeof REASONS> = { bounces: 'bounces', marketing_bounces: 'bounces', transactional_bounces: 'bounces', complaints: 'complaints', screen: 'screen' };
@@ -133,25 +142,54 @@ export async function shareFullAlert(runtime: Runtime, used: number, full: numbe
 }
 
 /**
- * Sign-in mail slow: on the standing job's ten-minute schedule, the last 15 minutes of Hosted transactional mail (no
- * campaigns, no simulated mail, no paused workspace) against the 15 minutes before them. An email waited from when it
- * was due (its creation, or a later scheduled time), as the dispatcher's DISPATCH_EMAIL queueMs measures it, until its
- * first attempt; one still queued counts once it has waited the full 10 seconds. Posts when the last window is slow
- * and the one before was not. Never throws.
+ * Sign-in mail slow: after the standing job's ten-minute run, the last 15 minutes of Hosted transactional mail (no
+ * campaigns, no simulated mail) against the 15 minutes before them. An email waited from when it was due (its creation,
+ * or a later scheduled time), as the dispatcher's DISPATCH_EMAIL queueMs measures it, until its first attempt; one still
+ * queued counts once it has waited the full 10 seconds. Mail that was not free to go is left out: mail of a paused
+ * workspace or sponsor, mail admitted before its workspace's last resume, and mail waiting for its own workspace's
+ * pace. That is a minute in which the workspace's mail so far was more than its minute cap could carry since its queue
+ * was last empty, or in which a new sender's growth allowance was used up: the dispatcher leases nothing of it then.
+ * Posts when the last window is slow and the one before was not. Stops after SLOW_SIGN_IN.timeoutMs; never throws.
  */
 export async function checkSignInMail(runtime: Runtime) {
   if (!runtime.config.operatorSlackWebhookUrl) return false;
   try {
-    const { minutes, seconds } = SLOW_SIGN_IN;
-    const { rows } = await runtime.db.execute<{ current: boolean; mail: number; slow: number }>(sql`WITH mail AS (
-        SELECT e.created_at>=now()-make_interval(mins=>${minutes}) AS current,e.status,
-          CASE WHEN e.dispatch_version=0 THEN e.attempt_started_at ELSE (SELECT min(v.created_at) FROM sending_email_events v WHERE v.workspace_id=e.workspace_id AND v.email_id=e.id AND v.type='dispatch_attempt') END AS first,
-          CASE WHEN e.dispatch_version=0 THEN greatest(e.created_at,e.scheduled_at) ELSE e.created_at END AS due
-        FROM provider_connections pc JOIN sending_emails e ON e.workspace_id=pc.workspace_id AND e.snapshot->>'kind'='transactional'
-          AND e.created_at>=now()-make_interval(mins=>${2 * minutes}) AND e.campaign_id IS NULL AND NOT e.simulated
-        WHERE pc.kind='shared' AND pc.paused_at IS NULL
-      ), waited AS (SELECT current,first IS NOT NULL AS attempted,coalesce(first,CASE WHEN status='queued' THEN clock_timestamp() END)-due>make_interval(secs=>${seconds}) AS slow FROM mail)
-      SELECT current,count(*) FILTER (WHERE attempted OR slow)::int AS mail,count(*) FILTER (WHERE slow)::int AS slow FROM waited GROUP BY current`);
+    const { minutes, seconds, lookback, timeoutMs } = SLOW_SIGN_IN;
+    const span = sql`generate_series(date_trunc('minute',now())-make_interval(mins=>${lookback}),date_trunc('minute',now()),interval '1 minute')`;
+    const rows = await runtime.db.transaction(async tx => {
+      await tx.execute(sql`SELECT set_config('statement_timeout',${String(timeoutMs)},true)`);
+      return (await tx.execute<{ current: boolean; mail: number; slow: number }>(sql`WITH hosted AS MATERIALIZED (
+          SELECT pc.workspace_id,pc.resumed_at,CASE WHEN NOT w.exempt_hosted_quotas THEN hosted_minute_cap(pc.workspace_id) END AS cap,
+            CASE WHEN NOT w.exempt_hosted_quotas AND s.growth_until>now() THEN s.growth_cap END AS growth_cap,coalesce(w.quota_sponsor,w.id) AS growth_key
+          FROM provider_connections pc JOIN workspaces w ON w.id=pc.workspace_id LEFT JOIN sender_standing s ON s.workspace_id=pc.workspace_id
+          WHERE pc.kind='shared' AND pc.paused_at IS NULL AND hosted_sponsor_hold(pc.workspace_id) IS DISTINCT FROM 'pause'
+            AND EXISTS (SELECT FROM sending_emails e WHERE e.workspace_id=pc.workspace_id AND e.snapshot->>'kind'='transactional' AND e.created_at>=now()-make_interval(mins=>${2 * minutes}))
+        ), excess AS (
+          -- Each minute, the workspace's recipients so far less what its minute cap carries, every stream counted.
+          SELECT h.workspace_id,m.minute,sum(coalesce(d.n,0)-h.cap) OVER (PARTITION BY h.workspace_id ORDER BY m.minute) AS excess
+          FROM hosted h CROSS JOIN ${span} m(minute) CROSS JOIN LATERAL (SELECT sum(jsonb_array_length(e.to_addresses)+jsonb_array_length(e.cc_addresses)+jsonb_array_length(e.bcc_addresses)) AS n
+            FROM sending_emails e WHERE e.workspace_id=h.workspace_id AND e.created_at>=m.minute AND e.created_at<m.minute+interval '1 minute' AND NOT e.simulated) d
+          WHERE h.cap IS NOT NULL
+        ), paced AS (
+          -- Behind its pace: the excess is above its lowest point before (the last time the queue was empty).
+          SELECT workspace_id,minute FROM (SELECT workspace_id,minute,excess,min(excess) OVER (PARTITION BY workspace_id ORDER BY minute ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS low FROM excess) x
+          WHERE excess>least(0,low)
+          UNION
+          -- Its growth allowance used up: what its sponsor sent in the rolling hour reached it.
+          SELECT h.workspace_id,m.minute FROM hosted h CROSS JOIN ${span} m(minute) WHERE h.growth_cap IS NOT NULL
+            AND (SELECT coalesce(sum(u.used),0) FROM hosted_growth_minutes u WHERE u.growth_key=h.growth_key AND u.minute>m.minute-interval '60 minutes' AND u.minute<=m.minute)>=h.growth_cap
+        ), mail AS (
+          SELECT e.workspace_id,e.created_at>=now()-make_interval(mins=>${minutes}) AS current,e.status,
+            CASE WHEN e.dispatch_version=0 THEN e.attempt_started_at ELSE (SELECT min(v.created_at) FROM sending_email_events v WHERE v.workspace_id=e.workspace_id AND v.email_id=e.id AND v.type='dispatch_attempt') END AS first,
+            CASE WHEN e.dispatch_version=0 THEN greatest(e.created_at,e.scheduled_at) ELSE e.created_at END AS due
+          FROM hosted h JOIN sending_emails e ON e.workspace_id=h.workspace_id AND e.snapshot->>'kind'='transactional'
+            AND e.created_at>=now()-make_interval(mins=>${2 * minutes}) AND e.created_at>coalesce(h.resumed_at,'-infinity') AND e.campaign_id IS NULL AND NOT e.simulated
+        ), waited AS (
+          SELECT current,first IS NOT NULL AS attempted,coalesce(first,CASE WHEN status='queued' THEN clock_timestamp() END)-due>make_interval(secs=>${seconds}) AS slow FROM mail m
+          WHERE NOT EXISTS (SELECT FROM paced p WHERE p.workspace_id=m.workspace_id AND p.minute BETWEEN date_trunc('minute',m.due) AND date_trunc('minute',coalesce(m.first,clock_timestamp())))
+        )
+        SELECT current,count(*) FILTER (WHERE attempted OR slow)::int AS mail,count(*) FILTER (WHERE slow)::int AS slow FROM waited GROUP BY current`)).rows;
+    });
     const slowIn = (current: boolean) => rows.find(r => r.current === current && r.mail >= SLOW_SIGN_IN.minimum && r.slow >= r.mail * SLOW_SIGN_IN.share);
     const now = slowIn(true);
     if (!now || slowIn(false)) return false;
