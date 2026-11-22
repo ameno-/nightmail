@@ -18,6 +18,16 @@ import { productName } from './brand.js';
 export const DAY_MS = 86_400_000, HOUR_MS = 3_600_000;
 export const LIMITS = { windowDays: 30, hourlyHours: 72, groups: 20, rows: 50, subject: 120, diagnostic: 160 } as const;
 export const SCREEN_CODES = ['CONTENT_REJECTED_SPAM', 'CONTENT_IMAGE_ONLY', 'CONTENT_TOO_LARGE_TO_SCREEN', 'CONTENT_SCREEN_BUDGET_EXCEEDED', 'ATTACHMENT_TYPE_UNSCREENABLE', 'ATTACHMENT_CONTENT_MISMATCH'];
+/** A screen refusal in words, for a reader that may repeat them to the sender: what the content check objected to, and
+ *  nothing of how close the message was or what judged it. */
+const SCREEN_VERDICTS: Record<string, string> = {
+  CONTENT_REJECTED_SPAM: 'The content check judged the message to be unsolicited advertising.',
+  CONTENT_IMAGE_ONLY: 'The message is images with too little text beside them for the content check to read.',
+  CONTENT_TOO_LARGE_TO_SCREEN: 'The message is too long for the content check.',
+  CONTENT_SCREEN_BUDGET_EXCEEDED: 'The campaign has more differing copies than its audience allows the content check to read; the unread ones were not sent.',
+  ATTACHMENT_TYPE_UNSCREENABLE: 'An attachment is of a type the content check cannot read.',
+  ATTACHMENT_CONTENT_MISMATCH: 'An attachment is not the type its name or its declared type says.',
+};
 const texts = (list: readonly string[]) => sql`${sql.param([...list])}::text[]`;
 
 /**
@@ -429,13 +439,14 @@ export function domainFindings(name: string, d: { dns: LiveDns | null; align: Aw
 export async function screenActivity(db: DbExecutor, wid: string, since: string) {
   const { rows: hours } = await db.execute<{ at: string; screened: number; rejected: number }>(sql`SELECT ${bucketOf('hour', sql`hour`)} AS at, sum(screened)::int AS screened, sum(rejected)::int AS rejected
     FROM hosted_screen_hourly WHERE workspace_id = ${wid} AND hour >= date_trunc('hour', ${since}::timestamptz, 'UTC') GROUP BY 1 ORDER BY 1`);
-  // The operator timeline's query (src/operator.ts), for every screen refusal: the reject event carries the spam score.
-  const { rows: rejections } = await db.execute<{ emailId: string; campaignId: string | null; at: string; subject: string; errorCode: string; spamScore: number | null; model: string | null }>(sql`SELECT e.id AS "emailId",
-      e.campaign_id AS "campaignId", e.created_at::text AS at, left(e.subject, ${LIMITS.subject}) AS subject, e.error_code AS "errorCode",
-      (v.data #>> '{screen,spam}')::float8 AS "spamScore", v.data #>> '{screen,model}' AS model
-    FROM sending_emails e LEFT JOIN LATERAL (SELECT data FROM sending_email_events WHERE workspace_id = e.workspace_id AND email_id = e.id AND type = 'reject' ORDER BY created_at DESC LIMIT 1) v ON true
+  // Every screen refusal, by its code and in words. This is read by the support agent, which writes to the sender, so it
+  // never reads the verdict (the score, the model, the threshold): that is the operator timeline's alone (src/operator.ts).
+  const { rows: refused } = await db.execute<{ emailId: string; campaignId: string | null; at: string; subject: string; errorCode: string }>(sql`SELECT e.id AS "emailId",
+      e.campaign_id AS "campaignId", e.created_at::text AS at, left(e.subject, ${LIMITS.subject}) AS subject, e.error_code AS "errorCode"
+    FROM sending_emails e
     WHERE e.workspace_id = ${wid} AND e.created_at >= ${since}::timestamptz AND e.status = 'rejected' AND e.error_code = ANY(${texts(SCREEN_CODES)})
     ORDER BY e.created_at DESC, e.id DESC LIMIT ${LIMITS.rows}`);
+  const rejections = refused.map(r => ({ ...r, verdict: SCREEN_VERDICTS[r.errorCode] ?? 'The content check refused the message.' }));
   const totals = hours.reduce((s, h) => ({ screened: s.screened + h.screened, rejected: s.rejected + h.rejected }), { screened: 0, rejected: 0 });
   const byCode = rejections.reduce<Record<string, number>>((m, r) => ({ ...m, [r.errorCode]: (m[r.errorCode] ?? 0) + 1 }), {});
   return { hours, totals: { ...totals, rate: rate(totals.rejected, totals.screened) }, rejections: rejections.map(r => ({ ...r, at: new Date(r.at).toISOString() })), byCode };

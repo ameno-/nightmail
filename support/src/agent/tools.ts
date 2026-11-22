@@ -180,7 +180,7 @@ export const TOOLS: ToolSpec[] = [
   { name: 'domain_health', description: 'One sending domain in depth: verification, live SPF/DMARC/BIMI records, DKIM and SPF alignment, sending volume and warm-up age, marketing vs transactional mix. Includes findings[].',
     params: { domainId: { type: 'string', description: 'The domain ID from list_domains', max: 120, pattern: ID }, workspaceId: workspaceParam },
     label: fixed('Checking your domain’s DNS…', 'Checked your domain’s DNS'), execute: read((a, h) => `/v1/support/domains/${seg(a.domainId)}/health${query({ workspaceId: a.workspaceId }, h)}`) },
-  { name: 'screen_rejections', description: `${productName}’s content screen over the last days: hourly screened and rejected counts and the last 50 rejections with subject, error code and spam score.`,
+  { name: 'screen_rejections', description: `${productName}’s content screen over the last days: hourly screened and rejected counts and the last 50 rejections with subject, error code and what the content check objected to, in words. It has no scores: nothing says how close a message was.`,
     params: { workspaceId: workspaceParam, days: { type: 'number', description: '1–7, default 7', optional: true, min: 1, max: 7 } },
     label: fixed('Checking content screen rejections…', 'Checked content screen rejections'), execute: read((a, h) => `/v1/support/screen${query(a, h, ['days'])}`) },
   { name: 'list_campaigns', description: 'Recent campaigns: state, audience and size, tracking, From, subject, stats and pacing.',

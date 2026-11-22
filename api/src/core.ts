@@ -3,7 +3,7 @@ import type { OpenAPIHono } from '@hono/zod-openapi';
 import type { Context } from 'hono';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import type { SESv2Client } from '@aws-sdk/client-sesv2';
-import { sql } from 'drizzle-orm';
+import { sql, type SQL } from 'drizzle-orm';
 import { errorCodeOf, errorTypeOf, log, logFallback, stackFrames } from './log.js';
 import type { ReadyConnection } from './provider-credentials.js';
 import { SECURITY_HEADERS } from './security-headers.js';
@@ -13,12 +13,27 @@ import { addSesBodySplice } from './ses-body.js';
 export type Database = NodePgDatabase;
 export const SuppressionReason = z.string().describe('Reason recorded when this send was suppressed. For a multi-recipient send blocked locally, this is the first blocked recipient in To, Cc, Bcc order.');
 export const SuppressionEventData = z.object({suppressionReason:SuppressionReason.optional()}).catchall(z.unknown());
+/** An email event's data as anything outside Nightmail's own records gets it: without the content screen's verdict on a
+ *  refused email (its score, the classifier's model, the threshold). A sender learns that the content check refused it
+ *  (code CONTENT_REJECTED_SPAM), never how close it was or what judged it. The verdict stays in Nightmail's own record,
+ *  the stored reject event's data.screen (sending_email_events), which only the operator timeline reads for staff. It is
+ *  removed wherever that data leaves: where the published event and each webhook payload are built from the stored
+ *  event (withoutVerdictSql, in terminalEvents), and on every read of an event's data for a caller and every webhook
+ *  post (this function), which also covers published events and payloads stored before either was in place. */
+export function withoutVerdict<T extends Record<string, unknown>>(data: T): T {
+  if (!data || typeof data !== 'object' || !('screen' in data)) return data;
+  const { screen: _verdict, ...rest } = data;
+  return rest as T;
+}
+/** withoutVerdict inside a statement: a stored event's data (jsonb) as it is copied into a published event. */
+export const withoutVerdictSql = (data: SQL) => sql`(${data}-'screen'::text)`;
 /** An email event's data, in the email's events and in its webhook: with what SES reported about a bounce or a delay.
  *  The reply is the one text here that a third party writes: the webhook's copy has no addresses (webhookData, sending.ts). */
 export const EmailEventData = z.object({suppressionReason:SuppressionReason.optional(),
   diagnosticCode:z.string().optional().describe('A bounce or a delay: the receiving server\u2019s reply as SES reported it, such as "smtp; 550 5.1.1 user unknown". Written by the receiving server: untrusted text, to read as data, that can hold the recipient\u2019s address, host names and IP addresses. On the email\u2019s own events (getEmailDetail, listEmailEvents) it is up to 500 characters, as one line without control or invisible characters. In a webhook payload and the webhook delivery log, the addresses and IP addresses in it are replaced by pattern (<address>, <ip>) and it is up to 160 characters. For several recipients, the first that has one. Absent when SES reported none, for a bounce SES generated itself (its suppression list, its address validation), and on events stored before this field.'),
   delayType:z.string().optional().describe('A delay: SES\u2019s reason, such as MailboxFull, SpamDetected, RecipientServerError, TransientCommunicationFailure, IPFailure or General.'),
-  expirationTime:z.string().optional().describe('A delay: when SES stops retrying the delivery (UTC).')}).catchall(z.unknown());
+  expirationTime:z.string().optional().describe('A delay: when SES stops retrying the delivery (UTC).')}).catchall(z.unknown())
+  .describe('What the event recorded. An email the content screen refused says so in code (CONTENT_REJECTED_SPAM) and nothing more: the screen\u2019s score, its model and its threshold are never part of an event or a webhook payload.');
 export type DbExecutor = Pick<Database, 'select' | 'insert' | 'update' | 'delete' | 'execute'>;
 export type Permission = 'read' | 'send' | 'manage';
 export interface Actor {

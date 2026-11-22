@@ -166,7 +166,8 @@ export function registerOperator(app: App) {
     const wid = c.req.valid('param').id, q = c.req.valid('query'), after = readCursor(q.cursor), upTo = after?.at ?? new Date(Date.now() + 60_000).toISOString();
     await hostedWorkspace(c.env.db, wid);
     // One stream: standing events, operator actions, the daily score, hourly hard bounces and complaints by recipient
-    // domain (never an address), and screen rejections with their spam score and subject. No message bodies. Each row
+    // domain (never an address), and screen rejections with their spam score, the threshold then and subject (staff only:
+    // this is the one read of a refusal's verdict). No message bodies. Each row
     // has a stable key, so rows sharing a timestamp are never skipped across pages.
     const { rows } = await c.env.db.execute<z.infer<typeof TimelineItem> & { key: string; ts: string }>(sql`SELECT ${isoAt(sql`t.ts`)} AS at,t.key,t.kind,t.title,t.detail FROM (
       SELECT at AS ts,'s:'||id AS key,CASE kind WHEN 'step' THEN 'standing' ELSE kind END AS kind,
@@ -182,7 +183,7 @@ export function registerOperator(app: App) {
         SELECT date_trunc('hour',e.created_at,'UTC') AS hour,lower(split_part(e.to_addresses->>0,'@',2)) AS domain,(e.status='bounced' OR e.event_outcomes & 4 <> 0)::int AS b,(e.status='complained' OR e.event_outcomes & 8 <> 0)::int AS cpl
         FROM sending_emails e WHERE e.workspace_id=${wid} AND NOT e.simulated AND e.created_at>now()-interval '7 days' AND e.created_at<=${upTo}::timestamptz+interval '1 hour' AND (e.status IN ('bounced','complained') OR e.event_outcomes & 12 <> 0)) x
         GROUP BY hour,domain
-      UNION ALL SELECT e.created_at,'r:'||e.id,'rejection','Screen rejected: '||left(e.subject,120),jsonb_build_object('spam',v.data->'screen'->'spam','model',v.data->'screen'->'model','campaignId',e.campaign_id,'emailId',e.id)
+      UNION ALL SELECT e.created_at,'r:'||e.id,'rejection','Screen rejected: '||left(e.subject,120),jsonb_build_object('spam',v.data->'screen'->'spam','threshold',v.data->'screen'->'threshold','campaignId',e.campaign_id,'emailId',e.id)
         FROM sending_emails e LEFT JOIN LATERAL (SELECT data FROM sending_email_events WHERE workspace_id=e.workspace_id AND email_id=e.id AND type='reject' ORDER BY created_at DESC LIMIT 1) v ON true
         WHERE e.workspace_id=${wid} AND e.error_code='CONTENT_REJECTED_SPAM' AND e.created_at>now()-interval '7 days' AND e.created_at<=${upTo}::timestamptz
     ) t ${after ? sql`WHERE (t.ts,t.key)<(${after.at}::timestamptz,${after.key})` : sql``} ORDER BY t.ts DESC,t.key DESC LIMIT ${q.limit + 1}`);

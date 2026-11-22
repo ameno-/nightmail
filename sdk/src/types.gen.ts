@@ -1214,6 +1214,9 @@ export type EmailEvent = {
     providerId: string | null;
     simulated: boolean;
     createdAt: string;
+    /**
+     * What the event recorded. An email the content screen refused says so in code (CONTENT_REJECTED_SPAM) and nothing more: the screen’s score, its model and its threshold are never part of an event or a webhook payload.
+     */
     data: {
         /**
          * Reason recorded when this send was suppressed. For a multi-recipient send blocked locally, this is the first blocked recipient in To, Cc, Bcc order.
@@ -2145,6 +2148,9 @@ export type Event = {
     createdAt: string;
     workspaceId: string;
     region: string | null;
+    /**
+     * What the event recorded. An email the content screen refused says so in code (CONTENT_REJECTED_SPAM) and nothing more: the screen’s score, its model and its threshold are never part of an event or a webhook payload.
+     */
     data: {
         /**
          * Reason recorded when this send was suppressed. For a multi-recipient send blocked locally, this is the first blocked recipient in To, Cc, Bcc order.
@@ -5886,7 +5892,7 @@ export type SupportDeliveryEvent = {
     type: string;
     at: string;
     /**
-     * The provider’s event detail (bounce type, complaint feedback type, and for a bounce or a delay the receiving server’s reply in diagnosticCode, redacted: addresses are <address>, IPs <ip>, 160 characters).
+     * The provider’s event detail (bounce type, complaint feedback type, and for a bounce or a delay the receiving server’s reply in diagnosticCode, redacted: addresses are <address>, IPs <ip>, 160 characters). Never the content screen’s score, model or threshold on a refused email.
      */
     detail: {
         [key: string]: unknown;
@@ -6592,10 +6598,9 @@ export type SupportScreen = {
          */
         errorCode: string;
         /**
-         * The classifier’s spam probability, for CONTENT_REJECTED_SPAM.
+         * What the content check objected to, in words. Never its score, its model or its threshold: nothing here says how close a message was.
          */
-        spamScore: number | null;
-        model: string | null;
+        verdict: string;
     }>;
 };
 

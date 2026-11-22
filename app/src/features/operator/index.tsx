@@ -291,7 +291,7 @@ function detailText(item: OperatorTimelineItem) {
   const reasons = Array.isArray(d.reasons) ? d.reasons.map(reason => record(reason).message).filter((m): m is string => typeof m === 'string') : []
   const parts: unknown[] = item.kind === 'score' ? [`${number(Number(d.accepted ?? 0))} accepted`, `${number(Number(d.bounced ?? 0))} bounced`, `${number(Number(d.complained ?? 0))} complaints`, `${number(Number(d.rejected ?? 0))} rejected`]
     : item.kind === 'audit' ? [d.reason, d.ticketRef && `ticket ${d.ticketRef}`, d.via]
-    : item.kind === 'rejection' ? [d.spam !== undefined && `spam ${typeof d.spam === 'object' ? JSON.stringify(d.spam) : d.spam}`, d.campaignId && `campaign ${d.campaignId}`]
+    : item.kind === 'rejection' ? [d.spam !== undefined && `spam ${typeof d.spam === 'object' ? JSON.stringify(d.spam) : d.spam}`, typeof d.threshold === 'number' && `threshold ${d.threshold}`, d.campaignId && `campaign ${d.campaignId}`]
     : item.kind === 'bounces' ? []
     : [...reasons, details.reason, details.ticketRef && `ticket ${details.ticketRef}`, actor.kind && `by ${actor.kind}${actor.via ? ` via ${actor.via}` : ''}`]
   return parts.filter(part => typeof part === 'string' && part).join(' · ')

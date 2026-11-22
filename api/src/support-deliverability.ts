@@ -167,9 +167,9 @@ export function registerSupportDeliverability(app: App, meta: Meta, WorkspaceFil
     totals: z.object({ screened: z.number(), rejected: z.number(), rate: Rate }), byCode: z.record(z.string(), z.number()).describe('Among the rejections listed.'),
     rejections: z.array(z.object({ emailId: z.string(), campaignId: z.string().nullable(), at: z.string(), subject: z.string().describe('120 characters.'),
       errorCode: z.string().describe('CONTENT_REJECTED_SPAM, CONTENT_IMAGE_ONLY, CONTENT_TOO_LARGE_TO_SCREEN, ATTACHMENT_TYPE_UNSCREENABLE, ATTACHMENT_CONTENT_MISMATCH.'),
-      spamScore: z.number().nullable().describe('The classifier’s spam probability, for CONTENT_REJECTED_SPAM.'), model: z.string().nullable() })).describe('The last 50, newest first.'),
+      verdict: z.string().describe('What the content check objected to, in words. Never its score, its model or its threshold: nothing here says how close a message was.') })).describe('The last 50, newest first.'),
   }).openapi('SupportScreen');
-  app.openapi(createRoute({ ...meta('getSupportScreen', 'The Hosted content screen over at most 7 days: hourly screened and rejected counts, and the last 50 rejections with subject, error code and spam score. Never bodies.'),
+  app.openapi(createRoute({ ...meta('getSupportScreen', 'The Hosted content screen over at most 7 days: hourly screened and rejected counts, and the last 50 rejections with subject, error code and the verdict in words. Never bodies, and never the screen’s score, model or threshold.'),
     path: '/v1/support/screen', request: { query: WorkspaceFilter.extend({ since: z.iso.datetime().optional().describe('Default and limit: 7 days ago.') }) }, responses: { 200: response(Screen), ...errors } }), async c => {
     const q = c.req.valid('query'), { workspaceId } = oneWorkspace(c), w = windowOf({ since: q.since }, 'day', 7 * DAY, 7 * DAY);
     return c.json(await cached(c, 'screen', workspaceId, w.since, async () => ({ workspaceId, since: w.since, ...await d.supportRead(c.env.db, tx => d.screenActivity(tx, workspaceId, w.since)) })), 200);
