@@ -1,7 +1,7 @@
 import { Fragment } from 'react'
 import { SearchField, ControlSkeleton, FieldSkeleton, LoadingRegion, PageHeader, SectionHeader, Select, SkeletonText, TableSkeleton, Tabs, type SkeletonColumn } from '../../components/ui'
 import { AudienceHeader } from './header'
-import { ConsentLegend, consentTitle, statusOptions } from './consent'
+import { consentTitle, statusOptions } from './consent'
 import './audience.css'
 
 export function AudienceCellSkeleton({ secondary = false }: { secondary?: boolean }) {
@@ -52,7 +52,7 @@ export function AudienceSummarySkeleton() {
   return <div className="audience-summary cluster">{[100, 115, 110, 125].map(width => <SkeletonText key={width} width={width} />)}</div>
 }
 export function AudienceMembersSkeleton() {
-  return <><Tabs value="" onValueChange={() => {}} items={[{ value: '', label: 'All members' }, ...statusOptions]} /><div className="data-toolbar"><ControlSkeleton width={320} /></div><ConsentLegend /><TableSkeleton columns={memberColumns} rows={8} pagination /></>
+  return <><Tabs value="" onValueChange={() => {}} items={[{ value: '', label: 'All members' }, ...statusOptions]} /><div className="data-toolbar"><ControlSkeleton width={320} /></div><TableSkeleton columns={memberColumns} rows={8} pagination /></>
 }
 export function ListDetailBodySkeleton() {
   return <LoadingRegion label="Loading list"><AudienceMembersSkeleton /></LoadingRegion>
@@ -76,7 +76,6 @@ export function AudienceRouteSkeleton({ kind, isNew = false }: { kind: 'contacts
   const contacts = kind === 'contacts'
   return <LoadingRegion className="audience-page" label={`Loading ${kind}`}><AudienceHeader actions={<>{contacts && <ControlSkeleton width={120} />}<ControlSkeleton width={contacts ? 98 : kind === "lists" ? 85 : 121} /></>} />
     <div className="data-toolbar"><div className="cluster">{contacts ? <><SearchField className="search-box--list" aria-label="Search contacts" placeholder="Search email or name" disabled /><Select className="audience-status-filter" aria-label="Filter by consent" value="" onValueChange={() => {}} options={[{ value: '', label: 'All contacts' }]} disabled /><ControlSkeleton width={220} /></> : <ControlSkeleton width={320} />}</div></div>
-    {kind !== 'segments' && <ConsentLegend />}
     <TableSkeleton columns={contacts ? contactColumns : kind === 'lists' ? listColumns : segmentColumns} rows={contacts ? 8 : 5} pagination />
   </LoadingRegion>
 }

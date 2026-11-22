@@ -5,7 +5,7 @@ import { queries } from '../../data/queries'
 import type { Contact, ContactInput, ConsentInput } from '../../data/types'
 import { SearchField, Alert, Button, Checkbox, ControlSkeleton, DataTable, Dialog, EmptyState, ErrorState, Field, Input, LoadingRegion, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, SkeletonText, StatusBadge, fieldError, MutationError, useToast } from '../../components/ui'
 import { activityColumns, AudienceRouteSkeleton, consentColumns } from './skeletons'
-import { ConsentLegend, consentTitle, ContactTable, date, ListPicker, nameTitle, noUnknown, statusOptions, suppressionText, useAudienceLists } from './shared'
+import { consentTitle, ContactTable, date, ListPicker, nameTitle, noUnknown, statusOptions, suppressionText, useAudienceLists } from './shared'
 import { ImportContactsDialog } from './import'
 import { BulkSubscribeDialog } from './bulk'
 import { AudienceHeader } from './header'
@@ -37,7 +37,6 @@ export function ContactsPage() {
   return <div className="audience-page">
     <AudienceHeader actions={<><Button onClick={() => setImporting(true)}>Import contacts</Button><Button variant="primary" onClick={() => setAdd(true)}>Add contact</Button></>} />
     <div className="data-toolbar"><div className="cluster"><SearchField className="search-box--list" aria-label="Search contacts" placeholder="Search email or name" value={draft} onChange={event => type(event.target.value)} /><Select className="audience-status-filter" aria-label="Filter by consent" value={status} onValueChange={value => update({ status: value, page: 1 })} options={[{ value: '', label: 'All contacts' }, ...statusOptions]} /><ListPicker className="audience-list-filter" label="Filter by list" emptyLabel="All lists" value={listId} onChange={value => update({ list: value, page: 1 })} /></div>{status === 'unknown' && <Button onClick={() => setBulk(true)}>Mark as subscribed…</Button>}</div>
-    <ConsentLegend />
     {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><ContactTable tableRef={tableRef} contacts={query.data?.items || []} lists={lists.data} listsLoading={lists.isPending} loading={query.isPending} minRows={pageSize} empty={filtered ? <EmptyState title={status === 'unknown' && !search ? noUnknown : 'No matching contacts'} action={<Button onClick={() => update({ q: '', status: '', list: '', page: 1 })}>Clear filters</Button>} /> : <EmptyState title="No contacts yet" action={<Button onClick={() => setImporting(true)}>Import contacts</Button>} />} />{query.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={pageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={next => update({ page: next })} />}</>}
     {add && <ContactEditor onClose={() => setAdd(false)} />}
     {importing && <ImportContactsDialog listId={listId} onClose={() => setImporting(false)} />}
