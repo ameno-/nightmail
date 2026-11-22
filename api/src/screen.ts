@@ -1,6 +1,7 @@
 import { ApiError, digest, type Runtime } from './core.js';
 import type { EmailSnapshot } from './db/sending.js';
 import { errorTypeOf, log } from './log.js';
+import { keepScreenCall, outbound } from './screen-calls.js';
 import { unescapeCss, VISIBLE_WORDS } from './screened-html.js';
 import { formattedSender } from './sending.js';
 import { SEND_LIMITS } from './send-limits.js';
@@ -371,12 +372,13 @@ async function body(snapshot: EmailSnapshot, limitBytes: number, scope: 'message
 // network error came before or after the headers), the request and response sizes, how many requests this isolate had in
 // flight when it started, where it came from (ScreenCall) and the classifier's own request ID and timing headers. Never
 // the message, its subject or addresses, the request body or the key. Failures are always logged; a campaign copy's
-// successful requests 1 in 10 (CAMPAIGN_SAMPLE, the line says sampleRate), since a campaign can make 50 a second.
+// successful requests 1 in 10 (CAMPAIGN_SAMPLE, the line says sampleRate), since a campaign can make 50 a second. Each
+// line kept is also kept as a content_screen_calls row (src/screen-calls.ts), written after the send, never before it.
 /** Where a classifier request came from, for its line: IDs and routing only. The screen writes back how the last request
  *  ended (outcome) and how long it took (ms), for the email's own record (src/dispatcher.ts DISPATCH_EMAIL). */
 export type ScreenCall = { emailId?: string; workspaceId?: string; campaignId?: string; region?: string; shard?: number; kind?: string; required?: boolean; outcome?: string; ms?: number };
 /** How one request went, filled in by jevQuestions as it goes. Only assignments: recording never throws or waits. */
-type CallTiming = { inFlight?: number; requestBytes?: number; headersMs?: number; ms?: number; outcome?: string; phase?: 'headers' | 'body'; httpStatus?: number; responseBytes?: number;
+type CallTiming = { inFlight?: number; sesInFlight?: number; requestBytes?: number; headersMs?: number; ms?: number; outcome?: string; phase?: 'headers' | 'body'; httpStatus?: number; responseBytes?: number;
   requestId?: string; cfRay?: string; serverTiming?: string; retryAfter?: string; errorType?: string; errorCode?: string; errorMessage?: string };
 const CAMPAIGN_SAMPLE = 0.1;
 let inFlight = 0;
@@ -398,18 +400,21 @@ function responded(timing: CallTiming, started: number, response: Response) {
     timing.serverTiming = header('server-timing', 300); timing.retryAfter = header('retry-after', 40);
   } catch { /* As above. */ }
 }
-function logCall(timing: CallTiming, call: ScreenCall | undefined, window: number, windows: number, sample: number) {
+function logCall(timing: CallTiming, call: ScreenCall | undefined, window: number, windows: number, sample: number, at: number, db: object | undefined) {
   try {
-    const ok = timing.outcome === 'ok';
+    const ok = timing.outcome === 'ok', sampleRate = ok && sample < 1 ? sample : 1;
     if (call) { call.outcome = timing.outcome; call.ms = timing.ms; }
-    if (ok && sample < 1 && Math.random() >= sample) return;
+    if (sampleRate < 1 && Math.random() >= sampleRate) return;
     log(ok ? 'info' : 'warn', { code: 'CONTENT_SCREEN_CALL', emailId: call?.emailId, workspaceId: call?.workspaceId, campaignId: call?.campaignId, region: call?.region, shard: call?.shard,
-      kind: call?.kind, required: call?.required, window, windows, ...timing, ...(ok && sample < 1 ? { sampleRate: sample } : {}) });
+      kind: call?.kind, required: call?.required, window, windows, ...timing, ...(sampleRate < 1 ? { sampleRate } : {}) });
+    keepScreenCall(db, { at, workspaceId: call?.workspaceId, emailId: call?.emailId, campaignId: call?.campaignId, kind: call?.kind, required: call?.required, region: call?.region,
+      shard: call?.shard, outcome: timing.outcome, phase: timing.phase, httpStatus: timing.httpStatus, headersMs: timing.headersMs, ms: timing.ms, requestBytes: timing.requestBytes,
+      responseBytes: timing.responseBytes, inFlight: timing.inFlight, sesInFlight: timing.sesInFlight, window, windows, requestId: timing.requestId, sampleRate });
   } catch { /* As above. */ }
 }
 export async function jevQuestions(endpoint:string,apiKey:string,model:string,state:unknown,questions:unknown,deadline:number,timing:CallTiming={}):Promise<unknown> {
   // The deadline includes reading the response body. Never retry inside a send lease.
-  const started=Date.now();timing.inFlight=++inFlight;
+  const started=Date.now();timing.inFlight=++inFlight;timing.sesInFlight=outbound.ses;
   try {
     let response: Response;
     try {
@@ -439,15 +444,16 @@ export async function jevQuestions(endpoint:string,apiKey:string,model:string,st
     try{return JSON.parse(Buffer.concat(chunks).toString())}catch{return null}
   } finally { inFlight--; }
 }
-async function evaluate(endpoint: string, apiKey: string, model: string, state: unknown, call: ScreenCall | undefined, window: number, windows: number, sample = 1): Promise<ScreenResult> {
-  const timing: CallTiming = {};
+/** One classifier request; `db` is the database client its content_screen_calls row is written with later. */
+async function evaluate(endpoint: string, apiKey: string, model: string, state: unknown, call: ScreenCall | undefined, window: number, windows: number, db: object | undefined, sample = 1): Promise<ScreenResult> {
+  const timing: CallTiming = {}, at = Date.now();
   try {
     const parsed = await jevQuestions(endpoint,apiKey,model,state,QUESTIONS,DEADLINE_MS,timing) as { model?: unknown; answers?: { spam?: { noul?: unknown } } } | null;
     const spam = parsed?.answers?.spam?.noul;
     if (typeof spam !== 'number' || !Number.isFinite(spam) || spam<0 || spam>1) { timing.outcome='invalid'; throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', 'The content classifier returned no valid spam score.', undefined, true); }
     timing.outcome='ok';
     return { spam, model: typeof parsed?.model === 'string' ? parsed.model : model };
-  } finally { logCall(timing,call,window,windows,sample); }
+  } finally { logCall(timing,call,window,windows,sample,at,db); }
 }
 
 // The classifier's input for a snapshot: what screenSnapshot sends it, request by request.
@@ -475,7 +481,7 @@ export async function screenSnapshot(runtime: Runtime, snapshot: EmailSnapshot, 
     const state=classifierState(snapshot,required,textHtmlOverlap);
     let highest: ScreenResult | undefined;
     for (const [window, body] of bodies.entries()) {
-      const result=await evaluate(settings.endpoint,settings.apiKey,settings.model,state(body),call,window,bodies.length);
+      const result=await evaluate(settings.endpoint,settings.apiKey,settings.model,state(body),call,window,bodies.length,runtime.db);
       if (!highest || result.spam>highest.spam) highest=result;
     }
     return highest!;
@@ -524,5 +530,5 @@ export async function screenInput(runtime: Runtime, snapshot: EmailSnapshot): Pr
 export async function screenWindow(runtime: Runtime, input: ScreenInput, window: number, call?: ScreenCall): Promise<ScreenResult> {
   const settings = runtime.config.screen;
   if (!settings) throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', 'Hosted content screening is unavailable.', undefined, true);
-  return evaluate(settings.endpoint, settings.apiKey, settings.model, input.requests[window], call, window, input.requests.length, CAMPAIGN_SAMPLE);
+  return evaluate(settings.endpoint, settings.apiKey, settings.model, input.requests[window], call, window, input.requests.length, runtime.db, CAMPAIGN_SAMPLE);
 }

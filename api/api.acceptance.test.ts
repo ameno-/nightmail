@@ -22025,6 +22025,54 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     }));
   });
 
+  test('content_screen_calls: a row per classifier request, answered or failed, with no content; a failed row write never stops a send',async t=>{
+    await simulatedSesFixture(t,async({runtime,db,local})=>t.test('synthetic transports',async t=>{
+      const {runDispatcher,initialGate}=await import('./src/dispatcher.js'),{SESv2Client,GetAccountCommand}=await import('@aws-sdk/client-sesv2');
+      const wid=runtime.config.workspaceId,acct='112223330004',origin='https://screen.synthetic.invalid',topic=`arn:aws:sns:${REGION}:${acct}:fixture`;
+      const key=ok(await local('POST','/v1/api-keys',{name:'calls',permissions:['send','read']}),201);
+      Object.assign(runtime.config,{multiTenant:true,hostedScreen:true,liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture'},screen:{endpoint:origin,apiKey:'classifier-fixture-key',model:'fixture',mode:'reject',threshold:0.7}});
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,$2,'ready',$3)`,[REGION,acct,topic]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,region,aws_account_id,tenant_state) VALUES($1,$1,'shared','ready',$2,$3,'ready')`,[wid,REGION,acct]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('bench.invalid',$1,$1,'verified')`,[wid]);
+      type Answer='ok'|'503'|'stall'|'stall-body'|'network'|'invalid';let answer:Answer='ok';
+      t.mock.method(globalThis,'fetch',async(_url:RequestInfo|URL,init:RequestInit)=>{
+        if(answer==='stall')return new Promise<never>((_,reject)=>init.signal!.addEventListener('abort',()=>reject(init.signal!.reason)));
+        if(answer==='stall-body')return new Response(new ReadableStream({start:c=>{init.signal!.addEventListener('abort',()=>c.error(init.signal!.reason));}}));
+        if(answer==='network')throw new TypeError('Network connection lost.');
+        if(answer==='503')return new Response(null,{status:503,headers:{'x-typesafe-request-id':'req_fixture_503'}});
+        return Response.json(answer==='invalid'?{answers:{}}:{answers:{spam:{noul:.01}}},{headers:{'x-typesafe-request-id':'req_fixture_ok'}});
+      });
+      const sent:string[]=[];
+      t.mock.method(SESv2Client.prototype,'send',async(cmd:any)=>{if(cmd instanceof GetAccountCommand)return {SendingEnabled:true,SendQuota:{MaxSendRate:10000,Max24HourSend:100000,SentLast24Hours:0}};sent.push(cmd.input.EmailTags.find((t:Json)=>t.Name==='bane_email_id').Value);return {MessageId:randomUUID()};});
+      const logs:Json[]=[];for(const level of ['error','warn','info'] as const)t.mock.method(console,level,(line:string)=>{try{logs.push(JSON.parse(line));}catch{}});
+      const gate=initialGate(),ids:Record<string,string>={};
+      const send=async(name:string,code:number)=>{
+        answer=name.startsWith('refused')?'ok':name as Answer;gate.screenRetryAt=undefined;
+        ids[name]=ok(await local('POST','/v1/emails/send',{from:'a@bench.invalid',to:'private.person@example.invalid',subject:`Your sign-in code is ${code}`,text:`Private body ${code}`},'live',{authorization:`Bearer ${key.secret}`}),202).id;
+        await runDispatcher(runtime,{region:REGION,accountId:acct,batchSize:24,lanes:1,gate});
+      };
+      let code=111111;for(const name of ['ok','503','stall','stall-body','network','invalid'])await send(name,code++);
+      const {rows}=await db.query(`SELECT email_id,workspace_id,kind,required,region,shard,outcome,phase,http_status,headers_ms,ms,request_bytes,response_bytes,in_flight,window_index,windows,request_id,sample_rate,
+        ses_in_flight,abs(extract(epoch FROM created_at-clock_timestamp()))<60 AS recent FROM content_screen_calls WHERE email_id=ANY($1)`,[Object.values(ids)]);
+      const row=(name:string)=>rows.find(r=>r.email_id===ids[name])!;
+      assert.equal(rows.length,6,'One row per request, written when each run ended');
+      assert.deepEqual(['ok','503','stall','stall-body','network','invalid'].map(n=>[row(n).outcome,row(n).phase,row(n).http_status]),
+        [['ok',null,200],['http_503',null,503],['timeout','headers',null],['timeout','body',200],['network','headers',null],['invalid',null,200]]);
+      assert.deepEqual([row('ok').workspace_id,row('ok').kind,row('ok').required,row('ok').region,row('ok').shard,row('ok').window_index,row('ok').windows,row('ok').request_id,row('ok').sample_rate,row('ok').ses_in_flight,row('ok').recent],
+        [wid,'transactional',true,REGION,0,0,1,'req_fixture_ok',1,0,true]);
+      assert.ok(['headers_ms','ms','request_bytes','response_bytes','in_flight'].every(c=>typeof row('ok')[c]==='number') && row('stall').ms>=490 && row('stall').headers_ms===null);
+      assert.equal((await import('./src/screen-calls.js')).outbound.ses,0,'Every SES send counted in flight is counted out');
+      const stored=JSON.stringify((await db.query('SELECT to_jsonb(c) AS c FROM content_screen_calls c WHERE email_id=ANY($1)',[Object.values(ids)])).rows);
+      for(const secret of ['sign-in code','111111','Private body','private.person','a@bench','classifier-fixture-key'])assert.ok(!stored.includes(secret),secret);
+      // The table refuses every row: the email still goes out, and the run logs one line for the rows it dropped.
+      await db.query('ALTER TABLE content_screen_calls ADD CONSTRAINT refuse_every_row CHECK (false) NOT VALID');
+      await send('refused',code++);
+      assert.equal(sent.at(-1),ids.refused);assert.notEqual((await db.query('SELECT status FROM sending_emails WHERE id=$1',[ids.refused])).rows[0].status,'queued');
+      assert.equal(logs.filter(l=>l.code==='CONTENT_SCREEN_CALLS_UNWRITTEN' && l.rows===1).length,1);
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM content_screen_calls WHERE email_id=$1',[ids.refused])).rows[0].n,0);
+    }));
+  });
+
   test('sending review benchmark: healthy hook tenant behind slow tenant',async t=>{
     await simulatedSesFixture(t,async({runtime,db})=>{
       const {processJobs}=await import('./src/jobs.js');
