@@ -9,6 +9,7 @@ import { clientIpHeader, productName, requestHeader } from './brand.js';
 import { METHOD_ACR } from './config.js';
 import { ANALYTICS_SESSION_PARAM } from './analytics-events.js';
 import { requestNetwork, signInSignals, type RequestNetwork } from './abuse.js';
+import { recordSignup, takePlace } from './signups.js';
 
 const verifiedEmail = z.email().max(320);
 const loginFailed = () => new ApiError(403, 'SIGN_IN_DENIED', 'This account cannot sign in.');
@@ -206,15 +207,18 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
       userId = existing.rows[0]?.user_id ?? '';
       if (!userId) {
         // A new subject is admitted only by a sub-bound decision: hosted staff (the provider identity, see
-        // account-policy.ts), the invitation link it followed, or a self-hosted subject allowlist. Operators bind
-        // anyone else by subject (a nightmail_oidc_identities row).
-        // Only the invitation path reads the address: it must be the invitation target, in a mailbox this sign-in proves
-        // (provenMailbox: an emailed link or code, or a Google-hosted mailbox; never GitHub or a password). Hosted,
-        // nothing is admitted without a verified address, whichever method signed in.
+        // account-policy.ts), the invitation link it followed, a place under the operator's sign-up limit, or a
+        // self-hosted subject allowlist. Operators bind anyone else by subject (a nightmail_oidc_identities row).
+        // Only the invitation and the sign-up limit read the address, in a mailbox this sign-in proves (provenMailbox: an
+        // emailed link or code, or a Google-hosted mailbox; never GitHub or a password): an invitation's target, or the
+        // address a place was held for. Hosted, nothing is admitted without a verified address, whichever method signed in.
         if (runtime.config.multiTenant && !emailAtLogin) throw new NotAdmitted('email_unverified');
         const selfHosted = !runtime.config.multiTenant && runtime.config.allowedSubjects.includes(claims.sub);
         const invited = runtime.config.multiTenant && !staff && !!invitation && !!mailbox && await pendingInvitation(db, mailbox, invitation);
-        if (!staff && !invited && !selfHosted) throw new NotAdmitted(invitation ? 'invitation' : 'not_approved');
+        // Signing up on its own (signups.ts): hosted, without an invitation link, while a place is held for the mailbox or
+        // open. At the limit it is refused as before, and joins the waitlist.
+        const signup = runtime.config.multiTenant && !staff && !invitation && mailbox ? await takePlace(db, mailbox) : null;
+        if (!staff && !invited && !selfHosted && !signup) throw new NotAdmitted(invitation ? 'invitation' : 'not_approved');
         userId = crypto.randomUUID();
         const name = typeof claims.name === 'string' && claims.name.trim() ? claims.name.slice(0,200) : address ?? `${productName} user`;
         if (emailAtLogin) await db.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(lower(${emailAtLogin}),80324))`);
@@ -222,10 +226,11 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
         await db.execute(sql`INSERT INTO nightmail_users(id,name,email,email_verified) VALUES(${userId},${name},${address}::text,
           ${!!emailAtLogin} AND NOT EXISTS(SELECT FROM nightmail_users WHERE email_verified AND lower(email)=lower(${address}::text)))`);
         await db.execute(sql`INSERT INTO nightmail_oidc_identities(issuer,subject,user_id) VALUES(${claims.iss},${claims.sub},${userId})`);
-        admitted = `signed_in:${staff ? 'staff' : invited ? 'invitation' : 'subject'}`;
+        admitted = `signed_in:${staff ? 'staff' : invited ? 'invitation' : signup ? 'signup' : 'subject'}`;
         log('info', { code: 'SIGN_IN_USER_CREATED', userId, subject: claims.sub, admission: admitted });
+        if (signup) await recordSignup(db, userId, signup);
         if (runtime.config.multiTenant) {
-          if (!await onboardNewUser(db,{id:userId,email:staff ? emailAtLogin : mailbox,name},staff,runtime.config.regions[0]!,invitation)) throw new NotAdmitted('invitation');
+          if (!await onboardNewUser(db,{id:userId,email:staff ? emailAtLogin : mailbox,name},staff || !!signup,runtime.config.regions[0]!,invitation)) throw new NotAdmitted('invitation');
         } else if (runtime.config.defaultWorkspaceOwners === '*' || runtime.config.defaultWorkspaceOwners.includes(claims.sub)) {
           await db.execute(sql`INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES(${crypto.randomUUID()},${userId},'default','owner')`);
         }

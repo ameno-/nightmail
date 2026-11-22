@@ -75,6 +75,23 @@ export const waitlistColumnDefs: SkeletonColumn[] = [
   { key: 'attempts', label: 'Attempts', width: 96, align: 'right', card: 'inline' },
 ]
 
+// Sign-ups (?view=signups): the limit and what fills it, then every workspace, newest first. A phone's card shows the
+// name and standing, the owner and when it joined, then its verified domain and what it sent.
+export const signupFacts = ['Signed up', 'Held for the waitlist', 'Waiting', 'Open'] as const
+export function SignupFacts({ values }: { values?: Record<(typeof signupFacts)[number], ReactNode> }) {
+  return <dl className="op-facts op-facts--four">{signupFacts.map(title => <div key={title}><dt>{title}</dt><dd>{values ? values[title] : <Skeleton width={72} height={14} />}</dd></div>)}</dl>
+}
+export const signupColumnDefs: SkeletonColumn[] = [
+  { key: 'name', label: 'Workspace', width: '24%', card: 'title' },
+  { key: 'owner', label: 'Owner', card: 'line' },
+  { key: 'joined', label: 'Joined', width: 160, card: 'inline' },
+  { key: 'domain', label: 'Domain', width: '18%', card: 'line' },
+  { key: 'sent', label: 'Sent', width: 104, align: 'right', card: 'inline' },
+  { key: 'standing', label: 'Standing', width: 112, card: 'aside' },
+]
+// The Sign-ups tab's header action, for the operator role: it opens the limit's dialog.
+export const SetLimitTrigger = (props: ButtonProps) => <Button {...props}>Set limit…</Button>
+
 // UI notes (/operator/notes): staff's design and bug notes on the dashboard. The screenshot column is for the table; a
 // phone's card shows the note, its status, page, type and age, with its selection checkbox at the end for the bulk menu.
 export const noteColumnDefs: SkeletonColumn[] = [
@@ -175,9 +192,9 @@ export function OperatorClusterSkeleton() {
   </>
 }
 
-const baseTabs = [{ value: 'queue', label: 'Review queue' }, { value: 'abuse', label: 'Abuse' }, { value: 'actions', label: 'Actions' }, { value: 'waitlist', label: 'Waitlist' }]
-/** The tab a /operator address opens: ?view=abuse, ?view=actions or ?view=waitlist, else the review queue. */
-export const operatorView = (search: string) => { const view = new URLSearchParams(search).get('view'); return view === 'actions' || view === 'waitlist' || view === 'abuse' ? view : 'queue' }
+const baseTabs = [{ value: 'queue', label: 'Review queue' }, { value: 'signups', label: 'Sign-ups' }, { value: 'abuse', label: 'Abuse' }, { value: 'actions', label: 'Actions' }, { value: 'waitlist', label: 'Waitlist' }]
+/** The tab a /operator address opens: ?view=signups, ?view=abuse, ?view=actions or ?view=waitlist, else the review queue. */
+export const operatorView = (search: string) => { const view = new URLSearchParams(search).get('view'); return view === 'actions' || view === 'waitlist' || view === 'abuse' || view === 'signups' ? view : 'queue' }
 const notesTabs = [...baseTabs, { value: 'notes', label: 'UI notes' }]
 /** UI notes has a tab only for the people the API allows (GET /v1/me uiNotes). */
 export const useOperatorTabs = () => useSession()?.identity?.uiNotes === true ? notesTabs : baseTabs
@@ -197,14 +214,15 @@ export function WaitlistToolbar({ search = '', onSearch, onExport, exporting = f
     <SearchField className="search-box--list" aria-label="Search the waitlist" placeholder="Search addresses and names" value={search} disabled={disabled} onChange={event => onSearch?.(event.target.value)} />
   </div><Button className="op-export" aria-label="Export as CSV" title="Download everyone listed as a CSV file" disabled={disabled || !exportable} loading={exporting} onClick={onExport}><Download size={16} aria-hidden="true" /><span>Export CSV</span></Button></div>
 }
-export function OperatorQueueSkeleton({ view = 'queue', search = '' }: { view?: string; search?: string }) {
+export function OperatorQueueSkeleton({ view = 'queue', search = '', canAct = false }: { view?: string; search?: string; canAct?: boolean }) {
   return <>
-    <PageHeader title="Operator" />
-    <LoadingRegion label={view === 'waitlist' ? 'Loading the waitlist' : view === 'abuse' ? 'Loading related accounts' : 'Loading the review queue'}><div className="op-page">
+    <PageHeader title="Operator" actions={view === 'signups' && canAct ? <SetLimitTrigger disabled /> : undefined} />
+    <LoadingRegion label={view === 'waitlist' ? 'Loading the waitlist' : view === 'abuse' ? 'Loading related accounts' : view === 'signups' ? 'Loading sign-ups' : 'Loading the review queue'}><div className="op-page">
       <Tabs value={view} onValueChange={() => {}} disabled items={useOperatorTabs()} label="Operator views" />
       {view === 'queue' && <QueueToolbar disabled />}
       {view === 'waitlist' && <WaitlistToolbar disabled />}
-      {view === 'abuse' ? <AbuseSkeleton search={search} /> : <TableSkeleton columns={view === 'queue' ? queueColumnDefs : view === 'waitlist' ? waitlistColumnDefs : actionColumnDefs} rows={6} />}
+      {view === 'signups' && <SignupFacts />}
+      {view === 'abuse' ? <AbuseSkeleton search={search} /> : <TableSkeleton columns={view === 'queue' ? queueColumnDefs : view === 'waitlist' ? waitlistColumnDefs : view === 'signups' ? signupColumnDefs : actionColumnDefs} rows={6} />}
     </div></LoadingRegion>
   </>
 }
@@ -231,5 +249,5 @@ export function OperatorRouteSkeleton({ operator }: { operator: 'operator' | 'op
   if (!operator) return null
   if (pathname === '/operator/notes') return uiNotes ? <OperatorNotesSkeleton /> : null
   if (pathname.startsWith('/operator/abuse/')) return <OperatorClusterSkeleton />
-  return pathname.startsWith('/operator/workspaces/') ? <OperatorWorkspaceSkeleton actions={operator === 'operator'} /> : <OperatorQueueSkeleton view={operatorView(search)} search={search} />
+  return pathname.startsWith('/operator/workspaces/') ? <OperatorWorkspaceSkeleton actions={operator === 'operator'} /> : <OperatorQueueSkeleton view={operatorView(search)} search={search} canAct={operator === 'operator'} />
 }

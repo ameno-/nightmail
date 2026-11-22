@@ -924,6 +924,11 @@ export async function seed(fx) {
   await db.query(`INSERT INTO abuse_alerts(id,cluster_id,band,score,kind,workspaces,payload,created_at) VALUES ($1,$3,'review',60,'new',2,$4::jsonb,now()-interval '3 days'),($2,$3,'high',85,'raised',2,$5::jsonb,now()-interval '3 hours')`,
     ['aal_' + '1'.repeat(24), 'aal_' + '2'.repeat(24), abuseCluster, JSON.stringify(card('review', 60, 'New', [['MULTI_ACCOUNT', 30], ['SHARED_CARD', 20], ['THROWAWAY_SIGNUP', 10]])),
       JSON.stringify(card('high', 85, 'Risk raised', [['MULTI_ACCOUNT', 30], ['SHARED_CARD', 20], ['SIMILAR_CONTENT', 20], ['THROWAWAY_SIGNUP', 10], ['SHARED_LINKS', 5]]))]);
+  // Sign-ups (Operator · sign-ups): nine accounts signed up on their own and a raise let the two longest-waiting
+  // addresses in, which fills the limit of 11; four more wait.
+  await db.query(`INSERT INTO nightmail_signups(user_id,via,at) SELECT 'user_'||k,'open',now()-interval '1 day' FROM unnest($1::text[]) k`, [['nia', 'ona', 'kai', 'mara', 'lou', 'sol', 'bea', 'cy', 'gil']]);
+  await db.query("UPDATE nightmail_waitlist SET let_in_at=now()-interval '1 day' WHERE email IN ('kwame.mensah@example.net','ines.alvarez@example.net')");
+  await db.query('UPDATE nightmail_signup_limit SET places=11');
   const desk = await kai.api('POST', '/v1/inbound/addresses', { address: 'support@driftwood.example', key: 'support', displayName: 'Support' }, 201);
   await kai.api('POST', '/v1/endpoints', { type: 'slack', name: 'support', url: 'https://hooks.slack.com/services/T0SYNTH/B0SYNTH/driftwoodfixture0a1' }, 201);
   await kai.api('PUT', '/v1/rules', { rules: [{ key: 'triage', source: liveSource(0) }], attachments: [{ rule: 'triage', target: desk.id, continue: false }] }, 200);
