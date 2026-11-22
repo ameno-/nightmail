@@ -46,7 +46,8 @@ export interface SesReputation { available: boolean; reason: string | null; boun
 interface SesConfigurationSet { name: string; exists: boolean | null; owned: boolean | null; sendingEnabled: boolean | null; eventDestinationExists: boolean | null; eventWired: boolean | null; autoValidation: AutoValidationMode | null }
 export interface Workspace { id: string; name: string; postalAddress: string | null; accountId?: string; role: string; members?: { id: string; name: string; email: string; role: string }[] }
 /** GET /v1/settings/workspace: the name and the postal address every campaign footer shows (null until set). */
-export interface WorkspaceSettings { name: string; postalAddress: string | null }
+// requiredNotices: an operator let this workspace's campaigns be required notices (Campaign.requiredNotice).
+export interface WorkspaceSettings { name: string; postalAddress: string | null; requiredNotices?: boolean }
 /** What a provider event recorded: a bounce's SES type and subtype, a delay's type and when SES stops retrying, a complaint's feedback type, a click's link, and whether SES thought an open or click came from a bot. */
 export interface EmailEventDetail { bounceType?: string; bounceSubType?: string; delayType?: string; retryUntil?: ISODate; feedbackType?: string; link?: string; bot?: boolean }
 /** diagnostic: a bounce's or a delay's reply from the receiving server, as SES reported it. */
@@ -96,7 +97,7 @@ export interface CampaignListStats { tracking: boolean; accepted: number; delive
 // null while a large list has never been counted.
 export interface NewsletterReaders { count: number; daily: number[]; since: string; countedAt: ISODate }
 export interface Newsletter { id: string; name: string; from: string; fromName: string | null; url: string; createdAt: ISODate; readers?: NewsletterReaders | null }
-export interface Campaign { stats?: CampaignListStats | null; counts?: { total: number; byStatus: Record<string, number> }; delivery?: CampaignDelivery | null; archivedAt?: ISODate | null; revision?: number; draft?: Record<string, any>; attachments?: string[]; sourceTemplateId?: string | null; sourceTemplateRevision?: number | null; id: string; regionId: RegionId; name: string; subject: string; previewText: string; fromName: string; fromEmail: string; replyTo: string[]; unsubscribePageUrl: string; listId: string; segmentId: string | null; html: string; status: CampaignStatus; createdAt: ISODate; updatedAt: ISODate; scheduledAt: ISODate | null; recipients: number; delivered: number; bounced: number; complaints: number }
+export interface Campaign { stats?: CampaignListStats | null; counts?: { total: number; byStatus: Record<string, number> }; delivery?: CampaignDelivery | null; archivedAt?: ISODate | null; revision?: number; draft?: Record<string, any>; attachments?: string[]; sourceTemplateId?: string | null; sourceTemplateRevision?: number | null; id: string; regionId: RegionId; name: string; subject: string; previewText: string; fromName: string; fromEmail: string; replyTo: string[]; unsubscribePageUrl: string; requiredNotice: boolean; listId: string; segmentId: string | null; html: string; status: CampaignStatus; createdAt: ISODate; updatedAt: ISODate; scheduledAt: ISODate | null; recipients: number; delivered: number; bounced: number; complaints: number }
 // pacing, pausedAt, pauseReason, waiting, and rateShare are optional so older API responses still type-check.
 // rateShare is the fraction (0.05–1) of the SES per-second send rate the campaign may use; 1 is the full rate.
 export interface CampaignPacing { perDay: number | null; autoPause: boolean; rateShare?: number; windowStartedAt: ISODate | null; windowExpanded: number; nextWindowAt: ISODate | null }
@@ -106,9 +107,9 @@ type CampaignRate = { value: number | null; numerator: number; denominator: numb
 // Lifetime distinct email outcomes (GET /v1/campaigns/{id}/stats); outcomes overlap and simulated mail is counted separately.
 export interface CampaignStats { tracking: boolean; totals: { accepted: number; delivered: number; bounced: number; complained: number; opened: number; clicked: number; failed: number; deliveryDelayed: number; simulated: number }; rates: Record<'delivery' | 'bounce' | 'complaint' | 'open' | 'click', CampaignRate> }
 // defaults are the fallback values for {{placeholders}} a contact has no value for (the API's draft.defaults).
-export type CampaignInput = Pick<Campaign, 'regionId' | 'name' | 'subject' | 'previewText' | 'fromName' | 'fromEmail' | 'listId' | 'segmentId' | 'html'> & { replyTo?: string[]; unsubscribePageUrl?: string; id?: string; revision?: number; draft?: Record<string, any>; attachments?: string[]; defaults?: Record<string, string>; templateId?: string; idempotencyKey?: string }
+export type CampaignInput = Pick<Campaign, 'regionId' | 'name' | 'subject' | 'previewText' | 'fromName' | 'fromEmail' | 'listId' | 'segmentId' | 'html'> & { replyTo?: string[]; unsubscribePageUrl?: string; requiredNotice?: boolean; id?: string; revision?: number; draft?: Record<string, any>; attachments?: string[]; defaults?: Record<string, string>; templateId?: string; idempotencyKey?: string }
 export interface CampaignState { id: string; revision: number; updatedAt: ISODate; status: CampaignStatus; scheduledAt: ISODate | null; archivedAt: ISODate | null }
-export interface SendCampaignInput { revision?: number; id: string; mode: 'now' | 'schedule'; scheduledAt?: ISODate; pacing?: { perDay?: number | null; autoPause?: boolean; rateShare?: number } }
+export interface SendCampaignInput { revision?: number; id: string; mode: 'now' | 'schedule'; scheduledAt?: ISODate; pacing?: { perDay?: number | null; autoPause?: boolean; rateShare?: number }; confirmRequiredNotice?: boolean }
 // Settings → Activity's entries (data/activity.ts) and an API key's history: the workspace's audit trail.
 export type AuditActorType = 'member' | 'api_key' | 'mcp_grant' | 'agent_token' | 'inbox_key' | 'app_password' | 'operator' | 'support' | 'system' | 'stripe'
 export type AuditEntry = {

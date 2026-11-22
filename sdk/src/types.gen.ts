@@ -1407,6 +1407,10 @@ export type CampaignDraft = {
      * Your own unsubscribe or preference page: HTTPS, no user name, password, whitespace or unsubscribe_token parameter, at most 1,000 characters. The footer's Unsubscribe link opens it with unsubscribe_token=<token> added; your page records the opt-out by POSTing that token to /unsubscribe/<token> on this API (idempotent). List-Unsubscribe keeps this API's one-click address, which records the opt-out itself and, opened in a browser, confirms it and then continues to your page. Omit to use the hosted page.
      */
     unsubscribePageUrl?: string;
+    /**
+     * A required notice: a message every recipient must get whatever their marketing choice, such as a change to terms, prices or taxes, never a promotion. It goes to everyone in the audience who is not suppressed, people who unsubscribed from marketing included, without an Unsubscribe link or List-Unsubscribe header, and is paced, limited and paused like any campaign. Only where an operator turned required notices on for the workspace (requiredNotices in getWorkspaceSettings); 403 REQUIRED_NOTICES_OFF otherwise. Sending or scheduling one needs confirmRequiredNotice.
+     */
+    requiredNotice?: boolean;
     html?: string;
 };
 
@@ -1518,6 +1522,10 @@ export type CreateCampaignInput = {
      * Your own unsubscribe or preference page: HTTPS, no user name, password, whitespace or unsubscribe_token parameter, at most 1,000 characters. The footer's Unsubscribe link opens it with unsubscribe_token=<token> added; your page records the opt-out by POSTing that token to /unsubscribe/<token> on this API (idempotent). List-Unsubscribe keeps this API's one-click address, which records the opt-out itself and, opened in a browser, confirms it and then continues to your page. Omit to use the hosted page.
      */
     unsubscribePageUrl?: string;
+    /**
+     * A required notice: a message every recipient must get whatever their marketing choice, such as a change to terms, prices or taxes, never a promotion. It goes to everyone in the audience who is not suppressed, people who unsubscribed from marketing included, without an Unsubscribe link or List-Unsubscribe header, and is paced, limited and paused like any campaign. Only where an operator turned required notices on for the workspace (requiredNotices in getWorkspaceSettings); 403 REQUIRED_NOTICES_OFF otherwise. Sending or scheduling one needs confirmRequiredNotice.
+     */
+    requiredNotice?: boolean;
     /**
      * Block HTML: h1-h3, p, ul/ol, blockquote, pre>code, hr, img, buttons, columns and styled sections with inline formatting. A constrained email-safe style attribute supports color, typography, spacing, borders, radius and dimensions; arbitrary CSS remains rejected. No wrappers, tables, class or id. Call getContentGuide in MCP or GET /v1/campaign-content-guide for the full vocabulary and examples.
      */
@@ -1731,7 +1739,7 @@ export type CampaignPreview = {
 };
 
 /**
- * Live counts for the saved audience: matched contacts, those eligible for marketing, and the suppressed or unsubscribed remainder. Read-only; sending freezes its own snapshot and rechecks consent at dispatch.
+ * Live counts for the saved audience: matched contacts, those eligible for marketing, and the suppressed or unsubscribed remainder. For a required notice everyone not suppressed is eligible and unsubscribed is 0. Read-only; sending freezes its own snapshot and rechecks consent at dispatch.
  */
 export type CampaignAudienceCounts = {
     matched: number;
@@ -1806,6 +1814,10 @@ export type CampaignUpdateInput = {
          */
         unsubscribePageUrl?: string;
         /**
+         * A required notice: a message every recipient must get whatever their marketing choice, such as a change to terms, prices or taxes, never a promotion. It goes to everyone in the audience who is not suppressed, people who unsubscribed from marketing included, without an Unsubscribe link or List-Unsubscribe header, and is paced, limited and paused like any campaign. Only where an operator turned required notices on for the workspace (requiredNotices in getWorkspaceSettings); 403 REQUIRED_NOTICES_OFF otherwise. Sending or scheduling one needs confirmRequiredNotice.
+         */
+        requiredNotice?: boolean;
+        /**
          * Block HTML: h1-h3, p, ul/ol, blockquote, pre>code, hr, img, buttons, columns and styled sections with inline formatting. A constrained email-safe style attribute supports color, typography, spacing, borders, radius and dimensions; arbitrary CSS remains rejected. No wrappers, tables, class or id. Call getContentGuide in MCP or GET /v1/campaign-content-guide for the full vocabulary and examples.
          */
         html?: string;
@@ -1834,6 +1846,10 @@ export type CampaignQueued = {
 export type CampaignSendInput = {
     revision: number;
     pacing?: CampaignPacing;
+    /**
+     * Required for a required notice (422 REQUIRED_NOTICE_UNCONFIRMED without it): the sender confirms it is a required notice with no promotion. Recorded with who and when. An agent asks the person first.
+     */
+    confirmRequiredNotice?: true;
 };
 
 export type CampaignPacing = {
@@ -1854,6 +1870,10 @@ export type CampaignPacing = {
 export type CampaignScheduleInput = {
     revision: number;
     pacing?: CampaignPacing;
+    /**
+     * Required for a required notice (422 REQUIRED_NOTICE_UNCONFIRMED without it): the sender confirms it is a required notice with no promotion. Recorded with who and when. An agent asks the person first.
+     */
+    confirmRequiredNotice?: true;
     scheduledAt: string;
 };
 
@@ -1889,6 +1909,10 @@ export type WorkspaceSettings = {
      * The postal address every campaign footer and marketing send shows under Unsubscribe; null until one is set. Campaigns can't be sent or scheduled without it.
      */
     postalAddress: string | null;
+    /**
+     * Whether campaigns in this workspace may be required notices (requiredNotice), which also reach people who unsubscribed from marketing. Only an operator turns this on.
+     */
+    requiredNotices: boolean;
 };
 
 export type UpdateWorkspaceSettings = {

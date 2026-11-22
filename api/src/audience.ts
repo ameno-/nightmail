@@ -122,30 +122,33 @@ async function audienceConditions(db: DbExecutor, identity: Actor, spec: z.infer
   for (const segmentId of spec.excludeSegmentIds ?? []) conditions.push(sql`NOT (${compileRule(lockedSegments.find(row => row.id === segmentId)!.rule)})`);
   return conditions;
 }
+// Who a campaign may reach: subscribers, or for a required notice everyone who is not suppressed (bounced, complained),
+// people who unsubscribed from marketing or never subscribed included.
+const reachable = (requiredNotice: boolean) => requiredNotice ? sql`NOT ${contacts.suppressed}` : sql`NOT ${contacts.suppressed} AND ${contacts.marketingConsent} = 'subscribed'`;
 /** Read-only counts of the live audience (the dashboard's pre-send check); nothing is frozen or locked. */
-export async function countCampaignAudience(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>) {
+export async function countCampaignAudience(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>, requiredNotice = false) {
   const conditions = await audienceConditions(db, identity, spec, false);
   const [row] = (await db.execute<{ matched: number; eligible: number; suppressed: number; unsubscribed: number }>(sql`SELECT count(*)::int AS matched,
-      count(*) FILTER (WHERE NOT ${contacts.suppressed} AND ${contacts.marketingConsent} = 'subscribed')::int AS eligible,
+      count(*) FILTER (WHERE ${reachable(requiredNotice)})::int AS eligible,
       count(*) FILTER (WHERE ${contacts.suppressed})::int AS suppressed,
-      count(*) FILTER (WHERE NOT ${contacts.suppressed} AND ${contacts.marketingConsent} <> 'subscribed')::int AS unsubscribed
+      count(*) FILTER (WHERE NOT ${contacts.suppressed} AND NOT (${reachable(requiredNotice)}))::int AS unsubscribed
     FROM ${contacts} WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)}`)).rows;
   return row!;
 }
 type SnapshotCounts = { matched: number; eligible: number; suppressed: number; unsubscribed: number; bytes: string; captured: number };
-function checkedSnapshot(row: SnapshotCounts) {
+function checkedSnapshot(row: SnapshotCounts, requiredNotice: boolean) {
   if (row.matched > 2000000) throw new ApiError(422, 'AUDIENCE_LIMIT_EXCEEDED', 'Campaign reviews support at most 2,000,000 matching contacts. No recipients were truncated.');
   if (row.captured !== row.eligible) throw new ApiError(413, 'CAMPAIGN_RECIPIENT_DATA_TOO_LARGE', 'Referenced personalization exceeds 1 GiB per review or 1 MiB per recipient.');
-  if (!row.eligible) throw new ApiError(422, 'EMPTY_AUDIENCE', 'This campaign has no eligible subscribed recipients.');
+  if (!row.eligible) throw new ApiError(422, 'EMPTY_AUDIENCE', requiredNotice ? 'This campaign has no recipients who can receive email.' : 'This campaign has no eligible subscribed recipients.');
   return { matched: row.matched, eligible: row.eligible, suppressed: row.suppressed, unsubscribed: row.unsubscribed, recipientBytes: Number(row.bytes) };
 }
-export async function snapshotCampaignAudience(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>, reviewId: string, propertyKeys: string[]) {
+export async function snapshotCampaignAudience(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>, reviewId: string, propertyKeys: string[], requiredNotice = false) {
   const conditions = await audienceConditions(db, identity, spec, true);
   const matched = (range?: SQL) => sql`SELECT ${spec.priority ? sql`coalesce(array_position(ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(spec.priority.values)}::jsonb)), ${contacts.properties} ->> ${spec.priority.property}), ${spec.priority.values.length + 1})` : sql`0`} AS rank,
         ${contacts.id}, jsonb_strip_nulls(jsonb_build_object('id', ${contacts.id}, 'email', ${contacts.email}, 'name', nullif(CASE WHEN ${propertyKeys.includes('name')} THEN ${contacts.name} END, ''),
           'properties', ${propertyKeys.length ? sql`coalesce((SELECT jsonb_object_agg(p.key, p.value) FROM jsonb_each(${contacts.properties}) p
             WHERE p.key = ANY(ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(propertyKeys)}::jsonb)))), '{}'::jsonb)` : sql`'{}'::jsonb`})) AS recipient,
-        NOT ${contacts.suppressed} AND ${contacts.marketingConsent} = 'subscribed' AS eligible, ${contacts.suppressed}
+        ${reachable(requiredNotice)} AS eligible, ${contacts.suppressed}
       FROM ${contacts} WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), range, ...conditions)}`;
   const ordered = sql`SELECT (row_number() OVER w)::int AS ordinal, recipient, bytes, sum(bytes) OVER w AS running_bytes
     FROM (SELECT rank, id, recipient, octet_length(recipient::text) AS bytes FROM audience_snapshot WHERE eligible) e
@@ -169,7 +172,7 @@ export async function snapshotCampaignAudience(db: DbExecutor, identity: Actor, 
       captured AS (INSERT INTO sending_review_recipients(review_id,ordinal,recipient,recipient_bytes)
         SELECT ${reviewId},ordinal,recipient,bytes FROM ordered WHERE bytes<=1048576 AND running_bytes<=1073741824 RETURNING recipient_bytes)
       SELECT ${counts},(SELECT count(*)::int FROM captured) AS captured,(SELECT coalesce(sum(recipient_bytes),0) FROM captured) AS bytes FROM audience_snapshot`);
-    return checkedSnapshot(rows[0]!);
+    return checkedSnapshot(rows[0]!, requiredNotice);
   }
   // One MVCC statement snapshot for membership, consent and properties, even under
   // READ COMMITTED. Never paginate the live audience over independent snapshots.
@@ -194,7 +197,7 @@ export async function snapshotCampaignAudience(db: DbExecutor, identity: Actor, 
   const result = await db.execute<SnapshotCounts>(sql`SELECT ${counts},
       (SELECT count(*)::int FROM sending_review_recipients WHERE review_id = ${reviewId}) AS captured,
       (SELECT coalesce(sum(recipient_bytes), 0)::bigint FROM sending_review_recipients WHERE review_id = ${reviewId}) AS bytes FROM audience_snapshot`);
-  return checkedSnapshot(result.rows[0]!);
+  return checkedSnapshot(result.rows[0]!, requiredNotice);
 }
 export async function isSuppressed(runtime: Runtime, identity: Actor, email: string): Promise<boolean> {
   const [row] = await runtime.db.select({ suppressed: contacts.suppressed }).from(contacts).where(and(scope(contacts, identity), eq(contacts.email, email.trim().toLowerCase()))).limit(1);
