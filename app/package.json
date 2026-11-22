@@ -10,7 +10,6 @@
     "preview": "vite preview --host 127.0.0.1",
     "cls": "bun run build && node scripts/cls.mjs",
     "copy-lint": "node scripts/copy-lint.mjs",
-    "commercial:smoke": "bun commercial/scripts/smoke.ts",
     "density": "bun run build && node scripts/density.mjs"
   },
   "dependencies": {
