@@ -1440,7 +1440,7 @@ export async function admitTestEmail(c: Ctx, a: Actor, domain: string, to: strin
 export function registerSending(app: App) {
   registerPreviewImages(app);
   app.openapi(createRoute({method:'post',path:'/v1/emails/check',operationId:'checkEmail',tags:['Emails'],security,
-    summary:'Check email sendability without sending', description:`Read-only 0–100 advisory score, not an inbox-placement probability or admission decision. Supply one draft (HTML or text), outbound email ID, or campaign ID. Uses visible retained content, cached From-domain facts, and workspace reputation for unrestricted readers. No DNS/asset fetches or paid screen. Scores use current evidence, not a historical delivery verdict. HTML has the preview lint’s 256 KiB UTF-8 and tree budgets. Marketing drafts are checked as supplied; ${productName} generates the unsubscribe headers and link for campaigns. MIME bytes are estimated.`,
+    summary:'Check email sendability without sending', description:`Read-only 0–100 advisory score, not an inbox-placement probability or admission decision. Supply one draft (HTML or text), outbound email ID, or campaign ID. Uses visible retained content, cached From-domain facts, and workspace reputation for unrestricted readers. No DNS/asset fetches or paid screen. Scores use current evidence, not a historical delivery verdict. HTML has the preview lint’s 256 KiB UTF-8 and tree budgets. Marketing drafts are checked as supplied; ${productName} adds the unsubscribe headers, the link and the workspace’s postal address to campaigns and to marketing mail it sent, so those are checked as sent. Each finding’s fix is one plain sentence and fixIn says where it is made. MIME bytes are estimated.`,
     request:{body:json(CheckInput)},responses:{200:response(CheckResult),...errors}}),async c=>{
     const a=actor(c,'read'), input=c.req.valid('json'); let mail:CheckMail;
     if ('emailId' in input) {
@@ -1451,13 +1451,14 @@ export function registerSending(app: App) {
       if (!body.html && !body.text) throw new ApiError(422,'EMAIL_BODY_UNAVAILABLE','No retained HTML or plain text is available for checking.','emailId');
       mail={from:row.from,fromName:s.fromName,subject:body.subject??'',stream:s.kind??'transactional',text:body.text??undefined,html:body.html??undefined,
         headers:Object.fromEntries([...(s.headers??[]).map(h=>[h.Name,h.Value]),...(s.replyTo?.length ? [['Reply-To',s.replyTo[0]!]] : [])]),
-        previewText:s.previewText,tracking:s.tracking,attachments:await attachmentRows(c.env.db,a,body.attachments,false,!!s.mailbox && !!actorMailAccess(a))};
+        // Marketing mail went out with the unsubscribe headers and link (and the workspace's postal address) Nightmail adds, however its copy is stored.
+        previewText:s.previewText,tracking:s.tracking,...(s.kind==='marketing' ? {generatedUnsubscribe:true,postalAddress:!!await workspacePostalAddress(c.env,c.env.db,a.workspaceId)} : {}),attachments:await attachmentRows(c.env.db,a,body.attachments,false,!!s.mailbox && !!actorMailAccess(a))};
     } else if ('campaignId' in input) {
-      const row=await findCampaign(c.env.db,a,input.campaignId), d=row.draft, audience=AudienceSpec.safeParse(d.audience);
+      const {row,footer}=await campaignWithFooter(c.env,a,input.campaignId), d=row.draft, audience=AudienceSpec.safeParse(d.audience);
       const [rendered,recipients,files]=await Promise.all([renderCampaignContent(c.env,d,false),row.reviewId ? row.total : audience.success && !a.domains.length
         ? wrapModuleLoad(()=>import('./audience.js')).then(m=>m.countCampaignAudience(c.env.db,a,audience.data)).then(r=>r.eligible) : undefined,attachmentRows(c.env.db,a,d.attachments)]);
       if (!d.from || (!rendered.html && !rendered.text)) throw new ApiError(422,'CAMPAIGN_INCOMPLETE','Set a sender and add content before checking this campaign.','campaignId');
-      mail={from:d.from,fromName:d.fromName,subject:d.subject,stream:'marketing',...rendered,previewText:d.previewText,tracking:d.tracking,generatedUnsubscribe:true,
+      mail={from:d.from,fromName:d.fromName,subject:d.subject,stream:'marketing',...rendered,previewText:d.previewText,tracking:d.tracking,generatedUnsubscribe:true,postalAddress:!!footer.postalAddress,
         recipientCount:recipients===undefined ? undefined : Math.min(recipients,row.pacePerDay??Infinity),attachments:files,headers:d.replyTo?.[0]?{'Reply-To':d.replyTo[0]}:undefined};
     } else mail=input;
     const domain=splitMailbox(mail.from).address.split('@').at(-1)!.toLowerCase();

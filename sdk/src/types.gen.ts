@@ -898,6 +898,10 @@ export type TemplateImageImport = {
 export type EmailCheckResult = {
     score: number;
     grade: 'A+' | 'A' | 'B' | 'C' | 'D' | 'F';
+    /**
+     * The From domain’s ID (getDomain) when it is one of this workspace’s domains: where a finding with fixIn domain is fixed.
+     */
+    domainId: string | null;
     categories: Array<{
         id: 'authentication' | 'content' | 'headers' | 'size' | 'rendering' | 'reputation';
         score: number;
@@ -909,7 +913,14 @@ export type EmailCheckResult = {
         severity: 'info' | 'warning' | 'error';
         title: string;
         detail: string;
+        /**
+         * What to do, in one short sentence of everyday words. The title and the detail name the header, record or standard.
+         */
         fix: string;
+        /**
+         * Where the fix is made: the From domain’s DNS records and setup (domain), the workspace’s settings (workspace), how much and to whom you send (sending), or the message itself (message).
+         */
+        fixIn: 'domain' | 'workspace' | 'sending' | 'message';
         evidence?: {
             [key: string]: number | string;
         };

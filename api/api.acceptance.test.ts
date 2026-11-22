@@ -10582,6 +10582,11 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
       const bad=ok(await check(risky)), ids=bad.findings.map((f:Json)=>f.ruleId);
       assert.ok(bad.score<report.score-20); for(const id of ['part-mismatch','display-name','off-brand-links','short-url','script','form','unsubscribe-post','postal-address','shouting'])assert.ok(ids.includes(id),id);
       assert.ok(bad.findings.every((f:Json)=>f.title && f.detail && f.fix && f.category && f.severity));assert.doesNotMatch(JSON.stringify(bad),/never-fetch|192\.0\.2\.1|<script/i);
+      // Each fix is in plain words, without the header, record or standard its title and detail name, and says where it is made.
+      assert.ok(bad.findings.every((f:Json)=>['domain','workspace','sending','message'].includes(f.fixIn) && !/RFC|List-Unsubscribe|MAIL FROM|SPF|DKIM|DMARC|marketing sending/.test(f.fix)),JSON.stringify(bad.findings.map((f:Json)=>f.fix)));
+      assert.deepEqual(['unsubscribe-header','unsubscribe-post','unsubscribe-link','postal-address','script'].map(id=>{const f=bad.findings.find((f:Json)=>f.ruleId===id);return [f.fix,f.fixIn];}),
+        [['Add one-click unsubscribe.','message'],['Add one-click unsubscribe.','message'],['Add an unsubscribe link.','message'],['Add your postal address to the footer.','message'],['Remove the scripts.','message']]);
+      assert.equal(bad.domainId,null,'A From domain that is not one of the workspace\u2019s has no ID to link.');
       const bytes=ok(await check({...good,html:undefined,text:'é'.repeat(32769)})).findings.find((f:Json)=>f.ruleId==='screen-bytes');
       assert.deepEqual(bytes.evidence,{screenedBytes:65538,limitBytes:65536,remainingBytes:-2});assert.equal(bytes.severity,'error');
       error(await check({...good,html:'<div>'.repeat(400)}),413,'EMAIL_CHECK_LIMIT_EXCEEDED');
@@ -10590,8 +10595,15 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
       assert.ok(ok(await check({emailId:await email(wid)},scoped)).score>0);error(await check({emailId:await email(foreign)}),404,'NOT_FOUND');
       const campaign=async(workspace:string)=>{const id=unique('checked-campaign');await db.query(`INSERT INTO sending_campaigns(id,workspace_id,draft) VALUES($1,$2,$3)`,[id,workspace,{from:'newsletter@shop.example.com',fromName:'Shop',region:REGION,subject:'Updates',html:'<p>Updates from the shop.</p>',audience:{},attachments:[],defaults:{},tracking:false}]);return id;};
       const c=ok(await check({campaignId:await campaign(wid)}));assert.ok(!c.findings.some((f:Json)=>f.ruleId.startsWith('unsubscribe-')));error(await check({campaignId:await campaign(foreign)}),404,'NOT_FOUND');
-      // No simulated send rows were inserted except the explicitly seeded terminal email.
-      assert.equal((await db.query('SELECT count(*)::int n FROM sending_emails WHERE workspace_id=$1',[wid])).rows[0].n,1);
+      // Marketing mail gets its unsubscribe headers, link and postal address from the workspace when it is sent: a campaign
+      // and a sent marketing email are told only that the workspace has no address yet, and where to add it.
+      const marketing=unique('checked-marketing');await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,status,simulated) VALUES ($1,$2,$3,'fixture','orders@shop.example.com','[]','[]','[]',$4,$5,'delivered',true)`,[marketing,wid,REGION,good.subject,{...good,kind:'marketing',testCampaignId:null,attachments:[]}]);
+      const advice=async(input:Json)=>ok(await check(input)).findings.filter((f:Json)=>f.ruleId.startsWith('unsubscribe-') || f.ruleId==='postal-address').map((f:Json)=>[f.ruleId,f.fix,f.fixIn]);
+      for(const input of [{campaignId:await campaign(wid)},{emailId:marketing}]) assert.deepEqual(await advice(input),[['postal-address','Add your postal address.','workspace']]);
+      ok(await local('PATCH','/v1/settings/workspace',{postalAddress:'Fixture Co.\n9 Synthetic Road\nTestville, CA 94000'}));
+      for(const input of [{campaignId:await campaign(wid)},{emailId:marketing}]) assert.deepEqual(await advice(input),[]);
+      // No simulated send rows were inserted except the two explicitly seeded terminal emails.
+      assert.equal((await db.query('SELECT count(*)::int n FROM sending_emails WHERE workspace_id=$1',[wid])).rows[0].n,2);
     });
   });
   test('previewEmail validates offline previews and reads only authorized, redacted outbound HTML', async t => {

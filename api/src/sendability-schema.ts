@@ -21,8 +21,12 @@ export const DraftCheck = z.object({
 export const CheckInput = z.union([DraftCheck, z.object({emailId: z.string().min(1).max(160)}).strict(), z.object({campaignId: z.string().min(1).max(160)}).strict()]).openapi('EmailCheckInput');
 export const categories = ['authentication','content','headers','size','rendering','reputation'] as const;
 const percent = z.int().min(0).max(100);
-export const CheckResult = z.object({score: percent, grade: z.enum(GRADES), categories: z.array(z.object({id: z.enum(categories), score: percent, weight: percent})),
-  findings: z.array(z.object({ruleId: z.string(), category: z.enum(categories), severity: z.enum(['info','warning','error']), title: z.string(), detail: z.string(), fix: z.string(), evidence: z.record(z.string(),z.union([z.number(),z.string()])).optional()})),
+const fixPlaces = ['domain','workspace','sending','message'] as const;
+export const CheckResult = z.object({score: percent, grade: z.enum(GRADES), domainId: z.string().nullable().describe('The From domain\u2019s ID (getDomain) when it is one of this workspace\u2019s domains: where a finding with fixIn domain is fixed.'), categories: z.array(z.object({id: z.enum(categories), score: percent, weight: percent})),
+  findings: z.array(z.object({ruleId: z.string(), category: z.enum(categories), severity: z.enum(['info','warning','error']), title: z.string(), detail: z.string(), fix: z.string().describe('What to do, in one short sentence of everyday words. The title and the detail name the header, record or standard.'),
+    fixIn: z.enum(fixPlaces).describe('Where the fix is made: the From domain\u2019s DNS records and setup (domain), the workspace\u2019s settings (workspace), how much and to whom you send (sending), or the message itself (message).'), evidence: z.record(z.string(),z.union([z.number(),z.string()])).optional()})),
 }).openapi('EmailCheckResult');
 export type CheckReport = z.infer<typeof CheckResult>;
-export type CheckMail = z.infer<typeof DraftCheck> & { recipientCount?: number; generatedUnsubscribe?: boolean; previewText?: string; tracking?: boolean };
+/** generatedUnsubscribe: a campaign's draft or a marketing email Nightmail sent, whose unsubscribe headers, link and postal
+ *  address Nightmail adds; postalAddress: whether the workspace has the address that footer shows. */
+export type CheckMail = z.infer<typeof DraftCheck> & { recipientCount?: number; generatedUnsubscribe?: boolean; postalAddress?: boolean; previewText?: string; tracking?: boolean };

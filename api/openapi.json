@@ -2922,6 +2922,13 @@
               "F"
             ]
           },
+          "domainId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The From domain’s ID (getDomain) when it is one of this workspace’s domains: where a finding with fixIn domain is fixed."
+          },
           "categories": {
             "type": "array",
             "items": {
@@ -2990,7 +2997,18 @@
                   "type": "string"
                 },
                 "fix": {
-                  "type": "string"
+                  "type": "string",
+                  "description": "What to do, in one short sentence of everyday words. The title and the detail name the header, record or standard."
+                },
+                "fixIn": {
+                  "type": "string",
+                  "enum": [
+                    "domain",
+                    "workspace",
+                    "sending",
+                    "message"
+                  ],
+                  "description": "Where the fix is made: the From domain’s DNS records and setup (domain), the workspace’s settings (workspace), how much and to whom you send (sending), or the message itself (message)."
                 },
                 "evidence": {
                   "type": "object",
@@ -3012,7 +3030,8 @@
                 "severity",
                 "title",
                 "detail",
-                "fix"
+                "fix",
+                "fixIn"
               ]
             }
           }
@@ -3020,6 +3039,7 @@
         "required": [
           "score",
           "grade",
+          "domainId",
           "categories",
           "findings"
         ]
@@ -34020,7 +34040,7 @@
           }
         ],
         "summary": "Check email sendability without sending",
-        "description": "Read-only 0–100 advisory score, not an inbox-placement probability or admission decision. Supply one draft (HTML or text), outbound email ID, or campaign ID. Uses visible retained content, cached From-domain facts, and workspace reputation for unrestricted readers. No DNS/asset fetches or paid screen. Scores use current evidence, not a historical delivery verdict. HTML has the preview lint’s 256 KiB UTF-8 and tree budgets. Marketing drafts are checked as supplied; Nightmail generates the unsubscribe headers and link for campaigns. MIME bytes are estimated.",
+        "description": "Read-only 0–100 advisory score, not an inbox-placement probability or admission decision. Supply one draft (HTML or text), outbound email ID, or campaign ID. Uses visible retained content, cached From-domain facts, and workspace reputation for unrestricted readers. No DNS/asset fetches or paid screen. Scores use current evidence, not a historical delivery verdict. HTML has the preview lint’s 256 KiB UTF-8 and tree budgets. Marketing drafts are checked as supplied; Nightmail adds the unsubscribe headers, the link and the workspace’s postal address to campaigns and to marketing mail it sent, so those are checked as sent. Each finding’s fix is one plain sentence and fixIn says where it is made. MIME bytes are estimated.",
         "requestBody": {
           "required": true,
           "content": {
