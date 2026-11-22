@@ -1806,9 +1806,13 @@ test('MCP cutover expires legacy approvals and tokens but keeps the objects they
   const db=await fixtureDatabase(t);
   await db.query('BEGIN');
   try {
-    for(const table of ['oauth_client','oauth_consent','oauth_access_token','oauth_refresh_token','agent_tokens','mail_grant_objects','api_keys','nightmail_expired_approvals','nightmail_resource_grants','nightmail_retired_grant_objects']) {
+    for(const table of ['agent_tokens','mail_grant_objects','api_keys','nightmail_expired_approvals','nightmail_resource_grants','nightmail_retired_grant_objects']) {
       await db.query(`CREATE TEMP TABLE ${table} (LIKE public.${table} INCLUDING DEFAULTS INCLUDING INDEXES) ON COMMIT DROP`);
     }
+    // Migration 398 dropped the legacy OAuth tables; recreate the columns 276 reads and writes.
+    await db.query(`CREATE TEMP TABLE oauth_client(id text PRIMARY KEY,client_id text NOT NULL UNIQUE,name text,redirect_uris text[] NOT NULL,disabled boolean DEFAULT false) ON COMMIT DROP;
+      CREATE TEMP TABLE oauth_consent(id text PRIMARY KEY,client_id text NOT NULL,user_id text,scopes text[] NOT NULL,created_at timestamptz NOT NULL,updated_at timestamptz NOT NULL,retired_at timestamptz) ON COMMIT DROP`);
+    for(const table of ['oauth_access_token','oauth_refresh_token']) await db.query(`CREATE TEMP TABLE ${table}(id text PRIMARY KEY,token text NOT NULL,user_id text,client_id text NOT NULL,scopes text[] NOT NULL,created_at timestamptz NOT NULL,expires_at timestamptz NOT NULL,revoked timestamptz,rotation_replay_response text) ON COMMIT DROP`);
     // Migration 276 predates the nightmail_* names; it writes through the bane_* views, here onto the temporary tables.
     for(const table of ['expired_approvals','resource_grants','retired_grant_objects']) await db.query(`CREATE TEMP VIEW bane_${table} AS SELECT * FROM pg_temp.nightmail_${table}`);
     await db.query('CREATE TRIGGER mail_grant_removed AFTER DELETE ON mail_grant_objects FOR EACH ROW EXECUTE FUNCTION mail_disable_grant_object()');
@@ -17712,9 +17716,6 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     const encrypted=await encrypt({config:loadConfig(config)},plain,aad);
     await db.query("INSERT INTO operation_webhooks(id,workspace_id,url,event_types,encrypted_secret) VALUES('fixture','default','https://fixture.invalid','[]',$1)",[encrypted]);
     const read=async()=>(await db.query("SELECT encrypted_secret FROM operation_webhooks WHERE id='fixture'")).rows[0].encrypted_secret;
-    const reference=`mcp_v2_${randomUUID()}|opensend:read opensend:live offline_access|ws_fixture|member`;
-    await db.query("INSERT INTO oauth_client(id,client_id,redirect_uris,scopes) VALUES('legacy','legacy','{}','{opensend:read,offline_access}')");
-    await db.query("INSERT INTO oauth_consent(id,client_id,reference_id,scopes,created_at,updated_at) VALUES('legacy','legacy',$1,'{opensend:read,opensend:live,offline_access}',now(),now())",[reference]);
     await mt.test('ambiguous ledgers refuse migration without changing either table',async()=>{
       await db.query('CREATE TABLE nightmail_migrations (LIKE opensend_migrations INCLUDING ALL)');
       migrate({},/MIGRATION_LEDGER_AMBIGUOUS: more than one of opensend_migrations, bane_migrations and nightmail_migrations exists/);
@@ -17726,7 +17727,6 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
       migrate({BANE_ROOT_SECRET:randomUUID()},/KEY_ROTATION_REQUIRED: NIGHTMAIL_ROOT_SECRET differs/);
       assert.equal(await read(),encrypted);assert.equal((await db.query("SELECT to_regclass('nightmail_migrations') AS t")).rows[0].t,null);
       assert.equal((await db.query("SELECT FROM opensend_migrations WHERE name='092_bane_scopes.sql'")).rowCount,0);
-      assert.equal((await db.query("SELECT reference_id FROM oauth_consent WHERE id='legacy'")).rows[0].reference_id,reference);
     });
     assert.match(migrate(),/WEBHOOK_SECRETS_REKEY_SKIPPED/);assert.equal(await read(),encrypted);
     await mt.test('concurrent index waits are bounded and retried before the ledger advances',async()=>{
@@ -17749,12 +17749,12 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     // The ledger moved to nightmail_migrations; bane_migrations stays a view of it for an earlier release's migrator.
     assert.deepEqual((await db.query("SELECT relkind FROM pg_class WHERE oid=to_regclass('bane_migrations')")).rows,[{relkind:'v'}]);
     assert.equal((await db.query("SELECT FROM bane_migrations WHERE name='092_bane_scopes.sql'")).rowCount,1);
-    assert.deepEqual((await db.query("SELECT scopes,reference_id FROM oauth_consent WHERE id='legacy'")).rows,[{scopes:['bane:read','bane:live','offline_access'],reference_id:reference.replaceAll('opensend:','bane:')}]);
+    assert.equal((await db.query("SELECT to_regclass('oauth_consent') AS t")).rows[0].t,null);
     assert.match(migrate({BANE_ROOT_SECRET:config.BANE_ROOT_SECRET}),/WEBHOOK_SECRETS_REKEY_SKIPPED/);assert.equal(await read(),encrypted);
     const next={...config,BANE_ROOT_SECRET:randomUUID()};
     assert.match(migrate({...next,PREVIOUS_BANE_ROOT_SECRET:config.BANE_ROOT_SECRET}),/WEBHOOK_SECRETS_REKEYED/);
     const rotated=await read();assert.notEqual(rotated,encrypted);assert.equal(await decrypt({config:loadConfig(next)},rotated,aad),plain);
-    await db.query("DELETE FROM oauth_client WHERE id='legacy'; DELETE FROM operation_webhooks WHERE id='fixture'; DELETE FROM ses_installation_settings WHERE workspace_id='default'");
+    await db.query("DELETE FROM operation_webhooks WHERE id='fixture'; DELETE FROM ses_installation_settings WHERE workspace_id='default'");
   });
   const w=['ws_10'+'a'.repeat(30),'ws_2'+'b'.repeat(31)],r='us-east-2',old='000011110001',dest='000011110002',run='fixture-cutover';
   const bucket=(acct:string)=>`${acct===old?'opensend-mx':'bane'}-${acct}-mail-${r}`,topic=(acct:string,kind='feedback')=>`arn:aws:sns:${r}:${acct}:${acct===old?'opensend-mx':'bane'}-${kind}`;
