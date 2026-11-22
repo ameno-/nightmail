@@ -113,6 +113,8 @@ const overviewRule = (recipe: typeof RecipeRef, asks: 'decisions' | 'omens') => 
   enabled: z.boolean().describe('False when it is turned off: it keeps its addresses and doesn’t run.'),
   lastMatchedAt: z.string().nullable().describe(`When it last took an action on received mail, among the workspace’s last ${LAST_MATCHED_WINDOW.toLocaleString('en-US')} received emails; null if it didn’t.`) });
 export function registerInboundOverview(app: App, deps: Deps) {
+  // On its own, as when the removed /v1/rituals operations used it, so the deprecated rituals list keeps its schema.
+  app.openAPIRegistry.register('RitualRecipeRef', RecipeRef);
   const RouteEntry = z.object({
     id: z.string().describe('Address ID, route ID, <addressId>:<pattern> for an address pattern, or default:<domainId> (default:<hostId> for a domain’s other receiving hosts) for a host’s default.'),
     kind: z.enum(KINDS),

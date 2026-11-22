@@ -19,8 +19,6 @@ pub enum Check {
     Manage,
     /// createAgentToken: an MCP approval may delegate a token within its own permissions.
     Delegate,
-    /// dashboardOwner(): a signed-in dashboard session only.
-    Dashboard,
     /// ritualAdmin(c): read with receiving consent, else manage; never a member.
     RitualRead,
     /// ritualAdmin(c, true): manage, receiving consent for a grant, never a member.
@@ -33,8 +31,6 @@ pub enum Check {
     MailboxAccess(&'static str),
     /// manageHook(): admin, and receiving consent for a grant.
     MailboxHook,
-    /// createInboundKey: admin, and ownReceiving() (receiving consent and manage) for a grant.
-    MailboxOwnReceiving,
 }
 
 /// (operationId, method, OpenAPI path, check), for the 209 operations of the hosted MCP catalog.
@@ -63,7 +59,6 @@ pub const OPS: &[(&str, &str, &str, Check)] = &[
     ("createDomain", "post", "/v1/domains", Check::Manage),
     ("createEndpoint", "post", "/v1/endpoints", Check::RitualWrite),
     ("createInboundAddress", "post", "/v1/inbound/addresses", Check::MailboxAdmin),
-    ("createInboundKey", "post", "/v1/inbound/keys", Check::MailboxOwnReceiving),
     ("createInboundSubdomain", "post", "/v1/inbound/domains/{id}/subdomains", Check::MailboxAdmin),
     ("createInboundThread", "post", "/v1/inbound/threads", Check::MailboxAccess("send")),
     ("createInboundWebhook", "post", "/v1/inbound/webhooks", Check::MailboxHook),
@@ -157,7 +152,6 @@ pub const OPS: &[(&str, &str, &str, Check)] = &[
     ("listInboundAddresses", "get", "/v1/inbound/addresses", Check::MailboxAccess("read")),
     ("listInboundDomains", "get", "/v1/inbound/domains", Check::MailboxAdmin),
     ("listInboundEvents", "get", "/v1/inbound/events", Check::MailboxAccess("read")),
-    ("listInboundKeys", "get", "/v1/inbound/keys", Check::MailboxAdmin),
     ("listInboundMessages", "get", "/v1/inbound/messages", Check::MailboxAccess("read")),
     ("listInboundSubdomains", "get", "/v1/inbound/domains/{id}/subdomains", Check::MailboxAdmin),
     ("listInboundThreads", "get", "/v1/inbound/threads", Check::MailboxAccess("read")),
@@ -169,7 +163,6 @@ pub const OPS: &[(&str, &str, &str, Check)] = &[
     ("listInboxes", "get", "/v1/inboxes", Check::MailboxAccess("read")),
     ("listListMembers", "get", "/v1/lists/{id}/members", Check::Read),
     ("listLogs", "get", "/v1/logs", Check::Read),
-    ("listMcpConnections", "get", "/v1/mcp-connections", Check::Dashboard),
     ("listRegions", "get", "/v1/regions", Check::Read),
     ("listRuleTemplates", "get", "/v1/rules/templates", Check::RitualRead),
     ("listRuleVersions", "get", "/v1/rules/history", Check::RitualRead),
@@ -205,9 +198,7 @@ pub const OPS: &[(&str, &str, &str, Check)] = &[
     ("revealWebhookSecret", "get", "/v1/webhooks/{id}/secret", Check::Manage),
     ("revokeAgentToken", "post", "/v1/agent-tokens/{id}/revoke", Check::Manage),
     ("revokeApiKey", "post", "/v1/api-keys/{id}/revoke", Check::Manage),
-    ("revokeInboundKey", "post", "/v1/inbound/keys/{id}/revoke", Check::MailboxAdmin),
     ("revokeInboxAppPassword", "delete", "/v1/inboxes/{id}/app-passwords/{passwordId}", Check::MailboxAdmin),
-    ("revokeMcpConnection", "post", "/v1/mcp-connections/{id}/revoke", Check::Dashboard),
     ("rotateInboundWebhookSecret", "post", "/v1/inbound/webhooks/{id}/rotate-secret", Check::MailboxHook),
     ("rotateWebhookSecret", "post", "/v1/webhooks/{id}/rotate-secret", Check::Manage),
     ("saveRule", "put", "/v1/rules/scripts/{key}", Check::RitualWrite),
@@ -262,7 +253,7 @@ pub fn mailbox_path(path: &str) -> bool {
 /// requireReceivingConsent (app.ts and mailbox.ts): a grant without receiving consent is refused.
 pub fn receiving_path(path: &str) -> bool {
     let under = |base: &str| path == base || path.starts_with(&format!("{base}/"));
-    ["/v1/routing", "/v1/rules", "/v1/rituals", "/v1/endpoints", "/v1/inbound/retired", "/v1/inbound/domains", "/v1/inbound/addresses", "/v1/inbound/keys", "/v1/inbound/webhooks", "/v1/inbound/overview"]
+    ["/v1/routing", "/v1/rules", "/v1/endpoints", "/v1/inbound/retired", "/v1/inbound/domains", "/v1/inbound/addresses", "/v1/inbound/webhooks", "/v1/inbound/overview"]
         .into_iter()
         .any(under)
         || app_password_path(path)
@@ -309,11 +300,10 @@ pub fn grant_allows(g: &Grant, method: &str, path: &str, check: Check) -> bool {
         Check::Read | Check::Delegate => has("read"),
         Check::Send => has("send"),
         Check::Manage => g.manage,
-        Check::Dashboard => false,
         Check::RitualRead | Check::RoutingRead => (if g.receiving { has("read") } else { g.manage }) && !g.member,
         Check::RitualWrite => g.manage && !g.member && g.receiving,
         Check::MailboxAdmin | Check::MailboxAccess(_) => true,
-        Check::MailboxHook | Check::MailboxOwnReceiving => g.receiving,
+        Check::MailboxHook => g.receiving,
     }
 }
 

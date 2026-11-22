@@ -29,9 +29,8 @@ export const limitedKeyView = (row: Row, createdInboxIds: string[] = []) => ({
 /**
  * Creates a limited key; the secret is returned once. The caller has already checked that it may administer keys
  * (an unrestricted manage credential, never an agent token). A key an MCP approval creates is tied to it (ownReceiving)
- * and needs its receiving consent. `field` names the request field for errors: the API's access object, or the
- * deprecated createInboundKey's top-level fields. `expiresAt`: a time to come, or none; an inbox key ends no later
- * than its inbox.
+ * and needs its receiving consent. `field` names the request field for errors in the API's access object.
+ * `expiresAt`: a time to come, or none; an inbox key ends no later than its inbox.
  */
 export async function createLimitedKey(c: Ctx, workspaceId: string, name: string, access: LimitedAccess, field: { addresses: string; inbox: string; mail: string }, asked?: string | null) {
   const mail = [...new Set(access.mail)];

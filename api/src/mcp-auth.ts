@@ -1,16 +1,12 @@
 import {createRoute,z} from '@hono/zod-openapi';
 import {sql} from 'drizzle-orm';
-import {ApiError,denied,errors,requiredOf,IdParams,page,PageQuery,response,security,type App,type Ctx} from './core.js';
+import {ApiError,denied,errors,requiredOf,IdParams,response,security,type App,type Ctx} from './core.js';
 import {protectedResourceMetadata} from './oidc-resource.js';
 import { productName } from './brand.js';
 export {authorizeResource as withMcpAuthorization,externalMcpGrant as getMcpGrantActor,approvalUse} from './oidc-resource.js';
 import {auditContext,auditInsert} from './audit.js';
 import {AgentTokenRecord} from './auth.js';
 
-const Connection=z.object({id:z.string(),clientId:z.string(),name:z.string().nullable(),userEmail:z.string(),scopes:z.array(z.string()),createdAt:z.string(),updatedAt:z.string(),status:z.enum(['active','revoked','expired']),
-  workspaceId:z.string().nullable().openapi({description:'The default workspace: where the connection\'s tool calls act when they name none. Null: the person\'s only workspace, else their last-used one. Each call can name another workspace of theirs.'}),
-  receiving:z.boolean().openapi({description:'Deprecated, always false. Receiving tools follow the role: an owner or admin of the workspace a call names, with the manage scope (nightmail:manage, or bane:manage).'}),
-  profile:z.string().nullable().openapi({description:'The label of the client entry that connected (`?profile=` on its MCP URL), to tell two entries of one client apart. Display only; it never affects access.'})}).openapi('McpConnection');
 const Binding=z.object({workspaceId:z.string().min(1).max(200).openapi({description:'One of your workspaces. Until one is set, calls use your only workspace, else the one you used last.'}),
   receiving:z.boolean().optional().openapi({description:'Deprecated and ignored: receiving follows the role.'})}).strict().openapi('McpConnectionBinding');
 // How a client's self-chosen name is shown in the connections list (ported from #90):
@@ -62,19 +58,6 @@ export function registerMcpAuth(app:App) {
     c.header('Access-Control-Allow-Origin','*');
     return c.req.method==='OPTIONS'?c.body(null,204):c.json(protectedResourceMetadata(c.env,c.req.url));
   });
-  type Row={id:string;client_id:string;name:string|null;email:string;scopes:string[];created_at:string;updated_at:string;status:'active'|'revoked'|'expired';workspace_id:string|null;receiving:boolean;profile:string|null};
-  const approvals=(user:string,where:ReturnType<typeof sql>,scope:string)=>sql`
-      WITH approvals AS (SELECT g.id,g.user_id,g.client_id,g.client_id AS name,ARRAY(SELECT ${scope}||p FROM unnest(g.permissions)p) scopes,g.created_at,g.updated_at,
-        CASE WHEN g.revoked THEN 'revoked' ELSE 'active' END status,g.workspace_id,false AS receiving,g.profile
-        FROM nightmail_resource_grants g WHERE g.user_id=${user}
-        UNION ALL SELECT id,user_id,client_id,name,scopes,created_at,updated_at,'expired',NULL,false,NULL FROM nightmail_expired_approvals WHERE user_id=${user})
-      SELECT a.*,u.email FROM approvals a JOIN nightmail_users u ON u.id=a.user_id ${where}`;
-  const view=(r:Row)=>({id:r.id,clientId:r.client_id,name:clientLabel(r.name)||null,userEmail:r.email,scopes:r.scopes,createdAt:new Date(r.created_at).toISOString(),updatedAt:new Date(r.updated_at).toISOString(),status:r.status,workspaceId:r.workspace_id,receiving:r.receiving,profile:r.profile});
-  app.openapi(createRoute({method:'get',path:'/v1/mcp-connections',operationId:'listMcpConnections',tags:['Auth'],security,deprecated:true,description:'Deprecated: listAgents lists your connected agents with their last use and the agent tokens they made.',request:{query:PageQuery},responses:{200:response(page(Connection)),...errors}}),async c=>{
-    const user=owner(c),{limit,cursor}=c.req.valid('query');
-    const {rows}=await c.env.db.execute<Row>(sql`${approvals(user,cursor?sql`WHERE a.id>${cursor}`:sql``,`${c.env.config.oauthScopePrefix ?? 'bane'}:`)} ORDER BY a.id LIMIT ${limit+1}`);
-    return c.json({data:rows.slice(0,limit).map(view),nextCursor:rows.length>limit?rows[limit-1]!.id:null},200);
-  });
   // Sets the connection's default workspace: where its tool calls act when they name none (an agent can also call
   // setDefaultWorkspace). It grants nothing: every call is checked against the person's membership and role in the
   // workspace it acts in, and what the approval created stays in its own workspace.
@@ -91,11 +74,6 @@ export function registerMcpAuth(app:App) {
     if(result.revoked) throw new ApiError(409,'MCP_CONNECTION_REVOKED',`This MCP connection is revoked in ${productName}.`);
     if(!result.role) throw new ApiError(403,'PERMISSION_DENIED','You are not a member of that workspace.');
     return c.json({id,workspaceId,receiving:false},200);
-  });
-  app.openapi(createRoute({method:'post',path:'/v1/mcp-connections/{id}/revoke',operationId:'revokeMcpConnection',tags:['Auth'],security,deprecated:true,description:'Deprecated: revokeAgent.',request:{params:IdParams},responses:{200:response(z.object({id:z.string(),revoked:z.literal(true)})),...errors}}),async c=>{
-    const {id}=c.req.valid('param');
-    if(!await revokeApproval(c,owner(c),id)) throw new ApiError(404,'NOT_FOUND','MCP connection was not found.');
-    return c.json({id,revoked:true as const},200);
   });
 
   // ---------- agents: a sign-in and the agent tokens it made, one list ----------

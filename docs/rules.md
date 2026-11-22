@@ -440,20 +440,9 @@ await attachRules({ client, body: { attachments: [{ rule: 'triage', target: 'mbx
 
 ### Earlier names
 
-Rules were called rituals, and AI decisions omens, until November 2026. Each rule operation also answers at its earlier name and path under `/v1/rituals`, deprecated: the same handler, request and response shapes and error codes as before the rename, so clients written then keep working. Over MCP, each earlier tool name, and the plain `rituals` tool with its earlier actions (`omens` among them), still answers through its alias, but no tool list shows them.
+Rules were called rituals, and AI decisions omens, until November 2026. The deprecated `/v1/rituals` aliases and their MCP tools under the earlier names are gone; use the rule operations above.
 
-| Rule operation | Deprecated alias |
-|---|---|
-| `getRules`, `applyRules`, `attachRules`, `testRules` (`/v1/rules`) | `getRituals`, `applyRituals`, `attachRituals`, `testRituals` (`/v1/rituals`) |
-| `getRule`, `saveRule`, `deleteRule`, `updateRule` | `getRitual`, `saveRitual`, `deleteRitual`, `updateRitual` |
-| `checkRule`, `getRuleTypings`, `listRuleTemplates` | `checkRitual`, `getRitualTypings`, `listRitualTemplates` |
-| `listRuleRecipes`, `createRuleFromRecipe`, `updateRuleFromRecipe` | `listRitualRecipes`, `createRitualFromRecipe`, `updateRitualFromRecipe` |
-| `listRuleVersions`, `restoreRuleVersion`, `getRuleVersion` | `listRitualVersions`, `restoreRitualVersion`, `getRitualVersion` |
-| `setDecisionOptIns` (`PUT /v1/rules/decisions`) | `setOmenOptIns` (`PUT /v1/rituals/omens`) |
-
-- **Writes** take either spelling of the config through either name: `rules` or `rituals`, and in each attachment `rule` or `ritual`, never both at once.
-- **Reads** answer in the operation's own spelling: the rule operations say `rules`, `rule`, `decisions` (`checkRule`, recipes, trace timelines), `decisionPricePerThousand`, a trace row's `kind` `rule` and an endpoint call's `actionId`; the aliases keep `rituals`, `ritual`, `omens`, `omenPricePerThousand`, `ritual` and `ritualAction`. One spelling per response means a config read, changed and written back through the same name always round-trips.
-- **Typings and templates:** `getRitualTypings` and `listRitualTemplates` answer the declarations and sources from before the rename (`omens`, `Omen`, `RitualContext`). The rule typings also declare `omens` and `Omen`, deprecated, so a source that still calls `omens(…)` type-checks.
-- **Error codes:** the rule operations return `RULE_INVALID`, `RULE_BINDING_NOT_OWNED` and `RULE_EXISTS`, with `error.field` `rules` and `error.details[].rule`; the aliases keep `RITUAL_INVALID`, `RITUAL_BINDING_NOT_OWNED`, `RITUAL_EXISTS`, `rituals` and `ritual`.
+- **Writes** still take the earlier spelling of the config: `rituals` for `rules`, and in each attachment `ritual` for `rule`, never both at once. Reads answer `rules`, `rule` and `decisions`.
+- **Typings:** the rule typings also declare `omens` and `Omen`, deprecated, so a source that still calls `omens(…)` type-checks.
 - **Other responses:** `getInboundOverview` and `listInboundEndpoints` return `rules` (with `decisions`) and keep `rituals` (with `omens`) as deprecated copies; billing returns `prices.decisionPerThousand` and keeps `omenPerThousand` (both deprecated and `"0.00"`: AI decisions are free). The usage meter for AI decisions keeps its value, `omen` (`getBillingUsage` also takes `meter=decision`).
 - **Kept names:** the `ritual-error` label on mail a failed rule junked, `verdicts.ritualsActed` and `ritualScores` on stored messages, and Activity's `ritual.*` actions keep their names: they are stored data. The MCP `toolsets=rituals` filter selects the `rules` toolset.

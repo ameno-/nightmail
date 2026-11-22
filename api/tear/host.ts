@@ -413,12 +413,12 @@ async function act(action: string): Promise<Obs> {
         return { status: o.status, code: o.code };
       }
       case 'ikey': {
-        const r = await send(null, 'POST', '/v1/inbound/keys', { bearer: bearer('key') }, { name: 'tear provisioning', permissions: ['read', 'create'], addressIds: [] });
+        const r = await send(null, 'POST', '/v1/api-keys', { bearer: bearer('key') }, { name: 'tear provisioning', access: { type: 'addresses', addressIds: [], mail: ['read', 'create'] } });
         if (r.status === 201) f.creds.set('ikey', { id: r.body.id, secret: r.body.secret });
         return { status: r.status, code: r.body?.error?.code ?? null };
       }
       case 'gikey': {
-        const o = await callTool('grant', 'createInboundKey', { confirm: true, body: { name: 'tear gikey', permissions: ['read', 'create'], addressIds: [] } });
+        const o = await callTool('grant', 'createApiKey', { confirm: true, body: { name: 'tear gikey', access: { type: 'addresses', addressIds: [], mail: ['read', 'create'] } } });
         if (o.status === 201) f.creds.set('gikey', { id: o.body.id, secret: o.body.secret });
         return { status: o.status, code: o.code };
       }
@@ -429,10 +429,9 @@ async function act(action: string): Promise<Obs> {
       }
     } break;
     case 'revoke': switch (a1) {
-      case 'key': case 'dkey': case 'legacy': case 'gkey': return revokeKey(a1);
+      case 'key': case 'dkey': case 'legacy': case 'gkey': case 'ikey': case 'gikey': return revokeKey(a1);
       case 'token': case 'token3': return { status: (await send(null, 'POST', `/v1/agent-tokens/${f.creds.get(a1)!.id}/revoke`, owner())).status };
-      case 'grant': case 'grant2': case 'grant3': case 'g-s': case 'g-m': case 'g-rm': case 'g-sm': case 'm-r': case 'm-s': return { status: (await send(null, 'POST', `/v1/mcp-connections/${f.grants.get(a1)!.keyId}/revoke`, owner())).status };
-      case 'ikey': case 'gikey': return { status: (await send(null, 'POST', `/v1/inbound/keys/${f.creds.get(a1)!.id}/revoke`, owner())).status };
+      case 'grant': case 'grant2': case 'grant3': case 'g-s': case 'g-m': case 'g-rm': case 'g-sm': case 'm-r': case 'm-s': return { status: (await send(null, 'POST', `/v1/agents/${f.grants.get(a1)!.keyId}/revoke`, owner())).status };
     } break;
     case 'delete': return { status: (await send(null, 'DELETE', `/v1/inboxes/${f.box}`, owner())).status };
     case 'receiving': await admin.query('UPDATE nightmail_resource_grants SET receiving=true WHERE grant_key=$1', [f.grants.get(a1 ?? 'grant')!.consentId]); return {};

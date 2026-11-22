@@ -283,13 +283,13 @@ const PERMISSION_ROUTES: [PermissionName, RegExp][] = [
   ['receivedMail', /^\w+ \/v1\/(?:inbound\/(?:messages|threads|events)|inboxes\/[^/]+\/(?:messages|folders|changes|simulate))(?:\/|$)/],
   ['inboxes', /^\w+ \/v1\/(?:inboxes|inbound\/(?:addresses|retired))(?:\/|$)/],
   ['audience', /^\w+ \/v1\/(?:contacts|lists|newsletters|segments|contact-imports|audience-query|templates|template-assets|campaign-content-guide|campaigns)(?:\/|$)/],
-  ['receivingRules', /^\w+ \/v1\/(?:routing|rules|rituals|endpoints|inbox-connections|inbound\/(?:endpoints|policy|domains|overview))(?:\/|$)|^\w+ \/v1\/domains\/[^/]+\/receiving-host$/],
+  ['receivingRules', /^\w+ \/v1\/(?:routing|rules|endpoints|inbox-connections|inbound\/(?:endpoints|policy|domains|overview))(?:\/|$)|^\w+ \/v1\/domains\/[^/]+\/receiving-host$/],
 ];
 /**
  * The permission a request needs at the level a check asks for: a credential's read, send or manage (editContent is
  * manage), an address key's read, send, modify or create, or, without one, read for GET and write otherwise.
  * Everything not listed above is Configuration. The workspace, its members, invitations and billing are an owner's or
- * admin's (person), listing and creating workspaces and accepting an invitation any person's, and staff areas take none.
+ * admin's (person), creating a workspace and accepting an invitation any person's, and staff areas take none.
  */
 export function requiredFor(method: string, path: string, need?: Permission | 'editContent' | import('./db/mailbox.js').MailboxPermission): Required {
   if (need === 'create') return { permission: 'inboxes', level: 'write' };
@@ -468,7 +468,7 @@ export const mailboxRoute = (path: string) => /^\/v1\/(?:inbound|inboxes)(?:\/|$
 const appPasswordRoute = (path: string) => /^\/v1\/(?:inboxes\/[^/]+\/)?app-passwords(?:\/|$)/.test(path);
 /** requireReceivingConsent: an MCP grant without explicit receiving consent is refused. */
 export const receivingConsentRoute = (path: string) =>
-  appPasswordRoute(path) || /^\/v1\/(?:routing|rules|rituals|endpoints|inbound\/(?:retired|domains|addresses|keys|webhooks|overview|endpoints))(?:\/|$)|^\/v1\/(?:inbox-connections|inbound\/policy|domains\/[^/]+\/receiving-host|inbound\/messages\/[^/]+\/redeliver)$/.test(path);
+  appPasswordRoute(path) || /^\/v1\/(?:routing|rules|endpoints|inbound\/(?:retired|domains|addresses|webhooks|overview|endpoints))(?:\/|$)|^\/v1\/(?:inbox-connections|inbound\/policy|domains\/[^/]+\/receiving-host|inbound\/messages\/[^/]+\/redeliver)$/.test(path);
 /** notMember: workspace members are refused these areas whatever their scopes. */
 export const ownerRoute = (method: string, path: string) => {
   const verb = method.toUpperCase();
@@ -480,11 +480,11 @@ export const ownerRoute = (method: string, path: string) => {
 export const unrestrictedRoute = (path: string) => /^\/v1\/(?:contacts|lists|newsletters|segments|contact-imports|audience-query|settings|webhooks|metrics|sender-score|usage|billing|regions|app-passwords)(?:\/|$)/.test(path)
   || !['state', 'preview', 'preview-image', 'archive', undefined].includes(/^\/v1\/campaigns\/[^/]+\/([^/]+)$/.exec(path)?.[1]);
 // The routes of the guards above that handlers call, for the MCP listing (each verified against REST's answers for reads).
-/** receivingAdmin's routes: routing, rules (and their deprecated /v1/rituals aliases), endpoints, inbox connections and an
- *  address's flow (its route and rule together). */
-export const receivingAdminRoute = (path: string) => /^\/v1\/(?:routing|rules|rituals|endpoints|inbox-connections)(?:\/|$)|^\/v1\/inbound\/addresses\/[^/]+\/flow$/.test(path);
-/** keyAdminRefusal's routes: API keys, listing and revoking agent tokens, and the deprecated inbound key aliases. */
-export const keyAdminRoute = (method: string, path: string) => /^\/v1\/(?:api-keys|agent-tokens|inbound\/keys)(?:\/|$)/.test(path) && !agentTokenMintRoute(method, path);
+/** receivingAdmin's routes: routing, rules, endpoints, inbox connections and an address's flow (its route and rule
+ *  together). */
+export const receivingAdminRoute = (path: string) => /^\/v1\/(?:routing|rules|endpoints|inbox-connections)(?:\/|$)|^\/v1\/inbound\/addresses\/[^/]+\/flow$/.test(path);
+/** keyAdminRefusal's routes: API keys, and listing and revoking agent tokens. */
+export const keyAdminRoute = (method: string, path: string) => /^\/v1\/(?:api-keys|agent-tokens)(?:\/|$)/.test(path) && !agentTokenMintRoute(method, path);
 /** agentTokenMintRefusal's route: createAgentToken. */
 export const agentTokenMintRoute = (method: string, path: string) => method.toUpperCase() === 'POST' && path === '/v1/agent-tokens';
 /** lasting's other routes: setting up sending and receiving webhooks and reading their secrets, mail client passwords, and

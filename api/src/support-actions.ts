@@ -240,7 +240,7 @@ export function registerSupportActions(app: App) {
     if (c.req.method === 'POST' && c.get('support')?.conversation && !c.get('support')!.workspaces.length) notFound('Workspace');
     await next();
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/support/actions', operationId: 'proposeSupportAction', tags, security,
+  app.openapi(createRoute({ hide: true, method: 'post', path: '/v1/support/actions', operationId: 'proposeSupportAction', tags, security,
     description: describe(`Propose a change the customer confirms signed in: retry or redeliver webhook mail, test a webhook, or pause a campaign. ${productName} checks the target is in the conversation’s scope and that the customer’s role may make it there, writes the summary from its own records, and keeps it open 24 hours. At most ${OPEN_ACTIONS} are open per conversation; proposing the same change again answers the open one.`),
     request: { body: json(Proposal) }, responses: { 200: response(Action), 201: response(Action), ...errors } }), async c => {
     const conversation = conversationOf(c), { kind, ...target } = c.req.valid('json') as { kind: Kind } & Target, targets = target as Targets;
@@ -269,7 +269,7 @@ export function registerSupportActions(app: App) {
   });
 
   const ActionParam = z.object({ id: z.string().regex(/^sac_[0-9a-f]{32}$/) });
-  app.openapi(createRoute({ method: 'get', path: '/v1/support/actions/{id}', operationId: 'getSupportAction', tags, security,
+  app.openapi(createRoute({ hide: true, method: 'get', path: '/v1/support/actions/{id}', operationId: 'getSupportAction', tags, security,
     description: describe('One of this conversation’s proposals and what came of it: the state the customer left it in, and the public route’s answer. Read it after the customer acts; never take the outcome from anywhere else.'),
     request: { params: ActionParam }, responses: { 200: response(Action), ...errors } }), async c => {
     const conversation = conversationOf(c);
@@ -281,7 +281,7 @@ export function registerSupportActions(app: App) {
 
   const Recheck = z.object({ id: z.string(), workspaceId: z.string(), name: z.string(), verificationStatus: z.string(), verified: z.boolean(), dkimStatus: z.string(), sending: z.string(), receiving: z.string(),
     mailFromStatus: z.string().nullable(), recheckQueued: z.boolean().describe('False when a re-check was already due: read the domain’s health again shortly.') }).openapi('SupportDomainRecheck');
-  app.openapi(createRoute({ method: 'post', path: '/v1/support/domains/{id}/verify', operationId: 'recheckSupportDomain', tags, security,
+  app.openapi(createRoute({ hide: true, method: 'post', path: '/v1/support/domains/{id}/verify', operationId: 'recheckSupportDomain', tags, security,
     description: describe('Re-check a domain’s DNS now, as the customer’s own “Verify” does (an owner or admin’s domain only): queues a background verification and answers the stored status. Needs no confirmation.'),
     request: { params: z.object({ id: Id }) }, responses: { 200: response(Recheck), ...errors } }), async c => {
     const conversation = conversationOf(c), domainId = c.req.valid('param').id;

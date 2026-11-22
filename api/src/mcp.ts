@@ -4,8 +4,8 @@ import { bearerActor, dispatchAsActor, dispatchAsMailboxAccess, workspaceBearer 
 import { agentTokenMintRefusal, denied, digest, keyAdminRefusal, requiredFor, type Required, lastingRefusal, memberAdminManage, memberAdminRefusal, ModuleLoadError, receivingAdminRefusal, requestOrigin, withOuterRequest, workspaceMailAccess, type Actor, type MailboxAccess, type App, type RequestOrigin, type Runtime } from './core.js';
 import { getMcpGrantActor, withMcpAuthorization } from './mcp-auth.js';
 import { chooseWorkspace, setDefaultWorkspace, WorkspaceChoice, type McpConnection } from './oidc-resource.js';
-import { buildMcpCatalog, mcpAliases, TOOLSETS, EMAIL_SEND_CONFIRMATION, EMAIL_SEND_ROUTING, type McpOperation } from './mcp-catalog.js';
-import { describeAction, describeTool, earlierResourceActions, listedTool, resourceActions, resourceTools } from './mcp-resources.js';
+import { buildMcpCatalog, TOOLSETS, EMAIL_SEND_CONFIRMATION, EMAIL_SEND_ROUTING, type McpOperation } from './mcp-catalog.js';
+import { describeAction, describeTool, listedTool, resourceActions, resourceTools } from './mcp-resources.js';
 import { mcpServerName, productName } from './brand.js';
 
 type ObjectValue = Record<string, any>;
@@ -168,9 +168,6 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Pr
   // Members, invitations and Activity are Hosted workspace administration; a self-hosted installation answers them 404.
   const allowed = ([, op]: [string, McpOperation]) => inbox ? !!op.inbox && inbox.permissions.includes(op.inbox) : (!op.memberAdmin || runtime.config.multiTenant) && authorized(op, connection ? connection.listing : key!.key);
   const operations = new Map([...catalog].filter(allowed));
-  // The rule tools under their names before the rename: authorized as the listed tools are, never listed (so the listing
-  // and its version stay the same), and called like any other tool through their deprecated HTTP operations.
-  const aliases = new Map([...mcpAliases(catalog)].filter(allowed));
   const params = new URL(request.url).searchParams;
   // rituals is the rules toolset's name from before the rename, kept for URLs configured with it.
   const requested = (params.get('toolsets') ?? '').split(',').map(x => x.trim()).map(x => x === 'rituals' ? 'rules' : x);
@@ -295,10 +292,10 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Pr
     return { ...value, response: { email, deleted: true } };
   }
   function resolveAction(resource: string, action: unknown) {
-    const earlier = earlierResourceActions(resource), actions = earlier ?? resourceActions(resource), from = earlier ? aliases : operations;
-    if (!actions || !Object.values(actions).some(id => from.has(id))) fail('TOOL_UNAVAILABLE', 'Tool or action is unavailable for this connection.');
+    const actions = resourceActions(resource);
+    if (!actions || !Object.values(actions).some(id => operations.has(id))) fail('TOOL_UNAVAILABLE', 'Tool or action is unavailable for this connection.');
     if (typeof action !== 'string') fail('INVALID_ARGUMENTS', 'Supply an action for this resource.');
-    return Object.hasOwn(actions, action) ? from.get(actions[action]) : undefined;
+    return Object.hasOwn(actions, action) ? operations.get(actions[action]) : undefined;
   }
 
   async function call(name: string, args: ObjectValue): Promise<CallToolResult> {
@@ -327,7 +324,7 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Pr
         }
         return result(workspaceList(), false, undefined, 200);
       }
-      const op = codeMode ? operations.get(name) ?? aliases.get(name) : resolveAction(name, args.action);
+      const op = codeMode ? operations.get(name) : resolveAction(name, args.action);
       if (!op) fail('TOOL_UNAVAILABLE', 'Tool or action is unavailable for this connection.');
       const id = op.tool.name;
       if (!codeMode) { const { action, ...rest } = args; args = rest; }

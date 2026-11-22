@@ -16,12 +16,10 @@ import {
   ritualPipeline,
   RitualConfig,
   RitualConfigError,
-  Ritual,
   Rule,
   RuleBindingInput,
   RuleConfig,
   RuleConfigInput,
-  RecipeRef,
   RuleRecipeRef,
   projectEmail,
   type Config,
@@ -33,53 +31,32 @@ import { perThousandUsd, RATES } from './billing/rates.js';
 import type { RoutingInput } from './routing-match.js';
 import { registerEndpoints } from './endpoints.js';
 import { registerRitualVersion } from './ritual-version.js';
-import { LEGACY_RULE_OPERATIONS, LEGACY_RULES_PATH, RULES_PATH, type RuleOperation } from './rule-names.js';
 
-/** rules: the operations and shapes since the rename. rituals: the deprecated aliases, which answer exactly as before. */
-export type Family = 'rules' | 'rituals';
-const path = RULES_PATH,
+// The stored config keeps the names from before rituals were renamed rules (ritual-pipeline.ts); every operation here
+// answers under the current names.
+const path = '/v1/rules',
   meta = { security, tags: ['Rules'] },
   state = z.object({ version: z.number().int(), config: RuleConfig }),
-  legacyState = z.object({ version: z.number().int(), config: RitualConfig }),
-  ok = { 200: response(state), ...errors },
-  legacyOk = { 200: response(legacyState), ...errors };
-/** A saved version as each family returns it. */
-const stateOf = (family: Family, s: { version: number; config: Config }) => family === 'rules' ? { version: s.version, config: asRules(s.config) } : s;
-/** Error codes from before the rename, which the aliases keep returning. */
-const LEGACY_CODES: Record<string, string> = { RULE_INVALID: 'RITUAL_INVALID', RULE_BINDING_NOT_OWNED: 'RITUAL_BINDING_NOT_OWNED', RULE_EXISTS: 'RITUAL_EXISTS' };
-function legacyError(e: unknown) {
-  if (!(e instanceof ApiError)) return e;
-  e.code = LEGACY_CODES[e.code] ?? e.code;
-  if (e.field === 'rules') e.field = 'rituals';
-  if (e.details) e.details = e.details.map(({ rule, ...d }) => rule === undefined ? d : { ritual: rule, ...d });
-  return e;
-}
-/**
- * Registers a rule operation and its deprecated alias at the earlier name and path: the same handler, told which family
- * answers so the alias keeps its earlier shapes (`legacy` overrides its request or responses where they differ).
- */
-function both(app: App, route: RouteConfig & { operationId: RuleOperation }, handler: (c: Ctx, family: Family) => Promise<Response> | Response, legacy: Partial<Pick<RouteConfig, 'request' | 'responses'>> = {}, legacyPath = route.path.replace(RULES_PATH, LEGACY_RULES_PATH)) {
-  app.openapi(createRoute(route), ((c: Ctx) => handler(c, 'rules')) as never);
-  const id = route.operationId;
-  app.openapi(createRoute({ ...route, ...legacy, operationId: LEGACY_RULE_OPERATIONS[id], path: legacyPath, deprecated: true,
-    summary: `${route.summary} (deprecated: use ${id})`, description: `Deprecated: use ${id}, the same operation under its current name.` }),
-  (async (c: Ctx) => { try { return await handler(c, 'rituals'); } catch (e) { throw legacyError(e); } }) as never);
+  ok = { 200: response(state), ...errors };
+/** A saved version under the public names. */
+const stateOf = (s: { version: number; config: Config }) => ({ version: s.version, config: asRules(s.config) });
+/** Registers one rule operation. */
+function rule(app: App, route: RouteConfig, handler: (c: Ctx) => Promise<Response> | Response) {
+  app.openapi(createRoute(route), handler as never);
 }
 const Line = z.number().int().min(1);
-const timeline = (scores: 'decisions' | 'omens') => z.discriminatedUnion('kind', [
+const timeline = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('condition'), line: Line, column: Line, endLine: Line, endColumn: Line, result: z.boolean().describe('What the condition evaluated to.') }),
-  z.object({ kind: z.literal(scores), line: Line, scores: z.record(z.string(), z.union([z.number(), z.boolean()])).describe('Decision name → the answer the rule read: the scores passed in, recorded answers or each decision’s onError value.') }),
+  z.object({ kind: z.literal('decisions'), line: Line, scores: z.record(z.string(), z.union([z.number(), z.boolean()])).describe('Decision name → the answer the rule read: the scores passed in, recorded answers or each decision’s onError value.') }),
   z.object({ kind: z.literal('action'), line: Line, op: z.string().describe('label, junk, block, drop, allow, inbox.deliver or endpoint.'), ref: z.string().optional().describe('endpoint:<name> or inbox:<key>.'), value: z.string().optional() }),
   z.object({ kind: z.literal('return'), line: Line }),
 ]);
-const traceRow = (step: ReturnType<typeof timeline>) => z.object({
+const TraceRow = z.object({
   recipient: z.string(), kind: z.string().describe('rule.'), key: z.string().describe('Rule key.'),
   scores: z.record(z.string(), z.union([z.number(), z.boolean()])), steps: z.number().int(), lines: z.array(z.number().int()).describe('Statement lines run, in order (at most 128).'),
   error: z.string().nullable(), actions: z.array(z.object({ op: z.string(), ref: z.string().optional(), body: z.unknown().optional(), value: z.string().optional() })),
-  timeline: z.array(step).describe('The evaluation in order: each condition and its result, decision answers read, actions taken and the return (at most 128 steps). For stepping through a dry run.'),
-});
-const TraceRow = traceRow(timeline('decisions').openapi('RuleTimelineStep')).openapi('RuleTraceRow'),
-  LegacyTraceRow = traceRow(timeline('omens').openapi('RitualTimelineStep')).openapi('RitualTraceRow');
+  timeline: z.array(timeline.openapi('RuleTimelineStep')).describe('The evaluation in order: each condition and its result, decision answers read, actions taken and the return (at most 128 steps). For stepping through a dry run.'),
+}).openapi('RuleTraceRow');
 /** A receiving write by an approval, or by a key it created, holds the approval (shared lock) for the rest of the
  * transaction. It is read again here, not only when the request was authenticated: a removal under way finishes first
  * and the write is refused, and one that starts later waits for the transaction and then disables what it recorded.
@@ -260,30 +237,30 @@ async function edit(c: Ctx, change: (config: Config, tx: DbExecutor) => Config |
   });
 }
 export function registerRituals(app: App) {
-  both(app, {...meta,method:'get',path:path+'/history',operationId:'listRuleVersions',summary:'List saved rule versions, newest first',request:{query:z.object({cursor:z.coerce.number().int().positive().optional(),limit:z.coerce.number().int().min(1).max(100).default(25)})},responses:{200:response(z.object({data:z.array(z.object({version:z.number(),actor:z.string()})),nextCursor:z.number().nullable()})),...errors}},async c=>{const w=receivingAdmin(c).workspaceId,q=c.req.valid('query' as never) as {cursor?:number;limit:number},rows=(await c.env.db.execute<{version:number;actor:string}>(sql`SELECT version,actor FROM mail_ritual_versions WHERE workspace_id=${w} AND version<${Math.min(q.cursor??2147483647,2147483647)} ORDER BY version DESC LIMIT ${q.limit+1}`)).rows;return c.json({data:rows.slice(0,q.limit),nextCursor:rows.length>q.limit?rows[q.limit-1].version:null},200)});
-  both(app, {...meta,method:'post',path:path+'/restore',operationId:'restoreRuleVersion',summary:'Recompile a retained version and restore it as a new version',request:{headers:versionHeader,body:json(z.object({version:z.number().int().positive()}))},responses:ok},async (c,family)=>{const w=receivingAdmin(c, 'change rules').workspaceId,v=(c.req.valid('json' as never) as {version:number}).version,row=v>2147483647?undefined:(await c.env.db.execute<{config:Config}>(sql`SELECT config FROM mail_ritual_versions WHERE workspace_id=${w} AND version=${v}`)).rows[0];if(!row)throw new ApiError(404,'NOT_FOUND','Version no longer retained.');return c.json(stateOf(family,await edit(c,()=>row.config,{action:'ritual.restore',after:x=>({restoredVersion:v,...counts(x)})})),200)},{responses:legacyOk});
+  rule(app, {...meta,method:'get',path:path+'/history',operationId:'listRuleVersions',summary:'List saved rule versions, newest first',request:{query:z.object({cursor:z.coerce.number().int().positive().optional(),limit:z.coerce.number().int().min(1).max(100).default(25)})},responses:{200:response(z.object({data:z.array(z.object({version:z.number(),actor:z.string()})),nextCursor:z.number().nullable()})),...errors}},async c=>{const w=receivingAdmin(c).workspaceId,q=c.req.valid('query' as never) as {cursor?:number;limit:number},rows=(await c.env.db.execute<{version:number;actor:string}>(sql`SELECT version,actor FROM mail_ritual_versions WHERE workspace_id=${w} AND version<${Math.min(q.cursor??2147483647,2147483647)} ORDER BY version DESC LIMIT ${q.limit+1}`)).rows;return c.json({data:rows.slice(0,q.limit),nextCursor:rows.length>q.limit?rows[q.limit-1].version:null},200)});
+  rule(app, {...meta,method:'post',path:path+'/restore',operationId:'restoreRuleVersion',summary:'Recompile a retained version and restore it as a new version',request:{headers:versionHeader,body:json(z.object({version:z.number().int().positive()}))},responses:ok},async c=>{const w=receivingAdmin(c, 'change rules').workspaceId,v=(c.req.valid('json' as never) as {version:number}).version,row=v>2147483647?undefined:(await c.env.db.execute<{config:Config}>(sql`SELECT config FROM mail_ritual_versions WHERE workspace_id=${w} AND version=${v}`)).rows[0];if(!row)throw new ApiError(404,'NOT_FOUND','Version no longer retained.');return c.json(stateOf(await edit(c,()=>row.config,{action:'ritual.restore',after:x=>({restoredVersion:v,...counts(x)})})),200)});
   const evalSettings=RitualConfig.pick({evaluateDomains:true,evaluateRoutes:true});
-  both(app, {...meta,method:'put',path:path+'/decisions',operationId:'setDecisionOptIns',summary:'Set the domains and routes whose mail the AI may read for decisions',request:{headers:versionHeader,body:json(evalSettings)},responses:ok},async (c,family)=>c.json(stateOf(family,await edit(c,x=>({...x,...(c.req.valid('json' as never) as z.infer<typeof evalSettings>)}),{action:'ritual.omens',after:x=>({evaluateDomains:x.evaluateDomains,evaluateRoutes:x.evaluateRoutes})})),200),{responses:legacyOk},LEGACY_RULES_PATH+'/omens');
+  rule(app, {...meta,method:'put',path:path+'/decisions',operationId:'setDecisionOptIns',summary:'Set the domains and routes whose mail the AI may read for decisions',request:{headers:versionHeader,body:json(evalSettings)},responses:ok},async c=>c.json(stateOf(await edit(c,x=>({...x,...(c.req.valid('json' as never) as z.infer<typeof evalSettings>)}),{action:'ritual.omens',after:x=>({evaluateDomains:x.evaluateDomains,evaluateRoutes:x.evaluateRoutes})})),200));
   registerEndpoints(app);
   registerInboxConnection(app);
   registerRitualVersion(app);
-  const diagnostic = (family: Family) => z.object({ [family === 'rules' ? 'rule' : 'ritual']: z.string().optional().describe('The rule the problem is in.'), line: z.number().int(), column: z.number().int(), endLine: z.number().int(), endColumn: z.number().int(), message: z.string(), hint: z.string().optional() }).openapi(family === 'rules' ? 'RuleDiagnostic' : 'RitualDiagnostic');
-  const check = (family: Family) => z.object({ ok: z.boolean(), diagnostics: z.array(diagnostic(family)), calls: z.array(z.string()).describe('Endpoints and inboxes the rule calls.'), [family === 'rules' ? 'decisions' : 'omens']: z.array(z.string()).describe('The names of the AI decisions it asks for.'), questions: z.record(z.string(), z.string()).describe('Decision name → its question. testRules takes scores keyed by question.'), lists: z.array(z.string()) }).openapi(family === 'rules' ? 'RuleCheck' : 'RitualCheck');
-  both(app, {
+  const diagnostic = z.object({ rule: z.string().optional().describe('The rule the problem is in.'), line: z.number().int(), column: z.number().int(), endLine: z.number().int(), endColumn: z.number().int(), message: z.string(), hint: z.string().optional() }).openapi('RuleDiagnostic');
+  const check = z.object({ ok: z.boolean(), diagnostics: z.array(diagnostic), calls: z.array(z.string()).describe('Endpoints and inboxes the rule calls.'), decisions: z.array(z.string()).describe('The names of the AI decisions it asks for.'), questions: z.record(z.string(), z.string()).describe('Decision name → its question. testRules takes scores keyed by question.'), lists: z.array(z.string()) }).openapi('RuleCheck');
+  rule(app, {
     ...meta, method: 'post', path: path + '/check', operationId: 'checkRule',
     summary: 'Compile one rule source against this workspace without saving',
     description: 'Returns every problem with its line, column and a hint, and what the rule calls. Use it while editing; nothing is saved, delivered or sent to the AI.',
     request: { body: json(z.object({ source: z.string().max(65536), key: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/).default('draft'), senderLists: RitualConfig.shape.senderLists.optional().describe('Lists to check against. Defaults to the saved sender lists.') }).strict()) },
-    responses: { 200: response(check('rules')), ...errors },
-  }, async (c, family) => {
+    responses: { 200: response(check), ...errors },
+  }, async c => {
     const w = receivingAdmin(c).workspaceId, q = c.req.valid('json' as never) as { source: string; key: string; senderLists?: Config['senderLists'] }, saved = await current(c.env.db, w);
     const config = RitualConfig.parse({ rituals: [{ key: q.key, source: q.source }], senderLists: q.senderLists ?? saved.config.senderLists });
     const { programs, diagnostics } = await analyze(c.env.db, w, config);
     let ir = programs?.rituals[q.key];
     if (!ir) try { ir = compileRitual(q.source); } catch { /* reported in diagnostics */ }
     const asked = Object.keys(ir?.omens ?? {});
-    return c.json({ ok: !diagnostics.length, diagnostics: family === 'rules' ? diagnostics.map(ruleDiagnostic) : diagnostics, calls: ir?.refs.map(r => r.startsWith('inbox:') ? `inbox.deliver("${r.slice(6)}")` : endpointCall(r.slice(9))) ?? [], ...(family === 'rules' ? { decisions: asked } : { omens: asked }), questions: Object.fromEntries(Object.entries(ir?.omens ?? {}).map(([name, d]) => [name, d.prompt])), lists: [...new Set(ir?.lists?.map(l => l.name) ?? [])] }, 200);
-  }, { responses: { 200: response(check('rituals')), ...errors } });
+    return c.json({ ok: !diagnostics.length, diagnostics: diagnostics.map(ruleDiagnostic), calls: ir?.refs.map(r => r.startsWith('inbox:') ? `inbox.deliver("${r.slice(6)}")` : endpointCall(r.slice(9))) ?? [], decisions: asked, questions: Object.fromEntries(Object.entries(ir?.omens ?? {}).map(([name, d]) => [name, d.prompt])), lists: [...new Set(ir?.lists?.map(l => l.name) ?? [])] }, 200);
+  });
   const workspaceSymbols = async (c: Ctx) => {
     const w = receivingAdmin(c).workspaceId;
     const [endpoints, inboxes, saved] = await Promise.all([
@@ -295,50 +272,49 @@ export function registerRituals(app: App) {
     return { endpoints: endpoints.rows, inboxes: inboxes.rows.map(r => r.key), lists: Object.keys(saved.config.senderLists) };
   };
   const typings = z.object({ typescript: z.string(), completions: z.array(z.object({ label: z.string(), type: z.enum(['function', 'property', 'variable', 'keyword']), detail: z.string(), info: z.string(), apply: z.string().optional() })), endpoints: z.array(z.object({ name: z.string(), type: z.enum(['slack', 'discord', 'webhook', 'forward']), status: z.string() })), inboxes: z.array(z.string()), lists: z.array(z.string()) });
-  both(app, {
+  rule(app, {
     ...meta, method: 'get', path: path + '/typings', operationId: 'getRuleTypings',
     summary: 'TypeScript declarations and editor completions for this workspace',
     description: 'Generated from the workspace’s endpoints, inbox keys and sender lists. Load typescript into an editor as a .d.ts, or read it to learn exactly what a rule can call.',
     responses: { 200: response(typings.openapi('RuleTypings')), ...errors },
-  }, async (c, family) => {
-    const symbols = await workspaceSymbols(c), earlierNames = family === 'rituals';
+  }, async c => {
+    const symbols = await workspaceSymbols(c);
     c.header('Cache-Control', 'no-store');
-    return c.json({ typescript: ritualTypings(symbols, earlierNames), completions: ritualCompletions(symbols, earlierNames), ...symbols }, 200);
-  }, { responses: { 200: response(typings.openapi('RitualTypings')), ...errors } });
+    return c.json({ typescript: ritualTypings(symbols), completions: ritualCompletions(symbols), ...symbols }, 200);
+  });
   const templates = z.object({ data: z.array(z.object({ id: z.string(), name: z.string(), description: z.string(), needs: z.enum(['slack', 'discord', 'webhook', 'forward']).nullable(), endpoint: z.string().nullable(), source: z.string() })) });
-  both(app, {
+  rule(app, {
     ...meta, method: 'get', path: path + '/templates', operationId: 'listRuleTemplates',
     summary: 'Starting points for common rules, filled in with this workspace’s endpoints',
     description: 'Each template compiles. An endpoint template uses the first endpoint of the type it needs; endpoint is null when there is none yet, and source then uses a placeholder name to replace.',
     responses: { 200: response(templates.openapi('RuleTemplates')), ...errors },
-  }, async (c, family) => {
+  }, async c => {
     const { endpoints } = await workspaceSymbols(c);
     return c.json({ data: ritualTemplates.map(t => {
       const endpoint = t.needs ? endpoints.find(e => e.type === t.needs && e.status === 'ready')?.name ?? null : null;
-      const shown = family === 'rituals' && t.before ? { ...t, ...t.before } : t;
-      return { id: shown.id, name: t.name, description: shown.description, needs: t.needs ?? null, endpoint, source: shown.source(endpoint ?? undefined) };
+      return { id: t.id, name: t.name, description: t.description, needs: t.needs ?? null, endpoint, source: t.source(endpoint ?? undefined) };
     }) }, 200);
-  }, { responses: { 200: response(templates.openapi('RitualTemplates')), ...errors } });
+  });
   const params=z.object({key:z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/)}),item=path+'/scripts/{key}';
   registerRecipes(app, item, params);
-  both(app, {...meta,method:'get',path:item,operationId:'getRule',summary:'Read one rule',request:{params},responses:{200:response(Rule),...errors}},async c=>{const {key}=c.req.valid('param' as never) as {key:string},s=await current(c.env.db,receivingAdmin(c).workspaceId),r=s.config.rituals.find(x=>x.key===key);if(!r)throw new ApiError(404,'NOT_FOUND','Rule not found.');return c.json(r,200)},{responses:{200:response(Ritual),...errors}});
-  both(app, {...meta,method:'put',path:item,operationId:'saveRule',summary:'Create or update one rule',request:{params,headers:versionHeader,body:json(Rule)},responses:ok},async (c,family)=>{const {key}=c.req.valid('param' as never) as {key:string},r=c.req.valid('json' as never) as z.infer<typeof Rule>;if(key!==r.key)throw new ApiError(422,'INVALID_KEY','The rule key must match the URL.');return c.json(stateOf(family,await edit(c,s=>{const prev=s.rituals.find(h=>h.key===key);return {...s,rituals:[...s.rituals.filter(h=>h.key!==key),{...r,recipe:r.recipe??prev?.recipe,enabled:r.enabled??prev?.enabled}]};},{action:'ritual.save',target:{type:'ritual',id:key},after:()=>({key})})),200)},{request:{params,headers:versionHeader,body:json(Ritual)},responses:legacyOk});
-  both(app, {...meta,method:'delete',path:item,operationId:'deleteRule',summary:'Remove a rule and detach it everywhere',request:{params,headers:versionHeader},responses:ok},async (c,family)=>{const {key}=c.req.valid('param' as never) as {key:string};return c.json(stateOf(family,await edit(c,s=>({...s,rituals:s.rituals.filter(h=>h.key!==key),attachments:s.attachments.filter(h=>h.ritual!==key)}),{action:'ritual.delete',target:{type:'ritual',id:key},after:()=>({key})})),200)},{responses:legacyOk});
-  both(app, {
+  rule(app, {...meta,method:'get',path:item,operationId:'getRule',summary:'Read one rule',request:{params},responses:{200:response(Rule),...errors}},async c=>{const {key}=c.req.valid('param' as never) as {key:string},s=await current(c.env.db,receivingAdmin(c).workspaceId),r=s.config.rituals.find(x=>x.key===key);if(!r)throw new ApiError(404,'NOT_FOUND','Rule not found.');return c.json(r,200)});
+  rule(app, {...meta,method:'put',path:item,operationId:'saveRule',summary:'Create or update one rule',request:{params,headers:versionHeader,body:json(Rule)},responses:ok},async c=>{const {key}=c.req.valid('param' as never) as {key:string},r=c.req.valid('json' as never) as z.infer<typeof Rule>;if(key!==r.key)throw new ApiError(422,'INVALID_KEY','The rule key must match the URL.');return c.json(stateOf(await edit(c,s=>{const prev=s.rituals.find(h=>h.key===key);return {...s,rituals:[...s.rituals.filter(h=>h.key!==key),{...r,recipe:r.recipe??prev?.recipe,enabled:r.enabled??prev?.enabled}]};},{action:'ritual.save',target:{type:'ritual',id:key},after:()=>({key})})),200)});
+  rule(app, {...meta,method:'delete',path:item,operationId:'deleteRule',summary:'Remove a rule and detach it everywhere',request:{params,headers:versionHeader},responses:ok},async c=>{const {key}=c.req.valid('param' as never) as {key:string};return c.json(stateOf(await edit(c,s=>({...s,rituals:s.rituals.filter(h=>h.key!==key),attachments:s.attachments.filter(h=>h.ritual!==key)}),{action:'ritual.delete',target:{type:'ritual',id:key},after:()=>({key})})),200)});
+  rule(app, {
     ...meta, method: 'put', path: path + '/attachments', operationId: 'attachRules',
     summary: 'Attach, reorder and detach rules by replacing the ordered attachment list',
     request: { headers: versionHeader, body: json(z.object({ attachments: z.array(RuleBindingInput).max(256) })) },
     responses: ok,
-  }, async (c, family) => {
+  }, async c => {
     const { attachments } = c.req.valid('json' as never) as { attachments: z.infer<typeof RuleBindingInput>[] };
-    return c.json(stateOf(family, await edit(c, (config) => ({ ...config, attachments: bindingsFrom(attachments) }), { action: 'ritual.attach', after: (x) => ({ attachments: x.attachments.length, rituals: [...new Set(x.attachments.map((b) => b.ritual))] }) })), 200);
-  }, { responses: legacyOk });
-  both(app, {
+    return c.json(stateOf(await edit(c, (config) => ({ ...config, attachments: bindingsFrom(attachments) }), { action: 'ritual.attach', after: (x) => ({ attachments: x.attachments.length, rituals: [...new Set(x.attachments.map((b) => b.ritual))] }) })), 200);
+  });
+  rule(app, {
     ...meta, method: 'get', path, operationId: 'getRules',
     summary: 'Read rules, ordered attachments, and sender lists',
     request: { query: z.object({ version: z.coerce.number().int().positive().optional() }) },
     responses: ok,
-  }, async (c, family) => {
+  }, async c => {
     const w = receivingAdmin(c).workspaceId, v = (c.req.valid('query' as never) as { version?: number }).version;
     // Versions are Postgres integers: a larger one cannot exist (and would fail the cast with a 500).
     const r = v
@@ -346,14 +322,14 @@ export function registerRituals(app: App) {
       : await current(c.env.db, w);
     if (!r) throw new ApiError(404, 'NOT_FOUND', 'Rule version not found.');
     c.header('ETag', `"${r.version}"`);
-    return c.json(stateOf(family, r), 200);
-  }, { responses: legacyOk });
-  both(app, {
+    return c.json(stateOf(r), 200);
+  });
+  rule(app, {
     ...meta, method: 'put', path, operationId: 'applyRules',
     summary: 'Create, replace or remove rules and ordered attachments in one version',
     request: { headers: versionHeader, body: json(RuleConfigInput) },
     responses: ok,
-  }, async (c, family) => c.json(stateOf(family, await edit(c, () => configFrom(c.req.valid('json' as never)), { action: 'ritual.apply', after: counts })), 200), { responses: legacyOk });
+  }, async c => c.json(stateOf(await edit(c, () => configFrom(c.req.valid('json' as never)), { action: 'ritual.apply', after: counts })), 200));
   const dry = z
     .object({
       config: RuleConfigInput.optional(),
@@ -363,13 +339,13 @@ export function registerRituals(app: App) {
       scores: z.record(z.string().max(500), z.number().min(0).max(1)).optional(),
     })
     .strict();
-  const tested = (row: typeof TraceRow | typeof LegacyTraceRow) => z.object({ version: z.number(), recipients: z.array(z.record(z.string(), z.unknown())), trace: z.array(row), steps: z.number() });
-  both(app, {
+  const tested = z.object({ version: z.number(), recipients: z.array(z.record(z.string(), z.unknown())), trace: z.array(TraceRow), steps: z.number() });
+  rule(app, {
     ...meta, method: 'post', path: path + '/test', operationId: 'testRules',
     summary: 'Trace saved or proposed rules on a stored message or pasted MIME; never asks the AI or delivers mail',
     request: { body: json(dry) },
-    responses: { 200: response(tested(TraceRow)), ...errors },
-  }, async (c, family) => {
+    responses: { 200: response(tested), ...errors },
+  }, async c => {
     const w = receivingAdmin(c).workspaceId, q = c.req.valid('json' as never) as z.infer<typeof dry>;
     if (!!q.messageId === !!q.mime) throw new ApiError(422, 'INVALID_TEST', 'Supply messageId or mime.');
     let email: ReturnType<typeof projectEmail>,
@@ -435,11 +411,10 @@ export function registerRituals(app: App) {
       return { input, version: s.version };
     });
     const { plan, trace, steps } = await ritualPipeline(c.env, w, input, email, scores, true);
-    if (family === 'rituals') return c.json({ version, recipients: plan.recipients, trace: trace.map(row => ({ ...row, timeline: row.timeline.map(step => step.kind === 'decisions' ? { ...step, kind: 'omens' as const } : step) })), steps }, 200);
     // The rule operations name each endpoint call's stable action ID actionId, and each trace row's kind rule.
     const recipients = plan.recipients.map(r => 'actions' in r && r.actions ? { ...r, actions: Object.fromEntries(Object.entries(r.actions).map(([id, list]) => [id, list.map(({ ritualAction, ...a }) => ({ actionId: ritualAction, ...a }))])) } : r);
     return c.json({ version, recipients, trace: trace.map(row => ({ ...row, kind: row.kind === 'ritual' ? 'rule' : row.kind })), steps }, 200);
-  }, { responses: { 200: response(tested(LegacyTraceRow)), ...errors } });
+  });
 }
 
 // ---------------------------------------------------------------- recipes: ready-made rules
@@ -447,20 +422,16 @@ const recipeField = z.object({
   name: z.string(), type: z.enum(['slack', 'discord', 'chat', 'forward', 'webhook', 'meaning', 'label', 'senders']).describe('slack, discord, chat (Slack or Discord), forward and webhook take the name of an endpoint of that type (createEndpoint); meaning is what the AI looks for, like "a refund request"; label is one label; senders is a list of addresses and @domains.'),
   label: z.string(), placeholder: z.string().nullable(), hint: z.string().nullable(),
 });
-/** The recipe catalog: the rule operations say decisions, the aliases omens, its name before the rename. */
-const recipeCatalog = (family: Family) => {
-  const [asks, price, name] = family === 'rules' ? ['decisions', 'decisionPricePerThousand', 'Rule'] : ['omens', 'omenPricePerThousand', 'Ritual'];
-  return z.object({
-    groups: z.array(z.object({ id: z.string(), title: z.string() })).describe('The order recipes are grouped in.'),
-    data: z.array(z.object({
-      id: z.string(), group: z.string(), name: z.string(), description: z.string(),
-      sentence: z.string().describe('What a rule made from it does, with {field} where each parameter goes.'),
-      fields: z.array(recipeField.openapi(`${name}RecipeField`)),
-      [asks]: z.boolean().describe('Asks the AI about each email (an AI decision). AI rules are free. Saving one lets the AI read mail at those addresses’ domains.'),
-    }).openapi(`${name}Recipe`)),
-    [price]: z.string().openapi({ deprecated: true, description: 'Deprecated: AI decisions are free, so this is always "0.00".' }),
-  }).openapi(`${name}Recipes`);
-};
+const recipeCatalog = z.object({
+  groups: z.array(z.object({ id: z.string(), title: z.string() })).describe('The order recipes are grouped in.'),
+  data: z.array(z.object({
+    id: z.string(), group: z.string(), name: z.string(), description: z.string(),
+    sentence: z.string().describe('What a rule made from it does, with {field} where each parameter goes.'),
+    fields: z.array(recipeField.openapi('RuleRecipeField')),
+    decisions: z.boolean().describe('Asks the AI about each email (an AI decision). AI rules are free. Saving one lets the AI read mail at those addresses’ domains.'),
+  }).openapi('RuleRecipe')),
+  decisionPricePerThousand: z.string().openapi({ deprecated: true, description: 'Deprecated: AI decisions are free, so this is always "0.00".' }),
+}).openapi('RuleRecipes');
 export const RecipeInputParams = RuleRecipeRef.shape.params;
 const RecipeAddresses = z.array(z.string().min(1).max(254)).min(1).max(10).describe('Inbox IDs (mbx_…) or receiving addresses it runs on.');
 type TargetRow = { address: string; mailbox_id: string; kind: string };
@@ -517,29 +488,28 @@ export async function apply(config: Config, tx: DbExecutor, w: string, key: stri
   return { ...next, attachments: placeRecipe(next, key, targets, inbox), evaluateDomains: [...new Set([...next.evaluateDomains, ...hosts])] };
 }
 function registerRecipes(app: App, item: string, keyParams: z.ZodObject<{ key: z.ZodString }>) {
-  both(app, {
+  rule(app, {
     ...meta, method: 'get', path: path + '/recipes', operationId: 'listRuleRecipes',
     summary: 'Ready-made rules and the fields each one takes',
     description: 'Each recipe writes an ordinary rule from one or two fields. Create one with createRuleFromRecipe; endpoint fields name an endpoint of the right type, created first with createEndpoint.',
-    responses: { 200: response(recipeCatalog('rules')), ...errors },
-  }, async (c, family) => {
+    responses: { 200: response(recipeCatalog), ...errors },
+  }, async c => {
     receivingAdmin(c);
     c.header('Cache-Control', 'no-store');
-    const [asks, price] = family === 'rules' ? ['decisions', 'decisionPricePerThousand'] : ['omens', 'omenPricePerThousand'];
     return c.json({
       groups: recipeGroups,
-      data: ritualRecipes.filter(r => r.listed !== false).map(r => ({ id: r.id, group: r.group, name: r.name, description: r.description, sentence: r.sentence, [asks]: r.decisions, fields: r.fields.map(f => ({ name: f.name, type: f.type, label: f.label, placeholder: f.placeholder ?? null, hint: f.hint ?? null })) })),
-      [price]: perThousandUsd(RATES.omenUc),
+      data: ritualRecipes.filter(r => r.listed !== false).map(r => ({ id: r.id, group: r.group, name: r.name, description: r.description, sentence: r.sentence, decisions: r.decisions, fields: r.fields.map(f => ({ name: f.name, type: f.type, label: f.label, placeholder: f.placeholder ?? null, hint: f.hint ?? null })) })),
+      decisionPricePerThousand: perThousandUsd(RATES.omenUc),
     }, 200);
-  }, { responses: { 200: response(recipeCatalog('rituals')), ...errors } });
-  const created = (s: typeof state | typeof legacyState) => s.extend({ key: z.string().describe('The new rule’s key.') });
-  both(app, {
+  });
+  const created = state.extend({ key: z.string().describe('The new rule’s key.') });
+  rule(app, {
     ...meta, method: 'post', path: path + '/recipes', operationId: 'createRuleFromRecipe',
     summary: 'Create a rule from a recipe and attach it to addresses',
     description: 'Writes the recipe’s script, saves it as a new rule (key from the recipe and address unless given) and attaches it to each address, after their other recipes and before their own scripts. An AI recipe lets the AI read mail at those addresses’ domains. Returns the new version and key. Besides listRuleRecipes, it takes the two-way rules the dashboard builds: split ({ test: always, from, subject, text or attachment; value: words, or senders for from; then; otherwise }) and split-by-meaning ({ meaning, then, otherwise }), where then and otherwise are inbox:<key>, an endpoint name, store or drop. Give the address the route [] (createRoute) so each side gets exactly its destination.',
     request: { headers: versionHeader, body: json(z.object({ recipe: z.string().max(40), params: RecipeInputParams, addresses: RecipeAddresses, key: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/).optional(), enabled: z.boolean().optional() }).strict()) },
-    responses: { 201: response(created(state)), ...errors },
-  }, async (c, family) => {
+    responses: { 201: response(created), ...errors },
+  }, async c => {
     const q = c.req.valid('json' as never) as { recipe: string; params: RecipeParams; addresses: string[]; key?: string; enabled?: boolean }, w = receivingAdmin(c, 'change rules').workspaceId;
     let key = '';
     const result = await edit(c, async (config, tx) => {
@@ -548,35 +518,35 @@ function registerRecipes(app: App, item: string, keyParams: z.ZodObject<{ key: z
       key = q.key ?? freeKey(config, `${q.recipe}-${(await targetAddresses(tx, w, [q.addresses[0]!]))[0]!.split('@')[0]}`);
       return apply(config, tx, w, key, q.recipe, q.params, q.addresses, q.enabled);
     }, { action: 'ritual.recipe', get target() { return { type: 'ritual', id: key }; }, after: () => ({ key, recipe: q.recipe }) });
-    return c.json({ ...stateOf(family, result), key }, 201);
-  }, { responses: { 201: response(created(legacyState)), ...errors } });
-  both(app, {
+    return c.json({ ...stateOf(result), key }, 201);
+  });
+  rule(app, {
     ...meta, method: 'put', path: item + '/recipe', operationId: 'updateRuleFromRecipe',
     summary: 'Change a rule’s recipe fields and addresses',
     description: 'Rewrites the rule from its recipe with these fields. addresses, when given, replaces where it runs (kept addresses keep their place). Passing recipe turns a script into that recipe.',
     request: { params: keyParams, headers: versionHeader, body: json(z.object({ recipe: z.string().max(40).optional(), params: RecipeInputParams, addresses: RecipeAddresses.optional(), enabled: z.boolean().optional() }).strict()) },
     responses: ok,
-  }, async (c, family) => {
+  }, async c => {
     const { key } = c.req.valid('param' as never) as { key: string }, q = c.req.valid('json' as never) as { recipe?: string; params: RecipeParams; addresses?: string[]; enabled?: boolean }, w = receivingAdmin(c, 'change rules').workspaceId;
-    return c.json(stateOf(family, await edit(c, async (config, tx) => {
+    return c.json(stateOf(await edit(c, async (config, tx) => {
       const prev = config.rituals.find(r => r.key === key);
       if (!prev) throw new ApiError(404, 'NOT_FOUND', 'Rule not found.');
       const recipe = q.recipe ?? prev.recipe?.id;
       if (!recipe) throw new ApiError(422, 'NOT_A_RECIPE', `${key} is a script. Pass recipe to rewrite it from one, or edit it with saveRule.`, 'recipe');
       return apply(config, tx, w, key, recipe, q.params, q.addresses, q.enabled);
     }, { action: 'ritual.recipe', target: { type: 'ritual', id: key }, after: () => ({ key }) })), 200);
-  }, { responses: legacyOk });
-  both(app, {
+  });
+  rule(app, {
     ...meta, method: 'patch', path: item, operationId: 'updateRule',
     summary: 'Turn a rule on or off',
     description: 'Off keeps the rule and where it runs, and stops it running until it is turned on again.',
     request: { params: keyParams, headers: versionHeader, body: json(z.object({ enabled: z.boolean() }).strict()) },
     responses: ok,
-  }, async (c, family) => {
+  }, async c => {
     const { key } = c.req.valid('param' as never) as { key: string }, { enabled } = c.req.valid('json' as never) as { enabled: boolean };
-    return c.json(stateOf(family, await edit(c, config => {
+    return c.json(stateOf(await edit(c, config => {
       if (!config.rituals.some(r => r.key === key)) throw new ApiError(404, 'NOT_FOUND', 'Rule not found.');
       return { ...config, rituals: config.rituals.map(r => r.key === key ? { ...r, enabled } : r) };
     }, { action: enabled ? 'ritual.enable' : 'ritual.disable', target: { type: 'ritual', id: key }, after: () => ({ key, enabled }) })), 200);
-  }, { responses: legacyOk });
+  });
 }

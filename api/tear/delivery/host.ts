@@ -326,10 +326,10 @@ async function act(action: string) {
         // Detach the endpoint from routes and rituals, then delete it (deleteEndpoint refuses one in use).
         const e = words[1]!.toLowerCase();
         if (e === 'w' || e === 'v' || e === 'u') r = (await rest('DELETE', `/v1/inbound/webhooks/${ids[words[1]!]}?detach=true`)).error ?? 'ok';
-        else { await rest('PUT', '/v1/rituals', {}); r = (await rest('DELETE', `/v1/endpoints/${e}`)).error ?? 'ok'; }
+        else { await rest('PUT', '/v1/rules', {}); r = (await rest('DELETE', `/v1/endpoints/${e}`)).error ?? 'ok'; }
         break;
       }
-      case 'rituals': r = words[1] === 'none' ? (await rest('PUT', '/v1/rituals', {})).error ?? 'ok' : (await rest('PUT', '/v1/rituals', { rituals: [{ key: 'triage', source: RITUALS[words[1]!] }], attachments: [{ ritual: 'triage', target: `box@${host}` }] })).error ?? 'ok'; break;
+      case 'rituals': r = words[1] === 'none' ? (await rest('PUT', '/v1/rules', {})).error ?? 'ok' : (await rest('PUT', '/v1/rules', { rules: [{ key: 'triage', source: RITUALS[words[1]!] }], attachments: [{ rule: 'triage', target: `box@${host}` }] })).error ?? 'ok'; break;
       case 'route': {
         const [, k, state] = words as [string, string, string];
         r = (await rest('PATCH', `/v1/routing/routes/${k}`, state === 'drop' ? { to: 'drop' } : { enabled: state === 'on' })).error ?? 'ok';

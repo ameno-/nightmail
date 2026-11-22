@@ -7,7 +7,7 @@ import type { CampaignDraft } from './db/sending.js';
 import { productName } from './brand.js';
 
 // A support conversation's deliverability reads (support-agent-design §5.2): GET only, behind supportGate (each costs 5
-// of the conversation's 120 a minute, see supportWeight), x-internal like every /v1/support route. Each handler is one read-only
+// of the conversation's 120 a minute, see supportWeight), hidden from the OpenAPI document like every /v1/support route. Each handler is one read-only
 // transaction with a 3-second statement timeout (supportRead) over the indexes listed in src/deliverability.ts, and its
 // result is cached 60 seconds per workspace, route and parameters, stamped computedAt. Windows are at most 30 days
 // (hourly at most 72 hours); at most 20 groups plus other and 50 rows. Recipients appear as domains and providers only,

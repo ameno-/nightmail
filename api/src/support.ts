@@ -314,7 +314,7 @@ export function registerSupport(app: App) {
   });
 
   // ---------- GET /v1/support/* (supportGate has loaded the conversation and logged the call) ----------
-  const meta = (operationId: string, description: string) => ({ method: 'get' as const, operationId, tags, security: supportSecurity, description: describe(description) });
+  const meta = (operationId: string, description: string) => ({ hide: true, method: 'get' as const, operationId, tags, security: supportSecurity, description: describe(description) });
 
   const Context = z.object({
     grant: z.object({ id: z.string(), ticketRef: z.string(), expiresAt: z.string(), contentShared: z.boolean().describe('Whether this request may read email bodies (the customer opted in).'),
