@@ -14,7 +14,7 @@ import { credentialFingerprint, discoveryTarget } from './ses-region-state.js';
 import { mxResourceName, POOL_INSTALLATION, setupResources } from './ses-setup.js';
 import { forDelivery, type ReadyConnection } from './provider-credentials.js';
 import { wakeWebhooks } from './jobs.js';
-import { screenSnapshot, type CampaignScreen } from './screen.js';
+import { screenSnapshot, type CampaignScreen, type ScreenCall } from './screen.js';
 import { SEND_LIMITS } from './send-limits.js';
 import { SesBodyError } from './ses-body.js';
 import { sendReservation, withMemory } from './isolate-memory.js';
@@ -49,10 +49,14 @@ type Review = { version:number; draft: CampaignDraft; rendered: { html?: string;
 // `probation`: a Hosted sender still in its evaluation, growth pace or below good standing (src/hosted-sending.ts probationReason).
 type Owner = { runtime: Runtime; a: Actor; ses: SESv2Client; transport: DispatchTransport; sendClient?:(domainId:string)=>SESv2Client; trusted?:boolean; probation?:boolean; tenantName?: string; feedbackTopic?: string };
 type LeaseQuota = { rate: number; max: number; sent: number; checked: string; age_ms: number };
-type Leased = { mail: Mail; contentBytes: number; review: Review | null; owner: Owner | null; rateRetries: number; quota?: LeaseQuota };
+/** Where one email's time goes in a run, filled in stage by stage for its DISPATCH_EMAIL line (logEmail): the screen's path
+ *  (a classifier call, the shard's open breaker, or a campaign copy's verdict) and how its last request ended, the wait for a
+ *  send slot and the SES call. Records only: nothing reads it to decide anything. */
+type Trace = { leasedAt: number; shard?: number; screen?: 'call' | 'breaker' | 'verdict'; screenAt?: number; screenMs?: number; call?: ScreenCall; paceMs?: number; sesMs?: number };
+type Leased = { mail: Mail; contentBytes: number; review: Review | null; owner: Owner | null; rateRetries: number; quota?: LeaseQuota; trace: Trace };
 // `screened`: the Hosted content screen judged this mail and passed it (a rejection never reaches sending).
 type Prepared = Leased & { owner: Owner; snapshot: EmailSnapshot; content: SendEmailCommandInput['Content']; unsubscribe?: { tokenHash: string; email: string; page?: string }; stored?: Partial<EmailSnapshot>; screened?: boolean };
-type Outcome = { mail: Mail; type: 'accepted' | 'reject' | 'acceptance_unknown' | 'provider_throttled' | 'dispatch_deferred'; providerId?: string; errorCode?: string; data: Record<string, unknown>; requeueAt?: string; screened?: boolean };
+type Outcome = { mail: Mail; type: 'accepted' | 'reject' | 'acceptance_unknown' | 'provider_throttled' | 'dispatch_deferred'; providerId?: string; errorCode?: string; data: Record<string, unknown>; requeueAt?: string; screened?: boolean; trace?: Trace };
 const requeued = (o: Outcome) => o.type === 'provider_throttled' || o.type === 'dispatch_deferred';
 
 export interface QuotaSnapshot { maxSendRate: number; max24HourSend: number; sentLast24Hours: number; checkedAt: number }
@@ -368,7 +372,7 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
     }
     const shared = mail.reviewId && reviews.get(reviewKey(row));
     if(mail.snapshot.deferredCampaign) mail.snapshot={...mail.snapshot,from:mail.from,to:mail.to,cc:mail.cc,bcc:mail.bcc,region:mail.region,subject:mail.subject,attachments:shared?shared.draft.attachments:mail.snapshot.attachments??[],binding:shared?shared.draft.binding:mail.snapshot.binding};
-    return { mail, contentBytes: Number(row.snapshot_bytes) > INLINE_SNAPSHOT_BYTES ? Number(row.snapshot_bytes) : 0, owner: ready ? owner! : null, rateRetries: Number(rate_retries), quota: quota_sample as LeaseQuota | undefined, review: shared && review_recipient ? { ...shared, contentHash: review_content_hash as string | null, recipient: review_recipient as ReviewedRecipient } : null };
+    return { mail, contentBytes: Number(row.snapshot_bytes) > INLINE_SNAPSHOT_BYTES ? Number(row.snapshot_bytes) : 0, owner: ready ? owner! : null, rateRetries: Number(rate_retries), quota: quota_sample as LeaseQuota | undefined, review: shared && review_recipient ? { ...shared, contentHash: review_content_hash as string | null, recipient: review_recipient as ReviewedRecipient } : null, trace: { leasedAt: Date.now() } };
   });
 }
 
@@ -381,7 +385,7 @@ let screenSkipLoggedAt = 0;
 // Fail closed for probation and marketing. Trusted transactional and explicit BYO
 // checks may fail open. Policy is decided from the leased connection, never caller input.
 // Returns true only when the screen actually judged the message (and passed it); a skip or a fail-open outage is not a clean verdict.
-async function screenMail(runtime: Runtime, mail: Mail, s: EmailSnapshot, required:boolean, hostedGate?:GateState): Promise<boolean> {
+async function screenMail(runtime: Runtime, mail: Mail, s: EmailSnapshot, required:boolean, hostedGate?:GateState, call?:ScreenCall): Promise<boolean> {
   const settings = runtime.config.screen;
   if (!settings) {
     if(required) throw new ApiError(503,'CONTENT_SCREEN_UNAVAILABLE','Hosted content screening is unavailable; deferring without calling SES.',undefined,true);
@@ -389,7 +393,7 @@ async function screenMail(runtime: Runtime, mail: Mail, s: EmailSnapshot, requir
     return false;
   }
   let result: Awaited<ReturnType<typeof screenSnapshot>>;
-  try { result = await screenSnapshot(runtime, s, required); }
+  try { result = await screenSnapshot(runtime, s, required, call); }
   catch (error) {
     if(!(error instanceof ApiError) || error.code!=='CONTENT_SCREEN_UNAVAILABLE') throw error;
     if(required) throw new ApiError(503,'CONTENT_SCREEN_UNAVAILABLE','Hosted content screening is unavailable; deferring without calling SES.',undefined,true);
@@ -447,6 +451,7 @@ async function prepareMail(leased: Leased & { owner: Owner }, loadAttachments: (
   const delivery=rules ? await import('./screened-html.js') : undefined;
   let screened=false;
   if (!isSimulatedSes(runtime) && (hosted || (s.screen && s.kind==='transactional'))) {
+    leased.trace.screenAt=Date.now();
     const required=hosted && (!leased.owner.trusted || s.kind==='marketing');
     // A screened campaign's copy (src/sending.ts campaignVerdicts) goes out only under a verdict for its exact bytes
     // (src/screen.ts copyKey): keyed here from the same customer copy it is delivered from, with Nightmail's
@@ -459,14 +464,21 @@ async function prepareMail(leased: Leased & { owner: Owner }, loadAttachments: (
     // field. Senders in good standing and the trusted tier keep their message.
     if (delivery) s = delivery.hostedCopy(s, rules==='probation');
     if (review) {
+      leased.trace.screen='verdict';
       const [verdict] = await campaignVerdicts(runtime, { workspaceId: mail.workspaceId, campaignId: mail.campaignId!, reviewId: mail.reviewId! }, [rules==='probation' ? delivery!.probationCopy(keyed!) : keyed!], Date.now() + MAX_PRE_SEND_MS);
       if (!verdict) throw new ApiError(503,'CONTENT_SCREEN_UNAVAILABLE','This copy has no verdict yet; deferring without calling SES.',undefined,true);
       if ('refused' in verdict) throw verdict.refused;
       // The release counted every released recipient's verdict toward reputation (src/sending.ts screenAhead).
       if (verdict.spam>=runtime.config.screen!.threshold) throw new ScreenRejected({ spam: verdict.spam, model: verdict.model, threshold: runtime.config.screen!.threshold }, true);
     } else if (hosted && (gate.screenRetryAt??0)>Date.now()) {
+      leased.trace.screen='breaker';
       if (required) throw new ApiError(503,'CONTENT_SCREEN_UNAVAILABLE','Hosted screen temporarily unavailable.',undefined,true);
-    } else screened=await screenMail(runtime,mail,s,required,hosted?gate:undefined) && !!leased.owner.tenantName;
+    } else {
+      leased.trace.screen='call';
+      leased.trace.call={ emailId: mail.id, workspaceId: mail.workspaceId, region: mail.region, shard: leased.trace.shard, kind: s.kind, required };
+      screened=await screenMail(runtime,mail,s,required,hosted?gate:undefined,leased.trace.call) && !!leased.owner.tenantName;
+    }
+    leased.trace.screenMs=Date.now()-leased.trace.screenAt;
   }
   const parts: Attachment[] = [];
   rows ??= checkedDispatchAttachments(s.attachments, await loadAttachments(mail));
@@ -491,7 +503,7 @@ async function prepareMail(leased: Leased & { owner: Owner }, loadAttachments: (
 }
 
 // Preflight failures (storage, rendering, hash mismatch) cannot have sent email: reject the row.
-async function rejectPreflight(runtime: Runtime, mail: Mail, error: unknown) {
+async function rejectPreflight(runtime: Runtime, mail: Mail, error: unknown): Promise<'deferred' | 'rejected'> {
   const code = error instanceof ApiError ? error.code : 'DISPATCH_PREFLIGHT_FAILED';
   const retryable = error instanceof ApiError ? error.retryable : true;
   if (retryable) {
@@ -499,7 +511,7 @@ async function rejectPreflight(runtime: Runtime, mail: Mail, error: unknown) {
     const missing=code==='ATTACHMENT_STORAGE_UNAVAILABLE';
     const retry=await runtime.db.execute(sql`UPDATE sending_emails SET lease_until = NULL, attachment_failures=attachment_failures+${missing?1:0}::smallint, scheduled_at = greatest(coalesce(scheduled_at, clock_timestamp()), clock_timestamp() + interval '15 seconds'), error_code = ${code}, updated_at = clock_timestamp()
       WHERE workspace_id = ${mail.workspaceId} AND id = ${mail.id} AND status = 'queued' AND dispatch_version = ${mail.dispatchVersion} ${missing?sql`AND attachment_failures<4`:sql``}`);
-    if(!missing || retry.rowCount) { log('warn', { code, emailId: mail.id, message: 'Dispatch preflight failed; retrying after a short delay.' }); return; }
+    if(!missing || retry.rowCount) { log('warn', { code, emailId: mail.id, message: 'Dispatch preflight failed; retrying after a short delay.' }); return 'deferred'; }
   }
   const rejected=await runtime.db.execute<{n:number}>(sql`WITH rejected AS (
       UPDATE sending_emails SET status = 'rejected', error_code = ${code}, lease_until = NULL, updated_at = clock_timestamp()
@@ -511,6 +523,7 @@ async function rejectPreflight(runtime: Runtime, mail: Mail, error: unknown) {
   else if (code === 'CONTENT_SCREEN_BUDGET_EXCEEDED') log('warn', { code, emailId: mail.id, campaignId: mail.campaignId });
   else logError(error, { code, emailId: mail.id });
   if (mail.campaignId) await finishSettledCampaigns(runtime, [{ workspace_id: mail.workspaceId, campaign_id: mail.campaignId }]);
+  return 'rejected';
 }
 
 type CampaignRef = { workspace_id: string; campaign_id: string };
@@ -828,6 +841,25 @@ function chunk<T>(items: T[], size: number): T[][] { const out: T[][] = []; for 
 const cost = (item: Prepared) => item.snapshot.to.length + item.snapshot.cc.length + item.snapshot.bcc.length;
 const quotaRetry = (gate: GateState, refreshMs: number) => Math.ceil(Math.max(Date.now() + Math.min(1000, refreshMs), gate.refreshAt ?? 0, gate.dailyBlockedUntil ?? 0));
 
+// One DISPATCH_EMAIL line per email a run sends or defers: how long it waited in the queue before this lease (queueMs, from
+// when it was due; ageMs from admission), in the screen, for a send slot and in the SES call, how long the run held it
+// (totalMs), and why it was deferred (reason). IDs, codes and milliseconds only. Flow control (a send, a pacing wait, the
+// daily allowance, the burst limit) is info; anything else is warn. A campaign's flow-control lines are kept 1 in 10, since a
+// campaign can send 50 a second and an invocation keeps 256 KB of log lines; each kept one says sampleRate. Failures and
+// every other deferral are always kept.
+const FLOW = new Set(['PACING_WAIT', 'DAILY_ALLOWANCE', 'HOSTED_BURST_LIMIT']);
+function logEmail(lane: Lane, mail: Mail, trace: Trace | undefined, outcome: string, reason?: string) {
+  try {
+    const routine = outcome === 'accepted' || FLOW.has(reason ?? ''), rate = routine && mail.snapshot.kind === 'marketing' ? 0.1 : 1;
+    if (rate < 1 && Math.random() >= rate) return;
+    const now = Date.now(), leasedAt = trace?.leasedAt ?? now, created = Date.parse(mail.createdAt), due = mail.scheduledAt ? Math.max(created, Date.parse(mail.scheduledAt)) : created;
+    log(routine ? 'info' : 'warn', { code: 'DISPATCH_EMAIL', outcome, reason, emailId: mail.id, workspaceId: mail.workspaceId, campaignId: mail.campaignId ?? undefined,
+      region: lane.options.region, shard: lane.options.shard?.index ?? 0, kind: mail.snapshot.kind, attempt: mail.dispatchVersion, queueMs: leasedAt - due, ageMs: leasedAt - created,
+      screen: trace?.screen, screenMs: trace?.screenMs, screenCall: trace?.call?.outcome,
+      paceMs: trace?.paceMs, sesMs: trace?.sesMs, totalMs: now - leasedAt, ...(rate < 1 ? { sampleRate: rate } : {}) });
+  } catch { /* A record never changes what happens to the email. */ }
+}
+
 // There is only one slot timer and one in-flight limit for every stream and lane. Choose who owns
 // the slot when it opens, not when an earlier batch was claimed. In-flight calls are never canceled.
 function pacedSender(gate: GateState, options: DispatcherOptions, pacing: Pacing, counters: DispatcherReport, held: Lane['held']) {
@@ -857,18 +889,22 @@ function pacedSender(gate: GateState, options: DispatcherOptions, pacing: Pacing
     const queuedAt = Date.now(), s = item.snapshot;
     queues[s.kind].push({ deadline, defer() {
       held.recipients -= cost(item);
+      item.trace.paceMs = Date.now() - queuedAt;
       const accountUntil=(gate.accountPauseAt??0)+300000,outage=(gate.outageUntil??0)>Date.now();
       const until=accountUntil>Date.now()?accountUntil:outage?gate.outageUntil:gate.dailyBlockedUntil;
       const code=accountUntil>Date.now()?'SES_ACCOUNT_SENDING_PAUSED':outage?'SES_UNAVAILABLE':gate.dailyBlockedUntil?'SES_DAILY_QUOTA_EXHAUSTED':undefined;
       if (!until) counters.idle = false; // Work is still due, possibly on a different shard.
-      resolve({ mail: item.mail, type: 'dispatch_deferred', errorCode:code, data:{code:code??'PACING_WAIT',providerCalled:false}, requeueAt:new Date(until??Date.now()).toISOString() });
+      resolve({ mail: item.mail, type: 'dispatch_deferred', errorCode:code, data:{code:code??'PACING_WAIT',providerCalled:false}, requeueAt:new Date(until??Date.now()).toISOString(), trace: item.trace });
     }, start() {
       held.recipients -= cost(item);
       active++;
       counters.timings.pace = (counters.timings.pace ?? 0) + Date.now() - queuedAt;
       reserve(gate, cost(item), options.shard, pacing);
+      const sendAt = Date.now();
+      item.trace.paceMs = sendAt - queuedAt;
       sendOne(item.owner.runtime, item.owner.a, item.owner.ses, item).then(outcome => {
-        outcome.screened = item.screened;
+        item.trace.sesMs = Date.now() - sendAt;
+        outcome.screened = item.screened; outcome.trace = item.trace;
         if (outcome.type === 'provider_throttled') brake(gate);
         if (outcome.type === 'accepted') delete gate.outageStreak;
         // Every ambiguous answer (no response, 5xx, or success without a MessageId) opens it; the specific code stays in the
@@ -910,6 +946,7 @@ async function dispatchBatch(base: Runtime, lane: Lane, leased: Leased[]): Promi
   if (!leased.length) return { processed: 0, blocked: false };
 
   const ready = leased.filter((item): item is Leased & { owner: Owner } => item.owner !== null);
+  for (const item of leased) { item.trace.shard = options.shard?.index ?? 0; if (!item.owner) logEmail(lane, item.mail, item.trace, 'deferred', 'SES_SETUP_REQUIRED'); }
   counters.claimed += leased.length;
   counters.deferred += leased.length - ready.length;
   // Only unready owner/stream pairs keep their leases as backoff. The gate still paces the region.
@@ -925,7 +962,7 @@ async function dispatchBatch(base: Runtime, lane: Lane, leased: Leased[]): Promi
     if (!gate.quota || Date.now() >= (gate.refreshAt ?? 0)) {
       // Lanes of one shard share one refresh; shards share one GetAccount through ensureQuota's election.
       lane.refresh ??= phase('quota', () => ensureQuota(first, options.accountId, options.region, gate, options.quotaRefreshMs)).finally(() => { lane.refresh = undefined; });
-      if (!await lane.refresh) { await releaseLeases(base, ready.map(item => item.mail)); return { processed: 0, blocked: true }; }
+      if (!await lane.refresh) { for (const item of ready) logEmail(lane, item.mail, item.trace, 'deferred', 'SES_QUOTA_UNKNOWN'); await releaseLeases(base, ready.map(item => item.mail)); return { processed: 0, blocked: true }; }
       await options.onGate?.(gate);
     }
   }
@@ -937,6 +974,7 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
   const {gate, options, counters, phase} = lane;
   if (dailyRemaining(gate) <= 0) {
     counters.quotaRetryAt = quotaRetry(gate, options.quotaRefreshMs);
+    for (const item of ready) logEmail(lane, item.mail, item.trace, 'deferred', 'SES_DAILY_QUOTA_EXHAUSTED');
     await releaseLeases(base, ready.map(item => item.mail));
     counters.claimed -= ready.length;
     counters.deferred += ready.length;
@@ -961,14 +999,16 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
       return await prepareMail(item, loadAttachments,gate);
     }
     catch (error) {
+      if (item.trace.screenAt !== undefined) item.trace.screenMs ??= Date.now() - item.trace.screenAt; // It ended in the screen.
       if (error instanceof ModuleLoadError) { await releaseLeases(base, [item.mail]); throw error; }
       if (error instanceof ApiError && error.code==='CONTENT_SCREEN_UNAVAILABLE') {
         if (!(gate.screenRetryAt && gate.screenRetryAt>Date.now())) {
           gate.screenRetryAt=Date.now()+30_000; log('warn',{code:error.code,region:options.region,retryAt:gate.screenRetryAt});
         }
-        counters.paceRetryAt=gate.screenRetryAt; counters.deferred++; screenDeferred.push(item.mail); lane.advanced++; return;
+        counters.paceRetryAt=gate.screenRetryAt; counters.deferred++; screenDeferred.push(item.mail); lane.advanced++; logEmail(lane, item.mail, item.trace, 'deferred', error.code); return;
       }
-      counters.skipped++; lane.advanced++; await rejectPreflight(item.owner.runtime, item.mail, error);
+      counters.skipped++; lane.advanced++;
+      logEmail(lane, item.mail, item.trace, await rejectPreflight(item.owner.runtime, item.mail, error), error instanceof ApiError ? error.code : 'DISPATCH_PREFLIGHT_FAILED');
     }
   };
   const streamPage=async(items:typeof ready,coalesce=false)=>{
@@ -1041,6 +1081,7 @@ function deferBurst(deferred:DeferredStream[],workspace_id:string,stream:Deferre
 async function recordBatch(base: Runtime,lane: Lane,outcomes: Outcome[]) {
   await lane.phase('record', () => recordOutcomes(base,outcomes));
   for (const outcome of outcomes) {
+    logEmail(lane, outcome.mail, outcome.trace, outcome.type === 'dispatch_deferred' ? 'deferred' : outcome.type, outcome.errorCode ?? (typeof outcome.data.code === 'string' ? outcome.data.code : undefined));
     if(outcome.type==='acceptance_unknown' || outcome.type==='provider_throttled' || outcome.errorCode==='SES_TENANT_SENDING_PAUSED') log(outcome.type==='acceptance_unknown'?'error':'warn',{code:outcome.errorCode,region:outcome.mail.region,stream:outcome.mail.snapshot.kind});
     if (outcome.type === 'accepted') lane.counters.sent++; else if (requeued(outcome)) lane.counters.deferred++; else lane.counters.skipped++;
     if (outcome.mail.campaignId && !requeued(outcome)) lane.finishing.set(outcome.mail.campaignId, { workspace_id: outcome.mail.workspaceId, campaign_id: outcome.mail.campaignId });
@@ -1080,7 +1121,7 @@ async function dispatchPrepared(base: Runtime, lane: Lane, prepared: Prepared[])
     const group = candidates.filter(item => {
       // Don't enter attempting in the first place for a predictably distant slot. The actual
       // sender also enforces this deadline if priority arrivals or a concurrent lane change it.
-      if (expectedSlot >= claimDeadline) { unpaced.push(item.mail); counters.claimed--; counters.deferred++; return false; }
+      if (expectedSlot >= claimDeadline) { unpaced.push(item.mail); counters.claimed--; counters.deferred++; logEmail(lane, item.mail, item.trace, 'deferred', 'PACING_WAIT'); return false; }
       const percent = item.snapshot.kind === 'marketing' ? base.config.dispatch.dailyHeadroomPercent : undefined;
       const left = dailyRemaining(gate, percent, options.shard);
       if (cost(item) <= left - lane.held.recipients) { lane.held.recipients += cost(item); expectedSlot += cost(item) * 1000 / rate; return true; }
@@ -1088,7 +1129,7 @@ async function dispatchPrepared(base: Runtime, lane: Lane, prepared: Prepared[])
       if (left <= 0 && !lane.deferred.some(d => d.workspace_id === item.mail.workspaceId && d.stream === item.snapshot.kind)) {
         lane.deferred.push({ workspace_id: item.mail.workspaceId, stream: item.snapshot.kind, until });
       }
-      delayed.push(item.mail); counters.deferred++; counters.claimed--; return false;
+      delayed.push(item.mail); counters.deferred++; counters.claimed--; logEmail(lane, item.mail, item.trace, 'deferred', 'DAILY_ALLOWANCE'); return false;
     });
     if (!group.length) continue;
     // Read MCP grants in the claim's transaction and hold their SHARE locks through the durable attempt, never during
@@ -1101,7 +1142,7 @@ async function dispatchPrepared(base: Runtime, lane: Lane, prepared: Prepared[])
     const statuses = await phase('claim', () => checkMcp ? base.db.transaction(tx => claim(group, tx)) : claim(group, base.db));
     lane.advanced += group.length;
     if (webhooks) pendingRecords.push(wakeWebhooks(base,webhooks));
-    for(const item of group) if(statuses.get(item.mail.id)==='queued') deferBurst(lane.deferred,item.mail.workspaceId,item.snapshot.kind);
+    for(const item of group) if(statuses.get(item.mail.id)==='queued') { deferBurst(lane.deferred,item.mail.workspaceId,item.snapshot.kind); logEmail(lane, item.mail, item.trace, 'deferred', 'HOSTED_BURST_LIMIT'); }
     const attempting = group.filter(item => statuses.get(item.mail.id) === 'attempting');
     for (const item of group) if (statuses.get(item.mail.id) !== 'attempting') lane.held.recipients -= cost(item);
     const lost = group.filter(item => !statuses.has(item.mail.id));

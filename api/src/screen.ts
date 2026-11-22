@@ -1,5 +1,6 @@
 import { ApiError, digest, type Runtime } from './core.js';
 import type { EmailSnapshot } from './db/sending.js';
+import { errorTypeOf, log } from './log.js';
 import { unescapeCss, VISIBLE_WORDS } from './screened-html.js';
 import { formattedSender } from './sending.js';
 import { SEND_LIMITS } from './send-limits.js';
@@ -364,32 +365,89 @@ async function body(snapshot: EmailSnapshot, limitBytes: number, scope: 'message
   assertScreenable(measure,limitBytes,scope);
   return { bodies:completeBodies(measure.content,measure.signals.join('\n'),limitBytes,scope), textHtmlOverlap:measure.textHtmlOverlap };
 }
-export async function jevQuestions(endpoint:string,apiKey:string,model:string,state:unknown,questions:unknown,deadline:number):Promise<unknown> {
-  // The deadline includes reading the response body. Never retry inside a send lease.
-  let response: Response;
+// ----- Classifier request records -------------------------------------------------------------------------------------
+// One CONTENT_SCREEN_CALL line per classifier request: how long it took to the response headers (headersMs) and to the end
+// of the body (ms), how it ended (outcome: ok, timeout, network, http_<status> or invalid; phase says whether a timeout or
+// network error came before or after the headers), the request and response sizes, how many requests this isolate had in
+// flight when it started, where it came from (ScreenCall) and the classifier's own request ID and timing headers. Never
+// the message, its subject or addresses, the request body or the key. Failures are always logged; a campaign copy's
+// successful requests 1 in 10 (CAMPAIGN_SAMPLE, the line says sampleRate), since a campaign can make 50 a second.
+/** Where a classifier request came from, for its line: IDs and routing only. The screen writes back how the last request
+ *  ended (outcome) and how long it took (ms), for the email's own record (src/dispatcher.ts DISPATCH_EMAIL). */
+export type ScreenCall = { emailId?: string; workspaceId?: string; campaignId?: string; region?: string; shard?: number; kind?: string; required?: boolean; outcome?: string; ms?: number };
+/** How one request went, filled in by jevQuestions as it goes. Only assignments: recording never throws or waits. */
+type CallTiming = { inFlight?: number; requestBytes?: number; headersMs?: number; ms?: number; outcome?: string; phase?: 'headers' | 'body'; httpStatus?: number; responseBytes?: number;
+  requestId?: string; cfRay?: string; serverTiming?: string; retryAfter?: string; errorType?: string; errorCode?: string; errorMessage?: string };
+const CAMPAIGN_SAMPLE = 0.1;
+let inFlight = 0;
+function failed(timing: CallTiming, started: number, phase: 'headers' | 'body', error: unknown) {
   try {
-    response = await fetch(endpoint, {
-      // Never follow a redirect: the key and the message body go only to the configured endpoint. Workers
-      // reject redirect: 'error', so use 'manual'; a 3xx is not ok and counts as unavailable below.
-      method: 'POST', redirect: 'manual', headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ model, state, questions }), signal: AbortSignal.timeout(deadline),
-    });
-  } catch {
-    throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', 'The content classifier could not be reached.', undefined, true);
-  }
-  if (!response.ok) {
-    await response.body?.cancel().catch(() => undefined);
-    throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', `The content classifier failed with HTTP ${response.status}.`, undefined, true);
-  }
-  const reader=response.body?.getReader(); if(!reader)return null;
-  const chunks:Uint8Array[]=[];let bytes=0;for(;;){const {value,done}=await reader.read();if(done)break;if((bytes+=value.length)>32768){await reader.cancel();return null}chunks.push(value)}
-  try{return JSON.parse(Buffer.concat(chunks).toString())}catch{return null}
+    const { name, cause, message } = error as { name?: unknown; cause?: { code?: unknown }; message?: unknown };
+    timing.ms = Date.now() - started; timing.phase = phase; timing.outcome = name === 'TimeoutError' ? 'timeout' : 'network'; timing.errorType = errorTypeOf(error);
+    // The runtime's own words for a failed connection ("Network connection lost.", undici's ECONNRESET), never text
+    // that could carry a URL, an address or a header.
+    if (typeof cause?.code === 'string' && /^[A-Z][A-Z0-9_]{1,40}$/.test(cause.code)) timing.errorCode = cause.code;
+    if (typeof message === 'string' && /^[A-Za-z0-9 .,;:()=_-]{1,120}$/.test(message)) timing.errorMessage = message;
+  } catch { /* A record never changes the request's outcome. */ }
 }
-async function evaluate(endpoint: string, apiKey: string, model: string, state: unknown): Promise<ScreenResult> {
-  const parsed = await jevQuestions(endpoint,apiKey,model,state,QUESTIONS,DEADLINE_MS) as { model?: unknown; answers?: { spam?: { noul?: unknown } } } | null;
-  const spam = parsed?.answers?.spam?.noul;
-  if (typeof spam !== 'number' || !Number.isFinite(spam) || spam<0 || spam>1) throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', 'The content classifier returned no valid spam score.', undefined, true);
-  return { spam, model: typeof parsed?.model === 'string' ? parsed.model : model };
+function responded(timing: CallTiming, started: number, response: Response) {
+  try {
+    const header = (name: string, max: number) => response.headers.get(name)?.slice(0, max) ?? undefined;
+    timing.headersMs = Date.now() - started; timing.httpStatus = response.status;
+    timing.requestId = header('x-typesafe-request-id', 80) ?? header('x-request-id', 80); timing.cfRay = header('cf-ray', 40);
+    timing.serverTiming = header('server-timing', 300); timing.retryAfter = header('retry-after', 40);
+  } catch { /* As above. */ }
+}
+function logCall(timing: CallTiming, call: ScreenCall | undefined, window: number, windows: number, sample: number) {
+  try {
+    const ok = timing.outcome === 'ok';
+    if (call) { call.outcome = timing.outcome; call.ms = timing.ms; }
+    if (ok && sample < 1 && Math.random() >= sample) return;
+    log(ok ? 'info' : 'warn', { code: 'CONTENT_SCREEN_CALL', emailId: call?.emailId, workspaceId: call?.workspaceId, campaignId: call?.campaignId, region: call?.region, shard: call?.shard,
+      kind: call?.kind, required: call?.required, window, windows, ...timing, ...(ok && sample < 1 ? { sampleRate: sample } : {}) });
+  } catch { /* As above. */ }
+}
+export async function jevQuestions(endpoint:string,apiKey:string,model:string,state:unknown,questions:unknown,deadline:number,timing:CallTiming={}):Promise<unknown> {
+  // The deadline includes reading the response body. Never retry inside a send lease.
+  const started=Date.now();timing.inFlight=++inFlight;
+  try {
+    let response: Response;
+    try {
+      const body=JSON.stringify({ model, state, questions });timing.requestBytes=Buffer.byteLength(body);
+      response = await fetch(endpoint, {
+        // Never follow a redirect: the key and the message body go only to the configured endpoint. Workers
+        // reject redirect: 'error', so use 'manual'; a 3xx is not ok and counts as unavailable below.
+        method: 'POST', redirect: 'manual', headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+        body, signal: AbortSignal.timeout(deadline),
+      });
+    } catch (error) {
+      failed(timing,started,'headers',error);
+      throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', 'The content classifier could not be reached.', undefined, true);
+    }
+    responded(timing,started,response);
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      timing.ms=Date.now()-started;timing.outcome=`http_${response.status}`;
+      throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', `The content classifier failed with HTTP ${response.status}.`, undefined, true);
+    }
+    const reader=response.body?.getReader(); if(!reader){timing.ms=Date.now()-started;return null;}
+    // A timeout while reading the body is not an ApiError: it goes on as it always has, recorded on the way.
+    const chunks:Uint8Array[]=[];let bytes=0;
+    try{for(;;){const {value,done}=await reader.read();if(done)break;if((bytes+=value.length)>32768){await reader.cancel();timing.responseBytes=bytes;timing.ms=Date.now()-started;return null}chunks.push(value)}}
+    catch(error){timing.responseBytes=bytes;failed(timing,started,'body',error);throw error;}
+    timing.responseBytes=bytes;timing.ms=Date.now()-started;
+    try{return JSON.parse(Buffer.concat(chunks).toString())}catch{return null}
+  } finally { inFlight--; }
+}
+async function evaluate(endpoint: string, apiKey: string, model: string, state: unknown, call: ScreenCall | undefined, window: number, windows: number, sample = 1): Promise<ScreenResult> {
+  const timing: CallTiming = {};
+  try {
+    const parsed = await jevQuestions(endpoint,apiKey,model,state,QUESTIONS,DEADLINE_MS,timing) as { model?: unknown; answers?: { spam?: { noul?: unknown } } } | null;
+    const spam = parsed?.answers?.spam?.noul;
+    if (typeof spam !== 'number' || !Number.isFinite(spam) || spam<0 || spam>1) { timing.outcome='invalid'; throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', 'The content classifier returned no valid spam score.', undefined, true); }
+    timing.outcome='ok';
+    return { spam, model: typeof parsed?.model === 'string' ? parsed.model : model };
+  } finally { logCall(timing,call,window,windows,sample); }
 }
 
 // The classifier's input for a snapshot: what screenSnapshot sends it, request by request.
@@ -398,8 +456,8 @@ function classifierState(snapshot: EmailSnapshot, required: boolean, textHtmlOve
   return (body: string) => ({email:{from:required?sender:sender.slice(0,100),kind:snapshot.kind,subject:required?subject:subject.slice(0,200),body},signals:{recipients,textHtmlOverlap}});
 }
 /** Spam probability for one snapshot, or null when the installation has no classifier configured. A campaign test has
- *  the campaign limit. `reserve` is told how many requests a classification will make before the first one. */
-export async function screenSnapshot(runtime: Runtime, snapshot: EmailSnapshot, required=false, reserve?: (requests: number) => Promise<void>): Promise<ScreenResult | null> {
+ *  the campaign limit. `call` names the email on each request's line and gets the last request's outcome back. */
+export async function screenSnapshot(runtime: Runtime, snapshot: EmailSnapshot, required=false, call?: ScreenCall): Promise<ScreenResult | null> {
   const settings = runtime.config.screen;
   if (!settings) return null;
   const from = formattedSender(snapshot.from, snapshot.fromName);
@@ -414,11 +472,10 @@ export async function screenSnapshot(runtime: Runtime, snapshot: EmailSnapshot, 
   const existing=pending.get(key);if(existing)return existing;
   const limits=runtime.config.screenLimits, test=!!snapshot.testCampaignId;
   const lookup=body(snapshot,test ? limits.campaignBytes : limits.messageBytes,test ? 'campaign' : 'message').then(async ({bodies,textHtmlOverlap})=>{
-    await reserve?.(bodies.length);
     const state=classifierState(snapshot,required,textHtmlOverlap);
     let highest: ScreenResult | undefined;
-    for (const body of bodies) {
-      const result=await evaluate(settings.endpoint,settings.apiKey,settings.model,state(body));
+    for (const [window, body] of bodies.entries()) {
+      const result=await evaluate(settings.endpoint,settings.apiKey,settings.model,state(body),call,window,bodies.length);
       if (!highest || result.spam>highest.spam) highest=result;
     }
     return highest!;
@@ -463,9 +520,9 @@ export async function screenInput(runtime: Runtime, snapshot: EmailSnapshot): Pr
   const state = classifierState({ ...snapshot, to: ['recipient'], cc: [], bcc: [] }, true, textHtmlOverlap);
   return { requests: bodies.map(state) };
 }
-/** One request of a campaign copy's screen. */
-export async function screenWindow(runtime: Runtime, input: ScreenInput, window: number): Promise<ScreenResult> {
+/** One request of a campaign copy's screen; `call` names the campaign on its line. */
+export async function screenWindow(runtime: Runtime, input: ScreenInput, window: number, call?: ScreenCall): Promise<ScreenResult> {
   const settings = runtime.config.screen;
   if (!settings) throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', 'Hosted content screening is unavailable.', undefined, true);
-  return evaluate(settings.endpoint, settings.apiKey, settings.model, input.requests[window]);
+  return evaluate(settings.endpoint, settings.apiKey, settings.model, input.requests[window], call, window, input.requests.length, CAMPAIGN_SAMPLE);
 }
