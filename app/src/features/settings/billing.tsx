@@ -1,21 +1,26 @@
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
 import { Link, useNavigate, useLocation } from 'react-router'
 import { useQueryClient } from '@tanstack/react-query'
-import { ArrowUpRight, ChevronRight, CreditCard } from 'lucide-react'
+import { ArrowUpRight, Check, ChevronDown, ChevronRight, CreditCard } from 'lucide-react'
 import { Alert, Button, ConfirmDialog, ControlSkeleton, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Input, Pagination, SectionHeader, Skeleton, StatusBadge, Switch, Tabs, useToast, type Column } from '../../components/ui'
-import { useApiDef, useApiQuery, useSession } from '../../data/context'
+import { useApiDef, useApiQuery, useSession, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
+import { request } from '../../data/live'
 import { ApiError, errorText } from '../../data/types'
+import { monthEstimate, type Usage } from '../../data/usage'
 import { balanceState, billingApi, cardBrand, centsUsd, declineText, fullDay, monthDay, parseDollars, priceUc, total, usd, type AutoRechargeInput, type BillingSummary, type LedgerEntry, type Payment } from '../../data/billing'
 import { useCursorPagination } from '../../lib/pagination'
-import { date } from '../../lib/format'
+import { date, number } from '../../lib/format'
 import './billing.css'
 import { productName } from '../../../../api/src/brand'
+import { GOOD_STANDING } from '../../../../api/src/standing-model'
 import { resourceOf } from '../../data/invalidation'
 
 type RowProps = { title: ReactNode; error?: ReactNode; children: ReactNode }
 const cardLabel = (card: { brand: string; last4: string }) => `${cardBrand(card.brand)}\u00a0••••\u00a0${card.last4}`
 const final = (payment: Payment | undefined) => !!payment && !['created', 'pending', 'requires_action'].includes(payment.status)
+const money = (value: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: value > 0 && value < 0.01 ? 4 : 2 }).format(value)
+const gigabytes = (bytes: number) => `${(bytes / 1e9).toLocaleString('en-US', { maximumFractionDigits: bytes > 0 && bytes < 1e8 ? 2 : 1 })} GB`
 
 /** Every billing read refreshes together after money moves, and the session's banner state with them. */
 function useBillingRefresh() {
@@ -26,72 +31,123 @@ function useBillingRefresh() {
   }
 }
 
-// Settings → Billing (owners and admins): the balance and Add credit first, then the card, auto-recharge and the
-// history. How billing works and the balance's parts open from the balance; auto-recharge's amounts from its row; the
-// free allowances and prices behind this month's usage from Plan & usage. Rows are 53px like every settings row and
-// each value has a skeleton of its own width, so nothing moves as data arrives.
+// Settings → Billing, the one page about money: the balance with Add credit, this month's usage, the free allowance it
+// comes after, the card, auto-recharge and the history. The balance's parts open from the balance and auto-recharge's
+// amounts from its row. Every member can open it: a member reads the usage and allowance rows (sent mail only, and no
+// balance, card or history, which the API keeps for owners and admins). Which rows there are is known from the session
+// on the first frame, rows are 53px like every settings row and each value has a skeleton of its own width, so nothing
+// moves as the two reads land.
 export function BillingSection({ row: Row }: { row: (props: RowProps) => ReactNode }) {
-  const query = useApiDef(queries.billing())
+  const { canAdminister } = useWorkspaceAccess()
+  const query = useApiDef(queries.billing(), { interval: 60_000 })
+  const reading = useApiDef(queries.usage(), { interval: 60_000 })
   // The state comes with the session (GET /v1/me) on the first frame: which alerts show is decided from it, so the
-  // balance arriving fills reserved space instead of inserting lines above the rows. The banner says what an empty
-  // balance stops; the badge says where it stands.
-  const state = useSession()?.identity?.billing
+  // balance arriving fills reserved space instead of inserting lines above the rows.
+  const identity = useSession()?.identity, state = identity?.billing
   const [adding, setAdding] = useState(false)
   const [about, setAbout] = useState(false)
-  const b = query.data
+  const b = query.data, usage = reading.data
   useCheckoutReturn()
   if (query.isError && !b) return <ErrorState error={query.error} onRetry={() => void query.refetch()} />
-  if (state?.free) return <FreePlan summary={b} Row={Row} />
+  // A member's page is its usage; an owner's still has the balance, the card and the history without it.
+  if (reading.isError && !usage && !canAdminister) return <ErrorState error={reading.error} onRetry={() => void reading.refetch()} />
+  const free = state?.free === true
+  // The balance says where it stands only when that needs saying: low, paused, held, or not charged yet.
+  const standing = b ?? (state ? { mode: free ? 'exempt' as const : 'prepaid' as const, state } : null)
+  const notice = !standing || free ? null : state?.enforcement !== 'enforce' ? { label: 'Not charged yet', tone: 'neutral' as const } : balanceState(standing).label === 'Funded' ? null : balanceState(standing)
+  // A daily sending limit is a row only while there is one (a new workspace's evaluation, or one its score set).
+  const limited = usage ? usage.daily?.cap != null : identity?.connection?.sendingLimit?.cap != null
+  const value = (ready: unknown, render: () => ReactNode, width = 120) => ready ? render() : <Skeleton width={width} height={20} />
+  const counted = usage ? [`${number(usage.month.sent)}\u00a0sent`, usage.month.received === null ? null : `${number(usage.month.received)}\u00a0received`].filter(Boolean).join(' · ') : null
+  const cost = b?.monthToDate ? usd(b.monthToDate.cost) : usage ? money(monthEstimate(usage)) : null
   return <>
-    <div className="settings-actions"><Button variant="primary" disabled={!b?.balance} onClick={() => setAdding(true)}>Add credit</Button></div>
-    {state && <BillingAlerts state={state} summary={b} />}
+    {canAdminister && !free && state && <BillingAlerts state={state} summary={b} />}
     <div className="settings-rows billing-rows">
-      <div className="billing-balance">
-        <span className="billing-balance__label">Balance{b && <StatusBadge status={state?.enforcement === 'enforce' ? balanceState(b).label : 'Not charged yet'} tone={state?.enforcement === 'enforce' ? balanceState(b).tone : 'neutral'} />}</span>
+      {canAdminister && (free ? <>
+        <div className="billing-balance">
+          <span className="billing-balance__label">Plan</span>
+          <span className="billing-balance__amount billing-balance__amount--plan">Free plan</span>
+        </div>
+        <Row title="Until">{b ? b.freePlan?.until ? fullDay(b.freePlan.until) : 'No end date' : <Skeleton width={96} height={20} />}</Row>
+      </> : <div className="billing-balance">
+        <span className="billing-balance__label">Balance{notice && <StatusBadge status={notice.label} tone={notice.tone} />}</span>
         {b?.balance ? <button type="button" className="billing-balance__amount" aria-haspopup="dialog" aria-label={`Balance ${usd(total(b.balance))}: details`} onClick={() => setAbout(true)}>{usd(total(b.balance))}<ChevronRight size={20} aria-hidden="true" /></button>
           : <span className="billing-balance__amount"><Skeleton width={136} height={36} /></span>}
-      </div>
-      <Row title="Usage this month">{b?.monthToDate ? <MonthLink>{usd(b.monthToDate.cost)}</MonthLink> : <Skeleton width={80} height={20} />}</Row>
-      <Row title="Payment method"><CardControl summary={b} /></Row>
-      <AutoRecharge summary={b} Row={Row} />
+        <Button variant="primary" className="billing-balance__add" disabled={!b?.balance} onClick={() => setAdding(true)}>Add credit</Button>
+      </div>)}
+      {/* A member sees no amount: only that the workspace is free, or that the balance needs an owner. */}
+      {!canAdminister && free && <Row title="Plan">Free plan</Row>}
+      {!canAdminister && notice && <Row title="Balance"><StatusBadge status={notice.label} tone={notice.tone} /></Row>}
+      {/* This month: the counts and what they cost so far, which opens the prices it is worked out from. */}
+      <Row title="Usage this month"><span className="billing-month">{cost && (usage || reading.isError) ? <>
+        {counted && <span className="muted">{counted}</span>}
+        <Link to="/legal/terms#prices" className="settings-score" aria-label={`${cost}: pricing`} title="Pricing"><span>{cost}</span><ArrowUpRight size={14} aria-hidden="true" /></Link>
+      </> : <Skeleton width={200} height={20} />}</span></Row>
+      <Row title="Free sends">{value(b, () => <Meter used={b!.free.sent.used} cap={b!.free.sent.limit} label="Free sends used" />, 160)}</Row>
+      <Row title="Free received">{value(b, () => b!.free.received ? <Meter used={b!.free.received.used} cap={b!.free.received.limit} label="Free received used" /> : <span className="muted">Owners and admins</span>, 160)}</Row>
+      <Row title="Stored past 90 days">{value(b, () => `${gigabytes(Number(BigInt(b!.free.storage.agedBytes)))} of ${gigabytes(b!.free.storage.limitBytes)} free`, 140)}</Row>
+      {limited && <DailyLimit usage={usage} />}
+      {canAdminister && !free && <>
+        <Row title="Payment method"><CardControl summary={b} /></Row>
+        <AutoRecharge summary={b} Row={Row} />
+      </>}
     </div>
-    <History />
-    {b && <AddCredit open={adding} onOpenChange={setAdding} summary={b} />}
-    {b?.balance && <BalanceDetails open={about} onOpenChange={setAbout} balance={b.balance} enforced={state?.enforcement === 'enforce'} />}
+    {canAdminister && <History />}
+    {canAdminister && b && <AddCredit open={adding} onOpenChange={setAdding} summary={b} />}
+    {canAdminister && b?.balance && <BalanceDetails open={about} onOpenChange={setAbout} balance={b.balance} />}
   </>
 }
-// This month's cost opens Plan & usage, where the free allowances it comes after and the prices are.
-const MonthLink = ({ children }: { children: ReactNode }) => <Link to="/settings#usage" replace className="settings-score"><span>{children}</span><ArrowUpRight size={14} aria-hidden="true" /></Link>
 
-// The balance's parts and how billing works, opened from the balance.
-function BalanceDetails({ open, onOpenChange, balance, enforced }: { open: boolean; onOpenChange: (open: boolean) => void; balance: NonNullable<BillingSummary['balance']>; enforced: boolean }) {
+// The balance's three parts, opened from the balance.
+function BalanceDetails({ open, onOpenChange, balance }: { open: boolean; onOpenChange: (open: boolean) => void; balance: NonNullable<BillingSummary['balance']> }) {
   const paid = BigInt(balance.paid)
-  const parts: [string, string][] = [paid < 0n ? ['Unpaid usage', usd(-paid)] : ['Paid credit', usd(paid)], ...BigInt(balance.promo) > 0n ? [['Promotional credit', usd(balance.promo)] as [string, string]] : [], ...BigInt(balance.unsettled) !== 0n ? [['Usage not yet settled', usd(balance.unsettled)] as [string, string]] : []]
+  const parts: [string, string][] = [paid < 0n ? ['Unpaid usage', usd(-paid)] : ['Paid credit', usd(paid)], ['Promotional credit', usd(balance.promo)], ['Usage not yet settled', usd(balance.unsettled)]]
   return <Dialog open={open} onOpenChange={onOpenChange} title={`Balance ${usd(total(balance))}`} className="billing-about">
     <dl className="billing-facts">{parts.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
-    <ul className="billing-rules">{enforced ? <>
-      <li>Usage is taken from it every hour.</li>
-      <li>At $0, sending pauses and received mail is accepted for 7 more days.</li>
-      <li>Credit you add pays off a negative balance first.</li>
-    </> : <li>Credit you add now is kept until billing starts.</li>}</ul>
-    <p className="muted billing-add__terms">{TERMS}</p>
   </Dialog>
 }
 
-// A workspace Anomaly made free: the plan instead of a balance, no Add credit, card or auto-recharge, and what its usage
-// would cost, since it is still measured. The history keeps its $0 usage rows.
-function FreePlan({ summary: b, Row }: { summary: BillingSummary | undefined; Row: (props: RowProps) => ReactNode }) {
-  return <>
-    <div className="settings-rows billing-rows">
-      <div className="billing-balance">
-        <span className="billing-balance__label">Plan</span>
-        <span className="billing-balance__amount billing-balance__amount--plan">Free plan</span>
-      </div>
-      <Row title="Until">{b ? b.freePlan?.until ? fullDay(b.freePlan.until) : 'No end date' : <Skeleton width={96} height={20} />}</Row>
-      <Row title="Usage this month">{b?.monthToDate ? <MonthLink>{usd(b.monthToDate.cost)}</MonthLink> : <Skeleton width={80} height={20} />}</Row>
+// A free allowance: how much of it this month has used.
+function Meter({ used, cap, label }: { used: number; cap: number; label: string }) {
+  const share = Math.min(1, used / Math.max(1, cap))
+  return <span className="usage-meter">
+    <span className="usage-meter__track" data-full={share >= 0.9 || undefined} role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={cap} aria-valuenow={used}><i style={{ transform: `scaleX(${share})` }} /></span>
+    <span className="usage-meter__count">{number(used)} / {number(cap)}</span>
+  </span>
+}
+
+// The daily sending limit while there is one: where it is now, and the steps it grows through open from it. The
+// evaluation is once, not a day: its meter counts toward the first recipients, whose results take about an hour.
+function DailyLimit({ usage }: { usage: Usage | undefined }) {
+  const daily = usage?.daily
+  // The API's steps (the evaluation) reserve their space while loading; good standing, with no limit, follows them.
+  const steps = usage ? usage.steps : [null]
+  // Where the workspace is: a step, or on a limit no step has (set by its score, a warning or the team), which the badge names.
+  const at = daily?.step ?? null, custom = daily?.cap != null && daily.step === null
+  const share = daily?.cap != null ? Math.min(1, daily.used / Math.max(1, daily.cap)) : 0, evaluating = daily?.step === 0
+  return <details className="usage-limit">
+    <summary className="settings-row">
+      <span className="settings-row__label"><span className="usage-limit__title">Daily limit<ChevronDown size={14} aria-hidden="true" />{custom && <StatusBadge status="Limited" tone="neutral" />}</span></span>
+      <span className="settings-row__control">{daily?.cap != null ? <span className="usage-meter" title={evaluating ? `Evaluation: the first ${number(daily.cap)} recipients, once. Their results take about an hour.` : daily.resetAt ? `Capacity frees up from ${date(daily.resetAt, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' })} UTC` : undefined}>
+        <span className="usage-meter__track" data-full={share >= 0.9 || undefined} role="meter" aria-label={evaluating ? 'Evaluation recipients sent' : 'Recipients used in the last 24 hours'} aria-valuemin={0} aria-valuemax={daily.cap} aria-valuenow={daily.used}><i style={{ transform: `scaleX(${share})` }} /></span>
+        <span className="usage-meter__count">{number(daily.used)} / {number(daily.cap)}</span>
+      </span> : <Skeleton width={160} height={20} />}</span>
+    </summary>
+    <div className="usage-steps-section">
+      <ol className="usage-steps">{steps.map((step, index) => {
+        const current = at === index, done = at != null && index < at
+        return <li key={index} data-current={current || undefined} data-done={done || undefined} style={{ '--i': index } as CSSProperties}>
+          <span className="usage-steps__mark" aria-hidden="true">{done ? <Check size={12} strokeWidth={2.75} /> : index + 1}</span>
+          {step ? <span className="usage-steps__body"><span><b>Evaluation</b> · first {number(step.cap)} recipients, once{current && <span className="usage-steps__badge">You’re here</span>}</span><span className="muted">{step.requires}</span></span> : <span className="usage-steps__body"><Skeleton width={160} height={20} /><Skeleton width={280} height={16} /><Skeleton width={200} height={16} /></span>}
+        </li>
+      })}
+        <li style={{ '--i': steps.length } as CSSProperties}>
+          <span className="usage-steps__mark" aria-hidden="true">{steps.length + 1}</span>
+          <span className="usage-steps__body"><span><b>No daily limit</b></span><span className="muted">{`Good standing: a sender score of ${GOOD_STANDING} or more, with no warning. Sending is paced per minute.`}</span></span>
+        </li>
+      </ol>
     </div>
-    <History />
-  </>
+  </details>
 }
 
 /** What the banner doesn't say, where the fix is: the date received mail starts being held, and why auto-recharge
@@ -193,17 +249,82 @@ function RechargeDialog({ settings, hasCard, enable, capped, Row, onClose }: { s
   </Dialog>
 }
 
-// History: the balance's ledger and the card payments, a page at a time. Both are cursor lists with card slots on phones.
-// An hourly usage line leads with its day and ends with its counts: "Usage Nov 20 · 2,330 emails, 44 AI decisions", so a
-// one-line cell keeps the numbers (the Date column has the time); the cell's title is the same text, whole.
-const shortDescription = (text: string) => text.replace(/^Usage ([A-Z][a-z]{2} \d{1,2}), \d{2}:\d{2}–\d{2}:\d{2} UTC: /, 'Usage $1 · ')
-const ledgerText = (e: LedgerEntry) => `${shortDescription(e.description)}${e.kind === 'topup' && e.expiresAt ? ` · Expires ${fullDay(e.expiresAt)}` : ''}`
-const ledgerDescription = (e: LedgerEntry) => <span className="billing-desc" title={ledgerText(e)}>{shortDescription(e.description)}{e.kind === 'topup' && e.expiresAt && <span className="muted"> · Expires {fullDay(e.expiresAt)}</span>}</span>
-const ledgerColumns: Column<LedgerEntry>[] = [
-  { key: 'description', label: 'Description', render: e => <span className="billing-cell">{ledgerDescription(e)}{e.invoiceUrl && <InvoiceLink href={e.invoiceUrl} label="Invoice" />}</span>, cardRender: ledgerDescription, card: 'title' },
-  { key: 'at', label: 'Date', width: 124, render: e => date(e.at, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' }), card: 'line' },
-  { key: 'amount', label: 'Amount', width: 104, align: 'right', render: e => <span className="billing-amount" data-sign={BigInt(e.amount) < 0n ? 'out' : 'in'}>{usd(e.amount, { sign: true })}</span>, card: 'aside' },
-  { key: 'after', label: 'Balance after', width: 124, align: 'right', render: e => usd(e.balanceAfter), cardRender: e => <>{usd(e.balanceAfter)}{e.invoiceUrl && <> · <InvoiceLink href={e.invoiceUrl} label="Invoice" /></>}</>, card: 'field' },
+// History: the balance's changes and the card payments, a page at a time. Both are cursor lists with card slots on phones.
+// The ledger has one usage entry an hour; the page shows one line a day (UTC), its emails and its cost added up from
+// those entries, so a month reads as its days. Everything else on the ledger (credit, refunds, adjustments) keeps its own line.
+type Line = { key: string; day: string; at: string | null; text: string; /** A top-up's credit expires on this day. */ expires: string | null; amount: bigint; invoiceUrl: string | null }
+type LedgerPage = { data: LedgerEntry[]; nextCursor: string | null }
+type Meters = Record<string, { quantity?: number | string } | undefined>
+/** The UTC day an hourly usage entry is for; null for anything that isn't one day's usage (a repricing, or a settlement
+ *  that runs past midnight), which stays a line of its own in the API's words. */
+function usageDay(entry: LedgerEntry) {
+  if (entry.kind !== 'usage' || typeof entry.detail.from !== 'string' || typeof entry.detail.to !== 'string') return null
+  const from = Date.parse(entry.detail.from), to = Date.parse(entry.detail.to)
+  if (Number.isNaN(from) || Number.isNaN(to)) return null
+  const day = new Date(from).toISOString().slice(0, 10)
+  return day === new Date(to - 1).toISOString().slice(0, 10) ? day : null
+}
+/** A day's usage in the ledger's own words: emails sent and received together, stored mail, and mail on a connected AWS account. */
+function usageText(sum: Record<string, number>, charged: boolean) {
+  const emails = (sum.send ?? 0) + (sum.receive ?? 0), own = (sum.byo_send ?? 0) + (sum.byo_receive ?? 0)
+  const parts = [emails ? `${number(emails)} emails` : '', sum.storage ? 'stored mail' : '', own ? `${number(own)} emails on your AWS` : ''].filter(Boolean)
+  return `${['Usage', ...parts.length ? [parts.join(', ')] : []].join(' · ')}${charged ? '' : ' (not charged)'}`
+}
+/** Ledger entries, newest first, as history lines: each day's usage entries become one line where the day's newest entry is. */
+function historyLines(entries: LedgerEntry[]): Line[] {
+  const lines: Line[] = [], days = new Map<string, { line: Line; sum: Record<string, number>; charged: boolean }>()
+  for (const entry of entries) {
+    const day = usageDay(entry)
+    if (!day) {
+      lines.push({ key: `entry-${entry.id}`, day: entry.at.slice(0, 10), at: entry.at, text: entry.description, expires: entry.kind === 'topup' && entry.expiresAt ? fullDay(entry.expiresAt) : null, amount: BigInt(entry.amount), invoiceUrl: entry.invoiceUrl })
+      continue
+    }
+    let group = days.get(day)
+    if (!group) { group = { line: { key: `day-${day}`, day, at: null, text: '', expires: null, amount: 0n, invoiceUrl: null }, sum: {}, charged: false }; days.set(day, group); lines.push(group.line) }
+    const meters = (typeof entry.detail.meters === 'object' && entry.detail.meters ? entry.detail.meters : entry.detail) as Meters
+    for (const meter of ['send', 'receive', 'storage', 'byo_send', 'byo_receive']) group.sum[meter] = (group.sum[meter] ?? 0) + Number(meters[meter]?.quantity ?? 0)
+    if (entry.detail.charged !== false) group.charged = true
+    group.line.amount += BigInt(entry.amount)
+    group.line.text = usageText(group.sum, group.charged)
+  }
+  return lines
+}
+/** How many of these entries (newest first) end on a whole day: the oldest day among them may continue on the next
+ *  ledger page, so it and anything among its entries waits for that page. */
+function wholeDays(entries: LedgerEntry[]) {
+  let last: string | null = null, cut = entries.length
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const day = usageDay(entries[index])
+    if (!day) continue
+    if (last === null) last = day
+    if (day !== last) break
+    cut = index
+  }
+  return last === null ? entries.length : cut
+}
+const LEDGER_READ = 100, HISTORY_LINES = 10, LEDGER_READS = 8
+/** One page of history: ledger pages are read until they hold ten whole lines (three reads for a workspace that sends
+ *  every hour), and the page ends where a day ends, so no day is split over two pages. */
+async function historyPage(cursor: string | undefined, signal: AbortSignal): Promise<{ data: Line[]; nextCursor: string | null }> {
+  const entries: LedgerEntry[] = []
+  let next = cursor
+  for (let read = 1; ; read++) {
+    const page = await request<LedgerPage>(`/v1/billing/ledger?limit=${LEDGER_READ}${next ? `&cursor=${encodeURIComponent(next)}` : ''}`, { signal })
+    entries.push(...page.data)
+    if (!page.nextCursor) return { data: historyLines(entries), nextCursor: null }
+    next = page.nextCursor
+    // A day longer than every read (it never is, at an entry an hour) is shown as far as it was read.
+    const cut = wholeDays(entries) || (read >= LEDGER_READS ? entries.length : 0)
+    const lines = historyLines(entries.slice(0, cut))
+    if (lines.length >= HISTORY_LINES || (cut && read >= LEDGER_READS)) return { data: lines, nextCursor: entries[cut - 1].id }
+  }
+}
+const lineDescription = (line: Line) => <span className="billing-desc" title={`${line.text}${line.expires ? ` · Expires ${line.expires}` : ''}`}>{line.text}{line.expires && <span className="muted"> · Expires {line.expires}</span>}</span>
+const lineDay = (line: Line) => <span title={line.at ? `${date(line.at, { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' })} UTC` : undefined}>{monthDay(line.day)}</span>
+const lineColumns: Column<Line>[] = [
+  { key: 'description', label: 'Description', render: line => <span className="billing-cell">{lineDescription(line)}{line.invoiceUrl && <InvoiceLink href={line.invoiceUrl} label="Invoice" />}</span>, cardRender: line => <span className="billing-desc">{line.text}</span>, card: 'title' },
+  { key: 'day', label: 'Date', width: 124, render: lineDay, cardRender: line => <>{lineDay(line)}{line.expires && <> · Expires {line.expires}</>}{line.invoiceUrl && <> · <InvoiceLink href={line.invoiceUrl} label="Invoice" /></>}</>, card: 'line' },
+  { key: 'amount', label: 'Amount', width: 104, align: 'right', render: line => <span className="billing-amount" data-sign={line.amount > 0n ? 'in' : undefined}>{usd(line.amount, { sign: true })}</span>, card: 'aside' },
 ]
 function InvoiceLink({ href, label }: { href: string; label: string }) {
   return <a className="billing-link" href={href} target="_blank" rel="noreferrer">{label}<ArrowUpRight size={12} aria-hidden="true" /></a>
@@ -227,11 +348,12 @@ function History() {
     {view === 'ledger' ? <LedgerTable /> : <PaymentsTable />}
   </section>
 }
-// Ledger IDs are sequence numbers: prefixed, so no row shares a React key with a skeleton row (keyed 0–4) and takes over
-// its element, which the browser then counts as that row moving.
+// Line keys are prefixed, so no row shares a React key with a skeleton row (keyed 0–4) and takes over its element, which
+// the browser then counts as that row moving.
 function LedgerTable() {
-  const pagination = useCursorPagination(), query = useApiDef(queries.billingLedger(pagination.cursorForPage(pagination.page)), { keepPrevious: true })
-  return <HistoryList query={query} pagination={pagination} columns={ledgerColumns} rowKey={e => `entry-${e.id}`} empty={<EmptyState title="No balance changes yet" />} />
+  const pagination = useCursorPagination(), cursor = pagination.cursorForPage(pagination.page)
+  const query = useApiQuery(['billing-history', cursor ?? null], (_api, signal) => historyPage(cursor, signal), { keepPrevious: true })
+  return <HistoryList query={query} pagination={pagination} columns={lineColumns} rowKey={line => line.key} empty={<EmptyState title="No balance changes yet" />} />
 }
 function PaymentsTable() {
   const pagination = useCursorPagination(), query = useApiDef(queries.billingPayments(pagination.cursorForPage(pagination.page)), { keepPrevious: true })

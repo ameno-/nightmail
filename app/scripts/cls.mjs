@@ -147,14 +147,18 @@ const pages = ids => [
   ['API keys', '/api-keys', { from: '/overview' }],
   ['Settings', '/settings', { from: '/overview' }],
   ['Settings · members', '/settings#members', { from: '/settings' }],
-  ['Settings · sending', '/settings#sending', { from: '/settings' }],
   ['Settings · webhooks', '/settings#webhooks', { from: '/settings' }],
   ['Settings · activity', '/settings#activity', { from: '/settings' }],
   ['Settings · account', '/settings#account', { from: '/settings' }],
-  ['Settings · plan & usage', '/settings#usage', { from: '/settings' }],
+  // Billing is the one page about money: the balance, this month's usage, the free allowance, the card, auto-recharge
+  // and the history (owed: the daily limit's row too). A member reads the usage and allowance rows only.
   ['Settings · billing', '/settings#billing', { from: '/settings' }],
   ['Settings · billing · owed', '/settings#billing', { user: 'rae', from: '/overview' }],
   ['Settings · billing · free', '/settings#billing', { user: 'nia', from: '/overview' }],
+  ['Settings · billing · member', '/settings#billing', { user: 'max', from: '/settings' }],
+  // Old links: Plan & usage is part of Billing; hosted mail has no Sending section, so its link opens General.
+  ['Settings · billing · old usage link', '/settings#usage', {}],
+  ['Settings · old sending link', '/settings#sending', {}],
   ['Settings · webhook', `/settings/webhooks/${ids.webhook}`, { from: '/settings#webhooks', row: 'Delivery events' }],
   ['Settings · MCP connection', `/settings/mcp/${ids.mcp}`, { from: '/settings#account' }],
   ['Docs', '/docs', { from: '/overview' }],
@@ -255,6 +259,580 @@ const pages = ids => [
   ['Settings · postal address dialog', '/settings', { dialog: 'Edit' }],
   ['Settings · new webhook', '/settings/webhooks/new', {}],
   ['Settings · add credit dialog', '/settings#billing', { dialog: 'Add credit' }],
+  // The balance opens its three parts.
+  ['Settings · balance dialog', '/settings#billing', { dialog: '
+  // A support email's sign-in link: the dialog answers Continue (the claim) in place, without moving.
+  ['Support · continue email', `/support/continue/${ids.continueConversation}/${ids.continueMessage}`, { user: 'nia', dialog: 'Continue' }],
+];
+
+// The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
+const phonePages = new Set(['Newsletter', 'Newsletter · one draft', 'Newsletter · new', 'New newsletter', 'New issue', 'Campaigns · with newsletters', 'Overview', 'Overview · range', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Logs · range', 'Sent email', 'Sent email · junk-like', 'Received email', 'Sent email · thread', 'Received email · thread', 'Received email · from its thread', 'Sent email · thread sheet', 'Receiving', 'Receiving · rules', 'Receiving · new rule', 'Receiving · recipe form', 'Receiving · recipe rule', 'Receiving · rule editor', 'Receiving · rule editor · new script', 'Receiving · flow panel', 'Receiving · typed address', 'Receiving · why it went here dialog', 'Receiving · address', 'Receiving · address · where mail goes', 'Receiving · address · settings', 'Receiving · agent inboxes', 'Receiving · destinations', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'Domain · custom MAIL FROM', 'API keys', 'Settings', 'Settings · members', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · billing · member', 'Settings · billing · old usage link', 'Settings · balance dialog', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Onboarding · AWS stack', 'Onboarding · AWS refused', 'Onboarding · AWS choose', 'Onboarding · AWS sandbox', 'Onboarding · AWS production access', 'Onboarding · AWS setting up', 'Receiving · inbox', 'Receiving · endpoints', 'Onboarding · AWS disconnecting', 'Settings · sending · AWS', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Operator · waitlist', 'Operator · abuse', 'Operator · abuse · cluster', 'Operator · abuse · alerts', 'Operator · abuse · Slack card', 'Support', 'Support · agent handling', 'Support · conversation', 'Support · customer sheet', 'Support · confirm a change', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Signed out · deep link', 'Signed out · page not found', 'Signed out · waitlist', 'Legal', 'Legal · terms', 'Legal · privacy', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'Overview · connect agent sheet', 'API keys · create key dialog', 'API keys · SMTP login dialog', 'API keys · edit key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · postal address dialog', 'Settings · add credit dialog', 'Domain · add custom MAIL FROM dialog', 'Domain · change custom MAIL FROM dialog', 'Support · continue email']);
+const devices = {
+  desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
+  phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
+};
+
+// Every API path gets a stable delay of 300–1300 ms in 200 ms steps: slow, and out of request order, the same way
+// every run. Every response of a page, assets included, starts 150 ms after its request at the soonest and shares the
+// page's 1.6 Mbps (the fixture's proxy applies both, as Chrome's DevTools throttling did).
+const apiDelay = path => { let h = 0; for (const c of path) h = (h * 31 + c.charCodeAt(0)) >>> 0; return 300 + (h % 6) * 200; };
+const throttle = { latency: 150, bytesPerSecond: 1.6 * 1024 * 1024 / 8 };
+// Web fonts are served at once from app/dist, not through the throttled network, so they have loaded before the
+// (throttled) script that renders any text runs. Before, whether a font arrived before or after the page's text varied
+// with the runner's load, and a page whose text changed size when the font swapped in failed only sometimes (Settings ·
+// webhook on a phone, 2 of 3 dev runs on Nov 12). CLS_FONTS=late measures that swap instead: every font arrives 1.8 s
+// late, after the slowest API response, so text first paints in its local fallback (tokens.css).
+const lateFonts = process.env.CLS_FONTS === 'late', FONT_DELAY_MS = 1800;
+const density = process.env.CLS_DENSITY ? await import('./density.mjs') : null, densityOnly = process.env.CLS_DENSITY === 'only';
+
+// Runs in the page before its own scripts.
+const probe = () => {
+  const state = window.__cls = { total: 0, entries: [], nodes: [], long: [], fetches: 0 };
+  const rect = r => [r.x, r.y, r.width, r.height].map(Math.round);
+  const describe = node => {
+    if (!node) return '(removed)';
+    if (node.nodeType !== 1) return `#text in ${describe(node.parentElement)}`;
+    const parts = [];
+    for (let n = node; n && n.nodeType === 1 && n !== document.body && parts.length < 5; n = n.parentElement) {
+      const classes = typeof n.className === 'string' ? n.className.trim().split(/\s+/).filter(Boolean).slice(0, 2) : [];
+      parts.unshift(n.tagName.toLowerCase() + (n.id ? '#' + n.id : '') + classes.map(c => '.' + c).join(''));
+      if (n.id) break;
+    }
+    return parts.join(' > ');
+  };
+  const record = list => {
+    for (const e of list) {
+      if (e.hadRecentInput) continue;
+      state.total += e.value;
+      state.entries.push({ value: e.value, at: Math.round(e.startTime), sources: (e.sources || []).map(s => {
+        if (s.node) state.nodes.push(s.node);
+        return { node: describe(s.node), text: (s.node?.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 80), from: rect(s.previousRect), to: rect(s.currentRect) };
+      }) });
+    }
+  };
+  state.observer = new PerformanceObserver(list => record(list.getEntries()));
+  state.observer.observe({ type: 'layout-shift', buffered: true });
+  state.read = () => { record(state.observer.takeRecords()); return { total: state.total, entries: state.entries, long: state.long }; };
+  state.reset = () => { record(state.observer.takeRecords()); Object.assign(state, { total: 0, entries: [], nodes: [], long: [] }); };
+  new PerformanceObserver(list => { for (const e of list.getEntries()) state.long.push({ at: Math.round(e.startTime), duration: Math.round(e.duration) }); }).observe({ type: 'longtask', buffered: true });
+  // Fetches the page has started and not yet answered, and response bodies it is still reading, counted in the page:
+  // a request started in the last frame can't slip past the network events, and a body the app never reads (which
+  // Chrome never reports finished) doesn't hold the measurement open.
+  const track = pending => { state.fetches++; pending.finally(() => state.fetches--).catch(() => {}); return pending; };
+  const original = window.fetch, held = url => String(url).includes('/v1/rules/version');
+  window.fetch = function (...args) { const pending = original.apply(this, args); return held(args[0] instanceof Request ? args[0].url : args[0]) ? pending : track(pending); };
+  for (const method of ['arrayBuffer', 'blob', 'bytes', 'formData', 'json', 'text']) {
+    const read = Response.prototype[method];
+    if (read) Response.prototype[method] = function (...args) { return held(this.url) ? read.apply(this, args) : track(read.apply(this, args)); };
+  }
+};
+// Resolves once fonts are loaded, two frames have rendered and the main thread has gone idle.
+const quiet = () => document.fonts.ready.then(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(() => requestIdleCallback(() => done(window.__cls.fetches), { timeout: 1000 })))));
+
+// Requests in flight. A fetch() leaves this set when its response headers arrive: the page counts its body reads.
+function network(page) {
+  const inflight = new Set(), waiters = [];
+  let started = 0;
+  const finish = request => { inflight.delete(request); if (!inflight.size) for (const done of waiters.splice(0)) done(); };
+  page.on('request', request => { if (request.url().includes(LONG_POLL)) return; inflight.add(request); started++; });
+  page.on('response', response => { if (response.request().resourceType() === 'fetch') finish(response.request()); });
+  page.on('requestfinished', finish);
+  page.on('requestfailed', finish);
+  return {
+    idle: () => inflight.size ? new Promise(done => waiters.push(done)) : Promise.resolve(),
+    get started() { return started; }, get size() { return inflight.size; },
+    pending: () => [...inflight].map(r => r.url()),
+  };
+}
+async function settle(page, net) {
+  for (let calm = 0; calm < 2;) {
+    await net.idle();
+    const mark = net.started;
+    const fetches = await page.evaluate(quiet);
+    calm = !net.size && net.started === mark && !fetches ? calm + 1 : 0;
+  }
+}
+const sharp = n => Math.round(n * 10000) / 10000;
+// The live view's long poll (features/inbound/live.ts) stays open while its page does; it never counts as loading.
+const LONG_POLL = '/v1/rules/version';
+let liveSaves = 0;
+
+// Masked addresses, in the page. A seeded mailbox address (cls-fixture.mjs) may be spelled out only where it is typed or
+// chosen (a field, a picker, a dialog) or in a code example; everywhere else the page holds its first two characters.
+const maskedLeaks = () => {
+  const SEEDED = /[A-Za-z0-9._%+*-]+@(?:[a-z0-9-]+\.)*(?:northwind\.example|lumenlabs\.example|fieldnotes\.example|driftwood\.example|example\.net|example\.com)\b/gi;
+  const mailbox = value => value.slice(0, value.lastIndexOf('@')).replace(/\*/g, '') !== '';
+  const exempt = el => !!el.closest('input, textarea, select, option, datalist, [contenteditable=""], [contenteditable="true"], pre, code, [role=dialog], [role=alertdialog], [data-own-address]');
+  const found = [], note = (what, value) => { if (found.length < 5) found.push(`${what} spells out ${value.slice(0, 2)}…`); };
+  for (const el of document.querySelectorAll('.private-address:not([data-revealed])')) {
+    const text = el.querySelector('.private-address__value')?.textContent ?? el.textContent;
+    if ([...text].length > 2 || !el.querySelector('.private-address__rest')) note('a masked address', text);
+  }
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  for (let node; (node = walker.nextNode());) for (const value of node.nodeValue.match(SEEDED) ?? []) if (mailbox(value) && !exempt(node.parentElement) && !node.parentElement.closest('[data-revealed]')) note(`text in <${node.parentElement.tagName.toLowerCase()} class="${node.parentElement.className}">`, value);
+  for (const el of document.body.querySelectorAll('[title], [aria-label], [aria-description], [alt], a[href]')) for (const name of ['title', 'aria-label', 'aria-description', 'alt', 'href']) {
+    let value = el.getAttribute(name) ?? ''; try { value = decodeURIComponent(value); } catch {}
+    for (const match of value.match(SEEDED) ?? []) if (mailbox(match) && !exempt(el)) note(`${name} on <${el.tagName.toLowerCase()} class="${el.className}">`, match);
+  }
+  return found;
+};
+// Where to hover the first few masked addresses in view that the pointer can reach, and what must stay where it is.
+const maskedTargets = () => [...document.querySelectorAll('.private-address:not([data-revealed])')].map((el, index) => {
+  const r = el.getBoundingClientRect(), x = r.left + 3, y = r.top + r.height / 2;
+  return r.width > 0 && r.top >= 0 && r.bottom <= innerHeight && el.contains(document.elementFromPoint(x, y)) ? { index, x, y } : null;
+}).filter(Boolean).slice(0, 3);
+const maskedState = index => {
+  const el = document.querySelectorAll('.private-address')[index], rect = node => { const r = node.getBoundingClientRect(); return [r.x, r.y, r.width, r.height].map(n => Math.round(n * 100) / 100).join(' '); };
+  return { revealed: el.hasAttribute('data-revealed'), text: el.querySelector('.private-address__value').textContent, own: rect(el), around: rect(el.closest('tr, li, dd, h1, p, section') ?? el.parentElement) };
+};
+async function masking(page, hover, shell) {
+  const problems = await page.evaluate(maskedLeaks);
+  if (!hover) return problems;
+  const frame = () => page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
+  for (const { index, x, y } of await page.evaluate(maskedTargets)) {
+    const before = await page.evaluate(maskedState, index);
+    await page.mouse.move(x, y); await frame();
+    const shown = await page.evaluate(maskedState, index);
+    await page.mouse.move(1, 1); await frame();
+    const after = await page.evaluate(maskedState, index);
+    if (!shown.revealed || [...shown.text].length <= 2) problems.push(`hovering ${before.text}… did not reveal it`);
+    else if (shown.own !== before.own || shown.around !== before.around) problems.push(`revealing ${before.text}… moved it: ${before.own} → ${shown.own}`);
+    if (after.revealed || after.text !== before.text || after.own !== before.own) problems.push(`${before.text}… stayed revealed or moved after the pointer left`);
+  }
+  // Privacy mode off (⇧P, lib/privacy.ts) reveals every address at once without moving anything; on again masks them.
+  // ⇧P is the dashboard shell's shortcut (components/AppShell.tsx): a signed-out page (the waitlist) reveals by hover only.
+  const count = await page.evaluate(() => document.querySelectorAll('.private-address').length);
+  if (!count || !shell) return problems;
+  const states = async () => { const all = []; for (let i = 0; i < Math.min(count, 5); i++) all.push(await page.evaluate(maskedState, i)); return all; };
+  // ⇧P is ignored while typing (the support chat's box, a rule's editor), so leave whatever field has focus first.
+  await page.evaluate(() => document.activeElement?.blur());
+  const before = await states();
+  await page.keyboard.press('Shift+P'); await frame();
+  const off = await states(), root = await page.evaluate(() => ({ privacy: document.documentElement.dataset.privacy, pressed: document.querySelector('.privacy-toggle')?.getAttribute('aria-pressed') }));
+  if (root.privacy !== undefined || root.pressed !== 'false') problems.push(`⇧P did not turn privacy mode off: ${JSON.stringify(root)}`);
+  off.forEach((state, i) => {
+    if (!state.revealed || [...state.text].length <= 2) problems.push(`privacy mode off left ${before[i].text}… masked`);
+    else if (state.own !== before[i].own || state.around !== before[i].around) problems.push(`privacy mode off moved ${before[i].text}…: ${before[i].own} → ${state.own}`);
+  });
+  await page.keyboard.press('Shift+P'); await frame();
+  const on = await states();
+  on.forEach((state, i) => { if (state.revealed !== before[i].revealed || state.text !== before[i].text || state.own !== before[i].own) problems.push(`privacy mode on again did not mask ${before[i].text}… as before`); });
+  problems.push(...await page.evaluate(maskedLeaks));
+  return problems;
+}
+
+async function measure(browser, job, fx) {
+  const origin = fx.origins[job.index % fx.origins.length];
+  const context = await browser.newContext({ ...devices[job.device], colorScheme: job.scheme, ...job.still && { reducedMotion: 'reduce' } });
+  const result = { page: job.name, path: job.path, scheme: job.scheme, device: job.device, mode: job.mode, cls: null, entries: [], longTask: null, error: null };
+  let page, net;
+  const problems = [];
+  let expected500 = null;
+  const work = (async () => {
+    if (job.waitlist) await context.addCookies([{ name: 'nightmail.waitlist', value: encodeURIComponent(job.waitlist), url: origin }]);
+    if (job.user) await context.addCookies([job.user].flat().map((user, slot) => ({ name: slot ? `nightmail.session_token.${slot}` : 'nightmail.session_token', value: encodeURIComponent(fx.sessions[user].cookie), url: origin, httpOnly: true })));
+    await context.addInitScript(probe);
+    // Privacy mode on (lib/privacy.ts; off by default), so the masking checks and the review screenshots see addresses masked.
+    // (Init scripts run in every frame too, and an email preview's sandboxed frame has no storage.)
+    await context.addInitScript(() => { try { localStorage.setItem('nightmail.privacy.v2', 'on'); } catch {} });
+    // Data Saver turns off the shell's idle warm-up of every other sidebar section: in-app clicks then load the next
+    // page's code and data cold, and cold loads (apart from Overview, which exercises the warm-up in each pass) measure
+    // their own page rather than re-fetching all eight sections 170 times.
+    if (job.mode === 'in-app' || job.name !== 'Overview') await context.addInitScript(() => {
+      if (navigator.connection) Object.defineProperty(navigator.connection, 'saveData', { get: () => true });
+      else Object.defineProperty(navigator, 'connection', { value: { saveData: true }, configurable: true });
+    });
+    // The support chat's scripted demo (components/SupportChat.tsx), so the open chat is measured without a support Worker.
+    if (job.support) await context.addInitScript(() => sessionStorage.setItem('nightmail.support', 'demo'));
+    // UI notes mode, as an operator turns it on (lib/ui-notes-mode.ts).
+    if (job.notes) await context.addInitScript(() => localStorage.setItem('nightmail.ui-notes', 'on'));
+    page = await context.newPage();
+    net = network(page);
+    page.on('request', request => { const url = request.url(); if (/^https?:\/\//i.test(url) && !url.startsWith(origin)) problems.push(`external request ${url}`); });
+    // A guard that makes a write fail on purpose expects its one 500 (expected500), and says so itself if it doesn't come.
+    page.on('response', response => { if (response.url().startsWith(origin + '/v1/') && (response.status() >= 500 || response.status() === 429) && !(expected500 && response.status() === 500 && expected500(response))) problems.push(`${response.status()} ${response.request().method()} ${response.url().slice(origin.length)}`); });
+    page.on('pageerror', error => problems.push(`page error: ${error.message}`));
+    // The fixture's proxy shapes the traffic (cls-fixture.mjs): apiDelay on /v1/*, fonts from memory at once, and this
+    // page's latency and bandwidth, for the requests carrying its x-cls-page. Not in Chrome: CDP Fetch interception
+    // (context.route) paused targets on Linux CI, and DevTools throttling (Network.emulateNetworkConditionsByRule)
+    // held a page's scripts for the whole page.goto after the proxy had sent them, in 12 of 36 shard runs on Nov 17.
+    await context.setExtraHTTPHeaders({ 'x-cls-page': String(job.index) });
+    if (lateFonts) {
+      const cdp = await context.newCDPSession(page);
+      await cdp.send('Network.enable');
+      await cdp.send('Network.setCacheDisabled', { cacheDisabled: true });
+    }
+    await page.goto(origin + (job.mode === 'in-app' ? job.from : job.path), { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(error => {
+      throw new Error(`${error.message.split('\n')[0]} In flight: ${net.pending().map(url => url.replace(origin, '')).join(', ') || 'nothing'}`);
+    });
+    // With late fonts, the fallbacks only keep text still if this machine has one of their local fonts (tokens.css).
+    const missing = !lateFonts ? [] : await page.evaluate(() => Promise.all([...document.fonts].filter(f => f.family.includes('Fallback')).map(f => f.load().then(() => null, () => `${f.family} ${f.weight} ${f.unicodeRange}`))));
+    for (const face of missing.filter(Boolean)) problems.push(`no local font for ${face}: install fonts-liberation and fonts-dejavu-core, or measure on a machine with Arial and Menlo`);
+    await settle(page, net);
+    if (job.support) {
+      // Open the chat and let the greeting finish: the panel is idle and no caret is left in it.
+      const opened = await page.evaluate(() => { const button = document.getElementById('support-trigger'); button?.click(); return Boolean(button); });
+      if (!opened) problems.push('no Help button');
+      else await page.waitForFunction(() => document.querySelector('#support-panel[data-open]:not([data-busy])') && !document.querySelector('#support-panel .support-caret'), null, { timeout: 30_000, polling: 100 });
+      await settle(page, net);
+    }
+    if (job.dialog) {
+      const opened = await page.evaluate(label => { const el = [...document.querySelectorAll('button')].find(el => el.getClientRects().length && el.textContent.trim().startsWith(label)); el?.click(); return Boolean(el); }, job.dialog);
+      if (!opened) problems.push(`no control “${job.dialog}”`);
+      else {
+        const dialog = await page.waitForSelector('[role=dialog][data-state=open]', { timeout: 10_000 }).catch(() => { problems.push(`“${job.dialog}” opened no dialog`); return null; });
+        // The page can go idle before the dialog's 200 ms entrance ends, whose transform then still moves what the
+        // masked address check hovers by a fraction of a pixel (the route editor, Nov 20).
+        await dialog?.evaluate(el => Promise.race([Promise.all(el.getAnimations({ subtree: true }).filter(a => a.effect?.getTiming().iterations !== Infinity).map(a => a.finished.catch(() => {}))), new Promise(done => setTimeout(done, 5000))]));
+      }
+      await settle(page, net);
+    }
+    if (job.menu) {
+      // A row's menu, then one of its items: a dropdown opens on pointer down, a phone's action sheet on click. The
+      // dialog the item opens is found by its title.
+      const [trigger, item, title] = job.menu;
+      const opened = await page.evaluate(label => { const el = [...document.querySelectorAll('button')].find(el => el.getClientRects().length && el.getAttribute('aria-label') === label); el?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, pointerType: 'mouse' })); el?.click(); return Boolean(el); }, trigger);
+      const choice = opened && await page.waitForFunction(text => [...document.querySelectorAll('[role=menuitem], .ui-action-sheet__item')].find(el => el.getClientRects().length && el.textContent.trim() === text), item, { timeout: 10_000 }).catch(() => null);
+      if (!choice) problems.push(opened ? `no “${item}” in “${trigger}”` : `no control “${trigger}”`);
+      else {
+        await choice.evaluate(el => el.click());
+        await page.waitForFunction(text => [...document.querySelectorAll('[role=dialog][data-state=open]')].some(el => el.textContent.includes(text)), title, { timeout: 10_000 }).catch(() => problems.push(`“${item}” opened no “${title}” dialog`));
+      }
+      await settle(page, net);
+    }
+    if (job.mode === 'in-app') {
+      await page.evaluate(() => { window.__cls.reset(); window.__inApp = performance.now(); });
+      if (job.switchTo) {
+        // Open the switcher (a dropdown opens on pointer down, the phone's sheet on click) and pick the other account's workspace.
+        await page.evaluate(() => { const trigger = document.querySelector('#sidebar-workspace'); trigger?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, pointerType: 'mouse' })); trigger?.click(); });
+        const item = await page.waitForFunction(text => [...document.querySelectorAll('[role=menuitem], .account-sheet button')].find(el => el.textContent.includes(text)), job.switchTo, { timeout: 10_000 }).catch(() => null);
+        result.via = item ? 'switch' : `no workspace “${job.switchTo}” in the switcher`;
+        if (item) await item.evaluate(el => el.click());
+      } else result.via = await page.evaluate(({ path, click, row }) => {
+        const shown = el => el.getClientRects().length > 0, text = el => el.textContent.replace(/\s+/g, ' ').trim();
+        // A table row, or on a phone its card (whose link covers it).
+        if (row) { const tr = [...document.querySelectorAll('tbody tr, .ui-card')].find(tr => shown(tr) && text(tr).includes(row)); (tr?.querySelector('.ui-card__link') ?? tr)?.click(); return tr ? 'row' : `no row with “${row}”`; }
+        if (click) { const el = [...document.querySelectorAll('a, button, [role=tab]')].find(el => shown(el) && text(el).startsWith(click)); el?.click(); return el ? 'control' : `no control “${click}”`; }
+        const target = new URL(path, location.href);
+        const link = [...document.querySelectorAll('a[href]')].find(a => a.href === target.href && shown(a));
+        if (link) { link.click(); return 'link'; }
+        history.pushState(null, '', target.href);
+        dispatchEvent(new PopStateEvent('popstate'));
+        return 'history';
+      }, { path: job.path, click: job.click, row: job.row });
+      if (result.via.startsWith('no ')) problems.push(result.via);
+      await settle(page, net);
+      const state = await page.evaluate(() => ({ at: window.__inApp, url: location.pathname + location.search + location.hash }));
+      if (state.at === undefined) problems.push('the navigation reloaded the page');
+      if (state.url !== job.path) problems.push(`landed on ${state.url}`);
+      const read = await page.evaluate(() => window.__cls.read());
+      result.longTask = Math.max(0, ...read.long.filter(t => t.at >= state.at).map(t => t.duration));
+      Object.assign(result, { cls: sharp(read.total), entries: read.entries });
+    } else {
+      const read = await page.evaluate(() => window.__cls.read());
+      Object.assign(result, { cls: sharp(read.total), entries: read.entries });
+    }
+    if (job.live) {
+      // The agent saves; the page must show it (`apply`) or offer the choice (`conflict`) without anything moving.
+      if (job.live === 'conflict') {
+        await page.click('.ritual-editor .cm-line >> nth=2');
+        await page.keyboard.press('End'); await page.keyboard.type(' // mine');
+        await page.waitForSelector('.rule-page .ui-page-header .ui-button--primary:not([disabled])', { timeout: 10_000 });
+      }
+      const saved = await fetch(fx.apiOrigin + '/v1/rules/scripts/triage', { method: 'PUT', headers: { authorization: `Bearer ${fx.liveKey}`, 'content-type': 'application/json' }, body: JSON.stringify({ key: 'triage', source: liveSource(++liveSaves) }) });
+      if (!saved.ok) problems.push(`the agent's save failed: ${saved.status}`);
+      else await page.waitForSelector(job.live === 'conflict' ? '.ritual-incoming' : '.rule-page[data-landed]', { timeout: 30_000 }).catch(() => problems.push(`no ${job.live === 'conflict' ? 'conflict card' : 'live update'} after the agent's save`));
+      await settle(page, net);
+      if (job.mode === 'load') { const read = await page.evaluate(() => window.__cls.read()); Object.assign(result, { cls: sharp(read.total), entries: read.entries }); }
+    }
+    if (job.leave) {
+      // Templates → Edit, after the measurement: Reply to keeps two typed addresses apart, and Back with an edit autosave
+      // hasn't sent asks first, then Save and leave saves it (templates.tsx's leave guard).
+      const replyTo = ['billing@example.invalid', 'ops@example.invalid'], subject = `Leave check ${Date.now()}`;
+      await page.fill('#template-reply', '');
+      await page.locator('#template-reply').pressSequentially(replyTo.join(', '));
+      const typed = await page.inputValue('#template-reply');
+      if (typed !== replyTo.join(', ')) problems.push(`Reply to turned "${replyTo.join(', ')}" into "${typed}"`);
+      await page.fill('#template-subject', subject);
+      await page.click('.ui-page-header a[href="/campaigns/templates"]');
+      const asked = await page.getByRole('dialog', { name: 'Leave without saving?' }).waitFor({ timeout: 5_000 }).then(() => true, () => false);
+      if (!asked) problems.push('Back with an unsaved template edit left without asking');
+      else {
+        await page.getByRole('button', { name: 'Save and leave' }).click();
+        await page.waitForURL(url => url.pathname === '/campaigns/templates', { timeout: 20_000 }).catch(async () => problems.push(`Save and leave stayed on the template${await page.locator('[role=alert], [role=status]').allInnerTexts().then(texts => texts.filter(Boolean).length ? `: ${texts.filter(Boolean).join(' / ').slice(0, 160)}` : '', () => '')}`));
+        const saved = await page.evaluate(id => fetch(`/v1/templates/${id}`).then(response => response.json()), job.path.split('/').pop());
+        if (saved?.draft?.subject !== subject) problems.push(`Save and leave didn't keep the new subject (saved: "${saved?.draft?.subject}")`);
+        if (JSON.stringify(saved?.draft?.replyTo) !== JSON.stringify(replyTo)) problems.push(`Reply to saved as ${JSON.stringify(saved?.draft?.replyTo)}`);
+      }
+    }
+    if (job.user === 'rae') {
+      const leak = await page.evaluate(async () => [document.querySelector('.uin-pill, .uin-pin, .uin-layer') && 'the notes layer', [...document.querySelectorAll('[role=tab], [role=menuitem]')].some(el => el.textContent.startsWith('UI notes')) && 'a UI notes control',
+        await fetch('/v1/operator/ui-notes').then(r => r.status !== 404 && `GET /v1/operator/ui-notes answered ${r.status}`)].filter(Boolean));
+      for (const what of leak) problems.push(`${what} for an operator outside UI_NOTES_SUBJECTS`);
+    }
+    const broken = await page.evaluate(() => document.querySelector('.fatal-error') ? 'the error boundary rendered' : [...document.querySelectorAll('h1,h2')].some(h => h.textContent === 'Page not found') ? 'Page not found' : null);
+    if (job.notFound ? broken !== 'Page not found' : broken) problems.push(broken ?? 'expected "Page not found"');
+    problems.push(...await masking(page, job.mode === 'load' && job.device === 'desktop', job.user !== null));
+    // Overview's latest emails reserve as many 28px rows as reach the card's bottom inset (features/overview/latest.ts):
+    // the list must end less than a row above that inset (the card's top padding: Help's taller bottom padding only
+    // applies in one column) and never past it.
+    if (job.device === 'desktop' && job.path === '/overview') {
+      const gap = await page.evaluate(() => {
+        const list = document.querySelector('.ov-latest'), surface = document.querySelector('.page-surface');
+        if (!list || !surface) return null;
+        const bottom = surface.getBoundingClientRect().bottom - parseFloat(getComputedStyle(surface).paddingTop);
+        return Math.round(bottom - list.getBoundingClientRect().bottom - surface.scrollTop);
+      });
+      if (gap !== null && (gap < 0 || gap >= 28)) problems.push(`Latest emails end ${gap}px above the card's bottom inset (expected 0–27): latest.ts's fixed heights are out of date`);
+    }
+    if (result.cls > LIMIT || process.env.CLS_SHOTS) {
+      await page.evaluate(() => { for (const n of window.__cls.nodes) if (n.isConnected && n.style) n.style.outline = '2px solid #f0f'; });
+      result.screenshot = `${job.slug}.png`;
+      await page.screenshot({ path: join(out, result.screenshot) });
+    }
+    if (density?.wanted(job)) result.density = await density.collect(page, job).catch(error => { result.densityError = error.message.split('\n')[0]; return null; });
+    if (job.guard === 'receiving-edit') {
+      // Saving through the address builder never changes an address's routes or rules it wasn't told to: New address
+      // turns away one that exists and a *, an unchanged Save writes nothing, and closing with a change asks first.
+      const writes = [];
+      const onRequest = request => { if (request.method() !== 'GET' && request.url().startsWith(origin + '/v1/')) writes.push(`${request.method()} ${request.url().slice(origin.length)}`); };
+      page.on('request', onRequest);
+      const snapshot = () => page.evaluate(async () => JSON.stringify([await (await fetch('/v1/routing/routes')).json(), (await (await fetch('/v1/rules')).json()).config]));
+      const before = await snapshot();
+      // New address turns away an address that exists and a *, writing nothing: it only creates.
+      const existing = await page.evaluate(async id => (await (await fetch('/v1/inbound/addresses/' + id)).json()).address, new URL(page.url()).searchParams.get('open'));
+      for (const typed of [existing, '*@' + existing.split('@')[1]]) {
+        await page.getByRole('button', { name: 'New address', exact: true }).click();
+        const dialog = page.locator('[role=dialog][data-state=open]');
+        await dialog.locator('#builder-address-input').fill(typed);
+        await dialog.getByRole('button', { name: 'Next' }).click();
+        await page.waitForTimeout(300);
+        if (!await dialog.locator('#builder-address-input').count()) problems.push(`New address went past its first step for ${typed.startsWith('*') ? 'a catch-all' : 'an address that exists'}`);
+        if (typed.startsWith('*') && !await dialog.getByRole('button', { name: 'Edit the catch-all' }).count()) problems.push('New address with * offers no way to the catch-all');
+        await dialog.getByRole('button', { name: 'Cancel' }).click();
+        // What was typed is a change: closing asks first.
+        await page.getByRole('button', { name: 'Discard', exact: true }).click({ timeout: 3_000 }).catch(() => problems.push('Cancel with an address typed closed New address without asking'));
+        await page.waitForTimeout(300);
+      }
+      const edit = async () => { const clicked = await page.evaluate(() => { const button = [...document.querySelectorAll('.flow-panel button')].find(el => el.textContent.trim() === 'Edit'); button?.click(); return Boolean(button); }); if (clicked) await page.waitForSelector('.builder #builder-flow', { timeout: 10_000 }).catch(() => problems.push('Edit on the flow panel opened no builder for an address it can draw')); return clicked; };
+      if (!await edit()) problems.push('no Edit on the flow panel');
+      else {
+        // Save with nothing changed: the result, and no write.
+        await page.locator('.builder').getByRole('button', { name: 'Save' }).click();
+        await page.locator('.builder').getByRole('button', { name: 'Done' }).click({ timeout: 10_000 }).catch(() => problems.push('an unchanged Save showed no result'));
+        await page.waitForTimeout(300);
+        // A change, then Cancel: asked, and discarded.
+        if (await edit()) {
+          await page.locator('.builder').getByRole('button', { name: 'Split with a rule' }).click();
+          await page.locator('.builder').getByRole('button', { name: 'Cancel' }).click();
+          await page.getByRole('button', { name: 'Discard', exact: true }).click({ timeout: 3_000 }).catch(() => problems.push('Cancel after a change closed the builder without asking'));
+          await page.waitForTimeout(300);
+          if (await page.$('.builder')) problems.push('Discard left the builder open');
+        }
+      }
+      page.off('request', onRequest);
+      if (writes.length) problems.push(`Edit wrote to the API: ${writes.join(', ')}`);
+      if (await snapshot() !== before) problems.push('Edit changed the address\'s routes or rules');
+    }
+    if (job.guard === 'receiving-splits') {
+      // Runs alone, after every shared page: it adds addresses and rules. An address with two splits opens its steps
+      // (never a loop back to the same message), and each rule opens the builder on that rule; New rule's Split on an
+      // address that splits already asks before replacing; Test's AI answer takes its side; a new address whose one
+      // write fails leaves no endpoint behind, and Save again creates it.
+      const api = (path, method = 'GET', body) => page.evaluate(async ([path, method, body]) => { const r = await fetch(path, { method, headers: { 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) }); return { status: r.status, body: await r.json().catch(() => null) }; }, [path, method, body]);
+      const builder = page.locator('.builder[role=dialog]');
+      const split = (value, then, otherwise) => ({ recipe: 'split', params: { test: 'subject', value, then, otherwise } });
+      const two = (await api('/v1/inbound/addresses', 'POST', { address: 'guard-two@northwind.example', key: 'guard-two', flow: { deliver: [], split: split('invoice', 'crm', 'inbox:guard-two') } })).body;
+      const second = (await api(`/v1/inbound/addresses/${two.id}/flow`, 'PATCH', { split: split('refund', 'store', 'inbox:guard-two') })).body;
+      const config = (await api('/v1/rules')).body;
+      const mine = config.config.attachments.filter(a => a.target === two.id), rest = config.config.attachments.filter(a => a.target !== two.id);
+      await api('/v1/rules/attachments', 'PUT', { attachments: [...rest, ...mine.reverse()] });
+      await page.goto(origin + `/receiving/addresses/${two.id}?tab=flow`);
+      await page.locator('.flow-panel').getByRole('button', { name: 'Edit', exact: true }).click({ timeout: 20_000 });
+      await page.waitForURL(/edit=1/, { timeout: 10_000 }).catch(() => problems.push('Edit on an address with two splits didn\'t open its steps'));
+      if (await page.$('.builder')) problems.push('Edit on an address with two splits opened the builder');
+      await page.getByText('It splits its mail with more than one rule.', { exact: false }).waitFor({ timeout: 20_000 }).catch(() => problems.push('the steps of an address with two splits don\'t say why'));
+      await page.locator('.addr-rule', { hasText: 'refund' }).first().click({ timeout: 20_000 });
+      const value = await builder.locator('#builder-value').inputValue({ timeout: 20_000 }).catch(() => null);
+      if (value !== 'refund') problems.push(`its refund rule opened ${value === null ? 'no builder field' : `the builder on "${value}"`}`);
+      if (await builder.getByRole('button', { name: 'One destination' }).count()) problems.push('the builder on one rule offers to reroute the address');
+      await builder.getByRole('button', { name: 'Cancel' }).click().catch(() => {});
+      // New rule → Split by words on an address with one split: asked, and Cancel writes nothing.
+      const one = (await api('/v1/inbound/addresses', 'POST', { address: 'guard-one@northwind.example', key: 'guard-one', flow: { deliver: [], split: { recipe: 'split-by-meaning', params: { meaning: 'a refund request', then: 'crm', otherwise: 'inbox:guard-one' } } } })).body;
+      const writes = [];
+      const onRequest = request => { if (request.method() !== 'GET' && request.url().startsWith(origin + '/v1/') && !request.url().includes('/v1/rules/test')) writes.push(`${request.method()} ${request.url().slice(origin.length)}`); };
+      page.on('request', onRequest);
+      await page.goto(origin + `/receiving/rules/new?address=${one.id}`);
+      await page.getByRole('link', { name: 'Split by words' }).click({ timeout: 20_000 });
+      await page.getByText('Replace the existing split?').waitFor({ timeout: 20_000 }).catch(() => problems.push('New rule\'s Split on an address that splits already didn\'t ask to replace it'));
+      if (await builder.locator('#builder-value').count()) problems.push('New rule\'s Split opened the existing split to change without asking');
+      await builder.getByRole('button', { name: 'Cancel' }).click().catch(() => {});
+      await page.waitForTimeout(300);
+      page.off('request', onRequest);
+      if (writes.length) problems.push(`Cancel on Replace the existing split? wrote: ${writes.join(', ')}`);
+      // The AI says Yes takes If yes (crm), No the other side (its inbox).
+      for (const [answer, want] of [['Yes', 'crm'], ['No', 'inbox']]) {
+        await page.goto(origin + `/receiving/addresses/${one.id}?tab=flow`);
+        await page.locator('.flow-sample summary').click({ timeout: 20_000 });
+        await page.locator('.flow-sample button[role=combobox]').click();
+        await page.getByRole('option', { name: answer, exact: true }).click();
+        await page.locator('.flow-panel').getByRole('button', { name: 'Test', exact: true }).click();
+        await page.waitForSelector('.flow-panel .flow[data-tested]', { timeout: 20_000 }).catch(() => {});
+        const ticked = await page.locator('.flow-panel .flow-stage').last().locator('.flow-item[data-hit=yes]').allInnerTexts();
+        if (ticked.length !== 1 || !ticked[0].toLowerCase().includes(want)) problems.push(`Test with The AI says ${answer} delivered to ${JSON.stringify(ticked)}, not ${want}`);
+      }
+      // A new address with two new webhooks whose one write fails (its rule write refused) leaves neither behind.
+      await page.goto(origin + '/receiving');
+      await page.getByRole('button', { name: 'New address', exact: true }).click({ timeout: 20_000 });
+      await builder.locator('#builder-address-input').fill('guard-fails@northwind.example');
+      await builder.getByRole('button', { name: 'Next' }).click();
+      await builder.getByRole('button', { name: 'Split with a rule' }).click({ timeout: 20_000 });
+      await builder.locator('#builder-value').fill('refund');
+      for (const [side, url] of [['then', 'https://hooks.northwind.example/guard-one'], ['otherwise', 'https://hooks.northwind.example/guard-two']]) {
+        await builder.locator(`#builder-${side}`).click();
+        await page.getByRole('option', { name: 'New webhook' }).click();
+        await builder.locator(`#builder-${side}-target`).fill(url);
+      }
+      await fx.db.query("CREATE FUNCTION cls_rule_refused() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'rule write refused'; END $$");
+      await fx.db.query('CREATE TRIGGER cls_rule_refused BEFORE INSERT OR UPDATE ON mail_ritual_configs FOR EACH ROW EXECUTE FUNCTION cls_rule_refused()');
+      expected500 = r => r.url().endsWith('/v1/inbound/addresses') && r.request().method() === 'POST';
+      try {
+        const failed = page.waitForResponse(r => r.url().endsWith('/v1/inbound/addresses') && r.request().method() === 'POST', { timeout: 20_000 });
+        await builder.getByRole('button', { name: 'Save' }).click();
+        if ((await failed).status() !== 500) problems.push('the refused create didn\'t fail');
+      } finally { expected500 = null; await fx.db.query('DROP TRIGGER cls_rule_refused ON mail_ritual_configs'); await fx.db.query('DROP FUNCTION cls_rule_refused()'); }
+      for (const name of ['guard-fails-webhook', 'guard-fails-webhook-2']) if ((await api('/v1/endpoints/' + name)).status !== 404) problems.push(`a failed create left ${name} behind`);
+      const retried = page.waitForResponse(r => r.url().endsWith('/v1/inbound/addresses') && r.request().method() === 'POST', { timeout: 20_000 });
+      await builder.getByRole('button', { name: 'Save' }).click();
+      if ((await retried).status() !== 201) problems.push(`Save again after a failed create returned ${(await retried).status()}`);
+      // The wildcard and catch-all route editor saves with the version it read: a change made meanwhile to its route is
+      // said and kept; one elsewhere in the workspace doesn't stop it.
+      const crm = (await api('/v1/inbound/overview?limit=50')).body.endpoints.find(e => e.name === 'crm' && e.source === 'endpoint');
+      const wild = (await api('/v1/routing/routes', 'POST', { match: 'guard-*@northwind.example', to: [crm.id] })).body;
+      const routeEditor = page.locator('[role=dialog]', { hasText: 'Where should this mail go?' });
+      const openEditor = async () => {
+        await page.goto(origin + '/receiving?kind=pattern&q=guard-');
+        await page.locator('.flow-panel').getByRole('button', { name: 'Edit', exact: true }).click({ timeout: 20_000 });
+        await routeEditor.locator('#routing-action').waitFor({ timeout: 20_000 });
+      };
+      const store = async () => { await routeEditor.locator('#routing-action').click(); await page.getByRole('option', { name: 'Stored, no inbox' }).click(); await routeEditor.getByRole('button', { name: 'Save' }).click(); };
+      await openEditor();
+      await api(`/v1/routing/routes/${wild.id}`, 'PATCH', { to: 'drop' });
+      await store();
+      await routeEditor.getByText('This changed since you opened it.', { exact: false }).waitFor({ timeout: 20_000 }).catch(() => problems.push('the route editor saved over a change made meanwhile, or didn\'t say so'));
+      if ((await api(`/v1/routing/routes/${wild.id}`)).body.to !== 'drop') problems.push('the route editor overwrote a change made meanwhile');
+      await openEditor();
+      await api('/v1/routing/routes', 'POST', { match: 'guard-other@northwind.example', to: [crm.id] });
+      await store();
+      await routeEditor.waitFor({ state: 'detached', timeout: 20_000 }).catch(() => problems.push('a change elsewhere in the workspace stopped the route editor\'s Save'));
+      if (JSON.stringify((await api(`/v1/routing/routes/${wild.id}`)).body.to) !== '[]') problems.push('the route editor\'s Save after a change elsewhere didn\'t land');
+      // An address's alias refuses a *, as New address does, pointing to the catch-all.
+      await page.goto(origin + `/receiving/addresses/${two.id}?tab=settings`);
+      await page.locator('.alias-input__field').waitFor({ state: 'attached', timeout: 20_000 });
+      await page.evaluate(() => document.querySelector('.alias-input__field')?.closest('details')?.setAttribute('open', ''));
+      await page.locator('.alias-input__field').fill('*', { timeout: 20_000 });
+      await page.keyboard.press('Enter');
+      if (!await page.getByRole('link', { name: 'Edit the catch-all' }).count()) problems.push('a * alias isn\'t pointed to the catch-all');
+    }
+  })();
+  work.catch(() => {}); // After a timeout the context closes under it.
+  let timer;
+  try {
+    await Promise.race([work, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`timed out; in flight: ${net?.pending().join(', ') || 'nothing'}`)), JOB_TIMEOUT_MS); })]);
+  } catch (error) {
+    problems.push(error.message.split('\n')[0]);
+  } finally {
+    clearTimeout(timer);
+    await context.close().catch(() => {});
+  }
+  if (problems.length) result.error = [...new Set(problems)].join('; ');
+  return result;
+}
+
+const format = r => !r ? '' : r.error ? `❌ ${r.cls ?? 'error'}` : `${r.cls > LIMIT ? '❌ ' : ''}${r.cls === 0 ? '0' : r.cls.toFixed(4)}`;
+function summarize(results, seconds) {
+  const failed = results.filter(r => r.error || r.cls > LIMIT);
+  const rows = new Map();
+  for (const r of results) {
+    const row = rows.get(r.page) ?? rows.set(r.page, { path: r.path, long: null }).get(r.page);
+    row[`${r.device === 'phone' ? 'phone' : r.scheme} ${r.mode}`] = r;
+    if (r.longTask !== null) row.long = Math.max(row.long ?? 0, r.longTask);
+  }
+  const lines = [
+    `### Layout shift: ${failed.length ? `❌ ${failed.length} of ${results.length} measurements failed` : `✅ ${results.length} measurements, every page at CLS ≤ ${LIMIT}`}`,
+    '',
+    `Cold load and in-app navigation, throttled network, API responses delayed 300–1300 ms out of order, web fonts ${lateFonts ? `after ${FONT_DELAY_MS} ms` : 'before any text'}; desktop 1440 × 900, phone 390 × 844 with touch. Limit: CLS ${LIMIT}. Longest task during in-app navigation is reported, not gated. ${seconds}s.`,
+    '',
+    '| Page | Path | Light load | Light in-app | Dark load | Dark in-app | Phone load | Phone in-app | Longest task |',
+    '| --- | --- | --: | --: | --: | --: | --: | --: | --: |',
+    ...[...rows].map(([page, row]) => `| ${page} | \`${row.path}\` | ${format(row['light load'])} | ${format(row['light in-app'])} | ${format(row['dark load'])} | ${format(row['dark in-app'])} | ${format(row['phone load'])} | ${format(row['phone in-app'])} | ${row.long === null ? '' : `${row.long} ms`} |`),
+  ];
+  if (failed.length) {
+    lines.push('', '#### Failures', '');
+    for (const r of failed) {
+      lines.push(`- **${r.page}** (${r.device === 'phone' ? 'phone' : r.scheme}, ${r.mode}) \`${r.path}\`: ${r.error ?? `CLS ${r.cls}`}`);
+      for (const e of r.entries.slice(0, 5)) for (const s of e.sources.slice(0, 3)) lines.push(`  - ${e.value.toFixed(4)} at ${e.at} ms: \`${s.node}\` ${JSON.stringify(s.from)} → ${JSON.stringify(s.to)}${s.text ? ` “${s.text.slice(0, 50)}”` : ''}`);
+    }
+  }
+  return { markdown: lines.join('\n') + '\n', failed };
+}
+
+rmSync(out, { recursive: true, force: true });
+mkdirSync(out, { recursive: true });
+// No request leaves the machine: every host but the fixture's fails to resolve.
+const browserPromise = chromium.launch({ ...process.env.CLS_CHROME ? { executablePath: process.env.CLS_CHROME } : { channel: 'chrome' }, args: ['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1'] });
+browserPromise.catch(() => {});
+const fx = await start(repo, { servers: Math.min(2, Math.ceil(workers / 8)), delay: densityOnly ? null : apiDelay, fontDelay: lateFonts ? FONT_DELAY_MS : 0, throttle: densityOnly ? null : throttle, log: message => console.log(`${elapsed()} ${message}`) }).catch(async error => {
+  await browserPromise.then(b => b.close(), () => {});
+  throw error;
+});
+for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => Promise.allSettled([fx.stop(), browserPromise.then(b => b.close())]).finally(() => process.exit(130)));
+let results = [];
+try {
+  const [ids, browser] = await Promise.all([seed(fx), browserPromise]);
+  console.log(`${elapsed()} seeded`);
+  const jobs = [];
+  const passes = [['desktop', 'light'], ['desktop', 'dark'], ...process.env.CLS_PHONE === '0' ? [] : [['phone', 'light']]];
+  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, leave, notes, dialog, menu, still, alone, phoneOnly, notFound, waitlist, guard }] of pages(ids)) {
+    if (only && !only.test(name) || device === 'phone' && !phonePages.has(name) || phoneOnly && device !== 'phone') continue;
+    const slug = `${name}-${device === 'phone' ? 'phone' : scheme}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+    const load = { name, path, user, scheme, device, support, live, leave: leave && device === 'desktop' && scheme === 'light', notes, dialog, menu, still, alone, notFound, waitlist, guard: guard && device === 'desktop' && scheme === 'light' ? guard : undefined, mode: 'load', slug: slug + '-load' };
+    if (densityOnly && !density.wanted(load)) continue;
+    jobs.push(load);
+    if (from && !densityOnly) jobs.push({ name, path, user, from, click, row, switchTo, support, notes, still, alone, scheme, device, mode: 'in-app', slug: slug + '-in-app' });
+  }
+  // Multi-step jobs (Support chat, live rules, Overview's full warm-up) start first so none trails alone at the end.
+  const weight = job => (job.support ? 4 : 0) + (job.live ? 2 : 0) + (job.name === 'Overview' && job.mode === 'load' ? 3 : 0);
+  const shard = /^(\d+)\/(\d+)$/.exec(process.env.CLS_SHARD ?? '1/1');
+  if (!shard || +shard[1] < 1 || +shard[1] > +shard[2] || +shard[2] > jobs.length) throw Error('Invalid CLS_SHARD: expected index/count within the measurement set');
+  jobs.forEach((job, index) => { job.index = index; });
+  const queue = [...jobs].sort((a, b) => weight(b) - weight(a)).filter((_, i) => i % +shard[2] === +shard[1] - 1);
+  console.log(`${elapsed()} measuring ${queue.length} of ${jobs.length} page loads, ${workers} at a time`);
+  const run = async job => {
+    const r = await measure(browser, job, fx);
+    results[job.index] = r;
+    const flag = r.error || r.cls > LIMIT ? '✗' : '✓';
+    console.log(`${elapsed().padStart(6)} ${flag} ${(r.device === 'phone' ? 'phone' : r.scheme).padEnd(5)} ${r.mode.padEnd(6)} ${r.page.padEnd(26)} ${String(r.cls).padEnd(7)}${r.longTask !== null ? ` ${r.longTask} ms` : ''}${r.error ? `  ${r.error}` : ''}`);
+  };
+  const shared = queue.filter(job => !job.alone), alone = queue.filter(job => job.alone);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(workers, shared.length) }, async () => { while (next < shared.length) await run(shared[next++]); }));
+  for (const job of alone) await run(job);
+} finally {
+  await browserPromise.then(b => b.close(), () => {});
+  writeFileSync(join(out, 'api.log'), fx.serverLog());
+  await fx.stop();
+}
+results = results.filter(Boolean);
+if (density) writeFileSync(join(out, 'density.json'), JSON.stringify(results.map(({ page, path, scheme, device, mode, error, density, densityError }) => ({ page, path, scheme, device, mode, error: error ?? densityError, density }))));
+if (densityOnly) process.exit(results.some(r => r.error) || !results.length ? 1 : 0);
+const { markdown, failed } = summarize(results, ((Date.now() - began) / 1000).toFixed(0));
+writeFileSync(join(out, 'report.json'), JSON.stringify(results, null, 2));
+writeFileSync(join(out, 'summary.md'), markdown);
+if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, markdown);
+console.log('\n' + markdown);
+process.exit(failed.length || !results.length ? 1 : 0);
+ }],
   // A support email's sign-in link: the dialog answers Continue (the claim) in place, without moving.
   ['Support · continue email', `/support/continue/${ids.continueConversation}/${ids.continueMessage}`, { user: 'nia', dialog: 'Continue' }],
 ];
