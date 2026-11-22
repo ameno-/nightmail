@@ -192,7 +192,6 @@
 /* From gives up the network before the client when it runs out of room. */
 .activity-from { display: flex; color: var(--color-muted); }
 .activity-from > span { flex: none; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: pre; }
-.activity-from > span + span { flex: 0 1 auto; min-width: 0; }
 .activity-more { display: flex; justify-content: center; }
 /* The details dialog is narrow: one fact per row, label beside value, so a long value never runs into the next one. */
 .activity-facts { grid-template-columns: 1fr; gap: 0; border-top: 1px solid var(--color-border-muted); }

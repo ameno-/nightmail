@@ -60,6 +60,8 @@ function Target({ entry }: { entry: AuditEntry }) {
 const channel: Record<string, string> = { dashboard: 'Dashboard', api: 'API', mcp: 'MCP', imap: 'IMAP', smtp: 'SMTP', console: productName, support: `${productName} support`, script: productName, job: productName, webhook: 'Webhook' }
 const source = (entry: AuditEntry) => entry.client ?? channel[entry.via] ?? entry.via
 const fromText = (entry: AuditEntry) => [source(entry), entry.network].filter(Boolean).join(' · ')
+// The client without its version (Chrome on macOS); the full source and network are its hover title and in the details.
+const shortSource = (entry: AuditEntry) => source(entry).replace(/ \d+(?:\.\d+)*(?= on )/, '')
 function targetText(entry: AuditEntry) {
   if (entry.action === 'support.view') return entry.subject?.email ? null : ['Support request', ticketOf(entry)].filter(Boolean).join(' · ')
   return plain(targetName(entry))
@@ -96,10 +98,10 @@ export function ActivitySection() {
       empty={<EmptyState title={area ? 'No matching activity' : 'No activity yet'} />} columns={[
         { ...when, render: entry => <When at={entry.at} /> },
         // A card names who did it and where from on one line, and the target only by its name: IDs are in the details.
-        { ...who, render: entry => <Cell full={whoText(entry.actor)}><Who actor={entry.actor} /></Cell>, cardRender: entry => <><Who actor={entry.actor} /><span className="muted"> · via {source(entry)}</span></> },
+        { ...who, render: entry => <Cell full={whoText(entry.actor)}><Who actor={entry.actor} /></Cell>, cardRender: entry => <><Who actor={entry.actor} /><span className="muted"> · via {shortSource(entry)}</span></> },
         { ...action, render: entry => <Cell full={actionLabel(entry.action)} hint={entry.action}>{actionLabel(entry.action)}</Cell>, cardRender: entry => actionLabel(entry.action) },
-        { ...target, render: entry => <Cell full={targetText(entry)}><Target entry={entry} /></Cell>, cardRender: entry => entry.action === 'support.view' || summaryName(entry) ? <Target entry={entry} /> : <span className="muted">—</span> },
-        { ...from, render: entry => <Cell full={fromText(entry)} className="activity-from"><span>{source(entry)}</span>{entry.network && <span> · {entry.network}</span>}</Cell>, cardRender: fromText },
+        { ...target, render: entry => <Cell full={targetText(entry)}><Target entry={entry} /></Cell>, cardRender: entry => entry.action === 'support.view' || summaryName(entry) ? <Target entry={entry} /> : null },
+        { ...from, render: entry => <Cell full={fromText(entry)} hint={fromText(entry)} className="activity-from"><span>{shortSource(entry)}</span></Cell>, cardRender: fromText },
       ]} />}
     {activity.hasNextPage && <div className="activity-more"><Button loading={activity.isFetchingNextPage} onClick={() => void activity.fetchNextPage()}>Load more</Button></div>}
     {activity.isFetchNextPageError ? <ErrorState error={activity.error} onRetry={() => void activity.fetchNextPage()} /> : null}

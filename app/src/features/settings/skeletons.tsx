@@ -91,12 +91,12 @@ export const settingsColumns = {
     { key: 'attempts', label: 'Attempts', card: 'inline' },
     { key: 'actions', label: '', align: 'right', width: 220, skeleton: <ControlSkeleton width={85} />, card: 'end' },
   ],
-  // An activity card: what happened and when, then labelled lines for who (and where from) and the target.
+  // An activity card: what happened and when, then plain lines for who (and where from) and the target.
   activity: [
     { key: 'when', label: 'When', width: 112, card: 'aside' },
-    { key: 'who', label: 'Who', width: '20%', card: 'field' },
+    { key: 'who', label: 'Who', width: '20%', card: 'line' },
     { key: 'action', label: 'Action', width: '22.5%', card: 'title' },
-    { key: 'target', label: 'Target', width: '22.5%', card: 'field' },
+    { key: 'target', label: 'Target', width: '22.5%', card: 'line' },
     { key: 'from', label: 'From', card: 'hide' },
   ],
 } satisfies Record<string, SkeletonColumn[]>
