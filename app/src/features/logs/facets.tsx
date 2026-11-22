@@ -4,8 +4,9 @@ import type { LogCounts, LogDirection, LogEntry } from '../../data/types'
 import { label, number } from '../../lib/format'
 
 // Logs' filters beside the list (Signal Log), from 1440 px; narrower, the toolbar's status and stream pickers filter
-// instead, so each filter is on screen once. Each value counts what choosing it would list: the whole log under the other
-// filters (GET /v1/logs?counts=true), not the page on screen. A direction lists a fixed set of rows, so the route
+// instead, so each filter is on screen once. Each value counts what choosing it would list: the log's dates under the
+// other filters (GET /v1/logs?counts=true), not the page on screen. Counts that take too long never arrive: the statuses
+// keep their dashes. A direction lists a fixed set of rows, so the route
 // skeleton, a loading page and a loaded one hold the same space, and counts arriving move nothing.
 // A status's colour is its badge's in the table (rows.tsx): received mail is green, spam red, sent mail its StatusBadge tone.
 export const logTone = (row: Pick<LogEntry, 'status'>): Tone => row.status === 'received' ? 'success' : row.status === 'spam' ? 'danger' : statusTone(row.status)
@@ -27,8 +28,6 @@ export type LogFilters = { statuses: string[]; status: string; stream: string; s
 type RailFilters = Pick<LogFilters, 'statuses' | 'streams'> & Partial<LogFilters>
 export function logFacetGroups(counts: LogCounts | undefined, filters: RailFilters): FacetGroup[] {
   const count = (status: string) => counts ? counts.status[status] ?? 0 : null
-  // A direction with more matching mail than the API counts has lower bounds: they read 5,000+.
-  const atLeast = (status: string) => Boolean(counts && (receivedStatuses.includes(status) ? counts.capped.received : counts.capped.sent))
   const choose = (status: string) => filters.setStatus?.(filters.status === status ? 'all' : status)
   // Received mail has no stream: while one is chosen, Received and Spam keep their rows (nothing moves) but neither count
   // nor choose, since choosing one would drop the stream and list mail the count left out.
@@ -37,15 +36,15 @@ export function logFacetGroups(counts: LogCounts | undefined, filters: RailFilte
   const chosen = filters.status && others.includes(filters.status) ? filters.status : null
   // Other opens the statuses with mail (all of them until the counts arrive), each with its count; none, and it is just a zero.
   const listed = others.filter(status => !counts || status === chosen || (count(status) ?? 0) > 0)
-  const menu = filters.setStatus && listed.length ? listed.map(status => ({ label: counts ? `${label(status)} · ${number(count(status) ?? 0)}${atLeast(status) ? '+' : ''}` : label(status), onSelect: () => choose(status) })) : undefined
+  const menu = filters.setStatus && listed.length ? listed.map(status => ({ label: counts ? `${label(status)} · ${number(count(status) ?? 0)}` : label(status), onSelect: () => choose(status) })) : undefined
   const groups: FacetGroup[] = [{ key: 'status', title: 'Status', items: [
     ...pinned.map(status => streamless(status) ? { key: status, label: label(status), tone: logTone({ status }), count: null, title: 'Received mail has no stream' }
-      : { key: status, label: label(status), tone: logTone({ status }), count: count(status), atLeast: atLeast(status), ...filters.setStatus && { selected: filters.status === status, onSelect: () => choose(status) } }),
+      : { key: status, label: label(status), tone: logTone({ status }), count: count(status), ...filters.setStatus && { selected: filters.status === status, onSelect: () => choose(status) } }),
     ...others.length ? [{ key: 'other', label: chosen ? label(chosen) : 'Other', tone: chosen ? logTone({ status: chosen }) : 'neutral' as Tone, dot: Boolean(chosen),
-      count: counts ? chosen ? count(chosen) : others.reduce((sum, status) => sum + (count(status) ?? 0), 0) : null, atLeast: atLeast(others[0]!), selected: Boolean(chosen), menuLabel: chosen ? `Other statuses: ${label(chosen)}` : 'Other statuses', menu }] : [],
+      count: counts ? chosen ? count(chosen) : others.reduce((sum, status) => sum + (count(status) ?? 0), 0) : null, selected: Boolean(chosen), menuLabel: chosen ? `Other statuses: ${label(chosen)}` : 'Other statuses', menu }] : [],
   ] }]
   // Streams are sent mail's: received mail has none, so the group leaves with it.
-  if (filters.streams) groups.push({ key: 'stream', title: 'Stream', items: (['transactional', 'marketing'] as const).map(stream => ({ key: stream, label: label(stream), dot: false, count: counts ? counts.stream[stream] : null, atLeast: Boolean(counts?.capped.sent),
+  if (filters.streams) groups.push({ key: 'stream', title: 'Stream', items: (['transactional', 'marketing'] as const).map(stream => ({ key: stream, label: label(stream), dot: false, count: counts ? counts.stream[stream] : null,
     ...filters.setStream && { selected: filters.stream === stream, onSelect: () => filters.setStream!(filters.stream === stream ? 'all' : stream) } })) })
   return groups
 }

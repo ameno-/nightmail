@@ -295,7 +295,7 @@ export async function changeEndpointRecord(tx: DbExecutor, c: Ctx, row: Endpoint
     Object.assign(set, { perMinute: next.perMinute, retryOnTimeout: next.retryOnTimeout, idempotent: next.idempotent });
   }
   const [updated] = await tx.update(endpoints).set(set).where(and(eq(endpoints.workspaceId, w), eq(endpoints.id, row.id))).returning();
-  if (resumed) { await tx.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload) VALUES('job_'||gen_random_uuid(),'mailbox.resumeDeliveries',${w},jsonb_build_object('hook',${row.id}::text))`); c.get('actor').wakeJobs = 1; }
+  if (resumed) { await tx.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload) VALUES(public.row_id('job'),'mailbox.resumeDeliveries',${w},jsonb_build_object('hook',${row.id}::text))`); c.get('actor').wakeJobs = 1; }
   return updated!;
 }
 /** Deletes an endpoint the caller locked. `detach` (the webhooks API) first removes it from every route, as one routing version. */
@@ -470,7 +470,7 @@ const isWebhook = (w: string, webhookId: string) => and(eq(endpoints.workspaceId
 const notFound = () => new ApiError(404, 'NOT_FOUND', 'Webhook was not found.');
 const getWebhook = async (db: DbExecutor, w: string, webhookId: string) => { const [row] = await db.select().from(endpoints).where(isWebhook(w, webhookId)); if (!row) throw notFound(); return row; };
 // Charge actual queued copies, not API requests. A rejected charge rolls the requeue and its jobs back.
-const requeue=(wid:string,condition:ReturnType<typeof sql>)=>sql`WITH resumed AS (UPDATE mailbox_webhook_deliveries SET last_redelivery_at=now(),status='pending',generation=generation+1,last_error=NULL,updated_at=now() WHERE workspace_id=${wid} AND ${condition} RETURNING *), reset_success AS (DELETE FROM mail_action_attempts a USING resumed r WHERE a.workspace_id=r.workspace_id AND a.delivery_id=r.id AND a.state='delivered') INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.webhook',workspace_id,jsonb_build_object('deliveryId',id,'generation',generation) FROM resumed`;
+const requeue=(wid:string,condition:ReturnType<typeof sql>)=>sql`WITH resumed AS (UPDATE mailbox_webhook_deliveries SET last_redelivery_at=now(),status='pending',generation=generation+1,last_error=NULL,updated_at=now() WHERE workspace_id=${wid} AND ${condition} RETURNING *), reset_success AS (DELETE FROM mail_action_attempts a USING resumed r WHERE a.workspace_id=r.workspace_id AND a.delivery_id=r.id AND a.state='delivered') INSERT INTO jobs(id,type,workspace_id,payload) SELECT public.row_id('job'),'mailbox.webhook',workspace_id,jsonb_build_object('deliveryId',id,'generation',generation) FROM resumed`;
 // The manual posts a person asks for, shared by their public routes and the support actions they confirm signed in.
 type InboundTest = { format?: z.infer<typeof FormatInput>; overrideUrl?: string };
 /** Testing an inbound webhook (POST /v1/inbound/webhooks/{id}/test): posts a synthetic message.received and returns the receiver's status. */

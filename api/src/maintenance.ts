@@ -254,7 +254,7 @@ async function retentionDrains(runtime: Runtime): Promise<Drain[]> {
           AND NOT EXISTS (SELECT 1 FROM sending_attachment_links l WHERE l.workspace_id = a.workspace_id AND l.attachment_id = a.id)
         ORDER BY a.workspace_id, a.id LIMIT ${UPLOAD_BATCH} FOR UPDATE SKIP LOCKED
       ), gone AS (DELETE FROM sending_attachments a USING old WHERE a.id = old.id RETURNING a.storage_key, a.workspace_id, a.source_template_asset_id
-      ), queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||replace(gen_random_uuid()::text,'-',''),'maintenance.deleteAttachment',workspace_id,jsonb_build_object('key',storage_key)
+      ), queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT public.row_id('job'),'maintenance.deleteAttachment',workspace_id,jsonb_build_object('key',storage_key)
         FROM gone WHERE source_template_asset_id IS NULL
       ) SELECT count(*)::int AS n FROM gone` },
     { name: 'unused_template_assets', size: UPLOAD_BATCH, batches: 5, statement: () => sql`WITH old AS (
@@ -263,7 +263,7 @@ async function retentionDrains(runtime: Runtime): Promise<Drain[]> {
           AND NOT EXISTS (SELECT 1 FROM sending_attachments s WHERE s.workspace_id = a.workspace_id AND s.source_template_asset_id = a.id)
         ORDER BY a.workspace_id, a.id LIMIT ${UPLOAD_BATCH} FOR UPDATE SKIP LOCKED
       ), gone AS (DELETE FROM template_assets a USING old WHERE a.id = old.id RETURNING a.storage_key, a.workspace_id
-      ), queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||replace(gen_random_uuid()::text,'-',''),'maintenance.deleteAttachment',workspace_id,jsonb_build_object('key',storage_key) FROM gone
+      ), queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT public.row_id('job'),'maintenance.deleteAttachment',workspace_id,jsonb_build_object('key',storage_key) FROM gone
       ) SELECT count(*)::int AS n FROM gone` },
     expired('jobs_attachment_deletes', 'jobs', at('created_at'), sql`status = 'completed' AND type IN ('maintenance.deleteAttachment','mail.deleteObjects') AND created_at < ${cutoff}`, sent),
   ];

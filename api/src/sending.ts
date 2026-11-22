@@ -12,7 +12,7 @@ import { mergeSuppression } from './db/audience.js';
 import { SuppressionReason, SuppressionEventData, readCursor, nextCursor, budgetedRead, readLimit, readLimitNote } from './core.js';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import type { Attachment } from '@aws-sdk/client-sesv2';
-import { actor, actorMailAccess, ApiError, AudienceSpec, denied, unrestrictedRequired, uploadKey, chargeRenderBudget, digest, errors, getSes, isSimulatedSes, id, IdParams, json, lazyModule, log, ModuleLoadError, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, timed, wrapModuleLoad, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Runtime, type Storage } from './core.js';
+import { actor, actorMailAccess, ApiError, AudienceSpec, denied, unrestrictedRequired, uploadKey, chargeRenderBudget, digest, errors, getSes, isSimulatedSes, id, rowId, IdParams, json, lazyModule, log, ModuleLoadError, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, timed, wrapModuleLoad, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Runtime, type Storage } from './core.js';
 import { enqueue, JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures, wakeWebhooks } from './jobs.js';
 import { countScreened, failScheduledRelease, CAMPAIGN_ACTIVE, CAMPAIGN_RUNNING, CAMPAIGN_STATES, campaignEditable, campaignReserved, campaignResumable, cancelCampaign, failCampaign, holdCampaign, launchCampaign, noteHealthChecked, pauseCampaign, quarantineCampaign, clearProbe, skipProbe, waitProbe, queueCampaignRun, recordExpanded, recordPrepared, rescheduleCampaign, restrictToDelivered, resumeCampaign, retireCampaignRun, reviseCampaign, runningState, setCampaignPacing, startSending, unscheduleCampaign, terminalColumns, terminalEvents, wakeCampaignRun, type CampaignState } from './states.js';
 import { productName } from './brand.js';
@@ -347,7 +347,10 @@ const CampaignDraftSummary = CampaignDraftView.pick({ name: true, region: true, 
 const CampaignSummary = Campaign.omit({ draft: true }).extend({ draft: CampaignDraftSummary }).describe('Campaign list metadata only. Fetch GET /v1/campaigns/{id} for the complete draft before editing or sending. Content, defaults, attachments and audience exclusions are intentionally omitted.').openapi('CampaignSummary');
 // The filters' statuses: the published ones, and scheduled for sends still waiting (they read queued, with scheduled true).
 export const EmailStatusFilter = z.enum([...Status.options, 'scheduled']);
-const EmailQuery = PageQuery.extend({ campaignId: z.string().max(120).optional(), status: EmailStatusFilter.optional().describe('scheduled lists sends waiting for their time; queued includes them.'), region: Region.optional(), kind: z.enum(['transactional', 'marketing']).optional(), search: z.string().trim().min(1).max(200).optional().describe('Literal case-insensitive substring of sender, To/Cc/Bcc, subject or email/campaign/provider ID.'), from: z.string().datetime({ offset: true }).optional(), to: z.string().datetime({ offset: true }).optional() }).refine(q => !q.from || !q.to || Date.parse(q.from) < Date.parse(q.to), 'from must precede to.').describe('Newest created emails first, with an opaque cursor bound to the filters. Date range is createdAt >= from and < to. Search is literal and case-insensitive across sender address, To/Cc/Bcc recipients, subject and email/campaign/provider IDs. Use status, region, kind and creation-date filters for those fields; error codes, simulation state and timestamps are not free-text fields.').openapi('ListEmailsQuery');
+// A literal substring search of sent mail (sending_log_text ILIKE): the trigram index answers terms of 3 characters or
+// more; a shorter one can't use it and reads every email of the workspace, so it is refused.
+export const SubstringSearch = z.string().trim().min(3, 'Search for at least 3 characters.').max(200);
+const EmailQuery = PageQuery.extend({ campaignId: z.string().max(120).optional(), status: EmailStatusFilter.optional().describe('scheduled lists sends waiting for their time; queued includes them.'), region: Region.optional(), kind: z.enum(['transactional', 'marketing']).optional(), search: SubstringSearch.optional().describe('Literal case-insensitive substring of sender, To/Cc/Bcc, subject or email/campaign/provider ID, at least 3 characters: a shorter term is refused with 422 VALIDATION_FAILED.'), from: z.string().datetime({ offset: true }).optional(), to: z.string().datetime({ offset: true }).optional() }).refine(q => !q.from || !q.to || Date.parse(q.from) < Date.parse(q.to), 'from must precede to.').describe('Newest created emails first, with an opaque cursor bound to the filters. Date range is createdAt >= from and < to. Search is literal and case-insensitive across sender address, To/Cc/Bcc recipients, subject and email/campaign/provider IDs. Use status, region, kind and creation-date filters for those fields; error codes, simulation state and timestamps are not free-text fields.').openapi('ListEmailsQuery');
 const CampaignQuery = PageQuery.extend({ region: Region.optional(), state: CampaignStateValue.optional(), archived: z.enum(['true', 'false']).default('false').describe('False lists active campaigns; true lists archived campaigns only.'), search: z.string().trim().min(1).max(200).optional() }).describe('Newest created campaigns first, excluding archived campaigns by default, with an opaque cursor bound to the filters. Search is literal, case-insensitive name, subject or ID text.').openapi('ListCampaignsQuery');
 const AudienceCounts = z.object({ matched: z.number().int(), eligible: z.number().int(), suppressed: z.number().int(), unsubscribed: z.number().int() }).describe('Live counts for the saved audience: matched contacts, those eligible for marketing, and the suppressed or unsubscribed remainder. Read-only; sending freezes its own snapshot and rechecks consent at dispatch.').openapi('CampaignAudienceCounts');
 
@@ -896,7 +899,7 @@ async function renderTemplate(runtime: Runtime, snapshot: EmailSnapshot, templat
 }
 /** Writes an admitted mailbox send in one statement: its email row, which is the dispatch queue entry, and its attachment links. */
 async function queueEmail(runtime: Runtime, db: DbExecutor, a: Actor, snapshot: EmailSnapshot) {
-  const emailId = id('email'), sim = isSimulatedSes(runtime);
+  const emailId = rowId('email'), sim = isSimulatedSes(runtime);
   await db.execute(sql`WITH inserted AS (INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
       VALUES(${emailId},${a.workspaceId},${a.keyId},${snapshot.region},${snapshot.from},${JSON.stringify(snapshot.to)}::jsonb,${JSON.stringify(snapshot.cc)}::jsonb,${JSON.stringify(snapshot.bcc)}::jsonb,${snapshot.subject},${JSON.stringify(snapshot)}::jsonb,${sim}) RETURNING id)
     INSERT INTO sending_attachment_links(workspace_id,attachment_id,owner_type,owner_id) SELECT ${a.workspaceId},f,'email',id FROM inserted,jsonb_array_elements_text(${JSON.stringify(snapshot.attachments)}::jsonb) f ON CONFLICT DO NOTHING`);
@@ -937,7 +940,7 @@ const queueRelease = (rows: SQL, at: string) => sql`INSERT INTO jobs(id,type,wor
   SELECT 'release:'||r.id,'sending.release',r.workspace_id,jsonb_build_object('emailId',r.id,'run',${id('run')}::text),${at}::timestamptz FROM (${rows}) r
   ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,payload=excluded.payload,available_at=excluded.available_at,lease_until=NULL,last_error=NULL RETURNING 1`;
 const scheduledEvent = (rows: SQL, type: 'scheduled' | 'rescheduled', at: string, simulated: boolean) => sql`INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated,data)
-  SELECT 'event_'||replace(gen_random_uuid()::text,'-',''),r.workspace_id,r.id,${type},${simulated},jsonb_build_object('scheduledAt',${at}::text) FROM (${rows}) r RETURNING 1`;
+  SELECT public.row_id('event'),r.workspace_id,r.id,${type},${simulated},jsonb_build_object('scheduledAt',${at}::text) FROM (${rows}) r RETURNING 1`;
 /** A send time within the schedule's bounds (the same as send_admission's), in UTC. */
 function scheduleTime(value: string) {
   const at = Date.parse(value), now = Date.now(), { skewSeconds, horizonSeconds } = SEND_LIMITS.schedule;
@@ -1072,7 +1075,7 @@ async function admitSends(call: SendCall, body: unknown, out: Outgoing[], identi
     if (batch && expanded > SENDING_LIMITS.expandedCampaignBytes) m.invalid ??= new ApiError(413, 'BATCH_CONTENT_TOO_LARGE', `Expanded batch content exceeds the ${SENDING_LIMITS.expandedCampaignBytes / 1024 / 1024} MiB limit. Submit smaller batches.`);
   }
   const hash = key === undefined ? null : await requestHash(body);
-  const data = out.map(() => ({ id: id('email'), status: 'queued' as const, simulated: sim, ...(at ? { scheduledAt: at } : {}) })), receipt = batch ? { data } : data[0]!;
+  const data = out.map(() => ({ id: rowId('email'), status: 'queued' as const, simulated: sim, ...(at ? { scheduledAt: at } : {}) })), receipt = batch ? { data } : data[0]!;
   const rows = out.map((m, ord) => ({ ord, id: data[ord]!.id, snapshot: m.snapshot, hash: m.token?.hash, email: m.token?.email }));
   const ids = [...new Set(out.flatMap(m => m.snapshot.attachments))];
   const principal = 'credential' in identity ? sql`SELECT k.*,b.used FROM credential k LEFT JOIN budget b ON true` : sql`SELECT ${identity.actor.keyId}::text AS id,${identity.actor.workspaceId}::text AS workspace_id,
@@ -2020,7 +2023,7 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
     ordinal: index, job_workspace: input.workspaceId, simulated: simulatedTopic(input.ingress.topicArn, input.ingress.region), topic_arn: input.ingress.topicArn, message_id: input.ingress.messageId, region: input.ingress.region, provider_id: input.providerId,
     type: input.type, next_status: statusForEvent[input.type]!, next_rank: rank[statusForEvent[input.type]!], public_type: publicEventType[input.type] ?? null,
     external_id: input.externalId ?? null, data: input.data ?? {}, effects: input.effects, created_at: input.createdAt ?? now(),
-    event_id: id('event'), recovery_job_id: id('job'), recovery_type: input.ingress.recoveryType, payload: input.ingress.payload, tagged_email_id: input.taggedEmailId ?? null,
+    event_id: rowId('event'), recovery_job_id: rowId('job'), recovery_type: input.ingress.recoveryType, payload: input.ingress.payload, tagged_email_id: input.taggedEmailId ?? null,
   }));
   // Remove embedded NUL without changing literal backslash-u text (consume JSON escapes in pairs).
   const json=JSON.stringify(rows), safe=json.includes('\\u0000') ? json.replace(/\\(?:u0000|.)/g,m=>m==='\\u0000'?'\uFFFD':m) : json;
@@ -2127,14 +2130,14 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
       FROM inserted ins JOIN input x ON x.event_id = ins.id WHERE x.public_type IS NOT NULL ON CONFLICT DO NOTHING RETURNING *
     ), deliveries AS (
       INSERT INTO operation_deliveries(id, workspace_id, webhook_id, event_id, payload)
-      SELECT 'whd_' || replace(gen_random_uuid()::text, '-', ''), p.workspace_id, w.id, p.id,
+      SELECT public.row_id('whd'), p.workspace_id, w.id, p.id,
         jsonb_build_object('id', p.id, 'workspaceId', p.workspace_id, 'type', p.type, 'region', p.region, 'createdAt', p.created_at, 'data', p.data)
       FROM published p JOIN operation_webhooks w ON w.workspace_id = p.workspace_id
       WHERE NOT w.paused AND w.event_types ? p.type AND (w.regions IS NULL OR p.region IS NULL OR w.regions ? p.region)
       ON CONFLICT DO NOTHING RETURNING id, workspace_id
     ), webhook_jobs AS (
       INSERT INTO jobs(id, workspace_id, type, payload)
-      SELECT 'job_' || replace(gen_random_uuid()::text, '-', ''), workspace_id, 'operation.webhook', jsonb_build_object('deliveryId', id, 'generation', 0) FROM deliveries RETURNING id
+      SELECT public.row_id('job'), workspace_id, 'operation.webhook', jsonb_build_object('deliveryId', id, 'generation', 0) FROM deliveries RETURNING id
     ) SELECT x.ordinal, x.workspace_id AS "workspaceId", coalesce(x.error,CASE WHEN x.effects IS NOT NULL AND x.email_id IS NULL THEN 'SES_EMAIL_NOT_FOUND' END) AS error,
       (SELECT row_to_json(e) FROM (SELECT ins.id, ins.workspace_id AS "workspaceId", ins.email_id AS "emailId", ins.type,
         ins.provider_id AS "providerId", ins.external_id AS "externalId", ins.data, ins.simulated, ins.created_at::text AS "createdAt" FROM inserted ins WHERE ins.id = x.event_id) e) AS event,
@@ -2156,7 +2159,7 @@ async function persistEmailEvent(runtime: Runtime, input: EmailEventInput & { em
       AND id = ${input.emailId} FOR UPDATE
   ), inserted AS (
     INSERT INTO sending_email_events(id, workspace_id, email_id, type, provider_id, external_id, data, simulated, created_at, recipient_hashes)
-    SELECT ${id('event')}, ${input.workspaceId}, mail.id, ${input.type}, ${input.providerId ?? null},
+    SELECT ${rowId('event')}, ${input.workspaceId}, mail.id, ${input.type}, ${input.providerId ?? null},
       ${input.externalId ?? null}, ${JSON.stringify(input.data ?? {})}::jsonb, mail.simulated, ${input.createdAt ?? now()}::timestamptz, ${sql.param(input.recipientHashes ?? null)}::text[]
     FROM mail ON CONFLICT DO NOTHING RETURNING *
   ), updated AS (
@@ -2170,14 +2173,14 @@ async function persistEmailEvent(runtime: Runtime, input: EmailEventInput & { em
     FROM inserted, mail WHERE ${publicType ?? null}::text IS NOT NULL ON CONFLICT DO NOTHING RETURNING *
   ), deliveries AS (
     INSERT INTO operation_deliveries(id, workspace_id, webhook_id, event_id, payload)
-    SELECT 'whd_' || replace(gen_random_uuid()::text, '-', ''), p.workspace_id, w.id, p.id,
+    SELECT public.row_id('whd'), p.workspace_id, w.id, p.id,
       jsonb_build_object('id',p.id,'workspaceId',p.workspace_id,'type',p.type,'region',p.region,'createdAt',p.created_at,'data',p.data)
     FROM published p JOIN operation_webhooks w ON w.workspace_id=p.workspace_id
     WHERE NOT w.paused AND w.event_types ? p.type AND (w.regions IS NULL OR p.region IS NULL OR w.regions ? p.region)
     ON CONFLICT DO NOTHING RETURNING id, workspace_id
   ), webhook_jobs AS (
     INSERT INTO jobs(id, workspace_id, type, payload)
-    SELECT 'job_' || replace(gen_random_uuid()::text, '-', ''), workspace_id, 'operation.webhook', jsonb_build_object('deliveryId', id, 'generation', 0) FROM deliveries RETURNING id
+    SELECT public.row_id('job'), workspace_id, 'operation.webhook', jsonb_build_object('deliveryId', id, 'generation', 0) FROM deliveries RETURNING id
   ), simulated_callbacks AS (
     SELECT 'urn:bane:simulated-ses:' || mail.region AS topic_arn, mail.id || ':' || kind AS message_id, inserted.workspace_id,
       inserted.created_at + CASE WHEN kind='Delivery' THEN ${runtime.config.simulatedSes.deliveryDelayMs}::int ELSE 0 END * interval '1 millisecond' AS created_at
@@ -2185,7 +2188,7 @@ async function persistEmailEvent(runtime: Runtime, input: EmailEventInput & { em
     WHERE ${simulatedJobs}::boolean
   ), simulated_jobs AS (
     INSERT INTO jobs(id, workspace_id, type, available_at, payload)
-    SELECT 'job_' || replace(gen_random_uuid()::text, '-', ''), r.workspace_id, 'operation.simulatedFeedback', r.created_at,
+    SELECT public.row_id('job'), r.workspace_id, 'operation.simulatedFeedback', r.created_at,
       jsonb_build_object('topicArn',r.topic_arn,'messageId',r.message_id,'region',mail.region,
         'message', jsonb_build_object('eventType',split_part(r.message_id,':',2),'mail',jsonb_build_object('messageId',${input.providerId ?? null}::text),
           lower(split_part(r.message_id,':',2)),jsonb_build_object('timestamp',r.created_at)))
@@ -2806,7 +2809,7 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     }
     // The review owns its assets. Only one variable-size bind per release page; no
     // per-recipient headers, base content, asset IDs, or denormalized attachment links.
-    const prepared=recipients.map(r=>({id:id('email'),ordinal:r.ordinal,address:r.recipient.email,subject:r.subject??draft.subject}));
+    const prepared=recipients.map(r=>({id:rowId('email'),ordinal:r.ordinal,address:r.recipient.email,subject:r.subject??draft.subject}));
     const stub={kind:'marketing',deferredCampaign:true};
     await db.execute(sql`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,campaign_id,review_id,review_ordinal,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,scheduled_at)
       SELECT p.id,${a.workspaceId},${a.keyId},${draft.region},${campaign.id},${campaign.reviewId},p.ordinal,${draft.from},jsonb_build_array(p.address),'[]','[]',p.subject,${JSON.stringify(stub)}::jsonb,${campaign.simulated},${campaign.scheduledAt}

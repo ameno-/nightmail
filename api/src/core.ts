@@ -334,10 +334,12 @@ export async function budgetedRead<T>(db: Runtime['db'], work: (tx: DbExecutor) 
       return work(tx);
     }, { accessMode: 'read only' });
   } catch (error) {
-    if ([error, (error as { cause?: unknown })?.cause].some(e => (e as { code?: string } | null)?.code === '57014')) throw budget.refusal();
+    if (statementTimedOut(error)) throw budget.refusal();
     throw error;
   }
 }
+/** A statement ended by statement_timeout (SQLSTATE 57014), as the driver reports it or wraps it. */
+export const statementTimedOut = (error: unknown) => [error, (error as { cause?: unknown })?.cause].some(e => (e as { code?: string } | null)?.code === '57014');
 export const security: Record<string, string[]>[] = [{ bearerAuth: [] }, { dashboardSession: [] }, { secureDashboardSession: [] }];
 export const IdParams = z.object({ id: z.string().min(1).max(120) });
 export const PageQuery = z.object({ cursor: z.string().max(200).optional(), limit: z.coerce.number().int().min(1).max(100).default(25) });
@@ -346,7 +348,16 @@ export const AudienceSpec = z.object({ listId: z.string().min(1).max(120), segme
 export const json = <T extends z.ZodType>(schema: T) => ({ content: { 'application/json': { schema } }, required: true });
 export const response = <T extends z.ZodType>(schema: T, description = 'Success') => ({ description, content: { 'application/json': { schema } } });
 export const page = <T extends z.ZodType>(schema: T) => z.object({ data: z.array(schema), nextCursor: z.string().nullable() });
+/** A random ID: the prefix, `_` and 32 hex characters (a UUIDv4, 122 random bits). Anything that must be unguessable uses this. */
 export function id(prefix: string) { return `${prefix}_${crypto.randomUUID().replaceAll('-', '')}`; }
+/**
+ * A time-ordered ID for high-volume rows (emails, events, webhook and inbound webhook deliveries, jobs, threads), in
+ * id()'s format: a UUIDv7 (RFC 9562), 48 bits of Unix milliseconds then 74 random bits, so a new row lands at the end
+ * of its indexes instead of on a random page. row_id() builds the same in SQL (migration 392). It shows when the row was
+ * made, so it is never a secret or a capability; and IDs from the same millisecond, or from machines whose clocks
+ * differ, come in no particular order.
+ */
+export function rowId(prefix: string) { return `${prefix}_${Date.now().toString(16).padStart(12, '0')}7${crypto.randomUUID().replaceAll('-', '').slice(13)}`; }
 /** A timestamp as the API returns it (ISO 8601, UTC), from Postgres text ("2026-11-13 10:00:00.123+00") or ISO. */
 export const isoTime = (value: string | null | undefined) => value ? new Date(value.includes('T') ? value : value.replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00')).toISOString() : null;
 /** A (created_at, id) page cursor, bound to its resource and filters; microseconds survive the round trip. */

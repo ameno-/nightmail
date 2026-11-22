@@ -7850,6 +7850,34 @@ describe('Hosted MCP OAuth and tools', () => {
         }
       });
 
+      await t.test('7d email reads only the account’s status, domains and sending: billing, the activity trail, request logs, webhooks and received mail are a chat’s (403 before anything is charged or logged, or left out of the context); a chat is unchanged', async () => {
+        const owned = await email(owner.email), chatted = await chat(owner);
+        assert.equal(owned.body.mode, 'member');
+        const trail = async (id: string) => (await db.query(`SELECT count(*)::int AS n FROM audit_events WHERE actor_id = $1 AND action IN ('support.read', 'support.view')`, [id])).rows[0].n as number;
+        // Ask the chat once first, so its activity trail has entries (its own customer-visible support.view).
+        ok(await stamped(chatted, 'GET', `/v1/support/workspaces?workspaceId=${acme}`));
+        const charged = async () => (await db.query('SELECT used FROM support_conversations WHERE id = $1', [owned.id])).rows[0].used as number, before = await trail(owned.id), used = await charged();
+        for (const path of [`/v1/support/billing?workspaceId=${acme}`, `/v1/support/audit?workspaceId=${acme}`, `/v1/support/requests?workspaceId=${acme}`,
+          `/v1/support/requests/req_${hex().slice(0, 32)}?workspaceId=${acme}`, `/v1/support/webhook-deliveries?workspaceId=${acme}`]) {
+          error(await stamped(owned.id, 'GET', path), 403, 'SUPPORT_CHAT_ONLY');
+          assert.equal((await stamped(chatted, 'GET', path)).status === 403, false, `The chat still reads ${path}.`);
+        }
+        assert.deepEqual([await trail(owned.id), await charged()], [before, used], 'Nothing charged or logged for email, no view row.');
+        // Its context keeps the schema, with no activity trail, webhook failures, request IDs or API-key count.
+        const mailed = ok(await stamped(owned.id, 'GET', `/v1/support/context?workspaceId=${acme}`)), chatContext = ok(await stamped(chatted, 'GET', `/v1/support/context?workspaceId=${acme}`));
+        assert.deepEqual([mailed.recentActivity, mailed.recentFailures.webhookDeliveries, mailed.links.requestIds, 'apiKeys' in mailed.workspaces[0].counts], [[], [], [], false]);
+        assert.deepEqual([mailed.workspaces.map((w: Json) => w.id), mailed.domains.length >= 0, Array.isArray(mailed.standing)], [[acme], true, true], 'Status, domains and sending stay.');
+        assert.ok(chatContext.recentActivity.length > 0 && 'apiKeys' in chatContext.workspaces[0].counts, 'A chat’s context is unchanged.');
+        assert.equal('apiKeys' in ok(await stamped(owned.id, 'GET', `/v1/support/workspaces?workspaceId=${acme}`)).data[0].counts, false);
+        // Sent mail only: received mail is a chat's.
+        const received = await mail(owner.email, { workspace: acme, box: acmeBox });
+        assert.deepEqual(ok(await stamped(owned.id, 'GET', `/v1/support/emails?workspaceId=${acme}&direction=received`)).data, []);
+        error(await stamped(owned.id, 'GET', `/v1/support/emails/${received}?workspaceId=${acme}`), 404);
+        assert.ok(ok(await stamped(chatted, 'GET', `/v1/support/emails?workspaceId=${acme}&direction=received`)).data.some((e: Json) => e.id === received), 'The chat still reads received mail.');
+        ok(await stamped(chatted, 'GET', `/v1/support/emails/${received}?workspaceId=${acme}`));
+        for (const done of [owned.id, chatted]) ok(reply(await platform.closeConversation(done)));
+      });
+
       await t.test('8 content access: only the chat’s own person, while a member of its workspace', async () => {
         const id = await chat(owner), emailId = unique('email');
         await db.query(`INSERT INTO sending_emails(id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, status, snapshot, simulated)
@@ -9273,11 +9301,11 @@ describe('Hosted MCP OAuth and tools', () => {
         const narrowed = await get('/v1/support/requests?route=/v1/emails&code=VALIDATION_FAILED');
         assert.deepEqual(asked.at(-1)!.body.parameters.filters.slice(4), [eq('route', '/v1/emails'), eq('code', 'VALIDATION_FAILED')]);
         assert.deepEqual(narrowed.groups.map((g: Json) => g.count), [7]);
-        // A conversation over two workspaces asks for both; workspaceId narrows to one.
-        const wide = await get('/v1/support/requests', stamp(both.id));
-        assert.deepEqual(asked.at(-1)!.body.parameters.filters[2].filters.map((f: Json) => f.value).sort(), [wid, second].sort());
-        assert.equal(wide.totals.errors, 12); assert.ok(wide.groups.some((g: Json) => g.code === 'CAMPAIGN_NOT_READY' && g.sampleRequestIds[0] === shared));
-        const onlySecond = await get(`/v1/support/requests?workspaceId=${second}`, stamp(both.id));
+        // Request logs are a chat's: an email conversation (the one kind that spans workspaces) is refused before anything is
+        // charged, and a chat in the second workspace asks for that one.
+        error(await send('GET', '/v1/support/requests', stamp(both.id)), 403, 'SUPPORT_CHAT_ONLY');
+        error(await send('GET', `/v1/support/requests/${shared}`, stamp(both.id)), 403, 'SUPPORT_CHAT_ONLY');
+        const inSecond = await chat(manager!, second), onlySecond = await get('/v1/support/requests', stamp(inSecond.id));
         assert.deepEqual(asked.at(-1)!.body.parameters.filters[2], workspaceGroup([second]));
         assert.deepEqual(onlySecond.groups.map((g: Json) => [g.code, g.count]), [['CAMPAIGN_NOT_READY', 1]]);
         error(await send('GET', `/v1/support/requests?workspaceId=${other}`, support), 404);
@@ -9300,7 +9328,7 @@ describe('Hosted MCP OAuth and tools', () => {
         assert.deepEqual([asked.length - searching, old.found, old.logs.map((l: Json) => l.at)], [2, true, [new Date(events.find(e => (e.source as Json).requestId === older)!.timestamp).toISOString()]]);
         assert.ok(asked.at(-1)!.body.timeframe.to - asked.at(-1)!.body.timeframe.from >= 3 * 86_400_000);
         assert.deepEqual((await get(`/v1/support/requests/${shared}`)).logs, [], 'A line of a workspace outside the conversation is never shown.');
-        assert.equal((await get(`/v1/support/requests/${shared}`, stamp(both.id))).logs[0].workspaceId, second);
+        assert.equal((await get(`/v1/support/requests/${shared}`, stamp(inSecond.id))).logs[0].workspaceId, second);
 
         // Cloudflare failing: 200 with available false, a warning with the HTTP status only, and no cached failure.
         warnings.length = 0; outage = { status: 500, body: { success: false, errors: [{ code: 10000, message: 'Authentication error for private@example.org' }] } };
@@ -14348,6 +14376,10 @@ describe('Dashboard API capabilities', () => {
       assert.equal(error(await local('GET', '/v1/logs?direction=sent&status=spam'), 422).code, 'VALIDATION_FAILED');
       assert.equal(error(await local('GET', '/v1/logs?status=received&kind=marketing'), 422).code, 'VALIDATION_FAILED');
       assert.deepEqual(ids(await list('search=reply')), [r1]); assert.deepEqual(ids(await list('search=Logs')), [s2, r2, r1, s1]);
+      // A substring search needs 3 characters (after trimming); an email ID or a full address finds its email.
+      for (const path of ['/v1/logs', '/v1/emails']) for (const term of ['Lo', ' ad ', 'x']) assert.equal(error(await local('GET', `${path}?search=${encodeURIComponent(term)}`), 422, 'VALIDATION_FAILED').field, 'search', `${path} ${term}`);
+      assert.deepEqual(ids(await list('search=Log')), [s2, s1], 'Three characters search sent mail\'s text; received mail matches whole words.');
+      for (const [term, found] of [[s1, [s1]], ['ada@example.net', [s1]], ['ADA@example.net', [s1]], ['linus@example.org', [r1]]] as const) assert.deepEqual(ids(await list(`search=${encodeURIComponent(term)}`)), found, term);
       const first = await list('limit=1');
       assert.equal(error(await local('GET', `/v1/logs?limit=1&direction=sent&cursor=${first.nextCursor}`), 422).code, 'INVALID_CURSOR');
       // counts=true: each facet counts under every other filter (status ignores status, kind ignores kind), for the whole list.
@@ -14358,6 +14390,27 @@ describe('Dashboard API capabilities', () => {
       assert.deepEqual(await counts('&kind=transactional'), { status: { delivered: 1 }, kind: { transactional: 1, marketing: 1 }, capped: { sent: false, received: false } });
       assert.deepEqual(await counts('&direction=received'), { status: { received: 1, spam: 1 }, kind: { transactional: 0, marketing: 0 }, capped: { sent: false, received: false } });
       assert.deepEqual(await counts('&search=reply'), { status: { received: 1 }, kind: { transactional: 0, marketing: 0 }, capped: { sent: false, received: false } });
+      // from and to bound the list and its counts alike, by when sent mail was created and received mail arrived: each
+      // status counts exactly the rows the list shows for those dates, and nothing outside them.
+      const dates = (from?: number, to?: number) => `${from === undefined ? '' : `&from=${encodeURIComponent(at(from))}`}${to === undefined ? '' : `&to=${encodeURIComponent(at(to))}`}`;
+      for (const [from, to, listed, status, kind] of [
+        [2, 4, [s2, r2, r1], { bounced: 1, received: 1, spam: 1 }, { transactional: 0, marketing: 1 }],
+        [3, undefined, [s2, r2], { bounced: 1, spam: 1 }, { transactional: 0, marketing: 1 }],
+        [undefined, 2, [s1], { delivered: 1 }, { transactional: 1, marketing: 0 }],
+        [1, 2, [s1], { delivered: 1 }, { transactional: 1, marketing: 0 }],
+        [4, 60, [], {}, { transactional: 0, marketing: 0 }],
+      ] as const) {
+        const rows = await walk(async cursor => list(`limit=1${dates(from, to)}${cursor ? `&cursor=${cursor}` : ''}`));
+        assert.deepEqual(rows.map(row => row.id), listed, `${from}..${to}`);
+        const tally = rows.reduce<Record<string, number>>((sum, row) => ({ ...sum, [row.status]: (sum[row.status] ?? 0) + 1 }), {});
+        assert.deepEqual([tally, await counts(dates(from, to))], [status, { status, kind, capped: { sent: false, received: false } }], `${from}..${to}`);
+      }
+      // Under the other filters too: kind counts take the chosen status, status counts the chosen kind, both within the dates.
+      assert.deepEqual(await counts(`&status=delivered${dates(2)}`), { status: { bounced: 1, received: 1, spam: 1 }, kind: { transactional: 0, marketing: 0 }, capped: { sent: false, received: false } });
+      assert.deepEqual(await counts(`&kind=marketing${dates(undefined, 3)}`), { status: {}, kind: { transactional: 1, marketing: 0 }, capped: { sent: false, received: false } });
+      assert.equal(error(await local('GET', `/v1/logs?${dates(3, 3).slice(1)}`), 422).code, 'VALIDATION_FAILED');
+      const dated = await list(`limit=1${dates(1)}`);
+      assert.equal(error(await local('GET', `/v1/logs?limit=1&cursor=${dated.nextCursor}`), 422).code, 'INVALID_CURSOR', 'A cursor is bound to its dates.');
       // A cursor from a page with counts reads the next page without them, and the other way round.
       const counted = await list('limit=1&counts=true');
       assert.deepEqual(ids(await list(`limit=1&cursor=${counted.nextCursor}`)), [r2]);
@@ -14427,6 +14480,8 @@ describe('Dashboard API capabilities', () => {
       // outlives it: that shows which limit the read ran under.
       const page = ok(await local('GET', '/v1/logs?limit=10&counts=true'));
       assert.deepEqual([page.data.map((row: Json) => row.id), page.counts.status, page.counts.kind], [[received, sent], { delivered: 1, received: 1 }, { transactional: 1, marketing: 0 }]);
+      assert.equal(await timeout(), '2s', 'The counts run last, under a shorter limit of their own.');
+      ok(await local('GET', '/v1/logs?limit=10'));
       assert.equal(await timeout(), '5s');
       assert.deepEqual(ok(await local('GET', '/v1/inbound/messages')).data.map((row: Json) => row.id), [received]);
       assert.equal(await timeout(), '3s');
@@ -14446,6 +14501,19 @@ describe('Dashboard API capabilities', () => {
       };
       await tooBroad('/v1/logs?direction=received', 5);
       await tooBroad('/v1/inbound/messages', 3);
+      // Counts that need longer than their 2 seconds are refused; the same page without them answers. Each of this
+      // workspace's 9 sent emails takes 0.3 s to read: the page stays within its 5 seconds, counting all 9 can't within 2.
+      await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, created_at)
+        SELECT $1 || '-' || n, $2, $3, 'fixture', 'hello@limits.example', '["ada@example.net"]', '[]', '[]', 'Counted', '{"kind":"transactional"}', false, 'delivered', now() - n * interval '1 hour' FROM generate_series(1, 8) n`, [sent, wid, REGION]);
+      await db.query(`SAVEPOINT slow_counts; SET LOCAL statement_timeout = '60s';
+        ALTER TABLE sending_emails ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
+        CREATE POLICY slow_counts ON sending_emails USING (CASE WHEN workspace_id = ${workspace} THEN pg_sleep(0.3) IS NOT NULL ELSE true END)`);
+      try {
+        assert.equal(ok(await local('GET', '/v1/logs?direction=sent&limit=1')).data.length, 1);
+        const started = performance.now(), reply = await local('GET', '/v1/logs?direction=sent&limit=1&counts=true'), elapsed = performance.now() - started;
+        assert.equal(error(reply, 422, 'READ_TOO_LARGE').message, 'This request is too broad to answer within 2 seconds. Narrow the dates or filters.');
+        t.diagnostic(`READ-LIMIT counts: 422 after ${Math.round(elapsed)} ms`);
+      } finally { await db.query('ROLLBACK TO SAVEPOINT slow_counts; RELEASE SAVEPOINT slow_counts'); }
       // The policy and its locks went with the savepoint: the same read answers again.
       assert.deepEqual(ok(await local('GET', '/v1/logs?direction=received')).data.map((row: Json) => row.id), [received]);
     });
@@ -30167,6 +30235,80 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal(result.state, 'failed');
       assert.equal(result.delivery.error.code, 'SES_MODE_CHANGED');
       assert.equal(result.delivery.prepared, 0); assert.equal(result.delivery.expanded, 0); assert.equal(result.counts.total, 0);
+    });
+  });
+
+  // Time-ordered IDs (migration 392): emails, events, webhook and inbound webhook deliveries, jobs and threads get a UUIDv7
+  // in id()'s prefix_<32 hex> form, so their inserts land at the end of each index. Every other kind stays random, and
+  // nothing may rely on these being strictly increasing: within one millisecond they come in no particular order.
+  test('IDs: high-volume rows get time-ordered IDs in the same format, sorted by creation time; other IDs stay random', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, run, db }) => {
+      const { id, rowId, taggedEmailId } = await import('./src/core.js');
+      const v7 = /^[a-z]+_[0-9a-f]{12}7[0-9a-f]{3}[89ab][0-9a-f]{15}$/, v4 = /^[a-z]+_[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$/;
+      const at = (value: string) => parseInt(value.slice(value.lastIndexOf('_') + 1, value.lastIndexOf('_') + 13), 16);
+      const wid = runtime.config.workspaceId, began = Date.now() - 1000;
+      const ids = async (query: string) => (await db.query(query, [wid])).rows.map(row => row.id as string);
+      // id()'s format and length, the creation time first.
+      for (const prefix of ['email', 'event', 'whd', 'job', 'mwd', 'thr']) {
+        const made = rowId(prefix);
+        assert.match(made, v7); assert.ok(made.startsWith(prefix + '_')); assert.equal(made.length, id(prefix).length);
+        assert.ok(Math.abs(at(made) - Date.now()) < 1000);
+      }
+      // Sorted by creation time across milliseconds, by JavaScript and by the database's collation.
+      const made: string[] = [], base = Date.now(), clock = t.mock.method(Date, 'now', () => base + Math.floor(made.length / 4));
+      try { while (made.length < 400) made.push(rowId('email')); } finally { clock.mock.restore(); }
+      assert.equal(new Set(made).size, made.length);
+      assert.deepEqual([...made].reverse().sort().map(at), made.map(at));
+      assert.deepEqual((await db.query('SELECT array_agg(v ORDER BY v) AS v FROM unnest($1::text[]) v', [[...made].reverse()])).rows[0].v.map(at), made.map(at));
+      // row_id() in SQL builds the same, from the database's clock.
+      const fromSql: string[] = [];
+      for (let i = 0; i < 5; i++) fromSql.push((await db.query("SELECT row_id('job') AS id FROM pg_sleep(0.002)")).rows[0].id);
+      for (const value of fromSql) { assert.match(value, v7); assert.equal(value.length, id('job').length); assert.ok(Math.abs(at(value) - Date.now()) < 1000); }
+      assert.deepEqual([...fromSql].reverse().sort(), fromSql); assert.equal(new Set(fromSql.map(at)).size, fromSql.length);
+      // id() is unchanged: random, in no order.
+      const random = Array.from({ length: 400 }, () => id('email'));
+      for (const value of random) assert.match(value, v4);
+      assert.notDeepEqual([...random].sort(), random);
+      // Consecutive IDs still spread evenly over the sending depth stripes (hashtext(id) & 15).
+      const stripes = (await db.query('SELECT hashtext(v) & 15 AS s, count(*)::int AS n FROM unnest($1::text[]) v GROUP BY 1', [[...made, ...Array.from({ length: 1200 }, () => rowId('email'))]])).rows;
+      assert.equal(stripes.length, 16); assert.ok(stripes.every(row => row.n > 50 && row.n < 200), JSON.stringify(stripes));
+
+      // Sending: a direct, batch and scheduled send, dispatch and feedback, with a webhook for both public events.
+      const hook = ok(await local('POST', '/v1/webhooks', { url: 'https://example.com/hooks/ids', eventTypes: ['email.sent', 'email.delivered'] }), 201);
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'IDs fixture', permissions: ['send'] }), 201);
+      const direct = ok(await local('POST', '/v1/emails/send', mail()), 202);
+      const batch = ok(await local('POST', '/v1/emails/batch', { emails: [mail(), mail()] }), 202).data.map((e: Json) => e.id as string);
+      const scheduled = ok(await local('POST', '/v1/emails/send', mail({ scheduledAt: new Date(Date.now() + 3_600_000).toISOString() })), 202);
+      await run('email.dispatch');
+      await run('operation.simulatedFeedback');
+      const events = (await db.query('SELECT id,type FROM sending_email_events WHERE workspace_id=$1', [wid])).rows;
+      assert.deepEqual([...new Set(events.map(e => e.type))].sort(), ['accepted', 'delivery', 'dispatch_attempt', 'scheduled', 'send']);
+      const sending = { emails: [direct.id, ...batch, scheduled.id], events: events.map(e => e.id as string), published: await ids('SELECT id FROM operation_events WHERE workspace_id=$1'),
+        deliveries: await ids('SELECT id FROM operation_deliveries WHERE workspace_id=$1'), jobs: await ids("SELECT id FROM jobs WHERE workspace_id=$1 AND type IN ('operation.webhook','operation.simulatedFeedback')") };
+      // Received mail: the thread mail_store_ritual_plan makes, its fanout job, the inbound webhook delivery and its job.
+      await db.query('INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,$3,$4)', [wid, REGION, unique('bucket'), `arn:aws:sns:${REGION}:111122223333:inbound`]);
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'ids.example',$3,'active','store')", [unique('mdom'), wid, REGION]);
+      const box = ok(await local('POST', '/v1/inbound/addresses', { address: 'orders@ids.example' }), 201);
+      const inbound = ok(await local('POST', '/v1/inbound/webhooks', { url: 'https://example.com/hooks/ids-inbound', eventTypes: ['message.received'] }), 201);
+      const mid = unique('msg');
+      await db.query("INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) VALUES($1,$2,$3,'fixture','fixture',$4,'{}')", [wid, mid, REGION, JSON.stringify([box.address])]);
+      await db.query("SELECT * FROM mail_store_incoming($1,'[]','[]',$2,false,false,NULL,NULL)", [{ id: mid, workspace_id: wid, ses_message_id: mid, lifecycle: 'kept', envelope_to: [box.address], direction: 'inbound',
+        subject: 'Order', from_address: 'customer@example.org', to: [], cc: [], bcc: [], reply_to: [], references: [], received_at: new Date().toISOString(), body_truncated: false, snippet: 'Order',
+        headers: [], size_bytes: 42, attachment_count: 0, verdicts: {}, spam: false, automated: false, status: 'received' }, JSON.stringify([{ addr: box.address, n: 0, valid: true }])]);
+      const fanout = await ids("SELECT id FROM jobs WHERE workspace_id=$1 AND type='mailbox.fanout'");
+      await expandFixtureOutbox(runtime, wid);
+      const receiving = { threads: [(await db.query('SELECT thread_id FROM mail_messages WHERE id=$1', [mid])).rows[0].thread_id as string], fanout,
+        deliveries: (await db.query('SELECT id FROM mailbox_webhook_deliveries WHERE webhook_id=$1', [inbound.id])).rows.map(row => row.id as string),
+        jobs: await ids("SELECT id FROM jobs WHERE workspace_id=$1 AND type='mailbox.webhook'") };
+      for (const [kind, values] of Object.entries({ ...sending, ...Object.fromEntries(Object.entries(receiving).map(([k, v]) => ['received ' + k, v])) })) {
+        assert.ok(values.length, kind);
+        for (const value of values) { assert.match(value, v7, kind); assert.ok(at(value) >= began && at(value) <= Date.now() + 1000, kind); }
+      }
+      // What depends on the format still works: the SES tag check takes a new email ID, and the scheduled send's release
+      // job is still named by its email. The other IDs these flows made stay random.
+      assert.equal(taggedEmailId({ mail: { tags: { bane_email_id: [direct.id] } } }), direct.id);
+      assert.deepEqual(await ids("SELECT id FROM jobs WHERE workspace_id=$1 AND type='sending.release'"), ['release:' + scheduled.id]);
+      for (const value of [hook.id, key.id, box.id, inbound.id]) assert.match(value, v4);
     });
   });
 

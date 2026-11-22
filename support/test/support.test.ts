@@ -11,7 +11,7 @@ import { MAIL_PORTS, mailServerHosts } from '../../api/src/mail-servers.js';
 import { ticketEmail } from '../src/tickets.js';
 import { mailAllowed } from '../src/limits.js';
 import { project, toolResult } from '../src/agent/projection.js';
-import { TOOLS, type ToolHost } from '../src/agent/tools.js';
+import { TOOLS, toolNames, type ToolHost } from '../src/agent/tools.js';
 import { addressHash, chatToken, confirmToken, readChatToken, readConfirmToken } from '../src/tokens.js';
 import { cleanImage, ImageRejected } from '../src/image.js';
 import { jpegWithMetadata, pngWithMetadata, SECRET_TEXT, webpWithMetadata } from './images.js';
@@ -321,6 +321,8 @@ const about = (r: Recorded, needle: string) => {
   const last = [...(r.body?.messages ?? [])].reverse().find((m: any) => m.role === 'user' && (typeof m.content === 'string' || m.content.some((b: any) => b.type === 'text')));
   return JSON.stringify(last?.content ?? '').includes(needle);
 };
+/** The reads email never has, even for an owner: billing, the activity trail, request logs and webhook deliveries. */
+const NOT_BY_EMAIL = ['api_errors', 'explain_request', 'get_audit', 'get_billing', 'list_webhook_deliveries'];
 /** The tools Nightmail lets only owners and admins read (MANAGER_TOOLS). */
 const MANAGER = ['api_errors', 'domain_health', 'explain_request', 'get_audit', 'get_billing', 'list_domains', 'list_webhook_deliveries', 'propose_action', 'recheck_domain'];
 /** The changes the fake Nightmail keeps (fakes.ts), and the one body the scripted retry proposal may send: its kind's IDs only. */
@@ -1020,7 +1022,7 @@ describe('support Worker', () => {
     for (const [message, thread] of cases) assert.equal((await signedHook(message, thread, 'vbo@acme.test')).status, 200);
     for (const [message, thread] of cases) assert.ok(await eventually(async () => (await replies(thread))[0], 60_000), message);
     const turns = recorded.slice(before).filter(r => offered(r).includes('reply'));
-    assert.ok(turns.length >= 4 && turns.every(r => offered(r).includes('get_billing')), 'An owner’s email turns, with her owner reads.');
+    assert.ok(turns.length >= 4 && turns.every(r => offered(r).includes('domain_health')), 'An owner’s email turns, with her owner reads.');
     for (const r of turns) for (const never of ['propose_action', 'recheck_domain', 'request_content_access', 'add_note']) assert.ok(!offered(r).includes(never), never);
     for (const [, , tool] of cases) {
       const called = turns.find(r => (r.body.messages as any[]).some(m => blocksOf(m).some((b: any) => b.type === 'tool_use' && b.name === tool)));
@@ -1034,6 +1036,37 @@ describe('support Worker', () => {
     assert.equal((await fakeActions()).length, proposals, 'Nothing was proposed.');
     for (const [, thread] of cases) assert.ok(!(await replies(thread))[0]![3].text.includes('press Help: https'), 'Verified answers carry no Help line.');
   }, 240_000);
+
+  test('verified email reads only account status, domains and sending: billing, the activity log, request logs and webhooks are never offered, a forced call is refused before Nightmail, and the prefetch carries none of them; a chat keeps them by role', async () => {
+    await fakeHook('/__account', { userId: 'usr_vxo', email: 'vxo@acme.test', role: 'owner' });
+    const before = recorded.length, from = (await fakeCalls()).length;
+    assert.equal((await signedHook('msg_vx_1', 'thr_vx', 'vxo@acme.test')).status, 200);
+    const sent = await eventually(async () => (await replies('thr_vx'))[0], 60_000);
+    assert.match(sent?.[3].text ?? '', /answered in Help in the dashboard/, 'The reply sends them to Help.');
+    const turns = recorded.slice(before).filter(r => about(r, 'Excluded probe'));
+    assert.ok(turns.length >= 6, 'The model tried each excluded tool, then answered.');
+    const tools = offered(turns[0]!);
+    for (const read of ['account_context', 'list_workspaces', 'list_domains', 'domain_health', 'get_standing', 'list_emails', 'get_email', 'list_events', 'delivery_metrics', 'bounce_reasons',
+      'screen_rejections', 'lint_email', 'list_campaigns', 'get_campaign', 'lint_campaign', 'audience_health', 'choose_workspace', 'reply', 'file_ticket']) assert.ok(tools.includes(read), read);
+    assert.deepEqual(tools.filter(name => NOT_BY_EMAIL.includes(name)), [], 'An owner’s email turn lists none of them.');
+    assert.deepEqual(tools.sort(), toolNames({ channel: 'email', verified: true, manager: true }).sort());
+    // Each forced call is refused by the tool host, and none reaches Nightmail.
+    const messages = turns.at(-1)!.body.messages as any[];
+    for (const tool of NOT_BY_EMAIL) {
+      const use = messages.flatMap(blocksOf).find((b: any) => b.type === 'tool_use' && b.name === tool);
+      const result = use && messages.flatMap(blocksOf).find((b: any) => b.type === 'tool_result' && b.tool_use_id === use.id);
+      assert.ok(result && (result.is_error === true || /not available|denied|not allowed|unavailable/i.test(JSON.stringify(result.content))), `${tool} was refused: ${JSON.stringify(result)}`);
+    }
+    const id = await registeredIn('msg_vx_1'), stamped = (await fakeCalls()).slice(from).filter(c => c[0] === 'request' && c[2] === id);
+    assert.deepEqual(stamped.filter(c => /^\/v1\/support\/(?:billing|audit|requests|webhook-deliveries)/.test(c[1])), [], 'Nothing excluded reached Nightmail.');
+    // The <account> prefetch: status, domains and sending, without the activity trail, webhook failures, request IDs or key counts.
+    const account = JSON.stringify(turns[0]!.body).match(/<account read=[\s\S]*?<\/account>/)?.[0] ?? '';
+    assert.ok(account.includes('news.acme.test') && account.includes('campaigns'), account.slice(0, 400));
+    for (const never of ['recentActivity', 'api_key', 'Deploy bot', 'webhookDeliveries', 'apiKeys', 'links', 'requestIds', 'grant']) assert.ok(!account.includes(never), `<account> carries no ${never}`);
+    // The Help chat is unchanged: an owner's turn lists them, a member's lists none of the owner/admin reads.
+    for (const tool of NOT_BY_EMAIL) assert.ok(toolNames({ channel: 'chat', manager: true }).includes(tool), tool);
+    assert.deepEqual(toolNames({ channel: 'chat', manager: false }).filter(name => NOT_BY_EMAIL.includes(name)), []);
+  }, 180_000);
 
   test('a verified email turn whose workspace choice gives less stops: the answer it wrote is held, never sent, the sender gets the notice once, and the conversation ends', async () => {
     await fakeHook('/__account', { userId: 'usr_vcw', email: 'vcw@acme.test', role: 'owner' });

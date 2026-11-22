@@ -35,7 +35,7 @@ export const terminalColumns = sql`id,workspace_id,status,region,simulated,error
 export function terminalEvents(rows: SQL, extra = sql`'{}'::jsonb`) {
   return sql`terminal AS (${rows}), emitted AS (
     INSERT INTO sending_email_events(id,workspace_id,email_id,type,external_id,simulated,data)
-    SELECT 'event_'||replace(gen_random_uuid()::text,'-',''),workspace_id,id,CASE WHEN status='rejected' THEN 'reject' ELSE status END,
+    SELECT public.row_id('event'),workspace_id,id,CASE WHEN status='rejected' THEN 'reject' ELSE status END,
       CASE status WHEN 'acceptance_unknown' THEN 'interrupted:'||id||':'||dispatch_version WHEN 'rejected' THEN 'preflight-failed:'||id ELSE status||':'||id END,simulated,
       jsonb_strip_nulls(jsonb_build_object('status',status,'code',error_code,'suppressionReason',suppression_reason)) || ${extra}
     FROM terminal ON CONFLICT DO NOTHING RETURNING *
@@ -45,12 +45,12 @@ export function terminalEvents(rows: SQL, extra = sql`'{}'::jsonb`) {
     FROM emitted v JOIN terminal t ON t.id=v.email_id ON CONFLICT DO NOTHING RETURNING *
   ), deliveries AS (
     INSERT INTO operation_deliveries(id,workspace_id,webhook_id,event_id,payload)
-    SELECT 'whd_'||replace(gen_random_uuid()::text,'-',''),p.workspace_id,w.id,p.id,
+    SELECT public.row_id('whd'),p.workspace_id,w.id,p.id,
       jsonb_build_object('id',p.id,'workspaceId',p.workspace_id,'type',p.type,'region',p.region,'createdAt',p.created_at,'data',p.data)
     FROM published p JOIN operation_webhooks w ON w.workspace_id=p.workspace_id AND NOT w.paused AND w.event_types ? p.type AND (w.regions IS NULL OR w.regions ? p.region)
     ON CONFLICT DO NOTHING RETURNING id,workspace_id
   ), webhook_jobs AS (
-    INSERT INTO jobs(id,workspace_id,type,payload) SELECT 'job_'||replace(gen_random_uuid()::text,'-',''),workspace_id,'operation.webhook',jsonb_build_object('deliveryId',id,'generation',0) FROM deliveries RETURNING 1
+    INSERT INTO jobs(id,workspace_id,type,payload) SELECT public.row_id('job'),workspace_id,'operation.webhook',jsonb_build_object('deliveryId',id,'generation',0) FROM deliveries RETURNING 1
   )`;
 }
 
