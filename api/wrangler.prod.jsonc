@@ -42,7 +42,7 @@
     "OAUTH_SCOPE_PREFIX": "nightmail",
     // Staff sign-up: the Google Workspace domain (hd) of the sign-in's provider identity, never an address. Only a
     // Google sign-in is staff; GitHub signs in members and existing users.
-    "AUTH_STAFF_GOOGLE_DOMAINS": "anoma.ly",
+    "AUTH_STAFF_GOOGLE_DOMAINS": "anoma.ly,vogel.dev",
     // Staff UI notes (src/ui-notes.ts) for these issuer subjects only, who must also be operators: Ryan alone.
     "UI_NOTES_SUBJECTS": "https://account.anoma.ly 0YLDsWUOonmIl3RQqb3yHQ",
     // Dashboard usage analytics (docs/analytics.md): batches go to the ANALYTICS bucket, never Postgres. "off" discards them.
