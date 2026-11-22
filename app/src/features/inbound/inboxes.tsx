@@ -132,7 +132,7 @@ function MessageDialog({ inboxId, messageId, onClose }: { inboxId: string; messa
   const message = useApiQuery(['agent-inbox-message', inboxId, messageId], (api, signal) => api.inboxes.message(inboxId, messageId, signal))
   const m = message.data
   const verdict = (name: string, value?: string) => <StatusBadge status={`${name} ${value ?? 'none'}`} tone={value === 'PASS' ? 'success' : value === 'FAIL' ? 'danger' : 'neutral'} />
-  return <Dialog open onOpenChange={open => { if (!open) onClose() }} title={m ? m.subject || '(no subject)' : <SkeletonText width={240} />} footer={<Button onClick={onClose}>Close</Button>}>
+  return <Dialog open onOpenChange={open => { if (!open) onClose() }} title={m ? m.subject || '(no subject)' : <SkeletonText width={240} />}>
     {message.error ? <ErrorState error={message.error} onRetry={() => void message.refetch()} /> : !m ? <SkeletonText width={320} /> : <div className="stack">
       <div className="settings-cell-stack">
         <div className="mailbox-message__from"><span><Sender name={m.from.name} address={m.from.address} nameOnly /></span>{nameParts(m.from.name, m.from.address) && <span className="muted"><PrivateAddress value={m.from.address} /></span>}</div>
@@ -220,9 +220,9 @@ function InboxDetail({ id }: { id: string }) {
   // The empty state depends on the inbox, and a single page drops the pagination: the messages stay in their loading
   // shape until both are known, and the keys section only joins below them once they have, so nothing moves.
   const settled = Boolean(b) && !messages.isPending
-  return <div className="stack inbound-stack">
   // The code column shows only when a loaded message carries one.
   const codes = (messages.data?.data ?? []).some(m => m.extract.codes.length > 0)
+  return <div className="stack inbound-stack">
     <PageHeader title={b ? <PrivateAddress value={b.address} /> : <SkeletonText width={260} lineHeight={28} />} backTo={route} actions={b && <>
       {b.type === 'ephemeral' && <Link className="ui-button ui-button--secondary ui-button--md" to={`/receiving/inbox?address=${encodeURIComponent(b.id)}`}>Open in inbox</Link>}
       {canAdminister && b.status !== 'deleting' && <Button onClick={() => setEditing(true)}>Edit</Button>}
