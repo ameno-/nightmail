@@ -28,7 +28,7 @@
 .recipe-advanced .recipe-agent-link > svg { margin-right: var(--space-6); }
 
 /* The recipe form: one column, as wide as a comfortable field. */
-.recipe-form { display: grid; gap: var(--space-16); max-width: 560px; }
+.recipe-form { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-16); max-width: 560px; }
 .recipe-ai { display: flex; align-items: flex-start; gap: var(--space-8); margin: 0; color: var(--color-muted); font-size: var(--text-sm); line-height: var(--leading-sm); font-variant-numeric: tabular-nums; }
 .recipe-ai > svg { flex: none; margin-top: 3px; color: var(--color-muted); }
 .recipe-field { gap: var(--space-12); }
