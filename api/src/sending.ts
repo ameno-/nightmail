@@ -226,8 +226,15 @@ async function statsGroups(db: DbExecutor, a: Pick<Actor, 'workspaceId'>, where:
     .where(and(scope(emails, a), where)).groupBy(emails.campaignId, emails.status, emails.simulated);
 }
 /** The stored count of the campaign's current launch, if any (an earlier launch's never applies). */
-const storedStats = (row: typeof campaigns.$inferSelect) => row.reviewId && row.stats?.reviewId === row.reviewId ? row.stats : null;
+const storedStats = (row: Pick<typeof campaigns.$inferSelect, 'reviewId' | 'stats'>) => row.reviewId && row.stats?.reviewId === row.reviewId ? row.stats : null;
 const backgroundCounted = (row: typeof campaigns.$inferSelect) => row.total >= CAMPAIGN_STATS.from;
+/** A listed campaign's stored totals (CampaignListStats), without counting anything. */
+function listedStats(row: Pick<typeof campaigns.$inferSelect, 'reviewId' | 'stats'> & { tracking: boolean | null }) {
+  const stored = storedStats(row);
+  if (!stored) return null;
+  const total = (key: 'accepted' | 'delivered' | 'opened' | 'clicked') => stored.groups.reduce((n, group) => n + group[key], 0);
+  return { tracking: row.tracking ?? true, accepted: total('accepted'), delivered: total('delivered'), opened: total('opened'), clicked: total('clicked'), computedAt: stored.computedAt };
+}
 /**
  * Lifetime statistics of campaigns (GET /v1/campaigns/{id}/stats, and the support reads in src/support-deliverability.ts).
  * A large campaign with a stored count reads it; the others are counted now, in one statement over the campaign and
@@ -274,12 +281,14 @@ const addGroups = (sum: CampaignStatsGroup[], page: CampaignStatsGroup[]) => {
 };
 const campaignStatsJobId = (campaignId: string) => `campaign-stats:${campaignId}`;
 /** Starts the campaign's background count at `at` (now when null), unless one is already waiting or running. */
-const queueCampaignStats = (ref: { workspaceId: string; id: string }, at: string | null = null) => sql`INSERT INTO jobs(id,type,workspace_id,payload,available_at)
-  VALUES (${campaignStatsJobId(ref.id)},'sending.campaignStats',${ref.workspaceId},${JSON.stringify({ campaignId: ref.id })}::jsonb,coalesce(${at}::timestamptz,now()))
+const queueCampaignStats = (ref: { workspaceId: string; id: string }, at: string | null = null) => queueCampaignsStats(ref.workspaceId, [ref.id], at);
+/** The same for several campaigns of a workspace, in one statement that takes their job rows in ID order. */
+const queueCampaignsStats = (workspaceId: string, campaignIds: string[], at: string | null = null) => sql`INSERT INTO jobs(id,type,workspace_id,payload,available_at)
+  VALUES ${sql.join([...campaignIds].sort().map(campaignId => sql`(${campaignStatsJobId(campaignId)},'sending.campaignStats',${workspaceId},${JSON.stringify({ campaignId })}::jsonb,coalesce(${at}::timestamptz,now()))`), sql`,`)}
   ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,payload=excluded.payload,available_at=excluded.available_at,lease_until=NULL,last_error=NULL
   WHERE jobs.status IN ('completed','failed')`;
 /** A read restarts the count of a launched campaign never counted, or of a finished one counted `readRefreshMs` ago. */
-function statsDue(row: typeof campaigns.$inferSelect) {
+function statsDue(row: Pick<typeof campaigns.$inferSelect, 'reviewId' | 'stats' | 'state'>) {
   if (!row.reviewId) return false;
   const stored = storedStats(row);
   if (!stored) return true;
@@ -344,14 +353,18 @@ const campaignStatsJob: JobHandler = retryDatabaseFailures(async (runtime, paylo
 });
 const CampaignState = Campaign.pick({ id: true, revision: true, updatedAt: true, state: true, scheduledAt: true, archivedAt: true }).describe('Compact state for draft sync polling. Compare all fields, not only revision: archival and delivery state can change without a new draft revision. Fetch the full campaign when state changes. No draft content or delivery counts.').openapi('CampaignState');
 const CampaignDraftSummary = CampaignDraftView.pick({ name: true, region: true, from: true, fromName: true, subject: true, previewText: true }).extend({ audience: AudienceSpec.pick({ listId: true, segmentId: true }).partial({ listId: true }).default({}) }).strict().openapi('CampaignDraftSummary');
-const CampaignSummary = Campaign.omit({ draft: true }).extend({ draft: CampaignDraftSummary }).describe('Campaign list metadata only. Fetch GET /v1/campaigns/{id} for the complete draft before editing or sending. Content, defaults, attachments and audience exclusions are intentionally omitted.').openapi('CampaignSummary');
+const CampaignListStats = z.object({ tracking: z.boolean(), accepted: z.number().int(), delivered: z.number().int(), opened: z.number().int(), clicked: z.number().int(), computedAt: z.string().describe('When the count was taken.') })
+  .describe('The campaign\u2019s last stored count: the totals getCampaignStats reported when it was taken (computedAt). Null when it has none. Listing never counts emails or events; listing with listId starts a count for finished campaigns whose figures are missing or stale, so they appear on a later read.').openapi('CampaignListStats');
+const CampaignSummary = Campaign.omit({ draft: true }).extend({ draft: CampaignDraftSummary, stats: CampaignListStats.nullable() }).describe('Campaign list metadata only. Fetch GET /v1/campaigns/{id} for the complete draft before editing or sending. Content, defaults, attachments and audience exclusions are intentionally omitted.').openapi('CampaignSummary');
 // The filters' statuses: the published ones, and scheduled for sends still waiting (they read queued, with scheduled true).
 export const EmailStatusFilter = z.enum([...Status.options, 'scheduled']);
 // A literal substring search of sent mail (sending_log_text ILIKE): the trigram index answers terms of 3 characters or
 // more; a shorter one can't use it and reads every email of the workspace, so it is refused.
 export const SubstringSearch = z.string().trim().min(3, 'Search for at least 3 characters.').max(200);
 const EmailQuery = PageQuery.extend({ campaignId: z.string().max(120).optional(), status: EmailStatusFilter.optional().describe('scheduled lists sends waiting for their time; queued includes them.'), region: Region.optional(), kind: z.enum(['transactional', 'marketing']).optional(), search: SubstringSearch.optional().describe('Literal case-insensitive substring of sender, To/Cc/Bcc, subject or email/campaign/provider ID, at least 3 characters: a shorter term is refused with 422 VALIDATION_FAILED.'), from: z.string().datetime({ offset: true }).optional(), to: z.string().datetime({ offset: true }).optional() }).refine(q => !q.from || !q.to || Date.parse(q.from) < Date.parse(q.to), 'from must precede to.').describe('Newest created emails first, with an opaque cursor bound to the filters. Date range is createdAt >= from and < to. Search is literal and case-insensitive across sender address, To/Cc/Bcc recipients, subject and email/campaign/provider IDs. Use status, region, kind and creation-date filters for those fields; error codes, simulation state and timestamps are not free-text fields.').openapi('ListEmailsQuery');
-const CampaignQuery = PageQuery.extend({ region: Region.optional(), state: CampaignStateValue.optional(), archived: z.enum(['true', 'false']).default('false').describe('False lists active campaigns; true lists archived campaigns only.'), search: z.string().trim().min(1).max(200).optional() }).describe('Newest created campaigns first, excluding archived campaigns by default, with an opaque cursor bound to the filters. Search is literal, case-insensitive name, subject or ID text.').openapi('ListCampaignsQuery');
+const CampaignQuery = PageQuery.extend({ region: Region.optional(), state: CampaignStateValue.optional(), archived: z.enum(['true', 'false']).default('false').describe('False lists active campaigns; true lists archived campaigns only.'), search: z.string().trim().min(1).max(200).optional(),
+  listId: z.string().min(1).max(120).optional().describe('Only campaigns whose audience list is this one: a newsletter\u2019s issues.'),
+  newsletter: z.enum(['true', 'false']).optional().describe('true: only campaigns whose audience list is a newsletter. false: only the others, with no list or a list that is not a newsletter.') }).describe('Newest created campaigns first, excluding archived campaigns by default, with an opaque cursor bound to the filters. Search is literal, case-insensitive name, subject or ID text.').openapi('ListCampaignsQuery');
 const AudienceCounts = z.object({ matched: z.number().int(), eligible: z.number().int(), suppressed: z.number().int(), unsubscribed: z.number().int() }).describe('Live counts for the saved audience: matched contacts, those eligible for marketing, and the suppressed or unsubscribed remainder. Read-only; sending freezes its own snapshot and rechecks consent at dispatch.').openapi('CampaignAudienceCounts');
 
 const CampaignUpdate = z.object({ revision: z.number().int().positive(), draft: z.object({ ...CampaignInput.shape, region: Region.optional().describe('Omit to keep the current region selection. An unpinned regional MX draft follows its From domain.') }).strict() }).strict().openapi('CampaignUpdateInput');
@@ -1633,18 +1646,28 @@ export function registerSending(app: App) {
     }, { replayed: campaignReplay(a) });
     return c.json(Campaign.parse({ ...result, archivedAt: result.archivedAt ?? null, url: campaignUrl(c.env, result), delivery: null }), 201);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns', operationId: 'listCampaigns', description: `Returns bounded campaign metadata summaries. Fetch an individual campaign for its full editable draft; list drafts omit bodies, defaults, attachments and audience exclusions. Dashboard list counts may be cached for up to 60 seconds; API credentials get exact list counts. getCampaign may reuse counts for up to ${CAMPAIGN_PROGRESS_CACHE_SECONDS} seconds ${CAMPAIGN_PROGRESS_SCOPE}.`, tags: ['Campaigns'], security, request: { query: CampaignQuery }, responses: { 200: response(page(CampaignSummary)), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns', operationId: 'listCampaigns', description: `Returns bounded campaign metadata summaries. Fetch an individual campaign for its full editable draft; list drafts omit bodies, defaults, attachments and audience exclusions. Dashboard list counts may be cached for up to 60 seconds; API credentials get exact list counts. getCampaign may reuse counts for up to ${CAMPAIGN_PROGRESS_CACHE_SECONDS} seconds ${CAMPAIGN_PROGRESS_SCOPE}. A newsletter's issues are the campaigns to its list: filter with listId.`, tags: ['Campaigns'], security, request: { query: CampaignQuery }, responses: { 200: response(page(CampaignSummary)), ...errors } }), async c => {
     const a = actor(c), q = c.req.valid('query'), binding = await pageBinding(a, 'campaigns', q), cursor = readCursor(q.cursor, binding);
     if (q.region) region(c.env, q.region);
     const search = q.search ? literalSearch(q.search) : null;
-    const rows = await timed(c, 'campaign-list-db', () => c.env.db.select(campaignSummaryColumns).from(campaigns).where(and(campaignWhere(a),
+    // list_id is the draft's audience list (migration 393), so these filters never read a draft; a newsletter is a list with a sender.
+    const newsletterList = sql`EXISTS (SELECT 1 FROM audience_lists l WHERE l.workspace_id = ${campaigns.workspaceId} AND l.id = ${campaigns.listId} AND l.newsletter_from IS NOT NULL)`;
+    const rows = await timed(c, 'campaign-list-db', () => c.env.db.select({ ...campaignSummaryColumns, stats: campaigns.stats,
+      // Only beside a stored count (the draft is read again for it).
+      tracking: sql<boolean | null>`CASE WHEN ${campaigns.stats}->>'reviewId' = ${campaigns.reviewId} THEN (${campaigns.draft}->>'tracking')::boolean END` }).from(campaigns).where(and(campaignWhere(a),
       q.archived === 'true' ? isNotNull(campaigns.archivedAt) : isNull(campaigns.archivedAt),
       cursor ? sql`(${campaigns.createdAt}, ${campaigns.id}) < (${cursor.at}::timestamptz, ${cursor.id})` : undefined,
       q.region ? sql`${campaigns.draft}->>'region' = ${q.region}` : undefined, q.state ? eq(campaigns.state, q.state) : undefined,
       search ? sql`(${campaigns.id} ILIKE ${search} OR ${campaigns.draft}->>'name' ILIKE ${search} OR ${campaigns.draft}->>'subject' ILIKE ${search})` : undefined,
+      q.listId ? eq(campaigns.listId, q.listId) : undefined, q.newsletter === 'true' ? newsletterList : q.newsletter === 'false' ? sql`NOT ${newsletterList}` : undefined,
     )).orderBy(desc(campaigns.createdAt), desc(campaigns.id)).limit(q.limit + 1));
-    const views = await timed(c, 'campaign-counts-db', () => campaignViews(c.env, a, rows.slice(0, q.limit), { origin: new URL(c.req.url).origin }));
-    return c.json({ data: views.map(row => CampaignSummary.parse(row)), nextCursor: nextCursor(rows, q.limit, binding) }, 200);
+    const listed = rows.slice(0, q.limit);
+    // A newsletter's issues: finished campaigns whose stored count is missing or stale are counted in the background (the
+    // job deduplicates), so their figures appear on a later read. This read counts nothing.
+    const due = q.listId ? listed.filter(row => !(CAMPAIGN_ACTIVE as readonly string[]).includes(row.state) && statsDue(row)).map(row => row.id) : [];
+    if (due.length) await c.env.db.execute(queueCampaignsStats(a.workspaceId, due));
+    const views = await timed(c, 'campaign-counts-db', () => campaignViews(c.env, a, listed.map(({ stats: _stats, tracking: _tracking, ...row }) => row), { origin: new URL(c.req.url).origin }));
+    return c.json({ data: views.map((row, i) => CampaignSummary.parse({ ...row, stats: listedStats(listed[i]!) })), nextCursor: nextCursor(rows, q.limit, binding) }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}', operationId: 'getCampaign', description: `The campaign with its full draft, per-status email counts and delivery progress. ${CAMPAIGN_PROGRESS_NOTE} ${readLimitNote(READ_LIMIT.campaign)}`, tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(Campaign), ...errors } }), async c => {
     const a = actor(c), row = await timed(c, 'campaign-db', () => findCampaign(c.env.db, a, c.req.valid('param').id));

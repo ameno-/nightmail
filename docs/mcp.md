@@ -116,6 +116,8 @@ A one-off send can wait for a time: `sendEmail` with `scheduledAt` (a UTC instan
 
 After the required audience/content/time confirmation, use `sendCampaign` or `scheduleCampaign` with the current campaign `revision`. Nightmail snapshots the audience and starts a durable background workflow. HTTP 202 means accepted for validation and delivery, not sent or delivered.
 
+A newsletter is a contact list with a sender: `createNewsletter` makes a new list one (`name`) or an existing list one (`listId`), and its ID and name are the list's. Its issues are ordinary campaigns to that list: create one with `createCampaign` and `audience.listId` set to the newsletter's ID, then test, confirm and send it as any campaign; `listCampaigns` with `listId` lists them. There are no separate issue operations. `getNewsletter` returns its readers (subscribed, unsuppressed members) and how many joined each day; `deleteNewsletter` keeps the list, its contacts and its campaigns.
+
 ### Inbound addresses and conversations
 
 Reading workspace-wide message content requires unrestricted **manage** access: a signed-in grant or an API key. Receiving configuration requires an owner or admin of the workspace a call names, or an API key with manage on every domain; managing it also requires manage permission. Inbox-scoped connections instead get only the operations and inboxes their key or consent allows. Refresh the client’s catalog after changing a grant.

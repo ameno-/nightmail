@@ -121,7 +121,7 @@ export const quickstart: { title: string; text: string; code?: string }[] = [
 // Guides beyond the first five minutes, for /docs.md and /llms.txt; the dashboard shows the same text as a Docs guide.
 export const guides: { id: string; title: string; text: string; code?: string; language?: string }[] = [webhookSignatureGuide];
 // Getting started first; account and installation plumbing last.
-const tagOrder = ['Emails', 'Domains', 'Inbound addresses', 'Inbound threads', 'Inbound webhooks', 'Inbound events', 'Inbound domains', 'Webhooks', 'Events', 'Metrics', 'Attachments', 'Templates', 'Campaigns', 'Audience', 'Consent', 'ApiKeys', 'Inbound keys', 'Settings', 'Regions', 'Workspaces', 'Auth'];
+const tagOrder = ['Emails', 'Domains', 'Inbound addresses', 'Inbound threads', 'Inbound webhooks', 'Inbound events', 'Inbound domains', 'Webhooks', 'Events', 'Metrics', 'Attachments', 'Templates', 'Campaigns', 'Newsletters', 'Audience', 'Consent', 'ApiKeys', 'Inbound keys', 'Settings', 'Regions', 'Workspaces', 'Auth'];
 const tagRank = (tag: string) => { const index = tagOrder.indexOf(tag); return index === -1 ? tagOrder.length : index; };
 
 export function createOpenApiDocument(app: App) {

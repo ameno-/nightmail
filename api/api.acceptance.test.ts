@@ -690,7 +690,7 @@ test('MCP: every API operation is a tool or a documented human step, and docs/mc
   assert.deepEqual(resourceInventory().map(x=>x.operation).sort(), [...catalog.keys()].sort());
   // The listing's byte budget is measured as sent, for the largest credential (Hosted MCP members and invitations).
   const plain = resourceTools(catalog);
-  assert.equal(plain.length, 30);
+  assert.equal(plain.length, 31);
   // tools/list leaves out the hints that equal the MCP spec's defaults: every tool it can list (each operation's Code Mode
   // tool, each plain resource tool and describe_tool, the workspace tools) keeps the same effective hints, and keeps
   // destructiveHint wherever it was set.
@@ -4822,9 +4822,9 @@ describe('Hosted MCP OAuth and tools', () => {
       // Full receiving control over MCP: endpoints by toolset, idempotent creates, and an API key that dies with the approval.
       const fullListing = ok(await http('POST','/mcp',token,{jsonrpc:'2.0',id:1,method:'tools/list',params:{}},rpcHeaders));
       const wireBytes = Buffer.byteLength(JSON.stringify(fullListing));
-      // 30 resource tools, describe_tool and the workspaces tool. About 50 KB, and about 1 KB more for the workspace each
+      // 31 resource tools, describe_tool and the workspaces tool. About 50 KB, and about 1 KB more for the workspace each
       // tool takes (a bare string there; the workspaces tool and describe_tool explain it).
-      assert.equal(fullListing.result.tools.length, 31); assert.ok(wireBytes <= 51_000, `${wireBytes} bytes`);
+      assert.equal(fullListing.result.tools.length, 32); assert.ok(wireBytes <= 51_000, `${wireBytes} bytes`);
       t.diagnostic(`Full-grant plain tools/list: ${wireBytes} bytes`);
       const inboxSet = (await rpc(token,'tools/list',{},'/mcp?toolsets=inboxes')).tools;
       assert.match(fullListing.result.tools.find((tool:Json)=>tool.name==='attachments').description, /upload/i);
@@ -10154,6 +10154,286 @@ describe('Lists, compound segments, imports and exports', () => {
   });
 });
 
+// A newsletter is a contact list with a sender (src/newsletters.ts, migration 393): its ID and name are the list's, and its
+// issues are the campaigns sent to that list. These run in isolated workspaces (the simulated fixture's transaction), where
+// every row is created at the same transaction time, so tests that read an order set created_at themselves.
+describe('Newsletters', () => {
+  const sender = 'news@unverified.example';
+  const keys = (value: Json) => Object.keys(value).sort();
+  const listKeys = ['createdAt', 'description', 'id', 'name', 'updatedAt', 'workspaceId'];
+  test('newsletters: a list with a sender, made from a name or an existing list, renamed with it, in /v1/me, and gone without taking its list', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const wid = runtime.config.workspaceId;
+      // Created in this order, a minute apart (the fixture's rows otherwise share one transaction time).
+      const age = (id: string, minutes: number) => db.query(`UPDATE audience_lists SET created_at=now()-make_interval(mins=>$2) WHERE workspace_id=$1 AND id=$3`, [wid, minutes, id]);
+      // A new list that is a newsletter, in one step; its domain need not be verified.
+      const weekly = ok(await local('POST', '/v1/newsletters', { name: 'Weekly', from: sender, fromName: 'The Weekly' }), 201);
+      await age(weekly.id, 60);
+      assert.deepEqual(keys(weekly), ['createdAt', 'from', 'fromName', 'id', 'name', 'url']);
+      assert.deepEqual([weekly.name, weekly.from, weekly.fromName, weekly.url], ['Weekly', sender, 'The Weekly', `${PUBLIC_ORIGIN}/newsletters/${weekly.id}`]);
+      assert.match(weekly.id, /^lst_[0-9a-f]{32}$/);
+      // It is a list, and the list routes answer with exactly the fields they had.
+      const asList = ok(await local('GET', `/v1/lists/${weekly.id}`));
+      assert.deepEqual([keys(asList), asList.name, asList.description], [[...listKeys, 'counts'].sort(), 'Weekly', '']);
+      const fresh = ok(await local('GET', `/v1/newsletters/${weekly.id}`));
+      assert.deepEqual(keys(fresh), ['createdAt', 'from', 'fromName', 'id', 'name', 'readers', 'url']);
+      assert.deepEqual([fresh.readers.count, fresh.readers.daily.length, fresh.readers.daily.some((n: number) => n)], [0, 182, false]);
+      // An existing list becomes one: a second time is a conflict, an unknown list is not found, and a body names one or the other.
+      const plain = ok(await local('POST', '/v1/lists', { name: 'Customers' }), 201);
+      await age(plain.id, 50);
+      assert.deepEqual(keys(plain), listKeys);
+      error(await local('GET', `/v1/newsletters/${plain.id}`), 404, 'NOT_FOUND');
+      const customers = ok(await local('POST', '/v1/newsletters', { listId: plain.id, from: sender }), 201);
+      assert.deepEqual([customers.id, customers.name, customers.fromName], [plain.id, 'Customers', null]);
+      error(await local('POST', '/v1/newsletters', { listId: plain.id, from: sender }), 409, 'NEWSLETTER_EXISTS');
+      error(await local('POST', '/v1/newsletters', { listId: 'lst_' + '0'.repeat(32), from: sender }), 404, 'NOT_FOUND');
+      error(await local('POST', '/v1/newsletters', { name: 'Both', listId: plain.id, from: sender }), 422);
+      error(await local('POST', '/v1/newsletters', { name: 'No sender' }), 422);
+      error(await local('POST', '/v1/newsletters', { name: 'Bad sender', from: 'Weekly <news@unverified.example>' }), 422);
+      // Oldest first, a page at a time; listContactLists still lists both, with the fields it had.
+      const first = ok(await local('GET', '/v1/newsletters?limit=1'));
+      assert.deepEqual(first.data.map((n: Json) => n.id), [weekly.id]);
+      const second = ok(await local('GET', `/v1/newsletters?limit=1&cursor=${encodeURIComponent(first.nextCursor)}`));
+      assert.deepEqual([second.data.map((n: Json) => n.id), second.nextCursor], [[customers.id], null]);
+      const allLists = ok(await local('GET', '/v1/lists?limit=100')).data as Json[];
+      assert.deepEqual(allLists.map(l => l.id).sort(), [weekly.id, customers.id].sort());
+      assert.ok(allLists.every(l => keys(l).join() === [...listKeys, 'counts'].sort().join()));
+      assert.ok(ok(await local('GET', '/v1/lists?counts=false')).data.every((l: Json) => keys(l).join() === [...listKeys, 'counts'].sort().join()));
+      // Renaming either renames both; the sender changes, and fromName null removes it.
+      const changed = ok(await local('PATCH', `/v1/newsletters/${weekly.id}`, { name: 'Weekly digest', from: 'digest@unverified.example', fromName: null }));
+      assert.deepEqual([changed.name, changed.from, changed.fromName], ['Weekly digest', 'digest@unverified.example', null]);
+      assert.equal(ok(await local('GET', `/v1/lists/${weekly.id}`)).name, 'Weekly digest');
+      const listRenamed = ok(await local('PATCH', `/v1/lists/${customers.id}`, { name: 'All customers' }));
+      assert.deepEqual([keys(listRenamed), listRenamed.name], [listKeys, 'All customers']);
+      assert.equal(ok(await local('GET', `/v1/newsletters/${customers.id}`)).name, 'All customers');
+      const other = ok(await local('POST', '/v1/lists', { name: 'Not a newsletter' }), 201);
+      await age(other.id, 45);
+      error(await local('PATCH', `/v1/newsletters/${other.id}`, { name: 'No' }), 404, 'NOT_FOUND');
+      // GET /v1/me names the oldest four, renamed and removed with them.
+      const me = async () => ok(await local('GET', '/v1/me')).newsletters as Json[];
+      assert.deepEqual(await me(), [{ id: weekly.id, name: 'Weekly digest' }, { id: customers.id, name: 'All customers' }]);
+      const extra: Json[] = [];
+      for (const [n, minutes] of [[1, 40], [2, 30], [3, 20]] as const) { extra.push(ok(await local('POST', '/v1/newsletters', { name: `Extra ${n}`, from: sender }), 201)); await age(extra.at(-1)!.id, minutes); }
+      assert.deepEqual((await me()).map(n => n.id), [weekly.id, customers.id, extra[0]!.id, extra[1]!.id], 'At most four, oldest first.');
+      // Deleting the newsletter keeps the list, its contacts and its campaigns.
+      const contact = ok(await local('POST', '/v1/contacts', { email: 'reader@example.net' }), 201);
+      ok(await local('POST', `/v1/lists/${weekly.id}/members`, { contactIds: [contact.id] }));
+      const issue = ok(await local('POST', '/v1/campaigns', { name: 'Issue 1', from: sender, audience: { listId: weekly.id } }), 201);
+      assert.deepEqual(ok(await local('DELETE', `/v1/newsletters/${weekly.id}`)), { id: weekly.id, deleted: true, listId: weekly.id });
+      error(await local('GET', `/v1/newsletters/${weekly.id}`), 404, 'NOT_FOUND');
+      error(await local('DELETE', `/v1/newsletters/${weekly.id}`), 404, 'NOT_FOUND');
+      const kept = ok(await local('GET', `/v1/lists/${weekly.id}`));
+      assert.deepEqual([kept.name, kept.counts.total], ['Weekly digest', 1]);
+      assert.equal(ok(await local('GET', `/v1/contacts/${contact.id}`)).listIds[0], weekly.id);
+      assert.equal(ok(await local('GET', `/v1/campaigns/${issue.id}`)).draft.audience.listId, weekly.id);
+      assert.deepEqual((await me()).map(n => n.id), [customers.id, extra[0]!.id, extra[1]!.id, extra[2]!.id]);
+      // Deleting the list deletes its newsletter.
+      ok(await local('DELETE', `/v1/lists/${customers.id}`));
+      error(await local('GET', `/v1/newsletters/${customers.id}`), 404, 'NOT_FOUND');
+      assert.deepEqual((await me()).map(n => n.id), extra.map(n => n.id));
+      assert.deepEqual(ok(await local('GET', '/v1/newsletters')).data.map((n: Json) => n.id), extra.map(n => n.id));
+    });
+  });
+
+  test('newsletters: its issues are the campaigns to its list; listing filters by list without reading drafts and shows stored counts without counting', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, run, jobs }) => {
+      const wid = runtime.config.workspaceId;
+      const news = ok(await local('POST', '/v1/newsletters', { name: 'Issues', from: sender }), 201);
+      const otherList = ok(await local('POST', '/v1/lists', { name: 'Other' }), 201);
+      const issue = ok(await local('POST', '/v1/campaigns', { name: 'Issue 1', audience: { listId: news.id } }), 201);
+      const elsewhere = ok(await local('POST', '/v1/campaigns', { name: 'Elsewhere', audience: { listId: otherList.id } }), 201);
+      const none = ok(await local('POST', '/v1/campaigns', { name: 'No list' }), 201);
+      // The trigger keeps list_id equal to the draft's audience list on every write of the draft.
+      const listIds = async () => Object.fromEntries((await db.query('SELECT id, list_id FROM sending_campaigns WHERE workspace_id=$1', [wid])).rows.map(r => [r.id, r.list_id]));
+      assert.deepEqual(await listIds(), { [issue.id]: news.id, [elsewhere.id]: otherList.id, [none.id]: null });
+      const ids = async (query: string) => (ok(await local('GET', `/v1/campaigns${query}`)).data as Json[]).map(c => c.id).sort();
+      assert.deepEqual(await ids(''), [issue.id, elsewhere.id, none.id].sort(), 'Without the new filters, the same campaigns.');
+      assert.deepEqual(await ids(`?listId=${news.id}`), [issue.id]);
+      assert.deepEqual(await ids('?newsletter=true'), [issue.id]);
+      assert.deepEqual(await ids('?newsletter=false'), [elsewhere.id, none.id].sort());
+      assert.deepEqual(await ids(`?listId=${news.id}&newsletter=false`), []);
+      // Moving a draft to the newsletter's list moves it.
+      const full = ok(await local('GET', `/v1/campaigns/${elsewhere.id}`));
+      ok(await local('PATCH', `/v1/campaigns/${elsewhere.id}`, { revision: full.revision, draft: { ...full.draft, audience: { listId: news.id } } }));
+      assert.equal((await listIds())[elsewhere.id], news.id);
+      assert.deepEqual(await ids(`?listId=${news.id}`), [issue.id, elsewhere.id].sort());
+      assert.deepEqual(await ids('?newsletter=false'), [none.id]);
+      assert.deepEqual(await ids(''), [issue.id, elsewhere.id, none.id].sort());
+      // A cursor is bound to its filters.
+      const paged = ok(await local('GET', `/v1/campaigns?listId=${news.id}&limit=1`));
+      error(await local('GET', `/v1/campaigns?limit=1&cursor=${encodeURIComponent(paged.nextCursor)}`), 422, 'INVALID_CURSOR');
+
+      // The issue was sent and finished: 4 recipients, delivered, two opened and one clicked (rows as the release writes them).
+      const review = unique('review');
+      await db.query("UPDATE sending_campaigns SET state='done',review_id=$2,actor_key_id='fixture',total=4,prepared=4,expanded=4 WHERE id=$1", [issue.id, review]);
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,campaign_id,review_id,review_ordinal,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id)
+        SELECT 'email_'||md5($2||n),$1,$3,'fixture',$2,$4,n,$5,jsonb_build_array('reader-'||n||'@example.net'),'[]','[]','Issue','{}',false,'delivered','p'||n FROM generate_series(1,4) n`, [wid, issue.id, REGION, review, sender]);
+      await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated) SELECT 'event_'||md5($2||n||t),$1,'email_'||md5($2||n),t,false
+        FROM generate_series(1,4) n, unnest(ARRAY['delivery','open','click']) t WHERE t='delivery' OR (t='open' AND n<=2) OR (t='click' AND n=1)`, [wid, issue.id]);
+      const statsOf = async (query: string) => Object.fromEntries((ok(await local('GET', `/v1/campaigns${query}`)).data as Json[]).map(c => [c.id, c.stats]));
+      // Listing reads stored counts only: before one exists, null, and no listing counts emails or events.
+      const statements: string[] = [];
+      const query = t.mock.method(db, 'query');
+      try {
+        assert.equal((await statsOf(''))[issue.id], null);
+        assert.equal((await jobs('sending.campaignStats')).length, 0, 'An unfiltered listing queues nothing.');
+        // A newsletter's issues: the finished one without a count is queued once (drafts never), and still reads null.
+        assert.deepEqual(await statsOf(`?listId=${news.id}`), { [issue.id]: null, [elsewhere.id]: null });
+        assert.equal((await statsOf(`?listId=${news.id}`))[issue.id], null);
+      } finally { statements.push(...query.mock.calls.map(call => String((call.arguments[0] as any)?.text ?? call.arguments[0]))); query.mock.restore(); }
+      assert.equal(statements.filter(s => /count\(DISTINCT|sending_email_events/i.test(s)).length, 0, 'No listing aggregates emails or events.');
+      assert.deepEqual((await jobs('sending.campaignStats')).map(j => [j.id, j.status, j.payload]), [[`campaign-stats:${issue.id}`, 'pending', { campaignId: issue.id }]]);
+      // The background count stores the figures; the listing then shows them as getCampaignStats reports its totals.
+      await run('sending.campaignStats');
+      const stored = (await db.query('SELECT stats FROM sending_campaigns WHERE id=$1', [issue.id])).rows[0].stats;
+      assert.equal(stored.emails, 4);
+      const totals = ok(await local('GET', `/v1/campaigns/${issue.id}/stats`)).totals;
+      const expected = { tracking: true, accepted: 4, delivered: 4, opened: 2, clicked: 1, computedAt: stored.computedAt };
+      assert.deepEqual([totals.accepted, totals.delivered, totals.opened, totals.clicked], [4, 4, 2, 1]);
+      assert.deepEqual((await statsOf(`?listId=${news.id}`))[issue.id], expected);
+      assert.deepEqual((await statsOf(''))[issue.id], expected, 'Every listing shows a stored count.');
+      assert.equal((await jobs('sending.campaignStats'))[0].status, 'completed', 'A fresh count is not queued again.');
+    });
+  });
+
+  test('newsletters: readers are exact for a small list, and a large list reads the count a bounded background pass stored', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, run, jobs }) => {
+      const { NEWSLETTER_READERS } = await import('./src/newsletters.js');
+      const lowered = { ...NEWSLETTER_READERS }; t.after(() => { Object.assign(NEWSLETTER_READERS, lowered); });
+      const wid = runtime.config.workspaceId, tag = unique('reader');
+      const list = ok(await local('POST', '/v1/lists', { name: 'Readers' }), 201);
+      // Seven members: three readers (joined today, 10 days ago and 300 days ago), and one each deleted, suppressed,
+      // unsubscribed and undecided.
+      await db.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent,suppressed,deleted_at)
+        SELECT $3||'-'||k, $1, k||'@'||$3||'.example', consent, k='suppressed', CASE WHEN k='deleted' THEN now() END
+        FROM (VALUES ('today','subscribed'),('tendays','subscribed'),('old','subscribed'),('deleted','subscribed'),('suppressed','subscribed'),('unsubscribed','unsubscribed'),('unknown','unknown')) v(k,consent) RETURNING id)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id,created_at)
+        SELECT $1,$2,id,CASE WHEN id LIKE '%-tendays' THEN now()-interval '10 days' WHEN id LIKE '%-old' THEN now()-interval '300 days' ELSE now() END FROM c`, [wid, list.id, tag]);
+      // Making an existing list a newsletter queues its count at once.
+      ok(await local('POST', '/v1/newsletters', { listId: list.id, from: sender }), 201);
+      const job = async () => { const rows = await jobs('audience.newsletterReaders'); assert.ok(rows.length <= 1, 'One job row per list.'); return rows[0]; };
+      assert.deepEqual([(await job())?.id, (await job())?.status], [`newsletter-readers:${list.id}`, 'pending']);
+      // A small list is counted when read, exactly.
+      const exact = ok(await local('GET', `/v1/newsletters/${list.id}`)).readers;
+      const today = new Date().toISOString().slice(0, 10), since = new Date(Date.now() - 181 * 86_400_000).toISOString().slice(0, 10);
+      assert.deepEqual([exact.count, exact.since, exact.daily.length], [3, since, 182]);
+      assert.equal(exact.daily.reduce((n: number, d: number) => n + d, 0), 2, 'The two readers who joined within 182 days.');
+      assert.deepEqual([exact.daily[181], exact.daily[171]], [1, 1]);
+      assert.ok(exact.countedAt.startsWith(today));
+      // A large list: the threshold, the page and the run are lowered so 7 members make four pages of at most 2.
+      Object.assign(NEWSLETTER_READERS, { exactUpTo: 3, page: 2, runMs: 0 });
+      const statements: string[] = [];
+      const query = t.mock.method(db, 'query');
+      let first: Json;
+      try { first = ok(await local('GET', `/v1/newsletters/${list.id}`)); }
+      finally { statements.push(...query.mock.calls.map(call => String((call.arguments[0] as any)?.text ?? call.arguments[0]))); query.mock.restore(); }
+      // It has no stored count yet: readers is null, and the read touched no contact, only the probe's index entries.
+      assert.equal(first!.readers, null);
+      assert.equal(statements.filter(s => s.includes('audience_contacts')).length, 0);
+      assert.equal(statements.filter(s => /FROM audience_list_members .*ORDER BY contact_id OFFSET \$\d+ LIMIT 1/s.test(s)).length, 1);
+      ok(await local('GET', `/v1/newsletters/${list.id}`));
+      assert.equal((await job()).status, 'pending', 'Already queued: the reads add nothing.');
+      // Each run reads one page (runMs 0), the sums carried in the job; the fourth page, of one member, ends the pass.
+      const progress: number[] = [];
+      for (let step = 0; step < 3; step++) { await run('audience.newsletterReaders'); progress.push((await job()).payload.pass.members); }
+      assert.deepEqual([progress, (await job()).status], [[2, 4, 6], 'pending']);
+      assert.equal((await db.query('SELECT newsletter_readers FROM audience_lists WHERE id=$1', [list.id])).rows[0].newsletter_readers, null);
+      await run('audience.newsletterReaders');
+      assert.equal((await job()).status, 'completed');
+      const stored = (await db.query('SELECT newsletter_readers FROM audience_lists WHERE id=$1', [list.id])).rows[0].newsletter_readers;
+      assert.deepEqual([stored.count, stored.members, stored.since, stored.daily], [3, 7, since, exact.daily], 'The pass counts what the exact read counted.');
+      // Reads answer from that count, and a fresh count is not queued again.
+      assert.deepEqual(ok(await local('GET', `/v1/newsletters/${list.id}`)).readers, { count: 3, daily: exact.daily, since, countedAt: stored.countedAt });
+      assert.equal((await job()).status, 'completed');
+      // Past the refresh interval a read queues the next pass (from the start) and answers from the last count meanwhile.
+      NEWSLETTER_READERS.refreshMs = 0;
+      assert.equal(ok(await local('GET', `/v1/newsletters/${list.id}`)).readers.countedAt, stored.countedAt);
+      assert.deepEqual([(await job()).status, (await job()).payload], ['pending', { listId: list.id }]);
+      // A list that stopped being a newsletter is not counted, and its stored count went with it.
+      ok(await local('DELETE', `/v1/newsletters/${list.id}`));
+      await run('audience.newsletterReaders');
+      assert.equal((await db.query('SELECT newsletter_readers FROM audience_lists WHERE id=$1', [list.id])).rows[0].newsletter_readers, null);
+    });
+  });
+
+  test('newsletters: owners and admins change them; members and keys without manage read them; keys limited to domains get nothing', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      // Hosted, so a member's dashboard session signs in (self-hosted admits only listed subjects).
+      runtime.config.multiTenant = true;
+      cleanup(t, async () => { runtime.config.multiTenant = false; });
+      const wid = runtime.config.workspaceId, issuer = process.env.ACCOUNT_ISSUER ?? 'https://account.anoma.ly';
+      const person = async (role: string) => {
+        const userId = unique('newsletter-user'), token = createHash('sha256').update(randomUUID()).digest('base64url'), email = `${userId}@${AUTH_DOMAIN}`;
+        secrets.add(token);
+        await db.query('INSERT INTO nightmail_users(id,name,email,email_verified) VALUES($1,$1,$2,true)', [userId, email]);
+        await db.query('INSERT INTO nightmail_oidc_identities VALUES($1,$2,$3)', [issuer, userId, userId]);
+        await db.query("INSERT INTO nightmail_sessions(token_hash,user_id,issuer,subject,verified_email,expires_at) VALUES($1,$2,$3,$2,$4,now()+interval '1 hour')", [createHash('sha256').update(token).digest('hex'), userId, issuer, email]);
+        await db.query('INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,$4)', [randomUUID(), userId, wid, role]);
+        return { cookie: `${COOKIE_NAME}=${token}`, origin: PUBLIC_ORIGIN };
+      };
+      const key = async (permissions: string[], domains: string[] = []) => { const made = ok(await request('POST', '/v1/api-keys', MANAGER, { name: unique('newsletter-key'), permissions, domains }), 201); secrets.add(made.secret); return made.secret as string; };
+      const news = ok(await local('POST', '/v1/newsletters', { name: 'Shared', from: sender }), 201);
+      const writes = (id: string): [string, string, Json?][] => [['POST', '/v1/newsletters', { name: 'Refused', from: sender }], ['PATCH', `/v1/newsletters/${id}`, { name: 'Refused' }], ['DELETE', `/v1/newsletters/${id}`]];
+      // A member, and keys with read or read and send: they read newsletters and cannot create, change or delete one.
+      const member = await person('member'), admin = await person('admin'), readKey = await key(['read']), readSendKey = await key(['read', 'send']);
+      const readers: [string, (method: string, path: string, body?: Json) => Promise<Reply>][] = [
+        ['member', (method, path, body) => request(method, path, undefined, body, member)],
+        ['read key', (method, path, body) => request(method, path, readKey, body)],
+        ['read and send key', (method, path, body) => request(method, path, readSendKey, body)],
+      ];
+      for (const [label, call] of readers) {
+        assert.deepEqual(ok(await call('GET', '/v1/newsletters')).data.map((n: Json) => n.id), [news.id], label);
+        assert.equal(ok(await call('GET', `/v1/newsletters/${news.id}`)).readers.count, 0, label);
+        assert.deepEqual(ok(await call('GET', '/v1/me')).newsletters, [{ id: news.id, name: 'Shared' }], label);
+        for (const [method, path, body] of writes(news.id)) {
+          const refused = error(await call(method, path, body), 403, 'PERMISSION_DENIED');
+          assert.deepEqual([label, refused.required?.permission, refused.required?.level], [label, 'audience', 'write']);
+        }
+      }
+      // An admin and a key with manage change them.
+      ok(await request('PATCH', `/v1/newsletters/${news.id}`, undefined, { fromName: 'Admin' }, admin));
+      const manageKey = await key(['manage']);
+      const made = ok(await request('POST', '/v1/newsletters', manageKey, { name: 'By key', from: sender }), 201);
+      ok(await request('DELETE', `/v1/newsletters/${made.id}`, manageKey));
+      // A send-only key reads no lists, and a key limited to sender domains reaches no workspace audience: /v1/me says null.
+      const sendKey = await key(['send']), domainKey = await key(['read', 'send', 'manage'], ['example.com']);
+      error(await request('GET', '/v1/newsletters', sendKey), 403, 'PERMISSION_DENIED');
+      assert.equal(ok(await request('GET', '/v1/me', sendKey)).newsletters, null);
+      for (const [method, path, body] of [['GET', '/v1/newsletters'], ['GET', `/v1/newsletters/${news.id}`], ...writes(news.id)] as [string, string, Json?][])
+        error(await request(method, path, domainKey, body), 403, 'UNRESTRICTED_KEY_REQUIRED');
+      assert.equal(ok(await request('GET', '/v1/me', domainKey)).newsletters, null);
+      assert.deepEqual(ok(await local('GET', '/v1/me')).newsletters, [{ id: news.id, name: 'Shared' }]);
+    });
+  });
+
+  // End to end on the real server and runner: an issue launched to a newsletter's list finishes, the count queued at its
+  // launch stores its figures, and the newsletter's listing shows them. A small campaign's count rechecks it every minute
+  // while it sends, so it stores within about a minute of finishing; this brings that check forward instead of waiting.
+  test('newsletters: an issue sent through the pipeline gets its stored count once it finishes, and its newsletter lists it', async t => {
+    const key = await keyFixture(t);
+    const news = ok(await http('POST', '/v1/newsletters', key.secret, { name: unique('newsletter'), from: 'sender@example.com' }), 201);
+    cleanup(t, async () => { ok(await http('DELETE', `/v1/lists/${news.id}`, key.secret), [200, 404]); });
+    const contact = await resource(t, key.secret, '/v1/contacts', { email: address() });
+    ok(await consent(key.secret, contact.id, 'subscribed'));
+    ok(await http('POST', `/v1/lists/${news.id}/members`, key.secret, { contactIds: [contact.id] }));
+    const campaign = await campaignFixture(t, key.secret, { listId: news.id });
+    ok(await http('POST', `/v1/campaigns/${campaign.id}/send`, key.secret, { revision: campaign.revision }), 202);
+    // Done, and its delivery recorded, before the count is taken: a stored count has what was recorded when it was taken.
+    await poll(`/v1/campaigns/${campaign.id}`, key.secret, row => row.state === 'done' && row.counts.byStatus.delivered === 1);
+    let listed: Json | undefined;
+    for (const until = Date.now() + 15_000; Date.now() < until && !listed?.stats; await new Promise(resolve => setTimeout(resolve, 100))) {
+      await authDb!.query("UPDATE jobs SET available_at=now() WHERE id=$1 AND status='pending'", [`campaign-stats:${campaign.id}`]);
+      if (fixtureWorker) { const { drain } = await import('./src/dispatch.js'); await drain(fixtureWorker.runtime, 20, 2, 5000, undefined, false, undefined, 'work'); }
+      [listed] = page(await http('GET', `/v1/campaigns?listId=${news.id}`, key.secret));
+    }
+    assert.equal(listed?.id, campaign.id);
+    assert.ok(listed?.stats, 'The finished issue has a stored count.');
+    const stats = ok(await http('GET', `/v1/campaigns/${campaign.id}/stats`, key.secret));
+    assert.deepEqual(listed.stats, { tracking: true, accepted: stats.totals.accepted, delivered: stats.totals.delivered, opened: stats.totals.opened, clicked: stats.totals.clicked, computedAt: listed.stats.computedAt });
+    assert.equal(stats.counts.total, 1);
+  });
+});
+
 describe('Import property boundaries', () => {
   test('CSV merges allow 50 properties, reject the 51st, and roll back every row in a failed commit', async t => {
     const key = await keyFixture(t);
@@ -10429,7 +10709,7 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
           || (method === 'post' && [...AUTHENTICATED_CREATES, ...MAILBOX_CREATES].some(route => route.test(concrete)))) routes.set(op.operationId, concrete);
       }
       const expires = ['sendEmail', 'sendEmailBatch', 'testCampaign', 'sendDomainTestEmail', 'createInboundThread', 'replyToInboundThread'];
-      const kept = ['createAgentToken', 'createApiKey', 'updateApiKey', 'createContact', 'createContactList', 'createSegment', 'previewContactImport', 'createCampaignTemplate',
+      const kept = ['createAgentToken', 'createApiKey', 'updateApiKey', 'createContact', 'createContactList', 'createNewsletter', 'createSegment', 'previewContactImport', 'createCampaignTemplate',
         'uploadTemplateAsset', 'importTemplateImage', 'uploadAttachment', 'uploadAttachmentBytes', 'createCampaign', 'sendCampaign', 'scheduleCampaign', 'cancelCampaign', 'createWebhook',
         'createRoute', 'createEndpoint', 'createInboxConnection', 'createInbox', 'createInboundSubdomain', 'createInboundAddress', 'createInboundKey', 'createInboundWebhook',
         'createBillingTopUp', 'createBillingTopUpLink'];
@@ -17008,9 +17288,9 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
   jobs: (type: string) => Promise<Json[]>;
 }) => Promise<void>) {
   assert.ok(['localhost', '127.0.0.1', '[::1]'].includes(new URL(FIXTURE_DATABASE_URL!).hostname), 'Simulated SES fixtures require an isolated local database.');
-  const [{ createApp }, { nodeRuntime }, { drizzle }, { jobHandlers }, { operationJobs }, { ensureRegionSettings }, { dispatchDue }, { JobDeferred }] = await Promise.all([
+  const [{ createApp }, { nodeRuntime }, { drizzle }, { jobHandlers }, { operationJobs }, { ensureRegionSettings }, { dispatchDue }, { JobDeferred }, { newsletterJobs }] = await Promise.all([
     import('./src/app.js'), import('./src/adapters/node.js'), import('drizzle-orm/node-postgres'), import('./src/sending.js'),
-    import('./src/operations.js'), import('./src/ses-region-state.js'), import('./src/dispatcher.js'), import('./src/jobs.js'),
+    import('./src/operations.js'), import('./src/ses-region-state.js'), import('./src/dispatcher.js'), import('./src/jobs.js'), import('./src/newsletters.js'),
   ]);
   const db = await fixtureDatabase(t);
   const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET,
@@ -17023,7 +17303,7 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
   runtime.snsCertificateState = new SnsCertificateState();
   assert.deepEqual(runtime.config.simulatedSes, { latencyMs: 100, maxSendRate: 1000, deliveryDelayMs: 250 }, 'Test dispatch must default to the 100 ms provider simulator.');
   runtime.config.simulatedSes.latencyMs = 0;
-  const app = createApp(), handlers = { ...jobHandlers, ...operationJobs };
+  const app = createApp(), handlers = { ...jobHandlers, ...operationJobs, ...newsletterJobs };
   const rollback = new Error('Rollback isolated simulated SES fixtures');
   const fetchIssuer=globalThis.fetch; let unexpectedNetwork=0;
   t.mock.method(globalThis,'fetch',async (input:RequestInfo|URL,init?:RequestInit)=>{

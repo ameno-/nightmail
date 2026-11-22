@@ -26,7 +26,12 @@ export const contacts = pgTable('audience_contacts', {
   openObservedSince: timestamp('open_observed_since', { withTimezone: true, mode: 'string' }), clickObservedSince: timestamp('click_observed_since', { withTimezone: true, mode: 'string' }),
   deletedAt: timestamp('deleted_at', { withTimezone: true, mode: 'string' }), ...dates(),
 }, t => [unique('audience_contacts_email_scope').on(t.workspaceId, t.email), index('audience_contacts_page').on(t.workspaceId, t.id)]);
-export const lists = pgTable('audience_lists', { id: text('id').primaryKey(), ...scope(), name: text('name').notNull(), description: text('description').notNull().default(''), ...dates() }, t => [index('audience_lists_page').on(t.workspaceId, t.id)]);
+/** A large newsletter's readers as its background count stored them (src/newsletters.ts readersJob). */
+export type StoredNewsletterReaders = { count: number; since: string; daily: number[]; countedAt: string; members: number };
+// A list is a newsletter while newsletter_from is set (migration 393, src/newsletters.ts).
+export const lists = pgTable('audience_lists', { id: text('id').primaryKey(), ...scope(), name: text('name').notNull(), description: text('description').notNull().default(''), ...dates(),
+  newsletterFrom: text('newsletter_from'), newsletterFromName: text('newsletter_from_name'), newsletterReaders: jsonb('newsletter_readers').$type<StoredNewsletterReaders>(),
+}, t => [index('audience_lists_page').on(t.workspaceId, t.id), index('audience_lists_newsletters').on(t.workspaceId, t.createdAt, t.id).where(sql`${t.newsletterFrom} IS NOT NULL`)]);
 export const listMembers = pgTable('audience_list_members', { ...scope(), listId: text('list_id').notNull(), contactId: text('contact_id').notNull(), createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow() }, t => [primaryKey({ columns: [t.workspaceId, t.listId, t.contactId] }), index('audience_members_contact').on(t.workspaceId, t.contactId)]);
 export const segments = pgTable('audience_segments', { id: text('id').primaryKey(), ...scope(), name: text('name').notNull(), rule: jsonb('rule').$type<SegmentRule>().notNull(), ...dates() }, t => [index('audience_segments_page').on(t.workspaceId, t.id)]);
 export const imports = pgTable('audience_imports', { id: text('id').primaryKey(), ...scope(), listId: text('list_id'), status: text('status').$type<'preview' | 'committed'>().notNull().default('preview'), rows: jsonb('rows').$type<ImportRow[]>().notNull(), errors: jsonb('errors').$type<ImportError[]>().notNull(), imported: integer('imported').notNull().default(0), ...dates() }, t => [index('audience_imports_page').on(t.workspaceId, t.id)]);

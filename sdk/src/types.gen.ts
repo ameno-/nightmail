@@ -684,6 +684,105 @@ export type AudienceOperationResult = {
     appliedAt: string;
 };
 
+export type Newsletter = {
+    /**
+     * The list’s ID.
+     */
+    id: string;
+    /**
+     * The list’s name.
+     */
+    name: string;
+    from: string;
+    fromName: string | null;
+    /**
+     * Dashboard URL for opening this newsletter.
+     */
+    url: string;
+    /**
+     * When the list was created.
+     */
+    createdAt: string;
+};
+
+/**
+ * Exactly one of name (a new list) or listId (an existing list).
+ */
+export type CreateNewsletterInput = {
+    /**
+     * Creates a new list with this name that is a newsletter.
+     */
+    name: string;
+    /**
+     * The From address of its issues. Its domain need not be verified yet: the sender is checked when an issue is tested or sent.
+     */
+    from: string;
+    fromName?: string;
+} | {
+    /**
+     * Makes this existing list a newsletter; 409 NEWSLETTER_EXISTS if it already is one.
+     */
+    listId: string;
+    /**
+     * The From address of its issues. Its domain need not be verified yet: the sender is checked when an issue is tested or sent.
+     */
+    from: string;
+    fromName?: string;
+};
+
+export type NewsletterRead = Newsletter & {
+    readers: NewsletterReaders;
+};
+
+/**
+ * Readers are the list’s members who are not deleted, not suppressed and subscribed to marketing, as campaign audiences count them. A list of up to 10,000 members is counted exactly when read. A larger list is counted in the background, a few minutes per pass, and read from its last count, which is refreshed when read more than an hour after it was taken; readers is null until the first count of a large list.
+ */
+export type NewsletterReaders = {
+    /**
+     * Readers now (at countedAt).
+     */
+    count: number;
+    /**
+     * One number per UTC day for the 182 days ending on the day of countedAt, oldest first: how many of these readers joined the list that day.
+     */
+    daily: Array<number>;
+    /**
+     * The first of those days, YYYY-MM-DD.
+     */
+    since: string;
+    /**
+     * When the count was taken; it includes every change made before then.
+     */
+    countedAt: string;
+} | null;
+
+export type UpdateNewsletterInput = {
+    /**
+     * Renames the list.
+     */
+    name?: string;
+    /**
+     * The From address of its issues. Its domain need not be verified yet: the sender is checked when an issue is tested or sent.
+     */
+    from?: string;
+    /**
+     * null removes it.
+     */
+    fromName?: string | null;
+};
+
+/**
+ * The list is no longer a newsletter. The list, its contacts and its campaigns are unchanged.
+ */
+export type NewsletterDeleted = {
+    id: string;
+    deleted: true;
+    /**
+     * The list, which stays, with its contacts and its campaigns. Delete it with deleteContactList.
+     */
+    listId: string;
+};
+
 export type CampaignTemplateSummary = {
     id: string;
     url: string;
@@ -1447,6 +1546,7 @@ export type CampaignSummary = {
     };
     delivery: CampaignDelivery;
     draft: CampaignDraftSummary;
+    stats: CampaignListStats;
 };
 
 export type CampaignDraftSummary = {
@@ -1464,6 +1564,21 @@ export type CampaignDraftSummary = {
         segmentId?: string;
     };
 };
+
+/**
+ * The campaign’s last stored count: the totals getCampaignStats reported when it was taken (computedAt). Null when it has none. Listing never counts emails or events; listing with listId starts a count for finished campaigns whose figures are missing or stale, so they appear on a later read.
+ */
+export type CampaignListStats = {
+    tracking: boolean;
+    accepted: number;
+    delivered: number;
+    opened: number;
+    clicked: number;
+    /**
+     * When the count was taken.
+     */
+    computedAt: string;
+} | null;
 
 /**
  * Lifetime campaign statistics, with no date cutoff or pagination. Done means dispatch finished, not delivery finished. Feedback is asynchronous; missing engagement does not prove nobody read or clicked. Simulated outcomes are never evidence of real delivery.
@@ -7545,6 +7660,13 @@ export type GetCurrentIdentityResponses = {
             autoRecharge: 'off' | 'on' | 'pending' | 'failed' | 'capped';
         } | null;
         /**
+         * The workspace’s oldest four newsletters (listNewsletters has them all), so a sidebar can name them on its first frame; a fourth means there are more. Null for a credential that cannot read lists (one without read, or limited to sender domains or addresses).
+         */
+        newsletters: Array<{
+            id: string;
+            name: string;
+        }> | null;
+        /**
          * The hosts mail apps connect to: IMAP on 993 (TLS) or 143 (STARTTLS), SMTP on 465 (TLS) or 587 (STARTTLS). An app password signs in to both; a send-only API key signs in to SMTP as apikey. Null when this installation has no IMAP/SMTP gateway.
          */
         mailServers?: {
@@ -9995,6 +10117,323 @@ export type ApplyAudiencePlanResponses = {
 
 export type ApplyAudiencePlanResponse = ApplyAudiencePlanResponses[keyof ApplyAudiencePlanResponses];
 
+export type ListNewslettersData = {
+    body?: never;
+    path?: never;
+    query?: {
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/v1/newsletters';
+};
+
+export type ListNewslettersErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListNewslettersError = ListNewslettersErrors[keyof ListNewslettersErrors];
+
+export type ListNewslettersResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<Newsletter>;
+        nextCursor: string | null;
+    };
+};
+
+export type ListNewslettersResponse = ListNewslettersResponses[keyof ListNewslettersResponses];
+
+export type CreateNewsletterData = {
+    body: CreateNewsletterInput;
+    path?: never;
+    query?: never;
+    url: '/v1/newsletters';
+};
+
+export type CreateNewsletterErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CreateNewsletterError = CreateNewsletterErrors[keyof CreateNewsletterErrors];
+
+export type CreateNewsletterResponses = {
+    /**
+     * Success
+     */
+    201: Newsletter;
+};
+
+export type CreateNewsletterResponse = CreateNewsletterResponses[keyof CreateNewsletterResponses];
+
+export type DeleteNewsletterData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/newsletters/{id}';
+};
+
+export type DeleteNewsletterErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type DeleteNewsletterError = DeleteNewsletterErrors[keyof DeleteNewsletterErrors];
+
+export type DeleteNewsletterResponses = {
+    /**
+     * Success
+     */
+    200: NewsletterDeleted;
+};
+
+export type DeleteNewsletterResponse = DeleteNewsletterResponses[keyof DeleteNewsletterResponses];
+
+export type GetNewsletterData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/newsletters/{id}';
+};
+
+export type GetNewsletterErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetNewsletterError = GetNewsletterErrors[keyof GetNewsletterErrors];
+
+export type GetNewsletterResponses = {
+    /**
+     * Success
+     */
+    200: NewsletterRead;
+};
+
+export type GetNewsletterResponse = GetNewsletterResponses[keyof GetNewsletterResponses];
+
+export type UpdateNewsletterData = {
+    body: UpdateNewsletterInput;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/newsletters/{id}';
+};
+
+export type UpdateNewsletterErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type UpdateNewsletterError = UpdateNewsletterErrors[keyof UpdateNewsletterErrors];
+
+export type UpdateNewsletterResponses = {
+    /**
+     * Success
+     */
+    200: Newsletter;
+};
+
+export type UpdateNewsletterResponse = UpdateNewsletterResponses[keyof UpdateNewsletterResponses];
+
 export type ListCampaignTemplatesData = {
     body?: never;
     path?: never;
@@ -11886,6 +12325,14 @@ export type ListCampaignsData = {
          */
         archived?: 'true' | 'false';
         search?: string;
+        /**
+         * Only campaigns whose audience list is this one: a newsletter’s issues.
+         */
+        listId?: string;
+        /**
+         * true: only campaigns whose audience list is a newsletter. false: only the others, with no list or a list that is not a newsletter.
+         */
+        newsletter?: 'true' | 'false';
     };
     url: '/v1/campaigns';
 };

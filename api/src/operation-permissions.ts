@@ -73,6 +73,9 @@ export const OPERATION_PERMISSIONS: Record<string, OperationPermission> = {
   updateContactConsent: needs('audience', 'write', 'workspace'), listContactConsentEvents: needs('audience', 'read', 'workspace'),
   listContactLists: needs('audience', 'read', 'workspace'), createContactList: needs('audience', 'write', 'workspace', admin), getContactList: needs('audience', 'read', 'workspace'),
   updateContactList: needs('audience', 'write', 'workspace', admin), deleteContactList: needs('audience', 'write', 'workspace', admin),
+  // Newsletters are lists with a sender: read like lists, changed like them by owners and admins.
+  listNewsletters: needs('audience', 'read', 'workspace'), getNewsletter: needs('audience', 'read', 'workspace'), createNewsletter: needs('audience', 'write', 'workspace', admin),
+  updateNewsletter: needs('audience', 'write', 'workspace', admin), deleteNewsletter: needs('audience', 'write', 'workspace', admin),
   listListMembers: needs('audience', 'read', 'workspace'), addListMembers: needs('audience', 'write', 'workspace', admin), removeListMember: needs('audience', 'write', 'workspace', admin),
   listSegments: needs('audience', 'read', 'workspace'), createSegment: needs('audience', 'write', 'workspace', admin), getSegment: needs('audience', 'read', 'workspace'),
   updateSegment: needs('audience', 'write', 'workspace', admin), deleteSegment: needs('audience', 'write', 'workspace', admin), previewSegment: needs('audience', 'read', 'workspace'),
