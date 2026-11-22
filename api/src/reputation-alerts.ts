@@ -111,21 +111,22 @@ export function reputationAlertText(input: { region: string; metric: Metric; lev
 const deliver: JobHandler = async (runtime, payload, job) => {
   const url = runtime.config.reputationAlertUrl;
   if (!url) return;
-  if(payload.code==='SES_IDENTITY_QUOTA_EXHAUSTED'){
-    const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text:`SES identity quota exhausted in ${payload.region}. Request regional identity capacity before onboarding more domains.`}),redirect:'manual',signal:AbortSignal.timeout(5000)});await r.body?.cancel();if(!r.ok)throw new ApiError(503,'REPUTATION_ALERT_FAILED','Quota alert delivery failed.',undefined,true);return;
-  }
-  if (payload.code === 'HOSTED_EXEMPT_OVER_LINE') return post(url, exemptAlertText({ ...payload, workspaceId: job.workspaceId }, runtime.config.publicUrl));
-  if (payload.code === 'SES_TENANT_PAUSED') return post(url, tenantPausedText({ ...payload, workspaceId: job.workspaceId }, runtime.config.publicUrl));
+  if (payload.code === 'SES_IDENTITY_QUOTA_EXHAUSTED') return postSlack(url, { text: `SES identity quota exhausted in ${payload.region}. Request regional identity capacity before onboarding more domains.` });
+  if (payload.code === 'HOSTED_EXEMPT_OVER_LINE') return postSlack(url, { text: exemptAlertText({ ...payload, workspaceId: job.workspaceId }, runtime.config.publicUrl) });
+  if (payload.code === 'SES_TENANT_PAUSED') return postSlack(url, { text: tenantPausedText({ ...payload, workspaceId: job.workspaceId }, runtime.config.publicUrl) });
   const { region, metric, level, previous, value } = payload;
   if (typeof region !== 'string' || !(metric === 'bounceRate' || metric === 'complaintRate') || !LEVELS.includes(level as Level) || !LEVELS.includes(previous as Level) || typeof value !== 'number') throw new ApiError(500, 'JOB_PAYLOAD_INVALID', 'Invalid reputation alert job.');
-  const text = reputationAlertText({ region, metric, level: level as Level, previous: previous as Level, value, publicUrl: runtime.config.publicUrl });
-  const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text }), signal: AbortSignal.timeout(10000) });
-  if (!response.ok) throw new ApiError(503, 'REPUTATION_ALERT_FAILED', `Slack rejected the reputation alert with HTTP ${response.status}.`, undefined, true);
+  await postSlack(url, { text: reputationAlertText({ region, metric, level: level as Level, previous: previous as Level, value, publicUrl: runtime.config.publicUrl }) });
 };
-async function post(url: string, text: string) {
-  const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text }), redirect: 'manual', signal: AbortSignal.timeout(10000) });
+/**
+ * Posts one message to a Slack incoming webhook (these alerts and src/operator-alerts.ts). It never follows a redirect,
+ * so the message goes to the configured webhook only; a refusal throws a retryable error, and so does a timeout
+ * (retryDatabaseFailures), so the job that posts it runs again. Neither the URL nor the message is logged.
+ */
+export async function postSlack(url: string, message: Record<string, unknown>, code = 'REPUTATION_ALERT_FAILED') {
+  const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(message), redirect: 'manual', signal: AbortSignal.timeout(10000) });
   await response.body?.cancel();
-  if (!response.ok) throw new ApiError(503, 'REPUTATION_ALERT_FAILED', `Slack rejected the alert with HTTP ${response.status}.`, undefined, true);
+  if (!response.ok) throw new ApiError(503, code, `Slack rejected the alert with HTTP ${response.status}.`, undefined, true);
 }
 const lineText: Record<string, string> = { complaints: 'spam complaints', screen: 'content-screen rejections', bounces: 'hard bounces' };
 /** A first-party (exempt) workspace crossed a pause line: Nightmail did not hold it, so a person has to look. */

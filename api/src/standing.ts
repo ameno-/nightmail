@@ -6,6 +6,7 @@ import { customerNotice, type NoticeInput } from './notices.js';
 import { queueTenantStatus, resumeHostedConnection, tenantStatusDrift, terminalColumns, terminalEvents, type HostedCaps } from './states.js';
 import { dailyLimit, ESTABLISHED, GOOD_STANDING, establishedBy, EVALUATION, evaluated, FREEZE_FLOOR, GROWTH, moveScore, nextGrowth, nextStanding, quality, stepRank, type DayEvidence, type GrowthHour, type DomainAuth, type Factor, type LadderInput, type Reason, type ScoreState, type Step, type TrackRecord, type Window } from './standing-model.js';
 import { productName } from './brand.js';
+import { checkSignInMail, standingAlert } from './operator-alerts.js';
 
 // The standing job: every ten minutes it counts each Hosted workspace's mail, moves its score, sets the daily limit
 // admission reads (none in good standing), and walks the ladder (notice → warn → restrict → pause). Every change of standing, by the job, an
@@ -90,6 +91,8 @@ export async function applyChange(db: DbExecutor, change: Change): Promise<{ eve
     ...(change.marketingHold !== undefined ? { marketingHold: change.marketingHold } : {}), strikes: strikes.length };
   await db.execute(sql`INSERT INTO standing_events(id,workspace_id,sequence,at,kind,from_step,to_step,reasons,actor,details)
     VALUES(${eventId},${wid},${sequence},${at}::timestamptz,${change.kind},${previousStep},${step},${JSON.stringify(reasons)}::jsonb,${JSON.stringify(actor)}::jsonb,${JSON.stringify(details)}::jsonb)`);
+  // Operators hear in Slack about a rise to a marketing hold or a pause, Amazon's included (src/operator-alerts.ts).
+  if (stepRank(step) > stepRank(previousStep)) await standingAlert(db, wid, step, reasons, change.details);
   // Customers see every change of step, a campaign quarantine and an owner's or operator's release on their own webhooks.
   if (step !== previousStep || change.kind === 'quarantine' || change.kind === 'release') {
     const data = { step, previousStep, reasons: reasons.map(({ code, metric, value, count, threshold, minimum, window, message }) => ({ code, metric, value, count, threshold, minimum, window, message })),
@@ -415,6 +418,8 @@ export async function standingTick(runtime: Runtime) {
     const { rows } = await runtime.db.execute(sql`INSERT INTO job_schedule(workspace_id,next_wake_at) VALUES ('maintenance:standing',now()+interval '10 minutes')
       ON CONFLICT(workspace_id) DO UPDATE SET next_wake_at=excluded.next_wake_at WHERE job_schedule.next_wake_at<=now() RETURNING 1`);
     if (!rows.length) return;
+    // Slow sign-in mail, on the same schedule (src/operator-alerts.ts). It never throws.
+    await checkSignInMail(runtime);
     const result = await refreshStanding(runtime);
     log('info', { code: 'STANDING_REFRESHED', ...result });
   } catch (error) { log('warn', { code: 'STANDING_REFRESH_FAILED', message: error instanceof ApiError ? error.code : 'The next run retries.' }); }

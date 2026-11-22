@@ -131,7 +131,8 @@ export function admitted<T extends { allowed: true }>(runtime: Runtime, d: T | R
   if (b && typeof b === 'object' && 'ok' in b) shadowBilling(b as BillingGate, workspaceId);
   if (!d.allowed) {
     const error = refusal(runtime, d, local);
-    // A send refused at the daily limit is also told by email, at most once a day (app.ts onError, account-notices.ts).
+    // A send refused at the daily limit is also told by email and to the operators, each at most once a day (app.ts
+    // onError, account-notices.ts and operator-alerts.ts).
     if (d.code === 'SEND_LIMIT_REACHED' && d.window !== 'hour' && error instanceof ApiError) error.limitReachedFor = workspaceId;
     throw error;
   }

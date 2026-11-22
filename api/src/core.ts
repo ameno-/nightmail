@@ -119,6 +119,8 @@ export interface Config {
   abuseMonitoring?: { since: string };
   /** ABUSE_SLACK_WEBHOOK_URL: where abuse-monitoring alerts are posted (src/abuse-alerts.ts). Undefined: stored only. */
   abuseSlackWebhookUrl?: string;
+  /** OPERATOR_SLACK_WEBHOOK_URL: where the operator alerts are posted (src/operator-alerts.ts). Undefined: nothing is posted. */
+  operatorSlackWebhookUrl?: string;
   /** NIGHTMAIL_ABUSE_ENFORCE. Reserved: abuse monitoring never blocks, and no code reads this yet. */
   abuseEnforce?: boolean;
   /** Hosted billing. stripe is undefined until STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET are set (money routes answer 503 BILLING_NOT_CONFIGURED). */
@@ -239,7 +241,7 @@ export class ApiError extends Error {
   logField?: string;
   /** What a permission refusal needs (denied): error.required and the Nightmail-Required-Permission header. */
   required?: Required;
-  /** The workspace whose daily limit refused this send (admission.ts): the error handler queues its once-a-day email. */
+  /** The workspace whose daily limit refused this send (admission.ts): the error handler queues its once-a-day email and operator alert. */
   limitReachedFor?: string;
   constructor(public status: number, public code: string, message: string, public field?: string, public retryable = false, public resetAt?: string) { super(message); }
 }
