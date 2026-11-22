@@ -113,7 +113,7 @@ function AddressesTab({ overview, fetching, filters, setFilter, page, onPage, on
   const lookup = overview.manage && complete && !exact && hosts.some(d => typed.endsWith('@' + d.name)) ? typed : undefined
   const chosen = rows.find(r => r.id === params.get('open'))
   // Beside the list, the panel always shows one: the chosen row, the typed one, or the first.
-  const selected = chosen ?? exact ?? (docked && !lookup ? rows[0] : undefined)
+  const selected = chosen ?? exact ?? rows.find(r => r.address?.id === params.get('build')) ?? (docked && !lookup ? rows[0] : undefined)
   const choose = (r: RouteEntry | null) => setParams(previous => { const next = new URLSearchParams(previous); if (r) next.set('open', r.id); else next.delete('open'); return next }, { replace: true })
   // An address opens the builder when it can draw its flow, else its steps on its page; an agent inbox its own page; a
   // wildcard or catch-all its route.
@@ -149,7 +149,6 @@ function AddressesTab({ overview, fetching, filters, setFilter, page, onPage, on
             { key: 'last', label: 'Last mail', align: 'right', card: 'aside', render: r => <LastMail entry={r} /> },
           ]} />
         <div className="rcv-foot" data-busy={fetching || undefined}>
-          <span className="muted">{number(kindCount(overview.counts, filters.kind))} {kindCount(overview.counts, filters.kind) === 1 ? 'address' : 'addresses'}{filters.domain ? ` at ${filters.domain}` : ''}</span>
           <Pagination page={page} pageSize={PAGE} total={kindCount(overview.counts, filters.kind)} nextCursor={overview.routes.nextCursor} onPageChange={onPage} />
         </div>
         {!docked && lookup && panel}

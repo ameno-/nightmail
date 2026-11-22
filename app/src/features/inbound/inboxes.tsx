@@ -9,6 +9,7 @@ import type { ApiKey, CreatedInbox, Inbox, InboxInput, InboxMessage, InboxStatus
 import { date, fileSize, number } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
 import { SecretField, when } from './shared'
+import { expiresIn } from './overview'
 import { nameParts } from '../../lib/private-address'
 import '../settings/settings.css'
 import './inbound.css'
@@ -116,7 +117,7 @@ export function AgentInboxesPage() {
           { key: 'address', label: 'Address', width: '26%', render: row => <span className="mailbox-address"><span className="receiving-clip"><PrivateAddress value={row.address} /></span>{row.type === 'sandbox' && <StatusBadge status="Sandbox" tone="neutral" />}</span>, cardRender: row => <PrivateAddress value={row.address} /> },
           { key: 'name', label: 'Name', width: '26%', card: 'line', render: row => row.name ? <span className="inbox-clip" title={row.name}>{row.name}</span> : <span className="muted">—</span>, cardRender: row => [row.name, row.type === 'sandbox' ? 'Sandbox' : null].filter(Boolean).join(' · ') || 'Agent inbox' },
           { key: 'status', label: 'Status', width: '11%', card: 'aside', render: row => <StatusBadge status={statusLabel[row.status]} tone={statusTone[row.status]} /> },
-          { key: 'expires', label: 'Expires', width: '13%', card: 'line', render: row => row.status === 'deleting' ? <span className="muted">Now</span> : row.expiresAt ? date(row.expiresAt) : <span className="muted">Never</span>, cardRender: row => row.status === 'deleting' ? 'Deleting now' : row.expiresAt ? `Expires ${date(row.expiresAt)}` : 'Never expires' },
+          { key: 'expires', label: 'Expires', width: '13%', card: 'line', render: row => row.status === 'deleting' ? <span className="muted">Now</span> : row.expiresAt ? expiresIn(row.expiresAt)!.replace(/^Expires /, '') : <span className="muted">Never</span>, cardRender: row => row.status === 'deleting' ? 'Deleting now' : row.expiresAt ? expiresIn(row.expiresAt) : 'Never expires' },
           { key: 'messages', label: 'Messages', align: 'right', card: 'inline', render: row => number(row.usage.messages), cardRender: row => `${number(row.usage.messages)} ${row.usage.messages === 1 ? 'message' : 'messages'}` },
           { key: 'unread', label: 'Unread', align: 'right', card: 'inline', render: row => row.usage.unread ? <strong>{number(row.usage.unread)}</strong> : <span className="muted">0</span>, cardRender: row => `${number(row.usage.unread)} unread` },
           { key: 'held', label: 'Held', align: 'right', card: 'hide', render: row => row.usage.held ? number(row.usage.held) : <span className="muted">0</span> },
@@ -131,7 +132,7 @@ function MessageDialog({ inboxId, messageId, onClose }: { inboxId: string; messa
   const message = useApiQuery(['agent-inbox-message', inboxId, messageId], (api, signal) => api.inboxes.message(inboxId, messageId, signal))
   const m = message.data
   const verdict = (name: string, value?: string) => <StatusBadge status={`${name} ${value ?? 'none'}`} tone={value === 'PASS' ? 'success' : value === 'FAIL' ? 'danger' : 'neutral'} />
-  return <Dialog open onOpenChange={open => { if (!open) onClose() }} title={m ? m.subject || '(no subject)' : <SkeletonText width={240} />} footer={<Button onClick={onClose}>Close</Button>}>
+  return <Dialog open onOpenChange={open => { if (!open) onClose() }} title={m ? m.subject || '(no subject)' : <SkeletonText width={240} />}>
     {message.error ? <ErrorState error={message.error} onRetry={() => void message.refetch()} /> : !m ? <SkeletonText width={320} /> : <div className="stack">
       <div className="settings-cell-stack">
         <div className="mailbox-message__from"><span><Sender name={m.from.name} address={m.from.address} nameOnly /></span>{nameParts(m.from.name, m.from.address) && <span className="muted"><PrivateAddress value={m.from.address} /></span>}</div>
@@ -150,7 +151,7 @@ function MessageDialog({ inboxId, messageId, onClose }: { inboxId: string; messa
   </Dialog>
 }
 
-const factTerms = ['Status', 'Expires', 'Deleted after', 'Delivered', 'Stored', 'Replies', 'Name']
+const factTerms = ['Status', 'Expires', 'Deleted after', 'Delivered', 'Stored', 'Replies']
 const permissionWords: Record<string, string> = { read: 'Read mail', modify: 'Mark read, delete', send: 'Reply' }
 /** A key limited to this inbox: an inbox key, or one for these addresses that names only this inbox. */
 const keyFor = (key: ApiKey, inboxId: string) => key.access.inboxId === inboxId || key.access.type !== 'workspace' && key.access.addressIds?.length === 1 && key.access.addressIds[0] === inboxId
@@ -219,6 +220,8 @@ function InboxDetail({ id }: { id: string }) {
   // The empty state depends on the inbox, and a single page drops the pagination: the messages stay in their loading
   // shape until both are known, and the keys section only joins below them once they have, so nothing moves.
   const settled = Boolean(b) && !messages.isPending
+  // The code column shows only when a loaded message carries one.
+  const codes = (messages.data?.data ?? []).some(m => m.extract.codes.length > 0)
   return <div className="stack inbound-stack">
     <PageHeader title={b ? <PrivateAddress value={b.address} /> : <SkeletonText width={260} lineHeight={28} />} backTo={route} actions={b && <>
       {b.type === 'ephemeral' && <Link className="ui-button ui-button--secondary ui-button--md" to={`/receiving/inbox?address=${encodeURIComponent(b.id)}`}>Open in inbox</Link>}
@@ -226,19 +229,17 @@ function InboxDetail({ id }: { id: string }) {
       {canAdminister && b.status==='active' && <ConnectAgentButton inboxId={id} />}
       {canAdminister && b.status !== 'deleting' && <Button variant="danger" onClick={() => setConfirmDelete(true)}>Delete</Button>}
     </>} />
-    {/* The facts hold their place while the inbox loads, so the sections below never move. Name always shows, keeping
-        the grid at three rows whatever the inbox. */}
+    {/* The facts hold their place while the inbox loads, so the sections below never move. */}
     {!b && <dl className="settings-facts" aria-hidden="true">{factTerms.map(term => <div key={term}><dt>{term}</dt><dd><SkeletonText width={120} /></dd></div>)}</dl>}
     {b && <>
       <dl className="settings-facts">
-        <div><dt>Status</dt><dd><StatusBadge status={statusLabel[b.status]} tone={statusTone[b.status]} /></dd></div>
+        {/* A sandbox says so beside its status rather than in a fact of its own, so every inbox has the loading grid's six. */}
+        <div><dt>Status</dt><dd><StatusBadge status={statusLabel[b.status]} tone={statusTone[b.status]} />{b.type === 'sandbox' && <span className="muted"> · Sandbox, test mail only</span>}</dd></div>
         <div><dt>{b.status === 'active' || !b.expiresAt ? 'Expires' : 'Expired'}</dt><dd>{b.expiresAt ? date(b.expiresAt) : 'Never'}</dd></div>
         <div><dt>Deleted after</dt><dd>{b.deleteAfter ? date(b.deleteAfter) : 'Never'}</dd></div>
         <div><dt>Delivered</dt><dd>{number(b.usage.messages - b.usage.held)} of {number(b.limits.messages)}{b.usage.unread > 0 && <span className="muted"> · {number(b.usage.unread)} unread</span>}</dd></div>
         <div><dt>Stored</dt><dd>{fileSize(b.usage.bytes)} of {fileSize(b.limits.bytes)}</dd></div>
         <div><dt>Replies</dt><dd>{b.type === 'sandbox' ? 'Never (sandbox)' : b.send.enabled ? 'To senders only' : 'Off'}</dd></div>
-        <div><dt>Name</dt><dd className="settings-break">{b.name || <span className="muted">—</span>}</dd></div>
-        {b.type === 'sandbox' && <div><dt>Type</dt><dd>Sandbox · test mail only</dd></div>}
       </dl>
       {b.status === 'deleting' && <Alert tone="info">This inbox was deleted. Its address no longer receives mail, and its messages are erased within the hour.</Alert>}
       {b.status === 'expired' && <Alert tone="info">This inbox expired. New mail is still stored but held until it is erased on {date(b.deleteAfter)}.</Alert>}
@@ -254,7 +255,7 @@ function InboxDetail({ id }: { id: string }) {
             // A message's card: its subject and status, then the sender and any code it carries.
             { key: 'from', label: 'From', width: '24%', card: 'line', render: row => <span className="inbox-clip"><Sender name={row.from.name} address={row.from.address} nameOnly /></span> },
             { key: 'subject', label: 'Subject', width: '40%', card: 'title', render: row => <span className="inbox-clip" title={row.snippet ? `${row.subject || '(no subject)'}: ${row.snippet}` : undefined}>{row.subject || '(no subject)'}{row.snippet && <span className="muted"> · {row.snippet}</span>}</span>, cardRender: row => row.subject || '(no subject)' },
-            { key: 'code', label: <span title={`A one-time code ${productName} found in the message, such as a sign-up code`}>Code found</span>, card: 'inline', render: row => row.extract.codes[0] ? <code>{row.extract.codes[0]}</code> : <span className="muted">—</span>, cardRender: row => row.extract.codes[0] ? <>Code <code>{row.extract.codes[0]}</code></> : 'No code' },
+            ...(codes ? [{ key: 'code', label: <span title={`A one-time code ${productName} found in the message, such as a sign-up code`}>Code found</span>, card: 'inline' as const, render: (row: InboxMessage) => row.extract.codes[0] ? <code>{row.extract.codes[0]}</code> : <span className="muted">—</span>, cardRender: (row: InboxMessage) => row.extract.codes[0] ? <>Code <code>{row.extract.codes[0]}</code></> : 'No code' }] : []),
             { key: 'state', label: 'Status', card: 'aside', render: row => { const state = messageState(row); return <StatusBadge status={state.label} tone={state.tone} /> } },
             { key: 'received', label: 'Received', align: 'right', render: row => when(row.receivedAt) },
           ]} />

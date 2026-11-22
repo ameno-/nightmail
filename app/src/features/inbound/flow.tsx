@@ -164,7 +164,7 @@ function matchedBy(r: TraceRecipient, overview: Overview, addresses: Pick<Inboun
   if (r.tier === 'pattern') return wildcard ? <>Caught by the wildcard <Match value={wildcard} /></> : 'Caught by a wildcard'
   if (r.tier === 'subaddress') return 'Caught by its address without the +tag'
   if (r.tier === 'catchall') return 'Caught by the catch-all'
-  if (r.tier === 'default') return r.domainDefault === 'create_address' ? 'No address yet · the catch-all creates it' : 'No address yet · the catch-all keeps it'
+  if (r.tier === 'default') return r.domainDefault === 'create_address' ? 'The catch-all creates it' : 'The catch-all keeps it'
   return 'Its own address'
 }
 /** The path one email took, from a test: where it was received and how, the rules that ran (ticked when they acted),
@@ -232,7 +232,7 @@ export function useFlowTest() {
   return { address: state?.address ?? null, outcome: state?.outcome ?? null, error: state?.error ?? null, pending: state?.pending ?? false, run, clear: () => setState(null) }
 }
 export type FlowTest = ReturnType<typeof useFlowTest>
-const aiAnswers = [{ value: 'unset', label: 'Not assumed' }, { value: 'yes', label: 'Yes' }, { value: 'no', label: 'No' }]
+const aiAnswers = [{ value: 'unset', label: 'Not set' }, { value: 'yes', label: 'Yes' }, { value: 'no', label: 'No' }]
 /** The sample a test sends: a refund request unless changed. One line until opened. ai: the address's rules ask the AI,
  *  so the answer a test assumes can be chosen (a test never asks it). */
 export function SampleFields({ sample, onChange, disabled, id = 'flow-sample', ai = false }: { sample: Sample; onChange: (next: Sample) => void; disabled?: boolean; id?: string; ai?: boolean }) {

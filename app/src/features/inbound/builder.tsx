@@ -401,13 +401,13 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   let body: ReactNode
   if (step === 'address') body = <form id="builder-address" className="stack" onSubmit={next} noValidate>
     <Field label="Address" htmlFor="builder-address-input" error={errors.address}>
-      <Input id="builder-address-input" type="email" value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} placeholder={`support@${receiving[0]?.name ?? 'example.com'}`} autoFocus autoComplete="off" />
+      <Input id="builder-address-input" type="email" value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} placeholder={`name@${receiving[0]?.name ?? 'example.com'}`} autoFocus autoComplete="off" />
     </Field>
     {onPattern && pattern && <div className="cluster"><Button size="sm" onClick={() => { onOpenChange(false); onPattern(pattern) }}>{pattern.startsWith('*@') ? 'Edit the catch-all' : 'Set up the wildcard'}</Button></div>}
     {existing && <div className="cluster"><Link className="ui-button ui-button--secondary ui-button--sm" to={`/receiving/addresses/${existing.id}?tab=flow`} onClick={() => onOpenChange(false)}>Open it</Link></div>}
-    <Field label="Display name" htmlFor="builder-address-name"><Input id="builder-address-name" value={form.displayName} onChange={e => setForm({ ...form, displayName: e.target.value })} placeholder="Support" /></Field>
+    <Field label="Display name" htmlFor="builder-address-name"><Input id="builder-address-name" value={form.displayName} onChange={e => setForm({ ...form, displayName: e.target.value })} placeholder="Name" /></Field>
     <details className="inbound-advanced" open={!!form.lifetime || !!form.publicAddress || !!errors.publicAddress || undefined}>
-      <summary>Lifetime and reply-as</summary>
+      <summary>More options</summary>
       <div className="stack inbound-advanced__body">
         <Field label="Receives mail for" htmlFor="builder-lifetime"><Select id="builder-lifetime" value={form.lifetime} onValueChange={value => setForm({ ...form, lifetime: value, ...(value ? { publicAddress: '' } : {}) })} options={lifetimes} /></Field>
         {!form.lifetime && <Field label="Reply as" htmlFor="builder-public" error={errors.publicAddress}><Input id="builder-public" type="email" value={form.publicAddress} onChange={e => setForm({ ...form, publicAddress: e.target.value })} autoComplete="off" /></Field>}

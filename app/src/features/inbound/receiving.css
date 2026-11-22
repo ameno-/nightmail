@@ -1,6 +1,8 @@
 /* Receiving: Addresses, Rules and Destinations, and an address's page. Nightmail tokens only; addresses and code in OpenTUI Mono. */
 .rcv-icon { flex: none; color: var(--color-faint); }
 .rcv-page { display: flex; flex-direction: column; gap: var(--space-16); min-width: 0; }
+/* Counts hold their width ("0" to "99"), so the tabs after them stay put while a search changes them. */
+.rcv-page > .ui-tabs .ui-tab__count { display: inline-block; min-width: 2ch; }
 .rcv-tab { gap: var(--space-12); }
 .rcv-cell { display: flex; align-items: center; gap: var(--space-8); min-width: 0; }
 .rcv-cell > .rcv-icon { align-self: flex-start; margin-top: 3px; }
@@ -12,7 +14,6 @@
 .rcv-table td[data-col='unread'] strong { color: var(--color-text); font-weight: 400; }
 /* Unread is a fact, not a second accent: a dot in the text's own colour. */
 .rcv-table td[data-col='unread'] strong::before { content: ''; display: inline-block; width: 6px; height: 6px; margin: 0 var(--space-6) 1px 0; border-radius: 50%; background: var(--color-text); }
-.rcv-foot { font-family: var(--font-mono); font-size: var(--text-xs); }
 .rcv-match { display: inline-flex; min-width: 0; max-width: 100%; font-family: var(--font-mono); font-size: var(--text-sm); letter-spacing: -.01em; }
 .rcv-match__local { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rcv-match__host { flex: none; color: var(--color-faint); }
@@ -53,7 +54,7 @@
 .rcv-filter:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 1px; }
 /* A tab's own actions, on the right above its table. */
 .rcv-kindline { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-16); min-height: var(--control-height); }
-.rcv-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--space-16); min-height: var(--control-height); font-size: var(--text-sm); transition: opacity 160ms ease-out; }
+.rcv-foot { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-16); min-height: var(--control-height); font-family: var(--font-mono); font-size: var(--text-sm); transition: opacity 160ms ease-out; }
 .rcv-foot[data-busy] { opacity: .6; }
 .rcv-foot .ui-pagination { margin: 0; }
 
@@ -220,13 +221,14 @@ html[data-privacy='on'] .trace-to.private-field:not(:hover, :focus)::placeholder
 .rcv-cell > .settings-cell-stack { min-width: 0; max-width: 100%; }
 :is(.rcv-match, .routing-choices .private-address, .addr-page dd .private-address, .inbound-stack .ui-page-header h1 .private-address) > .private-address__value { flex: 0 1 auto; min-width: 0; overflow: hidden; }
 .rcv-match[data-revealed] > .private-address__value { text-overflow: ellipsis; white-space: nowrap; }
-:is(.addr-page dd, .inbound-stack .ui-page-header h1) .private-address[data-revealed] > .private-address__value { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
+.addr-page dd .private-address[data-revealed] > .private-address__value { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
+.inbound-stack .ui-page-header h1 .private-address[data-revealed] > .private-address__value { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .routing-choices .settings-cell-stack { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .routing-choices .settings-cell-stack > * { min-width: 0; max-width: 100%; }
 .routing-choices .ui-check-field { min-width: 0; max-width: 100%; }
 .routing-choices .ui-check-field > label { flex: 1 1 0; min-width: 0; }
-/* Destinations on one line, cut with an ellipsis only when they don't fit (a fade cut the last letters of every row). */
-.rcv-to { display: block; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+/* Destinations wrap between destinations to at most two lines, at a line height that keeps the row's 53 px. */
+.rcv-to { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; min-width: 0; overflow: hidden; white-space: normal; line-height: 18px; }
 .rcv-to > .rcv-targets, .rcv-card-to .rcv-targets { display: inline; }
 :is(.rcv-to, .rcv-card-to) .rcv-target { display: inline; margin-right: var(--space-12); }
 :is(.rcv-to, .rcv-card-to) .rcv-target > .rcv-icon { margin-right: var(--space-6); vertical-align: -2px; }
@@ -244,6 +246,10 @@ html[data-privacy='on'] .trace-to.private-field:not(:hover, :focus)::placeholder
   .addr-recent__subject { grid-area: subject; }
   .addr-recent time { grid-area: time; }
   .addr-recent__snippet { grid-area: snippet; font-size: var(--text-xs); }
+  /* A card's "Add a rule" gets a 44 px tap area: its lines let it reach past them, and the line still cuts sideways. */
+  .rcv-table .ui-card__line:has(.rcv-add), .rcv-table .ui-card__segment:has(.rcv-add) { overflow: visible; }
+  .rcv-card-to { overflow: visible; overflow-x: clip; }
+  .rcv-card-to .rcv-add { display: inline-block; padding-block: 14px; margin-block: -14px; }
 }
 /* An address in a clipped line keeps its focus ring inside the clip. */
 .receiving-clip .private-address:focus-visible { outline-offset: -2px; }
@@ -287,7 +293,7 @@ html[data-privacy='on'] .trace-to.private-field:not(:hover, :focus)::placeholder
 .flow-stage + .flow-stage { margin-top: 24px; }
 .flow-stage + .flow-stage::before { content: ''; position: absolute; left: 50%; top: -25px; width: 1px; height: 18px; background: var(--color-border-strong); }
 .flow-stage + .flow-stage::after { content: ''; position: absolute; left: calc(50% - 4px); top: -8px; border: 4px solid transparent; border-top: 5px solid var(--color-border-strong); border-bottom: 0; }
-.flow-stage__head { display: flex; align-items: center; gap: var(--space-6); height: 20px; color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); letter-spacing: var(--tracking-label); text-transform: uppercase; }
+.flow-stage__head { display: flex; align-items: center; gap: var(--space-6); height: 20px; color: var(--color-muted); font-size: var(--text-xs); }
 .flow-stage__body { display: grid; }
 .flow-item { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: var(--space-8); min-height: 40px; padding-block: var(--space-4); transition: opacity 160ms ease-out; }
 .flow-item + .flow-item { border-top: 1px solid var(--color-border-muted); }
@@ -320,15 +326,15 @@ html[data-privacy='on'] .trace-to.private-field:not(:hover, :focus)::placeholder
   .rcv-kind { height: 36px; }
 }
 
-/* A fork: the rule's two outcomes side by side, joined to the Rules box by a line that splits in two. */
+/* A fork: the rule's two outcomes side by side, each with the same short arrow from the Rules box as every other box. */
 .flow-fork { position: relative; margin-top: 24px; }
-.flow-fork::before { content: ''; position: absolute; left: 50%; top: -25px; width: 1px; height: 13px; background: var(--color-border-strong); }
-.flow-fork::after { content: ''; position: absolute; left: 25%; right: 25%; top: -12px; height: 6px; border: 1px solid var(--color-border-strong); border-bottom: 0; border-radius: 4px 4px 0 0; }
 .flow-fork__ways { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-12); }
 .flow-fork__way { align-content: start; }
-/* The two ways are alternatives, not steps: no arrow between them. */
+.flow-fork__way::before { content: ''; position: absolute; left: 50%; top: -25px; width: 1px; height: 18px; background: var(--color-border-strong); }
+.flow-fork__way::after { content: ''; position: absolute; left: calc(50% - 4px); top: -8px; border: 4px solid transparent; border-top: 5px solid var(--color-border-strong); border-bottom: 0; }
 .flow-fork__way + .flow-fork__way { margin-top: 0; }
-.flow-fork__way + .flow-fork__way::before, .flow-fork__way + .flow-fork__way::after { content: none; }
+/* What comes after the split isn't one of its ways: a gap, no arrow. */
+.flow-fork + .flow-stage { margin-top: var(--space-12); }
 
 /* The address builder: its picks and the fork, in the flow's boxes. */
 .builder-ways { display: flex; gap: var(--space-4); margin-left: calc(-1 * var(--space-8)); }
@@ -338,5 +344,6 @@ html[data-privacy='on'] .trace-to.private-field:not(:hover, :focus)::placeholder
 .builder-option { display: inline-flex; align-items: center; gap: var(--space-6); }
 @media (max-width: 640px) {
   .flow-fork__ways { grid-template-columns: minmax(0, 1fr); }
-  .flow-fork::after { display: none; }
+  /* Stacked, the two ways are alternatives, not steps: no arrow between them. */
+  .flow-fork__way + .flow-fork__way::before, .flow-fork__way + .flow-fork__way::after { content: none; }
 }

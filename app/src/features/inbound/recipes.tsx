@@ -58,11 +58,11 @@ export function Sentence({ ritual }: { ritual: Pick<OverviewRule, 'key' | 'recip
     return <span key={i} className="recipe-blank">{Array.isArray(value) ? <Senders list={value} /> : value}</span>
   })}</>
 }
-/** A rule in plain words wherever it appears: a ready-made rule's sentence, or a script as Custom code rule and its name. */
+/** A rule in plain words wherever it appears: a ready-made rule's sentence, or a script by its name. */
 export function RuleLine({ rule, keyName, endpoints }: { rule?: Pick<OverviewRule, 'key' | 'recipe'>; keyName: string; endpoints?: Pick<OverviewEndpoint, 'name' | 'type'>[] }) {
   if (rule?.recipe && (rule.recipe.id === 'split' || rule.recipe.id === 'split-by-meaning')) return <SplitSentence params={rule.recipe.params} meaning={rule.recipe.id === 'split-by-meaning'} endpoints={endpoints} />
   if (rule?.recipe) return <Sentence ritual={rule} />
-  return <>Custom code rule <code className="recipe-code">{keyName}</code></>
+  return <code className="recipe-code">{keyName}</code>
 }
 /** An address's rules on one line: the first in plain words, and how many more. */
 export function RulesSummary({ keys, rules, endpoints }: { keys: string[]; rules: OverviewRule[]; endpoints?: Pick<OverviewEndpoint, 'name' | 'type'>[] }) {
@@ -108,7 +108,7 @@ export function RulesTab({ overview, refresh }: { overview: Overview; refresh: (
     try {
       await request(`/v1/rules/scripts/${encodeURIComponent(r.key)}`, { method: 'PATCH', body: { enabled } })
       await refresh()
-      toast(enabled ? `${r.key} is on` : `${r.key} is off · it keeps its addresses`, 'success')
+      toast(enabled ? 'Rule on' : 'Rule off', 'success')
     } catch (e) { toast(errorText(e), 'error') }
     finally { setSwitching(s => { const { [r.key]: _, ...rest } = s; return rest }) }
   })
@@ -117,7 +117,7 @@ export function RulesTab({ overview, refresh }: { overview: Overview; refresh: (
     await refresh()
     toast(`${r.key} deleted`, 'success')
   }
-  const last = (r: OverviewRule) => !r.enabled ? <span className="muted">Off</span>
+  const last = (r: OverviewRule) => !r.enabled ? null
     : r.lastMatchedAt ? <time dateTime={r.lastMatchedAt} title={new Date(r.lastMatchedAt).toLocaleString()}>{ago(r.lastMatchedAt)}</time>
     : <span className="muted" title="Not in the last 1,000 emails">Not lately</span>
   const runsOn = (r: OverviewRule) => r.addresses.length ? <Addresses list={r.addresses} />
@@ -128,12 +128,11 @@ export function RulesTab({ overview, refresh }: { overview: Overview; refresh: (
       empty={<EmptyState title="No rules yet" action={<Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/rules/new">New rule</Link>} />}
       columns={[
         { key: 'what', label: 'Rule', width: '50%', card: 'title', render: r => <span className="recipe-row" data-off={!r.enabled || undefined}><RecipeIcon id={r.recipe?.id ?? null} /><span className="recipe-sentence"><RuleLine rule={r} keyName={r.key} endpoints={overview.endpoints} /></span></span> },
-        { key: 'on', label: 'Runs on', width: '24%', card: 'line', render: runsOn, cardRender: r => <span className="recipe-card-line">{runsOn(r)}<span aria-hidden="true">·</span>{last(r)}</span> },
+        { key: 'on', label: 'Runs on', width: '24%', card: 'line', render: runsOn, cardRender: r => <span className="recipe-card-line">{runsOn(r)}</span> },
         { key: 'last', label: 'Last matched', width: '13%', card: 'hide', render: last },
         { key: 'actions', label: '', align: 'right', card: 'end', render: r => <span className="recipe-controls">
           <Switch checked={switching[r.key] ?? r.enabled} disabled={r.key in switching} onCheckedChange={v => void toggle(r, v)} label={<span className="sr-only">Run {r.key}</span>} />
           <DropdownMenu label={`Actions for ${r.key}`} title={<RuleLine rule={r} keyName={r.key} endpoints={overview.endpoints} />} items={[
-            { label: 'Edit', onSelect: () => navigate(rulePath(r.key)) },
             ...(builderPath(r) ? [{ label: openBuilder, onSelect: () => navigate(builderPath(r)!) }] : []),
             { label: 'Delete', destructive: true, onSelect: () => { setDeleting(r); setDeleteOpen(true) } },
           ]} />

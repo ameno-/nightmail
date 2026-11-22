@@ -32,7 +32,7 @@ export function RouteEditor({ match, route, to, version, onClose }: { match: str
   const webhooks = useApiDef(queries.inboundWebhooks())
   const forwards = useApiDef(queries.forwardEndpoints())
   const error = (!addresses.data && addresses.error) || (!webhooks.data && webhooks.error) || (!forwards.data && forwards.error)
-  if (error) return <Dialog open onOpenChange={next => { if (!next) onClose() }} title={TITLE} footer={<Button onClick={onClose}>Close</Button>}>
+  if (error) return <Dialog open onOpenChange={next => { if (!next) onClose() }} title={TITLE}>
     <ErrorState error={error} onRetry={() => { if (addresses.error) void addresses.refetch(); if (webhooks.error) void webhooks.refetch(); if (forwards.error) void forwards.refetch() }} />
   </Dialog>
   // The dialog opens once everything it lists has loaded, so nothing moves in it.

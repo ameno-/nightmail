@@ -11,13 +11,15 @@
 .recipe-card-line > span[aria-hidden] { color: var(--color-faint); }
 .recipe-controls { display: inline-flex; align-items: center; justify-content: flex-end; gap: var(--space-8); }
 .recipe-table .ui-check-field { gap: 0; }
+/* On a phone card the sentence's one line cuts a revealed address with its ellipsis rather than dropping it from its blank. */
+.recipe-table .ui-card__title .recipe-sentence .private-address[data-revealed], .recipe-table .ui-card__title .recipe-sentence .private-address[data-revealed] > .private-address__value { display: inline; white-space: nowrap; inline-size: auto; }
 
 /* New rule: one section per group, tiles in a grid that fills the width. */
 .recipe-groups { display: grid; gap: var(--space-24); }
 .recipe-group { display: grid; gap: var(--space-8); align-content: start; }
 .recipe-group > h2 { margin: 0; color: var(--color-muted); font-size: var(--text-xs); font-weight: var(--font-weight-regular); line-height: var(--leading-xs); }
 .recipe-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: var(--space-8); }
-.recipe-tile { display: flex; align-items: center; gap: var(--space-12); min-height: 48px; padding: var(--space-12); border: 1px solid var(--color-border-muted); border-radius: var(--radius-sm); color: var(--color-text); text-decoration: none; transition: background var(--motion-duration), transform 160ms var(--ease-out-strong); }
+.recipe-tile { display: flex; align-items: center; gap: var(--space-12); min-height: 48px; padding: var(--space-12); border: 1px solid var(--color-border-muted); border-radius: var(--radius-sm); background: transparent; color: var(--color-text); font: inherit; text-align: left; cursor: pointer; text-decoration: none; transition: background var(--motion-duration), transform 160ms var(--ease-out-strong); }
 .recipe-tile > strong { min-width: 0; font-size: var(--text-sm); font-weight: var(--font-weight-bold); line-height: var(--leading-sm); }
 @media (hover: hover) and (pointer: fine) { .recipe-tile:hover { background: var(--color-hover); } }
 .recipe-tile:active { transform: scale(.98); }
@@ -28,7 +30,7 @@
 .recipe-advanced .recipe-agent-link > svg { margin-right: var(--space-6); }
 
 /* The recipe form: one column, as wide as a comfortable field. */
-.recipe-form { display: grid; gap: var(--space-16); max-width: 560px; }
+.recipe-form { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-16); max-width: 560px; }
 .recipe-ai { display: flex; align-items: flex-start; gap: var(--space-8); margin: 0; color: var(--color-muted); font-size: var(--text-sm); line-height: var(--leading-sm); font-variant-numeric: tabular-nums; }
 .recipe-ai > svg { flex: none; margin-top: 3px; color: var(--color-muted); }
 .recipe-field { gap: var(--space-12); }
