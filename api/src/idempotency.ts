@@ -135,7 +135,7 @@ export const AUTHENTICATED_CREATES = [
   // A retried top-up returns the same Checkout link or charge instead of starting a second payment.
   /^\/v1\/billing\/(?:top-ups|top-up-links)$/,
 ];
-export const MAILBOX_CREATES = [/^\/v1\/inboxes$/, /^\/v1\/inbound\/(?:addresses|keys|webhooks)$/, /^\/v1\/inbound\/domains\/[^/]+\/subdomains$/];
+export const MAILBOX_CREATES = [/^\/v1\/inboxes$/, /^\/v1\/inbound\/(?:addresses|webhooks)$/, /^\/v1\/inbound\/domains\/[^/]+\/subdomains$/];
 // Field names that hold credentials at any depth (createInbox nests its key under credential.secret).
 // "key" is not one: addresses and webhooks use it for their routing key.
 const SECRET_FIELDS = new Set(['secret', 'token', 'verificationToken', 'password']);

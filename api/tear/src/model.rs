@@ -680,8 +680,9 @@ impl Model {
                 if let Some(denied) = via_grant(self) {
                     return denied;
                 }
+                // createApiKey with access: ownReceiving() refuses a grant without receiving consent.
                 if !self.receiving {
-                    return json!({"status": null, "code": "TOOL_UNAVAILABLE"});
+                    return json!({"status": 403, "code": "ADMIN_REQUIRED"});
                 }
                 self.creds.insert(c.into(), Cred::default());
                 json!({"status": 201, "code": null})
@@ -719,8 +720,8 @@ impl Model {
             }
             _ => {
                 let x = self.creds.get_mut(c).unwrap();
-                // API keys answer 200 to a repeated revoke; agent tokens and inbox keys answer 404.
-                let api_key = matches!(c, "key" | "dkey" | "legacy" | "gkey");
+                // API keys, those limited to addresses included, answer 200 to a repeated revoke; agent tokens answer 404.
+                let api_key = matches!(c, "key" | "dkey" | "legacy" | "gkey" | "ikey" | "gikey");
                 let status = if x.revoked && !api_key { 404 } else { 200 };
                 x.revoked = true;
                 json!({"status": status})

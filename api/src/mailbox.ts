@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
-import { actorMailAccess, mailboxRoute, receivingAdmin, receivingConsentRoute, workspaceMailAccess, ApiError, denied, requiredOf, unrestrictedRequired, RECEIVING_HOST_CHANGE, digest, errors, getSes, id, isoTime, json, KEY_CHANGE, lasting, lazyModule, log, ModuleLoadError, response, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
+import { actorMailAccess, mailboxRoute, receivingAdmin, receivingConsentRoute, workspaceMailAccess, ApiError, denied, requiredOf, unrestrictedRequired, RECEIVING_HOST_CHANGE, digest, errors, getSes, id, isoTime, json, lasting, lazyModule, log, ModuleLoadError, response, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
 import { authenticate, chargeCredential, createdInboxes, delegatedInbox, keyExpired, longPoll, requireReceivingConsent, reservePolls } from './auth.js';
 import { boundRequestBody } from './request-body.js';
 import { auditContext, auditInsert, recordAudit } from './audit.js';
@@ -124,7 +124,6 @@ const InboundAddressSchema = z.object({
 }).openapi('InboundAddress');
 const InboundEventSchema = z.object({ id: z.string(), cursor: z.string(), type: z.enum(inboundEventTypes), createdAt: z.string(), threadId: z.string().nullable(), messageId: z.string().nullable(), data: SuppressionEventData,
   addressId: z.string().nullable().describe('Receiving address ID at the time of the event; null for workspace events.') }).openapi('InboundEvent');
-const KeySchema = z.object({ id: z.string(), name: z.string(), prefix: z.string(), addressIds: z.array(z.string()).nullable(), permissions: z.array(z.enum(['read', 'send', 'modify','create'])), createdAt: z.string(), lastUsedAt: z.string().nullable(), revokedAt: z.string().nullable() }).openapi('InboundKey');
 const pageOf = <T extends z.ZodType>(item: T, name: string) => z.object({ data: z.array(item), nextCursor: z.string().nullable() }).openapi(name);
 const Limit = z.coerce.number().int().min(1).max(100).default(25);
 const IdParam = z.object({ id: z.string().min(1).max(120) });
@@ -205,7 +204,6 @@ async function mailboxViews(runtime: Runtime, rows: MailboxRow[]) {
   return rows.map(row => mailboxView(row, addresses.filter(item => item.mailboxId === row.id), stats.find(item => item.mailboxId === row.id)));
 }
 type MessageRow = typeof mailMessages.$inferSelect;
-const keyView = (row: typeof mailboxKeys.$inferSelect) => ({ id: row.id, name: row.name, prefix: row.prefix, addressIds: row.mailboxIds, permissions: row.permissions, createdAt: iso(row.createdAt)!, lastUsedAt: iso(row.lastUsedAt), revokedAt: iso(row.revokedAt) });
 
 const UpdateInboundThread = z.object({
   addressId: InboundAddressId.optional(),
@@ -705,35 +703,5 @@ export function registerMailbox(app: App) {
     return c.json(await poll(c, q.addressId ? [q.addressId] : parseEventIds(q.addressIds), q), 200);
   });
 
-  registerInboundKeys(app);
   registerInboundWebhooks(app, { access, admin });
-}
-
-// Deprecated aliases: an inbound key is an API key limited to receiving addresses (POST /v1/api-keys with access).
-// Same rules and rows as createApiKey; these keep their original request and response shapes.
-function registerInboundKeys(app: App) {
-  const base = '/v1/inbound/keys', tags = ['Inbound keys'], deprecated = true;
-  const keyFields = { name: z.string().trim().min(1).max(100), permissions: z.array(z.enum(['read', 'send', 'modify','create'])).min(1).max(4).default(['read', 'send', 'modify']) };
-  const ids = z.array(z.string().min(1).max(120)).max(500).optional();
-  const body = z.object({ ...keyFields, addressIds: ids }).strict().openapi('CreateInboundKey');
-  app.openapi(createRoute({ method: 'post', path: base, operationId: 'createInboundKey', tags, security, deprecated, summary: 'Create a key for an agent (deprecated: createApiKey with access)', description: 'Deprecated: use createApiKey with access {type: "addresses"} or {type: "inbox"}. Scopes a key to specific receiving addresses; omit the filter for every address, including future ones. The secret is returned once.',
-    request: { body: json(body) }, responses: { 201: response(KeySchema.extend({ secret: z.string() }).openapi('InboundKeySecret')), ...errors } }), async c => {
-    const value = admin(c); const input = c.req.valid('json');
-    // An MCP agent may create one only with explicit receiving consent; the key is then revoked with that approval.
-    lasting(c, KEY_CHANGE);
-    const { createLimitedKey } = await import('./address-keys.js');
-    const { row, secret } = await createLimitedKey(c, value.workspaceId, input.name, { type: 'addresses', addressIds: input.addressIds ?? null, mail: input.permissions }, { addresses: 'addressIds', inbox: 'addressIds', mail: 'permissions' });
-    return c.json({ ...keyView(row), secret }, 201);
-  });
-  app.openapi(createRoute({ method: 'get', path: base, operationId: 'listInboundKeys', tags, security, deprecated, description: 'Deprecated: listApiKeys lists these with every other API key.', request: { query: z.object({ includeRevoked: z.enum(['true', 'false']).default('false'), cursor: z.string().max(200).optional(), limit: Limit }) }, responses: { 200: response(pageOf(KeySchema, 'InboundKeyPage')), ...errors } }), async c => {
-    const value = admin(c); lasting(c, KEY_CHANGE); const q = c.req.valid('query');
-    const rows = await c.env.db.select().from(mailboxKeys).where(and(eq(mailboxKeys.workspaceId, value.workspaceId), q.includeRevoked === 'false' ? isNull(mailboxKeys.revokedAt) : undefined, q.cursor ? lt(mailboxKeys.id, q.cursor) : undefined)).orderBy(desc(mailboxKeys.id)).limit(q.limit + 1);
-    return c.json({ data: rows.slice(0, q.limit).map(keyView), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
-  });
-  app.openapi(createRoute({ method: 'post', path: `${base}/{id}/revoke`, operationId: 'revokeInboundKey', tags, security, deprecated, description: 'Deprecated: revokeApiKey revokes any API key.', request: { params: IdParam }, responses: { 200: response(KeySchema), ...errors } }), async c => {
-    const value = admin(c); lasting(c, KEY_CHANGE);
-    const revoked = await (await import('./address-keys.js')).revokeLimitedKey(c, value.workspaceId, c.req.valid('param').id);
-    if (!revoked?.fresh) throw new ApiError(404, 'NOT_FOUND', 'Key was not found or is already revoked.');
-    return c.json(keyView(revoked.row), 200);
-  });
 }

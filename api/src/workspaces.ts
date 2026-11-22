@@ -85,17 +85,12 @@ async function insertOwnedWorkspace(db: DbExecutor, userId: string, name: string
 }
 const maxOwnedWorkspaces = 10;
 
-/** Every workspace the user belongs to, with their role, by name: one statement. Read by GET /v1/me and the deprecated GET /v1/workspaces. */
 /** GET /v1/me for a dashboard session: its memberships and, in the same statement, its Nightmail operator role (if any). */
 export async function sessionMemberships(db: DbExecutor, userId: string) {
   // One row even with no memberships, so an operator who belongs to no workspace still gets the role.
   const { rows: [row] } = await db.execute<{ workspaces: { id: string; name: string; slug: string; role: string }[]; operator: OperatorRole | null }>(sql`SELECT ${operatorRoleOf(userId)} AS operator,
     coalesce((SELECT json_agg(json_build_object('id',w.id,'name',w.name,'slug',w.slug,'role',m.role) ORDER BY w.name,w.id) FROM workspace_members m JOIN workspaces w ON w.id=m.workspace_id WHERE m.user_id=${userId}),'[]') AS workspaces`);
   return { workspaces: row!.workspaces.map(w => Workspace.parse(w)), operator: row!.operator ?? null };
-}
-export async function memberships(db: DbExecutor, userId: string) {
-  const rows = await db.select({ id: workspaces.id, name: workspaces.name, slug: workspaces.slug, role: workspaceMembers.role }).from(workspaceMembers).innerJoin(workspaces, eq(workspaces.id, workspaceMembers.workspaceId)).where(eq(workspaceMembers.userId, userId)).orderBy(workspaces.name, workspaces.id);
-  return rows.map(row => Workspace.parse(row));
 }
 
 // Serialize governance writes per workspace. Read the caller and owner count *after* locking:
@@ -163,10 +158,6 @@ async function invite(c: Ctx, input: z.infer<typeof Invite>) {
 }
 
 export function registerWorkspaces(app: App) {
-  // Deprecated alias: GET /v1/me returns the same list as `workspaces`, so the dashboard needs one request, not two.
-  app.openapi(createRoute({ method: 'get', path: '/v1/workspaces', operationId: 'listWorkspaces', tags, security, deprecated: true,
-    description: 'Deprecated: use getCurrentIdentity (GET /v1/me), which returns the same list. Select a membership with X-Nightmail-Workspace; without it, the most recent selection is used.',
-    responses: { 200: response(z.object({ data: z.array(Workspace) })), ...errors } }), async c => c.json({ data: await memberships(c.env.db, dashboardSession(c).userId) }, 200));
   app.openapi(createRoute({ method: 'post', path: '/v1/workspaces', operationId: 'createWorkspace', tags, security,
     description: `Create another workspace you own. Hosted: staff only (decided at sign-in), up to ${maxOwnedWorkspaces} per account. Select it with X-Nightmail-Workspace.`,
     request: { body: json(z.object({ name: z.string().trim().min(1).max(120) }).strict()) }, responses: { 201: response(Workspace), ...errors } }), async c => {

@@ -677,7 +677,6 @@ test('ritual regex tests run on a bounded matcher: its state is charged as steps
 });
 test('MCP: every API operation is a tool or a documented human step, and docs/mcp-coverage.md is generated',async()=>{
   const {createOpenApiApp}=await import('./src/app.js'),{buildMcpCatalog,coverageMarkdown,TOOLSETS}=await import('./src/mcp-catalog.js'),app=await createOpenApiApp();const catalog=buildMcpCatalog(app),spec=app.getOpenAPI31Document({openapi:'3.1.0',info:{title:'Bane API',version:'0.1.0'}});
-  assert.equal((spec.paths as Json)['/v1/workspaces'].get.deprecated, true, 'listWorkspaces is a deprecated alias of GET /v1/me workspaces.');
   const markdown=coverageMarkdown(catalog,spec as Json);assert.doesNotMatch(markdown,/UNCOVERED/);assert.equal(String(await readFile(new URL('../docs/mcp-coverage.md',import.meta.url))),markdown,'Run bun run mcp:coverage');
   // Tools that return received mail, or text derived from it, carry the untrusted-content notice.
   // So do an email's events and the webhook delivery log: a bounce's or a delay's diagnosticCode is the receiving server's text.
@@ -1615,7 +1614,7 @@ test('MCP profiles: one client signed in as two accounts gets two approvals that
     // The label is display only: sanitized, bounded, and shown in that account's connections list alone.
     await mcp(work.subject,'  Work <script>  laptop  ');
     const browser = (path: string, account: typeof personal, method = 'GET') => app.fetch(new Request(origin+path,{method,headers:{origin,cookie:jar.join('; '),'x-bane-account':account.user}}),runtime);
-    const list = async (account: typeof personal) => ((await (await browser('/v1/mcp-connections',account)).json()) as {data:{id:string;profile:string|null;workspaceId:string}[]}).data;
+    const list = async (account: typeof personal) => ((await (await browser('/v1/agents',account)).json()) as {data:{id:string;profile:string|null;workspaceId:string}[]}).data;
     // No default is set: each account's only workspace is the default.
     assert.deepEqual((await list(work)).map(c=>[c.id,c.profile,c.workspaceId]),[[second.body.keyId,'Work script laptop',null]]);
     assert.deepEqual((await list(personal)).map(c=>[c.id,c.workspaceId]),[[first.body.keyId,null]]);
@@ -1623,8 +1622,8 @@ test('MCP profiles: one client signed in as two accounts gets two approvals that
     const owner = (await (await browser(`/api/auth/accounts?connection=${second.body.keyId}`,personal)).json()) as {connection:{account:string}};
     assert.equal(owner.connection.account,work.user);
     // Revoking one entry, as its own account, leaves the other entry working; the wrong account can't revoke it.
-    assert.equal((await browser(`/v1/mcp-connections/${second.body.keyId}/revoke`,personal,'POST')).status,404);
-    assert.equal((await browser(`/v1/mcp-connections/${second.body.keyId}/revoke`,work,'POST')).status,200);
+    assert.equal((await browser(`/v1/agents/${second.body.keyId}/revoke`,personal,'POST')).status,404);
+    assert.equal((await browser(`/v1/agents/${second.body.keyId}/revoke`,work,'POST')).status,200);
     assert.equal((await mcp(work.subject,'work')).status,403);
     assert.deepEqual([(await mcp(personal.subject,'personal')).status,(await mcp(personal.subject)).body.workspaceId],[200,personal.workspace]);
   } finally { await db.query('ROLLBACK'); }
@@ -1726,9 +1725,9 @@ test('MCP account resource validates issuer JWT, per-call workspaces, Bane-side 
     const {createApp}=await import('./src/app.js');const app=createApp();
     const dashboard={...runtime,config:{...runtime.config,accountIssuer:process.env.ACCOUNT_ISSUER,accountClient:{id:'fixture',privateKey:'unused',algorithm:'ES256' as const}}};
     const call=(path:string,method='GET',body?:object,cookie=manager!.cookie,env=dashboard)=>app.fetch(new Request('https://bane.example.org'+path,{method,body:body&&JSON.stringify(body),headers:{cookie:cookie.replace(/^nightmail\./,'__Host-nightmail.'),origin:'https://bane.example.org',...(body?{'content-type':'application/json'}:{})}}),env);
-    const list=await (await call('/v1/mcp-connections')).json() as {data:{id:string;status:string}[]};
+    const list=await (await call('/v1/agents')).json() as {data:{id:string;status:string}[]};
     assert.ok(list.data.some(g=>g.id===grants.rows[0].id && g.status==='active'));
-    assert.equal((await call(`/v1/mcp-connections/${grants.rows[0].id}/revoke`,'POST')).status,200);
+    assert.equal((await call(`/v1/agents/${grants.rows[0].id}/revoke`,'POST')).status,200);
     assert.equal((await run(token({jti:randomUUID(),iat:now+1}))).status,403,'A token that names no consent cannot restore a revoked client');
     const denied=await run('expired-legacy-token');assert.equal(denied.status,401);assert.match(denied.headers.get('www-authenticate')!,/resource_metadata=/);
     // MCP clients and the live dev E2E (mcpChallenge) read a JSON-RPC error body.
@@ -1744,7 +1743,7 @@ test('MCP account resource validates issuer JWT, per-call workspaces, Bane-side 
     const keyOf=async(access:string)=>{const r=await authorizeResource(runtime,new Request(resource,{method:'POST',headers:{authorization:`Bearer ${access}`}}),async a=>Response.json(a.keyId));return r.status===200?await r.json() as string:r.status;};
     const firstKey=await keyOf(consented('consent-first'));
     assert.equal(typeof firstKey,'string');
-    assert.equal((await call(`/v1/mcp-connections/${firstKey}/revoke`,'POST')).status,200);
+    assert.equal((await call(`/v1/agents/${firstKey}/revoke`,'POST')).status,200);
     assert.equal(await keyOf(consented('consent-first')),403,'The revoked consent stays refused');
     const secondKey=await keyOf(consented('consent-second'));
     assert.equal(typeof secondKey,'string');assert.notEqual(secondKey,firstKey,'A new consent starts the approval under a new key');
@@ -1771,8 +1770,8 @@ test('MCP account resource validates issuer JWT, per-call workspaces, Bane-side 
     assert.deepEqual(await acting('mcp-admin'+suffix),['mcp-admin'+suffix,'admin',['read','manage'],true]);
     assert.deepEqual(await acting('mcp-member'+suffix),['mcp-member'+suffix,'member',['read'],false],'A member reads; manage and receiving need an owner or admin');
     assert.equal(await acting('missing'+suffix),null,'No membership, no access');
-    const listed=(await (await call('/v1/mcp-connections')).json() as {data:{id:string;workspaceId:string|null;receiving:boolean}[]}).data.find(g=>g.id===multiId);
-    assert.deepEqual([listed?.workspaceId,listed?.receiving],[null,false]);
+    const listed=(await (await call('/v1/agents')).json() as {data:{id:string;workspaceId:string|null}[]}).data.find(g=>g.id===multiId);
+    assert.deepEqual([listed?.id,listed?.workspaceId],[multiId,null]);
     // The default can be set in Bane (or with the setDefaultWorkspace tool): only to one of the person's own workspaces.
     assert.equal((await bind(multiId,{workspaceId:'missing'+suffix})).status,403);
     assert.equal((await bind(multiId,{workspaceId:'default',extra:true})).status,422);
@@ -1782,15 +1781,15 @@ test('MCP account resource validates issuer JWT, per-call workspaces, Bane-side 
     await db.query("INSERT INTO nightmail_sessions(token_hash,user_id,issuer,subject,verified_email,expires_at) VALUES($1,$2,$3,$2,$4,now()+interval '1 hour')",[createHash('sha256').update(otherToken).digest('hex'),otherUser,dashboardIssuer,`${otherUser}@example.org`]);
     await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,'default','owner')",[randomUUID(),otherUser]);
     const otherDashboard={...dashboard,config:{...dashboard.config,allowedSubjects:[...dashboard.config.allowedSubjects,otherUser]}};
-    assert.equal((await call('/v1/mcp-connections','GET',undefined,`${COOKIE_NAME}=${otherToken}`,otherDashboard)).status,200,'The other user has a working dashboard session');
+    assert.equal((await call('/v1/agents','GET',undefined,`${COOKIE_NAME}=${otherToken}`,otherDashboard)).status,200,'The other user has a working dashboard session');
     assert.equal((await bind(multiId,{workspaceId:'default'},`${COOKIE_NAME}=${otherToken}`,otherDashboard)).status,404,'Only the approving user can set it');
     const chosen=await bind(multiId,{workspaceId:'mcp-member'+suffix});
     assert.equal(chosen.status,200);assert.deepEqual(await chosen.json(),{id:multiId,workspaceId:'mcp-member'+suffix,receiving:false});
     assert.deepEqual((await connection()).default,{id:'mcp-member'+suffix,source:'set'});
     assert.equal((await bind(multiId,{workspaceId:'mcp-admin'+suffix,receiving:true})).status,200,'The old receiving flag is accepted and ignored');
     assert.deepEqual((await connection()).default,{id:'mcp-admin'+suffix,source:'set'});
-    const after=(await (await call('/v1/mcp-connections')).json() as {data:{id:string;workspaceId:string|null;receiving:boolean}[]}).data.find(g=>g.id===multiId);
-    assert.deepEqual([after?.workspaceId,after?.receiving],['mcp-admin'+suffix,false]);
+    const after=(await (await call('/v1/agents')).json() as {data:{id:string;workspaceId:string|null}[]}).data.find(g=>g.id===multiId);
+    assert.equal(after?.workspaceId,'mcp-admin'+suffix);
     assert.equal((await bind(multiId,{workspaceId:null})).status,422,'A default is one of your workspaces');
     // A default the person no longer belongs to falls back: to the last-used workspace, then to the only one left.
     await db.query('DELETE FROM workspace_members WHERE user_id=$1 AND workspace_id=$2',[manager.userId,'mcp-admin'+suffix]);
@@ -1830,9 +1829,9 @@ test('MCP cutover expires legacy approvals and tokens but keeps the objects they
     assert.deepEqual((await db.query("SELECT kind,resource FROM nightmail_retired_grant_objects WHERE grant_id='consent'")).rows,[{kind:'api_key',resource:'derived'}]);
     const [{drizzle},{loadConfig},{createApp}]=await Promise.all([import('drizzle-orm/node-postgres'),import('./src/config.js'),import('./src/app.js')]);
     const runtime:import('./src/core.js').Runtime={config:loadConfig({...process.env,PUBLIC_URL:PUBLIC_ORIGIN}),db:drizzle(db),snsCertificateState:new SnsCertificateState(),storage:{async put(){throw Error('unused');},async get(){throw Error('unused');},async delete(){throw Error('unused');}}};
-    const response=await createApp().fetch(new Request(PUBLIC_ORIGIN+'/v1/mcp-connections',{headers:{cookie:manager.cookie}}),runtime);
-    const {data}=await response.json() as {data:{clientId:string;status:string}[]};
-    assert.deepEqual(data.map(g=>[g.clientId,g.status]),[['legacy-client','expired']]);
+    const response=await createApp().fetch(new Request(PUBLIC_ORIGIN+'/v1/agents?includeInactive=true',{headers:{cookie:manager.cookie}}),runtime);
+    const {data}=await response.json() as {data:{clientId:string;status:string;own:boolean}[]};
+    assert.deepEqual(data.filter(g=>g.own).map(g=>[g.clientId,g.status]),[['legacy-client','expired']]);
   } finally {await db.query('ROLLBACK');}
 });
 
@@ -1847,7 +1846,7 @@ test('an MCP client name is shown as one short line of the characters that are d
     for(const [id,name] of Object.entries(names)) await db.query("INSERT INTO nightmail_expired_approvals(id,user_id,client_id,name,scopes,created_at,updated_at) VALUES($1,$2,$1,$3,'{bane:read}',now(),now())",['legacy_name_'+id,manager.userId,name]);
     const [{drizzle},{loadConfig},{createApp}]=await Promise.all([import('drizzle-orm/node-postgres'),import('./src/config.js'),import('./src/app.js')]);
     const runtime:import('./src/core.js').Runtime={config:loadConfig({...process.env,PUBLIC_URL:PUBLIC_ORIGIN}),db:drizzle(db),snsCertificateState:new SnsCertificateState(),storage:{async put(){throw Error('unused');},async get(){throw Error('unused');},async delete(){throw Error('unused');}}};
-    const {data}=await (await createApp().fetch(new Request(PUBLIC_ORIGIN+'/v1/mcp-connections?limit=100',{headers:{cookie:manager.cookie}}),runtime)).json() as {data:{id:string;name:string|null}[]};
+    const {data}=await (await createApp().fetch(new Request(PUBLIC_ORIGIN+'/v1/agents?includeInactive=true',{headers:{cookie:manager.cookie}}),runtime)).json() as {data:{id:string;name:string|null}[]};
     const shown=(id:string)=>data.find(g=>g.id==='legacy_name_'+id)?.name;
     const label=`Desk helper notes ${'x'.repeat(142)}`;
     assert.equal(label.length,160);
@@ -4061,7 +4060,7 @@ test('permission refusals: every refusal helper names the permission, scope, cre
     ['GET', '/v1/campaigns/{id}/stats', 'read', 'sent_mail=read'], ['PUT', '/v1/rules/attachments', 'manage', 'receiving_rules=write'], ['GET', '/v1/inbound/webhooks', 'read', 'configuration=read'],
     ['POST', '/v1/campaigns', 'send', 'audience=write'], ['GET', '/v1/campaigns/{id}/preview-image', 'send', 'audience=write'], ['GET', '/v1/templates/{id}/preview', 'send', 'audience=write'],
     ['GET', '/v1/attachments/{id}', 'send', 'send_email=on'], ['POST', '/v1/emails/{id}/cancel', 'send', 'send_email=on'], ['POST', '/v1/inbound/threads/{threadId}/reply', 'send', 'send_email=on'],
-    ['GET', '/v1/workspaces/current/members', undefined, 'person=admin'], ['POST', '/v1/billing/top-ups', 'manage', 'person=admin'], ['GET', '/v1/workspaces', undefined, ''],
+    ['GET', '/v1/workspaces/current/members', undefined, 'person=admin'], ['POST', '/v1/billing/top-ups', 'manage', 'person=admin'], ['POST', '/v1/workspaces', undefined, ''],
     ['GET', '/v1/operator/workspaces', undefined, '']] as const)
     assert.equal(core.requiredHeaderValue(core.requiredFor(method, path, need)), required, `${method} ${path}`);
 });
@@ -4246,7 +4245,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const later = new Date(Date.now() + 86_400_000).toISOString();
       const bodies: Record<string, Json> = { updateApiKey: { name: 'renamed' }, applyAudiencePlan: { planId: 'aqp_' + '0'.repeat(32) }, checkEmail: { text: 'Hello.' }, rescheduleEmail: { scheduledAt: later },
         scheduleCampaign: { scheduledAt: later }, createDomain: { name: 'permission-table.example.com' }, configureDomainMailFrom: { mailFromDomain: 'bounce.example.com' }, chooseReceivingHost: { host: 'reply.example.com' },
-        configureRegion: { enabled: true }, createEndpoint: { name: 'example' }, attachRules: { attachments: [] }, attachRituals: { attachments: [] }, updateInboxMessage: { read: true },
+        configureRegion: { enabled: true }, createEndpoint: { name: 'example' }, attachRules: { attachments: [] }, updateInboxMessage: { read: true },
         updateInboundDomain: { catchAll: 'store' }, updateReceivingHost: { catchAll: 'store' }, createInboundAddress: { address: 'permission-table@example.com' }, createInboundThread: { text: 'Hello.' },
         updateInboundThread: { read: true }, replyToInboundThread: { text: 'Hello.' }, createWorkspaceInvitation: { role: 'member' }, inviteWorkspaceMember: { role: 'member' } };
       const example = (operation: Json) => { const curl = operation['x-codeSamples']?.find((s: Json) => s.lang === 'Shell')?.source as string | undefined, at = curl?.indexOf("--data '") ?? -1; return at >= 0 ? JSON.parse(curl!.slice(at + 8, curl!.lastIndexOf("'"))) : undefined; };
@@ -4353,7 +4352,7 @@ describe('Hosted MCP OAuth and tools', () => {
       } finally { globalThis.fetch = guarded; }
       assert.deepEqual(mismatches, []);
       assert.deepEqual(Object.keys(OPERATION_PERMISSIONS).filter(id => !entries.some(e => e.id === id)), [], 'Rows for operations that no longer exist.');
-      assert.ok(entries.length >= 300, String(entries.length));
+      assert.ok(entries.length >= 270, String(entries.length));
     });
   });
 
@@ -4398,105 +4397,6 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(changed.status, 404, diagnostic(changed));
     assert.equal((changed.body as Json).error.code, -32001);
     assert.equal(ok(await list(manage.secret, await start(manage.secret, '/mcp?codemode=true'), '/mcp?codemode=true')).result.tools.length, ok(await list(read.secret, await start(read.secret, '/mcp?codemode=true'), '/mcp?codemode=true')).result.tools.length);
-  });
-
-  // The rule tools were renamed (getRituals is getRules, the plain rituals resource is rules). A client's cached tool list
-  // or saved call still names them as they were: each earlier name is a tool no listing shows that calls its deprecated
-  // /v1/rituals operation, so it answers in that operation's shapes and codes, behind the same confirmation, and only
-  // for a credential that could call it before.
-  test('the rule tools under their earlier names: never listed, and answering as their /v1/rituals operations do', async t => {
-    const db = await fixtureDatabase(t);
-    const manage = await keyFixture(t), read = await keyFixture(t, { permissions: ['read'] }), sender = await keyFixture(t, { permissions: ['read', 'send'], domains: ['example.com'] });
-    const grant = await oauthGrant(t, db, 'bane:read offline_access');
-    const { resourceActions, earlierResourceActions } = await import('./src/mcp-resources.js');
-    const earlier = earlierResourceActions('rituals')!, current = resourceActions('rules')!;
-    // [earlier tool, its tool now, its plain action]
-    const renamed = Object.entries(earlier).map(([action, name]) => [name, current[action === 'omens' ? 'decisions' : action], action] as const);
-    assert.equal(renamed.length, 17);
-    const init = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'acceptance', version: '1' } } };
-    const send = (key: string, method: string, params: Json, path = '/mcp?codemode=false', session?: string) => http('POST', path, key, { jsonrpc: '2.0', id: 2, method, params }, session ? { ...rpcHeaders, 'mcp-session-id': session } : rpcHeaders);
-    const call = async (key: string, name: string, args: Json = {}, path?: string, session?: string) => ok(await send(key, 'tools/call', { name, arguments: args }, path, session)).result as Json;
-    const plain = (key: string, action: string, args: Json = {}) => call(key, 'rituals', { action, ...args }, '/mcp');
-    const fingerprint = (tools: Json) => createHash('sha256').update(JSON.stringify(tools)).digest('hex').slice(0, 16);
-    // What a call answers, and what REST answers the same request, in the same terms: the body, or the status and code.
-    // Versions and times differ between two writes of the same thing.
-    const steady = (value: unknown) => JSON.parse(JSON.stringify(value, (k, v) => ['version', 'createdAt', 'updatedAt', 'savedAt', 'nextCursor'].includes(k) ? undefined : v));
-    const answer = (r: Json) => steady(r.isError ? [r._meta?.status ?? null, r.structuredContent?.error?.code] : r.structuredContent);
-    const rest = (reply: Reply) => steady(reply.status < 300 ? reply.body : [reply.status, reply.body?.error?.code]);
-    const unavailable = (r: Json) => r.isError && r.structuredContent?.error?.code === 'TOOL_UNAVAILABLE';
-
-    // Listings: neither shows an earlier name, and a session's fingerprint is of exactly what it is shown, in which an
-    // earlier name still answers.
-    for (const path of ['/mcp?codemode=false', '/mcp']) {
-      const started = await http('POST', path, manage.secret, init, rpcHeaders), session = started.headers.get('mcp-session-id')!;
-      assert.equal(started.status, 200, diagnostic(started));
-      const tools = ok(await send(manage.secret, 'tools/list', {}, path, session)).result.tools as Json[];
-      assert.equal(session.split('.')[0], fingerprint(tools));
-      const names = tools.flatMap(x => [x.name as string, ...((x.inputSchema.properties?.action?.enum ?? []) as string[]).map(a => `${x.name}.${a}`)]);
-      assert.ok(names.includes(path === '/mcp' ? 'rules.decisions' : 'setDecisionOptIns'), path);
-      assert.deepEqual(names.filter(n => /ritual|omen/i.test(n)), [], path);
-      const config = await call(manage.secret, path === '/mcp' ? 'rituals' : 'getRituals', path === '/mcp' ? { action: 'config' } : {}, path, session);
-      assert.deepEqual(answer(config), rest(await http('GET', '/v1/rituals', manage.secret)), path);
-    }
-
-    // Every earlier name, by itself and as its plain action, answers what its /v1/rituals operation answers over REST,
-    // each from the same starting config.
-    const omens = 'export default function route(email, ctx) {\n  const r = omens(email, { refund: "Is the sender asking for a refund?" })\n  if (r.refund >= 0.7) label("refund")\n}';
-    const start = { rituals: [{ key: 'earlier', source: omens }, { key: 'plain', source: 'export default function route(email) { label("seen") }' }], attachments: [] };
-    const reset = async () => ok(await http('PUT', '/v1/rituals', manage.secret, start)).version as number;
-    const first = await reset();
-    const mime = 'From: a@example.net\r\nTo: earlier@example.com\r\nSubject: Refund\r\n\r\nRefund please';
-    const broken = { rituals: [{ key: 'broken', source: 'export default function route(email){ email.subjet }' }] };
-    const calls: [string, Json, string, string, Json?][] = [
-      ['getRituals', {}, 'GET', '/v1/rituals'], ['getRitualTypings', {}, 'GET', '/v1/rituals/typings'], ['listRitualTemplates', {}, 'GET', '/v1/rituals/templates'],
-      ['listRitualRecipes', {}, 'GET', '/v1/rituals/recipes'], ['listRitualVersions', { limit: 2 }, 'GET', '/v1/rituals/history?limit=2'], ['getRitual', { key: 'earlier' }, 'GET', '/v1/rituals/scripts/earlier'],
-      ['checkRitual', { body: { key: 'earlier', source: omens } }, 'POST', '/v1/rituals/check', { key: 'earlier', source: omens }],
-      ['testRituals', { body: { mime, scores: { 'Is the sender asking for a refund?': 0.9 } } }, 'POST', '/v1/rituals/test', { mime, scores: { 'Is the sender asking for a refund?': 0.9 } }],
-      ['applyRituals', { confirm: true, body: { ...start, rituals: start.rituals.slice(1) } }, 'PUT', '/v1/rituals', { ...start, rituals: start.rituals.slice(1) }],
-      ['applyRituals', { confirm: true, body: broken }, 'PUT', '/v1/rituals', broken],
-      ['saveRitual', { key: 'earlier', confirm: true, body: { key: 'earlier', source: omens.replace('0.7', '0.8') } }, 'PUT', '/v1/rituals/scripts/earlier', { key: 'earlier', source: omens.replace('0.7', '0.8') }],
-      ['updateRitual', { key: 'earlier', confirm: true, body: { enabled: false } }, 'PATCH', '/v1/rituals/scripts/earlier', { enabled: false }],
-      ['attachRituals', { confirm: true, body: { attachments: [] } }, 'PUT', '/v1/rituals/attachments', { attachments: [] }],
-      ['setOmenOptIns', { confirm: true, body: { evaluateDomains: [], evaluateRoutes: [] } }, 'PUT', '/v1/rituals/omens', { evaluateDomains: [], evaluateRoutes: [] }],
-      ['createRitualFromRecipe', { confirm: true, body: { recipe: 'junk-newsletters', params: {}, addresses: ['earlier@example.com'], key: 'earlier' } }, 'POST', '/v1/rituals/recipes', { recipe: 'junk-newsletters', params: {}, addresses: ['earlier@example.com'], key: 'earlier' }],
-      ['updateRitualFromRecipe', { key: 'plain', confirm: true, body: { recipe: 'junk-newsletters', params: {}, addresses: ['earlier@example.com'] } }, 'PUT', '/v1/rituals/scripts/plain/recipe', { recipe: 'junk-newsletters', params: {}, addresses: ['earlier@example.com'] }],
-      ['restoreRitualVersion', { confirm: true, body: { version: first } }, 'POST', '/v1/rituals/restore', { version: first }],
-      ['deleteRitual', { key: 'earlier', confirm: true }, 'DELETE', '/v1/rituals/scripts/earlier'],
-    ];
-    const actionOf = new Map(renamed.map(([name, , action]) => [name, action]));
-    for (const [name, args, method, path, body] of calls) {
-      await reset(); const expected = rest(await http(method, path, manage.secret, body));
-      await reset(); const named = await call(manage.secret, name, args);
-      await reset(); const grouped = await plain(manage.secret, actionOf.get(name)!, args);
-      assert.deepEqual([answer(named), answer(grouped)], [expected, expected], `${name}: ${redact(named)}`);
-    }
-    assert.deepEqual(new Set(calls.map(([name]) => name)), new Set(actionOf.keys()));
-    // The compile error is the one from before the rename, field and details too.
-    await reset(); const failed = await call(manage.secret, 'applyRituals', { confirm: true, body: broken });
-    assert.deepEqual([failed.structuredContent.error.code, failed.structuredContent.error.field, failed.structuredContent.error.details[0].ritual], ['RITUAL_INVALID', 'rituals', 'broken']);
-    // A write still needs its confirmation, as the tool now does.
-    const unconfirmed = await call(manage.secret, 'applyRituals', { body: start });
-    assert.deepEqual(answer(unconfirmed), answer(await call(manage.secret, 'applyRules', { body: { rules: start.rituals, attachments: [] } })));
-    assert.equal(unconfirmed.isError, true);
-    // describe_tool answers for the earlier resource as it did.
-    const described = await call(manage.secret, 'describe_tool', { resource: 'rituals', action: 'config' }, '/mcp');
-    assert.deepEqual([described.isError, described.structuredContent.name, described.structuredContent.description], [false, 'rituals', 'Read the saved rituals (sources), ordered attachments to inboxes and addresses, sender lists and omen opt-ins. Pass version for an earlier snapshot.']);
-    assert.equal((await call(manage.secret, 'describe_tool', { resource: 'rituals', action: 'omens' }, '/mcp')).structuredContent.inputSchema.properties.action.const, 'omens');
-
-    // Each credential reaches an earlier name exactly when it reaches the tool now: rules are receiving administration, so
-    // only the manage key does, and REST refuses the others too.
-    for (const [label, key] of [['manage key', manage.secret], ['read key', read.secret], ['sender-domain key', sender.secret], ['read approval', grant.token]] as const) {
-      for (const [name, now, action] of renamed) {
-        const [was, is] = [await call(key, name, {}), await call(key, now, {})], [wasPlain, isPlain] = [await plain(key, action), await call(key, 'rules', { action: action === 'omens' ? 'decisions' : action }, '/mcp')];
-        assert.deepEqual([unavailable(was), unavailable(wasPlain)], [unavailable(is), unavailable(isPlain)], `${label} ${name}: ${redact(was)}`);
-        const describedThen = await call(key, 'describe_tool', { resource: 'rituals', action }, '/mcp');
-        assert.equal(unavailable(describedThen), unavailable(isPlain), `${label} describe ${name}`);
-      }
-    }
-    const reached = [[manage, 'getRituals', {}], [read, 'getRituals', {}], [read, 'applyRituals', { confirm: true, body: start }], [sender, 'getRituals', {}]] as const;
-    assert.deepEqual(await Promise.all(reached.map(async ([key, name, args]) => unavailable(await call(key.secret, name, args)))), [false, true, true, true]);
-    assert.deepEqual([(await http('GET', '/v1/rituals', read.secret)).status, (await http('PUT', '/v1/rituals', read.secret, start)).status, (await http('GET', '/v1/rituals', sender.secret)).status], [403, 403, 403]);
-    await http('PUT', '/v1/rituals', manage.secret, {});
   });
 
   test('hosted MCP advertises both catalogs and composes campaign, contact, email and temporary-token workflows', async t => {
@@ -4738,16 +4638,15 @@ describe('Hosted MCP OAuth and tools', () => {
         const writes: [string, string, unknown?][] = [
           ['PUT', '/v1/routing', { routes: [] }], ['POST', '/v1/routing/routes', { match: 'fixture@example.com', to: [hook.id] }],
           ['PATCH', '/v1/routing/routes/billing', { to: [] }], ['DELETE', '/v1/routing/routes/billing'], ['POST', '/v1/routing/versions/1/restore'],
-          // Rules, and the same writes through their deprecated /v1/rituals aliases.
-          ...['/v1/rules', '/v1/rituals'].flatMap(base => [['PUT', base, {}], ['PUT', `${base}/scripts/fixture`, { key: 'fixture', source: 'export default function route(email){}' }],
-            ['PATCH', `${base}/scripts/fixture`, { enabled: false }], ['DELETE', `${base}/scripts/fixture`], ['POST', `${base}/restore`, { version: 1 }], ['PUT', `${base}/attachments`, { attachments: [] }],
-            ['PUT', base === '/v1/rules' ? `${base}/decisions` : `${base}/omens`, {}], ['POST', `${base}/recipes`, { recipe: 'fixture', addresses: ['fixture@example.com'] }], ['PUT', `${base}/scripts/fixture/recipe`, {}]] as [string, string, unknown?][]),
+          // Rules.
+          ['PUT', '/v1/rules', {}], ['PUT', '/v1/rules/scripts/fixture', { key: 'fixture', source: 'export default function route(email){}' }],
+          ['PATCH', '/v1/rules/scripts/fixture', { enabled: false }], ['DELETE', '/v1/rules/scripts/fixture'], ['POST', '/v1/rules/restore', { version: 1 }], ['PUT', '/v1/rules/attachments', { attachments: [] }],
+          ['PUT', '/v1/rules/decisions', {}], ['POST', '/v1/rules/recipes', { recipe: 'fixture', addresses: ['fixture@example.com'] }], ['PUT', '/v1/rules/scripts/fixture/recipe', {}],
           ['POST', '/v1/endpoints', { type: 'slack', name: 'agent-fixture', url: 'https://hooks.slack.com/services/T0AGENT/B0AGENT/synthetic' }],
           ['PATCH', '/v1/endpoints/agent-fixture', { paused: true }], ['DELETE', '/v1/endpoints/agent-fixture'],
           ['POST', '/v1/endpoints/agent-fixture/verification', {}], ['POST', '/v1/endpoints/agent-fixture/test'],
           ['POST', '/v1/inbound/webhooks', { url: 'https://example.com/synthetic-agent' }], ['PATCH', `/v1/inbound/webhooks/${hook.id}`, { paused: false }],
           ['DELETE', `/v1/inbound/webhooks/${hook.id}`], ['POST', `/v1/inbound/webhooks/${hook.id}/rotate-secret`],
-          ['POST', '/v1/inbound/keys', { name: 'agent fixture' }], ['GET', '/v1/inbound/keys'], ['POST', '/v1/inbound/keys/mbk_fixture/revoke'],
           ['DELETE', '/v1/inboxes/fixture/app-passwords/fixture'], ['POST', '/v1/inbox-connections', { inboxes: ['fixture'], client: 'generic', auth: 'key' }],
           // Receiving hosts: adding, changing or removing one (and its subdomain aliases), choosing one, turning receiving on or off.
           ['POST', '/v1/inbound/domains/dom_fixture/hosts', { name: 'acme' }], ['PATCH', '/v1/inbound/domains/dom_fixture/hosts/mdom_fixture', { catchAll: 'store' }],
@@ -4764,7 +4663,7 @@ describe('Hosted MCP OAuth and tools', () => {
         assert.equal(ok(await http('GET', '/v1/routing', MANAGER)).version, before, 'No refused write saved a routing version.');
         assert.equal(ok(await http('GET', `/v1/inbound/webhooks/${hook.id}`, MANAGER)).paused, true);
         // Reads and previews stay open: routing, its dry run, rules, endpoints and a webhook's deliveries.
-        for (const path of ['/v1/routing', '/v1/routing/routes', '/v1/rules', '/v1/rituals', '/v1/endpoints', `/v1/inbound/webhooks/${hook.id}`, `/v1/inbound/webhooks/${hook.id}/deliveries`, '/v1/inbound/domains']) ok(await http('GET', path, agent.token));
+        for (const path of ['/v1/routing', '/v1/routing/routes', '/v1/rules', '/v1/endpoints', `/v1/inbound/webhooks/${hook.id}`, `/v1/inbound/webhooks/${hook.id}/deliveries`, '/v1/inbound/domains']) ok(await http('GET', path, agent.token));
         assert.ok(Array.isArray(ok(await http('POST', '/v1/routing/test', agent.token, { envelope: { to: ['fixture@example.com'] } })).recipients));
         // Reading a domain's subdomains stays allowed: an unknown domain is not found, not refused.
         error(await http('GET', '/v1/inbound/domains/dom_fixture/subdomains', agent.token), 404, 'NOT_FOUND');
@@ -4811,8 +4710,8 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.ok(trackedTokens.some(row => row.id === managed.id && row.permissions.includes('manage')));
     ok(await http('POST', `/v1/agent-tokens/${temporary.id}/revoke`, MANAGER, undefined, { 'x-bane-environment': 'live' }));
     error(await http('GET', '/v1/me', temporary.token), 401, 'AUTH_INVALID');
-    const connections = page(await http('GET', '/v1/mcp-connections', MANAGER));
-    assert.ok(connections.some(row => row.id === `mcp_${consentId}`));
+    const agents = ok(await http('GET', '/v1/agents', MANAGER)).data as Json[];
+    assert.ok(agents.some(row => row.id === `mcp_${consentId}`));
     const tampered = `${temporary.token.slice(0, -1)}${temporary.token.endsWith('a') ? 'b' : 'a'}`;
     error(await http('GET', '/v1/me', tampered), 401, 'AUTH_INVALID');
     const grantKeys:string[]=[];
@@ -4862,7 +4761,7 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.equal(await live(),false);
       const policy=ok(await http('GET','/v1/inbound/policy',MANAGER));
       for(const secret of [parent.secret,derived.secret]){
-        for(const path of ['/v1/inbound/policy','/v1/inbound/addresses','/v1/routing/routes','/v1/rules','/v1/rituals','/v1/endpoints'])error(await http('GET',path,secret),401,'AUTH_INVALID');
+        for(const path of ['/v1/inbound/policy','/v1/inbound/addresses','/v1/routing/routes','/v1/rules','/v1/endpoints'])error(await http('GET',path,secret),401,'AUTH_INVALID');
         error(await http('PATCH','/v1/inbound/policy',secret,{spam:'quarantine'}),401,'AUTH_INVALID');
         error(await http('POST','/v1/inbound/addresses',secret,{address:'fixture@example.invalid'}),401,'AUTH_INVALID');
       }
@@ -4871,7 +4770,7 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.equal(await live(),true);
       error(await http('POST','/v1/inboxes',parent.secret,{type:'sandbox',credential:{name:'fixture',permissions:['read']}}),422,'USE_INBOX_CONNECTION');
     });
-    ok(await http('POST', `/v1/mcp-connections/mcp_${consentId}/revoke`, MANAGER));
+    ok(await http('POST', `/v1/agents/mcp_${consentId}/revoke`, MANAGER));
     assert.equal((await db.query('SELECT FROM mail_grant_objects WHERE grant_id=$1',[consentId])).rowCount,0);
     assert.equal((await db.query('SELECT id FROM api_keys WHERE id=ANY($1) AND revoked_at IS NOT NULL',[grantKeys])).rowCount,2,'Both credential generations are revoked with their approval.');
     error(await http('GET', '/v1/me', managed.token), 401, 'AUTH_INVALID');
@@ -5272,19 +5171,18 @@ describe('Hosted MCP OAuth and tools', () => {
       const attach=(list:typeof attachments)=>request('PUT',path+'/attachments',key,{attachments:list});
       for(const change of [[...attachments].reverse(),attachments.slice(1),[{...attachments[0],continue:true},attachments[1]]])
         error(await attach(change),403,'RULE_BINDING_NOT_OWNED');
-      // The deprecated alias, written the way it was before the rename, refuses with the code it always did.
-      error(await request('PUT','/v1/rituals/attachments',key,{attachments:[...attachments].reverse().map(({rule,...b})=>({ritual:rule,...b}))}),403,'RITUAL_BINDING_NOT_OWNED');
       assert.equal(ok(await local('GET',path)).version,saved.version);
       ok(await attach([binding('extra'),...attachments]));
       const dry=async()=>ok(await local('POST',path+'/test',{mime:`To: ${box.address}\r\nSubject: fixture\r\n\r\nfixture`})).recipients[0];
       assert.ok((await dry()).labels.includes('extra'));
-      ok(await local('POST','/v1/mcp-connections/mcp_'+consentId+'/revoke'));
+      ok(await local('POST','/v1/agents/mcp_'+consentId+'/revoke'));
       assert.equal((await dry()).dropped,true,'Only the grant-owned addition disappears; the original first guard still blocks.');
     });
   });
 
   // tear witnesses (2 steps): mint grant2; probe grant2 code -> a member's read+send grant listed createContactList, createApiKey,
-  // createAgentToken and listApiKeys; mint grant; probe grant code -> listMcpConnections. REST refuses all of them.
+  // createAgentToken and listApiKeys; mint grant; probe grant code -> listMcpConnections (since removed; listAgents is its
+  // successor). REST refuses all of them.
   test('MCP listings offer only what REST authorizes: permission, member role and dashboard-only administration',async t=>{
     await simulatedSesFixture(t,async({db,request,runtime})=>{
       const {resourceInventory}=await import('./src/mcp-resources.js');const actions=new Map(resourceInventory().map(x=>[`${x.name}.${x.action}`,x.operation]));
@@ -5296,14 +5194,14 @@ describe('Hosted MCP OAuth and tools', () => {
         for(const codemode of [true,false]){
           const ops=await listed(codemode);
           for(const name of ['getCurrentIdentity','sendEmail','sendCampaign','createAgentToken','listDomains'])assert.ok(ops.has(name),`${name} codemode=${codemode}`);
-          for(const name of ['createContactList','createApiKey','listApiKeys','listMcpConnections','revokeMcpConnection'])assert.ok(!ops.has(name),`${name} codemode=${codemode}`);
+          for(const name of ['createContactList','createApiKey','listApiKeys','listAgents','revokeAgent'])assert.ok(!ops.has(name),`${name} codemode=${codemode}`);
         }
         const hidden=ok(await request('POST','/mcp?codemode=true',token,{jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'createApiKey',arguments:{confirm:true,body:{name:'hidden',permissions:['read']}}}},rpcHeaders)).result;
         assert.equal(hidden.structuredContent.error.code,'TOOL_UNAVAILABLE');
         // tear witness (recheck of #51): with receiving (an owner) but no manage, mailbox administration was listed although
         // mailboxAuth (actorMailAccess) refuses it. Every GET must be listed exactly when REST, as this grant, does not refuse it.
         const receiving=await listed(true);
-        for(const name of ['listInboundKeys','listInboundAddresses','listInboundDomains','getInboundScanPolicy','listInboundWebhooks','listInboxes','revealWebhookSecret'])assert.ok(!receiving.has(name),name);
+        for(const name of ['listInboundAddresses','listInboundDomains','getInboundScanPolicy','listInboundWebhooks','listInboxes','revealWebhookSecret'])assert.ok(!receiving.has(name),name);
         assert.ok(receiving.has('getRouting')&&receiving.has('getRules')&&receiving.has('sendEmail'));
         const [{createApp,createOpenApiApp},{buildMcpCatalog},{dispatchAsActor},{getMcpGrantActor}]=await Promise.all([import('./src/app.js'),import('./src/mcp-catalog.js'),import('./src/auth.js'),import('./src/mcp-auth.js')]);
         const api=await createOpenApiApp(),spec=api.getOpenAPI31Document({openapi:'3.1.0',info:{title:'Bane API',version:'0'}}) as Json,app=createApp();
@@ -5600,7 +5498,7 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.equal(saved.isError,false,redact(saved));
       const dry=async()=>ok(await local('POST','/v1/rules/test',{mime:`From: fixture@example.net\r\nTo: ${boxes.join(', ')}\r\nSubject: fixture\r\n\r\nfixture`,scores:{'Is review needed?':1}})).recipients;
       const active=await dry();assert.deepEqual(active.map((r:Json)=>r.dropped),[true,true,false]);
-      ok(await local('POST','/v1/mcp-connections/mcp_'+consentId+'/revoke'));
+      ok(await local('POST','/v1/agents/mcp_'+consentId+'/revoke'));
       const inactive=await dry();for(const r of inactive.slice(0,2)){assert.equal(r.junk,true);assert.deepEqual(r.labels,['ritual-error']);assert.match(r.warnings.join(' '),/lost receiving approval/);}
       assert.deepEqual(inactive[2].labels,['human']);assert.equal(inactive[2].junk,false);
     });
@@ -5726,7 +5624,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const endpoint = async (name: string) => ok(await local('GET', `/v1/endpoints/${name}`));
       assert.deepEqual([(await endpoint('helpdesk')).status, (await endpoint('alerts')).status, (await endpoint('escalate')).status], ['ready', 'ready', 'ready']);
 
-      ok(await local('POST', '/v1/mcp-connections/mcp_' + consentId + '/revoke'));
+      ok(await local('POST', '/v1/agents/mcp_' + consentId + '/revoke'));
       const held = await endpoint('helpdesk');
       assert.equal(held.status, 'paused');
       assert.match(held.nextStep, /sending its URL again/);
@@ -5778,7 +5676,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const marked = async () => (await db.query("SELECT paused,reconfirm FROM mailbox_webhooks WHERE key='untouched' AND workspace_id=(SELECT workspace_id FROM mailbox_webhooks WHERE id=$1)", [hook.id])).rows[0];
       // The refused request rolled back with everything on its connection, the removal included: the endpoint is still paused.
       assert.equal((await marked()).paused, true);
-      ok(await local('POST', '/v1/mcp-connections/mcp_' + second.consentId + '/revoke'));
+      ok(await local('POST', '/v1/agents/mcp_' + second.consentId + '/revoke'));
       assert.deepEqual(await marked(), { paused: true, reconfirm: true });
       // The database holds the same rule for any writer: a marked endpoint stays paused.
       await db.query('SAVEPOINT marked_endpoint');
@@ -5803,7 +5701,7 @@ describe('Hosted MCP OAuth and tools', () => {
       try { error(await request('PATCH', `/v1/inbound/webhooks/${hook.id}`, key, { url: 'https://example.net/hooks/elsewhere', paused: false }), 401, 'AUTH_INVALID'); } finally { late.mock.restore(); }
       assert.equal(reads, 2);
       assert.equal(ok(await local('GET', `/v1/inbound/webhooks/${hook.id}`)).url, '\u2022\u2022\u2022\u2022ents');
-      ok(await local('POST', '/v1/mcp-connections/mcp_' + third.consentId + '/revoke'));
+      ok(await local('POST', '/v1/agents/mcp_' + third.consentId + '/revoke'));
       assert.deepEqual((await db.query('SELECT paused,reconfirm FROM mailbox_webhooks WHERE id=$1', [hook.id])).rows, [{ paused: true, reconfirm: true }]);
       assert.equal(ok(await local('PATCH', `/v1/inbound/webhooks/${hook.id}`, { url: 'https://example.com/hooks/events', paused: false })).paused, false);
     });
@@ -5889,7 +5787,7 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.deepEqual([listed.get(key.id)!.approval.active, listed.get(key.id)!.revokedAt], [false, null]);
       assert.equal(ok(await local('GET', `/v1/inbound/webhooks/${inbound.id}`)).approval.active, false);
       // Removing the approval revokes the key for good; it is no longer tied to anything.
-      ok(await local('POST', `/v1/mcp-connections/${approvalId}/revoke`));
+      ok(await local('POST', `/v1/agents/${approvalId}/revoke`));
       listed = await keys();
       assert.deepEqual([listed.get(key.id)!.approval, listed.get(key.id)!.revokedAt !== null, listed.get(limited.id)!.revokedAt !== null], [null, true, true]);
     });
@@ -5997,7 +5895,7 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.deepEqual([preview.tier, preview.route, preview.webhooks], routedHere);
       // Removing the approval disables the route: mail queued through it is not posted, and new mail stays in the inbox.
       const queued = await routed('route-agent-queued');
-      ok(await local('POST', `/v1/mcp-connections/${approvalId}/revoke`));
+      ok(await local('POST', `/v1/agents/${approvalId}/revoke`));
       assert.deepEqual(await deliver(queued.deliveries[0]!), { status: 'failed', last_error: 'GRANT_REVOKED' });
       assert.equal(posted.length, 2);
       const removed = await routed('route-agent-removed');
@@ -6014,7 +5912,7 @@ describe('Hosted MCP OAuth and tools', () => {
       ['its newest sign-in token expired', true, grantSet(tokenExpired)],
       ['no new sign-in token for 30 days', false, grantSet(idle)],
       ['90 days since the person approved the agent', false, grantSet(`${tokenExpired},${approvedLongAgo}`)],
-      ['the approval was removed', false, async ({ consentId, local }) => ok(await local('POST', `/v1/mcp-connections/mcp_${consentId}/revoke`))],
+      ['the approval was removed', false, async ({ consentId, local }) => ok(await local('POST', `/v1/agents/mcp_${consentId}/revoke`))],
       ['its person was demoted to member', false, ({ db, wid }) => db.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=$2", [wid, manager!.userId])],
       ['its person left the workspace', false, ({ db, wid }) => db.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [wid, manager!.userId])],
     ];
@@ -6458,7 +6356,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const write = request('PATCH', `/v1/inbound/webhooks/${hook.id}`, key, { url: 'https://example.net/hooks/elsewhere', paused: false }, live);
       await pausedAt;
       let settled = false;
-      const removal = request('POST', '/v1/mcp-connections/mcp_' + consentId + '/revoke', MANAGER).finally(() => { settled = true; });
+      const removal = request('POST', '/v1/agents/mcp_' + consentId + '/revoke', MANAGER).finally(() => { settled = true; });
       const waiting = async () => (await db.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE '%nightmail_resource_grants%'")).rows[0].n > 0;
       for (let i = 0; i < 100 && !await waiting(); i++) await new Promise(resolve => setTimeout(resolve, 30));
       assert.equal(await waiting(), true, 'The removal waits for the approval the write holds.');
@@ -6492,7 +6390,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const domain=unique('mdom');await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,'receive.example',$3,'active')",[domain,wid,REGION]);
       await db.query("INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,'fixture','fixture-topic')",[wid,REGION]);
       const box=ok(await local('POST','/v1/inbound/addresses',{address:'support@receive.example'}),201);
-      const mbk=ok(await request('POST','/v1/inbound/keys',parent.secret,{name:'R2 inbox',addressIds:[box.id],permissions:['read','send']}),201);secrets.add(mbk.secret);
+      const mbk=ok(await request('POST','/v1/api-keys',parent.secret,{name:'R2 inbox',access:{type:'addresses',addressIds:[box.id],mail:['read','send']}}),201);secrets.add(mbk.secret);
       assert.equal(await allowed(mbk.id,box.address),true);
       const thread=ok(await request('POST','/v1/inbound/threads',mbk.secret,{addressId:box.id,to:['recipient@example.net'],subject:'R2 fixture',text:'Synthetic message'}),202);
       const mailboxEmail=(await db.query('SELECT sending_email_id FROM mail_messages WHERE workspace_id=$1 AND id=$2',[wid,thread.id])).rows[0].sending_email_id;
@@ -6555,8 +6453,8 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.equal(minted.isError, false, redact(minted)); secrets.add(minted.structuredContent.token);
       const credentials: [string, Record<string, string>][] = [
         ['owner session', { cookie: manager!.cookie }], ['member session', { cookie: member.cookie }],
-        ['read-only API key', await bearer('/v1/api-keys', { permissions: ['read'] })], ['read-only inbound key', await bearer('/v1/inbound/keys', { permissions: ['read'] })],
-        ['support address key', await bearer('/v1/inbound/keys', { addressIds: [support.id], permissions: ['read'] })], ['agent token', { authorization: `Bearer ${minted.structuredContent.token}` }],
+        ['read-only API key', await bearer('/v1/api-keys', { permissions: ['read'] })], ['read-only address key', await bearer('/v1/api-keys', { access: { type: 'addresses', mail: ['read'] } })],
+        ['support address key', await bearer('/v1/api-keys', { access: { type: 'addresses', addressIds: [support.id], mail: ['read'] } })], ['agent token', { authorization: `Bearer ${minted.structuredContent.token}` }],
       ];
       runtime.config.multiTenant = true;
       cleanup(t, async () => { runtime.config.multiTenant = false; });
@@ -6579,7 +6477,7 @@ describe('Hosted MCP OAuth and tools', () => {
       }
       assert.deepEqual(answers, {
         'owner session': ['200', '200'], 'member session': ['200', '200'], 'read-only API key': ['403 ADMIN_REQUIRED', '403 ADMIN_REQUIRED'],
-        'read-only inbound key': ['200', '200'], 'support address key': ['200', '404 NOT_FOUND'], 'agent token': ['200', '200'],
+        'read-only address key': ['200', '200'], 'support address key': ['200', '404 NOT_FOUND'], 'agent token': ['200', '200'],
       });
       // The raw message names every recipient: it keeps delivery-detail access (owner and admin sessions, unrestricted manage keys).
       const raw = `/v1/inbound/messages/${files.get(support.id)!.message}/raw`;
@@ -6666,7 +6564,7 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.deepEqual(posted.splice(0), [hook('untouched').url, hook('made').url]);
       const queued = await test(made.id);
 
-      ok(await local('POST', '/v1/mcp-connections/mcp_' + consentId + '/revoke'));
+      ok(await local('POST', '/v1/agents/mcp_' + consentId + '/revoke'));
       for (const id of held) {
         assert.deepEqual(await state(id), { paused: true, reconfirm: true });
         const view = ok(await local('GET', `/v1/webhooks/${id}`));
@@ -6768,7 +6666,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const rotation = request('POST', `/v1/webhooks/${hook.id}/rotate-secret`, key);
       await pausedAt;
       let settled = false;
-      const removal = request('POST', '/v1/mcp-connections/mcp_' + consentId + '/revoke', MANAGER).finally(() => { settled = true; });
+      const removal = request('POST', '/v1/agents/mcp_' + consentId + '/revoke', MANAGER).finally(() => { settled = true; });
       const waiting = async () => (await db.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE '%nightmail_resource_grants%'")).rows[0].n > 0;
       for (let i = 0; i < 100 && !await waiting(); i++) await new Promise(resolve => setTimeout(resolve, 30));
       assert.equal(await waiting(), true, 'The removal waits for the approval the rotation holds.');
@@ -9462,7 +9360,7 @@ describe('Hosted MCP OAuth and tools', () => {
         assert.equal(denied.status,403);assert.equal((await denied.json() as Json).error.code,'ADMIN_REQUIRED');
       }
       for (const name of ['createInboundAddress','updateInboundAddress','listInboundAddresses','getInboundAddress','listInboundThreads','getInboundThread','listInboundMessages','getInboundMessage','createInboundThread','replyToInboundThread','deleteInboundAddress']) assert.ok(tools.includes(name),name);
-      for (const admin of ['createInboundKey','rotateInboundWebhookSecret','disableInboundDomain','applyRouting','createEndpoint']) assert.ok(tools.includes(admin),admin);assert.ok(tools.includes('provisionRegion'));
+      for (const admin of ['createApiKey','rotateInboundWebhookSecret','disableInboundDomain','applyRouting','createEndpoint']) assert.ok(tools.includes(admin),admin);assert.ok(tools.includes('provisionRegion'));
       const canonicalHook = ok(await post('/webhooks',{url:'https://example.com/addresses',eventTypes:['address.created','address.deleted']}),201);
       const a=await success('createInboundAddress',{body:{address:'support@example.com',aliases:['help@example.com'],metadata:{purpose:'support'}},confirm:true});
       const b=ok(await post('/addresses',{address:'billing@example.com'}),201);
@@ -9472,7 +9370,7 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.equal(domain.addressCount,2); assert.equal(domain.catchAll,'store'); assert.ok(!('mailboxCount' in domain));
       assert.equal(ok(await local('PATCH',`${base}/domains/${domainId}`,{catchAll:'store'},'live')).catchAll,'store');
       assert.equal(ok(await local('PATCH',`${base}/domains/${domainId}`,{catchAll:'create_address'},'live')).catchAll,'create_address');
-      const key=ok(await post('/keys',{name:'support only',addressIds:[a.id],permissions:['read','send']}),201);const h={authorization:`Bearer ${key.secret}`};
+      const key=ok(await local('POST','/v1/api-keys',{name:'support only',access:{type:'addresses',addressIds:[a.id],mail:['read','send']}},'live'),201);const h={authorization:`Bearer ${key.secret}`};
       assert.deepEqual(ok(await get('/addresses',h)).data.map((x:Json)=>x.id),[a.id]);error(await get(`/addresses/${b.id}`,h),404);error(await post('/addresses',{address:'denied@example.com'},h),403);
       error(await local('GET',`${base}/addresses`,undefined,'test'),400,'ENVIRONMENT_REMOVED');
       const startArgs={body:{addressId:a.id,to:['customer@example.net'],subject:'Invoice',text:'Opening message'},idempotencyKey:'thread-start',confirm:true};
@@ -9665,7 +9563,7 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(mergedDenied.isError, true); assert.equal(mergedDenied.structuredContent.error.code, denied.structuredContent.error.code);
     const hidden = await rpc(token,'tools/call',{name:'describe_tool',arguments:{resource:'contacts',action:'create'}},'/mcp');
     assert.equal(hidden.structuredContent.error.code, 'TOOL_UNAVAILABLE');
-    const deletion = await http('POST', `/v1/mcp-connections/mcp_${consentId}/revoke`, MANAGER);
+    const deletion = await http('POST', `/v1/agents/mcp_${consentId}/revoke`, MANAGER);
     assert.equal(deletion.status, 200, diagnostic(deletion));
     const revoked = await http('POST', '/mcp', token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders);
     assert.equal(revoked.status, 403, diagnostic(revoked));
@@ -10822,7 +10720,7 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
       const expires = ['sendEmail', 'sendEmailBatch', 'testCampaign', 'sendDomainTestEmail', 'createInboundThread', 'replyToInboundThread'];
       const kept = ['createAgentToken', 'createApiKey', 'updateApiKey', 'createContact', 'createContactList', 'createNewsletter', 'createSegment', 'previewContactImport', 'createCampaignTemplate',
         'uploadTemplateAsset', 'importTemplateImage', 'uploadAttachment', 'uploadAttachmentBytes', 'createCampaign', 'sendCampaign', 'scheduleCampaign', 'cancelCampaign', 'createWebhook',
-        'createRoute', 'createEndpoint', 'createInboxConnection', 'createInbox', 'createInboundSubdomain', 'createInboundAddress', 'createInboundKey', 'createInboundWebhook',
+        'createRoute', 'createEndpoint', 'createInboxConnection', 'createInbox', 'createInboundSubdomain', 'createInboundAddress', 'createInboundWebhook',
         'createBillingTopUp', 'createBillingTopUpLink'];
       assert.deepEqual([...routes.keys()].sort(), [...expires, ...kept].sort(), 'every route that takes an Idempotency-Key is classified');
       // Paths one step off a send route.
@@ -17155,7 +17053,7 @@ describe('Operational configuration and public event boundaries', () => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const logs = ['info','warn','error'].map(level => t.mock.method(console, level as 'info' | 'warn' | 'error', () => {}));
       const reader = ok(await local('POST', '/v1/api-keys', { name: 'Webhook reader', permissions: ['read'] }), 201).secret;
-      const inboxKey = ok(await local('POST', '/v1/inbound/keys', { name: 'Mailbox reader', permissions: ['read'] }), 201).secret;
+      const inboxKey = ok(await local('POST', '/v1/api-keys', { name: 'Mailbox reader', access: { type: 'addresses', mail: ['read'] } }), 201).secret;
       const value = 'Bearer ' + unique('header-canary'), replacement = unique('replacement');
       const rekeyFixtures: { path: string; table: string }[] = [];
       function noValues(data: unknown) { const text = JSON.stringify(data); assert.ok(!text.includes(value) && !text.includes(replacement), 'Plaintext webhook credential escaped.'); }
@@ -25104,7 +25002,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const root = '/v1/inbound/addresses';
       error(await local('POST', root, { address: 'short@example.com', ttlSeconds: 1 }, 'live'), 422);
       error(await local('PATCH', `${root}/${temporary.id}`, { rules: ['case-*@example.com'] }, 'live'), 422);
-      const scoped = ok(await local('POST', '/v1/inbound/keys', { name: 'support fixture', addressIds: [support.id], permissions: ['read', 'send'] }, 'live'), 201);
+      const scoped = ok(await local('POST', '/v1/api-keys', { name: 'support fixture', access: { type: 'addresses', addressIds: [support.id], mail: ['read', 'send'] } }, 'live'), 201);
       assert.match(scoped.secret,/^nm_mbx_[0-9a-f]{64}$/);
       const old=scoped.secret.replace('nm_mbx_','os_mbx_');
       await db.query(`INSERT INTO mailbox_keys(id,workspace_id,name,hash,prefix,mailbox_ids,permissions) SELECT 'legacy-fixture',workspace_id,name,$1,$2,mailbox_ids,permissions FROM mailbox_keys WHERE id=$3`,[createHash('sha256').update(old).digest('hex'),old.slice(0,14),scoped.id]);
@@ -26926,7 +26824,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         provisioning: { prefix: 'bane_mbx_', ids: [], mail: ['create', 'read', 'modify'] },
         inbox: { prefix: 'bane_mbx_', ids: [ephemeral.id], mail: ['read'], expires: ephemeral.deleteAfter },
         persistent: { prefix: 'bane_mbx_', ids: [kept.id], mail: ['read', 'send'] },
-        // createInboundKey on one ephemeral inbox set no expiry, so deleting the inbox never ended it.
+        // A key for one ephemeral inbox made before 305 (the inbound key routes, since removed) set no expiry, so deleting the inbox never ended it.
         stray: { prefix: 'bane_mbx_', ids: [stray.id], mail: ['read'] },
         connection: { prefix: 'bane_mbx_', ids: [later.id, a.id], mail: ['read'] },
       };
@@ -26971,7 +26869,6 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         for (const [method, path, body] of [['GET', '/v1/me'], ['GET', '/v1/api-keys'], ['POST', '/v1/api-keys', { name: 'escalate', permissions: ['manage'] }], ['GET', '/v1/domains'], ['GET', '/v1/app-passwords'],
           ['POST', '/v1/emails/send', { from: `alpha@${host}`, to: ['someone@example.com'], subject: 'x', text: 'x' }]] as const) error(await request(method, path, as(name), body), 401, 'AUTH_INVALID');
         // Nor does it administer receiving.
-        error(await request('POST', '/v1/inbound/keys', as(name), { name: 'escalate', permissions: ['read'] }), 403, 'ADMIN_REQUIRED');
         error(await request('GET', '/v1/inbound/webhooks', as(name)), 403, 'ADMIN_REQUIRED');
       }
       // Addresses: only the chosen ones, read or read and reply, never from another address.
@@ -27013,9 +26910,6 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       ok(await request('GET', `/v1/inboxes/${box.id}`, agent.secret)); error(await read(agent.secret, a.id), 404, 'NOT_FOUND');
       ok(await local('DELETE', `/v1/inboxes/${box.id}`), 202);
       error(await request('GET', '/v1/inboxes', agent.secret), 401, 'AUTH_INVALID');
-      // The deprecated createInboundKey makes the same key, listed with the rest.
-      const alias = ok(await local('POST', '/v1/inbound/keys', { name: 'Alias', addressIds: [a.id], permissions: ['read'] }), 201);
-      assert.deepEqual(ok(await local('GET', '/v1/api-keys?limit=100')).data.find((k: Json) => k.id === alias.id).access, access('addresses', [a.id], null, ['read']));
       for (const [body, code, field] of [
         [{ access: { type: 'inbox', inboxId: a.id } }, 'UNKNOWN_INBOX', 'access.inboxId'], [{ access: { type: 'inbox', inboxId: box.id } }, 'UNKNOWN_INBOX', 'access.inboxId'],
         [{ permissions: ['read'], access: { type: 'addresses' } }, 'VALIDATION_FAILED', 'permissions'], [{ access: { type: 'addresses', addressIds: [] } }, 'ADDRESS_SCOPE_REQUIRED', 'access.addressIds'],
@@ -27207,7 +27101,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       }});
       const trips=t.mock.method(pg.Client.prototype,'query');
       const charged=async<T>(n:number,call:()=>Promise<T>)=>{const before=trips.mock.callCount(),res=await call();assert.equal(trips.mock.callCount()-before,n,'wire statements');return res;};
-      const root='/v1/inboxes', provision=ok(await local('POST','/v1/inbound/keys',{name:'Provision',addressIds:[],permissions:['create','read','modify','send']}),201).secret;
+      const root='/v1/inboxes', provision=ok(await local('POST','/v1/api-keys',{name:'Provision',access:{type:'addresses',addressIds:[],mail:['create','read','modify','send']}}),201).secret;
       const create=(body:Json)=>request('POST',root,provision,body);
       await t.test('ephemeral inbox: missing and inactive receiving hosts give actionable DNS errors',async()=>{
         error(await charged(2,()=>create({})),409,'RECEIVING_DOMAIN_REQUIRED');
@@ -27446,10 +27340,10 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.match((await db.query('SELECT name FROM mailbox_keys WHERE id=$1',[connected.id])).rows[0].name,/ · Other MCP client$/);
         // A sign-in can't be limited to inboxes: auth=oauth is refused rather than handing back an unscoped config.
         error(await local('POST','/v1/inbox-connections',{inboxes:[box.id],client:'opencode',auth:'oauth'}),422,'VALIDATION_FAILED');
-        const opencode=ok(await local('POST','/v1/inbox-connections',{inboxes:[box.id],client:'opencode',auth:'key'}),201);ok(await local('POST',`/v1/inbound/keys/${opencode.id}/revoke`));
+        const opencode=ok(await local('POST','/v1/inbox-connections',{inboxes:[box.id],client:'opencode',auth:'key'}),201);ok(await local('POST',`/v1/api-keys/${opencode.id}/revoke`));
         assert.deepEqual(opencode.config.mcp.servers.nightmail,{type:'remote',url:connected.config.url,oauth:false,headers:opencode.config.mcp.servers.nightmail.headers});assert.match(opencode.config.mcp.servers.nightmail.headers.Authorization,/^Bearer nm_mbx_/);assert.equal(opencode.config.mcp.nightmail,undefined);
-        const cursor=ok(await local('POST','/v1/inbox-connections',{inboxes:[box.id],client:'cursor',auth:'key'}),201);assert.match(cursor.config.mcpServers.nightmail.headers.Authorization,/^Bearer nm_mbx_/);ok(await local('POST',`/v1/inbound/keys/${cursor.id}/revoke`));
-        const scoped=ok(await local('POST','/v1/inbound/keys',{name:'separate',permissions:['read'],addressIds:[box.id]}),201).secret;
+        const cursor=ok(await local('POST','/v1/inbox-connections',{inboxes:[box.id],client:'cursor',auth:'key'}),201);assert.match(cursor.config.mcpServers.nightmail.headers.Authorization,/^Bearer nm_mbx_/);ok(await local('POST',`/v1/api-keys/${cursor.id}/revoke`));
+        const scoped=ok(await local('POST','/v1/api-keys',{name:'separate',access:{type:'addresses',addressIds:[box.id],mail:['read']}}),201).secret;
         await db.query("UPDATE mailboxes SET expires_at=now()-interval '1 minute' WHERE id=$1",[box.id]);const grace=await deliver('grace',[box.address]);assert.equal(ok(await request('GET',`${url}/${grace.id}`,key)).held,'expired');ok(await charged(2,()=>request('DELETE',path,key)),202);
         const beforeGet=gets;assert.equal((await app.fetch(new Request(oldLink),runtime)).status,404);assert.equal(gets,beforeGet);
         for(const p of [url,`${url}/${first.id}`,`/v1/inbound/messages/${first.id}`,`/v1/inbound/threads/${first.thread_id}`]){error(await request('GET',p,scoped),404);error(await local('GET',p),404);}
@@ -27476,7 +27370,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.deepEqual(await roles(address.id,claimed.id),['inbox']);
         assert.deepEqual((await db.query('SELECT messages,bytes::int FROM inbox_state WHERE inbox_id=$1',[address.id])).rows[0],{messages:2,bytes:m.size_bytes+claimed.size_bytes});
         // Its mail is read and changed through the inbox routes, with an address key too. The Inbox resource lists agent inboxes.
-        const scoped=ok(await local('POST','/v1/inbound/keys',{name:'filed',addressIds:[address.id],permissions:['read','modify']}),201).secret;
+        const scoped=ok(await local('POST','/v1/api-keys',{name:'filed',access:{type:'addresses',addressIds:[address.id],mail:['read','modify']}}),201).secret;
         const inboxPath=`${root}/${address.id}`;
         const inboxed=ok(await request('GET',`${inboxPath}/messages?folder=inbox`,scoped)).data;assert.deepEqual(inboxed.map((x:Json)=>x.id),[claimed.id]);
         assert.deepEqual(ok(await request('GET',`${inboxPath}/messages?folder=archive`,scoped)).data.map((x:Json)=>x.id),[m.id]);
@@ -27498,7 +27392,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         ok(await request('DELETE',`${url}?source=inbox&uid=${moved.uid}`,scoped));
         assert.deepEqual(await counts(),{...before,archive:before.archive-1,trash:before.trash+1});
         const unrelated=ok(await local('POST','/v1/inbound/addresses',{address:'unrelated@'+host}),201);
-        const otherKey=ok(await local('POST','/v1/inbound/keys',{name:'other',addressIds:[unrelated.id],permissions:['read']}),201).secret;
+        const otherKey=ok(await local('POST','/v1/api-keys',{name:'other',access:{type:'addresses',addressIds:[unrelated.id],mail:['read']}}),201).secret;
         for(const path of [`${inboxPath}/messages`,url,`${inboxPath}/folders`])error(await request('GET',path,otherKey),404,'NOT_FOUND');
         error(await local('GET',inboxPath),404);assert.ok(!ok(await local('GET',root)).data.some((b:Json)=>b.id===address.id));
         // A temporary address is an inbox whose lease is expiresAt alone: receiving stops then, and it is kept.
@@ -28016,7 +27910,6 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const stored=await ingest('ritual-trace',[box.address]);const replay=await call('POST',path+'/test',{messageId:stored.id});
         // The dry run on the stored message is what ingest recorded; the rule operations name an action's stable ID actionId.
         assert.deepEqual(replay.recipients,stored.routing.recipients.map((r:Json)=>r.actions?{...r,actions:Object.fromEntries(Object.entries(r.actions).map(([id,list])=>[id,(list as Json[]).map(({ritualAction,...a})=>({actionId:ritualAction,...a}))]))}:r));
-        assert.deepEqual((await call('POST','/v1/rituals/test',{messageId:stored.id})).recipients,stored.routing.recipients);
         const payload=(await db.query('SELECT payload FROM mailbox_webhook_deliveries WHERE workspace_id=$1 AND webhook_id=$2 AND payload->>\'messageId\'=$3',[wid,hook.id,stored.id])).rows[0].payload;assert.deepEqual(payload.ritualBody,{subject:'Test ritual-trace',recipient:box.address});
         assert.ok((await db.query('SELECT labels FROM mailbox_messages WHERE message_id=$1 AND mailbox_id=$2',[stored.id,box.id])).rows[0].labels.includes('handled'));await call('PUT',path,{});
         const mixed={rules:[...config.rules,{key:'temporary',source:'export default function route(email){block()}'}],attachments:[{target:box.id,rule:'temporary'},...config.attachments]};
@@ -28099,7 +27992,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.deepEqual(auto.routes.data.map((r: Json) => r.kind), ['route', 'route']);
         const catchAll = (await call('GET', '/v1/inbound/overview?kind=catch_all')).routes.data.find((r: Json) => r.host === 'receive.example');
         assert.deepEqual([catchAll.kind, catchAll.route.id, catchAll.to[0].id], ['catch_all', compat.id, inbound.id]);
-        const scoped = await call('POST', '/v1/inbound/keys', { name: 'overview reader', addressIds: [box2.id], permissions: ['read'] }, 201); secrets.add(scoped.secret);
+        const scoped = await call('POST', '/v1/api-keys', { name: 'overview reader', access: { type: 'addresses', addressIds: [box2.id], mail: ['read'] } }, 201); secrets.add(scoped.secret);
         const limited = ok(await request('GET', '/v1/inbound/overview', scoped.secret));
         assert.equal(limited.manage, false); assert.deepEqual(limited.routes.data.map((r: Json) => r.match), ['overview@receive.example', 'ov+*@receive.example']);
         assert.deepEqual([limited.rules, limited.rituals, limited.endpoints, limited.domains, limited.routes.data[0].to.map((t: Json) => t.type)], [[], [], [], [], ['inbox']]);
@@ -28537,8 +28430,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         for (const box of [a, c]) await call('DELETE', '/v1/routing/routes/' + (await routeOf(box.address)).id);
         await call('DELETE', '/v1/inbound/addresses/' + b.id + '?detach=true');
       });
-      await t.test('rules: omens(…) compiles to the plan decisions(…) does and ingests to the same verdicts; the /v1/rituals aliases answer as they did before the rename', async it => {
-        const path = '/v1/rules', legacy = '/v1/rituals', prior = runtime.config.screen;
+      await t.test('rules: omens(…) compiles to the plan decisions(…) does and ingests to the same verdicts; reads answer under the current names', async it => {
+        const path = '/v1/rules', prior = runtime.config.screen;
         const source = (fn: string) => `export default function route(email,ctx){\n  const r = ${fn}(email, { refund: "Is the sender asking for a refund?", urgent: { prompt: "Does this need a reply today?", type: "boolean", threshold: 0.8 } })\n  if (r.refund >= 0.7) label("refund")\n  if (r.urgent) endpoints["support-hook"]({ subject: "urgent" })\n}`;
         const { compileRitual } = await import('./src/ritual-engine.js');
         assert.deepEqual(compileRitual(source('omens')), compileRitual(source('decisions')), 'one compiled plan');
@@ -28560,31 +28453,28 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           assert.deepEqual([omens.labels.includes('refund'), omens.bodies, omens.calls, omens.acted], [true, [{ subject: 'urgent' }], 1, ['asks']]);
           assert.deepEqual(omens.trace[0].timeline.find((s: Json) => s.kind === 'decisions').scores, { refund: 0.9, urgent: true });
         } finally { stub.mock.restore(); runtime.config.screen = prior; }
-        // The rule operations name things rules and decisions; each alias answers in the shape it always did.
-        const saved = await call('GET', path), old = await call('GET', legacy);
-        assert.equal(old.version, saved.version);
+        // The rule operations name things rules and decisions.
+        const saved = await call('GET', path);
         assert.deepEqual([Object.keys(saved.config).sort(), saved.config.attachments], [['attachments', 'evaluateDomains', 'evaluateRoutes', 'rules', 'senderLists'], [{ rule: 'asks', target: box.id, continue: false }]]);
-        assert.deepEqual([Object.keys(old.config).sort(), old.config.attachments, old.config.rituals], [['attachments', 'evaluateDomains', 'evaluateRoutes', 'rituals', 'senderLists'], [{ ritual: 'asks', target: box.id, continue: false }], saved.config.rules]);
-        // Either spelling is accepted on write, through either name; never both at once.
-        for (const [base, body, key] of [[path, { rituals: [{ key: 'old', source: source('omens') }], attachments: [{ ritual: 'old', target: box.id }] }, 'old'], [legacy, { rules: [{ key: 'new', source: source('decisions') }], attachments: [{ rule: 'new', target: box.id }] }, 'new']] as [string, Json, string][])
-          assert.deepEqual((await call('PUT', base, body)).config.attachments.map((a: Json) => a.rule ?? a.ritual), [key]);
+        // Either spelling is accepted on write; never both at once.
+        for (const [body, key] of [[{ rituals: [{ key: 'old', source: source('omens') }], attachments: [{ ritual: 'old', target: box.id }] }, 'old'], [{ rules: [{ key: 'new', source: source('decisions') }], attachments: [{ rule: 'new', target: box.id }] }, 'new']] as [Json, string][])
+          assert.deepEqual((await call('PUT', path, body)).config.attachments.map((a: Json) => a.rule), [key]);
         error(await local('PUT', path, { rules: [], rituals: [] }), 422);
         error(await local('PUT', path + '/attachments', { attachments: [{ rule: 'new', ritual: 'new', target: box.id }] }), 422);
-        // Compile errors: the rule code, field and details; the alias keeps the ritual ones.
+        // Compile errors: the rule code, field and details.
         const broken = { rules: [{ key: 'broken', source: 'export default function route(email){ email.subjet }' }] };
-        const now = error(await local('PUT', path, broken), 422, 'RULE_INVALID'), then = error(await local('PUT', legacy, broken), 422, 'RITUAL_INVALID');
-        assert.deepEqual([now.field, now.details[0].rule, now.details[0].ritual, then.field, then.details[0].ritual, then.details[0].rule], ['rules', 'broken', undefined, 'rituals', 'broken', undefined]);
+        const now = error(await local('PUT', path, broken), 422, 'RULE_INVALID');
+        assert.deepEqual([now.field, now.details[0].rule, now.details[0].ritual], ['rules', 'broken', undefined]);
         assert.match(now.message, /^Rule broken, line 1/);
-        const checked = await call('POST', path + '/check', { key: 'asks', source: source('omens') }), checkedThen = await call('POST', legacy + '/check', { key: 'asks', source: source('decisions') });
-        assert.deepEqual([checked.decisions, checked.omens, checkedThen.omens, checkedThen.decisions], [['refund', 'urgent'], undefined, ['refund', 'urgent'], undefined]);
+        const checked = await call('POST', path + '/check', { key: 'asks', source: source('omens') });
+        assert.deepEqual([checked.decisions, checked.omens], [['refund', 'urgent'], undefined]);
         assert.deepEqual((await call('POST', path + '/check', { source: broken.rules[0].source, key: 'broken' })).diagnostics[0].rule, 'broken');
-        // Recipes, templates and typings: decisions, and omens only on the aliases.
-        const recipes = await call('GET', path + '/recipes'), recipesThen = await call('GET', legacy + '/recipes');
-        assert.deepEqual([recipes.decisionPricePerThousand, recipes.omenPricePerThousand, recipesThen.omenPricePerThousand, recipesThen.decisionPricePerThousand], ['0.00', undefined, '0.00', undefined]);
-        assert.deepEqual([recipes.data.filter((r: Json) => r.decisions).map((r: Json) => r.id), recipesThen.data.filter((r: Json) => r.omens).map((r: Json) => r.id)], [['label-by-meaning', 'alert-by-meaning'], ['label-by-meaning', 'alert-by-meaning']]);
-        // Each name's typings declare its own words and type-check its own templates (TypeScript itself checks them): the
-        // alias answers the declarations from before the rename, and the rule ones also declare omens and Omen, deprecated,
-        // so a source stored with them still checks in an editor that loads the new typings.
+        // Recipes, templates and typings: decisions.
+        const recipes = await call('GET', path + '/recipes');
+        assert.deepEqual([recipes.decisionPricePerThousand, recipes.omenPricePerThousand], ['0.00', undefined]);
+        assert.deepEqual(recipes.data.filter((r: Json) => r.decisions).map((r: Json) => r.id), ['label-by-meaning', 'alert-by-meaning']);
+        // The typings declare decisions and type-check the templates (TypeScript itself checks them); they also declare omens
+        // and Omen, deprecated, so a source stored with them still checks in an editor that loads them.
         const ts = (await import('typescript')).default, libs = new Map<string, ReturnType<typeof ts.createSourceFile> | undefined>();
         const problems = (declarations: string, sources: Record<string, string>) => {
           const options = { noEmit: true, strict: false, skipLibCheck: true, target: ts.ScriptTarget.ES2022, lib: ['lib.es2022.d.ts'], types: [] };
@@ -28598,28 +28488,24 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         };
         const asks = (fn: string, question: string, context: string) => `export default function route(email, ctx) {\n  const urgent: ${question} = { prompt: "Does this need a reply today?", type: "boolean" }\n  const r = ${fn}(email, { refund: "Is the sender asking for a refund?", urgent })\n  const recipient: ${context} = ctx\n  if (r.refund >= 0.7 && r.urgent) label(recipient.local)\n}`;
         await call('PUT', path, { senderLists: { vip: ['@example.com'] } });
-        const [typings, typingsThen] = [await call('GET', path + '/typings'), await call('GET', legacy + '/typings')];
-        const [templates, templatesThen] = [(await call('GET', path + '/templates')).data as Json[], (await call('GET', legacy + '/templates')).data as Json[]];
+        const typings = await call('GET', path + '/typings'), templates = (await call('GET', path + '/templates')).data as Json[];
         const usable = (list: Json[]) => Object.fromEntries(list.filter(x => !x.needs || x.endpoint).map(x => [x.id, x.source]));
         assert.ok(Object.keys(usable(templates)).length >= 5);
         assert.deepEqual(problems(typings.typescript, { ...usable(templates), now: asks('decisions', 'Decision', 'RuleContext'), stored: asks('omens', 'Omen', 'RuleContext') }), []);
-        assert.deepEqual(problems(typingsThen.typescript, { ...usable(templatesThen), then: asks('omens', 'Omen', 'RitualContext') }), []);
-        assert.match(problems(typingsThen.typescript, { now: asks('decisions', 'Decision', 'RitualContext') }).join('\n'), /Cannot find name 'decisions'/);
-        assert.deepEqual([/@deprecated[^\n]*\ntype Omen = Decision;/.test(typings.typescript), /\bdecisions\b|Decision|RuleContext/.test(typingsThen.typescript)], [true, false]);
-        assert.deepEqual([typings.completions.some((x: Json) => x.label === 'omens'), typingsThen.completions.filter((x: Json) => ['omens', 'decisions'].includes(x.label)).map((x: Json) => x.label)], [false, ['omens']]);
-        assert.deepEqual([templates.find(x => x.id === 'refund-decision')?.source.includes('decisions(email'), templatesThen.find(x => x.id === 'refund-omen')?.source.includes('omens(email')], [true, true]);
-        assert.ok(templatesThen.every(x => !/decisions\(/.test(x.source)) && templates.every(x => !/omens\(/.test(x.source)));
+        assert.ok(/@deprecated[^\n]*\ntype Omen = Decision;/.test(typings.typescript));
+        assert.equal(typings.completions.some((x: Json) => x.label === 'omens'), false);
+        assert.equal(templates.find(x => x.id === 'refund-decision')?.source.includes('decisions(email'), true);
+        assert.ok(templates.every(x => !/omens\(/.test(x.source)));
         // A dry run names each row's kind rule, its timeline's answers decisions, and an endpoint call's stable ID actionId.
         const mime = `From: a@example.net\r\nTo: ${box.address}\r\nSubject: Refund\r\n\r\nRefund please`, scores = { 'Is the sender asking for a refund?': 0.9, 'Does this need a reply today?': 1 };
         await call('PUT', path, { rules: [{ key: 'asks', source: source('decisions') }], attachments: [{ rule: 'asks', target: box.id }], evaluateDomains: ['receive.example'] });
-        const dry = await call('POST', path + '/test', { mime, scores }), dryThen = await call('POST', legacy + '/test', { mime, scores });
-        assert.deepEqual([dry.trace[0].kind, dryThen.trace[0].kind], ['rule', 'ritual']);
-        assert.deepEqual([dry.trace[0].timeline.map((s: Json) => s.kind), dryThen.trace[0].timeline.map((s: Json) => s.kind)], [['decisions', 'condition', 'action', 'condition', 'action'], ['omens', 'condition', 'action', 'condition', 'action']]);
-        assert.deepEqual([Object.keys(dry.recipients[0].actions[hook.id][0]), Object.keys(dryThen.recipients[0].actions[hook.id][0])], [['actionId', 'body'], ['ritualAction', 'body']]);
-        assert.equal(dry.recipients[0].actions[hook.id][0].actionId, dryThen.recipients[0].actions[hook.id][0].ritualAction);
-        // Opt-ins: decisions, at its earlier path too.
+        const dry = await call('POST', path + '/test', { mime, scores });
+        assert.equal(dry.trace[0].kind, 'rule');
+        assert.deepEqual(dry.trace[0].timeline.map((s: Json) => s.kind), ['decisions', 'condition', 'action', 'condition', 'action']);
+        assert.deepEqual(Object.keys(dry.recipients[0].actions[hook.id][0]), ['actionId', 'body']);
+        // Opt-ins: decisions.
         assert.deepEqual((await call('PUT', path + '/decisions', { evaluateDomains: ['receive.example'] })).config.evaluateDomains, ['receive.example']);
-        assert.deepEqual((await call('PUT', legacy + '/omens', { evaluateDomains: [] })).config.evaluateDomains, []);
+        assert.deepEqual((await call('PUT', path + '/decisions', { evaluateDomains: [] })).config.evaluateDomains, []);
         // An AI recipe saved before the rename wrote omens(…): it keeps its recipe, and rewriting it writes decisions(…).
         const recipe = await call('POST', path + '/recipes', { recipe: 'label-by-meaning', params: { meaning: 'a refund request', label: 'refund' }, addresses: [box.id], key: 'meaning' }, 201);
         const written = recipe.config.rules.find((r: Json) => r.key === 'meaning').source as string;
@@ -28627,18 +28513,17 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const before = await call('PUT', path + '/scripts/meaning', { key: 'meaning', source: written.replace('decisions(', 'omens(') });
         assert.deepEqual(before.config.rules.find((r: Json) => r.key === 'meaning').recipe, { id: 'label-by-meaning', params: { meaning: 'a refund request', label: 'refund' } });
         error(await local('POST', path + '/recipes', { recipe: 'junk-newsletters', params: {}, addresses: [box.id], key: 'meaning' }), 409, 'RULE_EXISTS');
-        error(await local('POST', legacy + '/recipes', { recipe: 'junk-newsletters', params: {}, addresses: [box.id], key: 'meaning' }), 409, 'RITUAL_EXISTS');
         const overview = await call('GET', '/v1/inbound/overview?q=support');
         assert.deepEqual([overview.rules.find((r: Json) => r.key === 'meaning').decisions, overview.rituals.find((r: Json) => r.key === 'meaning').omens], [['match'], ['match']]);
         await call('PUT', path, {});
       });
-      // The tests below write through the deprecated /v1/rituals aliases with the keys from before the rename (rituals,
-      // ritual, omens(…)), as clients written then do.
+      // The tests below write the config with the keys from before the rename (rituals, ritual, omens(…)), which the rule
+      // operations still accept.
       await t.test('rituals: opt-in unions Jev questions, replays recorded scores and lets scripts choose the action',async it=>{
-        const path='/v1/rituals',prior=runtime.config.screen;runtime.config.screen={apiKey:'synthetic',endpoint:'https://jev.invalid/fixture',model:'synthetic',mode:'reject',threshold:0.7};let calls=0;
+        const path='/v1/rules',prior=runtime.config.screen;runtime.config.screen={apiKey:'synthetic',endpoint:'https://jev.invalid/fixture',model:'synthetic',mode:'reject',threshold:0.7};let calls=0;
         const questions=(start:number,count:number)=>Array.from({length:count},(_,i)=>`q${start+i}:"question ${start+i}?"`).join(',');
         const opt={attachments:[{ritual:'one',target:box.address},{ritual:'two',target:box.id}],evaluateDomains:['receive.example']};
-        error(await local('PUT',path,{...opt,rituals:['one','two'].map((key,i)=>({key,source:`export default function route(email){const r=omens(email,{${questions(i*6,i?5:6)}});}` }))}),422,'RITUAL_INVALID');
+        error(await local('PUT',path,{...opt,rituals:['one','two'].map((key,i)=>({key,source:`export default function route(email){const r=omens(email,{${questions(i*6,i?5:6)}});}` }))}),422,'RULE_INVALID');
         runtime.config.screen=undefined;await call('PUT',path,{evaluateDomains:opt.evaluateDomains,attachments:[opt.attachments[0]],rituals:[{key:'one',source:'export default function route(email){const r=omens(email,{q:{prompt:"Needs more review?",onError:"defer"}});if(r.q) block()}' }]});
         await assert.rejects(ingest('defer-deadline',[box.address]),(await import('./src/jobs.js')).JobDeferred);
         await db.query("UPDATE mail_receipts SET created_at=now()-interval '31 minutes' WHERE workspace_id=$1 AND ses_message_id='defer-deadline'",[wid]);
@@ -28650,7 +28535,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       });
       await t.test('rituals: chat credentials are pinned and write-only; durable posts disable mentions',async()=>{
         const {renderChat}=await import('./src/endpoints.js');assert.deepEqual(renderChat('discord',{content:'# Notice\n- [site](https://example.invalid)'}),{content:'\\# Notice\n\\- \\[site\\]\\(https://example.invalid\\)',allowed_mentions:{parse:[]},flags:4});
-        const path='/v1/rituals',dest='/v1/endpoints';error(await local('POST',dest,{type:'slack',name:'bad',url:'https://other.example.org/services/T/B/fake'}),422,'INVALID_CONNECTOR');const value='https://discord.com/api/webhooks/123/synthetic';const d=await call('POST',dest,{type:'discord',name:'triage',url:value},201);assert.equal(d.status,'ready');assert.equal(d.call,'endpoints.triage');assert.ok(!JSON.stringify(d).includes('/api/webhooks/'));error(await local('POST',dest,{type:'slack',name:'triage',url:'https://hooks.slack.com/services/T/B/x'}),409,'ENDPOINT_NAME_TAKEN');error(await local('POST',dest,{type:'webhook',name:'support-hook',url:'https://example.com/x'}),409,'ENDPOINT_NAME_TAKEN');const row=(await db.query("SELECT id AS hook_id,encrypted_target AS encrypted_value FROM mailbox_webhooks WHERE workspace_id=$1 AND key=$2 AND type='discord'",[wid,'triage'])).rows[0];
+        const path='/v1/rules',dest='/v1/endpoints';error(await local('POST',dest,{type:'slack',name:'bad',url:'https://other.example.org/services/T/B/fake'}),422,'INVALID_CONNECTOR');const value='https://discord.com/api/webhooks/123/synthetic';const d=await call('POST',dest,{type:'discord',name:'triage',url:value},201);assert.equal(d.status,'ready');assert.equal(d.call,'endpoints.triage');assert.ok(!JSON.stringify(d).includes('/api/webhooks/'));error(await local('POST',dest,{type:'slack',name:'triage',url:'https://hooks.slack.com/services/T/B/x'}),409,'ENDPOINT_NAME_TAKEN');error(await local('POST',dest,{type:'webhook',name:'support-hook',url:'https://example.com/x'}),409,'ENDPOINT_NAME_TAKEN');const row=(await db.query("SELECT id AS hook_id,encrypted_target AS encrypted_value FROM mailbox_webhooks WHERE workspace_id=$1 AND key=$2 AND type='discord'",[wid,'triage'])).rows[0];
           const bad=error(await local('PUT',path,{rituals:[{key:'notify',source:'export default function route(email,ctx){endpoints.triage({text:"x"});endpoints.triag({content:"x"})}'}]}),422,'UNKNOWN_ENDPOINT');assert.equal(bad.details.length,2);assert.match(bad.details[0].message,/discord endpoint: call it as endpoints\.triage\(\{ content \}\)/);assert.match(bad.details[1].hint,/Did you mean endpoints\.triage\?/);
           const check=await call('POST',path+'/check',{source:'export default function route(email,ctx){if(lists.has("vip",email.from.address))endpoints.triage({content:email.subject})}'});assert.equal(check.ok,false);assert.match(check.diagnostics[0].message,/No sender list named vip/);assert.deepEqual(check.calls,['endpoints.triage']);
           const typings=await call('GET',path+'/typings');assert.match(typings.typescript,/triage\(message: \{ content: string \}\): void/);assert.ok(typings.completions.some((x:Json)=>x.label==='endpoints.triage'));const templates=(await call('GET',path+'/templates')).data;assert.equal(templates.find((x:Json)=>x.id==='discord-alert').endpoint,'triage');assert.ok(!row.encrypted_value.includes('https://'));const prev=runtime.webhookFetch;let count=0;try{runtime.webhookFetch=async(url,init)=>{assert.equal(url,value);const body=JSON.parse(String(init.body));assert.deepEqual(body.allowed_mentions,{parse:[]});assert.equal(body.content,'@everyone');count++;return {status:200}};
@@ -28674,7 +28559,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         }finally{runtime.webhookFetch=prev;await call('PUT',path,{})}
       });
       await t.test('rituals: forwards require recipient verification, rewrite From via the inbox and suppress loops and repeats',async()=>{
-        const {mailboxEventJobs}=await import('./src/mailbox-events.js');const root='/v1/rituals',dest='/v1/endpoints',address='teammate@example.net';
+        const {mailboxEventJobs}=await import('./src/mailbox-events.js');const root='/v1/rules',dest='/v1/endpoints',address='teammate@example.net';
         const d=await call('POST',dest,{type:'forward',name:'team',address,from:box.id},201);assert.equal(d.status,'pending');assert.match(d.nextStep,/Only the recipient can confirm/);
         error(await local('POST',dest,{type:'forward',name:'outside',address:'x@example.net',preverify:true}),422,'PREVERIFY_NOT_ALLOWED');
         runtime.config.multiTenant=true;try{error(await local('POST',dest,{type:'forward',name:'outside-hosted',address:'x@example.net',preverify:true}),422,'PREVERIFY_NOT_ALLOWED');}finally{runtime.config.multiTenant=false;}
@@ -28709,14 +28594,14 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const {mailboxEventJobs}=await import('./src/mailbox-events.js');
         const hookId=(await db.query("SELECT id AS hook_id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='team' AND type='forward' AND verified",[wid])).rows[0].hook_id;
         await ingest('fwd-late',['late@receive.example']);
-        await call('PUT','/v1/rituals',{rituals:[{key:'forward',source:'export default function route(email,ctx){endpoints.team() }'}],attachments:[{ritual:'forward',target:box.id}]});
+        await call('PUT','/v1/rules',{rituals:[{key:'forward',source:'export default function route(email,ctx){endpoints.team() }'}],attachments:[{ritual:'forward',target:box.id}]});
         try{
           const m=await ingest('fwd-late',['late@receive.example',box.address]);
           const d=(await db.query("SELECT id FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2",[hookId,m.id])).rows[0];
           await mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:d.id},{id:'job_fwd_late',workspaceId:wid,attempts:1});
           assert.deepEqual((await db.query('SELECT status,last_error FROM mailbox_webhook_deliveries WHERE id=$1',[d.id])).rows[0],{status:'delivered',last_error:null});
           assert.equal((await db.query('SELECT FROM mail_forward_once WHERE message_id=$1 AND endpoint=$2',[m.id,hookId])).rowCount,1);
-        }finally{await call('PUT','/v1/rituals',{});}
+        }finally{await call('PUT','/v1/rules',{});}
       });
       await t.test('rituals: one forward rule, recorded at ingest for every message and added to older mail; mail stored without it is never forwarded',async()=>{
         // tear/delivery witnesses: ingest m1 z, strip m1, rituals forward, ingest m1 b+z, run K m1:F (and the loop variant).
@@ -28748,7 +28633,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.ok(Object.values(once).every(v=>!('forwardSafe' in v)),'No forwardSafe is left.');
         // Nothing decides a message stored without forwardEligible on read any more: it is never forwarded.
         await db.query("UPDATE mail_messages SET verdicts=verdicts-'forwardEligible' WHERE workspace_id=$1 AND ses_message_id='fwd-old'",[wid]);
-        await call('PUT','/v1/rituals',{rituals:[{key:'forward',source:'export default function route(email,ctx){endpoints.team() }'}],attachments:[{ritual:'forward',target:box.id}]});
+        await call('PUT','/v1/rules',{rituals:[{key:'forward',source:'export default function route(email,ctx){endpoints.team() }'}],attachments:[{ritual:'forward',target:box.id}]});
         try{
           for(const [mid,,ok] of cases){
             const [status,error]=ok&&mid!=='fwd-was-refused'&&mid!=='fwd-old'?['delivered',null]:['failed','FORWARD_BLOCKED'];
@@ -28761,7 +28646,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           assert.equal('forwardEligible' in (await verdicts())['fwd-old']!,false,'A refused forward stores no verdict.');
           const forwarded=(await db.query("SELECT headers FROM mail_messages WHERE workspace_id=$1 AND direction='outbound' AND subject='Fwd: Test fwd-hops-24'",[wid])).rows[0];
           assert.ok(forwarded?.headers.some((h:Json)=>h.name==='X-Nightmail-Loop' && h.value.startsWith('v1.1.')),'A forward carries X-Nightmail-Loop.');
-        }finally{await call('PUT','/v1/rituals',{});}
+        }finally{await call('PUT','/v1/rules',{});}
       });
       // Forwards send each message whole, from a route as from a rule. Each recipient here confirms through the emailed link.
       const confirmedForward=async(name:string,address:string)=>{
@@ -28935,7 +28820,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await route('clean@receive.example',['webhook:clean-route'],'clean-route');
         const hookId=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='clean-route'",[wid])).rows[0].id;
         // 33 intents exceed the per-run action budget: the ritual fails and its recipient's copy is junk.
-        await call('PUT','/v1/rituals',{rituals:[{key:'overrun',source:`export default function route(email){${'label("l");'.repeat(33)}}`}],attachments:[{ritual:'overrun',target:box.id}]});
+        await call('PUT','/v1/rules',{rituals:[{key:'overrun',source:`export default function route(email){${'label("l");'.repeat(33)}}`}],attachments:[{ritual:'overrun',target:box.id}]});
         const prev=runtime.webhookFetch;let posts=0;
         try{
           const m=await ingest('junk-one',[box.address,'clean@receive.example']);
@@ -28946,7 +28831,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           await mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:d.id},{id:'job_clean_route',workspaceId:wid,attempts:1});
           assert.equal(posts,1);
           assert.equal((await db.query('SELECT status FROM mailbox_webhook_deliveries WHERE id=$1',[d.id])).rows[0].status,'delivered');
-        }finally{runtime.webhookFetch=prev;await call('PUT','/v1/rituals',{});await call('DELETE',`/v1/inbound/webhooks/${hookId}?detach=true`);}
+        }finally{runtime.webhookFetch=prev;await call('PUT','/v1/rules',{});await call('DELETE',`/v1/inbound/webhooks/${hookId}?detach=true`);}
       });
       await t.test('delivery: another receipt of one email routes and runs rituals only for recipients not routed before',async()=>{
         // tear/delivery witnesses: rituals slack, ingest m1 b, ingest d1 b; ingest m1 a, route r1 off, ingest d1 a.
@@ -28954,7 +28839,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await call('POST','/v1/endpoints',{type:'webhook',name:'once-b',url:'https://hooks.example.org/once-b'},201);
         const ids:Record<string,string>=Object.fromEntries((await db.query("SELECT key,id FROM mailbox_webhooks WHERE workspace_id=$1 AND key IN ('once-a','once-b')",[wid])).rows.map(r=>[r.key,r.id]));
         await route('once@receive.example',['webhook:once-a'],'once-route');
-        await call('PUT','/v1/rituals',{rituals:[{key:'notify',source:'export default function route(email){endpoints["once-a"]({subject:email.subject})}'}],attachments:[{ritual:'notify',target:box.id}]});
+        await call('PUT','/v1/rules',{rituals:[{key:'notify',source:'export default function route(email){endpoints["once-a"]({subject:email.subject})}'}],attachments:[{ritual:'notify',target:box.id}]});
         const email=Buffer.from('From: Agent <a@example.org>\r\nSubject: Once\r\nMessage-ID: <once@example.org>\r\n\r\nHello');
         const receive=async(mid:string,to:string[])=>{raw.set(mid,email);await submit(mid,to,'Mail');await run('mailbox.ingest',{sesMessageId:mid});await expandFixtureOutbox(runtime,wid);};
         const queued=async()=>Object.fromEntries((await db.query('SELECT h.key,count(d.id)::int AS n FROM mailbox_webhooks h LEFT JOIN mailbox_webhook_deliveries d ON d.webhook_id=h.id WHERE h.id=ANY($1) GROUP BY h.key',[Object.values(ids)])).rows.map(r=>[r.key,r.n]));
@@ -28974,7 +28859,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           await receive('once-1',[box.address,'once@receive.example','once+two@receive.example']);
           assert.deepEqual((await db.query("SELECT envelope_to FROM mail_messages WHERE workspace_id=$1 AND message_id='once@example.org'",[wid])).rows.map(r=>[...r.envelope_to].sort()),[[box.address,'once@receive.example','once+tag@receive.example','once+two@receive.example'].sort()]);
           assert.deepEqual(await queued(),{'once-a':2,'once-b':1});
-        }finally{await call('PUT','/v1/rituals',{});for(const id of Object.values(ids))await call('DELETE',`/v1/inbound/webhooks/${id}?detach=true`);}
+        }finally{await call('PUT','/v1/rules',{});for(const id of Object.values(ids))await call('DELETE',`/v1/inbound/webhooks/${id}?detach=true`);}
       });
       await t.test('delivery: a runner whose claim went stale sends nothing once the delivery settled or resumed',async()=>{
         // tear/delivery witnesses: ingest m1 a, claim K m1:W, expire m1:W, run L m1:W, reply L 400, go K;
@@ -29084,13 +28969,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       });
       // tear witness: mint key, mint ikey, create inbox ikey k1, create inbox ikey k1 answered 409 IDEMPOTENCY_CONFLICT.
       await t.test('create idempotency: a provisioning inbox key replays its own inbox create',async()=>{
-        const key=ok(await local('POST','/v1/inbound/keys',{name:'tear provisioning',permissions:['read','create'],addressIds:[]}),201);secrets.add(key.secret);
+        const key=ok(await local('POST','/v1/api-keys',{name:'tear provisioning',access:{type:'addresses',addressIds:[],mail:['read','create']}}),201);secrets.add(key.secret);
         const create=()=>request('POST','/v1/inboxes',key.secret,{type:'sandbox',name:'tear provisioned'},{'idempotency-key':'provision-1'});
         const first=ok(await create(),201),again=await create();
         // Its visible inbox set now includes the new inbox; the retry is still the same request.
         assert.equal(again.status,201,diagnostic(again));assert.equal(again.body.id,first.id);assert.equal(again.headers.get('idempotent-replayed'),'true');
         error(await request('POST','/v1/inboxes',key.secret,{type:'sandbox',name:'another'},{'idempotency-key':'provision-1'}),409,'IDEMPOTENCY_CONFLICT');
-        ok(await local('POST',`/v1/inbound/keys/${key.id}/revoke`),200);
+        ok(await local('POST',`/v1/api-keys/${key.id}/revoke`),200);
       });
       await t.test('routing: declarative apply previews a diff, rejects stale versions and round-trips by key', async () => {
         const read = await local('GET', '/v1/routing?format=config'),
@@ -29611,8 +29496,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       dkim = true; error(await post(addresses, { address, publicAddress:'billing@example.com' }),422,'PUBLIC_ADDRESS_MISMATCH');
       const box = ok(await post(addresses, { address, publicAddress }), 201); assert.equal(box.publicAddress, publicAddress);
       const inbox = `${base}/messages?addressId=${box.id}`;
-      const agent = { authorization: `Bearer ${ok(await post(`${base}/keys`, { name: 'support agent', addressIds: [box.id], permissions: ['read','send'] }), 201).secret}` };
-      const reader = { authorization: `Bearer ${ok(await post(`${base}/keys`, { name: 'all mailbox reader', permissions: ['read'] }), 201).secret}` };
+      const agent = { authorization: `Bearer ${ok(await post('/v1/api-keys', { name: 'support agent', access: { type: 'addresses', addressIds: [box.id], mail: ['read','send'] } }), 201).secret}` };
+      const reader = { authorization: `Bearer ${ok(await post('/v1/api-keys', { name: 'all mailbox reader', access: { type: 'addresses', mail: ['read'] } }), 201).secret}` };
       const callbackAuth = 'Bearer ' + unique('inbound-callback'), updatedAuth = 'Bearer ' + unique('retry-callback');
       const allHook = ok(await post(`${base}/webhooks`, { url: 'https://example.com/all', eventTypes: ['message.stored'], headers: [{ name: 'Authorization', value: callbackAuth }] }), 201);
       const boxHook = ok(await post(`${base}/webhooks`, { url: 'https://example.com/support', addressIds: [box.id], eventTypes: ['message.received'] }), 201);
@@ -33673,15 +33558,14 @@ test('Audit trail: sensitive actions each write one redacted row', async t => {
     await audited(reveal, 'webhook.secret_reveal', ['webhook', hook.body.id]);
     await audited(await call('DELETE', `/v1/webhooks/${hook.body.id}`), 'webhook.delete', ['webhook', hook.body.id]);
 
-    // Inbound keys; a failed revoke writes nothing.
-    const key = await call('POST', '/v1/inbound/keys', { name: 'Audit agent', permissions: ['read'] }, 201);
+    // A key limited to addresses is recorded as an API key, with what it may do; a repeated revoke writes nothing.
+    const key = await call('POST', '/v1/api-keys', { name: 'Audit agent', access: { type: 'addresses', mail: ['read'] } }, 201);
     secrets.push(key.body.secret);
-    // An inbound key is an API key limited to addresses: recorded as one, with what it may do.
     const access = { type: 'addresses', mail: ['read'] }; // Audit summaries drop nulls: no addressIds is every address.
     assert.deepEqual((await audited(key, 'api_key.create', ['api_key', key.body.id])).summary.after, { name: 'Audit agent', access });
-    assert.deepEqual((await audited(await call('POST', `/v1/inbound/keys/${key.body.id}/revoke`), 'api_key.revoke', ['api_key', key.body.id])).summary.before, { name: 'Audit agent', access });
-    const missing = await local('POST', `/v1/inbound/keys/${key.body.id}/revoke`, undefined, 'live');
-    error(missing, 404); assert.deepEqual(await rows(missing), []);
+    assert.deepEqual((await audited(await call('POST', `/v1/api-keys/${key.body.id}/revoke`), 'api_key.revoke', ['api_key', key.body.id])).summary.before, { name: 'Audit agent', access });
+    const again = await local('POST', `/v1/api-keys/${key.body.id}/revoke`, undefined, 'live');
+    ok(again); assert.deepEqual(await rows(again), []);
 
     // A persistent inbox and its app password, on a self-hosted receiving domain (hosted needs a proven claim; the audit path is the same).
     Object.assign(runtime.config, selfHosted);

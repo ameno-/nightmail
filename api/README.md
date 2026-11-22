@@ -502,7 +502,7 @@ Nightmail staff with the operator role leave design and bug notes on the dashboa
 
 ## Support integration
 
-Internal: these routes serve Nightmail's operators and its support platform, never customers. `/v1/operator/*` answers only an operator and `/v1/support/*` only a support conversation, through the support platform's binding; every customer credential (any dashboard role, API keys, MCP grants, agent tokens, inbox keys, app passwords) gets the same `403` with no data on every path there, real or not. Neither appears as an MCP tool, and `/v1/support/*` is marked `x-internal` in `/openapi.json` and left out of `/docs`, `/docs.md` and `/llms.txt`. It stays in the SDK for the support platform.
+Internal: these routes serve Nightmail's operators and its support platform, never customers. `/v1/operator/*` answers only an operator and `/v1/support/*` only a support conversation, through the support platform's binding; every customer credential (any dashboard role, API keys, MCP grants, agent tokens, inbox keys, app passwords) gets the same `403` with no data on every path there, real or not. Neither appears as an MCP tool, and both are hidden (`hide: true`): they are not in `/openapi.json`, the SDK, `/docs`, `/docs.md` or `/llms.txt`. The support platform calls `/v1/support/*` through its `SupportPlatform` service binding, never the SDK.
 
 **Configuration** (hosted only):
 

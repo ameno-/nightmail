@@ -70,7 +70,7 @@ const resources: Record<string, { label: string; actions: Record<string, string>
     list: 'listCampaigns', get: 'getCampaign', create: 'createCampaign', update: 'updateCampaign', delete: 'deleteCampaign', stats: 'getCampaignStats', contentGuide: 'getCampaignContentGuide', preview: 'previewCampaign', audience: 'previewCampaignAudience', previewImage: 'renderCampaignPreviewImage', state: 'getCampaignState', archive: 'setCampaignArchived', test: 'testCampaign', send: 'sendCampaign', schedule: 'scheduleCampaign', unschedule: 'unscheduleCampaign', reschedule: 'rescheduleCampaign', cancel: 'cancelCampaign', pause: 'pauseCampaign', resume: 'resumeCampaign', pacing: 'setCampaignPacing',
   } },
   keys: { label: 'Credentials', actions: {
-    list: 'listApiKeys', create: 'createApiKey', update: 'updateApiKey', changes: 'listApiKeyChanges', revoke: 'revokeApiKey', listTokens: 'listAgentTokens', createToken: 'createAgentToken', revokeToken: 'revokeAgentToken', listInbound: 'listInboundKeys', createInbound: 'createInboundKey', revokeInbound: 'revokeInboundKey',
+    list: 'listApiKeys', create: 'createApiKey', update: 'updateApiKey', changes: 'listApiKeyChanges', revoke: 'revokeApiKey', listTokens: 'listAgentTokens', createToken: 'createAgentToken', revokeToken: 'revokeAgentToken',
   } },
   send: { label: 'Transactional mail (confirm recipients, content and time; do not split shared outreach to bypass the 50-person limit)', actions: {
     single: 'sendEmail', batch: 'sendEmailBatch', cancel: 'cancelEmail', reschedule: 'rescheduleEmail', preview: 'previewEmail', check: 'checkEmail',
@@ -87,7 +87,7 @@ const resources: Record<string, { label: string; actions: Record<string, string>
     members: 'listWorkspaceMembers', invitations: 'listWorkspaceInvitations', invite: 'createWorkspaceInvitation', revokeInvitation: 'revokeWorkspaceInvitation', activity: 'listActivity',
   } },
   connections: { label: 'Connected agents (MCP sign-ins) and inbox connections', actions: {
-    list: 'listMcpConnections', revoke: 'revokeMcpConnection', bind: 'bindMcpConnection', createInbox: 'createInboxConnection', agents: 'listAgents', revokeAgent: 'revokeAgent',
+    bind: 'bindMcpConnection', createInbox: 'createInboxConnection', agents: 'listAgents', revokeAgent: 'revokeAgent',
   } },
   regions: { label: 'SES regions', actions: {
     list: 'listRegions', configure: 'configureRegion', discover: 'discoverRegion', provision: 'provisionRegion', autoValidation: 'configureRegionAutoValidation',
@@ -114,17 +114,6 @@ function actionSummary(id: string) {
 
 export function resourceActions(name: string): Readonly<Record<string, string>> | undefined {
   return Object.hasOwn(resources, name) ? resources[name].actions : undefined;
-}
-
-// Resources under their names before the rename, with their earlier actions: never listed, still callable (and
-// described), each action naming a hidden alias tool (mcp-catalog.ts mcpAliases), so a saved plain call keeps working.
-const earlierResources: Record<string, Record<string, string>> = {
-  rituals: {
-    get: 'getRitual', save: 'saveRitual', delete: 'deleteRitual', check: 'checkRitual', typings: 'getRitualTypings', templates: 'listRitualTemplates', recipes: 'listRitualRecipes', createFromRecipe: 'createRitualFromRecipe', updateFromRecipe: 'updateRitualFromRecipe', update: 'updateRitual', attach: 'attachRituals', config: 'getRituals', apply: 'applyRituals', test: 'testRituals', versions: 'listRitualVersions', restore: 'restoreRitualVersion', omens: 'setOmenOptIns',
-  },
-};
-export function earlierResourceActions(name: string): Readonly<Record<string, string>> | undefined {
-  return Object.hasOwn(earlierResources, name) ? earlierResources[name] : undefined;
 }
 
 // Optional pagination is uniform across resources; list it once at the tool level.

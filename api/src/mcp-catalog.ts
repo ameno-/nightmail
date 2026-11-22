@@ -3,7 +3,6 @@ import type { Tool } from '@modelcontextprotocol/server';
 import { agentTokenMintRoute, keyAdminRoute, lastingRoute, mailboxRoute, memberAdminRoute, ownerRoute, receivingAdminRoute, receivingConsentRoute, unrestrictedRoute, type App } from './core.js';
 import { resourceInventory } from './mcp-resources.js';
 import { productName } from './brand.js';
-import { ruleAliases } from './rule-names.js';
 import { permissionOf } from './operation-permissions.js';
 
 type ObjectValue = Record<string, any>;
@@ -69,9 +68,9 @@ const INVITATIONS: Record<string, { output: Tool['inputSchema']; view?: (respons
 // never agent calls (an agent may create a top-up link that a person opens and pays: createBillingTopUpLink).
 export const DASHBOARD_MONEY = ['createBillingTopUp', 'updateBillingAutoRecharge', 'createBillingCardSetup', 'deleteBillingPaymentMethod'] as const;
 // getRuleVersion is the dashboard's long poll for an agent's saves; an agent reads the version from getRules.
-const EXCLUDED = new Set<string>(['receiveSesSnsEvent', 'receiveCloudFormationSnsEvent', 'revealWebhookSecret', 'downloadInboundAttachment', 'getRuleVersion', 'getRitualVersion', ...DASHBOARD_MONEY]);
+const EXCLUDED = new Set<string>(['receiveSesSnsEvent', 'receiveCloudFormationSnsEvent', 'revealWebhookSecret', 'downloadInboundAttachment', 'getRuleVersion', ...DASHBOARD_MONEY]);
 // POST operations that change nothing: no confirm argument, read-only hint, read permission.
-const READ_ONLY_POSTS = new Set(['testRouting', 'testRules', 'checkRule', 'testRituals', 'checkRitual', 'queryAudience', 'previewSegment', 'previewEmail', 'checkEmail']);
+const READ_ONLY_POSTS = new Set(['testRouting', 'testRules', 'checkRule', 'queryAudience', 'previewSegment', 'previewEmail', 'checkEmail']);
 // Writes whose calls need no confirm argument. Access to every operation is decided by its
 // REST permission below, never by the HTTP method; confirm=true marks only state changes.
 const NO_CONFIRM = new Set(['planAudienceMutation']);
@@ -88,7 +87,7 @@ const READ_LEVEL_WRITES = new Set(['createAgentToken']);
 const MANAGE_LEVEL_READS = new Set(['listApiKeys', 'listApiKeyChanges', 'listAgentTokens', 'listAppPasswords', 'listBillingLedger', 'listBillingPayments', 'getBillingPayment', 'listActivity']);
 // No permission check in REST: GET /v1/me reads c.get('actor'), so a send-only grant may call it.
 const ANY_AUTHENTICATED = new Set(['getCurrentIdentity']);
-const DASHBOARD_ONLY = new Set(['listMcpConnections', 'revokeMcpConnection', 'bindMcpConnection', 'listAgents', 'revokeAgent']);
+const DASHBOARD_ONLY = new Set(['bindMcpConnection', 'listAgents', 'revokeAgent']);
 const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
 function invalid(message: string): never { throw new Error(`Invalid MCP catalog: ${message}`); }
 function object(value: unknown): value is ObjectValue { return value !== null && typeof value === 'object' && !Array.isArray(value); }
@@ -224,10 +223,10 @@ const TAG_TOOLSET: Record<string, Toolset> = {
   'Agent inboxes': 'inboxes', 'Inbound addresses': 'inboxes', 'Inbound threads': 'inboxes', 'Inbound events': 'inboxes',
   Routing: 'routing', Rules: 'rules', Endpoints: 'endpoints', 'Inbound webhooks': 'endpoints',
   Emails: 'sending', Campaigns: 'sending', Newsletters: 'sending', Templates: 'sending', Audience: 'sending', Consent: 'sending', Attachments: 'admin', Metrics: 'sending',
-  Auth: 'admin', ApiKeys: 'admin', Settings: 'admin', Workspaces: 'admin', Billing: 'admin', Domains: 'admin', Regions: 'admin', Webhooks: 'admin', 'Inbound domains': 'admin', 'Inbound keys': 'admin',
+  Auth: 'admin', ApiKeys: 'admin', Settings: 'admin', Workspaces: 'admin', Billing: 'admin', Domains: 'admin', Regions: 'admin', Webhooks: 'admin', 'Inbound domains': 'admin',
 };
 // listEmailEvents and the webhook delivery log: a bounce's or a delay's diagnosticCode is the receiving server's text.
-const UNTRUSTED_READS = new Set(['listEmailEvents', 'listWebhookDeliveries', 'getWebhookDelivery', 'listEmails', 'getEmail', 'getEmailDetail', 'getEmailContent', 'previewEmail', 'listLogs', 'testRouting', 'testRules', 'testRituals', 'getInboxMessage', 'listInboxMessages', 'getInboxAttachment', 'getInboundMessage', 'listInboundMessages', 'getInboundThread', 'listInboundThreads', 'getInboundAttachment', 'listInboundEvents']);
+const UNTRUSTED_READS = new Set(['listEmailEvents', 'listWebhookDeliveries', 'getWebhookDelivery', 'listEmails', 'getEmail', 'getEmailDetail', 'getEmailContent', 'previewEmail', 'listLogs', 'testRouting', 'testRules', 'getInboxMessage', 'listInboxMessages', 'getInboxAttachment', 'getInboundMessage', 'listInboundMessages', 'getInboundThread', 'listInboundThreads', 'getInboundAttachment', 'listInboundEvents']);
 const INBOX_PERMISSIONS: Record<string, McpOperation['inbox']> = {
   createInboxFolder:'modify',updateInboxFolder:'modify',deleteInboxFolder:'modify',
   listInboxFolders:'read',getInboxChanges:'read',moveInboxMessage:'modify',copyInboxMessage:'modify',deleteInboxMessage:'modify',expungeInboxFolder:'modify',
@@ -277,27 +276,6 @@ const DESCRIPTIONS: Record<string, string> = {
   createWebhook: 'Subscribe a public HTTPS URL to sending events. Set up over MCP it delivers only while this approval is active and is paused when the approval is removed (approval.endsAt); a lasting webhook is made in the dashboard.',
   createInboundWebhook: 'Subscribe a public HTTPS URL to inbound mail events, signed with Standard Webhooks headers. Set up over MCP it delivers only while this approval is active and is paused when the approval is removed (approval.endsAt); a lasting webhook is made in the dashboard.',
 };
-/** The rule tools under their names before the rename, as they were published: never listed, still callable with the
- *  same description (rule-names.ts), so a client's cached tool list or saved call keeps working. */
-const EARLIER_DESCRIPTIONS: Record<string, string> = {
-  getRituals: 'Read the saved rituals (sources), ordered attachments to inboxes and addresses, sender lists and omen opt-ins. Pass version for an earlier snapshot.',
-  applyRituals: 'Replace the whole ritual config in one version: sources, attachments, sender lists and omen opt-ins. Every problem comes back at once in error.details with ritual, line, column and hint. Dry-run first with testRituals.',
-  attachRituals: 'Replace the ordered list of ritual attachments. Each runs on mail to its target (inbox ID or address); the first ritual that acts stops the chain unless continue is true.',
-  testRituals: 'Dry-run saved or proposed rituals against a stored message (messageId) or pasted MIME. Returns the trace (lines, scores, actions and a step-by-step timeline of each condition and its result) and the resulting deliveries. Never delivers, never calls Jev, never saves.',
-  getRitual: 'Read one reusable script.',
-  saveRitual: 'Create or replace one ritual source by key. Check it first with checkRitual. Attach it with attachRituals.',
-  deleteRitual: 'Remove a script and detach it everywhere.',
-  updateRitual: 'Turn a ritual off (it keeps its addresses and stops running) or on again.',
-  checkRitual: 'Compile one ritual source against this workspace without saving. Returns every problem with line, column and a hint, plus the endpoints, omens and lists it uses.',
-  getRitualTypings: 'TypeScript declarations for rituals, generated from this workspace’s endpoints, inbox keys and sender lists. Read it to learn exactly what a ritual can call.',
-  listRitualTemplates: 'Nine working starting points (Slack, Discord, JSON webhook, forward, newsletters, refund omen, block a domain, VIP allow-list, failed DMARC), filled in with this workspace’s endpoints.',
-  listRitualRecipes: 'Ready-made rituals (Post to Slack, Forward, Send to your app, Junk newsletters, Block senders, Always let VIPs in, Junk failed DMARC, Label or Alert by meaning) and the one or two fields each takes. Prefer a recipe over writing a script when one fits.',
-  createRitualFromRecipe: 'Create a ritual from a recipe and attach it to addresses. Endpoint fields name an existing endpoint of the right type (createEndpoint first). An AI recipe lets the AI read mail at those addresses’ domains; AI rules are free. The ritual shows in the dashboard as its sentence and reopens in the recipe form.',
-  updateRitualFromRecipe: 'Change a recipe ritual’s fields or the addresses it runs on; passing recipe rewrites a script from that recipe.',
-  listRitualVersions: 'List saved ritual versions, newest first.',
-  restoreRitualVersion: 'Recompile a retained version and restore it as a new version.',
-  setOmenOptIns: 'Set the domains and routes that may send inbound evidence to Jev.',
-};
 const PATH_IDS: Record<string, string> = {
   'mcp-connections': 'connectionId', agents: 'agentId', 'agent-tokens': 'tokenId', 'api-keys': 'keyId', keys: 'keyId',
   contacts: 'contactId', lists: 'listId', newsletters: 'newsletterId', segments: 'segmentId', 'contact-imports': 'importId', templates: 'templateId', 'template-assets': 'assetId',
@@ -339,17 +317,11 @@ function successSchemas(spec: ObjectValue, operation: ObjectValue, pollPage: boo
     validateOutput: (status: number, value: unknown) => validators.get(status)?.(value) === true };
 }
 
-// Each catalog's hidden aliases: the rule operations' deprecated /v1/rituals aliases as tools under their earlier names.
-const aliasesOf = new WeakMap<ReadonlyMap<string, McpOperation>, ReadonlyMap<string, McpOperation>>();
-/** The tools a catalog never lists but still answers: each calls its deprecated HTTP operation, so it answers in that
- *  operation's earlier shapes and codes, and is authorized for each credential as the listed tools are. */
-export const mcpAliases = (catalog: ReadonlyMap<string, McpOperation>): ReadonlyMap<string, McpOperation> => aliasesOf.get(catalog) ?? new Map();
-
 export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
   const spec = app.getOpenAPI31Document({ openapi: '3.1.0', info: { title: `${productName} API`, version: '0.1.0' } });
   if (bytes(spec) > 2 * 1024 * 1024 || !object(spec.paths)) invalid('OpenAPI document exceeds its byte limit or has no paths.');
   inspectSpec(spec);
-  const operations = new Map<string, McpOperation>(), hidden = new Map<string, McpOperation>();
+  const operations = new Map<string, McpOperation>();
   for (const [path, item] of Object.entries(spec.paths)) {
     if (!/^\/v1\/(?:[A-Za-z0-9_-]+|\{[A-Za-z][A-Za-z0-9_-]*\})(?:\/(?:[A-Za-z0-9_-]+|\{[A-Za-z][A-Za-z0-9_-]*\}))*$/.test(path)) continue;
     // Support and operator routes are internal (Nightmail staff and support grants only): never an MCP tool.
@@ -359,10 +331,8 @@ export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
       const name = operation.operationId;
       if (typeof name !== 'string' || !/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(name)) invalid('Invalid OpenAPI operationId.');
       if (EXCLUDED.has(name)) continue;
-      // The deprecated /v1/rituals operations are hidden tools: never listed, still callable (rule-names.ts, mcpAliases).
-      const alias = ruleAliases.has(name);
       if (!operation.security?.some((entry: unknown) => object(entry) && Array.isArray(entry.bearerAuth)) && !memberAdminRoute(method, path)) continue;
-      if (operations.has(name) || hidden.has(name) || operations.size >= 256) invalid('Duplicate operationId or too many tools.');
+      if (operations.has(name) || operations.size >= 256) invalid('Duplicate operationId or too many tools.');
       const write = method !== 'get' && !READ_ONLY_POSTS.has(name);
       const confirm = write && !NO_CONFIRM.has(name);
       const input = inputSchema(spec, item as ObjectValue, operation, confirm);
@@ -399,13 +369,13 @@ export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
       if (invitations) { const check = validator(invitations.output); outputSchema = invitations.output; validateOutput = (status, value) => status === 200 && check(value); }
       const tag = operation.tags?.[0], toolset = TAG_TOOLSET[tag] ?? invalid(`Unknown toolset for ${name}`);
       const receiving = ['routing', 'rules', 'endpoints'].includes(toolset) || (toolset === 'admin' && tag.startsWith('Inbound ')) || tag === 'Inbound addresses' || name === 'createInboxConnection';
-      const tool: Tool = { name, description: alias && EARLIER_DESCRIPTIONS[name] || descriptionFor(name, operation), inputSchema: input, outputSchema, annotations: { readOnlyHint: !write, destructiveHint: write && (method === 'delete' || /^(?:delete|remove|revoke|cancel|disable|rotate|restore|apply|release)/.test(name)), idempotentHint: !write || method === 'put', openWorldHint: true } };
+      const tool: Tool = { name, description: descriptionFor(name, operation), inputSchema: input, outputSchema, annotations: { readOnlyHint: !write, destructiveHint: write && (method === 'delete' || /^(?:delete|remove|revoke|cancel|disable|rotate|restore|apply|release)/.test(name)), idempotentHint: !write || method === 'put', openWorldHint: true } };
       freeze(tool);
       // The path guards are REST's own predicates (core.ts). On a mailbox path mailboxAuth, not a permission, decides.
       const mailbox = mailboxRoute(path);
       const permission = ANY_AUTHENTICATED.has(name) || mailbox ? 'any' : MANAGE_LEVEL_READS.has(name) ? 'manage' : SEND_LEVEL.has(name) ? 'send' : READ_LEVEL_WRITES.has(name) ? 'read' : write ? 'manage' : 'read';
       const ownerOnly = receiving || ownerRoute(method, path);
-      (alias ? hidden : operations).set(name, Object.freeze({ tool, method, path, queryParameters, write, confirm, apiArgs, pollPage, toolset, receiving, inbound: receiving || toolset === 'inboxes', inbox: INBOX_PERMISSIONS[name], untrustedContent: UNTRUSTED_READS.has(name), permission, ownerOnly, mailbox,
+      operations.set(name, Object.freeze({ tool, method, path, queryParameters, write, confirm, apiArgs, pollPage, toolset, receiving, inbound: receiving || toolset === 'inboxes', inbox: INBOX_PERMISSIONS[name], untrustedContent: UNTRUSTED_READS.has(name), permission, ownerOnly, mailbox,
         receivingConsent: receivingConsentRoute(path), unrestricted: unrestrictedRoute(path), keyAdmin: keyAdminRoute(method, path), agentTokenMint: agentTokenMintRoute(method, path),
         receivingAdmin: receivingAdminRoute(path), lasting: lastingRoute(method, path), dashboardOnly: DASHBOARD_ONLY.has(name), memberAdmin: memberAdminRoute(method, path), view: invitations?.view, requires: permissionOf(name), validate: validator(input), validateOutput }));
     }
@@ -418,7 +388,6 @@ export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
   freeze(tool);
   operations.set(tool.name, Object.freeze({ ...list, tool, validate: validator(input), apiArgs: (args: ObjectValue) => list.apiArgs({ ...args, extract: args.extract ?? 'codes,links', wait: 25, limit: 1 }) }));
   if (bytes([...operations.values()].map(o => o.tool)) > 4 * 1024 * 1024) invalid('Tool catalog exceeds its byte limit.');
-  aliasesOf.set(operations, hidden);
   return operations;
 }
 
@@ -447,7 +416,7 @@ export const HUMAN_STEPS: Record<string, string> = {
 export const INTERNAL_PATH = /^\/v1\/(?:support|operator)(?:\/|$)/;
 /** Account administration that the API keeps to signed-in people (members, invitations, workspaces, BYO AWS). Owners
  *  and admins also list members and invitations, invite and revoke over their own MCP sign-in (memberAdminRoute). */
-export const ACCOUNT_STEPS = /^(?:listWorkspaces|createWorkspace|renameCurrentWorkspace|updateWorkspaceMember|removeWorkspaceMember|getWorkspaceInvitation|acceptWorkspaceInvitation|getConnection|createConnection|deleteConnection|listConnectionRegions|refreshConnectionScan|importConnectionDomains|requestConnectionProductionAccess|updateConnectionStack|getConnectionRegionStatus|verifyConnection)$/;
+export const ACCOUNT_STEPS = /^(?:createWorkspace|renameCurrentWorkspace|updateWorkspaceMember|removeWorkspaceMember|getWorkspaceInvitation|acceptWorkspaceInvitation|getConnection|createConnection|deleteConnection|listConnectionRegions|refreshConnectionScan|importConnectionDomains|requestConnectionProductionAccess|updateConnectionStack|getConnectionRegionStatus|verifyConnection)$/;
 /** docs/mcp-coverage.md, generated from the catalog so the document cannot drift from the code. */
 export function coverageMarkdown(catalog: ReadonlyMap<string, McpOperation>, spec: ObjectValue): string {
   const byOperation = new Map<string, string>();
@@ -459,8 +428,7 @@ export function coverageMarkdown(catalog: ReadonlyMap<string, McpOperation>, spe
   for (const [path, item] of Object.entries(spec.paths ?? {}) as [string, ObjectValue][]) for (const operation of INTERNAL_PATH.test(path) ? [] : Object.values(item)) {
     const id = (operation as ObjectValue)?.operationId;
     if (typeof id !== 'string') continue;
-    const alias = ruleAliases.get(id);
-    rows.push(`| \`${id}\` | ${byOperation.get(id) ?? HUMAN_STEPS[id] ?? (alias ? `Deprecated alias of \`${alias}\`, its name before the rename${EXCLUDED.has(id) ? '' : ': still callable, not listed'}.` : undefined) ?? (ACCOUNT_STEPS.test(id) ? 'Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS).' : 'UNCOVERED')} |`);
+    rows.push(`| \`${id}\` | ${byOperation.get(id) ?? HUMAN_STEPS[id] ?? (ACCOUNT_STEPS.test(id) ? 'Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS).' : 'UNCOVERED')} |`);
   }
   return `# Hosted MCP coverage
 

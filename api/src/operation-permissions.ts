@@ -52,7 +52,7 @@ const people = (person: 'any' | 'admin' | 'owner', credential?: 'dashboard' | 's
 // People only, and also over their own MCP sign-in approved for this level.
 const signedIn = (person: 'any' | 'admin' | 'owner', level: 'read' | 'write', more: Pick<OperationPermission, 'credential' | 'withinCaller'> = {}): OperationPermission => ({ person, level, ...more });
 const admin = { person: 'admin' } as const, adminLasting = { person: 'admin', credential: 'lasting' } as const;
-const PUBLIC: OperationPermission = { access: 'public' }, STAFF: OperationPermission = { access: 'staff' };
+const PUBLIC: OperationPermission = { access: 'public' };
 // Repeated rows: key administration, and receiving configuration (routing, rules, endpoints, inbox connections).
 const keyAdmin = needs('configuration', 'write', 'workspace', adminLasting);
 const rulesRead = needs('receivingRules', 'read', 'workspace', admin), rulesChange = needs('receivingRules', 'write', 'workspace', adminLasting);
@@ -62,7 +62,7 @@ const mailRead = needs('receivedMail', 'read', 'address'), mailChange = needs('r
 
 export const OPERATION_PERMISSIONS: Record<string, OperationPermission> = {
   // MCP connections and agents: the person's own, in the dashboard.
-  listMcpConnections: people('any', 'dashboard'), bindMcpConnection: people('any', 'dashboard'), revokeMcpConnection: people('any', 'dashboard'),
+  bindMcpConnection: people('any', 'dashboard'),
   listAgents: people('any', 'dashboard'), revokeAgent: people('any', 'dashboard'),
   getCurrentIdentity: { access: 'any' },
   createAgentToken: signedIn('admin', 'read', { credential: 'signIn', withinCaller: true }), listAgentTokens: keyAdmin, revokeAgentToken: keyAdmin,
@@ -119,16 +119,15 @@ export const OPERATION_PERMISSIONS: Record<string, OperationPermission> = {
   getMetrics: needs('sentMail', 'read', 'workspace'), getSenderScore: needs('sentMail', 'read', 'workspace'), releaseSenderStanding: people('admin', 'dashboard'), getUsage: needs('sentMail', 'read', 'workspace'),
   listRegions: needs('configuration', 'read', 'workspace'), configureRegion: needs('configuration', 'write', 'workspace', admin), discoverRegion: needs('configuration', 'read', 'workspace', admin),
   provisionRegion: needs('configuration', 'write', 'workspace', admin), configureRegionAutoValidation: needs('configuration', 'write', 'workspace', admin),
-  // Routing, rules (and their /v1/rituals aliases), endpoints and inbox connections.
+  // Routing, rules, endpoints and inbox connections.
   getRouting: rulesRead, applyRouting: rulesChange, listRoutes: rulesRead, createRoute: rulesChange, getRoute: rulesRead, updateRoute: rulesChange, deleteRoute: rulesChange,
   getRoutingAudit: rulesRead, listRoutingVersions: rulesRead, getRoutingVersion: rulesRead, restoreRoutingVersion: rulesChange, testRouting: rulesRead,
-  listRuleVersions: rulesRead, listRitualVersions: rulesRead, restoreRuleVersion: rulesChange, restoreRitualVersion: rulesChange, setDecisionOptIns: rulesChange, setOmenOptIns: rulesChange,
+  listRuleVersions: rulesRead, restoreRuleVersion: rulesChange, setDecisionOptIns: rulesChange,
   listEndpoints: rulesRead, createEndpoint: rulesChange, getEndpoint: rulesRead, updateEndpoint: rulesChange, deleteEndpoint: rulesChange, sendEndpointVerification: rulesChange, testEndpoint: rulesChange,
-  createInboxConnection: rulesChange, getRuleVersion: rulesRead, getRitualVersion: rulesRead, checkRule: rulesRead, checkRitual: rulesRead, getRuleTypings: rulesRead, getRitualTypings: rulesRead,
-  listRuleTemplates: rulesRead, listRitualTemplates: rulesRead, listRuleRecipes: rulesRead, createRuleFromRecipe: rulesChange, listRitualRecipes: rulesRead, createRitualFromRecipe: rulesChange,
-  updateRuleFromRecipe: rulesChange, updateRitualFromRecipe: rulesChange, updateRule: rulesChange, getRule: rulesRead, saveRule: rulesChange, deleteRule: rulesChange,
-  updateRitual: rulesChange, getRitual: rulesRead, saveRitual: rulesChange, deleteRitual: rulesChange, attachRules: rulesChange, attachRituals: rulesChange,
-  getRules: rulesRead, applyRules: rulesChange, getRituals: rulesRead, applyRituals: rulesChange, testRules: rulesRead, testRituals: rulesRead,
+  createInboxConnection: rulesChange, getRuleVersion: rulesRead, checkRule: rulesRead, getRuleTypings: rulesRead,
+  listRuleTemplates: rulesRead, listRuleRecipes: rulesRead, createRuleFromRecipe: rulesChange,
+  updateRuleFromRecipe: rulesChange, updateRule: rulesChange, getRule: rulesRead, saveRule: rulesChange, deleteRule: rulesChange,
+  attachRules: rulesChange, getRules: rulesRead, applyRules: rulesChange, testRules: rulesRead,
   // Agent inboxes: their mail and folders, mail client passwords, and the inboxes themselves.
   listInboxFolders: mailRead, createInboxFolder: mailChange, updateInboxFolder: mailChange, deleteInboxFolder: mailChange,
   updateInboxMessage: mailChange, deleteInboxMessage: mailChange, getInboxMessage: mailRead, moveInboxMessage: mailChange, copyInboxMessage: mailChange, expungeInboxFolder: mailChange,
@@ -149,27 +148,20 @@ export const OPERATION_PERMISSIONS: Record<string, OperationPermission> = {
   listInboundMessages: mailRead, getInboundMessage: mailRead, getInboundAttachment: mailRead, downloadInboundAttachment: mailRead,
   listLogs: needs('sentMail', 'read', 'domain'), getInboundOverview: needs('inboxes', 'read', 'address'), listInboundEndpoints: hostsRead,
   replyToInboundThread: needs('sendEmail', 'on', 'address'), listInboundEvents: mailRead,
-  // Inbound keys (deprecated aliases of address keys) and inbound webhooks.
-  createInboundKey: keyAdmin, listInboundKeys: keyAdmin, revokeInboundKey: keyAdmin,
+  // Inbound webhooks.
   createInboundWebhook: needs('configuration', 'write', 'workspace', adminLasting), listInboundWebhooks: needs('configuration', 'read', 'workspace', { person: 'admin', delegatedLevel: 'write' }),
   getInboundWebhook: needs('configuration', 'read', 'workspace', { person: 'admin', delegatedLevel: 'write' }), updateInboundWebhook: needs('configuration', 'write', 'workspace', adminLasting),
   deleteInboundWebhook: needs('configuration', 'write', 'workspace', adminLasting), testInboundWebhook: needs('configuration', 'write', 'workspace', admin),
   redeliverInboundMessage: needs('configuration', 'write', 'workspace', admin), rotateInboundWebhookSecret: needs('configuration', 'write', 'workspace', adminLasting),
   retryInboundWebhookDelivery: needs('configuration', 'write', 'workspace', admin), listInboundWebhookDeliveries: needs('configuration', 'write', 'workspace', admin),
   // Workspaces, members, invitations and bring-your-own AWS: a person's.
-  listWorkspaces: people('any', 'dashboard'), createWorkspace: people('any', 'dashboard'), renameCurrentWorkspace: people('admin', 'dashboard'),
+  createWorkspace: people('any', 'dashboard'), renameCurrentWorkspace: people('admin', 'dashboard'),
   listWorkspaceMembers: signedIn('admin', 'read'), inviteWorkspaceMember: signedIn('admin', 'write'), createWorkspaceInvitation: signedIn('admin', 'write'), listWorkspaceInvitations: signedIn('admin', 'read'),
   revokeWorkspaceInvitation: signedIn('admin', 'write'), updateWorkspaceMember: people('admin', 'dashboard'), removeWorkspaceMember: people('admin', 'dashboard'),
   getWorkspaceInvitation: people('any', 'dashboard'), acceptWorkspaceInvitation: people('any', 'dashboard'),
   getConnection: people('admin', 'dashboard'), createConnection: people('admin', 'dashboard'), deleteConnection: people('admin', 'dashboard'), listConnectionRegions: people('admin', 'dashboard'),
   refreshConnectionScan: people('admin', 'dashboard'), importConnectionDomains: people('admin', 'dashboard'), requestConnectionProductionAccess: people('admin', 'dashboard'), updateConnectionStack: people('admin', 'dashboard'), getConnectionRegionStatus: people('admin', 'dashboard'), verifyConnection: people('admin', 'dashboard'),
   getPublicStats: PUBLIC, getOverviewSetup: needs('sentMail', 'read', 'domain'), listActivity: signedIn('admin', 'write'), contactSupport: people('any', 'dashboard'),
-  // Support and operator tooling (internal).
-  getSupportContext: STAFF, listSupportWorkspaces: STAFF, listSupportDomains: STAFF, listSupportEmails: STAFF, getSupportEmail: STAFF, listSupportEvents: STAFF,
-  listSupportWebhookDeliveries: STAFF, getSupportStanding: STAFF, getSupportBilling: STAFF, listSupportAudit: STAFF, listSupportRequests: STAFF, getSupportRequest: STAFF,
-  getSupportDeliveryMetrics: STAFF, getSupportBounceReasons: STAFF, getSupportDomainHealth: STAFF, getSupportScreen: STAFF, listSupportCampaigns: STAFF, getSupportCampaign: STAFF,
-  getSupportEmailLint: STAFF, getSupportCampaignLint: STAFF, getSupportAudienceHealth: STAFF, getSupportScope: STAFF, updateSupportScope: STAFF, listSupportNotes: STAFF, createSupportNote: STAFF,
-  proposeSupportAction: STAFF, getSupportAction: STAFF, recheckSupportDomain: STAFF,
   // Billing: balance and usage read like settings; charges, the card and auto-recharge are an owner's or admin's in the dashboard.
   getBilling: needs('configuration', 'read', 'workspace'), getBillingUsage: needs('configuration', 'read', 'workspace'),
   listBillingLedger: needs('configuration', 'write', 'workspace', admin), listBillingPayments: needs('configuration', 'write', 'workspace', admin), getBillingPayment: needs('configuration', 'write', 'workspace', admin),

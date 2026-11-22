@@ -20,10 +20,10 @@ const hostChange = 'Would add, change or remove a receiving host of the shared f
 const byoV2 = 'Regional BYO setup requires a dashboard owner and a customer AWS account, not the Hosted fixture.';
 // Deliberately enumerate IDs (not paths, tags or prefixes): a new endpoint must never auto-skip.
 const safeModeSkips: Partial<Record<Op, string>> = {
-  listMcpConnections: dashboard, revokeMcpConnection: dashboard, bindMcpConnection: dashboard, listAgents: dashboard, revokeAgent: dashboard,
+  bindMcpConnection: dashboard, listAgents: dashboard, revokeAgent: dashboard,
   createAgentToken: 'Only an MCP OAuth principal can mint an agent token.',
   revokeAgentToken: 'Manage keys can revoke, but cannot mint a run-owned OAuth agent token to revoke.',
-  listWorkspaces: dashboard, createWorkspace: dashboard, renameCurrentWorkspace: shared, listWorkspaceMembers: dashboard,
+  createWorkspace: dashboard, renameCurrentWorkspace: shared, listWorkspaceMembers: dashboard,
   inviteWorkspaceMember: dashboard, createWorkspaceInvitation: dashboard, listWorkspaceInvitations: dashboard,
   revokeWorkspaceInvitation: dashboard, updateWorkspaceMember: dashboard, removeWorkspaceMember: dashboard,
   acceptWorkspaceInvitation: dashboard,
@@ -58,22 +58,13 @@ const SKIP: Partial<Record<Op,string>> = destructive ? {
   receiveCloudFormationSnsEvent: 'AWS-signed ingress from connected accounts\' stacks only; never forge SNS.',
 } : safeModeSkips;
 SKIP.updateInboundScanPolicy='Changes a shared workspace-wide quarantine policy; covered by isolated acceptance.';
-// The audit trail's customer view and the support integration: a Google dashboard session, or a support grant minted by
-// an operator. The isolated acceptance suite covers them, including the 403 every customer credential gets.
-const supportInternal = 'Internal: needs a support grant minted by an operator; covered by isolated acceptance.';
+// The audit trail's customer view and contacting support: a Google dashboard session. The isolated acceptance suite
+// covers them, including the 403 every customer credential gets.
 Object.assign(SKIP, {
   listActivity: 'Google dashboard owners and admins only; covered by isolated acceptance.',
   contactSupport: 'Google dashboard only; creates a support handoff; covered by isolated acceptance.',
-  getSupportContext: supportInternal, listSupportWorkspaces: supportInternal, listSupportDomains: supportInternal, listSupportEmails: supportInternal, getSupportEmail: supportInternal,
-  listSupportEvents: supportInternal, listSupportWebhookDeliveries: supportInternal, getSupportStanding: supportInternal, getSupportBilling: supportInternal, listSupportAudit: supportInternal,
-  getSupportRequest: supportInternal, listSupportRequests: supportInternal, getSupportDeliveryMetrics: supportInternal, getSupportBounceReasons: supportInternal, getSupportDomainHealth: supportInternal, getSupportScreen: supportInternal,
-  listSupportCampaigns: supportInternal, getSupportCampaign: supportInternal, getSupportEmailLint: supportInternal, getSupportCampaignLint: supportInternal, getSupportAudienceHealth: supportInternal,
-  getSupportScope: 'Internal: needs a support conversation the support platform registered through its service binding; covered by isolated acceptance.', updateSupportScope: 'Internal: needs a support conversation the support platform registered through its service binding; covered by isolated acceptance.',
-  listSupportNotes: 'Internal: needs a support conversation the support platform registered through its service binding; covered by isolated acceptance.', createSupportNote: 'Internal: needs a support conversation the support platform registered through its service binding; covered by isolated acceptance.',
 });
 SKIP.retryInboundWebhookDelivery='Requires an exhausted run-owned inbound delivery; retries and leases are exercised offline.';
-// Support actions need a support conversation the support platform registered through its service binding.
-Object.assign(SKIP, Object.fromEntries(['proposeSupportAction', 'getSupportAction', 'recheckSupportDomain'].map(op => [op, 'Internal: needs a support conversation the support platform registered through its service binding; covered by isolated acceptance.'])));
 // The receiving MVP (routing, rules, endpoints, agent inboxes) is exercised end to end by the isolated acceptance
 // suite. Live steps need a run-owned receiving host and the R2 mail store on dev; until then each operation is
 // listed here by ID so the report shows it as skipped, never silently covered.
@@ -88,9 +79,6 @@ Object.assign(SKIP, {
   getBillingPayment: 'Needs a run-owned payment; the E2E workspace never pays. Covered by isolated acceptance.',
 });
 const receivingMvp = 'Receiving MVP: covered by isolated acceptance; live steps follow the dev R2 mail-store rollout.';
-// The rule operations' deprecated /v1/rituals aliases (src/rule-names.ts): the same handlers, covered by isolated acceptance.
-const ruleAlias = 'Deprecated alias of a rule operation (src/rule-names.ts); the same handler, covered by isolated acceptance.';
-Object.assign(SKIP, Object.fromEntries(['getRituals','applyRituals','attachRituals','testRituals','getRitual','saveRitual','deleteRitual','updateRitual','checkRitual','getRitualTypings','listRitualTemplates','listRitualRecipes','createRitualFromRecipe','updateRitualFromRecipe','listRitualVersions','restoreRitualVersion','getRitualVersion','setOmenOptIns'].map(op => [op, ruleAlias])));
 Object.assign(SKIP, {
   getRouting: receivingMvp,
   applyRouting: receivingMvp,
@@ -319,7 +307,7 @@ async function devBoundaries() {
     await step(`${op}: rejects unauthorized or invalid input`,()=>expectDenial(()=>api(op,{...input,client:apiKeyClient}),status,code));
   }
   // Intentionally sequential: don't issue a burst of requests against dashboard endpoints.
-  for (const op of ['listWorkspaces','listWorkspaceMembers','listWorkspaceInvitations','listMcpConnections','listAgents'] as const) await denied(op,{});
+  for (const op of ['listWorkspaceMembers','listWorkspaceInvitations','listAgents'] as const) await denied(op,{});
   await denied('renameCurrentWorkspace',{body:{name:'E2E'}});
   await denied('inviteWorkspaceMember',{body:invite});
   await denied('createWorkspaceInvitation',{body:invite});
@@ -327,7 +315,6 @@ async function devBoundaries() {
   await denied('acceptWorkspaceInvitation',{path:fake,headers:{Origin:base.origin}});
   await denied('updateWorkspaceMember',{path:fake,body:{role:'member'}});
   await denied('removeWorkspaceMember',{path:fake});
-  await denied('revokeMcpConnection',{path:fake});
   await denied('revokeAgent',{path:fake});
   await denied('bindMcpConnection',{path:fake,body:{workspaceId:prefix,receiving:false}});
   await denied('createAgentToken',{body:{permissions:['read'], domains:[domain], expiresInSeconds:30, purpose:prefix}},403,'MCP_AUTHORIZATION_REQUIRED');
@@ -786,19 +773,7 @@ async function cliUpload() {
 }
 
 async function inboundKey(addressId: string, otherId: string) {
-  const key = await api('createInboundKey', { body: { name: prefix, addressIds: [addressId], permissions: ['read'] } });
-  const path = { id: key.id };
-  const restricted = createClient({ baseUrl: base.origin, redirect: 'error', headers: { Authorization: `Bearer ${key.secret}` } });
-  defer(`revoke inbound key ${key.id}`, async () => {
-    const revoked = await api('revokeInboundKey', { path });
-    check(revoked.id === key.id && revoked.revokedAt, 'inbound key not revoked');
-    await expectDenial(() => api('getInboundAddress', { client: restricted, path: { addressId } }), 401, 'AUTH_INVALID');
-  });
-  const row = await listed(key.id, cursor => api('listInboundKeys', { query: { cursor, limit: 100 } }));
-  check(row.addressIds?.length === 1 && row.addressIds[0] === addressId && row.permissions.join() === 'read', 'inbound key scope differs');
-  check((await api('getInboundAddress', { client: restricted, path: { addressId } })).address === inbox, 'run key cannot read its address');
-  await expectDenial(() => api('getInboundAddress', { client: restricted, path: { addressId: otherId } }), 404, 'NOT_FOUND');
-  // The same key as an API key limited to the address: listed with the other API keys, and kept out of the workspace.
+  // An API key limited to the address: listed with the other API keys, and kept out of the workspace.
   const limited = await api('createApiKey', { body: { name: prefix, access: { type: 'addresses', addressIds: [addressId], mail: ['read'] } } });
   const limitedClient = createClient({ baseUrl: base.origin, redirect: 'error', headers: { Authorization: `Bearer ${limited.secret}` } });
   defer(`revoke limited key ${limited.id}`, async () => {
@@ -970,8 +945,8 @@ async function addressInbox(id: string, otherId: string, messageId: string, sent
   const after = await folders();
   check(after.inbox.total === before.inbox.total - 1 && after.archive.total === before.archive.total && after.trash.total === before.trash.total + 1, 'folder counts differ after the moves');
   // A key for the other run-owned address reads that address's Sent mail, and none of this one's.
-  const key = await api('createInboundKey', { body: { name: `${prefix}-other`, addressIds: [otherId], permissions: ['read'] } });
-  defer(`revoke inbound key ${key.id}`, async () => check((await api('revokeInboundKey', { path: { id: key.id } })).revokedAt, 'inbound key not revoked'));
+  const key = await api('createApiKey', { body: { name: `${prefix}-other`, access: { type: 'addresses', addressIds: [otherId], mail: ['read'] } } });
+  defer(`revoke limited key ${key.id}`, async () => check((await api('revokeApiKey', { path: { id: key.id } })).revoked, 'limited key not revoked'));
   const other = createClient({ baseUrl: base.origin, redirect: 'error', headers: { Authorization: `Bearer ${key.secret}` } });
   check((await api('listInboxMessages', { client: other, path: { id: otherId }, query: { folder: 'sent', limit: 100 } })).data.some(m => m.id === sentId), 'sent mail not filed in Sent');
   await expectDenial(() => api('listInboxMessages', { client: other, path: { id } }), 404, 'NOT_FOUND');
@@ -1036,11 +1011,9 @@ async function sweepStaleObjects() {
     if (run && k.domains.length===1 && k.domains[0]===domain && k.permissions.length===1 &&
         ((k.name===run && k.permissions[0]==='read') || (k.name===`${run}-cli` && k.permissions[0]==='send'))) {
       check((await api('revokeApiKey',{path:{id:k.id}})).revoked,'stale API key not revoked');
+    } else if (run===k.name && k.access.type==='addresses' && k.access.addressIds?.length===1 && k.access.mail.join()==='read') {
+      check((await api('revokeApiKey',{path:{id:k.id}})).revoked,'stale limited key not revoked');
     }
-  }
-  for (const k of await pages(cursor=>api('listInboundKeys',{query:{cursor,limit:100,includeRevoked:'false'}}))) {
-    if (staleRun(k.name,k.createdAt)===k.name && k.addressIds?.length===1 && k.permissions.join()==='read')
-      check((await api('revokeInboundKey',{path:{id:k.id}})).revokedAt,'stale inbound key not revoked');
   }
   for (const h of await pages(cursor=>api('listWebhooks',{query:{limit:100,cursor}}))) {
     if (staleRun(h.description,h.createdAt) && h.eventTypes.join()==='email.delivered')

@@ -34,8 +34,8 @@ type Ceiling = { method: 'GET' | 'POST'; path: string; roles: SupportRole[]; cou
  */
 export const SUPPORT_CEILINGS: Ceiling[] = [
   // Its domains, webhook failures and activity follow their own counterparts (CONTEXT_SECTIONS).
-  { method: 'GET', path: '/v1/support/context', roles: EVERYONE, counterpart: 'GET /v1/workspaces' },
-  { method: 'GET', path: '/v1/support/workspaces', roles: EVERYONE, counterpart: 'GET /v1/workspaces' },
+  { method: 'GET', path: '/v1/support/context', roles: EVERYONE, counterpart: 'GET /v1/me' },
+  { method: 'GET', path: '/v1/support/workspaces', roles: EVERYONE, counterpart: 'GET /v1/me' },
   { method: 'GET', path: '/v1/support/domains', roles: MANAGERS, counterpart: 'GET /v1/domains' },
   // Received mail follows actorMailAccess: a member reads mail on receiving addresses only, not unassigned stored mail.
   { method: 'GET', path: '/v1/support/emails', roles: EVERYONE, counterpart: 'GET /v1/emails' },
@@ -63,11 +63,11 @@ export const SUPPORT_CEILINGS: Ceiling[] = [
   { method: 'GET', path: '/v1/support/emails/{id}/lint', roles: EVERYONE, counterpart: 'GET /v1/emails' },
   { method: 'GET', path: '/v1/support/campaigns/{id}/lint', roles: EVERYONE, counterpart: 'GET /v1/campaigns' },
   { method: 'GET', path: '/v1/support/audience/health', roles: EVERYONE, counterpart: 'GET /v1/lists' },
-  { method: 'GET', path: '/v1/support/scope', roles: EVERYONE, counterpart: 'GET /v1/workspaces', views: false },
-  { method: 'POST', path: '/v1/support/scope', roles: EVERYONE, counterpart: 'GET /v1/workspaces', views: false },
+  { method: 'GET', path: '/v1/support/scope', roles: EVERYONE, counterpart: 'GET /v1/me', views: false },
+  { method: 'POST', path: '/v1/support/scope', roles: EVERYONE, counterpart: 'GET /v1/me', views: false },
   // Notes are the person's own (src/support-notes.ts), filtered by their memberships, never a workspace's data.
-  { method: 'GET', path: '/v1/support/notes', roles: EVERYONE, counterpart: 'GET /v1/workspaces', views: false, chatOnly: true },
-  { method: 'POST', path: '/v1/support/notes', roles: EVERYONE, counterpart: 'GET /v1/workspaces', views: false, chatOnly: true },
+  { method: 'GET', path: '/v1/support/notes', roles: EVERYONE, counterpart: 'GET /v1/me', views: false, chatOnly: true },
+  { method: 'POST', path: '/v1/support/notes', roles: EVERYONE, counterpart: 'GET /v1/me', views: false, chatOnly: true },
 ];
 /** The parts of GET /v1/support/context that follow another counterpart than the route's own. */
 export const CONTEXT_SECTIONS = {
@@ -435,9 +435,9 @@ export function registerSupportConversations(app: App) {
     const { workspace_id: _w, ...scope } = row!;
     return { ...scope, user: scope.user ?? { id: null, name: null, email: null, mailboxProven: false } };
   }
-  app.openapi(createRoute({ method: 'get', path: '/v1/support/scope', operationId: 'getSupportScope', tags, security, description: describe('Who this conversation is for and what it can read now: the person, the workspace in scope and their role there, content access, and whether they lost a workspace it read. Read it at the start of every turn.'),
+  app.openapi(createRoute({ hide: true, method: 'get', path: '/v1/support/scope', operationId: 'getSupportScope', tags, security, description: describe('Who this conversation is for and what it can read now: the person, the workspace in scope and their role there, content access, and whether they lost a workspace it read. Read it at the start of every turn.'),
     responses: { 200: response(Scope), ...errors } }), async c => c.json(await scopeOf(c.env.db, conversationOf(c).id), 200));
-  app.openapi(createRoute({ method: 'post', path: '/v1/support/scope', operationId: 'updateSupportScope', tags, security, description: describe('Narrow an email conversation to one of the sender’s workspaces, or switch to another of them. A chat stays in the workspace it came from.'),
+  app.openapi(createRoute({ hide: true, method: 'post', path: '/v1/support/scope', operationId: 'updateSupportScope', tags, security, description: describe('Narrow an email conversation to one of the sender’s workspaces, or switch to another of them. A chat stays in the workspace it came from.'),
     request: { body: json(z.object({ workspaceId: z.string().min(1).max(100) }).strict()) }, responses: { 200: response(Scope), ...errors } }), async c => {
     const conversation = conversationOf(c), workspaceId = c.req.valid('json').workspaceId;
     if (conversation.channel === 'chat' && workspaceId !== conversation.workspaceId) throw new ApiError(409, 'SUPPORT_SCOPE_FIXED', 'A chat stays in the workspace the customer contacted support from.', 'workspaceId');

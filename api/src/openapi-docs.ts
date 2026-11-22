@@ -123,7 +123,7 @@ export const quickstart: { title: string; text: string; code?: string }[] = [
 // Guides beyond the first five minutes, for /docs.md and /llms.txt; the dashboard shows the same text as a Docs guide.
 export const guides: { id: string; title: string; text: string; code?: string; language?: string }[] = [webhookSignatureGuide];
 // Getting started first; account and installation plumbing last.
-const tagOrder = ['Emails', 'Domains', 'Inbound addresses', 'Inbound threads', 'Inbound webhooks', 'Inbound events', 'Inbound domains', 'Webhooks', 'Events', 'Metrics', 'Attachments', 'Templates', 'Campaigns', 'Newsletters', 'Audience', 'Consent', 'ApiKeys', 'Inbound keys', 'Settings', 'Regions', 'Workspaces', 'Auth'];
+const tagOrder = ['Emails', 'Domains', 'Inbound addresses', 'Inbound threads', 'Inbound webhooks', 'Inbound events', 'Inbound domains', 'Webhooks', 'Events', 'Metrics', 'Attachments', 'Templates', 'Campaigns', 'Newsletters', 'Audience', 'Consent', 'ApiKeys', 'Settings', 'Regions', 'Workspaces', 'Auth'];
 const tagRank = (tag: string) => { const index = tagOrder.indexOf(tag); return index === -1 ? tagOrder.length : index; };
 
 export function createOpenApiDocument(app: App) {
@@ -134,8 +134,6 @@ export function createOpenApiDocument(app: App) {
   for (const [path, pathItem] of Object.entries<Json>(document.paths ?? {})) for (const method of METHODS) {
     const operation = pathItem[method];
     if (!operation?.operationId) continue;
-    // Support routes are internal: in the contract and the SDK for Nightmail's support platform, out of customer docs.
-    if (/^\/v1\/support\//.test(path)) operation['x-internal'] = true;
     // What it needs (operation-permissions.ts). An operation without a row has none, and check-premerge.ts fails on it.
     const permission = permissionOf(operation.operationId);
     if (permission) operation[permissionExtension] = permission;
@@ -203,10 +201,8 @@ function guidesMarkdown() {
 export const tagSlug = (tag: string) => tag.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 const intro = (document: Json) => `# ${productName} API\n\n${document.info?.description ?? ''}\n\n- [Interactive documentation](/docs)\n- [OpenAPI 3.1 JSON](/openapi.json)\n- [Agent index](/llms.txt)\n- TypeScript package: \`${sdkPackage}\`\n\n`;
 
-/** What customers read: everything but internal operations (x-internal). */
-const publicEntries = (document: Json) => operationEntries(document).filter(entry => !entry.operation['x-internal']);
 export function createMarkdownDocs(document: Json, operationId?: string): string | null {
-  const entries = publicEntries(document);
+  const entries = operationEntries(document);
   if (operationId) {
     const entry = entries.find(entry => entry.operation.operationId === operationId);
     if (!entry) return null;
@@ -218,12 +214,12 @@ export function createMarkdownDocs(document: Json, operationId?: string): string
 }
 
 export function createTagMarkdownDocs(document: Json, slug: string): string | null {
-  const group = grouped(document, publicEntries(document)).find(({ tag }) => tagSlug(tag) === slug);
+  const group = grouped(document, operationEntries(document)).find(({ tag }) => tagSlug(tag) === slug);
   if (!group) return null;
   return `${intro(document)}[API index](/docs.md)\n\n# ${group.tag}\n\n${group.entries.map(entry => operationMarkdown(document, entry)).join('\n---\n\n')}`;
 }
 
 export function createLlmsText(document: Json): string {
-  const groups = grouped(document, publicEntries(document));
+  const groups = grouped(document, operationEntries(document));
   return `# ${productName}\n\n${productName} is an email API on Amazon SES: send, receive and reply on your own domains.\n\n${quickstartMarkdown()}## Canonical documentation\n\n- Markdown API reference index: /docs.md\n- Interactive API reference: /docs\n- OpenAPI 3.1 definition: /openapi.json\n- TypeScript SDK: https://www.npmjs.com/package/${sdkPackage}\n- MCP endpoint: /mcp\n\n## Markdown API reference by tag\n\n${groups.map(({ tag }) => `- ${tag}: /docs/tags/${tagSlug(tag)}.md`).join('\n')}\n\n## Focused operation documentation\n\n${groups.flatMap(group => group.entries).map(entry => `- ${title(entry.operation.operationId)}: /docs/operations/${entry.operation.operationId}.md`).join('\n')}\n`;
 }

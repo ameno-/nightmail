@@ -31,8 +31,8 @@ const target = bounded.describe('A mailbox ID (mbx_…) or an existing recipient
   senderLists = z.record(key, z.array(bounded.toLowerCase()).max(500)).default({}).describe('Named address lists for lists.has(name, address). Entries are addresses or @domain.'),
   evaluateDomains = z.array(bounded.toLowerCase()).max(100).default([]).describe('Receiving domains whose mail may be sent to the AI for decisions.'),
   evaluateRoutes = z.array(bounded).max(100).default([]).describe('Route IDs opted in to AI decisions, in addition to the receiving domains.');
-// The stored config, and the deprecated /v1/rituals operations, keep the names from before the rename: rituals, and
-// attachments that name their ritual. The public shapes below say rules and rule.
+// The stored config keeps the names from before the rename: rituals, and attachments that name their ritual. The public
+// shapes below say rules and rule.
 export const RecipeRef = recipeRef.openapi('RitualRecipeRef');
 export const Ritual = item(RecipeRef);
 export const Binding = z.object({ ritual: key, target, continue: next }).strict();

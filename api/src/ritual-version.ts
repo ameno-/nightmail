@@ -2,7 +2,6 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
 import { reservePolls } from './auth.js';
 import { errors, receivingAdmin, response, security, type Actor, type App, type Ctx, type DbExecutor } from './core.js';
-import { LEGACY_RULES_PATH, RULES_PATH } from './rule-names.js';
 
 // The dashboard's live view of rules, routes and endpoints, for a person editing next to an agent that saves over MCP.
 // One long poll per open page: each tick is one statement of primary-key reads (the routing version every rule and
@@ -21,11 +20,11 @@ const changedBy_ = z.object({
   name: z.string().nullable().describe('The member’s name, the API key’s name or the MCP client and its profile label; null when it is gone. Never an email address.'),
   self: z.boolean().describe('The credential making this request made the change (another tab, say).'),
 });
-const versionState = (actor: z.ZodType) => z.object({
+const versionState = z.object({
   version: z.number().int().describe('The routing version. Routes and rules share it, and it is the If-Match for saving either.'),
   endpoints: z.string().regex(/^\d+$/).describe('Marks the latest endpoint change seen. Pass it back as endpoints to wait for the next one.'),
   changed: z.boolean().describe('version or endpoints moved past what you passed as after and endpoints.'),
-  actor: actor.nullable().describe('Who made the change returned: the save behind version, or else the latest endpoint change. Null when nothing changed.'),
+  actor: changedBy_.openapi('RuleChangeActor').nullable().describe('Who made the change returned: the save behind version, or else the latest endpoint change. Null when nothing changed.'),
 });
 const Query = z.object({
   after: z.coerce.number().int().min(0).max(2147483647).optional().describe('The version you have. The call waits until the version differs from it.'),
@@ -56,14 +55,11 @@ async function changedBy(db: DbExecutor, a: Actor, w: string, who: ReturnType<ty
 export function registerRitualVersion(app: App) {
   const summary = 'Read the rules and routes version, or wait for it to change';
   const description = 'Without after, returns the current version at once. With after (and endpoints, to include endpoint changes), waits up to wait seconds for a rule, route or endpoint save and returns as soon as one commits, with who saved it. The dashboard keeps one of these open while you edit rules so an agent’s saves appear live. Each waited 2.5 seconds counts as one request against the credential’s per-minute budget.';
-  // getRitualVersion is its deprecated alias at the path from before rituals were renamed rules (rule-names.ts).
-  for (const [operationId, path, name, deprecated] of [['getRuleVersion', RULES_PATH, 'Rule', false], ['getRitualVersion', LEGACY_RULES_PATH, 'Ritual', true]] as const)
-    app.openapi(createRoute({
-      method: 'get', path: `${path}/version`, operationId, security, tags: ['Rules'],
-      summary: deprecated ? `${summary} (deprecated: use getRuleVersion)` : summary, description: deprecated ? 'Deprecated: use getRuleVersion, the same operation under its current name.' : description, ...(deprecated ? { deprecated } : {}),
-      request: { query: Query },
-      responses: { 200: response(versionState(changedBy_.openapi(`${name}ChangeActor`)).openapi(`${name}Version`)), ...errors },
-    }), ((c: Ctx) => poll(c)) as never);
+  app.openapi(createRoute({
+    method: 'get', path: '/v1/rules/version', operationId: 'getRuleVersion', security, tags: ['Rules'], summary, description,
+    request: { query: Query },
+    responses: { 200: response(versionState.openapi('RuleVersion')), ...errors },
+  }), ((c: Ctx) => poll(c)) as never);
 }
 async function poll(c: Ctx) {
   const a = receivingAdmin(c), w = a.workspaceId, q = c.req.valid('query' as never) as z.infer<typeof Query>;
