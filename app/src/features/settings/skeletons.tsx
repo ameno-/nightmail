@@ -3,7 +3,6 @@ import { useRegion, useWorkspaceAccess } from '../../data/context'
 import './settings.css'
 import './domain-records.css'
 import './api-keys.css'
-import { KeysGuide } from './keys-guide'
 
 const twoLines = <div><SkeletonText width="74%" /><SkeletonText width="88%" /></div>
 /** The API keys page's type filter: every credential, or one of its three types. */
@@ -183,6 +182,6 @@ export function SettingsRouteSkeleton({ kind, isNew = false }: { kind: 'keys' | 
   if (kind === 'domain') return <DomainDetailSkeleton />
   if (kind === 'webhook') return <LoadingRegion className="stack settings-page" label="Loading webhook"><PageHeader title={isNew ? 'Add webhook' : <SkeletonText width={240} lineHeight={28} />} backTo="/settings#webhooks" actions={isNew ? undefined : <><Skeleton width={70} /><ControlSkeleton width="calc(5ch + 26px)" /><ControlSkeleton width={128} /></>} /><WebhookBodySkeleton isNew={isNew} /></LoadingRegion>
   if (kind === 'settings') return <LoadingRegion className="stack settings-ses settings-page" label="Loading settings"><PageHeader title="Settings" />{!multiTenant && <><SesSendingSkeleton regionId={regionId} /><WorkspaceFormSkeleton /></>}</LoadingRegion>
-  if (kind === 'keys') return <LoadingRegion className="stack" label="Loading API keys"><PageHeader title="API keys" actions={<KeysHeaderActions />} /><KeysGuide /><div className="keys-sections"><section className="section stack"><Tabs label="Type" value="all" onValueChange={() => {}} disabled items={[...keyTypes]} /><TableSkeleton className="keys-table keys-table--two-line" columns={settingsColumns.keys} rows={3} /></section></div></LoadingRegion>
+  if (kind === 'keys') return <LoadingRegion className="stack" label="Loading API keys"><PageHeader title="API keys" actions={<KeysHeaderActions />} /><div className="keys-sections"><section className="section stack"><Tabs label="Type" value="all" onValueChange={() => {}} disabled items={[...keyTypes]} /><TableSkeleton className="keys-table keys-table--two-line" columns={settingsColumns.keys} rows={3} /></section></div></LoadingRegion>
   return <LoadingRegion className="stack" label="Loading domains"><PageHeader title="Domains" actions={<ControlSkeleton width="calc(10ch + 26px)" />} /><TableSkeleton className="domains-table" columns={domainColumns(multiTenant)} rows={3} pagination /></LoadingRegion>
 }

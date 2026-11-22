@@ -13,7 +13,6 @@ import { actionLabel } from '../../data/activity'
 import { Who } from './activity'
 import { accessLabel, agentAccess, approvalLabel, connectionTitle, domainScope, mailLabel, protocolLabel } from './key-labels'
 import { keyTypes, settingsColumns, type KeyTypeFilter } from './skeletons'
-import { KeysGuide } from './keys-guide'
 import './api-keys.css'
 import { AddressList, PrivateAddress } from '../../components/PrivateAddress'
 import { ConnectAgentButton, ConnectAgentDialog, McpKeySetup } from '../docs/connect-agent'
@@ -174,7 +173,6 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
 
   return <div className="stack">
     <PageHeader title="API keys" actions={<><Checkbox label="Show inactive" checked={showRevoked} onCheckedChange={checked => { setShowRevoked(checked); pagination.reset() }} /><Button variant="primary" onClick={() => setOpen(true)} data-analytics="keys/create">Create key</Button></>} />
-    <KeysGuide />
     <div className="keys-sections">
       <section className="section stack" aria-label="Keys">
         <Tabs label="Type" value={type} onValueChange={value => { setType(value as KeyTypeFilter); pagination.reset() }} items={[...keyTypes]} />
