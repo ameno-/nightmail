@@ -1,4 +1,4 @@
-import { ChevronRight, Clock, Gauge, Mail, MoreHorizontal, UsersRound } from 'lucide-react'
+import { ChevronRight, MoreHorizontal } from 'lucide-react'
 import {
   Button, ControlSkeleton, Field, IconButton, LoadingRegion, PageHeader, SearchField, SectionHeader,
   Select, Skeleton, SkeletonText, TableSkeleton, Tabs, type SkeletonColumn,
@@ -81,11 +81,16 @@ export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 
       </div></div>
     </LoadingRegion>
   </div>
-  return <div className="campaign-review">
+  return <div className="campaign-review campaign-review--draft">
     <CampaignBar title={<h1 className="studio-title"><SkeletonText width={220} lineHeight={24} /></h1>} actions={<SkeletonText width={65} lineHeight={20} />} />
-    <LoadingRegion label="Loading campaign review" className="review-flow">
-      {([[UsersRound, 160], [Mail, 280], [Gauge, 200], [Clock, 120]] as const).map(([Icon, width]) => <section className="review-row" key={width}><div className="review-row__head"><span className="review-row__icon" aria-hidden="true"><Icon size={16} /></span><span className="review-row__summary"><SkeletonText width={width} /></span></div></section>)}
-      <div className="review-send"><Button variant="primary" className="review-send__button" disabled>Send now</Button></div>
+    <LoadingRegion label="Loading campaign review" className="review-stages">
+      {(['Recipients', 'Message', 'Sendability', 'Send'] as const).map((title, index) => <section className="review-stage" data-open={index === 0 || undefined} key={title}>
+        <div className="review-stage__head"><span className="campaign-steps__mark review-stage__mark" aria-hidden="true">{index + 1}</span><span className="review-stage__title">{title}</span><span className="review-stage__summary"><SkeletonText width={140} /></span></div>
+        {index === 0 && <div className="review-stage__body"><div className="review-stage__content"><div className="campaign-audience-picker">
+          <Field label="List" htmlFor="campaign-list-loading"><Select id="campaign-list-loading" aria-label="Recipient list" value="" onValueChange={() => {}} options={[{ value: '', label: 'Loading lists…' }]} disabled /></Field>
+          <Field label="Segment" htmlFor="campaign-segment-loading"><Select id="campaign-segment-loading" aria-label="Segment" value="" onValueChange={() => {}} options={[{ value: '', label: 'Everyone on the list' }]} disabled /></Field>
+        </div></div><div className="review-stage__footer"><Button variant="primary" disabled>Next</Button></div></div>}
+      </section>)}
     </LoadingRegion>
   </div>
 }
