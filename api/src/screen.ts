@@ -33,6 +33,9 @@ const QUESTIONS = {
 };
 
 export type ScreenResult = { spam: number; model: string };
+/** A classifier request the caller may not make now (Runtime.screenHandover): nothing was sent, so it is not a classifier
+ *  failure. The dispatcher gives the mail back to the queue for its next run. */
+export class ScreenHandover extends Error { constructor() { super('The classifier request was left to the next run.'); this.name = 'ScreenHandover'; } }
 // Bulk invitations repeat identical content, so one verdict serves every copy for an hour.
 // Insertion order is age order: the first key is always the oldest entry.
 const cache = new Map<string, { expires: number; result: ScreenResult }>();
@@ -444,8 +447,10 @@ export async function jevQuestions(endpoint:string,apiKey:string,model:string,st
     try{return JSON.parse(Buffer.concat(chunks).toString())}catch{return null}
   } finally { inFlight--; }
 }
-/** One classifier request; `db` is the database client its content_screen_calls row is written with later. */
-async function evaluate(endpoint: string, apiKey: string, model: string, state: unknown, call: ScreenCall | undefined, window: number, windows: number, db: object | undefined, sample = 1): Promise<ScreenResult> {
+/** One classifier request; `db` is the database client its content_screen_calls row is written with later. `handover`
+ *  is read right before the request, with nothing awaited between it and the request going out. */
+async function evaluate(endpoint: string, apiKey: string, model: string, state: unknown, call: ScreenCall | undefined, window: number, windows: number, db: object | undefined, handover: (() => boolean) | undefined, sample = 1): Promise<ScreenResult> {
+  if (handover?.()) throw new ScreenHandover();
   const timing: CallTiming = {}, at = Date.now();
   try {
     const parsed = await jevQuestions(endpoint,apiKey,model,state,QUESTIONS,DEADLINE_MS,timing) as { model?: unknown; answers?: { spam?: { noul?: unknown } } } | null;
@@ -481,7 +486,7 @@ export async function screenSnapshot(runtime: Runtime, snapshot: EmailSnapshot, 
     const state=classifierState(snapshot,required,textHtmlOverlap);
     let highest: ScreenResult | undefined;
     for (const [window, body] of bodies.entries()) {
-      const result=await evaluate(settings.endpoint,settings.apiKey,settings.model,state(body),call,window,bodies.length,runtime.db);
+      const result=await evaluate(settings.endpoint,settings.apiKey,settings.model,state(body),call,window,bodies.length,runtime.db,runtime.screenHandover);
       if (!highest || result.spam>highest.spam) highest=result;
     }
     return highest!;
@@ -530,5 +535,5 @@ export async function screenInput(runtime: Runtime, snapshot: EmailSnapshot): Pr
 export async function screenWindow(runtime: Runtime, input: ScreenInput, window: number, call?: ScreenCall): Promise<ScreenResult> {
   const settings = runtime.config.screen;
   if (!settings) throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', 'Hosted content screening is unavailable.', undefined, true);
-  return evaluate(settings.endpoint, settings.apiKey, settings.model, input.requests[window], call, window, input.requests.length, runtime.db, CAMPAIGN_SAMPLE);
+  return evaluate(settings.endpoint, settings.apiKey, settings.model, input.requests[window], call, window, input.requests.length, runtime.db, runtime.screenHandover, CAMPAIGN_SAMPLE);
 }

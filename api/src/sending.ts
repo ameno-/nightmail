@@ -2515,6 +2515,7 @@ export async function campaignVerdicts(runtime: Runtime, ref: CampaignScreenRef,
       const key = work[next++]!, input = inputs.get(key)!;
       let row = rows.get(key)!;
       while (!row.judged) {
+        if (runtime.screenHandover?.()) throw new screen.ScreenHandover(); // Before the charge: the request won't be made.
         const charged = await runtime.db.execute(sql`UPDATE sending_campaign_reviews SET screen_charged=screen_charged+1
           WHERE workspace_id=${ref.workspaceId} AND id=${ref.reviewId} AND screen_charged<screen_budget`);
         if (!charged.rowCount) throw new ApiError(422, 'CONTENT_SCREEN_BUDGET_EXCEEDED', 'This campaign has used the classifier requests its audience allows; its unscreened copies are not sent.');

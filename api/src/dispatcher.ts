@@ -14,7 +14,7 @@ import { credentialFingerprint, discoveryTarget } from './ses-region-state.js';
 import { mxResourceName, POOL_INSTALLATION, setupResources } from './ses-setup.js';
 import { forDelivery, type ReadyConnection } from './provider-credentials.js';
 import { wakeWebhooks } from './jobs.js';
-import { screenSnapshot, type CampaignScreen, type ScreenCall } from './screen.js';
+import { screenSnapshot, ScreenHandover, type CampaignScreen, type ScreenCall } from './screen.js';
 import { flushScreenCalls, outbound } from './screen-calls.js';
 import { SEND_LIMITS } from './send-limits.js';
 import { SesBodyError } from './ses-body.js';
@@ -96,6 +96,9 @@ export interface DispatcherOptions {
   quotaRefreshMs?: number;
   /** For the DISPATCH_RUN line: how long after the wake that started it this run began (src/dispatcher-do.ts). */
   wakeMs?: number;
+  /** Once true, the run leases nothing more and ends after the batches it holds (src/dispatcher-do.ts: a request landed on
+   *  the shard, so its classifier calls go to a follow-up run). */
+  stop?: () => boolean;
 }
 export interface DispatcherReport { claimed: number; sent: number; deferred: number; skipped: number; batches: number; idle: boolean; durationMs: number; timings: Record<string, number>; statements: number; quotaRetryAt?: number; paceRetryAt?: number }
 
@@ -850,7 +853,7 @@ const quotaRetry = (gate: GateState, refreshMs: number) => Math.ceil(Math.max(Da
 // daily allowance, the burst limit) is info; anything else is warn. A campaign's flow-control lines are kept 1 in 10, since a
 // campaign can send 50 a second and an invocation keeps 256 KB of log lines; each kept one says sampleRate. Failures and
 // every other deferral are always kept.
-const FLOW = new Set(['PACING_WAIT', 'DAILY_ALLOWANCE', 'HOSTED_BURST_LIMIT']);
+const FLOW = new Set(['PACING_WAIT', 'DAILY_ALLOWANCE', 'HOSTED_BURST_LIMIT', 'SCREEN_HANDOVER']);
 function logEmail(lane: Lane, mail: Mail, trace: Trace | undefined, outcome: string, reason?: string) {
   try {
     const routine = outcome === 'accepted' || FLOW.has(reason ?? ''), rate = routine && mail.snapshot.kind === 'marketing' ? 0.1 : 1;
@@ -985,7 +988,7 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
     return { processed: 0, blocked: true };
   }
   const loadAttachments = batchAttachments(base, ready);
-  const screenDeferred:Mail[]=[];
+  const screenDeferred:Mail[]=[], handedOver:Mail[]=[];
   const prepare = async (item: typeof ready[number]) => {
     try {
       if (item.contentBytes) {
@@ -1004,6 +1007,9 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
     catch (error) {
       if (item.trace.screenAt !== undefined) item.trace.screenMs ??= Date.now() - item.trace.screenAt; // It ended in the screen.
       if (error instanceof ModuleLoadError) { await releaseLeases(base, [item.mail]); throw error; }
+      // Its screen was left to the next run (Runtime.screenHandover): back to the queue as it was, due now. Not a classifier
+      // failure: no deferral, no error code, no breaker.
+      if (error instanceof ScreenHandover) { handedOver.push(item.mail); counters.deferred++; logEmail(lane, item.mail, item.trace, 'deferred', 'SCREEN_HANDOVER'); return; }
       if (error instanceof ApiError && error.code==='CONTENT_SCREEN_UNAVAILABLE') {
         if (!(gate.screenRetryAt && gate.screenRetryAt>Date.now())) {
           gate.screenRetryAt=Date.now()+30_000; log('warn',{code:error.code,region:options.region,retryAt:gate.screenRetryAt});
@@ -1071,6 +1077,7 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
     const prepared = await phase('prepare', () => Promise.all(ready.map(prepare)));
     await dispatchPrepared(base, lane, prepared.filter((item): item is Prepared => item !== undefined));
   }
+  if (handedOver.length) await releaseLeases(base, handedOver);
   // The status comes with each input row, not as a literal, to keep this on the primary key (see the claim in claimCtes).
   if(screenDeferred.length) await base.db.execute(sql`UPDATE sending_emails e SET lease_until=NULL,error_code='CONTENT_SCREEN_UNAVAILABLE',scheduled_at=clock_timestamp()+interval '30 seconds'
     FROM jsonb_to_recordset(${JSON.stringify(screenDeferred.map(m=>({id:m.id,version:m.dispatchVersion,status:'queued'})))}::jsonb) x(id text,version int,status text)
@@ -1232,6 +1239,7 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
   const tighter = (now: Allowance | undefined, before: Allowance | undefined) => !!now && (!before || now.marketing < before.marketing || now.transactional < before.transactional);
   const leaseAllowance = new WeakMap<Leased[], Allowance | undefined>();
   const lease = async (priorityOnly = false, first = false) => {
+    if (options.stop?.()) return [];
     const now = Date.now();
     if (gate.nextAllowedAt >= now + MAX_PRE_SEND_MS) { counters.paceRetryAt = Math.ceil(gate.nextAllowedAt); return []; }
     for (let i = lane.deferred.length - 1; i >= 0; i--) if ((lane.deferred[i]!.until ?? Infinity) <= now) lane.deferred.splice(i, 1);
@@ -1265,7 +1273,7 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
       const stalled = batch.length > 0 && lane.advanced === advanced && !gate.ownerCursor && !tighter(allowance(), caps);
       // A short batch means the queue is draining: settle completed campaigns before this lane stops.
       if (blocked || stalled || batch.length < lane.options.batchSize && (!gate.ownerCursor || gate.nextAllowedAt>=Date.now()+MAX_PRE_SEND_MS || dailyRemaining(gate)<=0)) { await flushFinishing(runtime, lane); return; }
-      if (options.until !== undefined && Date.now() >= options.until) { counters.idle = false; await flushFinishing(runtime, lane); return; }
+      if (options.until !== undefined && Date.now() >= options.until || options.stop?.()) { counters.idle = false; await flushFinishing(runtime, lane); return; }
       batch = await lease();
     }
   };
@@ -1277,7 +1285,7 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
   options.priorityWake?.addEventListener(key, wake);
   const priority = async () => {
     if (!options.priorityWake) return;
-    while (!done && !blocked) { // Keep serving priority wakes while the last normal batch drains past the lease budget.
+    while (!done && !blocked && !options.stop?.()) { // Keep serving priority wakes while the last normal batch drains past the lease budget.
       if (!dirty) await new Promise<void>(resolve => { resume = resolve; });
       if (done || blocked) return;
       resume = undefined; dirty = false;

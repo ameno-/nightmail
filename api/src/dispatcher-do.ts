@@ -30,6 +30,13 @@ function loadDeps() {
 // visitor who started the chain (a browser, the caller's Worker, our API Worker, this shard), and the content classifier's
 // edge refuses requests labelled with some countries (HTTP 451). The alarm invocation has no visitor. So a wake only arms
 // the alarm for now and returns; the platform runs one alarm() at a time, so runs never overlap.
+//
+// Which request labels a call is the "current" one: the newest request delivered to the object that hasn't completed, and
+// on a Durable Object a request whose handler has returned stays current while the object has any pending timer, as a run
+// always does (workerd io-context.c++). So a request that lands during an alarm is current until the next alarm() begins,
+// however fast it returns. From then the run makes no classifier call: `landed` (set first thing in fetch) stops it before
+// each one (Runtime.screenHandover), the run gives that mail back to the queue and ends, and the follow-up alarm, a newer
+// request with no visitor, screens it. A wake on an idle shard is safe: the alarm it arms is delivered after it.
 
 type Identity = { region: string; accountId?: string; shard: { index: number; count: number } };
 const RUN_MS = 45000;      // Re-arm well inside the alarm wall-clock and default CPU budgets.
@@ -48,6 +55,9 @@ export class DispatcherShard extends DurableObject<Env> {
   private placementLogged = false;
   // The first wake that found no run in progress since the last run started: DISPATCH_RUN's wakeMs, the cost of the hop.
   private wokenAt?: number;
+  // An alarm() is in progress, and a request (any request) has been delivered since it began.
+  private alarmActive = false;
+  private landed = false;
 
   // Once per persisted shard, after its first dispatch: where it runs and the cost of one DB round trip.
   // The location hint is only honored at creation, so this is the record of where the object actually landed.
@@ -70,6 +80,8 @@ export class DispatcherShard extends DurableObject<Env> {
   }
 
   async fetch(request: Request): Promise<Response> {
+    // First, before anything can await: this request is now the current one (see the top of this file).
+    if (this.alarmActive) this.landed = true;
     const url = new URL(request.url);
     if (url.pathname !== '/wake' || url.searchParams.has('environment')) return new Response('Not found', { status: 404 });
     const identity: Identity = {
@@ -116,6 +128,14 @@ export class DispatcherShard extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> {
+    // This invocation is now the current request: nothing delivered before it labels what it sends. Only the outermost call
+    // resets the flags (the platform never overlaps alarm(); a direct call could).
+    const outer = !this.alarmActive;
+    if (outer) { this.alarmActive = true; this.landed = false; }
+    try { await this.dispatch(); } finally { if (outer) this.alarmActive = false; }
+  }
+
+  private async dispatch(): Promise<void> {
     const identity = this.identity ??= await this.ctx.storage.get<Identity>('identity');
     if (!identity || 'environment' in identity) return; // Retire alarms from the old shard names.
     // The platform never runs two alarm() at once and nothing else calls it, so this guards only a direct call.
@@ -133,13 +153,16 @@ export class DispatcherShard extends DurableObject<Env> {
       deps.setLogContext({ service: 'worker', deploy: (this.env as unknown as Record<string, unknown>).DEPLOY_SHA });
       const { initialGate, runDispatcher } = deps;
       this.gate ??= (await this.ctx.storage.get<GateState>('gate')) ?? initialGate();
-      const runtime = await this.runtime();
+      // Once a request lands, no classifier call in this run (screenHandover), no more leases (stop), and a follow-up below.
+      const runtime: Runtime = { ...await this.runtime(), screenHandover: () => this.landed };
       // An alarm persisted by an older MX deployment must not drain an unpartitioned region.
       if (runtime.config.multiTenant && !identity.accountId) return;
       const report = await runDispatcher(runtime, {
-        ...identity, gate: this.gate, priorityWake: this.priorityWake,
+        ...identity, gate: this.gate, priorityWake: this.priorityWake, stop: () => this.landed,
         until: started + RUN_MS, lanes: 2, batchSize: deps.shardLeaseSize(this.gate.quota?.maxSendRate,identity.shard.count), sendConcurrency: 6, wakeMs,
-        onGate: async state => { await this.ctx.storage.put('gate', state); },
+        // Unconfirmed: a confirmed write holds the object's outgoing calls (SES, the classifier) until it is confirmed, about
+        // 25 ms after each batch. If the write fails the object is reset and the alarm runs again.
+        onGate: async state => { await this.ctx.storage.put('gate', state, { allowUnconfirmed: true }); },
       });
       if (!this.placementLogged) { this.placementLogged = true; this.ctx.waitUntil(this.logPlacement(identity, runtime)); }
       // Work remained when the run budget ended: continue immediately. Otherwise sleep until the next wake (an API nudge or
@@ -157,7 +180,8 @@ export class DispatcherShard extends DurableObject<Env> {
     } finally {
       this.running = false;
     }
-    await this.rearm(next);
+    // A request landed during the run: the follow-up alarm (a newer request, with no visitor) screens what this run gave back.
+    await this.rearm(this.landed ? Date.now() : next);
   }
 
   private async runtime(): Promise<Runtime> {

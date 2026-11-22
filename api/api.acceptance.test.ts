@@ -18231,6 +18231,70 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(probes, 1);
     });
   });
+  test('a DispatcherShard makes no classifier call while a request that landed on it is current, and its follow-up alarm screens what it gave back', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => t.test('synthetic transports', async t => {
+      const { registerHooks } = await import('node:module');
+      const hook = registerHooks({ resolve(specifier, context, next) {
+        return specifier === 'cloudflare:workers' ? { shortCircuit:true, url:'data:text/javascript,export class DurableObject {constructor(ctx,env){this.ctx=ctx;this.env=env}} export class WorkerEntrypoint {constructor(ctx,env){this.ctx=ctx;this.env=env}}' } : next(specifier, context);
+      } });
+      const { DispatcherShard } = await import('./src/dispatcher-do.js').finally(() => hook.deregister());
+      const { SESv2Client, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
+      const wid = runtime.config.workspaceId, acct = '112223330005', origin = 'https://screen.synthetic.invalid', topic = `arn:aws:sns:${REGION}:${acct}:fixture`;
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'handover', permissions: ['send', 'read'] }), 201);
+      Object.assign(runtime.config, { multiTenant: true, hostedScreen: true, liveEnabled: true, aws: { accessKeyId: 'fixture', secretAccessKey: 'fixture' }, screen: { endpoint: origin, apiKey: 'fixture', model: 'fixture', mode: 'reject', threshold: 0.7 } });
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,$2,'ready',$3)`, [REGION, acct, topic]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,region,aws_account_id,tenant_state) VALUES($1,$1,'shared','ready',$2,$3,'ready')`, [wid, REGION, acct]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('bench.invalid',$1,$1,'verified')`, [wid]);
+      const sent: string[] = [];
+      t.mock.method(SESv2Client.prototype, 'send', async (cmd: any) => { if (cmd instanceof GetAccountCommand) return { SendingEnabled: true, SendQuota: { MaxSendRate: 10000, Max24HourSend: 100000, SentLast24Hours: 0 } }; sent.push(cmd.input.EmailTags.find((t: Json) => t.Name === 'bane_email_id').Value); return { MessageId: randomUUID() }; });
+      // The platform's rule: the current request is the newest one delivered, from its delivery until the next alarm()
+      // begins, whether or not its handler has returned. The classifier stub fails the test if it is called while a request
+      // other than the alarm is current. `during` delivers a request from inside the run (from the stub, or a storage read).
+      const stored = new Map<string, unknown>();
+      let alarm: number | null = null, current = 'none', during: ((at: string) => Promise<void>) | undefined;
+      const ctx = { waitUntil: () => undefined, storage: {
+        get: async (k: string) => { if (during) await during('get:' + k); return stored.get(k); }, put: async (k: string, v: unknown) => { stored.set(k, v); },
+        delete: async (k: string) => stored.delete(k), getAlarm: async () => alarm, setAlarm: async (at: number) => { alarm = at; } } };
+      const shard = new DispatcherShard(ctx as unknown as DurableObjectState, {} as Env);
+      Object.assign(shard, { runtime: async () => runtime, placementLogged: true });
+      const deliver = async () => { current = 'request'; return (await shard.fetch(new Request(`https://dispatcher/wake?region=${REGION}&account=${acct}&shard=0&count=1`))).json() as Promise<Json>; };
+      const fire = async () => { assert.ok(alarm !== null && alarm <= Date.now() + 50, `an alarm is due (${alarm})`); alarm = null; current = 'alarm'; await shard.alarm(); };
+      const calls: string[] = [], violations: string[] = [];
+      t.mock.method(globalThis, 'fetch', async (url: RequestInfo | URL) => {
+        assert.equal(String(url), origin);
+        calls.push(current); if (current !== 'alarm') violations.push(`classifier called while ${current} is current`);
+        if (during) await during('classifier');
+        return Response.json({ answers: { spam: { noul: 0.01 } } });
+      });
+      const logs: Json[] = []; for (const level of ['info', 'warn'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch {} });
+      // A message long enough for two classifier requests, one after the other; distinct, so no verdict is reused.
+      const send = async (code: string) => ok(await local('POST', '/v1/emails/send', { from: 'a@bench.invalid', to: 'r@example.invalid', subject: `Your sign-in code is ${code}`, text: `Your sign-in code is ${code}. `.repeat(400) }, 'live', { authorization: `Bearer ${key.secret}` }), 202).id as string;
+      const row = async (id: string) => (await db.query('SELECT status,error_code,lease_until,scheduled_at FROM sending_emails WHERE id=$1', [id])).rows[0];
+      // 1. A request lands while the run's first classifier request is in flight: the second is not made. The email goes back
+      // to the queue as it was (no deferral, error code or breaker), the run ends, and the follow-up alarm screens it whole.
+      const first = await send('111111');
+      await deliver();
+      during = async at => { if (at === 'classifier') { during = undefined; assert.equal((await deliver()).running, true); } };
+      await fire();
+      assert.deepEqual([violations, calls], [[], ['alarm']]);
+      assert.deepEqual(await row(first), { status: 'queued', error_code: null, lease_until: null, scheduled_at: null });
+      assert.ok(logs.some(l => l.code === 'DISPATCH_EMAIL' && l.emailId === first && l.reason === 'SCREEN_HANDOVER'));
+      assert.ok(!logs.some(l => l.code === 'CONTENT_SCREEN_CALL' && l.outcome !== 'ok'), 'A handover is not a classifier failure');
+      assert.equal((shard as unknown as { gate?: { screenRetryAt?: number } }).gate?.screenRetryAt, undefined, 'No breaker');
+      await fire();
+      assert.deepEqual([violations, calls], [[], ['alarm', 'alarm', 'alarm']]);
+      assert.equal(sent.at(-1), first);
+      // 2. A request that lands as the alarm begins, before the run is marked running: the run makes no classifier call and
+      // leases nothing; the follow-up alarm sends the email.
+      const second = await send('222222');
+      await deliver();
+      during = async at => { if (at === 'get:displacedAlarm') { during = undefined; await deliver(); } };
+      await fire();
+      assert.deepEqual([violations, calls.length], [[], 3]); assert.equal((await row(second)).status, 'queued');
+      await fire();
+      assert.deepEqual([violations, calls.length], [[], 5]); assert.equal(sent.at(-1), second);
+    }));
+  });
   // tear witness (api/tear/dispatch): send ok, send ok, then a one-row dispatcher stepped through
   // lease, claim, send, record and the next lease, which found nothing and ended the run.
   test('a dispatcher lease that passes the last owner wraps to the first, so a run never stops with mail due', async t => {
