@@ -25,10 +25,16 @@ function loadDeps() {
 // keeps its database pool and pacing state across alarms, so a busy region never pays the
 // per-invocation setup the queue consumer did, and an evicted object resumes from storage
 // without bursting past its quota share. PostgreSQL rows remain the only queue.
+//
+// A run always starts in the alarm, never inside a wake request. Cloudflare labels a request's outbound calls with the
+// visitor who started the chain (a browser, the caller's Worker, our API Worker, this shard), and the content classifier's
+// edge refuses requests labelled with some countries (HTTP 451). The alarm invocation has no visitor. So a wake only arms
+// the alarm for now and returns; the platform runs one alarm() at a time, so runs never overlap.
 
 type Identity = { region: string; accountId?: string; shard: { index: number; count: number } };
 const RUN_MS = 45000;      // Re-arm well inside the alarm wall-clock and default CPU budgets.
 const RETRY_MS = 15000;    // Dependency failure (database, quota) backoff.
+const OVERDUE_MS = 3000;   // An alarm this far past due with no run in progress is waiting out a platform retry: arm it again.
 
 export function dispatcherName(identity: Identity) { return `dispatcher:${identity.accountId ? `${identity.accountId}:` : ''}${identity.region}:${identity.shard.index}/${identity.shard.count}`; }
 export function shardCount(value: unknown) { const n = Number(value); return Number.isInteger(n) && n >= 1 ? Math.min(n, 256) : 1; }
@@ -40,6 +46,8 @@ export class DispatcherShard extends DurableObject<Env> {
   private gate?: GateState;
   private identity?: Identity;
   private placementLogged = false;
+  // The first wake that found no run in progress since the last run started: DISPATCH_RUN's wakeMs, the cost of the hop.
+  private wokenAt?: number;
 
   // Once per persisted shard, after its first dispatch: where it runs and the cost of one DB round trip.
   // The location hint is only honored at creation, so this is the record of where the object actually landed.
@@ -74,27 +82,52 @@ export class DispatcherShard extends DurableObject<Env> {
       await this.ctx.storage.put('identity', identity);
       this.identity = identity;
     }
-    if (!this.running) {
-      this.ctx.waitUntil(this.alarm());
-    } else {
-      if (url.searchParams.get('priority') === '1') {
-        const { dispatchWakeKey } = await loadDeps();
-        this.priorityWake.dispatchEvent(new Event(dispatchWakeKey(identity.region, identity.accountId)));
-      }
-      // The running loop may already have taken its last lease. Keep a durable follow-up.
-      const alarm = await this.ctx.storage.getAlarm();
-      if (alarm === null || alarm > Date.now()) await this.ctx.storage.setAlarm(Date.now());
+    // A priority wake reaches a run in progress at once, as before; the run keeps serving them until it ends.
+    if (this.running && url.searchParams.get('priority') === '1') {
+      const { dispatchWakeKey } = await loadDeps();
+      this.priorityWake.dispatchEvent(new Event(dispatchWakeKey(identity.region, identity.accountId)));
     }
+    if (!this.running) this.wokenAt ??= Date.now();
+    // Idle, the alarm starts a run now. Mid-run, the running loop may already have taken its last lease, so the alarm
+    // set now fires as soon as this run's alarm() returns: a durable follow-up.
+    await this.armNow();
     return Response.json({ ok: true, running: this.running });
+  }
+
+  /** Sets the alarm for now unless one is already due. A later time it replaces (a quota, pace or failure retry) is kept as
+   *  displacedAlarm, and every run until one starts at or after it re-arms it (rearm), so a wake never loses an armed retry.
+   *  An alarm overdue by OVERDUE_MS with no run in progress is set again: after alarm() throws, the platform waits 2 to 64 s
+   *  before retrying and getAlarm keeps the past time, and a new setAlarm ends that wait. */
+  private async armNow() {
+    const now = Date.now(), alarm = await this.ctx.storage.getAlarm();
+    if (alarm !== null && alarm <= now && (this.running || now - alarm < OVERDUE_MS)) return;
+    if (alarm !== null && alarm > now) {
+      const kept = await this.ctx.storage.get<number>('displacedAlarm');
+      if (kept === undefined || alarm < kept) await this.ctx.storage.put('displacedAlarm', alarm);
+    }
+    await this.ctx.storage.setAlarm(now);
+  }
+
+  /** After a run: the alarm at `next` (the run's own retry), or at a retry a wake displaced, whichever is first, unless an
+   *  earlier one is set (a wake during the run). Inside alarm(), getAlarm is null unless something set one since it began. */
+  private async rearm(next: number | undefined) {
+    const at = Math.min(next ?? Infinity, await this.ctx.storage.get<number>('displacedAlarm') ?? Infinity);
+    if (at !== Infinity && (await this.ctx.storage.getAlarm() ?? Infinity) > at) await this.ctx.storage.setAlarm(at);
   }
 
   async alarm(): Promise<void> {
     const identity = this.identity ??= await this.ctx.storage.get<Identity>('identity');
     if (!identity || 'environment' in identity) return; // Retire alarms from the old shard names.
+    // The platform never runs two alarm() at once and nothing else calls it, so this guards only a direct call.
     if (this.running) { await this.ctx.storage.setAlarm(Date.now() + 1000); return; }
+    // A retry a wake displaced that is due by now is this run's to serve. Read before `running` is set, so a storage call
+    // that rejects here only fails this alarm (the platform retries it) and can't leave the shard marked as running.
+    const displaced = await this.ctx.storage.get<number>('displacedAlarm');
+    if (displaced !== undefined && displaced <= Date.now()) await this.ctx.storage.delete('displacedAlarm');
     this.running = true;
-    const started = Date.now();
-    let deps: Awaited<ReturnType<typeof loadDeps>> | undefined;
+    const started = Date.now(), wakeMs = this.wokenAt === undefined ? undefined : started - this.wokenAt;
+    this.wokenAt = undefined;
+    let deps: Awaited<ReturnType<typeof loadDeps>> | undefined, next: number | undefined;
     try {
       deps = await loadDeps();
       deps.setLogContext({ service: 'worker', deploy: (this.env as unknown as Record<string, unknown>).DEPLOY_SHA });
@@ -105,27 +138,26 @@ export class DispatcherShard extends DurableObject<Env> {
       if (runtime.config.multiTenant && !identity.accountId) return;
       const report = await runDispatcher(runtime, {
         ...identity, gate: this.gate, priorityWake: this.priorityWake,
-        until: started + RUN_MS, lanes: 2, batchSize: deps.shardLeaseSize(this.gate.quota?.maxSendRate,identity.shard.count), sendConcurrency: 6,
+        until: started + RUN_MS, lanes: 2, batchSize: deps.shardLeaseSize(this.gate.quota?.maxSendRate,identity.shard.count), sendConcurrency: 6, wakeMs,
         onGate: async state => { await this.ctx.storage.put('gate', state); },
       });
       if (!this.placementLogged) { this.placementLogged = true; this.ctx.waitUntil(this.logPlacement(identity, runtime)); }
-      // Work remained when the run budget ended: continue immediately. Otherwise sleep until the
-      // next API nudge or the scheduler's minute ping; queued mail never depends on this alarm alone.
-      if (!report.idle) await this.ctx.storage.setAlarm(Date.now());
-      else {
-        const retry = Math.min(report.quotaRetryAt ?? Infinity, report.paceRetryAt ?? Infinity);
-        if ((await this.ctx.storage.getAlarm() ?? Infinity) > retry) await this.ctx.storage.setAlarm(retry);
-      }
+      // Work remained when the run budget ended: continue immediately. Otherwise sleep until the next wake (an API nudge or
+      // the scheduler's minute ping) or the run's own retry. A wake only arms this alarm, so every run, and all queued mail,
+      // now depends on the alarm firing; armNow re-arms one left overdue by a platform retry wait.
+      const retry = Math.min(report.quotaRetryAt ?? Infinity, report.paceRetryAt ?? Infinity);
+      next = !report.idle ? Date.now() : retry === Infinity ? undefined : retry;
     } catch (error) {
       // Module loading itself can fail; still log, close and retry so the shard never wedges.
       if (!deps) console.error(JSON.stringify({ level: 'error', timestamp: new Date().toISOString(), service: 'worker', code: 'DISPATCHER_DEPS_FAILED' }));
       else {
       deps.logError(error, { code: error instanceof deps.ApiError ? error.code : 'DISPATCHER_RUN_FAILED', shard: dispatcherName(identity) }); }
       await this.closePool();
-      await this.ctx.storage.setAlarm(Date.now() + RETRY_MS);
+      next = Date.now() + RETRY_MS;
     } finally {
       this.running = false;
     }
+    await this.rearm(next);
   }
 
   private async runtime(): Promise<Runtime> {

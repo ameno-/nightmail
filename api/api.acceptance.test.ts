@@ -18127,7 +18127,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
 });
 
 describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
-  test('an idle DispatcherShard dispatches inline and does not reprobe placement on eviction', async t => {
+  test('a DispatcherShard runs only from its alarm: a wake arms it and returns, a wake mid-run gets a follow-up, a displaced retry survives, failures re-arm, placement is probed once', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, db }) => {
       // Node has no DO host; provide only its base constructor, storage and waitUntil.
       const { registerHooks } = await import('node:module');
@@ -18135,22 +18135,86 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         return specifier === 'cloudflare:workers' ? { shortCircuit:true, url:'data:text/javascript,export class DurableObject {constructor(ctx,env){this.ctx=ctx;this.env=env}} export class WorkerEntrypoint {constructor(ctx,env){this.ctx=ctx;this.env=env}}' } : next(specifier, context);
       } });
       const { DispatcherShard } = await import('./src/dispatcher-do.js').finally(() => hook.deregister());
-      const stored = new Map<string, unknown>(), pending: Promise<unknown>[] = [], alarms: number[] = [];
-      const ctx = { storage: { get:(k:string)=>stored.get(k), put:(k:string,v:unknown)=>stored.set(k,v), getAlarm:()=>null, setAlarm:(at:number)=>alarms.push(at) }, waitUntil:(p:Promise<unknown>)=>pending.push(p) };
-      let probes = 0, statusAtProbe: string | undefined;
-      const receipt = ok(await local('POST', '/v1/emails/send', mail()), 202);
+      // The platform, as the shard sees it: one alarm, consumed when it fires (getAlarm is null in the handler until something
+      // sets another), and one alarm() at a time. `onPut` runs inside the run when it saves its gate; `failGet` makes one read
+      // of that key reject, as an overloaded storage does.
+      const stored = new Map<string, unknown>(), pending: Promise<unknown>[] = [];
+      let alarm: number | null = null, onPut: (() => Promise<void>) | undefined, failGet: string | undefined;
+      const ctx = { waitUntil: (p: Promise<unknown>) => pending.push(p), storage: {
+        get: async (k: string) => { if (k === failGet) { failGet = undefined; throw new Error('Your account is doing too many concurrent storage operations.'); } return stored.get(k); }, put: async (k: string, v: unknown) => { stored.set(k, v); if (k === 'gate' && onPut) { const run = onPut; onPut = undefined; await run(); } },
+        delete: async (k: string) => stored.delete(k), getAlarm: async () => alarm, setAlarm: async (at: number) => { alarm = at; } } };
+      const shardFor = () => { const shard = new DispatcherShard(ctx as unknown as DurableObjectState, {} as Env); Object.assign(shard, { runtime: async () => runtime }); return shard; };
+      const fire = async (shard: InstanceType<typeof DispatcherShard>) => { assert.ok(alarm !== null && alarm <= Date.now() + 50, `an alarm is due (${alarm})`); alarm = null; await shard.alarm(); };
+      const wake = (shard: InstanceType<typeof DispatcherShard>) => shard.fetch(new Request(`https://dispatcher/wake?region=${REGION}`));
+      const status = async (id: string) => (await db.query('SELECT status FROM sending_emails WHERE id=$1', [id])).rows[0].status;
+      const logs: Json[] = []; t.mock.method(console, 'info', (line: string) => { try { logs.push(JSON.parse(line)); } catch {} });
+      let probes = 0;
       const previousFetch = globalThis.fetch;
-      globalThis.fetch = async () => {
-        probes++; statusAtProbe = (await db.query('SELECT status FROM sending_emails WHERE id=$1',[receipt.id])).rows[0].status;
-        return new Response('colo=TEST');
-      };
-      try { for (let i = 0; i < 2; i++) {
-        const shard = new DispatcherShard(ctx as unknown as DurableObjectState, {} as Env);
-        Object.assign(shard, { runtime: async () => runtime });
-        assert.equal((await shard.fetch(new Request(`https://dispatcher/wake?region=${REGION}`))).status, 200);
+      globalThis.fetch = async () => { probes++; return new Response('colo=TEST'); };
+      try {
+        // 1. Idle: the wake arms the alarm for now and returns with nothing sent and nothing running in the background.
+        const first = ok(await local('POST', '/v1/emails/send', mail()), 202), shard = shardFor();
+        const woken = Date.now();
+        assert.deepEqual(await (await wake(shard)).json(), { ok: true, running: false });
+        assert.equal(await status(first.id), 'queued'); assert.equal(pending.length, 0);
+        assert.ok(alarm !== null && alarm >= woken - 50 && alarm <= Date.now() + 50);
+        await fire(shard);
+        assert.notEqual(await status(first.id), 'queued');
+        const run = logs.find(l => l.code === 'DISPATCH_RUN' && l.claimed === 1)!;
+        assert.ok(typeof run.wakeMs === 'number' && run.wakeMs >= 0 && run.wakeMs < 5000, JSON.stringify(run));
+        assert.equal(alarm, null, 'An idle run with nothing left sets no alarm');
+        // 2. A wake that arrives while a run is under way (here, as the run saves its gate): the run reports running, the
+        // alarm is armed for a follow-up that fires once this alarm() returns, and that run sends the late email.
+        const early = ok(await local('POST', '/v1/emails/send', mail()), 202);
+        let late: { id: string } | undefined, during: Json | undefined;
+        onPut = async () => { late = ok(await local('POST', '/v1/emails/send', mail()), 202); during = await (await wake(shard)).json(); };
+        assert.equal(((await (await wake(shard)).json()) as Json).running, false);
+        await fire(shard);
+        assert.deepEqual(during, { ok: true, running: true });
+        assert.notEqual(await status(early.id), 'queued'); assert.equal(await status(late!.id), 'queued');
+        await fire(shard);
+        assert.notEqual(await status(late!.id), 'queued');
+        // 3. A later retry (a pace, quota or failure backoff) is armed when a wake comes: the wake runs the shard now, and the
+        // retry is armed again when that run ends.
+        const retryAt = Date.now() + 60_000; alarm = retryAt;
+        await wake(shard);
+        assert.ok(alarm !== null && alarm <= Date.now() + 50); assert.equal(stored.get('displacedAlarm'), retryAt);
+        await fire(shard);
+        assert.equal(alarm, retryAt, 'The displaced retry is armed again');
         while (pending.length) await Promise.all(pending.splice(0));
-      } } finally { globalThis.fetch = previousFetch; }
-      assert.deepEqual(alarms, []); assert.equal(probes, 1); assert.equal(statusAtProbe, 'accepted');
+        // 4. A storage read rejects as a run starts: that alarm fails, and the platform keeps its past time while it waits 2 to
+        // 64 s to retry. A wake arms the alarm again, and the shard still runs (it isn't left marked as running).
+        const stuck = ok(await local('POST', '/v1/emails/send', mail()), 202);
+        alarm = Date.now(); failGet = 'displacedAlarm';
+        await assert.rejects(fire(shard), /too many concurrent storage operations/);
+        alarm = Date.now() - 5000;
+        const rewoken = Date.now(), answer = (await (await wake(shard)).json()) as Json;
+        assert.equal(answer.running, false, 'The failed alarm left the shard marked as running');
+        assert.ok(alarm !== null && alarm >= rewoken - 50 && alarm <= Date.now() + 50, `a wake re-arms an overdue alarm (${alarm})`);
+        await fire(shard);
+        assert.notEqual(await status(stuck.id), 'queued');
+        // 5. A run that fails arms the failure backoff, 15 s out (or the displaced retry, if that is sooner; it isn't here).
+        Object.assign(shard, { runtime: async () => { throw new Error('database unavailable'); } });
+        alarm = Date.now(); const failedAt = Date.now();
+        await fire(shard);
+        assert.ok(alarm !== null && alarm >= failedAt + 15_000 - 50 && alarm <= Date.now() + 15_000 + 50, `the backoff is armed (${alarm})`);
+        Object.assign(shard, { runtime: async () => runtime });
+        // 6. A wake during a run that ends with a later retry of its own (here a pace hold 30 s out): the wake's alarm stays.
+        stored.set('gate', { ...(stored.get('gate') as object), nextAllowedAt: Date.now() + 30_000 });
+        const held = shardFor(); let heldWake = 0;
+        Object.assign(held, { runtime: async () => { if (!heldWake) { heldWake = Date.now(); await wake(held); } return runtime; } });
+        alarm = Date.now();
+        await fire(held);
+        assert.ok(heldWake && alarm !== null && alarm <= heldWake + 50, `the mid-run wake's alarm isn't moved to the run's retry (${alarm})`);
+        stored.delete('gate');
+        while (pending.length) await Promise.all(pending.splice(0));
+        // 7. An evicted shard (a new instance, same storage) doesn't probe its placement again.
+        const again = ok(await local('POST', '/v1/emails/send', mail()), 202), evicted = shardFor();
+        await wake(evicted); await fire(evicted);
+        while (pending.length) await Promise.all(pending.splice(0));
+        assert.notEqual(await status(again.id), 'queued');
+      } finally { globalThis.fetch = previousFetch; }
+      assert.equal(probes, 1);
     });
   });
   // tear witness (api/tear/dispatch): send ok, send ok, then a one-row dispatcher stepped through
@@ -32749,7 +32813,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
 
             // Subsequent DispatcherShard alarm loads transport cleanly and sends the message once.
             const store = new Map([['identity', { region: reg, accountId: acct, shard: { index: 0, count: 1 } }], ['placementLogged', true]]);
-            const shard = new DispatcherShard({ storage: { get: async k => store.get(k), put: async (k, v) => store.set(k, v), getAlarm: async () => null, setAlarm: async () => {} }, waitUntil() {} }, {});
+            const shard = new DispatcherShard({ storage: { get: async k => store.get(k), put: async (k, v) => store.set(k, v), delete: async k => store.delete(k), getAlarm: async () => null, setAlarm: async () => {} }, waitUntil() {} }, {});
             Object.assign(shard, { runtime: async () => runtime });
             await shard.alarm();
             const afterSend = (await client.query('SELECT status, error_code, provider_id, dispatch_version FROM sending_emails WHERE id = $1', [emailId])).rows[0];
