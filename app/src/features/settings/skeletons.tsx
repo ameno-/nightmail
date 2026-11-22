@@ -27,8 +27,6 @@ export const settingsColumns = {
     { key: 'receiving', label: 'Receiving', width: '32%', card: 'line' },
     { key: 'addresses', label: 'Addresses', align: 'right', card: 'hide' },
     { key: 'region', label: 'Region', card: 'hide' },
-    // What sending still waits for (a card has no room for it beside the status); the table shows it in the Sending cell.
-    { key: 'note', label: 'Setup', table: false, card: 'line' },
   ],
   // A receiving host's card: the host and its status, then its addresses and catch-all; Remove is in the row's menu.
   hosts: [
@@ -104,11 +102,11 @@ export const settingsColumns = {
   ],
 } satisfies Record<string, SkeletonColumn[]>
 // Hosted workspaces span every region, so their domains table has no Region column.
-const [domainName, domainStatus, domainReceiving, domainAddresses, domainRegion, domainNote] = settingsColumns.domains
+const [domainName, domainStatus, domainReceiving, domainAddresses, domainRegion] = settingsColumns.domains
 // The widths the loaded table forces (domain-records.css), so the skeleton and the list agree.
 export const domainColumns = (multiTenant: boolean): SkeletonColumn[] => multiTenant
-  ? [{ ...domainName, width: '38%' }, { ...domainStatus, key: 'sending', label: 'Sending', width: '29%' }, { ...domainReceiving, width: '23%' }, { ...domainAddresses, width: '10%' }, domainNote]
-  : [{ ...domainName, width: '34%' }, { ...domainStatus, key: 'sending', label: 'Sending', width: '26%' }, { ...domainReceiving, width: '21%' }, { ...domainAddresses, width: '9%' }, { ...domainRegion, width: '10%' }, domainNote]
+  ? [{ ...domainName, width: '38%' }, { ...domainStatus, key: 'sending', label: 'Sending', width: '29%' }, { ...domainReceiving, width: '23%' }, { ...domainAddresses, width: '10%' }]
+  : [{ ...domainName, width: '34%' }, { ...domainStatus, key: 'sending', label: 'Sending', width: '26%' }, { ...domainReceiving, width: '21%' }, { ...domainAddresses, width: '9%' }, { ...domainRegion, width: '10%' }]
 // Hosted webhooks cover every region, so they have no region scope or region columns.
 const hostedWebhookColumns: SkeletonColumn[] = [{ ...settingsColumns.webhooks[0], width: '54%' }, settingsColumns.webhooks[1], { ...settingsColumns.webhooks[3], width: '16%' }, { ...settingsColumns.webhooks[4], width: '12%' }, settingsColumns.webhooks[5]]
 const hostedDeliveryColumns: SkeletonColumn[] = [settingsColumns.deliveries[0], { ...settingsColumns.deliveries[2], width: '30%' }, ...settingsColumns.deliveries.slice(3)]

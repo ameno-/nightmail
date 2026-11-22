@@ -32,10 +32,10 @@ function sendingNote(domain: Domain) {
   return parts.length ? parts.join(' · ') : domain.status === 'verified' ? null : 'Waiting for DNS'
 }
 
-// A card's corner has room for the status alone; the note is on the domain's page.
-function SendingCell({ domain, short = false }: { domain: Domain; short?: boolean }) {
+// The status word alone; what setup still waits for is in its hover title and on the domain's page.
+function SendingCell({ domain }: { domain: Domain }) {
   const { status } = domainState(domain), note = sendingNote(domain)
-  return <StatusDot tone={domain.status === 'issue' ? 'danger' : domain.status === 'verified' ? 'success' : 'warning'} note={short ? undefined : note} title={note ? `${status} · ${note}` : undefined}>{status}</StatusDot>
+  return <StatusDot tone={domain.status === 'issue' ? 'danger' : domain.status === 'verified' ? 'success' : 'warning'} title={note ? `${status} · ${note}` : undefined}>{status}</StatusDot>
 }
 
 // One line per domain: the host it receives at (the domain itself or a subdomain such as reply.), or Off. The column
@@ -110,11 +110,10 @@ function DomainsList() {
     {domains.error ? <ErrorState error={domains.error} onRetry={() => void domains.refetch()} /> : <>
       <DataTable className="domains-table" loading={domains.isPending || (inbound.isPending && !inbound.error)} skeletonRows={3} minRows={3} rows={domains.data?.items ?? []} rowKey={row => row.id} rowHref={row => `/domains/${row.id}`} onRowIntent={row => void warm([queries.domain(row.id)])} empty={<EmptyState title={multiTenant ? 'No domains' : 'No domains in this region'} action={<Button onClick={openCreate}>Add domain</Button>} />} columns={[
         { ...columns[0], render: row => <span className="domain-name" title={row.name}>{row.name}</span> },
-        { ...columns[1], render: row => <SendingCell domain={row} />, cardRender: row => <SendingCell domain={row} short /> },
+        { ...columns[1], render: row => <SendingCell domain={row} /> },
         { ...columns[2], render: row => <ReceivingCell domain={row} receiving={receivingOf(row.id)} unknown={!!inbound.error} />, cardRender: row => <ReceivingCell domain={row} receiving={receivingOf(row.id)} unknown={!!inbound.error} card /> },
         { ...columns[3], render: row => { const r = receivingOf(row.id); return r && r.status !== 'off' && r.status !== 'disabled' ? <Link to={`/receiving?domain=${encodeURIComponent(r.name)}`} onClick={event => event.stopPropagation()}>{r.addressCount.toLocaleString('en-US')}</Link> : <span className="muted" title={inbound.error ? 'Couldn’t load receiving status' : undefined}>—</span> } },
         ...multiTenant ? [] : [{ ...columns[4], render: (row: Domain) => row.regionId }],
-        { ...columns.find(column => column.key === 'note')!, render: () => null, cardRender: row => sendingNote(row) ?? '' },
       ]} />
       {domains.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={10} total={domains.data.total} nextCursor={domains.data.nextCursor} onPageChange={next => setPageState({ regionId, page: next })} />}
     </>}
