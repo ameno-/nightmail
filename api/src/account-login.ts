@@ -185,7 +185,10 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
   }
   const returnUrl = new URL(flow.return_url);
   if (returnUrl.origin !== new URL(runtime.config.publicUrl).origin) throw loginFailed();
-  const invitation = returnUrl.pathname === '/' ? returnUrl.searchParams.get('invitation') : null;
+  // The invitation the page signing in carries, on any path: its link is /overview?invitation=… (workspaces.ts acceptUrl),
+  // and the dashboard signs in with the page it is on as the return URL. It names an ID only; pendingInvitation checks
+  // that it is for the address this sign-in proves.
+  const invitation = returnUrl.searchParams.get('invitation');
   // Identity is (issuer, subject). An email address is display and contact data only: it never links a subject to an
   // existing user. The account service gives an account one subject whichever of its linked methods (GitHub, Google)
   // signs in, so a person who uses both stays one user here; an account it keeps apart is another user.

@@ -1224,12 +1224,25 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   // verified address doesn't prove it, even matching the invitation and following its link; nor does a Google account
   // on another provider's address.
   const staffWorkspace=((await (await request('/v1/me','GET',staffSession)).json()) as {workspaceId:string}).workspaceId;
-  const invite=async(address:string)=>{const id=randomUUID();await db.query("INSERT INTO workspace_invitations(id,workspace_id,email,role,status,expires_at,inviter_id) VALUES($1,$2,$3,'member','pending',now()+interval '1 hour',$4)",[id,staffWorkspace,address,staffUser]);return {id,url:origin+'/?invitation='+id};};
+  // The link the product sends: createWorkspaceInvitation's acceptUrl, /overview?invitation=…. Signed out there, the
+  // dashboard signs in with that page as its return URL (context.tsx accountUrl keeps a known path and its query).
+  const invite=async(address:string)=>{
+    const response=await request('/v1/workspaces/current/invitations','POST',staffSession,{email:address,role:'member'});
+    assert.equal(response.status,201);
+    const created=await response.json() as {id:string;acceptUrl:string};
+    assert.equal(created.acceptUrl,`${origin}/overview?invitation=${encodeURIComponent(created.id)}`);
+    return {id:created.id,url:created.acceptUrl};
+  };
   for (const [method,address] of [['github',`invited-${randomUUID()}@example.net`],['google',`invited-${randomUUID()}@example.net`]] as const) {
     use(method);const link=await invite(address);fresh(address);
     assert.equal((await login(undefined,link.url)).headers.get('location'),origin+'/?auth=error',method);
     assert.equal((await attempt()).outcome,'invitation');
   }
+  // Without an invitation, the page the dashboard signs in from admits nobody: a new Gmail address is waitlisted.
+  use('google');fresh(`uninvited-${randomUUID()}@gmail.com`);
+  assert.equal((await login(undefined,origin+'/overview')).headers.get('location'),origin+'/?auth=waitlist');
+  assert.equal((await attempt()).outcome,'not_approved');
+  // A new Gmail invitee following the link joins, and lands back on it, where the dashboard shows the review.
   use('google');const gmail=`invited-${randomUUID()}@gmail.com`, gmailInvite=await invite(gmail);fresh(gmail);const gmailSubject=subject;
   const joined=await login(undefined,gmailInvite.url);
   assert.equal(landed(joined),gmailInvite.url);
