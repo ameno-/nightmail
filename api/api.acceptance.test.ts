@@ -21976,7 +21976,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           assert.ok(hits(fixed)<500 && hits(old)>backlog/2);
           await db.query('ROLLBACK TO backlog_benchmark; RELEASE backlog_benchmark');
         }
-        if(name==='outage'){assert.equal(report.sent,0);assert.ok(screens<=6 && rewritten<=24 && q.mock.callCount()<=8);}
+        // The first outage run also writes its classifier requests (src/screen-calls.ts): BEGIN, the write's limits, the INSERT, COMMIT.
+        if(name==='outage'){assert.equal(report.sent,0);assert.ok(screens<=6 && rewritten<=24 && q.mock.callCount()<=9);}
         await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=ANY($1) AND status='queued'`,[ids]);
       }
       gate.screenRetryAt=Date.now()-1;outage=false;score=.99;runtime.config.screen!.mode='flag';
@@ -22047,11 +22048,24 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const logs:Json[]=[];for(const level of ['error','warn','info'] as const)t.mock.method(console,level,(line:string)=>{try{logs.push(JSON.parse(line));}catch{}});
       const gate=initialGate(),ids:Record<string,string>={};
       const send=async(name:string,code:number)=>{
-        answer=name.startsWith('refused')?'ok':name as Answer;gate.screenRetryAt=undefined;
+        answer=(['refused','locked'].includes(name)?'ok':name) as Answer;gate.screenRetryAt=undefined;
         ids[name]=ok(await local('POST','/v1/emails/send',{from:'a@bench.invalid',to:'private.person@example.invalid',subject:`Your sign-in code is ${code}`,text:`Private body ${code}`},'live',{authorization:`Bearer ${key.secret}`}),202).id;
         await runDispatcher(runtime,{region:REGION,accountId:acct,batchSize:24,lanes:1,gate});
       };
-      let code=111111;for(const name of ['ok','503','stall','stall-body','network','invalid'])await send(name,code++);
+      let code=111111;
+      // Another session holds a lock on the table: the database cancels the write once it has waited 1.5 s for the lock, the
+      // email has already gone, and the connection gets its own limits back.
+      const limits=async()=>(await db.query("SELECT current_setting('statement_timeout') AS s,current_setting('lock_timeout') AS l")).rows[0],own=await limits();
+      const holder=new pg.Client({connectionString:FIXTURE_DATABASE_URL});await holder.connect();
+      try{
+        await holder.query('BEGIN');await holder.query('LOCK TABLE content_screen_calls IN SHARE MODE');
+        const started=Date.now();await send('locked',code++);const took=Date.now()-started;
+        assert.ok(took>=1400 && took<2400,`the write gave up after ${took} ms`);assert.equal(sent.at(-1),ids.locked);
+        assert.equal(logs.filter(l=>l.code==='CONTENT_SCREEN_CALLS_UNWRITTEN' && l.databaseCode==='55P03').length,1);
+      }finally{await holder.query('ROLLBACK').catch(()=>undefined);await holder.end();}
+      assert.deepEqual(await limits(),own);
+      for(const name of ['ok','503','stall','stall-body','network','invalid'])await send(name,code++);
+      assert.deepEqual(await limits(),own,'A written flush puts the caller\'s limits back');
       const {rows}=await db.query(`SELECT email_id,workspace_id,kind,required,region,shard,outcome,phase,http_status,headers_ms,ms,request_bytes,response_bytes,in_flight,window_index,windows,request_id,sample_rate,
         ses_in_flight,abs(extract(epoch FROM created_at-clock_timestamp()))<60 AS recent FROM content_screen_calls WHERE email_id=ANY($1)`,[Object.values(ids)]);
       const row=(name:string)=>rows.find(r=>r.email_id===ids[name])!;
@@ -22068,7 +22082,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query('ALTER TABLE content_screen_calls ADD CONSTRAINT refuse_every_row CHECK (false) NOT VALID');
       await send('refused',code++);
       assert.equal(sent.at(-1),ids.refused);assert.notEqual((await db.query('SELECT status FROM sending_emails WHERE id=$1',[ids.refused])).rows[0].status,'queued');
-      assert.equal(logs.filter(l=>l.code==='CONTENT_SCREEN_CALLS_UNWRITTEN' && l.rows===1).length,1);
+      assert.equal(logs.filter(l=>l.code==='CONTENT_SCREEN_CALLS_UNWRITTEN' && l.databaseCode==='23514').length,1);
       assert.equal((await db.query('SELECT count(*)::int AS n FROM content_screen_calls WHERE email_id=$1',[ids.refused])).rows[0].n,0);
     }));
   });
