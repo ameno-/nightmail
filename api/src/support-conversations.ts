@@ -29,7 +29,8 @@ type Ceiling = { method: 'GET' | 'POST'; path: string; roles: SupportRole[]; cou
  * Every /v1/support route a conversation may call: the roles whose workspaces it reads, and the dashboard route that
  * decides them. A role reads a workspace here exactly when its own session may call the counterpart there. A route
  * missing here is refused to every conversation. `views: false`: reading it names no workspace's data, so it writes no
- * customer-visible "support viewed" row. `chatOnly`: an email conversation is refused (it proposes nothing and keeps no notes).
+ * customer-visible "support viewed" row. `chatOnly`: an email conversation is refused (it proposes nothing, keeps no notes, and
+ * reads only the account's status, domains and sending: never billing, the activity trail, request logs or webhooks).
  */
 export const SUPPORT_CEILINGS: Ceiling[] = [
   // Its domains, webhook failures and activity follow their own counterparts (CONTEXT_SECTIONS).
@@ -40,13 +41,15 @@ export const SUPPORT_CEILINGS: Ceiling[] = [
   { method: 'GET', path: '/v1/support/emails', roles: EVERYONE, counterpart: 'GET /v1/emails' },
   { method: 'GET', path: '/v1/support/emails/{id}', roles: EVERYONE, counterpart: 'GET /v1/emails' },
   { method: 'GET', path: '/v1/support/events', roles: EVERYONE, counterpart: 'GET /v1/emails' },
-  { method: 'GET', path: '/v1/support/webhook-deliveries', roles: MANAGERS, counterpart: 'GET /v1/webhooks' },
+  // Email reads the account's status, domains and sending only (chatOnly): webhooks, billing, the activity trail and request
+  // logs are a chat's, in the dashboard's Help.
+  { method: 'GET', path: '/v1/support/webhook-deliveries', roles: MANAGERS, counterpart: 'GET /v1/webhooks', chatOnly: true },
   { method: 'GET', path: '/v1/support/standing', roles: EVERYONE, counterpart: 'GET /v1/sender-score' },
-  { method: 'GET', path: '/v1/support/billing', roles: MANAGERS, counterpart: 'GET /v1/billing/ledger' },
-  { method: 'GET', path: '/v1/support/audit', roles: MANAGERS, counterpart: 'GET /v1/activity' },
+  { method: 'GET', path: '/v1/support/billing', roles: MANAGERS, counterpart: 'GET /v1/billing/ledger', chatOnly: true },
+  { method: 'GET', path: '/v1/support/audit', roles: MANAGERS, counterpart: 'GET /v1/activity', chatOnly: true },
   // Request lines and traces show the whole workspace's API activity and its audit entries.
-  { method: 'GET', path: '/v1/support/requests', roles: MANAGERS, counterpart: 'GET /v1/activity' },
-  { method: 'GET', path: '/v1/support/requests/{requestId}', roles: MANAGERS, counterpart: 'GET /v1/activity' },
+  { method: 'GET', path: '/v1/support/requests', roles: MANAGERS, counterpart: 'GET /v1/activity', chatOnly: true },
+  { method: 'GET', path: '/v1/support/requests/{requestId}', roles: MANAGERS, counterpart: 'GET /v1/activity', chatOnly: true },
   { method: 'GET', path: '/v1/support/deliverability/metrics', roles: EVERYONE, counterpart: 'GET /v1/metrics' },
   { method: 'GET', path: '/v1/support/deliverability/bounces', roles: EVERYONE, counterpart: 'GET /v1/metrics' },
   { method: 'GET', path: '/v1/support/domains/{id}/health', roles: MANAGERS, counterpart: 'GET /v1/domains' },

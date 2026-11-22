@@ -7850,6 +7850,34 @@ describe('Hosted MCP OAuth and tools', () => {
         }
       });
 
+      await t.test('7d email reads only the account’s status, domains and sending: billing, the activity trail, request logs, webhooks and received mail are a chat’s (403 before anything is charged or logged, or left out of the context); a chat is unchanged', async () => {
+        const owned = await email(owner.email), chatted = await chat(owner);
+        assert.equal(owned.body.mode, 'member');
+        const trail = async (id: string) => (await db.query(`SELECT count(*)::int AS n FROM audit_events WHERE actor_id = $1 AND action IN ('support.read', 'support.view')`, [id])).rows[0].n as number;
+        // Ask the chat once first, so its activity trail has entries (its own customer-visible support.view).
+        ok(await stamped(chatted, 'GET', `/v1/support/workspaces?workspaceId=${acme}`));
+        const charged = async () => (await db.query('SELECT used FROM support_conversations WHERE id = $1', [owned.id])).rows[0].used as number, before = await trail(owned.id), used = await charged();
+        for (const path of [`/v1/support/billing?workspaceId=${acme}`, `/v1/support/audit?workspaceId=${acme}`, `/v1/support/requests?workspaceId=${acme}`,
+          `/v1/support/requests/req_${hex().slice(0, 32)}?workspaceId=${acme}`, `/v1/support/webhook-deliveries?workspaceId=${acme}`]) {
+          error(await stamped(owned.id, 'GET', path), 403, 'SUPPORT_CHAT_ONLY');
+          assert.equal((await stamped(chatted, 'GET', path)).status === 403, false, `The chat still reads ${path}.`);
+        }
+        assert.deepEqual([await trail(owned.id), await charged()], [before, used], 'Nothing charged or logged for email, no view row.');
+        // Its context keeps the schema, with no activity trail, webhook failures, request IDs or API-key count.
+        const mailed = ok(await stamped(owned.id, 'GET', `/v1/support/context?workspaceId=${acme}`)), chatContext = ok(await stamped(chatted, 'GET', `/v1/support/context?workspaceId=${acme}`));
+        assert.deepEqual([mailed.recentActivity, mailed.recentFailures.webhookDeliveries, mailed.links.requestIds, 'apiKeys' in mailed.workspaces[0].counts], [[], [], [], false]);
+        assert.deepEqual([mailed.workspaces.map((w: Json) => w.id), mailed.domains.length >= 0, Array.isArray(mailed.standing)], [[acme], true, true], 'Status, domains and sending stay.');
+        assert.ok(chatContext.recentActivity.length > 0 && 'apiKeys' in chatContext.workspaces[0].counts, 'A chat’s context is unchanged.');
+        assert.equal('apiKeys' in ok(await stamped(owned.id, 'GET', `/v1/support/workspaces?workspaceId=${acme}`)).data[0].counts, false);
+        // Sent mail only: received mail is a chat's.
+        const received = await mail(owner.email, { workspace: acme, box: acmeBox });
+        assert.deepEqual(ok(await stamped(owned.id, 'GET', `/v1/support/emails?workspaceId=${acme}&direction=received`)).data, []);
+        error(await stamped(owned.id, 'GET', `/v1/support/emails/${received}?workspaceId=${acme}`), 404);
+        assert.ok(ok(await stamped(chatted, 'GET', `/v1/support/emails?workspaceId=${acme}&direction=received`)).data.some((e: Json) => e.id === received), 'The chat still reads received mail.');
+        ok(await stamped(chatted, 'GET', `/v1/support/emails/${received}?workspaceId=${acme}`));
+        for (const done of [owned.id, chatted]) ok(reply(await platform.closeConversation(done)));
+      });
+
       await t.test('8 content access: only the chat’s own person, while a member of its workspace', async () => {
         const id = await chat(owner), emailId = unique('email');
         await db.query(`INSERT INTO sending_emails(id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, status, snapshot, simulated)
@@ -9273,11 +9301,11 @@ describe('Hosted MCP OAuth and tools', () => {
         const narrowed = await get('/v1/support/requests?route=/v1/emails&code=VALIDATION_FAILED');
         assert.deepEqual(asked.at(-1)!.body.parameters.filters.slice(4), [eq('route', '/v1/emails'), eq('code', 'VALIDATION_FAILED')]);
         assert.deepEqual(narrowed.groups.map((g: Json) => g.count), [7]);
-        // A conversation over two workspaces asks for both; workspaceId narrows to one.
-        const wide = await get('/v1/support/requests', stamp(both.id));
-        assert.deepEqual(asked.at(-1)!.body.parameters.filters[2].filters.map((f: Json) => f.value).sort(), [wid, second].sort());
-        assert.equal(wide.totals.errors, 12); assert.ok(wide.groups.some((g: Json) => g.code === 'CAMPAIGN_NOT_READY' && g.sampleRequestIds[0] === shared));
-        const onlySecond = await get(`/v1/support/requests?workspaceId=${second}`, stamp(both.id));
+        // Request logs are a chat's: an email conversation (the one kind that spans workspaces) is refused before anything is
+        // charged, and a chat in the second workspace asks for that one.
+        error(await send('GET', '/v1/support/requests', stamp(both.id)), 403, 'SUPPORT_CHAT_ONLY');
+        error(await send('GET', `/v1/support/requests/${shared}`, stamp(both.id)), 403, 'SUPPORT_CHAT_ONLY');
+        const inSecond = await chat(manager!, second), onlySecond = await get('/v1/support/requests', stamp(inSecond.id));
         assert.deepEqual(asked.at(-1)!.body.parameters.filters[2], workspaceGroup([second]));
         assert.deepEqual(onlySecond.groups.map((g: Json) => [g.code, g.count]), [['CAMPAIGN_NOT_READY', 1]]);
         error(await send('GET', `/v1/support/requests?workspaceId=${other}`, support), 404);
@@ -9300,7 +9328,7 @@ describe('Hosted MCP OAuth and tools', () => {
         assert.deepEqual([asked.length - searching, old.found, old.logs.map((l: Json) => l.at)], [2, true, [new Date(events.find(e => (e.source as Json).requestId === older)!.timestamp).toISOString()]]);
         assert.ok(asked.at(-1)!.body.timeframe.to - asked.at(-1)!.body.timeframe.from >= 3 * 86_400_000);
         assert.deepEqual((await get(`/v1/support/requests/${shared}`)).logs, [], 'A line of a workspace outside the conversation is never shown.');
-        assert.equal((await get(`/v1/support/requests/${shared}`, stamp(both.id))).logs[0].workspaceId, second);
+        assert.equal((await get(`/v1/support/requests/${shared}`, stamp(inSecond.id))).logs[0].workspaceId, second);
 
         // Cloudflare failing: 200 with available false, a warning with the HTTP status only, and no cached failure.
         warnings.length = 0; outage = { status: 500, body: { success: false, errors: [{ code: 10000, message: 'Authentication error for private@example.org' }] } };
