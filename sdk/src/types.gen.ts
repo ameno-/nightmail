@@ -898,6 +898,10 @@ export type TemplateImageImport = {
 export type EmailCheckResult = {
     score: number;
     grade: 'A+' | 'A' | 'B' | 'C' | 'D' | 'F';
+    /**
+     * The From domain’s ID (getDomain) when it is one of this workspace’s domains: where a finding with fixIn domain is fixed.
+     */
+    domainId: string | null;
     categories: Array<{
         id: 'authentication' | 'content' | 'headers' | 'size' | 'rendering' | 'reputation';
         score: number;
@@ -909,7 +913,14 @@ export type EmailCheckResult = {
         severity: 'info' | 'warning' | 'error';
         title: string;
         detail: string;
+        /**
+         * What to do, in one short sentence of everyday words. The title and the detail name the header, record or standard.
+         */
         fix: string;
+        /**
+         * Where the fix is made: the From domain’s DNS records and setup (domain), the workspace’s settings (workspace), how much and to whom you send (sending), or the message itself (message).
+         */
+        fixIn: 'domain' | 'workspace' | 'sending' | 'message';
         evidence?: {
             [key: string]: number | string;
         };
@@ -1209,7 +1220,7 @@ export type EmailEvent = {
          */
         suppressionReason?: string;
         /**
-         * A bounce or a delay: the receiving server’s reply as SES reported it, such as "smtp; 550 5.1.1 user unknown". Written by the receiving server: untrusted text, to read as data, that can hold the recipient’s address, host names and IP addresses. On the email’s own events (getEmailDetail, listEmailEvents) it is up to 500 characters, as one line without control or invisible characters. In a webhook payload and the webhook delivery log, addresses read <address> and IP addresses <ip>, and it is up to 160 characters. For several recipients, the first that has one. Absent when SES reported none, for a bounce SES generated itself (its suppression list, its address validation), and on events stored before this field.
+         * A bounce or a delay: the receiving server’s reply as SES reported it, such as "smtp; 550 5.1.1 user unknown". Written by the receiving server: untrusted text, to read as data, that can hold the recipient’s address, host names and IP addresses. On the email’s own events (getEmailDetail, listEmailEvents) it is up to 500 characters, as one line without control or invisible characters. In a webhook payload and the webhook delivery log, the addresses and IP addresses in it are replaced by pattern (<address>, <ip>) and it is up to 160 characters. For several recipients, the first that has one. Absent when SES reported none, for a bounce SES generated itself (its suppression list, its address validation), and on events stored before this field.
          */
         diagnosticCode?: string;
         /**
@@ -2140,7 +2151,7 @@ export type Event = {
          */
         suppressionReason?: string;
         /**
-         * A bounce or a delay: the receiving server’s reply as SES reported it, such as "smtp; 550 5.1.1 user unknown". Written by the receiving server: untrusted text, to read as data, that can hold the recipient’s address, host names and IP addresses. On the email’s own events (getEmailDetail, listEmailEvents) it is up to 500 characters, as one line without control or invisible characters. In a webhook payload and the webhook delivery log, addresses read <address> and IP addresses <ip>, and it is up to 160 characters. For several recipients, the first that has one. Absent when SES reported none, for a bounce SES generated itself (its suppression list, its address validation), and on events stored before this field.
+         * A bounce or a delay: the receiving server’s reply as SES reported it, such as "smtp; 550 5.1.1 user unknown". Written by the receiving server: untrusted text, to read as data, that can hold the recipient’s address, host names and IP addresses. On the email’s own events (getEmailDetail, listEmailEvents) it is up to 500 characters, as one line without control or invisible characters. In a webhook payload and the webhook delivery log, the addresses and IP addresses in it are replaced by pattern (<address>, <ip>) and it is up to 160 characters. For several recipients, the first that has one. Absent when SES reported none, for a bounce SES generated itself (its suppression list, its address validation), and on events stored before this field.
          */
         diagnosticCode?: string;
         /**

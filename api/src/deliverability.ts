@@ -54,15 +54,25 @@ const fromDomainOf = sql`lower(split_part(e.from_address, '@', 2))`;
 export const fromDomainIs = (domain: string) => sql`(reverse(lower(split_part(e.from_address, '@', 2))) || '.') COLLATE "C" = ${[...domain.toLowerCase()].reverse().join('') + '.'}`;
 
 // ---------- redaction ----------
-const ADDRESS = /[^\s<>"'@,;()[\]]+@[^\s<>"'@,;()[\]]+/g;
+// Replacement by pattern, not a parser: it takes what mail servers write, and a form no pattern here knows stays as it was.
+// An address is a local part, "@" and a domain. The local part: plain characters, an apostrophe between letters
+// (o'brien), a comment without spaces (bob(work)), or a quoted string ("mary smith"). The domain: plain characters, or an
+// address literal in brackets (bob@[192.0.2.1]). Each addition only widens what the plain form already matched.
+const ATOM = String.raw`[^\s<>"'@,;()[\]]`;
+const ADDRESS = new RegExp(`(?:"[^"]{1,64}"|(?:${ATOM}|(?<=[A-Za-z])'(?=[A-Za-z])|\\([^()\\s]*\\))+)@(?:${ATOM}+|\\[[^\\]\\s]{1,64}\\])`, 'g');
 const IPV4 = /\b(?:\d{1,3}\.){3}\d{1,3}\b/g, IPV6 = /\b(?:[0-9a-f]{1,4}:){2,7}(?::|[0-9a-f]{1,4})\b/gi;
-/** A provider diagnostic as support may read it: addresses become <address>, IPs <ip>, at most 160 characters. */
+// A shortened IPv6 address (one with "::"), whole, with the IPv4 tail IPV4 has already replaced; IPV6 above took only
+// its head. It starts a word, or follows the "IPv6:" of an address literal.
+const IPV6_SHORT = /(?<![0-9a-z.])(?<!(?<!ipv6):)(?=[0-9a-f:]*[0-9a-f])(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6})?::(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6})?(?::?<ip>)?(?![0-9a-z:])/gi;
+/** A provider diagnostic as support and webhooks may read it: addresses become <address>, IPs <ip>, at most 160
+ *  characters. The SQL below groups bounce reasons by the plain forms only; what it returns comes through here. */
 export function redactDiagnostic(text: string | null | undefined): string | null {
   if (!text) return null;
-  return text.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(ADDRESS, '<address>').replace(IPV4, '<ip>').replace(IPV6, '<ip>').replace(/\s+/g, ' ').trim().slice(0, LIMITS.diagnostic) || null;
+  return text.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(ADDRESS, '<address>').replace(IPV4, '<ip>').replace(IPV6_SHORT, '<ip>').replace(IPV6, '<ip>').replace(/\s+/g, ' ').trim().slice(0, LIMITS.diagnostic) || null;
 }
 /** An email event's data with the receiving server's reply (diagnosticCode) redacted that way, for the readers that
- *  never get a recipient's address in it: webhooks (sending.ts webhookData) and support's reads of one email's events. */
+ *  get it with its addresses and IP addresses replaced: webhooks (sending.ts webhookData) and support's reads of one
+ *  email's events. */
 export function withRedactedReply(data: Record<string, unknown>): Record<string, unknown> {
   if (typeof data.diagnosticCode !== 'string') return data;
   const { diagnosticCode, ...rest } = data, reply = redactDiagnostic(diagnosticCode);

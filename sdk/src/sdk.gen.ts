@@ -1312,7 +1312,7 @@ export const getTemplateAssetContent = <ThrowOnError extends boolean = false>(op
 /**
  * Check email sendability without sending
  *
- * Read-only 0–100 advisory score, not an inbox-placement probability or admission decision. Supply one draft (HTML or text), outbound email ID, or campaign ID. Uses visible retained content, cached From-domain facts, and workspace reputation for unrestricted readers. No DNS/asset fetches or paid screen. Scores use current evidence, not a historical delivery verdict. HTML has the preview lint’s 256 KiB UTF-8 and tree budgets. Marketing drafts are checked as supplied; Nightmail generates the unsubscribe headers and link for campaigns. MIME bytes are estimated.
+ * Read-only 0–100 advisory score, not an inbox-placement probability or admission decision. Supply one draft (HTML or text), outbound email ID, or campaign ID. Uses visible retained content, cached From-domain facts, and workspace reputation for unrestricted readers. No DNS/asset fetches or paid screen. Scores use current evidence, not a historical delivery verdict. HTML has the preview lint’s 256 KiB UTF-8 and tree budgets. Marketing drafts are checked as supplied; Nightmail adds the unsubscribe headers, the link and the workspace’s postal address to campaigns and to marketing mail it sent, so those are checked as sent. Each finding’s fix is one plain sentence and fixIn says where it is made. MIME bytes are estimated.
  */
 export const checkEmail = <ThrowOnError extends boolean = false>(options: Options<CheckEmailData, ThrowOnError>): RequestResult<CheckEmailResponses, CheckEmailErrors, ThrowOnError> => (options.client ?? client).post<CheckEmailResponses, CheckEmailErrors, ThrowOnError>({
     security: [

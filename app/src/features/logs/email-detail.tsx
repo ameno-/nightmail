@@ -6,7 +6,7 @@ import { queries } from '../../data/queries'
 import type { Email, EmailEvent } from '../../data/types'
 import { Alert, Button, CopyButton, elapsed, ErrorState, PageHeader, Sheet, Tooltip, Waterfall, type Tone } from '../../components/ui'
 import { useEmailDocument } from '../../components/EmailPreview'
-import { EmailViews, SendabilityChip, SendabilityDetails, SendabilityTitle, SendabilityToggle, useSendability, type InsightSource } from '../../components/EmailInsight'
+import { Checks, ChecksChip, ChecksToggle, EmailViews, useSendability, type InsightSource } from '../../components/EmailInsight'
 import { AddressList, Sender } from '../../components/PrivateAddress'
 import { AddressText } from '../../components/AddressText'
 import { date, label, shortDateTime, time } from '../../lib/format'
@@ -18,8 +18,8 @@ import { productName } from '../../../../api/src/brand'
 import { errorText } from '../../data/types'
 
 // A sent email, in the order people come for: did it arrive (the status and its delivery, and why when it didn't), what it looked like (the
-// preview: as sent and in each client, side by side where there is room), and how to do better (the score, the fixes to
-// make first and every finding), and the conversation it is part of. The window decides where each sits (detail-layout.ts).
+// preview: as sent and in each client, side by side where there is room), and how to do better (Checks: at most three
+// things to fix), and the conversation it is part of. The window decides where each sits (detail-layout.ts).
 
 // A scheduled email reads queued, with scheduled true, until it goes; the page calls it scheduled.
 const statusOf = (email: Email) => email.scheduled ? 'scheduled' : email.status
@@ -37,12 +37,12 @@ export function EmailDetailPage() {
 
 // focus: the email the URL names, which the thread marks at once while it loads.
 function EmailDetail({ email, focus }: { email: Email; focus: string }) {
-  const { mode, roomy } = useDetailLayout()
+  const { mode } = useDetailLayout()
   const [panel, setPanel] = useState(false)
-  // A phone or tablet opens the delivery and the facts, the score, and the thread in sheets; each returns focus to its opener.
-  const [sheet, setSheet] = useState<'details' | 'sendability' | 'thread' | null>(null)
+  // A phone or tablet opens the delivery and the facts, the checks, and the thread in sheets; each returns focus to its opener.
+  const [sheet, setSheet] = useState<'details' | 'checks' | 'thread' | null>(null)
   const opener = useRef<HTMLElement | null>(null)
-  const openSheet = (which: 'details' | 'sendability' | 'thread') => (from: HTMLElement) => { opener.current = from; setSheet(which) }
+  const openSheet = (which: 'details' | 'checks' | 'thread') => (from: HTMLElement) => { opener.current = from; setSheet(which) }
   const thread = threaded(email.thread) ? email.thread : null
   const items = threadItems(thread, focus)
   const open = { warm: useThreadPrefetch(items), onNavigate: () => setSheet(null) }
@@ -60,11 +60,11 @@ function EmailDetail({ email, focus }: { email: Email; focus: string }) {
   const compact = mode === 'stack'
   const delivery = <Delivery key={email.events.map(event => event.id).join()} email={email} vertical={mode !== 'panel'} why={compact ? 'said' : 'full'} />
   const why = compact ? reasonOf(email, email.events) : null
-  const sendability = <SendabilityDetails check={check} expanded={roomy} />
+  const checks = <Checks check={check} />
   const close = () => { setPanel(false); document.querySelector<HTMLElement>(`[aria-controls="${panelId}"]`)?.focus() }
   const subject = email.subject || '(no subject)'
   return <div className="email-detail" data-mode={mode}>
-    {compact ? <PageHeader title={<Subject text={subject} />} backTo="/logs" subtitle={<><StatusLine email={email} chip={<>{thread && <ThreadChip count={thread.count} onOpen={openSheet('thread')} />}<SendabilityChip check={check} onOpen={openSheet('sendability')} /></>} onOpen={openSheet('details')} />{why && <p className="email-why">{why.text}</p>}</>} />
+    {compact ? <PageHeader title={<Subject text={subject} />} backTo="/logs" subtitle={<><StatusLine email={email} chip={<>{thread && <ThreadChip count={thread.count} onOpen={openSheet('thread')} />}<ChecksChip check={check} onOpen={openSheet('checks')} /></>} onOpen={openSheet('details')} />{why && <p className="email-why">{why.text}</p>}</>} />
       : <PageHeader title={subject} backTo="/logs" subtitle={<EmailFacts email={email} />} />}
     {mode === 'panel' && delivery}
     <div className="email-detail__body">
@@ -72,24 +72,24 @@ function EmailDetail({ email, focus }: { email: Email; focus: string }) {
         {thread && mode === 'panel' && <ThreadRows items={items} part="before" open={open} />}
         <EmailViews source={source} previewSource={hasHtml ? { emailId: email.id } : null} check={check} original={{ doc: original.complete ? original.doc : null, error: original.error, html: email.html, text }}
           fill={!compact} wide={!compact} compact={compact}
-          toolbarEnd={mode === 'panel' && <SendabilityToggle check={check} open={panel} onToggle={() => setPanel(!panel)} controls={panelId} />} />
+          toolbarEnd={mode === 'panel' && <ChecksToggle check={check} open={panel} onToggle={() => setPanel(!panel)} controls={panelId} />} />
         {thread && mode === 'panel' && <ThreadRows items={items} part="after" open={open} />}
       </section>
       {mode === 'column' && <aside className="email-detail__side ui-scroll-fade" aria-label="Details">
         {thread && <ThreadTimeline thread={thread} items={items} open={open} />}
         <section className="email-detail__delivery" aria-labelledby={deliveryId}><h2 id={deliveryId} className="ss__title">Delivery</h2>{delivery}</section>
-        {sendability}
+        {checks}
       </aside>}
       {/* Its toggle, on the toolbar's row, heads it: the panel starts at the preview's top. */}
-      {mode === 'panel' && <aside ref={panelRef} id={panelId} className="email-detail__side ui-scroll-fade" aria-label="Sendability" tabIndex={-1} hidden={!panel} onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); close() } }}>{sendability}</aside>}
+      {mode === 'panel' && <aside ref={panelRef} id={panelId} className="email-detail__side ui-scroll-fade" aria-label="Checks" tabIndex={-1} hidden={!panel} onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); close() } }}>{checks}</aside>}
     </div>
     {compact && <>
       <Sheet open={sheet === 'details'} onOpenChange={open => setSheet(open ? 'details' : null)} title="Details" className="email-detail-sheet" returnFocus={opener}>
         <section className="email-detail-sheet__delivery" aria-label="Delivery">{delivery}</section>
         <FactList email={email} />
       </Sheet>
-      <Sheet open={sheet === 'sendability'} onOpenChange={open => setSheet(open ? 'sendability' : null)} title={<SendabilityTitle check={check} />} className="email-detail-sheet email-detail-sheet--tall" returnFocus={opener}>
-        <SendabilityDetails check={check} expanded titled={false} />
+      <Sheet open={sheet === 'checks'} onOpenChange={open => setSheet(open ? 'checks' : null)} title="Checks" className="email-detail-sheet" returnFocus={opener}>
+        <Checks check={check} titled={false} />
       </Sheet>
       {thread && <Sheet open={sheet === 'thread'} onOpenChange={open => setSheet(open ? 'thread' : null)} title={`Thread · ${thread.count}`} className="email-detail-sheet" returnFocus={opener}>
         <ThreadTimeline thread={thread} items={items} open={open} titled={false} />
@@ -123,7 +123,7 @@ function Clamped({ className, text, children }: { className: string; text: strin
 const Subject = ({ text }: { text: string }) => <Clamped className="email-subject" text={text}>{text}</Clamped>
 
 // A phone's one line under the subject: the status as of its last step (a scheduled email: when it goes), with when and
-// (on a tablet) the stream, opening the delivery and the facts; and the score's chip. The Details sheet names the stream.
+// (on a tablet) the stream, opening the delivery and the facts; and the checks' chip. The Details sheet names the stream.
 function StatusLine({ email, chip, onOpen }: { email: Email; chip: ReactNode; onOpen: (opener: HTMLElement) => void }) {
   const key = eventKey(email.status), steps = stepsOf(email.events, email), sendsAt = sendTime(email)
   const at = sendsAt ?? [...steps].reverse().find(step => step.key === key)?.at ?? steps[steps.length - 1]?.at ?? email.sentAt

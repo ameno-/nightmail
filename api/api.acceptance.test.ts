@@ -10582,6 +10582,11 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
       const bad=ok(await check(risky)), ids=bad.findings.map((f:Json)=>f.ruleId);
       assert.ok(bad.score<report.score-20); for(const id of ['part-mismatch','display-name','off-brand-links','short-url','script','form','unsubscribe-post','postal-address','shouting'])assert.ok(ids.includes(id),id);
       assert.ok(bad.findings.every((f:Json)=>f.title && f.detail && f.fix && f.category && f.severity));assert.doesNotMatch(JSON.stringify(bad),/never-fetch|192\.0\.2\.1|<script/i);
+      // Each fix is in plain words, without the header, record or standard its title and detail name, and says where it is made.
+      assert.ok(bad.findings.every((f:Json)=>['domain','workspace','sending','message'].includes(f.fixIn) && !/RFC|List-Unsubscribe|MAIL FROM|SPF|DKIM|DMARC|marketing sending/.test(f.fix)),JSON.stringify(bad.findings.map((f:Json)=>f.fix)));
+      assert.deepEqual(['unsubscribe-header','unsubscribe-post','unsubscribe-link','postal-address','script'].map(id=>{const f=bad.findings.find((f:Json)=>f.ruleId===id);return [f.fix,f.fixIn];}),
+        [['Add one-click unsubscribe.','message'],['Add one-click unsubscribe.','message'],['Add an unsubscribe link.','message'],['Add your postal address to the footer.','message'],['Remove the scripts.','message']]);
+      assert.equal(bad.domainId,null,'A From domain that is not one of the workspace\u2019s has no ID to link.');
       const bytes=ok(await check({...good,html:undefined,text:'é'.repeat(32769)})).findings.find((f:Json)=>f.ruleId==='screen-bytes');
       assert.deepEqual(bytes.evidence,{screenedBytes:65538,limitBytes:65536,remainingBytes:-2});assert.equal(bytes.severity,'error');
       error(await check({...good,html:'<div>'.repeat(400)}),413,'EMAIL_CHECK_LIMIT_EXCEEDED');
@@ -10590,8 +10595,16 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
       assert.ok(ok(await check({emailId:await email(wid)},scoped)).score>0);error(await check({emailId:await email(foreign)}),404,'NOT_FOUND');
       const campaign=async(workspace:string)=>{const id=unique('checked-campaign');await db.query(`INSERT INTO sending_campaigns(id,workspace_id,draft) VALUES($1,$2,$3)`,[id,workspace,{from:'newsletter@shop.example.com',fromName:'Shop',region:REGION,subject:'Updates',html:'<p>Updates from the shop.</p>',audience:{},attachments:[],defaults:{},tracking:false}]);return id;};
       const c=ok(await check({campaignId:await campaign(wid)}));assert.ok(!c.findings.some((f:Json)=>f.ruleId.startsWith('unsubscribe-')));error(await check({campaignId:await campaign(foreign)}),404,'NOT_FOUND');
-      // No simulated send rows were inserted except the explicitly seeded terminal email.
-      assert.equal((await db.query('SELECT count(*)::int n FROM sending_emails WHERE workspace_id=$1',[wid])).rows[0].n,1);
+      // Marketing mail gets its unsubscribe headers, link and postal address from the workspace when it is sent: a campaign
+      // and a sent marketing email are told only that the workspace has no address yet, and where to add it.
+      const marketing=unique('checked-marketing');await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,status,simulated) VALUES ($1,$2,$3,'fixture','orders@shop.example.com','[]','[]','[]',$4,$5,'delivered',true)`,[marketing,wid,REGION,good.subject,{...good,kind:'marketing',testCampaignId:null,attachments:[]}]);
+      const advice=async(input:Json)=>ok(await check(input)).findings.filter((f:Json)=>f.ruleId.startsWith('unsubscribe-') || f.ruleId==='postal-address').map((f:Json)=>[f.ruleId,f.fix,f.fixIn]);
+      await db.query('UPDATE operation_settings SET postal_address=NULL WHERE workspace_id=$1',[wid]);
+      for(const input of [{campaignId:await campaign(wid)},{emailId:marketing}]) assert.deepEqual(await advice(input),[['postal-address','Add your postal address.','workspace']]);
+      ok(await local('PATCH','/v1/settings/workspace',{postalAddress:'Fixture Co.\n9 Synthetic Road\nTestville, CA 94000'}));
+      for(const input of [{campaignId:await campaign(wid)},{emailId:marketing}]) assert.deepEqual(await advice(input),[]);
+      // No simulated send rows were inserted except the two explicitly seeded terminal emails.
+      assert.equal((await db.query('SELECT count(*)::int n FROM sending_emails WHERE workspace_id=$1',[wid])).rows[0].n,2);
     });
   });
   test('previewEmail validates offline previews and reads only authorized, redacted outbound HTML', async t => {
@@ -31388,6 +31401,17 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // payload and the delivery log) gets it without the recipient's address or an IP address, at most 160 characters.
       assert.equal(ok(await local('GET',`/v1/emails/${bounced.id}/events`)).data.find((event:Json)=>event.type==='bounce').data.diagnosticCode,reply);
       const redacted=`smtp; 550 5.1.1 <<address>>: user unknown at <ip> ${'x'.repeat(600)}`.slice(0,160);
+      // The replacement is by pattern. The rarer forms of an address and of an IP address go whole too, and the plain
+      // forms as they always did.
+      const {redactDiagnostic}=await import('./src/deliverability.js');
+      for(const [said,read] of [
+        ['550 5.1.1 "mary smith"@example.com rejected','550 5.1.1 <address> rejected'],
+        ['550 5.1.1 bob(work)@example.com rejected','550 5.1.1 <address> rejected'],
+        ['550 5.1.1 <o\'brien@example.com>: no such user','550 5.1.1 <<address>>: no such user'],
+        ['550 5.1.1 bob@[192.0.2.1] refused','550 5.1.1 <address> refused'],
+        ['554 5.7.1 host 2001:db8::1 blocked, also fe80::1ff:fe23:4567:890a, [::1]:25 and [IPv6:2001:db8::25]','554 5.7.1 host <ip> blocked, also <ip>, [<ip>]:25 and [IPv6:<ip>]'],
+        ['550 5.1.1 <person@example.com>: rejected by 192.0.2.44 (\'postmaster@example.net\') via ::ffff:192.0.2.9 and 2001:0db8:85a3:0000:0000:8a2e:0370:7334','550 5.1.1 <<address>>: rejected by <ip> (\'<address>\') via <ip> and <ip>'],
+      ]) assert.equal(redactDiagnostic(said),read,said);
       assert.equal((await published(bounced.id,'email.bounced')).diagnosticCode,redacted);
       const payload=await delivered(bounced.id);
       assert.equal(payload.diagnosticCode,redacted);assert.equal(payload.bounceType,'Permanent');assert.ok(!JSON.stringify(posted).includes(bounced.to));

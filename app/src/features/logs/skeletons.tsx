@@ -44,7 +44,7 @@ export function EmailDetailSkeleton() {
         <section className="email-detail__preview"><div className="ev" data-fill><div className="ev-toolbar"><Skeleton width={360} height={28} /></div>
           <div className="ev-stage"><div className="ev-captions" /><div className="ev-canvas"><div className="ev-placeholder" /></div></div></div></section>
         {mode === 'column' && <aside className="email-detail__side"><section className="email-detail__delivery"><h2 className="ss__title">Delivery</h2>{delivery}</section>
-          <section className="ss"><div className="ss__head"><h2 className="ss__title">Sendability</h2><SkeletonText width={52} /></div><div className="ss__fixes">{['86%', '70%', '78%'].map(width => <SkeletonText key={width} width={width} lineHeight={28} />)}</div></section></aside>}
+          <section className="ss"><h2 className="ss__title">Checks</h2><div className="ss__fixes">{['86%', '70%'].map(width => <SkeletonText key={width} width={width} lineHeight={28} />)}</div></section></aside>}
       </div>
     </LoadingRegion></div>
 }

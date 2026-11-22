@@ -8,7 +8,7 @@ import { loadStanding, scoreView } from './sender-score.js';
 
 export type CheckContext = {
   /** probation: Hosted delivers this sender's mail as the copy the screen read (src/hosted-sending.ts probationReason). */
-  domain?: { verified: boolean; dkim?: boolean; mailFrom?: boolean; spf?: boolean; fromSpf?: boolean; dmarc?: string; rua?: boolean; ageDays?: number; pool?: string; probation?: boolean };
+  domain?: { id?: string; verified: boolean; dkim?: boolean; mailFrom?: boolean; spf?: boolean; fromSpf?: boolean; dmarc?: string; rua?: boolean; ageDays?: number; pool?: string; probation?: boolean };
   standing?: {score: number | null; warmup: boolean; accepted: number; bounced: number; complained: number; daily: number | null};
   /** The Hosted screened-text limit that applies: per message, or per campaign (screened once for every recipient). */
   screenLimitBytes?: number;
@@ -16,8 +16,8 @@ export type CheckContext = {
 // Never run placement probes, look up remote assets or lock admission rows.
 // Fresh facts for the exact From only: a parent's DMARC record does not prove the subdomain has no override.
 export async function checkContext(runtime: Runtime, a: Actor, fromDomain: string): Promise<CheckContext> {
-  type Row = {identity: IdentityFacts | null; state: string; age: number | null; pool: string | null; probation: boolean | null; from_spf: boolean | null};
-  const domainRead = runtime.db.execute<Row>(sql`SELECT c.identity,c.sending_state AS state,
+  type Row = {id: string | null; identity: IdentityFacts | null; state: string; age: number | null; pool: string | null; probation: boolean | null; from_spf: boolean | null};
+  const domainRead = runtime.db.execute<Row>(sql`SELECT b.domain_id AS id,c.identity,c.sending_state AS state,
     (s.signals->>'ageDays')::int + floor(extract(epoch FROM now()-s.started_at)/86400)::int AS age,
     CASE WHEN s.started_at>now()-interval '48 hours' THEN (s.signals #>> '{exact,spf}')::boolean END AS from_spf,
     CASE WHEN pc.kind='shared' THEN coalesce(p.pool_tier,'probation') END AS pool,
@@ -44,7 +44,7 @@ export async function checkContext(runtime: Runtime, a: Actor, fromDomain: strin
     const start=new Date(Date.now()-6*86400000).toISOString().slice(0,10), recent=(row.days??[]).filter(day=>day.day>=start);
     return {score:view.score,warmup:view.state==='warmup',daily:null,...recent.reduce((n,d)=>({accepted:n.accepted+d.accepted,bounced:n.bounced+d.bounced,complained:n.complained+d.complained}),{accepted:0,bounced:0,complained:0})};
   },60)).value;
-  return {domain: d && {verified: d.state==='verified', dkim: ses?.DkimAttributes ? ses.DkimAttributes.SigningEnabled===true && ses.DkimAttributes.Status==='SUCCESS' : undefined,
+  return {domain: d && {id: d.id ?? undefined, verified: d.state==='verified', dkim: ses?.DkimAttributes ? ses.DkimAttributes.SigningEnabled===true && ses.DkimAttributes.Status==='SUCCESS' : undefined,
     mailFrom: ses && !!ses.MailFromAttributes?.MailFromDomain, spf: dm?.alignment.spf, fromSpf:d?.from_spf??undefined, dmarc: dm?.status,
     rua: dm?.record ? /(?:^|;)\s*rua\s*=\s*mailto:/i.test(dm.record) : undefined, ageDays: d.age ?? undefined, pool: d.pool ?? undefined, probation: d.probation ?? undefined},
     standing: rep, screenLimitBytes: runtime.config.screenLimits.messageBytes};
