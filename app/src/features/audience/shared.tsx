@@ -71,18 +71,20 @@ export function ListPicker({ value, onChange, emptyLabel, id, label, disabled = 
   </div>
 }
 
-// A contact's lists by name, with a count for any not loaded: "Customers, Beta +1".
+// A contact's lists as the first list's name and a count of the rest, "Customers +2", so no name is cut midway; the
+// hover title names them all.
+const listNames = (row: Contact, lists: AudienceList[]) => row.listIds.map(id => lists.find(list => list.id === id)?.name).filter((name): name is string => Boolean(name))
 function listsText(row: Contact, lists: AudienceList[]) {
-  const names = row.listIds.map(id => lists.find(list => list.id === id)?.name).filter(Boolean).join(', ')
-  const unnamed = row.listIds.filter(id => !lists.find(list => list.id === id)?.name).length
-  return names ? unnamed ? `${names} +${unnamed}` : names : unnamed ? `${unnamed} list${unnamed === 1 ? '' : 's'}` : '—'
+  const count = row.listIds.length, first = listNames(row, lists)[0]
+  return !count ? '—' : first ? count > 1 ? `${first} +${count - 1}` : first : `${count} list${count === 1 ? '' : 's'}`
 }
+const listsTitle = (row: Contact, lists: AudienceList[]) => listNames(row, lists).join(', ') || undefined
 export function ContactTable({ contacts, lists = [], members = false, loading = false, minRows = pageSize, listsLoading = false, tableRef, empty }: { contacts: Contact[]; lists?: AudienceList[]; members?: boolean; loading?: boolean; minRows?: number; listsLoading?: boolean; tableRef?: (node: HTMLDivElement | null) => void; empty?: ReactNode }) {
   const columns = members ? memberColumns : contactColumns
   return <DataTable className="audience-contacts" tableRef={tableRef} rows={contacts} loading={loading} skeletonRows={minRows} minRows={minRows} rowKey={row => row.id} rowHref={row => `/audience/contacts/${row.id}`} empty={empty} columns={columns.map(column => ({ ...column, cardRender: column.key === 'name' ? (row: Contact) => <span title={nameTitle(row.name)}>{row.name ? <AddressText text={row.name} /> : 'No name'}</span>
     // A member card's second line: the suppression reason when there is one, else the name (never an empty dash).
     : column.key === 'suppression' ? (row: Contact) => row.suppressionReason ? <span title={suppressionText(row.suppressionReason)}>{suppressionText(row.suppressionReason)}</span> : <span title={nameTitle(row.name)}>{row.name ? <AddressText text={row.name} /> : 'No name'}</span>
-    : column.key === 'created' ? (row: Contact) => { const names = members || listsLoading ? null : listsText(row, lists); return <>{`Added ${date(row.createdAt)}`}{names && names !== '—' && <span title={names}> · {names}</span>}</> } : undefined, render: (row: Contact) => {
+    : column.key === 'created' ? (row: Contact) => { const names = members || listsLoading ? null : listsText(row, lists); return <>{`Added ${date(row.createdAt)}`}{names && names !== '—' && <span title={listsTitle(row, lists)}> · {names}</span>}</> } : undefined, render: (row: Contact) => {
     if (column.key === 'email') return <span className="audience-cell-text"><PrivateAddress value={row.email} /></span>
     if (column.key === 'status') return <span title={consentTitle(row.status)}><StatusBadge status={row.status} /></span>
     if (column.key === 'suppression') return <span className="audience-cell-text" title={suppressionText(row.suppressionReason)}>{suppressionText(row.suppressionReason) ?? '—'}</span>
@@ -90,7 +92,7 @@ export function ContactTable({ contacts, lists = [], members = false, loading = 
     if (column.key === 'lists') {
       if (listsLoading && row.listIds.length) return <SkeletonText width="70%" />
       const text = listsText(row, lists)
-      return <span className="audience-cell-text" title={text}>{text}</span>
+      return <span className="audience-cell-text" title={listsTitle(row, lists) ?? text}>{text}</span>
     }
     return date(row.createdAt)
   } }))} />
