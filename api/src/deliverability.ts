@@ -61,6 +61,13 @@ export function redactDiagnostic(text: string | null | undefined): string | null
   if (!text) return null;
   return text.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(ADDRESS, '<address>').replace(IPV4, '<ip>').replace(IPV6, '<ip>').replace(/\s+/g, ' ').trim().slice(0, LIMITS.diagnostic) || null;
 }
+/** An email event's data with the receiving server's reply (diagnosticCode) redacted that way, for the readers that
+ *  never get a recipient's address in it: webhooks (sending.ts webhookData) and support's reads of one email's events. */
+export function withRedactedReply(data: Record<string, unknown>): Record<string, unknown> {
+  if (typeof data.diagnosticCode !== 'string') return data;
+  const { diagnosticCode, ...rest } = data, reply = redactDiagnostic(diagnosticCode);
+  return reply ? { ...rest, diagnosticCode: reply } : rest;
+}
 /** The same in SQL, so redacted diagnostics group together before they are counted. */
 const redactedSql = (text: SQL) => sql`left(regexp_replace(regexp_replace(regexp_replace(regexp_replace(${text}, '[[:cntrl:]]+', ' ', 'g'),
   '[^[:space:]<>"''@,;()]+@[^[:space:]<>"''@,;()]+', '<address>', 'g'), '([0-9]{1,3}\\.){3}[0-9]{1,3}', '<ip>', 'g'), '([0-9A-Fa-f]{1,4}:){2,7}(:|[0-9A-Fa-f]{1,4})', '<ip>', 'g'), ${LIMITS.diagnostic})`;

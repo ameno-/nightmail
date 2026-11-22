@@ -47,8 +47,9 @@ interface SesConfigurationSet { name: string; exists: boolean | null; owned: boo
 export interface Workspace { id: string; name: string; postalAddress: string | null; accountId?: string; role: string; members?: { id: string; name: string; email: string; role: string }[] }
 /** GET /v1/settings/workspace: the name and the postal address every campaign footer shows (null until set). */
 export interface WorkspaceSettings { name: string; postalAddress: string | null }
-/** What a provider event recorded: a bounce's SES type and subtype, a complaint's feedback type, a click's link, and whether SES thought an open or click came from a bot. */
-export interface EmailEventDetail { bounceType?: string; bounceSubType?: string; feedbackType?: string; link?: string; bot?: boolean }
+/** What a provider event recorded: a bounce's SES type and subtype, a delay's type and when SES stops retrying, a complaint's feedback type, a click's link, and whether SES thought an open or click came from a bot. */
+export interface EmailEventDetail { bounceType?: string; bounceSubType?: string; delayType?: string; retryUntil?: ISODate; feedbackType?: string; link?: string; bot?: boolean }
+/** diagnostic: a bounce's or a delay's reply from the receiving server, as SES reported it. */
 export interface EmailEvent { id: string; type: string; at: ISODate; description: string; diagnostic?: string; detail?: EmailEventDetail }
 /** POST /v1/emails/check: an advisory 0–100 sendability score, never an inbox-placement probability. */
 export type SendabilityCategory = 'authentication' | 'content' | 'headers' | 'size' | 'rendering' | 'reputation'
@@ -60,7 +61,7 @@ export type PreviewClient = 'gmail-web' | 'gmail-ios' | 'gmail-android' | 'gmail
 export interface PreviewIssue { feature: string; clients: PreviewClient[]; severity: 'warning' | 'error' }
 export interface ClientPreview { client: PreviewClient; html: string; issues: PreviewIssue[] }
 export interface EmailPreviewRequest { source: { emailId: string } | { html: string }; clients: PreviewClient[]; theme: 'light' | 'dark'; device: 'desktop' | 'mobile' }
-export interface Email { scheduled?: boolean; scheduledAt?: ISODate | null; contact?: {id:string; suppressed:boolean} | null; campaignId?: string | null; text?: string | null; eventsNextCursor?: string | null; fromName?: string; simulated?: boolean; attachments?: string[]; id: string; regionId: RegionId; to: string; from: string; subject: string; stream: Stream; status: EmailStatus; sentAt: ISODate; html: string; events: EmailEvent[]; thread?: EmailThread | null }
+export interface Email { scheduled?: boolean; scheduledAt?: ISODate | null; errorCode?: string | null; suppressionReason?: string | null; contact?: {id:string; suppressed:boolean; suppressedAt?: ISODate | null} | null; campaignId?: string | null; text?: string | null; eventsNextCursor?: string | null; fromName?: string; simulated?: boolean; attachments?: string[]; id: string; regionId: RegionId; to: string; from: string; subject: string; stream: Stream; status: EmailStatus; sentAt: ISODate; html: string; events: EmailEvent[]; thread?: EmailThread | null }
 /** The conversation an email belongs to (getEmailDetail, getInboundMessage?includeThread=true): up to 50 of the messages around it, oldest first, and how many the reader sees. */
 export interface EmailThread { id: string; count: number; messages: ThreadMessage[] }
 /** id: the stored message (msg_…), or an email that answers by header and has no copy (its email ID). emailId: the sent email, on outbound messages. */

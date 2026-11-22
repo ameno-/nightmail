@@ -15,7 +15,7 @@ import { chargeManualDelivery, claimedWithWebhooks, enqueue, JobDeferred, WEBHOO
 import { applyClaim, connectionReady, domainHosts, receivingSetup, type ReceivingSetup, hostGraceStart, identityOnly, LOST_GRACE_MS, poolReceives, poolSends, transitionClaim, type ClaimEvidence, type ClaimState, type HostEvidence, type HostStatus, type HostWrite, type IdentityFacts, type TenantState, PROOF_LABELS, proofRecordName, type ProofLabel } from './states.js';
 import { jobs } from './db/core.js';
 import { contacts, mergeSuppression } from './db/audience.js';
-import { lasting, RECEIVING_HOST_CHANGE, SuppressionEventData, WEBHOOK_CHANGE, webhookUrlHint, WebhookUrlHint, readCursor, nextCursor, budgetedRead, readLimit, readLimitNote } from './core.js';
+import { lasting, RECEIVING_HOST_CHANGE, EmailEventData, WEBHOOK_CHANGE, webhookUrlHint, WebhookUrlHint, readCursor, nextCursor, budgetedRead, readLimit, readLimitNote } from './core.js';
 import { emails } from './db/sending.js';
 import { sesRegions } from './db/ses-regions.js';
 import { getRegionSettings, resolveRegionRuntime, withRegionSettings } from './ses-region-state.js';
@@ -46,7 +46,7 @@ const loadSendingOps = lazyModule(() => import('./sending.js'));
 
 const now = () => new Date().toISOString();
 const scoped = (table: { workspaceId: AnyPgColumn }, a: Pick<Actor, 'workspaceId'>) => eq(table.workspaceId, a.workspaceId);
-const eventSchema = z.object({ id: z.string(), type: z.enum(eventTypes), createdAt: z.string(), workspaceId: z.string(), region: z.string().nullable(), data: SuppressionEventData }).openapi('Event');
+const eventSchema = z.object({ id: z.string(), type: z.enum(eventTypes), createdAt: z.string(), workspaceId: z.string(), region: z.string().nullable(), data: EmailEventData }).openapi('Event');
 const reservedHeader = /^(?:host|content-length|content-type|content-encoding|transfer-encoding|connection|keep-alive|te|trailer|upgrade|http2-settings|expect|cookie|user-agent|webhook-id|webhook-timestamp|webhook-signature|nightmail-test|bane-test|opensend-test)$|^proxy-/i;
 export const WebhookHeaders = z.array(z.object({
   name: z.string().min(1).max(64).regex(/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/).refine(name => !reservedHeader.test(name), 'Reserved webhook header.'),
@@ -1765,6 +1765,22 @@ function feedbackClass(kind: string, detail: Record<string, any>) {
   if (kind === 'Bounce') return detail.bounceType !== 'Permanent' ? 'non_permanent_bounce' : detail.bounceSubType === 'EmailValidationSuppressed' ? 'validation_suppressed' : 'bounce';
   return sesEvents[kind]?.rawType;
 }
+// What a bounce or a delay keeps of SES's report, in its email event (EmailEventData): the receiving server's reply, of
+// the first recipient that has one, as one bounded line; and a delay's kind and deadline. The reply is a stranger's
+// text: bidi overrides, isolates and zero-width marks go (the set the dashboard takes from sender names,
+// app/src/lib/private-address.ts), then control characters, surrogates and white space become single spaces. A bounce
+// SES wrote itself keeps none: its text is about the sending account at Amazon, which a hosted sender cannot act on.
+const DIAGNOSTIC_CHARS = 500, SES_BOUNCES = ['Suppressed', 'OnAccountSuppressionList', 'EmailValidationSuppressed'];
+function feedbackReason(kind: string, detail: Record<string, any>) {
+  if (kind !== 'Bounce' && kind !== 'DeliveryDelay') return {};
+  const recipients: unknown = kind === 'Bounce' ? detail.bouncedRecipients : detail.delayedRecipients;
+  const reply = kind === 'Bounce' && SES_BOUNCES.includes(detail.bounceSubType) ? undefined
+    : (Array.isArray(recipients) ? recipients : []).map(r => typeof r?.diagnosticCode === 'string' ? r.diagnosticCode.replace(/[\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, '').replace(/[\u0000-\u001f\u007f-\u009f\ud800-\udfff\s]+/g, ' ').trim() : '').find(Boolean);
+  const expires = kind === 'DeliveryDelay' && typeof detail.expirationTime === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(detail.expirationTime) ? Date.parse(detail.expirationTime) : NaN;
+  return { ...(reply ? { diagnosticCode: reply.slice(0, DIAGNOSTIC_CHARS) } : {}),
+    ...(kind === 'DeliveryDelay' && typeof detail.delayType === 'string' && /^[A-Za-z]{1,64}$/.test(detail.delayType) ? { delayType: detail.delayType } : {}),
+    ...(Number.isFinite(expires) ? { expirationTime: new Date(expires).toISOString() } : {}) };
+}
 function routineInput(item: FeedbackItem, enqueueOther = false): RoutineIngress {
   const data = item.message as Record<string, any>;
   const { kind, providerId } = sesFeedbackIdentity(data);
@@ -1783,7 +1799,7 @@ function routineInput(item: FeedbackItem, enqueueOther = false): RoutineIngress 
   const reported = kind === 'Bounce' ? detail.bouncedRecipients : kind === 'Complaint' ? detail.complainedRecipients : undefined;
   return { type: extended ? classification! : type, providerId, taggedEmailId: taggedEmailId(item.message), createdAt, externalId: `${item.topicArn}:${item.messageId}`,
     data: { providerId, ...(validation ? {suppressionReason:'email_validation'} : {}), ...(engagement ? { isBotEvent: detail.isBotEvent ?? 'Unknown' } : {}), ...(kind === 'Click' && typeof detail.link === 'string' ? { link: detail.link } : {}),
-      ...(kind === 'Bounce' ? { bounceType: detail.bounceType ?? 'Unknown', bounceSubType: detail.bounceSubType ?? 'Unknown' } : {}), ...(kind === 'Complaint' && detail.complaintFeedbackType != null ? {complaintFeedbackType:detail.complaintFeedbackType} : {}) },
+      ...(kind === 'Bounce' ? { bounceType: detail.bounceType ?? 'Unknown', bounceSubType: detail.bounceSubType ?? 'Unknown' } : {}), ...(kind === 'Complaint' && detail.complaintFeedbackType != null ? {complaintFeedbackType:detail.complaintFeedbackType} : {}), ...feedbackReason(kind, detail) },
     ...(extended ? { effects: { reported: Array.isArray(reported) && reported.length ? reported.map(r => typeof r?.emailAddress === 'string' ? r.emailAddress.toLowerCase() : null) : null,
       suppress: classification === 'complaint' ? 'complaint' : validation ? 'email_validation' : classification === 'bounce' ? 'hard_bounce' : null,
       observe: engagement && detail.isBotEvent !== true && detail.isBotEvent !== 'Likely' ? kind.toLowerCase() : null,
@@ -2054,7 +2070,7 @@ const processSesReceipt: JobHandler = async (runtime, payload, job) => {
   const eventDetail = data[kind === 'RenderingFailure' ? 'failure' : kind === 'DeliveryDelay' ? 'deliveryDelay' : kind.toLowerCase()] ?? {};
   const eventTime = typeof eventDetail.timestamp === 'string' && Number.isFinite(Date.parse(eventDetail.timestamp)) ? new Date(eventDetail.timestamp).toISOString() : receipt.createdAt;
   const eventId = `evt_ses_${await digest(`${payload.topicArn}:${payload.messageId}`)}`;
-  const normalized: PublishedEvent = { id: eventId, workspaceId: job.workspaceId, region: email.region, type: mapped.type, createdAt: eventTime, data: { emailId: email.id, providerId, ...(kind === 'Open' || kind === 'Click' ? { isBotEvent: eventDetail.isBotEvent ?? 'Unknown' } : {}), ...((kind === 'Bounce') ? { bounceType: eventDetail.bounceType ?? 'Unknown', bounceSubType: eventDetail.bounceSubType ?? 'Unknown' } : {}), ...(kind === 'Click' && typeof eventDetail.link === 'string' ? { link: eventDetail.link } : {}) } };
+  const normalized: PublishedEvent = { id: eventId, workspaceId: job.workspaceId, region: email.region, type: mapped.type, createdAt: eventTime, data: { emailId: email.id, providerId, ...(kind === 'Open' || kind === 'Click' ? { isBotEvent: eventDetail.isBotEvent ?? 'Unknown' } : {}), ...((kind === 'Bounce') ? { bounceType: eventDetail.bounceType ?? 'Unknown', bounceSubType: eventDetail.bounceSubType ?? 'Unknown' } : {}), ...(kind === 'Click' && typeof eventDetail.link === 'string' ? { link: eventDetail.link } : {}), ...feedbackReason(kind, eventDetail) } };
   // Routine send/delivery events have no later consent or engagement writes.
   // Mark their receipt in the same commit as status, event and webhook fan-out.
   const routine = kind === 'Send' || kind === 'Delivery';

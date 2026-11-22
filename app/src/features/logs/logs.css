@@ -38,18 +38,25 @@
 .delivery__step + .delivery__step::before { content: ''; flex: none; width: 20px; height: 1px; margin-inline: var(--space-8); background: var(--color-border-strong); }
 .delivery__fact { display: inline-flex; align-items: center; gap: var(--space-6); border-radius: 2px; color: var(--color-text); text-decoration: none; cursor: default; }
 .delivery__dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--tone-marker); }
-.delivery__count, .delivery__time, .delivery__note { color: var(--color-muted); font-variant-numeric: tabular-nums; }
-.delivery__note::before { content: '·'; margin-right: var(--space-6); color: var(--color-faint); }
-.delivery__contact { color: var(--color-danger); cursor: pointer; }
-.delivery__contact > svg { width: 12px; height: 12px; }
-@media (hover: hover) and (pointer: fine) { .delivery__contact:hover { text-decoration: underline; text-underline-offset: 3px; } }
+.delivery__count, .delivery__time { color: var(--color-muted); font-variant-numeric: tabular-nums; }
+/* Why it ended this way, under the steps: one sentence, then the receiving server's own reply, quieter and on one line
+   beside it (in a column: under it, two lines at most; in a phone's sheet: all of it). A reply that is cut opens in
+   place (Clamped, email-detail.tsx). */
+.delivery { flex-wrap: wrap; row-gap: var(--space-4); }
+.delivery__why { display: flex; flex-basis: 100%; align-items: baseline; gap: var(--space-12); min-width: 0; margin: 0; }
+.delivery__said { flex: 1 1 0; min-width: 0; overflow: hidden; color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
+.delivery[data-vertical] .delivery__why { display: block; flex: none; text-wrap: pretty; }
+.delivery[data-vertical] .delivery__said { display: -webkit-box; margin-top: var(--space-4); line-height: var(--leading-xs); overflow-wrap: anywhere; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.email-detail-sheet .delivery[data-vertical] .delivery__said { display: block; margin-top: 0; }
+.delivery .delivery__said[data-open] { display: block; overflow: visible; overflow-wrap: anywhere; white-space: normal; }
+.delivery__said[role='button'] { border-radius: 2px; cursor: pointer; }
+@media (hover: hover) and (pointer: fine) { .delivery__said[role='button']:hover { color: var(--color-text); } }
 .delivery__zone { color: var(--color-faint); font-size: var(--text-xs); }
 .delivery > .ui-alert { flex: 1; }
 .delivery-tip { display: flex; flex-direction: column; gap: 2px; }
 .delivery-tip code { font-family: var(--font-mono); }
-/* Vertical (the details column, a phone): a step per row with its time at the end and its reason under it, the dots
-   joined by a rule. */
-.delivery[data-vertical] { flex-direction: column; align-items: stretch; gap: var(--space-8); margin-bottom: 0; }
+/* Vertical (the details column, a phone): a step per row with its time at the end, the dots joined by a rule. */
+.delivery[data-vertical] { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: var(--space-8); margin-bottom: 0; }
 .delivery[data-vertical] .delivery__steps { flex-direction: column; align-items: stretch; overflow: visible; white-space: normal; }
 .delivery[data-vertical] .delivery__step { position: relative; display: block; padding-block: var(--space-4); }
 .delivery[data-vertical] .delivery__step + .delivery__step::before { content: none; }
@@ -57,13 +64,9 @@
 .delivery[data-vertical] .delivery__fact { display: grid; grid-template-columns: 6px minmax(0, 1fr) auto; align-items: center; column-gap: var(--space-12); }
 .delivery[data-vertical] .delivery__name { grid-column: 2; }
 .delivery[data-vertical] .delivery__time { grid-column: 3; text-align: right; }
-.delivery[data-vertical] .delivery__note { grid-column: 2 / -1; }
-.delivery[data-vertical] .delivery__note::before { content: none; }
 .delivery[data-vertical] > .ui-button { align-self: flex-start; }
 .delivery__skeleton { display: flex; flex-direction: column; }
 .delivery[data-vertical] > .ui-waterfall .delivery__fact { display: inline-flex; gap: var(--space-6); cursor: default; }
-.delivery[data-vertical] > .ui-waterfall .delivery__note { font-size: var(--text-xs); }
-.delivery[data-vertical] > .delivery__contact { display: inline-flex; gap: var(--space-6); align-self: flex-start; }
 /* The preview, then (a phone) the score under it, or beside it the details column: the delivery, then the score. */
 .email-detail__body { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-24); min-width: 0; }
 .email-detail__preview { min-width: 0; }
@@ -99,6 +102,8 @@
 .email-status__text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .email-status__text time { font-variant-numeric: tabular-nums; }
 .email-status__facts > svg { flex: none; width: 14px; height: 14px; color: var(--color-faint); }
+/* A phone: why it ended this way, in the open under the status line. */
+.email-why { flex-basis: 100%; min-width: 0; margin: 0; text-wrap: pretty; }
 @media (hover: hover) and (pointer: fine) { .email-status__facts:hover { color: var(--color-text); } }
 /* The sheets: the delivery above the facts, and the score's findings at full height. */
 .email-detail-sheet .ui-sheet__body { display: flex; flex-direction: column; gap: var(--space-16); }

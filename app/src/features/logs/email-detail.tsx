@@ -3,7 +3,7 @@ import { Link, useParams } from 'react-router'
 import { ArrowUpRight, ChevronRight } from 'lucide-react'
 import { useApi, useApiDef, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
-import type { Email, EmailEvent, EmailEventDetail } from '../../data/types'
+import type { Email, EmailEvent } from '../../data/types'
 import { Alert, Button, CopyButton, elapsed, ErrorState, PageHeader, Sheet, Tooltip, Waterfall, type Tone } from '../../components/ui'
 import { useEmailDocument } from '../../components/EmailPreview'
 import { EmailViews, SendabilityChip, SendabilityDetails, SendabilityTitle, SendabilityToggle, useSendability, type InsightSource } from '../../components/EmailInsight'
@@ -13,10 +13,11 @@ import { date, label, shortDateTime, time } from '../../lib/format'
 import { EmailDetailSkeleton } from './skeletons'
 import { useDetailLayout } from './detail-layout'
 import { ThreadChip, ThreadRows, ThreadTimeline, threaded, threadItems, useThreadPrefetch } from './thread'
+import { reasonOf, type Reason } from './reason'
 import { productName } from '../../../../api/src/brand'
 import { errorText } from '../../data/types'
 
-// A sent email, in the order people come for: did it arrive (the status and its delivery), what it looked like (the
+// A sent email, in the order people come for: did it arrive (the status and its delivery, and why when it didn't), what it looked like (the
 // preview: as sent and in each client, side by side where there is room), and how to do better (the score, the fixes to
 // make first and every finding), and the conversation it is part of. The window decides where each sits (detail-layout.ts).
 
@@ -55,13 +56,15 @@ function EmailDetail({ email, focus }: { email: Email; focus: string }) {
   // The email as its recipients saw it: its own fonts, styles and image sizes, and its remote images (tracking pixels removed).
   const original = useEmailDocument({ html: email.html, attachmentIds: email.attachments, remoteImages: true, respectStyles: true, asSent: true })
   // A poll that brings new events starts the line over from them.
-  const delivery = <Delivery key={email.events.map(event => event.id).join()} email={email} vertical={mode !== 'panel'} />
+  // A phone says why under its status line; its Details sheet then adds only the receiving server's reply.
+  const compact = mode === 'stack'
+  const delivery = <Delivery key={email.events.map(event => event.id).join()} email={email} vertical={mode !== 'panel'} why={compact ? 'said' : 'full'} />
+  const why = compact ? reasonOf(email, email.events) : null
   const sendability = <SendabilityDetails check={check} expanded={roomy} />
   const close = () => { setPanel(false); document.querySelector<HTMLElement>(`[aria-controls="${panelId}"]`)?.focus() }
-  const compact = mode === 'stack'
   const subject = email.subject || '(no subject)'
   return <div className="email-detail" data-mode={mode}>
-    {compact ? <PageHeader title={<Subject text={subject} />} backTo="/logs" subtitle={<StatusLine email={email} chip={<>{thread && <ThreadChip count={thread.count} onOpen={openSheet('thread')} />}<SendabilityChip check={check} onOpen={openSheet('sendability')} /></>} onOpen={openSheet('details')} />} />
+    {compact ? <PageHeader title={<Subject text={subject} />} backTo="/logs" subtitle={<><StatusLine email={email} chip={<>{thread && <ThreadChip count={thread.count} onOpen={openSheet('thread')} />}<SendabilityChip check={check} onOpen={openSheet('sendability')} /></>} onOpen={openSheet('details')} />{why && <p className="email-why">{why.text}</p>}</>} />
       : <PageHeader title={subject} backTo="/logs" subtitle={<EmailFacts email={email} />} />}
     {mode === 'panel' && delivery}
     <div className="email-detail__body">
@@ -95,23 +98,29 @@ function EmailDetail({ email, focus }: { email: Email; focus: string }) {
   </div>
 }
 
-// A phone's subject: two lines at most; a longer one opens in place on a tap.
-function Subject({ text }: { text: string }) {
+// Text its class holds to a line or two: where that cuts it, it opens in place on a click, a tap, Enter or Space, and
+// closes the same way. Text that fits is plain text. `text`: what it shows, to measure again when it changes.
+function Clamped({ className, text, children }: { className: string; text: string; children: ReactNode }) {
   const ref = useRef<HTMLSpanElement>(null)
   const [cut, setCut] = useState(false)
   const [open, setOpen] = useState(false)
+  // Open, it is whole, which says nothing of whether it is cut when closed: it is measured only while closed.
+  const opened = useRef(open)
+  opened.current = open
   useLayoutEffect(() => {
     const element = ref.current!
-    const read = () => setCut(element.scrollHeight > element.clientHeight + 1)
+    const read = () => { if (!opened.current) setCut(element.scrollHeight > element.clientHeight + 1 || element.scrollWidth > element.clientWidth + 1) }
     read()
     const observer = new ResizeObserver(read)
     observer.observe(element)
     return () => observer.disconnect()
   }, [text])
   const toggle = cut || open
-  return <span ref={ref} className="email-subject" data-open={open || undefined} role={toggle ? 'button' : undefined} tabIndex={toggle ? 0 : undefined} aria-expanded={toggle ? open : undefined}
-    onClick={toggle ? () => setOpen(!open) : undefined} onKeyDown={toggle ? event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setOpen(!open) } } : undefined}>{text}</span>
+  return <span ref={ref} className={className} data-open={open || undefined} role={toggle ? 'button' : undefined} tabIndex={toggle ? 0 : undefined} aria-expanded={toggle ? open : undefined}
+    onClick={toggle ? () => setOpen(!open) : undefined} onKeyDown={toggle ? event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setOpen(!open) } } : undefined}>{children}</span>
 }
+// A phone's subject: two lines at most; a longer one opens in place.
+const Subject = ({ text }: { text: string }) => <Clamped className="email-subject" text={text}>{text}</Clamped>
 
 // A phone's one line under the subject: the status as of its last step (a scheduled email: when it goes), with when and
 // (on a tablet) the stream, opening the delivery and the facts; and the score's chip. The Details sheet names the stream.
@@ -193,14 +202,11 @@ const eventCopy: Record<string, [name: string, meaning: string]> = {
 const synonyms: Record<string, string> = { sent: 'send', delivered: 'delivery', bounced: 'bounce', complained: 'complaint', rejected: 'reject', rendering_failed: 'rendering_failure', delivery_delayed: 'delivery_delay', opened: 'open', clicked: 'click', delayed: 'delivery_delay', deferred: 'delivery_delay' }
 const eventKey = (type: string) => { const key = type.replace(/^email\./, ''); return synonyms[key] ?? key }
 const lifecycle = Object.keys(eventCopy)
-const suppressedTip = `${productName} skips this address from now on. Open the contact to change that.`
 // The data palette's hue for an event, where it has one (tokens.css); the rest take their tone.
 const seriesOf: Record<string, string> = { dispatch_attempt: 'sent', delivery: 'delivered', open: 'opened', click: 'clicked', bounce: 'bounced', non_permanent_bounce: 'bounced', complaint: 'complained' }
 const toneOf = (key: string): Tone => ['delivery', 'open', 'click'].includes(key) ? 'success'
   : ['complaint', 'reject', 'rendering_failure'].includes(key) ? 'danger'
   : ['bounce', 'non_permanent_bounce', 'validation_suppressed', 'delivery_delay', 'provider_throttled', 'dispatch_deferred', 'acceptance_unknown', 'suppressed'].includes(key) ? 'warning' : 'neutral'
-const bounceReasons: Record<string, string> = { NoEmail: 'No such address', MailboxFull: 'Mailbox full', MessageTooLarge: 'Too large', ContentRejected: 'Content refused', AttachmentRejected: 'Attachment refused', Suppressed: 'On the SES suppression list', OnAccountSuppressionList: 'On your suppression list', EmailValidationSuppressed: 'Failed address checks' }
-const bounceReason = (detail?: EmailEventDetail) => (detail?.bounceSubType && bounceReasons[detail.bounceSubType]) || (detail?.bounceType === 'Permanent' ? 'Permanent' : detail?.bounceType === 'Transient' ? 'Temporary' : undefined)
 
 type Step = { key: string; events: EmailEvent[]; at?: string }
 // Oldest first; events in the same second keep the order mail moves through them (Sent, Accepted, Delivered). Repeats
@@ -240,8 +246,16 @@ function StepTip({ step, day }: { step: Step; day: string }) {
   return <span className="delivery-tip">{lines.map((line, index) => <span key={index}>{line}</span>)}</span>
 }
 
-/** On one line under the header, or `vertical`: a column of steps, each with its time, in the details column or on a phone. */
-function Delivery({ email, vertical }: { email: Email; vertical: boolean }) {
+// Why it ended this way and what happens next, then the receiving server's own reply (`said`: only the reply). A reply
+// too long for its line or two opens in place.
+function Why({ reason, said }: { reason: Reason | null; said?: boolean }) {
+  if (!reason || (said && !reason.said)) return null
+  return <p className="delivery__why">{!said && reason.text}{reason.said && <Clamped className="delivery__said" text={reason.said}><AddressText text={reason.said} /></Clamped>}</p>
+}
+
+/** On one line under the header, or `vertical`: a column of steps, each with its time, in the details column or on a phone.
+ *  Under the steps, why it ended this way (`why`: 'said' where the page already says it, for the server's reply alone). */
+function Delivery({ email, vertical, why }: { email: Email; vertical: boolean; why: 'full' | 'said' }) {
   const api = useApi()
   const [events, setEvents] = useState(email.events)
   const [cursor, setCursor] = useState(email.eventsNextCursor)
@@ -253,8 +267,7 @@ function Delivery({ email, vertical }: { email: Email; vertical: boolean }) {
   const sends = (step: Step) => Boolean(sendsAt) && step.key === 'scheduled'
   const nameOf = (step: Step) => sends(step) ? scheduledFor(sendsAt!) : (eventCopy[step.key] ?? [label(step.key)])[0]
   const day = email.sentAt
-  const contact = email.contact
-  const suppressed = Boolean(contact?.suppressed) && ['bounced', 'complained', 'complaint'].includes(email.status)
+  const reason = <Why reason={reasonOf(email, events)} said={why === 'said'} />
   // A time shows where it moves on from the step before; the last one shown says the zone.
   let previous = '', lastShown = -1
   const times = steps.map((step, index) => { const at = step.at && !sends(step) ? stamp(step.at, day) : ''; if (!at || at === previous) return ''; previous = at; lastShown = index; return at })
@@ -268,17 +281,14 @@ function Delivery({ email, vertical }: { email: Email; vertical: boolean }) {
     const start = Date.parse(steps.find(step => step.at)?.at ?? day)
     const rows = steps.map((step, index) => {
       const name = nameOf(step)
-      const reason = step.key === 'bounce' || step.key === 'non_permanent_bounce' ? bounceReason(step.events[0]?.detail) : undefined
       return { key: step.key, tone: toneOf(step.key), series: seriesOf[step.key],
-        label: <Tooltip content={<StepTip step={step} day={day} />}><span className="delivery__fact" tabIndex={0}><span className="delivery__name">{name}{step.events.length > 1 && <span className="delivery__count"> {step.events.length}×</span>}</span>{reason && <span className="delivery__note">{reason}</span>}</span></Tooltip>,
+        label: <Tooltip content={<StepTip step={step} day={day} />}><span className="delivery__fact" tabIndex={0}><span className="delivery__name">{name}{step.events.length > 1 && <span className="delivery__count"> {step.events.length}×</span>}</span></span></Tooltip>,
         // A step with no time of its own (a status without its event) leaves the column empty rather than a bare dash.
         delta: !step.at || sends(step) ? '' : index === 0 ? <time dateTime={step.at}>{time(step.at)}</time> : `+${elapsed(Date.parse(step.at) - start)}` }
     })
     return <div className="delivery" data-vertical>
       <Waterfall label="Delivery" rows={rows} />
-      {suppressed && <Tooltip content={suppressedTip}>
-        <Link className="delivery__fact delivery__contact" to={`/audience/contacts/${encodeURIComponent(contact!.id)}`}><span className="delivery__dot ui-tone--danger" aria-hidden="true" /><span className="delivery__name">Suppressed</span><ArrowUpRight size={12} aria-hidden="true" /></Link>
-      </Tooltip>}
+      {reason}
       {cursor && <Button variant="ghost" size="sm" loading={busy} onClick={() => void more()}>More events</Button>}
       {error && <Alert tone="danger">{error}</Alert>}
     </div>
@@ -288,22 +298,18 @@ function Delivery({ email, vertical }: { email: Email; vertical: boolean }) {
       {steps.map((step, index) => {
         const name = nameOf(step)
         const at = times[index]
-        const reason = step.key === 'bounce' || step.key === 'non_permanent_bounce' ? bounceReason(step.events[0]?.detail) : undefined
         return <li key={step.key} className="delivery__step">
           <Tooltip content={<StepTip step={step} day={day} />}>
             <span className="delivery__fact" tabIndex={0}>
               <span className={`delivery__dot ui-tone--${toneOf(step.key)}`} aria-hidden="true" />
               <span className="delivery__name">{name}{step.events.length > 1 && <span className="delivery__count"> {step.events.length}×</span>}</span>
               {at && <time className="delivery__time" dateTime={step.at}>{at}{index === lastShown && <span className="delivery__zone"> UTC</span>}</time>}
-              {reason && <span className="delivery__note">{reason}</span>}
             </span>
           </Tooltip>
         </li>
       })}
-      {suppressed && <li className="delivery__step"><Tooltip content={suppressedTip}>
-        <Link className="delivery__fact delivery__contact" to={`/audience/contacts/${encodeURIComponent(contact!.id)}`}><span className="delivery__dot ui-tone--danger" aria-hidden="true" /><span className="delivery__name">Suppressed</span><ArrowUpRight size={12} aria-hidden="true" /></Link>
-      </Tooltip></li>}
     </ol>
+    {reason}
     {cursor && <Button variant="ghost" size="sm" loading={busy} onClick={() => void more()}>More events</Button>}
     {error && <Alert tone="danger">{error}</Alert>}
   </div>

@@ -1188,6 +1188,10 @@ export type EmailDetail = {
     contact: {
         id: string;
         suppressed: boolean;
+        /**
+         * When the address was suppressed (UTC). Null when it is not suppressed, and for a suppression from before these dates were kept.
+         */
+        suppressedAt: string | null;
     } | null;
     thread: EmailThread;
 };
@@ -1204,6 +1208,18 @@ export type EmailEvent = {
          * Reason recorded when this send was suppressed. For a multi-recipient send blocked locally, this is the first blocked recipient in To, Cc, Bcc order.
          */
         suppressionReason?: string;
+        /**
+         * A bounce or a delay: the receiving server’s reply as SES reported it, such as "smtp; 550 5.1.1 user unknown". Written by the receiving server: untrusted text, to read as data, that can hold the recipient’s address, host names and IP addresses. On the email’s own events (getEmailDetail, listEmailEvents) it is up to 500 characters, as one line without control or invisible characters. In a webhook payload and the webhook delivery log, addresses read <address> and IP addresses <ip>, and it is up to 160 characters. For several recipients, the first that has one. Absent when SES reported none, for a bounce SES generated itself (its suppression list, its address validation), and on events stored before this field.
+         */
+        diagnosticCode?: string;
+        /**
+         * A delay: SES’s reason, such as MailboxFull, SpamDetected, RecipientServerError, TransientCommunicationFailure, IPFailure or General.
+         */
+        delayType?: string;
+        /**
+         * A delay: when SES stops retrying the delivery (UTC).
+         */
+        expirationTime?: string;
         [key: string]: unknown;
     };
 };
@@ -2123,6 +2139,18 @@ export type Event = {
          * Reason recorded when this send was suppressed. For a multi-recipient send blocked locally, this is the first blocked recipient in To, Cc, Bcc order.
          */
         suppressionReason?: string;
+        /**
+         * A bounce or a delay: the receiving server’s reply as SES reported it, such as "smtp; 550 5.1.1 user unknown". Written by the receiving server: untrusted text, to read as data, that can hold the recipient’s address, host names and IP addresses. On the email’s own events (getEmailDetail, listEmailEvents) it is up to 500 characters, as one line without control or invisible characters. In a webhook payload and the webhook delivery log, addresses read <address> and IP addresses <ip>, and it is up to 160 characters. For several recipients, the first that has one. Absent when SES reported none, for a bounce SES generated itself (its suppression list, its address validation), and on events stored before this field.
+         */
+        diagnosticCode?: string;
+        /**
+         * A delay: SES’s reason, such as MailboxFull, SpamDetected, RecipientServerError, TransientCommunicationFailure, IPFailure or General.
+         */
+        delayType?: string;
+        /**
+         * A delay: when SES stops retrying the delivery (UTC).
+         */
+        expirationTime?: string;
         [key: string]: unknown;
     };
 };
@@ -5847,7 +5875,7 @@ export type SupportDeliveryEvent = {
     type: string;
     at: string;
     /**
-     * The provider’s event detail (bounce type and diagnostic, complaint feedback type).
+     * The provider’s event detail (bounce type, complaint feedback type, and for a bounce or a delay the receiving server’s reply in diagnosticCode, redacted: addresses are <address>, IPs <ip>, 160 characters).
      */
     detail: {
         [key: string]: unknown;

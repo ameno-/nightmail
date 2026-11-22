@@ -226,7 +226,8 @@ const TAG_TOOLSET: Record<string, Toolset> = {
   Emails: 'sending', Campaigns: 'sending', Newsletters: 'sending', Templates: 'sending', Audience: 'sending', Consent: 'sending', Attachments: 'admin', Metrics: 'sending',
   Auth: 'admin', ApiKeys: 'admin', Settings: 'admin', Workspaces: 'admin', Billing: 'admin', Domains: 'admin', Regions: 'admin', Webhooks: 'admin', 'Inbound domains': 'admin', 'Inbound keys': 'admin',
 };
-const UNTRUSTED_READS = new Set(['listEmails', 'getEmail', 'getEmailDetail', 'getEmailContent', 'previewEmail', 'listLogs', 'testRouting', 'testRules', 'testRituals', 'getInboxMessage', 'listInboxMessages', 'getInboxAttachment', 'getInboundMessage', 'listInboundMessages', 'getInboundThread', 'listInboundThreads', 'getInboundAttachment', 'listInboundEvents']);
+// listEmailEvents and the webhook delivery log: a bounce's or a delay's diagnosticCode is the receiving server's text.
+const UNTRUSTED_READS = new Set(['listEmailEvents', 'listWebhookDeliveries', 'getWebhookDelivery', 'listEmails', 'getEmail', 'getEmailDetail', 'getEmailContent', 'previewEmail', 'listLogs', 'testRouting', 'testRules', 'testRituals', 'getInboxMessage', 'listInboxMessages', 'getInboxAttachment', 'getInboundMessage', 'listInboundMessages', 'getInboundThread', 'listInboundThreads', 'getInboundAttachment', 'listInboundEvents']);
 const INBOX_PERMISSIONS: Record<string, McpOperation['inbox']> = {
   createInboxFolder:'modify',updateInboxFolder:'modify',deleteInboxFolder:'modify',
   listInboxFolders:'read',getInboxChanges:'read',moveInboxMessage:'modify',copyInboxMessage:'modify',deleteInboxMessage:'modify',expungeInboxFolder:'modify',
