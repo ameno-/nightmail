@@ -1,6 +1,13 @@
-/* Settings → Billing: the balance in large tabular figures, then rows like every settings row (auto-recharge among them)
-   and the history table. Every block has a fixed height, so values arriving never move what is below them. */
-.billing-balance { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: 20px 44px; row-gap: var(--space-4); align-content: center; height: 104px; border-bottom: 1px solid var(--color-border-muted); }
+/* Settings → Billing: the balance in large tabular figures with Add credit beside it, then rows like every settings row
+   (this month's usage, the free allowance, the card, auto-recharge) and the history table. Every block has a fixed
+   height, so values arriving never move what is below them. */
+.billing-balance { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: 20px 44px; gap: var(--space-4) var(--space-16); height: 84px; border-bottom: 1px solid var(--color-border-muted); }
+/* The page starts with the balance, where the other sections start with their action: no hairline or space over it. */
+.billing-rows:has(> .billing-balance:first-child) { border-top: 0; }
+.billing-balance__add { grid-area: 1 / 2 / -1 / 3; align-self: center; }
+/* This month: the counts, then what they cost. On a phone the cost sits over the counts, both at the right edge. It
+   fills the control, so its box is the same while the figures load and after. */
+.billing-month { display: flex; flex: 1; align-items: baseline; justify-content: flex-end; gap: var(--space-16); min-width: 0; }
 .billing-balance__label { display: flex; align-items: center; gap: var(--space-8); }
 .billing-balance__amount { display: flex; align-items: center; font-family: var(--font-mono); font-size: 36px; line-height: 44px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
 /* The balance opens its details: the figure is the button, with a chevron that nudges on hover. */
@@ -8,6 +15,30 @@ button.billing-balance__amount { justify-self: start; gap: var(--space-4); paddi
 button.billing-balance__amount > svg { flex: none; color: var(--color-muted); transition: transform 160ms var(--ease-out-strong), color var(--motion-duration); }
 @media (hover: hover) and (pointer: fine) { button.billing-balance__amount:hover > svg { color: var(--color-text); transform: translateX(2px); } }
 .billing-balance__amount--plan { font-family: var(--font-body); font-size: 30px; font-weight: var(--font-weight-bold); letter-spacing: -.01em; }
+/* The free allowance's meters, and the daily limit's row while there is one: it opens its steps, a short numbered ladder. */
+.usage-meter { display: inline-flex; align-items: center; gap: var(--space-12); }
+.usage-meter__count { min-width: 13ch; text-align: right; }
+.usage-meter__track { position: relative; display: block; width: 96px; height: 4px; overflow: hidden; border-radius: 2px; background: var(--color-layer-2); }
+.usage-meter__track > i { position: absolute; inset: 0; border-radius: inherit; background: var(--color-contrast); transform-origin: left; transition: transform 240ms var(--ease-out-strong); }
+.usage-meter__track[data-full] > i { background: var(--color-warning-marker); }
+.usage-limit > summary { list-style: none; cursor: pointer; }
+.usage-limit > summary::-webkit-details-marker { display: none; }
+.usage-limit__title { display: inline-flex; align-items: center; gap: var(--space-4); }
+.usage-limit__title > svg { flex: none; color: var(--color-muted); transition: transform 180ms var(--ease-out-strong), color var(--motion-duration); }
+.usage-limit[open] .usage-limit__title > svg { transform: rotate(180deg); }
+@media (hover: hover) and (pointer: fine) { .usage-limit > summary:hover .usage-limit__title > svg { color: var(--color-text); } }
+.usage-limit > summary:focus-visible { outline-offset: calc(-1 * var(--focus-width)); }
+.usage-steps-section { display: flex; flex-direction: column; gap: var(--space-12); padding-top: var(--space-12); }
+.usage-limit__title .ui-status { margin-left: var(--space-4); }
+.usage-steps { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--color-border-muted); }
+.usage-steps > li { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: var(--space-12); align-items: start; min-height: 80px; padding: var(--space-12) 0; border-bottom: 1px solid var(--color-border-muted); }
+.usage-steps__mark { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%; box-shadow: inset 0 0 0 1px var(--color-border-strong); color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.usage-steps > li[data-current] .usage-steps__mark { background: var(--color-contrast); box-shadow: none; color: var(--color-on-contrast); }
+.usage-steps > li[data-done] .usage-steps__mark { color: var(--color-text); }
+.usage-steps__body { display: flex; flex-direction: column; gap: 2px; min-width: 0; font-size: var(--text-sm); line-height: var(--leading-sm); }
+.usage-steps__body b { font-variant-numeric: tabular-nums; }
+.usage-steps__body .muted { font-size: var(--text-xs); line-height: var(--leading-xs); text-wrap: pretty; }
+.usage-steps__badge { margin-left: var(--space-8); padding: 0; border-radius: 0; background: none; color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
 .billing-section { display: flex; flex-direction: column; gap: var(--space-12); }
 .billing-slot { display: inline-flex; vertical-align: middle; }
 
@@ -23,7 +54,6 @@ button.billing-balance__amount > svg { flex: none; color: var(--color-muted); tr
 
 /* Balance details and auto-recharge open as dialogs: the balance's parts as label and value lines, the amounts as rows. */
 .billing-about .ui-dialog__body, .billing-recharge-dialog .ui-dialog__body { display: flex; flex-direction: column; gap: var(--space-12); }
-.billing-rules { display: flex; flex-direction: column; gap: var(--space-4); margin: 0; padding-left: var(--space-16); text-wrap: pretty; }
 .billing-facts { display: flex; flex-direction: column; gap: var(--space-8); margin: 0; }
 .billing-facts > div { display: flex; justify-content: space-between; gap: var(--space-12); }
 .billing-facts dt { color: var(--color-muted); font-size: var(--text-xs); }
@@ -67,19 +97,20 @@ button.billing-balance__amount > svg { flex: none; color: var(--color-muted); tr
   /* Values sit in a fixed column one control tall, so a skeleton and the value it becomes share one box; the label takes
      the rest and wraps, so no title or range is cut off. Rows with a field keep a narrow column. */
   .billing-rows .settings-row { grid-template-columns: minmax(0, 1fr) 208px; }
+  /* Two lines whatever has loaded, so the row is one height from its skeleton on. */
+  .billing-month { flex-direction: column-reverse; align-items: flex-end; justify-content: center; gap: 0; height: 44px; line-height: 22px; }
+  .billing-rows .settings-row__control:has(.billing-month) { height: 44px; }
+  .usage-meter__track { width: 48px; }
   .billing-rows .settings-row:has(.billing-dollars) { grid-template-columns: minmax(0, 1fr) 112px; min-height: 60px; }
   .billing-recharge { gap: var(--space-8); }
   .billing-rows .settings-row__label > span { overflow: visible; white-space: normal; text-wrap: pretty; }
   .billing-rows .settings-row__control { justify-self: stretch; height: var(--control-height); }
-  .billing-balance { height: 96px; }
   .billing-balance__amount { font-size: 32px; }
   .billing-dollars { width: 104px; }
   .billing-choice { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  /* Cards: a description wraps onto two lines instead of ending at one. */
-  .billing-table .ui-card { height: auto; min-height: var(--table-row-height); }
-  .billing-table .ui-card__head { height: auto; min-height: 20px; align-items: flex-start; white-space: normal; }
-  .billing-table .ui-card__title { overflow: visible; text-wrap: pretty; }
-  /* Two lines for every description (longer ones end in an ellipsis, the full text is the title), so cards keep one height. */
-  .billing-table .billing-desc { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; min-height: 40px; line-height: 20px; overflow: hidden; white-space: normal; }
 }
-@media (prefers-reduced-motion: reduce) { .billing-choice__item, .billing-method, button.billing-balance__amount > svg { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .billing-choice__item, .billing-method, button.billing-balance__amount > svg, .usage-limit__title > svg { transition: none; } }
+@media (pointer: coarse), (max-width: 899px) {
+  .billing-rows .settings-score { position: relative; }
+  .billing-rows .settings-score::before { content: ''; position: absolute; inset: -12px -8px; }
+}
