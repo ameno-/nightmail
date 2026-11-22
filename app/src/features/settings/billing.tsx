@@ -67,7 +67,7 @@ const MonthLink = ({ children }: { children: ReactNode }) => <Link to="/settings
 function BalanceDetails({ open, onOpenChange, balance, enforced }: { open: boolean; onOpenChange: (open: boolean) => void; balance: NonNullable<BillingSummary['balance']>; enforced: boolean }) {
   const paid = BigInt(balance.paid)
   const parts: [string, string][] = [paid < 0n ? ['Unpaid usage', usd(-paid)] : ['Paid credit', usd(paid)], ...BigInt(balance.promo) > 0n ? [['Promotional credit', usd(balance.promo)] as [string, string]] : [], ...BigInt(balance.unsettled) !== 0n ? [['Usage not yet settled', usd(balance.unsettled)] as [string, string]] : []]
-  return <Dialog open={open} onOpenChange={onOpenChange} title={`Balance ${usd(total(balance))}`} className="billing-about" footer={<Button onClick={() => onOpenChange(false)}>Close</Button>}>
+  return <Dialog open={open} onOpenChange={onOpenChange} title={`Balance ${usd(total(balance))}`} className="billing-about">
     <dl className="billing-facts">{parts.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
     <ul className="billing-rules">{enforced ? <>
       <li>Usage is taken from it every hour.</li>

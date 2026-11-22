@@ -220,10 +220,8 @@ function WebhookEditor({ webhook: read, regions, refreshError, onRefresh }: { we
     <SecretDialog secret={secret?.value ?? null} title={`${webhook.name} · ${secret?.rotated ? 'New signing secret' : 'Signing secret'}`} description={secret?.rotated ? undefined : `Keep it on your server: anyone with it can sign requests as ${productName}.`} onClose={() => { setSecret(null); rotate.reset(); reveal.reset() }}><SigningGuide /></SecretDialog>
     {/* A delivery in full: its facts as key/value rows, then the payload as sent, with copy for both the ID and the JSON. */}
     <Dialog size="lg" open={inspected !== null} onOpenChange={open => { if (!open) setInspected(null) }} title={inspected?.test ? 'Test delivery payload' : 'Delivery payload'}
-      status={inspected && <StatusBadge status={label(inspected.status)} />}
-      footer={<Button onClick={() => setInspected(null)}>Close</Button>}>
+      status={inspected && <StatusBadge status={label(inspected.status)} />}>
       {inspected && <>
-        <h3 className="ui-label ui-label--rule">Delivery</h3>
         <KeyValues className="settings-delivery-facts" items={[['Event', <code>{inspected.event}</code>], ['Response', inspected.response ?? 'No response'], ['Attempts', number(inspected.attempts)], ['Created', `${shortDateTime(inspected.at)} UTC`], ...multiTenant ? [] : [['Region', inspected.regionId] as [string, ReactNode]], ['ID', <span className="ui-kv__id"><code>{inspected.id}</code><CopyButton value={inspected.id} label="Copy delivery ID" /></span>]]} />
         <div className="settings-payload-head"><h3 className="ui-label ui-label--rule">Payload</h3><CopyButton value={JSON.stringify(inspected.payload ?? {}, null, 2)} label="Copy payload" /></div>
         <pre className="settings-payload">{JSON.stringify(inspected.payload ?? {}, null, 2)}</pre>

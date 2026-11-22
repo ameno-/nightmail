@@ -150,7 +150,7 @@ function Changes({ summary }: { summary: Record<string, unknown> }) {
 }
 function ActivityDetails({ entry, onClose }: { entry: AuditEntry | null; onClose: () => void }) {
   // When it happened leads the facts; where it came from (the channel with its client and network) is From.
-  return <Dialog open={entry !== null} onOpenChange={open => { if (!open) onClose() }} title={entry ? actionLabel(entry.action) : ''} footer={<Button onClick={onClose}>Close</Button>}>
+  return <Dialog open={entry !== null} onOpenChange={open => { if (!open) onClose() }} title={entry ? actionLabel(entry.action) : ''}>
     {entry && <div className="stack">
       <dl className="settings-facts activity-facts">
         <div><dt>When</dt><dd>{shortDateTime(entry.at)} UTC</dd></div>

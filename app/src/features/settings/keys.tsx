@@ -18,7 +18,6 @@ import { AddressList, PrivateAddress } from '../../components/PrivateAddress'
 import { ConnectAgentButton, ConnectAgentDialog, McpKeySetup } from '../docs/connect-agent'
 import { MailSettings, useMailServers } from '../docs/mail-settings'
 import { apiKeyEnv, productName } from '../../../../api/src/brand'
-import { usePhone } from '../../lib/media'
 
 // One table for the three credential types: API keys, agent tokens (a connected agent, with the short-lived tokens it
 // made nested under it) and app passwords.
@@ -218,17 +217,14 @@ function KeyDetails({ row, fields, onClose, onRevoke, onEdit }: { row: Row | nul
   const id = row?.id
   useEffect(() => { setTab('details') }, [id])
   const state = row ? stateOf(row) : null
-  // A phone's sheet closes with its X and a swipe: no Close beside Revoke and Edit.
-  const phone = usePhone()
   const facts = fields.filter(([label]) => label !== 'Status')
   const life: [string, ReactNode][] = [...facts.filter(([label]) => !accessFacts.has(label)), ...(row?.kind === 'key' ? [['ID', <span className="ui-kv__id"><code>{row.key.id}</code><CopyButton value={row.key.id} label="Copy key ID" /></span>] as [string, ReactNode]] : [])]
   return <Dialog size="lg" open={row !== null} onOpenChange={next => { if (!next) onClose() }} title={row ? rowName(row) : ''}
     status={row && <StatusBadge status={state ?? 'Active'} tone={state === 'Revoked' || state === 'Ended' ? 'danger' : state ? 'warning' : 'success'} />}
-    footer={<>
-      {row && !rowState(row) && <Button variant="danger" className="ui-dialog__footer-start" onClick={() => onRevoke(row)}>{revokeLabel(row)}</Button>}
-      {!phone && <Button onClick={onClose}>Close</Button>}
-      {row && editable(row) && <Button variant="primary" onClick={() => onEdit(row.key)}>Edit</Button>}
-    </>}>
+    footer={row && (!rowState(row) || editable(row)) ? <>
+      {!rowState(row) && <Button variant="danger" className="ui-dialog__footer-start" onClick={() => onRevoke(row)}>{revokeLabel(row)}</Button>}
+      {editable(row) && <Button variant="primary" onClick={() => onEdit(row.key)}>Edit</Button>}
+    </> : undefined}>
     {row?.kind === 'key' && <Tabs label="Key" value={tab} onValueChange={setTab} items={[{ value: 'details', label: 'Details' }, { value: 'changes', label: 'Changes' }]} />}
     <div className="keys-panels">
       <div className="keys-details" data-inactive={tab !== 'details' || undefined} inert={tab !== 'details'}>
