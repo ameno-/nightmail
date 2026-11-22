@@ -1188,6 +1188,10 @@ export type EmailDetail = {
     contact: {
         id: string;
         suppressed: boolean;
+        /**
+         * When the address was suppressed (UTC), while it is.
+         */
+        suppressedAt: string | null;
     } | null;
     thread: EmailThread;
 };
@@ -1204,6 +1208,18 @@ export type EmailEvent = {
          * Reason recorded when this send was suppressed. For a multi-recipient send blocked locally, this is the first blocked recipient in To, Cc, Bcc order.
          */
         suppressionReason?: string;
+        /**
+         * A bounce or a delay: the receiving server’s reply as SES reported it, such as "smtp; 550 5.1.1 user unknown", up to 500 characters. For several recipients, the first that has one. Absent when SES reported none and on events stored before this field.
+         */
+        diagnosticCode?: string;
+        /**
+         * A delay: SES’s reason, such as MailboxFull, SpamDetected, RecipientServerError, TransientCommunicationFailure, IPFailure or General.
+         */
+        delayType?: string;
+        /**
+         * A delay: when SES stops retrying the delivery (UTC).
+         */
+        expirationTime?: string;
         [key: string]: unknown;
     };
 };
@@ -2123,6 +2139,18 @@ export type Event = {
          * Reason recorded when this send was suppressed. For a multi-recipient send blocked locally, this is the first blocked recipient in To, Cc, Bcc order.
          */
         suppressionReason?: string;
+        /**
+         * A bounce or a delay: the receiving server’s reply as SES reported it, such as "smtp; 550 5.1.1 user unknown", up to 500 characters. For several recipients, the first that has one. Absent when SES reported none and on events stored before this field.
+         */
+        diagnosticCode?: string;
+        /**
+         * A delay: SES’s reason, such as MailboxFull, SpamDetected, RecipientServerError, TransientCommunicationFailure, IPFailure or General.
+         */
+        delayType?: string;
+        /**
+         * A delay: when SES stops retrying the delivery (UTC).
+         */
+        expirationTime?: string;
         [key: string]: unknown;
     };
 };

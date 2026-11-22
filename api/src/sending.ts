@@ -9,7 +9,7 @@ import type { DefaultTreeAdapterMap } from 'parse5';
 import { apiKeys } from './db/core.js';
 import { receivingPolicy } from './mailbox-ingest-input.js';
 import { mergeSuppression } from './db/audience.js';
-import { SuppressionReason, SuppressionEventData, readCursor, nextCursor, budgetedRead, readLimit, readLimitNote } from './core.js';
+import { SuppressionReason, EmailEventData, readCursor, nextCursor, budgetedRead, readLimit, readLimitNote } from './core.js';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import type { Attachment } from '@aws-sdk/client-sesv2';
 import { actor, actorMailAccess, ApiError, AudienceSpec, denied, unrestrictedRequired, uploadKey, chargeRenderBudget, digest, errors, getSes, isSimulatedSes, id, rowId, IdParams, json, lazyModule, log, ModuleLoadError, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, timed, wrapModuleLoad, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Runtime, type Storage } from './core.js';
@@ -146,7 +146,7 @@ const Email = z.object({ untrustedContent: UntrustedContent, id: z.string(), reg
 const Receipt = z.object({ id: z.string(), status: z.literal('queued'), simulated: z.boolean() }).openapi('EmailQueued');
 const SingleReceipt = z.object({ ...Receipt.shape, scheduledAt: z.string().optional().describe('A scheduled send: when it goes (UTC).'), inboundMessageId: z.string().optional(), mailboxMessageId: z.string().optional().openapi({ deprecated: true, description: 'Legacy alias for inboundMessageId.' }), threadId: z.string().optional() }).describe('For tracked sends, id is the transactional receipt, inboundMessageId identifies the stored message, and threadId identifies its conversation.').openapi('SingleEmailQueued');
 const BatchReceipt = z.object({ data: z.array(Receipt) }).openapi('EmailBatchQueued');
-const Event = z.object({ id: z.string(), emailId: z.string(), type: z.string(), providerId: z.string().nullable(), simulated: z.boolean(), createdAt: z.string(), data: SuppressionEventData }).openapi('EmailEvent');
+const Event = z.object({ id: z.string(), emailId: z.string(), type: z.string(), providerId: z.string().nullable(), simulated: z.boolean(), createdAt: z.string(), data: EmailEventData }).openapi('EmailEvent');
 const EmailContent = z.object({ untrustedContent: UntrustedContent, subject: z.string(), html: z.string().nullable(), text: z.string().nullable(), raw: z.string().nullable(), attachments: z.array(z.string()), render: z.enum(['direct', 'ses', 'simulated']), templateName: z.string().nullable(), simulated: z.boolean() }).openapi('EmailContent');
 const PreviewClient = z.enum(clients).openapi('EmailPreviewClient');
 const previewOptions = {
@@ -1528,13 +1528,13 @@ export function registerSending(app: App) {
   });
   app.openapi(createRoute({ method:'get', path:'/v1/emails/{id}/detail', operationId:'getEmailDetail', tags:['Emails'], security,
     description:'One log detail: metadata, visible HTML/text, attachment IDs, the first 100 events, active contact for a single To address, and the conversation the email belongs to. Uses the same content and event redaction as their individual endpoints; no raw MIME. Continue events with listEmailEvents.',
-    request:{params:IdParams},responses:{200:response(z.object({email:Email,content:EmailContent.pick({html:true,text:true,attachments:true}),events:page(Event),contact:z.object({id:z.string(),suppressed:z.boolean()}).nullable(),
+    request:{params:IdParams},responses:{200:response(z.object({email:Email,content:EmailContent.pick({html:true,text:true,attachments:true}),events:page(Event),contact:z.object({id:z.string(),suppressed:z.boolean(),suppressedAt:z.string().nullable().describe('When the address was suppressed (UTC), while it is.')}).nullable(),
       thread:EmailThread.nullable().describe('The conversation: of a reply from a receiving address or inbox, or of an email whose In-Reply-To named a stored message its sender could read, with the messages around it that you can read. Null for an email in none, when you can read none of the conversation\'s received or stored messages, and for credentials that cannot read received mail.')}).openapi('EmailDetail')),...errors} }),async c=>{
     const a=actor(c), emailId=c.req.valid('param').id, access=actorMailAccess(a);
     // Single-table select fields render columns unqualified, which would bind to the subquery's own
     // table (events matching their own id; contacts matching any workspace). Name the outer row.
     const [detail]=await c.env.db.select({mail:emails,fromName:emailColumns.fromName,untrustedContent:sentUntrustedContent,
-      contact:a.domains.length ? sql<null>`NULL` : sql<{id:string;suppressed:boolean}|null>`(SELECT jsonb_build_object('id',c.id,'suppressed',c.suppressed) FROM audience_contacts c
+      contact:a.domains.length ? sql<null>`NULL` : sql<{id:string;suppressed:boolean;suppressedAt:string|null}|null>`(SELECT jsonb_build_object('id',c.id,'suppressed',c.suppressed,'suppressedAt',CASE WHEN c.suppressed THEN c.suppressed_at END) FROM audience_contacts c
         WHERE c.workspace_id=sending_emails.workspace_id AND c.deleted_at IS NULL AND jsonb_array_length(sending_emails.to_addresses)=1 AND c.email=lower(sending_emails.to_addresses->>0))`,
       timeline:sql<z.input<typeof Event>[]>`(SELECT coalesce(jsonb_agg(t ORDER BY t."createdAt"::timestamptz,t.id),'[]') FROM (
         SELECT id,email_id AS "emailId",type,provider_id AS "providerId",simulated,created_at::text AS "createdAt",data FROM sending_email_events

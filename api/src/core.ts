@@ -13,6 +13,11 @@ import { addSesBodySplice } from './ses-body.js';
 export type Database = NodePgDatabase;
 export const SuppressionReason = z.string().describe('Reason recorded when this send was suppressed. For a multi-recipient send blocked locally, this is the first blocked recipient in To, Cc, Bcc order.');
 export const SuppressionEventData = z.object({suppressionReason:SuppressionReason.optional()}).catchall(z.unknown());
+/** An email event's data, in the email's events and in its webhook: with what SES reported about a bounce or a delay. */
+export const EmailEventData = z.object({suppressionReason:SuppressionReason.optional(),
+  diagnosticCode:z.string().optional().describe('A bounce or a delay: the receiving server\u2019s reply as SES reported it, such as "smtp; 550 5.1.1 user unknown", up to 500 characters. For several recipients, the first that has one. Absent when SES reported none and on events stored before this field.'),
+  delayType:z.string().optional().describe('A delay: SES\u2019s reason, such as MailboxFull, SpamDetected, RecipientServerError, TransientCommunicationFailure, IPFailure or General.'),
+  expirationTime:z.string().optional().describe('A delay: when SES stops retrying the delivery (UTC).')}).catchall(z.unknown());
 export type DbExecutor = Pick<Database, 'select' | 'insert' | 'update' | 'delete' | 'execute'>;
 export type Permission = 'read' | 'send' | 'manage';
 export interface Actor {

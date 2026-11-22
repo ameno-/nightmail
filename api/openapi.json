@@ -3969,11 +3969,19 @@
               },
               "suppressed": {
                 "type": "boolean"
+              },
+              "suppressedAt": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "When the address was suppressed (UTC), while it is."
               }
             },
             "required": [
               "id",
-              "suppressed"
+              "suppressed",
+              "suppressedAt"
             ]
           },
           "thread": {
@@ -4018,6 +4026,18 @@
               "suppressionReason": {
                 "type": "string",
                 "description": "Reason recorded when this send was suppressed. For a multi-recipient send blocked locally, this is the first blocked recipient in To, Cc, Bcc order."
+              },
+              "diagnosticCode": {
+                "type": "string",
+                "description": "A bounce or a delay: the receiving server’s reply as SES reported it, such as \"smtp; 550 5.1.1 user unknown\", up to 500 characters. For several recipients, the first that has one. Absent when SES reported none and on events stored before this field."
+              },
+              "delayType": {
+                "type": "string",
+                "description": "A delay: SES’s reason, such as MailboxFull, SpamDetected, RecipientServerError, TransientCommunicationFailure, IPFailure or General."
+              },
+              "expirationTime": {
+                "type": "string",
+                "description": "A delay: when SES stops retrying the delivery (UTC)."
               }
             },
             "additionalProperties": {}
@@ -7094,6 +7114,18 @@
               "suppressionReason": {
                 "type": "string",
                 "description": "Reason recorded when this send was suppressed. For a multi-recipient send blocked locally, this is the first blocked recipient in To, Cc, Bcc order."
+              },
+              "diagnosticCode": {
+                "type": "string",
+                "description": "A bounce or a delay: the receiving server’s reply as SES reported it, such as \"smtp; 550 5.1.1 user unknown\", up to 500 characters. For several recipients, the first that has one. Absent when SES reported none and on events stored before this field."
+              },
+              "delayType": {
+                "type": "string",
+                "description": "A delay: SES’s reason, such as MailboxFull, SpamDetected, RecipientServerError, TransientCommunicationFailure, IPFailure or General."
+              },
+              "expirationTime": {
+                "type": "string",
+                "description": "A delay: when SES stops retrying the delivery (UTC)."
               }
             },
             "additionalProperties": {}

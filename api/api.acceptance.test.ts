@@ -31356,6 +31356,52 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  test('a bounce and a delay keep the receiving server\u2019s reply, the delay\u2019s type and its retry deadline, in the email\u2019s events and its webhook event',async t=>{
+    await simulatedSesFixture(t,async({runtime,local,db})=>{
+      const {ingestFeedbackBatch,operationJobs}=await import('./src/operations.js');
+      const wid=runtime.config.workspaceId, account='111122223333', topicArn=`arn:aws:sns:${REGION}:${account}:fixture`;
+      const sent=async()=>{
+        const to=address(), email=ok(await local('POST','/v1/emails/send',mail({to})),202), provider=unique('provider');
+        await db.query("UPDATE sending_emails SET status='sent',provider_id=$2,simulated=false WHERE id=$1",[email.id,provider]);
+        return {to,id:email.id as string,provider};
+      };
+      const notice=(provider:string,eventType:'Bounce'|'DeliveryDelay',detail:Json,sendingAccountId:unknown=account)=>({topicArn,region:REGION,messageId:unique('sns'),
+        message:{eventType,mail:{messageId:provider,sendingAccountId},[eventType==='Bounce'?'bounce':'deliveryDelay']:detail}});
+      const detail=async(id:string,type:string)=>{const d=ok(await local('GET',`/v1/emails/${id}/detail`));return {status:d.email.status,contact:d.contact,data:d.events.data.find((event:Json)=>event.type===type)?.data};};
+      const published=async(id:string,type:string)=>(await db.query("SELECT data FROM operation_events WHERE workspace_id=$1 AND data->>'emailId'=$2 AND type=$3",[wid,id,type])).rows[0]?.data;
+      // The queue: the reply of the first recipient that has one, as one line without control characters, cut at 500.
+      // A bounce keeps nothing of a delay.
+      const bounced=await sent(), reply=`smtp; 550 5.1.1 <${bounced.to}>: user unknown ${'x'.repeat(600)}`.slice(0,500);
+      assert.deepEqual(await ingestFeedbackBatch(runtime,[notice(bounced.provider,'Bounce',{bounceType:'Permanent',bounceSubType:'General',delayType:'General',expirationTime:'2030-01-01T00:00:00Z',
+        bouncedRecipients:[{emailAddress:bounced.to},{emailAddress:bounced.to,diagnosticCode:`smtp; 550 5.1.1 <${bounced.to}>:\r\n user\0 unknown ${'x'.repeat(600)}`}]})]),[{ok:true}]);
+      const hard=await detail(bounced.id,'bounce');
+      assert.equal(hard.status,'bounced');assert.equal(hard.data.diagnosticCode,reply);assert.equal(hard.data.diagnosticCode.length,500);
+      assert.ok(!('delayType' in hard.data) && !('expirationTime' in hard.data));
+      assert.equal((await published(bounced.id,'email.bounced')).diagnosticCode,reply);
+      // Its address is suppressed from then: the detail says since when.
+      assert.equal(hard.contact.suppressed,true);assert.ok(Number.isFinite(Date.parse(hard.contact.suppressedAt)));
+      // A delay: its reply, SES's reason and when SES stops retrying.
+      const delayed=await sent(), wait={diagnosticCode:'smtp; 452 4.2.2 The email account is over quota',delayType:'MailboxFull',expirationTime:'2030-01-02T03:04:05.000Z'};
+      assert.deepEqual(await ingestFeedbackBatch(runtime,[notice(delayed.provider,'DeliveryDelay',{delayType:'MailboxFull',expirationTime:'2030-01-02T03:04:05Z',timestamp:new Date().toISOString(),
+        delayedRecipients:[{emailAddress:delayed.to,status:'4.2.2',diagnosticCode:wait.diagnosticCode}]})]),[{ok:true}]);
+      const late=await detail(delayed.id,'delivery_delay');
+      assert.equal(late.status,'delayed');assert.equal(late.contact,null);
+      for(const data of [late.data,await published(delayed.id,'email.delivery_delayed')]) assert.deepEqual({diagnosticCode:data.diagnosticCode,delayType:data.delayType,expirationTime:data.expirationTime},wait);
+      // The recovery job keeps the same; a report without a reply, a known type or a real date keeps none of them.
+      const soft=await sent(), bare=await sent();
+      for(const item of [notice(soft.provider,'Bounce',{bounceType:'Transient',bounceSubType:'MailboxFull',bouncedRecipients:[{emailAddress:soft.to,diagnosticCode:'smtp; 552 5.2.2 Mailbox full'}]},runtime.config.awsAccountId),
+        notice(bare.provider,'DeliveryDelay',{delayType:'not a type',expirationTime:'soon',delayedRecipients:[{emailAddress:bare.to,diagnosticCode:' \n '}]},runtime.config.awsAccountId)]) {
+        await db.query('INSERT INTO operation_sns_receipts(topic_arn,message_id,workspace_id) VALUES($1,$2,$3)',[topicArn,item.messageId,wid]);
+        await operationJobs['operation.ses']!(runtime,item,{id:unique('job'),attempts:1,workspaceId:wid});
+      }
+      const refused=await detail(soft.id,'non_permanent_bounce');
+      assert.equal(refused.status,'delayed');assert.equal(refused.data.diagnosticCode,'smtp; 552 5.2.2 Mailbox full');
+      assert.equal((await published(soft.id,'email.bounced')).diagnosticCode,'smtp; 552 5.2.2 Mailbox full');
+      const plain=(await detail(bare.id,'delivery_delay')).data;
+      assert.ok(!('diagnosticCode' in plain) && !('delayType' in plain) && !('expirationTime' in plain));
+    });
+  });
+
   test('mixed-workspace feedback commits healthy siblings and quarantines only the unpersistable message',async t=>{
     await simulatedSesFixture(t,async ({runtime,local,run,db})=>{
       const {ingestFeedbackBatch}=await import('./src/operations.js'), {settleFeedbackMessage}=await import('./src/adapters/feedback-queue.js');
