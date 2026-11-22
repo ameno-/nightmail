@@ -66,6 +66,8 @@ export function WebhooksSection() {
   const webhooks = useWebhooks(pagination.cursor)
   const { multiTenant } = useWorkspaceAccess()
   const columns = webhookColumns(multiTenant)
+  // Headers only when a webhook has some: while loading it isn't shown either, so the usual case never shifts.
+  const withHeaders = webhooks.data?.some(webhook => webhook.headers.length > 0) ?? false
   return <section id="webhooks" className="section stack settings-group settings-rule">
     {multiTenant ? <div className="settings-actions"><Button onClick={() => navigate('/settings/webhooks/new')}>Add webhook</Button></div> : <SectionHeader title="Webhooks" actions={<Button onClick={() => navigate('/settings/webhooks/new')}>Add webhook</Button>} />}
     {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable className="settings-webhooks-table" loading={webhooks.isPending} skeletonRows={2} minRows={2} rows={webhooks.data ?? []} rowKey={webhook => webhook.id} rowHref={webhook => `/settings/webhooks/${webhook.id}`} empty={<EmptyState title="No webhooks" />} columns={[
@@ -73,7 +75,7 @@ export function WebhooksSection() {
       { ...column(columns, 'url'), render: (webhook: Webhook) => webhook.url },
       ...multiTenant ? [] : [{ ...column(columns, 'scope'), render: (webhook: Webhook) => scopeText(webhook.regionIds) }],
       { ...column(columns, 'events'), render: (webhook: Webhook) => <span className="settings-webhook-events" title={webhook.events.map(eventLabel).join(', ')}>{eventSummary(webhook.events)}</span>, cardRender: (webhook: Webhook) => eventSummary(webhook.events) },
-      { ...column(columns, 'headers'), render: (webhook: Webhook) => <HeaderNames headers={webhook.headers} /> },
+      ...withHeaders ? [{ ...column(columns, 'headers'), render: (webhook: Webhook) => <HeaderNames headers={webhook.headers} /> }] : [],
       { ...column(columns, 'status'), render: (webhook: Webhook) => <StatusBadge status={label(webhook.status)} /> },
     ]} />}
     {webhooks.data && <Pagination page={pagination.page} pageSize={20} nextCursor={webhooks.data.nextCursor} onPageChange={next => pagination.onPageChange(next, webhooks.data.nextCursor)} />}
