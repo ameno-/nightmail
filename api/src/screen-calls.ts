@@ -1,7 +1,7 @@
 import { sql } from 'drizzle-orm';
 import { log, logError, type Runtime } from './core.js';
 
-// content_screen_calls (migration 395): one row per classifier request, the same record as its CONTENT_SCREEN_CALL line
+// content_screen_calls (migration 397): one row per classifier request, the same record as its CONTENT_SCREEN_CALL line
 // (src/screen.ts), for operators who read the database. A row waits in memory, per database client, until
 // flushScreenCalls writes them all in one INSERT when a dispatch run ends (src/dispatcher.ts runDispatcher) or a job drain
 // ends (src/jobs.ts processJobs). So no write sits between a lease and SES or inside a statement that records a send, and
