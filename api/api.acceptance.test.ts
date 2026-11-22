@@ -10361,6 +10361,51 @@ describe('Newsletters', () => {
     });
   });
 
+  // The probe, the exact count and the background page walk the members' primary key, which reads the same entries however
+  // large the list. With statistics taken while the list was small the planner prefers a bitmap scan of every member
+  // instead (src/newsletters.ts walkingTheKey). Here they are taken with 1,000 members, then the list grows to 12,000, and
+  // each of those statements is explained where it runs: on its connection, in its transaction, with its settings. What
+  // the default settings would choose in this state depends on the rest of the table, so it is reported, not asserted.
+  test('newsletters: the probe, the exact count and the background page walk the primary key, with statistics taken while the list was smaller', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, run }) => {
+      const { NEWSLETTER_READERS } = await import('./src/newsletters.js');
+      const lowered = { ...NEWSLETTER_READERS }; t.after(() => { Object.assign(NEWSLETTER_READERS, lowered); });
+      const wid = runtime.config.workspaceId;
+      const list = ok(await local('POST', '/v1/lists', { name: 'Grows' }), 201), other = ok(await local('POST', '/v1/lists', { name: 'Other' }), 201);
+      const members = (listId: string, from: number, to: number) => db.query(`INSERT INTO audience_list_members(workspace_id,list_id,contact_id)
+        SELECT $1,$2,'con_'||md5($2||n) FROM generate_series($3::int,$4::int) n`, [wid, listId, from, to]);
+      await members(list.id, 1, 1000); await members(other.id, 1, 2000);
+      await db.query('ANALYZE audience_list_members');
+      await members(list.id, 1001, 12_000);
+      ok(await local('POST', '/v1/newsletters', { listId: list.id, from: sender }), 201);
+      const scans = (plan: Json, out: string[] = []): string[] => {
+        if (plan['Relation Name'] === 'audience_list_members') out.push(`${plan['Node Type']}${plan['Index Name'] ? ` ${plan['Index Name']}` : ''}`);
+        for (const child of plan.Plans ?? []) scans(child, out);
+        return out;
+      };
+      const query = db.query.bind(db) as (...args: unknown[]) => Promise<any>;
+      const explain = async (text: string, values?: unknown[]) => scans((await query({ text: `EXPLAIN (FORMAT JSON) ${text}`, values })).rows[0]['QUERY PLAN'][0].Plan);
+      const plans: [string, string[]][] = [];
+      t.mock.method(db, 'query', async (...args: unknown[]) => {
+        const config = args[0] as { text?: string; values?: unknown[] } | string, text = typeof config === 'string' ? config : config?.text ?? '';
+        const label = /ORDER BY contact_id OFFSET/.test(text) ? 'probe' : /WITH page AS MATERIALIZED/.test(text) ? 'page' : null;
+        if (label) plans.push([label, await explain(text, (typeof config === 'string' ? undefined : config.values) ?? args[1] as unknown[])]);
+        return query(...args);
+      });
+      ok(await local('GET', `/v1/newsletters/${list.id}`));
+      NEWSLETTER_READERS.exactUpTo = 20_000;
+      ok(await local('GET', `/v1/newsletters/${list.id}`));
+      Object.assign(NEWSLETTER_READERS, { exactUpTo: lowered.exactUpTo, runMs: 0 });
+      await run('audience.newsletterReaders'); await run('audience.newsletterReaders');
+      // A large read's probe; a small read's probe and exact count; the job's first two pages of 5,000.
+      assert.deepEqual(plans.map(([label]) => label), ['probe', 'probe', 'page', 'page', 'page']);
+      for (const [label, nodes] of plans) assert.ok(nodes.length && nodes.every(node => /^Index (Only )?Scan audience_list_members_pkey$/.test(node)), `${label}: ${nodes.join(', ')}`);
+      // Only those statements: everything after them plans with the defaults again.
+      assert.deepEqual((await query("SELECT current_setting('enable_bitmapscan') AS bitmap, current_setting('enable_seqscan') AS seq")).rows[0], { bitmap: 'on', seq: 'on' });
+      t.diagnostic(`The probe with the default settings in this state: ${(await explain('SELECT 1 FROM audience_list_members WHERE workspace_id = $1 AND list_id = $2 ORDER BY contact_id OFFSET 10000 LIMIT 1', [wid, list.id])).join(', ')}`);
+    });
+  });
+
   test('newsletters: owners and admins change them; members and keys without manage read them; keys limited to domains get nothing', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       // Hosted, so a member's dashboard session signs in (self-hosted admits only listed subjects).

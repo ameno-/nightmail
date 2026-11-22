@@ -72,6 +72,21 @@ async function readersPage(db: DbExecutor, workspaceId: string, listId: string, 
         FROM page p JOIN audience_contacts c ON c.workspace_id = ${workspaceId} AND c.id = p.contact_id WHERE ${reader} GROUP BY 1) d), '[]'::jsonb) AS days`);
   return row!;
 }
+/**
+ * The probe and the page walk the members' primary key in order, which reads the same number of entries whatever the
+ * list's size. With statistics taken while a list was small (an import that outran autovacuum's analyze), the planner
+ * expects a few thousand members and prefers a bitmap scan of every one of them and a sort instead: 0.5 s and all
+ * 2,000,000 members read for one probe at PostgreSQL's default random_page_cost, and a background page that rereads the
+ * rest of the list each time (measured; the plan flipped at estimates of 191 to 14,617 rows). With bitmap and sequential
+ * scans off, the primary key is the plan left. Only `work` runs that way: the settings are local to the caller's
+ * transaction and go back to their defaults after it.
+ */
+async function walkingTheKey<T>(db: DbExecutor, work: () => Promise<T>) {
+  await db.execute(sql`SELECT set_config('enable_bitmapscan', 'off', true), set_config('enable_seqscan', 'off', true)`);
+  const result = await work();
+  await db.execute(sql`SELECT set_config(name, reset_val, true) FROM pg_settings WHERE name IN ('enable_bitmapscan', 'enable_seqscan')`);
+  return result;
+}
 function addPage(pass: Pass, page: Awaited<ReturnType<typeof readersPage>>): Pass {
   const daily = [...pass.daily];
   let count = pass.count;
@@ -89,9 +104,9 @@ const queueReaders = (workspaceId: string, listId: string) => sql`INSERT INTO jo
 const readersDue = (stored: StoredNewsletterReaders | null) => !stored || Date.now() - Date.parse(stored.countedAt) >= NEWSLETTER_READERS.refreshMs;
 
 /**
- * A large newsletter's background count: pages of its members by primary key, each its own statement outside any
- * transaction, the running sums in the job's payload between runs, stored on the list when the pass ends. A count is
- * taken over minutes, so members who join or leave while it runs may or may not be in it.
+ * A large newsletter's background count: pages of its members by primary key, each its own short read-only transaction
+ * (for walkingTheKey's settings), the running sums in the job's payload between runs, stored on the list when the pass
+ * ends. A count is taken over minutes, so members who join or leave while it runs may or may not be in it.
  */
 const readersJob: JobHandler = retryDatabaseFailures(async (runtime, payload, job) => {
   if (typeof payload.listId !== 'string') throw new ApiError(422, 'INVALID_JOB', 'A newsletter count needs its list.');
@@ -107,7 +122,8 @@ const readersJob: JobHandler = retryDatabaseFailures(async (runtime, payload, jo
   }
   let done = false;
   for (;;) {
-    const page = await readersPage(runtime.db, workspaceId, listId, pass.since, pass.cursor, NEWSLETTER_READERS.page);
+    const { since, cursor } = pass;
+    const page = await runtime.db.transaction(tx => walkingTheKey(tx, () => readersPage(tx, workspaceId, listId, since, cursor, NEWSLETTER_READERS.page)), { accessMode: 'read only' });
     pass = addPage(pass, page);
     if (page.members < NEWSLETTER_READERS.page) { done = true; break; }
     if (Date.now() - started >= NEWSLETTER_READERS.runMs) break;
@@ -151,14 +167,16 @@ export function registerNewsletters(app: App) {
     const { row, readers, due } = await budgetedRead(c.env.db, async db => {
       const [row] = await db.select({ ...columns, stored: lists.newsletterReaders }).from(lists).where(and(scope(a, listId), isNotNull(lists.newsletterFrom))).limit(1);
       if (!row) return notFound('Newsletter');
-      // At most exactUpTo + 1 entries of the members' primary key, whatever the list's size. The ORDER BY keeps it on that
-      // index: without it, a list that is most of the table plans as a sequential scan of the members' heap.
-      const large = !!(await db.execute(sql`SELECT 1 FROM audience_list_members WHERE workspace_id = ${a.workspaceId} AND list_id = ${listId} ORDER BY contact_id OFFSET ${NEWSLETTER_READERS.exactUpTo} LIMIT 1`)).rows.length;
-      if (large) return { row, readers: row.stored, due: readersDue(row.stored) };
-      const now = Date.now(), since = utcDay(now - (NEWSLETTER_READERS.days - 1) * 86_400_000);
-      const readers = addPage({ since, countedAt: new Date(now).toISOString(), cursor: '', members: 0, count: 0, daily: Array<number>(NEWSLETTER_READERS.days).fill(0) },
-        await readersPage(db, a.workspaceId, listId, since, '', NEWSLETTER_READERS.exactUpTo + 1));
-      return { row, readers, due: false };
+      return walkingTheKey(db, async () => {
+        // At most exactUpTo + 1 entries of the members' primary key, whatever the list's size. The ORDER BY keeps it on
+        // that index: without it, a list that is most of the table plans as a sequential scan of the members' heap.
+        const large = !!(await db.execute(sql`SELECT 1 FROM audience_list_members WHERE workspace_id = ${a.workspaceId} AND list_id = ${listId} ORDER BY contact_id OFFSET ${NEWSLETTER_READERS.exactUpTo} LIMIT 1`)).rows.length;
+        if (large) return { row, readers: row.stored, due: readersDue(row.stored) };
+        const now = Date.now(), since = utcDay(now - (NEWSLETTER_READERS.days - 1) * 86_400_000);
+        const readers = addPage({ since, countedAt: new Date(now).toISOString(), cursor: '', members: 0, count: 0, daily: Array<number>(NEWSLETTER_READERS.days).fill(0) },
+          await readersPage(db, a.workspaceId, listId, since, '', NEWSLETTER_READERS.exactUpTo + 1));
+        return { row, readers, due: false };
+      });
     }, readLimit(READ_SECONDS));
     // Outside the read: a large list's count is refreshed in the background, and this read answers from the last one.
     if (due) await c.env.db.execute(queueReaders(a.workspaceId, listId));
