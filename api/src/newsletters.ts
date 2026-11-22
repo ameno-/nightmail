@@ -60,7 +60,8 @@ const reader = sql`c.deleted_at IS NULL AND NOT c.suppressed AND c.marketing_con
 /**
  * The readers among the list's next `limit` members after `cursor` in primary-key order, grouped by the UTC day each
  * joined counted from `since` (-1: before it; the last day also takes anyone who joined after it began), with the last
- * member read, for the next page.
+ * member read, for the next page. Each member's contact is one lookup of its primary key (walkingTheKey says why it is
+ * LATERAL), checked against the workspace after.
  */
 async function readersPage(db: DbExecutor, workspaceId: string, listId: string, since: string, cursor: string, limit: number) {
   const { rows: [row] } = await db.execute<{ last: string | null; members: number; days: [number, number][] }>(sql`WITH page AS MATERIALIZED (
@@ -69,7 +70,8 @@ async function readersPage(db: DbExecutor, workspaceId: string, listId: string, 
     SELECT (SELECT max(contact_id) FROM page) AS last, (SELECT count(*)::int FROM page) AS members,
       coalesce((SELECT jsonb_agg(jsonb_build_array(day, n)) FROM (
         SELECT least(${NEWSLETTER_READERS.days - 1}::int, greatest(-1, (p.created_at AT TIME ZONE 'UTC')::date - ${since}::date)) AS day, count(*)::int AS n
-        FROM page p JOIN audience_contacts c ON c.workspace_id = ${workspaceId} AND c.id = p.contact_id WHERE ${reader} GROUP BY 1) d), '[]'::jsonb) AS days`);
+        FROM page p CROSS JOIN LATERAL (SELECT c.workspace_id, c.deleted_at, c.suppressed, c.marketing_consent FROM audience_contacts c WHERE c.id = p.contact_id LIMIT 1) c
+        WHERE c.workspace_id = ${workspaceId} AND ${reader} GROUP BY 1) d), '[]'::jsonb) AS days`);
   return row!;
 }
 /**
@@ -78,13 +80,19 @@ async function readersPage(db: DbExecutor, workspaceId: string, listId: string, 
  * expects a few thousand members and prefers a bitmap scan of every one of them and a sort instead: 0.5 s and all
  * 2,000,000 members read for one probe at PostgreSQL's default random_page_cost, and a background page that rereads the
  * rest of the list each time (measured; the plan flipped at estimates of 191 to 14,617 rows). With bitmap and sequential
- * scans off, the primary key is the plan left. Only `work` runs that way: the settings are local to the caller's
- * transaction and go back to their defaults after it.
+ * scans off, the primary key is the plan left. Contact statistics taken while the workspace had few contacts flip the
+ * join the same way: to a merge or hash join that reads the workspace's contacts instead of looking up each member's
+ * (0.8 s and 1,000,000 contacts read for an exact count of 10,000, half of them for a page in the middle of the list), or,
+ * with those joins off, to a nested loop driven from the contacts that compares each with every member of the page
+ * (0.5 s for 12,000; measured). Hash and merge joins are off here too, but what makes the join certain is readersPage's
+ * LATERAL lookup, whose LIMIT keeps it from being flattened into a join the planner could turn around: each member's
+ * contact is one lookup of the contacts' primary key, as fast as the join with current statistics (measured). Only
+ * `work` runs with these settings: they are local to the caller's transaction and go back to their defaults after it.
  */
 async function walkingTheKey<T>(db: DbExecutor, work: () => Promise<T>) {
-  await db.execute(sql`SELECT set_config('enable_bitmapscan', 'off', true), set_config('enable_seqscan', 'off', true)`);
+  await db.execute(sql`SELECT set_config('enable_bitmapscan', 'off', true), set_config('enable_seqscan', 'off', true), set_config('enable_hashjoin', 'off', true), set_config('enable_mergejoin', 'off', true)`);
   const result = await work();
-  await db.execute(sql`SELECT set_config(name, reset_val, true) FROM pg_settings WHERE name IN ('enable_bitmapscan', 'enable_seqscan')`);
+  await db.execute(sql`SELECT set_config(name, reset_val, true) FROM pg_settings WHERE name IN ('enable_bitmapscan', 'enable_seqscan', 'enable_hashjoin', 'enable_mergejoin')`);
   return result;
 }
 function addPage(pass: Pass, page: Awaited<ReturnType<typeof readersPage>>): Pass {
