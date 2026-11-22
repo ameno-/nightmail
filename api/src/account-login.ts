@@ -185,14 +185,18 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
   }
   const returnUrl = new URL(flow.return_url);
   if (returnUrl.origin !== new URL(runtime.config.publicUrl).origin) throw loginFailed();
-  const invitation = returnUrl.pathname === '/' ? returnUrl.searchParams.get('invitation') : null;
+  // The invitation the page signing in carries, on any path: its link is /overview?invitation=… (workspaces.ts acceptUrl),
+  // and the dashboard signs in with the page it is on as the return URL. It names an ID only; pendingInvitation checks
+  // that it is for the address this sign-in proves.
+  const invitation = returnUrl.searchParams.get('invitation');
   // Identity is (issuer, subject). An email address is display and contact data only: it never links a subject to an
   // existing user. The account service gives an account one subject whichever of its linked methods (GitHub, Google)
   // signs in, so a person who uses both stays one user here; an account it keeps apart is another user.
   const staff = isStaffSignIn(runtime.config, claims.acr, upstream);
   // What is bound to an address (an invitation; the session's verified_email, which accepting one and claiming an emailed
-  // support request read) needs a sign-in that proves its mailbox now: hosted, only a Google-hosted mailbox does.
-  const mailbox = runtime.config.multiTenant ? provenMailbox(claims.acr, upstream) : emailAtLogin;
+  // support request read) needs a sign-in that proves its mailbox now: hosted, an emailed link or code, or Google for a
+  // Google-hosted mailbox (provenMailbox).
+  const mailbox = runtime.config.multiTenant ? provenMailbox(claims.acr, upstream, emailAtLogin) : emailAtLogin;
   const session = oidc.generateRandomState();
   let admitted = 'signed_in', slot = 0, userId = '';
   try {
@@ -205,8 +209,8 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
         // account-policy.ts), the invitation link it followed, or a self-hosted subject allowlist. Operators bind
         // anyone else by subject (a nightmail_oidc_identities row).
         // Only the invitation path reads the address: it must be the invitation target, in a mailbox this sign-in proves
-        // (provenMailbox: a Google-hosted one, so never through GitHub). Hosted, nothing is
-        // admitted without a verified address, whichever method signed in.
+        // (provenMailbox: an emailed link or code, or a Google-hosted mailbox; never GitHub or a password). Hosted,
+        // nothing is admitted without a verified address, whichever method signed in.
         if (runtime.config.multiTenant && !emailAtLogin) throw new NotAdmitted('email_unverified');
         const selfHosted = !runtime.config.multiTenant && runtime.config.allowedSubjects.includes(claims.sub);
         const invited = runtime.config.multiTenant && !staff && !!invitation && !!mailbox && await pendingInvitation(db, mailbox, invitation);

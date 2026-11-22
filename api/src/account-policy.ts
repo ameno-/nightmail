@@ -40,10 +40,12 @@ export function isStaffSignIn(config: Pick<Config, 'multiTenant' | 'staffGoogleD
 
 const googleMail = new Set(['gmail.com', 'googlemail.com']);
 /** The address whose mailbox this sign-in proves the person reads now, for what is bound to an address (an invitation,
- * an emailed support request): a Google sign-in's own verified address when Google hosts that mailbox (a Workspace
- * account, or Gmail). GitHub, or a Google account on another provider's address, shows only that an address was
- * verified once. */
-export function provenMailbox(acr: unknown, upstream: ProviderIdentity | null) {
+ * an emailed support request): an emailed link or code's, which the account service sends only to the account's
+ * verified address, the one its token asserts (`verifiedEmail`), at any provider; or a Google sign-in's own verified
+ * address when Google hosts that mailbox (a Workspace account, or Gmail). GitHub, a password, or a Google account on
+ * another provider's address shows only that an address was verified once. */
+export function provenMailbox(acr: unknown, upstream: ProviderIdentity | null, verifiedEmail: string | null) {
+  if (acr === METHOD_ACR.email) return verifiedEmail?.toLowerCase() ?? null;
   if (acr !== METHOD_ACR.google || upstream?.provider !== 'google' || !upstream.emailVerified || !upstream.email) return null;
   const email = upstream.email.toLowerCase();
   return upstream.hd || googleMail.has(email.slice(email.lastIndexOf('@') + 1)) ? email : null;

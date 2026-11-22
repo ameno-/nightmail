@@ -18,10 +18,10 @@ export async function verifiedDashboardUser(runtime:Runtime,headers:Headers,requ
   // every other dashboard-only route (core.ts); 401 is for a caller with no session at all.
   if (headers.has('authorization')) throw denied('DASHBOARD_AUTH_REQUIRED','Use a signed-in dashboard session.',{credential:'dashboard'});
   const user=await accountSessionUser(runtime,headers,requireCurrentEmail);
-  // Signed in, but this session's sign-in proves no mailbox for the account's address (hosted: only a Google-hosted
-  // one does, account-policy.ts provenMailbox). What is bound to an address needs a sign-in that does.
+  // Signed in, but this session's sign-in proves no mailbox for the account's address (hosted: an emailed link or code
+  // does, or Google for a Google-hosted one; account-policy.ts provenMailbox). What is bound to an address needs one.
   if (!user && requireCurrentEmail && runtime.config.multiTenant && await accountSessionUser(runtime,headers))
-    throw new ApiError(403,'MAILBOX_SIGN_IN_REQUIRED','Sign in with the Google account for this email address to continue.');
+    throw new ApiError(403,'MAILBOX_SIGN_IN_REQUIRED','Sign in with an emailed link to this address, or its Google account, to continue.');
   if (!user) throw new ApiError(401,'AUTH_REQUIRED',`Sign in to ${productName}.`);
   return {userId:user.id,email:user.email};
 }

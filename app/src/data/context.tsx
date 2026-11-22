@@ -388,7 +388,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   const authNotice = authError ? <Alert tone="danger">{String(authError)}</Alert>
     : authResult && authMessages[authResult] ? <Alert tone={authResult === 'interaction_required' || authResult === 'waitlist' ? 'info' : 'danger'}>{authMessages[authResult]}</Alert>
     : notice ? <Alert tone="danger">{notice}</Alert>
-    : invitation && <Alert tone="info" title="You have a workspace invitation">Sign in with the invited account to review it. You join only after you confirm.</Alert>
+    : invitation && <Alert tone="info" title="You have a workspace invitation">Sign in with an emailed link to the invited address, or its Google account. You join only after you confirm.</Alert>
   // M9: an account whose only way in is the invitation signs in with no workspace, so /v1/me is 401 while
   // the invitation itself is readable. It gets the same review; nothing joins until the recipient clicks Join.
   const invitee = signedOut && invitation !== null && review.data?.status === 'pending'
