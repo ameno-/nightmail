@@ -108,7 +108,7 @@ export function RulesTab({ overview, refresh }: { overview: Overview; refresh: (
     try {
       await request(`/v1/rules/scripts/${encodeURIComponent(r.key)}`, { method: 'PATCH', body: { enabled } })
       await refresh()
-      toast(enabled ? `${r.key} is on` : `${r.key} is off · it keeps its addresses`, 'success')
+      toast(enabled ? 'Rule on' : 'Rule off', 'success')
     } catch (e) { toast(errorText(e), 'error') }
     finally { setSwitching(s => { const { [r.key]: _, ...rest } = s; return rest }) }
   })
@@ -133,7 +133,6 @@ export function RulesTab({ overview, refresh }: { overview: Overview; refresh: (
         { key: 'actions', label: '', align: 'right', card: 'end', render: r => <span className="recipe-controls">
           <Switch checked={switching[r.key] ?? r.enabled} disabled={r.key in switching} onCheckedChange={v => void toggle(r, v)} label={<span className="sr-only">Run {r.key}</span>} />
           <DropdownMenu label={`Actions for ${r.key}`} title={<RuleLine rule={r} keyName={r.key} endpoints={overview.endpoints} />} items={[
-            { label: 'Edit', onSelect: () => navigate(rulePath(r.key)) },
             ...(builderPath(r) ? [{ label: openBuilder, onSelect: () => navigate(builderPath(r)!) }] : []),
             { label: 'Delete', destructive: true, onSelect: () => { setDeleting(r); setDeleteOpen(true) } },
           ]} />
