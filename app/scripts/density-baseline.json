@@ -141,6 +141,14 @@
    "score": 33,
    "findings": []
   },
+  "Logs · range · desktop": {
+   "score": 18,
+   "findings": []
+  },
+  "Logs · range · phone": {
+   "score": 35,
+   "findings": []
+  },
   "Logs · received · desktop": {
    "score": 7,
    "findings": []

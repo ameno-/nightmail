@@ -177,7 +177,11 @@
   .logs-page > .data-toolbar :is(.search-box, .cluster > .ui-button) { grid-column: 1 / -1; width: 100%; }
   .logs-page > .data-toolbar .ui-select-trigger { width: 100%; }
   .logs-page .logs-controls .ui-tab { padding-inline: var(--space-8); }
+  /* The header's tabs take their own row: the direction at its start, the dates at its end (under it when too narrow). */
+  .logs-page > .ui-page-header > .cluster:last-child, .logs-page .logs-controls { flex: 1 1 100%; }
+  .logs-page .logs-controls { flex-wrap: wrap; justify-content: space-between; row-gap: 0; }
 }
+@media (max-width: 400px) { .logs-page .logs-controls .ui-tab { padding-inline: var(--space-6); } }
 .ui-cards.logs-table .ui-card__segment + .ui-card__segment::before { content: none; }
 .ui-cards.logs-table .ui-card__line { gap: var(--space-8); }
 .ui-cards.logs-table .log-direction { display: inline-block; width: 22px; }

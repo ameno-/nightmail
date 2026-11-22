@@ -334,10 +334,12 @@ export async function budgetedRead<T>(db: Runtime['db'], work: (tx: DbExecutor) 
       return work(tx);
     }, { accessMode: 'read only' });
   } catch (error) {
-    if ([error, (error as { cause?: unknown })?.cause].some(e => (e as { code?: string } | null)?.code === '57014')) throw budget.refusal();
+    if (statementTimedOut(error)) throw budget.refusal();
     throw error;
   }
 }
+/** A statement ended by statement_timeout (SQLSTATE 57014), as the driver reports it or wraps it. */
+export const statementTimedOut = (error: unknown) => [error, (error as { cause?: unknown })?.cause].some(e => (e as { code?: string } | null)?.code === '57014');
 export const security: Record<string, string[]>[] = [{ bearerAuth: [] }, { dashboardSession: [] }, { secureDashboardSession: [] }];
 export const IdParams = z.object({ id: z.string().min(1).max(120) });
 export const PageQuery = z.object({ cursor: z.string().max(200).optional(), limit: z.coerce.number().int().min(1).max(100).default(25) });

@@ -440,12 +440,12 @@ export function useApi() {
 // keepPrevious keeps the last result on screen while a changed key (page, search, filter) loads, so a list never blanks.
 // Pass a function to keep it only for some key changes (a region change must not show the old region's rows).
 type KeepPrevious = boolean | ((previousKey: readonly unknown[]) => boolean)
-type Poll<T> = { interval?: number | ((data: T | undefined) => number | false); enabled?: boolean; keepPrevious?: KeepPrevious }
+type Poll<T> = { interval?: number | ((data: T | undefined, failed: boolean) => number | false); enabled?: boolean; keepPrevious?: KeepPrevious }
 export function useApiQuery<T>(key: readonly unknown[], read: (api: Api, signal: AbortSignal) => Promise<T>, poll?: Poll<T>) {
   const api = useApi()
   const interval = poll?.interval
   const keep = poll?.keepPrevious
-  return useQuery({ queryKey: ['nightmail', ...key], queryFn: ({ signal }) => read(api, signal), enabled: poll?.enabled, refetchInterval: typeof interval === 'function' ? query => interval(query.state.data) : interval ?? false, refetchIntervalInBackground: false,
+  return useQuery({ queryKey: ['nightmail', ...key], queryFn: ({ signal }) => read(api, signal), enabled: poll?.enabled, refetchInterval: typeof interval === 'function' ? query => interval(query.state.data, query.state.status === 'error') : interval ?? false, refetchIntervalInBackground: false,
     placeholderData: keep ? (previous, previousQuery) => keep === true || (previousQuery && keep(previousQuery.queryKey.slice(1))) ? previous : undefined : undefined })
 }
 export function useApiDef<T>(query: QueryDef<T>, poll?: Poll<T>) { return useApiQuery(query.key, query.read, poll) }

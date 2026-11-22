@@ -7,6 +7,7 @@ import { firstOverview, overviewQuery } from '../features/inbound/overview'
 import type { Api } from './types'
 import { openApiQuery } from '../features/docs/openapi'
 import { latestRowCount } from '../features/overview/latest'
+import { rangeStart } from '../features/logs/range'
 
 // A warmed result stays fresh this long, so repeated hovers and the idle sweep never refetch it.
 const FRESH = 30_000
@@ -20,7 +21,7 @@ function firstScreen(path: string, { regionId, multiTenant, canAdminister }: Sco
   const scoped = multiTenant || Boolean(regionId)
   switch (path) {
     case '/overview': return scoped ? [queries.overview(regionId, '24h', 'all'), queries.senderScore(), queries.logs({ regionId, direction: 'all', page: 1, pageSize: latestRowCount() }), ...(canAdminister ? [queries.overviewSetup()] : [])] : []
-    case '/logs': { const pageSize = rememberedPageSize('logs'); return scoped && pageSize ? [queries.logs({ regionId, direction: 'all', search: '', status: undefined, stream: undefined, page: 1, pageSize })] : [] }
+    case '/logs': { const pageSize = rememberedPageSize('logs'); return scoped && pageSize ? [queries.logs({ regionId, direction: 'all', search: '', status: undefined, stream: undefined, from: rangeStart('30d'), page: 1, pageSize })] : [] }
     // Receiving is one read: addresses (routes), counts, rules, destinations (endpoints) and domains.
     case '/receiving': return [overviewQuery(firstOverview) as QueryDef<unknown>]
     case '/campaigns': return [queries.campaigns({ search: '', archived: false, status: undefined, page: 1, pageSize: 10 })]
