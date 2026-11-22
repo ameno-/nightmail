@@ -23,7 +23,6 @@ body:has(.campaign-compose-page) :is(.ui-popover, [data-re-bubble-menu], [data-r
 body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: var(--color-text); }
 .campaign-compose-page > .ui-page-header, .campaign-compose-page > .ui-alert { flex-shrink: 0; }
 .campaign-compose-page > .ui-page-header { margin-bottom: var(--space-8); }
-.campaign-compose-page > .ui-page-header h1 { font-family: 'OpenTUI Mono', monospace; font-size: var(--text-sm); line-height: var(--leading-sm); letter-spacing: normal; }
 .campaign-sync-status { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-6); width: 144px; flex-shrink: 0; color: var(--color-muted); font-size: var(--text-xs); white-space: nowrap; }
 .campaign-sync-status .ui-button { height: 28px; padding: 0; color: inherit; }
 .campaign-sync-dot { width: 5px; height: 5px; flex-shrink: 0; border-radius: 50%; background: currentColor; }
