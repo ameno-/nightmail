@@ -58,7 +58,7 @@ export function OverviewRouteSkeleton() {
     <PageHeader title="Overview" actions={<div className="cluster ov-controls" data-wide={!multiTenant || undefined}>{!multiTenant && <>{!canAdminister && <span className="muted">{regionId}</span>}<RegionStatus /></>}<Tabs value="24h" onValueChange={() => {}} disabled items={[{ value: '24h', label: '24h' }, { value: '7d', label: '7d' }, { value: '30d', label: '30d' }]} label="Time range" /><Select aria-label="Email stream" value="all" onValueChange={() => {}} disabled options={[{ value: 'all', label: 'All emails' }]} /></div>} />
     <LoadingRegion label="Loading overview"><div className="ov-split">
       <div className="ov-split__main"><div className="ov-tiles" aria-hidden="true"><FactTilesSkeleton />{compact && <ScoreTileSkeleton />}</div><ChartSkeleton />{!stacked && <section className="ov-latest"><SectionHeader title="Latest emails" actions={<span className="ui-button ui-button--ghost ui-button--sm" aria-disabled="true">Logs <ArrowUpRight size={16} /></span>} /><TableSkeleton className="logs-table ov-table" columns={latestColumnDefs} rows={count} /></section>}</div>
-      <aside className="ov-split__aside"><AsideSkeleton /></aside>
+      <aside className="ov-split__aside">{!stacked && <AsideSkeleton />}</aside>
     </div></LoadingRegion>
   </>
 }

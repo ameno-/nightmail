@@ -114,9 +114,11 @@ a.ov-tile:focus-visible { outline: 2px solid var(--color-focus); outline-offset:
   .ov-split { grid-template-columns: minmax(0, 1fr) 280px; gap: var(--space-28); }
   .page-surface > .ui-page-header:has(+ .ov-split) { --ov-aside: calc(280px + var(--space-28)); }
 }
-/* One column: the main column, the detail column, then the latest emails (index.tsx). */
+/* One column: the main column, the detail column, then the latest emails (index.tsx). The detail column takes a row,
+   and its gap, only once it has something to show. */
 @media (max-width: 960px) {
   .ov-split { grid-template-columns: minmax(0, 1fr); }
+  .ov-split__aside:empty { display: none; }
   .page-surface > .ui-page-header:has(+ .ov-split) { --ov-aside: 0px; }
 }
 /* Phone: the controls take their own row (range tabs, then the stream filter filling the rest); the four tiles are a

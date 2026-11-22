@@ -78,7 +78,7 @@ export function OverviewPage() {
           {!stacked && latestEmails}
         </Fragment>
       </div>
-      <Aside setup={setup} detail={detail} showSetup={!stacked} campaigns={data?.recentCampaigns} range={range} />
+      <Aside setup={setup} detail={detail} showSetup={!stacked} placeholder={!stacked} campaigns={data?.recentCampaigns} range={range} />
       {/* Under the detail column, once that column has its final height (its own reads and the figures' campaigns). */}
       {stacked && detail.ready && (data || query.isError) ? latestEmails : null}
     </div>
@@ -95,7 +95,9 @@ function useDetail(setup: ReturnType<typeof useSetupSteps>) {
 // The detail column renders in one go once setup, the score and the next steps are known, so nothing in it moves.
 // The standing card (Warn and up) leads it; the banner's fix link and the sidebar score scroll here by hash. Recent
 // campaigns come with the overview's figures and close the column, so arriving later moves nothing above them.
-function Aside({ setup, detail: { score, next, ready }, showSetup, campaigns, range }: { setup: ReturnType<typeof useSetupSteps>; detail: ReturnType<typeof useDetail>; showSetup: boolean; campaigns?: Overview['recentCampaigns']; range: TimeRange }) {
+// In one column it has no placeholder while it loads: it sits under the chart there, in view, and may turn out empty
+// (a new workspace's setup leads the page instead), so it takes up room only once it has something to show.
+function Aside({ setup, detail: { score, next, ready }, showSetup, placeholder, campaigns, range }: { setup: ReturnType<typeof useSetupSteps>; detail: ReturnType<typeof useDetail>; showSetup: boolean; placeholder: boolean; campaigns?: Overview['recentCampaigns']; range: TimeRange }) {
   // One score per screen: the sidebar's card; under the tiles where the sidebar isn't on screen (the compact shell);
   // or this column's copy where the sidebar doesn't carry it (self-hosted).
   const { multiTenant } = useWorkspaceAccess()
@@ -106,7 +108,7 @@ function Aside({ setup, detail: { score, next, ready }, showSetup, campaigns, ra
     const frame = requestAnimationFrame(() => document.getElementById('standing')?.scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }))
     return () => cancelAnimationFrame(frame)
   }, [ready, hash, key])
-  return <aside className="ov-split__aside" aria-label="Status">{!ready ? <AsideSkeleton /> : <>
+  return <aside className="ov-split__aside" aria-label="Status">{!ready ? placeholder && <AsideSkeleton /> : <>
     {score.data && <StandingCard report={score.data} />}
     {showSetup && setup.steps && <SetupRail steps={setup.steps} current={setup.current} open={setup.open} />}
     {showSetup && setup.error ? <ErrorState error={setup.error} onRetry={setup.retry} /> : null}
