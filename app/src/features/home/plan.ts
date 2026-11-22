@@ -2,7 +2,7 @@
 // projection: its front is a true rectangle (so the page's own text sits on it), and depth runs up the page and a
 // little to the left. World x is right of the machine's middle, y is up from the floor, z is back from its front.
 // The machine stands on a slab with a lip along its front; the tubes cross the slab, go over the lip and on down the
-// page. The page's boxes (sorter-home.css) are placed from these numbers; the engine builds the machine from them.
+// page. The homepage's foot (machines.tsx, end-band.tsx) is measured from these numbers.
 import { COLS, ROWS } from './price'
 
 /** Depth on screen per unit of world depth. */

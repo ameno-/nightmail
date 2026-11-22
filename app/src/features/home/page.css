@@ -1,0 +1,41 @@
+/* The homepage's own frame, apart from factory-home.css because home.html inlines that one (home-shell.ts) and has its
+   own copy of what it needs of this (shell/shell.css). Its type and tones, a phone's safe areas, the
+   fold the page is measured by (plan.ts), the notice over the hero, and the button at the page's foot (machines.tsx). */
+.srt-page { font-variant-numeric: normal;
+  --srt-text: oklch(0.21 0.02 268); --srt-text-2: oklch(0.42 0.02 268); --srt-text-3: oklch(0.47 0.02 268);
+  --srt-cta: oklch(0.975 0.02 92); --srt-cta-hover: oklch(0.995 0.012 92); --srt-cta-top: oklch(1 0 0); --srt-cta-side: oklch(0.78 0.03 92); --srt-on-cta: oklch(0.2 0.02 268); --srt-cta-edge: oklch(0.2 0.02 268 / 14%);
+  --srt-paper: oklch(0.985 0.01 92);
+  --srt-ease: cubic-bezier(.22, 1, .36, 1);
+  /* The brand's marks (lib/marks.ts) are set in its ink on the pale page and its paper on the dark one, and in nothing else. */
+  --srt-name: var(--color-logo);
+  /* A phone's safe areas (its status bar, where the page runs under one; the sides of one held on its side; its home
+     indicator). There is no header: the hero begins at the top of the window, or under a status bar the page runs under. */
+  --srt-safe-t: env(safe-area-inset-top, 0px); --srt-safe-r: env(safe-area-inset-right, 0px); --srt-safe-b: env(safe-area-inset-bottom, 0px); --srt-safe-l: env(safe-area-inset-left, 0px); --srt-head: var(--srt-safe-t);
+  display: flex; flex-direction: column; box-sizing: border-box; min-height: 100svh; padding-top: var(--srt-head); overflow-x: clip; background: var(--srt-floor); color: var(--srt-text); }
+/* The page ends where it ends: no rubber band past its top or its foot, and no pull to refresh. */
+:root:has(.srt-page), :root:has(.srt-page) body { overscroll-behavior-y: none; }
+:root[data-theme='dark'] .srt-page {
+  --srt-text: oklch(0.968 0.004 268); --srt-text-2: oklch(0.74 0.014 268); --srt-text-3: oklch(0.63 0.016 268);
+  --srt-cta: oklch(0.945 0.016 92); --srt-cta-hover: oklch(0.975 0.012 92); --srt-cta-top: oklch(1 0 0); --srt-cta-side: oklch(0.72 0.022 92); --srt-on-cta: oklch(0.2 0.02 268); --srt-cta-edge: oklch(0.2 0.02 268 / 14%);
+  --srt-paper: oklch(0.955 0.014 92); }
+.srt-page > main { display: flex; flex: 1; flex-direction: column; }
+/* How much of the page is seen before any scrolling: measured by the small viewport, so a phone's toolbars coming and
+   going change nothing (plan.ts). Its padding is the safe areas. */
+.srt-fold { position: absolute; top: 0; left: 0; box-sizing: border-box; width: 0; height: calc(100svh - var(--srt-head)); padding: var(--srt-head) var(--srt-safe-r) var(--srt-safe-b) var(--srt-safe-l); visibility: hidden; pointer-events: none; }
+.srt-notice { position: absolute; z-index: 4; top: var(--space-8); left: 50%; width: min(520px, 100% - 2 * var(--space-16)); translate: -50% 0; }
+
+/* The button at the page's foot: a lit key standing proud of the page, so (seen from above and the right) its top and
+   its left side show; pressed, it goes in flush. */
+.srt-cta { position: absolute; z-index: 3; display: inline-flex; align-items: center; justify-content: center; padding: 3px 0 0 2px; border: 0; background: none; color: var(--srt-on-cta); font-family: var(--font-body); font-size: clamp(15px, var(--srt-u) * 1.9, 19px); font-weight: 600; line-height: 1; letter-spacing: -.012em; text-decoration: none; cursor: pointer; }
+.srt-cta::before { content: ''; position: absolute; inset: 3px 0 0 2px; background: var(--srt-cta); box-shadow: 0 -2px 0 var(--srt-cta-top), -1px 0 0 var(--srt-cta-side), -1px -2px 0 var(--srt-cta-side); outline: 1px solid var(--srt-cta-edge); outline-offset: -5px; pointer-events: none; transition: background-color 150ms var(--srt-ease), translate 90ms var(--srt-ease), box-shadow 90ms var(--srt-ease); }
+.srt-cta-label { position: relative; display: inline-flex; align-items: center; gap: .4em; transition: translate 90ms var(--srt-ease); }
+@media (hover: hover) and (pointer: fine) { .srt-cta:hover:not(:disabled)::before { background: var(--srt-cta-hover); } .srt-cta:hover:not(:disabled) .srt-cta-arrow { translate: 4px 0; } }
+.srt-cta:active:not(:disabled)::before { box-shadow: 0 0 0 var(--srt-cta-top), 0 0 0 var(--srt-cta-side), 0 0 0 var(--srt-cta-side); translate: -1px -2px; }
+.srt-cta:active:not(:disabled) .srt-cta-label { translate: -1px -2px; }
+.srt-cta:disabled { opacity: 1; }
+.srt-cta[data-busy] { cursor: progress; }
+.srt-cta-arrow { transition: translate 200ms var(--srt-ease); }
+/* Focus: a square ring round a square button, clear of it. */
+.srt-cta:focus-visible { outline: none; }
+.srt-cta:focus-visible::after { content: ''; position: absolute; inset: -7px; border: var(--focus-width) solid var(--color-focus); pointer-events: none; }
+@media (prefers-reduced-motion: reduce) { .srt-cta::before, .srt-cta-label, .srt-cta-arrow { transition: none; } }
