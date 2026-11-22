@@ -150,7 +150,7 @@ function MessageDialog({ inboxId, messageId, onClose }: { inboxId: string; messa
   </Dialog>
 }
 
-const factTerms = ['Status', 'Expires', 'Deleted after', 'Delivered', 'Stored', 'Replies', 'Name']
+const factTerms = ['Status', 'Expires', 'Deleted after', 'Delivered', 'Stored', 'Replies']
 const permissionWords: Record<string, string> = { read: 'Read mail', modify: 'Mark read, delete', send: 'Reply' }
 /** A key limited to this inbox: an inbox key, or one for these addresses that names only this inbox. */
 const keyFor = (key: ApiKey, inboxId: string) => key.access.inboxId === inboxId || key.access.type !== 'workspace' && key.access.addressIds?.length === 1 && key.access.addressIds[0] === inboxId
@@ -220,14 +220,15 @@ function InboxDetail({ id }: { id: string }) {
   // shape until both are known, and the keys section only joins below them once they have, so nothing moves.
   const settled = Boolean(b) && !messages.isPending
   return <div className="stack inbound-stack">
+  // The code column shows only when a loaded message carries one.
+  const codes = (messages.data?.data ?? []).some(m => m.extract.codes.length > 0)
     <PageHeader title={b ? <PrivateAddress value={b.address} /> : <SkeletonText width={260} lineHeight={28} />} backTo={route} actions={b && <>
       {b.type === 'ephemeral' && <Link className="ui-button ui-button--secondary ui-button--md" to={`/receiving/inbox?address=${encodeURIComponent(b.id)}`}>Open in inbox</Link>}
       {canAdminister && b.status !== 'deleting' && <Button onClick={() => setEditing(true)}>Edit</Button>}
       {canAdminister && b.status==='active' && <ConnectAgentButton inboxId={id} />}
       {canAdminister && b.status !== 'deleting' && <Button variant="danger" onClick={() => setConfirmDelete(true)}>Delete</Button>}
     </>} />
-    {/* The facts hold their place while the inbox loads, so the sections below never move. Name always shows, keeping
-        the grid at three rows whatever the inbox. */}
+    {/* The facts hold their place while the inbox loads, so the sections below never move. */}
     {!b && <dl className="settings-facts" aria-hidden="true">{factTerms.map(term => <div key={term}><dt>{term}</dt><dd><SkeletonText width={120} /></dd></div>)}</dl>}
     {b && <>
       <dl className="settings-facts">
@@ -237,7 +238,6 @@ function InboxDetail({ id }: { id: string }) {
         <div><dt>Delivered</dt><dd>{number(b.usage.messages - b.usage.held)} of {number(b.limits.messages)}{b.usage.unread > 0 && <span className="muted"> · {number(b.usage.unread)} unread</span>}</dd></div>
         <div><dt>Stored</dt><dd>{fileSize(b.usage.bytes)} of {fileSize(b.limits.bytes)}</dd></div>
         <div><dt>Replies</dt><dd>{b.type === 'sandbox' ? 'Never (sandbox)' : b.send.enabled ? 'To senders only' : 'Off'}</dd></div>
-        <div><dt>Name</dt><dd className="settings-break">{b.name || <span className="muted">—</span>}</dd></div>
         {b.type === 'sandbox' && <div><dt>Type</dt><dd>Sandbox · test mail only</dd></div>}
       </dl>
       {b.status === 'deleting' && <Alert tone="info">This inbox was deleted. Its address no longer receives mail, and its messages are erased within the hour.</Alert>}
@@ -254,7 +254,7 @@ function InboxDetail({ id }: { id: string }) {
             // A message's card: its subject and status, then the sender and any code it carries.
             { key: 'from', label: 'From', width: '24%', card: 'line', render: row => <span className="inbox-clip"><Sender name={row.from.name} address={row.from.address} nameOnly /></span> },
             { key: 'subject', label: 'Subject', width: '40%', card: 'title', render: row => <span className="inbox-clip" title={row.snippet ? `${row.subject || '(no subject)'}: ${row.snippet}` : undefined}>{row.subject || '(no subject)'}{row.snippet && <span className="muted"> · {row.snippet}</span>}</span>, cardRender: row => row.subject || '(no subject)' },
-            { key: 'code', label: <span title={`A one-time code ${productName} found in the message, such as a sign-up code`}>Code found</span>, card: 'inline', render: row => row.extract.codes[0] ? <code>{row.extract.codes[0]}</code> : <span className="muted">—</span>, cardRender: row => row.extract.codes[0] ? <>Code <code>{row.extract.codes[0]}</code></> : 'No code' },
+            ...(codes ? [{ key: 'code', label: <span title={`A one-time code ${productName} found in the message, such as a sign-up code`}>Code found</span>, card: 'inline' as const, render: (row: InboxMessage) => row.extract.codes[0] ? <code>{row.extract.codes[0]}</code> : <span className="muted">—</span>, cardRender: (row: InboxMessage) => row.extract.codes[0] ? <>Code <code>{row.extract.codes[0]}</code></> : 'No code' }] : []),
             { key: 'state', label: 'Status', card: 'aside', render: row => { const state = messageState(row); return <StatusBadge status={state.label} tone={state.tone} /> } },
             { key: 'received', label: 'Received', align: 'right', render: row => when(row.receivedAt) },
           ]} />
