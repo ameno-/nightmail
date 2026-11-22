@@ -5,7 +5,7 @@
 .audience-summary > .ui-skeleton-line { width: auto; }
 .audience-page > .data-toolbar > .cluster { flex-wrap: wrap; }
 .ui-select-trigger.audience-match { width: 220px; max-width: 100%; flex-shrink: 0; }
-.audience-page > .section { margin-block: var(--space-24) 0; padding-top: var(--space-24); border-top: 1px solid var(--color-border-muted); }
+.audience-page > .section { margin-block: var(--space-40) 0; }
 .audience-page > .ui-alert { margin-top: var(--space-16); }
 .audience-summary { min-height: var(--space-20); gap: var(--space-8) var(--space-24); }
 .section > .audience-summary { margin-bottom: var(--space-12); }

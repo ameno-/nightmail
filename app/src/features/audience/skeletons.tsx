@@ -44,8 +44,8 @@ export const activityColumns: SkeletonColumn[] = [
 export const consentColumns: SkeletonColumn[] = [
   { key: 'status', label: 'Status', width: '15%', card: 'title' },
   { key: 'source', label: 'Source', width: '17%', card: 'line' },
-  { key: 'evidence', label: 'How', width: '38%', card: 'inline' },
-  { key: 'policy', label: 'Policy version', width: '14%', card: 'field' },
+  { key: 'evidence', label: 'How', width: '38%', card: 'line' },
+  { key: 'policy', label: 'Policy version', width: '14%', card: 'hide' },
   { key: 'at', label: 'When', width: '16%', card: 'aside' },
 ]
 export function AudienceSummarySkeleton() {
@@ -61,7 +61,7 @@ export function ContactDetailBodySkeleton() {
   return <><div className="audience-summary cluster"><SkeletonText width={240} /><SkeletonText width={94} /></div>
     {/* Properties can grow by any number of custom rows, so Lists and Consent history appear with the contact, below
         them, instead of as placeholders the loaded rows would push down. */}
-    <div className="section audience-properties"><section><SectionHeader title="Properties" /><dl className="ui-facts">{['Full name', 'Country', 'Created', 'Last opened'].map(label => <Fragment key={label}><dt>{label}</dt><dd><SkeletonText width="65%" /></dd></Fragment>)}</dl></section></div>
+    <div className="section audience-properties"><section><SectionHeader title="Properties" /><dl className="ui-facts">{['Country', 'Added', 'Last opened'].map(label => <Fragment key={label}><dt>{label}</dt><dd><SkeletonText width="65%" /></dd></Fragment>)}</dl></section></div>
   </>
 }
 export function SegmentEditorBodySkeleton() {
