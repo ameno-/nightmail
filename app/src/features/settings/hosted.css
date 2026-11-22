@@ -40,6 +40,11 @@
 .settings-mcp__workspace { width: 200px; }
 .settings-name-error { position: absolute; top: calc(100% + 6px); right: 0; z-index: 2; width: min(360px, 100%); text-align: left; white-space: normal; }
 .settings-score { display: inline-flex; align-items: baseline; gap: var(--space-8); padding: 0; border: 0; background: none; color: var(--color-text); font: inherit; text-decoration: none; cursor: pointer; }
+/* The postal address on one line, cut at the edge with the full address in its title; Edit stays at the end. */
+/* The cluster fills the control, so its box is the same while the address loads and after. */
+.settings-address { flex: 1; justify-content: flex-end; min-width: 0; }
+.settings-address__value { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.settings-address > svg { flex: none; color: var(--color-muted); }
 .settings-readonly { min-width: 0; }
 .settings-readonly > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .settings-readonly > svg { flex: none; color: var(--color-muted); }
@@ -74,8 +79,9 @@
   .settings-row__label a::after { content: ''; position: absolute; inset-block: -14px; inset-inline: 0; }
   .settings-score { position: relative; }
   .settings-score::after { content: ''; position: absolute; inset-block: -12px; inset-inline: 0; }
-  .settings-row:has(.settings-name, .settings-inline:not(.settings-version) > code, .private-address) { grid-template-columns: minmax(0, 1fr); gap: var(--space-8); padding-block: var(--space-12); }
-  .settings-row:has(.settings-name, .settings-inline:not(.settings-version) > code, .private-address) .settings-row__control { justify-content: flex-start; text-align: left; }
+  .settings-row:has(.settings-name, .settings-address, .settings-inline:not(.settings-version) > code, .private-address) { grid-template-columns: minmax(0, 1fr); gap: var(--space-8); padding-block: var(--space-12); }
+  .settings-row:has(.settings-name, .settings-address, .settings-inline:not(.settings-version) > code, .private-address) .settings-row__control { justify-content: flex-start; text-align: left; }
+  .settings-address { flex: 1; justify-content: space-between; }
   /* The score loads late: its control fills the row, so the figure arriving moves nothing. */
   .settings-row:has(.settings-score--late) { grid-template-columns: auto minmax(0, 1fr); }
   .settings-inline:has(> code) { flex-wrap: nowrap; min-width: 0; max-width: 100%; }

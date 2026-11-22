@@ -3268,7 +3268,8 @@
               "transactional",
               "marketing"
             ],
-            "default": "transactional"
+            "default": "transactional",
+            "description": "marketing adds Nightmail's footer (an Unsubscribe link, with the workspace's postal address under it when it has one) and the one-click List-Unsubscribe headers."
           },
           "subject": {
             "type": "string",
@@ -3503,7 +3504,8 @@
               "transactional",
               "marketing"
             ],
-            "default": "transactional"
+            "default": "transactional",
+            "description": "marketing adds Nightmail's footer (an Unsubscribe link, with the workspace's postal address under it when it has one) and the one-click List-Unsubscribe headers."
           },
           "subject": {
             "type": "string",
@@ -6118,10 +6120,18 @@
         "properties": {
           "name": {
             "type": "string"
+          },
+          "postalAddress": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The postal address every campaign footer and marketing send shows under Unsubscribe; null until one is set. Campaigns can't be sent or scheduled without it."
           }
         },
         "required": [
-          "name"
+          "name",
+          "postalAddress"
         ]
       },
       "UpdateWorkspaceSettings": {
@@ -6131,11 +6141,20 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 120
+          },
+          "postalAddress": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "maxLength": 300,
+            "description": "The workspace's postal address, as plain text: at most 300 characters on up to 6 lines, without HTML. Every campaign email and marketing send shows it under the Unsubscribe link, as US law (CAN-SPAM) requires; a campaign can't be sent or scheduled without it."
           }
         },
-        "required": [
-          "name"
-        ]
+        "example": {
+          "postalAddress": "Example Inc.\n1 Main Street\nSpringfield, IL 62701"
+        }
       },
       "SesAccount": {
         "type": "object",
@@ -37830,7 +37849,7 @@
     "/v1/campaigns/{id}/preview": {
       "get": {
         "operationId": "previewCampaign",
-        "description": "Renders the saved draft’s block HTML as the styled email and its plain-text alternative, without personalization or the unsubscribe footer. Placeholders remain visible as {{name}}.",
+        "description": "Renders the saved draft’s block HTML as the styled email and its plain-text alternative, with the footer every email gets (the Unsubscribe link, a placeholder here, and the workspace’s postal address) and without personalization. Placeholders remain visible as {{name}}.",
         "tags": [
           "Campaigns"
         ],
@@ -38669,7 +38688,7 @@
     "/v1/campaigns/{id}/test": {
       "post": {
         "operationId": "testCampaign",
-        "description": "Send the current draft, personalized with data, to one address as a transactional test. On Hosted sending a test is screened on its own, with the campaign limit (131,072 bytes of screened text by default; 422 CONTENT_TOO_LARGE_TO_SCREEN with error.details[0] { screenedBytes, limitBytes } over it).",
+        "description": "Send the current draft, personalized with data, to one address as a transactional test. It shows the footer as recipients get it (the Unsubscribe link, a placeholder here, and the workspace’s postal address, if set) without List-Unsubscribe headers, and needs no postal address. On Hosted sending a test is screened on its own, with the campaign limit (131,072 bytes of screened text by default; 422 CONTENT_TOO_LARGE_TO_SCREEN with error.details[0] { screenedBytes, limitBytes } over it).",
         "tags": [
           "Campaigns"
         ],
@@ -38855,7 +38874,7 @@
     "/v1/campaigns/{id}/send": {
       "post": {
         "operationId": "sendCampaign",
-        "description": "Accept the current revision for durable background delivery: the audience is frozen now, every message is validated in the background, then recipients are released into the dispatch queue. The 202 count is accepted recipient intents, not SES acceptance or delivery; poll the campaign for its state. Hosted campaigns are screened copy by copy before they are released, as single messages are, but each distinct copy only once: recipients whose personalized copies read the same share one verdict, so a campaign personalized only with first names costs one screen per distinct first name, and one with a unique value per recipient costs one per recipient. Each copy is screened exactly as a single message is, and sent only under a verdict for its exact content. The campaign’s own copy, placeholders unresolved, is screened first and may hold 131,072 bytes of screened text (installation default; 422 CONTENT_TOO_LARGE_TO_SCREEN with error.details[0] { screenedBytes, limitBytes } otherwise); so may each copy, and a copy over it is refused alone. A copy the screen refuses is never sent (CONTENT_REJECTED_SPAM); when refused copies pass 5% and 10 recipients the campaign pauses once for review, and a positive verdict on the campaign’s own copy fails it before anyone is sent to. The audience is captured in this request, which takes seconds for a large one. A capture that runs out of time is refused with 503 AUDIENCE_CAPTURE_TIMEOUT and one that waits for other large captures with 503 AUDIENCE_CAPTURE_BUSY; both are retryable and keep nothing, so retry with the same Idempotency-Key.",
+        "description": "Accept the current revision for durable background delivery: the audience is frozen now, every message is validated in the background, then recipients are released into the dispatch queue. The 202 count is accepted recipient intents, not SES acceptance or delivery; poll the campaign for its state. Every email’s footer shows the workspace’s postal address under the Unsubscribe link, as US law (CAN-SPAM) requires, frozen as it is now: without one the request is refused with 422 POSTAL_ADDRESS_REQUIRED (set postalAddress with updateWorkspaceSettings). Hosted campaigns are screened copy by copy before they are released, as single messages are, but each distinct copy only once: recipients whose personalized copies read the same share one verdict, so a campaign personalized only with first names costs one screen per distinct first name, and one with a unique value per recipient costs one per recipient. Each copy is screened exactly as a single message is, and sent only under a verdict for its exact content. The campaign’s own copy, placeholders unresolved, is screened first and may hold 131,072 bytes of screened text (installation default; 422 CONTENT_TOO_LARGE_TO_SCREEN with error.details[0] { screenedBytes, limitBytes } otherwise); so may each copy, and a copy over it is refused alone. A copy the screen refuses is never sent (CONTENT_REJECTED_SPAM); when refused copies pass 5% and 10 recipients the campaign pauses once for review, and a positive verdict on the campaign’s own copy fails it before anyone is sent to. The audience is captured in this request, which takes seconds for a large one. A capture that runs out of time is refused with 503 AUDIENCE_CAPTURE_TIMEOUT and one that waits for other large captures with 503 AUDIENCE_CAPTURE_BUSY; both are retryable and keep nothing, so retry with the same Idempotency-Key.",
         "tags": [
           "Campaigns"
         ],
@@ -39042,7 +39061,7 @@
     "/v1/campaigns/{id}/schedule": {
       "post": {
         "operationId": "scheduleCampaign",
-        "description": "Accept the current revision for durable scheduled delivery. The audience is frozen and validated now; no recipient is materialized or sent before scheduledAt. The 202 count is accepted recipient intents. Hosted campaigns are screened copy by copy before they are released, as single messages are, but each distinct copy only once: recipients whose personalized copies read the same share one verdict, so a campaign personalized only with first names costs one screen per distinct first name, and one with a unique value per recipient costs one per recipient. Each copy is screened exactly as a single message is, and sent only under a verdict for its exact content. The campaign’s own copy, placeholders unresolved, is screened first and may hold 131,072 bytes of screened text (installation default; 422 CONTENT_TOO_LARGE_TO_SCREEN with error.details[0] { screenedBytes, limitBytes } otherwise); so may each copy, and a copy over it is refused alone. A copy the screen refuses is never sent (CONTENT_REJECTED_SPAM); when refused copies pass 5% and 10 recipients the campaign pauses once for review, and a positive verdict on the campaign’s own copy fails it before anyone is sent to. The audience is captured in this request, which takes seconds for a large one. A capture that runs out of time is refused with 503 AUDIENCE_CAPTURE_TIMEOUT and one that waits for other large captures with 503 AUDIENCE_CAPTURE_BUSY; both are retryable and keep nothing, so retry with the same Idempotency-Key.",
+        "description": "Accept the current revision for durable scheduled delivery. The audience is frozen and validated now; no recipient is materialized or sent before scheduledAt. The 202 count is accepted recipient intents. Every email’s footer shows the workspace’s postal address under the Unsubscribe link, as US law (CAN-SPAM) requires, frozen as it is now: without one the request is refused with 422 POSTAL_ADDRESS_REQUIRED (set postalAddress with updateWorkspaceSettings). Hosted campaigns are screened copy by copy before they are released, as single messages are, but each distinct copy only once: recipients whose personalized copies read the same share one verdict, so a campaign personalized only with first names costs one screen per distinct first name, and one with a unique value per recipient costs one per recipient. Each copy is screened exactly as a single message is, and sent only under a verdict for its exact content. The campaign’s own copy, placeholders unresolved, is screened first and may hold 131,072 bytes of screened text (installation default; 422 CONTENT_TOO_LARGE_TO_SCREEN with error.details[0] { screenedBytes, limitBytes } otherwise); so may each copy, and a copy over it is refused alone. A copy the screen refuses is never sent (CONTENT_REJECTED_SPAM); when refused copies pass 5% and 10 recipients the campaign pauses once for review, and a positive verdict on the campaign’s own copy fails it before anyone is sent to. The audience is captured in this request, which takes seconds for a large one. A capture that runs out of time is refused with 503 AUDIENCE_CAPTURE_TIMEOUT and one that waits for other large captures with 503 AUDIENCE_CAPTURE_BUSY; both are retryable and keep nothing, so retry with the same Idempotency-Key.",
         "tags": [
           "Campaigns"
         ],
@@ -40424,6 +40443,7 @@
       },
       "patch": {
         "operationId": "updateWorkspaceSettings",
+        "description": "Change the workspace's name, its postal address, or both; omitted fields keep their value. The postal address appears under the Unsubscribe link of every campaign email and marketing send, as US law (CAN-SPAM) requires: campaigns can't be sent or scheduled without one (422 POSTAL_ADDRESS_REQUIRED). null removes it. Owners and admins only.",
         "tags": [
           "Settings"
         ],
@@ -40571,12 +40591,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { updateWorkspaceSettings } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await updateWorkspaceSettings({\n  client,\n  body: {\n    \"name\": \"Example\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { updateWorkspaceSettings } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await updateWorkspaceSettings({\n  client,\n  body: {\n    \"postalAddress\": \"Example Inc.\\n1 Main Street\\nSpringfield, IL 62701\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request PATCH \\\n  --url 'https://nightmail.dev/v1/settings/workspace' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"name\": \"Example\"\n}'"
+            "source": "curl --request PATCH \\\n  --url 'https://nightmail.dev/v1/settings/workspace' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"postalAddress\": \"Example Inc.\\n1 Main Street\\nSpringfield, IL 62701\"\n}'"
           }
         ]
       }

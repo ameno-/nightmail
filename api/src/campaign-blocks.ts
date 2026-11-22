@@ -95,8 +95,12 @@ A campaign created from a template copies them: give it a default for each one (
 ## Unsubscribe
 
 ${productName} adds an Unsubscribe link at the end of every campaign email and the one-click
-\`List-Unsubscribe\` headers. To send people to your own unsubscribe or preference page, set the
-campaign's or template's \`unsubscribePageUrl\` (HTTPS). The footer link then opens that page with
+\`List-Unsubscribe\` headers. Under the link it shows the workspace's postal address, which US law
+(CAN-SPAM) requires: set \`postalAddress\` with updateWorkspaceSettings before sending or scheduling a
+campaign (until then both refuse with \`POSTAL_ADDRESS_REQUIRED\`); don't repeat it in the content.
+
+To send people to your own unsubscribe or preference page, set the campaign's or template's
+\`unsubscribePageUrl\` (HTTPS). The footer link then opens that page with
 \`unsubscribe_token=<token>\` added; your page records the opt-out by POSTing the token to
 \`/unsubscribe/<token>\` on this API. Mail clients' one-click unsubscribes still reach ${productName}.
 Every opt-out marks the contact \`unsubscribed\`, stops later campaigns to them and sends a

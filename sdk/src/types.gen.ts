@@ -978,6 +978,9 @@ export type SendEmailInput = {
      * Usually omitted: hosted Nightmail sends from the region bound to the sender domain, and a different value fails with SENDER_REGION_MISMATCH. Self-hosted installations default to their default region.
      */
     region?: string;
+    /**
+     * marketing adds Nightmail's footer (an Unsubscribe link, with the workspace's postal address under it when it has one) and the one-click List-Unsubscribe headers.
+     */
     kind?: 'transactional' | 'marketing';
     subject?: string;
     html?: string;
@@ -1051,6 +1054,9 @@ export type BatchSendEmailItem = {
      * Usually omitted: hosted Nightmail sends from the region bound to the sender domain, and a different value fails with SENDER_REGION_MISMATCH. Self-hosted installations default to their default region.
      */
     region?: string;
+    /**
+     * marketing adds Nightmail's footer (an Unsubscribe link, with the workspace's postal address under it when it has one) and the one-click List-Unsubscribe headers.
+     */
     kind?: 'transactional' | 'marketing';
     subject?: string;
     html?: string;
@@ -1859,10 +1865,18 @@ export type CampaignRescheduleInput = {
 
 export type WorkspaceSettings = {
     name: string;
+    /**
+     * The postal address every campaign footer and marketing send shows under Unsubscribe; null until one is set. Campaigns can't be sent or scheduled without it.
+     */
+    postalAddress: string | null;
 };
 
 export type UpdateWorkspaceSettings = {
-    name: string;
+    name?: string;
+    /**
+     * The workspace's postal address, as plain text: at most 300 characters on up to 6 lines, without HTML. Every campaign email and marketing send shows it under the Unsubscribe link, as US law (CAN-SPAM) requires; a campaign can't be sent or scheduled without it.
+     */
+    postalAddress?: string | null;
 };
 
 export type SesAccount = {

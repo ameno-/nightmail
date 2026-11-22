@@ -877,12 +877,17 @@ async function sessionFixture(t: TestContext, options: Parameters<typeof seedSes
   cleanup(t, async () => { await authDb!.query('DELETE FROM nightmail_users WHERE id = $1', [fixture.userId]); });
   return fixture;
 }
+// Synthetic: the postal address fixture workspaces' campaign footers show (campaigns need one).
+const FIXTURE_POSTAL_ADDRESS = 'Acceptance Fixture Co.\n1 Synthetic Way\nTestville, CA 94000';
 before(async () => {
   authDb = new pg.Client({ connectionString: FIXTURE_DATABASE_URL, connectionTimeoutMillis: 5_000, statement_timeout: 5_000 });
   await authDb.connect();
   // The synthetic acceptance operator, signed in with Google Workspace as staff are.
   manager = await seedSession(authDb, { email: AUTH_EMAIL, userId: AUTH_SUBJECT, hostedDomain: null, staff: true });
   const identity = ok(await http('GET', '/v1/me', MANAGER));
+  const { name } = ok(await http('GET', '/v1/settings/workspace', MANAGER));
+  await authDb.query(`INSERT INTO operation_settings(workspace_id,name,postal_address) VALUES('default',$1,$2)
+    ON CONFLICT ON CONSTRAINT operation_settings_pkey DO UPDATE SET postal_address=excluded.postal_address`, [name, FIXTURE_POSTAL_ADDRESS]);
   assert.equal(identity.id, manager.userId, 'Fixture DB, session secret and API must match; no machine keys may be provisioned otherwise.');
   assert.equal(identity.email, AUTH_EMAIL);
   if (!identity.simulated) assert.ok(process.env.LIVE_SES_TEST === '1' && process.execArgv.includes('--test-name-pattern=^LIVE SES:'), 'Synthetic scenarios require a simulated deployment. An explicitly authorized live check must run alone with --test-name-pattern=^LIVE SES:.');
@@ -10154,7 +10159,7 @@ describe('Lists, compound segments, imports and exports', () => {
   });
 });
 
-// A newsletter is a contact list with a sender (src/newsletters.ts, migration 393): its ID and name are the list's, and its
+// A newsletter is a contact list with a sender (src/newsletters.ts, migration 394): its ID and name are the list's, and its
 // issues are the campaigns sent to that list. These run in isolated workspaces (the simulated fixture's transaction), where
 // every row is created at the same transaction time, so tests that read an order set created_at themselves.
 describe('Newsletters', () => {
@@ -13692,8 +13697,10 @@ describe('Dashboard API capabilities', () => {
     assert.ok(preview.html.includes('role="presentation"') && preview.html.includes('>Go</a>'), 'Buttons and columns render as presentation tables.');
     assert.ok(!preview.html.includes('data-button') && !preview.html.includes('data-columns') && !preview.html.includes('<section'), 'Rendered output contains no block markers.');
     assert.ok(preview.html.includes('font-size:32px') && preview.html.includes('background-color:#3156c7') && preview.html.includes('border-radius:8px'), 'Email-safe advanced styles survive rendering.');
-    assert.ok(!preview.html.includes('Unsubscribe'), 'Preview omits the unsubscribe footer.');
-    assert.equal(preview.text, 'Hello {{name}}\n\nRead this (https://example.com/{{email}}).\n\n- One\n- Two\n\n[Art] https://cdn.example.com/a.png\n\nGo: https://example.com/go\n\n----------\n\nLeft\n\nRight');
+    // The footer every email gets, as it will look: the Unsubscribe link (a placeholder here) and the postal address under it.
+    const placeholder = `${PUBLIC_ORIGIN}/unsubscribe/u_${'0'.repeat(64)}`;
+    assert.ok(preview.html.includes(`<a href="${placeholder}" style="color:#595959;text-decoration:underline">Unsubscribe</a></p><p style="`) && preview.html.includes(`>${FIXTURE_POSTAL_ADDRESS.split('\n').join('<br>')}</p>`), 'Preview shows the footer with the postal address.');
+    assert.equal(preview.text, `Hello {{name}}\n\nRead this (https://example.com/{{email}}).\n\n- One\n- Two\n\n[Art] https://cdn.example.com/a.png\n\nGo: https://example.com/go\n\n----------\n\nLeft\n\nRight\n\nUnsubscribe: ${placeholder}\n${FIXTURE_POSTAL_ADDRESS}`);
 
     const contact = await resource(t, key.secret, '/v1/contacts', { email: address(), name: 'Block Reader' });
     ok(await consent(key.secret, contact.id, 'subscribed'));
@@ -13703,7 +13710,7 @@ describe('Dashboard API capabilities', () => {
     const [message] = page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, key.secret));
     const content = ok(await http('GET', `/v1/emails/${message.id}/content`, key.secret));
     assert.ok(content.html.includes('Hello Block Reader') && content.html.includes(`href="https://example.com/${contact.email}"`), 'Rendered email is personalized.');
-    assert.ok(/<a href="[^"]+" style="[^"]*">Unsubscribe<\/a><\/p><\/td>/.test(content.html), 'The unsubscribe footer sits inside the rendered layout.');
+    assert.ok(/<a href="[^"]+" style="[^"]*">Unsubscribe<\/a><\/p><p style="[^"]*">[^<]+(<br>[^<]+)*<\/p><\/td>/.test(content.html), 'The unsubscribe footer and the postal address under it sit inside the rendered layout.');
     assert.ok(content.text.startsWith('Hello Block Reader') && content.text.includes('\n\nUnsubscribe: '), 'A plain-text alternative is derived from the blocks.');
   });
 
@@ -13892,7 +13899,8 @@ describe('Dashboard API capabilities', () => {
     assert.equal(stored.snapshot.deferredCampaign, true);
     assert.match(stored.snapshot.unsubscribeUrl, /\/unsubscribe\/u_[A-Za-z0-9_-]+$/);
     assert.ok(content.html.includes(stored.snapshot.unsubscribeUrl), 'The rebuilt body carries the unsubscribe link that was sent.');
-    assert.ok(content.text.endsWith(`Unsubscribe: ${stored.snapshot.unsubscribeUrl}`));
+    // Rebuilt from the review, the footer carries the postal address its launch froze, under the link, in both parts.
+    assert.ok(content.text.endsWith(`Unsubscribe: ${stored.snapshot.unsubscribeUrl}\n${FIXTURE_POSTAL_ADDRESS}`));
     const token = stored.snapshot.unsubscribeUrl.slice(stored.snapshot.unsubscribeUrl.lastIndexOf('/') + 1);
     assert.equal((await db.query("SELECT count(*)::int AS n FROM operation_unsubscribe_tokens WHERE token_hash = encode(sha256(convert_to($1, 'UTF8')), 'hex')", [token])).rows[0].n, 1, 'The stored link is the one whose token was issued.');
     error(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: revised.revision, draft: { ...revised.draft, previewText: 'Too late' } }), 409, 'CAMPAIGN_LOCKED');
@@ -16006,7 +16014,7 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     const token = `u_${'ab'.repeat(32)}`, url = `https://mail.example/unsubscribe/${token}`, own = 'https://brand.example/prefs?list=news#top';
     const customer = { testCampaignId: null, from: 'news@brand.example', to: ['ana@example.net'], cc: [], bcc: [], replyTo: [], region: REGION, kind: 'marketing' as const,
       subject: 'Hello', html: '<p>Hello</p>', text: 'Hello', attachments: [], tracking: true, headers: [] as { Name: string; Value: string }[] };
-    const hosted = withUnsubscribe(runtime, customer, url), mine = withUnsubscribe(runtime, customer, url, own);
+    const hosted = withUnsubscribe(runtime, customer, url), mine = withUnsubscribe(runtime, customer, url, { unsubscribePageUrl: own });
     const link = `https://brand.example/prefs?list=news&unsubscribe_token=${token}#top`;
     assert.ok(hosted.html!.includes(`<a href="${url}"`) && hosted.text!.endsWith(`\n\nUnsubscribe: ${url}`));
     assert.ok(mine.html!.includes(`<a href="${link.replace('&', '&amp;')}"`) && mine.text!.endsWith(`\n\nUnsubscribe: ${link}`), 'The footer opens the page with the recipient’s opaque token.');
@@ -16014,12 +16022,12 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     // RFC 8058 allows one HTTPS URI and the mailbox POSTs to it: it stays this installation's, with or without a page.
     for (const copy of [hosted, mine]) assert.deepEqual(copy.headers, [{ Name: 'List-Unsubscribe', Value: `<${url}>` }, { Name: 'List-Unsubscribe-Post', Value: 'List-Unsubscribe=One-Click' }]);
     // Screening keys the page link with the placeholder token, the same for every recipient.
-    const keyed = screenedAs(runtime, customer, own);
+    const keyed = screenedAs(runtime, customer, { unsubscribePageUrl: own });
     assert.ok(keyed.text!.endsWith(`unsubscribe_token=u_${'0'.repeat(64)}#top`) && keyed.headers[0]!.Value === `<https://mail.example/unsubscribe/u_${'0'.repeat(64)}>`);
-    assert.equal(withUnsubscribe(runtime, customer, url, 'https://brand.example').text!.split('Unsubscribe: ')[1], `https://brand.example/?unsubscribe_token=${token}`);
+    assert.equal(withUnsubscribe(runtime, customer, url, { unsubscribePageUrl: 'https://brand.example' }).text!.split('Unsubscribe: ')[1], `https://brand.example/?unsubscribe_token=${token}`);
     // A page carrying an unsubscribe_token of its own, plain or percent-encoded (refused on input), still gets exactly one,
     // the recipient's, with every other parameter as written and the fragment kept.
-    const stale = withUnsubscribe(runtime, customer, url, `https://brand.example/prefs?unsubscribe_token=u_${'cd'.repeat(32)}&list=a%20b+c&unsubscribe%5Ftoken=x#top`).text!.split('Unsubscribe: ')[1]!;
+    const stale = withUnsubscribe(runtime, customer, url, { unsubscribePageUrl: `https://brand.example/prefs?unsubscribe_token=u_${'cd'.repeat(32)}&list=a%20b+c&unsubscribe%5Ftoken=x#top` }).text!.split('Unsubscribe: ')[1]!;
     assert.equal(stale, `https://brand.example/prefs?list=a%20b+c&unsubscribe_token=${token}#top`);
     assert.deepEqual(new URL(stale).searchParams.getAll('unsubscribe_token'), [token]);
   });
@@ -16061,7 +16069,7 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
       const token = stored.snapshot.unsubscribeUrl.slice(stored.snapshot.unsubscribeUrl.lastIndexOf('/') + 1);
       secrets.add(token);
       const link = `${own}&unsubscribe_token=${token}`, content = ok(await http('GET', `/v1/emails/${message.id}/content`, key.secret));
-      assert.ok(content.html.includes(`<a href="${link.replace('&', '&amp;')}" style="color:#595959;text-decoration:underline">Unsubscribe</a>`) && content.text.endsWith(`Unsubscribe: ${link}`), 'The footer opens the page with the recipient’s token.');
+      assert.ok(content.html.includes(`<a href="${link.replace('&', '&amp;')}" style="color:#595959;text-decoration:underline">Unsubscribe</a>`) && content.text.endsWith(`Unsubscribe: ${link}\n${FIXTURE_POSTAL_ADDRESS}`), 'The footer opens the page with the recipient’s token.');
       assert.ok(!content.html.includes('/unsubscribe/u_') && !content.text.includes('/unsubscribe/u_') && !link.includes(message.to[0]));
       assert.equal((await db.query("SELECT page_url FROM operation_unsubscribe_tokens WHERE token_hash = encode(sha256(convert_to($1, 'UTF8')), 'hex')", [token])).rows[0]?.page_url, own);
       assert.ok(!JSON.stringify(ok(await http('GET', `/v1/emails/${message.id}/content`, reader.secret))).includes(token), 'Readers without manage get the token redacted from the page link too.');
@@ -16131,7 +16139,7 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     await db.query('UPDATE jobs SET available_at = now() WHERE id = $1', [`campaign.run:${second.id}`]);
     await poll(`/v1/campaigns/${second.id}`, key.secret, row => row.state === 'done' && row.counts.byStatus.delivered === 1);
     const { message, token: bens } = await sentToken(second.id);
-    const link = new URL(ok(await http('GET', `/v1/emails/${message.id}/content`, key.secret)).text.split('Unsubscribe: ').at(-1));
+    const link = new URL(ok(await http('GET', `/v1/emails/${message.id}/content`, key.secret)).text.split('Unsubscribe: ').at(-1).split('\n')[0]);
     assert.deepEqual(link.searchParams.getAll('unsubscribe_token'), [bens], 'Ben’s footer carries exactly one token, his own.');
     assert.equal(link.searchParams.get('list'), 'news');
     // The customer's page reads the token and records the opt-out: Ben is unsubscribed, Anna is not.
@@ -16730,6 +16738,118 @@ describe('Scoped database source fixtures with HTTP security assertions', () => 
   });
 });
 
+describe('Campaign postal address', () => {
+  test('postal address: campaign footers carry it in HTML and text; send and schedule need it, a test does not; marketing sends get it, transactional mail never', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, run }) => {
+      const wid = runtime.config.workspaceId, from = 'sender@example.com', placeholder = `${PUBLIC_ORIGIN}/unsubscribe/u_${'0'.repeat(64)}`;
+      const content = async (id: string) => ok(await local('GET', `/v1/emails/${id}/content`));
+      const footerOf = (address: string) => `margin:8px 0 0">${address.split('\n').join('<br>')}</p>`;
+      await db.query('UPDATE operation_settings SET postal_address = NULL WHERE workspace_id = $1', [wid]);
+      assert.equal(ok(await local('GET', '/v1/settings/workspace')).postalAddress, null);
+      const list = ok(await local('POST', '/v1/lists', { name: 'Postal' }), 201);
+      await db.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'postal-contact-'||n,$1,'reader'||n||'@example.net','subscribed' FROM generate_series(1,2) n RETURNING id)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM c`, [wid, list.id]);
+      const draft = async (name: string) => ok(await local('POST', '/v1/campaigns', { name, from, subject: 'Postal', html: '<p>Postal fixture.</p>', audience: { listId: list.id } }), 201);
+      const [scheduled, sent] = [await draft('Postal scheduled'), await draft('Postal sent')];
+      const later = new Date(Date.now() + 86_400_000).toISOString();
+      // Without an address, send and schedule are refused with the setting they need, and nothing is captured.
+      for (const [path, body] of [['send', { revision: sent.revision }], ['schedule', { revision: scheduled.revision, scheduledAt: later }]] as const) {
+        const refused = error(await local('POST', `/v1/campaigns/${path === 'send' ? sent.id : scheduled.id}/${path}`, body), 422, 'POSTAL_ADDRESS_REQUIRED');
+        assert.equal(refused.field, 'postalAddress');
+        assert.match(refused.message, /postal address/);
+      }
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM sending_campaign_reviews WHERE workspace_id = $1', [wid])).rows[0].n, 0);
+      assert.deepEqual((await db.query('SELECT DISTINCT state FROM sending_campaigns WHERE workspace_id = $1', [wid])).rows, [{ state: 'draft' }]);
+      // A test to yourself goes without one, with the footer as it will look and no List-Unsubscribe (it is transactional).
+      const bare = await content(ok(await local('POST', `/v1/campaigns/${sent.id}/test`, { to: 'tester@example.net' }), 202).id);
+      assert.ok(bare.html.includes(`<a href="${placeholder}" style="color:#595959;text-decoration:underline">Unsubscribe</a></p>`) && bare.text.endsWith(`\n\nUnsubscribe: ${placeholder}`));
+      assert.ok(!bare.html.includes('margin:8px 0 0'));
+      // Saved as plain text: each line trimmed, empty ones dropped.
+      const address = 'Postal Fixture Co.\n9 Synthetic Road\nTestville, CA 94000';
+      assert.equal(ok(await local('PATCH', '/v1/settings/workspace', { postalAddress: '  Postal Fixture Co.\r\n\n  9 Synthetic Road  \nTestville, CA 94000 ' })).postalAddress, address);
+      for (const invalid of ['<b>Fixture</b> 1 Road', 'x'.repeat(301), Array.from({ length: 7 }, (_, i) => `Line ${i}`).join('\n'), 'Fixture\u0000Road', '   '])
+        error(await local('PATCH', '/v1/settings/workspace', { postalAddress: invalid }), 422, 'VALIDATION_FAILED');
+      error(await local('PATCH', '/v1/settings/workspace', {}), 422, 'VALIDATION_FAILED');
+      const settings = ok(await local('GET', '/v1/settings/workspace'));
+      assert.deepEqual(settings, { name: settings.name, postalAddress: address });
+      // The test, the preview and the sent email show the same footer.
+      const test = await content(ok(await local('POST', `/v1/campaigns/${sent.id}/test`, { to: 'tester@example.net' }), 202).id);
+      const preview = ok(await local('GET', `/v1/campaigns/${sent.id}/preview`));
+      for (const copy of [test, preview]) assert.ok(copy.html.includes(footerOf(address)) && copy.text.endsWith(`\n\nUnsubscribe: ${placeholder}\n${address}`), 'The test and the preview show the footer as it will look.');
+      const testRow = (await db.query("SELECT snapshot FROM sending_emails WHERE workspace_id = $1 AND snapshot->>'testCampaignId' = $2 ORDER BY created_at DESC LIMIT 1", [wid, sent.id])).rows[0];
+      assert.ok(!testRow.snapshot.headers.some((h: Json) => /^list-unsubscribe/i.test(h.Name)), 'A test carries no List-Unsubscribe.');
+      ok(await local('POST', `/v1/campaigns/${scheduled.id}/schedule`, { revision: scheduled.revision, scheduledAt: later }), 202);
+      ok(await local('POST', `/v1/campaigns/${sent.id}/send`, { revision: sent.revision }), 202);
+      const released = async (id: string) => (await db.query('SELECT id FROM sending_emails WHERE campaign_id = $1 ORDER BY id', [id])).rows.map(r => r.id as string);
+      for (let i = 0; i < 6 && (await released(sent.id)).length < 2; i++) await run('campaign.run');
+      await run('email.dispatch');
+      const delivered = await Promise.all((await released(sent.id)).map(content));
+      assert.equal(delivered.length, 2);
+      for (const copy of delivered) {
+        const url = copy.html.match(/<a href="([^"]+)" style="color:#595959;text-decoration:underline">Unsubscribe<\/a><\/p>/)?.[1];
+        assert.ok(url && url !== placeholder && copy.html.includes(`Unsubscribe</a></p><p style="`) && copy.html.includes(footerOf(address)), 'The HTML footer carries the address under the link.');
+        assert.ok(copy.text.endsWith(`\n\nUnsubscribe: ${url}\n${address}`), 'So does the text.');
+      }
+      // Frozen with the launch: a later change reaches new launches, never what was sent.
+      ok(await local('PATCH', '/v1/settings/workspace', { postalAddress: 'Moved Fixture Co.\n10 Other Road' }));
+      assert.ok((await content((await released(sent.id))[0]!)).text.endsWith(address));
+      // Marketing sends carry the address under their Unsubscribe link; transactional mail gets no footer at all.
+      const marketing = ok(await local('POST', '/v1/emails/send', { from, to: 'reader@example.net', subject: 'News', html: '<p>News</p>', text: 'News', kind: 'marketing' }), 202);
+      const transactional = ok(await local('POST', '/v1/emails/send', { from, to: 'reader@example.net', subject: 'Receipt', html: '<p>Receipt</p>', text: 'Receipt' }), 202);
+      const [news, receipt] = [await content(marketing.id), await content(transactional.id)];
+      assert.ok(news.html.includes(footerOf('Moved Fixture Co.\n10 Other Road')) && /\n\nUnsubscribe: \S+\nMoved Fixture Co\.\n10 Other Road$/.test(news.text));
+      assert.equal(receipt.html, '<p>Receipt</p>');
+      assert.equal(receipt.text, 'Receipt');
+      // A marketing send without an address still goes, with the link alone: its caller wrote the whole message.
+      await db.query('UPDATE operation_settings SET postal_address = NULL WHERE workspace_id = $1', [wid]);
+      const unaddressed = await content(ok(await local('POST', '/v1/emails/send', { from, to: 'reader@example.net', subject: 'News', text: 'News', kind: 'marketing' }), 202).id);
+      assert.match(unaddressed.text, /^News\n\nUnsubscribe: \S+$/);
+      // A campaign scheduled before postal addresses existed froze none: at its time it pauses while the workspace has
+      // none, and once one is added and it is resumed it sends with that one, stamped into its review.
+      await db.query("UPDATE sending_campaign_reviews SET draft = draft - 'postalAddress' WHERE campaign_id = $1", [scheduled.id]);
+      for (let i = 0; i < 3 && ok(await local('GET', `/v1/campaigns/${scheduled.id}`)).state === 'preparing'; i++) await run('campaign.run');
+      await db.query('UPDATE sending_campaigns SET scheduled_at = now() WHERE id = $1', [scheduled.id]);
+      for (let i = 0; i < 3 && ok(await local('GET', `/v1/campaigns/${scheduled.id}`)).state !== 'paused'; i++) await run('campaign.run');
+      const paused = ok(await local('GET', `/v1/campaigns/${scheduled.id}`));
+      assert.equal(paused.state, 'paused');
+      assert.equal(paused.delivery.pauseReason.code, 'POSTAL_ADDRESS_REQUIRED');
+      assert.deepEqual(await released(scheduled.id), [], 'Nobody is sent to without an address.');
+      ok(await local('PATCH', '/v1/settings/workspace', { postalAddress: 'Late Fixture Co.\n11 Last Road' }));
+      ok(await local('POST', `/v1/campaigns/${scheduled.id}/resume`, {}));
+      for (let i = 0; i < 4 && (await released(scheduled.id)).length < 2; i++) await run('campaign.run');
+      await run('email.dispatch');
+      assert.equal((await db.query("SELECT draft->>'postalAddress' AS a FROM sending_campaign_reviews WHERE campaign_id = $1", [scheduled.id])).rows[0].a, 'Late Fixture Co.\n11 Last Road');
+      for (const id of await released(scheduled.id)) assert.ok((await content(id)).text.endsWith('\nLate Fixture Co.\n11 Last Road'));
+    });
+  });
+
+  test('postal address: owners and admins change it; a member, a read key and a send key cannot, and every change is audited', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const wid = runtime.config.workspaceId;
+      runtime.config.multiTenant = true;
+      cleanup(t, async () => { runtime.config.multiTenant = false; });
+      const member = await sessionFixture(t), admin = await sessionFixture(t);
+      await db.query("UPDATE workspace_members SET workspace_id = $1, role = 'member' WHERE user_id = $2", [wid, member.userId]);
+      await db.query("UPDATE workspace_members SET workspace_id = $1, role = 'admin' WHERE user_id = $2", [wid, admin.userId]);
+      const key = async (permissions: string[]) => { const made = ok(await local('POST', '/v1/api-keys', { name: unique('postal-key'), permissions }), 201); secrets.add(made.secret); return { authorization: `Bearer ${made.secret}` }; };
+      const [reader, sender] = [await key(['read']), await key(['read', 'send'])];
+      const as = (headers: Record<string, string>) => (method: string, body?: Json) => local(method, '/v1/settings/workspace', body, 'live', headers);
+      for (const who of [{ cookie: member.cookie }, reader, sender]) {
+        assert.equal(ok(await as(who)('GET')).postalAddress, FIXTURE_POSTAL_ADDRESS, 'Everyone in the workspace reads it.');
+        error(await as(who)('PATCH', { postalAddress: 'Not Allowed Co.\n1 Nope Road' }), 403, 'PERMISSION_DENIED');
+      }
+      assert.equal((await db.query('SELECT postal_address FROM workspaces WHERE id = $1', [wid])).rows[0].postal_address, FIXTURE_POSTAL_ADDRESS);
+      assert.equal(ok(await as({ cookie: admin.cookie })('PATCH', { postalAddress: 'Admin Fixture Co.\n2 Admin Road' })).postalAddress, 'Admin Fixture Co.\n2 Admin Road');
+      assert.deepEqual(ok(await local('PATCH', '/v1/settings/workspace', { postalAddress: null })), { name: wid, postalAddress: null });
+      const audits = (await db.query("SELECT summary FROM audit_events WHERE workspace_id = $1 AND action = 'settings.update' ORDER BY id", [wid])).rows.map(r => r.summary);
+      assert.deepEqual(audits.map(a => [a.before?.postalAddress, a.after?.postalAddress, a.fields]), [[FIXTURE_POSTAL_ADDRESS, 'Admin Fixture Co.\n2 Admin Road', ['postalAddress']], ['Admin Fixture Co.\n2 Admin Road', '', ['postalAddress']]]);
+      // Renaming alone leaves the address as it is.
+      ok(await local('PATCH', '/v1/settings/workspace', { postalAddress: 'Kept Fixture Co.' }));
+      assert.deepEqual(ok(await local('PATCH', '/v1/settings/workspace', { name: 'Postal renamed' })), { name: 'Postal renamed', postalAddress: 'Kept Fixture Co.' });
+    });
+  });
+});
+
 describe('Operational configuration and public event boundaries', () => {
   test('workspace settings are shared and simulated deployments reject real SES control-plane requests', async t => {
     const key = await keyFixture(t);
@@ -17314,7 +17434,9 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
   try {
     await drizzle(db).transaction(async tx => {
       runtime.db = tx;
-      await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [runtime.config.workspaceId]);
+      // A postal address in both places a workspace keeps one: scenarios may switch the runtime to Hosted.
+      await db.query('INSERT INTO workspaces (id, name, slug, postal_address) VALUES ($1, $1, $1, $2)', [runtime.config.workspaceId, FIXTURE_POSTAL_ADDRESS]);
+      await db.query('INSERT INTO operation_settings (workspace_id, name, postal_address) VALUES ($1, $1, $2)', [runtime.config.workspaceId, FIXTURE_POSTAL_ADDRESS]);
       await db.query("UPDATE workspace_members SET workspace_id = $1 WHERE user_id = $2 AND workspace_id = 'default'", [runtime.config.workspaceId, manager!.userId]);
       const request: typeof http = (method, path, key, body, headers, timeout) => http(method, path, key, body, headers, timeout, PUBLIC_ORIGIN, req => app.fetch(req, runtime));
       await ensureRegionSettings(runtime.db, runtime.config);
@@ -25819,7 +25941,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await g.query(`DELETE FROM ${table} WHERE workspace_id=$1`,[w]);
       await g.query('DELETE FROM workspaces WHERE id=$1',[w]);
     });
-    await g.query('INSERT INTO workspaces(id,name,slug,byo_v2_enabled) VALUES($1,$1,$1,true)',[w]);
+    await g.query('INSERT INTO workspaces(id,name,slug,byo_v2_enabled,postal_address) VALUES($1,$1,$1,true,$2)',[w,FIXTURE_POSTAL_ADDRESS]);
     await g.query("INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,$1,$2,jsonb_build_array($2::text))",[w,region]);
     await g.query("INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES($1,$1,$2,'ready','shared','111122223333','ready')",[w,region]);
     await g.query("INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES($1,$2,$2,'verified')",[host,w]);
@@ -25881,7 +26003,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       for(let pass=0;pass<3;pass++)for(const table of tables)await g.query(`DELETE FROM "${table}" WHERE workspace_id=$1`,[w]).catch(()=>{});
       await g.query('DELETE FROM workspaces WHERE id=$1',[w]);
     });
-    await g.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[w]);
+    await g.query('INSERT INTO workspaces(id,name,slug,postal_address) VALUES($1,$1,$1,$2)',[w,FIXTURE_POSTAL_ADDRESS]);
     await g.query("INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,$1,$2,jsonb_build_array($2::text))",[w,region]);
     await g.query("INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES($1,$1,$2,'ready','shared','111122223333','ready')",[w,region]);
     await g.query("INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES($1,$2,$2,'verified')",[host,w]);
@@ -32761,7 +32883,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
             await client.query("INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,'inst_cold_camp','us-east-2',$2::jsonb)", [wid, JSON.stringify(['us-east-2'])]);
             await client.query("INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES('key_camp',$1,'camp','h','bane_99999999',$2::jsonb,'[]'::jsonb)", [wid, JSON.stringify(['read', 'send', 'manage'])]);
             await client.query("INSERT INTO sending_campaigns(id,workspace_id,draft,state,review_id,actor_key_id,simulated,total,prepared,expanded,auto_pause) VALUES($1,$2,$3::jsonb,'preparing',$4,'key_camp',true,1,0,0,false)", [campId, wid, JSON.stringify(draft), revId]);
-            await client.query("INSERT INTO sending_campaign_reviews(id,renderer_version,workspace_id,campaign_id,revision,draft,content_hash,rendered) VALUES($1,2,$2,$3,1,$4::jsonb,$5,$6::jsonb)", [revId, wid, campId, JSON.stringify(draft), '0'.repeat(64), JSON.stringify({ html: '<p>Hi {{name}}</p>', text: 'Hi {{name}}' })]);
+            await client.query("INSERT INTO sending_campaign_reviews(id,renderer_version,workspace_id,campaign_id,revision,draft,content_hash,rendered) VALUES($1,2,$2,$3,1,$4::jsonb,$5,$6::jsonb)", [revId, wid, campId, JSON.stringify({ ...draft, postalAddress: '1 Fixture Way' }), '0'.repeat(64), JSON.stringify({ html: '<p>Hi {{name}}</p>', text: 'Hi {{name}}' })]);
             await client.query("INSERT INTO sending_review_recipients(review_id,ordinal,recipient,recipient_bytes) VALUES($1,1,$2::jsonb,64)", [revId, JSON.stringify({ id: 'ct_1', email: 'alice@example.com', name: 'Alice', properties: {} })]);
             const jobId = 'campaign.run:' + campId;
             await client.query("INSERT INTO jobs(id,type,workspace_id,status,attempts,payload) VALUES($1,'campaign.run',$2,'pending',$3,$4::jsonb)", [jobId, wid, MAX_ATTEMPTS - 1, JSON.stringify({ campaignId: campId, run: 'run_c1' })]);

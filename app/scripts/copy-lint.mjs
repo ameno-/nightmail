@@ -127,6 +127,7 @@ export const KEEP = [
   { why: 'legal', file: 'features/audience/bulk.tsx', text: /^Confirm they (agreed before marking them subscribed|subscribed again)\.$/ },
   { why: 'legal', file: 'features/audience/contacts.tsx', text: /^Records that they agreed to marketing email\.$/ },
   { why: 'legal', file: 'features/audience/contacts.tsx', text: /^Transactional email still sends\.$/ },
+  { why: 'legal', file: 'components/PostalAddress.tsx', text: /^US law requires it in the footer of every marketing email\.$/ },
   { why: 'safety', file: 'lib/leave-guard.tsx', text: /^You haven’t saved …; leaving discards them\.$/ },
   { why: 'safety', file: 'App.tsx', text: /^Unsaved changes may be lost\.$/ },
   { why: 'safety', file: 'components/AppShell.tsx', text: /^Unsaved changes on it may be lost\.$/ },

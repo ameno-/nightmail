@@ -7,7 +7,8 @@ import { queries } from '../../data/queries'
 import { priceUc, total, usd } from '../../data/billing'
 import { useRefreshListsOnChange } from '../../data/invalidation'
 import { useRegionCatalog } from '../../data/regions'
-import { campaignEditable, errorText, campaignResumable, type Campaign, type CampaignInput, type SendCampaignInput } from '../../data/types'
+import { ApiError, campaignEditable, errorText, campaignResumable, type Campaign, type CampaignInput, type SendCampaignInput } from '../../data/types'
+import { PostalAddressDialog } from '../../components/PostalAddress'
 import {
   Alert, Button, Checkbox, ConfirmDialog, Dialog, DropdownMenu, EmptyState, ErrorState,
   Field, IconButton, Input, PageHeader, SectionHeader, Select, SkeletonText,
@@ -601,6 +602,10 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
   const paceSummary = (input: SendCampaignInput | null) => !input?.pacing ? '' : `${input.pacing.perDay ? ` Sends to up to ${number(input.pacing.perDay)} recipients per day${paceDays ? ` (about ${paceDays} ${paceDays === 1 ? 'day' : 'days'})` : ''}.` : ''}${input.pacing.rateShare != null && input.pacing.rateShare < 1 ? ` Uses at most ${Math.round(input.pacing.rateShare * 100)}% of your sending speed.` : ''}${input.pacing.autoPause === false ? ' Auto-pause on high bounces or complaints is off.' : ''}`
   const [receipt, setReceipt] = useState('')
   const sendMutation = useApiMutation((api, input: SendCampaignInput) => api.campaigns.send(input))
+  // Every campaign footer carries the workspace's postal address, so Send and Schedule ask for it first when it is
+  // missing, then go on: to the confirmation, or straight to sending when the API asked after it was confirmed.
+  const settings = useApiDef(queries.workspaceSettings(), { enabled: draft && canAdminister })
+  const [addressFor, setAddressFor] = useState<{ input: SendCampaignInput; confirmed: boolean } | null>(null)
   const recipients = audience.data ? `${number(audience.data.eligible)} eligible ${audience.data.eligible === 1 ? 'recipient' : 'recipients'}` : 'the eligible recipients'
   const audienceName = `${listName ? ` in ${listName}` : ''}`
   // Hosted and enforced: what the send costs beyond the free allowance, against the balance, read while the page opens.
@@ -625,17 +630,23 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
       if (problem) { setScheduleProblem(problem); return }
       input.scheduledAt = parseUtc(scheduled)!.toISOString()
     }
+    if (settings.data && !settings.data.postalAddress) { setAddressFor({ input, confirmed: false }); return }
     setConfirmation(input)
   }
-  async function confirmSend() {
-    if (!confirmation || !draft || guard.current || sendMutation.isPending) return
+  async function send(input: SendCampaignInput) {
+    if (!draft || guard.current || sendMutation.isPending) return
     if (readinessError) { setError(readinessError); setConfirmation(null); return }
     guard.current = true
     setError('')
-    try { const result = await sendMutation.mutateAsync(confirmation); setReceipt('queued' in result && !result.scheduledAt ? `Sending started · ${number(result.queued)} ${result.queued === 1 ? 'recipient' : 'recipients'}${result.simulated ? ' · simulation mode, no real email is sent' : ''}` : ''); setConfirmation(null) }
-    catch (cause) { setError(errorText(cause)); setConfirmation(null) }
+    try { const result = await sendMutation.mutateAsync(input); setReceipt('queued' in result && !result.scheduledAt ? `Sending started · ${number(result.queued)} ${result.queued === 1 ? 'recipient' : 'recipients'}${result.simulated ? ' · simulation mode, no real email is sent' : ''}` : ''); setConfirmation(null) }
+    catch (cause) {
+      setConfirmation(null)
+      if (cause instanceof ApiError && cause.code === 'POSTAL_ADDRESS_REQUIRED') setAddressFor({ input, confirmed: true })
+      else setError(errorText(cause))
+    }
     finally { guard.current = false }
   }
+  const confirmSend = () => confirmation ? send(confirmation) : undefined
   const scheduledView = !draft && !campaign.archivedAt && unreleasedSchedule(campaign)
   const sentSomething = (campaign.counts?.total ?? 0) > 0
   const finished = ['done', 'canceled'].includes(campaign.status) || (campaign.status === 'failed' && !campaignResumable(campaign))
@@ -709,5 +720,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
     </div>
     <ConfirmDialog open={confirmation !== null} onOpenChange={open => { if (!open && !sendMutation.isPending) setConfirmation(null) }} title={confirmation?.mode === 'schedule' ? 'Schedule this campaign?' : 'Send this campaign now?'} description={confirmation?.mode === 'schedule' ? `Send “${campaign.name}”${origin} to ${recipients}${audienceName} on ${utcLabel(confirmation.scheduledAt!)} (${localLabel(confirmation.scheduledAt!)}).${paceSummary(confirmation)}${cost}${scoreNote} You can change this until sending starts.` : `Send “${campaign.name}”${origin} to ${recipients}${audienceName} now.${paceSummary(confirmation)}${cost} Consent is checked again as each email sends.${scoreNote} You can’t undo this.`} confirmLabel={confirmation?.mode === 'schedule' ? 'Schedule' : 'Send now'} onConfirm={confirmSend} pending={sendMutation.isPending} />
     {draft && testOpen && <TestEmailDialog campaign={campaign} open={testOpen} onOpenChange={setTestOpen} />}
+    {addressFor && <PostalAddressDialog open onOpenChange={open => { if (!open) setAddressFor(null) }} initial={null} required title="Add your postal address" submitLabel="Continue"
+      onSaved={() => { if (addressFor.confirmed) void send(addressFor.input); else setConfirmation(addressFor.input) }} />}
   </div>
 }

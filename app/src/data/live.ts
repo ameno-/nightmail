@@ -1,6 +1,6 @@
 import { ApiError, type MailRoute, type RoutingTestResult, type Api, type PageRequest, type PageResult, type Campaign, type CampaignState, type Contact, type AudienceList, type AudiencePreview, type Segment, type Domain, type Webhook, type WebhookDelivery, type MailboxDomain, type MailboxWebhookDelivery, type ReceivedEmailDetail, type InboundAddress, type InboundAddressState, type InboundMessage, type InboundMessageDetail, type InboundThread, type InboundThreadDetail, type InboundWebhook, type ForwardEndpoint, type Email, type RegionCatalog, type SesDiscovery, type RegionProvisionReceipt, type Workspace, type Identity, type OverviewSetup } from './types'
 
-import type { Agent, ApiKey, AppPassword, AuditEntry, CreatedAppPassword, DomainQuota } from './types'
+import type { Agent, ApiKey, AppPassword, AuditEntry, CreatedAppPassword, DomainQuota, WorkspaceSettings } from './types'
 import type { CreatedInbox, Inbox, InboxMessageDetail, InboxMessagePage, LogDirection, LogEntry, SenderScore } from './types'
 import { headerPrefix, productName } from '../../../api/src/brand'
 import { analytics } from '../lib/analytics'
@@ -165,8 +165,8 @@ export function createLiveApi(): Api {
   const getCampaign = async (id: string, signal?: AbortSignal) => mapCampaign(await call(`/campaigns/${idPath(id)}`, 'GET', undefined, signal))
   const getContact = async (id: string, signal?: AbortSignal) => mapContact(await call(`/contacts/${idPath(id)}`, 'GET', undefined, signal))
   const getWorkspace = async (signal?: AbortSignal) => {
-    const [settings, identity] = await Promise.all([call('/settings/workspace', 'GET', undefined, signal), call<Identity>('/me', 'GET', undefined, signal)])
-    return { name: settings.name, id: identity.id, role: identity.permissions.join(', ') } satisfies Workspace
+    const [settings, identity] = await Promise.all([call<WorkspaceSettings>('/settings/workspace', 'GET', undefined, signal), call<Identity>('/me', 'GET', undefined, signal)])
+    return { name: settings.name, postalAddress: settings.postalAddress, id: identity.id, role: identity.permissions.join(', ') } satisfies Workspace
   }
   const deliveries = async (id: string, cursor?: string) => { const result = await page(`/webhooks/${idPath(id)}/deliveries`, { cursor, pageSize: 20 }, mapDelivery); return { items: result.items, nextCursor: result.nextCursor ?? null } }
   return {
@@ -179,7 +179,8 @@ export function createLiveApi(): Api {
       provision: (region, signal) => call<RegionProvisionReceipt>(`/regions/${idPath(region)}/provision`, 'POST', { confirm: true }, signal),
       updateAutoValidation: (region, stream, mode, signal) => call(`/regions/${idPath(region)}/auto-validation`, 'PUT', { stream, mode, confirm: true }, signal),
     },
-    workspace: { get: getWorkspace, update: async (input, signal) => { await call('/settings/workspace', 'PATCH', input, signal); return getWorkspace(signal) } },
+    workspace: { get: getWorkspace, update: async (input, signal) => { await call('/settings/workspace', 'PATCH', input, signal); return getWorkspace(signal) },
+      settings: signal => call<WorkspaceSettings>('/settings/workspace', 'GET', undefined, signal), updateSettings: (input, signal) => call<WorkspaceSettings>('/settings/workspace', 'PATCH', input, signal) },
     senderScore: { get: signal => call<SenderScore>('/sender-score', 'GET', undefined, signal), release: (input, signal) => call<SenderScore>('/sender-score/release', 'POST', input, signal) },
     overview: { get: async (input, signal) => {
       const end = new Date(), start = new Date(end.getTime() - ({ '24h': 1, '7d': 7, '30d': 30 }[input.range]) * 86400000)

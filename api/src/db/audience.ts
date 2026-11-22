@@ -28,7 +28,7 @@ export const contacts = pgTable('audience_contacts', {
 }, t => [unique('audience_contacts_email_scope').on(t.workspaceId, t.email), index('audience_contacts_page').on(t.workspaceId, t.id)]);
 /** A large newsletter's readers as its background count stored them (src/newsletters.ts readersJob). */
 export type StoredNewsletterReaders = { count: number; since: string; daily: number[]; countedAt: string; members: number };
-// A list is a newsletter while newsletter_from is set (migration 393, src/newsletters.ts).
+// A list is a newsletter while newsletter_from is set (migration 394, src/newsletters.ts).
 export const lists = pgTable('audience_lists', { id: text('id').primaryKey(), ...scope(), name: text('name').notNull(), description: text('description').notNull().default(''), ...dates(),
   newsletterFrom: text('newsletter_from'), newsletterFromName: text('newsletter_from_name'), newsletterReaders: jsonb('newsletter_readers').$type<StoredNewsletterReaders>(),
 }, t => [index('audience_lists_page').on(t.workspaceId, t.id), index('audience_lists_newsletters').on(t.workspaceId, t.createdAt, t.id).where(sql`${t.newsletterFrom} IS NOT NULL`)]);

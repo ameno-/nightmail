@@ -6,7 +6,7 @@ import { JobDeferred, retryDatabaseFailures } from './jobs.js';
 import { mailAddress, senderDisplayName } from './outbound-content.js';
 
 /**
- * A newsletter is a contact list with a sender (audience_lists.newsletter_from, migration 393): its ID and name are the
+ * A newsletter is a contact list with a sender (audience_lists.newsletter_from, migration 394): its ID and name are the
  * list's, and its issues are the campaigns sent to that list (sending_campaigns.list_id; listCampaigns with listId).
  * There is nothing else to keep in sync: deleting the list deletes the newsletter, and deleting the newsletter leaves
  * the list, its contacts and its campaigns.

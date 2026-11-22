@@ -26,6 +26,7 @@ import './hosted.css'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { connectionTitle } from './key-labels'
 import { hostedHosts, productName } from '../../../../api/src/brand'
+import { PostalAddressDialog, postalAddressLine } from '../../components/PostalAddress'
 
 // Hosted settings: a grouped rail and one section at a time. Settings are rows, the label on the left and the
 // control on the right, each 53px tall so values loading in never move anything. Old #workspace and #webhooks links still land.
@@ -93,8 +94,24 @@ function WorkspaceRows() {
   const current = session?.identity?.workspaces?.find(workspace => workspace.id === id)
   return <div className="settings-rows">
     <Row title="Name">{current ? <NameForm key={current.id} initial={current.name} canEdit={canAdminister} /> : <span className="muted">—</span>}</Row>
+    <PostalAddressRow canEdit={canAdminister} />
     <Row title="Workspace ID"><span className="cluster settings-inline"><code>{id}</code>{id && <CopyButton value={id} label="Copy workspace ID" />}</span></Row>
   </div>
+}
+// The address every campaign footer shows, on one line; owners and admins change it in a dialog (a campaign's Send asks
+// for it too when it is missing). Edit keeps its place and label whatever loads, so nothing moves.
+function PostalAddressRow({ canEdit }: { canEdit: boolean }) {
+  const settings = useApiDef(queries.workspaceSettings())
+  const [open, setOpen] = useState(false)
+  const address = settings.data?.postalAddress ?? null
+  const value = settings.isPending ? <Skeleton width={180} height={12} /> : settings.isError ? <span className="muted">Couldn’t load</span>
+    : address ? <span className="settings-address__value" title={address}>{postalAddressLine(address)}</span> : <span className="muted">Not set</span>
+  return <Row title="Postal address">
+    <span className="cluster settings-inline settings-address">{value}
+      {canEdit ? <Button disabled={settings.isPending} onClick={() => setOpen(true)} data-analytics="settings/postal-address/edit">Edit</Button> : <Lock size={12} aria-label="Owners and admins only" />}
+    </span>
+    {open && <PostalAddressDialog open onOpenChange={setOpen} initial={address} title="Postal address" submitLabel="Save" />}
+  </Row>
 }
 function NameForm({ initial, canEdit }: { initial: string; canEdit: boolean }) {
   // Members read the name as text with the rail's lock: an input that ignores typing looks broken.
