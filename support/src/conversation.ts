@@ -8,7 +8,7 @@ import { alertOnce, countToday, holdOverCap, limits, mailAllowed, ticketAllowed 
 import { external, WorkQueue, type NewWork, type Outcome, type WorkRow, type WorkState } from './work.js';
 import { attachmentLink, deleteConversationUploads, MAX_ATTACHMENTS, modelImage, safeName, storeImage, type Attachment } from './attachments.js';
 import { cleanImage, ImageRejected, IMAGE_TYPES, MAX_IMAGE_BYTES } from './image.js';
-import { customerBlock, firstName, notesBlock, type Customer, type Note } from './agent/context.js';
+import { customerBlock, firstName, notesBlock, oneLine, type Customer, type Note } from './agent/context.js';
 import type { Harness, HarnessEvent, TurnResult } from './agent/harness.js';
 import { createHarness, MODEL, promptFragments } from './agent/opencode.js';
 import { actionTitle, NOTE_MAX, ToolFailure, toolNames, type ActionProposal, type TicketInput, type ToolHost } from './agent/tools.js';
@@ -1198,7 +1198,7 @@ export class SupportConversation extends DurableObject<Env> {
         if (meta.channel !== 'chat' && !this.emailTurn?.verified) throw new ToolFailure(GENERAL_ONLY);
         const chosen = meta.workspaces.find(w => w.id === workspaceId);
         if (!chosen) throw new ToolFailure('That is not one of the customer’s verified workspaces. Use an ID from <customer>.');
-        if (meta.workspace?.id === workspaceId) return `Already on ${fenced(chosen.name)}.`;
+        if (meta.workspace?.id === workspaceId) return `Already on ${untrusted(oneLine(chosen.name))}.`;
         if (meta.channel === 'chat') throw new ToolFailure('In chat the workspace is the one the dashboard was on. Ask the customer to switch workspace in the dashboard and press Help again.');
         const turn = this.emailTurn!;
         let reply: PlatformReply<Scope>;
@@ -1208,7 +1208,7 @@ export class SupportConversation extends DurableObject<Env> {
         if (reply.status === 200) {
           if (this.reduced(meta, reply.body) || !recipientOf(reply.body, meta.email)) throw stop();
           const now = this.applyScope(reply.body);
-          return `Now reading ${fenced(now.workspace?.name ?? chosen.name)} (${chosen.id}).`;
+          return `Now reading ${untrusted(oneLine(now.workspace?.name ?? chosen.name))} (${chosen.id}).`;
         }
         if (reply.status === 404) throw new ToolFailure('That is not one of the customer’s verified workspaces. Use an ID from <customer>.');
         if (reply.status === 403) throw stop();
@@ -1838,7 +1838,7 @@ export class SupportConversation extends DurableObject<Env> {
       const a = all.find(x => x.id === id);
       if (!a) continue;
       const image = await modelImage(this.env, a);
-      if (image) images.push(image); else notes.push(`${a.name} is too large for you to view; it is kept for the team and attaches to any ticket.`);
+      if (image) images.push(image); else notes.push(`${fileName(a.name)} is too large for you to view; it is kept for the team and attaches to any ticket.`);
     }
     return { images, notes };
   }
@@ -1854,10 +1854,10 @@ export class SupportConversation extends DurableObject<Env> {
     for (const part of parts) {
       const kept = stored[part.id];
       if (kept && this.attachments().some(a => a.id === kept)) { ids.push(kept); continue; }
-      if (this.attachments().length >= MAX_ATTACHMENTS) { skipped.push(`${safeName(part.filename, 'an image')} (the conversation already has ${MAX_ATTACHMENTS} images)`); continue; }
+      if (this.attachments().length >= MAX_ATTACHMENTS) { skipped.push(`${fileName(part.filename)} (the conversation already has ${MAX_ATTACHMENTS} images)`); continue; }
       try {
         const bytes = await baneApi(this.env).part(messageId, part.id, MAX_IMAGE_BYTES);
-        if (!bytes) { skipped.push(`${safeName(part.filename, 'an image')} (too large)`); continue; }
+        if (!bytes) { skipped.push(`${fileName(part.filename)} (too large)`); continue; }
         const clean = cleanImage(bytes);
         const id = newId('att'), image = await storeImage(this.env, meta.conversationId, id, clean, 'email', safeName(part.filename, `attachment-${this.attachments().length + 1}`));
         this.sql.exec('INSERT INTO _support_attachments (id, key, type, size, width, height, source, name, message_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', image.id, image.key, image.type, image.size, image.width, image.height, image.source, image.name, messageId, Date.now());
@@ -1865,7 +1865,7 @@ export class SupportConversation extends DurableObject<Env> {
         ids.push(id);
       } catch (error) {
         logError(error, { event: 'email', code: 'EMAIL_ATTACHMENT_SKIPPED', reason: error instanceof ImageRejected ? error.code : 'FETCH_FAILED' }, 'warn');
-        skipped.push(`${safeName(part.filename, 'an image')} (not a readable PNG, JPEG or WebP)`);
+        skipped.push(`${fileName(part.filename)} (not a readable PNG, JPEG or WebP)`);
       }
     }
     const others = message.attachments.length - parts.length;
@@ -2065,6 +2065,12 @@ function codeOf(body: unknown): string | null {
 }
 /** A Nightmail refusal as the work queue retries it (work.ts failure()). */
 const platformError = (reply: PlatformReply, fallback: string) => new BaneError(reply.status, codeOf(reply.body) ?? fallback, `${productName} answered ${reply.status}`, reply.requestId, reply.retryAfter);
+/**
+ * A file's name inside the harness's own bracketed note: safeName keeps letters, digits, spaces, dots, parentheses and
+ * hyphens (no bracket, line break or control character) up to 80 characters, and the name is fenced as untrusted, so it
+ * can't close the note or pass for its words.
+ */
+const fileName = (name: string | null | undefined) => { const safe = safeName(name, ''); return safe ? untrusted(safe) : 'an image'; };
 const bodyOf = (message: Snapshot) => (message.replyText || message.text || '').slice(0, 6000);
 /** A thread key of its own for a new conversation a message is handed to (D1 conversations.thread_id is unique). */
 const freshKey = async (threadId: string, sender: string) => `${threadId}#${await addressHash(sender)}#${newId('msg').slice(4, 12)}`;

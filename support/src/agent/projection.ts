@@ -2,14 +2,25 @@
 // The model's context is, in effect, shown to the customer, so it gets only what the customer may see: no grant or
 // operator internals, third-party text fenced as untrusted, no angle bracket in any string or key, and a bounded size.
 
-/** Characters that are an angle bracket, or become one under Unicode normalization (NFKC, NFKD, NFD): ＜ ﹤ ≮ and their pairs. */
-const BRACKETS = /[<>\u226E\u226F\uFE64\uFE65\uFF1C\uFF1E]/g;
 /**
- * Outside text placed inside the harness's tags, with every angle bracket escaped (`&lt;`, `&gt;`; a look-alike as its
- * numeric reference), so no input, however it is written, can close a fence or open a tag. Never strip instead: removing a
- * marker in one pass leaves `</untr</untrusted>usted>` a marker. Escaping again changes nothing.
+ * What the fence escapes: angle brackets, the look-alikes Unicode normalization (NFKC, NFKD, NFD) turns into one (＜ ﹤ ≮
+ * and their pairs), and `&`, so that unfenced can undo it exactly.
  */
-export const fenced = (text: string) => text.replace(BRACKETS, c => c === '<' ? '&lt;' : c === '>' ? '&gt;' : `&#x${c.charCodeAt(0).toString(16).toUpperCase()};`);
+const ESCAPE = /[&<>\u226E\u226F\uFE64\uFE65\uFF1C\uFF1E]/g;
+const NAMED: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;' };
+/**
+ * Outside text placed inside the harness's tags, escaped (`&amp;`, `&lt;`, `&gt;`; a look-alike as its numeric reference),
+ * so no input, however it is written, can close a fence or open a tag. Never strip instead: removing a marker in one pass
+ * leaves `</untr</untrusted>usted>` a marker. Escape each text once: unfenced reverses exactly one escape.
+ */
+export const fenced = (text: string) => text.replace(ESCAPE, c => NAMED[c] ?? `&#x${c.charCodeAt(0).toString(16).toUpperCase()};`);
+const ESCAPED = /&(?:amp|lt|gt|#x(?:226E|226F|FE64|FE65|FF1C|FF1E));/g;
+/**
+ * What the agent writes, as it leaves it (an answer, a reply, a ticket, a note, any tool argument): fenced's escapes undone
+ * once and nothing more, so quoted outside text reads as it was written. `unfenced(fenced(s))` is `s` for every string:
+ * `&amp;lt;` becomes `&lt;`, and any other entity stays as written.
+ */
+export const unfenced = (text: string) => text.replace(ESCAPED, e => e === '&amp;' ? '&' : e === '&lt;' ? '<' : e === '&gt;' ? '>' : String.fromCharCode(parseInt(e.slice(3, -1), 16)));
 /** Outside text as the model reads it: fenced, inside <untrusted> (naming where it came from, when the harness knows). */
 export const untrusted = (text: string, source?: 'chat' | 'email') => `<untrusted${source ? ` source="${source}"` : ''}>${fenced(text)}</untrusted>`;
 

@@ -10,7 +10,9 @@ export type Customer = {
   verified: 'handoff' | 'dmarc' | 'signin' | 'magic_link' | null; contentAccess: boolean; page: string | null;
 };
 
-const esc = (s: unknown) => fenced(String(s ?? '').slice(0, 200));
+/** A name (a person's, a workspace's) on one line: line breaks, other white space and control characters become one space. */
+export const oneLine = (s: string) => s.replace(/[\s\p{Cc}]+/gu, ' ').trim();
+const esc = (s: unknown) => fenced(oneLine(String(s ?? '')).slice(0, 200));
 export const firstName = (name: string | null | undefined) => (name ?? '').trim().split(/\s+/)[0]?.slice(0, 40) || null;
 
 export function customerBlock(c: Customer) {
@@ -47,7 +49,8 @@ export function notesBlock(notes: readonly Note[], workspaces: readonly { id: st
   let size = 0;
   for (const note of [...notes].reverse().slice(0, NOTES_SHOWN)) {
     const workspace = note.workspaceId ? workspaces.find(w => w.id === note.workspaceId)?.name ?? note.workspaceId : null;
-    const row = { date: String(note.createdAt).slice(0, 10), workspace: workspace ? esc(workspace) : 'none', ...(note.author === 'staff' ? { by: 'the team' } : {}), text: noteText(String(note.text ?? ''), hidden) };
+    // Stored as written; the projection escapes it, once, on its way to the agent.
+    const row = { date: String(note.createdAt).slice(0, 10), workspace: workspace ? oneLine(workspace).slice(0, 200) : 'none', ...(note.author === 'staff' ? { by: 'the team' } : {}), text: noteText(String(note.text ?? ''), hidden) };
     size += JSON.stringify(row).length + 1;
     if (size > NOTES_CHARS) break;
     rows.unshift(row);
