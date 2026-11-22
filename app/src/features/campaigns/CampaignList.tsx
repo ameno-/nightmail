@@ -14,8 +14,11 @@ import { campaignDisplayStatus, campaignPollInterval } from './CampaignProgress'
 import { CampaignsHeader } from './header'
 import './campaigns.css'
 
-// Simulated sends count as delivered here (the review page lists them apart). Demo campaigns carry only `delivered`.
-const delivered = (campaign: Campaign) => campaign.counts ? (campaign.counts.byStatus.delivered ?? 0) + (campaign.counts.byStatus.simulated ?? 0) : campaign.delivered
+// Simulated sends count as delivered here (the review page lists them apart). Past the email history the stored totals
+// count instead; null when neither is known. Demo campaigns carry only `delivered`.
+const delivered = (campaign: Campaign): number | null => (campaign.counts?.total ?? 0) > 0 ? (campaign.counts!.byStatus.delivered ?? 0) + (campaign.counts!.byStatus.simulated ?? 0)
+  : campaign.stats ? campaign.stats.delivered : campaign.counts ? null : campaign.delivered
+const deliveredShare = (campaign: Campaign) => { const count = ['sent', 'done'].includes(campaign.status) && campaign.recipients > 0 ? delivered(campaign) : null; return count === null ? null : count / campaign.recipients }
 const campaignPath = (campaign: Campaign) => `/campaigns/${encodeURIComponent(campaign.id)}/${!campaign.archivedAt && campaignEditable(campaign) ? 'edit' : 'review'}`
 
 export function CampaignsPage() {
@@ -62,7 +65,7 @@ export function CampaignsPage() {
         { ...campaignColumns[1], render: row => <StatusBadge status={campaignDisplayStatus(row)} /> },
         { ...campaignColumns[2], render: row => row.subject.trim() || <span className="muted">No subject</span> },
         { ...campaignColumns[3], render: row => number(row.recipients), cardRender: row => `${number(row.recipients)} ${row.recipients === 1 ? 'recipient' : 'recipients'}` },
-        { ...campaignColumns[4], render: row => ['sent', 'done'].includes(row.status) && row.recipients > 0 ? percent(delivered(row) / row.recipients) : '—', cardRender: row => ['sent', 'done'].includes(row.status) && row.recipients > 0 ? `${percent(delivered(row) / row.recipients, 0)} delivered` : 'Not sent' },
+        { ...campaignColumns[4], render: row => { const count = deliveredShare(row); return count === null ? '—' : percent(count) }, cardRender: row => { const count = deliveredShare(row); return count === null ? 'Not sent' : `${percent(count, 0)} delivered` } },
         { ...campaignColumns[5], render: row => { const at = row.scheduledAt || row.updatedAt; return <span className="muted campaign-activity" title={`${date(at)} · ${time(at)} UTC`}>{shortDateTime(at)}</span> }, cardRender: row => (row.scheduledAt ? 'Sends ' : '') + date(row.scheduledAt || row.updatedAt, { month: 'short', day: 'numeric', timeZone: 'UTC' }) },
         { ...campaignColumns[6], render: row => <CampaignArchiveButton campaign={row} compact onSuccess={() => filter('page', '')} /> },
       ]} />
