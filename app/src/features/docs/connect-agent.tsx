@@ -58,7 +58,8 @@ export function McpSignInSetup({ label = 'Agent', urlLine = true, client: shared
           <pre className="developer-code connect-agent__command" tabIndex={0} aria-label={`${mcpSignInNames[value]} command`}><code>{setup.command}</code></pre>
           <CopyAction value={setup.command} label={`Copy ${mcpSignInNames[value]} command`} variant="ghost" size="sm" compact className="developer-copy-icon developer-snippet__copy" />
         </div>}
-        <ol className="developer-steps">{setup.steps.map(step => <li key={step}>{step}</li>)}</ol>
+        {/* The command box already says to run it; Codex's longer first step says more, so it stays. */}
+        <ol className="developer-steps">{setup.steps.filter(step => step !== 'Run it in a terminal.').map(step => <li key={step}>{step}</li>)}</ol>
       </div>
     })}</div>
   </div>
@@ -97,8 +98,8 @@ const seen = (agent: Agent) => `${agent.createdAt}|${agent.lastUsedAt ?? ''}`
 const everything = ['read', 'send', 'manage']
 
 /**
- * Your agents signed in as you, polled while the dialog is open: one that connects (or calls) meanwhile takes the
- * waiting row's place with Connected. Each names the workspace its calls use when they name none, and what it can do
+ * Your agents signed in as you, polled while the dialog is open: the waiting row shows until you have one, and one that
+ * connects (or calls) meanwhile is marked Connected. Each names the workspace its calls use when they name none, and what it can do
  * in this one: what its sign-in approved, within your role here (members read and send). Rows are the tables' 53px,
  * and the dialog's height is fixed, so the list loading or growing moves nothing.
  */
@@ -114,10 +115,9 @@ function ConnectedAgents({ onLeave }: { onLeave: () => void }) {
   const allowed = multiTenant && role === 'member' ? ['read', 'send'] : everything
   const workspaces = identity?.workspaces ?? []
   const where = (agent: Agent) => workspaces.find(workspace => workspace.id === agent.workspaceId)?.name ?? (workspaces.length === 1 ? workspaces[0].name : workspaces.length ? 'Last used workspace' : 'This workspace')
-  return <section className="stack connect-agent__connected" aria-labelledby="connect-agent-connected">
-    <h3 id="connect-agent-connected" className="connect-agent__heading">Connected agents</h3>
+  return <section className="stack connect-agent__connected" aria-label="Connected agents">
     <ul className="connect-agent__agents" aria-live="polite">
-      {!rows.some(fresh) && <li className="connect-agent__agent connect-agent__waiting"><span className="connect-agent__pulse" aria-hidden="true" /><span className="muted">Waiting for your agent to sign in</span></li>}
+      {!rows.length && <li className="connect-agent__agent connect-agent__waiting"><span className="connect-agent__pulse" aria-hidden="true" /><span className="muted">Waiting for your agent to sign in</span></li>}
       {rows.map(agent => <li key={agent.id} className="connect-agent__agent" data-fresh={fresh(agent) || undefined}>
         <span className="connect-agent__who">
           <Link to={`/settings/mcp/${encodeURIComponent(agent.id)}`} onClick={onLeave}>{connectionTitle(agent)}</Link>

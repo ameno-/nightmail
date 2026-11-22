@@ -182,7 +182,6 @@ export const guides: Guide[] = [
           [<strong key="k">With an API key</strong>, 'Exactly what the key can do, in this workspace only. No browser sign-in: the key goes in the config’s Authorization header. An agent token works the same way.', <Link key="l" to="/api-keys?create=read_send">Create key</Link>],
           [<strong key="b">One agent inbox</strong>, 'Only that inbox, with an API key for it: read its mail and, if allowed, reply. Nothing else in the workspace.', <Link key="c" to="/api-keys?connect=1">Connect an agent</Link>],
         ]} />
-        <p>Each is listed in <Link to="/api-keys">API keys</Link>: an agent signed in as you as an <strong>agent token</strong>, with the short-lived tokens it made, and a key as an <strong>API key</strong>. Revoke any of them there, or an inbox’s key from its page.</p>
       </Section>
       <McpSetup />
     </>,
