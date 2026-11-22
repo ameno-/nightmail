@@ -175,7 +175,7 @@ export function InboundAddressDetailPage() {
   const focusSettings = (target: () => HTMLElement | null) => { show('settings'); requestAnimationFrame(() => requestAnimationFrame(() => focus(target))) }
   const expired = !!current?.expiresAt && Date.parse(current.expiresAt) <= Date.now()
   return <div className="stack inbound-stack addr-root" data-tab={tab}>
-    <PageHeader title={current ? <PrivateAddress value={current.address} /> : <SkeletonText width={240} lineHeight={28} />} backTo="/receiving" />
+    <PageHeader title={current ? <PrivateAddress value={current.address} /> : <SkeletonText width={240} lineHeight={28} />} backTo={tab === 'mail' && params.get('thread') ? `/receiving/addresses/${id}` : '/receiving'} />
     {canAdminister && <Tabs label="Address" value={tab} onValueChange={value => show(value as AddressTab)}
       items={[{ value: 'mail', label: 'Mail' }, { value: 'flow', label: 'Where mail goes' }, { value: 'settings', label: 'Settings' }]} />}
     {expired && <Alert tone="info">This temporary address expired. It can’t receive or send, but its mail stays readable.</Alert>}

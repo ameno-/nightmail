@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type RefObject } from 'react'
 import { Navigate, useLocation, useNavigate, useSearchParams } from 'react-router'
-import { Archive, ArrowLeft, Inbox, Mail, MailOpen, Paperclip, Reply, Search, Star, Trash2, Undo2, X } from 'lucide-react'
+import { Archive, Inbox, Mail, MailOpen, Paperclip, Reply, Search, Star, Trash2, Undo2, X } from 'lucide-react'
 import { Alert, Button, Checkbox, ConfirmDialog, Dialog, EmptyState, ErrorState, Field, IconButton, Input, Pagination, Select, SkeletonText, StatusBadge, Textarea, useToast, fieldError, MutationError, ErrorText } from '../../components/ui'
 import { ReceivedEmailPreview } from '../../components/EmailPreview'
 import { useApi, useApiDef, useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
@@ -144,7 +144,7 @@ function MessageCard({ message, addressId, parent, expanded, onToggle, onReply, 
   </li>
 }
 
-function Conversation({ thread, addressId, addresses, focusMessage, onBack, onAddress }: { thread: InboundThreadDetail; addressId?: string; addresses: Addresses; focusMessage: string | null; onBack: () => void; onAddress: (id: string) => void }) {
+function Conversation({ thread, addressId, addresses, focusMessage, onAddress }: { thread: InboundThreadDetail; addressId?: string; addresses: Addresses; focusMessage: string | null; onAddress: (id: string) => void }) {
   const api = useApi()
   const own = useMemo(() => ownAddresses(addresses), [addresses])
   // Older pages hang off the first page's oldest message; if a refetch moves that boundary, the cursors are stale.
@@ -195,7 +195,6 @@ function Conversation({ thread, addressId, addresses, focusMessage, onBack, onAd
   const replyTarget = messages.find(message => message.id === target) ?? messages.at(-1)!
   return <section className="mailbox-conversation" aria-label="Conversation">
     <header className="mailbox-conversation__header">
-      <IconButton variant="ghost" className="mailbox-back" label="Back to conversations" onClick={onBack}><ArrowLeft size={16} /></IconButton>
       <div className="mailbox-conversation__title">
         <h2>{thread.subject || '(no subject)'}</h2>
         {(!addressId || (flags && flags.labels.length > 0)) && <span className="mailbox-labels">
@@ -378,7 +377,7 @@ export function AddressMail({ addressId, hidden = false }: { addressId: string; 
           : thread.error ? <ErrorState error={thread.error} onRetry={() => void thread.refetch()} />
           // Its names wait for the addresses too: a conversation drawn before them rewrites "you" and its senders in place.
           : thread.isPending || !thread.data || addressList.isPending ? <div className="mailbox-thread-skeleton"><SkeletonText width="50%" lineHeight={24} /><SkeletonText width="80%" /><SkeletonText width="70%" /></div>
-          : <Conversation thread={thread.data} addressId={addressId} addresses={addresses} focusMessage={params.get('message')} onBack={() => change({ thread: null, message: null })} onAddress={() => undefined} />}
+          : <Conversation thread={thread.data} addressId={addressId} addresses={addresses} focusMessage={params.get('message')} onAddress={() => undefined} />}
       </div>
     </div>
     {/* A message sent from another of the workspace's addresses lives on that address's page. */}

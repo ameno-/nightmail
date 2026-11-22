@@ -221,7 +221,8 @@ html[data-privacy='on'] .trace-to.private-field:not(:hover, :focus)::placeholder
 .rcv-cell > .settings-cell-stack { min-width: 0; max-width: 100%; }
 :is(.rcv-match, .routing-choices .private-address, .addr-page dd .private-address, .inbound-stack .ui-page-header h1 .private-address) > .private-address__value { flex: 0 1 auto; min-width: 0; overflow: hidden; }
 .rcv-match[data-revealed] > .private-address__value { text-overflow: ellipsis; white-space: nowrap; }
-:is(.addr-page dd, .inbound-stack .ui-page-header h1) .private-address[data-revealed] > .private-address__value { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
+.addr-page dd .private-address[data-revealed] > .private-address__value { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
+.inbound-stack .ui-page-header h1 .private-address[data-revealed] > .private-address__value { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .routing-choices .settings-cell-stack { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .routing-choices .settings-cell-stack > * { min-width: 0; max-width: 100%; }
 .routing-choices .ui-check-field { min-width: 0; max-width: 100%; }
