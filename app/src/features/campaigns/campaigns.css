@@ -267,6 +267,8 @@ button.review-stage__head { cursor: pointer; }
 .review-warn { color: var(--color-warning); }
 .review-detail { margin: 0; color: var(--color-muted); font-size: var(--text-sm); }
 .review-detail a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+/* A finger gets a 44 px tall target without moving the line. */
+@media (pointer: coarse) { .review-detail a { position: relative; } .review-detail a::after { content: ''; position: absolute; inset: -14px -8px; } }
 .review-actions { display: flex; gap: var(--space-8); }
 .review-fixes { display: flex; flex-direction: column; gap: var(--space-8); max-width: 720px; margin: 0; padding-left: 1.2em; }
 .review-stage .ui-tabs { align-self: flex-start; }
