@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import { keepPreviousData, useInfiniteQuery } from '@tanstack/react-query'
-import { Button, CopyButton, DataTable, Dialog, EmptyState, ErrorState, SectionHeader, Select, StatusBadge } from '../../components/ui'
+import { Button, CopyButton, DataTable, Dialog, EmptyState, ErrorState, Select, StatusBadge } from '../../components/ui'
 import { actionLabel, activityApi, activityAreas, type AuditEntry } from '../../data/activity'
 import { ago, shortDateTime } from '../../lib/format'
 import { PrivateAddress } from '../../components/PrivateAddress'
@@ -91,7 +91,7 @@ export function ActivitySection() {
   const rows = activity.data?.pages.flatMap(page => page.data) ?? []
   const [when, who, action, target, from] = settingsColumns.activity
   return <section className="section stack activity">
-    <SectionHeader title="Activity" actions={<Select className="activity-filter" aria-label="Show activity for" value={area} onValueChange={setArea} options={[{ value: '', label: 'All activity' }, ...activityAreas]} />} />
+    <div className="settings-actions"><Select className="activity-filter" aria-label="Show activity for" value={area} onValueChange={setArea} options={[{ value: '', label: 'All activity' }, ...activityAreas]} /></div>
     {activity.error && !activity.data ? <ErrorState error={activity.error} onRetry={() => void activity.refetch()} /> : <DataTable className="activity-table" loading={activity.isPending} skeletonRows={8} minRows={3} rows={rows} rowKey={entry => entry.id} onRowClick={setOpen}
       empty={<EmptyState title={area ? 'No matching activity' : 'No activity yet'} />} columns={[
         { ...when, render: entry => <When at={entry.at} /> },

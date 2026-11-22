@@ -1,7 +1,7 @@
 import type { CSSProperties, ReactNode } from 'react'
 import { Link } from 'react-router'
 import { ArrowUpRight, Check, ChevronDown } from 'lucide-react'
-import { ErrorState, SectionHeader, Skeleton, StatusBadge } from '../../components/ui'
+import { ErrorState, Skeleton, StatusBadge } from '../../components/ui'
 import { useApiDef, useSession, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { monthEstimate } from '../../data/usage'
@@ -24,7 +24,7 @@ export function PlanUsage({ row: Row }: { row: (props: { title: ReactNode; child
   const month = useApiDef(queries.billingMonth(), { enabled: canAdminister })
   const usage = query.data, b = billing.data
   const free = useSession()?.identity?.billing?.free === true
-  if (query.isError && !usage) return <><SectionHeader title="Plan & usage" /><ErrorState error={query.error} onRetry={() => void query.refetch()} /></>
+  if (query.isError && !usage) return <ErrorState error={query.error} onRetry={() => void query.refetch()} />
   const value = (ready: unknown, render: () => ReactNode, width = 120) => ready ? render() : <Skeleton width={width} height={20} />
   const enforced = b?.enforcement === 'enforce', state = b ? balanceState(b) : null
   // The omen meter counts AI decisions; it keeps its name from before the rename in the API.
@@ -39,7 +39,6 @@ export function PlanUsage({ row: Row }: { row: (props: { title: ReactNode; child
   const custom = daily?.cap != null && daily.step === null
   const pricing = usage?.pricing
   return <>
-    <SectionHeader title="Plan & usage" />
     <div className="settings-rows usage-rows">
       {/* The limit and where it is now first; the steps it grows through open from it. */}
       <details className="usage-limit">

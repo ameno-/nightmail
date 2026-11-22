@@ -2,7 +2,7 @@ import { useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } fro
 import { Link, useLocation } from 'react-router'
 import { useQueryClient } from '@tanstack/react-query'
 import { ArrowUpRight, ChevronRight, Lock } from 'lucide-react'
-import { Button, ConfirmDialog, CopyButton, ErrorState, Input, SectionHeader, Select, Skeleton, StatusBadge, MutationError } from '../../components/ui'
+import { Button, ConfirmDialog, CopyButton, ErrorState, Input, Select, Skeleton, StatusBadge, MutationError } from '../../components/ui'
 import { useApiDef, useApiMutation, useSession, useWorkspaceAccess } from '../../data/context'
 import { connectionApi, connectionKindLabel, useConnectionCache } from '../../data/connections'
 import { queries } from '../../data/queries'
@@ -67,14 +67,14 @@ export function HostedSettings() {
     <div key={section} className="hosted-settings__content" data-width={locked(current) ? undefined : current.width}>
       {locked(current) ? <AdminOnly title={current.label} />
         : <>
-          {section === 'general' && <><SectionHeader title="General" /><WorkspaceRows /></>}
+          {section === 'general' && <WorkspaceRows />}
           {section === 'members' && <Team />}
-          {section === 'sending' && <><SectionHeader title="Sending" /><SendingRows /></>}
+          {section === 'sending' && <SendingRows />}
           {section === 'webhooks' && <WebhooksSection />}
           {section === 'activity' && <ActivitySection />}
           {section === 'usage' && <PlanUsage row={Row} />}
           {section === 'billing' && <BillingSection row={Row} />}
-          {section === 'account' && <><SectionHeader title="Account" /><AccountRows /></>}
+          {section === 'account' && <AccountRows />}
         </>}
     </div>
   </div>

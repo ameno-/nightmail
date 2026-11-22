@@ -132,7 +132,7 @@ export function SesSendingSkeleton({ regionId }: { regionId: string }) {
 // Members and invitations as they will be, so the section holds its place while the two lists load.
 export function TeamSkeleton() {
   return <LoadingRegion label="Loading members" className="settings-loading-body">
-    <section className="section stack settings-rule"><SectionHeader title="Members" actions={<ControlSkeleton width={134} />} /><TableSkeleton className="settings-people" columns={settingsColumns.members} rows={3} /></section>
+    <section className="section stack settings-rule"><div className="settings-actions"><ControlSkeleton width={134} /></div><TableSkeleton className="settings-people" columns={settingsColumns.members} rows={3} /></section>
     <section className="section stack settings-rule"><SectionHeader title="Invitations" /><TableSkeleton className="settings-people" columns={settingsColumns.invitations} rows={2} /></section>
   </LoadingRegion>
 }

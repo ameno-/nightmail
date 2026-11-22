@@ -40,10 +40,10 @@ export function BillingSection({ row: Row }: { row: (props: RowProps) => ReactNo
   const [about, setAbout] = useState(false)
   const b = query.data
   useCheckoutReturn()
-  if (query.isError && !b) return <><SectionHeader title="Billing" /><ErrorState error={query.error} onRetry={() => void query.refetch()} /></>
+  if (query.isError && !b) return <ErrorState error={query.error} onRetry={() => void query.refetch()} />
   if (state?.free) return <FreePlan summary={b} Row={Row} />
   return <>
-    <SectionHeader title="Billing" actions={<Button variant="primary" disabled={!b?.balance} onClick={() => setAdding(true)}>Add credit</Button>} />
+    <div className="settings-actions"><Button variant="primary" disabled={!b?.balance} onClick={() => setAdding(true)}>Add credit</Button></div>
     {state && <BillingAlerts state={state} summary={b} />}
     <div className="settings-rows billing-rows">
       <div className="billing-balance">
@@ -82,7 +82,6 @@ function BalanceDetails({ open, onOpenChange, balance, enforced }: { open: boole
 // would cost, since it is still measured. The history keeps its $0 usage rows.
 function FreePlan({ summary: b, Row }: { summary: BillingSummary | undefined; Row: (props: RowProps) => ReactNode }) {
   return <>
-    <SectionHeader title="Billing" />
     <div className="settings-rows billing-rows">
       <div className="billing-balance">
         <span className="billing-balance__label">Plan</span>

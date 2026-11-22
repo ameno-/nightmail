@@ -51,7 +51,7 @@ export function Members({ owner, onInvite }: { owner: boolean; onInvite: () => v
   const manageable = (member: WorkspaceMember) => member.userId !== session?.identity?.id && (owner || member.role !== 'owner')
   const lastOwner = (member: WorkspaceMember) => member.role === 'owner' && owners <= 1
   return <section className="section stack settings-rule">
-    <SectionHeader title="Members" actions={<Button onClick={onInvite} data-analytics="members/invite">Invite teammate</Button>} />
+    <div className="settings-actions"><Button onClick={onInvite} data-analytics="members/invite">Invite teammate</Button></div>
     <MutationError error={update.error} />
     {members.error ? <ErrorState error={members.error} onRetry={() => void members.refetch()} /> : <DataTable className="settings-people" loading={members.isPending} skeletonRows={3} minRows={3} rows={members.data ?? []} rowKey={member => member.id} empty={<EmptyState title="No members" />} columns={[
       { ...nameColumn, render: member => <span className="settings-cell settings-cell--two" title={`${member.name || '—'}${member.userId === session?.identity?.id ? ' · You' : ''}`}>{member.name || '—'}{member.userId === session?.identity?.id && <span className="muted"> · You</span>}</span>, cardRender: member => member.name || '—' },
