@@ -31917,35 +31917,63 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual([f.alerts.length, (await cards()).length], [4, 1]);
     });
   });
-  test('MX operator alerts: sign-in mail is slow when 1 in 20 of the last 15 minutes\' transactional mail waited over 10 seconds for its first attempt, and only when the 15 minutes before were not', async t => {
+  test('MX operator alerts: sign-in mail is slow when 1 in 20 of at least 40 transactional emails free to go in the last 15 minutes waited over 10 seconds, and only when the 15 minutes before were not; mail waiting for its own workspace\'s pace never counts', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
       const { checkSignInMail } = await import('./src/operator-alerts.js');
       const f = await hostedHoldFixture(runtime, db);
       runtime.config.operatorSlackWebhookUrl = OPERATOR_HOOK;
-      // n emails created minutes ago, first attempted after wait seconds (null: still queued).
-      const mail = (n: number, minutes: number, wait: number | null, kind = 'transactional') => db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,created_at,attempt_started_at)
+      const workspace = async () => {
+        const id = unique('paced');
+        await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)', [id]);
+        await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [id, REGION, f.pool]);
+        return id;
+      };
+      // n emails of a workspace created minutes ago, first attempted after wait seconds (null: still queued).
+      const mail = (wid: string, n: number, minutes: number, wait: number | null, kind = 'transactional') => db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,created_at,attempt_started_at)
         SELECT $1||g,$2,$3,'fixture',$4,'["reader@example.net"]','[]','[]','Your sign-in code',jsonb_build_object('kind',$5::text),false,CASE WHEN $7::float8 IS NULL THEN 'queued' ELSE 'accepted' END,
           now()-make_interval(mins=>$6),now()-make_interval(mins=>$6)+make_interval(secs=>$7::float8) FROM generate_series(1,$8::int) g RETURNING id`,
-        [unique('signin-'), f.wid, REGION, f.from, kind, minutes, wait, n]).then(r => r.rows.map(row => row.id as string));
+        [unique('signin-'), wid, REGION, f.from, kind, minutes, wait, n]).then(r => r.rows.map(row => row.id as string));
       const cards = async () => (await db.query(`SELECT payload FROM jobs WHERE type='operator.alert'`)).rows.map(r => r.payload);
-      // Marketing mail waits on purpose and never counts; under 20 transactional emails is too few to say.
-      await mail(40, 5, 60, 'marketing'); await mail(10, 5, 30);
+      // One email out of exactly 20 (still queued after 5 minutes) can't raise it; two out of 39 can't either: too few.
+      await mail(f.wid, 19, 5, 1); await mail(f.wid, 1, 5, null);
       assert.equal(await checkSignInMail(runtime), false);
-      // 1 in 20 of the last 15 minutes waited (one still queued after 5 minutes), and so did 1 in 20 of the 15 before: slow
-      // all along, nothing new to say.
-      await db.query('DELETE FROM sending_emails WHERE workspace_id=$1 AND snapshot->>$2=$3', [f.wid, 'kind', 'transactional']);
-      await mail(19, 5, 1); await mail(1, 5, null);
-      await mail(19, 20, 1); const [earlier] = await mail(1, 20, 30);
+      await mail(f.wid, 18, 5, 1); await mail(f.wid, 1, 5, 30);
+      assert.equal(await checkSignInMail(runtime), false);
+      // A new customer sends 100 at once at its pace of 50 a minute: the second 50 wait a minute for their own pace.
+      // Another, growing, has used its rolling hour's growth allowance: its mail waits for that. Neither is free to go,
+      // so neither counts (counted, they would be 61 slow of 149). Their marketing never counts either.
+      const burst = await workspace();
+      await mail(burst, 50, 3, 1); await mail(burst, 50, 3, 61); await mail(burst, 20, 3, 120, 'marketing');
+      const growing = await workspace();
+      await gradedSender(db, growing, 10_000);
+      await db.query(`UPDATE sender_standing SET growth_until=now()+interval '1 hour',growth_cap=10 WHERE workspace_id=$1`, [growing]);
+      await db.query(`INSERT INTO hosted_growth_minutes(growth_key,minute,used) VALUES($1,date_trunc('minute',now())-interval '6 minutes',10)`, [growing]);
+      await mail(growing, 10, 4, 30);
+      assert.equal(await checkSignInMail(runtime), false);
+      // Now 2 of 40 free to go waited, 1 in 20, but so did 2 of 40 in the 15 minutes before: slow all along, nothing new.
+      await mail(f.wid, 1, 5, 1);
+      await mail(f.wid, 38, 20, 1); const earlier = await mail(f.wid, 2, 20, 30);
       assert.equal(await checkSignInMail(runtime), false);
       // The 15 minutes before were quick: it became slow now.
-      await db.query(`UPDATE sending_emails SET attempt_started_at=created_at+interval '1 second' WHERE id=$1`, [earlier]);
+      await db.query(`UPDATE sending_emails SET attempt_started_at=created_at+interval '1 second' WHERE id=ANY($1)`, [earlier]);
       assert.equal(await checkSignInMail(runtime), true);
-      assert.deepEqual(await cards(), [{ kind: 'signin_slow', slow: 1, mail: 20 }]);
+      assert.deepEqual(await cards(), [{ kind: 'signin_slow', slow: 2, mail: 40 }]);
       // The next run finds the same: one card a day.
       assert.equal(await checkSignInMail(runtime), false);
       const posted = await postOperatorAlerts(t, runtime, db);
       assert.deepEqual(posted.map(card => [cardLine(card), card.text, card.blocks[0].accessory.url]), [[':snail: *Sign-in mail slow* 1 in 20 over 10 seconds.', 'Sign-in mail slow: 1 in 20 over 10 seconds.', `${PUBLIC_ORIGIN}/operator`]]);
     });
+  });
+  test('MX operator alerts: a long workspace name is cut at 80 whole characters, never inside an emoji', async () => {
+    const { cardName } = await import('./src/operator-alerts.js');
+    const family = '👩‍👩‍👧', flag = '🇮🇸';
+    assert.equal(cardName('a'.repeat(79) + family + ' more'), 'a'.repeat(79) + family, 'The 80th character is the whole family.');
+    assert.equal(cardName('a'.repeat(80) + flag), 'a'.repeat(80), 'An emoji past the 80th is left out whole.');
+    for (const name of ['🦊'.repeat(100), 'b' + '🏳️‍🌈'.repeat(90), 'é'.repeat(90)]) {
+      const cut = cardName(name);
+      assert.doesNotMatch(cut, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/, 'No half character.');
+      assert.equal(Array.from(new Intl.Segmenter('en', { granularity: 'grapheme' }).segment(cut)).length, 80);
+    }
   });
 
   test('SDK responses preserve acceptance, rejection, throttling and timeout semantics without network', async t => {
