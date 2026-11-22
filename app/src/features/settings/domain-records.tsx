@@ -186,7 +186,7 @@ const hoursLeft = (at: string) => Math.max(0, Math.ceil((Date.parse(at) - Date.n
 export function DnsWaitNote({ domain }: { domain: Domain }) {
   if (domain.status === 'verified' || (domain.sending ?? 'pending') === 'verified') return null
   return <div className="dns-wait">
-    {domain.releasesAt && <p>If the sending records aren’t found within 72 hours, {domain.name} is released and you’d add it again ({hoursLeft(domain.releasesAt)} h left).</p>}
+    {domain.releasesAt && <p>Add these records at your DNS provider within {hoursLeft(domain.releasesAt)} h.</p>}
     <p className="dns-guides">Guides: {guides.map(([name, url], index) => <span key={name}>{index > 0 && <span className="dns-guides-dot" aria-hidden="true"> · </span>}<a href={url} target="_blank" rel="noreferrer">{name}</a></span>)}</p>
   </div>
 }
