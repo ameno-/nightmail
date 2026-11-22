@@ -1,6 +1,6 @@
 import { sql, type SQL } from 'drizzle-orm';
-import { ApiError, id, isSimulatedSes, log, type DbExecutor, type JobHandler, type Runtime } from './core.js';
-import { retryDatabaseFailures } from './jobs.js';
+import { ApiError, id, isSimulatedSes, log, ModuleLoadError, type DbExecutor, type JobHandler, type Runtime } from './core.js';
+import { JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
 import { RATES } from './billing/money.js';
 import { customerNotice, type Notice, type NoticeInput } from './notices.js';
 
@@ -32,6 +32,30 @@ export async function deliverNotice(runtime: Runtime, to: string[], notice: Noti
     log('info', { code: 'NOTICE_ALREADY_SENT', origin: keyOf(origin) });
   }
   return 'sent';
+}
+
+// A notice row is leased while its job sends it. A send that fails must not end there: the job's next attempt would find
+// the row leased, and a job that returned would be done with the email unsent. So a job that finds its row leased waits
+// for the lease to end (heldNotice), and a send that throws gives the lease back at once (noticeFailed), so the runner's
+// retries send it. Every attempt sends under the row's key, so however many run, one email goes out.
+type NoticeTable = 'account_notices' | 'billing_notices';
+/**
+ * For a job whose lease found nothing to take: if a run still holds the row (it crashed, or could not give the lease
+ * back), come back when its lease ends, without spending an attempt. Otherwise the notice is settled and the job is done.
+ */
+export async function heldNotice(db: DbExecutor, table: NoticeTable, noticeId: string) {
+  const { rows: [held] } = await db.execute<{ seconds: number }>(sql`SELECT extract(epoch FROM lease_until-now())::float AS seconds FROM ${sql.identifier(table)} WHERE id=${noticeId} AND status='sending' AND lease_until>now()`);
+  if (held) throw new JobDeferred(new Date(Date.now() + Math.ceil(held.seconds * 1000) + 1000).toISOString(), undefined, true);
+}
+/**
+ * A send that threw. While the runner will try again the row goes back to pending; on the last attempt (the error is not
+ * retryable, or the attempts are used) it is settled failed and logged as an error, so an email nobody got is visible.
+ */
+export async function noticeFailed(runtime: Runtime, table: NoticeTable, noticeId: string, job: { attempts: number; workspaceId: string }, error: unknown, kind: string) {
+  const retryable = !(error instanceof ApiError) || error.retryable;
+  const last = !(error instanceof ModuleLoadError) && (!retryable || job.attempts >= MAX_ATTEMPTS);
+  await runtime.db.execute(sql`UPDATE ${sql.identifier(table)} SET status=${last ? 'failed' : 'pending'},lease_until=NULL WHERE id=${noticeId} AND status='sending'`).catch(() => {});
+  if (last) log('error', { code: 'NOTICE_SEND_FAILED', workspaceId: job.workspaceId, notice: table === 'billing_notices' ? 'billing' : 'account', kind, noticeId, attempts: job.attempts, error: error instanceof ApiError ? error.code : 'JOB_INTERNAL_ERROR' });
 }
 
 /** A workspace's owners and admins with a verified address, at most 20: who an account email goes to. */
@@ -87,8 +111,12 @@ export async function limitReached(runtime: Runtime, workspaceId: string) {
 export const evaluationFinished = (db: DbExecutor, workspaceId: string, limited: boolean) =>
   queueNotice(db, { workspaceId, kind: 'evaluation_finished', dedupe: `evaluation:${workspaceId}`, data: { limited } });
 
-/** Invitation emails a workspace may cause in a UTC day, and one address may get from every workspace together. */
-export const INVITATION_EMAILS = { workspaceDay: 20, addressDay: 5 } as const;
+/**
+ * Invitation emails a workspace may cause in a UTC day, one address may get from every workspace together in a day, and
+ * one workspace may send one address in all (pair): revoking and inviting again mails nobody a fourth time. Only that
+ * address accepting an invitation starts the count again.
+ */
+export const INVITATION_EMAILS = { workspaceDay: 20, addressDay: 5, pair: 3 } as const;
 const budget = (db: DbExecutor, workspace: string, key: string, limit: number) => db.execute(sql`INSERT INTO api_request_budgets AS b(workspace_id,key_id,window_start,used) VALUES(${workspace},${key},date_trunc('day',now()),1)
   ON CONFLICT(workspace_id,key_id) DO UPDATE SET used=CASE WHEN b.window_start=excluded.window_start THEN b.used+1 ELSE 1 END,window_start=excluded.window_start
   WHERE b.window_start<>excluded.window_start OR b.used<${limit} RETURNING 1`).then(r => r.rows.length > 0);
@@ -101,7 +129,10 @@ export async function inviteByEmail(runtime: Runtime, tx: DbExecutor, invitation
   try {
     await tx.execute(sql`SAVEPOINT invitation_email`);
     const queued = await budget(tx, invitation.workspaceId, 'invitation-email', INVITATION_EMAILS.workspaceDay) && await budget(tx, 'global', `invitation-email:${addressHash}`, INVITATION_EMAILS.addressDay)
-      && (await tx.execute(noticeInsert({ workspaceId: invitation.workspaceId, kind: 'invitation', dedupe: `invitation:${invitation.id}`, data: { invitationId: invitation.id } }))).rows.length > 0;
+      && (await tx.execute(noticeInsert({ workspaceId: invitation.workspaceId, kind: 'invitation', dedupe: `invitation:${invitation.id}`, data: { invitationId: invitation.id, address: addressHash },
+        // The address is kept as its hash; a notice that was never sent (revoked first, or failed) does not count.
+        when: sql`(SELECT count(*) FROM account_notices p WHERE p.workspace_id=${invitation.workspaceId} AND p.kind='invitation' AND p.data->>'address'=${addressHash} AND p.status IN ('pending','sending','sent')
+          AND p.created_at>coalesce((SELECT max(i.created_at) FROM workspace_invitations i WHERE i.workspace_id=${invitation.workspaceId} AND i.email=${invitation.email} AND i.status='accepted'),'-infinity'))<${INVITATION_EMAILS.pair}` }))).rows.length > 0;
     await tx.execute(queued ? sql`RELEASE SAVEPOINT invitation_email` : sql`ROLLBACK TO SAVEPOINT invitation_email`);
     return queued;
   } catch {
@@ -148,7 +179,7 @@ function noticeOf(row: Row, origin: string): { to: string[]; input: NoticeInput 
 
 export const accountNotifyJob: JobHandler = retryDatabaseFailures(async (runtime, payload, job) => {
   const noticeId = typeof payload.noticeId === 'string' ? payload.noticeId : '';
-  // The lease: one runner at a time, and a send that crashed is retried after five minutes under the same key.
+  // The lease: one runner at a time. A send that failed or crashed is sent by a later attempt, under the same key.
   const { rows: [row] } = await runtime.db.execute<Row>(sql`WITH leased AS (
       UPDATE account_notices SET status='sending',lease_until=now()+interval '5 minutes'
       WHERE id=${noticeId} AND workspace_id=${job.workspaceId} AND (status='pending' OR (status='sending' AND lease_until<now())) RETURNING id,kind,data,workspace_id)
@@ -160,17 +191,19 @@ export const accountNotifyJob: JobHandler = retryDatabaseFailures(async (runtime
       (SELECT json_build_object('email',i.email,'role',i.role,'expiresAt',i.expires_at,'inviterName',u.name,'inviterEmail',u.email) FROM workspace_invitations i JOIN nightmail_users u ON u.id=i.inviter_id
         WHERE i.id=l.data->>'invitationId' AND i.workspace_id=l.workspace_id AND i.status='pending' AND i.expires_at>now()) AS invitation
     FROM leased l LEFT JOIN workspaces w ON w.id=l.workspace_id`);
-  if (!row) return;
+  if (!row) return heldNotice(runtime.db, 'account_notices', noticeId);
   const settle = (status: 'sent' | 'suppressed' | 'failed') => runtime.db.execute(sql`UPDATE account_notices SET status=${status},lease_until=NULL,sent_at=CASE WHEN ${status}='sent' THEN now() END WHERE id=${row.id} AND status='sending'`);
-  const notice = noticeOf(row, runtime.config.publicUrl.replace(/\/$/, ''));
-  if (!notice) { await settle('suppressed'); log('info', { code: 'ACCOUNT_NOTICE_SUPPRESSED', workspaceId: job.workspaceId, kind: row.kind }); return; }
-  if (!notice.to.length) { await settle('failed'); log('warn', { code: 'ACCOUNT_NOTIFY_NO_RECIPIENTS', workspaceId: job.workspaceId, kind: row.kind }); return; }
-  if (await deliverNotice(runtime, notice.to, customerNotice(runtime.config.publicUrl, notice.input), { notice: row.id }) === 'unconfigured') {
-    await settle('failed');
-    log('info', { code: 'ACCOUNT_NOTIFY_SKIPPED', workspaceId: job.workspaceId, kind: row.kind, reason: 'NIGHTMAIL_NOTIFY_FROM or the platform workspace is not configured' });
-    return;
-  }
-  await settle('sent');
-  log('info', { code: 'ACCOUNT_NOTIFIED', workspaceId: job.workspaceId, kind: row.kind, recipients: notice.to.length, simulated: isSimulatedSes(runtime) });
+  try {
+    const notice = noticeOf(row, runtime.config.publicUrl.replace(/\/$/, ''));
+    if (!notice) { await settle('suppressed'); log('info', { code: 'ACCOUNT_NOTICE_SUPPRESSED', workspaceId: job.workspaceId, kind: row.kind }); return; }
+    if (!notice.to.length) { await settle('failed'); log('warn', { code: 'ACCOUNT_NOTIFY_NO_RECIPIENTS', workspaceId: job.workspaceId, kind: row.kind }); return; }
+    if (await deliverNotice(runtime, notice.to, customerNotice(runtime.config.publicUrl, notice.input), { notice: row.id }) === 'unconfigured') {
+      await settle('failed');
+      log('info', { code: 'ACCOUNT_NOTIFY_SKIPPED', workspaceId: job.workspaceId, kind: row.kind, reason: 'NIGHTMAIL_NOTIFY_FROM or the platform workspace is not configured' });
+      return;
+    }
+    await settle('sent');
+    log('info', { code: 'ACCOUNT_NOTIFIED', workspaceId: job.workspaceId, kind: row.kind, recipients: notice.to.length, simulated: isSimulatedSes(runtime) });
+  } catch (error) { await noticeFailed(runtime, 'account_notices', row.id, job, error, row.kind); throw error; }
 });
 export const accountNoticeJobs: Record<string, JobHandler> = { 'account.notify': accountNotifyJob };

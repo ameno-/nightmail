@@ -477,7 +477,7 @@ export async function ingestTenantStatus(runtime: Runtime, event: NonNullable<Re
  * workspace and then hold or pause it within a standing run or two: the job sends what is most serious by then.
  */
 export const NOTICE_WAIT_MINUTES = 15;
-type NoticeEvent = { kind: string; to_step: Step; age: number; details: Record<string, unknown>; name: string; exempt: boolean; recipients: string[]; outranked: boolean; repeated: boolean; paused: boolean | null; pending: boolean | null };
+type NoticeEvent = { kind: string; to_step: Step; age: number; details: Record<string, unknown>; name: string; exempt: boolean; recipients: string[]; outranked: boolean; repeated: boolean; paused: boolean | null; pending: boolean | null; marketing_held: boolean };
 /**
  * Emails the workspace's owners and admins about a standing change (src/notices.ts writes it; account-notices.ts sends
  * it from the platform workspace's own sender). Without that sender the dashboard and webhook still carry the change.
@@ -494,7 +494,8 @@ export const notifyJob: JobHandler = retryDatabaseFailures(async (runtime, paylo
         ELSE false END AS outranked,
       e.kind='quarantine' AND EXISTS (SELECT FROM standing_events q WHERE q.workspace_id=e.workspace_id AND q.kind='quarantine' AND q.id<>e.id AND q.details->>'campaignId'=e.details->>'campaignId'
         AND q.at<=e.at AND q.at>e.at-interval '24 hours') AS repeated,
-      pc.paused_at IS NOT NULL AS paused,pc.resume_pending_at IS NOT NULL AS pending
+      pc.paused_at IS NOT NULL AS paused,pc.resume_pending_at IS NOT NULL AS pending,
+      coalesce(pc.marketing_held_at IS NOT NULL OR (SELECT s.marketing_hold OR s.step='restrict' FROM sender_standing s WHERE s.workspace_id=e.workspace_id),false) AS marketing_held
     FROM standing_events e JOIN workspaces w ON w.id=e.workspace_id LEFT JOIN provider_connections pc ON pc.workspace_id=e.workspace_id AND pc.kind='shared'
     WHERE e.id=${eventId} AND e.workspace_id=${job.workspaceId}`)).rows;
   if (!event || !event.recipients.length) return;
@@ -507,7 +508,7 @@ export const notifyJob: JobHandler = retryDatabaseFailures(async (runtime, paylo
   if (!resumed && event.kind !== 'quarantine' && stepRank(event.to_step) < stepRank('warn')) return;
   if (!resumed && (event.outranked || event.repeated)) return skip(event.repeated ? 'This campaign had its email in the last 24 hours.' : 'A more serious email covers this event.');
   const workspace = event.name;
-  const input: NoticeInput = resumed ? { kind: 'resumed', workspace, limit: !event.exempt }
+  const input: NoticeInput = resumed ? { kind: 'resumed', workspace, limit: !event.exempt, marketingHeld: event.marketing_held }
     : event.kind === 'quarantine' ? { kind: 'campaign_paused', workspace, campaign: { id: String(event.details.campaignId ?? ''), name: String(event.details.campaignName ?? '') } }
     : { kind: event.to_step === 'pause' ? 'paused' : event.to_step === 'restrict' ? 'restricted' : 'warned', workspace };
   if (await deliverNotice(runtime, event.recipients, customerNotice(runtime.config.publicUrl, input), { standingEvent: eventId }) === 'unconfigured') return skip('NIGHTMAIL_NOTIFY_FROM or the platform workspace is not configured');

@@ -1,7 +1,7 @@
 import { sql } from 'drizzle-orm';
 import { isSimulatedSes, log, type JobHandler } from '../core.js';
 import { retryDatabaseFailures } from '../jobs.js';
-import { deliverNotice } from '../account-notices.js';
+import { deliverNotice, heldNotice, noticeFailed } from '../account-notices.js';
 import { customerNotice, type Notice, type NoticeInput } from '../notices.js';
 import { formatUsd, microCents, RATES, type MicroCents } from './money.js';
 import type { NoticeKind } from './types.js';
@@ -9,7 +9,8 @@ import type { NoticeKind } from './types.js';
 // Owner emails about money (job billing.notify, one per billing_notices row). The notice row is the dedupe: A's
 // billing_notice() inserts it once per episode (its dedupe_key is unique) with this job. Here a 5-minute lease
 // makes one runner send it, the idempotency key makes a retried send one email, and the status ends sent,
-// suppressed (shadow mode, or the account is not prepaid) or failed (nobody to tell). src/notices.ts writes each email:
+// suppressed (shadow mode, or the account is not prepaid) or failed (nobody to tell, or every attempt to send failed:
+// a send that fails gives its lease back and is retried, account-notices.ts). src/notices.ts writes each email:
 // what happened, what it means for mail now and what to do, with the Billing link.
 
 export type NoticeContext = {
@@ -65,7 +66,7 @@ export const notifyJob: JobHandler = retryDatabaseFailures(async (runtime, paylo
     SELECT l.id,l.kind,l.data,c.mode AS enforcement,c.receive_hold,coalesce(a.mode,'prepaid') AS mode,a.unpaid_since,w.name,billing_position(l.workspace_id) AS position,
       ARRAY(SELECT u.email FROM workspace_members m JOIN nightmail_users u ON u.id=m.user_id WHERE m.workspace_id=l.workspace_id AND m.role IN ('owner','admin') ORDER BY u.email LIMIT 20) AS recipients
     FROM leased l CROSS JOIN billing_config c LEFT JOIN billing_accounts a ON a.workspace_id=l.workspace_id LEFT JOIN workspaces w ON w.id=l.workspace_id WHERE c.singleton`);
-  if (!notice) return;
+  if (!notice) return heldNotice(runtime.db, 'billing_notices', noticeId);
   const settle = (status: 'sent' | 'suppressed' | 'failed') => runtime.db.execute(sql`UPDATE billing_notices SET status=${status},lease_until=NULL,sent_at=CASE WHEN ${status}='sent' THEN now() END
     WHERE id=${notice.id} AND status='sending'`);
   if (!runtime.config.multiTenant || notice.enforcement !== 'enforce' || notice.mode !== 'prepaid') {
@@ -73,16 +74,18 @@ export const notifyJob: JobHandler = retryDatabaseFailures(async (runtime, paylo
     log('info', { code: 'BILLING_NOTICE_SUPPRESSED', workspaceId: job.workspaceId, kind: notice.kind, enforcement: notice.enforcement, mode: notice.mode });
     return;
   }
-  if (!notice.recipients.length) { await settle('failed'); log('warn', { code: 'BILLING_NOTIFY_NO_RECIPIENTS', workspaceId: job.workspaceId, kind: notice.kind }); return; }
-  const position = notice.position ?? {};
-  const totalUc = microCents(BigInt(position.balanceUc ?? '0') + BigInt(position.promoUc ?? '0'));
-  const email = noticeEmail(notice.kind, { workspace: notice.name ?? '', origin: runtime.config.publicUrl, totalUc,
-    freeLeft: Number(position.freeSentLeft ?? 0), unpaidSince: notice.unpaid_since ? new Date(notice.unpaid_since) : null, receiveHold: notice.receive_hold, data: notice.data ?? {} });
-  if (await deliverNotice(runtime, notice.recipients, email, { billingNotice: notice.id }) === 'unconfigured') {
-    await settle('failed');
-    log('info', { code: 'BILLING_NOTIFY_SKIPPED', workspaceId: job.workspaceId, kind: notice.kind, reason: 'NIGHTMAIL_NOTIFY_FROM or the platform workspace is not configured' });
-    return;
-  }
-  await settle('sent');
-  log('info', { code: 'BILLING_NOTIFIED', workspaceId: job.workspaceId, kind: notice.kind, recipients: notice.recipients.length, simulated: isSimulatedSes(runtime) });
+  try {
+    if (!notice.recipients.length) { await settle('failed'); log('warn', { code: 'BILLING_NOTIFY_NO_RECIPIENTS', workspaceId: job.workspaceId, kind: notice.kind }); return; }
+    const position = notice.position ?? {};
+    const totalUc = microCents(BigInt(position.balanceUc ?? '0') + BigInt(position.promoUc ?? '0'));
+    const email = noticeEmail(notice.kind, { workspace: notice.name ?? '', origin: runtime.config.publicUrl, totalUc,
+      freeLeft: Number(position.freeSentLeft ?? 0), unpaidSince: notice.unpaid_since ? new Date(notice.unpaid_since) : null, receiveHold: notice.receive_hold, data: notice.data ?? {} });
+    if (await deliverNotice(runtime, notice.recipients, email, { billingNotice: notice.id }) === 'unconfigured') {
+      await settle('failed');
+      log('info', { code: 'BILLING_NOTIFY_SKIPPED', workspaceId: job.workspaceId, kind: notice.kind, reason: 'NIGHTMAIL_NOTIFY_FROM or the platform workspace is not configured' });
+      return;
+    }
+    await settle('sent');
+    log('info', { code: 'BILLING_NOTIFIED', workspaceId: job.workspaceId, kind: notice.kind, recipients: notice.recipients.length, simulated: isSimulatedSes(runtime) });
+  } catch (error) { await noticeFailed(runtime, 'billing_notices', notice.id, job, error, notice.kind); throw error; }
 });
