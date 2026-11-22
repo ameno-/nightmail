@@ -159,6 +159,9 @@ a.ui-tab { text-decoration: none; }
 .ui-table-scroll { --table-row-height: var(--row-height); width: 100%; overflow-x: auto; }
 .ui-table { width: 100%; table-layout: fixed; border-collapse: collapse; text-align: left; font-size: var(--text-sm); line-height: var(--leading-sm); font-variant-numeric: tabular-nums; }
 .ui-table th { height: 32px; padding: var(--space-6) var(--space-12); border-bottom: 1px solid var(--color-border); color: var(--color-faint); font-family: var(--font-body); font-size: var(--text-xs); font-weight: 400; white-space: nowrap; }
+/* An empty table keeps its header row's height but shows neither its labels nor its rule (collapsed borders paint even when hidden). */
+.ui-table--empty thead { visibility: hidden; }
+.ui-table--empty th { border-bottom-color: transparent; }
 .ui-table td { height: var(--table-row-height); padding: var(--space-6) var(--space-12); border-bottom: 1px solid var(--color-border-muted); vertical-align: middle; overflow-wrap: anywhere; }
 .ui-table td[data-skeleton-align='right'] > * { margin-left: auto; }
 .ui-table td[data-skeleton-align='right'] .ui-skeleton-line { justify-content: flex-end; }
