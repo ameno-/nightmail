@@ -22380,11 +22380,17 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual([call('ok').outcome,call('503').outcome,call('stall').outcome,call('stall-body').outcome],['ok','http_503','timeout','timeout']);
       assert.deepEqual([call('ok').level,call('ok').requestId,call('ok').serverTiming,call('ok').httpStatus,call('ok').workspaceId,call('ok').kind,call('ok').required,call('ok').window,call('ok').windows],['info','req_fixture_ok','model;dur=120',200,wid,'transactional',true,0,1]);
       assert.deepEqual([call('503').level,call('503').retryAfter,call('stall').phase,call('stall-body').phase,call('stall-body').requestId],['warn','2','headers','body','req_fixture_body']);
-      assert.ok(['headersMs','ms','requestBytes','responseBytes','inFlight'].every(f=>typeof call('ok')[f]==='number') && call('stall').ms>=500 && call('stall').headersMs===undefined);
+      // Timings within margins, not to the millisecond: a busy runner's timers can fire a little early against the clock the
+      // record reads. A timeout lasts about the 500 ms deadline (never much less); an answered call has its headers no later
+      // than its end, and the upper bounds only leave room for a busy runner.
+      const nearDeadline=(ms:number)=>ms>=450 && ms<3000,answered=(r:Json)=>r.headersMs>=0 && r.headersMs<=r.ms && r.ms<3000;
+      assert.ok(['headersMs','ms','requestBytes','responseBytes','inFlight'].every(f=>typeof call('ok')[f]==='number') && answered(call('ok')));
+      assert.ok(nearDeadline(call('stall').ms) && call('stall').headersMs===undefined && nearDeadline(call('stall-body').ms) && call('stall-body').headersMs<=call('stall-body').ms,
+        JSON.stringify([call('stall'),call('stall-body')]));
       // Each email's line: where its time went, and why it was deferred. The deferral itself is unchanged.
       assert.deepEqual([email('ok').outcome,email('ok').screen,email('ok').screenCall,email('503').outcome,email('503').reason,email('503').screenCall,email('stall').screenCall,email('stall-body').screenCall],
         ['accepted','call','ok','deferred','CONTENT_SCREEN_UNAVAILABLE','http_503','timeout','timeout']);
-      assert.ok(['queueMs','ageMs','screenMs','paceMs','sesMs','totalMs'].every(f=>typeof email('ok')[f]==='number') && email('503').sesMs===undefined && email('stall').screenMs>=500);
+      assert.ok(['queueMs','ageMs','screenMs','paceMs','sesMs','totalMs'].every(f=>typeof email('ok')[f]==='number') && email('503').sesMs===undefined && nearDeadline(email('stall').screenMs));
       assert.deepEqual((await db.query('SELECT error_code FROM sending_emails WHERE id=ANY($1) ORDER BY array_position($1,id)',[[ids['503'],ids.stall]])).rows.map(r=>r.error_code),['CONTENT_SCREEN_UNAVAILABLE','CONTENT_SCREEN_UNAVAILABLE']);
       const written=JSON.stringify(logs.filter(l=>l.code==='CONTENT_SCREEN_CALL' || l.code==='DISPATCH_EMAIL'));
       for(const secret of ['sign-in code','111111','Private body','private.person','a@bench','classifier-fixture-key'])assert.ok(!written.includes(secret),secret);
@@ -22425,7 +22431,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       try{
         await holder.query('BEGIN');await holder.query('LOCK TABLE content_screen_calls IN SHARE MODE');
         const started=Date.now();await send('locked',code++);const took=Date.now()-started;
-        assert.ok(took>=1400 && took<2400,`the write gave up after ${took} ms`);assert.equal(sent.at(-1),ids.locked);
+        // It waited for the lock (Postgres's 1.5 s lock_timeout, never early) and the database, not the 2.5 s backstop,
+        // ended it (55P03 below); the upper bound only leaves room for a busy runner.
+        assert.ok(took>=1350 && took<6000,`the write gave up after ${took} ms`);assert.equal(sent.at(-1),ids.locked);
         assert.equal(logs.filter(l=>l.code==='CONTENT_SCREEN_CALLS_UNWRITTEN' && l.databaseCode==='55P03').length,1);
       }finally{await holder.query('ROLLBACK').catch(()=>undefined);await holder.end();}
       assert.deepEqual(await limits(),own);
@@ -22439,7 +22447,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         [['ok',null,200],['http_503',null,503],['timeout','headers',null],['timeout','body',200],['network','headers',null],['invalid',null,200]]);
       assert.deepEqual([row('ok').workspace_id,row('ok').kind,row('ok').required,row('ok').region,row('ok').shard,row('ok').window_index,row('ok').windows,row('ok').request_id,row('ok').sample_rate,row('ok').ses_in_flight,row('ok').recent],
         [wid,'transactional',true,REGION,0,0,1,'req_fixture_ok',1,0,true]);
-      assert.ok(['headers_ms','ms','request_bytes','response_bytes','in_flight'].every(c=>typeof row('ok')[c]==='number') && row('stall').ms>=490 && row('stall').headers_ms===null);
+      assert.ok(['headers_ms','ms','request_bytes','response_bytes','in_flight'].every(c=>typeof row('ok')[c]==='number') && row('ok').headers_ms<=row('ok').ms && row('ok').ms<3000
+        && row('stall').ms>=450 && row('stall').ms<3000 && row('stall').headers_ms===null && row('stall-body').ms>=450 && row('stall-body').ms<3000,JSON.stringify(rows));
       assert.equal((await import('./src/screen-calls.js')).outbound.ses,0,'Every SES send counted in flight is counted out');
       const stored=JSON.stringify((await db.query('SELECT to_jsonb(c) AS c FROM content_screen_calls c WHERE email_id=ANY($1)',[Object.values(ids)])).rows);
       for(const secret of ['sign-in code','111111','Private body','private.person','a@bench','classifier-fixture-key'])assert.ok(!stored.includes(secret),secret);
