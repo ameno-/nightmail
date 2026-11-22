@@ -50,6 +50,8 @@ function sample(document: Json, input: Json | undefined, name = 'value', depth =
   if (schema.const !== undefined) return schema.const;
   if (Array.isArray(schema.enum) && schema.enum.length) return schema.enum[0];
   if (schema.default !== undefined) return schema.default;
+  // A body whose fields are all optional documents one that does something.
+  if (schema.example !== null && typeof schema.example === 'object') return schema.example;
   if (schema.type === 'string' || schema.format || schema.pattern) return sampleString(name, schema);
   if (schema.type === 'integer' || schema.type === 'number') return schema.minimum ?? (schema.exclusiveMinimum !== undefined ? Number(schema.exclusiveMinimum) + 1 : 1);
   if (schema.type === 'boolean') return false;

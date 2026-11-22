@@ -158,6 +158,8 @@ const simulator = (kind: 'success' | 'bounce' | 'complaint', label = '') => `${k
 const success = simulator('success'), singleSuccess = simulator('success', '-single'), bounce = simulator('bounce'), complaint = simulator('complaint');
 const subject = `Bane E2E ${prefix}`, text = `Bane delivery check ${prefix}.`;
 const html = `<p>${text}</p>`;
+// Synthetic: the E2E workspace's postal address, which its campaigns' footers show.
+const E2E_POSTAL_ADDRESS = 'Nightmail E2E\n1 Fixture Way\nTest City, CA 94000';
 const webhookUrl = 'https://example.com/';
 const key = setting('API_KEY');
 const base = new URL(setting('URL') ?? 'https://nightmail.dev');
@@ -276,7 +278,8 @@ async function listed<T extends { id: string }>(id: string, read: (cursor?: stri
   throw new Error(`run-owned record not listed: ${id}`);
 }
 async function workspaceReads() {
-  check((await api('getWorkspaceSettings', {})).name === 'E2E', 'unexpected workspace name');
+  const settings = await api('getWorkspaceSettings', {});
+  check(settings.name === 'E2E' && !!settings.postalAddress, 'unexpected workspace name or no postal address');
   const catalog = await api('listRegions', {});
   check(catalog.data.some(r => r.region === region && r.enabled) && catalog.data.some(r => r.region === catalog.defaultRegion && r.isDefault), 'invalid regional catalog');
   const tokens = await api('listAgentTokens', { query: { includeInactive: 'false', limit: 1 } });
@@ -642,7 +645,7 @@ async function campaign(audience: Audience, templateId?: string) {
   check(saved.revision > item.revision && saved.draft.name === subject, 'revision did not advance');
   check(hasId(await api('listCampaigns', { query: { search: prefix } }), item.id), 'campaign not listed');
   const preview = await api('previewCampaign', { path });
-  check(preview.html.includes(text) && preview.text.includes(text), 'campaign preview differs');
+  check(preview.html.includes(text) && preview.text.includes(text) && preview.text.endsWith(E2E_POSTAL_ADDRESS), 'campaign preview differs or lacks the postal address');
   await step('Render campaign PNG', async () => checkScreenshot(await api('renderCampaignPreviewImage', { client: previews, path })));
   const allowed = await api('previewCampaignAudience', { path });
   check(saved.draft.audience?.listId === audience.listId && saved.draft.audience.segmentId === audience.segmentId && allowed.matched === 1 && allowed.eligible === 1, 'refusing campaign: not the verified one-member exact-email audience');
@@ -962,7 +965,10 @@ async function prepare() {
   check(base.protocol === 'https:' && base.href === base.origin + '/', 'BANE_E2E_URL must be a bare HTTPS origin');
   check(!destructive || (['https://dev.nightmail.dev', 'https://dev.bane.mx'].includes(base.origin) && domain === 'e2e.bane.mx' && domainId === 'dom_e53755830a0141a5bd6e71e45e942f06' && region === 'us-east-2'),'destructive tests require the exact dev fixture');
   check(key && domain && domainId, 'missing BANE_E2E_API_KEY, DOMAIN or DOMAIN_ID');
-  check((await api('getWorkspaceSettings',{})).name === 'E2E','refusing non-E2E workspace');
+  const settings = await api('getWorkspaceSettings',{});
+  check(settings.name === 'E2E','refusing non-E2E workspace');
+  // Campaigns need the workspace's postal address (CAN-SPAM); the campaign steps run after this one.
+  if (destructive && settings.postalAddress !== E2E_POSTAL_ADDRESS) check((await api('updateWorkspaceSettings',{body:{postalAddress:E2E_POSTAL_ADDRESS}})).postalAddress === E2E_POSTAL_ADDRESS,'postal address not set');
   const me = await api('getCurrentIdentity', {});
   check(me.multiTenant && !me.simulated && me.origin === base.origin && me.connection?.kind === 'shared' && me.connection.region === region && me.connection.state === 'ready' && me.connection.tenant === 'ready', 'expected live MX, ready Hosted mail, us-east-2');
   // Inbound, webhooks, templates, metrics and key management need an unrestricted key; the domain ID

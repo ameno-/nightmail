@@ -1,4 +1,5 @@
 import { z } from '@hono/zod-openapi';
+import { sql } from 'drizzle-orm';
 import { Buffer } from 'node:buffer';
 import { productName } from './brand.js';
 import { ApiError } from './core.js';
@@ -58,6 +59,23 @@ export function unsubscribePageLink(page: string, token: string): string {
   url.search = [...kept, `${UNSUBSCRIBE_PAGE_PARAM}=${token}`].join('&');
   return url.href;
 }
+
+// A workspace's postal address: US law (CAN-SPAM) requires one in every commercial email. Plain text, shown under the
+// Unsubscribe link of every campaign footer and every marketing send (src/sending.ts marketingFooter). Line breaks are
+// kept, each line trimmed and empty ones dropped (postalAddressText); no markup, control or bidirectional characters.
+export const POSTAL_ADDRESS = { chars: 300, lines: 6 } as const;
+const POSTAL_CONTROL = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
+export const postalAddressText = (value: string) => value.split(/\r\n|\r|\n/).map(line => line.trim()).filter(Boolean).join('\n');
+export const PostalAddress = z.string().trim().min(1).max(POSTAL_ADDRESS.chars)
+  .refine(value => postalAddressText(value).split('\n').length <= POSTAL_ADDRESS.lines, `Use at most ${POSTAL_ADDRESS.lines} lines.`)
+  .refine(value => !/[<>]/.test(value) && !POSTAL_CONTROL.test(value), 'Use plain text: no HTML, angle brackets or control characters.')
+  .describe(`The workspace's postal address, as plain text: at most ${POSTAL_ADDRESS.chars} characters on up to ${POSTAL_ADDRESS.lines} lines, without HTML. Every campaign email and marketing send shows it under the Unsubscribe link, as US law (CAN-SPAM) requires; a campaign can't be sent or scheduled without it.`);
+
+/** The workspace's postal address, a scalar subquery: Hosted keeps it beside the workspace's name, self-hosted in its settings row. */
+export const postalAddressOf = (multiTenant: boolean, workspaceId: string) => multiTenant
+  ? sql<string | null>`(SELECT postal_address FROM workspaces WHERE id=${workspaceId})`
+  : sql<string | null>`(SELECT postal_address FROM operation_settings WHERE workspace_id=${workspaceId})`;
+export const postalAddressRequired = () => new ApiError(422, 'POSTAL_ADDRESS_REQUIRED', 'Add the workspace’s postal address before sending or scheduling a campaign: US law (CAN-SPAM) requires it in every marketing email, under the Unsubscribe link. Set postalAddress in Settings (updateWorkspaceSettings).', 'postalAddress');
 
 export const MAX_ATTACHMENT_BYTES = SEND_LIMITS.attachmentBytes;
 /** A file sent as base64 inside JSON: 8 MiB decoded (SEND_LIMITS.jsonAttachmentBytes). */

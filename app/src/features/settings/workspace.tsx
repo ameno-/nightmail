@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { useLocation } from 'react-router'
-import { Button, ErrorState, Field, Input, PageHeader, SectionHeader, fieldError, MutationError } from '../../components/ui'
+import { Button, ErrorState, Field, Input, PageHeader, SectionHeader, Textarea, fieldError, MutationError } from '../../components/ui'
+import { postalAddressError } from '../../components/PostalAddress'
 import { useApiMutation, useApiQuery, useRegion, useSession, useWorkspaceAccess } from '../../data/context'
 import type { Workspace } from '../../data/types'
 import { SesSendingSkeleton, WorkspaceFormSkeleton } from './skeletons'
@@ -12,9 +13,19 @@ import { PrivateAddress } from '../../components/PrivateAddress'
 
 function WorkspaceForm({workspace, ruled}: {workspace: Workspace; ruled: boolean}) {
   const [name, setName] = useState(workspace.name)
-  const save = useApiMutation((api, input: {name: string}) => api.workspace.update(input), 'Saved')
-  async function submit(event: FormEvent) {event.preventDefault(); try {await save.mutateAsync({name: name.trim()})} catch { /* inline */ }}
-  return <form id="workspace" className={`section stack settings-group${ruled ? ' settings-rule' : ''}`} onSubmit={submit}><SectionHeader title="Workspace" actions={<Button type="submit" loading={save.isPending} variant="primary">Save</Button>} /><MutationError error={save.error} /><Field label="Name" htmlFor="workspace-name" error={fieldError(save.error, 'name')}><Input id="workspace-name" maxLength={120} value={name} onChange={event => setName(event.target.value)} disabled={save.isPending} required /></Field></form>
+  const [address, setAddress] = useState(workspace.postalAddress ?? '')
+  const [addressProblem, setAddressProblem] = useState('')
+  const save = useApiMutation((api, input: {name: string; postalAddress: string | null}) => api.workspace.update(input), 'Saved')
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    const problem = postalAddressError(address)
+    if (problem) { setAddressProblem(problem); return }
+    try {await save.mutateAsync({name: name.trim(), postalAddress: address.trim() || null})} catch { /* inline */ }
+  }
+  return <form id="workspace" className={`section stack settings-group${ruled ? ' settings-rule' : ''}`} onSubmit={submit}><SectionHeader title="Workspace" actions={<Button type="submit" loading={save.isPending} variant="primary">Save</Button>} /><MutationError error={save.error} /><Field label="Name" htmlFor="workspace-name" error={fieldError(save.error, 'name')}><Input id="workspace-name" maxLength={120} value={name} onChange={event => setName(event.target.value)} disabled={save.isPending} required /></Field>
+    {/* Every campaign footer shows it under Unsubscribe; campaigns can't be sent without it. */}
+    <Field label="Postal address" htmlFor="workspace-postal-address" error={addressProblem || fieldError(save.error, 'postalAddress')}><Textarea id="workspace-postal-address" className="settings-postal-address" rows={4} autoComplete="street-address" value={address} onChange={event => {setAddress(event.target.value); setAddressProblem('')}} disabled={save.isPending} /></Field>
+  </form>
 }
 function SignedInSection() {
   const session = useSession()

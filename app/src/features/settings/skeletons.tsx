@@ -139,7 +139,7 @@ export function TeamSkeleton() {
 
 export function WorkspaceFormSkeleton() {
   return <LoadingRegion label="Loading workspace" className="settings-loading-body">
-    <section id="workspace" className="section stack settings-group settings-rule"><SectionHeader title="Workspace" actions={<ControlSkeleton width={70} />} /><FieldSkeleton label="Name" /></section>
+    <section id="workspace" className="section stack settings-group settings-rule"><SectionHeader title="Workspace" actions={<ControlSkeleton width={70} />} /><FieldSkeleton label="Name" /><FieldSkeleton label="Postal address" multiline /></section>
   </LoadingRegion>
 }
 

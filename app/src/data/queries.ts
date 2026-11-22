@@ -58,6 +58,8 @@ export const queries = {
   connection: () => def(['connection'], (_api, signal) => connectionApi.get(signal)),
   usage: () => def(['usage'], (_api, signal) => usageApi.get(signal)),
   billing: () => def(['billing'], (_api, signal) => billingApi.get(signal)),
+  /** The workspace's name and postal address (GET /v1/settings/workspace): Settings and the campaign send prompt share it. */
+  workspaceSettings: () => def(['workspace-settings'], (api, signal) => api.workspace.settings(signal)),
   billingLedger: (cursor: string | undefined) => def(['billing-ledger', cursor ?? null], (_api, signal) => billingApi.ledger(cursor, signal)),
   billingPayments: (cursor: string | undefined) => def(['billing-payments', cursor ?? null], (_api, signal) => billingApi.payments(cursor, signal)),
   // This month by meter (UTC): Plan & usage's AI decision count.

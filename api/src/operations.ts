@@ -16,7 +16,6 @@ import { applyClaim, connectionReady, domainHosts, receivingSetup, type Receivin
 import { jobs } from './db/core.js';
 import { contacts, mergeSuppression } from './db/audience.js';
 import { lasting, RECEIVING_HOST_CHANGE, SuppressionEventData, WEBHOOK_CHANGE, webhookUrlHint, WebhookUrlHint, readCursor, nextCursor, budgetedRead, readLimit, readLimitNote } from './core.js';
-import { workspaces } from './db/workspaces.js';
 import { emails } from './db/sending.js';
 import { sesRegions } from './db/ses-regions.js';
 import { getRegionSettings, resolveRegionRuntime, withRegionSettings } from './ses-region-state.js';
@@ -34,10 +33,10 @@ import { webhookSecretBinding as mailboxSecretBinding } from './mailbox-events.j
 import { mailboxDomains, endpoints, type MxReport } from './db/mailbox.js';
 import { checkMx,expectedMx } from './mailbox-dns.js';
 import { baneRecordIssue, baneRecordUse, defaultReceivingHost, establishedHost, hostOwners, inspectReceivingHost, observeReceiving, refusedCodes, takenIssue, type DomainObservation, type ReceivingHostRow, type ReceivingIssue } from './receiving-host.js';
-import { deliveryAttempts, deliveries, domainClaims, domains, events, eventTypes, snsReceipts, unsubscribeTokens, webhooks, webhookSecretAudit, workspaceSettings, type PublishedEvent, type EventType } from './db/operations.js';
+import { deliveryAttempts, deliveries, domainClaims, domains, events, eventTypes, snsReceipts, unsubscribeTokens, webhooks, webhookSecretAudit, type PublishedEvent, type EventType } from './db/operations.js';
 import { clientIpHeader, productName, requestHeaderNames, webhookTestHeaders, webhookUserAgent } from './brand.js';
 import { hasTags, tagKey, TAG_PREFIX } from './resource-tags.js';
-import { unsubscribePageLink } from './outbound-content.js';
+import { PostalAddress, postalAddressText, unsubscribePageLink } from './outbound-content.js';
 export type { PublishedEvent } from './db/operations.js';
 
 const RegionalAccepted = z.object({ operationId: z.string(), regions: z.array(z.string()) });
@@ -76,7 +75,7 @@ const domainSchema = z.object({ id: z.string(), name: z.string(), region: z.stri
   releasesAt: z.string().nullable().optional().describe('Hosted only: when this domain is released if its records are still unproven (72 hours after it was added). Null once ownership has been proven.'),
   receivingIssue: receivingIssueSchema.nullable().optional().describe('Hosted only: receiving needs attention. Set by the DNS checks that run when a receiving host is suggested or chosen, on Check now and in the hourly recheck. Null when the receiving record is clear.') }).openapi('DomainReadiness');
 const accountSchema = z.object({ region: z.string(), productionAccess: z.boolean(), sendingEnabled: z.boolean(), enforcementStatus: z.string(), quota: z.object({ max24HourSend: z.number(), maxSendRate: z.number(), sentLast24Hours: z.number() }) }).openapi('SesAccount');
-const settingsSchema = z.object({ name: z.string() }).openapi('WorkspaceSettings');
+const settingsSchema = z.object({ name: z.string(), postalAddress: z.string().nullable().describe('The postal address every campaign footer and marketing send shows under Unsubscribe; null until one is set. Campaigns can\'t be sent or scheduled without it.') }).openapi('WorkspaceSettings');
 const queuedSchema = z.object({ id: z.string(), status: z.literal('pending') }).openapi('QueuedWebhookDelivery');
 const deletedSchema = z.object({ deleted: z.boolean() }).openapi('WebhookDeleted');
 const regionQuery = z.object({ region: z.string().optional() }).openapi('RegionQuery');
@@ -900,19 +899,29 @@ export async function domainPage(c: Ctx, a: Actor, q: DomainQuery): Promise<z.in
 
 export function registerOperations(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/settings/workspace', operationId: 'getWorkspaceSettings', tags: ['Settings'], security, responses: { 200: response(settingsSchema), ...errors } }), async c => {
-    const a = workspaceActor(c); const [row] = c.env.config.multiTenant
-      ? await c.env.db.select({ name: workspaces.name }).from(workspaces).where(eq(workspaces.id, a.workspaceId))
-      : await c.env.db.select().from(workspaceSettings).where(scoped(workspaceSettings, a));
-    return c.json({ name: row?.name ?? productName }, 200);
+    const a = workspaceActor(c); const { rows: [row] } = await c.env.db.execute<{ name: string; postal_address: string | null }>(c.env.config.multiTenant
+      ? sql`SELECT name,postal_address FROM workspaces WHERE id=${a.workspaceId}`
+      : sql`SELECT name,postal_address FROM operation_settings WHERE workspace_id=${a.workspaceId}`);
+    return c.json({ name: row?.name ?? productName, postalAddress: row?.postal_address ?? null }, 200);
   });
-  app.openapi(createRoute({ method: 'patch', path: '/v1/settings/workspace', operationId: 'updateWorkspaceSettings', tags: ['Settings'], security, request: { body: json(z.object({ name: z.string().trim().min(1).max(120) }).openapi('UpdateWorkspaceSettings')) }, responses: { 200: response(settingsSchema), ...errors } }), async c => {
-    const a = workspaceActor(c, 'manage'), { name } = c.req.valid('json');
-    const audit = auditInsert(auditContext(c), { action: 'settings.update', workspaceId: a.workspaceId, target: { type: 'workspace', id: a.workspaceId }, before: sql`jsonb_build_object('name',(SELECT name FROM old))`, after: { name }, details: { fields: ['name'] } }, { from: sql`changed` });
-    await c.env.db.execute(c.env.config.multiTenant
-      ? sql`WITH old AS (SELECT name FROM workspaces WHERE id=${a.workspaceId}), changed AS (UPDATE workspaces SET name=${name} WHERE id=${a.workspaceId} RETURNING id), audit AS (${audit}) SELECT 1`
-      : sql`WITH old AS (SELECT name FROM operation_settings WHERE workspace_id=${a.workspaceId}), changed AS (INSERT INTO operation_settings(workspace_id,name) VALUES (${a.workspaceId},${name})
-      ON CONFLICT ON CONSTRAINT operation_settings_pkey DO UPDATE SET name=excluded.name,updated_at=now() RETURNING workspace_id), audit AS (${audit}) SELECT 1`);
-    return c.json({ name }, 200);
+  app.openapi(createRoute({ method: 'patch', path: '/v1/settings/workspace', operationId: 'updateWorkspaceSettings', description: 'Change the workspace\'s name, its postal address, or both; omitted fields keep their value. The postal address appears under the Unsubscribe link of every campaign email and marketing send, as US law (CAN-SPAM) requires: campaigns can\'t be sent or scheduled without one (422 POSTAL_ADDRESS_REQUIRED). null removes it. Owners and admins only.', tags: ['Settings'], security,
+    request: { body: json(z.object({ name: z.string().trim().min(1).max(120).optional(), postalAddress: PostalAddress.nullable().optional() }).refine(body => body.name !== undefined || body.postalAddress !== undefined, 'Send name, postalAddress or both.')
+      .openapi('UpdateWorkspaceSettings', { example: { postalAddress: 'Example Inc.\n1 Main Street\nSpringfield, IL 62701' } })) }, responses: { 200: response(settingsSchema), ...errors } }), async c => {
+    const a = workspaceActor(c, 'manage'), input = c.req.valid('json');
+    // Each line trimmed, empty ones dropped, so the footer shows exactly what was meant.
+    const name = input.name ?? null, address = input.postalAddress === undefined ? undefined : input.postalAddress === null ? null : postalAddressText(input.postalAddress);
+    const fields = [...input.name !== undefined ? ['name'] : [], ...address !== undefined ? ['postalAddress'] : []];
+    const setAddress = address !== undefined;
+    const audit = auditInsert(auditContext(c), { action: 'settings.update', workspaceId: a.workspaceId, target: { type: 'workspace', id: a.workspaceId },
+      before: sql`(SELECT jsonb_strip_nulls(jsonb_build_object('name',CASE WHEN ${name}::text IS NOT NULL THEN name END,'postalAddress',CASE WHEN ${setAddress}::boolean THEN coalesce(postal_address,'') END)) FROM old)`,
+      after: { ...input.name !== undefined ? { name: input.name } : {}, ...setAddress ? { postalAddress: address ?? '' } : {} }, details: { fields } }, { from: sql`changed` });
+    const { rows: [row] } = await c.env.db.execute<{ name: string; postal_address: string | null }>(c.env.config.multiTenant
+      ? sql`WITH old AS (SELECT name,postal_address FROM workspaces WHERE id=${a.workspaceId}), changed AS (UPDATE workspaces SET name=coalesce(${name}::text,name),
+        postal_address=CASE WHEN ${setAddress}::boolean THEN ${address ?? null}::text ELSE postal_address END WHERE id=${a.workspaceId} RETURNING name,postal_address), audit AS (${audit}) SELECT * FROM changed`
+      : sql`WITH old AS (SELECT name,postal_address FROM operation_settings WHERE workspace_id=${a.workspaceId}), changed AS (INSERT INTO operation_settings(workspace_id,name,postal_address)
+        VALUES (${a.workspaceId},coalesce(${name}::text,${productName}),${address ?? null}::text) ON CONFLICT ON CONSTRAINT operation_settings_pkey DO UPDATE SET name=coalesce(${name}::text,operation_settings.name),
+        postal_address=CASE WHEN ${setAddress}::boolean THEN excluded.postal_address ELSE operation_settings.postal_address END,updated_at=now() RETURNING name,postal_address), audit AS (${audit}) SELECT * FROM changed`);
+    return c.json({ name: row?.name ?? input.name ?? productName, postalAddress: row?.postal_address ?? null }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/settings/ses', operationId: 'getSesSettings', tags: ['Settings'], security, request: { query: regionQuery }, responses: { 200: response(accountSchema), ...errors } }), async c => { const a = workspaceActor(c); return c.json(await account(c.env,a.workspaceId,c.req.valid('query').region), 200); });
   app.openapi(createRoute({ method: 'get', path: '/v1/domains', operationId: 'listDomains', description: 'MX returns persisted DNS records and background verification status without AWS calls. Self-hosted installations refresh up to ten identities unless refresh=false.', tags: ['Domains'], security, request: { query: PageQuery.extend({ limit: z.coerce.number().int().min(1).max(10).default(5), region: z.string().optional(), refresh: z.enum(['true', 'false']).default('true') }).openapi('ListDomainsQuery') }, responses: { 200: response(DomainPage), ...errors } }), async c => {
