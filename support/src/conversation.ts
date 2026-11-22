@@ -72,7 +72,9 @@ const helpLine = (origin: string) => `For anything about your account, sign in t
 /** What the email model is told when it reaches for an account tool in a general (unverified) turn. */
 const GENERAL_ONLY = `Email answers are general: you can’t see or change any ${productName} account from email. Answer from what you know about ${productName}; the reply ends with a line (added for you) telling them to sign in and press Help for anything about their account.`;
 /** What any email turn is told when it reaches for a change, a note or content access. */
-const EMAIL_READS_ONLY = `By email you only read the account. For any change, tell them to sign in to ${productName}, open Help in the dashboard and ask there: they confirm it on the card. Notes and message content are for a chat too.`;
+const EMAIL_READS_ONLY = `By email you read only the account's status, domains and sending. Billing, API keys, the activity log, request logs and webhooks are answered in Help in the dashboard, and so is any change: tell them to sign in to ${productName}, open Help and ask there (they confirm a change on the card). Notes and message content are for a chat too.`;
+/** The only /v1/support reads an email conversation makes: the account's status, domains and sending (Nightmail refuses the rest for email too). */
+const EMAIL_ROUTES = /^\/v1\/support\/(?:context|workspaces|domains|domains\/[^/]+\/health|standing|emails|emails\/[^/]+|emails\/[^/]+\/lint|events|deliverability\/(?:metrics|bounces)|screen|campaigns|campaigns\/[^/]+|campaigns\/[^/]+\/lint|audience\/health|scope)$/;
 const ACCESS_CHANGED = 'This conversation ended because your access to a workspace changed. Open Help to start a new one.';
 /** A chat from before the stamp: it ends at its next message. */
 const LEGACY_ENDED = 'This conversation has ended. Open Help to start a new one.';
@@ -362,13 +364,15 @@ export class SupportConversation extends DurableObject<Env> {
   }
   /**
    * Every account request: a /v1/support GET (or a POST to scope, notes, actions or a domain's re-check) stamped with this
-   * conversation. An email conversation only reads, and narrows its workspace: here, and again in Nightmail. It reads no
-   * notes and no proposals (Nightmail answers whom an unbound one is for: nobody).
+   * conversation. An email conversation reads only the account's status, domains and sent mail (EMAIL_ROUTES), and narrows
+   * its workspace: here, and again in Nightmail. It reads no billing, activity, request logs, webhooks, notes or proposals,
+   * and no received mail (Nightmail answers whom an unbound one is for: nobody).
    */
   private stamped<T = unknown>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<PlatformReply<T>> {
     if (this.meta()?.channel === 'email') {
-      const route = path.split('?')[0]!;
-      if (/^\/v1\/support\/(?:notes|actions)(?:\/|$)/.test(route) || (method === 'POST' && route !== '/v1/support/scope')) return Promise.reject(new ToolFailure(EMAIL_READS_ONLY));
+      const [route = '', query = ''] = path.split('?');
+      const allowed = method === 'GET' ? EMAIL_ROUTES.test(route) && new URLSearchParams(query).get('direction') !== 'received' : route === '/v1/support/scope';
+      if (!allowed) return Promise.reject(new ToolFailure(EMAIL_READS_ONLY));
     }
     return this.env.BANE.request<T>(this.own(), method, path, body);
   }
@@ -421,7 +425,8 @@ export class SupportConversation extends DurableObject<Env> {
     try {
       const reply = await this.stamped('GET', `/v1/support/context?workspaceId=${encodeURIComponent(workspace)}`);
       if (reply.status !== 200) return null;
-      this.context = { workspaceId: workspace, at, text: `<account read="${new Date(at).toISOString().slice(0, 16)}Z">\n${toolResult(reply.body, this.hidden())}\n</account>` };
+      const body = meta.channel === 'email' ? emailView('/v1/support/context', reply.body) : reply.body;
+      this.context = { workspaceId: workspace, at, text: `<account read="${new Date(at).toISOString().slice(0, 16)}Z">\n${toolResult(body, this.hidden())}\n</account>` };
       return this.context.text;
     } catch (error) { logError(error, { event: 'support', code: 'CONTEXT_READ_FAILED' }, 'warn'); return null; }
   }
@@ -1171,8 +1176,10 @@ export class SupportConversation extends DurableObject<Env> {
         // Only Nightmail's stamp reads: a conversation it never registered has no account access at all.
         if (!meta.registered) throw new ToolFailure('You have no account access in this conversation. Answer general questions only.');
         const reply = await this.stamped('GET', path);
-        if (reply.status === 200) return reply.body;
+        if (reply.status === 200) return meta.channel === 'email' ? emailView(path, reply.body) : reply.body;
         const code = codeOf(reply.body) ?? `HTTP_${reply.status}`;
+        // Nightmail's refusal of a chat's read for email: answered in Help, and access goes on.
+        if (reply.status === 403 && code === 'SUPPORT_CHAT_ONLY') throw new ToolFailure(EMAIL_READS_ONLY);
         // Access to the account ended during a verified email turn: it stops, and its answer is held (never sent).
         if (reply.status === 403 && this.emailTurn?.verified) { this.emailTurn.lost = true; this.emailTurn.stop.abort(); throw new ToolFailure('Stopped: access to this account ended.'); }
         if (reply.status === 429) throw new ToolFailure(`${productName}’s support read budget is spent for this minute. Wait and try fewer, narrower calls.`);
@@ -2033,6 +2040,23 @@ function receivedOn(at: string | null | undefined) {
   if (!d || Number.isNaN(d.getTime())) return null;
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()} at ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`;
+}
+/**
+ * What an email conversation keeps of a read: the account's status, domains and sending, never its activity trail, webhook
+ * failures, request IDs, handoff or API-key count (Nightmail leaves them out for email too). Other reads pass unchanged.
+ */
+function emailView(path: string, body: unknown): unknown {
+  const route = path.split('?')[0], record = (v: unknown) => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, any> : null;
+  const keyless = (w: unknown) => { const ws = record(w), counts = record(ws?.counts); if (!ws || !counts) return w; const { apiKeys: _keys, ...rest } = counts; return { ...ws, counts: rest }; };
+  const b = record(body);
+  if (!b) return body;
+  if (route === '/v1/support/context') {
+    const failures = record(b.recentFailures);
+    return { user: b.user, workspaces: Array.isArray(b.workspaces) ? b.workspaces.map(keyless) : [], domains: b.domains ?? [], standing: b.standing ?? [], openEnforcement: b.openEnforcement ?? [],
+      recentFailures: failures ? { since: failures.since, sends: failures.sends ?? [], bounces: failures.bounces ?? [] } : null };
+  }
+  if (route === '/v1/support/workspaces' && Array.isArray(b.data)) return { ...b, data: b.data.map(keyless) };
+  return body;
 }
 const dmarcOf = (message: Snapshot) => String(message.authentication?.dmarc ?? 'NONE').toUpperCase();
 /** The error code of a Nightmail reply's body, if it has one. */
