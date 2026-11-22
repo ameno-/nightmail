@@ -10382,11 +10382,15 @@ describe('Newsletters', () => {
   });
 
   // The probe, the exact count and the background page walk the members' primary key, which reads the same entries however
-  // large the list. With statistics taken while the list was small the planner prefers a bitmap scan of every member
-  // instead (src/newsletters.ts walkingTheKey). Here they are taken with 1,000 members, then the list grows to 12,000, and
-  // each of those statements is explained where it runs: on its connection, in its transaction, with its settings. What
-  // the default settings would choose in this state depends on the rest of the table, so it is reported, not asserted.
-  test('newsletters: the probe, the exact count and the background page walk the primary key, with statistics taken while the list was smaller', async t => {
+  // large the list, and the count and the page look up each member's contact in the contacts' primary key. With statistics taken
+  // while the list was small the planner prefers a bitmap scan of every member instead, and with contact statistics taken
+  // while the workspace had few contacts a merge or hash join over all of them, or a nested loop driven from them
+  // (src/newsletters.ts walkingTheKey). Here
+  // both are taken with 1,000 members and 100 of the workspace's contacts (beside 20,000 of another workspace's), then the
+  // list grows to 12,000 members with a contact each, and each of those statements is explained where it runs: on its
+  // connection, in its transaction, with its settings. What the default settings would choose in this state depends on the
+  // rest of the tables, so it is reported, not asserted.
+  test('newsletters: the probe, the exact count and the background page walk the primary keys, with statistics taken while the list and its contacts were fewer', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, run }) => {
       const { NEWSLETTER_READERS } = await import('./src/newsletters.js');
       const lowered = { ...NEWSLETTER_READERS }; t.after(() => { Object.assign(NEWSLETTER_READERS, lowered); });
@@ -10394,18 +10398,25 @@ describe('Newsletters', () => {
       const list = ok(await local('POST', '/v1/lists', { name: 'Grows' }), 201), other = ok(await local('POST', '/v1/lists', { name: 'Other' }), 201);
       const members = (listId: string, from: number, to: number) => db.query(`INSERT INTO audience_list_members(workspace_id,list_id,contact_id)
         SELECT $1,$2,'con_'||md5($2||n) FROM generate_series($3::int,$4::int) n`, [wid, listId, from, to]);
+      const contacts = (workspaceId: string, listId: string, from: number, to: number) => db.query(`INSERT INTO audience_contacts(id,workspace_id,email)
+        SELECT 'con_'||md5($2||n),$1,md5($2||n)||'@example.net' FROM generate_series($3::int,$4::int) n`, [workspaceId, listId, from, to]);
       await members(list.id, 1, 1000); await members(other.id, 1, 2000);
-      await db.query('ANALYZE audience_list_members');
-      await members(list.id, 1001, 12_000);
+      await contacts(wid, list.id, 1, 100); await contacts(`${wid}-other`, unique('elsewhere'), 1, 20_000);
+      await db.query('ANALYZE audience_list_members, audience_contacts');
+      await members(list.id, 1001, 12_000); await contacts(wid, list.id, 101, 12_000);
       ok(await local('POST', '/v1/newsletters', { listId: list.id, from: sender }), 201);
-      const scans = (plan: Json, out: string[] = []): string[] => {
-        if (plan['Relation Name'] === 'audience_list_members') out.push(`${plan['Node Type']}${plan['Index Name'] ? ` ${plan['Index Name']}` : ''}`);
+      // Per plan: how it reads the members, how it reads the contacts, and the joins.
+      const scans = (plan: Json, out: Record<'members' | 'contacts' | 'joins', string[]> = { members: [], contacts: [], joins: [] }) => {
+        const node = `${plan['Node Type']}${plan['Index Name'] ? ` ${plan['Index Name']}` : ''}`;
+        if (plan['Relation Name'] === 'audience_list_members') out.members.push(node);
+        if (plan['Relation Name'] === 'audience_contacts') out.contacts.push(`${node} (${plan['Index Cond'] ?? 'no condition'})`);
+        if (/Join|Nested Loop/.test(plan['Node Type'])) out.joins.push(plan['Node Type']);
         for (const child of plan.Plans ?? []) scans(child, out);
         return out;
       };
       const query = db.query.bind(db) as (...args: unknown[]) => Promise<any>;
       const explain = async (text: string, values?: unknown[]) => scans((await query({ text: `EXPLAIN (FORMAT JSON) ${text}`, values })).rows[0]['QUERY PLAN'][0].Plan);
-      const plans: [string, string[]][] = [];
+      const plans: [string, ReturnType<typeof scans>][] = [];
       t.mock.method(db, 'query', async (...args: unknown[]) => {
         const config = args[0] as { text?: string; values?: unknown[] } | string, text = typeof config === 'string' ? config : config?.text ?? '';
         const label = /ORDER BY contact_id OFFSET/.test(text) ? 'probe' : /WITH page AS MATERIALIZED/.test(text) ? 'page' : null;
@@ -10419,10 +10430,19 @@ describe('Newsletters', () => {
       await run('audience.newsletterReaders'); await run('audience.newsletterReaders');
       // A large read's probe; a small read's probe and exact count; the job's first two pages of 5,000.
       assert.deepEqual(plans.map(([label]) => label), ['probe', 'probe', 'page', 'page', 'page']);
-      for (const [label, nodes] of plans) assert.ok(nodes.length && nodes.every(node => /^Index (Only )?Scan audience_list_members_pkey$/.test(node)), `${label}: ${nodes.join(', ')}`);
+      for (const [label, { members: read, contacts: looked, joins }] of plans) {
+        assert.ok(read.length && read.every(node => /^Index (Only )?Scan audience_list_members_pkey$/.test(node)), `${label}: ${read.join(', ')}`);
+        // The count and the pages: a nested loop that looks up each member's contact in the contacts' primary key, one entry
+        // per member. Never a merge or hash join, or a loop driven from the contacts, which read the workspace's contacts.
+        if (label === 'page') assert.ok(looked.length === 1 && looked[0] === 'Index Scan audience_contacts_pkey ((id = p.contact_id))' && joins.every(join => join === 'Nested Loop'), `${label}: ${[...looked, ...joins].join(', ')}`);
+      }
       // Only those statements: everything after them plans with the defaults again.
-      assert.deepEqual((await query("SELECT current_setting('enable_bitmapscan') AS bitmap, current_setting('enable_seqscan') AS seq")).rows[0], { bitmap: 'on', seq: 'on' });
-      t.diagnostic(`The probe with the default settings in this state: ${(await explain('SELECT 1 FROM audience_list_members WHERE workspace_id = $1 AND list_id = $2 ORDER BY contact_id OFFSET 10000 LIMIT 1', [wid, list.id])).join(', ')}`);
+      assert.deepEqual((await query("SELECT current_setting('enable_bitmapscan') AS bitmap, current_setting('enable_seqscan') AS seq, current_setting('enable_hashjoin') AS hash, current_setting('enable_mergejoin') AS merge")).rows[0],
+        { bitmap: 'on', seq: 'on', hash: 'on', merge: 'on' });
+      const page = (await explain(`WITH page AS MATERIALIZED (SELECT m.contact_id FROM audience_list_members m WHERE m.workspace_id = $1 AND m.list_id = $2 ORDER BY m.contact_id LIMIT 5000)
+        SELECT count(*) FROM page p JOIN audience_contacts c ON c.workspace_id = $1 AND c.id = p.contact_id`, [wid, list.id]));
+      const probe = await explain('SELECT 1 FROM audience_list_members WHERE workspace_id = $1 AND list_id = $2 ORDER BY contact_id OFFSET 10000 LIMIT 1', [wid, list.id]);
+      t.diagnostic(`With the default settings in this state the probe reads the members by ${probe.members.join(', ')}; a page reads them by ${page.members.join(', ')} and joins the contacts by ${[...page.joins, ...page.contacts].join(', ')}`);
     });
   });
 
