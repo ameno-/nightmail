@@ -596,11 +596,11 @@ function AudiencePicker({ campaign, disabled }: { campaign: Campaign; disabled?:
 }
 
 // Where the campaign goes: the list (and segment) by name, never by id.
-function AudienceSource({ listId, segmentId }: { listId: string; segmentId: string | null }) {
+function AudienceSource({ listId, segmentId, prefix }: { listId: string; segmentId: string | null; prefix?: string }) {
   const list = useApiQuery(['lists', listId], (api, signal) => api.lists.get(listId, signal), { enabled: Boolean(listId) })
   const segment = useApiQuery(['segments', segmentId ?? ''], (api, signal) => api.segments.get(segmentId!, signal), { enabled: Boolean(segmentId) })
   if (!listId) return <p className="campaign-audience-source muted">No list chosen yet.</p>
-  return <p className="campaign-audience-source" title={list.data?.name}>{list.data ? <Link to={`/audience/lists/${encodeURIComponent(listId)}`}>{list.data.name}</Link> : <SkeletonText width={120} />}{segmentId && <span className="muted"> · only {segment.data?.name ?? 'segment'}</span>}</p>
+  return <p className="campaign-audience-source" title={list.data?.name}>{prefix}{list.data ? <Link to={`/audience/lists/${encodeURIComponent(listId)}`}>{list.data.name}</Link> : <SkeletonText width={120} />}{segmentId && <span className="muted"> · only {segment.data?.name ?? 'segment'}</span>}</p>
 }
 
 function CampaignResults({ campaign }: { campaign: Campaign }) {
@@ -810,13 +810,10 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
     <div className="campaign-review-layout">
       <section className="campaign-fields campaign-recipients">
         {campaign.delivery?.error && <p className="campaign-note" data-tone="danger" role="alert">{campaign.delivery.error.message}</p>}
-        <SectionHeader title={scheduledView ? 'Recipients' : 'Delivery'} actions={<div className="cluster">{cancellable && <CancelCampaignButton campaign={campaign} />}<Button variant="secondary" size="sm" onClick={refresh} disabled={refreshing} title="This page also updates by itself">Refresh</Button></div>} />
+        {!scheduledView && <SectionHeader title="Delivery" actions={finished ? undefined : <div className="cluster">{cancellable && <CancelCampaignButton campaign={campaign} />}<Button variant="secondary" size="sm" onClick={refresh} disabled={refreshing} title="This page also updates by itself">Refresh</Button></div>} />}
         {/* Eligible recipients is matched contacts less the suppressed and not subscribed lines under it. */}
         {<>
-          {scheduledView ? <div className="campaign-audience-summary">
-            <div className="campaign-summary-line"><span>Recipients, frozen when scheduled</span><span>{number(campaign.delivery?.total ?? campaign.recipients)}</span></div>
-            <AudienceSource listId={campaign.listId} segmentId={campaign.segmentId} />
-          </div> : <>
+          {scheduledView ? <AudienceSource listId={campaign.listId} segmentId={campaign.segmentId} prefix="To " /> : <>
             <AudienceSource listId={campaign.listId} segmentId={campaign.segmentId} />
             <CampaignPacing key={`${campaign.id}:${campaign.delivery?.pacing?.perDay ?? ''}:${campaign.delivery?.pacing?.autoPause ?? ''}:${campaign.delivery?.pacing?.rateShare ?? ''}`} campaign={campaign} />
             {finished ? <CampaignResults campaign={campaign} /> : campaign.counts ? <CampaignProgress campaign={campaign} /> : <div className="campaign-audience-summary"><div className="campaign-summary-line"><span>Recipients</span><span>{number(campaign.recipients)}</span></div></div>}
@@ -825,7 +822,6 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
         </>}
       </section>
       <section className="campaign-fields campaign-message">
-        <SectionHeader title="Message" />
         <dl className="ui-facts campaign-message-details"><dt>From</dt><dd><SenderLines name={campaign.fromName} address={campaign.fromEmail} /></dd>{campaign.replyTo.length > 0 && <><dt>Reply to</dt><dd><AddressList values={campaign.replyTo} /></dd></>}<dt>Subject</dt><dd>{campaign.subject}</dd>{campaign.previewText && <><dt>Inbox preview</dt><dd>{campaign.previewText}</dd></>}</dl>
         <CampaignRenderedPreview campaign={campaign} transform={previewHtml} />
       </section>
