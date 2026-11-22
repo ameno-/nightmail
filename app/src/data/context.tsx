@@ -140,9 +140,9 @@ function WaitlistPage({ busy, error, onSwitch }: { busy: boolean; error: unknown
 }
 /** Pages anyone can open, signed in or not. Continuing an emailed support request (features/support/continue.tsx) is one:
  *  a person signed in without a workspace has no /v1/me but can confirm it, and someone signed out signs in from it. */
-export const isPublicPath = (path: string) => path === '/docs' || path.startsWith('/docs/') || path === '/legal' || path.startsWith('/legal/') || path.startsWith('/support/continue/')
+export const isPublicPath = (path: string) => path === '/docs' || path.startsWith('/docs/') || path === '/legal' || path.startsWith('/legal/') || path === '/pricing' || path.startsWith('/compare/') || path.startsWith('/support/continue/')
 export function ApiProvider({ children }: { children: ReactNode }) {
-  // The docs and the legal pages are public: they render signed out, and /v1/me only adds the workspace's context.
+  // The docs, the legal pages and the price pages are public: they render signed out, and /v1/me only adds the workspace's context.
   const { pathname } = useLocation(), publicRoute = isPublicPath(pathname)
   const navigate = useNavigate()
   // A sign-in (or a return from a provider) this tab started names the account the page opens as; the tab then stays

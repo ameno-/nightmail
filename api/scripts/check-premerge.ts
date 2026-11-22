@@ -271,6 +271,104 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
   if (failed === before) console.log(`BYO templates: ${head.length} published, ${head.filter(n => !baseList.includes(n)).length} new.`);
 }
 
+// 9. Price pages (app/src/features/pricing). Every Nightmail figure the pages show must be what the billing rates
+// (src/billing/rates.ts) charge for the usage beside it, and every competitor figure in the pages' data must name the
+// vendor's page it was read on, the day and the text. The pages are rendered as React renders them for a browser (in a
+// child process with the app's JSX settings), at their own sizes and at inputs a visitor might type.
+{
+  const before = failed, file = 'app/src/features/pricing/prices.ts'
+  const { RATES, CREDIT, STORAGE_AFTER_DAYS, perThousandUsd } = await import('../src/billing/rates.js')
+  const n = (value: number) => value.toLocaleString('en-US')
+  // Written again here, apart from the pages' own code: micro-cents to dollars, half up, four places under a cent.
+  const dollarsOf = (uc: bigint) => { const places = uc > 0n && uc < 1_000_000n ? 4 : 2, unit = 10n ** BigInt(8 - places), v = ((uc + unit / 2n) / unit).toString().padStart(places + 1, '0'); return '$' + n(Number(v.slice(0, -places))) + '.' + v.slice(-places) }
+  const charged = (sent: number, received: number) => BigInt(Math.max(0, sent - RATES.freeSentEmails) + Math.max(0, received - RATES.freeReceivedEmails)) * RATES.emailUc
+  // What a typed value means: its digits, at most a billion.
+  const typed = (value: string) => { const digits = value.replace(/\D/g, ''); return digits ? Math.min(Number(digits.slice(0, 10)), 1e9) : 0 }
+  const inputs: Record<string, string>[] = [
+    {}, { sent: '20000', received: '0', contacts: '5000', teammates: '3' }, { sent: '400000', received: '0', contacts: '100000', teammates: '3' },
+    { sent: '4999', received: '5000', contacts: '0', teammates: '1' }, { sent: '5001', received: '5001', contacts: '250', teammates: '1' },
+    { sent: '6000', received: '0', contacts: '12000', teammates: '4' }, { sent: '55000', received: '100', contacts: '5000', teammates: '3' },
+    { sent: '101000', received: '9000', contacts: '1000', teammates: '6' }, { sent: '3000001', received: '0', contacts: '150000', teammates: '2' },
+    { sent: 'abc', received: '-5', contacts: '1e9', teammates: '' }, { sent: '99999999999999', received: '1,234,567', contacts: '0.5', teammates: '99999999999' },
+  ]
+  const script = [
+    "import { createElement as h } from 'react'", "import { renderToStaticMarkup } from 'react-dom/server'", "import { MemoryRouter } from 'react-router'",
+    "const content = await import('./src/features/pricing/content.tsx'), prices = await import('./src/features/pricing/prices.ts')",
+    'const at = (path, element) => renderToStaticMarkup(h(MemoryRouter, { initialEntries: [path] }, element))',
+    `const calculator = ${JSON.stringify(inputs)}.map(input => { const path = '/pricing?' + new URLSearchParams(input); return { input, path, html: at(path, h(content.Calculator)) } })`,
+    "const compare = ['mailchimp', 'resend'].map(id => ({ id, html: at('/compare/' + id, h(content.Compare, { comparison: prices.comparisons[id] })) }))",
+    'const { OFFERS, notCheaper, comparisons, ses, resendOverage, resendReceived } = prices',
+    "process.stdout.write(JSON.stringify({ calculator, compare, data: { OFFERS, notCheaper, comparisons, ses, resendOverage, resendReceived } }, (_k, v) => typeof v === 'bigint' ? String(v) : v))",
+  ].join('\n')
+  type Rendered = { calculator: { input: Record<string, string>; path: string; html: string }[]; compare: { id: string; html: string }[]; data: unknown }
+  let out: Rendered | null = null
+  try {
+    out = JSON.parse(execFileSync('node', ['--import', import.meta.resolve('tsx'), '--input-type=module', '-e', script], { cwd: new URL('app/', root), encoding: 'utf8', maxBuffer: 64 << 20, stdio: ['ignore', 'pipe', 'pipe'] })) as Rendered
+  } catch (error) {
+    if (/Cannot find (module|package) '(react|react-dom|react-router|lucide-react)/.test(String((error as { stderr?: string }).stderr))) warn('Price pages', 'Skipped: run bun install in app/ to render the price pages.')
+    else fail('Price pages', `Rendering the price pages failed: ${String((error as { stderr?: string }).stderr ?? error).slice(0, 600)}`, file)
+  }
+  if (out) {
+    const text = (html: string) => html.replace(/<[^>]+>/g, ' ').replace(/&#x27;|&#39;/g, "'").replace(/&amp;/g, '&').replace(/\s+/g, ' ')
+    const figures = (html: string) => [...html.matchAll(/data-nightmail-sent="(\d+)" data-nightmail-received="(\d+)">([^<]*)</g)].map(m => ({ sent: Number(m[1]), received: Number(m[2]), shown: m[3]! }))
+    const checkFigures = (where: string, html: string, least: number) => {
+      const found = figures(html)
+      if (found.length < least) fail('Price pages', `${where} shows ${found.length} Nightmail figures marked with the usage they price, not at least ${least}: mark each with data-nightmail-sent and data-nightmail-received (content.tsx, Ours).`, file)
+      for (const f of found) if (f.shown !== dollarsOf(charged(f.sent, f.received))) fail('Price pages', `${where} shows ${f.shown} for ${n(f.sent)} sent and ${n(f.received)} received; src/billing/rates.ts charges ${dollarsOf(charged(f.sent, f.received))}.`, file)
+    }
+    // The rates and terms the pages quote, as the billing code has them.
+    const minTopUp = '$' + n(CREDIT.minTopUpCents / 100)
+    const terms = ['$' + perThousandUsd(RATES.emailUc) + ' per 1,000', n(RATES.freeSentEmails) + ' of each free', dollarsOf(RATES.storageUcPerGbMonth) + ' per GB a month after ' + Number(RATES.freeStorageBytes / 1_000_000_000n) + ' GB free',
+      'past ' + STORAGE_AFTER_DAYS + ' days', 'Top-ups start at ' + minTopUp + ' and expire ' + CREDIT.expiresAfterMonths + ' months after purchase']
+    for (const { input, path, html } of out.calculator) {
+      const page = text(html), want = { sent: typed(input.sent ?? '100000'), received: typed(input.received ?? '0') }
+      checkFigures(`The calculator at ${path}`, html, 4)
+      const total = figures(html)[0]
+      if (total && (total.sent !== want.sent || total.received !== want.received)) fail('Price pages', `The calculator at ${path} priced ${n(total.sent)} sent and ${n(total.received)} received, not the ${n(want.sent)} and ${n(want.received)} typed.`, file)
+      for (const term of terms) if (!page.includes(term)) fail('Price pages', `The calculator at ${path} doesn't say “${term}”, as src/billing/rates.ts has it.`, file)
+      const monthly = charged(want.sent, want.received), floor = monthly > 0n && monthly * 12n < BigInt(CREDIT.minTopUpCents) * 1_000_000n
+      if (floor !== page.includes(`at least ${minTopUp} a year`)) fail('Price pages', `The calculator at ${path} ${floor ? 'doesn’t say' : 'says'} that a year costs at least the smallest top-up, at ${dollarsOf(monthly)} a month.`, file)
+      if (/\bNaN\b|undefined|Infinity/.test(page)) fail('Price pages', `The calculator at ${path} shows NaN, undefined or Infinity.`, file)
+    }
+    for (const { id, html } of out.compare) {
+      checkFigures(`Nightmail vs ${id}`, html, 3)
+      for (const term of terms.slice(2)) if (!text(html).includes(term)) fail('Price pages', `Nightmail vs ${id} doesn't say “${term}”, as src/billing/rates.ts has it.`, file)
+      if (/Not (published|checked)/.test(text(html))) fail('Price pages', `Nightmail vs ${id} has a size without a verified competitor price: compare only at sizes the data has.`, file)
+    }
+    // Every competitor figure (a tier, a per-email rate, a fact that names a price) and its source: the vendor's page
+    // (https), the day it was read (not in the future) and the text it was read from. Facts without a source are
+    // Nightmail's own (a comparison's \`ours\`).
+    const sources: [string, Record<string, unknown>][] = []
+    const walk = (value: unknown, at: string) => {
+      if (!value || typeof value !== 'object') return
+      if (Array.isArray(value)) return value.forEach((item, i) => walk(item, `${at}[${i}]`))
+      const record = value as Record<string, unknown>, cited = Object.keys(record).some(key => key === 'source' || key.endsWith('Source'))
+      const price = 'cents' in record || 'ucPerEmail' in record || ('text' in record && /\$\d/.test(String(record.text)) && !/\.ours\[\d+\]$/.test(at))
+      if (price && !cited) fail('Price pages', `${at} is a competitor price with no source.`, file)
+      for (const [key, item] of Object.entries(record)) {
+        if (key === 'source' || key.endsWith('Source') || key === 'resendOverage' || key === 'resendReceived') sources.push([`${at}.${key}`, (item ?? {}) as Record<string, unknown>])
+        walk(item, `${at}.${key}`)
+      }
+    }
+    walk(out.data, 'prices')
+    const today = new Date().toISOString().slice(0, 10)
+    for (const [at, source] of sources) {
+      let url: URL | null = null
+      try { url = new URL(String(source.url)) } catch { url = null }
+      if (url?.protocol !== 'https:') fail('Price pages', `${at} has no https link to the vendor's page.`, file)
+      if (typeof source.checked !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(source.checked) || Number.isNaN(Date.parse(source.checked)) || source.checked > today) fail('Price pages', `${at} has no valid day it was checked (YYYY-MM-DD, not in the future).`, file)
+      if (typeof source.quote !== 'string' || source.quote.trim().length < 8) fail('Price pages', `${at} doesn't quote the text it was read from.`, file)
+    }
+    // On the pages: each competitor row with a price names the day it was checked and links the vendor's page (a row with
+    // none links it); a comparison table says it under the table.
+    const dated = /Checked \d{1,2} \w{3} \d{4} on <a href="https:\/\//
+    for (const { path, html } of out.calculator) for (const row of html.split(/(?=<li [^>]*data-offer=)/).slice(1).map(part => part.split('</li>')[0]!))
+      if (!(/Not checked/.test(row) ? /See <a href="https:\/\//.test(row) : dated.test(row))) fail('Price pages', `A competitor row on the calculator at ${path} has no date and link to the vendor's page: ${text(row).slice(0, 80)}`, file)
+    for (const { id, html } of out.compare) if (!dated.test(html.split('</table>')[1] ?? '')) fail('Price pages', `Nightmail vs ${id} doesn't give the day its prices were checked and a link to the vendor's page under the table.`, file)
+    if (failed === before) console.log(`Price pages: ${out.calculator.length} calculator inputs and ${out.compare.length} comparisons match src/billing/rates.ts; ${sources.length} competitor sources have a link, a day and a quote.`)
+  }
+}
+
 if (failed) {
   console.log(`\n${failed} pre-merge check${failed === 1 ? '' : 's'} failed. docs/ci.md explains each one and how to fix it.`);
   process.exitCode = 1;
