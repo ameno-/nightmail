@@ -94,6 +94,8 @@ export interface DispatcherOptions {
   until?: number;
   /** Refresh quota from the provider at most this often. */
   quotaRefreshMs?: number;
+  /** For the DISPATCH_RUN line: how long after the wake that started it this run began (src/dispatcher-do.ts). */
+  wakeMs?: number;
 }
 export interface DispatcherReport { claimed: number; sent: number; deferred: number; skipped: number; batches: number; idle: boolean; durationMs: number; timings: Record<string, number>; statements: number; quotaRetryAt?: number; paceRetryAt?: number }
 
@@ -1302,7 +1304,7 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
   if (gate.nextAllowedAt >= Date.now() + MAX_PRE_SEND_MS) { counters.paceRetryAt = Math.ceil(gate.nextAllowedAt); counters.idle = true; }
   counters.durationMs = Date.now() - started;
   // Idle polls are silent; runs that moved mail (or hit the budget) are the throughput record.
-  if (counters.claimed || !counters.idle) log('info', { code: 'DISPATCH_RUN', accountId: options.accountId, region: options.region, shard: options.shard?.index ?? 0, ...counters, quota: gate.quota?.maxSendRate ?? null, rate: shardRate(gate, options.shard, pacing), braked: (gate.brakeUntil ?? 0) > Date.now() });
+  if (counters.claimed || !counters.idle) log('info', { code: 'DISPATCH_RUN', accountId: options.accountId, region: options.region, shard: options.shard?.index ?? 0, ...counters, quota: gate.quota?.maxSendRate ?? null, rate: shardRate(gate, options.shard, pacing), braked: (gate.brakeUntil ?? 0) > Date.now(), wakeMs: options.wakeMs });
   // The run's classifier requests as content_screen_calls rows (src/screen-calls.ts): now, with every lane and the priority
   // loop finished and nothing leased waiting on SES. At most two seconds, and never throws.
   await flushScreenCalls(runtime.db);
