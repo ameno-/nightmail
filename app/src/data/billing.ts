@@ -76,7 +76,7 @@ const DECLINES: Record<string, string> = {
 }
 export const declineText = (code: string) => DECLINES[code] ?? 'The last charge failed'
 
-/** The one-word state of the balance, for Plan & usage and the Billing header. */
+/** The one-word state of the balance, for Settings → Billing. */
 export function balanceState(b: Pick<BillingSummary, 'mode' | 'state'>): { label: string; tone: 'success' | 'warning' | 'danger' | 'neutral' } {
   if (b.mode === 'exempt') return { label: 'Free plan', tone: 'success' }
   if (b.state.receiving === 'held') return { label: 'Receiving held', tone: 'danger' }

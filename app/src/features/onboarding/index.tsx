@@ -253,7 +253,7 @@ function connectionError(error: unknown) {
 
 // Each option is its name and the one fact that decides between them; the setup itself shows on the next step.
 function ChooseSending({ onChoose, error }: { onChoose: (kind: ConnectionKind) => void; error: unknown }) {
-  // Fixed copy, so the choice never re-wraps when a request lands; the exact steps are in Settings → Plan & usage.
+  // Fixed copy, so the choice never re-wraps when a request lands; the exact steps are in Settings → Billing, under Daily limit.
   return <div className="onboarding onboarding--choice">
     <div className="onboarding-intro onboarding-intro--center onb-rise" style={rise(0)}>
       <h1 className="onboarding-title">Where should your email send from?</h1>

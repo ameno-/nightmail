@@ -16,7 +16,6 @@ import { openScoreAbout } from '../../lib/score-about'
 import { useCompactShell } from '../../lib/media'
 import { AdminOnly } from './admin-only'
 import { TeamSkeleton } from './skeletons'
-import { PlanUsage } from './usage'
 import { BillingSection } from './billing'
 import { WebhooksSection } from './webhooks'
 import { ActivitySection } from './activity'
@@ -29,23 +28,30 @@ import { hostedHosts, productName } from '../../../../api/src/brand'
 import { PostalAddressDialog, postalAddressLine } from '../../components/PostalAddress'
 
 // Hosted settings: a grouped rail and one section at a time. Settings are rows, the label on the left and the
-// control on the right, each 53px tall so values loading in never move anything. Old #workspace and #webhooks links still land.
-type SectionKey = 'general' | 'members' | 'sending' | 'webhooks' | 'activity' | 'usage' | 'billing' | 'account'
+// control on the right, each 53px tall so values loading in never move anything. Old links still land: #workspace on
+// General, and #usage (Plan & usage, now part of Billing) on Billing.
+type SectionKey = 'general' | 'members' | 'sending' | 'webhooks' | 'activity' | 'billing' | 'account'
+const moved: Record<string, SectionKey> = { workspace: 'general', usage: 'billing' }
 // Members see every section in the rail: owner and admin ones carry a lock and open a short explanation instead of
 // controls they can't use, so nothing is silently missing. Every section takes the whole panel, to the same right edge
 // as the app's other tables.
 const groups: { title: string; items: { key: SectionKey; label: string; admin?: boolean }[] }[] = [
-  { title: 'Workspace', items: [{ key: 'general', label: 'General' }, { key: 'members', label: 'Members', admin: true }, { key: 'sending', label: 'Sending', admin: true }, { key: 'webhooks', label: 'Webhooks', admin: true }, { key: 'activity', label: 'Activity', admin: true }, { key: 'usage', label: 'Plan & usage' }, { key: 'billing', label: 'Billing', admin: true }] },
+  { title: 'Workspace', items: [{ key: 'general', label: 'General' }, { key: 'members', label: 'Members', admin: true }, { key: 'sending', label: 'Sending', admin: true }, { key: 'webhooks', label: 'Webhooks', admin: true }, { key: 'activity', label: 'Activity', admin: true }, { key: 'billing', label: 'Billing' }] },
   { title: 'You', items: [{ key: 'account', label: 'Account' }] },
 ]
-const items = groups.flatMap(group => group.items)
 
 export function HostedSettings() {
   const { hash } = useLocation()
   const { canAdminister } = useWorkspaceAccess()
+  const identity = useSession()?.identity
+  // Sending is a connected AWS account's section (its role, its health, Disconnect), and the way to one where that is
+  // offered. Hosted mail has nothing to set there, so its rail has no Sending and an old #sending link opens General.
+  const ownAws = identity?.connection?.kind === 'byo' || identity?.byo === true
+  const shown = groups.map(group => ({ ...group, items: group.items.filter(item => item.key !== 'sending' || ownAws) }))
+  const items = shown.flatMap(group => group.items)
   // A malformed hash (/settings#%) falls back to General instead of throwing during render.
   const requested = (() => { try { return decodeURIComponent(hash.slice(1)) } catch { return '' } })()
-  const section = (requested === 'workspace' ? 'general' : items.find(item => item.key === requested)?.key) ?? 'general'
+  const section = items.find(item => item.key === (moved[requested] ?? requested))?.key ?? 'general'
   const locked = (item: typeof items[number]) => !canAdminister && Boolean(item.admin)
   const current = items.find(item => item.key === section)!
   // On a phone the rail is one scrolling row: the selected section's link scrolls into it (the page itself doesn't move).
@@ -59,7 +65,7 @@ export function HostedSettings() {
   return <div className="hosted-settings">
     <nav className="settings-rail" aria-label="Settings">
       <h1 className="settings-rail__title">Settings</h1>
-      <div ref={rail} className="settings-rail__groups">{groups.map(group => <div key={group.title} className="settings-rail__group">
+      <div ref={rail} className="settings-rail__groups">{shown.map(group => <div key={group.title} className="settings-rail__group">
         {group.items.map(item => <Link key={item.key} to={`/settings#${item.key}`} replace aria-current={item.key === section ? 'page' : undefined} data-locked={locked(item) || undefined} title={locked(item) ? 'Owners and admins only' : undefined}>{item.label}{locked(item) && <Lock size={12} aria-label="Owners and admins only" />}</Link>)}
       </div>)}</div>
     </nav>
@@ -72,7 +78,6 @@ export function HostedSettings() {
           {section === 'sending' && <SendingRows />}
           {section === 'webhooks' && <WebhooksSection />}
           {section === 'activity' && <ActivitySection />}
-          {section === 'usage' && <PlanUsage row={Row} />}
           {section === 'billing' && <BillingSection row={Row} />}
           {section === 'account' && <AccountRows />}
         </>}
@@ -146,7 +151,7 @@ function SendingRows() {
       {kind === 'byo' && <Row title="AWS account">{current ? <code>{current.awsAccountId ?? '—'}</code> : <Skeleton width={93} height={20} />}</Row>}
       {kind === 'byo' && current?.templateVersion !== 'v4' && <ConnectedAccountRows connection={current ?? null} />}
       <ScoreRow />
-      {limit && limit.cap !== null && <Row title="Daily limit"><Link to="/settings#usage" replace className="settings-score" title={limitSummary(limit, evaluating)}><span>{number(limit.used)} / {number(limit.cap)}</span><span className="muted">Plan & usage</span><ArrowUpRight size={14} aria-hidden="true" /></Link></Row>}
+      {limit && limit.cap !== null && <Row title="Daily limit"><Link to="/settings#billing" replace className="settings-score" title={limitSummary(limit, evaluating)}><span>{number(limit.used)} / {number(limit.cap)}</span><span className="muted">Billing</span><ArrowUpRight size={14} aria-hidden="true" /></Link></Row>}
     </div>
     {/* Hosted mail is the only connection to switch to without an operator's go-ahead, and onboarding would start it again. */}
     {(kind === 'byo' || offerByo) && <DisconnectRow kind={kind} connection={current} />}
