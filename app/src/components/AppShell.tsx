@@ -1,6 +1,6 @@
 import { Component, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
-import { Link, NavLink, Outlet, useLocation, useNavigate, useNavigationType } from 'react-router'
-import { BookOpen, Ellipsis, Globe, Inbox, KeyRound, LayoutGrid, LifeBuoy, Lock, Plug, ScrollText, Send, Settings, ShieldCheck, Users } from 'lucide-react'
+import { Link, NavLink, Outlet, useLocation, useNavigate, useNavigationType, type NavLinkProps } from 'react-router'
+import { BookOpen, Ellipsis, Globe, Inbox, KeyRound, LayoutGrid, LifeBuoy, Lock, Newspaper, Plug, ScrollText, Send, Settings, ShieldCheck, Users } from 'lucide-react'
 import { useRegion, useSession, useWorkspaceAccess } from '../data/context'
 import { sidebarPaths, usePrefetchQueries, usePrefetchRoute, useRouteIntent } from '../data/prefetch'
 import { useRegionCatalog, useRegionDiscovery } from '../data/regions'
@@ -24,6 +24,7 @@ import { togglePrivacy } from '../lib/privacy'
 import { SupportHost, SupportTrigger, useSupportChat } from './SupportChat'
 import { notesModifierLabel, useUiNotesMode, useUiNotesShortcut } from '../lib/ui-notes-mode'
 import { productName } from '../../../api/src/brand'
+import { newsletterLinks, useNewsletters, useShownNewsletter } from '../features/newsletters/shared'
 
 // The sender score card (hosted): its code and data load with the shell, into a slot that already has its final size.
 const score = chunk(() => import('../features/score'))
@@ -48,7 +49,12 @@ const staffLinks: readonly NavItem[] = [['/support', 'Support'], ['/operator', '
 // button; the tab bar keeps the main ones visible and says where you are.
 const tabs = ['/overview', '/logs', '/receiving', '/campaigns']
 const icons: Record<string, ReactNode> = { '/overview': <LayoutGrid />, '/logs': <ScrollText />, '/receiving': <Inbox />, '/campaigns': <Send />, '/audience': <Users />, '/domains': <Globe />, '/api-keys': <KeyRound />, '/docs': <BookOpen />, '/settings': <Settings />, '/support': <LifeBuoy />, '/operator': <ShieldCheck /> }
+const iconOf = (path: string) => icons[path] ?? (path.startsWith('/newsletters') ? <Newspaper /> : null)
 const current = (path: string, pathname: string) => pathname === path || pathname.startsWith(`${path}/`)
+// A link of the navigation. `on`: undefined lets the address decide, as everywhere; a boolean decides for it.
+function Nav({ on, className, ...props }: Omit<NavLinkProps, 'className' | 'children' | 'style'> & { on?: boolean; className?: string; children: ReactNode }) {
+  return on === undefined ? <NavLink className={className} {...props} /> : <Link className={[className, on && 'active'].filter(Boolean).join(' ') || undefined} aria-current={on ? 'page' : undefined} {...props} />
+}
 export function AppShell() {
   const { regionId, setRegionId } = useRegion()
   const session = useSession()
@@ -84,13 +90,15 @@ export function AppShell() {
   const prefetchRoute = usePrefetchRoute()
   const intent = useRouteIntent()
   const prefetchQueries = usePrefetchQueries()
-  const latest = useRef({ prefetchRoute, pathname: location.pathname, canAdminister: access.canAdminister })
-  latest.current = { prefetchRoute, pathname: location.pathname, canAdminister: access.canAdminister }
+  // A newsletter is an item under its own name where Campaigns sits (features/newsletters/shared.ts has the rule).
+  const newsletters = newsletterLinks(useNewsletters())
+  const latest = useRef({ prefetchRoute, pathname: location.pathname, canAdminister: access.canAdminister, newsletters })
+  latest.current = { prefetchRoute, pathname: location.pathname, canAdminister: access.canAdminister, newsletters }
   const regionReady = access.multiTenant || Boolean(current)
   // The page in front of the user: its first-screen requests start with its code, not after it, on a cold load too.
   useEffect(() => {
     const path = latest.current.pathname
-    if (regionReady && (sidebarPaths as readonly string[]).includes(path)) void latest.current.prefetchRoute(path)
+    if (regionReady && ((sidebarPaths as readonly string[]).includes(path) || path.startsWith('/newsletters'))) void latest.current.prefetchRoute(path)
     if (access.multiTenant) { void score.preload().catch(() => {}); void prefetchQueries([queries.senderScore()]) }
   }, [regionReady])
   // Once the page in front of the user has settled, warm every other sidebar page one at a time (its code and
@@ -113,7 +121,7 @@ export function AppShell() {
     const idle = () => new Promise<void>(resolve => typeof requestIdleCallback === 'function' ? requestIdleCallback(() => resolve(), { timeout: 3000 }) : void setTimeout(resolve, 300))
     void (async () => {
       await new Promise(resolve => setTimeout(resolve, 600))
-      for (const path of sidebarPaths) {
+      for (const path of [...sidebarPaths, ...latest.current.newsletters.map(([path]) => path)]) {
         await visible()
         await idle()
         const { pathname, canAdminister, prefetchRoute } = latest.current
@@ -161,7 +169,7 @@ export function AppShell() {
     if (!access.multiTenant && regions.data && !current && enabled.length) setRegionId(enabled.find(region => region.region === preferred)?.region ?? enabled[0].region)
   }, [access.multiTenant, regions.data, current, enabled, setRegionId])
   // Docs pages name themselves (features/docs).
-  useEffect(() => { if (location.pathname === '/docs' || location.pathname.startsWith('/docs/')) return; document.title = `${[...navigation, ...staffLinks].find(([path]) => location.pathname.startsWith(path))?.[1] ?? productName.toLowerCase()} · ${productName.toLowerCase()}` }, [location.pathname])
+  useEffect(() => { if (location.pathname === '/docs' || location.pathname.startsWith('/docs/')) return; document.title = `${[...newsletters, ...navigation, ...staffLinks].find(([path]) => location.pathname.startsWith(path))?.[1] ?? productName.toLowerCase()} · ${productName.toLowerCase()}` }, [location.pathname, newsletters.map(([, title]) => title).join('\n')])
   // "/" jumps to the page's search box, as in most list-heavy tools, unless you are already typing somewhere.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -199,7 +207,10 @@ export function AppShell() {
     }
   }
   // Members see every page: owner and admin ones carry a lock and open a short note on who can use them.
-  const links: readonly NavItem[] = [...navigation, ...session?.identity?.operator || session?.identity?.staffSignIn ? staffLinks : []]
+  const links: readonly NavItem[] = [...navigation.flatMap(item => item[0] === '/campaigns' ? [...newsletters, item] : [item]), ...session?.identity?.operator || session?.identity?.staffSignIn ? staffLinks : []]
+  // An issue open in the composer or its review belongs to its newsletter: that item is marked, not Campaigns.
+  const shown = useShownNewsletter(), issueOf = shown && location.pathname.startsWith('/campaigns/') ? newsletters.find(([path]) => path === `/newsletters/${encodeURIComponent(shown)}`)?.[0] ?? (newsletters[0]?.[0] === '/newsletters' ? '/newsletters' : null) : null
+  const on = (path: string) => issueOf ? path === issueOf : undefined
   const locked = (path: string) => !access.canAdminister && adminOnly.has(path)
   const scoreHost = (scoreAbout.open || scoreAboutMounted) && <Suspense fallback={null}><ScoreAboutHost /></Suspense>
   const connectHost = (connecting || connectMounted) && <Suspense fallback={null}><ConnectAgentHost /></Suspense>
@@ -242,7 +253,7 @@ export function AppShell() {
     </header>
     {scoreHost}
     {main}
-    <TabBar links={links} intent={intent} footer={footer} locked={locked} connect={!access.multiTenant} />
+    <TabBar links={links} intent={intent} footer={footer} locked={locked} connect={!access.multiTenant} on={on} />
     {overlays}
   </div>
   return <div className={support.mode ? 'app-shell app-shell--support' : 'app-shell'}>
@@ -252,7 +263,7 @@ export function AppShell() {
       <ThemeToggle />
       <div className="sidebar-context">{context}</div>
       {/* Members see every page: owner and admin ones carry a lock and explain who can use them. */}
-      <nav className="main-navigation" aria-label="Main navigation">{links.map(([path, title]) => <NavLink key={path} to={path} {...locked(path) ? lockedProps : intent(path)}>{title}{locked(path) && <Lock size={12} aria-label="Owners and admins only" />}</NavLink>)}</nav>
+      <nav className="main-navigation" aria-label="Main navigation">{links.map(([path, title]) => <Nav key={path} to={path} on={on(path)} {...locked(path) ? lockedProps : intent(path)}><span className="main-navigation__title">{title}</span>{locked(path) && <Lock size={12} aria-label="Owners and admins only" />}</Nav>)}</nav>
       <div className="sidebar-footer"><button type="button" className="sidebar-connect" onPointerEnter={preloadConnectAgent} onFocus={preloadConnectAgent} onClick={openConnectAgent}>Connect an agent<Plug aria-hidden="true" /></button>{footer}</div>
     </aside>
     {scoreHost}
@@ -279,22 +290,22 @@ class PageErrorBoundary extends Component<{ resetKey: string; children: ReactNod
 const issued = new Set<string>()
 const lockedProps = { title: 'Owners and admins only', 'data-locked': true }
 // `connect`: Connect an agent closes More and opens. Hosted, it is in the account menu instead (AccountSwitcher).
-function TabBar({ links, intent, footer, locked, connect }: { links: readonly NavItem[]; intent: ReturnType<typeof useRouteIntent>; footer: ReactNode; locked: (path: string) => boolean; connect: boolean }) {
+function TabBar({ links, intent, footer, locked, connect, on }: { links: readonly NavItem[]; intent: ReturnType<typeof useRouteIntent>; footer: ReactNode; locked: (path: string) => boolean; connect: boolean; on: (path: string) => boolean | undefined }) {
   const location = useLocation(), navigate = useNavigate(), moreButton = useRef<HTMLButtonElement>(null)
   // Only an entry opened in this visit counts: a reload on it shows the page, not a stale sheet.
   const token = (location.state as { more?: string } | null)?.more
   const open = Boolean(token && issued.has(token))
   const more = links.filter(([path]) => !tabs.includes(path))
-  const inMore = more.some(([path]) => current(path, location.pathname))
+  const inMore = more.some(([path]) => on(path) ?? current(path, location.pathname))
   const show = () => { const next = `${Date.now()}:${Math.random()}`; issued.add(next); navigate({ pathname: location.pathname, search: location.search, hash: location.hash }, { state: { more: next } }) }
   const close = () => { if (open) navigate(-1) }
   return <>
     <nav className="tab-bar" aria-label="Main navigation">
-      {links.filter(([path]) => tabs.includes(path)).map(([path, title]) => <NavLink key={path} className="tab-bar__item" to={path} {...intent(path)}><span className="tab-bar__icon" aria-hidden="true">{icons[path]}</span><span className="tab-bar__label">{title}</span></NavLink>)}
+      {links.filter(([path]) => tabs.includes(path)).map(([path, title]) => <Nav key={path} className="tab-bar__item" to={path} on={on(path)} {...intent(path)}><span className="tab-bar__icon" aria-hidden="true">{iconOf(path)}</span><span className="tab-bar__label">{title}</span></Nav>)}
       <button ref={moreButton} type="button" className="tab-bar__item" aria-haspopup="dialog" aria-expanded={open} aria-current={inMore ? 'page' : undefined} data-active={inMore || open || undefined} onClick={show}><span className="tab-bar__icon" aria-hidden="true"><Ellipsis /></span><span className="tab-bar__label">More</span></button>
     </nav>
     <Sheet open={open} onOpenChange={next => { if (!next) close() }} title="More" hideTitle className="more-sheet" returnFocus={moreButton}>
-      <nav className="more-sheet__links" aria-label="More pages">{more.map(([path, title]) => <NavLink key={path} className="more-sheet__link" to={path} replace {...locked(path) ? lockedProps : intent(path)}><span className="more-sheet__icon" aria-hidden="true">{icons[path]}</span>{title}{locked(path) && <Lock className="more-sheet__lock" size={14} aria-label="Owners and admins only" />}</NavLink>)}
+      <nav className="more-sheet__links" aria-label="More pages">{more.map(([path, title]) => <Nav key={path} className="more-sheet__link" to={path} replace on={on(path)} {...locked(path) ? lockedProps : intent(path)}><span className="more-sheet__icon" aria-hidden="true">{iconOf(path)}</span><span className="more-sheet__title">{title}</span>{locked(path) && <Lock className="more-sheet__lock" size={14} aria-label="Owners and admins only" />}</Nav>)}
         {connect && <button type="button" className="more-sheet__link" onPointerDown={preloadConnectAgent} onClick={() => { close(); openConnectAgent() }}><span className="more-sheet__icon" aria-hidden="true"><Plug /></span>Connect an agent</button>}</nav>
       <div className="more-sheet__footer">{footer}</div>
     </Sheet>

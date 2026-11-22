@@ -16,6 +16,7 @@ const onboarding = chunk(() => import('./features/onboarding'))
 const overview = chunk(() => import('./features/overview'))
 const logs = chunk(() => import('./features/logs'))
 const campaigns = chunk(() => import('./features/campaigns'))
+const newsletters = chunk(() => import('./features/newsletters'))
 const audience = chunk(() => import('./features/audience'))
 const settings = chunk(() => import('./features/settings'))
 const docs = chunk(() => import('./features/docs'))
@@ -29,6 +30,7 @@ const loadOnboarding = onboarding.preload
 const loadOverview = overview.preload
 const loadLogs = logs.preload
 const loadCampaigns = campaigns.preload
+const loadNewsletters = newsletters.preload
 const loadAudience = audience.preload
 const loadSettings = settings.preload
 const loadDocs = docs.preload
@@ -36,7 +38,7 @@ const loadInbound = inbound.preload
 const loadOperator = operator.preload
 const loadSupportInbox = supportInbox.preload
 const loadLegal = legal.preload
-Object.assign(routeChunks, { '/overview': loadOverview, '/logs': loadLogs, '/receiving': loadInbound, '/campaigns': loadCampaigns, '/audience': loadAudience, '/domains': loadSettings, '/api-keys': loadSettings, '/settings': loadSettings, '/docs': loadDocs, '/operator': loadOperator, '/support': loadSupportInbox, '/legal': loadLegal })
+Object.assign(routeChunks, { '/overview': loadOverview, '/logs': loadLogs, '/receiving': loadInbound, '/campaigns': loadCampaigns, '/newsletters': loadNewsletters, '/audience': loadAudience, '/domains': loadSettings, '/api-keys': loadSettings, '/settings': loadSettings, '/docs': loadDocs, '/operator': loadOperator, '/support': loadSupportInbox, '/legal': loadLegal })
 const LogsPage = logs.page(m => m.LogsPage)
 const LogDetailPage = logs.page(m => m.LogDetailPage)
 const CampaignsPage = campaigns.page(m => m.CampaignsPage)
@@ -44,6 +46,9 @@ const CampaignEditorPage = campaigns.page(m => m.CampaignEditorPage)
 const CampaignReviewPage = campaigns.page(m => m.CampaignReviewPage)
 const TemplatesPage = campaigns.page(m => m.TemplatesPage)
 const TemplateEditorPage = campaigns.page(m => m.TemplateEditorPage)
+const NewsletterPage = newsletters.page(m => m.NewsletterPage)
+const NewNewsletterPage = newsletters.page(m => m.NewNewsletterPage)
+const NewslettersPage = newsletters.page(m => m.NewslettersPage)
 const ContactsPage = audience.page(m => m.ContactsPage)
 const ContactDetailPage = audience.page(m => m.ContactDetailPage)
 const ListsPage = audience.page(m => m.ListsPage)
@@ -105,6 +110,7 @@ else if (['/campaigns', '/templates'].some(path => initialPath.startsWith(path))
   // The composer is the largest chunk; an editor route fetches it alongside the campaigns chunk, not after it.
   if (/^\/campaigns\/(?:new|templates\/[^/]+|[^/]+\/edit)\/?$/.test(initialPath)) composer.preload().catch(noop)
 }
+else if (initialPath.startsWith('/newsletters')) loadNewsletters().catch(noop)
 else if (['/audience', '/contacts', '/lists', '/segments'].some(path => initialPath.startsWith(path))) loadAudience().catch(noop)
 else if (['/api-keys', '/domains', '/settings'].some(path => initialPath.startsWith(path))) loadSettings().catch(noop)
 else if (['/receiving', '/inbound', '/mailboxes'].some(path => initialPath.startsWith(path))) loadInbound().catch(noop)
@@ -168,6 +174,7 @@ const routes = <><Route path="legal/:doc?" element={<ChunkFallback.Provider valu
     <Route path="mailboxes" element={<LegacyMailboxesRedirect />} /><Route path="mailboxes/webhooks" element={<LegacyMailboxWebhooksRedirect />} /><Route path="mailboxes/webhooks/:id" element={<LegacyMailboxWebhookRedirect />} /><Route path="mailboxes/:id" element={<LegacyMailboxRedirect />} />
     <Route path="campaigns" element={<CampaignsPage />} /><Route path="campaigns/new" element={<CampaignEditorPage />} /><Route path="campaigns/:id/edit" element={<CampaignEditorPage />} /><Route path="campaigns/:id/review" element={<CampaignReviewPage />} />
     <Route path="campaigns/templates" element={<TemplatesPage />} /><Route path="campaigns/templates/:id" element={<TemplateEditorPage />} />
+    <Route path="newsletters" element={<NewslettersPage />} /><Route path="newsletters/new" element={<NewNewsletterPage />} /><Route path="newsletters/:id" element={<NewsletterPage />} />
     <Route path="audience" element={<ContactsPage />} /><Route path="audience/contacts/:id" element={<ContactDetailPage />} />
     <Route path="audience/lists" element={<ListsPage />} /><Route path="audience/lists/:id" element={<ListDetailPage />} />
     <Route path="audience/segments" element={<SegmentsPage />} /><Route path="audience/segments/new" element={<SegmentEditorPage />} /><Route path="audience/segments/:id" element={<SegmentEditorPage />} />

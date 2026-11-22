@@ -626,6 +626,71 @@ async function connectedAccount(fx, db, key, name, phase) {
   if (phase === 'setup') await db.query("INSERT INTO byo_domain_intents(connection_id,region,name,importing,id) VALUES($1,'us-east-2',$2,true,$3)", [conn, `mail.${slug}.example`, 'dom_' + conn.slice(5)]);
 }
 
+// Newsletters (features/newsletters): a list with a sender, made through the API. Its readers go in as SQL like the rest
+// of the audience here, joined over the last two years. A sent issue is a campaign made through the API, then marked
+// done with the count its background job stores (the fixture runs no job worker and sends nothing); those of Tide
+// Notes are frozen, as a count is once its emails have left the 30-day history, so listing them queues nothing.
+async function newsletterReaders(db, workspaceId, listId, count, host = 'example.net') {
+  await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,name,marketing_consent,created_at,updated_at)
+    SELECT 'contact_nl_'||$2||'_'||g, $1, lower(f.n)||'.'||lower(l.n)||g||'@'||$4, f.n||' '||l.n, 'subscribed', now()-make_interval(days=>CASE WHEN g%61=0 THEN 37+g%3 WHEN g%83=0 THEN 121+g%2 ELSE ((g*7919)%1000)*720/1000 END), now()
+    FROM generate_series(1,$3) g
+    JOIN LATERAL (SELECT (ARRAY['Ada','Grace','Linus','Margaret','Ken','Barbara','Edsger','Radia','Alan','Frances','Dennis','Adele','Tim','Hedy','Guido','Sophie','Niklaus'])[1+g%17] AS n) f ON true
+    JOIN LATERAL (SELECT (ARRAY['Okafor','Lind','Moreau','Park','Rivera','Quinn','Brandt','Sato','Mensah','Alvarez','Field','Moana','Bell','Ortiz','Shah','Chen','Nair','Wren','Holt'])[1+(g*7)%19] AS n) l ON true`, [workspaceId, listId, count, host]);
+  await db.query(`INSERT INTO audience_list_members(workspace_id,list_id,contact_id,created_at) SELECT workspace_id,$2,id,created_at FROM audience_contacts WHERE workspace_id=$1 AND id LIKE 'contact_nl_'||$2||'_%'`, [workspaceId, listId]);
+}
+const issueHtml = (title, paragraphs) => `<h1>${title}</h1>${paragraphs.map(p => `<p>${p}</p>`).join('')}`;
+// `sent`: days ago it went out to `readers`, with the shares that opened and clicked; without it the issue is a draft.
+async function issue(db, who, newsletter, subject, sent) {
+  const campaign = await who.api('POST', '/v1/campaigns', { name: subject, subject, from: newsletter.from, fromName: newsletter.fromName, audience: { listId: newsletter.id },
+    html: issueHtml(subject, ['A short note from the shore this week.', 'More next time.']) }, 201);
+  if (!sent) return campaign.id;
+  const review = rid('review'), at = ago(sent.days * 1440 + 5), bounced = Math.round(sent.readers * 0.004), delivered = sent.readers - bounced;
+  const group = (status, count, extra) => ({ status, simulated: false, count, accepted: count, delivered: 0, bounced: 0, complained: 0, opened: 0, clicked: 0, failed: 0, deliveryDelayed: 0, ...extra });
+  const stats = { reviewId: review, computedAt: ago(Math.max(0, sent.days - 2) * 1440), revision: 'fixture', emails: sent.readers, frozen: sent.days > 30 || undefined,
+    groups: [group('delivered', delivered, { delivered, opened: Math.round(delivered * sent.opened), clicked: Math.round(delivered * sent.clicked) }), group('bounced', bounced, { bounced })] };
+  await db.query(`INSERT INTO sending_campaign_reviews(id,workspace_id,campaign_id,revision,draft,content_hash,rendered,created_at)
+    SELECT $1,workspace_id,id,revision,draft,'fixture',jsonb_build_object('html',draft->>'html'),$3::timestamptz FROM sending_campaigns WHERE id=$2`, [review, campaign.id, at]);
+  await db.query(`UPDATE sending_campaigns SET state='done',review_id=$2,total=$3,prepared=$3,expanded=$3,stats=$4::jsonb,created_at=$5::timestamptz-interval '2 days',updated_at=$5 WHERE id=$1`,
+    [campaign.id, review, sent.readers, JSON.stringify(stats), at]);
+  return campaign.id;
+}
+// One newsletter with a year's readers and twelve issues (mara); two newsletters, one with a single draft, beside two
+// campaigns that are neither's issue (lou); one made a moment ago (sol); four, which the sidebar lists as one item (ivy).
+async function newsletters(fx) {
+  const { db } = fx;
+  const workspace = async (key, email, fullName, ws, host) => {
+    const who = await fx.signIn(key, email, fullName, ws);
+    await domain(db, ws.id, await hosted(db, ws.id), host, { mailFrom: true });
+    // Credit, so its pages carry no empty-balance banner once billing is enforced.
+    await db.query("SELECT billing_post($1,'topup',$2,5000000000::bigint,0::bigint,'{}'::jsonb,'stripe')", [ws.id, 'attempt:cls_' + ws.id]);
+    return who;
+  };
+  let seed = 11; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const mara = await workspace('mara', 'mara@tidenotes.example', 'Mara Quinn', { id: 'ws_tide', name: 'Mara Quinn' }, 'tidenotes.example');
+  const tide = await mara.api('POST', '/v1/newsletters', { name: 'Tide Notes', from: 'mara@tidenotes.example', fromName: 'Tide Notes' }, 201);
+  await newsletterReaders(db, 'ws_tide', tide.id, 3412);
+  const subjects = ['Hello from the shore', 'Mending nets', 'A field guide to sea fog', 'Where the seals go in August', 'The low-tide walk to the island', 'Salt on everything', 'Notes from the lighthouse road', 'Small boats, big tides', 'The ferry timetable, annotated', 'Kelp, and what to do with it', 'A harbour at five in the morning', 'What the storm left behind'];
+  for (const [i, subject] of subjects.entries()) await issue(db, mara, tide, subject, { days: (subjects.length - 1 - i) * 7 + 3, readers: Math.round(3398 * (1 - (subjects.length - 1 - i) * 0.021)), opened: 0.46 + rnd() * 0.1, clicked: 0.08 + rnd() * 0.06 });
+
+  const lou = await workspace('lou', 'lou@fernhill.example', 'Lou Holt', { id: 'ws_fern', name: 'Fernhill Farm' }, 'fernhill.example');
+  const weekly = await lou.api('POST', '/v1/newsletters', { name: 'Fernhill Weekly', from: 'weekly@fernhill.example', fromName: 'Fernhill Farm' }, 201);
+  await newsletterReaders(db, 'ws_fern', weekly.id, 5120);
+  for (const [i, subject] of ['What we are planting', 'Seed swap on Saturday', 'A wet October', 'Hedges, and who lives in them', 'Frost on the kale', 'The last of the apples'].entries()) await issue(db, lou, weekly, subject, { days: (5 - i) * 7 + 3, readers: Math.round(5080 * (1 - (5 - i) * 0.02)), opened: 0.47 + rnd() * 0.08, clicked: 0.09 + rnd() * 0.05 });
+  // Max is a member, not an admin: his sidebar and Campaigns are as they were before newsletters.
+  await fx.signIn('max', 'max@fernhill.example', 'Max Holt', { id: 'ws_fern', name: 'Fernhill Farm', role: 'member' });
+  const trade = await lou.api('POST', '/v1/newsletters', { name: 'Trade Notes', from: 'trade@fernhill.example', fromName: 'Fernhill Farm' }, 201);
+  await newsletterReaders(db, 'ws_fern', trade.id, 640, 'example.org');
+  await issue(db, lou, trade, 'Wholesale prices from January');
+  for (const [name, subject] of [['Farm shop: Christmas hours', 'Open every day until the 24th'], ['Open day invitation', 'Come and see the farm']]) await lou.api('POST', '/v1/campaigns', { name, subject, from: 'shop@fernhill.example', html: issueHtml(subject, ['See you there.']) }, 201);
+
+  const sol = await workspace('sol', 'sol@wren.example', 'Sol Wren', { id: 'ws_wren', name: 'Wren & Co' }, 'wren.example');
+  const wren = await sol.api('POST', '/v1/newsletters', { name: 'Wren Weekly', from: 'hello@wren.example', fromName: 'Wren Weekly' }, 201);
+
+  const ivy = await workspace('ivy', 'ivy@quillpress.example', 'Ivy Marsh', { id: 'ws_quill', name: 'Quill Press' }, 'quillpress.example');
+  for (const name of ['Fiction', 'Poetry', 'Essays', 'For booksellers']) await ivy.api('POST', '/v1/newsletters', { name, from: `${name.toLowerCase().replace(/\W+/g, '-')}@quillpress.example`, fromName: 'Quill Press' }, 201);
+  return { newsletter: tide.id, newsletterDraft: trade.id, newsletterNew: wren.id, newsletterSecond: weekly.id };
+}
+
 export async function seed(fx) {
   const { db } = fx;
   const dana = await fx.signIn('dana', 'dana@northwind.example', 'Dana Rivera', { id: 'ws_northwind', name: 'Northwind' });
@@ -770,6 +835,7 @@ export async function seed(fx) {
     events: [{ at: ago(3 * 24 * 60), from: 'ok', to: 'warn', reasons: [{ ...complaints, code: 'COMPLAINTS_WARN', step: 'warn', count: 2, message: '2 of 1,830 accepted emails were marked as spam in 24 hours (0.11%; the warn line is 0.05% and 2).' }] }, { at: ago(2 * 24 * 60), from: 'warn', to: 'restrict', reasons: [complaints] }] });
 
   await billing(db);
+  const newsletterIds = await newsletters(fx);
   const { conversation: supportConversation, action: supportAction } = await supportInbox(db, hook.webhook?.id ?? hook.id);
 
   // Lumen Labs: verified domain, no key, no mail. Field Notes: no sending connection yet.
@@ -846,7 +912,7 @@ export async function seed(fx) {
   await db.query("INSERT INTO nightmail_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at,profile,receiving) VALUES('mcp_at_cls_live','https://account.anoma.ly','user_kai','user_kai','opencode','ws_live','{read,send,manage}',now()+interval '1 day',0,'work',true)");
   fx.liveKey = agent.secret;
   return {
-    mcp, abuseCluster, restricted: 'ws_harbor', email, junkEmail, receivedEmail: 'msg_northwind_invoice', threadEmail: thread.email, threadReceived: thread.received, supportThread: thread.thread, domain: nw.id, sendingDomain: sendingDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
+    ...newsletterIds, mcp, abuseCluster, restricted: 'ws_harbor', email, junkEmail, receivedEmail: 'msg_northwind_invoice', threadEmail: thread.email, threadReceived: thread.received, supportThread: thread.thread, domain: nw.id, sendingDomain: sendingDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
     webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, template: template.id ?? template.template?.id, segment: segment.id, supportConversation, supportAction, continueConversation, continueMessage,
   };
 }

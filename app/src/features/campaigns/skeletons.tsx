@@ -5,6 +5,9 @@ import {
 } from '../../components/ui'
 import { CampaignsHeader } from './header'
 import { usePhone } from '../../lib/media'
+import { useSearchParams } from 'react-router'
+import { useWorkspaceAccess } from '../../data/context'
+import { newsletterPath } from '../newsletters/shared'
 import './campaigns.css'
 
 // A campaign's card: its name and status, its subject, then recipients, delivery and last activity.
@@ -59,10 +62,13 @@ export function CampaignEditorSkeleton() {
 
 export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 'editor' | 'review' | 'templates' | 'template'; isNew?: boolean }) {
   const phone = usePhone()
+  const { canAdminister } = useWorkspaceAccess()
+  // "New issue" on a newsletter's page opens the composer for that newsletter.
+  const [search] = useSearchParams(), issueOf = isNew ? search.get('newsletter') : null
   if (kind === 'list' || kind === 'templates') {
     const templates = kind === 'templates'
     return <>
-      <CampaignsHeader actions={<Button variant="primary" disabled>{templates ? 'Create template' : 'Create campaign'}</Button>} />
+      <CampaignsHeader actions={<>{!templates && canAdminister && <Button disabled>New newsletter</Button>}<Button variant="primary" disabled>{templates ? 'Create template' : 'Create campaign'}</Button></>} />
       <div className="data-toolbar"><div className="cluster"><SearchField className="search-box--list" aria-label={templates ? 'Search templates' : 'Search campaigns'} placeholder={templates ? 'Search templates' : 'Search campaigns'} disabled /><Select aria-label={templates ? 'Filter templates' : 'Filter by status'} value="all" onValueChange={() => {}} options={[{ value: 'all', label: templates ? 'Active' : 'All campaigns' }]} disabled /></div></div>
       <TableSkeleton className="campaigns-table" columns={templates ? templateColumns : campaignColumns} rows={4} pagination />
     </>
@@ -79,7 +85,7 @@ export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 
     </LoadingRegion>
   </div>
   if (kind === 'editor') return <div className="campaign-compose-page">
-    <PageHeader title={isNew ? 'Create campaign' : 'Edit campaign'} backTo="/campaigns" actions={<><span className="campaign-sync-status"><span className="campaign-sync-dot" />{isNew ? 'New draft' : 'Connecting…'}</span><div className="campaign-compose-actions">{phone ? <><Button variant="primary" disabled>Review</Button><IconButton label="More actions" disabled><MoreHorizontal size={16} /></IconButton></> : <>{isNew && <Button variant="ghost" disabled>Use a template</Button>}<Button variant="ghost" disabled>Send test</Button><Button variant="primary" disabled>Continue to review</Button></>}</div></>} />
+    <PageHeader title={issueOf ? 'New issue' : isNew ? 'Create campaign' : 'Edit campaign'} backTo={issueOf ? newsletterPath(issueOf) : '/campaigns'} actions={<><span className="campaign-sync-status"><span className="campaign-sync-dot" />{isNew ? 'New draft' : 'Connecting…'}</span><div className="campaign-compose-actions">{phone ? <><Button variant="primary" disabled>Review</Button><IconButton label="More actions" disabled><MoreHorizontal size={16} /></IconButton></> : <>{isNew && <Button variant="ghost" disabled>Use a template</Button>}<Button variant="ghost" disabled>Send test</Button><Button variant="primary" disabled>Continue to review</Button></>}</div></>} />
     <CampaignEditorSkeleton />
   </div>
   return <div className="stack campaign-review">

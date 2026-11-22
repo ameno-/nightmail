@@ -8,6 +8,8 @@ import './sender-input.css'
 type Sender = { name: string; email: string }
 export type CampaignSenderInputProps = Sender & {
   domains: string[]
+  /** Take an address on any domain, verified or not (a new newsletter's sender: its domain's setup can come next). */
+  anyDomain?: boolean
   disabled?: boolean
   onChange: (sender: Sender) => void
 }
@@ -48,7 +50,7 @@ function suggestSenders(text: string, domains: string[]): Sender[] {
   return domains.filter(domain => domain.startsWith(prefix.toLowerCase())).map(domain => ({ name, email: `${local}@${domain}` })).filter(sender => validEmail(sender.email))
 }
 
-export function CampaignSenderInput({ name, email, domains, disabled = false, onChange }: CampaignSenderInputProps) {
+export function CampaignSenderInput({ name, email, domains, anyDomain = false, disabled = false, onChange }: CampaignSenderInputProps) {
   // The editor remounts for another campaign/region. Parent echoes must not replace
   // an unfinished draft (or move the caret) when its published email is empty.
   const [draft, setDraft] = useState(() => formatSender({ name, email }))
@@ -64,7 +66,7 @@ export function CampaignSenderInput({ name, email, domains, disabled = false, on
   // a saved domain that is absent from the current verified-domain page.
   const retained = useRef(new Set(validEmail(email) ? [email.toLowerCase()] : []))
   const verified = [...new Set(domains.map(domain => domain.trim().toLowerCase()))]
-  const allowed = (sender: Sender) => verifiedDomain(sender.email.split('@')[1].toLowerCase(), verified) || retained.current.has(sender.email.toLowerCase())
+  const allowed = (sender: Sender) => anyDomain || verifiedDomain(sender.email.split('@')[1].toLowerCase(), verified) || retained.current.has(sender.email.toLowerCase())
   const parsed = parseSender(draft)
   const candidates = parsed ? (allowed(parsed) ? [parsed, ...otherDomains(parsed, verified)] : []) : suggestSenders(draft, verified)
   // A lone suggestion that is the field's own value says nothing new.

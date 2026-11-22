@@ -1,7 +1,8 @@
 import { useNavigate, useSearchParams } from 'react-router'
-import { useApiDef } from '../../data/context'
+import { useApiDef, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { usePrefetchQueries } from '../../data/prefetch'
+import { useNewsletters } from '../newsletters/shared'
 import { composer } from './composer-chunk'
 import { campaignEditable, type Campaign } from '../../data/types'
 import { SearchField, Button, DataTable, EmptyState, ErrorState, Pagination, PaginationSkeleton, Select, StatusBadge } from '../../components/ui'
@@ -27,7 +28,9 @@ export function CampaignsPage() {
   const requestedPage = Number(params.get('page'))
   const page = Number.isSafeInteger(requestedPage) && requestedPage > 0 ? requestedPage : 1
   const pageSize = 10
-  const request = { search, archived, status: status === 'all' ? undefined : status, page, pageSize }
+  // A newsletter's issues are on its own page: with newsletters, this page holds the campaigns that are none's issue.
+  const { canAdminister } = useWorkspaceAccess()
+  const request = { search, archived, status: status === 'all' ? undefined : status, page, pageSize, ...(useNewsletters().length ? { newsletter: false } : {}) }
   const query = useApiDef(queries.campaigns(request), { keepPrevious: true, interval: data => {
     const intervals = (data?.items ?? []).map(campaignPollInterval).filter((value): value is number => value !== false)
     return intervals.length ? Math.max(15_000, Math.min(...intervals)) : false
@@ -47,7 +50,7 @@ export function CampaignsPage() {
     })
   }
   return <>
-    <CampaignsHeader actions={<Button variant="primary" onClick={() => navigate('/campaigns/new')}>Create campaign</Button>} />
+    <CampaignsHeader actions={<>{canAdminister && <Button onClick={() => navigate('/newsletters/new')}>New newsletter</Button>}<Button variant="primary" onClick={() => navigate('/campaigns/new')}>Create campaign</Button></>} />
     <div className="data-toolbar"><div className="cluster"><SearchField className="search-box--list" aria-label="Search campaigns" placeholder="Search campaigns" value={draft} onChange={event => type(event.target.value)} /><Select aria-label="Filter by status" value={archived ? 'archived' : status} onValueChange={selectTab} options={[
       { value: 'all', label: 'All campaigns' }, { value: 'draft', label: 'Drafts' }, { value: 'scheduled', label: 'Scheduled' },
       { value: 'sending', label: 'Sending' }, { value: 'paused', label: 'Paused' }, { value: 'done', label: 'Done' }, { value: 'failed', label: 'Failed' }, { value: 'canceled', label: 'Canceled' },

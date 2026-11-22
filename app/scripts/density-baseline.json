@@ -73,6 +73,14 @@
    "score": 18,
    "findings": []
   },
+  "Campaigns · with newsletters · desktop": {
+   "score": 7,
+   "findings": []
+  },
+  "Campaigns · with newsletters · phone": {
+   "score": 5,
+   "findings": []
+  },
   "Contact · desktop": {
    "score": 11,
    "findings": []
@@ -155,6 +163,50 @@
   },
   "New campaign · desktop": {
    "score": 18,
+   "findings": []
+  },
+  "New issue · desktop": {
+   "score": 19,
+   "findings": []
+  },
+  "New issue · phone": {
+   "score": 13,
+   "findings": []
+  },
+  "New newsletter · desktop": {
+   "score": 3,
+   "findings": []
+  },
+  "New newsletter · phone": {
+   "score": 3,
+   "findings": []
+  },
+  "Newsletter · desktop": {
+   "score": 30,
+   "findings": []
+  },
+  "Newsletter · new · desktop": {
+   "score": 4,
+   "findings": []
+  },
+  "Newsletter · new · phone": {
+   "score": 4,
+   "findings": []
+  },
+  "Newsletter · one draft · desktop": {
+   "score": 30,
+   "findings": []
+  },
+  "Newsletter · one draft · phone": {
+   "score": 30,
+   "findings": []
+  },
+  "Newsletter · phone": {
+   "score": 30,
+   "findings": []
+  },
+  "Newsletters · desktop": {
+   "score": 1,
    "findings": []
   },
   "Onboarding · AWS checking · desktop": {

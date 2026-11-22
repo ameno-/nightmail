@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { ChevronRight, MoreHorizontal } from 'lucide-react'
-import { Link, Navigate, useLocation, useNavigate, useParams } from 'react-router'
+import { Link, Navigate, useLocation, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useApiDef, useApiMutation, useApiQuery, useRegion, useApi, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { priceUc, total, usd } from '../../data/billing'
 import { useRefreshListsOnChange } from '../../data/invalidation'
 import { useRegionCatalog } from '../../data/regions'
-import { ApiError, campaignEditable, errorText, campaignResumable, type Campaign, type CampaignInput, type SendCampaignInput } from '../../data/types'
+import { ApiError, campaignEditable, errorText, campaignResumable, type Campaign, type CampaignInput, type Newsletter, type SendCampaignInput } from '../../data/types'
 import { PostalAddressDialog } from '../../components/PostalAddress'
+import { newsletterPath, useNewsletterOf, useShowNewsletter } from '../newsletters/shared'
 import {
   Alert, Button, Checkbox, ConfirmDialog, Dialog, DropdownMenu, EmptyState, ErrorState,
   Field, IconButton, Input, PageHeader, SectionHeader, Select, SkeletonText,
@@ -89,6 +90,9 @@ export function CampaignEditorPage() {
 
 function CampaignEditorLoader({ id, fallbackRegion, preserveEditor }: { id?: string; fallbackRegion: string; preserveEditor: (campaign: Campaign) => void }) {
   const query = useApiQuery<Campaign | null>(['campaign', id ?? 'new'], (api, signal) => id ? api.campaigns.get(id, signal) : Promise.resolve(null))
+  // "New issue" on a newsletter's page (?newsletter=): the draft starts with that newsletter's sender and readers.
+  const [search] = useSearchParams(), issueOf = id ? '' : search.get('newsletter') ?? ''
+  const newsletter = useApiDef(queries.newsletter(issueOf), { enabled: Boolean(issueOf) })
   const opened = useRef<Campaign | null | undefined>(undefined)
   useEffect(() => { void composerChunk.preload().catch(() => {}) }, [])
   useEffect(() => {
@@ -96,7 +100,8 @@ function CampaignEditorLoader({ id, fallbackRegion, preserveEditor }: { id?: str
   }, [query.data])
   if (opened.current === undefined && query.data !== undefined && (query.data === null || (!query.data.archivedAt && campaignEditable(query.data)))) opened.current = query.data
   // Once opened, background refetches must never unmount an unsaved working copy.
-  if (opened.current !== undefined) return <CampaignEditor initial={opened.current} fallbackRegion={fallbackRegion} preserveEditor={preserveEditor} />
+  if (issueOf && opened.current === null && !newsletter.data) return newsletter.isError ? <ErrorState error={newsletter.error} onRetry={() => newsletter.refetch()} /> : <CampaignRouteSkeleton kind="editor" isNew />
+  if (opened.current !== undefined) return <CampaignEditor initial={opened.current} newsletter={newsletter.data} fallbackRegion={fallbackRegion} preserveEditor={preserveEditor} />
   if (query.isPending) return <CampaignRouteSkeleton kind="editor" isNew={!id} />
   if (query.isError) return <ErrorState error={query.error} onRetry={() => query.refetch()} />
   // Archived and sent campaigns can't be edited: their review page is where to read, restore or follow them.
@@ -104,7 +109,7 @@ function CampaignEditorLoader({ id, fallbackRegion, preserveEditor }: { id?: str
   return null
 }
 
-function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: Campaign | null; fallbackRegion: string; preserveEditor: (campaign: Campaign) => void }) {
+function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }: { initial: Campaign | null; newsletter?: Newsletter; fallbackRegion: string; preserveEditor: (campaign: Campaign) => void }) {
   const toast = useToast()
   const phone = usePhone()
   const { multiTenant } = useWorkspaceAccess()
@@ -112,7 +117,10 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
   const navigate = useNavigate()
   const [accepted, setAccepted] = useState(initial)
   const acceptedRef = useRef(initial)
-  const [form, setForm] = useState<CampaignInput>(() => initial ? campaignInput(initial) : { regionId: fallbackRegion, name: '', subject: '', previewText: '', fromName: '', fromEmail: '', replyTo: [], listId: '', segmentId: null, html: '', defaults: {} })
+  const [form, setForm] = useState<CampaignInput>(() => initial ? campaignInput(initial) : { regionId: fallbackRegion, name: '', subject: '', previewText: '', fromName: newsletter?.fromName ?? '', fromEmail: newsletter?.from ?? '', replyTo: [], listId: newsletter?.id ?? '', segmentId: null, html: '', defaults: {} })
+  // A campaign to a newsletter's list is its issue: the page says so and goes back to the newsletter, and the sidebar marks it.
+  const issueOf = useNewsletterOf(form.listId)
+  useShowNewsletter(issueOf?.id ?? null)
   const [templatesOpen, setTemplatesOpen] = useState(false)
   // Body placeholders are known from the last saved body; subject and inbox preview are read as they are typed.
   const [bodyKeys, setBodyKeys] = useState(() => placeholders(initial?.html))
@@ -331,7 +339,7 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
   // inside autosave's 800 ms wait. Closing or reloading the tab gets the browser's prompt.
   const leaveGuard = useLeaveGuard(dirty || autosavePaused, { what: 'this campaign', save: async () => { await save('edit'); return !dirtyRef.current && !creation.current } })
   return <div className="campaign-compose-page">
-    <PageHeader title={accepted ? 'Edit campaign' : 'Create campaign'} backTo="/campaigns" actions={<>
+    <PageHeader title={issueOf ? accepted ? 'Edit issue' : 'New issue' : accepted ? 'Edit campaign' : 'Create campaign'} backTo={issueOf ? newsletterPath(issueOf.id) : '/campaigns'} actions={<>
       {!phone && <div className="campaign-sync-status" role="status" data-state={syncState} data-actionable={syncActionable || undefined} title={syncTitle}>
         <span className="campaign-sync-dot" aria-hidden="true" />
         {syncActionable ? <Button variant="ghost" size="sm" disabled={pending} onClick={syncAction}>{syncLabel}</Button> : <span>{syncLabel}</span>}
@@ -571,6 +579,9 @@ function CampaignResults({ campaign }: { campaign: Campaign }) {
 
 function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Campaign; stale: boolean; refreshing: boolean; refresh: () => void }) {
   const navigate = useNavigate()
+  // An issue goes back to its newsletter, and the sidebar marks it.
+  const issueOf = useNewsletterOf(campaign.listId)
+  useShowNewsletter(issueOf?.id ?? null)
   const [mode, setMode] = useState<'now' | 'schedule'>('now')
   const [scheduled, setScheduled] = useState('')
   const [error, setError] = useState('')
@@ -656,7 +667,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
   const scoreNote = lowScore ? ` Its sendability score is ${sendability.data!.score} of 100.` : ''
   const previewHtml = (html: string) => keys.length ? html.replace(/\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/g, (_, key: string) => escapeHtml(fallbacks[key] ? String(fallbacks[key]) : sampleValue(key))) : html
   return <div className="stack campaign-review">
-    <PageHeader title={campaign.name} backTo={campaign.archivedAt ? '/campaigns?archived=true' : '/campaigns'} actions={<div className="cluster">{!campaignEditable(campaign) && (sentSomething ? <Link className="ui-button ui-button--secondary ui-button--md" to={`/logs?campaign=${encodeURIComponent(campaign.id)}`}>View logs</Link> : <Button disabled title="Each email appears in Logs once sending starts">View logs</Button>)}<StatusBadge status={campaignDisplayStatus(campaign)} />{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</div>} />
+    <PageHeader title={campaign.name} backTo={campaign.archivedAt ? '/campaigns?archived=true' : issueOf ? newsletterPath(issueOf.id) : '/campaigns'} actions={<div className="cluster">{!campaignEditable(campaign) && (sentSomething ? <Link className="ui-button ui-button--secondary ui-button--md" to={`/logs?campaign=${encodeURIComponent(campaign.id)}`}>View logs</Link> : <Button disabled title="Each email appears in Logs once sending starts">View logs</Button>)}<StatusBadge status={campaignDisplayStatus(campaign)} />{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</div>} />
     {stale && <Alert tone="warning">Couldn’t refresh this campaign. Showing the last available counts.</Alert>}
     {draft && readinessError && <Alert tone="warning">{readinessError} <Link to={campaignRoute(campaign, 'edit')}>Edit draft</Link></Alert>}
     {draft && missingFallbacks.length > 0 && <Alert tone="warning">{missingFallbacks.map(key => `{{${key}}}`).join(', ')} {missingFallbacks.length === 1 ? 'has' : 'have'} no fallback, so a contact without a value stops the send. <Link to={campaignRoute(campaign, 'edit')}>Add a fallback</Link></Alert>}
