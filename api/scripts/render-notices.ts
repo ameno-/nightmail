@@ -44,6 +44,7 @@ const paused = account('paused', 'Sending is paused (any cause, Amazon included)
 account('restricted', 'Marketing is put on hold', { kind: 'restricted', workspace });
 account('warned', 'A warning', { kind: 'warned', workspace });
 account('resumed', 'A pause ends', { kind: 'resumed', workspace });
+account('resumed-marketing-held', 'A pause ends, marketing still on hold (an owner’s own resume)', { kind: 'resumed', workspace, marketingHeld: true });
 account('campaign-paused', 'A campaign pauses itself', { kind: 'campaign_paused', workspace, campaign: { id: 'cmp_8f3k2n', name: 'Autumn catalogue' } });
 account('domain-unverified', 'A domain stops verifying', { kind: 'domain_unverified', workspace, domain: { id: 'dom_41xq7c', name: 'driftwood.example' } });
 account('limit-reached', 'The daily limit is reached', { kind: 'limit_reached', workspace });

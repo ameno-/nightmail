@@ -41,7 +41,7 @@ type Workspace = { workspace: string };
 export type NoticeInput =
   | Workspace & { kind: 'paused' | 'restricted' | 'warned' | 'limit_reached' }
   /** limit: false for a workspace no daily limit applies to (exempt), which is told nothing about one. */
-  | Workspace & { kind: 'resumed'; limit?: boolean }
+  | Workspace & { kind: 'resumed'; limit?: boolean; /** Marketing stays on hold after this resume. */ marketingHeld?: boolean }
   | Workspace & { kind: 'campaign_paused'; campaign: { id: string; name: string } }
   | Workspace & { kind: 'domain_unverified'; domain: { id: string; name: string } }
   | Workspace & { kind: 'evaluation_finished'; limited: boolean }
@@ -73,21 +73,21 @@ export function customerNotice(origin: string, n: NoticeInput): Notice {
       'Campaigns are paused and new marketing mail is refused. Receipts, password resets and other transactional mail still send.',
       'The dashboard shows what to fix and when marketing can resume.'] });
     case 'warned': return notice({ subject: `A warning about mail from ${w}`, action: dashboard, why: members, lines: [
-      `Recent mail from ${w} has had too many bounces or spam complaints.`,
+      `There is a problem with recent mail from ${w}.`,
       'Nothing is held and your mail still sends. If it continues, marketing mail will be put on hold.',
       'The dashboard shows which mail caused it. The warning clears on its own once things improve.'] });
     case 'resumed': return notice({ subject: `Sending has resumed for ${w}`, action: dashboard, why: members, lines: [
       `Sending from ${w} is on again.`,
-      `New mail goes out as usual, and mail that was still held is being sent.${n.limit === false ? '' : ' For the next two days the daily limit may be lower than before.'}`,
-      ...(n.limit === false ? [] : ['The dashboard shows the limit.'])] });
+      `Mail that was still held is being sent, and ${n.marketingHeld ? 'new transactional mail goes out again. Marketing mail stays on hold a little longer.' : 'new mail goes out again.'}${n.limit === false ? '' : ' For now the daily limit may be lower than before.'}`,
+      ...(n.limit === false ? n.marketingHeld ? ['The dashboard shows when marketing can resume.'] : [] : [n.marketingHeld ? 'The dashboard shows the limit and when marketing can resume.' : 'The dashboard shows the limit.'])] });
     case 'limit_reached': return notice({ subject: `${w} has reached its daily sending limit`, action: dashboard, why: members, lines: [
-      `${w} has sent as much mail as its daily limit allows.`,
-      'New mail is refused for now. Room frees up over the next 24 hours, and mail already accepted is still delivered.',
+      `${w} has reached its daily sending limit.`,
+      'Mail over the limit is refused for now. Room frees up over the next 24 hours, and mail already accepted is still delivered.',
       'The dashboard shows the limit and what raises it.'] });
     case 'evaluation_finished': return notice(n.limited
       ? { subject: `The evaluation of ${w} is finished`, action: dashboard, why: members, lines: [
-        `The first emails from ${w} had delivery problems, so it keeps a daily limit for now.`,
-        'Mail within the limit sends as usual. The limit rises on its own as delivery improves.',
+        `The first emails from ${w} showed some problems, so it keeps a daily limit for now.`,
+        'Mail within the limit sends as usual. The limit rises on its own as your later mail goes well.',
         'The dashboard shows the limit and what would raise it.'] }
       : { subject: `${w} has passed its evaluation`, action: dashboard, why: members, lines: [
         `The first emails from ${w} were delivered well, so its starting limit is lifted.`,
