@@ -31377,10 +31377,10 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       t.after(()=>{runtime.webhookFetch=transport;});
       const delivered=async(id:string)=>{await run('operation.webhook');return posted.find(event=>event.data.emailId===id)?.data;};
       // The queue: the reply of the first recipient that has one, as one line cut at 500, without control characters, a
-      // bidi override, a zero-width space or half a surrogate pair. A bounce keeps nothing of a delay.
+      // bidi override or a zero-width space. A bounce keeps nothing of a delay.
       const bounced=await sent(), reply=`smtp; 550 5.1.1 <${bounced.to}>: user unknown at 192.0.2.7 ${'x'.repeat(600)}`.slice(0,500);
       assert.deepEqual(await ingestFeedbackBatch(runtime,[notice(bounced.provider,'Bounce',{bounceType:'Permanent',bounceSubType:'General',delayType:'General',expirationTime:'2030-01-01T00:00:00Z',
-        bouncedRecipients:[{emailAddress:bounced.to},{emailAddress:bounced.to,diagnosticCode:`smtp; 550 5.1.1 <${bounced.to}>:\r\n \u202euser\0 unk\u200bnown\ud83d at 192.0.2.7 ${'x'.repeat(600)}`}]})]),[{ok:true}]);
+        bouncedRecipients:[{emailAddress:bounced.to},{emailAddress:bounced.to,diagnosticCode:`smtp; 550 5.1.1 <${bounced.to}>:\r\n \u202euser\0 unk\u200bnown at 192.0.2.7 ${'x'.repeat(600)}`}]})]),[{ok:true}]);
       const hard=await detail(bounced.id,'bounce');
       assert.equal(hard.status,'bounced');assert.equal(hard.data.diagnosticCode,reply);assert.equal(hard.data.diagnosticCode.length,500);
       assert.ok(!('delayType' in hard.data) && !('expirationTime' in hard.data));
@@ -31402,10 +31402,11 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const late=await detail(delayed.id,'delivery_delay');
       assert.equal(late.status,'delayed');assert.equal(late.contact,null);
       for(const data of [late.data,await published(delayed.id,'email.delivery_delayed'),await delivered(delayed.id)]) assert.deepEqual({diagnosticCode:data.diagnosticCode,delayType:data.delayType,expirationTime:data.expirationTime},wait);
-      // The recovery job keeps the same; a report without a reply, a known type or a date in ISO form keeps none of them,
-      // and neither does a bounce SES wrote itself, whose text is about the account at Amazon.
+      // The recovery job keeps the same, without half a surrogate pair (the queue never gets that far with one: PostgreSQL
+      // refuses the notification itself, which is quarantined, as before). A report without a reply, a known type or a
+      // date in ISO form keeps none of them, and neither does a bounce SES wrote itself, whose text is about the account at Amazon.
       const soft=await sent(), bare=await sent(), own=await sent();
-      for(const item of [notice(soft.provider,'Bounce',{bounceType:'Transient',bounceSubType:'MailboxFull',bouncedRecipients:[{emailAddress:soft.to,diagnosticCode:'smtp; 552 5.2.2 Mailbox full'}]},runtime.config.awsAccountId),
+      for(const item of [notice(soft.provider,'Bounce',{bounceType:'Transient',bounceSubType:'MailboxFull',bouncedRecipients:[{emailAddress:soft.to,diagnosticCode:'smtp; 552 5.2.2 Mailbox\ud83d full'}]},runtime.config.awsAccountId),
         notice(bare.provider,'DeliveryDelay',{delayType:'not a type',expirationTime:'12',delayedRecipients:[{emailAddress:bare.to,diagnosticCode:' \n \u200b'}]},runtime.config.awsAccountId),
         notice(own.provider,'Bounce',{bounceType:'Permanent',bounceSubType:'OnAccountSuppressionList',bouncedRecipients:[{emailAddress:own.to,diagnosticCode:'Amazon SES did not send the message to this address because it is on the suppression list for your account.'}]},runtime.config.awsAccountId)]) {
         await db.query('INSERT INTO operation_sns_receipts(topic_arn,message_id,workspace_id) VALUES($1,$2,$3)',[topicArn,item.messageId,wid]);
