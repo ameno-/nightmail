@@ -233,13 +233,13 @@ function InboxDetail({ id }: { id: string }) {
     {!b && <dl className="settings-facts" aria-hidden="true">{factTerms.map(term => <div key={term}><dt>{term}</dt><dd><SkeletonText width={120} /></dd></div>)}</dl>}
     {b && <>
       <dl className="settings-facts">
-        <div><dt>Status</dt><dd><StatusBadge status={statusLabel[b.status]} tone={statusTone[b.status]} /></dd></div>
+        {/* A sandbox says so beside its status rather than in a fact of its own, so every inbox has the loading grid's six. */}
+        <div><dt>Status</dt><dd><StatusBadge status={statusLabel[b.status]} tone={statusTone[b.status]} />{b.type === 'sandbox' && <span className="muted"> · Sandbox, test mail only</span>}</dd></div>
         <div><dt>{b.status === 'active' || !b.expiresAt ? 'Expires' : 'Expired'}</dt><dd>{b.expiresAt ? date(b.expiresAt) : 'Never'}</dd></div>
         <div><dt>Deleted after</dt><dd>{b.deleteAfter ? date(b.deleteAfter) : 'Never'}</dd></div>
         <div><dt>Delivered</dt><dd>{number(b.usage.messages - b.usage.held)} of {number(b.limits.messages)}{b.usage.unread > 0 && <span className="muted"> · {number(b.usage.unread)} unread</span>}</dd></div>
         <div><dt>Stored</dt><dd>{fileSize(b.usage.bytes)} of {fileSize(b.limits.bytes)}</dd></div>
         <div><dt>Replies</dt><dd>{b.type === 'sandbox' ? 'Never (sandbox)' : b.send.enabled ? 'To senders only' : 'Off'}</dd></div>
-        {b.type === 'sandbox' && <div><dt>Type</dt><dd>Sandbox · test mail only</dd></div>}
       </dl>
       {b.status === 'deleting' && <Alert tone="info">This inbox was deleted. Its address no longer receives mail, and its messages are erased within the hour.</Alert>}
       {b.status === 'expired' && <Alert tone="info">This inbox expired. New mail is still stored but held until it is erased on {date(b.deleteAfter)}.</Alert>}
