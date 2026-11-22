@@ -87,3 +87,5 @@ body:has(.email-composer[data-inactive]) :is([data-re-bubble-menu], [data-re-sla
   :is([data-re-slash-command-item], [data-re-node-selector-item]) { min-height: 44px; }
   :is([data-re-link-selector-input], [data-re-link-bm-input], [data-re-btn-bm-input], [data-re-img-bm-input], .composer-inspector :is(input, select, textarea)) { font-size: 16px; }
 }
+/* The link toolbar is for a link someone clicked, not for the caret the editor opens with. The library sets visibility inline. */
+.composer-document:not(:focus-within) > [data-re-bubble-menu]:has([data-re-link-bm-toolbar]) { visibility: hidden !important; pointer-events: none; }

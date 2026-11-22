@@ -1,6 +1,5 @@
-/* A newsletter's page: its readers, how they are growing, and its issues. New surfaces set table headings in sentence
-   case, like the rest of their text. */
-.newsletter-issues .ui-table th, .newsletters-table .ui-table th { color: var(--color-muted); font-family: var(--font-body); font-size: var(--text-xs); letter-spacing: 0; text-transform: none; }
+/* A newsletter's page: its readers, how they are growing, and its issues. Its tables use the shared row height. */
+.ui-table-scroll.newsletter-issues, .ui-table-scroll.newsletters-table { --table-row-height: 53px; }
 .newsletter-readers { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 440px); gap: var(--space-40); align-items: stretch; height: 96px; padding-bottom: var(--space-8); }
 .newsletter-readers__count { display: flex; flex-direction: column; align-items: flex-start; justify-content: space-between; gap: var(--space-8); min-width: 0; }
 .newsletter-readers__count > a:first-child { color: var(--color-text); text-decoration: none; }

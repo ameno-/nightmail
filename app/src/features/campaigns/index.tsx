@@ -30,12 +30,12 @@ import './campaigns.css'
 import type { EmailComposerRef } from './EmailComposer'
 import { composer as composerChunk, EmailComposer } from './composer-chunk'
 import { ChunkFallback } from '../../lib/preloadable'
-import { CampaignSenderInput } from './CampaignSenderInput'
+import { CampaignSenderInput, SenderLines } from './CampaignSenderInput'
 import { CampaignAttachments, type CampaignAttachmentsRef } from './CampaignAttachments'
 import { campaignVersion, useCampaignSync } from './useCampaignSync'
 import { ComposerSkeleton } from './skeletons'
 import { composerLoading, invalidSender } from './copy'
-import { AddressList, NamedAddress, PrivateAddress } from '../../components/PrivateAddress'
+import { AddressList, PrivateAddress } from '../../components/PrivateAddress'
 import { localLabel, parseUtc, ScheduleField, scheduleError, utcLabel } from '../../components/ScheduleField'
 import { useSingleFlight } from '../../lib/single-flight'
 import { usePhone } from '../../lib/media'
@@ -596,30 +596,37 @@ function AudiencePicker({ campaign, disabled }: { campaign: Campaign; disabled?:
 }
 
 // Where the campaign goes: the list (and segment) by name, never by id.
-function AudienceSource({ listId, segmentId }: { listId: string; segmentId: string | null }) {
+function AudienceSource({ listId, segmentId, prefix }: { listId: string; segmentId: string | null; prefix?: string }) {
   const list = useApiQuery(['lists', listId], (api, signal) => api.lists.get(listId, signal), { enabled: Boolean(listId) })
   const segment = useApiQuery(['segments', segmentId ?? ''], (api, signal) => api.segments.get(segmentId!, signal), { enabled: Boolean(segmentId) })
   if (!listId) return <p className="campaign-audience-source muted">No list chosen yet.</p>
-  return <p className="campaign-audience-source" title={list.data?.name}>{list.data ? <Link to={`/audience/lists/${encodeURIComponent(listId)}`}>{list.data.name}</Link> : <SkeletonText width={120} />}{segmentId && <span className="muted"> · only {segment.data?.name ?? 'segment'}</span>}</p>
+  return <p className="campaign-audience-source" title={list.data?.name}>{prefix}{list.data ? <Link to={`/audience/lists/${encodeURIComponent(listId)}`}>{list.data.name}</Link> : <SkeletonText width={120} />}{segmentId && <span className="muted"> · only {segment.data?.name ?? 'segment'}</span>}</p>
 }
 
 function CampaignResults({ campaign }: { campaign: Campaign }) {
   const byStatus = campaign.counts?.byStatus ?? {}
   const total = Math.max(campaign.counts?.total ?? 0, campaign.delivery?.total ?? 0)
   const canceled = (byStatus.canceled ?? 0) + (campaign.delivery?.canceled ?? 0)
+  // Past the email history, the per-email counts are gone: the stored totals keep the outcomes (not suppressed or canceled).
+  const expired = (campaign.counts?.total ?? 0) === 0 && (campaign.delivery?.expanded ?? 0) > 0
+  const stats = useApiQuery(['campaign-stats', campaign.id], (api, signal) => api.campaigns.stats(campaign.id, signal), { enabled: expired })
+  const totals = expired ? stats.data?.totals : undefined
+  const figure = (perEmail: number, stored?: number) => expired ? stored ?? null : perEmail
   // Simulated sends get their own row, as while sending (CampaignProgress), only when there are some.
-  const rows: [string, number, string][] = [
-    ['Delivered', byStatus.delivered ?? 0, 'Accepted by the recipient’s mail server'],
-    ...((byStatus.simulated ?? 0) > 0 ? [['Simulated', byStatus.simulated ?? 0, ''] as [string, number, string]] : []),
-    ['Bounced', byStatus.bounced ?? 0, `Rejected by the recipient’s mail server; ${productName} stops emailing these addresses`],
-    ['Complaints', byStatus.complained ?? 0, `Marked as spam; ${productName} stops emailing these addresses`],
-    ['Failed', (byStatus.rejected ?? 0) + (byStatus.rendering_failed ?? 0), 'Couldn’t be sent'],
-    ['Suppressed', byStatus.suppressed ?? 0, 'Skipped because the address is suppressed'],
-    ['Canceled', canceled, 'Never sent because the campaign was canceled'],
+  const simulated = figure(byStatus.simulated ?? 0, totals?.simulated) ?? 0
+  const rows: [string, number | null, string][] = [
+    ['Delivered', figure(byStatus.delivered ?? 0, totals?.delivered), 'Accepted by the recipient’s mail server'],
+    ...(simulated > 0 ? [['Simulated', simulated, ''] as [string, number, string]] : []),
+    ['Bounced', figure(byStatus.bounced ?? 0, totals?.bounced), `Rejected by the recipient’s mail server; ${productName} stops emailing these addresses`],
+    ['Complaints', figure(byStatus.complained ?? 0, totals?.complained), `Marked as spam; ${productName} stops emailing these addresses`],
+    ['Failed', figure((byStatus.rejected ?? 0) + (byStatus.rendering_failed ?? 0), totals?.failed), 'Couldn’t be sent'],
+    ['Suppressed', expired ? null : byStatus.suppressed ?? 0, 'Skipped because the address is suppressed'],
+    ['Canceled', expired ? null : canceled, 'Never sent because the campaign was canceled'],
   ]
+  const loading = expired && stats.isPending
   return <div className="campaign-audience-summary">
     <div className="campaign-summary-line"><strong>Recipients</strong><span>{number(total)}</span></div>
-    {rows.map(([label, count, hint]) => <div className="campaign-summary-line" key={label} title={hint || undefined}><span>{label}</span><span>{number(count)}</span></div>)}
+    {rows.map(([label, count, hint]) => <div className="campaign-summary-line" key={label} title={hint || undefined}><span>{label}</span>{loading && label !== 'Suppressed' && label !== 'Canceled' ? <SkeletonText width={45} /> : <span>{count === null ? '—' : number(count)}</span>}</div>)}
   </div>
 }
 
@@ -725,7 +732,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
     ...(!canAdminister ? [['neutral', `Only owners and admins can send or schedule ${thing}s.`] as ['neutral', ReactNode]] : []),
     ...(error ? [['danger', error] as ['danger', ReactNode]] : []),
   ]
-  const bar = <CampaignBar back={campaign.archivedAt ? '/campaigns?archived=true' : issueOf ? newsletterPath(issueOf.id) : '/campaigns'} title={<h1 className="studio-title">{campaign.name}</h1>} steps={draft && <CampaignSteps step="review" writeTo={campaignRoute(campaign, 'edit')} />} actions={<>{stale && <span className="campaign-note" data-tone="warning" title="Showing the last available counts.">Couldn’t refresh</span>}{!campaignEditable(campaign) && (sentSomething ? <Link className="ui-button ui-button--secondary ui-button--md" to={`/logs?campaign=${encodeURIComponent(campaign.id)}`}>View logs</Link> : <Button disabled title="Each email appears in Logs once sending starts">View logs</Button>)}<StatusBadge status={campaignDisplayStatus(campaign)} />{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</>} />
+  const bar = <CampaignBar back={campaign.archivedAt ? '/campaigns?archived=true' : issueOf ? newsletterPath(issueOf.id) : '/campaigns'} title={<h1 className="studio-title">{campaign.name}</h1>} steps={draft && <CampaignSteps step="review" writeTo={campaignRoute(campaign, 'edit')} />} actions={<>{stale && <span className="campaign-note" data-tone="warning" title="Showing the last available counts.">Couldn’t refresh</span>}{!campaignEditable(campaign) && sentSomething && <Link className="ui-button ui-button--secondary ui-button--md" to={`/logs?campaign=${encodeURIComponent(campaign.id)}`}>View logs</Link>}<StatusBadge status={campaignDisplayStatus(campaign)} />{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</>} />
   const dialogs = <>
     <ConfirmDialog open={confirmation !== null} onOpenChange={open => { if (!open && !sendMutation.isPending) setConfirmation(null) }} title={confirmation?.mode === 'schedule' ? `Schedule this ${thing}?` : `Send this ${thing} now?`} description={confirmation?.mode === 'schedule' ? `Send “${campaign.name}”${origin} to ${recipients}${audienceName} on ${utcLabel(confirmation.scheduledAt!)} (${localLabel(confirmation.scheduledAt!)}).${paceSummary(confirmation)}${cost}${scoreNote} You can change this until sending starts.` : `Send “${campaign.name}”${origin} to ${recipients}${audienceName} now.${paceSummary(confirmation)}${cost} Consent is checked again as each email sends.${scoreNote} You can’t undo this.`} confirmLabel={confirmation?.mode === 'schedule' ? 'Schedule' : 'Send now'} onConfirm={confirmSend} pending={sendMutation.isPending} />
     {draft && testOpen && <TestEmailDialog campaign={campaign} open={testOpen} onOpenChange={setTestOpen} />}
@@ -743,7 +750,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
     const scoreSummary = sendability.data ? `${sendability.data.score} of 100 · ${fixes.length ? `${fixes.length} ${fixes.length === 1 ? 'suggestion' : 'suggestions'}` : 'looks good'}` : missing.length ? 'After the message is complete' : !campaign.listId ? 'After you choose a list' : 'Checking…'
     const scheduledAt = mode === 'schedule' && scheduled && !scheduleError(scheduled) ? parseUtc(scheduled)!.toISOString() : null
     const messageSummary = missing.length ? `Add ${missing.join(', ').replace(/, ([^,]*)$/, ' and $1')} in Write` : campaign.subject
-    const whenSummary = mode === 'now' ? 'Right now' : scheduledAt ? utcLabel(scheduledAt) : 'Pick a time'
+    const whenSummary = mode === 'now' ? 'Send now' : scheduledAt ? utcLabel(scheduledAt) : 'Pick a time'
     const order: ReviewRowId[] = ['to', 'message', 'score', 'when']
     const next = (row: ReviewRowId) => <Button variant="primary" onClick={() => setOpenRow(order[order.indexOf(row) + 1]!)}>Next</Button>
     return <div className="campaign-review campaign-review--draft">
@@ -757,7 +764,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
           <div className="review-message">
             <div className="review-message__details">
               <dl className="review-facts">
-                <dt>From</dt><dd>{campaign.fromEmail ? <NamedAddress name={campaign.fromName} address={campaign.fromEmail} /> : <span className="muted">Not set</span>}</dd>
+                <dt>From</dt><dd>{campaign.fromEmail ? <SenderLines name={campaign.fromName} address={campaign.fromEmail} /> : <span className="muted">Not set</span>}</dd>
                 {campaign.replyTo.length > 0 && <><dt>Reply to</dt><dd><AddressList values={campaign.replyTo} /></dd></>}
                 <dt>Subject</dt><dd>{campaign.subject || <span className="muted">Not set</span>}</dd>
                 {campaign.previewText && <><dt>Inbox preview</dt><dd>{campaign.previewText}</dd></>}
@@ -803,13 +810,10 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
     <div className="campaign-review-layout">
       <section className="campaign-fields campaign-recipients">
         {campaign.delivery?.error && <p className="campaign-note" data-tone="danger" role="alert">{campaign.delivery.error.message}</p>}
-        <SectionHeader title={scheduledView ? 'Recipients' : 'Delivery'} actions={<div className="cluster">{cancellable && <CancelCampaignButton campaign={campaign} />}<Button variant="secondary" size="sm" onClick={refresh} disabled={refreshing} title="This page also updates by itself">Refresh</Button></div>} />
+        {!scheduledView && <SectionHeader title="Delivery" actions={finished ? undefined : <div className="cluster">{cancellable && <CancelCampaignButton campaign={campaign} />}<Button variant="secondary" size="sm" onClick={refresh} disabled={refreshing} title="This page also updates by itself">Refresh</Button></div>} />}
         {/* Eligible recipients is matched contacts less the suppressed and not subscribed lines under it. */}
         {<>
-          {scheduledView ? <div className="campaign-audience-summary">
-            <div className="campaign-summary-line"><span>Recipients, frozen when scheduled</span><span>{number(campaign.delivery?.total ?? campaign.recipients)}</span></div>
-            <AudienceSource listId={campaign.listId} segmentId={campaign.segmentId} />
-          </div> : <>
+          {scheduledView ? <AudienceSource listId={campaign.listId} segmentId={campaign.segmentId} prefix="To " /> : <>
             <AudienceSource listId={campaign.listId} segmentId={campaign.segmentId} />
             <CampaignPacing key={`${campaign.id}:${campaign.delivery?.pacing?.perDay ?? ''}:${campaign.delivery?.pacing?.autoPause ?? ''}:${campaign.delivery?.pacing?.rateShare ?? ''}`} campaign={campaign} />
             {finished ? <CampaignResults campaign={campaign} /> : campaign.counts ? <CampaignProgress campaign={campaign} /> : <div className="campaign-audience-summary"><div className="campaign-summary-line"><span>Recipients</span><span>{number(campaign.recipients)}</span></div></div>}
@@ -818,8 +822,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
         </>}
       </section>
       <section className="campaign-fields campaign-message">
-        <SectionHeader title="Message" />
-        <dl className="ui-facts campaign-message-details"><dt>From</dt><dd><NamedAddress name={campaign.fromName} address={campaign.fromEmail} /></dd>{campaign.replyTo.length > 0 && <><dt>Reply to</dt><dd><AddressList values={campaign.replyTo} /></dd></>}<dt>Subject</dt><dd>{campaign.subject}</dd>{campaign.previewText && <><dt>Inbox preview</dt><dd>{campaign.previewText}</dd></>}</dl>
+        <dl className="ui-facts campaign-message-details"><dt>From</dt><dd><SenderLines name={campaign.fromName} address={campaign.fromEmail} /></dd>{campaign.replyTo.length > 0 && <><dt>Reply to</dt><dd><AddressList values={campaign.replyTo} /></dd></>}<dt>Subject</dt><dd>{campaign.subject}</dd>{campaign.previewText && <><dt>Inbox preview</dt><dd>{campaign.previewText}</dd></>}</dl>
         <CampaignRenderedPreview campaign={campaign} transform={previewHtml} />
       </section>
     </div>

@@ -60,12 +60,11 @@ export function CampaignProgress({ campaign }: { campaign: Campaign }) {
     ['Simulated', byStatus.simulated],
   ] as const
   return <div className="campaign-audience-summary">
-    {campaign.delivery && !campaign.delivery.pacing?.perDay && <div className="campaign-summary-line"><span>Added to send queue</span><span>{number(campaign.delivery.expanded)} / {number(campaign.delivery.total)}</span></div>}
     <div className="campaign-summary-line"><strong>Send progress</strong><span>{number(processed)} / {number(total)} processed</span></div>
     {total > 0 ? <progress className="campaign-progress-bar" aria-label="Campaign send progress" aria-valuetext={`${number(processed)} of ${number(total)} emails processed`} value={processed} max={total} /> : <p className="muted">No email records available.</p>}
     {awaitingQueue > 0 && <div className="campaign-summary-line"><span>Awaiting queue</span><span>{number(awaitingQueue)}</span></div>}
-    <div className="campaign-summary-line"><span>Queued</span><span>{number(queued)}</span></div>
-    <div className="campaign-summary-line"><span>Processing</span><span>{number(processing)}</span></div>
+    {queued > 0 && <div className="campaign-summary-line"><span>Queued</span><span>{number(queued)}</span></div>}
+    {processing > 0 && <div className="campaign-summary-line"><span>Processing</span><span>{number(processing)}</span></div>}
     {outcomes.filter(([, count]) => count && count > 0).map(([label, count]) => <div className="campaign-summary-line" key={label}><span>{label}</span><span>{number(count)}</span></div>)}
   </div>
 }
@@ -127,8 +126,10 @@ export function CampaignPacing({ campaign }: { campaign: Campaign }) {
   const rateShare = pacing?.rateShare != null && pacing.rateShare < 1 ? ` · up to ${ratePercent(pacing.rateShare)}% of send rate` : ''
   return <div className="campaign-pacing">
     {paused && <div className="campaign-scheduled" data-tone={campaign.status === 'failed' ? 'danger' : 'warning'} role="status">
-      <div className="campaign-pacing-banner"><strong>{campaign.status === 'failed' ? 'Sending failed' : 'Sending paused'}</strong>
-        <span>{campaign.status === 'failed' ? 'No new recipients are being released. Resume to continue where it stopped, or cancel.' : `${expansion.pauseReason?.message ?? 'No new recipients are being released.'} Queued emails still send.`}{expansion.pausedAt && <span className="muted" title={atUtc(expansion.pausedAt)}> Paused {relativeTime(expansion.pausedAt)}.</span>}</span>
+      <div className="campaign-pacing-banner">{campaign.status === 'failed' ? <><strong>Sending failed</strong>
+        <span>No new recipients are being released. Resume to continue where it stopped, or cancel.{expansion.pausedAt && <span className="muted" title={atUtc(expansion.pausedAt)}> Paused {relativeTime(expansion.pausedAt)}.</span>}</span></>
+        // An automatic pause says why first.
+        : <span>{expansion.pauseReason && `${expansion.pauseReason.message} `}{expansion.pausedAt && <><span title={atUtc(expansion.pausedAt)}>Paused {relativeTime(expansion.pausedAt)}.</span> </>}Queued emails still send.</span>}
         {canAdminister && <Button variant="primary" size="sm" loading={resume.isPending} disabled={busy} onClick={() => void run(() => resume.mutateAsync(campaign.id))}>Resume</Button>}
       </div>
     </div>}
