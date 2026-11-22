@@ -9135,8 +9135,7 @@ describe('Hosted MCP OAuth and tools', () => {
 
         // Route 4: the screen, with each refusal in words and subjects capped at 120 characters. The support agent reads
         // this and writes to the sender, so it has none of the verdict (score, model, threshold), though these refusals
-        // are stored as they were before the verdict had its own column, in the event's data. Nor do the reads of an
-        // email's events.
+        // hold it in the stored event's data. Nor do the reads of an email's events.
         const screen = await get('/v1/support/screen');
         assert.deepEqual([screen.totals.screened, screen.totals.rejected, screen.rejections.length, screen.rejections[0].verdict, screen.rejections[0].subject.length], [50, 2, 2, 'The content check judged the message to be unsolicited advertising.', 120]);
         assert.doesNotMatch(JSON.stringify(screen), /"spamScore"|"spam"|"model"|"threshold"|jev-fixture/);
@@ -24191,17 +24190,14 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       ok(await local('PUT', `${base}/limit`, { daily: null, reason: 'Back to the score limit' }));
       // One evidence stream and one audit log, in ISO time, paged by a cursor that never skips rows sharing a timestamp.
       await db.query(`INSERT INTO standing_events(id,workspace_id,sequence,at,kind,from_step,to_step,actor) SELECT 'stev_tie'||n,$1,1000+n,now()-interval '1 minute','limit','warn','warn','{"kind":"system"}' FROM generate_series(1,3) n`, [wid]);
-      // Two content-screen refusals: one with its verdict in the event's own column, one stored before that column, in the
-      // event's data. Staff read the score and the threshold of both here, and never the classifier's model.
-      const refusals = [unique('refused-column'), unique('refused-data')];
-      for (const [i, emailId] of refusals.entries()) {
-        await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,status,simulated,error_code,created_at)
-          VALUES ($1,$2,$3,'fixture','offers@example.com','[]','[]','[]','Screened',$4,'rejected',false,'CONTENT_REJECTED_SPAM',now()-interval '2 minutes')`, [emailId, wid, REGION, { kind: 'transactional', subject: 'Screened', text: 'Screened', attachments: [] }]);
-        await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated,data,screen) VALUES ($1,$2,$3,'reject',false,$4,$5)`, [unique('event'), wid, emailId,
-          i ? { code: 'CONTENT_REJECTED_SPAM', screen: { spam: 0.93, model: 'jev-fixture', threshold: 0.9 } } : { code: 'CONTENT_REJECTED_SPAM' }, i ? null : { spam: 0.97, model: 'jev-fixture', threshold: 0.7 }]);
-      }
+      // A content-screen refusal, its verdict in the stored event's data. Staff read the score and the threshold here, and
+      // never the classifier's model.
+      const refused = unique('refused');
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,status,simulated,error_code,created_at)
+        VALUES ($1,$2,$3,'fixture','offers@example.com','[]','[]','[]','Screened',$4,'rejected',false,'CONTENT_REJECTED_SPAM',now()-interval '2 minutes')`, [refused, wid, REGION, { kind: 'transactional', subject: 'Screened', text: 'Screened', attachments: [] }]);
+      await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated,data) VALUES ($1,$2,$3,'reject',false,$4)`, [unique('event'), wid, refused, { code: 'CONTENT_REJECTED_SPAM', screen: { spam: 0.97, model: 'jev-fixture', threshold: 0.7 } }]);
       const timeline = ok(await local('GET', `${base}/timeline`)).data;
-      assert.deepEqual(refusals.map(emailId => timeline.find((e: Json) => e.kind === 'rejection' && e.detail.emailId === emailId)?.detail), [{ spam: 0.97, threshold: 0.7, campaignId: null, emailId: refusals[0] }, { spam: 0.93, threshold: 0.9, campaignId: null, emailId: refusals[1] }]);
+      assert.deepEqual(timeline.find((e: Json) => e.kind === 'rejection' && e.detail.emailId === refused)?.detail, { spam: 0.97, threshold: 0.7, campaignId: null, emailId: refused });
       assert.ok(timeline.every((e: Json) => /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(e.at)));
       const paged: Json[] = [];
       for (let cursor = '', pages = 0; pages < 100; pages++) {
@@ -32644,29 +32640,28 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal(reject.data.code, 'CONTENT_REJECTED_SPAM');
       assert.equal(reject.data.providerCalled, false);
       // The sender learns that the content check refused it (the code above), never how close it was or what judged it.
-      // The verdict is kept for operators and support in the event's own column, not in its data: the email's detail
-      // and events, the published event, the payload posted to the webhook and the delivery log have none of it.
-      const stored = async (emailId: string) => (await db.query(`SELECT v.screen, v.data ? 'screen' AS event, (SELECT bool_or(data ? 'screen') FROM operation_events WHERE workspace_id=v.workspace_id AND data->>'emailId'=v.email_id) AS published,
+      // The verdict stays in our own record, the stored event's data. The published event and the webhook payload built
+      // from it never hold it, and the email's detail and events, the posted webhook and the delivery log have none of it.
+      const stored = async (emailId: string) => (await db.query(`SELECT v.data->'screen' AS event, (SELECT bool_or(data ? 'screen') FROM operation_events WHERE workspace_id=v.workspace_id AND data->>'emailId'=v.email_id) AS published,
         (SELECT bool_or(payload->'data' ? 'screen') FROM operation_deliveries WHERE workspace_id=v.workspace_id AND payload#>>'{data,emailId}'=v.email_id) AS payload FROM sending_email_events v WHERE v.email_id=$1 AND v.type='reject'`, [emailId])).rows[0];
-      assert.deepEqual(await stored(spam), { screen: { spam: 0.97, model: 'jev-test', threshold: 0.7 }, event: false, published: false, payload: false });
+      const kept = { spam: 0.97, model: 'jev-test', threshold: 0.7 };
+      assert.deepEqual(await stored(spam), { event: kept, published: false, payload: false });
       await run('operation.webhook');
       const fresh = await outward(spam);
       assert.deepEqual([fresh.log.length, fresh.posted.length, fresh.posted[0].type, fresh.posted[0].data.code], [1, 1, 'email.rejected', 'CONTENT_REJECTED_SPAM']);
       assert.doesNotMatch(JSON.stringify(fresh), verdict);
-      // A refusal stored before this change holds the verdict in the event's data and in the copies its webhook was made
-      // of. Stored rows are not rewritten: every read removes it, and so does posting the delivery again.
-      const before = { spam: 0.93, model: 'jev-test', threshold: 0.7 };
-      await db.query(`UPDATE sending_email_events SET data=data||jsonb_build_object('screen',$2::jsonb),screen=NULL WHERE email_id=$1 AND type='reject'`, [spam, JSON.stringify(before)]);
-      await db.query(`UPDATE operation_events SET data=data||jsonb_build_object('screen',$2::jsonb) WHERE data->>'emailId'=$1`, [spam, JSON.stringify(before)]);
-      await db.query(`UPDATE operation_deliveries SET payload=jsonb_set(payload,'{data,screen}',$2::jsonb) WHERE payload#>>'{data,emailId}'=$1`, [spam, JSON.stringify(before)]);
-      assert.deepEqual(await stored(spam), { screen: null, event: true, published: true, payload: true });
+      // A refusal published before this change also holds the verdict in the published event and in the payload its
+      // webhook was made of. Stored rows are not rewritten: every read removes it, and so does posting the delivery again.
+      await db.query(`UPDATE operation_events SET data=data||jsonb_build_object('screen',$2::jsonb) WHERE data->>'emailId'=$1`, [spam, JSON.stringify(kept)]);
+      await db.query(`UPDATE operation_deliveries SET payload=jsonb_set(payload,'{data,screen}',$2::jsonb) WHERE payload#>>'{data,emailId}'=$1`, [spam, JSON.stringify(kept)]);
+      assert.deepEqual(await stored(spam), { event: kept, published: true, payload: true });
       ok(await local('POST', `/v1/webhooks/${hook.id}/deliveries/${fresh.log[0].id}/retry`), 202);
       await run('operation.webhook');
       const old = await outward(spam);
       assert.deepEqual([old.posted.length, old.posted[1].data.code, old.events.find(event => event.type === 'reject')!.data.code], [2, 'CONTENT_REJECTED_SPAM', 'CONTENT_REJECTED_SPAM']);
       assert.doesNotMatch(JSON.stringify(old), verdict);
       // Support's screen read is the support agent's, which writes to the sender: the refusal in words, and none of the
-      // three, however it is stored. (Staff read the score and the threshold in the operator timeline.)
+      // three. (Staff read the score and the threshold in the operator timeline.)
       const { screenActivity } = await import('./src/deliverability.js');
       const told = await screenActivity(runtime.db, runtime.config.workspaceId, new Date(Date.now() - 3_600_000).toISOString());
       assert.deepEqual(told.rejections.filter(row => row.emailId === spam).map(row => [row.errorCode, row.verdict]), [['CONTENT_REJECTED_SPAM', 'The content check judged the message to be unsolicited advertising.']]);

@@ -247,8 +247,8 @@ export async function reencryptWebhookSecrets(db: Database, config: Config): Pro
   return counts;
 }
 
-// A webhook payload as stored may hold the content screen's verdict (payloads from before migration 398): what a caller
-// reads of the delivery log, and what is posted or posted again, never does.
+// A webhook payload stored before the published event was built without the content screen's verdict (states.ts
+// terminalEvents) may hold it: what a caller reads of the delivery log, and what is posted or posted again, never does.
 const outwardEvent = <T extends { data: Record<string, unknown> }>(event: T): T => ({ ...event, data: withoutVerdict(event.data) });
 function visibleDelivery(row: typeof deliveries.$inferSelect, a: Actor) {
   return deliverySchema.parse({ ...row, payload: outwardEvent(a.permissions.includes('manage') ? row.payload : { ...row.payload, data: redactCapabilityData(row.payload.data) }) });

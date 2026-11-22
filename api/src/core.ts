@@ -3,7 +3,7 @@ import type { OpenAPIHono } from '@hono/zod-openapi';
 import type { Context } from 'hono';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import type { SESv2Client } from '@aws-sdk/client-sesv2';
-import { sql } from 'drizzle-orm';
+import { sql, type SQL } from 'drizzle-orm';
 import { errorCodeOf, errorTypeOf, log, logFallback, stackFrames } from './log.js';
 import type { ReadyConnection } from './provider-credentials.js';
 import { SECURITY_HEADERS } from './security-headers.js';
@@ -15,15 +15,18 @@ export const SuppressionReason = z.string().describe('Reason recorded when this 
 export const SuppressionEventData = z.object({suppressionReason:SuppressionReason.optional()}).catchall(z.unknown());
 /** An email event's data as anything outside Nightmail's own records gets it: without the content screen's verdict on a
  *  refused email (its score, the classifier's model, the threshold). A sender learns that the content check refused it
- *  (code CONTENT_REJECTED_SPAM), never how close it was or what judged it. New refusals keep the verdict in the event's
- *  own column (sending_email_events.screen, migration 398), which only the operator timeline reads. Events stored before that, and their copies in published
- *  events and webhook payloads, may still hold data.screen: every read of an event's data for a caller, and every
- *  webhook post, goes through this. */
+ *  (code CONTENT_REJECTED_SPAM), never how close it was or what judged it. The verdict stays in Nightmail's own record,
+ *  the stored reject event's data.screen (sending_email_events), which only the operator timeline reads for staff. It is
+ *  removed wherever that data leaves: where the published event and each webhook payload are built from the stored
+ *  event (withoutVerdictSql, in terminalEvents), and on every read of an event's data for a caller and every webhook
+ *  post (this function), which also covers published events and payloads stored before either was in place. */
 export function withoutVerdict<T extends Record<string, unknown>>(data: T): T {
   if (!data || typeof data !== 'object' || !('screen' in data)) return data;
   const { screen: _verdict, ...rest } = data;
   return rest as T;
 }
+/** withoutVerdict inside a statement: a stored event's data (jsonb) as it is copied into a published event. */
+export const withoutVerdictSql = (data: SQL) => sql`(${data}-'screen'::text)`;
 /** An email event's data, in the email's events and in its webhook: with what SES reported about a bounce or a delay.
  *  The reply is the one text here that a third party writes: the webhook's copy has no addresses (webhookData, sending.ts). */
 export const EmailEventData = z.object({suppressionReason:SuppressionReason.optional(),

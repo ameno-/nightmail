@@ -1,7 +1,7 @@
 import { sql, type SQL } from 'drizzle-orm';
 import { FREEZE_FLOOR } from './standing-model.js';
 import type { GetEmailIdentityCommandOutput } from '@aws-sdk/client-sesv2';
-import { id, type DbExecutor } from './core.js';
+import { id, withoutVerdictSql, type DbExecutor } from './core.js';
 import type { MxReport } from './db/mailbox.js';
 import { legacySlugs, productName, productSlug } from './brand.js';
 
@@ -32,19 +32,19 @@ export const countScreened = (verdicts: SQL) => sql`INSERT INTO hosted_screen_ho
   JOIN provider_connections pc ON pc.workspace_id=v.workspace_id AND pc.kind='shared' GROUP BY 1,2,3 ORDER BY 1,2,3
   ON CONFLICT(workspace_id,epoch,hour) DO UPDATE SET screened=s.screened+excluded.screened,rejected=s.rejected+excluded.rejected`;
 export const terminalColumns = sql`id,workspace_id,status,region,simulated,error_code,suppression_reason,dispatch_version`;
-/** `screen`: a content-screen refusal's verdict (ScreenVerdict), for the event's own column (migration 398), which only
- *  that refusal's statement writes and only the operator timeline reads. It is never part of the event's data, which is what the published event and each
- *  webhook payload below are made of. */
-export function terminalEvents(rows: SQL, extra = sql`'{}'::jsonb`, screen?: SQL) {
+/** The stored event keeps all of its data: for a content-screen refusal that includes the verdict (data.screen: score,
+ *  model, threshold), Nightmail's own record. The published event is built from the stored one without it, and each
+ *  webhook payload from the published event, so neither ever holds it. */
+export function terminalEvents(rows: SQL, extra = sql`'{}'::jsonb`) {
   return sql`terminal AS (${rows}), emitted AS (
-    INSERT INTO sending_email_events(id,workspace_id,email_id,type,external_id,simulated,data${screen ? sql`,screen` : sql``})
+    INSERT INTO sending_email_events(id,workspace_id,email_id,type,external_id,simulated,data)
     SELECT public.row_id('event'),workspace_id,id,CASE WHEN status='rejected' THEN 'reject' ELSE status END,
       CASE status WHEN 'acceptance_unknown' THEN 'interrupted:'||id||':'||dispatch_version WHEN 'rejected' THEN 'preflight-failed:'||id ELSE status||':'||id END,simulated,
-      jsonb_strip_nulls(jsonb_build_object('status',status,'code',error_code,'suppressionReason',suppression_reason)) || ${extra}${screen ? sql`,${screen}` : sql``}
+      jsonb_strip_nulls(jsonb_build_object('status',status,'code',error_code,'suppressionReason',suppression_reason)) || ${extra}
     FROM terminal ON CONFLICT DO NOTHING RETURNING *
   ), published AS (
     INSERT INTO operation_events(id,workspace_id,type,region,created_at,data)
-    SELECT v.id,v.workspace_id,'email.rejected',t.region,v.created_at,v.data||jsonb_build_object('emailId',t.id,'simulated',t.simulated)
+    SELECT v.id,v.workspace_id,'email.rejected',t.region,v.created_at,${withoutVerdictSql(sql`v.data`)}||jsonb_build_object('emailId',t.id,'simulated',t.simulated)
     FROM emitted v JOIN terminal t ON t.id=v.email_id ON CONFLICT DO NOTHING RETURNING *
   ), deliveries AS (
     INSERT INTO operation_deliveries(id,workspace_id,webhook_id,event_id,payload)

@@ -1558,9 +1558,7 @@ export function registerSending(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/emails/{id}/events', operationId: 'listEmailEvents', tags: ['Emails'], security, request: { params: IdParams, query: PageQuery }, responses: { 200: response(page(Event)), ...errors } }), async c => {
     // Oldest first by creation time: event IDs are random, so ordering by ID shuffled an email's history.
     const a = actor(c); const emailId = c.req.valid('param').id; await findEmail(c.env.db, a, emailId); const q = c.req.valid('query'), binding = `email-events:${emailId}`, cursor = readCursor(q.cursor, binding);
-    // The event's public columns by name: its screen column (a refusal's verdict) is never read here.
-    const rows = await c.env.db.select({ id: emailEvents.id, emailId: emailEvents.emailId, type: emailEvents.type, providerId: emailEvents.providerId, simulated: emailEvents.simulated, createdAt: emailEvents.createdAt, data: emailEvents.data })
-      .from(emailEvents).where(and(scope(emailEvents, a), eq(emailEvents.emailId, emailId), cursor ? sql`(${emailEvents.createdAt},${emailEvents.id})>(${cursor.at}::timestamptz,${cursor.id})` : undefined)).orderBy(asc(emailEvents.createdAt), asc(emailEvents.id)).limit(q.limit + 1);
+    const rows = await c.env.db.select().from(emailEvents).where(and(scope(emailEvents, a), eq(emailEvents.emailId, emailId), cursor ? sql`(${emailEvents.createdAt},${emailEvents.id})>(${cursor.at}::timestamptz,${cursor.id})` : undefined)).orderBy(asc(emailEvents.createdAt), asc(emailEvents.id)).limit(q.limit + 1);
     return c.json({ data: rows.slice(0, q.limit).map(r => visibleEmailEvent(a,r)), nextCursor: nextCursor(rows, q.limit, binding) }, 200);
   });
   // A scheduled send can be canceled or moved until its release at scheduledAt starts sending it (releaseScheduled holds

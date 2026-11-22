@@ -519,7 +519,7 @@ async function rejectPreflight(runtime: Runtime, mail: Mail, error: unknown): Pr
   const rejected=await runtime.db.execute<{n:number}>(sql`WITH rejected AS (
       UPDATE sending_emails SET status = 'rejected', error_code = ${code}, lease_until = NULL, updated_at = clock_timestamp()
       WHERE workspace_id = ${mail.workspaceId} AND id = ${mail.id} AND status = 'queued' AND dispatch_version = ${mail.dispatchVersion} RETURNING ${terminalColumns},to_addresses||cc_addresses||bcc_addresses AS recipients
-    ), ${error instanceof ScreenRejected && !error.counted ? sql`screen_counted AS (${countScreened(sql`SELECT r.workspace_id,1 AS rejected FROM rejected r WHERE hosted_real_cost(r.recipients)>0`)}), ` : sql``}${terminalEvents(sql`SELECT * FROM rejected`,sql`'{"providerCalled":false}'::jsonb`,error instanceof ScreenRejected ? sql`${JSON.stringify(error.screen)}::jsonb` : undefined)} SELECT count(*)::int AS n FROM webhook_jobs`);
+    ), ${error instanceof ScreenRejected && !error.counted ? sql`screen_counted AS (${countScreened(sql`SELECT r.workspace_id,1 AS rejected FROM rejected r WHERE hosted_real_cost(r.recipients)>0`)}), ` : sql``}${terminalEvents(sql`SELECT * FROM rejected`,sql`${JSON.stringify({providerCalled:false,...(error instanceof ScreenRejected ? { screen: error.screen } : {})})}::jsonb`)} SELECT count(*)::int AS n FROM webhook_jobs`);
   await wakeWebhooks(runtime,rejected.rows[0]!.n);
   // Screen rejections are an expected policy outcome, not a dispatcher fault.
   if (error instanceof ScreenRejected) log('warn', { code, emailId: mail.id, spam: error.screen.spam, model: error.screen.model });
