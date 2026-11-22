@@ -164,7 +164,7 @@ function matchedBy(r: TraceRecipient, overview: Overview, addresses: Pick<Inboun
   if (r.tier === 'pattern') return wildcard ? <>Caught by the wildcard <Match value={wildcard} /></> : 'Caught by a wildcard'
   if (r.tier === 'subaddress') return 'Caught by its address without the +tag'
   if (r.tier === 'catchall') return 'Caught by the catch-all'
-  if (r.tier === 'default') return r.domainDefault === 'create_address' ? 'No address yet · the catch-all creates it' : 'No address yet · the catch-all keeps it'
+  if (r.tier === 'default') return r.domainDefault === 'create_address' ? 'The catch-all creates it' : 'The catch-all keeps it'
   return 'Its own address'
 }
 /** The path one email took, from a test: where it was received and how, the rules that ran (ticked when they acted),

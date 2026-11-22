@@ -1,6 +1,8 @@
 /* Receiving: Addresses, Rules and Destinations, and an address's page. Nightmail tokens only; addresses and code in OpenTUI Mono. */
 .rcv-icon { flex: none; color: var(--color-faint); }
 .rcv-page { display: flex; flex-direction: column; gap: var(--space-16); min-width: 0; }
+/* Counts hold their width ("0" to "99"), so the tabs after them stay put while a search changes them. */
+.rcv-page > .ui-tabs .ui-tab__count { display: inline-block; min-width: 2ch; }
 .rcv-tab { gap: var(--space-12); }
 .rcv-cell { display: flex; align-items: center; gap: var(--space-8); min-width: 0; }
 .rcv-cell > .rcv-icon { align-self: flex-start; margin-top: 3px; }
@@ -12,7 +14,6 @@
 .rcv-table td[data-col='unread'] strong { color: var(--color-text); font-weight: 400; }
 /* Unread is a fact, not a second accent: a dot in the text's own colour. */
 .rcv-table td[data-col='unread'] strong::before { content: ''; display: inline-block; width: 6px; height: 6px; margin: 0 var(--space-6) 1px 0; border-radius: 50%; background: var(--color-text); }
-.rcv-foot { font-family: var(--font-mono); font-size: var(--text-xs); }
 .rcv-match { display: inline-flex; min-width: 0; max-width: 100%; font-family: var(--font-mono); font-size: var(--text-sm); letter-spacing: -.01em; }
 .rcv-match__local { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rcv-match__host { flex: none; color: var(--color-faint); }
@@ -53,7 +54,7 @@
 .rcv-filter:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 1px; }
 /* A tab's own actions, on the right above its table. */
 .rcv-kindline { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-16); min-height: var(--control-height); }
-.rcv-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--space-16); min-height: var(--control-height); font-size: var(--text-sm); transition: opacity 160ms ease-out; }
+.rcv-foot { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-16); min-height: var(--control-height); font-family: var(--font-mono); font-size: var(--text-sm); transition: opacity 160ms ease-out; }
 .rcv-foot[data-busy] { opacity: .6; }
 .rcv-foot .ui-pagination { margin: 0; }
 

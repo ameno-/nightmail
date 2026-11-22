@@ -149,7 +149,6 @@ function AddressesTab({ overview, fetching, filters, setFilter, page, onPage, on
             { key: 'last', label: 'Last mail', align: 'right', card: 'aside', render: r => <LastMail entry={r} /> },
           ]} />
         <div className="rcv-foot" data-busy={fetching || undefined}>
-          <span className="muted">{number(kindCount(overview.counts, filters.kind))} {kindCount(overview.counts, filters.kind) === 1 ? 'address' : 'addresses'}{filters.domain ? ` at ${filters.domain}` : ''}</span>
           <Pagination page={page} pageSize={PAGE} total={kindCount(overview.counts, filters.kind)} nextCursor={overview.routes.nextCursor} onPageChange={onPage} />
         </div>
         {!docked && lookup && panel}
