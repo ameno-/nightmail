@@ -1,8 +1,8 @@
 /* The homepage's first screen, painted from home.html before any of the app's code (home-shell.ts inlines this with
    factory-home.css, which lays the frame out): the factory's hero, in the frame the window's shape gets (frame.ts
    UPRIGHT; both are in the page and one is shown), over the place the page will take, until the page's own hero is up
-   (factory-home.tsx removes it). The homepage is in the system's theme. The tones are sorter-home.css's and
-   sorter/tones.ts's; --hs-floor-* are filled in by home-shell.ts. The words are set in Inter cut down to their letters
+   (factory-home.tsx removes it). The homepage is in the system's theme. The tones are factory-home.css's and
+   tones.ts's; --hs-floor-* are filled in by home-shell.ts. The words are set in Inter cut down to their letters
    (inter-shell.woff2: `fonttools varLib.instancer inter-latin.woff2 wght=400:600`, then `pyftsubset --text=…
    --flavor=woff2 --layout-features=kern,liga,calt`), with the app's own size-matched fallback until it is in. */
 @font-face { font-family: 'Inter Shell'; src: url(%FONT%) format('woff2'); font-weight: 400 600; font-display: swap; }

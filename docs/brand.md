@@ -16,7 +16,7 @@ The logo is the **NIGHTMAIL** wordmark, in wide squared-off capitals, and the **
 | `app/src/lib/marks.ts` | the wordmark's and the monogram's outlines, as the app draws them |
 | `app/src/components/NightmailLogo.tsx` | `NightmailWordmark` (the wordmark alone) and `NightmailMark` (the tile), each one inline SVG that follows the theme |
 
-The SVGs in `app/public/brand/`, `favicon.svg`, `favicon-dark.svg` and `apple-touch-icon.png` are the final vector set's own files, copied in unchanged. `node scripts/brand-assets.mjs` in `app/` builds the rest: it packs `favicon.ico`, draws the three manifest icons from `nightmail-monogram.svg`, and photographs `og.png` from the built homepage (`bun run build` first; `BRAND_ONLY=og` for the card alone, `BRAND_ONLY=icons` for everything but the card).
+The SVGs in `app/public/brand/`, `favicon.svg`, `favicon-dark.svg` and `apple-touch-icon.png` are the final vector set's own files, copied in unchanged. `node scripts/brand-assets.mjs` in `app/` builds the rest: it packs `favicon.ico`, and draws the three manifest icons from `nightmail-monogram.svg`. `og.png` is a fixed file.
 
 Everything is outlined, so no font is needed to render the files. Use the PNGs in email, because many mail clients don't show SVG.
 
@@ -44,7 +44,7 @@ Where the app sets them:
 - **A phone's top bar (under 640 px):** 11 px, as tall as the caps of the workspace picker's name beside it; 10 px under 380 px. From 640 px the bar carries it at 13 px.
 - **Onboarding and the legal pages:** 13 px, at the head of the page.
 - **Support chat:** `NightmailMark` at 18 px beside the agent's name.
-- **Homepage:** there is no header and no tile: the machine carries the name. The wordmark stands in lit letters at the head of the sorting frame, exactly as wide as the price under it (`features/home/sorter/name.ts`), and again across the page's end as solids cut off by the page's edge (`features/home/end-band.tsx`). `og.png` sets the lockup beside the machine.
+- **Homepage:** there is no header and no tile. The wordmark stands across the page's end as solids cut off by the page's edge (`features/home/end-band.tsx`). `og.png`, a fixed file, sets the lockup beside the machine.
 
 ## Clear space and size
 

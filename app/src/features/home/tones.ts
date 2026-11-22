@@ -1,6 +1,5 @@
 // The sorter's materials. Each is four tones of one colour, by how a surface faces the lamp over the machine: lit from
-// above, the front, grazing, and shade (which is also what a cast shadow is). The renderer passes smoothly between
-// them round a curve and adds the rest of the light to them (gl.ts); the page's own boxes use them as they are. `floor` is the page itself, the dark the slab stands in. Night: one hue (268°, the brand's) at low chroma and
+// above, the front, grazing, and shade (which is also what a cast shadow is); the page's own boxes use them as they are. `floor` is the page itself, the dark the slab stands in. Night: one hue (268°, the brand's) at low chroma and
 // its opposite, a warm paper white, for letters and whatever is lit; red only where something burns. Day is the same
 // machine in pale enamel on a pale floor, its sorting frame still dark so the letters in it stay paper.
 // A row is [lit, front, grazing, shade] lightness, chroma, hue, alpha (OKLCH); night first, then day.
@@ -42,7 +41,7 @@ const TABLE = {
   smoke:   [flat(.36, .012, 268), flat(.7, .008, 262)],
   steam:   [flat(.82, .008, 268), flat(.99, .004, 262)],
   scorch:  [flat(.1, .012, 268, .7), flat(.35, .02, 262, .5)],
-  // The sides of the wordmark's lit letters at the head of the frame (sorter/name.ts): never as pale as their faces,
+  // The sides of the wordmark's lit letters at the head of the frame: never as pale as their faces,
   // by night or by day, so a letter's face stays the outline's own shape.
   rim:     [[.5, .39, .33, .27, .02, 268, 1], [.63, .52, .46, .39, .03, 262, 1]],
   // The fitters' arms: a paler enamel than the machine's own, so they are seen at work against it and against the dark.
@@ -102,7 +101,7 @@ function glassVeil(index: 0 | 1 | 2 | 3, dark: boolean, strength = 1) {
   const t = TABLE.tube[dark ? 0 : 1], [r, g, b] = oklch(t[index], t[4], t[5])
   return `rgb(${r} ${g} ${b} / ${Math.round(t[6] * strength * 100)}%)`
 }
-/** The machine's tones for the page's own boxes below it (sorter-home.css reads them as --srt-*). */
+/** The machine's tones for the page's own boxes below it (the page's CSS reads them as --srt-*). */
 export function toneVars(dark: boolean): Record<string, string> {
   return {
     '--srt-floor': tone('floor', 0, dark), '--srt-body': tone('body', 1, dark), '--srt-body-top': tone('body', 0, dark), '--srt-body-side': tone('body', 3, dark), '--srt-plinth': tone('plinth', 1, dark), '--srt-trim': tone('trim', 1, dark),

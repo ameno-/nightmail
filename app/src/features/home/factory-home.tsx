@@ -3,8 +3,8 @@ import { SignInConsent } from '../../components/LegalLinks'
 import { useTheme } from '../../lib/theme'
 import type { HomeProps } from '.'
 import { StartButton } from './start'
-import { plan, type Plan } from './sorter/plan'
-import { toneVars } from './sorter/tones'
+import { plan, type Plan } from './plan'
+import { toneVars } from './tones'
 import { Machines } from './machines'
 import { MANIFESTS, published, type Format, type Manifest } from './factory/manifest'
 import { frameOf, pct } from './frame'
@@ -14,6 +14,7 @@ import deskBoard0 from './factory/boards/board0.webp'
 import deskBoard1 from './factory/boards/board1.webp'
 import deskBoard2 from './factory/boards/board2.webp'
 import './factory-home.css'
+import './page.css'
 
 // The homepage: the factory, in a wide frame on a desktop and a tall one on a phone (index.tsx picks), from the very top
 // of the window: there is no header (the machine carries the name). A rendered hall with the sorting machine standing in it, the price on the
@@ -72,7 +73,7 @@ export function FactoryHome({ start, notice, format }: HomeProps & { format: For
   const scene = useRef<HTMLElement>(null), probe = useRef<HTMLDivElement>(null), stage = useRef<HTMLDivElement>(null), frame = useRef<HTMLDivElement>(null)
   const bg = useRef<HTMLDivElement>(null), boards = useRef<HTMLDivElement>(null), fg = useRef<HTMLDivElement>(null), tags = useRef<HTMLDivElement>(null)
   const poster = useRef<HTMLImageElement>(null), cta = useRef<HTMLElement>(null)
-  // The page's foot (machines.tsx, end-band.tsx) is measured as the sorter's page would measure it for this window (sorter/plan.ts).
+  // The page's foot (machines.tsx, end-band.tsx) is measured for this window (plan.ts).
   const [p, setP] = useState<Plan | null>(null)
   useLayoutEffect(() => {
     const measure = () => {
