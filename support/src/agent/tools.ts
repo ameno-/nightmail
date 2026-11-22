@@ -254,19 +254,24 @@ export const TOOL_NAMES = TOOLS.map(t => t.name);
 export const MANAGER_TOOLS: ReadonlySet<string> = new Set(['list_domains', 'domain_health', 'list_webhook_deliveries', 'get_billing', 'get_audit', 'api_errors', 'explain_request', 'propose_action', 'recheck_domain']);
 /** An unverified email reads no account: its turns answer through reply and can file a ticket, nothing else. */
 const EMAIL_TOOLS: ReadonlySet<string> = new Set(['reply', 'file_ticket']);
-/** Never by email, even for a verified sender: email changes nothing, keeps no notes and never reads content. */
-const CHAT_ONLY: ReadonlySet<string> = new Set(['propose_action', 'recheck_domain', 'request_content_access', 'add_note']);
+/**
+ * Everything a verified email may call: the account's status, domains and sending (by role, as in chat), workspace choice,
+ * reply and file_ticket. Never billing, the activity trail (it carries key and billing events), request logs (key
+ * principals) or webhook deliveries: those are answered in the dashboard's Help chat. And nothing that changes anything,
+ * keeps a note or reads content. Nightmail refuses those routes for an email conversation too.
+ */
+export const EMAIL_TOOLS_VERIFIED: ReadonlySet<string> = new Set(['account_context', 'list_workspaces', 'list_domains', 'domain_health', 'get_standing', 'list_emails', 'get_email',
+  'list_events', 'delivery_metrics', 'bounce_reasons', 'screen_rejections', 'lint_email', 'list_campaigns', 'get_campaign', 'lint_campaign', 'audience_health', 'choose_workspace', 'reply', 'file_ticket']);
 export type Turn = { channel: 'chat'; manager: boolean } | { channel: 'email'; verified?: false } | { channel: 'email'; verified: true; manager: boolean };
 /**
  * The tools one turn may call. A chat's: account tools by role (the owner/admin ones only for a manager), workspace
- * choice, content access, tickets, add_note and the changes, never reply (chat text streams). A verified email's: the same
- * account reads by role, workspace choice, reply and file_ticket, and nothing that changes anything, keeps a note or reads
- * content. Any other email's: reply and file_ticket only. OpenCode's session permissions offer exactly these; the plugin
- * refuses any other call.
+ * choice, content access, tickets, add_note and the changes, never reply (chat text streams). A verified email's: the
+ * reads of EMAIL_TOOLS_VERIFIED by role, workspace choice, reply and file_ticket. Any other email's: reply and file_ticket
+ * only. OpenCode's session permissions offer exactly these; the plugin refuses any other call.
  */
 export function toolNames(turn: Turn): string[] {
   if (turn.channel === 'email' && !turn.verified) return TOOL_NAMES.filter(name => EMAIL_TOOLS.has(name));
-  if (turn.channel === 'email') return TOOL_NAMES.filter(name => !CHAT_ONLY.has(name) && (!MANAGER_TOOLS.has(name) || turn.manager));
+  if (turn.channel === 'email') return TOOL_NAMES.filter(name => EMAIL_TOOLS_VERIFIED.has(name) && (!MANAGER_TOOLS.has(name) || turn.manager));
   return TOOL_NAMES.filter(name => name !== 'reply' && (!MANAGER_TOOLS.has(name) || turn.manager));
 }
 

@@ -80,7 +80,8 @@ export const operatorGate: MiddlewareHandler<AppEnv> = async (c, next) => {
  * dashboard counterpart admits (SUPPORT_CEILINGS), charges the conversation's minute budget (supportWeight: 5 for an
  * aggregate read, else 1), writes the internal support.read row and, the first time the conversation reads a workspace,
  * the customer-visible "support.view". A route without a ceiling is refused, and an email conversation is refused a
- * chat's own routes (changes and notes): it only reads and narrows its workspace.
+ * chat's own routes (changes, notes, billing, the activity trail, request logs and webhooks): it reads only the account's
+ * status, domains and sending, and narrows its workspace.
  */
 export const supportGate: MiddlewareHandler<AppEnv> = async (c, next) => {
   const conversationId = c.env.supportConversation;
@@ -119,7 +120,7 @@ export const supportGate: MiddlewareHandler<AppEnv> = async (c, next) => {
   if (!conv) {
     // Nothing was charged or logged: say why when it is an email conversation asking for a chat's route.
     if (ceiling.chatOnly && (await c.env.db.execute(sql`SELECT FROM support_conversations WHERE id = ${conversationId} AND channel = 'email' AND status <> 'closed' AND user_id IS NOT NULL`)).rows.length)
-      throw new ApiError(403, 'SUPPORT_CHAT_ONLY', 'An email support conversation only reads and narrows its workspace: changes and notes are a chat’s.');
+      throw new ApiError(403, 'SUPPORT_CHAT_ONLY', 'An email support conversation reads only the account’s status, domains and sending, and narrows its workspace: changes, notes, billing, the activity trail, request logs and webhooks are a chat’s.');
     throw supportRequired();
   }
   if (conv.used > limit) { c.header('Retry-After', '60'); throw new ApiError(429, 'REQUEST_RATE_LIMITED', `A support conversation may make ${limit} requests a minute. Retry after the window resets.`, undefined, true); }
@@ -199,7 +200,8 @@ const Standing = z.object({ workspaceId: z.string(), connection: z.record(z.stri
   standing: z.record(z.string(), z.unknown()).nullable().describe('The sender standing (step, reasons, score, daily limit) where the reputation system is enabled.'),
   last24h: z.record(z.string(), z.number()).describe('Sent mail in the last 24 hours by status (counted up to 50,000).') }).openapi('SupportStanding');
 
-async function workspaceSummaries(db: DbExecutor, list: SupportScope['workspaces']) {
+/** `email`: the API-key count is left out (an email conversation never reads keys). */
+async function workspaceSummaries(db: DbExecutor, list: SupportScope['workspaces'], email = false) {
   if (!list.length) return [];
   const { rows } = await db.execute<{ id: string; created_at: string; sending: z.infer<typeof WorkspaceSummary>['sending']; counts: Record<string, number> }>(sql`SELECT w.id, w.created_at::text,
       (SELECT json_build_object('kind', pc.kind, 'region', pc.region, 'state', to_jsonb(pc) ->> 'state', 'paused', pc.paused_at IS NOT NULL, 'pauseReason', left(to_jsonb(pc) ->> 'pause_reason', 300),
@@ -211,7 +213,8 @@ async function workspaceSummaries(db: DbExecutor, list: SupportScope['workspaces
         'campaigns', (SELECT count(*) FROM sending_campaigns WHERE workspace_id = w.id), 'templates', (SELECT count(*) FROM campaign_templates WHERE workspace_id = w.id),
         'contacts', (SELECT count(*) FROM (SELECT FROM audience_contacts WHERE workspace_id = w.id LIMIT 100000) x)) AS counts
     FROM workspaces w WHERE w.id = ANY(${ids(list.map(w => w.id))})`);
-  return list.map(w => { const r = rows.find(x => x.id === w.id); return { ...w, createdAt: r ? new Date(r.created_at).toISOString() : '', sending: r?.sending ?? null, counts: r?.counts ?? {} }; });
+  const counts = (all: Record<string, number> | undefined) => { if (!all || !email) return all ?? {}; const { apiKeys: _keys, ...rest } = all; return rest; };
+  return list.map(w => { const r = rows.find(x => x.id === w.id); return { ...w, createdAt: r ? new Date(r.created_at).toISOString() : '', sending: r?.sending ?? null, counts: counts(r?.counts) }; });
 }
 async function domainSummaries(db: DbExecutor, list: string[], limit = 200) {
   if (!list.length) return [];
@@ -329,19 +332,22 @@ export function registerSupport(app: App) {
     links: z.object({ requestIds: z.array(z.string()).describe('Request IDs to look up with /v1/support/requests/{requestId}.') }),
   }).openapi('SupportContext');
   app.openapi(createRoute({ ...meta('getSupportContext', 'Start here: one compact summary of the customer for a support conversation: who they are, their workspaces and roles, sending setup and limits, domains and their verification, failures in the last 24 hours, open enforcement, the last 20 audit entries and request IDs to drill into.'), path: '/v1/support/context', request: { query: WorkspaceFilter }, responses: { 200: response(Context), ...errors } }), async c => {
-    const { scope, ids: list, workspaces } = scoped(c), admin = workspaces.filter(w => w.role !== 'member').map(w => w.id), db = c.env.db;
+    const { scope, ids: list, workspaces } = scoped(c), email = scope.conversation.channel === 'email', db = c.env.db;
     // A conversation reads domains and webhook failures only where its role reads them in the dashboard (CONTEXT_SECTIONS).
-    const domainIds = sectionIds('domains', workspaces), hookIds = sectionIds('webhookDeliveries', workspaces);
+    // Email reads the account's status, domains and sending only: no activity trail (it carries key and billing events),
+    // no webhook failures, no request IDs and no API-key count; those sections stay empty.
+    const admin = email ? [] : workspaces.filter(w => w.role !== 'member').map(w => w.id);
+    const domainIds = sectionIds('domains', workspaces), hookIds = email ? [] : sectionIds('webhookDeliveries', workspaces);
     // Independent reads, in parallel (the support platform's runtime has a pool for this: src/worker.ts).
     const [{ rows: [user] }, { rows: [handoff] }, summaries, domains, recent, activity, stand, { rows: enforcement }] = await Promise.all([
       db.execute<{ id: string; name: string | null; email: string | null; created_at: string | null }>(sql`SELECT id, name, email, created_at::text FROM nightmail_users WHERE id = ${scope.userId}`),
       db.execute<{ id: string; page: string | null; request_ids: string[]; message: string | null; created_at: string }>(sql`SELECT h.id, h.page, h.request_ids, h.message, h.created_at::text FROM support_handoffs h WHERE h.conversation_id = ${scope.conversation.id}`),
-      workspaceSummaries(db, workspaces), domainSummaries(db, domainIds, 50), failures(db, list, hookIds), customerTrail(db, admin, AuditFilters.parse({ limit: 20 })), standings(db, list),
+      workspaceSummaries(db, workspaces, email), domainSummaries(db, domainIds, 50), failures(db, list, hookIds), admin.length ? customerTrail(db, admin, AuditFilters.parse({ limit: 20 })) : Promise.resolve({ data: [] as z.infer<typeof AuditEntry>[] }), standings(db, list),
       db.execute<{ workspaceId: string; kind: string; since: string | null; reason: string | null }>(sql`SELECT workspace_id AS "workspaceId", 'sending_paused' AS kind, paused_at::text AS since,
           left(to_jsonb(pc) ->> 'pause_reason', 300) AS reason FROM provider_connections pc WHERE workspace_id = ANY(${ids(list)}) AND paused_at IS NOT NULL
         UNION ALL SELECT workspace_id, 'campaign_paused:' || id, paused_at::text, left(pause_reason::text, 300) FROM sending_campaigns WHERE workspace_id = ANY(${ids(list)}) AND state = 'paused' LIMIT 20`),
     ]);
-    const requestIds = [...new Set([...(handoff?.request_ids ?? []), ...activity.data.map(e => e.requestId).filter((r): r is string => !!r)])].slice(0, 10);
+    const requestIds = email ? [] : [...new Set([...(handoff?.request_ids ?? []), ...activity.data.map(e => e.requestId).filter((r): r is string => !!r)])].slice(0, 10);
     return c.json({ grant: { id: scope.conversation.id, ticketRef: scope.conversation.id, expiresAt: new Date().toISOString(), contentShared: !!scope.contentWorkspaceId, contentWorkspaceId: scope.contentWorkspaceId },
       user: { id: scope.userId, name: user?.name ?? null, email: user?.email ?? null, createdAt: user?.created_at ? new Date(user.created_at).toISOString() : null },
       workspaces: summaries, domains, recentFailures: { since: new Date(Date.now() - 86_400_000).toISOString(), ...recent, authErrors: null }, standing: stand, recentActivity: activity.data,
@@ -350,7 +356,7 @@ export function registerSupport(app: App) {
       links: { requestIds } }, 200);
   });
   app.openapi(createRoute({ ...meta('listSupportWorkspaces', 'The customer’s workspaces with their role, sending connection and resource counts.'), path: '/v1/support/workspaces', request: { query: WorkspaceFilter }, responses: { 200: response(z.object({ data: z.array(WorkspaceSummary) })), ...errors } }), async c =>
-    c.json({ data: await workspaceSummaries(c.env.db, scoped(c).workspaces) }, 200));
+    c.json({ data: await workspaceSummaries(c.env.db, scoped(c).workspaces, c.get('support')!.conversation.channel === 'email') }, 200));
   app.openapi(createRoute({ ...meta('listSupportDomains', 'Every domain with its sending verification (DKIM, MAIL FROM, DMARC) and receiving state.'), path: '/v1/support/domains', request: { query: WorkspaceFilter }, responses: { 200: response(z.object({ data: z.array(DomainSummary) })), ...errors } }), async c =>
     c.json({ data: await domainSummaries(c.env.db, scoped(c).ids) }, 200));
 
@@ -360,8 +366,9 @@ export function registerSupport(app: App) {
     address: z.string().trim().toLowerCase().max(254).optional().describe('Only mail to or from this exact address.'),
   });
   app.openapi(createRoute({ ...meta('listSupportEmails', 'Sent or received mail, newest first: addresses, subject, status and error codes. Never bodies; read one email for its events (and its body when the customer shared content).'), path: '/v1/support/emails', request: { query: EmailQuery }, responses: { 200: response(z.object({ data: z.array(EmailSummary), nextCursor: z.string().nullable() })), ...errors } }), async c => {
-    const q = c.req.valid('query'), { ids: list, workspaces } = scoped(c), cursor = keyset(q.cursor), routed = receivedAsMember(workspaces);
-    if (!list.length) return c.json({ data: [], nextCursor: null }, 200);
+    const q = c.req.valid('query'), { scope, ids: list, workspaces } = scoped(c), cursor = keyset(q.cursor), routed = receivedAsMember(workspaces);
+    // Email reads sending only: an email conversation lists no received mail.
+    if (!list.length || (q.direction === 'received' && scope.conversation.channel === 'email')) return c.json({ data: [], nextCursor: null }, 200);
     const rows = q.direction === 'sent' ? (await c.env.db.execute<z.infer<typeof EmailSummary> & { at_text: string; key: string }>(sql`SELECT workspace_id AS "workspaceId", id, 'sent' AS direction, created_at::text AS at_text,
         id AS key, created_at::text AS at, from_address AS "from", to_addresses AS "to", subject, status, error_code AS "errorCode", suppression_reason AS "suppressionReason", campaign_id AS "campaignId",
         snapshot ->> 'kind' AS kind, simulated, provider_id AS "providerMessageId" FROM sending_emails
@@ -396,6 +403,8 @@ export function registerSupport(app: App) {
       return c.json({ ...rest, at: new Date(sent.at).toISOString(), events: events.map(e => ({ ...e, at: new Date(e.at).toISOString(), detail: e.detail ?? {} })), authentication: null,
         content: snapshot ? { subject: snapshot.subject ?? sent.subject, text: snapshot.text ?? null, html: snapshot.html ?? null } : null }, 200);
     }
+    // Email reads sending only: an email conversation opens no received message.
+    if (scope.conversation.channel === 'email') notFound('Email');
     const { rows: [received] } = await db.execute<z.infer<typeof EmailSummary> & { verdicts: Record<string, unknown> | null; text: string | null; html: string | null }>(sql`SELECT workspace_id AS "workspaceId", id,
         'received' AS direction, received_at::text AS at, from_address AS "from", envelope_to AS "to", subject, status, error_code AS "errorCode", suppression_reason AS "suppressionReason", NULL AS "campaignId",
         CASE WHEN spam THEN 'spam' WHEN automated THEN 'automated' END AS kind, NULL::boolean AS simulated, ses_message_id AS "providerMessageId", verdicts,
