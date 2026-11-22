@@ -6,7 +6,7 @@ import { queries, type QueryDef } from './queries'
 import { firstOverview, overviewQuery } from '../features/inbound/overview'
 import type { Api } from './types'
 import { openApiQuery } from '../features/docs/openapi'
-import { latestRowCount } from '../features/overview/latest'
+import { latestRequest } from '../features/overview/latest'
 import { rangeStart } from '../features/logs/range'
 import { issuesRequest, useNewsletters } from '../features/newsletters/shared'
 
@@ -25,7 +25,7 @@ function firstScreen(path: string, { regionId, multiTenant, canAdminister, newsl
   const newsletter = /^\/newsletters\/(?!new$)([^/]+)$/.exec(path)?.[1]
   if (newsletter) { const id = decodeURIComponent(newsletter); return [queries.newsletter(id), queries.campaigns(issuesRequest(id))] }
   switch (path) {
-    case '/overview': return scoped ? [queries.overview(regionId, '24h', 'all'), queries.senderScore(), queries.logs({ regionId, direction: 'all', page: 1, pageSize: latestRowCount() }), ...(canAdminister ? [queries.overviewSetup()] : [])] : []
+    case '/overview': return scoped ? [queries.overview(regionId, '24h', 'all'), queries.senderScore(), queries.logs(latestRequest(regionId)), ...(canAdminister ? [queries.overviewSetup()] : [])] : []
     case '/logs': { const pageSize = rememberedPageSize('logs'); return scoped && pageSize ? [queries.logs({ regionId, direction: 'all', search: '', status: undefined, stream: undefined, from: rangeStart('30d'), page: 1, pageSize })] : [] }
     // Receiving is one read: addresses (routes), counts, rules, destinations (endpoints) and domains.
     case '/receiving': return [overviewQuery(firstOverview) as QueryDef<unknown>]

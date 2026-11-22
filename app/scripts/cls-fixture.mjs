@@ -652,6 +652,11 @@ async function issue(db, who, newsletter, subject, sent) {
     SELECT $1,workspace_id,id,revision,draft,'fixture',jsonb_build_object('html',draft->>'html'),$3::timestamptz FROM sending_campaigns WHERE id=$2`, [review, campaign.id, at]);
   await db.query(`UPDATE sending_campaigns SET state='done',review_id=$2,total=$3,prepared=$3,expanded=$3,stats=$4::jsonb,created_at=$5::timestamptz-interval '2 days',updated_at=$5 WHERE id=$1`,
     [campaign.id, review, sent.readers, JSON.stringify(stats), at]);
+  // `emails`: its emails are still in the history, so its results open them in Logs (the review's per-status links).
+  if (sent.emails) await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, provider_id, event_outcomes, created_at, campaign_id, review_id, review_ordinal)
+    SELECT 'email_'||$2||'_'||g, workspace_id, '${REGION}', 'fixture', $3, jsonb_build_array('reader'||g||'@example.net'), '[]', '[]', $4, jsonb_build_object('kind','marketing','region','${REGION}','subject',$4::text,'attachments','[]'::jsonb), false,
+      CASE WHEN g <= $6 THEN 'bounced' ELSE 'delivered' END, 'provider-'||$2||'-'||g, 0, $7::timestamptz + g * interval '1 second', id, $2, g
+    FROM sending_campaigns, generate_series(1,$5) g WHERE id=$1`, [campaign.id, review, newsletter.from, subject, sent.readers, bounced, at]);
   return campaign.id;
 }
 // One newsletter with a year's readers and twelve issues (mara); two newsletters, one with a single draft, beside two
@@ -670,7 +675,8 @@ async function newsletters(fx) {
   const tide = await mara.api('POST', '/v1/newsletters', { name: 'Tide Notes', from: 'mara@tidenotes.example', fromName: 'Tide Notes' }, 201);
   await newsletterReaders(db, 'ws_tide', tide.id, 3412);
   const subjects = ['Hello from the shore', 'Mending nets', 'A field guide to sea fog', 'Where the seals go in August', 'The low-tide walk to the island', 'Salt on everything', 'Notes from the lighthouse road', 'Small boats, big tides', 'The ferry timetable, annotated', 'Kelp, and what to do with it', 'A harbour at five in the morning', 'What the storm left behind'];
-  for (const [i, subject] of subjects.entries()) await issue(db, mara, tide, subject, { days: (subjects.length - 1 - i) * 7 + 3, readers: Math.round(3398 * (1 - (subjects.length - 1 - i) * 0.021)), opened: 0.46 + rnd() * 0.1, clicked: 0.08 + rnd() * 0.06 });
+  let issueSent
+  for (const [i, subject] of subjects.entries()) issueSent = await issue(db, mara, tide, subject, { days: (subjects.length - 1 - i) * 7 + 3, readers: Math.round(3398 * (1 - (subjects.length - 1 - i) * 0.021)), opened: 0.46 + rnd() * 0.1, clicked: 0.08 + rnd() * 0.06, emails: i === subjects.length - 1 });
 
   const lou = await workspace('lou', 'lou@fernhill.example', 'Lou Holt', { id: 'ws_fern', name: 'Fernhill Farm' }, 'fernhill.example');
   const weekly = await lou.api('POST', '/v1/newsletters', { name: 'Fernhill Weekly', from: 'weekly@fernhill.example', fromName: 'Fernhill Farm' }, 201);
@@ -688,7 +694,7 @@ async function newsletters(fx) {
 
   const ivy = await workspace('ivy', 'ivy@quillpress.example', 'Ivy Marsh', { id: 'ws_quill', name: 'Quill Press' }, 'quillpress.example');
   for (const name of ['Fiction', 'Poetry', 'Essays', 'For booksellers']) await ivy.api('POST', '/v1/newsletters', { name, from: `${name.toLowerCase().replace(/\W+/g, '-')}@quillpress.example`, fromName: 'Quill Press' }, 201);
-  return { newsletter: tide.id, newsletterDraft: trade.id, newsletterNew: wren.id, newsletterSecond: weekly.id };
+  return { issueSent, newsletter: tide.id, newsletterDraft: trade.id, newsletterNew: wren.id, newsletterSecond: weekly.id };
 }
 
 export async function seed(fx) {

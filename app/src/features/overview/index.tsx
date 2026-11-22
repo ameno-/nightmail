@@ -11,17 +11,20 @@ import { Crossfade, useMorph, useTween } from '../../components/motion'
 import { date, label, number, percent } from '../../lib/format'
 import { NextSteps, SidebarScore, StandingCard, useNextSteps, useSenderScore } from '../score'
 // `logColumns` here are Overview's compact set of Logs' columns (skeletons.tsx).
-import { AsideSkeleton, ChartSkeleton, factTitles, FactsSkeleton, latestColumns as logColumns, RegionStatus } from './skeletons'
-import { useLatestRowCount } from './latest'
+import { AsideSkeleton, ChartSkeleton, factTitles, FactTilesSkeleton, latestColumns as logColumns, RegionStatus, ScoreTileSkeleton } from './skeletons'
+import { latestRequest, useLatestRowCount } from './latest'
 import { logHref, logRowLabel, useLogRowIntent } from '../logs/rows'
-import { usePrefetchQueries } from '../../data/prefetch'
+import { routeChunks, usePrefetchQueries } from '../../data/prefetch'
 import { composer } from '../campaigns/composer-chunk'
 import { DailyLimit, SetupRail, useSendingLimitPending, useSetupSteps } from './setup'
 import { useCompactShell, useMediaQuery } from '../../lib/media'
 
-// Overview: four figure tiles, the activity chart and the latest emails (down to the card's bottom) on
-// the left; a detail column on the right with the standing card (Warn and up), setup (until the first email), the
-// daily limit, up to three next steps and the recent campaigns. The sender score is the sidebar's card.
+// Overview: is sending healthy? The range and stream over the figures they filter; four figure tiles, each a link to
+// that mail in Logs; the activity chart; and the latest emails, failures first (down to the card's bottom) on the
+// left. A detail column on the right with the standing card (Warn and up), setup (until the first email), the daily
+// limit, up to three next steps and the recent campaigns. The sender score is the sidebar's card; where there is no
+// sidebar (the compact shell) it is a row under the tiles, so health comes before everything else.
+// In one column (960px and under) the detail column follows the chart and the list closes the page.
 // Every async block reserves its final size, and refetches keep the previous data on screen. A new range or stream keeps
 // the old figures up (dimmed if the new ones take over 100 ms), then numbers tween and charts morph or crossfade.
 export function OverviewPage() {
@@ -36,7 +39,8 @@ export function OverviewPage() {
   const regions = useRegionCatalog({ enabled: !multiTenant })
   const current = regions.data?.data.find(region => region.region === regionId)
   const discovery = useRegionDiscovery(multiTenant ? undefined : current)
-  const controls = <div className="cluster ov-controls">
+  // Self-hosted, the region's status rides along: too wide for the main column, so the header keeps the page's width.
+  const controls = <div className="cluster ov-controls" data-wide={!multiTenant || undefined}>
     {!multiTenant && <><ReputationSummary report={discovery.data} regionId={regionId} />{!canAdminister && <span className="muted">{regionId}</span>}<RegionStatus current={current} /></>}
     <Tabs value={range} onValueChange={value => setRange(value as TimeRange)} items={[{ value: '24h', label: '24h' }, { value: '7d', label: '7d' }, { value: '30d', label: '30d' }]} label="Time range" />
     <Select aria-label="Email stream" value={stream} onValueChange={value => setSearchParams(previous => { const next = new URLSearchParams(previous); if (value === 'all') next.delete('stream'); else next.set('stream', value); return next })} options={[{ value: 'all', label: 'All emails' }, { value: 'transactional', label: 'Transactional' }, { value: 'marketing', label: 'Marketing' }]} />
@@ -44,19 +48,21 @@ export function OverviewPage() {
   const data = query.data
   // Where the detail column stacks under the main one (overview.css, 960px), the setup steps lead the page, above the figures. Whether they show is only known once the setup read
   // lands, so until then the main column holds its skeletons and swaps in whole (new nodes, nothing moves).
-  const stacked = useMediaQuery('(max-width: 960px)')
+  const stacked = useMediaQuery('(max-width: 960px)'), compact = useCompactShell()
   const setup = useSetupSteps()
+  const detail = useDetail(setup)
   const held = stacked && setup.loading
   // Latest emails and the figures above it must agree: when a new email (or a new outcome for one) shows in the list,
   // the figures are read again. The API keys its dashboard cache on the same mail activity, so that read is current.
   const count = useLatestRowCount()
   // A stream picked in the header scopes Latest emails too: its sent mail (received mail has no stream).
-  const latestParams = stream === 'all' ? { regionId, direction: 'all' as const, page: 1, pageSize: count } : { regionId, direction: 'sent' as const, stream, page: 1, pageSize: count }
+  const latestParams = latestRequest(regionId, stream)
   const latest = useApiDef(queries.logs(latestParams), { interval: 60_000, keepPrevious: sameRegion(regionId) })
   const head = latest.data?.items.slice(0, 7).map(row => `${row.id}:${row.status}`).join(',')
   const seen = useRef<string | undefined>(undefined)
   const refetch = query.refetch
   useEffect(() => { if (head === undefined) return; if (seen.current !== undefined && seen.current !== head) void refetch(); seen.current = head }, [head, refetch])
+  const latestEmails = <LatestEmails params={latestParams} count={count} reserve={!stacked} held={held} range={range} figures={data} figuresFailed={query.isError} />
   return <>
     <PageHeader title="Overview" actions={controls} />
     <div className="ov-split">
@@ -65,40 +71,48 @@ export function OverviewPage() {
         {stacked && setup.error ? <ErrorState error={setup.error} onRetry={setup.retry} /> : null}
         <Fragment key={held ? 'held' : 'ready'}>
           {query.isError && !data ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
-            {data && !held ? <Facts data={data} stale={query.isPlaceholderData} /> : <FactsSkeleton />}
+            {/* The score has its own read: it neither waits for the figures nor dims with them. */}
+            <div className="ov-tiles" role="group" aria-label="Figures" data-stale={query.isPlaceholderData || undefined}>{data && !held ? <Facts data={data} range={range} stream={stream} /> : <FactTilesSkeleton />}{compact && (held ? <ScoreTileSkeleton /> : <SidebarScore />)}</div>
             {data && !held ? <Chart data={data} stale={query.isPlaceholderData} /> : <ChartSkeleton />}
           </>}
-          <LatestEmails params={latestParams} held={held} range={range} />
+          {!stacked && latestEmails}
         </Fragment>
       </div>
-      <Aside setup={setup} showSetup={!stacked} campaigns={data?.recentCampaigns} range={range} />
+      <Aside setup={setup} detail={detail} showSetup={!stacked} placeholder={!stacked} campaigns={data?.recentCampaigns} range={range} />
+      {/* Under the detail column, once that column has its final height (its own reads and the figures' campaigns). */}
+      {stacked && detail.ready && (data || query.isError) ? latestEmails : null}
     </div>
   </>
 }
 
+// What the detail column shows, and whether all of it is known (the page also waits on this to place the list under it).
+function useDetail(setup: ReturnType<typeof useSetupSteps>) {
+  const score = useSenderScore()
+  const next = useNextSteps(score.data)
+  const limitPending = useSendingLimitPending()
+  return { score, next, ready: Boolean((score.data || score.isError) && !setup.loading && next.ready && !limitPending) }
+}
 // The detail column renders in one go once setup, the score and the next steps are known, so nothing in it moves.
 // The standing card (Warn and up) leads it; the banner's fix link and the sidebar score scroll here by hash. Recent
 // campaigns come with the overview's figures and close the column, so arriving later moves nothing above them.
-function Aside({ setup, showSetup, campaigns, range }: { setup: ReturnType<typeof useSetupSteps>; showSetup: boolean; campaigns?: Overview['recentCampaigns']; range: TimeRange }) {
-  const score = useSenderScore()
-  // One score per screen: the sidebar's card, or this column's copy of it where the sidebar isn't on screen (the
-  // phone shell keeps it in More) or doesn't carry it (self-hosted).
+// In one column it has no placeholder while it loads: it sits under the chart there, in view, and may turn out empty
+// (a new workspace's setup leads the page instead), so it takes up room only once it has something to show.
+function Aside({ setup, detail: { score, next, ready }, showSetup, placeholder, campaigns, range }: { setup: ReturnType<typeof useSetupSteps>; detail: ReturnType<typeof useDetail>; showSetup: boolean; placeholder: boolean; campaigns?: Overview['recentCampaigns']; range: TimeRange }) {
+  // One score per screen: the sidebar's card; under the tiles where the sidebar isn't on screen (the compact shell);
+  // or this column's copy where the sidebar doesn't carry it (self-hosted).
   const { multiTenant } = useWorkspaceAccess()
-  const showScore = useCompactShell() || !multiTenant
-  const next = useNextSteps(score.data)
-  const limitPending = useSendingLimitPending()
-  const ready = Boolean((score.data || score.isError) && !setup.loading && next.ready && !limitPending)
+  const compact = useCompactShell()
   const { hash, key } = useLocation()
   useEffect(() => {
     if (!ready || hash !== '#standing') return
     const frame = requestAnimationFrame(() => document.getElementById('standing')?.scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }))
     return () => cancelAnimationFrame(frame)
   }, [ready, hash, key])
-  return <aside className="ov-split__aside" aria-label="Status">{!ready ? <AsideSkeleton /> : <>
+  return <aside className="ov-split__aside" aria-label="Status">{!ready ? placeholder && <AsideSkeleton /> : <>
     {score.data && <StandingCard report={score.data} />}
     {showSetup && setup.steps && <SetupRail steps={setup.steps} current={setup.current} open={setup.open} />}
     {showSetup && setup.error ? <ErrorState error={setup.error} onRetry={setup.retry} /> : null}
-    {score.isError && !score.data ? <ErrorState error={score.error} onRetry={() => score.refetch()} /> : showScore && <SidebarScore />}
+    {compact ? null : score.isError && !score.data ? <ErrorState error={score.error} onRetry={() => score.refetch()} /> : !multiTenant && <SidebarScore />}
     <DailyLimit report={score.data} />
     {/* Next steps follow setup: never in its place while setup is unknown. */}
     {!setup.steps && !setup.error && <NextSteps items={next.items.map(item => ({ ...item, to: logsHref(item.to, range) }))} />}
@@ -110,7 +124,8 @@ function Aside({ setup, showSetup, campaigns, range }: { setup: ReturnType<typeo
 const buckets = (points: ChartPoint[]) => `${points.length}:${points[0]?.at ?? ''}:${points.at(-1)?.at ?? ''}`
 const swap = 200
 
-// Four tiles. Emails and Delivered carry their buckets as columns; a rate carries a 20-cell gauge that ends at its
+// Four tiles, each a link to the mail it counts: Logs' sent mail with that status, over the same range and stream.
+// Emails and Delivered carry their buckets as columns; a rate carries a 20-cell gauge that ends at its
 // limit (5% bounces, 0.1% complaints; each cell a twentieth of it): navy below half the limit, amber from half, red at
 // it. Every number tweens (tabular figures; a hint is laid out from its right edge, so a new value moves nothing) and the
 // columns morph or crossfade.
@@ -123,21 +138,23 @@ const hourRate = (part: number, sent: number) => sent >= BAND_VOLUME ? part / se
 // A rate too small for two decimals keeps a third, so one complaint never reads as 0.00%.
 const rateText = (rate: number) => rate > 0 && rate < 0.0001 ? percent(rate, 3) : percent(rate)
 const limitText = (limit: number) => percent(limit, limit < 0.01 ? 1 : 0)
-function Facts({ data, stale }: { data: Overview; stale: boolean }) {
+function Facts({ data, range, stream }: { data: Overview; range: TimeRange; stream: 'all' | 'transactional' | 'marketing' }) {
   const sent = useTween(data.sent, swap), delivered = useTween(data.sent ? data.delivered / data.sent : 0, swap), bounced = useTween(data.sent ? data.bounced / data.sent : 0, swap), complaints = useTween(data.sent ? data.complaints / data.sent : 0, swap)
   const deliveredCount = useTween(data.delivered, swap), bouncedCount = useTween(data.bounced, swap), complaintCount = useTween(data.complaints, swap)
   const change = useTween(data.previousSent ? (data.sent - data.previousSent) / data.previousSent : undefined, swap)
+  const to = (status?: string) => logsHref(`/logs?view=sent${status ? `&status=${status}` : ''}${stream === 'all' ? '' : `&stream=${stream}`}`, range)
+  const warm = () => void routeChunks['/logs']?.().catch(() => {})
   const tiles = [
-    { title: factTitles[0], hint: data.previousSent ? `${change >= 0 ? '+' : ''}${percent(change, 0)}` : '', value: number(Math.round(sent)), columns: data.points.map(p => p.sent), tone: 'sent' as const },
-    { title: factTitles[1], hint: number(Math.round(deliveredCount)), value: data.sent ? percent(delivered) : '—', columns: data.points.map(p => p.delivered), tone: 'delivered' as const },
-    { title: factTitles[2], hint: number(Math.round(bouncedCount)), value: data.sent ? rateText(bounced) : '—', rate: data.sent ? data.bounced / data.sent : 0, limit: BOUNCE_LINE },
-    { title: factTitles[3], hint: number(Math.round(complaintCount)), value: data.sent ? rateText(complaints) : '—', rate: data.sent ? data.complaints / data.sent : 0, limit: COMPLAINT_LINE },
+    { title: factTitles[0], to: to(), hint: data.previousSent ? `${change >= 0 ? '+' : ''}${percent(change, 0)}` : '', value: number(Math.round(sent)), columns: data.points.map(p => p.sent), tone: 'sent' as const },
+    { title: factTitles[1], to: to('delivered'), hint: number(Math.round(deliveredCount)), value: data.sent ? percent(delivered) : '—', columns: data.points.map(p => p.delivered), tone: 'delivered' as const },
+    { title: factTitles[2], to: to('bounced'), hint: number(Math.round(bouncedCount)), value: data.sent ? rateText(bounced) : '—', rate: data.sent ? data.bounced / data.sent : 0, limit: BOUNCE_LINE },
+    { title: factTitles[3], to: to('complained'), hint: number(Math.round(complaintCount)), value: data.sent ? rateText(complaints) : '—', rate: data.sent ? data.complaints / data.sent : 0, limit: COMPLAINT_LINE },
   ]
-  return <div className="ov-tiles" role="group" aria-label="Figures" data-stale={stale || undefined}>{tiles.map(tile => <div key={tile.title} className="ov-tile" data-zone={tile.limit === undefined ? undefined : zone(tile.rate, tile.limit)}>
+  return <>{tiles.map(tile => <Link key={tile.title} to={tile.to} className="ov-tile" data-zone={tile.limit === undefined ? undefined : zone(tile.rate, tile.limit)} onPointerEnter={warm} onFocus={warm}>
     <div className="ov-tile__head"><span>{tile.title}</span><span className="ov-tile__hint"><span>{tile.hint}</span></span></div>
     <div className="ov-tile__value">{tile.value}</div>
     {tile.limit === undefined ? <Crossfade id={buckets(data.points)} className="ov-tile__columns"><Columns values={tile.columns} tone={tile.tone} /></Crossfade> : <div className="ov-tile__chart"><Gauge rate={tile.rate} limit={tile.limit} label={`${tile.title} rate`} /></div>}
-  </div>)}</div>
+  </Link>)}</>
 }
 function Gauge({ rate, limit, label }: { rate: number; limit: number; label: string }) {
   const lit = rate > 0 ? Math.min(20, Math.max(1, Math.ceil(rate / limit * 20))) : 0
@@ -166,16 +183,23 @@ function Chart({ data, stale }: { data: Overview; stale: boolean }) {
 const logsHref = (to: string, range: TimeRange) => range === '30d' || !(to === '/logs' || to.startsWith('/logs?')) ? to : `${to}${to.includes('?') ? '&' : '?'}range=${range}`
 // Latest emails are the selected region's, like the figures and Logs; another region's rows never stand in while it loads.
 const sameRegion = (regionId: string) => (previous: readonly unknown[]) => (previous[1] as { regionId?: string } | undefined)?.regionId === regionId
-// The latest mail is the top of Logs: the same rows, columns and masking (features/logs/rows.tsx), compact. `count`
-// rows fill the column (latest.ts) and are always reserved, so loading, short and full lists are the same height; a new
-// count after a resize keeps the old rows up until the new page arrives. A new email or outcome crossfades the rows.
-function LatestEmails({ params, held, range }: { params: { regionId: string; direction: 'all' | 'sent'; stream?: string; page: number; pageSize: number }; held: boolean; range: TimeRange }) {
-  const { regionId, pageSize: count, stream } = params
+// Sent mail that didn't arrive or was held back, as Logs' statuses name it.
+const failed = new Set(['bounced', 'complained', 'rejected', 'rendering_failed', 'suppressed', 'delayed'])
+// The latest mail is the top of Logs: the same rows, columns and masking (features/logs/rows.tsx), compact, with the
+// failures first: the ones among the newest hundred emails that were sent in the figures' period, so the list and the
+// tiles above it speak of the same mail. Beside the detail column `count` rows fill the main one (latest.ts) and are
+// always reserved, so loading, short and full lists are the same height; closing the page in one column, it is as tall
+// as its rows. It waits for the figures, so it settles once. A new email or outcome crossfades the rows.
+function LatestEmails({ params, count, reserve, held, range, figures, figuresFailed }: { params: ReturnType<typeof latestRequest>; count: number; reserve: boolean; held: boolean; range: TimeRange; figures: Overview | undefined; figuresFailed: boolean }) {
+  const { regionId } = params, stream = 'stream' in params ? params.stream : undefined
   const logs = useApiDef(queries.logs(params), { interval: 60_000, keepPrevious: sameRegion(regionId) }) // warmed with the page (data/prefetch.ts)
   const rowIntent = useLogRowIntent()
-  const rows = (logs.data?.items ?? []).slice(0, count)
+  const items = logs.data?.items ?? [], settled = Boolean(figures || figuresFailed)
+  const since = figures ? Date.parse(figures.periodStart) : NaN
+  const failures = items.filter(row => row.direction === 'sent' && failed.has(row.status) && Date.parse(row.at) >= since)
+  const rows = [...failures, ...items.filter(row => !failures.includes(row))].slice(0, count)
   return <section className="ov-latest"><SectionHeader title="Latest emails" actions={<Link className="ui-button ui-button--ghost ui-button--sm" to={logsHref(stream ? `/logs?view=sent&stream=${stream}` : '/logs', range)}>Logs <ArrowUpRight size={16} /></Link>} />
-    {logs.isError && !logs.data ? <ErrorState error={logs.error} onRetry={() => logs.refetch()} /> : <Crossfade id={logs.data && rows.map(row => `${row.direction}:${row.id}:${row.status}`).join(',')}><DataTable<LogEntry> className="logs-table ov-table" loading={logs.isPending || held} skeletonRows={count} minRows={count} rows={rows} rowKey={row => `${row.direction}:${row.id}`} rowHref={logHref} rowLabel={logRowLabel} onRowIntent={rowIntent} empty={<EmptyState title="No emails yet" />} columns={logColumns} /></Crossfade>}
+    {logs.isError && !logs.data ? <ErrorState error={logs.error} onRetry={() => logs.refetch()} /> : <Crossfade id={logs.data && settled ? rows.map(row => `${row.direction}:${row.id}:${row.status}`).join(',') : undefined}><DataTable<LogEntry> className="logs-table ov-table" loading={logs.isPending || held || !settled} skeletonRows={count} minRows={reserve ? count : 0} rows={rows} rowKey={row => `${row.direction}:${row.id}`} rowHref={logHref} rowLabel={logRowLabel} onRowIntent={rowIntent} empty={<EmptyState title="No emails yet" />} columns={logColumns} /></Crossfade>}
   </section>
 }
 // Up to three, in the detail column's list style: the name, then how it went (or its status while not sent).

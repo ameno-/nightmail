@@ -17,9 +17,9 @@ import {
 } from '../../components/ui'
 import { EmailPreview } from '../../components/EmailPreview'
 import { LOW_SENDABILITY, topFixes, useSendability } from '../../components/EmailInsight'
-import { date, number } from '../../lib/format'
+import { date, label, number, percent } from '../../lib/format'
 import { CampaignAudienceSkeleton, CampaignRouteSkeleton } from './skeletons'
-import { CampaignPacing, CampaignProgress, campaignDisplayStatus, campaignPollInterval, maxPerDay, maxRatePercent, minPerDay, minRatePercent, perDayError, ratePercentError } from './CampaignProgress'
+import { CampaignPacing, CampaignProgress, SummaryLine, campaignDisplayStatus, campaignLogs, campaignPollInterval, maxPerDay, maxRatePercent, minPerDay, minRatePercent, perDayError, ratePercentError } from './CampaignProgress'
 import { CampaignArchiveButton } from './CampaignArchiveButton'
 import { CampaignBar, CampaignSteps } from './steps'
 import { productName } from '../../../../api/src/brand'
@@ -437,7 +437,8 @@ export function CampaignReviewPage() {
   const query = useApiQuery(['campaign', id], (api, signal) => api.campaigns.get(id, signal), { interval: campaignPollInterval })
   // The polled review learns of a finished or paused send before the cached Campaigns list does.
   useRefreshListsOnChange('campaigns', query.data?.status)
-  if (query.isPending) return <CampaignRouteSkeleton kind="review" />
+  const stats = useCampaignStats(query.data)
+  if (query.isPending || (query.data && campaignFinished(query.data) && stats.isPending)) return <CampaignRouteSkeleton kind="review" />
   if (!query.data) return <ErrorState error={query.error} onRetry={() => query.refetch()} />
   return <CampaignReview key={id} campaign={query.data} stale={query.isError} refreshing={query.isFetching} refresh={() => void query.refetch()} />
 }
@@ -603,30 +604,42 @@ function AudienceSource({ listId, segmentId, prefix }: { listId: string; segment
   return <p className="campaign-audience-source" title={list.data?.name}>{prefix}{list.data ? <Link to={`/audience/lists/${encodeURIComponent(listId)}`}>{list.data.name}</Link> : <SkeletonText width={120} />}{segmentId && <span className="muted"> · only {segment.data?.name ?? 'segment'}</span>}</p>
 }
 
+// A send that is over: its results stay, and nothing can be released any more.
+const campaignFinished = (campaign: Campaign) => ['done', 'canceled'].includes(campaign.status) || (campaign.status === 'failed' && !campaignResumable(campaign))
+// A finished campaign's lifetime figures: opens and clicks, and its outcomes once its emails are past the history.
+// The review waits for them, so its results open whole.
+const useCampaignStats = (campaign: Campaign | undefined) => useApiQuery(['campaign-stats', campaign?.id ?? ''], (api, signal) => api.campaigns.stats(campaign!.id, signal), { enabled: Boolean(campaign && campaignFinished(campaign)) })
+const day = (value: string) => date(value, { month: 'short', day: 'numeric', ...(new Date(value).getFullYear() === new Date().getFullYear() ? {} : { year: 'numeric' }) })
+
+// Only the outcomes that happened, each opening its emails in Logs; opens and clicks as the newsletter's issues show them.
+// A count links only when Logs lists exactly that many: Canceled, and Recipients with some never queued, stay plain.
 function CampaignResults({ campaign }: { campaign: Campaign }) {
   const byStatus = campaign.counts?.byStatus ?? {}
   const total = Math.max(campaign.counts?.total ?? 0, campaign.delivery?.total ?? 0)
-  const canceled = (byStatus.canceled ?? 0) + (campaign.delivery?.canceled ?? 0)
   // Past the email history, the per-email counts are gone: the stored totals keep the outcomes (not suppressed or canceled).
   const expired = (campaign.counts?.total ?? 0) === 0 && (campaign.delivery?.expanded ?? 0) > 0
-  const stats = useApiQuery(['campaign-stats', campaign.id], (api, signal) => api.campaigns.stats(campaign.id, signal), { enabled: expired })
-  const totals = expired ? stats.data?.totals : undefined
+  const stats = useCampaignStats(campaign).data
+  const totals = expired ? stats?.totals : undefined
   const figure = (perEmail: number, stored?: number) => expired ? stored ?? null : perEmail
-  // Simulated sends get their own row, as while sending (CampaignProgress), only when there are some.
-  const simulated = figure(byStatus.simulated ?? 0, totals?.simulated) ?? 0
-  const rows: [string, number | null, string][] = [
-    ['Delivered', figure(byStatus.delivered ?? 0, totals?.delivered), 'Accepted by the recipient’s mail server'],
-    ...(simulated > 0 ? [['Simulated', simulated, ''] as [string, number, string]] : []),
-    ['Bounced', figure(byStatus.bounced ?? 0, totals?.bounced), `Rejected by the recipient’s mail server; ${productName} stops emailing these addresses`],
-    ['Complaints', figure(byStatus.complained ?? 0, totals?.complained), `Marked as spam; ${productName} stops emailing these addresses`],
-    ['Failed', figure((byStatus.rejected ?? 0) + (byStatus.rendering_failed ?? 0), totals?.failed), 'Couldn’t be sent'],
-    ['Suppressed', expired ? null : byStatus.suppressed ?? 0, 'Skipped because the address is suppressed'],
-    ['Canceled', expired ? null : canceled, 'Never sent because the campaign was canceled'],
+  const logs = (status?: string) => expired ? undefined : campaignLogs(campaign.id, status)
+  const rate = (value?: number | null) => value ? percent(value, 0) : null
+  const failures = (['rejected', 'rendering_failed'] as const).filter(status => (byStatus[status] ?? 0) > 0)
+  const rows: { label: string; count: number | string | null; status?: string; always?: boolean }[] = [
+    { label: 'Delivered', count: figure(byStatus.delivered ?? 0, totals?.delivered), status: 'delivered', always: true },
+    { label: 'Simulated', count: figure(byStatus.simulated ?? 0, totals?.simulated), status: 'simulated' },
+    { label: 'Opened', count: stats?.tracking ? rate(stats.rates.open.value) : null },
+    { label: 'Clicked', count: stats?.tracking ? rate(stats.rates.click.value) : null },
+    { label: 'Bounced', count: figure(byStatus.bounced ?? 0, totals?.bounced), status: 'bounced' },
+    { label: 'Complaints', count: figure(byStatus.complained ?? 0, totals?.complained), status: 'complained' },
+    ...expired ? [{ label: 'Failed', count: totals?.failed ?? null }]
+      : failures.map(status => ({ label: failures.length > 1 ? label(status) : 'Failed', count: byStatus[status]!, status })),
+    { label: 'Suppressed', count: expired ? null : byStatus.suppressed ?? 0, status: 'suppressed' },
+    { label: 'Canceled', count: expired ? null : (byStatus.canceled ?? 0) + (campaign.delivery?.canceled ?? 0) },
   ]
-  const loading = expired && stats.isPending
   return <div className="campaign-audience-summary">
-    <div className="campaign-summary-line"><strong>Recipients</strong><span>{number(total)}</span></div>
-    {rows.map(([label, count, hint]) => <div className="campaign-summary-line" key={label} title={hint || undefined}><span>{label}</span>{loading && label !== 'Suppressed' && label !== 'Canceled' ? <SkeletonText width={45} /> : <span>{count === null ? '—' : number(count)}</span>}</div>)}
+    <SummaryLine label={<strong>Recipients</strong>} figure={number(total)} to={campaign.counts?.total && campaign.counts.total === total ? logs() : undefined} />
+    {rows.filter(row => row.always || (typeof row.count === 'number' ? row.count > 0 : Boolean(row.count))).map(row => <SummaryLine key={row.label} label={row.label}
+      figure={row.count === null ? '—' : typeof row.count === 'number' ? number(row.count) : row.count} to={row.status && typeof row.count === 'number' && row.count > 0 ? logs(row.status) : undefined} />)}
   </div>
 }
 
@@ -718,7 +731,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
   const confirmSend = () => confirmation ? send(confirmation) : undefined
   const scheduledView = !draft && !campaign.archivedAt && unreleasedSchedule(campaign)
   const sentSomething = (campaign.counts?.total ?? 0) > 0
-  const finished = ['done', 'canceled'].includes(campaign.status) || (campaign.status === 'failed' && !campaignResumable(campaign))
+  const finished = campaignFinished(campaign)
   const cancellable = !draft && !campaign.archivedAt && !scheduledView && (['preparing', 'sending', 'paused'].includes(campaign.status) || campaignResumable(campaign))
   const sendability = useSendability(draft && !readinessError ? { kind: 'campaign', id: campaign.id, revision: campaign.revision ?? 0 } : null)
   const lowScore = Boolean(sendability.data && sendability.data.score < LOW_SENDABILITY)
@@ -732,7 +745,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
     ...(!canAdminister ? [['neutral', `Only owners and admins can send or schedule ${thing}s.`] as ['neutral', ReactNode]] : []),
     ...(error ? [['danger', error] as ['danger', ReactNode]] : []),
   ]
-  const bar = <CampaignBar back={campaign.archivedAt ? '/campaigns?archived=true' : issueOf ? newsletterPath(issueOf.id) : '/campaigns'} title={<h1 className="studio-title">{campaign.name}</h1>} steps={draft && <CampaignSteps step="review" writeTo={campaignRoute(campaign, 'edit')} />} actions={<>{stale && <span className="campaign-note" data-tone="warning" title="Showing the last available counts.">Couldn’t refresh</span>}{!campaignEditable(campaign) && sentSomething && <Link className="ui-button ui-button--secondary ui-button--md" to={`/logs?campaign=${encodeURIComponent(campaign.id)}`}>View logs</Link>}<StatusBadge status={campaignDisplayStatus(campaign)} />{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</>} />
+  const bar = <CampaignBar back={campaign.archivedAt ? '/campaigns?archived=true' : issueOf ? newsletterPath(issueOf.id) : '/campaigns'} title={<h1 className="studio-title">{campaign.name}</h1>} steps={draft && <CampaignSteps step="review" writeTo={campaignRoute(campaign, 'edit')} />} actions={<>{stale && <span className="campaign-note" data-tone="warning" title="Showing the last available counts.">Couldn’t refresh</span>}{!campaignEditable(campaign) && !finished && sentSomething && <Link className="ui-button ui-button--secondary ui-button--md" to={`/logs?campaign=${encodeURIComponent(campaign.id)}`}>View logs</Link>}<StatusBadge status={campaignDisplayStatus(campaign)} />{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</>} />
   const dialogs = <>
     <ConfirmDialog open={confirmation !== null} onOpenChange={open => { if (!open && !sendMutation.isPending) setConfirmation(null) }} title={confirmation?.mode === 'schedule' ? `Schedule this ${thing}?` : `Send this ${thing} now?`} description={confirmation?.mode === 'schedule' ? `Send “${campaign.name}”${origin} to ${recipients}${audienceName} on ${utcLabel(confirmation.scheduledAt!)} (${localLabel(confirmation.scheduledAt!)}).${paceSummary(confirmation)}${cost}${scoreNote} You can change this until sending starts.` : `Send “${campaign.name}”${origin} to ${recipients}${audienceName} now.${paceSummary(confirmation)}${cost} Consent is checked again as each email sends.${scoreNote} You can’t undo this.`} confirmLabel={confirmation?.mode === 'schedule' ? 'Schedule' : 'Send now'} onConfirm={confirmSend} pending={sendMutation.isPending} />
     {draft && testOpen && <TestEmailDialog campaign={campaign} open={testOpen} onOpenChange={setTestOpen} />}
@@ -814,7 +827,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
         {/* Eligible recipients is matched contacts less the suppressed and not subscribed lines under it. */}
         {<>
           {scheduledView ? <AudienceSource listId={campaign.listId} segmentId={campaign.segmentId} prefix="To " /> : <>
-            <AudienceSource listId={campaign.listId} segmentId={campaign.segmentId} />
+            <AudienceSource listId={campaign.listId} segmentId={campaign.segmentId} prefix={campaign.status === 'done' ? `Sent ${day(campaign.scheduledAt || campaign.updatedAt)} to ` : undefined} />
             <CampaignPacing key={`${campaign.id}:${campaign.delivery?.pacing?.perDay ?? ''}:${campaign.delivery?.pacing?.autoPause ?? ''}:${campaign.delivery?.pacing?.rateShare ?? ''}`} campaign={campaign} />
             {finished ? <CampaignResults campaign={campaign} /> : campaign.counts ? <CampaignProgress campaign={campaign} /> : <div className="campaign-audience-summary"><div className="campaign-summary-line"><span>Recipients</span><span>{number(campaign.recipients)}</span></div></div>}
           </>}
