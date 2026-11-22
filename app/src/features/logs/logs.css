@@ -112,8 +112,9 @@
 /* The ID's copy button makes its row taller: its label sits level with the ID, not above it. */
 .email-fact-list dt:has(+ .email-fact-list__id) { align-self: center; }
 .email-fact-list__id .identifier { min-width: 0; overflow: hidden; font-size: var(--text-xs); text-overflow: ellipsis; }
-/* A phone: the email from edge to edge. */
+/* A phone: the email from edge to edge, and the status line without the stream (the Details sheet names it). */
 @media (max-width: 640px) {
+  .email-status__stream { display: none; }
   .email-detail .ev-canvas { margin-inline: calc(-1 * var(--bleed, 0px)); }
   .email-detail .ev-canvas :is(.email-frame, .email-source, .email-text) { border-radius: 0; }
   .email-detail .email-frame { box-shadow: 0 -1px var(--color-border-muted), 0 1px var(--color-border-muted); }
@@ -206,7 +207,7 @@
   .email-detail-grid .ui-tabs { padding-bottom: var(--space-8); }
   .page-surface .message-identifiers { flex-direction: column; align-items: flex-start; gap: var(--space-8); }
   .message-identifiers .identifier { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  .message-identifiers > .cluster { flex-wrap: nowrap; max-width: 100%; }
+  .message-identifiers > .cluster { flex-wrap: nowrap; max-width: 100%; white-space: nowrap; }
 }
 /* Long campaign names truncate, so the filter row keeps one height and Export stays on it. */
 .logs-campaign-chip { display: inline-block; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }

@@ -113,8 +113,8 @@ function Subject({ text }: { text: string }) {
     onClick={toggle ? () => setOpen(!open) : undefined} onKeyDown={toggle ? event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setOpen(!open) } } : undefined}>{text}</span>
 }
 
-// A phone's one line under the subject: the status as of its last step (a scheduled email: when it goes), with when and the stream, opening the delivery
-// and the facts; and the score's chip.
+// A phone's one line under the subject: the status as of its last step (a scheduled email: when it goes), with when and
+// (on a tablet) the stream, opening the delivery and the facts; and the score's chip. The Details sheet names the stream.
 function StatusLine({ email, chip, onOpen }: { email: Email; chip: ReactNode; onOpen: (opener: HTMLElement) => void }) {
   const key = eventKey(email.status), steps = stepsOf(email.events, email), sendsAt = sendTime(email)
   const at = sendsAt ?? [...steps].reverse().find(step => step.key === key)?.at ?? steps[steps.length - 1]?.at ?? email.sentAt
@@ -124,7 +124,7 @@ function StatusLine({ email, chip, onOpen }: { email: Email; chip: ReactNode; on
   return <div className="email-status">
     <button type="button" className="email-status__facts" aria-haspopup="dialog" onClick={event => onOpen(event.currentTarget)}>
       <span className={`delivery__dot ui-tone--${toneOf(key)}`} aria-hidden="true" />
-      <span className="email-status__text"><span className="sr-only">Details: </span>{label(statusOf(email))}{sendsAt && ' for'} <time dateTime={at}>{when}</time> · {label(email.stream)}</span>
+      <span className="email-status__text"><span className="sr-only">Details: </span>{label(statusOf(email))}{sendsAt && ' for'} <time dateTime={at}>{when}</time><span className="email-status__stream"> · {label(email.stream)}</span></span>
       <ChevronRight size={14} aria-hidden="true" />
     </button>
     {chip}
