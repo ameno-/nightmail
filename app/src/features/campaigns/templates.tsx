@@ -167,7 +167,7 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
   const publish = useSingleFlight('templates.publish', async () => {
     const current = dirty || error ? await save() : templateRef.current
     if (!current) return
-    try { const updated = await api.templates.publish(current.id, current.revision); setTemplate(updated); remember(updated); await refreshLists(); toast('Template published. Use it to start a campaign.', 'success') }
+    try { const updated = await api.templates.publish(current.id, current.revision); setTemplate(updated); remember(updated); await refreshLists(); toast('Template published', 'success') }
     catch (cause) { toast(errorText(cause), 'error') }
   }, template.id)
   const archive = useSingleFlight('templates.archive', async () => {
