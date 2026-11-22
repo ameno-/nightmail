@@ -72,7 +72,7 @@ export function PlanUsage({ row: Row }: { row: (props: { title: ReactNode; child
       {/* This month's cost; the prices it is worked out from open from it, like the limit's steps. */}
       <details className="usage-limit">
         <summary className="settings-row">
-          <span className="settings-row__label"><span className="usage-limit__title">Estimated cost<ChevronDown size={14} aria-hidden="true" /></span></span>
+          <span className="settings-row__label"><span className="usage-limit__title">Usage this month<ChevronDown size={14} aria-hidden="true" /></span></span>
           <span className="settings-row__control">{value(b && usage, () => b!.monthToDate ? usd(b!.monthToDate.cost) : money(monthEstimate(usage!)), 80)}</span>
         </summary>
         <div className="usage-prices">

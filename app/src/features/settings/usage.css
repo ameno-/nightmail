@@ -13,7 +13,7 @@
 .usage-limit > summary:focus-visible { outline-offset: calc(-1 * var(--focus-width)); }
 .usage-steps-section { display: flex; flex-direction: column; gap: var(--space-12); padding-top: var(--space-12); }
 .usage-limit__title .ui-status { margin-left: var(--space-4); }
-/* The prices behind Estimated cost: label and value lines, then the terms' full table. */
+/* The prices behind this month's usage: label and value lines, then the terms' full table. */
 .usage-prices { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-12); padding: var(--space-12) 0; border-bottom: 1px solid var(--color-border-muted); font-size: var(--text-sm); line-height: var(--leading-sm); }
 .usage-prices dl { display: flex; flex-direction: column; gap: var(--space-8); align-self: stretch; margin: 0; }
 .usage-prices dl > div { display: flex; justify-content: space-between; gap: var(--space-12); }
