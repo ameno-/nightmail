@@ -141,7 +141,10 @@ function Facts({ data, stale }: { data: Overview; stale: boolean }) {
 }
 function Gauge({ rate, limit, label }: { rate: number; limit: number; label: string }) {
   const lit = rate > 0 ? Math.min(20, Math.max(1, Math.ceil(rate / limit * 20))) : 0
-  return <span className="ov-gauge" data-zone={zone(rate, limit)} role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={limit} aria-valuenow={rate} aria-valuetext={`${rateText(rate)} of a ${limitText(limit)} limit`}>{Array.from({ length: 20 }, (_, i) => <i key={i} data-on={i < lit || undefined} />)}</span>
+  return <>
+    <span className="ov-gauge" data-zone={zone(rate, limit)} role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={limit} aria-valuenow={rate} aria-valuetext={`${rateText(rate)} of a ${limitText(limit)} limit`}>{Array.from({ length: 20 }, (_, i) => <i key={i} data-on={i < lit || undefined} />)}</span>
+    <span className="ov-gauge__limit">{limitText(limit)} limit</span>
+  </>
 }
 // SVG, so a range with another count of buckets redraws the columns instead of moving boxes.
 function Columns({ values: target, tone }: { values: number[]; tone: 'sent' | 'delivered' }) {
