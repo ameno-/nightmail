@@ -750,7 +750,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
     const scoreSummary = sendability.data ? `${sendability.data.score} of 100 · ${fixes.length ? `${fixes.length} ${fixes.length === 1 ? 'suggestion' : 'suggestions'}` : 'looks good'}` : missing.length ? 'After the message is complete' : !campaign.listId ? 'After you choose a list' : 'Checking…'
     const scheduledAt = mode === 'schedule' && scheduled && !scheduleError(scheduled) ? parseUtc(scheduled)!.toISOString() : null
     const messageSummary = missing.length ? `Add ${missing.join(', ').replace(/, ([^,]*)$/, ' and $1')} in Write` : campaign.subject
-    const whenSummary = mode === 'now' ? 'Right now' : scheduledAt ? utcLabel(scheduledAt) : 'Pick a time'
+    const whenSummary = mode === 'now' ? 'Send now' : scheduledAt ? utcLabel(scheduledAt) : 'Pick a time'
     const order: ReviewRowId[] = ['to', 'message', 'score', 'when']
     const next = (row: ReviewRowId) => <Button variant="primary" onClick={() => setOpenRow(order[order.indexOf(row) + 1]!)}>Next</Button>
     return <div className="campaign-review campaign-review--draft">
