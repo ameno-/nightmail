@@ -18,6 +18,8 @@ body:has(.campaign-compose-page) :is(.ui-popover, [data-re-bubble-menu], [data-r
 .campaign-compose-page a:not(.ui-button):focus-visible { outline: var(--focus-width) solid var(--color-focus); outline-offset: var(--focus-offset); }
 .campaign-compose-page :is(.ui-button--ghost, .ui-button--secondary):focus-visible { background: var(--color-canvas); }
 .campaign-compose-row:has(:focus-visible) { border-bottom-color: var(--color-muted); }
+/* The rows' darker rule is the focus cue, also inside the folding Reply-to and Inbox preview rows (which clip a ring). */
+.campaign-compose-page [data-focus-clipped] { outline: none; }
 body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: var(--color-text); }
 .campaign-compose-page > .ui-page-header, .campaign-compose-page > .ui-alert { flex-shrink: 0; }
 .campaign-compose-page > .ui-page-header { margin-bottom: var(--space-8); }
@@ -167,3 +169,78 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .campaign-menu-trigger[data-state='offline']::before { background: var(--color-danger); }
 /* The Design panel is fixed to the right edge (composer.css); the sheet makes room beside it instead of sitting under it. */
 @media (min-width: 1200px) { .campaign-compose-workspace:has(.composer-inspector:not([hidden])) { padding-inline-end: 320px; } }
+
+/* The campaign's two steps, Write and Review (as in Loops, Kit and beehiiv): a top bar across the page with the name,
+   the steps and the actions, then one roomy column. Both pages are always light (lib/theme.tsx), like the email. */
+.page-surface:has(:is(.campaign-studio, .campaign-review)), .app-shell--compact .page-surface:has(:is(.campaign-studio, .campaign-review)), body:has(.campaign-studio) .app-shell--compact .page-surface:has(.campaign-studio) { padding: 0; }
+.page-surface:has(.campaign-studio) { overflow: hidden; }
+/* These pages are always light, so the theme switch would do nothing here. It keeps its place so nothing moves. */
+body:has(:is(.campaign-studio, .campaign-review)) .theme-toggle { visibility: hidden; }
+.studio-bar { position: sticky; top: 0; z-index: 4; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: var(--space-16); flex-shrink: 0; min-height: 64px; padding: var(--space-12) var(--space-24); border-bottom: 1px solid var(--color-border); background: var(--color-surface); }
+.studio-bar__start { display: flex; align-items: center; gap: var(--space-12); min-width: 0; }
+.studio-bar__end { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-8); min-width: 0; }
+.studio-title { min-width: 0; margin: 0; overflow: clip; font-size: var(--text-md); line-height: 24px; font-weight: var(--font-weight-bold); text-overflow: ellipsis; white-space: nowrap; }
+.campaign-studio .studio-name { flex: 1 1 auto; min-width: 0; max-width: 360px; height: 32px; padding-inline: var(--space-8); margin-inline-start: calc(-1 * var(--space-4)); border-color: transparent; background: transparent; box-shadow: none; font-size: var(--text-md); font-weight: var(--font-weight-bold); }
+.studio-name--loading { display: flex; align-items: center; }
+.campaign-studio .studio-name:hover:not(:disabled) { background: var(--color-active-bg); }
+.campaign-studio .studio-name:focus { border-color: var(--color-border-strong); background: transparent; outline: 0; }
+.studio-bar .campaign-sync-status { width: auto; margin-inline-end: var(--space-8); }
+.campaign-steps { display: flex; align-items: center; gap: var(--space-8); margin: 0; padding: 0; list-style: none; font-size: var(--text-sm); }
+.campaign-steps > li { display: flex; align-items: center; gap: var(--space-8); margin: 0; color: var(--color-muted); }
+.campaign-steps > li + li::before { content: ''; width: 32px; height: 1px; background: var(--color-border-strong); }
+.campaign-steps > li[aria-current] { color: var(--color-text); font-weight: var(--font-weight-bold); }
+.campaign-steps :is(a, button, span:not(.campaign-steps__mark)) { display: inline-flex; align-items: center; gap: var(--space-8); min-height: 32px; padding: 0 var(--space-4); border: 0; background: none; color: inherit; font: inherit; text-decoration: none; }
+.campaign-steps button:not(:disabled) { cursor: pointer; }
+@media (hover: hover) and (pointer: fine) { .campaign-steps :is(a, button:not(:disabled)):hover { color: var(--color-text); } }
+.campaign-steps__mark { display: inline-grid; place-items: center; width: 20px; height: 20px; border: 1px solid var(--color-border-strong); border-radius: 50%; font-family: var(--font-mono); font-size: 11px; font-weight: normal; }
+.campaign-steps > li[aria-current] .campaign-steps__mark { border-color: var(--color-text); background: var(--color-text); color: var(--color-surface); }
+.campaign-studio > .ui-alert { margin: var(--space-16) var(--space-24) 0; }
+/* Write: the email on a plain page, with room around it. */
+.campaign-studio .campaign-compose-workspace, :root[data-theme='dark'] .campaign-studio .campaign-compose-workspace { background: var(--color-surface); border-radius: 0; }
+.campaign-studio .campaign-compose-scroll { padding-block: var(--space-32) 96px; }
+.campaign-studio .campaign-compose-sheet { max-width: 760px; min-height: 100%; padding: 0 var(--space-32); border: 0; border-radius: 0; box-shadow: none; }
+.campaign-studio .campaign-compose-row { grid-template-columns: 104px minmax(0, 1fr); min-height: 52px; }
+.campaign-studio .campaign-compose-row :is(.ui-input, .ui-control-skeleton) { height: 51px; }
+.campaign-studio .campaign-compose-row > :is(label, span) { font-size: var(--text-sm); }
+.campaign-studio .campaign-compose-sender, .campaign-studio .campaign-compose-subject { grid-template-columns: 104px minmax(0, 1fr) auto; }
+.campaign-studio .composer-toolbar { margin: var(--space-8) 0 var(--space-24); padding-inline: 0; }
+.campaign-studio .composer-skeleton-tools { margin: var(--space-8) 0 var(--space-24); padding-inline: 0; }
+.campaign-sender-toggle { margin-inline-end: calc(-1 * var(--space-8)); color: var(--color-muted); }
+.campaign-sender-toggle svg { transition: transform 150ms ease-out; }
+.campaign-sender-toggle[aria-expanded='true'] { color: var(--color-text); }
+.campaign-sender-toggle[aria-expanded='true'] svg { transform: rotate(90deg); }
+/* Review: the same bar, then recipients, the message and delivery with room between them. */
+.campaign-review { display: flex; flex-direction: column; min-height: 100%; }
+.campaign-review__body { padding: var(--space-32); }
+.campaign-review .campaign-review-layout { column-gap: 56px; row-gap: var(--space-32); }
+.campaign-audience-picker { display: flex; flex-direction: column; gap: var(--space-12); }
+@media (max-width: 1100px) { .studio-bar { grid-template-columns: minmax(0, 1fr) auto; } .studio-bar__steps { display: none; } }
+@media (max-width: 899px) {
+  .studio-bar { padding-inline: var(--space-16); }
+  .campaign-studio .campaign-compose-scroll { padding-block: var(--space-16) var(--space-40); }
+  .campaign-studio .campaign-compose-sheet { padding-inline: var(--space-16); }
+  .campaign-review__body { padding: var(--space-20) var(--space-16); }
+}
+@media (max-width: 640px) {
+  .campaign-studio .campaign-compose-row, .campaign-studio .campaign-compose-sender, .campaign-studio .campaign-compose-subject { grid-template-columns: minmax(0, 1fr) auto; }
+  .campaign-studio .campaign-compose-row > :first-child { grid-column: 1 / -1; }
+  .campaign-studio .campaign-compose-row :is(.ui-input, .ui-control-skeleton) { height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) { .campaign-sender-toggle svg { transition: none; } }
+/* Status and problems sit inline where they apply, as a dot and a line of text: never a tinted banner over the page. */
+.campaign-note { display: flex; align-items: baseline; gap: var(--space-8); margin: 0; color: var(--color-text); font-size: var(--text-sm); line-height: var(--leading-sm); text-wrap: pretty; }
+.campaign-note::before { content: ''; flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--color-muted); transform: translateY(-2px); }
+.campaign-note[data-tone='warning']::before { background: var(--color-warning); }
+.campaign-note[data-tone='danger'] { color: var(--color-danger); }
+.campaign-note[data-tone='danger']::before { background: var(--color-danger); }
+.campaign-note[data-tone='success']::before { background: var(--color-success); }
+.campaign-note a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.studio-bar__end > .campaign-note { margin-inline-end: var(--space-8); white-space: nowrap; }
+.campaign-notes { display: flex; flex-direction: column; gap: var(--space-8); margin: 0; padding: 0; list-style: none; }
+.campaign-notes > li { margin: 0; }
+.campaign-scheduled { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-12); padding-block: var(--space-12); border-block: 1px solid var(--color-border); }
+.campaign-scheduled__text { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
+.campaign-scheduled .campaign-pacing-banner { flex: 1; }
+.campaign-scheduled[data-tone='danger'] strong { color: var(--color-danger); }
+.campaign-scheduled[data-tone='warning'] strong { color: var(--color-warning); }
+.campaign-review__body > .campaign-scheduled { margin-bottom: var(--space-8); }

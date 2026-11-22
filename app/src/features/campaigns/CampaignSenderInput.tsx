@@ -124,7 +124,8 @@ export function CampaignSenderInput({ name, email, domains, disabled = false, on
       aria-autocomplete="list" aria-expanded={expanded} aria-controls={expanded ? listId : undefined}
       aria-activedescendant={activeIndex >= 0 ? `${listId}-${activeIndex}` : undefined}
       title={draft || undefined} aria-invalid={showError || undefined} aria-describedby={showError ? errorId : undefined}
-      onFocus={() => setOpen(true)}
+      // Focused, it stays the input: typing a complete address must not swap it for the masked view and drop focus.
+      onFocus={() => { setOpen(true); setEditing(true) }}
       onChange={event => { setDraft(event.target.value); publish(event.target.value); setTouched(false); setOpen(true); setActive(-1) }}
       onKeyDown={event => {
         if (event.nativeEvent.isComposing) return

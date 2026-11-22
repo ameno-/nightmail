@@ -1,11 +1,12 @@
 import { ChevronRight, MoreHorizontal } from 'lucide-react'
 import {
-  Button, ControlSkeleton, IconButton, LoadingRegion, PageHeader, SearchField, SectionHeader,
+  Button, ControlSkeleton, Field, IconButton, LoadingRegion, PageHeader, SearchField, SectionHeader,
   Select, Skeleton, SkeletonText, TableSkeleton, Tabs, type SkeletonColumn,
 } from '../../components/ui'
 import { CampaignsHeader } from './header'
 import { usePhone } from '../../lib/media'
 import './campaigns.css'
+import { CampaignBar, CampaignSteps } from './steps'
 
 // A campaign's card: its name and status, its subject, then recipients, delivery and last activity.
 export const campaignColumns: SkeletonColumn[] = [
@@ -44,19 +45,6 @@ export function ComposerSkeleton() {
   return <LoadingRegion label="Loading composer" className="composer-loading"><div className="composer-skeleton-tools"><ControlSkeleton width={90} /><ControlSkeleton width={28} /><ControlSkeleton width={28} /></div><div className="composer-skeleton-canvas"><SkeletonText width="55%" lineHeight={36} /><SkeletonText /><SkeletonText width="80%" /><SkeletonText width="60%" /></div></LoadingRegion>
 }
 
-export function CampaignEditorSkeleton() {
-  return <LoadingRegion label="Loading campaign editor" className="campaign-compose-workspace">
-    <div className="campaign-compose-scroll"><div className="campaign-compose-sheet">
-      <div className="campaign-compose-metadata" aria-hidden="true">
-        {['Name', 'From', 'Reply to', 'Unsubscribe', 'To', 'Segment'].map(label => <div className="campaign-compose-row" key={label}><span className="muted">{label}</span><ControlSkeleton /></div>)}
-        <div className="campaign-compose-row campaign-audience-line"><span /><span className="campaign-audience-line__text"><SkeletonText width="60%" /></span></div>
-        <div className="campaign-compose-row campaign-compose-subject"><span className="muted">Subject</span><ControlSkeleton /><Button className="campaign-preview-toggle" variant="ghost" size="sm" disabled>Inbox preview</Button></div>
-      </div>
-      <ComposerSkeleton />
-    </div></div>
-  </LoadingRegion>
-}
-
 export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 'editor' | 'review' | 'templates' | 'template'; isNew?: boolean }) {
   const phone = usePhone()
   if (kind === 'list' || kind === 'templates') {
@@ -78,15 +66,30 @@ export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 
       </div></div>
     </LoadingRegion>
   </div>
-  if (kind === 'editor') return <div className="campaign-compose-page">
-    <PageHeader title={isNew ? 'Create campaign' : 'Edit campaign'} backTo="/campaigns" actions={<><span className="campaign-sync-status"><span className="campaign-sync-dot" />{isNew ? 'New draft' : 'Connecting…'}</span><div className="campaign-compose-actions">{phone ? <><Button variant="primary" disabled>Review</Button><IconButton label="More actions" disabled><MoreHorizontal size={16} /></IconButton></> : <>{isNew && <Button variant="ghost" disabled>Use a template</Button>}<Button variant="ghost" disabled>Send test</Button><Button variant="primary" disabled>Continue to review</Button></>}</div></>} />
-    <CampaignEditorSkeleton />
+  if (kind === 'editor') return <div className="campaign-compose-page campaign-studio">
+    <CampaignBar title={<><h1 className="sr-only">{isNew ? 'Create campaign' : 'Edit campaign'}</h1><div className="studio-name studio-name--loading">{isNew ? <span className="muted">Untitled campaign</span> : <SkeletonText width={180} />}</div></>} steps={<CampaignSteps step="write" />} actions={<>
+      {!phone && <span className="campaign-sync-status"><span className="campaign-sync-dot" />{isNew ? 'New draft' : 'Connecting…'}</span>}
+      {phone ? <><Button variant="primary" disabled>Continue</Button><IconButton label="More actions" disabled><MoreHorizontal size={16} /></IconButton></> : <>{isNew && <Button variant="ghost" disabled>Use a template</Button>}<Button variant="secondary" disabled>Send test</Button><Button variant="primary" disabled>Continue</Button></>}
+    </>} />
+    <LoadingRegion label="Loading campaign editor" className="campaign-compose-workspace">
+      <div className="campaign-compose-scroll"><div className="campaign-compose-sheet">
+        <div className="campaign-compose-metadata" aria-hidden="true">
+          <div className="campaign-compose-row campaign-compose-sender"><span className="muted">From</span><ControlSkeleton /><Button variant="ghost" size="sm" className="campaign-sender-toggle" disabled>Reply-to<ChevronRight size={14} aria-hidden="true" /></Button></div>
+          <div className="campaign-compose-row campaign-compose-subject"><span className="muted">Subject</span><ControlSkeleton /><Button className="campaign-preview-toggle" variant="ghost" size="sm" disabled>Inbox preview</Button></div>
+        </div>
+        <ComposerSkeleton />
+      </div></div>
+    </LoadingRegion>
   </div>
-  return <div className="stack campaign-review">
-    <PageHeader title={<SkeletonText width={220} lineHeight={28} />} backTo="/campaigns" actions={<SkeletonText width={65} lineHeight={20} />} />
-    <LoadingRegion label="Loading campaign review" className="campaign-review-layout">
+  return <div className="campaign-review">
+    <CampaignBar title={<h1 className="studio-title"><SkeletonText width={220} lineHeight={24} /></h1>} actions={<SkeletonText width={65} lineHeight={20} />} />
+    <LoadingRegion label="Loading campaign review" className="campaign-review__body campaign-review-layout">
       <section className="campaign-fields campaign-recipients">
-        <SectionHeader title="Recipients" actions={<Button variant="ghost" disabled>Edit audience</Button>} />
+        <SectionHeader title="Recipients" />
+        <div className="campaign-audience-picker">
+          <Field label="List" htmlFor="campaign-list-loading"><Select id="campaign-list-loading" aria-label="Recipient list" value="" onValueChange={() => {}} options={[{ value: '', label: 'Loading lists…' }]} disabled /></Field>
+          <Field label="Segment" htmlFor="campaign-segment-loading"><Select id="campaign-segment-loading" aria-label="Segment" value="" onValueChange={() => {}} options={[{ value: '', label: 'Everyone on the list' }]} disabled /></Field>
+        </div>
         <CampaignAudienceSkeleton />
       </section>
       <section className="campaign-fields campaign-message">
@@ -98,7 +101,7 @@ export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 
         <SectionHeader title="Delivery" />
         <Tabs value="now" onValueChange={() => {}} items={[{ value: 'now', label: 'Send now' }, { value: 'schedule', label: 'Schedule' }]} />
         <div className="campaign-pacing-options"><div className="campaign-pacing-head"><Button variant="ghost" size="sm" className="campaign-pacing-toggle" disabled><ChevronRight size={14} aria-hidden="true" />Pace sending</Button></div></div>
-        <div className="campaign-delivery-actions"><Button variant="secondary" disabled>Back to draft</Button><Button variant="primary" disabled>Send campaign now</Button></div>
+        <div className="campaign-delivery-actions"><Button variant="secondary" disabled>Back to editing</Button><Button variant="primary" disabled>Send campaign now</Button></div>
       </section>
     </LoadingRegion>
   </div>

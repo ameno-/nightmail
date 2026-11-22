@@ -11,12 +11,14 @@ function savedTheme() {
 function systemTheme(): Theme { return matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light' }
 
 // The homepage ("/") has no theme switch: it is always in the system's theme, whatever the dashboard's switch chose
-// (public/theme.js decides the same before the first paint). Everywhere else a saved choice wins over the system's.
+// (public/theme.js decides the same before the first paint). A campaign's Write and Review pages are always light: the
+// email on them is light, so the whole page matches what recipients see. Everywhere else a saved choice wins over the system's.
+const lightOnly = (pathname: string) => /^\/campaigns\/(?:new|[^/]+\/(?:edit|review))\/?$/.test(pathname)
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [preference, setPreference] = useState<Theme | null>(savedTheme)
   const [system, setSystem] = useState<Theme>(systemTheme)
-  const home = useLocation().pathname === '/'
-  const theme = home ? system : preference ?? system
+  const { pathname } = useLocation()
+  const theme = pathname === '/' ? system : lightOnly(pathname) ? 'light' : preference ?? system
 
   useLayoutEffect(() => {
     document.documentElement.dataset.theme = theme
