@@ -1,19 +1,19 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
+import { useCallback, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
+import { Link } from 'react-router'
 import type { UseQueryResult } from '@tanstack/react-query'
-import { Check, ChevronDown, ChevronRight, ExternalLink, Monitor, Moon, MoreHorizontal, Smartphone, Sun } from 'lucide-react'
+import { ArrowUpRight, Check as CheckIcon, ChevronDown, ChevronRight, ExternalLink, Monitor, Moon, MoreHorizontal, Smartphone, Sun } from 'lucide-react'
 import { useApiQuery } from '../data/context'
 import type { ClientPreview, PreviewClient, PreviewIssue, SendabilityCategory, SendabilityFinding, SendabilityReport } from '../data/types'
 import { usePhone } from '../lib/media'
-import { gradeKey } from '../lib/standing'
-import { gradeOf } from '../../../api/src/standing-model'
 import { AddressText } from './AddressText'
 import { EmailFrame, FRAME_WIDTH, frameDocument, frameKey, frameSize, shownWidth, useFrameSizes, type FrameDevice } from './EmailFrame'
-import { Alert, Button, DropdownMenu, ErrorText, Sheet, Skeleton, SkeletonText, Tooltip } from './ui'
+import { Alert, Button, Disclosure, DropdownMenu, ErrorText, Sheet, Skeleton, SkeletonText, Tooltip } from './ui'
 import './email-insight.css'
 
-// "Will this email land and look right": the sendability check (POST /v1/emails/check) as a score, the fixes to make
-// first and every finding, and the preview: the email as sent and as each client emulation shows it (POST
-// /v1/emails/preview), side by side where the window has room. Used by a sent email's detail page and the campaign editor.
+// "Will this email land and look right": Checks, the sendability check (POST /v1/emails/check) as at most three things
+// to fix with everything technical behind one row, and the preview: the email as sent and as each client emulation shows
+// it (POST /v1/emails/preview), side by side where the window has room. A sent email's page shows both; a campaign's
+// review reads the check (useSendability, topFixes).
 export type InsightSource = { kind: 'email'; id: string; html: boolean } | { kind: 'campaign'; id: string; revision: number }
 type Theme = 'light' | 'dark'
 type Check = UseQueryResult<SendabilityReport, Error>
@@ -29,7 +29,6 @@ export function useSendability(source: InsightSource | null) {
 }
 
 const severityRank = { error: 0, warning: 1, info: 2 } as const
-const severityTone = { error: 'danger', warning: 'warning', info: 'neutral' } as const
 const severityLabel = { error: 'Error', warning: 'Warning', info: 'Note' } as const
 const categoryLabel: Record<SendabilityCategory, string> = { authentication: 'Authentication', content: 'Content', headers: 'Headers', size: 'Size', rendering: 'Rendering', reputation: 'Reputation' }
 const SCORE_NOTE = 'A high score means few problems found, not guaranteed inbox placement.'
@@ -38,8 +37,11 @@ const ranked = (report: SendabilityReport, findings = report.findings) => {
   const weight = (category: SendabilityCategory) => report.categories.find(item => item.id === category)?.weight ?? 0
   return [...findings].sort((a, b) => severityRank[a.severity] - severityRank[b.severity] || weight(b.category) - weight(a.category))
 }
-/** The fixes to make first. */
-export const topFixes = (report: SendabilityReport, count = 3, findings = report.findings) => ranked(report, findings).filter(finding => finding.severity !== 'info').slice(0, count)
+/** The fixes to make first: problems, each sentence once (two findings can call for the same fix). */
+export const topFixes = (report: SendabilityReport, count = 3, findings = report.findings) => {
+  const said = new Set<string>()
+  return ranked(report, findings).filter(finding => finding.severity !== 'info' && !said.has(finding.fix) && said.add(finding.fix)).slice(0, count)
+}
 
 // The rendering rule sums up the compatibility lint that the preview shows client by client (each client's issue count
 // and list), so where a preview is shown it isn't a finding too; the form and script rules already say what the
@@ -66,88 +68,65 @@ function issueReader(report: SendabilityReport | undefined, previews: ClientPrev
 const issueTone = (issues: PreviewIssue[]) => issues.some(issue => issue.severity === 'error') ? 'danger' as const : 'warning' as const
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? '' : 's'}`
 
-// ── Sendability: the score, the fixes to make first, and every finding where there is room for it ──
+// ── Checks: at most three things to fix, in plain words, then everything technical behind one row ──
 
-/** The warning near Send when a draft scores low: the score and the three fixes to make first. Sending stays possible. */
-export function SendabilityWarning({ report, action }: { report: SendabilityReport; action?: ReactNode }) {
-  const fixes = topFixes(report)
-  return <Alert tone="warning" title={`Sendability ${report.score} of 100 (${report.grade})`}>
-    {fixes.length > 0 && <><p>Fix these first.</p><ol className="ei-warning-fixes">{fixes.map(finding => <li key={finding.ruleId}><AddressText text={finding.fix} /></li>)}</ol></>}
-    {action}
-  </Alert>
-}
+// Everything to fix: the list shows the first three, and a phone's chip and the toolbar's toggle count them all. The
+// preview shows the client compatibility lint, so that finding stays out.
+const fixesOf = (report: SendabilityReport) => topFixes(report, Infinity, report.findings.filter(finding => !PREVIEW_RULES.has(finding.ruleId)))
+const toFix = (count: number) => count ? `${count} to fix` : 'Nothing to fix'
+// Where a fix is made, where the dashboard has the place: the From domain's page and the workspace's settings. A fix in
+// the message or in how it is sent has none.
+const fixLink = (finding: SendabilityFinding, report: SendabilityReport) => finding.fixIn === 'domain' ? (report.domainId ? `/domains/${encodeURIComponent(report.domainId)}` : '/domains') : finding.fixIn === 'workspace' ? '/settings#general' : null
 
-const scoreLabel = (report: SendabilityReport) => `Score ${report.score} of 100, grade ${report.grade}`
 function Score({ report }: { report: SendabilityReport }) {
-  return <Tooltip content={SCORE_NOTE}><span className="ss__score" data-grade={gradeKey(report.grade)} tabIndex={0} role="img" aria-label={scoreLabel(report)}>
+  return <Tooltip content={SCORE_NOTE}><span className="ss__score" tabIndex={0} role="img" aria-label={`Score ${report.score} of 100, grade ${report.grade}`}>
     <span>{report.score}</span><span className="ss__dot" aria-hidden="true">·</span><span className="ss__grade">{report.grade}</span>
   </span></Tooltip>
 }
 
 /**
- * The score, then the fixes to make first, each opening its finding in place, and All findings, which opens the rest in
- * place. `expanded` (a details column with the height for it, or a phone's sheet): the categories and every finding from
- * the start. `previewed`: a preview beside it shows the client compatibility lint, so that finding stays out of the list.
- * `titled`: false where a sheet's title already names it and gives the score.
+ * Up to three things to fix, each a link where the dashboard has the place to fix it, or Nothing to fix; then one
+ * Technical details row with the score, its categories and every finding. `titled`: false where a sheet's title names it.
  */
-export function SendabilityDetails({ check, expanded = false, previewed = true, warnBelow, checking = false, titled = true }: { check: Check; expanded?: boolean; previewed?: boolean; warnBelow?: number; checking?: boolean; titled?: boolean }) {
+export function Checks({ check, titled = true }: { check: Check; titled?: boolean }) {
   const id = useId()
-  const [all, setAll] = useState(false)
-  const [focus, setFocus] = useState<string | null>(null)
-  const head = (score?: ReactNode) => titled ? <div className="ss__head"><h2 id={id} className="ss__title">Sendability</h2>{score}</div> : null
-  if (check.isPending) return <section className="ss" aria-labelledby={titled ? id : undefined} aria-busy="true">{head(<SkeletonText width={52} />)}
-    <div className="ss__fixes">{['86%', '70%', '78%'].map(width => <SkeletonText key={width} width={width} lineHeight={28} />)}</div></section>
-  if (!check.data) return <section className="ss" aria-labelledby={titled ? id : undefined}>{head()}
+  const head = titled ? <h2 id={id} className="ss__title">Checks</h2> : null
+  if (check.isPending) return <section className="ss" aria-labelledby={titled ? id : undefined} aria-busy="true">{head}
+    <div className="ss__fixes">{['86%', '70%'].map(width => <SkeletonText key={width} width={width} lineHeight={28} />)}</div></section>
+  if (!check.data) return <section className="ss" aria-labelledby={titled ? id : undefined}>{head}
     <p className="ss__error"><ErrorText error={check.error} fallback="Couldn’t check this email." /></p><Button size="sm" onClick={() => void check.refetch()}>Try again</Button></section>
-  const report = check.data
-  const findings = previewed ? report.findings.filter(finding => !PREVIEW_RULES.has(finding.ruleId)) : report.findings
-  const fixes = topFixes(report, 3, findings)
-  const full = expanded || all
-  const open = (ruleId: string | null) => { setFocus(ruleId); setAll(true) }
-  return <section className="ss" aria-labelledby={titled ? id : undefined} aria-busy={checking || undefined} data-full={full || undefined}>
-    {head(<><span className="ss__status muted" role="status">{checking ? 'Checking…' : ''}</span><Score report={report} /></>)}
-    {warnBelow !== undefined && report.score < warnBelow && fixes.length > 0 && <p className="ss__warn">Fix these before sending.</p>}
-    {full ? <>
+  const report = check.data, fixes = fixesOf(report).slice(0, 3)
+  return <section className="ss" aria-labelledby={titled ? id : undefined}>
+    {head}
+    {fixes.length ? <ul className="ss__fixes" aria-label="To fix">{fixes.map(finding => { const to = fixLink(finding, report); return <li key={finding.ruleId}>
+      {to ? <Link className="ss__fix" to={to}><span><AddressText text={finding.fix} /></span><ArrowUpRight size={12} aria-hidden="true" /></Link> : <span className="ss__fix"><AddressText text={finding.fix} /></span>}
+    </li> })}</ul> : <p className="ss__clear">Nothing to fix</p>}
+    <Disclosure title="Technical details" className="ss__technical">
+      <p className="ss__scored"><span>Score</span><Score report={report} /></p>
       <Categories report={report} />
-      <Findings findings={ranked(report, findings)} focus={focus} />
-      {!expanded && <Button variant="ghost" size="sm" className="ss__all" aria-expanded="true" onClick={() => { setAll(false); setFocus(null) }}>Fewer findings</Button>}
-    </> : <>
-      {fixes.length ? <ul className="ss__fixes" aria-label="Fixes to make first">{fixes.map(finding => <li key={finding.ruleId}>
-        <button type="button" className="ss__fix" onClick={() => open(finding.ruleId)}><span className={`ei-dot ui-tone--${severityTone[finding.severity]}`} aria-hidden="true" /><span className="ss__fix-text"><span className="sr-only">{severityLabel[finding.severity]}: </span><AddressText text={finding.fix} /></span></button>
-      </li>)}</ul> : <p className="ei-clear"><Check size={16} aria-hidden="true" />No problems found.</p>}
-      <Button variant="ghost" size="sm" className="ss__all" aria-expanded="false" onClick={() => open(null)}>All findings<span className="ss__count">{findings.length}</span><ChevronRight size={14} aria-hidden="true" /></Button>
-    </>}
+      <Findings findings={ranked(report, report.findings.filter(finding => !PREVIEW_RULES.has(finding.ruleId)))} />
+    </Disclosure>
   </section>
 }
 
-/** Where the window has no room for a details column: the score in the preview's toolbar, opening the details beside it. */
-export function SendabilityToggle({ check, open, onToggle, controls }: { check: Check; open: boolean; onToggle: () => void; controls: string }) {
-  const report = check.data
-  return <button type="button" className="ev-details" aria-expanded={open} aria-controls={controls} onClick={onToggle} aria-label={report ? `Sendability: ${scoreLabel(report)}` : 'Sendability'}>
-    Sendability<span className="ev-details__score" data-grade={report ? gradeKey(report.grade) : undefined} aria-hidden="true">
-      {report ? <><span>{report.score}</span><span className="ss__dot">·</span><span className="ss__grade">{report.grade}</span></> : check.isPending ? <Skeleton width={40} height={12} /> : '–'}
-    </span>
+/** Where the window has no room for a details column: Checks in the preview's toolbar with how many to fix, opening them beside it. */
+export function ChecksToggle({ check, open, onToggle, controls }: { check: Check; open: boolean; onToggle: () => void; controls: string }) {
+  const count = check.data ? fixesOf(check.data).length : 0
+  return <button type="button" className="ev-details" aria-expanded={open} aria-controls={controls} onClick={onToggle} aria-label={check.data ? `Checks: ${toFix(count)}` : 'Checks'}>
+    Checks<span className="ev-details__count" aria-hidden="true">{check.data ? count ? toFix(count) : <CheckIcon size={14} /> : check.isPending ? <Skeleton width={40} height={12} /> : null}</span>
   </button>
 }
 
-/** A phone's score: one chip under the subject, opening a sheet with the fixes and every finding. */
-export function SendabilityChip({ check, onOpen }: { check: Check; onOpen: (opener: HTMLElement) => void }) {
-  const report = check.data
+/** A phone's checks: one chip under the subject with how many to fix, opening them in a sheet. */
+export function ChecksChip({ check, onOpen }: { check: Check; onOpen: (opener: HTMLElement) => void }) {
   if (check.isPending) return <Skeleton className="ss-chip-skeleton" width="var(--chip-width)" height={28} />
-  if (!report) return <button type="button" className="ss-chip" aria-haspopup="dialog" onClick={event => onOpen(event.currentTarget)}>Sendability</button>
-  const problems = report.findings.filter(finding => !PREVIEW_RULES.has(finding.ruleId) && finding.severity !== 'info').length
-  const fix = problems ? `${problems} to fix` : ''
-  return <button type="button" className="ss-chip" data-grade={gradeKey(report.grade)} aria-haspopup="dialog" aria-label={`Sendability: ${scoreLabel(report)}${fix ? `, ${fix}` : ''}`} onClick={event => onOpen(event.currentTarget)}>
-    <span className="ss-chip__score" aria-hidden="true"><span>{report.score}</span><span className="ss__dot">·</span><span className="ss__grade">{report.grade}</span></span>{fix && <span className="ss-chip__fix" aria-hidden="true">{fix}</span>}
+  return <button type="button" className="ss-chip" aria-haspopup="dialog" onClick={event => onOpen(event.currentTarget)}>
+    {check.data ? <><span className="sr-only">Checks: </span>{toFix(fixesOf(check.data).length)}</> : 'Checks'}
   </button>
-}
-/** A phone's sheet title for the score: Sendability and the score beside it. */
-export function SendabilityTitle({ check }: { check: Check }) {
-  return <span className="ss-sheet-title">Sendability{check.data && <Score report={check.data} />}</span>
 }
 
 function Categories({ report }: { report: SendabilityReport }) {
-  return <ul className="ei-categories" aria-label="Scores by category">{report.categories.map(category => <li key={category.id} data-grade={category.weight ? gradeKey(gradeOf(category.score)) : undefined}>
+  return <ul className="ei-categories" aria-label="Scores by category">{report.categories.map(category => <li key={category.id}>
     <span className="ei-categories__label">{categoryLabel[category.id]}</span>
     <span className="ei-categories__value">{category.weight ? category.score : <Tooltip content="Not scored: no evidence yet, so it doesn’t count."><span tabIndex={0} aria-label="Not scored">—</span></Tooltip>}</span>
     <span className="ei-bar" aria-hidden="true"><span style={{ transform: `scaleX(${category.weight ? category.score / 100 : 0})` }} /></span>
@@ -155,24 +134,21 @@ function Categories({ report }: { report: SendabilityReport }) {
 }
 
 // Problems (errors, then warnings) first; notes are measurements and context that cost few or no points.
-function Findings({ findings: sorted, focus }: { findings: SendabilityFinding[]; focus: string | null }) {
+function Findings({ findings: sorted }: { findings: SendabilityFinding[] }) {
   const problems = sorted.filter(finding => finding.severity !== 'info'), notes = sorted.filter(finding => finding.severity === 'info')
   return <>
-    {problems.length ? <ul className="ei-findings" aria-label="Problems">{problems.map(finding => <Finding key={finding.ruleId} finding={finding} focused={finding.ruleId === focus} />)}</ul>
-      : <p className="ei-clear"><Check size={16} aria-hidden="true" />No problems found.</p>}
-    {notes.length > 0 && <div className="ei-notes"><h3 className="ei-group">Notes</h3><ul className="ei-findings" aria-label="Notes">{notes.map(finding => <Finding key={finding.ruleId} finding={finding} focused={finding.ruleId === focus} />)}</ul></div>}
+    {problems.length ? <ul className="ei-findings" aria-label="Problems">{problems.map(finding => <Finding key={finding.ruleId} finding={finding} />)}</ul>
+      : <p className="ss__clear">No problems found.</p>}
+    {notes.length > 0 && <div className="ei-notes"><h3 className="ei-group">Notes</h3><ul className="ei-findings" aria-label="Notes">{notes.map(finding => <Finding key={finding.ruleId} finding={finding} />)}</ul></div>}
   </>
 }
 
 const evidenceLabel = (key: string) => key.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, first => first.toUpperCase()).replace(/ ([A-Z])/g, (_, letter: string) => ` ${letter.toLowerCase()}`)
-function Finding({ finding, focused }: { finding: SendabilityFinding; focused: boolean }) {
-  const [open, setOpen] = useState(focused)
+function Finding({ finding }: { finding: SendabilityFinding }) {
+  const [open, setOpen] = useState(false)
   const id = useId()
-  const item = useRef<HTMLLIElement>(null)
-  useEffect(() => { if (focused) item.current?.scrollIntoView({ block: 'nearest' }) }, [focused])
   const evidence = Object.entries(finding.evidence ?? {})
-  return <li ref={item} className="ei-finding" data-severity={finding.severity}>
-    <span className={`ei-dot ui-tone--${severityTone[finding.severity]}`} aria-hidden="true" />
+  return <li className="ei-finding">
     <div className="ei-finding__body">
       <button type="button" className="ei-finding__title" aria-expanded={open} aria-controls={id} onClick={() => setOpen(!open)}><span className="sr-only">{severityLabel[finding.severity]}: </span><span><AddressText text={finding.title} /></span><ChevronRight size={14} aria-hidden="true" /></button>
       <p className="ei-finding__fix"><AddressText text={finding.fix} /></p>
@@ -214,7 +190,7 @@ function Caption({ label, width, issues, classic = [], open = false, onOpenChang
     {issues && <span className="ev-caption__end">
       {all.length ? <button type="button" className="ev-caption__issues" aria-expanded={open} aria-controls={panel} onClick={() => onOpenChange?.(!open)}>
         <span className={`ei-dot ui-tone--${issueTone(all)}`} aria-hidden="true" />{plural(all.length, 'issue')}<ChevronRight size={14} aria-hidden="true" />
-      </button> : <span className="ev-caption__clear"><Check size={14} aria-hidden="true" />No issues</span>}
+      </button> : <span className="ev-caption__clear"><CheckIcon size={14} aria-hidden="true" />No issues</span>}
     </span>}
   </div>
 }
@@ -235,10 +211,10 @@ function IssuesButton({ caption, issues, classic }: { caption: string; issues: P
   const all = [...issues, ...classic]
   return <>
     <button ref={trigger} type="button" className="ev-issues-button" aria-haspopup="dialog" onClick={() => setOpen(true)}>
-      {all.length ? <><span className={`ei-dot ui-tone--${issueTone(all)}`} aria-hidden="true" />{plural(all.length, 'issue')}</> : <><Check size={14} aria-hidden="true" />No issues</>}
+      {all.length ? <><span className={`ei-dot ui-tone--${issueTone(all)}`} aria-hidden="true" />{plural(all.length, 'issue')}</> : <><CheckIcon size={14} aria-hidden="true" />No issues</>}
     </button>
     <Sheet open={open} onOpenChange={setOpen} title={caption} className="ev-issues-sheet" returnFocus={trigger}>
-      {all.length ? <IssueLists issues={issues} classic={classic} /> : <p className="ei-clear"><Check size={16} aria-hidden="true" />No issues</p>}
+      {all.length ? <IssueLists issues={issues} classic={classic} /> : <p className="ei-clear"><CheckIcon size={16} aria-hidden="true" />No issues</p>}
     </Sheet>
   </>
 }
@@ -304,7 +280,7 @@ function ViewPicker({ value, current, options, onChange, loading }: { value: str
         {options.map(option => <button key={option.value} type="button" role="option" aria-selected={option.value === value} className="ui-action-sheet__item" onClick={() => { setOpen(false); onChange(option.value) }}>
           <span className="ui-action-sheet__label">{option.label}</span>
           {option.count ? <span className="ev-view__count" data-tone={option.tone}>{plural(option.count, 'issue')}</span> : null}
-          {option.value === value && <Check size={14} aria-hidden="true" />}
+          {option.value === value && <CheckIcon size={14} aria-hidden="true" />}
         </button>)}
         {loading && <div className="ui-action-sheet__item ev-picker-sheet__loading" aria-hidden="true"><Skeleton width={160} height={12} /></div>}
       </div>
@@ -481,31 +457,5 @@ export function EmailViews({ source, previewSource, check, original, loading = f
           </> : <div className="ev-placeholder" aria-hidden="true" />}
       </div>
     </div>
-  </div>
-}
-
-// ── The campaign editor's panel: the draft's score and fixes, then its clients ──
-export function EmailInsight({ source, pending = false, placeholder, warnBelow }: { source: InsightSource | null; pending?: boolean; placeholder?: ReactNode; warnBelow?: number }) {
-  const check = useSendability(source)
-  const campaign = source?.kind === 'campaign' ? source : null
-  const campaignHtml = useApiQuery(['campaign-preview', campaign?.id ?? '', campaign?.revision ?? 0], (api, signal) => api.campaigns.preview(campaign!.id, signal), { enabled: Boolean(campaign), keepPrevious: sameSubject(source) })
-  if (!source) return <div className="ei ei--placeholder"><h2 className="ss__title">Sendability</h2><p className="muted">{placeholder}</p></div>
-  // The score comes first and the preview after it, so the panel appears once the score is in: nothing above the
-  // preview changes height after that.
-  if (check.isPending) return <InsightSkeleton />
-  const html = campaign ? campaignHtml.data?.html ?? '' : ''
-  const previewSource = source.kind === 'email' ? source.html ? { emailId: source.id } : null : html.trim() ? { html } : null
-  return <div className="ei">
-    <SendabilityDetails check={check} warnBelow={warnBelow} checking={pending || check.isFetching || campaignHtml.isFetching} />
-    {campaignHtml.isError && !campaignHtml.data ? <Alert tone="neutral" title="Couldn’t render this draft"><ErrorText error={campaignHtml.error} /><div className="ei-retry"><Button size="sm" onClick={() => void campaignHtml.refetch()}>Try again</Button></div></Alert>
-      : <EmailViews source={source} previewSource={previewSource} check={check} loading={campaign ? campaignHtml.isPending : false} />}
-  </div>
-}
-
-export function InsightSkeleton() {
-  return <div className="ei ei--loading" aria-busy="true"><span role="status" className="sr-only">Checking this email</span>
-    <section className="ss" aria-hidden="true"><div className="ss__head"><h2 className="ss__title">Sendability</h2><SkeletonText width={52} /></div>
-      <div className="ss__fixes">{['86%', '70%', '78%'].map(width => <SkeletonText key={width} width={width} lineHeight={28} />)}</div></section>
-    <div className="ev" aria-hidden="true"><div className="ev-toolbar"><Skeleton width={320} height={28} /></div><div className="ev-stage"><div className="ev-captions" /><div className="ev-canvas"><div className="ev-placeholder" /></div></div></div>
   </div>
 }

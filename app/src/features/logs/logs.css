@@ -1,6 +1,6 @@
 /* A sent email (email-detail.tsx, detail-layout.ts): the subject with its facts and status, then the preview. From 900 px
    the page is the window's height and the preview fills it, scrolling inside; from 1200 px the details column (delivery,
-   then the score) sits beside it, and below that the delivery runs on one line under the header and the score opens
+   then the checks) sits beside it, and below that the delivery runs on one line under the header and the checks open
    beside the preview from its toolbar. A phone or tablet reads the email first: a short header, one row of controls, the
    email edge to edge, and everything else in sheets. No hairlines: space groups them. */
 .email-detail { --side-width: clamp(280px, 22cqi, 380px); container-type: inline-size; display: flex; flex-direction: column; min-width: 0; }
@@ -67,7 +67,7 @@
 .delivery[data-vertical] > .ui-button { align-self: flex-start; }
 .delivery__skeleton { display: flex; flex-direction: column; }
 .delivery[data-vertical] > .ui-waterfall .delivery__fact { display: inline-flex; gap: var(--space-6); cursor: default; }
-/* The preview, then (a phone) the score under it, or beside it the details column: the delivery, then the score. */
+/* The preview, and beside it the details column: the delivery, then the checks. */
 .email-detail__body { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-24); min-width: 0; }
 .email-detail__preview { min-width: 0; }
 .email-detail__delivery { display: flex; flex-direction: column; gap: var(--space-8); }
@@ -82,13 +82,13 @@
   .email-detail__side { --fade-pad-y: var(--focus-reach); display: flex; flex-direction: column; gap: var(--space-28); width: calc(var(--side-width) + var(--space-8) + var(--space-24)); min-height: 0; margin: calc(-1 * var(--focus-reach)) calc(-1 * var(--space-8)) calc(-1 * var(--focus-reach)) 0; padding: var(--focus-reach) var(--space-8) var(--focus-reach) var(--space-24); border-left: 1px solid var(--color-border-muted); overflow: hidden auto; }
   .email-detail__side[hidden] { display: none; }
   .email-detail__side:focus-visible { outline-offset: calc(-1 * var(--focus-width)); }
-  /* Opened from the toolbar, the score's panel starts at the preview's top, under its toggle. */
+  /* Opened from the toolbar, the checks' panel starts at the preview's top, under its toggle, which names it. */
   .email-detail[data-mode='panel'] .email-detail__side { padding-top: calc(var(--control-height) + var(--space-12) + var(--focus-reach)); }
-  .email-detail[data-mode='panel'] .email-detail__side .ss__head { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .email-detail[data-mode='panel'] .email-detail__side .ss > .ss__title { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .email-detail__side .ss { flex: none; }
 }
 /* A phone or tablet (stack): the subject in two lines at most (a longer one opens on a tap), then one line with the
-   status, its time and the stream (opening the delivery and the facts) and the score's chip (opening every finding). */
+   status, its time and the stream (opening the delivery and the facts) and the checks' chip (opening them). */
 .email-detail[data-mode='stack'] > .ui-page-header { flex-wrap: wrap; margin-bottom: var(--space-12); }
 .page-surface .email-detail[data-mode='stack'] > .ui-page-header > .cluster:first-child { flex-basis: 100%; flex-wrap: wrap; row-gap: var(--space-8); }
 .email-detail[data-mode='stack'] .ui-page-header__text { display: contents; }
@@ -105,9 +105,8 @@
 /* A phone: why it ended this way, in the open under the status line. */
 .email-why { flex-basis: 100%; min-width: 0; margin: 0; text-wrap: pretty; }
 @media (hover: hover) and (pointer: fine) { .email-status__facts:hover { color: var(--color-text); } }
-/* The sheets: the delivery above the facts, and the score's findings at full height. */
+/* The sheets: the delivery above the facts; the checks. */
 .email-detail-sheet .ui-sheet__body { display: flex; flex-direction: column; gap: var(--space-16); }
-.email-detail-sheet--tall { height: calc(100dvh - var(--keyboard-inset, 0px) - max(24px, env(safe-area-inset-top))); }
 .email-fact-list { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: var(--space-12); margin: 0; padding-top: var(--space-16); border-top: 1px solid var(--color-border-muted); }
 .email-fact-list > div { display: contents; }
 .email-fact-list dt { color: var(--color-muted); }

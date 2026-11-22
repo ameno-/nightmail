@@ -53,8 +53,10 @@ export interface EmailEventDetail { bounceType?: string; bounceSubType?: string;
 export interface EmailEvent { id: string; type: string; at: ISODate; description: string; diagnostic?: string; detail?: EmailEventDetail }
 /** POST /v1/emails/check: an advisory 0–100 sendability score, never an inbox-placement probability. */
 export type SendabilityCategory = 'authentication' | 'content' | 'headers' | 'size' | 'rendering' | 'reputation'
-export interface SendabilityFinding { ruleId: string; category: SendabilityCategory; severity: 'info' | 'warning' | 'error'; title: string; detail: string; fix: string; evidence?: Record<string, number | string> }
-export interface SendabilityReport { score: number; grade: SenderGrade; categories: { id: SendabilityCategory; score: number; weight: number }[]; findings: SendabilityFinding[] }
+/** fix: what to do, in plain words; fixIn: where it is done (the From domain, the workspace's settings, how it is sent, or the message). */
+export interface SendabilityFinding { ruleId: string; category: SendabilityCategory; severity: 'info' | 'warning' | 'error'; title: string; detail: string; fix: string; fixIn: 'domain' | 'workspace' | 'sending' | 'message'; evidence?: Record<string, number | string> }
+/** domainId: the From domain's, when it is one of the workspace's. */
+export interface SendabilityReport { score: number; grade: SenderGrade; domainId: string | null; categories: { id: SendabilityCategory; score: number; weight: number }[]; findings: SendabilityFinding[] }
 export type EmailCheckInput = { emailId: string } | { campaignId: string }
 /** POST /v1/emails/preview: offline per-client emulation. Classic Outlook for Windows is lint only (empty html). */
 export type PreviewClient = 'gmail-web' | 'gmail-ios' | 'gmail-android' | 'gmail-ios-non-google' | 'gmail-android-non-google' | 'apple-mail-macos' | 'apple-mail-ios' | 'outlook-web' | 'outlook-new-windows' | 'outlook-mac' | 'outlook-classic-windows' | 'yahoo-web' | 'aol-web' | 'samsung-email'
