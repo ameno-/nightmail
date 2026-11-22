@@ -147,6 +147,9 @@ export interface Runtime {
   // Nudges the long-lived dispatcher for one account/region after queued mail commits. Dispatch
   // never depends on it: the dispatcher also polls and the scheduler pings it every minute.
   dispatch?: (region: string, accountId?: string, emails?: number, kind?: ReadyConnection['kind'], priority?: boolean) => Promise<void>;
+  /** True once the content classifier must not be called in this run (src/dispatcher-do.ts: a request landed on the shard,
+   *  and a call now would carry its visitor). Checked right before each request; a call not made throws ScreenHandover. */
+  screenHandover?: () => boolean;
   // Verified provider feedback (and simulated callbacks) leave the request path through this
   // sink and are ingested in batches, never through the sending jobs table.
   feedback?: { enqueue: (items: FeedbackItem[]) => Promise<void> };
