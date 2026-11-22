@@ -1,5 +1,7 @@
-/* Overview: a main column and a 312px detail column. Every async block has a fixed height, matched by its skeleton. */
-.page-surface > .ui-page-header:has(+ .ov-split) { margin-bottom: var(--space-16); }
+/* Overview: a main column and a 312px detail column. Every async block has a fixed height, matched by its skeleton.
+   The header ends where the main column does, so the range and stream sit over the figures they filter. */
+.page-surface > .ui-page-header:has(+ .ov-split) { --ov-aside: calc(312px + var(--space-32)); margin-bottom: var(--space-16); }
+.page-surface > .ui-page-header:has(+ .ov-split):not(:has(.ov-controls[data-wide])) { padding-right: var(--ov-aside); }
 .ov-controls { flex-wrap: nowrap; gap: var(--space-12); }
 .ov-controls .ui-tabs { min-height: var(--control-height); overflow: visible; border-bottom: 0; }
 .ov-controls .ui-tab { height: var(--control-height); }
@@ -17,10 +19,17 @@
 .ov-aside-skeleton > span:first-child { height: 30px; }
 .ov-aside-skeleton > span:last-child { height: 120px; }
 
-/* Figures: four 104px tiles (two by two on a phone: 216px). A tile is its name and a hint, the figure, and either its
-   buckets as columns or, for a rate, a 20-cell gauge that ends at the limit named under it. Flat fills, no borders. */
+/* Figures: four 104px tiles (two by two on a phone: 216px). A tile is a link to its mail in Logs: its name and a hint,
+   the figure, and either its buckets as columns or, for a rate, a 20-cell gauge that ends at the limit named under it.
+   Flat fills, no borders. */
 .ov-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-8); }
-.ov-tile { display: flex; flex-direction: column; min-width: 0; height: 104px; padding: var(--space-12); border-radius: var(--radius-sm); background: var(--color-layer-1); }
+.ov-tile { display: flex; flex-direction: column; min-width: 0; height: 104px; padding: var(--space-12); border-radius: var(--radius-sm); background: var(--color-layer-1); color: inherit; text-decoration: none; }
+a.ov-tile:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+@media (hover: hover) and (pointer: fine) { a.ov-tile:hover { background: var(--color-layer-2); } }
+/* Where there is no sidebar to carry it (the compact shell), the sender score is a row under the tiles: its own card
+   (features/score, 56px), filled like a tile instead of outlined. */
+.ov-tiles > .gauge-card { grid-column: 1 / -1; padding: 0 var(--space-12); background: var(--color-layer-1); box-shadow: none; }
+.ov-tiles > .gauge-card > .gauge-alert { box-shadow: 0 0 0 2px var(--color-layer-1); }
 .ov-tile__head { display: flex; align-items: baseline; gap: var(--space-8); height: 16px; color: var(--color-muted); font-size: var(--text-sm); line-height: 16px; white-space: nowrap; }
 /* The hint is laid out from the tile's right edge and pulled back by its own width, so a tweening count moves nothing. */
 .ov-tile__hint { position: relative; flex: 1; align-self: stretch; min-width: 0; color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); font-variant-numeric: tabular-nums; }
@@ -103,8 +112,15 @@
 
 @media (max-width: 1200px) {
   .ov-split { grid-template-columns: minmax(0, 1fr) 280px; gap: var(--space-28); }
+  .page-surface > .ui-page-header:has(+ .ov-split) { --ov-aside: calc(280px + var(--space-28)); }
 }
-@media (max-width: 960px) { .ov-split { grid-template-columns: minmax(0, 1fr); } }
+/* One column: the main column, the detail column, then the latest emails (index.tsx). The detail column takes a row,
+   and its gap, only once it has something to show. */
+@media (max-width: 960px) {
+  .ov-split { grid-template-columns: minmax(0, 1fr); }
+  .ov-split__aside:empty { display: none; }
+  .page-surface > .ui-page-header:has(+ .ov-split) { --ov-aside: 0px; }
+}
 /* Phone: the controls take their own row (range tabs, then the stream filter filling the rest); the four tiles are a
    2 × 2 grid. Heights stay fixed, as above. */
 @media (max-width: 640px) {
@@ -119,5 +135,5 @@
 
 /* A new range or stream: the old figures stay up and dim once the new ones take over 100 ms, then brighten as they
    arrive. Opacity only, so nothing moves. */
-.ov-tiles, .ov-chart { transition: opacity 200ms var(--ease-swap); }
-.ov-tiles[data-stale], .ov-chart[data-stale] { opacity: .6; transition: opacity 200ms var(--ease-swap) 100ms; }
+.ov-tile, .ov-chart { transition: opacity 200ms var(--ease-swap), background var(--motion-duration); }
+.ov-tiles[data-stale] > .ov-tile, .ov-chart[data-stale] { opacity: .6; transition: opacity 200ms var(--ease-swap) 100ms, background var(--motion-duration); }
