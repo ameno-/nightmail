@@ -203,7 +203,7 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
       if (!userId) {
         // A new subject is admitted only by a sub-bound decision: hosted staff (the provider identity, see
         // account-policy.ts), the invitation link it followed, or a self-hosted subject allowlist. Operators bind
-        // anyone else by subject (scripts/cutover-fresh-start.ts --owner-sub, or a nightmail_oidc_identities row).
+        // anyone else by subject (a nightmail_oidc_identities row).
         // Only the invitation path reads the address: it must be the invitation target, in a mailbox this sign-in proves
         // (provenMailbox: a Google-hosted one, so never through GitHub). Hosted, nothing is
         // admitted without a verified address, whichever method signed in.

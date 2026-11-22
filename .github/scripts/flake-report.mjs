@@ -17,7 +17,7 @@ const suiteFailures = [];
 const repetitions = JSON.parse(process.env.NIGHTLY_RUNS ?? 'null');
 if (repetitions) for (const run of repetitions) {
   for (const fixture of ['integration', 'simulated', 'simulated-heavy']) if (!runs.includes(`nightly-acceptance-${run}-${fixture}`)) suiteFailures.push(`run ${run}: missing ${fixture} acceptance artifact`);
-  for (const shard of [1, 2, 3, 4]) if (!clsRuns.includes(`nightly-cls-${run}-${shard}`)) suiteFailures.push(`CLS run ${run}: missing shard ${shard}`);
+  if (!clsRuns.includes(`nightly-cls-${run}`)) suiteFailures.push(`CLS run ${run}: missing its artifact`);
 }
 const acceptanceCount = repetitions?.length ?? runs.length, clsCount = repetitions?.length ?? clsRuns.length;
 for (const run of runs) {

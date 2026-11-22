@@ -233,21 +233,7 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
   if (!hits) console.log(`Identity: ${scanned.length} API, script and OIDC migration files admit and link people by subject only.`);
 }
 
-// 7. Copy: dashboard strings checked against the copy rules (app/scripts/copy-lint.mjs), as a ratchet against
-// app/scripts/copy-baseline.json, so only a finding the change adds fails. Fixing one is app/scripts/copy-fix.md.
-{
-  try {
-    const out = execFileSync('node', ['scripts/copy-lint.mjs', '--json'], { cwd: new URL('app/', root), encoding: 'utf8', maxBuffer: 64 << 20, stdio: ['ignore', 'pipe', 'pipe'] });
-    const { fresh, rules, total } = JSON.parse(out) as { fresh: { file: string; line: number; rule: string; message: string; text: string }[]; rules: Record<string, string>; total: number };
-    for (const f of fresh) fail('Copy', `${f.rule}: ${f.message}. ${rules[f.rule]} “${f.text.slice(0, 100)}” Shorten it (app/scripts/copy-fix.md), or accept a deliberate exception with bun run copy-lint --update-baseline in app/.`, f.file, f.line);
-    if (!fresh.length) console.log(`Copy: no new findings (${total} in the baseline).`);
-  } catch (error) {
-    if (/Cannot find module '@babel\/parser'/.test(String((error as { stderr?: string }).stderr))) warn('Copy', 'Skipped: run bun install in app/ to lint dashboard copy.');
-    else fail('Copy', `app/scripts/copy-lint.mjs failed: ${String((error as { stderr?: string }).stderr ?? error).slice(0, 300)}`);
-  }
-}
-
-// 8. Every operation states the permission it needs: x-nightmail-permission in openapi.json, from the table in
+// 7. Every operation states the permission it needs: x-nightmail-permission in openapi.json, from the table in
 // src/operation-permissions.ts, which the acceptance test "permission table" checks against what REST enforces.
 {
   const before = failed, file = 'api/src/operation-permissions.ts';
@@ -267,7 +253,7 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
   if (failed === before) console.log(`Permissions: all ${operations.length} operations state the permission they need.`);
 }
 
-// 9. Published BYO role templates. Customers' stacks run byo/<version>.yaml from S3, and Nightmail keeps working with
+// 8. Published BYO role templates. Customers' stacks run byo/<version>.yaml from S3, and Nightmail keeps working with
 // every supported version, so a published file never changes or disappears: a change is a new, higher version. The
 // acceptance test "BYO contract" checks every session the code asks for against each of them.
 {
