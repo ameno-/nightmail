@@ -58,7 +58,6 @@
     "BANE_RECEIVING_REDRIVE": "true",
     // Dev only: the pools become ready in the SES sandbox, so dev can send to the mailbox simulator and verified addresses.
     "BANE_ALLOW_SES_SANDBOX": "true",
-    "HOSTED_SEND_CAP_FIRST_WEEK": "100",
     "DEFAULT_SES_REGION": "us-east-2",
     // Stripe Tax stays off until its registrations exist (api/README.md, Stripe setup). The keys are Worker secrets.
     "STRIPE_AUTOMATIC_TAX": "false",

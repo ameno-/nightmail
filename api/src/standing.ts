@@ -38,7 +38,7 @@ const STRIKE_DAYS = 90;
 /** One transaction: lock the standing, check If-Match, write the change, its event and every side effect. */
 export async function applyChange(db: DbExecutor, change: Change): Promise<{ eventId: string; version: number; sequence: number; step: Step; previousStep: Step } | null> {
   const wid = change.workspaceId;
-  await db.execute(sql`INSERT INTO sender_standing(workspace_id) SELECT workspace_id FROM provider_connections WHERE workspace_id=${wid} AND kind='shared' ON CONFLICT DO NOTHING`);
+  await db.execute(sql`INSERT INTO sender_standing(workspace_id,daily_limit,band_limit) SELECT workspace_id,${EVALUATION.limit}::int,${EVALUATION.limit}::int FROM provider_connections WHERE workspace_id=${wid} AND kind='shared' ON CONFLICT DO NOTHING`);
   // A pause that is resuming (waiting for its SES tenants to be enabled again) counts as lifted: a new pause re-arms it.
   const [row] = (await db.execute<StandingRow & { paused_at: string | null; held: boolean; exempt: boolean; connection_id: string }>(sql`SELECT s.*,CASE WHEN pc.resume_pending_at IS NULL THEN pc.paused_at END AS paused_at,
     pc.marketing_held_at IS NOT NULL AS held,w.exempt_hosted_quotas AS exempt,pc.id AS connection_id FROM sender_standing s
@@ -115,7 +115,7 @@ const MAIL_REAL = sql`NOT e.simulated AND hosted_real_cost(e.to_addresses||e.cc_
   AND (e.feedback_topic_arn IS NULL OR EXISTS (SELECT FROM provider_feedback_history h WHERE h.topic_arn=e.feedback_topic_arn AND h.kind='shared'))`;
 /**
  * Counts each due workspace's mail per UTC day: 30 days the first time, then the last 8 (late feedback). Hourly, or every
- * five minutes during the evaluation, so its first 100 recipients are graded soon after their results are in.
+ * five minutes during the evaluation, so its recipients are graded soon after their results are in.
  */
 async function refreshEvidence(db: DbExecutor, limit: number) {
   const { rows: [r] } = await db.execute<{ n: number }>(sql`WITH due AS (
@@ -181,8 +181,8 @@ async function growthHour(runtime: Runtime, key: string, hour: string): Promise<
 
 /**
  * A workspace's track record before `cutoff` (src/standing-model.ts ESTABLISHED): real mail by its SES acceptance
- * events (never its admission time), in the 30 completed UTC days before the cutoff, leaving out its first 100
- * acceptances (the evaluation's seeds), per real recipient.
+ * events (never its admission time), in the 30 completed UTC days before the cutoff, leaving out its first
+ * EVALUATION.recipients acceptances (the evaluation's seeds), per real recipient.
  */
 async function trackRecord(runtime: Runtime, wid: string, cutoff: string): Promise<TrackRecord> {
   const { rows: [r] } = await runtime.db.execute<TrackRecord>(sql`WITH accepted AS (
@@ -263,7 +263,8 @@ export async function liveLadder(runtime: Runtime, wid: string) {
 export async function refreshStanding(runtime: Runtime, options: { now?: Date; only?: string; limit?: number } = {}) {
   if (!runtime.config.multiTenant) return { evaluated: 0, changed: 0 };
   const now = options.now ?? new Date(), limit = options.limit ?? 500;
-  await runtime.db.execute(sql`INSERT INTO sender_standing(workspace_id) SELECT workspace_id FROM provider_connections WHERE kind='shared' ${options.only ? sql`AND workspace_id=${options.only}` : sql``} ON CONFLICT DO NOTHING`);
+  // A new workspace starts in its evaluation, at its limit (not the column's default, 100, which predates it).
+  await runtime.db.execute(sql`INSERT INTO sender_standing(workspace_id,daily_limit,band_limit) SELECT workspace_id,${EVALUATION.limit}::int,${EVALUATION.limit}::int FROM provider_connections WHERE kind='shared' ${options.only ? sql`AND workspace_id=${options.only}` : sql``} ON CONFLICT DO NOTHING`);
   await refreshEvidence(runtime.db, options.only ? 1 : 200);
   const rows = await candidates(runtime, limit, options.only);
   const today = now.toISOString().slice(0, 10), routine: Record<string, unknown>[] = [];
@@ -297,7 +298,7 @@ export async function refreshStanding(runtime: Runtime, options: { now?: Date; o
     // while it can still raise an allowance that limits.
     const was = { until: row.growth_until, cap: row.growth_cap, hour: row.growth_hour && new Date(row.growth_hour).toISOString(), quality: row.growth_quality === null ? null : Number(row.growth_quality) };
     const graduated = row.phase === 'calibrating' && moved.phase === 'graded', pacing = !!was.until && Date.parse(was.until) > now.getTime() && was.cap !== null;
-    // The track record ends at the baseline, or earlier when the evaluation's 100th was counted before it.
+    // The track record ends at the baseline, or earlier when the evaluation's last recipient was counted before it.
     const cutoff = row.history_before && new Date(Math.min(Date.parse(row.history_before), moved.calibratedAt ? Date.parse(moved.calibratedAt) : Infinity)).toISOString();
     const history = (graduated || pacing) && !row.override && cutoff && moved.score !== null && moved.score >= GOOD_STANDING && next.step === 'ok' ? await trackRecord(runtime, row.workspace_id, cutoff) : null;
     const exempt = graduated || pacing ? establishedBy({ override: row.override, history, score: moved.score, step: next.step }) : null, established = exempt !== null;

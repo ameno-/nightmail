@@ -58,7 +58,7 @@ export function SendingLimitsGuide({ headings = 'h3', limit, compact = false }: 
       </table></div>
       <ul className="limits-notes">
         <li>The first {EVALUATION.recipients} wait for their results, about an hour. Then sending grows from {number(GROWTH.start)} an hour for {GROWTH.hours} hours.</li>
-        <li>Under a limit, 100 or 10% is kept for receipts. A band drops {SCORE.hysteresis} points under its floor.</li>
+        <li>After the evaluation, a limit keeps 100 or 10% for receipts. A band drops {SCORE.hysteresis} points under its floor.</li>
       </ul>
     </section>
     <Part title="Warnings and holds" H={H} compact={compact}>

@@ -2181,13 +2181,13 @@ test('send-only SMTP: revoking a key, changing what it may send or when it expir
   assert.deepEqual(heard, [keyId, keyId, keyId, addressKey, addressKey]);
 });
 test('mail gateway: the IMAP/SMTP score cap is the cap admission uses for the stored standing',async t=>{
-  const {drizzle}=await import('drizzle-orm/node-postgres'),{protocolScoreCap}=await import('./src/sender-score.js');
+  const {drizzle}=await import('drizzle-orm/node-postgres'),{protocolScoreCap}=await import('./src/sender-score.js'),{EVALUATION}=await import('./src/standing-model.js');
   const db=await fixtureDatabase(t),wid=unique('protocol-cap');
   await db.query('BEGIN');
   try {
     const rt={db:drizzle(db),config:{hostedSendCaps:{firstWeek:100}}} as unknown as import('./src/core.js').Runtime;
     await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[wid]);
-    assert.equal(await protocolScoreCap(rt,wid),100,'No stored standing: the calibration limit.');
+    assert.equal(await protocolScoreCap(rt,wid),EVALUATION.limit,'No stored standing: the calibration limit.');
     await gradedSender(db,wid,500);
     assert.equal(await protocolScoreCap(rt,wid),500);
     await db.query("UPDATE workspaces SET send_cap_override=2000,send_cap_override_expires_at=now()+interval '1 day' WHERE id=$1",[wid]);
@@ -2939,7 +2939,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
         assert.deepEqual(ok(await local('GET', path, undefined, a.cookie)).connection, pending);
         const {sendingLimit,domains:claimed,...summary}=ok(await local('GET','/v1/me',undefined,a.cookie)).connection;
         assert.deepEqual(summary,{kind:'shared',region,state:'ready',tenant:'pending',sendingPause:null,standing:{step:'ok',marketingHeld:false}}); assert.deepEqual(claimed,{total:0,verified:0});
-        assert.deepEqual({...sendingLimit,resetAt:undefined},{cap:100,used:0,resetAt:undefined,nextCap:null,nextCapAt:null},'No time-only graduation promise.');
+        assert.deepEqual({...sendingLimit,resetAt:undefined},{cap:500,used:0,resetAt:undefined,nextCap:null,nextCapAt:null},'No time-only graduation promise.');
         assert.equal((await pool.query('SELECT lease_until FROM provider_connections WHERE id=$1', [pending.id])).rows[0].lease_until, null);
         // GET /v1/me reads the allowance without row locks: a pending operator pause or cap change (a row lock on the
         // workspace) doesn't hold it up, while admission's hosted_allowance still waits for it.
@@ -14142,12 +14142,12 @@ describe('Dashboard API capabilities', () => {
     assert.deepEqual(ok(await http('GET', `/v1/lists/${other.id}`, key.secret)).counts, { total: 0, subscribed: 0, unsubscribed: 0, unknown: 0, suppressed: 0 });
   });
 
-  test('sender score: the model publishes its limit table and ladder; the evaluation grades the first 100, good standing has no daily limit and a warning freezes it', async t => {
-    const m = await import('./src/standing-model.js');
+  test('sender score: the model publishes its limit table and ladder; the evaluation grades the first 500, good standing has no daily limit and a warning freezes it', async t => {
+    const m = await import('./src/standing-model.js'), E = m.EVALUATION.recipients;
     // Score → limit: none from 75 (good standing), the score's band under it, 2 points of hysteresis on the way down.
     assert.deepEqual([60, 64.9, 65, 70, 74.9, 75, 90, 99].map(s => m.bandFor(s).limit), [100, 100, 200, 500, 500, null, null, null]);
     assert.deepEqual([m.bandLimit(73.5, null), m.bandLimit(72.9, null), m.bandLimit(74, 500), m.bandLimit(75, 500), m.bandLimit(68.5, 500), m.bandLimit(67.9, 500), m.bandLimit(91, 200)], [null, 500, 500, null, 500, 200, null]);
-    assert.deepEqual([m.burstFor(100), m.burstFor(2000), m.burstFor(20000), m.burstFor(null), m.marketingHourFor(100), m.marketingHourFor(10000), m.reserveFor(100), m.reserveFor(200), m.reserveFor(5000)], [50, 100, 500, 500, 25, 2500, 100, 100, 500]);
+    assert.deepEqual([m.burstFor(100), m.burstFor(2000), m.burstFor(20000), m.burstFor(null), m.marketingHourFor(100), m.marketingHourFor(10000), m.reserveFor(100), m.reserveFor(200), m.reserveFor(5000), m.reserveFor(m.EVALUATION.limit, true)], [50, 100, 500, 500, 25, 2500, 100, 100, 500, 0]);
     // No volume prior: 100 perfect emails are a perfect score (they used to give 71), and the target is the quality.
     const perfect = (n: number) => [{ day: '2026-11-12', emails: n, accepted: n, delivered: n, bounced: 0, first_sends: 0, first_bounced: 0, complained: 0, screened: 0, rejected: 0, suppressed: 0, marketing_delivered: 0, unsubscribed: 0, clicked: 0 }];
     assert.deepEqual([100, 1000].map(n => m.quality(perfect(n), [], false, '2026-11-12').target), [100, 100]);
@@ -14155,22 +14155,22 @@ describe('Dashboard API capabilities', () => {
     // A day of mail 30 days old counts half.
     assert.equal(m.quality([{ ...perfect(200)[0]!, day: '2026-10-13' }], [], false, '2026-11-12').volume, 100);
     assert.deepEqual(m.evaluated([{ accepted: 100, delivered: 70, bounced: 5 }, { accepted: 10, delivered: 12, bounced: 0 }]), { accepted: 110, resolved: 85 });
-    // The evaluation: 100 real recipients, then their results (90% delivered or bounced) or an hour; graded on them alone.
+    // The evaluation: 500 real recipients, then their results (90% delivered or bounced) or an hour; graded on them alone.
     const atMin = (min: number) => new Date(Date.parse('2026-11-12T01:00:00Z') + min * 60_000), at = (h: number) => atMin(h * 60);
     const fresh = { phase: 'calibrating', firstRecipients: 0, calibratedAt: null, score: null, dayScore: null, scoreDay: null } as const;
-    let st = m.moveScore(fresh, 97, { accepted: 99, resolved: 99 }, atMin(0)); assert.deepEqual([st.phase, st.calibratedAt], ['calibrating', null], '99 recipients are not an evaluation.');
-    st = m.moveScore(st, 97, { accepted: 100, resolved: 40 }, atMin(1)); assert.deepEqual([st.phase, st.calibratedAt], ['calibrating', atMin(1).toISOString()]);
-    st = m.moveScore(st, 97, { accepted: 100, resolved: 89 }, atMin(30)); assert.equal(st.phase, 'calibrating', 'It waits for their results.');
-    st = m.moveScore(st, 97, { accepted: 100, resolved: 90 }, atMin(31)); assert.deepEqual([st.phase, st.score], ['graded', 97], 'Graded once 90% have a result, at their quality.');
-    assert.equal(m.moveScore({ ...fresh, firstRecipients: 100, calibratedAt: atMin(0).toISOString() }, 50, { accepted: 100, resolved: 10 }, atMin(61)).score, 50, 'An hour after the 100th it is graded on what is in.');
+    let st = m.moveScore(fresh, 97, { accepted: E - 1, resolved: E - 1 }, atMin(0)); assert.deepEqual([st.phase, st.calibratedAt], ['calibrating', null], '499 recipients are not an evaluation.');
+    st = m.moveScore(st, 97, { accepted: E, resolved: 0.4 * E }, atMin(1)); assert.deepEqual([st.phase, st.calibratedAt], ['calibrating', atMin(1).toISOString()]);
+    st = m.moveScore(st, 97, { accepted: E, resolved: 0.89 * E }, atMin(30)); assert.equal(st.phase, 'calibrating', 'It waits for their results.');
+    st = m.moveScore(st, 97, { accepted: E, resolved: 0.9 * E }, atMin(31)); assert.deepEqual([st.phase, st.score], ['graded', 97], 'Graded once 90% have a result, at their quality.');
+    assert.equal(m.moveScore({ ...fresh, firstRecipients: E, calibratedAt: atMin(0).toISOString() }, 50, { accepted: E, resolved: 0.1 * E }, atMin(61)).score, 50, 'An hour after the 500th it is graded on what is in.');
     // Then the score is the evidence on every run, down or up: complaints that arrive days later move it at once.
     st = m.moveScore(st, 40, { accepted: 120, resolved: 120 }, atMin(40)); assert.equal(st.score, 40);
     st = m.moveScore(st, 95, { accepted: 2000, resolved: 2000 }, atMin(50)); assert.equal(st.score, 95);
     assert.equal(m.moveScore({ phase: 'seed', firstRecipients: 0, calibratedAt: null, score: null, dayScore: null, scoreDay: null }, 88, { accepted: 4000, resolved: 4000 }, atMin(0)).score, 88, 'An existing sender starts at its target once.');
-    // The limit: the evaluation's 100, none in good standing, the band under it. A ladder step freezes it (none becomes the
+    // The limit: the evaluation's 500, none in good standing, the band under it. A ladder step freezes it (none becomes the
     // last 24 hours, at least 10,000) until the step clears; a second strike halves it.
     const limit = (o: Partial<Parameters<typeof m.dailyLimit>[0]> = {}) => m.dailyLimit({ phase: 'graded', score: 91, band: null, step: 'ok', strikeCapped: false, acceptedDay: 0, ...o });
-    assert.deepEqual(limit({ phase: 'calibrating', score: null, band: 100, acceptedDay: 80 }), { band: 100, limit: 100 });
+    assert.deepEqual(limit({ phase: 'calibrating', score: null, band: 100, acceptedDay: 80 }), { band: m.EVALUATION.limit, limit: m.EVALUATION.limit });
     assert.deepEqual([limit(), limit({ score: 66 }), limit({ score: 68, band: 500 })], [{ band: null, limit: null }, { band: 200, limit: 200 }, { band: 500, limit: 500 }]);
     assert.deepEqual(limit({ step: 'warn', acceptedDay: 3000 }), { band: 10000, limit: 10000 });
     assert.deepEqual(limit({ step: 'warn', acceptedDay: 42000 }), { band: 42000, limit: 42000 });
@@ -14179,6 +14179,7 @@ describe('Dashboard API capabilities', () => {
     assert.deepEqual(limit({ step: 'warn', band: 42000, score: 66 }), { band: 200, limit: 200 }, 'A falling score still tightens it.');
     assert.deepEqual(limit({ band: 42000 }), { band: null, limit: null }, 'Once the step clears, good standing lifts it.');
     assert.deepEqual(limit({ step: 'warn', band: 2000, strikeCapped: true }), { band: 2000, limit: 1000 });
+    assert.deepEqual(limit({ score: 60, band: 100, strikeCapped: true }), { band: 100, limit: 100 }, 'A strike never raises a limit: its half stops at the bottom band, not at the evaluation\'s limit.');
     // A strike keeps the frozen reference after the step clears: the halving cannot drift from run to run.
     const struck = limit({ score: 95, band: 2000, strikeCapped: true, acceptedDay: 100 });
     assert.deepEqual([struck, limit({ score: 95, band: struck.band, strikeCapped: true, acceptedDay: 100 })], [{ band: 2000, limit: 1000 }, { band: 2000, limit: 1000 }]);
@@ -14186,7 +14187,7 @@ describe('Dashboard API capabilities', () => {
     // Growth after the evaluation: 1,000 an hour, raised to twice the distinct recipients of a mature, clean hour.
     const hour = (h: number) => new Date(Date.parse('2026-11-12T00:00:00Z') + h * 3600_000).toISOString();
     const start = m.nextGrowth(m.NO_GROWTH, { graduated: true, step: 'ok', quality: 98, hour: hour(0), evidence: null, now: atMin(70) });
-    assert.deepEqual([start.cap, start.hour, Date.parse(start.until!) - atMin(70).getTime()], [1000, hour(0), 72 * 3600_000]);
+    assert.deepEqual([start.cap, start.hour, Date.parse(start.until!) - atMin(70).getTime()], [1000, hour(0), 24 * 3600_000]);
     const hourOf = (o: Partial<import('./src/standing-model.js').GrowthHour> = {}) => ({ accepted: 1000, distinct: 990, resolved: 1000, bounces: 5, complaints: 0, ...o });
     const step = (prev: import('./src/standing-model.js').Growth, evidence: ReturnType<typeof hourOf> | null, o: { step?: import('./src/standing-model.js').Step; quality?: number; h?: number } = {}) =>
       m.nextGrowth(prev, { graduated: false, step: o.step ?? 'ok', quality: o.quality ?? 98, hour: hour(o.h ?? 1), evidence, now: atMin(130) });
@@ -14197,10 +14198,10 @@ describe('Dashboard API capabilities', () => {
     assert.equal(step(start, hourOf(), { step: 'notice' }).cap, 1000);
     assert.equal(step(start, hourOf({ distinct: 10 })).cap, 1000, 'Nothing lowers it.');
     const tripped = step(start, hourOf(), { step: 'warn' });
-    assert.deepEqual([tripped.cap, Date.parse(tripped.until!) - atMin(130).getTime()], [1000, 72 * 3600_000], 'A trip starts the 72 clean hours again.');
+    assert.deepEqual([tripped.cap, Date.parse(tripped.until!) - atMin(130).getTime()], [1000, 24 * 3600_000], 'A trip starts the 24 clean hours again.');
     assert.equal(step(step(start, hourOf()), hourOf({ distinct: 1900 }), { h: 2 }).cap, 3800);
     assert.equal(step(step(start, hourOf()), hourOf({ distinct: 5000 }), { h: 1 }).cap, 1980, 'An hour grows it once.');
-    assert.deepEqual(m.nextGrowth({ ...start, until: atMin(60).toISOString() }, { graduated: false, step: 'ok', quality: 98, hour: hour(1), evidence: hourOf(), now: atMin(130) }), m.NO_GROWTH, 'After 72 hours it is gone.');
+    assert.deepEqual(m.nextGrowth({ ...start, until: atMin(60).toISOString() }, { graduated: false, step: 'ok', quality: 98, hour: hour(1), evidence: hourOf(), now: atMin(130) }), m.NO_GROWTH, 'After 24 hours it is gone.');
     assert.deepEqual(m.limitRequest({ phase: 'graded', step: 'ok', daily: null }).reasons.map(r => r.code), ['NO_DAILY_LIMIT']);
     // The ladder: counts and rates together; bounces alone hold marketing and stop transactional mail only at 5% and 50.
     const w = (o: Partial<import('./src/standing-model.js').Window> = {}) => ({ accepted: 1000, bounces: 0, complaints: 0, marketingAccepted: 0, marketingBounces: 0, marketingComplaints: 0, ...o });
@@ -14236,29 +14237,29 @@ describe('Dashboard API capabilities', () => {
       const key = ok(await local('POST', '/v1/api-keys', { name: 'Score reader', permissions: ['read'] }), 201); secrets.add(key.secret);
       const read = async () => ok(await request('GET', '/v1/sender-score', key.secret));
       // Self-hosted (no standing): simulated mail never counts; computed on read for display only, with no limit.
-      await insert(500, { simulated: true }); await insert(99);
+      await insert(500, { simulated: true }); await insert(E - 1);
       // Review of #115: live mail to the SES mailbox simulator earned a grade and a higher limit. It is not evidence.
       await insert(300, { to: 'success+score@simulator.amazonses.com' });
       const warm = await read();
-      assert.deepEqual([warm.state, warm.emails.firstEmails, warm.needed, warm.score, warm.grade, warm.history, warm.limit, warm.standing], ['warmup', 99, 100, null, null, [], null, null]);
+      assert.deepEqual([warm.state, warm.emails.firstEmails, warm.needed, warm.score, warm.grade, warm.history, warm.limit, warm.standing], ['warmup', E - 1, E, null, null, [], null, null]);
       assert.deepEqual(warm.factors.filter((f: Json) => f.source === 'neutral').map((f: Json) => f.key), ['content', 'hygiene', 'auth', 'engagement']);
       await insert(1);
       const shown = await read();
       assert.deepEqual([shown.state, shown.score, shown.grade, shown.raw], ['graded', 100, 'A+', 100]);
-      // Hosted: the job stores the standing. 100 accepted recipients are the evaluation, graded once their results are in;
-      // here 20 of them have none yet.
+      // Hosted: the job stores the standing. 500 accepted recipients are the evaluation, graded once their results are in;
+      // here a fifth of them have none yet.
       await db.query(`UPDATE sending_emails SET status='sent',event_outcomes=1 WHERE id IN (SELECT id FROM sending_emails WHERE workspace_id=$1 AND status='delivered' AND NOT simulated
-        AND to_addresses->>0='recipient@example.com' ORDER BY id LIMIT 20)`, [wid]);
+        AND to_addresses->>0='recipient@example.com' ORDER BY id LIMIT $2)`, [wid, E / 5]);
       Object.assign(runtime.config, { multiTenant: true });
       await db.query("INSERT INTO provider_connections(id,workspace_id,kind,region,state) VALUES ($1,$1,'shared',$2,'ready')", [wid, REGION]);
       const now = new Date();
       await refreshStanding(runtime, { only: wid, now });
       const calibrating = await read();
-      assert.deepEqual([calibrating.state, calibrating.score, calibrating.limit.daily, calibrating.limit.source, calibrating.standing.step, calibrating.emails.firstEmails], ['warmup', null, 100, 'calibrating', 'ok', 100]);
+      assert.deepEqual([calibrating.state, calibrating.score, calibrating.limit.daily, calibrating.limit.source, calibrating.standing.step, calibrating.emails.firstEmails], ['warmup', null, E, 'calibrating', 'ok', E]);
       assert.ok(Date.parse(calibrating.calibratedAt) <= Date.now());
-      // 80 of the 100 have a result: still the evaluation. An hour after the 100th it is graded on what is in.
+      // 80% of them have a result: still the evaluation. An hour after the 500th it is graded on what is in.
       await refreshStanding(runtime, { only: wid, now: new Date(now.getTime() + 30 * 60_000) });
-      assert.deepEqual([(await read()).state, (await read()).limit.daily], ['warmup', 100]);
+      assert.deepEqual([(await read()).state, (await read()).limit.daily], ['warmup', E]);
       await refreshStanding(runtime, { only: wid, now: new Date(now.getTime() + 61 * 60_000) });
       const graded = await read();
       assert.deepEqual([graded.state, graded.score, graded.grade, graded.limit.daily, graded.limit.unlimited, graded.limit.source, graded.limit.next], ['graded', 100, 'A+', null, true, 'score', null]);
@@ -14340,10 +14341,10 @@ describe('Dashboard API capabilities', () => {
       const read = async () => ok(await request('GET', '/v1/sender-score', key.secret));
       const factor = (view: Json, k: string) => view.factors.find((f: Json) => f.key === k);
       const measured = (view: Json) => view.factors.filter((f: Json) => f.source === 'measured').map((f: Json) => [f.key, f.weight]);
-      // A transactional sender: 200 delivered, 2 hard bounces, 5 refused for a suppressed address. Complaints (30) and
-      // bounces (15) are measured; with list quality at 0 for weight 15 this was 72.3, under good standing.
-      await insert(200); await insert(2, { status: 'bounced', outcomes: 5 }); await insert(5, { status: 'suppressed', outcomes: 0 });
-      const expected = m.round((30 * 100 + 15 * 100 * (0.05 - 2 / 202) / 0.045) / 45);
+      // A transactional sender past its evaluation: 600 delivered, 6 hard bounces, 15 refused for a suppressed address.
+      // Complaints (30) and bounces (15) are measured; with list quality at 0 for weight 15 this was 72.3, under good standing.
+      await insert(600); await insert(6, { status: 'bounced', outcomes: 5 }); await insert(15, { status: 'suppressed', outcomes: 0 });
+      const expected = m.round((30 * 100 + 15 * 100 * (0.05 - 6 / 606) / 0.045) / 45);
       const shown = await read();
       assert.deepEqual([factor(shown, 'hygiene').source, factor(shown, 'hygiene').value, measured(shown), shown.raw, expected], ['neutral', null, [['complaints', 30], ['bounces', 15]], 96.4, 96.4], 'Read on display (no stored standing).');
       // Hosted: the standing job stores the same factors and score, in good standing.
@@ -14376,17 +14377,17 @@ describe('Dashboard API capabilities', () => {
       await db.query("DELETE FROM sender_score_daily WHERE workspace_id=$1 AND day<(now() AT TIME ZONE 'UTC')::date", [wid]);
 
       // A campaign sender: 100 first sends delivered, 4 hard-bounced and 6 refused for a suppressed address. List quality is
-      // (4 + 6) ÷ (104 + 6), as before; the 5 transactional suppressions stay out of it.
+      // (4 + 6) ÷ (104 + 6), as before; the 15 transactional suppressions stay out of it.
       await insert(100, { campaign: true }); await insert(4, { status: 'bounced', outcomes: 5, campaign: true }); await insert(6, { status: 'suppressed', outcomes: 0, campaign: true });
       await db.query('UPDATE sender_standing SET evidence_at=NULL WHERE workspace_id=$1', [wid]);
       await refreshStanding(runtime, { only: wid });
       const campaign = await read();
-      assert.deepEqual([factor(campaign, 'hygiene').source, factor(campaign, 'hygiene').value, factor(campaign, 'hygiene').score, factor(campaign, 'bounces').value], ['measured', m.round(10 / 110, 6), 11.4, m.round(2 / 202, 6)]);
+      assert.deepEqual([factor(campaign, 'hygiene').source, factor(campaign, 'hygiene').value, factor(campaign, 'hygiene').score, factor(campaign, 'bounces').value], ['measured', m.round(10 / 110, 6), 11.4, m.round(6 / 606, 6)]);
       assert.deepEqual(measured(campaign), [['complaints', 30], ['bounces', 15], ['hygiene', 15], ['engagement', 10]]);
     });
   });
 
-  test('sender score: a new sender\'s first 100 recipients are its evaluation; after it a good sender grows from 1,000 an hour and sends past 10,000 a day, a bad one is capped, a queued burst does not raise a freeze, bouncing caps and recovery lifts it, and the pace bounds every minute', async t => {
+  test('sender score: a new sender\'s first 500 recipients are its evaluation; after it a good sender grows from 1,000 an hour and sends past 10,000 a day, a bad one is capped, a queued burst does not raise a freeze, bouncing caps and recovery lifts it, and the pace bounds every minute', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const { refreshStanding } = await import('./src/standing.js');
       const wid = runtime.config.workspaceId, pool = '111122223333', domain = 'standing.example', from = `sender@${domain}`;
@@ -14407,15 +14408,15 @@ describe('Dashboard API capabilities', () => {
       const regrade = async (at = new Date(), workspace = wid) => { await db.query('UPDATE sender_standing SET evidence_at=NULL WHERE workspace_id=$1', [workspace]); await refreshStanding(runtime, { only: workspace, now: at }); };
       const usedDay = async () => Number((await db.query(`SELECT a->>'used' AS used FROM hosted_allowance_read($1,1,0,100,1000,10000,10) h(a)`, [wid])).rows[0].used);
 
-      // The evaluation: the first 100 real recipients, and no more until their delivery results are in.
-      await sent(100, 'sent', 1);
+      // The evaluation: the first 500 real recipients, and no more until their delivery results are in.
+      await sent(500, 'sent', 1);
       await regrade();
       let view = await score();
-      assert.deepEqual([view.state, view.limit.daily, view.limit.unlimited, view.limit.source, view.emails.firstEmails], ['warmup', 100, false, 'calibrating', 100]);
-      // It says when the first grade comes at the latest: an hour after the 100th was counted, plus a job run.
+      assert.deepEqual([view.state, view.limit.daily, view.limit.unlimited, view.limit.source, view.emails.firstEmails], ['warmup', 500, false, 'calibrating', 500]);
+      // It says when the first grade comes at the latest: an hour after the 500th was counted, plus a job run.
       assert.equal(Date.parse(view.gradedBy) - Date.parse(view.calibratedAt), 70 * 60_000);
-      assert.match(error(await send(), 429, 'SEND_LIMIT_REACHED').message, /100 recipients per rolling 24 hours/);
-      // Their results land: graded on those 100 alone, and a good sender has no daily limit.
+      assert.match(error(await send(), 429, 'SEND_LIMIT_REACHED').message, /500 recipients per rolling 24 hours/);
+      // Their results land: graded on those 500 alone, and a good sender has no daily limit.
       await db.query(`UPDATE sending_emails SET status='delivered',event_outcomes=3 WHERE workspace_id=$1 AND status='sent'`, [wid]);
       await regrade();
       view = await score();
@@ -14431,10 +14432,10 @@ describe('Dashboard API capabilities', () => {
       assert.equal(await pace(), 500);
       await db.query(`INSERT INTO provider_account_limits(aws_account_id,region,refresh_after,checked_at,max_send_rate,max_24_hour_send,sent_last_24_hours) VALUES ($1,$2,now(),now(),200,1000000,0)`, [pool, REGION]);
       assert.deepEqual([await pace(), (await score()).limit.perMinute], [3000, 3000]);
-      // And for 72 clean hours after the evaluation, the growth pace: 1,000 recipients in any rolling hour, charged by the
-      // dispatch claim for every stream, so the clean first 100 cannot be followed by 3,000 a minute at once.
+      // And for 24 clean hours after the evaluation, the growth pace: 1,000 recipients in any rolling hour, charged by the
+      // dispatch claim for every stream, so the clean first 500 cannot be followed by 3,000 a minute at once.
       view = await score();
-      assert.deepEqual([view.limit.growth.hourly, view.limit.growth.used, Date.parse(view.limit.growth.until) > Date.now() + 71 * 3600_000], [1000, 0, true]);
+      assert.deepEqual([view.limit.growth.hourly, view.limit.growth.used, Date.parse(view.limit.growth.until) > Date.now() + 23 * 3600_000], [1000, 0, true]);
       const burst = async (checks: [string, number][]) => (await db.query(`SELECT ${checks.map((_, i) => `hosted_burst_ok($1,$${i * 2 + 2},$${i * 2 + 3}) AS c${i}`).join(',')}`, [wid, ...checks.flat()])).rows[0];
       await db.query('DELETE FROM hosted_burst_windows WHERE workspace_id=$1', [wid]);
       assert.deepEqual(await burst([['a.example', 600], ['b.example', 400], ['c.example', 1]]), { c0: true, c1: true, c2: false }, 'One statement, one minute: the hour is used up, the minute is not.');
@@ -14460,11 +14461,11 @@ describe('Dashboard API capabilities', () => {
       await db.query('DELETE FROM hosted_burst_windows WHERE workspace_id=$1', [wid]);
       assert.deepEqual(await burst([['a.example', 1501], ['a.example', 1500], ['b.example', 1500], ['c.example', 1]]), { c0: false, c1: true, c2: true, c3: false });
 
-      // A new sender whose first 100 bring complaints is capped by the score its evaluation found.
+      // A new sender whose first 500 bring complaints is capped by the score its evaluation found.
       const other = wid + '-new';
       await db.query('INSERT INTO workspaces(id,slug,name) VALUES($1,$1,$1)', [other]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [other, REGION, pool]);
-      await sent(92, 'delivered', 3, other); await sent(8, 'complained', 11, other);
+      await sent(460, 'delivered', 3, other); await sent(40, 'complained', 11, other);
       await regrade(new Date(), other);
       const { rows: [bad] } = await db.query(`SELECT s.phase,s.score::float AS score,s.daily_limit,(SELECT a->>'cap' FROM hosted_allowance_read($1,1,0,100,1000,10000,10) h(a)) AS cap FROM sender_standing s WHERE s.workspace_id=$1`, [other]);
       assert.deepEqual([bad.phase, bad.daily_limit, bad.cap], ['graded', 100, '100']); assert.ok(bad.score < 65, String(bad.score));
@@ -14525,14 +14526,14 @@ describe('Dashboard API capabilities', () => {
         INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated,created_at) SELECT 'ev-'||id,$2,id,'accepted',false,CASE WHEN $7 THEN now() ELSE created_at END FROM e`,
         [unique('history-'), wid, REGION, n, o.to ?? 'distinct', o.bounceEvery ?? 0, o.acceptedNow ?? false]);
       const evaluation = (wid: string) => db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,event_outcomes,created_at)
-        SELECT $1||n,$2,$3,'fixture','sender@growth.example',jsonb_build_array('e'||n||'@example.net'),'[]','[]','Evaluation','{}',false,'delivered','p-'||$1||n,3,least(now(),date_trunc('day',now(),'UTC')+make_interval(secs=>n)) FROM generate_series(1,100) n`, [unique('evaluation-'), wid, REGION]);
+        SELECT $1||n,$2,$3,'fixture','sender@growth.example',jsonb_build_array('e'||n||'@example.net'),'[]','[]','Evaluation','{}',false,'delivered','p-'||$1||n,3,least(now(),date_trunc('day',now(),'UTC')+make_interval(secs=>n)) FROM generate_series(1,500) n`, [unique('evaluation-'), wid, REGION]);
       const audit = async (wid: string) => (await db.query(`SELECT (SELECT json_agg(json_build_object('kind',kind,'actor',actor->>'kind','growth',details->'growth')) FROM standing_events WHERE workspace_id=$1 AND details ? 'growth') AS events,
         (SELECT json_agg(action) FROM hosted_operator_audit WHERE workspace_id=$1) AS audit`, [wid])).rows[0];
       const growth = async (wid: string) => { await refreshStanding(runtime, { only: wid });
-        return (await db.query('SELECT phase,growth_cap AS cap,growth_until>now()+interval \'48 hours\' AS long FROM sender_standing WHERE workspace_id=$1', [wid])).rows[0]; };
+        return (await db.query('SELECT phase,growth_cap AS cap,growth_until>now()+interval \'23 hours\' AS long FROM sender_standing WHERE workspace_id=$1', [wid])).rows[0]; };
       const paced = { phase: 'graded', cap: 1000, long: true }, skipped = { phase: 'graded', cap: null, long: null };
 
-      // A new sender: its evaluation's 100 clean recipients, then the pace, which the next runs keep, with nothing to audit.
+      // A new sender: its evaluation's 500 clean recipients, then the pace, which the next runs keep, with nothing to audit.
       const fresh = await workspace('fresh');
       await evaluation(fresh);
       assert.deepEqual(await growth(fresh), paced);
@@ -14544,36 +14545,111 @@ describe('Dashboard API capabilities', () => {
       assert.deepEqual(await growth(overridden), skipped);
       assert.deepEqual(await growth(overridden), skipped);
       assert.deepEqual(await audit(overridden), { events: [{ kind: 'limit', actor: 'system', growth: { change: 'skipped', reason: 'OPERATOR_OVERRIDE', before: null, cutoff: null, history: null } }], audit: ['growth-skipped'] });
-      // Still evaluating when the pace shipped, with 450 clean recipients SES accepted over the two weeks before: no pace.
+      // Still evaluating when the pace shipped, with 850 clean recipients SES accepted over the two weeks before: no pace.
       const known = await workspace('known', legacy);
-      await history(known, 450);
+      await history(known, 850);
       assert.deepEqual(await growth(known), skipped);
       const [event] = (await audit(known)).events;
-      assert.deepEqual([event.growth.reason, event.growth.history.recipients, event.growth.history.days >= 3, event.growth.history.domains], ['TRACK_RECORD', 350, true, 5], 'The first 100, the seeds, never count.');
-      // Not a track record, so the pace stays: 350 (250 after the seeds), mail admitted before the pace but accepted only
+      assert.deepEqual([event.growth.reason, event.growth.history.recipients, event.growth.history.days >= 3, event.growth.history.domains], ['TRACK_RECORD', 350, true, 5], 'The first 500, the seeds, never count.');
+      // Not a track record, so the pace stays: 750 (250 after the seeds), mail admitted before the pace but accepted only
       // after it (a backlog, or a late grader), the same history for a workspace created later, one recipient, one
       // recipient domain, or 3% hard bounces.
       for (const [name, setup] of [
-        ['seeds', (wid: string) => history(wid, 350)],
-        ['backlog', (wid: string) => history(wid, 450, { acceptedNow: true })],
-        ['one-address', (wid: string) => history(wid, 450, { to: 'same' })],
-        ['one-domain', (wid: string) => history(wid, 450, { to: 'oneDomain' })],
-        ['bounces', (wid: string) => history(wid, 450, { bounceEvery: 33 })],
+        ['seeds', (wid: string) => history(wid, 750)],
+        ['backlog', (wid: string) => history(wid, 850, { acceptedNow: true })],
+        ['one-address', (wid: string) => history(wid, 850, { to: 'same' })],
+        ['one-domain', (wid: string) => history(wid, 850, { to: 'oneDomain' })],
+        ['bounces', (wid: string) => history(wid, 850, { bounceEvery: 33 })],
       ] as const) {
         const wid = await workspace(name, name === 'backlog' ? "phase='calibrating',first_recipients=60,history_before=now()-interval '1 hour'" : legacy);
         await setup(wid);
         assert.deepEqual([name, await growth(wid)], [name, paced]);
       }
       const late = await workspace('late', "phase='calibrating',first_recipients=60");
-      await history(late, 450);
+      await history(late, 850);
       assert.deepEqual(await growth(late), paced, 'A workspace created after the pace shipped has no track record before it: a delayed grade is still an evaluation.');
       // Graded and put on the pace with that history: the next run clears it, once, on the timeline and in the operator audit.
       const cleared = await workspace('cleared', "phase='graded',first_recipients=100,calibrated_at=now()-interval '12 hours',history_before=now()-interval '12 hours',growth_until=now()+interval '60 hours',growth_cap=1000,growth_hour=date_trunc('hour',now())-interval '2 hours'");
-      await history(cleared, 450);
+      await history(cleared, 850);
       assert.deepEqual(await growth(cleared), skipped);
       assert.deepEqual(await growth(cleared), skipped);
       const trail = await audit(cleared);
       assert.deepEqual([trail.events.length, trail.events[0].actor, trail.events[0].growth.change, trail.events[0].growth.before.cap, trail.events[0].growth.history.recipients, trail.audit], [1, 'system', 'cleared', 1000, 350, ['growth-cleared']]);
+    });
+  });
+
+  test('sender score: a new workspace\'s day one: 500 transactional recipients are admitted, and the 501st waits for the evaluation as the 101st did', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const { refreshStanding } = await import('./src/standing.js');
+      const wid = runtime.config.workspaceId, pool = '111122223333', domain = 'launch.example', from = `signin@${domain}`;
+      Object.assign(runtime.config, { multiTenant: true, liveEnabled: true, aws: { accessKeyId: 'fixture-platform', secretAccessKey: 'fixture-only' } });
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:feedback`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, pool]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`, [domain, wid]);
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'Launch', permissions: ['read', 'send'] }), 201).secret; secrets.add(key);
+      const signIn = (n: number) => mail({ from, to: `user-${n}@example.net`, subject: `Your sign-in code ${n}` });
+      // Launch day: sign-in emails to 500 new users, in batches of 100 distinct emails (identical ones would be bulk).
+      for (let b = 0; b < 5; b++) ok(await request('POST', '/v1/emails/batch', key, { emails: Array.from({ length: 100 }, (_, i) => signIn(b * 100 + i)) }), 202);
+      const limit = ok(await request('GET', '/v1/me', key)).connection.sendingLimit;
+      assert.deepEqual([limit.cap, limit.used], [500, 500]);
+      // The 501st is held as the 101st was: a retryable 429 until the evaluation's results are in.
+      const held = error(await request('POST', '/v1/emails/send', key, signIn(500)), 429, 'SEND_LIMIT_REACHED');
+      assert.match(held.message, /^Hosted sending is limited to 500 recipients per rolling 24 hours; 500 are used\./);
+      assert.equal(held.retryable, true);
+      // The standing job's first run stores the same limit.
+      await refreshStanding(runtime, { only: wid });
+      assert.deepEqual((await db.query('SELECT phase,daily_limit FROM sender_standing WHERE workspace_id=$1', [wid])).rows[0], { phase: 'calibrating', daily_limit: 500 });
+      error(await request('POST', '/v1/emails/send', key, signIn(500)), 429, 'SEND_LIMIT_REACHED');
+    });
+  });
+
+  test('sender score: the evaluation may be all marketing: a new workspace\'s first campaign goes out and ten identical notices in a batch are admitted; a score\'s limit keeps its transactional reserve', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request, run, jobs }) => {
+      const { SESv2Client, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
+      const { runDispatcher, initialGate } = await import('./src/dispatcher.js');
+      const { refreshStanding } = await import('./src/standing.js');
+      const wid = runtime.config.workspaceId, acct = '112223330041', domain = 'first-newsletter.invalid', from = `news@${domain}`;
+      Object.assign(runtime.config, { multiTenant: true, liveEnabled: true, aws: { accessKeyId: 'fixture', secretAccessKey: 'fixture' } });
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,$2,'ready',$3)`, [REGION, acct, `arn:aws:sns:${REGION}:${acct}:fixture`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,region,aws_account_id,tenant_state) VALUES($1,$1,'shared','ready',$2,$3,'ready')`, [wid, REGION, acct]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES($1,$2,$2,'verified')`, [domain, wid]);
+      const sent: string[] = [];
+      t.mock.method(SESv2Client.prototype, 'send', async (cmd: any) => {
+        if (cmd instanceof GetAccountCommand) return { SendingEnabled: true, SendQuota: { MaxSendRate: 10000, Max24HourSend: 1000000, SentLast24Hours: 0 } };
+        sent.push(cmd.input.Destination.ToAddresses[0]); return { MessageId: randomUUID() };
+      });
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'Evaluation reader', permissions: ['read'] }), 201).secret; secrets.add(key);
+      const score = async () => ok(await request('GET', '/v1/sender-score', key));
+      const allowance = async () => (await db.query('SELECT a FROM hosted_allowance_read($1,1,1,$2,NULL,NULL,10) h(a)', [wid, runtime.config.hostedSendCaps.firstWeek])).rows[0].a;
+      // Brand new, no standing yet: all of the evaluation's 500 may be marketing. The reserve, max(100, 10%) of the limit,
+      // took all of the evaluation's 100 before, so marketing had none and a newsletter sender could never finish it.
+      assert.deepEqual([(await allowance()).cap, (await allowance()).marketingDayCap], [500, 500]);
+      // Earlier newsletters reached 450 recipients two hours ago (real mail SES accepted, charged to that hour).
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,event_outcomes,created_at)
+        SELECT $1||n,$2,$3,'fixture',$4,jsonb_build_array('earlier-'||n||'@example.net'),'[]','[]','Earlier news','{"kind":"marketing"}',false,'delivered','p-'||$1||n,3,now()-interval '2 hours'
+        FROM generate_series(1,450) n`, [unique('earlier-'), wid, REGION, from]);
+      // Ten identical sign-in notices in one batch are bulk evidence, charged as marketing: admitted (marketing had none).
+      ok(await local('POST', '/v1/emails/batch', { emails: Array.from({ length: 10 }, (_, i) => ({ from, to: `member-${i}@example.net`, subject: 'Your sign-in link', text: 'Sign in with the link in this email.' })) }), 202);
+      // The first campaign, to 40 subscribers, takes the evaluation to its 500th recipient: released and sent at once.
+      const list = ok(await local('POST', '/v1/lists', { name: unique('first-newsletter') }), 201);
+      await db.query(`WITH a AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_'||md5($2||n),$1,'reader-'||n||'@example.net','subscribed' FROM generate_series(1,40) n RETURNING id)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM a`, [wid, list.id]);
+      const c = ok(await local('POST', '/v1/campaigns', { name: 'First newsletter', from, subject: 'Our first newsletter', html: '<p>Hello from the team. Here is what we shipped this month, and what comes next.</p>', audience: { listId: list.id } }), 201);
+      ok(await local('POST', `/v1/campaigns/${c.id}/send`, { revision: c.revision }), 202);
+      for (let i = 0; i < 10 && (await jobs('campaign.run')).some(j => j.status === 'pending'); i++) await run('campaign.run');
+      const released = ok(await local('GET', `/v1/campaigns/${c.id}`));
+      assert.deepEqual([released.delivery.expanded, released.delivery.waiting], [40, null]);
+      assert.equal((await runDispatcher(runtime, { region: REGION, accountId: acct, batchSize: 100, lanes: 1, gate: initialGate() })).sent, 50, 'The newsletter and the ten notices.');
+      assert.equal(sent.filter(to => to.startsWith('reader-')).length, 40);
+      assert.deepEqual([(await allowance()).used, (await allowance()).marketingDayCap], [500, 500]);
+      // Every one of them was marketing, and the evaluation is over: SES accepted 500 and 90% have results, so the job
+      // grades it at once. No daily limit; the growth pace starts.
+      await refreshStanding(runtime, { only: wid });
+      const view = await score();
+      assert.deepEqual([view.state, view.limit.daily, view.limit.transactionalReserve, view.standing.probation], ['graded', null, 0, 'growth']);
+      // A limit the score sets keeps its reserve: 500 at a score of 72 leaves marketing 400.
+      await db.query(`UPDATE sender_standing SET phase='graded',score=72,target=72,quality=72,band_limit=500,daily_limit=500 WHERE workspace_id=$1`, [wid]);
+      assert.deepEqual([(await allowance()).marketingDayCap, (await score()).limit.transactionalReserve], [400, 100]);
     });
   });
 
@@ -20727,15 +20803,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const send = (to = 'real@example.net') => request('POST','/v1/emails/send',key,mail({from,to}));
       const simulator = 'success@simulator.amazonses.com';
       const refused = error(await send(),429,'SEND_LIMIT_REACHED').message;
-      assert.match(refused, /100 recipients per rolling 24 hours; [\d,]+ are used\./); assert.doesNotMatch(refused, /The limit rises/);
+      assert.match(refused, /500 recipients per rolling 24 hours; [\d,]+ are used\./); assert.doesNotMatch(refused, /The limit rises/);
       // The same limit is visible before a send hits it.
       const limit = ok(await request('GET','/v1/me',key)).connection.sendingLimit;
-      assert.equal(limit.cap,100); assert.ok(limit.used>=100); assert.equal(limit.nextCap,null); assert.equal(limit.nextCapAt,null);
+      assert.equal(limit.cap,500); assert.ok(limit.used>=500); assert.equal(limit.nextCap,null); assert.equal(limit.nextCapAt,null);
       // Plan & usage shows the same limit, the step it is on (the evaluation), the price and the free allowance per direction.
       const usage = ok(await request('GET','/v1/usage',key));
       // Billing launches enforced (migration 249); the workspace-wide switch is billing_config.
       assert.deepEqual([usage.billing, usage.pricing, usage.simulated], [{ enabled: true, enforcement: 'enforce' }, { currency: 'USD', perThousand: 0.2, freeEmails: 5000, freeSentEmails: 5000, freeReceivedEmails: 5000, freeStorageBytes: 1000000000 }, false]);
-      assert.deepEqual([usage.daily.cap, usage.daily.used, usage.daily.step, usage.steps.map((step: Json) => step.cap)], [100, limit.used, 0, [100]], 'The evaluation is the only step: after it, good standing has no daily limit.');
+      assert.deepEqual([usage.daily.cap, usage.daily.used, usage.daily.step, usage.steps.map((step: Json) => step.cap)], [500, limit.used, 0, [500]], 'The evaluation is the only step: after it, good standing has no daily limit.');
       assert.ok(usage.month.sent >= physical && usage.month.received === 0 && usage.month.from.endsWith('-01T00:00:00.000Z'));
       // PR92 P2: received volume counts unrouted and spam mail, so only credentials that may read every received message
       // see it. Members and read-only keys get null; otherwise polling it around a probe tells which addresses take mail.
@@ -20764,7 +20840,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.ok(Date.parse(capped.resetAt) > Date.now()+23*3600000, 'Crossing into week two in an hour cannot reset a fixed override.');
       error(await send(simulator),429,'SEND_LIMIT_REACHED');
       await limits('default','default');
-      assert.match(error(await send(),429,'SEND_LIMIT_REACHED').message, /100 recipients/);
+      assert.match(error(await send(),429,'SEND_LIMIT_REACHED').message, /500 recipients/);
       error(await send(simulator),429,'SEND_LIMIT_REACHED');
       assert.deepEqual(changes.map(({workspaceId,old,new:next}) => [workspaceId,old,next]), [
         [wid,{sendCap:null,pendingCap:null},{sendCap:11001,pendingCap:10001}], [wid,{sendCap:11001,pendingCap:10001},{sendCap:null,pendingCap:null}],
@@ -20971,7 +21047,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const { runDispatcher } = await import('./src/dispatcher.js');
       const { createMailbox } = await import('./src/mailbox-store.js');
       const wid = runtime.config.workspaceId, pool = '111122223333', domain = 'guard.example', from = `sender@${domain}`;
-      Object.assign(runtime.config, { multiTenant:true, liveEnabled:true, aws:{ accessKeyId:'fixture-platform', secretAccessKey:'fixture-only' } });
+      // A limit of 100 for a workspace the standing job has not seen (the evaluation's is 500) keeps the counts below small.
+      Object.assign(runtime.config, { multiTenant:true, liveEnabled:true, aws:{ accessKeyId:'fixture-platform', secretAccessKey:'fixture-only' }, hostedSendCaps:{ firstWeek:100 } });
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [REGION,pool,`arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[wid,REGION,pool]);
       await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`,[domain,wid]);
@@ -23463,16 +23540,17 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await db.query('INSERT INTO workspaces(id,slug,name,quota_sponsor) VALUES($1,$1,$1,$2)',[sibling,sponsor]);
       for(const id of [wid,sibling]) await db.query("INSERT INTO provider_connections(id,workspace_id,kind,state,region,tenant_state,created_at) VALUES($1,$1,'shared','ready',$2,'ready',now()-interval '30 days')",[id,REGION]);
       const limit=async(marketing=0)=>{
-        const {rows:[{admitted,shown}]}=await db.query(`SELECT (SELECT allowance FROM hosted_allowance($1,1,$2,100,1000,10000,10)) AS admitted,
-          (SELECT allowance FROM hosted_allowance_read($1,1,$2,100,1000,10000,10)) AS shown`,[wid,marketing]);
+        const {rows:[{admitted,shown}]}=await db.query(`SELECT (SELECT allowance FROM hosted_allowance($1,1,$2,$3,1000,10000,10)) AS admitted,
+          (SELECT allowance FROM hosted_allowance_read($1,1,$2,$3,1000,10000,10)) AS shown`,[wid,marketing,runtime.config.hostedSendCaps.firstWeek]);
         assert.deepEqual(shown,admitted); return admitted;
       };
       await db.query("INSERT INTO hosted_usage_hourly VALUES($1,date_trunc('hour',now()),89)",[sibling]);
-      // A workspace the standing job has not seen yet is calibrating: 100 a day, all of it the transactional reserve.
-      assert.deepEqual([(await limit()).used,(await limit()).cap,(await limit()).marketingDayCap,(await limit()).step],[89,100,0,'ok']);
+      // A workspace the standing job has not seen yet is in its evaluation: 500 a day, and no transactional reserve, so
+      // marketing may use all of it (the reserve took all of the old evaluation's 100).
+      assert.deepEqual([(await limit()).used,(await limit()).cap,(await limit()).marketingDayCap,(await limit()).step],[89,500,500,'ok']);
       // Age and history no longer raise it; the stored score limit does.
       await db.query("INSERT INTO hosted_health_hourly VALUES($1,'-infinity',date_trunc('hour',now())-interval '2 days',1000,0,0)",[wid]);
-      assert.equal((await limit()).cap,100);
+      assert.equal((await limit()).cap,500);
       await gradedSender(db,wid,2000);
       assert.deepEqual([(await limit()).cap,(await limit()).marketingDayCap],[2000,1800]);
       await db.query('UPDATE sender_standing SET daily_limit=200 WHERE workspace_id=$1',[wid]);
