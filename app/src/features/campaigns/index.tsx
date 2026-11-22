@@ -119,7 +119,7 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
   const acceptedRef = useRef(initial)
   const [form, setForm] = useState<CampaignInput>(() => initial ? campaignInput(initial) : { regionId: fallbackRegion, name: '', subject: '', previewText: '', fromName: newsletter?.fromName ?? '', fromEmail: newsletter?.from ?? '', replyTo: [], listId: newsletter?.id ?? '', segmentId: null, html: '', defaults: {} })
   // A campaign to a newsletter's list is its issue: the page says so and goes back to the newsletter, and the sidebar marks it.
-  const issueOf = useNewsletterOf(form.listId)
+  const issueOf = useNewsletterOf(form.listId), thing = issueOf ? 'issue' : 'campaign'
   useShowNewsletter(issueOf?.id ?? null)
   const [templatesOpen, setTemplatesOpen] = useState(false)
   // Body placeholders are known from the last saved body; subject and inbox preview are read as they are typed.
@@ -258,7 +258,7 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
   const syncLabel = autosaving || preparing || saveMutation.isPending ? 'Saving…' : remote ? 'Update available' : autosavePaused ? 'Save failed' : error ? 'Check draft' : unavailable ? 'Unavailable' : readOnly ? 'Read only' : sync.connection === 'offline' ? 'Sync interrupted' : dirty ? form.name.trim() ? 'Unsaved changes' : 'Name required' : accepted ? 'Saved' : 'New draft'
   const syncActionable = Boolean(remote || error || autosavePaused || sync.connection === 'offline')
   const syncState = error || autosavePaused || sync.connection === 'offline' ? 'offline' : remote || dirty || autosaving ? 'changed' : sync.connection
-  const syncTitle = error || sync.error?.message || (remote ? 'A newer version is available.' : autosavePaused ? 'Autosave paused. Retry saving your changes.' : readOnly ? 'This campaign is no longer editable.' : 'Changes save automatically and sync with MCP and the API.')
+  const syncTitle = error || sync.error?.message || (remote ? 'A newer version is available.' : autosavePaused ? 'Autosave paused. Retry saving your changes.' : readOnly ? `This ${thing} is no longer editable.` : 'Changes save automatically and sync with MCP and the API.')
   function syncAction() { if (remote) setReviewUpdate(true); else if (autosavePaused) void save('edit'); else if (error) toast(error, 'error'); else sync.checkNow() }
   function reportError(value: string) { setError(value); toast(value, 'error') }
   async function save(next: 'auto' | 'edit' | 'review' | 'test') {
@@ -268,7 +268,7 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
     const continuing = next === 'review' || next === 'test'
     const input = creation.current?.input ?? formRef.current
     const version = creation.current?.version ?? editVersion.current
-    const validation = !input.name.trim() ? 'Enter a campaign name.'
+    const validation = !input.name.trim() ? issueOf ? 'Enter an issue name.' : 'Enter a campaign name.'
       : continuing && !input.subject.trim() ? 'Enter a subject before continuing.'
       : (continuing || input.fromEmail.trim()) && !emailIsValid(input.fromEmail.trim()) ? invalidSender
       : !multiTenant && (!input.regionId.trim() || input.regionId.trim().length > 40) ? 'Enter a region identifier of 1–40 characters.'
@@ -337,7 +337,7 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
   }
   // In-app links ask before dropping edits autosave hasn't stored: a draft without a name, a failed save, or typing
   // inside autosave's 800 ms wait. Closing or reloading the tab gets the browser's prompt.
-  const leaveGuard = useLeaveGuard(dirty || autosavePaused, { what: 'this campaign', save: async () => { await save('edit'); return !dirtyRef.current && !creation.current } })
+  const leaveGuard = useLeaveGuard(dirty || autosavePaused, { what: `this ${thing}`, save: async () => { await save('edit'); return !dirtyRef.current && !creation.current } })
   return <div className="campaign-compose-page">
     <PageHeader title={issueOf ? accepted ? 'Edit issue' : 'New issue' : accepted ? 'Edit campaign' : 'Create campaign'} backTo={issueOf ? newsletterPath(issueOf.id) : '/campaigns'} actions={<>
       {!phone && <div className="campaign-sync-status" role="status" data-state={syncState} data-actionable={syncActionable || undefined} title={syncTitle}>
@@ -354,17 +354,17 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
           ]} />
         </> : <>
           {!accepted && <Button variant="ghost" disabled={pending} onClick={() => setTemplatesOpen(true)}>Use a template</Button>}
-          <Button variant="ghost" disabled={!accepted || saveDisabled || pending || autosavePaused} title={!accepted ? 'Name the campaign first' : undefined} onClick={() => save('test')}>Send test</Button>
+          <Button variant="ghost" disabled={!accepted || saveDisabled || pending || autosavePaused} title={!accepted ? `Name the ${thing} first` : undefined} onClick={() => save('test')}>Send test</Button>
           <Button variant="primary" disabled={saveDisabled || pending || autosavePaused} loading={preparing} onClick={() => save('review')} data-analytics="campaigns/review">Continue to review</Button>
         </>}
       </div>
     </>} />
     {options.isError && <ErrorState error={options.error} onRetry={() => options.refetch()} />}
-    <section className="campaign-compose-workspace" aria-label="Campaign composer">
+    <section className="campaign-compose-workspace" aria-label={issueOf ? 'Issue composer' : 'Campaign composer'}>
       <div className="campaign-compose-scroll">
         <div className="campaign-compose-sheet">
           <div className="campaign-compose-metadata">
-            <div className="campaign-compose-row"><label htmlFor="campaign-name">Name</label><Input id="campaign-name" placeholder="Campaign name" value={form.name} onChange={event => change('name', event.target.value)} required disabled={controlsDisabled} /></div>
+            <div className="campaign-compose-row"><label htmlFor="campaign-name">Name</label><Input id="campaign-name" placeholder={issueOf ? 'Issue name' : 'Campaign name'} value={form.name} onChange={event => change('name', event.target.value)} required disabled={controlsDisabled} /></div>
             <div className="campaign-compose-row"><label htmlFor="campaign-from-email">From</label><CampaignSenderInput key={generation} name={form.fromName} email={form.fromEmail} domains={choices.domains.map(domain => domain.name)} disabled={controlsDisabled || options.isPending} onChange={({name, email}) => {const domain = email.split('@')[1]?.toLowerCase(); const supports = (parent: string) => domain === parent || domain?.endsWith(`.${parent}`); const match = choices.domains.find(item => supports(item.name) && item.regionId === formRef.current.regionId) ?? choices.domains.find(item => supports(item.name)); if (name !== formRef.current.fromName || email !== formRef.current.fromEmail || (match && match.regionId !== formRef.current.regionId)) updateForm({...formRef.current, fromName: name, fromEmail: email, ...(match ? {regionId: match.regionId} : {})}); markDirty()}} /></div>
             <div className="campaign-compose-row"><label htmlFor="campaign-reply-to">Reply to</label><Input id="campaign-reply-to" type="text" inputMode="email" autoCapitalize="none" spellCheck={false} placeholder="reply@example.com" value={replyToText} aria-invalid={Boolean(replyToValidation) || undefined} aria-describedby={replyToValidation ? 'campaign-reply-to-error' : undefined} onChange={event => { const value = event.target.value; setReplyToText(value); updateForm({...formRef.current, replyTo: replyToAddresses(value)}); markDirty() }} disabled={controlsDisabled} /></div>
             {replyToValidation && <div id="campaign-reply-to-error" className="campaign-compose-feedback ui-field__error" role="alert">{replyToValidation}</div>}
@@ -390,11 +390,11 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
           </section>}
           {/* The saved draft is checked: autosave (800 ms after typing stops) is the debounce, and the score then covers what
               Nightmail sends: the rendered layout, the unsubscribe link it adds and the audience size. */}
-          <div className="email-insight campaign-insight"><EmailInsight source={accepted ? { kind: 'campaign', id: accepted.id, revision: accepted.revision ?? 0 } : null} pending={dirty || pending} warnBelow={LOW_SENDABILITY} placeholder="Name the campaign to check" /></div>
+          <div className="email-insight campaign-insight"><EmailInsight source={accepted ? { kind: 'campaign', id: accepted.id, revision: accepted.revision ?? 0 } : null} pending={dirty || pending} warnBelow={LOW_SENDABILITY} placeholder={`Name the ${thing} to check`} /></div>
         </div>
       </div>
     </section>
-    <ConfirmDialog open={reviewUpdate} onOpenChange={value => {if (!loadingLatest) setReviewUpdate(value)}} title="Load the latest campaign?" description="This campaign changed elsewhere. Loading the latest version discards your unsaved changes." confirmLabel="Load latest" onConfirm={loadLatest} pending={loadingLatest} />
+    <ConfirmDialog open={reviewUpdate} onOpenChange={value => {if (!loadingLatest) setReviewUpdate(value)}} title={`Load the latest ${thing}?`} description={`This ${thing} changed elsewhere. Loading the latest version discards your unsaved changes.`} confirmLabel="Load latest" onConfirm={loadLatest} pending={loadingLatest} />
     {accepted && testOpen && <TestEmailDialog campaign={accepted} open={testOpen} onOpenChange={setTestOpen} />}
     {templatesOpen && <TemplatePickerDialog onOpenChange={setTemplatesOpen} />}
     {leaveGuard}
