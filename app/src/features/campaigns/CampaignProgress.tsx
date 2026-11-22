@@ -2,7 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useApiMutation, useWorkspaceAccess } from '../../data/context'
 import { campaignResumable, errorText, type Campaign, type CampaignPacingInput } from '../../data/types'
-import { Alert, Button, Checkbox, Input } from '../../components/ui'
+import { Button, Checkbox, Input } from '../../components/ui'
 import { date, number, relativeTime, time } from '../../lib/format'
 import { isDuplicateSubmission } from '../../lib/single-flight'
 
@@ -126,12 +126,12 @@ export function CampaignPacing({ campaign }: { campaign: Campaign }) {
   const nextSlice = perDay && pacing?.nextWindowAt && (active || paused) ? ` · next slice ${relativeTime(pacing.nextWindowAt)}` : ''
   const rateShare = pacing?.rateShare != null && pacing.rateShare < 1 ? ` · up to ${ratePercent(pacing.rateShare)}% of send rate` : ''
   return <div className="campaign-pacing">
-    {paused && <Alert tone={campaign.status === 'failed' ? 'danger' : 'warning'} title={campaign.status === 'failed' ? 'Sending failed' : 'Sending paused'}>
-      <div className="campaign-pacing-banner">
+    {paused && <div className="campaign-scheduled" data-tone={campaign.status === 'failed' ? 'danger' : 'warning'} role="status">
+      <div className="campaign-pacing-banner"><strong>{campaign.status === 'failed' ? 'Sending failed' : 'Sending paused'}</strong>
         <span>{campaign.status === 'failed' ? 'No new recipients are being released. Resume to continue where it stopped, or cancel.' : `${expansion.pauseReason?.message ?? 'No new recipients are being released.'} Queued emails still send.`}{expansion.pausedAt && <span className="muted" title={atUtc(expansion.pausedAt)}> Paused {relativeTime(expansion.pausedAt)}.</span>}</span>
         {canAdminister && <Button variant="primary" size="sm" loading={resume.isPending} disabled={busy} onClick={() => void run(() => resume.mutateAsync(campaign.id))}>Resume</Button>}
       </div>
-    </Alert>}
+    </div>}
     <div className="campaign-summary-line">
       <span>{perDay ? <>{released} · {number(perDay)}/day{nextSlice && <span title={atUtc(pacing!.nextWindowAt!)}>{nextSlice}</span>}</> : released}{rateShare}</span>
       {active && canAdminister && <Button variant="secondary" size="sm" loading={pause.isPending} disabled={busy} onClick={() => void run(() => pause.mutateAsync(campaign.id))}>Pause</Button>}
@@ -149,6 +149,6 @@ export function CampaignPacing({ campaign }: { campaign: Campaign }) {
       {/* Hosted always pauses on high bounces or complaints. */}
       {!multiTenant && <Checkbox label="Auto-pause on high bounces or complaints" checked={autoPause} onCheckedChange={value => { setAutoPause(value); setError('') }} disabled={busy} />}
     </form>}
-    {error && <Alert tone="danger">{error}</Alert>}
+    {error && <p className="campaign-note" data-tone="danger" role="alert">{error}</p>}
   </div>
 }
