@@ -313,3 +313,7 @@ button.review-stage__head { cursor: pointer; }
 .campaign-scheduled[data-tone='danger'] strong { color: var(--color-danger); }
 .campaign-scheduled[data-tone='warning'] strong { color: var(--color-warning); }
 .campaign-review__body > .campaign-scheduled { margin-bottom: var(--space-8); }
+/* Phone cards: a figure a campaign doesn't have yet (a draft's recipients, an unsent campaign's delivery) leaves no gap or stray dot. */
+.campaigns-table .ui-card__segment:empty { display: none; }
+.campaigns-table .ui-card__line > .ui-card__segment::before { content: none; }
+.campaigns-table .ui-card__line > .ui-card__segment:not(:empty) ~ .ui-card__segment:not(:empty)::before { content: '·'; }
