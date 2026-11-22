@@ -1,7 +1,7 @@
 import { sql } from 'drizzle-orm';
 import { log, type DbExecutor, type Runtime } from './core.js';
 
-// The sign-up limit (hosted, migration 403): how many accounts may sign up on their own, set by an operator at
+// The sign-up limit (hosted, migration 404): how many accounts may sign up on their own, set by an operator at
 // Operator → Sign-ups (src/operator.ts). A place is taken by an account that signed up (nightmail_signups, one row per
 // account, written in the transaction that creates it) or held for a waiting address an operator's raise let in
 // (nightmail_waitlist.let_in_at). The sign-in gate, the operator's count and a raise all read `places` below, so the
@@ -51,8 +51,9 @@ export async function setLimit(db: DbExecutor, limit: number) {
 }
 
 /**
- * The addresses a raise just let in, once it has committed: each may now sign in. The email that tells them so comes
- * with the customer notices (emails/customer-notices) and is sent from here; until then nothing is sent.
+ * The addresses a raise just let in, once it has committed: each may now sign in. The email that tells them so is the
+ * customer notices' waitlistAdmitted(runtime, db, email) (src/account-notices.ts, emails/customer-notices, once per
+ * address), called here for each; until it lands nothing is sent.
  */
 export async function placesOpened(_runtime: Runtime, emails: string[]) {
   if (emails.length) log('info', { code: 'SIGNUP_PLACES_HELD', count: emails.length });
