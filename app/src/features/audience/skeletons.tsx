@@ -75,7 +75,7 @@ export function AudienceRouteSkeleton({ kind, isNew = false }: { kind: 'contacts
   if (kind === 'segment') return <LoadingRegion className="audience-page" label="Loading segment"><PageHeader title={isNew ? 'Create segment' : 'Edit segment'} backTo="/audience/segments" actions={<ControlSkeleton width={121} />} /><SegmentEditorBodySkeleton /></LoadingRegion>
   const contacts = kind === 'contacts'
   return <LoadingRegion className="audience-page" label={`Loading ${kind}`}><AudienceHeader actions={<>{contacts && <ControlSkeleton width={120} />}<ControlSkeleton width={contacts ? 98 : kind === "lists" ? 85 : 121} /></>} />
-    <div className="data-toolbar"><div className="cluster">{contacts ? <><SearchField className="search-box--list" aria-label="Search contacts" placeholder="Search email or name" disabled /><Select className="audience-status-filter" aria-label="Filter by consent" value="" onValueChange={() => {}} options={[{ value: '', label: 'All contacts' }]} disabled /><ControlSkeleton width={220} /></> : <ControlSkeleton width={320} />}</div></div>
+    <div className="data-toolbar"><div className="cluster">{contacts ? <><SearchField className="search-box--list" aria-label="Search contacts" placeholder="Search email or name" disabled /><Select className="audience-status-filter" aria-label="Filter by consent" value="" onValueChange={() => {}} options={[{ value: '', label: 'All contacts' }]} disabled /><div className="audience-list-filter"><ControlSkeleton /></div></> : <ControlSkeleton width={320} />}</div></div>
     <TableSkeleton columns={contacts ? contactColumns : kind === 'lists' ? listColumns : segmentColumns} rows={contacts ? 8 : 5} pagination />
   </LoadingRegion>
 }
