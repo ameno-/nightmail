@@ -928,6 +928,9 @@ export async function seed(fx) {
   // addresses in, which fills the limit of 11; four more wait.
   await db.query(`INSERT INTO nightmail_signups(user_id,via,at) SELECT 'user_'||k,'open',now()-interval '1 day' FROM unnest($1::text[]) k`, [['nia', 'ona', 'kai', 'mara', 'lou', 'sol', 'bea', 'cy', 'gil']]);
   await db.query("UPDATE nightmail_waitlist SET let_in_at=now()-interval '1 day' WHERE email IN ('kwame.mensah@example.net','ines.alvarez@example.net')");
+  // Each was emailed that it can sign in (account-notices.ts waitlistAdmitted): the Waitlist tab's Let in column says so.
+  await db.query(`INSERT INTO account_notices(id,workspace_id,kind,dedupe_key,data,status,sent_at) SELECT 'ant_cls_'||md5(e),'ws_northwind','waitlist_admitted','waitlist:'||e,jsonb_build_object('email',e),'sent',now()-interval '1 day'
+    FROM unnest(ARRAY['kwame.mensah@example.net','ines.alvarez@example.net']) e`);
   await db.query('UPDATE nightmail_signup_limit SET places=11');
   const desk = await kai.api('POST', '/v1/inbound/addresses', { address: 'support@driftwood.example', key: 'support', displayName: 'Support' }, 201);
   await kai.api('POST', '/v1/endpoints', { type: 'slack', name: 'support', url: 'https://hooks.slack.com/services/T0SYNTH/B0SYNTH/driftwoodfixture0a1' }, 201);

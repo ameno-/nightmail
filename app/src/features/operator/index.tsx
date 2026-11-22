@@ -99,7 +99,13 @@ function SignupLimitForm({ places, idempotencyKey, onClose }: { places: SignupPl
   const hint = error ? '' : limit < places.limit ? 'Lowering it removes no one.' : letIn ? `Lets in ${number(letIn)} from the waitlist, oldest first.` : ''
   const mutation = useMutation({
     mutationFn: () => operatorApi.setSignupLimit(limit, { idempotencyKey }),
-    onSuccess: () => { toast('Limit saved', 'success'); void client.invalidateQueries({ queryKey: ['operator'] }); onClose() },
+    // Everyone held is emailed once; one a failure missed is said here, and saving again emails it.
+    onSuccess: saved => {
+      const missed = saved.notEmailed ?? 0
+      toast(missed ? `Limit saved. ${number(missed)} held ${missed === 1 ? 'address isn’t' : 'addresses aren’t'} emailed yet: save again to retry.`
+        : saved.emailed ? `Limit saved. ${number(saved.emailed)} emailed that they can sign in.` : 'Limit saved', missed ? 'error' : 'success')
+      void client.invalidateQueries({ queryKey: ['operator'] }); onClose()
+    },
   })
   function submit(event: FormEvent) { event.preventDefault(); setTried(true); if (!error) mutation.mutate() }
   return <form className="op-dialog-fields" onSubmit={submit} noValidate>
@@ -173,13 +179,16 @@ function Actions() {
 }
 
 // The waitlist: verified sign-ins nothing admitted yet, to email when Nightmail opens. Addresses are masked like every
-// other; the CSV export has them in full.
+// other; the CSV export has them in full. Let in: a raise of the sign-up limit holds a place for it, and emails it.
+const emailedText = { sent: 'emailed', queued: 'email queued', failed: 'email failed' } as const
+const letInText = (row: WaitlistEntry) => `${when(row.letInAt)} · ${row.emailed ? emailedText[row.emailed] : 'not emailed'}`
 const waitlistColumns: Column<WaitlistEntry>[] = [
   { ...def(waitlistColumnDefs, 'email'), render: row => <span className="op-email"><PrivateAddress value={row.email} /></span> },
   { ...def(waitlistColumnDefs, 'name'), render: row => <span className="op-cell" title={row.name ?? undefined}>{row.name || '—'}</span>, cardRender: row => row.name || 'No name' },
   { ...def(waitlistColumnDefs, 'first'), render: row => <At value={row.firstAt} />, cardRender: row => `first ${when(row.firstAt)}` },
   { ...def(waitlistColumnDefs, 'last'), render: row => <At value={row.lastAt} /> },
   { ...def(waitlistColumnDefs, 'attempts'), render: row => number(row.attempts), cardRender: row => `${number(row.attempts)} ${row.attempts === 1 ? 'attempt' : 'attempts'}` },
+  { ...def(waitlistColumnDefs, 'letIn'), render: row => row.letInAt ? <span className="op-cell" title={letInText(row)}>{letInText(row)}</span> : <span className="muted">—</span>, cardRender: row => row.letInAt ? `Let in ${letInText(row)}` : 'Waiting' },
 ]
 function Waitlist() {
   const toast = useToast()
@@ -200,7 +209,7 @@ function Waitlist() {
         const page = await operatorApi.waitlist({ q: q || undefined, cursor, limit: 1000 })
         all.push(...page.items); cursor = page.nextCursor ?? undefined
       }
-      downloadCsv('nightmail-waitlist.csv', [['Email', 'Name', 'First attempt (UTC)', 'Last attempt (UTC)', 'Attempts'], ...all.map(row => [row.email, row.name ?? '', isoTime(row.firstAt), isoTime(row.lastAt), row.attempts])])
+      downloadCsv('nightmail-waitlist.csv', [['Email', 'Name', 'First attempt (UTC)', 'Last attempt (UTC)', 'Attempts', 'Let in (UTC)', 'Emailed'], ...all.map(row => [row.email, row.name ?? '', isoTime(row.firstAt), isoTime(row.lastAt), row.attempts, row.letInAt ? isoTime(row.letInAt) : '', row.emailed ?? ''])])
     } catch (error) { toast(errorText(error, 'Couldn’t export the waitlist.'), 'error') }
     finally { setExporting(false) }
   }

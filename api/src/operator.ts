@@ -8,6 +8,7 @@ import { loadStanding, scoreView, StandingSchema } from './sender-score.js';
 import { clearProbe, queueCampaignRun, resumeCampaign } from './states.js';
 import { productName } from './brand.js';
 import { placesOpened, readPlaces, setLimit } from './signups.js';
+import { waitlistNoticeStatus } from './account-notices.js';
 
 // The operator API: Anomaly staff with a platform role act on any Hosted workspace through one audited path. The
 // /operator dashboard area, Ryan's support platform (phase 2) and scripts are its clients. Roles live in
@@ -60,7 +61,9 @@ const Action = z.object({ at: z.string(), workspaceId: z.string().describe("'pla
   requestId: z.string().nullable(), before: z.unknown().nullable(), after: z.unknown().nullable(), details: z.unknown() }).openapi('OperatorAction');
 const TimelineItem = z.object({ at: z.string(), kind: z.enum(['standing', 'limit', 'quarantine', 'release', 'tenant', 'operator', 'score', 'audit', 'bounces', 'rejection']),
   title: z.string(), detail: z.unknown() }).openapi('OperatorTimelineItem');
-const WaitlistEntry = z.object({ email: z.string(), name: z.string().nullable(), attempts: z.number().int(), firstAt: z.string(), lastAt: z.string() }).openapi('OperatorWaitlistEntry');
+const WaitlistEntry = z.object({ email: z.string(), name: z.string().nullable(), attempts: z.number().int(), firstAt: z.string(), lastAt: z.string(),
+  letInAt: z.string().nullable().describe('When a raise of the sign-up limit held a place for this address; null while it waits.'),
+  emailed: z.enum(['queued', 'sent', 'failed']).nullable().describe('The email saying it can sign in: queued, sent or failed; null when none was sent.') }).openapi('OperatorWaitlistEntry');
 const SignupPlaces = z.object({ limit: z.number().int().describe('How many accounts may sign up on their own; 0 lets nobody in this way.'), signedUp: z.number().int().describe('Accounts that signed up on their own, each counted once.'),
   held: z.number().int().describe('Places a raise held for waiting addresses whose person has not signed in yet.'), waiting: z.number().int().describe('Addresses on the waitlist without a place.'),
   open: z.number().int().describe('Places left for whoever signs in next: limit less signed up and held, at least 0.') }).openapi('OperatorSignupPlaces');
@@ -331,7 +334,8 @@ export function registerOperator(app: App) {
     await operatorActor(c, 'operator:read');
     const q = c.req.valid('query'), after = readCursor(q.cursor), search = q.q ? `%${q.q.replace(/[\\%_]/g, m => '\\' + m)}%` : null;
     const match = search ? sql`(email ILIKE ${search} OR name ILIKE ${search})` : sql`true`;
-    const { rows } = await c.env.db.execute<z.infer<typeof WaitlistEntry>>(sql`SELECT email,name,attempts,${isoAt(sql`first_at`)} AS "firstAt",${isoAt(sql`last_at`)} AS "lastAt"
+    const { rows } = await c.env.db.execute<z.infer<typeof WaitlistEntry>>(sql`SELECT email,name,attempts,${isoAt(sql`first_at`)} AS "firstAt",${isoAt(sql`last_at`)} AS "lastAt",
+        ${isoAt(sql`let_in_at`)} AS "letInAt",CASE ${waitlistNoticeStatus(sql`email`)} WHEN 'sent' THEN 'sent' WHEN 'pending' THEN 'queued' WHEN 'sending' THEN 'queued' WHEN 'failed' THEN 'failed' END AS emailed
       FROM nightmail_waitlist WHERE ${match} ${after ? sql`AND (last_at,email)<(${after.at}::timestamptz,${after.key})` : sql``} ORDER BY last_at DESC,email DESC LIMIT ${q.limit + 1}`);
     const { rows: [count] } = await c.env.db.execute<{ total: number }>(sql`SELECT count(*)::int AS total FROM nightmail_waitlist WHERE ${match}`);
     const page = rows.slice(0, q.limit), last = page.at(-1);
@@ -347,18 +351,17 @@ export function registerOperator(app: App) {
   });
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'put', path: '/v1/operator/signups', operationId: 'operatorSetSignupLimit',
     request: { headers: z.object({ 'Idempotency-Key': Mutation['Idempotency-Key'] }), body: json(z.object({ limit: z.number().int().min(0).max(1_000_000), reason: Reason.optional(), ticketRef: TicketRef }).strict()) },
-    responses: { 200: response(SignupPlaces.extend({ letIn: z.number().int().describe('Waiting addresses this change let in, oldest first.') })), ...errors } }), async c => {
+    responses: { 200: response(SignupPlaces.extend({ letIn: z.number().int().describe('Waiting addresses this change let in, oldest first.'),
+      emailed: z.number().int().describe('Held addresses emailed now that they can sign in: those this change let in, and any an earlier save missed.'),
+      notEmailed: z.number().int().nullable().describe('Held addresses still not emailed (save again to retry); null when it could not be checked.') })), ...errors } }), async c => {
     const body = c.req.valid('json'), operator = await operatorActor(c, 'operator');
-    // Set only when this request made the change: a replayed Idempotency-Key lets nobody in twice.
-    let letIn: string[] = [];
     const result = await mutate(c, operator, 'platform', body, async tx => {
       const change = await setLimit(tx, body.limit);
-      letIn = change.letIn;
       return { result: { ...change.after, letIn: change.letIn.length },
         audit: { action: 'operator-set-signup-limit', before: { limit: change.before.limit }, after: { limit: body.limit, letIn: change.letIn.length }, reason: body.reason, ticketRef: body.ticketRef } };
     });
-    await placesOpened(c.env, letIn);
-    return c.json(result, 200);
+    // After the commit: an email that fails or is slow can't undo the change. Each address is emailed once, ever.
+    return c.json({ ...result, ...await placesOpened(c.env) }, 200);
   });
   // Every workspace, newest first, with what judging sign-ups needs: when it joined, its owner, a verified domain, what
   // it sent and its standing. Paged by the API's cursor.

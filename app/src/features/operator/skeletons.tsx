@@ -66,13 +66,15 @@ export const timelineColumnDefs: SkeletonColumn[] = [
   { key: 'detail', label: 'Detail', card: 'line' },
   { key: 'at', label: 'When', width: 160, card: 'line' },
 ]
-// The waitlist (?view=waitlist): a phone's card shows the address, its latest attempt, the name and the count.
+// The waitlist (?view=waitlist): a phone's card shows the address, its latest attempt, the name and the count, then
+// whether a raise of the sign-up limit let it in and its email went.
 export const waitlistColumnDefs: SkeletonColumn[] = [
-  { key: 'email', label: 'Email', width: '34%', card: 'title' },
+  { key: 'email', label: 'Email', width: '28%', card: 'title' },
   { key: 'name', label: 'Name', card: 'line' },
   { key: 'first', label: 'First attempt', width: 176, card: 'inline' },
   { key: 'last', label: 'Last attempt', width: 176, card: 'aside' },
   { key: 'attempts', label: 'Attempts', width: 96, align: 'right', card: 'inline' },
+  { key: 'letIn', label: 'Let in', width: 216, card: 'line' },
 ]
 
 // Sign-ups (?view=signups): the limit and what fills it, then every workspace, newest first. A phone's card shows the

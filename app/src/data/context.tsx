@@ -125,10 +125,14 @@ function waitlistAddress() {
   const cookie = document.cookie.split(';').map(part => part.trim()).find(part => /^(?:__Host-)?nightmail\.waitlist=/.test(part))
   try { return cookie ? decodeURIComponent(cookie.slice(cookie.indexOf('=') + 1)) || null : null } catch { return null }
 }
+// ?place=ready: a place is held for the address, or open, but GitHub or a password proves no mailbox, so the API says how
+// to take it instead of waiting.
 function WaitlistPage({ busy, error, onSwitch }: { busy: boolean; error: unknown; onSwitch: () => void }) {
-  const [email] = useState(waitlistAddress)
+  const [email] = useState(waitlistAddress), [ready] = useState(() => new URLSearchParams(window.location.search).get('place') === 'ready')
+  const who = email ? <bdi data-own-address="">{email}</bdi> : null
   return <SignedOutPage title={`${productName} isn’t open to the public yet`}>
-    <p>We’ll email {email ? <bdi data-own-address="">{email}</bdi> : 'you'} when it opens.</p>
+    {ready ? <p>There’s a place for {who ?? 'you'}: sign in with an emailed link or Google to take it.</p>
+      : <p>We’ll email {who ?? 'you'} when it opens.</p>}
     {error ? <Alert tone="danger">{errorText(error)}</Alert> : null}
     <Button variant="primary" loading={busy} onClick={onSwitch} data-analytics="sign-in/waitlist-switch">Use a different account</Button>
     <nav className="signed-out__links" aria-label={productName}><Link to="/">Homepage</Link><Link to="/docs">Docs</Link></nav>
@@ -283,7 +287,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   }
   async function redirectAdd() {
     const callback = new URL(window.location.pathname, window.location.origin)
-    callback.search = window.location.search; callback.searchParams.delete('auth')
+    callback.search = window.location.search; callback.searchParams.delete('auth'); callback.searchParams.delete('place')
     try { const url = await accountApi.signIn(callback.href, true); expectAccount(); window.location.assign(url) }
     catch (error) { toast(error instanceof ApiError && error.code === 'ACCOUNT_LIMIT' ? authMessages.account_limit : errorText(error, 'Couldn’t add an account.'), 'error') }
   }
@@ -348,7 +352,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     callback.pathname = path === '/' || !isKnownPath(path) ? '/overview' : path
     callback.search = window.location.search
     callback.hash = window.location.hash
-    callback.searchParams.delete('auth')
+    callback.searchParams.delete('auth'); callback.searchParams.delete('place')
     // Analytics: this signed-out page's session rides in the return URL to the sign-in callback, which links it to the
     // account and removes it before the browser opens the page (docs/analytics.md).
     const session = analytics().signInSession()

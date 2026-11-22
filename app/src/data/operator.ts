@@ -35,7 +35,7 @@ export interface SignupPlaces { limit: number; signedUp: number; held: number; w
 /** One workspace on the Sign-ups tab. standing is pause while its sending is paused, and null without hosted sending. */
 export interface WorkspaceSummary { id: string; name: string; createdAt: string; owner: string | null; domain: string | null; domains: number; sent: number; standing: StandingStep | null }
 /** One address on the waitlist: a verified sign-in nothing admitted yet (api/src/account-login.ts). */
-export interface WaitlistEntry { email: string; name: string | null; attempts: number; firstAt: string; lastAt: string }
+export interface WaitlistEntry { email: string; name: string | null; attempts: number; firstAt: string; lastAt: string; /** When a raise of the sign-up limit held a place for it. */ letInAt: string | null; /** The email saying it can sign in. */ emailed: 'queued' | 'sent' | 'failed' | null }
 /** Abuse monitoring (/v1/operator/abuse/*): accounts and workspaces that share signals, scored for a person to review. */
 export type AbuseBand = 'low' | 'watch' | 'review' | 'high'
 export interface AbuseReason { code: string; points: number; count?: number }
@@ -88,7 +88,7 @@ export const operatorApi = {
     return { items: page.data, nextCursor: page.nextCursor, total: page.total }
   },
   signups: (signal?: AbortSignal) => request<SignupPlaces>(`${base}/signups`, { signal }),
-  setSignupLimit: (limit: number, guard: OperatorGuard) => request<SignupPlaces & { letIn: number }>(`${base}/signups`, { method: 'PUT', body: { limit }, idempotencyKey: guard.idempotencyKey }),
+  setSignupLimit: (limit: number, guard: OperatorGuard) => request<SignupPlaces & { letIn: number; emailed: number; notEmailed: number | null }>(`${base}/signups`, { method: 'PUT', body: { limit }, idempotencyKey: guard.idempotencyKey }),
   allWorkspaces: async (input: { cursor?: string }, signal?: AbortSignal) => {
     const page = await request<{ data: WorkspaceSummary[]; nextCursor: string | null }>(`${base}/signups/workspaces${query({ cursor: input.cursor, limit: 100 })}`, { signal })
     return { items: page.data, nextCursor: page.nextCursor }

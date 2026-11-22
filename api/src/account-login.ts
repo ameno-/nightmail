@@ -9,14 +9,15 @@ import { clientIpHeader, productName, requestHeader } from './brand.js';
 import { METHOD_ACR } from './config.js';
 import { ANALYTICS_SESSION_PARAM } from './analytics-events.js';
 import { requestNetwork, signInSignals, type RequestNetwork } from './abuse.js';
-import { recordSignup, takePlace } from './signups.js';
+import { placeReady, recordSignup, takePlace } from './signups.js';
 
 const verifiedEmail = z.email().max(320);
 const loginFailed = () => new ApiError(403, 'SIGN_IN_DENIED', 'This account cannot sign in.');
 class AuthenticationMethodRequired extends Error {}
-class NotAdmitted extends Error { constructor(readonly reason: string) { super(reason); } }
+/** placeReady: a place it could take by signing in with an emailed link or Google (signups.ts placeReady). */
+class NotAdmitted extends Error { constructor(readonly reason: string, readonly placeReady = false) { super(reason); } }
 /** A refused hosted sign-in whose verified address is now on the waitlist: the refusal screen names it. */
-class Waitlisted extends Error { constructor(readonly email: string) { super('waitlist'); } }
+class Waitlisted extends Error { constructor(readonly email: string, readonly placeReady = false) { super('waitlist'); } }
 
 function loginIssue(error: unknown, requiredAcr?: string[]) {
   const issuerError = error instanceof oidc.AuthorizationResponseError || error instanceof oidc.ResponseBodyError ? error.error : undefined;
@@ -218,7 +219,10 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
         // Signing up on its own (signups.ts): hosted, without an invitation link, while a place is held for the mailbox or
         // open. At the limit it is refused as before, and joins the waitlist.
         const signup = runtime.config.multiTenant && !staff && !invitation && mailbox ? await takePlace(db, mailbox) : null;
-        if (!staff && !invited && !selfHosted && !signup) throw new NotAdmitted(invitation ? 'invitation' : 'not_approved');
+        // GitHub or a password proves no mailbox: when a place is held for its address or open, the refusal says to sign
+        // in with an emailed link or Google instead.
+        if (!staff && !invited && !selfHosted && !signup) throw new NotAdmitted(invitation ? 'invitation' : 'not_approved',
+          runtime.config.multiTenant && !staff && !invitation && !mailbox && !!emailAtLogin && await placeReady(db, emailAtLogin));
         userId = crypto.randomUUID();
         const name = typeof claims.name === 'string' && claims.name.trim() ? claims.name.slice(0,200) : address ?? `${productName} user`;
         if (emailAtLogin) await db.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(lower(${emailAtLogin}),80324))`);
@@ -265,7 +269,7 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
     // Without a verified address, or when the write fails, nothing is promised.
     if (error.reason === 'not_approved' && runtime.config.multiTenant && emailAtLogin) {
       const name = [claims.name, profile.name].find((value): value is string => typeof value === 'string' && value.trim() !== '')?.trim().slice(0, 200) ?? null;
-      if (await joinWaitlist(runtime, emailAtLogin, name).catch(() => false)) throw new Waitlisted(emailAtLogin.toLowerCase());
+      if (await joinWaitlist(runtime, emailAtLogin, name).catch(() => false)) throw new Waitlisted(emailAtLogin.toLowerCase(), error.placeReady);
     }
     throw loginFailed();
   }
@@ -457,6 +461,7 @@ export async function accountBrowserRoute(c: Ctx) {
       // where a visitor's sign-in starts, with what went wrong.
       const back = started && new URL(started).pathname === POPUP_PATH ? new URL(started) : new URL(`${origin}/`);
       back.searchParams.set('auth', issue?.reason ?? 'error');
+      if (error instanceof Waitlisted && error.placeReady) back.searchParams.set('place', 'ready');
       return c.redirect(back.href,303);
     }
   }

@@ -51,10 +51,33 @@ export async function setLimit(db: DbExecutor, limit: number) {
 }
 
 /**
- * The addresses a raise just let in, once it has committed: each may now sign in. The email that tells them so is the
- * customer notices' waitlistAdmitted(runtime, db, email) (src/account-notices.ts, emails/customer-notices, once per
- * address), called here for each; until it lands nothing is sent.
+ * Whether a sign-in that proved no mailbox (GitHub, a password) could take a place by proving it: one is held for its
+ * address, or one is open. Read without the lock: it only decides what the refusal says.
  */
-export async function placesOpened(_runtime: Runtime, emails: string[]) {
-  if (emails.length) log('info', { code: 'SIGNUP_PLACES_HELD', count: emails.length });
+export async function placeReady(db: DbExecutor, address: string) {
+  if ((await db.execute(sql`SELECT FROM nightmail_waitlist WHERE email=${address.toLowerCase()} AND let_in_at IS NOT NULL`)).rowCount) return true;
+  return (await readPlaces(db)).open > 0;
+}
+
+/**
+ * Emails every held address not yet told that it can sign in (account-notices.ts waitlistAdmitted, one email per
+ * address ever). Called after a change of the limit commits, never inside it, so an email can't undo or hold up a
+ * raise, and it never throws. A second raise tells only the addresses it newly let in; saving the limit again tells
+ * any a failure missed. emailed: queued now. notEmailed: held addresses still without one (null when unknown).
+ */
+export async function placesOpened(runtime: Runtime): Promise<{ emailed: number; notEmailed: number | null }> {
+  let emailed = 0;
+  try {
+    const { waitlistAdmitted, waitlistNoticeStatus } = await import('./account-notices.js');
+    const untold = sql`FROM nightmail_waitlist w WHERE w.let_in_at IS NOT NULL AND ${waitlistNoticeStatus(sql`w.email`)} IS NULL`;
+    const { rows } = await runtime.db.execute<{ email: string }>(sql`SELECT w.email ${untold} ORDER BY w.let_in_at,w.first_at,w.email`);
+    for (const { email } of rows) if (await waitlistAdmitted(runtime, runtime.db, email)) emailed++;
+    const { rows: [left] } = await runtime.db.execute<{ n: number }>(sql`SELECT count(*)::int AS n ${untold}`);
+    if (emailed) log('info', { code: 'SIGNUP_PLACES_EMAILED', count: emailed });
+    if (left!.n) log('warn', { code: 'SIGNUP_PLACES_NOT_EMAILED', count: left!.n });
+    return { emailed, notEmailed: left!.n };
+  } catch (error) {
+    log('warn', { code: 'SIGNUP_PLACES_NOT_EMAILED', emailed, error: error instanceof Error ? error.message.slice(0, 200) : 'unknown' });
+    return { emailed, notEmailed: null };
+  }
 }
