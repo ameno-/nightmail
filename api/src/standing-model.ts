@@ -85,7 +85,7 @@ export const nextBand = (score: number) => [...LIMIT_BANDS].reverse().find(b => 
 /**
  * Per minute for a daily limit (null: the uncapped floor; the API reports the pool-based figure); marketing per hour
  * max(25, limit ÷ 4); the transactional reserve max(100, 10%), none during the evaluation: it lifts within about an hour
- * of its last recipient, and a sender of newsletters alone must be able to finish it (hosted_allowance_read, migration 398).
+ * of its last recipient, and a sender of newsletters alone must be able to finish it (hosted_allowance_read, migration 400).
  */
 export const burstFor = (limit: number | null) => limit === null ? PACE.uncappedFloor : Math.min(PACE.ceiling, Math.max(PACE.floor, Math.floor(limit / PACE.perDay)));
 export const marketingHourFor = (limit: number) => Math.max(25, Math.floor(limit / 4));
