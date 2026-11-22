@@ -4,7 +4,7 @@ import { useApiDef, useApiQuery } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { AudienceList, Contact } from '../../data/types'
 import { DataTable, Input, SkeletonText, StatusBadge } from '../../components/ui'
-import { contactColumns, memberColumns } from './skeletons'
+import { contactColumns, memberColumnsFor } from './skeletons'
 import { date as formatDate, number } from '../../lib/format'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { AddressText } from '../../components/AddressText'
@@ -15,7 +15,7 @@ import { consentTitle } from './consent'
 export const pageSize = 8
 export const date = (value: string | null) => value ? formatDate(value) : 'Never'
 export { number }
-export { ConsentLegend, consentTitle, evidenceRequired, noUnknown, statusOptions } from './consent'
+export { consentTitle, evidenceRequired, noUnknown, statusOptions } from './consent'
 /** A contact name is free text: addresses in it are masked (AddressText), so it is a tooltip only when it holds none. */
 export const nameTitle = (name?: string) => name && !addressParts(name).some(part => part.address) ? name : undefined
 export function useAudienceLists(search = '', cursor?: string) {
@@ -23,6 +23,9 @@ export function useAudienceLists(search = '', cursor?: string) {
 }
 /** A quoted AudienceQL string literal. */
 export const aqlString = (value: string) => `'${value.replaceAll("'", "''")}'`
+// A contact's suppression reason as the API records it, in plain words.
+const suppressionWords: Record<string, string> = { hard_bounce: 'Bounced', soft_bounce: 'Bounced', transient: 'Bounced', complaint: 'Marked as spam', email_validation: 'Blocked' }
+export const suppressionText = (reason?: string) => reason ? suppressionWords[reason] ?? 'Blocked' : undefined
 
 // One control to find and choose a list by name: type to search, arrows and Enter to choose. The first option is
 // `emptyLabel` (all lists, or no list). Lists are never shown by ID.
@@ -53,7 +56,7 @@ export function ListPicker({ value, onChange, emptyLabel, id, label, disabled = 
   return <div className={className ? `audience-list-picker ${className}` : 'audience-list-picker'} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) { setOpen(false); setSearch('') } }}>
     <Input id={id} role="combobox" title={open ? undefined : name || undefined} aria-label={label} aria-describedby={describedBy} aria-expanded={open} aria-controls={open ? listbox : undefined} aria-autocomplete="list" aria-activedescendant={open ? `${listbox}-${activeIndex}` : undefined} autoComplete="off" spellCheck={false} disabled={disabled}
       placeholder={open ? 'Search lists by name' : value && !name ? (selected.isError ? 'List not found' : 'Loading list…') : emptyLabel} value={open ? search : name ?? ''}
-      onFocus={show} onClick={show} onChange={event => { setSearch(event.target.value); setActive(event.target.value.trim() ? 1 : 0); setOpen(true) }}
+      onClick={show} onChange={event => { setSearch(event.target.value); setActive(event.target.value.trim() ? 1 : 0); setOpen(true) }}
       onKeyDown={event => {
         if (event.nativeEvent.isComposing) return
         if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); if (!open) show(); else move(event.key === 'ArrowDown' ? 1 : -1) }
@@ -68,26 +71,28 @@ export function ListPicker({ value, onChange, emptyLabel, id, label, disabled = 
   </div>
 }
 
-// A contact's lists by name, with a count for any not loaded: "Customers, Beta +1".
+// A contact's lists as the first list's name and a count of the rest, "Customers +2", so no name is cut midway; the
+// hover title names them all.
+const listNames = (row: Contact, lists: AudienceList[]) => row.listIds.map(id => lists.find(list => list.id === id)?.name).filter((name): name is string => Boolean(name))
 function listsText(row: Contact, lists: AudienceList[]) {
-  const names = row.listIds.map(id => lists.find(list => list.id === id)?.name).filter(Boolean).join(', ')
-  const unnamed = row.listIds.filter(id => !lists.find(list => list.id === id)?.name).length
-  return names ? unnamed ? `${names} +${unnamed}` : names : unnamed ? `${unnamed} list${unnamed === 1 ? '' : 's'}` : '—'
+  const count = row.listIds.length, first = listNames(row, lists)[0]
+  return !count ? '—' : first ? count > 1 ? `${first} +${count - 1}` : first : `${count} list${count === 1 ? '' : 's'}`
 }
-export function ContactTable({ contacts, lists = [], members = false, loading = false, minRows = pageSize, listsLoading = false, tableRef, empty }: { contacts: Contact[]; lists?: AudienceList[]; members?: boolean; loading?: boolean; minRows?: number; listsLoading?: boolean; tableRef?: (node: HTMLDivElement | null) => void; empty?: ReactNode }) {
-  const columns = members ? memberColumns : contactColumns
+const listsTitle = (row: Contact, lists: AudienceList[]) => listNames(row, lists).join(', ') || undefined
+export function ContactTable({ contacts, lists = [], members = false, status, loading = false, minRows = pageSize, listsLoading = false, tableRef, empty }: { contacts: Contact[]; lists?: AudienceList[]; members?: boolean; status?: string; loading?: boolean; minRows?: number; listsLoading?: boolean; tableRef?: (node: HTMLDivElement | null) => void; empty?: ReactNode }) {
+  const columns = members ? memberColumnsFor(status ?? '') : contactColumns
   return <DataTable className="audience-contacts" tableRef={tableRef} rows={contacts} loading={loading} skeletonRows={minRows} minRows={minRows} rowKey={row => row.id} rowHref={row => `/audience/contacts/${row.id}`} empty={empty} columns={columns.map(column => ({ ...column, cardRender: column.key === 'name' ? (row: Contact) => <span title={nameTitle(row.name)}>{row.name ? <AddressText text={row.name} /> : 'No name'}</span>
     // A member card's second line: the suppression reason when there is one, else the name (never an empty dash).
-    : column.key === 'suppression' ? (row: Contact) => row.suppressionReason ? <span title={row.suppressionReason}>{row.suppressionReason}</span> : <span title={nameTitle(row.name)}>{row.name ? <AddressText text={row.name} /> : 'No name'}</span>
-    : column.key === 'created' ? (row: Contact) => { const names = members || listsLoading ? null : listsText(row, lists); return <>{`Added ${date(row.createdAt)}`}{names && names !== '—' && <span title={names}> · {names}</span>}</> } : undefined, render: (row: Contact) => {
+    : column.key === 'suppression' ? (row: Contact) => row.suppressionReason ? <span title={suppressionText(row.suppressionReason)}>{suppressionText(row.suppressionReason)}</span> : <span title={nameTitle(row.name)}>{row.name ? <AddressText text={row.name} /> : 'No name'}</span>
+    : column.key === 'created' ? (row: Contact) => { const names = members || listsLoading ? null : listsText(row, lists); return <>{`Added ${date(row.createdAt)}`}{names && names !== '—' && <span title={listsTitle(row, lists)}> · {names}</span>}</> } : undefined, render: (row: Contact) => {
     if (column.key === 'email') return <span className="audience-cell-text"><PrivateAddress value={row.email} /></span>
     if (column.key === 'status') return <span title={consentTitle(row.status)}><StatusBadge status={row.status} /></span>
-    if (column.key === 'suppression') return <span className="audience-cell-text" title={row.suppressionReason || undefined}>{row.suppressionReason || '—'}</span>
+    if (column.key === 'suppression') return <span className="audience-cell-text" title={suppressionText(row.suppressionReason)}>{suppressionText(row.suppressionReason) ?? '—'}</span>
     if (column.key === 'name') return <span className="audience-cell-text" title={nameTitle(row.name)}>{row.name ? <AddressText text={row.name} /> : '—'}</span>
     if (column.key === 'lists') {
       if (listsLoading && row.listIds.length) return <SkeletonText width="70%" />
       const text = listsText(row, lists)
-      return <span className="audience-cell-text" title={text}>{text}</span>
+      return <span className="audience-cell-text" title={listsTitle(row, lists) ?? text}>{text}</span>
     }
     return date(row.createdAt)
   } }))} />

@@ -1,7 +1,8 @@
 import { Fragment } from 'react'
+import { useSearchParams } from 'react-router'
 import { SearchField, ControlSkeleton, FieldSkeleton, LoadingRegion, PageHeader, SectionHeader, Select, SkeletonText, TableSkeleton, Tabs, type SkeletonColumn } from '../../components/ui'
 import { AudienceHeader } from './header'
-import { ConsentLegend, consentTitle, statusOptions } from './consent'
+import { consentTitle, statusOptions } from './consent'
 import './audience.css'
 
 export function AudienceCellSkeleton({ secondary = false }: { secondary?: boolean }) {
@@ -18,7 +19,10 @@ export const contactColumns: SkeletonColumn[] = [
   { key: 'lists', label: 'Lists', width: '20%', card: 'hide' },
   { key: 'created', label: 'Added', width: '17%', skeleton: <SkeletonText width={95} />, card: 'inline' },
 ]
-export const memberColumns: SkeletonColumn[] = [contactColumns[0], contactColumns[1], { key: 'suppression', label: 'Suppression reason', width: '38%', card: 'line' }, contactColumns[4]]
+const memberColumns: SkeletonColumn[] = [contactColumns[0], contactColumns[1], { key: 'suppression', label: 'Suppression reason', width: '38%', card: 'line' }, contactColumns[4]]
+// A consent tab already names the status, and only Suppressed has reasons to show; a card keeps the reason column's
+// line, which shows the name when there is no reason.
+export const memberColumnsFor = (status: string): SkeletonColumn[] => memberColumns.filter(column => !(status && column.key === 'status')).map(column => column.key === 'suppression' && status !== 'suppressed' ? { ...column, table: false } : column)
 export const listColumns: SkeletonColumn[] = [
   { key: 'name', label: 'Name', width: '24%', card: 'title' },
   // A phone card gives consent two lines, two counts each, so all four fit at any width a count reaches.
@@ -34,7 +38,7 @@ export const segmentColumns: SkeletonColumn[] = [
   { key: 'rules', label: 'Rules', width: '22%', card: 'line' },
   { key: 'matched', label: 'Matched', width: '14%', align: 'right', card: 'hide' },
   { key: 'eligible', label: 'Eligible', width: '14%', align: 'right', card: 'hide' },
-  { key: 'updated', label: 'Updated', width: '20%', card: 'inline' },
+  { key: 'updated', label: 'Updated', width: '20%', card: 'hide' },
 ]
 export const activityColumns: SkeletonColumn[] = [
   { key: 'subject', label: 'Email', width: '55%' },
@@ -44,15 +48,17 @@ export const activityColumns: SkeletonColumn[] = [
 export const consentColumns: SkeletonColumn[] = [
   { key: 'status', label: 'Status', width: '15%', card: 'title' },
   { key: 'source', label: 'Source', width: '17%', card: 'line' },
-  { key: 'evidence', label: 'How', width: '38%', card: 'inline' },
-  { key: 'policy', label: 'Policy version', width: '14%', card: 'field' },
+  { key: 'evidence', label: 'How', width: '38%', card: 'line' },
+  { key: 'policy', label: 'Policy version', width: '14%', card: 'hide' },
   { key: 'at', label: 'When', width: '16%', card: 'aside' },
 ]
 export function AudienceSummarySkeleton() {
   return <div className="audience-summary cluster">{[100, 115, 110, 125].map(width => <SkeletonText key={width} width={width} />)}</div>
 }
 export function AudienceMembersSkeleton() {
-  return <><Tabs value="" onValueChange={() => {}} items={[{ value: '', label: 'All members' }, ...statusOptions]} /><div className="data-toolbar"><ControlSkeleton width={320} /></div><ConsentLegend /><TableSkeleton columns={memberColumns} rows={8} pagination /></>
+  const [params] = useSearchParams()
+  const status = statusOptions.some(option => option.value === params.get('status')) ? params.get('status')! : ''
+  return <><Tabs value="" onValueChange={() => {}} items={[{ value: '', label: 'All members' }, ...statusOptions]} /><div className="data-toolbar"><ControlSkeleton width={320} /></div><TableSkeleton columns={memberColumnsFor(status)} rows={8} pagination /></>
 }
 export function ListDetailBodySkeleton() {
   return <LoadingRegion label="Loading list"><AudienceMembersSkeleton /></LoadingRegion>
@@ -61,7 +67,7 @@ export function ContactDetailBodySkeleton() {
   return <><div className="audience-summary cluster"><SkeletonText width={240} /><SkeletonText width={94} /></div>
     {/* Properties can grow by any number of custom rows, so Lists and Consent history appear with the contact, below
         them, instead of as placeholders the loaded rows would push down. */}
-    <div className="section audience-properties"><section><SectionHeader title="Properties" /><dl className="ui-facts">{['Full name', 'Country', 'Created', 'Last opened'].map(label => <Fragment key={label}><dt>{label}</dt><dd><SkeletonText width="65%" /></dd></Fragment>)}</dl></section></div>
+    <div className="section audience-properties"><section><SectionHeader title="Properties" /><dl className="ui-facts">{['Country', 'Added', 'Last opened'].map(label => <Fragment key={label}><dt>{label}</dt><dd><SkeletonText width="65%" /></dd></Fragment>)}</dl></section></div>
   </>
 }
 export function SegmentEditorBodySkeleton() {
@@ -75,8 +81,7 @@ export function AudienceRouteSkeleton({ kind, isNew = false }: { kind: 'contacts
   if (kind === 'segment') return <LoadingRegion className="audience-page" label="Loading segment"><PageHeader title={isNew ? 'Create segment' : 'Edit segment'} backTo="/audience/segments" actions={<ControlSkeleton width={121} />} /><SegmentEditorBodySkeleton /></LoadingRegion>
   const contacts = kind === 'contacts'
   return <LoadingRegion className="audience-page" label={`Loading ${kind}`}><AudienceHeader actions={<>{contacts && <ControlSkeleton width={120} />}<ControlSkeleton width={contacts ? 98 : kind === "lists" ? 85 : 121} /></>} />
-    <div className="data-toolbar"><div className="cluster">{contacts ? <><SearchField className="search-box--list" aria-label="Search contacts" placeholder="Search email or name" disabled /><Select className="audience-status-filter" aria-label="Filter by consent" value="" onValueChange={() => {}} options={[{ value: '', label: 'All contacts' }]} disabled /><ControlSkeleton width={220} /></> : <ControlSkeleton width={320} />}</div></div>
-    {kind !== 'segments' && <ConsentLegend />}
+    <div className="data-toolbar"><div className="cluster">{contacts ? <><SearchField className="search-box--list" aria-label="Search contacts" placeholder="Search email or name" disabled /><Select className="audience-status-filter" aria-label="Filter by consent" value="" onValueChange={() => {}} options={[{ value: '', label: 'All contacts' }]} disabled /><div className="audience-list-filter"><ControlSkeleton /></div></> : <ControlSkeleton width={320} />}</div></div>
     <TableSkeleton columns={contacts ? contactColumns : kind === 'lists' ? listColumns : segmentColumns} rows={contacts ? 8 : 5} pagination />
   </LoadingRegion>
 }
