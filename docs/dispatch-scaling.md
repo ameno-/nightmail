@@ -161,6 +161,10 @@ Commits `be8076e` → `7f82248` on `main`.
 - Marketing leaves `DISPATCH_DAILY_HEADROOM_PERCENT` of the rolling 24-hour quota unused (default
   10%); transactional mail may use it. Quota holds leave the campaign `sending` and its rows queued.
   The dispatcher rechecks at the next quota-cache refresh, not on every send or via a manual resume.
+- Outside (Hosted, non-exempt) workspaces' marketing also stops at the customer share: `HOSTED_CUSTOMER_SHARE_PERCENT`
+  (default 50%) of the rolling 24-hour quota for all of them together. Their use is SES's own count less what it accepted
+  for exempt workspaces, worked out once per refresh by the elected refresher and stored beside the sample; shards
+  split what is left as above.
 - Any `429` sets `brakeUntil = now + 10 s` (target falls to the raw quota) and yields the slots the
   shard ran ahead by. Throttled rows requeue with 2 s, 4 s, 8 s, 16 s, 32 s backoff (five attempts).
 - `sending_region_limits` is the shared one-minute quota cache; only a shard that finds it stale calls

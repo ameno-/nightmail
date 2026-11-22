@@ -2,7 +2,7 @@ import { getTableColumns, sql, type SQL } from 'drizzle-orm';
 import type { Attachment, SESv2Client, SendEmailCommandInput } from '@aws-sdk/client-sesv2';
 import { ApiError, getSes, isSimulatedSes, rowId, lazyModule, log, logError, ModuleLoadError, preloadSesTransport, wrapModuleLoad, type Actor, type DbExecutor, type Runtime } from './core.js';
 import { attachments, emails, type EmailSnapshot, type EmailStatus, type CampaignDraft, type ReviewedRecipient } from './db/sending.js';
-import { approvedOriginUser, campaignVerdicts, checkedDispatchAttachments, formattedSender, inlineMessage, materializeCampaignEmail, originAllowed, publicEventType, QUOTA_REFRESH_MS, queueSimulatedFeedback, rank, sesDailyReserve, sizeCheck, statusForEvent, terminalColumns, terminalEvents, verifiedAttachment } from './sending.js';
+import { approvedOriginUser, campaignVerdicts, checkedDispatchAttachments, customerCredits, formattedSender, inlineMessage, materializeCampaignEmail, originAllowed, publicEventType, QUOTA_REFRESH_MS, queueSimulatedFeedback, rank, sesDailyReserve, sizeCheck, statusForEvent, terminalColumns, terminalEvents, verifiedAttachment } from './sending.js';
 import { receivingPolicy } from './mailbox-ingest-input.js';
 import { tieAllows } from './approval-ties.js';
 import { principal } from './mail-gateway.js';
@@ -48,8 +48,9 @@ function loadDispatchTransport(runtime: Runtime): Promise<DispatchTransport> {
 export type Mail = typeof emails.$inferSelect;
 type Review = { version:number; draft: CampaignDraft; rendered: { html?: string; text?: string }; assets:AttachmentRow[]; contentHash: string | null; recipient: ReviewedRecipient; screen?: CampaignScreen | null; reviewHash?: string };
 // `probation`: a Hosted sender still in its evaluation, growth pace or below good standing (src/hosted-sending.ts probationReason).
-type Owner = { runtime: Runtime; a: Actor; ses: SESv2Client; transport: DispatchTransport; sendClient?:(domainId:string)=>SESv2Client; trusted?:boolean; probation?:boolean; tenantName?: string; feedbackTopic?: string };
-type LeaseQuota = { rate: number; max: number; sent: number; checked: string; age_ms: number };
+// `customer`: an outside workspace on the shared account (Hosted, live, not exempt), whose marketing waits for the customer share.
+type Owner = { runtime: Runtime; a: Actor; ses: SESv2Client; transport: DispatchTransport; sendClient?:(domainId:string)=>SESv2Client; trusted?:boolean; probation?:boolean; customer?: boolean; tenantName?: string; feedbackTopic?: string };
+type LeaseQuota = { rate: number; max: number; sent: number; customer: number; checked: string; age_ms: number };
 /** Where one email's time goes in a run, filled in stage by stage for its DISPATCH_EMAIL line (logEmail): the screen's path
  *  (a classifier call, the shard's open breaker, or a campaign copy's verdict) and how its last request ended, the wait for a
  *  send slot and the SES call. Records only: nothing reads it to decide anything. */
@@ -60,7 +61,8 @@ type Prepared = Leased & { owner: Owner; snapshot: EmailSnapshot; content: SendE
 type Outcome = { mail: Mail; type: 'accepted' | 'reject' | 'acceptance_unknown' | 'provider_throttled' | 'dispatch_deferred'; providerId?: string; errorCode?: string; data: Record<string, unknown>; requeueAt?: string; screened?: boolean; trace?: Trace };
 const requeued = (o: Outcome) => o.type === 'provider_throttled' || o.type === 'dispatch_deferred';
 
-export interface QuotaSnapshot { maxSendRate: number; max24HourSend: number; sentLast24Hours: number; checkedAt: number }
+// customerSent: what outside workspaces on a shared account used of its daily limit (migration 401), read with the sample.
+export interface QuotaSnapshot { maxSendRate: number; max24HourSend: number; sentLast24Hours: number; customerSent?: number; checkedAt: number }
 // Serializable pacing state so a Durable Object survives eviction without bursting.
 export interface GateState { nextAllowedAt: number; quota: QuotaSnapshot | null; refreshAt?: number; sentSinceRefresh: number; brakeUntil?: number; accountPauseAt?:number; outageUntil?: number; outageStreak?: number; dailyBlockedUntil?: number; ownerCursor?: string; screenRetryAt?: number }
 export const initialGate = (): GateState => ({ nextAllowedAt: 0, quota: null, sentSinceRefresh: 0 });
@@ -146,22 +148,29 @@ async function ensureQuota(owner: Pick<Owner, 'runtime'|'a'|'ses'|'transport'>, 
   const key = sql`${subject}=${account ?? a.workspaceId} AND region=${region}`;
   if (account) refreshMs = Math.max(1000, refreshMs);
   const period = sql`(${refreshMs}::int * interval '1 millisecond')`;
-  type Row = { fence: string | null; checked: string; rate: number; max: number; sent: number; age_ms: number };
-  const cached = sql`SELECT NULL::text AS fence, checked_at::text AS checked, max_send_rate AS rate, max_24_hour_send AS max, sent_last_24_hours AS sent, extract(epoch FROM clock_timestamp()-checked_at)::float8*1000 AS age_ms
+  type Row = { fence: string | null; checked: string; rate: number; max: number; sent: number; customer: number; age_ms: number };
+  const customer = account ? sql`customer_sent_24_hours` : sql`0::float8`;
+  const cached = sql`SELECT NULL::text AS fence, checked_at::text AS checked, max_send_rate AS rate, max_24_hour_send AS max, sent_last_24_hours AS sent, ${customer} AS customer, extract(epoch FROM clock_timestamp()-checked_at)::float8*1000 AS age_ms
     FROM ${table} WHERE ${key} AND max_send_rate > 0 AND checked_at > clock_timestamp()-${period}`;
   const result = await runtime.db.execute<Row>(sql`WITH elected AS (
     INSERT INTO ${table}(${subject},region,${fence}) VALUES (${account ?? a.workspaceId},${region},clock_timestamp()+${period})
     ON CONFLICT (${subject},region) DO UPDATE SET ${fence}=clock_timestamp()+${period}
       WHERE (${table}.${fence} IS NULL OR ${table}.${fence} <= clock_timestamp()) AND (${table}.checked_at IS NULL OR ${table}.max_send_rate <= 0 OR ${table}.checked_at <= clock_timestamp()-${period})
     RETURNING ${fence}::text AS fence)
-    SELECT fence,NULL::text AS checked,NULL::float8 AS rate,NULL::float8 AS max,NULL::float8 AS sent,NULL::float8 AS age_ms FROM elected UNION ALL ${cached} LIMIT 1`);
+    SELECT fence,NULL::text AS checked,NULL::float8 AS rate,NULL::float8 AS max,NULL::float8 AS sent,NULL::float8 AS customer,NULL::float8 AS age_ms FROM elected UNION ALL ${cached} LIMIT 1`);
   let row = result.rows[0];
   if (row?.fence) {
     const q = await fetchQuota(transport, ses, gate);
-    const saved = await runtime.db.execute<{ checked: string }>(sql`UPDATE ${table} SET checked_at=clock_timestamp(), ${fence}=${account ? sql`clock_timestamp()+${period}` : sql`NULL`},
-      max_send_rate=${q.maxSendRate},max_24_hour_send=${q.max24HourSend},sent_last_24_hours=${q.sentLast24Hours} WHERE ${key} AND ${fence}=${row.fence}::timestamptz RETURNING checked_at::text AS checked`);
+    // The customer share's sum is taken here, by the one elected refresher, from the sample it is a share of.
+    const saved = await runtime.db.execute<{ checked: string; customer: number }>(sql`UPDATE ${table} SET checked_at=clock_timestamp(), ${fence}=${account ? sql`clock_timestamp()+${period}` : sql`NULL`},
+      max_send_rate=${q.maxSendRate},max_24_hour_send=${q.max24HourSend},sent_last_24_hours=${q.sentLast24Hours}${account ? sql`,customer_sent_24_hours=hosted_customer_day(${account},${region},${q.sentLast24Hours})` : sql``}
+      WHERE ${key} AND ${fence}=${row.fence}::timestamptz RETURNING checked_at::text AS checked, ${customer} AS customer`);
     if (!saved.rowCount) return false;
-    return observeQuota(gate, { ...q, checkedAt: Date.parse(saved.rows[0]!.checked) }, refreshMs);
+    const customerSent = Number(saved.rows[0]!.customer), percent = runtime.config.dispatch.customerSharePercent;
+    if (customerSent > 0 && customerCredits(q.max24HourSend, customerSent, percent) === 0) {
+      log('error', { code: 'HOSTED_CUSTOMER_SHARE_FULL', accountId: account, region, used: customerSent, share: Math.floor(q.max24HourSend * percent / 100), percent });
+    }
+    return observeQuota(gate, { ...q, customerSent, checkedAt: Date.parse(saved.rows[0]!.checked) }, refreshMs);
   } else {
     // A concurrent shard won a cold refresh. Give its single control-plane request time to publish.
     for (const delay of [100, 400, 1000]) {
@@ -169,7 +178,7 @@ async function ensureQuota(owner: Pick<Owner, 'runtime'|'a'|'ses'|'transport'>, 
       await sleep(delay); row = (await runtime.db.execute<Row>(cached)).rows[0];
     }
     if (!row) return false;
-    return observeQuota(gate, { maxSendRate: row.rate, max24HourSend: account ? row.max : row.max || -1, sentLast24Hours: row.sent, checkedAt: Date.parse(row.checked) }, refreshMs, row.age_ms);
+    return observeQuota(gate, { maxSendRate: row.rate, max24HourSend: account ? row.max : row.max || -1, sentLast24Hours: row.sent, customerSent: Number(row.customer), checkedAt: Date.parse(row.checked) }, refreshMs, row.age_ms);
   }
 }
 
@@ -210,8 +219,10 @@ export function brake(gate: GateState) {
   gate.brakeUntil = Date.now() + BRAKE_MS;
   gate.nextAllowedAt = Math.max(gate.nextAllowedAt, Date.now() + 1000);
 }
-const marketingCredits = (q: QuotaSnapshot, percent: number) => Math.max(0, q.max24HourSend - q.sentLast24Hours - sesDailyReserve(q.max24HourSend, percent));
-function dailyRemaining(gate: GateState, headroomPercent?: number, shard?: DispatcherOptions['shard']) {
+// `share`: an outside workspace's marketing also fits in what is left of the customer share (src/sending.ts customerCredits).
+const marketingCredits = (q: QuotaSnapshot, percent: number, share?: number) => Math.max(0, Math.min(q.max24HourSend - q.sentLast24Hours - sesDailyReserve(q.max24HourSend, percent),
+  share === undefined ? Infinity : customerCredits(q.max24HourSend, q.customerSent ?? 0, share)));
+function dailyRemaining(gate: GateState, headroomPercent?: number, shard?: DispatcherOptions['shard'], share?: number) {
   if (gate.dailyBlockedUntil) return 0; // A fresh account snapshot, not a slot timer, releases a provider daily denial.
   const quota = gate.quota;
   if (!quota || quota.max24HourSend < 0) return Number.POSITIVE_INFINITY;
@@ -220,16 +231,18 @@ function dailyRemaining(gate: GateState, headroomPercent?: number, shard?: Dispa
   if (headroomPercent === undefined) return quota.max24HourSend - quota.sentLast24Hours - gate.sentSinceRefresh;
   // The provider snapshot is account-wide; each shard can spend only its share until the next
   // refresh. Otherwise four shards could each spend the *entire* remaining marketing allowance.
-  // The shares add up to the remainder exactly: the last credits belong to the first shards.
-  const remaining = marketingCredits(quota, headroomPercent);
+  // The shares add up to the remainder exactly: the last credits belong to the first shards. Against the customer share
+  // every send since the sample counts, ours and transactional too: until the next sample, a minute, it errs toward ours.
+  const remaining = marketingCredits(quota, headroomPercent, share);
   const count = shard?.count ?? 1, index = shard?.index ?? 0;
   return Math.floor(remaining / count) + (index < remaining % count ? 1 : 0) - gate.sentSinceRefresh;
 }
 
 // One statement leases the oldest due mail for this region and returns it with its frozen review inputs.
 type DeferredStream = { workspace_id: string; stream: EmailSnapshot['kind']; until?: number };
-// Recipients an envelope may still have to be affordable, per stream (at most 50 per envelope).
-type Allowance = { transactional: number; marketing: number };
+// Recipients an envelope may still have to be affordable, per stream (at most 50 per envelope); `customer` is an outside
+// workspace's marketing, under the customer share as well.
+type Allowance = { transactional: number; marketing: number; customer: number };
 const MAX_ENVELOPE = 50;
 async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: string, limit: number, gate:GateState, deferred: DeferredStream[], runClients: Map<string, SESv2Client>, accountId?: string, priorityOnly = false, readQuota = false, allowance?: Allowance): Promise<Leased[]> {
   const queued = sql`region = ${region} AND status = 'queued'`;
@@ -246,7 +259,7 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
     -- A boolean range is an index condition on 061's expression. Equality to true is
     -- simplified to a text comparison and can scan the kind index over delivered mail.
     ${priorityOnly ? sql`AND ${transactional} > false` : sql``}
-    ${allowance && (allowance.transactional < MAX_ENVELOPE || allowance.marketing < MAX_ENVELOPE) ? sql`AND ${cost} <= CASE WHEN ${transactional} THEN ${allowance.transactional}::int ELSE ${allowance.marketing}::int END` : sql``}
+    ${allowance && Object.values(allowance).some(n => n < MAX_ENVELOPE) ? sql`AND ${cost} <= CASE WHEN ${transactional} THEN ${allowance.transactional}::int WHEN o.customer THEN ${allowance.customer}::int ELSE ${allowance.marketing}::int END` : sql``}
     ${deferred.length ? sql`AND ${transactional} BETWEEN (o.workspace_id=ANY(${sql.param(deferred.filter(d=>d.stream==='marketing').map(d=>d.workspace_id))}::text[])) AND NOT (o.workspace_id=ANY(${sql.param(deferred.filter(d=>d.stream==='transactional').map(d=>d.workspace_id))}::text[]))` : sql``}`;
   // Look up each due stream separately: the immediate ordered index contains no future mail,
   // and the scheduled index can stop at this statement's cutoff. Merge only bounded pages.
@@ -264,7 +277,7 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
     ) heads ORDER BY workspace_id LIMIT 1`;
   const queuedOwners = sql`SELECT n.workspace_id,1 FROM (${seek(sql`${gate.ownerCursor??''}`)}) n
       UNION ALL SELECT n.workspace_id,o.step+1 FROM queued_owners o CROSS JOIN LATERAL (${seek(sql`o.workspace_id`)}) n WHERE o.step<${limit}`;
-  const ownersSql = mx ? sql`SELECT q.workspace_id,hosted_marketing_held(q.workspace_id) AS marketing_held ${liveMx?sql`,p.cap,least(p.cap-coalesce(b.used,0),g.cap-g.used) AS remaining,pc.kind='shared' AS required_screen,
+  const ownersSql = mx ? sql`SELECT q.workspace_id,hosted_marketing_held(q.workspace_id) AS marketing_held,${liveMx?sql`(pc.kind='shared' AND NOT w.exempt_hosted_quotas)`:sql`false`} AS customer ${liveMx?sql`,p.cap,least(p.cap-coalesce(b.used,0),g.cap-g.used) AS remaining,pc.kind='shared' AS required_screen,
     (${!!runtime.config.trustedPool} AND pc.pool_tier='trusted' AND NOT pc.legacy_names) AS trusted`:sql``}
     FROM queued_owners q JOIN ${sendingConnections(runtime)} pc USING(workspace_id)
     ${liveMx?sql`LEFT JOIN workspaces w ON w.id=q.workspace_id LEFT JOIN hosted_burst_windows b ON b.workspace_id=q.workspace_id AND b.scope='' AND b.minute=${tick}
@@ -272,7 +285,7 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
       -- A new sender's growth pace (sponsor-wide rolling hour): an owner it has used up is not leased, so nothing is prepared or screened for it.
       LEFT JOIN LATERAL hosted_growth(q.workspace_id) g ON pc.kind='shared'`:sql``}
     WHERE pc.region=${region} AND pc.aws_account_id=${accountId} AND pc.paused_at IS NULL AND hosted_sponsor_hold(q.workspace_id) IS DISTINCT FROM 'pause'
-      ${liveMx?sql`AND (p.cap IS NULL OR p.cap-coalesce(b.used,0)>0) AND (g.key IS NULL OR g.cap-g.used>0)`:sql``}` : sql`SELECT workspace_id,false AS marketing_held FROM queued_owners`;
+      ${liveMx?sql`AND (p.cap IS NULL OR p.cap-coalesce(b.used,0)>0) AND (g.key IS NULL OR g.cap-g.used>0)`:sql``}` : sql`SELECT workspace_id,false AS marketing_held,false AS customer FROM queued_owners`;
   const result = await runtime.db.execute<Record<string, unknown>>(sql`WITH RECURSIVE queued_owners(workspace_id,step) AS (${queuedOwners}), owners AS MATERIALIZED (${ownersSql}), candidates AS (
       SELECT o.workspace_id, row_number() OVER (ORDER BY q.turn, q.transactional DESC, q.created_at, q.id) AS place FROM owners o CROSS JOIN LATERAL (
         SELECT p.*,row_number() OVER (ORDER BY transactional DESC,created_at,id) AS turn FROM (${page(sql`${limit}`)}) p
@@ -305,7 +318,8 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
     ), settings AS MATERIALIZED (
       SELECT p.*, s.installation_id, s.default_region, s.enabled_regions, ${mx ? sql`to_jsonb(pc)` : sql`NULL`} AS connection,
         ${liveMx ? sql`${probationReason(sql`p.workspace_id`)} IS NOT NULL` : sql`false`} AS probation,
-        ${readQuota ? sql`(SELECT jsonb_build_object('rate',max_send_rate,'max',max_24_hour_send,'sent',sent_last_24_hours,'checked',checked_at::text,
+        (SELECT o.customer FROM owners o WHERE o.workspace_id=p.workspace_id) AS customer,
+        ${readQuota ? sql`(SELECT jsonb_build_object('rate',max_send_rate,'max',max_24_hour_send,'sent',sent_last_24_hours,'customer',${accountId ? sql`customer_sent_24_hours` : sql`0`},'checked',checked_at::text,
           'age_ms',extract(epoch FROM clock_timestamp()-checked_at)*1000)
           FROM ${accountId ? sql`provider_account_limits WHERE aws_account_id=${accountId}` : sql`sending_region_limits WHERE workspace_id=p.workspace_id`}
           AND region=${region} AND max_send_rate>0 AND isfinite(checked_at))` : sql`NULL`} AS quota_sample,
@@ -325,7 +339,7 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
         SELECT workspace_id, campaign_id, review_id, min(id) AS carrier FROM selected WHERE review_id IS NOT NULL GROUP BY 1,2,3
       ) refs JOIN sending_campaign_reviews r ON r.workspace_id=refs.workspace_id AND r.campaign_id=refs.campaign_id AND r.id=refs.review_id
     )
-    SELECT meta.cursor,${liveMx?sql`(SELECT jsonb_agg(to_jsonb(blocked)) FROM (SELECT DISTINCT workspace_id,stream FROM fit WHERE cap IS NOT NULL AND n>0 AND used>=greatest(50,cap/2)) blocked)`:sql`NULL`} AS blocked_streams,${sql.join(mailColumns, sql`, `)}, measured.bytes AS snapshot_bytes, s.installation_id, s.default_region, s.enabled_regions, s.ready, s.connection,s.quota_sample,s.probation AS on_probation,
+    SELECT meta.cursor,${liveMx?sql`(SELECT jsonb_agg(to_jsonb(blocked)) FROM (SELECT DISTINCT workspace_id,stream FROM fit WHERE cap IS NOT NULL AND n>0 AND used>=greatest(50,cap/2)) blocked)`:sql`NULL`} AS blocked_streams,${sql.join(mailColumns, sql`, `)}, measured.bytes AS snapshot_bytes, s.installation_id, s.default_region, s.enabled_regions, s.ready, s.connection,s.quota_sample,s.probation AS on_probation,s.customer AS outside,
       CASE WHEN leased.dispatch_version > 0 THEN (SELECT count(*)::int FROM sending_email_events v
         WHERE v.workspace_id=leased.workspace_id AND v.email_id=leased.id AND v.type='provider_throttled' AND v.data->>'code'='SES_THROTTLED') ELSE 0 END AS rate_retries,
       r.renderer_version AS review_version, r.draft AS review_draft, r.rendered AS review_rendered,r.assets AS review_assets, r.screen AS review_screen, r.content_hash AS review_hash,
@@ -352,7 +366,7 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
     reviews.set(reviewKey(row), { version:Number(row.review_version), draft: row.review_draft as CampaignDraft, rendered: row.review_rendered as Review['rendered'],assets:(row.review_assets??[]) as AttachmentRow[], screen: row.review_screen as CampaignScreen | null, reviewHash: row.review_hash as string });
   }
   return result.rows.map(row => {
-    const { review_version, review_draft, review_rendered, review_content_hash, review_recipient, review_screen, review_hash, installation_id, default_region, enabled_regions, ready:regionReady, connection, rate_retries, quota_sample, on_probation, ...fields } = row;
+    const { review_version, review_draft, review_rendered, review_content_hash, review_recipient, review_screen, review_hash, installation_id, default_region, enabled_regions, ready:regionReady, connection, rate_retries, quota_sample, on_probation, outside, ...fields } = row;
     void review_version; void review_screen; void review_hash;
     // Admission refuses hosted sends until the tenant is ready; mail admitted earlier waits here, never provisions.
     const pc0 = connection as (ReadyConnection & { tenant_state?: TenantState; paused_at?: string | null }) | null;
@@ -371,7 +385,7 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
       const namespace=pc?.legacy_names===false ? pc.kind==='shared' ? pc.pool_tier : 'byo' : undefined;
       const { transactional, marketing } = setupResources(pc?.kind === 'shared' ? POOL_INSTALLATION : pc?.id ?? installation_id as string,namespace);
       const scoped = { ...runtime, config: { ...runtime.config, workspaceId, regions: [default_region as string, ...(enabled_regions as string[]).filter(r => r !== default_region),...(pc?[region]:[])], configurationSets: { transactional, marketing } } };
-      owner = { runtime: scoped, trusted:runtime.config.trustedPool && pc?.pool_tier==='trusted' && pc.legacy_names===false, probation:on_probation===true, a: { workspaceId, keyId: 'worker', domains: [], permissions: ['manage'] }, transport, ses: transport.clientFor(scoped, region, forDelivery(pc,{purpose:'quota'}), runClients),
+      owner = { runtime: scoped, trusted:runtime.config.trustedPool && pc?.pool_tier==='trusted' && pc.legacy_names===false, probation:on_probation===true, customer:outside===true, a: { workspaceId, keyId: 'worker', domains: [], permissions: ['manage'] }, transport, ses: transport.clientFor(scoped, region, forDelivery(pc,{purpose:'quota'}), runClients),
         sendClient:pc?.template_version==='v5'?domainId=>transport.clientFor(scoped,region,forDelivery(pc,{purpose:'send',domainId}),runClients):undefined,
         tenantName: pc?.kind === 'shared' ? pc.pool_tenant_name ?? (pc.managed_tenant ? mxResourceName(workspaceId) : `bane-${workspaceId}`) : undefined, feedbackTopic: pc?.feedback_topic_arn };
       owners.set(workspaceId, owner);
@@ -964,7 +978,7 @@ async function dispatchBatch(base: Runtime, lane: Lane, leased: Leased[]): Promi
   // Postgres, not by subtracting unrelated clocks. Never give a shard fresh capacity for the same sample.
   if (!gate.quota || Date.now() >= (gate.refreshAt ?? 0)) {
     const q = ready[0]!.quota, period = options.accountId ? Math.max(1000, options.quotaRefreshMs) : options.quotaRefreshMs;
-    if (q && q.age_ms < period) observeQuota(gate, { maxSendRate:q.rate, max24HourSend:options.accountId ? q.max : q.max || -1, sentLast24Hours:q.sent, checkedAt:Date.parse(q.checked) }, period, q.age_ms);
+    if (q && q.age_ms < period) observeQuota(gate, { maxSendRate:q.rate, max24HourSend:options.accountId ? q.max : q.max || -1, sentLast24Hours:q.sent, customerSent:Number(q.customer ?? 0), checkedAt:Date.parse(q.checked) }, period, q.age_ms);
     if (!gate.quota || Date.now() >= (gate.refreshAt ?? 0)) {
       // Lanes of one shard share one refresh; shards share one GetAccount through ensureQuota's election.
       lane.refresh ??= phase('quota', () => ensureQuota(first, options.accountId, options.region, gate, options.quotaRefreshMs)).finally(() => { lane.refresh = undefined; });
@@ -1133,7 +1147,7 @@ async function dispatchPrepared(base: Runtime, lane: Lane, prepared: Prepared[])
       // sender also enforces this deadline if priority arrivals or a concurrent lane change it.
       if (expectedSlot >= claimDeadline) { unpaced.push(item.mail); counters.claimed--; counters.deferred++; logEmail(lane, item.mail, item.trace, 'deferred', 'PACING_WAIT'); return false; }
       const percent = item.snapshot.kind === 'marketing' ? base.config.dispatch.dailyHeadroomPercent : undefined;
-      const left = dailyRemaining(gate, percent, options.shard);
+      const left = dailyRemaining(gate, percent, options.shard, percent !== undefined && item.owner.customer ? base.config.dispatch.customerSharePercent : undefined);
       if (cost(item) <= left - lane.held.recipients) { lane.held.recipients += cost(item); expectedSlot += cost(item) * 1000 / rate; return true; }
       const until = counters.quotaRetryAt = quotaRetry(gate, options.quotaRefreshMs);
       if (left <= 0 && !lane.deferred.some(d => d.workspace_id === item.mail.workspaceId && d.stream === item.snapshot.kind)) {
@@ -1230,13 +1244,13 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
   // What the gate's current sample still affords, per stream, net of envelopes held in claim
   // groups; unknown until the run has a fresh sample. A lease skips the envelopes it cannot
   // afford, one by one: an owner's oversized head never hides the affordable mail behind it.
-  const headroom = runtime.config.dispatch.dailyHeadroomPercent;
+  const { dailyHeadroomPercent: headroom, customerSharePercent: share } = runtime.config.dispatch;
+  const afford = (left: number) => Math.floor(Math.min(MAX_ENVELOPE, Math.max(0, left - held.recipients)));
   const allowance = (): Allowance | undefined => gate.quota && Date.now() < (gate.refreshAt ?? 0) ? {
-    transactional: Math.floor(Math.min(MAX_ENVELOPE, Math.max(0, dailyRemaining(gate) - held.recipients))),
-    marketing: Math.floor(Math.min(MAX_ENVELOPE, Math.max(0, dailyRemaining(gate, headroom, options.shard) - held.recipients))),
+    transactional: afford(dailyRemaining(gate)), marketing: afford(dailyRemaining(gate, headroom, options.shard)), customer: afford(dailyRemaining(gate, headroom, options.shard, share)),
   } : undefined;
   // The allowance became known or smaller: rows a lease returned unaffordable are now skipped.
-  const tighter = (now: Allowance | undefined, before: Allowance | undefined) => !!now && (!before || now.marketing < before.marketing || now.transactional < before.transactional);
+  const tighter = (now: Allowance | undefined, before: Allowance | undefined) => !!now && (!before || now.marketing < before.marketing || now.transactional < before.transactional || now.customer < before.customer);
   const leaseAllowance = new WeakMap<Leased[], Allowance | undefined>();
   const lease = async (priorityOnly = false, first = false) => {
     if (options.stop?.()) return [];
@@ -1250,7 +1264,7 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
     }
     const caps = allowance();
     // Mail the allowance skips waits for a new sample: an idle run still wakes when it can change.
-    if (caps && (caps.transactional < MAX_ENVELOPE || caps.marketing < MAX_ENVELOPE)) counters.quotaRetryAt ??= quotaRetry(gate, lane.options.quotaRefreshMs);
+    if (caps && Object.values(caps).some(n => n < MAX_ENVELOPE)) counters.quotaRetryAt ??= quotaRetry(gate, lane.options.quotaRefreshMs);
     const leaseOnce = () => phase('lease', () => leaseDue(runtime, transport, options.region, lane.options.batchSize, gate,lane.deferred, runClients, options.accountId, priorityOnly, first && (!gate.quota || now >= (gate.refreshAt ?? 0)), caps));
     const fromCursor = gate.ownerCursor !== undefined;
     if (!fromCursor) { passStart = lane.advanced; passAllowance = caps; }

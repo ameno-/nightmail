@@ -30794,6 +30794,98 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  // The customer share (HOSTED_CUSTOMER_SHARE_PERCENT, migration 401): every outside workspace on a shared account together
+  // may use half its daily SES limit by default. A first-party workspace (exempt) and an outside one share a pool account.
+  async function customerShareFixture(t: TestContext, runtime: import('./src/core.js').Runtime, db: pg.Client) {
+    const { SESv2Client, GetAccountCommand } = await import('@aws-sdk/client-sesv2'), { ensureRegionSettings } = await import('./src/ses-region-state.js');
+    const { runDispatcher } = await import('./src/dispatcher.js');
+    const pool = '111122224444', customer = runtime.config.workspaceId, ours = unique('first-party');
+    Object.assign(runtime.config, { multiTenant: true, liveEnabled: true, aws: { accessKeyId: 'fixture-platform', secretAccessKey: 'fixture-only' } });
+    await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:feedback`]);
+    await db.query('INSERT INTO workspaces (id,name,slug,postal_address,exempt_hosted_quotas) VALUES ($1,$1,$1,$2,true)', [ours, FIXTURE_POSTAL_ADDRESS]);
+    await db.query('INSERT INTO operation_settings (workspace_id,name,postal_address) VALUES ($1,$1,$2)', [ours, FIXTURE_POSTAL_ADDRESS]);
+    await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,'owner')", [randomUUID(), manager!.userId, ours]);
+    await ensureRegionSettings(runtime.db, { ...runtime.config, workspaceId: ours });
+    for (const wid of [customer, ours]) {
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, pool]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`, [`${wid === ours ? 'ours' : 'customer'}.example`, wid]);
+    }
+    // The outside workspace is in good standing with room to spare: only the share can hold it.
+    await db.query('UPDATE workspaces SET send_cap_override=200000 WHERE id=$1', [customer]); await gradedSender(db, customer, 200000);
+    const account = { max: 1000, sent: 0 }, sent: string[] = [], alerts: Json[] = [];
+    t.mock.method(SESv2Client.prototype, 'send', async (cmd: any) => {
+      if (cmd instanceof GetAccountCommand) return { SendingEnabled: true, SendQuota: { MaxSendRate: 1000, Max24HourSend: account.max, SentLast24Hours: account.sent } };
+      const tag = (name: string) => cmd.input.EmailTags.find((t: any) => t.Name === name).Value, to = cmd.input.Destination;
+      account.sent += to.ToAddresses.length + to.CcAddresses.length + to.BccAddresses.length;
+      sent.push(`${tag('bane_workspace_id') === ours ? 'ours' : 'customer'} ${tag('bane_priority')}`); return { MessageId: randomUUID() };
+    });
+    t.mock.method(console, 'error', (line: string) => { try { const entry = JSON.parse(line); if (entry.code === 'HOSTED_CUSTOMER_SHARE_FULL') alerts.push(entry); } catch { /* not a log line */ } });
+    return { pool, customer, ours, account, sent, alerts,
+      /** Recipients SES accepted for a workspace this hour: in SES's own count, and in its hours as the record statement credits them. */
+      used: async (wid: string, n: number) => { account.sent += n; await db.query(`INSERT INTO hosted_health_hourly(workspace_id,epoch,hour,accepted,bounces,complaints) VALUES ($1,'-infinity',date_trunc('hour',now(),'UTC'),$2,0,0)
+        ON CONFLICT (workspace_id,epoch,hour) DO UPDATE SET accepted=hosted_health_hourly.accepted+excluded.accepted`, [wid, n]); },
+      /** A day passes for a workspace's sends: they leave its hours and SES's count. */
+      roll: async (wid: string) => { account.sent -= Number((await db.query(`WITH moved AS (UPDATE hosted_health_hourly SET hour=hour-interval '24 hours' WHERE workspace_id=$1 RETURNING accepted)
+        SELECT coalesce(sum(accepted),0) AS n FROM moved`, [wid])).rows[0].n); },
+      send: async (local: (method: string, path: string, body?: Json, environment?: 'test' | 'live', headers?: Record<string, string>) => Promise<Reply>, wid: string, kind: 'marketing' | 'transactional') => {
+        const to = address(), from = `news@${wid === ours ? 'ours' : 'customer'}.example`;
+        if (kind === 'marketing') await db.query("INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES (gen_random_uuid()::text,$1,$2,'subscribed')", [wid, to]);
+        return ok(await local('POST', '/v1/emails/send', mail({ from, to, kind }), 'live', { 'x-bane-workspace': wid }), 202).id as string;
+      },
+      dispatch: async () => { sent.length = 0; await runDispatcher(runtime, { region: REGION, accountId: pool, lanes: 1 }); return [...sent].sort(); },
+      /** The next dispatch takes a new sample: GetAccount and the customers' sum. */
+      expire: () => db.query(`UPDATE provider_account_limits SET checked_at=clock_timestamp()-interval '2 minutes',refresh_after='-infinity' WHERE aws_account_id=$1`, [pool]),
+      counted: async () => Number((await db.query('SELECT customer_sent_24_hours AS n FROM provider_account_limits WHERE aws_account_id=$1 AND region=$2', [pool, REGION])).rows[0]?.n),
+      status: async (id: string) => (await db.query('SELECT status,attempt_started_at IS NOT NULL AS attempted FROM sending_emails WHERE id=$1', [id])).rows[0] };
+  }
+  test('MX customer share: outside marketing waits at the share while ours and their transactional mail send, and resumes as the window rolls', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, run }) => {
+      const f = await customerShareFixture(t, runtime, db);
+      // Outside workspaces used the whole share (500 of 1,000); ours used 100, which is not theirs.
+      await f.used(f.customer, 500); await f.used(f.ours, 100);
+      const held = await f.send(local, f.customer, 'marketing'), receipt = await f.send(local, f.customer, 'transactional');
+      await f.send(local, f.ours, 'marketing');
+      assert.deepEqual(await f.dispatch(), ['customer transactional', 'ours marketing'], 'Their sign-in codes and receipts and our newsletter go; their newsletter waits.');
+      assert.deepEqual(await f.status(held), { status: 'queued', attempted: false }); assert.equal((await f.status(receipt)).status, 'accepted');
+      assert.equal(await f.counted(), 500, "SES's count (600) less ours (100).");
+      assert.deepEqual(f.alerts.map(a => [a.accountId, a.region, a.used, a.share, a.percent]), [[f.pool, REGION, 500, 500, 50]]);
+      // An outside campaign waits as one over its own limit does: for Hosted sending capacity, nothing released.
+      const as = { 'x-bane-workspace': f.customer }, list = ok(await local('POST', '/v1/lists', { name: unique('share') }, 'live', as), 201), to = address();
+      await db.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES (gen_random_uuid()::text,$1,$2,'subscribed') RETURNING id)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$3,id FROM c`, [f.customer, to, list.id]);
+      const c = ok(await local('POST', '/v1/campaigns', { name: unique('share'), from: 'news@customer.example', subject: 'Share fixture', html: '<p>Fixture</p>', audience: { listId: list.id } }, 'live', as), 201);
+      ok(await local('POST', `/v1/campaigns/${c.id}/send`, { revision: c.revision }, 'live', as), 202); await run('campaign.run');
+      const waiting = ok(await local('GET', `/v1/campaigns/${c.id}`, undefined, 'live', as)).delivery;
+      assert.deepEqual([waiting.waiting?.reason, waiting.expanded], ['hosted_daily_quota', 0]);
+      assert.deepEqual(await f.dispatch(), [], 'Nothing waiting is sent on the same sample.');
+      // The window rolls past their hour: the held mail and the campaign go by themselves on the next sample.
+      await f.roll(f.customer); await f.expire();
+      await run('campaign.run');
+      assert.deepEqual(await f.dispatch(), ['customer marketing', 'customer marketing']);
+      assert.deepEqual(await f.status(held), { status: 'accepted', attempted: true });
+      const resumed = ok(await local('GET', `/v1/campaigns/${c.id}`, undefined, 'live', as)).delivery;
+      assert.deepEqual([resumed.waiting, resumed.expanded], [null, 1]);
+    });
+  });
+  test('MX customer share: an exempt workspace is never counted or limited, and the share follows the account limit and its setting', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const f = await customerShareFixture(t, runtime, db);
+      await f.used(f.customer, 500);
+      const first = await f.send(local, f.customer, 'marketing');
+      assert.deepEqual(await f.dispatch(), []);
+      // Amazon raises the limit: half of 2,000 leaves room, with nothing else changed.
+      f.account.max = 2000; await f.expire();
+      assert.deepEqual(await f.dispatch(), ['customer marketing']); assert.equal((await f.status(first)).status, 'accepted');
+      // The share is lowered below what they used: their marketing waits from the next run, on the same sample.
+      runtime.config.dispatch.customerSharePercent = 25;
+      const second = await f.send(local, f.customer, 'marketing'); await f.send(local, f.ours, 'marketing');
+      assert.deepEqual(await f.dispatch(), ['ours marketing']); assert.deepEqual(await f.status(second), { status: 'queued', attempted: false });
+      // Exempt, the same workspace is neither counted nor held.
+      await db.query('UPDATE workspaces SET exempt_hosted_quotas=true WHERE id=$1', [f.customer]); await f.expire();
+      assert.deepEqual(await f.dispatch(), ['customer marketing']); assert.equal(await f.counted(), 0);
+    });
+  });
+
   test('SDK responses preserve acceptance, rejection, throttling and timeout semantics without network', async t => {
     const [{ SESv2Client, SendEmailCommand, GetAccountCommand }, { createSimulatedSesHandler }] = await Promise.all([
       import('@aws-sdk/client-sesv2'), import('./src/adapters/simulated-ses.js'),
