@@ -232,7 +232,7 @@ export function useFlowTest() {
   return { address: state?.address ?? null, outcome: state?.outcome ?? null, error: state?.error ?? null, pending: state?.pending ?? false, run, clear: () => setState(null) }
 }
 export type FlowTest = ReturnType<typeof useFlowTest>
-const aiAnswers = [{ value: 'unset', label: 'Not assumed' }, { value: 'yes', label: 'Yes' }, { value: 'no', label: 'No' }]
+const aiAnswers = [{ value: 'unset', label: 'Not set' }, { value: 'yes', label: 'Yes' }, { value: 'no', label: 'No' }]
 /** The sample a test sends: a refund request unless changed. One line until opened. ai: the address's rules ask the AI,
  *  so the answer a test assumes can be chosen (a test never asks it). */
 export function SampleFields({ sample, onChange, disabled, id = 'flow-sample', ai = false }: { sample: Sample; onChange: (next: Sample) => void; disabled?: boolean; id?: string; ai?: boolean }) {
