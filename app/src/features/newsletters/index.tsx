@@ -110,15 +110,16 @@ export function NewNewsletterPage() {
 function NewNewsletter() {
   const api = useApi(), navigate = useNavigate(), remember = useRememberNewsletter(), nameId = useId()
   const [name, setName] = useState(''), [sender, setSender] = useState({ name: '', email: '' })
-  const [pending, setPending] = useState(false), [error, setError] = useState('')
+  const [pending, setPending] = useState(false), [errors, setErrors] = useState<{ name?: string; from?: string }>({})
   // The workspace's domains: verified ones complete the address as it is typed, and decide where creating leads.
   const domains = useApiQuery(['domains', 'newsletter-sender'], (client, signal) => client.domains.list({ pageSize: 100, refresh: false }, signal))
   const verified = (domains.data?.items ?? []).filter(domain => domain.status === 'verified').map(domain => domain.name)
   async function submit(event: FormEvent) {
     event.preventDefault()
-    if (!name.trim()) { setError('Enter a name.'); return }
-    if (!sender.email) { setError('Enter the address issues are sent from.'); return }
-    setPending(true); setError('')
+    const missing = { name: !name.trim() ? 'Enter a name.' : undefined, from: !sender.email ? 'Enter the address issues are sent from.' : undefined }
+    setErrors(missing)
+    if (missing.name || missing.from) return
+    setPending(true)
     try {
       const created = await api.newsletters.create({ name: name.trim(), from: sender.email, fromName: sender.name || name.trim() })
       remember({ id: created.id, name: created.name })
@@ -129,13 +130,13 @@ function NewNewsletter() {
       const known = all.find(item => item.name === domain)
       if (all.some(item => item.status === 'verified' && covers(item.name))) navigate(back, { replace: true })
       else navigate(known ? `/domains/${encodeURIComponent(known.id)}?then=${encodeURIComponent(back)}` : `/domains?add=${encodeURIComponent(domain)}&then=${encodeURIComponent(back)}`, { replace: true })
-    } catch (cause) { setError(errorText(cause)); setPending(false) }
+    } catch (cause) { setErrors({ from: errorText(cause) }); setPending(false) }
   }
   return <form className="stack newsletter-new" onSubmit={submit} noValidate>
     {/* The button is in the header: the From field's suggestions open below it, where a button would sit under them. */}
     <PageHeader title="New newsletter" backTo="/campaigns" actions={<Button type="submit" variant="primary" loading={pending}>Create newsletter</Button>} />
-    <Field label="Name" htmlFor={nameId}><Input id={nameId} value={name} maxLength={120} autoFocus onChange={event => setName(event.target.value)} /></Field>
-    <Field label="From" htmlFor="campaign-from-email" error={error || undefined}><CampaignSenderInput name={sender.name} email={sender.email} domains={verified} anyDomain disabled={pending} onChange={setSender} /></Field>
+    <Field label="Name" htmlFor={nameId} error={errors.name}><Input id={nameId} value={name} maxLength={120} autoFocus onChange={event => { setName(event.target.value); setErrors(previous => ({ ...previous, name: undefined })) }} /></Field>
+    <Field label="From" htmlFor="campaign-from-email" error={errors.from}><CampaignSenderInput name={sender.name} email={sender.email} domains={verified} anyDomain disabled={pending} onChange={value => { setSender(value); setErrors(previous => ({ ...previous, from: undefined })) }} /></Field>
   </form>
 }
 
