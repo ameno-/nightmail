@@ -80,6 +80,10 @@ Bounces alone hold marketing; they stop everything only when **transactional mai
 - A resume never restarts the limit at 100 a day. The 50% is of the limit before the resume (the frozen one), for 48 hours, even if the score has meanwhile earned no limit; another resume in that window keeps it there. Each pause leaves a **strike** for 90 days; the second caps the limit at 50% for 7 days, and the third needs a review for any resume.
 - The owner action is `POST /v1/sender-score/release` (dashboard sessions, owners and admins); `standing.selfService` in `GET /v1/sender-score` says whether it is available, and when.
 
+## What Nightmail emails you
+
+Owners and admins get one short email for each of these, and at most one a day of each: a **warning**, **marketing put on hold**, **sending paused** and **sending resumed**, a **campaign that paused itself**, the **daily limit reached** (when a send is refused at it, never during the evaluation) and the **evaluation's end**. One problem sends one email, the most serious: a campaign's pause is not emailed when the workspace is held or paused for it, and a warning is not when a campaign's pause says the same. The email says what happened, what it means for your mail and what to do; the reasons and numbers are on the dashboard and in `account.standing.changed`.
+
 ## Checks for new senders
 
 A workspace in its evaluation, in the growth pace, or below good standing (a daily limit set by the score, a freeze or a strike, or a step from warn up) is on **probation**: `standing.probation` in `GET /v1/sender-score` is `evaluation`, `growth` or `standing`. Until then Hosted adds these checks; they end by themselves on good standing, with nothing to request:

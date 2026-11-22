@@ -15744,12 +15744,17 @@
           {
             "type": "object",
             "properties": {
+              "emailed": {
+                "type": "boolean",
+                "description": "Whether the invitation was emailed to the invitee, with acceptUrl. False when this installation sends no account email or the day’s invitation emails are used: share acceptUrl yourself."
+              },
               "nextStep": {
                 "type": "string",
-                "description": "What to do next, for people and agents: no email is sent, so share acceptUrl with the invitee."
+                "description": "What to do next, for people and agents: whether the invitee was emailed, or acceptUrl is yours to share."
               }
             },
             "required": [
+              "emailed",
               "nextStep"
             ]
           }
@@ -64103,7 +64108,7 @@
       },
       "post": {
         "operationId": "inviteWorkspaceMember",
-        "description": "Invite an email address. Membership starts only after acceptance by the verified address. Share the returned URL; no email is sent. An invitation never grants more than the inviter's role, and an owner invitation is made only in the dashboard.",
+        "description": "Invite an email address. Membership starts only after acceptance by the verified address. Hosted, the invitee is emailed the link (emailed says so; at most 20 invitation emails a workspace a day); otherwise share the returned URL. An invitation never grants more than the inviter's role, and an owner invitation is made only in the dashboard.",
         "tags": [
           "Workspaces"
         ],
@@ -64259,7 +64264,7 @@
     "/v1/workspaces/current/invitations": {
       "post": {
         "operationId": "createWorkspaceInvitation",
-        "description": "Invite an email address. Membership starts only after acceptance by the verified address. Share the returned URL; no email is sent. An invitation never grants more than the inviter's role, and an owner invitation is made only in the dashboard. Owners and admins, in the dashboard or over their own MCP sign-in; API keys and agent tokens get 403 DASHBOARD_AUTH_REQUIRED.",
+        "description": "Invite an email address. Membership starts only after acceptance by the verified address. Hosted, the invitee is emailed the link (emailed says so; at most 20 invitation emails a workspace a day); otherwise share the returned URL. An invitation never grants more than the inviter's role, and an owner invitation is made only in the dashboard. Owners and admins, in the dashboard or over their own MCP sign-in; API keys and agent tokens get 403 DASHBOARD_AUTH_REQUIRED.",
         "tags": [
           "Workspaces"
         ],

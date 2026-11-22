@@ -429,6 +429,8 @@ export interface ByoRegion { region: string; regionLabel: string; scanState: str
   pending: { domain: string; importing: boolean; error: string | null }[]; failedIntents: { domain: string; importing: boolean; error: string }[] }
 export interface ByoCandidate { id: string; domain: string; region: string; regionLabel: string; selectable: boolean; status: 'verified' | 'signing_pending' | 'not_verified' | 'incomplete' | 'already_bound' | 'overlap'; sandbox: boolean | null }
 export interface WorkspaceInvitation { id: string; workspaceId: string; email: string; role: WorkspaceRole; expiresAt: string; acceptUrl: string }
+/** A new invitation: emailed says whether the invitee was sent the link. */
+export interface CreatedWorkspaceInvitation extends WorkspaceInvitation { emailed?: boolean }
 export interface WorkspaceInvitationPreview { id: string; workspaceId: string; workspaceName: string; workspaceSlug: string; inviterName: string; inviterEmail: string; role: WorkspaceRole; expiresAt: string; status: 'pending' | 'accepted' }
 export interface Attachment { disposition?: 'attachment' | 'inline'; contentId?: string | null; id: string; filename: string; contentType: string; size: number }
 export interface ConsentInput { status: "subscribed" | "unsubscribed"; source?: string; evidence?: string; policyVersion?: string; occurredAt?: string; confirmResubscribe?: boolean }

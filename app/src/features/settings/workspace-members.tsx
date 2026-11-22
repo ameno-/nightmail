@@ -3,7 +3,7 @@ import { Share } from 'lucide-react'
 import { Button, ConfirmDialog, CopyButton, SecretCode, DataTable, Dialog, Disclosure, DropdownMenu, EmptyState, ErrorState, Field, Input, SectionHeader, Select, useCopy, useToast, fieldError, MutationError } from '../../components/ui'
 import { useApiMutation, useApiDef, useSession } from '../../data/context'
 import { queries } from '../../data/queries'
-import type { WorkspaceInvitation, WorkspaceMember, WorkspaceRole } from '../../data/types'
+import type { CreatedWorkspaceInvitation, WorkspaceInvitation, WorkspaceMember, WorkspaceRole } from '../../data/types'
 import { roleLabel, workspaceApi } from '../../data/workspaces'
 import { date } from '../../lib/format'
 import { PrivateAddress } from '../../components/PrivateAddress'
@@ -97,7 +97,7 @@ export function InviteDialog({ open, owner, onOpenChange }: { open: boolean; own
   const [email, setEmail] = useState('')
   const [role, setRole] = useState<WorkspaceRole>('member')
   const [emailError, setEmailError] = useState('')
-  const [created, setCreated] = useState<WorkspaceInvitation | null>(null)
+  const [created, setCreated] = useState<CreatedWorkspaceInvitation | null>(null)
   async function submit(event: FormEvent) {
     event.preventDefault()
     const value = email.trim()
@@ -107,13 +107,16 @@ export function InviteDialog({ open, owner, onOpenChange }: { open: boolean; own
     try { setCreated(await create.mutateAsync({ email: value, role })) } catch { /* The mutation error is shown in the form. */ }
   }
   function close() { onOpenChange(false); setCreated(null); setEmail(''); setRole('member'); setEmailError(''); create.reset() }
-  // The link works only for the invited address; its expiry is in Invitations, where it can be copied again.
-  if (created) return <Dialog sensitive open={open} onOpenChange={next => { if (!next) close() }} title="Share this invitation link" description={<>Only <PrivateAddress value={created.email} /> can accept it, signed in with an emailed link to that address or its Google account.</>} footer={<Button variant="primary" onClick={close}>Done</Button>}>
+  // The link works only for the invited address; its expiry is in Invitations, where it can be copied again. When the
+  // invitation was emailed, the link is the same one, for sharing another way.
+  if (created) return <Dialog sensitive open={open} onOpenChange={next => { if (!next) close() }} title={created.emailed ? 'Invitation sent' : 'Share this invitation link'}
+    description={created.emailed ? <>We emailed <PrivateAddress value={created.email} /> this link. Only that address can accept it, signed in with an emailed link to it or its Google account.</>
+      : <>No email was sent. Only <PrivateAddress value={created.email} /> can accept it, signed in with an emailed link to that address or its Google account.</>} footer={<Button variant="primary" onClick={close}>Done</Button>}>
     <div className="ui-secret"><SecretCode>{created.acceptUrl}</SecretCode><CopyButton value={created.acceptUrl} label="Copy invitation link" /></div>
     {canShare() && <Button className="settings-share" onClick={() => void shareLink(created.acceptUrl, toast)}><Share size={16} />Share link</Button>}
   </Dialog>
-  // Nothing is emailed: the button says it makes a link, and the next step shows it to share.
-  return <Dialog open={open} onOpenChange={next => { if (!create.isPending) { if (next) onOpenChange(true); else close() } }} title="Invite teammate" footer={<><Button disabled={create.isPending} onClick={close}>Cancel</Button><Button variant="primary" loading={create.isPending} type="submit" form="invite-member">Create invitation link</Button></>}>
+  // The invitee is emailed the link when the installation sends account email; the next step says whether, and shows it.
+  return <Dialog open={open} onOpenChange={next => { if (!create.isPending) { if (next) onOpenChange(true); else close() } }} title="Invite teammate" footer={<><Button disabled={create.isPending} onClick={close}>Cancel</Button><Button variant="primary" loading={create.isPending} type="submit" form="invite-member">Invite</Button></>}>
     <form id="invite-member" className="stack" onSubmit={submit} noValidate>
       <MutationError error={create.error} />
       <Field label="Their sign-in email" htmlFor="invite-email" error={emailError || fieldError(create.error, 'email')}><Input id="invite-email" type="email" value={email} onChange={event => { setEmail(event.target.value); if (emailError) setEmailError(''); if (create.error) create.reset() }} autoFocus required disabled={create.isPending} placeholder="name@company.com" /></Field>

@@ -5059,7 +5059,11 @@ export type WorkspaceMember = {
 
 export type CreatedWorkspaceInvitation = WorkspaceInvitation & {
     /**
-     * What to do next, for people and agents: no email is sent, so share acceptUrl with the invitee.
+     * Whether the invitation was emailed to the invitee, with acceptUrl. False when this installation sends no account email or the day’s invitation emails are used: share acceptUrl yourself.
+     */
+    emailed: boolean;
+    /**
+     * What to do next, for people and agents: whether the invitee was emailed, or acceptUrl is yours to share.
      */
     nextStep: string;
 };

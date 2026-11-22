@@ -2985,19 +2985,15 @@ const retiredDispatchJob: JobHandler = async () => {};
 // Job rows of the previous release's prepare/expand/finish chain continue as runs of the same campaign.
 export const jobHandlers: Record<string, JobHandler> = { 'sending.cancelPage':cancelPageJob, 'sending.campaignStats': campaignStatsJob, 'sending.release': releaseScheduled, 'email.dispatch': retiredDispatchJob, 'campaign.run': runCampaign, 'campaign.prepare': runCampaign, 'campaign.expand': runCampaign, 'campaign.finish': runCampaign };
 /**
- * Nightmail's own notices (standing changes) from a platform workspace, through the ordinary admission path: one
- * transactional email per recipient, deduplicated by the idempotency key, charged to that workspace like any send.
+ * One of Nightmail's own account emails (src/account-notices.ts) from the platform workspace, through the ordinary
+ * admission path: one transactional email per recipient, deduplicated by the idempotency key, charged to that workspace
+ * like any send, with the product's name as the sender's. Its origin names the committed row it is about: standing:<event id>, billing:<notice id> or
+ * notice:<account notice id>. It dispatches only from the configured platform workspace and only while that row exists
+ * (the dispatcher's claim); it is not a general system bypass.
  */
-/**
- * An internal notice from the platform workspace about one committed standing event or billing notice. Its origin,
- * standing:<event id> or billing:<notice id>, dispatches only from the configured platform workspace and only while that
- * row exists (the dispatcher's claim);
- * it is not a general system bypass. Idempotent per event.
- */
-export async function sendSystemEmail(runtime: Runtime, workspaceId: string, mail: { from: string; to: string[]; subject: string; text: string; idempotencyKey: string } & ({ standingEvent: string } | { billingNotice: string })) {
-  // The origin names the committed row the notice is about: a standing event, or a billing notice (billing_notices).
-  const origin = 'standingEvent' in mail ? `standing:${mail.standingEvent}` : `billing:${mail.billingNotice}`;
+export async function sendSystemEmail(runtime: Runtime, workspaceId: string, mail: { from: string; to: string[]; subject: string; text: string; html?: string; idempotencyKey: string } & ({ standingEvent: string } | { billingNotice: string } | { notice: string })) {
+  const origin = 'standingEvent' in mail ? `standing:${mail.standingEvent}` : 'billingNotice' in mail ? `billing:${mail.billingNotice}` : `notice:${mail.notice}`;
   const a: Actor = { workspaceId, keyId: origin, permissions: ['send'], domains: [], credential: 'apiKey' };
-  const input = BatchInput.parse({ emails: mail.to.map(to => ({ from: mail.from, to: [to], subject: mail.subject, text: mail.text, kind: 'transactional' })) });
+  const input = BatchInput.parse({ emails: mail.to.map(to => ({ from: mail.from, fromName: productName, to: [to], subject: mail.subject, text: mail.text, ...(mail.html ? { html: mail.html } : {}), kind: 'transactional' })) });
   return admitEmails({ runtime, path: '/v1/emails/batch', key: idempotencyKey(mail.idempotencyKey) }, a, input);
 }

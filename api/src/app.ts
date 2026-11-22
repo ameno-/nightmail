@@ -306,6 +306,8 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     const field = responseError.logField !== undefined ? responseError.logField || undefined : schemaFields(responseError.field);
     // The request line (logRequest) carries the code; an unexpected failure also logs its stack.
     c.set('failure', { code: responseError.code, field, databaseCode: databaseCodeOf(error) });
+    // Best effort, and never this request's failure: limitReached logs what it could not queue.
+    if (responseError.limitReachedFor) await (await import('./account-notices.js')).limitReached(c.env, responseError.limitReachedFor).catch(() => {});
     if (!known && responseError.status >= 500) logError(error, { requestId, route: routeOf(c), code: responseError.code, status: responseError.status });
     if (responseError.required) c.header(requiredHeader, requiredHeaderValue(responseError.required));
     if (responseError.resetAt) c.header('Retry-After', new Date(responseError.resetAt).toUTCString());

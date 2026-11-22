@@ -6,8 +6,8 @@ import { addresses, productName } from './brand.js';
 // same words; the HTML part sets a line length, the link as a button and its own dark colours, and nothing else (no
 // images, no background). A notice never says how a check works: no scores, rates, thresholds or provider names.
 //
-// Proposal (emails/customer-notices): nothing sends these yet. standing.ts (noticeText) and billing/notify.ts
-// (noticeEmail) still write today's emails; scripts/render-notices.ts renders both sets side by side.
+// The jobs that send them: standing.notify (standing.ts), billing.notify (billing/notify.ts) and account.notify
+// (account-notices.ts). scripts/render-notices.ts renders every one in a mail client, for review.
 
 export type Notice = { subject: string; text: string; html: string };
 type Parts = { subject: string; lines: string[]; action: { label: string; url: string }; why: string };
@@ -17,6 +17,7 @@ const escapeHtml = (v: string) => v.replaceAll('&', '&amp;').replaceAll('<', '&l
 export const oneLine = (v: string, fallback: string) => v.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, 100) || fallback;
 const day = (value: Date) => value.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
 const count = (value: number) => value.toLocaleString('en-US');
+const owes = (workspace: string, owed: string, since: Date | null) => since ? `${workspace} has owed ${owed} since ${day(since)}.` : `${workspace} owes ${owed}.`;
 
 // The dashboard's ink, muted text and primary button (app/src/styles/tokens.css), light and dark. Colours a client
 // can't override stay readable on its own canvas: the page sets no background.
@@ -38,16 +39,18 @@ export function notice(p: Parts): Notice {
 
 type Workspace = { workspace: string };
 export type NoticeInput =
-  | Workspace & { kind: 'paused' | 'restricted' | 'warned' | 'resumed' | 'limit_reached' }
+  | Workspace & { kind: 'paused' | 'restricted' | 'warned' | 'limit_reached' }
+  /** limit: false for a workspace no daily limit applies to (exempt), which is told nothing about one. */
+  | Workspace & { kind: 'resumed'; limit?: boolean }
   | Workspace & { kind: 'campaign_paused'; campaign: { id: string; name: string } }
   | Workspace & { kind: 'domain_unverified'; domain: { id: string; name: string } }
   | Workspace & { kind: 'evaluation_finished'; limited: boolean }
   | Workspace & { kind: 'low_balance'; balance: string; emails: number }
   | Workspace & { kind: 'out_of_credit'; receivingUntil: Date | null }
   | Workspace & { kind: 'recharge_failed'; last4: string | null; decline: string; balance: string }
-  | Workspace & { kind: 'receive_hold_soon'; owed: string; since: Date; holdAt: Date }
-  | Workspace & { kind: 'receive_held'; owed: string; since: Date }
-  | Workspace & { kind: 'credit_expiring'; amount: string; expiresAt: Date }
+  | Workspace & { kind: 'receive_hold_soon'; owed: string; since: Date | null; holdAt: Date | null }
+  | Workspace & { kind: 'receive_held'; owed: string; since: Date | null }
+  | Workspace & { kind: 'credit_expiring'; amount: string; expiresAt: Date | null }
   | Workspace & { kind: 'invitation'; inviter: { name: string; email: string }; role: 'owner' | 'admin' | 'member'; expiresAt: Date; acceptUrl: string }
   | { kind: 'waitlist_admitted' };
 export type NoticeKind = NoticeInput['kind'];
@@ -75,8 +78,8 @@ export function customerNotice(origin: string, n: NoticeInput): Notice {
       'The dashboard shows which mail caused it. The warning clears on its own once things improve.'] });
     case 'resumed': return notice({ subject: `Sending has resumed for ${w}`, action: dashboard, why: members, lines: [
       `Sending from ${w} is on again.`,
-      'New mail goes out as usual, and mail that was still held is being sent. For the next two days the daily limit may be lower than before.',
-      'The dashboard shows the limit.'] });
+      `New mail goes out as usual, and mail that was still held is being sent.${n.limit === false ? '' : ' For the next two days the daily limit may be lower than before.'}`,
+      ...(n.limit === false ? [] : ['The dashboard shows the limit.'])] });
     case 'limit_reached': return notice({ subject: `${w} has reached its daily sending limit`, action: dashboard, why: members, lines: [
       `${w} has sent as much mail as its daily limit allows.`,
       'New mail is refused for now. Room frees up over the next 24 hours, and mail already accepted is still delivered.',
@@ -88,7 +91,7 @@ export function customerNotice(origin: string, n: NoticeInput): Notice {
         'The dashboard shows the limit and what would raise it.'] }
       : { subject: `${w} has passed its evaluation`, action: dashboard, why: members, lines: [
         `The first emails from ${w} were delivered well, so its starting limit is lifted.`,
-        'You can send more now. Over the next few days the amount grows on its own as your mail keeps being delivered.',
+        'You can send more now. Over the next day the amount grows on its own as your mail keeps being delivered.',
         'The dashboard shows how much you can send right now.'] });
     case 'campaign_paused': {
       const name = oneLine(n.campaign.name, 'A campaign');
@@ -116,17 +119,17 @@ export function customerNotice(origin: string, n: NoticeInput): Notice {
       `${productName} could not charge the card${n.last4 ? ` ending ${n.last4}` : ''}: ${n.decline}.`,
       `Auto-recharge is off until the card is updated. The balance is ${n.balance}, and sending continues until it reaches $0.`,
       'Update the card in Billing, then turn auto-recharge back on.'] });
-    case 'receive_hold_soon': return notice({ subject: `Received mail for ${w} will be held from ${day(n.holdAt)}`, action: billing('Add credit'), why: members, lines: [
-      `${w} has owed ${n.owed} since ${day(n.since)}.`,
-      `Sending is paused. From ${day(n.holdAt)}, new received mail is stored but not delivered to inboxes, webhooks or IMAP. Nothing is deleted.`,
+    case 'receive_hold_soon': return notice({ subject: `Received mail for ${w} will be held ${n.holdAt ? `from ${day(n.holdAt)}` : 'soon'}`, action: billing('Add credit'), why: members, lines: [
+      owes(w, n.owed, n.since),
+      `Sending is paused. ${n.holdAt ? `From ${day(n.holdAt)}` : 'Soon'}, new received mail is stored but not delivered to inboxes, webhooks or IMAP. Nothing is deleted.`,
       'Add credit in Billing before then and nothing is held.'] });
     case 'receive_held': return notice({ subject: `Received mail for ${w} is being held`, action: billing('Add credit'), why: members, lines: [
-      `${w} has owed ${n.owed} since ${day(n.since)}.`,
+      owes(w, n.owed, n.since),
       'New received mail is stored but not delivered to inboxes, webhooks or IMAP. Earlier mail stays readable, and nothing is deleted.',
       'Add credit in Billing and held mail is delivered in the order it arrived.'] });
-    case 'credit_expiring': return notice({ subject: `${n.amount} of credit for ${w} expires on ${day(n.expiresAt)}`, action: billing('Open Billing'), why: members, lines: [
+    case 'credit_expiring': return notice({ subject: `${n.amount} of credit for ${w} expires ${n.expiresAt ? `on ${day(n.expiresAt)}` : 'soon'}`, action: billing('Open Billing'), why: members, lines: [
       `${n.amount} of a top-up to ${w} is still unused, and prepaid credit expires 12 months after purchase.`,
-      `Nothing changes for your mail. Usage spends the oldest credit first. Whatever is left of this credit on ${day(n.expiresAt)} leaves the balance and is not refunded.`,
+      `Nothing changes for your mail. Usage spends the oldest credit first. Whatever is left of this credit ${n.expiresAt ? `on ${day(n.expiresAt)}` : 'then'} leaves the balance and is not refunded.`,
       'There is nothing you need to do. Billing shows the balance.'] });
     case 'invitation': {
       const inviter = oneLine(n.inviter.name, n.inviter.email);

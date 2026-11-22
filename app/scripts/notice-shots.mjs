@@ -39,7 +39,7 @@ const browser = await chromium.launch({ headless: true, ...(process.env.NOTICE_C
 const context = await browser.newContext({ viewport: { width: 1000, height: 900 }, deviceScaleFactor: 2 })
 const page = await context.newPage()
 for (const shot of shots) {
-  const email = emails.find(candidate => candidate.name === shot.email && (shot.file.startsWith('today-') || shot.file === 'template-today.png' ? candidate.set === 'today' : candidate.set === 'proposed'))
+  const email = emails.find(candidate => candidate.name === shot.email)
   await page.setContent(frame(shot, email), { waitUntil: 'load' })
   const inner = page.frames().find(candidate => candidate !== page.mainFrame())
   // The message's own height, and its canvas under the header too.
@@ -67,16 +67,10 @@ async function sheet(file, html, width) {
   await sheetContext.close()
 }
 const four = name => ['-desktop', '-desktop-dark'].map(suffix => image(name + suffix + '.png', 380)).join('') + ['-phone', '-phone-dark'].map(suffix => image(name + suffix + '.png', 186)).join('')
-const proposed = emails.filter(email => email.set === 'proposed'), today = emails.filter(email => email.set === 'today')
-await sheet('contact-sheet.png', sheetPage('Customer emails: the proposed set', 'Each email in Apple Mail on a desktop and an iPhone, light and dark, rendered by the product’s own client emulation. Sample workspace: Driftwood.',
-  `<div class="grid">${proposed.map(email => item(email.title, 'To ' + email.to, four(email.name))).join('')}</div><h2>What is sent today, for comparison (text only, as Gmail shows it)</h2><div class="grid">${today
-    .map(email => item(email.title, email.subject, image('today-' + email.name + '.png', 380))).join('')}</div>`), 2520)
-await sheet('contact-sheet-today.png', sheetPage('Customer emails: what is sent today', 'Each email exactly as today’s code writes it (text only), as Gmail shows it on a desktop.',
-  `<div class="grid">${today.map(email => item(email.title, email.subject, image('today-' + email.name + '.png', 560))).join('')}</div>`), 1880)
+await sheet('contact-sheet.png', sheetPage('Customer emails', 'Each account email in Apple Mail on a desktop and an iPhone, light and dark, built by src/notices.ts and rendered by the product’s own client emulation. Sample workspace: Driftwood.',
+  `<div class="grid">${emails.map(email => item(email.title, 'To ' + email.to, four(email.name))).join('')}</div>`), 2520)
 const clientShots = shots.filter(shot => shot.file.startsWith('client-'))
-await sheet('template-sheet.png', sheetPage('The template: today, and the proposed change', 'The paused email. Top: today’s text, the proposed words as text only, and the proposed words with the small HTML part, all in Gmail. Below: the HTML part in other clients.',
-  `<div class="grid">${[['template-today.png', 'Today', 'Text only, with rates and thresholds'], ['template-text-part.png', 'Proposed, text part', 'What a text-only client shows'], ['template-html-part.png', 'Proposed, HTML part', 'The same words']]
-    .map(([file, heading, caption]) => item(heading, caption, image(file, 560))).join('')}</div><h2>The proposed paused email in other clients</h2><div class="grid">${clientShots
-    .map(shot => item(CLIENT[shot.client] + (shot.theme === 'dark' ? ', dark' : ''), shot.device === 'mobile' ? 'Phone' : 'Desktop', image(shot.file, shot.device === 'mobile' ? 240 : 480))).join('')}</div>`), 1880)
+await sheet('clients-sheet.png', sheetPage('The paused email in other clients', 'Its text part as a text-only client shows it, and its HTML part in Gmail, Outlook, Yahoo Mail and Samsung Email.',
+  `<div class="grid">${clientShots.map(shot => item(shot.part === 'text' ? 'Text part' : CLIENT[shot.client] + (shot.theme === 'dark' ? ', dark' : ''), shot.device === 'mobile' ? 'Phone' : 'Desktop', image(shot.file, shot.device === 'mobile' ? 240 : 480))).join('')}</div>`), 1880)
 await browser.close()
-console.log(shots.length + ' pictures and 3 sheets in ' + target)
+console.log(shots.length + ' pictures and 2 sheets in ' + target)

@@ -513,6 +513,10 @@ async function saveObservation(db:DbExecutor,row:HostedDomain,wid:string,ses:Ide
       await apply();
     }
   } else await apply();
+  // The grace after its DNS records went missing has run out: mail from the domain is refused from here on, and its
+  // owners are told once (an identity that SES revoked or lost is another story, and has no email).
+  if (row.sending_state==='lost' && next.claim.sending_state==='pending' && !evidence.definitive && !evidence.unavailable && !evidence.sendingRevoked)
+    await (await wrapModuleLoad(() => import('./account-notices.js'))).domainUnverified(db,wid,{id:row.id,name:row.name,lostSince:row.lost_since ? String(row.lost_since) : null});
   if (row.connection.legacy===false) return next.claim;
   if (byo && (next.claim.receiving_host!==row.receiving_host || next.hosts.some((s,i)=>s.status==='provisioning' || routes(s.status)!==routes(input[i]!.status)))) await (await wrapModuleLoad(() => import('./mailbox-setup.js'))).queueReconcile(db,wid,row.region);
   return next.claim;
