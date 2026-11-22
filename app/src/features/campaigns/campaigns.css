@@ -239,7 +239,7 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 /* Review: the same bar, then recipients, the message and delivery with room between them. */
 .campaign-review { display: flex; flex-direction: column; min-height: 100%; }
 .campaign-review__body { padding: var(--space-32); }
-/* Review: four numbered stages (recipients, message, sendability, send), one open at a time. The open stage fills
+/* Review: four numbered stages (recipients, message, checks, send), one open at a time. The open stage fills
    the page; the others stay one header tall, saying what is set. Next moves on, as in Mailchimp's and beehiiv's flows. */
 .campaign-review--draft { flex: 1; min-height: 0; }
 .review-stages { display: flex; flex-direction: column; gap: var(--space-12); flex: 1; min-height: 0; padding: var(--space-24) var(--space-32); }
@@ -268,15 +268,13 @@ button.review-stage__head { cursor: pointer; }
 .review-facts { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: var(--space-8) var(--space-12); margin: 0; font-size: var(--text-sm); }
 .review-facts dt { color: var(--color-muted); }
 .review-facts dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
-.review-score { margin: 0; font-size: var(--text-md); }
-.review-score strong { font-size: 28px; font-weight: 600; letter-spacing: -.02em; }
 .review-warn { color: var(--color-warning); }
 .review-detail { margin: 0; color: var(--color-muted); font-size: var(--text-sm); }
 .review-detail a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
 /* A finger gets a 44 px tall target without moving the line. */
 @media (pointer: coarse) { .review-detail a { position: relative; } .review-detail a::after { content: ''; position: absolute; inset: -14px -8px; } }
 .review-actions { display: flex; gap: var(--space-8); }
-.review-fixes { display: flex; flex-direction: column; gap: var(--space-8); max-width: 720px; margin: 0; padding-left: 1.2em; }
+.review-stage .ss { max-width: 720px; }
 .review-stage .ui-tabs { align-self: flex-start; }
 .review-stage .ui-field .ui-input { max-width: 320px; }
 @media (max-width: 899px) {

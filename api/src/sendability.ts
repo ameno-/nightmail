@@ -36,8 +36,8 @@ function rendering(issues: Issue[], add:Add) {
 function authentication(d: CheckContext['domain'], host:string, add:Add) {
   if (!d || d.dmarc===undefined || d.dkim===undefined) add('auth-unknown','info',0,'Authentication evidence is incomplete','There is no complete, current cached observation for the exact From domain. Unknown checks are not scored.',`Check ${host} in Domains.`);
   if (!d) return;
-  // Every problem with the domain's records is fixed in one place, so they share one sentence.
-  const records=d.verified ? `Check the DNS records for ${host}.` : `Finish setting up ${host}.`;
+  // Every problem with the domain's records is fixed in one place, its page, so they share one sentence.
+  const records=`Finish setting up ${host}.`;
   if (d.fromSpf===false) add('spf-policy','info',3,'Review the From domain SPF policy','The most recent cached DNS check did not find a single restrictive SPF policy here. SPF authenticates the envelope domain; this is not a delivery verdict.',records);
   if (!d.verified || d.dkim===false) add('dkim','error',45,'Sender identity is not ready','The exact domain is not verified for sending or its aligned DKIM signing is not ready.',records);
   if (d.mailFrom===false) add('mail-from','warning',8,'No custom MAIL FROM','The default SES envelope does not align with the From domain. DKIM can still satisfy DMARC.',records);

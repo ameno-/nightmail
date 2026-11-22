@@ -13,7 +13,7 @@ import './email-insight.css'
 // "Will this email land and look right": Checks, the sendability check (POST /v1/emails/check) as at most three things
 // to fix with everything technical behind one row, and the preview: the email as sent and as each client emulation shows
 // it (POST /v1/emails/preview), side by side where the window has room. A sent email's page shows both; a campaign's
-// review reads the check (useSendability, topFixes).
+// review shows Checks.
 export type InsightSource = { kind: 'email'; id: string; html: boolean } | { kind: 'campaign'; id: string; revision: number }
 type Theme = 'light' | 'dark'
 type Check = UseQueryResult<SendabilityReport, Error>
@@ -37,8 +37,8 @@ const ranked = (report: SendabilityReport, findings = report.findings) => {
   const weight = (category: SendabilityCategory) => report.categories.find(item => item.id === category)?.weight ?? 0
   return [...findings].sort((a, b) => severityRank[a.severity] - severityRank[b.severity] || weight(b.category) - weight(a.category))
 }
-/** The fixes to make first: problems, each sentence once (two findings can call for the same fix). */
-export const topFixes = (report: SendabilityReport, count = 3, findings = report.findings) => {
+// The fixes to make first: problems, each sentence once (two findings can call for the same fix).
+const topFixes = (report: SendabilityReport, count = 3, findings = report.findings) => {
   const said = new Set<string>()
   return ranked(report, findings).filter(finding => finding.severity !== 'info' && !said.has(finding.fix) && said.add(finding.fix)).slice(0, count)
 }
@@ -74,9 +74,14 @@ const plural = (count: number, word: string) => `${count} ${word}${count === 1 ?
 // preview shows the client compatibility lint, so that finding stays out.
 const fixesOf = (report: SendabilityReport) => topFixes(report, Infinity, report.findings.filter(finding => !PREVIEW_RULES.has(finding.ruleId)))
 const toFix = (count: number) => count ? `${count} to fix` : 'Nothing to fix'
-// Where a fix is made, where the dashboard has the place: the From domain's page and the workspace's settings. A fix in
-// the message or in how it is sent has none.
-const fixLink = (finding: SendabilityFinding, report: SendabilityReport) => finding.fixIn === 'domain' ? (report.domainId ? `/domains/${encodeURIComponent(report.domainId)}` : '/domains') : finding.fixIn === 'workspace' ? '/settings#general' : null
+/** How many things there are to fix, and the same in a few words, as a phone's chip and a campaign's review say it:
+ *  "3 to fix" or "Nothing to fix". */
+export const checksCount = (report: SendabilityReport) => fixesOf(report).length
+export const checksSummary = (report: SendabilityReport) => toFix(checksCount(report))
+// Where a fix is made, where the dashboard has the place: the From domain's page, the workspace's settings, and for a
+// draft its editor (`message`). A fix in a sent message or in how it is sent has none.
+const fixLink = (finding: SendabilityFinding, report: SendabilityReport, message?: string) => finding.fixIn === 'domain' ? (report.domainId ? `/domains/${encodeURIComponent(report.domainId)}` : '/domains')
+  : finding.fixIn === 'workspace' ? '/settings#general' : finding.fixIn === 'message' ? message ?? null : null
 
 function Score({ report }: { report: SendabilityReport }) {
   return <Tooltip content={SCORE_NOTE}><span className="ss__score" tabIndex={0} role="img" aria-label={`Score ${report.score} of 100, grade ${report.grade}`}>
@@ -86,9 +91,10 @@ function Score({ report }: { report: SendabilityReport }) {
 
 /**
  * Up to three things to fix, each a link where the dashboard has the place to fix it, or Nothing to fix; then one
- * Technical details row with the score, its categories and every finding. `titled`: false where a sheet's title names it.
+ * Technical details row with the score, its categories and every finding. `titled`: false where a sheet's title or a
+ * step names it. `message`: where a draft's own content is edited (a campaign's editor); a sent email has no such place.
  */
-export function Checks({ check, titled = true }: { check: Check; titled?: boolean }) {
+export function Checks({ check, titled = true, message }: { check: Check; titled?: boolean; message?: string }) {
   const id = useId()
   const head = titled ? <h2 id={id} className="ss__title">Checks</h2> : null
   if (check.isPending) return <section className="ss" aria-labelledby={titled ? id : undefined} aria-busy="true">{head}
@@ -98,7 +104,7 @@ export function Checks({ check, titled = true }: { check: Check; titled?: boolea
   const report = check.data, fixes = fixesOf(report).slice(0, 3)
   return <section className="ss" aria-labelledby={titled ? id : undefined}>
     {head}
-    {fixes.length ? <ul className="ss__fixes" aria-label="To fix">{fixes.map(finding => { const to = fixLink(finding, report); return <li key={finding.ruleId}>
+    {fixes.length ? <ul className="ss__fixes" aria-label="To fix">{fixes.map(finding => { const to = fixLink(finding, report, message); return <li key={finding.ruleId}>
       {to ? <Link className="ss__fix" to={to}><span><AddressText text={finding.fix} /></span><ArrowUpRight size={12} aria-hidden="true" /></Link> : <span className="ss__fix"><AddressText text={finding.fix} /></span>}
     </li> })}</ul> : <p className="ss__clear">Nothing to fix</p>}
     <Disclosure title="Technical details" className="ss__technical">

@@ -16,7 +16,7 @@ import {
   StatusBadge, Tabs, useToast,
 } from '../../components/ui'
 import { EmailPreview } from '../../components/EmailPreview'
-import { LOW_SENDABILITY, topFixes, useSendability } from '../../components/EmailInsight'
+import { Checks, checksCount, checksSummary, LOW_SENDABILITY, useSendability } from '../../components/EmailInsight'
 import { date, label, number, percent } from '../../lib/format'
 import { CampaignAudienceSkeleton, CampaignRouteSkeleton } from './skeletons'
 import { CampaignPacing, CampaignProgress, SummaryLine, campaignDisplayStatus, campaignLogs, campaignPollInterval, maxPerDay, maxRatePercent, minPerDay, minRatePercent, perDayError, ratePercentError } from './CampaignProgress'
@@ -734,8 +734,9 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
   const finished = campaignFinished(campaign)
   const cancellable = !draft && !campaign.archivedAt && !scheduledView && (['preparing', 'sending', 'paused'].includes(campaign.status) || campaignResumable(campaign))
   const sendability = useSendability(draft && !readinessError ? { kind: 'campaign', id: campaign.id, revision: campaign.revision ?? 0 } : null)
-  const lowScore = Boolean(sendability.data && sendability.data.score < LOW_SENDABILITY)
-  const scoreNote = lowScore ? ` Its sendability score is ${sendability.data!.score} of 100.` : ''
+  // The step is ticked when there is nothing to fix; the send confirmation mentions the checks only when the score is low.
+  const toFix = sendability.data ? checksCount(sendability.data) : 0
+  const scoreNote = sendability.data && sendability.data.score < LOW_SENDABILITY && toFix ? ` Checks found ${checksSummary(sendability.data)}.` : ''
   const previewHtml = (html: string) => keys.length ? html.replace(/\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/g, (_, key: string) => escapeHtml(fallbacks[key] ? String(fallbacks[key]) : sampleValue(key))) : html
   // What the Write step still needs, each named, and what this step needs: shown under the send button.
   const missing = [!campaign.name.trim() && 'a name', !campaign.subject.trim() && 'a subject', !emailIsValid(campaign.fromEmail.trim()) && 'a sender', !campaign.html.trim() && 'content'].filter(Boolean) as string[]
@@ -759,8 +760,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
       : !audience.data ? `${listName ?? 'Your list'}${audience.isError ? ' · couldn’t count' : ''}`
       : eligible ? `${number(eligible)} ${eligible === 1 ? 'contact' : 'contacts'} in ${listName}${segmentLabel}`
       : <span className="review-warn">Nobody in {listName} can receive it yet</span>
-    const fixes = sendability.data ? topFixes(sendability.data, 5) : []
-    const scoreSummary = sendability.data ? `${sendability.data.score} of 100 · ${fixes.length ? `${fixes.length} ${fixes.length === 1 ? 'suggestion' : 'suggestions'}` : 'looks good'}` : missing.length ? 'After the message is complete' : !campaign.listId ? 'After you choose a list' : 'Checking…'
+    const scoreSummary = sendability.data ? checksSummary(sendability.data) : missing.length ? 'After the message is complete' : !campaign.listId ? 'After you choose a list' : 'Checking…'
     const scheduledAt = mode === 'schedule' && scheduled && !scheduleError(scheduled) ? parseUtc(scheduled)!.toISOString() : null
     const messageSummary = missing.length ? `Add ${missing.join(', ').replace(/, ([^,]*)$/, ' and $1')} in Write` : campaign.subject
     const whenSummary = mode === 'now' ? 'Send now' : scheduledAt ? utcLabel(scheduledAt) : 'Pick a time'
@@ -789,11 +789,8 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
             <div className="review-message__preview">{seen.has('message') && <CampaignRenderedPreview campaign={campaign} transform={previewHtml} />}</div>
           </div>
         </ReviewStage>
-        <ReviewStage n={3} id="score" title="Sendability" open={openRow === 'score'} done={Boolean(sendability.data && !lowScore)} onOpen={() => setOpenRow('score')} summary={scoreSummary} footer={next('score')}>
-          {sendability.data ? <>
-            <p className="review-score"><strong>{sendability.data.score}</strong><span className="muted"> of 100 · grade {sendability.data.grade}</span></p>
-            {fixes.length ? <ol className="review-fixes">{fixes.map(finding => <li key={finding.ruleId}>{finding.fix}</li>)}</ol> : <p className="review-detail">Nothing to fix.</p>}
-          </> : <p className="review-detail">{scoreSummary}.</p>}
+        <ReviewStage n={3} id="score" title="Checks" open={openRow === 'score'} done={Boolean(sendability.data && !toFix)} onOpen={() => setOpenRow('score')} summary={scoreSummary} footer={next('score')}>
+          {sendability.data ? <Checks check={sendability} titled={false} message={`${campaignRoute(campaign, 'edit')}#message`} /> : <p className="review-detail">{scoreSummary}.</p>}
         </ReviewStage>
         <ReviewStage n={4} id="when" title="Send" open={openRow === 'when'} done={false} onOpen={() => setOpenRow('when')} summary={whenSummary} footer={<>
           {notes.length > 0 && <ul className="campaign-notes">{notes.map(([tone, text], index) => <li key={index} className="campaign-note" data-tone={tone} role={tone === 'danger' ? 'alert' : undefined}><span>{text}</span></li>)}</ul>}

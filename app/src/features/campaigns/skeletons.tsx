@@ -90,7 +90,7 @@ export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 
   return <div className="campaign-review campaign-review--draft">
     <CampaignBar title={<h1 className="studio-title"><SkeletonText width={220} lineHeight={24} /></h1>} actions={<SkeletonText width={65} lineHeight={20} />} />
     <LoadingRegion label="Loading campaign review" className="review-stages">
-      {(['Recipients', 'Message', 'Sendability', 'Send'] as const).map((title, index) => <section className="review-stage" data-open={index === 0 || undefined} key={title}>
+      {(['Recipients', 'Message', 'Checks', 'Send'] as const).map((title, index) => <section className="review-stage" data-open={index === 0 || undefined} key={title}>
         <div className="review-stage__head"><span className="campaign-steps__mark review-stage__mark" aria-hidden="true">{index + 1}</span><span className="review-stage__title">{title}</span><span className="review-stage__summary"><SkeletonText width={140} /></span></div>
         {index === 0 && <div className="review-stage__body"><div className="review-stage__content"><div className="campaign-audience-picker">
           <Field label="List" htmlFor="campaign-list-loading"><Select id="campaign-list-loading" aria-label="Recipient list" value="" onValueChange={() => {}} options={[{ value: '', label: 'Loading lists…' }]} disabled /></Field>
