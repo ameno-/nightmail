@@ -15,6 +15,7 @@ import { mxResourceName, POOL_INSTALLATION, setupResources } from './ses-setup.j
 import { forDelivery, type ReadyConnection } from './provider-credentials.js';
 import { wakeWebhooks } from './jobs.js';
 import { screenSnapshot, type CampaignScreen, type ScreenCall } from './screen.js';
+import { flushScreenCalls, outbound } from './screen-calls.js';
 import { SEND_LIMITS } from './send-limits.js';
 import { SesBodyError } from './ses-body.js';
 import { sendReservation, withMemory } from './isolate-memory.js';
@@ -901,7 +902,7 @@ function pacedSender(gate: GateState, options: DispatcherOptions, pacing: Pacing
       counters.timings.pace = (counters.timings.pace ?? 0) + Date.now() - queuedAt;
       reserve(gate, cost(item), options.shard, pacing);
       const sendAt = Date.now();
-      item.trace.paceMs = sendAt - queuedAt;
+      item.trace.paceMs = sendAt - queuedAt; outbound.ses++;
       sendOne(item.owner.runtime, item.owner.a, item.owner.ses, item).then(outcome => {
         item.trace.sesMs = Date.now() - sendAt;
         outcome.screened = item.screened; outcome.trace = item.trace;
@@ -925,7 +926,7 @@ function pacedSender(gate: GateState, options: DispatcherOptions, pacing: Pacing
           outcome.requeueAt = new Date(gate.dailyBlockedUntil).toISOString(); counters.quotaRetryAt = gate.dailyBlockedUntil;
         }
         resolve(outcome);
-      }, reject).finally(() => { active--; pump(); });
+      }, reject).finally(() => { active--; outbound.ses--; pump(); });
     } });
     pump();
   });
@@ -1302,6 +1303,9 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
   counters.durationMs = Date.now() - started;
   // Idle polls are silent; runs that moved mail (or hit the budget) are the throughput record.
   if (counters.claimed || !counters.idle) log('info', { code: 'DISPATCH_RUN', accountId: options.accountId, region: options.region, shard: options.shard?.index ?? 0, ...counters, quota: gate.quota?.maxSendRate ?? null, rate: shardRate(gate, options.shard, pacing), braked: (gate.brakeUntil ?? 0) > Date.now() });
+  // The run's classifier requests as content_screen_calls rows (src/screen-calls.ts): now, with every lane and the priority
+  // loop finished and nothing leased waiting on SES. At most two seconds, and never throws.
+  await flushScreenCalls(runtime.db);
   return counters;
 }
 
