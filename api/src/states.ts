@@ -32,12 +32,15 @@ export const countScreened = (verdicts: SQL) => sql`INSERT INTO hosted_screen_ho
   JOIN provider_connections pc ON pc.workspace_id=v.workspace_id AND pc.kind='shared' GROUP BY 1,2,3 ORDER BY 1,2,3
   ON CONFLICT(workspace_id,epoch,hour) DO UPDATE SET screened=s.screened+excluded.screened,rejected=s.rejected+excluded.rejected`;
 export const terminalColumns = sql`id,workspace_id,status,region,simulated,error_code,suppression_reason,dispatch_version`;
-export function terminalEvents(rows: SQL, extra = sql`'{}'::jsonb`) {
+/** `screen`: a content-screen refusal's verdict (ScreenVerdict), for the event's own column (migration 398), which only
+ *  that refusal's statement names. It is never part of the event's data, which is what the published event and each
+ *  webhook payload below are made of. */
+export function terminalEvents(rows: SQL, extra = sql`'{}'::jsonb`, screen?: SQL) {
   return sql`terminal AS (${rows}), emitted AS (
-    INSERT INTO sending_email_events(id,workspace_id,email_id,type,external_id,simulated,data)
+    INSERT INTO sending_email_events(id,workspace_id,email_id,type,external_id,simulated,data${screen ? sql`,screen` : sql``})
     SELECT public.row_id('event'),workspace_id,id,CASE WHEN status='rejected' THEN 'reject' ELSE status END,
       CASE status WHEN 'acceptance_unknown' THEN 'interrupted:'||id||':'||dispatch_version WHEN 'rejected' THEN 'preflight-failed:'||id ELSE status||':'||id END,simulated,
-      jsonb_strip_nulls(jsonb_build_object('status',status,'code',error_code,'suppressionReason',suppression_reason)) || ${extra}
+      jsonb_strip_nulls(jsonb_build_object('status',status,'code',error_code,'suppressionReason',suppression_reason)) || ${extra}${screen ? sql`,${screen}` : sql``}
     FROM terminal ON CONFLICT DO NOTHING RETURNING *
   ), published AS (
     INSERT INTO operation_events(id,workspace_id,type,region,created_at,data)

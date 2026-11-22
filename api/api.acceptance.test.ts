@@ -9133,9 +9133,15 @@ describe('Hosted MCP OAuth and tools', () => {
         assert.deepEqual(lookups, [], 'Live DNS is cached for 5 minutes.');
         error(await send('GET', `/v1/support/domains/${domainId}/health`, stamp(theirs.id)), 404);
 
-        // Route 4: the screen, with spam scores and subjects capped at 120 characters.
+        // Route 4: the screen, with spam scores and subjects capped at 120 characters. These refusals are stored as they
+        // were before the verdict had its own column (in the event's data): the screen's own read still finds it there,
+        // and the reads of an email's events never return it.
         const screen = await get('/v1/support/screen');
         assert.deepEqual([screen.totals.screened, screen.totals.rejected, screen.rejections.length, screen.rejections[0].spamScore, screen.rejections[0].model, screen.rejections[0].subject.length], [50, 2, 2, 0.97, 'jev-fixture', 120]);
+        for (const read of [await get(`/v1/support/events?emailId=${rejected[0]!.id}`), await get(`/v1/support/emails/${rejected[0]!.id}`)]) {
+          const detail = (read.data ?? read.events).find((event: Json) => event.type === 'reject').detail;
+          assert.deepEqual(detail, { code: 'CONTENT_REJECTED_SPAM' });assert.doesNotMatch(JSON.stringify(read), /"screen"|"spam"|jev-fixture|"threshold"/);
+        }
 
         // Route 5: campaigns with the campaign stats computation; content only with consent.
         const campaigns = await get('/v1/support/campaigns');
@@ -32536,7 +32542,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
   });
 
   test('MOCK JEV TRANSPORT: screened live transactional spam is rejected before SES, clean and unscreened mail sends, and an outage fails open', async t => {
-    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+    await simulatedSesFixture(t, async ({ runtime, local, db, run }) => {
       const [{ SESv2Client, SendEmailCommand, GetAccountCommand }, { dispatchDue }, { credentialFingerprint, discoveryTarget }, { loadConfig }] = await Promise.all([
         import('@aws-sdk/client-sesv2'), import('./src/dispatcher.js'), import('./src/ses-region-state.js'), import('./src/config.js'),
       ]);
@@ -32599,6 +32605,19 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const get = async (emailId: string) => ok(await local('GET', `/v1/emails/${emailId}`, undefined, 'live'));
       const events = async (emailId: string) => page(await local('GET', `/v1/emails/${emailId}/events`, undefined, 'live'));
 
+      // A registered webhook for refusals: what it is posted is read here, never sent anywhere.
+      const hook = ok(await local('POST', '/v1/webhooks', { url: `https://example.com/hooks/${unique('refusals')}`, eventTypes: ['email.rejected'] }), 201);
+      const posted: Json[] = [], transport = runtime.webhookFetch;
+      runtime.webhookFetch = async (_url, init) => { posted.push(JSON.parse(String(init.body))); return { status: 204 }; };
+      t.after(() => { runtime.webhookFetch = transport; });
+      // Nothing a sender can read or receive carries the verdict: not its score, the classifier's model or the threshold
+      // (by their keys and the model's name: a score's digits can occur in a timestamp).
+      const verdict = /"screen"|"spam"|"model"|"threshold"|jev-test/;
+      const outward = async (emailId: string) => {
+        const log = ok(await local('GET', `/v1/webhooks/${hook.id}/deliveries`)).data.filter((row: Json) => row.payload.data.emailId === emailId);
+        return { detail: ok(await local('GET', `/v1/emails/${emailId}/detail`, undefined, 'live')), events: await events(emailId), log,
+          delivery: ok(await local('GET', `/v1/webhooks/${hook.id}/deliveries/${log[0].id}`)), posted: posted.filter(event => event.data.emailId === emailId) };
+      };
       const spamSubject = `Join ${marker} on OpenCode`;
       const spam = await send({ subject: spamSubject, html: `<p>You were invited to <b>${marker}</b>.</p>`, screen: true });
       const clean = await send({ subject: 'Join Acme on OpenCode', screen: true });
@@ -32612,7 +32631,34 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.ok(reject, 'A screen rejection records a reject event.');
       assert.equal(reject.data.code, 'CONTENT_REJECTED_SPAM');
       assert.equal(reject.data.providerCalled, false);
-      assert.deepEqual(reject.data.screen, { spam: 0.97, model: 'jev-test', threshold: 0.7 });
+      // The sender learns that the content check refused it (the code above), never how close it was or what judged it.
+      // The verdict is kept for operators and support in the event's own column, not in its data: the email's detail
+      // and events, the published event, the payload posted to the webhook and the delivery log have none of it.
+      const stored = async (emailId: string) => (await db.query(`SELECT v.screen, v.data ? 'screen' AS event, (SELECT bool_or(data ? 'screen') FROM operation_events WHERE workspace_id=v.workspace_id AND data->>'emailId'=v.email_id) AS published,
+        (SELECT bool_or(payload->'data' ? 'screen') FROM operation_deliveries WHERE workspace_id=v.workspace_id AND payload#>>'{data,emailId}'=v.email_id) AS payload FROM sending_email_events v WHERE v.email_id=$1 AND v.type='reject'`, [emailId])).rows[0];
+      assert.deepEqual(await stored(spam), { screen: { spam: 0.97, model: 'jev-test', threshold: 0.7 }, event: false, published: false, payload: false });
+      await run('operation.webhook');
+      const fresh = await outward(spam);
+      assert.deepEqual([fresh.log.length, fresh.posted.length, fresh.posted[0].type, fresh.posted[0].data.code], [1, 1, 'email.rejected', 'CONTENT_REJECTED_SPAM']);
+      assert.doesNotMatch(JSON.stringify(fresh), verdict);
+      // A refusal stored before this change holds the verdict in the event's data and in the copies its webhook was made
+      // of. Stored rows are not rewritten: every read removes it, and so does posting the delivery again.
+      const before = { spam: 0.93, model: 'jev-test', threshold: 0.7 };
+      await db.query(`UPDATE sending_email_events SET data=data||jsonb_build_object('screen',$2::jsonb),screen=NULL WHERE email_id=$1 AND type='reject'`, [spam, JSON.stringify(before)]);
+      await db.query(`UPDATE operation_events SET data=data||jsonb_build_object('screen',$2::jsonb) WHERE data->>'emailId'=$1`, [spam, JSON.stringify(before)]);
+      await db.query(`UPDATE operation_deliveries SET payload=jsonb_set(payload,'{data,screen}',$2::jsonb) WHERE payload#>>'{data,emailId}'=$1`, [spam, JSON.stringify(before)]);
+      assert.deepEqual(await stored(spam), { screen: null, event: true, published: true, payload: true });
+      ok(await local('POST', `/v1/webhooks/${hook.id}/deliveries/${fresh.log[0].id}/retry`), 202);
+      await run('operation.webhook');
+      const old = await outward(spam);
+      assert.deepEqual([old.posted.length, old.posted[1].data.code, old.events.find(event => event.type === 'reject')!.data.code], [2, 'CONTENT_REJECTED_SPAM', 'CONTENT_REJECTED_SPAM']);
+      assert.doesNotMatch(JSON.stringify(old), verdict);
+      // Operators and support still read it, from the column or, for the older row, from its data.
+      const { screenActivity } = await import('./src/deliverability.js');
+      const known = async () => (await screenActivity(runtime.db, runtime.config.workspaceId, new Date(Date.now() - 3_600_000).toISOString())).rejections.find(row => row.emailId === spam);
+      assert.deepEqual([(await known())!.spamScore, (await known())!.model], [0.93, 'jev-test']);
+      await db.query(`UPDATE sending_email_events SET data=data-'screen',screen=$2::jsonb WHERE email_id=$1 AND type='reject'`, [spam, JSON.stringify({ ...before, spam: 0.97 })]);
+      assert.deepEqual([(await known())!.spamScore, (await known())!.model], [0.97, 'jev-test']);
       assert.ok(!sent.includes(spam), 'A rejected message never reaches SES.');
       assert.equal((await get(clean)).status, 'accepted');
       assert.equal((await get(unscreened)).status, 'accepted', 'Unscreened mail is never classified, whatever its content.');

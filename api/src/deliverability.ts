@@ -429,11 +429,12 @@ export function domainFindings(name: string, d: { dns: LiveDns | null; align: Aw
 export async function screenActivity(db: DbExecutor, wid: string, since: string) {
   const { rows: hours } = await db.execute<{ at: string; screened: number; rejected: number }>(sql`SELECT ${bucketOf('hour', sql`hour`)} AS at, sum(screened)::int AS screened, sum(rejected)::int AS rejected
     FROM hosted_screen_hourly WHERE workspace_id = ${wid} AND hour >= date_trunc('hour', ${since}::timestamptz, 'UTC') GROUP BY 1 ORDER BY 1`);
-  // The operator timeline's query (src/operator.ts), for every screen refusal: the reject event carries the spam score.
+  // The operator timeline's query (src/operator.ts), for every screen refusal: the reject event's screen column carries
+  // the verdict (in its data, for one stored before migration 398). Internal: no customer route returns it.
   const { rows: rejections } = await db.execute<{ emailId: string; campaignId: string | null; at: string; subject: string; errorCode: string; spamScore: number | null; model: string | null }>(sql`SELECT e.id AS "emailId",
       e.campaign_id AS "campaignId", e.created_at::text AS at, left(e.subject, ${LIMITS.subject}) AS subject, e.error_code AS "errorCode",
-      (v.data #>> '{screen,spam}')::float8 AS "spamScore", v.data #>> '{screen,model}' AS model
-    FROM sending_emails e LEFT JOIN LATERAL (SELECT data FROM sending_email_events WHERE workspace_id = e.workspace_id AND email_id = e.id AND type = 'reject' ORDER BY created_at DESC LIMIT 1) v ON true
+      (v.screen ->> 'spam')::float8 AS "spamScore", v.screen ->> 'model' AS model
+    FROM sending_emails e LEFT JOIN LATERAL (SELECT coalesce(screen, data -> 'screen') AS screen FROM sending_email_events WHERE workspace_id = e.workspace_id AND email_id = e.id AND type = 'reject' ORDER BY created_at DESC LIMIT 1) v ON true
     WHERE e.workspace_id = ${wid} AND e.created_at >= ${since}::timestamptz AND e.status = 'rejected' AND e.error_code = ANY(${texts(SCREEN_CODES)})
     ORDER BY e.created_at DESC, e.id DESC LIMIT ${LIMITS.rows}`);
   const totals = hours.reduce((s, h) => ({ screened: s.screened + h.screened, rejected: s.rejected + h.rejected }), { screened: 0, rejected: 0 });

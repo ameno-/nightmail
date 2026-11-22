@@ -6,6 +6,8 @@ import { boolean, doublePrecision, index, integer, jsonb, pgTable, primaryKey, s
 
 /** scheduled: a single send waiting for its time (admitted again then); the API shows it as queued with scheduled true. */
 export type EmailStatus = 'scheduled' | 'queued' | 'attempting' | 'accepted' | 'sent' | 'delivered' | 'bounced' | 'complained' | 'rejected' | 'rendering_failed' | 'delayed' | 'suppressed' | 'canceled' | 'acceptance_unknown' | 'simulated';
+/** What the content screen judged when it refused an email: the classifier's score, its model and the threshold then. Internal. */
+export type ScreenVerdict = { spam: number; model: string; threshold: number };
 export type CampaignEditor = { format: 'react-email'; version: 1; document: Record<string, unknown> };
 export type EmailSnapshot = {
   /** Null: known non-test send. A campaign ID: test of that campaign. Missing: legacy/unknown. */
@@ -70,6 +72,8 @@ export const emails = pgTable('sending_emails', {
 export const emailEvents = pgTable('sending_email_events', {
   id: text('id').primaryKey(), ...scope(), emailId: text('email_id').notNull(), type: text('type').notNull(), providerId: text('provider_id'),
   externalId: text('external_id'), data: jsonb('data').$type<Record<string, unknown>>().notNull().default({}), simulated: boolean('simulated').notNull(), createdAt: time('created_at').notNull().defaultNow(),
+  // A content-screen refusal's verdict, for operators and support only (migration 398): never part of data, which the API returns and webhooks are sent.
+  screen: jsonb('screen').$type<ScreenVerdict>(),
 }, t => [index('sending_events_page').on(t.workspaceId, t.emailId, t.id), uniqueIndex('sending_events_external').on(t.workspaceId, t.externalId), index('sending_email_events_retention').on(t.workspaceId, t.createdAt)]);
 export const attachments = pgTable('sending_attachments', {
   uploadedBy: text('uploaded_by'),

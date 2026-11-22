@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql, type SQL } from 'drizzle-orm';
 import type { MiddlewareHandler } from 'hono';
-import { ApiError, denied, errors, hasSessionCookie, id, json, notFound, response, timed, webhookUrlHint, type App, type AppEnv, type Ctx, type DbExecutor, type SupportScope } from './core.js';
+import { ApiError, denied, errors, hasSessionCookie, id, json, notFound, response, timed, webhookUrlHint, withoutVerdict, type App, type AppEnv, type Ctx, type DbExecutor, type SupportScope } from './core.js';
 import { AuditEntry, AuditFilters, auditContext, auditInsert, customerTrail, operatorRequired, requireOperator, userEmail } from './audit.js';
 import { supportRead, withRedactedReply } from './deliverability.js';
 import { GOOD_STANDING, limitRequest, type Step } from './standing-model.js';
@@ -192,7 +192,7 @@ const EmailSummary = z.object({
   providerMessageId: z.string().nullable().describe('The SES message ID, for provider-side lookups.'),
 }).openapi('SupportEmail');
 const DeliveryEvent = z.object({ workspaceId: z.string(), id: z.string(), emailId: z.string(), type: z.string().describe('send, delivery, bounce, complaint, reject, open, click…'), at: z.string(),
-  detail: z.record(z.string(), z.unknown()).describe('The provider’s event detail (bounce type, complaint feedback type, and for a bounce or a delay the receiving server’s reply in diagnosticCode, redacted: addresses are <address>, IPs <ip>, 160 characters).') }).openapi('SupportDeliveryEvent');
+  detail: z.record(z.string(), z.unknown()).describe('The provider’s event detail (bounce type, complaint feedback type, and for a bounce or a delay the receiving server’s reply in diagnosticCode, redacted: addresses are <address>, IPs <ip>, 160 characters). Never the content screen’s verdict on a refused email: getSupportScreen has its score.') }).openapi('SupportDeliveryEvent');
 const WebhookDelivery = z.object({ workspaceId: z.string(), id: z.string(), source: z.enum(['email', 'inbound']).describe('email: sending events; inbound: received mail.'), webhookId: z.string(),
   endpoint: z.string().describe('The last four characters of the URL; URLs are credentials.'), eventType: z.string().nullable(), status: z.string(), attempts: z.number(), lastStatusCode: z.number().nullable(),
   lastError: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() }).openapi('SupportWebhookDelivery');
@@ -400,7 +400,7 @@ export function registerSupport(app: App) {
       const { rows: events } = await db.execute<z.infer<typeof DeliveryEvent>>(sql`SELECT workspace_id AS "workspaceId", id, email_id AS "emailId", type, created_at::text AS at, data AS detail
         FROM sending_email_events WHERE workspace_id = ${sent.workspaceId} AND email_id = ${sent.id} ORDER BY created_at, id LIMIT 100`);
       const { snapshot, ...rest } = sent;
-      return c.json({ ...rest, at: new Date(sent.at).toISOString(), events: events.map(e => ({ ...e, at: new Date(e.at).toISOString(), detail: withRedactedReply(e.detail ?? {}) })), authentication: null,
+      return c.json({ ...rest, at: new Date(sent.at).toISOString(), events: events.map(e => ({ ...e, at: new Date(e.at).toISOString(), detail: withRedactedReply(withoutVerdict(e.detail ?? {})) })), authentication: null,
         content: snapshot ? { subject: snapshot.subject ?? sent.subject, text: snapshot.text ?? null, html: snapshot.html ?? null } : null }, 200);
     }
     // Email reads sending only: an email conversation opens no received message.
@@ -422,7 +422,7 @@ export function registerSupport(app: App) {
         created_at::text AS at_text, id AS key, data AS detail FROM sending_email_events
       WHERE workspace_id = ANY(${ids(list)}) AND created_at >= ${sinceOf(q.since)}::timestamptz ${q.emailId ? sql`AND email_id = ${q.emailId}` : sql``} ${q.type ? sql`AND type = ${q.type}` : sql``}
         ${cursor ? sql`AND (created_at, id) < (${cursor.at}::timestamptz, ${cursor.key})` : sql``} ORDER BY created_at DESC, id DESC LIMIT ${q.limit + 1}`);
-    return c.json({ data: rows.slice(0, q.limit).map(r => ({ ...strip(r), at: new Date(r.at).toISOString(), detail: withRedactedReply(r.detail ?? {}) })), nextCursor: nextCursor(rows, q.limit) }, 200);
+    return c.json({ data: rows.slice(0, q.limit).map(r => ({ ...strip(r), at: new Date(r.at).toISOString(), detail: withRedactedReply(withoutVerdict(r.detail ?? {})) })), nextCursor: nextCursor(rows, q.limit) }, 200);
   });
   app.openapi(createRoute({ ...meta('listSupportWebhookDeliveries', 'Webhook deliveries (sending events and received mail), newest first, with attempts, the last HTTP status and error. Never payloads or URLs.'), path: '/v1/support/webhook-deliveries', request: { query: WorkspaceFilter.extend(Page.shape).extend(Since.shape).extend({
     status: z.enum(['pending', 'delivered', 'failed', 'paused']).optional(), webhookId: z.string().max(120).optional() }) }, responses: { 200: response(z.object({ data: z.array(WebhookDelivery), nextCursor: z.string().nullable() })), ...errors } }), async c => {

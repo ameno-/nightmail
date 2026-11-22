@@ -182,8 +182,9 @@ export function registerOperator(app: App) {
         SELECT date_trunc('hour',e.created_at,'UTC') AS hour,lower(split_part(e.to_addresses->>0,'@',2)) AS domain,(e.status='bounced' OR e.event_outcomes & 4 <> 0)::int AS b,(e.status='complained' OR e.event_outcomes & 8 <> 0)::int AS cpl
         FROM sending_emails e WHERE e.workspace_id=${wid} AND NOT e.simulated AND e.created_at>now()-interval '7 days' AND e.created_at<=${upTo}::timestamptz+interval '1 hour' AND (e.status IN ('bounced','complained') OR e.event_outcomes & 12 <> 0)) x
         GROUP BY hour,domain
-      UNION ALL SELECT e.created_at,'r:'||e.id,'rejection','Screen rejected: '||left(e.subject,120),jsonb_build_object('spam',v.data->'screen'->'spam','model',v.data->'screen'->'model','campaignId',e.campaign_id,'emailId',e.id)
-        FROM sending_emails e LEFT JOIN LATERAL (SELECT data FROM sending_email_events WHERE workspace_id=e.workspace_id AND email_id=e.id AND type='reject' ORDER BY created_at DESC LIMIT 1) v ON true
+      UNION ALL SELECT e.created_at,'r:'||e.id,'rejection','Screen rejected: '||left(e.subject,120),jsonb_build_object('spam',v.screen->'spam','model',v.screen->'model','threshold',v.screen->'threshold','campaignId',e.campaign_id,'emailId',e.id)
+        -- The verdict has its own column; a refusal stored before migration 398 has it in its data.
+        FROM sending_emails e LEFT JOIN LATERAL (SELECT coalesce(screen,data->'screen') AS screen FROM sending_email_events WHERE workspace_id=e.workspace_id AND email_id=e.id AND type='reject' ORDER BY created_at DESC LIMIT 1) v ON true
         WHERE e.workspace_id=${wid} AND e.error_code='CONTENT_REJECTED_SPAM' AND e.created_at>now()-interval '7 days' AND e.created_at<=${upTo}::timestamptz
     ) t ${after ? sql`WHERE (t.ts,t.key)<(${after.at}::timestamptz,${after.key})` : sql``} ORDER BY t.ts DESC,t.key DESC LIMIT ${q.limit + 1}`);
     const page = rows.slice(0, q.limit), last = page.at(-1);

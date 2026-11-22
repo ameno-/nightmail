@@ -4060,7 +4060,8 @@
                 "description": "A delay: when SES stops retrying the delivery (UTC)."
               }
             },
-            "additionalProperties": {}
+            "additionalProperties": {},
+            "description": "What the event recorded. An email the content screen refused says so in code (CONTENT_REJECTED_SPAM) and nothing more: the screen’s score, its model and its threshold are never part of an event or a webhook payload."
           }
         },
         "required": [
@@ -7148,7 +7149,8 @@
                 "description": "A delay: when SES stops retrying the delivery (UTC)."
               }
             },
-            "additionalProperties": {}
+            "additionalProperties": {},
+            "description": "What the event recorded. An email the content screen refused says so in code (CONTENT_REJECTED_SPAM) and nothing more: the screen’s score, its model and its threshold are never part of an event or a webhook payload."
           }
         },
         "required": [
@@ -18410,7 +18412,7 @@
           "detail": {
             "type": "object",
             "additionalProperties": {},
-            "description": "The provider’s event detail (bounce type, complaint feedback type, and for a bounce or a delay the receiving server’s reply in diagnosticCode, redacted: addresses are <address>, IPs <ip>, 160 characters)."
+            "description": "The provider’s event detail (bounce type, complaint feedback type, and for a bounce or a delay the receiving server’s reply in diagnosticCode, redacted: addresses are <address>, IPs <ip>, 160 characters). Never the content screen’s verdict on a refused email: getSupportScreen has its score."
           }
         },
         "required": [

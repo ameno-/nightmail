@@ -15,7 +15,7 @@ import { chargeManualDelivery, claimedWithWebhooks, enqueue, JobDeferred, WEBHOO
 import { applyClaim, connectionReady, domainHosts, receivingSetup, type ReceivingSetup, hostGraceStart, identityOnly, LOST_GRACE_MS, poolReceives, poolSends, transitionClaim, type ClaimEvidence, type ClaimState, type HostEvidence, type HostStatus, type HostWrite, type IdentityFacts, type TenantState, PROOF_LABELS, proofRecordName, type ProofLabel } from './states.js';
 import { jobs } from './db/core.js';
 import { contacts, mergeSuppression } from './db/audience.js';
-import { lasting, RECEIVING_HOST_CHANGE, EmailEventData, WEBHOOK_CHANGE, webhookUrlHint, WebhookUrlHint, readCursor, nextCursor, budgetedRead, readLimit, readLimitNote } from './core.js';
+import { lasting, RECEIVING_HOST_CHANGE, EmailEventData, withoutVerdict, WEBHOOK_CHANGE, webhookUrlHint, WebhookUrlHint, readCursor, nextCursor, budgetedRead, readLimit, readLimitNote } from './core.js';
 import { emails } from './db/sending.js';
 import { sesRegions } from './db/ses-regions.js';
 import { getRegionSettings, resolveRegionRuntime, withRegionSettings } from './ses-region-state.js';
@@ -247,8 +247,11 @@ export async function reencryptWebhookSecrets(db: Database, config: Config): Pro
   return counts;
 }
 
+// A webhook payload as stored may hold the content screen's verdict (payloads from before migration 398): what a caller
+// reads of the delivery log, and what is posted or posted again, never does.
+const outwardEvent = <T extends { data: Record<string, unknown> }>(event: T): T => ({ ...event, data: withoutVerdict(event.data) });
 function visibleDelivery(row: typeof deliveries.$inferSelect, a: Actor) {
-  return deliverySchema.parse(a.permissions.includes('manage') ? row : { ...row, payload: { ...row.payload, data: redactCapabilityData(row.payload.data) } });
+  return deliverySchema.parse({ ...row, payload: outwardEvent(a.permissions.includes('manage') ? row.payload : { ...row.payload, data: redactCapabilityData(row.payload.data) }) });
 }
 
 export async function publishEvent(runtime: Runtime, event: PublishedEvent, wake = true): Promise<void> {
@@ -1734,7 +1737,7 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
   if (inactive) { error = 'APPROVAL_INACTIVE'; retryable = false; }
   else try {
     const url = webhookUrl(runtime, delivery.url), binding = secretBinding(job, delivery.webhook_id), secret = await decrypt(runtime, delivery.encrypted_secret, binding);
-    const body = JSON.stringify(eventSchema.parse(delivery.payload)), timestamp = String(Math.floor(Date.now() / 1000));
+    const body = JSON.stringify(outwardEvent(eventSchema.parse(delivery.payload))), timestamp = String(Math.floor(Date.now() / 1000));
     const signature = await hmac(secret, `${delivery.event_id}.${timestamp}.${body}`);
     const result = await postWebhook(runtime, url, { 'Webhook-Id': delivery.event_id, 'Webhook-Timestamp': timestamp, 'Webhook-Signature': `v1,${signature}`, 'User-Agent': webhookUserAgent, ...(delivery.synthetic ? Object.fromEntries(webhookTestHeaders.map(name => [name, 'true'])) : {}) }, body, delivery.encrypted_headers, binding);
     statusCode = result.status; if (statusCode < 200 || statusCode >= 300) error = 'WEBHOOK_HTTP_ERROR';

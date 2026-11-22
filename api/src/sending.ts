@@ -12,7 +12,7 @@ import { mergeSuppression } from './db/audience.js';
 import { SuppressionReason, EmailEventData, readCursor, nextCursor, budgetedRead, readLimit, readLimitNote } from './core.js';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import type { Attachment } from '@aws-sdk/client-sesv2';
-import { actor, actorMailAccess, ApiError, AudienceSpec, denied, unrestrictedRequired, uploadKey, chargeRenderBudget, digest, errors, getSes, isSimulatedSes, id, rowId, IdParams, json, lazyModule, log, ModuleLoadError, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, timed, wrapModuleLoad, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Runtime, type Storage } from './core.js';
+import { actor, actorMailAccess, ApiError, AudienceSpec, denied, unrestrictedRequired, uploadKey, chargeRenderBudget, digest, errors, getSes, isSimulatedSes, id, rowId, IdParams, json, lazyModule, log, ModuleLoadError, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, timed, withoutVerdict, wrapModuleLoad, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Runtime, type Storage } from './core.js';
 import { enqueue, JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures, wakeWebhooks } from './jobs.js';
 import { countScreened, failScheduledRelease, CAMPAIGN_ACTIVE, CAMPAIGN_RUNNING, CAMPAIGN_STATES, campaignEditable, campaignReserved, campaignResumable, cancelCampaign, failCampaign, holdCampaign, launchCampaign, noteHealthChecked, pauseCampaign, quarantineCampaign, clearProbe, skipProbe, waitProbe, queueCampaignRun, recordExpanded, recordPrepared, rescheduleCampaign, restrictToDelivered, resumeCampaign, retireCampaignRun, reviseCampaign, runningState, setCampaignPacing, startSending, unscheduleCampaign, terminalColumns, terminalEvents, wakeCampaignRun, type CampaignState } from './states.js';
 import { productName } from './brand.js';
@@ -558,8 +558,9 @@ async function visibleEmailContent(runtime: Runtime,a: Actor,row: typeof emails.
   if (row.snapshot.sealed) { const { sealCapabilities } = await import('./mailbox-send.js'); return EmailContent.parse({ untrustedContent, subject: s.subject, html: s.html === undefined ? null : sealCapabilities(s.html), text: s.text === undefined ? null : sealCapabilities(s.text), raw: null, attachments: s.attachments, render: s.template?.render ?? 'direct', templateName: s.template?.name ?? null, simulated: row.simulated }); }
   return EmailContent.parse({ untrustedContent, subject: visible(s.subject), html: visible(s.html), text: visible(s.text), raw: manage ? s.raw ?? s.mime ?? null : null, attachments: s.attachments, render: s.template?.render ?? 'direct', templateName: s.template?.name ?? null, simulated: row.simulated });
 }
+// Every reader, whatever its permissions, gets an event's data without the content screen's verdict.
 function visibleEmailEvent(a: Actor, row: z.input<typeof Event>) {
-  return Event.parse({ ...row, data: a.permissions.includes('manage') ? row.data : redactCapabilityData(row.data) });
+  return Event.parse({ ...row, data: withoutVerdict(a.permissions.includes('manage') ? row.data : redactCapabilityData(row.data)) });
 }
 async function findCampaign(db: DbExecutor, a: Actor, campaignId: string, lock: boolean | 'share' = false) {
   const query = db.select().from(campaigns).where(campaignWhere(a, campaignId));
@@ -1557,7 +1558,9 @@ export function registerSending(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/emails/{id}/events', operationId: 'listEmailEvents', tags: ['Emails'], security, request: { params: IdParams, query: PageQuery }, responses: { 200: response(page(Event)), ...errors } }), async c => {
     // Oldest first by creation time: event IDs are random, so ordering by ID shuffled an email's history.
     const a = actor(c); const emailId = c.req.valid('param').id; await findEmail(c.env.db, a, emailId); const q = c.req.valid('query'), binding = `email-events:${emailId}`, cursor = readCursor(q.cursor, binding);
-    const rows = await c.env.db.select().from(emailEvents).where(and(scope(emailEvents, a), eq(emailEvents.emailId, emailId), cursor ? sql`(${emailEvents.createdAt},${emailEvents.id})>(${cursor.at}::timestamptz,${cursor.id})` : undefined)).orderBy(asc(emailEvents.createdAt), asc(emailEvents.id)).limit(q.limit + 1);
+    // The event's public columns by name: its screen column (a refusal's verdict) is never read here.
+    const rows = await c.env.db.select({ id: emailEvents.id, emailId: emailEvents.emailId, type: emailEvents.type, providerId: emailEvents.providerId, simulated: emailEvents.simulated, createdAt: emailEvents.createdAt, data: emailEvents.data })
+      .from(emailEvents).where(and(scope(emailEvents, a), eq(emailEvents.emailId, emailId), cursor ? sql`(${emailEvents.createdAt},${emailEvents.id})>(${cursor.at}::timestamptz,${cursor.id})` : undefined)).orderBy(asc(emailEvents.createdAt), asc(emailEvents.id)).limit(q.limit + 1);
     return c.json({ data: rows.slice(0, q.limit).map(r => visibleEmailEvent(a,r)), nextCursor: nextCursor(rows, q.limit, binding) }, 200);
   });
   // A scheduled send can be canceled or moved until its release at scheduledAt starts sending it (releaseScheduled holds
