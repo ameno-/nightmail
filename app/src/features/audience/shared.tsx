@@ -56,7 +56,7 @@ export function ListPicker({ value, onChange, emptyLabel, id, label, disabled = 
   return <div className={className ? `audience-list-picker ${className}` : 'audience-list-picker'} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) { setOpen(false); setSearch('') } }}>
     <Input id={id} role="combobox" title={open ? undefined : name || undefined} aria-label={label} aria-describedby={describedBy} aria-expanded={open} aria-controls={open ? listbox : undefined} aria-autocomplete="list" aria-activedescendant={open ? `${listbox}-${activeIndex}` : undefined} autoComplete="off" spellCheck={false} disabled={disabled}
       placeholder={open ? 'Search lists by name' : value && !name ? (selected.isError ? 'List not found' : 'Loading list…') : emptyLabel} value={open ? search : name ?? ''}
-      onFocus={show} onClick={show} onChange={event => { setSearch(event.target.value); setActive(event.target.value.trim() ? 1 : 0); setOpen(true) }}
+      onClick={show} onChange={event => { setSearch(event.target.value); setActive(event.target.value.trim() ? 1 : 0); setOpen(true) }}
       onKeyDown={event => {
         if (event.nativeEvent.isComposing) return
         if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); if (!open) show(); else move(event.key === 'ArrowDown' ? 1 : -1) }

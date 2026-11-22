@@ -169,7 +169,7 @@ export function ImportContactsDialog({ listId: initialListId = '', onClose }: { 
       </>}
       <div className="audience-consent">
         {/* The consequence is in the label; opt-outs and suppressions stay, and the result says how many kept their consent. */}
-        <Checkbox checked={consent} disabled={busy || started} onCheckedChange={value => { setConsent(value); setChecked(false) }} label="Mark as subscribed: these people agreed to receive marketing email" />
+        <Checkbox checked={consent} disabled={busy || started} onCheckedChange={value => { setConsent(value); setChecked(false) }} label="They agreed to receive marketing email" />
         {consent && <Field label="How did they agree?" htmlFor="import-evidence" error={checked && !evidence.trim() ? evidenceRequired : fieldError(commit.error, 'consent.evidence')}><Input id="import-evidence" autoFocus maxLength={2000} placeholder="Signed up on our website" disabled={busy || started} value={evidence} onChange={event => setEvidence(event.target.value)} /></Field>}
       </div>
       {progress && <p className="muted" role="status">{progress}</p>}
