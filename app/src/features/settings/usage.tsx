@@ -40,27 +40,27 @@ export function PlanUsage({ row: Row }: { row: (props: { title: ReactNode; child
   const pricing = usage?.pricing
   return <>
     <div className="settings-rows usage-rows">
-      {/* The limit and where it is now first; the steps it grows through open from it. */}
-      <details className="usage-limit">
-        <summary className="settings-row">
-          <span className="settings-row__label"><span className="usage-limit__title">Daily limit<ChevronDown size={14} aria-hidden="true" />{custom && <StatusBadge status="Limited" tone="neutral" />}</span></span>
-          <span className="settings-row__control">{value(usage, () => !daily ? <span className="muted">Connect sending first</span> : daily.cap === null ? 'No daily limit' : <DailyMeter used={daily.used} cap={daily.cap} resetAt={daily.resetAt} evaluating={daily.step === 0} />, 160)}</span>
-        </summary>
-        <div className="usage-steps-section">
-          <ol className="usage-steps">{steps.map((step, index) => {
-            const current = at === index, done = at != null && index < at
-            return <li key={index} data-current={current || undefined} data-done={done || undefined} style={{ '--i': index } as CSSProperties}>
-              <span className="usage-steps__mark" aria-hidden="true">{done ? <Check size={12} strokeWidth={2.75} /> : index + 1}</span>
-              {step ? <span className="usage-steps__body"><span><b>Evaluation</b> · first {number(step.cap)} recipients, once{current && <span className="usage-steps__badge">You’re here</span>}</span><span className="muted">{step.requires}</span></span> : <span className="usage-steps__body"><Skeleton width={160} height={20} /><Skeleton width={280} height={16} /><Skeleton width={200} height={16} /></span>}
-            </li>
-          })}
-            <li data-current={at === steps.length || undefined} style={{ '--i': steps.length } as CSSProperties}>
-              <span className="usage-steps__mark" aria-hidden="true">{steps.length + 1}</span>
-              <span className="usage-steps__body"><span><b>No daily limit</b>{at === steps.length && <span className="usage-steps__badge">You’re here</span>}</span><span className="muted">{`Good standing: a sender score of ${GOOD_STANDING} or more, with no warning. Sending is paced per minute.`}</span></span>
-            </li>
-          </ol>
-        </div>
-      </details>
+      {/* The limit and where it is now first; the steps it grows through open from it. With no limit it is a plain row. */}
+      {daily?.cap === null ? <Row title="Daily limit">None</Row> : <details className="usage-limit">
+          <summary className="settings-row">
+            <span className="settings-row__label"><span className="usage-limit__title">Daily limit<ChevronDown size={14} aria-hidden="true" />{custom && <StatusBadge status="Limited" tone="neutral" />}</span></span>
+            <span className="settings-row__control">{value(usage, () => !daily ? <span className="muted">Connect sending first</span> : daily.cap === null ? 'No daily limit' : <DailyMeter used={daily.used} cap={daily.cap} resetAt={daily.resetAt} evaluating={daily.step === 0} />, 160)}</span>
+          </summary>
+          <div className="usage-steps-section">
+            <ol className="usage-steps">{steps.map((step, index) => {
+              const current = at === index, done = at != null && index < at
+              return <li key={index} data-current={current || undefined} data-done={done || undefined} style={{ '--i': index } as CSSProperties}>
+                <span className="usage-steps__mark" aria-hidden="true">{done ? <Check size={12} strokeWidth={2.75} /> : index + 1}</span>
+                {step ? <span className="usage-steps__body"><span><b>Evaluation</b> · first {number(step.cap)} recipients, once{current && <span className="usage-steps__badge">You’re here</span>}</span><span className="muted">{step.requires}</span></span> : <span className="usage-steps__body"><Skeleton width={160} height={20} /><Skeleton width={280} height={16} /><Skeleton width={200} height={16} /></span>}
+              </li>
+            })}
+              <li data-current={at === steps.length || undefined} style={{ '--i': steps.length } as CSSProperties}>
+                <span className="usage-steps__mark" aria-hidden="true">{steps.length + 1}</span>
+                <span className="usage-steps__body"><span><b>No daily limit</b>{at === steps.length && <span className="usage-steps__badge">You’re here</span>}</span><span className="muted">{`Good standing: a sender score of ${GOOD_STANDING} or more, with no warning. Sending is paced per minute.`}</span></span>
+              </li>
+            </ol>
+          </div>
+        </details>}
       <Row title="Balance">{value(b, () => <span className="cluster settings-inline">
         <StatusBadge status={enforced || free ? state!.label : 'Not charged yet'} tone={enforced || free ? state!.tone : 'neutral'} />
         {b!.balance && !free && <Link to="/settings#billing" replace className="settings-score"><span>{usd(total(b!.balance))}</span><ArrowUpRight size={14} aria-hidden="true" /></Link>}
