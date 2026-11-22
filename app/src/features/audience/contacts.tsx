@@ -5,7 +5,7 @@ import { queries } from '../../data/queries'
 import type { Contact, ContactInput, ConsentInput } from '../../data/types'
 import { SearchField, Alert, Button, Checkbox, ControlSkeleton, DataTable, Dialog, EmptyState, ErrorState, Field, Input, LoadingRegion, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, SkeletonText, StatusBadge, fieldError, MutationError, useToast } from '../../components/ui'
 import { activityColumns, AudienceRouteSkeleton, consentColumns } from './skeletons'
-import { ConsentLegend, consentTitle, ContactTable, date, ListPicker, nameTitle, noUnknown, statusOptions, useAudienceLists } from './shared'
+import { ConsentLegend, consentTitle, ContactTable, date, ListPicker, nameTitle, noUnknown, statusOptions, suppressionText, useAudienceLists } from './shared'
 import { ImportContactsDialog } from './import'
 import { BulkSubscribeDialog } from './bulk'
 import { AudienceHeader } from './header'
@@ -63,7 +63,7 @@ function ContactEditor({ contact, onClose }: { contact?: Contact; onClose: () =>
       <Field label="Lists" error={fieldError(save.error, 'listIds')}><div className="stack">{lists.isPending ? <LoadingRegion label="Loading lists"><ControlSkeleton /></LoadingRegion> : lists.isError ? <ErrorState error={lists.error} onRetry={() => lists.refetch()} /> : lists.data.length ? lists.data.map(list => <Checkbox key={list.id} checked={input.listIds.includes(list.id)} onCheckedChange={checked => setInput({ ...input, listIds: checked ? [...input.listIds, list.id] : input.listIds.filter(id => id !== list.id) })} label={list.name} />) : <span className="muted">No matching lists.</span>}</div></Field>
       {(listCursor || lists.data?.nextCursor) && <div className="cluster"><Button disabled={save.isPending || lists.isFetching || !listCursor} onClick={() => setListCursor(undefined)}>First matching lists</Button><Button disabled={save.isPending || lists.isFetching || !lists.data?.nextCursor} onClick={() => setListCursor(lists.data?.nextCursor ?? undefined)}>Next matching lists</Button></div>}
       {!contact && <Alert tone="info">New contacts start with Unknown consent: campaigns skip them until marked subscribed.</Alert>}
-      {contact?.status === 'suppressed' && <Alert tone="warning">Suppressed: {contact.suppressionReason || 'Delivery blocked.'}</Alert>}
+      {contact?.status === 'suppressed' && <Alert tone="warning">Suppressed: {suppressionText(contact.suppressionReason) ?? 'Delivery blocked.'}</Alert>}
     </form>
   </Dialog>
 }
@@ -99,7 +99,7 @@ function ContactDetails({ contact }: { contact: Contact }) {
   return <div className="audience-page">
     <PageHeader title={contact.name ? <AddressText text={contact.name} /> : <PrivateAddress value={contact.email} />} backTo="/audience" actions={<><Button disabled={contact.status === 'suppressed' || status.isPending} title={contact.status === 'suppressed' ? 'Consent can’t change while the address is suppressed.' : undefined} onClick={() => { status.reset(); setConsentInput(initialConsent()); setConfirm(true) }}>{consentAction(contact.status)}</Button><Button variant="primary" onClick={() => setEdit(true)}>Edit contact</Button></>} />
     {/* Consent is the badge here (and the suppression reason when there is one), not a second Status row below. */}
-    <div className="audience-summary cluster">{contact.name && <PrivateAddress value={contact.email} />}<span title={consentTitle(contact.status)}><StatusBadge status={contact.status} /></span>{contact.suppressionReason && <span>{contact.suppressionReason}</span>}</div>
+    <div className="audience-summary cluster">{contact.name && <PrivateAddress value={contact.email} />}<span title={consentTitle(contact.status)}><StatusBadge status={contact.status} /></span>{contact.suppressionReason && <span>{suppressionText(contact.suppressionReason)}</span>}</div>
     <div className="section audience-properties"><section><SectionHeader title="Properties" /><dl className="ui-facts">{contact.country && <><dt>Country</dt><dd>{contact.country}</dd></>}<dt>Added</dt><dd>{date(contact.createdAt)}</dd><dt>Last opened</dt><dd>{date(contact.lastOpenedAt)}</dd>{customProperties(contact).map(([key, value]) => <Fragment key={key}><dt>{key === 'plan' ? 'Plan' : <AddressText text={key} />}</dt><dd><AddressText text={value} /></dd></Fragment>)}</dl></section></div>
     <section className="section"><SectionHeader title="Lists" />{lists.isPending ? <LoadingRegion label="Loading list memberships"><SkeletonText width={170} /></LoadingRegion> : lists.isError ? <ErrorState error={lists.error} onRetry={() => lists.refetch()} /> : <div className="cluster audience-links">{contact.listIds.length ? contact.listIds.map(id => <Link key={id} to={`/audience/lists/${id}`}>{lists.data.find(list => list.id === id)?.name || 'Unnamed list'}</Link>) : <span className="muted">Not on any lists.</span>}</div>}</section>
     <ConsentHistory id={contact.id} />

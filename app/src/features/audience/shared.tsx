@@ -23,6 +23,9 @@ export function useAudienceLists(search = '', cursor?: string) {
 }
 /** A quoted AudienceQL string literal. */
 export const aqlString = (value: string) => `'${value.replaceAll("'", "''")}'`
+// A contact's suppression reason as the API records it, in plain words.
+const suppressionWords: Record<string, string> = { hard_bounce: 'Bounced', soft_bounce: 'Bounced', transient: 'Bounced', complaint: 'Marked as spam', email_validation: 'Blocked' }
+export const suppressionText = (reason?: string) => reason ? suppressionWords[reason] ?? 'Blocked' : undefined
 
 // One control to find and choose a list by name: type to search, arrows and Enter to choose. The first option is
 // `emptyLabel` (all lists, or no list). Lists are never shown by ID.
@@ -78,11 +81,11 @@ export function ContactTable({ contacts, lists = [], members = false, loading = 
   const columns = members ? memberColumns : contactColumns
   return <DataTable className="audience-contacts" tableRef={tableRef} rows={contacts} loading={loading} skeletonRows={minRows} minRows={minRows} rowKey={row => row.id} rowHref={row => `/audience/contacts/${row.id}`} empty={empty} columns={columns.map(column => ({ ...column, cardRender: column.key === 'name' ? (row: Contact) => <span title={nameTitle(row.name)}>{row.name ? <AddressText text={row.name} /> : 'No name'}</span>
     // A member card's second line: the suppression reason when there is one, else the name (never an empty dash).
-    : column.key === 'suppression' ? (row: Contact) => row.suppressionReason ? <span title={row.suppressionReason}>{row.suppressionReason}</span> : <span title={nameTitle(row.name)}>{row.name ? <AddressText text={row.name} /> : 'No name'}</span>
+    : column.key === 'suppression' ? (row: Contact) => row.suppressionReason ? <span title={suppressionText(row.suppressionReason)}>{suppressionText(row.suppressionReason)}</span> : <span title={nameTitle(row.name)}>{row.name ? <AddressText text={row.name} /> : 'No name'}</span>
     : column.key === 'created' ? (row: Contact) => { const names = members || listsLoading ? null : listsText(row, lists); return <>{`Added ${date(row.createdAt)}`}{names && names !== '—' && <span title={names}> · {names}</span>}</> } : undefined, render: (row: Contact) => {
     if (column.key === 'email') return <span className="audience-cell-text"><PrivateAddress value={row.email} /></span>
     if (column.key === 'status') return <span title={consentTitle(row.status)}><StatusBadge status={row.status} /></span>
-    if (column.key === 'suppression') return <span className="audience-cell-text" title={row.suppressionReason || undefined}>{row.suppressionReason || '—'}</span>
+    if (column.key === 'suppression') return <span className="audience-cell-text" title={suppressionText(row.suppressionReason)}>{suppressionText(row.suppressionReason) ?? '—'}</span>
     if (column.key === 'name') return <span className="audience-cell-text" title={nameTitle(row.name)}>{row.name ? <AddressText text={row.name} /> : '—'}</span>
     if (column.key === 'lists') {
       if (listsLoading && row.listIds.length) return <SkeletonText width="70%" />
