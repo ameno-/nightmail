@@ -31256,6 +31256,188 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  // Operator alerts (src/operator-alerts.ts): one Slack card when a customer may be in trouble. Slack is faked here.
+  const OPERATOR_HOOK = 'https://hooks.slack.com/services/T0FIXTURE/B0FIXTURE/operatoralerts';
+  const cardLine = (card: Json) => card.blocks[0].text.text as string;
+  /** Posts each pending operator alert as the job runner would, to a fake Slack answering status; returns what was posted. */
+  async function postOperatorAlerts(t: TestContext, runtime: import('./src/core.js').Runtime, db: pg.Client, status = 200) {
+    const { operatorAlertJobs } = await import('./src/operator-alerts.js'), posted: Json[] = [];
+    await t.test(`operator alerts posted, Slack answering ${status}`, async t => {
+      t.mock.method(globalThis, 'fetch', async (url: RequestInfo | URL, init?: RequestInit) => {
+        assert.deepEqual([String(url), init?.method, init?.redirect], [OPERATOR_HOOK, 'POST', 'manual']);
+        posted.push(JSON.parse(String(init!.body))); return new Response(null, { status });
+      });
+      for (const job of (await db.query(`SELECT id,workspace_id,payload,attempts FROM jobs WHERE type='operator.alert' AND status='pending' ORDER BY id`)).rows) {
+        try {
+          await operatorAlertJobs['operator.alert']!(runtime, job.payload, { id: job.id, workspaceId: job.workspace_id, attempts: job.attempts + 1 });
+          await db.query(`UPDATE jobs SET status='completed',attempts=attempts+1 WHERE id=$1`, [job.id]);
+        } catch (cause) {
+          // A refused post is retryable: the runner keeps the job for its next attempt.
+          const failure = cause as { code?: string; retryable?: boolean };
+          assert.deepEqual([failure.code, failure.retryable], ['OPERATOR_ALERT_FAILED', true]);
+          await db.query(`UPDATE jobs SET attempts=attempts+1,last_error=$2 WHERE id=$1`, [job.id, failure.code]);
+        }
+      }
+    });
+    return posted;
+  }
+  test('MX operator alerts: a refusal at the daily limit, a marketing hold, a pause, Amazon\'s pause and a new sign-up each post their one-line card once; a state that continues posts nothing more; a failed post changes nothing else; unset, nothing is posted', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const { refreshStanding, applyChange } = await import('./src/standing.js'), alerts = await import('./src/operator-alerts.js'), { loadConfig } = await import('./src/config.js');
+      // The setting: a Slack incoming webhook only, hosted only, off by default, and a secret (not in the deployed configuration).
+      const settings = (extra: Json) => loadConfig({ PUBLIC_URL: 'https://alerts.example', BANE_ROOT_SECRET: 'local-fixture-'.repeat(4), MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google', ...extra });
+      assert.deepEqual([settings({}).operatorSlackWebhookUrl, settings({ OPERATOR_SLACK_WEBHOOK_URL: OPERATOR_HOOK }).operatorSlackWebhookUrl,
+        loadConfig({ PUBLIC_URL: 'https://alerts.example', BANE_ROOT_SECRET: 'local-fixture-'.repeat(4), OPERATOR_SLACK_WEBHOOK_URL: OPERATOR_HOOK }).operatorSlackWebhookUrl], [undefined, OPERATOR_HOOK, undefined]);
+      assert.throws(() => settings({ OPERATOR_SLACK_WEBHOOK_URL: 'https://example.com/hook' }), { code: 'CONFIG_INVALID' });
+      assert.equal(/OPERATOR_SLACK_WEBHOOK_URL/.test(await readFile(new URL('./wrangler.prod.jsonc', import.meta.url), 'utf8')), false);
+
+      const f = await hostedHoldFixture(runtime, db), wid = f.wid;
+      await db.query(`UPDATE workspaces SET name='Driftwood' WHERE id=$1`, [wid]);
+      await gradedSender(db, wid, 2);
+      const send = () => local('POST', '/v1/emails/send', { from: f.from, to: 'reader@example.net', subject: 'Your sign-in code', text: 'Fixture', kind: 'transactional' });
+      const queued = async () => (await db.query(`SELECT workspace_id,payload FROM jobs WHERE type='operator.alert' ORDER BY id`)).rows;
+      const step = async (id: string) => (await db.query('SELECT step FROM sender_standing WHERE workspace_id=$1', [id])).rows[0].step;
+      const owner = randomUUID();
+      await db.query(`INSERT INTO nightmail_users(id,name,email,email_verified) VALUES($1,'Signed up',$2,true)`, [owner, `${owner}@example.org`]);
+      await db.query(`INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,'owner')`, [randomUUID(), owner, wid]);
+      const workspace = async (name: string) => {
+        const id = unique('alerted');
+        await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$2,$1)', [id, name]);
+        await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [id, REGION, f.pool]);
+        return id;
+      };
+      // What src/standing.ts ingestTenantStatus applies when AWS pauses a workspace's SES tenant.
+      const amazon = (id: string) => applyChange(runtime.db, { workspaceId: id, actor: { kind: 'system', via: 'ses' }, kind: 'tenant', step: 'pause', pauseKind: 'full', pause: { message: 'Hosted sending paused: AWS paused this workspace’s SES tenant.' },
+        reasons: [{ code: 'SES_TENANT_PAUSED', metric: 'external', value: 0, count: 0, threshold: 0, minimum: 0, window: null, step: 'pause', message: 'Trust and Safety review.' }],
+        details: { tenant: `arn:aws:ses:us-east-2:${f.pool}:tenant/bane-probation-${id}/tn-1`, origin: 'AWS_SES', status: 'DISABLED', cause: 'Trust and Safety review.' } });
+
+      // Unset, the default: a refusal at the limit, a sign-up and the installation-wide checks queue nothing.
+      assert.equal(runtime.config.operatorSlackWebhookUrl, undefined);
+      ok(await send(), 202); ok(await send(), 202);
+      error(await send(), 429, 'SEND_LIMIT_REACHED');
+      assert.deepEqual([await alerts.alertNewSignup(runtime, runtime.db, owner, { signedUp: 91, limit: 100 }), await alerts.shareFullAlert(runtime, 500, 500), await alerts.checkSignInMail(runtime)], [false, false, false]);
+      assert.deepEqual(await queued(), []);
+
+      runtime.config.operatorSlackWebhookUrl = OPERATOR_HOOK;
+      // The daily limit: the first refusal queues the card, the next ones the same day don't.
+      error(await send(), 429, 'SEND_LIMIT_REACHED'); error(await send(), 429, 'SEND_LIMIT_REACHED');
+      // A new sign-up, through the sign-up limit's call site: every one.
+      assert.equal(await alerts.alertNewSignup(runtime, runtime.db, owner, { signedUp: 91, limit: 100 }), true);
+      // The ladder holds marketing (5% of marketing mail hard-bounced), then pauses (6% of transactional mail). It runs twice
+      // each time: the state continues and nothing more is queued.
+      await db.query(`INSERT INTO hosted_health_hourly(workspace_id,epoch,hour,accepted,bounces,complaints,marketing_accepted,marketing_bounces) VALUES($1,'-infinity',date_trunc('hour',now()),1000,50,0,1000,50)`, [wid]);
+      await refreshStanding(runtime, { only: wid }); await refreshStanding(runtime, { only: wid });
+      assert.equal(await step(wid), 'restrict');
+      await db.query('UPDATE hosted_health_hourly SET accepted=2000,bounces=110 WHERE workspace_id=$1', [wid]);
+      await refreshStanding(runtime, { only: wid }); await refreshStanding(runtime, { only: wid });
+      assert.equal(await step(wid), 'pause');
+      // Amazon pauses another workspace's SES tenant. Its name is the customer's: the card escapes it and cuts the address.
+      const other = await workspace('*Acme* <!channel> & ops@acme.example\'s _team_');
+      await amazon(other);
+      assert.deepEqual((await queued()).map(r => [r.workspace_id === wid ? 'Driftwood' : r.workspace_id === other ? 'Acme' : r.workspace_id, r.payload]), [
+        ['Acme', { kind: 'amazon_paused', region: 'us-east-2' }],
+        ['Driftwood', { kind: 'daily_limit', used: 2, limit: 2 }],
+        ['Driftwood', { kind: 'marketing_held' }],
+        ['Driftwood', { kind: 'paused', reason: 'bounces' }],
+        ['Driftwood', { kind: 'signup', signedUp: 91, limit: 100 }],
+      ]);
+      const open = (id?: string) => `${PUBLIC_ORIGIN}/operator${id ? `/workspaces/${encodeURIComponent(id)}` : ''}`;
+      const posted = await postOperatorAlerts(t, runtime, db);
+      const acme = '∗Acme∗ &lt;!channel&gt; &amp; ops\'s ˍteamˍ';
+      assert.deepEqual(posted.map(card => [cardLine(card), card.text, card.blocks[0].accessory.url]), [
+        [`:cloud: *Amazon paused* ${acme}, Ohio.`, `Amazon paused: ${acme}, Ohio.`, open(other)],
+        [':no_entry_sign: *Daily limit* Driftwood, 2 of 2.', 'Daily limit: Driftwood, 2 of 2.', open(wid)],
+        [':mega: *Marketing on hold* Driftwood.', 'Marketing on hold: Driftwood.', open(wid)],
+        [':double_vertical_bar: *Paused* Driftwood, too many bounces.', 'Paused: Driftwood, too many bounces.', open(wid)],
+        [':wave: *New sign-up* Driftwood. 91 of 100.', 'New sign-up: Driftwood. 91 of 100.', open(wid)],
+      ]);
+      // The approved card: one section with the words and an Open button. No header, fields or context, and nothing unfurls.
+      assert.deepEqual(posted[4], { text: 'New sign-up: Driftwood. 91 of 100.', unfurl_links: false, unfurl_media: false, blocks: [{ type: 'section',
+        text: { type: 'mrkdwn', text: ':wave: *New sign-up* Driftwood. 91 of 100.', verbatim: true }, accessory: { type: 'button', action_id: 'open', text: { type: 'plain_text', text: 'Open', emoji: false }, url: open(wid) } }] });
+      assert.doesNotMatch(JSON.stringify(posted), /@|example\.org|acme\.example|score|threshold/i, 'No address, domain, score or threshold.');
+
+      // The states continue: the ladder runs again and the paused workspace's sends are refused. Nothing more is posted.
+      await refreshStanding(runtime, { only: wid }); error(await send(), 409, 'HOSTED_SENDING_PAUSED');
+      assert.deepEqual(await postOperatorAlerts(t, runtime, db), []);
+
+      // A failed post changes nothing else: Amazon pauses a third workspace while Slack refuses the card. The pause, its
+      // timeline event and its owner email stand, and the card waits for the runner's next attempt, which posts it once.
+      const third = await workspace('Kestrel');
+      await amazon(third);
+      assert.deepEqual((await postOperatorAlerts(t, runtime, db, 500)).map(cardLine), [':cloud: *Amazon paused* Kestrel, Ohio.']);
+      assert.deepEqual((await db.query(`SELECT status,attempts,last_error FROM jobs WHERE type='operator.alert' AND workspace_id=$1`, [third])).rows, [{ status: 'pending', attempts: 1, last_error: 'OPERATOR_ALERT_FAILED' }]);
+      const counted = async (sql: string) => (await db.query(sql, [third])).rows[0].n;
+      assert.deepEqual([await step(third), await counted('SELECT count(*)::int AS n FROM standing_events WHERE workspace_id=$1'), await counted(`SELECT count(*)::int AS n FROM jobs WHERE workspace_id=$1 AND type='standing.notify'`),
+        await counted('SELECT count(*)::int AS n FROM provider_connections WHERE id=$1 AND paused_at IS NOT NULL')], ['pause', 1, 1, 1]);
+      assert.deepEqual((await postOperatorAlerts(t, runtime, db)).map(cardLine), [':cloud: *Amazon paused* Kestrel, Ohio.']);
+
+      // Unset again: a standing change still queues its card in its own transaction (it has no configuration to read), and
+      // the job completes without posting anything.
+      runtime.config.operatorSlackWebhookUrl = undefined;
+      const fourth = await workspace('Larkspur');
+      await applyChange(runtime.db, { workspaceId: fourth, actor: { kind: 'operator', via: 'console' }, kind: 'operator', marketingHold: true, step: 'restrict',
+        reasons: [{ code: 'OPERATOR_HOLD', metric: 'external', value: 0, count: 0, threshold: 0, minimum: 0, window: null, step: 'restrict', message: 'Held after a review.' }] });
+      assert.deepEqual(await postOperatorAlerts(t, runtime, db), []);
+      assert.deepEqual((await db.query(`SELECT status FROM jobs WHERE type='operator.alert' AND workspace_id=$1`, [fourth])).rows, [{ status: 'completed' }]);
+    });
+  });
+  test('MX operator alerts: the customer share filling posts one card, none while it stays full, and one a day however often it fills', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const f = await customerShareFixture(t, runtime, db);
+      runtime.config.operatorSlackWebhookUrl = OPERATOR_HOOK;
+      const cards = async () => (await db.query(`SELECT workspace_id,payload FROM jobs WHERE type='operator.alert'`)).rows;
+      // Their marketing waits at the share: the sample that found it full queues the card.
+      await f.used(f.customer, 500); await f.send(local, f.customer, 'marketing');
+      assert.deepEqual(await f.dispatch(), []);
+      assert.deepEqual(await cards(), [{ workspace_id: 'platform', payload: { kind: 'share_full', used: 500, share: 500 } }]);
+      const posted = await postOperatorAlerts(t, runtime, db);
+      assert.deepEqual(posted.map(card => [cardLine(card), card.text, card.blocks[0].accessory.url]), [[':bucket: *Customer share full* 500 of 500.', 'Customer share full: 500 of 500.', `${PUBLIC_ORIGIN}/operator`]]);
+      // A day later (the day's card is gone) it is still full: the sample is logged again, and no card, as it never emptied.
+      await db.query(`DELETE FROM jobs WHERE type='operator.alert'`);
+      await f.expire(); assert.deepEqual(await f.dispatch(), []);
+      assert.deepEqual([f.alerts.length, await cards()], [2, []]);
+      // The window rolls and the waiting mail goes; when the share fills again, that is a new card.
+      await f.roll(f.customer); await f.expire(); assert.deepEqual(await f.dispatch(), ['customer marketing']);
+      await f.used(f.customer, 499); await f.send(local, f.customer, 'marketing'); await f.expire(); assert.deepEqual(await f.dispatch(), []);
+      assert.deepEqual([f.alerts.length, (await cards()).map(c => c.payload.kind)], [3, ['share_full']]);
+      // Amazon raises the limit and the waiting mail goes, then lowers it again: full once more the same day. Logged, and
+      // no second card that day.
+      f.account.max = 2000; await f.expire(); assert.deepEqual(await f.dispatch(), ['customer marketing']);
+      f.account.max = 1000; await f.send(local, f.customer, 'marketing'); await f.expire(); assert.deepEqual(await f.dispatch(), []);
+      assert.deepEqual([f.alerts.length, (await cards()).length], [4, 1]);
+    });
+  });
+  test('MX operator alerts: sign-in mail is slow when 1 in 20 of the last 15 minutes\' transactional mail waited over 10 seconds for its first attempt, and only when the 15 minutes before were not', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { checkSignInMail } = await import('./src/operator-alerts.js');
+      const f = await hostedHoldFixture(runtime, db);
+      runtime.config.operatorSlackWebhookUrl = OPERATOR_HOOK;
+      // n emails created minutes ago, first attempted after wait seconds (null: still queued).
+      const mail = (n: number, minutes: number, wait: number | null, kind = 'transactional') => db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,created_at,attempt_started_at)
+        SELECT $1||g,$2,$3,'fixture',$4,'["reader@example.net"]','[]','[]','Your sign-in code',jsonb_build_object('kind',$5::text),false,CASE WHEN $7::float8 IS NULL THEN 'queued' ELSE 'accepted' END,
+          now()-make_interval(mins=>$6),now()-make_interval(mins=>$6)+make_interval(secs=>$7::float8) FROM generate_series(1,$8::int) g RETURNING id`,
+        [unique('signin-'), f.wid, REGION, f.from, kind, minutes, wait, n]).then(r => r.rows.map(row => row.id as string));
+      const cards = async () => (await db.query(`SELECT payload FROM jobs WHERE type='operator.alert'`)).rows.map(r => r.payload);
+      // Marketing mail waits on purpose and never counts; under 20 transactional emails is too few to say.
+      await mail(40, 5, 60, 'marketing'); await mail(10, 5, 30);
+      assert.equal(await checkSignInMail(runtime), false);
+      // 1 in 20 of the last 15 minutes waited (one still queued after 5 minutes), and so did 1 in 20 of the 15 before: slow
+      // all along, nothing new to say.
+      await db.query('DELETE FROM sending_emails WHERE workspace_id=$1 AND snapshot->>$2=$3', [f.wid, 'kind', 'transactional']);
+      await mail(19, 5, 1); await mail(1, 5, null);
+      await mail(19, 20, 1); const [earlier] = await mail(1, 20, 30);
+      assert.equal(await checkSignInMail(runtime), false);
+      // The 15 minutes before were quick: it became slow now.
+      await db.query(`UPDATE sending_emails SET attempt_started_at=created_at+interval '1 second' WHERE id=$1`, [earlier]);
+      assert.equal(await checkSignInMail(runtime), true);
+      assert.deepEqual(await cards(), [{ kind: 'signin_slow', slow: 1, mail: 20 }]);
+      // The next run finds the same: one card a day.
+      assert.equal(await checkSignInMail(runtime), false);
+      const posted = await postOperatorAlerts(t, runtime, db);
+      assert.deepEqual(posted.map(card => [cardLine(card), card.text, card.blocks[0].accessory.url]), [[':snail: *Sign-in mail slow* 1 in 20 over 10 seconds.', 'Sign-in mail slow: 1 in 20 over 10 seconds.', `${PUBLIC_ORIGIN}/operator`]]);
+    });
+  });
+
   test('SDK responses preserve acceptance, rejection, throttling and timeout semantics without network', async t => {
     const [{ SESv2Client, SendEmailCommand, GetAccountCommand }, { createSimulatedSesHandler }] = await Promise.all([
       import('@aws-sdk/client-sesv2'), import('./src/adapters/simulated-ses.js'),

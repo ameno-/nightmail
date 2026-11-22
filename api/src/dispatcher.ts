@@ -14,6 +14,7 @@ import { credentialFingerprint, discoveryTarget } from './ses-region-state.js';
 import { mxResourceName, POOL_INSTALLATION, setupResources } from './ses-setup.js';
 import { forDelivery, type ReadyConnection } from './provider-credentials.js';
 import { wakeWebhooks } from './jobs.js';
+import { shareFullAlert } from './operator-alerts.js';
 import { screenSnapshot, ScreenHandover, type CampaignScreen, type ScreenCall } from './screen.js';
 import { flushScreenCalls, outbound } from './screen-calls.js';
 import { SEND_LIMITS } from './send-limits.js';
@@ -161,14 +162,20 @@ async function ensureQuota(owner: Pick<Owner, 'runtime'|'a'|'ses'|'transport'>, 
   let row = result.rows[0];
   if (row?.fence) {
     const q = await fetchQuota(transport, ses, gate);
-    // The customer share's sum is taken here, by the one elected refresher, from the sample it is a share of.
-    const saved = await runtime.db.execute<{ checked: string; customer: number }>(sql`UPDATE ${table} SET checked_at=clock_timestamp(), ${fence}=${account ? sql`clock_timestamp()+${period}` : sql`NULL`},
+    // The customer share's sum is taken here, by the one elected refresher, from the sample it is a share of. The
+    // previous sample comes back too (a subquery reads the row as it was before this statement).
+    const saved = await runtime.db.execute<{ checked: string; customer: number; was: { max: number | null; customer: number } | null }>(sql`UPDATE ${table} SET checked_at=clock_timestamp(), ${fence}=${account ? sql`clock_timestamp()+${period}` : sql`NULL`},
       max_send_rate=${q.maxSendRate},max_24_hour_send=${q.max24HourSend},sent_last_24_hours=${q.sentLast24Hours}${account ? sql`,customer_sent_24_hours=hosted_customer_day(${account},${region},${q.sentLast24Hours})` : sql``}
-      WHERE ${key} AND ${fence}=${row.fence}::timestamptz RETURNING checked_at::text AS checked, ${customer} AS customer`);
+      WHERE ${key} AND ${fence}=${row.fence}::timestamptz RETURNING checked_at::text AS checked, ${customer} AS customer,
+      ${account ? sql`(SELECT json_build_object('max',p.max_24_hour_send,'customer',p.customer_sent_24_hours) FROM ${table} p WHERE p.aws_account_id=${account} AND p.region=${region})` : sql`NULL`} AS was`);
     if (!saved.rowCount) return false;
-    const customerSent = Number(saved.rows[0]!.customer), percent = runtime.config.dispatch.customerSharePercent;
-    if (customerSent > 0 && customerCredits(q.max24HourSend, customerSent, percent) === 0) {
-      log('error', { code: 'HOSTED_CUSTOMER_SHARE_FULL', accountId: account, region, used: customerSent, share: Math.floor(q.max24HourSend * percent / 100), percent });
+    const customerSent = Number(saved.rows[0]!.customer), percent = runtime.config.dispatch.customerSharePercent, was = saved.rows[0]!.was;
+    const full = (max: number, used: number) => used > 0 && customerCredits(max, used, percent) === 0;
+    if (full(q.max24HourSend, customerSent)) {
+      const share = Math.floor(q.max24HourSend * percent / 100);
+      log('error', { code: 'HOSTED_CUSTOMER_SHARE_FULL', accountId: account, region, used: customerSent, share, percent });
+      // The operators' Slack hears once, when the share fills (src/operator-alerts.ts); it never fails this refresh.
+      if (!was || !full(Number(was.max ?? 0), Number(was.customer))) await shareFullAlert(runtime, customerSent, share);
     }
     return observeQuota(gate, { ...q, customerSent, checkedAt: Date.parse(saved.rows[0]!.checked) }, refreshMs);
   } else {
