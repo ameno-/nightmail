@@ -72,7 +72,7 @@ export const emails = pgTable('sending_emails', {
 export const emailEvents = pgTable('sending_email_events', {
   id: text('id').primaryKey(), ...scope(), emailId: text('email_id').notNull(), type: text('type').notNull(), providerId: text('provider_id'),
   externalId: text('external_id'), data: jsonb('data').$type<Record<string, unknown>>().notNull().default({}), simulated: boolean('simulated').notNull(), createdAt: time('created_at').notNull().defaultNow(),
-  // A content-screen refusal's verdict, for operators and support only (migration 398): never part of data, which the API returns and webhooks are sent.
+  // A content-screen refusal's verdict, for staff only (the operator timeline; migration 398): never part of data, which the API returns and webhooks are sent.
   screen: jsonb('screen').$type<ScreenVerdict>(),
 }, t => [index('sending_events_page').on(t.workspaceId, t.emailId, t.id), uniqueIndex('sending_events_external').on(t.workspaceId, t.externalId), index('sending_email_events_retention').on(t.workspaceId, t.createdAt)]);
 export const attachments = pgTable('sending_attachments', {

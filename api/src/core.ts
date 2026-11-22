@@ -16,7 +16,7 @@ export const SuppressionEventData = z.object({suppressionReason:SuppressionReaso
 /** An email event's data as anything outside Nightmail's own records gets it: without the content screen's verdict on a
  *  refused email (its score, the classifier's model, the threshold). A sender learns that the content check refused it
  *  (code CONTENT_REJECTED_SPAM), never how close it was or what judged it. New refusals keep the verdict in the event's
- *  own column (sending_email_events.screen, migration 398). Events stored before that, and their copies in published
+ *  own column (sending_email_events.screen, migration 398), which only the operator timeline reads. Events stored before that, and their copies in published
  *  events and webhook payloads, may still hold data.screen: every read of an event's data for a caller, and every
  *  webhook post, goes through this. */
 export function withoutVerdict<T extends Record<string, unknown>>(data: T): T {

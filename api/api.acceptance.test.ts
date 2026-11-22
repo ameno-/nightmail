@@ -9133,11 +9133,13 @@ describe('Hosted MCP OAuth and tools', () => {
         assert.deepEqual(lookups, [], 'Live DNS is cached for 5 minutes.');
         error(await send('GET', `/v1/support/domains/${domainId}/health`, stamp(theirs.id)), 404);
 
-        // Route 4: the screen, with spam scores and subjects capped at 120 characters. These refusals are stored as they
-        // were before the verdict had its own column (in the event's data): the screen's own read still finds it there,
-        // and the reads of an email's events never return it.
+        // Route 4: the screen, with each refusal in words and subjects capped at 120 characters. The support agent reads
+        // this and writes to the sender, so it has none of the verdict (score, model, threshold), though these refusals
+        // are stored as they were before the verdict had its own column, in the event's data. Nor do the reads of an
+        // email's events.
         const screen = await get('/v1/support/screen');
-        assert.deepEqual([screen.totals.screened, screen.totals.rejected, screen.rejections.length, screen.rejections[0].spamScore, screen.rejections[0].model, screen.rejections[0].subject.length], [50, 2, 2, 0.97, 'jev-fixture', 120]);
+        assert.deepEqual([screen.totals.screened, screen.totals.rejected, screen.rejections.length, screen.rejections[0].verdict, screen.rejections[0].subject.length], [50, 2, 2, 'The content check judged the message to be unsolicited advertising.', 120]);
+        assert.doesNotMatch(JSON.stringify(screen), /"spamScore"|"spam"|"model"|"threshold"|jev-fixture/);
         for (const read of [await get(`/v1/support/events?emailId=${rejected[0]!.id}`), await get(`/v1/support/emails/${rejected[0]!.id}`)]) {
           const detail = (read.data ?? read.events).find((event: Json) => event.type === 'reject').detail;
           assert.deepEqual(detail, { code: 'CONTENT_REJECTED_SPAM' });assert.doesNotMatch(JSON.stringify(read), /"screen"|"spam"|jev-fixture|"threshold"/);
@@ -24189,7 +24191,17 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       ok(await local('PUT', `${base}/limit`, { daily: null, reason: 'Back to the score limit' }));
       // One evidence stream and one audit log, in ISO time, paged by a cursor that never skips rows sharing a timestamp.
       await db.query(`INSERT INTO standing_events(id,workspace_id,sequence,at,kind,from_step,to_step,actor) SELECT 'stev_tie'||n,$1,1000+n,now()-interval '1 minute','limit','warn','warn','{"kind":"system"}' FROM generate_series(1,3) n`, [wid]);
+      // Two content-screen refusals: one with its verdict in the event's own column, one stored before that column, in the
+      // event's data. Staff read the score and the threshold of both here, and never the classifier's model.
+      const refusals = [unique('refused-column'), unique('refused-data')];
+      for (const [i, emailId] of refusals.entries()) {
+        await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,status,simulated,error_code,created_at)
+          VALUES ($1,$2,$3,'fixture','offers@example.com','[]','[]','[]','Screened',$4,'rejected',false,'CONTENT_REJECTED_SPAM',now()-interval '2 minutes')`, [emailId, wid, REGION, { kind: 'transactional', subject: 'Screened', text: 'Screened', attachments: [] }]);
+        await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated,data,screen) VALUES ($1,$2,$3,'reject',false,$4,$5)`, [unique('event'), wid, emailId,
+          i ? { code: 'CONTENT_REJECTED_SPAM', screen: { spam: 0.93, model: 'jev-fixture', threshold: 0.9 } } : { code: 'CONTENT_REJECTED_SPAM' }, i ? null : { spam: 0.97, model: 'jev-fixture', threshold: 0.7 }]);
+      }
       const timeline = ok(await local('GET', `${base}/timeline`)).data;
+      assert.deepEqual(refusals.map(emailId => timeline.find((e: Json) => e.kind === 'rejection' && e.detail.emailId === emailId)?.detail), [{ spam: 0.97, threshold: 0.7, campaignId: null, emailId: refusals[0] }, { spam: 0.93, threshold: 0.9, campaignId: null, emailId: refusals[1] }]);
       assert.ok(timeline.every((e: Json) => /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(e.at)));
       const paged: Json[] = [];
       for (let cursor = '', pages = 0; pages < 100; pages++) {
@@ -32653,12 +32665,12 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const old = await outward(spam);
       assert.deepEqual([old.posted.length, old.posted[1].data.code, old.events.find(event => event.type === 'reject')!.data.code], [2, 'CONTENT_REJECTED_SPAM', 'CONTENT_REJECTED_SPAM']);
       assert.doesNotMatch(JSON.stringify(old), verdict);
-      // Operators and support still read it, from the column or, for the older row, from its data.
+      // Support's screen read is the support agent's, which writes to the sender: the refusal in words, and none of the
+      // three, however it is stored. (Staff read the score and the threshold in the operator timeline.)
       const { screenActivity } = await import('./src/deliverability.js');
-      const known = async () => (await screenActivity(runtime.db, runtime.config.workspaceId, new Date(Date.now() - 3_600_000).toISOString())).rejections.find(row => row.emailId === spam);
-      assert.deepEqual([(await known())!.spamScore, (await known())!.model], [0.93, 'jev-test']);
-      await db.query(`UPDATE sending_email_events SET data=data-'screen',screen=$2::jsonb WHERE email_id=$1 AND type='reject'`, [spam, JSON.stringify({ ...before, spam: 0.97 })]);
-      assert.deepEqual([(await known())!.spamScore, (await known())!.model], [0.97, 'jev-test']);
+      const told = await screenActivity(runtime.db, runtime.config.workspaceId, new Date(Date.now() - 3_600_000).toISOString());
+      assert.deepEqual(told.rejections.filter(row => row.emailId === spam).map(row => [row.errorCode, row.verdict]), [['CONTENT_REJECTED_SPAM', 'The content check judged the message to be unsolicited advertising.']]);
+      assert.doesNotMatch(JSON.stringify(told), verdict);
       assert.ok(!sent.includes(spam), 'A rejected message never reaches SES.');
       assert.equal((await get(clean)).status, 'accepted');
       assert.equal((await get(unscreened)).status, 'accepted', 'Unscreened mail is never classified, whatever its content.');

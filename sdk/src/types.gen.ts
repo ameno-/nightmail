@@ -5892,7 +5892,7 @@ export type SupportDeliveryEvent = {
     type: string;
     at: string;
     /**
-     * The provider’s event detail (bounce type, complaint feedback type, and for a bounce or a delay the receiving server’s reply in diagnosticCode, redacted: addresses are <address>, IPs <ip>, 160 characters). Never the content screen’s verdict on a refused email: getSupportScreen has its score.
+     * The provider’s event detail (bounce type, complaint feedback type, and for a bounce or a delay the receiving server’s reply in diagnosticCode, redacted: addresses are <address>, IPs <ip>, 160 characters). Never the content screen’s score, model or threshold on a refused email.
      */
     detail: {
         [key: string]: unknown;
@@ -6598,10 +6598,9 @@ export type SupportScreen = {
          */
         errorCode: string;
         /**
-         * The classifier’s spam probability, for CONTENT_REJECTED_SPAM.
+         * What the content check objected to, in words. Never its score, its model or its threshold: nothing here says how close a message was.
          */
-        spamScore: number | null;
-        model: string | null;
+        verdict: string;
     }>;
 };
 

@@ -192,7 +192,7 @@ const EmailSummary = z.object({
   providerMessageId: z.string().nullable().describe('The SES message ID, for provider-side lookups.'),
 }).openapi('SupportEmail');
 const DeliveryEvent = z.object({ workspaceId: z.string(), id: z.string(), emailId: z.string(), type: z.string().describe('send, delivery, bounce, complaint, reject, open, click…'), at: z.string(),
-  detail: z.record(z.string(), z.unknown()).describe('The provider’s event detail (bounce type, complaint feedback type, and for a bounce or a delay the receiving server’s reply in diagnosticCode, redacted: addresses are <address>, IPs <ip>, 160 characters). Never the content screen’s verdict on a refused email: getSupportScreen has its score.') }).openapi('SupportDeliveryEvent');
+  detail: z.record(z.string(), z.unknown()).describe('The provider’s event detail (bounce type, complaint feedback type, and for a bounce or a delay the receiving server’s reply in diagnosticCode, redacted: addresses are <address>, IPs <ip>, 160 characters). Never the content screen’s score, model or threshold on a refused email.') }).openapi('SupportDeliveryEvent');
 const WebhookDelivery = z.object({ workspaceId: z.string(), id: z.string(), source: z.enum(['email', 'inbound']).describe('email: sending events; inbound: received mail.'), webhookId: z.string(),
   endpoint: z.string().describe('The last four characters of the URL; URLs are credentials.'), eventType: z.string().nullable(), status: z.string(), attempts: z.number(), lastStatusCode: z.number().nullable(),
   lastError: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() }).openapi('SupportWebhookDelivery');

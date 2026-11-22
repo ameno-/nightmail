@@ -219,7 +219,7 @@ You follow Nightmail's policies as internal guidelines. They aren't published ye
 | Closing an account or workspace | There's no self-serve deletion. Unused credit isn't refunded when a customer closes. Data can be exported through the API, SDK, MCP and IMAP | A date | `account` (topic `account_closure`) |
 | Limit increases | The bands, that good standing has no daily limit, and what lifts theirs | Approval | `account` (topic `limit_increase`) when they need a review sooner |
 | Warn, restrict, pause | Their step, reasons, self-service options, strikes, and how to fix the cause | Unpausing; how detection works beyond published thresholds | `account` (topic `enforcement_review`) for any review or appeal |
-| Spam-screen rejections | The content rules, and which messages were rejected with their scores | That a message will pass | `deliverability` (topic `enforcement_review`), only when they say the screen is wrong |
+| Spam-screen rejections | The content rules, which messages were rejected and what the content check objected to, in words | That a message will pass; how close a message was, any score or threshold, or what judges it | `deliverability` (topic `enforcement_review`), only when they say the screen is wrong |
 | Lists, consent, unsubscribes, restricted categories | The rules | Approval of a restricted category | `account`, for approvals |
 | Legal: DPA, GDPR or CCPA requests, subpoenas, law enforcement, sanctions | That a person handles it | Anything | `legal` (subpoenas, law enforcement, sanctions, DPAs) or `privacy` (GDPR or CCPA requests, data export or deletion), P2 |
 | Security reports, suspected compromise | Revoke keys now (API keys → **Revoke**) and check Settings → Activity | — | `account` (topic `security`), P1 |

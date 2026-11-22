@@ -6565,7 +6565,7 @@ export const getSupportDomainHealth = <ThrowOnError extends boolean = false>(opt
 });
 
 /**
- * The Hosted content screen over at most 7 days: hourly screened and rejected counts, and the last 50 rejections with subject, error code and spam score. Never bodies. Internal: for Nightmail support’s conversations, through the support platform’s binding, never for customers.
+ * The Hosted content screen over at most 7 days: hourly screened and rejected counts, and the last 50 rejections with subject, error code and the verdict in words. Never bodies, and never the screen’s score, model or threshold. Internal: for Nightmail support’s conversations, through the support platform’s binding, never for customers.
  */
 export const getSupportScreen = <ThrowOnError extends boolean = false>(options?: Options<GetSupportScreenData, ThrowOnError>): RequestResult<GetSupportScreenResponses, GetSupportScreenErrors, ThrowOnError> => (options?.client ?? client).get<GetSupportScreenResponses, GetSupportScreenErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }],

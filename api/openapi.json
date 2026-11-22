@@ -18412,7 +18412,7 @@
           "detail": {
             "type": "object",
             "additionalProperties": {},
-            "description": "The provider’s event detail (bounce type, complaint feedback type, and for a bounce or a delay the receiving server’s reply in diagnosticCode, redacted: addresses are <address>, IPs <ip>, 160 characters). Never the content screen’s verdict on a refused email: getSupportScreen has its score."
+            "description": "The provider’s event detail (bounce type, complaint feedback type, and for a bounce or a delay the receiving server’s reply in diagnosticCode, redacted: addresses are <address>, IPs <ip>, 160 characters). Never the content screen’s score, model or threshold on a refused email."
           }
         },
         "required": [
@@ -20363,18 +20363,9 @@
                   "type": "string",
                   "description": "CONTENT_REJECTED_SPAM, CONTENT_IMAGE_ONLY, CONTENT_TOO_LARGE_TO_SCREEN, ATTACHMENT_TYPE_UNSCREENABLE, ATTACHMENT_CONTENT_MISMATCH."
                 },
-                "spamScore": {
-                  "type": [
-                    "number",
-                    "null"
-                  ],
-                  "description": "The classifier’s spam probability, for CONTENT_REJECTED_SPAM."
-                },
-                "model": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
+                "verdict": {
+                  "type": "string",
+                  "description": "What the content check objected to, in words. Never its score, its model or its threshold: nothing here says how close a message was."
                 }
               },
               "required": [
@@ -20383,8 +20374,7 @@
                 "at",
                 "subject",
                 "errorCode",
-                "spamScore",
-                "model"
+                "verdict"
               ]
             },
             "description": "The last 50, newest first."
@@ -81725,7 +81715,7 @@
             "bearerAuth": []
           }
         ],
-        "description": "The Hosted content screen over at most 7 days: hourly screened and rejected counts, and the last 50 rejections with subject, error code and spam score. Never bodies. Internal: for Nightmail support’s conversations, through the support platform’s binding, never for customers.",
+        "description": "The Hosted content screen over at most 7 days: hourly screened and rejected counts, and the last 50 rejections with subject, error code and the verdict in words. Never bodies, and never the screen’s score, model or threshold. Internal: for Nightmail support’s conversations, through the support platform’s binding, never for customers.",
         "parameters": [
           {
             "schema": {

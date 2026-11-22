@@ -33,7 +33,7 @@ export const countScreened = (verdicts: SQL) => sql`INSERT INTO hosted_screen_ho
   ON CONFLICT(workspace_id,epoch,hour) DO UPDATE SET screened=s.screened+excluded.screened,rejected=s.rejected+excluded.rejected`;
 export const terminalColumns = sql`id,workspace_id,status,region,simulated,error_code,suppression_reason,dispatch_version`;
 /** `screen`: a content-screen refusal's verdict (ScreenVerdict), for the event's own column (migration 398), which only
- *  that refusal's statement names. It is never part of the event's data, which is what the published event and each
+ *  that refusal's statement writes and only the operator timeline reads. It is never part of the event's data, which is what the published event and each
  *  webhook payload below are made of. */
 export function terminalEvents(rows: SQL, extra = sql`'{}'::jsonb`, screen?: SQL) {
   return sql`terminal AS (${rows}), emitted AS (
