@@ -246,6 +246,10 @@ html[data-privacy='on'] .trace-to.private-field:not(:hover, :focus)::placeholder
   .addr-recent__subject { grid-area: subject; }
   .addr-recent time { grid-area: time; }
   .addr-recent__snippet { grid-area: snippet; font-size: var(--text-xs); }
+  /* A card's "Add a rule" gets a 44 px tap area: its lines let it reach past them, and the line still cuts sideways. */
+  .rcv-table .ui-card__line:has(.rcv-add), .rcv-table .ui-card__segment:has(.rcv-add) { overflow: visible; }
+  .rcv-card-to { overflow: visible; overflow-x: clip; }
+  .rcv-card-to .rcv-add { display: inline-block; padding-block: 14px; margin-block: -14px; }
 }
 /* An address in a clipped line keeps its focus ring inside the clip. */
 .receiving-clip .private-address:focus-visible { outline-offset: -2px; }
