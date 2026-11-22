@@ -17677,6 +17677,8 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
   const {readFile,readdir}=await import('node:fs/promises'),dir=new URL('./migrations/',import.meta.url);
   for(const file of (await readdir(dir)).filter(f=>/^\d+_[a-z_]+\.sql$/.test(f)).sort()) {
     const source=await readFile(new URL(file,dir),'utf8');
+    // The ledger test below upgrades through 092, which rewrites the OAuth tables 398 drops; the migrator applies 398 after it.
+    if(file==='398_drop_legacy_auth_tables.sql')continue;
     if(file==='120_addresses.sql'){
       await db.query(`INSERT INTO mailbox_domains(id,domain_id,workspace_id,name,region,status) VALUES ('r-old','r-old','default','upgrade.example','us-east-2','active'),('r-big','r-big','default','big.example','us-east-2','active');
         INSERT INTO mailboxes(id,workspace_id,domain_id,address,rules,created_at) VALUES ('oldest','default','r-old','a@upgrade.example','["sales*@upgrade.example"]',now()-interval '2 days'),('narrow','default','r-old','b@upgrade.example','["sales-eu*@upgrade.example"]',now());
@@ -17702,7 +17704,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     });
     await db.query('COMMIT');
   }
-  await db.query('CREATE TABLE opensend_migrations (LIKE public.nightmail_migrations INCLUDING ALL); INSERT INTO opensend_migrations SELECT * FROM public.nightmail_migrations WHERE name NOT LIKE \'092_%\'');
+  await db.query('CREATE TABLE opensend_migrations (LIKE public.nightmail_migrations INCLUDING ALL); INSERT INTO opensend_migrations SELECT * FROM public.nightmail_migrations WHERE name NOT LIKE \'092_%\' AND name NOT LIKE \'398_%\'');
   await t.test('secretless migration preserves ciphertext and the legacy ledger; explicit rotation rewraps it',async mt=>{
     const {loadConfig}=await import('./src/config.js'), {encrypt,decrypt}=await import('./src/operations.js'), {spawnSync}=await import('node:child_process');
     const url=new URL(FIXTURE_DATABASE_URL!);url.searchParams.set('options','-c search_path='+schema);
