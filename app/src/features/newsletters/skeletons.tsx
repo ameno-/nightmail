@@ -33,7 +33,7 @@ export function IssuesSkeleton({ id }: { id: string }) {
 function NewsletterSkeleton({ id }: { id: string }) {
   const name = useNewsletters().find(item => item.id === id)?.name
   return <div className="stack newsletter">
-    <PageHeader title={name ?? <SkeletonText width={140} lineHeight={24} />} backTo="/campaigns" actions={<Button variant="primary" disabled>New issue</Button>} />
+    <PageHeader title={name ?? <SkeletonText width={140} lineHeight={24} />} actions={<Button variant="primary" disabled>New issue</Button>} />
     <ReadersSkeleton />
     <IssuesSkeleton id={id} />
   </div>

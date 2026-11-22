@@ -93,7 +93,7 @@ function NewsletterView() {
   useEffect(() => { if (issues.data && page === 1) rememberIssuesShape(id, { rows: issues.data.items.length, engagement }) }, [id, page, issues.data, engagement])
   if (newsletter.isError) return <><PageHeader title={named ?? 'Newsletter'} backTo="/campaigns" /><ErrorState error={newsletter.error} onRetry={() => void newsletter.refetch()} /></>
   return <div className="stack newsletter">
-    <PageHeader title={newsletter.data?.name ?? named ?? <SkeletonText width={140} lineHeight={24} />} backTo="/campaigns" actions={<Button variant="primary" onPointerEnter={() => void composer.preload().catch(() => {})} onClick={() => navigate(newIssuePath(id))}>New issue</Button>} />
+    <PageHeader title={newsletter.data?.name ?? named ?? <SkeletonText width={140} lineHeight={24} />} actions={<Button variant="primary" onPointerEnter={() => void composer.preload().catch(() => {})} onClick={() => navigate(newIssuePath(id))}>New issue</Button>} />
     {newsletter.data ? <Readers newsletter={newsletter.data} /> : <ReadersSkeleton />}
     {issues.isError ? <ErrorState error={issues.error} onRetry={() => void issues.refetch()} /> : issues.isPending ? <IssuesSkeleton id={id} />
       : <DataTable className="newsletter-issues" rows={rows} rowKey={issue => issue.id} rowHref={issuePath} onRowIntent={issue => { void warm([queries.campaign(issue.id)]); if (campaignEditable(issue)) void composer.preload().catch(() => {}) }}
