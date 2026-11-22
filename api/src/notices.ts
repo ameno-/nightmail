@@ -142,6 +142,6 @@ export function customerNotice(origin: string, n: NoticeInput): Notice {
     case 'waitlist_admitted': return notice({ subject: `You can sign in to ${productName} now`, action: { label: 'Sign in', url: `${base}/overview` },
       why: `${productName} sent this once, because this address joined the waitlist.`, lines: [
         `You asked to join ${productName} with this address. It is open to you now.`,
-        'Nothing has been set up yet. Your account is created when you sign in.'] });
+        'Sign in with an emailed link to this address, or its Google account. Your account is created then.'] });
   }
 }

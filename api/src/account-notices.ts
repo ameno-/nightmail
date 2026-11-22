@@ -143,13 +143,15 @@ export async function inviteByEmail(runtime: Runtime, tx: DbExecutor, invitation
 }
 
 /**
- * The email to a waitlisted address that was let in, once per address. Nothing calls this yet: there is no action that
- * lets someone in. The one that does calls it with the address; the notice is recorded under the platform workspace.
+ * The email to a waitlisted address that was let in, once per address: signups.ts placesOpened calls it for each address
+ * a raise of the sign-up limit holds a place for. The notice is recorded under the platform workspace.
  */
 export async function waitlistAdmitted(runtime: Runtime, db: DbExecutor, email: string) {
   const workspaceId = runtime.config.platformDomainWorkspace;
   return !!workspaceId && queueNotice(db, { workspaceId, kind: 'waitlist_admitted', dedupe: `waitlist:${email.toLowerCase()}`, data: { email: email.toLowerCase() } });
 }
+/** The status of a waitlist address's email (null: none queued), for a lowercased address column. */
+export const waitlistNoticeStatus = (email: SQL) => sql`(SELECT n.status FROM account_notices n WHERE n.dedupe_key='waitlist:'||${email})`;
 
 type Row = { id: string; kind: AccountNoticeKind; data: Record<string, unknown>; name: string | null; exempt: boolean | null; recipients: string[];
   standing: { phase: string; step: string; daily: number | null } | null; paused: boolean | null; position: { mode?: string; enforcement?: string; availableUc?: string; freeSentLeft?: number } | null;
