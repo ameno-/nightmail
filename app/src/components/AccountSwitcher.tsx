@@ -71,7 +71,7 @@ export function AccountSwitcher({ onConnectAgent }: { onConnectAgent?: () => voi
   const sections: Entry[][] = accounts.map(account => {
     const active = account.id === self.id
     return [
-      { key: `account:${account.id}`, heading: true, label: <><AccountAvatar name={account.name} email={account.email} /><Who account={account} />{active && <Check className="account-menu__check" size={14} aria-label="Current account" />}</>, text: account.name || account.email || 'Account',
+      { key: `account:${account.id}`, heading: true, label: <><AccountAvatar name={account.name} email={account.email} /><Who account={account} /></>, text: account.name || account.email || 'Account',
         disabled: active, onSelect: () => void run(() => session!.switchAccount(account.id, sectionPath()), 'Couldn’t switch account.') },
       ...account.workspaces.map(item => ({ key: `workspace:${account.id}:${item.id}`, text: item.name, label: <span className="account-menu__workspace-name">{item.name}</span>,
         checked: active && item.id === identity.workspaceId,
