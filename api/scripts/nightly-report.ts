@@ -259,10 +259,13 @@ function publicIssueBody(problem: Problem, windowEnd: string) {
     + 'Nightly issues carry error codes, route templates and counts only; the request IDs and details are in the private report.';
 }
 
+// Per-request records, not errors: a classifier request that failed and an email the dispatcher deferred are logged at warn
+// on purpose (src/screen.ts, src/dispatcher.ts). The report counts them like any code but never files them as new.
+const RECORD_CODES = ['CONTENT_SCREEN_CALL', 'DISPATCH_EMAIL'];
 function problems(target: Stage, today: Window, baseline: Window[]): Problem[] {
   const found: Problem[] = [];
   if (!today.complete) return found; // Counts from a partial read are not findings.
-  const knownCodes = new Set(baseline.flatMap(day => Object.keys(day.codes)));
+  const knownCodes = new Set([...RECORD_CODES, ...baseline.flatMap(day => Object.keys(day.codes))]);
   const stageName = `\`${target.name}\``;
   for (const route of Object.values(today.routes)) {
     for (const [rawCode, failure] of Object.entries(route.failures ?? {})) {
