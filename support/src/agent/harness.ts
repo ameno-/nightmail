@@ -20,7 +20,10 @@ export type TurnInput = {
   /** Screenshots for this message, as data URIs (checked and stripped by image.ts). */
   images?: { uri: string; name: string }[];
 };
-/** refused: the model declined to answer (stop_reason "refusal"); `text` is then empty, whatever it wrote before stopping. */
+/**
+ * `text`: what the agent wrote, with the fence's escapes undone (projection.ts unfenced), as are its tool arguments.
+ * refused: the model declined to answer (stop_reason "refusal"); `text` is then empty, whatever it wrote before stopping.
+ */
 export type TurnResult = { text: string; usage: Usage; aborted: boolean; error?: string; refused?: boolean };
 
 export interface Harness {

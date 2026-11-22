@@ -4,6 +4,7 @@ import type { Env } from '../env.js';
 import { MissingSecret } from '../tokens.js';
 import type { Harness, HarnessEvent, TurnInput, TurnResult, Usage } from './harness.js';
 import { TOOLS, ToolFailure, type Param, type ToolHost } from './tools.js';
+import { unfenced } from './projection.js';
 import SYSTEM from './system.md';
 import VOICE from '../../VOICE.md';
 import { errorTypeOf } from '../../../api/src/log.js';
@@ -111,6 +112,13 @@ function cacheForAnHour(body: ModelRequest): boolean {
   return changed;
 }
 
+/**
+ * A tool call's arguments as the agent meant them: it reads outside text escaped (projection.ts), so every string it passes
+ * on (a reply, a ticket, a note, an ID) has those escapes undone once, as its answer does.
+ */
+const written = (value: unknown): unknown => typeof value === 'string' ? unfenced(value) : Array.isArray(value) ? value.map(written)
+  : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k, written(v)])) : value;
+
 function jsonSchema(params: Record<string, Param>) {
   const properties: Record<string, unknown> = {}, required: string[] = [];
   for (const [name, p] of Object.entries(params)) {
@@ -145,7 +153,7 @@ export async function createHarness(env: Env, storage: DurableObjectStorage): Pr
               if (context.signal.aborted) throw new Error('Cancelled.');
               // The session's rules already leave it out; a call that gets here anyway is refused, never run.
               if (!current.allowed.has(spec.name)) throw new Error('That tool is not available in this conversation.');
-              try { return { content: await spec.execute((input ?? {}) as Record<string, unknown>, current.host) }; }
+              try { return { content: await spec.execute(written(input ?? {}) as Record<string, unknown>, current.host) }; }
               catch (error) { throw new Error(error instanceof ToolFailure ? error.message : 'The tool failed. Say what you could not check and carry on.'); }
             },
           } as never);
@@ -281,7 +289,7 @@ export async function createHarness(env: Env, storage: DurableObjectStorage): Pr
       const failed = outcome === 'failed' && !refused;
       log(failed ? 'error' : 'info', { event: 'turn', outcome: refused ? 'refused' : outcome, code: failed ? 'TURN_FAILED' : undefined, failure: failed ? failure : undefined, durationMs: Date.now() - started, ...usage, tools: names.size, images: input.images?.length ?? 0 });
       if (refused) return { text: '', usage, aborted: false, refused: true };
-      return { text: texts.join('\n\n'), usage, aborted: outcome === 'interrupted', ...(failed ? { error: error ?? 'failed' } : {}) };
+      return { text: unfenced(texts.join('\n\n')), usage, aborted: outcome === 'interrupted', ...(failed ? { error: error ?? 'failed' } : {}) };
     },
   };
 }
