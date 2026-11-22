@@ -1,0 +1,176 @@
+import { sql, type SQL } from 'drizzle-orm';
+import { ApiError, id, isSimulatedSes, log, type DbExecutor, type JobHandler, type Runtime } from './core.js';
+import { retryDatabaseFailures } from './jobs.js';
+import { RATES } from './billing/money.js';
+import { customerNotice, type Notice, type NoticeInput } from './notices.js';
+
+// Sending the account emails (src/notices.ts writes them). Three jobs send one each, every one through deliverNotice:
+// standing.notify (standing.ts: paused, marketing on hold, warning, resumed, campaign paused), billing.notify
+// (billing/notify.ts) and account.notify here, for the moments that have no standing event or billing notice of their
+// own: a domain that stopped verifying, the daily limit reached, the evaluation finished, an invitation and the
+// waitlist. Those are account_notices rows (migration 403), one per dedupe key, queued with their job in one statement.
+//
+// An email goes out once: the row's dedupe key makes one notice of one moment, the job leases the row so one runner
+// sends it, and the send's idempotency key (its origin) makes a retried send the same email. Nothing here runs in the
+// request or job that found the moment, except the one INSERT, and that never fails its caller (queueNotice).
+
+type Origin = { standingEvent: string } | { billingNotice: string } | { notice: string };
+const keyOf = (origin: Origin) => 'standingEvent' in origin ? `standing:${origin.standingEvent}` : 'billingNotice' in origin ? `billing:${origin.billingNotice}` : `notice:${origin.notice}`;
+
+/**
+ * One notice to its recipients, from the platform workspace's own sender (NIGHTMAIL_NOTIFY_FROM), one email each.
+ * 'unconfigured' when the installation has no such sender: the dashboard still shows what the email would have said.
+ */
+export async function deliverNotice(runtime: Runtime, to: string[], notice: Notice, origin: Origin): Promise<'sent' | 'unconfigured'> {
+  const from = runtime.config.notifyFrom, sender = runtime.config.platformDomainWorkspace;
+  if (!from || !sender || !runtime.config.multiTenant) return 'unconfigured';
+  const { sendSystemEmail } = await import('./sending.js');
+  try { await sendSystemEmail(runtime, sender, { from, to, ...notice, idempotencyKey: keyOf(origin), ...origin }); }
+  catch (error) {
+    // The key was used with other words: a build before this one sent this notice and its job is being retried.
+    if (!(error instanceof ApiError && error.code === 'IDEMPOTENCY_CONFLICT')) throw error;
+    log('info', { code: 'NOTICE_ALREADY_SENT', origin: keyOf(origin) });
+  }
+  return 'sent';
+}
+
+/** A workspace's owners and admins with a verified address, at most 20: who an account email goes to. */
+export const noticeRecipients = (workspace: SQL) => sql`ARRAY(SELECT u.email FROM workspace_members m JOIN nightmail_users u ON u.id=m.user_id
+  WHERE m.workspace_id=${workspace} AND m.role IN ('owner','admin') AND u.email_verified ORDER BY u.email LIMIT 20)`;
+
+export type AccountNoticeKind = 'domain_unverified' | 'limit_reached' | 'evaluation_finished' | 'invitation' | 'waitlist_admitted';
+type Queued = { workspaceId: string; kind: AccountNoticeKind; dedupe: string; data?: Record<string, unknown>;
+  /** At most one of this kind per workspace in 24 hours (suppressed ones don't count). */
+  daily?: boolean;
+  /** Queue it only while this holds, in the same statement. */
+  when?: SQL };
+/** The notice row and its job, in one statement. Returns a row when this call made the notice. */
+export const noticeInsert = (n: Queued) => sql`WITH made AS (INSERT INTO account_notices(id,workspace_id,kind,dedupe_key,data)
+    SELECT ${id('ant')},${n.workspaceId},${n.kind},${n.dedupe},${JSON.stringify(n.data ?? {})}::jsonb
+    WHERE ${n.when ?? sql`true`} AND ${n.daily ? sql`NOT EXISTS (SELECT FROM account_notices p WHERE p.workspace_id=${n.workspaceId} AND p.kind=${n.kind} AND p.status<>'suppressed' AND p.created_at>now()-interval '24 hours')` : sql`true`}
+    ON CONFLICT (dedupe_key) DO NOTHING RETURNING id,workspace_id),
+  queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'account.notify:'||id,'account.notify',workspace_id,jsonb_build_object('noticeId',id) FROM made ON CONFLICT (id) DO NOTHING)
+  SELECT id FROM made`;
+/**
+ * Queues a notice without ever failing the caller: a notice that can't be queued is logged, and what it reports goes
+ * on. Inside a transaction pass `savepoint`, so a failed insert leaves the transaction usable.
+ */
+export async function queueNotice(db: DbExecutor, n: Queued, savepoint = false): Promise<boolean> {
+  try {
+    if (savepoint) await db.execute(sql`SAVEPOINT account_notice`);
+    const { rows } = await db.execute(noticeInsert(n));
+    if (savepoint) await db.execute(sql`RELEASE SAVEPOINT account_notice`);
+    return rows.length > 0;
+  } catch {
+    if (savepoint) await db.execute(sql`ROLLBACK TO SAVEPOINT account_notice`).catch(() => {});
+    log('warn', { code: 'NOTICE_NOT_QUEUED', workspaceId: n.workspaceId, kind: n.kind });
+    return false;
+  }
+}
+
+/** A domain whose grace ran out: mail from it is refused from now on. Once per loss (the claim's lost_since). */
+export const domainUnverified = (db: DbExecutor, workspaceId: string, domain: { id: string; name: string; lostSince: string | null }) =>
+  queueNotice(db, { workspaceId, kind: 'domain_unverified', dedupe: `domain:${domain.id}:${domain.lostSince ?? ''}`, data: { domainId: domain.id, name: domain.name } }, true);
+
+/**
+ * A send refused at the daily limit: at most one email in 24 hours, and none for a workspace in its evaluation, paused,
+ * or exempt from limits. One statement per refused request, which writes nothing once the day's notice exists.
+ */
+export async function limitReached(runtime: Runtime, workspaceId: string) {
+  if (!runtime.config.multiTenant) return;
+  await queueNotice(runtime.db, { workspaceId, kind: 'limit_reached', dedupe: `limit:${workspaceId}:${new Date().toISOString().slice(0, 10)}`, daily: true,
+    when: sql`EXISTS (SELECT FROM sender_standing s JOIN workspaces w ON w.id=s.workspace_id JOIN provider_connections pc ON pc.workspace_id=s.workspace_id AND pc.kind='shared'
+      WHERE s.workspace_id=${workspaceId} AND s.phase='graded' AND s.daily_limit IS NOT NULL AND NOT w.exempt_hosted_quotas AND pc.paused_at IS NULL)` });
+}
+
+/** The evaluation's end, once in a workspace's life. */
+export const evaluationFinished = (db: DbExecutor, workspaceId: string, limited: boolean) =>
+  queueNotice(db, { workspaceId, kind: 'evaluation_finished', dedupe: `evaluation:${workspaceId}`, data: { limited } });
+
+/** Invitation emails a workspace may cause in a UTC day, and one address may get from every workspace together. */
+export const INVITATION_EMAILS = { workspaceDay: 20, addressDay: 5 } as const;
+const budget = (db: DbExecutor, workspace: string, key: string, limit: number) => db.execute(sql`INSERT INTO api_request_budgets AS b(workspace_id,key_id,window_start,used) VALUES(${workspace},${key},date_trunc('day',now()),1)
+  ON CONFLICT(workspace_id,key_id) DO UPDATE SET used=CASE WHEN b.window_start=excluded.window_start THEN b.used+1 ELSE 1 END,window_start=excluded.window_start
+  WHERE b.window_start<>excluded.window_start OR b.used<${limit} RETURNING 1`).then(r => r.rows.length > 0);
+/**
+ * The invitation's email, queued in the transaction that made the invitation. False when none goes out: the
+ * installation has no sender for it, or the day's allowance is used (the inviter then shares the link, as before).
+ */
+export async function inviteByEmail(runtime: Runtime, tx: DbExecutor, invitation: { id: string; workspaceId: string; email: string }, addressHash: string): Promise<boolean> {
+  if (!runtime.config.multiTenant || !runtime.config.notifyFrom || !runtime.config.platformDomainWorkspace) return false;
+  try {
+    await tx.execute(sql`SAVEPOINT invitation_email`);
+    const queued = await budget(tx, invitation.workspaceId, 'invitation-email', INVITATION_EMAILS.workspaceDay) && await budget(tx, 'global', `invitation-email:${addressHash}`, INVITATION_EMAILS.addressDay)
+      && (await tx.execute(noticeInsert({ workspaceId: invitation.workspaceId, kind: 'invitation', dedupe: `invitation:${invitation.id}`, data: { invitationId: invitation.id } }))).rows.length > 0;
+    await tx.execute(queued ? sql`RELEASE SAVEPOINT invitation_email` : sql`ROLLBACK TO SAVEPOINT invitation_email`);
+    return queued;
+  } catch {
+    await tx.execute(sql`ROLLBACK TO SAVEPOINT invitation_email`).catch(() => {});
+    log('warn', { code: 'NOTICE_NOT_QUEUED', workspaceId: invitation.workspaceId, kind: 'invitation' });
+    return false;
+  }
+}
+
+/**
+ * The email to a waitlisted address that was let in, once per address. Nothing calls this yet: there is no action that
+ * lets someone in. The one that does calls it with the address; the notice is recorded under the platform workspace.
+ */
+export async function waitlistAdmitted(runtime: Runtime, db: DbExecutor, email: string) {
+  const workspaceId = runtime.config.platformDomainWorkspace;
+  return !!workspaceId && queueNotice(db, { workspaceId, kind: 'waitlist_admitted', dedupe: `waitlist:${email.toLowerCase()}`, data: { email: email.toLowerCase() } });
+}
+
+type Row = { id: string; kind: AccountNoticeKind; data: Record<string, unknown>; name: string | null; exempt: boolean | null; recipients: string[];
+  standing: { phase: string; step: string; daily: number | null } | null; paused: boolean | null; position: { mode?: string; enforcement?: string; availableUc?: string; freeSentLeft?: number } | null;
+  domain: string | null; invitation: { email: string; role: 'owner' | 'admin' | 'member'; expiresAt: string; inviterName: string; inviterEmail: string } | null };
+
+/** What the row says now, or null when the moment has passed (fixed, revoked, or told by a more serious email). */
+function noticeOf(row: Row, origin: string): { to: string[]; input: NoticeInput } | null {
+  const workspace = row.name ?? '', held = !!row.paused || (row.standing !== null && ['warn', 'restrict', 'pause'].includes(row.standing.step));
+  switch (row.kind) {
+    // Still refused: a domain that verified again, or was removed, needs no email.
+    case 'domain_unverified': return row.domain === 'pending' || row.domain === 'failed' ? { to: row.recipients, input: { kind: 'domain_unverified', workspace, domain: { id: String(row.data.domainId), name: String(row.data.name) } } } : null;
+    case 'limit_reached': {
+      const p = row.position ?? {}, available = BigInt(p.availableUc ?? '0');
+      const unpaid = p.enforcement === 'enforce' && p.mode === 'prepaid' && (available < 0n || (available < RATES.emailUc && (p.freeSentLeft ?? 0) === 0));
+      return row.exempt || row.paused || unpaid || row.standing?.phase !== 'graded' || row.standing.daily === null ? null : { to: row.recipients, input: { kind: 'limit_reached', workspace } };
+    }
+    // A workspace that left its evaluation into a warning, a hold or a pause is told that instead.
+    case 'evaluation_finished': return row.exempt || held ? null : { to: row.recipients, input: { kind: 'evaluation_finished', workspace, limited: row.data.limited === true } };
+    case 'invitation': {
+      const i = row.invitation;
+      return i && { to: [i.email], input: { kind: 'invitation', workspace, inviter: { name: i.inviterName, email: i.inviterEmail }, role: i.role, expiresAt: new Date(i.expiresAt),
+        acceptUrl: `${origin}/overview?invitation=${encodeURIComponent(String(row.data.invitationId))}` } };
+    }
+    case 'waitlist_admitted': return typeof row.data.email === 'string' ? { to: [row.data.email], input: { kind: 'waitlist_admitted' } } : null;
+  }
+}
+
+export const accountNotifyJob: JobHandler = retryDatabaseFailures(async (runtime, payload, job) => {
+  const noticeId = typeof payload.noticeId === 'string' ? payload.noticeId : '';
+  // The lease: one runner at a time, and a send that crashed is retried after five minutes under the same key.
+  const { rows: [row] } = await runtime.db.execute<Row>(sql`WITH leased AS (
+      UPDATE account_notices SET status='sending',lease_until=now()+interval '5 minutes'
+      WHERE id=${noticeId} AND workspace_id=${job.workspaceId} AND (status='pending' OR (status='sending' AND lease_until<now())) RETURNING id,kind,data,workspace_id)
+    SELECT l.id,l.kind,l.data,w.name,w.exempt_hosted_quotas AS exempt,${noticeRecipients(sql`l.workspace_id`)} AS recipients,
+      (SELECT json_build_object('phase',s.phase,'step',s.step,'daily',s.daily_limit) FROM sender_standing s WHERE s.workspace_id=l.workspace_id) AS standing,
+      (SELECT pc.paused_at IS NOT NULL FROM provider_connections pc WHERE pc.workspace_id=l.workspace_id AND pc.kind='shared') AS paused,
+      CASE WHEN l.kind='limit_reached' THEN billing_position(l.workspace_id) END AS position,
+      (SELECT dc.sending_state FROM domain_claims dc WHERE dc.workspace_id=l.workspace_id AND dc.name=l.data->>'name') AS domain,
+      (SELECT json_build_object('email',i.email,'role',i.role,'expiresAt',i.expires_at,'inviterName',u.name,'inviterEmail',u.email) FROM workspace_invitations i JOIN nightmail_users u ON u.id=i.inviter_id
+        WHERE i.id=l.data->>'invitationId' AND i.workspace_id=l.workspace_id AND i.status='pending' AND i.expires_at>now()) AS invitation
+    FROM leased l LEFT JOIN workspaces w ON w.id=l.workspace_id`);
+  if (!row) return;
+  const settle = (status: 'sent' | 'suppressed' | 'failed') => runtime.db.execute(sql`UPDATE account_notices SET status=${status},lease_until=NULL,sent_at=CASE WHEN ${status}='sent' THEN now() END WHERE id=${row.id} AND status='sending'`);
+  const notice = noticeOf(row, runtime.config.publicUrl.replace(/\/$/, ''));
+  if (!notice) { await settle('suppressed'); log('info', { code: 'ACCOUNT_NOTICE_SUPPRESSED', workspaceId: job.workspaceId, kind: row.kind }); return; }
+  if (!notice.to.length) { await settle('failed'); log('warn', { code: 'ACCOUNT_NOTIFY_NO_RECIPIENTS', workspaceId: job.workspaceId, kind: row.kind }); return; }
+  if (await deliverNotice(runtime, notice.to, customerNotice(runtime.config.publicUrl, notice.input), { notice: row.id }) === 'unconfigured') {
+    await settle('failed');
+    log('info', { code: 'ACCOUNT_NOTIFY_SKIPPED', workspaceId: job.workspaceId, kind: row.kind, reason: 'NIGHTMAIL_NOTIFY_FROM or the platform workspace is not configured' });
+    return;
+  }
+  await settle('sent');
+  log('info', { code: 'ACCOUNT_NOTIFIED', workspaceId: job.workspaceId, kind: row.kind, recipients: notice.to.length, simulated: isSimulatedSes(runtime) });
+});
+export const accountNoticeJobs: Record<string, JobHandler> = { 'account.notify': accountNotifyJob };
