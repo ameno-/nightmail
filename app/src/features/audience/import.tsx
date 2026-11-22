@@ -69,7 +69,7 @@ function importParts(text: string, mapping: Record<string, string>) {
 }
 const firstIssues = (issues: Issue[]) => issues.sort((a, b) => a.row - b.row).slice(0, 10)
 // The API can name one row twice (a blank email is invalid and not ASCII): the first message is enough, and the count counts rows.
-const onePerRow = (issues: Issue[]) => issues.filter((issue, index) => issues.findIndex(other => other.row === issue.row) === index)
+const onePerRow = (issues: Issue[]) => { const seen = new Set<number>(); return issues.filter(issue => !seen.has(issue.row) && Boolean(seen.add(issue.row))) }
 
 export function ImportContactsDialog({ listId: initialListId = '', onClose }: { listId?: string; onClose: () => void }) {
   const [listId, setListId] = useState(initialListId)
