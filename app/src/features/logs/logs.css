@@ -40,13 +40,17 @@
 .delivery__dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--tone-marker); }
 .delivery__count, .delivery__time { color: var(--color-muted); font-variant-numeric: tabular-nums; }
 /* Why it ended this way, under the steps: one sentence, then the receiving server's own reply, quieter and on one line
-   beside it (in a column: under it, two lines at most, with all of it in the step's tooltip; in a phone's sheet: all of it). */
+   beside it (in a column: under it, two lines at most; in a phone's sheet: all of it). A reply that is cut opens in
+   place (Clamped, email-detail.tsx). */
 .delivery { flex-wrap: wrap; row-gap: var(--space-4); }
 .delivery__why { display: flex; flex-basis: 100%; align-items: baseline; gap: var(--space-12); min-width: 0; margin: 0; }
 .delivery__said { flex: 1 1 0; min-width: 0; overflow: hidden; color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
 .delivery[data-vertical] .delivery__why { display: block; flex: none; text-wrap: pretty; }
 .delivery[data-vertical] .delivery__said { display: -webkit-box; margin-top: var(--space-4); line-height: var(--leading-xs); overflow-wrap: anywhere; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .email-detail-sheet .delivery[data-vertical] .delivery__said { display: block; margin-top: 0; }
+.delivery .delivery__said[data-open] { display: block; overflow: visible; overflow-wrap: anywhere; white-space: normal; }
+.delivery__said[role='button'] { border-radius: 2px; cursor: pointer; }
+@media (hover: hover) and (pointer: fine) { .delivery__said[role='button']:hover { color: var(--color-text); } }
 .delivery__zone { color: var(--color-faint); font-size: var(--text-xs); }
 .delivery > .ui-alert { flex: 1; }
 .delivery-tip { display: flex; flex-direction: column; gap: 2px; }

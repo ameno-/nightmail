@@ -98,23 +98,29 @@ function EmailDetail({ email, focus }: { email: Email; focus: string }) {
   </div>
 }
 
-// A phone's subject: two lines at most; a longer one opens in place on a tap.
-function Subject({ text }: { text: string }) {
+// Text its class holds to a line or two: where that cuts it, it opens in place on a click, a tap, Enter or Space, and
+// closes the same way. Text that fits is plain text. `text`: what it shows, to measure again when it changes.
+function Clamped({ className, text, children }: { className: string; text: string; children: ReactNode }) {
   const ref = useRef<HTMLSpanElement>(null)
   const [cut, setCut] = useState(false)
   const [open, setOpen] = useState(false)
+  // Open, it is whole, which says nothing of whether it is cut when closed: it is measured only while closed.
+  const opened = useRef(open)
+  opened.current = open
   useLayoutEffect(() => {
     const element = ref.current!
-    const read = () => setCut(element.scrollHeight > element.clientHeight + 1)
+    const read = () => { if (!opened.current) setCut(element.scrollHeight > element.clientHeight + 1 || element.scrollWidth > element.clientWidth + 1) }
     read()
     const observer = new ResizeObserver(read)
     observer.observe(element)
     return () => observer.disconnect()
   }, [text])
   const toggle = cut || open
-  return <span ref={ref} className="email-subject" data-open={open || undefined} role={toggle ? 'button' : undefined} tabIndex={toggle ? 0 : undefined} aria-expanded={toggle ? open : undefined}
-    onClick={toggle ? () => setOpen(!open) : undefined} onKeyDown={toggle ? event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setOpen(!open) } } : undefined}>{text}</span>
+  return <span ref={ref} className={className} data-open={open || undefined} role={toggle ? 'button' : undefined} tabIndex={toggle ? 0 : undefined} aria-expanded={toggle ? open : undefined}
+    onClick={toggle ? () => setOpen(!open) : undefined} onKeyDown={toggle ? event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setOpen(!open) } } : undefined}>{children}</span>
 }
+// A phone's subject: two lines at most; a longer one opens in place.
+const Subject = ({ text }: { text: string }) => <Clamped className="email-subject" text={text}>{text}</Clamped>
 
 // A phone's one line under the subject: the status as of its last step (a scheduled email: when it goes), with when and
 // (on a tablet) the stream, opening the delivery and the facts; and the score's chip. The Details sheet names the stream.
@@ -240,10 +246,11 @@ function StepTip({ step, day }: { step: Step; day: string }) {
   return <span className="delivery-tip">{lines.map((line, index) => <span key={index}>{line}</span>)}</span>
 }
 
-// Why it ended this way and what happens next, then the receiving server's own reply (`said`: only the reply).
+// Why it ended this way and what happens next, then the receiving server's own reply (`said`: only the reply). A reply
+// too long for its line or two opens in place.
 function Why({ reason, said }: { reason: Reason | null; said?: boolean }) {
   if (!reason || (said && !reason.said)) return null
-  return <p className="delivery__why">{!said && reason.text}{reason.said && <span className="delivery__said"><AddressText text={reason.said} /></span>}</p>
+  return <p className="delivery__why">{!said && reason.text}{reason.said && <Clamped className="delivery__said" text={reason.said}><AddressText text={reason.said} /></Clamped>}</p>
 }
 
 /** On one line under the header, or `vertical`: a column of steps, each with its time, in the details column or on a phone.
