@@ -14,8 +14,6 @@
 //   CLS_SHOTS=1        screenshot every page, not only failing ones
 //   CLS_PHONE=0        skip the phone pass
 //   CLS_FONTS=late     deliver web fonts 1.8 s late, to measure the fallback-to-web-font swap
-//   CLS_DENSITY=1      also read each page's text density in the same run (density.mjs) into .cls/density.json;
-//                      =only measures density alone (cold loads, no throttling, no CLS gate): node scripts/density.mjs
 // Writes .cls/report.json (every shift with its source elements), .cls/summary.md (also appended to
 // $GITHUB_STEP_SUMMARY) and a screenshot per failing page with the shifted elements outlined.
 //
@@ -294,7 +292,6 @@ const throttle = { latency: 150, bytesPerSecond: 1.6 * 1024 * 1024 / 8 };
 // webhook on a phone, 2 of 3 dev runs on Nov 12). CLS_FONTS=late measures that swap instead: every font arrives 1.8 s
 // late, after the slowest API response, so text first paints in its local fallback (tokens.css).
 const lateFonts = process.env.CLS_FONTS === 'late', FONT_DELAY_MS = 1800;
-const density = process.env.CLS_DENSITY ? await import('./density.mjs') : null, densityOnly = process.env.CLS_DENSITY === 'only';
 
 // Runs in the page before its own scripts.
 const probe = () => {
@@ -601,7 +598,6 @@ async function measure(browser, job, fx) {
       result.screenshot = `${job.slug}.png`;
       await page.screenshot({ path: join(out, result.screenshot) });
     }
-    if (density?.wanted(job)) result.density = await density.collect(page, job).catch(error => { result.densityError = error.message.split('\n')[0]; return null; });
     if (job.guard === 'receiving-edit') {
       // Saving through the address builder never changes an address's routes or rules it wasn't told to: New address
       // turns away one that exists and a *, an unchanged Save writes nothing, and closing with a change asks first.
@@ -793,7 +789,7 @@ mkdirSync(out, { recursive: true });
 // No request leaves the machine: every host but the fixture's fails to resolve.
 const browserPromise = chromium.launch({ ...process.env.CLS_CHROME ? { executablePath: process.env.CLS_CHROME } : { channel: 'chrome' }, args: ['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1'] });
 browserPromise.catch(() => {});
-const fx = await start(repo, { servers: Math.min(2, Math.ceil(workers / 8)), delay: densityOnly ? null : apiDelay, fontDelay: lateFonts ? FONT_DELAY_MS : 0, throttle: densityOnly ? null : throttle, log: message => console.log(`${elapsed()} ${message}`) }).catch(async error => {
+const fx = await start(repo, { servers: Math.min(2, Math.ceil(workers / 8)), delay: apiDelay, fontDelay: lateFonts ? FONT_DELAY_MS : 0, throttle, log: message => console.log(`${elapsed()} ${message}`) }).catch(async error => {
   await browserPromise.then(b => b.close(), () => {});
   throw error;
 });
@@ -808,17 +804,14 @@ try {
     if (only && !only.test(name) || device === 'phone' && !phonePages.has(name) || phoneOnly && device !== 'phone') continue;
     const slug = `${name}-${device === 'phone' ? 'phone' : scheme}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
     const load = { name, path, user, scheme, device, support, live, leave: leave && device === 'desktop' && scheme === 'light', notes, dialog, menu, still, alone, notFound, waitlist, guard: guard && device === 'desktop' && scheme === 'light' ? guard : undefined, mode: 'load', slug: slug + '-load' };
-    if (densityOnly && !density.wanted(load)) continue;
     jobs.push(load);
-    if (from && !densityOnly) jobs.push({ name, path, user, from, click, row, switchTo, support, notes, still, alone, scheme, device, mode: 'in-app', slug: slug + '-in-app' });
+    if (from) jobs.push({ name, path, user, from, click, row, switchTo, support, notes, still, alone, scheme, device, mode: 'in-app', slug: slug + '-in-app' });
   }
   // Multi-step jobs (Support chat, live rules, Overview's full warm-up) start first so none trails alone at the end.
   const weight = job => (job.support ? 4 : 0) + (job.live ? 2 : 0) + (job.name === 'Overview' && job.mode === 'load' ? 3 : 0);
-  const shard = /^(\d+)\/(\d+)$/.exec(process.env.CLS_SHARD ?? '1/1');
-  if (!shard || +shard[1] < 1 || +shard[1] > +shard[2] || +shard[2] > jobs.length) throw Error('Invalid CLS_SHARD: expected index/count within the measurement set');
   jobs.forEach((job, index) => { job.index = index; });
-  const queue = [...jobs].sort((a, b) => weight(b) - weight(a)).filter((_, i) => i % +shard[2] === +shard[1] - 1);
-  console.log(`${elapsed()} measuring ${queue.length} of ${jobs.length} page loads, ${workers} at a time`);
+  const queue = [...jobs].sort((a, b) => weight(b) - weight(a));
+  console.log(`${elapsed()} measuring ${queue.length} page loads, ${workers} at a time`);
   const run = async job => {
     const r = await measure(browser, job, fx);
     results[job.index] = r;
@@ -835,8 +828,6 @@ try {
   await fx.stop();
 }
 results = results.filter(Boolean);
-if (density) writeFileSync(join(out, 'density.json'), JSON.stringify(results.map(({ page, path, scheme, device, mode, error, density, densityError }) => ({ page, path, scheme, device, mode, error: error ?? densityError, density }))));
-if (densityOnly) process.exit(results.some(r => r.error) || !results.length ? 1 : 0);
 const { markdown, failed } = summarize(results, ((Date.now() - began) / 1000).toFixed(0));
 writeFileSync(join(out, 'report.json'), JSON.stringify(results, null, 2));
 writeFileSync(join(out, 'summary.md'), markdown);

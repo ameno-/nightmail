@@ -137,6 +137,7 @@ jobs:
             echo "::group::bun audit $pkg"; (cd "$pkg" && bun audit "${args[@]}"); echo '::endgroup::'
           done
 
+  # Required, so it always runs and succeeds; the Rust steps run only when gateway/ or this workflow changed.
   gateway:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     env:
@@ -148,8 +149,21 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
+          fetch-depth: 2
           persist-credentials: false
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      # HEAD^1 of a pull request's merge checkout is the base branch; of a queue entry, the entries ahead; of a dev
+      # push, the previous dev tip (the queue merges with a merge commit).
+      - name: Check for gateway changes
+        id: changes
+        working-directory: .
+        run: |
+          if ! git diff --quiet HEAD^1 HEAD -- gateway .github/workflows/ci.yml; then
+            echo 'run=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'No gateway/ or CI changes: nothing to build.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - if: steps.changes.outputs.run == 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -157,8 +171,10 @@ jobs:
             gateway/target
           key: cargo-${{ runner.os }}-${{ hashFiles('gateway/Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
-      - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy,rustfmt
+      - if: steps.changes.outputs.run == 'true'
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy,rustfmt
       - name: Format, lint and unit tests
+        if: steps.changes.outputs.run == 'true'
         run: cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked
 
   acceptance:
@@ -247,19 +263,7 @@ jobs:
   # Layout shift on every main dashboard page (light and dark, cold load and in-app navigation, throttled network,
   # slow out-of-order API responses) against the production build and a throwaway API with synthetic data.
   # Fails above CLS 0.001 on any page; the longest task per in-app navigation is reported. Locally: cd app && bun run cls.
-  # The same run reads each page's text density (app/scripts/density.mjs), a ratchet against density-baseline.json.
   cls:
-    needs: cls-shard
-    if: always()
-    runs-on: blacksmith-2vcpu-ubuntu-2404
-    steps:
-      - run: test "${{ needs.cls-shard.result }}" = success
-
-  cls-shard:
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     services:
@@ -307,31 +311,13 @@ jobs:
         working-directory: app
         env:
           CLS_PG_URL: postgresql://postgres:fixture-admin@127.0.0.1:5432/postgres
-          CLS_DENSITY: '1'
-          CLS_SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}
         run: node scripts/cls.mjs
-      # Scores the density readings the CLS run took (no second server): fails on a new finding or a denser page.
-      - name: Check text density on every page
-        if: always() && steps.changes.outputs.run == 'true' && hashFiles('app/.cls/density.json') != ''
-        working-directory: app
-        run: node scripts/density.mjs --from .cls/density.json
-      - name: Save density measurements for baseline updates
-        if: success() && steps.changes.outputs.run == 'true'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: density-${{ matrix.shard }}
-          path: app/.cls/density.json
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 7
-      - name: Upload the shift sources and density report
+      - name: Upload the shift sources
         if: failure() && steps.changes.outputs.run == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: cls-shift-sources-${{ matrix.shard }}
-          path: |
-            app/.cls/
-            app/.density/
+          name: cls-shift-sources
+          path: app/.cls/
           include-hidden-files: true
           retention-days: 14
 

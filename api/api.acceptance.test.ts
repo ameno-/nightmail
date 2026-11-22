@@ -1155,7 +1155,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   assert.equal((await request('/v1/me','GET',reassignedSession)).status,401);
   assert.equal((await request('/api/auth/sign-out','POST',session)).status,200);
   assert.equal((await request('/v1/me','GET',session)).status,401);
-  // A seat bound by subject (scripts/cutover-fresh-start.ts --owner-sub): a refused subject the operator bound to a
+  // A seat bound by subject (a nightmail_oidc_identities row): a refused subject the operator bound to a
   // user lands in that user's workspace with its role. Addresses never decide: the same address under another
   // subject gets nothing.
   subject=randomUUID();subjects.push(subject);email=`seat-${randomUUID()}@example.org`;providerName=null;providerHd=null;waitlist.push(email);

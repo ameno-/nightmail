@@ -5,7 +5,7 @@
 // Env: DATABASE_URL; ACCOUNT_ISSUER (optional) limits the list to that issuer.
 // Identity is (issuer, subject). The address and name come from the sign-in and are shown only to help the
 // operator tell attempts apart: confirm with the person, out of band, which subject and time are theirs before
-// using it (for example `scripts/cutover-fresh-start.ts --owner-sub <subject>`). An address never proves who it is.
+// binding it (a nightmail_oidc_identities row). An address never proves who it is.
 import { parseArgs } from 'node:util';
 import pg from 'pg';
 import { postgresConnection } from '../src/adapters/node.js';

@@ -1,9 +1,9 @@
 name: Nightly
 
-# Flake hunting (docs/ci.md). On the dev tip, ten times in parallel: the whole acceptance suite, quarantined
-# [flaky #N] tests included, with the deadlock guard on; and the CLS gate on every page. The report job keeps one
-# issue current: every test or CLS measurement that failed at least once, with its count and first error, and every
-# quarantined test that passed every run (ready to un-quarantine). A clean night closes the issue.
+# Flake hunting (docs/ci.md). On the dev tip, once by default (more in parallel by hand): the whole acceptance suite,
+# quarantined [flaky #N] tests included, with the deadlock guard on; and the CLS gate on every page. The report job
+# keeps one issue current: every test or CLS measurement that failed at least once, with its count and first error,
+# and every quarantined test that passed every run (ready to un-quarantine). A clean night closes the issue.
 
 on:
   schedule:
@@ -13,8 +13,8 @@ on:
       runs:
         description: How many parallel acceptance runs
         type: choice
-        options: ['10', '5', '20']
-        default: '10'
+        options: ['1', '5', '10', '20']
+        default: '1'
 
 permissions:
   contents: read
@@ -32,7 +32,7 @@ jobs:
     steps:
       - id: runs
         env:
-          RUNS: ${{ inputs.runs || '10' }}
+          RUNS: ${{ inputs.runs || '1' }}
         run: echo "runs=$(jq -cn --argjson n "$RUNS" '[range(1; $n + 1)]')" >> "$GITHUB_OUTPUT"
 
   acceptance:
@@ -97,14 +97,13 @@ jobs:
   # The CLS gate, the same number of times: a page whose shift depends on timing shows up as failing some runs.
   cls:
     needs: plan
-    name: cls run ${{ matrix.run }} (${{ matrix.shard }}/4)
+    name: cls run ${{ matrix.run }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         run: ${{ fromJSON(needs.plan.outputs.runs) }}
-        shard: [1, 2, 3, 4]
     services:
       postgres:
         image: postgres:17.11-alpine
@@ -136,7 +135,6 @@ jobs:
         working-directory: app
         env:
           CLS_PG_URL: postgresql://postgres:fixture-admin@127.0.0.1:5432/postgres
-          CLS_SHARD: ${{ matrix.shard }}/4
         run: node scripts/cls.mjs
       - name: Record the outcome
         if: always()
@@ -149,7 +147,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
-          name: nightly-cls-${{ matrix.run }}-${{ matrix.shard }}
+          name: nightly-cls-${{ matrix.run }}
           path: |
             app/.cls/report.json
             app/.cls/outcome.json

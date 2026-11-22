@@ -8,6 +8,7 @@ Every change reaches production through `dev`: a PR merges into `dev`, the dev d
 
 - **Why:** with "require branches to be up to date", parallel PRs went BEHIND after every merge and re-ran CI each time; without it, two PRs that pass alone could break `dev` together (a migration number both picked, a route one added and the other's check missed). The queue removes both.
 - **Cost:** each PR's required checks run twice, once on the PR and once in the queue. The queue builds up to five entries at once, so a burst of PRs doesn't wait in series.
+- **Path-gated checks:** `cls` (dashboard, API or CI changes; every `dev` push) and `gateway` (`gateway/` or `ci.yml` changes) always run and pass when there is nothing to check: the job starts and skips its steps, so the required check reports success to the PR and the queue instead of never arriving.
 - **Failures:** a PR that fails in the queue is removed from it with the failing check linked; the entries behind it are rebuilt without it. Fix and re-add.
 - **Deploys:** the queue pushes `dev` as `github-merge-queue[bot]`. The dev deploy accepts that push when the PR merged at exactly that commit was merged (enqueued) by thdxr or R44VC0RP; anything else still fails "Only thdxr and R44VC0RP may deploy".
 - **Breaking API changes:** the `api-breaking` label on the PR still allows them; in the queue, the compatibility check compares just that PR's step.
@@ -19,9 +20,9 @@ Every change reaches production through `dev`: a PR merges into `dev`, the dev d
 | PR, merge group, `dev` push | `build` | Types, SDK and docs regenerate cleanly, both Workers bundle, the public API stays compatible, and the **pre-merge invariants** below |
 | PR, merge group, `dev` push | `acceptance` | Three isolated Postgres/S3 shards (integration, simulated, simulated-heavy), each with the **deadlock guard** |
 | PR, merge group, `dev` push | `preview` | The real Worker under `wrangler dev` on a database upgraded from `dev`'s schema; see **Preview stack** |
-| PR, merge group, `dev` push | `audit`, `gateway`, `cls`, `support` | Dependency advisories, the Rust mail gateway, four shards of layout shift and density measurements, and the support Worker tests |
+| PR, merge group, `dev` push | `audit`, `gateway`, `cls`, `support` | Dependency advisories, the Rust mail gateway (built only when `gateway/` or `ci.yml` changed), layout shift on every main page in one job, and the support Worker tests |
 | `dev` push, alongside CI | Deploy dev | Migrate, deploy, health and live dev E2E. Support prepares alongside the main Worker but waits for its health check before changing D1 or its service binding. |
-| Daily 07:17 UTC, or by hand | Nightly | The acceptance suite (quarantined tests included) and the CLS gate, ten repetitions each by default, reported in one issue |
+| Daily 07:17 UTC, or by hand | Nightly | The acceptance suite (quarantined tests included) and the CLS gate, once each by default (5, 10 or 20 by hand), reported in one issue |
 | `production` push | Deploy production | Requires a passing live dev E2E and CI proof (see **Releasing to production**) |
 | Daily 03:00 ET, on Ryan's Mac | Nightly report | The last 24 hours of production and dev logs against the previous week; files `nightly` issues and starts a self-improve session (below) |
 
@@ -108,14 +109,6 @@ Connected AWS accounts run a published role template (`api/byo-templates/<major>
 
 **Fix:** revert the published file and add the change as a new version. A minor version only adds permissions. The acceptance test `BYO contract` checks every session the code asks for (`api/src/byo-permissions.ts`) against the current draft and every published version; a call outside its session policy fails the BYO v5 enrollment test.
 
-## Copy and density lint (`build`, `cls`)
-
-Both are ratchets: a baseline holds today's findings, only a new one fails, and a clean local run drops fixed ones from it (`--update-baseline` accepts a deliberate exception). A finding keeps its identity when its line moves or its text is edited in place, and the product's name counts as one neutral word, so a rename is never new.
-
-- **Copy** (`app/scripts/copy-lint.mjs`, pre-merge invariant 7; locally `bun run copy-lint` in `app/`): every dashboard string against length per element type, sentence length, reading grade, filler, hedging, passive voice, the glossary, sentence case, numerals, restated labels and duplicates, secondary text (taglines, helper text and captions) and reassurance that rules out a failure nobody worried about; kept only for legal, safety, billing and one-time secret text. Baseline `app/scripts/copy-baseline.json`.
-- **Density** (`app/scripts/density.mjs`, read during the `cls` run; locally `bun run density`): per page and main dialog at 1440 × 900 and 390 × 844, words in total and above the fold, long blocks, paragraphs, controls, tooltips, a figure, fact or explanation shown twice, detail shown by default that could open from its summary, text that adds nothing, and explanations with nothing to act on (rule ids in `app/scripts/copy-fix.md`). Fails on a new finding or a score 5% (at least 3) over `app/scripts/density-baseline.json`; the artifact has annotated screenshots.
-- **Fixing:** `app/scripts/copy-fix.md`.
-
 ## Deadlock guard (`acceptance`)
 
 Dev's E2E runs its steps concurrently, and every 40P01 it has hit so far was two endpoints locking the same rows (the workspace's settings row, a domain claim, a receipt or its window) in opposite orders. Each request then failed with a 500 after `deadlock_timeout`. The acceptance job now:
@@ -134,7 +127,7 @@ A flaky check costs every PR a re-run and teaches everyone to ignore red. The po
 
 - **Fix it first.** Most flakes are a race with something else in the shared fixture, or a measurement that depends on timing. Two fixed this way: `database connection refusals…` claimed whichever job was due, so under the full suite it could take another test's job (it now shadows the queue with a transaction-scoped `CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP`, as the campaign-run tests do); and the CLS gate's `Settings · webhook` phone measurement (below).
 - **Quarantine while you fix it.** Open an issue, then add `[flaky #<issue>]` to the test's name. The required `acceptance` job skips it; the nightly runs it. `check-premerge.ts` fails the build if the tag names no issue or a closed one. Remove the tag when the fix lands, or when the nightly report lists it as passing every run.
-- **The nightly finds new ones.** `.github/workflows/nightly.yml` runs the acceptance suite (`ACCEPTANCE_QUARANTINE=all`, JUnit output) and the CLS gate ten times each, in parallel, on the dev tip, then keeps one issue labeled `nightly-flakes` current: each failing test or CLS measurement with its failure count and first error, run-level failures (a deadlock, a crashed shard), and quarantined tests that passed every run. A clean night closes the issue. Run it by hand from the Actions tab (5, 10 or 20 runs).
+- **The nightly finds new ones.** `.github/workflows/nightly.yml` runs the acceptance suite (`ACCEPTANCE_QUARANTINE=all`, JUnit output) and the CLS gate on the dev tip, once each by default, then keeps one issue labeled `nightly-flakes` current: each failing test or CLS measurement with its failure count and first error, run-level failures (a deadlock, a crashed shard), and quarantined tests that passed every run. A clean night closes the issue. Run it by hand from the Actions tab (5, 10 or 20 runs).
 
 `acceptance.sh` modes: `ACCEPTANCE_QUARANTINE` unset skips quarantined tests, `only` runs just them, `all` runs everything; `ACCEPTANCE_JUNIT=<dir>` also writes `integration.xml` and `simulated.xml` there.
 
