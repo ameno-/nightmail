@@ -20,8 +20,8 @@ const targets = [
 ]
 const COMBINED = '\u0000first-last'
 // A file of up to 1,000,000 rows and 100 MiB goes up in parts the API takes (POST /v1/contact-imports: 50,000 rows and
-// 5 MiB each), each previewed and then committed in order; rows keep the file's numbers. A later part's row that repeats
-// an earlier part's email is skipped here, as the API skips a repeat within one import.
+// 5 MiB each), each previewed and then committed in order; rows keep the file's numbers. A row without an email, or one
+// that repeats an earlier row's email, is skipped here, as the API would skip it, naming the earlier row.
 const MAX_ROWS = 1_000_000, MAX_FILE_BYTES = 100 * 1024 * 1024, PART_ROWS = 50_000, PART_BYTES = 5 * 1024 * 1024 - 65_536
 const sample = 'email,name,first_name,plan,country\nada@example.com,Ada Lovelace,Ada,pro,GB\ngrace@example.com,Grace Hopper,Grace,free,US\n'
 const sampleHref = `data:text/csv;charset=utf-8,${encodeURIComponent(sample)}`
@@ -47,25 +47,29 @@ function importParts(text: string, mapping: Record<string, string>) {
   const line = (cells: string[]) => cells.map(quote).join(',')
   const top = line(column ? [...header, column] : header), topBytes = utf8Bytes(top)
   function* parts(): Generator<Part> {
-    const earlier = new Set<string>(), current = new Set<string>()
+    const earlier = new Map<string, number>(), current = new Map<string, number>()
     let lines: string[] = [], numbers: number[] = [], skipped: Issue[] = [], bytes = topBytes, row = 1
     for (const cells of rows) {
       row++
       const key = (cells[email] ?? '').trim().toLowerCase(), text = line(column ? [...cells, fullName(cells)] : cells), size = utf8Bytes(text) + 1
       if (lines.length && (lines.length >= PART_ROWS || bytes + size > PART_BYTES)) {
         yield { csv: `${top}\n${lines.join('\n')}`, rows: numbers, skipped }
-        for (const seen of current) earlier.add(seen)
+        for (const [seen, first] of current) earlier.set(seen, first)
         current.clear(); lines = []; numbers = []; skipped = []; bytes = topBytes
       }
-      if (key && earlier.has(key)) { skipped.push({ row, field: 'email', message: 'Duplicate normalized email within this import.' }); continue }
+      if (!key) { skipped.push({ row, field: 'email', message: 'Email is empty' }); continue }
+      const first = earlier.get(key) ?? current.get(key)
+      if (first !== undefined) { skipped.push({ row, field: 'email', message: `Same email as row ${first}` }); continue }
       lines.push(text); numbers.push(row); bytes += size
-      if (key) current.add(key)
+      current.set(key, row)
     }
     yield { csv: lines.length ? `${top}\n${lines.join('\n')}` : '', rows: numbers, skipped }
   }
   return { mapping: selected, parts: parts() }
 }
 const firstIssues = (issues: Issue[]) => issues.sort((a, b) => a.row - b.row).slice(0, 10)
+// The API can name one row twice (a blank email is invalid and not ASCII): the first message is enough, and the count counts rows.
+const onePerRow = (issues: Issue[]) => issues.filter((issue, index) => issues.findIndex(other => other.row === issue.row) === index)
 
 export function ImportContactsDialog({ listId: initialListId = '', onClose }: { listId?: string; onClose: () => void }) {
   const [listId, setListId] = useState(initialListId)
@@ -90,7 +94,7 @@ export function ImportContactsDialog({ listId: initialListId = '', onClose }: { 
       const fileRow = (row: number) => part.rows[row - 2] ?? row
       found.ids.push(answer.id); found.total += answer.rows.length
       found.rows.push(...answer.rows.slice(0, 10 - found.rows.length).map(item => ({ ...item, row: fileRow(item.row) })))
-      note(answer.errors.map(issue => ({ ...issue, row: fileRow(issue.row) })))
+      note(onePerRow(answer.errors).map(issue => ({ ...issue, row: fileRow(issue.row) })))
       if (done < rowCount) setProgress(`Checked ${number(done)} of ${number(rowCount)} rows`)
     }
     return found
