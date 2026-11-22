@@ -16790,6 +16790,17 @@ describe('Campaign postal address', () => {
         assert.ok(url && url !== placeholder && copy.html.includes(`Unsubscribe</a></p><p style="`) && copy.html.includes(footerOf(address)), 'The HTML footer carries the address under the link.');
         assert.ok(copy.text.endsWith(`\n\nUnsubscribe: ${url}\n${address}`), 'So does the text.');
       }
+      // The copy as dispatched (rebuilt by the same footer) keeps the one-click headers on the recipient's own link.
+      const [{ sentCampaignContent }, { emails }, { eq }] = await Promise.all([import('./src/sending.js'), import('./src/db/sending.js'), import('drizzle-orm')]);
+      const unsubscribeHeaders = (snapshot: { headers: { Name: string; Value: string }[]; text?: string }) => {
+        const url = snapshot.text?.match(/\n\nUnsubscribe: (\S+)/)?.[1];
+        assert.ok(url?.includes('/unsubscribe/u_'));
+        assert.deepEqual(snapshot.headers.filter(h => /^list-unsubscribe/i.test(h.Name)), [{ Name: 'List-Unsubscribe', Value: `<${url}>` }, { Name: 'List-Unsubscribe-Post', Value: 'List-Unsubscribe=One-Click' }]);
+      };
+      for (const id of await released(sent.id)) {
+        const [row] = await runtime.db.select().from(emails).where(eq(emails.id, id));
+        unsubscribeHeaders(await sentCampaignContent(runtime, { workspaceId: wid, keyId: 'acceptance', permissions: ['manage'], domains: [] }, row!));
+      }
       // Frozen with the launch: a later change reaches new launches, never what was sent.
       ok(await local('PATCH', '/v1/settings/workspace', { postalAddress: 'Moved Fixture Co.\n10 Other Road' }));
       assert.ok((await content((await released(sent.id))[0]!)).text.endsWith(address));
@@ -16802,8 +16813,10 @@ describe('Campaign postal address', () => {
       assert.equal(receipt.text, 'Receipt');
       // A marketing send without an address still goes, with the link alone: its caller wrote the whole message.
       await db.query('UPDATE operation_settings SET postal_address = NULL WHERE workspace_id = $1', [wid]);
-      const unaddressed = await content(ok(await local('POST', '/v1/emails/send', { from, to: 'reader@example.net', subject: 'News', text: 'News', kind: 'marketing' }), 202).id);
-      assert.match(unaddressed.text, /^News\n\nUnsubscribe: \S+$/);
+      const unaddressedId = ok(await local('POST', '/v1/emails/send', { from, to: 'reader@example.net', subject: 'News', text: 'News', kind: 'marketing' }), 202).id;
+      assert.match((await content(unaddressedId)).text, /^News\n\nUnsubscribe: \S+$/);
+      // Marketing sends keep the one-click headers with an address and without one.
+      for (const id of [marketing.id, unaddressedId]) unsubscribeHeaders((await db.query('SELECT snapshot FROM sending_emails WHERE id = $1', [id])).rows[0].snapshot);
       // A campaign scheduled before postal addresses existed froze none: at its time it pauses while the workspace has
       // none, and once one is added and it is resumed it sends with that one, stamped into its review.
       await db.query("UPDATE sending_campaign_reviews SET draft = draft - 'postalAddress' WHERE campaign_id = $1", [scheduled.id]);
