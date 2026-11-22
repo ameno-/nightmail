@@ -1765,14 +1765,18 @@ function feedbackClass(kind: string, detail: Record<string, any>) {
   if (kind === 'Bounce') return detail.bounceType !== 'Permanent' ? 'non_permanent_bounce' : detail.bounceSubType === 'EmailValidationSuppressed' ? 'validation_suppressed' : 'bounce';
   return sesEvents[kind]?.rawType;
 }
-// What a bounce or a delay keeps of SES's report, in its email event and its webhook (EmailEventData): the receiving
-// server's reply, of the first recipient that has one, as one bounded line; and a delay's kind and deadline.
-const DIAGNOSTIC_CHARS = 500;
+// What a bounce or a delay keeps of SES's report, in its email event (EmailEventData): the receiving server's reply, of
+// the first recipient that has one, as one bounded line; and a delay's kind and deadline. The reply is a stranger's
+// text: bidi overrides, isolates and zero-width marks go (the set the dashboard takes from sender names,
+// app/src/lib/private-address.ts), then control characters, surrogates and white space become single spaces. A bounce
+// SES wrote itself keeps none: its text is about the sending account at Amazon, which a hosted sender cannot act on.
+const DIAGNOSTIC_CHARS = 500, SES_BOUNCES = ['Suppressed', 'OnAccountSuppressionList', 'EmailValidationSuppressed'];
 function feedbackReason(kind: string, detail: Record<string, any>) {
   if (kind !== 'Bounce' && kind !== 'DeliveryDelay') return {};
   const recipients: unknown = kind === 'Bounce' ? detail.bouncedRecipients : detail.delayedRecipients;
-  const reply = (Array.isArray(recipients) ? recipients : []).map(r => typeof r?.diagnosticCode === 'string' ? r.diagnosticCode.replace(/[\u0000-\u001f\u007f-\u009f\ud800-\udfff\s]+/g, ' ').trim() : '').find(Boolean);
-  const expires = kind === 'DeliveryDelay' && typeof detail.expirationTime === 'string' ? Date.parse(detail.expirationTime) : NaN;
+  const reply = kind === 'Bounce' && SES_BOUNCES.includes(detail.bounceSubType) ? undefined
+    : (Array.isArray(recipients) ? recipients : []).map(r => typeof r?.diagnosticCode === 'string' ? r.diagnosticCode.replace(/[\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, '').replace(/[\u0000-\u001f\u007f-\u009f\ud800-\udfff\s]+/g, ' ').trim() : '').find(Boolean);
+  const expires = kind === 'DeliveryDelay' && typeof detail.expirationTime === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(detail.expirationTime) ? Date.parse(detail.expirationTime) : NaN;
   return { ...(reply ? { diagnosticCode: reply.slice(0, DIAGNOSTIC_CHARS) } : {}),
     ...(kind === 'DeliveryDelay' && typeof detail.delayType === 'string' && /^[A-Za-z]{1,64}$/.test(detail.delayType) ? { delayType: detail.delayType } : {}),
     ...(Number.isFinite(expires) ? { expirationTime: new Date(expires).toISOString() } : {}) };

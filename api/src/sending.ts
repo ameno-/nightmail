@@ -30,6 +30,7 @@ import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, 
 import { AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_ATTACHMENT_BYTES, MAX_JSON_ATTACHMENT_BYTES, mib, postalAddressOf, postalAddressRequired, senderDisplayName, unsubscribePageLink, unsubscribePageUrl, validateAttachment, type AttachmentMetadataInput } from './outbound-content.js';
 import { clients, type Client } from './email-preview/support.js';
 import { CheckInput, CheckResult, splitMailbox, type CheckMail } from './sendability-schema.js';
+import { withRedactedReply } from './deliverability.js';
 import { headerPrefix, requestHeader } from './brand.js';
 import { canonical, idempotencyGate, idempotencyKey, idempotent, IdempotencyHeaders, idempotentRequest, SendIdempotencyHeaders, replay, requestHash, validIdempotencyKey, type ClaimState, type IdempotentRequest } from './idempotency.js';
 import { PREVIEW_ROUTE_NOTE, previewResponses, refuseHead, registerPreviewImages, renderPreview } from './preview-images.js';
@@ -1528,7 +1529,7 @@ export function registerSending(app: App) {
   });
   app.openapi(createRoute({ method:'get', path:'/v1/emails/{id}/detail', operationId:'getEmailDetail', tags:['Emails'], security,
     description:'One log detail: metadata, visible HTML/text, attachment IDs, the first 100 events, active contact for a single To address, and the conversation the email belongs to. Uses the same content and event redaction as their individual endpoints; no raw MIME. Continue events with listEmailEvents.',
-    request:{params:IdParams},responses:{200:response(z.object({email:Email,content:EmailContent.pick({html:true,text:true,attachments:true}),events:page(Event),contact:z.object({id:z.string(),suppressed:z.boolean(),suppressedAt:z.string().nullable().describe('When the address was suppressed (UTC), while it is.')}).nullable(),
+    request:{params:IdParams},responses:{200:response(z.object({email:Email,content:EmailContent.pick({html:true,text:true,attachments:true}),events:page(Event),contact:z.object({id:z.string(),suppressed:z.boolean(),suppressedAt:z.string().nullable().describe('When the address was suppressed (UTC). Null when it is not suppressed, and for a suppression from before these dates were kept.')}).nullable(),
       thread:EmailThread.nullable().describe('The conversation: of a reply from a receiving address or inbox, or of an email whose In-Reply-To named a stored message its sender could read, with the messages around it that you can read. Null for an email in none, when you can read none of the conversation\'s received or stored messages, and for credentials that cannot read received mail.')}).openapi('EmailDetail')),...errors} }),async c=>{
     const a=actor(c), emailId=c.req.valid('param').id, access=actorMailAccess(a);
     // Single-table select fields render columns unqualified, which would bind to the subquery's own
@@ -2078,6 +2079,11 @@ export async function ingestRoutineSesEvent(runtime: Runtime, input: RoutineIngr
     kind: input.type === 'send' ? 'Send' : 'Delivery', outcome: result.event ? 'processed' : result.runnable > 0 ? 'deferred' : 'duplicate', runnable: result.runnable });
   return result;
 }
+/** An email event's data as its webhook carries it (the published event and each delivery's payload): the receiving
+ *  server's reply without addresses or IP addresses, cut at 160 characters (withRedactedReply). A webhook has never held a
+ *  recipient's address, and adding one later would be an addition where removing it would be a break. The email's own
+ *  events keep the reply as stored. Undefined when the data has no reply: the webhook then carries the event's data. */
+const webhookData = (data: Record<string, unknown> | undefined) => typeof data?.diagnosticCode === 'string' ? withRedactedReply(data) : undefined;
 export type RoutineIngress = Omit<EmailEventInput, 'workspaceId'> & { workspaceId?: string; providerId: string; taggedEmailId?: string; ingress: IncomingReceipt;
   effects?: { reported: (string | null)[] | null; suppress: string | null; observe: string | null; receiptTime: boolean } };
 // One statement persists verified callbacks and their side effects. Only subscriptions and
@@ -2091,14 +2097,14 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
   const rows = inputs.map((input, index) => ({
     ordinal: index, job_workspace: input.workspaceId, simulated: simulatedTopic(input.ingress.topicArn, input.ingress.region), topic_arn: input.ingress.topicArn, message_id: input.ingress.messageId, region: input.ingress.region, provider_id: input.providerId,
     type: input.type, next_status: statusForEvent[input.type]!, next_rank: rank[statusForEvent[input.type]!], public_type: publicEventType[input.type] ?? null,
-    external_id: input.externalId ?? null, data: input.data ?? {}, effects: input.effects, created_at: input.createdAt ?? now(),
+    external_id: input.externalId ?? null, data: input.data ?? {}, public_data: webhookData(input.data), effects: input.effects, created_at: input.createdAt ?? now(),
     event_id: rowId('event'), recovery_job_id: rowId('job'), recovery_type: input.ingress.recoveryType, payload: input.ingress.payload, tagged_email_id: input.taggedEmailId ?? null,
   }));
   // Remove embedded NUL without changing literal backslash-u text (consume JSON escapes in pairs).
   const json=JSON.stringify(rows), safe=json.includes('\\u0000') ? json.replace(/\\(?:u0000|.)/g,m=>m==='\\u0000'?'\uFFFD':m) : json;
   const result = await runtime.db.execute<{ ordinal: number; workspaceId: string | null; error: string | null; event: typeof emailEvents.$inferSelect | null; runnable: number; recovery:boolean; hooks:number }>(sql`WITH raw AS (
       SELECT * FROM jsonb_to_recordset(${safe}::jsonb) AS x(ordinal int, job_workspace text, simulated boolean, topic_arn text, message_id text, region text, provider_id text,
-        type text, next_status text, next_rank int, public_type text, external_id text, data jsonb, effects jsonb, created_at timestamptz, event_id text, recovery_job_id text, recovery_type text, payload jsonb, tagged_email_id text)
+        type text, next_status text, next_rank int, public_type text, external_id text, data jsonb, public_data jsonb, effects jsonb, created_at timestamptz, event_id text, recovery_job_id text, recovery_type text, payload jsonb, tagged_email_id text)
     ), candidates AS (
       SELECT x.ordinal, e.id FROM raw x JOIN sending_emails e ON e.provider_id = x.provider_id
       WHERE x.tagged_email_id IS NULL AND e.region = x.region AND e.simulated = x.simulated ${topicMatch}
@@ -2195,7 +2201,7 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
     ), published AS (
       INSERT INTO operation_events(id, workspace_id, type, region, created_at, data)
       SELECT ins.id, ins.workspace_id, x.public_type, x.region, ins.created_at,
-         x.data || jsonb_build_object('simulated', x.simulated, 'providerId', x.provider_id, 'emailId', x.email_id)
+         coalesce(x.public_data, x.data) || jsonb_build_object('simulated', x.simulated, 'providerId', x.provider_id, 'emailId', x.email_id)
       FROM inserted ins JOIN input x ON x.event_id = ins.id WHERE x.public_type IS NOT NULL ON CONFLICT DO NOTHING RETURNING *
     ), deliveries AS (
       INSERT INTO operation_deliveries(id, workspace_id, webhook_id, event_id, payload)
@@ -2238,7 +2244,7 @@ async function persistEmailEvent(runtime: Runtime, input: EmailEventInput & { em
   ), published AS (
     INSERT INTO operation_events(id, workspace_id, type, region, created_at, data)
     SELECT inserted.id, inserted.workspace_id, ${publicType ?? null}::text, mail.region, inserted.created_at,
-      ${JSON.stringify({ ...(input.data ?? {}), ...(input.providerId ? { providerId: input.providerId } : {}) })}::jsonb || jsonb_build_object('emailId',mail.id,'simulated',mail.simulated)
+      ${JSON.stringify({ ...(webhookData(input.data) ?? input.data ?? {}), ...(input.providerId ? { providerId: input.providerId } : {}) })}::jsonb || jsonb_build_object('emailId',mail.id,'simulated',mail.simulated)
     FROM inserted, mail WHERE ${publicType ?? null}::text IS NOT NULL ON CONFLICT DO NOTHING RETURNING *
   ), deliveries AS (
     INSERT INTO operation_deliveries(id, workspace_id, webhook_id, event_id, payload)

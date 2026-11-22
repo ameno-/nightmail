@@ -680,7 +680,8 @@ test('MCP: every API operation is a tool or a documented human step, and docs/mc
   assert.equal((spec.paths as Json)['/v1/workspaces'].get.deprecated, true, 'listWorkspaces is a deprecated alias of GET /v1/me workspaces.');
   const markdown=coverageMarkdown(catalog,spec as Json);assert.doesNotMatch(markdown,/UNCOVERED/);assert.equal(String(await readFile(new URL('../docs/mcp-coverage.md',import.meta.url))),markdown,'Run bun run mcp:coverage');
   // Tools that return received mail, or text derived from it, carry the untrusted-content notice.
-  for(const name of ['listEmails','getEmail','getEmailContent','getEmailDetail','previewEmail','listLogs','testRouting','testRules','listInboundMessages','getInboundMessage','getInboundThread'])assert.equal(catalog.get(name)?.untrustedContent,true,name);
+  // So do an email's events and the webhook delivery log: a bounce's or a delay's diagnosticCode is the receiving server's text.
+  for(const name of ['listEmails','getEmail','getEmailContent','getEmailDetail','listEmailEvents','listWebhookDeliveries','getWebhookDelivery','previewEmail','listLogs','testRouting','testRules','listInboundMessages','getInboundMessage','getInboundThread'])assert.equal(catalog.get(name)?.untrustedContent,true,name);
   for(const op of catalog.values()){assert.ok((TOOLSETS as readonly string[]).includes(op.toolset),op.tool.name);assert.equal(op.tool.outputSchema?.type,'object',op.tool.name);assert.match(op.tool.name,/^[a-z][A-Za-z]+$/,op.tool.name)}
   // Internal routes (operators and support grants) are never tools, whatever their security scheme.
   const bearer=Object.entries(spec.paths??{}).filter(([path])=>!/^\/v1\/(?:support|operator)\//.test(path)).flatMap(([,item])=>Object.values(item??{})).filter((o:Json)=>o?.security?.some((s:Json)=>s.bearerAuth)&&!o.operationId.endsWith('Ritual')&&!/Ritual[A-Z]|Rituals|OmenOptIns/.test(o.operationId)&&!['receiveSesSnsEvent','revealWebhookSecret','downloadInboundAttachment','getRuleVersion','createBillingTopUp','updateBillingAutoRecharge','createBillingCardSetup','deleteBillingPaymentMethod'].includes(o.operationId)).map((o:Json)=>o.operationId as string);
@@ -31356,8 +31357,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
-  test('a bounce and a delay keep the receiving server\u2019s reply, the delay\u2019s type and its retry deadline, in the email\u2019s events and its webhook event',async t=>{
-    await simulatedSesFixture(t,async({runtime,local,db})=>{
+  test('a bounce and a delay keep the receiving server\u2019s reply, the delay\u2019s type and its retry deadline, in the email\u2019s events and, without addresses, in its webhook',async t=>{
+    await simulatedSesFixture(t,async({runtime,local,db,run})=>{
       const {ingestFeedbackBatch,operationJobs}=await import('./src/operations.js');
       const wid=runtime.config.workspaceId, account='111122223333', topicArn=`arn:aws:sns:${REGION}:${account}:fixture`;
       const sent=async()=>{
@@ -31369,15 +31370,29 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         message:{eventType,mail:{messageId:provider,sendingAccountId},[eventType==='Bounce'?'bounce':'deliveryDelay']:detail}});
       const detail=async(id:string,type:string)=>{const d=ok(await local('GET',`/v1/emails/${id}/detail`));return {status:d.email.status,contact:d.contact,data:d.events.data.find((event:Json)=>event.type===type)?.data};};
       const published=async(id:string,type:string)=>(await db.query("SELECT data FROM operation_events WHERE workspace_id=$1 AND data->>'emailId'=$2 AND type=$3",[wid,id,type])).rows[0]?.data;
-      // The queue: the reply of the first recipient that has one, as one line without control characters, cut at 500.
-      // A bounce keeps nothing of a delay.
-      const bounced=await sent(), reply=`smtp; 550 5.1.1 <${bounced.to}>: user unknown ${'x'.repeat(600)}`.slice(0,500);
+      // A registered webhook: what it is posted is read here, never sent anywhere.
+      const hook=ok(await local('POST','/v1/webhooks',{url:`https://example.com/hooks/${unique('replies')}`,eventTypes:['email.bounced','email.delivery_delayed']}),201);
+      const posted:Json[]=[], transport=runtime.webhookFetch;
+      runtime.webhookFetch=async(_url,init)=>{posted.push(JSON.parse(String(init.body)));return {status:204};};
+      t.after(()=>{runtime.webhookFetch=transport;});
+      const delivered=async(id:string)=>{await run('operation.webhook');return posted.find(event=>event.data.emailId===id)?.data;};
+      // The queue: the reply of the first recipient that has one, as one line cut at 500, without control characters, a
+      // bidi override, a zero-width space or half a surrogate pair. A bounce keeps nothing of a delay.
+      const bounced=await sent(), reply=`smtp; 550 5.1.1 <${bounced.to}>: user unknown at 192.0.2.7 ${'x'.repeat(600)}`.slice(0,500);
       assert.deepEqual(await ingestFeedbackBatch(runtime,[notice(bounced.provider,'Bounce',{bounceType:'Permanent',bounceSubType:'General',delayType:'General',expirationTime:'2030-01-01T00:00:00Z',
-        bouncedRecipients:[{emailAddress:bounced.to},{emailAddress:bounced.to,diagnosticCode:`smtp; 550 5.1.1 <${bounced.to}>:\r\n user\0 unknown ${'x'.repeat(600)}`}]})]),[{ok:true}]);
+        bouncedRecipients:[{emailAddress:bounced.to},{emailAddress:bounced.to,diagnosticCode:`smtp; 550 5.1.1 <${bounced.to}>:\r\n \u202euser\0 unk\u200bnown\ud83d at 192.0.2.7 ${'x'.repeat(600)}`}]})]),[{ok:true}]);
       const hard=await detail(bounced.id,'bounce');
       assert.equal(hard.status,'bounced');assert.equal(hard.data.diagnosticCode,reply);assert.equal(hard.data.diagnosticCode.length,500);
       assert.ok(!('delayType' in hard.data) && !('expirationTime' in hard.data));
-      assert.equal((await published(bounced.id,'email.bounced')).diagnosticCode,reply);
+      // The sending workspace reads the whole reply in the email's events; its webhook (the published event, the posted
+      // payload and the delivery log) gets it without the recipient's address or an IP address, at most 160 characters.
+      assert.equal(ok(await local('GET',`/v1/emails/${bounced.id}/events`)).data.find((event:Json)=>event.type==='bounce').data.diagnosticCode,reply);
+      const redacted=`smtp; 550 5.1.1 <<address>>: user unknown at <ip> ${'x'.repeat(600)}`.slice(0,160);
+      assert.equal((await published(bounced.id,'email.bounced')).diagnosticCode,redacted);
+      const payload=await delivered(bounced.id);
+      assert.equal(payload.diagnosticCode,redacted);assert.equal(payload.bounceType,'Permanent');assert.ok(!JSON.stringify(posted).includes(bounced.to));
+      const log=ok(await local('GET',`/v1/webhooks/${hook.id}/deliveries`)).data.find((row:Json)=>row.payload.data.emailId===bounced.id);
+      assert.equal(log.payload.data.diagnosticCode,redacted);assert.equal(ok(await local('GET',`/v1/webhooks/${hook.id}/deliveries/${log.id}`)).payload.data.diagnosticCode,redacted);
       // Its address is suppressed from then: the detail says since when.
       assert.equal(hard.contact.suppressed,true);assert.ok(Number.isFinite(Date.parse(hard.contact.suppressedAt)));
       // A delay: its reply, SES's reason and when SES stops retrying.
@@ -31386,11 +31401,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         delayedRecipients:[{emailAddress:delayed.to,status:'4.2.2',diagnosticCode:wait.diagnosticCode}]})]),[{ok:true}]);
       const late=await detail(delayed.id,'delivery_delay');
       assert.equal(late.status,'delayed');assert.equal(late.contact,null);
-      for(const data of [late.data,await published(delayed.id,'email.delivery_delayed')]) assert.deepEqual({diagnosticCode:data.diagnosticCode,delayType:data.delayType,expirationTime:data.expirationTime},wait);
-      // The recovery job keeps the same; a report without a reply, a known type or a real date keeps none of them.
-      const soft=await sent(), bare=await sent();
+      for(const data of [late.data,await published(delayed.id,'email.delivery_delayed'),await delivered(delayed.id)]) assert.deepEqual({diagnosticCode:data.diagnosticCode,delayType:data.delayType,expirationTime:data.expirationTime},wait);
+      // The recovery job keeps the same; a report without a reply, a known type or a date in ISO form keeps none of them,
+      // and neither does a bounce SES wrote itself, whose text is about the account at Amazon.
+      const soft=await sent(), bare=await sent(), own=await sent();
       for(const item of [notice(soft.provider,'Bounce',{bounceType:'Transient',bounceSubType:'MailboxFull',bouncedRecipients:[{emailAddress:soft.to,diagnosticCode:'smtp; 552 5.2.2 Mailbox full'}]},runtime.config.awsAccountId),
-        notice(bare.provider,'DeliveryDelay',{delayType:'not a type',expirationTime:'soon',delayedRecipients:[{emailAddress:bare.to,diagnosticCode:' \n '}]},runtime.config.awsAccountId)]) {
+        notice(bare.provider,'DeliveryDelay',{delayType:'not a type',expirationTime:'12',delayedRecipients:[{emailAddress:bare.to,diagnosticCode:' \n \u200b'}]},runtime.config.awsAccountId),
+        notice(own.provider,'Bounce',{bounceType:'Permanent',bounceSubType:'OnAccountSuppressionList',bouncedRecipients:[{emailAddress:own.to,diagnosticCode:'Amazon SES did not send the message to this address because it is on the suppression list for your account.'}]},runtime.config.awsAccountId)]) {
         await db.query('INSERT INTO operation_sns_receipts(topic_arn,message_id,workspace_id) VALUES($1,$2,$3)',[topicArn,item.messageId,wid]);
         await operationJobs['operation.ses']!(runtime,item,{id:unique('job'),attempts:1,workspaceId:wid});
       }
@@ -31399,6 +31416,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal((await published(soft.id,'email.bounced')).diagnosticCode,'smtp; 552 5.2.2 Mailbox full');
       const plain=(await detail(bare.id,'delivery_delay')).data;
       assert.ok(!('diagnosticCode' in plain) && !('delayType' in plain) && !('expirationTime' in plain));
+      const listed=await detail(own.id,'bounce');
+      assert.equal(listed.status,'bounced');assert.equal(listed.data.bounceSubType,'OnAccountSuppressionList');assert.ok(!('diagnosticCode' in listed.data));
     });
   });
 

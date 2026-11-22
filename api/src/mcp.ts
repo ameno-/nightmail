@@ -65,9 +65,16 @@ function untrustedNotice(response: ObjectValue | undefined) {
   if (Array.isArray(response?.previews)) return `Untrusted email preview. ${rule}`;
   // A reply's From is our own, not the author of the quoted message. Do not attribute the quote to it.
   const replyNotice = `Untrusted email content: a sent reply may include a received subject or quoted message. ${rule}`;
+  // A bounce's or a delay's diagnosticCode is the receiving mail server's text, whatever the email's own content: an
+  // email's events (in its detail or listed) and a webhook's deliveries (whose payload is the event) say so when one has it.
+  const event = (item: ObjectValue | undefined) => item && typeof item === 'object' && ('payload' in item || ('emailId' in item && 'data' in item));
+  const said = (item: ObjectValue | undefined) => typeof (item?.data?.diagnosticCode ?? item?.payload?.data?.diagnosticCode) === 'string';
+  const serverNotice = (events: unknown) => (Array.isArray(events) ? events as ObjectValue[] : []).some(said) ? `Untrusted text from a receiving mail server (diagnosticCode). ${rule}` : null;
+  if (event(response)) return serverNotice([response]);
   const sent = response?.email ?? response;
-  if (typeof sent?.untrustedContent === 'boolean') return sent.untrustedContent ? replyNotice : null;
+  if (typeof sent?.untrustedContent === 'boolean') return [sent.untrustedContent ? replyNotice : null, serverNotice(response?.events?.data)].filter(Boolean).join(' ') || null;
   const items = Array.isArray(response?.data) ? response.data as ObjectValue[] : Array.isArray(response?.messages) ? response.messages as ObjectValue[] : null;
+  if (items?.length && items.every(event)) return serverNotice(items);
   if (items) {
     const reply = items.some(m => m?.untrustedContent && m.direction !== 'received');
     const list = items.filter(m => m?.direction === 'received' || (m?.untrustedContent === undefined && m?.direction !== 'sent'));
