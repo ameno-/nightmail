@@ -41,7 +41,10 @@ const suppressions: Record<string, (on: string) => string> = {
 }
 
 const last = (events: EmailEvent[], ...types: string[]) => [...events].reverse().find(event => types.includes(event.type))
-const day = (at: string) => date(at, { month: 'short', day: 'numeric', ...(new Date(at).getUTCFullYear() === new Date().getUTCFullYear() ? {} : { year: 'numeric' }), timeZone: 'UTC' })
+// A date stays on one line: its spaces don't break.
+const whole = (text: string) => text.replaceAll(' ', '\u00a0')
+const day = (at: string) => whole(date(at, { month: 'short', day: 'numeric', ...(new Date(at).getUTCFullYear() === new Date().getUTCFullYear() ? {} : { year: 'numeric' }), timeZone: 'UTC' }))
+const deadline = (at: string) => whole(`${shortDateTime(at)} UTC`)
 // The reply without the protocol SES names before it.
 const saidBy = (event?: EmailEvent) => event?.diagnostic?.replace(/^smtp;\s*/i, '') || undefined
 // "it" for a sentence already about the address.
@@ -67,7 +70,7 @@ export function reasonOf(email: Email, events: EmailEvent[]): Reason | null {
     // A soft bounce: SES gave up on this email, and the address stays good.
     if (event?.type === 'non_permanent_bounce') return { text: `${refusals[event.detail?.bounceSubType ?? ''] ?? 'The recipient’s server refused it for now'}, so this email wasn’t delivered; a later one may get through.`, said: saidBy(event) }
     const why = delays[event?.detail?.delayType ?? ''] ?? 'The recipient’s server put it off', until = event?.detail?.retryUntil
-    const next = !until ? ', so we keep trying.' : Date.parse(until) > Date.now() ? `, so we keep trying until ${shortDateTime(until)} UTC.` : `, and we tried until ${shortDateTime(until)} UTC.`
+    const next = !until ? ', so we keep trying.' : Date.parse(until) > Date.now() ? `, so we keep trying until ${deadline(until)}.` : `, and we tried until ${deadline(until)}.`
     return { text: why + next, said: saidBy(event) }
   }
   return null
