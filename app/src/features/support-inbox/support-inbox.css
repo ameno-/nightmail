@@ -47,7 +47,7 @@
 .sinbox-fact ~ .sinbox-fact::before { content: '·'; margin-inline: var(--space-8); color: var(--color-faint); }
 .sinbox-fact svg { width: 14px; height: 14px; color: var(--color-faint); }
 .sinbox-fact .ui-status { font-family: var(--font-mono); }
-.sinbox-fact__key { color: var(--color-faint); font-size: var(--text-label); letter-spacing: var(--tracking-label); text-transform: uppercase; }
+.sinbox-fact__key { color: var(--color-muted); font-size: var(--text-xs); }
 .sinbox-conversation { display: grid; grid-template-columns: minmax(0, 1fr) 340px; align-items: start; }
 .sinbox-transcript { display: flex; flex-direction: column; min-width: 0; padding-right: var(--space-24); }
 .sinbox-earlier { margin: 0 0 var(--space-12); color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-xs); }
@@ -57,7 +57,7 @@
 .sinbox-message[data-pending] { opacity: .7; }
 .sinbox-message__meta { display: flex; align-items: center; gap: var(--space-8); min-height: 20px; font-size: var(--text-sm); line-height: 20px; }
 .sinbox-message__author { font-weight: var(--font-weight-bold); }
-.sinbox-message__role { color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); letter-spacing: var(--tracking-label); text-transform: uppercase; }
+.sinbox-message__role { color: var(--color-muted); font-family: var(--font-body); font-size: var(--text-xs); }
 .sinbox-message[data-author='agent'] .sinbox-message__author, .sinbox-message[data-author='system'] .sinbox-message__author { color: var(--color-muted); }
 .sinbox-message__meta .ui-status { font-family: var(--font-mono); }
 .sinbox-message__time { margin-left: auto; color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }

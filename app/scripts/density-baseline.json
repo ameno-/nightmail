@@ -18,7 +18,7 @@
    "findings": []
   },
   "API keys · desktop": {
-   "score": 16,
+   "score": 14,
    "findings": []
   },
   "API keys · edit key dialog · desktop": {
@@ -30,47 +30,47 @@
    "findings": []
   },
   "API keys · phone": {
-   "score": 16,
+   "score": 14,
    "findings": []
   },
   "Audience · desktop": {
-   "score": 13,
-   "findings": []
-  },
-  "Audience · import dialog · desktop": {
-   "score": 8,
-   "findings": []
-  },
-  "Audience · phone": {
    "score": 12,
    "findings": []
   },
+  "Audience · import dialog · desktop": {
+   "score": 7,
+   "findings": []
+  },
+  "Audience · phone": {
+   "score": 11,
+   "findings": []
+  },
   "Campaign editor · desktop": {
-   "score": 38,
+   "score": 13,
    "findings": []
   },
   "Campaign review · desktop": {
-   "score": 17,
+   "score": 12,
    "findings": []
   },
   "Campaign review · phone": {
-   "score": 16,
+   "score": 7,
    "findings": []
   },
   "Campaigns · desktop": {
-   "score": 5,
+   "score": 6,
    "findings": []
   },
   "Campaigns · phone": {
-   "score": 4,
+   "score": 5,
    "findings": []
   },
   "Campaigns · restricted · desktop": {
-   "score": 19,
+   "score": 20,
    "findings": []
   },
   "Campaigns · restricted · phone": {
-   "score": 18,
+   "score": 19,
    "findings": []
   },
   "Campaigns · with newsletters · desktop": {
@@ -82,7 +82,7 @@
    "findings": []
   },
   "Contact · desktop": {
-   "score": 11,
+   "score": 9,
    "findings": []
   },
   "Domain · add custom MAIL FROM dialog · desktop": {
@@ -102,20 +102,26 @@
    "findings": []
   },
   "Domain · custom MAIL FROM · desktop": {
-   "score": 25,
+   "score": 24,
    "findings": []
   },
   "Domain · custom MAIL FROM · phone": {
-   "score": 14,
+   "score": 13,
    "findings": []
   },
   "Domain · desktop": {
-   "score": 22,
+   "score": 21,
    "findings": []
   },
   "Domain · phone": {
-   "score": 16,
+   "score": 14,
    "findings": []
+  },
+  "Domain · remove custom MAIL FROM dialog · desktop": {
+   "score": 13,
+   "findings": [
+    "long-block|mail from mail.northwind.example goes ba"
+   ]
   },
   "Domains · add domain dialog · desktop": {
    "score": 3,
@@ -130,15 +136,15 @@
    "findings": []
   },
   "List · desktop": {
-   "score": 14,
+   "score": 13,
    "findings": []
   },
   "Lists · desktop": {
-   "score": 11,
+   "score": 9,
    "findings": []
   },
   "Lists · phone": {
-   "score": 6,
+   "score": 4,
    "findings": []
   },
   "Logs · desktop": {
@@ -146,11 +152,11 @@
    "findings": []
   },
   "Logs · phone": {
-   "score": 33,
+   "score": 35,
    "findings": []
   },
   "Logs · range · desktop": {
-   "score": 18,
+   "score": 16,
    "findings": []
   },
   "Logs · range · phone": {
@@ -158,11 +164,11 @@
    "findings": []
   },
   "Logs · received · desktop": {
-   "score": 7,
+   "score": 9,
    "findings": []
   },
   "New campaign · desktop": {
-   "score": 18,
+   "score": 16,
    "findings": []
   },
   "New issue · desktop": {
@@ -219,6 +225,14 @@
   },
   "Onboarding · AWS choose · phone": {
    "score": 13,
+   "findings": []
+  },
+  "Onboarding · AWS disconnecting · desktop": {
+   "score": 19,
+   "findings": []
+  },
+  "Onboarding · AWS disconnecting · phone": {
+   "score": 19,
    "findings": []
   },
   "Onboarding · AWS production access · desktop": {
@@ -302,23 +316,23 @@
    "findings": []
   },
   "Operator · desktop": {
-   "score": 8,
-   "findings": []
-  },
-  "Operator · phone": {
    "score": 7,
    "findings": []
   },
-  "Operator · waitlist · desktop": {
+  "Operator · phone": {
    "score": 6,
+   "findings": []
+  },
+  "Operator · waitlist · desktop": {
+   "score": 5,
    "findings": []
   },
   "Operator · waitlist · phone": {
-   "score": 6,
+   "score": 4,
    "findings": []
   },
   "Operator · workspace · desktop": {
-   "score": 30,
+   "score": 31,
    "findings": []
   },
   "Operator · workspace · phone": {
@@ -326,19 +340,19 @@
    "findings": []
   },
   "Overview · connect agent dialog · desktop": {
-   "score": 18,
+   "score": 14,
    "findings": []
   },
   "Overview · connect agent sheet · phone": {
-   "score": 15,
+   "score": 12,
    "findings": []
   },
   "Overview · desktop": {
-   "score": 22,
+   "score": 19,
    "findings": []
   },
   "Overview · phone": {
-   "score": 26,
+   "score": 23,
    "findings": []
   },
   "Overview · restricted · desktop": {
@@ -350,11 +364,11 @@
    "findings": []
   },
   "Overview · sender score dialog · desktop": {
-   "score": 14,
+   "score": 13,
    "findings": []
   },
   "Overview · sender score dialog · phone": {
-   "score": 14,
+   "score": 13,
    "findings": []
   },
   "Overview · sending limits dialog · desktop": {
@@ -366,7 +380,7 @@
    "findings": []
   },
   "Overview · setup · desktop": {
-   "score": 19,
+   "score": 21,
    "findings": []
   },
   "Received email · desktop": {
@@ -374,11 +388,11 @@
    "findings": []
   },
   "Received email · from its thread · desktop": {
-   "score": 25,
+   "score": 24,
    "findings": []
   },
   "Received email · from its thread · phone": {
-   "score": 12,
+   "score": 14,
    "findings": []
   },
   "Received email · phone": {
@@ -386,11 +400,11 @@
    "findings": []
   },
   "Received email · thread · desktop": {
-   "score": 25,
+   "score": 24,
    "findings": []
   },
   "Received email · thread · phone": {
-   "score": 12,
+   "score": 14,
    "findings": []
   },
   "Receiving · address builder dialog · desktop": {
@@ -398,11 +412,11 @@
    "findings": []
   },
   "Receiving · address builder from New rule · desktop": {
-   "score": 12,
+   "score": 11,
    "findings": []
   },
   "Receiving · address · desktop": {
-   "score": 6,
+   "score": 5,
    "findings": []
   },
   "Receiving · address · phone": {
@@ -410,23 +424,23 @@
    "findings": []
   },
   "Receiving · address · settings · desktop": {
-   "score": 12,
+   "score": 10,
    "findings": []
   },
   "Receiving · address · settings · phone": {
-   "score": 12,
+   "score": 10,
    "findings": []
   },
   "Receiving · address · where mail goes · desktop": {
-   "score": 14,
+   "score": 13,
    "findings": []
   },
   "Receiving · address · where mail goes · phone": {
-   "score": 14,
+   "score": 13,
    "findings": []
   },
   "Receiving · agent inbox · desktop": {
-   "score": 18,
+   "score": 17,
    "findings": []
   },
   "Receiving · agent inboxes · desktop": {
@@ -462,7 +476,7 @@
    "findings": []
   },
   "Receiving · flow panel · desktop": {
-   "score": 23,
+   "score": 22,
    "findings": []
   },
   "Receiving · flow panel · phone": {
@@ -478,27 +492,27 @@
    "findings": []
   },
   "Receiving · new address dialog · desktop": {
-   "score": 5,
+   "score": 4,
    "findings": []
   },
   "Receiving · new address dialog · phone": {
-   "score": 5,
+   "score": 4,
    "findings": []
   },
   "Receiving · new agent inbox dialog · desktop": {
-   "score": 11,
+   "score": 12,
    "findings": []
   },
   "Receiving · new rule · desktop": {
-   "score": 17,
+   "score": 19,
    "findings": []
   },
   "Receiving · new rule · new workspace · desktop": {
-   "score": 17,
+   "score": 16,
    "findings": []
   },
   "Receiving · new rule · phone": {
-   "score": 16,
+   "score": 18,
    "findings": []
   },
   "Receiving · new workspace · desktop": {
@@ -550,7 +564,7 @@
    "findings": []
   },
   "Receiving · rules · phone": {
-   "score": 16,
+   "score": 11,
    "findings": []
   },
   "Receiving · split chooser dialog · desktop": {
@@ -558,7 +572,7 @@
    "findings": []
   },
   "Receiving · split edits · desktop": {
-   "score": 14,
+   "score": 13,
    "findings": []
   },
   "Receiving · test · desktop": {
@@ -570,16 +584,12 @@
    "findings": []
   },
   "Receiving · typed address · desktop": {
-   "score": 15,
-   "findings": [
-    "intro-restates|address|no address yet · the catch-all"
-   ]
+   "score": 12,
+   "findings": []
   },
   "Receiving · typed address · phone": {
-   "score": 14,
-   "findings": [
-    "intro-restates|address|no address yet · the catch-all"
-   ]
+   "score": 12,
+   "findings": []
   },
   "Receiving · webhook · desktop": {
    "score": 14,
@@ -594,11 +604,11 @@
    "findings": []
   },
   "Receiving · why it went here dialog · desktop": {
-   "score": 8,
+   "score": 7,
    "findings": []
   },
   "Receiving · why it went here dialog · phone": {
-   "score": 8,
+   "score": 7,
    "findings": []
   },
   "Segment · desktop": {
@@ -614,11 +624,11 @@
    "findings": []
   },
   "Sent email · junk-like · desktop": {
-   "score": 34,
+   "score": 33,
    "findings": []
   },
   "Sent email · junk-like · phone": {
-   "score": 7,
+   "score": 6,
    "findings": []
   },
   "Sent email · phone": {
@@ -626,11 +636,11 @@
    "findings": []
   },
   "Sent email · thread sheet · phone": {
-   "score": 13,
+   "score": 11,
    "findings": []
   },
   "Sent email · thread · desktop": {
-   "score": 46,
+   "score": 44,
    "findings": []
   },
   "Sent email · thread · phone": {
@@ -646,7 +656,7 @@
    "findings": []
   },
   "Settings · account · desktop": {
-   "score": 10,
+   "score": 9,
    "findings": []
   },
   "Settings · activity · desktop": {
@@ -666,11 +676,11 @@
    "findings": []
   },
   "Settings · billing · desktop": {
-   "score": 16,
+   "score": 11,
    "findings": []
   },
   "Settings · billing · free · desktop": {
-   "score": 9,
+   "score": 8,
    "findings": []
   },
   "Settings · billing · free · phone": {
@@ -686,11 +696,11 @@
    "findings": []
   },
   "Settings · billing · phone": {
-   "score": 16,
+   "score": 11,
    "findings": []
   },
   "Settings · desktop": {
-   "score": 6,
+   "score": 7,
    "findings": []
   },
   "Settings · invite dialog · desktop": {
@@ -710,19 +720,19 @@
    "findings": []
   },
   "Settings · new webhook · desktop": {
-   "score": 9,
+   "score": 8,
    "findings": []
   },
   "Settings · phone": {
-   "score": 6,
+   "score": 7,
    "findings": []
   },
   "Settings · plan & usage · desktop": {
-   "score": 13,
+   "score": 11,
    "findings": []
   },
   "Settings · plan & usage · phone": {
-   "score": 13,
+   "score": 11,
    "findings": []
   },
   "Settings · postal address dialog · desktop": {
@@ -742,7 +752,7 @@
    "findings": []
   },
   "Settings · sending · desktop": {
-   "score": 6,
+   "score": 5,
    "findings": []
   },
   "Settings · webhook · desktop": {
@@ -754,23 +764,23 @@
    "findings": []
   },
   "Settings · webhooks · desktop": {
-   "score": 6,
+   "score": 5,
    "findings": []
   },
   "Support · agent handling · desktop": {
-   "score": 14,
+   "score": 16,
    "findings": []
   },
   "Support · agent handling · phone": {
-   "score": 7,
+   "score": 9,
    "findings": []
   },
   "Support · confirm a change · desktop": {
-   "score": 9,
+   "score": 11,
    "findings": []
   },
   "Support · confirm a change · phone": {
-   "score": 9,
+   "score": 11,
    "findings": []
   },
   "Support · continue email · desktop": {
@@ -782,28 +792,28 @@
    "findings": []
   },
   "Support · conversation · desktop": {
-   "score": 57,
+   "score": 58,
    "findings": [
     "long-block|two of the three dkim records are publis"
    ]
   },
   "Support · conversation · phone": {
-   "score": 36,
+   "score": 38,
    "findings": [
     "inert|two of the three dkim records are publis",
     "long-block|two of the three dkim records are publis"
    ]
   },
   "Support · customer sheet · phone": {
-   "score": 22,
+   "score": 24,
    "findings": []
   },
   "Support · desktop": {
-   "score": 13,
+   "score": 14,
    "findings": []
   },
   "Support · phone": {
-   "score": 6,
+   "score": 7,
    "findings": []
   },
   "Template · desktop": {

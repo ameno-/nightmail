@@ -19,13 +19,13 @@
 /* Facts: a hairline, a label and the value. 56px tall in every state. */
 .op-facts { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: var(--space-24); margin: 0; }
 .op-facts > div { min-width: 0; height: 56px; padding-top: var(--space-12); border-top: 1px solid var(--color-border); }
-.op-facts dt { height: 16px; color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); line-height: var(--leading-xs); letter-spacing: var(--tracking-label); text-transform: uppercase; }
+.op-facts dt { height: 16px; color: var(--color-muted); font-family: var(--font-body); font-size: var(--text-xs); line-height: var(--leading-xs); }
 .op-facts dd { display: flex; align-items: center; height: 24px; margin: var(--space-4) 0 0; min-width: 0; overflow: hidden; font-family: var(--font-mono); font-size: var(--text-sm); font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Label and value rows, 32px each. */
 .op-rows { margin: 0; }
 .op-rows > div { display: grid; grid-template-columns: 184px minmax(0, 1fr); gap: var(--space-12); align-items: baseline; min-height: 32px; padding-block: 6px; border-top: 1px solid var(--color-border-muted); font-size: var(--text-sm); line-height: var(--leading-sm); font-variant-numeric: tabular-nums; }
-.op-rows dt { color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); letter-spacing: var(--tracking-label); text-transform: uppercase; }
+.op-rows dt { color: var(--color-muted); font-family: var(--font-body); font-size: var(--text-xs); }
 .op-rows dd { margin: 0; min-width: 0; font-family: var(--font-mono); font-size: var(--text-xs); overflow-wrap: anywhere; }
 .op-rows dd :is(.ui-button, .ui-input, .ui-select-trigger, select) { font-family: var(--font-body); }
 /* Billing rows hold one line each (values arrive after the page), so nothing below them moves. */

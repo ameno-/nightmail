@@ -182,7 +182,7 @@ function ReceivedEmailDetailView({ email, focus }: { email: ReceivedEmailDetail;
       <dl className="received-facts">
         <div><dt>Received</dt><dd>{date(email.receivedAt)} · {time(email.receivedAt)} UTC</dd></div>
         {email.sentAt && <div><dt>Sent</dt><dd>{date(email.sentAt)} · {time(email.sentAt)} UTC</dd></div>}
-        {checks.length > 0 && <div><dt>Checks</dt><dd><span className="cluster">{checks.map(key => <StatusBadge key={key} status={`${key.toUpperCase()} ${verdictLabel(String(verdicts[key]))}`} tone={checkTone(String(verdicts[key]))} />)}</span></dd></div>}
+        {checks.length > 0 && <div><dt>Checks</dt><dd><span className="cluster">{checks.map(key => <StatusBadge key={key} status={`${key === 'spam' || key === 'virus' ? label(key) : key.toUpperCase()} ${verdictLabel(String(verdicts[key]))}`} tone={checkTone(String(verdicts[key]))} />)}</span></dd></div>}
         {email.cc.length > 0 && <div><dt>Cc</dt><dd><AddressList values={email.cc.map(cc => cc.address)} /></dd></div>}
         {email.replyTo.length > 0 && <div><dt>Reply-To</dt><dd><AddressList values={email.replyTo.map(r => r.address)} /></dd></div>}
         {email.sizeBytes != null && <div><dt>Size</dt><dd>{fileSize(email.sizeBytes)}</dd></div>}
