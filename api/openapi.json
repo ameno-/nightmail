@@ -14271,7 +14271,7 @@
             "additionalProperties": {
               "type": "integer"
             },
-            "description": "Matching emails per status (sent statuses, received and spam), with every filter but status. A status with none is left out."
+            "description": "Emails per status (sent statuses, received and spam) between from and to, with every filter but status. A status with none is left out."
           },
           "kind": {
             "type": "object",
@@ -14287,7 +14287,7 @@
               "transactional",
               "marketing"
             ],
-            "description": "Matching sent emails per kind, with every filter but kind."
+            "description": "Sent emails per kind between from and to, with every filter but kind."
           },
           "capped": {
             "type": "object",
@@ -14303,7 +14303,7 @@
               "sent",
               "received"
             ],
-            "description": "Per direction: true when it has more than 50,000 matching emails. Its counts then cover that many of its newest and are lower bounds."
+            "description": "Always false: the counts are exact. Kept for compatibility from when each direction counted at most its 50,000 newest emails."
           }
         },
         "required": [
@@ -33621,12 +33621,12 @@
           {
             "schema": {
               "type": "string",
-              "minLength": 1,
+              "minLength": 3,
               "maxLength": 200,
-              "description": "Literal case-insensitive substring of sender, To/Cc/Bcc, subject or email/campaign/provider ID."
+              "description": "Literal case-insensitive substring of sender, To/Cc/Bcc, subject or email/campaign/provider ID, at least 3 characters: a shorter term is refused with 422 VALIDATION_FAILED."
             },
             "required": false,
-            "description": "Literal case-insensitive substring of sender, To/Cc/Bcc, subject or email/campaign/provider ID.",
+            "description": "Literal case-insensitive substring of sender, To/Cc/Bcc, subject or email/campaign/provider ID, at least 3 characters: a shorter term is refused with 422 VALIDATION_FAILED.",
             "name": "search",
             "in": "query"
           },
@@ -69680,12 +69680,12 @@
           {
             "schema": {
               "type": "string",
-              "minLength": 1,
+              "minLength": 3,
               "maxLength": 200,
-              "description": "Sent mail: a literal, case-insensitive substring of the sender, recipients, subject or IDs. Received mail: a full-text match on sender, recipients, subject and body."
+              "description": "At least 3 characters: a shorter term is refused with 422 VALIDATION_FAILED. Sent mail: a literal, case-insensitive substring of the sender, recipients, subject or IDs. Received mail: a full-text match on sender, recipients, subject and body."
             },
             "required": false,
-            "description": "Sent mail: a literal, case-insensitive substring of the sender, recipients, subject or IDs. Received mail: a full-text match on sender, recipients, subject and body.",
+            "description": "At least 3 characters: a shorter term is refused with 422 VALIDATION_FAILED. Sent mail: a literal, case-insensitive substring of the sender, recipients, subject or IDs. Received mail: a full-text match on sender, recipients, subject and body.",
             "name": "search",
             "in": "query"
           },
@@ -69756,14 +69756,36 @@
           {
             "schema": {
               "type": "string",
+              "format": "date-time",
+              "description": "Mail created (sent) or received at or after this instant."
+            },
+            "required": false,
+            "description": "Mail created (sent) or received at or after this instant.",
+            "name": "from",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "description": "Mail created (sent) or received before this instant."
+            },
+            "required": false,
+            "description": "Mail created (sent) or received before this instant.",
+            "name": "to",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
               "enum": [
                 "true",
                 "false"
               ],
-              "description": "true adds counts: how many emails match each status and kind for these filters, whatever the cursor and limit."
+              "description": "true adds counts: how many emails match each status and kind for these filters between from and to (all retained mail without them), whatever the cursor and limit. Counts that take longer than 2 seconds are refused with 422 READ_TOO_LARGE: narrow from and to."
             },
             "required": false,
-            "description": "true adds counts: how many emails match each status and kind for these filters, whatever the cursor and limit.",
+            "description": "true adds counts: how many emails match each status and kind for these filters between from and to (all retained mail without them), whatever the cursor and limit. Counts that take longer than 2 seconds are refused with 422 READ_TOO_LARGE: narrow from and to.",
             "name": "counts",
             "in": "query"
           }

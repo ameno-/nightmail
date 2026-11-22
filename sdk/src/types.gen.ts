@@ -4455,20 +4455,20 @@ export type LogEntry = {
  */
 export type LogCounts = {
     /**
-     * Matching emails per status (sent statuses, received and spam), with every filter but status. A status with none is left out.
+     * Emails per status (sent statuses, received and spam) between from and to, with every filter but status. A status with none is left out.
      */
     status: {
         [key: string]: number;
     };
     /**
-     * Matching sent emails per kind, with every filter but kind.
+     * Sent emails per kind between from and to, with every filter but kind.
      */
     kind: {
         transactional: number;
         marketing: number;
     };
     /**
-     * Per direction: true when it has more than 50,000 matching emails. Its counts then cover that many of its newest and are lower bounds.
+     * Always false: the counts are exact. Kept for compatibility from when each direction counted at most its 50,000 newest emails.
      */
     capped: {
         sent: boolean;
@@ -11164,7 +11164,7 @@ export type ListEmailsData = {
         region?: string;
         kind?: 'transactional' | 'marketing';
         /**
-         * Literal case-insensitive substring of sender, To/Cc/Bcc, subject or email/campaign/provider ID.
+         * Literal case-insensitive substring of sender, To/Cc/Bcc, subject or email/campaign/provider ID, at least 3 characters: a shorter term is refused with 422 VALIDATION_FAILED.
          */
         search?: string;
         from?: string;
@@ -24427,7 +24427,7 @@ export type ListLogsData = {
         limit?: number;
         direction?: 'all' | 'sent' | 'received';
         /**
-         * Sent mail: a literal, case-insensitive substring of the sender, recipients, subject or IDs. Received mail: a full-text match on sender, recipients, subject and body.
+         * At least 3 characters: a shorter term is refused with 422 VALIDATION_FAILED. Sent mail: a literal, case-insensitive substring of the sender, recipients, subject or IDs. Received mail: a full-text match on sender, recipients, subject and body.
          */
         search?: string;
         /**
@@ -24444,7 +24444,15 @@ export type ListLogsData = {
         campaignId?: string;
         region?: string;
         /**
-         * true adds counts: how many emails match each status and kind for these filters, whatever the cursor and limit.
+         * Mail created (sent) or received at or after this instant.
+         */
+        from?: string;
+        /**
+         * Mail created (sent) or received before this instant.
+         */
+        to?: string;
+        /**
+         * true adds counts: how many emails match each status and kind for these filters between from and to (all retained mail without them), whatever the cursor and limit. Counts that take longer than 2 seconds are refused with 422 READ_TOO_LARGE: narrow from and to.
          */
         counts?: 'true' | 'false';
     };

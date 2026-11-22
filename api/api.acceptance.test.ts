@@ -14348,6 +14348,10 @@ describe('Dashboard API capabilities', () => {
       assert.equal(error(await local('GET', '/v1/logs?direction=sent&status=spam'), 422).code, 'VALIDATION_FAILED');
       assert.equal(error(await local('GET', '/v1/logs?status=received&kind=marketing'), 422).code, 'VALIDATION_FAILED');
       assert.deepEqual(ids(await list('search=reply')), [r1]); assert.deepEqual(ids(await list('search=Logs')), [s2, r2, r1, s1]);
+      // A substring search needs 3 characters (after trimming); an email ID or a full address finds its email.
+      for (const path of ['/v1/logs', '/v1/emails']) for (const term of ['Lo', ' ad ', 'x']) assert.equal(error(await local('GET', `${path}?search=${encodeURIComponent(term)}`), 422, 'VALIDATION_FAILED').field, 'search', `${path} ${term}`);
+      assert.deepEqual(ids(await list('search=Log')), [s2, s1], 'Three characters search sent mail\'s text; received mail matches whole words.');
+      for (const [term, found] of [[s1, [s1]], ['ada@example.net', [s1]], ['ADA@example.net', [s1]], ['linus@example.org', [r1]]] as const) assert.deepEqual(ids(await list(`search=${encodeURIComponent(term)}`)), found, term);
       const first = await list('limit=1');
       assert.equal(error(await local('GET', `/v1/logs?limit=1&direction=sent&cursor=${first.nextCursor}`), 422).code, 'INVALID_CURSOR');
       // counts=true: each facet counts under every other filter (status ignores status, kind ignores kind), for the whole list.
@@ -14358,6 +14362,27 @@ describe('Dashboard API capabilities', () => {
       assert.deepEqual(await counts('&kind=transactional'), { status: { delivered: 1 }, kind: { transactional: 1, marketing: 1 }, capped: { sent: false, received: false } });
       assert.deepEqual(await counts('&direction=received'), { status: { received: 1, spam: 1 }, kind: { transactional: 0, marketing: 0 }, capped: { sent: false, received: false } });
       assert.deepEqual(await counts('&search=reply'), { status: { received: 1 }, kind: { transactional: 0, marketing: 0 }, capped: { sent: false, received: false } });
+      // from and to bound the list and its counts alike, by when sent mail was created and received mail arrived: each
+      // status counts exactly the rows the list shows for those dates, and nothing outside them.
+      const dates = (from?: number, to?: number) => `${from === undefined ? '' : `&from=${encodeURIComponent(at(from))}`}${to === undefined ? '' : `&to=${encodeURIComponent(at(to))}`}`;
+      for (const [from, to, listed, status, kind] of [
+        [2, 4, [s2, r2, r1], { bounced: 1, received: 1, spam: 1 }, { transactional: 0, marketing: 1 }],
+        [3, undefined, [s2, r2], { bounced: 1, spam: 1 }, { transactional: 0, marketing: 1 }],
+        [undefined, 2, [s1], { delivered: 1 }, { transactional: 1, marketing: 0 }],
+        [1, 2, [s1], { delivered: 1 }, { transactional: 1, marketing: 0 }],
+        [4, 60, [], {}, { transactional: 0, marketing: 0 }],
+      ] as const) {
+        const rows = await walk(async cursor => list(`limit=1${dates(from, to)}${cursor ? `&cursor=${cursor}` : ''}`));
+        assert.deepEqual(rows.map(row => row.id), listed, `${from}..${to}`);
+        const tally = rows.reduce<Record<string, number>>((sum, row) => ({ ...sum, [row.status]: (sum[row.status] ?? 0) + 1 }), {});
+        assert.deepEqual([tally, await counts(dates(from, to))], [status, { status, kind, capped: { sent: false, received: false } }], `${from}..${to}`);
+      }
+      // Under the other filters too: kind counts take the chosen status, status counts the chosen kind, both within the dates.
+      assert.deepEqual(await counts(`&status=delivered${dates(2)}`), { status: { bounced: 1, received: 1, spam: 1 }, kind: { transactional: 0, marketing: 0 }, capped: { sent: false, received: false } });
+      assert.deepEqual(await counts(`&kind=marketing${dates(undefined, 3)}`), { status: {}, kind: { transactional: 1, marketing: 0 }, capped: { sent: false, received: false } });
+      assert.equal(error(await local('GET', `/v1/logs?${dates(3, 3).slice(1)}`), 422).code, 'VALIDATION_FAILED');
+      const dated = await list(`limit=1${dates(1)}`);
+      assert.equal(error(await local('GET', `/v1/logs?limit=1&cursor=${dated.nextCursor}`), 422).code, 'INVALID_CURSOR', 'A cursor is bound to its dates.');
       // A cursor from a page with counts reads the next page without them, and the other way round.
       const counted = await list('limit=1&counts=true');
       assert.deepEqual(ids(await list(`limit=1&cursor=${counted.nextCursor}`)), [r2]);
@@ -14427,6 +14452,8 @@ describe('Dashboard API capabilities', () => {
       // outlives it: that shows which limit the read ran under.
       const page = ok(await local('GET', '/v1/logs?limit=10&counts=true'));
       assert.deepEqual([page.data.map((row: Json) => row.id), page.counts.status, page.counts.kind], [[received, sent], { delivered: 1, received: 1 }, { transactional: 1, marketing: 0 }]);
+      assert.equal(await timeout(), '2s', 'The counts run last, under a shorter limit of their own.');
+      ok(await local('GET', '/v1/logs?limit=10'));
       assert.equal(await timeout(), '5s');
       assert.deepEqual(ok(await local('GET', '/v1/inbound/messages')).data.map((row: Json) => row.id), [received]);
       assert.equal(await timeout(), '3s');
@@ -14446,6 +14473,19 @@ describe('Dashboard API capabilities', () => {
       };
       await tooBroad('/v1/logs?direction=received', 5);
       await tooBroad('/v1/inbound/messages', 3);
+      // Counts that need longer than their 2 seconds are refused; the same page without them answers. Each of this
+      // workspace's 9 sent emails takes 0.3 s to read: the page stays within its 5 seconds, counting all 9 can't within 2.
+      await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, created_at)
+        SELECT $1 || '-' || n, $2, $3, 'fixture', 'hello@limits.example', '["ada@example.net"]', '[]', '[]', 'Counted', '{"kind":"transactional"}', false, 'delivered', now() - n * interval '1 hour' FROM generate_series(1, 8) n`, [sent, wid, REGION]);
+      await db.query(`SAVEPOINT slow_counts; SET LOCAL statement_timeout = '60s';
+        ALTER TABLE sending_emails ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY;
+        CREATE POLICY slow_counts ON sending_emails USING (CASE WHEN workspace_id = ${workspace} THEN pg_sleep(0.3) IS NOT NULL ELSE true END)`);
+      try {
+        assert.equal(ok(await local('GET', '/v1/logs?direction=sent&limit=1')).data.length, 1);
+        const started = performance.now(), reply = await local('GET', '/v1/logs?direction=sent&limit=1&counts=true'), elapsed = performance.now() - started;
+        assert.equal(error(reply, 422, 'READ_TOO_LARGE').message, 'This request is too broad to answer within 2 seconds. Narrow the dates or filters.');
+        t.diagnostic(`READ-LIMIT counts: 422 after ${Math.round(elapsed)} ms`);
+      } finally { await db.query('ROLLBACK TO SAVEPOINT slow_counts; RELEASE SAVEPOINT slow_counts'); }
       // The policy and its locks went with the savepoint: the same read answers again.
       assert.deepEqual(ok(await local('GET', '/v1/logs?direction=received')).data.map((row: Json) => row.id), [received]);
     });

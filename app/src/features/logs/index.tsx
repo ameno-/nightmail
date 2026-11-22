@@ -3,7 +3,7 @@ import { Link, useParams, useSearchParams } from 'react-router'
 import { Download, Paperclip, Search, X } from 'lucide-react'
 import { useApiDef, useApiQuery, useRegion, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
-import type { LogDirection, LogEntry, ReceivedEmailDetail } from '../../data/types'
+import type { LogDirection, LogEntry, ReceivedEmailDetail, TimeRange } from '../../data/types'
 import { Alert, Button, CopyButton, DataTable, EmptyState, ErrorState, Input, PaginationSkeleton, PageHeader, Pagination, SectionHeader, Select, Sheet, StatusBadge, Tabs } from '../../components/ui'
 import { ReceivedEmailPreview } from '../../components/EmailPreview'
 import { date, fileSize, label, time } from '../../lib/format'
@@ -17,11 +17,22 @@ import { useScheduledActions } from './scheduled'
 import { ThreadChip, ThreadTimeline, threaded, threadItems, useThreadPrefetch } from './thread'
 import { useMediaQuery } from '../../lib/media'
 import { LogsBody, logStatuses, receivedStatuses, sentStatuses, withStream, type LogFilters } from './facets'
+import { logRange, logRanges, rangeStart } from './range'
 
 const directions = [{ value: 'all', label: 'All' }, { value: 'sent', label: 'Sent' }, { value: 'received', label: 'Received' }]
 const option = (value: string) => ({ value, label: value === 'all' ? 'All statuses' : label(value) })
 const streams = [{ value: 'all', label: 'All streams' }, { value: 'transactional', label: 'Transactional' }, { value: 'marketing', label: 'Marketing' }]
 export const logDirection = (view: string | null, campaignId?: string): LogDirection => campaignId ? 'sent' : view === 'sent' || view === 'received' ? view : 'all'
+// A range's start (range.ts), kept until another range is chosen.
+function useRangeStart(range: TimeRange) {
+  const [start, setStart] = useState(() => ({ range, from: rangeStart(range) }))
+  if (start.range === range) return start.from
+  const next = { range, from: rangeStart(range) }
+  setStart(next)
+  return next.from
+}
+// A substring search needs 3 characters (the API refuses fewer): until then the list isn't searched.
+const searchTerm = (value: string) => value.trim().length >= 3 ? value.trim() : ''
 
 // Logs: sent and received mail in one list, newest first (GET /v1/logs). Received mail follows the API's rules: owners
 // and admins see every received message, including unrouted mail; members see mail on receiving addresses.
@@ -33,11 +44,12 @@ export function LogsPage() {
 }
 // The sidebar's region selector already names the region; repeat it only when it is hidden or a campaign filter shows another region.
 // Hosted logs span every region and name none.
-export function LogsHeader({ regionId, direction, onDirection, locked }: { regionId: string; direction: LogDirection; onDirection: (value: LogDirection) => void; locked?: boolean }) {
+function LogsHeader({ regionId, direction, onDirection, locked, range, onRange }: { regionId: string; direction: LogDirection; onDirection: (value: LogDirection) => void; locked?: boolean; range: TimeRange; onRange: (value: TimeRange) => void }) {
   const selected = useRegion().regionId
   const { canAdminister, multiTenant } = useWorkspaceAccess()
   return <PageHeader title="Logs" actions={<div className="cluster logs-controls">{!multiTenant && (!canAdminister || regionId !== selected) && <span className="muted">{regionId}</span>}
-    <Tabs label="Direction" value={direction} onValueChange={value => onDirection(value as LogDirection)} disabled={locked} items={directions} /></div>} />
+    <Tabs label="Direction" value={direction} onValueChange={value => onDirection(value as LogDirection)} disabled={locked} items={directions} />
+    <Tabs label="Time range" value={range} onValueChange={value => onRange(value as TimeRange)} items={logRanges} /></div>} />
 }
 // Everything that decides the rows is in the URL (view, q, status, stream, page), so Back from an email, a reload or a
 // shared link shows the same page of the same list. Filters replace the entry instead of adding one per keystroke.
@@ -49,7 +61,8 @@ function Logs({ regionId, campaignId }: { regionId: string; campaignId?: string 
   // A campaign sends from one region, so its filter replaces the region selector; it lists sent mail only.
   const campaign = useApiQuery(['campaign', campaignId ?? null], (api, signal) => campaignId ? api.campaigns.get(campaignId, signal) : Promise.resolve(null))
   const direction = logDirection(searchParams.get('view'), campaignId)
-  const search = searchParams.get('q') ?? ''
+  const search = searchParams.get('q') ?? '', searched = searchTerm(search)
+  const range = logRange(searchParams.get('range')), from = useRangeStart(range)
   const statuses = logStatuses(direction, { campaign: Boolean(campaignId), canAdminister }), allowed = new Set(statuses)
   const requested = searchParams.get('status') ?? 'all'
   const status = allowed.has(requested) ? requested : 'all'
@@ -71,19 +84,21 @@ function Logs({ regionId, campaignId }: { regionId: string; campaignId?: string 
   useEffect(() => { if (!measured) return; if (fitted.current !== null && fitted.current !== pageSize) update({ page: null }); fitted.current = pageSize }, [pageSize, measured]) // eslint-disable-line react-hooks/exhaustive-deps
   // Status and stream follow the direction: a sent status leaves Received, received and spam leave Sent, and streams are sent mail only.
   const setDirection = (value: LogDirection) => update({ view: value, status: value === 'received' && sentStatuses.includes(status) || value === 'sent' && receivedStatuses.includes(status) ? null : status, stream: value === 'received' ? null : stream })
-  const params = { ...(campaignId ? { campaignId } : { regionId }), direction, search: search.trim(), status: status === 'all' ? undefined : status, stream: stream === 'all' ? undefined : stream, page, pageSize }
+  const params = { ...(campaignId ? { campaignId } : { regionId }), direction, search: searched, status: status === 'all' ? undefined : status, stream: stream === 'all' ? undefined : stream, from, page, pageSize }
   const query = useApiDef(queries.logs(params), { interval: 30_000, enabled: measured, keepPrevious: true })
-  // The filters' counts, for the whole log under the other filters: read only where the filters are on screen (logs.css).
+  // The filters' counts, for the list's dates under the other filters: read only where the filters are on screen
+  // (logs.css), apart from the list, which never waits for them. Counts the API can't finish in time are refused: the
+  // filters keep their dashes, and they aren't asked again until the filters or dates change.
   const railed = useMediaQuery('(min-width: 1440px)')
-  const counts = useApiDef(queries.logCounts({ ...(campaignId ? { campaignId } : { regionId }), direction, search: search.trim(), status: params.status, stream: params.stream }), { interval: 30_000, enabled: railed, keepPrevious: true })
+  const counts = useApiDef(queries.logCounts({ ...(campaignId ? { campaignId } : { regionId }), direction, search: searched, status: params.status, stream: params.stream, from }), { interval: (_, failed) => failed ? false : 30_000, enabled: railed, keepPrevious: true })
   // A page the session has no cursor for (a reload, or the window's page size changed) comes back as page 1: say so in the URL too.
   const served = query.data && !query.isPlaceholderData ? query.data.page : undefined
   useEffect(() => { if (served !== undefined && served !== page) update({ page: served === 1 ? null : String(served) }, true) }, [served, page]) // eslint-disable-line react-hooks/exhaustive-deps
   // The previous filter's rows stay on screen while the next loads, keyed apart from the result that replaces them: a
   // row in both lists (received mail under All and Received) is swapped in place, not moved down the table.
-  const filtered = Boolean(search.trim() || campaignId || status !== 'all' || stream !== 'all')
+  const filtered = Boolean(searched || campaignId || status !== 'all' || stream !== 'all' || range !== '30d')
   // A campaign's own empty state needs its summary: wait for it, or offer to retry it, before calling the list unmatched.
-  const campaignOnly = Boolean(campaignId) && !search.trim() && status === 'all' && stream === 'all'
+  const campaignOnly = Boolean(campaignId) && !searched && status === 'all' && stream === 'all' && range === '30d'
   // The filters beside the list set the same URL filters as the toolbar's pickers, which they replace from 1440 px.
   const setStatus = (value: string) => update({ status: value, ...receivedStatuses.includes(value) ? { stream: null } : {} })
   const filters: LogFilters = { statuses, status, stream, streams: !receivedOnly, setStatus, setStream: value => update({ stream: value }) }
@@ -91,8 +106,8 @@ function Logs({ regionId, campaignId }: { regionId: string; campaignId?: string 
   const blank = Boolean(query.data && !query.isPlaceholderData && !query.data.items.length && !filtered && page === 1)
   // An export is the rows on screen for the filters shown: while the next filter's rows load, the previous rows stay up
   // but can't be exported, and neither can rows while the search box holds text the list hasn't searched for yet.
-  const exportable = Boolean(query.data?.items.length) && !query.isPlaceholderData && draft.trim() === search.trim()
-  return <div className="logs-page"><LogsHeader regionId={campaign.data?.regionId ?? regionId} direction={direction} onDirection={setDirection} locked={Boolean(campaignId)} />
+  const exportable = Boolean(query.data?.items.length) && !query.isPlaceholderData && draft.trim() === searched
+  return <div className="logs-page"><LogsHeader regionId={campaign.data?.regionId ?? regionId} direction={direction} onDirection={setDirection} locked={Boolean(campaignId)} range={range} onRange={value => update({ range: value === '30d' ? null : value })} />
     <div className="data-toolbar"><div className="cluster">{campaignId && <Button variant="secondary" aria-label={`Remove campaign filter: ${campaign.data?.name ?? campaignId}`} onClick={clearCampaign} title={campaign.data?.name}><span className="logs-campaign-chip">Campaign: {campaign.data?.name ?? campaignId}</span><X size={14} aria-hidden /></Button>}<div className="search-box"><Search size={16} /><Input type="search" aria-label="Search logs" placeholder="Search logs" maxLength={200} value={draft} onChange={event => type(event.target.value)} /></div>
       <Select className="logs-filter" aria-label="Email status" value={status} onValueChange={setStatus} options={['all', ...statuses].map(value => ({ ...option(value), disabled: !withStream(value, stream) }))} />
       <Select className="logs-filter" aria-label="Email stream filter" value={stream} disabled={receivedOnly} onValueChange={value => update({ stream: value })} options={streams} /></div>
@@ -103,7 +118,7 @@ function Logs({ regionId, campaignId }: { regionId: string; campaignId?: string 
         empty={campaignOnly && campaign.isError && !campaign.data ? <ErrorState error={campaign.error} onRetry={() => campaign.refetch()} />
           // A campaign that hasn't sent says when it will, in its heading.
           : campaignId && campaignOnly && campaign.data && !campaign.data.counts?.total ? <EmptyState title={campaign.data.scheduledAt && Date.parse(campaign.data.scheduledAt) > Date.now() ? `Scheduled for ${date(campaign.data.scheduledAt)} at ${time(campaign.data.scheduledAt)} UTC` : 'Nothing sent from this campaign yet'} action={<Link className="ui-button ui-button--secondary ui-button--md" to={`/campaigns/${encodeURIComponent(campaignId)}/review`}>Back to campaign</Link>} />
-          : filtered ? <EmptyState title="No matching mail" action={<Button onClick={() => update({ q: null, status: null, stream: null, campaign: null, ...direction !== 'all' && !campaignId ? { view: null } : {} })}>Clear filters</Button>} />
+          : filtered ? <EmptyState title="No matching mail" action={<Button onClick={() => update({ q: null, status: null, stream: null, campaign: null, range: null, ...direction !== 'all' && !campaignId ? { view: null } : {} })}>Clear filters</Button>} />
           : <EmptyState title={direction === 'received' ? 'No mail received yet' : direction === 'sent' ? 'No mail sent yet' : 'No mail yet'} action={direction === 'received' ? <Link className="ui-button ui-button--primary ui-button--md" to="/receiving">Set up receiving</Link> : <Link className="ui-button ui-button--primary ui-button--md" to="/docs#quickstart">Send your first email</Link>} />} />
       {scheduled.dialogs}
       {query.data ? <Pagination page={query.data.page} pageSize={query.data.pageSize} total={query.data.total} nextCursor={query.data.nextCursor} count={query.data.items.length} onPageChange={next => update({ page: next === 1 ? null : String(next) }, true)} /> : <PaginationSkeleton />}
