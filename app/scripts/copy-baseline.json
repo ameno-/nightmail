@@ -13,17 +13,12 @@
   },
   "app/src/features/inbound/trace.tsx": {
    "length/placeholder": [
-    "75: from: ana@example.org to: support@acme.com subject: invoice "
+    "78: from: ana@example.org to: support@acme.com subject: invoice "
    ]
   },
   "app/src/features/operator/skeletons.tsx": {
    "length/heading": [
-    "13: sign in with google to use staff tools"
-   ]
-  },
-  "app/src/features/score/about.tsx": {
-   "caption": [
-    "61: …% weight"
+    "14: sign in with google to use staff tools"
    ]
   }
  }
