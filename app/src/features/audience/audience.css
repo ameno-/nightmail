@@ -63,10 +63,11 @@
   /* Field and condition share the first line, the value gets the second. Classes, not nth-child: a Select inside a
      form also renders a hidden native select. */
   .audience-condition { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 44px; row-gap: var(--space-8); }
-  .audience-condition + .audience-condition, .audience-conditions > .ui-field__error + .audience-condition { margin-top: var(--space-8); }
+  .audience-condition + .audience-condition, .audience-conditions > .ui-field__error + .audience-condition { margin-top: var(--space-16); }
+  .audience-condition--head + .audience-condition { margin-top: var(--space-8); }
   .audience-condition > .audience-condition-field { grid-column: 1; grid-row: 1; }
   .audience-condition > .audience-condition-operator { grid-column: 2; grid-row: 1; }
-  .audience-condition > .audience-condition-value { grid-column: 1 / 3; grid-row: 2; }
+  .audience-condition > .audience-condition-value { grid-column: 1 / 4; grid-row: 2; }
   .audience-condition > .audience-condition-remove { grid-column: 3; grid-row: 1; justify-self: end; min-width: 44px; min-height: 44px; }
   .audience-condition-group { grid-column: 1 / 3; }
   .audience-condition--head { display: none; }
