@@ -34,7 +34,7 @@ export function FactsSkeleton() {
   </div>)}</div>
 }
 export function ChartSkeleton() {
-  return <section className="ov-chart" aria-hidden="true"><div className="ov-chart__head"><h2 className="ui-label ui-label--rule">Activity</h2></div><div className="ov-chart__plot ov-chart__plot--loading" /></section>
+  return <section className="ov-chart" aria-hidden="true"><div className="ov-chart__head" /><div className="ov-chart__plot ov-chart__plot--loading" /></section>
 }
 export function AsideSkeleton() {
   return <div className="ov-aside-skeleton" aria-hidden="true"><span /><span /></div>

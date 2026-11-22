@@ -68,10 +68,10 @@ export function OverviewPage() {
             {data && !held ? <Facts data={data} stale={query.isPlaceholderData} /> : <FactsSkeleton />}
             {data && !held ? <Chart data={data} stale={query.isPlaceholderData} /> : <ChartSkeleton />}
           </>}
-          <LatestEmails params={latestParams} held={held} />
+          <LatestEmails params={latestParams} held={held} range={range} />
         </Fragment>
       </div>
-      <Aside setup={setup} showSetup={!stacked} campaigns={data?.recentCampaigns} />
+      <Aside setup={setup} showSetup={!stacked} campaigns={data?.recentCampaigns} range={range} />
     </div>
   </>
 }
@@ -79,7 +79,7 @@ export function OverviewPage() {
 // The detail column renders in one go once setup, the score and the next steps are known, so nothing in it moves.
 // The standing card (Warn and up) leads it; the banner's fix link and the sidebar score scroll here by hash. Recent
 // campaigns come with the overview's figures and close the column, so arriving later moves nothing above them.
-function Aside({ setup, showSetup, campaigns }: { setup: ReturnType<typeof useSetupSteps>; showSetup: boolean; campaigns?: Overview['recentCampaigns'] }) {
+function Aside({ setup, showSetup, campaigns, range }: { setup: ReturnType<typeof useSetupSteps>; showSetup: boolean; campaigns?: Overview['recentCampaigns']; range: TimeRange }) {
   const score = useSenderScore()
   // One score per screen: the sidebar's card, or this column's copy of it where the sidebar isn't on screen (the
   // phone shell keeps it in More) or doesn't carry it (self-hosted).
@@ -101,7 +101,7 @@ function Aside({ setup, showSetup, campaigns }: { setup: ReturnType<typeof useSe
     {score.isError && !score.data ? <ErrorState error={score.error} onRetry={() => score.refetch()} /> : showScore && <SidebarScore />}
     <DailyLimit report={score.data} />
     {/* Next steps follow setup: never in its place while setup is unknown. */}
-    {!setup.steps && !setup.error && <NextSteps items={next.items} />}
+    {!setup.steps && !setup.error && <NextSteps items={next.items.map(item => ({ ...item, to: logsHref(item.to, range) }))} />}
     {campaigns && campaigns.length > 0 && <Campaigns rows={campaigns.slice(0, 3)} />}
   </>}</aside>
 }
@@ -141,10 +141,7 @@ function Facts({ data, stale }: { data: Overview; stale: boolean }) {
 }
 function Gauge({ rate, limit, label }: { rate: number; limit: number; label: string }) {
   const lit = rate > 0 ? Math.min(20, Math.max(1, Math.ceil(rate / limit * 20))) : 0
-  return <>
-    <span className="ov-gauge" data-zone={zone(rate, limit)} role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={limit} aria-valuenow={rate} aria-valuetext={`${rateText(rate)} of a ${limitText(limit)} limit`}>{Array.from({ length: 20 }, (_, i) => <i key={i} data-on={i < lit || undefined} />)}</span>
-    <span className="ov-gauge__limit">{limitText(limit)} limit</span>
-  </>
+  return <span className="ov-gauge" data-zone={zone(rate, limit)} role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={limit} aria-valuenow={rate} aria-valuetext={`${rateText(rate)} of a ${limitText(limit)} limit`}>{Array.from({ length: 20 }, (_, i) => <i key={i} data-on={i < lit || undefined} />)}</span>
 }
 // SVG, so a range with another count of buckets redraws the columns instead of moving boxes.
 function Columns({ values: target, tone }: { values: number[]; tone: 'sent' | 'delivered' }) {
@@ -157,22 +154,24 @@ function Columns({ values: target, tone }: { values: number[]; tone: 'sent' | 'd
 
 function Chart({ data, stale }: { data: Overview; stale: boolean }) {
   return <section className="ov-chart" aria-label="Sending activity" data-stale={stale || undefined}>
-    <div className="ov-chart__head"><h2 className="ui-label ui-label--rule">Activity</h2><span className="ov-legend" aria-hidden="true"><span><i className="ov-key--sent" />Emails</span><span><i className="ov-key--bounces" />Bounced</span><span><i className="ov-key--complaints" />Complaints</span></span></div>
+    <div className="ov-chart__head"><span className="ov-legend" aria-hidden="true"><span><i className="ov-key--sent" />Emails</span><span><i className="ov-key--bounces" />Bounced</span><span><i className="ov-key--complaints" />Complaints</span></span></div>
     <Crossfade id={data.sent ? buckets(data.points) : 'empty'} className="ov-chart__plot">{data.sent ? <ActivityChart data={data} /> : <EmptyState title="No emails in this period" />}</Crossfade>
   </section>
 }
 
+// Logs opens on the range Overview shows; 30d is its default.
+const logsHref = (to: string, range: TimeRange) => range === '30d' || !(to === '/logs' || to.startsWith('/logs?')) ? to : `${to}${to.includes('?') ? '&' : '?'}range=${range}`
 // Latest emails are the selected region's, like the figures and Logs; another region's rows never stand in while it loads.
 const sameRegion = (regionId: string) => (previous: readonly unknown[]) => (previous[1] as { regionId?: string } | undefined)?.regionId === regionId
 // The latest mail is the top of Logs: the same rows, columns and masking (features/logs/rows.tsx), compact. `count`
 // rows fill the column (latest.ts) and are always reserved, so loading, short and full lists are the same height; a new
 // count after a resize keeps the old rows up until the new page arrives. A new email or outcome crossfades the rows.
-function LatestEmails({ params, held }: { params: { regionId: string; direction: 'all' | 'sent'; stream?: string; page: number; pageSize: number }; held: boolean }) {
+function LatestEmails({ params, held, range }: { params: { regionId: string; direction: 'all' | 'sent'; stream?: string; page: number; pageSize: number }; held: boolean; range: TimeRange }) {
   const { regionId, pageSize: count, stream } = params
   const logs = useApiDef(queries.logs(params), { interval: 60_000, keepPrevious: sameRegion(regionId) }) // warmed with the page (data/prefetch.ts)
   const rowIntent = useLogRowIntent()
   const rows = (logs.data?.items ?? []).slice(0, count)
-  return <section className="ov-latest"><SectionHeader title="Latest emails" actions={<Link className="ui-button ui-button--ghost ui-button--sm" to={stream ? `/logs?view=sent&stream=${stream}` : '/logs'}>Logs <ArrowUpRight size={16} /></Link>} />
+  return <section className="ov-latest"><SectionHeader title="Latest emails" actions={<Link className="ui-button ui-button--ghost ui-button--sm" to={logsHref(stream ? `/logs?view=sent&stream=${stream}` : '/logs', range)}>Logs <ArrowUpRight size={16} /></Link>} />
     {logs.isError && !logs.data ? <ErrorState error={logs.error} onRetry={() => logs.refetch()} /> : <Crossfade id={logs.data && rows.map(row => `${row.direction}:${row.id}:${row.status}`).join(',')}><DataTable<LogEntry> className="logs-table ov-table" loading={logs.isPending || held} skeletonRows={count} minRows={count} rows={rows} rowKey={row => `${row.direction}:${row.id}`} rowHref={logHref} rowLabel={logRowLabel} onRowIntent={rowIntent} empty={<EmptyState title="No emails yet" />} columns={logColumns} /></Crossfade>}
   </section>
 }

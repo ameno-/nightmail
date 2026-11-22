@@ -80,9 +80,9 @@ function bestStep(report: SenderScore | undefined, domains: Domain[]) {
     : worst.key === 'content' ? { text: 'Review rejected messages', to: '/logs?view=sent&status=rejected' }
     : worst.key === 'hygiene' ? { text: 'Clean suppressed addresses from lists', to: '/audience' }
     : { text: `Review ${worst.label.toLowerCase()} in Logs`, to: worst.key === 'complaints' ? '/logs?view=sent&status=complained' : worst.key === 'bounces' ? '/logs?view=sent&status=bounced' : '/logs?view=sent&stream=marketing' }
-  return { key: 'score', ...target, meta: `+${whole(gain)} pts` }
+  return { key: 'score', ...target }
 }
-export type NextItem = { key: string; text: string; meta?: string; to: string }
+export type NextItem = { key: string; text: string; to: string }
 // Domains, webhooks and invitations come from Overview's one setup read, shared with the setup steps. Once a domain
 // receives, the receiving domains' address counts say whether the first address is still to make.
 export function useNextSteps(report: SenderScore | undefined): { items: NextItem[]; ready: boolean } {
@@ -106,5 +106,5 @@ export function useNextSteps(report: SenderScore | undefined): { items: NextItem
 }
 export function NextSteps({ items }: { items: NextItem[] }) {
   if (!items.length) return null
-  return <nav className="next-steps" aria-label="Next"><h2 className="next-steps__title">Next</h2><ul>{items.map((item, i) => <li key={item.key} style={{ '--i': i } as CSSProperties}><Link to={item.to}><span>{item.text}</span>{item.meta && <span className="muted">{item.meta}</span>}<ArrowUpRight size={14} aria-hidden="true" /></Link></li>)}</ul></nav>
+  return <nav className="next-steps" aria-label="Next"><ul>{items.map((item, i) => <li key={item.key} style={{ '--i': i } as CSSProperties}><Link to={item.to}><span>{item.text}</span><ArrowUpRight size={14} aria-hidden="true" /></Link></li>)}</ul></nav>
 }
