@@ -81,7 +81,7 @@ export function TemplatesPage() {
         {...templateColumns[0], render: row => { const about = row.subject || row.description; return <div className="campaign-row-name"><span title={row.name}>{row.name}</span>{about && <span className="muted" title={about}>{about}</span>}</div> }, cardRender: row => row.name},
         {...templateColumns[1], render: row => <StatusBadge status={row.published ? 'Published' : 'Draft'} />},
         {...templateColumns[2], render: row => row.description || row.subject || 'No subject yet'},
-        {...templateColumns[3], render: row => <span className="muted campaign-activity" title={`${date(row.updatedAt)} · ${time(row.updatedAt)} UTC`}>{shortDateTime(row.updatedAt)}</span>, cardRender: row => `Updated ${date(row.updatedAt, { month: 'short', day: 'numeric', timeZone: 'UTC' })}`},
+        {...templateColumns[3], render: row => <span className="muted campaign-activity" title={`${date(row.updatedAt)} · ${time(row.updatedAt)} UTC`}>{shortDateTime(row.updatedAt)}</span>},
         {...templateColumns[4], render: row => archived ? null : <Button size="sm" variant="secondary" title={row.published ? 'Start a new campaign draft from this template' : publishFirst} disabled={!row.published || pending !== null || unavailable} loading={pending === row.id} onClick={event => { event.stopPropagation(); void start(row) }}>Use template</Button>},
       ]} />
       {query.isPending ? <PaginationSkeleton /> : <Pagination page={query.data.page} pageSize={query.data.pageSize} total={query.data.total} nextCursor={query.data.nextCursor} count={query.data.items.length} onPageChange={page => setParams(previous => { const next = new URLSearchParams(previous); next.set('page', String(page)); return next })} />}
