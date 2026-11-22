@@ -348,7 +348,6 @@ function useRoom() {
 function useClientPreviews(source: InsightSource, previewSource: PreviewSource | null, theme: Theme, device: FrameDevice, needed: boolean) {
   return useApiQuery(['email-previews', ...sourceKey(source), theme, device], (api, signal) => api.emails.preview({ source: previewSource!, clients: clientsFor(device), theme, device }, signal), { enabled: Boolean(previewSource) && needed, keepPrevious: sameSubject(source) })
 }
-const sentLabel = (device: FrameDevice) => device === 'mobile' ? 'As sent, phone width' : 'As sent'
 const useClientDocs = (previews: ClientPreview[] | undefined) => useMemo(() => new Map((previews ?? []).flatMap(item => item.html ? [[item.client, frameDocument(item.html)] as const] : [])), [previews])
 
 /**
@@ -428,7 +427,7 @@ export function EmailViews({ source, previewSource, check, original, loading = f
   const pending = Boolean(shown) && (shown!.signature !== signature || slots.some(slot => slot.view !== 'original' && queries[slot.device].isPlaceholderData))
   const describe = (column: Slot) => {
     const item = CLIENTS.find(entry => entry.value === column.view)
-    if (!item) return { label: sentLabel(column.device), title: column.device === 'mobile' ? 'Email as sent, phone width' : 'Email as sent' }
+    if (!item) return { label: '', title: column.device === 'mobile' ? 'Email as sent, phone width' : 'Email as sent' }
     const issues = readers[column.device](item.clients[column.device]), classic = item.value === 'outlook' && column.device === 'desktop' ? readers.desktop(CLASSIC_OUTLOOK) : []
     return { label: item.captions[column.device], title: `${item.captions[column.device]}, ${theme} mode`, item, issues, classic, key: `${item.value}@${column.device}` }
   }
@@ -461,7 +460,7 @@ export function EmailViews({ source, previewSource, check, original, loading = f
     <div className="ev-stage">
       {!compact && <div className="ev-captions">
         {sourceView ? <Caption label={view === 'html' ? 'HTML source' : 'Plain text'} />
-          : view === 'original' && original && !hasHtml ? <Caption label={sentLabel('desktop')} />
+          : view === 'original' && original && !hasHtml ? null
           : showFrames && columns.map((column, index) => { const about = describe(column); return <Caption key={column.key} label={about.label} width={widths[index]} issues={about.issues} classic={about.classic}
             open={Boolean(about.key && openIssues[about.key])} onOpenChange={open => setOpenIssues(state => ({ ...state, [about.key!]: open }))} panel={`${id}-${column.key}`} /> })}
       </div>}
