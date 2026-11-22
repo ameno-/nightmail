@@ -720,6 +720,19 @@ export async function seed(fx) {
   await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, provider_id, event_outcomes, created_at)
     VALUES ($1,'ws_northwind','${REGION}','fixture','deals@mail.northwind.example','["customer@example.net"]','[]','[]',$2,$3::jsonb,false,'delivered','provider-'||$1,3,now()-interval '1 minute')`,
     [junkEmail, JUNK_SUBJECT, JSON.stringify({ kind: 'marketing', region: REGION, subject: JUNK_SUBJECT, html: JUNK_HTML, attachments: [] })]);
+  // A bounced and a delayed email, each with what its page says under the delivery (features/logs/reason.ts): the
+  // receiving server's reply as SES feedback stores it, and for the delay SES's type and its retry deadline.
+  const failed = {};
+  for (const [name, subject, status, outcomes, minutes, type, data] of [
+    ['bounced', 'Reset your password', 'bounced', 5, 3, 'bounce', { bounceType: 'Permanent', bounceSubType: 'NoEmail', diagnosticCode: 'smtp; 550 5.1.1 <customer@example.net>: Recipient address rejected: User unknown in virtual mailbox table' }],
+    ['delayed', 'Your sign-in code', 'delayed', 129, 4, 'delivery_delay', { delayType: 'MailboxFull', expirationTime: new Date(Date.now() + 2 * 86_400_000).toISOString(), diagnosticCode: 'smtp; 452 4.2.2 The email account that you tried to reach is over quota' }]]) {
+    const id = failed[name] = rid('email');
+    await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, provider_id, event_outcomes, created_at)
+      VALUES ($1,'ws_northwind','${REGION}','fixture','receipts@mail.northwind.example','["customer@example.net"]','[]','[]',$2,$3::jsonb,false,$4,'provider-'||$1,$5,now()-$6*interval '1 minute')`,
+      [id, subject, JSON.stringify({ kind: 'transactional', region: REGION, subject, fromName: 'Northwind', html: RECEIPT_HTML, text: RECEIPT_TEXT, attachments: [] }), status, outcomes, minutes]);
+    for (const [step, ms, extra] of [['dispatch_attempt', 0, {}], ['accepted', 400, {}], [type, 2100, data]]) await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,provider_id,external_id,data,simulated,created_at)
+      SELECT $1,workspace_id,id,$2,provider_id,$1,jsonb_build_object('emailId',id,'providerId',provider_id)||$5::jsonb,false,created_at + $3 * interval '1 millisecond' FROM sending_emails WHERE id=$4`, [rid('event'), step, ms, id, JSON.stringify(extra)]);
+  }
   // A single email scheduled for tomorrow: Logs gives it a Scheduled badge and its row's menu (cancel, reschedule).
   await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, scheduled_at, created_at)
     VALUES ($1,'ws_northwind','${REGION}','fixture','receipts@mail.northwind.example','["customer@example.net"]','[]','[]','Your order ships tomorrow',$2::jsonb,false,'scheduled',now()+interval '1 day',now()-interval '2 minutes')`,
@@ -912,7 +925,7 @@ export async function seed(fx) {
   await db.query("INSERT INTO nightmail_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at,profile,receiving) VALUES('mcp_at_cls_live','https://account.anoma.ly','user_kai','user_kai','opencode','ws_live','{read,send,manage}',now()+interval '1 day',0,'work',true)");
   fx.liveKey = agent.secret;
   return {
-    ...newsletterIds, mcp, abuseCluster, restricted: 'ws_harbor', email, junkEmail, receivedEmail: 'msg_northwind_invoice', threadEmail: thread.email, threadReceived: thread.received, supportThread: thread.thread, domain: nw.id, sendingDomain: sendingDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
+    ...newsletterIds, mcp, abuseCluster, restricted: 'ws_harbor', email, junkEmail, bouncedEmail: failed.bounced, delayedEmail: failed.delayed, receivedEmail: 'msg_northwind_invoice', threadEmail: thread.email, threadReceived: thread.received, supportThread: thread.thread, domain: nw.id, sendingDomain: sendingDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
     webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, template: template.id ?? template.template?.id, segment: segment.id, supportConversation, supportAction, continueConversation, continueMessage,
   };
 }
