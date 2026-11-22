@@ -84,11 +84,11 @@ export function AgentPrompt({ prompt, compact = false }: { prompt: string | null
 }
 
 // The hosted MCP server, set up as you: the same URL and one-line setups as Connect an agent (connect-agent.tsx).
-// `compact` (onboarding) is the setup alone, without the docs' paragraph on the three ways to connect.
+// `compact` (onboarding) is the setup alone, without the docs' lead line.
 export function McpSetup({ compact = false }: { compact?: boolean }) {
   return <section id="mcp" className="section stack developer-section" aria-label="MCP server">
     <SectionHeader title="MCP server" />
-    {!compact && <p className="muted developer-copy">Add this URL as a remote (HTTP) server in your MCP client. There are three ways to connect. <strong>As you</strong>: the client opens your browser, you sign in with your Anomaly account (GitHub or Google) and approve what it may do; no key to copy. <strong>With an API key</strong>: the key in the config’s Authorization header gives the agent exactly that key’s access in its workspace, with no browser; Create key shows the setup. <strong>One agent inbox</strong>: an API key for that inbox in the config limits the agent to it; make it with Connect an agent → Limit to one inbox, or from any agent inbox.</p>}
+    {!compact && <p className="muted developer-copy">Add this URL as a remote (HTTP) server in your MCP client.</p>}
     <McpSignInSetup />
   </section>
 }

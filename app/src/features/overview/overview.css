@@ -40,12 +40,11 @@
 .ov-gauge[data-zone='near'] > i[data-on] { background: var(--color-warning-marker); }
 .ov-gauge[data-zone='over'] > i[data-on] { background: var(--color-danger-marker); }
 .ov-gauge__limit { height: 10px; margin-top: var(--space-4); color: var(--color-faint); font-family: var(--font-mono); font-size: 10.5px; line-height: 10px; text-align: right; }
-.ov-split__aside .next-steps__title { color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-label); font-weight: 400; letter-spacing: var(--tracking-label); text-transform: uppercase; }
+.ov-split__aside .next-steps__title { color: var(--color-muted); font-family: var(--font-body); font-size: var(--text-xs); font-weight: 400; }
 
-/* Activity: a 20px head (its title and the lines' key) and a 196px plot. */
+/* Activity: a 20px head (the lines' key, at its right) and a 196px plot. */
 .ov-chart { display: flex; flex-direction: column; gap: var(--space-4); }
-.ov-chart__head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-16); height: 20px; }
-.ov-chart__head h2 { flex: 1; }
+.ov-chart__head { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-16); height: 20px; }
 .ov-chart__plot { position: relative; height: 196px; }
 .ov-legend { display: flex; flex: none; align-items: center; gap: var(--space-16); color: var(--color-muted); font-size: var(--text-xs); white-space: nowrap; }
 .ov-legend > span { display: inline-flex; align-items: center; gap: var(--space-6); }
@@ -97,7 +96,6 @@
   :is(.ov-latest .ui-section-header, .ov-campaigns__head) .ui-button { height: 44px; }
   .ov-controls .ui-tab { min-width: 44px; }
   .ov-legend { gap: var(--space-12); }
-  .ov-chart__head h2::after { display: none; }
   .ov-readout { padding: var(--space-6) var(--space-8) var(--space-8); gap: 2px; font-size: 11px; }
   .ov-readout span { gap: var(--space-6); }
   .ov-readout em { min-width: 34px; }

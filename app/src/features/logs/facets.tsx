@@ -11,12 +11,12 @@ import { label, number } from '../../lib/format'
 // A status's colour is its badge's in the table (rows.tsx): received mail is green, spam red, sent mail its StatusBadge tone.
 export const logTone = (row: Pick<LogEntry, 'status'>): Tone => row.status === 'received' ? 'success' : row.status === 'spam' ? 'danger' : statusTone(row.status)
 
-// Sent statuses, most looked-for first; received and spam filter received mail (spam is visible to owners and admins).
+// Sent statuses, most looked-for first; received and spam filter received mail, under Received (spam is visible to owners and admins).
 export const sentStatuses = ['delivered', 'bounced', 'complained', 'delayed', 'suppressed', 'rejected', 'rendering_failed', 'scheduled', 'queued', 'attempting', 'accepted', 'sent', 'canceled', 'acceptance_unknown', 'simulated']
 export const receivedStatuses = ['received', 'spam']
 /** The statuses a list can filter by, in the order the pickers show them. */
 export function logStatuses(direction: LogDirection, { campaign, canAdminister }: { campaign: boolean; canAdminister: boolean }) {
-  const allowed = new Set([...direction === 'received' ? [] : sentStatuses, ...campaign || direction === 'sent' ? [] : canAdminister ? receivedStatuses : ['received']])
+  const allowed = new Set([...direction === 'received' ? [] : sentStatuses, ...campaign || direction !== 'received' ? [] : canAdminister ? receivedStatuses : ['received']])
   return [...receivedStatuses, ...sentStatuses].filter(status => allowed.has(status))
 }
 /** Whether a status can be combined with the chosen stream: received mail has none. */

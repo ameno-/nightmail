@@ -1,7 +1,7 @@
 import { ChevronRight, Paperclip, Reply } from 'lucide-react'
 import { StatusBadge, type Column, type SkeletonColumn } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
-import type { LogEntry } from '../../data/types'
+import type { LogDirection, LogEntry } from '../../data/types'
 import { useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { routeChunks, usePrefetchQueries } from '../../data/prefetch'
@@ -62,8 +62,12 @@ export const logColumns: Column<LogEntry>[] = [
 // Its last column also holds a scheduled email's menu (features/logs/scheduled.tsx), at the end of its card on a phone.
 // The subject keeps the room: the addresses take less, and the stream shows only on a wide window (logs.css).
 const wide = <T extends { key: string; width?: number | string; card?: SkeletonColumn['card'] }>(columns: T[]): T[] => columns.map(column => column.key === 'status' ? { ...column, width: 164 } : column.key === 'open' ? { ...column, width: 40, card: 'end' } : column.key === 'from' || column.key === 'to' ? { ...column, width: '12%' } : column.key === 'stream' ? { ...column, width: 124 } : column)
-export const logsPageColumns = wide(logColumns)
-export const logsPageColumnDefs = wide(logColumnDefs)
+const logsPageColumns = wide(logColumns)
+const logsPageColumnDefs = wide(logColumnDefs)
+// Only All mixes directions: Sent and Received drop the direction column, and Received marks only spam (the rest is all received).
+const forView = <T extends { key: string }>(columns: T[], direction: LogDirection) => direction === 'all' ? columns : columns.filter(column => column.key !== 'direction')
+export const logsViewColumns = (direction: LogDirection): Column<LogEntry>[] => forView(logsPageColumns, direction).map(column => direction === 'received' && column.key === 'status' ? { ...column, render: row => row.status === 'spam' ? <StatusBadge status="Spam" tone="danger" /> : null } : column)
+export const logsViewColumnDefs = (direction: LogDirection) => forView(logsPageColumnDefs, direction)
 
 // CSV is an explicit export: addresses in full, like the detail pages.
 export function logCsvRows(rows: LogEntry[], regions: boolean): string[][] {

@@ -26,8 +26,8 @@ button.gauge-card:focus-visible { outline: 2px solid var(--color-focus); outline
 .gauge-needle[data-rest] { opacity: .4; animation: none; }
 @keyframes gauge-sweep { from { transform: rotate(0deg); } }
 
-.gauge-eyebrow { color: var(--color-muted); font-family: var(--font-mono); font-size: 10px; line-height: 14px; letter-spacing: .12em; text-transform: uppercase; }
-.gauge-grade { font-family: var(--font-mono); font-size: 11px; line-height: 14px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+.gauge-eyebrow { color: var(--color-muted); font-family: var(--font-body); font-size: var(--text-xs); line-height: 14px; }
+.gauge-grade { font-family: var(--font-mono); font-size: 11px; line-height: 14px; font-weight: 700; }
 
 /* Compact: the sidebar card, full sidebar width and 56px tall. */
 .gauge-card--compact { display: flex; align-items: center; gap: 12px; height: 56px; padding: 0 14px 0 10px; transition: background var(--motion-duration), transform 160ms var(--ease-out-strong); }
@@ -36,11 +36,10 @@ button.gauge-card:focus-visible { outline: 2px solid var(--color-focus); outline
 .gauge-card--compact .gauge-dial { flex: none; width: 60px; height: 34px; }
 .gauge-card--compact:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 .gauge-stack { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
-.gauge-card--compact .gauge-eyebrow { font-size: var(--text-label); line-height: 14px; letter-spacing: .08em; }
 /* One 24px line in every state: the graded number keeps a fixed slot before its grade; ungraded or unread, a dash. */
 .gauge-readout { display: flex; align-items: baseline; gap: 8px; height: 24px; line-height: 24px; }
 .gauge-readout b { display: inline-block; min-width: 1.5em; font-family: var(--font-mono); font-size: 20px; line-height: 24px; font-weight: 400; letter-spacing: -.02em; }
-.gauge-readout .gauge-grade { font-size: 13px; letter-spacing: .04em; }
+.gauge-readout .gauge-grade { font-size: 13px; }
 
 /* Next steps: a short list of places to go; rows fade up in sequence. */
 .next-steps { display: flex; flex-direction: column; gap: var(--space-8); min-width: 0; }
@@ -74,7 +73,7 @@ button.gauge-card:focus-visible { outline: 2px solid var(--color-focus); outline
 .standing-card__head h2 { flex: 1; min-width: 0; color: var(--tone-ink); font-size: var(--text-sm); line-height: var(--leading-sm); font-weight: var(--font-weight-bold); }
 .standing-card__dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--tone-marker); }
 .standing-card__part { display: flex; flex-direction: column; gap: var(--space-4); }
-.standing-card__part h3 { color: var(--color-muted); font-family: var(--font-mono); font-size: 10px; line-height: 14px; font-weight: 400; letter-spacing: .12em; text-transform: uppercase; }
+.standing-card__part h3 { color: var(--color-muted); font-family: var(--font-body); font-size: var(--text-xs); line-height: 14px; font-weight: 400; }
 .standing-card__part p, .standing-card__action p { margin: 0; text-wrap: pretty; }
 .standing-card__part ul, .standing-checklist { display: flex; flex-direction: column; gap: var(--space-4); margin: 0; padding-inline-start: var(--space-20); font-variant-numeric: tabular-nums; }
 .standing-card__action { display: flex; align-items: center; gap: var(--space-8); }

@@ -9,13 +9,17 @@
 .page-surface .email-detail > .ui-page-header > .cluster:last-child:not(:first-child) { flex: none; align-items: center; min-height: var(--control-height); }
 .email-detail .ui-page-header__text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .page-surface .email-detail > .ui-page-header h1 { --title-line: 24px; min-width: 0; padding-block: calc((var(--control-height) - var(--title-line)) / 2); line-height: var(--title-line); overflow-wrap: anywhere; }
-/* To · From · stream · date · ID on one line; the sender gives way first, then the recipient. */
-.email-facts { display: flex; align-items: center; min-width: 0; min-height: 24px; color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); white-space: nowrap; }
+/* To on one line; From · stream · date · ID on the next. On that line the ID gives way first, then the sender's address. */
+.email-facts { display: flex; flex-direction: column; min-width: 0; color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); }
+.email-facts__line { display: flex; align-items: center; min-width: 0; min-height: 24px; white-space: nowrap; }
 .email-facts__item { display: inline-flex; flex: none; align-items: center; min-width: 0; }
-.email-facts__item ~ .email-facts__item::before { content: '·'; flex: none; margin-inline: var(--space-8); color: var(--color-faint); }
-.email-facts__item:is(:first-child, .email-facts__from) { flex: 0 1 auto; overflow: clip; }
-.email-facts__from { flex-shrink: 10; }
-.email-facts__label { flex: none; margin-right: var(--space-6); color: var(--color-faint); font-size: var(--text-label); letter-spacing: var(--tracking-label); text-transform: uppercase; }
+.email-facts__item + .email-facts__item::before { content: '·'; flex: none; margin-inline: var(--space-8); color: var(--color-faint); }
+.email-facts__line > .email-facts__item:only-child { flex: 0 1 auto; overflow: clip; }
+.email-facts__from { flex: 0 1 auto; min-width: 0; overflow: clip; }
+.email-facts__id { flex: 0 100000 auto; min-width: 0; }
+.email-facts__id .identifier { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.email-facts__label { flex: none; margin-right: var(--space-6); color: var(--color-muted); font-family: var(--font-body); font-size: var(--text-xs); }
+.email-facts .email-sender .private-address[data-revealed] > .private-address__value, .email-facts .private-address__value { overflow: hidden; white-space: nowrap; overflow-wrap: normal; text-overflow: ellipsis; }
 .email-facts .email-sender { flex-wrap: nowrap; min-width: 0; }
 .email-facts :is(.email-sender > span, .email-sender__address) { min-width: 0; overflow: clip; text-overflow: ellipsis; }
 .email-facts .private-address__value { flex: 0 1 auto; min-width: 0; overflow: clip; }
@@ -108,8 +112,9 @@
 /* The ID's copy button makes its row taller: its label sits level with the ID, not above it. */
 .email-fact-list dt:has(+ .email-fact-list__id) { align-self: center; }
 .email-fact-list__id .identifier { min-width: 0; overflow: hidden; font-size: var(--text-xs); text-overflow: ellipsis; }
-/* A phone: the email from edge to edge. */
+/* A phone: the email from edge to edge, and the status line without the stream (the Details sheet names it). */
 @media (max-width: 640px) {
+  .email-status__stream { display: none; }
   .email-detail .ev-canvas { margin-inline: calc(-1 * var(--bleed, 0px)); }
   .email-detail .ev-canvas :is(.email-frame, .email-source, .email-text) { border-radius: 0; }
   .email-detail .email-frame { box-shadow: 0 -1px var(--color-border-muted), 0 1px var(--color-border-muted); }
@@ -185,6 +190,7 @@
 .ui-cards.logs-table .ui-card__segment + .ui-card__segment::before { content: none; }
 .ui-cards.logs-table .ui-card__line { gap: var(--space-8); }
 .ui-cards.logs-table .log-direction { display: inline-block; width: 22px; }
+.ui-cards.logs-table .ui-card__segment:empty { display: none; }
 .ui-cards.logs-table .ui-card__segment:not(:last-child) { flex: none; }
 .ui-cards.logs-table .ui-card__segment:last-child { flex: 1 1 0; }
 /* Phone: a message's facts are label · value rows, its status sits under the title, and the body and its timeline stack. */
@@ -201,7 +207,7 @@
   .email-detail-grid .ui-tabs { padding-bottom: var(--space-8); }
   .page-surface .message-identifiers { flex-direction: column; align-items: flex-start; gap: var(--space-8); }
   .message-identifiers .identifier { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  .message-identifiers > .cluster { flex-wrap: nowrap; max-width: 100%; }
+  .message-identifiers > .cluster { flex-wrap: nowrap; max-width: 100%; white-space: nowrap; }
 }
 /* Long campaign names truncate, so the filter row keeps one height and Export stays on it. */
 .logs-campaign-chip { display: inline-block; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
@@ -220,13 +226,11 @@
 .thread__time { flex: none; color: var(--color-muted); font-variant-numeric: tabular-nums; }
 .thread__clip { flex: none; color: var(--color-muted); }
 .thread__count { color: var(--color-muted); font-weight: normal; font-variant-numeric: tabular-nums; }
-:is(.thread-line, .thread-rows) .log-direction { flex: none; }
 :is(.thread-line__entry, .thread-rows__row):focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
 .thread-line { display: flex; flex: none; flex-direction: column; gap: var(--space-8); }
 .thread-line__title { display: flex; align-items: center; gap: var(--space-6); min-height: var(--control-height); margin: 0; }
-/* Section titles beside an email: small mono caps over their data, a hairline to the edge. */
-:is(.email-detail, .email-detail-page) :is(.ss__title, .thread-line__title) { display: flex; align-items: center; gap: var(--space-8); color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-label); font-weight: 400; letter-spacing: var(--tracking-label); text-transform: uppercase; }
-:is(.email-detail, .email-detail-page) .thread-line__title::after, .email-detail__delivery > .ss__title::after { content: ''; flex: 1; height: 1px; background: var(--color-border-muted); }
+/* Section titles beside an email: quiet sentence-case labels over their data. */
+:is(.email-detail, .email-detail-page) :is(.ss__title, .thread-line__title) { display: flex; align-items: center; gap: var(--space-8); color: var(--color-muted); font-family: var(--font-body); font-size: var(--text-xs); font-weight: 400; }
 .email-detail .thread__count { color: var(--color-faint); }
 .thread-line__steps { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
 .thread-line__step { position: relative; }
@@ -241,7 +245,6 @@
 .thread-line__status { display: flex; grid-area: status; align-items: center; gap: var(--space-8); min-width: 0; color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-label); line-height: 16px; white-space: nowrap; }
 .thread-line__top { line-height: 20px; }
 .thread-line .thread__time { font-family: var(--font-mono); font-size: var(--text-xs); }
-.thread-line__here { color: var(--color-text); }
 .thread-line__entry[data-focused] { background: var(--color-active-bg); }
 @media (hover: hover) and (pointer: fine) { a.thread-line__entry:hover { background: var(--color-hover); } }
 .email-detail-sheet .thread-line__steps { margin-inline: var(--space-8); }
@@ -255,9 +258,9 @@
 .thread-chip + :is(.ss-chip, .ss-chip-skeleton) { margin-left: 0; }
 .thread-rows { display: flex; flex: none; flex-direction: column; margin: 0 calc(-1 * var(--space-8)) var(--space-12); padding: 0; list-style: none; }
 .thread-rows[data-part='after'] { margin-block: var(--space-12) 0; }
-.thread-rows__row { display: grid; grid-template-columns: 28px minmax(0, 180px) minmax(0, 1fr) auto auto; align-items: center; column-gap: var(--space-12); width: 100%; height: 36px; padding: 0 var(--space-8); border: 0; border-radius: var(--radius-sm); background: none; color: var(--color-text); font: inherit; text-align: left; text-decoration: none; }
+.thread-rows__row { display: grid; grid-template-columns: minmax(0, 180px) minmax(0, 1fr) auto auto; align-items: center; column-gap: var(--space-12); width: 100%; height: 36px; padding: 0 var(--space-8); border: 0; border-radius: var(--radius-sm); background: none; color: var(--color-text); font: inherit; text-align: left; text-decoration: none; }
 .thread-rows__row[data-focused] { background: var(--color-active-bg); }
 .thread-rows__status { min-width: 0; overflow: hidden; color: var(--color-muted); text-overflow: ellipsis; white-space: nowrap; }
-.thread-rows__more { display: flex; padding-left: calc(28px + var(--space-12) + var(--space-8)); color: var(--color-muted); cursor: pointer; }
+.thread-rows__more { display: flex; padding-left: var(--space-8); color: var(--color-muted); cursor: pointer; }
 @media (hover: hover) and (pointer: fine) { .thread-rows__row:is(a, button):hover { background: var(--color-hover); } }
 .log-subject > .log-thread { display: inline-flex; flex: none; align-items: center; gap: 3px; height: 20px; padding: 0 7px 0 6px; overflow: visible; border-radius: 10px; background: var(--color-hover); color: var(--color-muted); font-size: 11px; font-variant-numeric: tabular-nums; line-height: 20px; }

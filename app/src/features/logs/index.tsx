@@ -9,14 +9,14 @@ import { ReceivedEmailPreview } from '../../components/EmailPreview'
 import { date, fileSize, label, time } from '../../lib/format'
 import { downloadCsv } from '../../lib/download'
 import { ReceivedEmailSkeleton } from './skeletons'
-import { isReceivedId, logsPageColumns, logCsvRows, logHref, logRowLabel, useLogRowIntent } from './rows'
+import { isReceivedId, logsViewColumns, logCsvRows, logHref, logRowLabel, useLogRowIntent } from './rows'
 import { useAdaptivePageSize, useSearchDraft } from '../../lib/pagination'
 import { AddressList, PrivateAddress, Sender } from '../../components/PrivateAddress'
 import { EmailDetailPage } from './email-detail'
 import { useScheduledActions } from './scheduled'
 import { ThreadChip, ThreadTimeline, threaded, threadItems, useThreadPrefetch } from './thread'
 import { useMediaQuery } from '../../lib/media'
-import { LogsBody, logStatuses, receivedStatuses, sentStatuses, withStream, type LogFilters } from './facets'
+import { LogsBody, logStatuses, receivedStatuses, withStream, type LogFilters } from './facets'
 import { logRange, logRanges, rangeStart } from './range'
 
 const directions = [{ value: 'all', label: 'All' }, { value: 'sent', label: 'Sent' }, { value: 'received', label: 'Received' }]
@@ -82,8 +82,8 @@ function Logs({ regionId, campaignId }: { regionId: string; campaignId?: string 
   // A new page size (the window resized) starts from the first page; the size settling on mount keeps the URL's page.
   const fitted = useRef<number | null>(null)
   useEffect(() => { if (!measured) return; if (fitted.current !== null && fitted.current !== pageSize) update({ page: null }); fitted.current = pageSize }, [pageSize, measured]) // eslint-disable-line react-hooks/exhaustive-deps
-  // Status and stream follow the direction: a sent status leaves Received, received and spam leave Sent, and streams are sent mail only.
-  const setDirection = (value: LogDirection) => update({ view: value, status: value === 'received' && sentStatuses.includes(status) || value === 'sent' && receivedStatuses.includes(status) ? null : status, stream: value === 'received' ? null : stream })
+  // Status and stream follow the direction: a status the new direction doesn't list leaves, and streams are sent mail only.
+  const setDirection = (value: LogDirection) => update({ view: value, status: logStatuses(value, { campaign: false, canAdminister }).includes(status) ? status : null, stream: value === 'received' ? null : stream })
   const params = { ...(campaignId ? { campaignId } : { regionId }), direction, search: searched, status: status === 'all' ? undefined : status, stream: stream === 'all' ? undefined : stream, from, page, pageSize }
   const query = useApiDef(queries.logs(params), { interval: 30_000, enabled: measured, keepPrevious: true })
   // The filters' counts, for the list's dates under the other filters: read only where the filters are on screen
@@ -114,7 +114,7 @@ function Logs({ regionId, campaignId }: { regionId: string; campaignId?: string 
       <Button className="logs-export" aria-label="Export this page as CSV" title="Download the rows on this page as a CSV file" disabled={!exportable} onClick={() => downloadCsv(campaignId ? `nightmail-${campaignId}-logs-page.csv` : 'nightmail-logs-page.csv', logCsvRows(query.data?.items ?? [], !multiTenant))}><Download size={16} /><span>Export CSV</span></Button>
     </div>
     {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <LogsBody counts={counts.data} filters={filters} blank={blank}>
-      <DataTable<LogEntry> className="logs-table" tableRef={tableRef} loading={query.isPending || (campaignOnly && campaign.isPending)} skeletonRows={pageSize} minRows={pageSize} rows={query.data?.items ?? []} rowKey={row => `${query.isPlaceholderData ? 'previous:' : ''}${row.direction}:${row.id}`} rowHref={logHref} rowLabel={logRowLabel} onRowIntent={rowIntent} columns={scheduled.columns(logsPageColumns)}
+      <DataTable<LogEntry> className="logs-table" tableRef={tableRef} loading={query.isPending || (campaignOnly && campaign.isPending)} skeletonRows={pageSize} minRows={pageSize} rows={query.data?.items ?? []} rowKey={row => `${query.isPlaceholderData ? 'previous:' : ''}${row.direction}:${row.id}`} rowHref={logHref} rowLabel={logRowLabel} onRowIntent={rowIntent} columns={scheduled.columns(logsViewColumns(direction))}
         empty={campaignOnly && campaign.isError && !campaign.data ? <ErrorState error={campaign.error} onRetry={() => campaign.refetch()} />
           // A campaign that hasn't sent says when it will, in its heading.
           : campaignId && campaignOnly && campaign.data && !campaign.data.counts?.total ? <EmptyState title={campaign.data.scheduledAt && Date.parse(campaign.data.scheduledAt) > Date.now() ? `Scheduled for ${date(campaign.data.scheduledAt)} at ${time(campaign.data.scheduledAt)} UTC` : 'Nothing sent from this campaign yet'} action={<Link className="ui-button ui-button--secondary ui-button--md" to={`/campaigns/${encodeURIComponent(campaignId)}/review`}>Back to campaign</Link>} />
@@ -133,8 +133,8 @@ export function LogDetailPage() {
 }
 
 const checkTone = (value?: string) => value === 'PASS' ? 'success' as const : value === 'FAIL' ? 'danger' as const : value === 'GRAY' ? 'warning' as const : 'neutral' as const
-// NONE is a sender without the record to check, not a failure: the badge says so.
-const verdictLabel = (value: string) => value.toUpperCase() === 'NONE' ? 'no record' : label(value.toLowerCase())
+// NONE is a sender without the record to check, not a failure, and GRAY is a check that didn't run: the badge says so.
+const verdictLabel = (value: string) => value.toUpperCase() === 'NONE' ? 'no record' : value.toUpperCase() === 'GRAY' ? 'not checked' : label(value.toLowerCase())
 export function ReceivedEmailDetailPage() {
   const { id = '' } = useParams()
   // Delivery details (envelope, region, verdicts, headers, the raw .eml) are for owners and admins; members read the message.
@@ -166,10 +166,10 @@ function ReceivedEmailDetailView({ email, focus }: { email: ReceivedEmailDetail;
   const recipients = email.envelopeTo?.length ? email.envelopeTo : email.to.map(to => to.address)
   const inboxFor = (address: string) => email.addresses?.find(mailbox => mailbox.address.toLowerCase() === address.toLowerCase())
   const routed = Boolean(email.addresses?.length) && recipients.every(address => inboxFor(address))
-  const chip = thread && stacked && <ThreadChip count={thread.count} onOpen={from => { opener.current = from; setSheet(true) }} />
+  const chip = thread && stacked && <ThreadChip count={thread.count} words onOpen={from => { opener.current = from; setSheet(true) }} />
   return <div className="email-detail-page"><PageHeader title={email.subject || '(no subject)'} backTo="/logs" actions={email.rawUrl || chip ? <>{chip}{email.rawUrl && <a className="ui-button ui-button--secondary ui-button--md" href={email.rawUrl}><Download size={16} />Download .eml</a>}</> : undefined} />
     <dl className="email-metadata"><div><dt>From</dt><dd><Sender name={email.from.name} address={email.from.address} /></dd></div><div><dt>To</dt><dd>{recipients.map((address, index) => <Fragment key={`${index}:${address}`}>{index > 0 && ', '}{inboxFor(address) ? <Link to={`/receiving/inbox?address=${encodeURIComponent(inboxFor(address)!.id)}&thread=${encodeURIComponent(email.threadId)}&message=${encodeURIComponent(email.id)}`}><PrivateAddress value={address} /></Link> : <PrivateAddress value={address} />}</Fragment>)}</dd></div>{email.addresses && !routed && <div><dt>Address</dt><dd>{email.addresses.length ? email.addresses.map((mailbox, index) => <Fragment key={mailbox.id}>{index > 0 && ', '}<Link to={`/receiving/inbox?address=${encodeURIComponent(mailbox.id)}&thread=${encodeURIComponent(email.threadId)}&message=${encodeURIComponent(email.id)}`}><PrivateAddress value={mailbox.address} /></Link></Fragment>) : 'Unrouted'}</dd></div>}</dl>
-    {email.spam && <Alert tone="warning">SES flagged this message as spam or a virus.</Alert>}
+    {email.spam && <Alert tone="warning">Marked as spam or a virus.</Alert>}
     {email.bodyTruncated && <Alert tone="info">Part of this message was too large to store. Download the original for the full content.</Alert>}
     <div className="email-detail-grid"><section><Tabs value={view} onValueChange={setView} items={[{ value: 'preview', label: 'Preview' }, { value: 'plain', label: 'Plain text' }, { value: 'html', label: 'HTML' }, { value: 'headers', label: 'Headers' }]} />
       {view === 'preview' ? hasHtml ? <><ReceivedEmailPreview html={html} tooComplex={email.htmlTooComplex} title="Received message preview" inlineImages={inlineImages} />{email.htmlTooComplex && email.text && <pre className="plain-text-preview">{email.text}</pre>}</> : email.text ? <pre className="plain-text-preview">{email.text}</pre> : <EmptyState title="This message has no body" />

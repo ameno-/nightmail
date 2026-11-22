@@ -62,7 +62,7 @@ function LegalIndex() {
   return <main className="legal-main legal-index">
     <div className="legal-intro">
       <h1>Legal</h1>
-      <p>{productName} is provided by {ENTITY}. These are the terms and policies that apply to it.</p>
+      <p>{productName} is provided by {ENTITY} These are the terms and policies that apply to it.</p>
     </div>
     <ul className="legal-documents">
       {legalLinks.map(([slug]) => { const item = documents[slug]; return <li key={slug}>
@@ -72,11 +72,6 @@ function LegalIndex() {
     <section className="legal-index-section" aria-labelledby="legal-dpa">
       <h2 id="legal-dpa">Data Processing Addendum</h2>
       <p>Available to business customers on request: email <a href={`mailto:${addresses.privacy}`}>{addresses.privacy}</a>.</p>
-    </section>
-    <section className="legal-index-section" aria-labelledby="legal-contact">
-      <h2 id="legal-contact">Contact</h2>
-      <p>{ENTITY}<br />{ADDRESS}</p>
-      <dl className="legal-contacts">{contacts.map(([label, address]) => <div key={address}><dt>{label}</dt><dd><a href={`mailto:${address}`}>{address}</a></dd></div>)}</dl>
     </section>
   </main>
 }
