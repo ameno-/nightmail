@@ -16001,7 +16001,7 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     // settled, or a dispatch between the two reads makes them differ (dev, Nov 17: detail [] and two listed events).
     await poll(`/v1/emails/${source.id}`, reader.secret, body => body.status === 'delivered');
     const detail=ok(await http('GET',`/v1/emails/${source.id}/detail`,reader.secret));
-    assert.deepEqual(detail.contact,{id:contact.id,suppressed:false});
+    assert.deepEqual(detail.contact,{id:contact.id,suppressed:false,suppressedAt:null});
     assert.deepEqual(detail.content,{html:redacted.html,text:redacted.text,attachments:redacted.attachments});
     assert.equal(detail.email.id,source.id); assert.ok(!JSON.stringify(detail).includes(token));
     const listedEvents=page(await http('GET',`/v1/emails/${source.id}/events`,reader.secret)) as {id:string}[];
