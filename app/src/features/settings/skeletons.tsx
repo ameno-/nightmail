@@ -143,7 +143,7 @@ export function WorkspaceFormSkeleton() {
 export function EndpointFieldsSkeleton({ isNew = false, selectedRegions = false }: { isNew?: boolean; selectedRegions?: boolean }) {
   const { multiTenant } = useWorkspaceAccess()
   return <div className="stack">
-    <div className="form-grid"><FieldSkeleton label="Name" /><FieldSkeleton label="Endpoint URL" /></div>
+    <div className="form-grid webhook-fields"><FieldSkeleton label="Name" /><FieldSkeleton label="Endpoint URL" /></div>
     {!multiTenant && <div className="stack settings-region-scope"><div className="ui-field"><span className="ui-field__label">Region scope</span><ControlSkeleton /></div>
     {selectedRegions && <div className="settings-choices"><ControlSkeleton width={135} /><ControlSkeleton width={135} /></div>}</div>}
     <div className="stack"><div>Events</div><div className="settings-choices settings-choices--events">{['Sent', 'Delivered', 'Bounced', 'Complained', 'Rejected', 'Rendering failed', 'Delivery delayed', 'Opened', 'Clicked', 'Contact subscription changed', 'Sending standing changed'].map(event => <div className="ui-check-field" key={event} aria-hidden="true"><Skeleton width={14} height={14} /><span>{event}</span></div>)}</div></div>
@@ -154,7 +154,7 @@ export function EndpointFieldsSkeleton({ isNew = false, selectedRegions = false 
 export function WebhookBodySkeleton({ isNew = false, selectedRegions = false }: { isNew?: boolean; selectedRegions?: boolean }) {
   const { multiTenant } = useWorkspaceAccess()
   return <LoadingRegion label={isNew ? 'Loading webhook form' : 'Loading webhook endpoint'} className="settings-loading-body">
-    {isNew ? <div className="stack"><EndpointFieldsSkeleton isNew /><div className="cluster"><ControlSkeleton width={76} /><ControlSkeleton width={128} /></div></div> : <>
+    {isNew ? <div className="stack"><EndpointFieldsSkeleton isNew /><div className="cluster"><ControlSkeleton width={128} /></div></div> : <>
       <EndpointFieldsSkeleton selectedRegions={selectedRegions} />
       <section className="section stack settings-rule settings-secret"><SectionHeader title={<span className="settings-guide-title">Signing secret<span className="guide-link">Guide</span></span>} actions={<><ControlSkeleton width={76} /><ControlSkeleton width={138} /></>} /></section>
       <section className="section stack settings-rule"><SectionHeader title="Delivery history" /><TableSkeleton columns={deliveryColumns(multiTenant)} rows={2} /></section>

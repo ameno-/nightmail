@@ -172,6 +172,8 @@
 /* A heading with its docs guide beside it, the guide link quiet like the keys page's. */
 .settings-guide-title { display: inline-flex; align-items: baseline; gap: var(--space-12); }
 @media (max-width: 640px) { .settings-secret > .ui-section-header > h2 { flex-basis: 100%; } }
+/* Name and Endpoint URL keep room for one error line (label, control, error and their gaps), so an error moves nothing. */
+.webhook-fields > .ui-field { min-height: calc(var(--control-height) + 48px); }
 .settings-row-actions { justify-content: flex-end; flex-wrap: nowrap; }
 
 .page-surface > .settings-page.stack { gap: var(--space-24); }

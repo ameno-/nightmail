@@ -46,7 +46,7 @@ function EndpointFields({ input, savedUrl, onChange, regions, errors, apiError, 
   // Hosted endpoints leave regionIds out: they cover every region and an update keeps the saved scope.
   const scope = input.regionIds
   return <div className="stack">
-    <div className="form-grid">
+    <div className="form-grid webhook-fields">
       <Field label="Name" htmlFor="endpoint-name" error={errors.name || fieldError(apiError, 'name')}><Input id="endpoint-name" value={input.name} onChange={event => onChange({ ...input, name: event.target.value })} required disabled={disabled} placeholder="Support notifications" /></Field>
       <Field label="Endpoint URL" htmlFor="endpoint-url" error={errors.url || fieldError(apiError, 'url')}><SecretInput id="endpoint-url" type="url" value={input.url} onChange={event => onChange({ ...input, url: event.target.value })} required={!input.id} disabled={disabled} placeholder={savedUrl ?? 'https://support.acme.com/hooks/email'} /></Field>
     </div>
@@ -109,7 +109,7 @@ function NewWebhook() {
     {!multiTenant && regions.isPending ? <WebhookBodySkeleton isNew /> : !multiTenant && regions.error ? <ErrorState error={regions.error} onRetry={() => void regions.refetch()} /> : <form className="stack" onSubmit={submit} noValidate>
       <MutationError error={save.error} />
       <EndpointFields input={input} onChange={setInput} regions={regions.data?.data ?? []} errors={errors} apiError={save.error} disabled={save.isPending} headers={{ current: [], draft: headers, onChange: setHeaders }} />
-      <div className="cluster form-actions"><Button disabled={save.isPending} onClick={() => navigate('/settings#webhooks')}>Cancel</Button><Button variant="primary" type="submit" loading={save.isPending}>Add webhook</Button></div>
+      <div className="cluster form-actions"><Button variant="primary" type="submit" loading={save.isPending}>Add webhook</Button></div>
     </form>}
     <SecretDialog secret={created?.secret ?? null} title="Webhook created · Signing secret" onClose={() => { const id = created?.id; setCreated(null); if (id) navigate(`/settings/webhooks/${id}`, { replace: true }) }}><SigningGuide /></SecretDialog>
   </div>
