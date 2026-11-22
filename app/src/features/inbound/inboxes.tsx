@@ -9,6 +9,7 @@ import type { ApiKey, CreatedInbox, Inbox, InboxInput, InboxMessage, InboxStatus
 import { date, fileSize, number } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
 import { SecretField, when } from './shared'
+import { expiresIn } from './overview'
 import { nameParts } from '../../lib/private-address'
 import '../settings/settings.css'
 import './inbound.css'
@@ -116,7 +117,7 @@ export function AgentInboxesPage() {
           { key: 'address', label: 'Address', width: '26%', render: row => <span className="mailbox-address"><span className="receiving-clip"><PrivateAddress value={row.address} /></span>{row.type === 'sandbox' && <StatusBadge status="Sandbox" tone="neutral" />}</span>, cardRender: row => <PrivateAddress value={row.address} /> },
           { key: 'name', label: 'Name', width: '26%', card: 'line', render: row => row.name ? <span className="inbox-clip" title={row.name}>{row.name}</span> : <span className="muted">—</span>, cardRender: row => [row.name, row.type === 'sandbox' ? 'Sandbox' : null].filter(Boolean).join(' · ') || 'Agent inbox' },
           { key: 'status', label: 'Status', width: '11%', card: 'aside', render: row => <StatusBadge status={statusLabel[row.status]} tone={statusTone[row.status]} /> },
-          { key: 'expires', label: 'Expires', width: '13%', card: 'line', render: row => row.status === 'deleting' ? <span className="muted">Now</span> : row.expiresAt ? date(row.expiresAt) : <span className="muted">Never</span>, cardRender: row => row.status === 'deleting' ? 'Deleting now' : row.expiresAt ? `Expires ${date(row.expiresAt)}` : 'Never expires' },
+          { key: 'expires', label: 'Expires', width: '13%', card: 'line', render: row => row.status === 'deleting' ? <span className="muted">Now</span> : row.expiresAt ? expiresIn(row.expiresAt)!.replace(/^Expires /, '') : <span className="muted">Never</span>, cardRender: row => row.status === 'deleting' ? 'Deleting now' : row.expiresAt ? expiresIn(row.expiresAt) : 'Never expires' },
           { key: 'messages', label: 'Messages', align: 'right', card: 'inline', render: row => number(row.usage.messages), cardRender: row => `${number(row.usage.messages)} ${row.usage.messages === 1 ? 'message' : 'messages'}` },
           { key: 'unread', label: 'Unread', align: 'right', card: 'inline', render: row => row.usage.unread ? <strong>{number(row.usage.unread)}</strong> : <span className="muted">0</span>, cardRender: row => `${number(row.usage.unread)} unread` },
           { key: 'held', label: 'Held', align: 'right', card: 'hide', render: row => row.usage.held ? number(row.usage.held) : <span className="muted">0</span> },
