@@ -17626,12 +17626,12 @@ describe('Required notices', () => {
       await gradedSender(db, wid, 10000);
       await turn(db, wid, 'on');
       const list = ok(await local('POST', '/v1/lists', { name: unique('notice-probe') }), 201);
-      // Contact IDs in the order of n, so the review's order (by contact ID) is too: the probe is customers 1 to 100.
       await db.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_'||$1||lpad(n::text,4,'0'),$1,'customer-'||n||'@example.net','subscribed' FROM generate_series(1,150)n RETURNING id)
         INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM c`, [wid, list.id]);
-      // Ten of the last fifty were delivered to before, by an earlier receipt.
-      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,created_at)
-        SELECT 'email_prior_'||n,$1,$2,'fixture',$3,jsonb_build_array('customer-'||n||'@example.net'),'[]','[]','Receipt','{}',false,'delivered','prior-'||n,now()-interval '20 days' FROM generate_series(141,150) n`, [wid, REGION, from]);
+      // Ten of the last fifty in snapshot send order (hashtextextended(id, 0), id) were delivered to before.
+      await db.query(`WITH tail AS (SELECT email, row_number() OVER () AS n FROM (SELECT email FROM audience_contacts WHERE workspace_id=$1 ORDER BY hashtextextended(id, 0), id OFFSET 140 LIMIT 10) t)
+        INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,created_at)
+        SELECT 'email_prior_'||n,$1,$2,'fixture',$3,jsonb_build_array(email),'[]','[]','Receipt','{}',false,'delivered','prior-'||n,now()-interval '20 days' FROM tail`, [wid, REGION, from]);
       // A quarantined probe and the owner's resume, for a notice and for a marketing campaign to the same list.
       const quarantinedAndResumed = async (body: Json, confirm: Json) => {
         const c = ok(await local('POST', '/v1/campaigns', { from, subject: 'Probe', html: '<p>Fixture.</p>', audience: { listId: list.id }, ...body }), 201), path = `/v1/campaigns/${c.id}`;
@@ -27368,8 +27368,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     // millions does. Every 2,500th contact is subscribed; the first of those is also suppressed.
     const listId=await audience(50_010,2500);
     const contact=(n:number)=>'con_'+createHash('md5').update(w+n).digest('hex');
-    // The audience as it stands before any launch: subscribed, not suppressed, in send order (contact ID).
-    const before=(await g.query("SELECT email FROM audience_contacts WHERE workspace_id=$1 AND marketing_consent='subscribed' AND NOT suppressed ORDER BY id",[w])).rows.map(r=>r.email);
+    // The audience as it stands before any launch: subscribed, not suppressed, in send order (hash of contact ID).
+    const before=(await g.query("SELECT email FROM audience_contacts WHERE workspace_id=$1 AND marketing_consent='subscribed' AND NOT suppressed ORDER BY hashtextextended(id, 0), id",[w])).rows.map(r=>r.email);
     assert.equal(before.length,19);
     const blockedBy=async(pid:number)=>(await g.query('SELECT count(*)::int AS n FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))',[pid])).rows[0].n as number;
     const within=(p:Promise<unknown>,ms:number)=>Promise.race([p,new Promise(r=>setTimeout(r,ms))]);
@@ -32420,8 +32420,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         contacts.push(contact);
       }
       // Seed invalid historical contact data before snapshotting. Recipient order
-      // is by contact ID; keep the first valid so the static-message cache is used.
-      const ordered = (await db.query("SELECT id FROM audience_contacts WHERE workspace_id = $1 ORDER BY id", [runtime.config.workspaceId])).rows;
+      // is by hashtextextended(id, 0), id; keep the first valid so the static-message cache is used.
+      const ordered = (await db.query("SELECT id FROM audience_contacts WHERE workspace_id = $1 ORDER BY hashtextextended(id, 0), id", [runtime.config.workspaceId])).rows;
       const invalidContactId = ordered[1].id;
       const invalidAddress = `${'a'.repeat(250)}@example.com`;
       assert.equal((await db.query("UPDATE audience_contacts SET email = $1 WHERE workspace_id = $2 AND id = $3", [invalidAddress, runtime.config.workspaceId, invalidContactId])).rowCount, 1);
