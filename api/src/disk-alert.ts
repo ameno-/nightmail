@@ -33,22 +33,23 @@ const authorized = (config: Config, header: string | undefined) => !!header && h
 /** X-PlanetScale-Signature: the hex HMAC-SHA256 of the exact body, keyed with the webhook's secret. */
 const signed = (secret: string, body: string, header: string | undefined) => !!header && same(header.toLowerCase(), createHmac('sha256', secret).update(body).digest('hex'));
 
-const slug = (value: unknown) => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(value) ? value : null;
+// The button opens this address and no other: nothing in an event shapes a link.
+const PLANETSCALE = 'https://app.planetscale.com';
+// A branch is named in the card only as letters, digits, dashes and underscores (no dot: Slack links what reads like a
+// domain). Any other name is left out.
+const slug = (value: unknown) => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/.test(value) ? value : null;
 /**
  * The card for an event, and the limiter key it posts under: the threshold it crossed. Null for an event that posts
- * nothing. A test delivery posts a card too, so the webhook can be checked without filling a disk.
+ * nothing. A test delivery posts a card too, so the webhook can be checked without filling a disk. From the event the
+ * card takes a whole percent and, as text, the branch's name.
  */
 export function diskAlertCard(event: Record<string, unknown>) {
-  if (event.event !== 'cluster.storage' && event.event !== 'webhook.test') return null;
-  const organization = slug(event.organization), database = slug(event.database);
-  const invalid = () => new ApiError(400, 'EVENT_INVALID', 'Expected a PlanetScale cluster.storage event.');
-  if (!organization || !database) throw invalid();
-  const page = `https://app.planetscale.com/${organization}/${database}`;
-  if (event.event === 'webhook.test') return { key: 'test', card: slackCard(CARD, 'Test from PlanetScale.', page) };
+  if (event.event === 'webhook.test') return { key: 'test', card: slackCard(CARD, 'Test from PlanetScale.', PLANETSCALE) };
+  if (event.event !== 'cluster.storage') return null;
   const resource = (event.resource ?? {}) as Record<string, unknown>, branch = slug(resource.branch_name), percent = resource.storage_percentage;
-  if (!branch || typeof percent !== 'number' || !(percent >= 0 && percent <= 100)) throw invalid();
+  if (typeof percent !== 'number' || !(percent >= 0 && percent <= 100)) throw new ApiError(400, 'EVENT_INVALID', 'Expected a PlanetScale cluster.storage event.');
   const full = Math.floor(percent);
-  return { key: String(THRESHOLDS.find(threshold => full >= threshold) ?? 0), branch, full, card: slackCard(CARD, `${cardName(branch)}, ${full}% full.`, `${page}/${branch}`) };
+  return { key: String(THRESHOLDS.find(threshold => full >= threshold) ?? 0), branch, full, card: slackCard(CARD, `${branch ? `${cardName(branch)}, ` : ''}${full}% full.`, PLANETSCALE) };
 }
 
 // One card a minute per threshold (seven keys in all): a delivery repeated within the minute posts once, the next
@@ -79,7 +80,7 @@ export function registerDiskAlert(app: App) {
     if (!url) throw new ApiError(503, 'OPERATOR_ALERTS_OFF', 'OPERATOR_SLACK_WEBHOOK_URL is not set.', undefined, true);
     if (!await allow(c.env, alert.key)) return c.body(null, 204);
     const requestId = c.get('requestId');
-    if (alert.branch) log('warn', { requestId, code: 'DATABASE_DISK_ALERT', branch: alert.branch, percent: alert.full });
+    if (alert.full !== undefined) log('warn', { requestId, code: 'DATABASE_DISK_ALERT', branch: alert.branch ?? undefined, percent: alert.full });
     // PlanetScale waits two seconds for the answer and asks for it before the work, so on Workers the card is posted
     // after the response. One retry; a card Slack refuses twice is logged, and nothing delivers it later.
     const post = async () => {
