@@ -1,6 +1,6 @@
 import type { Plugin } from 'vite'
 import { productName } from '../api/src/brand.ts'
-import { COMPETITOR_BRAND, PRICE_PAGES_LIVE } from './src/features/pricing/live.ts'
+import { PRICE_PAGES_LIVE } from './src/features/pricing/live.ts'
 import { PRICE_PAGES } from './src/features/pricing/pages.ts'
 
 // pricing.html, compare/mailchimp.html and compare/resend.html: index.html with each price page's own title, description
@@ -13,12 +13,6 @@ export function pricePages(): Plugin {
   return {
     name: 'nightmail:price-pages', apply: 'build', enforce: 'post',
     generateBundle: { order: 'post', handler(_options, bundle) {
-      // While COMPETITOR_BRAND is off, a competitor's logo is not in the build: the module that shows it
-      // (src/features/pricing/brand) is never loaded then, and it and its files are left out.
-      if (!COMPETITOR_BRAND) for (const [name, file] of Object.entries(bundle)) {
-        const sources = file.type === 'chunk' ? Object.keys(file.modules) : file.originalFileNames
-        if (sources.length && sources.every(source => source.includes('src/features/pricing/brand/'))) delete bundle[name]
-      }
       const index = bundle['index.html']
       if (index?.type !== 'asset') return this.error('The price pages are made from index.html, and the bundle has none.')
       const source = String(index.source)

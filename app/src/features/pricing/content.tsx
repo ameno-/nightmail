@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
 import { ArrowRight, ArrowUpRight } from 'lucide-react'
 import { Disclosure } from '../../components/ui'
-import { billMath, CHECKED, comparisons, count, dayOf, formatCount, money, nightmail, nightmailBill, OFFERS, quote, ses, sesBill, sesPerThousand, yearlyFloor, type Comparison, type Offer, type Quote, type Source, type Usage } from './prices'
+import { billMath, CHECKED, comparisons, count, dayOf, formatCount, money, nightmail, nightmailBill, OFFERS, quote, yearlyFloor, type Comparison, type Offer, type Quote, type Source, type Usage } from './prices'
 
 // The price pages' content (index.tsx frames it). Every Nightmail figure is computed from the billing code's rates and
 // carries the usage it prices (data-nightmail-sent and -received), which api/scripts/check-premerge.ts reads back.
@@ -87,18 +87,12 @@ export function Calculator() {
         <Disclosure className="price-small" headingAs="h3" title="Small print"><Terms floor={floor} /></Disclosure>
       </section>
     </div>
-    <section className="price-section" aria-labelledby="price-others">
+    {/* (Nothing to compare at a size no vendor's page prices.) */}
+    {offers.length > 0 && <section className="price-section" aria-labelledby="price-others">
       <h2 id="price-others">Others at this size</h2>
-      <ul className="price-rows">
-        {offers.map(({ offer, q }) => <OfferRow key={offer.id} offer={offer} q={q} />)}
-        <li className="price-row" data-offer="ses">
-          <span className="price-row__name">{ses.name}<span className="price-row__plan">{ses.plan}</span></span>
-          <span className="price-row__price">{sesBill(usage)}</span>
-          <span className="price-row__meta">({formatCount(usage.sent)} + {formatCount(usage.received)}) × {sesPerThousand(ses.ucPerEmail)} per 1,000, plus attachment and large-message charges. <Checked source={ses.sentSource} /></span>
-        </li>
-      </ul>
+      <ul className="price-rows">{offers.map(({ offer, q }) => <OfferRow key={offer.id} offer={offer} q={q} />)}</ul>
       <p className="price-note">Monthly billing, list prices before tax, no promotions. Each vendor’s cheapest plan that holds your numbers.</p>
-    </section>
+    </section>}
   </>
 }
 

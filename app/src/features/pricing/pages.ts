@@ -8,7 +8,7 @@ const sizes = (id: keyof typeof comparisons, of: 'contacts' | 'sent') => list(co
  *  api/src/server.ts) and its title and description: the browser tab, search results and link previews. */
 export const PRICE_PAGES = [
   { path: '/pricing', file: 'pricing.html', title: 'Price calculator',
-    description: `What your email costs on Nightmail, beside Mailchimp, Resend and Amazon SES. ${nightmail.perThousand} per 1,000 emails; contacts and teammates are free.` },
+    description: `What your email costs on Nightmail, beside Mailchimp and Resend. ${nightmail.perThousand} per 1,000 emails; contacts and teammates are free.` },
   { path: '/compare/mailchimp', file: 'compare/mailchimp.html', title: 'Nightmail vs Mailchimp',
     description: `Mailchimp prices by contacts, Nightmail by email. Monthly prices at ${sizes('mailchimp', 'contacts')} contacts, checked ${dayOf(CHECKED)}.` },
   { path: '/compare/resend', file: 'compare/resend.html', title: 'Nightmail vs Resend',

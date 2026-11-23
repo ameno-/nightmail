@@ -232,23 +232,12 @@ function payg(offer: Offer, size: number, price: number) {
   return found
 }
 
-// ---------------------------------------------------------------- Amazon SES, priced per email
-
-const SES = 'https://aws.amazon.com/ses/pricing/'
-export const ses = {
-  vendor: 'Amazon SES', name: 'Amazon SES', plan: 'Pay as you go', pricing: SES,
-  /** $0.10 per 1,000 sent and per 1,000 received, in micro-cents per email. */
-  ucPerEmail: 10_000n,
-  sentSource: read(SES, 'Outbound email $0.10 / 1,000 emails | $0.12 per GB of attachment data sent'),
-  receivedSource: read(SES, 'Inbound email $0.10 / 1,000 emails | $0.09 for every 1,000 incoming email chunks'),
-}
-export const sesPerThousand = (uc: bigint) => `$${perThousandUsd(uc)}`
-export const sesBill = (u: Usage) => price(BigInt(u.sent + u.received) * ses.ucPerEmail)
-
 // ---------------------------------------------------------------- the pages' comparisons and disclosures
 
-/** short: the same claim in a few words, for a list that is scanned (mailchimp.tsx). */
-export type Fact = { text: string; short?: string; source: Source }
+/** short: the same claim in a few words, for a list that is scanned; note: what stands behind it, in a line (mailchimp.tsx). */
+export type Fact = { text: string; short?: string; note?: string; source: Source }
+/** A claim about Nightmail and the competitor's own page for the other half of it: text is the two sentences together. */
+const fact = (short: string, ours: string, note: string, source: Source): Fact => ({ short, note, text: `${ours} ${note}`, source })
 export type Comparison = {
   offer: Offer
   /** The three sizes, as the product map sets them. */
@@ -256,7 +245,9 @@ export type Comparison = {
   usage: string
   lead: string
   /** What Nightmail has that the competitor charges for or lacks, each with the competitor's page where it says so. */
-  ours: (Fact | { text: string; short?: string; source?: undefined })[]
+  ours: (Fact | { text: string; short?: string; note?: string; source?: undefined })[]
+  /** The same in one clause, after "Nightmail has". */
+  summary?: string
 }
 /** The Mailchimp comparison's use of a list: this many emails a month to every contact, this many teammates. */
 export const MAILCHIMP_USE = { sendsPerContact: 4, seats: 3 }
@@ -267,11 +258,12 @@ export const comparisons: Record<'mailchimp' | 'resend', Comparison> = {
     sizes: [5_000, 25_000, 100_000].map(mailchimpSize),
     usage: 'Four campaigns a month to the whole list, 3 teammates, nothing received.',
     lead: 'Mailchimp prices by contacts. Nightmail prices by email.',
+    summary: 'contacts and teammates at no charge, a role that edits but can’t send, and receiving email',
     ours: [
-      { short: 'Contacts at no charge', text: 'No charge for contacts. Mailchimp counts unsubscribed contacts too, at the month’s highest number.', source: read('https://mailchimp.com/help/about-mailchimp-pricing-plans/', '"Subscribed, unsubscribed, and non-subscribed contacts are included in your contact count." … "If your contact total increases beyond your contact limit at any time during your monthly billing cycle, we won’t interrupt your service. Instead, you’ll see an additional charge on your bill."') },
-      { short: 'Teammates at no charge', text: `No charge for teammates. Mailchimp Essentials includes ${mailchimp.plans[1]!.seats!.count} seats and Standard ${mailchimp.plans[2]!.seats!.count}.`, source: mailchimpSeats(3).source },
-      { short: 'A role that edits but can’t send', text: 'Every workspace has a role that edits campaigns but can’t send them. Mailchimp’s starts on Standard.', source: read('https://mailchimp.com/help/manage-user-levels-in-your-account/', 'Author "can create, edit, and delete emails and templates, and view reports" … Role-based Access: 5 Roles, 4 Roles, 2 Roles, Not included (Premium, Standard, Essentials, Free)') },
-      { short: 'Receiving email', text: `Receiving email, at ${nightmail.perThousand} per 1,000 after ${formatCount(nightmail.freeReceived)} free.` },
+      fact('Contacts at no charge', 'No charge for contacts.', 'Mailchimp counts unsubscribed contacts too, at the month’s highest number.', read('https://mailchimp.com/help/about-mailchimp-pricing-plans/', '"Subscribed, unsubscribed, and non-subscribed contacts are included in your contact count." … "If your contact total increases beyond your contact limit at any time during your monthly billing cycle, we won’t interrupt your service. Instead, you’ll see an additional charge on your bill."')),
+      fact('Teammates at no charge', 'No charge for teammates.', `Mailchimp Essentials includes ${mailchimp.plans[1]!.seats!.count} seats and Standard ${mailchimp.plans[2]!.seats!.count}.`, mailchimpSeats(3).source),
+      fact('A role that edits but can’t send', 'Every workspace has a role that edits campaigns but can’t send them.', 'Mailchimp’s starts on Standard.', read('https://mailchimp.com/help/manage-user-levels-in-your-account/', 'Author "can create, edit, and delete emails and templates, and view reports" … Role-based Access: 5 Roles, 4 Roles, 2 Roles, Not included (Premium, Standard, Essentials, Free)')),
+      { short: 'Receiving email', note: `${nightmail.perThousand} per 1,000 after ${formatCount(nightmail.freeReceived)} free.`, text: `Receiving email, at ${nightmail.perThousand} per 1,000 after ${formatCount(nightmail.freeReceived)} free.` },
     ],
   },
   resend: {

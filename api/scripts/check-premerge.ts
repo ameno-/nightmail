@@ -298,10 +298,11 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
     'const at = (path, element) => renderToStaticMarkup(h(MemoryRouter, { initialEntries: [path] }, element))',
     `const calculator = ${JSON.stringify(inputs)}.map(input => { const path = '/pricing?' + new URLSearchParams(input); return { input, path, html: at(path, h(content.Calculator)) } })`,
     "const compare = ['resend'].map(id => ({ id, html: at('/compare/' + id, h(content.Compare, { comparison: prices.comparisons[id] })) }))",
-    // The Mailchimp page is a chart of its own (mailchimp.tsx).
-    "const chart = [{ id: 'mailchimp', sizes: prices.comparisons.mailchimp.sizes.length, html: at('/compare/mailchimp', h((await import('./src/features/pricing/mailchimp.tsx')).MailchimpComparison)) }]",
-    'const { OFFERS, comparisons, ses, resendOverage, resendReceived } = prices',
-    "process.stdout.write(JSON.stringify({ calculator, compare, chart, data: { OFFERS, comparisons, ses, resendOverage, resendReceived } }, (_k, v) => typeof v === 'bigint' ? String(v) : v))",
+    // The Mailchimp page is a chart of its own (mailchimp.tsx), and three compositions of it wait for a choice (mailchimp-takes.tsx).
+    "const sizes = prices.comparisons.mailchimp.sizes.length, takes = await import('./src/features/pricing/mailchimp-takes.tsx')",
+    "const chart = [{ id: 'mailchimp', sizes, html: at('/compare/mailchimp', h((await import('./src/features/pricing/mailchimp.tsx')).MailchimpComparison)) }, ...['1', '2', '3'].map(take => ({ id: 'mailchimp (take ' + take + ')', sizes, html: at('/compare/mailchimp?take=' + take, h(takes.MailchimpTake, { take })) }))]",
+    'const { OFFERS, comparisons, resendOverage, resendReceived } = prices',
+    "process.stdout.write(JSON.stringify({ calculator, compare, chart, data: { OFFERS, comparisons, resendOverage, resendReceived } }, (_k, v) => typeof v === 'bigint' ? String(v) : v))",
   ].join('\n')
   type Rendered = { calculator: { input: Record<string, string>; path: string; html: string }[]; compare: { id: string; html: string }[]; chart: { id: string; sizes: number; html: string }[]; data: unknown }
   let out: Rendered | null = null
@@ -375,13 +376,13 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
     for (const { id, sizes, html } of out.chart) {
       const page = text(html), where = `Nightmail vs ${id}`, found = figures(html)
       checkFigures(where, html, sizes)
-      if (found.length !== sizes) fail('Price pages', `${where} shows ${found.length} sizes, not the ${sizes} it compares: every size must be one the vendor's page prices (prices.ts).`, file)
+      if (new Set(found.map(f => f.sent)).size !== sizes) fail('Price pages', `${where} shows ${new Set(found.map(f => f.sent)).size} sizes, not the ${sizes} it compares: every size must be one the vendor's page prices (prices.ts).`, file)
       for (const f of found) if (!page.includes(`${n(f.sent)} emails a month`) || f.received) fail('Price pages', `${where} prices ${n(f.sent)} sent and ${n(f.received)} received without saying so beside the figure.`, file)
       for (const term of terms.slice(2)) if (!page.includes(term)) fail('Price pages', `${where} doesn't say “${term}”, as src/billing/rates.ts has it.`, file)
       if (/Not (published|checked)|\bNaN\b|undefined/.test(page)) fail('Price pages', `${where} has a size without a verified competitor price: compare only at sizes the data has.`, file)
       if (!dated.test(html)) fail('Price pages', `${where} doesn't give the day its prices were checked and a link to the vendor's page.`, file)
     }
-    if (failed === before) console.log(`Price pages: ${out.calculator.length} calculator inputs and ${out.compare.length + out.chart.length} comparisons match src/billing/rates.ts; ${sources.length} competitor sources have a link, a day and a quote.`)
+    if (failed === before) console.log(`Price pages: ${out.calculator.length} calculator inputs and ${out.compare.length + out.chart.length} renderings of the comparisons match src/billing/rates.ts; ${sources.length} competitor sources have a link, a day and a quote.`)
   }
 }
 

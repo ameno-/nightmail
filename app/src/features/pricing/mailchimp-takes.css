@@ -1,0 +1,113 @@
+/* Three compositions of the Mailchimp page (mailchimp-takes.tsx: ?take=1, 2 and 3), until one is chosen. Headings and
+   words in Inter, as the homepage sets them; figures in a picture in the data font. One moment of colour, the picture:
+   Mailchimp in the data palette's teal, Nightmail in the data navy, flat and square. (The teal is the series colour
+   eased toward the page, 70%: at full strength a fill this large shouts, most of all on the dark theme.) */
+.tk { --tk-theirs: color-mix(in oklab, var(--color-series-received) 70%, var(--color-surface)); --tk-ours: var(--color-accent-data); }
+.tk-title { max-width: 15em; font-family: var(--font-body); font-size: clamp(34px, 2vw + 23px, 52px); font-weight: 600; font-variation-settings: 'opsz' 32; line-height: 1.06; letter-spacing: -.03em; text-wrap: balance; }
+.tk-lede { max-width: 24em; color: var(--color-muted); font-size: 18px; line-height: 1.5; letter-spacing: -.008em; font-variant-numeric: normal; text-wrap: pretty; }
+.tk-key { display: inline-block; flex: none; width: 10px; height: 10px; margin-inline-end: var(--space-8); background: var(--tk-theirs); }
+.tk-key--ours { background: var(--tk-ours); }
+.tk .ui-button--primary { height: 44px; padding-inline: var(--space-20); font-size: 15px; }
+.tk .price-note { margin-top: var(--space-20); }
+.tk :is(.tk1-sizes, .tk2-size, .tk3-size) br { display: none; }
+/* What Nightmail has, as a sentence, beside the way into the calculator; the small print's rule closes it. */
+.tk-band { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-24) var(--space-40); margin-top: 64px; padding-top: var(--space-32); border-top: 1px solid var(--color-border-muted); }
+.tk-has { max-width: 27em; font-size: 22px; line-height: 1.4; letter-spacing: -.014em; font-variant-numeric: normal; text-wrap: pretty; }
+.tk-has strong { font-weight: 600; }
+.tk .price-small { margin-top: var(--space-32); }
+
+/* 1. The number as the hero: two prices on one scale, each over its bar, and the sizes to choose from beneath. */
+.tk1-title { max-width: 24em; font-family: var(--font-body); font-size: clamp(22px, .7vw + 19px, 30px); font-weight: 600; font-variation-settings: 'opsz' 32; line-height: 1.2; letter-spacing: -.02em; text-wrap: balance; }
+.tk1-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-40); margin-top: 56px; }
+.tk1-name { display: flex; align-items: center; font-size: 17px; font-weight: 600; line-height: var(--leading-lg); }
+.tk1-name small { margin-inline-start: var(--space-8); color: var(--color-muted); font-size: 15px; font-weight: var(--font-weight-regular); }
+.tk1-figure { display: flex; align-items: baseline; gap: var(--space-12); margin-top: var(--space-4); font-size: clamp(64px, 10vw, 144px); font-weight: 600; font-variation-settings: 'opsz' 32; font-variant-numeric: normal; line-height: 1.05; letter-spacing: -.05em; white-space: nowrap; }
+.tk1-figure small { color: var(--color-muted); font-size: 18px; font-weight: var(--font-weight-regular); letter-spacing: 0; }
+.tk1-bar { display: block; height: 16px; margin-top: var(--space-20); background: var(--tk-theirs); }
+.tk1-bar--ours { background: var(--tk-ours); transform: scaleX(var(--share)); transform-origin: left center; transition: transform 260ms var(--ease-swap); }
+.tk1-sizes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-8); margin-top: 48px; }
+.tk1-sizes button { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 0 var(--space-16); padding: var(--space-12) var(--space-16); border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--color-muted); font: inherit; font-size: var(--text-md); line-height: var(--leading-sm); text-align: start; cursor: pointer; transition: background-color var(--motion-duration), color var(--motion-duration); }
+.tk1-sizes button > strong { grid-column: 1; font-size: 15px; font-weight: 600; }
+.tk1-sizes button > span { grid-column: 1; font-variant-numeric: normal; }
+.tk1-sizes .tk1-sizes__pair { grid-column: 2; grid-row: 1 / span 2; display: flex; align-items: center; gap: var(--space-8); font-family: var(--font-mono); font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.tk1-sizes__pair i { color: var(--color-faint); font-family: var(--font-body); font-style: normal; font-weight: var(--font-weight-regular); }
+@media (hover: hover) and (pointer: fine) { .tk1-sizes button:hover { background: var(--color-hover); } }
+.tk1-sizes button[aria-pressed='true'] { background: var(--color-active-bg); color: var(--color-text); }
+.tk1-sizes button:focus-visible { outline: var(--focus-width) solid var(--color-focus); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { .tk1-bar--ours { transition: none; } }
+
+/* 2. Three panels, each its own scale: Mailchimp's column is the plot's height, Nightmail's its share of that. */
+.tk2-legend { display: none; }
+.tk2-panels { --plot: 176px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-24); margin: 48px 0 0; padding: 0; list-style: none; }
+.tk2-panels > li { padding: var(--space-24); border: 1px solid var(--color-border); border-radius: var(--radius-lg); }
+.tk2-size { display: flex; flex-direction: column; line-height: var(--leading-sm); }
+.tk2-size strong { font-size: 18px; font-weight: 600; line-height: var(--leading-lg); letter-spacing: -.01em; }
+.tk2-size span { color: var(--color-muted); font-size: var(--text-md); font-variant-numeric: normal; }
+.tk2-cols { display: flex; align-items: flex-end; gap: var(--space-12); height: calc(var(--plot) + 104px); }
+.tk2-cols p { display: flex; flex: 1; flex-direction: column; align-items: center; min-width: 0; white-space: nowrap; }
+.tk2-cols b { font-family: var(--font-mono); font-size: 20px; font-weight: 700; line-height: 28px; }
+.tk2-cols small { color: var(--color-muted); font-size: var(--text-sm); line-height: var(--leading-xs); }
+.tk2-cols i { width: 100%; height: var(--plot); margin-block: var(--space-8); background: var(--tk-theirs); }
+.tk2-cols__ours i { height: max(2px, calc(var(--plot) * var(--share))); background: var(--tk-ours); }
+.tk2-cols p > span { font-size: var(--text-md); line-height: var(--leading-sm); }
+
+/* 3. Words beside bars: a size to a group, Mailchimp's bar the whole track and Nightmail's its share, prices at the ends. */
+.tk3-hero { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); grid-template-rows: auto auto 1fr; align-items: start; gap: 0 64px; }
+.tk3-hero > :is(.tk-title, .tk-lede, .ui-button) { grid-column: 1; }
+.tk3-hero .tk-lede { margin-top: var(--space-20); }
+.tk3-hero .ui-button { justify-self: start; margin-top: var(--space-32); }
+.tk3-chart { grid-column: 2; grid-row: 1 / span 3; padding-top: var(--space-6); }
+.tk3-groups { display: grid; gap: var(--space-28); margin: 0; padding: 0; list-style: none; }
+.tk3-size { display: flex; align-items: baseline; gap: var(--space-8); margin-bottom: var(--space-8); line-height: var(--leading-lg); }
+.tk3-size strong { font-size: 17px; font-weight: 600; letter-spacing: -.01em; }
+.tk3-size span { color: var(--color-muted); font-size: var(--text-md); font-variant-numeric: normal; }
+.tk3-bar { --share: 1; --name: 84px; --end: 140px; display: flex; align-items: center; gap: var(--space-8); height: 28px; white-space: nowrap; }
+.tk3-bar + .tk3-bar { margin-top: var(--space-6); }
+.tk3-bar > span { flex: none; width: calc(var(--name) - var(--space-8)); color: var(--color-muted); font-size: var(--text-md); }
+.tk3-bar i { flex: none; width: max(2px, calc((100% - var(--name) - var(--end)) * var(--share))); height: 100%; background: var(--tk-theirs); }
+.tk3-bar--ours i { background: var(--tk-ours); }
+.tk3-bar b { margin-inline-start: var(--space-4); font-family: var(--font-mono); font-size: 18px; font-weight: 700; }
+.tk3-bar small { color: var(--color-muted); font-size: var(--text-sm); }
+.tk3-has { margin-top: 72px; padding-top: var(--space-32); border-top: 1px solid var(--color-border-muted); }
+.tk3-has h2 { font-family: var(--font-body); font-size: 22px; font-weight: 600; font-variation-settings: 'opsz' 32; line-height: 1.3; letter-spacing: -.016em; }
+.tk3-has ul { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-24) 64px; margin: var(--space-20) 0 0; padding: 0; list-style: none; }
+.tk3-has li { display: flex; flex-direction: column; gap: var(--space-4); max-width: 26em; font-variant-numeric: normal; }
+.tk3-has strong { font-size: 17px; font-weight: 600; line-height: var(--leading-lg); letter-spacing: -.008em; }
+.tk3-has span { color: var(--color-muted); font-size: 15px; line-height: 1.5; text-wrap: pretty; }
+
+@media (max-width: 900px) {
+  .tk-band { grid-template-columns: minmax(0, 1fr); margin-top: 48px; }
+  .tk1-pair { gap: var(--space-24); margin-top: var(--space-40); }
+  .tk1-sizes { grid-template-columns: minmax(0, 1fr); gap: var(--space-4); margin-top: var(--space-32); }
+  .tk2-panels { gap: var(--space-12); margin-top: var(--space-32); }
+  .tk2-panels > li { padding: var(--space-16); }
+  /* One column: the title, the lede, the bars and their note, then the button. */
+  .tk3-hero { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; }
+  .tk3-chart { grid-column: 1; grid-row: auto; margin-top: var(--space-32); padding-top: 0; }
+  .tk3-has { margin-top: 56px; }
+}
+@media (max-width: 640px) {
+  .tk-has { font-size: 19px; }
+  .tk-band .ui-button, .tk3-hero .ui-button { justify-self: stretch; }
+  .tk1-figure { flex-direction: column; gap: 0; }
+  .tk1-figure small { font-size: 15px; line-height: var(--leading-sm); }
+  .tk1-name small { display: none; }
+  .tk1-bar { height: 12px; margin-top: var(--space-12); }
+  /* Three narrow panels side by side: the names go to one key over them, and each caption breaks after its number. */
+  .tk2-legend { display: flex; gap: var(--space-16); margin-top: var(--space-20); color: var(--color-muted); font-size: var(--text-sm); line-height: var(--leading-sm); }
+  .tk2-legend span { display: inline-flex; align-items: center; }
+  .tk2-panels { --plot: 150px; gap: var(--space-8); margin-top: var(--space-12); }
+  .tk2-panels > li { padding: var(--space-12) var(--space-8) var(--space-8); }
+  .tk2-size { align-items: center; text-align: center; }
+  .tk2-size strong { font-size: var(--text-md); line-height: var(--leading-sm); }
+  .tk2-size span { font-size: var(--text-xs); line-height: var(--leading-xs); }
+  .tk .tk2-size br { display: inline; }
+  .tk2-cols { gap: var(--space-6); height: calc(var(--plot) + 56px); }
+  .tk2-cols b { font-size: 12px; line-height: 16px; }
+  .tk2-cols small { font-size: 11px; }
+  .tk2-cols i { margin-block: var(--space-4) 0; }
+  .tk2-cols p > span { display: none; }
+  .tk3-bar { --name: 76px; --end: 132px; }
+  .tk3-bar b { font-size: 15px; }
+  .tk3-has ul { grid-template-columns: minmax(0, 1fr); gap: var(--space-20); }
+}
