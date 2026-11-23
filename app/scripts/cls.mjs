@@ -577,6 +577,8 @@ async function measure(browser, job, fx) {
       // Templates → Edit, after the measurement: Reply to keeps two typed addresses apart, and Back with an edit autosave
       // hasn't sent asks first, then Save and leave saves it (templates.tsx's leave guard).
       const replyTo = ['billing@example.invalid', 'ops@example.invalid'], subject = `Leave check ${Date.now()}`;
+      // Once the editor has loaded: before, Save and leave has nothing to save with and stays.
+      await page.locator('.composer-canvas:not(:has(.composer-starting))').waitFor({ timeout: 30_000 }).catch(() => problems.push('the template editor never finished loading'));
       await page.fill('#template-reply', '');
       await page.locator('#template-reply').pressSequentially(replyTo.join(', '));
       const typed = await page.inputValue('#template-reply');
