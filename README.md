@@ -1,7 +1,7 @@
 <h1>
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="app/public/brand/nightmail-lockup-reversed.svg">
-    <img src="app/public/brand/nightmail-lockup.svg" alt="nightmail" height="22">
+    <source media="(prefers-color-scheme: dark)" srcset="app/public/brand/nightmail-lockup-256-dark.svg">
+    <img src="app/public/brand/nightmail-lockup-256-light.svg" alt="nightmail" height="32">
   </picture>
 </h1>
 
