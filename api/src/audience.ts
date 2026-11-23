@@ -166,7 +166,7 @@ function priorityRankSql(priority: z.infer<typeof AudienceSpec>['priority'], pro
   return sql`(CASE ${propsCol} ->> ${priority.property} ${sql.join(branches, sql` `)} ELSE ${priority.values.length + 1} END)::smallint`;
 }
 function recipientJsonSql(propertyKeys: string[], idCol: SQL, emailCol: SQL, nameCol: SQL, propsCol: SQL): SQL {
-  const customKeys = [...new Set(propertyKeys.filter(k => k !== 'name'))];
+  const customKeys = [...new Set(propertyKeys)];
   const propsExpr = customKeys.length
     ? sql.join(customKeys.map(k => sql`(CASE WHEN ${propsCol} ? ${k} THEN jsonb_build_object(${k}::text, ${propsCol} -> ${k}) ELSE '{}'::jsonb END)`), sql` || `)
     : sql`'{}'::jsonb`;
