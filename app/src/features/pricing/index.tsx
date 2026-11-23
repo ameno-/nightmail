@@ -28,8 +28,9 @@ const fontsReady = Promise.race([
 const pageLinks = (label: (page: (typeof PRICE_PAGES)[number]) => string) => PRICE_PAGES.map(page => <NavLink key={page.path} to={page.path} end>{label(page)}</NavLink>)
 
 /** A price page's frame. The calculator has a bar along the top: the wordmark, the price pages and the theme. A
- *  comparison is a `scene` that runs to the window's top edge: the wordmark is a quiet link in its corner, and the price
- *  pages and the theme are in the footer, with a link past the corner to the comparison for a keyboard. */
+ *  comparison is a `scene` that runs to the window's top edge, the same in either theme: the wordmark is a quiet link
+ *  in its corner, with a link past it to the comparison for a keyboard, and its `end` is its own footer (board.tsx,
+ *  BoardEnd), the homepage's. */
 function PriceFrame({ title, children, variant, end, scene }: { title: string; children: ReactNode; variant?: string; end?: ReactNode; scene?: boolean }) {
   use(fontsReady)
   useEffect(() => { document.title = `${title} · ${productName.toLowerCase()}` }, [title])
@@ -46,11 +47,9 @@ function PriceFrame({ title, children, variant, end, scene }: { title: string; c
       <ThemeToggle />
     </header>}
     <main className="price-main" id="price-main" tabIndex={-1}>{children}</main>
-    <footer className="price-footer">
-      {scene && <div className="price-footer__nav"><nav aria-label="Price pages">{pageLinks(page => page.path === '/pricing' ? 'Price calculator' : page.title)}</nav><ThemeToggle /></div>}
+    {scene ? end : <footer className="price-footer">
       <p>Product names belong to their owners and only identify their products. {productName} isn’t affiliated with them.</p>
-    </footer>
-    {end}
+    </footer>}
   </div>
 }
 
@@ -65,7 +64,7 @@ export function ComparePage() {
   // The board's frame in the homepage's steel, while its concrete waits for a yes (board.tsx): ?frame=steel.
   const [search] = useSearchParams()
   if (!comparison) return <PriceFrame title="Page not found"><EmptyState headingAs="h1" title="Page not found" action={<Link to="/pricing">Price calculator</Link>} /></PriceFrame>
-  return <PriceFrame title={page?.title ?? comparison.offer.vendor} variant="price-page--board" end={<BoardEnd />} scene>
+  return <PriceFrame title={page?.title ?? comparison.offer.vendor} variant="price-page--board" end={<BoardEnd comparison={comparison} />} scene>
     <ComparisonScene key={vendor} comparison={comparison} frame={search.get('frame')} />
   </PriceFrame>
 }

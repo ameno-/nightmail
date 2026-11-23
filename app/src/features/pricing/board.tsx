@@ -1,15 +1,15 @@
-import { useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import { ArrowRight } from 'lucide-react'
-import { Disclosure } from '../../components/ui'
+import { AnomalyLogo } from '../../components/AnomalyLogo'
 import { NightmailWordmark } from '../../components/NightmailLogo'
 import { SignInConsent } from '../../components/LegalLinks'
-import { useTheme } from '../../lib/theme'
 import { EndBand, endBand } from '../home/end-band'
 import { toneVars } from '../home/tones'
 import { calculatorPath, Checked, CheckedOn, Cite, Ours, Terms } from './content'
 import { Flaps } from './flaps'
 import { Features } from './features'
+import { PRICE_PAGES } from './pages'
 import { CHECKED, claim, formatCount, money, nightmail, nightmailBill, theirPrice, ucOf, type Comparison, type Usage } from './prices'
 
 // A comparison page (/compare/mailchimp, /compare/resend): the two prices on a board hung in the homepage's factory, as
@@ -20,8 +20,8 @@ import { CHECKED, claim, formatCount, money, nightmail, nightmailBill, theirPric
 // Nightmail's its share, lit in the homepage's periwinkle, the only colour. Along the board's foot, its small print: what
 // both prices are for, the plan, and the day and page the competitor's was read on. The console under it has the
 // fader and the page's two ways on, Get started (the key) and Try your numbers. Then what else Nightmail does
-// (features.tsx, a wall of the homepage machine's concrete), the close with Get started again, the small print, and
-// the wordmark across the page's end.
+// (features.tsx, a wall of the homepage machine's concrete), the close with Get started again, and the page's end
+// (BoardEnd): the homepage's row of links with Sources, and the wordmark. The page is the same scene in either theme.
 // Every figure keeps the room of the widest it can show (Room), so nothing moves as the fader does.
 // The board hangs on a dark wall under one pendant lamp, which comes down on its cord from the top of the window (the
 // page has no bar: PriceFrame's scene). Nightmail is named by its wordmark wherever it is a display word: the headline
@@ -84,7 +84,7 @@ export function ComparisonBoard({ comparison: c, start, frame }: { comparison: C
   const p = pointAt(c, size), id = useId(), vendor = c.offer.vendor
   const lit = p.ours.uc === 0n ? 0 : Math.max(1, Math.round(CELLS * share(p)))
   const theirs = byContacts(c) ? [`${formatCount(p.usage.sent)} emails a month`, `${p.usage.sent / p.usage.contacts} to each contact`] : ['One recipient each', 'Nothing received']
-  return <><section className="cb-hall" aria-labelledby="cb-title" data-frame={frame === 'steel' ? 'steel' : undefined}>
+  return <section className="cb-hall" aria-labelledby="cb-title" data-frame={frame === 'steel' ? 'steel' : undefined}>
     <div className="cb-stage">
       <div className="cb-backdrop" aria-hidden="true"><i className="cb-lamp" /></div>
       <div className="cb-wrap">
@@ -120,24 +120,15 @@ export function ComparisonBoard({ comparison: c, start, frame }: { comparison: C
       {start && <>{start.button('cb-key cb-key-start')}{!start.signedIn && <SignInConsent className="cb-consent" />}</>}
     </section>
   </section>
-  {/* The small print, closed, on the page's own ground with its last links (index.tsx, PriceFrame). */}
-  <div className="cb-fine">
-    <Disclosure className="price-small cb-print" headingAs="h2" title="Sources and small print">
-      <p className="price-note">{c.assume} Monthly billing, no promotions. <Checked source={{ checked: CHECKED, url: c.offer.pricing }} /></p>
-      <p className="price-note">Nightmail charges {nightmail.perThousand} per 1,000 emails after {formatCount(nightmail.freeSent)} free a month.</p>
-      <Terms floor={null} />
-      <ul className="price-facts">{c.ours.map(fact => <li key={fact.text}>{fact.text}{fact.source && <Cite source={fact.source} />}</li>)}</ul>
-      <CheckedOn facts={c.ours} />
-    </Disclosure>
-  </div>
-  </>
 }
 
-/** The wordmark across the page's end, as the homepage ends (end-band.tsx), in the machine's tones, measured before
- *  the first paint. */
-export function BoardEnd() {
-  const dark = useTheme().theme === 'dark'
-  const ref = useRef<HTMLDivElement>(null), [W, setW] = useState(0)
+/** The page's end, as the homepage ends (machines.tsx, .mx-end): one small row of links on the scene's own dark, and
+ *  the wordmark across the page's end (end-band.tsx) in the machine's night tones, measured before the first paint. The
+ *  row is the homepage's (by Anomaly, API docs, Terms, Privacy) with the other price pages (not this one) and Sources,
+ *  which opens the sources and small print in place under the row (#sources opens it too): the competitor's sourced
+ *  facts, the pricing terms and the trademark line, which a legal review depends on. */
+export function BoardEnd({ comparison: c }: { comparison: Comparison }) {
+  const ref = useRef<HTMLElement>(null), [W, setW] = useState(0), [open, setOpen] = useState(false)
   useLayoutEffect(() => {
     const node = ref.current!, measure = () => setW(node.clientWidth)
     measure()
@@ -145,6 +136,26 @@ export function BoardEnd() {
     observer.observe(node)
     return () => observer.disconnect()
   }, [])
+  useEffect(() => { if (window.location.hash === '#sources') setOpen(true) }, [])
   const phone = W < 900, inset = { left: 0, right: 0, bottom: 0 }, band = W ? endBand(W, phone, inset) : null
-  return <div className="cb-end" ref={ref} style={{ ...toneVars(dark), height: band?.h } as CSSProperties}>{band && <EndBand W={W} phone={phone} inset={inset} />}</div>
+  const here = `/compare/${c.offer.id}`
+  const label = (path: string) => path === '/pricing' ? 'Pricing' : `vs ${PRICE_PAGES.find(page => page.path === path)!.title.replace(/^.* vs /, '')}`
+  return <footer className="mx-end cb-end" ref={ref} style={{ ...toneVars(true), ...band ? { '--mx-band': `${band.h}px` } : {} } as CSSProperties}>
+    <nav aria-label="Site links">
+      <a className="srt-by" href="https://anoma.ly" target="_blank" rel="noopener" title="Anomaly (opens in a new tab)">by <AnomalyLogo height={18} /></a>
+      {PRICE_PAGES.filter(page => page.path !== here).map(page => <Link key={page.path} to={page.path}>{label(page.path)}</Link>)}
+      <button type="button" className="cb-sources-toggle" aria-expanded={open} aria-controls="sources" onClick={() => setOpen(now => !now)}>Sources</button>
+      <a href="/docs">API docs</a><Link to="/legal/terms">Terms</Link><Link to="/legal/privacy">Privacy</Link>
+    </nav>
+    <section className="cb-sources" id="sources" hidden={!open} aria-labelledby="sources-title">
+      <h2 id="sources-title" className="cb-sources-title">Sources and small print</h2>
+      <p className="price-note">{c.assume} Monthly billing, no promotions. <Checked source={{ checked: CHECKED, url: c.offer.pricing }} /></p>
+      <p className="price-note">Nightmail charges {nightmail.perThousand} per 1,000 emails after {formatCount(nightmail.freeSent)} free a month.</p>
+      <Terms floor={null} />
+      <ul className="price-facts">{c.ours.map(fact => <li key={fact.text}>{fact.text}{fact.source && <Cite source={fact.source} />}</li>)}</ul>
+      <CheckedOn facts={c.ours} />
+      <p className="price-note">Product names belong to their owners and only identify their products. Nightmail isn’t affiliated with them.</p>
+    </section>
+    {band && <EndBand W={W} phone={phone} inset={inset} />}
+  </footer>
 }

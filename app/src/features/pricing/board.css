@@ -6,18 +6,21 @@
    Every picture is its own file (?no-inline): the build inlines the homepage's kit for its own lazy stylesheet
    (vite.config.ts), and inlined here they would make this stylesheet a quarter of a megabyte. */
 .price-page--board {
-  --cb-floor: oklch(0.948 0.01 262); --cb-paper: oklch(0.955 0.014 92); --cb-text-2: oklch(0.79 0.014 268); --cb-mine: oklch(0.79 0.085 269);
+  --cb-paper: oklch(0.955 0.014 92); --cb-text-2: oklch(0.79 0.014 268); --cb-mine: oklch(0.79 0.085 269);
   --cb-ease: cubic-bezier(.22, 1, .36, 1); --cb-gutter: 32px;
   /* The scene's tones, darkest to lightest: the wall's shadow, the board's face, a slot, a tile, an edge, a fill, a label, a glyph. */
   --cb-wall: rgb(20 20 20); --cb-face: oklch(0.215 0.006 262); --cb-slot: oklch(0.27 0.005 262); --cb-slot-edge: oklch(0.51 0.006 262);
   --cb-tile: oklch(0.35 0.006 262); --cb-tile-edge: oklch(0.6 0.006 262); --cb-glyph: oklch(0.96 0.004 262); --cb-fill: oklch(0.74 0.006 262);
   --cb-label: oklch(0.88 0.01 92); --cb-caption: oklch(0.84 0.008 262);
-  --srt-name: var(--color-logo); --srt-paper: oklch(0.985 0.01 92);
+  --srt-paper: oklch(0.985 0.01 92);
   --srt-cta: oklch(0.975 0.02 92); --srt-cta-hover: oklch(0.995 0.012 92); --srt-cta-top: oklch(1 0 0); --srt-cta-side: oklch(0.78 0.03 92); --srt-on-cta: oklch(0.2 0.02 268); --srt-cta-edge: oklch(0.2 0.02 268 / 14%);
-  background: var(--cb-floor); -webkit-font-smoothing: antialiased; }
-:root[data-theme='dark'] .price-page--board { --cb-floor: oklch(0.158 0.014 268); --srt-paper: oklch(0.955 0.014 92); --srt-cta: oklch(0.945 0.016 92); --srt-cta-hover: oklch(0.975 0.012 92); --srt-cta-side: oklch(0.72 0.022 92); }
-/* No bar: the scene runs to the window's top edge. The wordmark is a quiet link in its corner, over the wall; the price
-   pages and the theme are in the footer (index.tsx, PriceFrame's scene). */
+  /* The page is one dark scene in either theme, its end included: the theme's tokens are the scene's here, and the
+     homepage's end (.mx-end, the wordmark) takes its night tones (BoardEnd). */
+  --color-text: var(--cb-paper); --color-muted: var(--cb-text-2); --color-faint: oklch(0.63 0.016 268); --color-border-muted: oklch(1 0 0 / 12%); --color-border: oklch(1 0 0 / 14%); --color-border-strong: oklch(1 0 0 / 32%); --color-hover: oklch(1 0 0 / 6%); --color-focus: var(--cb-mine);
+  --srt-name: var(--cb-paper); --srt-text: var(--cb-paper); --srt-text-3: oklch(0.66 0.014 268); --srt-safe-l: env(safe-area-inset-left, 0px); --srt-safe-r: env(safe-area-inset-right, 0px); --srt-ease: var(--cb-ease);
+  background: var(--cb-wall); color: var(--cb-paper); color-scheme: dark; -webkit-font-smoothing: antialiased; }
+/* No bar: the scene runs to the window's top edge. The wordmark is a quiet link in its corner, over the wall; the other
+   price pages are in the page's end (board.tsx, BoardEnd). */
 .price-page--board { position: relative; }
 .price-corner { position: absolute; z-index: 5; top: 0; left: 0; display: flex; padding: 22px max(28px, env(safe-area-inset-left)); }
 .price-corner .wordmark { height: 32px; color: var(--cb-paper); opacity: .86; transition: opacity 150ms var(--cb-ease); }
@@ -26,12 +29,6 @@
 .price-corner .wordmark:focus-visible { outline: var(--focus-width) solid var(--cb-mine); outline-offset: 6px; opacity: 1; }
 .price-page--board .price-main { width: 100%; padding: 0; }
 .price-page--board .price-main:focus { outline: none; }
-.price-page--board .price-footer { border-top: 0; text-align: center; }
-.price-footer__nav { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: var(--space-4) var(--space-16); margin-bottom: var(--space-12); }
-.price-footer__nav .theme-toggle { position: relative; inset: auto; }
-.price-footer__nav nav { display: flex; flex-wrap: wrap; justify-content: center; gap: 0 var(--space-16); }
-.price-footer__nav a { display: inline-flex; align-items: center; min-height: 44px; padding-inline: var(--space-4); color: var(--color-muted); font-size: var(--text-md); text-decoration: none; transition: color 150ms var(--cb-ease); }
-.price-footer__nav a:hover, .price-footer__nav a[aria-current='page'] { color: var(--color-text); }
 .cb-wrap { width: min(100% - 2 * var(--cb-gutter), 1120px); margin-inline: auto; }
 .cb-room { display: inline-grid; }
 .cb-room > * { grid-area: 1 / 1; }
@@ -41,7 +38,6 @@
    same dark wall as the lamp's light falls away, the concrete wall of what else it does and the close. No floors
    between them: one wall, dark by day and by night, as the homepage's factory is, and one lamp. */
 .cb-hall {
-  --color-text: var(--cb-paper); --color-muted: var(--cb-text-2); --color-faint: oklch(0.63 0.016 268); --color-border-muted: oklch(1 0 0 / 12%); --color-border: oklch(1 0 0 / 14%); --color-border-strong: oklch(1 0 0 / 32%); --color-hover: oklch(1 0 0 / 6%); --color-focus: var(--cb-mine);
   /* The homepage machine's concrete (board/moondust-*.avif, generated with crops of the machine as the reference), lit
      from above as the lamp lights the page: a near-white top edge, a softer foot, a shadow down the wall. */
   --md-tex: image-set(url('./board/moondust-384.avif?no-inline') 1x, url('./board/moondust-768.avif?no-inline') 2x);
@@ -218,17 +214,25 @@
 .ft-tag span { color: oklch(0.38 0.02 268); font-family: var(--font-mono); font-size: 11px; font-weight: 700; line-height: 1; letter-spacing: .1em; text-transform: uppercase; }
 
 /* ── The close: the bill and the way in, on the dark wall under the slab's shadow, with room around it. ── */
-.cb-close { position: relative; display: grid; justify-items: center; padding: 168px var(--cb-gutter) 176px; text-align: center; }
+.cb-close { position: relative; display: grid; justify-items: center; padding: 168px var(--cb-gutter) 136px; text-align: center; }
 .cb-bill { display: grid; justify-items: center; row-gap: 6px; max-width: 18em; margin: 0; color: var(--cb-caption); font-size: clamp(32px, 1.6cqw + 18px, 52px); font-weight: 600; font-variation-settings: 'opsz' 32; line-height: 1.08; letter-spacing: -.03em; text-wrap: balance; }
 .cb-bill > span:first-child { color: var(--cb-paper); }
 .cb-bill b { font-weight: 700; }
 .cb-close .cb-key-start { margin-top: 44px; }
 .cb-close .cb-consent { margin-top: 18px; }
 
-/* The small print and the last links, on the page's own ground (index.tsx, PriceFrame's footer). */
-.cb-fine { display: grid; justify-items: center; padding: 48px var(--cb-gutter) 0; background: var(--cb-floor); }
-.cb-print { width: 100%; max-width: 900px; margin-top: 0; text-align: start; }
-.cb-end { position: relative; }
+/* ── The page's end (board.tsx, BoardEnd): the homepage's (machines.css, .mx-end), on the same dark: one small row of
+   links, Sources among them, and the wordmark across the page's end. Sources opens the small print in place under the
+   row. ── */
+.cb-end { padding-top: 0; }
+.cb-sources-toggle { padding: 0; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; transition: color 150ms var(--cb-ease); }
+.cb-sources-toggle[aria-expanded='true'] { color: var(--srt-text); }
+@media (hover: hover) and (pointer: fine) { .cb-sources-toggle:hover { color: var(--srt-text); } }
+.cb-end nav a:focus-visible, .cb-sources-toggle:focus-visible { outline: var(--focus-width) solid var(--cb-mine); outline-offset: 3px; border-radius: 2px; }
+.cb-sources { width: min(100%, 720px); margin-top: var(--space-24); padding-top: var(--space-20); box-shadow: inset 0 1px 0 var(--color-border-muted); text-align: start; }
+.cb-sources-title { margin: 0 0 var(--space-4); color: var(--color-text); font-size: var(--text-sm); font-weight: 600; line-height: var(--leading-sm); }
+.cb-sources .price-terms { margin-top: var(--space-12); }
+.cb-sources .price-facts { margin-top: var(--space-12); color: var(--color-muted); font-size: var(--text-sm); line-height: var(--leading-sm); }
 
 @media (prefers-reduced-motion: no-preference) {
   /* The lamp swings a little as the page opens and comes to rest. */
@@ -291,10 +295,9 @@
   .ft-hooks { margin: 14px -14px -12px; padding: 12px 14px 14px; }
   .ft-flaps { --h: 32px; }
   .ft-tag { width: 68px; }
-  .cb-close { padding: 112px var(--cb-gutter) 120px; }
+  .cb-close { padding: 112px var(--cb-gutter) 96px; }
   .cb-bill { font-size: 30px; }
   .cb-close .cb-key-start { width: 100%; max-width: 320px; margin-top: 32px; }
-  .cb-fine { padding-top: 36px; }
 }
 /* Two panels across, the first across both, on a tablet; one under another on a phone. */
 @container (width < 900px) {

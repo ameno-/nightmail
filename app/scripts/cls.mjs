@@ -239,13 +239,13 @@ const pages = ids => [
   ['Legal · subprocessors', '/legal/subprocessors', { user: null, from: '/legal/privacy' }],
   // The price pages (features/pricing), public and not linked from the site yet: signed out, cold and from one another
   // (their header's links), the calculator also at its large size and signed in.
-  ['Pricing', '/pricing', { user: null, from: '/compare/mailchimp', click: 'Price calculator' }],
+  ['Pricing', '/pricing', { user: null, from: '/compare/mailchimp', click: 'Pricing' }],
   ['Pricing · large', '/pricing?sent=400000&received=0&contacts=100000&teammates=3', { user: null }],
   ['Pricing · signed in', '/pricing', {}],
   ['Compare · Mailchimp', '/compare/mailchimp', { user: null, from: '/pricing', click: 'vs Mailchimp' }],
   // The board's frame in the homepage's steel, while its concrete waits for a yes (features/pricing/board.tsx).
   ['Compare · Mailchimp · steel frame', '/compare/mailchimp?frame=steel', { user: null }],
-  ['Compare · Resend', '/compare/resend', { user: null, from: '/compare/mailchimp', click: 'Nightmail vs Resend' }],
+  ['Compare · Resend', '/compare/resend', { user: null, from: '/compare/mailchimp', click: 'vs Resend' }],
   ['Support chat', '/logs', { from: '/overview', support: true }],
   ['Overview · sending limits dialog', '/overview', { user: 'rae', dialog: 'Daily limit' }],
   ['Overview · sender score dialog', '/overview', { dialog: 'Sender score' }],
