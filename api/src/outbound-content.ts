@@ -15,12 +15,17 @@ export const mailAddress = (base=z.string()) => base.email({pattern:/^(?!\.)(?!.
 export const validMailAddressSql = (expr: ReturnType<typeof sql>) => sql`(
   ${expr} IS NOT NULL
   AND octet_length(${expr}) BETWEEN 1 AND 254
-  AND (${expr}) ~ '^[!-~]+$'
+  AND octet_length(${expr}) = char_length(${expr})
   AND left(${expr}, 1) <> '.'
   AND strpos(${expr}, '..') = 0
-  AND position('@' in (${expr})) BETWEEN 2 AND 65
-  AND substring((${expr}) FROM position('@' in (${expr})) + 1) !~ '[^.]{64}'
-  AND (${expr}) ~* '^[a-z0-9_''+.-]*[a-z0-9_+-]@(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:[a-z]{2,}|xn--[a-z0-9][a-z0-9-]*[a-z0-9])$'
+  AND (${expr}) ~ '^[A-Za-z0-9_''+.-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+(?:[A-Za-z]{2,}|[Xx][Nn]--[A-Za-z0-9][A-Za-z0-9-]*[A-Za-z0-9])$'
+  AND (
+    octet_length(${expr}) <= 64
+    OR (
+      position('@' in (${expr})) BETWEEN 2 AND 65
+      AND substring((${expr}) FROM position('@' in (${expr})) + 1) !~ '[^.]{64}'
+    )
+  )
 )`;
 
 // A sender display name may not read as an address or an angle-bracketed route in any client, and may not carry the

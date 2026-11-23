@@ -283,7 +283,7 @@ export async function snapshotCampaignAudience(
   if (large) {
     if (!(await db.execute(sql`SELECT 1 WHERE pg_try_advisory_xact_lock(275815, hashtext(${identity.workspaceId}))`)).rowCount) throw new ApiError(503,'AUDIENCE_CAPTURE_BUSY','Another large audience capture is running in this workspace; retry the launch when it finishes.',undefined,true);
     if (!(await db.execute(sql`SELECT 1 WHERE pg_try_advisory_xact_lock(275812,1) OR pg_try_advisory_xact_lock(275812,2)`)).rowCount) throw new ApiError(503,'AUDIENCE_CAPTURE_BUSY','Large audience captures are busy; retry the launch.',undefined,true);
-    await db.execute(sql`SET LOCAL work_mem = '64MB'`);
+    await db.execute(sql`SET LOCAL work_mem = '128MB'`);
   }
   const carriesEmail = propertyKeys.length === 0;
   const sliceRows = options?.sliceRows ?? DEFAULT_CAPTURE_SLICE_ROWS;
@@ -318,34 +318,40 @@ export async function snapshotCampaignAudience(
     const to = Math.min(eligible, from + sliceRows);
     let chunk: { captured: number; max_bytes: number; total_bytes: string } | undefined;
     if (carriesEmail && stamp) {
-      const invalid = await db.execute<{ id: string }>(sql`
-        SELECT o.id FROM audience_ordered o
-        WHERE o.ordinal > ${from} AND o.ordinal <= ${to} AND NOT ${validMailAddressSql(sql`o.email`)}
-        ORDER BY o.ordinal LIMIT 1`);
-      if (invalid.rows[0]) {
-        throw new ApiError(422, 'CAMPAIGN_RECIPIENT_INVALID', `Contact ${invalid.rows[0].id}: Recipient or rendered message is invalid (to).`, 'contactId');
-      }
-      ({ rows: [chunk] } = await db.execute<{ captured: number; max_bytes: number; total_bytes: string }>(sql`
-        WITH inserted AS (
-          INSERT INTO sending_review_recipients(review_id, ordinal, recipient, recipient_bytes, content_hash, subject, snapshot_bytes)
-          SELECT ${reviewId}, o.ordinal, r.recipient, octet_length(r.recipient::text),
-            's1:' || encode(sha256(convert_to(${stamp.baseHash} || ':' || o.email, 'UTF8')), 'hex'),
-            ${stamp.storedSubject},
-            ${stamp.baseBytes} + octet_length(to_json(o.email)::text)
+      const { rows: [ins] } = await db.execute<{ captured: number; max_bytes: number; total_bytes: string; first_bad_id: string | null }>(sql`
+        WITH slice AS (
+          SELECT o.ordinal, o.id, o.email, ${validMailAddressSql(sql`o.email`)} AS ok,
+            jsonb_build_object('id', o.id, 'email', o.email, 'properties', '{}'::jsonb) AS recipient
           FROM audience_ordered o
-          CROSS JOIN LATERAL (SELECT jsonb_strip_nulls(jsonb_build_object('id', o.id, 'email', o.email, 'properties', '{}'::jsonb)) AS recipient) r
           WHERE o.ordinal > ${from} AND o.ordinal <= ${to}
           ORDER BY o.ordinal
+        ), bad AS (
+          SELECT id FROM slice WHERE NOT ok ORDER BY ordinal LIMIT 1
+        ), inserted AS (
+          INSERT INTO sending_review_recipients(review_id, ordinal, recipient, recipient_bytes, content_hash, subject, snapshot_bytes)
+          SELECT ${reviewId}, s.ordinal, s.recipient, octet_length(s.recipient::text),
+            's1:' || encode(sha256(convert_to(${stamp.baseHash} || ':' || s.email, 'UTF8')), 'hex'),
+            ${stamp.storedSubject},
+            ${stamp.baseBytes} + octet_length(s.email) + 2
+          FROM slice s
+          WHERE s.ok AND NOT EXISTS (SELECT 1 FROM bad)
+          ORDER BY s.ordinal
           RETURNING recipient_bytes
         )
-        SELECT count(*)::int AS captured, coalesce(max(recipient_bytes), 0)::int AS max_bytes, coalesce(sum(recipient_bytes), 0)::bigint AS total_bytes FROM inserted`));
+        SELECT count(*)::int AS captured, coalesce(max(recipient_bytes), 0)::int AS max_bytes, coalesce(sum(recipient_bytes), 0)::bigint AS total_bytes,
+          (SELECT id FROM bad) AS first_bad_id
+        FROM inserted`);
+      if (ins?.first_bad_id) {
+        throw new ApiError(422, 'CAMPAIGN_RECIPIENT_INVALID', `Contact ${ins.first_bad_id}: Recipient or rendered message is invalid (to).`, 'contactId');
+      }
+      chunk = ins;
     } else if (carriesEmail) {
       ({ rows: [chunk] } = await db.execute<{ captured: number; max_bytes: number; total_bytes: string }>(sql`
         WITH inserted AS (
           INSERT INTO sending_review_recipients(review_id, ordinal, recipient, recipient_bytes)
           SELECT ${reviewId}, o.ordinal, r.recipient, octet_length(r.recipient::text)
           FROM audience_ordered o
-          CROSS JOIN LATERAL (SELECT jsonb_strip_nulls(jsonb_build_object('id', o.id, 'email', o.email, 'properties', '{}'::jsonb)) AS recipient) r
+          CROSS JOIN LATERAL (SELECT jsonb_build_object('id', o.id, 'email', o.email, 'properties', '{}'::jsonb) AS recipient) r
           WHERE o.ordinal > ${from} AND o.ordinal <= ${to}
           ORDER BY o.ordinal
           RETURNING recipient_bytes

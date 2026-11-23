@@ -27681,6 +27681,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const addr = uniqueCorpus[r.i - 1]!;
       const jsOk = Address.safeParse(addr).success;
       if (Boolean(r.ok) !== jsOk) diffs.push(`${JSON.stringify(addr)}: sql=${r.ok} js=${jsOk}`);
+      if (jsOk) assert.equal(Buffer.byteLength(JSON.stringify(addr), 'utf8'), Buffer.byteLength(addr, 'utf8') + 2, `JSON length invariant for ${addr}`);
     }
     t.diagnostic(`Tested ${uniqueCorpus.length} adversarial email addresses: ${diffs.length} disagreements`);
     assert.deepEqual(diffs, [], `SQL validMailAddressSql disagreed with JS mailAddress: ${diffs.slice(0, 10).join('; ')}`);
