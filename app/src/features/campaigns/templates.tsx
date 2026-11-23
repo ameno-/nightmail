@@ -209,7 +209,7 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
         {replyToValidation && <div id="template-reply-error" className="campaign-compose-feedback ui-field__error" role="alert">{replyToValidation}</div>}
       </div>
       <ChunkFallback.Provider value={<ComposerSkeleton />}><EmailComposer ref={composer} personalize attachmentApi={api.templateAssets} attachmentIds={draft.attachments} initialHtml={draft.html ?? ''} disabled={archived} onReady={() => setReady(true)} onDirty={changed} onBusy={setComposerBusy} onAttach={() => attachments.current?.open()} /></ChunkFallback.Provider>
-      <CampaignAttachments ref={attachments} attachmentApi={api.templateAssets} ids={draft.attachments} persisted={template.draft.attachments} onChange={ids => change('attachments', ids)} onBusy={setAssetBusy} disabled={archived || saving || composerBusy} />
+      <CampaignAttachments ref={attachments} attachmentApi={api.templateAssets} ids={draft.attachments} persisted={template.draft.attachments} body={template.draft.html ?? ''} shown={ready} onChange={ids => change('attachments', ids)} onBusy={setAssetBusy} disabled={archived || saving || composerBusy} />
     </div></div></section>
     {leaveGuard}
     {previewOpen && <TemplatePreviewDialog template={template} onOpenChange={setPreviewOpen} />}
