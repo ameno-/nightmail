@@ -190,6 +190,14 @@ function checkScope(ids: string[] | null, types: string[], format: StoredFormat)
   if (ids !== null && types.includes('message.stored')) throw new ApiError(422, 'INVALID_EVENT_SCOPE', 'message.stored requires a workspace webhook without an addressIds filter.', 'addressIds');
   if (format === 'inbound' && types.some(t => t !== 'message.received' && t !== 'message.junk')) throw new ApiError(422, 'INVALID_EVENT_SCOPE', 'The inbound format carries received mail only. Use eventTypes ["message.received"], or [] for a route-only webhook.', 'eventTypes');
 }
+// A webhook's addressIds name only this workspace's receiving addresses. Another workspace's ID gets the answer of one
+// that doesn't exist (the answer an API key's access.addressIds gets), so an ID can't be probed. IDs the webhook already
+// names pass unchecked: an address can be deleted after it was chosen, and the webhook must stay editable.
+async function ownAddresses(tx: DbExecutor, w: string, ids: string[] | null, stored: string[] | null = null) {
+  const added = [...new Set(ids ?? [])].filter(id => !stored?.includes(id));
+  if (added.length && (await tx.execute(sql`SELECT id FROM mailboxes WHERE workspace_id=${w} AND id=ANY(${sql.param(added)}::text[])`)).rows.length !== added.length)
+    throw new ApiError(422, 'MAILBOX_NOT_FOUND', 'Every ID must identify an existing receiving address.', 'addressIds');
+}
 const defaultJunk = (format: StoredFormat) => format === 'inbound' ? 'include' as const : 'skip' as const;
 /**
  * Locks an endpoint for a change: the address lane, then this approval's hold on what it changes, then the row: the
@@ -220,6 +228,7 @@ export async function createEndpointRecord(tx: DbExecutor, c: Ctx, w: string, sp
   if (spec.type === 'webhook') {
     const junk = spec.junk ?? defaultJunk(spec.format), eventTypes = [...new Set(spec.eventTypes)], binding = webhookSecretBinding(w, endpointId), url = webhookUrl(c.env, spec.url);
     checkScope(spec.addressIds, eventTypes, spec.format);
+    await ownAddresses(tx, w, spec.addressIds);
     if (!spec.paused) await assertCapacity(tx, w, eventTypes.length ? 'subscribed' : 'routeOnly');
     // Junk delivery needs the routed store, which emits message.junk.
     if (junk === 'include') await enableRouting(tx, w);
@@ -275,6 +284,7 @@ export async function changeEndpointRecord(tx: DbExecutor, c: Ctx, row: Endpoint
     const eventTypes = q.eventTypes && [...new Set(q.eventTypes)], events = eventTypes ?? row.eventTypes;
     const format = q.format ?? row.format, junk = q.junk ?? (format !== row.format ? defaultJunk(format) : row.junk);
     checkScope(q.addressIds === undefined ? row.mailboxIds : q.addressIds, events, format);
+    if (q.addressIds !== undefined) await ownAddresses(tx, w, q.addressIds, row.mailboxIds);
     if (!paused && (row.paused || !row.eventTypes.length !== !events.length)) await assertCapacity(tx, w, events.length ? 'subscribed' : 'routeOnly', row.id);
     if (junk === 'include') await enableRouting(tx, w);
     const url = q.url === undefined ? undefined : webhookUrl(c.env, q.url), moved = url !== undefined && url !== row.url;

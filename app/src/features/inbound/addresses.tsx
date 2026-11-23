@@ -2,13 +2,13 @@ import { useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { X } from 'lucide-react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { Alert, Button, ConfirmDialog, ErrorState, Field, IconButton, Input, KeyValues, LoadingRegion, PageHeader, Select, SkeletonText, Tabs, useToast, fieldError, MutationError } from '../../components/ui'
-import { useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
+import { useApiMutation, useApiQuery, useRequestScope, useWorkspaceAccess } from '../../data/context'
 import { date, number } from '../../lib/format'
 import { AddressMail } from './threads'
 import { FlowPanel } from './panel'
 import { AddressBuilder, builderFits } from './builder'
 import { isSplit } from './flow'
-import { request } from '../../data/live'
+import { isAbortError, request } from '../../data/live'
 import { errorText, type InboundAddress, type InboundAddressPatch } from '../../data/types'
 import { AliasEditor, aliasState, commitAliases, type AliasState } from './aliases'
 import { steps } from './concepts'
@@ -37,6 +37,7 @@ function AddressPath({ address, overview }: { address: InboundAddress; overview:
   const toast = useToast()
   const entry = overview.data?.routes.data.find(r => r.address?.id === address.id)
   const [ritual, setRitual] = useState('')
+  const scope = useRequestScope()
   const [busy, setBusy] = useState(false)
   const [routing, setRouting] = useState(false)
   // Single flight: attaching reads the saved version and writes against it, so a second click would conflict with the first.
@@ -44,11 +45,11 @@ function AddressPath({ address, overview }: { address: InboundAddress; overview:
   const attach = useSingleFlight('rules.attachments', async (change: (list: Attachments) => Attachments, done: string, undo?: (list: Attachments) => Attachments) => {
     setBusy(true)
     try {
-      const current = await request<RuleConfig>('/v1/rules')
-      await request('/v1/rules/attachments', { method: 'PUT', body: { attachments: change(current.config.attachments) }, ifMatch: current.version })
+      const current = await request<RuleConfig>('/v1/rules', { scope })
+      await request('/v1/rules/attachments', { method: 'PUT', body: { attachments: change(current.config.attachments) }, ifMatch: current.version, scope })
       // Detaching changes how live mail is handled: Undo puts the rule back where it was.
       toast(done, 'success', undo ? { action: { label: 'Undo', onSelect: () => void attach(undo, 'Rule put back.') } } : undefined); setRitual(''); await overview.refetch()
-    } catch (e) { toast(errorText(e), 'error') } finally { setBusy(false) }
+    } catch (e) { if (!isAbortError(e)) toast(errorText(e), 'error') } finally { setBusy(false) }
   }, address.id)
   const detach = (key: string) => void attach(list => list.filter(b => !(b.rule === key && b.target === address.id)), 'Rule detached.', list => {
     if (list.some(b => b.rule === key && b.target === address.id)) return list

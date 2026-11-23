@@ -183,7 +183,7 @@ export function SupportInboxPage() {
   useEffect(() => { memory.list = { view, q, channel } }, [view, q, channel])
   const setChannel = (next: Channel | '') => setParams(previous => { const params = new URLSearchParams(previous); if (next) params.set('channel', next); else params.delete('channel'); return params }, { replace: true })
   // A search keeps the rows it replaces until its answer arrives; another tab never shows this one's.
-  const list = useInfiniteQuery({ ...listQuery(view, q, channel), enabled: Boolean(role), staleTime: 5_000, refetchInterval: 30_000,
+  const list = useInfiniteQuery({ ...listQuery(view, q, channel), enabled: Boolean(role), staleTime: 5_000, refetchInterval: query => query.state.status === 'error' ? false : 30_000,
     placeholderData: (previous, query) => query?.queryKey[2] === view ? previous : undefined })
   // The rail counts each channel before the channel filter (this view and search, every channel).
   const everyChannel = useInfiniteQuery({ ...listQuery(view, q, ''), enabled: Boolean(role && channel), staleTime: 5_000 })
@@ -279,7 +279,7 @@ export function SupportConversationPage() {
   const role = useRole(), canAct = role === 'operator'
   const id = useParams().id ?? '', valid = CONVERSATION.test(id)
   const client = useQueryClient(), navigate = useNavigate(), location = useLocation(), phone = usePhone()
-  const detail = useQuery({ ...detailQuery(id), enabled: Boolean(role && valid), refetchInterval: 30_000 })
+  const detail = useQuery({ ...detailQuery(id), enabled: Boolean(role && valid), refetchInterval: query => query.state.status === 'error' ? false : 30_000 })
   const list = useInfiniteQuery({ ...listQuery(memory.list.view, memory.list.q, memory.list.channel), enabled: Boolean(role), staleTime: 5_000 })
   const rows = flatten(list.data?.pages)
   const { next, previous } = useNeighbors(id, rows)

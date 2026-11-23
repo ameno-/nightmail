@@ -9,8 +9,8 @@ import { Archive, Ban, CodeXml, Forward, Hash, MessageSquare, ShieldAlert, Spark
 import { Alert, Button, ConfirmDialog, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, SecretInput, Select, Switch, Textarea, useToast, type SelectOption } from '../../components/ui'
 import { FieldSkeleton, LoadingRegion, Skeleton } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
-import { useApiDef, useApiQuery, useWorkspaceAccess } from '../../data/context'
-import { request } from '../../data/live'
+import { useApiDef, useApiQuery, useRequestScope, useWorkspaceAccess } from '../../data/context'
+import { isAbortError, request } from '../../data/live'
 import { staleAfterWrite } from '../../data/invalidation'
 import { queries } from '../../data/queries'
 import { ApiError, errorText } from '../../data/types'
@@ -103,17 +103,18 @@ export function RulesTab({ overview, refresh }: { overview: Overview; refresh: (
   const builderPath = (r: OverviewRule) => isSplitRule(r) ? splitBuilderPath(r.key, r.attachedTo, options.data) : null
   const [switching, setSwitching] = useState<Record<string, boolean>>({})
   const [deleting, setDeleting] = useState<OverviewRule | null>(null), [deleteOpen, setDeleteOpen] = useState(false)
+  const scope = useRequestScope()
   const toggle = useSingleFlight('rules.toggle', async (r: OverviewRule, enabled: boolean) => {
     setSwitching(s => ({ ...s, [r.key]: enabled }))
     try {
-      await request(`/v1/rules/scripts/${encodeURIComponent(r.key)}`, { method: 'PATCH', body: { enabled } })
+      await request(`/v1/rules/scripts/${encodeURIComponent(r.key)}`, { method: 'PATCH', body: { enabled }, scope })
       await refresh()
       toast(enabled ? 'Rule on' : 'Rule off', 'success')
-    } catch (e) { toast(errorText(e), 'error') }
+    } catch (e) { if (!isAbortError(e)) toast(errorText(e), 'error') }
     finally { setSwitching(s => { const { [r.key]: _, ...rest } = s; return rest }) }
   })
   async function remove(r: OverviewRule) {
-    await request(`/v1/rules/scripts/${encodeURIComponent(r.key)}`, { method: 'DELETE' })
+    await request(`/v1/rules/scripts/${encodeURIComponent(r.key)}`, { method: 'DELETE', scope })
     await refresh()
     toast(`${r.key} deleted`, 'success')
   }

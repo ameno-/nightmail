@@ -2,7 +2,7 @@
 import { useState, type FormEvent, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import { Alert, Button, Checkbox, ConfirmDialog, Dialog, ErrorState, Field, Input, Select, Switch, fieldError, MutationError } from '../../components/ui'
-import { useApiDef, useApiMutation } from '../../data/context'
+import { useApiDef, useApiMutation, useRequestScope } from '../../data/context'
 import { queries } from '../../data/queries'
 import { ApiError, type ForwardEndpoint, type InboundAddress, type InboundWebhook, type MailRoute } from '../../data/types'
 import { request } from '../../data/live'
@@ -56,10 +56,11 @@ function RouteDialog({ draft, version, destinations, owners, onClose, refreshWeb
   const [confirmDelete, setConfirmDelete] = useState(false)
   // Saved with the version this editor read (the overview's): a change made meanwhile to this route (or a new route for
   // its address) is said, never overwritten. One elsewhere in the workspace only sends it again with the new version.
+  const scope = useRequestScope()
   const versioned = async <T,>(send: (ifMatch: number | undefined) => Promise<T>): Promise<T> => {
     try { return await send(version) } catch (error) {
       if (version === undefined || !(error instanceof ApiError && error.code === 'VERSION_CONFLICT')) throw error
-      const now = await request<{ version: number; routes: MailRoute[] }>('/v1/routing')
+      const now = await request<{ version: number; routes: MailRoute[] }>('/v1/routing', { scope })
       const mine = route ? now.routes.find(r => r.id === route.id) : now.routes.find(r => r.match === draft.match)
       const set = (to: string[] | 'drop') => Array.isArray(to) ? [...to].sort().join(',') : to
       const same = route ? !!mine && mine.match === route.match && mine.enabled === route.enabled && set(mine.to) === set(route.to) : !mine
@@ -68,8 +69,8 @@ function RouteDialog({ draft, version, destinations, owners, onClose, refreshWeb
     }
   }
   const path = route ? `/v1/routing/routes/${encodeURIComponent(route.id)}` : '/v1/routing/routes'
-  const save = useApiMutation((_api, input: { match: string; to: string[] | 'drop'; enabled: boolean }) => versioned(ifMatch => request<MailRoute>(path, { method: route ? 'PATCH' : 'POST', body: input, ifMatch })), 'Saved', false, true, route?.id)
-  const remove = useApiMutation((_api, _: void) => versioned(ifMatch => request(path, { method: 'DELETE', ifMatch })), 'Removed', false, true, route?.id)
+  const save = useApiMutation((_api, input: { match: string; to: string[] | 'drop'; enabled: boolean }) => versioned(ifMatch => request<MailRoute>(path, { method: route ? 'PATCH' : 'POST', body: input, ifMatch, scope })), 'Saved', false, true, route?.id)
+  const remove = useApiMutation((_api, _: void) => versioned(ifMatch => request(path, { method: 'DELETE', ifMatch, scope })), 'Removed', false, true, route?.id)
   const normalized = match.trim().toLowerCase()
   const owner = owners.find(a => a.address === normalized || a.aliases.includes(normalized))
   const losesOwner = owner && (action !== 'deliver' || !selected.includes(owner.id))

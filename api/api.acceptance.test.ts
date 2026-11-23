@@ -14812,6 +14812,25 @@ describe('Dashboard API capabilities', () => {
     });
   });
 
+  test('campaign planning rate: a shared workspace plans at a quarter of the pooled SES rate, an exempt one at the full rate, and a BYO account at its own', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const wid = runtime.config.workspaceId, pool = '111122224444', own = '444455557777', byo = unique('byo-rate-');
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:feedback`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, pool]);
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1)', [byo]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,external_id,template_version,role_arn,platform_principal_arn,feedback_topic_arn)
+        VALUES ($1,$1,$2,'ready','byo',$3,gen_random_uuid(),'v4','fixture-role','fixture-platform',$4)`, [byo, REGION, own, `arn:aws:sns:${REGION}:${own}:feedback`]);
+      await db.query(`INSERT INTO provider_account_limits(aws_account_id,region,refresh_after,checked_at,max_send_rate,max_24_hour_send,sent_last_24_hours) VALUES ($1,$3,now(),now(),200,1000000,0),($2,$3,now(),now(),14,50000,0)`, [pool, own, REGION]);
+      // What the release planner reads: the rate, and beside it the daily quota, which is never divided.
+      const planned = async () => Object.fromEntries((await db.query('SELECT workspace_id,max_send_rate,max_24_hour_send FROM regional_workspace_limits WHERE workspace_id=ANY($1)', [[wid, byo]])).rows.map(r => [r.workspace_id, [r.max_send_rate, r.max_24_hour_send]]));
+      assert.deepEqual(await planned(), { [wid]: [50, 1000000], [byo]: [14, 50000] }, 'A shared workspace plans at a quarter of the pool account\'s rate.');
+      await db.query('UPDATE workspaces SET exempt_hosted_quotas=true WHERE id=$1', [wid]);
+      assert.deepEqual(await planned(), { [wid]: [200, 1000000], [byo]: [14, 50000] }, 'Exempt from hosted quotas: the full pooled rate. The BYO account is unchanged.');
+      await db.query('UPDATE workspaces SET exempt_hosted_quotas=false WHERE id=$1', [wid]);
+      assert.deepEqual((await planned())[wid], [50, 1000000], 'The flag off again: the quarter again.');
+    });
+  });
+
   test('sender score: the growth pace is for new senders only: an operator override or a clean track record SES accepted before the pace existed skips it, once and audited; later acceptances, seeds, one recipient or domain and bounces do not', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
       const { refreshStanding } = await import('./src/standing.js');
@@ -15326,7 +15345,11 @@ describe('Dashboard API capabilities', () => {
       // Built where it is thrown, as a driver's error is: a stack shows where an error was made, and the log keeps Bane's frames.
       t.mock.method(runtime.db, 'execute', ((...args: Parameters<typeof execute>) => { if (fault) { const thrown = fault as Error; fault = null; throw new Error(thrown.message, { cause: thrown.cause }); } return execute(...args); }) as typeof execute);
       const refused = async (failure: unknown) => { fault = failure; logs.length = 0; return request('GET', '/v1/emails', reader.secret); };
-      for (const failure of [wrapped('58000', 'Failed to acquire a connection from the pool.'), wrapped('58000', 'Server connection attempt failed: connection_refused'), wrapped('53300', 'sorry, too many clients already'), wrapped('08006', 'connection failure'), new Error('Connection terminated unexpectedly')]) {
+      // So is a statement Postgres refused or cancelled, keeping nothing of it: a read-only cluster (PlanetScale's pg_readonly
+      // arrives as XX000 with this message), a full disk, and a statement past its time or lock limit.
+      const readOnly = wrapped('XX000', 'pg_readonly: invalid statement because cluster is read-only');
+      for (const failure of [wrapped('58000', 'Failed to acquire a connection from the pool.'), wrapped('58000', 'Server connection attempt failed: connection_refused'), wrapped('53300', 'sorry, too many clients already'), wrapped('08006', 'connection failure'), new Error('Connection terminated unexpectedly'),
+        readOnly, wrapped('25006', 'cannot execute INSERT in a read-only transaction'), wrapped('53100', 'could not extend file "base/16384/16397": No space left on device'), wrapped('57014', 'canceling statement due to statement timeout'), wrapped('55P03', 'canceling statement due to lock timeout')]) {
         const reply = await refused(failure);
         const body = error(reply, 503, 'DATABASE_UNAVAILABLE');
         assert.deepEqual([body.retryable, reply.headers.get('retry-after')], [true, '1']);
@@ -15338,6 +15361,8 @@ describe('Dashboard API capabilities', () => {
       const broken = await refused(wrapped('42703', 'column "missing" does not exist'));
       error(broken, 500, 'INTERNAL_ERROR');
       assert.equal(logs.find(line => line.code === 'INTERNAL_ERROR')?.databaseCode, '42703');
+      // XX000 is every internal error: only the read-only message is transient.
+      error(await refused(wrapped('XX000', 'unexpected chunk number 2 (expected 1) for toast value 16397')), 500, 'INTERNAL_ERROR');
       assert.equal(ok(await request('GET', '/v1/emails', reader.secret)).data.length >= 0, true, 'the next request succeeds');
       t.mock.restoreAll();
       for (const level of ['error', 'warn', 'info'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch {} });
@@ -15353,7 +15378,37 @@ describe('Dashboard API capabilities', () => {
       };
       assert.deepEqual(await job(unique('refused-job-'), wrapped('58000', 'Failed to acquire a connection from the pool.')), { status: 'pending', attempts: 1, last_error: 'DATABASE_UNAVAILABLE', later: true });
       assert.equal(logs.find(line => line.code === 'DATABASE_UNAVAILABLE' && line.operation === 'campaign.run')?.databaseCode, '58000');
+      assert.deepEqual(await job(unique('read-only-job-'), readOnly), { status: 'pending', attempts: 1, last_error: 'DATABASE_UNAVAILABLE', later: true });
       assert.deepEqual(await job(unique('broken-job-'), wrapped('42703', 'column "missing" does not exist')), { status: 'failed', attempts: 1, last_error: 'JOB_INTERNAL_ERROR', later: true });
+    });
+  });
+
+  // Production, 2026-11-23: the database's disk filled and the cluster was read-only for three and a half minutes. Every
+  // write was refused and answered 500 INTERNAL_ERROR, not retryable, so callers dropped sends they should have retried.
+  test('database refusals: a write a read-only database refuses and a statement cancelled at its time limit are a retryable 503 that kept nothing; the retry succeeds', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const wid = runtime.config.workspaceId, name = unique('refused-list-'), logs: Json[] = [];
+      for (const level of ['error', 'warn'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch {} });
+      const kept = async () => (await db.query('SELECT count(*)::int AS n FROM audience_lists WHERE workspace_id = $1 AND name = $2', [wid, name])).rows[0].n;
+      // Each refusal is Postgres's own, set up inside a savepoint that undoes it.
+      const refused = async (sqlstate: string, setup: string) => {
+        logs.length = 0;
+        await db.query(`SAVEPOINT refused; ${setup}`);
+        let reply: Reply;
+        try { reply = await local('POST', '/v1/lists', { name }); } finally { await db.query('ROLLBACK TO SAVEPOINT refused; RELEASE SAVEPOINT refused'); }
+        const body = error(reply, 503, 'DATABASE_UNAVAILABLE');
+        assert.deepEqual([body.retryable, reply.headers.get('retry-after'), logs.find(line => line.code === 'DATABASE_UNAVAILABLE' && line.stack)?.databaseCode, await kept()], [true, '1', sqlstate, 0]);
+      };
+      const onInsert = (body: string) => `CREATE FUNCTION refuse_list() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN ${body} END $$;
+        CREATE TRIGGER refuse_list BEFORE INSERT ON audience_lists FOR EACH STATEMENT EXECUTE FUNCTION refuse_list()`;
+      // PlanetScale's read-only mode raises no SQLSTATE of its own: XX000 with this message.
+      await refused('XX000', onInsert("RAISE EXCEPTION 'pg_readonly: invalid statement because cluster is read-only' USING ERRCODE = 'XX000';"));
+      // Postgres's own read-only refusal, of the request's first write.
+      await refused('25006', 'SET LOCAL transaction_read_only = on');
+      // A statement past statement_timeout is cancelled.
+      await refused('57014', `${onInsert('PERFORM pg_sleep(30); RETURN NULL;')}; SET LOCAL statement_timeout = '1s'`);
+      assert.equal(ok(await local('POST', '/v1/lists', { name }), 201).name, name);
+      assert.equal(await kept(), 1);
     });
   });
 });
@@ -15543,6 +15598,65 @@ describe('Campaign authorization and dispatch credentials', () => {
     assert.deepEqual(page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, owner.secret)), []);
   });
 
+  // tear/workspace-isolation witness BUG-ISO-02: createCampaign and updateCampaign stored another workspace's audience IDs.
+  // Another workspace's list (one subscribed member) and segment, IDs nobody has, and this workspace's own list and member.
+  async function audienceIsolation({ runtime, db, local }: Parameters<Parameters<typeof simulatedSesFixture>[1]>[0]) {
+    const wid = runtime.config.workspaceId, other = unique('other-workspace');
+    const theirs = { list: unique('lst'), segment: unique('seg') }, nobodys = { list: unique('lst'), segment: unique('seg') };
+    await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)', [other]);
+    await db.query("INSERT INTO audience_lists(id,workspace_id,name) VALUES($1,$2,'Theirs')", [theirs.list, other]);
+    await db.query(`INSERT INTO audience_segments(id,workspace_id,name,rule) VALUES($1,$2,'Theirs','{"field":"lastOpenAt","operator":"inactive","days":90}')`, [theirs.segment, other]);
+    const member = `WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES($3,$1,$4,'subscribed') RETURNING id)
+      INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM c`;
+    await db.query(member, [other, theirs.list, unique('con'), 'theirs@example.net']);
+    const list = ok(await local('POST', '/v1/lists', { name: 'Ours' }), 201);
+    await db.query(member, [wid, list.id, unique('con'), 'ours@example.net']);
+    // Every way an audience names a list or a segment.
+    const naming = (ids: { list: string; segment: string }): Json[] => [{ listId: ids.list }, { listId: list.id, segmentId: ids.segment }, { listId: list.id, excludeListIds: [ids.list] }, { listId: list.id, excludeSegmentIds: [ids.segment] }];
+    const base = { name: 'Isolation', from: 'sender@example.com', subject: 'Hello', html: '<p>Hello</p>' };
+    const own = ok(await local('POST', '/v1/campaigns', { ...base, audience: { listId: list.id } }), 201);
+    assert.deepEqual(ok(await local('GET', `/v1/campaigns/${own.id}/audience`)), { matched: 1, eligible: 1, suppressed: 0, unsubscribed: 0 });
+    return { wid, list, base, own, foreign: naming(theirs), unknown: naming(nobodys) };
+  }
+  test('a campaign audience may name only lists and segments of its own workspace: an ID of another workspace is refused like one nobody has', async t => {
+    await simulatedSesFixture(t, async fixture => {
+      const { db, local } = fixture, { wid, list, base, own, foreign, unknown } = await audienceIsolation(fixture);
+      const refused = (reply: Reply) => { const e = error(reply, 404, 'NOT_FOUND'); return [e.code, e.message, e.field ?? null]; };
+      const save = (audience: Json) => local('PATCH', `/v1/campaigns/${own.id}`, { revision: own.revision, draft: { ...own.draft, audience } });
+      for (const [i, audience] of foreign.entries()) {
+        assert.deepEqual(refused(await local('POST', '/v1/campaigns', { ...base, audience })), refused(await local('POST', '/v1/campaigns', { ...base, audience: unknown[i] })), JSON.stringify(audience));
+        assert.deepEqual(refused(await save(audience)), refused(await save(unknown[i]!)), JSON.stringify(audience));
+      }
+      assert.deepEqual((await db.query('SELECT id, draft->\'audience\' AS audience FROM sending_campaigns WHERE workspace_id=$1', [wid])).rows, [{ id: own.id, audience: { listId: list.id } }], 'Nothing was stored.');
+    });
+  });
+  test('a campaign draft stored with a list or segment of another workspace reads nothing of it and stays editable', async t => {
+    // A draft stored before the check above (written here past the API) keeps the ID. Counting answers as for a list or
+    // segment that doesn't exist, launching is refused and queues nothing, and the draft is still listed, read and edited.
+    await simulatedSesFixture(t, async fixture => {
+      const { db, local } = fixture, { wid, base, own, foreign } = await audienceIsolation(fixture);
+      let revision = own.revision as number;
+      for (const [i, audience] of foreign.entries()) {
+        await db.query("UPDATE sending_campaigns SET draft=jsonb_set(draft,'{audience}',$2::jsonb) WHERE id=$1", [own.id, JSON.stringify(audience)]);
+        const stored = ok(await local('GET', `/v1/campaigns/${own.id}`));
+        assert.deepEqual(stored.draft.audience, audience);
+        error(await local('GET', `/v1/campaigns/${own.id}/audience`), 404, 'NOT_FOUND');
+        const launch = await local('POST', `/v1/campaigns/${own.id}/send`, { revision });
+        assert.ok(launch.status >= 400, `launch answered ${launch.status}`);
+        const edited = ok(await local('PATCH', `/v1/campaigns/${own.id}`, { revision, draft: { ...stored.draft, subject: `Edited ${i}` } }));
+        assert.deepEqual([edited.draft.audience, edited.draft.subject, edited.state], [audience, `Edited ${i}`, 'draft']);
+        revision = edited.revision;
+      }
+      assert.ok(ok(await local('GET', '/v1/campaigns')).data.some((row: Json) => row.id === own.id));
+      assert.deepEqual((await db.query('SELECT (SELECT count(*)::int FROM sending_emails WHERE workspace_id=$1) AS emails, (SELECT count(*)::int FROM sending_campaign_reviews WHERE workspace_id=$1) AS reviews', [wid])).rows[0], { emails: 0, reviews: 0 });
+      // The same for a list of this workspace deleted after its draft was saved.
+      const gone = ok(await local('POST', '/v1/lists', { name: 'Gone' }), 201);
+      const kept = ok(await local('POST', '/v1/campaigns', { ...base, audience: { listId: gone.id } }), 201);
+      ok(await local('DELETE', `/v1/lists/${gone.id}`));
+      assert.deepEqual(ok(await local('PATCH', `/v1/campaigns/${kept.id}`, { revision: kept.revision, draft: { ...kept.draft, subject: 'Edited' } })).draft.audience, { listId: gone.id });
+      error(await local('GET', `/v1/campaigns/${kept.id}/audience`), 404, 'NOT_FOUND');
+    });
+  });
   test('revoking the originating send key stops its future scheduled job before simulation or SES acceptance', async t => {
     const owner = await keyFixture(t);
     const origin = await keyFixture(t, { permissions: ['send'] });
@@ -31374,6 +31488,52 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await mailboxEventJobs['mailbox.resumeDeliveries']!(runtime,{hook},{id:'job_held_resume_2',workspaceId:wid,attempts:1});
         assert.deepEqual((await db.query("SELECT attempts FROM jobs WHERE workspace_id=$1 AND type='mailbox.webhook' AND status='pending'",[wid])).rows,[{attempts:2}]);
       }finally{runtime.webhookFetch=transport;}
+    });
+  });
+  // tear/workspace-isolation witness BUG-ISO-03: createInboundWebhook and updateInboundWebhook stored another workspace's address IDs.
+  // Another workspace's receiving address, an ID nobody has, and this workspace's own address with a webhook limited to it.
+  async function addressIsolation({ runtime, db, local }: Parameters<Parameters<typeof simulatedSesFixture>[1]>[0]) {
+    const wid = runtime.config.workspaceId, other = unique('other-workspace'), theirs = unique('mbx'), nobodys = unique('mbx'), address = `box@${other}.invalid`;
+    await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)', [other]);
+    await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,$3,$4,'active')", [theirs, other, address.split('@')[1], REGION]);
+    await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES($1,$2,$1,$3,'inbox','forever')", [theirs, other, address]);
+    const ours = ok(await local('POST', '/v1/inboxes', { type: 'sandbox' }), 201).id as string, url = 'https://example.com/hooks/isolation';
+    const hook = ok(await local('POST', '/v1/inbound/webhooks', { url, addressIds: [ours] }), 201);
+    return { wid, other, theirs, nobodys, ours, url, hook, path: `/v1/inbound/webhooks/${hook.id}` };
+  }
+  test('an inbound webhook may name only addresses of its own workspace: an ID of another workspace is refused like one nobody has', async t => {
+    await simulatedSesFixture(t, async fixture => {
+      const { db, local } = fixture, { wid, theirs, nobodys, ours, url, path } = await addressIsolation(fixture);
+      const refused = (reply: Reply) => { const e = error(reply, 422, 'MAILBOX_NOT_FOUND'); return [e.code, e.message, e.field]; };
+      for (const ids of [[theirs], [ours, theirs]]) {
+        const unknown = ids.map(id => id === theirs ? nobodys : id);
+        assert.deepEqual(refused(await local('POST', '/v1/inbound/webhooks', { url, addressIds: ids })), refused(await local('POST', '/v1/inbound/webhooks', { url, addressIds: unknown })), ids.join());
+        assert.deepEqual(refused(await local('PATCH', path, { addressIds: ids })), refused(await local('PATCH', path, { addressIds: unknown })), ids.join());
+      }
+      assert.deepEqual(ok(await local('GET', path)).addressIds, [ours]);
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM mailbox_webhooks WHERE workspace_id=$1 AND (mailbox_ids ? $2 OR mailbox_ids ? $3)', [wid, theirs, nobodys])).rows[0].n, 0, 'Nothing was stored.');
+    });
+  });
+  test('an inbound webhook stored with an address of another workspace gets none of its mail and stays editable', async t => {
+    // A webhook stored before the check above (written here past the API) keeps the ID. The other workspace's events reach
+    // no webhook here, and the ID matches no address of this workspace, so the webhook gets none of this workspace's mail
+    // either. A webhook for every address is the control.
+    await simulatedSesFixture(t, async fixture => {
+      const { recordEvents } = await import('./src/mailbox-events.js');
+      const { runtime, db, local } = fixture, { wid, other, theirs, nobodys, ours, url, hook, path } = await addressIsolation(fixture);
+      await db.query('UPDATE mailbox_webhooks SET mailbox_ids=$2::jsonb WHERE id=$1', [hook.id, JSON.stringify([theirs])]);
+      const every = ok(await local('POST', '/v1/inbound/webhooks', { url: `${url}-every` }), 201);
+      const copies = async () => (await db.query('SELECT (SELECT count(*)::int FROM mailbox_webhook_deliveries WHERE webhook_id=$1) AS filtered, (SELECT count(*)::int FROM mailbox_webhook_deliveries WHERE webhook_id=$2) AS every', [hook.id, every.id])).rows[0];
+      await recordEvents(runtime.db, other, [{ type: 'message.received', mailboxId: theirs, data: {} }]);
+      assert.deepEqual(await copies(), { filtered: 0, every: 0 });
+      await recordEvents(runtime.db, wid, [{ type: 'message.received', mailboxId: ours, data: {} }]);
+      assert.deepEqual(await copies(), { filtered: 0, every: 1 });
+      // It is still read, listed and changed with the IDs it has, as is one whose address was since deleted.
+      assert.deepEqual(ok(await local('GET', path)).addressIds, [theirs]);
+      assert.ok(ok(await local('GET', '/v1/inbound/webhooks')).data.some((row: Json) => row.id === hook.id));
+      assert.deepEqual(ok(await local('PATCH', path, { description: 'Edited', addressIds: [theirs, ours] })).addressIds, [theirs, ours]);
+      await db.query('UPDATE mailbox_webhooks SET mailbox_ids=$2::jsonb WHERE id=$1', [hook.id, JSON.stringify([nobodys])]);
+      assert.deepEqual(ok(await local('PATCH', path, { description: 'Edited again', addressIds: [nobodys] })).addressIds, [nobodys]);
     });
   });
   test('a plain event subscription takes the delivery fence: paused after its claim, claimed stale or behind the breaker',async t=>{

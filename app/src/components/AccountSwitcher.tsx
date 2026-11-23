@@ -3,6 +3,7 @@ import * as DropdownPrimitive from '@radix-ui/react-dropdown-menu'
 import { useQueryClient } from '@tanstack/react-query'
 import { Check, ChevronDown, LifeBuoy, LogOut, Plug, Plus, StickyNote, UserPlus } from 'lucide-react'
 import { sectionPath, useApiMutation, useSession } from '../data/context'
+import { isAbortError } from '../data/live'
 import { accountApi, accountsKey, initials, useAccounts, type ConnectedAccount } from '../data/accounts'
 import { useMembershipCache, workspaceApi } from '../data/workspaces'
 import { useCompactShell, usePhone } from '../lib/media'
@@ -66,7 +67,7 @@ export function AccountSwitcher({ onConnectAgent }: { onConnectAgent?: () => voi
   const workspace = self.workspaces.find(item => item.id === identity.workspaceId)
   async function run(action: () => Promise<void> | void, failure: string) {
     setOpen(false); setBusy(true)
-    try { await action() } catch (error) { toast(errorText(error, failure), 'error'); void memberships.refresh() } finally { setBusy(false) }
+    try { await action() } catch (error) { if (isAbortError(error)) return; toast(errorText(error, failure), 'error'); void memberships.refresh() } finally { setBusy(false) }
   }
   const sections: Entry[][] = accounts.map(account => {
     const active = account.id === self.id

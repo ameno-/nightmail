@@ -12,9 +12,9 @@ import { Link, useNavigate } from 'react-router'
 import { useQueryClient } from '@tanstack/react-query'
 import { Alert, Button, ConfirmDialog, Dialog, Field, Input, Select, type SelectOption } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
-import { useApiDef } from '../../data/context'
+import { useApiDef, useRequestScope } from '../../data/context'
 import { queries } from '../../data/queries'
-import { request } from '../../data/live'
+import { isAbortError, request } from '../../data/live'
 import { staleAfterWrite } from '../../data/invalidation'
 import { ApiError, errorText, type InboundAddress, type MailboxDomain } from '../../data/types'
 import { idempotencyFor, addressOption } from './shared'
@@ -230,12 +230,13 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
     if (!Object.keys(found).length) setStep('flow')
   }
 
+  const scope = useRequestScope()
   const own = saved?.address ?? form.address.trim().toLowerCase()
   const ownKeys = () => new Set((boxes.data ?? []).map(b => b.key).filter((k): k is string => !!k))
   /** A key for an inbox a rule names, which a new one gets from its address (another inbox: PATCH, a write to its name only). */
   async function keyed(box: InboundAddress): Promise<string> {
     if (box.key) return box.key
-    const updated = await request<InboundAddress>(`/v1/inbound/addresses/${encodeURIComponent(box.id)}`, { method: 'PATCH', body: { key: freeName(box.address.split('@')[0]!, ownKeys()) } })
+    const updated = await request<InboundAddress>(`/v1/inbound/addresses/${encodeURIComponent(box.id)}`, { method: 'PATCH', body: { key: freeName(box.address.split('@')[0]!, ownKeys()) }, scope })
     return updated.key!
   }
   const targetError = (pick: Slot, value: string) => {
@@ -282,12 +283,12 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
       let thing = made.current.get(cache)
       if (!thing && type === 'inbox') {
         const address = value.toLowerCase(), body = { address, key: freeName(address.split('@')[0]!, new Set([...ownKeys(), ...(ownKey ? [ownKey] : [])])) }
-        const box = await request<InboundAddress>('/v1/inbound/addresses', { method: 'POST', body, idempotencyKey: idempotencyFor(attempt(cache), body) })
+        const box = await request<InboundAddress>('/v1/inbound/addresses', { method: 'POST', body, idempotencyKey: idempotencyFor(attempt(cache), body), scope })
         thing = { id: box.id, name: box.address, key: box.key }
         made.current.set(cache, thing)
       } else if (!thing) {
         // A forward is made first: its recipient confirms by email before a route or rule can use it.
-        const post = (body: Record<string, unknown>) => request<{ id: string; name: string; status: string }>('/v1/endpoints', { method: 'POST', body, idempotencyKey: idempotencyFor(attempt(cache), body) })
+        const post = (body: Record<string, unknown>) => request<{ id: string; name: string; status: string }>('/v1/endpoints', { method: 'POST', body, idempotencyKey: idempotencyFor(attempt(cache), body), scope })
         const body = { type, name: names[side]!, address: value, ...(from ? { from } : {}) }
         let created: { id: string; name: string; status: string }
         try { created = await post({ ...body, preverify: true }) } catch (e) { if (!(e instanceof ApiError && e.code === 'PREVERIFY_NOT_ALLOWED')) throw e; created = await post(body) }
@@ -296,7 +297,7 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
         if (created.status !== 'ready') { setWaiting(value); return 'waiting' }
       } else if (type === 'forward') {
         // Made by an earlier try and waiting for its recipient: saved once they confirm.
-        const now = await request<{ status: string }>(`/v1/endpoints/${encodeURIComponent(thing.name)}`)
+        const now = await request<{ status: string }>(`/v1/endpoints/${encodeURIComponent(thing.name)}`, { scope })
         if (now.status !== 'ready') { setWaiting(value); return 'waiting' }
       }
       out[side] = type === 'inbox' ? { param: `inbox:${thing.key ?? ''}`, route: [thing.id], chat: false } : { param: thing.name, route: [thing.id], chat: false }
@@ -339,7 +340,7 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
         const flow = { ...(endpoints.length ? { endpoints } : {}), ...(rule ? { split: rule, deliver: [] } : r.then.route !== null ? { deliver: r.then.route } : {}) }
         const value = form.address.trim().toLowerCase(), sender = form.publicAddress.trim().toLowerCase()
         const body = { address: value, displayName: form.displayName.trim() || null, ...(ownKey ? { key: ownKey } : {}), ...(sender ? { publicAddress: sender } : {}), ...(form.lifetime ? { ttlSeconds: Number(form.lifetime) } : {}), ...(Object.keys(flow).length ? { flow } : {}) }
-        const self = await request<InboundAddress>('/v1/inbound/addresses', { method: 'POST', body, idempotencyKey: idempotencyFor(attempt('address'), body) })
+        const self = await request<InboundAddress>('/v1/inbound/addresses', { method: 'POST', body, idempotencyKey: idempotencyFor(attempt('address'), body), scope })
         setSaved(self); setEditing(true)
         await refresh()
         onSaved?.(self)
@@ -366,6 +367,7 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
       setPlan(null); setOpened(null)
       setStep('done')
     } catch (error) {
+      if (isAbortError(error)) return
       if (error instanceof ApiError && error.code === 'VERSION_CONFLICT') setConflict(true)
       else if (error instanceof ApiError && error.fields['params.value']) setErrors({ value: error.fields['params.value'] })
       else setProblem(error)
@@ -375,7 +377,7 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
    *  the workspace changed, it is sent once more with the new one; when this address's flow changed, Conflict says so. */
   async function write(change: Change, version: number | undefined, retried: boolean): Promise<void> {
     try {
-      await request(`/v1/inbound/addresses/${encodeURIComponent(saved!.id)}/flow`, { method: 'PATCH', body: change, ifMatch: version })
+      await request(`/v1/inbound/addresses/${encodeURIComponent(saved!.id)}/flow`, { method: 'PATCH', body: change, ifMatch: version, scope })
     } catch (error) {
       if (retried || !(error instanceof ApiError && error.code === 'VERSION_CONFLICT')) throw error
       const fresh = (await overview.refetch()).data

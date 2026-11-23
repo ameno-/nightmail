@@ -11,6 +11,7 @@ const def = <T>(key: readonly unknown[], read: QueryDef<T>['read']): QueryDef<T>
 
 export const queries = {
   overview: (regionId: string, range: TimeRange, stream: Stream | 'all') => def(['overview', regionId, range, stream], (api, signal) => api.overview.get({ regionId, range, stream: stream === 'all' ? undefined : stream }, signal)),
+  recentCampaigns: (regionId: string) => def(['campaigns', 'recent', regionId], (api, signal) => api.campaigns.list({ regionId, pageSize: 4 }, signal)),
   senderScore: () => def(['sender-score'], (api, signal) => api.senderScore.get(signal)),
   emails: (params: PageRequest) => def(['emails', params], (api, signal) => api.emails.list(params, signal)),
   logs: (params: PageRequest & { direction?: LogDirection }) => def(['logs', params], (api, signal) => api.logs.list(params, signal)),
