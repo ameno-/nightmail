@@ -14,7 +14,7 @@ import { receivingIssueReason, receivingIssueTitle } from './receiving-issue-tit
 import { AdminOnlyPage } from './admin-only'
 import { DomainDetailSkeleton, domainColumns } from './skeletons'
 import { DnsRecordTable, DnsWaitNote, DomainRecords, domainState, recordRow, recordsFor, useDnsSetup, useDomain, zoneLines } from './domain-records'
-import { invalidate, resourceOf } from '../../data/invalidation'
+import { invalidate, invalidateResources, resourceOf } from '../../data/invalidation'
 import { ReceivingHosts, useReceivingHosts } from './receiving-hosts'
 
 function downloadDnsRecords(domain: string, records: DnsRecord[]) {
@@ -206,7 +206,7 @@ function DomainDetail() {
     <ConfirmDialog open={!!moveMail} onOpenChange={open => { if (!open) setMoveMail(null) }} title={`Move mail for ${moveMail?.host ?? current.name}?`}
       description={`${moveMail?.message ?? ''} Mail stops arriving there once the MX record changes.`} confirmLabel={`Use ${moveMail?.host ?? current.name} anyway`} danger
       onConfirm={() => choose.mutateAsync({ host: moveMail!.host, confirm: true })} />
-    <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} title={`Delete ${current.name}?`} description="Sending from it stops. Its DNS records stay at your DNS provider until you remove them." confirmLabel="Delete domain" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(id); navigate('/domains', { replace: true }); client.removeQueries({ predicate: query => query.queryKey[0] === 'nightmail' && resourceOf(query.queryKey) === 'domain' && query.queryKey[2] === id }); void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'nightmail' && resourceOf(query.queryKey) === 'domains' }) }} />
+    <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} title={`Delete ${current.name}?`} description="Sending from it stops. Its DNS records stay at your DNS provider until you remove them." confirmLabel="Delete domain" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(id); navigate('/domains', { replace: true }); client.removeQueries({ predicate: query => query.queryKey[0] === 'nightmail' && resourceOf(query.queryKey) === 'domain' && query.queryKey[2] === id }); void invalidateResources(client, invalidate.domains.filter(r => r !== 'domain')) }} />
     <ConfirmDialog open={removingMailFrom.open} onOpenChange={open => setRemovingMailFrom(state => ({ ...state, open }))} title="Remove custom MAIL FROM?"
       description={`Mail from ${current.name} goes back to the default MAIL FROM, amazonses.com. You can then delete the MX and SPF records for ${removingMailFrom.name} at your DNS provider.`} confirmLabel="Remove" danger pending={removeMailFrom.isPending} onConfirm={() => removeMailFrom.mutateAsync(id)} />
     <Dialog open={mailFromOpen} onOpenChange={next => {if (!configureMailFrom.isPending) setMailFromOpen(next)}} title={current.mailFromDomain ? 'Change custom MAIL FROM' : 'Add custom MAIL FROM'} footer={<><Button disabled={configureMailFrom.isPending} onClick={() => setMailFromOpen(false)}>Cancel</Button><Button variant="primary" loading={configureMailFrom.isPending} type="submit" form="configure-mail-from">Save</Button></>}>

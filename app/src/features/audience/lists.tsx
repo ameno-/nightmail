@@ -43,7 +43,7 @@ export function ListDetailPage() {
   const query = useApiQuery(['lists', id], (api, signal) => api.lists.get(id, signal))
   const [importing, setImporting] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
-  const remove = useApiMutation((api, listId: string) => api.lists.remove(listId), 'List deleted', false, invalidate.lists)
+  const remove = useApiMutation((api, listId: string) => api.lists.remove(listId), 'List deleted', false, invalidate.listRemove)
   // A newsletter is its list: deleting the list takes its sidebar item with it (the session's copy of /v1/me).
   const cache = useQueryClient(), newsletter = useNewsletters().some(item => item.id === id)
   async function deleteList() { await remove.mutateAsync(id); if (newsletter) void cache.invalidateQueries({ queryKey: ['identity'] }); navigate('/audience/lists') }
