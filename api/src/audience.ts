@@ -185,7 +185,7 @@ export async function countCampaignAudience(db: DbExecutor, identity: Actor, spe
     FROM ${contacts} WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)}`)).rows;
   return row!;
 }
-const SNAPSHOT_MAX_MATCHED = 2_000_000, SNAPSHOT_MAX_RECIPIENT_BYTES = 1_048_576, SNAPSHOT_MAX_REVIEW_BYTES = 1_073_741_824, SNAPSHOT_CHUNK_ROWS = 100_000;
+const SNAPSHOT_MAX_MATCHED = 2_000_000, SNAPSHOT_MAX_RECIPIENT_BYTES = 1_048_576, SNAPSHOT_MAX_REVIEW_BYTES = 1_073_741_824;
 type SnapshotCounts = { matched: number; eligible: number; suppressed: number; unsubscribed: number; bytes: string | number; captured: number; maxBytes?: number };
 function checkedSnapshot(row: SnapshotCounts, requiredNotice: boolean) {
   if (row.matched > SNAPSHOT_MAX_MATCHED) throw new ApiError(422, 'AUDIENCE_LIMIT_EXCEEDED', 'Campaign reviews support at most 2,000,000 matching contacts. No recipients were truncated.');
@@ -258,29 +258,21 @@ export async function snapshotCampaignAudience(db: DbExecutor, identity: Actor, 
   if (!eligible) throw new ApiError(422, 'EMPTY_AUDIENCE', requiredNotice ? 'This campaign has no recipients who can receive email.' : 'This campaign has no eligible subscribed recipients.');
   // Skinny sort over (smallint, text) only (~132 MB at 2M vs 430 MB JSONB sort), hashed by ID so time-ordered UUIDv7 IDs keep the Hosted list probe uniform; drop audience_snapshot immediately.
   await db.execute(sql`CREATE TEMP TABLE audience_ordered ON COMMIT DROP AS SELECT (row_number() OVER (ORDER BY rank, hashtextextended(id, 0), id))::int AS ordinal, id FROM audience_snapshot WHERE eligible`);
-  await db.execute(sql`DROP TABLE pg_temp.audience_snapshot; CREATE UNIQUE INDEX ON audience_ordered(ordinal); ANALYZE audience_ordered`);
-  const chunkRecipientExpr = recipientJsonSql(propertyKeys, sql`c.id`, sql`c.email`, sql`c.name`, sql`c.properties`);
-  let captured = 0, totalBytes = 0, maxBytes = 0;
-  for (let from = 0; from < eligible; from += SNAPSHOT_CHUNK_ROWS) {
-    const { rows: [chunk] } = await db.execute<{ captured: number; max_bytes: number; total_bytes: string }>(sql`
-      WITH inserted AS (
-        INSERT INTO sending_review_recipients(review_id, ordinal, recipient, recipient_bytes)
-        SELECT ${reviewId}, o.ordinal, r.recipient, octet_length(r.recipient::text)
-        FROM audience_ordered o
-        JOIN audience_contacts c ON c.workspace_id = ${identity.workspaceId} AND c.id = o.id
-        CROSS JOIN LATERAL (SELECT ${chunkRecipientExpr} AS recipient) r
-        WHERE o.ordinal > ${from} AND o.ordinal <= ${from + SNAPSHOT_CHUNK_ROWS}
-        RETURNING recipient_bytes
-      )
-      SELECT count(*)::int AS captured, coalesce(max(recipient_bytes), 0)::int AS max_bytes, coalesce(sum(recipient_bytes), 0)::bigint AS total_bytes FROM inserted`);
-    captured += chunk?.captured ?? 0;
-    maxBytes = Math.max(maxBytes, chunk?.max_bytes ?? 0);
-    totalBytes += Number(chunk?.total_bytes ?? 0);
-    if (maxBytes > SNAPSHOT_MAX_RECIPIENT_BYTES || totalBytes > SNAPSHOT_MAX_REVIEW_BYTES) {
-      throw new ApiError(413, 'CAMPAIGN_RECIPIENT_DATA_TOO_LARGE', 'Referenced personalization exceeds 1 GiB per review or 1 MiB per recipient.');
-    }
-  }
-  return checkedSnapshot({ matched, eligible, suppressed, unsubscribed, captured, bytes: totalBytes, maxBytes }, requiredNotice);
+  await db.execute(sql`DROP TABLE pg_temp.audience_snapshot`);
+  // Single hash-join INSERT builds recipient JSONB once without 18 x 100k random PK lookups (or an index on audience_ordered);
+  // checkedSnapshot aborts all-or-nothing with 413 if any recipient exceeds 1 MiB or the review exceeds 1 GiB.
+  const insertRecipientExpr = recipientJsonSql(propertyKeys, sql`c.id`, sql`c.email`, sql`c.name`, sql`c.properties`);
+  const { rows: [inserted] } = await wholeJoins<{ captured: number; max_bytes: number; total_bytes: string }>(sql`
+    WITH inserted AS (
+      INSERT INTO sending_review_recipients(review_id, ordinal, recipient, recipient_bytes)
+      SELECT ${reviewId}, o.ordinal, r.recipient, octet_length(r.recipient::text)
+      FROM audience_ordered o
+      JOIN audience_contacts c ON c.workspace_id = ${identity.workspaceId} AND c.id = o.id
+      CROSS JOIN LATERAL (SELECT ${insertRecipientExpr} AS recipient) r
+      RETURNING recipient_bytes
+    )
+    SELECT count(*)::int AS captured, coalesce(max(recipient_bytes), 0)::int AS max_bytes, coalesce(sum(recipient_bytes), 0)::bigint AS total_bytes FROM inserted`);
+  return checkedSnapshot({ matched, eligible, suppressed, unsubscribed, captured: inserted?.captured ?? 0, bytes: Number(inserted?.total_bytes ?? 0), maxBytes: inserted?.max_bytes ?? 0 }, requiredNotice);
 }
 export async function isSuppressed(runtime: Runtime, identity: Actor, email: string): Promise<boolean> {
   const [row] = await runtime.db.select({ suppressed: contacts.suppressed }).from(contacts).where(and(scope(contacts, identity), eq(contacts.email, email.trim().toLowerCase()))).limit(1);
