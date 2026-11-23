@@ -5,9 +5,9 @@ import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { Check, X } from 'lucide-react'
 import { Button, ConfirmDialog, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, IconButton, LoadingRegion, PageHeader, Pagination, SearchField, Select, StatusBadge, Tabs, useToast } from '../../components/ui'
-import { useApiDef, useApiQuery, useWorkspaceAccess } from '../../data/context'
+import { useApiDef, useApiQuery, useRequestScope, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
-import { request } from '../../data/live'
+import { isAbortError, request } from '../../data/live'
 import { errorText, type InboundAddress } from '../../data/types'
 import { number } from '../../lib/format'
 import { useMediaQuery } from '../../lib/media'
@@ -196,12 +196,13 @@ function DestinationsTab({ overview, refresh }: { overview: Overview; refresh: (
   // Kept after closing, so the dialog's title and fields don't change while it animates out.
   const [editing, setEditing] = useState<EditableEndpoint | null>(null), [editOpen, setEditOpen] = useState(false)
   const [deleting, setDeleting] = useState<OverviewEndpoint | null>(null), [deleteOpen, setDeleteOpen] = useState(false)
+  const scope = useRequestScope()
   async function act(e: OverviewEndpoint, path: string, method: string, body: unknown, done: string) {
     try {
-      const result = await request<{ ok?: boolean; error?: string | null }>(`/v1/endpoints/${encodeURIComponent(e.name)}${path}`, { method, ...(body === undefined ? {} : { body }) })
+      const result = await request<{ ok?: boolean; error?: string | null }>(`/v1/endpoints/${encodeURIComponent(e.name)}${path}`, { method, ...(body === undefined ? {} : { body }), scope })
       toast(result.ok === false ? `${e.name} answered ${result.error ?? 'an error'}.` : done, result.ok === false ? 'error' : 'success')
       reload()
-    } catch (error) { toast(errorText(error), 'error') }
+    } catch (error) { if (!isAbortError(error)) toast(errorText(error), 'error') }
   }
   // A webhook opens its own page (events, deliveries, headers, secret), named or not.
   const webhookPage = (e: OverviewEndpoint) => e.type === 'webhook' ? `/receiving/webhooks/${e.id}` : null
