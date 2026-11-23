@@ -2,8 +2,9 @@
 # On-demand runner for Nightmail's reworked TypeScript tear models.
 #
 # Usage (from api/ or via `bun run tear:ci`):
-#   bash tear/run.sh                      # all 6 core checkers (campaigns + exhaustive edges + rotating guided + deep-prefix novelty)
-#   bash tear/run.sh all                  # all 6 core + 5 preventative safety models
+#   bash tear/run.sh                      # per-PR default: 6 core checkers (campaigns + rotating guided seeds, ~5-6 min on exos)
+#   bash tear/run.sh all                  # all 6 core + 5 preventative safety models (campaigns + rotating guided seeds)
+#   bash tear/run.sh scheduled            # full scheduled suite: all 11 checkers + BFS edges to depth 2 + 20 deep walks/core (~15-16 min)
 #   bash tear/run.sh safety               # the 5 preventative safety models
 #   bash tear/run.sh dispatch access      # named checkers only
 #
@@ -12,8 +13,8 @@
 #                      When unset, starts a throwaway postgres:17.11-alpine container in Docker and removes it on exit.
 #   TEAR_SEEDS         Guided seed range per checker (default: rotates each run, e.g. 60 seeds for core;
 #                      set to "" for campaigns only). Exact seed range is always printed for replay.
-#   TEAR_EDGES         Set to 0 to skip the exhaustive BFS edge-coverage pass on core checkers (default: 1).
-#   TEAR_DEEP_RUNS     Number of deep-prefix --novelty walks started from campaign cases per core checker (default: 20).
+#   TEAR_EDGES         Set to 1 to enable the BFS edge-coverage pass (depth 2, access race d=4 / revoke d=5) on core checkers (default: 0; 1 in `scheduled`).
+#   TEAR_DEEP_RUNS     Number of deep-prefix walks started from campaign cases per core checker (default: 0; 20 in `scheduled`).
 #   TEAR_PG_PORT       Localhost port for the throwaway Docker Postgres (default: 55488).
 #   TEAR_DIR           Optional local tear checkout passed to setup.sh if @tear/mbt or pinned CLI is absent.
 #   TEAR_BIN           Optional explicit path to a tear binary (defaults to ~/.cache/nightmail-tear/<TEAR_REV>/bin/tear).
@@ -32,6 +33,7 @@ fi
 CORE=(dispatch ses access admission inbox delivery)
 SAFETY=(campaign-collab campaign-attachments db-faults scale-reads tenant-isolation)
 
+SCHEDULED_MODE=0
 SELECTED=()
 if (( $# == 0 )); then
   SELECTED=("${CORE[@]}")
@@ -41,6 +43,7 @@ else
       core) SELECTED+=("${CORE[@]}") ;;
       safety) SELECTED+=("${SAFETY[@]}") ;;
       all) SELECTED+=("${CORE[@]}" "${SAFETY[@]}") ;;
+      scheduled) SCHEDULED_MODE=1; SELECTED+=("${CORE[@]}" "${SAFETY[@]}") ;;
       dispatch|ses|access|admission|inbox|delivery|campaign-collab|campaign-attachments|db-faults|scale-reads|tenant-isolation)
         SELECTED+=("$arg") ;;
       *) echo "unknown checker: $arg" >&2; exit 2 ;;
@@ -50,8 +53,13 @@ fi
 
 # Rotate default seeds on every run and print them so any failing run can be reproduced via TEAR_SEEDS.
 SEED_BASE="${TEAR_SEED_BASE:-$(( ( $(date +%s) % 100000 ) * 100 + 1 ))}"
-TEAR_EDGES="${TEAR_EDGES:-1}"
-TEAR_DEEP_RUNS="${TEAR_DEEP_RUNS:-20}"
+if (( SCHEDULED_MODE == 1 )); then
+  TEAR_EDGES="${TEAR_EDGES:-1}"
+  TEAR_DEEP_RUNS="${TEAR_DEEP_RUNS:-20}"
+else
+  TEAR_EDGES="${TEAR_EDGES:-0}"
+  TEAR_DEEP_RUNS="${TEAR_DEEP_RUNS:-0}"
+fi
 CONTAINER=""
 PORT="${TEAR_PG_PORT:-55488}"
 SECRET="$(openssl rand -hex 36)"

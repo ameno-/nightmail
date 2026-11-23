@@ -18219,7 +18219,10 @@ test('a tear host refuses redirecting URLs, databases not marked disposable and 
   const redirected = new URL(FIXTURE_DATABASE_URL!);
   redirected.search = `host=${redirected.hostname}&port=${redirected.port || 5432}`;
   redirected.port = '1';
-  const beforeWs = Number((await client.query('SELECT count(*)::int AS n FROM workspaces')).rows[0].n);
+  const dbFingerprint = async () => (await client.query(
+    "SELECT (SELECT count(*)::int FROM workspaces) AS ws, (SELECT count(*)::int FROM pg_namespace) AS ns, (SELECT count(*)::int FROM pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema')) AS tbl",
+  )).rows[0];
+  const beforeFp = await dbFingerprint();
   try {
     await Promise.all(hostFiles.map(async rel => {
       const unmarked = await runHost(rel, FIXTURE_DATABASE_URL!);
@@ -18235,7 +18238,7 @@ test('a tear host refuses redirecting URLs, databases not marked disposable and 
     if (stubbed) rmSync(tearScope, { recursive: true, force: true });
   }
   assert.equal((await client.query("SELECT to_regnamespace('tear_clock')::text AS s")).rows[0].s, null, 'Nothing was written.');
-  assert.equal(Number((await client.query('SELECT count(*)::int AS n FROM workspaces')).rows[0].n), beforeWs, 'No workspace was written.');
+  assert.deepEqual(await dbFingerprint(), beforeFp, 'No workspace, schema, or table was written.');
 });
 
 test('MX deployment variables remain fallbacks and BANE variables take precedence',async()=>{

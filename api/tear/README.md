@@ -37,18 +37,21 @@ From `api/` (with `bun install` done and Docker running):
 # One-time setup (installs revision-pinned CLI + @tear/{mbt,host}; TEAR_DIR must match TEAR_REV when a git repo)
 bash tear/setup.sh
 
-# Run all 6 core checkers (campaigns + rotating guided seeds + exhaustive BFS edges + deep-prefix novelty)
+# Per-PR default: all 6 core checkers (campaigns + 60 rotating guided seeds each, ~5-6 min on exos; 20-160 s for one checker)
 bun run tear:ci
 
-# Run all 11 models (core + safety)
+# All 11 models (campaigns + rotating guided seeds, no edge pass)
 bun run tear:ci all
+
+# Full scheduled run: all 11 models + BFS edges to depth 2 (access race d=4, revoke d=5) + 20 deep walks/core (~15-16 min on exos)
+bun run tear:ci scheduled
 
 # Run a single checker against an existing disposable DB (seeds rotate each run and are printed for replay)
 TEAR_DATABASE_URL="postgresql://postgres:tear@127.0.0.1:55499/tear_dispatch" \
   bash tear/run.sh dispatch
 
-# Replay an exact rotating seed window or skip edges for a quick local smoke check
-TEAR_SEEDS="12345..12404" TEAR_EDGES=0 bash tear/run.sh access
+# Replay an exact rotating seed window (note: under heavy host load, inbox can occasionally hit tear's 10 s step timeout; replay the printed seed alone to confirm)
+TEAR_SEEDS="12345..12404" bash tear/run.sh access
 ```
 
 ## Direct `tear` commands & planted-bug verification
@@ -69,7 +72,7 @@ TEAR_DATABASE_URL=... bun verify-plants.ts --scratch-root /path/to/scratch-night
 
 ## Disposable database guard
 
-Every `*.host.ts` validates `disposableUrl` and `assertDisposable` before registering exception handlers or writing anything, exiting non-zero with nothing on stdout on refusal. Public CI's `acceptance` shard runs all 11 real `*.host.ts` files against an unmarked database and a query-parameter URL.
+Every `*.host.ts` validates `disposableUrl` and `assertDisposable` before registering exception handlers or writing anything, exiting non-zero with nothing on stdout on refusal. Public CI's `acceptance` shard runs all 11 real `*.host.ts` files against an unmarked database and a query-parameter URL and verifies workspace, schema, and table counts are unchanged (known limit: a host that inserts into an arbitrary pre-existing table before calling its guard is not caught by those counts alone).
 
 ```sql
 COMMENT ON DATABASE tear_db IS 'bane-tear: disposable test database, every row may be changed or deleted';

@@ -86,7 +86,7 @@ export const campaignCollab = model<CollabState, CollabAction, CollabObs, Collab
   rounds: 2,
   bug: "canary_stale_overwrite",
   roundRoles: {
-    Load: "read",
+    Load: "sequential",
     EditLocal: "sequential",
     Save: "call",
     ReloadMergeSave: "sequential",

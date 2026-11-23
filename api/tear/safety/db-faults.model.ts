@@ -11,6 +11,7 @@ import type { DbFaultAction, DbFaultObs, DbFaultSnapshot, FaultMode, SendKey } f
 export interface DbFaultState {
   fault: FaultMode;
   keysAccepted: SendKey[];
+  uncertainKeys: SendKey[];
 }
 
 const FAULT_MODES: readonly FaultMode[] = [
@@ -62,7 +63,7 @@ export const dbFaults = model<DbFaultState, DbFaultAction, DbFaultObs, DbFaultSn
   maxSteps: 16,
   bug: "canary_double_send",
 
-  initial: (): DbFaultState => ({ fault: "none", keysAccepted: [] }),
+  initial: (): DbFaultState => ({ fault: "none", keysAccepted: [], uncertainKeys: [] }),
 
   choices(s): Choice<DbFaultAction>[] {
     const out: Choice<DbFaultAction>[] = [];
@@ -107,9 +108,15 @@ export const dbFaults = model<DbFaultState, DbFaultAction, DbFaultObs, DbFaultSn
       };
     }
 
-    if (a.op === "Send" && s.fault === "none" && !next.keysAccepted.includes(a.key)) {
-      next.keysAccepted.push(a.key);
+    if (a.op === "Send") {
+      if (s.fault === "none" && !next.keysAccepted.includes(a.key)) {
+        next.keysAccepted.push(a.key);
+      }
+      if (s.fault === "after_first_write_57014" && !next.uncertainKeys.includes(a.key)) {
+        next.uncertainKeys.push(a.key);
+      }
     }
+    const keyUncertain = a.op === "Send" && next.uncertainKeys.includes(a.key);
 
     const expect = satisfies("success-or-retryable", (obs) => {
       if (obs.duplicateKeyId) {
@@ -117,13 +124,13 @@ export const dbFaults = model<DbFaultState, DbFaultAction, DbFaultObs, DbFaultSn
       }
       if (s.fault === "none") {
         if (obs.status >= 200 && obs.status < 300) return true;
-        // After a mid-request fault, a committed-or-in-flight idempotency key may legitimately return 409 IDEMPOTENCY_OUTCOME_UNKNOWN.
-        if (obs.status === 409 && obs.code === "IDEMPOTENCY_OUTCOME_UNKNOWN") return true;
+        // Only keys previously sent under after_first_write_57014 may legitimately return 409 IDEMPOTENCY_OUTCOME_UNKNOWN.
+        if (keyUncertain && obs.status === 409 && obs.code === "IDEMPOTENCY_OUTCOME_UNKNOWN") return true;
         return `expected 2xx while DB is healthy, got ${obs.status} ${obs.code} (retryable=${obs.retryable})`;
       }
       if (obs.status >= 200 && obs.status < 300) return true;
       if ((obs.status === 503 || obs.status === 409) && obs.retryable === true) return true;
-      if (obs.status === 409 && obs.code === "IDEMPOTENCY_OUTCOME_UNKNOWN") return true;
+      if (keyUncertain && obs.status === 409 && obs.code === "IDEMPOTENCY_OUTCOME_UNKNOWN") return true;
       return `under DB fault ${s.fault}, expected 2xx or retryable 503/409, got status=${obs.status} code=${obs.code} retryable=${obs.retryable}`;
     });
 
