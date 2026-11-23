@@ -14,7 +14,7 @@ import { Alert, Button, ConfirmDialog, Dialog, Field, Input, SearchField, Select
 import { mergeAddresses, useAddressOptions, useResolvedAddresses } from '../../data/addresses'
 import { useDebounced } from '../../lib/pagination'
 import { PrivateAddress } from '../../components/PrivateAddress'
-import { useApiDef, useRequestScope } from '../../data/context'
+import { useApi, useRequestScope } from '../../data/context'
 import { queries } from '../../data/queries'
 import { isAbortError, request } from '../../data/live'
 import { staleAfterWrite } from '../../data/invalidation'
@@ -177,7 +177,9 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   const attempts = useRef(new Map<string, { key: string; body: string }>())
   const made = useRef(new Map<string, { id: string; name: string; key?: string | null }>())
   const attempt = (name: string) => { let a = attempts.current.get(name); if (!a) attempts.current.set(name, a = { key: '', body: '' }); return a }
+  const api = useApi()
   const [boxSearch, setBoxSearch] = useState('')
+  const [checkingAddress, setCheckingAddress] = useState(false)
   const boxes = useAddressOptions({ enabled: open, search: useDebounced(boxSearch) })
   const current = saved?.address ?? form.address.trim().toLowerCase()
   const overview = useOverview({ q: current, kind: 'address', limit: 5 }, false, open && step !== 'address')
@@ -224,14 +226,23 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   const typed = form.address.trim().toLowerCase()
   const pattern = errors.address && EMAIL.test(typed) && typed.split('@')[0]!.includes('*') && receiving.some(d => d.name === typed.split('@')[1]) ? typed : null
   const existing = errors.address ? allBoxes.find(b => b.address === typed || b.aliases.includes(typed)) : undefined
-  function next(event: FormEvent) {
+  async function next(event: FormEvent) {
     event.preventDefault()
+    if (boxes.isPending || checkingAddress) return
     const value = form.address.trim().toLowerCase(), sender = form.publicAddress.trim().toLowerCase(), found: Record<string, string> = {}
     if (!EMAIL.test(value)) found.address = 'Enter a full email address, such as support@example.com.'
     // A * makes a catch-all or wildcard (a route), never an address with a * in its name.
     else if (value.split('@')[0]!.includes('*')) found.address = value.startsWith('*@') ? catchAllNote : 'An address with * is a wildcard.'
     else if (receiving.length && !receiving.some(d => d.name === value.split('@')[1])) found.address = onDomains(receiving)
     else if (allBoxes.some(b => b.address === value || b.aliases.includes(value))) found.address = 'That address exists.'
+    else if (boxes.hasMore) {
+      setCheckingAddress(true)
+      try {
+        const matches = await api.inbound.addresses({ search: value })
+        if (matches.some(b => b.address === value || b.aliases.includes(value))) found.address = 'That address exists.'
+      } catch { /* Server validates uniqueness on submit if lookup fails. */ }
+      finally { setCheckingAddress(false) }
+    }
     if (sender && form.lifetime) found.publicAddress = 'Temporary addresses cannot have a public sender address.'
     else if (sender && !EMAIL.test(sender)) found.publicAddress = FULL
     // The API takes a public sender only as the same local part on a parent domain.
@@ -405,7 +416,7 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   const title = step === 'address' ? 'New address' : step === 'flow' && asking ? 'Replace the existing split?' : <PrivateAddress value={own} />
   const ready = step !== 'flow' || (!boxes.isPending && !resolvedBoxes.pending && overview.data !== undefined && (!editing || !!opened))
   const stepsPath = saved ? `/receiving/addresses/${saved.id}?tab=flow&edit=1` : null
-  const footer = step === 'address' ? <><Button onClick={() => close()}>Cancel</Button><Button variant="primary" type="submit" form="builder-address">Next</Button></>
+  const footer = step === 'address' ? <><Button onClick={() => close()}>Cancel</Button><Button variant="primary" type="submit" form="builder-address" loading={checkingAddress} disabled={boxes.isPending}>Next</Button></>
     : step === 'flow' && asking ? <><Button onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" onClick={() => { setReplace(true); setPlan({ ...base!.plan, split: true, condition: split!, value: '' }) }}>Replace it</Button></>
     : step === 'flow' ? <>{editing ? <Button disabled={busy} onClick={() => close()}>Cancel</Button> : <Button disabled={busy} onClick={() => setStep('address')}>Back</Button>}{fits && <Button variant="primary" type="submit" form="builder-flow" loading={busy} disabled={!ready || conflict}>Save</Button>}</>
     : <>{saved && <Link className="ui-button ui-button--secondary ui-button--md" to={`/receiving/addresses/${saved.id}`} onClick={() => onOpenChange(false)}>Open address</Link>}<Button variant="primary" onClick={() => onOpenChange(false)}>Done</Button></>
@@ -415,7 +426,7 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
     {boxes.hasMore && <Button variant="ghost" size="sm" loading={boxes.loadingMore} onClick={boxes.loadMore}>Load more addresses</Button>}
   </div>
   let body: ReactNode
-  if (step === 'address') body = <form id="builder-address" className="stack" onSubmit={next} noValidate>
+  if (step === 'address') body = <form id="builder-address" className="stack" onSubmit={e => void next(e)} noValidate>
     <Field label="Address" htmlFor="builder-address-input" error={errors.address}>
       <Input id="builder-address-input" type="email" value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} placeholder={`name@${receiving[0]?.name ?? 'example.com'}`} autoFocus autoComplete="off" />
     </Field>
