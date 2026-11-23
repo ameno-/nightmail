@@ -26542,6 +26542,25 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     assert.equal(await stored(bid),null,'writers leave NULL as NULL until backfill locks the row');
     assert.equal(await viewed(bid),liveBefore+1,'inbox_view stays exact while mail arrives before backfill');
     const backfillSql=await readFile(new URL('./migrations/410_inbox_unread_backfill.sql',import.meta.url),'utf8');
+    const bPid=(await b.query('SELECT pg_backend_pid() pid')).rows[0].pid as number;
+    const beforeBid=(await a.query('SELECT max(inbox_id) m FROM inbox_state WHERE inbox_id<$1',[bid])).rows[0].m as string|null ?? '';
+    // Two-session race: writer holds inbox_state FOR UPDATE while backfill starts and blocks on Lock;
+    // backfill must count on a post-lock snapshot (never pre-lock). Verify both read and delivery races.
+    for(const mode of ['read','delivery'] as const){
+      await a.query('UPDATE inbox_state SET unread=NULL WHERE inbox_id=$1',[bid]);
+      await a.query('BEGIN');
+      try{
+        if(mode==='read')await a.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"read":true}'::jsonb)`,[w,bid,mDuring]);
+        else await deliver(a,unique('msg'));
+        const pending=b.query(backfillSql,[beforeBid]);
+        let waiting=false;
+        for(let i=0;i<400&&!waiting;i++){waiting=(await a.query('SELECT wait_event_type FROM pg_stat_activity WHERE pid=$1',[bPid])).rows[0]?.wait_event_type==='Lock';if(!waiting)await new Promise(r=>setTimeout(r,5));}
+        assert.ok(waiting,`backfill must wait on ${mode} writer lock`);
+        await a.query('COMMIT');
+        await pending;
+      }catch(e){await a.query('ROLLBACK');throw e;}
+      await assertExact(bid,`after concurrent ${mode} during backfill`);
+    }
     for(let pass=0;pass<2;pass++){
       let cur='';
       for(;;){const next=(await a.query(backfillSql,[cur])).rows[0].cursor as string|null;if(next===null)break;cur=next;}

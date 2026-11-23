@@ -216,7 +216,7 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
   const INBOX_LIST_READ = 5;
   app.openapi(createRoute({
     ...meta, method: 'get', path: base, operationId: 'listInboxes', summary: 'List agent inboxes',
-    description: 'Inboxes this credential can see, ordered by ID, with status and usage. A provisioning key sees the inboxes it created. Pass nextCursor as cursor for the next page. ' + readLimitNote(INBOX_LIST_READ),
+    description: 'Inboxes this credential can see, ordered by ID, with status and usage. A provisioning key sees the inboxes it created. Pass nextCursor as cursor for the next page. Filtered queries (type, status, q): ' + readLimitNote(INBOX_LIST_READ),
     request: { query: z.object({ type: type.optional(), status: status.optional(), q: z.string().max(200).optional().describe('Search address and name.'), cursor: key.optional(), limit: take }) },
     responses: { 200: response(z.object({ data: z.array(Inbox), nextCursor: z.string().nullable() }).openapi('InboxPage')), ...errors },
   }), async c => {

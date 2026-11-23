@@ -118,7 +118,7 @@ export const mailboxThreads = pgTable('mailbox_threads', {
   lastMessageAt: ts('last_message_at').notNull(), lastInboundAt: ts('last_inbound_at'),
   archived: boolean('archived').notNull().default(false), starred: boolean('starred').notNull().default(false), spam: boolean('spam').notNull().default(false),
   trashedAt: ts('trashed_at'), labels: text('labels').array().notNull().default([]), createdAt: ts('created_at').notNull().defaultNow(),
-}, t => [primaryKey({ columns: [t.mailboxId, t.threadId] }), index('mailbox_threads_workspace_page').on(t.workspaceId, t.lastMessageAt.desc(), t.threadId.desc())]);
+}, t => [primaryKey({ columns: [t.mailboxId, t.threadId] }), index('mailbox_threads_workspace_page').on(t.workspaceId, t.lastMessageAt.desc(), t.threadId.desc()), index('mailbox_threads_newest').on(t.workspaceId, t.threadId, t.lastMessageAt.desc(), t.mailboxId)]);
 
 export const mailAttachments = pgTable('mail_attachments', {
   sourceId:text('source_attachment_id'),

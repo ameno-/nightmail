@@ -114,33 +114,47 @@ async function threadPage(db: DbExecutor, value: MailboxAccess, filter: Filter, 
       ) SELECT threads.id, m.subject, m.snippet, m.from_name, m.from_address, ${preciseTime(sql`threads.last_at`)} AS at, threads.address_ids, threads.message_count
         FROM threads ${latest(sql`mm.mailbox_id=${singleAddress}`)}
         JOIN mail_messages m ON m.id=detail.latest_id ORDER BY threads.last_at DESC, threads.id DESC`);
-  } else if (!filter.threadId && !options.q) {
-    // Workspace-wide or multi-address list: walk mailbox_threads_workspace_page newest-first and emit each thread
-    // once at its winning live row (maximum last_message_at, lowest mailbox_id on ties), stopping after limit + 1.
+  } else if (!filter.threadId && !options.q && (!view || view === 'all' || view === 'inbox')) {
+    // Workspace-wide or multi-address dense views (all, inbox): walk mailbox_threads_workspace_page newest-first,
+    // pick the winning live row per thread via one ordered LIMIT 1 probe on mailbox_threads_newest (avoids O(N^2)
+    // on broadcast conversations), stop after limit + 1, and collect address_ids only for those winners.
+    // Sparse views (archive, starred, trash, spam) use the grouped branch below so empty tabs don't walk all threads.
     const scopeList = value.mailboxIds ? sql.param(value.mailboxIds) : null;
     const state = viewMatch('s');
     rows = await db.execute<PageRow>(sql`
-      WITH threads AS MATERIALIZED (
-        SELECT t.thread_id AS id, t.last_message_at AS last_at, grp.address_ids, grp.single_count
+      WITH winners AS MATERIALIZED (
+        SELECT t.thread_id AS id, t.last_message_at AS last_at, t.message_count AS single_count
         FROM mailbox_threads t
-        CROSS JOIN LATERAL (
-          SELECT array_agg(s.mailbox_id ORDER BY s.mailbox_id) AS address_ids,
-                 max(s.message_count) AS single_count,
-                 bool_or(s.last_message_at > t.last_message_at
-                   OR (s.last_message_at = t.last_message_at AND s.mailbox_id < t.mailbox_id)) AS has_newer
-                 ${state ? sql`, bool_or(${state}) AS matches_view` : sql``}
-          FROM mailbox_threads s
-          WHERE s.thread_id=t.thread_id AND s.workspace_id=${value.workspaceId}
-            ${scopeList ? sql`AND s.mailbox_id=ANY(${scopeList}::text[])` : sql``}
-            AND ${liveBox(sql`s.mailbox_id`)}
-        ) grp
         WHERE t.workspace_id=${value.workspaceId}
           ${scopeList ? sql`AND t.mailbox_id=ANY(${scopeList}::text[])` : sql``}
           AND ${liveBox(sql`t.mailbox_id`)}
           ${after ? sql`AND (t.last_message_at, t.thread_id) < (${after[0]}::timestamptz, ${after[1]})` : sql``}
-          AND NOT grp.has_newer
-          ${state ? sql`AND grp.matches_view` : sql``}
+          AND t.mailbox_id = (
+            SELECT n.mailbox_id FROM mailbox_threads n
+            WHERE n.workspace_id=${value.workspaceId} AND n.thread_id=t.thread_id
+              ${scopeList ? sql`AND n.mailbox_id=ANY(${scopeList}::text[])` : sql``}
+              AND ${liveBox(sql`n.mailbox_id`)}
+            ORDER BY n.last_message_at DESC, n.mailbox_id LIMIT 1
+          )
+          ${state ? sql`AND EXISTS (
+            SELECT 1 FROM mailbox_threads s
+            WHERE s.workspace_id=${value.workspaceId} AND s.thread_id=t.thread_id
+              ${scopeList ? sql`AND s.mailbox_id=ANY(${scopeList}::text[])` : sql``}
+              AND ${liveBox(sql`s.mailbox_id`)}
+              AND ${state}
+          )` : sql``}
         ORDER BY t.last_message_at DESC, t.thread_id DESC LIMIT ${options.limit + 1}
+      ),
+      threads AS MATERIALIZED (
+        SELECT w.id, w.last_at, w.single_count,
+               ARRAY(
+                 SELECT s.mailbox_id FROM mailbox_threads s
+                 WHERE s.workspace_id=${value.workspaceId} AND s.thread_id=w.id
+                   ${scopeList ? sql`AND s.mailbox_id=ANY(${scopeList}::text[])` : sql``}
+                   AND ${liveBox(sql`s.mailbox_id`)}
+                 ORDER BY s.mailbox_id
+               ) AS address_ids
+        FROM winners w
       ) SELECT threads.id, m.subject, m.snippet, m.from_name, m.from_address, ${preciseTime(sql`threads.last_at`)} AS at, threads.address_ids, ${countExpr} AS message_count
         FROM threads ${latest(sql`mm.mailbox_id=ANY(threads.address_ids)`)}
         JOIN mail_messages m ON m.id=detail.latest_id ORDER BY threads.last_at DESC, threads.id DESC`);

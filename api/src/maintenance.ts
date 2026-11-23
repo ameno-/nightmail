@@ -91,8 +91,18 @@ const INBOX_RECONCILE_LOCK_CAP = 50_000;
  */
 export async function reconcileInboxState(runtime: Runtime, budgetMs = 15_000, clock = Date.now) {
   const deadline = clock() + budgetMs;
-  let checked = 0, corrected = 0, drifted = 0;
+  let checked = 0, corrected = 0, drifted = 0, skipped = 0;
   let after = (await runtime.db.execute<{ after: string }>(sql`SELECT after FROM sending_upload_reconcile WHERE id='inbox-state'`)).rows[0]?.after ?? '';
+  type Tally = { messages: number; held: number; unread: number };
+  const zero: Tally = { messages: 0, held: 0, unread: 0 };
+  const countOne = (inboxId: string) => runtime.db.transaction(async tx => {
+    await tx.execute(sql`SET LOCAL statement_timeout = '5s'`);
+    return (await tx.execute<Tally>(sql`
+      SELECT count(*)::int AS messages,
+             count(*) FILTER (WHERE held_reason IS NOT NULL)::int AS held,
+             count(*) FILTER (WHERE NOT read AND held_reason IS NULL)::int AS unread
+      FROM mailbox_messages WHERE mailbox_id=${inboxId}`)).rows[0]!;
+  }, { accessMode: 'read only' });
   while (clock() < deadline) {
     const { rows } = await runtime.db.execute<{ inbox_id: string; workspace_id: string; modseq: string; messages: number; held: number; unread: number | null }>(sql`
       SELECT s.inbox_id, s.workspace_id, s.modseq::text, s.messages, s.held, s.unread
@@ -103,29 +113,44 @@ export async function reconcileInboxState(runtime: Runtime, budgetMs = 15_000, c
       if (after !== '') await runtime.db.execute(sql`INSERT INTO sending_upload_reconcile(id,after) VALUES('inbox-state','') ON CONFLICT(id) DO UPDATE SET after=''`);
       break;
     }
+    // Count all small inboxes on the page in one grouped query; count large inboxes individually so
+    // one 2M-message inbox cannot time out the other 49 inboxes on the page.
+    const smallIds = rows.filter(r => r.messages <= INBOX_RECONCILE_LOCK_CAP).map(r => r.inbox_id);
+    let batched: Map<string, Tally> | null = null;
+    if (smallIds.length) {
+      try {
+        const grouped = await runtime.db.transaction(async tx => {
+          await tx.execute(sql`SET LOCAL statement_timeout = '5s'`);
+          return (await tx.execute<Tally & { mailbox_id: string }>(sql`
+            SELECT mailbox_id, count(*)::int AS messages,
+                   count(*) FILTER (WHERE held_reason IS NOT NULL)::int AS held,
+                   count(*) FILTER (WHERE NOT read AND held_reason IS NULL)::int AS unread
+            FROM mailbox_messages WHERE mailbox_id = ANY(${sql.param(smallIds)}::text[])
+            GROUP BY mailbox_id`)).rows;
+        }, { accessMode: 'read only' });
+        batched = new Map(grouped.map(g => [g.mailbox_id, { messages: g.messages, held: g.held, unread: g.unread }]));
+      } catch (error) {
+        log('warn', { code: 'INBOX_STATE_RECONCILE_BATCH_FALLBACK', count: smallIds.length, timedOut: timedOut(error) });
+      }
+    }
     let advanced = after;
     for (const s of rows) {
       if (clock() >= deadline) break;
       try {
-        const actual = await runtime.db.transaction(async tx => {
-          await tx.execute(sql`SET LOCAL statement_timeout = '5s'`);
-          return (await tx.execute<{ messages: number; held: number; unread: number }>(sql`
-            SELECT count(*)::int AS messages,
-                   count(*) FILTER (WHERE held_reason IS NOT NULL)::int AS held,
-                   count(*) FILTER (WHERE NOT read AND held_reason IS NULL)::int AS unread
-            FROM mailbox_messages WHERE mailbox_id=${s.inbox_id}`)).rows[0]!;
-        }, { accessMode: 'read only' });
+        const actual = batched && s.messages <= INBOX_RECONCILE_LOCK_CAP
+          ? (batched.get(s.inbox_id) ?? zero)
+          : await countOne(s.inbox_id);
         checked++;
         if (s.unread === actual.unread && s.messages === actual.messages && s.held === actual.held) { advanced = s.inbox_id; continue; }
         const outcome = await runtime.db.transaction(async tx => {
           await tx.execute(sql`SET LOCAL lock_timeout = '1s'; SET LOCAL statement_timeout = '5s'`);
           const [locked] = (await tx.execute<{ modseq: string; messages: number; held: number; unread: number | null }>(sql`
             SELECT modseq::text, messages, held, unread FROM inbox_state WHERE inbox_id=${s.inbox_id} FOR UPDATE SKIP LOCKED`)).rows;
-          if (!locked) return null;
+          if (!locked) return { skipped: 'busy' as const };
           let exact = actual;
           if (locked.modseq !== s.modseq) {
-            if (locked.messages > INBOX_RECONCILE_LOCK_CAP) return null;
-            exact = (await tx.execute<{ messages: number; held: number; unread: number }>(sql`
+            if (locked.messages > INBOX_RECONCILE_LOCK_CAP) return { skipped: 'busy' as const };
+            exact = (await tx.execute<Tally>(sql`
               SELECT count(*)::int AS messages,
                      count(*) FILTER (WHERE held_reason IS NOT NULL)::int AS held,
                      count(*) FILTER (WHERE NOT read AND held_reason IS NULL)::int AS unread
@@ -135,7 +160,10 @@ export async function reconcileInboxState(runtime: Runtime, budgetMs = 15_000, c
           await tx.execute(sql`UPDATE inbox_state SET messages=${exact.messages}, held=${exact.held}, unread=${exact.unread} WHERE inbox_id=${s.inbox_id}`);
           return { wasInitialized: locked.unread !== null, stored: { messages: locked.messages, held: locked.held, unread: locked.unread }, exact };
         });
-        if (outcome) {
+        if (outcome && 'skipped' in outcome) {
+          skipped++;
+          log('warn', { code: 'INBOX_STATE_RECONCILE_SKIPPED', workspaceId: s.workspace_id, inboxId: s.inbox_id, reason: outcome.skipped });
+        } else if (outcome) {
           corrected++;
           if (outcome.wasInitialized) {
             drifted++;
@@ -144,7 +172,12 @@ export async function reconcileInboxState(runtime: Runtime, budgetMs = 15_000, c
         }
         advanced = s.inbox_id;
       } catch (error) {
-        if (!timedOut(error)) logError(error, { code: 'INBOX_STATE_RECONCILE_FAILED', inboxId: s.inbox_id }, 'warn');
+        if (timedOut(error)) {
+          skipped++;
+          log('warn', { code: 'INBOX_STATE_RECONCILE_SKIPPED', workspaceId: s.workspace_id, inboxId: s.inbox_id, reason: 'timeout' });
+        } else {
+          logError(error, { code: 'INBOX_STATE_RECONCILE_FAILED', inboxId: s.inbox_id }, 'warn');
+        }
         advanced = s.inbox_id;
       }
     }
@@ -153,7 +186,7 @@ export async function reconcileInboxState(runtime: Runtime, budgetMs = 15_000, c
     after = next;
     if (!next) break;
   }
-  return { checked, corrected, drifted };
+  return { checked, corrected, drifted, skipped };
 }
 
 /**

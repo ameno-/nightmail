@@ -219,3 +219,23 @@ BEGIN
  END LOOP;
  RETURN n;
 END $$;
+
+-- Batched backfill helper for migration 410: locks 50 inbox_state rows FOR UPDATE in inbox_id order
+-- in statement 1, then counts mailbox_messages in statement 2 whose READ COMMITTED snapshot is taken
+-- AFTER all 50 locks are held (so concurrent reads and deliveries cannot be missed).
+CREATE OR REPLACE FUNCTION inbox_unread_backfill_page(after text) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE ids text[];
+BEGIN
+ SELECT array_agg(inbox_id ORDER BY inbox_id) INTO ids FROM (
+   SELECT inbox_id FROM inbox_state WHERE inbox_id > coalesce(after, '') ORDER BY inbox_id LIMIT 50 FOR UPDATE
+ ) page;
+ IF ids IS NULL THEN RETURN NULL; END IF;
+ UPDATE inbox_state s SET unread = c.unread
+ FROM (
+   SELECT i AS inbox_id,
+          (SELECT count(*)::int FROM mailbox_messages m WHERE m.mailbox_id = i AND NOT m.read AND m.held_reason IS NULL) AS unread
+   FROM unnest(ids) i
+ ) c
+ WHERE s.inbox_id = c.inbox_id AND s.unread IS DISTINCT FROM c.unread;
+ RETURN ids[array_upper(ids, 1)];
+END $$;
