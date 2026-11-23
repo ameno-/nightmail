@@ -29,7 +29,46 @@ export const currentScope = (): RequestScope => ({ account: accountSelection, wo
 export const isCurrentScope = (scope: RequestScope) => scope.epoch === selectionEpoch && scope.account === accountSelection && scope.workspace === workspaceSelection
 export const aborted = () => new DOMException('The operation was aborted.', 'AbortError')
 export const isAbortError = (error: unknown): boolean => error instanceof DOMException && error.name === 'AbortError'
+
+// Combines two AbortSignals, falling back to a manual AbortController on browsers without AbortSignal.any (Safari < 17.4).
+function combineSignals(a: AbortSignal, b: AbortSignal): { signal: AbortSignal; cleanup: () => void } {
+  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.any === 'function') {
+    return { signal: AbortSignal.any([a, b]), cleanup: () => {} }
+  }
+  const combined = new AbortController()
+  if (a.aborted || b.aborted) { combined.abort(); return { signal: combined.signal, cleanup: () => {} } }
+  const onAbort = () => combined.abort()
+  a.addEventListener('abort', onAbort, { once: true })
+  b.addEventListener('abort', onAbort, { once: true })
+  return {
+    signal: combined.signal,
+    cleanup: () => { a.removeEventListener('abort', onAbort); b.removeEventListener('abort', onAbort) },
+  }
+}
+
+// Writes cut off by a workspace/account switch: remembered per (account, workspace) in memory so returning to that
+// workspace tells the person in a few words that their last save may have landed.
+const scopeId = (account: string | null, workspace: string | null) => `${account ?? ''}\0${workspace ?? ''}`
+const activeWrites = new Set<{ account: string | null; workspace: string | null }>()
+const interruptedWrites = new Set<string>()
+const isMutatingRequest = (method: string, path: string) =>
+  method !== 'GET' && method !== 'HEAD' &&
+  !path.startsWith('/api/auth/') &&
+  !/^\/v1\/(?:rules\/(?:test|check)|routing\/test|emails\/(?:check|preview)|audience-query\/plan|segments\/[^/]+\/preview)$/.test(path)
+export function takeInterruptedWrite(account: string | null, workspace: string | null): boolean {
+  const key = scopeId(account, workspace)
+  if (!interruptedWrites.has(key)) return false
+  interruptedWrites.delete(key)
+  return true
+}
+export function clearInterruptedWrites(account?: string | null) {
+  if (!account) { interruptedWrites.clear(); return }
+  const prefix = `${account}\0`
+  for (const key of interruptedWrites) if (key.startsWith(prefix)) interruptedWrites.delete(key)
+}
+
 function bumpScope() {
+  for (const write of activeWrites) interruptedWrites.add(scopeId(write.account, write.workspace))
   selectionEpoch += 1
   scopeController.abort()
   scopeController = new AbortController()
@@ -86,21 +125,29 @@ export async function request<T = Json>(path: string, options: { method?: string
   const account = options.account !== undefined ? options.account : accountSelection
   const workspace = options.workspace !== undefined ? options.workspace : workspaceSelection
   const epoch = selectionEpoch
-  const signal = scoped
-    ? (options.signal ? AbortSignal.any([options.signal, scopeController.signal]) : scopeController.signal)
-    : options.signal
+  const method = options.method ?? 'GET'
+  const linked = scoped && options.signal ? combineSignals(options.signal, scopeController.signal) : null
+  const signal = linked ? linked.signal : scoped ? scopeController.signal : options.signal
+  const trackedWrite = scoped && isMutatingRequest(method, path) ? { account, workspace } : null
+  if (trackedWrite) activeWrites.add(trackedWrite)
   let response: Response
+  let data: any
   try {
-    const early = !probe && options.method === undefined && options.body === undefined && !options.file ? takeEarly(path, signal) : null
-    response = (early && await early) ?? await fetch(path, { method: options.method ?? 'GET', credentials: 'include', signal,
-      headers: { Accept: 'application/json', ...(options.ifMatch===undefined?{}:{'If-Match':String(options.ifMatch)}), ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }), ...options.file?.headers, ...(options.idempotencyKey ? { 'Idempotency-Key': options.idempotencyKey } : {}), ...(account ? { [accountHeader]: account } : {}), ...(workspace ? { [workspaceHeader]: workspace } : {}) },
-      body: options.file?.bytes ?? (options.body === undefined ? undefined : JSON.stringify(options.body)) })
-  } catch (error) {
-    if (isAbortError(error)) throw error
-    analytics().apiError(options.method ?? 'GET', path, undefined, 'NETWORK_UNAVAILABLE')
-    throw new ApiError(`Cannot reach ${productName}. Check the API service and try again.`, 'NETWORK_UNAVAILABLE')
+    try {
+      const early = !probe && options.method === undefined && options.body === undefined && !options.file ? takeEarly(path, signal) : null
+      response = (early && await early) ?? await fetch(path, { method, credentials: 'include', signal,
+        headers: { Accept: 'application/json', ...(options.ifMatch===undefined?{}:{'If-Match':String(options.ifMatch)}), ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }), ...options.file?.headers, ...(options.idempotencyKey ? { 'Idempotency-Key': options.idempotencyKey } : {}), ...(account ? { [accountHeader]: account } : {}), ...(workspace ? { [workspaceHeader]: workspace } : {}) },
+        body: options.file?.bytes ?? (options.body === undefined ? undefined : JSON.stringify(options.body)) })
+    } catch (error) {
+      if (isAbortError(error)) throw error
+      analytics().apiError(method, path, undefined, 'NETWORK_UNAVAILABLE')
+      throw new ApiError(`Cannot reach ${productName}. Check the API service and try again.`, 'NETWORK_UNAVAILABLE')
+    }
+    data = await response.json().catch(() => null)
+  } finally {
+    if (trackedWrite) activeWrites.delete(trackedWrite)
+    linked?.cleanup()
   }
-  const data = await response.json().catch(() => null)
   // The tab switched accounts or workspaces while this was in flight: its answer belongs to the other scope and is never shown.
   if (options.scope && !isCurrentScope(options.scope)) throw aborted()
   if (scoped && (epoch !== selectionEpoch || (account !== null && account !== accountSelection) || (workspace !== null && workspace !== workspaceSelection))) throw aborted()

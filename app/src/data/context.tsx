@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useLocation, useNavigate } from 'react-router'
 import { ApiError, type Identity, type Api, type WorkspaceInvitationPreview, errorText, tooBroadCode } from './types'
 import { roleLabel, workspaceApi } from './workspaces'
-import { aborted, createLiveApi, currentScope, isCurrentScope, rememberedWorkspace, request, selectAccount, selectedAccount, selectedWorkspace, selectWorkspace, type RequestScope } from './live'
+import { aborted, clearInterruptedWrites, createLiveApi, currentScope, isCurrentScope, rememberedWorkspace, request, selectAccount, selectedAccount, selectedWorkspace, selectWorkspace, takeInterruptedWrite, type RequestScope } from './live'
 import { accountApi, accountsKey, announce, expectAccount, onAccountEvent, POPUP_PATH, takeExpectedAccount, type AccountList } from './accounts'
 import { forgetInboxDrafts } from './support-inbox'
 import { regionCatalogKey } from './regions'
@@ -237,12 +237,14 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     const next = await request<Identity>('/v1/me', { workspace: id })
     if (seq !== switchSeq.current || selectedAccount() !== account) throw aborted()
     // Commit synchronously: abort every in-flight request from the previous workspace, clear cache and remount.
-    selectWorkspace(next.multiTenant ? next.workspaceId : null)
+    const nextWorkspace = next.multiTenant ? next.workspaceId : null
+    selectWorkspace(nextWorkspace)
     void cache.cancelQueries()
     cache.clear()
     cache.setQueryData(['identity'], next)
     if (path) navigate(path)
     setGeneration(value => value + 1)
+    if (takeInterruptedWrite(next.id, nextWorkspace)) toast('A save here was cut off when you switched — check if it landed.', 'info')
   }
   // Act as another connected account in this tab, at once: no round trip to the account service, one /v1/me to Nightmail.
   // Nothing from the previous account stays cached or mounted (the generation remounts every screen and dialog), and
@@ -260,8 +262,9 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     }
     if (seq !== switchSeq.current) throw aborted()
     if (next.id !== previous.account) accountChanged(false)
+    const nextWorkspace = next.multiTenant ? next.workspaceId : null
     selectAccount(next.id)
-    selectWorkspace(next.multiTenant ? next.workspaceId : null)
+    selectWorkspace(nextWorkspace)
     void cache.cancelQueries()
     const accounts = cache.getQueryData<AccountList>(accountsKey)
     cache.clear()
@@ -269,6 +272,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     cache.setQueryData(['identity'], next)
     if (options.path) navigate(options.path)
     setGeneration(value => value + 1)
+    if (takeInterruptedWrite(next.id, nextWorkspace)) toast('A save here was cut off when you switched — check if it landed.', 'info')
   }
   async function switchAccount(id: string, path?: string, workspace?: string) {
     if (id === selectedAccount() && cache.getQueryData(['identity'])) { if (workspace) await switchWorkspace(workspace, path); return }
@@ -278,6 +282,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   }
   async function signOutAccount(id = selectedAccount() ?? undefined) {
     const result = await accountApi.signOut(id ? { account: id } : {})
+    clearInterruptedWrites(id ?? selectedAccount())
     forgetInboxDrafts()
     if (id) announce({ type: 'signed-out', accounts: [id] })
     if (id && id !== selectedAccount()) { void cache.invalidateQueries({ queryKey: accountsKey }); return }
@@ -288,6 +293,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   }
   async function signOutAll() {
     await accountApi.signOut({ all: true })
+    clearInterruptedWrites()
     forgetInboxDrafts()
     announce({ type: 'signed-out', accounts: 'all' })
     rememberDashboardReady(selectedWorkspace(), false)
