@@ -33512,9 +33512,20 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       } finally { errSpy.mock.restore(); }
       assert.ok(errors.some(line => line.includes('CAMPAIGN_TALLIES_DRIFT')), 'Logs CAMPAIGN_TALLIES_DRIFT at error level.');
       assert.ok(errors.some(line => line.includes('METRICS_HOURLY_DRIFT')), 'Logs METRICS_HOURLY_DRIFT at error level.');
-      // Re-running reconcile produces zero diffs now.
+      // Re-running reconcile produces zero diffs now; raw event_outcomes bit check also finds 0 mismatches.
       assert.equal((await db.query('SELECT * FROM reconcile_sending_campaign_tallies($1,$2)', [wid, cid])).rowCount, 0);
       assert.equal((await db.query('SELECT * FROM reconcile_sending_metrics_hourly($1)', [wid])).rowCount, 0);
+      assert.equal(Number((await db.query('SELECT emails_with_other_bits FROM check_sending_event_outcome_bits($1)', [wid])).rows[0].emails_with_other_bits), 0);
+      // Plant a mis-stamped event_outcomes bit (as old migration 088 did) and confirm daily recount logs SENDING_EVENT_OUTCOMES_DRIFT loudly!
+      await db.query("UPDATE sending_emails SET event_outcomes = event_outcomes | 128 WHERE workspace_id=$1 AND id='t_seq_bnc'", [wid]);
+      const bitErrors: string[] = [];
+      const bitSpy = t.mock.method(console, 'error', (...args: unknown[]) => { bitErrors.push(String(args[0])); });
+      try {
+        await db.query("DELETE FROM job_schedule WHERE workspace_id='maintenance:sending-tallies'");
+        const res = await recountSendingTallies(runtime);
+        assert.equal(res.outcomeBitsDrifted, 1);
+      } finally { bitSpy.mock.restore(); }
+      assert.ok(bitErrors.some(line => line.includes('SENDING_EVENT_OUTCOMES_DRIFT')), 'Logs SENDING_EVENT_OUTCOMES_DRIFT when event_outcomes disagrees with raw events.');
 
       // 6. High-volume dashboard cache revision quantizes to 10-second buckets above 500 emails/hour.
       const quietRev = await dashboardRevision(runtime, wid);

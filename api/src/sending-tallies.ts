@@ -35,22 +35,26 @@ export async function foldSendingTallies(runtime: Runtime, budgetMs = 10_000, cl
   let campaignRemoved = 0, campaignKept = 0, campaignUnfolded = 0;
   let metricsRemoved = 0, metricsKept = 0, metricsUnfolded = 0;
 
-  for (let pass = 0; pass < FOLD_MAX_PASSES && clock() < until; pass++) {
-    const { rows: [c] } = await runtime.db.execute<{ removed_rows: number; kept_rows: number; unfolded_rows: string }>(
-      sql`SELECT removed_rows, kept_rows, unfolded_rows FROM fold_sending_campaign_tallies(${FOLD_BATCH_LIMIT})`
-    );
-    const removed = Number(c?.removed_rows ?? 0), kept = Number(c?.kept_rows ?? 0);
-    campaignRemoved += removed; campaignKept += kept; campaignUnfolded = Number(c?.unfolded_rows ?? 0);
-    if (removed < FOLD_BATCH_LIMIT || campaignUnfolded === 0) break;
-  }
-
-  for (let pass = 0; pass < FOLD_MAX_PASSES && clock() < until; pass++) {
-    const { rows: [m] } = await runtime.db.execute<{ removed_rows: number; kept_rows: number; unfolded_rows: string }>(
-      sql`SELECT removed_rows, kept_rows, unfolded_rows FROM fold_sending_metrics_hourly(${FOLD_BATCH_LIMIT})`
-    );
-    const removed = Number(m?.removed_rows ?? 0), kept = Number(m?.kept_rows ?? 0);
-    metricsRemoved += removed; metricsKept += kept; metricsUnfolded = Number(m?.unfolded_rows ?? 0);
-    if (removed < FOLD_BATCH_LIMIT || metricsUnfolded === 0) break;
+  // Alternate bounded slices between campaign tallies and hourly metrics so a large backlog in one table never
+  // starves the other within the per-minute budget.
+  let campaignMore = true, metricsMore = true;
+  for (let pass = 0; pass < FOLD_MAX_PASSES && (campaignMore || metricsMore) && clock() < until; pass++) {
+    if (campaignMore && clock() < until) {
+      const { rows: [c] } = await runtime.db.execute<{ removed_rows: number; kept_rows: number; unfolded_rows: string }>(
+        sql`SELECT removed_rows, kept_rows, unfolded_rows FROM fold_sending_campaign_tallies(${FOLD_BATCH_LIMIT})`
+      );
+      const removed = Number(c?.removed_rows ?? 0), kept = Number(c?.kept_rows ?? 0);
+      campaignRemoved += removed; campaignKept += kept; campaignUnfolded = Number(c?.unfolded_rows ?? 0);
+      if (removed < FOLD_BATCH_LIMIT || campaignUnfolded === 0) campaignMore = false;
+    }
+    if (metricsMore && clock() < until) {
+      const { rows: [m] } = await runtime.db.execute<{ removed_rows: number; kept_rows: number; unfolded_rows: string }>(
+        sql`SELECT removed_rows, kept_rows, unfolded_rows FROM fold_sending_metrics_hourly(${FOLD_BATCH_LIMIT})`
+      );
+      const removed = Number(m?.removed_rows ?? 0), kept = Number(m?.kept_rows ?? 0);
+      metricsRemoved += removed; metricsKept += kept; metricsUnfolded = Number(m?.unfolded_rows ?? 0);
+      if (removed < FOLD_BATCH_LIMIT || metricsUnfolded === 0) metricsMore = false;
+    }
   }
 
   if (campaignUnfolded > UNFOLDED_ALERT_THRESHOLD || metricsUnfolded > UNFOLDED_ALERT_THRESHOLD) {
@@ -70,8 +74,8 @@ export async function foldSendingTallies(runtime: Runtime, budgetMs = 10_000, cl
 }
 
 const RECOUNT_STATEMENT_SECONDS = 30;
-const RECOUNT_CAMPAIGN_BATCH = 20;
-const RECOUNT_WORKSPACE_BATCH = 10;
+const RECOUNT_CAMPAIGN_BATCH = 5;
+const RECOUNT_WORKSPACE_BATCH = 1;
 
 /**
  * Daily exact recount (durable election in job_schedule) of sending_campaign_tallies and sending_metrics_hourly.
@@ -140,7 +144,7 @@ export async function recountSendingTallies(runtime: Runtime, budgetMs = 60_000,
     }
   }
 
-  let workspacesRecounted = 0, workspacesCorrected = 0, workspacesFailed = 0;
+  let workspacesRecounted = 0, workspacesCorrected = 0, workspacesFailed = 0, outcomeBitsDrifted = 0;
   for (let i = 0; i < workspaceTargets.length && clock() < until; i += RECOUNT_WORKSPACE_BATCH) {
     const batch = workspaceTargets.slice(i, i + RECOUNT_WORKSPACE_BATCH);
     try {
@@ -171,14 +175,43 @@ export async function recountSendingTallies(runtime: Runtime, budgetMs = 60_000,
       workspacesFailed += batch.length;
       logError(error, { code: 'METRICS_HOURLY_RECOUNT_FAILED' }, 'warn');
     }
+
+    // Verify stamped sending_emails.event_outcomes bits against raw sending_email_events so a mis-stamped bit can
+    // never stay hidden behind agreeing tallies. Isolated per workspace under its own 30 s timeout.
+    for (const target of batch) {
+      if (clock() >= until) break;
+      try {
+        const { rows: [bits] } = await runtime.db.transaction(async tx => {
+          await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${RECOUNT_STATEMENT_SECONDS}s'`));
+          return tx.execute<{ emails_with_other_bits: string; in_campaigns: string; extra_bits: number; missing_bits: number }>(
+            sql`SELECT * FROM check_sending_event_outcome_bits(${target.workspace_id})`
+          );
+        });
+        const drifted = Number(bits?.emails_with_other_bits ?? 0);
+        if (drifted > 0) {
+          outcomeBitsDrifted += drifted;
+          log('error', {
+            code: 'SENDING_EVENT_OUTCOMES_DRIFT',
+            workspace: target.workspace_id,
+            emailsWithOtherBits: drifted,
+            inCampaigns: Number(bits?.in_campaigns ?? 0),
+            extraBits: Number(bits?.extra_bits ?? 0),
+            missingBits: Number(bits?.missing_bits ?? 0),
+          });
+        }
+      } catch (error) {
+        logError(error, { code: 'SENDING_EVENT_OUTCOMES_CHECK_FAILED', workspace: target.workspace_id }, 'warn');
+      }
+    }
   }
 
   if (campaignTargets.length || workspaceTargets.length) {
-    log(campaignsFailed || workspacesFailed ? 'warn' : 'info', {
+    log(campaignsFailed || workspacesFailed || outcomeBitsDrifted ? 'warn' : 'info', {
       code: 'SENDING_TALLIES_RECOUNTED',
       campaigns: campaignTargets.length, campaignsRecounted, campaignsCorrected, campaignsFailed,
       workspaces: workspaceTargets.length, workspacesRecounted, workspacesCorrected, workspacesFailed,
+      outcomeBitsDrifted,
     });
   }
-  return { campaignsCorrected, workspacesCorrected };
+  return { campaignsCorrected, workspacesCorrected, outcomeBitsDrifted };
 }

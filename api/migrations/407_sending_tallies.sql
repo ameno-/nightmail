@@ -12,27 +12,33 @@
 --   fold_sending_metrics_hourly); daily upkeep recounts exact totals in a single snapshot with no write locks and logs
 --   any difference as an error (reconcile_sending_campaign_tallies, reconcile_sending_metrics_hourly).
 --
--- Live deploy lock: CREATE TRIGGER takes SHARE ROW EXCLUSIVE on sending_emails and sending_email_events (reads continue,
--- writes wait) from here to COMMIT (~milliseconds, since migration 408 runs the backfill in a separate transaction with
--- no table locks). The lock is requested in 2-second attempts with a 1-second pause between, in the codebase's lock order
--- (sending_emails before sending_email_events), so active dispatch never queues behind this migration for more than 2 s.
+-- Live deploy lock: CREATE TRIGGER takes SHARE ROW EXCLUSIVE on sending_emails ONLY (one table per transaction so it
+-- cannot deadlock with outcome writes that touch both sending_emails and sending_email_events; migration 408 locks
+-- sending_email_events in its own transaction, and migration 409 runs the backfill with no table locks). The lock is
+-- requested in 2-second attempts with a 1-second pause between, held only for milliseconds until COMMIT.
+--
+-- Note for future migrations: DDL that locks sending_campaign_tallies or sending_metrics_hourly blocks sending_emails
+-- writes while held (use CONCURRENTLY for indexes and lock_timeout for metadata-only ALTERs).
 --
 -- Emergency undo (one statement; reads check pg_trigger and immediately fall back to live queries behind budgetedRead):
 --   ALTER TABLE sending_emails DISABLE TRIGGER sending_tally_insert, DISABLE TRIGGER sending_tally_update, DISABLE TRIGGER sending_tally_delete;
+-- Safe re-enable (two steps, so pages never read stale tallies accumulated while disabled):
+--   1. ALTER TABLE sending_emails ENABLE TRIGGER sending_tally_insert, ENABLE TRIGGER sending_tally_update, ENABLE TRIGGER sending_tally_delete;
+--   2. Re-run the two idempotent diff INSERT statements in migration 409_sending_tallies_fill.sql.
 
-DO $$
+DO $
 BEGIN
   FOR attempt IN 1..60 LOOP
     BEGIN
       SET LOCAL lock_timeout = '2s';
-      LOCK TABLE sending_emails, sending_email_events IN SHARE ROW EXCLUSIVE MODE;
+      LOCK TABLE sending_emails IN SHARE ROW EXCLUSIVE MODE;
       RETURN;
     EXCEPTION WHEN lock_not_available THEN
       PERFORM pg_sleep(1);
     END;
   END LOOP;
-  RAISE EXCEPTION 'sending_emails and sending_email_events were busy for 3 minutes. Nothing was changed: run the migration again.' USING ERRCODE = 'lock_not_available';
-END $$;
+  RAISE EXCEPTION 'sending_emails was busy for 3 minutes. Nothing was changed: run the migration again.' USING ERRCODE = 'lock_not_available';
+END $;
 
 CREATE TABLE sending_campaign_tallies (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -72,67 +78,6 @@ CREATE TABLE sending_metrics_hourly (
 );
 CREATE INDEX sending_metrics_hourly_lookup
   ON sending_metrics_hourly (workspace_id, hour, region, kind);
-
--- Keep sending_emails.event_outcomes in sync when events are inserted directly into sending_email_events (as well as via
--- operation_events). Hot paths (dispatcher recordOutcomes, feedback ingestRoutineSesEvents) set event_outcomes inline on
--- sending_emails so this trigger matches 0 rows and adds no extra UPDATE on the hot path.
-CREATE FUNCTION record_sending_event_outcomes() RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN
-  WITH bits AS (
-    SELECT n.workspace_id, n.email_id,
-      bit_or(CASE n.type
-        WHEN 'send' THEN 1
-        WHEN 'accepted' THEN 1
-        WHEN 'delivery' THEN 3
-        WHEN 'bounce' THEN CASE WHEN n.data->>'bounceSubType' = 'EmailValidationSuppressed' THEN 0 ELSE 5 END
-        WHEN 'non_permanent_bounce' THEN 129
-        WHEN 'complaint' THEN 9
-        WHEN 'delivery_delay' THEN 129
-        WHEN 'open' THEN 16
-        WHEN 'click' THEN 32
-        WHEN 'reject' THEN 64
-        WHEN 'rendering_failure' THEN 64
-        ELSE 0 END) AS bits
-    FROM new_events n
-    GROUP BY 1, 2
-  ), targets AS (
-    SELECT e.id, b.bits::smallint AS bits
-    FROM sending_emails e
-    JOIN bits b ON e.id = b.email_id AND e.workspace_id = b.workspace_id
-    WHERE b.bits <> 0 AND (e.event_outcomes | b.bits::smallint) <> e.event_outcomes
-    ORDER BY e.id FOR UPDATE OF e
-  )
-  UPDATE sending_emails e SET event_outcomes = e.event_outcomes | t.bits FROM targets t WHERE e.id = t.id;
-  RETURN NULL;
-END $$;
-
-CREATE TRIGGER sending_email_events_outcomes AFTER INSERT ON sending_email_events
-  REFERENCING NEW TABLE AS new_events FOR EACH STATEMENT EXECUTE FUNCTION record_sending_event_outcomes();
-
--- operation_events collapses bounce, non_permanent_bounce and validation_suppressed into one public type ('email.bounced'),
--- so migration 088's ELSE 129 fallback misclassified minimal bounce/validation_suppressed payloads as delivery_delayed.
--- When a matching sending_email_events row exists (same workspace_id + id), sending_email_events_outcomes already sets the
--- exact bit from the unambiguous event type; only orphan operation_events rows fall back to this trigger.
-CREATE OR REPLACE FUNCTION record_email_event_outcomes() RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN
-  WITH bits AS (
-    SELECT n.workspace_id, n.data->>'emailId' AS email_id,
-      bit_or(CASE n.type WHEN 'email.sent' THEN 1 WHEN 'email.delivered' THEN 3
-        WHEN 'email.bounced' THEN CASE WHEN n.data->>'bounceSubType'='EmailValidationSuppressed' THEN 0
-          WHEN n.data->>'bounceType'='Permanent' THEN 5 ELSE 129 END
-        WHEN 'email.complained' THEN 9 WHEN 'email.delivery_delayed' THEN 129 WHEN 'email.opened' THEN 16
-        WHEN 'email.clicked' THEN 32 WHEN 'email.rejected' THEN CASE WHEN n.data->>'status' IN ('suppressed','canceled','acceptance_unknown') THEN 0 ELSE 64 END
-        WHEN 'email.rendering_failed' THEN 64 ELSE 0 END) AS bits
-    FROM new_events n
-    WHERE n.data ? 'emailId'
-      AND NOT EXISTS (SELECT 1 FROM sending_email_events v WHERE v.workspace_id = n.workspace_id AND v.id = n.id)
-    GROUP BY 1, 2
-  ), targets AS (
-    SELECT e.id, b.bits::smallint AS bits FROM sending_emails e JOIN bits b ON e.id = b.email_id AND e.workspace_id = b.workspace_id
-    WHERE b.bits <> 0 AND (e.event_outcomes | b.bits::smallint) <> e.event_outcomes ORDER BY e.id FOR UPDATE OF e
-  ) UPDATE sending_emails e SET event_outcomes = e.event_outcomes | t.bits FROM targets t WHERE e.id = t.id;
-  RETURN NULL;
-END $$;
 
 CREATE FUNCTION sending_tally_insert() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -544,3 +489,51 @@ BEGIN
   RETURNING n.region, n.kind, n.hour, n.emails, n.accepted, n.delivered, n.bounced,
     n.complained, n.opened, n.clicked, n.failed, n.delivery_delayed, n.simulated;
 END $$;
+
+
+-- Compares stamped sending_emails.event_outcomes bits against raw sending_email_events (and orphan operation_events)
+-- for one workspace so the daily recount detects any bit-stamping drift, not only tally drift. Read-only.
+CREATE FUNCTION check_sending_event_outcome_bits(wid text)
+RETURNS TABLE (
+  emails_with_other_bits bigint,
+  in_campaigns bigint,
+  extra_bits smallint,
+  missing_bits smallint
+) LANGUAGE sql SET plan_cache_mode = force_custom_plan AS $$
+  WITH expected AS (
+    SELECT email_id, bit_or(bits)::smallint AS bits
+    FROM (
+      SELECT v.email_id,
+        CASE v.type
+          WHEN 'send' THEN 1 WHEN 'accepted' THEN 1 WHEN 'delivery' THEN 3
+          WHEN 'bounce' THEN CASE WHEN v.data->>'bounceSubType' = 'EmailValidationSuppressed' THEN 0 ELSE 5 END
+          WHEN 'non_permanent_bounce' THEN 129 WHEN 'complaint' THEN 9 WHEN 'delivery_delay' THEN 129
+          WHEN 'open' THEN 16 WHEN 'click' THEN 32 WHEN 'reject' THEN 64 WHEN 'rendering_failure' THEN 64
+          ELSE 0 END AS bits
+      FROM sending_email_events v
+      WHERE v.workspace_id = wid
+      UNION ALL
+      SELECT n.data->>'emailId' AS email_id,
+        CASE n.type
+          WHEN 'email.sent' THEN 1 WHEN 'email.delivered' THEN 3
+          WHEN 'email.bounced' THEN CASE WHEN n.data->>'bounceSubType' = 'EmailValidationSuppressed' THEN 0
+            WHEN n.data->>'bounceType' = 'Permanent' THEN 5 ELSE 129 END
+          WHEN 'email.complained' THEN 9 WHEN 'email.delivery_delayed' THEN 129 WHEN 'email.opened' THEN 16
+          WHEN 'email.clicked' THEN 32
+          WHEN 'email.rejected' THEN CASE WHEN n.data->>'status' IN ('suppressed','canceled','acceptance_unknown') THEN 0 ELSE 64 END
+          WHEN 'email.rendering_failed' THEN 64 ELSE 0 END AS bits
+      FROM operation_events n
+      WHERE n.workspace_id = wid AND n.data ? 'emailId'
+        AND NOT EXISTS (SELECT 1 FROM sending_email_events v WHERE v.workspace_id = n.workspace_id AND v.id = n.id)
+    ) u
+    GROUP BY 1
+  )
+  SELECT
+    count(*)::bigint AS emails_with_other_bits,
+    count(*) FILTER (WHERE e.campaign_id IS NOT NULL)::bigint AS in_campaigns,
+    coalesce(bit_or(e.event_outcomes & ~coalesce(w.bits, 0)), 0)::smallint AS extra_bits,
+    coalesce(bit_or(coalesce(w.bits, 0) & ~e.event_outcomes), 0)::smallint AS missing_bits
+  FROM sending_emails e
+  LEFT JOIN expected w ON w.email_id = e.id
+  WHERE e.workspace_id = wid AND e.event_outcomes <> coalesce(w.bits, 0);
+$$;
