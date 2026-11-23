@@ -1,6 +1,10 @@
-import type { AttachmentApi } from '../../data/types'
+import type { Attachment, AttachmentApi } from '../../data/types'
 import { imageTags } from '../../lib/html-scan'
 import { MAX_ATTACHMENTS } from './copy'
+
+// What the composer saves: inlineAttachmentIds are the inline images the body uses, removedInlineIds the ones it no longer does.
+export type ComposedDraft = { html: string; inlineAttachmentIds: string[]; removedInlineIds: string[] }
+export const draftAttachments = (ids: string[] = [], draft: ComposedDraft) => [...new Set([...ids, ...draft.inlineAttachmentIds])].filter(id => !draft.removedInlineIds.includes(id))
 
 export function isRasterDataUrl(value: string): boolean {
   const content = value.slice(value.indexOf(',') + 1)
@@ -139,9 +143,9 @@ function rasterBytesMatch(bytes: Uint8Array, type: string): boolean {
   if (type === 'image/webp') return ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP'
   return type === 'image/avif' && ascii(4, 8) === 'ftyp' && ['avif', 'avis'].includes(ascii(8, 12))
 }
-export async function loadInlineAttachments(attachments: AttachmentApi, attachmentIds: string[], needed: ReadonlySet<string>, signal: AbortSignal): Promise<{sources: Map<string, string>}> {
-  const sources = new Map<string, string>()
-  if (!needed.size) return {sources}
+export async function loadInlineAttachments(attachments: AttachmentApi, attachmentIds: string[], needed: ReadonlySet<string>, signal: AbortSignal): Promise<{sources: Map<string, string>; items: Map<string, Attachment>}> {
+  const sources = new Map<string, string>(), items = new Map<string, Attachment>()
+  if (!needed.size) return {sources, items}
   const ids = [...new Set(attachmentIds)]
   if (ids.length > MAX_ATTACHMENTS) throw new Error('Too many attachments to preview.')
   const metadata = await Promise.all(ids.map(id => attachments.get(id, signal)))
@@ -157,8 +161,9 @@ export async function loadInlineAttachments(attachments: AttachmentApi, attachme
     if (bytes.length !== item.size || !rasterBytesMatch(bytes, type)) throw new Error('The attachment is not a supported raster image.')
     if (signal.aborted) throw new DOMException('Preview canceled.', 'AbortError')
     sources.set(`cid:${item.contentId}`, `data:${type};base64,${result.content}`)
+    items.set(`data:${type};base64,${result.content}`, item)
   }))
   const failure = results.find(result => result.status === 'rejected')
   if (failure?.status === 'rejected') throw failure.reason
-  return {sources}
+  return {sources, items}
 }
