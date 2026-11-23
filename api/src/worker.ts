@@ -3,10 +3,12 @@ import { getPath } from 'hono/utils/url';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import type { Config, FeedbackItem, Runtime } from './core.js';
 import { DispatcherShard, dispatcherName, shardCount } from './dispatcher-do.js';
+import { CampaignRoom } from './campaign-room.js';
+import { ROOM_PEER_HEADER } from './campaign-room-protocol.js';
 import type { SupportPlatformApi } from './support-platform.js';
 import { SECURITY_HEADERS } from './security-headers.js';
 import { clientIpHeader, clientNetworkHeader, healthService, legacyClientIpHeaders, requestHeaderNames, setting } from './brand.js';
-export { DispatcherShard };
+export { DispatcherShard, CampaignRoom };
 
 // Keep top-level evaluation empty so cold-started isolates answer /health without
 // loading OpenAPI/Zod schemas, Better Auth, MCP, Drizzle, pg or AWS SDK clients.
@@ -102,6 +104,7 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
     },
   });
   const nudges: ((runtime: Runtime) => Promise<void>)[] = [];
+  const rooms = env.CAMPAIGN_ROOMS;
   try {
     const notify = workWake(env.WAKE_QUEUE, concurrency);
     return await work({ db, storage: r2Storage(env.ATTACHMENTS), config, mailR2: env.MAIL && { bucket:env.MAIL,name:setting(env,'MAIL_BUCKET')!,write:setting(env,'MAIL_STORE')==='r2' }, jwksCacheScope: env.HYPERDRIVE,
@@ -115,6 +118,11 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
       // fails lets the batch through; the per-process cap still applies.
       analyticsStorage: env.ANALYTICS ? r2Storage(env.ANALYTICS) : undefined,
       allowAnalytics: env.ANALYTICS_INGEST ? peer => env.ANALYTICS_INGEST!.limit({ key: `analytics:${peer}` }).then(r => r.success, () => true) : undefined,
+      // Campaign rooms (src/campaign-room.ts). A room answers the upgrade itself; the person rides in a header only this builds.
+      campaignRooms: rooms && {
+        connect: (name, person) => rooms.getByName(name).fetch('https://room/connect', { headers: { upgrade: 'websocket', [ROOM_PEER_HEADER]: JSON.stringify(person) } }),
+        agent: (name, agent) => rooms.getByName(name).agent(agent),
+      },
       placementEdge:{probesPerJob:Math.min(3,Math.floor(6/concurrency))}, deferNudge: ctx ? pending => { nudges.push(pending); } : undefined, wake: async (readyJobs = 1, immediate) => {
       if (immediate === 'webhook' && env.WEBHOOK_QUEUE) return workWake(env.WEBHOOK_QUEUE,concurrency)(readyJobs);
       if (immediate || readyJobs > concurrency) return notify(readyJobs);
@@ -225,6 +233,11 @@ export default {
       headers.set(clientIpHeader, address);
       // The network Cloudflare resolved the client to, never a value the request carried.
       headers.delete(clientNetworkHeader);
+      // A browser's WebSocket can't send headers: the campaign room's upgrade names its account and workspace in the query,
+      // which stand in for the headers the dashboard sends with every other request (sending.ts, the room route).
+      if (/^\/v1\/campaigns\/[^/]+\/room$/.test(pathname) && request.headers.get('upgrade')?.toLowerCase() === 'websocket') {
+        for (const name of ['account', 'workspace']) { const value = url.searchParams.get(name); if (value && !requestHeaderNames(name).some(header => headers.has(header))) headers.set(requestHeaderNames(name)[0]!, value); }
+      }
       const cf = (request as Request & { cf?: { asn?: unknown; country?: unknown } }).cf;
       if (typeof cf?.asn === 'number' || typeof cf?.country === 'string') headers.set(clientNetworkHeader, `${typeof cf.asn === 'number' ? `AS${cf.asn}` : ''};${typeof cf.country === 'string' ? cf.country : ''}`);
       const runtimeStarted = performance.now();
@@ -233,6 +246,8 @@ export default {
         : await core.guardPublicRequest(pathname, headers, peer, () => withRuntime(env, async runtime =>
           app.fetch(new Request(request, { headers }), runtime), 1, ctx));
       const runtimeMs = performance.now() - runtimeStarted;
+      // The campaign room's accepted upgrade goes back as it is: a copy would drop its socket.
+      if (response.webSocket) return response;
       const responseHeaders = new Headers(response.headers);
       const innerTiming = responseHeaders.get('server-timing');
       if(innerTiming) responseHeaders.set('server-timing', [innerTiming, `admission;dur=${admissionMs.toFixed(1)}`, `runtime;dur=${runtimeMs.toFixed(1)}`].join(', '));

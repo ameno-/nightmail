@@ -170,6 +170,9 @@ export interface Runtime {
   // Nudges the long-lived dispatcher for one account/region after queued mail commits. Dispatch
   // never depends on it: the dispatcher also polls and the scheduler pings it every minute.
   dispatch?: (region: string, accountId?: string, emails?: number, kind?: ReadyConnection['kind'], priority?: boolean) => Promise<void>;
+  /** Campaign rooms (src/campaign-room.ts): who has a campaign open in the dashboard. Cloudflare only: the Node server has
+   *  none, and its dashboard shows no presence. connect answers the WebSocket upgrade; agent records an agent's visit. */
+  campaignRooms?: { connect: (name: string, person: import('./campaign-room-protocol.js').RoomPerson) => Promise<Response>; agent: (name: string, agent: import('./campaign-room-protocol.js').RoomAgent) => Promise<void> };
   /** True once the content classifier must not be called in this run (src/dispatcher-do.ts: a request landed on the shard,
    *  and a call now would carry its visitor). Checked right before each request; a call not made throws ScreenHandover. */
   screenHandover?: () => boolean;

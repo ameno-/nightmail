@@ -43,6 +43,7 @@ import { usePhone } from '../../lib/media'
 import { useLeaveGuard } from '../../lib/leave-guard'
 import { emailIsValid, replyToAddresses, replyToError } from './reply-to'
 import { mergeCampaign, mergeFieldsText, type MergeField } from './merge'
+import { CampaignPresence, useCampaignPresence } from './presence'
 
 // {{placeholders}} the campaign uses; email always resolves, everything else needs a contact value or a fallback.
 const placeholderPattern = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/g
@@ -258,6 +259,7 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
     return taken
   }
   const sync = useCampaignSync(accepted, receiveRemote)
+  const present = useCampaignPresence(accepted?.id, 'write')
   const current = remote ?? accepted
   const unavailable = Boolean(sync.error && 'status' in sync.error && [401, 403, 404].includes(Number(sync.error.status)))
   const readOnly = unavailable || Boolean(current && (current.archivedAt || !campaignEditable(current)))
@@ -407,6 +409,7 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
       <h1 className="sr-only">{issueOf ? accepted ? 'Edit issue' : 'New issue' : accepted ? 'Edit campaign' : 'Create campaign'}</h1>
       <Input id="campaign-name" className="studio-name" aria-label={issueOf ? 'Issue name' : 'Campaign name'} placeholder={issueOf ? 'Untitled issue' : 'Untitled campaign'} value={form.name} onChange={event => change('name', event.target.value)} required disabled={controlsDisabled} />
     </>} steps={<CampaignSteps step="write" onReview={saveDisabled || pending || autosavePaused ? undefined : review} />} actions={<>
+      <CampaignPresence present={present} />
       {!phone && <div className="campaign-sync-status" role="status" data-state={syncState} data-actionable={syncActionable || undefined} title={syncTitle}>
         <span className="campaign-sync-dot" aria-hidden="true" />
         {syncActionable ? <Button variant="ghost" size="sm" disabled={pending} onClick={syncAction}>{syncLabel}</Button> : <span>{syncLabel}</span>}
@@ -828,6 +831,8 @@ function CampaignReview({ campaign, stats, stale, refreshing, refresh }: { campa
   const origin = multiTenant ? '' : ` from ${campaign.regionId}`
 
   const draft = !campaign.archivedAt && campaignEditable(campaign)
+  // Review joins the draft's room too: someone still writing sees you here, and you see them.
+  const present = useCampaignPresence(draft ? campaign.id : null, 'review')
   const readinessError = campaignReadinessError(campaign)
   const fallbacks = campaign.draft?.defaults ?? {}
   const keys = placeholders(campaign.subject, campaign.previewText, campaign.html)
@@ -911,7 +916,7 @@ function CampaignReview({ campaign, stats, stale, refreshing, refresh }: { campa
     ...(!canAdminister ? [['neutral', `Only owners and admins can send or schedule ${thing}s.`] as ['neutral', ReactNode]] : []),
     ...(error ? [['danger', error] as ['danger', ReactNode]] : []),
   ]
-  const bar = <CampaignBar back={campaign.archivedAt ? '/campaigns?archived=true' : issueOf ? newsletterPath(issueOf.id) : '/campaigns'} title={<h1 className="studio-title">{campaign.name}</h1>} steps={draft && <CampaignSteps step="review" writeTo={campaignRoute(campaign, 'edit')} />} actions={<>{stale && <span className="campaign-note" data-tone="warning" title="Showing the last available counts.">Couldn’t refresh</span>}{!campaignEditable(campaign) && !finished && sentSomething && <Link className="ui-button ui-button--secondary ui-button--md" to={`/logs?campaign=${encodeURIComponent(campaign.id)}`}>View logs</Link>}<StatusBadge status={campaignDisplayStatus(campaign)} />{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</>} />
+  const bar = <CampaignBar back={campaign.archivedAt ? '/campaigns?archived=true' : issueOf ? newsletterPath(issueOf.id) : '/campaigns'} title={<h1 className="studio-title">{campaign.name}</h1>} steps={draft && <CampaignSteps step="review" writeTo={campaignRoute(campaign, 'edit')} />} actions={<><CampaignPresence present={present} />{stale && <span className="campaign-note" data-tone="warning" title="Showing the last available counts.">Couldn’t refresh</span>}{!campaignEditable(campaign) && !finished && sentSomething && <Link className="ui-button ui-button--secondary ui-button--md" to={`/logs?campaign=${encodeURIComponent(campaign.id)}`}>View logs</Link>}<StatusBadge status={campaignDisplayStatus(campaign)} />{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</>} />
   const dialogs = <>
     <ConfirmDialog open={confirmation !== null} onOpenChange={open => { if (!open && !sendMutation.isPending) setConfirmation(null) }} title={confirmation?.mode === 'schedule' ? `Schedule this ${thing}?` : `Send this ${thing} now?`} description={confirmation?.mode === 'schedule' ? `Send “${campaign.name}”${origin} to ${recipients}${audienceName} on ${utcLabel(confirmation.scheduledAt!)} (${localLabel(confirmation.scheduledAt!)}).${paceSummary(confirmation)}${cost}${noticeNote}${scoreNote} You can change this until sending starts.` : `Send “${campaign.name}”${origin} to ${recipients}${audienceName} now.${paceSummary(confirmation)}${cost}${noticeNote || ' Consent is checked again as each email sends.'}${scoreNote} You can’t undo this.`} confirmLabel={confirmation?.mode === 'schedule' ? 'Schedule' : 'Send now'} onConfirm={confirmSend} pending={sendMutation.isPending} />
     {draft && testOpen && <TestEmailDialog campaign={campaign} open={testOpen} onOpenChange={setTestOpen} />}

@@ -1,0 +1,20 @@
+/* Faces of who else is in the campaign (presence.tsx), at the start of the bar's actions. The actions sit at the bar's
+   end, so the faces take room to their left: the first to arrive is nearest them and each one after takes the next place
+   out, so an arrival moves nothing on screen. The group runs right to left (direction) so that its own start is its
+   right edge, which stays put as it grows; the faces inside read left to right. */
+.campaign-presence { display: flex; direction: rtl; align-items: center; gap: var(--space-4); flex: none; margin-right: var(--space-4); }
+.campaign-presence__face { direction: ltr; position: relative; display: inline-grid; place-items: center; flex: none; width: 26px; height: 26px; border-radius: 50%; background: var(--presence-color, var(--color-layer-3)); color: #fff; font-size: 10px; font-weight: var(--font-weight-bold); letter-spacing: 0; line-height: 1; cursor: default; animation: presence-in 160ms ease-out; }
+.campaign-presence__face[data-kind='agent'] { border-radius: 8px; background: var(--color-layer-3); color: var(--color-text); }
+.campaign-presence__more { background: var(--color-layer-3); color: var(--color-text); }
+/* A phone's one face: how many others are here, in its corner. */
+.campaign-presence__count { position: absolute; right: -10px; bottom: -3px; display: grid; place-items: center; min-width: 15px; height: 15px; padding-inline: 3px; border: 2px solid var(--color-surface); border-radius: 8px; background: var(--color-text); color: var(--color-surface); font-size: 9px; line-height: 1; }
+.campaign-presence__face[data-color='0'] { --presence-color: #d13f45; }
+.campaign-presence__face[data-color='1'] { --presence-color: #1f6fd1; }
+.campaign-presence__face[data-color='2'] { --presence-color: #23855a; }
+.campaign-presence__face[data-color='3'] { --presence-color: #8a4fc4; }
+.campaign-presence__face[data-color='4'] { --presence-color: #c43d8e; }
+.campaign-presence__face[data-color='5'] { --presence-color: #c25a12; }
+.campaign-presence__face[data-color='6'] { --presence-color: #0f7d8a; }
+.campaign-presence__face[data-color='7'] { --presence-color: #5d5fc9; }
+@keyframes presence-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .campaign-presence__face { animation: none; } }
