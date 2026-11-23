@@ -72,14 +72,16 @@ CREATE FUNCTION audience_contact_state(deleted_at timestamptz, suppressed boolea
 $$;
 
 -- How a trigger joins the rows a statement changed to the tables it looks them up in. With statistics that describe
--- tables larger than the statement, one index probe per row: time in proportion to the change, whatever the tables'
--- size. Otherwise the statistics predate the rows being looked up (a first import, tables autovacuum last saw empty): the
--- planner then rates every index the same and has picked one that reads the whole workspace per row, minutes for 50,000
--- rows. So that statement reads the table once and joins by hash; the table is no larger than what was loaded since its
--- last ANALYZE. The settings last until the calling trigger function returns (it names them in its SET clauses), and the
+-- tables more than ten times the statement, one index probe per row: time in proportion to the change, whatever the
+-- tables' size. Otherwise the table is read once and joined by hash, for one of two reasons. The statement is a large
+-- part of the table (a recount of a list most contacts are in: 9.4 s by probes, 3.2 s by hash at 2,000,000), and one
+-- pass costs at most ten times the statement. Or the statistics predate the rows being looked up (a first import,
+-- tables autovacuum last saw empty): the planner then rates every index the same and has picked one that reads the
+-- whole workspace per row, minutes for 50,000 rows; the table is then no larger than what was loaded since its last
+-- ANALYZE. The settings last until the calling trigger function returns (it names them in its SET clauses), and the
 -- joins are planned on each call (EXECUTE), never from a plan kept from a statement of another size.
 CREATE FUNCTION audience_counts_join(changed bigint, VARIADIC looked_up regclass[]) RETURNS void LANGUAGE plpgsql AS $$
-DECLARE probe boolean := (SELECT min(reltuples) FROM pg_class WHERE oid = ANY (looked_up)) > changed;
+DECLARE probe boolean := (SELECT min(reltuples) FROM pg_class WHERE oid = ANY (looked_up)) > 10 * changed;
 BEGIN
   PERFORM set_config('enable_nestloop', probe::text, true), set_config('enable_hashjoin', (NOT probe)::text, true),
     set_config('enable_mergejoin', (NOT probe)::text, true), set_config('enable_seqscan', (NOT probe)::text, true);

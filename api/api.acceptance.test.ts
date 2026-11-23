@@ -22843,6 +22843,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       }
       assert.equal(ok(await local('POST', `/v1/lists/${list.id}/members`, { contactIds: people.map(person => person.id) })).added, 4);
       for (const person of people.slice(0, 2)) sent.push(ok(await local('POST', '/v1/emails/send', mail({ to: person.email })), 202));
+      // One email to two people who are in no list, for the last step: its address order is the reverse of SES's.
+      const tag = unique('pair'), [early, late] = [`a-${tag}@example.com`, `z-${tag}@example.com`];
+      const both = ok(await local('POST', '/v1/emails/send', mail({ to: late, cc: [early] })), 202);
       runtime.config.multiTenant = true;
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`, [REGION, account, topicArn]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, account]);
@@ -22877,8 +22880,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // One bounce for two recipients, listed by SES in the reverse of their email order: the feedback job suppresses
       // them in email order, the order imports, the feedback batch and lockContacts take contacts in, so it cannot
       // deadlock with someone adding both to a list.
-      const tag = unique('pair'), [early, late] = [`a-${tag}@example.com`, `z-${tag}@example.com`];
-      const both = ok(await local('POST', '/v1/emails/send', mail({ to: late, cc: [early] })), 202), provider = unique('fixture-provider');
+      const provider = unique('fixture-provider');
       await db.query(`UPDATE sending_emails SET status='accepted',provider_id=$2,simulated=false,feedback_topic_arn=$3 WHERE id=$1`, [both.id, provider, topicArn]);
       const bounce = { topicArn, region: REGION, messageId: unique('sns'), message: { eventType: 'Bounce', mail: { messageId: provider, sendingAccountId: account }, bounce: { bounceType: 'Permanent', bounceSubType: 'General', bouncedRecipients: [{ emailAddress: late }, { emailAddress: early }] } } };
       await db.query('INSERT INTO operation_sns_receipts(topic_arn,message_id,workspace_id) VALUES($1,$2,$3)', [topicArn, bounce.messageId, wid]);
