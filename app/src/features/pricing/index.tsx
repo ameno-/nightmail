@@ -1,5 +1,5 @@
 import { lazy, use, useEffect, useLayoutEffect, type ReactNode } from 'react'
-import { Link, NavLink, useParams, useSearchParams } from 'react-router'
+import { Link, NavLink, useParams } from 'react-router'
 import { ThemeToggle } from '../../components/ThemeToggle'
 import { NightmailWordmark } from '../../components/NightmailLogo'
 import { EmptyState } from '../../components/ui'
@@ -25,21 +25,29 @@ const fontsReady = Promise.race([
   new Promise(resolve => setTimeout(resolve, 3000)),
 ]).catch(() => {})
 
-function PriceFrame({ title, children, variant, end }: { title: string; children: ReactNode; variant?: string; end?: ReactNode }) {
+const pageLinks = (label: (page: (typeof PRICE_PAGES)[number]) => string) => PRICE_PAGES.map(page => <NavLink key={page.path} to={page.path} end>{label(page)}</NavLink>)
+
+/** A price page's frame. The calculator has a bar along the top: the wordmark, the price pages and the theme. A
+ *  comparison is a `scene` that runs to the window's top edge: the wordmark is a quiet link in its corner, and the price
+ *  pages and the theme are in the footer, with a link past the corner to the comparison for a keyboard. */
+function PriceFrame({ title, children, variant, end, scene }: { title: string; children: ReactNode; variant?: string; end?: ReactNode; scene?: boolean }) {
   use(fontsReady)
   useEffect(() => { document.title = `${title} · ${productName.toLowerCase()}` }, [title])
   // A page opens at its top.
   useLayoutEffect(() => { window.scrollTo(0, 0) }, [title])
+  const home = <Link className="wordmark" to="/" aria-label={`${productName.toLowerCase()} home`}><NightmailWordmark /></Link>
   return <div className={`price-page${variant ? ` ${variant}` : ''}`}>
-    <header className="price-header">
-      <Link className="wordmark" to="/" aria-label={`${productName.toLowerCase()} home`}><NightmailWordmark /></Link>
-      <nav className="price-switcher" aria-label="Price pages">
-        {PRICE_PAGES.map(page => <NavLink key={page.path} to={page.path} end>{page.path === '/pricing' ? 'Calculator' : page.title.replace(`${productName} `, '')}</NavLink>)}
-      </nav>
+    {scene ? <>
+      <a className="skip-link" href="#price-main">Skip to the comparison</a>
+      <header className="price-corner">{home}</header>
+    </> : <header className="price-header">
+      {home}
+      <nav className="price-switcher" aria-label="Price pages">{pageLinks(page => page.path === '/pricing' ? 'Calculator' : page.title.replace(`${productName} `, ''))}</nav>
       <ThemeToggle />
-    </header>
-    <main className="price-main">{children}</main>
+    </header>}
+    <main className="price-main" id="price-main" tabIndex={-1}>{children}</main>
     <footer className="price-footer">
+      {scene && <div className="price-footer__nav"><nav aria-label="Price pages">{pageLinks(page => page.path === '/pricing' ? 'Price calculator' : page.title)}</nav><ThemeToggle /></div>}
       <p>Product names belong to their owners and only identify their products. {productName} isn’t affiliated with them.</p>
     </footer>
     {end}
@@ -54,10 +62,8 @@ export function ComparePage() {
   const { vendor } = useParams()
   const comparison = vendor === 'mailchimp' || vendor === 'resend' ? comparisons[vendor] : null
   const page = PRICE_PAGES.find(p => p.path === `/compare/${vendor}`)
-  // What the board hangs in waits for a choice (board.tsx, BACKDROPS): ?bg=1 to 4.
-  const backdrop = useSearchParams()[0].get('bg')
   if (!comparison) return <PriceFrame title="Page not found"><EmptyState headingAs="h1" title="Page not found" action={<Link to="/pricing">Price calculator</Link>} /></PriceFrame>
-  return <PriceFrame title={page?.title ?? comparison.offer.vendor} variant="price-page--board" end={<BoardEnd />}>
-    <ComparisonBoard key={vendor} comparison={comparison} backdrop={backdrop} />
+  return <PriceFrame title={page?.title ?? comparison.offer.vendor} variant="price-page--board" end={<BoardEnd />} scene>
+    <ComparisonBoard key={vendor} comparison={comparison} />
   </PriceFrame>
 }

@@ -2,11 +2,12 @@ import { useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, 
 import { Link } from 'react-router'
 import { ArrowRight, Check } from 'lucide-react'
 import { Disclosure } from '../../components/ui'
+import { NightmailWordmark } from '../../components/NightmailLogo'
 import { useTheme } from '../../lib/theme'
 import { EndBand, endBand } from '../home/end-band'
 import { toneVars } from '../home/tones'
 import { calculatorPath, Checked, CheckedOn, Cite, Ours, Terms } from './content'
-import { CHECKED, claim, formatCount, money, nightmail, nightmailBill, reachable, theirPrice, ucOf, type Comparison, type Usage } from './prices'
+import { CHECKED, claim, formatCount, money, nightmail, nightmailBill, theirPrice, ucOf, type Comparison, type Usage } from './prices'
 
 // A comparison page (/compare/mailchimp, /compare/resend): the two prices on a board hung in the homepage's factory, as
 // its hero's boards hang. The reader's own size is set on a fader on the console under it, over the vendor's own
@@ -16,12 +17,11 @@ import { CHECKED, claim, formatCount, money, nightmail, nightmailBill, reachable
 // Nightmail's its share, lit in the homepage's periwinkle, the only colour. Under the console, what both prices are for
 // and where the competitor's was read; then what Nightmail has, the small print, and the wordmark across the page's end.
 // Every figure keeps the room of the widest it can show (Room), so nothing moves as the fader does.
-// What the board hangs in waits for a choice (BACKDROPS, ?bg=): without it, the factory's concrete wall.
+// The board hangs on a dark wall under one pendant lamp, which comes down on its cord from the top of the window (the
+// page has no bar: PriceFrame's scene). Nightmail is named by its wordmark wherever it is a display word: the headline,
+// the board's lit row and "Nightmail has"; each one's accessible name is "Nightmail".
 // (Its styles are board.css, loaded with this page only: board-page.tsx. This file imports none, so the pre-merge check
 // can render it.)
-
-export const BACKDROPS = ['1', '2', '3', '4'] as const
-export type Backdrop = (typeof BACKDROPS)[number]
 
 type Point = { size: number; usage: Usage; ours: ReturnType<typeof nightmailBill>; theirs: { cents: number; plan: string } }
 const pointAt = (c: Comparison, size: number): Point => {
@@ -33,10 +33,10 @@ const unitOf = (c: Comparison) => byContacts(c) ? 'contacts' : 'emails a month'
 /** The size the page opens at: the comparison's middle size, or the vendor's nearest that holds it. */
 const opening = (c: Comparison) => { const u = c.sizes[1] ?? c.use(c.steps[0]!), n = byContacts(c) ? u.contacts : u.sent; return c.steps.find(step => step >= n) ?? c.steps.at(-1)! }
 const share = (p: Point) => Number(p.ours.uc) / Number(ucOf(p.theirs.cents))
-/** The widest text a figure can show, by the sizes the control reaches. */
+/** The widest text a figure can show, by the sizes the fader reaches. */
 const widest = (values: string[]) => values.reduce((a, b) => b.length > a.length || (b.length === a.length && b.replace(/\D/g, '').length > a.replace(/\D/g, '').length) ? b : a, '')
 function rooms(c: Comparison) {
-  const points = reachable(c).map(size => pointAt(c, size))
+  const points = c.steps.map(size => pointAt(c, size))
   return { size: widest(points.map(p => formatCount(p.size))), price: widest(points.flatMap(p => [p.ours.text, money(p.theirs.cents)])) }
 }
 /** A figure in the room of the widest it can be. */
@@ -51,6 +51,11 @@ function Flaps({ text, width, end, className }: { text: string; width: number; e
   return <span className={`cb-flaps ${className}`} aria-hidden="true">{chars.map((ch, i) =>
     <span key={`${i}:${ch}`} className="cb-flap" style={{ '--i': i } as CSSProperties} data-blank={ch === ' ' || undefined}><span>{ch}</span></span>)}</span>
 }
+/** Nightmail's wordmark, read as the word. */
+const Mark = ({ className }: { className: string }) => <NightmailWordmark className={`cb-mark ${className}`} title="Nightmail" />
+/** The headline, with the wordmark in the place of the word. */
+const Claim = ({ text }: { text: string }) => <>{text.split('Nightmail').map((part, i) => <span key={i}>{i > 0 && <Mark className="cb-mark-title" />}{part}</span>)}</>
+
 /** A price as a row of pigeonholes on one scale: the competitor's fills every one, Nightmail's its share, lit from the
  *  left in turn. */
 const CELLS = 40
@@ -68,25 +73,24 @@ function Fader({ c, size, onChange, id }: { c: Comparison; size: number; onChang
   </span>
 }
 
-export function ComparisonBoard({ comparison: c, backdrop }: { comparison: Comparison; backdrop?: string | null }) {
-  const bg = BACKDROPS.includes(backdrop as Backdrop) ? backdrop as Backdrop : undefined
+export function ComparisonBoard({ comparison: c }: { comparison: Comparison }) {
   const room = useMemo(() => rooms(c), [c])
   const [size, setSize] = useState(() => opening(c))
   const p = pointAt(c, size), id = useId(), vendor = c.offer.vendor
-  const lit = p.ours.uc === 0n ? 0 : Math.max(1, Math.round(CELLS * share(p))), nameWidth = Math.max(9, vendor.length)
-  return <section className="cb-hall" data-bg={bg} aria-labelledby="cb-title">
+  const lit = p.ours.uc === 0n ? 0 : Math.max(1, Math.round(CELLS * share(p)))
+  return <section className="cb-hall" aria-labelledby="cb-title">
     <div className="cb-stage">
-      <div className="cb-backdrop" aria-hidden="true"><i /></div>
+      <div className="cb-backdrop" aria-hidden="true"><i className="cb-lamp" /></div>
       <div className="cb-wrap">
-        <h1 id="cb-title" className="cb-title">{claim(c)}</h1>
+        <h1 id="cb-title" className="cb-title"><Claim text={claim(c)} /></h1>
         <div className="cb-hang" aria-hidden="true"><i /><i /></div>
         <div className="cb-board" aria-live="polite">
           <div className="cb-face">
-            <p className="cb-head"><span>A month at</span><Flaps text={formatCount(size)} width={room.size.length} end className="cb-small" /><span>{unitOf(c)}</span></p>
+            <p className="cb-head" aria-hidden="true"><span>A month at</span><Flaps text={formatCount(size)} width={room.size.length} end className="cb-small" /><span>{unitOf(c)}</span></p>
             <p className="sr-only">{formatCount(size)} {unitOf(c)}{byContacts(c) && `, ${formatCount(p.usage.sent)} emails a month`}: Nightmail <Ours sent={p.usage.sent} received={p.usage.received}>{p.ours.text}</Ours>, {vendor} {money(p.theirs.cents)} a month.</p>
-            <div className="cb-row cb-mine"><Flaps text="Nightmail" width={nameWidth} className="cb-name" /><Flaps text={p.ours.text} width={room.price.length} end className="cb-price" /></div>
+            <div className="cb-row cb-mine" aria-hidden="true"><Mark className="cb-mark-board" /><Flaps text={p.ours.text} width={room.price.length} end className="cb-price" /></div>
             <Cells lit={lit} mine />
-            <div className="cb-row"><Flaps text={vendor} width={nameWidth} className="cb-name" /><Flaps text={money(p.theirs.cents)} width={room.price.length} end className="cb-price" /></div>
+            <div className="cb-row"><Flaps text={vendor} width={vendor.length} className="cb-name" /><Flaps text={money(p.theirs.cents)} width={room.price.length} end className="cb-price" /></div>
             <Cells lit={CELLS} />
             <p className="cb-foot"><span>{byContacts(c) ? `${formatCount(p.usage.sent)} emails a month` : 'One recipient each'}</span><span>{vendor} {p.theirs.plan}</span></p>
           </div>
@@ -101,7 +105,7 @@ export function ComparisonBoard({ comparison: c, backdrop }: { comparison: Compa
     <div className="cb-slab" aria-hidden="true" />
     <div className="cb-wrap cb-below">
       <p className="cb-note">{c.assume} <Checked source={{ checked: CHECKED, url: c.offer.pricing }} /></p>
-      <section className="cb-has" aria-labelledby="cb-has"><h2 id="cb-has">Nightmail has</h2>
+      <section className="cb-has" aria-labelledby="cb-has"><h2 id="cb-has"><Mark className="cb-mark-has" /> has</h2>
         <ul>{c.ours.map(fact => <li key={fact.text}><Check size={16} strokeWidth={2.25} aria-hidden="true" />{fact.short ?? fact.text}</li>)}</ul>
       </section>
       <Disclosure className="price-small cb-print" headingAs="h2" title="Sources and small print">
