@@ -26645,7 +26645,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       b.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"read":false}'::jsonb)`,[w,bid,mRace]),
     ]);
     await assertExact(bid,'after concurrent IMAP + API flag toggle');
-    // 8. Pre-backfill NULL fallback (Condition 3) + idempotent re-run of migration 418.
+    // 8. Pre-backfill NULL fallback (Condition 3) + idempotent re-run of migration 424.
     await a.query('UPDATE inbox_state SET unread=NULL WHERE inbox_id=$1',[bid]);
     assert.equal(await stored(bid),null);
     const liveBefore=await exact(bid);
@@ -26655,7 +26655,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     await deliver(a,mDuring);
     assert.equal(await stored(bid),null,'writers leave NULL as NULL until backfill locks the row');
     assert.equal(await viewed(bid),liveBefore+1,'inbox_view stays exact while mail arrives before backfill');
-    const backfillSql=await readFile(new URL('./migrations/418_inbox_unread_backfill.sql',import.meta.url),'utf8');
+    const backfillSql=await readFile(new URL('./migrations/424_inbox_unread_backfill.sql',import.meta.url),'utf8');
     const bPid=(await b.query('SELECT pg_backend_pid() pid')).rows[0].pid as number;
     const beforeBid=(await a.query('SELECT max(inbox_id) m FROM inbox_state WHERE inbox_id<$1',[bid])).rows[0].m as string|null ?? '';
     // Two-session race: writer holds inbox_state FOR UPDATE while backfill starts and blocks on Lock;
