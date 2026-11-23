@@ -2,7 +2,9 @@
 import { useState, type FormEvent, type ReactNode } from 'react'
 import { useInfiniteQuery } from '@tanstack/react-query'
 import { Link } from 'react-router'
-import { Alert, Button, Checkbox, ConfirmDialog, Dialog, ErrorState, Field, Input, Select, Switch, fieldError, MutationError } from '../../components/ui'
+import { Alert, Button, Checkbox, ConfirmDialog, Dialog, ErrorState, Field, Input, SearchField, Select, Switch, fieldError, MutationError } from '../../components/ui'
+import { mergeAddresses, useAddressOptions, useResolvedAddresses } from '../../data/addresses'
+import { useDebounced } from '../../lib/pagination'
 import { useApi, useApiDef, useApiMutation, useRequestScope } from '../../data/context'
 import { queries } from '../../data/queries'
 import { ApiError, type ForwardEndpoint, type InboundAddress, type InboundWebhook, type MailRoute } from '../../data/types'
@@ -30,13 +32,9 @@ export const TITLE = 'Where should this mail go?'
 /** Loads what a route can deliver to (inboxes, webhooks and forwards) and opens the editor for one route, or a new one for `match`. */
 export function RouteEditor({ match, route, to, version, onClose }: { match: string; route?: { id: string; enabled: boolean; to: string[] | 'drop' } | null; to?: string[]; version?: number; onClose: () => void }) {
   const api = useApi()
-  const addresses = useInfiniteQuery({
-    queryKey: ['nightmail', 'inbound-addresses', 'route-options'],
-    initialPageParam: undefined as string | undefined,
-    queryFn: ({ pageParam, signal }) => api.inbound.addresses({ cursor: pageParam }, signal),
-    getNextPageParam: last => last.nextCursor ?? undefined,
-    retry: false,
-  })
+  const [addressSearch, setAddressSearch] = useState('')
+  const addressQuery = useDebounced(addressSearch)
+  const addresses = useAddressOptions({ search: addressQuery })
   const webhooks = useInfiniteQuery({
     queryKey: ['nightmail', 'inbound-webhooks', 'route-options'],
     initialPageParam: undefined as string | undefined,
@@ -45,23 +43,26 @@ export function RouteEditor({ match, route, to, version, onClose }: { match: str
     retry: false,
   })
   const forwards = useApiDef(queries.forwardEndpoints())
-  const error = (!addresses.data && addresses.error) || (!webhooks.data && webhooks.error) || (!forwards.data && forwards.error)
+  const targetIds = Array.isArray(route?.to) ? route.to : to ?? []
+  const resolved = useResolvedAddresses(targetIds.filter(id => id.startsWith('mbx_')), addresses.items, !addresses.isPending)
+  const error = (addresses.isError && !addresses.items.length && addresses.error) || (!webhooks.data && webhooks.error) || (!forwards.data && forwards.error)
   if (error) return <Dialog open onOpenChange={next => { if (!next) onClose() }} title={TITLE}>
     <ErrorState error={error} onRetry={() => { if (addresses.error) void addresses.refetch(); if (webhooks.error) void webhooks.refetch(); if (forwards.error) void forwards.refetch() }} />
   </Dialog>
   // The dialog opens once everything it lists has loaded, so nothing moves in it.
-  if (!addresses.data || !webhooks.data || !forwards.data) return null
-  const allAddresses = addresses.data.pages.flatMap(page => page)
+  if (addresses.isPending || resolved.pending || !webhooks.data || !forwards.data) return null
+  const allAddresses = mergeAddresses(resolved.items, addresses.items)
   const allWebhooks = webhooks.data.pages.flatMap(page => page)
   const draft = route ? { match, to: route.to, route: { id: route.id, enabled: route.enabled, match, to: route.to } as MailRoute } : { match, to: to ?? [] }
   return <RouteDialog draft={draft} version={version} destinations={destinationsOf(allAddresses, allWebhooks, forwards.data)} owners={allAddresses} onClose={onClose}
-    moreAddresses={addresses.hasNextPage ? { loading: addresses.isFetchingNextPage, load: () => void addresses.fetchNextPage() } : undefined}
+    addressSearch={addresses.hasMore || Boolean(addressSearch) ? { value: addressSearch, onChange: setAddressSearch } : undefined}
+    moreAddresses={addresses.hasMore ? { loading: addresses.loadingMore, load: addresses.loadMore } : undefined}
     moreWebhooks={webhooks.hasNextPage ? { loading: webhooks.isFetchingNextPage, load: () => void webhooks.fetchNextPage() } : undefined}
     refreshWebhooks={async () => (await webhooks.refetch()).data?.pages.flatMap(page => page) ?? []} refreshForwards={async () => { await forwards.refetch() }} />
 }
 
 type Action = 'deliver' | 'keep' | 'drop'
-function RouteDialog({ draft, version, destinations, owners, onClose, moreAddresses, moreWebhooks, refreshWebhooks, refreshForwards }: { draft: { match: string; to: string[] | 'drop'; route?: MailRoute }; version?: number; destinations: Destination[]; owners: InboundAddress[]; onClose: () => void; moreAddresses?: { loading: boolean; load: () => void }; moreWebhooks?: { loading: boolean; load: () => void }; refreshWebhooks: () => Promise<InboundWebhook[]>; refreshForwards: () => Promise<void> }) {
+function RouteDialog({ draft, version, destinations, owners, onClose, addressSearch, moreAddresses, moreWebhooks, refreshWebhooks, refreshForwards }: { draft: { match: string; to: string[] | 'drop'; route?: MailRoute }; version?: number; destinations: Destination[]; owners: InboundAddress[]; onClose: () => void; addressSearch?: { value: string; onChange: (value: string) => void }; moreAddresses?: { loading: boolean; load: () => void }; moreWebhooks?: { loading: boolean; load: () => void }; refreshWebhooks: () => Promise<InboundWebhook[]>; refreshForwards: () => Promise<void> }) {
   // A new webhook or forward endpoint is made here, without leaving, and ticked once it can take mail.
   const [creating, setCreating] = useState<'webhook' | 'forward' | null>(null)
   const [created, setCreated] = useState<(Endpoint & { secret?: string }) | null>(null)
@@ -130,6 +131,7 @@ function RouteDialog({ draft, version, destinations, owners, onClose, moreAddres
         </Field>
         {action === 'deliver' && <>
           {group('inbox', 'Inboxes', <>No addresses yet. <Link to="/receiving">Create one</Link>.</>)}
+          {addressSearch && <SearchField aria-label="Search addresses" placeholder="Search addresses" value={addressSearch.value} onChange={event => addressSearch.onChange(event.target.value)} />}
           {moreAddresses && <Button variant="ghost" size="sm" loading={moreAddresses.loading} onClick={moreAddresses.load}>Load more addresses</Button>}
           {group('webhook', 'Webhooks', 'No webhooks yet')}
           {moreWebhooks && <Button variant="ghost" size="sm" loading={moreWebhooks.loading} onClick={moreWebhooks.load}>Load more webhooks</Button>}

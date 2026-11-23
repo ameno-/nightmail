@@ -1,4 +1,4 @@
-import { lazy, use, useEffect, useLayoutEffect, type ReactNode } from 'react'
+import { use, useEffect, useLayoutEffect, type ReactNode } from 'react'
 import { Link, NavLink, useLocation, useSearchParams } from 'react-router'
 import { ThemeToggle } from '../../components/ThemeToggle'
 import { NightmailWordmark } from '../../components/NightmailLogo'
@@ -8,10 +8,13 @@ import { PRICE_PAGES } from './pages'
 import { comparisons } from './prices'
 import './pricing.css'
 
+import { chunk } from '../../lib/preloadable'
+
 // The price pages' scene, its styles and its pictures are a module of their own (board-page.tsx), loaded only here.
-const boardPage = () => import('./board-page')
-const PriceScene = lazy(() => boardPage().then(m => ({ default: m.PriceScene })))
-const BoardEnd = lazy(() => boardPage().then(m => ({ default: m.BoardEnd })))
+const boardChunk = chunk(() => import('./board-page'))
+const boardPage = boardChunk.preload
+const PriceScene = boardChunk.page(m => m.PriceScene)
+const BoardEnd = boardChunk.page(m => m.BoardEnd)
 
 // Public pages, no sign-in: the price calculator (/pricing) and one comparison per competitor (/compare/:vendor), linked
 // from the homepage's footer and from each other (live.ts).

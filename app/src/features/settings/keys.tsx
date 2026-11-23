@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router'
 import { Button, Checkbox, ConfirmDialog, CopyButton, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, KeyValues, PageHeader, Pagination, StatusBadge, Tabs, useToast, SecretDialog } from '../../components/ui'
 import { useApiMutation, useApiDef, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
+import { useResolvedAddresses } from '../../data/addresses'
 import type { Agent, AgentTokenSummary, ApiKey, AppPassword, ApprovalTie } from '../../data/types'
 import { date, shortDateTime } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
@@ -94,7 +95,9 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
   // goes back there rather than to the page's top.
   const opener = useRef<HTMLElement | null>(null)
   const view = (row: Row) => { const focused = document.activeElement; opener.current = focused instanceof HTMLElement && focused !== document.body ? focused : null; setViewing(row) }
-  const address = (id: string) => addresses.data?.find(item => item.id === id)?.address ?? id
+  const referencedIds = (keys.data ?? []).flatMap(key => key.access.type === 'addresses' ? key.access.addressIds ?? [] : [])
+  const resolvedAddresses = useResolvedAddresses(referencedIds, addresses.data ?? [], Boolean(keys.data && addresses.data))
+  const address = (id: string) => resolvedAddresses.byId.get(id)?.address ?? addresses.data?.find(item => item.id === id)?.address ?? id
   // Edit opens once what its form lists has loaded (a workspace key's domains, an inbox key's inboxes), so they don't
   // push its fields down as they arrive.
   const editDomains = useDomainOptions(editing?.access.type === 'workspace')

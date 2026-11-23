@@ -94,15 +94,13 @@ export function usePrefetchRoute(mode: 'active' | 'hover' = 'active') {
 // and cheap first-screen queries only.
 export function useRouteIntent() {
   const prefetchHover = usePrefetchRoute('hover')
+  const prefetchActive = usePrefetchRoute('active')
   const timer = useRef<number | undefined>(undefined)
   useEffect(() => () => window.clearTimeout(timer.current), [])
-  return (path: string) => {
-    const start = () => { window.clearTimeout(timer.current); void prefetchHover(path) }
-    return {
-      onPointerEnter: () => { window.clearTimeout(timer.current); timer.current = window.setTimeout(() => void prefetchHover(path), 80) },
-      onPointerLeave: () => window.clearTimeout(timer.current),
-      onPointerDown: start,
-      onFocus: start,
-    }
-  }
+  return (path: string) => ({
+    onPointerEnter: () => { window.clearTimeout(timer.current); timer.current = window.setTimeout(() => void prefetchHover(path), 80) },
+    onPointerLeave: () => window.clearTimeout(timer.current),
+    onPointerDown: () => { window.clearTimeout(timer.current); void prefetchActive(path) },
+    onFocus: () => { window.clearTimeout(timer.current); void prefetchHover(path) },
+  })
 }
