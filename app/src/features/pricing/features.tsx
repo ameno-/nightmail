@@ -1,6 +1,8 @@
-import { useEffect, useRef, type CSSProperties, type ReactNode } from 'react'
+import { memo, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { routeScreen, SCREENS } from '../home/screens'
 import { Flaps } from './flaps'
+import { Bolts, reducedMotion, useReplay } from './eggs'
+import { play } from './sound'
 import { formatCount, nightmail, type Comparison } from './prices'
 
 // What else Nightmail does, under a comparison's board: one wall of the homepage machine's pale concrete, cast in
@@ -23,6 +25,12 @@ const TEAM = [['Dana', 'Owner'], ['Zahir', 'Admin'], ['Bertram', 'Member'], ['Mi
 // the DMARC it checks for, and the MX that receives.
 const RECORDS = [['DKIM', 'x7k2._domainkey'], ['DKIM', 'p4qd._domainkey'], ['SPF', 'email'], ['DMARC', '_dmarc'], ['MX', 'acme.example']] as const
 const free = formatCount(nightmail.freeSent)
+/** A paper tag on its pin: it swings when the pointer brushes it or it's tapped (and rustles when tapped). */
+function Tag({ name, role, k }: { name: string; role: string; k: number }) {
+  const [swing, replay] = useReplay()
+  return <span className="ft-tag" data-swing={swing} style={{ '--k': k } as CSSProperties}
+    onPointerEnter={event => { if (event.pointerType === 'mouse') replay() }} onClick={() => { replay(); play('tags') }}><b>{name}</b><span>{role}</span></span>
+}
 
 const FEATURES: Record<FeatureId, Feature> = {
   send: { title: 'Send from your app.', line: 'One API call each, and a signed webhook for every event.', face: 'screen', show: <div className="ft-screen ft-send">
@@ -35,7 +43,7 @@ const FEATURES: Record<FeatureId, Feature> = {
     <p><span>Charge</span><Flaps text="$0" width={7} end className="ft-flaps ft-lit" /></p>
   </div> },
   team: { title: 'Bring the whole team.', line: 'No charge per seat. Members edit campaigns; admins send them.', face: 'object', show: <div className="ft-rail">
-    {TEAM.map(([name, role], i) => <span key={name} className="ft-tag" style={{ '--k': i } as CSSProperties}><b>{name}</b><span>{role}</span></span>)}
+    {TEAM.map(([name, role], i) => <Tag key={name} name={name} role={role} k={i} />)}
   </div> },
   free: { title: 'Free every month.', line: 'Sent and received each have their own allowance.', face: 'object', show: <div className="ft-flapboard">
     <p><Flaps text={free} width={free.length} className="ft-flaps ft-lit" /><span>Sent</span></p>
@@ -58,7 +66,36 @@ const LAYOUTS: Record<Comparison['offer']['id'], [FeatureId, string][]> = {
   'resend-marketing': [],
 }
 
-export function Features({ comparison: c }: { comparison: Comparison }) {
+/** A panel of the wall: held by four bolts, a quarter turn a click; with all four turned it slips on its last and
+ *  hangs from its top corner, then is put back and bolted again. The campaign's screen stamps SENT when it's clicked. */
+function Panel({ id, at, lead, wide, k }: { id: FeatureId; at: string; lead: boolean; wide: boolean; k: number }) {
+  const { title, line, face, show } = FEATURES[id]
+  const ref = useRef<HTMLElement>(null), loose = useRef(new Set<number>())
+  const [drop, setDrop] = useState<{ x: number; y: number } | null>(null), [stamp, replayStamp] = useReplay()
+  const turn = (corner: number) => {
+    loose.current.add(corner)
+    if (loose.current.size < 4 || drop) return
+    loose.current.clear()
+    if (reducedMotion()) return
+    // (The panel's own concrete, lined up with the wall's: where it sits in the slab.)
+    const card = ref.current!, slab = card.closest('.ft-slab')!.getBoundingClientRect(), box = card.getBoundingClientRect()
+    setDrop({ x: box.left - slab.left, y: box.top - slab.top })
+    play('drop')
+    window.setTimeout(() => { setDrop(null); play('bolt') }, 2600)
+  }
+  const thump = id === 'campaign' ? () => { replayStamp(); play('stamp') } : undefined
+  return <article ref={ref} className="ft-card" data-face={face} data-feature={id} data-lead={lead || undefined} data-wide={wide || undefined} data-drop={drop ? '' : undefined}
+    style={{ '--at': at, '--k': k, ...drop ? { '--px': `${drop.x}px`, '--py': `${drop.y}px` } : {} } as CSSProperties}>
+    <div className="ft-panel">
+      <Bolts onTurn={turn} />
+      <div className="ft-show" aria-hidden="true" data-stamp={stamp} onClick={thump}>{show}</div>
+      <div className="ft-words"><h3>{title}</h3><p>{line}</p></div>
+    </div>
+  </article>
+}
+
+// (The wall doesn't change with the board's fader or its flaps: it isn't drawn again for them.)
+export const Features = memo(function Features({ comparison: c }: { comparison: Comparison }) {
   const root = useRef<HTMLElement>(null)
   // A panel's screen moves, and its flaps turn, while it is in view.
   useEffect(() => {
@@ -72,14 +109,10 @@ export function Features({ comparison: c }: { comparison: Comparison }) {
     <div className="ft-slab">
       <h2 id="ft-title" className="ft-title">Also in the box.</h2>
       <div className="ft-grid">{layout.map(([id, at], k) => {
-        const { title, line, face, show } = FEATURES[id]
         // (A panel across more than half the wide grid is across both columns on a tablet.)
-        const [, from, , to] = at.split('/').map(Number), wide = to! - from! > 6
-        return <article key={id} className="ft-card" data-face={face} data-feature={id} data-lead={k === 0 || undefined} data-wide={wide || undefined} style={{ '--at': at, '--k': k } as CSSProperties}>
-          <div className="ft-show" aria-hidden="true">{show}</div>
-          <div className="ft-words"><h3>{title}</h3><p>{line}</p></div>
-        </article>
+        const [, from, , to] = at.split('/').map(Number)
+        return <Panel key={id} id={id} at={at} k={k} lead={k === 0} wide={to! - from! > 6} />
       })}</div>
     </div>
   </section>
-}
+})

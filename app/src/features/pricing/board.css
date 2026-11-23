@@ -30,9 +30,6 @@
 .price-page--board .price-main { width: 100%; padding: 0; }
 .price-page--board .price-main:focus { outline: none; }
 .cb-wrap { width: min(100% - 2 * var(--cb-gutter), 1120px); margin-inline: auto; }
-.cb-room { display: inline-grid; }
-.cb-room > * { grid-area: 1 / 1; }
-.cb-room > :first-child { visibility: hidden; }
 
 /* The hall: the stage the board hangs in (its backdrop a layer behind it, which never takes room), and under it, on the
    same dark wall as the lamp's light falls away, the concrete wall of what else it does and the close. No floors
@@ -51,7 +48,17 @@
    the board: they take no room and never hold up the text. */
 .cb-stage { position: relative; isolation: isolate; overflow: clip; padding: 0 0 104px; }
 .cb-backdrop { position: absolute; z-index: -1; inset: 0; pointer-events: none; background: linear-gradient(to bottom, transparent 62%, var(--cb-wall)), var(--cb-wall) url('./board/wall-1920.avif?no-inline') center top / cover no-repeat; }
-.cb-lamp { position: absolute; top: 0; left: 50%; display: block; width: 170px; height: 176px; translate: -50% 0; background: url('./board/lamp.webp?no-inline') center top / contain no-repeat; }
+.cb-lamp { position: absolute; top: 0; left: 50%; display: block; width: 170px; height: 176px; translate: -50% 0; background: url('./board/lamp.webp?no-inline') center top / contain no-repeat; transform-origin: 50% 0; }
+/* The lamp's own light, under the shade, swinging with it about the cord's top; and the dark when it's off. */
+.cb-pool { position: absolute; top: 110px; left: 50%; display: block; width: min(980px, 120%); height: 640px; translate: -50% 0; border-radius: 50%; background: radial-gradient(closest-side, oklch(0.96 0.03 85 / 10%), oklch(0.96 0.03 85 / 0%)); transform-origin: 50% -110px; }
+.cb-dark { position: absolute; inset: 0; display: block; background: rgb(6 6 8 / 84%); opacity: 0; }
+/* What a click on the lamp lands on (board.tsx): the shade and its cord, over the stage, with nothing else there. */
+.cb-lamp-hit { position: absolute; z-index: 2; top: 0; left: 50%; display: block; width: 150px; height: 176px; translate: -50% 0; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+/* The sound switch, in the scene's top corner across from the wordmark. */
+.cb-sound { position: absolute; z-index: 5; top: 18px; right: max(20px, env(safe-area-inset-right)); display: inline-flex; align-items: center; gap: 8px; height: 40px; padding: 0 12px; border: 0; border-radius: 20px; background: none; color: var(--cb-paper); font-family: var(--font-mono); font-size: 12px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; opacity: .8; cursor: pointer; transition: opacity 150ms var(--cb-ease), background-color 150ms var(--cb-ease); }
+@media (hover: hover) and (pointer: fine) { .cb-sound:hover { opacity: 1; background: oklch(1 0 0 / 7%); } }
+.cb-sound:focus-visible { outline: var(--focus-width) solid var(--cb-mine); outline-offset: 2px; opacity: 1; }
+.cb-sound[aria-pressed='false'] { opacity: .6; }
 .cb-stage > .cb-wrap { display: grid; justify-items: center; text-align: center; }
 .cb-title { max-width: 19em; margin-top: 184px; color: var(--cb-paper); font-family: var(--font-body); font-size: clamp(36px, 1.9cqw + 20px, 60px); font-weight: 600; font-variation-settings: 'opsz' 32; line-height: 1.04; letter-spacing: -.03em; text-wrap: balance; }
 
@@ -59,6 +66,8 @@
 .cb-hang { display: flex; justify-content: space-between; width: min(94%, 940px); height: 30px; margin-top: 24px; }
 .cb-hang i { position: relative; width: 6px; background: oklch(0.42 0.01 268); box-shadow: inset -2px 0 0 oklch(0.3 0.01 268), inset 1px 0 0 oklch(0.6 0.01 268); }
 .cb-hang i::before { content: ''; position: absolute; z-index: -1; bottom: 100%; left: 2px; width: 2px; height: 100vh; background: oklch(0.4 0.006 262); mask-image: linear-gradient(to top, #000, transparent 60vh); }
+/* Where a rod meets the frame: a steel clevis on the frame's top edge, its pin through the rod's eye. */
+.cb-hang i::after { content: ''; position: absolute; z-index: 1; bottom: -6px; left: 50%; width: 20px; height: 14px; translate: -50% 0; border-radius: 3px 3px 1px 1px; background: radial-gradient(circle at 46% 42%, oklch(0.9 0.004 262) 0 1px, oklch(0.6 0.006 262) 2px, oklch(0.42 0.008 262) 2.8px, rgb(0 0 0 / 0%) 3.2px) 50% 4px / 8px 8px no-repeat, linear-gradient(oklch(0.7 0.006 262), oklch(0.5 0.007 262)); box-shadow: inset 0 1px 0 rgb(255 255 255 / 55%), inset 0 -1px 0 rgb(0 0 0 / 30%), 1px 2px 2px rgb(0 0 0 / 50%); }
 /* The board: a charcoal face (lighter than the wall's shadow, darker than the tiles) set into a frame of the machine's
    concrete, its border a chamfer lit at the top and shaded at the foot; on the face, tiles with a light edge each, so
    the frame, the face, a tile and its glyph are each their own tone. The lamp's light catches the frame's top edge. */
@@ -82,39 +91,60 @@
 .cb-mark { display: inline-block; flex: none; color: inherit; }
 .cb-mark-board { --logo-cap: 32px; margin-bottom: 6px; color: oklch(0.955 0.014 92); }
 .cb-mark-title { --logo-cap: .7em; width: calc(var(--logo-cap) * 10.8); height: var(--logo-cap); margin-inline-start: .02em; vertical-align: baseline; }
-/* A tile: a flap a character, its hinge across the middle. Nightmail's are lit, the others' are not. */
+/* A row of tiles, a flap a character: the size's small, the competitor's name a little bigger, the prices biggest. */
 .cb-flaps { display: inline-flex; gap: calc(var(--h) * .07); perspective: 600px; }
 .cb-small { --h: 30px; }
 .cb-name { --h: 44px; }
-.cb-price { --h: clamp(56px, 5cqw + 16px, 80px); margin-left: auto; }
-/* The competitor's tiles are a cool neutral, unlit, their glyphs near white; Nightmail's (and the size's) are lit in
-   warm paper with ink glyphs. Every tile has an edge a step lighter than the face; a blank one is a darker slot. */
+.cb-price { --h: clamp(60px, 5cqw + 20px, 88px); margin-left: auto; }
+/* The board's tiles (splitflap.tsx), each in two halves either side of its hinge so it can turn as a real board's does:
+   the old character's upper half falls over the hinge (.fl-f), then the new one's lower half falls onto the stop
+   (.fl-k). Nightmail's tiles and the size's are lit in warm paper with ink glyphs; the competitor's are a cool neutral,
+   unlit, their glyphs near white, with an edge a step lighter than the face; a blank half is a darker slot. The upper
+   half is a touch lighter than the lower, and the hinge a fine gap with the lower half's lit edge under it. */
+.fl { --tile: var(--cb-tile); --edge: var(--cb-tile-edge); --hi: transparent; --foot: rgb(0 0 0 / 30%); position: relative; flex: none; width: calc(var(--h) * .66); height: var(--h); border-radius: 3px; color: var(--cb-glyph); font-family: var(--font-mono); font-size: calc(var(--h) * .74); font-weight: 700; line-height: 1; }
+:is(.cb-mine, .cb-head) .fl { --tile: oklch(0.955 0.014 92); --edge: transparent; --hi: oklch(1 0 0); --foot: oklch(0.8 0.02 92); color: oklch(0.2 0.02 268); }
+.fl::after { content: ''; position: absolute; z-index: 2; top: 50%; right: 0; left: 0; height: 2px; margin-top: -1px; background: rgb(0 0 0 / 62%); box-shadow: 0 1px 0 rgb(255 255 255 / 9%); pointer-events: none; }
+.fl-h { position: absolute; right: 0; left: 0; height: 50%; overflow: hidden; contain: size layout; background-color: var(--tile); }
+.fl-h b { position: absolute; right: 0; left: 0; display: grid; place-items: center; height: 200%; font-weight: inherit; }
+.fl-t, .fl-f { top: 0; border-radius: 3px 3px 0 0; background-image: linear-gradient(rgb(255 255 255 / 5%), rgb(255 255 255 / 5%)); box-shadow: inset 0 0 0 1px var(--edge), inset 0 1px 0 var(--hi); }
+.fl-b, .fl-k { top: 50%; border-radius: 0 0 3px 3px; background-image: linear-gradient(rgb(0 0 0 / 9%), rgb(0 0 0 / 9%)); box-shadow: inset 0 0 0 1px var(--edge), inset 0 -2px 0 var(--foot); }
+.fl-t b, .fl-f b { top: 0; }
+.fl-b b, .fl-k b { top: -100%; }
+.fl-h[data-blank] { background-color: var(--cb-slot); box-shadow: inset 0 0 0 1px var(--cb-slot-edge); }
+.fl-f, .fl-k { z-index: 1; visibility: hidden; }
+.fl-f { transform-origin: 50% 100%; }
+.fl-k { transform-origin: 50% 0; }
+/* The feature cards' tiles (features.tsx, flaps.tsx): a cool neutral, their glyphs near white, or lit in warm paper
+   with ink glyphs (.ft-lit). */
 .cb-flap { position: relative; display: grid; place-items: center; width: calc(var(--h) * .66); height: var(--h); overflow: hidden; border-radius: 3px; background: var(--cb-tile); box-shadow: inset 0 0 0 1px var(--cb-tile-edge), inset 0 -2px 0 rgb(0 0 0 / 30%); color: var(--cb-glyph); font-family: var(--font-mono); font-size: calc(var(--h) * .74); font-weight: 700; line-height: 1; }
-.cb-flap::after { content: ''; position: absolute; top: 50%; right: 0; left: 0; height: 1px; background: rgb(0 0 0 / 55%); }
+/* Its two leaves: the upper a touch lighter, the hinge a fine gap between them with the lower leaf's lit edge under it. */
+.cb-flap::before { content: ''; position: absolute; z-index: 1; inset: 0; background: linear-gradient(rgb(255 255 255 / 5%) 50%, rgb(0 0 0 / 9%) 50%); pointer-events: none; }
+.cb-flap::after { content: ''; position: absolute; z-index: 1; top: 50%; right: 0; left: 0; height: 2px; margin-top: -1px; background: rgb(0 0 0 / 62%); box-shadow: 0 1px 0 rgb(255 255 255 / 9%); }
 .cb-flap[data-blank] { background: var(--cb-slot); box-shadow: inset 0 0 0 1px var(--cb-slot-edge); }
-.cb-mine .cb-flap:not([data-blank]), .cb-head .cb-flap:not([data-blank]) { background: oklch(0.955 0.014 92); box-shadow: inset 0 -2px 0 oklch(0.8 0.02 92), inset 0 1px 0 oklch(1 0 0); color: oklch(0.2 0.02 268); }
 .cb-flap > span { display: block; }
-/* A row of pigeonholes: forty to the competitor's price, Nightmail's share lit in periwinkle, from the left in turn. */
+/* A row of pigeonholes: forty to the competitor's price, Nightmail's share lit in periwinkle. They fill and empty a
+   pigeonhole at a time from where the bar ends, at the tiles' cadence (board.tsx, Cells: --k). */
 .cb-cells { display: grid; grid-template-columns: repeat(40, minmax(0, 1fr)); gap: 4px; height: 30px; margin-top: 16px; }
 /* An empty pigeonhole is a slot with an edge; a filled one is unmistakable against it: the competitor's a light
    neutral, Nightmail's periwinkle. */
-.cb-cells i { border-radius: 2px; background: var(--cb-slot); box-shadow: inset 0 0 0 1px var(--cb-slot-edge), inset 0 2px 3px rgb(0 0 0 / 45%); transition: background-color 160ms var(--cb-ease), box-shadow 160ms var(--cb-ease); }
+.cb-cells i { --wait: calc(var(--k, 0) * 28ms); border-radius: 2px; background: var(--cb-slot); box-shadow: inset 0 0 0 1px var(--cb-slot-edge), inset 0 2px 3px rgb(0 0 0 / 45%); transition: background-color 90ms var(--cb-ease) var(--wait), box-shadow 90ms var(--cb-ease) var(--wait); }
 .cb-cells i[data-on] { background: var(--cb-fill); box-shadow: inset 0 1px 0 oklch(1 0 0 / 30%); }
-.cb-cells[data-mine] i { transition-delay: calc(var(--i) * 22ms); }
 .cb-cells[data-mine] i[data-on] { background: var(--cb-mine); box-shadow: inset 0 1px 0 oklch(1 0 0 / 40%); }
 
 /* The console: the fader and the page's two ways on, on a block of the machine's concrete under the board: Try your
    numbers, a quiet link, and Get started, the lit key; what signing in agrees to under it. */
-.cb-console { display: flex; align-items: center; gap: 28px; width: min(100%, 1000px); height: 124px; margin-top: 44px; padding-inline: 10px 6px; border: 32px solid; border-color: rgb(255 255 255 / 12%) transparent rgb(30 33 40 / 14%); border-radius: 3px; background: var(--md-light) border-box, var(--md-tex) -200px -120px / 384px 384px border-box, var(--md) border-box; box-shadow: 0 -1px 0 rgb(255 255 255 / 70%), var(--md-drop); }
+.cb-console { position: relative; display: flex; align-items: center; gap: 28px; width: min(100%, 1000px); height: 124px; margin-top: 44px; padding-inline: 10px 6px; border: 32px solid; border-color: rgb(255 255 255 / 12%) transparent rgb(30 33 40 / 14%); border-radius: 3px; background: var(--md-light) border-box, var(--md-tex) -200px -120px / 384px 384px border-box, var(--md) border-box; box-shadow: 0 -1px 0 rgb(255 255 255 / 70%), var(--md-drop); }
 .cb-hall[data-frame='steel'] .cb-console { border-color: rgb(126 130 136); border-image: url('../home/kit/housing.webp?no-inline') 64 fill / 32px round; border-radius: 0; background: rgb(146 149 154) padding-box; box-shadow: 5px 11px 14px rgb(0 0 0 / 50%); }
 .cb-stencil { color: var(--md-ink); font-family: var(--font-mono); font-size: 15px; font-weight: 700; line-height: 1; letter-spacing: .14em; text-transform: uppercase; }
 .cb-fader { --thumb: 26px; --at: 0; position: relative; display: block; flex: 1; min-width: 0; height: 52px; }
-.cb-fader::before { content: ''; position: absolute; top: 50%; right: 0; left: 0; height: 10px; margin-top: -5px; border-radius: 5px; background: rgb(24 27 31); box-shadow: inset 0 2px 2px rgb(0 0 0 / 70%), 0 1px 0 rgb(255 255 255 / 50%); }
+/* The slot the cap runs in: cut into the concrete, its upper edge in shade and its lower lip lit. */
+.cb-fader::before { content: ''; position: absolute; top: 50%; right: 0; left: 0; height: 10px; margin-top: -5px; border-radius: 5px; background: linear-gradient(rgb(8 9 11), rgb(26 29 34)); box-shadow: inset 0 2px 3px rgb(0 0 0 / 80%), 0 -1px 0 rgb(30 33 40 / 22%), 0 1px 0 rgb(255 255 255 / 60%); }
 .cb-fader input { position: absolute; z-index: 1; inset: 0; width: 100%; height: 100%; margin: 0; background: transparent; cursor: pointer; appearance: none; -webkit-appearance: none; touch-action: pan-y; }
 .cb-fader input::-webkit-slider-runnable-track { height: 100%; background: transparent; }
 .cb-fader input::-moz-range-track { height: 100%; background: transparent; }
 .cb-fader input:focus-visible { outline: none; }
-.cb-fader input::-webkit-slider-thumb { width: var(--thumb); height: 46px; margin-top: 3px; border: 0; border-radius: 4px; background: oklch(0.9 0.006 268) linear-gradient(to bottom, transparent calc(50% - 1px), oklch(0.36 0.012 268) calc(50% - 1px) calc(50% + 1px), transparent calc(50% + 1px)); box-shadow: inset 0 -4px 0 oklch(0.68 0.01 268), inset 0 2px 0 oklch(1 0 0 / 80%), 0 0 0 1px oklch(0.32 0.012 268), 2px 5px 6px rgb(0 0 0 / 45%); appearance: none; -webkit-appearance: none; transition: background-color 120ms var(--cb-ease), translate 90ms var(--cb-ease); }
+/* The cap: three grip lines across it, its top lit, its foot in shade, and its shadow on the concrete. */
+.cb-fader input::-webkit-slider-thumb { width: var(--thumb); height: 46px; margin-top: 3px; border: 0; border-radius: 4px; background: oklch(0.9 0.006 268) linear-gradient(to bottom, transparent calc(50% - 8px), oklch(0.5 0.01 268) calc(50% - 8px) calc(50% - 7px), oklch(0.98 0.004 268) calc(50% - 7px) calc(50% - 6px), transparent calc(50% - 6px) calc(50% - 1px), oklch(0.36 0.012 268) calc(50% - 1px) calc(50% + 1px), oklch(0.98 0.004 268) calc(50% + 1px) calc(50% + 2px), transparent calc(50% + 2px) calc(50% + 6px), oklch(0.5 0.01 268) calc(50% + 6px) calc(50% + 7px), oklch(0.98 0.004 268) calc(50% + 7px) calc(50% + 8px), transparent calc(50% + 8px)); box-shadow: inset 0 -4px 0 oklch(0.68 0.01 268), inset 0 2px 0 oklch(1 0 0 / 80%), 0 0 0 1px oklch(0.32 0.012 268), 2px 5px 6px rgb(0 0 0 / 45%); appearance: none; -webkit-appearance: none; transition: background-color 120ms var(--cb-ease), translate 90ms var(--cb-ease); }
 .cb-fader input::-moz-range-thumb { box-sizing: border-box; width: var(--thumb); height: 46px; border: 0; border-radius: 4px; background: oklch(0.9 0.006 268); box-shadow: inset 0 -4px 0 oklch(0.68 0.01 268), 0 0 0 1px oklch(0.32 0.012 268), 2px 5px 6px rgb(0 0 0 / 45%); }
 @media (hover: hover) and (pointer: fine) { .cb-fader input:hover::-webkit-slider-thumb { background-color: oklch(0.97 0.004 268); } }
 .cb-fader input:active::-webkit-slider-thumb { translate: 0 1px; }
@@ -131,11 +161,11 @@
 .cb-try:focus-visible { outline: var(--focus-width) solid var(--cb-mine); outline-offset: 2px; border-radius: 2px; }
 /* The homepage's lit key (page.css .srt-cta), in the console: its top and left side show; pressed it goes in flush. */
 .cb-key { position: relative; display: inline-flex; flex: none; align-items: center; justify-content: center; width: 224px; height: 56px; padding: 3px 0 0 2px; border: 0; background: none; color: var(--srt-on-cta); font-family: var(--font-body); font-size: 18px; font-weight: 600; line-height: 1; letter-spacing: -.012em; text-decoration: none; white-space: nowrap; cursor: pointer; }
-.cb-key::before { content: ''; position: absolute; inset: 3px 0 0 2px; background: var(--srt-cta); box-shadow: 0 -2px 0 var(--srt-cta-top), -1px 0 0 var(--srt-cta-side), -1px -2px 0 var(--srt-cta-side); outline: 1px solid var(--srt-cta-edge); outline-offset: -5px; transition: background-color 150ms var(--cb-ease), translate 90ms var(--cb-ease), box-shadow 90ms var(--cb-ease); }
+.cb-key::before { content: ''; position: absolute; inset: 3px 0 0 2px; background: var(--srt-cta); box-shadow: 0 -2px 0 var(--srt-cta-top), -1px 0 0 var(--srt-cta-side), -1px -2px 0 var(--srt-cta-side), 2px 3px 4px rgb(0 0 0 / 22%); outline: 1px solid var(--srt-cta-edge); outline-offset: -5px; transition: background-color 150ms var(--cb-ease), translate 90ms var(--cb-ease), box-shadow 90ms var(--cb-ease); }
 .cb-key .srt-cta-label { position: relative; display: inline-flex; align-items: center; gap: .45em; transition: translate 90ms var(--cb-ease); }
 .cb-key .srt-cta-arrow { transition: translate 200ms var(--cb-ease); }
 @media (hover: hover) and (pointer: fine) { .cb-key:hover::before { background: var(--srt-cta-hover); } .cb-key:hover .srt-cta-arrow { translate: 4px 0; } }
-.cb-key:active::before { box-shadow: 0 0 0 var(--srt-cta-top), 0 0 0 var(--srt-cta-side), 0 0 0 var(--srt-cta-side); translate: -1px -2px; }
+.cb-key:active::before { box-shadow: 0 0 0 var(--srt-cta-top), 0 0 0 var(--srt-cta-side), 0 0 0 var(--srt-cta-side), 0 0 0 rgb(0 0 0 / 0%); translate: -1px -2px; }
 .cb-key:active .srt-cta-label { translate: -1px -2px; }
 .cb-key:focus-visible { outline: none; }
 .cb-key:focus-visible::after { content: ''; position: absolute; inset: -7px; border: var(--focus-width) solid var(--cb-mine); pointer-events: none; }
@@ -155,19 +185,25 @@
   --mx-font: 14px; --mx-small: 13px; --gap: 44px;
   padding: 72px 0 0; }
 .ft p, .ft pre, .ft dl, .ft dd { margin: 0; }
-.ft-slab { position: relative; isolation: isolate; width: min(100% - 2 * var(--cb-gutter), 1000px); margin-inline: auto; padding: 52px calc(var(--gap) / 2) calc(var(--gap) / 2); border-radius: 3px; background: var(--md-light), var(--md-tex) 0 0 / 384px 384px, var(--md); box-shadow: var(--md-edge), var(--md-drop); }
+.ft-slab { position: relative; isolation: isolate; overflow: clip; width: min(100% - 2 * var(--cb-gutter), 1000px); margin-inline: auto; padding: 52px calc(var(--gap) / 2) calc(var(--gap) / 2); border-radius: 3px; background: var(--md-light), var(--md-tex) 0 0 / 384px 384px, var(--md); box-shadow: var(--md-edge), var(--md-drop); }
 .ft-title { margin: 0 0 52px; color: var(--md-ink); font-size: clamp(32px, 1.2cqw + 22px, 48px); font-weight: 600; font-variation-settings: 'opsz' 32; line-height: 1.05; letter-spacing: -.03em; text-align: center; text-shadow: 0 1px 0 rgb(255 255 255 / 55%); text-wrap: balance; }
-.ft-grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: var(--gap); }
-/* A panel: its joint a hairline in shadow (the outline) down the middle of the gutter, and its four bolts. */
-.ft-card { position: relative; grid-area: var(--at); display: flex; flex-direction: column; min-width: 0; outline: 1px solid rgb(40 44 52 / 20%); outline-offset: calc(var(--gap) / 2 - .5px); }
-.ft-card::after { content: ''; position: absolute; z-index: -1; inset: calc(var(--gap) / -2 + 9px); pointer-events: none;
-  background: radial-gradient(circle at 45% 40%, rgb(252 252 253) 0 1px, rgb(150 154 160) 1.6px 2.6px, rgb(70 74 80 / 75%) 3.2px, transparent 4px) 0 0 / 9px 9px no-repeat,
-    radial-gradient(circle at 45% 40%, rgb(252 252 253) 0 1px, rgb(150 154 160) 1.6px 2.6px, rgb(70 74 80 / 75%) 3.2px, transparent 4px) 100% 0 / 9px 9px no-repeat,
-    radial-gradient(circle at 45% 40%, rgb(252 252 253) 0 1px, rgb(150 154 160) 1.6px 2.6px, rgb(70 74 80 / 75%) 3.2px, transparent 4px) 0 100% / 9px 9px no-repeat,
-    radial-gradient(circle at 45% 40%, rgb(252 252 253) 0 1px, rgb(150 154 160) 1.6px 2.6px, rgb(70 74 80 / 75%) 3.2px, transparent 4px) 100% 100% / 9px 9px no-repeat; }
+.ft-grid { position: relative; display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: var(--gap); }
+/* The heading's panel's joint, over the first row. */
+.ft-grid::before { content: ''; position: absolute; z-index: 0; top: calc(var(--gap) / -2 - 1px); right: calc(var(--gap) / -2); left: calc(var(--gap) / -2); height: 2px; background: rgb(36 40 48 / 30%); box-shadow: 0 1px 0 rgb(255 255 255 / 55%); pointer-events: none; }
+/* A panel: everything from one joint to the next, held by a bolt at each corner. Its joints are shadow gaps down the
+   middle of the gutters, a groove in shade with its lit lower and right lip (the light comes from above and the left),
+   each panel drawing the joints along its right and its foot (at the slab's edges they fall on its own shaded edge). */
+.ft-card { position: relative; grid-area: var(--at); display: flex; flex-direction: column; min-width: 0; }
+.ft-card::before { content: ''; position: absolute; z-index: 0; inset: calc(var(--gap) / -2); border-right: 2px solid rgb(36 40 48 / 28%); border-bottom: 2px solid rgb(36 40 48 / 32%); box-shadow: 1px 0 0 rgb(255 255 255 / 45%), 0 1px 0 rgb(255 255 255 / 55%); pointer-events: none; }
+.ft-panel { position: relative; z-index: 1; display: flex; flex: 1; flex-direction: column; margin: calc(var(--gap) / -2); padding: calc(var(--gap) / 2); }
+.ft-panel > .cb-bolts { --b: 12px; inset: 8px; }
 /* The recess: one display for every card. */
-.ft-show { position: relative; display: flex; flex: 1; flex-direction: column; justify-content: center; min-height: 0; border-radius: 2px; background: var(--md-screen); box-shadow: inset 0 0 0 1px rgb(0 0 0 / 80%), inset 0 5px 12px rgb(0 0 0 / 85%); }
-.ft-show::before { content: ''; position: absolute; z-index: -1; inset: -9px; border-radius: 4px; background: linear-gradient(rgb(24 27 33 / 56%), rgb(24 27 33 / 26%) 12%, rgb(24 27 33 / 10%) 36%, rgb(24 27 33 / 6%) 64%, rgb(255 255 255 / 38%)); box-shadow: inset 0 1px 0 rgb(24 27 33 / 22%), 0 1px 0 rgb(255 255 255 / 45%); pointer-events: none; }
+/* The recess: one display for every card, set into its panel. Its reveal is shaded on the top and the left and catches
+   the light on the bottom and the right; the screen's own edge is in shadow at the top and left, and over it is glass,
+   a faint sheen from the top left. */
+.ft-show { position: relative; display: flex; flex: 1; flex-direction: column; justify-content: center; min-height: 0; border-radius: 2px; background: var(--md-screen); box-shadow: inset 0 0 0 1px rgb(0 0 0 / 85%), inset 3px 4px 10px rgb(0 0 0 / 80%), inset 0 -1px 0 rgb(255 255 255 / 5%); }
+.ft-show::before { content: ''; position: absolute; z-index: -1; inset: -8px; border-radius: 4px; background: linear-gradient(rgb(24 27 33 / 58%), rgb(24 27 33 / 24%) 14%, rgb(24 27 33 / 8%) 40%, rgb(24 27 33 / 0%) 62%, rgb(255 255 255 / 46%)), linear-gradient(90deg, rgb(24 27 33 / 26%), rgb(24 27 33 / 0%) 16%, rgb(255 255 255 / 0%) 84%, rgb(255 255 255 / 20%)); box-shadow: inset 0 1px 0 rgb(24 27 33 / 24%), 0 1px 0 rgb(255 255 255 / 50%); pointer-events: none; }
+.ft-show::after { content: ''; position: absolute; z-index: 3; inset: 0; border-radius: inherit; background: linear-gradient(162deg, rgb(255 255 255 / 7%), rgb(255 255 255 / 2%) 28%, rgb(255 255 255 / 0%) 46%); box-shadow: inset 0 1px 0 rgb(255 255 255 / 7%); pointer-events: none; }
 .ft-card[data-face='object'] .ft-show { padding: 16px 18px; }
 /* The words, lettered on the concrete. */
 .ft-words { margin-top: 20px; padding-inline: 2px; }
@@ -251,25 +287,107 @@
 @keyframes cb-flip { from { transform: rotateX(-88deg); opacity: .35; } }
 @media (prefers-reduced-motion: reduce) { .cb-cells i { transition: none; } }
 
+/* ── Fixings: a slotted bolt in its washer, proud of the concrete, lit from above and the left with its shadow down
+   and to the right; one size and inset on every panel, the board's frame and the console. A click turns it a quarter
+   (eggs.tsx). ── */
+.cb-bolts { position: absolute; z-index: 2; inset: 0; display: block; pointer-events: none; }
+.cb-board > .cb-bolts { inset: calc(var(--frame) / -2); }
+.cb-console > .cb-bolts { inset: -16px; }
+.cb-bolt { --b: 14px; position: absolute; display: block; width: var(--b); height: var(--b); margin: calc(var(--b) / -2); border-radius: 50%; pointer-events: auto; cursor: pointer; -webkit-tap-highlight-color: transparent;
+  background: radial-gradient(circle at 36% 30%, rgb(255 255 255 / 95%) 0 4%, rgb(255 255 255 / 0%) 17%),
+    radial-gradient(circle at 46% 40%, oklch(0.94 0.004 262) 0 10%, oklch(0.75 0.006 262) 26%, oklch(0.5 0.008 262) 33%, rgb(0 0 0 / 0%) 35%),
+    radial-gradient(circle, oklch(0.56 0.006 262) 0 36%, oklch(0.86 0.005 262) 40%, oklch(0.66 0.006 262) 46%, oklch(0.6 0.006 262) 49%, rgb(0 0 0 / 0%) 50%);
+  box-shadow: 1px 1.5px 1.5px rgb(0 0 0 / 32%); }
+.cb-bolt::before { content: ''; position: absolute; inset: -7px; border-radius: 50%; }
+.cb-bolt[data-at='tl'] { top: 0; left: 0; margin: 0; }
+.cb-bolt[data-at='tr'] { top: 0; right: 0; margin: 0; }
+.cb-bolt[data-at='bl'] { bottom: 0; left: 0; margin: 0; }
+.cb-bolt[data-at='br'] { right: 0; bottom: 0; margin: 0; }
+.cb-board > .cb-bolts .cb-bolt, .cb-console > .cb-bolts .cb-bolt { margin: calc(var(--b) / -2); }
+.cb-bolt > i { position: absolute; top: 50%; left: 50%; display: block; width: 42%; height: 1.4px; margin: -.7px 0 0 -21%; border-radius: 1px; background: oklch(0.3 0.008 262); box-shadow: 0 .7px 0 rgb(255 255 255 / 55%); rotate: calc(var(--turn, 0deg) - 30deg); }
+.cb-hall[data-frame='steel'] .cb-board > .cb-bolts, .cb-hall[data-frame='steel'] .cb-console > .cb-bolts { display: none; }
+
+/* ── The lights out (board.tsx): the lamp's cord pulled, the hall goes dark but for what is lit: Nightmail's tiles and
+   share, the key, the screens. ── */
+.cb-board::after { content: ''; position: absolute; z-index: 3; inset: calc(-1 * var(--frame)); border: var(--frame) solid rgb(6 6 8 / 72%); border-radius: 3px; opacity: 0; pointer-events: none; }
+.cb-console::after { content: ''; position: absolute; z-index: 3; inset: -32px; border-radius: 3px; background: rgb(6 6 8 / 70%); opacity: 0; pointer-events: none; }
+.cb-hall[data-lights='off'] .cb-dark, .cb-hall[data-lights='off'] .cb-board::after, .cb-hall[data-lights='off'] .cb-console::after { opacity: 1; }
+.cb-hall[data-lights='off'] .cb-console .cb-key { z-index: 4; filter: drop-shadow(0 0 12px oklch(0.97 0.03 92 / 35%)); }
+.cb-hall[data-lights='off'] :is(.cb-mine, .cb-head) .fl:not([data-blank]) { box-shadow: 0 0 16px oklch(0.96 0.04 92 / 42%); }
+.cb-hall[data-lights='off'] .cb-cells[data-mine] i[data-on] { box-shadow: inset 0 1px 0 oklch(1 0 0 / 40%), 0 0 10px oklch(0.79 0.085 269 / 70%); }
+.cb-hall[data-lights='off'] .cb-mark-board { filter: drop-shadow(0 0 10px oklch(0.96 0.04 92 / 35%)); }
+
+/* Eggs that only point: the hand over what answers a click. */
+.ft-card[data-feature='campaign'] .ft-show, .ft-tag, .cb-end .srt-rest { cursor: pointer; }
+.cb-board { cursor: default; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .cb-bolt > i { transition: rotate 240ms var(--cb-ease); }
+  /* The lamp, clicked: it swings on its cord and settles, its light swaying under it. */
+  .cb-backdrop[data-swing='a'] :is(.cb-lamp, .cb-pool) { animation: cb-swing-a 2400ms cubic-bezier(.37, 0, .63, 1) both; }
+  .cb-backdrop[data-swing='b'] :is(.cb-lamp, .cb-pool) { animation: cb-swing-b 2400ms cubic-bezier(.37, 0, .63, 1) both; }
+  /* The light flickers out, and back on. */
+  .cb-hall[data-lights='off'] .cb-dark, .cb-hall[data-lights='off'] .cb-board::after, .cb-hall[data-lights='off'] .cb-console::after { animation: cb-off 700ms linear both; }
+  .cb-hall[data-lights='on'] .cb-dark, .cb-hall[data-lights='on'] .cb-board::after, .cb-hall[data-lights='on'] .cb-console::after { animation: cb-on 600ms linear both; }
+  /* Every tile on the page turns at once ("night"). */
+  .cb-hall[data-flip='a'] .cb-flap > span { animation: cb-flip-a 420ms var(--cb-ease) both; animation-delay: calc(var(--i) * 30ms); }
+  .cb-hall[data-flip='b'] .cb-flap > span { animation: cb-flip-b 420ms var(--cb-ease) both; animation-delay: calc(var(--i) * 30ms); }
+  /* The fader's cap knocks on its end stop. */
+  .cb-fader[data-bump='a'] input { animation: cb-bump-a 280ms var(--cb-ease); }
+  .cb-fader[data-bump='b'] input { animation: cb-bump-b 280ms var(--cb-ease); }
+  /* A tag brushed or tapped swings on its pin. */
+  .ft-card .ft-tag[data-swing='a'] { animation: ft-swing-a 1500ms cubic-bezier(.37, 0, .63, 1) both; }
+  .ft-card .ft-tag[data-swing='b'] { animation: ft-swing-b 1500ms cubic-bezier(.37, 0, .63, 1) both; }
+  /* The campaign's SENT, stamped again. */
+  .ft-show[data-stamp='a'] .mx-sent { animation: ft-stamp-a 420ms var(--cb-ease) both; }
+  .ft-show[data-stamp='b'] .mx-sent { animation: ft-stamp-b 420ms var(--cb-ease) both; }
+  /* A panel with its four bolts out hangs from its last, then is put back. */
+  .ft-card[data-drop]::after { content: ''; position: absolute; z-index: 0; inset: calc(var(--gap) / -2); background: rgb(14 14 16); box-shadow: inset 0 6px 14px rgb(0 0 0 / 85%); pointer-events: none; }
+  .ft-card[data-drop] .ft-panel { background: var(--md-tex) calc(var(--gap) / 2 - var(--px)) calc(var(--gap) / 2 - var(--py)) / 384px 384px, var(--md); box-shadow: var(--md-edge), 0 12px 24px rgb(0 0 0 / 55%); transform-origin: 10px 10px; animation: ft-drop 2600ms both; }
+  /* An envelope on the wordmark slides off, and another lands. */
+  .cb-end .srt-rest[data-off] { animation: cb-letter 2400ms var(--cb-ease) both; }
+}
+@keyframes cb-swing-a { 0% { rotate: 0deg; } 12% { rotate: 7deg; } 30% { rotate: -5deg; } 48% { rotate: 3deg; } 66% { rotate: -1.5deg; } 84% { rotate: .5deg; } 100% { rotate: 0deg; } }
+@keyframes cb-swing-b { 0% { rotate: 0deg; } 12% { rotate: -7deg; } 30% { rotate: 5deg; } 48% { rotate: -3deg; } 66% { rotate: 1.5deg; } 84% { rotate: -.5deg; } 100% { rotate: 0deg; } }
+@keyframes cb-off { 0% { opacity: 0; } 10% { opacity: .85; } 18% { opacity: .15; } 30% { opacity: 1; } 38% { opacity: .55; } 100% { opacity: 1; } }
+@keyframes cb-on { 0% { opacity: 1; } 14% { opacity: .2; } 24% { opacity: .8; } 40% { opacity: 0; } 100% { opacity: 0; } }
+@keyframes cb-flip-a { from { transform: rotateX(-88deg); opacity: .35; } }
+@keyframes cb-flip-b { from { transform: rotateX(-88deg); opacity: .35; } }
+@keyframes cb-bump-a { 35% { translate: calc((var(--at) * 2 - 1) * 4px) 0; } 70% { translate: calc((var(--at) * 2 - 1) * -1px) 0; } }
+@keyframes cb-bump-b { 35% { translate: calc((var(--at) * 2 - 1) * 4px) 0; } 70% { translate: calc((var(--at) * 2 - 1) * -1px) 0; } }
+@keyframes ft-swing-a { 0% { transform: rotate(0); } 15% { transform: rotate(7deg); } 38% { transform: rotate(-4deg); } 60% { transform: rotate(2deg); } 80% { transform: rotate(-.8deg); } 100% { transform: rotate(0); } }
+@keyframes ft-swing-b { 0% { transform: rotate(0); } 15% { transform: rotate(-7deg); } 38% { transform: rotate(4deg); } 60% { transform: rotate(-2deg); } 80% { transform: rotate(.8deg); } 100% { transform: rotate(0); } }
+@keyframes ft-stamp-a { 0% { transform: scale(1.7) rotate(-9deg); opacity: .2; } 40% { transform: scale(.92) rotate(-2deg); opacity: 1; } 65% { transform: scale(1.05) rotate(0); } 100% { transform: none; } }
+@keyframes ft-stamp-b { 0% { transform: scale(1.7) rotate(8deg); opacity: .2; } 40% { transform: scale(.92) rotate(2deg); opacity: 1; } 65% { transform: scale(1.05) rotate(0); } 100% { transform: none; } }
+@keyframes ft-drop { 0% { rotate: 0deg; } 12% { rotate: 4.6deg; } 20% { rotate: 3.1deg; } 28% { rotate: 3.9deg; } 36% { rotate: 3.5deg; } 72% { rotate: 3.6deg; } 88% { rotate: -.4deg; } 100% { rotate: 0deg; } }
+@keyframes cb-letter { 0% { translate: 0 0; opacity: 1; } 28% { translate: 0 36px; opacity: 0; } 64% { translate: 0 -48px; opacity: 0; } 86% { translate: 0 3px; opacity: 1; } 100% { translate: 0 0; opacity: 1; } }
+
 /* ── Phones ── */
 @media (max-width: 640px) {
   .price-page--board { --cb-gutter: 16px; }
   .cb-stage { padding: 0 0 72px; }
   .cb-backdrop { background-image: url('./board/wall-828.avif?no-inline'); }
   .cb-lamp { width: 112px; height: 116px; }
+  .cb-lamp-hit { width: 100px; height: 116px; }
+  .cb-pool { top: 72px; height: 460px; transform-origin: 50% -72px; }
+  .cb-sound { top: 10px; right: max(4px, env(safe-area-inset-right)); justify-content: center; width: 44px; height: 44px; padding: 0; }
+  .cb-sound span { display: none; }
+  .cb-bolt { --b: 12px; }
+  .ft-panel > .cb-bolts { --b: 10px; inset: 6px; }
+  .cb-console > .cb-bolts { inset: -12px; }
   .price-corner { padding: 18px max(16px, env(safe-area-inset-left)); }
   .price-corner .wordmark { height: 24px; }
   .price-corner .nightmail-wordmark { --logo-cap: 11px; }
   .cb-title { margin-top: 128px; padding-inline: 4px; font-size: 32px; }
   .cb-hang { width: min(56%, 520px); height: 24px; margin-top: 18px; }
   .cb-hang i::before { display: none; }
-  .cb-mark-board { --logo-cap: 20px; margin-bottom: 2px; }
   .cb-board { --frame: 18px; }
+  .cb-mark-board { --logo-cap: 20px; margin-bottom: 2px; }
   .cb-face { margin: 2px; padding: 18px 14px 16px; }
   .cb-head { font-size: 12px; letter-spacing: .1em; }
   .cb-small { --h: 24px; }
   .cb-name { --h: 26px; }
-  .cb-price { --h: 54px; margin-left: auto; }
+  .cb-price { --h: 58px; margin-left: auto; }
   .cb-row { margin-top: 22px; }
   .cb-cells { gap: 2px; height: 24px; margin-top: 12px; }
   /* The console in rows: the fader, then Get started across it, then Try your numbers. */
