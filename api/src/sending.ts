@@ -2057,7 +2057,7 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
     });
     queued = counts.eligible;
     capturedAt = now();
-    capturedCount = counts.eligible;
+    // Sync launch finalizes sending_campaigns in this same transaction, so capturedCount stays NULL (no pending finalizeCapture).
   } else {
     const estimate = await audienceMod.estimateCampaignAudience(db, a, draft.audience, draft.requiredNotice === true, row.audienceEstimate ?? null);
     if (estimate.definitive === 'empty') throw new ApiError(422, 'EMPTY_AUDIENCE', draft.requiredNotice ? 'This campaign has no recipients who can receive email.' : 'This campaign has no eligible subscribed recipients.');
@@ -2810,6 +2810,7 @@ async function finalizeCapture(runtime: Runtime, a: Actor, row: RunRow, jobId: s
     const set = sql`,total=${rev.captured_count},prepared=${prepared}`;
     await db.execute(next === 'preparing' ? sql`UPDATE sending_campaigns SET updated_at=now()${set} WHERE workspace_id=${a.workspaceId} AND id=${row.id} AND state='preparing' RETURNING id`
       : sql`UPDATE sending_campaigns SET state=${next},updated_at=now()${set} WHERE workspace_id=${a.workspaceId} AND id=${row.id} AND state='preparing' RETURNING id`);
+    await db.execute(sql`UPDATE sending_campaign_reviews SET captured_count = NULL WHERE workspace_id = ${a.workspaceId} AND id = ${row.reviewId}`);
     log('info', { code: 'CAMPAIGN_CAPTURE_FINALIZED', jobId, campaignId: campaign.id, total: rev.captured_count, prepared, staticPrepared: rev.static_prepared, nextState: next });
   });
 }
@@ -3224,7 +3225,7 @@ const runCampaign: JobHandler = async (runtime, payload, job) => {
       a.keyId = row.actorKeyId ?? a.keyId;
       if (row.state === 'preparing') {
         if (row.reviewCapturedAt === null) await captureStep(runtime, a, row, job.id);
-        else if (row.reviewCapturedCount !== null && (row.total !== row.reviewCapturedCount || (row.reviewStaticPrepared && row.prepared < row.reviewCapturedCount))) await finalizeCapture(runtime, a, row, job.id);
+        else if (row.reviewCapturedCount !== null) await finalizeCapture(runtime, a, row, job.id);
         else await prepareStep(runtime, a, row, job.id);
       }
       else if (row.state === 'scheduled') {
