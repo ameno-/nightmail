@@ -615,6 +615,14 @@ export type AudienceImport = {
         message: string;
     }>;
     imported: number;
+    /**
+     * false once committed row payloads are no longer kept after the retention window (rows is then [] while imported keeps the count).
+     */
+    rowsRetained: boolean;
+    /**
+     * false once per-row error details are no longer kept after the retention window (errors is then []).
+     */
+    errorsRetained: boolean;
     createdAt: string;
     updatedAt: string;
 };
@@ -8150,6 +8158,14 @@ export type ListContactImportsResponses = {
             listId: string | null;
             status: 'preview' | 'committed';
             imported: number;
+            /**
+             * false once committed row payloads are no longer kept after the retention window (rows is then [] while imported keeps the count).
+             */
+            rowsRetained: boolean;
+            /**
+             * false once per-row error details are no longer kept after the retention window (errors is then []).
+             */
+            errorsRetained: boolean;
             createdAt: string;
             updatedAt: string;
         }>;

@@ -11422,6 +11422,71 @@ describe('Import property boundaries', () => {
       assert.equal(rateLimited.headers.get('retry-after'), '60');
     });
   });
+
+  test('consent unsub index exists, committed imports keep opaque sample IDs for support, and retention scrubs rows/errors honestly', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const wid = runtime.config.workspaceId;
+      const [{ valid }] = (await db.query(`SELECT indisvalid AS valid FROM pg_index WHERE indexrelid = to_regclass('audience_consent_unsub_occurred')`)).rows;
+      assert.equal(valid, true, 'Partial unsubscribe index must be valid.');
+
+      const list = ok(await local('POST', '/v1/lists', { name: 'Retention List' }), 201);
+      const preview = ok(await local('POST', '/v1/contact-imports', {
+        csv: 'Email,Name\nkeep1@example.com,Keep One\nbounce1@example.com,Bounce One\nbad-email,Invalid\n',
+        listId: list.id, mapping: { email: 'Email', name: 'Name' },
+      }), 201);
+      assert.equal(preview.rowsRetained, true);
+      assert.equal(preview.errorsRetained, true);
+      const committed = ok(await local('POST', `/v1/contact-imports/${preview.id}/commit`, { consent: { status: 'subscribed', evidence: 'Opted in' } }));
+      assert.equal(committed.imported, 2);
+      assert.equal(committed.rowsRetained, true);
+      assert.equal(committed.errorsRetained, true);
+      const [{ sample_contact_ids: sampleIds }] = (await db.query(`SELECT sample_contact_ids FROM audience_imports WHERE id = $1`, [preview.id])).rows;
+      assert.equal(sampleIds.length, 2);
+      for (const cid of sampleIds) assert.match(cid, /^con_[0-9a-f]{32}$/, 'Sample stores opaque contact IDs, never addresses.');
+
+      // Simulate a hard bounce after the import and a soft-deleted contact.
+      await db.query(`UPDATE audience_contacts SET suppressed = true, suppression_reason = 'hard_bounce', suppressed_at = now() + interval '1 minute' WHERE workspace_id = $1 AND email = 'bounce1@example.com'`, [wid]);
+      const keepContact = (await db.query(`SELECT id FROM audience_contacts WHERE workspace_id = $1 AND email = 'keep1@example.com'`, [wid])).rows[0];
+      ok(await local('DELETE', `/v1/contacts/${keepContact.id}`));
+
+      // Also seed a legacy committed import (sample_contact_ids IS NULL, 10 days old) and verify audienceHealth
+      // works before backfill, maintenance backfills sample_contact_ids before scrubbing rows, and audienceHealth
+      // continues working after rows is scrubbed to [].
+      const legacyId = 'imp_legacy_' + randomUUID().replaceAll('-', '').slice(0, 12);
+      await db.query(`INSERT INTO audience_imports(id,workspace_id,list_id,status,rows,errors,imported,created_at,updated_at)
+        VALUES($1,$2,$3,'committed','[{"row":2,"email":"bounce1@example.com","properties":{}},{"row":3,"email":"keep1@example.com","properties":{}}]'::jsonb,'[{"row":4,"field":"email","message":"bad"}]'::jsonb,2,now()-interval '10 days',now()-interval '10 days')`, [legacyId, wid, list.id]);
+      const { audienceHealth } = await import('./src/deliverability.js');
+      const beforeBackfill = await audienceHealth(runtime.db, wid);
+      const legacyBefore = beforeBackfill.imports.find(i => i.id === legacyId)!;
+      assert.equal(legacyBefore.contacts, 2);
+      assert.equal(legacyBefore.hardBounce.numerator, 1);
+
+      // Age our new committed import past 7 days, run cleanup: legacy gets backfilled AND both get rows scrubbed.
+      await db.query(`UPDATE audience_imports SET created_at = now() - interval '10 days' WHERE id = $1`, [preview.id]);
+      const { cleanup } = await import('./src/maintenance.js');
+      await cleanup(runtime);
+      const report = ok(await local('GET', `/v1/contact-imports/${preview.id}`));
+      assert.deepEqual({ imported: report.imported, rows: report.rows, rowsRetained: report.rowsRetained, errorsRetained: report.errorsRetained, errorCount: report.errors.length }, { imported: 2, rows: [], rowsRetained: false, errorsRetained: true, errorCount: 1 });
+      const legacyReport = ok(await local('GET', `/v1/contact-imports/${legacyId}`));
+      assert.equal(legacyReport.rowsRetained, false);
+      assert.deepEqual(legacyReport.rows, []);
+      assert.equal(legacyReport.errorsRetained, true);
+      const afterScrub = await audienceHealth(runtime.db, wid);
+      for (const impId of [preview.id, legacyId]) {
+        const view = afterScrub.imports.find(i => i.id === impId)!;
+        assert.equal(view.contacts, 2, `Support import view ${impId} keeps diagnosis after rows scrub.`);
+        assert.equal(view.hardBounce.numerator, 1);
+      }
+
+      // Age past 90 days: cleanup scrubs sample_contact_ids and errors too, and marks errorsRetained = false.
+      await db.query(`UPDATE audience_imports SET created_at = now() - interval '91 days' WHERE id = $1`, [preview.id]);
+      await cleanup(runtime);
+      const aged = ok(await local('GET', `/v1/contact-imports/${preview.id}`));
+      assert.deepEqual({ imported: aged.imported, rows: aged.rows, errors: aged.errors, rowsRetained: aged.rowsRetained, errorsRetained: aged.errorsRetained }, { imported: 2, rows: [], errors: [], rowsRetained: false, errorsRetained: false });
+      const [{ sample_contact_ids: after90 }] = (await db.query(`SELECT sample_contact_ids FROM audience_imports WHERE id = $1`, [preview.id])).rows;
+      assert.equal(after90, null);
+    });
+  });
 });
 
 describe('Transactional sending, idempotency and scoped authorization', () => {
@@ -23567,6 +23632,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         support_subjects: [null,"SELECT count(*) FROM support_conversations,p WHERE subject=p.tag"],
         audience_operation_plans: ["INSERT INTO audience_operation_plans(id,workspace_id,actor_key_id,statement,operation,matched,expires_at) SELECT 'aop_'||p.tag||p.day||'x'||i,p.wid,'k','fixture','{}',0,now()-interval '25 hours'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM audience_operation_plans,p WHERE starts_with(id,'aop_'||p.tag)"],
         audience_import_previews: ["INSERT INTO audience_imports(id,workspace_id,rows,errors,status,created_at) SELECT 'aim_'||p.tag||p.day||'x'||i,p.wid,'[]','[]','preview',now()-interval '8 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM audience_imports,p WHERE starts_with(id,'aim_'||p.tag)"],
+        audience_import_samples: ["INSERT INTO audience_imports(id,workspace_id,rows,errors,status,imported,created_at) SELECT 'aims_'||p.tag||p.day||'x'||i,p.wid,'[]','[]','committed',0,now()-interval '2 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM audience_imports,p WHERE starts_with(id,'aims_'||p.tag) AND sample_contact_ids IS NULL"],
+        audience_import_rows: ["INSERT INTO audience_imports(id,workspace_id,rows,errors,status,imported,sample_contact_ids,created_at) SELECT 'aimr_'||p.tag||p.day||'x'||i,p.wid,jsonb_build_array(jsonb_build_object('row',2,'email','a@example.invalid','properties','{}'::jsonb)),'[]','committed',1,'{}'::text[],now()-interval '8 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM audience_imports,p WHERE starts_with(id,'aimr_'||p.tag) AND rows_scrubbed_at IS NULL"],
+        audience_import_details: ["INSERT INTO audience_imports(id,workspace_id,rows,errors,status,imported,sample_contact_ids,rows_scrubbed_at,created_at) SELECT 'aimd_'||p.tag||p.day||'x'||i,p.wid,'[]',jsonb_build_array(jsonb_build_object('row',2,'field','email','message','bad')),'committed',1,'{}'::text[],now()-interval '80 days',now()-interval '91 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM audience_imports,p WHERE starts_with(id,'aimd_'||p.tag) AND errors_scrubbed_at IS NULL"],
         sending_email_events: ["INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated,created_at) SELECT 'event_'||md5(p.tag||p.day||'x'||i),p.wid,'email_'||p.tag,'dispatch_attempt',true,now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM sending_email_events,p WHERE email_id='email_'||p.tag"],
         sending_emails: ["INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,created_at) SELECT 'email_'||md5(p.tag||p.day||'x'||i),p.wid,p.region,'fixture','a@example.org','[]','[]','[]',p.tag,'{}',true,'delivered',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM sending_emails,p WHERE workspace_id=p.wid AND subject=p.tag"],
         sending_idempotency: ["INSERT INTO sending_idempotency(workspace_id,actor_key_id,path,request_key,request_hash,result,created_at) SELECT p.wid,'fixture','/v1/emails/send','idem_'||p.tag||p.day||'x'||i,'h',jsonb_build_object('id','email_'||p.tag||p.day||'x'||i),now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM sending_idempotency,p WHERE workspace_id=p.wid AND starts_with(request_key,'idem_'||p.tag)"],
