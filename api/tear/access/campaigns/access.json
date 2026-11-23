@@ -1,0 +1,751 @@
+{
+  "version": 1,
+  "modelId": "access",
+  "cases": [
+    {
+      "name": "smoke-idempotent-list",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "core"
+        },
+        {
+          "op": "Mint",
+          "target": "key"
+        },
+        {
+          "op": "Create",
+          "what": "list",
+          "cred": "key",
+          "key": "k1",
+          "body": "b1"
+        },
+        {
+          "op": "Create",
+          "what": "list",
+          "cred": "key",
+          "key": "k1",
+          "body": "b1"
+        }
+      ],
+      "expected": {
+        "outcome": "pass",
+        "control": true
+      },
+      "note": "Control: idempotent list create replays original resource id"
+    },
+    {
+      "name": "canary-secret-replay",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "core"
+        },
+        {
+          "op": "Mint",
+          "target": "key"
+        },
+        {
+          "op": "Create",
+          "what": "apikey",
+          "cred": "key",
+          "key": "k1",
+          "body": "fixed"
+        },
+        {
+          "op": "Create",
+          "what": "apikey",
+          "cred": "key",
+          "key": "k1",
+          "body": "fixed"
+        }
+      ],
+      "bug": "canary_leak_secret",
+      "expected": {
+        "outcome": "fail",
+        "operator": "access.no-secret-replay/idem/0",
+        "verdict": "violated",
+        "canary": true
+      },
+      "note": "Canary: planted host bug emits apikey.secret_returned on replay to verify temporal property bites"
+    },
+    {
+      "name": "lost-commit-ack-list-key",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "core"
+        },
+        {
+          "op": "Mint",
+          "target": "key"
+        },
+        {
+          "op": "Create",
+          "what": "list",
+          "cred": "key",
+          "key": "k1",
+          "body": "b1",
+          "lost": true
+        },
+        {
+          "op": "Create",
+          "what": "list",
+          "cred": "key",
+          "key": "k1",
+          "body": "b1"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "c8fee43: lost commit ack on REST list create prevents duplicate create on retry"
+    },
+    {
+      "name": "lost-commit-ack-list-grant",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "core"
+        },
+        {
+          "op": "Mint",
+          "target": "grant"
+        },
+        {
+          "op": "Create",
+          "what": "list",
+          "cred": "grant",
+          "key": "k1",
+          "body": "b1",
+          "lost": true
+        },
+        {
+          "op": "Create",
+          "what": "list",
+          "cred": "grant",
+          "key": "k1",
+          "body": "b1"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "c8fee43: lost commit ack on MCP list create prevents duplicate create on retry"
+    },
+    {
+      "name": "provisioning-inbox-key-retries-own-create",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "core"
+        },
+        {
+          "op": "Mint",
+          "target": "key"
+        },
+        {
+          "op": "Mint",
+          "target": "ikey"
+        },
+        {
+          "op": "Create",
+          "what": "inbox",
+          "cred": "ikey",
+          "key": "k1",
+          "body": "fixed"
+        },
+        {
+          "op": "Create",
+          "what": "inbox",
+          "cred": "ikey",
+          "key": "k1",
+          "body": "fixed"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "177ce7c: provisioning inbox key retry replays despite its visible inbox set growing"
+    },
+    {
+      "name": "concurrent-race-in-progress-and-replay",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "race"
+        },
+        {
+          "op": "Mint",
+          "target": "key"
+        },
+        {
+          "op": "SlotBegin",
+          "slot": "A",
+          "what": "list",
+          "cred": "key",
+          "key": "k1",
+          "body": "b1"
+        },
+        {
+          "op": "SlotStep",
+          "slot": "A"
+        },
+        {
+          "op": "SlotStep",
+          "slot": "A"
+        },
+        {
+          "op": "SlotBegin",
+          "slot": "B",
+          "what": "list",
+          "cred": "key",
+          "key": "k1",
+          "body": "b1"
+        },
+        {
+          "op": "SlotStep",
+          "slot": "B"
+        },
+        {
+          "op": "SlotStep",
+          "slot": "B"
+        },
+        {
+          "op": "SlotStep",
+          "slot": "A"
+        },
+        {
+          "op": "SlotStep",
+          "slot": "A"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "C1: concurrent duplicate while winner runs gets 409 IDEMPOTENCY_IN_PROGRESS at once"
+    },
+    {
+      "name": "concurrent-race-bad-body-release-then-retry",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "race"
+        },
+        {
+          "op": "Mint",
+          "target": "key"
+        },
+        {
+          "op": "SlotBegin",
+          "slot": "A",
+          "what": "list",
+          "cred": "key",
+          "key": "k1",
+          "body": "bad"
+        },
+        {
+          "op": "SlotStep",
+          "slot": "A"
+        },
+        {
+          "op": "SlotStep",
+          "slot": "A"
+        },
+        {
+          "op": "SlotBegin",
+          "slot": "B",
+          "what": "list",
+          "cred": "key",
+          "key": "k1",
+          "body": "b1"
+        },
+        {
+          "op": "SlotStep",
+          "slot": "B"
+        },
+        {
+          "op": "SlotStep",
+          "slot": "A"
+        },
+        {
+          "op": "SlotStep",
+          "slot": "B"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "8f9ecc7 / 9d9ae337: after winner fails validation and releases, B claims cleanly"
+    },
+    {
+      "name": "grant-revoked-mid-apikey-create",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "revoke"
+        },
+        {
+          "op": "Mint",
+          "target": "grant"
+        },
+        {
+          "op": "Mint",
+          "target": "token"
+        },
+        {
+          "op": "SlotBegin",
+          "slot": "A",
+          "what": "apikey",
+          "cred": "grant",
+          "key": "k1",
+          "body": "fixed"
+        },
+        {
+          "op": "SlotStep",
+          "slot": "A"
+        },
+        {
+          "op": "SlotStep",
+          "slot": "A"
+        },
+        {
+          "op": "Revoke",
+          "target": "grant"
+        },
+        {
+          "op": "SlotStep",
+          "slot": "A"
+        },
+        {
+          "op": "SlotStep",
+          "slot": "A"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "d956bc8: grant revoked before handler refuses derived apikey create with 401, never 500"
+    },
+    {
+      "name": "listings-and-audit-grant-owner",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "full"
+        },
+        {
+          "op": "Mint",
+          "target": "grant"
+        },
+        {
+          "op": "Probe",
+          "who": "grant",
+          "how": "code"
+        },
+        {
+          "op": "Probe",
+          "who": "grant",
+          "how": "plain"
+        },
+        {
+          "op": "Probe",
+          "who": "grant",
+          "how": "audit"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "M1/M2/M5: owner full grant code+plain listings and REST GET audit"
+    },
+    {
+      "name": "listings-and-audit-grant2-member-and-promoted",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "full"
+        },
+        {
+          "op": "Mint",
+          "target": "grant2"
+        },
+        {
+          "op": "Probe",
+          "who": "grant2",
+          "how": "code"
+        },
+        {
+          "op": "Probe",
+          "who": "grant2",
+          "how": "plain"
+        },
+        {
+          "op": "Probe",
+          "who": "grant2",
+          "how": "audit"
+        },
+        {
+          "op": "PromoteMember"
+        },
+        {
+          "op": "Probe",
+          "who": "grant2",
+          "how": "code"
+        },
+        {
+          "op": "Probe",
+          "who": "grant2",
+          "how": "plain"
+        },
+        {
+          "op": "Probe",
+          "who": "grant2",
+          "how": "audit"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "M1/M2/M5/R5: member grant before and after promotion to admin"
+    },
+    {
+      "name": "listings-and-audit-grant3-read-only",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "full"
+        },
+        {
+          "op": "Mint",
+          "target": "grant3"
+        },
+        {
+          "op": "Probe",
+          "who": "grant3",
+          "how": "code"
+        },
+        {
+          "op": "Probe",
+          "who": "grant3",
+          "how": "plain"
+        },
+        {
+          "op": "Probe",
+          "who": "grant3",
+          "how": "delegate"
+        },
+        {
+          "op": "Probe",
+          "who": "grant3",
+          "how": "query"
+        },
+        {
+          "op": "Probe",
+          "who": "grant3",
+          "how": "audit"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "M4/M5: read-only owner grant listings, delegation, query and REST GET audit"
+    },
+    {
+      "name": "listings-and-audit-remaining-grant-shapes",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "full"
+        },
+        {
+          "op": "Mint",
+          "target": "g-s"
+        },
+        {
+          "op": "Probe",
+          "who": "g-s",
+          "how": "code"
+        },
+        {
+          "op": "Probe",
+          "who": "g-s",
+          "how": "plain"
+        },
+        {
+          "op": "Probe",
+          "who": "g-s",
+          "how": "call"
+        },
+        {
+          "op": "Probe",
+          "who": "g-s",
+          "how": "audit"
+        },
+        {
+          "op": "Mint",
+          "target": "g-m"
+        },
+        {
+          "op": "Probe",
+          "who": "g-m",
+          "how": "code"
+        },
+        {
+          "op": "Probe",
+          "who": "g-m",
+          "how": "plain"
+        },
+        {
+          "op": "Probe",
+          "who": "g-m",
+          "how": "call"
+        },
+        {
+          "op": "Probe",
+          "who": "g-m",
+          "how": "audit"
+        },
+        {
+          "op": "Mint",
+          "target": "g-rm"
+        },
+        {
+          "op": "Probe",
+          "who": "g-rm",
+          "how": "code"
+        },
+        {
+          "op": "Probe",
+          "who": "g-rm",
+          "how": "plain"
+        },
+        {
+          "op": "Probe",
+          "who": "g-rm",
+          "how": "audit"
+        },
+        {
+          "op": "Mint",
+          "target": "g-sm"
+        },
+        {
+          "op": "Probe",
+          "who": "g-sm",
+          "how": "code"
+        },
+        {
+          "op": "Probe",
+          "who": "g-sm",
+          "how": "plain"
+        },
+        {
+          "op": "Probe",
+          "who": "g-sm",
+          "how": "audit"
+        },
+        {
+          "op": "Mint",
+          "target": "m-r"
+        },
+        {
+          "op": "Probe",
+          "who": "m-r",
+          "how": "code"
+        },
+        {
+          "op": "Probe",
+          "who": "m-r",
+          "how": "plain"
+        },
+        {
+          "op": "Probe",
+          "who": "m-r",
+          "how": "audit"
+        },
+        {
+          "op": "Mint",
+          "target": "m-s"
+        },
+        {
+          "op": "Probe",
+          "who": "m-s",
+          "how": "code"
+        },
+        {
+          "op": "Probe",
+          "who": "m-s",
+          "how": "plain"
+        },
+        {
+          "op": "Probe",
+          "who": "m-s",
+          "how": "audit"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "All 6 single/pair grant shapes: code, plain, call, and full REST GET audit"
+    },
+    {
+      "name": "listings-and-audit-keys-and-tokens",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "full"
+        },
+        {
+          "op": "Mint",
+          "target": "key"
+        },
+        {
+          "op": "Probe",
+          "who": "key",
+          "how": "mcp"
+        },
+        {
+          "op": "Probe",
+          "who": "key",
+          "how": "audit"
+        },
+        {
+          "op": "Mint",
+          "target": "dkey"
+        },
+        {
+          "op": "Probe",
+          "who": "dkey",
+          "how": "audit"
+        },
+        {
+          "op": "Mint",
+          "target": "grant"
+        },
+        {
+          "op": "Mint",
+          "target": "token"
+        },
+        {
+          "op": "Probe",
+          "who": "token",
+          "how": "mcp"
+        },
+        {
+          "op": "Probe",
+          "who": "token",
+          "how": "audit"
+        },
+        {
+          "op": "Mint",
+          "target": "ikey"
+        },
+        {
+          "op": "Probe",
+          "who": "ikey",
+          "how": "mcp"
+        },
+        {
+          "op": "Probe",
+          "who": "ikey",
+          "how": "audit"
+        },
+        {
+          "op": "Mint",
+          "target": "box"
+        },
+        {
+          "op": "Probe",
+          "who": "bkey",
+          "how": "mcp"
+        },
+        {
+          "op": "Probe",
+          "who": "bkey",
+          "how": "audit"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "6ecf1076: API keys, domain-limited keys, agent tokens, address keys, and inbox keys on /mcp vs REST GET audit"
+    },
+    {
+      "name": "inbox-deleted-and-key-independence",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "core"
+        },
+        {
+          "op": "Mint",
+          "target": "key"
+        },
+        {
+          "op": "Mint",
+          "target": "ikey"
+        },
+        {
+          "op": "Mint",
+          "target": "box"
+        },
+        {
+          "op": "DeleteBox"
+        },
+        {
+          "op": "Probe",
+          "who": "bkey",
+          "how": "rest"
+        },
+        {
+          "op": "Probe",
+          "who": "bkey",
+          "how": "mcp"
+        },
+        {
+          "op": "Revoke",
+          "target": "key"
+        },
+        {
+          "op": "Probe",
+          "who": "ikey",
+          "how": "rest"
+        },
+        {
+          "op": "Probe",
+          "who": "ikey",
+          "how": "mcp"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "R6 & R7: deleted inbox kills bound bkey; revoking creating key leaves ikey alive"
+    },
+    {
+      "name": "known-bug-dkey-mcp-lists-refused-writes",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "full"
+        },
+        {
+          "op": "Mint",
+          "target": "dkey"
+        },
+        {
+          "op": "Probe",
+          "who": "dkey",
+          "how": "mcp"
+        }
+      ],
+      "expected": {
+        "outcome": "fail",
+        "operator": "reply:Probe:/visible/createCampaignTemplate",
+        "verdict": "replyMismatch",
+        "canary": true
+      },
+      "note": "Known product bug BUG-ACCESS-01 (/mcp advertises 9 template/attachment writes REST refuses with 403 UNRESTRICTED_KEY_REQUIRED to domain-limited keys); see /Users/vogel/.config/opensend-mx/plans/tear/bugs.md#bug-access-01"
+    }
+  ]
+}
