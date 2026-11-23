@@ -34364,22 +34364,25 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const viewRoutine = ok(await local('GET', `/v1/campaigns/${camp2.id}`));
       assert.equal(viewRoutine.delivery.feedbackLag?.lane, 'routine');
       assert.equal(viewRoutine.delivery.feedbackLag?.oldestMs, 20 * 60_000);
-      await db.query("UPDATE sending_campaigns SET state='sending', prepared=total, expanded=0, simulated=false WHERE id=$1", [camp2.id]);
+      // Priority lag >= 5 min holds an autoPause campaign with waiting.reason='feedback_lag' (never a manual pause),
+      // while routine lag alone never holds releasing.
       await recordFeedbackLag(runtime.db, 'priority', 500, FEEDBACK_LAG_HOLD_MS + 60_000);
       const viewPrio = ok(await local('GET', `/v1/campaigns/${camp2.id}`));
       assert.equal(viewPrio.delivery.feedbackLag?.lane, 'priority');
-      const prevLive = runtime.config.liveEnabled;
-      runtime.config.liveEnabled = true;
       try {
-        await db.query("UPDATE jobs SET status='pending', available_at=clock_timestamp() WHERE id=$1", ['campaign.run:' + camp2.id]);
         await run('campaign.run');
         const held = ok(await local('GET', `/v1/campaigns/${camp2.id}`));
-        assert.deepEqual([held.state, held.delivery.waiting?.reason], ['sending', 'feedback_lag']);
+        assert.deepEqual([held.state, held.delivery.waiting?.reason, held.delivery.expanded], ['sending', 'feedback_lag', 0]);
+        // Stale priority sample (> 5 min old) expires automatically so a broken metrics read never holds forever,
+        // and the 20 min routine lag still does NOT hold releasing.
         await db.query("UPDATE operation_feedback_lag SET updated_at = now() - interval '6 minutes' WHERE lane = 'priority'");
         const staleView = ok(await local('GET', `/v1/campaigns/${camp2.id}`));
         assert.equal(staleView.delivery.feedbackLag?.lane, 'routine');
+        await db.query("UPDATE jobs SET status='pending', available_at=clock_timestamp() WHERE id=$1", ['campaign.run:' + camp2.id]);
+        await run('campaign.run');
+        const released = ok(await local('GET', `/v1/campaigns/${camp2.id}`));
+        assert.equal(released.delivery.expanded, 80, 'Campaign releases once priority lag expires even with 20m routine lag');
       } finally {
-        runtime.config.liveEnabled = prevLive;
         await db.query('DELETE FROM operation_feedback_lag');
       }
     });

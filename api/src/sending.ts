@@ -2972,7 +2972,7 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
   } else if (probe !== null) probeLeft = probe - row.expanded;
   // Hold new releases (never a manual pause) when priority safety feedback (bounces/complaints) is >= 5 minutes behind
   // so auto-pause does not send blind; routine opens/clicks lagging never hold a send, and stale samples (> 5 min old) expire.
-  if (row.autoPause && !row.simulated && (row.priorityLagMs ?? 0) >= FEEDBACK_LAG_HOLD_MS) {
+  if (row.autoPause && (row.priorityLagMs ?? 0) >= FEEDBACK_LAG_HOLD_MS) {
     return hold('feedback_lag', new Date(dbNow + 60_000).toISOString());
   }
   if (row.autoPause && (!row.healthCheckedAt || nowMs - Date.parse(row.healthCheckedAt) >= AUTO_PAUSE.intervalMs)) {
