@@ -3,12 +3,12 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useLocation, useNavigate } from 'react-router'
 import { ApiError, type Identity, type Api, type WorkspaceInvitationPreview, errorText, tooBroadCode } from './types'
 import { roleLabel, workspaceApi } from './workspaces'
-import { createLiveApi, request, selectAccount, selectedAccount, selectedWorkspace, selectWorkspace } from './live'
+import { aborted, createLiveApi, currentScope, isCurrentScope, rememberedWorkspace, request, selectAccount, selectedAccount, selectedWorkspace, selectWorkspace, type RequestScope } from './live'
 import { accountApi, accountsKey, announce, expectAccount, onAccountEvent, POPUP_PATH, takeExpectedAccount, type AccountList } from './accounts'
 import { forgetInboxDrafts } from './support-inbox'
 import { regionCatalogKey } from './regions'
 import { dashboardLikelyReady, identityOnboardingStage, rememberDashboardReady, useDomainStep, onboardingStage } from './onboarding'
-import { Alert, Button, PageHeader, useToast } from '../components/ui'
+import { Alert, Button, PageHeader, ToastScope, useToast } from '../components/ui'
 import { BootLoader } from '../components/BootLoader'
 import { PrivateAddress } from '../components/PrivateAddress'
 import { chunk } from '../lib/preloadable'
@@ -41,8 +41,11 @@ const homeChunk = chunk(() => import('../features/home'))
 export const loadHome = homeChunk.preload
 export const HomePage = homeChunk.page(m => m.HomePage)
 const ApiContext = createContext<Api | null>(null)
+const RequestScopeContext = createContext<RequestScope | null>(null)
 const SessionContext = createContext<Session | null>(null)
 export const useSession = () => useContext(SessionContext)
+/** The account/workspace scope of the mounted provider generation; passing it to request() fails closed after a switch. */
+export const useRequestScope = () => useContext(RequestScopeContext) ?? currentScope()
 // Self-hosted installations have no workspace roles; every signed-in operator administers.
 export function useWorkspaceAccess() {
   const identity = useContext(SessionContext)?.identity
@@ -72,22 +75,28 @@ export function sectionPath(pathname = window.location.pathname) {
 // /v1/me as the tab's account. A remembered workspace the account no longer belongs to falls back to the server's
 // choice; an account this browser signed out of (in another tab, or its session expired or was revoked) falls back to
 // the browser's default account.
-async function loadIdentity(signal?: AbortSignal) {
+async function loadIdentity(signal?: AbortSignal, override?: { account?: string | null; workspace?: string | null }) {
+  let account = override ? (override.account ?? null) : selectedAccount()
+  let workspace = override ? (override.workspace !== undefined ? override.workspace : (account ? rememberedWorkspace(account) : null)) : selectedWorkspace()
+  const opts = () => override ? { signal, account, workspace } : { signal }
   let result: Identity
-  try { result = await request<Identity>('/v1/me', {signal}) }
+  try { result = await request<Identity>('/v1/me', opts()) }
   catch (error) {
-    if (error instanceof ApiError && error.code === 'ACCOUNT_SIGNED_OUT' && selectedAccount()) selectAccount(null)
-    else if (error instanceof ApiError && error.code === 'WORKSPACE_ACCESS_DENIED' && selectedWorkspace()) selectWorkspace(null)
+    if (error instanceof ApiError && error.code === 'ACCOUNT_SIGNED_OUT' && account) { account = null; workspace = null; if (!override) selectAccount(null) }
+    else if (error instanceof ApiError && error.code === 'WORKSPACE_ACCESS_DENIED' && workspace) { workspace = null; if (!override) selectWorkspace(null) }
     else throw error
-    try { result = await request<Identity>('/v1/me', {signal}) }
+    try { result = await request<Identity>('/v1/me', opts()) }
     catch (retry) {
-      if (!(retry instanceof ApiError && retry.code === 'WORKSPACE_ACCESS_DENIED' && selectedWorkspace())) throw retry
-      selectWorkspace(null)
-      result = await request<Identity>('/v1/me', {signal})
+      if (!(retry instanceof ApiError && retry.code === 'WORKSPACE_ACCESS_DENIED' && workspace)) throw retry
+      workspace = null
+      if (!override) selectWorkspace(null)
+      result = await request<Identity>('/v1/me', opts())
     }
   }
-  selectAccount(result.id)
-  selectWorkspace(result.multiTenant ? result.workspaceId : null)
+  if (!override) {
+    selectAccount(result.id)
+    selectWorkspace(result.multiTenant ? result.workspaceId : null)
+  }
   return result
 }
 /** The account in this tab changes or signs out: features holding its state end it (the Help panel's conversation). */
@@ -161,7 +170,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   })
   // Bumped on workspace switches so clients, cursors and every mounted screen start fresh.
   const [generation, setGeneration] = useState(0)
-  const client = useMemo(() => createLiveApi(), [generation])
+  const switchSeq = useRef(0)
   const cache = useQueryClient()
   const toast = useToast()
   const [authError, setAuthError] = useState<unknown>(null)
@@ -174,6 +183,19 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash)
     setInvitation(null)
   }
+  const identity = useQuery({
+    queryKey: ['identity'],
+    networkMode: 'always', refetchOnReconnect: true,
+    retry: (failures, error) => failures < 1 && error instanceof ApiError && error.code !== 'AUTH_NOT_CONFIGURED' && (error.code === 'NETWORK_UNAVAILABLE' || (error.status ?? 0) >= 500),
+    queryFn: async ({signal}) => {
+      const started = performance.now()
+      const result = await loadIdentity(signal)
+      console.info(`[${productName} timing] Dashboard session ready`, { durationMs: Number((performance.now() - started).toFixed(1)) })
+      return result
+    },
+  })
+  const scope = useMemo(() => currentScope(), [generation, identity.data?.id, identity.data?.workspaceId])
+  const client = useMemo(() => createLiveApi(scope.account !== null || scope.workspace !== null ? scope : undefined), [scope])
   // An invitation link only opens a review. Joining, and switching to the workspace, wait for the
   // recipient's own click: a link alone must never move someone into another workspace.
   const review = useQuery({
@@ -188,23 +210,13 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     },
   })
   const join = useGuardedMutation({
+    requestScope: null,
     mutationFn: async (pending: WorkspaceInvitationPreview) => {
       const { workspaceId } = await workspaceApi.acceptInvitation(pending.id)
       // Joined from the homepage (an invitation link from before it moved to /overview): open the dashboard.
       await switchWorkspace(workspaceId, window.location.pathname === '/' ? '/overview' : undefined)
       clearInvitation()
       toast(`Joined ${pending.workspaceName}`, 'success')
-    },
-  })
-  const identity = useQuery({
-    queryKey: ['identity'],
-    networkMode: 'always', refetchOnReconnect: true,
-    retry: (failures, error) => failures < 1 && error instanceof ApiError && error.code !== 'AUTH_NOT_CONFIGURED' && (error.code === 'NETWORK_UNAVAILABLE' || (error.status ?? 0) >= 500),
-    queryFn: async ({signal}) => {
-      const started = performance.now()
-      const result = await loadIdentity(signal)
-      console.info(`[${productName} timing] Dashboard session ready`, { durationMs: Number((performance.now() - started).toFixed(1)) })
-      return result
     },
   })
   useEffect(() => {
@@ -218,12 +230,15 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     const previous = selectedWorkspace()
     // A first-time invitee has no identity yet, so a remembered ID equal to the joined workspace still loads it.
     if (id === previous && cache.getQueryData(['identity'])) return
-    await cache.cancelQueries()
-    selectWorkspace(id)
-    let next: Identity
-    try { next = await request<Identity>('/v1/me') }
-    catch (error) { selectWorkspace(previous); throw error }
-    // Nothing from the previous workspace may remain visible or cached.
+    const seq = ++switchSeq.current
+    const account = selectedAccount()
+    // Probe the target workspace without changing the active selection yet: mounted screens from the previous
+    // workspace must never send a request to, or read from, the target workspace while /v1/me is in flight.
+    const next = await request<Identity>('/v1/me', { workspace: id })
+    if (seq !== switchSeq.current || selectedAccount() !== account) throw aborted()
+    // Commit synchronously: abort every in-flight request from the previous workspace, clear cache and remount.
+    selectWorkspace(next.multiTenant ? next.workspaceId : null)
+    void cache.cancelQueries()
     cache.clear()
     cache.setQueryData(['identity'], next)
     if (path) navigate(path)
@@ -234,17 +249,20 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   // responses to its requests still in flight are dropped (live.ts). null: the browser's default account.
   async function enter(account: string | null, options: { path?: string; workspace?: string } = {}) {
     const previous = { account: selectedAccount(), workspace: selectedWorkspace() }
-    if (account !== previous.account) accountChanged(false)
-    await cache.cancelQueries()
-    selectAccount(account)
-    if (options.workspace) selectWorkspace(options.workspace)
+    const seq = ++switchSeq.current
     let next: Identity
-    try { next = await loadIdentity() }
+    try { next = await loadIdentity(undefined, { account, workspace: options.workspace }) }
     catch (error) {
-      if (!(error instanceof ApiError && error.status === 401)) { selectAccount(previous.account); selectWorkspace(previous.workspace); throw error }
+      if (!(error instanceof ApiError && error.status === 401)) throw error
+      if (seq !== switchSeq.current) throw aborted()
       // No account is left in this browser: the signed-out page.
-      accountChanged(true); selectAccount(null); cache.clear(); setGeneration(value => value + 1); await identity.refetch(); return
+      accountChanged(true); selectAccount(null); selectWorkspace(null); void cache.cancelQueries(); cache.clear(); setGeneration(value => value + 1); await identity.refetch(); return
     }
+    if (seq !== switchSeq.current) throw aborted()
+    if (next.id !== previous.account) accountChanged(false)
+    selectAccount(next.id)
+    selectWorkspace(next.multiTenant ? next.workspaceId : null)
+    void cache.cancelQueries()
     const accounts = cache.getQueryData<AccountList>(accountsKey)
     cache.clear()
     if (accounts) cache.setQueryData<AccountList>(accountsKey, { ...accounts, active: next.id })
@@ -402,7 +420,8 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   // the invitation itself is readable. It gets the same review; nothing joins until the recipient clicks Join.
   const invitee = signedOut && invitation !== null && review.data?.status === 'pending'
   const reviewing = !publicRoute && invitation !== null && ((identity.data && !identity.isError) || invitee || (signedOut && review.isFetching))
-  return <ApiContext.Provider key={generation} value={client}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, switchAccount, addAccount, signOutAccount, signOutAll, signInForStaff: () => void startLogin(false, 'google'), signIn: method => void startLogin(false, method), signInIntent: prepareLogin, signingIn: busy, notice, dismissNotice: () => setNotice(null)}}>
+  const allowToast = useMemo(() => () => isCurrentScope(scope), [scope])
+  return <ApiContext.Provider key={generation} value={client}><RequestScopeContext.Provider value={scope}><ToastScope allow={allowToast}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, switchAccount, addAccount, signOutAccount, signOutAll, signInForStaff: () => void startLogin(false, 'google'), signIn: method => void startLogin(false, method), signInIntent: prepareLogin, signingIn: busy, notice, dismissNotice: () => setNotice(null)}}>
     <Analytics identity={identity.data && !identity.isError ? identity.data : null} signedOut={signedOut} />
     {reviewing ? review.data?.status === 'pending' ? <InvitationReview invitation={review.data} email={identity.data?.email ?? null} firstWorkspace={invitee} joining={join.isPending} error={join.error} onJoin={() => join.mutate(review.data!)} onCancel={invitee ? () => { clearInvitation(); void logout() } : clearInvitation} /> : <BootLoader />
     : publicRoute || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending ? <BootLoader /> : authResult === 'waitlist' && window.location.pathname === '/' ? <WaitlistPage busy={busy} error={authError} onSwitch={() => void startLogin(true)} />
@@ -424,7 +443,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
         <Alert tone="warning">{unconfigured ? 'Sign-in is not configured on this installation.' : `${productName} couldn’t verify your session.`}</Alert>
         <Button loading={identity.isFetching} onClick={() => void identity.refetch()}>Try again</Button>
       </SignedOutPage>}
-  </SessionContext.Provider></ApiContext.Provider>
+  </SessionContext.Provider></ToastScope></RequestScopeContext.Provider></ApiContext.Provider>
 }
 // The installation's canonical address (lib/public-origin.ts), for examples and connection URLs: PUBLIC_URL from
 // /v1/me when signed in, else from /health, never the page's own Host. null until known; foreign when the page is
@@ -462,14 +481,17 @@ export function politePollInterval(base: number | false, error: unknown, consecu
 
 export function useApiQuery<T>(key: readonly unknown[], read: (api: Api, signal: AbortSignal) => Promise<T>, poll?: Poll<T>) {
   const api = useApi()
+  const scope = useRequestScope()
   const interval = poll?.interval
   const keep = poll?.keepPrevious
   const keyId = JSON.stringify(key)
   const failures = useRef({ key: keyId, count: 0 })
   if (failures.current.key !== keyId) failures.current = { key: keyId, count: 0 }
   return useQuery({ queryKey: ['nightmail', ...key], queryFn: async ({ signal }) => {
+    if (!isCurrentScope(scope)) throw aborted()
     try {
       const data = await read(api, signal)
+      if (!isCurrentScope(scope)) throw aborted()
       if (failures.current.key === keyId) failures.current.count = 0
       return data
     } catch (error) {
@@ -487,15 +509,22 @@ export function useApiDef<T>(query: QueryDef<T>, poll?: Poll<T>) { return useApi
  *  domain, a campaign). It keys the in-flight guard with the operation and input (lib/single-flight.ts). */
 export function useApiMutation<TInput, TResult>(write: (api: Api, input: TInput) => Promise<TResult>, successMessage?: string, refreshSes = false, invalidate = true, target?: unknown) {
   const api = useApi()
+  const scope = useRequestScope()
   const client = useQueryClient()
   const toast = useToast()
   // One write while it is in flight: a repeat of the same operation on the same target with the same input is dropped
   // (lib/single-flight.ts). The operation is the write's source, the same in every render.
   return useGuardedMutation({
-    operation: write.toString(), target,
+    operation: write.toString(), target, requestScope: scope,
     gcTime: 0,
-    mutationFn: (input: TInput) => write(api, input),
+    mutationFn: async (input: TInput) => {
+      if (!isCurrentScope(scope)) throw aborted()
+      const result = await write(api, input)
+      if (!isCurrentScope(scope)) throw aborted()
+      return result
+    },
     onSuccess: () => {
+      if (!isCurrentScope(scope)) return
       if (successMessage) toast(successMessage, 'success')
       if (!invalidate) return
       void client.invalidateQueries({predicate: query => staleAfterWrite(query.queryKey, refreshSes)}).catch(() => {})

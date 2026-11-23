@@ -11,9 +11,9 @@ import { HighlightStyle, syntaxHighlighting, syntaxTree } from '@codemirror/lang
 import { tags } from '@lezer/highlight'
 import { ArrowDown, ArrowUp, ChevronDown, ChevronUp, X } from 'lucide-react'
 import { Button, Checkbox, ConfirmDialog, Dialog, DropdownMenu, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, Select, Sheet, Skeleton, Textarea, useToast, type MenuItem } from '../../components/ui'
-import { request } from '../../data/live'
+import { isAbortError, request } from '../../data/live'
 import { ApiError, errorText } from '../../data/types'
-import { useApiDef, useApiQuery, useWorkspaceAccess } from '../../data/context'
+import { useApiDef, useApiQuery, useRequestScope, useWorkspaceAccess } from '../../data/context'
 import { staleAfterWrite } from '../../data/invalidation'
 import { queries } from '../../data/queries'
 import { useLeaveGuard } from '../../lib/leave-guard'
@@ -241,6 +241,7 @@ function RunsOn({ id, name, atts, change, targets }: { id: string; name: string;
  */
 export function RulePage() {
   const { canAdminister } = useWorkspaceAccess()
+  const scope = useRequestScope()
   const toast = useToast()
   const client = useQueryClient()
   const navigate = useNavigate()
@@ -305,8 +306,8 @@ export function RulePage() {
   useEffect(() => {
     if (!canAdminister) return
     const ac = new AbortController()
-    request<{ completions: Completion[] }>('/v1/rules/typings', { signal: ac.signal }).then(t => setCompletions(t.completions)).catch(() => {})
-    request<Saved>('/v1/rules', { signal: ac.signal }).then(s => { setSaved(s); open(s, wanted) }).catch(e => { if (!ac.signal.aborted) setLoadError(e as Error) })
+    request<{ completions: Completion[] }>('/v1/rules/typings', { signal: ac.signal, scope }).then(t => setCompletions(t.completions)).catch(() => {})
+    request<Saved>('/v1/rules', { signal: ac.signal, scope }).then(s => { setSaved(s); open(s, wanted) }).catch(e => { if (!ac.signal.aborted && !isAbortError(e)) setLoadError(e as Error) })
     return () => ac.abort()
   }, [canAdminister]) // eslint-disable-line react-hooks/exhaustive-deps
   // Another rule's path (the page stays mounted between them): open it, unless it is the one on screen (a new rule's
@@ -342,7 +343,7 @@ export function RulePage() {
   useLiveVersion(canAdminister && !!saved, change => {
     setRemote(change)
     // A new or changed endpoint changes what a rule can call: new completions, and the script checked again.
-    if (change.endpointsMoved) request<{ completions: Completion[] }>('/v1/rules/typings').then(t => { setCompletions(t.completions); setRelint(n => n + 1) }).catch(() => {})
+    if (change.endpointsMoved) request<{ completions: Completion[] }>('/v1/rules/typings', { scope }).then(t => { setCompletions(t.completions); setRelint(n => n + 1) }).catch(() => {})
   }, { endpoints: true })
   // A version newer than the one on screen (and not this page's own save, which is never in flight here) is read once,
   // and again 4 s later if that read fails.
@@ -351,7 +352,7 @@ export function RulePage() {
     if (!remote || !saved || pending || removing || remote.version <= Math.max(saved.version, incoming?.version ?? 0)) return
     const ac = new AbortController()
     let again: ReturnType<typeof setTimeout> | undefined
-    request<Saved>('/v1/rules', { signal: ac.signal }).then(s => land(s, remote.actor)).catch(() => { if (!ac.signal.aborted) again = setTimeout(() => setRetry(n => n + 1), 4000) })
+    request<Saved>('/v1/rules', { signal: ac.signal, scope }).then(s => land(s, remote.actor)).catch(e => { if (!ac.signal.aborted && !isAbortError(e)) again = setTimeout(() => setRetry(n => n + 1), 4000) })
     return () => { ac.abort(); clearTimeout(again) }
   }, [remote, saved?.version, incoming?.version, pending, removing, retry]) // eslint-disable-line react-hooks/exhaustive-deps
   // Your edits are gone (Undo, or undone by hand) while their version waits: it lands as if you hadn't edited.
@@ -426,7 +427,7 @@ export function RulePage() {
    *  whole name there. */
   async function lint(text: string): Promise<Problem[]> {
     try {
-      const r = await request<Check>('/v1/rules/check', { method: 'POST', body: { source: text, key: KEY.test(keyRef.current) ? keyRef.current : 'draft', senderLists: listsRef.current } })
+      const r = await request<Check>('/v1/rules/check', { method: 'POST', body: { source: text, key: KEY.test(keyRef.current) ? keyRef.current : 'draft', senderLists: listsRef.current }, scope })
       const lines = text.split('\n')
       const marked = r.diagnostics.map(d => (d.endLine ?? d.line) !== d.line ? d : { ...d, endColumn: Math.max(d.endColumn ?? 0, d.column + Math.max(1, /^[\w$.]*/.exec((lines[d.line - 1] ?? '').slice(d.column - 1))![0].length)) })
       setProblems(marked)
@@ -440,12 +441,13 @@ export function RulePage() {
     if (incoming) { toast(savedMeanwhile(incoming.version), 'error'); return false }
     setPending(true)
     try {
-      const s = await request<Saved>('/v1/rules', { method: 'PUT', body: config, ifMatch: saved.version })
+      const s = await request<Saved>('/v1/rules', { method: 'PUT', body: config, ifMatch: saved.version, scope })
       setSaved(s); open(s, key); refresh()
       if (key !== wanted) navigate(rulePath(key), { replace: true })
       toast(key + ' saved · version ' + s.version, 'success')
       return true
     } catch (e) {
+      if (isAbortError(e)) return false
       const first = e instanceof ApiError ? (e.details as Problem[] | undefined)?.[0] : undefined
       toast('Not saved: ' + (first ? (first.rule && first.rule !== key ? first.rule + ', line ' : 'line ') + first.line + ': ' + first.message : errorText(e)), 'error')
       return false
@@ -458,7 +460,7 @@ export function RulePage() {
     // Marked as a write in flight, so the live view never reports this delete as someone else's.
     setRemoving(true)
     try {
-      const s = await request<Saved>('/v1/rules/scripts/' + encodeURIComponent(opened), { method: 'DELETE', ifMatch: saved.version })
+      const s = await request<Saved>('/v1/rules/scripts/' + encodeURIComponent(opened), { method: 'DELETE', ifMatch: saved.version, scope })
       setSaved(s); refresh(); toast(opened + ' deleted', 'success')
       navigate(LIST, { replace: true })
     } finally { setRemoving(false) }
@@ -490,7 +492,7 @@ export function RulePage() {
    *  The AI is never asked: each stored email brings the answer it got when it arrived. */
   const dryRun = (m: Received, on: Config, signal: AbortSignal) => {
     const to = ownRecipient(m) ?? m.to[0] ?? ''
-    return request<DryRun>('/v1/rules/test', { method: 'POST', signal, body: { messageId: m.id, to: [to], config: { ...on, rules: on.rules.map(r => r.key === ruleKey ? { ...r, enabled: true } : r), attachments: [{ rule: ruleKey, target: to, continue: false }] } } })
+    return request<DryRun>('/v1/rules/test', { method: 'POST', signal, scope, body: { messageId: m.id, to: [to], config: { ...on, rules: on.rules.map(r => r.key === ruleKey ? { ...r, enabled: true } : r), attachments: [{ rule: ruleKey, target: to, continue: false }] } } })
   }
   const signature = JSON.stringify([source, ruleKey, lists, emails.map(m => m.id), !!saved, trying])
   useEffect(() => {
