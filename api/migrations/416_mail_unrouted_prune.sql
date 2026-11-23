@@ -25,7 +25,7 @@ BEGIN
     FROM mail_unrouted
     WHERE created_at < now() - interval '30 days'
       AND workspace_id = ANY(wids)
-    ORDER BY created_at, workspace_id, address, message_id
+    ORDER BY created_at
     LIMIT least(greatest(batch_size, 1), 1000)
     FOR UPDATE SKIP LOCKED
   ),
@@ -42,6 +42,7 @@ BEGIN
       WHERE m.id = ANY(mids) AND m.workspace_id = ANY(wids)
         AND NOT EXISTS (SELECT 1 FROM mailbox_messages mm WHERE mm.message_id = m.id)
         AND NOT EXISTS (SELECT 1 FROM mail_unrouted rem WHERE rem.message_id = m.id)
+      ORDER BY m.id
       FOR UPDATE OF m
     ),
     keys AS (
