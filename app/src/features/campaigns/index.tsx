@@ -640,10 +640,11 @@ function AudiencePicker({ campaign, notices, disabled }: { campaign: Campaign; n
   const toast = useToast()
   const accept = useCampaignCache()
   const [cursor, setCursor] = useState<string | undefined>()
+  const [segmentCursor, setSegmentCursor] = useState<string | undefined>()
   const [saving, setSaving] = useState(false)
-  const options = useApiQuery(['campaign-audience-options', cursor ?? ''], async (api, signal) => {
-    const [listPage, segmentPage] = await Promise.all([api.lists.list({ pageSize: 100, cursor, counts: false }, signal), api.segments.list({ pageSize: 100 }, signal)])
-    return { lists: [...listPage.items].sort((a, b) => a.name.localeCompare(b.name)), segments: [...segmentPage.items].sort((a, b) => a.name.localeCompare(b.name)), next: listPage.nextCursor }
+  const options = useApiQuery(['campaign-audience-options', cursor ?? '', segmentCursor ?? ''], async (api, signal) => {
+    const [listPage, segmentPage] = await Promise.all([api.lists.list({ pageSize: 100, cursor, counts: false }, signal), api.segments.list({ pageSize: 100, cursor: segmentCursor }, signal)])
+    return { lists: [...listPage.items].sort((a, b) => a.name.localeCompare(b.name)), segments: [...segmentPage.items].sort((a, b) => a.name.localeCompare(b.name)), next: listPage.nextCursor, nextSegment: segmentPage.nextCursor }
   })
   const lists = options.data?.lists ?? [], segments = options.data?.segments ?? []
   // The chosen list or segment may not be on the loaded page: read its name, so it never shows as an ID.
@@ -666,6 +667,7 @@ function AudiencePicker({ campaign, notices, disabled }: { campaign: Campaign; n
     <Field label="List" htmlFor="campaign-list"><Select id="campaign-list" aria-label="Recipient list" disabled={off} value={campaign.listId} onValueChange={value => void choose(value, campaign.segmentId ?? null)} options={options.isPending ? [{ value: campaign.listId, label: 'Loading lists…', disabled: true }] : lists.length ? [{ value: '', label: 'Choose a list' }, ...(listMissing ? [{ value: campaign.listId, label: chosenList.data?.name ?? (chosenList.isError ? 'List not found' : 'Loading list…') }] : []), ...lists.map(list => ({ value: list.id, label: list.name }))] : [{ value: '', label: 'No lists yet. Create one in Audience.', disabled: true }]} /></Field>
     {(cursor || options.data?.next) && <div className="cluster"><Button onClick={() => setCursor(undefined)}>First lists</Button><Button disabled={!options.data?.next} onClick={() => setCursor(options.data?.next ?? undefined)}>More lists</Button></div>}
     <Field label="Segment" htmlFor="campaign-segment"><Select id="campaign-segment" aria-label="Segment" disabled={off || !campaign.listId} value={campaign.segmentId ?? ''} onValueChange={value => void choose(campaign.listId, value || null)} options={[{ value: '', label: 'Everyone on the list' }, ...(campaign.segmentId && segmentMissing ? [{ value: campaign.segmentId, label: chosenSegment.data?.name ? `Only ${chosenSegment.data.name}` : chosenSegment.isError ? 'Segment not found' : 'Loading segment…' }] : []), ...segments.map(segment => ({ value: segment.id, label: `Only ${segment.name}` })), ...(!options.isPending && !segments.length ? [{ value: '__none', label: 'No segments yet. Create one in Audience.', disabled: true }] : [])]} /></Field>
+    {(segmentCursor || options.data?.nextSegment) && <div className="cluster"><Button disabled={!segmentCursor} onClick={() => setSegmentCursor(undefined)}>First segments</Button><Button disabled={!options.data?.nextSegment} onClick={() => setSegmentCursor(options.data?.nextSegment ?? undefined)}>More segments</Button></div>}
     {/* A campaign that is already a notice keeps the choice, so it can go back to marketing if notices were turned off. */}
     {(notices || campaign.requiredNotice) && <Field label="Kind" htmlFor="campaign-kind" hint={campaign.requiredNotice ? 'Reaches people who unsubscribed too, with no unsubscribe link.' : undefined}><Select id="campaign-kind" aria-label="Kind" disabled={disabled || saving} value={campaign.requiredNotice ? 'notice' : 'marketing'} onValueChange={value => { if (!saving && (value === 'notice') !== campaign.requiredNotice) void save({ requiredNotice: value === 'notice' }) }} options={[{ value: 'marketing', label: 'Marketing' }, { value: 'notice', label: 'Required notice', disabled: !notices }]} /></Field>}
   </div>

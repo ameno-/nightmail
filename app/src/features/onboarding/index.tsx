@@ -370,7 +370,7 @@ function VerifyAccount({ connection }: { connection: ProviderConnection | null }
 
 // BYO with verified domains already in SES: they're done; continue, or add another.
 function ImportedDomains({ count, onContinue, onAddAnother, fallback }: { count: number; onContinue: (id: string) => void; onAddAnother: () => void; fallback: ReactNode }) {
-  const domains = useApiQuery(['domains', 'onboarding-imported'], (api, signal) => api.domains.list({ page: 1, pageSize: 20 }, signal))
+  const domains = useApiQuery(['domains', 'onboarding-imported'], (api, signal) => api.domains.list({ page: 1, pageSize: 10, refresh: false }, signal))
   if (domains.isPending) return <BootLoader inline />
   const verified = (domains.data?.items ?? []).filter(domain => domain.status === 'verified')
   if (domains.error || verified.length === 0) return fallback

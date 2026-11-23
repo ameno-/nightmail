@@ -1,8 +1,9 @@
 // Routes: the route editor ("Goes to"), opened from a route row or an address's page.
 import { useState, type FormEvent, type ReactNode } from 'react'
+import { useInfiniteQuery } from '@tanstack/react-query'
 import { Link } from 'react-router'
 import { Alert, Button, Checkbox, ConfirmDialog, Dialog, ErrorState, Field, Input, Select, Switch, fieldError, MutationError } from '../../components/ui'
-import { useApiDef, useApiMutation, useRequestScope } from '../../data/context'
+import { useApi, useApiDef, useApiMutation, useRequestScope } from '../../data/context'
 import { queries } from '../../data/queries'
 import { ApiError, type ForwardEndpoint, type InboundAddress, type InboundWebhook, type MailRoute } from '../../data/types'
 import { request } from '../../data/live'
@@ -28,8 +29,21 @@ export const TITLE = 'Where should this mail go?'
 
 /** Loads what a route can deliver to (inboxes, webhooks and forwards) and opens the editor for one route, or a new one for `match`. */
 export function RouteEditor({ match, route, to, version, onClose }: { match: string; route?: { id: string; enabled: boolean; to: string[] | 'drop' } | null; to?: string[]; version?: number; onClose: () => void }) {
-  const addresses = useApiDef(queries.inboundAddressOptions())
-  const webhooks = useApiDef(queries.inboundWebhooks())
+  const api = useApi()
+  const addresses = useInfiniteQuery({
+    queryKey: ['nightmail', 'inbound-addresses', 'route-options'],
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ pageParam, signal }) => api.inbound.addresses({ cursor: pageParam }, signal),
+    getNextPageParam: last => last.nextCursor ?? undefined,
+    retry: false,
+  })
+  const webhooks = useInfiniteQuery({
+    queryKey: ['nightmail', 'inbound-webhooks', 'route-options'],
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ pageParam, signal }) => api.inbound.webhooks(signal, pageParam),
+    getNextPageParam: last => last.nextCursor ?? undefined,
+    retry: false,
+  })
   const forwards = useApiDef(queries.forwardEndpoints())
   const error = (!addresses.data && addresses.error) || (!webhooks.data && webhooks.error) || (!forwards.data && forwards.error)
   if (error) return <Dialog open onOpenChange={next => { if (!next) onClose() }} title={TITLE}>
@@ -37,13 +51,17 @@ export function RouteEditor({ match, route, to, version, onClose }: { match: str
   </Dialog>
   // The dialog opens once everything it lists has loaded, so nothing moves in it.
   if (!addresses.data || !webhooks.data || !forwards.data) return null
+  const allAddresses = addresses.data.pages.flatMap(page => page)
+  const allWebhooks = webhooks.data.pages.flatMap(page => page)
   const draft = route ? { match, to: route.to, route: { id: route.id, enabled: route.enabled, match, to: route.to } as MailRoute } : { match, to: to ?? [] }
-  return <RouteDialog draft={draft} version={version} destinations={destinationsOf(addresses.data, webhooks.data, forwards.data)} owners={addresses.data} onClose={onClose}
-    refreshWebhooks={async () => (await webhooks.refetch()).data ?? []} refreshForwards={async () => { await forwards.refetch() }} />
+  return <RouteDialog draft={draft} version={version} destinations={destinationsOf(allAddresses, allWebhooks, forwards.data)} owners={allAddresses} onClose={onClose}
+    moreAddresses={addresses.hasNextPage ? { loading: addresses.isFetchingNextPage, load: () => void addresses.fetchNextPage() } : undefined}
+    moreWebhooks={webhooks.hasNextPage ? { loading: webhooks.isFetchingNextPage, load: () => void webhooks.fetchNextPage() } : undefined}
+    refreshWebhooks={async () => (await webhooks.refetch()).data?.pages.flatMap(page => page) ?? []} refreshForwards={async () => { await forwards.refetch() }} />
 }
 
 type Action = 'deliver' | 'keep' | 'drop'
-function RouteDialog({ draft, version, destinations, owners, onClose, refreshWebhooks, refreshForwards }: { draft: { match: string; to: string[] | 'drop'; route?: MailRoute }; version?: number; destinations: Destination[]; owners: InboundAddress[]; onClose: () => void; refreshWebhooks: () => Promise<InboundWebhook[]>; refreshForwards: () => Promise<void> }) {
+function RouteDialog({ draft, version, destinations, owners, onClose, moreAddresses, moreWebhooks, refreshWebhooks, refreshForwards }: { draft: { match: string; to: string[] | 'drop'; route?: MailRoute }; version?: number; destinations: Destination[]; owners: InboundAddress[]; onClose: () => void; moreAddresses?: { loading: boolean; load: () => void }; moreWebhooks?: { loading: boolean; load: () => void }; refreshWebhooks: () => Promise<InboundWebhook[]>; refreshForwards: () => Promise<void> }) {
   // A new webhook or forward endpoint is made here, without leaving, and ticked once it can take mail.
   const [creating, setCreating] = useState<'webhook' | 'forward' | null>(null)
   const [created, setCreated] = useState<(Endpoint & { secret?: string }) | null>(null)
@@ -112,7 +130,9 @@ function RouteDialog({ draft, version, destinations, owners, onClose, refreshWeb
         </Field>
         {action === 'deliver' && <>
           {group('inbox', 'Inboxes', <>No addresses yet. <Link to="/receiving">Create one</Link>.</>)}
+          {moreAddresses && <Button variant="ghost" size="sm" loading={moreAddresses.loading} onClick={moreAddresses.load}>Load more addresses</Button>}
           {group('webhook', 'Webhooks', 'No webhooks yet')}
+          {moreWebhooks && <Button variant="ghost" size="sm" loading={moreWebhooks.loading} onClick={moreWebhooks.load}>Load more webhooks</Button>}
           {group('forward', 'Forwards', 'No forwards yet')}
         </>}
         {action === 'drop' && <Alert tone="warning">Dropped mail is not stored and cannot be recovered. Its receipt still records that it arrived.</Alert>}

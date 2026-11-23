@@ -188,7 +188,7 @@ function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial, editing
   const create = useApiMutation((api, input: ApiKeyInput) => api.keys.create(input))
   const update = useApiMutation((api, change: ApiKeyUpdate) => api.keys.update(editing!.id, change), 'Key updated')
   const write = editing ? update : create
-  const addresses = useApiDef(queries.inboundAddressOptions())
+  const api = useApi()
   const was = editing?.access
   const [name, setName] = useState(editing?.name ?? '')
   const [purpose, setPurpose] = useState<FormPurpose>(editing ? purposeOf(editing) : initial?.purpose ?? 'send')
@@ -210,10 +210,20 @@ function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial, editing
   useEffect(() => onPending(pending), [pending, onPending])
   const domainOptions = useDomainOptions(open && workspace)
   const inboxes = useInboxOptions('key-options', {}, open && purpose === 'inbox')
+  const addresses = useInfiniteQuery({
+    queryKey: ['nightmail', 'inbound-addresses', 'key-options'],
+    enabled: open && purpose === 'addresses',
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ pageParam, signal }) => api.inbound.addresses({ cursor: pageParam }, signal),
+    getNextPageParam: last => last.nextCursor ?? undefined,
+    staleTime: 60_000,
+    retry: false,
+  })
   const domains = domainNames(domainOptions, selectedDomains)
   // Inboxes have their own choice; this list is the receiving addresses, and when editing anything else the key has
   // (an inbox), so saving never drops it unseen.
-  const receiving = (addresses.data ?? []).filter(item => item.kind !== 'inbox' || was?.addressIds?.includes(item.id))
+  const allAddressesData = addresses.data?.pages.flatMap(page => page) ?? []
+  const receiving = allAddressesData.filter(item => item.kind !== 'inbox' || was?.addressIds?.includes(item.id))
   const shownAddresses = [...receiving, ...(was?.type === 'addresses' ? was.addressIds ?? [] : []).filter(id => !receiving.some(item => item.id === id)).map(id => ({ id, address: id }))]
   const chosenInbox = inboxId || activeInboxes(inboxes)[0]?.id || ''
   const finalMail = mailOrder(purpose === 'create' ? [...new Set<MailPermission>(['create', ...mail])] : mail)
@@ -337,9 +347,12 @@ function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial, editing
       </fieldset>
       {workspace && <DomainChoice query={domainOptions} chosen={selectedDomains} onToggle={toggleDomain} disabled={pending} error={domainError} onLeave={() => onOpenChange(false)}
         every={{ checked: allDomains, onChange: checked => { setAllDomains(checked); setSelectedDomains([]); clearError('domains') } }} />}
-      {purpose === 'addresses' && <AddressChoice id="key-address" options={shownAddresses} every={allAddresses} chosen={addressIds} disabled={pending} error={addressError}
-        onEvery={checked => { setAllAddresses(checked); setAddressIds(checked ? [] : was?.type === 'addresses' ? was.addressIds ?? [] : []); clearError('addressIds') }} onToggle={toggleAddress}
-        empty={addresses.isPending ? <p className="muted" role="status">Loading addresses…</p> : addresses.isError ? <AddressesFailed query={addresses} /> : !shownAddresses.length ? <Link className="keys-form-note" to="/receiving" onClick={() => onOpenChange(false)}>Create an address</Link> : undefined} />}
+      {purpose === 'addresses' && <>
+        <AddressChoice id="key-address" options={shownAddresses} every={allAddresses} chosen={addressIds} disabled={pending} error={addressError}
+          onEvery={checked => { setAllAddresses(checked); setAddressIds(checked ? [] : was?.type === 'addresses' ? was.addressIds ?? [] : []); clearError('addressIds') }} onToggle={toggleAddress}
+          empty={addresses.isPending ? <p className="muted" role="status">Loading addresses…</p> : addresses.isError ? <AddressesFailed query={addresses} /> : !shownAddresses.length ? <Link className="keys-form-note" to="/receiving" onClick={() => onOpenChange(false)}>Create an address</Link> : undefined} />
+        {addresses.hasNextPage && <Button variant="ghost" size="sm" loading={addresses.isFetchingNextPage} onClick={() => void addresses.fetchNextPage()}>Load more addresses</Button>}
+      </>}
       {purpose === 'inbox' && <InboxChoice name="key-inbox" query={inboxes} value={chosenInbox} onChange={id => { setInboxId(id); clearError('inboxId') }} disabled={pending} error={inboxError}
         none={<Link to="/receiving/inboxes" onClick={() => onOpenChange(false)}>Create an agent inbox</Link>} />}
       {!workspace && <fieldset className="keys-purpose" disabled={pending}>

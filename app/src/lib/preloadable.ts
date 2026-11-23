@@ -21,6 +21,10 @@ function reloadForNewBuild() {
   window.location.reload()
   return true
 }
+// Catch Vite chunk/CSS preload failures after a deploy (including React.lazy and CSS preloads outside chunk()).
+if (typeof window !== 'undefined') {
+  window.addEventListener('vite:preloadError', event => { if (reloadForNewBuild()) event.preventDefault() })
+}
 
 // A route chunk whose pages never suspend. React holds a revealed Suspense fallback for at least 300 ms,
 // so a page that suspended on a cold load (its chunk still downloading) showed its skeleton, and held back
