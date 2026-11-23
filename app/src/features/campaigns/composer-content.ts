@@ -15,11 +15,23 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 // A GIF keeps its animation: it goes up unchanged, within the 8 MiB an inline image may hold (a template asset's JSON
-// upload). Other images are redrawn as JPEG at most 1,200 px wide, so their source may be large: up to 40 MB and about
+// upload). Other images are redrawn at most 1,200 px wide, so their source may be large: up to 40 MB and about
 // 50 megapixels, measured before the image is decoded (50 MP decodes to 200 MB of pixels).
 const MAX_GIF_BYTES = 8 * 1024 * 1024, MAX_SOURCE_BYTES = 40 * 1024 * 1024, MAX_SOURCE_PIXELS = 50_000_000
+// Every recipient's message carries its inline images, so a redrawn image has a budget, as its data URL's length:
+// 140,000 characters (about 105 KB) for a JPEG, reached by lowering quality, then size. An image with see-through
+// pixels stays a PNG, the one format with transparency that every mail client shows. PNG has no quality to lower and
+// costs several times a JPEG's bytes, so it gets 400,000 characters (about 300 KB), reached by size alone, and is
+// never drawn under 600 px on its longer side (the email's column at 1x) unless the source is smaller: below that it
+// would look soft at full width, so the editor says it doesn't fit instead.
+const MAX_JPEG_URL = 140_000, MAX_PNG_URL = 400_000, MIN_PNG_SIDE = 600
+// A pixel is see-through below this alpha (of 255): the 251 to 254 some exporters leave on an opaque image change no
+// colour anyone can see when flattened.
+const OPAQUE_ALPHA = 250
 const unreadable = 'Couldn’t open this image. Export it as a PNG or JPEG and try again.'
 const tooManyPixels = 'Choose an image under 50 megapixels.'
+const tooLarge = 'This image is still too large for email. Choose a smaller image.'
+const tooLargeTransparent = 'This image is too large to send with a transparent background. Choose a smaller image, or one with a solid background.'
 function dataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
@@ -55,9 +67,10 @@ export async function prepareLocalImage(file: File): Promise<{ url: string }> {
   if (typeof createImageBitmap !== 'function') throw new Error('This browser cannot optimize images. Try a current browser.')
 
   let bitmap: ImageBitmap
+  const jpeg = header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff
   try {
     const raster = (header[0] === 0x89 && ascii(1, 4) === 'PNG' && header[4] === 13 && header[5] === 10 && header[6] === 26 && header[7] === 10)
-      || (header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff)
+      || jpeg
       || (ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP')
       || (ascii(4, 8) === 'ftyp' && ascii(8, 12) === 'avif')
     if (!raster) throw new Error(unreadable)
@@ -68,22 +81,45 @@ export async function prepareLocalImage(file: File): Promise<{ url: string }> {
   }
 
   const canvas = document.createElement('canvas')
+  let transparent = false
   try {
     if (!bitmap.width || !bitmap.height) throw new Error('invalid dimensions')
     const context = canvas.getContext('2d')
     if (!context) throw new Error('canvas unavailable')
     let scale = Math.min(1, 1200 / bitmap.width, 1200 / bitmap.height)
-    for (let attempt = 0; attempt < 8; attempt++) {
+    // Sizing the canvas clears it to transparent; a JPEG's paper is white.
+    const draw = (paper: boolean) => {
       canvas.width = Math.max(1, Math.round(bitmap.width * scale))
       canvas.height = Math.max(1, Math.round(bitmap.height * scale))
-      context.fillStyle = '#ffffff'
-      context.fillRect(0, 0, canvas.width, canvas.height)
+      if (paper) { context.fillStyle = '#ffffff'; context.fillRect(0, 0, canvas.width, canvas.height) }
       context.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
-      for (const quality of [0.84, 0.68, 0.52, 0.36]) {
-        const url = canvas.toDataURL('image/jpeg', quality)
-        if (url.startsWith('data:image/jpeg;base64,') && url.length <= 140_000) return { url }
+    }
+    // Transparency is read from the pixels as they will be sent, not from the format: a PNG, WebP or AVIF whose
+    // alpha channel is opaque throughout is a JPEG like any photo. A JPEG has no alpha to read.
+    if (!jpeg) {
+      draw(false)
+      const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data
+      for (let alpha = 3; alpha < pixels.length; alpha += 4) if (pixels[alpha] < OPAQUE_ALPHA) { transparent = true; break }
+    }
+    if (transparent) {
+      const smallest = Math.min(scale, MIN_PNG_SIDE / Math.max(bitmap.width, bitmap.height))
+      for (;;) {
+        const url = canvas.toDataURL('image/png')
+        if (url.startsWith('data:image/png;base64,') && url.length <= MAX_PNG_URL) return { url }
+        if (scale <= smallest) break
+        // A PNG's bytes follow its pixel count: aim just under the budget, a tenth smaller at least.
+        scale = Math.max(smallest, scale * Math.min(0.9, 0.97 * Math.sqrt(MAX_PNG_URL / url.length)))
+        draw(false)
       }
-      scale *= 0.72
+    } else {
+      for (let attempt = 0; attempt < 8; attempt++) {
+        draw(true)
+        for (const quality of [0.84, 0.68, 0.52, 0.36]) {
+          const url = canvas.toDataURL('image/jpeg', quality)
+          if (url.startsWith('data:image/jpeg;base64,') && url.length <= MAX_JPEG_URL) return { url }
+        }
+        scale *= 0.72
+      }
     }
   } catch {
     throw new Error('Couldn’t optimize this image. Try a smaller PNG or JPEG image.')
@@ -92,7 +128,7 @@ export async function prepareLocalImage(file: File): Promise<{ url: string }> {
     canvas.width = 0
     canvas.height = 0
   }
-  throw new Error('This image is still too large for email. Choose a smaller image.')
+  throw new Error(transparent ? tooLargeTransparent : tooLarge)
 }
 
 export function inlineImageSources(document: Record<string, unknown>): string[] {
