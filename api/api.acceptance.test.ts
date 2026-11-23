@@ -15579,6 +15579,65 @@ describe('Campaign authorization and dispatch credentials', () => {
     assert.deepEqual(page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, owner.secret)), []);
   });
 
+  // tear/workspace-isolation witness BUG-ISO-02: createCampaign and updateCampaign stored another workspace's audience IDs.
+  // Another workspace's list (one subscribed member) and segment, IDs nobody has, and this workspace's own list and member.
+  async function audienceIsolation({ runtime, db, local }: Parameters<Parameters<typeof simulatedSesFixture>[1]>[0]) {
+    const wid = runtime.config.workspaceId, other = unique('other-workspace');
+    const theirs = { list: unique('lst'), segment: unique('seg') }, nobodys = { list: unique('lst'), segment: unique('seg') };
+    await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)', [other]);
+    await db.query("INSERT INTO audience_lists(id,workspace_id,name) VALUES($1,$2,'Theirs')", [theirs.list, other]);
+    await db.query(`INSERT INTO audience_segments(id,workspace_id,name,rule) VALUES($1,$2,'Theirs','{"field":"lastOpenAt","operator":"inactive","days":90}')`, [theirs.segment, other]);
+    const member = `WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES($3,$1,$4,'subscribed') RETURNING id)
+      INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM c`;
+    await db.query(member, [other, theirs.list, unique('con'), 'theirs@example.net']);
+    const list = ok(await local('POST', '/v1/lists', { name: 'Ours' }), 201);
+    await db.query(member, [wid, list.id, unique('con'), 'ours@example.net']);
+    // Every way an audience names a list or a segment.
+    const naming = (ids: { list: string; segment: string }): Json[] => [{ listId: ids.list }, { listId: list.id, segmentId: ids.segment }, { listId: list.id, excludeListIds: [ids.list] }, { listId: list.id, excludeSegmentIds: [ids.segment] }];
+    const base = { name: 'Isolation', from: 'sender@example.com', subject: 'Hello', html: '<p>Hello</p>' };
+    const own = ok(await local('POST', '/v1/campaigns', { ...base, audience: { listId: list.id } }), 201);
+    assert.deepEqual(ok(await local('GET', `/v1/campaigns/${own.id}/audience`)), { matched: 1, eligible: 1, suppressed: 0, unsubscribed: 0 });
+    return { wid, list, base, own, foreign: naming(theirs), unknown: naming(nobodys) };
+  }
+  test('a campaign audience may name only lists and segments of its own workspace: an ID of another workspace is refused like one nobody has', async t => {
+    await simulatedSesFixture(t, async fixture => {
+      const { db, local } = fixture, { wid, list, base, own, foreign, unknown } = await audienceIsolation(fixture);
+      const refused = (reply: Reply) => { const e = error(reply, 404, 'NOT_FOUND'); return [e.code, e.message, e.field ?? null]; };
+      const save = (audience: Json) => local('PATCH', `/v1/campaigns/${own.id}`, { revision: own.revision, draft: { ...own.draft, audience } });
+      for (const [i, audience] of foreign.entries()) {
+        assert.deepEqual(refused(await local('POST', '/v1/campaigns', { ...base, audience })), refused(await local('POST', '/v1/campaigns', { ...base, audience: unknown[i] })), JSON.stringify(audience));
+        assert.deepEqual(refused(await save(audience)), refused(await save(unknown[i]!)), JSON.stringify(audience));
+      }
+      assert.deepEqual((await db.query('SELECT id, draft->\'audience\' AS audience FROM sending_campaigns WHERE workspace_id=$1', [wid])).rows, [{ id: own.id, audience: { listId: list.id } }], 'Nothing was stored.');
+    });
+  });
+  test('a campaign draft stored with a list or segment of another workspace reads nothing of it and stays editable', async t => {
+    // A draft stored before the check above (written here past the API) keeps the ID. Counting answers as for a list or
+    // segment that doesn't exist, launching is refused and queues nothing, and the draft is still listed, read and edited.
+    await simulatedSesFixture(t, async fixture => {
+      const { db, local } = fixture, { wid, base, own, foreign } = await audienceIsolation(fixture);
+      let revision = own.revision as number;
+      for (const [i, audience] of foreign.entries()) {
+        await db.query("UPDATE sending_campaigns SET draft=jsonb_set(draft,'{audience}',$2::jsonb) WHERE id=$1", [own.id, JSON.stringify(audience)]);
+        const stored = ok(await local('GET', `/v1/campaigns/${own.id}`));
+        assert.deepEqual(stored.draft.audience, audience);
+        error(await local('GET', `/v1/campaigns/${own.id}/audience`), 404, 'NOT_FOUND');
+        const launch = await local('POST', `/v1/campaigns/${own.id}/send`, { revision });
+        assert.ok(launch.status >= 400, `launch answered ${launch.status}`);
+        const edited = ok(await local('PATCH', `/v1/campaigns/${own.id}`, { revision, draft: { ...stored.draft, subject: `Edited ${i}` } }));
+        assert.deepEqual([edited.draft.audience, edited.draft.subject, edited.state], [audience, `Edited ${i}`, 'draft']);
+        revision = edited.revision;
+      }
+      assert.ok(ok(await local('GET', '/v1/campaigns')).data.some((row: Json) => row.id === own.id));
+      assert.deepEqual((await db.query('SELECT (SELECT count(*)::int FROM sending_emails WHERE workspace_id=$1) AS emails, (SELECT count(*)::int FROM sending_campaign_reviews WHERE workspace_id=$1) AS reviews', [wid])).rows[0], { emails: 0, reviews: 0 });
+      // The same for a list of this workspace deleted after its draft was saved.
+      const gone = ok(await local('POST', '/v1/lists', { name: 'Gone' }), 201);
+      const kept = ok(await local('POST', '/v1/campaigns', { ...base, audience: { listId: gone.id } }), 201);
+      ok(await local('DELETE', `/v1/lists/${gone.id}`));
+      assert.deepEqual(ok(await local('PATCH', `/v1/campaigns/${kept.id}`, { revision: kept.revision, draft: { ...kept.draft, subject: 'Edited' } })).draft.audience, { listId: gone.id });
+      error(await local('GET', `/v1/campaigns/${kept.id}/audience`), 404, 'NOT_FOUND');
+    });
+  });
   test('revoking the originating send key stops its future scheduled job before simulation or SES acceptance', async t => {
     const owner = await keyFixture(t);
     const origin = await keyFixture(t, { permissions: ['send'] });
