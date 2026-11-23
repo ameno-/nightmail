@@ -726,7 +726,7 @@ export const listContactImports = <ThrowOnError extends boolean = false>(options
 });
 
 /**
- * Persist a preview before commit. Feature limit: 5 MiB UTF-8 CSV, 50,000 rows, 100 columns per import; preview and commit a larger file in parts of that size (the dashboard does this for files up to 1,000,000 rows and 100 MiB). Each workspace keeps at most 25 uncommitted previews (oldest evicted) and allows 40 previews per minute. Map headers explicitly. Valid rows can commit alongside a retained row-error report. Imports never lift suppression; consent changes only when the commit attests it.
+ * Persist a preview before commit. Feature limit: 5 MiB UTF-8 CSV, 50,000 rows, 100 columns per import; preview and commit a larger file in parts of that size (the dashboard does this for files up to 1,000,000 rows and 100 MiB). Map headers explicitly. Valid rows can commit alongside a retained row-error report. Imports never lift suppression; consent changes only when the commit attests it. Each workspace keeps at most 50 uncommitted previews (oldest evicted) and allows 40 previews per minute.
  */
 export const previewContactImport = <ThrowOnError extends boolean = false>(options: Options<PreviewContactImportData, ThrowOnError>): RequestResult<PreviewContactImportResponses, PreviewContactImportErrors, ThrowOnError> => (options.client ?? client).post<PreviewContactImportResponses, PreviewContactImportErrors, ThrowOnError>({
     security: [
@@ -769,7 +769,7 @@ export const getContactImport = <ThrowOnError extends boolean = false>(options: 
 });
 
 /**
- * Imports every valid row of a previewed import. One import commits at a time per workspace (503 IMPORT_COMMIT_BUSY if another is running; retryable). Without consent, imported contacts keep their consent decision (new contacts have none, so campaigns skip them). With consent, everyone imported who had no decision is marked subscribed with your evidence. A repeated commit changes nothing.
+ * Imports every valid row of a previewed import. Without consent, imported contacts keep their consent decision (new contacts have none, so campaigns skip them). With consent, everyone imported who had no decision is marked subscribed with your evidence. A repeated commit changes nothing. One import commits at a time per workspace (503 IMPORT_COMMIT_BUSY if another is running; retryable).
  */
 export const commitContactImport = <ThrowOnError extends boolean = false>(options: Options<CommitContactImportData, ThrowOnError>): RequestResult<CommitContactImportResponses, CommitContactImportErrors, ThrowOnError> => (options.client ?? client).post<CommitContactImportResponses, CommitContactImportErrors, ThrowOnError>({
     security: [

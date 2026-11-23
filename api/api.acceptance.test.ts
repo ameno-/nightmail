@@ -10843,20 +10843,39 @@ describe('Import property boundaries', () => {
       // 249 new rows fold into 100 + 100 + 49, plus 1 existing unknown row -> 100, 100, 49, 1 = 250 events total.
       assert.deepEqual(batchJobs, [100, 100, 49, 1]);
 
-      // 6. Open preview cap (keep newest 25, evict oldest; committed imports stay) + 40/min preview budget.
+      // 6. Isolate memory reservation is released as soon as DB work ends (never held while response stream is unread).
+      const { memoryInUse } = await import('./src/isolate-memory.js');
+      assert.equal(memoryInUse(), 0, 'Preview and commit must release isolate memory before returning their streams.');
+
+      // 7. Campaign snapshot order hashes contact IDs so time-ordered UUIDv7 IDs do not skew the Hosted list probe.
+      const probeList = ok(await local('POST', '/v1/lists', { name: 'Probe Order List' }), 201);
+      await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_019a000000017'||substr(replace(gen_random_uuid()::text,'-',''),14),$1,'early_'||g||'@example.com','subscribed' FROM generate_series(1,100) g`, [wid]);
+      await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_019a000000097'||substr(replace(gen_random_uuid()::text,'-',''),14),$1,'late_'||g||'@example.com','subscribed' FROM generate_series(1,500) g`, [wid]);
+      await db.query(`INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM audience_contacts WHERE workspace_id=$1 AND (email LIKE 'early_%' OR email LIKE 'late_%')`, [wid, probeList.id]);
+      const { snapshotCampaignAudience } = await import('./src/audience.js');
+      const probeReviewId = 'rev_probe_' + randomUUID().replaceAll('-', '').slice(0, 12);
+      await snapshotCampaignAudience(runtime.db, { workspaceId: wid, keyId: 'fixture', permissions: ['read', 'write', 'manage', 'send'], domains: [], role: 'owner', credential: 'dashboard' } as never, { listId: probeList.id }, probeReviewId, [], false);
+      const lateInFirst100 = (await db.query(`SELECT count(*)::int AS n FROM sending_review_recipients WHERE review_id=$1 AND ordinal<=100 AND recipient->>'email' LIKE 'late_%'`, [probeReviewId])).rows[0].n;
+      assert.ok(lateInFirst100 >= 50 && lateInFirst100 <= 99, `Expected uniform mix of later UUIDv7 contacts in first 100 (got ${lateInFirst100}).`);
+
+      // 8. Open preview cap (keep newest 50, evict oldest with explanatory 404; committed imports stay) + 40/min budget.
       const created: string[] = [];
-      for (let i = 0; i < 27; i++) {
+      for (let i = 0; i < 52; i++) {
+        if (i === 35) await db.query(`DELETE FROM api_request_budgets WHERE workspace_id = $1 AND key_id = 'imports:preview'`, [wid]);
         const p = ok(await local('POST', '/v1/contact-imports', { csv: `Email\ncap${i}@example.com\n`, mapping: { email: 'Email' } }), 201);
         created.push(p.id);
       }
       const openCount = (await db.query(`SELECT count(*)::int AS n FROM audience_imports WHERE workspace_id = $1 AND status = 'preview'`, [wid])).rows[0].n;
-      assert.equal(openCount, 25, 'Workspace keeps at most 25 open previews.');
-      error(await local('GET', `/v1/contact-imports/${created[0]}`), 404, 'NOT_FOUND');
-      error(await local('GET', `/v1/contact-imports/${created[1]}`), 404, 'NOT_FOUND');
-      assert.equal(ok(await local('GET', `/v1/contact-imports/${created[26]}`)).status, 'preview');
+      assert.equal(openCount, 50, 'Workspace keeps at most 50 open previews.');
+      const goneGet = error(await local('GET', `/v1/contact-imports/${created[0]}`), 404, 'NOT_FOUND');
+      assert.match(goneGet.message, /50 newer ones/);
+      const goneCommit = error(await local('POST', `/v1/contact-imports/${created[1]}/commit`), 404, 'NOT_FOUND');
+      assert.match(goneCommit.message, /50 newer ones/);
+      assert.equal(ok(await local('GET', `/v1/contact-imports/${created[51]}`)).status, 'preview');
       assert.equal(ok(await local('GET', `/v1/contact-imports/${batchPreview.id}`)).status, 'committed', 'Committed imports are never evicted by the open preview cap.');
-      // We already ran 29 previews in this workspace (allBad + batchPreview + 27); 11 more hit 40, then the 41st is 429.
-      for (let i = 0; i < 11; i++) ok(await local('POST', '/v1/contact-imports', { csv: `Email\nrate${i}@example.com\n`, mapping: { email: 'Email' } }), 201);
+      // Reset window and verify the 41st preview in one minute returns 429 IMPORT_PREVIEW_RATE_LIMITED.
+      await db.query(`DELETE FROM api_request_budgets WHERE workspace_id = $1 AND key_id = 'imports:preview'`, [wid]);
+      for (let i = 0; i < 40; i++) ok(await local('POST', '/v1/contact-imports', { csv: `Email\nrate${i}@example.com\n`, mapping: { email: 'Email' } }), 201);
       const rateLimited = await local('POST', '/v1/contact-imports', { csv: 'Email\nover@example.com\n', mapping: { email: 'Email' } });
       const rateErr = error(rateLimited, 429, 'IMPORT_PREVIEW_RATE_LIMITED');
       assert.equal(rateErr.retryable, true);

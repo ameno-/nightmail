@@ -6,7 +6,7 @@ import { productName } from './brand.js';
 export { AudienceSpec };
 import { contacts, consentAudit, imports, listMembers, lists, segments, type SegmentRule } from './db/audience.js';
 import { enqueue, noteEnqueued } from './jobs.js';
-import { reserveMemory } from './isolate-memory.js';
+import { withMemory } from './isolate-memory.js';
 import { mailAddress } from './outbound-content.js';
 import { SEND_LIMITS } from './send-limits.js';
 
@@ -40,7 +40,8 @@ const ConsentInput = z.object({ status: z.enum(['subscribed', 'unsubscribed']), 
 const ImportRowSchema = z.object({ row: z.number().int(), email: z.string(), name: z.string().optional(), properties: Properties });
 const ImportErrorSchema = z.object({ row: z.number().int(), field: z.string(), message: z.string() });
 const Import = z.object({ id: z.string(), ...Scope, listId: z.string().nullable(), status: z.enum(['preview', 'committed']), rows: z.array(ImportRowSchema), errors: z.array(ImportErrorSchema), imported: z.number().int(), ...Dates }).openapi('AudienceImport');
-const IMPORT_MAX_BYTES = 5 * 1024 * 1024, IMPORT_MAX_ROWS = 50_000, IMPORT_OPEN_PREVIEW_CAP = 25, IMPORT_PREVIEW_RATE_PER_MINUTE = 40;
+const IMPORT_MAX_BYTES = 5 * 1024 * 1024, IMPORT_MAX_ROWS = 50_000, IMPORT_OPEN_PREVIEW_CAP = 50, IMPORT_PREVIEW_RATE_PER_MINUTE = 40;
+function importNotFound(): never { throw new ApiError(404, 'NOT_FOUND', `Import was not found. A preview that was never committed is removed once the workspace has ${IMPORT_OPEN_PREVIEW_CAP} newer ones (or after 7 days). Preview the file again.`); }
 const importMetaColumns = { id: imports.id, workspaceId: imports.workspaceId, listId: imports.listId, status: imports.status, imported: imports.imported, createdAt: imports.createdAt, updatedAt: imports.updatedAt };
 type ImportMeta = { [K in keyof typeof importMetaColumns]: (typeof imports.$inferSelect)[K] };
 const ImportCommit = z.object({ consent: z.object({ status: z.literal('subscribed'), evidence: z.string().trim().min(1).max(2000).describe('How these people agreed to marketing email, for example "Opted in at checkout". Stored with each consent record.'), policyVersion: z.string().trim().min(1).max(120).optional() }).strict().optional().describe('Records that everyone in this import agreed to receive marketing email. It changes only contacts with no consent decision yet: prior opt-outs stay unsubscribed and suppressed addresses stay suppressed. Omit it to import without consent.') }).strict().openapi('CommitContactImportInput');
@@ -154,9 +155,10 @@ export async function snapshotCampaignAudience(db: DbExecutor, identity: Actor, 
             WHERE p.key = ANY(ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(propertyKeys)}::jsonb)))), '{}'::jsonb)` : sql`'{}'::jsonb`})) AS recipient,
         ${reachable(requiredNotice)} AS eligible, ${contacts.suppressed}
       FROM ${contacts} WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), range, ...conditions)}`;
+  // Hash the contact ID after priority rank so time-ordered UUIDv7 IDs keep the Hosted list probe's first 500 a uniform sample.
   const ordered = sql`SELECT (row_number() OVER w)::int AS ordinal, recipient, bytes, sum(bytes) OVER w AS running_bytes
     FROM (SELECT rank, id, recipient, octet_length(recipient::text) AS bytes FROM audience_snapshot WHERE eligible) e
-    WINDOW w AS (ORDER BY rank, id ROWS UNBOUNDED PRECEDING)`;
+    WINDOW w AS (ORDER BY rank, hashtextextended(id, 0), id ROWS UNBOUNDED PRECEDING)`;
   const counts = sql`count(*)::int AS matched,count(*) FILTER (WHERE eligible)::int AS eligible,
     count(*) FILTER (WHERE suppressed)::int AS suppressed,count(*) FILTER (WHERE NOT eligible AND NOT suppressed)::int AS unsubscribed`;
   // The audience's contacts and list members are joined whole, by hash, whatever the statistics say. With stale ones
@@ -393,8 +395,7 @@ function previewImport(input: z.infer<typeof ImportInput>) {
   return { rowsJson: rows.finish(), errorsJson: failures.finish(), rowCount: rows.count };
 }
 // Stream large import JSON responses one 64 KiB chunk at a time on pull(), avoiding a second 8 MB copy or 50,000 JS objects.
-// Holds the isolate memory lease until the last chunk is sent or the consumer cancels.
-function streamImportResponse(meta: ImportMeta, rowsJson: string, errorsJson: string, status: 200 | 201, subscribed?: number, onDone?: () => void): Response {
+function streamImportResponse(meta: ImportMeta, rowsJson: string, errorsJson: string, status: 200 | 201, subscribed?: number): Response {
   const parts = [
     `{"id":${JSON.stringify(meta.id)},"workspaceId":${JSON.stringify(meta.workspaceId)},"listId":${JSON.stringify(meta.listId)},"status":${JSON.stringify(meta.status)},"rows":`,
     rowsJson,
@@ -403,8 +404,7 @@ function streamImportResponse(meta: ImportMeta, rowsJson: string, errorsJson: st
     `,"imported":${meta.imported},"createdAt":${JSON.stringify(meta.createdAt)},"updatedAt":${JSON.stringify(meta.updatedAt)}${subscribed !== undefined ? `,"subscribed":${subscribed}` : ''}}`,
   ];
   const encoder = new TextEncoder();
-  let partIndex = 0, offset = 0, done = false;
-  const finish = () => { if (!done) { done = true; parts.length = 0; onDone?.(); } };
+  let partIndex = 0, offset = 0;
   const stream = new ReadableStream<Uint8Array>({
     pull(controller) {
       while (partIndex < parts.length) {
@@ -419,10 +419,10 @@ function streamImportResponse(meta: ImportMeta, rowsJson: string, errorsJson: st
         partIndex++;
         offset = 0;
       }
+      parts.length = 0;
       controller.close();
-      finish();
     },
-    cancel() { finish(); },
+    cancel() { parts.length = 0; },
   });
   return new Response(stream, { status, headers: { 'content-type': 'application/json; charset=UTF-8' } });
 }
@@ -530,15 +530,17 @@ export function registerAudience(app: App) {
     const identity = actor(c), segment = await findSegment(c.env.db, identity, c.req.valid('param').id), listId = c.req.valid('json').listId;
     const conditions = [compileRule(segment.rule)]; if (listId) { await findList(c.env.db, identity, listId); conditions.push(inList(identity, listId)); } return c.json(counts(await boundedContacts(c.env.db, identity, conditions, 1000)), 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/contact-imports', operationId: 'previewContactImport', tags: ['Audience'], security, description: `Persist a preview before commit. Feature limit: 5 MiB UTF-8 CSV, 50,000 rows, 100 columns per import; preview and commit a larger file in parts of that size (the dashboard does this for files up to 1,000,000 rows and 100 MiB). Each workspace keeps at most ${IMPORT_OPEN_PREVIEW_CAP} uncommitted previews (oldest evicted) and allows ${IMPORT_PREVIEW_RATE_PER_MINUTE} previews per minute. Map headers explicitly. Valid rows can commit alongside a retained row-error report. Imports never lift suppression; consent changes only when the commit attests it.`, request: { body: json(ImportInput) }, responses: { 201: response(Import), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/contact-imports', operationId: 'previewContactImport', tags: ['Audience'], security, description: `Persist a preview before commit. Feature limit: 5 MiB UTF-8 CSV, 50,000 rows, 100 columns per import; preview and commit a larger file in parts of that size (the dashboard does this for files up to 1,000,000 rows and 100 MiB). Map headers explicitly. Valid rows can commit alongside a retained row-error report. Imports never lift suppression; consent changes only when the commit attests it. Each workspace keeps at most ${IMPORT_OPEN_PREVIEW_CAP} uncommitted previews (oldest evicted) and allows ${IMPORT_PREVIEW_RATE_PER_MINUTE} previews per minute.`, request: { body: json(ImportInput) }, responses: { 201: response(Import), ...errors } }), async c => {
     const identity = actor(c, 'editContent'), input = c.req.valid('json');
     if (input.listId) await findList(c.env.db, identity, input.listId);
     if (!await chargeBudget(c.env, identity.workspaceId, 'imports:preview', IMPORT_PREVIEW_RATE_PER_MINUTE)) {
       c.header('Retry-After', '60');
       throw new ApiError(429, 'IMPORT_PREVIEW_RATE_LIMITED', `This workspace allows ${IMPORT_PREVIEW_RATE_PER_MINUTE} contact import previews per minute. Retry after the window resets.`, undefined, true);
     }
-    const lease = await reserveMemory(Math.min(SEND_LIMITS.isolateWorkingBytes, input.csv.length * 6 + 2 * 1024 * 1024));
-    try {
+    // Hold the isolate memory budget only through parse + DB write (never across the response stream, so a stalled
+    // or dropped client cannot wedge the isolate). 12 B/char covers two-byte non-Latin strings + wire buffers.
+    const built = await withMemory(Math.min(SEND_LIMITS.isolateWorkingBytes, input.csv.length * 12 + 2 * 1024 * 1024), async () => {
+      if (c.req.raw.signal?.aborted) return null;
       const { rowsJson, errorsJson } = previewImport(input);
       const newId = id('imp');
       const meta = await c.env.db.transaction(async tx => {
@@ -550,11 +552,10 @@ export function registerAudience(app: App) {
           AND id IN (SELECT id FROM audience_imports WHERE workspace_id = ${identity.workspaceId} AND status = 'preview' AND id <> ${newId} ORDER BY created_at DESC, id DESC OFFSET ${IMPORT_OPEN_PREVIEW_CAP - 1})`);
         return row!;
       });
-      return streamImportResponse(meta, rowsJson, errorsJson, 201, undefined, () => lease.release()) as never;
-    } catch (error) {
-      lease.release();
-      throw error;
-    }
+      return { meta, rowsJson, errorsJson };
+    });
+    if (!built) return new Response(null, { status: 499 }) as never;
+    return streamImportResponse(built.meta, built.rowsJson, built.errorsJson, 201) as never;
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/contact-imports', operationId: 'listContactImports', tags: ['Audience'], security, request: { query: PageQuery }, responses: { 200: response(page(Import.omit({ rows: true, errors: true }))), ...errors } }), async c => {
     const identity = actor(c), query = c.req.valid('query'); const rows = await c.env.db.select(importMetaColumns).from(imports).where(and(scope(imports, identity), query.cursor ? gt(imports.id, query.cursor) : undefined)).orderBy(asc(imports.id)).limit(query.limit + 1); return c.json(paginate(rows, query.limit), 200);
@@ -562,20 +563,21 @@ export function registerAudience(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/contact-imports/{id}', operationId: 'getContactImport', tags: ['Audience'], security, request: { params: IdParams }, responses: { 200: response(Import), ...errors } }), async c => {
     const identity = actor(c);
     const [row] = await c.env.db.select({ ...importMetaColumns, rowsText: sql<string>`${imports.rows}::text`, errorsText: sql<string>`${imports.errors}::text` }).from(imports).where(and(scope(imports, identity), eq(imports.id, c.req.valid('param').id))).limit(1);
-    if (!row) return notFound('Import');
+    if (!row) importNotFound();
     return streamImportResponse(row, row.rowsText, row.errorsText, 200) as never;
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/contact-imports/{id}/commit', operationId: 'commitContactImport', tags: ['Audience'], security, description: 'Imports every valid row of a previewed import. One import commits at a time per workspace (503 IMPORT_COMMIT_BUSY if another is running; retryable). Without consent, imported contacts keep their consent decision (new contacts have none, so campaigns skip them). With consent, everyone imported who had no decision is marked subscribed with your evidence. A repeated commit changes nothing.', request: { params: IdParams, body: { ...json(ImportCommit), required: false } }, responses: { 200: response(CommittedImport), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/contact-imports/{id}/commit', operationId: 'commitContactImport', tags: ['Audience'], security, description: 'Imports every valid row of a previewed import. Without consent, imported contacts keep their consent decision (new contacts have none, so campaigns skip them). With consent, everyone imported who had no decision is marked subscribed with your evidence. A repeated commit changes nothing. One import commits at a time per workspace (503 IMPORT_COMMIT_BUSY if another is running; retryable).', request: { params: IdParams, body: { ...json(ImportCommit), required: false } }, responses: { 200: response(CommittedImport), ...errors } }), async c => {
     const identity = actor(c, 'editContent'), importId = c.req.valid('param').id, consent = c.req.valid('json').consent;
-    const lease = await reserveMemory(24 * 1024 * 1024);
     try {
-        const result = await c.env.db.transaction(async tx => {
+      const result = await withMemory(48 * 1024 * 1024, async () => {
+        if (c.req.raw.signal?.aborted) return null;
+        return c.env.db.transaction(async tx => {
           // One commit at a time per workspace (transaction-scoped try-lock: supported by Hyperdrive and PgBouncer
           // transaction mode, released automatically at COMMIT/ROLLBACK), matching AUDIENCE_CAPTURE_BUSY.
           if (!(await tx.execute(sql`SELECT 1 WHERE pg_try_advisory_xact_lock(275817, hashtext(${identity.workspaceId}))`)).rowCount)
             throw new ApiError(503, 'IMPORT_COMMIT_BUSY', 'Another contact import is committing in this workspace; retry when it finishes.', undefined, true);
           const [job] = await tx.select({ ...importMetaColumns, rowCount: sql<number>`jsonb_array_length(${imports.rows})::int` }).from(imports).where(and(scope(imports, identity), eq(imports.id, importId))).limit(1).for('update');
-          if (!job) return notFound('Import');
+          if (!job) importNotFound();
           if (job.status === 'committed') {
             const [full] = await tx.select({ rowsText: sql<string>`${imports.rows}::text`, errorsText: sql<string>`${imports.errors}::text` }).from(imports).where(and(scope(imports, identity), eq(imports.id, importId))).limit(1);
             return { meta: job, rowsText: full!.rowsText, errorsText: full!.errorsText, subscribed: 0 };
@@ -678,9 +680,10 @@ export function registerAudience(app: App) {
           const [updated] = await tx.update(imports).set({ status: 'committed', imported: job.rowCount, updatedAt: new Date().toISOString() }).where(and(scope(imports, identity), eq(imports.id, job.id))).returning({ ...importMetaColumns, rowsText: sql<string>`${imports.rows}::text`, errorsText: sql<string>`${imports.errors}::text` });
           return { meta: updated!, rowsText: updated!.rowsText, errorsText: updated!.errorsText, subscribed };
         });
-      return streamImportResponse(result.meta, result.rowsText, result.errorsText, 200, result.subscribed, () => lease.release()) as never;
+      });
+      if (!result) return new Response(null, { status: 499 }) as never;
+      return streamImportResponse(result.meta, result.rowsText, result.errorsText, 200, result.subscribed) as never;
     } catch (error) {
-      lease.release();
       if (statementTimedOut(error)) throw new ApiError(503, 'IMPORT_COMMIT_TIMEOUT', 'The contact import commit ran out of time and nothing was imported. Retry the commit.', undefined, true);
       throw error;
     }
