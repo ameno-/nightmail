@@ -62,10 +62,10 @@ export function ComparePage() {
   const { vendor } = useParams()
   const comparison = vendor === 'mailchimp' || vendor === 'resend' ? comparisons[vendor] : null
   const page = PRICE_PAGES.find(p => p.path === `/compare/${vendor}`)
-  // The feature cards' material waits for a choice (board.tsx, CARDS): ?cards=1 to 3, and ?frame=concrete with one.
+  // The board's frame in the homepage's steel, while its concrete waits for a yes (board.tsx): ?frame=steel.
   const [search] = useSearchParams()
   if (!comparison) return <PriceFrame title="Page not found"><EmptyState headingAs="h1" title="Page not found" action={<Link to="/pricing">Price calculator</Link>} /></PriceFrame>
   return <PriceFrame title={page?.title ?? comparison.offer.vendor} variant="price-page--board" end={<BoardEnd />} scene>
-    <ComparisonScene key={vendor} comparison={comparison} cards={search.get('cards')} frame={search.get('frame')} />
+    <ComparisonScene key={vendor} comparison={comparison} frame={search.get('frame')} />
   </PriceFrame>
 }

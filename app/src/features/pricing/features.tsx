@@ -3,20 +3,20 @@ import { routeScreen, SCREENS } from '../home/screens'
 import { Flaps } from './flaps'
 import { formatCount, nightmail, type Comparison } from './prices'
 
-// What else Nightmail does, under a comparison's board: a wall of the homepage's machines, small, each one thing the
-// product does, something to look at and a few words. As the board stands over its console, a screen stands on a steel
-// plate with its words: on the screen, the homepage's own depiction of that job (home/screens.tsx: the sample mail, the
-// API call, the agent's tools, the rule and its log). A steel cabinet holds a made thing instead, split-flap figures or
-// the team's paper tags, with its words under it. Every claim is the product's as
-// shipped (the billing code's figures come from prices.ts). Each comparison sets which panels it shows, in what order
-// and how large (LAYOUTS): Mailchimp's readers first see the list, the contacts and the team; Resend's the API, the
-// allowances and the domain. (Seven each: a wall, not a catalogue.) On a wide page the panels are set on a 12-column grid by row and column; narrower, two
-// across with the large one across both; on a phone, one under another in the same order.
+// What else Nightmail does, under a comparison's board: one wall of the homepage machine's pale concrete, cast in
+// panels as the machine's face is, a panel to each thing the product does with a display set into it and a few words
+// lettered under it (board.css). On a screen, the homepage's own depiction of that job (home/screens.tsx: the sample
+// mail, the API call, the agent's tools, the rule and its log); in the others, a made thing: split-flap figures or the
+// team's paper tags. Every claim is the product's as shipped (the billing code's figures come from prices.ts). Each
+// comparison sets which panels it shows, in what order and how large (LAYOUTS): Mailchimp's readers first see the
+// list, the contacts and the team; Resend's the API, the allowances and the domain. (Seven each: a wall, not a
+// catalogue.) On a wide page the panels are set on a 12-column grid by row and column; narrower, two across with the
+// wide ones across both; on a phone, one under another in the same order.
 // Three screens move while they are in view, as on the homepage (the campaign's meter, the agent's reply, the log's
 // tape), and a panel's flaps turn over as it comes into view; with reduced motion nothing does (board.css).
 
 export type FeatureId = 'send' | 'campaign' | 'contacts' | 'team' | 'free' | 'receive' | 'agent' | 'route' | 'domain'
-type Feature = { title: string; line: string; face: 'screen' | 'steel'; show: ReactNode }
+type Feature = { title: string; line: string; face: 'screen' | 'object'; show: ReactNode }
 
 const TEAM = [['Dana', 'Owner'], ['Zahir', 'Admin'], ['Bertram', 'Member'], ['Mina', 'Member']] as const
 // A domain's records as the product lists them (api/src/operations.ts, readiness): three DKIM CNAMEs, MAIL FROM's SPF,
@@ -30,14 +30,14 @@ const FEATURES: Record<FeatureId, Feature> = {
     <div className="ft-hooks">{['email.sent', 'email.delivered'].map(event => <p key={event}><span>Webhook</span><b>{event}</b><em>200</em></p>)}</div>
   </div> },
   campaign: { title: 'Email your whole list.', line: `Campaigns and newsletters, at the same ${nightmail.perThousand} per 1,000.`, face: 'screen', show: <div className="ft-screen ft-campaign">{SCREENS.campaign}</div> },
-  contacts: { title: 'No charge per contact.', line: 'You pay for the email, never for the list.', face: 'steel', show: <div className="ft-flapboard">
+  contacts: { title: 'No charge per contact.', line: 'You pay for the email, never for the list.', face: 'object', show: <div className="ft-flapboard">
     <p><span>Contacts</span><Flaps text="100,000" width={7} end className="ft-flaps" /></p>
     <p><span>Charge</span><Flaps text="$0" width={7} end className="ft-flaps ft-lit" /></p>
   </div> },
-  team: { title: 'Bring the whole team.', line: 'No charge per seat. Members edit campaigns; admins send them.', face: 'steel', show: <div className="ft-rail">
+  team: { title: 'Bring the whole team.', line: 'No charge per seat. Members edit campaigns; admins send them.', face: 'object', show: <div className="ft-rail">
     {TEAM.map(([name, role], i) => <span key={name} className="ft-tag" style={{ '--k': i } as CSSProperties}><b>{name}</b><span>{role}</span></span>)}
   </div> },
-  free: { title: 'Free every month.', line: 'Sent and received each have their own allowance.', face: 'steel', show: <div className="ft-flapboard">
+  free: { title: 'Free every month.', line: 'Sent and received each have their own allowance.', face: 'object', show: <div className="ft-flapboard">
     <p><Flaps text={free} width={free.length} className="ft-flaps ft-lit" /><span>Sent</span></p>
     <p><Flaps text={formatCount(nightmail.freeReceived)} width={free.length} className="ft-flaps ft-lit" /><span>Received</span></p>
   </div> },

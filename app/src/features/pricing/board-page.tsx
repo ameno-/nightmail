@@ -12,10 +12,10 @@ import '../home/machines.css'
 import './board.css'
 export { BoardEnd } from './board'
 
-export function ComparisonScene({ comparison, cards, frame }: { comparison: Comparison; cards?: string | null; frame?: string | null }) {
+export function ComparisonScene({ comparison, frame }: { comparison: Comparison; frame?: string | null }) {
   const session = useSession()
   const start: HomeStart = session?.identity ? { signedIn: true }
     : { signedIn: false, onSignIn: () => session?.signIn(), onSignInIntent: event => session?.signInIntent(event), busy: session?.signingIn ?? false }
   const way: Start = { signedIn: start.signedIn, button: className => <StartButton start={start} className={className} /> }
-  return <ComparisonBoard comparison={comparison} start={way} cards={cards} frame={frame} />
+  return <ComparisonBoard comparison={comparison} start={way} frame={frame} />
 }

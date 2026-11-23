@@ -17,9 +17,11 @@ import { CHECKED, claim, formatCount, money, nightmail, nightmailBill, theirPric
 // published sizes (comparison.steps: each one priced by the vendor and cheaper on Nightmail, as the pre-merge check
 // proves). On the board: the prices on split-flap tiles (lit for Nightmail, unlit for the competitor; a tile flips when
 // its character changes) and each price as a bar of forty pigeonholes on one scale, the competitor's every one,
-// Nightmail's its share, lit in the homepage's periwinkle, the only colour. Under the console, what both prices are for
-// and where the competitor's was read, and a quiet Get started; then what else Nightmail does (features.tsx), the close
-// under a lamp of its own with the page's Get started, the small print, and the wordmark across the page's end.
+// Nightmail's its share, lit in the homepage's periwinkle, the only colour. Along the board's foot, its small print: what
+// both prices are for, the plan, and the day and page the competitor's was read on. The console under it has the
+// fader and the page's two ways on, Get started (the key) and Try your numbers. Then what else Nightmail does
+// (features.tsx, a wall of the homepage machine's concrete), the close with Get started again, the small print, and
+// the wordmark across the page's end.
 // Every figure keeps the room of the widest it can show (Room), so nothing moves as the fader does.
 // The board hangs on a dark wall under one pendant lamp, which comes down on its cord from the top of the window (the
 // page has no bar: PriceFrame's scene). Nightmail is named by its wordmark wherever it is a display word: the headline
@@ -74,17 +76,15 @@ function Fader({ c, size, onChange, id }: { c: Comparison; size: number; onChang
  *  a class of the page's. Without it (the pre-merge check's render) the page has no button. */
 export type Start = { signedIn: boolean; button: (className: string) => ReactNode }
 
-/** The feature cards' material, while one is chosen (?cards=1 to 3, board.css): cast blocks, one wall, quiet panels;
- *  without it, the homepage's steel. frame: the board's frame and console in the cards' concrete too (?frame=concrete). */
-export const CARDS = ['1', '2', '3'] as const
-
-export function ComparisonBoard({ comparison: c, start, cards, frame }: { comparison: Comparison; start?: Start; cards?: string | null; frame?: string | null }) {
+/** frame: 'steel' puts the board's frame and console back in the homepage's steel (?frame=steel), while the concrete
+ *  they are in now waits for a yes. */
+export function ComparisonBoard({ comparison: c, start, frame }: { comparison: Comparison; start?: Start; frame?: string | null }) {
   const room = useMemo(() => rooms(c), [c])
   const [size, setSize] = useState(() => opening(c))
   const p = pointAt(c, size), id = useId(), vendor = c.offer.vendor
   const lit = p.ours.uc === 0n ? 0 : Math.max(1, Math.round(CELLS * share(p)))
-  const material = CARDS.find(k => k === cards)
-  return <><section className="cb-hall" aria-labelledby="cb-title" data-cards={material} data-frame={material && frame === 'concrete' ? 'concrete' : undefined}>
+  const theirs = byContacts(c) ? [`${formatCount(p.usage.sent)} emails a month`, `${p.usage.sent / p.usage.contacts} to each contact`] : ['One recipient each', 'Nothing received']
+  return <><section className="cb-hall" aria-labelledby="cb-title" data-frame={frame === 'steel' ? 'steel' : undefined}>
     <div className="cb-stage">
       <div className="cb-backdrop" aria-hidden="true"><i className="cb-lamp" /></div>
       <div className="cb-wrap">
@@ -98,26 +98,24 @@ export function ComparisonBoard({ comparison: c, start, cards, frame }: { compar
             <Cells lit={lit} mine />
             <div className="cb-row"><Flaps text={vendor} width={vendor.length} className="cb-name" /><Flaps text={money(p.theirs.cents)} width={room.price.length} end className="cb-price" /></div>
             <Cells lit={CELLS} />
-            <p className="cb-foot"><span>{byContacts(c) ? `${formatCount(p.usage.sent)} emails a month` : 'One recipient each'}</span><span>{vendor} {p.theirs.plan}</span></p>
+            {/* The board's small print: what both prices are for, the plan, and where and when it was read. */}
+            <div className="cb-foot"><p>{theirs.map(line => <span key={line}>{line}</span>)}</p><p><span>{vendor} {p.theirs.plan}, list price</span><Checked source={{ checked: CHECKED, url: c.offer.pricing }} /></p></div>
           </div>
         </div>
+        {/* The console: the fader, then the page's two ways on: the calculator, quietly, and Get started, the key. What
+            signing in agrees to stands under the key. */}
         <div className="cb-console">
           <label className="cb-stencil" htmlFor={id}>{byContacts(c) ? 'Contacts' : 'Emails'}</label>
           <Fader c={c} size={size} onChange={setSize} id={id} />
-          <Link className="cb-key" to={calculatorPath(p.usage)}><span className="cb-try">Try your numbers<ArrowRight size={18} strokeWidth={2} aria-hidden="true" /></span></Link>
+          <Link className="cb-try" to={calculatorPath(p.usage)}>Try your numbers<ArrowRight size={17} strokeWidth={2} aria-hidden="true" /></Link>
+          {start?.button('cb-key cb-key-start')}
         </div>
+        {start && !start.signedIn && <SignInConsent className="cb-consent cb-consent-hero" />}
       </div>
     </div>
-    {/* Under the console, on the wall as its light falls away: what both prices are for, and the way in for whoever the
-        price has convinced. */}
-    <div className="cb-wrap cb-after">
-      <p className="cb-note">{c.assume} <Checked source={{ checked: CHECKED, url: c.offer.pricing }} /></p>
-      {start && <div className="cb-first">{start.button('cb-quiet')}{!start.signedIn && <SignInConsent className="cb-consent" />}</div>}
-    </div>
     <Features comparison={c} />
-    {/* The close, under a lamp of its own as the page began: the bill, and the way in. */}
+    {/* The close: the bill, and the way in again. */}
     <section className="cb-close" aria-labelledby="cb-close">
-      <div className="cb-close-light" aria-hidden="true"><i className="cb-lamp" /></div>
       <h2 id="cb-close" className="cb-bill"><span><b>{nightmail.perThousand}</b> per 1,000 emails, sent or received.</span> <span>That’s the whole bill.</span></h2>
       {start && <>{start.button('cb-key cb-key-start')}{!start.signedIn && <SignInConsent className="cb-consent" />}</>}
     </section>
@@ -125,7 +123,7 @@ export function ComparisonBoard({ comparison: c, start, cards, frame }: { compar
   {/* The small print, closed, on the page's own ground with its last links (index.tsx, PriceFrame). */}
   <div className="cb-fine">
     <Disclosure className="price-small cb-print" headingAs="h2" title="Sources and small print">
-      <p className="price-note">{c.usage} Monthly billing, list prices before tax, no promotions. <Checked source={{ checked: CHECKED, url: c.offer.pricing }} /></p>
+      <p className="price-note">{c.assume} Monthly billing, no promotions. <Checked source={{ checked: CHECKED, url: c.offer.pricing }} /></p>
       <p className="price-note">Nightmail charges {nightmail.perThousand} per 1,000 emails after {formatCount(nightmail.freeSent)} free a month.</p>
       <Terms floor={null} />
       <ul className="price-facts">{c.ours.map(fact => <li key={fact.text}>{fact.text}{fact.source && <Cite source={fact.source} />}</li>)}</ul>

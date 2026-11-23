@@ -1,16 +1,17 @@
 # The board's scene
 
-The pictures behind the comparison page's board (board.css): a plaster wall lit from above, one for a wide window and one
-for a phone, and the pendant lamp that lights it, hung on its cord from the window's top edge. Each is its own file the
+The pictures of the comparison page (board.css): a plaster wall lit from above, one for a wide window and one for a
+phone, the pendant lamp that lights it, hung on its cord from the window's top edge, and the homepage machine's
+concrete the board's frame, its console and the features wall are made of. Each is its own file the
 page links to (`?no-inline` in board.css), never inlined into the stylesheet.
 
 | File | What | Bytes |
 | --- | --- | --: |
 | `wall-1920.avif`, `wall-828.avif` | the wall, its pool of light about a fifth of the way down | 13 kB, 10 kB |
 | `lamp.webp` | the lamp and the foot of its cord, a transparent cutout | 14 kB |
-| `moondust-384.avif`, `moondust-768.avif` | the homepage machine's pale "moondust" concrete, a seamless tile shown 384 px square (1x, 2x), for the feature cards while a material is chosen (`?cards=1` to `3`) and the board's frame with `&frame=concrete` | 12 kB, 36 kB |
+| `moondust-384.avif`, `moondust-768.avif` | the homepage machine's pale "moondust" concrete, a seamless tile shown 384 px square (1x, 2x), for the features wall, the board's frame and the console | 12 kB, 36 kB |
 
-The board, its frame and the fader console are the homepage's station kit (home/kit), already on the page.
+With `?frame=steel` the board's frame and the console are the homepage's station kit (home/kit) instead.
 
 ## Making them again
 
