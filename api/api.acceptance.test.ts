@@ -26551,7 +26551,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const expRes=await drainClaimUnrouted(runtime,wid,expBox.id);
       assert.deepEqual(expRes,{done:true,claimed:0,batches:1},'address given expiry stops draining');
 
-      await seedUnrouted('al',[{addr:'keepal@'+host,n:105},{addr:'dropal@'+host,n:20}]);
+      await seedUnrouted('al',[{addr:'keepal@'+host,n:105},{addr:'dropal@'+host,n:120}]);
       const alBox=ok(await local('POST','/v1/inbound/addresses',{address:'keepal@'+host,aliases:['dropal@'+host]}),201);
       ok(await local('PATCH',`/v1/inbound/addresses/${alBox.id}`,{aliases:[]}));
       await drainClaimUnrouted(runtime,wid,alBox.id);
