@@ -302,10 +302,15 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
     // (mailchimp-takes.tsx) and five iterations on the first (mailchimp-hero.tsx).
     "const sizes = prices.comparisons.mailchimp.sizes.length, takes = await import('./src/features/pricing/mailchimp-takes.tsx'), hero = await import('./src/features/pricing/mailchimp-hero.tsx')",
     "const chart = [{ id: 'mailchimp', sizes, html: at('/compare/mailchimp', h((await import('./src/features/pricing/mailchimp.tsx')).MailchimpComparison)) }, ...['1', '2', '3'].map(take => ({ id: 'mailchimp (take ' + take + ')', sizes, html: at('/compare/mailchimp?take=' + take, h(takes.MailchimpTake, { take })) })), ...hero.HERO_TAKES.map(take => ({ id: 'mailchimp (take ' + take + ')', sizes, html: at('/compare/mailchimp?take=' + take, h(hero.MailchimpHero, { take })) }))]",
+    // The price-against-a-price component (price-against.tsx) in each look on each comparison, and every size its
+    // control can reach, with the competitor's price there.
+    "const pa = await import('./src/features/pricing/price-against.tsx')",
+    "const against = Object.entries(prices.comparisons).flatMap(([id, c]) => pa.LOOKS.map(look => ({ id: id + ' (calc ' + look + ')', html: at('/compare/' + id + '?calc=' + look, h(pa.ComparisonCalc, { comparison: c, look })) })))",
+    "const reach = Object.entries(prices.comparisons).map(([id, c]) => ({ id, sizes: prices.reachable(c).map(size => { const u = c.use(size), t = prices.theirPrice(c.offer, u); return { size, sent: u.sent, received: u.received, theirs: t ? t.cents : null } }) }))",
     'const { OFFERS, comparisons, resendOverage, resendReceived } = prices',
-    "process.stdout.write(JSON.stringify({ calculator, compare, chart, data: { OFFERS, comparisons, resendOverage, resendReceived } }, (_k, v) => typeof v === 'bigint' ? String(v) : v))",
+    "process.stdout.write(JSON.stringify({ calculator, compare, chart, against, reach, data: { OFFERS, comparisons, resendOverage, resendReceived } }, (_k, v) => typeof v === 'bigint' ? String(v) : v))",
   ].join('\n')
-  type Rendered = { calculator: { input: Record<string, string>; path: string; html: string }[]; compare: { id: string; html: string }[]; chart: { id: string; sizes: number; html: string }[]; data: unknown }
+  type Rendered = { calculator: { input: Record<string, string>; path: string; html: string }[]; compare: { id: string; html: string }[]; chart: { id: string; sizes: number; html: string }[]; against: { id: string; html: string }[]; reach: { id: string; sizes: { size: number; sent: number; received: number; theirs: number | null }[] }[]; data: unknown }
   let out: Rendered | null = null
   try {
     out = JSON.parse(execFileSync('node', ['--import', import.meta.resolve('tsx'), '--input-type=module', '-e', script], { cwd: new URL('app/', root), encoding: 'utf8', maxBuffer: 64 << 20, stdio: ['ignore', 'pipe', 'pipe'] })) as Rendered
@@ -383,7 +388,22 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
       if (/Not (published|checked)|\bNaN\b|undefined/.test(page)) fail('Price pages', `${where} has a size without a verified competitor price: compare only at sizes the data has.`, file)
       if (!dated.test(html)) fail('Price pages', `${where} doesn't give the day its prices were checked and a link to the vendor's page.`, file)
     }
-    if (failed === before) console.log(`Price pages: ${out.calculator.length} calculator inputs and ${out.compare.length + out.chart.length} renderings of the comparisons match src/billing/rates.ts; ${sources.length} competitor sources have a link, a day and a quote.`)
+    // The price-against-a-price component: every size its control can reach is one the competitor's page prices, and
+    // Nightmail costs less there (a size where it doesn't must not be offered); each rendering's Nightmail figure is the
+    // billed price for the emails a month written beside it, dated and linked, with the terms in its small print.
+    for (const { id, sizes } of out.reach) for (const s of sizes) {
+      if (s.theirs === null) fail('Price pages', `The ${id} control reaches ${n(s.size)}, a size ${id}'s page doesn't price: take it out of the comparison's steps (prices.ts).`, file)
+      else if (charged(s.sent, s.received) >= BigInt(s.theirs) * 1_000_000n) fail('Price pages', `The ${id} control reaches ${n(s.size)}, where Nightmail (${dollarsOf(charged(s.sent, s.received))}) isn't cheaper than ${id} (${dollarsOf(BigInt(s.theirs) * 1_000_000n)}): the control must not offer it (prices.ts, steps).`, file)
+    }
+    for (const { id, html } of out.against) {
+      const page = text(html), where = `Nightmail vs ${id}`
+      checkFigures(where, html, 1)
+      for (const f of figures(html)) if (!page.includes(`${n(f.sent)} emails a month`) || f.received) fail('Price pages', `${where} prices ${n(f.sent)} sent and ${n(f.received)} received without saying so beside the figure.`, file)
+      for (const term of terms.slice(2)) if (!page.includes(term)) fail('Price pages', `${where} doesn't say “${term}”, as src/billing/rates.ts has it.`, file)
+      if (!dated.test(html)) fail('Price pages', `${where} doesn't give the day its prices were checked and a link to the vendor's page.`, file)
+      if (/\bNaN\b|undefined|Infinity/.test(page)) fail('Price pages', `${where} shows NaN, undefined or Infinity.`, file)
+    }
+    if (failed === before) console.log(`Price pages: ${out.calculator.length} calculator inputs and ${out.compare.length + out.chart.length + out.against.length} renderings of the comparisons match src/billing/rates.ts; ${sources.length} competitor sources have a link, a day and a quote.`)
   }
 }
 

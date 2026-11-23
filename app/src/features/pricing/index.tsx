@@ -10,9 +10,11 @@ import { comparisons } from './prices'
 import { MailchimpComparison } from './mailchimp'
 import { MailchimpTake } from './mailchimp-takes'
 import { HERO_TAKES, MailchimpHero, type HeroTake } from './mailchimp-hero'
+import { ComparisonCalc, LOOKS, type Look } from './price-against'
 import './pricing.css'
 import './mailchimp-takes.css'
 import './mailchimp-hero.css'
+import './price-against.css'
 
 // Public pages, no sign-in: the price calculator (/pricing) and one comparison per competitor (/compare/:vendor). Not
 // linked from the site until the legal review (pages.ts, PRICE_PAGES_LIVE).
@@ -54,7 +56,9 @@ export function ComparePage() {
   const page = PRICE_PAGES.find(p => p.path === `/compare/${vendor}`)
   // Compositions of the Mailchimp page wait for a choice: three takes (mailchimp-takes.tsx) and five iterations on the
   // first (mailchimp-hero.tsx). Without ?take it is the chart.
-  const take = useSearchParams()[0].get('take')
+  const params = useSearchParams()[0], take = params.get('take'), calc = params.get('calc')
+  // Three looks of the price-against-a-price component, on both comparisons (price-against.tsx).
+  if (comparison && LOOKS.includes(calc as Look)) return <PriceFrame title={page?.title ?? 'Page not found'}><ComparisonCalc key={`${vendor}-${calc}`} comparison={comparison} look={calc as Look} /></PriceFrame>
   return <PriceFrame title={page?.title ?? 'Page not found'}>
     {vendor === 'mailchimp' ? (take === '1' || take === '2' || take === '3' ? <MailchimpTake key={take} take={take} /> : HERO_TAKES.includes(take as HeroTake) ? <MailchimpHero key={take} take={take as HeroTake} /> : <MailchimpComparison />) : comparison ? <Compare key={vendor} comparison={comparison} /> : <EmptyState headingAs="h1" title="Page not found" action={<Link to="/pricing">Price calculator</Link>} />}
   </PriceFrame>

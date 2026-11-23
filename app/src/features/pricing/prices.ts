@@ -248,6 +248,34 @@ export type Comparison = {
   ours: (Fact | { text: string; short?: string; note?: string; source?: undefined })[]
   /** The same in one clause, after "Nightmail has". */
   summary?: string
+  /** The sizes the price-against-a-price control can reach (contacts or emails a month, by the offer's unit), each one
+   *  the vendor prices; use turns one into the usage both prices are for; assume is the line under the picture. On a
+   *  'complete' ladder a typed size between the first and the last is priced too (reachable). */
+  steps: number[]
+  use: (size: number) => Usage
+  assume: string
+}
+/** A competitor's price for a usage as a buyer would pay it: its cheapest plan, or pay-as-you-go where that costs less. */
+export function theirPrice(offer: Offer, u: Usage): { cents: number; plan: string } | null {
+  const q = quote(offer, u)
+  if (q.kind !== 'price') return null
+  return q.payg ? { cents: q.payg.cents, plan: `${q.payg.plan.name}, pay as you go` } : { cents: q.cents, plan: q.plan.name }
+}
+/** Every size the control can show: its steps, and on a 'complete' ladder every 1,000 between the first and the last. */
+export function reachable(c: Comparison): number[] {
+  if (c.offer.ladder !== 'complete') return c.steps
+  const first = c.steps[0]!, last = c.steps.at(-1)!, grid = new Set(c.steps)
+  for (let size = Math.ceil(first / 1000) * 1000; size <= last; size += 1000) grid.add(size)
+  return [...grid].sort((a, b) => a - b)
+}
+/** The page's headline: the gap as it holds at every size the control can reach. */
+export function claim(c: Comparison): string {
+  const least = Math.min(...reachable(c).map(size => {
+    const u = c.use(size), ours = nightmailBill(u.sent, u.received).uc, theirs = ucOf(theirPrice(c.offer, u)!.cents)
+    return ours === 0n ? Infinity : Number(theirs) / Number(ours)
+  }))
+  if (least >= 2) return `${c.offer.vendor} costs ${Number.isInteger(least) ? 'at least' : 'over'} ${Math.floor(least)}\u00a0times as much as Nightmail`
+  return `Nightmail costs less than ${c.offer.vendor}`
 }
 /** The Mailchimp comparison's use of a list: this many emails a month to every contact, this many teammates. */
 export const MAILCHIMP_USE = { sendsPerContact: 4, seats: 3 }
@@ -258,6 +286,10 @@ export const comparisons: Record<'mailchimp' | 'resend', Comparison> = {
     sizes: [5_000, 25_000, 100_000].map(mailchimpSize),
     usage: 'Four campaigns a month to the whole list, 3 teammates, nothing received.',
     lead: 'Mailchimp prices by contacts. Nightmail prices by email.',
+    // Every list size Mailchimp's page prices from 500 to 100,000 contacts.
+    steps: [...new Set(mailchimp.plans.flatMap(plan => plan.tiers.map(tier => tier.size)))].filter(size => size >= 500 && size <= 100_000).sort((a, b) => a - b),
+    use: mailchimpSize,
+    assume: 'Four emails a month to each contact, 3 teammates, Mailchimp’s cheapest plan. List prices before tax.',
     summary: 'contacts and teammates at no charge, a role that edits but can’t send, and receiving email',
     ours: [
       fact('Contacts at no charge', 'No charge for contacts.', 'Mailchimp counts unsubscribed contacts too, at the month’s highest number.', read('https://mailchimp.com/help/about-mailchimp-pricing-plans/', '"Subscribed, unsubscribed, and non-subscribed contacts are included in your contact count." … "If your contact total increases beyond your contact limit at any time during your monthly billing cycle, we won’t interrupt your service. Instead, you’ll see an additional charge on your bill."')),
@@ -271,10 +303,15 @@ export const comparisons: Record<'mailchimp' | 'resend', Comparison> = {
     sizes: [{ contacts: 0, sent: 10_000, received: 0, seats: 1 }, { contacts: 0, sent: 100_000, received: 0, seats: 1 }, { contacts: 0, sent: 1_000_000, received: 0, seats: 1 }],
     usage: 'Emails sent a month, one recipient each, nothing received.',
     lead: 'Resend sells a monthly allowance of email. Nightmail charges for each email.',
+    // 10,000 emails, then every paid tier Resend's page lists up to its last (2,500,000; past it Resend names no price).
+    // Not below: up to Resend's free 3,000 both cost $0, so Nightmail isn't cheaper there.
+    steps: [10_000, ...new Set(resend.plans.flatMap(plan => plan.tiers.map(tier => tier.size)).filter(size => size >= 50_000))].sort((a, b) => a - b),
+    use: (sent: number): Usage => ({ contacts: 0, sent, received: 0, seats: 1 }),
+    assume: 'One recipient each, nothing received, Resend’s cheapest plan or pay-as-you-go. List prices before tax.',
     ours: [
-      { text: `Received email has its own ${formatCount(nightmail.freeReceived)} free a month. Resend counts it against the sending allowance.`, source: resendReceived },
-      { text: 'No charge per inbox. Resend includes 3 and charges $1 a month for each one after that.', source: read(RESEND, 'Every plan includes 3 inboxes. Paid plans can enable pay-as-you-go to add more at $1 per inbox per month') },
-      { text: `No contact plan for marketing. Resend’s Pro marketing is ${money(resendMarketing.plans[1]!.tiers[0]!.cents)} a month at ${formatCount(resendMarketing.plans[1]!.tiers[0]!.size)} contacts.`, source: resendMarketing.plans[1]!.tiers[0]!.source },
+      { short: 'A free allowance for received email', text: `Received email has its own ${formatCount(nightmail.freeReceived)} free a month. Resend counts it against the sending allowance.`, source: resendReceived },
+      { short: 'Inboxes at no charge', text: 'No charge per inbox. Resend includes 3 and charges $1 a month for each one after that.', source: read(RESEND, 'Every plan includes 3 inboxes. Paid plans can enable pay-as-you-go to add more at $1 per inbox per month') },
+      { short: 'Marketing without a contact plan', text: `No contact plan for marketing. Resend’s Pro marketing is ${money(resendMarketing.plans[1]!.tiers[0]!.cents)} a month at ${formatCount(resendMarketing.plans[1]!.tiers[0]!.size)} contacts.`, source: resendMarketing.plans[1]!.tiers[0]!.source },
     ],
   },
 }
