@@ -1396,12 +1396,13 @@ export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, held: 
   const receipt = await queueEmail(runtime, db, a, snapshot);
   return { emailId: receipt.id, snapshot };
 }
-/** An agent (API key or MCP) read or saved this draft: anyone with it open sees it for two minutes (src/campaign-room.ts).
- *  In the background, only where rooms exist (the Worker), and only for a campaign that can still be edited. People are
- *  in the room through their own socket. */
-function agentVisit(c: Ctx, a: Actor, campaign: typeof campaigns.$inferSelect) {
+/** An agent (API key or MCP) read or saved this draft: anyone with it open sees it for two minutes (src/campaign-room.ts),
+ *  and a save (saved: its revision) shows on their pages at once, with the agent's name. In the background, only where
+ *  rooms exist (the Worker), and only for a campaign that can still be edited. People are in the room through their own
+ *  socket, and their tab tells it they saved. */
+function agentVisit(c: Ctx, a: Actor, campaign: typeof campaigns.$inferSelect, saved?: number) {
   if (!c.env.campaignRooms || !(a.credential === 'apiKey' || a.credential === 'mcp' || a.credential === 'agentToken') || campaign.archivedAt || !campaignEditable(campaign)) return;
-  c.env.campaignRooms.visit(roomName(a.workspaceId, campaign.id), a.keyId, runtime => import('./ritual-version.js').then(({ credentialName }) => credentialName(runtime.db, a)));
+  c.env.campaignRooms.visit(roomName(a.workspaceId, campaign.id), a.keyId, runtime => import('./ritual-version.js').then(({ credentialName }) => credentialName(runtime.db, a)), saved);
 }
 function editable(row: typeof campaigns.$inferSelect, revision?: number) {
   if (row.archivedAt) throw new ApiError(409, 'CAMPAIGN_ARCHIVED', 'Restore this campaign before editing, reviewing or sending it.');
@@ -1838,7 +1839,7 @@ export function registerSending(app: App) {
       if (!revised.rows.length) throw new ApiError(409, 'CAMPAIGN_LOCKED', 'The campaign changed while it was being saved; fetch it and try again.');
       return (await findCampaign(db, a, campaignId))!;
     });
-    agentVisit(c, a, row);
+    agentVisit(c, a, row, row.revision);
     return c.json(Campaign.parse((await campaignViews(c.env, a, [row]))[0]!), 200);
   });
   app.openapi(createRoute({ method: 'patch', path: '/v1/campaigns/{id}/archive', operationId: 'setCampaignArchived', description: 'Archive a campaign to hide it from default lists, or restore it. Preserves its content, revision, delivery state and history. Preparing, scheduled, sending or paused campaigns must finish or be canceled before archiving. Archived campaigns cannot be edited, tested or sent until restored.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(CampaignArchive) }, responses: { 200: response(Campaign), ...errors } }), async c => {

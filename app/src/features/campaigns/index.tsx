@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNod
 import { useQueryClient } from '@tanstack/react-query'
 import { Check, ChevronRight, MoreHorizontal } from 'lucide-react'
 import { Link, Navigate, useLocation, useNavigate, useParams, useSearchParams } from 'react-router'
-import { useApiDef, useApiMutation, useApiQuery, useRegion, useApi, useWorkspaceAccess } from '../../data/context'
+import { useApiDef, useApiMutation, useApiQuery, useRegion, useApi, useSession, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { priceUc, total, usd } from '../../data/billing'
 import { invalidate, useRefreshListsOnChange } from '../../data/invalidation'
@@ -43,7 +43,7 @@ import { usePhone } from '../../lib/media'
 import { useLeaveGuard } from '../../lib/leave-guard'
 import { emailIsValid, replyToAddresses, replyToError } from './reply-to'
 import { mergeCampaign, mergeFieldsText, type MergeField } from './merge'
-import { CampaignPresence, useCampaignPresence } from './presence'
+import { announceSave, CampaignPresence, useCampaignPresence, type Save } from './presence'
 import { PresenceOverlay } from './presence-overlay'
 
 // {{placeholders}} the campaign uses; email always resolves, everything else needs a contact value or a fallback.
@@ -157,6 +157,8 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
   // but the form no longer lists (after a merge), so no saved message refers to an image it doesn't attach.
   const seenAttachments = useRef(new Set(initial?.attachments ?? []))
   const rememberAttachments = (version: Campaign) => { for (const id of version.attachments ?? []) seenAttachments.current.add(id) }
+  // Who made the saves the room announced, by revision, until that version reaches this page.
+  const authors = useRef(new Map<number, Save['by']>())
   const [loadingLatest, setLoadingLatest] = useState(false)
   const refreshController = useRef<AbortController | null>(null)
   const [preparing, setPreparing] = useState(false)
@@ -236,6 +238,10 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
     if (busyRef.current) queueRemote(next)
     else if (!dirtyRef.current) applyRemote(next)
     else if (!rebase(next)) queueRemote(next)
+    // The newest announced save this version includes names who made it, once.
+    const revision = next.revision ?? 1, made = [...authors.current].filter(([at]) => at <= revision).sort(([a], [b]) => b - a)[0]
+    for (const [at] of authors.current) if (at <= revision) authors.current.delete(at)
+    if (made) toast(`${made[1].name} saved this ${thing}`, 'info')
   }
   // Someone else saved while this person has unsaved edits. Where only they changed a field, theirs lands; where only
   // this person did, the edit stays; where both did, `prefer` decides. Without one, nothing lands and the fields both
@@ -261,6 +267,9 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
   }
   const sync = useCampaignSync(accepted, receiveRemote)
   const { present, room } = useCampaignPresence(accepted?.id, 'write')
+  // Someone else saved: read it now instead of at the next poll, and say who once it lands (receiveRemote).
+  const self = room.self
+  useEffect(() => room.onSave(save => { if (save.by.id !== self) authors.current.set(save.revision, save.by); sync.checkNow() }), [room.onSave, sync.checkNow, self])
   const current = remote ?? accepted
   const unavailable = Boolean(sync.error && 'status' in sync.error && [401, 403, 404].includes(Number(sync.error.status)))
   const readOnly = unavailable || Boolean(current && (current.archivedAt || !campaignEditable(current)))
@@ -352,6 +361,7 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
       acceptedRef.current = saved
       bodySaved.current = bodyVersion
       staleRetries.current = 0
+      announceSave(saved.id, saved.revision)
       setAccepted(saved)
       dirtyRef.current = changedWhileSaving
       setDirty(changedWhileSaving)
@@ -614,7 +624,7 @@ async function saveChange(api: ReturnType<typeof useApi>, campaign: Campaign, ch
 
 function useCampaignCache() {
   const cache = useQueryClient()
-  return (next: Campaign) => { cache.setQueryData(['nightmail', 'campaign', next.id], next); void cache.invalidateQueries({ queryKey: ['nightmail', 'campaigns'], refetchType: 'none' }) }
+  return (next: Campaign) => { cache.setQueryData(['nightmail', 'campaign', next.id], next); void cache.invalidateQueries({ queryKey: ['nightmail', 'campaigns'], refetchType: 'none' }); announceSave(next.id, next.revision) }
 }
 
 function ScheduledBanner({ campaign }: { campaign: Campaign }) {
@@ -834,7 +844,7 @@ function CampaignReview({ campaign, stats, stale, refreshing, refresh }: { campa
 
   const draft = !campaign.archivedAt && campaignEditable(campaign)
   // Review joins the draft's room too: someone still writing sees you here, and you see them.
-  const { present } = useCampaignPresence(draft ? campaign.id : null, 'review')
+  const { present, room } = useCampaignPresence(draft ? campaign.id : null, 'review')
   const readinessError = campaignReadinessError(campaign)
   const fallbacks = campaign.draft?.defaults ?? {}
   const keys = placeholders(campaign.subject, campaign.previewText, campaign.html)
@@ -853,6 +863,10 @@ function CampaignReview({ campaign, stats, stale, refreshing, refresh }: { campa
   const paceLine = [pace.limit && `${number(perDay)} per day`, `${pace.share.trim()}% speed`, !multiTenant && (pace.autoPause ? 'auto-pause on' : 'auto-pause off')].filter(Boolean).join(' · ')
   const paceSummary = (input: SendCampaignInput | null) => !input?.pacing ? '' : `${input.pacing.perDay ? ` Sends to up to ${number(input.pacing.perDay)} recipients per day${paceDays ? ` (about ${paceDays} ${paceDays === 1 ? 'day' : 'days'})` : ''}.` : ''}${input.pacing.rateShare != null && input.pacing.rateShare < 1 ? ` Uses at most ${Math.round(input.pacing.rateShare * 100)}% of your sending speed.` : ''}${input.pacing.autoPause === false ? ' Auto-pause on high bounces or complaints is off.' : ''}`
   const toast = useToast()
+  // A save made elsewhere (Write, another Review, an agent) shows here at once, with who made it.
+  const self = room.self, reload = useRef(refresh)
+  reload.current = refresh
+  useEffect(() => room.onSave(save => { reload.current(); if (save.by.id !== self) toast(`${save.by.name} saved this ${thing}`, 'info') }), [room.onSave, self, thing, toast])
   const sendMutation = useApiMutation((api, input: SendCampaignInput) => api.campaigns.send(input), undefined, false, invalidate.campaignSend)
   // Every campaign footer carries the workspace's postal address, so Send and Schedule ask for it first when it is
   // missing, then go on: to the confirmation, or straight to sending when the API asked after it was confirmed.
