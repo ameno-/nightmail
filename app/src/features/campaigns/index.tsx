@@ -532,10 +532,12 @@ async function saveChange(api: ReturnType<typeof useApi>, campaign: Campaign, ch
   catch (cause) {
     if (!(cause instanceof ApiError && cause.code === 'STALE_CAMPAIGN_REVISION')) throw cause
     // Review is where the message is approved: a save here never brings in a change this page didn't show. When anything
-    // of theirs would be taken, the stale-revision error stands, as does Send's until the page is read again.
+    // of theirs would be taken, or their message differs by a single byte (the merge compares messages as the composer
+    // reads them, which evens some changes out, such as a link it can't import), the stale-revision error stands, as
+    // does Send's until the page is read again.
     const base = campaignInput(campaign), latest = campaignInput(await api.campaigns.get(campaign.id))
     const { input, conflicts, taken } = mergeCampaign(base, mine, latest, false, 'mine')
-    if (conflicts.length || taken.size || String(latest.attachments ?? []) !== String(base.attachments ?? [])) throw cause
+    if (conflicts.length || taken.size || latest.html !== base.html || String(latest.attachments ?? []) !== String(base.attachments ?? [])) throw cause
     return api.campaigns.save(input)
   }
 }
