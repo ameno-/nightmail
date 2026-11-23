@@ -31168,6 +31168,52 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       }finally{runtime.webhookFetch=transport;}
     });
   });
+  // tear/workspace-isolation witness BUG-ISO-03: createInboundWebhook and updateInboundWebhook stored another workspace's address IDs.
+  // Another workspace's receiving address, an ID nobody has, and this workspace's own address with a webhook limited to it.
+  async function addressIsolation({ runtime, db, local }: Parameters<Parameters<typeof simulatedSesFixture>[1]>[0]) {
+    const wid = runtime.config.workspaceId, other = unique('other-workspace'), theirs = unique('mbx'), nobodys = unique('mbx'), address = `box@${other}.invalid`;
+    await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)', [other]);
+    await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,$3,$4,'active')", [theirs, other, address.split('@')[1], REGION]);
+    await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES($1,$2,$1,$3,'inbox','forever')", [theirs, other, address]);
+    const ours = ok(await local('POST', '/v1/inboxes', { type: 'sandbox' }), 201).id as string, url = 'https://example.com/hooks/isolation';
+    const hook = ok(await local('POST', '/v1/inbound/webhooks', { url, addressIds: [ours] }), 201);
+    return { wid, other, theirs, nobodys, ours, url, hook, path: `/v1/inbound/webhooks/${hook.id}` };
+  }
+  test('an inbound webhook may name only addresses of its own workspace: an ID of another workspace is refused like one nobody has', async t => {
+    await simulatedSesFixture(t, async fixture => {
+      const { db, local } = fixture, { wid, theirs, nobodys, ours, url, path } = await addressIsolation(fixture);
+      const refused = (reply: Reply) => { const e = error(reply, 422, 'MAILBOX_NOT_FOUND'); return [e.code, e.message, e.field]; };
+      for (const ids of [[theirs], [ours, theirs]]) {
+        const unknown = ids.map(id => id === theirs ? nobodys : id);
+        assert.deepEqual(refused(await local('POST', '/v1/inbound/webhooks', { url, addressIds: ids })), refused(await local('POST', '/v1/inbound/webhooks', { url, addressIds: unknown })), ids.join());
+        assert.deepEqual(refused(await local('PATCH', path, { addressIds: ids })), refused(await local('PATCH', path, { addressIds: unknown })), ids.join());
+      }
+      assert.deepEqual(ok(await local('GET', path)).addressIds, [ours]);
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM mailbox_webhooks WHERE workspace_id=$1 AND (mailbox_ids ? $2 OR mailbox_ids ? $3)', [wid, theirs, nobodys])).rows[0].n, 0, 'Nothing was stored.');
+    });
+  });
+  test('an inbound webhook stored with an address of another workspace gets none of its mail and stays editable', async t => {
+    // A webhook stored before the check above (written here past the API) keeps the ID. The other workspace's events reach
+    // no webhook here, and the ID matches no address of this workspace, so the webhook gets none of this workspace's mail
+    // either. A webhook for every address is the control.
+    await simulatedSesFixture(t, async fixture => {
+      const { recordEvents } = await import('./src/mailbox-events.js');
+      const { runtime, db, local } = fixture, { wid, other, theirs, nobodys, ours, url, hook, path } = await addressIsolation(fixture);
+      await db.query('UPDATE mailbox_webhooks SET mailbox_ids=$2::jsonb WHERE id=$1', [hook.id, JSON.stringify([theirs])]);
+      const every = ok(await local('POST', '/v1/inbound/webhooks', { url: `${url}-every` }), 201);
+      const copies = async () => (await db.query('SELECT (SELECT count(*)::int FROM mailbox_webhook_deliveries WHERE webhook_id=$1) AS filtered, (SELECT count(*)::int FROM mailbox_webhook_deliveries WHERE webhook_id=$2) AS every', [hook.id, every.id])).rows[0];
+      await recordEvents(runtime.db, other, [{ type: 'message.received', mailboxId: theirs, data: {} }]);
+      assert.deepEqual(await copies(), { filtered: 0, every: 0 });
+      await recordEvents(runtime.db, wid, [{ type: 'message.received', mailboxId: ours, data: {} }]);
+      assert.deepEqual(await copies(), { filtered: 0, every: 1 });
+      // It is still read, listed and changed with the IDs it has, as is one whose address was since deleted.
+      assert.deepEqual(ok(await local('GET', path)).addressIds, [theirs]);
+      assert.ok(ok(await local('GET', '/v1/inbound/webhooks')).data.some((row: Json) => row.id === hook.id));
+      assert.deepEqual(ok(await local('PATCH', path, { description: 'Edited', addressIds: [theirs, ours] })).addressIds, [theirs, ours]);
+      await db.query('UPDATE mailbox_webhooks SET mailbox_ids=$2::jsonb WHERE id=$1', [hook.id, JSON.stringify([nobodys])]);
+      assert.deepEqual(ok(await local('PATCH', path, { description: 'Edited again', addressIds: [nobodys] })).addressIds, [nobodys]);
+    });
+  });
   test('a plain event subscription takes the delivery fence: paused after its claim, claimed stale or behind the breaker',async t=>{
     // tear/delivery witnesses: ingest m1 b, claim K m1:U, pause U, go K; ingest m1 b, claim K m1:U, expire m1:U,
     // run L m1:U, reply L 410, go K; three timeouts, then run K m1:U (the breaker defers, attempts kept).
