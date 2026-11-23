@@ -90,7 +90,7 @@
 /* Nightmail's name on the board: its wordmark, lit in the paper the homepage's machine lights it in. */
 .cb-mark { display: inline-block; flex: none; color: inherit; }
 .cb-mark-board { --logo-cap: 32px; margin-bottom: 6px; color: oklch(0.955 0.014 92); }
-.cb-mark-title { --logo-cap: .7em; width: calc(var(--logo-cap) * 10.8); height: var(--logo-cap); margin-inline-start: .02em; vertical-align: baseline; }
+.cb-mark-title { --logo-cap: .7em; width: calc(var(--logo-cap) * 10.72); height: var(--logo-cap); margin-inline-start: .02em; vertical-align: baseline; }
 /* A row of tiles, a flap a character: the size's small, the competitor's name a little bigger, the prices biggest. */
 .cb-flaps { display: inline-flex; gap: calc(var(--h) * .07); perspective: 600px; }
 .cb-small { --h: 30px; }
