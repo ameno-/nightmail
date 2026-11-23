@@ -364,7 +364,7 @@ const interactive = doc('Interactive and embedded content', `
   <details><summary style="cursor:pointer;font-weight:bold">Show shipping details</summary><p style="margin:6px 0">Ships in 2 business days.</p></details>
   ${label('Inline SVG with an image fallback after it')}
   <svg width="120" height="60" viewBox="0 0 120 60" xmlns="http://www.w3.org/2000/svg"><rect width="120" height="60" rx="8" fill="#22c55e"/><text x="60" y="36" font-size="16" text-anchor="middle" fill="#ffffff" font-family="Arial">SVG</text></svg>
-  <img src="${asset('brand/nightmail-monogram.svg')}" width="40" height="40" alt="SVG as img">
+  <img src="${asset('brand/nightmail-logo-1024-light.svg')}" width="40" height="40" alt="SVG as img">
   ${label('Video with poster, then audio and iframe')}
   <video width="320" height="168" poster="${heroImage}" controls><source src="https://example.com/clip.mp4" type="video/mp4"><a href="https://example.com/clip"><img src="${heroImage}" width="320" alt="Play video"></a></video>
   <audio controls src="https://example.com/sound.mp3">Audio fallback text.</audio>

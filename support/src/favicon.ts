@@ -1,9 +1,10 @@
-// The brand's tile in a browser tab, for this Worker's own pages (the page an old confirm link opens). They are
-// on their own origin, so the Worker serves the icon itself: the same drawing as the dashboard's app/public/favicon.svg
-// and favicon-dark.svg (docs/brand.md: keep them the same), ink for a browser's pale theme and paper for its dark one.
-const OUTLINE = 'M40 0H280C302 0 320 18 320 40V280C320 302 302 320 280 320H40C18 320 0 302 0 280V40C0 18 18 0 40 0ZM30 220H70V140L110 220H170V180L190 220H230L250 180V220H290V100H250L210 180L170 100H130V180L90 100H30V220Z';
-const tile = (fill: string) => `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 320 320"><path fill="${fill}" d="${OUTLINE}"/></svg>`;
-const FILES: Record<string, string> = { '/favicon.svg': tile('#0A0B0F'), '/favicon-dark.svg': tile('#F4F2EC') };
+// The brand's tab icon, for this Worker's own pages (the page an old confirm link opens). They are on their own origin,
+// so the Worker serves the icon itself: the same files as the dashboard's app/public/favicon.svg and favicon-dark.svg
+// (made by app/scripts/brand-assets.mjs; docs/brand.md: keep them the same), the stamp's crescent on a rounded tile, a
+// paper moon on ink for a browser's pale theme and an ink moon on paper for its dark one.
+const MOON = 'M666.1,265.1c121.8,104 136.2,287 32.2,408.9c-104,121.8 -287,136.2 -408.9,32.2c-29.4,-25.1 -52.6,-54.9 -69.3,-87.2c108.1,33 230.3,1.4 308.4,-90c78.1,-91.4 90.1,-217.1 40.6,-318.7c34.6,11.5 67.6,29.7 97,54.8z';
+const icon = (tile: string, moon: string) => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16" role="img" aria-label="Nightmail"><rect width="16" height="16" rx="3" fill="${tile}"/><path fill="${moon}" transform="translate(-1.611 -1.591) scale(0.019455)" d="${MOON}"/></svg>`;
+const FILES: Record<string, string> = { '/favicon.svg': icon('#0a0a0a', '#fafafa'), '/favicon-dark.svg': icon('#fafafa', '#0a0a0a') };
 
 /** For a page's head. (Its policy must let it load an image from this origin: img-src 'self'.) */
 export const FAVICON_LINKS = '<link rel="icon" type="image/svg+xml" href="/favicon.svg" media="(prefers-color-scheme: light)"><link rel="icon" type="image/svg+xml" href="/favicon-dark.svg" media="(prefers-color-scheme: dark)">';
