@@ -17,24 +17,23 @@ try {
   const browser = await chromium.launch({ channel: 'chrome' })
   mkdirSync('public/og', { recursive: true })
   for (const page of PRICE_PAGES) {
-    // A comparison: its headline and its whole board, centred, with the wall around them. The calculator: its top.
-    const board = page.path.startsWith('/compare/'), width = board ? 1600 : 1440
+    // Each page's headline and its whole board, centred, with the wall around them.
+    const width = 1800
     const probe = await browser.newPage({ viewport: { width, height: 1100 } })
     await probe.goto(origin + page.path, { waitUntil: 'networkidle' })
     await probe.evaluate(() => document.fonts.ready)
     await probe.waitForTimeout(4500)
-    let clip = { x: 0, y: 0, width, height: Math.round(width * H / W) }
-    if (board) {
-      const title = await probe.locator('.cb-title').boundingBox(), face = await probe.locator('.cb-board').boundingBox()
-      const top = title.y - 44, height = face.y + face.height + 32 - top, w = Math.round(height * W / H)
-      clip = { x: Math.round((width - w) / 2), y: Math.round(top), width: w, height: Math.round(height) }
-    }
+    const title = await probe.locator('.cb-title').boundingBox(), face = await probe.locator('.cb-board').boundingBox()
+    const top = title.y - 44, height = face.y + face.height + 32 - top, w = Math.round(height * W / H)
+    const clip = { x: Math.round((width - w) / 2), y: Math.round(top), width: w, height: Math.round(height) }
     await probe.close()
     // (Drawn at the scale that makes the clip 1200 px wide.)
     const shot = await browser.newPage({ viewport: { width, height: 1100 }, deviceScaleFactor: W / clip.width })
     await shot.goto(origin + page.path, { waitUntil: 'networkidle' })
     await shot.evaluate(() => document.fonts.ready)
     await shot.waitForTimeout(4500)
+    // (Without what the dev server adds over the page, such as the UI notes' button.)
+    await shot.evaluate(() => { for (const el of document.querySelectorAll('body *')) if (getComputedStyle(el).position === 'fixed' && !el.closest('.price-page')) el.style.display = 'none' })
     await shot.screenshot({ path: `public/${page.card.file}`, clip, type: 'jpeg', quality: 86 })
     await shot.close()
     const slug = page.card.file.slice(3).replace(/-[^-]+\.jpg$/, '')

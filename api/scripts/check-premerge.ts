@@ -294,13 +294,12 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
   ]
   const script = [
     "import { createElement as h, Fragment } from 'react'", "import { renderToStaticMarkup } from 'react-dom/server'", "import { MemoryRouter } from 'react-router'",
-    "const content = await import('./src/features/pricing/content.tsx'), prices = await import('./src/features/pricing/prices.ts')",
+    "const scene = await import('./src/features/pricing/scene.tsx'), prices = await import('./src/features/pricing/prices.ts')",
     'const at = (path, element) => renderToStaticMarkup(h(MemoryRouter, { initialEntries: [path] }, element))',
-    `const calculator = ${JSON.stringify(inputs)}.map(input => { const path = '/pricing?' + new URLSearchParams(input); return { input, path, html: at(path, h(content.Calculator)) } })`,
-    // Each comparison's page (board.tsx: the board and the page's end, whose Sources has its small print), and every
+    `const calculator = ${JSON.stringify(inputs)}.map(input => { const path = '/pricing?' + new URLSearchParams(input); return { input, path, html: at(path, h(scene.Scene, {})) } })`,
+    // Each comparison's page (scene.tsx: the board in its hall, and the page's end, whose Sources has its small print), and every
     // size its fader can reach, with the competitor's price there.
-    "const board = await import('./src/features/pricing/board.tsx')",
-    "const boards = Object.entries(prices.comparisons).map(([id, c]) => ({ id, html: at('/compare/' + id, h(Fragment, null, h(board.ComparisonBoard, { comparison: c }), h(board.BoardEnd, { comparison: c }))) }))",
+        "const boards = Object.entries(prices.comparisons).map(([id, c]) => ({ id, html: at('/compare/' + id, h(Fragment, null, h(scene.Scene, { comparison: c }), h(scene.BoardEnd, { comparison: c }))) }))",
     "const reach = Object.entries(prices.comparisons).map(([id, c]) => ({ id, sizes: prices.reachable(c).map(size => { const u = c.use(size), t = prices.theirPrice(c.offer, u); return { size, sent: u.sent, received: u.received, theirs: t ? t.cents : null } }) }))",
     'const { OFFERS, comparisons, resendOverage, resendReceived } = prices',
     "process.stdout.write(JSON.stringify({ calculator, boards, reach, data: { OFFERS, comparisons, resendOverage, resendReceived } }, (_k, v) => typeof v === 'bigint' ? String(v) : v))",

@@ -112,10 +112,11 @@ class Drums {
 const reducedMotion = () => typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
 
 /** A row of tiles: `text` padded to `width` (at its end with `end`), so nothing changes size. It opens blank and
- *  settles (`settle`), or opens on its text; a new `text` turns the tiles that change, with their sound, and a new
- *  `refresh` turns every one, as if the board were sent its message again. Styled by board.css (.fl). */
-export const FlapRow = memo(function FlapRow({ text, width, end, className, size = 'small', x = [0, 1], row = 0, settle, refresh }: {
-  text: string; width: number; end?: boolean; className: string; size?: Size; x?: [number, number]; row?: number; settle?: boolean; refresh?: number }) {
+ *  settles (`settle`; heard only with `sound`, when the reader brought this board up), or opens on its text; a new
+ *  `text` turns the tiles that change, with their sound, and a new `refresh` turns every one, as if the board were sent
+ *  its message again. Styled by board.css (.fl). */
+export const FlapRow = memo(function FlapRow({ text, width, end, className, size = 'small', x = [0, 1], row = 0, settle, refresh, sound }: {
+  text: string; width: number; end?: boolean; className: string; size?: Size; x?: [number, number]; row?: number; settle?: boolean; refresh?: number; sound?: boolean }) {
   const chars = useMemo(() => (end ? text.padStart(width) : text.padEnd(width)).toUpperCase().split(''), [text, width, end])
   const ref = useRef<HTMLSpanElement>(null), drums = useRef<Drums | null>(null), opened = useRef(false), refreshed = useRef(refresh)
   // (The tiles are drawn once, as they open; after that the drums own what they show.)
@@ -126,7 +127,7 @@ export const FlapRow = memo(function FlapRow({ text, width, end, className, size
     return () => board.dispose()
   }, [first]) // eslint-disable-line react-hooks/exhaustive-deps
   useLayoutEffect(() => {
-    drums.current!.aim(chars, opened.current ? 'change' : 'settle', opened.current, reducedMotion())
+    drums.current!.aim(chars, opened.current ? 'change' : 'settle', opened.current || !!sound, reducedMotion())
     opened.current = true
   }, [chars])
   useEffect(() => {
