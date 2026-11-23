@@ -2827,7 +2827,8 @@ async function captureStep(runtime: Runtime, a: Actor, row: RunRow, jobId: strin
   if (screenState?.template && screenState.template.spam >= runtime.config.screen!.threshold) return campaignRejected(runtime, a, row, screenState);
 
   const review = { draft: row.reviewDraft!, rendered: row.reviewRendered! };
-  const draft = readyCampaign(review.draft);
+  const draft = review.draft;
+  if (!draft.audience || !draft.from || !draft.subject) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The frozen campaign draft is incomplete.');
   const propertyKeys = placeholderKeys(draft, review.rendered);
   const messageStatic = ![draft.subject, review.rendered.html, review.rendered.text].some(value => value?.includes('{{'));
 
