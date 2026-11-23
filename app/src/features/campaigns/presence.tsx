@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import { useEffect, useMemo, useReducer, useRef, useState, type CSSProperties } from 'react'
 import { Bot } from 'lucide-react'
 import { Tooltip } from '../../components/ui'
 import { useSession } from '../../data/context'
@@ -20,10 +20,13 @@ const AGENT_MS = 120_000, PING_MS = 30_000, READMIT = 4000, AGENT = 'An agent'
 const RETRY_MAX_MS = 30_000, RETRIES = 8
 // A tab that leaves and comes straight back (Write to Review) stays on screen instead of blinking out.
 const LEAVE_MS = 1500
-/** A person's colour, the same in every browser: one of the eight in presence.css. */
-export const presenceColor = (id: string) => { let hash = 0; for (const char of id) hash = (hash * 31 + char.charCodeAt(0)) >>> 0; return hash % 8 }
+/** A person's colour, the same in every browser, for their face, pointer and highlights. Flat, and white text reads on each. */
+export const PRESENCE_COLORS = ['#d13f45', '#1f6fd1', '#23855a', '#8a4fc4', '#c43d8e', '#c25a12', '#0f7d8a', '#5d5fc9']
+export const presenceColor = (id: string) => { let hash = 0; for (const char of id) hash = (hash * 31 + char.charCodeAt(0)) >>> 0; return hash % PRESENCE_COLORS.length }
+/** The room as presence-overlay.tsx uses it: the people by slot, and binary frames each way. */
+export type Room = { people: ReadonlyMap<number, Present & { slot: number }>; send: (frame: Uint8Array<ArrayBuffer>) => void; listen: (receive: (frame: Uint8Array) => void) => () => void; joins: number }
 
-export function useCampaignPresence(campaignId: string | null | undefined, view: Person['view']): Present[] {
+export function useCampaignPresence(campaignId: string | null | undefined, view: Person['view']): { present: Present[]; room: Room } {
   const identity = useSession()?.identity
   const enabled = Boolean(campaignId && identity?.presence)
   // By slot. A slot is reused once free, so a delayed leave removes only the person who left (the same object).
@@ -32,24 +35,27 @@ export function useCampaignPresence(campaignId: string | null | undefined, view:
   const [self, setSelf] = useState<string | null>(null)
   const [agents, setAgents] = useState<ReadonlyMap<string, Agent>>(new Map())
   const [now, setNow] = useState(() => Date.now())
+  const socket = useRef<WebSocket | null>(null), listeners = useRef(new Set<(frame: Uint8Array) => void>()), [joins, joined] = useReducer((n: number) => n + 1, 0)
   useEffect(() => {
     if (!enabled || !campaignId) return
-    let socket: WebSocket | null = null, stopped = false, failures = 0, resting = false
+    let stopped = false, failures = 0, resting = false
     let retry: ReturnType<typeof setTimeout> | undefined, ping: ReturnType<typeof setInterval> | undefined
     const leaving = new Set<ReturnType<typeof setTimeout>>()
     const connect = () => {
-      const ws = socket = new WebSocket(socketUrl(`/v1/campaigns/${encodeURIComponent(campaignId)}/room`, { view }))
+      const ws = socket.current = new WebSocket(socketUrl(`/v1/campaigns/${encodeURIComponent(campaignId)}/room`, { view }))
+      ws.binaryType = 'arraybuffer'
       ws.onopen = () => { failures = 0; resting = false; ping = setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.send('ping') }, PING_MS) }
       ws.onmessage = ({ data }) => {
+        if (data instanceof ArrayBuffer) { const frame = new Uint8Array(data); for (const receive of listeners.current) receive(frame); return }
         if (typeof data !== 'string' || data === 'pong') return
         let message: { type?: string; self?: string; peers?: (Person | Agent)[]; peer?: Person | Agent; slot?: number }
         try { message = JSON.parse(data) } catch { return }
         const { peer } = message
         if (message.type === 'hello') {
           setSelf(message.self ?? null)
-          people.current = new Map((message.peers ?? []).filter((item): item is Person => item.kind === 'person').map(item => [item.slot, item])); changed()
+          people.current = new Map((message.peers ?? []).filter((item): item is Person => item.kind === 'person').map(item => [item.slot, item])); changed(); joined()
           setAgents(new Map((message.peers ?? []).filter((item): item is Agent => item.kind === 'agent').map(item => [item.id, { ...item, at: Date.now() - Math.max(0, item.ago ?? 0) }])))
-        } else if (message.type === 'join' && peer?.kind === 'person') { people.current.set(peer.slot, peer); changed() }
+        } else if (message.type === 'join' && peer?.kind === 'person') { people.current.set(peer.slot, peer); changed(); joined() }
         else if (message.type === 'agent' && peer?.kind === 'agent') { setAgents(map => new Map(map).set(peer.id, { ...peer, at: Date.now() })); setNow(Date.now()) }
         else if (message.type === 'leave' && typeof message.slot === 'number') {
           const slot = message.slot, gone = people.current.get(slot)
@@ -74,7 +80,7 @@ export function useCampaignPresence(campaignId: string | null | undefined, view:
     return () => {
       stopped = true; clearTimeout(retry); clearInterval(ping); leaving.forEach(clearTimeout)
       document.removeEventListener('visibilitychange', wake); window.removeEventListener('online', wake); window.removeEventListener('focus', wake)
-      socket?.close(1000)
+      socket.current?.close(1000); socket.current = null
       people.current = new Map(); changed(); setAgents(new Map())
     }
   }, [enabled, campaignId, view])
@@ -99,8 +105,11 @@ export function useCampaignPresence(campaignId: string | null | undefined, view:
     const all = [...byPerson.values(), ...present], here = new Set(all.map(item => item.kind + item.id))
     for (const key of arrival.current.keys()) if (!here.has(key)) arrival.current.delete(key)
     for (const key of here) if (!arrival.current.has(key)) arrival.current.set(key, next.current++)
-    return all.sort((a, b) => arrival.current.get(a.kind + a.id)! - arrival.current.get(b.kind + b.id)!)
-  }, [version, agents, now, self])
+    // Other people's tabs by slot (not your own other tabs), for the pointers and highlights.
+    const slots = new Map([...people.current.values()].filter(person => person.id !== self).map(person => [person.slot, { id: person.id, kind: 'person' as const, name: person.name, view: person.view, color: presenceColor(person.id), slot: person.slot }]))
+    const room: Room = { people: slots, joins, send: frame => { const ws = socket.current; if (ws?.readyState === WebSocket.OPEN && slots.size) ws.send(frame) }, listen: receive => { listeners.current.add(receive); return () => { listeners.current.delete(receive) } } }
+    return { present: all.sort((a, b) => arrival.current.get(a.kind + a.id)! - arrival.current.get(b.kind + b.id)!), room }
+  }, [version, agents, now, self, joins])
 }
 
 /** Faces of the people and agents also in this campaign: three and then a count on a wide screen. Where the bar is
@@ -119,7 +128,7 @@ export function CampaignPresence({ present, room }: { present: Present[]; room: 
   if (!present.length) return reserve ? <div className="campaign-presence" data-reserve aria-hidden="true" /> : null
   const describe = (item: Present) => item.kind === 'agent' ? item.name === AGENT ? AGENT : `${item.name} · agent` : item.view === 'review' ? `${item.name} · on Review` : item.name
   const face = (item: Present, others = 0) => <Tooltip key={item.kind + item.id} content={others ? present.map(describe).join(', ') : describe(item)}>
-    <span className="campaign-presence__face" data-kind={item.kind} data-color={item.color} aria-hidden="true">{item.kind === 'agent' ? <Bot size={14} strokeWidth={2.25} /> : initials(item.name)}{others > 0 && <span className="campaign-presence__count">+{others}</span>}</span>
+    <span className="campaign-presence__face" data-kind={item.kind} style={item.kind === 'person' ? { '--presence-color': PRESENCE_COLORS[item.color] } as CSSProperties : undefined} aria-hidden="true">{item.kind === 'agent' ? <Bot size={14} strokeWidth={2.25} /> : initials(item.name)}{others > 0 && <span className="campaign-presence__count">+{others}</span>}</span>
   </Tooltip>
   const byKey = new Map(present.map(item => [item.kind + item.id, item])), rest = present.length - kept.filter(Boolean).length
   return <div className="campaign-presence" data-reserve={reserve || undefined} role="group" aria-label={`Also here: ${present.map(describe).join(', ')}`}>

@@ -44,6 +44,7 @@ import { useLeaveGuard } from '../../lib/leave-guard'
 import { emailIsValid, replyToAddresses, replyToError } from './reply-to'
 import { mergeCampaign, mergeFieldsText, type MergeField } from './merge'
 import { CampaignPresence, useCampaignPresence } from './presence'
+import { PresenceOverlay } from './presence-overlay'
 
 // {{placeholders}} the campaign uses; email always resolves, everything else needs a contact value or a fallback.
 const placeholderPattern = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/g
@@ -259,7 +260,7 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
     return taken
   }
   const sync = useCampaignSync(accepted, receiveRemote)
-  const present = useCampaignPresence(accepted?.id, 'write')
+  const { present, room } = useCampaignPresence(accepted?.id, 'write')
   const current = remote ?? accepted
   const unavailable = Boolean(sync.error && 'status' in sync.error && [401, 403, 404].includes(Number(sync.error.status)))
   const readOnly = unavailable || Boolean(current && (current.archivedAt || !campaignEditable(current)))
@@ -428,6 +429,7 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
       </>}
     </>} />
     {options.isError && <ErrorState error={options.error} onRetry={() => options.refetch()} />}
+    <PresenceOverlay room={room} />
     <section className="campaign-compose-workspace" aria-label={issueOf ? 'Issue composer' : 'Campaign composer'}>
       <div className="campaign-compose-scroll">
         <div className="campaign-compose-sheet">
@@ -832,7 +834,7 @@ function CampaignReview({ campaign, stats, stale, refreshing, refresh }: { campa
 
   const draft = !campaign.archivedAt && campaignEditable(campaign)
   // Review joins the draft's room too: someone still writing sees you here, and you see them.
-  const present = useCampaignPresence(draft ? campaign.id : null, 'review')
+  const { present } = useCampaignPresence(draft ? campaign.id : null, 'review')
   const readinessError = campaignReadinessError(campaign)
   const fallbacks = campaign.draft?.defaults ?? {}
   const keys = placeholders(campaign.subject, campaign.previewText, campaign.html)

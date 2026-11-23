@@ -20,13 +20,20 @@ import { AGENT_PRESENCE_MS, ROOM_PEER_HEADER, ROOM_READMIT, type RoomAgent, type
 //   { v: 1, type: 'agent', peer }         an agent read or saved the campaign
 // What a person sees of others: names, never user IDs (keys are per room), and an agent's name only if they may see
 // API keys and MCP clients in Settings (owners and admins); everyone else sees "An agent".
-// Browser → room: 'ping' about every 30 s, answered 'pong' by the runtime without waking the room. Nothing else yet:
-// any other frame closes the socket.
+// Browser → room: 'ping' about every 30 s, answered 'pong' by the runtime without waking the room, and while anyone else
+// is here, binary frames of 1 to 15 bytes, at most 60 a second (more are dropped): [kind][big-endian u16 …]. The room
+// sends each one on to everyone else at once, after the sender's slot: [slot][kind][…]. Kinds (presence-overlay.tsx):
+//   1 pointer at x, y: x in 1/16384 of the sheet's width from its left edge, y in px from its top, both + 32768
+//   4 pointer gone
+//   2 selection: block, from, to (0xffff: none)   3 field (0xffff: none)
+// Any other frame closes the socket.
 type Slotted = RoomPerson & { slot: number };
 type Visit = { id: string; name: string };
-const MAX_SOCKETS = 50, MAX_PER_PERSON = 5, AGENT = 'An agent';
+const MAX_SOCKETS = 50, MAX_PER_PERSON = 5, AGENT = 'An agent', MAX_FRAME = 15, FRAMES_PER_SECOND = 60;
 
 export class CampaignRoom extends DurableObject<Env> {
+  // Frames each socket sent in the current second; reset when the room hibernates, which is when nobody is sending.
+  private rate = new Map<WebSocket, { second: number; frames: number }>();
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'));
@@ -78,10 +85,23 @@ export class CampaignRoom extends DurableObject<Env> {
     return true;
   }
 
-  override async webSocketMessage(ws: WebSocket) { ws.close(1003, 'Unsupported message'); }
+  override async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
+    const peer = ws.deserializeAttachment() as Slotted | null;
+    const bytes = typeof message === 'string' ? null : new Uint8Array(message);
+    if (!peer || !bytes || !bytes.length || bytes.length > MAX_FRAME || bytes[0]! < 1 || bytes[0]! > 4) { ws.close(1003, 'Unsupported message'); return; }
+    // A sender past its admission joins again before anyone hears from it.
+    const now = Date.now();
+    if (peer.until <= now) { ws.close(ROOM_READMIT, 'Join again'); return; }
+    const second = Math.floor(now / 1000), rate = this.rate.get(ws);
+    if (rate?.second === second) { if (++rate.frames > FRAMES_PER_SECOND) return; } else this.rate.set(ws, { second, frames: 1 });
+    const framed = new Uint8Array(bytes.length + 1);
+    framed[0] = peer.slot; framed.set(bytes, 1);
+    for (const item of this.sockets(now)) if (item.ws !== ws) try { item.ws.send(framed); } catch { /* closing */ }
+  }
   override async webSocketClose(ws: WebSocket) { this.left(ws); }
   override async webSocketError(ws: WebSocket) { this.left(ws); }
   private left(ws: WebSocket) {
+    this.rate.delete(ws);
     const peer = ws.deserializeAttachment() as Slotted | null;
     const rest = this.sockets().filter(item => item.ws !== ws);
     if (peer) for (const item of rest) this.send(item.ws, { type: 'leave', slot: peer.slot });
