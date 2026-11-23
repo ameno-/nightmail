@@ -1,7 +1,7 @@
 SET LOCAL lock_timeout='2s';
 
 -- Maintain exact unread count on inbox_state so inbox_view() never scans mailbox_messages.
--- Existing rows stay NULL until migration 410 backfills them; inbox_view() falls back to the
+-- Existing rows stay NULL until migration 418 backfills them; inbox_view() falls back to the
 -- live count while unread IS NULL so an inbox never shows a wrong zero during rollout.
 ALTER TABLE inbox_state ADD COLUMN IF NOT EXISTS unread integer;
 
@@ -220,7 +220,7 @@ BEGIN
  RETURN n;
 END $$;
 
--- Batched backfill helper for migration 410: locks 50 inbox_state rows FOR UPDATE in inbox_id order
+-- Batched backfill helper for migration 418: locks 50 inbox_state rows FOR UPDATE in inbox_id order
 -- in statement 1, then counts mailbox_messages in statement 2 whose READ COMMITTED snapshot is taken
 -- AFTER all 50 locks are held (so concurrent reads and deliveries cannot be missed).
 CREATE OR REPLACE FUNCTION inbox_unread_backfill_page(after text) RETURNS text LANGUAGE plpgsql AS $$
