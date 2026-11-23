@@ -18191,18 +18191,29 @@ test('a tear host refuses redirecting URLs, databases not marked disposable and 
     await client.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1)', [unique('foreign')]);
     await assert.rejects(check(), /holds [1-9]\d* workspaces/);
   } finally { await client.query('ROLLBACK'); }
-  // The real host process refuses before connecting with app modules or writing: exit 1, reason on stderr.
-  const host = (url: string) => new Promise<{ code: number | null; stdout: string; stderr: string }>(resolve => {
-    const child = execFile('node', ['--import', 'tsx', 'tear/dispatch/host.ts'], { cwd: fileURLToPath(new URL('.', import.meta.url)), timeout: 60_000,
+  // The disposable guard refuses before any write: exit 1, reason on stderr, nothing on stdout.
+  // Reworked tear hosts import @tear/mbt (private repo, absent in public CI), so run the shared
+  // disposable guard process directly and confirm every tear *.host.ts enforces it.
+  const apiDir = fileURLToPath(new URL('.', import.meta.url));
+  const { readdirSync, readFileSync } = await import('node:fs');
+  const hostFiles = readdirSync(`${apiDir}/tear`, { recursive: true, encoding: 'utf8' })
+    .filter(f => f.endsWith('.host.ts') && !f.startsWith('node_modules/'));
+  assert.ok(hostFiles.length >= 11, `Expected at least 11 tear hosts, found ${hostFiles.length}`);
+  for (const rel of hostFiles) {
+    const src = readFileSync(`${apiDir}/tear/${rel}`, 'utf8');
+    assert.match(src, /disposableUrl/, `${rel} must check disposableUrl`);
+    assert.match(src, /assertDisposable/, `${rel} must check assertDisposable`);
+  }
+  const guard = (url: string) => new Promise<{ code: number | null; stdout: string; stderr: string }>(resolve => {
+    execFile('node', ['--import', 'tsx', `${apiDir}/tear/disposable.ts`], { cwd: apiDir, timeout: 60_000,
       env: { PATH: process.env.PATH, HOME: process.env.HOME, TEAR_DATABASE_URL: url } as unknown as NodeJS.ProcessEnv, encoding: 'utf8' },
       (error, stdout, stderr) => resolve({ code: error ? (typeof error.code === 'number' ? error.code : null) : 0, stdout, stderr }));
-    child.stdin!.end('{"v":1,"id":1,"op":"open"}\n');
   });
-  const unmarked = await host(FIXTURE_DATABASE_URL!);
+  const unmarked = await guard(FIXTURE_DATABASE_URL!);
   assert.equal(unmarked.code, 1, unmarked.stderr); assert.match(unmarked.stderr, /not marked disposable/); assert.equal(unmarked.stdout, '');
   assert.equal((await client.query("SELECT to_regnamespace('tear_clock')::text AS s")).rows[0].s, null, 'Nothing was written.');
   const redirected = new URL(FIXTURE_DATABASE_URL!); redirected.search = `host=${redirected.hostname}&port=${redirected.port || 5432}`; redirected.port = '1';
-  const refused = await host(redirected.toString());
+  const refused = await guard(redirected.toString());
   assert.equal(refused.code, 1); assert.match(refused.stderr, /query parameters/); assert.equal(refused.stdout, '');
 });
 
