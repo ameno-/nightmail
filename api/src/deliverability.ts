@@ -490,16 +490,27 @@ export async function audienceHealth(db: DbExecutor, wid: string, listId?: strin
   const all = listId ? null : (await views(sql`''`, sql`audience_contacts c WHERE c.workspace_id = ${wid} AND c.deleted_at IS NULL`)).get('') ?? empty();
   // Imports: each committed import's contacts, now. Suppressions after the import stand for its bounces and complaints:
   // the outcome of first mailing that list (Nightmail does not record which send first reached each imported contact).
+  // Reads up to 2,000 opaque contact IDs saved at commit (sample_contact_ids, zero PII) so support diagnosis stays
+  // fast even after raw CSV rows are scrubbed; falls back to legacy i.rows (capped at 2,000) until backfilled.
   const { rows: imports } = await db.execute<{ id: string; list_id: string | null; list_name: string | null; created_at: string; imported: number; errors: number; matched: number; hard_bounced: number; complained: number; unsubscribed: number }>(sql`WITH i AS (
-      SELECT id, workspace_id, list_id, created_at, imported, errors, rows FROM audience_imports
+      SELECT id, workspace_id, list_id, created_at, imported, errors, rows, sample_contact_ids FROM audience_imports
       WHERE workspace_id = ${wid} AND status = 'committed' AND created_at >= now() - interval '90 days' ${listId ? sql`AND list_id = ${listId}` : sql``} ORDER BY created_at DESC LIMIT 10
     ) SELECT i.id, i.list_id,
       (SELECT name FROM audience_lists l WHERE l.workspace_id = i.workspace_id AND l.id = i.list_id) AS list_name, i.created_at::text, i.imported, jsonb_array_length(i.errors)::int AS errors,
       count(c.id)::int AS matched, count(*) FILTER (WHERE c.suppression_reason = 'hard_bounce' AND c.suppressed_at >= i.created_at)::int AS hard_bounced,
       count(*) FILTER (WHERE c.suppression_reason = 'complaint' AND c.suppressed_at >= i.created_at)::int AS complained,
       count(*) FILTER (WHERE c.marketing_consent = 'unsubscribed')::int AS unsubscribed
-    FROM i LEFT JOIN LATERAL (SELECT r->>'email' AS email FROM jsonb_array_elements(i.rows) r LIMIT 50000) x ON true
-      LEFT JOIN audience_contacts c ON c.workspace_id = i.workspace_id AND c.email = lower(x.email)
+    FROM i LEFT JOIN LATERAL (
+      SELECT c.id, c.suppression_reason, c.suppressed_at, c.marketing_consent
+      FROM unnest(i.sample_contact_ids) AS s(contact_id)
+      JOIN audience_contacts c ON c.workspace_id = i.workspace_id AND c.id = s.contact_id
+      WHERE i.sample_contact_ids IS NOT NULL
+      UNION ALL
+      SELECT c.id, c.suppression_reason, c.suppressed_at, c.marketing_consent
+      FROM (SELECT r->>'email' AS email FROM jsonb_array_elements(i.rows) r LIMIT 2000) x
+      JOIN audience_contacts c ON c.workspace_id = i.workspace_id AND c.email = lower(x.email)
+      WHERE i.sample_contact_ids IS NULL
+    ) c ON true
     GROUP BY i.id, i.workspace_id, i.list_id, i.created_at, i.imported, i.errors ORDER BY i.created_at DESC`);
   const importViews = imports.map(i => ({ id: i.id, listId: i.list_id, listName: i.list_name, at: new Date(i.created_at).toISOString(), imported: i.imported, errors: i.errors, contacts: i.matched,
     hardBounce: rate(i.hard_bounced, i.matched), complaint: rate(i.complained, i.matched), unsubscribed: i.unsubscribed }));

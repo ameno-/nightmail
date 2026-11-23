@@ -2013,6 +2013,14 @@
           "imported": {
             "type": "integer"
           },
+          "rowsRetained": {
+            "type": "boolean",
+            "description": "false once committed row payloads are no longer kept after the retention window (rows is then [] while imported keeps the count)."
+          },
+          "errorsRetained": {
+            "type": "boolean",
+            "description": "false once per-row error details are no longer kept after the retention window (errors is then [])."
+          },
           "createdAt": {
             "type": "string"
           },
@@ -2028,6 +2036,8 @@
           "rows",
           "errors",
           "imported",
+          "rowsRetained",
+          "errorsRetained",
           "createdAt",
           "updatedAt"
         ]
@@ -24476,6 +24486,14 @@
                           "imported": {
                             "type": "integer"
                           },
+                          "rowsRetained": {
+                            "type": "boolean",
+                            "description": "false once committed row payloads are no longer kept after the retention window (rows is then [] while imported keeps the count)."
+                          },
+                          "errorsRetained": {
+                            "type": "boolean",
+                            "description": "false once per-row error details are no longer kept after the retention window (errors is then [])."
+                          },
                           "createdAt": {
                             "type": "string"
                           },
@@ -24489,6 +24507,8 @@
                           "listId",
                           "status",
                           "imported",
+                          "rowsRetained",
+                          "errorsRetained",
                           "createdAt",
                           "updatedAt"
                         ]
@@ -24647,6 +24667,7 @@
             "secureDashboardSession": []
           }
         ],
+        "description": "Read one import preview or committed import report. Committed row payloads are retained briefly after commit (rowsRetained is false and rows is [] once scrubbed; imported keeps the count); per-row errors are retained longer (errorsRetained is false once scrubbed).",
         "parameters": [
           {
             "schema": {
