@@ -101,7 +101,7 @@ export const mailMessageIds = pgTable('mail_message_ids', {
 
 export const mailUnrouted = pgTable('mail_unrouted', {
   ...scope(), messageId: text('message_id').notNull(), address: text('address').notNull(), createdAt: ts('created_at').notNull().defaultNow(),
-}, t => [primaryKey({ columns: [t.workspaceId, t.address, t.messageId] }), index('mail_unrouted_message').on(t.messageId)]);
+}, t => [primaryKey({ columns: [t.workspaceId, t.address, t.messageId] }), index('mail_unrouted_message').on(t.messageId), index('mail_unrouted_created_at').on(t.createdAt)]);
 
 export const mailboxMessages = pgTable('mailbox_messages', {
   heldReason:text('held_reason'),

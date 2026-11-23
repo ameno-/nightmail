@@ -727,7 +727,7 @@ async function measure(browser, job, fx) {
         await page.locator('.flow-panel').getByRole('button', { name: 'Edit', exact: true }).click({ timeout: 20_000 });
         await routeEditor.locator('#routing-action').waitFor({ timeout: 20_000 });
       };
-      const store = async () => { await routeEditor.locator('#routing-action').click(); await page.getByRole('option', { name: 'Stored, no inbox' }).click(); await routeEditor.getByRole('button', { name: 'Save' }).click(); };
+      const store = async () => { await routeEditor.locator('#routing-action').click(); await page.getByRole('option', { name: 'Stored 30 days, no inbox' }).click(); await routeEditor.getByRole('button', { name: 'Save' }).click(); };
       await openEditor();
       await api(`/v1/routing/routes/${wild.id}`, 'PATCH', { to: 'drop' });
       await store();

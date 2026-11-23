@@ -11706,7 +11706,7 @@
               "create_address",
               "store"
             ],
-            "description": "For an unknown recipient, create_address creates a receiving address; store keeps the message as unrouted."
+            "description": "For an unknown recipient, create_address creates a receiving address; store keeps the message as unrouted for 30 days."
           },
           "dns": {
             "type": "array",
@@ -12146,7 +12146,7 @@
               "create_address",
               "store"
             ],
-            "description": "For an unknown recipient, store keeps the message as unrouted (default); create_address creates a receiving address."
+            "description": "For an unknown recipient, store keeps the message as unrouted for 30 days (default); create_address creates a receiving address."
           },
           "metadata": {
             "type": "object",
@@ -12177,7 +12177,7 @@
               "create_address",
               "store"
             ],
-            "description": "For an unknown recipient, store keeps the message as unrouted (default); create_address creates a receiving address."
+            "description": "For an unknown recipient, store keeps the message as unrouted for 30 days (default); create_address creates a receiving address."
           },
           "metadata": {
             "type": "object",
@@ -12316,7 +12316,7 @@
               "store"
             ],
             "default": "store",
-            "description": "For an unknown recipient, store keeps the message as unrouted (default); create_address creates a receiving address."
+            "description": "For an unknown recipient, store keeps the message as unrouted for 30 days (default); create_address creates a receiving address."
           },
           "metadata": {
             "type": "object",
@@ -58316,7 +58316,7 @@
         "operationId": "createInboundAddress",
         "deprecated": true,
         "summary": "Create a receivable address",
-        "description": "Admin only. The domain must be verified for this workspace; mail arrives once its receiving MX record is active. Permanent addresses claim earlier unrouted mail for their address or rules; temporary addresses start empty. Expiry stops new delivery and sending without deleting history.",
+        "description": "Admin only. The domain must be verified for this workspace; mail arrives once its receiving MX record is active. Permanent addresses claim earlier unrouted mail (kept 30 days) for their address or rules; temporary addresses start empty. Expiry stops new delivery and sending without deleting history.",
         "requestBody": {
           "required": true,
           "content": {
