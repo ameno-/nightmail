@@ -2766,7 +2766,7 @@ async function prepareStaticStamp(
   validateInterpolationTemplate(rendered.text, false);
   await validateHtmlUrls(rendered.html);
   // Build once with a longest-shape valid recipient address (254 bytes) to verify SendInput, headers and MIME sizeCheck.
-  const longestValid = `${'a'.repeat(64)}@${'b'.repeat(63)}.${'c'.repeat(63)}.${'d'.repeat(58)}.com`;
+  const longestValid = `${'a'.repeat(64)}@${'b'.repeat(63)}.${'c'.repeat(63)}.${'d'.repeat(57)}.com`;
   const staticSnapshot = await campaignMessage(runtime, draft, { id: 'static', email: longestValid, properties: {} }, false, lockedAttachments, rendered, true, true, reviewVersion);
   const baseHash = await digest(canonical({ ...staticSnapshot, to: [] }));
   const withFooter = { ...staticSnapshot, headers: [...staticSnapshot.headers] };
@@ -2828,7 +2828,9 @@ async function captureStep(runtime: Runtime, a: Actor, row: RunRow, jobId: strin
 
   const review = { draft: row.reviewDraft!, rendered: row.reviewRendered! };
   const draft = review.draft;
-  if (!draft.audience || !draft.from || !draft.subject) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The frozen campaign draft is incomplete.');
+  const parsedAudience = AudienceSpec.safeParse(draft.audience);
+  if (!parsedAudience.success || !draft.from || !draft.subject) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The frozen campaign draft is incomplete.');
+  const audienceSpec = parsedAudience.data;
   const propertyKeys = placeholderKeys(draft, review.rendered);
   const messageStatic = ![draft.subject, review.rendered.html, review.rendered.text].some(value => value?.includes('{{'));
 
@@ -2856,7 +2858,7 @@ async function captureStep(runtime: Runtime, a: Actor, row: RunRow, jobId: strin
   try {
     await runtime.db.transaction(async tx => {
       await tx.execute(sql`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`);
-      const counts = await audienceMod.snapshotCampaignAudience(tx, a, draft.audience, row.reviewId!, propertyKeys, draft.requiredNotice === true, {
+      const counts = await audienceMod.snapshotCampaignAudience(tx, a, audienceSpec, row.reviewId!, propertyKeys, draft.requiredNotice === true, {
         large: true,
         staticStamp,
         onProgress: async progress => {
