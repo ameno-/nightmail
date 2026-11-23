@@ -305,7 +305,7 @@ export function registerSupportDeliverability(app: App, meta: Meta, WorkspaceFil
   const AudienceView = z.object({ contacts: z.number().describe('Exact count when sampled is false; number of contacts in the sample (estimate basis, not total audience size) when sampled is true.'), subscribed: z.number(), unknown: z.number(), unsubscribed: z.number(), suppressed: z.number(), suppressedBy: z.record(z.string(), z.number()),
     clicked30: z.number(), clicked90: z.number(), clicked180: z.number(), stale: z.number().describe('Observed for more than 180 days with no open or click.'), neverObserved: z.number(),
     role: z.number().describe('info@, sales@ and other role addresses.'), freeMail: z.number(), typoDomains: z.number().describe('gmial.com, hotmial.com, gmail.co…'), providers: z.record(z.string(), z.number()),
-    sampled: z.boolean().describe('true when this scope exceeded the sample cap (up to 50,000 contacts): all counts and shares in this view are estimates from the sample and must be presented as estimates, never exact totals.'),
+    sampled: z.boolean().describe('true when this scope exceeded the sample cap (up to 10,000 contacts): all counts and shares in this view are estimates from the sample and must be presented as estimates, never exact totals.'),
     sampleSize: z.number().int().nullable().describe('Number of contacts sampled when sampled is true; null when exact.'),
     shares: z.object({ stale: Rate.describe('stale / observed contacts'), role: Rate, freeMail: Rate }) });
   const Audience = z.object({

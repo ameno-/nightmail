@@ -466,24 +466,29 @@ const audienceMeasures = sql`count(*)::int AS contacts,
   count(*) FILTER (WHERE c.observed_since IS NULL)::int AS "neverObserved",
   count(*) FILTER (WHERE ${local} = ANY(${texts(ROLE)}))::int AS role, count(*) FILTER (WHERE ${cdomain} = ANY(${texts(FREE)}))::int AS "freeMail",
   count(*) FILTER (WHERE ${cdomain} = ANY(${texts(TYPOS)}))::int AS "typoDomains"`;
-const AUDIENCE_HEALTH_SAMPLE_LIMIT = 50_000, AUDIENCE_HEALTH_LIST_TOTAL_BUDGET = 100_000;
+const AUDIENCE_HEALTH_SAMPLE_LIMIT = 10_000, AUDIENCE_HEALTH_LIST_TOTAL_BUDGET = 40_000;
 type AudienceRow = { contacts: number; subscribed: number; unknown: number; unsubscribed: number; suppressed: number; clicked30: number; clicked90: number; clicked180: number; stale: number; neverObserved: number; role: number; freeMail: number; typoDomains: number };
 type AudienceViewResult = AudienceRow & { sampled: boolean; sampleSize: number | null; suppressedBy: Record<string, number>; providers: Record<string, number>; shares: { stale: Rate; role: Rate; freeMail: Rate } };
 /** Counts per list (the 20 largest, or one) and for the whole audience, imports of the last 90 days; never an address. */
 export async function audienceHealth(db: DbExecutor, wid: string, listId?: string) {
-  // Single-pass CTE per scope (core measures + suppression reasons + providers in one query) capped at sampleLimit
-  // rows so a 2M-contact workspace stays well inside supportRead's 3 s budget. When a scope exceeds sampleLimit,
-  // sampled=true and sampleSize=sampleLimit mark every count and share as an estimate, never an exact total.
-  const views = async (sourceCte: SQL, sampleLimit: number): Promise<Map<string, AudienceViewResult>> => {
-    const { rows } = await db.execute<AudienceRow & { g: string; raw_n: number; reasons: Array<{ reason: string; n: number }>; providers: Array<{ provider: Provider; n: number }> }>(sql`
-      WITH raw AS MATERIALIZED (${sourceCte}),
-      numbered AS (
-        SELECT g, email, marketing_consent, suppressed, suppression_reason, last_open_at, last_click_at, observed_since,
-          row_number() OVER (PARTITION BY g) AS rn
-        FROM raw
+  // Pick up to sampleLimit + 1 contact IDs per group uniformly by hashtextextended(id, 0) via Index-Only Scan
+  // (avoiding both time-ordered UUIDv7 skew and random-IO blowup inside LATERAL), fetch distinct contacts once,
+  // and compute core measures + suppression reasons + providers in one pass. Scopes exceeding sampleLimit mark
+  // sampled=true and sampleSize=contacts so callers present every count and share as an estimate, never an exact total.
+  const views = async (pickedCte: SQL, sampleLimit: number): Promise<Map<string, AudienceViewResult>> => {
+    const { rows } = await db.execute<AudienceRow & { g: string; picked_n: number; reasons: Array<{ reason: string; n: number }>; providers: Array<{ provider: Provider; n: number }> }>(sql`
+      WITH picked AS MATERIALIZED (${pickedCte}),
+      overflow AS (SELECT g, count(*)::int AS picked_n FROM picked GROUP BY g),
+      kept AS (SELECT g, contact_id FROM picked WHERE rn <= ${sampleLimit}),
+      fetched AS MATERIALIZED (
+        SELECT c.id, c.email, c.marketing_consent, c.suppressed, c.suppression_reason, c.last_open_at, c.last_click_at, c.observed_since
+        FROM audience_contacts c
+        WHERE c.workspace_id = ${wid} AND c.id = ANY(ARRAY(SELECT DISTINCT contact_id FROM kept)) AND c.deleted_at IS NULL
       ),
-      overflow AS (SELECT g, count(*)::int AS raw_n FROM numbered GROUP BY g),
-      c AS MATERIALIZED (SELECT * FROM numbered WHERE rn <= ${sampleLimit}),
+      c AS MATERIALIZED (
+        SELECT k.g, f.email, f.marketing_consent, f.suppressed, f.suppression_reason, f.last_open_at, f.last_click_at, f.observed_since
+        FROM kept k JOIN fetched f ON f.id = k.contact_id
+      ),
       measures AS (SELECT g, ${audienceMeasures} FROM c GROUP BY g),
       reasons AS (
         SELECT g, jsonb_agg(jsonb_build_object('reason', reason, 'n', n) ORDER BY n DESC, reason) AS reasons
@@ -500,11 +505,11 @@ export async function audienceHealth(db: DbExecutor, wid: string, listId?: strin
           FROM (SELECT g, ${cdomain} AS domain, count(*) AS n FROM c GROUP BY 1, 2) x GROUP BY 1, 2
         ) p GROUP BY g
       )
-      SELECT m.*, o.raw_n, coalesce(r.reasons, '[]'::jsonb) AS reasons, coalesce(p.providers, '[]'::jsonb) AS providers
+      SELECT m.*, o.picked_n, coalesce(r.reasons, '[]'::jsonb) AS reasons, coalesce(p.providers, '[]'::jsonb) AS providers
       FROM measures m JOIN overflow o USING (g) LEFT JOIN reasons r USING (g) LEFT JOIN providers p USING (g)`);
-    return new Map(rows.map(({ g, raw_n, reasons, providers, ...counts }) => {
-      const sampled = raw_n > sampleLimit;
-      return [g, { ...counts, sampled, sampleSize: sampled ? sampleLimit : null,
+    return new Map(rows.map(({ g, picked_n, reasons, providers, ...counts }) => {
+      const sampled = picked_n > sampleLimit;
+      return [g, { ...counts, sampled, sampleSize: sampled ? counts.contacts : null,
         suppressedBy: Object.fromEntries(reasons.map(r => [r.reason, r.n])),
         providers: Object.fromEntries(providers.map(p => [p.provider, p.n])),
         shares: { stale: rate(counts.stale, counts.contacts - counts.neverObserved), role: rate(counts.role, counts.contacts), freeMail: rate(counts.freeMail, counts.contacts) } }];
@@ -512,28 +517,32 @@ export async function audienceHealth(db: DbExecutor, wid: string, listId?: strin
   };
   const empty = (): AudienceViewResult => ({ contacts: 0, subscribed: 0, unknown: 0, unsubscribed: 0, suppressed: 0, clicked30: 0, clicked90: 0, clicked180: 0, stale: 0, neverObserved: 0, role: 0, freeMail: 0, typoDomains: 0,
     sampled: false, sampleSize: null, suppressedBy: {}, providers: {}, shares: { stale: rate(0, 0), role: rate(0, 0), freeMail: rate(0, 0) } });
-  // Use audience_list_counts when present (audience-scale); otherwise bound each list's sort probe at 50,001 rows.
+  // Use audience_list_counts when present (audience-scale); otherwise bound each list's sort probe at 10,001 rows.
   const hasListCounts = Boolean((await db.execute<{ t: string | null }>(sql`SELECT to_regclass('public.audience_list_counts')::text AS t`)).rows[0]?.t);
   const listSizeSql = hasListCounts
     ? sql`coalesce((SELECT sum(subscribed + unsubscribed + unknown + suppressed)::int FROM audience_list_counts n WHERE n.workspace_id = l.workspace_id AND n.list_id = l.id), 0)`
     : sql`(SELECT count(*)::int FROM (SELECT 1 FROM audience_list_members m WHERE m.workspace_id = l.workspace_id AND m.list_id = l.id LIMIT ${AUDIENCE_HEALTH_SAMPLE_LIMIT + 1}) x)`;
   const { rows: lists } = await db.execute<{ id: string; name: string; size: number }>(sql`SELECT l.id, l.name, ${listSizeSql} AS size
     FROM audience_lists l WHERE l.workspace_id = ${wid} ${listId ? sql`AND l.id = ${listId}` : sql``} ORDER BY size DESC, l.id LIMIT ${LIMITS.groups}`);
-  const perListLimit = lists.length ? Math.min(AUDIENCE_HEALTH_SAMPLE_LIMIT, Math.max(5_000, Math.floor(AUDIENCE_HEALTH_LIST_TOTAL_BUDGET / lists.length))) : AUDIENCE_HEALTH_SAMPLE_LIMIT;
+  const perListLimit = lists.length ? Math.min(AUDIENCE_HEALTH_SAMPLE_LIMIT, Math.max(2_000, Math.floor(AUDIENCE_HEALTH_LIST_TOTAL_BUDGET / lists.length))) : AUDIENCE_HEALTH_SAMPLE_LIMIT;
   const byList = lists.length ? await views(sql`
-    SELECT l.list_id AS g, c.email, c.marketing_consent, c.suppressed, c.suppression_reason, c.last_open_at, c.last_click_at, c.observed_since
+    SELECT l.list_id AS g, x.contact_id, x.rn
     FROM unnest(${texts(lists.map(l => l.id))}) AS l(list_id)
     CROSS JOIN LATERAL (
-      SELECT c.email, c.marketing_consent, c.suppressed, c.suppression_reason, c.last_open_at, c.last_click_at, c.observed_since
-      FROM audience_list_members m JOIN audience_contacts c ON c.workspace_id = m.workspace_id AND c.id = m.contact_id
-      WHERE m.workspace_id = ${wid} AND m.list_id = l.list_id AND c.deleted_at IS NULL
-      ORDER BY m.contact_id LIMIT ${perListLimit + 1}
-    ) c`, perListLimit) : new Map<string, AudienceViewResult>();
+      SELECT m.contact_id, row_number() OVER () AS rn
+      FROM (
+        SELECT m.contact_id FROM audience_list_members m
+        WHERE m.workspace_id = ${wid} AND m.list_id = l.list_id
+        ORDER BY hashtextextended(m.contact_id, 0) LIMIT ${perListLimit + 1}
+      ) m
+    ) x`, perListLimit) : new Map<string, AudienceViewResult>();
   const perList = lists.map(list => ({ id: list.id, name: list.name, ...byList.get(list.id) ?? empty() }));
   const all = listId ? null : (await views(sql`
-    SELECT ''::text AS g, c.email, c.marketing_consent, c.suppressed, c.suppression_reason, c.last_open_at, c.last_click_at, c.observed_since
-    FROM audience_contacts c WHERE c.workspace_id = ${wid} AND c.deleted_at IS NULL
-    ORDER BY c.id LIMIT ${AUDIENCE_HEALTH_SAMPLE_LIMIT + 1}`, AUDIENCE_HEALTH_SAMPLE_LIMIT)).get('') ?? empty();
+    SELECT ''::text AS g, x.id AS contact_id, row_number() OVER () AS rn
+    FROM (
+      SELECT id FROM audience_contacts WHERE workspace_id = ${wid}
+      ORDER BY hashtextextended(id, 0) LIMIT ${AUDIENCE_HEALTH_SAMPLE_LIMIT + 1}
+    ) x`, AUDIENCE_HEALTH_SAMPLE_LIMIT)).get('') ?? empty();
   // Imports: each committed import's contacts, now. Suppressions after the import stand for its bounces and complaints:
   // the outcome of first mailing that list (Nightmail does not record which send first reached each imported contact).
   // Reads up to 2,000 opaque contact IDs saved at commit (sample_contact_ids, zero PII) so support diagnosis stays
