@@ -375,6 +375,12 @@ async function settle(page, net) {
   }
 }
 const sharp = n => Math.round(n * 10000) / 10000;
+// A step that should ask first: whichever comes first, the question (asked) or the page going on without it (left). Both
+// can take seconds on a loaded runner, where a fixed 3 or 5 s wait read a slow question as none (Nov 23).
+const askedOrLeft = (question, left) => Promise.race([
+  question.waitFor({ timeout: 30_000 }).then(() => 'asked', () => 'neither'),
+  left.then(() => 'left', () => 'neither'),
+]);
 // The live view's long poll (features/inbound/live.ts) stays open while its page does; it never counts as loading.
 const LONG_POLL = '/v1/rules/version';
 let liveSaves = 0;
@@ -571,14 +577,22 @@ async function measure(browser, job, fx) {
       // Templates → Edit, after the measurement: Reply to keeps two typed addresses apart, and Back with an edit autosave
       // hasn't sent asks first, then Save and leave saves it (templates.tsx's leave guard).
       const replyTo = ['billing@example.invalid', 'ops@example.invalid'], subject = `Leave check ${Date.now()}`;
+      // Once the editor has loaded: before, Save and leave has nothing to save with and stays.
+      await page.locator('.composer-canvas:not(:has(.composer-starting))').waitFor({ timeout: 30_000 }).catch(() => problems.push('the template editor never finished loading'));
       await page.fill('#template-reply', '');
       await page.locator('#template-reply').pressSequentially(replyTo.join(', '));
       const typed = await page.inputValue('#template-reply');
       if (typed !== replyTo.join(', ')) problems.push(`Reply to turned "${replyTo.join(', ')}" into "${typed}"`);
-      await page.fill('#template-subject', subject);
-      await page.click('.ui-page-header a[href="/campaigns/templates"]');
-      const asked = await page.getByRole('dialog', { name: 'Leave without saving?' }).waitFor({ timeout: 5_000 }).then(() => true, () => false);
-      if (!asked) problems.push('Back with an unsaved template edit left without asking');
+      // The subject, then Back in the next frame. Autosave sends 800 ms after Reply to becomes valid, so separate
+      // Playwright steps on a loaded runner let it save everything first, and Back rightly left without asking.
+      await page.evaluate(value => new Promise(done => {
+        const input = document.querySelector('#template-subject');
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, value);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        requestAnimationFrame(() => { document.querySelector('.ui-page-header a[href="/campaigns/templates"]').click(); done(); });
+      }), subject);
+      const outcome = await askedOrLeft(page.getByRole('dialog', { name: 'Leave without saving?' }), page.waitForURL(url => url.pathname === '/campaigns/templates', { timeout: 30_000 }));
+      if (outcome !== 'asked') problems.push(outcome === 'left' ? 'Back with an unsaved template edit left without asking' : 'Back with an unsaved template edit neither asked nor left');
       else {
         await page.getByRole('button', { name: 'Save and leave' }).click();
         await page.waitForURL(url => url.pathname === '/campaigns/templates', { timeout: 20_000 }).catch(async () => problems.push(`Save and leave stayed on the template${await page.locator('[role=alert], [role=status]').allInnerTexts().then(texts => texts.filter(Boolean).length ? `: ${texts.filter(Boolean).join(' / ').slice(0, 160)}` : '', () => '')}`));
@@ -632,8 +646,10 @@ async function measure(browser, job, fx) {
         if (typed.startsWith('*') && !await dialog.getByRole('button', { name: 'Edit the catch-all' }).count()) problems.push('New address with * offers no way to the catch-all');
         await dialog.getByRole('button', { name: 'Cancel' }).click();
         // What was typed is a change: closing asks first.
-        await page.getByRole('button', { name: 'Discard', exact: true }).click({ timeout: 3_000 }).catch(() => problems.push('Cancel with an address typed closed New address without asking'));
-        await page.waitForTimeout(300);
+        const outcome = await askedOrLeft(page.getByRole('button', { name: 'Discard', exact: true }), page.locator('.builder').waitFor({ state: 'detached', timeout: 30_000 }));
+        if (outcome !== 'asked') problems.push(outcome === 'left' ? 'Cancel with an address typed closed New address without asking' : 'Cancel with an address typed neither asked nor closed');
+        else await page.getByRole('button', { name: 'Discard', exact: true }).click();
+        await page.locator('.builder').waitFor({ state: 'detached', timeout: 30_000 }).catch(() => problems.push('Discard left New address open'));
       }
       const edit = async () => { const clicked = await page.evaluate(() => { const button = [...document.querySelectorAll('.flow-panel button')].find(el => el.textContent.trim() === 'Edit'); button?.click(); return Boolean(button); }); if (clicked) await page.waitForSelector('.builder #builder-flow', { timeout: 10_000 }).catch(() => problems.push('Edit on the flow panel opened no builder for an address it can draw')); return clicked; };
       if (!await edit()) problems.push('no Edit on the flow panel');
@@ -646,9 +662,12 @@ async function measure(browser, job, fx) {
         if (await edit()) {
           await page.locator('.builder').getByRole('button', { name: 'Split with a rule' }).click();
           await page.locator('.builder').getByRole('button', { name: 'Cancel' }).click();
-          await page.getByRole('button', { name: 'Discard', exact: true }).click({ timeout: 3_000 }).catch(() => problems.push('Cancel after a change closed the builder without asking'));
-          await page.waitForTimeout(300);
-          if (await page.$('.builder')) problems.push('Discard left the builder open');
+          const outcome = await askedOrLeft(page.getByRole('button', { name: 'Discard', exact: true }), page.locator('.builder').waitFor({ state: 'detached', timeout: 30_000 }));
+          if (outcome !== 'asked') problems.push(outcome === 'left' ? 'Cancel after a change closed the builder without asking' : 'Cancel after a change neither asked nor closed the builder');
+          else {
+            await page.getByRole('button', { name: 'Discard', exact: true }).click();
+            await page.locator('.builder').waitFor({ state: 'detached', timeout: 30_000 }).catch(() => problems.push('Discard left the builder open'));
+          }
         }
       }
       page.off('request', onRequest);
@@ -833,8 +852,12 @@ try {
     console.log(`${elapsed().padStart(6)} ${flag} ${(r.device === 'phone' ? 'phone' : r.scheme).padEnd(5)} ${r.mode.padEnd(6)} ${r.page.padEnd(26)} ${String(r.cls).padEnd(7)}${r.longTask !== null ? ` ${r.longTask} ms` : ''}${r.error ? `  ${r.error}` : ''}`);
   };
   const shared = queue.filter(job => !job.alone), alone = queue.filter(job => job.alone);
+  // The live rule jobs each have an agent save the same rule, and every one of their pages hears every save: one at a
+  // time, so a page sees only its own save (two at once stacked a second toast that moved the first, Nov 23).
+  let live = Promise.resolve();
+  const turn = job => { if (!job.live) return run(job); const mine = live.then(() => run(job)); live = mine.catch(() => {}); return mine; };
   let next = 0;
-  await Promise.all(Array.from({ length: Math.min(workers, shared.length) }, async () => { while (next < shared.length) await run(shared[next++]); }));
+  await Promise.all(Array.from({ length: Math.min(workers, shared.length) }, async () => { while (next < shared.length) await turn(shared[next++]); }));
   for (const job of alone) await run(job);
 } finally {
   await browserPromise.then(b => b.close(), () => {});
