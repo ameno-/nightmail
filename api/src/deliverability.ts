@@ -482,10 +482,15 @@ export async function audienceHealth(db: DbExecutor, wid: string, listId?: strin
       kept AS MATERIALIZED (
         SELECT contact_id, array_agg(g) AS gs FROM picked WHERE rn <= ${sampleLimit} GROUP BY contact_id
       ),
+      -- LATERAL with LIMIT 1 keeps Postgres from flattening the join into a seq/hash scan of all contacts when stats are stale or large.
       fetched AS (
         SELECT k.gs, c.email, c.marketing_consent, c.suppressed, c.suppression_reason, c.last_open_at, c.last_click_at, c.observed_since
-        FROM kept k JOIN audience_contacts c ON c.workspace_id = ${wid} AND c.id = k.contact_id
-        WHERE c.deleted_at IS NULL
+        FROM kept k CROSS JOIN LATERAL (
+          SELECT c.email, c.marketing_consent, c.suppressed, c.suppression_reason, c.last_open_at, c.last_click_at, c.observed_since
+          FROM audience_contacts c
+          WHERE c.id = k.contact_id AND c.workspace_id = ${wid} AND c.deleted_at IS NULL
+          LIMIT 1
+        ) c
       ),
       c AS MATERIALIZED (
         SELECT g, email, marketing_consent, suppressed, suppression_reason, last_open_at, last_click_at, observed_since
