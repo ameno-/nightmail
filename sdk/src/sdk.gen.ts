@@ -4221,7 +4221,7 @@ export const simulateInboxMessage = <ThrowOnError extends boolean = false>(optio
 /**
  * List or wait for inbox messages
  *
- * Oldest first, in commit order. Without after, the page starts at the first message, so mail that arrived before the call is included. With wait, the call holds until a matching message arrives or the time runs out; pass the returned cursor as after on the next call. Junk, unverified and held mail never wake a waiter: list them with include=held. Each waited second counts as one request against the key’s per-minute budget.
+ * Oldest first, in commit order. Without after, the page starts at the first message, so mail that arrived before the call is included. With wait, the call holds until a matching message arrives or the time runs out; pass the returned cursor as after on the next call. Junk, unverified and held mail never wake a waiter: list them with include=held. Each waited second counts as one request against the key’s per-minute budget. Filtered queries: Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.
  */
 export const listInboxMessages = <ThrowOnError extends boolean = false>(options: Options<ListInboxMessagesData, ThrowOnError>): RequestResult<ListInboxMessagesResponses, ListInboxMessagesErrors, ThrowOnError> => (options.client ?? client).get<ListInboxMessagesResponses, ListInboxMessagesErrors, ThrowOnError>({
     security: [
