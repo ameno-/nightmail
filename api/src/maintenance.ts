@@ -207,7 +207,7 @@ async function retentionDrains(runtime: Runtime): Promise<Drain[]> {
         ORDER BY created_at DESC LIMIT 10 FOR UPDATE SKIP LOCKED
       ), updated AS (
         UPDATE audience_imports i SET sample_contact_ids = coalesce((
-          SELECT array_agg(c.id) FROM (SELECT r->>'email' AS email FROM jsonb_array_elements(i.rows) r LIMIT 2000) x
+          SELECT array_agg(c.id) FROM (SELECT r->>'email' AS email FROM jsonb_array_elements(i.rows) r ORDER BY hashtextextended(lower(r->>'email'), 0) LIMIT 2000) x
           JOIN audience_contacts c ON c.workspace_id = i.workspace_id AND c.email = lower(x.email)
         ), ARRAY[]::text[]) FROM due WHERE i.id = due.id RETURNING 1
       ) SELECT count(*)::int AS n FROM updated` },
