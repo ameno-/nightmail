@@ -479,15 +479,17 @@ export async function audienceHealth(db: DbExecutor, wid: string, listId?: strin
     const { rows } = await db.execute<AudienceRow & { g: string; picked_n: number; reasons: Array<{ reason: string; n: number }>; providers: Array<{ provider: Provider; n: number }> }>(sql`
       WITH picked AS MATERIALIZED (${pickedCte}),
       overflow AS (SELECT g, count(*)::int AS picked_n FROM picked GROUP BY g),
-      kept AS (SELECT g, contact_id FROM picked WHERE rn <= ${sampleLimit}),
-      fetched AS MATERIALIZED (
-        SELECT c.id, c.email, c.marketing_consent, c.suppressed, c.suppression_reason, c.last_open_at, c.last_click_at, c.observed_since
-        FROM audience_contacts c
-        WHERE c.workspace_id = ${wid} AND c.id = ANY(ARRAY(SELECT DISTINCT contact_id FROM kept)) AND c.deleted_at IS NULL
+      kept AS MATERIALIZED (
+        SELECT contact_id, array_agg(g) AS gs FROM picked WHERE rn <= ${sampleLimit} GROUP BY contact_id
+      ),
+      fetched AS (
+        SELECT k.gs, c.email, c.marketing_consent, c.suppressed, c.suppression_reason, c.last_open_at, c.last_click_at, c.observed_since
+        FROM kept k JOIN audience_contacts c ON c.workspace_id = ${wid} AND c.id = k.contact_id
+        WHERE c.deleted_at IS NULL
       ),
       c AS MATERIALIZED (
-        SELECT k.g, f.email, f.marketing_consent, f.suppressed, f.suppression_reason, f.last_open_at, f.last_click_at, f.observed_since
-        FROM kept k JOIN fetched f ON f.id = k.contact_id
+        SELECT g, email, marketing_consent, suppressed, suppression_reason, last_open_at, last_click_at, observed_since
+        FROM fetched, unnest(gs) AS g
       ),
       measures AS (SELECT g, ${audienceMeasures} FROM c GROUP BY g),
       reasons AS (
