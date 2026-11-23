@@ -1,10 +1,10 @@
 import { createRoute, z } from '@hono/zod-openapi';
-import { and, asc, eq, gt, inArray, isNull, sql, type SQL } from 'drizzle-orm';
+import { and, asc, eq, getTableColumns, gt, inArray, isNull, sql, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { actor, ApiError, AudienceSpec, unrestrictedRequired, errors, id, IdParams, json, notFound, page, PageQuery, response, security, type Actor, type App, type DbExecutor, type Runtime } from './core.js';
 import { productName } from './brand.js';
 export { AudienceSpec };
-import { contacts, consentAudit, imports, listMembers, lists, segments, type ImportError, type ImportRow, type SegmentRule } from './db/audience.js';
+import { contacts, consentAudit, imports, listCounts, listMembers, lists, segments, type ImportError, type ImportRow, type SegmentRule } from './db/audience.js';
 import { enqueue } from './jobs.js';
 import { mailAddress } from './outbound-content.js';
 
@@ -21,7 +21,7 @@ const ContactRead = Contact.extend({ listIds: z.array(z.string()) }).openapi('Co
 const ListCounts = z.object({ total: z.number().int(), subscribed: z.number().int(), unsubscribed: z.number().int(), unknown: z.number().int(), suppressed: z.number().int() }).describe('Active members only. Suppressed takes precedence over consent; subscribed, unsubscribed, unknown and suppressed are mutually exclusive and sum to total.');
 const ListRead = z.object({ ...List.shape, counts: ListCounts.nullable() }).strict().openapi('ContactListRead');
 const SearchQuery = PageQuery.extend({ search: z.string().trim().min(1).max(200).optional() });
-const ListQuery = SearchQuery.extend({ counts: z.enum(['true', 'false']).default('true').describe('false skips member counts (counts is null), for pickers that only need names. Counting scans every membership of each list.') }).openapi('ListContactListsQuery');
+const ListQuery = SearchQuery.extend({ counts: z.enum(['true', 'false']).default('true').describe('false leaves member counts out (counts is null). Counts are kept as memberships, consent and suppression change, so reading them does not count members.') }).openapi('ListContactListsQuery');
 const ContactQuery = SearchQuery.extend({ email: Email.optional().describe('Exact, case-insensitive email match. Uses the unique email index; prefer it over search for one address.'), consent: z.enum(['unknown', 'subscribed', 'unsubscribed']).optional(), suppressed: z.enum(['true', 'false']).optional(), listId: z.string().min(1).max(120).optional() }).openapi('ListContactsQuery');
 const RuleLeaf = z.union([z.object({ field: z.enum(['email', 'firstName', 'plan', 'country']), operator: z.enum(['eq', 'neq', 'contains']), value: z.string().max(200) }).strict(), z.object({ field: z.enum(['lastOpenAt', 'lastClickAt']), operator: z.enum(['within', 'inactive']), days: z.number().int().min(1).max(730) }).strict()]);
 // Finite-depth schemas remain fully representable in OpenAPI; no recursive lazy schema.
@@ -55,8 +55,12 @@ async function findSegment(db: DbExecutor, identity: Actor, segmentId: string) {
 
 // Literal substring search: %, _ and backslash have no wildcard meaning.
 function searchText(column: AnyPgColumn, search: string): SQL { return sql`strpos(lower(${column}), lower(${search})) > 0`; }
+// A search that is one complete address is that contact, through the unique email index. Any other search is a
+// substring of the email or name, which no index serves: it reads every contact of the workspace.
+const wholeAddress = (search: string | undefined) => { const address = Email.safeParse(search); return address.success ? address.data : undefined; };
 function contactFilters(identity: Actor, query: z.infer<typeof ContactQuery>) {
-  return [query.email ? eq(contacts.email, query.email) : undefined, query.search ? sql`(${searchText(contacts.email, query.search)} OR ${searchText(contacts.name, query.search)})` : undefined, query.consent ? eq(contacts.marketingConsent, query.consent) : undefined, query.suppressed !== undefined ? eq(contacts.suppressed, query.suppressed === 'true') : undefined, query.listId ? inList(identity, query.listId) : undefined];
+  const address = wholeAddress(query.search);
+  return [query.email ? eq(contacts.email, query.email) : undefined, address ? eq(contacts.email, address) : query.search ? sql`(${searchText(contacts.email, query.search)} OR ${searchText(contacts.name, query.search)})` : undefined, query.consent ? eq(contacts.marketingConsent, query.consent) : undefined, query.suppressed !== undefined ? eq(contacts.suppressed, query.suppressed === 'true') : undefined, query.listId ? inList(identity, query.listId) : undefined];
 }
 async function readContacts(db: DbExecutor, identity: Actor, rows: Array<typeof contacts.$inferSelect>) {
   if (!rows.length) return [];
@@ -65,11 +69,39 @@ async function readContacts(db: DbExecutor, identity: Actor, rows: Array<typeof 
   for (const member of memberships) { const ids = byContact.get(member.contactId) ?? []; ids.push(member.listId); byContact.set(member.contactId, ids); }
   return rows.map(row => ({ ...row, listIds: byContact.get(row.id) ?? [] }));
 }
+// A list this size or smaller is read through its own memberships whatever the filter: at most this many contact probes.
+const SMALL_LIST = 5000;
+/**
+ * One page of active contacts in ID order, a row past the limit when more follow. Three ways to the same rows:
+ * - One address (email, or a search that is a whole address): the unique email index, then the membership probe.
+ * - A list with no other filter, or a small list: the list's own memberships, whose key is in contact-ID order, each
+ *   joined to its contact. A page reads a page of memberships. Reading the workspace's contacts and probing each for
+ *   membership (below) read every contact when the list had fewer members than a page: 5 s at 2,000,000 contacts for
+ *   an empty list's page.
+ * - Otherwise the workspace's contacts in ID order, filtered, each probed for membership (inList).
+ */
+async function contactRows(db: DbExecutor, identity: Actor, query: z.infer<typeof ContactQuery>) {
+  const { listId } = query, filtered = !!query.search || !!query.consent || query.suppressed !== undefined;
+  const byMembership = !!listId && !query.email && !wholeAddress(query.search) && (!filtered
+    || !(await db.execute(sql`SELECT 1 FROM ${listMembers} WHERE ${scope(listMembers, identity)} AND ${listMembers.listId} = ${listId} OFFSET ${SMALL_LIST} LIMIT 1`)).rows.length);
+  if (byMembership) return db.select(getTableColumns(contacts)).from(listMembers).innerJoin(contacts, and(eq(contacts.workspaceId, listMembers.workspaceId), eq(contacts.id, listMembers.contactId)))
+    .where(and(scope(listMembers, identity), eq(listMembers.listId, listId), isNull(contacts.deletedAt), ...contactFilters(identity, { ...query, listId: undefined }), query.cursor ? gt(listMembers.contactId, query.cursor) : undefined))
+    .orderBy(asc(listMembers.contactId)).limit(query.limit + 1);
+  return db.select().from(contacts).where(and(scope(contacts, identity), isNull(contacts.deletedAt), ...contactFilters(identity, query), query.cursor ? gt(contacts.id, query.cursor) : undefined)).orderBy(asc(contacts.id)).limit(query.limit + 1);
+}
+// Counts are the sums of the list's rows in audience_list_counts, which the database keeps as memberships and contacts
+// change (migration 405): a few rows per list, however many members it has.
 async function readLists(db: DbExecutor, identity: Actor, rows: ListRow[]) {
   if (!rows.length) return [];
-  const totals = await db.select({ listId: listMembers.listId, total: sql<number>`count(*)::int`, subscribed: sql<number>`count(*) FILTER (WHERE NOT ${contacts.suppressed} AND ${contacts.marketingConsent} = 'subscribed')::int`, unsubscribed: sql<number>`count(*) FILTER (WHERE NOT ${contacts.suppressed} AND ${contacts.marketingConsent} = 'unsubscribed')::int`, unknown: sql<number>`count(*) FILTER (WHERE NOT ${contacts.suppressed} AND ${contacts.marketingConsent} = 'unknown')::int`, suppressed: sql<number>`count(*) FILTER (WHERE ${contacts.suppressed})::int` }).from(listMembers).innerJoin(contacts, and(eq(contacts.id, listMembers.contactId), eq(contacts.workspaceId, listMembers.workspaceId))).where(and(scope(listMembers, identity), scope(contacts, identity), isNull(contacts.deletedAt), inArray(listMembers.listId, rows.map(row => row.id)))).groupBy(listMembers.listId);
-  const byList = new Map(totals.map(({ listId, ...counts }) => [listId, counts]));
+  const sums = await db.select({ listId: listCounts.listId, subscribed: sql<number>`sum(${listCounts.subscribed})::int`, unsubscribed: sql<number>`sum(${listCounts.unsubscribed})::int`, unknown: sql<number>`sum(${listCounts.unknown})::int`, suppressed: sql<number>`sum(${listCounts.suppressed})::int` }).from(listCounts).where(and(scope(listCounts, identity), inArray(listCounts.listId, rows.map(row => row.id)))).groupBy(listCounts.listId);
+  const byList = new Map(sums.map(({ listId, ...counts }) => [listId, { total: counts.subscribed + counts.unsubscribed + counts.unknown + counts.suppressed, ...counts }]));
   return rows.map(row => ({ ...row, counts: byList.get(row.id) ?? { total: 0, subscribed: 0, unsubscribed: 0, unknown: 0, suppressed: 0 } }));
+}
+// A membership change reads its contact's state to count it (migration 405), so it locks the contact first, as an
+// import, a consent change and a deletion do: contact, then membership, several contacts in email order. Returns the
+// IDs that are active contacts.
+export async function lockContacts(tx: DbExecutor, identity: Pick<Actor, 'workspaceId'>, contactIds: string[]) {
+  return (await tx.select({ id: contacts.id }).from(contacts).where(and(scope(contacts, identity), inArray(contacts.id, contactIds), isNull(contacts.deletedAt))).orderBy(asc(contacts.email)).for('share')).map(row => row.id);
 }
 
 export function compileRule(rule: SegmentRule): SQL { return sql`coalesce((${compileRuleCondition(rule)}), false)`; }
@@ -264,11 +296,10 @@ function previewImport(input: z.infer<typeof ImportInput>) {
 }
 
 export function registerAudience(app: App) {
-  app.openapi(createRoute({ method: 'get', path: '/v1/contacts', operationId: 'listContacts', tags: ['Audience'], security, description: 'Active contacts with current list IDs. Search is a case-insensitive literal email/name substring. Consent and suppression filters are independent.', request: { query: ContactQuery }, responses: { 200: response(page(ContactRead)), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: '/v1/contacts', operationId: 'listContacts', tags: ['Audience'], security, description: 'Active contacts with current list IDs. A search that is one complete email address returns that contact (exact, any case). Any other search is a case-insensitive literal substring of the email or name. Consent and suppression filters are independent.', request: { query: ContactQuery }, responses: { 200: response(page(ContactRead)), ...errors } }), async c => {
     const identity = actor(c), query = c.req.valid('query');
     if (query.listId) await findList(c.env.db, identity, query.listId);
-    const rows = await c.env.db.select().from(contacts).where(and(scope(contacts, identity), isNull(contacts.deletedAt), ...contactFilters(identity, query), query.cursor ? gt(contacts.id, query.cursor) : undefined)).orderBy(asc(contacts.id)).limit(query.limit + 1);
-    const result = paginate(rows, query.limit);
+    const result = paginate(await contactRows(c.env.db, identity, query), query.limit);
     return c.json({ ...result, data: await readContacts(c.env.db, identity, result.data) }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/contacts', operationId: 'createContact', tags: ['Audience'], security, request: { body: json(ContactInput) }, responses: { 201: response(Contact), ...errors } }), async c => {
@@ -339,15 +370,15 @@ export function registerAudience(app: App) {
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/lists/{id}/members', operationId: 'listListMembers', tags: ['Audience'], security, request: { params: IdParams, query: ContactQuery.omit({ listId: true }) }, responses: { 200: response(page(ContactRead)), ...errors } }), async c => {
     const identity = actor(c), listId = c.req.valid('param').id, query = c.req.valid('query'); await findList(c.env.db, identity, listId);
-    const rows = await c.env.db.select().from(contacts).where(and(scope(contacts, identity), isNull(contacts.deletedAt), ...contactFilters(identity, { ...query, listId }), query.cursor ? gt(contacts.id, query.cursor) : undefined)).orderBy(asc(contacts.id)).limit(query.limit + 1);
-    const result = paginate(rows, query.limit); return c.json({ ...result, data: await readContacts(c.env.db, identity, result.data) }, 200);
+    const result = paginate(await contactRows(c.env.db, identity, { ...query, listId }), query.limit); return c.json({ ...result, data: await readContacts(c.env.db, identity, result.data) }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/lists/{id}/members', operationId: 'addListMembers', tags: ['Audience'], security, request: { params: IdParams, body: json(z.object({ contactIds: z.array(z.string().min(1).max(120)).min(1).max(100) }).strict()) }, responses: { 200: response(z.object({ added: z.number().int() })), ...errors } }), async c => {
     const identity = actor(c, 'manage'), listId = c.req.valid('param').id, contactIds = [...new Set(c.req.valid('json').contactIds)];
-    const added = await c.env.db.transaction(async tx => { const [list] = await tx.select().from(lists).where(and(scope(lists, identity), eq(lists.id, listId))).limit(1).for('update'); if (!list) notFound('List'); for (const contactId of contactIds) await findContact(tx, identity, contactId); const result = await tx.insert(listMembers).values(contactIds.map(contactId => ({ ...scopeValues(identity), listId, contactId }))).onConflictDoNothing().returning(); return result.length; }); return c.json({ added }, 200);
+    const added = await c.env.db.transaction(async tx => { const [list] = await tx.select().from(lists).where(and(scope(lists, identity), eq(lists.id, listId))).limit(1).for('update'); if (!list) notFound('List'); if ((await lockContacts(tx, identity, contactIds)).length !== contactIds.length) notFound('Contact'); const result = await tx.insert(listMembers).values(contactIds.map(contactId => ({ ...scopeValues(identity), listId, contactId }))).onConflictDoNothing().returning(); return result.length; }); return c.json({ added }, 200);
   });
   app.openapi(createRoute({ method: 'delete', path: '/v1/lists/{id}/members/{contactId}', operationId: 'removeListMember', tags: ['Audience'], security, request: { params: IdParams.extend({ contactId: z.string().min(1).max(120) }) }, responses: { 200: response(Deleted), ...errors } }), async c => {
-    const identity = actor(c, 'manage'), params = c.req.valid('param'); await findList(c.env.db, identity, params.id); await c.env.db.delete(listMembers).where(and(scope(listMembers, identity), eq(listMembers.listId, params.id), eq(listMembers.contactId, params.contactId))); return c.json({ id: params.contactId, deleted: true as const }, 200);
+    const identity = actor(c, 'manage'), params = c.req.valid('param'); await findList(c.env.db, identity, params.id);
+    await c.env.db.transaction(async tx => { await lockContacts(tx, identity, [params.contactId]); await tx.delete(listMembers).where(and(scope(listMembers, identity), eq(listMembers.listId, params.id), eq(listMembers.contactId, params.contactId))); }); return c.json({ id: params.contactId, deleted: true as const }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/segments', operationId: 'listSegments', tags: ['Audience'], security, request: { query: SearchQuery }, responses: { 200: response(page(Segment)), ...errors } }), async c => {
     const identity = actor(c), query = c.req.valid('query'); const rows = await c.env.db.select().from(segments).where(and(scope(segments, identity), query.search ? searchText(segments.name, query.search) : undefined, query.cursor ? gt(segments.id, query.cursor) : undefined)).orderBy(asc(segments.id)).limit(query.limit + 1); return c.json(paginate(rows, query.limit), 200);
@@ -382,7 +413,7 @@ export function registerAudience(app: App) {
       const [job] = await tx.select().from(imports).where(and(scope(imports, identity), eq(imports.id, importId))).limit(1).for('update'); if (!job) return notFound('Import'); if (job.status === 'committed') return { ...job, subscribed: 0 };
       // A share lock keeps the list from being changed or deleted mid-commit without serializing concurrent imports into it.
       if (job.listId) { const [list] = await tx.select().from(lists).where(and(scope(lists, identity), eq(lists.id, job.listId))).limit(1).for('share'); if (!list) notFound('List'); }
-      // One statement upserts every row and adds list memberships, however large the import. Rows travel as a
+      // One statement upserts every row, however large the import. Rows travel as a
       // single JSON parameter, so the Postgres bind-parameter limit does not cap the row count. Preview already
       // rejects duplicate emails within an import, and ORDER BY email gives overlapping concurrent imports one
       // lock order. Imported names are never null, so COALESCE keeps the stored name only when the import omits it.
@@ -396,12 +427,13 @@ export function registerAudience(app: App) {
           SELECT id, ${identity.workspaceId}, email, name, properties FROM incoming ORDER BY email
           ON CONFLICT ON CONSTRAINT audience_contacts_email_scope DO UPDATE SET name = coalesce(excluded.name, c.name), properties = c.properties || excluded.properties, deleted_at = NULL, updated_at = ${now}
           RETURNING c.id, c.email, c.properties
-        ), members AS (
-          INSERT INTO audience_list_members (workspace_id, list_id, contact_id)
-          SELECT ${identity.workspaceId}, ${job.listId}::text, id FROM upserted WHERE ${job.listId}::text IS NOT NULL
-          ON CONFLICT DO NOTHING
         )
         SELECT id, email, properties FROM upserted`)).rows : [];
+      // Memberships in a statement of their own: the upsert restores a deleted contact, and a membership added in the
+      // statement that changes its contact's state would be counted twice (migration 405).
+      if (job.listId && upserted.length) await tx.execute(sql`INSERT INTO audience_list_members (workspace_id, list_id, contact_id)
+        SELECT ${identity.workspaceId}, ${job.listId}, id FROM jsonb_array_elements_text(${JSON.stringify(upserted.map(contact => contact.id))}::jsonb) AS added(id)
+        ON CONFLICT DO NOTHING`);
       // The upsert locks every current profile, so concurrent imports cannot bypass the merged limit.
       // Rejecting here rolls back this entire commit, including memberships and restorations.
       const byEmail = new Map(upserted.map(contact => [contact.email, contact]));

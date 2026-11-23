@@ -2,7 +2,7 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, eq, gt, gte, inArray, isNotNull, isNull, lt, lte, ne, or, sql, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { actor, ApiError, errors, id, json, response, security, type Actor, type App, type Database, type DbExecutor } from './core.js';
-import { compileRule } from './audience.js';
+import { compileRule, lockContacts } from './audience.js';
 import { auditContext, auditInsert, type AuditContext } from './audit.js';
 import { audiencePlans, consentAudit, contacts, listMembers, lists, segments, type AudienceOperation } from './db/audience.js';
 import { enqueue } from './jobs.js';
@@ -153,7 +153,8 @@ async function applyPlan(db: Database, identity: Actor, planId: string, confirmR
     if (Date.parse(plan.expiresAt) <= Date.now()) throw new ApiError(409, 'AUDIENCE_PLAN_EXPIRED', 'This audience operation plan expired. Create a new plan.');
     const operation = plan.operation; const appliedAt = new Date().toISOString();
     if (operation.kind === 'update_contacts') {
-      const ids = operation.targets.map(target => target.id); const current = ids.length ? await tx.select().from(contacts).where(and(scoped(contacts, identity), inArray(contacts.id, ids), isNull(contacts.deletedAt))).orderBy(asc(contacts.id)).for('update') : [];
+      // Several contacts are locked in email order everywhere (imports, SES feedback, lockContacts), so none of them deadlock.
+      const ids = operation.targets.map(target => target.id); const current = ids.length ? await tx.select().from(contacts).where(and(scoped(contacts, identity), inArray(contacts.id, ids), isNull(contacts.deletedAt))).orderBy(asc(contacts.email)).for('update') : [];
       const expected = new Map(operation.targets.map(target => [target.id, target]));
       if (current.length !== ids.length || current.some(row => row.updatedAt !== expected.get(row.id)?.updatedAt)) throw new ApiError(409, 'STALE_AUDIENCE_PLAN', 'A planned contact changed or was deleted. Review a new plan.');
       if (operation.set.consent === 'subscribed' && current.some(row => row.marketingConsent === 'unsubscribed') && !confirmResubscribe) throw new ApiError(409, 'RESUBSCRIBE_CONFIRMATION_REQUIRED', 'This plan includes prior opt-outs. Explicitly confirm renewed consent before applying it.');
@@ -168,6 +169,7 @@ async function applyPlan(db: Database, identity: Actor, planId: string, confirmR
       if (!list) throw new ApiError(409, 'STALE_AUDIENCE_PLAN', 'The planned list was deleted. Review a new plan.');
       const currentMemberships = operation.targetIds.length ? await tx.select({ contactId: listMembers.contactId }).from(listMembers).where(and(scoped(listMembers, identity), eq(listMembers.listId, operation.listId), inArray(listMembers.contactId, operation.targetIds))) : [];
       if (operation.kind === 'add_to_list' && currentMemberships.length || operation.kind === 'remove_from_list' && currentMemberships.length !== operation.targetIds.length) throw new ApiError(409, 'STALE_AUDIENCE_PLAN', 'List memberships changed after review. Review a new plan.');
+      if (operation.targetIds.length) await lockContacts(tx, identity, operation.targetIds);
       if (operation.kind === 'add_to_list') {
         for (const batch of chunks(operation.targetIds, 1000)) if (batch.length) await tx.insert(listMembers).values(batch.map(contactId => ({ workspaceId: identity.workspaceId, listId: operation.listId, contactId }))).onConflictDoNothing();
       } else {
