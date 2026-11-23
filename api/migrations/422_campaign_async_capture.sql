@@ -8,3 +8,9 @@ ALTER TABLE sending_campaign_reviews
 
 ALTER TABLE sending_campaigns
   ADD COLUMN IF NOT EXISTS audience_estimate integer;
+
+-- Allow state='preparing' with total=0, prepared=0 while a deferred large capture without a cached estimate is in flight.
+ALTER TABLE sending_campaigns
+  DROP CONSTRAINT IF EXISTS sending_campaigns_preparing,
+  ADD CONSTRAINT sending_campaigns_preparing CHECK (state <> 'preparing' OR prepared < total OR (total = 0 AND prepared = 0)) NOT VALID;
+ALTER TABLE sending_campaigns VALIDATE CONSTRAINT sending_campaigns_preparing;
