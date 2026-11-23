@@ -27510,7 +27510,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
   // snapshot: sends, an edit and a second launch go on meanwhile, nothing that changes then reaches the frozen list, and a
   // launch that fails or is cancelled there leaves nothing behind.
   test('campaign launch: sends in the workspace never wait for the audience capture, and the frozen list is one snapshot',async t=>{
-    const {g,w,host,call,audience,draft,launch,capturing}=await launchFixture(t);
+    const {runtime,g,w,host,call,audience,draft,launch,capturing}=await launchFixture(t);
     // Up to 5,000 members captures synchronously inside launch() using the same snapshotCampaignAudience path; >5,000
     // defers to campaign.run (tested in part 3 below). Every 200th contact is subscribed; the first is also suppressed.
     const listId=await audience(4_000,200);
@@ -27598,11 +27598,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const bigLaunched = await launch(bigCamp);
     assert.equal(bigLaunched.status, 202, JSON.stringify(bigLaunched.body));
     assert.equal(bigLaunched.body.queued, bigBefore.length);
-    const { nodeRuntime } = await import('./src/adapters/node.js');
     const { jobHandlers } = await import('./src/sending.js');
-    const { runtime, close } = nodeRuntime({ ...process.env, DATABASE_URL: FIXTURE_DATABASE_URL });
-    cleanup(t, close);
-    Object.assign(runtime.config, { multiTenant: false, liveEnabled: false });
     const bigSubId = (await g.query("SELECT c.id FROM audience_contacts c JOIN audience_list_members m ON m.workspace_id=c.workspace_id AND m.contact_id=c.id WHERE c.workspace_id=$1 AND m.list_id=$2 AND c.marketing_consent='subscribed' AND NOT c.suppressed LIMIT 1", [w, bigList])).rows[0].id;
     await gate.query('BEGIN');
     let bgRun: Promise<unknown> | undefined;
