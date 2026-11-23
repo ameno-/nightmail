@@ -1,7 +1,7 @@
 import { createContext, Suspense, useContext, useRef, useState, useMemo, useEffect, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useLocation, useNavigate } from 'react-router'
-import { ApiError, type Identity, type Api, type WorkspaceInvitationPreview, errorText } from './types'
+import { ApiError, type Identity, type Api, type WorkspaceInvitationPreview, errorText, tooBroadCode } from './types'
 import { roleLabel, workspaceApi } from './workspaces'
 import { createLiveApi, request, selectAccount, selectedAccount, selectedWorkspace, selectWorkspace } from './live'
 import { accountApi, accountsKey, announce, expectAccount, onAccountEvent, POPUP_PATH, takeExpectedAccount, type AccountList } from './accounts'
@@ -445,11 +445,36 @@ export function useApi() {
 // Pass a function to keep it only for some key changes (a region change must not show the old region's rows).
 type KeepPrevious = boolean | ((previousKey: readonly unknown[]) => boolean)
 type Poll<T> = { interval?: number | ((data: T | undefined, failed: boolean) => number | false); enabled?: boolean; keepPrevious?: KeepPrevious }
+/** Stops polling on 422 READ_TOO_LARGE / non-429 4xx; backs off exponentially on 429/5xx/network and stops after 3 retries. */
+export function politePollInterval(base: number | false, error: unknown, consecutiveFailures: number): number | false {
+  if (base === false) return false
+  if (!error) return base
+  if (error instanceof ApiError && (error.code === tooBroadCode || (error.status !== undefined && error.status >= 400 && error.status < 500 && error.status !== 429))) return false
+  if (consecutiveFailures >= 4) return false
+  const floor = error instanceof ApiError && error.status === 429 ? 60_000 : base
+  return Math.min(300_000, floor * 2 ** Math.max(0, consecutiveFailures))
+}
+
 export function useApiQuery<T>(key: readonly unknown[], read: (api: Api, signal: AbortSignal) => Promise<T>, poll?: Poll<T>) {
   const api = useApi()
   const interval = poll?.interval
   const keep = poll?.keepPrevious
-  return useQuery({ queryKey: ['nightmail', ...key], queryFn: ({ signal }) => read(api, signal), enabled: poll?.enabled, refetchInterval: typeof interval === 'function' ? query => interval(query.state.data, query.state.status === 'error') : interval ?? false, refetchIntervalInBackground: false,
+  const keyId = JSON.stringify(key)
+  const failures = useRef({ key: keyId, count: 0 })
+  if (failures.current.key !== keyId) failures.current = { key: keyId, count: 0 }
+  return useQuery({ queryKey: ['nightmail', ...key], queryFn: async ({ signal }) => {
+    try {
+      const data = await read(api, signal)
+      if (failures.current.key === keyId) failures.current.count = 0
+      return data
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === 'AbortError') && failures.current.key === keyId) failures.current.count += 1
+      throw error
+    }
+  }, enabled: poll?.enabled, refetchInterval: query => {
+    const base = typeof interval === 'function' ? interval(query.state.data, query.state.status === 'error') : interval ?? false
+    return politePollInterval(base, query.state.error, failures.current.count)
+  }, refetchIntervalInBackground: false,
     placeholderData: keep ? (previous, previousQuery) => keep === true || (previousQuery && keep(previousQuery.queryKey.slice(1))) ? previous : undefined : undefined })
 }
 export function useApiDef<T>(query: QueryDef<T>, poll?: Poll<T>) { return useApiQuery(query.key, query.read, poll) }

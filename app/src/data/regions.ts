@@ -23,7 +23,7 @@ export function useRegionCatalog(options: { enabled?: boolean } = {}) {
     enabled: options.enabled,
     staleTime: 30_000,
     retry: false,
-    refetchInterval: query => query.state.data?.data.some(regionJobActive) ? 2500 : false,
+    refetchInterval: query => query.state.status === 'error' ? false : query.state.data?.data.some(regionJobActive) ? 2500 : false,
   })
 }
 

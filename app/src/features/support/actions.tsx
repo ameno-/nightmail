@@ -35,7 +35,7 @@ export function SupportActionDialog() {
   const query = useQuery({ queryKey: key, queryFn: ({ signal }) => supportActionsApi.get(id, signal), staleTime: 0, enabled: valid,
     retry: (count, error) => !(error instanceof ApiError && error.status !== undefined && error.status < 500) && count < 2,
     // A test posting, or a queued test or retry, is read again until its delivery answers (two minutes after the decision).
-    refetchInterval: current => { const data = current.state.data; return data && actionResult(data)?.waiting && Date.now() - Date.parse(data.resolvedAt ?? new Date().toISOString()) < 120_000 ? 2500 : false } })
+    refetchInterval: current => { if (current.state.status === 'error') return false; const data = current.state.data; return data && actionResult(data)?.waiting && Date.now() - Date.parse(data.resolvedAt ?? new Date().toISOString()) < 120_000 ? 2500 : false } })
   const [deciding, setDeciding] = useState<'confirm' | 'decline' | null>(null)
   const [error, setError] = useState<unknown>(null)
   const action = query.data
