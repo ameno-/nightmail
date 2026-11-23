@@ -302,10 +302,12 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
     // (mailchimp-takes.tsx) and five iterations on the first (mailchimp-hero.tsx).
     "const sizes = prices.comparisons.mailchimp.sizes.length, takes = await import('./src/features/pricing/mailchimp-takes.tsx'), hero = await import('./src/features/pricing/mailchimp-hero.tsx')",
     "const chart = [{ id: 'mailchimp', sizes, html: at('/compare/mailchimp', h((await import('./src/features/pricing/mailchimp.tsx')).MailchimpComparison)) }, ...['1', '2', '3'].map(take => ({ id: 'mailchimp (take ' + take + ')', sizes, html: at('/compare/mailchimp?take=' + take, h(takes.MailchimpTake, { take })) })), ...hero.HERO_TAKES.map(take => ({ id: 'mailchimp (take ' + take + ')', sizes, html: at('/compare/mailchimp?take=' + take, h(hero.MailchimpHero, { take })) }))]",
-    // The price-against-a-price component (price-against.tsx) in each look on each comparison, and every size its
+    // The price-against-a-price component (price-against.tsx) in each look, and its three visual directions
+    // (compare-style.tsx), on each comparison, and every size its
     // control can reach, with the competitor's price there.
     "const pa = await import('./src/features/pricing/price-against.tsx')",
-    "const against = Object.entries(prices.comparisons).flatMap(([id, c]) => pa.LOOKS.map(look => ({ id: id + ' (calc ' + look + ')', html: at('/compare/' + id + '?calc=' + look, h(pa.ComparisonCalc, { comparison: c, look })) })))",
+    "const cs = await import('./src/features/pricing/compare-style.tsx')",
+    "const against = Object.entries(prices.comparisons).flatMap(([id, c]) => [...pa.LOOKS.map(look => ({ id: id + ' (calc ' + look + ')', html: at('/compare/' + id + '?calc=' + look, h(pa.ComparisonCalc, { comparison: c, look })) })), ...cs.STYLES.map(style => ({ id: id + ' (style ' + style + ')', html: at('/compare/' + id + '?style=' + style, h(cs.ComparisonStyle, { comparison: c, style })) }))])",
     "const reach = Object.entries(prices.comparisons).map(([id, c]) => ({ id, sizes: prices.reachable(c).map(size => { const u = c.use(size), t = prices.theirPrice(c.offer, u); return { size, sent: u.sent, received: u.received, theirs: t ? t.cents : null } }) }))",
     'const { OFFERS, comparisons, resendOverage, resendReceived } = prices',
     "process.stdout.write(JSON.stringify({ calculator, compare, chart, against, reach, data: { OFFERS, comparisons, resendOverage, resendReceived } }, (_k, v) => typeof v === 'bigint' ? String(v) : v))",

@@ -17,27 +17,27 @@ import { CHECKED, claim, count, formatCount, money, nightmail, nightmailBill, pr
 export const LOOKS = ['a', 'b', 'c'] as const
 export type Look = (typeof LOOKS)[number]
 
-type Point = { size: number; usage: Usage; ours: ReturnType<typeof nightmailBill>; theirs: { cents: number; plan: string } }
-const pointAt = (c: Comparison, size: number): Point => {
+export type Point = { size: number; usage: Usage; ours: ReturnType<typeof nightmailBill>; theirs: { cents: number; plan: string } }
+export const pointAt = (c: Comparison, size: number): Point => {
   const usage = c.use(size)
   return { size, usage, ours: nightmailBill(usage.sent, usage.received), theirs: theirPrice(c.offer, usage)! }
 }
-const byContacts = (c: Comparison) => c.offer.unit === 'contacts'
-const sizeOf = (c: Comparison, u: Usage) => byContacts(c) ? u.contacts : u.sent
+export const byContacts = (c: Comparison) => c.offer.unit === 'contacts'
+export const sizeOf = (c: Comparison, u: Usage) => byContacts(c) ? u.contacts : u.sent
 /** The size a typed number is priced at: on a 'complete' ladder itself, within the steps; otherwise the vendor's
  *  smallest size that holds it (or its largest). */
-function fit(c: Comparison, n: number) {
+export function fit(c: Comparison, n: number) {
   const first = c.steps[0]!, last = c.steps.at(-1)!
   if (c.offer.ladder === 'complete') return Math.min(last, Math.max(first, n))
   return c.steps.find(step => step >= n) ?? last
 }
 /** How much more the competitor costs. */
-const more = (p: Point) => price(ucOf(p.theirs.cents) - p.ours.uc)
-const share = (p: Point) => Number(p.ours.uc) / Number(ucOf(p.theirs.cents))
+export const more = (p: Point) => price(ucOf(p.theirs.cents) - p.ours.uc)
+export const share = (p: Point) => Number(p.ours.uc) / Number(ucOf(p.theirs.cents))
 
 /** The widest text a figure can show, by the sizes the control reaches. */
 const widest = (values: string[]) => values.reduce((a, b) => b.length > a.length || (b.length === a.length && b.replace(/\D/g, '').length > a.replace(/\D/g, '').length) ? b : a, '')
-function rooms(c: Comparison) {
+export function rooms(c: Comparison) {
   const points = reachable(c).map(size => pointAt(c, size))
   return {
     size: widest(points.map(p => formatCount(p.size))), emails: widest(points.map(p => formatCount(p.usage.sent))),
@@ -46,7 +46,7 @@ function rooms(c: Comparison) {
   }
 }
 /** A figure in the room of the widest it can be. */
-function Room({ widest, children }: { widest: string; children: ReactNode }) {
+export function Room({ widest, children }: { widest: string; children: ReactNode }) {
   return <span className="pa-room"><span aria-hidden="true">{widest}</span><span>{children}</span></span>
 }
 
