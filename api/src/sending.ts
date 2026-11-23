@@ -8,7 +8,7 @@ import { Buffer } from 'node:buffer';
 import type { DefaultTreeAdapterMap } from 'parse5';
 import { apiKeys } from './db/core.js';
 import { receivingPolicy } from './mailbox-ingest-input.js';
-import { mergeSuppression } from './db/audience.js';
+import { lists, mergeSuppression, segments } from './db/audience.js';
 import { SuppressionReason, EmailEventData, readCursor, nextCursor, budgetedRead, readLimit, readLimitNote } from './core.js';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import type { Attachment } from '@aws-sdk/client-sesv2';
@@ -508,6 +508,16 @@ function draftSender(runtime: Runtime, a: Actor, draft: CampaignDraft) {
   if (!draft.from && a.domains.length) throw denied('SENDER_DOMAIN_FORBIDDEN', 'A domain-restricted key must supply a From address on one of its domains.', { permission: 'sendEmail', level: 'on', scope: 'workspace' }, 'from');
   if (draft.from) keySender(a, draft.from);
   if (a.domains.length && Object.keys(draft.audience).length) throw unrestrictedRequired('Selecting a campaign audience requires an unrestricted credential.', { permission: 'audience', level: 'write' });
+}
+// A draft's audience names only this workspace's lists and segments. Another workspace's ID gets the answer of one that
+// doesn't exist, the answer the audience gives when it is read (audience.ts audienceConditions), so an ID can't be probed.
+// IDs the stored draft already names pass unchecked: a draft outlives a deleted list and must stay editable.
+async function draftAudience(db: DbExecutor, a: Actor, audience: CampaignDraft['audience'], stored: CampaignDraft['audience'] = {}) {
+  const added = (now: (string | undefined)[], before: (string | undefined)[]) => [...new Set(now.filter((id): id is string => id !== undefined && !before.includes(id)))];
+  const listIds = added([audience.listId, ...(audience.excludeListIds ?? [])], [stored.listId, ...(stored.excludeListIds ?? [])]);
+  const segmentIds = added([audience.segmentId, ...(audience.excludeSegmentIds ?? [])], [stored.segmentId, ...(stored.excludeSegmentIds ?? [])]);
+  if (listIds.length && (await db.select({ id: lists.id }).from(lists).where(and(scope(lists, a), inArray(lists.id, listIds)))).length !== listIds.length) notFound('List');
+  if (segmentIds.length && (await db.select({ id: segments.id }).from(segments).where(and(scope(segments, a), inArray(segments.id, segmentIds)))).length !== segmentIds.length) notFound('Segment');
 }
 async function draftRegion(runtime:Runtime,db:DbExecutor,a:Actor,input:{from:string;region?:string;regionPinned?:boolean},previous?:CampaignDraft) {
   if (!regionalSending(runtime)) return {region:await assertRegionEnabled(db,a.workspaceId,input.region ?? previous?.region),regionPinned:previous?.regionPinned};
@@ -1698,6 +1708,7 @@ export function registerSending(app: App) {
       const campaignId = id('campaign'); const source = input.templateId ? await (await wrapModuleLoad(() => import('./templates.js'))).instantiateTemplate(c.env, db, a, input.templateId) : null;
       const draft = { name: input.name, from: input.from, ...(input.fromName ?? source?.draft.fromName ? { fromName: input.fromName ?? source?.draft.fromName } : {}), ...(input.previewText ?? source?.draft.previewText ? { previewText: input.previewText ?? source?.draft.previewText } : {}), replyTo: input.replyTo.length ? input.replyTo : source?.draft.replyTo ?? [], ...await draftRegion(c.env,db,a,input), subject: input.subject || source?.draft.subject || '', attachments: [...new Set([...(source?.draft.attachments ?? []), ...input.attachments])], tracking: input.tracking ?? source?.draft.tracking ?? true, audience: input.audience, defaults: { ...(source?.draft.defaults ?? {}), ...input.defaults }, ...(input.html ?? source?.draft.html ? { html: input.html ?? source?.draft.html } : {}), ...(input.unsubscribePageUrl ?? source?.draft.unsubscribePageUrl ? { unsubscribePageUrl: input.unsubscribePageUrl ?? source?.draft.unsubscribePageUrl } : {}), ...(input.requiredNotice ? { requiredNotice: true } : {}) };
       draftSender(c.env, a, draft);
+      await draftAudience(db, a, draft.audience);
       await requiredNoticesAllowed(db, draft, a.workspaceId);
       await linkAttachments(db, a, draft.attachments, 'campaign', campaignId);
       const [row] = await db.insert(campaigns).values({ id: campaignId, workspaceId: a.workspaceId, draft, sourceTemplateId: source?.templateId ?? null, sourceTemplateRevision: source?.templateRevision ?? null }).returning();
@@ -1789,6 +1800,7 @@ export function registerSending(app: App) {
       const draft = {...input.draft,...await draftRegion(c.env,db,a,input.draft,current.draft)};
       draftSender(c.env, a, draft);
       draftSender(c.env, a, current.draft); editable(current, input.revision);
+      await draftAudience(db, a, draft.audience, current.draft.audience);
       await requiredNoticesAllowed(db, draft, a.workspaceId);
       await attachmentRows(db, a, input.draft.attachments, true);
       await db.delete(attachmentLinks).where(and(scope(attachmentLinks, a), eq(attachmentLinks.ownerType, 'campaign'), eq(attachmentLinks.ownerId, campaignId)));
