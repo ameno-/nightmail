@@ -151,6 +151,10 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
   const [remote, setRemote] = useState<Campaign | null>(null)
   const remoteRef = useRef<Campaign | null>(null)
   const [reviewUpdate, setReviewUpdate] = useState(false)
+  // Every attachment this page has seen on a version of the draft: where the composer finds an image the message shows
+  // but the form no longer lists (after a merge), so no saved message refers to an image it doesn't attach.
+  const seenAttachments = useRef(new Set(initial?.attachments ?? []))
+  const rememberAttachments = (version: Campaign) => { for (const id of version.attachments ?? []) seenAttachments.current.add(id) }
   const [loadingLatest, setLoadingLatest] = useState(false)
   const refreshController = useRef<AbortController | null>(null)
   const [preparing, setPreparing] = useState(false)
@@ -203,6 +207,7 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
     if (remoteRef.current && olderCampaign(next, remoteRef.current)) next = remoteRef.current
     if (acceptedRef.current && olderCampaign(next, acceptedRef.current)) next = acceptedRef.current
     acceptedRef.current = next
+    rememberAttachments(next)
     setAccepted(next)
     updateForm(campaignInput(next))
     setReplyToText(next.replyTo.join(', '))
@@ -228,28 +233,29 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
     setTestOpen(false)
     if (busyRef.current) queueRemote(next)
     else if (!dirtyRef.current) applyRemote(next)
-    else if (rebase(next)) queueRemote(next)
+    else if (!rebase(next)) queueRemote(next)
   }
   // Someone else saved while this person has unsaved edits. Where only they changed a field, theirs lands; where only
   // this person did, the edit stays; where both did, `prefer` decides. Without one, nothing lands and the fields both
-  // changed come back (empty when theirs can't take edits). Null once it landed: autosave then saves on their revision.
-  function rebase(theirs: Campaign, prefer?: 'mine' | 'theirs'): MergeField[] | null {
+  // changed stay unmerged, and so does a version that can't take edits: null. Once it landed, what it took of theirs comes
+  // back (maybe nothing), and autosave saves on their revision.
+  function rebase(theirs: Campaign, prefer?: 'mine' | 'theirs'): Set<MergeField> | null {
     const base = acceptedRef.current
-    if (!base || theirs.id !== base.id || olderCampaign(theirs, base) || theirs.archivedAt || !campaignEditable(theirs)) return []
+    if (!base || theirs.id !== base.id || olderCampaign(theirs, base) || theirs.archivedAt || !campaignEditable(theirs)) return null
     const { input, conflicts, taken } = mergeCampaign(campaignInput(base), formRef.current, campaignInput(theirs), bodyEdits.current !== bodySaved.current, prefer ?? 'mine')
-    if (conflicts.length && !prefer) return conflicts
+    if (conflicts.length && !prefer) return null
+    rememberAttachments(theirs)
     acceptedRef.current = theirs
     setAccepted(theirs)
     updateForm(input)
     if (taken.has('replyTo')) setReplyToText(theirs.replyTo.join(', '))
-    if (taken.has('previewText') && theirs.previewText) setPreviewOpen(true)
     if (taken.has('html')) { bodySaved.current = bodyEdits.current; readyRef.current = false; setComposerReady(false); setBodyKeys(placeholders(theirs.html)) }
     if (taken.has('html') || taken.has('sender')) setRebased(value => ({ body: value.body + Number(taken.has('html')), sender: value.sender + Number(taken.has('sender')) }))
     queueRemote(null)
     setReviewUpdate(false)
     setAutosavePaused(false)
     markDirty()
-    return null
+    return taken
   }
   const sync = useCampaignSync(accepted, receiveRemote)
   const current = remote ?? accepted
@@ -280,8 +286,12 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
     busyRef.current = true
     try {
       const latest = await api.campaigns.get(acceptedRef.current.id, controller.signal)
+      if (controller.signal.aborted) return
+      // The choice was about the version the dialog showed: a newer one is shown and asked about again.
+      const shown = remoteRef.current
+      if (dirtyRef.current && shown && campaignVersion(latest) !== campaignVersion(shown) && !olderCampaign(latest, shown)) { queueRemote(latest); return }
       // Theirs can't take edits any more (sent, archived): nothing to keep, so it simply loads.
-      if (!controller.signal.aborted && (!dirtyRef.current || rebase(latest, prefer))) applyRemote(latest)
+      if (!dirtyRef.current || !rebase(latest, prefer)) applyRemote(latest)
     } catch (cause) { if (!controller.signal.aborted) toast(errorText(cause), 'error') }
     finally { if (!controller.signal.aborted) { setLoadingLatest(false); busyRef.current = false } }
   }
@@ -343,7 +353,11 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
       dirtyRef.current = changedWhileSaving
       setDirty(changedWhileSaving)
       queueRemote(remoteRef.current && olderCampaign(saved, remoteRef.current) ? remoteRef.current : null)
-      updateForm({...formRef.current, id: saved.id, revision: saved.revision, draft: saved.draft, attachments: changedWhileSaving ? formRef.current.attachments : saved.attachments})
+      rememberAttachments(saved)
+      // Edited while saving: the form keeps its newer edits, and learns which attachments this save added or dropped
+      // (an image the composer uploaded, one #583's pruning removed), so a later merge reads them as saved, not as removed.
+      const sent = new Set(input.attachments ?? []), stored = new Set(saved.attachments ?? []), kept = (formRef.current.attachments ?? []).filter(id => !sent.has(id) || stored.has(id))
+      updateForm({...formRef.current, id: saved.id, revision: saved.revision, draft: saved.draft, attachments: changedWhileSaving ? [...kept, ...(saved.attachments ?? []).filter(id => !sent.has(id) && !kept.includes(id))] : saved.attachments})
       const reviewing = next === 'review' && !changedWhileSaving
       if (!submitted.id && !reviewing) {
         preserveEditor(saved)
@@ -360,7 +374,10 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
         staleRetries.current += 1
         const latest = await api.campaigns.get(acceptedRef.current.id).catch(() => null)
         if (!mounted.current) return
-        if (latest && !rebase(latest)) { retry = !automatic; return }
+        const taken = latest && rebase(latest)
+        // Continue and Send test act on what this person saw: when the merge brought in someone else's change, it
+        // stops and shows it instead of going on with it.
+        if (taken) { retry = !automatic && !(continuing && taken.size); if (continuing && taken.size) toast(`Someone else changed this ${thing}. Check it, then try again.`, 'info'); return }
         if (latest) { queueRemote(latest); if (!automatic) setReviewUpdate(true); return }
       }
       const status = cause && typeof cause === 'object' && 'status' in cause ? Number(cause.status) : 0
@@ -426,7 +443,7 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
               <div><div className="campaign-compose-row"><label htmlFor="campaign-preview">Inbox preview</label><Input ref={previewInput} id="campaign-preview" maxLength={200} placeholder="Shown after the subject" value={form.previewText} onChange={event => change('previewText', event.target.value)} disabled={controlsDisabled} /></div></div>
             </div>
           </div>
-          <ChunkFallback.Provider value={<ComposerSkeleton />}><EmailComposer key={`${generation}.${rebased.body}`} ref={composer} personalize attachmentIds={form.attachments ?? []} initialHtml={form.html} disabled={controlsDisabled} onReady={handleComposerReady} onDirty={handleComposerDirty} onBusy={value => {busyRef.current = value || attachmentsBusy || guard.current || loadingLatest; setComposerBusy(value); if (value) markDirty()}} onAttach={() => {markDirty(); attachments.current?.open()}} /></ChunkFallback.Provider>
+          <ChunkFallback.Provider value={<ComposerSkeleton />}><EmailComposer key={`${generation}.${rebased.body}`} ref={composer} personalize attachmentIds={form.attachments ?? []} knownAttachmentIds={[...seenAttachments.current]} initialHtml={form.html} disabled={controlsDisabled} onReady={handleComposerReady} onDirty={handleComposerDirty} onBusy={value => {busyRef.current = value || attachmentsBusy || guard.current || loadingLatest; setComposerBusy(value); if (value) markDirty()}} onAttach={() => {markDirty(); attachments.current?.open()}} /></ChunkFallback.Provider>
           <CampaignAttachments key={`attachments:${generation}`} ref={attachments} ids={form.attachments ?? []} persisted={form.draft?.attachments ?? []} body={form.draft?.html ?? form.html} shown={composerReady} onChange={ids => change('attachments', ids)} onBusy={value => {busyRef.current = value || guard.current || loadingLatest; setAttachmentsBusy(value)}} disabled={preparing || autosaving || saveMutation.isPending || composerBusy || loadingLatest || readOnly} />
           {/* Every contact has an email, so {{email}} needs no fallback and no row. */}
           {fallbackKeys.length > 0 && <section className="campaign-personalize" aria-labelledby="campaign-personalize-title">
@@ -514,8 +531,11 @@ async function saveChange(api: ReturnType<typeof useApi>, campaign: Campaign, ch
   try { return await api.campaigns.save(mine) }
   catch (cause) {
     if (!(cause instanceof ApiError && cause.code === 'STALE_CAMPAIGN_REVISION')) throw cause
-    const { input, conflicts } = mergeCampaign(campaignInput(campaign), mine, campaignInput(await api.campaigns.get(campaign.id)), false, 'mine')
-    if (conflicts.length) throw cause
+    // Review is where the message is approved: a save here never brings in a change this page didn't show. When anything
+    // of theirs would be taken, the stale-revision error stands, as does Send's until the page is read again.
+    const base = campaignInput(campaign), latest = campaignInput(await api.campaigns.get(campaign.id))
+    const { input, conflicts, taken } = mergeCampaign(base, mine, latest, false, 'mine')
+    if (conflicts.length || taken.size || String(latest.attachments ?? []) !== String(base.attachments ?? [])) throw cause
     return api.campaigns.save(input)
   }
 }

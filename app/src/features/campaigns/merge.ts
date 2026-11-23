@@ -36,7 +36,9 @@ export function mergeCampaign(base: CampaignInput, mine: CampaignInput, theirs: 
   const conflicts: MergeField[] = [], taken = new Set<MergeField>()
   const set = input as Record<string, unknown>
   for (const [field, keys] of Object.entries(groups) as [MergeField, readonly (keyof CampaignInput)[]][]) {
-    const mineChanged = keys.some(key => !same(mine[key], base[key])), theirsChanged = keys.some(key => !same(theirs[key], base[key]))
+    // The region follows the sender's address (and a new draft's form never learns the one the server chose): only
+    // the name and address count as this person's change.
+    const mineChanged = keys.some(key => key !== 'regionId' && !same(mine[key], base[key])), theirsChanged = keys.some(key => !same(theirs[key], base[key]))
     if (!theirsChanged || keys.every(key => same(mine[key], theirs[key]))) continue
     if (mineChanged) conflicts.push(field)
     if (!mineChanged || prefer === 'theirs') { for (const key of keys) set[key] = theirs[key]; taken.add(field) }
@@ -44,7 +46,7 @@ export function mergeCampaign(base: CampaignInput, mine: CampaignInput, theirs: 
   if (!sameMessage(theirs.html, base.html)) {
     if (bodyEdited) conflicts.push('html')
     if (!bodyEdited || prefer === 'theirs') { input.html = theirs.html; taken.add('html') }
-  }
+  } else if (!bodyEdited) input.html = theirs.html // their bytes, where they differ only in what the composer's export evens out
   const [b, m, t] = [fallbacks(base), fallbacks(mine), fallbacks(theirs)], defaults: Record<string, string> = {}
   for (const key of new Set([...Object.keys(b), ...Object.keys(m), ...Object.keys(t)])) {
     const theirsChanged = t[key] !== b[key], mineChanged = m[key] !== b[key]
