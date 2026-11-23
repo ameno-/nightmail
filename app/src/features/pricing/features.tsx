@@ -49,7 +49,7 @@ const FEATURES: Record<FeatureId, Feature> = {
     <p><Flaps text={free} width={free.length} className="ft-flaps ft-lit" /><span>Sent</span></p>
     <p><Flaps text={formatCount(nightmail.freeReceived)} width={free.length} className="ft-flaps ft-lit" /><span>Received</span></p>
   </div> },
-  receive: { title: 'Receive mail, and reply.', line: 'Inboxes at no charge. Open them in any mail app too.', face: 'screen', show: <div className="ft-screen ft-receive">{SCREENS.receive}</div> },
+  receive: { title: 'Receive mail, and reply.', line: 'Inboxes at no charge, with IMAP and SMTP for mail apps.', face: 'screen', show: <div className="ft-screen ft-receive">{SCREENS.receive}</div> },
   agent: { title: 'Inboxes for your agents.', line: 'Agents read and answer email over MCP.', face: 'screen', show: <div className="ft-screen ft-agent">{SCREENS.agent}</div> },
   route: { title: 'Route it. Keep the record.', line: 'Rules forward mail to Slack, Discord or a webhook.', face: 'screen', show: <div className="ft-screen ft-route">{routeScreen(6)}</div> },
   domain: { title: 'Your own domain.', line: 'DKIM, SPF and DMARC, each record checked.', face: 'screen', show: <div className="ft-screen ft-dns">

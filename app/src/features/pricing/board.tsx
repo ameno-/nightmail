@@ -156,7 +156,7 @@ export function ComparisonBoard({ comparison: c, start, frame }: { comparison: C
     <Features comparison={c} />
     {/* The close: the bill, and the way in again. */}
     <section className="cb-close" aria-labelledby="cb-close" {...keys}>
-      <h2 id="cb-close" className="cb-bill"><span><b>{nightmail.perThousand}</b> per 1,000 emails, sent or received.</span> <span>That’s the whole bill.</span></h2>
+      <h2 id="cb-close" className="cb-bill"><span><b>{nightmail.perThousand}</b> per 1,000 emails, sent or received.</span> <span>Contacts and teammates are free.</span></h2>
       {start && <>{start.button('cb-key cb-key-start')}{!start.signedIn && <SignInConsent className="cb-consent" />}</>}
     </section>
   </section>
