@@ -1,0 +1,272 @@
+/**
+ * Workspace data-isolation safety model: nothing crosses between workspaces, on any route.
+ *
+ * Invariants verified across 3 workspaces (A, B, C), all principal kinds (owner, admin, member,
+ * dual-workspace user, unrestricted API key, domain-limited API key, MCP OAuth sessions,
+ * support conversations, unauthenticated), every route enumerated from api/openapi.json,
+ * every hidden /v1/support/* route, and every MCP catalog tool:
+ *   1. No response ever contains another workspace's recognisable data, IDs, names, or counts.
+ *   2. No write ever changes another workspace's state (full DB + storage snapshot before/after).
+ *   3. "Not yours" and "doesn't exist" are indistinguishable (same status, code, message, shape).
+ *   4. Aggregate and count endpoints equal a direct SQL recount over the caller's own workspace only.
+ *   5. For a user who belongs to two workspaces (A and B, not C), each request acts only in the
+ *      workspace named by X-Nightmail-Workspace, and cross-workspace path/body IDs never land across.
+ */
+import { choice, model, prop, satisfies, sel, type Choice, type IdleRule, type Step } from "@tear/mbt";
+import type {
+  AggregatePrincipal,
+  McpChunk,
+  McpPrincipal,
+  OpenApiPrincipal,
+  RouteGroup,
+  SupportPrincipal,
+  WorkspaceIsolationAction,
+  WorkspaceIsolationObs,
+  WorkspaceIsolationSnapshot,
+  WorkspaceSlot,
+} from "./workspace-isolation.types.ts";
+
+export interface WorkspaceIsolationState {
+  steps: number;
+  seenGroups: string[];
+}
+
+const ROUTE_GROUPS: readonly RouteGroup[] = [
+  "auth",
+  "audience",
+  "templates",
+  "emails",
+  "campaigns",
+  "domains",
+  "webhooks",
+  "ops",
+  "routing-rules",
+  "inboxes",
+  "inbound-mail",
+  "inbound-webhooks-write",
+  "inbound-config",
+  "workspaces",
+  "billing",
+  "other",
+] as const;
+
+const OPENAPI_PRINCIPALS: readonly OpenApiPrincipal[] = [
+  "ownerA",
+  "adminA",
+  "memberA",
+  "dualA",
+  "dualB",
+  "dualC",
+  "keyA",
+  "dkeyA",
+  "anon",
+] as const;
+
+const SUPPORT_PRINCIPALS: readonly SupportPrincipal[] = [
+  "supportA",
+  "supportDualA",
+  "supportDualAB",
+  "ownerA",
+  "keyA",
+  "anon",
+] as const;
+
+const MCP_PRINCIPALS: readonly McpPrincipal[] = ["mcpA", "mcpDual", "keyA", "dkeyA", "anon"] as const;
+const MCP_CHUNKS: readonly McpChunk[] = ["auth-ops", "audience", "sending", "routing-inboxes", "inbound"] as const;
+
+const AGGREGATE_PRINCIPALS: readonly AggregatePrincipal[] = [
+  "ownerA",
+  "adminA",
+  "memberA",
+  "dualA",
+  "dualB",
+  "keyA",
+  "supportA",
+] as const;
+
+const TARGETS: readonly WorkspaceSlot[] = ["A", "B", "C"] as const;
+
+const isolationIdleRules: IdleRule<WorkspaceIsolationSnapshot>[] = [
+  {
+    id: "wiso.no-leaks",
+    description: "no response ever contains another workspace's recognisable data, IDs, names, or counts",
+    check: (s) => (s.leaks.length ? `cross-workspace leaks (${s.leaks.length}): ${s.leaks.slice(0, 5).join("; ")}` : undefined),
+  },
+  {
+    id: "wiso.no-foreign-mutations",
+    description: "no write ever changes another workspace's database or object storage state",
+    check: (s) =>
+      s.foreignMutations.length
+        ? `foreign workspace mutations (${s.foreignMutations.length}): ${s.foreignMutations.slice(0, 5).join("; ")}`
+        : undefined,
+  },
+  {
+    id: "wiso.no-id-probing",
+    description: "foreign resource IDs and nonexistent resource IDs produce indistinguishable responses",
+    check: (s) =>
+      s.probeOracles.length
+        ? `ID probe oracles (${s.probeOracles.length}): ${s.probeOracles.slice(0, 5).join("; ")}`
+        : undefined,
+  },
+  {
+    id: "wiso.aggregates-exact",
+    description: "every aggregate and count endpoint equals a direct recount over the caller's workspace only",
+    check: (s) =>
+      s.aggregateMismatches.length
+        ? `aggregate mismatches (${s.aggregateMismatches.length}): ${s.aggregateMismatches.slice(0, 5).join("; ")}`
+        : undefined,
+  },
+  {
+    id: "wiso.dual-isolated",
+    description: "for a dual-workspace user, mismatched header vs path/body IDs never cross between workspaces",
+    check: (s) =>
+      s.dualViolations.length
+        ? `dual-workspace violations (${s.dualViolations.length}): ${s.dualViolations.slice(0, 5).join("; ")}`
+        : undefined,
+  },
+  {
+    id: "wiso.no-leaked-errors",
+    description: "no unhandled rejections or unexpected 5xx server failures",
+    check: (s) => {
+      const all = [...s.unexpectedErrors, ...s.leakedErrors];
+      return all.length ? `unexpected errors (${all.length}): ${all.slice(0, 5).join("; ")}` : undefined;
+    },
+  },
+];
+
+function summarizeViolations(obs: WorkspaceIsolationObs): string | true {
+  const problems: string[] = [];
+  if (obs.leaks.length) problems.push(`LEAK: ${obs.leaks.slice(0, 3).join(" | ")}`);
+  if (obs.foreignMutations.length) problems.push(`MUTATION: ${obs.foreignMutations.slice(0, 3).join(" | ")}`);
+  if (obs.probeOracles.length) problems.push(`ORACLE: ${obs.probeOracles.slice(0, 3).join(" | ")}`);
+  if (obs.aggregateMismatches.length) problems.push(`AGGREGATE: ${obs.aggregateMismatches.slice(0, 3).join(" | ")}`);
+  if (obs.dualViolations.length) problems.push(`DUAL: ${obs.dualViolations.slice(0, 3).join(" | ")}`);
+  if (obs.unexpectedErrors.length) problems.push(`ERROR: ${obs.unexpectedErrors.slice(0, 3).join(" | ")}`);
+  return problems.length ? problems.join(" ;; ") : true;
+}
+
+function maskFor(a: WorkspaceIsolationAction): string | undefined {
+  // Known product bugs documented in /Users/vogel/.config/opensend-mx/plans/tear/bugs-isolation.md:
+  // - BUG-ISO-01 (PR #591, unmerged on api/tear-update base 24333f2c): GET /v1/support/audience/health
+  //   reads base table audience_imports instead of scoped CTE i, leaking every workspace's imports.
+  if (a.op === "ProbeSupport" && a.scope === "audience-health" && (a.principal === "supportA" || a.principal === "supportDualA")) {
+    return "BUG-ISO-01";
+  }
+  // - BUG-ISO-02 (PR #597 class, unfixed): POST /v1/campaigns and PATCH /v1/campaigns/{id} accept and
+  //   persist foreign workspace listId/segmentId/excludeListIds/excludeSegmentIds without workspace check.
+  if (a.op === "DualMismatch" && a.focus === "campaign-audience" && a.header !== "C" && a.header !== a.target) {
+    return "BUG-ISO-02";
+  }
+  // - BUG-ISO-03 (PR #597 class, unfixed): POST /v1/inbound/webhooks and PATCH /v1/inbound/webhooks/{id}
+  //   accept and persist foreign workspace addressIds into mailbox_webhooks.mailbox_ids without workspace check.
+  if (a.op === "DualMismatch" && a.focus === "inbound-webhook-addresses" && a.header !== "C" && a.header !== a.target) {
+    return "BUG-ISO-03";
+  }
+  if (
+    a.op === "ProbeGroup" &&
+    a.group === "inbound-webhooks-write" &&
+    a.principal !== "anon" &&
+    a.principal !== "dualC" &&
+    a.principal !== "memberA" &&
+    a.principal !== "dkeyA"
+  ) {
+    return "BUG-ISO-03";
+  }
+  return undefined;
+}
+
+export const workspaceIsolation = model<
+  WorkspaceIsolationState,
+  WorkspaceIsolationAction,
+  WorkspaceIsolationObs,
+  WorkspaceIsolationSnapshot
+>({
+  id: "workspace-isolation",
+  description:
+    "Workspace data isolation: nothing crosses between workspaces on any OpenAPI route, hidden /v1/support/* route, or MCP tool",
+  maxSteps: 8,
+  rounds: 2,
+  bug: "canary_cross_workspace_leak",
+  roundRoles: {
+    ProbeGroup: "call",
+    ProbeSupport: "call",
+    ProbeMcp: "call",
+    CheckAggregates: "read",
+    DualMismatch: "call",
+    ConcurrentDualSwitch: "sequential",
+  },
+
+  initial: (): WorkspaceIsolationState => ({ steps: 0, seenGroups: [] }),
+
+  choices(s): Choice<WorkspaceIsolationAction>[] {
+    const out: Choice<WorkspaceIsolationAction>[] = [];
+    for (const group of ROUTE_GROUPS) {
+      const weight = group === "other" || group === "inbound-webhooks-write" ? 1 : s.seenGroups.includes(group) ? 1 : 3;
+      for (const principal of OPENAPI_PRINCIPALS) {
+        const target: WorkspaceSlot = principal === "dualB" ? "A" : "B";
+        out.push(choice({ op: "ProbeGroup", group, principal, target }, weight));
+        if (principal === "ownerA" || principal === "dualA" || principal === "keyA" || principal === "dualC") {
+          out.push(choice({ op: "ProbeGroup", group, principal, target: "C" }, 1));
+        }
+      }
+    }
+    for (const principal of SUPPORT_PRINCIPALS) {
+      for (const target of TARGETS) {
+        if (principal === "supportA" && target === "A") continue;
+        out.push(choice({ op: "ProbeSupport", principal, scope: "core", target }, 2));
+      }
+    }
+    out.push(choice({ op: "ProbeSupport", principal: "supportA", scope: "audience-health", target: "B" }, 1));
+    out.push(choice({ op: "ProbeSupport", principal: "supportDualA", scope: "audience-health", target: "B" }, 1));
+    for (const principal of MCP_PRINCIPALS) {
+      for (const chunk of MCP_CHUNKS) {
+        out.push(choice({ op: "ProbeMcp", principal, chunk, target: "B" }, 2));
+        if (principal === "mcpDual") out.push(choice({ op: "ProbeMcp", principal, chunk, target: "C" }, 1));
+      }
+    }
+    for (const principal of AGGREGATE_PRINCIPALS) {
+      out.push(choice({ op: "CheckAggregates", principal }, 2));
+    }
+    out.push(
+      choice({ op: "DualMismatch", header: "A", target: "B", focus: "core" }, 3),
+      choice({ op: "DualMismatch", header: "B", target: "A", focus: "core" }, 3),
+      choice({ op: "DualMismatch", header: "A", target: "C", focus: "core" }, 2),
+      choice({ op: "DualMismatch", header: "C", target: "A", focus: "core" }, 2),
+      choice({ op: "DualMismatch", header: "A", target: "B", focus: "campaign-audience" }, 1),
+      choice({ op: "DualMismatch", header: "A", target: "B", focus: "inbound-webhook-addresses" }, 1),
+      choice({ op: "ConcurrentDualSwitch" }, 3),
+    );
+    return out;
+  },
+
+  step(s, a): Step<WorkspaceIsolationState, WorkspaceIsolationObs> {
+    const next = structuredClone(s);
+    next.steps += 1;
+    if (a.op === "ProbeGroup" && !next.seenGroups.includes(a.group)) {
+      next.seenGroups.push(a.group);
+    }
+    const expect = satisfies("no-cross-workspace-violation", summarizeViolations);
+    const mask = maskFor(a);
+    return mask ? { next, expect, mask } : { next, expect };
+  },
+
+  idle: isolationIdleRules,
+
+  temporal: [
+    {
+      id: "wiso.never-leaked",
+      title: "no response ever leaks another workspace's data",
+      prop: prop.never(sel.event("isolation.leak")),
+    },
+    {
+      id: "wiso.never-mutated-foreign",
+      title: "no write ever mutates another workspace's state",
+      prop: prop.never(sel.event("isolation.foreign_mutation")),
+    },
+    {
+      id: "wiso.never-probed",
+      title: "no route leaks existence of foreign resource IDs",
+      prop: prop.never(sel.event("isolation.id_oracle")),
+    },
+  ],
+});
