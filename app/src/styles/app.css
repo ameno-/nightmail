@@ -11,9 +11,9 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
    inset). */
 .sidebar .wordmark { position: absolute; top: var(--space-16); left: calc(var(--sidebar-gutter) + var(--sidebar-inset)); }
 /* The brand's marks (components/NightmailLogo.tsx): the brand's ink on a pale theme, its paper on a dark one. The
-   wordmark is sized by its cap height, 13 px: 140 px across, which leaves the sidebar's row room for the theme button. */
+   wordmark is sized by its cap height, 13 px: 139 px across, which leaves the sidebar's row room for the theme button. */
 .nightmail-logo { display: block; flex: none; color: var(--color-logo); fill: currentColor; }
-.nightmail-wordmark { --logo-cap: 13px; width: calc(var(--logo-cap) * 10.8); height: var(--logo-cap); }
+.nightmail-wordmark { --logo-cap: 13px; width: calc(var(--logo-cap) * 10.72); height: var(--logo-cap); }
 /* The same top and height as the wordmark's row, so the button is centred on it. */
 .theme-toggle { position: absolute; top: var(--space-16); right: var(--sidebar-gutter); }
 .sidebar-context { flex-shrink: 0; display: flex; flex-direction: column; gap: var(--space-6); }
@@ -218,7 +218,7 @@ html[data-privacy='on'] .private-field:not(:hover, :focus)::placeholder { color:
 /* A small laptop or a landscape tablet: a narrower sidebar leaves the page room for its tables. */
 @media (max-width: 1100px) and (min-width: 900px) {
   :root { --sidebar-width: 200px; }
-  /* (The wordmark at 11 px caps, 119 px across, clears the theme button in the narrower row.) */
+  /* (The wordmark at 11 px caps, 118 px across, clears the theme button in the narrower row.) */
   .sidebar .nightmail-wordmark { --logo-cap: 11px; }
 }
 @media (max-width: 850px) {
@@ -245,7 +245,7 @@ html[data-privacy='on'] .private-field:not(:hover, :focus)::placeholder { color:
 body:has(.app-shell--compact) .ui-toasts { --toast-offset: 56px; }
 .mobile-bar { display: flex; align-items: center; gap: var(--space-8); height: calc(var(--mobile-bar-height) + env(safe-area-inset-top)); padding: env(safe-area-inset-top) max(var(--space-8), env(safe-area-inset-right)) 0 max(var(--space-16), env(safe-area-inset-left)); background: var(--color-deep); }
 /* The bar opens with the wordmark, on the page's own left edge; the workspace picker and the buttons keep to the right.
-   On a phone the wordmark's caps are as tall as the picker's name beside it (11 px, 119 px across), and a step smaller
+   On a phone the wordmark's caps are as tall as the picker's name beside it (11 px, 118 px across), and a step smaller
    on the narrowest phones, where the bar also holds the Help button. */
 .mobile-bar .wordmark { flex: none; height: 44px; }
 @media (max-width: 639px) { .mobile-bar .nightmail-wordmark { --logo-cap: 11px; } }

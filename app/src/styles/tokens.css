@@ -102,7 +102,7 @@
   --color-email-surface: #FFFFFF;
   --color-email-text: #181818;
   --color-brand: #798ABA; /* a periwinkle accent, oklch(0.638 0.075 269.2): 3.3:1 on deep, 3.0:1 on layer-2 */
-  --color-logo: #0A0B0F; /* the brand's ink: the wordmark and the monogram on a pale ground; docs/brand.md */
+  --color-logo: #0A0B0F; /* the brand's ink: the wordmark and the stamp on a pale ground; docs/brand.md */
   --color-contrast: #161616;
   --color-contrast-hover: #333333;
   --color-on-contrast: #FFFFFF;

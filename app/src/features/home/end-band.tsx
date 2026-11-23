@@ -53,7 +53,7 @@ export function EndBand({ W, phone, inset }: { W: number; phone: boolean; inset:
   return <>
     <svg className="srt-band-end" style={{ bottom: inset.bottom }} width={W} height={h} viewBox={`0 0 ${W} ${h}`} role="img" aria-label="Nightmail">
       {[3, 2, 1, 0].map(tone => <path key={tone} className={`srt-solid srt-solid-${tone}`} d={tones[tone]} />)}
-      <path className="srt-solid-face" d={WORDMARK.d} transform={`translate(${margin} ${top}) scale(${k})`} />
+      <path className="srt-solid-face" fillRule="evenodd" d={WORDMARK.d} transform={`translate(${margin} ${top}) scale(${k})`} />
       {lying.map(({ x, z, turn, face }, i) =>
         // Drawn lying flat (across the page, and back from the solid's front edge), then seen as the machine's roof is seen.
         <g key={i} className="srt-rest" transform={`matrix(1 0 ${DX} ${-DY} ${(margin + x).toFixed(2)} ${top.toFixed(2)}) translate(0 ${z.toFixed(2)}) rotate(${turn})`}>

@@ -248,7 +248,7 @@ async function route(request: Request, env: Env, url: URL, at: { route: string }
     const ready = await readiness(env).catch(error => { logError(error, { event: 'health', code: 'READINESS_UNAVAILABLE' }, 'warn'); return { ready: false }; });
     return json({ status: 'ok', service: 'bane-support', stage: env.STAGE, ...ready });
   }
-  // (The brand's tile, for the tabs of this Worker's own pages.)
+  // (The brand's tab icon, for the tabs of this Worker's own pages.)
   const icon = request.method === 'GET' ? favicon(path) : null;
   if (icon) { name('/favicon'); return icon; }
   if (request.method === 'OPTIONS' && (path.startsWith('/chat/') || /^\/c\/conv_[a-z2-7]{26}\/attachments$/.test(path))) {
