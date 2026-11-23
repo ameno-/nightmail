@@ -1,12 +1,15 @@
 import { useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { Link } from 'react-router'
-import { ArrowRight, Check } from 'lucide-react'
+import { ArrowRight } from 'lucide-react'
 import { Disclosure } from '../../components/ui'
 import { NightmailWordmark } from '../../components/NightmailLogo'
+import { SignInConsent } from '../../components/LegalLinks'
 import { useTheme } from '../../lib/theme'
 import { EndBand, endBand } from '../home/end-band'
 import { toneVars } from '../home/tones'
 import { calculatorPath, Checked, CheckedOn, Cite, Ours, Terms } from './content'
+import { Flaps } from './flaps'
+import { Features } from './features'
 import { CHECKED, claim, formatCount, money, nightmail, nightmailBill, theirPrice, ucOf, type Comparison, type Usage } from './prices'
 
 // A comparison page (/compare/mailchimp, /compare/resend): the two prices on a board hung in the homepage's factory, as
@@ -15,11 +18,12 @@ import { CHECKED, claim, formatCount, money, nightmail, nightmailBill, theirPric
 // proves). On the board: the prices on split-flap tiles (lit for Nightmail, unlit for the competitor; a tile flips when
 // its character changes) and each price as a bar of forty pigeonholes on one scale, the competitor's every one,
 // Nightmail's its share, lit in the homepage's periwinkle, the only colour. Under the console, what both prices are for
-// and where the competitor's was read; then what Nightmail has, the small print, and the wordmark across the page's end.
+// and where the competitor's was read, and a quiet Get started; then what else Nightmail does (features.tsx), the close
+// under a lamp of its own with the page's Get started, the small print, and the wordmark across the page's end.
 // Every figure keeps the room of the widest it can show (Room), so nothing moves as the fader does.
 // The board hangs on a dark wall under one pendant lamp, which comes down on its cord from the top of the window (the
-// page has no bar: PriceFrame's scene). Nightmail is named by its wordmark wherever it is a display word: the headline,
-// the board's lit row and "Nightmail has"; each one's accessible name is "Nightmail".
+// page has no bar: PriceFrame's scene). Nightmail is named by its wordmark wherever it is a display word: the headline
+// and the board's lit row; each one's accessible name is "Nightmail".
 // (Its styles are board.css, loaded with this page only: board-page.tsx. This file imports none, so the pre-merge check
 // can render it.)
 
@@ -44,13 +48,6 @@ function Room({ widest, children }: { widest: string; children: ReactNode }) {
   return <span className="cb-room"><span aria-hidden="true">{widest}</span><span>{children}</span></span>
 }
 
-/** Split-flap tiles: a tile a character, padded to a fixed count so the board never changes size; a tile whose
- *  character changes flips over to it. */
-function Flaps({ text, width, end, className }: { text: string; width: number; end?: boolean; className: string }) {
-  const chars = (end ? text.padStart(width) : text.padEnd(width)).toUpperCase().split('')
-  return <span className={`cb-flaps ${className}`} aria-hidden="true">{chars.map((ch, i) =>
-    <span key={`${i}:${ch}`} className="cb-flap" style={{ '--i': i } as CSSProperties} data-blank={ch === ' ' || undefined}><span>{ch}</span></span>)}</span>
-}
 /** Nightmail's wordmark, read as the word. */
 const Mark = ({ className }: { className: string }) => <NightmailWordmark className={`cb-mark ${className}`} title="Nightmail" />
 /** The headline, with the wordmark in the place of the word. */
@@ -73,12 +70,16 @@ function Fader({ c, size, onChange, id }: { c: Comparison; size: number; onChang
   </span>
 }
 
-export function ComparisonBoard({ comparison: c }: { comparison: Comparison }) {
+/** The way in (board-page.tsx gives it: the homepage's Get started, or Open dashboard for someone signed in), drawn in
+ *  a class of the page's. Without it (the pre-merge check's render) the page has no button. */
+export type Start = { signedIn: boolean; button: (className: string) => ReactNode }
+
+export function ComparisonBoard({ comparison: c, start }: { comparison: Comparison; start?: Start }) {
   const room = useMemo(() => rooms(c), [c])
   const [size, setSize] = useState(() => opening(c))
   const p = pointAt(c, size), id = useId(), vendor = c.offer.vendor
   const lit = p.ours.uc === 0n ? 0 : Math.max(1, Math.round(CELLS * share(p)))
-  return <section className="cb-hall" aria-labelledby="cb-title">
+  return <><section className="cb-hall" aria-labelledby="cb-title">
     <div className="cb-stage">
       <div className="cb-backdrop" aria-hidden="true"><i className="cb-lamp" /></div>
       <div className="cb-wrap">
@@ -102,22 +103,31 @@ export function ComparisonBoard({ comparison: c }: { comparison: Comparison }) {
         </div>
       </div>
     </div>
-    <div className="cb-slab" aria-hidden="true" />
-    <div className="cb-wrap cb-below">
+    {/* Under the console, on the wall as its light falls away: what both prices are for, and the way in for whoever the
+        price has convinced. */}
+    <div className="cb-wrap cb-after">
       <p className="cb-note">{c.assume} <Checked source={{ checked: CHECKED, url: c.offer.pricing }} /></p>
-      <section className="cb-has" aria-labelledby="cb-has"><h2 id="cb-has"><Mark className="cb-mark-has" /> has</h2>
-        <ul>{c.ours.map(fact => <li key={fact.text}><Check size={16} strokeWidth={2.25} aria-hidden="true" />{fact.short ?? fact.text}</li>)}</ul>
-      </section>
-      <Disclosure className="price-small cb-print" headingAs="h2" title="Sources and small print">
-        <p className="price-note">{c.usage} Monthly billing, list prices before tax, no promotions. <Checked source={{ checked: CHECKED, url: c.offer.pricing }} /></p>
-        <p className="price-note">Nightmail charges {nightmail.perThousand} per 1,000 emails after {formatCount(nightmail.freeSent)} free a month.</p>
-        <Terms floor={null} />
-        <ul className="price-facts">{c.ours.map(fact => <li key={fact.text}>{fact.text}{fact.source && <Cite source={fact.source} />}</li>)}</ul>
-        <CheckedOn facts={c.ours} />
-      </Disclosure>
+      {start && <div className="cb-first">{start.button('cb-quiet')}{!start.signedIn && <SignInConsent className="cb-consent" />}</div>}
     </div>
-    <div className="cb-slab" aria-hidden="true" />
+    <Features comparison={c} />
+    {/* The close, under a lamp of its own as the page began: the bill, and the way in. */}
+    <section className="cb-close" aria-labelledby="cb-close">
+      <div className="cb-close-light" aria-hidden="true"><i className="cb-lamp" /></div>
+      <h2 id="cb-close" className="cb-bill"><span><b>{nightmail.perThousand}</b> per 1,000 emails, sent or received.</span> <span>That’s the whole bill.</span></h2>
+      {start && <>{start.button('cb-key cb-key-start')}{!start.signedIn && <SignInConsent className="cb-consent" />}</>}
+    </section>
   </section>
+  {/* The small print, closed, on the page's own ground with its last links (index.tsx, PriceFrame). */}
+  <div className="cb-fine">
+    <Disclosure className="price-small cb-print" headingAs="h2" title="Sources and small print">
+      <p className="price-note">{c.usage} Monthly billing, list prices before tax, no promotions. <Checked source={{ checked: CHECKED, url: c.offer.pricing }} /></p>
+      <p className="price-note">Nightmail charges {nightmail.perThousand} per 1,000 emails after {formatCount(nightmail.freeSent)} free a month.</p>
+      <Terms floor={null} />
+      <ul className="price-facts">{c.ours.map(fact => <li key={fact.text}>{fact.text}{fact.source && <Cite source={fact.source} />}</li>)}</ul>
+      <CheckedOn facts={c.ours} />
+    </Disclosure>
+  </div>
+  </>
 }
 
 /** The wordmark across the page's end, as the homepage ends (end-band.tsx), in the machine's tones, measured before

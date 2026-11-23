@@ -12,7 +12,7 @@ import './pricing.css'
 // A comparison's page, its styles and its pictures are a module of their own (board-page.tsx), loaded only here: the
 // calculator's first paint waits for none of it.
 const boardPage = () => import('./board-page')
-const ComparisonBoard = lazy(() => boardPage().then(m => ({ default: m.ComparisonBoard })))
+const ComparisonScene = lazy(() => boardPage().then(m => ({ default: m.ComparisonScene })))
 const BoardEnd = lazy(() => boardPage().then(m => ({ default: m.BoardEnd })))
 
 // Public pages, no sign-in: the price calculator (/pricing) and one comparison per competitor (/compare/:vendor). Not
@@ -64,6 +64,6 @@ export function ComparePage() {
   const page = PRICE_PAGES.find(p => p.path === `/compare/${vendor}`)
   if (!comparison) return <PriceFrame title="Page not found"><EmptyState headingAs="h1" title="Page not found" action={<Link to="/pricing">Price calculator</Link>} /></PriceFrame>
   return <PriceFrame title={page?.title ?? comparison.offer.vendor} variant="price-page--board" end={<BoardEnd />} scene>
-    <ComparisonBoard key={vendor} comparison={comparison} />
+    <ComparisonScene key={vendor} comparison={comparison} />
   </PriceFrame>
 }
