@@ -111,7 +111,7 @@ Connected AWS accounts run a published role template (`api/byo-templates/<major>
 
 ### Price pages
 
-The public price pages (`/pricing` and `/compare/*`, `app/src/features/pricing`) compare Nightmail with named competitors, so a wrong figure is a false claim. The check renders them with React as a browser gets them, at their own sizes and at inputs a visitor might type (empty, negative, decimals, commas, past a billion), and the Mailchimp page's two takes (`?take=a` at every stop of its slider, `?take=b`). **Fails when:**
+The public price pages (`/pricing` and `/compare/*`, `app/src/features/pricing`) compare Nightmail with named competitors, so a wrong figure is a false claim. The check renders them with React as a browser gets them, at their own sizes and at inputs a visitor might type (empty, negative, decimals, commas, past a billion). **Fails when:**
 
 - a Nightmail figure isn't what `api/src/billing/rates.ts` charges for the usage it is marked with (`data-nightmail-sent` and `data-nightmail-received`), or the pages don't quote the rate, the free allowances, storage, or the top-up minimum and expiry (`CREDIT`) as the billing code has them;
 - a competitor price in `prices.ts` has no source, or a source lacks an https link to the vendor's page, the day it was read (not in the future) or the text it was read from;

@@ -1,5 +1,4 @@
 import { CREDIT, perThousandUsd, RATES, STORAGE_AFTER_DAYS, usd } from '../../../../api/src/billing/rates.ts'
-import { EVALUATION, GROWTH } from '../../../../api/src/standing-model.ts'
 
 // Every price the public price pages show (features/pricing), in one place. Nightmail's own come from the billing code
 // (api/src/billing/rates.ts), so a page can't drift from what is billed. Each competitor figure carries the vendor's
@@ -41,8 +40,6 @@ export const nightmail = {
   storageAfterDays: STORAGE_AFTER_DAYS,
   minTopUp: money(CREDIT.minTopUpCents),
   expiresAfterMonths: CREDIT.expiresAfterMonths,
-  evaluation: EVALUATION.recipients,
-  growthHours: GROWTH.hours,
 }
 
 /** One meter's part of the bill: what was used, what was free, and what it costs. */
@@ -244,55 +241,32 @@ export const ses = {
   ucPerEmail: 10_000n,
   sentSource: read(SES, 'Outbound email $0.10 / 1,000 emails | $0.12 per GB of attachment data sent'),
   receivedSource: read(SES, 'Inbound email $0.10 / 1,000 emails | $0.09 for every 1,000 incoming email chunks'),
-  essentials: { ucPerEmail: 16_000n, source: read(SES, 'Essentials: 0 – 10M emails / month $0.16 per 1,000 emails … New SES accounts … will start on the Essentials plan beginning July 21, 2026.') },
 }
 export const sesPerThousand = (uc: bigint) => `$${perThousandUsd(uc)}`
 export const sesBill = (u: Usage) => price(BigInt(u.sent + u.received) * ses.ucPerEmail)
 
 // ---------------------------------------------------------------- the pages' comparisons and disclosures
 
-/** short: the same claim in a few words, for a list that is scanned (takes.tsx). */
+/** short: the same claim in a few words, for a list that is scanned (mailchimp.tsx). */
 export type Fact = { text: string; short?: string; source: Source }
-/** Flodesk's flat monthly price, and the sent volume above which Nightmail costs more than it. */
-const FLODESK_CENTS = 4_600
-export const flodeskCrossover = RATES.freeSentEmails + Number(ucOf(FLODESK_CENTS) / RATES.emailUc)
-
-/** Where Nightmail costs more, or isn't like for like (the calculator page). */
-export const notCheaper: Fact[] = [
-  { text: `Amazon SES on its own: ${sesPerThousand(ses.ucPerEmail)} per 1,000 sent or received (${sesPerThousand(ses.essentials.ucPerEmail)} sent on the Essentials plan, where new AWS accounts start). Connect your own AWS account and Nightmail charges nothing; Amazon bills you.`, source: ses.essentials.source },
-  { text: 'Mailchimp’s paid plans include automations, sign-up forms, landing pages and A/B testing. Nightmail has none of these.', source: read(MAILCHIMP, 'visual automation flows …, templates, A/B testing, …, forms and landing pages') },
-  { text: 'Kit is free up to 10,000 subscribers, without automations.', source: read('https://kit.com/pricing', '$0 /mo Free—up to 10,000 subscribers … Visual automation builder … Free: No') },
-  { text: `Flodesk is ${money(FLODESK_CENTS)} a month for unlimited subscribers and sends. Nightmail costs more above ${formatCount(flodeskCrossover)} emails sent a month.`, source: read('https://flodesk.com/pricing', 'Email: $38/month with annual billing ($456/year), or $46/month billed monthly … Both paid plans include unlimited subscribers and unlimited email sends.') },
-  { text: 'Cloudflare Email Routing forwards mail for free. On Nightmail a forward is one received and one sent email.', source: read('https://developers.cloudflare.com/email-service/platform/pricing/', 'Inbound emails (Email Routing) | Unlimited | Unlimited') },
-]
-
 export type Comparison = {
   offer: Offer
   /** The three sizes, as the product map sets them. */
   sizes: Usage[]
   usage: string
   lead: string
-  /** What the competitor has that Nightmail doesn't, and the other way round. */
-  theirs: Fact[]
+  /** What Nightmail has that the competitor charges for or lacks, each with the competitor's page where it says so. */
   ours: (Fact | { text: string; short?: string; source?: undefined })[]
 }
 /** The Mailchimp comparison's use of a list: this many emails a month to every contact, this many teammates. */
 export const MAILCHIMP_USE = { sendsPerContact: 4, seats: 3 }
 const mailchimpSize = (contacts: number): Usage => ({ contacts, sent: contacts * MAILCHIMP_USE.sendsPerContact, received: 0, seats: MAILCHIMP_USE.seats })
-/** Every list size Mailchimp's page has a tier for, used that way and priced: each one a figure that was read. */
-export const mailchimpStops = [...new Set(mailchimp.plans.flatMap(plan => plan.tiers.map(tier => tier.size)))].sort((a, b) => a - b).map(mailchimpSize).filter(usage => quote(mailchimp, usage).kind === 'price')
 export const comparisons: Record<'mailchimp' | 'resend', Comparison> = {
   mailchimp: {
     offer: mailchimp,
     sizes: [5_000, 25_000, 100_000].map(mailchimpSize),
     usage: 'Four campaigns a month to the whole list, 3 teammates, nothing received.',
     lead: 'Mailchimp prices by contacts. Nightmail prices by email.',
-    theirs: [
-      { text: 'Automation flows', source: read(MAILCHIMP, 'visual automation flows (Essentials up to 4 flow steps; Standard/Premium up to 200 flows)') },
-      { text: 'Sign-up forms and landing pages', source: read(MAILCHIMP, 'forms and landing pages') },
-      { text: 'A/B testing', source: read(MAILCHIMP, 'A/B testing, multivariate testing (Standard+)') },
-      { text: 'Phone support on Premium', source: read(MAILCHIMP, 'phone and priority support and dedicated onboarding (Premium)') },
-    ],
     ours: [
       { short: 'Contacts at no charge', text: 'No charge for contacts. Mailchimp counts unsubscribed contacts too, at the month’s highest number.', source: read('https://mailchimp.com/help/about-mailchimp-pricing-plans/', '"Subscribed, unsubscribed, and non-subscribed contacts are included in your contact count." … "If your contact total increases beyond your contact limit at any time during your monthly billing cycle, we won’t interrupt your service. Instead, you’ll see an additional charge on your bill."') },
       { short: 'Teammates at no charge', text: `No charge for teammates. Mailchimp Essentials includes ${mailchimp.plans[1]!.seats!.count} seats and Standard ${mailchimp.plans[2]!.seats!.count}.`, source: mailchimpSeats(3).source },
@@ -305,10 +279,6 @@ export const comparisons: Record<'mailchimp' | 'resend', Comparison> = {
     sizes: [{ contacts: 0, sent: 10_000, received: 0, seats: 1 }, { contacts: 0, sent: 100_000, received: 0, seats: 1 }, { contacts: 0, sent: 1_000_000, received: 0, seats: 1 }],
     usage: 'Emails sent a month, one recipient each, nothing received.',
     lead: 'Resend sells a monthly allowance of email. Nightmail charges for each email.',
-    theirs: [
-      { text: 'Automations, 10,000 runs a month on paid plans', source: read(RESEND, 'All paid plans include 10,000 Automation Runs per month.') },
-      { text: 'Dedicated IPs, $30 a month on Scale', source: read(RESEND, 'Dedicated IPs - $30 / mo') },
-    ],
     ours: [
       { text: `Received email has its own ${formatCount(nightmail.freeReceived)} free a month. Resend counts it against the sending allowance.`, source: resendReceived },
       { text: 'No charge per inbox. Resend includes 3 and charges $1 a month for each one after that.', source: read(RESEND, 'Every plan includes 3 inboxes. Paid plans can enable pay-as-you-go to add more at $1 per inbox per month') },

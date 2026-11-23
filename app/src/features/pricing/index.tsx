@@ -1,5 +1,5 @@
 import { use, useEffect, useLayoutEffect, type ReactNode } from 'react'
-import { Link, NavLink, useLocation, useParams, useSearchParams } from 'react-router'
+import { Link, NavLink, useParams } from 'react-router'
 import { ThemeToggle } from '../../components/ThemeToggle'
 import { NightmailWordmark } from '../../components/NightmailLogo'
 import { EmptyState } from '../../components/ui'
@@ -7,7 +7,7 @@ import { productName } from '../../../../api/src/brand'
 import { Calculator, Compare } from './content'
 import { PRICE_PAGES } from './pages'
 import { comparisons } from './prices'
-import { MailchimpTake } from './takes'
+import { MailchimpComparison } from './mailchimp'
 import './pricing.css'
 
 // Public pages, no sign-in: the price calculator (/pricing) and one comparison per competitor (/compare/:vendor). Not
@@ -22,14 +22,9 @@ const fontsReady = Promise.race([
 
 function PriceFrame({ title, children }: { title: string; children: ReactNode }) {
   use(fontsReady)
-  const { hash } = useLocation()
   useEffect(() => { document.title = `${title} · ${productName.toLowerCase()}` }, [title])
-  // A page opens at its top, or at the section its link names.
-  useLayoutEffect(() => {
-    const target = hash ? document.getElementById(decodeURIComponent(hash.slice(1))) : null
-    if (target) target.scrollIntoView({ block: 'start' })
-    else window.scrollTo(0, 0)
-  }, [title, hash])
+  // A page opens at its top.
+  useLayoutEffect(() => { window.scrollTo(0, 0) }, [title])
   return <div className="price-page">
     <header className="price-header">
       <Link className="wordmark" to="/" aria-label={`${productName.toLowerCase()} home`}><NightmailWordmark /></Link>
@@ -53,9 +48,7 @@ export function ComparePage() {
   const { vendor } = useParams()
   const comparison = vendor === 'mailchimp' || vendor === 'resend' ? comparisons[vendor] : null
   const page = PRICE_PAGES.find(p => p.path === `/compare/${vendor}`)
-  // Two takes on the Mailchimp page wait for a choice (takes.tsx); without ?take the page is the one it has been.
-  const take = useSearchParams()[0].get('take')
   return <PriceFrame title={page?.title ?? 'Page not found'}>
-    {vendor === 'mailchimp' && (take === 'a' || take === 'b') ? <MailchimpTake key={take} take={take} /> : comparison ? <Compare key={vendor} comparison={comparison} /> : <EmptyState headingAs="h1" title="Page not found" action={<Link to="/pricing">Price calculator</Link>} />}
+    {vendor === 'mailchimp' ? <MailchimpComparison /> : comparison ? <Compare key={vendor} comparison={comparison} /> : <EmptyState headingAs="h1" title="Page not found" action={<Link to="/pricing">Price calculator</Link>} />}
   </PriceFrame>
 }
