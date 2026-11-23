@@ -31,7 +31,7 @@ export function FlowPanel({ entry, lookup, overview, onEdit, onCreate, mailLink 
     entry?.address?.id,
     ...(Array.isArray(entry?.route?.to) ? entry.route.to : []),
     ...(entry?.to ?? []).map(t => t.id),
-    ...(outcome?.recipient?.mailboxes ?? []),
+    ...(outcome?.recipient?.inboxes ?? []),
   ].filter((id): id is string => Boolean(id && id.startsWith('mbx_')))
   const resolved = useResolvedAddresses(referencedIds, addresses.data ?? [])
   const knownAddresses = mergeAddresses(resolved.items, addresses.data ?? [])
