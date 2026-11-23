@@ -135,6 +135,7 @@ export function cidImageSources(html: string): Set<string> {
   return ids
 }
 const rasterTypes = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp'])
+export const isRasterType = (type: string) => rasterTypes.has(type.toLowerCase())
 function rasterBytesMatch(bytes: Uint8Array, type: string): boolean {
   const ascii = (start: number, end: number) => String.fromCharCode(...bytes.slice(start, end))
   if (type === 'image/png') return bytes[0] === 0x89 && ascii(1, 4) === 'PNG' && bytes[4] === 13 && bytes[5] === 10 && bytes[6] === 26 && bytes[7] === 10

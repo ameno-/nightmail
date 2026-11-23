@@ -32,7 +32,7 @@ import { draftAttachments } from './composer-content'
 import { composer as composerChunk, EmailComposer } from './composer-chunk'
 import { ChunkFallback } from '../../lib/preloadable'
 import { CampaignSenderInput, SenderLines } from './CampaignSenderInput'
-import { CampaignAttachments, type CampaignAttachmentsRef } from './CampaignAttachments'
+import { AttachmentList, CampaignAttachments, type CampaignAttachmentsRef } from './CampaignAttachments'
 import { campaignVersion, useCampaignSync } from './useCampaignSync'
 import { ComposerSkeleton } from './skeletons'
 import { composerLoading, invalidSender } from './copy'
@@ -379,7 +379,7 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
             </div>
           </div>
           <ChunkFallback.Provider value={<ComposerSkeleton />}><EmailComposer key={generation} ref={composer} personalize attachmentIds={form.attachments ?? []} initialHtml={form.html} disabled={controlsDisabled} onReady={handleComposerReady} onDirty={handleComposerDirty} onBusy={value => {busyRef.current = value || attachmentsBusy || guard.current || loadingLatest; setComposerBusy(value); if (value) markDirty()}} onAttach={() => {markDirty(); attachments.current?.open()}} /></ChunkFallback.Provider>
-          <CampaignAttachments key={`attachments:${generation}`} ref={attachments} ids={form.attachments ?? []} persisted={form.draft?.attachments ?? []} onChange={ids => change('attachments', ids)} onBusy={value => {busyRef.current = value || guard.current || loadingLatest; setAttachmentsBusy(value)}} disabled={preparing || autosaving || saveMutation.isPending || composerBusy || loadingLatest || readOnly} />
+          <CampaignAttachments key={`attachments:${generation}`} ref={attachments} ids={form.attachments ?? []} persisted={form.draft?.attachments ?? []} body={form.draft?.html ?? form.html} shown={composerReady} onChange={ids => change('attachments', ids)} onBusy={value => {busyRef.current = value || guard.current || loadingLatest; setAttachmentsBusy(value)}} disabled={preparing || autosaving || saveMutation.isPending || composerBusy || loadingLatest || readOnly} />
           {/* Every contact has an email, so {{email}} needs no fallback and no row. */}
           {fallbackKeys.length > 0 && <section className="campaign-personalize" aria-labelledby="campaign-personalize-title">
             <h2 className="campaign-personalize__lead" id="campaign-personalize-title">Fallbacks</h2>
@@ -795,6 +795,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
                 {campaign.replyTo.length > 0 && <><dt>Reply to</dt><dd><AddressList values={campaign.replyTo} /></dd></>}
                 <dt>Subject</dt><dd>{campaign.subject || <span className="muted">Not set</span>}</dd>
                 {campaign.previewText && <><dt>Inbox preview</dt><dd>{campaign.previewText}</dd></>}
+                {(campaign.attachments?.length ?? 0) > 0 && <><dt>Attached</dt><dd><AttachmentList ids={campaign.attachments!} body={campaign.html} /></dd></>}
               </dl>
               {missingFallbacks.length > 0 && <p className="review-detail review-warn">{missingFallbacks.map(key => `{{${key}}}`).join(', ')} {missingFallbacks.length === 1 ? 'needs' : 'need'} a fallback, or contacts without a value stop the send.</p>}
               {!campaign.requiredNotice && <UnsubscribePageField campaign={campaign} disabled={sendMutation.isPending} />}
