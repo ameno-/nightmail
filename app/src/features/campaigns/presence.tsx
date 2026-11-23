@@ -4,16 +4,20 @@ import { Tooltip } from '../../components/ui'
 import { useSession } from '../../data/context'
 import { initials } from '../../data/accounts'
 import { socketUrl } from '../../data/live'
-import { usePhone } from '../../lib/media'
+import { useMediaQuery } from '../../lib/media'
 import './presence.css'
 
 // Who else has this campaign open, from its room (api/src/campaign-room.ts): people with its Write or Review page open,
 // and agents that read or saved it in the last two minutes. One socket per page, which the room answers only when
-// someone joins or leaves; alone, it is a hibernated connection and a ping every 30 s the runtime answers for it.
+// someone joins or leaves; alone, it is a hibernated connection and a ping every 30 s the runtime answers for it. People
+// are known by a key the room gives them (never a user ID), and an agent's name only to those who see API keys.
 type Person = { kind: 'person'; slot: number; id: string; name: string; view: 'write' | 'review' }
 type Agent = { kind: 'agent'; id: string; name: string; at: number; ago?: number }
 export type Present = { id: string; kind: 'person' | 'agent'; name: string; view?: Person['view']; color: number }
-const AGENT_MS = 120_000, PING_MS = 30_000
+const AGENT_MS = 120_000, PING_MS = 30_000, READMIT = 4000, AGENT = 'An agent'
+// Reconnecting: exponential, with jitter so a deploy doesn't bring every tab back in the same instant, at most 30 s apart,
+// and after eight failures in a row it waits until the tab is shown again or comes back online.
+const RETRY_MAX_MS = 30_000, RETRIES = 8
 // A tab that leaves and comes straight back (Write to Review) stays on screen instead of blinking out.
 const LEAVE_MS = 1500
 /** A person's colour, the same in every browser: one of the eight in presence.css. */
@@ -24,22 +28,25 @@ export function useCampaignPresence(campaignId: string | null | undefined, view:
   const enabled = Boolean(campaignId && identity?.presence)
   // By slot. A slot is reused once free, so a delayed leave removes only the person who left (the same object).
   const people = useRef(new Map<number, Person>()), [version, changed] = useReducer((n: number) => n + 1, 0)
+  // This person's key in the room (hello's self): their other tabs are not someone else.
+  const [self, setSelf] = useState<string | null>(null)
   const [agents, setAgents] = useState<ReadonlyMap<string, Agent>>(new Map())
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     if (!enabled || !campaignId) return
-    let socket: WebSocket | null = null, stopped = false, failures = 0
+    let socket: WebSocket | null = null, stopped = false, failures = 0, resting = false
     let retry: ReturnType<typeof setTimeout> | undefined, ping: ReturnType<typeof setInterval> | undefined
     const leaving = new Set<ReturnType<typeof setTimeout>>()
     const connect = () => {
       const ws = socket = new WebSocket(socketUrl(`/v1/campaigns/${encodeURIComponent(campaignId)}/room`, { view }))
-      ws.onopen = () => { failures = 0; ping = setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.send('ping') }, PING_MS) }
+      ws.onopen = () => { failures = 0; resting = false; ping = setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.send('ping') }, PING_MS) }
       ws.onmessage = ({ data }) => {
         if (typeof data !== 'string' || data === 'pong') return
-        let message: { type?: string; peers?: (Person | Agent)[]; peer?: Person | Agent; slot?: number }
+        let message: { type?: string; self?: string; peers?: (Person | Agent)[]; peer?: Person | Agent; slot?: number }
         try { message = JSON.parse(data) } catch { return }
         const { peer } = message
         if (message.type === 'hello') {
+          setSelf(message.self ?? null)
           people.current = new Map((message.peers ?? []).filter((item): item is Person => item.kind === 'person').map(item => [item.slot, item])); changed()
           setAgents(new Map((message.peers ?? []).filter((item): item is Agent => item.kind === 'agent').map(item => [item.id, { ...item, at: Date.now() - Math.max(0, item.ago ?? 0) }])))
         } else if (message.type === 'join' && peer?.kind === 'person') { people.current.set(peer.slot, peer); changed() }
@@ -50,16 +57,23 @@ export function useCampaignPresence(campaignId: string | null | undefined, view:
           leaving.add(timer)
         }
       }
-      ws.onclose = () => {
+      ws.onclose = ({ code }) => {
         clearInterval(ping)
         if (stopped) return
+        // The admission ran out (the room asks every tab to join again now and then): straight back, faces kept.
+        if (code === READMIT) { retry = setTimeout(connect, Math.random() * 300); return }
         people.current = new Map(); changed()
-        retry = setTimeout(connect, Math.min(30_000, 1000 * 2 ** failures++))
+        if (failures >= RETRIES) { resting = true; return }
+        retry = setTimeout(connect, Math.min(RETRY_MAX_MS, 1000 * 2 ** failures++) * (0.5 + Math.random() / 2))
       }
     }
+    // After the retries ran out: try again when the tab is shown or the network returns.
+    const wake = () => { if (resting && document.visibilityState === 'visible') { resting = false; failures = 0; connect() } }
+    document.addEventListener('visibilitychange', wake); window.addEventListener('online', wake); window.addEventListener('focus', wake)
     connect()
     return () => {
       stopped = true; clearTimeout(retry); clearInterval(ping); leaving.forEach(clearTimeout)
+      document.removeEventListener('visibilitychange', wake); window.removeEventListener('online', wake); window.removeEventListener('focus', wake)
       socket?.close(1000)
       people.current = new Map(); changed(); setAgents(new Map())
     }
@@ -71,7 +85,6 @@ export function useCampaignPresence(campaignId: string | null | undefined, view:
     const timer = setTimeout(() => setNow(Date.now()), Math.max(0, next - Date.now()) + 50)
     return () => clearTimeout(timer)
   }, [agents, now])
-  const self = identity?.id
   // In the order they arrived, so a face that arrives goes at the end and none of the others moves.
   const arrival = useRef(new Map<string, number>()), next = useRef(0)
   return useMemo(() => {
@@ -90,20 +103,29 @@ export function useCampaignPresence(campaignId: string | null | undefined, view:
   }, [version, agents, now, self])
 }
 
-/** Faces of the people and agents also in this campaign: three at most on a computer, then a count. A phone's bar has room
- *  for one face, which counts everyone else in its corner. */
-export function CampaignPresence({ present }: { present: Present[] }) {
-  const phone = usePhone()
-  if (!present.length) return null
-  const describe = (item: Present) => item.kind === 'agent' ? `${item.name} · agent` : item.view === 'review' ? `${item.name} · on Review` : item.name
+/** Faces of the people and agents also in this campaign: three and then a count on a wide screen. Where the bar is
+ *  narrower (1,100 px and less, phones), one face that counts everyone else in its corner, in a place kept for it
+ *  whenever the page has a room (room), so nobody arriving moves the bar. */
+export function CampaignPresence({ present, room }: { present: Present[]; room: boolean }) {
+  const compact = useMediaQuery('(max-width: 1100px)'), reserve = Boolean(useSession()?.identity?.presence && room && compact)
+  // Wide: three places, each face keeping its own until it leaves; someone arriving takes the first free one (then a
+  // count). A place freed between two faces stays empty, so nobody else moves; the outermost free ones close up.
+  const places = useRef<(string | null)[]>([])
+  const keys = present.map(item => item.kind + item.id)
+  let kept = places.current.map(key => key && keys.includes(key) ? key : null)
+  for (const key of keys) if (!kept.includes(key)) { const free = kept.indexOf(null); if (free !== -1) kept[free] = key; else if (kept.length < 3) kept.push(key) }
+  while (kept.length && kept.at(-1) === null) kept = kept.slice(0, -1)
+  places.current = kept
+  if (!present.length) return reserve ? <div className="campaign-presence" data-reserve aria-hidden="true" /> : null
+  const describe = (item: Present) => item.kind === 'agent' ? item.name === AGENT ? AGENT : `${item.name} · agent` : item.view === 'review' ? `${item.name} · on Review` : item.name
   const face = (item: Present, others = 0) => <Tooltip key={item.kind + item.id} content={others ? present.map(describe).join(', ') : describe(item)}>
     <span className="campaign-presence__face" data-kind={item.kind} data-color={item.color} aria-hidden="true">{item.kind === 'agent' ? <Bot size={14} strokeWidth={2.25} /> : initials(item.name)}{others > 0 && <span className="campaign-presence__count">+{others}</span>}</span>
   </Tooltip>
-  const shown = present.slice(0, 3), rest = present.length - shown.length
-  return <div className="campaign-presence" role="group" aria-label={`Also here: ${present.map(describe).join(', ')}`}>
-    {phone ? face(present[0]!, present.length - 1) : <>
-      {shown.map(item => face(item))}
-      {rest > 0 && <Tooltip content={present.slice(shown.length).map(describe).join(', ')}><span className="campaign-presence__face campaign-presence__more" aria-hidden="true">+{rest}</span></Tooltip>}
+  const byKey = new Map(present.map(item => [item.kind + item.id, item])), rest = present.length - kept.filter(Boolean).length
+  return <div className="campaign-presence" data-reserve={reserve || undefined} role="group" aria-label={`Also here: ${present.map(describe).join(', ')}`}>
+    {compact ? face(present[0]!, present.length - 1) : <>
+      {kept.map((key, place) => key ? face(byKey.get(key)!) : <span key={`place-${place}`} className="campaign-presence__face" data-empty aria-hidden="true" />)}
+      {rest > 0 && <Tooltip content={present.filter(item => !kept.includes(item.kind + item.id)).map(describe).join(', ')}><span className="campaign-presence__face campaign-presence__more" aria-hidden="true">+{rest}</span></Tooltip>}
     </>}
   </div>
 }

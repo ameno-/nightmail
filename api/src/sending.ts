@@ -16,7 +16,7 @@ import { actor, actorMailAccess, ApiError, AudienceSpec, denied, unrestrictedReq
 import { enqueue, JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures, wakeWebhooks } from './jobs.js';
 import { countScreened, failScheduledRelease, CAMPAIGN_ACTIVE, CAMPAIGN_RUNNING, CAMPAIGN_STATES, campaignEditable, campaignReserved, campaignResumable, cancelCampaign, failCampaign, holdCampaign, launchCampaign, noteHealthChecked, pauseCampaign, quarantineCampaign, clearProbe, skipProbe, waitProbe, queueCampaignRun, recordExpanded, recordPrepared, rescheduleCampaign, restrictToDelivered, resumeCampaign, retireCampaignRun, reviseCampaign, runningState, setCampaignPacing, startSending, unscheduleCampaign, terminalColumns, terminalEvents, wakeCampaignRun, type CampaignState } from './states.js';
 import { productName } from './brand.js';
-import { roomName } from './campaign-room-protocol.js';
+import { ADMISSION_MS, roomName } from './campaign-room-protocol.js';
 import type { CampaignScreen } from './screen.js';
 export { simulatedTopic, taggedEmailId, terminalColumns, terminalEvents };
 import { regionalSending, sendingConnections, type SendingBinding } from './domain-claims.js';
@@ -1396,14 +1396,12 @@ export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, held: 
   const receipt = await queueEmail(runtime, db, a, snapshot);
   return { emailId: receipt.id, snapshot };
 }
-/** An agent (API key or MCP) read or saved this campaign: anyone with it open sees it for two minutes (src/campaign-room.ts).
- *  After the response, and only where rooms exist (the Worker); people are in the room through their own socket. */
-function agentVisit(c: Ctx, a: Actor, campaignId: string) {
-  if (!c.env.campaignRooms || !c.env.deferNudge || !(a.credential === 'apiKey' || a.credential === 'mcp' || a.credential === 'agentToken')) return;
-  c.env.deferNudge(async runtime => {
-    const name = await import('./ritual-version.js').then(({ credentialName }) => credentialName(runtime.db, a)).catch(() => null);
-    await runtime.campaignRooms?.agent(roomName(a.workspaceId, campaignId), { kind: 'agent', id: a.keyId, name: name ?? 'An agent', at: Date.now() }).catch(() => {});
-  });
+/** An agent (API key or MCP) read or saved this draft: anyone with it open sees it for two minutes (src/campaign-room.ts).
+ *  In the background, only where rooms exist (the Worker), and only for a campaign that can still be edited. People are
+ *  in the room through their own socket. */
+function agentVisit(c: Ctx, a: Actor, campaign: typeof campaigns.$inferSelect) {
+  if (!c.env.campaignRooms || !(a.credential === 'apiKey' || a.credential === 'mcp' || a.credential === 'agentToken') || campaign.archivedAt || !campaignEditable(campaign)) return;
+  c.env.campaignRooms.visit(roomName(a.workspaceId, campaign.id), a.keyId, runtime => import('./ritual-version.js').then(({ credentialName }) => credentialName(runtime.db, a)));
 }
 function editable(row: typeof campaigns.$inferSelect, revision?: number) {
   if (row.archivedAt) throw new ApiError(409, 'CAMPAIGN_ARCHIVED', 'Restore this campaign before editing, reviewing or sending it.');
@@ -1767,11 +1765,15 @@ export function registerSending(app: App) {
     const campaignId = c.req.param('id');
     const [row] = await c.env.db.select({ id: campaigns.id }).from(campaigns).where(campaignWhere(a, campaignId)).limit(1);
     if (!row) notFound('Campaign');
-    return rooms.connect(roomName(a.workspaceId, campaignId), { kind: 'person', id: a.keyId.slice('user_'.length), name: a.name?.trim() || 'A teammate', view: c.req.query('view') === 'review' ? 'review' : 'write' });
+    // The room knows each person by a key of its own, never their user ID, and shows API keys' and MCP clients' names
+    // only to those who see them in Settings (owners and admins; self-hosted, everyone).
+    const room = roomName(a.workspaceId, campaignId), key = (await digest(`${room}:${a.keyId}`)).slice(0, 16);
+    const names = !c.env.config.multiTenant || a.role === 'owner' || a.role === 'admin';
+    return rooms.connect(room, { kind: 'person', id: key, name: a.name?.trim() || 'A teammate', view: c.req.query('view') === 'review' ? 'review' : 'write', names, until: Date.now() + ADMISSION_MS });
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}', operationId: 'getCampaign', description: `The campaign with its full draft, per-status email counts and delivery progress. ${CAMPAIGN_PROGRESS_NOTE} ${readLimitNote(READ_LIMIT.campaign)}`, tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(Campaign), ...errors } }), async c => {
     const a = actor(c), row = await timed(c, 'campaign-db', () => findCampaign(c.env.db, a, c.req.valid('param').id));
-    agentVisit(c, a, row.id);
+    agentVisit(c, a, row);
     const views = await timed(c, 'campaign-counts-db', () => budgetedRead(c.env.db, db => campaignViews(c.env, a, [row], { origin: new URL(c.req.url).origin, detail: true }, db), readLimit(READ_LIMIT.campaign)));
     return c.json(Campaign.parse(views[0]!), 200);
   });
@@ -1836,7 +1838,7 @@ export function registerSending(app: App) {
       if (!revised.rows.length) throw new ApiError(409, 'CAMPAIGN_LOCKED', 'The campaign changed while it was being saved; fetch it and try again.');
       return (await findCampaign(db, a, campaignId))!;
     });
-    agentVisit(c, a, campaignId);
+    agentVisit(c, a, row);
     return c.json(Campaign.parse((await campaignViews(c.env, a, [row]))[0]!), 200);
   });
   app.openapi(createRoute({ method: 'patch', path: '/v1/campaigns/{id}/archive', operationId: 'setCampaignArchived', description: 'Archive a campaign to hide it from default lists, or restore it. Preserves its content, revision, delivery state and history. Preparing, scheduled, sending or paused campaigns must finish or be canceled before archiving. Archived campaigns cannot be edited, tested or sent until restored.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(CampaignArchive) }, responses: { 200: response(Campaign), ...errors } }), async c => {
