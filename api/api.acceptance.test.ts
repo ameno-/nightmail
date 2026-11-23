@@ -14812,6 +14812,25 @@ describe('Dashboard API capabilities', () => {
     });
   });
 
+  test('campaign planning rate: a shared workspace plans at a quarter of the pooled SES rate, an exempt one at the full rate, and a BYO account at its own', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const wid = runtime.config.workspaceId, pool = '111122224444', own = '444455557777', byo = unique('byo-rate-');
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:feedback`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, pool]);
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1)', [byo]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,external_id,template_version,role_arn,platform_principal_arn,feedback_topic_arn)
+        VALUES ($1,$1,$2,'ready','byo',$3,gen_random_uuid(),'v4','fixture-role','fixture-platform',$4)`, [byo, REGION, own, `arn:aws:sns:${REGION}:${own}:feedback`]);
+      await db.query(`INSERT INTO provider_account_limits(aws_account_id,region,refresh_after,checked_at,max_send_rate,max_24_hour_send,sent_last_24_hours) VALUES ($1,$3,now(),now(),200,1000000,0),($2,$3,now(),now(),14,50000,0)`, [pool, own, REGION]);
+      // What the release planner reads: the rate, and beside it the daily quota, which is never divided.
+      const planned = async () => Object.fromEntries((await db.query('SELECT workspace_id,max_send_rate,max_24_hour_send FROM regional_workspace_limits WHERE workspace_id=ANY($1)', [[wid, byo]])).rows.map(r => [r.workspace_id, [r.max_send_rate, r.max_24_hour_send]]));
+      assert.deepEqual(await planned(), { [wid]: [50, 1000000], [byo]: [14, 50000] }, 'A shared workspace plans at a quarter of the pool account\'s rate.');
+      await db.query('UPDATE workspaces SET exempt_hosted_quotas=true WHERE id=$1', [wid]);
+      assert.deepEqual(await planned(), { [wid]: [200, 1000000], [byo]: [14, 50000] }, 'Exempt from hosted quotas: the full pooled rate. The BYO account is unchanged.');
+      await db.query('UPDATE workspaces SET exempt_hosted_quotas=false WHERE id=$1', [wid]);
+      assert.deepEqual((await planned())[wid], [50, 1000000], 'The flag off again: the quarter again.');
+    });
+  });
+
   test('sender score: the growth pace is for new senders only: an operator override or a clean track record SES accepted before the pace existed skips it, once and audited; later acceptances, seeds, one recipient or domain and bounces do not', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
       const { refreshStanding } = await import('./src/standing.js');
