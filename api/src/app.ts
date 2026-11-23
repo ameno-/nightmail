@@ -14,13 +14,14 @@ import { countEnqueued } from './jobs.js';
 import { authenticatedCreates } from './idempotency.js';
 import { addresses, clientIpHeader, headerPrefix, healthService, productName, requestHeaderNames } from './brand.js';
 
-type RouteGroup = 'analytics' | 'auth-ui' | 'mcp' | 'auth' | 'operator' | 'support' | 'audience' | 'audience-query' | 'newsletters' | 'templates' | 'sending-emails' | 'sending-other' | 'ops-domains' | 'ops-events' | 'ops-other' | 'ses-regions' | 'mailbox' | 'workspaces' | 'provider-connections' | 'public-stats' | 'overview' | 'billing';
+type RouteGroup = 'analytics' | 'disk-alert' | 'auth-ui' | 'mcp' | 'auth' | 'operator' | 'support' | 'audience' | 'audience-query' | 'newsletters' | 'templates' | 'sending-emails' | 'sending-other' | 'ops-domains' | 'ops-events' | 'ops-other' | 'ses-regions' | 'mailbox' | 'workspaces' | 'provider-connections' | 'public-stats' | 'overview' | 'billing';
 // Internal areas: /v1/operator/* answers only Nightmail operators and /v1/support/* only support grants (src/support.ts).
 const operatorPath = (pathname: string) => pathname === '/v1/operator' || pathname.startsWith('/v1/operator/');
 const supportPath = (pathname: string) => pathname === '/v1/support' || pathname.startsWith('/v1/support/');
 function routeGroupFor(pathname: string): RouteGroup | null {
   if(pathname==='/internal/v1/mail')return 'mailbox';
   if (pathname === '/internal/v1/analytics') return 'analytics';
+  if (pathname === '/internal/v1/database-disk') return 'disk-alert';
   if (pathname === '/v1/public/stats') return 'public-stats';
   // Billing: balance, usage, ledger, payments, the Stripe webhook and the operator's billing tools (behind the operator gate).
   if (pathname === '/v1/billing' || pathname.startsWith('/v1/billing/') || pathname.startsWith('/v1/operator/billing/')) return 'billing';
@@ -66,6 +67,7 @@ function loadGroupRegistrar(group: Exclude<RouteGroup, 'mcp'>): Promise<(app: Ap
   return groupRegistrars[group] ??= wrapModuleLoad(async () => {
     switch (group) {
       case 'analytics': return (await import('./analytics.js')).registerAnalytics;
+      case 'disk-alert': return (await import('./disk-alert.js')).registerDiskAlert;
       case 'auth': return registerAuth;
       case 'auth-ui': {
         const [{ registerMcpAuth }, { registerDashboardAuth }] = await Promise.all([import('./mcp-auth.js'), import('./dashboard-auth.js')]);
@@ -359,8 +361,8 @@ export async function createOpenApiApp(): Promise<App> {
   registerWorkspaces(full); registerProviderConnections(full); registerMcp(full); registerPublicStats(full); registerOverviewSetup(full); registerOperator(full);
   registerAudit(full); registerSupport(full); registerSupportOperator(full); registerSupportConversations(full); registerSupportInbox(full); registerUiNotes(full);
   registerBilling(full); registerStripeWebhook(full);
-  const [{ registerSupportNotes }, { registerSupportActions }, { registerAnalytics }, { registerAbuse }, { registerAbuseAlerts }] = await wrapModuleLoad(() => Promise.all([import('./support-notes.js'), import('./support-actions.js'), import('./analytics.js'), import('./abuse-clusters.js'), import('./abuse-alerts.js')]));
-  registerSupportNotes(full); registerSupportActions(full); registerAnalytics(full); registerAbuse(full); registerAbuseAlerts(full);
+  const [{ registerSupportNotes }, { registerSupportActions }, { registerAnalytics }, { registerAbuse }, { registerAbuseAlerts }, { registerDiskAlert }] = await wrapModuleLoad(() => Promise.all([import('./support-notes.js'), import('./support-actions.js'), import('./analytics.js'), import('./abuse-clusters.js'), import('./abuse-alerts.js'), import('./disk-alert.js')]));
+  registerSupportNotes(full); registerSupportActions(full); registerAnalytics(full); registerAbuse(full); registerAbuseAlerts(full); registerDiskAlert(full);
   return full;
 }
 

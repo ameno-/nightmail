@@ -115,6 +115,8 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
       // fails lets the batch through; the per-process cap still applies.
       analyticsStorage: env.ANALYTICS ? r2Storage(env.ANALYTICS) : undefined,
       allowAnalytics: env.ANALYTICS_INGEST ? peer => env.ANALYTICS_INGEST!.limit({ key: `analytics:${peer}` }).then(r => r.success, () => true) : undefined,
+      // The database disk alert (src/disk-alert.ts): one card a minute per threshold. A limiter that fails lets the card through.
+      allowDiskAlert: env.DISK_ALERT ? key => env.DISK_ALERT!.limit({ key: `disk-alert:${key}` }).then(r => r.success, () => true) : undefined,
       placementEdge:{probesPerJob:Math.min(3,Math.floor(6/concurrency))}, deferNudge: ctx ? pending => { nudges.push(pending); } : undefined, wake: async (readyJobs = 1, immediate) => {
       if (immediate === 'webhook' && env.WEBHOOK_QUEUE) return workWake(env.WEBHOOK_QUEUE,concurrency)(readyJobs);
       if (immediate || readyJobs > concurrency) return notify(readyJobs);

@@ -124,7 +124,9 @@
     { "name": "ADMISSION", "namespace_id": "8794001", "simple": { "limit": 6000, "period": 60 } },
     { "name": "SNS_CERT_MISSES", "namespace_id": "8794002", "simple": { "limit": 60, "period": 60 } },
     // Analytics batches per client address a minute (src/analytics.ts ANALYTICS_BATCHES_PER_MINUTE).
-    { "name": "ANALYTICS_INGEST", "namespace_id": "8794003", "simple": { "limit": 60, "period": 60 } }
+    { "name": "ANALYTICS_INGEST", "namespace_id": "8794003", "simple": { "limit": 60, "period": 60 } },
+    // Database disk cards a minute per storage threshold (src/disk-alert.ts).
+    { "name": "DISK_ALERT", "namespace_id": "8794004", "simple": { "limit": 1, "period": 60 } }
   ],
   "observability": {
     "enabled": true,
