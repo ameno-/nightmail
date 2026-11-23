@@ -34381,7 +34381,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await db.query("UPDATE jobs SET status='pending', available_at=clock_timestamp() WHERE id=$1", ['campaign.run:' + camp2.id]);
         await run('campaign.run');
         const released = ok(await local('GET', `/v1/campaigns/${camp2.id}`));
-        assert.equal(released.delivery.expanded, 80, 'Campaign releases once priority lag expires even with 20m routine lag');
+        assert.equal(released.delivery.expanded, 60, 'Campaign releases all 60 non-suppressed recipients once priority lag expires even with 20m routine lag');
       } finally {
         await db.query('DELETE FROM operation_feedback_lag');
       }
