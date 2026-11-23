@@ -19,17 +19,18 @@
 -- What keeps them exact under concurrency:
 -- - A membership change reads its contact's state under FOR SHARE, and a state change holds its contact's row: the two
 --   wait for each other, so neither can miss the other's uncommitted half. Whichever commits second sees the first.
--- - Lock order is contact, then membership, and several contacts in email order. The API takes the contact's lock before
---   it changes a membership (lockContacts in src/audience.ts), so the triggers' own lock is one it already holds. A
---   statement from outside the API that deletes a membership while that contact is being deleted takes them the other
---   way round and can be chosen as a deadlock victim (40P01: rolled back whole, never miscounted).
--- - Each statement changes memberships or contacts' states, not both for the same contact: a trigger sees the table it
---   looks up as it is after its statement, so a membership added in the statement that changes its contact's state
---   would be counted by both triggers. The import was the one such statement (its upsert restores a deleted contact, and
---   added its membership); it now adds memberships in a statement of their own. A contact inserted with its membership
---   in one statement is fine: inserting a contact changes no state.
--- - Not handled, because nothing does them: an UPDATE of a membership's list or contact, a contact row deleted
---   outright, a membership written before its contact exists. The daily recount would report all of these.
+-- - Lock order is contact, then membership, and several contacts in email order: the triggers lock theirs in that order,
+--   as imports, SES feedback and lockContacts (src/audience.ts) do. The API takes the contact's lock before it changes
+--   a membership, so the triggers' lock is one it already holds. A statement from outside the API that deletes a
+--   membership while that contact is being deleted takes them the other way round and can be chosen as a deadlock
+--   victim (40P01: rolled back whole, never miscounted).
+-- - A trigger sees the other table as it is after its statement. The one statement that changes a contact's state and
+--   adds its membership is the import (its upsert restores a deleted contact): the membership trigger counts the new
+--   membership, and the contact trigger leaves out the memberships its own statement added (below). So the counts are
+--   right with the release before this migration too, during a deploy and after a rollback.
+-- - Not handled, because nothing does them: one statement that changes a contact's consent or suppression and adds or
+--   removes that contact's memberships, an UPDATE of a membership's list or contact, a contact row deleted outright, a
+--   membership written before its contact exists. The daily recount would report all of these.
 -- - reconcile_audience_list_counts(workspace, list) counts a list the old way and stores the difference, if there is
 --   one, in a single statement: both sides are read in one snapshot, so it is right at any moment, with writes running,
 --   and it locks nothing a write waits for. The hourly upkeep runs it for every list once a day and logs
@@ -70,20 +71,18 @@ CREATE FUNCTION audience_contact_state(deleted_at timestamptz, suppressed boolea
   SELECT CASE WHEN deleted_at IS NOT NULL THEN NULL WHEN suppressed THEN 'suppressed' ELSE marketing_consent END
 $$;
 
--- How a trigger joins the rows a statement changed to the table it looks them up in. With statistics that describe a
--- table larger than the statement, one index probe per row: time in proportion to the change, whatever the table's size.
--- Otherwise the statistics predate the rows being looked up (a first import, tables autovacuum last saw empty): the
+-- How a trigger joins the rows a statement changed to the tables it looks them up in. With statistics that describe
+-- tables larger than the statement, one index probe per row: time in proportion to the change, whatever the tables'
+-- size. Otherwise the statistics predate the rows being looked up (a first import, tables autovacuum last saw empty): the
 -- planner then rates every index the same and has picked one that reads the whole workspace per row, minutes for 50,000
 -- rows. So that statement reads the table once and joins by hash; the table is no larger than what was loaded since its
 -- last ANALYZE. The settings last until the calling trigger function returns (it names them in its SET clauses), and the
 -- joins are planned on each call (EXECUTE), never from a plan kept from a statement of another size.
-CREATE FUNCTION audience_counts_join(looked_up regclass, changed bigint) RETURNS void LANGUAGE plpgsql AS $$
+CREATE FUNCTION audience_counts_join(changed bigint, VARIADIC looked_up regclass[]) RETURNS void LANGUAGE plpgsql AS $$
+DECLARE probe boolean := (SELECT min(reltuples) FROM pg_class WHERE oid = ANY (looked_up)) > changed;
 BEGIN
-  IF (SELECT reltuples FROM pg_class WHERE oid = looked_up) > changed THEN
-    PERFORM set_config('enable_hashjoin', 'off', true), set_config('enable_mergejoin', 'off', true), set_config('enable_seqscan', 'off', true);
-  ELSE
-    PERFORM set_config('enable_nestloop', 'off', true);
-  END IF;
+  PERFORM set_config('enable_nestloop', probe::text, true), set_config('enable_hashjoin', (NOT probe)::text, true),
+    set_config('enable_mergejoin', (NOT probe)::text, true), set_config('enable_seqscan', (NOT probe)::text, true);
 END $$;
 
 CREATE FUNCTION audience_members_added() RETURNS trigger LANGUAGE plpgsql
@@ -92,12 +91,12 @@ DECLARE added_rows bigint;
 BEGIN
   SELECT count(*) INTO added_rows FROM added;
   IF added_rows = 0 THEN RETURN NULL; END IF;
-  PERFORM audience_counts_join('audience_contacts', added_rows);
-  -- The contact is found by its ID alone and locked before its workspace and state are read. A deleted contact's
-  -- membership (or one whose contact does not exist) is counted nowhere, as readLists never counted it.
+  PERFORM audience_counts_join(added_rows, 'audience_contacts');
+  -- The contact is found by its ID alone and locked, in email order, before its workspace and state are read. A deleted
+  -- contact's membership (or one whose contact does not exist) is counted nowhere, as readLists never counted it.
   EXECUTE $q$WITH seen AS MATERIALIZED (
       SELECT a.workspace_id, a.list_id, c.workspace_id AS contact_workspace, audience_contact_state(c.deleted_at, c.suppressed, c.marketing_consent) AS state
-      FROM added a JOIN audience_contacts c ON c.id = a.contact_id FOR SHARE OF c
+      FROM added a JOIN audience_contacts c ON c.id = a.contact_id ORDER BY c.workspace_id, c.email FOR SHARE OF c
     ) INSERT INTO audience_list_counts (workspace_id, list_id, subscribed, unsubscribed, unknown, suppressed)
     SELECT workspace_id, list_id, count(*) FILTER (WHERE state = 'subscribed'), count(*) FILTER (WHERE state = 'unsubscribed'),
       count(*) FILTER (WHERE state = 'unknown'), count(*) FILTER (WHERE state = 'suppressed')
@@ -112,11 +111,12 @@ BEGIN
   -- A deleted list's counts go with it: nothing is subtracted, and no contact is read, for a list that is gone.
   SELECT count(*) INTO removed_rows FROM removed r WHERE EXISTS (SELECT FROM audience_lists l WHERE l.id = r.list_id AND l.workspace_id = r.workspace_id);
   IF removed_rows = 0 THEN RETURN NULL; END IF;
-  PERFORM audience_counts_join('audience_contacts', removed_rows);
+  PERFORM audience_counts_join(removed_rows, 'audience_contacts');
   EXECUTE $q$WITH seen AS MATERIALIZED (
       SELECT r.workspace_id, r.list_id, c.workspace_id AS contact_workspace, audience_contact_state(c.deleted_at, c.suppressed, c.marketing_consent) AS state
       FROM removed r JOIN audience_contacts c ON c.id = r.contact_id
-      WHERE EXISTS (SELECT FROM audience_lists l WHERE l.id = r.list_id AND l.workspace_id = r.workspace_id) FOR SHARE OF c
+      WHERE EXISTS (SELECT FROM audience_lists l WHERE l.id = r.list_id AND l.workspace_id = r.workspace_id)
+      ORDER BY c.workspace_id, c.email FOR SHARE OF c
     ) INSERT INTO audience_list_counts (workspace_id, list_id, subscribed, unsubscribed, unknown, suppressed)
     SELECT workspace_id, list_id, 0 - count(*) FILTER (WHERE state = 'subscribed'), 0 - count(*) FILTER (WHERE state = 'unsubscribed'),
       0 - count(*) FILTER (WHERE state = 'unknown'), 0 - count(*) FILTER (WHERE state = 'suppressed')
@@ -135,16 +135,29 @@ BEGIN
       UNION ALL SELECT id, workspace_id, false, audience_contact_state(deleted_at, suppressed, marketing_consent) FROM after) versions
     GROUP BY id HAVING max(state) FILTER (WHERE prior) IS DISTINCT FROM max(state) FILTER (WHERE NOT prior)) v;
   IF contacts IS NULL THEN RETURN NULL; END IF;
-  PERFORM audience_counts_join('audience_list_members', cardinality(contacts));
+  PERFORM audience_counts_join(cardinality(contacts), 'audience_list_members');
   -- Each changed contact's memberships as they are now, moved from its old state to its new one. A deleted contact's
-  -- leave their state's count, and a restored contact's enter it.
+  -- leave their state's count.
   EXECUTE $q$INSERT INTO audience_list_counts (workspace_id, list_id, subscribed, unsubscribed, unknown, suppressed)
     SELECT ch.workspace_id, m.list_id, count(*) FILTER (WHERE ch.became = 'subscribed') - count(*) FILTER (WHERE ch.was = 'subscribed'),
       count(*) FILTER (WHERE ch.became = 'unsubscribed') - count(*) FILTER (WHERE ch.was = 'unsubscribed'),
       count(*) FILTER (WHERE ch.became = 'unknown') - count(*) FILTER (WHERE ch.was = 'unknown'),
       count(*) FILTER (WHERE ch.became = 'suppressed') - count(*) FILTER (WHERE ch.was = 'suppressed')
     FROM unnest($1, $2, $3, $4) ch(workspace_id, id, was, became) JOIN audience_list_members m ON m.workspace_id = ch.workspace_id AND m.contact_id = ch.id
-    GROUP BY ch.workspace_id, m.list_id$q$ USING workspaces, contacts, old_states, new_states;
+    WHERE ch.was IS NOT NULL GROUP BY ch.workspace_id, m.list_id$q$ USING workspaces, contacts, old_states, new_states;
+  -- A restored contact's memberships enter its state's count, except the ones this same statement added: the membership
+  -- trigger counts those. The import restores a deleted contact and adds its membership in one statement (and a release
+  -- before this migration still does, during a deploy or after a rollback); a row that statement inserted carries the
+  -- transaction and command (xmin, cmin) of the contact row it wrote.
+  IF array_position(old_states, NULL) IS NOT NULL THEN
+    PERFORM audience_counts_join(cardinality(contacts), 'audience_list_members', 'audience_contacts');
+    EXECUTE $q$INSERT INTO audience_list_counts (workspace_id, list_id, subscribed, unsubscribed, unknown, suppressed)
+      SELECT ch.workspace_id, m.list_id, count(*) FILTER (WHERE ch.became = 'subscribed'), count(*) FILTER (WHERE ch.became = 'unsubscribed'),
+        count(*) FILTER (WHERE ch.became = 'unknown'), count(*) FILTER (WHERE ch.became = 'suppressed')
+      FROM unnest($1, $2, $3, $4) ch(workspace_id, id, was, became) JOIN audience_contacts c ON c.id = ch.id
+        JOIN audience_list_members m ON m.workspace_id = ch.workspace_id AND m.contact_id = ch.id
+      WHERE ch.was IS NULL AND NOT (m.xmin = c.xmin AND m.cmin = c.cmin) GROUP BY ch.workspace_id, m.list_id$q$ USING workspaces, contacts, old_states, new_states;
+  END IF;
   RETURN NULL;
 END $$;
 
@@ -154,6 +167,7 @@ CREATE TRIGGER audience_contacts_changed AFTER UPDATE ON audience_contacts REFER
 
 -- The difference it stored, or no row when the counts were exact. One recount of a list at a time: two that read the
 -- same difference would both store it. A plan for this list's size each time, not one kept from a list of another size.
+-- A list deleted meanwhile has nothing to correct (its rows wait for the hourly fold): the same snapshot decides that.
 CREATE FUNCTION reconcile_audience_list_counts(wid text, lid text) RETURNS TABLE (subscribed integer, unsubscribed integer, unknown integer, suppressed integer) LANGUAGE plpgsql
   SET plan_cache_mode = force_custom_plan AS $$
 BEGIN
@@ -170,5 +184,6 @@ BEGIN
   INSERT INTO audience_list_counts AS n (workspace_id, list_id, subscribed, unsubscribed, unknown, suppressed)
   SELECT wid, lid, e.subscribed - s.subscribed, e.unsubscribed - s.unsubscribed, e.unknown - s.unknown, e.suppressed - s.suppressed FROM exact e, stored s
   WHERE (e.subscribed, e.unsubscribed, e.unknown, e.suppressed) IS DISTINCT FROM (s.subscribed, s.unsubscribed, s.unknown, s.suppressed)
+    AND EXISTS (SELECT FROM audience_lists l WHERE l.workspace_id = wid AND l.id = lid)
   RETURNING n.subscribed, n.unsubscribed, n.unknown, n.suppressed;
 END $$;

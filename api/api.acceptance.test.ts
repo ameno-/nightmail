@@ -10470,6 +10470,13 @@ describe('Lists, compound segments, imports and exports', () => {
     assert.equal(ok(await importInto(key, list.id, [a.email])).imported, 1);
     await counts({ total: 4, subscribed: 4 }, 'the contact restored by an import, with the consent it had');
     await exactly(db, key, other.id, { total: 1, subscribed: 1 }, 'the restored contact is back in the imported list only');
+    // The import restores the contact and adds its membership in one statement; a restore and a membership in two
+    // statements (as an import that adds memberships separately issues them) count the same.
+    ok(await http('DELETE', `/v1/contacts/${a.id}`, key.secret));
+    await counts({ total: 3, subscribed: 3 }, 'the contact deleted again');
+    await db.query('UPDATE audience_contacts SET deleted_at = NULL WHERE id = $1', [a.id]);
+    await join(db, list, a.id);
+    await counts({ total: 4, subscribed: 4 }, 'restored, then added to the list, in two statements');
     // A transaction that rolls back takes its differences with it. Inside it, the kept counts follow each statement.
     const kept = await keptCounts(db, list.id);
     await db.query('BEGIN');
@@ -10569,7 +10576,7 @@ describe('Lists, compound segments, imports and exports', () => {
   });
 
   test('list counts: locks are taken contact first and several contacts in email order, so removing a member while its contact is deleted, or a bulk change crossing SES feedback, waits instead of deadlocking', async t => {
-    const key = await keyFixture(t), a = await fixtureDatabase(t), observer = await fixtureDatabase(t);
+    const key = await keyFixture(t), a = await fixtureDatabase(t), observer = await fixtureDatabase(t), writer = await fixtureDatabase(t);
     const list = await resource(t, key.secret, '/v1/lists', { name: unique('ordered') }), wid = list.workspaceId;
     const counts = (expected: Partial<ListCounts>, label: string) => exactly(observer, key, list.id, expected, label);
     const held = async (membership: Json, work: () => Promise<void>) => {
@@ -10634,6 +10641,31 @@ describe('Lists, compound segments, imports and exports', () => {
       if (joins) expected = { total: expected.total + 2, subscribed: expected.subscribed, suppressed: expected.suppressed + 2 };
       await counts(expected, `${label} crossing SES feedback for the same two contacts`);
     }
+    // A bulk addition planned before one of its contacts was deleted is refused whole: nothing is added for the others.
+    const [stays, leaves] = await contactsFor(t, key, 2, 'subscribed') as [Json, Json], tag = unique('stale');
+    for (const person of [stays, leaves]) ok(await http('PATCH', `/v1/contacts/${person.id}`, key.secret, { name: tag }));
+    const plan = ok(await http('POST', '/v1/audience-query/plan', key.secret, { statement: `ADD contacts TO LIST '${list.id}' WHERE name = '${tag}'` }), 201);
+    assert.equal(plan.matched, 2);
+    ok(await http('DELETE', `/v1/contacts/${leaves.id}`, key.secret));
+    error(await http('POST', '/v1/audience-query/apply', key.secret, { planId: plan.id }), 409, 'STALE_AUDIENCE_PLAN');
+    assert.equal(await membershipsOf(observer, stays.id), 0);
+    await counts(expected, 'a bulk addition refused because a planned contact was deleted');
+    // Memberships written beside the API for two deleted contacts, while an import restores both in email order: the
+    // triggers lock contacts in email order too, so the writer waits for the first and holds neither.
+    const { byEmail: [x, y] } = await pair();
+    for (const person of [x, y]) ok(await http('DELETE', `/v1/contacts/${person.id}`, key.secret));
+    await a.query('BEGIN');
+    let writing: Promise<unknown>;
+    try {
+      await a.query('UPDATE audience_contacts SET deleted_at = NULL WHERE id = $1', [x.id]);
+      writing = join(writer, list, y.id, x.id);
+      await waitingOnLock(observer, 'INSERT INTO audience_list_members');
+      await a.query('UPDATE audience_contacts SET deleted_at = NULL WHERE id = $1', [y.id]);
+      await a.query('COMMIT');
+    } catch (cause) { await a.query('ROLLBACK').catch(() => {}); throw cause; }
+    await writing;
+    expected = { total: expected.total + 2, subscribed: expected.subscribed, suppressed: expected.suppressed };
+    await counts({ ...expected, unknown: 2 }, 'memberships written while their deleted contacts were being restored');
     assert.deepEqual(await recount(observer, list), []);
   });
 
@@ -10715,6 +10747,23 @@ describe('Lists, compound segments, imports and exports', () => {
     logs.length = 0;
     assert.equal(await recountLists(runtime), 0);
     assert.deepEqual(logs.filter(line => String(line.code).startsWith('AUDIENCE_LIST')), []);
+    // A list deleted while a run is under way has nothing to correct: its rows wait for the fold, and that is no difference.
+    const gone = await resource(t, key.secret, '/v1/lists', { name: unique('recount-gone') });
+    assert.equal(ok(await http('POST', `/v1/lists/${gone.id}/members`, key.secret, { contactIds: people.map(person => person.id) })).added, 4);
+    ok(await http('DELETE', `/v1/lists/${gone.id}`, key.secret));
+    const leftover = await keptCounts(db, gone.id);
+    assert.deepEqual([leftover.total, await recount(db, gone), await keptCounts(db, gone.id)], [4, [], leftover]);
+    // Each list is its own transaction with its own time limit: one whose recount cannot finish in time (here, another
+    // recount of it holds its lock) is reported and skipped, and a difference in another list is still found and corrected.
+    const stuck = await resource(t, key.secret, '/v1/lists', { name: unique('recount-stuck') }), lock = [list.workspaceId, stuck.id];
+    await db.query('INSERT INTO audience_list_counts(workspace_id,list_id,unknown) VALUES ($1,$2,3)', [list.workspaceId, list.id]);
+    await db.query(`DELETE FROM job_schedule WHERE workspace_id='maintenance:audience-list-counts'`);
+    await a.query(`SELECT pg_advisory_lock(275816, hashtext($1 || ':' || $2))`, lock);
+    try { assert.ok(await recountLists(runtime, 60_000, 1) >= 1); } finally { await a.query(`SELECT pg_advisory_unlock(275816, hashtext($1 || ':' || $2))`, lock); }
+    assert.deepEqual(logs.filter(line => line.code === 'AUDIENCE_LIST_RECOUNT_FAILED').map(({ level, list: id, databaseCode }) => ({ level, id, databaseCode })), [{ level: 'warn', id: stuck.id, databaseCode: '57014' }]);
+    assert.deepEqual(logs.filter(line => line.code === 'AUDIENCE_LIST_COUNTS_DRIFT' && line.list === list.id).map(({ level, unknown }) => ({ level, unknown })), [{ level: 'error', unknown: -3 }]);
+    assert.deepEqual(logs.filter(line => line.code === 'AUDIENCE_LISTS_RECOUNTED').map(({ level, failed }) => ({ level, failed })), [{ level: 'warn', failed: 1 }]);
+    await counts({ total: 3, subscribed: 1, unsubscribed: 2 }, 'after a run in which one list could not be counted');
   });
 
   test('list counts: migration 405 takes its lock between writers without holding other writes up, and 406 fills counts that stay right when writes land while it runs, and stores nothing when run again', async t => {
@@ -10727,20 +10776,26 @@ describe('Lists, compound segments, imports and exports', () => {
     await db.query('DELETE FROM audience_list_counts WHERE list_id=$1', [list.id]);
     assert.deepEqual(ok(await http('GET', `/v1/lists/${list.id}`, key.secret)).counts, NO_MEMBERS);
     // The fill reads one snapshot. Writes that commit after it, before the fill itself commits, add their own rows.
+    // The file's own statements: three settings that keep the join a hash join whatever the statistics say, and the fill.
     const fill = (await source('406_audience_list_counts_fill.sql')).split(/;\s*$/m).map(statement => statement.trim()).filter(Boolean);
-    assert.equal(fill.length, 1);
+    assert.deepEqual(fill.map(statement => statement.split(' ').slice(0, 3).join(' ')), ['SET LOCAL enable_nestloop', 'SET LOCAL enable_mergejoin', 'SET LOCAL work_mem', 'INSERT INTO audience_list_counts']);
     await a.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
     try {
       await a.query('SELECT 1 FROM audience_lists LIMIT 1');
       assert.equal(ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [people[2].id] })).added, 1);
       ok(await consent(key.secret, people[0].id, 'unsubscribed'));
       ok(await http('DELETE', `/v1/lists/${list.id}/members/${people[1].id}`, key.secret));
-      for (const statement of fill) await a.query(statement);
+      for (const statement of fill.slice(0, 3)) await a.query(statement);
+      const nodes: string[] = [], walk = (plan: Json) => { nodes.push(plan['Node Type']); for (const child of plan.Plans ?? []) walk(child); };
+      walk((await a.query(`EXPLAIN (FORMAT JSON) ${fill[3]}`)).rows[0]['QUERY PLAN'][0].Plan);
+      assert.deepEqual(nodes.filter(node => /Nested Loop|Merge Join/.test(node)), [], 'Memberships and contacts are joined by hash.');
+      await a.query(fill[3]!);
       await a.query('COMMIT');
     } catch (cause) { await a.query('ROLLBACK').catch(() => {}); throw cause; }
     await exactly(db, key, list.id, { total: 2, subscribed: 1, unsubscribed: 1 }, 'filled while writes landed');
     const filled = await keptCounts(db, list.id);
-    for (const statement of fill) await db.query(statement);
+    await db.query('BEGIN');
+    try { for (const statement of fill) await db.query(statement); await db.query('COMMIT'); } catch (cause) { await db.query('ROLLBACK').catch(() => {}); throw cause; }
     assert.deepEqual(await keptCounts(db, list.id), filled, 'A second fill stores nothing for a list that is already right.');
     // 405's lock: asked for 2 s at a time. A writer's open transaction makes the first attempt give up; a write that
     // queued behind that attempt goes ahead when it does; the next attempt gets the lock once the writer has committed.
@@ -22819,6 +22874,22 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // An opt-out from someone who is not a contact creates the contact, in no list.
       assert.equal((await recordUnsubscribe(runtime, wid, address(), 'rfc8058-post')).changed, true);
       await counts({ total: 4, subscribed: 2, unsubscribed: 1, suppressed: 1 }, 'an opt-out from a stranger');
+      // One bounce for two recipients, listed by SES in the reverse of their email order: the feedback job suppresses
+      // them in email order, the order imports, the feedback batch and lockContacts take contacts in, so it cannot
+      // deadlock with someone adding both to a list.
+      const tag = unique('pair'), [early, late] = [`a-${tag}@example.com`, `z-${tag}@example.com`];
+      const both = ok(await local('POST', '/v1/emails/send', mail({ to: late, cc: [early] })), 202), provider = unique('fixture-provider');
+      await db.query(`UPDATE sending_emails SET status='accepted',provider_id=$2,simulated=false,feedback_topic_arn=$3 WHERE id=$1`, [both.id, provider, topicArn]);
+      const bounce = { topicArn, region: REGION, messageId: unique('sns'), message: { eventType: 'Bounce', mail: { messageId: provider, sendingAccountId: account }, bounce: { bounceType: 'Permanent', bounceSubType: 'General', bouncedRecipients: [{ emailAddress: late }, { emailAddress: early }] } } };
+      await db.query('INSERT INTO operation_sns_receipts(topic_arn,message_id,workspace_id) VALUES($1,$2,$3)', [topicArn, bounce.messageId, wid]);
+      const query = t.mock.method(db, 'query'), suppressed: string[] = [];
+      try { await operationJobs['operation.ses']!(runtime, bounce, { id: unique('job'), attempts: 1, workspaceId: wid }); }
+      finally {
+        for (const call of query.mock.calls) { const [first, second] = call.arguments as unknown as [any, any], text = String(first?.text ?? first), values = (first?.values ?? second ?? []) as unknown[];
+          if (text.includes('INSERT INTO audience_contacts AS c')) suppressed.push(...values.filter((value): value is string => value === early || value === late)); }
+        query.mock.restore();
+      }
+      assert.deepEqual(suppressed, [early, late]);
     });
   });
 

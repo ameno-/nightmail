@@ -98,10 +98,11 @@ async function readLists(db: DbExecutor, identity: Actor, rows: ListRow[]) {
   return rows.map(row => ({ ...row, counts: byList.get(row.id) ?? { total: 0, subscribed: 0, unsubscribed: 0, unknown: 0, suppressed: 0 } }));
 }
 // A membership change reads its contact's state to count it (migration 405), so it locks the contact first, as an
-// import, a consent change and a deletion do: contact, then membership, several contacts in email order. Returns the
-// IDs that are active contacts.
+// import, a consent change and a deletion do: contact, then membership, several contacts in email order. Deleted
+// contacts are locked too (an import may be restoring one). Returns the IDs that are active contacts.
 export async function lockContacts(tx: DbExecutor, identity: Pick<Actor, 'workspaceId'>, contactIds: string[]) {
-  return (await tx.select({ id: contacts.id }).from(contacts).where(and(scope(contacts, identity), inArray(contacts.id, contactIds), isNull(contacts.deletedAt))).orderBy(asc(contacts.email)).for('share')).map(row => row.id);
+  const rows = await tx.select({ id: contacts.id, deletedAt: contacts.deletedAt }).from(contacts).where(and(scope(contacts, identity), inArray(contacts.id, contactIds))).orderBy(asc(contacts.email)).for('share');
+  return rows.filter(row => !row.deletedAt).map(row => row.id);
 }
 
 export function compileRule(rule: SegmentRule): SQL { return sql`coalesce((${compileRuleCondition(rule)}), false)`; }
@@ -413,7 +414,7 @@ export function registerAudience(app: App) {
       const [job] = await tx.select().from(imports).where(and(scope(imports, identity), eq(imports.id, importId))).limit(1).for('update'); if (!job) return notFound('Import'); if (job.status === 'committed') return { ...job, subscribed: 0 };
       // A share lock keeps the list from being changed or deleted mid-commit without serializing concurrent imports into it.
       if (job.listId) { const [list] = await tx.select().from(lists).where(and(scope(lists, identity), eq(lists.id, job.listId))).limit(1).for('share'); if (!list) notFound('List'); }
-      // One statement upserts every row, however large the import. Rows travel as a
+      // One statement upserts every row and adds list memberships, however large the import. Rows travel as a
       // single JSON parameter, so the Postgres bind-parameter limit does not cap the row count. Preview already
       // rejects duplicate emails within an import, and ORDER BY email gives overlapping concurrent imports one
       // lock order. Imported names are never null, so COALESCE keeps the stored name only when the import omits it.
@@ -427,13 +428,12 @@ export function registerAudience(app: App) {
           SELECT id, ${identity.workspaceId}, email, name, properties FROM incoming ORDER BY email
           ON CONFLICT ON CONSTRAINT audience_contacts_email_scope DO UPDATE SET name = coalesce(excluded.name, c.name), properties = c.properties || excluded.properties, deleted_at = NULL, updated_at = ${now}
           RETURNING c.id, c.email, c.properties
+        ), members AS (
+          INSERT INTO audience_list_members (workspace_id, list_id, contact_id)
+          SELECT ${identity.workspaceId}, ${job.listId}::text, id FROM upserted WHERE ${job.listId}::text IS NOT NULL
+          ON CONFLICT DO NOTHING
         )
         SELECT id, email, properties FROM upserted`)).rows : [];
-      // Memberships in a statement of their own: the upsert restores a deleted contact, and a membership added in the
-      // statement that changes its contact's state would be counted twice (migration 405).
-      if (job.listId && upserted.length) await tx.execute(sql`INSERT INTO audience_list_members (workspace_id, list_id, contact_id)
-        SELECT ${identity.workspaceId}, ${job.listId}, id FROM jsonb_array_elements_text(${JSON.stringify(upserted.map(contact => contact.id))}::jsonb) AS added(id)
-        ON CONFLICT DO NOTHING`);
       // The upsert locks every current profile, so concurrent imports cannot bypass the merged limit.
       // Rejecting here rolls back this entire commit, including memberships and restorations.
       const byEmail = new Map(upserted.map(contact => [contact.email, contact]));

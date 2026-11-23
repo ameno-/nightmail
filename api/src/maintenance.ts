@@ -421,36 +421,37 @@ export async function retentionTick(runtime: Runtime, budgetMs = SENT_BUDGET_MS)
   }
 }
 
-// Lists recounted per statement, and how long one statement may take: a list of millions takes seconds, and reads only.
-const RECOUNT_BATCH = 50, RECOUNT_STATEMENT_SECONDS = 30;
+// How long one list's recount may take: a list of millions takes seconds, and reads only.
+const RECOUNT_STATEMENT_SECONDS = 30;
 /**
  * Once a day (a durable election, as the other reconcilers), every list is counted the way readLists used to count it and
  * compared with the counts the triggers keep (reconcile_audience_list_counts, migration 405). They must agree: a
  * difference means a write changed a membership or a contact's state without its trigger's row, which is a bug, so it is
  * logged at error level with the list and the difference, and stored so the list shows the right numbers again. The recount
- * reads both sides in one snapshot and takes no lock a write waits for. Lists go in a different order each day, so a
- * budget that doesn't reach them all today reaches the rest another day. Returns how many lists it corrected.
+ * reads both sides in one snapshot and takes no lock a write waits for. Each list is its own transaction with its own
+ * time limit, so one that is too large to count in time (logged, not corrected) costs no other list its check; a list
+ * deleted since the run began has nothing to correct. Lists go in a different order each day, so a budget that doesn't
+ * reach them all today reaches the rest another day. Returns how many lists it corrected.
  */
-export async function recountLists(runtime: Runtime, budgetMs = 60_000, clock = Date.now) {
+export async function recountLists(runtime: Runtime, budgetMs = 60_000, statementSeconds = RECOUNT_STATEMENT_SECONDS, clock = Date.now) {
   const until = clock() + budgetMs;
   const { rows: lists } = await runtime.db.execute<{ workspace_id: string; id: string }>(sql`WITH elected AS (INSERT INTO job_schedule(workspace_id,next_wake_at)
       VALUES ('maintenance:audience-list-counts',now()+interval '1 day') ON CONFLICT(workspace_id) DO UPDATE SET next_wake_at=excluded.next_wake_at
       WHERE job_schedule.next_wake_at<=now() RETURNING 1)
     SELECT l.workspace_id, l.id FROM audience_lists l, elected ORDER BY md5(l.id || current_date::text)`);
   let recounted = 0, corrected = 0, failed = 0;
-  for (let start = 0; start < lists.length && clock() < until; start += RECOUNT_BATCH) {
-    const batch = lists.slice(start, start + RECOUNT_BATCH);
+  for (const list of lists) {
+    if (clock() >= until) break;
     try {
-      const { rows } = await runtime.db.transaction(async tx => {
-        await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${RECOUNT_STATEMENT_SECONDS}s'`));
-        return tx.execute<{ workspace_id: string; id: string; subscribed: number; unsubscribed: number; unknown: number; suppressed: number }>(sql`SELECT l.workspace_id, l.id, r.subscribed, r.unsubscribed, r.unknown, r.suppressed
-          FROM unnest(${sql.param(batch.map(list => list.workspace_id))}::text[], ${sql.param(batch.map(list => list.id))}::text[]) l(workspace_id, id), reconcile_audience_list_counts(l.workspace_id, l.id) r`);
+      const { rows: [difference] } = await runtime.db.transaction(async tx => {
+        await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${Math.max(1, Math.floor(statementSeconds))}s'`));
+        return tx.execute<{ subscribed: number; unsubscribed: number; unknown: number; suppressed: number }>(sql`SELECT * FROM reconcile_audience_list_counts(${list.workspace_id}, ${list.id})`);
       });
-      recounted += batch.length; corrected += rows.length;
-      for (const row of rows) log('error', { code: 'AUDIENCE_LIST_COUNTS_DRIFT', workspace: row.workspace_id, list: row.id, subscribed: row.subscribed, unsubscribed: row.unsubscribed, unknown: row.unknown, suppressed: row.suppressed });
-    } catch (error) { failed += batch.length; logError(error, { code: 'AUDIENCE_LIST_RECOUNT_FAILED' }, 'warn'); }
+      recounted++;
+      if (difference) { corrected++; log('error', { code: 'AUDIENCE_LIST_COUNTS_DRIFT', workspace: list.workspace_id, list: list.id, ...difference }); }
+    } catch (error) { failed++; logError(error, { code: 'AUDIENCE_LIST_RECOUNT_FAILED', workspace: list.workspace_id, list: list.id }, 'warn'); }
   }
-  if (lists.length) log(failed ? 'warn' : 'info', { code: 'AUDIENCE_LISTS_RECOUNTED', lists: lists.length, recounted, corrected, failed });
+  if (lists.length) log(failed || recounted < lists.length ? 'warn' : 'info', { code: 'AUDIENCE_LISTS_RECOUNTED', lists: lists.length, recounted, corrected, failed });
   return corrected;
 }
 
