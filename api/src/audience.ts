@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, eq, getTableColumns, gt, inArray, isNull, sql, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
-import { actor, ApiError, AudienceSpec, chargeBudget, unrestrictedRequired, errors, id, IdParams, json, notFound, page, PageQuery, response, rowId, security, statementTimedOut, type Actor, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
+import { actor, ApiError, AudienceSpec, budgetedRead, chargeBudget, unrestrictedRequired, errors, id, IdParams, json, notFound, page, PageQuery, readLimit, readLimitNote, response, rowId, security, statementTimedOut, type Actor, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
 import { productName } from './brand.js';
 export { AudienceSpec };
 import { contacts, consentAudit, imports, listCounts, listMembers, lists, segments, type SegmentRule } from './db/audience.js';
@@ -131,16 +131,26 @@ function compileRuleCondition(rule: SegmentRule): SQL {
 // Keep the full membership-key probe correlated even immediately after a large import,
 // before PostgreSQL has analyzed the new row distribution.
 function inList(identity: Actor, listId: string): SQL { return sql`EXISTS (SELECT 1 FROM ${listMembers} WHERE ${scope(listMembers, identity)} AND ${listMembers.listId} = ${listId} AND ${listMembers.contactId} = ${contacts.id} OFFSET 0)`; }
-function counts(rows: Array<typeof contacts.$inferSelect>) {
-  const suppressed = rows.filter(c => c.suppressed).length;
-  const unsubscribed = rows.filter(c => !c.suppressed && c.marketingConsent !== 'subscribed').length;
-  return { matched: rows.length, eligible: rows.length - suppressed - unsubscribed, suppressed, unsubscribed };
-}
-async function boundedContacts(db: DbExecutor, identity: Actor, conditions: SQL[], limit: number) {
-  if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new ApiError(422, 'AUDIENCE_LIMIT_INVALID', 'Audience limits must be between 1 and 1000.');
-  const rows = await db.select().from(contacts).where(and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)).orderBy(asc(contacts.id)).limit(limit + 1);
-  if (rows.length > limit) throw new ApiError(422, 'AUDIENCE_LIMIT_EXCEEDED', `This preview supports at most ${limit} matching contacts. Narrow the audience; no contacts were silently truncated.`);
-  return rows;
+const PREVIEW_SMALL_LIST = 5000;
+async function previewSegmentCounts(db: DbExecutor, identity: Actor, rule: SegmentRule, listId?: string) {
+  const ruleSql = compileRule(rule);
+  let fromSql: SQL;
+  if (listId) {
+    const big = await db.execute(sql`SELECT 1 FROM ${listMembers} WHERE ${scope(listMembers, identity)} AND ${listMembers.listId} = ${listId} ORDER BY ${listMembers.contactId} OFFSET ${PREVIEW_SMALL_LIST} LIMIT 1`);
+    fromSql = !big.rowCount
+      ? sql`${listMembers} JOIN ${contacts} ON ${contacts.workspaceId} = ${listMembers.workspaceId} AND ${contacts.id} = ${listMembers.contactId} WHERE ${scope(listMembers, identity)} AND ${listMembers.listId} = ${listId} AND ${isNull(contacts.deletedAt)} AND ${ruleSql}`
+      : sql`${contacts} WHERE ${scope(contacts, identity)} AND ${isNull(contacts.deletedAt)} AND ${ruleSql} AND EXISTS (SELECT 1 FROM ${listMembers} WHERE ${scope(listMembers, identity)} AND ${listMembers.listId} = ${listId} AND ${listMembers.contactId} = ${contacts.id})`;
+  } else {
+    fromSql = sql`${contacts} WHERE ${scope(contacts, identity)} AND ${isNull(contacts.deletedAt)} AND ${ruleSql}`;
+  }
+  const { rows: [row] } = await db.execute<{ matched: number; eligible: number; suppressed: number; unsubscribed: number }>(sql`
+    SELECT count(*)::int AS matched,
+      count(*) FILTER (WHERE NOT suppressed AND marketing_consent = 'subscribed')::int AS eligible,
+      count(*) FILTER (WHERE suppressed)::int AS suppressed,
+      count(*) FILTER (WHERE NOT suppressed AND marketing_consent <> 'subscribed')::int AS unsubscribed
+    FROM (SELECT ${contacts.suppressed} AS suppressed, ${contacts.marketingConsent} AS marketing_consent FROM ${fromSql} LIMIT 1001) bounded`);
+  if (row!.matched > 1000) throw new ApiError(422, 'AUDIENCE_LIMIT_EXCEEDED', 'This preview supports at most 1000 matching contacts. Narrow the audience; no contacts were silently truncated.');
+  return row!;
 }
 // One INSERT ... SELECT captures membership, consent and only referenced personalization values.
 // Keyset-paging the live audience across transactions would not be a review snapshot.
@@ -175,70 +185,102 @@ export async function countCampaignAudience(db: DbExecutor, identity: Actor, spe
     FROM ${contacts} WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)}`)).rows;
   return row!;
 }
-type SnapshotCounts = { matched: number; eligible: number; suppressed: number; unsubscribed: number; bytes: string; captured: number };
+const SNAPSHOT_MAX_MATCHED = 2_000_000, SNAPSHOT_MAX_RECIPIENT_BYTES = 1_048_576, SNAPSHOT_MAX_REVIEW_BYTES = 1_073_741_824, SNAPSHOT_CHUNK_ROWS = 100_000;
+type SnapshotCounts = { matched: number; eligible: number; suppressed: number; unsubscribed: number; bytes: string | number; captured: number; maxBytes?: number };
 function checkedSnapshot(row: SnapshotCounts, requiredNotice: boolean) {
-  if (row.matched > 2000000) throw new ApiError(422, 'AUDIENCE_LIMIT_EXCEEDED', 'Campaign reviews support at most 2,000,000 matching contacts. No recipients were truncated.');
-  if (row.captured !== row.eligible) throw new ApiError(413, 'CAMPAIGN_RECIPIENT_DATA_TOO_LARGE', 'Referenced personalization exceeds 1 GiB per review or 1 MiB per recipient.');
+  if (row.matched > SNAPSHOT_MAX_MATCHED) throw new ApiError(422, 'AUDIENCE_LIMIT_EXCEEDED', 'Campaign reviews support at most 2,000,000 matching contacts. No recipients were truncated.');
+  if (row.captured !== row.eligible || (row.maxBytes ?? 0) > SNAPSHOT_MAX_RECIPIENT_BYTES || Number(row.bytes) > SNAPSHOT_MAX_REVIEW_BYTES) throw new ApiError(413, 'CAMPAIGN_RECIPIENT_DATA_TOO_LARGE', 'Referenced personalization exceeds 1 GiB per review or 1 MiB per recipient.');
   if (!row.eligible) throw new ApiError(422, 'EMPTY_AUDIENCE', requiredNotice ? 'This campaign has no recipients who can receive email.' : 'This campaign has no eligible subscribed recipients.');
   return { matched: row.matched, eligible: row.eligible, suppressed: row.suppressed, unsubscribed: row.unsubscribed, recipientBytes: Number(row.bytes) };
 }
+// Flat SQL expressions avoid executing correlated jsonb_each/jsonb_object_agg and array_position subplans millions of times.
+function priorityRankSql(priority: z.infer<typeof AudienceSpec>['priority'], propsCol: SQL): SQL {
+  if (!priority) return sql`0::smallint`;
+  const branches = priority.values.map((val, idx) => sql`WHEN ${val} THEN ${idx + 1}`);
+  return sql`(CASE ${propsCol} ->> ${priority.property} ${sql.join(branches, sql` `)} ELSE ${priority.values.length + 1} END)::smallint`;
+}
+function recipientJsonSql(propertyKeys: string[], idCol: SQL, emailCol: SQL, nameCol: SQL, propsCol: SQL): SQL {
+  const customKeys = [...new Set(propertyKeys.filter(k => k !== 'name'))];
+  const propsExpr = customKeys.length
+    ? sql.join(customKeys.map(k => sql`(CASE WHEN ${propsCol} ? ${k} THEN jsonb_build_object(${k}::text, ${propsCol} -> ${k}) ELSE '{}'::jsonb END)`), sql` || `)
+    : sql`'{}'::jsonb`;
+  return sql`jsonb_strip_nulls(jsonb_build_object('id', ${idCol}, 'email', ${emailCol}, 'name', nullif(${propertyKeys.includes('name') ? nameCol : sql`NULL::text`}, ''), 'properties', ${propsExpr}))`;
+}
 export async function snapshotCampaignAudience(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>, reviewId: string, propertyKeys: string[], requiredNotice = false) {
   const conditions = await audienceConditions(db, identity, spec, true);
-  const matched = (range?: SQL) => sql`SELECT ${spec.priority ? sql`coalesce(array_position(ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(spec.priority.values)}::jsonb)), ${contacts.properties} ->> ${spec.priority.property}), ${spec.priority.values.length + 1})` : sql`0`} AS rank,
-        ${contacts.id}, jsonb_strip_nulls(jsonb_build_object('id', ${contacts.id}, 'email', ${contacts.email}, 'name', nullif(CASE WHEN ${propertyKeys.includes('name')} THEN ${contacts.name} END, ''),
-          'properties', ${propertyKeys.length ? sql`coalesce((SELECT jsonb_object_agg(p.key, p.value) FROM jsonb_each(${contacts.properties}) p
-            WHERE p.key = ANY(ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(propertyKeys)}::jsonb)))), '{}'::jsonb)` : sql`'{}'::jsonb`})) AS recipient,
-        ${reachable(requiredNotice)} AS eligible, ${contacts.suppressed}
-      FROM ${contacts} WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), range, ...conditions)}`;
-  // Hash the contact ID after priority rank so time-ordered UUIDv7 IDs keep the Hosted list probe's first 500 a uniform sample.
-  const ordered = sql`SELECT (row_number() OVER w)::int AS ordinal, recipient, bytes, sum(bytes) OVER w AS running_bytes
-    FROM (SELECT rank, id, recipient, octet_length(recipient::text) AS bytes FROM audience_snapshot WHERE eligible) e
-    WINDOW w AS (ORDER BY rank, hashtextextended(id, 0), id ROWS UNBOUNDED PRECEDING)`;
+  const rankExpr = priorityRankSql(spec.priority, sql`${contacts.properties}`);
+  const recipientExpr = recipientJsonSql(propertyKeys, sql`${contacts.id}`, sql`${contacts.email}`, sql`${contacts.name}`, sql`${contacts.properties}`);
   const counts = sql`count(*)::int AS matched,count(*) FILTER (WHERE eligible)::int AS eligible,
     count(*) FILTER (WHERE suppressed)::int AS suppressed,count(*) FILTER (WHERE NOT eligible AND NOT suppressed)::int AS unsubscribed`;
   // The audience's contacts and list members are joined whole, by hash, whatever the statistics say. With stale ones
   // (tables autovacuum found empty, then a list imported before the next analyze) the planner expects one row on each
   // side and compares every contact with every member in a nested loop: minutes at 50,000 members, never done at
-  // 2,000,000. The property filter inside each row is an array test, not a join, so the setting leaves it alone.
+  // 2,000,000.
   const wholeJoins = async <T extends Record<string, unknown>>(statement: SQL) => {
     await db.execute(sql`SET LOCAL enable_nestloop = off`);
     const result = await db.execute<T>(statement);
     await db.execute(sql`SET LOCAL enable_nestloop TO DEFAULT`);
     return result;
   };
-  // Bound the fast path by the base list, not an unbounded count of the filtered audience.
-  const large = await db.execute(sql`SELECT 1 FROM audience_list_members WHERE workspace_id=${identity.workspaceId} AND list_id=${spec.listId} OFFSET 50000 LIMIT 1`);
+  // Bound the fast path by the base list using the PK order so Postgres does an Index Only Scan.
+  const large = await db.execute(sql`SELECT 1 FROM audience_list_members WHERE workspace_id=${identity.workspaceId} AND list_id=${spec.listId} ORDER BY contact_id OFFSET 50000 LIMIT 1`);
   if (!large.rowCount) {
-    const { rows } = await wholeJoins<SnapshotCounts>(sql`WITH audience_snapshot AS MATERIALIZED (${matched()}), ordered AS (${ordered}),
-      captured AS (INSERT INTO sending_review_recipients(review_id,ordinal,recipient,recipient_bytes)
-        SELECT ${reviewId},ordinal,recipient,bytes FROM ordered WHERE bytes<=1048576 AND running_bytes<=1073741824 RETURNING recipient_bytes)
-      SELECT ${counts},(SELECT count(*)::int FROM captured) AS captured,(SELECT coalesce(sum(recipient_bytes),0) FROM captured) AS bytes FROM audience_snapshot`);
+    const { rows } = await wholeJoins<SnapshotCounts>(sql`WITH audience_snapshot AS MATERIALIZED (
+        SELECT ${rankExpr} AS rank, ${contacts.id} AS id, ${recipientExpr} AS recipient, ${reachable(requiredNotice)} AS eligible, ${contacts.suppressed} AS suppressed
+        FROM ${contacts} WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)}
+      ), ordered AS (
+        SELECT (row_number() OVER (ORDER BY rank, hashtextextended(id, 0), id))::int AS ordinal, recipient, octet_length(recipient::text) AS bytes FROM audience_snapshot WHERE eligible
+      ), limits AS (
+        SELECT coalesce(max(bytes), 0)::int AS max_bytes, coalesce(sum(bytes), 0)::bigint AS total_bytes FROM ordered
+      ), captured AS (
+        INSERT INTO sending_review_recipients(review_id, ordinal, recipient, recipient_bytes)
+        SELECT ${reviewId}, o.ordinal, o.recipient, o.bytes FROM ordered o, limits l
+        WHERE l.max_bytes <= ${SNAPSHOT_MAX_RECIPIENT_BYTES} AND l.total_bytes <= ${SNAPSHOT_MAX_REVIEW_BYTES}
+        RETURNING recipient_bytes
+      )
+      SELECT ${counts}, (SELECT count(*)::int FROM captured) AS captured, (SELECT coalesce(sum(recipient_bytes), 0)::bigint FROM captured) AS bytes, (SELECT max_bytes FROM limits) AS "maxBytes" FROM audience_snapshot`);
     return checkedSnapshot(rows[0]!, requiredNotice);
   }
-  // One MVCC statement snapshot for membership, consent and properties, even under
-  // READ COMMITTED. Never paginate the live audience over independent snapshots.
-  // Two large captures at a time across the installation (275812), and one of them per workspace (275815), so one
-  // workspace's launches never hold both.
+  // One MVCC statement snapshot for membership, eligibility and priority order inside launch's READ COMMITTED
+  // transaction (running launch at REPEATABLE READ would abort with 40001 whenever a concurrent direct email updates
+  // send_admission). Staging only (rank, id, eligible, suppressed) cuts temp disk ~70% (279 MB vs 935 MB at 2M) and
+  // keeps every statement well inside Hyperdrive's 60 s limit through 5M contacts; chunked inserts build recipient
+  // JSONB directly into sending_review_recipients and abort all-or-nothing on 1 MiB / 1 GiB overflow.
   if (!(await db.execute(sql`SELECT 1 WHERE pg_try_advisory_xact_lock(275815, hashtext(${identity.workspaceId}))`)).rowCount) throw new ApiError(503,'AUDIENCE_CAPTURE_BUSY','Another large audience capture is running in this workspace; retry the launch when it finishes.',undefined,true);
   if (!(await db.execute(sql`SELECT 1 WHERE pg_try_advisory_xact_lock(275812,1) OR pg_try_advisory_xact_lock(275812,2)`)).rowCount) throw new ApiError(503,'AUDIENCE_CAPTURE_BUSY','Large audience captures are busy; retry the launch.',undefined,true);
   await db.execute(sql`SET LOCAL work_mem = '64MB'`);
-  // A launch that fails after this point and is retried inside the same transaction (tests) must not trip over its own staging tables.
   await db.execute(sql`DROP TABLE IF EXISTS pg_temp.audience_snapshot, pg_temp.audience_ordered`);
-  const staged=await wholeJoins(sql`CREATE TEMP TABLE audience_snapshot ON COMMIT DROP AS ${matched()} LIMIT 2000001`);
-  if ((staged.rowCount??0)>2000000) throw new ApiError(422,'AUDIENCE_LIMIT_EXCEEDED','Campaign reviews support at most 2,000,000 matching contacts. No recipients were truncated.');
-  // One sort assigns the send order (priority, then contact ID) and the running size used for the 1 GiB cap.
-  await db.execute(sql`CREATE TEMP TABLE audience_ordered ON COMMIT DROP AS ${ordered}`);
-  await db.execute(sql`CREATE UNIQUE INDEX ON audience_ordered(ordinal); ANALYZE audience_ordered`);
-  const [{ eligibleRows }] = (await db.execute<{ eligibleRows: number }>(sql`SELECT count(*)::int AS "eligibleRows" FROM audience_ordered`)).rows as [{ eligibleRows: number }];
-  for (let from = 0; from < eligibleRows; from += 200000) {
-    await db.execute(sql`INSERT INTO sending_review_recipients(review_id, ordinal, recipient, recipient_bytes)
-      SELECT ${reviewId}, ordinal, recipient, bytes FROM audience_ordered
-      WHERE ordinal > ${from} AND ordinal <= ${from + 200000} AND bytes <= 1048576 AND running_bytes <= 1073741824`);
+  const staged = await wholeJoins(sql`CREATE TEMP TABLE audience_snapshot ON COMMIT DROP AS
+    SELECT ${rankExpr} AS rank, ${contacts.id} AS id, ${reachable(requiredNotice)} AS eligible, ${contacts.suppressed} AS suppressed
+    FROM ${contacts} WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)} LIMIT ${SNAPSHOT_MAX_MATCHED + 1}`);
+  if ((staged.rowCount ?? 0) > SNAPSHOT_MAX_MATCHED) throw new ApiError(422, 'AUDIENCE_LIMIT_EXCEEDED', 'Campaign reviews support at most 2,000,000 matching contacts. No recipients were truncated.');
+  const [{ matched, eligible, suppressed, unsubscribed }] = (await db.execute<{ matched: number; eligible: number; suppressed: number; unsubscribed: number }>(sql`SELECT ${counts} FROM audience_snapshot`)).rows;
+  if (!eligible) throw new ApiError(422, 'EMPTY_AUDIENCE', requiredNotice ? 'This campaign has no recipients who can receive email.' : 'This campaign has no eligible subscribed recipients.');
+  // Skinny sort over (smallint, text) only (~132 MB at 2M vs 430 MB JSONB sort), hashed by ID so time-ordered UUIDv7 IDs keep the Hosted list probe uniform; drop audience_snapshot immediately.
+  await db.execute(sql`CREATE TEMP TABLE audience_ordered ON COMMIT DROP AS SELECT (row_number() OVER (ORDER BY rank, hashtextextended(id, 0), id))::int AS ordinal, id FROM audience_snapshot WHERE eligible`);
+  await db.execute(sql`DROP TABLE pg_temp.audience_snapshot; CREATE UNIQUE INDEX ON audience_ordered(ordinal); ANALYZE audience_ordered`);
+  const chunkRecipientExpr = recipientJsonSql(propertyKeys, sql`c.id`, sql`c.email`, sql`c.name`, sql`c.properties`);
+  let captured = 0, totalBytes = 0, maxBytes = 0;
+  for (let from = 0; from < eligible; from += SNAPSHOT_CHUNK_ROWS) {
+    const { rows: [chunk] } = await db.execute<{ captured: number; max_bytes: number; total_bytes: string }>(sql`
+      WITH inserted AS (
+        INSERT INTO sending_review_recipients(review_id, ordinal, recipient, recipient_bytes)
+        SELECT ${reviewId}, o.ordinal, r.recipient, octet_length(r.recipient::text)
+        FROM audience_ordered o
+        JOIN audience_contacts c ON c.workspace_id = ${identity.workspaceId} AND c.id = o.id
+        CROSS JOIN LATERAL (SELECT ${chunkRecipientExpr} AS recipient) r
+        WHERE o.ordinal > ${from} AND o.ordinal <= ${from + SNAPSHOT_CHUNK_ROWS}
+        RETURNING recipient_bytes
+      )
+      SELECT count(*)::int AS captured, coalesce(max(recipient_bytes), 0)::int AS max_bytes, coalesce(sum(recipient_bytes), 0)::bigint AS total_bytes FROM inserted`);
+    captured += chunk?.captured ?? 0;
+    maxBytes = Math.max(maxBytes, chunk?.max_bytes ?? 0);
+    totalBytes += Number(chunk?.total_bytes ?? 0);
+    if (maxBytes > SNAPSHOT_MAX_RECIPIENT_BYTES || totalBytes > SNAPSHOT_MAX_REVIEW_BYTES) {
+      throw new ApiError(413, 'CAMPAIGN_RECIPIENT_DATA_TOO_LARGE', 'Referenced personalization exceeds 1 GiB per review or 1 MiB per recipient.');
+    }
   }
-  const result = await db.execute<SnapshotCounts>(sql`SELECT ${counts},
-      (SELECT count(*)::int FROM sending_review_recipients WHERE review_id = ${reviewId}) AS captured,
-      (SELECT coalesce(sum(recipient_bytes), 0)::bigint FROM sending_review_recipients WHERE review_id = ${reviewId}) AS bytes FROM audience_snapshot`);
-  return checkedSnapshot(result.rows[0]!, requiredNotice);
+  return checkedSnapshot({ matched, eligible, suppressed, unsubscribed, captured, bytes: totalBytes, maxBytes }, requiredNotice);
 }
 export async function isSuppressed(runtime: Runtime, identity: Actor, email: string): Promise<boolean> {
   const [row] = await runtime.db.select({ suppressed: contacts.suppressed }).from(contacts).where(and(scope(contacts, identity), eq(contacts.email, email.trim().toLowerCase()))).limit(1);
@@ -543,9 +585,14 @@ export function registerAudience(app: App) {
   app.openapi(createRoute({ method: 'delete', path: '/v1/segments/{id}', operationId: 'deleteSegment', tags: ['Audience'], security, request: { params: IdParams }, responses: { 200: response(Deleted), ...errors } }), async c => {
     const identity = actor(c, 'manage'), segmentId = c.req.valid('param').id; const [row] = await c.env.db.delete(segments).where(and(scope(segments, identity), eq(segments.id, segmentId))).returning(); if (!row) notFound('Segment'); return c.json({ id: segmentId, deleted: true as const }, 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/segments/{id}/preview', operationId: 'previewSegment', tags: ['Audience'], security, description: 'Bounded to 1000 matches. Unknown observation history is never classified as inactive. Counts separate suppressed and other non-consenting contacts.', request: { params: IdParams, body: json(z.object({ listId: z.string().min(1).max(120).optional() }).strict()) }, responses: { 200: response(Counts), ...errors } }), async c => {
-    const identity = actor(c), segment = await findSegment(c.env.db, identity, c.req.valid('param').id), listId = c.req.valid('json').listId;
-    const conditions = [compileRule(segment.rule)]; if (listId) { await findList(c.env.db, identity, listId); conditions.push(inList(identity, listId)); } return c.json(counts(await boundedContacts(c.env.db, identity, conditions, 1000)), 200);
+  app.openapi(createRoute({ method: 'post', path: '/v1/segments/{id}/preview', operationId: 'previewSegment', tags: ['Audience'], security, description: `Bounded to 1000 matches. Unknown observation history is never classified as inactive. Counts separate suppressed and other non-consenting contacts. ${readLimitNote(5)}`, request: { params: IdParams, body: json(z.object({ listId: z.string().min(1).max(120).optional() }).strict()) }, responses: { 200: response(Counts), ...errors } }), async c => {
+    const identity = actor(c), segmentId = c.req.valid('param').id, listId = c.req.valid('json').listId;
+    const result = await budgetedRead(c.env.db, async tx => {
+      const segment = await findSegment(tx, identity, segmentId);
+      if (listId) await findList(tx, identity, listId);
+      return previewSegmentCounts(tx, identity, segment.rule, listId);
+    }, readLimit(5));
+    return c.json(result, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/contact-imports', operationId: 'previewContactImport', tags: ['Audience'], security, description: `Persist a preview before commit. Feature limit: 5 MiB UTF-8 CSV, 50,000 rows, 100 columns per import; preview and commit a larger file in parts of that size (the dashboard does this for files up to 1,000,000 rows and 100 MiB). Map headers explicitly. Valid rows can commit alongside a retained row-error report. Imports never lift suppression; consent changes only when the commit attests it. Each workspace keeps at most ${IMPORT_OPEN_PREVIEW_CAP} uncommitted previews (oldest evicted) and allows ${IMPORT_PREVIEW_RATE_PER_MINUTE} previews per minute.`, request: { body: json(ImportInput) }, responses: { 201: response(Import), ...errors } }), async c => {
     const identity = actor(c, 'editContent'), input = c.req.valid('json');

@@ -2146,7 +2146,8 @@
             }
           },
           "matched": {
-            "type": "integer"
+            "type": "integer",
+            "description": "Exact count for SELECT count(*) or when truncated is false; otherwise the returned page size."
           },
           "truncated": {
             "type": "boolean"
@@ -24145,7 +24146,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Bounded to 1000 matches. Unknown observation history is never classified as inactive. Counts separate suppressed and other non-consenting contacts.",
+        "description": "Bounded to 1000 matches. Unknown observation history is never classified as inactive. Counts separate suppressed and other non-consenting contacts. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
         "parameters": [
           {
             "schema": {
@@ -25126,7 +25127,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Execute a bounded read-only AudienceQL SELECT against the virtual contacts schema.",
+        "description": "Execute a bounded read-only AudienceQL SELECT against the virtual contacts schema. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
         "requestBody": {
           "required": true,
           "content": {
@@ -25138,7 +25139,7 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 4000,
-                    "description": "AudienceQL statement. Supported: SELECT fields|count(*) FROM contacts [WHERE ...] [LIMIT n]; UPDATE contacts SET name|consent|properties.key = value WHERE ...; ADD contacts TO LIST 'name-or-id' WHERE ...; REMOVE contacts FROM LIST 'name-or-id' WHERE .... WHERE supports AND with =, !=, CONTAINS, IS NULL, IS NOT NULL and timestamp comparisons over id, email, name, consent, suppressed, list, segment, lastOpenAt, lastClickAt and properties.key. No raw tables, joins, comments or semicolons."
+                    "description": "AudienceQL statement. Supported: SELECT fields|count(*) FROM contacts [WHERE ...] [LIMIT n]; UPDATE contacts SET name|consent|properties.key = value WHERE ... [LIMIT n]; ADD contacts TO LIST 'name-or-id' WHERE ...; REMOVE contacts FROM LIST 'name-or-id' WHERE .... WHERE supports AND with =, !=, CONTAINS, IS NULL, IS NOT NULL and timestamp comparisons over id, email, name, consent, suppressed, list, segment, lastOpenAt, lastClickAt and properties.key. No raw tables, joins, comments or semicolons."
                   }
                 },
                 "required": [
@@ -25298,7 +25299,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Create a 15-minute immutable plan for a bounded AudienceQL bulk mutation. Does not modify contacts or memberships.",
+        "description": "Create a 15-minute immutable plan for a bounded AudienceQL bulk mutation (at most 10,000 contacts per plan; newest 25 unapplied plans kept per workspace). Does not modify contacts or memberships. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
         "requestBody": {
           "required": true,
           "content": {
@@ -25310,7 +25311,7 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 4000,
-                    "description": "AudienceQL statement. Supported: SELECT fields|count(*) FROM contacts [WHERE ...] [LIMIT n]; UPDATE contacts SET name|consent|properties.key = value WHERE ...; ADD contacts TO LIST 'name-or-id' WHERE ...; REMOVE contacts FROM LIST 'name-or-id' WHERE .... WHERE supports AND with =, !=, CONTAINS, IS NULL, IS NOT NULL and timestamp comparisons over id, email, name, consent, suppressed, list, segment, lastOpenAt, lastClickAt and properties.key. No raw tables, joins, comments or semicolons."
+                    "description": "AudienceQL statement. Supported: SELECT fields|count(*) FROM contacts [WHERE ...] [LIMIT n]; UPDATE contacts SET name|consent|properties.key = value WHERE ... [LIMIT n]; ADD contacts TO LIST 'name-or-id' WHERE ...; REMOVE contacts FROM LIST 'name-or-id' WHERE .... WHERE supports AND with =, !=, CONTAINS, IS NULL, IS NOT NULL and timestamp comparisons over id, email, name, consent, suppressed, list, segment, lastOpenAt, lastClickAt and properties.key. No raw tables, joins, comments or semicolons."
                   }
                 },
                 "required": [

@@ -683,7 +683,7 @@ export const updateSegment = <ThrowOnError extends boolean = false>(options: Opt
 });
 
 /**
- * Bounded to 1000 matches. Unknown observation history is never classified as inactive. Counts separate suppressed and other non-consenting contacts.
+ * Bounded to 1000 matches. Unknown observation history is never classified as inactive. Counts separate suppressed and other non-consenting contacts. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.
  */
 export const previewSegment = <ThrowOnError extends boolean = false>(options: Options<PreviewSegmentData, ThrowOnError>): RequestResult<PreviewSegmentResponses, PreviewSegmentErrors, ThrowOnError> => (options.client ?? client).post<PreviewSegmentResponses, PreviewSegmentErrors, ThrowOnError>({
     security: [
@@ -797,7 +797,7 @@ export const commitContactImport = <ThrowOnError extends boolean = false>(option
 });
 
 /**
- * Execute a bounded read-only AudienceQL SELECT against the virtual contacts schema.
+ * Execute a bounded read-only AudienceQL SELECT against the virtual contacts schema. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.
  */
 export const queryAudience = <ThrowOnError extends boolean = false>(options: Options<QueryAudienceData, ThrowOnError>): RequestResult<QueryAudienceResponses, QueryAudienceErrors, ThrowOnError> => (options.client ?? client).post<QueryAudienceResponses, QueryAudienceErrors, ThrowOnError>({
     security: [
@@ -822,7 +822,7 @@ export const queryAudience = <ThrowOnError extends boolean = false>(options: Opt
 });
 
 /**
- * Create a 15-minute immutable plan for a bounded AudienceQL bulk mutation. Does not modify contacts or memberships.
+ * Create a 15-minute immutable plan for a bounded AudienceQL bulk mutation (at most 10,000 contacts per plan; newest 25 unapplied plans kept per workspace). Does not modify contacts or memberships. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.
  */
 export const planAudienceMutation = <ThrowOnError extends boolean = false>(options: Options<PlanAudienceMutationData, ThrowOnError>): RequestResult<PlanAudienceMutationResponses, PlanAudienceMutationErrors, ThrowOnError> => (options.client ?? client).post<PlanAudienceMutationResponses, PlanAudienceMutationErrors, ThrowOnError>({
     security: [
