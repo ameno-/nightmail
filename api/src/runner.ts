@@ -7,6 +7,7 @@ import { jobConcurrency } from './jobs.js';
 import { hourlyUpkeep, retentionTick } from './maintenance.js';
 import { reconcileSharedConnections } from './provider-connections.js';
 import { publicStatsTick } from './public-stats.js';
+import { foldSendingTallies } from './sending-tallies.js';
 import { standingTick } from './standing.js';
 import { syncOutboundMessages } from './mailbox-send.js';
 import { scheduleHoldRelease } from './mailbox-staging.js';
@@ -51,7 +52,7 @@ try {
         // GET /v1/public/stats serves only what this writes. In the background, so dispatch never waits on it.
         if (!publicStats && Date.now() - lastPublicStats >= 60_000) {
           lastPublicStats = Date.now();
-          publicStats = publicStatsTick(runtime).then(() => standingTick(runtime)).finally(() => { publicStats = undefined; });
+          publicStats = foldSendingTallies(runtime).catch(() => log('warn', { code: 'SENDING_TALLIES_FOLD_FAILED' })).then(() => publicStatsTick(runtime)).then(() => standingTick(runtime)).finally(() => { publicStats = undefined; });
         }
         // In the background, like shared setup: retention can take minutes, and a step that keeps failing used to throw
         // here before drain() on every pass, so no job ran and no mail was dispatched until it succeeded.
