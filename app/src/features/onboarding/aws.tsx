@@ -212,7 +212,7 @@ function SettingUp({ regions }: { regions: ByoRegion[] }) {
 
 // A domain added in the connect step exists once its region is set up: then the add-domain step opens its records.
 export function PendingDomain({ name, onFound }: { name: string; onFound: (id: string | null) => void }) {
-  const domains = useApiQuery(['domains', 'onboarding-aws', name], (api, signal) => api.domains.list({ page: 1, pageSize: 20 }, signal), { interval: 2000 })
+  const domains = useApiQuery(['domains', 'onboarding-aws', name], (api, signal) => api.domains.list({ page: 1, pageSize: 20, refresh: false }, signal), { interval: 2000 })
   const found = domains.data?.items.find(domain => domain.name === name)
   useEffect(() => { if (found) onFound(found.id) }, [found?.id]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { const timer = setTimeout(() => onFound(null), 120_000); return () => clearTimeout(timer) }, []) // eslint-disable-line react-hooks/exhaustive-deps

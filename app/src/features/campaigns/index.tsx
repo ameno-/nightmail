@@ -433,18 +433,83 @@ function TestEmailDialog({ campaign, open, onOpenChange }: { campaign: Campaign;
   </Dialog>
 }
 
+// Lightweight controls when GET /v1/campaigns/{id} fails (e.g. 422 READ_TOO_LARGE on a 1.8M send):
+// reads GET /v1/campaigns/{id}/state (single row, no counts) so Pause, Resume, Unschedule and Cancel stay usable.
+function CampaignControlFallback({ id, state, error, refreshing, onRetry }: { id: string; state: import('../../data/types').CampaignState; error: unknown; refreshing: boolean; onRetry: () => void }) {
+  const api = useApi()
+  const cache = useQueryClient()
+  const toast = useToast()
+  const { canAdminister } = useWorkspaceAccess()
+  const [confirm, setConfirm] = useState<'cancel' | 'unschedule' | null>(null)
+  const [busy, setBusy] = useState<'pause' | 'resume' | 'unschedule' | 'cancel' | null>(null)
+  const [actionError, setActionError] = useState('')
+  const active = ['preparing', 'sending'].includes(state.status)
+  const paused = state.status === 'paused' || state.status === 'failed'
+  const scheduled = state.status === 'scheduled'
+  const cancellable = !state.archivedAt && (active || paused)
+  async function run(kind: 'pause' | 'resume' | 'unschedule', call: () => Promise<Campaign>, message: string) {
+    setBusy(kind); setActionError('')
+    try {
+      const next = await call()
+      toast(message, 'success')
+      cache.setQueryData(['nightmail', 'campaign', id], next)
+      void cache.invalidateQueries({ queryKey: ['nightmail', 'campaign-state', id] })
+      void cache.invalidateQueries({ queryKey: ['nightmail', 'campaigns'], refetchType: 'none' })
+    } catch (cause) { setActionError(errorText(cause)) }
+    finally { setBusy(null) }
+  }
+  async function cancel() {
+    setBusy('cancel'); setActionError('')
+    try {
+      const result = await api.campaigns.cancel(id)
+      toast(`Campaign canceled · ${number(result.canceled)} not sent`, 'success')
+      setConfirm(null)
+      void cache.invalidateQueries({ queryKey: ['nightmail', 'campaign-state', id] })
+      void cache.invalidateQueries({ queryKey: ['nightmail', 'campaign', id] })
+      void cache.invalidateQueries({ queryKey: ['nightmail', 'campaigns'], refetchType: 'none' })
+    } catch (cause) { setActionError(errorText(cause)) }
+    finally { setBusy(null) }
+  }
+  return <div className="campaign-review">
+    <CampaignBar back={state.archivedAt ? '/campaigns?archived=true' : '/campaigns'} title={<h1 className="studio-title">Campaign</h1>}
+      actions={<><Link className="ui-button ui-button--secondary ui-button--md" to={campaignLogs(id)}>View logs</Link><StatusBadge status={campaignDisplayStatus(state)} /></>} />
+    <div className="campaign-review__body stack">
+      <div className="campaign-scheduled" data-tone="warning" role="status">
+        <div className="campaign-scheduled__text">
+          <strong>Live counts unavailable</strong>
+          <span className="muted">{errorText(error, 'Couldn’t load campaign counts.')}</span>
+        </div>
+        <div className="cluster">
+          {active && canAdminister && <Button variant="secondary" size="sm" loading={busy === 'pause'} disabled={busy !== null} onClick={() => void run('pause', () => api.campaigns.pause(id), 'Sending paused')}>Pause</Button>}
+          {paused && canAdminister && <Button variant="primary" size="sm" loading={busy === 'resume'} disabled={busy !== null} onClick={() => void run('resume', () => api.campaigns.resume(id), 'Sending resumed')}>Resume</Button>}
+          {scheduled && canAdminister && <Button variant="secondary" size="sm" loading={busy === 'unschedule'} disabled={busy !== null} onClick={() => setConfirm('unschedule')}>Unschedule</Button>}
+          {cancellable && canAdminister && <Button variant="ghost" size="sm" disabled={busy !== null} onClick={() => setConfirm('cancel')}>Cancel campaign</Button>}
+          <Button variant="secondary" size="sm" loading={refreshing} disabled={busy !== null} onClick={onRetry}>Retry</Button>
+        </div>
+      </div>
+      {actionError && <p className="campaign-note" data-tone="danger" role="alert">{actionError}</p>}
+    </div>
+    <ConfirmDialog open={confirm === 'cancel'} onOpenChange={open => { if (!open) setConfirm(null) }} danger title="Cancel this campaign?" description="Queued emails are canceled and remaining recipients won’t get it. Sent emails stay sent. You can’t undo this." confirmLabel="Cancel campaign" pending={busy === 'cancel'} onConfirm={cancel} />
+    <ConfirmDialog open={confirm === 'unschedule'} onOpenChange={open => { if (!open) setConfirm(null) }} title="Unschedule this campaign?" description="It becomes a draft again and won’t send." confirmLabel="Unschedule" pending={busy === 'unschedule'} onConfirm={async () => { await run('unschedule', () => api.campaigns.unschedule(id), 'Unscheduled. The campaign is a draft again.'); setConfirm(null) }} />
+  </div>
+}
+
 export function CampaignReviewPage() {
   const { id = '' } = useParams()
   const query = useApiQuery(['campaign', id], (api, signal) => api.campaigns.get(id, signal), { interval: campaignPollInterval })
+  // If detail fails (e.g. 422 READ_TOO_LARGE on a large send), fall back to compact /state so Pause & Cancel stay usable.
+  const missingOrDenied = query.error instanceof ApiError && [401, 403, 404].includes(query.error.status ?? 0)
+  const fallbackState = useApiQuery(['campaign-state', id], (api, signal) => api.campaigns.state(id, signal), { enabled: query.isError && !query.data && !missingOrDenied })
   // The polled review learns of a finished or paused send before the cached Campaigns list does.
-  useRefreshListsOnChange('campaigns', query.data?.status)
+  useRefreshListsOnChange('campaigns', query.data?.status ?? fallbackState.data?.status)
   const stats = useCampaignStats(query.data)
   // Whether a draft may be a required notice is read beside it, so the Recipients choice is there from the first frame.
   const settings = useApiDef(queries.workspaceSettings())
   const editableDraft = Boolean(query.data && !query.data.archivedAt && campaignEditable(query.data))
-  if (query.isPending || (query.data && campaignFinished(query.data) && stats.isPending) || (editableDraft && settings.isPending)) return <CampaignRouteSkeleton kind="review" />
-  if (!query.data) return <ErrorState error={query.error} onRetry={() => query.refetch()} />
-  return <CampaignReview key={id} campaign={query.data} stale={query.isError} refreshing={query.isFetching} refresh={() => void query.refetch()} />
+  const waitingStats = Boolean(query.data && campaignFinished(query.data) && stats.isPending && stats.errorUpdateCount === 0)
+  if (query.isPending || (query.isError && !query.data && !missingOrDenied && fallbackState.isPending) || waitingStats || (editableDraft && settings.isPending)) return <CampaignRouteSkeleton kind="review" />
+  if (!query.data) return fallbackState.data ? <CampaignControlFallback id={id} state={fallbackState.data} error={query.error} refreshing={query.isFetching} onRetry={() => void query.refetch()} /> : <ErrorState error={query.error} onRetry={() => query.refetch()} />
+  return <CampaignReview key={id} campaign={query.data} stats={stats} stale={query.isError} refreshing={query.isFetching} refresh={() => void query.refetch()} />
 }
 
 // The server renders block HTML into the styled email; the review shows that rendering, not the blocks.
@@ -623,12 +688,12 @@ const day = (value: string) => date(value, { month: 'short', day: 'numeric', ...
 
 // Only the outcomes that happened, each opening its emails in Logs; opens and clicks as the newsletter's issues show them.
 // A count links only when Logs lists exactly that many: Canceled, and Recipients with some never queued, stay plain.
-function CampaignResults({ campaign }: { campaign: Campaign }) {
+function CampaignResults({ campaign, stats: statsQuery }: { campaign: Campaign; stats: ReturnType<typeof useCampaignStats> }) {
   const byStatus = campaign.counts?.byStatus ?? {}
   const total = Math.max(campaign.counts?.total ?? 0, campaign.delivery?.total ?? 0)
   // Past the email history, the per-email counts are gone: the stored totals keep the outcomes (not suppressed or canceled).
   const expired = (campaign.counts?.total ?? 0) === 0 && (campaign.delivery?.expanded ?? 0) > 0
-  const stats = useCampaignStats(campaign).data
+  const stats = statsQuery.data
   const totals = expired ? stats?.totals : undefined
   const figure = (perEmail: number, stored?: number) => expired ? stored ?? null : perEmail
   const logs = (status?: string) => expired ? undefined : campaignLogs(campaign.id, status)
@@ -650,10 +715,11 @@ function CampaignResults({ campaign }: { campaign: Campaign }) {
     <SummaryLine label={<strong>Recipients</strong>} figure={number(total)} to={campaign.counts?.total && campaign.counts.total === total ? logs() : undefined} />
     {rows.filter(row => row.always || (typeof row.count === 'number' ? row.count > 0 : Boolean(row.count))).map(row => <SummaryLine key={row.label} label={row.label}
       figure={row.count === null ? '—' : typeof row.count === 'number' ? number(row.count) : row.count} to={row.status && typeof row.count === 'number' && row.count > 0 ? logs(row.status) : undefined} />)}
+    {statsQuery.isError && <div className="campaign-summary-line muted"><span>Engagement stats unavailable</span><Button variant="ghost" size="sm" loading={statsQuery.isFetching} onClick={() => void statsQuery.refetch()}>Retry</Button></div>}
   </div>
 }
 
-function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Campaign; stale: boolean; refreshing: boolean; refresh: () => void }) {
+function CampaignReview({ campaign, stats, stale, refreshing, refresh }: { campaign: Campaign; stats: ReturnType<typeof useCampaignStats>; stale: boolean; refreshing: boolean; refresh: () => void }) {
   const navigate = useNavigate()
   // An issue goes back to its newsletter, and the sidebar marks it.
   const issueOf = useNewsletterOf(campaign.listId), thing = issueOf ? 'issue' : 'campaign'
@@ -842,7 +908,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
           {scheduledView ? <AudienceSource listId={campaign.listId} segmentId={campaign.segmentId} prefix="To " /> : <>
             <AudienceSource listId={campaign.listId} segmentId={campaign.segmentId} prefix={campaign.status === 'done' ? `Sent ${day(campaign.scheduledAt || campaign.updatedAt)} to ` : undefined} />
             <CampaignPacing key={`${campaign.id}:${campaign.delivery?.pacing?.perDay ?? ''}:${campaign.delivery?.pacing?.autoPause ?? ''}:${campaign.delivery?.pacing?.rateShare ?? ''}`} campaign={campaign} />
-            {finished ? <CampaignResults campaign={campaign} /> : campaign.counts ? <CampaignProgress campaign={campaign} /> : <div className="campaign-audience-summary"><div className="campaign-summary-line"><span>Recipients</span><span>{number(campaign.recipients)}</span></div></div>}
+            {finished ? <CampaignResults campaign={campaign} stats={stats} /> : campaign.counts ? <CampaignProgress campaign={campaign} /> : <div className="campaign-audience-summary"><div className="campaign-summary-line"><span>Recipients</span><span>{number(campaign.recipients)}</span></div></div>}
           </>}
           {scheduledView && <CampaignPacing key={`${campaign.id}:paused`} campaign={campaign} />}
         </>}

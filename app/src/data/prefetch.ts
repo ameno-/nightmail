@@ -25,7 +25,7 @@ function firstScreen(path: string, { regionId, multiTenant, canAdminister, newsl
   const newsletter = /^\/newsletters\/(?!new$)([^/]+)$/.exec(path)?.[1]
   if (newsletter) { const id = decodeURIComponent(newsletter); return [queries.newsletter(id), queries.campaigns(issuesRequest(id))] }
   switch (path) {
-    case '/overview': return scoped ? [queries.overview(regionId, '24h', 'all'), queries.senderScore(), queries.logs(latestRequest(regionId)), ...(canAdminister ? [queries.overviewSetup()] : [])] : []
+    case '/overview': return scoped ? [queries.overview(regionId, '24h', 'all'), queries.recentCampaigns(regionId), queries.senderScore(), queries.logs(latestRequest(regionId)), ...(canAdminister ? [queries.overviewSetup()] : [])] : []
     case '/logs': { const pageSize = rememberedPageSize('logs'); return scoped && pageSize ? [queries.logs({ regionId, direction: 'all', search: '', status: undefined, stream: undefined, from: rangeStart('30d'), page: 1, pageSize })] : [] }
     // Receiving is one read: addresses (routes), counts, rules, destinations (endpoints) and domains.
     case '/receiving': return [overviewQuery(firstOverview) as QueryDef<unknown>]
