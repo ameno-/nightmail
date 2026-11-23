@@ -1,0 +1,10 @@
+-- Support background chunked audience capture for large campaigns (>5,000 list members) and cached preview estimates.
+-- All columns use NULL or a constant default, so PostgreSQL 11+ applies them metadata-only with no table rewrite.
+-- Existing reviews automatically receive captured_at = now() (already captured before this migration).
+ALTER TABLE sending_campaign_reviews
+  ADD COLUMN IF NOT EXISTS captured_at timestamptz DEFAULT now(),
+  ADD COLUMN IF NOT EXISTS captured_count integer,
+  ADD COLUMN IF NOT EXISTS static_prepared boolean NOT NULL DEFAULT false;
+
+ALTER TABLE sending_campaigns
+  ADD COLUMN IF NOT EXISTS audience_estimate integer;

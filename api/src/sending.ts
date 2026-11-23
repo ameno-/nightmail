@@ -27,7 +27,7 @@ import { mailboxAddresses, mailboxKeys } from './db/mailbox.js';
 import { CustomHeaders } from './custom-headers.js';
 import { EmailThread, joinReplies, mailboxMail, sentThreadId, threadBlock, threadView, type RawThread } from './thread-view.js';
 import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, emails, type CampaignStatsGroup, type StoredCampaignStats, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
-import { AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_ATTACHMENT_BYTES, MAX_JSON_ATTACHMENT_BYTES, mib, postalAddressOf, postalAddressRequired, senderDisplayName, unsubscribePageLink, unsubscribePageUrl, validateAttachment, type AttachmentMetadataInput } from './outbound-content.js';
+import { AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_ATTACHMENT_BYTES, MAX_JSON_ATTACHMENT_BYTES, mib, postalAddressOf, postalAddressRequired, senderDisplayName, unsubscribePageLink, unsubscribePageUrl, validateAttachment, validMailAddressSql, type AttachmentMetadataInput } from './outbound-content.js';
 import { clients, type Client } from './email-preview/support.js';
 import { CheckInput, CheckResult, splitMailbox, type CheckMail } from './sendability-schema.js';
 import { withRedactedReply } from './deliverability.js';
@@ -121,7 +121,7 @@ const CAMPAIGN_SCREEN_NOTE = `Hosted campaigns are screened copy by copy before 
 // The audience is frozen inside the launch request (sending.ts launch): a large one takes seconds, and one statement of it
 // may run out of the database's time.
 const CAMPAIGN_POSTAL_NOTE = 'Every email\u2019s footer shows the workspace\u2019s postal address under the Unsubscribe link, as US law (CAN-SPAM) requires, frozen as it is now: without one the request is refused with 422 POSTAL_ADDRESS_REQUIRED (set postalAddress with updateWorkspaceSettings).';
-const CAMPAIGN_CAPTURE_NOTE = 'The audience is captured in this request, which takes seconds for a large one. A capture that runs out of time is refused with 503 AUDIENCE_CAPTURE_TIMEOUT and one that waits for other large captures with 503 AUDIENCE_CAPTURE_BUSY; both are retryable and keep nothing, so retry with the same Idempotency-Key.';
+const CAMPAIGN_CAPTURE_NOTE = 'Audiences on lists up to 5,000 members freeze inside this request; larger audiences freeze in the background during preparing so this request returns immediately. CampaignQueued.queued is recipients expected; delivery.total on GET /v1/campaigns/{id} is authoritative once the audience is frozen. Late capture failures (such as EMPTY_AUDIENCE or AUDIENCE_LIMIT_EXCEEDED) move the campaign to failed with delivery.error and leave the draft editable.';
 const captureTimedOut = () => new ApiError(503, 'AUDIENCE_CAPTURE_TIMEOUT', 'The audience capture ran out of time and nothing was kept. Retry the launch; if it keeps running out of time, send to a smaller list.', undefined, true);
 // SMTP already limits the entire MIME message to the advertised wire SIZE. Keep all
 // address, HTML and encoded-size checks, without imposing the public JSON body-part cap.
@@ -179,11 +179,11 @@ const CampaignInput = z.object({ ...CampaignDraftFields, html: BlockHtml.optiona
 const CampaignDraftView = z.object({ ...CampaignDraftFields, html: z.string().optional() }).strict().describe(CAMPAIGN_INPUT_NOTES).openapi('CampaignDraft');
 const CampaignCreate = z.object({ ...CampaignInput.shape, region: Region.optional().describe('Defaults to the installation region. With regional MX delivery, omitting region follows the From domain.'), tracking: z.boolean().optional(), templateId: z.string().regex(/^tpl_[0-9a-f]{32}$/).optional().describe('Copies the active published revision of this global campaign template into a new independent campaign draft.') }).strict().openapi('CreateCampaignInput');
 const CampaignReady = CampaignInput.extend({ from: Address, subject: Subject, audience: AudienceSpec }).refine(v => !!v.html?.trim(), { message: 'Provide html before reviewing.', path: ['html'] });
-const CampaignStateValue = z.enum(CAMPAIGN_STATES).describe('draft: editable. preparing: the audience is frozen and every message is being validated in the background. scheduled: validated and waiting for scheduledAt. sending: recipients are being released into the dispatch queue. paused: releasing stopped by the user or the health check; queued mail still dispatches. done: every recipient was released and dispatched. failed: preparation or releasing failed (delivery.error); edit or launch again. canceled: terminal.');
+const CampaignStateValue = z.enum(CAMPAIGN_STATES).describe('draft: editable. preparing: the audience is being frozen (for large lists) and every message is being validated in the background. scheduled: validated and waiting for scheduledAt. sending: recipients are being released into the dispatch queue. paused: releasing stopped by the user or the health check; queued mail still dispatches. done: every recipient was released and dispatched. failed: capture, preparation or releasing failed (delivery.error); edit or launch again. canceled: terminal.');
 const emptyCounts = () => ({ total: 0, byStatus: Object.fromEntries(Status.options.map(status => [status, 0])) as Record<EmailStatus, number> });
 const CampaignCounts = z.object({ total: z.number().int().nonnegative(), byStatus: z.record(Status, z.number().int().nonnegative()) }).describe('Counts of immutable campaign email records grouped by their current status, not cumulative provider events or delivery rates. Drafts with no queued emails have zero counts.');
 const Failure = z.object({ code: z.string(), message: z.string() });
-const Delivery = z.object({ total: z.number().int().describe('Fixed recipient count frozen at send or schedule.'), prepared: z.number().int().describe('Recipients whose message was validated.'), expanded: z.number().int().describe('Recipients materialized as immutable email records.'), canceled: z.number().int().describe('Recipients canceled before materialization. Materialized cancellations remain in counts.byStatus.canceled.'), error: Failure.nullable().describe('Why the campaign failed or was canceled by the system.'),
+const Delivery = z.object({ total: z.number().int().describe('Fixed recipient count once the audience is frozen (recipients expected while a large audience is being captured).'), prepared: z.number().int().describe('Recipients whose message was validated.'), expanded: z.number().int().describe('Recipients materialized as immutable email records.'), canceled: z.number().int().describe('Recipients canceled before materialization. Materialized cancellations remain in counts.byStatus.canceled.'), error: Failure.nullable().describe('Why the campaign failed or was canceled by the system.'),
   pacing: z.object({ perDay: z.number().int().nullable().describe('Maximum recipients released per rolling 24-hour window; null means no daily cap.'), autoPause: z.boolean().describe('Pause automatically when bounce or complaint rates exceed safe thresholds.'), rateShare: z.number().describe('Maximum fraction of the SES per-second send rate this campaign uses; 1 is the full rate.'), windowStartedAt: z.string().nullable(), windowExpanded: z.number().int().describe('Recipients released in the current 24-hour window.'), nextWindowAt: z.string().nullable().describe('When the next 24-hour window opens, when a daily cap is set.') }),
   pausedAt: z.string().nullable(), pauseReason: Failure.nullable(),
   deliveredOnly: z.boolean().describe('After a resumed list-probe quarantine: the rest goes only to contacts this workspace delivered to before; the others are counted in canceled. Never for a required notice.'),
@@ -384,7 +384,7 @@ const Pacing = z.object({ perDay: z.number().int().min(100).max(10000000).nullab
 const CampaignSend = z.object({ revision: z.number().int().positive(), pacing: Pacing.optional(),
   confirmRequiredNotice: z.literal(true).optional().describe('Required for a required notice (422 REQUIRED_NOTICE_UNCONFIRMED without it): the sender confirms it is a required notice with no promotion. Recorded with who and when. An agent asks the person first.') }).strict().openapi('CampaignSendInput');
 const CampaignSchedule = z.object({ ...CampaignSend.shape, scheduledAt: z.string().datetime({ offset: true }) }).strict().openapi('CampaignScheduleInput');
-const CampaignQueued = z.object({ id: z.string(), state: z.literal('preparing'), queued: z.number().int(), scheduledAt: z.string().nullable(), simulated: z.boolean() }).openapi('CampaignQueued');
+const CampaignQueued = z.object({ id: z.string(), state: z.literal('preparing'), queued: z.number().int().describe('Recipients expected; delivery.total is authoritative once the audience is frozen.'), scheduledAt: z.string().nullable(), simulated: z.boolean() }).openapi('CampaignQueued');
 const CampaignCanceled = z.object({ id: z.string(), state: z.literal('canceled'), canceled: z.number().int(), inFlight: z.number().int() }).openapi('CampaignCanceled');
 const TestCampaign = z.object({ to: Address, data: Data }).strict().openapi('CampaignTestInput');
 export type SendRequest = z.infer<typeof SendInput>;
@@ -760,8 +760,9 @@ function validateUrl(value: string) {
   try { url = new URL(normalized, 'https://template.invalid/'); } catch { throw new ApiError(422, 'UNSAFE_HTML_URL', 'HTML contains an invalid URL.'); }
   if (!['http:', 'https:', 'mailto:', 'tel:', 'cid:'].includes(url.protocol)) throw new ApiError(422, 'UNSAFE_HTML_URL', 'HTML URLs must use HTTP(S), mailto, tel, CID, or relative references.');
 }
-function inspectHtml(source: string, root: DefaultTreeAdapterMap['node'], template = false) {
-  const safe: { start: number; end: number }[] = [];
+type HtmlPlaceholderAnalysis = { hasUrlPlaceholder: boolean; hasAttrPlaceholder: boolean };
+function inspectHtml(source: string, root: DefaultTreeAdapterMap['node'], template = false): HtmlPlaceholderAnalysis {
+  const safe: { start: number; end: number; kind: 'text' | 'textAttr' | 'urlAttr' }[] = [];
   const stack: { node: DefaultTreeAdapterMap['node']; unsafe: boolean }[] = [{ node: root, unsafe: false }];
   while (stack.length) {
     const { node, unsafe } = stack.pop()!;
@@ -771,7 +772,7 @@ function inspectHtml(source: string, root: DefaultTreeAdapterMap['node'], templa
       const { startOffset: start, endOffset: end } = node.sourceCodeLocation;
       // HTML error recovery can coalesce text across ignored markup. Never trust such a
       // broad location as a text-only range; literal less-than signs should use &lt;.
-      if (!source.slice(start, end).includes('<')) safe.push({ start, end });
+      if (!source.slice(start, end).includes('<')) safe.push({ start, end, kind: 'text' });
     }
     if (element) {
       for (const attr of element.attrs) {
@@ -789,7 +790,7 @@ function inspectHtml(source: string, root: DefaultTreeAdapterMap['node'], templa
           const original = source.slice(location.startOffset, location.endOffset);
           // Parser offsets identify the attribute; this only checks its lexical quoting, never parses HTML.
           const quoted = original.match(/^[^\s=]+\s*=\s*(["'])/);
-          if (quoted && original.endsWith(quoted[1]!)) safe.push({ start: location.startOffset + quoted[0].length, end: location.endOffset - 1 });
+          if (quoted && original.endsWith(quoted[1]!)) safe.push({ start: location.startOffset + quoted[0].length, end: location.endOffset - 1, kind: URL_ATTRIBUTES.has(name) ? 'urlAttr' : 'textAttr' });
         }
       }
     }
@@ -798,21 +799,30 @@ function inspectHtml(source: string, root: DefaultTreeAdapterMap['node'], templa
     if ('content' in node) stack.push({ node: (node as DefaultTreeAdapterMap['template']).content, unsafe: blocked });
   }
   safe.sort((a, b) => a.start - b.start); let rangeIndex = 0;
+  let hasUrlPlaceholder = false, hasAttrPlaceholder = false;
   if (template) for (const match of source.matchAll(/{{\s*[a-zA-Z_][a-zA-Z0-9_]*\s*}}/g)) {
     while (safe[rangeIndex] && safe[rangeIndex]!.end <= match.index) rangeIndex++;
     const range = safe[rangeIndex];
     if (!range || match.index < range.start || match.index + match[0].length > range.end) throw new ApiError(422, 'UNSAFE_TEMPLATE_CONTEXT', 'Campaign placeholders require HTML text nodes or quoted URL/title/alt/aria-label/aria-description attributes. Unquoted attributes, tag names, comments, script/style, event handlers and foreign markup are unsupported.');
+    if (range.kind === 'urlAttr') hasUrlPlaceholder = true;
+    if (range.kind !== 'text') hasAttrPlaceholder = true;
   }
+  return { hasUrlPlaceholder, hasAttrPlaceholder };
 }
-function validateInterpolationTemplate(source: string | undefined, html: boolean, parse?: HtmlParser) {
-  if (!source) return;
+function validateInterpolationTemplate(source: string | undefined, html: boolean, parse?: HtmlParser): HtmlPlaceholderAnalysis {
+  if (!source) return { hasUrlPlaceholder: false, hasAttrPlaceholder: false };
   const unsupported = source.replace(/{{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*}}/g, '');
   // Nested CSS blocks legitimately end in }}. Only an unmatched opening delimiter begins unsupported template syntax.
   if (unsupported.includes('{{')) throw new ApiError(422, 'UNSUPPORTED_TEMPLATE_SYNTAX', 'Campaigns support simple {{name}} substitutions, not helpers, HTML fragments, or Liquid syntax.');
   if (html) {
     if (!parse) throw new Error('HTML parser required');
-    inspectHtml(source, parse(source, {sourceCodeLocationInfo:true}), true);
+    return inspectHtml(source, parse(source, {sourceCodeLocationInfo:true}), true);
   }
+  return { hasUrlPlaceholder: false, hasAttrPlaceholder: false };
+}
+/** Differential-test helper: validates HTML placeholders and reports whether any sit in a URL or text attribute. */
+export async function analyzeHtmlPlaceholders(html: string): Promise<HtmlPlaceholderAnalysis> {
+  return validateInterpolationTemplate(html, true, await loadParse5());
 }
 function interpolate(source: string | undefined, values: Record<string, unknown>, html: boolean, templateValidated = false, parse?: HtmlParser): string | undefined {
   if (!source) return source;
@@ -1757,7 +1767,11 @@ export function registerSending(app: App) {
     const a = actor(c), row = await findCampaign(c.env.db, a, c.req.valid('param').id);
     const audience = AudienceSpec.safeParse(row.draft.audience);
     if (!audience.success) throw new ApiError(422, 'CAMPAIGN_INCOMPLETE', 'Choose an audience list before counting recipients.', 'audience.listId');
-    return c.json(AudienceCounts.parse(await (await wrapModuleLoad(() => import('./audience.js'))).countCampaignAudience(c.env.db, a, audience.data, row.draft.requiredNotice === true)), 200);
+    const counts = await (await wrapModuleLoad(() => import('./audience.js'))).countCampaignAudience(c.env.db, a, audience.data, row.draft.requiredNotice === true);
+    if (row.audienceEstimate !== counts.eligible) {
+      await c.env.db.execute(sql`UPDATE sending_campaigns SET audience_estimate = ${counts.eligible} WHERE workspace_id = ${a.workspaceId} AND id = ${row.id}`).catch(() => {});
+    }
+    return c.json(AudienceCounts.parse(counts), 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/preview-image', operationId: 'renderCampaignPreviewImage', description: 'Renders the saved campaign draft as a full-page, 720 px wide PNG for visual review. Inline CID images are embedded; remote HTTPS images are loaded by the isolated renderer.' + PREVIEW_ROUTE_NOTE, tags: ['Campaigns'], security, request: { params: IdParams }, responses: { ...previewResponses(CampaignPreviewImage), ...errors } }), async c => {
     refuseHead(c);
@@ -1793,7 +1807,8 @@ export function registerSending(app: App) {
       await attachmentRows(db, a, input.draft.attachments, true);
       await db.delete(attachmentLinks).where(and(scope(attachmentLinks, a), eq(attachmentLinks.ownerType, 'campaign'), eq(attachmentLinks.ownerId, campaignId)));
       await linkAttachments(db, a, input.draft.attachments, 'campaign', campaignId);
-      const revised = await db.execute<typeof campaigns.$inferSelect>(reviseCampaign(campaignRef(a, campaignId), sql`,draft=${JSON.stringify(draft)}::jsonb,revision=${current.revision + 1}`));
+      const audienceChanged = JSON.stringify(draft.audience ?? null) !== JSON.stringify(current.draft.audience ?? null) || Boolean(draft.requiredNotice) !== Boolean(current.draft.requiredNotice);
+      const revised = await db.execute<typeof campaigns.$inferSelect>(reviseCampaign(campaignRef(a, campaignId), sql`,draft=${JSON.stringify(draft)}::jsonb,revision=${current.revision + 1}${audienceChanged ? sql`,audience_estimate=NULL` : sql``}`));
       if (!revised.rows.length) throw new ApiError(409, 'CAMPAIGN_LOCKED', 'The campaign changed while it was being saved; fetch it and try again.');
       return (await findCampaign(db, a, campaignId))!;
     });
@@ -1832,10 +1847,10 @@ export function registerSending(app: App) {
     }, { batch: false, replayed: (db, receipt) => campaignReplay(a, campaignId)(db, receipt) });
     return c.json(Receipt.parse(result), 202);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/send', operationId: 'sendCampaign', description: 'Accept the current revision for durable background delivery: the audience is frozen now, every message is validated in the background, then recipients are released into the dispatch queue. The 202 count is accepted recipient intents, not SES acceptance or delivery; poll the campaign for its state. ' + CAMPAIGN_POSTAL_NOTE + ' ' + CAMPAIGN_SCREEN_NOTE + ' ' + CAMPAIGN_CAPTURE_NOTE, tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(CampaignSend) }, responses: { 202: response(CampaignQueued), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/send', operationId: 'sendCampaign', description: 'Accept the current revision for durable background delivery: small audiences (<=5,000 list members) freeze immediately while larger audiences freeze in the background during preparing, every message is validated before sending, then recipients are released into the dispatch queue. The 202 queued count is recipients expected (not SES acceptance or delivery); delivery.total on GET /v1/campaigns/{id} is authoritative once the audience is frozen. ' + CAMPAIGN_POSTAL_NOTE + ' ' + CAMPAIGN_SCREEN_NOTE + ' ' + CAMPAIGN_CAPTURE_NOTE, tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(CampaignSend) }, responses: { 202: response(CampaignQueued), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json'); const result = await idempotent(c.env.db, keyed(c, a), input, db => launch(c.env, db, a, c.req.valid('param').id, input, c.get('requestId'), c), { replayed: campaignReplay(a, c.req.valid('param').id) }); return c.json(CampaignQueued.parse(result), 202);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/schedule', operationId: 'scheduleCampaign', description: 'Accept the current revision for durable scheduled delivery. The audience is frozen and validated now; no recipient is materialized or sent before scheduledAt. The 202 count is accepted recipient intents. ' + CAMPAIGN_POSTAL_NOTE + ' ' + CAMPAIGN_SCREEN_NOTE + ' ' + CAMPAIGN_CAPTURE_NOTE, tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(CampaignSchedule) }, responses: { 202: response(CampaignQueued), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/schedule', operationId: 'scheduleCampaign', description: 'Accept the current revision for durable scheduled delivery. Small audiences (<=5,000 list members) freeze immediately while larger audiences freeze and validate in the background during preparing; no recipient is materialized or sent before scheduledAt. The 202 queued count is recipients expected; delivery.total on GET /v1/campaigns/{id} is authoritative once the audience is frozen. ' + CAMPAIGN_POSTAL_NOTE + ' ' + CAMPAIGN_SCREEN_NOTE + ' ' + CAMPAIGN_CAPTURE_NOTE, tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(CampaignSchedule) }, responses: { 202: response(CampaignQueued), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
     const result = await idempotent(c.env.db, keyed(c, a), input, db => launch(c.env, db, a, c.req.valid('param').id, input, c.get('requestId'), c), { replayed: campaignReplay(a, c.req.valid('param').id) }); return c.json(CampaignQueued.parse(result), 202);
   });
@@ -1961,13 +1976,13 @@ async function deliveredBefore(db: DbExecutor, wid: string, campaignId: string, 
   return new Set(rows.map(r => r.email));
 }
 async function recipientChunk(db: DbExecutor, reviewId: string, cursor: number, limit = CAMPAIGN_PREPARE_ROWS) {
-  const result = await db.execute<{ ordinal: number; recipient: ReviewedRecipient; content_hash: string | null; subject: string | null; snapshot_bytes: number | null }>(sql`
+  const result = await db.execute<{ ordinal: number; recipient: ReviewedRecipient; content_hash: string | null; subject: string | null; snapshot_bytes: number | null; recipient_bytes: number }>(sql`
     WITH batch AS (
       SELECT ordinal, recipient, content_hash, subject, snapshot_bytes, recipient_bytes FROM sending_review_recipients
       WHERE review_id = ${reviewId} AND ordinal > ${cursor} ORDER BY ordinal LIMIT ${limit}
     ), sized AS (
       SELECT *, sum(recipient_bytes + coalesce(octet_length(subject), 0) + 64) OVER (ORDER BY ordinal) AS bytes FROM batch
-    ) SELECT ordinal, recipient, content_hash, subject, snapshot_bytes FROM sized
+    ) SELECT ordinal, recipient, content_hash, subject, snapshot_bytes, recipient_bytes FROM sized
       WHERE bytes <= ${CAMPAIGN_CHUNK_BYTES} OR ordinal = ${cursor + 1} ORDER BY ordinal`);
   return result.rows;
 }
@@ -1977,8 +1992,9 @@ function backgroundFailure(error: unknown) {
   // see the campaign, so other content errors stay the sanitized summary.
   const placeholder = error instanceof ApiError && code === 'MISSING_TEMPLATE_VARIABLE' ? /\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}/.exec(error.message)?.[1] : undefined;
   if (placeholder) return { code, message: `A recipient has no value for {{${placeholder}}} (${code}). Add a fallback value for ${placeholder} and send again.` };
-  // The screen's refusals name only sizes and limits, never a contact or its values.
-  if (error instanceof ApiError && ['CONTENT_REJECTED_SPAM', 'CONTENT_TOO_LARGE_TO_SCREEN', 'CONTENT_SCREEN_BUDGET_EXCEEDED'].includes(code)) return { code, message: error.message };
+  if (error instanceof ApiError && code === 'CAMPAIGN_RECIPIENT_INVALID') return { code, message: 'A recipient has an invalid email address (CAMPAIGN_RECIPIENT_INVALID). Fix or remove the invalid contact and send again.' };
+  // Capture, screen, size and limit refusals name only counts, sizes and limits, never a contact or its values.
+  if (error instanceof ApiError && (['EMPTY_AUDIENCE', 'AUDIENCE_LIMIT_EXCEEDED', 'CAMPAIGN_RECIPIENT_DATA_TOO_LARGE', 'ENCODED_MESSAGE_TOO_LARGE', 'RENDERED_CONTENT_TOO_LARGE', 'UNSAFE_HTML_URL', 'UNSAFE_TEMPLATE_CONTEXT', 'UNSUPPORTED_TEMPLATE_SYNTAX', 'CONTENT_REJECTED_SPAM', 'CONTENT_TOO_LARGE_TO_SCREEN', 'CONTENT_SCREEN_BUDGET_EXCEEDED', 'INSUFFICIENT_BALANCE'].includes(code) || code.endsWith('_LIMIT_EXCEEDED'))) return { code, message: error.message };
   return { code, message: `Campaign work could not finish (${code}). Correct the cause and send again, or cancel the campaign.` };
 }
 // Send and schedule: freeze the audience and content now, reserve the recipients, and hand the one run job the rest.
@@ -2028,30 +2044,45 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   finally { await db.execute(sql`ROLLBACK TO SAVEPOINT launch_check`); await db.execute(sql`RELEASE SAVEPOINT launch_check`); }
   if (!postalAddress) throw postalAddressRequired();
   const reviewId = id('review'), propertyKeys = placeholderKeys(draft, rendered);
-  const counts = await (await wrapModuleLoad(() => import('./audience.js'))).snapshotCampaignAudience(db, a, draft.audience, reviewId, propertyKeys, draft.requiredNotice === true).catch(error => {
-    // A statement past the database's limit (or cancelled) ends the launch; its transaction keeps nothing.
-    if ([error, (error as { cause?: unknown })?.cause].some(e => (e as { code?: string } | null)?.code === '57014')) throw captureTimedOut();
-    throw error;
-  });
+  const audienceMod = await wrapModuleLoad(() => import('./audience.js'));
+  const smallList = await audienceMod.isSmallAudienceList(db, a, draft.audience.listId);
+  let queued: number;
+  let capturedAt: string | null = null;
+  let capturedCount: number | null = null;
+  if (smallList) {
+    const counts = await audienceMod.snapshotCampaignAudience(db, a, draft.audience, reviewId, propertyKeys, draft.requiredNotice === true, { large: false }).catch(error => {
+      // A statement past the database's limit (or cancelled) ends the launch; its transaction keeps nothing.
+      if ([error, (error as { cause?: unknown })?.cause].some(e => (e as { code?: string } | null)?.code === '57014')) throw captureTimedOut();
+      throw error;
+    });
+    queued = counts.eligible;
+    capturedAt = now();
+    capturedCount = counts.eligible;
+  } else {
+    const estimate = await audienceMod.estimateCampaignAudience(db, a, draft.audience, draft.requiredNotice === true, row.audienceEstimate ?? null);
+    if (estimate.definitive === 'empty') throw new ApiError(422, 'EMPTY_AUDIENCE', draft.requiredNotice ? 'This campaign has no recipients who can receive email.' : 'This campaign has no eligible subscribed recipients.');
+    if (estimate.definitive === 'over_limit') throw new ApiError(422, 'AUDIENCE_LIMIT_EXCEEDED', 'Campaign reviews support at most 2,000,000 matching contacts. No recipients were truncated.');
+    queued = estimate.queued;
+  }
   // The send locks. The campaign is still the revision that was captured, or the launch fails and its capture rolls back.
   const held = await lockSendScope(db, a.workspaceId, { campaignId });
   editable(await findCampaign(db, a, campaignId, true), input.revision);
   const route = admitted(runtime, await decide(held), a.workspaceId, local).mails[0]!;
   const reviewed={...row.draft,...route.binding ? {region:route.region,binding:route.binding} : {},postalAddress};
   const contentHash = await digest(canonical({ version: 2, draft: reviewed, rendered }));
-  await db.insert(campaignReviews).values({ id: reviewId, rendererVersion: CAMPAIGN_RENDERER_VERSION, workspaceId: a.workspaceId, campaignId, revision: row.revision, draft: reviewed, contentHash, rendered });
-  await reserveCampaign(runtime, db, held, a, a.keyId, counts.eligible);
+  await db.insert(campaignReviews).values({ id: reviewId, rendererVersion: CAMPAIGN_RENDERER_VERSION, workspaceId: a.workspaceId, campaignId, revision: row.revision, draft: reviewed, contentHash, rendered, capturedAt, capturedCount, staticPrepared: false });
+  await reserveCampaign(runtime, db, held, a, a.keyId, queued);
   // Who confirmed the notice and when, in the workspace's Activity.
   if (draft.requiredNotice) await recordAudit(db, c, { action: 'campaign.required_notice_confirmed', workspaceId: a.workspaceId, target: { type: 'campaign', id: campaignId },
-    details: { confirmation: 'This is a required notice with no promotion.', revision: row.revision, reviewId, recipients: counts.eligible, ...input.scheduledAt ? { scheduledAt: input.scheduledAt } : {} } });
+    details: { confirmation: 'This is a required notice with no promotion.', revision: row.revision, reviewId, recipients: queued, ...capturedAt ? {} : { deferredCapture: true }, ...input.scheduledAt ? { scheduledAt: input.scheduledAt } : {} } });
   if (ids.length) await db.insert(attachmentLinks).values(ids.map(attachmentId => ({ workspaceId: a.workspaceId, attachmentId, ownerType: 'review' as const, ownerId: reviewId }))).onConflictDoNothing();
   const ref = campaignRef(a, campaignId);
-  const moved = await db.execute(launchCampaign(ref, { reviewId, resolvedRegion:route.region!==row.draft.region ? route.region : undefined, actorKeyId: a.keyId, simulated: isSimulatedSes(runtime), total: counts.eligible, requestId: requestId ?? null, scheduledAt: input.scheduledAt ?? null,
+  const moved = await db.execute(launchCampaign(ref, { reviewId, resolvedRegion:route.region!==row.draft.region ? route.region : undefined, actorKeyId: a.keyId, simulated: isSimulatedSes(runtime), total: queued, requestId: requestId ?? null, scheduledAt: input.scheduledAt ?? null,
     pacePerDay: input.pacing?.perDay ?? null, autoPause: input.pacing?.autoPause ?? true, rateShare: input.pacing ? input.pacing.rateShare ?? 0.5 : null }));
   if (!moved.rows.length) throw new ApiError(409, 'CAMPAIGN_LOCKED', 'The campaign changed while it was being sent; fetch it and try again.');
   await db.execute(queueCampaignRun(ref, requestId ? { requestId } : {}));
   await db.execute(queueCampaignStats(ref, input.scheduledAt ?? null));
-  return { id: campaignId, state: 'preparing' as const, queued: counts.eligible, scheduledAt: input.scheduledAt ?? null, simulated: isSimulatedSes(runtime) };
+  return { id: campaignId, state: 'preparing' as const, queued, scheduledAt: input.scheduledAt ?? null, simulated: isSimulatedSes(runtime) };
 }
 async function bytesDigest(bytes: Uint8Array) { return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes as Uint8Array<ArrayBuffer>)), n => n.toString(16).padStart(2, '0')).join(''); }
 // Reuse fully verified bytes across invocations sharing the same bucket binding.
@@ -2363,6 +2394,23 @@ export function checkedDispatchAttachments(ids: string[], rows: (typeof attachme
   validateAttachmentRows(distinctAttachmentIds(ids), rows);
   return rows;
 }
+/**
+ * Compact cryptographic digest for static campaigns (no {{placeholders}}): hashes the full canonical snapshot without
+ * `to` once (baseHash), then binds each recipient's exact address via `s1:${sha256(baseHash + ':' + email)}`.
+ * - Deploy mid-campaign (old 64-hex rows met by new code): verified directly via `digest(canonical(customer))`.
+ * - Rollback mid-campaign (new `s1:` rows met by old code): old code never produces `s1:` and refuses fail-closed with
+ *   CAMPAIGN_SNAPSHOT_CHANGED / CAMPAIGN_CONTENT_UNREPRODUCIBLE without sending wrong content.
+ */
+export async function staticContentHash(baseHash: string, email: string): Promise<string> {
+  return `s1:${await digest(`${baseHash}:${email}`)}`;
+}
+export async function verifyCampaignContentHash(customer: EmailSnapshot, storedHash: string): Promise<boolean> {
+  if (storedHash.startsWith('s1:')) {
+    const baseHash = await digest(canonical({ ...customer, to: [] }));
+    return (await staticContentHash(baseHash, customer.to[0] ?? '')) === storedHash;
+  }
+  return (await digest(canonical(customer))) === storedHash;
+}
 export async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail: typeof emails.$inferSelect, review: { version: number; draft: CampaignDraft; rendered: { html?: string; text?: string }; contentHash: string | null; recipient: ReviewedRecipient } | null, prefetched?: (typeof attachments.$inferSelect)[]) {
   // Review/recipient data and attachment metadata are immutable; retained email
   // links prevent attachment deletion. No transaction is needed to render them.
@@ -2371,7 +2419,7 @@ export async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail:
   const rows = prefetched ? checkedDispatchAttachments(mail.snapshot.attachments, prefetched) : await attachmentRows(runtime.db, a, mail.snapshot.attachments);
   if (!review?.rendered || !review.contentHash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The reviewed recipient is unavailable.');
   const customer = await campaignMessage(runtime, review.draft, review.recipient, false, rows, review.rendered, true, !review.rendered.html?.includes('{{'), review.version);
-  if (await digest(canonical(customer)) !== review.contentHash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_CHANGED', 'The renderer no longer reproduces the reviewed message. No provider attempt was made.');
+  if (!(await verifyCampaignContentHash(customer, review.contentHash))) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_CHANGED', 'The renderer no longer reproduces the reviewed message. No provider attempt was made.');
   // `keyed`: the same customer copy with the footer generated for the placeholder link, as campaign screening keys it.
   const keyed = screenedAs(runtime, customer, review.draft);
   // A required notice has no unsubscribe link: it goes out exactly as it is keyed, and no token is made for it.
@@ -2413,7 +2461,7 @@ export async function rebuildCampaignEmail(runtime: Runtime, a: Actor, stub: Ema
   if (![1, CAMPAIGN_RENDERER_VERSION].includes(review.renderer_version)) throw new ApiError(409, 'CAMPAIGN_RENDERER_CHANGED', `This email was rendered by campaign renderer v${review.renderer_version}; this release supports v1 and v${CAMPAIGN_RENDERER_VERSION}.`);
   if (!(review.draft.requiredNotice ? stub.requiredNotice : stub.unsubscribeUrl)) throw new ApiError(409, 'EMAIL_CONTENT_UNAVAILABLE', 'This campaign email has no stored content to rebuild.');
   const snapshot = await campaignMessage(runtime, review.draft, review.recipient, false, rows, review.rendered, true, !review.rendered.html?.includes('{{'), review.renderer_version);
-  if (await digest(canonical(snapshot)) !== review.content_hash) throw new ApiError(409, 'CAMPAIGN_CONTENT_UNREPRODUCIBLE', 'The renderer no longer reproduces the message that was sent.');
+  if (!(await verifyCampaignContentHash(snapshot, review.content_hash))) throw new ApiError(409, 'CAMPAIGN_CONTENT_UNREPRODUCIBLE', 'The renderer no longer reproduces the message that was sent.');
   marketingFooter(snapshot, stub.unsubscribeUrl ?? '', review.draft);
   return snapshot;
 }
@@ -2474,10 +2522,10 @@ export async function listMailedCleanly(db: DbExecutor, a: Pick<Actor, 'workspac
 }
 // The campaign row with its frozen snapshot and the cached regional limits: one read per step of the run job.
 type RunAccount = NonNullable<Actor['dispatchAccount']> & { pauseReason: string | null; generation:number; trusted: boolean; probation: ProbationReason | null; exempt: boolean };
-type RunRow = typeof campaigns.$inferSelect & { reviewVersion: number | null; reviewDraft: CampaignDraft | null; reviewRendered: { html?: string; text?: string } | null; reviewHash: string | null; reviewScreen: CampaignScreen | null; rate: number; max24: number; sent24: number; customer24: number; quotaCheckedAt: string | null; dbNow: string; account: RunAccount | null };
+type RunRow = typeof campaigns.$inferSelect & { reviewVersion: number | null; reviewDraft: CampaignDraft | null; reviewRendered: { html?: string; text?: string } | null; reviewHash: string | null; reviewScreen: CampaignScreen | null; reviewCapturedAt: string | null; reviewCapturedCount: number | null; reviewStaticPrepared: boolean | null; rate: number; max24: number; sent24: number; customer24: number; quotaCheckedAt: string | null; dbNow: string; account: RunAccount | null };
 async function readRun(runtime: Runtime, a: Actor, campaignId: string): Promise<RunRow | undefined> {
   const limits = limitsTable(runtime), region = sql`${campaignReviews.draft}->>'region'`;
-  const [row] = await runtime.db.select({ ...getTableColumns(campaigns), reviewVersion: campaignReviews.rendererVersion, reviewDraft: campaignReviews.draft, reviewRendered: campaignReviews.rendered, reviewHash: campaignReviews.contentHash, reviewScreen: campaignReviews.screen,
+  const [row] = await runtime.db.select({ ...getTableColumns(campaigns), reviewVersion: campaignReviews.rendererVersion, reviewDraft: campaignReviews.draft, reviewRendered: campaignReviews.rendered, reviewHash: campaignReviews.contentHash, reviewScreen: campaignReviews.screen, reviewCapturedAt: campaignReviews.capturedAt, reviewCapturedCount: campaignReviews.capturedCount, reviewStaticPrepared: campaignReviews.staticPrepared,
     autoPause: runtime.config.multiTenant ? sql<boolean>`${campaigns.autoPause} OR ${sharedConnection(a.workspaceId)}` : campaigns.autoPause,
     account: runtime.config.multiTenant ? sql<RunAccount>`(SELECT jsonb_build_object('aws_account_id', aws_account_id, 'kind', kind, 'pauseReason', pause_reason,'generation',generation,
       'trusted', ${!!runtime.config.trustedPool} AND coalesce(pool_tier='trusted' AND legacy_names=false, false),'probation',${probationReason(sql`${a.workspaceId}::text`)},
@@ -2623,7 +2671,7 @@ async function screenCampaignStep(runtime: Runtime, a: Actor, row: RunRow) {
   const limits = runtime.config.screenLimits, screen = await loadScreen();
   const rules = contentRules(row), fresh: CampaignScreen = { contentHash: row.reviewHash!, probation: rules === 'probation', template: null, screenedThrough: 0, recipients: 0, rejected: 0, failures: 0, quarantined: false };
   const state = row.reviewScreen?.contentHash === row.reviewHash ? row.reviewScreen! : await saveScreen(runtime, a, row, fresh);
-  await runtime.db.execute(sql`UPDATE sending_campaign_reviews SET screen_budget=${(row.total + 10) * screen.chunksFor(limits.campaignBytes)} WHERE workspace_id=${a.workspaceId} AND id=${row.reviewId} AND screen_budget IS NULL`);
+  await runtime.db.execute(sql`UPDATE sending_campaign_reviews SET screen_budget=${(Math.max(row.total, 1) + 10) * screen.chunksFor(limits.campaignBytes)} WHERE workspace_id=${a.workspaceId} AND id=${row.reviewId} AND screen_budget IS NULL`);
   const own = await campaignCopy(runtime, row.reviewDraft!, row.reviewRendered!, row.reviewVersion!);
   let verdict: CopyVerdict;
   try { [verdict] = await campaignVerdicts(runtime, screenRef(a, row), [rules ? (await import('./screened-html.js')).hostedCopy(own, rules === 'probation') : own], Date.now() + SCREEN_BUDGET_MS); }
@@ -2702,6 +2750,142 @@ async function campaignRejected(runtime: Runtime, a: Actor, row: RunRow, state: 
   log('warn', { code: 'CONTENT_REJECTED_SPAM', campaignId: row.id, spam: state.template?.spam, model: state.template?.model });
   throw new ApiError(422, 'CONTENT_REJECTED_SPAM', 'The content classifier judged this campaign to be unsolicited advertising. No recipient was sent to.');
 }
+const STATIC_PREPARE_SLICE_ROWS = 200_000;
+
+/** Validates a static campaign once and computes the shared s1: base digest and JSON byte size (excluding recipient to). */
+async function prepareStaticStamp(
+  runtime: Runtime,
+  draft: CampaignDraft,
+  rendered: { html?: string; text?: string },
+  lockedAttachments: AttachmentSize[],
+  reviewVersion: number,
+) {
+  const parse = rendered.html ? await loadParse5() : undefined;
+  validateInterpolationTemplate(draft.subject, false);
+  validateInterpolationTemplate(rendered.html, true, parse);
+  validateInterpolationTemplate(rendered.text, false);
+  await validateHtmlUrls(rendered.html);
+  // Build once with a longest-shape valid recipient address (254 bytes) to verify SendInput, headers and MIME sizeCheck.
+  const longestValid = `${'a'.repeat(64)}@${'b'.repeat(63)}.${'c'.repeat(63)}.${'d'.repeat(58)}.com`;
+  const staticSnapshot = await campaignMessage(runtime, draft, { id: 'static', email: longestValid, properties: {} }, false, lockedAttachments, rendered, true, true, reviewVersion);
+  const baseHash = await digest(canonical({ ...staticSnapshot, to: [] }));
+  const withFooter = { ...staticSnapshot, headers: [...staticSnapshot.headers] };
+  marketingFooter(withFooter, unsubscribePlaceholder(runtime), draft);
+  sizeCheck(withFooter, lockedAttachments);
+  const baseBytes = Buffer.byteLength(JSON.stringify({ ...withFooter, to: [] }), 'utf8');
+  return {
+    baseHash,
+    baseBytes,
+    storedSubject: staticSnapshot.subject === draft.subject ? null : staticSnapshot.subject,
+  };
+}
+
+/**
+ * Transaction 2 of background capture (normal READ COMMITTED, milliseconds): locks send scope + campaign row,
+ * reconciles recipient reservation for any delta against the initial estimate, updates Hosted screen_budget if needed,
+ * records the exact frozen total/prepared cursors, and advances state via runningState(). Idempotent across crashes
+ * between Tx 1 commit and Tx 2 commit.
+ */
+async function finalizeCapture(runtime: Runtime, a: Actor, row: RunRow, jobId: string) {
+  const ref = campaignRef(a, row.id);
+  const hosted = row.account?.kind === 'shared';
+  await runtime.db.transaction(async db => {
+    const held = await lockSendScope(db, a.workspaceId, { campaignId: row.id });
+    const campaign = await findCampaign(db, a, row.id, true);
+    if (campaign.state !== 'preparing' || campaign.reviewId !== row.reviewId) return;
+    const [rev] = (await db.execute<{ captured_at: string | null; captured_count: number | null; static_prepared: boolean }>(sql`
+      SELECT captured_at::text, captured_count, static_prepared FROM sending_campaign_reviews WHERE workspace_id = ${a.workspaceId} AND id = ${row.reviewId}`)).rows;
+    if (!rev?.captured_at || rev.captured_count === null) return;
+    const authorized = await originAllowed(runtime, db, { ...a, actorKeyId: a.keyId, campaignId: campaign.id, snapshot: { from: row.reviewDraft!.from } });
+    if (!authorized) { await cancelCampaignWork(db, a, campaign, 'ORIGIN_KEY_REVOKED'); return; }
+    const delta = Math.max(0, rev.captured_count - campaign.total);
+    await reserveCampaign(runtime, db, held, a, a.keyId, delta);
+    if (campaignScreened(runtime, hosted)) {
+      const limits = runtime.config.screenLimits, screen = await loadScreen();
+      const needed = (rev.captured_count + 10) * screen.chunksFor(limits.campaignBytes);
+      await db.execute(sql`UPDATE sending_campaign_reviews SET screen_budget = greatest(coalesce(screen_budget, 0), ${needed}) WHERE workspace_id = ${a.workspaceId} AND id = ${row.reviewId}`);
+    }
+    const prepared = rev.static_prepared ? rev.captured_count : 0;
+    const next = runningState({ prepared, total: rev.captured_count, scheduledAt: campaign.scheduledAt });
+    const set = sql`,total=${rev.captured_count},prepared=${prepared}`;
+    await db.execute(next === 'preparing' ? sql`UPDATE sending_campaigns SET updated_at=now()${set} WHERE workspace_id=${a.workspaceId} AND id=${row.id} AND state='preparing' RETURNING id`
+      : sql`UPDATE sending_campaigns SET state=${next},updated_at=now()${set} WHERE workspace_id=${a.workspaceId} AND id=${row.id} AND state='preparing' RETURNING id`);
+    log('info', { code: 'CAMPAIGN_CAPTURE_FINALIZED', jobId, campaignId: campaign.id, total: rev.captured_count, prepared, staticPrepared: rev.static_prepared, nextState: next });
+  });
+}
+
+/**
+ * Background audience freeze for large campaigns (>5,000 list members).
+ * Runs inside ONE REPEATABLE READ transaction so the frozen set is a single consistent MVCC snapshot even when contacts
+ * unsubscribe or imports commit concurrently. Inserts run in bounded 200,000-row slices (each <= ~3 s on lab), reporting
+ * live progress on a separate pool connection without touching sending_campaigns inside the REPEATABLE READ transaction
+ * (avoiding 40001 conflicts). Static campaigns validate addresses and stamp s1: content_hash inline during capture.
+ */
+async function captureStep(runtime: Runtime, a: Actor, row: RunRow, jobId: string) {
+  const screenState = campaignScreened(runtime, row.account?.kind === 'shared') ? row.reviewScreen?.contentHash === row.reviewHash ? row.reviewScreen : null : undefined;
+  if (screenState !== undefined && !screenState?.template) return screenCampaignStep(runtime, a, row);
+  if (screenState?.template && screenState.template.spam >= runtime.config.screen!.threshold) return campaignRejected(runtime, a, row, screenState);
+
+  const review = { draft: row.reviewDraft!, rendered: row.reviewRendered! };
+  const draft = readyCampaign(review.draft);
+  const propertyKeys = placeholderKeys(draft, review.rendered);
+  const messageStatic = ![draft.subject, review.rendered.html, review.rendered.text].some(value => value?.includes('{{'));
+
+  // Verify origin + admission + attachments before starting the REPEATABLE READ capture transaction.
+  const prepCheck = await runtime.db.transaction(async db => {
+    const campaign = await findCampaign(db, a, row.id, true);
+    if (campaign.state !== 'preparing' || campaign.reviewId !== row.reviewId) return null;
+    const authorized = await originAllowed(runtime, db, { ...a, actorKeyId: a.keyId, campaignId: campaign.id, snapshot: { from: draft.from } });
+    if (!authorized) { await cancelCampaignWork(db, a, campaign, 'ORIGIN_KEY_REVOKED'); return null; }
+    const decision = await admission(runtime, a.workspaceId, actorJson(a), { stage: 'prepare', locks: 'none', mails: [reviewedMail(draft)] }, undefined, actorAssets(a, draft.attachments));
+    const lockedAttachments = admitted(runtime, (await db.execute<{ s: Admitted | Refused }>(sql`SELECT ${decision} AS s`)).rows[0]!.s, a.workspaceId, { retryable: ['SES_SETUP_REQUIRED'] }).assets;
+    // Clear any stale progress left by a previously interrupted capture attempt before starting fresh.
+    if (campaign.prepared > 0) await db.execute(sql`UPDATE sending_campaigns SET prepared = 0, updated_at = now() WHERE workspace_id = ${a.workspaceId} AND id = ${row.id} AND state = 'preparing' AND review_id = ${row.reviewId}`);
+    return { lockedAttachments };
+  });
+  if (!prepCheck) return;
+
+  const staticStamp = messageStatic
+    ? await prepareStaticStamp(runtime, draft, review.rendered, prepCheck.lockedAttachments, row.reviewVersion!)
+    : undefined;
+  const audienceMod = await wrapModuleLoad(() => import('./audience.js'));
+  const started = Date.now();
+  let aborted = false;
+
+  try {
+    await runtime.db.transaction(async tx => {
+      await tx.execute(sql`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`);
+      const counts = await audienceMod.snapshotCampaignAudience(tx, a, draft.audience, row.reviewId!, propertyKeys, draft.requiredNotice === true, {
+        large: true,
+        staticStamp,
+        onProgress: async progress => {
+          // Separate pool connection (runtime.db): checks for cancel/unschedule and publishes visible progress without
+          // mutating sending_campaigns inside the REPEATABLE READ transaction.
+          const [cur] = (await runtime.db.execute<{ state: string; review_id: string | null }>(sql`
+            SELECT state, review_id FROM sending_campaigns WHERE workspace_id = ${a.workspaceId} AND id = ${row.id}`)).rows;
+          if (!cur || cur.state !== 'preparing' || cur.review_id !== row.reviewId) return 'abort';
+          const visiblePrepared = Math.min(progress.prepared, Math.max(0, progress.total - 1));
+          await runtime.db.execute(sql`
+            UPDATE sending_campaigns SET total = ${progress.total}, prepared = ${visiblePrepared}, updated_at = now()
+            WHERE workspace_id = ${a.workspaceId} AND id = ${row.id} AND state = 'preparing' AND review_id = ${row.reviewId}`);
+          return 'continue';
+        },
+      });
+      await tx.execute(sql`
+        UPDATE sending_campaign_reviews
+        SET captured_at = now(), captured_count = ${counts.eligible}, static_prepared = ${Boolean(staticStamp)}
+        WHERE workspace_id = ${a.workspaceId} AND id = ${row.reviewId}`);
+      log('info', { code: 'CAMPAIGN_CAPTURE_COMPLETED', jobId, campaignId: row.id, reviewId: row.reviewId, eligible: counts.eligible, staticPrepared: Boolean(staticStamp), durationMs: Date.now() - started });
+    });
+  } catch (error) {
+    if (error instanceof audienceMod.CaptureAborted) { aborted = true; }
+    else if ([error, (error as { cause?: unknown })?.cause].some(e => (e as { code?: string } | null)?.code === '57014')) throw captureTimedOut();
+    else throw error;
+  }
+  if (aborted) return;
+  await finalizeCapture(runtime, a, row, jobId);
+}
+
 // preparing: validate the next chunk of frozen recipients (every substitution, URL and MIME size) and keep only each
 // message's digest; when the whole list is validated the campaign moves to its schedule or straight to sending.
 async function prepareStep(runtime: Runtime, a: Actor, row: RunRow, jobId: string) {
@@ -2717,35 +2901,73 @@ async function prepareStep(runtime: Runtime, a: Actor, row: RunRow, jobId: strin
     // The reviewed binding, the region's setup and the attachments, outside the send locks (claim locks last).
     const decision = await admission(runtime, a.workspaceId, actorJson(a), { stage: 'prepare', locks: 'none', mails: [reviewedMail(review.draft)] }, undefined, actorAssets(a, review.draft.attachments));
     const lockedAttachments = admitted(runtime, (await db.execute<{ s: Admitted | Refused }>(sql`SELECT ${decision} AS s`)).rows[0]!.s, a.workspaceId, { retryable: ['SES_SETUP_REQUIRED'] }).assets;
+    const messageStatic = ![review.draft.subject, review.rendered.html, review.rendered.text].some(value => value?.includes('{{'));
+    const started = Date.now();
+    if (messageStatic) {
+      // Set-based static preparation (used for small <=5,000 sync launches and pre-deploy static reviews mid-prepare).
+      const stamp = await prepareStaticStamp(runtime, review.draft, review.rendered, lockedAttachments, row.reviewVersion!);
+      const sliceEnd = Math.min(campaign.total, campaign.prepared + STATIC_PREPARE_SLICE_ROWS);
+      const expected = sliceEnd - campaign.prepared;
+      if (expected <= 0) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The frozen audience is incomplete.');
+      const invalid = await db.execute<{ id: string }>(sql`
+        SELECT recipient->>'id' AS id FROM sending_review_recipients
+        WHERE review_id = ${campaign.reviewId} AND ordinal > ${campaign.prepared} AND ordinal <= ${sliceEnd}
+          AND NOT ${validMailAddressSql(sql`recipient->>'email'`)}
+        ORDER BY ordinal LIMIT 1`);
+      if (invalid.rows[0]) {
+        throw new ApiError(422, 'CAMPAIGN_RECIPIENT_INVALID', `Contact ${invalid.rows[0].id}: Recipient or rendered message is invalid (to).`, 'contactId');
+      }
+      const { rows: [stamped] } = await db.execute<{ n: number; max_ordinal: number | null }>(sql`
+        WITH updated AS (
+          UPDATE sending_review_recipients
+          SET content_hash = 's1:' || encode(sha256(convert_to(${stamp.baseHash} || ':' || (recipient->>'email'), 'UTF8')), 'hex'),
+              subject = ${stamp.storedSubject},
+              snapshot_bytes = ${stamp.baseBytes} + octet_length(to_json(recipient->>'email')::text)
+          WHERE review_id = ${campaign.reviewId} AND ordinal > ${campaign.prepared} AND ordinal <= ${sliceEnd} AND content_hash IS NULL
+          RETURNING ordinal
+        )
+        SELECT count(*)::int AS n, max(ordinal)::int AS max_ordinal FROM updated`);
+      if ((stamped?.n ?? 0) !== expected || stamped?.max_ordinal !== sliceEnd) {
+        throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The frozen audience cursor is inconsistent.');
+      }
+      log('info', { code: 'CAMPAIGN_PREPARE_TIMINGS', jobId, campaignId: campaign.id, cursor: campaign.prepared, rows: expected, messageStatic: true, durationMs: Date.now() - started });
+      await db.execute(recordPrepared(ref, sliceEnd, runningState({ prepared: sliceEnd, total: campaign.total, scheduledAt: campaign.scheduledAt })));
+      return;
+    }
+
+    // Personalized preparation: keeps the all-validated-before-any-send guarantee.
     const recipients = await recipientChunk(db, campaign.reviewId!, campaign.prepared);
     if (!recipients.length) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The frozen audience is incomplete.');
     const parse = review.rendered.html ? await loadParse5() : undefined;
     validateInterpolationTemplate(review.draft.subject, false);
-    validateInterpolationTemplate(review.rendered.html, true, parse);
+    const htmlInfo = validateInterpolationTemplate(review.rendered.html, true, parse);
     validateInterpolationTemplate(review.rendered.text, false);
     const htmlStatic = !review.rendered.html?.includes('{{');
-    if (htmlStatic) await validateHtmlUrls(review.rendered.html);
-    const messageStatic = ![review.draft.subject, review.rendered.html, review.rendered.text].some(value => value?.includes('{{'));
-    let cursor = campaign.prepared, bytes = 0;
-    const started = Date.now(), prepared: { ordinal: number; hash: string; subject: string; bytes: number }[] = [];
-    let staticSnapshot: EmailSnapshot | undefined;
+    const templateHtmlBytes = review.rendered.html ? Buffer.byteLength(review.rendered.html, 'utf8') : 0;
+    // When no {{placeholder}} sits in a URL attribute, HTML-escaped substitution in text or text-only attributes cannot
+    // alter any URL or DOM structure, so validateHtmlUrls runs once instead of re-parsing HTML per recipient.
+    const htmlUrlsOnce = htmlStatic || !htmlInfo.hasUrlPlaceholder;
+    if (htmlUrlsOnce && review.rendered.html) {
+      await validateHtmlUrls(review.draft.previewText ? withPreheader(review.rendered.html, review.draft.previewText, parse, row.reviewVersion!) : review.rendered.html);
+    }
+    let cursor = campaign.prepared, payloadBytes = 0;
+    const prepared: { ordinal: number; hash: string; subject: string; bytes: number }[] = [];
     for (const recipient of recipients) {
       if (recipient.ordinal !== cursor + 1 || recipient.content_hash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The frozen audience cursor is inconsistent.');
-      // The immutable rendered base is shared by all recipients; the full message audit is saved at dispatch.
-      if (messageStatic && !Address.safeParse(recipient.recipient.email).success) throw new ApiError(422, 'CAMPAIGN_RECIPIENT_INVALID', `Contact ${recipient.recipient.id}: Recipient or rendered message is invalid (to).`, 'contactId');
-      if (messageStatic && !staticSnapshot) staticSnapshot = await campaignMessage(runtime, review.draft, recipient.recipient, false, lockedAttachments, review.rendered, true, true, row.reviewVersion!);
-      const snapshot = staticSnapshot
-        ? { ...staticSnapshot, to: [recipient.recipient.email], headers: [...staticSnapshot.headers] }
-        : await campaignMessage(runtime, review.draft, recipient.recipient, false, lockedAttachments, review.rendered, true, htmlStatic, row.reviewVersion!);
+      // If a text attribute holds a placeholder and recipient data could push total attribute bytes past bounded-html's
+      // 512 KiB budget, fall back to full per-row validateHtmlUrls so the result is always identical.
+      const rowHtmlValidated = htmlUrlsOnce && (!htmlInfo.hasAttrPlaceholder || templateHtmlBytes + (recipient.recipient_bytes ?? 0) <= 512 * 1024);
+      const snapshot = await campaignMessage(runtime, review.draft, recipient.recipient, false, lockedAttachments, review.rendered, true, rowHtmlValidated, row.reviewVersion!);
       const contentHash = await digest(canonical(snapshot));
       marketingFooter(snapshot, unsubscribePlaceholder(runtime), review.draft);
       sizeCheck(snapshot, lockedAttachments);
       const size = Buffer.byteLength(JSON.stringify(snapshot), 'utf8');
-      if (prepared.length && bytes + size > CAMPAIGN_PREPARE_BYTES) break;
-      prepared.push({ ordinal: recipient.ordinal, hash: contentHash, subject: snapshot.subject, bytes: size }); bytes += size; cursor = recipient.ordinal;
+      const entryBytes = 160 + Buffer.byteLength(snapshot.subject, 'utf8');
+      if (prepared.length && payloadBytes + entryBytes > CAMPAIGN_PREPARE_BYTES) break;
+      prepared.push({ ordinal: recipient.ordinal, hash: contentHash, subject: snapshot.subject, bytes: size }); payloadBytes += entryBytes; cursor = recipient.ordinal;
       if (Date.now() - started >= 10000) break;
     }
-    log('info', { code: 'CAMPAIGN_PREPARE_TIMINGS', jobId, campaignId: campaign.id, cursor: campaign.prepared, rows: prepared.length, messageStatic, durationMs: Date.now() - started });
+    log('info', { code: 'CAMPAIGN_PREPARE_TIMINGS', jobId, campaignId: campaign.id, cursor: campaign.prepared, rows: prepared.length, messageStatic: false, htmlUrlsOnce, durationMs: Date.now() - started });
     await db.execute(sql`UPDATE sending_review_recipients r SET content_hash = p.hash, subject = nullif(p.subject,${review.draft.subject}), snapshot_bytes = p.bytes
       FROM jsonb_to_recordset(${JSON.stringify(prepared)}::jsonb) AS p(ordinal integer, hash text, subject text, bytes integer)
       WHERE r.review_id = ${campaign.reviewId} AND r.ordinal = p.ordinal AND r.content_hash IS NULL`);
@@ -2997,7 +3219,11 @@ const runCampaign: JobHandler = async (runtime, payload, job) => {
       if (row.simulated !== isSimulatedSes(runtime)) throw new ApiError(409, 'SES_MODE_CHANGED', 'The campaign was launched with a different SES configuration. No more recipients were queued.');
       if (!row.reviewDraft || !row.reviewRendered) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The frozen message source is missing.');
       a.keyId = row.actorKeyId ?? a.keyId;
-      if (row.state === 'preparing') await prepareStep(runtime, a, row, job.id);
+      if (row.state === 'preparing') {
+        if (row.reviewCapturedAt === null) await captureStep(runtime, a, row, job.id);
+        else if (row.reviewCapturedCount !== null && (row.total !== row.reviewCapturedCount || (row.reviewStaticPrepared && row.prepared < row.reviewCapturedCount))) await finalizeCapture(runtime, a, row, job.id);
+        else await prepareStep(runtime, a, row, job.id);
+      }
       else if (row.state === 'scheduled') {
         if (row.scheduledAt && Date.parse(row.scheduledAt) > Date.now()) throw new JobDeferred(row.scheduledAt, payload);
         await runtime.db.execute(startSending(ref, { scheduledAt: row.scheduledAt, reviewId: row.reviewId }));

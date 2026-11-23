@@ -27616,8 +27616,186 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       t.diagnostic(`${name} capture of ${members} members with statistics ${statistics}: ${Math.round(attempt.ms)} ms`);
       assert.equal(attempt.value!.status,202,JSON.stringify(attempt.value!.body));
       assert.equal(attempt.value!.body.queued,Math.floor(members/every));
-      assert.ok(attempt.ms<5000,`The ${name} capture took ${Math.round(attempt.ms)} ms.`);
+      assert.ok(attempt.ms<5000,`The ${name} launch took ${Math.round(attempt.ms)} ms.`);
+      // Also run the deferred background capture under the same stale statistics and verify it freezes the exact set in seconds.
+      const capStart = Date.now();
+      const { nodeRuntime } = await import('./src/adapters/node.js');
+      const { jobHandlers } = await import('./src/sending.js');
+      const { processJobs } = await import('./src/jobs.js');
+      const { runtime, close } = nodeRuntime({ ...process.env, DATABASE_URL: FIXTURE_DATABASE_URL });
+      try {
+        Object.assign(runtime.config, { multiTenant: false, liveEnabled: false });
+        const { rows: [cRow] } = await g.query('SELECT workspace_id, review_id FROM sending_campaigns WHERE id=$1', [c.id]);
+        await g.query("UPDATE jobs SET available_at = clock_timestamp() WHERE workspace_id=$1 AND id=$2", [cRow.workspace_id, 'campaign.run:' + c.id]);
+        await stale();
+        await processJobs(runtime, jobHandlers, 2, 1, 15_000);
+        const capMs = Date.now() - capStart;
+        const { rows: [after] } = await g.query('SELECT state, total, prepared FROM sending_campaigns WHERE id=$1', [c.id]);
+        const { rows: [rec] } = await g.query("SELECT count(*)::int AS n, count(*) FILTER (WHERE content_hash LIKE 's1:%')::int AS stamped FROM sending_review_recipients WHERE review_id=$1", [cRow.review_id]);
+        t.diagnostic(`${name} deferred capture+static prepare of ${members} members (${rec.n} eligible): ${capMs} ms`);
+        assert.equal(rec.n, Math.floor(members/every));
+        assert.equal(rec.stamped, Math.floor(members/every));
+        assert.equal(after.total, Math.floor(members/every));
+        assert.equal(after.prepared, Math.floor(members/every));
+        assert.ok(capMs < 10_000, `Deferred ${name} capture took ${capMs} ms.`);
+      } finally { await close(); }
     }
+  });
+
+  // Differential proof (L87 item 4): SQL validMailAddressSql must agree 100% with JS mailAddress() across an adversarial corpus.
+  test('fast campaign launch: SQL address validation matches JS mailAddress with zero disagreements', async t => {
+    const { mailAddress, validMailAddressSql } = await import('./src/outbound-content.js');
+    const { nodeRuntime } = await import('./src/adapters/node.js');
+    const { sql } = await import('drizzle-orm');
+    const { runtime, close } = nodeRuntime({ ...process.env, DATABASE_URL: FIXTURE_DATABASE_URL });
+    cleanup(t, close);
+    const Address = mailAddress();
+    const corpus: string[] = [
+      '', ' ', 'a', '@', '@example.com', 'a@', 'a@b', 'a@b.c', 'a@b.co', 'A@B.CO', 'User.Name+Tag_1@Sub-Domain.Example.COM',
+      "'a@b.co", "'@b.co", "a'@b.co", "o'brien+1@example.co.uk", '-a@b.co', 'a-@b.co', 'a@-b.co', 'a@b-.co', 'a@b-c.co',
+      '.a@b.co', 'a.@b.co', 'a..b@b.co', 'a@b..co', 'a@b.co.', 'a@.b.co', 'a@b.c.', 'a@b.co..uk',
+      '"quoted"@example.com', '"a b"@example.com', '"a..b"@example.com', 'a b@example.com', ' a@b.co', 'a@b.co ', 'a@b.co\n', 'a@b.co\r', 'a\t@b.co', 'a@b.co\u00a0', 'a\u200b@b.co',
+      'user@münchen.de', 'üser@example.com', 'user@xn--mnchen-3ya.de', 'USER@XN--MNCHEN-3YA.DE', 'a@b.xn--p1ai', 'a@b.xn--a', 'a@b.xn--ab', 'a@b.xn--a-', 'a@b.xn---a',
+      'a@[127.0.0.1]', 'a@127.0.0.1', 'a@b.123', 'a@b.c1', 'a@@b.co', 'a@b@c.co',
+      'a'.repeat(64) + '@example.com', 'a'.repeat(65) + '@example.com',
+      'a@' + 'b'.repeat(63) + '.com', 'a@' + 'b'.repeat(64) + '.com',
+      'a@example.' + 'c'.repeat(63), 'a@example.' + 'c'.repeat(64),
+      'a'.repeat(64) + '@' + 'b'.repeat(63) + '.' + 'c'.repeat(63) + '.' + 'd'.repeat(57) + '.com',
+      'a'.repeat(64) + '@' + 'b'.repeat(63) + '.' + 'c'.repeat(63) + '.' + 'd'.repeat(58) + '.com',
+      'a@' + 'b'.repeat(63) + '.' + 'c'.repeat(63) + '.' + 'd'.repeat(63) + '.' + 'e'.repeat(57) + '.com',
+      'a@' + 'b'.repeat(63) + '.' + 'c'.repeat(63) + '.' + 'd'.repeat(63) + '.' + 'e'.repeat(58) + '.com',
+      ...Array.from({ length: 95 }, (_, i) => String.fromCharCode(32 + i)).flatMap(ch => [
+        ch + 'a@example.com', 'a' + ch + 'b@example.com', 'a' + ch + '@example.com', 'a@ex' + ch + 'ample.com',
+      ]),
+      ...Array.from({ length: 31 }, (_, i) => 'a' + String.fromCharCode(i + 1) + '@example.com'),
+      'a' + String.fromCharCode(0x7f) + '@example.com',
+      'u_1@example.invalid', 'contact_123456@scale.example.com', 'notice-paced-1@example.com',
+    ];
+    const uniqueCorpus = [...new Set(corpus)];
+    const { rows } = await runtime.db.execute<{ i: number; ok: boolean }>(sql`
+      SELECT t.i, ${validMailAddressSql(sql`t.addr`)} AS ok
+      FROM unnest(${sql.param(uniqueCorpus)}::text[]) WITH ORDINALITY AS t(addr, i)
+      ORDER BY t.i`);
+    const diffs: string[] = [];
+    for (const r of rows) {
+      const addr = uniqueCorpus[r.i - 1]!;
+      const jsOk = Address.safeParse(addr).success;
+      if (Boolean(r.ok) !== jsOk) diffs.push(`${JSON.stringify(addr)}: sql=${r.ok} js=${jsOk}`);
+    }
+    t.diagnostic(`Tested ${uniqueCorpus.length} adversarial email addresses: ${diffs.length} disagreements`);
+    assert.deepEqual(diffs, [], `SQL validMailAddressSql disagreed with JS mailAddress: ${diffs.slice(0, 10).join('; ')}`);
+  });
+
+  // Differential proof (L87 item 7) + s1: static content_hash deploy & rollback safety (L87 item 5).
+  test('fast campaign launch: URL-attribute shortcut matches per-row parse5 and s1: hashes preserve deploy/rollback safety', async t => {
+    const { analyzeHtmlPlaceholders, staticContentHash, verifyCampaignContentHash } = await import('./src/sending.js');
+    const { digest } = await import('./src/core.js');
+    const { canonical } = await import('./src/idempotency.js');
+    const { boundedHtmlFragment } = await import('./src/bounded-html.js');
+    const escaped = (v: string) => v.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
+    const interpolateHtml = (tpl: string, val: string) => tpl.replace(/\{\{\s*x\s*\}\}/g, escaped(val));
+    const URL_ATTRS = new Set(['href', 'src', 'action', 'formaction', 'poster', 'background', 'cite', 'longdesc', 'data', 'codebase', 'profile', 'manifest', 'xlink:href']);
+    const checkUrl = (v: string) => {
+      const u = new URL(v.replace(/[\x00-\x20\x7f]/g, ''), 'https://template.invalid/');
+      if (!['http:', 'https:', 'mailto:', 'tel:', 'cid:'].includes(u.protocol)) throw new Error('UNSAFE_HTML_URL');
+    };
+    const fullPerRowOk = (html: string) => {
+      const root = boundedHtmlFragment(html, 'document', { clients: true });
+      if (!root) return false;
+      const stack: any[] = [root];
+      while (stack.length) {
+        const node = stack.pop()!;
+        if ('tagName' in node) {
+          for (const attr of node.attrs) {
+            const name = attr.prefix ? `${attr.prefix}:${attr.name}` : attr.name;
+            try {
+              if (URL_ATTRS.has(name) || /:(?:href|src)$/.test(name)) checkUrl(attr.value);
+              if (['srcset', 'imagesrcset', 'ping', 'archive'].includes(name)) {
+                const urls = name.endsWith('srcset') ? attr.value.split(',').map((p: string) => p.trim().split(/\s+/)[0]!) : attr.value.trim().split(/\s+/);
+                for (const u of urls) if (u) checkUrl(u);
+              }
+            } catch { return false; }
+          }
+        }
+        if ('childNodes' in node) stack.push(...node.childNodes);
+        if ('content' in node) stack.push(node.content);
+      }
+      return true;
+    };
+    const templates = [
+      { html: '<html><body><p>Hello {{x}}</p><a href="https://example.com/ok">Read</a></body></html>', expectUrl: false },
+      { html: '<html><body><img src="https://example.com/a.png" alt="Photo of {{x}}" title="{{x}}"><p aria-label="{{x}}">Hi</p></body></html>', expectUrl: false },
+      { html: '<html><body><p>{{x}}</p><a href="javascript:alert(1)">Bad static link</a></body></html>', expectUrl: false },
+      { html: '<html><body><a href="{{x}}">Click</a></body></html>', expectUrl: true },
+      { html: '<html><body><a href="https://example.com/{{x}}">Click</a></body></html>', expectUrl: true },
+      { html: '<html><body><a href="java{{x}}">Split</a></body></html>', expectUrl: true },
+      { html: '<html><body><a href="&#x6a;avascript:{{x}}">Encoded</a></body></html>', expectUrl: true },
+      { html: '<html><body><a href="  {{x}}">Spaced</a></body></html>', expectUrl: true },
+      { html: '<html><body><a href="/users/{{x}}">Relative</a></body></html>', expectUrl: true },
+      { html: '<html><body><p>Hi {{x}}</p><img src="https://cdn.example.com/{{x}}.png"></body></html>', expectUrl: true },
+      { html: '<html><body><form action="{{x}}"><p>Hi</p></form></body></html>', expectUrl: true },
+    ];
+    const payloads = ['Alice', 'javascript:alert(1)', 'script:alert(1)', '<a href="javascript:x">', '"><script>alert(1)</script>', '<!--[if mso]><a href="javascript:1"><![endif]-->', '  javascript:void(0)', 'https://example.com/safe'];
+    for (const tc of templates) {
+      const info = await analyzeHtmlPlaceholders(tc.html);
+      assert.equal(info.hasUrlPlaceholder, tc.expectUrl, `hasUrlPlaceholder mismatch for ${tc.html}`);
+      if (!info.hasUrlPlaceholder) {
+        const onceOk = fullPerRowOk(tc.html);
+        for (const p of payloads) {
+          const rowOk = fullPerRowOk(interpolateHtml(tc.html, p));
+          assert.equal(onceOk, rowOk, `Shortcut disagreed with per-row parse5 on ${tc.html} with payload ${JSON.stringify(p)}`);
+        }
+      }
+    }
+    const customer = {
+      from: 'news@example.com', fromName: 'News', to: ['alice@example.com'], cc: [], bcc: [], replyTo: [],
+      region: 'us-west-2', kind: 'marketing' as const, subject: 'Hello', html: '<p>Static</p>', text: 'Static',
+      attachments: [], tracking: true, headers: [],
+    };
+    const legacyHash = await digest(canonical(customer));
+    const baseHash = await digest(canonical({ ...customer, to: [] }));
+    const s1Hash = await staticContentHash(baseHash, 'alice@example.com');
+    assert.ok(s1Hash.startsWith('s1:') && s1Hash.length === 67);
+    assert.equal(await verifyCampaignContentHash(customer, legacyHash), true);
+    assert.equal(await verifyCampaignContentHash(customer, s1Hash), true);
+    assert.equal(await verifyCampaignContentHash({ ...customer, to: ['bob@example.com'] }, s1Hash), false);
+    assert.equal(await verifyCampaignContentHash({ ...customer, html: '<p>Tampered</p>' }, s1Hash), false);
+    assert.equal(await verifyCampaignContentHash({ ...customer, subject: 'Tampered' }, s1Hash), false);
+    assert.notEqual(await digest(canonical(customer)), s1Hash);
+  });
+
+  // Deferred capture late failures (L87 item 3): EMPTY_AUDIENCE and invalid recipient fail loudly, leaving draft editable.
+  test('fast campaign launch: deferred >5k launch fails loudly on late EMPTY_AUDIENCE and leaves draft editable', async t => {
+    const { g, draft, launch, audience, call } = await launchFixture(t);
+    const listId = await audience(5_100, 10, 'latefail');
+    const c = await draft('latefail', listId);
+    // Preview caches audience_estimate on sending_campaigns.
+    const prev = await call('GET', `/v1/campaigns/${c.id}/audience`);
+    assert.equal(prev.status, 200);
+    assert.equal(prev.body.eligible, 510);
+    const res = await launch(c);
+    assert.equal(res.status, 202, JSON.stringify(res.body));
+    assert.equal(res.body.queued, 510);
+    // Everyone unsubscribes after the 202 before the background capture runs.
+    const { rows: [cRow] } = await g.query('SELECT workspace_id, review_id FROM sending_campaigns WHERE id=$1', [c.id]);
+    await g.query("UPDATE audience_contacts SET marketing_consent='unsubscribed' WHERE workspace_id=$1", [cRow.workspace_id]);
+    const { nodeRuntime } = await import('./src/adapters/node.js');
+    const { jobHandlers } = await import('./src/sending.js');
+    const { processJobs } = await import('./src/jobs.js');
+    const { runtime, close } = nodeRuntime({ ...process.env, DATABASE_URL: FIXTURE_DATABASE_URL });
+    cleanup(t, close);
+    Object.assign(runtime.config, { multiTenant: false, liveEnabled: false });
+    await g.query("UPDATE jobs SET available_at = clock_timestamp() WHERE workspace_id=$1 AND id=$2", [cRow.workspace_id, 'campaign.run:' + c.id]);
+    await processJobs(runtime, jobHandlers, 2, 1, 15_000);
+    const view = await call('GET', `/v1/campaigns/${c.id}`);
+    assert.equal(view.status, 200);
+    assert.equal(view.body.state, 'failed');
+    assert.equal(view.body.delivery.expanded, 0);
+    assert.equal(view.body.delivery.error?.code, 'EMPTY_AUDIENCE');
+    // Draft remains editable after late capture failure.
+    const patch = await call('PATCH', `/v1/campaigns/${c.id}`, { revision: view.body.revision, draft: { ...view.body.draft, subject: 'Updated after failure' } });
+    assert.equal(patch.status, 200, JSON.stringify(patch.body));
+    assert.equal(patch.body.state, 'draft');
   });
   // Migration 332 decides the inbound mail stored without forwardEligible; a message committed after the page that
   // would have seen it is never decided on read any more: a forward refuses it.

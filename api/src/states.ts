@@ -454,7 +454,7 @@ export const campaignReserved = (c: SQL = sql`c`) => sql`(${campaignActive(c)} O
 const editableRow = sql`(state='draft' OR (state='failed' AND expanded=0))`;
 /** Where a launched campaign continues from its cursors: preparing until every recipient is validated, then its schedule, then sending. */
 export function runningState(row: { prepared: number; total: number; scheduledAt: string | null }, now = Date.now()): RunningState {
-  if (row.prepared < row.total) return 'preparing';
+  if (row.total <= 0 || row.prepared < row.total) return 'preparing';
   return row.scheduledAt && Date.parse(row.scheduledAt) > now ? 'scheduled' : 'sending';
 }
 type CampaignRef = { workspaceId: string; id: string };

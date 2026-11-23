@@ -118,6 +118,8 @@ export const campaigns = pgTable('sending_campaigns', {
   createdAt: time('created_at').notNull().defaultNow(), updatedAt: time('updated_at').notNull().defaultNow(),
   // draft.audience.listId, written by a trigger on every write of draft (migration 394): filters by list never read a draft.
   listId: text('list_id'),
+  // Last eligible count returned by previewCampaignAudience (migration 422): fallback for CampaignQueued.queued on large deferred launches.
+  audienceEstimate: integer('audience_estimate'),
 }, t => [index('sending_campaigns_page').on(t.workspaceId, t.id), index('sending_campaigns_created_page').on(t.workspaceId, t.createdAt.desc(), t.id.desc()), index('sending_campaigns_archive_page').on(t.workspaceId, t.archivedAt, t.createdAt.desc(), t.id.desc()),
   index('sending_campaigns_list_page').on(t.workspaceId, t.listId, t.createdAt.desc(), t.id.desc()).where(sql`${t.listId} IS NOT NULL`)]);
 // The frozen snapshot a launch sends from: the draft and rendered base every recipient is interpolated into, and the
@@ -130,6 +132,9 @@ export const campaignReviews = pgTable('sending_campaign_reviews', {
   rendered: jsonb('rendered').$type<{ html?: string; text?: string }>(),
   // Hosted screening state and its classifier budget, charged before each request (migration 312, src/sending.ts campaignVerdicts).
   screen: jsonb('screen').$type<CampaignScreen>(), screenBudget: integer('screen_budget'), screenCharged: integer('screen_charged').notNull().default(0),
+  // Background audience freeze completion (migration 422): NULL while capture is pending/in progress; non-NULL once all
+  // recipients are frozen in one REPEATABLE READ snapshot. staticPrepared records whether static content_hash rows were stamped inline.
+  capturedAt: time('captured_at').defaultNow(), capturedCount: integer('captured_count'), staticPrepared: boolean('static_prepared').notNull().default(false),
 }, t => [index('sending_review_campaign').on(t.workspaceId, t.campaignId)]);
 // One verdict per campaign and copy as delivered (src/screen.ts copyKey), shared by every recipient whose copy is the same.
 export const campaignScreens = pgTable('sending_campaign_screens', {

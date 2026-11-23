@@ -4,7 +4,7 @@ import { Link } from 'react-router'
 import { useApiMutation, useWorkspaceAccess } from '../../data/context'
 import { campaignResumable, errorText, type Campaign, type CampaignPacingInput } from '../../data/types'
 import { Button, Checkbox, Input } from '../../components/ui'
-import { date, number, relativeTime, time } from '../../lib/format'
+import { approxRelativeTime, date, localTime, number, relativeTime, time } from '../../lib/format'
 import { isDuplicateSubmission } from '../../lib/single-flight'
 
 export const liveInterval = 3000
@@ -22,7 +22,7 @@ type Progress = Pick<Campaign, 'status' | 'delivery'>
 const releasing = (campaign: Progress) => ['preparing', 'sending'].includes(campaign.status) && (campaign.delivery?.expanded ?? 0) < (campaign.delivery?.total ?? 0)
 // Paused or waiting for a pacing window / SES quota: nothing new is released for a while.
 export const sendingHeld = (campaign: Progress) => campaign.status === 'paused' || (releasing(campaign) && Boolean(campaign.delivery?.waiting))
-const waitingLabel = { pacing_window: 'Waiting for the next daily slice', ses_daily_quota: 'Holding for the SES daily quota', hosted_daily_quota: 'Waiting for Hosted sending capacity' } as const
+const waitingLabel = { pacing_window: 'Waiting for the next daily slice', ses_daily_quota: 'Holding for the SES daily quota', hosted_daily_quota: 'Waiting for Hosted sending capacity', balance: 'Waiting for account credit' } as const
 const atUtc = (value: string) => `${date(value)} · ${time(value)} UTC`
 /** What people see as the state: a launch still checking messages for a future send is already "scheduled" to them. */
 export const campaignDisplayStatus = (campaign: Pick<Campaign, 'status' | 'scheduledAt' | 'archivedAt'>) => campaign.archivedAt ? 'archived' : campaign.status === 'preparing' && campaign.scheduledAt && Date.parse(campaign.scheduledAt) > Date.now() ? 'scheduled' : campaign.status
@@ -69,10 +69,17 @@ export function CampaignProgress({ campaign }: { campaign: Campaign }) {
     ['Canceled', (byStatus.canceled ?? 0) + canceledBeforeQueue, undefined], ['Acceptance unknown', byStatus.acceptance_unknown, 'acceptance_unknown'],
     ['Simulated', byStatus.simulated, 'simulated'],
   ] as const
+  const preparing = campaign.status === 'preparing'
+  const prepared = campaign.delivery?.prepared ?? 0
   return <div className="campaign-audience-summary">
-    <div className="campaign-summary-line"><strong>Send progress</strong><span>{number(processed)} / {number(total)} processed</span></div>
-    {total > 0 ? <progress className="campaign-progress-bar" aria-label="Campaign send progress" aria-valuetext={`${number(processed)} of ${number(total)} emails processed`} value={processed} max={total} /> : <p className="muted">No email records available.</p>}
-    {awaitingQueue > 0 && <div className="campaign-summary-line"><span>Awaiting queue</span><span>{number(awaitingQueue)}</span></div>}
+    {preparing ? <>
+      <div className="campaign-summary-line"><strong>Preparing</strong><span>{total > 0 ? `Checking ${number(total)} ${total === 1 ? 'recipient' : 'recipients'} · ${number(prepared)} done` : 'Preparing recipient list…'}</span></div>
+      <progress className="campaign-progress-bar" aria-label="Campaign preparation progress" aria-valuetext={total > 0 ? `${number(prepared)} of ${number(total)} recipients checked` : 'Preparing recipient list'} value={total > 0 ? prepared : 0} max={total > 0 ? total : 1} />
+    </> : <>
+      <div className="campaign-summary-line"><strong>Send progress</strong><span>{number(processed)} / {number(total)} processed</span></div>
+      {total > 0 ? <progress className="campaign-progress-bar" aria-label="Campaign send progress" aria-valuetext={`${number(processed)} of ${number(total)} emails processed`} value={processed} max={total} /> : <p className="muted">No email records available.</p>}
+    </>}
+    {!preparing && awaitingQueue > 0 && <div className="campaign-summary-line"><span>Awaiting queue</span><span>{number(awaitingQueue)}</span></div>}
     {queued > 0 && <div className="campaign-summary-line"><span>Queued</span><span>{number(queued)}</span></div>}
     {processing > 0 && <div className="campaign-summary-line"><span>Processing</span><span>{number(processing)}</span></div>}
     {outcomes.filter(([, count]) => count && count > 0).map(([label, count, status]) => <SummaryLine key={label} label={label} figure={number(count)} to={status && campaignLogs(campaign.id, status)} />)}
@@ -148,7 +155,9 @@ export function CampaignPacing({ campaign }: { campaign: Campaign }) {
       {active && canAdminister && <Button variant="secondary" size="sm" loading={pause.isPending} disabled={busy} onClick={() => void run(() => pause.mutateAsync(campaign.id))}>Pause</Button>}
     </div>
     {perDay && (active || paused) && <div className="campaign-summary-line muted"><span>Released in this 24-hour slice</span><span>{number(pacing?.windowExpanded ?? 0)} / {number(perDay)}</span></div>}
-    {active && expansion.waiting && <p className="muted" role="status" title={atUtc(expansion.waiting.until)}>{waitingLabel[expansion.waiting.reason] ?? 'Waiting to release more recipients'} · about {relativeTime(expansion.waiting.until)}</p>}
+    {active && expansion.waiting && <p className="muted" role="status" title={atUtc(expansion.waiting.until)}>{expansion.waiting.reason === 'list_probe'
+      ? `Test batch${expansion.expanded > 0 ? ` of ${number(expansion.expanded)}` : ''} sent. The rest release at ${localTime(expansion.waiting.until)} if bounces and complaints stay low.`
+      : `${waitingLabel[expansion.waiting.reason] ?? 'Waiting to release more recipients'} · ${approxRelativeTime(expansion.waiting.until)}`}</p>}
     {(active || paused) && canAdminister && <form className="campaign-pacing-form" onSubmit={save}>
       <div className="campaign-pacing-limit">
         <label htmlFor="campaign-pacing-limit" className="muted">Daily limit</label>

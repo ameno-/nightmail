@@ -34,3 +34,17 @@ export function relativeTime(value: string | null | undefined, now = Date.now())
   if (abs < 172_800_000) return format.format(Math.round(ms / 3_600_000), 'hour')
   return format.format(Math.round(ms / 86_400_000), 'day')
 }
+/** Approximate relative time with natural grammar ("in about 9 minutes", never "about in 9 minutes"). */
+export function approxRelativeTime(value: string | null | undefined, now = Date.now()) {
+  const text = relativeTime(value, now)
+  if (text === '—' || text === 'in under a minute' || text === 'just now') return text
+  if (text.startsWith('in ')) return `in about ${text.slice(3)}`
+  return text
+}
+/** Concise local clock time ("4:54 pm") for near-term waiting estimates. */
+export function localTime(value: string | null | undefined) {
+  if (!value) return '—'
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return '—'
+  return new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' }).format(parsed).toLowerCase()
+}
