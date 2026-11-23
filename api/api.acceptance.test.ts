@@ -2616,6 +2616,24 @@ function page(reply: Reply): Json[] {
   assert.ok(body.nextCursor === null || typeof body.nextCursor === 'string', diagnostic(reply));
   return body.data;
 }
+// A list's members counted the way readLists counted them on every load before migration 405: every membership joined to
+// its contact. The counts the API shows are kept by triggers instead and must equal this after any history of writes.
+type ListCounts = { total: number; subscribed: number; unsubscribed: number; unknown: number; suppressed: number };
+const NO_MEMBERS: ListCounts = { total: 0, subscribed: 0, unsubscribed: 0, unknown: 0, suppressed: 0 };
+async function countedMembers(db: pg.Client, listId: string): Promise<ListCounts> {
+  return (await db.query(`SELECT count(*)::int AS total, count(*) FILTER (WHERE NOT c.suppressed AND c.marketing_consent='subscribed')::int AS subscribed,
+      count(*) FILTER (WHERE NOT c.suppressed AND c.marketing_consent='unsubscribed')::int AS unsubscribed, count(*) FILTER (WHERE NOT c.suppressed AND c.marketing_consent='unknown')::int AS unknown,
+      count(*) FILTER (WHERE c.suppressed)::int AS suppressed
+    FROM audience_list_members m JOIN audience_contacts c ON c.workspace_id=m.workspace_id AND c.id=m.contact_id WHERE m.list_id=$1 AND c.deleted_at IS NULL`, [listId])).rows[0];
+}
+// Resolves once a backend is waiting for a lock inside a statement matching `statement`: the half of a race that must wait.
+async function waitingOnLock(observer: pg.Client, statement: string) {
+  for (const until = Date.now() + 4000; ;) {
+    if ((await observer.query(`SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock' AND query ~* $1`, [statement])).rowCount) return;
+    assert.ok(Date.now() < until, `No statement matching ${statement} waited for a lock.`);
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+}
 async function keyFixture(t: TestContext, options: { permissions?: string[]; domains?: string[] } = {}): Promise<Key> {
   const body = ok(await http('POST', '/v1/api-keys', MANAGER, {
     name: unique('acceptance'),
@@ -10364,6 +10382,503 @@ describe('Lists, compound segments, imports and exports', () => {
     cleanup(t, async () => { ok(await http('DELETE', `/v1/contacts/${laterContact.id}`, key.secret), [200, 404]); });
     const [bulk] = page(await http('GET', `/v1/contacts/${laterContact.id}/consent`, key.secret));
     assert.deepEqual({ status: bulk.status, source: bulk.source, evidence: bulk.evidence }, { status: 'subscribed', source: 'audienceql', evidence: 'Signed up at the event' });
+  });
+
+  // A list's counts are kept by the triggers of migration 405, not counted on each load. The tests below compare what
+  // the API shows with a count of the memberships (countedMembers) and with the numbers each scenario must produce.
+  const exactly = async (db: pg.Client, key: Key, listId: string, expected: Partial<ListCounts>, label: string) => {
+    const shown = ok(await http('GET', `/v1/lists/${listId}`, key.secret)).counts;
+    assert.deepEqual(shown, await countedMembers(db, listId), `${label}: the counts shown are the memberships, counted`);
+    assert.deepEqual(shown, { ...NO_MEMBERS, ...expected }, label);
+  };
+  const keptCounts = async (db: pg.Client, listId: string): Promise<ListCounts & { rows: number }> => (await db.query(`SELECT coalesce(sum(subscribed+unsubscribed+unknown+suppressed),0)::int AS total, coalesce(sum(subscribed),0)::int AS subscribed,
+    coalesce(sum(unsubscribed),0)::int AS unsubscribed, coalesce(sum(unknown),0)::int AS unknown, coalesce(sum(suppressed),0)::int AS suppressed, count(*)::int AS rows FROM audience_list_counts WHERE list_id=$1`, [listId])).rows[0];
+  const recount = async (db: pg.Client, list: Json) => (await db.query('SELECT * FROM reconcile_audience_list_counts($1,$2)', [list.workspaceId, list.id])).rows;
+  const importInto = async (key: Key, listId: string, emails: string[], body?: Json) => {
+    const preview = ok(await http('POST', '/v1/contact-imports', key.secret, { csv: `email\n${emails.join('\n')}\n`, listId, mapping: { email: 'email' } }), 201);
+    return http('POST', `/v1/contact-imports/${preview.id}/commit`, key.secret, body);
+  };
+  const attested = { consent: { status: 'subscribed', evidence: 'Opted in at checkout' } };
+  // A list's members, each deleted with the test (an import's contacts have no other owner).
+  const membersOf = async (t: TestContext, key: Key, listId: string) => {
+    const rows = await allPages(`/v1/lists/${listId}/members`, key.secret);
+    for (const row of rows) cleanup(t, async () => { ok(await http('DELETE', `/v1/contacts/${row.id}`, key.secret), [200, 404]); });
+    return rows;
+  };
+  const contactsFor = async (t: TestContext, key: Key, n: number, state?: 'subscribed' | 'unsubscribed') => {
+    const rows: Json[] = [];
+    for (let i = 0; i < n; i++) { const row = await resource(t, key.secret, '/v1/contacts', { email: address() }); if (state) ok(await consent(key.secret, row.id, state)); rows.push(row); }
+    return rows;
+  };
+  // The suppression SES feedback writes for one address (operations.ts and sending.ts share mergeSuppression), and its lift (scripts/lift-suppression.ts).
+  const suppress = async (db: pg.Client, wid: string, email: string) => {
+    const [{ drizzle }, { sql }, { mergeSuppression }] = await Promise.all([import('drizzle-orm/node-postgres'), import('drizzle-orm'), import('./src/db/audience.js')]);
+    await drizzle(db).execute(sql`INSERT INTO audience_contacts AS c(id,workspace_id,email,suppressed,suppression_reason,suppressed_at) VALUES (${unique('con')},${wid},${email},true,'hard_bounce',now())
+      ON CONFLICT ON CONSTRAINT audience_contacts_email_scope DO UPDATE SET ${mergeSuppression},updated_at=now()`);
+  };
+  const lift = (db: pg.Client, id: string) => db.query('UPDATE audience_contacts SET suppressed = false, suppression_reason = NULL, suppressed_at = NULL, updated_at = now() WHERE id = $1 AND suppressed', [id]);
+  const join = (db: pg.Client, list: Json, ...contactIds: string[]) => db.query('INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,unnest($3::text[]) ON CONFLICT DO NOTHING', [list.workspaceId, list.id, contactIds]);
+  const membershipsOf = async (db: pg.Client, contactId: string) => (await db.query('SELECT count(*)::int AS n FROM audience_list_members WHERE contact_id=$1', [contactId])).rows[0].n as number;
+  const bulk = async (key: Key, statement: string, extra: Json = {}) => {
+    const plan = ok(await http('POST', '/v1/audience-query/plan', key.secret, { statement }), 201);
+    return http('POST', '/v1/audience-query/apply', key.secret, { planId: plan.id, ...extra });
+  };
+
+  test('list counts: every write that changes a membership or a contact\'s state moves them, a failed or rolled-back write moves nothing, and a recount has nothing to correct', async t => {
+    const key = await keyFixture(t), db = await fixtureDatabase(t);
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('counted') }), other = await resource(t, key.secret, '/v1/lists', { name: unique('counted-too') });
+    const counts = (expected: Partial<ListCounts>, label: string) => exactly(db, key, list.id, expected, label);
+    await counts({}, 'a new list');
+    const [existing] = await contactsFor(t, key, 1, 'subscribed'), fresh = [address(), address(), address()];
+    assert.equal(ok(await importInto(key, list.id, [existing!.email, ...fresh])).imported, 4);
+    const rows = await membersOf(t, key, list.id), [a, b, c] = fresh.map(email => rows.find(row => row.email === email)!) as [Json, Json, Json];
+    await counts({ total: 4, subscribed: 1, unknown: 3 }, 'an import without consent');
+    assert.equal(ok(await importInto(key, list.id, [existing!.email, ...fresh], attested)).subscribed, 3);
+    await counts({ total: 4, subscribed: 4 }, 'the same addresses again with consent: no membership twice, the three undecided subscribed');
+    ok(await consent(key.secret, a.id, 'unsubscribed'));
+    await counts({ total: 4, subscribed: 3, unsubscribed: 1 }, 'an opt-out');
+    // Suppression and its lift, written as SES feedback and the operator's script write them (the simulated-SES test
+    // "a list's counts follow a bounce..." runs the feedback batch, the feedback job and the script themselves).
+    await suppress(db, list.workspaceId, b.email);
+    await counts({ total: 4, subscribed: 2, unsubscribed: 1, suppressed: 1 }, 'a suppression');
+    ok(await consent(key.secret, b.id, 'unsubscribed'));
+    await counts({ total: 4, subscribed: 2, unsubscribed: 1, suppressed: 1 }, 'a suppressed contact opts out: suppression takes precedence');
+    await lift(db, b.id);
+    await counts({ total: 4, subscribed: 2, unsubscribed: 2 }, 'the suppression lifted');
+    // What changes no state, or another list, adds nothing here.
+    ok(await http('PATCH', `/v1/contacts/${c.id}`, key.secret, { name: 'Renamed' }));
+    assert.equal(ok(await http('POST', `/v1/lists/${other.id}/members`, key.secret, { contactIds: [a.id, c.id] })).added, 2);
+    await counts({ total: 4, subscribed: 2, unsubscribed: 2 }, 'a profile edit and another list\'s members');
+    await exactly(db, key, other.id, { total: 2, subscribed: 1, unsubscribed: 1 }, 'the other list');
+    // One membership at a time: removing or adding it twice counts once.
+    for (let i = 0; i < 2; i++) ok(await http('DELETE', `/v1/lists/${list.id}/members/${b.id}`, key.secret));
+    await counts({ total: 3, subscribed: 2, unsubscribed: 1 }, 'a member removed, twice');
+    assert.equal(ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [b.id, a.id] })).added, 1);
+    await counts({ total: 4, subscribed: 2, unsubscribed: 2 }, 'the member added back beside one already there');
+    // AudienceQL bulk changes: consent, removal, addition.
+    assert.equal(ok(await bulk(key, `UPDATE contacts SET consent = 'subscribed' WHERE list = '${list.id}' AND consent = 'unsubscribed'`, { confirmResubscribe: true, evidence: 'Asked to come back' })).affected, 2);
+    await counts({ total: 4, subscribed: 4 }, 'a bulk consent change');
+    assert.equal(ok(await bulk(key, `REMOVE contacts FROM LIST '${list.id}' WHERE list = '${other.id}'`)).affected, 2);
+    await counts({ total: 2, subscribed: 2 }, 'a bulk removal');
+    assert.equal(ok(await bulk(key, `ADD contacts TO LIST '${list.id}' WHERE list = '${other.id}'`)).affected, 2);
+    await counts({ total: 4, subscribed: 4 }, 'a bulk addition');
+    // A deleted contact leaves every list. An import restores it into the list it names, and no other.
+    ok(await http('DELETE', `/v1/contacts/${a.id}`, key.secret));
+    await counts({ total: 3, subscribed: 3 }, 'a contact deleted');
+    await exactly(db, key, other.id, { total: 1, subscribed: 1 }, 'the other list after the deletion');
+    assert.equal(await membershipsOf(db, a.id), 0);
+    assert.equal(ok(await importInto(key, list.id, [a.email])).imported, 1);
+    await counts({ total: 4, subscribed: 4 }, 'the contact restored by an import, with the consent it had');
+    await exactly(db, key, other.id, { total: 1, subscribed: 1 }, 'the restored contact is back in the imported list only');
+    // The import restores the contact and adds its membership in one statement; a restore and a membership in two
+    // statements (as an import that adds memberships separately issues them) count the same.
+    ok(await http('DELETE', `/v1/contacts/${a.id}`, key.secret));
+    await counts({ total: 3, subscribed: 3 }, 'the contact deleted again');
+    await db.query('UPDATE audience_contacts SET deleted_at = NULL WHERE id = $1', [a.id]);
+    await join(db, list, a.id);
+    await counts({ total: 4, subscribed: 4 }, 'restored, then added to the list, in two statements');
+    // A transaction that rolls back takes its differences with it. Inside it, the kept counts follow each statement.
+    const kept = await keptCounts(db, list.id);
+    await db.query('BEGIN');
+    try {
+      await db.query(`UPDATE audience_contacts SET marketing_consent='unsubscribed' WHERE id=$1`, [b.id]);
+      await db.query('DELETE FROM audience_list_members WHERE list_id=$1 AND contact_id=$2', [list.id, c.id]);
+      await join(db, other, b.id);
+      const { rows: _, ...inside } = await keptCounts(db, list.id);
+      assert.deepEqual([inside, await countedMembers(db, list.id)], [{ total: 3, subscribed: 2, unsubscribed: 1, unknown: 0, suppressed: 0 }, inside]);
+    } finally { await db.query('ROLLBACK'); }
+    assert.deepEqual(await keptCounts(db, list.id), kept);
+    await counts({ total: 4, subscribed: 4 }, 'a rolled-back transaction');
+    // An import that fails after its statement added members (merged properties over the limit) rolls back whole.
+    const full = await resource(t, key.secret, '/v1/contacts', { email: address(), properties: Object.fromEntries(Array.from({ length: 50 }, (_, i) => [`field${i}`, 'x'])) });
+    const refused = ok(await http('POST', '/v1/contact-imports', key.secret, { csv: `Email,Plan\n${address()},pro\n${full.email},pro\n`, listId: list.id, mapping: { email: 'Email', plan: 'Plan' } }), 201);
+    error(await http('POST', `/v1/contact-imports/${refused.id}/commit`, key.secret, attested), 422, 'IMPORT_PROPERTIES_INVALID');
+    await counts({ total: 4, subscribed: 4 }, 'an import that failed after adding members');
+    for (const each of [list, other]) assert.deepEqual(await recount(db, each), [], 'A recount has nothing to correct.');
+    // The listing shows the same numbers; counts=false still leaves them out.
+    const listed = (query: string) => http('GET', `/v1/lists?search=${encodeURIComponent(list.name)}${query}`, key.secret);
+    assert.deepEqual(page(await listed('')).map(row => [row.id, row.counts]), [[list.id, { total: 4, subscribed: 4, unsubscribed: 0, unknown: 0, suppressed: 0 }]]);
+    assert.deepEqual(page(await listed('&counts=false')).map(row => [row.id, row.counts]), [[list.id, null]]);
+    // A deleted list is gone with its counts; its members' other lists keep theirs.
+    ok(await http('DELETE', `/v1/lists/${list.id}`, key.secret));
+    error(await http('GET', `/v1/lists/${list.id}`, key.secret), 404, 'NOT_FOUND');
+    await exactly(db, key, other.id, { total: 1, subscribed: 1 }, 'another list after a list is deleted');
+  });
+
+  test('list counts: an opt-out and a suppression racing an import, a contact deleted while it joins a list, and a list deleted under a pending change are each counted once, whichever commits first', async t => {
+    const key = await keyFixture(t), a = await fixtureDatabase(t), b = await fixtureDatabase(t), observer = await fixtureDatabase(t);
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('raced') }), wid = list.workspaceId;
+    const counts = (expected: Partial<ListCounts>, label: string) => exactly(observer, key, list.id, expected, label);
+    const open = async <T,>(work: () => Promise<T>) => { await a.query('BEGIN'); try { const result = await work(); await a.query('COMMIT'); return result; } catch (cause) { await a.query('ROLLBACK').catch(() => {}); throw cause; } };
+    // 1. The state change first: an opt-out is uncommitted when the import reaches its contact. The import waits for the
+    // contact's row, then counts the membership it adds in the state the opt-out left.
+    const [early, late, bounced, leaving, joining, kept] = await contactsFor(t, key, 6) as [Json, Json, Json, Json, Json, Json];
+    const newcomer = address();
+    await open(async () => {
+      await a.query(`UPDATE audience_contacts SET marketing_consent='unsubscribed' WHERE id=$1`, [early.id]);
+      const importing = importInto(key, list.id, [early.email, newcomer], attested);
+      await waitingOnLock(observer, 'INSERT INTO audience_contacts AS c');
+      await a.query('COMMIT'); await a.query('BEGIN');
+      assert.equal(ok(await importing).subscribed, 1);
+    });
+    await membersOf(t, key, list.id);
+    await counts({ total: 2, subscribed: 1, unsubscribed: 1 }, 'an opt-out committed while the import waited for its contact');
+    // 2. The memberships first: they are uncommitted (as inside an import's transaction, which holds its contacts) when
+    // an opt-out and a bounce arrive for two of them. Both wait for the contact, then find and move the new membership.
+    let optingOut: Promise<Reply>, suppressing: Promise<void>;
+    await open(async () => {
+      await join(a, list, late.id, bounced.id);
+      optingOut = consent(key.secret, late.id, 'unsubscribed'); suppressing = suppress(b, wid, bounced.email);
+      await waitingOnLock(observer, 'audience_contacts.*for update'); await waitingOnLock(observer, 'ON CONFLICT ON CONSTRAINT audience_contacts_email_scope');
+      await counts({ total: 2, subscribed: 1, unsubscribed: 1 }, 'uncommitted memberships are not counted yet');
+    });
+    ok(await optingOut!); await suppressing!;
+    await counts({ total: 4, subscribed: 1, unsubscribed: 2, suppressed: 1 }, 'an opt-out and a bounce that waited for uncommitted memberships');
+    // 3. A contact deleted while it is being added to a list. The deletion first: the addition waits, then finds no contact.
+    await open(async () => {
+      await a.query(`UPDATE audience_contacts SET deleted_at=now(),name=NULL,properties='{}' WHERE id=$1`, [leaving.id]);
+      const adding = http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [leaving.id] });
+      await waitingOnLock(observer, 'audience_contacts.*for share');
+      await a.query('COMMIT'); await a.query('BEGIN');
+      error(await adding, 404, 'NOT_FOUND');
+    });
+    // The addition first: the deletion waits for it, then removes the membership it can now see.
+    await open(async () => {
+      await join(a, list, joining.id);
+      const deleting = http('DELETE', `/v1/contacts/${joining.id}`, key.secret);
+      await waitingOnLock(observer, 'update "audience_contacts" set.*"deleted_at"');
+      await a.query('COMMIT'); await a.query('BEGIN');
+      ok(await deleting);
+    });
+    assert.deepEqual([await membershipsOf(observer, leaving.id), await membershipsOf(observer, joining.id)], [0, 0]);
+    await counts({ total: 4, subscribed: 1, unsubscribed: 2, suppressed: 1 }, 'deleted contacts are in no list, whichever side committed first');
+    // A membership written beside the API for a deleted contact is counted nowhere, as it is listed nowhere. An import
+    // that restores the contact into that list counts it once: the restored contact's membership, not also a new one.
+    await join(a, list, leaving.id);
+    await counts({ total: 4, subscribed: 1, unsubscribed: 2, suppressed: 1 }, 'a deleted contact\'s membership');
+    assert.equal(ok(await importInto(key, list.id, [leaving.email])).imported, 1);
+    await counts({ total: 5, subscribed: 1, unsubscribed: 2, unknown: 1, suppressed: 1 }, 'the contact restored by an import into the list it was already in');
+    // 4. A list deleted while a member's opt-out is uncommitted: the deletion does not wait, and the opt-out's
+    // difference for the deleted list is dropped by the hourly fold. The member's other list counts the opt-out.
+    const doomed = await resource(t, key.secret, '/v1/lists', { name: unique('doomed') });
+    assert.equal(ok(await http('POST', `/v1/lists/${doomed.id}/members`, key.secret, { contactIds: [kept.id] })).added, 1);
+    assert.equal(ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [kept.id] })).added, 1);
+    await open(async () => {
+      await a.query(`UPDATE audience_contacts SET marketing_consent='unsubscribed' WHERE id=$1`, [kept.id]);
+      ok(await http('DELETE', `/v1/lists/${doomed.id}`, key.secret));
+    });
+    await counts({ total: 6, subscribed: 1, unsubscribed: 3, unknown: 1, suppressed: 1 }, 'an opt-out committed after one of its lists was deleted');
+    assert.ok((await keptCounts(observer, doomed.id)).rows > 0, 'The opt-out stored a difference for the list it still saw.');
+    const [{ drizzle }, { foldListCounts }] = await Promise.all([import('drizzle-orm/node-postgres'), import('./src/maintenance.js')]);
+    await drizzle(observer).execute(foldListCounts());
+    assert.equal((await keptCounts(observer, doomed.id)).rows, 0, 'The fold drops a deleted list\'s rows.');
+    assert.deepEqual(await recount(observer, list), []);
+  });
+
+  test('list counts: locks are taken contact first and several contacts in email order, so removing a member while its contact is deleted, or a bulk change crossing SES feedback, waits instead of deadlocking', async t => {
+    const key = await keyFixture(t), a = await fixtureDatabase(t), observer = await fixtureDatabase(t), writer = await fixtureDatabase(t);
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('ordered') }), wid = list.workspaceId;
+    const counts = (expected: Partial<ListCounts>, label: string) => exactly(observer, key, list.id, expected, label);
+    const held = async (membership: Json, work: () => Promise<void>) => {
+      // Another session holds the membership row, so whichever request reaches it stops there mid-transaction.
+      await a.query('BEGIN');
+      try { await a.query('SELECT 1 FROM audience_list_members WHERE list_id=$1 AND contact_id=$2 FOR UPDATE', [list.id, membership.id]); await work(); } finally { await a.query('COMMIT').catch(() => {}); }
+    };
+    const [first, second] = await contactsFor(t, key, 2, 'subscribed') as [Json, Json];
+    assert.equal(ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [first.id, second.id] })).added, 2);
+    // The removal first. It holds the contact before it touches the membership, so the deletion queues behind it on the
+    // contact, holding nothing. (Membership first, as a trigger alone would lock, the two would wait on each other.)
+    let removing: Promise<Reply>, deleting: Promise<Reply>;
+    await held(first, async () => {
+      removing = http('DELETE', `/v1/lists/${list.id}/members/${first.id}`, key.secret);
+      await waitingOnLock(observer, 'delete from "audience_list_members"');
+      await assert.rejects(observer.query('SELECT 1 FROM audience_contacts WHERE id=$1 FOR UPDATE NOWAIT', [first.id]), { code: '55P03' }, 'The removal holds its contact while it waits for the membership.');
+      deleting = http('DELETE', `/v1/contacts/${first.id}`, key.secret);
+      await waitingOnLock(observer, 'update "audience_contacts" set.*"deleted_at"');
+    });
+    ok(await removing!); ok(await deleting!);
+    await counts({ total: 1, subscribed: 1 }, 'a member removed while its contact was being deleted');
+    // The deletion first: it holds the contact and waits for the membership; the removal waits for the contact, holding nothing.
+    await held(second, async () => {
+      deleting = http('DELETE', `/v1/contacts/${second.id}`, key.secret);
+      await waitingOnLock(observer, 'delete from "audience_list_members"');
+      removing = http('DELETE', `/v1/lists/${list.id}/members/${second.id}`, key.secret);
+      await waitingOnLock(observer, 'audience_contacts.*for share');
+    });
+    ok(await deleting!); ok(await removing!);
+    await counts({}, 'a contact deleted while its membership was being removed');
+    assert.deepEqual([await membershipsOf(observer, first.id), await membershipsOf(observer, second.id)], [0, 0]);
+    // Several contacts. SES feedback and imports lock contacts in email order; a bulk change plans them in ID order. Two
+    // contacts whose email order is the reverse of their ID order: feedback holds the first by email, the bulk change
+    // must wait for that one before it locks the other, or each would hold what the other needs.
+    const pair = async () => {
+      for (;;) {
+        const tag = unique('order'), [x, y] = [await resource(t, key.secret, '/v1/contacts', { email: `a-${tag}@example.com` }), await resource(t, key.secret, '/v1/contacts', { email: `z-${tag}@example.com` })];
+        if (y.id < x.id) return { tag, byEmail: [x, y] as [Json, Json] };
+      }
+    };
+    const crossings: [string, (tag: string, ids: string[]) => Promise<Reply>][] = [
+      ['a bulk removal', tag => bulk(key, `REMOVE contacts FROM LIST '${list.id}' WHERE email CONTAINS '${tag}'`)],
+      ['a bulk consent change', tag => bulk(key, `UPDATE contacts SET consent = 'subscribed' WHERE email CONTAINS '${tag}'`, { evidence: 'Signed up at the event' })],
+      ['members added in one request', (_, ids) => http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: ids })],
+    ];
+    let expected = { total: 0, subscribed: 0, suppressed: 0 };
+    for (const [label, change] of crossings) {
+      const { tag, byEmail: [x, y] } = await pair(), joins = label !== 'a bulk removal';
+      if (label !== 'members added in one request') assert.equal(ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [x.id, y.id] })).added, 2);
+      await a.query('BEGIN');
+      let changing: Promise<Reply>;
+      try {
+        await suppress(a, wid, x.email);
+        changing = change(tag, [y.id, x.id]);
+        await waitingOnLock(observer, label === 'a bulk consent change' ? 'audience_contacts.*for update' : 'audience_contacts.*for share');
+        // Feedback's next contact is free: the bulk change is still waiting for the first and has not locked this one.
+        await suppress(a, wid, y.email);
+        await a.query('COMMIT');
+      } catch (cause) { await a.query('ROLLBACK').catch(() => {}); throw cause; }
+      // The consent change waited for the bounce, then found its planned contacts changed: refused whole, not half applied.
+      if (label === 'a bulk consent change') error(await changing, 409, 'STALE_AUDIENCE_PLAN'); else ok(await changing);
+      if (joins) expected = { total: expected.total + 2, subscribed: expected.subscribed, suppressed: expected.suppressed + 2 };
+      await counts(expected, `${label} crossing SES feedback for the same two contacts`);
+    }
+    // A bulk addition planned before one of its contacts was deleted is refused whole: nothing is added for the others.
+    const [stays, leaves] = await contactsFor(t, key, 2, 'subscribed') as [Json, Json], tag = unique('stale');
+    for (const person of [stays, leaves]) ok(await http('PATCH', `/v1/contacts/${person.id}`, key.secret, { name: tag }));
+    const plan = ok(await http('POST', '/v1/audience-query/plan', key.secret, { statement: `ADD contacts TO LIST '${list.id}' WHERE name = '${tag}'` }), 201);
+    assert.equal(plan.matched, 2);
+    ok(await http('DELETE', `/v1/contacts/${leaves.id}`, key.secret));
+    error(await http('POST', '/v1/audience-query/apply', key.secret, { planId: plan.id }), 409, 'STALE_AUDIENCE_PLAN');
+    assert.equal(await membershipsOf(observer, stays.id), 0);
+    await counts(expected, 'a bulk addition refused because a planned contact was deleted');
+    // Memberships written beside the API for two deleted contacts, while an import restores both in email order: the
+    // triggers lock contacts in email order too, so the writer waits for the first and holds neither.
+    const { byEmail: [x, y] } = await pair();
+    for (const person of [x, y]) ok(await http('DELETE', `/v1/contacts/${person.id}`, key.secret));
+    await a.query('BEGIN');
+    let writing: Promise<unknown>;
+    try {
+      await a.query('UPDATE audience_contacts SET deleted_at = NULL WHERE id = $1', [x.id]);
+      writing = join(writer, list, y.id, x.id);
+      await waitingOnLock(observer, 'INSERT INTO audience_list_members');
+      await a.query('UPDATE audience_contacts SET deleted_at = NULL WHERE id = $1', [y.id]);
+      await a.query('COMMIT');
+    } catch (cause) { await a.query('ROLLBACK').catch(() => {}); throw cause; }
+    await writing;
+    expected = { total: expected.total + 2, subscribed: expected.subscribed, suppressed: expected.suppressed };
+    await counts({ ...expected, unknown: 2 }, 'memberships written while their deleted contacts were being restored');
+    assert.deepEqual(await recount(observer, list), []);
+  });
+
+  test('list counts: two imports into one list at once, with opt-outs, bounces, deletions and removals for the same people, leave exactly the memberships counted', async t => {
+    const key = await keyFixture(t), db = await fixtureDatabase(t), sessions = [await fixtureDatabase(t), await fixtureDatabase(t)];
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('storm') }), other = await resource(t, key.secret, '/v1/lists', { name: unique('storm-too') }), wid = list.workspaceId;
+    for (let round = 0; round < 3; round++) {
+      const known = await contactsFor(t, key, 12, round % 2 ? 'subscribed' : undefined), both = Array.from({ length: 20 }, address), left = Array.from({ length: 20 }, address), right = Array.from({ length: 20 }, address);
+      assert.equal(ok(await http('POST', `/v1/lists/${other.id}/members`, key.secret, { contactIds: known.map(row => row.id) })).added, 12);
+      if (round) assert.equal(ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: known.slice(6).map(row => row.id) })).added, 6);
+      const emails = known.map(row => row.email);
+      const replies = await Promise.all([
+        importInto(key, list.id, [...both, ...left, ...emails], attested), importInto(key, list.id, [...right, ...emails.toReversed(), ...both]),
+        ...known.slice(0, 3).map(row => consent(key.secret, row.id, 'unsubscribed')),
+        ...known.slice(6, 9).map(row => consent(key.secret, row.id, 'unsubscribed')),
+        ...known.slice(3, 5).map(row => http('DELETE', `/v1/contacts/${row.id}`, key.secret)),
+        ...known.slice(9, 11).map(row => http('DELETE', `/v1/lists/${list.id}/members/${row.id}`, key.secret)),
+        ...sessions.map(async (session, i) => { for (const row of [known[5]!, known[11]!, known[i]!, known[6 + i]!]) await suppress(session, wid, row.email); return undefined; }),
+      ]);
+      for (const reply of replies) if (reply) ok(reply);
+      await membersOf(t, key, list.id);
+      const shown = ok(await http('GET', `/v1/lists/${list.id}`, key.secret)).counts, shownOther = ok(await http('GET', `/v1/lists/${other.id}`, key.secret)).counts;
+      assert.deepEqual([shown, shownOther], [await countedMembers(db, list.id), await countedMembers(db, other.id)], `round ${round}`);
+      assert.deepEqual([await recount(db, list), await recount(db, other)], [[], []], `round ${round}: a recount has nothing to correct`);
+      // Every address either import named is a member exactly once, unless it was deleted or removed while they ran.
+      assert.ok(shown.total >= 60 * (round + 1) + 6 * round, `round ${round}: every imported address is a member`);
+    }
+  });
+
+  test('list counts: the daily recount reports and corrects a difference without making a write wait, and the hourly fold changes no count', async t => {
+    const key = await keyFixture(t), db = await fixtureDatabase(t), a = await fixtureDatabase(t);
+    const [{ drizzle }, { foldListCounts, recountLists }] = await Promise.all([import('drizzle-orm/node-postgres'), import('./src/maintenance.js')]);
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('recounted') }), people = await contactsFor(t, key, 4, 'subscribed') as [Json, Json, Json, Json];
+    const counts = (expected: Partial<ListCounts>, label: string) => exactly(db, key, list.id, expected, label);
+    for (const person of people.slice(0, 3)) ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [person.id] }));
+    ok(await consent(key.secret, people[0].id, 'unsubscribed'));
+    // The fold: a list's four rows become one with the same sums. A write that is uncommitted while it runs keeps its own row.
+    assert.equal((await keptCounts(db, list.id)).rows, 4);
+    await a.query('BEGIN');
+    try {
+      await a.query(`UPDATE audience_contacts SET marketing_consent='unsubscribed' WHERE id=$1`, [people[1].id]);
+      await drizzle(db).execute(foldListCounts());
+      assert.equal((await keptCounts(db, list.id)).rows, 1);
+      await a.query('COMMIT');
+    } catch (cause) { await a.query('ROLLBACK').catch(() => {}); throw cause; }
+    assert.equal((await keptCounts(db, list.id)).rows, 2);
+    await counts({ total: 3, subscribed: 1, unsubscribed: 2 }, 'after a fold with a write in flight');
+    await drizzle(db).execute(foldListCounts());
+    assert.equal((await keptCounts(db, list.id)).rows, 1);
+    await counts({ total: 3, subscribed: 1, unsubscribed: 2 }, 'after a second fold');
+    // A recount in an open transaction: writes to the same list and its contacts do not wait for it, and a write that is
+    // uncommitted when it counts is on neither side of its comparison.
+    await a.query('BEGIN');
+    try {
+      await join(a, list, people[3].id);
+      await db.query('BEGIN');
+      try {
+        assert.deepEqual(await recount(db, list), [], 'An uncommitted membership is neither counted nor stored yet.');
+        ok(await consent(key.secret, people[2].id, 'unsubscribed'));
+        ok(await http('DELETE', `/v1/lists/${list.id}/members/${people[0].id}`, key.secret));
+        await db.query('COMMIT');
+      } catch (cause) { await db.query('ROLLBACK').catch(() => {}); throw cause; }
+      await a.query('COMMIT');
+    } catch (cause) { await a.query('ROLLBACK').catch(() => {}); throw cause; }
+    await counts({ total: 3, subscribed: 1, unsubscribed: 2 }, 'writes made while a recount was open');
+    // A difference is a bug: the daily recount stores what restores the count and says so at error level, once.
+    await db.query('INSERT INTO audience_list_counts(workspace_id,list_id,subscribed,suppressed) VALUES ($1,$2,7,-1)', [list.workspaceId, list.id]);
+    assert.deepEqual(ok(await http('GET', `/v1/lists/${list.id}`, key.secret)).counts, { total: 9, subscribed: 8, unsubscribed: 2, unknown: 0, suppressed: -1 });
+    const logs: Json[] = [];
+    for (const level of ['error', 'warn', 'info'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch { /* not a log line */ } });
+    const runtime = { db: drizzle(db) } as unknown as import('./src/core.js').Runtime;
+    await db.query(`DELETE FROM job_schedule WHERE workspace_id='maintenance:audience-list-counts'`);
+    assert.ok(await recountLists(runtime) >= 1);
+    const drift = logs.filter(line => line.code === 'AUDIENCE_LIST_COUNTS_DRIFT' && line.list === list.id);
+    assert.deepEqual(drift.map(({ level, workspace, subscribed, unsubscribed, unknown, suppressed }) => ({ level, workspace, subscribed, unsubscribed, unknown, suppressed })),
+      [{ level: 'error', workspace: list.workspaceId, subscribed: -7, unsubscribed: 0, unknown: 0, suppressed: 1 }]);
+    await counts({ total: 3, subscribed: 1, unsubscribed: 2 }, 'after the recount');
+    // Elected once a day: a second run the same day recounts nothing.
+    logs.length = 0;
+    assert.equal(await recountLists(runtime), 0);
+    assert.deepEqual(logs.filter(line => String(line.code).startsWith('AUDIENCE_LIST')), []);
+    // A list deleted while a run is under way has nothing to correct: its rows wait for the fold, and that is no difference.
+    const gone = await resource(t, key.secret, '/v1/lists', { name: unique('recount-gone') });
+    assert.equal(ok(await http('POST', `/v1/lists/${gone.id}/members`, key.secret, { contactIds: people.map(person => person.id) })).added, 4);
+    ok(await http('DELETE', `/v1/lists/${gone.id}`, key.secret));
+    const leftover = await keptCounts(db, gone.id);
+    assert.deepEqual([leftover.total, await recount(db, gone), await keptCounts(db, gone.id)], [4, [], leftover]);
+    // Each list is its own transaction with its own time limit: one whose recount cannot finish in time (here, another
+    // recount of it holds its lock) is reported and skipped, and a difference in another list is still found and corrected.
+    const stuck = await resource(t, key.secret, '/v1/lists', { name: unique('recount-stuck') }), lock = [list.workspaceId, stuck.id];
+    await db.query('INSERT INTO audience_list_counts(workspace_id,list_id,unknown) VALUES ($1,$2,3)', [list.workspaceId, list.id]);
+    await db.query(`DELETE FROM job_schedule WHERE workspace_id='maintenance:audience-list-counts'`);
+    await a.query(`SELECT pg_advisory_lock(275816, hashtext($1 || ':' || $2))`, lock);
+    try { assert.ok(await recountLists(runtime, 60_000, 1) >= 1); } finally { await a.query(`SELECT pg_advisory_unlock(275816, hashtext($1 || ':' || $2))`, lock); }
+    assert.deepEqual(logs.filter(line => line.code === 'AUDIENCE_LIST_RECOUNT_FAILED').map(({ level, list: id, databaseCode }) => ({ level, id, databaseCode })), [{ level: 'warn', id: stuck.id, databaseCode: '57014' }]);
+    assert.deepEqual(logs.filter(line => line.code === 'AUDIENCE_LIST_COUNTS_DRIFT' && line.list === list.id).map(({ level, unknown }) => ({ level, unknown })), [{ level: 'error', unknown: -3 }]);
+    assert.deepEqual(logs.filter(line => line.code === 'AUDIENCE_LISTS_RECOUNTED').map(({ level, failed }) => ({ level, failed })), [{ level: 'warn', failed: 1 }]);
+    await counts({ total: 3, subscribed: 1, unsubscribed: 2 }, 'after a run in which one list could not be counted');
+  });
+
+  test('list counts: migration 405 takes its lock between writers without holding other writes up, and 406 fills counts that stay right when writes land while it runs, and stores nothing when run again', async t => {
+    const key = await keyFixture(t), db = await fixtureDatabase(t), a = await fixtureDatabase(t), b = await fixtureDatabase(t);
+    const source = async (file: string) => (await readFile(new URL(`./migrations/${file}`, import.meta.url), 'utf8')).replace(/^--.*$/gm, '');
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('filled') }), people = await contactsFor(t, key, 4, 'subscribed') as [Json, Json, Json, Json];
+    assert.equal(ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: people.slice(0, 2).map(row => row.id) })).added, 2);
+    // Between 405 and 406 the table holds only the differences made since the triggers exist. The API that reads it is
+    // deployed after both; the release before it still counts members itself.
+    await db.query('DELETE FROM audience_list_counts WHERE list_id=$1', [list.id]);
+    assert.deepEqual(ok(await http('GET', `/v1/lists/${list.id}`, key.secret)).counts, NO_MEMBERS);
+    // The fill reads one snapshot. Writes that commit after it, before the fill itself commits, add their own rows.
+    // The file's own statements: three settings that keep the join a hash join whatever the statistics say, and the fill.
+    const fill = (await source('406_audience_list_counts_fill.sql')).split(/;\s*$/m).map(statement => statement.trim()).filter(Boolean);
+    assert.deepEqual(fill.map(statement => statement.split(' ').slice(0, 3).join(' ')), ['SET LOCAL enable_nestloop', 'SET LOCAL enable_mergejoin', 'SET LOCAL work_mem', 'INSERT INTO audience_list_counts']);
+    await a.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
+    try {
+      await a.query('SELECT 1 FROM audience_lists LIMIT 1');
+      assert.equal(ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [people[2].id] })).added, 1);
+      ok(await consent(key.secret, people[0].id, 'unsubscribed'));
+      ok(await http('DELETE', `/v1/lists/${list.id}/members/${people[1].id}`, key.secret));
+      for (const statement of fill.slice(0, 3)) await a.query(statement);
+      const nodes: string[] = [], walk = (plan: Json) => { nodes.push(plan['Node Type']); for (const child of plan.Plans ?? []) walk(child); };
+      walk((await a.query(`EXPLAIN (FORMAT JSON) ${fill[3]}`)).rows[0]['QUERY PLAN'][0].Plan);
+      assert.deepEqual(nodes.filter(node => /Nested Loop|Merge Join/.test(node)), [], 'Memberships and contacts are joined by hash.');
+      await a.query(fill[3]!);
+      await a.query('COMMIT');
+    } catch (cause) { await a.query('ROLLBACK').catch(() => {}); throw cause; }
+    await exactly(db, key, list.id, { total: 2, subscribed: 1, unsubscribed: 1 }, 'filled while writes landed');
+    const filled = await keptCounts(db, list.id);
+    await db.query('BEGIN');
+    try { for (const statement of fill) await db.query(statement); await db.query('COMMIT'); } catch (cause) { await db.query('ROLLBACK').catch(() => {}); throw cause; }
+    assert.deepEqual(await keptCounts(db, list.id), filled, 'A second fill stores nothing for a list that is already right.');
+    // 405's lock: asked for 2 s at a time. A writer's open transaction makes the first attempt give up; a write that
+    // queued behind that attempt goes ahead when it does; the next attempt gets the lock once the writer has committed.
+    const [lock] = /DO \$\$[\s\S]*?END \$\$;/.exec(await source('405_audience_list_counts.sql')) ?? [];
+    assert.ok(lock, 'Migration 405 begins by taking its lock in a retry loop.');
+    for (const session of [a, b, db]) await session.query('SET statement_timeout = 0');
+    await b.query('BEGIN'); await b.query('UPDATE audience_contacts SET updated_at=updated_at WHERE id=$1', [people[3].id]);
+    const writer = setTimeout(() => { void b.query('COMMIT'); }, 2400);
+    try {
+      await a.query('BEGIN');
+      const started = Date.now(), locking = a.query(lock);
+      await waitingOnLock(db, 'LOCK TABLE audience_contacts');
+      // Behind the migration's pending lock, another write waits only until that attempt gives up, not for the writer ahead of it.
+      await db.query('UPDATE audience_contacts SET updated_at=updated_at WHERE id=$1', [people[2].id]);
+      const queued = Date.now() - started;
+      assert.ok(queued < 2800, `A write behind the pending lock waited ${queued} ms.`);
+      await locking;
+      assert.ok(Date.now() - started >= 2400, 'The lock was granted only after the writer committed.');
+      // With the lock held to COMMIT, reads go on; nothing else in the migration reads these tables.
+      assert.deepEqual(ok(await http('GET', `/v1/lists/${list.id}`, key.secret)).counts, { ...NO_MEMBERS, total: 2, subscribed: 1, unsubscribed: 1 });
+      assert.equal(page(await http('GET', `/v1/lists/${list.id}/members`, key.secret)).length, 2);
+    } finally { clearTimeout(writer); await a.query('ROLLBACK').catch(() => {}); await b.query('COMMIT').catch(() => {}); }
+  });
+
+  test('list counts: a session whose first writes were one row each counts 20,000 members, their consent and their removal in time with the rows, not with their square', async t => {
+    // PL/pgSQL keeps a statement's first plan for the session. Planned on small tables, a lookup the planner can answer
+    // from two indexes took the one that reads a whole workspace per row: 50,000 members in one statement then ran
+    // minutes. Each statement here has this session's 5 s limit.
+    const db = await fixtureDatabase(t), wid = unique('wide-workspace'), tag = unique('wide');
+    const list = unique('lst'), n = 20_000, kept = () => keptCounts(db, list);
+    try {
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)', [wid]);
+      await db.query('INSERT INTO audience_lists(id,workspace_id,name) VALUES($1,$2,$1)', [list, wid]);
+      const add = (from: number, to: number) => db.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email) SELECT 'con_'||md5($3||i),$1,$3||i||'@example.com' FROM generate_series($4::int,$5::int) i RETURNING id)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM c`, [wid, list, tag, from, to]);
+      const all = (statement: string) => db.query(statement, [wid, n]);
+      // One row through each trigger first, so this session has its plans.
+      await add(0, 0); await all(`UPDATE audience_contacts SET marketing_consent='subscribed' WHERE workspace_id=$1 AND $2>0`);
+      await db.query('DELETE FROM audience_list_members WHERE workspace_id=$1', [wid]); await db.query(`UPDATE audience_contacts SET deleted_at=now() WHERE workspace_id=$1`, [wid]);
+      await add(1, n);
+      assert.deepEqual([(await kept()).total, (await kept()).unknown], [n, n]);
+      await all(`UPDATE audience_contacts SET marketing_consent='subscribed' WHERE workspace_id=$1 AND $2>0 AND deleted_at IS NULL`);
+      assert.deepEqual([(await kept()).total, (await kept()).subscribed], [n, n]);
+      await db.query(`DELETE FROM audience_list_members WHERE workspace_id=$1 AND contact_id IN (SELECT 'con_'||md5($2||i) FROM generate_series(1,$3::int/2) i)`, [wid, tag, n]);
+      assert.deepEqual([(await kept()).total, (await kept()).subscribed], [n / 2, n / 2]);
+      await all(`UPDATE audience_contacts SET deleted_at=now() WHERE workspace_id=$1 AND $2>0 AND deleted_at IS NULL`);
+      assert.equal((await kept()).total, 0);
+      assert.deepEqual((await db.query('SELECT * FROM reconcile_audience_list_counts($1,$2)', [wid, list])).rows, []);
+    } finally {
+      for (const table of ['audience_list_members', 'audience_lists', 'audience_contacts', 'audience_list_counts']) await db.query(`DELETE FROM ${table} WHERE workspace_id=$1`, [wid]);
+      await db.query('DELETE FROM workspaces WHERE id=$1', [wid]).catch(() => {});
+    }
+  });
+
+  test('a list\'s page is read through its memberships, and a search for one whole address is that contact', async t => {
+    const key = await keyFixture(t), tag = unique('find');
+    const empty = await resource(t, key.secret, '/v1/lists', { name: unique('empty') }), list = await resource(t, key.secret, '/v1/lists', { name: unique('searched') });
+    const ids = async (path: string) => page(await http('GET', path, key.secret)).map(row => row.id).sort();
+    // An empty list's page, however it is filtered (the page a new list opens on read every contact of the workspace).
+    for (const query of ['', '?consent=unknown', '?suppressed=true', `?search=${tag}`]) assert.deepEqual(await ids(`/v1/lists/${empty.id}/members${query}`), [], query);
+    assert.deepEqual(await ids(`/v1/contacts?listId=${empty.id}`), []);
+    const ann = await resource(t, key.secret, '/v1/contacts', { email: `${tag}@example.com` }), joann = await resource(t, key.secret, '/v1/contacts', { email: `jo${tag}@example.com` });
+    const named = await resource(t, key.secret, '/v1/contacts', { email: address(), name: `Forwarded for ${tag}@example.com` });
+    assert.equal(ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [ann.id, joann.id] })).added, 2);
+    // Part of an address or a name: a substring of either, as before.
+    assert.deepEqual(await ids(`/v1/contacts?search=${tag.toUpperCase()}`), [ann.id, joann.id, named.id].sort());
+    assert.deepEqual(await ids(`/v1/lists/${list.id}/members?search=${tag}`), [ann.id, joann.id].sort());
+    assert.deepEqual(await ids(`/v1/contacts?search=${encodeURIComponent(`${tag}@example`)}`), [ann.id, joann.id, named.id].sort());
+    // One whole address, in any case: that contact, not every address or name that contains it.
+    assert.deepEqual(await ids(`/v1/contacts?search=${encodeURIComponent(ann.email.toUpperCase())}`), [ann.id]);
+    assert.deepEqual(await ids(`/v1/contacts?search=${encodeURIComponent(` ${joann.email} `)}`), [joann.id]);
+    assert.deepEqual(await ids(`/v1/contacts?search=${encodeURIComponent(`nobody-${tag}@example.com`)}`), []);
+    assert.deepEqual(await ids(`/v1/lists/${list.id}/members?search=${encodeURIComponent(ann.email)}`), [ann.id]);
+    assert.deepEqual(await ids(`/v1/contacts?listId=${empty.id}&search=${encodeURIComponent(ann.email)}`), []);
+    assert.deepEqual(await ids(`/v1/lists/${list.id}/members?search=${encodeURIComponent(named.email)}`), []);
+    // A small list's filters and pages, through its memberships.
+    ok(await consent(key.secret, joann.id, 'subscribed'));
+    assert.deepEqual(await ids(`/v1/lists/${list.id}/members?consent=subscribed`), [joann.id]);
+    assert.deepEqual(await ids(`/v1/contacts?listId=${list.id}&consent=unknown&suppressed=false`), [ann.id]);
+    const firstPage = await http('GET', `/v1/lists/${list.id}/members?limit=1&search=${tag}`, key.secret), [lower] = [ann.id, joann.id].sort();
+    assert.deepEqual([page(firstPage).map(row => row.id), firstPage.body.nextCursor], [[lower], lower]);
+    assert.deepEqual(await ids(`/v1/lists/${list.id}/members?limit=1&search=${tag}&cursor=${firstPage.body.nextCursor}`), [[ann.id, joann.id].sort()[1]]);
+    assert.deepEqual(page(await http('GET', `/v1/lists/${list.id}/members`, key.secret)).map(row => row.listIds), [[list.id], [list.id]]);
   });
 });
 
@@ -22393,6 +22908,71 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.ok([...tags.values()].every(n=>n===1) && tags.size===50,'every email reached SES at most once');
     });
   });
+  test('MX: a list\'s counts follow a bounce on either feedback path, an operator\'s lift and a footer opt-out', async t => {
+    // The writers of a contact's suppression and consent that no dashboard request reaches: the SES feedback batch
+    // (sending.ts), the feedback job (operations.ts), scripts/lift-suppression.ts and recordUnsubscribe.
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const [{ ingestFeedbackBatch, operationJobs }, { liftSuppression }, { recordUnsubscribe }] = await Promise.all([import('./src/operations.js'), import('./scripts/lift-suppression.js'), import('./src/audience.js')]);
+      const wid = runtime.config.workspaceId, account = '111122223333', topicArn = `arn:aws:sns:${REGION}:${account}:fixture`;
+      const list = ok(await local('POST', '/v1/lists', { name: 'Counted' }), 201), people: Json[] = [], sent: Json[] = [];
+      for (let i = 0; i < 4; i++) {
+        const contact = ok(await local('POST', '/v1/contacts', { email: address() }), 201);
+        ok(await local('POST', `/v1/contacts/${contact.id}/consent`, { status: 'subscribed' })); people.push(contact);
+      }
+      assert.equal(ok(await local('POST', `/v1/lists/${list.id}/members`, { contactIds: people.map(person => person.id) })).added, 4);
+      for (const person of people.slice(0, 2)) sent.push(ok(await local('POST', '/v1/emails/send', mail({ to: person.email })), 202));
+      // One email to two people who are in no list, for the last step: its address order is the reverse of SES's.
+      const tag = unique('pair'), [early, late] = [`a-${tag}@example.com`, `z-${tag}@example.com`];
+      const both = ok(await local('POST', '/v1/emails/send', mail({ to: late, cc: [early] })), 202);
+      runtime.config.multiTenant = true;
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`, [REGION, account, topicArn]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, account]);
+      const counts = async (expected: Partial<ListCounts>, label: string) => {
+        const shown = ok(await local('GET', `/v1/lists/${list.id}`)).counts;
+        assert.deepEqual([shown, shown], [await countedMembers(db, list.id), { ...NO_MEMBERS, ...expected }], label);
+        assert.deepEqual((await db.query('SELECT * FROM reconcile_audience_list_counts($1,$2)', [wid, list.id])).rows, [], `${label}: a recount has nothing to correct`);
+      };
+      await counts({ total: 4, subscribed: 4 }, 'four subscribers');
+      for (const [i, path] of (['batch', 'job'] as const).entries()) {
+        const provider = unique('fixture-provider');
+        await db.query(`UPDATE sending_emails SET status='accepted',provider_id=$2,simulated=false,feedback_topic_arn=$3 WHERE id=$1`, [sent[i]!.id, provider, topicArn]);
+        const item = { topicArn, region: REGION, messageId: unique('sns'), message: { eventType: 'Bounce', mail: { messageId: provider, sendingAccountId: account }, bounce: { bounceType: 'Permanent', bounceSubType: 'General', bouncedRecipients: [{ emailAddress: people[i]!.email }] } } };
+        if (path === 'batch') assert.deepEqual(await ingestFeedbackBatch(runtime, [item]), [{ ok: true }]);
+        else {
+          await db.query('INSERT INTO operation_sns_receipts(topic_arn,message_id,workspace_id) VALUES($1,$2,$3)', [topicArn, item.messageId, wid]);
+          await operationJobs['operation.ses']!(runtime, item, { id: unique('job'), attempts: 1, workspaceId: wid });
+        }
+        await counts({ total: 4, subscribed: 3 - i, suppressed: 1 + i }, `a bounce through the feedback ${path}`);
+      }
+      const savepoint = async <T,>(work: () => Promise<T>) => {
+        await db.query('SAVEPOINT lift');
+        try { const result = await work(); await db.query('RELEASE SAVEPOINT lift'); return result; } catch (error) { await db.query('ROLLBACK TO SAVEPOINT lift'); throw error; }
+      };
+      await liftSuppression(db, [wid, people[0]!.email, '--reason', 'The mailbox exists now'], () => ({ account: async () => account, get: async () => null, remove: async () => false }), savepoint);
+      await counts({ total: 4, subscribed: 3, suppressed: 1 }, 'the first bounce lifted by an operator');
+      assert.deepEqual(await recordUnsubscribe(runtime, wid, people[2]!.email, 'footer-confirm'), { contactId: people[2]!.id, changed: true });
+      await counts({ total: 4, subscribed: 2, unsubscribed: 1, suppressed: 1 }, 'a footer opt-out');
+      // An opt-out from someone who is not a contact creates the contact, in no list.
+      assert.equal((await recordUnsubscribe(runtime, wid, address(), 'rfc8058-post')).changed, true);
+      await counts({ total: 4, subscribed: 2, unsubscribed: 1, suppressed: 1 }, 'an opt-out from a stranger');
+      // One bounce for two recipients, listed by SES in the reverse of their email order: the feedback job suppresses
+      // them in email order, the order imports, the feedback batch and lockContacts take contacts in, so it cannot
+      // deadlock with someone adding both to a list.
+      const provider = unique('fixture-provider');
+      await db.query(`UPDATE sending_emails SET status='accepted',provider_id=$2,simulated=false,feedback_topic_arn=$3 WHERE id=$1`, [both.id, provider, topicArn]);
+      const bounce = { topicArn, region: REGION, messageId: unique('sns'), message: { eventType: 'Bounce', mail: { messageId: provider, sendingAccountId: account }, bounce: { bounceType: 'Permanent', bounceSubType: 'General', bouncedRecipients: [{ emailAddress: late }, { emailAddress: early }] } } };
+      await db.query('INSERT INTO operation_sns_receipts(topic_arn,message_id,workspace_id) VALUES($1,$2,$3)', [topicArn, bounce.messageId, wid]);
+      const query = t.mock.method(db, 'query'), suppressed: string[] = [];
+      try { await operationJobs['operation.ses']!(runtime, bounce, { id: unique('job'), attempts: 1, workspaceId: wid }); }
+      finally {
+        for (const call of query.mock.calls) { const [first, second] = call.arguments as unknown as [any, any], text = String(first?.text ?? first), values = (first?.values ?? second ?? []) as unknown[];
+          if (text.includes('INSERT INTO audience_contacts AS c')) suppressed.push(...values.filter((value): value is string => value === early || value === late)); }
+        query.mock.restore();
+      }
+      assert.deepEqual(suppressed, [early, late]);
+    });
+  });
+
   test('MX: a queue redelivery suppresses after a recovery job stored the bounce and died before suppressing', async t => {
     // tear witness (api/tear/ses): h b1, accept e1, J b1, J go, J crash, q b1.
     await simulatedSesFixture(t,async ({runtime,local,db})=>{

@@ -20143,7 +20143,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Active contacts with current list IDs. Search is a case-insensitive literal email/name substring. Consent and suppression filters are independent.",
+        "description": "Active contacts with current list IDs. A search that is one complete email address returns that contact (exact, any case). Any other search is a case-insensitive literal substring of the email or name. Consent and suppression filters are independent.",
         "parameters": [
           {
             "schema": {
@@ -21625,10 +21625,10 @@
                 "false"
               ],
               "default": "true",
-              "description": "false skips member counts (counts is null), for pickers that only need names. Counting scans every membership of each list."
+              "description": "false leaves member counts out (counts is null). Counts are kept as memberships, consent and suppression change, so reading them does not count members."
             },
             "required": false,
-            "description": "false skips member counts (counts is null), for pickers that only need names. Counting scans every membership of each list.",
+            "description": "false leaves member counts out (counts is null). Counts are kept as memberships, consent and suppression change, so reading them does not count members.",
             "name": "counts",
             "in": "query"
           }
