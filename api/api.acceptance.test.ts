@@ -10768,6 +10768,101 @@ describe('Import property boundaries', () => {
     assert.equal(ok(await http('POST', `/v1/contact-imports/${replacement.id}/commit`, key.secret)).imported, 1);
     assert.deepEqual(ok(await http('GET', `/v1/contacts/${contact.id}`, key.secret)).properties, { ...properties, plan: 'enterprise' }, 'Replacing a property at the 50-property boundary remains supported.');
   });
+
+  test('imports use time-ordered IDs, serialize commits per workspace, cap open previews, fold publishBatch jobs, and roll back cleanly on timeout', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const wid = runtime.config.workspaceId;
+      const list = ok(await local('POST', '/v1/lists', { name: 'Import Scale List' }), 201);
+
+      // 1. Time-ordered UUIDv7 IDs for contacts and consent records (same prefix, length and hex charset).
+      const uuidv7 = /^(?:con|cns)_[0-9a-f]{12}7[0-9a-f]{19}$/;
+      const manual = ok(await local('POST', '/v1/contacts', { email: 'manual@example.com', name: 'Manual' }), 201);
+      assert.match(manual.id, uuidv7);
+      ok(await local('POST', `/v1/contacts/${manual.id}/consent`, { status: 'subscribed', evidence: 'Direct' }));
+      const [manualAudit] = page(await local('GET', `/v1/contacts/${manual.id}/consent`));
+      assert.match(manualAudit.id, uuidv7);
+
+      // 2. 250-row attested import preview + one-commit-at-a-time per workspace check (must run before any commit in
+      // this fixture's outer transaction acquires advisory lock 275817).
+      const existingUnk = ok(await local('POST', '/v1/contacts', { email: 'existing-unk@example.com' }), 201);
+      const lines = ['Email,Name,Plan', 'existing-unk@example.com,Existing Unk,pro'];
+      for (let i = 0; i < 249; i++) lines.push(`batch${i}@example.com,Person ${i},free`);
+      const batchPreview = ok(await local('POST', '/v1/contact-imports', { csv: lines.join('\n'), listId: list.id, mapping: { email: 'Email', name: 'Name', plan: 'Plan' } }), 201);
+      assert.equal(batchPreview.rows.length, 250);
+
+      const blocker = new pg.Client({ connectionString: FIXTURE_DATABASE_URL! });
+      await blocker.connect();
+      try {
+        await blocker.query('BEGIN');
+        const locked = (await blocker.query('SELECT pg_try_advisory_xact_lock(275817, hashtext($1)) AS ok', [wid])).rows[0]?.ok;
+        assert.equal(locked, true);
+        const busy = error(await local('POST', `/v1/contact-imports/${batchPreview.id}/commit`, { consent: { status: 'subscribed', evidence: 'Opted in' } }), 503, 'IMPORT_COMMIT_BUSY');
+        assert.equal(busy.retryable, true);
+      } finally {
+        await blocker.query('ROLLBACK').catch(() => {});
+        await blocker.end();
+      }
+
+      // 3. 100%-errors CSV previews and commits cleanly with 0 imported and retained error report.
+      const allBad = ok(await local('POST', '/v1/contact-imports', { csv: 'Email,Name\nnot-an-email,A\nalso-bad,B\n', listId: list.id, mapping: { email: 'Email', name: 'Name' } }), 201);
+      assert.equal(allBad.rows.length, 0);
+      assert.equal(allBad.errors.length, 2);
+      const allBadCommit = ok(await local('POST', `/v1/contact-imports/${allBad.id}/commit`, { consent: { status: 'subscribed', evidence: 'None valid' } }));
+      assert.equal(allBadCommit.imported, 0);
+      assert.equal(allBadCommit.subscribed, 0);
+      assert.equal(allBadCommit.errors.length, 2);
+
+      // 5. Statement timeout (SQLSTATE 57014) rolls back the entire commit (nothing half-applied) and returns retryable 503 IMPORT_COMMIT_TIMEOUT.
+      const origQuery = db.query.bind(db);
+      let injectTimeout = true;
+      const stub = t.mock.method(db, 'query', async (...args: unknown[]) => {
+        const first = args[0] as string | { text?: string };
+        const text = typeof first === 'string' ? first : first?.text ?? '';
+        if (injectTimeout && text.includes('INSERT INTO audience_contacts')) {
+          injectTimeout = false;
+          throw Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' });
+        }
+        return (origQuery as (...a: unknown[]) => Promise<unknown>)(...args);
+      });
+      try {
+        const timedOut = error(await local('POST', `/v1/contact-imports/${batchPreview.id}/commit`, { consent: { status: 'subscribed', evidence: 'Opted in' } }), 503, 'IMPORT_COMMIT_TIMEOUT');
+        assert.equal(timedOut.retryable, true);
+      } finally { stub.mock.restore(); }
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM audience_contacts WHERE workspace_id = $1 AND email LIKE 'batch%@example.com'`, [wid])).rows[0].n, 0, 'Timed-out commit must leave zero contacts.');
+      assert.equal(ok(await local('GET', `/v1/contact-imports/${batchPreview.id}`)).status, 'preview');
+
+      // Retry succeeds atomically: 250 imported, 250 subscribed (249 new + 1 existing unknown), 3 folded publishBatch jobs.
+      const batchCommitted = ok(await local('POST', `/v1/contact-imports/${batchPreview.id}/commit`, { consent: { status: 'subscribed', evidence: 'Opted in' } }));
+      assert.equal(batchCommitted.imported, 250);
+      assert.equal(batchCommitted.subscribed, 250);
+      const importedIds = (await db.query(`SELECT id FROM audience_contacts WHERE workspace_id = $1 AND email LIKE 'batch%@example.com' UNION ALL SELECT id FROM audience_consent_audit WHERE workspace_id = $1 AND source = 'import'`, [wid])).rows;
+      assert.equal(importedIds.length, 499);
+      for (const row of importedIds) assert.match(row.id, uuidv7);
+      assert.equal(ok(await local('GET', `/v1/contacts/${existingUnk.id}`)).marketingConsent, 'subscribed');
+      const batchJobs = (await db.query(`SELECT jsonb_array_length(payload->'events')::int AS n FROM jobs WHERE workspace_id = $1 AND type = 'operation.publishBatch' ORDER BY n DESC`, [wid])).rows.map((r: Json) => r.n);
+      // 249 new rows fold into 100 + 100 + 49, plus 1 existing unknown row -> 100, 100, 49, 1 = 250 events total.
+      assert.deepEqual(batchJobs, [100, 100, 49, 1]);
+
+      // 6. Open preview cap (keep newest 25, evict oldest; committed imports stay) + 40/min preview budget.
+      const created: string[] = [];
+      for (let i = 0; i < 27; i++) {
+        const p = ok(await local('POST', '/v1/contact-imports', { csv: `Email\ncap${i}@example.com\n`, mapping: { email: 'Email' } }), 201);
+        created.push(p.id);
+      }
+      const openCount = (await db.query(`SELECT count(*)::int AS n FROM audience_imports WHERE workspace_id = $1 AND status = 'preview'`, [wid])).rows[0].n;
+      assert.equal(openCount, 25, 'Workspace keeps at most 25 open previews.');
+      error(await local('GET', `/v1/contact-imports/${created[0]}`), 404, 'NOT_FOUND');
+      error(await local('GET', `/v1/contact-imports/${created[1]}`), 404, 'NOT_FOUND');
+      assert.equal(ok(await local('GET', `/v1/contact-imports/${created[26]}`)).status, 'preview');
+      assert.equal(ok(await local('GET', `/v1/contact-imports/${batchPreview.id}`)).status, 'committed', 'Committed imports are never evicted by the open preview cap.');
+      // We already ran 29 previews in this workspace (allBad + batchPreview + 27); 11 more hit 40, then the 41st is 429.
+      for (let i = 0; i < 11; i++) ok(await local('POST', '/v1/contact-imports', { csv: `Email\nrate${i}@example.com\n`, mapping: { email: 'Email' } }), 201);
+      const rateLimited = await local('POST', '/v1/contact-imports', { csv: 'Email\nover@example.com\n', mapping: { email: 'Email' } });
+      const rateErr = error(rateLimited, 429, 'IMPORT_PREVIEW_RATE_LIMITED');
+      assert.equal(rateErr.retryable, true);
+      assert.equal(rateLimited.headers.get('retry-after'), '60');
+    });
+  });
 });
 
 describe('Transactional sending, idempotency and scoped authorization', () => {

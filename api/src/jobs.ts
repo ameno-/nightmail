@@ -51,11 +51,15 @@ export async function countEnqueued(work: () => Promise<void>) {
   await enqueued.run(scope, work);
   return scope.count;
 }
+export function noteEnqueued(count: number) {
+  if (count <= 0) return;
+  const scope = enqueued.getStore();
+  if (scope) scope.count += count;
+}
 export async function enqueue(db: DbExecutor, input: { type: string; workspaceId: string; payload: Record<string, unknown>; availableAt?: string }) {
   const jobId = rowId('job');
   await db.insert(jobs).values({ id: jobId, ...input });
-  const scope = enqueued.getStore();
-  if (scope) scope.count++;
+  noteEnqueued(1);
   return jobId;
 }
 // Thrown by a handler that is polling (not failing): the runner returns the same row to pending at
