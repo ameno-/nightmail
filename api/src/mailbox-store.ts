@@ -161,27 +161,50 @@ export async function claimUnroutedBatch(
   if (!addresses.length && !rules.length) return { picked: 0, attached: 0 };
   const locked = await tx.execute(sql`SELECT inbox_id FROM inbox_state WHERE workspace_id=${scope.workspaceId} AND inbox_id=${mailboxId} FOR UPDATE`);
   if (!locked.rowCount) return { picked: 0, attached: 0 };
-  const exactFilter = addresses.length
-    ? sql`u.address = ANY(${sql.param(addresses)}::text[]) OR (strpos(u.address, '+') > 0 AND regexp_replace(u.address, '[+][^@]*@', '@') = ANY(${sql.param(addresses)}::text[]))`
-    : sql`false`;
-  const ruleFilter = rules.length
-    ? sql`EXISTS (SELECT 1 FROM unnest(${sql.param(rules)}::text[]) pat WHERE u.address LIKE replace(replace(replace(replace(pat, '!', '!!'), '%', '!%'), '_', '!_'), '*', '%') ESCAPE '!')`
-    : sql`false`;
-  const { rows: [batch] } = await tx.execute<{ picked: number; attached: string[] }>(sql`
-    WITH picked AS MATERIALIZED (
-      SELECT u.address, u.message_id, m.thread_id, m.received_at, coalesce(m.size_bytes, 0) AS size_bytes, m.spam
-      FROM mail_unrouted u
-      JOIN mail_messages m ON m.id = u.message_id AND m.workspace_id = u.workspace_id
-      WHERE u.workspace_id = ${scope.workspaceId}
-        AND (${exactFilter} OR ${ruleFilter})
-        AND NOT EXISTS (
-          SELECT 1 FROM mailbox_addresses a JOIN mailboxes bm ON bm.id = a.mailbox_id
-          WHERE a.workspace_id = u.workspace_id AND (bm.expires_at IS NOT NULL OR a.kind = 'public')
-            AND a.address IN (u.address, regexp_replace(u.address, '[+][^@]*@', '@'))
-        )
-      ORDER BY m.received_at, u.message_id, u.address
+  const unreserved = sql`NOT EXISTS (
+    SELECT 1 FROM mailbox_addresses a JOIN mailboxes bm ON bm.id = a.mailbox_id
+    WHERE a.workspace_id = u.workspace_id AND (bm.expires_at IS NOT NULL OR a.kind = 'public')
+      AND a.address IN (u.address, regexp_replace(u.address, '[+][^@]*@', '@'))
+  )`;
+  const addrParam = addresses.length ? sql.param(addresses) : null;
+  const exactCte = addrParam
+    ? sql`SELECT u.address, u.message_id FROM mail_unrouted u
+      WHERE u.workspace_id = ${scope.workspaceId} AND u.address = ANY(${addrParam}::text[])
+        AND ${unreserved}
+      ORDER BY u.address, u.message_id
       LIMIT ${limit}
-      FOR UPDATE OF u SKIP LOCKED
+      FOR UPDATE OF u SKIP LOCKED`
+    : sql`SELECT NULL::text AS address, NULL::text AS message_id WHERE false`;
+  const plusCte = addrParam
+    ? sql`SELECT u.address, u.message_id FROM mail_unrouted u
+      WHERE u.workspace_id = ${scope.workspaceId} AND strpos(u.address, '+') > 0
+        AND regexp_replace(u.address, '[+][^@]*@', '@') = ANY(${addrParam}::text[])
+        AND NOT (u.address = ANY(${addrParam}::text[]))
+        AND ${unreserved}
+      LIMIT greatest(0, ${limit} - (SELECT count(*)::int FROM exact))
+      FOR UPDATE OF u SKIP LOCKED`
+    : sql`SELECT NULL::text AS address, NULL::text AS message_id WHERE false`;
+  const ruleCte = rules.length
+    ? sql`SELECT u.address, u.message_id FROM mail_unrouted u
+      WHERE u.workspace_id = ${scope.workspaceId}
+        AND EXISTS (SELECT 1 FROM unnest(${sql.param(rules)}::text[]) pat WHERE u.address LIKE replace(replace(replace(replace(pat, '!', '!!'), '%', '!%'), '_', '!_'), '*', '%') ESCAPE '!')
+        ${addrParam ? sql`AND NOT (u.address = ANY(${addrParam}::text[]) OR (strpos(u.address, '+') > 0 AND regexp_replace(u.address, '[+][^@]*@', '@') = ANY(${addrParam}::text[])))` : sql``}
+        AND ${unreserved}
+      LIMIT greatest(0, ${limit} - (SELECT count(*)::int FROM exact) - (SELECT count(*)::int FROM plus))
+      FOR UPDATE OF u SKIP LOCKED`
+    : sql`SELECT NULL::text AS address, NULL::text AS message_id WHERE false`;
+  const { rows: [batch] } = await tx.execute<{ picked: number; attached: string[] }>(sql`
+    WITH exact AS MATERIALIZED (${exactCte}),
+    plus AS MATERIALIZED (${plusCte}),
+    by_rule AS MATERIALIZED (${ruleCte}),
+    picked AS MATERIALIZED (
+      SELECT p.address, p.message_id, m.thread_id, m.received_at, coalesce(m.size_bytes, 0) AS size_bytes, m.spam
+      FROM (
+        SELECT address, message_id FROM exact
+        UNION ALL SELECT address, message_id FROM plus
+        UNION ALL SELECT address, message_id FROM by_rule
+      ) p
+      JOIN mail_messages m ON m.id = p.message_id AND m.workspace_id = ${scope.workspaceId}
     ),
     distinct_msgs AS MATERIALIZED (
       SELECT DISTINCT ON (message_id) message_id, thread_id, received_at, size_bytes, spam
