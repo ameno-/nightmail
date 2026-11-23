@@ -34276,6 +34276,115 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  test('feedback throughput: priority routing, cross-queue duplicates, concurrent out-of-order safety, exact tallies and priority-only lag hold', async t => {
+    const { feedbackSink, isPriorityFeedback, settleFeedbackBatch, feedbackMac } = await import('./src/adapters/feedback-queue.js');
+    const { ingestRoutineSesEvents, recordFeedbackLag, FEEDBACK_LAG_HOLD_MS } = await import('./src/sending.js');
+    const secret = '0'.repeat(64);
+    const routineSent: unknown[] = [], prioritySent: unknown[] = [];
+    const mkQ = (out: unknown[]) => ({ sendBatch: async (batch: { body: unknown }[]) => { out.push(...batch.map(b => b.body)); } }) as unknown as Queue<import('./src/core.js').FeedbackItem>;
+    const sampleItems: import('./src/core.js').FeedbackItem[] = [
+      { region: REGION, topicArn: 'urn:t', messageId: 'm1', message: { eventType: 'Delivery' } },
+      { region: REGION, topicArn: 'urn:t', messageId: 'm2', message: { eventType: 'Open' } },
+      { region: REGION, topicArn: 'urn:t', messageId: 'm3', message: { eventType: 'Click' } },
+      { region: REGION, topicArn: 'urn:t', messageId: 'm4', message: { eventType: 'Bounce' } },
+      { region: REGION, topicArn: 'urn:t', messageId: 'm5', message: { eventType: 'Complaint' } },
+      { region: REGION, topicArn: 'urn:t', messageId: 'm6', message: { eventType: 'Reject' } },
+      { region: REGION, topicArn: 'urn:t', messageId: 'm7', message: { eventType: 'RenderingFailure' } },
+      { region: REGION, topicArn: 'urn:t', messageId: 'm8', message: { eventType: 'Subscription' } },
+      { region: REGION, topicArn: 'urn:t', messageId: 'm9', message: { source: 'aws.ses', 'detail-type': 'SES Tenant' } },
+    ];
+    assert.deepEqual(sampleItems.map(isPriorityFeedback), [false, false, false, true, true, true, true, true, true]);
+    await feedbackSink(mkQ(routineSent), secret, mkQ(prioritySent)).enqueue(sampleItems);
+    assert.equal(routineSent.length, 3);
+    assert.equal(prioritySent.length, 6);
+    const fallbackOut: unknown[] = [];
+    await feedbackSink(mkQ(fallbackOut), secret).enqueue(sampleItems);
+    assert.equal(fallbackOut.length, 9);
+    let acked = 0, archived = 0;
+    const goodItem = { ...sampleItems[3]!, mac: feedbackMac(secret, sampleItems[3]!) };
+    const forgedItem = { ...sampleItems[3]!, mac: 'x'.repeat(43) };
+    const settled = await settleFeedbackBatch({
+      secrets: { authSecret: secret }, lane: 'priority', sourceQueue: 'fixture-priority',
+      messages: [
+        { id: '1', attempts: 1, timestamp: new Date(), body: goodItem, ack: () => { acked++; }, retry: () => {} },
+        { id: '2', attempts: 1, timestamp: new Date(), body: forgedItem, ack: () => { acked++; }, retry: () => {} },
+      ],
+      ingest: async items => items.map(() => ({ ok: true })),
+      promoteLegacy: async () => {}, completeLegacy: async () => {},
+      archive: async () => { archived++; },
+    });
+    assert.deepEqual([acked, archived, settled.unauthenticated], [2, 1, 1]);
+
+    await simulatedSesFixture(t, async ({ runtime, local, run, db }) => {
+      const ws = runtime.config.workspaceId;
+      const list = ok(await local('POST', '/v1/lists', { name: unique('fb-prio') }), 201);
+      await db.query(`INSERT INTO audience_contacts (id, workspace_id, email, marketing_consent)
+        SELECT 'con_fb_' || n, $1, 'fb-conc-' || n || '@example.com', 'subscribed' FROM generate_series(1, 80) n`, [ws]);
+      await db.query('INSERT INTO audience_list_members (workspace_id, list_id, contact_id) SELECT workspace_id, $2, id FROM audience_contacts WHERE workspace_id = $1', [ws, list.id]);
+      const camp = ok(await local('POST', '/v1/campaigns', { name: unique('fb-prio'), from: 'sender@example.com', subject: 'FB', html: '<p>Hi</p>', tracking: true, audience: { listId: list.id } }), 201);
+      ok(await local('POST', `/v1/campaigns/${camp.id}/send`, { revision: camp.revision }), 202);
+      await run('campaign.run');
+      await run('email.dispatch');
+      const sentRows = (await db.query('SELECT id, provider_id, to_addresses->>0 AS email FROM sending_emails WHERE workspace_id=$1 AND campaign_id=$2 ORDER BY id', [ws, camp.id])).rows as { id: string; provider_id: string; email: string }[];
+      assert.equal(sentRows.length, 80);
+
+      const topic = `urn:bane:simulated-ses:${REGION}`, nowIso = new Date().toISOString();
+      const events: import('./src/sending.js').RoutineIngress[] = [];
+      for (const [i, r] of sentRows.entries()) {
+        const mk = (kind: string, type: string, data: Record<string, unknown>, effects?: import('./src/sending.js').RoutineIngress['effects']): import('./src/sending.js').RoutineIngress => ({
+          workspaceId: ws, type, providerId: r.provider_id, taggedEmailId: r.id, createdAt: nowIso,
+          externalId: `${topic}:${r.id}:${kind}`, data: { providerId: r.provider_id, ...data }, ...(effects ? { effects } : {}),
+          ingress: { topicArn: topic, messageId: `${r.id}:${kind}`, region: REGION, payload: { message: { eventType: kind, mail: { messageId: r.provider_id } }, topicArn: topic, messageId: `${r.id}:${kind}`, region: REGION }, recoveryType: 'operation.simulatedFeedbackRecovery' },
+        });
+        events.push(mk('Open', 'open', { isBotEvent: false }, { reported: null, suppress: null, observe: 'open', receiptTime: false }));
+        events.push(mk('Open', 'open', { isBotEvent: false }, { reported: null, suppress: null, observe: 'open', receiptTime: false }));
+        events.push(mk('Delivery', 'delivery', {}));
+        events.push(mk('Delivery', 'delivery', {}));
+        if (i % 4 === 0) {
+          events.push(mk('Bounce', 'bounce', { bounceType: 'Permanent', bounceSubType: 'General' }, { reported: [r.email], suppress: 'hard_bounce', observe: null, receiptTime: false }));
+          events.push(mk('Bounce', 'bounce', { bounceType: 'Permanent', bounceSubType: 'General' }, { reported: [r.email], suppress: 'hard_bounce', observe: null, receiptTime: false }));
+        }
+        if (i % 5 === 0) events.push(mk('Click', 'click', { isBotEvent: false, link: 'https://example.com' }, { reported: null, suppress: null, observe: 'click', receiptTime: false }));
+      }
+      const chunks = [0, 1, 2, 3].map(k => events.filter((_, idx) => idx % 4 === k));
+      await Promise.all(chunks.map(chunk => ingestRoutineSesEvents(runtime, chunk)));
+
+      const dupCheck = await db.query('SELECT count(*)::int AS total, count(DISTINCT external_id)::int AS uniq FROM sending_email_events WHERE workspace_id=$1 AND external_id IS NOT NULL', [ws]);
+      assert.equal(dupCheck.rows[0].total, dupCheck.rows[0].uniq, 'Exactly-once event rows despite cross-queue duplicates');
+      assert.equal((await db.query('SELECT * FROM reconcile_sending_campaign_tallies($1, $2)', [ws, camp.id])).rowCount, 0);
+      assert.equal(Number((await db.query('SELECT emails_with_other_bits FROM check_sending_event_outcome_bits($1)', [ws])).rows[0].emails_with_other_bits), 0);
+      const listDrift = await db.query('SELECT * FROM reconcile_audience_list_counts($1, $2)', [ws, list.id]);
+      assert.equal(listDrift.rowCount, 0, 'Audience list counts stay exact after concurrent bounce suppressions');
+      const statusSummary = await db.query("SELECT count(*) FILTER (WHERE status='bounced')::int AS bnc, count(*) FILTER (WHERE (event_outcomes & 16) <> 0)::int AS opened, count(*) FILTER (WHERE (event_outcomes & 32) <> 0)::int AS clicked FROM sending_emails WHERE workspace_id=$1 AND campaign_id=$2", [ws, camp.id]);
+      assert.deepEqual(statusSummary.rows[0], { bnc: 20, opened: 80, clicked: 16 });
+
+      const camp2 = ok(await local('POST', '/v1/campaigns', { name: unique('fb-lag'), from: 'sender@example.com', subject: 'Lag', html: '<p>Hi</p>', audience: { listId: list.id } }), 201);
+      ok(await local('POST', `/v1/campaigns/${camp2.id}/send`, { revision: camp2.revision }), 202);
+      await recordFeedbackLag(runtime.db, 'routine', 150000, 20 * 60_000);
+      const viewRoutine = ok(await local('GET', `/v1/campaigns/${camp2.id}`));
+      assert.equal(viewRoutine.delivery.feedbackLag?.lane, 'routine');
+      assert.equal(viewRoutine.delivery.feedbackLag?.oldestMs, 20 * 60_000);
+      await db.query("UPDATE sending_campaigns SET state='sending', prepared=total, expanded=0, simulated=false WHERE id=$1", [camp2.id]);
+      await recordFeedbackLag(runtime.db, 'priority', 500, FEEDBACK_LAG_HOLD_MS + 60_000);
+      const viewPrio = ok(await local('GET', `/v1/campaigns/${camp2.id}`));
+      assert.equal(viewPrio.delivery.feedbackLag?.lane, 'priority');
+      const prevLive = runtime.config.liveEnabled;
+      runtime.config.liveEnabled = true;
+      try {
+        await db.query("UPDATE jobs SET status='pending', available_at=clock_timestamp() WHERE id=$1", ['campaign.run:' + camp2.id]);
+        await run('campaign.run');
+        const held = ok(await local('GET', `/v1/campaigns/${camp2.id}`));
+        assert.deepEqual([held.state, held.delivery.waiting?.reason], ['sending', 'feedback_lag']);
+        await db.query("UPDATE operation_feedback_lag SET updated_at = now() - interval '6 minutes' WHERE lane = 'priority'");
+        const staleView = ok(await local('GET', `/v1/campaigns/${camp2.id}`));
+        assert.equal(staleView.delivery.feedbackLag?.lane, 'routine');
+      } finally {
+        runtime.config.liveEnabled = prevLive;
+        await db.query('DELETE FROM operation_feedback_lag');
+      }
+    });
+  });
+
   test('paced campaigns release one daily window at a time, pause and resume in place, hold for the SES daily quota, and pause automatically on bounces', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
       const ws = runtime.config.workspaceId;

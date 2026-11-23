@@ -44,6 +44,7 @@ function loadHttpDeps() {
 
 // A provider group fits on one shard. Spread small sends across the pool without waking idle siblings.
 let nextShard: number | undefined;
+let lastPriorityLagWrite = 0, lastPriorityLagHigh = false;
 async function wakeDispatchers(env: Env, region: string, accountId?: string, emails?: number, kind?: 'shared' | 'byo', priority = false) {
   const count = kind === 'byo' ? 1 : shardCount('DISPATCH_SHARDS' in env ? env.DISPATCH_SHARDS : undefined);
   nextShard ??= Math.floor(Math.random() * 0x100000000);
@@ -72,7 +73,7 @@ function configFor(env: Env, keys: readonly string[], loadConfig: (input: Record
   return { ...config };
 }
 
-const queueName = (env: Env, key: 'FEEDBACK_QUEUE_NAME' | 'LEGACY_FEEDBACK_QUEUE_NAME' | 'FEEDBACK_DLQ_NAME' | 'LEGACY_FEEDBACK_DLQ_NAME' | 'WORK_QUEUE_NAME', fallback: string) => {
+const queueName = (env: Env, key: 'FEEDBACK_QUEUE_NAME' | 'FEEDBACK_PRIORITY_QUEUE_NAME' | 'LEGACY_FEEDBACK_QUEUE_NAME' | 'FEEDBACK_DLQ_NAME' | 'LEGACY_FEEDBACK_DLQ_NAME' | 'WORK_QUEUE_NAME', fallback: string) => {
   const value: unknown = (env as unknown as Record<string, unknown>)[key];
   return typeof value === 'string' && value ? value : fallback;
 };
@@ -134,7 +135,7 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
         throw error;
       }
       core.log('info', { code: 'QUEUE_WAKE', readyJobs, messages: 1 });
-    }, dispatch: (...args) => wakeDispatchers(env, ...args), feedback: feedbackSink(env.FEEDBACK_QUEUE, config.authSecret), renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
+    }, dispatch: (...args) => wakeDispatchers(env, ...args), feedback: feedbackSink(env.FEEDBACK_QUEUE, config.authSecret, env.FEEDBACK_PRIORITY_QUEUE), renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
   } finally {
     if (client) {
       if (ctx) ctx.waitUntil(client.end().catch(() => {}));
@@ -255,6 +256,7 @@ export default {
     const concurrency = jobConcurrency('JOB_CONCURRENCY' in env ? env.JOB_CONCURRENCY : undefined, 6);
     // Queue names differ per installation (wrangler config); an unrecognized queue is retried, never acknowledged as a wake.
     const feedbackLane = batch.queue === queueName(env, 'FEEDBACK_QUEUE_NAME', 'bane-feedback') ? 'tagged'
+      : (queueName(env, 'FEEDBACK_PRIORITY_QUEUE_NAME', '') && batch.queue === queueName(env, 'FEEDBACK_PRIORITY_QUEUE_NAME', '')) ? 'priority'
       : batch.queue === queueName(env, 'LEGACY_FEEDBACK_QUEUE_NAME', '') ? 'legacy'
       : batch.queue === queueName(env, 'FEEDBACK_DLQ_NAME', '') ? 'tagged-dlq'
       : batch.queue === queueName(env, 'LEGACY_FEEDBACK_DLQ_NAME', '') ? 'legacy-dlq' : undefined;
@@ -277,6 +279,18 @@ export default {
           archive: (source,body,error) => archiveQueueFeedback(runtime,source,body,error) });
         const { outcomes: _, ...counts } = settled, oldestMs=Math.max(0,...messages.map(m=>Date.now()-m.timestamp.getTime()));
         core.log(counts.failed || counts.untagged || counts.unauthenticated || counts.held || oldestMs>60000?'warn':'info', { code: 'FEEDBACK_BATCH', lane: feedbackLane, size: messages.length, ...counts, oldestMs });
+        // Keep priority safety-lane lag fresh within ~15 s during spikes or recovery so releaseStep reacts quickly.
+        if (feedbackLane === 'priority' && (oldestMs >= 60_000 || lastPriorityLagHigh)) {
+          const nowMs = Date.now();
+          if (nowMs - lastPriorityLagWrite >= 15_000) {
+            lastPriorityLagWrite = nowMs;
+            lastPriorityLagHigh = oldestMs >= 60_000;
+            try {
+              const { recordFeedbackLag } = await import('./sending.js');
+              await recordFeedbackLag(runtime.db, 'priority', messages.length, oldestMs);
+            } catch { /* Minute cron refreshes lag independently. */ }
+          }
+        }
       });
       return;
     }
@@ -313,13 +327,22 @@ export default {
       // Mailbox outbound status and Message-IDs follow the sending pipeline; best-effort.
       if (controller.cron !== '* * * * *') return;
       // Independent of PostgreSQL: even a total DB outage must not hide DLQ growth.
-      await Promise.all([['feedback',env.FEEDBACK_QUEUE],['feedback-dlq',env.FEEDBACK_DLQ],['legacy-feedback-dlq',env.LEGACY_FEEDBACK_DLQ],['work',env.WAKE_QUEUE],['webhooks',env.WEBHOOK_QUEUE]].map(async pair=>{
+      const lagSamples: { lane: 'routine' | 'priority'; depth: number; oldestMs: number }[] = [];
+      await Promise.all([['feedback',env.FEEDBACK_QUEUE],...(env.FEEDBACK_PRIORITY_QUEUE?[['feedback-priority',env.FEEDBACK_PRIORITY_QUEUE]]:[]),['feedback-dlq',env.FEEDBACK_DLQ],['legacy-feedback-dlq',env.LEGACY_FEEDBACK_DLQ],['work',env.WAKE_QUEUE],['webhooks',env.WEBHOOK_QUEUE]].map(async pair=>{
         const [name,q]=pair as [string,Queue]; if(!q?.metrics)return;
         try{const m=await q.metrics(),oldestMs=m.oldestMessageTimestamp?Math.max(0,Date.now()-m.oldestMessageTimestamp.getTime()):0;
           const alarm=(name.endsWith('feedback-dlq') && m.backlogCount>0) || oldestMs>60000;
           core.log(alarm?'error':'info',{code:alarm?'QUEUE_BACKLOG_ALERT':'QUEUE_BACKLOG',queue:name,depth:m.backlogCount,oldestMs});
+          if (name === 'feedback') lagSamples.push({ lane: 'routine', depth: m.backlogCount, oldestMs });
+          if (name === 'feedback-priority') lagSamples.push({ lane: 'priority', depth: m.backlogCount, oldestMs });
         }catch{core.log('warn',{code:'QUEUE_METRICS_UNAVAILABLE',queue:name});}
       }));
+      if (lagSamples.length) {
+        try {
+          const { recordFeedbackLag } = await import('./sending.js');
+          for (const sample of lagSamples) await recordFeedbackLag(runtime.db, sample.lane, sample.depth, sample.oldestMs);
+        } catch { core.log('warn', { code: 'FEEDBACK_LAG_RECORD_FAILED' }); }
+      }
       try { const { drainFeedbackRecovery } = await import('./operations.js'); await drainFeedbackRecovery(runtime); }
       catch { core.log('error',{code:'FEEDBACK_RECOVERY_DRAIN_FAILED'}); }
       await reconcileSharedConnections(runtime); // Installation work must not depend on a workspace or a successful queue drain.

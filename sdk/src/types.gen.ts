@@ -1474,11 +1474,19 @@ export type CampaignDelivery = {
      */
     deliveredOnly: boolean;
     /**
-     * Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest.
+     * Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up.
      */
     waiting: {
-        reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance';
+        reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance' | 'feedback_lag';
         until: string;
+    } | null;
+    /**
+     * Present on active campaigns when delivery feedback ingestion is at least 2 minutes behind.
+     */
+    feedbackLag: {
+        oldestMs: number;
+        depth: number;
+        lane: 'routine' | 'priority';
     } | null;
 } | null;
 

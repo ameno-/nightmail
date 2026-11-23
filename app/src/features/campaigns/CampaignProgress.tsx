@@ -22,7 +22,7 @@ type Progress = Pick<Campaign, 'status' | 'delivery'>
 const releasing = (campaign: Progress) => ['preparing', 'sending'].includes(campaign.status) && (campaign.delivery?.expanded ?? 0) < (campaign.delivery?.total ?? 0)
 // Paused or waiting for a pacing window / SES quota: nothing new is released for a while.
 export const sendingHeld = (campaign: Progress) => campaign.status === 'paused' || (releasing(campaign) && Boolean(campaign.delivery?.waiting))
-const waitingLabel = { pacing_window: 'Waiting for the next daily slice', ses_daily_quota: 'Holding for the SES daily quota', hosted_daily_quota: 'Waiting for Hosted sending capacity' } as const
+const waitingLabel = { pacing_window: 'Waiting for the next daily slice', ses_daily_quota: 'Holding for the SES daily quota', hosted_daily_quota: 'Waiting for Hosted sending capacity', list_probe: 'Waiting for test batch feedback', balance: 'Waiting for account credit', feedback_lag: 'Waiting for delivery reports to catch up' } as const
 const atUtc = (value: string) => `${date(value)} · ${time(value)} UTC`
 /** What people see as the state: a launch still checking messages for a future send is already "scheduled" to them. */
 export const campaignDisplayStatus = (campaign: Pick<Campaign, 'status' | 'scheduledAt' | 'archivedAt'>) => campaign.archivedAt ? 'archived' : campaign.status === 'preparing' && campaign.scheduledAt && Date.parse(campaign.scheduledAt) > Date.now() ? 'scheduled' : campaign.status
@@ -149,6 +149,7 @@ export function CampaignPacing({ campaign }: { campaign: Campaign }) {
     </div>
     {perDay && (active || paused) && <div className="campaign-summary-line muted"><span>Released in this 24-hour slice</span><span>{number(pacing?.windowExpanded ?? 0)} / {number(perDay)}</span></div>}
     {active && expansion.waiting && <p className="muted" role="status" title={atUtc(expansion.waiting.until)}>{waitingLabel[expansion.waiting.reason] ?? 'Waiting to release more recipients'} · about {relativeTime(expansion.waiting.until)}</p>}
+    {active && expansion.feedbackLag && expansion.waiting?.reason !== 'feedback_lag' && <p className="muted" role="status">Delivery stats are about {Math.max(1, Math.round(expansion.feedbackLag.oldestMs / 60_000))} min behind.</p>}
     {(active || paused) && canAdminister && <form className="campaign-pacing-form" onSubmit={save}>
       <div className="campaign-pacing-limit">
         <label htmlFor="campaign-pacing-limit" className="muted">Daily limit</label>
