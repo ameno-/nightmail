@@ -5,7 +5,7 @@ import { Link, Navigate, useLocation, useNavigate, useParams, useSearchParams } 
 import { useApiDef, useApiMutation, useApiQuery, useRegion, useApi, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { priceUc, total, usd } from '../../data/billing'
-import { useRefreshListsOnChange } from '../../data/invalidation'
+import { invalidate, useRefreshListsOnChange } from '../../data/invalidation'
 import { useRegionCatalog } from '../../data/regions'
 import { ApiError, campaignEditable, errorText, campaignResumable, type Campaign, type CampaignInput, type Newsletter, type SendCampaignInput } from '../../data/types'
 import { PostalAddressDialog } from '../../components/PostalAddress'
@@ -404,7 +404,7 @@ function TestEmailDialog({ campaign, open, onOpenChange }: { campaign: Campaign;
   const samples = placeholders(campaign.subject, campaign.previewText, campaign.html).filter(key => key !== 'email' && (fallbacks[key] === undefined || fallbacks[key] === ''))
   const [data, setData] = useState<Record<string, string>>(() => Object.fromEntries(samples.map(key => [key, key === 'name' ? 'Sam Example' : key === 'firstName' ? 'Sam' : ''])))
   const [sent, setSent] = useState<{ to: string; id?: string } | null>(null)
-  const mutation = useApiMutation((api, input: { id: string; to: string; data: Record<string, string> }) => api.campaigns.test(input))
+  const mutation = useApiMutation((api, input: { id: string; to: string; data: Record<string, string> }) => api.campaigns.test(input), undefined, false, invalidate.campaignTest)
   async function submit(event: FormEvent) {
     event.preventDefault()
     if (guard.current || mutation.isPending) return
@@ -761,7 +761,7 @@ function CampaignReview({ campaign, stats, stale, refreshing, refresh }: { campa
   const paceLine = [pace.limit && `${number(perDay)} per day`, `${pace.share.trim()}% speed`, !multiTenant && (pace.autoPause ? 'auto-pause on' : 'auto-pause off')].filter(Boolean).join(' · ')
   const paceSummary = (input: SendCampaignInput | null) => !input?.pacing ? '' : `${input.pacing.perDay ? ` Sends to up to ${number(input.pacing.perDay)} recipients per day${paceDays ? ` (about ${paceDays} ${paceDays === 1 ? 'day' : 'days'})` : ''}.` : ''}${input.pacing.rateShare != null && input.pacing.rateShare < 1 ? ` Uses at most ${Math.round(input.pacing.rateShare * 100)}% of your sending speed.` : ''}${input.pacing.autoPause === false ? ' Auto-pause on high bounces or complaints is off.' : ''}`
   const toast = useToast()
-  const sendMutation = useApiMutation((api, input: SendCampaignInput) => api.campaigns.send(input))
+  const sendMutation = useApiMutation((api, input: SendCampaignInput) => api.campaigns.send(input), undefined, false, invalidate.campaignSend)
   // Every campaign footer carries the workspace's postal address, so Send and Schedule ask for it first when it is
   // missing, then go on: to the confirmation, or straight to sending when the API asked after it was confirmed.
   const settings = useApiDef(queries.workspaceSettings(), { enabled: draft })

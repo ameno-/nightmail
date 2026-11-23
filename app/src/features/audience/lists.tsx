@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useQueryClient } from '@tanstack/react-query'
 import { useApiMutation, useApiQuery } from '../../data/context'
+import { invalidate } from '../../data/invalidation'
 import { useNewsletters } from '../newsletters/shared'
 import { ApiError, type AudienceList } from '../../data/types'
 import { SearchField, Button, ConfirmDialog, ControlSkeleton, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SkeletonText, Tabs, fieldError, MutationError } from '../../components/ui'
@@ -32,7 +33,7 @@ export function ListsPage() {
 function CreateListDialog({ onClose }: { onClose: () => void }) {
   const [name, setName] = useState('')
   const navigate = useNavigate()
-  const create = useApiMutation((api, input: { name: string }) => api.lists.create(input), 'List created')
+  const create = useApiMutation((api, input: { name: string }) => api.lists.create(input), 'List created', false, invalidate.lists)
   async function submit() { try { const list = await create.mutateAsync({ name }); onClose(); navigate(`/audience/lists/${list.id}`) } catch { /* Shown inline. */ } }
   return <Dialog open onOpenChange={open => { if (!open && !create.isPending) onClose() }} title="Create list" footer={<><Button disabled={create.isPending} onClick={onClose}>Cancel</Button><Button variant="primary" type="submit" form="create-list" loading={create.isPending}>Create list</Button></>}><form id="create-list" className="stack" onSubmit={event => { event.preventDefault(); void submit() }}><MutationError error={create.error} /><Field label="List name" htmlFor="list-name" error={fieldError(create.error, 'name')}><Input autoFocus id="list-name" required value={name} onChange={event => setName(event.target.value)} /></Field></form></Dialog>
 }
@@ -42,7 +43,7 @@ export function ListDetailPage() {
   const query = useApiQuery(['lists', id], (api, signal) => api.lists.get(id, signal))
   const [importing, setImporting] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
-  const remove = useApiMutation((api, listId: string) => api.lists.remove(listId), 'List deleted')
+  const remove = useApiMutation((api, listId: string) => api.lists.remove(listId), 'List deleted', false, invalidate.lists)
   // A newsletter is its list: deleting the list takes its sidebar item with it (the session's copy of /v1/me).
   const cache = useQueryClient(), newsletter = useNewsletters().some(item => item.id === id)
   async function deleteList() { await remove.mutateAsync(id); if (newsletter) void cache.invalidateQueries({ queryKey: ['identity'] }); navigate('/audience/lists') }

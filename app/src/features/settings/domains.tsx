@@ -14,7 +14,7 @@ import { receivingIssueReason, receivingIssueTitle } from './receiving-issue-tit
 import { AdminOnlyPage } from './admin-only'
 import { DomainDetailSkeleton, domainColumns } from './skeletons'
 import { DnsRecordTable, DnsWaitNote, DomainRecords, domainState, recordRow, recordsFor, useDnsSetup, useDomain, zoneLines } from './domain-records'
-import { resourceOf } from '../../data/invalidation'
+import { invalidate, resourceOf } from '../../data/invalidation'
 import { ReceivingHosts, useReceivingHosts } from './receiving-hosts'
 
 function downloadDnsRecords(domain: string, records: DnsRecord[]) {
@@ -55,7 +55,7 @@ function ReceivingCell({ domain, receiving, unknown = false, card = false }: { d
 /** Hosted: the hosts the domain receives on, each with its status, addresses (which open its routes in Receiving) and catch-all. Only once receiving is set up: before that the Receiving record above says how to turn it on. */
 /** The page reads the receiving domain and its hosts before it shows (so this section arrives at its final height) and passes them in. */
 function ReceivingSettings({ domainId, domainName, receiving, hosts }: { domainId: string; domainName: string; receiving: { data?: MailboxDomain; error: unknown; refetch: () => unknown }; hosts: { data?: ReceivingHost[]; error: unknown; refetch: () => unknown } }) {
-  const check = useApiMutation((api, _: void) => api.mailboxes.checkDomain(domainId), 'MX records checked', false, true, domainId)
+  const check = useApiMutation((api, _: void) => api.mailboxes.checkDomain(domainId), 'MX records checked', false, invalidate.mailboxDomains, domainId)
   const state = receiving.data
   const failed = receiving.error ?? hosts.error
   if (!state || !hosts.data) return failed ? <section className="section stack"><SectionHeader title="Receiving" /><ErrorState error={failed as Error} onRetry={() => { void receiving.refetch(); void hosts.refetch() }} /></section> : null
@@ -85,7 +85,7 @@ function DomainsList() {
   const inbound = useApiDef(queries.inboundDomains())
   const receivingOf = (id: string) => inbound.data?.find(d => d.id === id)
   const quota = domains.data?.quota
-  const create = useApiMutation((api, input: { regionId: string; name: string }) => api.domains.create(input), 'Domain added', true)
+  const create = useApiMutation((api, input: { regionId: string; name: string }) => api.domains.create(input), 'Domain added', true, invalidate.domains)
   const [open, setOpen] = useState(() => Boolean(params.get('add')))
   const [name, setName] = useState(() => params.get('add') ?? '')
   const [invalid, setInvalid] = useState('')
@@ -140,16 +140,16 @@ function DomainDetail() {
   // Receiving set up through the API checks the domain in the background: follow it until it settles.
   const receiving = useApiQuery(['mailbox-domain', id], (api, signal) => api.mailboxes.domain(id, signal), { enabled: multiTenant, interval: state => state?.status === 'provisioning' ? 5_000 : false })
   const hosts = useReceivingHosts(id, multiTenant, receiving.data?.status === 'provisioning' ? 5_000 : false)
-  const verify = useApiMutation((api, domainId: string) => api.domains.verify(domainId), 'Checking records', true)
+  const verify = useApiMutation((api, domainId: string) => api.domains.verify(domainId), 'Checking records', true, invalidate.domains)
   const client = useQueryClient()
   // Invalidate only after leaving: refetching this domain would 404 while the dialog closes.
   const remove = useApiMutation((api, domainId: string) => api.domains.remove(domainId), 'Domain deleted', true, false)
-  const configureMailFrom = useApiMutation((api, input: {id: string; mailFromDomain: string}) => api.domains.configureMailFrom(input.id, input.mailFromDomain), 'Custom MAIL FROM configured', true)
+  const configureMailFrom = useApiMutation((api, input: {id: string; mailFromDomain: string}) => api.domains.configureMailFrom(input.id, input.mailFromDomain), 'Custom MAIL FROM configured', true, invalidate.domains)
   const removeMailFrom = useApiMutation(async (api, domainId: string) => {
     const updated = await api.domains.removeMailFrom(domainId)
     client.setQueryData(['nightmail', 'domain', domainId], updated)
     return updated
-  }, 'Custom MAIL FROM removed', true)
+  }, 'Custom MAIL FROM removed', true, invalidate.domains)
   const [deleteOpen, setDeleteOpen] = useState(false)
   // The name stays in the dialog's text while it closes, after the domain no longer has one.
   const [removingMailFrom, setRemovingMailFrom] = useState({ open: false, name: '' })
@@ -172,7 +172,7 @@ function DomainDetail() {
     const updated = await api.domains.chooseReceivingHost(id, input)
     client.setQueryData(['nightmail', 'domain', id], updated)
     return updated
-  }, undefined, false, true, id)
+  }, undefined, false, invalidate.domains, id)
   async function chooseHost(host: string | null) {
     choose.reset()
     try { await choose.mutateAsync({ host }) }
@@ -221,9 +221,9 @@ function DomainDetail() {
 // Self-hosted receiving. Enabling it on a domain that isn't verified yet is refused by the API, which says so inline.
 function MailboxReceiving({ domainId, domainName }: { domainId: string; domainName: string }) {
   const receiving = useApiQuery(['mailbox-domain', domainId], (api, signal) => api.mailboxes.domain(domainId, signal), { interval: state => state && ['provisioning', 'waiting_for_mx', 'disabling'].includes(state.status) ? 30_000 : false })
-  const enable = useApiMutation((api, force: boolean) => api.mailboxes.enableDomain(domainId, { force }), 'Receiving setup started', false, true, domainId)
-  const disable = useApiMutation((api, _: void) => api.mailboxes.disableDomain(domainId), 'Receiving turned off', false, true, domainId)
-  const check = useApiMutation((api, _: void) => api.mailboxes.checkDomain(domainId), 'MX records checked', false, true, domainId)
+  const enable = useApiMutation((api, force: boolean) => api.mailboxes.enableDomain(domainId, { force }), 'Receiving setup started', false, invalidate.mailboxDomains, domainId)
+  const disable = useApiMutation((api, _: void) => api.mailboxes.disableDomain(domainId), 'Receiving turned off', false, invalidate.mailboxDomains, domainId)
+  const check = useApiMutation((api, _: void) => api.mailboxes.checkDomain(domainId), 'MX records checked', false, invalidate.mailboxDomains, domainId)
   const hosts = useReceivingHosts(domainId, !!receiving.data && !['off', 'disabled'].includes(receiving.data.status))
   const [conflict, setConflict] = useState<string | null>(null)
   const [disableOpen, setDisableOpen] = useState(false)

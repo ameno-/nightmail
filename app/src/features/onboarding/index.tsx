@@ -19,7 +19,7 @@ import { ApiError, errorText, type ConnectionKind, type ConnectionState, type Pr
 import './onboarding.css'
 import { NightmailWordmark } from '../../components/NightmailLogo'
 import { apiKeyEnv, productName, secretPrefixes } from '../../../../api/src/brand'
-import { resourceOf } from '../../data/invalidation'
+import { invalidate, resourceOf } from '../../data/invalidation'
 
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 // Bring-your-own verification is resumable; keep retrying while AWS confirms the feedback subscription.
@@ -393,7 +393,7 @@ type AddDomainProps = { draft: string; onDraftChange: (value: string) => void; q
 // Before the connection is ready, a valid domain waits and is added as soon as it is.
 function AddDomain({ draft, onDraftChange, queued, onQueuedChange, ready, onAdded, onFinish }: AddDomainProps) {
   const client = useQueryClient()
-  const create = useApiMutation((api, name: string) => api.domains.create({ regionId: '', name }), undefined, true)
+  const create = useApiMutation((api, name: string) => api.domains.create({ regionId: '', name }), undefined, true, invalidate.domains)
   const [invalid, setInvalid] = useState('')
   // A pasted URL or address still works: https://www.acme.com/pricing becomes acme.com.
   const value = normalizeDomain(draft)
@@ -467,7 +467,7 @@ function AgentSetup({ domainId, onFinish }: { domainId: string; onFinish: () => 
   const [scope, setScope] = useState<KeyScope>('send')
   const create = useApiMutation((api, input: { scope: KeyScope; domain: string | null }) => api.keys.create(input.scope === 'send'
     ? { name: input.domain ? `Send from ${input.domain}` : 'Send only', permissions: ['send'], domains: input.domain ? [input.domain] : [] }
-    : { name: 'Coding agent', permissions: ['read', 'send', 'manage'], domains: [] }))
+    : { name: 'Coding agent', permissions: ['read', 'send', 'manage'], domains: [] }), undefined, false, invalidate.apiKeys)
   const [secret, setSecret] = useState<string | null>(null)
   // A removed domain still leaves a useful prompt without domain details.
   const missing = domain.error instanceof ApiError && domain.error.status === 404

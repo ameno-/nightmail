@@ -6,6 +6,7 @@ import { AccountAvatar } from '../../components/AccountSwitcher'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { accountApi, accountsKey } from '../../data/accounts'
 import { useApiDef, useApiMutation, useSession } from '../../data/context'
+import { invalidate } from '../../data/invalidation'
 import { queries } from '../../data/queries'
 import { McpApproval, Row } from './hosted'
 import { agentAccess, connectionTitle } from './key-labels'
@@ -26,7 +27,7 @@ export function McpApprovalPage() {
   const picked = chosen ?? owner ?? identity?.id ?? null
   const ready = Boolean(identity && owner && owner === identity.id && picked === owner)
   const connection = useApiDef(queries.ownAgent(id), { enabled: ready })
-  const revoke = useApiMutation((api, agentId: string) => api.credentials.revokeAgent(agentId), 'Agent revoked')
+  const revoke = useApiMutation((api, agentId: string) => api.credentials.revokeAgent(agentId), 'Agent revoked', false, invalidate.agents)
   const [switching, setSwitching] = useState(false)
   const accounts = browser.data?.accounts ?? []
   const pickedAccount = accounts.find(account => account.id === picked)

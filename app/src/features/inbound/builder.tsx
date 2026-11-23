@@ -15,7 +15,7 @@ import { PrivateAddress } from '../../components/PrivateAddress'
 import { useApiDef, useRequestScope } from '../../data/context'
 import { queries } from '../../data/queries'
 import { isAbortError, request } from '../../data/live'
-import { staleAfterWrite } from '../../data/invalidation'
+import { invalidate, invalidateResources } from '../../data/invalidation'
 import { ApiError, errorText, type InboundAddress, type MailboxDomain } from '../../data/types'
 import { idempotencyFor, addressOption } from './shared'
 import { Flow, FlowFork, FlowItem, FlowStage, isSplit, splitOf } from './flow'
@@ -200,7 +200,7 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   // Rules the builder doesn't draw (ready-made ones, scripts) keep running beside it.
   const others = (opened?.entry.rules ?? entry?.rules ?? []).filter(key => key !== base?.rule?.key).length
   const set = (patch: Partial<Plan>) => { setPlan({ ...draft, ...patch }); setProblem(null); setErrors({}) }
-  const refresh = () => client.invalidateQueries({ predicate: query => staleAfterWrite(query.queryKey, false) })
+  const refresh = () => invalidateResources(client, invalidate.rules)
   const dirty = step !== 'done' && (plan !== null || form.address !== initial || !!form.displayName || !!form.lifetime || !!form.publicAddress)
   // Leaving with something typed asks first: closing, Cancel, or a link out of the builder.
   const close = (then?: () => void) => {
