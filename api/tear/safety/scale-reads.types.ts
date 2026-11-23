@@ -12,6 +12,7 @@ export interface ScaleReadObs {
   status: number;
   elapsedMs: number;
   budgetMs: number;
+  badPlan: string | null;
   rows: number;
   seededContacts: number;
 }

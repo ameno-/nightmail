@@ -1,12 +1,12 @@
 /**
- * Preventative property (d): Large-workspace dashboard read latency budgets (review-582.md class).
+ * Preventative property (d): Large-workspace dashboard read scaling (review-582.md class).
  * Invariant: On a workspace seeded with N contacts (default 200,000 via TEAR_SCALE_CONTACTS, up to
- * 2,000,000), every dashboard read answers HTTP 200 within its stated latency budget.
+ * 2,000,000), every dashboard read answers HTTP 200 within a fixed (data-size-independent) latency cap
+ * AND indexed pagination reads never regress to a full-table Seq Scan or full-workspace Sort in EXPLAIN.
  *
- * Tool-fit note: tear is NOT the ideal primary tool for numeric latency budgets (wall-clock times vary
- * with buffer-cache warmth and shared CPU load, making counterexample shrinking noisy). A standalone
- * EXPLAIN-plan + p95 benchmark script is the simpler tool; this model demonstrates a host-timed named
- * `satisfies("within-budget")` check inside tear.
+ * Tool-fit note: Full multi-million-row p95 benchmarking lives in the scale budget scripts; this model
+ * combines fixed latency caps with deterministic EXPLAIN (FORMAT JSON) plan checks so scaling regressions
+ * fail regardless of CPU speed or load.
  */
 import { choice, model, satisfies, type Choice, type IdleRule, type Step } from "@tear/mbt";
 import type { ScaleReadAction, ScaleReadKind, ScaleReadObs, ScaleReadSnapshot } from "./scale-reads.types.ts";
@@ -34,7 +34,7 @@ const scaleIdleRules: IdleRule<ScaleReadSnapshot>[] = [
 
 export const scaleReads = model<ScaleReadState, ScaleReadAction, ScaleReadObs, ScaleReadSnapshot>({
   id: "scale-reads",
-  description: "Large-workspace (200k–2M contacts) dashboard read latency budgets checked via named satisfies predicate",
+  description: "Large-workspace (200k-2M contacts) dashboard reads: fixed latency caps + deterministic EXPLAIN plan checks",
   maxSteps: 6,
   bug: "canary_slow_read",
 
@@ -54,13 +54,16 @@ export const scaleReads = model<ScaleReadState, ScaleReadAction, ScaleReadObs, S
       if (obs.status !== 200) {
         return `${a.op} returned HTTP ${obs.status} (expected 200) at ${obs.seededContacts} contacts`;
       }
+      if (obs.badPlan !== null) {
+        return `${a.op} regressed query plan at ${obs.seededContacts} contacts: ${obs.badPlan}`;
+      }
       if (obs.elapsedMs > obs.budgetMs) {
-        return `${a.op} took ${obs.elapsedMs}ms > budget ${obs.budgetMs}ms at ${obs.seededContacts} contacts`;
+        return `${a.op} took ${obs.elapsedMs}ms > fixed budget ${obs.budgetMs}ms at ${obs.seededContacts} contacts`;
       }
       return true;
     });
-    // Known product bug BUG-SCALE-01 (review-582.md B1): GET /v1/contacts?listId=<small> scans every
-    // contact in the workspace because inList() uses OFFSET 0 (audience.ts:103).
+    // Known product bug BUG-SCALE-01 (review-582.md B1, PR #596): GET /v1/contacts?listId=<small> scans every
+    // contact in the workspace because inList() uses OFFSET 0 (audience.ts).
     return a.op === "ContactsSmallList" ? { next, expect, mask: "BUG-SCALE-01" } : { next, expect };
   },
 

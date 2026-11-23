@@ -2,7 +2,7 @@
 
 Model-based tests for Nightmail built on the reworked TypeScript `tear` (`@tear/mbt` + `@tear/host`). Run on demand against a throwaway local PostgreSQL database with simulated/fake SES and storage — never production or dev.
 
-Because `anomalyco/tear` is a private repository, `api/package.json` does not depend on it and public GitHub Actions CI does not run tear. Install the `tear` CLI and local `api/tear/node_modules/@tear/{mbt,host}` once via `api/tear/setup.sh`.
+Because `anomalyco/tear` is a private repository, `api/package.json` does not depend on it and public GitHub Actions CI does not run tear (public CI verifies the disposable-database guard on all 11 real `api/tear/**/*.host.ts` processes via a minimal stand-in). Install the revision-pinned `tear` CLI (`~/.cache/nightmail-tear/<TEAR_REV>/bin/tear`) and local `api/tear/node_modules/@tear/{mbt,host}` once via `api/tear/setup.sh`.
 
 ## Suite layout
 
@@ -12,64 +12,64 @@ Each checker uses split files: `<name>.types.ts` (pure shared types), `<name>.mo
 
 | Checker | Area | Campaign cases |
 |---|---|---:|
-| `dispatch/` | Send admission, campaigns, batch dispatcher, quotas, outage breaker, recovery, 5 timing/once rules | 34 |
-| `ses/` | Hosted SES feedback (SNS route, queue consumer, recovery jobs, rank guards, stats, health) | 12 |
-| `access/` | Idempotency reservations, grant/key/token revocation & expiry, 243-op MCP vs REST parity (`BUG-ACCESS-01` pinned) | 15 |
-| `admission/` | Receive hourly window & backlog, hosted send caps & sponsor holds, upload quota reservations | 46 |
-| `inbox/` | Inbox folders, UIDs, UIDVALIDITY, MODSEQ, flags, move/copy/expunge, tombstones, retention | 22 |
+| `dispatch/` | Send admission, campaigns, batch dispatcher, quotas, outage breaker, recovery, virtual-second clock agreement, 5 timing/once rules | 36 |
+| `ses/` | Hosted SES feedback (SNS route, queue consumer, recovery jobs, rank guards, stats, health) | 13 |
+| `access/` | Idempotency reservations (including I7 authority hash), grant/key/token revocation & expiry, 243-op MCP vs REST parity (`BUG-ACCESS-01` tracked mask-free) | 18 |
+| `admission/` | Receive hourly window, 48 h recovery boundary (47 h / 49 h) & backlog, hosted send caps & sponsor holds, upload quota reservations | 47 |
+| `inbox/` | Inbox folders, UIDs, UIDVALIDITY, MODSEQ, flags, move/copy/expunge, tombstones, reopen job queueing, retention | 26 |
 | `delivery/` | Routing, rules, endpoints, retries, backoff, rate limits, fences, pause/resume (`DLV-1` pinned) | 42 |
 
 ### Preventative safety models (`safety/`, 5)
 
-| Model | Invariant |
+| Model | What is checked |
 |---|---|
-| `campaign-collab` | Two editors + API caller on one draft: no committed edit silently lost; stale saves always `409 STALE_CAMPAIGN_REVISION`. |
-| `campaign-attachments` | Every attachment delivered to SES matches the draft at launch with valid `cid:` references and zero stray removed inline images. |
-| `db-faults` | Under DB read-only (`XX000`/`25006`), timeout (`57014`/`55P03`), or pool exhaustion (`53300`), every API reply is 2xx or `retryable: true`, and recovery loses/duplicates zero accepted mail (`BUG-DB-01`, `BUG-DB-02` pinned). |
-| `scale-reads` | On a workspace seeded with `TEAR_SCALE_CONTACTS` (default `200000`, up to `2000000`), dashboard reads answer 200 within stated latency budgets (`BUG-SCALE-01` pinned). |
-| `tenant-isolation` | Heavy workspace imports and marketing floods never block, deadlock, or starve another workspace's transactional sends. |
+| `campaign-collab` | API optimistic locking under two editors + API caller: stale saves always `409 STALE_CAMPAIGN_REVISION`; concurrent `--rounds 2` races pick one winner. |
+| `campaign-attachments` | Real PNG/PDF uploads, add/remove inline `cid:` images and files, `postal-mime` verification of every MIME part delivered to SES. |
+| `db-faults` | Under DB read-only (`XX000`/`25006`), timeouts (`57014`/`55P03`), mid-request timeout after first write, or pool exhaustion (`53300`), API replies are 2xx or `retryable: true`, one `Idempotency-Key` produces at most one email id and one SES send, and healthy recovery drains all accepted mail. |
+| `scale-reads` | On `TEAR_SCALE_CONTACTS` (default `200000`, up to `2000000`), dashboard reads return 200 within fixed (data-size-independent) latency caps AND indexed contact pagination reads pass `EXPLAIN (ANALYZE, FORMAT JSON)` with no full-table `Seq Scan`, large `Sort`, or full-workspace filter scan (`BUG-SCALE-01` pinned). |
+| `tenant-isolation` | Workspace B's transactional sends return 202 within budget while overlapped deterministically inside workspace A's contact import commit transaction, and dispatch ahead of A's marketing backlog. |
 
 ## Quickstart
 
 From `api/` (with `bun install` done and Docker running):
 
 ```sh
-# One-time setup (uses TEAR_DIR=/path/to/tear if you already have a checkout)
+# One-time setup (installs revision-pinned CLI + @tear/{mbt,host}; TEAR_DIR must match TEAR_REV when a git repo)
 bash tear/setup.sh
 
-# Run all 6 core checkers against a throwaway Docker Postgres (~2.5 min)
+# Run all 6 core checkers (campaigns + rotating guided seeds + exhaustive BFS edges + deep-prefix novelty)
 bun run tear:ci
 
 # Run all 11 models (core + safety)
 bun run tear:ci all
 
-# Run a single checker against an existing disposable DB
+# Run a single checker against an existing disposable DB (seeds rotate each run and are printed for replay)
 TEAR_DATABASE_URL="postgresql://postgres:tear@127.0.0.1:55499/tear_dispatch" \
   bash tear/run.sh dispatch
+
+# Replay an exact rotating seed window or skip edges for a quick local smoke check
+TEAR_SEEDS="12345..12404" TEAR_EDGES=0 bash tear/run.sh access
 ```
 
-## Direct `tear` commands
+## Direct `tear` commands & planted-bug verification
 
-From `api/tear/` with `TEAR_DATABASE_URL` set to a migrated, disposable-marked loopback Postgres database (see `disposable.ts`):
+From `api/tear/` with `TEAR_DATABASE_URL` set to a migrated, disposable-marked loopback Postgres database:
 
 ```sh
 # Discover all 11 models
-tear mbt list
+~/.cache/nightmail-tear/97a42a263ccb8902f69daad185b0b558d1316277/bin/tear mbt list
 
-# Run one campaign + guided seeds
-tear test dispatch/dispatch.model.ts dispatch --campaign dispatch/campaigns/dispatch.json --seeds 1..50
-
-# Deep guided exploration with novelty bias
-tear test access/access.model.ts --runs 150 --max-steps 24 --novelty --keep-going
-
-# Replay a counterexample token (use --start ... --masks run for masked known bugs)
+# Replay a counterexample token (use --start ... --masks run for masked known bugs; plain --replay skips masked steps)
 tear test dispatch/dispatch.model.ts dispatch --replay tpbt1_...
 tear test delivery/delivery.model.ts delivery --start tpbt1_... --max-steps 0 --runs 1 --masks run
+
+# Re-verify the kept 21-bug planted product suite against a scratch checkout
+TEAR_DATABASE_URL=... bun verify-plants.ts --scratch-root /path/to/scratch-nightmail
 ```
 
 ## Disposable database guard
 
-Every host imports `disposable.ts` and refuses any URL that is not plain loopback (no query string) or lacks this exact `COMMENT ON DATABASE` marker (plus a foreign-data check):
+Every `*.host.ts` validates `disposableUrl` and `assertDisposable` before registering exception handlers or writing anything, exiting non-zero with nothing on stdout on refusal. Public CI's `acceptance` shard runs all 11 real `*.host.ts` files against an unmarked database and a query-parameter URL.
 
 ```sql
 COMMENT ON DATABASE tear_db IS 'bane-tear: disposable test database, every row may be changed or deleted';

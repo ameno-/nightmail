@@ -1712,6 +1712,59 @@
         "outcome": "pass"
       },
       "note": "Quota room=1 filled exactly then refuses 413 STORED_ATTACHMENT_LIMIT_EXCEEDED"
+    },
+    {
+      "name": "bnd-recv-recover-48h-boundary-47h-and-49h",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "recv0"
+        },
+        {
+          "op": "Accept",
+          "msg": "m1",
+          "rcpts": "a"
+        },
+        {
+          "op": "Claim",
+          "ws": "A",
+          "msg": "m1"
+        },
+        {
+          "op": "Lose",
+          "ws": "A",
+          "msg": "m1"
+        },
+        {
+          "op": "Age47"
+        },
+        {
+          "op": "Recover"
+        },
+        {
+          "op": "Claim",
+          "ws": "A",
+          "msg": "m1"
+        },
+        {
+          "op": "Lose",
+          "ws": "A",
+          "msg": "m1"
+        },
+        {
+          "op": "Hour"
+        },
+        {
+          "op": "Hour"
+        },
+        {
+          "op": "Recover"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Pins both sides of the 48-hour recovery window: 47h still recovers; 49h fails with MAILBOX_RECOVERY_EXHAUSTED"
     }
   ]
 }

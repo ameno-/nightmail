@@ -64,6 +64,7 @@ export interface AccessState {
   creds: Record<string, CredState>;
   grants: Record<string, GrantState>;
   member: "member" | "admin" | "removed";
+  keyNarrowed: boolean;
   boxDeleted: boolean;
   res: Record<string, ResState>;
   ids: Record<string, boolean>;
@@ -102,7 +103,9 @@ function credLive(s: AccessState, c: string): boolean {
       return grantLive(s, "grant");
     case "token":
     case "token3":
-      return grantLive(s, "grant") && s.t < x.exp;
+      // Commit 516521cf: agent tokens authenticate via externalMcpGrant(..., 'request'), so they
+      // stop working once the parent grant's newest 5-minute access token expires.
+      return accessOk(s, "grant") && s.t < x.exp;
     case "bkey":
       return !s.boxDeleted;
     default:
@@ -193,9 +196,17 @@ function identityOf(r: ReqState): string {
 
 function hashOf(s: AccessState, r: ReqState): string {
   const body = r.what === "list" ? r.body : "fixed";
-  // Owner grants have receivingConsent=true; API keys/agent tokens have receivingConsent=false.
-  const receiving = r.cred === "grant";
-  return `${body}|${receiving ? "receiving" : "-"}`;
+  // Mirrors api/src/idempotency.ts:174 — request hash covers body AND caller authority
+  // (permissions, domain/inbox scope, and receivingConsent). I7: changing authority between
+  // retries with the same Idempotency-Key produces 409 IDEMPOTENCY_CONFLICT.
+  const actor = evalActorFor(s, r.cred);
+  const perms =
+    r.cred === "key"
+      ? s.keyNarrowed
+        ? "sm"
+        : "rsm"
+      : `${actor.read ? "r" : ""}${actor.send ? "s" : ""}${actor.manage ? "m" : ""}`;
+  return `${body}|${perms}|${actor.domainLimited ? "dom" : "-"}|${actor.receivingConsent ? "receiving" : "-"}`;
 }
 
 function countFor(s: AccessState, what: CreateWhat): [string, number] {
@@ -237,6 +248,8 @@ function keyValid(k: IdemKeyName): boolean {
 }
 
 function mcpAuthStatus(s: AccessState, g: string, tokenExp?: number): 200 | 401 | 403 {
+  // Note (review-599 finding 9): revoked approvals with an unexpired JWT currently answer 403
+  // (oidc-resource.ts:250, since d6355639/5975cc31) rather than RFC 6750 401; update here if changed.
   const exp = tokenExp ?? s.grants[g]!.at;
   if (s.t >= exp) return 401;
   if (!grantLive(s, g)) return 403;
@@ -423,6 +436,7 @@ function generalChoices(s: AccessState, full: boolean): Choice<AccessAction>[] {
   }
   if (isMinted(s, "dkey")) add({ op: "Probe", who: "dkey", how: "lists" }, 2);
   if (isMinted(s, "key")) {
+    if (credLive(s, "key") && !s.keyNarrowed) add({ op: "NarrowKey" }, 1);
     add({ op: "Probe", who: "key", how: "mcp" }, 2);
     if (full) add({ op: "Probe", who: "key", how: "audit" }, 1);
   }
@@ -631,6 +645,7 @@ export const access = model<AccessState, AccessAction, AccessObs, AccessSnapshot
     creds: {},
     grants: {},
     member: "member",
+    keyNarrowed: false,
     boxDeleted: false,
     res: {},
     ids: {},
@@ -732,8 +747,8 @@ export const access = model<AccessState, AccessAction, AccessObs, AccessSnapshot
             // member's agent tokens (404 if none exist).
             status = 404;
           } else {
-            // revokeApproval (mcp-auth.ts:41-49) updates WHERE user_id=$user AND id=$id without AND NOT revoked:
-            // revoking one's own agent is idempotent and returns 200.
+            // Note (review-599 finding 9): revokeApproval (mcp-auth.ts:41-49) updates without AND NOT revoked,
+            // returning 200 on repeat (and writing an audit row). Update here if contract changes to 404.
             status = 200;
             g.revoked = true;
             if (c === "grant") {
@@ -775,6 +790,10 @@ export const access = model<AccessState, AccessAction, AccessObs, AccessSnapshot
         next.member = "admin";
         expected = { status: 200 };
         break;
+      case "NarrowKey":
+        next.keyNarrowed = true;
+        expected = { status: 200 };
+        break;
       case "Tick":
         next.t = a.ms;
         expected = {};
@@ -807,7 +826,30 @@ export const access = model<AccessState, AccessAction, AccessObs, AccessSnapshot
             expected = credLive(next, who) ? { status: 200, rest: restGetsMap(actor) } : { status: 401 };
           } else if (how === "mcp") {
             // Commit 6ecf1076: /mcp accepts workspace API keys, agent tokens, and inbox keys.
-            expected = credLive(next, who) ? { status: 200, visible: visibleMap(actor) } : { status: 401 };
+            // Open product bug BUG-ACCESS-01 (plans/tear/bugs.md): /mcp advertises these exact 9
+            // workspace-only template/attachment write tools to domain-limited keys (dkey) even though
+            // REST refuses them with 403. Listed explicitly with NO mask so all other 234 operations
+            // stay strictly checked in every run, and fixing BUG-ACCESS-01 fails loudly to remove this list.
+            const BUG_ACCESS_01_EXTRA = [
+              "createCampaignTemplate",
+              "updateCampaignTemplate",
+              "publishCampaignTemplate",
+              "setCampaignTemplateArchived",
+              "deleteCampaignTemplate",
+              "uploadTemplateAsset",
+              "importTemplateImage",
+              "deleteTemplateAsset",
+              "deleteAttachment",
+            ];
+            if (credLive(next, who)) {
+              const vis = visibleMap(actor);
+              if (who === "dkey") {
+                for (const name of BUG_ACCESS_01_EXTRA) vis[name] = true;
+              }
+              expected = { status: 200, visible: vis };
+            } else {
+              expected = { status: 401 };
+            }
           } else if (who === "dkey" && how === "lists") {
             expected = credLive(next, who)
               ? { status: 403, code: "UNRESTRICTED_KEY_REQUIRED" }
@@ -879,14 +921,7 @@ export const access = model<AccessState, AccessAction, AccessObs, AccessSnapshot
       }
     }
 
-    // Known product bug BUG-ACCESS-01: /mcp lists 9 workspace-only template/attachment writes
-    // that REST refuses with 403 UNRESTRICTED_KEY_REQUIRED for domain-limited API keys (dkey).
-    // See /Users/vogel/.config/opensend-mx/plans/tear/bugs.md#bug-access-01.
-    const mask =
-      a.op === "Probe" && a.who === "dkey" && a.how === "mcp" && credLive(next, "dkey")
-        ? "BUG-ACCESS-01"
-        : undefined;
-    return mask ? { next, expect: exact(expected), mask } : { next, expect: exact(expected) };
+    return { next, expect: exact(expected) };
   },
 
   idle: accessIdleRules,

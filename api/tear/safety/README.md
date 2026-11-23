@@ -1,17 +1,18 @@
 # tear: preventative safety models (`safety/`)
 
-Five preventative models built directly from the 2026-11-23 incidents (`incident-2026-11-23.md`, `db-safety-audit-2026-11-23.md`, `review-582.md`) and PRs #583/#584:
+Five preventative models built from the 2026-11-23 incidents and PRs #582/#583/#584/#593:
 
-| Model | Invariant | Canary | Run time |
-|---|---|---|---|
-| `campaign-collab` | Two editors and an API caller on one draft: no committed edit is silently lost and every stale save returns `409 STALE_CAMPAIGN_REVISION`. | `canary_stale_overwrite` | ~30 s (campaign + 40 `--rounds 2` seeds) |
-| `campaign-attachments` | Every attachment delivered by SES matches the draft at launch, with matching `cid:` references and no stray removed inline images. | `canary_keep_removed_inline` | ~10 s (campaign + 40 seeds) |
-| `db-faults` | Under read-only (`XX000`/`25006`), timeout (`57014`/`55P03`), or connection exhaustion (`53300`), every API reply is 2xx or `retryable: true`, and recovery loses/duplicates zero accepted mail. | `canary_double_send` + `BUG-DB-01` + `BUG-DB-02` | ~5 s (campaign + 40 seeds) |
-| `scale-reads` | On a workspace seeded with `TEAR_SCALE_CONTACTS` (default `200000`, up to `2000000`), every dashboard read answers 200 within its stated latency budget (`satisfies("within-budget")`). | `canary_slow_read` + `BUG-SCALE-01` | ~3.5 s warm (~5.3 s first seed of 200k) |
-| `tenant-isolation` | While workspace A runs 1,500-row contact import commits or a marketing flood, workspace B's transactional sends return 202 promptly and dispatch ahead of A's marketing backlog. | `canary_block_victim` | ~9.5 s (campaign + 15 `--rounds 2` seeds) |
+| Model | What is checked | Canary / known bugs |
+|---|---|---|
+| `campaign-collab` | API optimistic locking for two editors + API caller on one draft: stale saves always `409 STALE_CAMPAIGN_REVISION`; concurrent `--rounds 2` races allow at most one winner. | `canary_stale_overwrite` (host-side) |
+| `campaign-attachments` | Real PNG/PDF uploads, add/remove inline `cid:` images and files, `postal-mime` verification of every MIME part delivered by SES. | `canary_keep_removed_inline` (host-side) |
+| `db-faults` | Under read-only (`XX000`/`25006`), timeouts (`57014`/`55P03`), mid-request `57014` after first write, or pool exhaustion (`53300`), API replies are 2xx or `retryable: true`, one `Idempotency-Key` produces at most one email id and one SES send, and healthy recovery drains all accepted mail. | `canary_double_send` (`BUG-DB-01` & `BUG-DB-02` fixed by #593, now ordinary passing cases) |
+| `scale-reads` | On `TEAR_SCALE_CONTACTS` (default `200000`, up to `2000000`), 6 dashboard reads return 200 within fixed (data-size-independent) latency caps AND indexed pagination reads pass `EXPLAIN (ANALYZE, FORMAT JSON)` with no full-table `Seq Scan`, large `Sort`, or full-workspace filter scan. | `canary_slow_read` + `BUG-SCALE-01` (open until #596) |
+| `tenant-isolation` | Deterministic commit-phase overlap (preview runs first, `VictimSend` fires inside workspace A's commit transaction) + `--rounds 2` concurrency: workspace B's transactional sends return 202 within 2 s and dispatch ahead of A's marketing backlog. Import size configurable via `TEAR_TENANT_IMPORT_ROWS` (default `1500`). | `canary_block_victim` (host-side) |
 
-## Tool-fit notes
+## Tool-fit notes & honest limits
 
-- **`scale-reads` (numeric latency budgets):** Tear is not the best primary tool for wall-clock latency budgets because timings fluctuate with buffer-cache warmth and shared CPU load, making counterexample shrinking noisy. Use a standalone `EXPLAIN (FORMAT JSON)` plan-shape + p95 benchmark script as the primary performance gate; keep `scale-reads` here as an on-demand host-timed sanity check.
-- **`tenant-isolation` (physical vs logical isolation):** Tear proves logical, lock-order, and dispatcher-priority isolation under concurrent rounds. Physical resource saturation (filling a 10 GB disk with WAL, exhausting PgBouncer's 25 connections, or CPU/IOPS starvation) needs a resource-capped Docker Postgres load harness, not tear.
-- **`campaign-collab` & `campaign-attachments` (React UI vs API):** Tear has no browser driver. These models prove the API's optimistic locking, attachment-link replacement, review freeze, and MIME assembly; pure client helpers (`mergeCampaign`, `draftAttachments`) belong in `@tear/pbt` property tests.
+- **Host-side canaries vs planted product bugs:** Each model's built-in `canary_*` proves one rule/predicate fires on a host-injected event. For end-to-end proof against real product mutations, run `api/tear/verify-plants.ts` against the 21 planted product bugs in `api/tear/plants.json`.
+- **`scale-reads`:** Combines fixed latency caps with deterministic `EXPLAIN (ANALYZE, FORMAT JSON)` plan checks so regressions fail regardless of CPU speed. Full multi-million-row p95 benchmarking and no-match search audits remain in the standalone scale budget scripts.
+- **`tenant-isolation`:** Proves lock/error isolation across an overlapping import commit and dispatcher priority across workspaces. Physical exhaustion (WAL disk fill, PgBouncer pool saturation, IOPS starvation) needs a resource-capped Docker Postgres load harness.
+- **`campaign-collab` & `campaign-attachments`:** Proves API optimistic locking, attachment-link replacement, and SES MIME assembly; pure client merge helpers (`app/src/features/campaigns/merge.ts`) belong in `@tear/pbt` property tests.

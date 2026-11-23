@@ -21,6 +21,21 @@ for (const level of ["log", "info", "warn", "error", "debug"] as const) {
   };
 }
 
+// Validate disposable database before connecting, registering handlers, or writing anything.
+const { disposableUrl, assertDisposable } = await import("../disposable.ts");
+const checkedUrl = await (async () => {
+  const checked = disposableUrl(process.env.TEAR_DATABASE_URL ?? process.env.DATABASE_URL, "TEAR_DATABASE_URL");
+  const { default: pg } = await import("pg");
+  const client = new pg.Client({ connectionString: checked });
+  await client.connect();
+  try {
+    await assertDisposable((text) => client.query(text));
+  } finally {
+    await client.end();
+  }
+  return checked;
+})();
+
 // Track unhandled rejections/exceptions as idle-rule violations instead of crashing the host.
 const leaked: string[] = [];
 const leak = (kind: string) => (error: unknown) => {
@@ -47,21 +62,6 @@ class VirtualDate extends RealDate {
   }
 }
 globalThis.Date = VirtualDate as DateConstructor;
-
-// Validate disposable database before connecting or writing anything.
-const { disposableUrl, assertDisposable } = await import("../disposable.ts");
-const checkedUrl = await (async () => {
-  const checked = disposableUrl(process.env.TEAR_DATABASE_URL ?? process.env.DATABASE_URL, "TEAR_DATABASE_URL");
-  const { default: pg } = await import("pg");
-  const client = new pg.Client({ connectionString: checked });
-  await client.connect();
-  try {
-    await assertDisposable((text) => client.query(text));
-  } finally {
-    await client.end();
-  }
-  return checked;
-})();
 
 const withClock = `${checkedUrl}?options=${encodeURIComponent("-c search_path=tear_clock,pg_catalog,public")}`;
 
@@ -769,7 +769,7 @@ async function readObs(t: Trial, result: unknown): Promise<DispatchObs> {
   for (const name of ["D1", "D2"]) {
     if (t.instances.has(name)) d[name] = instPhase(t, name);
   }
-  return { r: result ?? null, mail, campaign: [cstate, expanded, windowN], d };
+  return { r: result ?? null, mail, campaign: [cstate, expanded, windowN], d, t: Math.floor((vnow() - t.epoch) / 1000) };
 }
 
 async function readSnapshot(t: Trial): Promise<Observed> {

@@ -950,6 +950,142 @@
         "outcome": "pass"
       },
       "note": "Core preset end-to-end delivery, mutation, move, and expunge"
+    },
+    {
+      "name": "reopen-after-store-queues-new-ingest-job",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "full"
+        },
+        {
+          "op": "Accept",
+          "msg": "m1",
+          "recips": "a"
+        },
+        {
+          "op": "StoreAuto",
+          "msg": "m1"
+        },
+        {
+          "op": "Accept",
+          "msg": "m1",
+          "recips": "b"
+        },
+        {
+          "op": "StoreAuto",
+          "msg": "m1"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Migration 155: reopening a receipt after its ingest job completed queues a new ingest job (queued: 1) and delivers to the new recipient"
+    },
+    {
+      "name": "duplicate-accept-after-store-does-not-reopen",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "full"
+        },
+        {
+          "op": "Accept",
+          "msg": "m1",
+          "recips": "a"
+        },
+        {
+          "op": "StoreAuto",
+          "msg": "m1"
+        },
+        {
+          "op": "Accept",
+          "msg": "m1",
+          "recips": "a"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Duplicate SNS delivery for already-processed recipients does not reopen the receipt (pins inbox-P2)"
+    },
+    {
+      "name": "reg-3-unread-recount-excludes-held",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "quota1"
+        },
+        {
+          "op": "Accept",
+          "msg": "m1",
+          "recips": "a"
+        },
+        {
+          "op": "StoreAuto",
+          "msg": "m1"
+        },
+        {
+          "op": "Accept",
+          "msg": "m2",
+          "recips": "a"
+        },
+        {
+          "op": "StoreAuto",
+          "msg": "m2"
+        },
+        {
+          "op": "Seen",
+          "box": "A",
+          "msg": "m1"
+        },
+        {
+          "op": "Unseen",
+          "box": "A",
+          "msg": "m1"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Re-pinned old regression #3 on current writer: quota 1 holds m2 while m1 is stored; marking m1 unread yields thread summary [1,1]"
+    },
+    {
+      "name": "vanished-sync-strict-greater-than-modseq",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "full"
+        },
+        {
+          "op": "Accept",
+          "msg": "m1",
+          "recips": "a"
+        },
+        {
+          "op": "StoreAuto",
+          "msg": "m1"
+        },
+        {
+          "op": "Move",
+          "box": "A",
+          "msg": "m1",
+          "src": "inbox",
+          "dst": "trash"
+        },
+        {
+          "op": "Sync",
+          "box": "A"
+        },
+        {
+          "op": "Sync",
+          "box": "A"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Second Sync at current modseq does not re-emit vanished messages (pins inbox-P1)"
     }
   ]
 }

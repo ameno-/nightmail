@@ -23,16 +23,6 @@ for (const level of ["log", "info", "warn", "error", "debug"] as const) {
   };
 }
 
-// Track unhandled rejections/exceptions as idle-rule violations instead of crashing the host.
-const leaked: string[] = [];
-const leak = (kind: string) => (error: unknown) => {
-  const text = error instanceof Error ? `${error.message}\n${error.stack ?? ""}` : String(error);
-  process.stderr.write(`host ${kind}: ${text}\n`);
-  leaked.push(`${kind}:${(error instanceof Error ? error.message : String(error)).slice(0, 100)}`);
-};
-process.on("unhandledRejection", leak("unhandled-rejection"));
-process.on("uncaughtException", leak("uncaught-exception"));
-
 const hex = (n: number) =>
   Array.from({ length: Math.ceil(n / 32) }, () => randomUUID().replaceAll("-", ""))
     .join("")
@@ -53,6 +43,16 @@ const DATABASE_URL = await (async () => {
   }
   return checked;
 })();
+
+// Track unhandled rejections/exceptions as idle-rule violations instead of crashing the host.
+const leaked: string[] = [];
+const leak = (kind: string) => (error: unknown) => {
+  const text = error instanceof Error ? `${error.message}\n${error.stack ?? ""}` : String(error);
+  process.stderr.write(`host ${kind}: ${text}\n`);
+  leaked.push(`${kind}:${(error instanceof Error ? error.message : String(error)).slice(0, 100)}`);
+};
+process.on("unhandledRejection", leak("unhandled-rejection"));
+process.on("uncaughtException", leak("uncaught-exception"));
 
 const [
   { createApp },
@@ -901,6 +901,8 @@ function actionToWords(a: AdmissionAction): [string | null, string[]] {
       return [null, ["legacy-fail", a.ws, a.msg]];
     case "Recover":
       return [null, ["recover"]];
+    case "Age47":
+      return [null, ["age47"]];
     case "Days":
       return [null, ["days"]];
     case "Hour":
@@ -1088,6 +1090,9 @@ async function autoAct(t: Trial, words: string[]): Promise<unknown> {
         ["sending_emails", "created_at"],
         ["api_request_budgets", "window_start"],
       ]);
+      return "ok";
+    case "age47":
+      await shiftTime(t, "47 hours", [["mail_receipts", "created_at"]]);
       return "ok";
     case "days":
       await shiftTime(t, "70 hours", [["mail_receipts", "created_at"]]);

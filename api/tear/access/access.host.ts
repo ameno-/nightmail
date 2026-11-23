@@ -28,12 +28,6 @@ for (const level of ["log", "info", "warn", "debug"] as const) {
       : () => {};
 }
 
-const leaked: string[] = [];
-process.on("unhandledRejection", (error) => {
-  const msg = error instanceof Error ? error.message : String(error);
-  leaked.push(`unhandled-rejection:${msg.slice(0, 120)}`);
-});
-
 const { disposableUrl, assertDisposable } = await import("../disposable.ts");
 const url = disposableUrl(process.env.TEAR_DATABASE_URL ?? process.env.DATABASE_URL, "TEAR_DATABASE_URL");
 
@@ -214,6 +208,12 @@ class GatedPool extends pg.Pool {
 const withClock = `${url}?options=${encodeURIComponent("-c search_path=tear_clock,pg_catalog,public")}`;
 const admin = new pg.Pool({ connectionString: url, max: 4 });
 await assertDisposable((text) => admin.query(text));
+
+const leaked: string[] = [];
+process.on("unhandledRejection", (error) => {
+  const msg = error instanceof Error ? error.message : String(error);
+  leaked.push(`unhandled-rejection:${msg.slice(0, 120)}`);
+});
 await admin.query(`
   CREATE SCHEMA IF NOT EXISTS tear_clock;
   DROP TABLE IF EXISTS tear_clock.state;
@@ -486,12 +486,10 @@ async function mintGrant(f: Fixture, name: string, user: User, scope: string, ex
 
 async function refreshGrant(f: Fixture, name: string) {
   const g = f.grants.get(name)!;
-  const active = await admin.query(
-    "SELECT 1 FROM nightmail_resource_grants g JOIN workspace_members m ON m.workspace_id=$2 AND m.user_id=g.user_id WHERE g.id=$1 AND NOT g.revoked",
-    [g.keyId, f.w],
-  );
-  if (!active.rowCount) return { status: "denied" };
-  return mintGrant(f, name, g.user, g.scope, g.clientId);
+  // Ask the real product (mintGrant presents a fresh JWT to /mcp tools/list; the product itself
+  // refuses revoked grants and removed members with 403 without unrevoking them).
+  const res = await mintGrant(f, name, g.user, g.scope, g.clientId);
+  return res.status === "ok" ? { status: "ok" } : { status: "denied" };
 }
 
 async function legacyToken(f: Fixture, grant: Grant) {
@@ -621,14 +619,15 @@ async function runCreate(f: Fixture, slot: Slot | null, what: string, cred: stri
   throw new Error(`unknown create ${what}`);
 }
 
-async function listing(f: Fixture, bearerToken: string, codemode: boolean) {
+async function listing(f: Fixture, bearerToken: string, codemode: boolean, isGrant: boolean) {
   const r = await rpc(f, bearerToken, "tools/list", {}, codemode);
   if (r.status !== 200 || !Array.isArray(r.body?.result?.tools)) return { status: r.status };
   const tools = r.body.result.tools as { name: string; inputSchema?: { properties?: { action?: { enum?: string[] } } } }[];
   const ops = new Set<string>();
   for (const t of tools) {
     if (codemode) {
-      if (t.name !== "workspaces" && t.name !== "setDefaultWorkspace") ops.add(t.name);
+      // Only MCP sign-in grants receive workspaces/setDefaultWorkspace (6ecf1076: keys and agent tokens must not).
+      if (!isGrant || (t.name !== "workspaces" && t.name !== "setDefaultWorkspace")) ops.add(t.name);
     } else {
       for (const action of t.inputSchema?.properties?.action?.enum ?? []) {
         const op = INVENTORY.get(`${t.name}.${action}`);
@@ -800,6 +799,8 @@ export const accessHost = host(access, {
         return { status: (await sendReq(f, null, "DELETE", `/v1/workspaces/current/members/${f.member.memberId}`, ownerAuth(f))).status };
       case "PromoteMember":
         return { status: (await sendReq(f, null, "PATCH", `/v1/workspaces/current/members/${f.member.memberId}`, ownerAuth(f), { role: "admin" })).status };
+      case "NarrowKey":
+        return { status: (await sendReq(f, null, "PATCH", `/v1/api-keys/${f.creds.get("key")!.id}`, ownerAuth(f), { permissions: ["send", "manage"] })).status };
       case "Tick":
         await freezeClock(f.start + a.ms);
         return {};
@@ -823,10 +824,10 @@ export const accessHost = host(access, {
             const o = await callTool(f, who, "queryAudience", { body: { statement: "SELECT count(*) FROM contacts" } });
             return { status: o.status, code: o.code };
           }
-          return listing(f, g.access, how === "code");
+          return listing(f, g.access, how === "code", true);
         }
         const secret = bearerOf(f, who);
-        if (how === "mcp") return listing(f, secret, true);
+        if (how === "mcp") return listing(f, secret, true, false);
         if (how === "lists") {
           const r = await sendReq(f, null, "GET", "/v1/lists", { bearer: secret });
           return { status: r.status, code: r.body?.error?.code ?? null };

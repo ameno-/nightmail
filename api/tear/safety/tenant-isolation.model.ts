@@ -1,19 +1,20 @@
 /**
- * Preventative property (e): Multi-tenant isolation — one workspace's heavy work must not stop another's send.
- * Invariant: While workspace A runs heavy contact import commits or a marketing send flood in the shared
- * database and sending region, workspace B's transactional sends always return 202 promptly (no lock/quota
- * spillover or deadlock) and dispatch ahead of workspace A's marketing backlog.
+ * Preventative property (e): Multi-tenant isolation — one workspace's import commit or marketing backlog
+ * must not block or starve another workspace's transactional send.
+ * Invariant: While workspace A commits a contact import or floods marketing mail in the shared database
+ * and sending region, workspace B's transactional sends return 202 within budget (no cross-workspace lock
+ * or deadlock) and dispatch ahead of workspace A's marketing backlog.
  *
- * Tool-fit note: tear verifies logical, lock-order, and dispatcher-fairness isolation (including concurrent
- * rounds). Physical resource exhaustion (filling a 10 GB disk with WAL, exhausting PgBouncer's 25 connections,
- * or CPU/IOPS starvation as in incident-2026-11-23.md) is outside tear's scope; the simpler tool for physical
- * saturation is a resource-capped Docker Postgres load script.
+ * Tool-fit note: tear verifies lock/error isolation during commit overlap and dispatcher priority across
+ * workspaces. Physical resource exhaustion (WAL disk fill, PgBouncer pool saturation, IOPS starvation)
+ * belongs in a resource-capped Docker Postgres load script.
  */
 import { choice, model, satisfies, type Choice, type IdleRule, type Step } from "@tear/mbt";
 import type { TenantAction, TenantObs, TenantSnapshot } from "./tenant-isolation.types.ts";
 
 export interface TenantState {
   heavyImports: number;
+  previewReady: boolean;
   heavyMarketingQueued: number;
   victimQueued: number;
 }
@@ -40,23 +41,25 @@ const tenantIdleRules: IdleRule<TenantSnapshot>[] = [
 
 export const tenantIsolation = model<TenantState, TenantAction, TenantObs, TenantSnapshot>({
   id: "tenant-isolation",
-  description: "Multi-tenant isolation: workspace A's heavy imports and marketing floods never block or starve workspace B's sends",
+  description: "Multi-tenant isolation: workspace A's import commits and marketing floods never lock out or starve workspace B's sends",
   maxSteps: 10,
   rounds: 2,
   bug: "canary_block_victim",
   roundRoles: {
-    HeavyImport: "call",
+    PreviewImport: "sequential",
+    CommitImport: "call",
     HeavyMarketingFlood: "call",
     VictimSend: "call",
     OverlapImportAndVictimSend: "sequential",
     DrainVictim: "sequential",
   },
 
-  initial: (): TenantState => ({ heavyImports: 0, heavyMarketingQueued: 0, victimQueued: 0 }),
+  initial: (): TenantState => ({ heavyImports: 0, previewReady: false, heavyMarketingQueued: 0, victimQueued: 0 }),
 
   choices(s): Choice<TenantAction>[] {
     const out: Choice<TenantAction>[] = [];
-    if (s.heavyImports < 3) out.push(choice({ op: "HeavyImport" }, 2));
+    if (!s.previewReady && s.heavyImports < 3) out.push(choice({ op: "PreviewImport" }, 2));
+    if (s.previewReady) out.push(choice({ op: "CommitImport" }, 3));
     if (s.heavyMarketingQueued < 40) out.push(choice({ op: "HeavyMarketingFlood" }, 2));
     out.push(choice({ op: "VictimSend" }, 3));
     if (s.heavyImports < 3) out.push(choice({ op: "OverlapImportAndVictimSend" }, 2));
@@ -67,12 +70,21 @@ export const tenantIsolation = model<TenantState, TenantAction, TenantObs, Tenan
   step(s, a): Step<TenantState, TenantObs> {
     const next = structuredClone(s);
     switch (a.op) {
-      case "HeavyImport":
+      case "PreviewImport":
+        next.previewReady = true;
+        return {
+          next,
+          expect: satisfies("preview-import-ok", (obs) =>
+            obs.status === 201 ? true : `preview import failed: status=${obs.status} code=${obs.code}`,
+          ),
+        };
+      case "CommitImport":
+        next.previewReady = false;
         next.heavyImports += 1;
         return {
           next,
-          expect: satisfies("heavy-import-ok", (obs) =>
-            obs.status === 200 ? true : `heavy import failed: status=${obs.status} code=${obs.code}`,
+          expect: satisfies("commit-import-ok", (obs) =>
+            obs.status === 200 ? true : `commit import failed: status=${obs.status} code=${obs.code}`,
           ),
         };
       case "HeavyMarketingFlood":
@@ -103,12 +115,12 @@ export const tenantIsolation = model<TenantState, TenantAction, TenantObs, Tenan
         return {
           next,
           expect: satisfies("overlap-victim-not-blocked", (obs) => {
-            if (obs.status !== 200) return `overlapping heavy import failed: status=${obs.status} code=${obs.code}`;
+            if (obs.status !== 200) return `overlapping heavy import commit failed: status=${obs.status} code=${obs.code}`;
             if (obs.victimStatus !== 202) {
-              return `victim send blocked during heavy import: status=${obs.victimStatus} code=${obs.code}`;
+              return `victim send blocked during import commit: status=${obs.victimStatus} code=${obs.code}`;
             }
             if ((obs.victimElapsedMs ?? 0) > VICTIM_SEND_BUDGET_MS) {
-              return `victim send delayed during import: ${obs.victimElapsedMs}ms > ${VICTIM_SEND_BUDGET_MS}ms`;
+              return `victim send delayed during import commit: ${obs.victimElapsedMs}ms > ${VICTIM_SEND_BUDGET_MS}ms`;
             }
             return true;
           }),

@@ -747,6 +747,7 @@ function buildExpected(s: DispatchState, r: unknown): DispatchObs {
     mail,
     campaign: [s.camp.st, s.camp.expanded, s.camp.windowN],
     d,
+    t: s.t,
   };
 }
 

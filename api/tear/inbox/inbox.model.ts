@@ -150,6 +150,7 @@ interface BoxState {
 interface ReceiptState {
   pending: boolean;
   recips: number;
+  jobPending: boolean;
 }
 
 interface DbState {
@@ -542,15 +543,17 @@ function applyStmt(db: DbState, stmt: Stmt, quota: number | null): unknown {
     const { m, r } = stmt;
     const rc = db.receipts[m];
     if (!rc) {
-      db.receipts[m] = { pending: true, recips: r };
+      db.receipts[m] = { pending: true, recips: r, jobPending: true };
       return { queued: 1 };
     }
     if ((rc.recips | r) !== rc.recips) {
       rc.recips |= r;
       rc.pending = true;
-      // Migration 155_receive_reopen_backlog.sql (commits 1b3fdeb0, eee2feda):
-      // mail_ingest_admit() coalesces a reopen into the existing pending mailbox.ingest job -> queued: 0.
-      return { queued: 0 };
+      // Migration 155_receive_reopen_backlog.sql: reopen coalesces into an existing pending
+      // mailbox.ingest job (queued: 0), or queues a new one when no pending job exists (queued: 1).
+      if (rc.jobPending) return { queued: 0 };
+      rc.jobPending = true;
+      return { queued: 1 };
     }
     return { queued: 0 };
   }
@@ -575,6 +578,7 @@ function applyStmt(db: DbState, stmt: Stmt, quota: number | null): unknown {
       db.content[id] = thread;
     }
     rc.pending = false;
+    rc.jobPending = false;
     for (let x = 0; x < 2; x++) {
       if ((r & (1 << x)) === 0) continue;
       const b = db.boxes[x]!;
@@ -655,12 +659,15 @@ function needLock(s: InboxState, c: number, stmt: Stmt): number | null {
       const b = head.boxes[x]!;
       return !(b.seen.includes(id) && !hasKey(b.members, id));
     });
-    if (!reaches) return null;
-    for (const x of owners) {
-      const il = take(inboxLock(x));
-      if (il !== null) return il;
+    if (reaches) {
+      for (const x of owners) {
+        const il = take(inboxLock(x));
+        if (il !== null) return il;
+      }
     }
-    return null;
+    // Retiring the pending mailbox.ingest job fires mail_ingest_head_change -> mail_ingest_turns (TURN)
+    // whenever the receipt settles, even when all recipient boxes were deleted (!reaches).
+    return dbRc.jobPending ? take(TURN) : null;
   }
 
   const mu = stmt.mu;

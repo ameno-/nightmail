@@ -40,6 +40,26 @@
       "note": "Canary: planted duplicate SES send fails declarative temporal property dbfault.once"
     },
     {
+      "name": "idempotent-replay-same-key-sends-once",
+      "steps": [
+        {
+          "op": "Send",
+          "key": "k1"
+        },
+        {
+          "op": "Send",
+          "key": "k1"
+        },
+        {
+          "op": "Drain"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Repeating a Send with the same Idempotency-Key returns the same emailId and sends to SES at most once"
+    },
+    {
       "name": "pool-exhausted-53300-is-retryable-and-recovers-once",
       "steps": [
         {
@@ -82,7 +102,7 @@
       "note": "SQLSTATE 53300 returns retryable 503 DATABASE_UNAVAILABLE; after recovery k1 replays without double-send and k2 sends once"
     },
     {
-      "name": "known-bug-db-01-pg-readonly-xx000-returns-500-non-retryable",
+      "name": "pg-readonly-xx000-is-retryable",
       "steps": [
         {
           "op": "SetFault",
@@ -91,18 +111,29 @@
         {
           "op": "Send",
           "key": "k1"
+        },
+        {
+          "op": "CreateList"
+        },
+        {
+          "op": "SetFault",
+          "mode": "none"
+        },
+        {
+          "op": "Send",
+          "key": "k1"
+        },
+        {
+          "op": "Drain"
         }
       ],
       "expected": {
-        "outcome": "fail",
-        "operator": "reply:Send:satisfies:success-or-retryable",
-        "verdict": "replyMismatch",
-        "canary": true
+        "outcome": "pass"
       },
-      "note": "Known product bug BUG-DB-01 (incident-2026-11-23 / PR #582): PlanetScale XX000 pg_readonly returns non-retryable 500 INTERNAL_ERROR instead of retryable 503"
+      "note": "Fixed by PR #593 (BUG-DB-01): PlanetScale XX000 pg_readonly returns retryable 503 and recovers cleanly"
     },
     {
-      "name": "known-bug-db-02-statement-timeout-57014-returns-500-non-retryable",
+      "name": "statement-timeout-57014-is-retryable",
       "steps": [
         {
           "op": "SetFault",
@@ -111,15 +142,89 @@
         {
           "op": "Send",
           "key": "k1"
+        },
+        {
+          "op": "CreateList"
+        },
+        {
+          "op": "SetFault",
+          "mode": "none"
+        },
+        {
+          "op": "Send",
+          "key": "k1"
+        },
+        {
+          "op": "Drain"
         }
       ],
       "expected": {
-        "outcome": "fail",
-        "operator": "reply:Send:satisfies:success-or-retryable",
-        "verdict": "replyMismatch",
-        "canary": true
+        "outcome": "pass"
       },
-      "note": "Known product bug BUG-DB-02 (PR #582): SQLSTATE 57014 statement timeout returns non-retryable 500 INTERNAL_ERROR instead of retryable 503"
+      "note": "Fixed by PR #593 (BUG-DB-02): SQLSTATE 57014 statement timeout returns retryable 503 and recovers cleanly"
+    },
+    {
+      "name": "readonly-25006-and-lock-55p03-are-retryable",
+      "steps": [
+        {
+          "op": "SetFault",
+          "mode": "readonly_25006"
+        },
+        {
+          "op": "Send",
+          "key": "k1"
+        },
+        {
+          "op": "SetFault",
+          "mode": "lock_55P03"
+        },
+        {
+          "op": "CreateList"
+        },
+        {
+          "op": "SetFault",
+          "mode": "none"
+        },
+        {
+          "op": "Send",
+          "key": "k1"
+        },
+        {
+          "op": "Drain"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "SQLSTATE 25006 read-only and 55P03 lock timeout return retryable 503 and recover cleanly"
+    },
+    {
+      "name": "mid-request-fault-after-first-write-recovers-once",
+      "steps": [
+        {
+          "op": "SetFault",
+          "mode": "after_first_write_57014"
+        },
+        {
+          "op": "Send",
+          "key": "k1"
+        },
+        {
+          "op": "SetFault",
+          "mode": "none"
+        },
+        {
+          "op": "Send",
+          "key": "k1"
+        },
+        {
+          "op": "Drain"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "A 57014 timeout after the first write inside a request returns retryable 503 and never double-sends on retry"
     }
   ]
 }

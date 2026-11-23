@@ -434,7 +434,13 @@ async function runJob(t: Trial, c: Conn, label: string): Promise<string> {
     c.job = undefined;
     c.label = undefined;
     signal(c, `done:${state}`);
-  })().catch(() => {});
+  })().catch((err) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    c.settled = { ok: false, error: msg };
+    c.job = undefined;
+    c.label = undefined;
+    signal(c, `error:${msg}`);
+  });
   return wait;
 }
 

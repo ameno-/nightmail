@@ -371,6 +371,31 @@
         "outcome": "pass"
       },
       "note": "Boundary: recovery job exhausts 6 attempts before email has provider id"
+    },
+    {
+      "name": "bounce-suppression-not-overwritten-by-validation",
+      "steps": [
+        {
+          "op": "Accept",
+          "email": "e1"
+        },
+        {
+          "op": "Queue",
+          "msg": "b1"
+        },
+        {
+          "op": "Accept",
+          "email": "e2"
+        },
+        {
+          "op": "Queue",
+          "msg": "v2"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Hard bounce suppression reason is preserved when a later email_validation result arrives (pins ses-A)"
     }
   ]
 }

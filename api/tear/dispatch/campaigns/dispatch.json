@@ -1649,6 +1649,92 @@
         "outcome": "pass"
       },
       "note": "2026-11-23 witness: D2 after 5xx unknown"
+    },
+    {
+      "name": "outage-window-doubles-on-consecutive-unknowns",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "core"
+        },
+        {
+          "op": "Send",
+          "persona": "unk"
+        },
+        {
+          "op": "Drain"
+        },
+        {
+          "op": "Wait",
+          "seconds": 59
+        },
+        {
+          "op": "Send",
+          "persona": "unk"
+        },
+        {
+          "op": "Send",
+          "persona": "ok"
+        },
+        {
+          "op": "Drain"
+        },
+        {
+          "op": "Wait",
+          "seconds": 4
+        },
+        {
+          "op": "Wait",
+          "seconds": 4
+        },
+        {
+          "op": "Wait",
+          "seconds": 4
+        },
+        {
+          "op": "Wait",
+          "seconds": 4
+        },
+        {
+          "op": "Drain"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Consecutive outage probes double the outage backoff window (pins dispatch-2)"
+    },
+    {
+      "name": "brake-upper-bound-after-throttle",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "core"
+        },
+        {
+          "op": "Send",
+          "persona": "thr"
+        },
+        {
+          "op": "Send",
+          "persona": "ok"
+        },
+        {
+          "op": "Send",
+          "persona": "ok"
+        },
+        {
+          "op": "Drain"
+        },
+        {
+          "op": "Wait",
+          "seconds": 1
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Virtual second t in DispatchObs bounds the post-throttle brake from above (pins dispatch-3-slow-brake)"
     }
   ]
 }

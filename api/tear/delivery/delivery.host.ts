@@ -33,17 +33,7 @@ const hex = (n: number) =>
     .join("")
     .slice(0, n);
 
-// Track unhandled rejections/exceptions as idle-rule violations instead of crashing the host.
-let activeTrial: Trial | null = null;
-const leak = (kind: string) => (error: unknown) => {
-  const text = error instanceof Error ? `${error.message}\n${error.stack ?? ""}` : String(error);
-  process.stderr.write(`host ${kind}: ${text}\n`);
-  activeTrial?.leakedErrors.push(`${kind}:${(error instanceof Error ? error.message : String(error)).slice(0, 120)}`);
-};
-process.on("unhandledRejection", leak("unhandled-rejection"));
-process.on("uncaughtException", leak("uncaught-exception"));
-
-// Validate disposable database before connecting or writing anything.
+// Validate disposable database before connecting, registering handlers, or writing anything.
 const { disposableUrl, assertDisposable } = await import("../disposable.ts");
 const { default: pg } = await import("pg");
 const { drizzle } = await import("drizzle-orm/node-postgres");
@@ -59,6 +49,16 @@ const DATABASE_URL = await (async () => {
   }
   return checked;
 })();
+
+// Track unhandled rejections/exceptions as idle-rule violations instead of crashing the host.
+let activeTrial: Trial | null = null;
+const leak = (kind: string) => (error: unknown) => {
+  const text = error instanceof Error ? `${error.message}\n${error.stack ?? ""}` : String(error);
+  process.stderr.write(`host ${kind}: ${text}\n`);
+  activeTrial?.leakedErrors.push(`${kind}:${(error instanceof Error ? error.message : String(error)).slice(0, 120)}`);
+};
+process.on("unhandledRejection", leak("unhandled-rejection"));
+process.on("uncaughtException", leak("uncaught-exception"));
 
 const { S3Client } = await import("@aws-sdk/client-s3");
 const [

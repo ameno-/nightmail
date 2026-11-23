@@ -12,11 +12,6 @@ for (const level of ["log", "info", "warn", "debug"] as const) {
       : () => {};
 }
 
-const leaked: string[] = [];
-process.on("unhandledRejection", (err) => {
-  leaked.push(String(err instanceof Error ? err.message : err).slice(0, 120));
-});
-
 const { disposableUrl, assertDisposable } = await import("../disposable.ts");
 const url = disposableUrl(process.env.TEAR_DATABASE_URL ?? process.env.DATABASE_URL, "TEAR_DATABASE_URL");
 const PUBLIC = "http://127.0.0.1:8797";
@@ -46,6 +41,11 @@ const env: Record<string, string> = {
 const pool = new pg.Pool({ connectionString: url, max: 16 });
 pool.on("error", () => {});
 await assertDisposable((text) => pool.query(text));
+
+const leaked: string[] = [];
+process.on("unhandledRejection", (err) => {
+  leaked.push(String(err instanceof Error ? err.message : err).slice(0, 120));
+});
 
 const [{ createApp }, { loadConfig }, { s3Storage }, { ensureRegionSettings }] = await Promise.all([
   import("../../src/app.ts"),

@@ -711,6 +711,8 @@ function rActionWords(a: AdmissionAction): [ConnName | null, string[]] {
       return [null, ["recover"]];
     case "Hour":
       return [null, ["hour"]];
+    case "Age47":
+      return [null, ["age47"]];
     case "Days":
       return [null, ["days"]];
     default:
@@ -759,6 +761,7 @@ function rEnabled(s: RecvState, a: AdmissionAction): boolean {
     }
     case "recover":
     case "hour":
+    case "age47":
     case "days":
       return !open;
     default:
@@ -857,6 +860,10 @@ function rStep(s: RecvState, a: AdmissionAction): [unknown, Record<string, unkno
     case "hour":
       s.h += 1;
       s.t += 1;
+      r = "ok";
+      break;
+    case "age47":
+      s.t += 47;
       r = "ok";
       break;
     case "days":
@@ -1654,7 +1661,7 @@ const RECV_ALPHABET: AdmissionAction[] = (() => {
       out.push({ op: "LegacyFail", ws: x, msg: m });
     }
   }
-  out.push({ op: "Recover" }, { op: "Hour" }, { op: "Days" });
+  out.push({ op: "Recover" }, { op: "Hour" }, { op: "Age47" }, { op: "Days" });
   for (const c of ["W", "V", "X"] as const) {
     out.push({ op: "Commit", conn: c }, { op: "Abort", conn: c });
   }

@@ -4,7 +4,8 @@ export type FaultMode =
   | "readonly_25006"
   | "stall_57014"
   | "lock_55P03"
-  | "pool_exhausted_53300";
+  | "pool_exhausted_53300"
+  | "after_first_write_57014";
 
 export type SendKey = "k1" | "k2";
 
@@ -20,6 +21,7 @@ export interface DbFaultObs {
   code: string | null;
   retryable: boolean | null;
   emailId: string | null;
+  duplicateKeyId: boolean;
   drained: boolean;
 }
 
@@ -28,6 +30,8 @@ export interface DbFaultSnapshot {
   acceptedIds: string[];
   deliveredIds: string[];
   doubleSentIds: string[];
+  duplicateKeyIds: string[];
+  doubleSentKeys: string[];
   lostAfterDrain: string[];
   nonRetryableFaultErrors: string[];
   leakedErrors: string[];

@@ -68,6 +68,7 @@ export type AccessAction =
   | { op: "Refresh"; grant: GrantName }
   | { op: "RemoveMember" }
   | { op: "PromoteMember" }
+  | { op: "NarrowKey" }
   | { op: "Probe"; who: ProbeTarget; how: ProbeHow }
   | { op: "Tick"; ms: number }
   | { op: "Create"; what: CreateWhat; cred: CredName | "grant"; key: IdemKeyName; body: BodyName; lost?: boolean }

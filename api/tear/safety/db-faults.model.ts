@@ -1,8 +1,9 @@
 /**
- * Preventative property (c): Database fault resilience (incident-2026-11-23 / PR #582 class).
- * Invariant: When the database rejects writes (read-only), stalls (statement/lock timeout), or
- * exhausts connections mid-run, every API answer is either a success or marked retryable
- * (retryable === true), and once the database recovers, no accepted email is lost and none is sent twice.
+ * Preventative property (c): Database fault resilience (incident-2026-11-23 / PR #582 / PR #593 class).
+ * Invariant: When the database rejects writes (read-only), stalls (statement/lock timeout or mid-request
+ * failure after the first write), or exhausts connections, every API answer is either a success or marked
+ * retryable (retryable === true), one Idempotency-Key never creates or sends more than one email, and once
+ * the database recovers, every accepted email is delivered once and none is lost.
  */
 import { choice, exact, model, prop, satisfies, sel, type Choice, type IdleRule, type Step } from "@tear/mbt";
 import type { DbFaultAction, DbFaultObs, DbFaultSnapshot, FaultMode, SendKey } from "./db-faults.types.ts";
@@ -19,18 +20,34 @@ const FAULT_MODES: readonly FaultMode[] = [
   "stall_57014",
   "lock_55P03",
   "pool_exhausted_53300",
+  "after_first_write_57014",
 ] as const;
 
 const dbFaultIdleRules: IdleRule<DbFaultSnapshot>[] = [
   {
     id: "dbfault.no-double-send",
-    description: "no accepted email is ever sent to SES more than once across database faults and retries",
-    check: (s) => (s.doubleSentIds.length ? `double-sent: ${s.doubleSentIds.join(", ")}` : undefined),
+    description: "no accepted email id is ever sent to SES more than once across database faults and retries",
+    check: (s) => (s.doubleSentIds.length ? `double-sent ids: ${s.doubleSentIds.join(", ")}` : undefined),
+  },
+  {
+    id: "dbfault.one-id-per-key",
+    description: "one Idempotency-Key never produces more than one distinct email id",
+    check: (s) => (s.duplicateKeyIds.length ? `multiple email ids for one key: ${s.duplicateKeyIds.join(", ")}` : undefined),
+  },
+  {
+    id: "dbfault.one-send-per-key",
+    description: "one Idempotency-Key never causes more than one SES send",
+    check: (s) => (s.doubleSentKeys.length ? `multiple SES sends for one key: ${s.doubleSentKeys.join(", ")}` : undefined),
   },
   {
     id: "dbfault.no-lost-email",
     description: "after draining with a healthy database, every accepted email has been delivered to SES",
     check: (s) => (s.lostAfterDrain.length ? `lost after drain: ${s.lostAfterDrain.join(", ")}` : undefined),
+  },
+  {
+    id: "dbfault.no-nonretryable-fault-error",
+    description: "under an active DB fault, no API or drain call returns a non-retryable error",
+    check: (s) => (s.nonRetryableFaultErrors.length ? `non-retryable fault errors: ${s.nonRetryableFaultErrors.join("; ")}` : undefined),
   },
   {
     id: "dbfault.no-leaked-errors",
@@ -41,7 +58,7 @@ const dbFaultIdleRules: IdleRule<DbFaultSnapshot>[] = [
 
 export const dbFaults = model<DbFaultState, DbFaultAction, DbFaultObs, DbFaultSnapshot>({
   id: "db-faults",
-  description: "Database faults (read-only, timeout stall, pool exhaustion): retryable answers, no lost or double-sent mail",
+  description: "Database faults (read-only, timeout stall, mid-request fault, pool exhaustion): retryable answers, at-most-once per key, no lost mail",
   maxSteps: 16,
   bug: "canary_double_send",
 
@@ -70,7 +87,7 @@ export const dbFaults = model<DbFaultState, DbFaultAction, DbFaultObs, DbFaultSn
       next.fault = a.mode;
       return {
         next,
-        expect: exact({ status: 200, code: null, retryable: null, emailId: null, drained: false }),
+        expect: exact({ status: 200, code: null, retryable: null, emailId: null, duplicateKeyId: false, drained: false }),
       };
     }
 
@@ -78,39 +95,39 @@ export const dbFaults = model<DbFaultState, DbFaultAction, DbFaultObs, DbFaultSn
       return {
         next,
         expect: satisfies("drain-safe", (obs) => {
-          if (s.fault === "none" && !obs.drained) {
-            return `drain failed while DB was healthy: status=${obs.status} code=${obs.code}`;
+          if (s.fault === "none") {
+            if (!obs.drained) {
+              return `drain failed while DB was healthy: status=${obs.status} code=${obs.code}`;
+            }
+            return true;
           }
-          return true;
+          if (obs.drained || obs.retryable === true) return true;
+          return `drain under DB fault ${s.fault} returned non-retryable error: status=${obs.status} code=${obs.code}`;
         }),
       };
     }
-
-    // Known product bugs on dev (24333f2c, prior to PR #582):
-    // - BUG-DB-01: read-only errors (XX000 pg_readonly, 25006) return 500 INTERNAL_ERROR (retryable: false).
-    // - BUG-DB-02: statement/lock timeouts (57014, 55P03) return 500 INTERNAL_ERROR (retryable: false).
-    const mask =
-      s.fault === "readonly_pg_readonly" || s.fault === "readonly_25006"
-        ? "BUG-DB-01"
-        : s.fault === "stall_57014" || s.fault === "lock_55P03"
-          ? "BUG-DB-02"
-          : undefined;
 
     if (a.op === "Send" && s.fault === "none" && !next.keysAccepted.includes(a.key)) {
       next.keysAccepted.push(a.key);
     }
 
     const expect = satisfies("success-or-retryable", (obs) => {
+      if (obs.duplicateKeyId) {
+        return `Idempotency-Key ${a.op === "Send" ? a.key : ""} created a second distinct emailId (${obs.emailId})`;
+      }
       if (s.fault === "none") {
         if (obs.status >= 200 && obs.status < 300) return true;
+        // After a mid-request fault, a committed-or-in-flight idempotency key may legitimately return 409 IDEMPOTENCY_OUTCOME_UNKNOWN.
+        if (obs.status === 409 && obs.code === "IDEMPOTENCY_OUTCOME_UNKNOWN") return true;
         return `expected 2xx while DB is healthy, got ${obs.status} ${obs.code} (retryable=${obs.retryable})`;
       }
       if (obs.status >= 200 && obs.status < 300) return true;
       if ((obs.status === 503 || obs.status === 409) && obs.retryable === true) return true;
+      if (obs.status === 409 && obs.code === "IDEMPOTENCY_OUTCOME_UNKNOWN") return true;
       return `under DB fault ${s.fault}, expected 2xx or retryable 503/409, got status=${obs.status} code=${obs.code} retryable=${obs.retryable}`;
     });
 
-    return mask ? { next, expect, mask } : { next, expect };
+    return { next, expect };
   },
 
   idle: dbFaultIdleRules,
@@ -118,11 +135,21 @@ export const dbFaults = model<DbFaultState, DbFaultAction, DbFaultObs, DbFaultSn
   temporal: [
     {
       id: "dbfault.once",
-      title: "an accepted email is never sent to SES more than once",
+      title: "an accepted email id is never sent to SES more than once",
       prop: prop.optional(
         prop.forEach(
           { name: "email", discover: sel.event("ses.committed"), key: "/emailId" },
           (emailId) => [prop.never(sel.event("ses.call", { "/emailId": emailId }))],
+        ),
+      ),
+    },
+    {
+      id: "dbfault.once-per-key",
+      title: "one Idempotency-Key is never sent to SES more than once",
+      prop: prop.optional(
+        prop.forEach(
+          { name: "key", discover: sel.event("ses.committed"), key: "/sendKey" },
+          (sendKey) => [prop.never(sel.event("ses.call", { "/sendKey": sendKey }))],
         ),
       ),
     },

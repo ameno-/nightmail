@@ -76,6 +76,7 @@ export type AdmissionAction =
   | { op: "Lose"; ws: RecvWs; msg: RecvMsg }
   | { op: "LegacyFail"; ws: RecvWs; msg: RecvMsg }
   | { op: "Recover" }
+  | { op: "Age47" }
   | { op: "Days" }
   // shared recv + send
   | { op: "Hour" }

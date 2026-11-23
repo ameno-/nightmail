@@ -3,7 +3,7 @@ import pg from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { host, type HostEvent, type Observed } from "@tear/mbt";
 import { dbFaults } from "./db-faults.model.ts";
-import type { DbFaultAction, DbFaultObs, DbFaultSnapshot, FaultMode } from "./db-faults.types.ts";
+import type { DbFaultAction, DbFaultObs, DbFaultSnapshot, FaultMode, SendKey } from "./db-faults.types.ts";
 
 for (const level of ["log", "info", "warn", "debug"] as const) {
   console[level] =
@@ -11,11 +11,6 @@ for (const level of ["log", "info", "warn", "debug"] as const) {
       ? (...a: unknown[]) => process.stderr.write(a.map(String).join(" ") + "\n")
       : () => {};
 }
-
-const leaked: string[] = [];
-process.on("unhandledRejection", (err) => {
-  leaked.push(String(err instanceof Error ? err.message : err).slice(0, 120));
-});
 
 const { disposableUrl, assertDisposable } = await import("../disposable.ts");
 const url = disposableUrl(process.env.TEAR_DATABASE_URL ?? process.env.DATABASE_URL, "TEAR_DATABASE_URL");
@@ -42,7 +37,9 @@ const env: Record<string, string> = {
   SIMULATED_SES_DELIVERY_DELAY_MS: "0",
 };
 
+const TRANSIENT_CODES = new Set(["XX000", "25006", "57014", "55P03", "53300"]);
 let currentFault: FaultMode = "none";
+let reqWriteSeq = 0;
 
 function isWriteSql(text: string): boolean {
   const s = text.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ").trim();
@@ -67,6 +64,13 @@ function makeFaultError(mode: FaultMode, text: string): Error | null {
       return Object.assign(new Error("canceling statement due to lock timeout"), { code: "55P03" });
     case "pool_exhausted_53300":
       return Object.assign(new Error("sorry, too many clients already"), { code: "53300" });
+    case "after_first_write_57014":
+      if (!isWriteSql(text)) return null;
+      reqWriteSeq += 1;
+      // Let the first write succeed (e.g., chargeCredential or idempotency claim), then fail the next write mid-request.
+      return reqWriteSeq >= 2
+        ? Object.assign(new Error("canceling statement due to statement timeout"), { code: "57014" })
+        : null;
   }
 }
 
@@ -105,6 +109,11 @@ const admin = new pg.Pool({ connectionString: url, max: 4 });
 admin.on("error", () => {});
 await assertDisposable((text) => admin.query(text));
 
+const leaked: string[] = [];
+process.on("unhandledRejection", (err) => {
+  leaked.push(String(err instanceof Error ? err.message : err).slice(0, 120));
+});
+
 const faultPool = new FaultPool({ connectionString: url, max: 12 });
 faultPool.on("error", () => {});
 
@@ -127,7 +136,9 @@ interface Trial {
   region: string;
   secret: string;
   acceptedIds: Set<string>;
+  keyEmailIds: Map<SendKey, Set<string>>;
   sendCounts: Map<string, number>;
+  keySendCounts: Map<string, number>;
   lostAfterDrain: string[];
   nonRetryableFaultErrors: string[];
   leakedErrors: string[];
@@ -148,18 +159,22 @@ let seq = 0;
   const emailId = (command.input?.EmailTags as { Name: string; Value: string }[])?.find(
     (tag) => tag.Name === "bane_email_id",
   )?.Value;
+  const toAddr: string = command.input?.Destination?.ToAddresses?.[0] ?? "";
+  const sendKey = toAddr.split("@")[0] || "unknown";
   if (emailId) {
     t.sendCounts.set(emailId, (t.sendCounts.get(emailId) ?? 0) + 1);
-    t.pendingEvents.push({ name: "ses.call", data: { emailId } });
-    t.pendingEvents.push({ name: "ses.committed", data: { emailId } });
+    t.keySendCounts.set(sendKey, (t.keySendCounts.get(sendKey) ?? 0) + 1);
+    t.pendingEvents.push({ name: "ses.call", data: { emailId, sendKey } });
+    t.pendingEvents.push({ name: "ses.committed", data: { emailId, sendKey } });
     if (t.bug === "canary_double_send") {
-      t.pendingEvents.push({ name: "ses.call", data: { emailId } });
+      t.pendingEvents.push({ name: "ses.call", data: { emailId, sendKey } });
     }
   }
   return { MessageId: "tear-dbf-" + randomUUID() };
 };
 
 async function api(t: Trial, method: string, path: string, body?: unknown, headers: Record<string, string> = {}) {
+  reqWriteSeq = 0;
   const r = await app.fetch(
     new Request(PUBLIC + path, {
       method,
@@ -191,9 +206,19 @@ const letters = (n: number) => {
   return s;
 };
 
+function pgCodeOf(err: unknown): string | null {
+  let cur: any = err;
+  for (let i = 0; i < 6 && cur; i++) {
+    if (typeof cur.code === "string") return cur.code;
+    cur = cur.cause;
+  }
+  return null;
+}
+
 export const dbFaultsHost = host(dbFaults, {
   async open(req): Promise<Trial> {
     currentFault = "none";
+    reqWriteSeq = 0;
     await assertDisposable((text) => admin.query(text));
     seq++;
     const w = `tear_dbf_${process.pid}_${seq}`;
@@ -211,7 +236,9 @@ export const dbFaultsHost = host(dbFaults, {
       region,
       secret,
       acceptedIds: new Set(),
+      keyEmailIds: new Map(),
       sendCounts: new Map(),
+      keySendCounts: new Map(),
       lostAfterDrain: [],
       nonRetryableFaultErrors: [],
       leakedErrors: [],
@@ -225,7 +252,8 @@ export const dbFaultsHost = host(dbFaults, {
     switch (a.op) {
       case "SetFault":
         currentFault = a.mode;
-        return { status: 200, code: null, retryable: null, emailId: null, drained: false };
+        reqWriteSeq = 0;
+        return { status: 200, code: null, retryable: null, emailId: null, duplicateKeyId: false, drained: false };
       case "Send": {
         const res = await api(
           t,
@@ -241,37 +269,51 @@ export const dbFaultsHost = host(dbFaults, {
           { "idempotency-key": `${t.w}-${a.key}` },
         );
         const emailId = res.status === 202 && typeof res.body?.id === "string" ? res.body.id : null;
-        if (emailId) t.acceptedIds.add(emailId);
-        return {
-          status: res.status,
-          code: res.status >= 400 ? res.body?.error?.code ?? null : null,
-          retryable: res.status >= 400 ? (typeof res.body?.error?.retryable === "boolean" ? res.body.error.retryable : false) : null,
-          emailId,
-          drained: false,
-        };
+        let duplicateKeyId = false;
+        if (emailId) {
+          t.acceptedIds.add(emailId);
+          let ids = t.keyEmailIds.get(a.key);
+          if (!ids) {
+            ids = new Set();
+            t.keyEmailIds.set(a.key, ids);
+          }
+          if (ids.size > 0 && !ids.has(emailId)) duplicateKeyId = true;
+          ids.add(emailId);
+        }
+        const code = res.status >= 400 ? res.body?.error?.code ?? null : null;
+        const retryable = res.status >= 400 ? (typeof res.body?.error?.retryable === "boolean" ? res.body.error.retryable : false) : null;
+        if (currentFault !== "none" && res.status >= 400 && retryable !== true && code !== "IDEMPOTENCY_OUTCOME_UNKNOWN") {
+          t.nonRetryableFaultErrors.push(`Send:${res.status}:${code}`);
+        }
+        return { status: res.status, code, retryable, emailId, duplicateKeyId, drained: false };
       }
       case "CreateList": {
         const res = await api(t, "POST", "/v1/lists", { name: `list-${randomBytes(4).toString("hex")}` });
-        return {
-          status: res.status,
-          code: res.status >= 400 ? res.body?.error?.code ?? null : null,
-          retryable: res.status >= 400 ? (typeof res.body?.error?.retryable === "boolean" ? res.body.error.retryable : false) : null,
-          emailId: null,
-          drained: false,
-        };
+        const code = res.status >= 400 ? res.body?.error?.code ?? null : null;
+        const retryable = res.status >= 400 ? (typeof res.body?.error?.retryable === "boolean" ? res.body.error.retryable : false) : null;
+        if (currentFault !== "none" && res.status >= 400 && retryable !== true) {
+          t.nonRetryableFaultErrors.push(`CreateList:${res.status}:${code}`);
+        }
+        return { status: res.status, code, retryable, emailId: null, duplicateKeyId: false, drained: false };
       }
       case "ReadMe": {
         const res = await api(t, "GET", "/v1/me");
-        return {
-          status: res.status,
-          code: res.status >= 400 ? res.body?.error?.code ?? null : null,
-          retryable: res.status >= 400 ? (typeof res.body?.error?.retryable === "boolean" ? res.body.error.retryable : false) : null,
-          emailId: null,
-          drained: false,
-        };
+        const code = res.status >= 400 ? res.body?.error?.code ?? null : null;
+        const retryable = res.status >= 400 ? (typeof res.body?.error?.retryable === "boolean" ? res.body.error.retryable : false) : null;
+        if (currentFault !== "none" && res.status >= 400 && retryable !== true) {
+          t.nonRetryableFaultErrors.push(`ReadMe:${res.status}:${code}`);
+        }
+        return { status: res.status, code, retryable, emailId: null, duplicateKeyId: false, drained: false };
       }
       case "Drain": {
+        reqWriteSeq = 0;
         try {
+          if (currentFault === "none") {
+            await admin.query(
+              "UPDATE sending_emails SET lease_until = NULL WHERE workspace_id = $1 AND status = 'queued' AND lease_until IS NOT NULL",
+              [t.w],
+            );
+          }
           await runDispatcher(runtime, {
             region: t.region,
             lanes: 1,
@@ -284,9 +326,21 @@ export const dbFaultsHost = host(dbFaults, {
               if ((t.sendCounts.get(id) ?? 0) === 0) t.lostAfterDrain.push(id);
             }
           }
-          return { status: 200, code: null, retryable: null, emailId: null, drained: true };
+          return { status: 200, code: null, retryable: null, emailId: null, duplicateKeyId: false, drained: true };
         } catch (err: any) {
-          return { status: 503, code: err?.code ?? "DISPATCH_ERROR", retryable: true, emailId: null, drained: false };
+          const pgCode = pgCodeOf(err);
+          const isTransient = pgCode !== null && TRANSIENT_CODES.has(pgCode);
+          if (!isTransient) {
+            t.nonRetryableFaultErrors.push(`Drain:${pgCode ?? err?.message ?? "UNKNOWN"}`);
+          }
+          return {
+            status: isTransient ? 503 : 500,
+            code: pgCode ?? "DISPATCH_ERROR",
+            retryable: isTransient,
+            emailId: null,
+            duplicateKeyId: false,
+            drained: false,
+          };
         }
       }
     }
@@ -295,6 +349,12 @@ export const dbFaultsHost = host(dbFaults, {
   async observe(t: Trial): Promise<Observed> {
     if (leaked.length) t.leakedErrors.push(...leaked.splice(0));
     const doubleSentIds = [...t.sendCounts.entries()].filter(([, n]) => n > 1).map(([id]) => id);
+    const duplicateKeyIds = [...t.keyEmailIds.entries()]
+      .filter(([, ids]) => ids.size > 1)
+      .map(([k, ids]) => `${k}:[${[...ids].join(",")}]`);
+    const doubleSentKeys = [...t.keySendCounts.entries()]
+      .filter(([, n]) => n > 1)
+      .map(([k, n]) => `${k}x${n}`);
     const events = t.pendingEvents;
     t.pendingEvents = [];
     const snap: DbFaultSnapshot = {
@@ -302,6 +362,8 @@ export const dbFaultsHost = host(dbFaults, {
       acceptedIds: [...t.acceptedIds],
       deliveredIds: [...t.sendCounts.keys()],
       doubleSentIds,
+      duplicateKeyIds,
+      doubleSentKeys,
       lostAfterDrain: [...t.lostAfterDrain],
       nonRetryableFaultErrors: [...t.nonRetryableFaultErrors],
       leakedErrors: [...t.leakedErrors],
@@ -311,6 +373,7 @@ export const dbFaultsHost = host(dbFaults, {
 
   async close(t: Trial): Promise<void> {
     currentFault = "none";
+    reqWriteSeq = 0;
     await admin.query("UPDATE sending_emails SET status='canceled' WHERE workspace_id=$1 AND status IN ('queued','attempting')", [t.w]);
     if (activeTrial === t) activeTrial = null;
   },

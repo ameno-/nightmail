@@ -1,5 +1,6 @@
 export type TenantAction =
-  | { op: "HeavyImport" }
+  | { op: "PreviewImport" }
+  | { op: "CommitImport" }
   | { op: "HeavyMarketingFlood" }
   | { op: "VictimSend" }
   | { op: "OverlapImportAndVictimSend" }

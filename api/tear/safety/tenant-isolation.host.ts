@@ -12,14 +12,10 @@ for (const level of ["log", "info", "warn", "debug"] as const) {
       : () => {};
 }
 
-const leaked: string[] = [];
-process.on("unhandledRejection", (err) => {
-  leaked.push(String(err instanceof Error ? err.message : err).slice(0, 120));
-});
-
 const { disposableUrl, assertDisposable } = await import("../disposable.ts");
 const url = disposableUrl(process.env.TEAR_DATABASE_URL ?? process.env.DATABASE_URL, "TEAR_DATABASE_URL");
 const PUBLIC = "http://127.0.0.1:8793";
+const IMPORT_ROWS = Math.max(100, Math.min(50_000, Number(process.env.TEAR_TENANT_IMPORT_ROWS ?? 1500)));
 
 const env: Record<string, string> = {
   DATABASE_URL: url,
@@ -42,9 +38,42 @@ const env: Record<string, string> = {
   SIMULATED_SES_DELIVERY_DELAY_MS: "0",
 };
 
-const pool = new pg.Pool({ connectionString: url, max: 16 });
+// Synchronizes OverlapImportAndVictimSend so VictimSend fires after the commit transaction's BEGIN.
+let onCommitTxBegin: (() => void) | null = null;
+
+class SyncPool extends pg.Pool {
+  override connect(...args: any[]): any {
+    if (typeof args[0] === "function") return (super.connect as any)(...args);
+    return (super.connect() as Promise<pg.PoolClient>).then((client) => {
+      const c = client as pg.PoolClient & { __syncWrapped?: true };
+      if (!c.__syncWrapped) {
+        c.__syncWrapped = true;
+        const orig = c.query.bind(c);
+        (c as any).query = (...q: any[]) => {
+          const text = typeof q[0] === "string" ? q[0] : q[0]?.text ?? "";
+          if (onCommitTxBegin && /^\s*begin\b/i.test(text)) {
+            const fire = onCommitTxBegin;
+            onCommitTxBegin = null;
+            const res = (orig as any)(...q);
+            Promise.resolve(res).then(() => setTimeout(fire, 40), () => fire());
+            return res;
+          }
+          return (orig as any)(...q);
+        };
+      }
+      return c;
+    });
+  }
+}
+
+const pool = new SyncPool({ connectionString: url, max: 16 });
 pool.on("error", () => {});
 await assertDisposable((text) => pool.query(text));
+
+const leaked: string[] = [];
+process.on("unhandledRejection", (err) => {
+  leaked.push(String(err instanceof Error ? err.message : err).slice(0, 120));
+});
 
 const [{ createApp }, { loadConfig }, { s3Storage }, { runDispatcher, initialGate }, { ensureRegionSettings }, { SESv2Client }] =
   await Promise.all([
@@ -68,6 +97,7 @@ interface Trial {
   wVictim: string;
   secretVictim: string;
   importSeq: number;
+  pendingImportId: string | null;
   heavyBusy: boolean;
   victimIds: Set<string>;
   deliveredOrder: { workspace: string; kind: string; id: string }[];
@@ -127,7 +157,7 @@ async function api(secret: string, method: string, path: string, body?: unknown)
   return { status: r.status, body: parsed };
 }
 
-function makeCsv(batch: number, rows = 1500): string {
+function makeCsv(batch: number, rows = IMPORT_ROWS): string {
   const lines = ["email,name"];
   for (let i = 1; i <= rows; i++) {
     lines.push(`heavy-${batch}-${i}@example.com,Heavy ${batch}-${i}`);
@@ -135,18 +165,22 @@ function makeCsv(batch: number, rows = 1500): string {
   return lines.join("\n");
 }
 
-async function runHeavyImport(t: Trial): Promise<{ status: number; code: string | null }> {
+async function runPreviewImport(t: Trial): Promise<{ status: number; code: string | null; id: string | null }> {
   t.importSeq++;
+  const csv = makeCsv(t.importSeq, IMPORT_ROWS);
+  const prev = await api(t.secretHeavy, "POST", "/v1/contact-imports", {
+    csv,
+    listId: t.heavyListId,
+    mapping: { email: "email", name: "name" },
+  });
+  const id = prev.status === 201 && typeof prev.body?.id === "string" ? prev.body.id : null;
+  return { status: prev.status, code: prev.status >= 400 ? prev.body?.error?.code ?? null : null, id };
+}
+
+async function runCommitImport(t: Trial, importId: string): Promise<{ status: number; code: string | null }> {
   t.heavyBusy = true;
   try {
-    const csv = makeCsv(t.importSeq, 1500);
-    const prev = await api(t.secretHeavy, "POST", "/v1/contact-imports", {
-      csv,
-      listId: t.heavyListId,
-      mapping: { email: "email", name: "name" },
-    });
-    if (prev.status !== 201) return { status: prev.status, code: prev.body?.error?.code ?? null };
-    const committed = await api(t.secretHeavy, "POST", `/v1/contact-imports/${prev.body.id}/commit`, {});
+    const committed = await api(t.secretHeavy, "POST", `/v1/contact-imports/${importId}/commit`, {});
     return { status: committed.status, code: committed.status >= 400 ? committed.body?.error?.code ?? null : null };
   } finally {
     t.heavyBusy = false;
@@ -216,6 +250,7 @@ export const tenantIsolationHost = host(tenantIsolation, {
       wVictim,
       secretVictim,
       importSeq: 0,
+      pendingImportId: null,
       heavyBusy: false,
       victimIds: new Set(),
       deliveredOrder: [],
@@ -229,8 +264,15 @@ export const tenantIsolationHost = host(tenantIsolation, {
 
   async act(t: Trial, a: TenantAction): Promise<TenantObs> {
     switch (a.op) {
-      case "HeavyImport": {
-        const res = await runHeavyImport(t);
+      case "PreviewImport": {
+        const res = await runPreviewImport(t);
+        t.pendingImportId = res.id;
+        return { status: res.status, code: res.code, victimStatus: null, victimElapsedMs: null, victimDeliveredBeforeMarketing: null };
+      }
+      case "CommitImport": {
+        const id = t.pendingImportId!;
+        t.pendingImportId = null;
+        const res = await runCommitImport(t, id);
         return { status: res.status, code: res.code, victimStatus: null, victimElapsedMs: null, victimDeliveredBeforeMarketing: null };
       }
       case "HeavyMarketingFlood": {
@@ -262,7 +304,26 @@ export const tenantIsolationHost = host(tenantIsolation, {
         };
       }
       case "OverlapImportAndVictimSend": {
-        const [imp, vic] = await Promise.all([runHeavyImport(t), runVictimSend(t)]);
+        // Preview first so the concurrent overlap always lands inside the commit transaction.
+        const prev = await runPreviewImport(t);
+        if (prev.status !== 201 || !prev.id) {
+          return { status: prev.status, code: prev.code, victimStatus: null, victimElapsedMs: null, victimDeliveredBeforeMarketing: null };
+        }
+        let txEnteredResolve!: () => void;
+        const txEntered = new Promise<void>((resolve) => {
+          txEnteredResolve = resolve;
+        });
+        onCommitTxBegin = txEnteredResolve;
+        const commitPromise = runCommitImport(t, prev.id).finally(() => {
+          if (onCommitTxBegin) {
+            const f = onCommitTxBegin;
+            onCommitTxBegin = null;
+            f();
+          }
+        });
+        await Promise.race([txEntered, new Promise((r) => setTimeout(r, 250))]);
+        const vic = await runVictimSend(t);
+        const imp = await commitPromise;
         return {
           status: imp.status,
           code: vic.code ?? imp.code,
@@ -285,7 +346,6 @@ export const tenantIsolationHost = host(tenantIsolation, {
         for (const id of t.victimIds) {
           if (!deliveredIds.has(id)) t.starvedVictim.push(id);
         }
-        // In the first leased batch, transactional victim mail should dispatch ahead of heavy marketing mail.
         const firstVictimIdx = newSends.findIndex((d) => d.workspace === t.wVictim);
         const firstMktIdx = newSends.findIndex((d) => d.workspace === t.wHeavy && d.kind === "marketing");
         const victimBeforeMkt =
@@ -316,6 +376,7 @@ export const tenantIsolationHost = host(tenantIsolation, {
   },
 
   async close(t: Trial): Promise<void> {
+    onCommitTxBegin = null;
     await pool.query(
       "UPDATE sending_emails SET status='canceled' WHERE workspace_id = ANY($1) AND status IN ('queued','attempting')",
       [[t.wHeavy, t.wVictim]],

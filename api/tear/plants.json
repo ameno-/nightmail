@@ -1,0 +1,150 @@
+[
+  {
+    "label": "ses-A",
+    "checker": "ses",
+    "file": "api/src/db/audience.ts",
+    "old": "    WHEN excluded.suppression_reason='email_validation' THEN c.suppression_reason ELSE excluded.suppression_reason END,",
+    "neu": "    ELSE excluded.suppression_reason END,"
+  },
+  {
+    "label": "ses-B",
+    "checker": "ses",
+    "file": "api/src/operations.ts",
+    "old": "  if (!input || input.receipt.processedAt) return;\n  const { receipt, email } = input;",
+    "neu": "  if (!input) return;\n  const { receipt, email } = input;"
+  },
+  {
+    "label": "admission-1",
+    "checker": "admission",
+    "file": "api/src/mailbox-ingest.ts",
+    "old": "const INGEST_OUTAGE_MS = 48 * 3600_000;",
+    "neu": "const INGEST_OUTAGE_MS = 72 * 3600_000;"
+  },
+  {
+    "label": "admission-2",
+    "checker": "admission",
+    "file": "api/src/auth.ts",
+    "old": "  if (used <= maxRequests) return;",
+    "neu": "  if (used < maxRequests) return;"
+  },
+  {
+    "label": "inbox-P1",
+    "checker": "inbox",
+    "file": "api/src/inbox-folders.ts",
+    "old": "FROM inbox_vanished WHERE inbox_id=b.id AND modseq>${since}::bigint",
+    "neu": "FROM inbox_vanished WHERE inbox_id=b.id AND modseq>=${since}::bigint"
+  },
+  {
+    "label": "inbox-P2",
+    "checker": "inbox",
+    "file": "api/src/mailbox-receipts.ts",
+    "old": "AND r.status<>'failed' AND NOT r.recipients @> excluded.recipients",
+    "neu": "AND r.status<>'failed'"
+  },
+  {
+    "label": "access-1",
+    "checker": "access",
+    "file": "api/src/idempotency.ts",
+    "old": "Date.parse(state.createdAt!) >= 600_000",
+    "neu": "Date.parse(state.createdAt!) > 600_000"
+  },
+  {
+    "label": "access-2",
+    "checker": "access",
+    "file": "api/src/core.ts",
+    "old": "(?:domains|webhooks|agent-tokens)(?:\\/|$)|^\\/v1\\/regions\\/",
+    "neu": "(?:domains|agent-tokens)(?:\\/|$)|^\\/v1\\/regions\\/"
+  },
+  {
+    "label": "delivery-P1",
+    "checker": "delivery",
+    "file": "api/src/inbound-webhook.ts",
+    "old": "{'Idempotency-Key':h.delivery_id}",
+    "neu": "{'Idempotency-Key':event.id}"
+  },
+  {
+    "label": "delivery-P2",
+    "checker": "delivery",
+    "file": "api/src/mailbox-events.ts",
+    "old": "greatest(r.attempt_count,coalesce(a.attempts,0))",
+    "neu": "r.attempt_count"
+  },
+  {
+    "label": "dispatch-1",
+    "checker": "dispatch",
+    "file": "api/src/dispatcher.ts",
+    "old": "gate.nextAllowedAt = Math.max(gate.nextAllowedAt, Date.now() + 1000);",
+    "neu": "gate.nextAllowedAt = Math.max(gate.nextAllowedAt, Date.now() + 100);"
+  },
+  {
+    "label": "dispatch-2",
+    "checker": "dispatch",
+    "file": "api/src/dispatcher.ts",
+    "old": "Math.min(OUTAGE_MAX_MS, OUTAGE_MS * 2 ** (gate.outageStreak ?? 0))",
+    "neu": "Math.min(OUTAGE_MAX_MS, OUTAGE_MS)"
+  },
+  {
+    "label": "dispatch-3-slow-brake",
+    "checker": "dispatch",
+    "file": "api/src/dispatcher.ts",
+    "old": "gate.nextAllowedAt = Math.max(gate.nextAllowedAt, Date.now() + 1000);",
+    "neu": "gate.nextAllowedAt = Math.max(gate.nextAllowedAt, Date.now() + 3000);"
+  },
+  {
+    "label": "collab-1-no-rowlock",
+    "checker": "campaign-collab",
+    "file": "api/src/sending.ts",
+    "old": "      const current = await findCampaign(db, a, campaignId, true);\n      const draft = {...input.draft,",
+    "neu": "      const current = await findCampaign(db, a, campaignId);\n      const draft = {...input.draft,"
+  },
+  {
+    "label": "attach-1-inline-as-attachment",
+    "checker": "campaign-attachments",
+    "file": "api/src/dispatcher.ts",
+    "old": "ContentDisposition: row.disposition === 'inline' ? 'INLINE' : 'ATTACHMENT'",
+    "neu": "ContentDisposition: 'ATTACHMENT'"
+  },
+  {
+    "label": "attach-2-links-not-removed",
+    "checker": "campaign-attachments",
+    "file": "api/src/sending.ts",
+    "old": "      await attachmentRows(db, a, input.draft.attachments, true);\n      await db.delete(attachmentLinks).where(and(scope(attachmentLinks, a), eq(attachmentLinks.ownerType, 'campaign'), eq(attachmentLinks.ownerId, campaignId)));\n",
+    "neu": "      await attachmentRows(db, a, input.draft.attachments, true);\n"
+  },
+  {
+    "label": "dbfaults-1-idempotency-ignored",
+    "checker": "db-faults",
+    "file": "api/src/app.ts",
+    "old": "  app.use('*', async (c, next) => {",
+    "neu": "  app.use('*', async (c, next) => { c.req.raw.headers.delete('idempotency-key'); await next(); });\n  app.use('*', async (c, next) => {",
+    "first": true
+  },
+  {
+    "label": "dbfaults-2-53300-not-transient",
+    "checker": "db-faults",
+    "file": "api/src/core.ts",
+    "old": "new Set(['58000', '53300', '57P01'",
+    "neu": "new Set(['58000', '57P01'"
+  },
+  {
+    "label": "scale-1-seqscan-page",
+    "checker": "scale-reads",
+    "file": "api/src/audience.ts",
+    "old": "...contactFilters(identity, query), query.cursor ? gt(contacts.id, query.cursor) : undefined)).orderBy(asc(contacts.id))",
+    "neu": "...contactFilters(identity, query), query.cursor ? gt(contacts.id, query.cursor) : undefined)).orderBy(asc(contacts.name), asc(contacts.id))"
+  },
+  {
+    "label": "tenant-2-import-global-lock-3s",
+    "checker": "tenant-isolation",
+    "file": "api/src/audience.ts",
+    "old": "    const result = await c.env.db.transaction(async tx => {\n      const [job] = await tx.select().from(imports)",
+    "neu": "    const result = await c.env.db.transaction(async tx => {\n      await tx.execute(sql`LOCK TABLE sending_emails IN ACCESS EXCLUSIVE MODE`); await tx.execute(sql`SELECT pg_sleep(3)`);\n      const [job] = await tx.select().from(imports)"
+  },
+  {
+    "label": "tenant-1b-final-order-reversed",
+    "checker": "tenant-isolation",
+    "file": "api/src/dispatcher.ts",
+    "old": "    ORDER BY (leased.snapshot->>'kind' = 'transactional') DESC, leased.created_at, leased.id`);",
+    "neu": "    ORDER BY (leased.snapshot->>'kind' = 'transactional') ASC, leased.created_at, leased.id`);"
+  }
+]

@@ -123,6 +123,7 @@ export type DispatchObs =
       mail: Record<string, [string, number]>;
       campaign: [string, number, number];
       d: Record<string, string>;
+      t: number;
     }
   | { invariants: true };
 

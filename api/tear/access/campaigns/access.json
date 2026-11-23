@@ -523,6 +523,11 @@
         {
           "op": "Probe",
           "who": "g-rm",
+          "how": "call"
+        },
+        {
+          "op": "Probe",
+          "who": "g-rm",
           "how": "audit"
         },
         {
@@ -538,6 +543,11 @@
           "op": "Probe",
           "who": "g-sm",
           "how": "plain"
+        },
+        {
+          "op": "Probe",
+          "who": "g-sm",
+          "how": "call"
         },
         {
           "op": "Probe",
@@ -561,6 +571,11 @@
         {
           "op": "Probe",
           "who": "m-r",
+          "how": "call"
+        },
+        {
+          "op": "Probe",
+          "who": "m-r",
           "how": "audit"
         },
         {
@@ -576,6 +591,29 @@
           "op": "Probe",
           "who": "m-s",
           "how": "plain"
+        },
+        {
+          "op": "Probe",
+          "who": "m-s",
+          "how": "call"
+        },
+        {
+          "op": "Probe",
+          "who": "m-s",
+          "how": "audit"
+        },
+        {
+          "op": "PromoteMember"
+        },
+        {
+          "op": "Probe",
+          "who": "m-s",
+          "how": "code"
+        },
+        {
+          "op": "Probe",
+          "who": "m-s",
+          "how": "call"
         },
         {
           "op": "Probe",
@@ -723,7 +761,7 @@
       "note": "R6 & R7: deleted inbox kills bound bkey; revoking creating key leaves ikey alive"
     },
     {
-      "name": "known-bug-dkey-mcp-lists-refused-writes",
+      "name": "bug-access-01-dkey-mcp-exact-9-phantom-writes",
       "steps": [
         {
           "op": "Configure",
@@ -740,12 +778,125 @@
         }
       ],
       "expected": {
-        "outcome": "fail",
-        "operator": "reply:Probe:/visible/createCampaignTemplate",
-        "verdict": "replyMismatch",
-        "canary": true
+        "outcome": "pass"
       },
-      "note": "Known product bug BUG-ACCESS-01 (/mcp advertises 9 template/attachment writes REST refuses with 403 UNRESTRICTED_KEY_REQUIRED to domain-limited keys); see /Users/vogel/.config/opensend-mx/plans/tear/bugs.md#bug-access-01"
+      "note": "BUG-ACCESS-01 tracked without a whole-step mask: checks all 243 entries strictly (the exact 9 phantom writes + all 234 other entries); fails loudly once BUG-ACCESS-01 is fixed so the 9-tool list is removed"
+    },
+    {
+      "name": "agent-token-expires-with-grant-access-token",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "core"
+        },
+        {
+          "op": "Mint",
+          "target": "grant"
+        },
+        {
+          "op": "Tick",
+          "ms": 299999
+        },
+        {
+          "op": "Mint",
+          "target": "token"
+        },
+        {
+          "op": "Tick",
+          "ms": 300000
+        },
+        {
+          "op": "Probe",
+          "who": "token",
+          "how": "rest"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Commit 516521cf: agent token stops working (401) once its parent grant's 5-minute access token expires"
+    },
+    {
+      "name": "i7-authority-change-between-retries-conflicts",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "core"
+        },
+        {
+          "op": "Mint",
+          "target": "key"
+        },
+        {
+          "op": "Create",
+          "what": "list",
+          "cred": "key",
+          "key": "k1",
+          "body": "b1"
+        },
+        {
+          "op": "NarrowKey"
+        },
+        {
+          "op": "Create",
+          "what": "list",
+          "cred": "key",
+          "key": "k1",
+          "body": "b1"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "I7 (restored witness 26): changing a credential's authority between retries with the same Idempotency-Key returns 409 IDEMPOTENCY_CONFLICT"
+    },
+    {
+      "name": "idempotency-10min-boundary-exact-600000ms",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "race"
+        },
+        {
+          "op": "Mint",
+          "target": "key"
+        },
+        {
+          "op": "SlotBegin",
+          "slot": "A",
+          "what": "list",
+          "cred": "key",
+          "key": "k1",
+          "body": "b1"
+        },
+        {
+          "op": "SlotStep",
+          "slot": "A"
+        },
+        {
+          "op": "SlotStep",
+          "slot": "A"
+        },
+        {
+          "op": "SlotCrash",
+          "slot": "A"
+        },
+        {
+          "op": "Tick",
+          "ms": 600000
+        },
+        {
+          "op": "Create",
+          "what": "list",
+          "cred": "key",
+          "key": "k1",
+          "body": "b1"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "T1: crashed pending claim transitions from IN_PROGRESS to OUTCOME_UNKNOWN at exactly 600,000 ms (pins access-1)"
     }
   ]
 }

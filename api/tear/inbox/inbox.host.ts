@@ -28,22 +28,12 @@ for (const level of ["log", "info", "warn", "error", "debug"] as const) {
   };
 }
 
-// Track unhandled rejections/exceptions as idle-rule violations instead of crashing the host.
-const leaked: string[] = [];
-const leak = (kind: string) => (error: unknown) => {
-  const text = error instanceof Error ? `${error.message}\n${error.stack ?? ""}` : String(error);
-  process.stderr.write(`host ${kind}: ${text}\n`);
-  leaked.push(`${kind}:${(error instanceof Error ? error.message : String(error)).slice(0, 100)}`);
-};
-process.on("unhandledRejection", leak("unhandled-rejection"));
-process.on("uncaughtException", leak("uncaught-exception"));
-
 const hex = (n: number) =>
   Array.from({ length: Math.ceil(n / 32) }, () => randomUUID().replaceAll("-", ""))
     .join("")
     .slice(0, n);
 
-// Validate disposable database before connecting or writing anything.
+// Validate disposable database before connecting, registering handlers, or writing anything.
 const { disposableUrl, assertDisposable } = await import("../disposable.ts");
 const DATABASE_URL = await (async () => {
   const checked = disposableUrl(process.env.TEAR_DATABASE_URL ?? process.env.DATABASE_URL, "TEAR_DATABASE_URL");
@@ -56,6 +46,16 @@ const DATABASE_URL = await (async () => {
   }
   return checked;
 })();
+
+// Track unhandled rejections/exceptions as idle-rule violations instead of crashing the host.
+const leaked: string[] = [];
+const leak = (kind: string) => (error: unknown) => {
+  const text = error instanceof Error ? `${error.message}\n${error.stack ?? ""}` : String(error);
+  process.stderr.write(`host ${kind}: ${text}\n`);
+  leaked.push(`${kind}:${(error instanceof Error ? error.message : String(error)).slice(0, 100)}`);
+};
+process.on("unhandledRejection", leak("unhandled-rejection"));
+process.on("uncaughtException", leak("uncaught-exception"));
 
 const [
   { createApp },
@@ -299,6 +299,9 @@ function buildStatement(t: Trial, a: InboxAction, c: { db: Db }, claim?: string[
     const m = a.op === "StoreAuto" ? a.msg : "";
     return async () => {
       await storeIncoming(c.db as Json, incoming(t, m, claim!), [], false, false, false, null, undefined);
+      await c.db.execute(
+        sql`UPDATE jobs SET status='completed' WHERE workspace_id=${t.ws} AND type='mailbox.ingest' AND status='pending' AND payload->>'sesMessageId'=${midOf(t, m)} AND EXISTS (SELECT 1 FROM mail_receipts WHERE workspace_id=${t.ws} AND ses_message_id=${midOf(t, m)} AND status<>'pending')`,
+      );
       return "ok";
     };
   }
@@ -868,6 +871,9 @@ export const inboxHost = host(inbox, {
       const claim = c.claim!;
       r = await runHeld(c, async () => {
         await storeIncoming(c.db as Json, incoming(t, claimed, claim), [], false, false, false, null, undefined);
+        await c.db.execute(
+          sql`UPDATE jobs SET status='completed' WHERE workspace_id=${t.ws} AND type='mailbox.ingest' AND status='pending' AND payload->>'sesMessageId'=${midOf(t, claimed)} AND EXISTS (SELECT 1 FROM mail_receipts WHERE workspace_id=${t.ws} AND ses_message_id=${midOf(t, claimed)} AND status<>'pending')`,
+        );
         return "ok";
       });
     } else if ("conn" in a && a.conn !== undefined) {

@@ -18191,30 +18191,51 @@ test('a tear host refuses redirecting URLs, databases not marked disposable and 
     await client.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1)', [unique('foreign')]);
     await assert.rejects(check(), /holds [1-9]\d* workspaces/);
   } finally { await client.query('ROLLBACK'); }
-  // The disposable guard refuses before any write: exit 1, reason on stderr, nothing on stdout.
-  // Reworked tear hosts import @tear/mbt (private repo, absent in public CI), so run the shared
-  // disposable guard process directly and confirm every tear *.host.ts enforces it.
+  // Run every real tear *.host.ts subprocess against the unmarked fixture DB and a redirecting URL.
+  // When private @tear/{mbt,host} is absent (public CI), install a minimal Proxy stand-in in the
+  // gitignored tear/node_modules/@tear directory for the duration of this test so every host runs
+  // its real module-init guard path.
   const apiDir = fileURLToPath(new URL('.', import.meta.url));
-  const { readdirSync, readFileSync } = await import('node:fs');
+  const { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } = await import('node:fs');
   const hostFiles = readdirSync(`${apiDir}/tear`, { recursive: true, encoding: 'utf8' })
-    .filter(f => f.endsWith('.host.ts') && !f.startsWith('node_modules/'));
+    .filter(f => f.endsWith('.host.ts') && !f.startsWith('node_modules/'))
+    .sort();
   assert.ok(hostFiles.length >= 11, `Expected at least 11 tear hosts, found ${hostFiles.length}`);
-  for (const rel of hostFiles) {
-    const src = readFileSync(`${apiDir}/tear/${rel}`, 'utf8');
-    assert.match(src, /disposableUrl/, `${rel} must check disposableUrl`);
-    assert.match(src, /assertDisposable/, `${rel} must check assertDisposable`);
+  const tearScope = `${apiDir}/tear/node_modules/@tear`;
+  const stubbed = !existsSync(`${tearScope}/mbt/package.json`);
+  if (stubbed) {
+    const stub = 'const p = new Proxy(() => p, { get: () => p, apply: () => p });\nexport const host = p, model = p, choice = p, exact = p, sel = p, prop = p, satisfies = p, serve = p, oneOf = p, channelFds = p, anyReply = p, matches = p, check = p, all = p, generated = p, g = p;\nexport default p;\n';
+    for (const pkg of ['mbt', 'host']) {
+      mkdirSync(`${tearScope}/${pkg}`, { recursive: true });
+      writeFileSync(`${tearScope}/${pkg}/package.json`, JSON.stringify({ name: `@tear/${pkg}`, type: 'module', main: './index.js' }));
+      writeFileSync(`${tearScope}/${pkg}/index.js`, stub);
+    }
   }
-  const guard = (url: string) => new Promise<{ code: number | null; stdout: string; stderr: string }>(resolve => {
-    execFile('node', ['--import', 'tsx', `${apiDir}/tear/disposable.ts`], { cwd: apiDir, timeout: 60_000,
+  const runHost = (rel: string, url: string) => new Promise<{ code: number | null; stdout: string; stderr: string }>(resolve => {
+    execFile('node', ['--import', 'tsx', `tear/${rel}`], { cwd: apiDir, timeout: 60_000,
       env: { PATH: process.env.PATH, HOME: process.env.HOME, TEAR_DATABASE_URL: url } as unknown as NodeJS.ProcessEnv, encoding: 'utf8' },
       (error, stdout, stderr) => resolve({ code: error ? (typeof error.code === 'number' ? error.code : null) : 0, stdout, stderr }));
   });
-  const unmarked = await guard(FIXTURE_DATABASE_URL!);
-  assert.equal(unmarked.code, 1, unmarked.stderr); assert.match(unmarked.stderr, /not marked disposable/); assert.equal(unmarked.stdout, '');
+  const redirected = new URL(FIXTURE_DATABASE_URL!);
+  redirected.search = `host=${redirected.hostname}&port=${redirected.port || 5432}`;
+  redirected.port = '1';
+  const beforeWs = Number((await client.query('SELECT count(*)::int AS n FROM workspaces')).rows[0].n);
+  try {
+    await Promise.all(hostFiles.map(async rel => {
+      const unmarked = await runHost(rel, FIXTURE_DATABASE_URL!);
+      assert.notEqual(unmarked.code, 0, `${rel} must exit non-zero on unmarked DB: ${unmarked.stderr}`);
+      assert.match(unmarked.stderr, /not marked disposable/, `${rel}: ${unmarked.stderr}`);
+      assert.equal(unmarked.stdout, '', `${rel} stdout must be empty`);
+      const refused = await runHost(rel, redirected.toString());
+      assert.notEqual(refused.code, 0, `${rel} must exit non-zero on redirecting URL: ${refused.stderr}`);
+      assert.match(refused.stderr, /query parameters/, `${rel}: ${refused.stderr}`);
+      assert.equal(refused.stdout, '', `${rel} stdout must be empty`);
+    }));
+  } finally {
+    if (stubbed) rmSync(tearScope, { recursive: true, force: true });
+  }
   assert.equal((await client.query("SELECT to_regnamespace('tear_clock')::text AS s")).rows[0].s, null, 'Nothing was written.');
-  const redirected = new URL(FIXTURE_DATABASE_URL!); redirected.search = `host=${redirected.hostname}&port=${redirected.port || 5432}`; redirected.port = '1';
-  const refused = await guard(redirected.toString());
-  assert.equal(refused.code, 1); assert.match(refused.stderr, /query parameters/); assert.equal(refused.stdout, '');
+  assert.equal(Number((await client.query('SELECT count(*)::int AS n FROM workspaces')).rows[0].n), beforeWs, 'No workspace was written.');
 });
 
 test('MX deployment variables remain fallbacks and BANE variables take precedence',async()=>{

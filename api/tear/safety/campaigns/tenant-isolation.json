@@ -22,7 +22,10 @@
       "name": "canary-heavy-blocks-victim",
       "steps": [
         {
-          "op": "HeavyImport"
+          "op": "PreviewImport"
+        },
+        {
+          "op": "CommitImport"
         },
         {
           "op": "VictimSend"
@@ -50,7 +53,7 @@
       "expected": {
         "outcome": "pass"
       },
-      "note": "1,500-row contact import commit in workspace A running concurrently with workspace B's send does not block or deadlock B"
+      "note": "Contact import commit in workspace A overlapped deterministically with workspace B's send does not lock out or deadlock B"
     },
     {
       "name": "victim-transactional-beats-heavy-marketing-flood",
