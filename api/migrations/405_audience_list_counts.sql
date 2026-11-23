@@ -166,24 +166,29 @@ CREATE TRIGGER audience_members_removed AFTER DELETE ON audience_list_members RE
 CREATE TRIGGER audience_contacts_changed AFTER UPDATE ON audience_contacts REFERENCING OLD TABLE AS before NEW TABLE AS after FOR EACH STATEMENT EXECUTE FUNCTION audience_contacts_changed();
 
 -- The difference it stored, or no row when the counts were exact. One recount of a list at a time: two that read the
--- same difference would both store it. A plan for this list's size each time, not one kept from a list of another size.
--- A list deleted meanwhile has nothing to correct (its rows wait for the hourly fold): the same snapshot decides that.
+-- same difference would both store it. A list deleted meanwhile has nothing to correct (its rows wait for the hourly
+-- fold): the same snapshot decides that. The memberships are joined to their contacts as audience_counts_join decides
+-- for a list of this size, planned on each call, as the triggers' lookups are: left to the planner on statistics that
+-- say the tables are empty, the join read the workspace's contacts once per membership.
 CREATE FUNCTION reconcile_audience_list_counts(wid text, lid text) RETURNS TABLE (subscribed integer, unsubscribed integer, unknown integer, suppressed integer) LANGUAGE plpgsql
-  SET plan_cache_mode = force_custom_plan AS $$
+  SET enable_nestloop = on SET enable_hashjoin = on SET enable_mergejoin = on SET enable_seqscan = on AS $$
+DECLARE members bigint;
 BEGIN
   PERFORM pg_advisory_xact_lock(275816, hashtext(wid || ':' || lid));
-  RETURN QUERY WITH exact AS (
-    SELECT count(*) FILTER (WHERE NOT c.suppressed AND c.marketing_consent = 'subscribed') AS subscribed, count(*) FILTER (WHERE NOT c.suppressed AND c.marketing_consent = 'unsubscribed') AS unsubscribed,
-      count(*) FILTER (WHERE NOT c.suppressed AND c.marketing_consent = 'unknown') AS unknown, count(*) FILTER (WHERE c.suppressed) AS suppressed
-    FROM audience_list_members m JOIN audience_contacts c ON c.workspace_id = m.workspace_id AND c.id = m.contact_id
-    WHERE m.workspace_id = wid AND m.list_id = lid AND c.deleted_at IS NULL
-  ), stored AS (
-    SELECT coalesce(sum(n.subscribed), 0) AS subscribed, coalesce(sum(n.unsubscribed), 0) AS unsubscribed, coalesce(sum(n.unknown), 0) AS unknown, coalesce(sum(n.suppressed), 0) AS suppressed
-    FROM audience_list_counts n WHERE n.workspace_id = wid AND n.list_id = lid
-  )
-  INSERT INTO audience_list_counts AS n (workspace_id, list_id, subscribed, unsubscribed, unknown, suppressed)
-  SELECT wid, lid, e.subscribed - s.subscribed, e.unsubscribed - s.unsubscribed, e.unknown - s.unknown, e.suppressed - s.suppressed FROM exact e, stored s
-  WHERE (e.subscribed, e.unsubscribed, e.unknown, e.suppressed) IS DISTINCT FROM (s.subscribed, s.unsubscribed, s.unknown, s.suppressed)
-    AND EXISTS (SELECT FROM audience_lists l WHERE l.workspace_id = wid AND l.id = lid)
-  RETURNING n.subscribed, n.unsubscribed, n.unknown, n.suppressed;
+  SELECT count(*) INTO members FROM audience_list_members m WHERE m.workspace_id = wid AND m.list_id = lid;
+  PERFORM audience_counts_join(members, 'audience_contacts');
+  RETURN QUERY EXECUTE $q$WITH exact AS (
+      SELECT count(*) FILTER (WHERE NOT c.suppressed AND c.marketing_consent = 'subscribed') AS subscribed, count(*) FILTER (WHERE NOT c.suppressed AND c.marketing_consent = 'unsubscribed') AS unsubscribed,
+        count(*) FILTER (WHERE NOT c.suppressed AND c.marketing_consent = 'unknown') AS unknown, count(*) FILTER (WHERE c.suppressed) AS suppressed
+      FROM audience_list_members m JOIN audience_contacts c ON c.id = m.contact_id
+      WHERE m.workspace_id = $1 AND m.list_id = $2 AND c.workspace_id = $1 AND c.deleted_at IS NULL
+    ), stored AS (
+      SELECT coalesce(sum(n.subscribed), 0) AS subscribed, coalesce(sum(n.unsubscribed), 0) AS unsubscribed, coalesce(sum(n.unknown), 0) AS unknown, coalesce(sum(n.suppressed), 0) AS suppressed
+      FROM audience_list_counts n WHERE n.workspace_id = $1 AND n.list_id = $2
+    )
+    INSERT INTO audience_list_counts AS n (workspace_id, list_id, subscribed, unsubscribed, unknown, suppressed)
+    SELECT $1, $2, e.subscribed - s.subscribed, e.unsubscribed - s.unsubscribed, e.unknown - s.unknown, e.suppressed - s.suppressed FROM exact e, stored s
+    WHERE (e.subscribed, e.unsubscribed, e.unknown, e.suppressed) IS DISTINCT FROM (s.subscribed, s.unsubscribed, s.unknown, s.suppressed)
+      AND EXISTS (SELECT FROM audience_lists l WHERE l.workspace_id = $1 AND l.id = $2)
+    RETURNING n.subscribed, n.unsubscribed, n.unknown, n.suppressed$q$ USING wid, lid;
 END $$;
