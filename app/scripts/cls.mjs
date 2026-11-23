@@ -237,7 +237,7 @@ const pages = ids => [
   ['Legal · acceptable use', '/legal/acceptable-use', { user: null, from: '/legal/terms' }],
   ['Legal · privacy', '/legal/privacy', { user: null, from: '/legal' }],
   ['Legal · subprocessors', '/legal/subprocessors', { user: null, from: '/legal/privacy' }],
-  // The price pages (features/pricing), public and not linked from the site yet: signed out, cold and from one another
+  // The price pages (features/pricing), public and linked from the homepage: signed out, cold and from one another
   // (their header's links), the calculator also at its large size and signed in.
   ['Pricing', '/pricing', { user: null, from: '/compare/mailchimp', click: 'Pricing' }],
   ['Pricing · large', '/pricing?sent=400000&received=0&contacts=100000&teammates=3', { user: null }],

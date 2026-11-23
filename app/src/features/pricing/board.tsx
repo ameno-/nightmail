@@ -9,7 +9,7 @@ import { toneVars } from '../home/tones'
 import { calculatorPath, Checked, CheckedOn, Cite, Ours, Terms } from './content'
 import { Features } from './features'
 import { FlapRow } from './splitflap'
-import { PRICE_PAGES } from './pages'
+import { PRICE_LINKS } from './live'
 import { Bolts, keySound, reducedMotion, SoundSwitch, useReplay, useTypedWord } from './eggs'
 import { play, wake } from './sound'
 import { CHECKED, claim, formatCount, money, nightmail, nightmailBill, theirPrice, ucOf, type Comparison, type Usage } from './prices'
@@ -131,7 +131,7 @@ export function ComparisonBoard({ comparison: c, start, frame }: { comparison: C
         <div className="cb-board" aria-live="polite" onClick={resend}>
           <Bolts />
           <div className="cb-face">
-            <p className="cb-head" aria-hidden="true"><span>A month at</span><FlapRow text={formatCount(size)} width={room.size.length} end className="cb-small" x={[.38, .56]} settle={settle} refresh={refresh} /><span>{unitOf(c)}</span></p>
+            <p className="cb-head" aria-hidden="true"><span>A month at</span><FlapRow text={formatCount(size)} width={room.size.length} end className="cb-small" x={[.38, .56]} settle={settle} refresh={refresh} /><span>{byContacts(c) ? 'contacts' : 'emails'}</span></p>
             <p className="sr-only">{formatCount(size)} {unitOf(c)}{byContacts(c) && `, ${formatCount(p.usage.sent)} emails a month`}: Nightmail <Ours sent={p.usage.sent} received={p.usage.received}>{p.ours.text}</Ours>, {vendor} {money(p.theirs.cents)} a month.</p>
             <div className="cb-row cb-mine" aria-hidden="true"><Mark className="cb-mark-board" /><FlapRow text={p.ours.text} width={room.price.length} end className="cb-price" size="big" x={[.72, 1]} row={1} settle={settle} refresh={refresh} /></div>
             <Cells lit={lit} mine settle={settle} />
@@ -187,11 +187,10 @@ export function BoardEnd({ comparison: c }: { comparison: Comparison }) {
   useEffect(() => { if (window.location.hash === '#sources') setOpen(true) }, [])
   const phone = W < 900, inset = { left: 0, right: 0, bottom: 0 }, band = W ? endBand(W, phone, inset) : null
   const here = `/compare/${c.offer.id}`
-  const label = (path: string) => path === '/pricing' ? 'Pricing' : `vs ${PRICE_PAGES.find(page => page.path === path)!.title.replace(/^.* vs /, '')}`
   return <footer className="mx-end cb-end" ref={ref} onClick={nudge} style={{ ...toneVars(true), ...band ? { '--mx-band': `${band.h}px` } : {} } as CSSProperties}>
     <nav aria-label="Site links">
       <a className="srt-by" href="https://anoma.ly" target="_blank" rel="noopener" title="Anomaly (opens in a new tab)">by <AnomalyLogo height={18} /></a>
-      {PRICE_PAGES.filter(page => page.path !== here).map(page => <Link key={page.path} to={page.path}>{label(page.path)}</Link>)}
+      {PRICE_LINKS.filter(([path]) => path !== here).map(([path, label]) => <Link key={path} to={path}>{label}</Link>)}
       <button type="button" className="cb-sources-toggle" aria-expanded={open} aria-controls="sources" onClick={() => setOpen(now => !now)}>Sources</button>
       <a href="/docs">API docs</a><Link to="/legal/terms">Terms</Link><Link to="/legal/privacy">Privacy</Link>
     </nav>

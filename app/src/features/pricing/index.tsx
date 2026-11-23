@@ -15,8 +15,8 @@ const boardPage = () => import('./board-page')
 const ComparisonScene = lazy(() => boardPage().then(m => ({ default: m.ComparisonScene })))
 const BoardEnd = lazy(() => boardPage().then(m => ({ default: m.BoardEnd })))
 
-// Public pages, no sign-in: the price calculator (/pricing) and one comparison per competitor (/compare/:vendor). Not
-// linked from the site until the legal review (pages.ts, PRICE_PAGES_LIVE).
+// Public pages, no sign-in: the price calculator (/pricing) and one comparison per competitor (/compare/:vendor), linked
+// from the homepage's footer and from each other (live.ts).
 
 // Prose here uses proportional figures, and the local fallback faces are sized for the tabular ones (tokens.css): text
 // painted before the web fonts arrive rewraps when they do. So the pages wait for them, as long as 3 seconds.

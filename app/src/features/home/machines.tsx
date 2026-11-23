@@ -7,7 +7,7 @@ import { StartButton } from './start'
 import type { Plan } from './plan'
 import { EndBand, endBand } from './end-band'
 import { afterFirstPicture } from './first-picture'
-import { PRICE_PAGES_LIVE } from '../pricing/live'
+import { PRICE_LINKS, PRICE_PAGES_LIVE } from '../pricing/live'
 import { SCREENS, type Kind } from './screens'
 import './machines.css'
 
@@ -89,7 +89,7 @@ export function Machines({ plan: p, start }: { plan: Plan | null; start: HomeSta
     {/* Out of the factory, in the page's own light: the last links, and the wordmark across the page's end
         (end-band.tsx), which stands clear of a phone's home indicator on a sill. */}
     <footer className="mx-end" style={band ? { '--mx-band': `${band.h + p.inset.bottom}px` } as CSSProperties : undefined}>
-      <nav aria-label="Site links"><a className="srt-by" href="https://anoma.ly" target="_blank" rel="noopener" title="Anomaly (opens in a new tab)">by <AnomalyLogo height={18} /></a><a href="/docs">API docs</a>{PRICE_PAGES_LIVE && <Link to="/pricing">Pricing</Link>}<Link to="/legal/terms">Terms</Link><Link to="/legal/privacy">Privacy</Link></nav>
+      <nav aria-label="Site links"><a className="srt-by" href="https://anoma.ly" target="_blank" rel="noopener" title="Anomaly (opens in a new tab)">by <AnomalyLogo height={18} /></a><a href="/docs">API docs</a>{PRICE_PAGES_LIVE && PRICE_LINKS.map(([path, label]) => <Link key={path} to={path}>{label}</Link>)}<Link to="/legal/terms">Terms</Link><Link to="/legal/privacy">Privacy</Link></nav>
       {p && <EndBand W={p.W} phone={p.phone} inset={p.inset} />}
     </footer>
   </>
