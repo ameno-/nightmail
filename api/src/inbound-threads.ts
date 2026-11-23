@@ -4,7 +4,7 @@ import { boundMailBucket, isS3Bucket } from './mail-objects.js';
 import type { S3Client } from '@aws-sdk/client-s3';
 import { readableMailboxKey, mailboxS3 } from './mailbox-setup.js';
 import { createRoute, z } from '@hono/zod-openapi';
-import { and, asc, desc, eq, inArray, sql, type SQLWrapper } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 import { actorMailAccess, ApiError, budgetedRead, denied, errors, isoTime, json, lazyModule, page, readLimit, readLimitNote, response, security, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
 import { productName } from './brand.js';
 
@@ -73,26 +73,94 @@ export function visibleThreadAddresses(value: MailboxAccess, threadId: string, a
 async function threadPage(db: DbExecutor, value: MailboxAccess, filter: Filter, options: { view?: z.infer<typeof View>; q?: string; cursor?: string; limit: number }) {
   const after = decodeCursor(options.cursor), view = options.view;
   const t = mailboxThreads;
-  const state = view === 'trash' ? sql`${t.trashedAt} IS NOT NULL` : view && view !== 'all' ? sql`${t.trashedAt} IS NULL AND ${
-    view === 'inbox' ? sql`NOT ${t.archived} AND NOT ${t.spam}` : view === 'archive' ? t.archived : view === 'spam' ? t.spam : t.starred}` : null;
+  const viewMatch = (alias: string) => {
+    const a = sql.raw(alias);
+    if (view === 'trash') return sql`${a}.trashed_at IS NOT NULL`;
+    if (!view || view === 'all') return null;
+    if (view === 'inbox') return sql`${a}.trashed_at IS NULL AND NOT ${a}.archived AND NOT ${a}.spam`;
+    if (view === 'archive') return sql`${a}.trashed_at IS NULL AND ${a}.archived`;
+    if (view === 'spam') return sql`${a}.trashed_at IS NULL AND ${a}.spam`;
+    return sql`${a}.trashed_at IS NULL AND ${a}.starred`;
+  };
   // Match search/view at the thread level. An older matching message (or one matching address)
   // must not replace the newest visible snippet, narrow the address list, or reduce the count.
   const visibility = visibleLinks(value, filter); // Also validates an explicit address filter against the grant.
-  // Page the per-address summaries first: opening Inbound shouldn't aggregate every message ever received.
-  const rows = await db.execute<{ id: string; subject: string; snippet: string; from_name: string | null; from_address: string; at: string; address_ids: string[]; message_count: number }>(sql`
-    WITH threads AS MATERIALIZED (
-      SELECT ${t.threadId} AS id, max(${t.lastMessageAt}) AS last_at, array_agg(${t.mailboxId} ORDER BY ${t.mailboxId}) AS address_ids
-      FROM ${t} WHERE ${liveBox(t.mailboxId)} AND ${and(eq(t.workspaceId,value.workspaceId),filter.threadId ? eq(t.threadId,filter.threadId) : undefined,
-        filter.addressId ? eq(t.mailboxId,filter.addressId) : value.mailboxIds ? inArray(t.mailboxId,value.mailboxIds) : undefined)}
-        ${options.q ? sql`AND ${t.threadId} IN (SELECT ${links.threadId} FROM ${links} JOIN ${messages} ON ${messages.id} = ${links.messageId} WHERE ${visibility} AND mail_messages.search @@ websearch_to_tsquery('simple', ${options.q}))` : sql``}
-      GROUP BY ${t.threadId} HAVING true ${after ? sql`AND (max(${t.lastMessageAt}), ${t.threadId}) < (${after[0]}::timestamptz, ${after[1]})` : sql``}
-        ${state ? sql`AND bool_or(${state})` : sql``}
-      ORDER BY last_at DESC, id DESC LIMIT ${options.limit + 1}
-    ) SELECT threads.id, m.subject, m.snippet, m.from_name, m.from_address, ${preciseTime(sql`threads.last_at`)} AS at, threads.address_ids, detail.message_count
-      FROM threads CROSS JOIN LATERAL (SELECT count(DISTINCT mm.message_id)::int AS message_count,
-        (array_agg(mm.message_id ORDER BY mm.received_at DESC, mm.message_id DESC))[1] AS latest_id
-        FROM mailbox_messages mm WHERE mm.held_reason IS NULL AND mm.thread_id=threads.id AND mm.mailbox_id=ANY(threads.address_ids)) detail
-      JOIN mail_messages m ON m.id=detail.latest_id ORDER BY threads.last_at DESC, threads.id DESC`);
+  type PageRow = { id: string; subject: string; snippet: string; from_name: string | null; from_address: string; at: string; address_ids: string[]; message_count: number };
+  const singleAddress = !filter.threadId && !options.q
+    ? (filter.addressId ?? (value.mailboxIds?.length === 1 ? value.mailboxIds[0] : undefined))
+    : undefined;
+  const latest = (boxFilter: SQL) => sql`CROSS JOIN LATERAL (
+      SELECT mm.message_id AS latest_id FROM mailbox_messages mm
+      WHERE mm.workspace_id=${value.workspaceId} AND mm.held_reason IS NULL AND mm.thread_id=threads.id AND ${boxFilter}
+      ORDER BY mm.received_at DESC, mm.message_id DESC LIMIT 1
+    ) detail`;
+  const countExpr = sql`CASE WHEN cardinality(threads.address_ids)=1 THEN threads.single_count
+      ELSE (SELECT count(DISTINCT mm.message_id)::int FROM mailbox_messages mm
+            WHERE mm.workspace_id=${value.workspaceId} AND mm.held_reason IS NULL AND mm.thread_id=threads.id AND mm.mailbox_id=ANY(threads.address_ids)) END`;
+  let rows;
+  if (singleAddress) {
+    // One address has at most one mailbox_threads row per thread: walk the index directly without GROUP BY.
+    // Check liveBox once as a constant InitPlan so the planner keeps the index scan instead of misestimating an anti-join.
+    const state = viewMatch('t');
+    rows = await db.execute<PageRow>(sql`
+      WITH threads AS MATERIALIZED (
+        SELECT t.thread_id AS id, t.last_message_at AS last_at, ARRAY[t.mailbox_id] AS address_ids, t.message_count
+        FROM mailbox_threads t
+        WHERE t.workspace_id=${value.workspaceId} AND t.mailbox_id=${singleAddress}
+          AND NOT EXISTS(SELECT FROM mailboxes ended WHERE ended.id=${singleAddress} AND ended.delete_after<=statement_timestamp())
+          ${after ? sql`AND (t.last_message_at, t.thread_id) < (${after[0]}::timestamptz, ${after[1]})` : sql``}
+          ${state ? sql`AND ${state}` : sql``}
+        ORDER BY t.last_message_at DESC, t.thread_id DESC LIMIT ${options.limit + 1}
+      ) SELECT threads.id, m.subject, m.snippet, m.from_name, m.from_address, ${preciseTime(sql`threads.last_at`)} AS at, threads.address_ids, threads.message_count
+        FROM threads ${latest(sql`mm.mailbox_id=${singleAddress}`)}
+        JOIN mail_messages m ON m.id=detail.latest_id ORDER BY threads.last_at DESC, threads.id DESC`);
+  } else if (!filter.threadId && !options.q) {
+    // Workspace-wide or multi-address list: walk mailbox_threads_workspace_page newest-first and emit each thread
+    // once at its winning live row (maximum last_message_at, lowest mailbox_id on ties), stopping after limit + 1.
+    const scopeList = value.mailboxIds ? sql.param(value.mailboxIds) : null;
+    const state = viewMatch('s');
+    rows = await db.execute<PageRow>(sql`
+      WITH threads AS MATERIALIZED (
+        SELECT t.thread_id AS id, t.last_message_at AS last_at, grp.address_ids, grp.single_count
+        FROM mailbox_threads t
+        CROSS JOIN LATERAL (
+          SELECT array_agg(s.mailbox_id ORDER BY s.mailbox_id) AS address_ids,
+                 max(s.message_count) AS single_count,
+                 bool_or(s.last_message_at > t.last_message_at
+                   OR (s.last_message_at = t.last_message_at AND s.mailbox_id < t.mailbox_id)) AS has_newer
+                 ${state ? sql`, bool_or(${state}) AS matches_view` : sql``}
+          FROM mailbox_threads s
+          WHERE s.thread_id=t.thread_id AND s.workspace_id=${value.workspaceId}
+            ${scopeList ? sql`AND s.mailbox_id=ANY(${scopeList}::text[])` : sql``}
+            AND ${liveBox(sql`s.mailbox_id`)}
+        ) grp
+        WHERE t.workspace_id=${value.workspaceId}
+          ${scopeList ? sql`AND t.mailbox_id=ANY(${scopeList}::text[])` : sql``}
+          AND ${liveBox(sql`t.mailbox_id`)}
+          ${after ? sql`AND (t.last_message_at, t.thread_id) < (${after[0]}::timestamptz, ${after[1]})` : sql``}
+          AND NOT grp.has_newer
+          ${state ? sql`AND grp.matches_view` : sql``}
+        ORDER BY t.last_message_at DESC, t.thread_id DESC LIMIT ${options.limit + 1}
+      ) SELECT threads.id, m.subject, m.snippet, m.from_name, m.from_address, ${preciseTime(sql`threads.last_at`)} AS at, threads.address_ids, ${countExpr} AS message_count
+        FROM threads ${latest(sql`mm.mailbox_id=ANY(threads.address_ids)`)}
+        JOIN mail_messages m ON m.id=detail.latest_id ORDER BY threads.last_at DESC, threads.id DESC`);
+  } else {
+    // Single-thread lookup or full-text search: drive from mailbox_threads_workspace or mail_messages_search GIN.
+    const state = view === 'trash' ? sql`${t.trashedAt} IS NOT NULL` : view && view !== 'all' ? sql`${t.trashedAt} IS NULL AND ${
+      view === 'inbox' ? sql`NOT ${t.archived} AND NOT ${t.spam}` : view === 'archive' ? t.archived : view === 'spam' ? t.spam : t.starred}` : null;
+    rows = await db.execute<PageRow>(sql`
+      WITH threads AS MATERIALIZED (
+        SELECT ${t.threadId} AS id, max(${t.lastMessageAt}) AS last_at, array_agg(${t.mailboxId} ORDER BY ${t.mailboxId}) AS address_ids, max(${t.messageCount}) AS single_count
+        FROM ${t} WHERE ${liveBox(t.mailboxId)} AND ${and(eq(t.workspaceId,value.workspaceId),filter.threadId ? eq(t.threadId,filter.threadId) : undefined,
+          filter.addressId ? eq(t.mailboxId,filter.addressId) : value.mailboxIds ? inArray(t.mailboxId,value.mailboxIds) : undefined)}
+          ${options.q ? sql`AND ${t.threadId} IN (SELECT ${links.threadId} FROM ${links} JOIN ${messages} ON ${messages.id} = ${links.messageId} WHERE ${visibility} AND mail_messages.search @@ websearch_to_tsquery('simple', ${options.q}))` : sql``}
+        GROUP BY ${t.threadId} HAVING true ${after ? sql`AND (max(${t.lastMessageAt}), ${t.threadId}) < (${after[0]}::timestamptz, ${after[1]})` : sql``}
+          ${state ? sql`AND bool_or(${state})` : sql``}
+        ORDER BY last_at DESC, id DESC LIMIT ${options.limit + 1}
+      ) SELECT threads.id, m.subject, m.snippet, m.from_name, m.from_address, ${preciseTime(sql`threads.last_at`)} AS at, threads.address_ids, ${countExpr} AS message_count
+        FROM threads ${latest(sql`mm.mailbox_id=ANY(threads.address_ids)`)}
+        JOIN mail_messages m ON m.id=detail.latest_id ORDER BY threads.last_at DESC, threads.id DESC`);
+  }
   const last = rows.rows[options.limit - 1];
   return { data: rows.rows.slice(0, options.limit).map(row => ({ id: row.id, subject: row.subject, snippet: row.snippet, from: { name: row.from_name, address: row.from_address }, lastMessageAt: timestamp(row.at), addressIds: row.address_ids, messageCount: row.message_count })),
     nextCursor: rows.rows.length > options.limit && last ? encodeCursor(last.at, last.id) : null };

@@ -4071,7 +4071,7 @@ export const revokeInboxAppPassword = <ThrowOnError extends boolean = false>(opt
 /**
  * List agent inboxes
  *
- * Inboxes this credential can see, ordered by ID, with status and usage. A provisioning key sees the inboxes it created. Pass nextCursor as cursor for the next page.
+ * Inboxes this credential can see, ordered by ID, with status and usage. A provisioning key sees the inboxes it created. Pass nextCursor as cursor for the next page. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.
  */
 export const listInboxes = <ThrowOnError extends boolean = false>(options?: Options<ListInboxesData, ThrowOnError>): RequestResult<ListInboxesResponses, ListInboxesErrors, ThrowOnError> => (options?.client ?? client).get<ListInboxesResponses, ListInboxesErrors, ThrowOnError>({
     security: [

@@ -79,6 +79,83 @@ export async function sweepInboxes(runtime:Runtime, budgetMs:number,clock=Date.n
   return pending.length===0;
 }
 
+const INBOX_RECONCILE_PAGE = 50;
+const INBOX_RECONCILE_LOCK_CAP = 50_000;
+/**
+ * Scheduled exact recount of inbox_state counters (messages, held, unread) from mailbox_messages.
+ * Pages across inbox_state with a persisted cursor (sending_upload_reconcile id='inbox-state') and a
+ * per-inbox statement timeout, reading without locks first so a 2M-message inbox never stalls live
+ * ingest. Only takes FOR UPDATE SKIP LOCKED when a difference is found, confirms modseq did not move
+ * during the scan (or recounts under lock for small inboxes), corrects the row, and logs INBOX_STATE_DRIFT
+ * at error level whenever an initialized counter drifted (a difference is a bug).
+ */
+export async function reconcileInboxState(runtime: Runtime, budgetMs = 15_000, clock = Date.now) {
+  const deadline = clock() + budgetMs;
+  let checked = 0, corrected = 0, drifted = 0;
+  let after = (await runtime.db.execute<{ after: string }>(sql`SELECT after FROM sending_upload_reconcile WHERE id='inbox-state'`)).rows[0]?.after ?? '';
+  while (clock() < deadline) {
+    const { rows } = await runtime.db.execute<{ inbox_id: string; workspace_id: string; modseq: string; messages: number; held: number; unread: number | null }>(sql`
+      SELECT s.inbox_id, s.workspace_id, s.modseq::text, s.messages, s.held, s.unread
+      FROM inbox_state s JOIN mailboxes b ON b.id=s.inbox_id
+      WHERE s.inbox_id > ${after} AND (b.delete_after IS NULL OR b.delete_after > statement_timestamp())
+      ORDER BY s.inbox_id LIMIT ${INBOX_RECONCILE_PAGE}`);
+    if (!rows.length) {
+      if (after !== '') await runtime.db.execute(sql`INSERT INTO sending_upload_reconcile(id,after) VALUES('inbox-state','') ON CONFLICT(id) DO UPDATE SET after=''`);
+      break;
+    }
+    let advanced = after;
+    for (const s of rows) {
+      if (clock() >= deadline) break;
+      try {
+        const actual = await runtime.db.transaction(async tx => {
+          await tx.execute(sql`SET LOCAL statement_timeout = '5s'`);
+          return (await tx.execute<{ messages: number; held: number; unread: number }>(sql`
+            SELECT count(*)::int AS messages,
+                   count(*) FILTER (WHERE held_reason IS NOT NULL)::int AS held,
+                   count(*) FILTER (WHERE NOT read AND held_reason IS NULL)::int AS unread
+            FROM mailbox_messages WHERE mailbox_id=${s.inbox_id}`)).rows[0]!;
+        }, { accessMode: 'read only' });
+        checked++;
+        if (s.unread === actual.unread && s.messages === actual.messages && s.held === actual.held) { advanced = s.inbox_id; continue; }
+        const outcome = await runtime.db.transaction(async tx => {
+          await tx.execute(sql`SET LOCAL lock_timeout = '1s'; SET LOCAL statement_timeout = '5s'`);
+          const [locked] = (await tx.execute<{ modseq: string; messages: number; held: number; unread: number | null }>(sql`
+            SELECT modseq::text, messages, held, unread FROM inbox_state WHERE inbox_id=${s.inbox_id} FOR UPDATE SKIP LOCKED`)).rows;
+          if (!locked) return null;
+          let exact = actual;
+          if (locked.modseq !== s.modseq) {
+            if (locked.messages > INBOX_RECONCILE_LOCK_CAP) return null;
+            exact = (await tx.execute<{ messages: number; held: number; unread: number }>(sql`
+              SELECT count(*)::int AS messages,
+                     count(*) FILTER (WHERE held_reason IS NOT NULL)::int AS held,
+                     count(*) FILTER (WHERE NOT read AND held_reason IS NULL)::int AS unread
+              FROM mailbox_messages WHERE mailbox_id=${s.inbox_id}`)).rows[0]!;
+          }
+          if (locked.unread === exact.unread && locked.messages === exact.messages && locked.held === exact.held) return null;
+          await tx.execute(sql`UPDATE inbox_state SET messages=${exact.messages}, held=${exact.held}, unread=${exact.unread} WHERE inbox_id=${s.inbox_id}`);
+          return { wasInitialized: locked.unread !== null, stored: { messages: locked.messages, held: locked.held, unread: locked.unread }, exact };
+        });
+        if (outcome) {
+          corrected++;
+          if (outcome.wasInitialized) {
+            drifted++;
+            log('error', { code: 'INBOX_STATE_DRIFT', workspaceId: s.workspace_id, inboxId: s.inbox_id, stored: outcome.stored, actual: outcome.exact });
+          }
+        }
+        advanced = s.inbox_id;
+      } catch (error) {
+        if (!timedOut(error)) logError(error, { code: 'INBOX_STATE_RECONCILE_FAILED', inboxId: s.inbox_id }, 'warn');
+        advanced = s.inbox_id;
+      }
+    }
+    const next = rows.length < INBOX_RECONCILE_PAGE && advanced === rows.at(-1)!.inbox_id ? '' : advanced;
+    await runtime.db.execute(sql`INSERT INTO sending_upload_reconcile(id,after) VALUES('inbox-state',${next}) ON CONFLICT(id) DO UPDATE SET after=excluded.after`);
+    after = next;
+    if (!next) break;
+  }
+  return { checked, corrected, drifted };
+}
+
 /**
  * One retention step: a bounded statement that removes (or retires) at most `size` rows, oldest first, and returns their
  * count as n. `oldest` selects the time of the oldest row the step would still take, for the log. `lane` groups the steps in
@@ -354,6 +431,8 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
   let next: string | null = null, through: string[] = [];
   try {
     const inboxComplete = await sweepInboxes(runtime, Math.min(60_000, Math.floor(budgetMs / 5)));
+    try { await reconcileInboxState(runtime, Math.min(15_000, Math.floor(budgetMs / 10))); }
+    catch (error) { failed.push('inbox_reconcile'); logError(error, { code: 'RETENTION_STEP_FAILED', table: 'inbox_reconcile' }, 'warn'); }
     // A durable daily election prevents two reconcilers from applying the same
     // snapshot difference. Dispatch continues adding deltas while this runs.
     try {

@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql, type SQL } from 'drizzle-orm';
-import { ApiError, denied, digest, id, randomSecret, errors, json, response, type App, type Ctx, type DbExecutor, type MailboxAccess } from './core.js';
+import { ApiError, budgetedRead, denied, digest, id, randomSecret, readLimit, readLimitNote, errors, json, response, type App, type Ctx, type DbExecutor, type MailboxAccess } from './core.js';
 import { longPoll, reservePolls } from './auth.js';
 import { auditContext, auditInsert, type AuditContext } from './audit.js';
 import type { MailboxPermission, MailAddress, Verdicts } from './db/mailbox.js';
@@ -213,16 +213,17 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
     if (r.replay) return c.json(r.inbox, 200);
     return c.json({ ...r.inbox, ...(credential && secret ? { credential: { id: credential.id, secret, permissions: input.credential!.permissions, expiresAt: r.inbox.deleteAfter } } : {}) }, 201);
   });
+  const INBOX_LIST_READ = 5;
   app.openapi(createRoute({
     ...meta, method: 'get', path: base, operationId: 'listInboxes', summary: 'List agent inboxes',
-    description: 'Inboxes this credential can see, ordered by ID, with status and usage. A provisioning key sees the inboxes it created. Pass nextCursor as cursor for the next page.',
+    description: 'Inboxes this credential can see, ordered by ID, with status and usage. A provisioning key sees the inboxes it created. Pass nextCursor as cursor for the next page. ' + readLimitNote(INBOX_LIST_READ),
     request: { query: z.object({ type: type.optional(), status: status.optional(), q: z.string().max(200).optional().describe('Search address and name.'), cursor: key.optional(), limit: take }) },
     responses: { 200: response(z.object({ data: z.array(Inbox), nextCursor: z.string().nullable() }).openapi('InboxPage')), ...errors },
   }), async c => {
     const v = access(c, 'read'), q = c.req.valid('query');
-    const { rows } = await c.env.db.execute<{ box: Box }>(
+    const { rows } = await budgetedRead(c.env.db, db => db.execute<{ box: Box }>(
       sql`SELECT inbox_view(b) box FROM mailboxes b WHERE ${agentInbox(v)} ${q.type ? sql`AND b.create_request->>'type'=${q.type}` : sql``} ${q.cursor ? sql`AND b.id>${q.cursor}` : sql``} ${q.status ? sql`AND CASE WHEN delete_after<=now() THEN 'deleting' WHEN expires_at<=now() THEN 'expired' ELSE 'active' END=${q.status}` : sql``} ${q.q ? sql`AND strpos(lower(b.address||' '||coalesce(b.display_name,'')),lower(${q.q}))>0` : sql``} ORDER BY id LIMIT ${q.limit + 1}`,
-    );
+    ), readLimit(INBOX_LIST_READ));
     return c.json({ data: rows.slice(0, q.limit).map(r => r.box), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.box.id : null }, 200);
   });
   app.openapi(createRoute({

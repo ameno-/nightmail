@@ -26415,6 +26415,230 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     }finally{await writer.query('ROLLBACK');}
     assert.deepEqual(await state(),before);
   });
+  test('inbox unread counter: every mutation path, concurrent races, NULL fallback, backfill and reconcile stay exact',async t=>{
+    const a=await fixtureDatabase(t),b=await fixtureDatabase(t),w=unique('unreadw'),host=w+'.invalid',dom=unique('mdom');
+    const {readFile}=await import('node:fs/promises');
+    const {attachToMailboxes}=await import('./src/mailbox-store.js');
+    const {reconcileInboxState}=await import('./src/maintenance.js');
+    const {drizzle}=await import('drizzle-orm/node-postgres');
+    const {digest,randomSecret}=await import('./src/core.js');
+    await a.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')",[dom,w,host,REGION]);
+    const exact=async(bid:string)=>Number((await a.query('SELECT count(*)::int n FROM mailbox_messages WHERE mailbox_id=$1 AND NOT read AND held_reason IS NULL',[bid])).rows[0].n);
+    const stored=async(bid:string)=>(await a.query('SELECT unread FROM inbox_state WHERE inbox_id=$1',[bid])).rows[0].unread as number|null;
+    const viewed=async(bid:string)=>Number((await a.query("SELECT (inbox_view(b)->'usage'->>'unread')::int n FROM mailboxes b WHERE b.id=$1",[bid])).rows[0].n);
+    const assertExact=async(bid:string,label:string)=>{const e=await exact(bid),s=await stored(bid),v=await viewed(bid);assert.equal(s,e,`${label}: stored=${s} exact=${e}`);assert.equal(v,e,`${label}: view=${v} exact=${e}`);};
+    // 1. Managed inbox create starts at unread=0 (persistent, quota=10 so we can also test held).
+    const bid=unique('mbx'),addr='main@'+host,tok=randomSecret('bane_mbx_');
+    const created=(await a.query('SELECT create_managed_inbox($1::jsonb) r',[JSON.stringify({
+      wid:w,actor:'actor',admin:true,manageAddress:true,hosted:false,id:bid,
+      input:{type:'persistent',ttlSeconds:86400,graceHours:24,domain:host,localPart:'main',metadata:{},limits:{messages:4,bytes:1048576},send:{enabled:false,perDay:0}},
+      locals:['main'],
+    })])).rows[0].r;
+    assert.equal(created.error,undefined,JSON.stringify(created));
+    assert.equal(created.inbox.usage.unread,0);
+    await assertExact(bid,'after create');
+    await a.query(`INSERT INTO mailbox_keys(id,workspace_id,name,hash,prefix,mailbox_ids,permissions) VALUES($1,$2,'rw',$3,'fixture',jsonb_build_array($4::text),'["read","modify"]')`,[unique('mbk'),w,await digest(tok),bid]);
+    // 2. Inbound delivery + duplicate receipt replay + held delivery.
+    const deliver=async(db:pg.Client,mid:string,opts:{spam?:boolean;ts?:string}={})=>{
+      const at=opts.ts??new Date().toISOString();
+      await db.query("INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) VALUES($1,$2,$3,'fixture','k',$4,'{}') ON CONFLICT DO NOTHING",[w,mid,REGION,JSON.stringify([addr])]);
+      await db.query("SELECT * FROM mail_store_incoming($1::jsonb,'[]','[]',$2::jsonb,false,false,NULL,NULL)",[JSON.stringify({
+        id:mid,workspace_id:w,ses_message_id:mid,lifecycle:'kept',envelope_to:[addr],direction:'inbound',subject:'Sub '+mid,
+        from_address:'sender@example.invalid',to:[{name:null,address:addr}],cc:[],bcc:[],reply_to:[],references:[],received_at:at,
+        body_truncated:false,snippet:mid,headers:[],size_bytes:128,attachment_count:0,verdicts:{dmarc:'PASS'},spam:!!opts.spam,automated:false,status:'received',
+      }),JSON.stringify([{addr,n:0,valid:true}])]);
+    };
+    const m1=unique('msg'),m2=unique('msg'),m3=unique('msg'),m4=unique('msg'),mHeld=unique('msg');
+    await deliver(a,m1); await assertExact(bid,'after delivery 1');
+    await deliver(a,m1); await assertExact(bid,'after duplicate receipt replay');
+    await deliver(a,m2,{spam:true}); await assertExact(bid,'after spam delivery (unheld unread)');
+    await deliver(a,m3);
+    // 3. API read/unread, move, copy (must count once, not twice!), delete to trash, non-final & final expunge, custom folder delete.
+    ok(await http('PATCH',`/v1/inboxes/${bid}/messages/${m1}`,tok,{read:true}));
+    await assertExact(bid,'after API mark read');
+    ok(await http('PATCH',`/v1/inboxes/${bid}/messages/${m1}`,tok,{read:false}));
+    await assertExact(bid,'after API mark unread');
+    // Copy m1 to archive: 2 inbox_entries, still 1 mailbox_messages row -> unread must NOT double!
+    const copied=ok(await http('POST',`/v1/inboxes/${bid}/messages/${m1}/copy`,tok,{folder:'archive'}));
+    await assertExact(bid,'after copy unread message');
+    // Expunge only the archive copy: message still lives in inbox -> unread stays same!
+    ok(await http('DELETE',`/v1/inboxes/${bid}/messages/${m1}?source=archive&uid=${copied.uid}&permanent=true`,tok));
+    await assertExact(bid,'after expunging 1 of 2 copies');
+    // Move m1 to custom folder, then delete custom folder (moves to trash, preserves unread).
+    const fld=ok(await http('POST',`/v1/inboxes/${bid}/folders`,tok,{path:'Custom'}),201);
+    ok(await http('POST',`/v1/inboxes/${bid}/messages/${m1}/move`,tok,{folder:fld.id}));
+    await assertExact(bid,'after move to custom folder');
+    ok(await http('DELETE',`/v1/inboxes/${bid}/folders/${fld.id}`,tok));
+    await assertExact(bid,'after custom folder delete');
+    // Permanent expunge of last copy of m1 removes row and decrements unread.
+    ok(await http('DELETE',`/v1/inboxes/${bid}/messages/${m1}?permanent=true`,tok));
+    await assertExact(bid,'after final expunge of unread');
+    // 4. Thread patch (inbox_patch_thread) marking read/unread.
+    const t3=(await a.query('SELECT thread_id FROM mailbox_messages WHERE mailbox_id=$1 AND message_id=$2',[bid,m3])).rows[0].thread_id as string;
+    await a.query(`SELECT inbox_patch_thread($1,$2,$3,'{"read":true}'::jsonb)`,[w,bid,t3]);
+    await assertExact(bid,'after thread patch read=true');
+    await a.query(`SELECT inbox_patch_thread($1,$2,$3,'{"read":false}'::jsonb)`,[w,bid,t3]);
+    await assertExact(bid,'after thread patch read=false');
+    // 5. IMAP mailgw_mutate (flags) + mailgw_append (unseen & seen).
+    const u3=(await a.query("SELECT uid FROM inbox_entries WHERE inbox_id=$1 AND message_id=$2 AND role='inbox'",[bid,m3])).rows[0].uid;
+    await a.query(`SELECT mailgw_mutate($1,$2,'inbox',NULL,'flags',$3::bigint[],'add','{"read":true}'::jsonb,ARRAY[]::text[])`,[w,bid,[u3]]);
+    await assertExact(bid,'after IMAP mark seen');
+    await a.query(`SELECT mailgw_mutate($1,$2,'inbox',NULL,'flags',$3::bigint[],'remove','{"read":false}'::jsonb,ARRAY[]::text[])`,[w,bid,[u3]]);
+    await assertExact(bid,'after IMAP mark unseen');
+    const appUnseen=unique('msg'),appSeen=unique('msg');
+    await a.query("SELECT mailgw_append($1,$2,'inbox',$3,$4,NULL,'App unseen','a@b.test','hi',now(),64,'local:','k1','{}'::jsonb,ARRAY[]::text[])",[w,bid,appUnseen,unique('thr')]);
+    await assertExact(bid,'after IMAP APPEND unseen');
+    await a.query("SELECT mailgw_append($1,$2,'inbox',$3,$4,NULL,'App seen','a@b.test','hi',now(),64,'local:','k2','{}'::jsonb,ARRAY['\\Seen'])",[w,bid,appSeen,unique('thr')]);
+    await assertExact(bid,'after IMAP APPEND seen');
+    // Quota is 4 messages; we now have 4 (m2, m3, appUnseen, appSeen), so next delivery is held -> unread must NOT increase!
+    await deliver(a,mHeld);
+    assert.equal((await a.query('SELECT held_reason FROM mailbox_messages WHERE mailbox_id=$1 AND message_id=$2',[bid,mHeld])).rows[0].held_reason,'quota');
+    await assertExact(bid,'after held delivery');
+    // Marking a held message read must NOT decrement unread!
+    await a.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"read":true}'::jsonb)`,[w,bid,mHeld]);
+    await assertExact(bid,'after marking held message read');
+    // 6. inbox_adopt + attachToMailboxes (claimUnrouted inbound & outbound read=true).
+    const addrBox=unique('mbx');
+    await a.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind) VALUES($1,$2,$3,$4,'address')",[addrBox,w,dom,'claim@'+host]);
+    await assertExact(addrBox,'after inbox_adopt on new address');
+    const tClaim=unique('thr'),mClaimIn=unique('msg'),mClaimOut=unique('msg');
+    await a.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)',[tClaim,w]);
+    const [inRow]=(await a.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,received_at,size_bytes,spam) VALUES($1,$2,$3,'inbound',now(),50,false) RETURNING *",[mClaimIn,w,tClaim])).rows;
+    const [outRow]=(await a.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,received_at,size_bytes,spam) VALUES($1,$2,$3,'outbound',now(),50,false) RETURNING *",[mClaimOut,w,tClaim])).rows;
+    const drz=drizzle(a);
+    await attachToMailboxes(drz,{workspaceId:w},{...inRow,workspaceId:w,threadId:tClaim,receivedAt:inRow.received_at.toISOString(),sizeBytes:50},[addrBox]);
+    await assertExact(addrBox,'after attachToMailboxes inbound (claimUnrouted)');
+    await attachToMailboxes(drz,{workspaceId:w},{...outRow,workspaceId:w,threadId:tClaim,receivedAt:outRow.received_at.toISOString(),sizeBytes:50},[addrBox]);
+    await assertExact(addrBox,'after attachToMailboxes outbound');
+    // 7. Concurrent races: (a) two readers marking same message read, (b) delivery racing thread mark-all-read, (c) IMAP vs API flags.
+    await a.query('UPDATE mailboxes SET quota_messages=NULL WHERE id=$1',[bid]);
+    await deliver(a,m4);
+    await Promise.all([
+      a.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"read":true}'::jsonb)`,[w,bid,m4]),
+      b.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"read":true}'::jsonb)`,[w,bid,m4]),
+    ]);
+    await assertExact(bid,'after concurrent double mark-read');
+    const mRace=unique('msg'),tRace=(await a.query('SELECT thread_id FROM mailbox_messages WHERE mailbox_id=$1 AND message_id=$2',[bid,m4])).rows[0].thread_id as string;
+    await Promise.all([
+      deliver(a,mRace),
+      b.query(`SELECT inbox_patch_thread($1,$2,$3,'{"read":true}'::jsonb)`,[w,bid,tRace]),
+    ]);
+    await assertExact(bid,'after delivery racing thread mark-all-read');
+    const uRace=(await a.query("SELECT uid FROM inbox_entries WHERE inbox_id=$1 AND message_id=$2 AND role='inbox'",[bid,mRace])).rows[0].uid;
+    await Promise.all([
+      a.query(`SELECT mailgw_mutate($1,$2,'inbox',NULL,'flags',$3::bigint[],'add','{"read":true}'::jsonb,ARRAY[]::text[])`,[w,bid,[uRace]]),
+      b.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"read":false}'::jsonb)`,[w,bid,mRace]),
+    ]);
+    await assertExact(bid,'after concurrent IMAP + API flag toggle');
+    // 8. Pre-backfill NULL fallback (Condition 3) + idempotent re-run of migration 410.
+    await a.query('UPDATE inbox_state SET unread=NULL WHERE inbox_id=$1',[bid]);
+    assert.equal(await stored(bid),null);
+    const liveBefore=await exact(bid);
+    assert.ok(liveBefore>0,'fixture must have unread messages to prove fallback never shows 0');
+    assert.equal(await viewed(bid),liveBefore,'inbox_view falls back to live count while unread IS NULL');
+    const mDuring=unique('msg');
+    await deliver(a,mDuring);
+    assert.equal(await stored(bid),null,'writers leave NULL as NULL until backfill locks the row');
+    assert.equal(await viewed(bid),liveBefore+1,'inbox_view stays exact while mail arrives before backfill');
+    const backfillSql=await readFile(new URL('./migrations/410_inbox_unread_backfill.sql',import.meta.url),'utf8');
+    for(let pass=0;pass<2;pass++){
+      let cur='';
+      for(;;){const next=(await a.query(backfillSql,[cur])).rows[0].cursor as string|null;if(next===null)break;cur=next;}
+    }
+    await assertExact(bid,'after 2x idempotent backfill');
+    // 9. Scheduled reconcileInboxState corrects drift and reports it loudly.
+    await a.query('UPDATE inbox_state SET unread=unread+7 WHERE inbox_id=$1',[bid]);
+    await a.query("DELETE FROM sending_upload_reconcile WHERE id='inbox-state'");
+    const rec=await reconcileInboxState({...fixtureWorker!.runtime,db:drz},10_000);
+    assert.ok(rec.corrected>=1&&rec.drifted>=1,JSON.stringify(rec));
+    await assertExact(bid,'after reconcileInboxState');
+    // 10. inbox_retention_batch mid-drain keeps unread exact on ended ephemeral inbox.
+    const eph=unique('mbx');
+    await a.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode,expires_at,delete_after) VALUES($1,$2,$3,$4,'inbox','ephemeral',now()-interval '2 hours',now()-interval '1 hour')",[eph,w,dom,'eph@'+host]);
+    await a.query('INSERT INTO inbox_state(inbox_id,workspace_id,messages,unread) VALUES($1,$2,2,2)',[eph,w]);
+    const tEph=unique('thr');await a.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)',[tEph,w]);
+    for(const mid of [unique('msg'),unique('msg')]){
+      await a.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,lifecycle) VALUES($1,$2,$3,'inbound','ephemeral')",[mid,w,tEph]);
+      await a.query("INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,read,received_at) VALUES($1,$2,$3,$4,'inbound',false,now())",[eph,mid,w,tEph]);
+    }
+    await a.query('SELECT inbox_retention_batch(25)');
+    assert.equal((await a.query('SELECT FROM mailboxes WHERE id=$1',[eph])).rowCount,0);
+  });
+  test('inbound threads: workspace-wide and single-address paging match full grouping across multi-address, equal-timestamp and ended-inbox edges',async t=>{
+    await simulatedSesFixture(t,async({db,local,runtime})=>{
+      const w=runtime.config.workspaceId,dom=unique('mdom'),host=w+'.invalid';
+      const [boxA,boxB,boxC,boxEnded]=[unique('mbx'),unique('mbx'),unique('mbx'),unique('mbx')];
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')",[dom,w,host,REGION]);
+      for(const [id,addr,ended] of [[boxA,'a@'+host,false],[boxB,'b@'+host,false],[boxC,'c@'+host,false],[boxEnded,'ended@'+host,true]] as const){
+        await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode,expires_at,delete_after) VALUES($1,$2,$3,$4,'inbox',$5,$6,$7)",
+          [id,w,dom,addr,ended?'ephemeral':'forever',ended?new Date(Date.now()-7200_000).toISOString():null,ended?new Date(Date.now()-3600_000).toISOString():null]);
+        await db.query("INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,$3,'primary')",[w,addr,id]);
+        await db.query('INSERT INTO inbox_state(inbox_id,workspace_id,unread) VALUES($1,$2,0)',[id,w]);
+      }
+      const add=async(tid:string,mid:string,boxes:{id:string;at:string;starred?:boolean;archived?:boolean;trashed?:boolean}[],subject:string)=>{
+        const newest=boxes.map(x=>x.at).sort().at(-1)!;
+        await db.query('INSERT INTO mail_threads(id,workspace_id,subject,message_count,last_message_at) VALUES($1,$2,$3,1,$4) ON CONFLICT(id) DO UPDATE SET message_count=mail_threads.message_count+1,last_message_at=greatest(mail_threads.last_message_at,excluded.last_message_at)',[tid,w,subject,newest]);
+        await db.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,subject,from_address,snippet,received_at,lifecycle) VALUES($1,$2,$3,'inbound',$4,'ext@example.invalid',$4,$5,'kept')",[mid,w,tid,subject,newest]);
+        for(const x of boxes){
+          await db.query("INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,read,received_at) VALUES($1,$2,$3,$4,'inbound',false,$5)",[x.id,mid,w,tid,x.at]);
+          await db.query(`INSERT INTO mailbox_threads(mailbox_id,thread_id,workspace_id,subject,snippet,message_count,unread_count,last_message_at,last_inbound_at,starred,archived,trashed_at)
+            VALUES($1,$2,$3,$4,$4,1,1,$5,$5,$6,$7,$8)
+            ON CONFLICT(mailbox_id,thread_id) DO UPDATE SET message_count=mailbox_threads.message_count+1,last_message_at=greatest(mailbox_threads.last_message_at,excluded.last_message_at),starred=mailbox_threads.starred OR excluded.starred`,
+            [x.id,tid,w,subject,x.at,!!x.starred,!!x.archived,x.trashed?x.at:null]);
+        }
+      };
+      // 3 distinct threads with IDENTICAL timestamp (order must tie-break by id DESC).
+      const eqAt='2026-11-23T12:00:00.123456Z';
+      const [tEq1,tEq2,tEq3]=['thr_eq_a_'+unique('x'),'thr_eq_b_'+unique('x'),'thr_eq_c_'+unique('x')];
+      await add(tEq1,unique('msg'),[{id:boxA,at:eqAt}],'Equal 1');
+      await add(tEq2,unique('msg'),[{id:boxB,at:eqAt}],'Equal 2');
+      await add(tEq3,unique('msg'),[{id:boxC,at:eqAt}],'Equal 3');
+      // Multi-address thread: older boxB is starred, newer boxA is not, and boxEnded has an even newer message (must be excluded!).
+      const tMulti=unique('thr');
+      await add(tMulti,unique('msg'),[{id:boxB,at:'2026-11-23T12:00:01.000000Z',starred:true}],'Multi older starred');
+      await add(tMulti,unique('msg'),[{id:boxA,at:'2026-11-23T12:00:03.000000Z'}],'Multi newer live');
+      await add(tMulti,unique('msg'),[{id:boxEnded,at:'2026-11-23T12:00:09.000000Z'}],'Multi ended newest');
+      // Multi-address thread with IDENTICAL timestamp on boxA and boxB (shared single message -> messageCount must be 1, emitted once!).
+      const tShared=unique('thr');
+      await add(tShared,unique('msg'),[{id:boxA,at:'2026-11-23T12:00:04.000000Z'},{id:boxB,at:'2026-11-23T12:00:04.000000Z',starred:true}],'Shared equal ts');
+      // Trashed thread in boxC.
+      const tTrash=unique('thr');
+      await add(tTrash,unique('msg'),[{id:boxC,at:'2026-11-23T12:00:05.000000Z',trashed:true}],'Trashed');
+      const collectAll=async(qs:string)=>{
+        const out:Json[]=[],seen=new Set<string>();
+        let cursor:string|null=null;
+        for(let i=0;i<20;i++){
+          const page=ok(await local('GET',`/v1/inbound/threads?limit=2&${qs}${cursor?'&cursor='+encodeURIComponent(cursor):''}`));
+          for(const row of page.data){assert.ok(!seen.has(row.id),`duplicate thread ${row.id} on ${qs}`);seen.add(row.id);out.push(row);}
+          cursor=page.nextCursor;if(!cursor)break;
+        }
+        return out;
+      };
+      // Compare workspace-wide views and single-address view against reference GROUP BY ground truth.
+      const all=await collectAll('view=all');
+      assert.deepEqual(all.map(r=>r.id),[tTrash,tShared,tMulti,tEq3,tEq2,tEq1]);
+      const sharedRow=all.find(r=>r.id===tShared)!;
+      assert.deepEqual(sharedRow.addressIds,[boxA,boxB].sort());
+      assert.equal(sharedRow.messageCount,1,'shared delivery counts distinct messages');
+      const multiRow=all.find(r=>r.id===tMulti)!;
+      assert.deepEqual(multiRow.addressIds,[boxA,boxB].sort(),'ended inbox excluded');
+      assert.equal(multiRow.lastMessageAt,'2026-11-23T12:00:03.000Z','ended inbox timestamp excluded');
+      assert.equal(multiRow.messageCount,2);
+      const starred=await collectAll('view=starred');
+      assert.deepEqual(starred.map(r=>r.id),[tShared,tMulti]);
+      assert.equal(starred[1]!.lastMessageAt,'2026-11-23T12:00:03.000Z','starred view keeps live max timestamp');
+      const inbox=await collectAll('view=inbox');
+      assert.deepEqual(inbox.map(r=>r.id),[tShared,tMulti,tEq3,tEq2,tEq1]);
+      const trash=await collectAll('view=trash');
+      assert.deepEqual(trash.map(r=>r.id),[tTrash]);
+      const onlyA=await collectAll(`view=all&addressId=${boxA}`);
+      assert.deepEqual(onlyA.map(r=>r.id),[tShared,tMulti,tEq1]);
+      assert.equal(onlyA.find(r=>r.id===tMulti)!.messageCount,1);
+      // Full-text search path (q=) also works with LIMIT 1 latest_id.
+      const searched=await collectAll('view=all&q=Shared');
+      assert.deepEqual(searched.map(r=>r.id),[tShared]);
+    });
+  });
   test('mail gateway: a signed folder edit waiting behind deletion is denied without a write',async t=>{
     const db=await fixtureDatabase(t),rt=fixtureWorker!.runtime,w=unique('gwdel'),bid=unique('mbx'),kid=unique('app');
     await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'gwdel.invalid',$3,'active','store')",[bid,w,REGION]);
