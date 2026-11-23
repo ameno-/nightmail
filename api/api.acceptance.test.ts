@@ -26422,6 +26422,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const {reconcileInboxState}=await import('./src/maintenance.js');
     const {drizzle}=await import('drizzle-orm/node-postgres');
     const {digest,randomSecret}=await import('./src/core.js');
+    cleanup(t,async()=>{for(const tbl of ['mailbox_events','mail_gc_candidates','mail_receipts','mailbox_keys','mailbox_addresses','mailbox_threads','mailbox_messages','mail_messages','mail_threads','mailboxes','mailbox_domains','api_request_budgets','mailbox_write_lanes'])await a.query(`DELETE FROM ${tbl} WHERE workspace_id=$1`,[w]);});
     await a.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')",[dom,w,host,REGION]);
     const exact=async(bid:string)=>Number((await a.query('SELECT count(*)::int n FROM mailbox_messages WHERE mailbox_id=$1 AND NOT read AND held_reason IS NULL',[bid])).rows[0].n);
     const stored=async(bid:string)=>(await a.query('SELECT unread FROM inbox_state WHERE inbox_id=$1',[bid])).rows[0].unread as number|null;

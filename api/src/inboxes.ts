@@ -221,9 +221,12 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
     responses: { 200: response(z.object({ data: z.array(Inbox), nextCursor: z.string().nullable() }).openapi('InboxPage')), ...errors },
   }), async c => {
     const v = access(c, 'read'), q = c.req.valid('query');
-    const { rows } = await budgetedRead(c.env.db, db => db.execute<{ box: Box }>(
+    const query = (db: DbExecutor) => db.execute<{ box: Box }>(
       sql`SELECT inbox_view(b) box FROM mailboxes b WHERE ${agentInbox(v)} ${q.type ? sql`AND b.create_request->>'type'=${q.type}` : sql``} ${q.cursor ? sql`AND b.id>${q.cursor}` : sql``} ${q.status ? sql`AND CASE WHEN delete_after<=now() THEN 'deleting' WHEN expires_at<=now() THEN 'expired' ELSE 'active' END=${q.status}` : sql``} ${q.q ? sql`AND strpos(lower(b.address||' '||coalesce(b.display_name,'')),lower(${q.q}))>0` : sql``} ORDER BY id LIMIT ${q.limit + 1}`,
-    ), readLimit(INBOX_LIST_READ));
+    );
+    const { rows } = q.q || q.status || q.type
+      ? await budgetedRead(c.env.db, query, readLimit(INBOX_LIST_READ))
+      : await query(c.env.db);
     return c.json({ data: rows.slice(0, q.limit).map(r => r.box), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.box.id : null }, 200);
   });
   app.openapi(createRoute({

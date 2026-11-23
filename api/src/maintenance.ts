@@ -431,8 +431,6 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
   let next: string | null = null, through: string[] = [];
   try {
     const inboxComplete = await sweepInboxes(runtime, Math.min(60_000, Math.floor(budgetMs / 5)));
-    try { await reconcileInboxState(runtime, Math.min(15_000, Math.floor(budgetMs / 10))); }
-    catch (error) { failed.push('inbox_reconcile'); logError(error, { code: 'RETENTION_STEP_FAILED', table: 'inbox_reconcile' }, 'warn'); }
     // A durable daily election prevents two reconcilers from applying the same
     // snapshot difference. Dispatch continues adding deltas while this runs.
     try {
@@ -498,6 +496,7 @@ export async function hourlyUpkeep(runtime: Runtime, mailboxRuntime: () => Promi
   for (const [code, step] of [
     ['HOSTED_HEALTH_CHECK_FAILED', () => checkHostedHealth(runtime)],
     ['UPLOAD_RECONCILE_FAILED', () => reconcileUploads(runtime)],
+    ['INBOX_RECONCILE_FAILED', () => reconcileInboxState(runtime)],
     ['PREVIEW_SWEEP_FAILED', async () => (await import('./preview-images.js')).sweepPreviews(runtime)],
     ['REPUTATION_ALERT_CHECK_FAILED', async () => (await import('./reputation-alerts.js')).checkReputationAlerts(runtime)],
     ['MAILBOX_HOURLY_FAILED', async () => (await import('./mailbox-ingest.js')).mailboxHourly(await mailboxRuntime())],
