@@ -822,7 +822,7 @@ export const queryAudience = <ThrowOnError extends boolean = false>(options: Opt
 });
 
 /**
- * Create a 15-minute immutable plan for a bounded AudienceQL bulk mutation (at most 10,000 contacts per plan; newest 25 unapplied plans kept per workspace). Does not modify contacts or memberships. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.
+ * Create a 15-minute immutable plan for a bounded AudienceQL bulk mutation. Does not modify contacts or memberships. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters. At most 10,000 contacts per plan; newest 25 unapplied plans kept per workspace.
  */
 export const planAudienceMutation = <ThrowOnError extends boolean = false>(options: Options<PlanAudienceMutationData, ThrowOnError>): RequestResult<PlanAudienceMutationResponses, PlanAudienceMutationErrors, ThrowOnError> => (options.client ?? client).post<PlanAudienceMutationResponses, PlanAudienceMutationErrors, ThrowOnError>({
     security: [
