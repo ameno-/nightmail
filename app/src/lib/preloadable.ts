@@ -3,12 +3,12 @@ import { createContext, createElement, useContext, useEffect, useReducer, type C
 // What a page shows while its chunk downloads: the route skeleton in the dashboard, a loader elsewhere.
 export const ChunkFallback = createContext<ReactNode>(null)
 
-// A deploy since this page loaded removes chunks the tab hasn't fetched yet. Background warm-ups (idle sweep, hover)
-// swallow the error and mark the build stale; only a real navigation the user triggered reloads/navigates to the new
-// build, never over unsaved edits guarded by useLeaveGuard, and at most once a minute so real errors reach the boundary.
+// A deploy since this page loaded removes the chunks it hasn't fetched yet, and the server answers one with the
+// dashboard's HTML, so the import fails (a teammate joining from an invitation link met it: Overview's code was first
+// needed after Join). Load the page again for the current build, once a minute at most: a failure right after a reload
+// isn't a stale build and goes to the error boundary. 'nightmail:reloading' lets the toasts on screen survive it.
 const RELOADED = 'nightmail.chunk-reload'
 let reloading = false
-let buildStale = false
 let activeChunkNavigations = 0
 let dirtyGuards = 0
 
@@ -31,31 +31,12 @@ function reloadForNewBuild() {
   return true
 }
 
+// Only reload on vite:preloadError while a real route navigation is loading and no unsaved-edit guard is active.
+// Background warm-ups (idle sweep / hover) do NOT call preventDefault(), so the dynamic import rejects cleanly,
+// chunk() clears pending without caching a broken module, and the next real navigation retries and reloads once.
 if (typeof window !== 'undefined') {
   window.addEventListener('vite:preloadError', event => {
-    buildStale = true
-    // Background warm-ups (idle sweep / hover) must never reload the page or discard typed text.
-    if (activeChunkNavigations > 0 && dirtyGuards === 0) {
-      if (reloadForNewBuild()) event.preventDefault()
-    } else {
-      event.preventDefault()
-    }
-  })
-}
-
-if (typeof document !== 'undefined') {
-  // Bubble-phase listener runs AFTER useLeaveGuard's capture-phase listener: if a page has unsaved edits,
-  // useLeaveGuard intercepts the click first (defaultPrevented = true) and asks before leaving.
-  document.addEventListener('click', event => {
-    if (!buildStale || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
-    const link = (event.target as Element | null)?.closest?.('a[href]') as HTMLAnchorElement | null
-    if (!link || (link.target && link.target !== '_self') || link.hasAttribute('download')) return
-    const url = new URL(link.href, window.location.href)
-    if (url.origin !== window.location.origin || (url.pathname === window.location.pathname && url.search === window.location.search)) return
-    event.preventDefault()
-    reloading = true
-    window.dispatchEvent(new Event('nightmail:reloading'))
-    window.location.assign(url.href)
+    if (activeChunkNavigations > 0 && dirtyGuards === 0 && reloadForNewBuild()) event.preventDefault()
   })
 }
 
@@ -70,10 +51,19 @@ export function chunk<Module>(load: () => Promise<Module>) {
   let pending: Promise<Module> | undefined
   const listeners = new Set<() => void>()
   const settle = () => listeners.forEach(listener => listener())
-  const preload = () => pending ??= load().then(
-    module => { loaded = module; failure = undefined; settle(); return module },
-    error => { pending = undefined; failure = error; buildStale = true; settle(); throw error },
-  )
+  const start = (forNavigation: boolean) => {
+    if (forNavigation) failure = undefined
+    return pending ??= load().then(
+      module => { loaded = module; failure = undefined; settle(); return module },
+      error => {
+        pending = undefined
+        if (forNavigation || activeChunkNavigations > 0) failure = error
+        settle()
+        throw error
+      },
+    )
+  }
+  const preload = () => start(false)
   const page = <Props extends object>(pick: (module: Module) => ComponentType<Props>) => function ChunkPage(props: Props) {
     const fallback = useContext(ChunkFallback)
     const [, rerender] = useReducer((n: number) => n + 1, 0)
@@ -83,7 +73,7 @@ export function chunk<Module>(load: () => Promise<Module>) {
       let active = true
       const release = () => { if (active) { active = false; activeChunkNavigations = Math.max(0, activeChunkNavigations - 1) } }
       listeners.add(rerender)
-      preload().then(release, release)
+      start(true).then(release, () => { release(); rerender() })
       if (loaded || failure !== undefined) { release(); rerender() }
       return () => { release(); listeners.delete(rerender) }
     }, [])

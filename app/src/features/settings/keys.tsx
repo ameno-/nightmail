@@ -96,7 +96,7 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
   const opener = useRef<HTMLElement | null>(null)
   const view = (row: Row) => { const focused = document.activeElement; opener.current = focused instanceof HTMLElement && focused !== document.body ? focused : null; setViewing(row) }
   const referencedIds = (keys.data ?? []).flatMap(key => key.access.type === 'addresses' ? key.access.addressIds ?? [] : [])
-  const resolvedAddresses = useResolvedAddresses(referencedIds, addresses.data ?? [], Boolean(keys.data && addresses.data))
+  const resolvedAddresses = useResolvedAddresses(referencedIds, addresses.data ?? [], Boolean(keys.data && addresses.data), addresses.data?.nextCursor ?? null)
   const address = (id: string) => resolvedAddresses.byId.get(id)?.address ?? addresses.data?.find(item => item.id === id)?.address ?? id
   // Edit opens once what its form lists has loaded (a workspace key's domains, an inbox key's inboxes), so they don't
   // push its fields down as they arrive.

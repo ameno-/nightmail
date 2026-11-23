@@ -95,12 +95,12 @@ function WebhookDetail() {
   const [secret, setSecret] = useState<string | null>(null)
   const [confirm, setConfirm] = useState<'rotate' | 'delete' | null>(null)
   useEffect(() => { if (webhook.data && !input) setInput(draftOf(webhook.data)) }, [webhook.data, input])
-  // Only a failed first load replaces the page: a later refetch that fails keeps the form and its unsaved edits.
-  if (webhook.error && !webhook.data) return <><PageHeader title="Webhook" backTo={list} /><ErrorState error={webhook.error} onRetry={() => void webhook.refetch()} /></>
   const current = webhook.data
   const chosenIds = input?.addressIds ?? current?.addressIds ?? []
   const resolvedSaved = useResolvedAddresses(chosenIds, addresses.items, Boolean(current))
   const shownAddresses = mergeAddresses(resolvedSaved.items, addresses.items)
+  // Only a failed first load replaces the page: a later refetch that fails keeps the form and its unsaved edits.
+  if (webhook.error && !webhook.data) return <><PageHeader title="Webhook" backTo={list} /><ErrorState error={webhook.error} onRetry={() => void webhook.refetch()} /></>
   // The saved response is newer than the cached endpoint until the refetch lands.
   const currentHeaders = save.data?.headers ?? current?.headers ?? []
   const dirty = !!current && !!input && (headersChanged(headers, currentHeaders) || JSON.stringify(draftOf(current)) !== JSON.stringify({ ...input, eventTypes: [...input.eventTypes].sort() }))
