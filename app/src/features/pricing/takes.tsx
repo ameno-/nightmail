@@ -3,8 +3,7 @@ import { Link, useSearchParams } from 'react-router'
 import { ArrowRight } from 'lucide-react'
 import { Disclosure } from '../../components/ui'
 import { calculatorPath, Checked, CheckedOn, Cite, Ours, Terms } from './content'
-import { CHECKED, comparisons, count, formatCount, mailchimp, MAILCHIMP_USE, mailchimpStops, money, nightmail, nightmailBill, quote, ucOf, yearlyFloor, type Usage } from './prices'
-import { usd } from '../../../../api/src/billing/rates'
+import { CHECKED, comparisons, count, formatCount, mailchimp, MAILCHIMP_USE, mailchimpStops, money, nightmail, nightmailBill, price, quote, ucOf, yearlyFloor, type Usage } from './prices'
 
 // Two takes on the Mailchimp comparison, for one to be chosen: /compare/mailchimp?take=a (a control for the list size,
 // then the two prices) and ?take=b (three sizes at once, as a chart). Without the parameter the page is the table
@@ -18,8 +17,7 @@ const rowOf = (usage: Usage): Row[] => { const q = quote(mailchimp, usage); retu
 const STOPS = mailchimpStops.flatMap(rowOf), SIZES = c.sizes.flatMap(rowOf)
 /** A bar's share of the scale; a price above zero is never drawn as nothing. */
 const share = (uc: bigint, max: number) => uc > 0n ? Math.max(Number(uc) / Number(ucOf(max)), .004) : 0
-/** What Nightmail costs less: "$251", or "$26.30" when it isn't whole dollars. */
-const less = (row: Row) => usd(ucOf(row.cents) - row.ours.uc).replace(/\.00$/, '')
+const less = (row: Row) => price(ucOf(row.cents) - row.ours.uc)
 
 export function MailchimpTake({ take }: { take: 'a' | 'b' }) {
   return <div className="take">

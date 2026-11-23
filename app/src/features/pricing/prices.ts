@@ -25,9 +25,9 @@ export function count(value: unknown): number {
 export const formatCount = (n: number) => n.toLocaleString('en-US')
 /** Whole US cents as micro-cents (1¢ = 1,000,000 µ¢), the billing code's unit. */
 export const ucOf = (cents: number) => BigInt(cents) * 1_000_000n
-export const money = (cents: number) => usd(ucOf(cents))
-/** A price in a sentence: "$20" for whole dollars, else as money(). */
-export const dollars = (cents: number) => cents % 100 === 0 ? `$${(cents / 100).toLocaleString('en-US')}` : money(cents)
+/** A price as the pages print it: the billing code's usd() without the cents of a whole-dollar amount ("$270", "$26.50", "$0"). */
+export const price = (uc: bigint) => usd(uc).replace(/\.00$/, '')
+export const money = (cents: number) => price(ucOf(cents))
 export const dayOf = (iso: string) => new Date(`${iso}T00:00:00Z`).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' })
 
 // ---------------------------------------------------------------- Nightmail, from the billing code
@@ -39,7 +39,7 @@ export const nightmail = {
   storagePerGb: usd(RATES.storageUcPerGbMonth),
   freeStorageGb: Number(RATES.freeStorageBytes / 1_000_000_000n),
   storageAfterDays: STORAGE_AFTER_DAYS,
-  minTopUp: dollars(CREDIT.minTopUpCents),
+  minTopUp: money(CREDIT.minTopUpCents),
   expiresAfterMonths: CREDIT.expiresAfterMonths,
   evaluation: EVALUATION.recipients,
   growthHours: GROWTH.hours,
@@ -51,10 +51,10 @@ export type BillLine = { used: number; free: number; paid: number; uc: bigint; t
 export function nightmailBill(sent: number, received: number) {
   const line = (used: number, free: number): BillLine => {
     const paid = Math.max(0, used - free), uc = BigInt(paid) * RATES.emailUc
-    return { used, free, paid, uc, text: usd(uc) }
+    return { used, free, paid, uc, text: price(uc) }
   }
   const s = line(sent, RATES.freeSentEmails), r = line(received, RATES.freeReceivedEmails), total = s.uc + r.uc
-  return { sent: s, received: r, uc: total, text: usd(total) }
+  return { sent: s, received: r, uc: total, text: price(total) }
 }
 /** The arithmetic behind one line, as the pages print it. */
 export const billMath = (line: BillLine) => line.paid === 0
@@ -247,7 +247,7 @@ export const ses = {
   essentials: { ucPerEmail: 16_000n, source: read(SES, 'Essentials: 0 – 10M emails / month $0.16 per 1,000 emails … New SES accounts … will start on the Essentials plan beginning July 21, 2026.') },
 }
 export const sesPerThousand = (uc: bigint) => `$${perThousandUsd(uc)}`
-export const sesBill = (u: Usage) => usd(BigInt(u.sent + u.received) * ses.ucPerEmail)
+export const sesBill = (u: Usage) => price(BigInt(u.sent + u.received) * ses.ucPerEmail)
 
 // ---------------------------------------------------------------- the pages' comparisons and disclosures
 
@@ -262,7 +262,7 @@ export const notCheaper: Fact[] = [
   { text: `Amazon SES on its own: ${sesPerThousand(ses.ucPerEmail)} per 1,000 sent or received (${sesPerThousand(ses.essentials.ucPerEmail)} sent on the Essentials plan, where new AWS accounts start). Connect your own AWS account and Nightmail charges nothing; Amazon bills you.`, source: ses.essentials.source },
   { text: 'Mailchimp’s paid plans include automations, sign-up forms, landing pages and A/B testing. Nightmail has none of these.', source: read(MAILCHIMP, 'visual automation flows …, templates, A/B testing, …, forms and landing pages') },
   { text: 'Kit is free up to 10,000 subscribers, without automations.', source: read('https://kit.com/pricing', '$0 /mo Free—up to 10,000 subscribers … Visual automation builder … Free: No') },
-  { text: `Flodesk is ${dollars(FLODESK_CENTS)} a month for unlimited subscribers and sends. Nightmail costs more above ${formatCount(flodeskCrossover)} emails sent a month.`, source: read('https://flodesk.com/pricing', 'Email: $38/month with annual billing ($456/year), or $46/month billed monthly … Both paid plans include unlimited subscribers and unlimited email sends.') },
+  { text: `Flodesk is ${money(FLODESK_CENTS)} a month for unlimited subscribers and sends. Nightmail costs more above ${formatCount(flodeskCrossover)} emails sent a month.`, source: read('https://flodesk.com/pricing', 'Email: $38/month with annual billing ($456/year), or $46/month billed monthly … Both paid plans include unlimited subscribers and unlimited email sends.') },
   { text: 'Cloudflare Email Routing forwards mail for free. On Nightmail a forward is one received and one sent email.', source: read('https://developers.cloudflare.com/email-service/platform/pricing/', 'Inbound emails (Email Routing) | Unlimited | Unlimited') },
 ]
 
@@ -312,7 +312,7 @@ export const comparisons: Record<'mailchimp' | 'resend', Comparison> = {
     ours: [
       { text: `Received email has its own ${formatCount(nightmail.freeReceived)} free a month. Resend counts it against the sending allowance.`, source: resendReceived },
       { text: 'No charge per inbox. Resend includes 3 and charges $1 a month for each one after that.', source: read(RESEND, 'Every plan includes 3 inboxes. Paid plans can enable pay-as-you-go to add more at $1 per inbox per month') },
-      { text: `No contact plan for marketing. Resend’s Pro marketing is ${dollars(resendMarketing.plans[1]!.tiers[0]!.cents)} a month at ${formatCount(resendMarketing.plans[1]!.tiers[0]!.size)} contacts.`, source: resendMarketing.plans[1]!.tiers[0]!.source },
+      { text: `No contact plan for marketing. Resend’s Pro marketing is ${money(resendMarketing.plans[1]!.tiers[0]!.cents)} a month at ${formatCount(resendMarketing.plans[1]!.tiers[0]!.size)} contacts.`, source: resendMarketing.plans[1]!.tiers[0]!.source },
     ],
   },
 }

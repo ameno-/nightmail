@@ -279,8 +279,9 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
   const before = failed, file = 'app/src/features/pricing/prices.ts'
   const { RATES, CREDIT, STORAGE_AFTER_DAYS, perThousandUsd } = await import('../src/billing/rates.js')
   const n = (value: number) => value.toLocaleString('en-US')
-  // Written again here, apart from the pages' own code: micro-cents to dollars, half up, four places under a cent.
-  const dollarsOf = (uc: bigint) => { const places = uc > 0n && uc < 1_000_000n ? 4 : 2, unit = 10n ** BigInt(8 - places), v = ((uc + unit / 2n) / unit).toString().padStart(places + 1, '0'); return '$' + n(Number(v.slice(0, -places))) + '.' + v.slice(-places) }
+  // Written again here, apart from the pages' own code: micro-cents to dollars, half up, four places under a cent, and
+  // no cents on a whole-dollar amount (the pages print "$19", "$26.50", "$0").
+  const dollarsOf = (uc: bigint) => { const places = uc > 0n && uc < 1_000_000n ? 4 : 2, unit = 10n ** BigInt(8 - places), v = ((uc + unit / 2n) / unit).toString().padStart(places + 1, '0'); return '$' + n(Number(v.slice(0, -places))) + (v.slice(-places) === '00' ? '' : '.' + v.slice(-places)) }
   const charged = (sent: number, received: number) => BigInt(Math.max(0, sent - RATES.freeSentEmails) + Math.max(0, received - RATES.freeReceivedEmails)) * RATES.emailUc
   // What a typed value means: its digits, at most a billion.
   const typed = (value: string) => { const digits = value.replace(/\D/g, ''); return digits ? Math.min(Number(digits.slice(0, 10)), 1e9) : 0 }

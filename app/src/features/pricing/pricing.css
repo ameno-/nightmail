@@ -1,5 +1,9 @@
 /* The price pages (calculator and comparisons): the legal pages' header and type, a figure-first layout, hairlines
-   between rows and no side rules. The accent is only on the primary button. Measures in em (see legal.css). */
+   between rows and no side rules. The accent is only on the primary button. Measures in em (see legal.css).
+   One column for every page: .price-main, centred, and every section fills it (only the lead under a title keeps a
+   reading measure), so the margins are equal and nothing moves between the tabs; the gutter keeps that true where a
+   scrollbar takes room and one page scrolls and the next doesn't. */
+html:has(.price-page) { scrollbar-gutter: stable; }
 .price-page { --price-header: 58px; display: flex; flex-direction: column; min-height: 100dvh; background: var(--color-surface); color: var(--color-text); }
 .price-header { position: sticky; z-index: 5; top: 0; display: flex; align-items: center; gap: var(--space-24); height: var(--price-header); padding-inline: var(--space-24); border-bottom: 1px solid var(--color-border); background: var(--color-surface); }
 .price-header .wordmark, .price-header .theme-toggle { position: relative; inset: auto; }
@@ -50,9 +54,9 @@
 .price-row__plan { margin-inline-start: var(--space-8); color: var(--color-muted); font-weight: var(--font-weight-regular); }
 .price-row__price { font-family: var(--font-mono); font-weight: 700; text-align: end; }
 .price-row__price--none { color: var(--color-muted); font-family: var(--font-body); font-weight: var(--font-weight-regular); }
-.price-row__meta { grid-column: 1 / -1; max-width: 48em; color: var(--color-muted); font-size: var(--text-sm); font-variant-numeric: normal; text-wrap: pretty; }
+.price-row__meta { grid-column: 1 / -1; color: var(--color-muted); font-size: var(--text-sm); font-variant-numeric: normal; text-wrap: pretty; }
 .price-facts { display: flex; flex-direction: column; gap: var(--space-8); margin: 0; padding-inline-start: 1.1em; font-size: var(--text-md); line-height: 1.55; font-variant-numeric: normal; }
-.price-facts li { max-width: 48em; padding-inline-start: .2em; text-wrap: pretty; }
+.price-facts li { padding-inline-start: .2em; text-wrap: pretty; }
 .price-facts li::marker { color: var(--color-faint); }
 
 /* A comparison: three sizes in a table, then what differs. */
@@ -68,7 +72,6 @@
 
 /* Two takes on the Mailchimp comparison (takes.tsx: ?take=a and ?take=b), until one is chosen. The two prices come
    first, as a picture: Mailchimp in the neutral series, Nightmail in the data navy, flat and square like Overview's. */
-.take { width: min(100%, 760px); }
 .take .price-intro { margin-bottom: var(--space-28); }
 .take .price-note { margin-top: var(--space-20); }
 .take .price-actions { margin-top: var(--space-28); }
