@@ -26,7 +26,7 @@
 --   1. ALTER TABLE sending_emails ENABLE TRIGGER sending_tally_insert, ENABLE TRIGGER sending_tally_update, ENABLE TRIGGER sending_tally_delete;
 --   2. Re-run the two idempotent diff INSERT statements in migration 409_sending_tallies_fill.sql.
 
-DO $
+DO $$
 BEGIN
   FOR attempt IN 1..60 LOOP
     BEGIN
@@ -38,7 +38,7 @@ BEGIN
     END;
   END LOOP;
   RAISE EXCEPTION 'sending_emails was busy for 3 minutes. Nothing was changed: run the migration again.' USING ERRCODE = 'lock_not_available';
-END $;
+END $$;
 
 CREATE TABLE sending_campaign_tallies (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
