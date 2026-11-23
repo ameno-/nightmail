@@ -9,6 +9,7 @@ import { EmailPreview } from '../../components/EmailPreview'
 import { date, shortDateTime, time } from '../../lib/format'
 import { CampaignAttachments, type CampaignAttachmentsRef } from './CampaignAttachments'
 import type { EmailComposerRef } from './EmailComposer'
+import { draftAttachments } from './composer-content'
 import { composer as composerChunk, EmailComposer } from './composer-chunk'
 import { queries } from '../../data/queries'
 import { usePrefetchQueries } from '../../data/prefetch'
@@ -22,7 +23,7 @@ import { useLeaveGuard } from '../../lib/leave-guard'
 import { useSingleFlight } from '../../lib/single-flight'
 import { usePhone } from '../../lib/media'
 
-// Only the draft schema's fields: the composer also returns inline attachment ids, which the API rejects as unknown keys.
+// Only the draft schema's fields: the API rejects unknown keys.
 const templateDraft = (draft: CampaignTemplateDraft): CampaignTemplateDraft => ({ name: draft.name.trim(), description: draft.description ?? '', subject: draft.subject.trim(), previewText: draft.previewText ?? '', fromName: draft.fromName ?? '', replyTo: draft.replyTo ?? [], html: draft.html ?? '', attachments: draft.attachments ?? [], ...(draft.unsubscribePageUrl ? { unsubscribePageUrl: draft.unsubscribePageUrl } : {}) })
 
 /** Creates a campaign draft from a published template and opens it in the editor. */
@@ -154,7 +155,7 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
     try {
       const content = await composer.current?.prepare()
       if (!content) throw new Error('The editor is still loading. Try again in a moment.')
-      const submitted = templateDraft({...draftRef.current, html: content.html, attachments: [...new Set([...(draftRef.current.attachments ?? []), ...(content.inlineAttachmentIds ?? [])])]})
+      const submitted = templateDraft({...draftRef.current, html: content.html, attachments: draftAttachments(draftRef.current.attachments, content)})
       const updated = await api.templates.update(templateRef.current.id, templateRef.current.revision, submitted)
       remember(updated)
       await refreshLists()

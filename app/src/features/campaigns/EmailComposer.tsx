@@ -7,7 +7,7 @@ import { Button, DropdownMenu, IconButton, SkeletonText } from '../../components
 import { useApi } from '../../data/context'
 import type { Attachment, AttachmentApi } from '../../data/types'
 import { attachmentLimit, composerLoading, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS } from './copy'
-import { prepareLocalImage, inlineImageSources, inlineImageHash, replaceEditorImageSources, loadInlineAttachments, cidImageSources } from './composer-content'
+import { prepareLocalImage, inlineImageSources, inlineImageHash, replaceEditorImageSources, loadInlineAttachments, cidImageSources, type ComposedDraft } from './composer-content'
 import { blockHtmlToDocument, documentToBlockHtml, isBlockDocumentEmpty, type EditorNode } from './block-content'
 import '@react-email/editor/themes/default.css'
 import './composer.css'
@@ -16,7 +16,7 @@ import { errorText } from '../../data/types'
 
 // The composer edits block HTML: the same document agents read and write through the
 // API. Opening converts block HTML to editor blocks; saving converts blocks back.
-type Draft = { html: string; inlineAttachmentIds?: string[] }
+type Draft = ComposedDraft
 export type EmailComposerRef = { prepare: () => Promise<Draft> }
 // personalize offers {{placeholder}} insertions.
 type Props = { attachmentIds?: string[]; attachmentApi?: AttachmentApi; initialHtml: string; disabled?: boolean; personalize?: boolean; onReady: () => void; onDirty: () => void; onAttach?: () => void; onBusy?: (busy: boolean) => void }
@@ -40,7 +40,8 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
   const [initialSnapshot] = useState(() => ({ html: initialHtml, attachmentIds: [...attachmentIds] }))
   // Inline attachments open as data URLs and save back as their cid references.
   const cidBySource = useRef(new Map<string, string>())
-  // Uploads must survive a failed prepare/save before their IDs reach attachmentIds.
+  // Inline images uploaded or opened here, by source: an upload must survive a failed prepare/save before its ID
+  // reaches attachmentIds, and an image removed by a save and then restored by undo must be attached again.
   const uploadedInline = useRef(new Map<string, Attachment>())
   const needsHydration = useRef(cidImageSources(initialHtml).size > 0).current
   const [hydrating, setHydrating] = useState(needsHydration)
@@ -159,6 +160,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     loadInlineAttachments(attachmentApi, initialSnapshot.attachmentIds, needed, controller.signal).then(result => {
       if (controller.signal.aborted) return
       cidBySource.current = new Map([...result.sources].map(([cid, url]) => [url, cid]))
+      result.items.forEach((item, url) => uploadedInline.current.set(url, item))
       setContent(replaceEditorImageSources(blockHtmlToDocument(initialSnapshot.html), result.sources) as EditorNode)
       setHydrating(false); setReady(false); setGeneration(value => value + 1)
     }).catch(cause => { if (!controller.signal.aborted) { setError(errorText(cause, 'Couldn’t load inline images.')); setContent(blockHtmlToDocument(initialSnapshot.html)); setHydrating(false); setReady(false); setGeneration(value => value + 1) } })
@@ -171,15 +173,23 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     const instance = editor.current
     if (!instance?.editor) throw new Error(composerLoading)
     let document = instance.getJSON() as EditorNode
-    if (isBlockDocumentEmpty(document)) return { html: '', inlineAttachmentIds: [] }
+    const empty = isBlockDocumentEmpty(document)
     const currentInline: string[] = []
     const allIds = new Set(attachmentIds)
-    const metadata = await Promise.all([...allIds].map(id => attachmentApi.get(id)))
-    const inlineSources = inlineImageSources(document as Record<string, unknown>)
+    let metadata = await Promise.all([...allIds].map(id => attachmentApi.get(id)))
+    const inlineSources = empty ? [] : inlineImageSources(document as Record<string, unknown>)
     for (const source of inlineSources) {
       const cached = uploadedInline.current.get(source)
       if (cached && !allIds.has(cached.id)) { metadata.push(cached); allIds.add(cached.id) }
     }
+    // An inline image the body no longer uses would go out as a stray attachment. Drop the ones this editor placed
+    // (bane- content IDs) or opened in the body; leave other inline attachments, set through the API, as they are.
+    const opened = cidImageSources(initialSnapshot.html)
+    const used = empty ? new Set<string>() : new Set([...cidImageSources(documentToBlockHtml(document)), ...inlineSources.flatMap(source => cidBySource.current.get(source)?.slice(4) ?? [])])
+    const removed = metadata.filter(item => item.disposition === 'inline' && item.contentId && !used.has(item.contentId) && (item.contentId.startsWith('bane-') || opened.has(item.contentId)))
+    const removedInlineIds = removed.map(item => item.id)
+    if (empty) return { html: '', inlineAttachmentIds: [], removedInlineIds }
+    metadata = metadata.filter(item => !removedInlineIds.includes(item.id)); removedInlineIds.forEach(id => allIds.delete(id))
     let totalSize = metadata.reduce((total, item) => total + item.size, 0)
     if (allIds.size > MAX_ATTACHMENTS || totalSize > MAX_ATTACHMENT_BYTES) throw new Error(attachmentLimit)
     const sources = new Map<string, string>()
@@ -206,7 +216,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     document = replaceEditorImageSources(document as Record<string, unknown>, sources) as EditorNode
     const html = documentToBlockHtml(document)
     if (html.length > 500_000) throw new Error('This email is too large. Remove an image or shorten the content before saving.')
-    return { html, inlineAttachmentIds: currentInline }
+    return { html, inlineAttachmentIds: currentInline, removedInlineIds }
   }
   function prepare(): Promise<Draft> {
     if (!preparing.current) preparing.current = prepareContent().finally(() => { preparing.current = null })

@@ -28,6 +28,7 @@ export { TemplatesPage, TemplateEditorPage } from './templates'
 import { TemplatePickerDialog } from './templates'
 import './campaigns.css'
 import type { EmailComposerRef } from './EmailComposer'
+import { draftAttachments } from './composer-content'
 import { composer as composerChunk, EmailComposer } from './composer-chunk'
 import { ChunkFallback } from '../../lib/preloadable'
 import { CampaignSenderInput, SenderLines } from './CampaignSenderInput'
@@ -287,7 +288,7 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
         const content = await composer.current?.prepare()
         if (!content) throw new Error(composerLoading)
         if (continuing && !content.html.trim()) throw new Error('Add some email content before continuing.')
-        submitted = { ...input, ...content, attachments: [...new Set([...(input.attachments ?? []), ...(content.inlineAttachmentIds ?? [])])], defaults: Object.fromEntries(Object.entries(input.defaults ?? {}).map(([key, value]) => [key, value.trim()]).filter(([, value]) => value)), name: input.name.trim(), subject: input.subject.trim(), fromName: input.fromName.trim(), fromEmail: input.fromEmail.trim(), regionId: input.regionId.trim() }
+        submitted = { ...input, html: content.html, attachments: draftAttachments(input.attachments, content), defaults: Object.fromEntries(Object.entries(input.defaults ?? {}).map(([key, value]) => [key, value.trim()]).filter(([, value]) => value)), name: input.name.trim(), subject: input.subject.trim(), fromName: input.fromName.trim(), fromEmail: input.fromEmail.trim(), regionId: input.regionId.trim() }
         if (!submitted.id) {
           submitted.idempotencyKey = crypto.randomUUID()
           creation.current = { input: structuredClone(submitted), version }
