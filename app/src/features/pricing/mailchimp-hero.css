@@ -1,0 +1,139 @@
+/* Five iterations on take 1, the number as the hero (mailchimp-hero.tsx: ?take=1a … 1e). Headings and words in Inter;
+   the big figures in Inter too, set tight. Colour carries meaning, flat and square: Nightmail is the data navy, Mailchimp
+   a pale teal (the received-mail series eased toward the page), the field it is measured against. Sizes in the hero
+   follow the column (cqi), so a line is as wide on a phone as it can be without breaking. */
+.hx { --hx-ours: var(--color-accent-data); --hx-theirs: color-mix(in oklab, var(--color-series-received) 32%, var(--color-surface)); container-type: inline-size; }
+:root[data-theme='dark'] .hx { --hx-theirs: color-mix(in oklab, var(--color-series-received) 40%, var(--color-surface)); }
+.hx h1 { font-family: var(--font-body); font-weight: 600; font-variation-settings: 'opsz' 32; font-variant-numeric: normal; }
+.hx b { font-weight: inherit; }
+.hx .price-note { margin-top: var(--space-20); }
+
+/* One size at a time: every size in one cell, the chosen one shown. */
+.hx-stack { display: grid; }
+.hx-stack__item { grid-area: 1 / 1; min-width: 0; visibility: hidden; opacity: 0; transition: opacity 140ms ease-out, visibility 0s linear 140ms; }
+.hx-stack__item[data-on] { visibility: visible; opacity: 1; transition: opacity 220ms ease-out 40ms; }
+
+/* The switch, and the emails a month the prices are for. */
+.hx-ask { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-8) var(--space-12); color: var(--color-muted); font-size: 15px; line-height: var(--leading-sm); }
+.hx-ask p { white-space: nowrap; font-variant-numeric: normal; }
+.hx-seg { display: inline-flex; gap: 2px; padding: 3px; border-radius: 8px; background: var(--color-layer-2); }
+.hx-seg button { height: 32px; padding-inline: var(--space-12); border: 0; border-radius: 5px; background: transparent; color: var(--color-muted); font: inherit; font-size: 14px; font-weight: var(--font-weight-bold); cursor: pointer; transition: background-color 120ms ease-out, color 120ms ease-out; }
+.hx-seg button[aria-checked='true'] { background: var(--color-surface); box-shadow: var(--shadow-button); color: var(--color-text); }
+:root[data-theme='dark'] .hx-seg button[aria-checked='true'] { background: var(--color-layer-3); }
+@media (hover: hover) and (pointer: fine) { .hx-seg button:hover:not([aria-checked='true']) { color: var(--color-text); } }
+.hx-seg button:focus-visible { outline: var(--focus-width) solid var(--color-focus); outline-offset: 1px; }
+
+/* The end: what Nightmail has, a check each, and the way into the calculator. */
+.hx-close { margin-top: 96px; }
+.hx-close h2 { font-family: var(--font-body); font-size: 22px; font-weight: 600; font-variation-settings: 'opsz' 32; line-height: 1.3; letter-spacing: -.016em; }
+.hx-close ul { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-16) var(--space-24); margin: var(--space-20) 0 0; padding: 0; list-style: none; }
+.hx-close li { display: flex; gap: var(--space-8); font-size: 16px; line-height: 24px; letter-spacing: -.006em; font-variant-numeric: normal; text-wrap: balance; }
+.hx-close li svg { flex: none; margin-top: 3px; color: var(--hx-ours); }
+.hx-close .ui-button { margin-top: var(--space-32); height: 44px; padding-inline: var(--space-20); font-size: 15px; }
+.hx .price-small { margin-top: 64px; }
+
+/* 1a. One statement in two lines: Mailchimp's price quieter, Nightmail's in ink with its figure in navy. */
+.hx1a-lines { margin-top: 40px; }
+.hx1a-lines h1 { display: flex; flex-direction: column; font-size: min(104px, 9.4cqi); line-height: 1.04; letter-spacing: -.045em; white-space: nowrap; }
+.hx1a-theirs { color: var(--color-faint); }
+.hx1a-ours b { color: var(--hx-ours); }
+
+/* 1b. The saving, huge, over Mailchimp's price as a bar and Nightmail's share of it in navy. */
+.hx1b-hero { margin-top: 40px; }
+.hx1b-hero h1 { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--space-24); }
+.hx1b-hero b { color: var(--hx-ours); font-size: min(200px, 21cqi); line-height: .96; letter-spacing: -.055em; }
+.hx1b-hero span { font-size: min(40px, 6.2cqi); line-height: 1.15; letter-spacing: -.025em; }
+.hx1b-bar { position: relative; height: 56px; margin-top: 48px; background: var(--hx-theirs); }
+.hx1b-bar i { position: absolute; inset: 0; background: var(--hx-ours); transform: scaleX(var(--share)); transform-origin: left center; transition: transform 320ms var(--ease-swap); }
+.hx1b-ends .hx-stack__item { display: flex; justify-content: space-between; gap: var(--space-16); margin-top: var(--space-12); }
+.hx1b-ends p { display: flex; flex-direction: column; color: var(--color-muted); font-size: 14px; line-height: var(--leading-sm); }
+.hx1b-ends b { color: var(--color-text); font-size: 22px; font-weight: 600; line-height: 30px; letter-spacing: -.02em; font-variant-numeric: normal; }
+.hx1b-theirs { align-items: flex-end; text-align: end; }
+
+/* 1c. Area: Mailchimp's price a square field, Nightmail's a square in its corner, each area its price. */
+.hx1c-hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: auto auto 1fr auto; column-gap: 64px; }
+.hx1c-hero > h1 { max-width: 8em; font-size: min(60px, 6cqi); line-height: 1.04; letter-spacing: -.035em; text-wrap: balance; }
+.hx1c-hero > .hx-ask { margin-top: var(--space-32); }
+.hx1c-area { grid-column: 2; grid-row: 1 / span 4; position: relative; aspect-ratio: 1; background: var(--hx-theirs); }
+.hx1c-area i { position: absolute; inset: 0; background: var(--hx-ours); transform: scale(var(--side)); transform-origin: left bottom; transition: transform 360ms var(--ease-swap); }
+.hx1c-keys { grid-column: 1; align-self: end; }
+.hx1c-keys dl { margin: 0; border-top: 1px solid var(--color-border-muted); }
+.hx1c-keys dl > div { display: flex; align-items: center; justify-content: space-between; gap: var(--space-16); min-height: 88px; border-bottom: 1px solid var(--color-border-muted); }
+.hx1c-keys dt { display: flex; align-items: center; gap: var(--space-12); font-size: 17px; font-weight: 600; letter-spacing: -.01em; }
+.hx1c-keys dt i { width: 16px; height: 16px; background: var(--hx-theirs); }
+.hx1c-ours dt i { background: var(--hx-ours); }
+.hx1c-keys dd { margin: 0; font-size: 48px; font-weight: 600; line-height: 1; letter-spacing: -.04em; font-variant-numeric: normal; }
+.hx1c-ours dd { color: var(--hx-ours); }
+.hx1c-hero > .price-note { grid-column: 1; }
+
+/* 1d. The ratio counted: one month of Mailchimp as a bar, and as many months of Nightmail as it pays for, to its scale. */
+.hx1d-hero { margin-top: 40px; }
+.hx1d-hero h1 { max-width: 15em; font-size: min(60px, 8.4cqi); line-height: 1.05; letter-spacing: -.035em; text-wrap: balance; }
+.hx1d-hero h1 b { color: var(--hx-ours); white-space: nowrap; }
+.hx1d-plot { display: grid; gap: var(--space-24); margin-top: 48px; }
+.hx1d-plot p { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--space-8); color: var(--color-muted); font-size: 15px; line-height: var(--leading-sm); }
+.hx1d-plot p > span:last-of-type { color: var(--color-text); font-size: 20px; font-weight: 600; letter-spacing: -.02em; font-variant-numeric: normal; }
+.hx1d-theirs > i, .hx1d-tiles { display: flex; flex-basis: 100%; height: 48px; margin-bottom: var(--space-12); }
+.hx1d-theirs > i { background: var(--hx-theirs); }
+.hx1d-tiles i { flex: none; width: calc(100% * var(--share)); height: 100%; border-right: 3px solid var(--color-surface); background: var(--hx-ours); background-clip: padding-box; }
+
+/* 1e. Nightmail's price on a navy field, Mailchimp's beside it, and the bar of one against the other. */
+.hx1e-field { --on: var(--color-on-accent); --on-quiet: color-mix(in oklab, var(--color-on-accent) 70%, var(--color-accent)); padding: 48px; border-radius: var(--radius-lg); background: var(--color-accent); color: var(--on); }
+.hx1e-field h1 { font-size: min(30px, 6cqi); line-height: 1.2; letter-spacing: -.02em; }
+.hx1e-pair .hx-stack__item { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: var(--space-16) var(--space-24); margin-top: 40px; }
+.hx1e-pair p { display: flex; flex-direction: column; }
+.hx1e-pair b { font-weight: 600; font-variant-numeric: normal; }
+.hx1e-pair p > span { color: var(--on-quiet); font-size: 18px; line-height: 1.3; }
+.hx1e-ours b { font-size: min(200px, 20cqi); line-height: .9; letter-spacing: -.055em; }
+.hx1e-ours > span { margin-top: var(--space-16); }
+.hx1e-theirs { align-items: flex-end; text-align: end; }
+.hx1e-theirs b { color: var(--on-quiet); font-size: min(64px, 9cqi); line-height: 1; letter-spacing: -.04em; }
+.hx1e-theirs > span { margin-top: var(--space-8); }
+.hx1e-bar { position: relative; height: 12px; margin-top: 40px; background: color-mix(in oklab, var(--color-on-accent) 22%, var(--color-accent)); }
+.hx1e-bar i { position: absolute; inset: 0; background: var(--on); transform: scaleX(var(--share)); transform-origin: left center; transition: transform 320ms var(--ease-swap); }
+.hx1e-field .hx-ask { margin-top: 40px; color: var(--on-quiet); }
+.hx1e-field .hx-seg { background: color-mix(in oklab, var(--color-on-accent) 12%, var(--color-accent)); }
+.hx1e-field .hx-seg button { color: var(--on-quiet); }
+:root .hx1e-field .hx-seg button[aria-checked='true'] { background: var(--on); box-shadow: none; color: var(--color-accent); }
+.hx1e-field .hx-seg button:focus-visible { outline-color: var(--on); }
+
+@media (prefers-reduced-motion: reduce) { .hx-stack__item, .hx-stack__item[data-on], .hx :is(.hx1b-bar, .hx1c-area, .hx1e-bar) i { transition: none; } }
+
+@media (max-width: 900px) {
+  .hx-close { margin-top: 80px; }
+  .hx-close ul { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .hx1c-hero { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; }
+  .hx1c-hero > * { grid-column: 1; }
+  .hx1c-area { grid-row: auto; margin-top: var(--space-32); }
+  .hx1c-keys { margin-top: var(--space-24); }
+  .hx1c-hero > h1 { max-width: none; font-size: min(52px, 10.4cqi); }
+}
+@media (max-width: 640px) {
+  .hx-ask { flex-direction: column; align-items: stretch; }
+  .hx-seg { display: flex; }
+  .hx-seg button { flex: 1; height: 40px; }
+  .hx-close { margin-top: 64px; }
+  .hx-close ul { grid-template-columns: minmax(0, 1fr); gap: var(--space-12); }
+  .hx-close .ui-button { width: 100%; }
+  .hx1a-lines { margin-top: var(--space-32); }
+  /* On a phone each figure takes a line of its own, as large as the column allows. */
+  .hx1a-lines h1 { gap: var(--space-20); font-size: 10cqi; line-height: 1.1; letter-spacing: -.035em; }
+  .hx1a-lines h1 > span { display: flex; flex-direction: column; }
+  .hx1a-lines h1 b { font-size: 26cqi; line-height: .98; letter-spacing: -.055em; }
+  .hx1b-hero { margin-top: var(--space-32); }
+  .hx1b-bar { height: 40px; margin-top: var(--space-32); }
+  .hx1c-keys dl > div { min-height: 64px; }
+  .hx1c-keys dd { font-size: 36px; }
+  .hx1d-hero { margin-top: var(--space-32); }
+  .hx1d-plot { margin-top: var(--space-32); }
+  .hx1d-theirs > i, .hx1d-tiles { height: 40px; }
+  .hx1d-tiles i { border-right-width: 2px; }
+  .hx1e-field { padding: var(--space-24) var(--space-20); }
+  .hx1e-pair .hx-stack__item { margin-top: var(--space-28); }
+  .hx1e-pair p > span { font-size: 15px; }
+  .hx1e-theirs { align-items: flex-start; text-align: start; }
+  .hx1e-ours b { font-size: 30cqi; }
+  .hx1e-theirs b { font-size: 13cqi; }
+  .hx1e-bar { margin-top: var(--space-28); }
+  .hx1e-field .hx-ask { margin-top: var(--space-28); }
+}

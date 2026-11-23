@@ -298,9 +298,10 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
     'const at = (path, element) => renderToStaticMarkup(h(MemoryRouter, { initialEntries: [path] }, element))',
     `const calculator = ${JSON.stringify(inputs)}.map(input => { const path = '/pricing?' + new URLSearchParams(input); return { input, path, html: at(path, h(content.Calculator)) } })`,
     "const compare = ['resend'].map(id => ({ id, html: at('/compare/' + id, h(content.Compare, { comparison: prices.comparisons[id] })) }))",
-    // The Mailchimp page is a chart of its own (mailchimp.tsx), and three compositions of it wait for a choice (mailchimp-takes.tsx).
-    "const sizes = prices.comparisons.mailchimp.sizes.length, takes = await import('./src/features/pricing/mailchimp-takes.tsx')",
-    "const chart = [{ id: 'mailchimp', sizes, html: at('/compare/mailchimp', h((await import('./src/features/pricing/mailchimp.tsx')).MailchimpComparison)) }, ...['1', '2', '3'].map(take => ({ id: 'mailchimp (take ' + take + ')', sizes, html: at('/compare/mailchimp?take=' + take, h(takes.MailchimpTake, { take })) }))]",
+    // The Mailchimp page is a chart of its own (mailchimp.tsx), and compositions of it wait for a choice: three takes
+    // (mailchimp-takes.tsx) and five iterations on the first (mailchimp-hero.tsx).
+    "const sizes = prices.comparisons.mailchimp.sizes.length, takes = await import('./src/features/pricing/mailchimp-takes.tsx'), hero = await import('./src/features/pricing/mailchimp-hero.tsx')",
+    "const chart = [{ id: 'mailchimp', sizes, html: at('/compare/mailchimp', h((await import('./src/features/pricing/mailchimp.tsx')).MailchimpComparison)) }, ...['1', '2', '3'].map(take => ({ id: 'mailchimp (take ' + take + ')', sizes, html: at('/compare/mailchimp?take=' + take, h(takes.MailchimpTake, { take })) })), ...hero.HERO_TAKES.map(take => ({ id: 'mailchimp (take ' + take + ')', sizes, html: at('/compare/mailchimp?take=' + take, h(hero.MailchimpHero, { take })) }))]",
     'const { OFFERS, comparisons, resendOverage, resendReceived } = prices',
     "process.stdout.write(JSON.stringify({ calculator, compare, chart, data: { OFFERS, comparisons, resendOverage, resendReceived } }, (_k, v) => typeof v === 'bigint' ? String(v) : v))",
   ].join('\n')
