@@ -297,10 +297,13 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
     'const at = (path, element) => renderToStaticMarkup(h(MemoryRouter, { initialEntries: [path] }, element))',
     `const calculator = ${JSON.stringify(inputs)}.map(input => { const path = '/pricing?' + new URLSearchParams(input); return { input, path, html: at(path, h(content.Calculator)) } })`,
     "const compare = ['mailchimp', 'resend'].map(id => ({ id, html: at('/compare/' + id, h(content.Compare, { comparison: prices.comparisons[id] })) }))",
+    // The Mailchimp page's two takes (takes.tsx): the first at every stop of its control, the second as it is.
+    "const takes = await import('./src/features/pricing/takes.tsx')",
+    "const take = [...prices.mailchimpStops.map(usage => '/compare/mailchimp?take=a&contacts=' + usage.contacts), '/compare/mailchimp?take=b'].map(path => ({ path, html: at(path, h(takes.MailchimpTake, { take: path.includes('take=a') ? 'a' : 'b' })) }))",
     'const { OFFERS, notCheaper, comparisons, ses, resendOverage, resendReceived } = prices',
-    "process.stdout.write(JSON.stringify({ calculator, compare, data: { OFFERS, notCheaper, comparisons, ses, resendOverage, resendReceived } }, (_k, v) => typeof v === 'bigint' ? String(v) : v))",
+    "process.stdout.write(JSON.stringify({ calculator, compare, take, data: { OFFERS, notCheaper, comparisons, ses, resendOverage, resendReceived } }, (_k, v) => typeof v === 'bigint' ? String(v) : v))",
   ].join('\n')
-  type Rendered = { calculator: { input: Record<string, string>; path: string; html: string }[]; compare: { id: string; html: string }[]; data: unknown }
+  type Rendered = { calculator: { input: Record<string, string>; path: string; html: string }[]; compare: { id: string; html: string }[]; take: { path: string; html: string }[]; data: unknown }
   let out: Rendered | null = null
   try {
     out = JSON.parse(execFileSync('node', ['--import', import.meta.resolve('tsx'), '--input-type=module', '-e', script], { cwd: new URL('app/', root), encoding: 'utf8', maxBuffer: 64 << 20, stdio: ['ignore', 'pipe', 'pipe'] })) as Rendered
@@ -365,7 +368,20 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
     for (const { path, html } of out.calculator) for (const row of html.split(/(?=<li [^>]*data-offer=)/).slice(1).map(part => part.split('</li>')[0]!))
       if (!(/Not checked/.test(row) ? /See <a href="https:\/\//.test(row) : dated.test(row))) fail('Price pages', `A competitor row on the calculator at ${path} has no date and link to the vendor's page: ${text(row).slice(0, 80)}`, file)
     for (const { id, html } of out.compare) if (!dated.test(html.split('</table>')[1] ?? '')) fail('Price pages', `Nightmail vs ${id} doesn't give the day its prices were checked and a link to the vendor's page under the table.`, file)
-    if (failed === before) console.log(`Price pages: ${out.calculator.length} calculator inputs and ${out.compare.length} comparisons match src/billing/rates.ts; ${sources.length} competitor sources have a link, a day and a quote.`)
+    // The takes: every figure is Nightmail's price for the emails a month written beside it, at the list size the address
+    // names; Mailchimp's price is one that was read, dated and linked; and the terms are on the page (in its small print).
+    for (const { path, html } of out.take) {
+      const page = text(html), where = `The Mailchimp take at ${path}`, slider = path.includes('take=a'), contacts = new URLSearchParams(path.split('?')[1]).get('contacts')
+      checkFigures(where, html, slider ? 1 : 3)
+      for (const f of figures(html)) if (!page.includes(`${n(f.sent)} emails a month`) || f.received) fail('Price pages', `${where} prices ${n(f.sent)} sent and ${n(f.received)} received without saying so beside the figure.`, file)
+      if (contacts && !page.includes(`${n(Number(contacts))} contacts`)) fail('Price pages', `${where} doesn't show the ${n(Number(contacts))} contacts its address names.`, file)
+      for (const term of terms.slice(2)) if (!page.includes(term)) fail('Price pages', `${where} doesn't say “${term}”, as src/billing/rates.ts has it.`, file)
+      if (/Not (published|checked)|\bNaN\b|undefined/.test(page) || !/data-offer="mailchimp"/.test(html)) fail('Price pages', `${where} has a size without a verified competitor price: show only sizes the data has.`, file)
+      if (!dated.test(html)) fail('Price pages', `${where} doesn't give the day its prices were checked and a link to the vendor's page.`, file)
+      const monthly = figures(html)[0], floor = slider && !!monthly && charged(monthly.sent, 0) > 0n && charged(monthly.sent, 0) * 12n < BigInt(CREDIT.minTopUpCents) * 1_000_000n
+      if (slider && floor !== page.includes(`at least ${minTopUp} a year`)) fail('Price pages', `${where} ${floor ? 'doesn’t say' : 'says'} that a year costs at least the smallest top-up.`, file)
+    }
+    if (failed === before) console.log(`Price pages: ${out.calculator.length} calculator inputs, ${out.compare.length} comparisons and ${out.take.length} renderings of the Mailchimp takes match src/billing/rates.ts; ${sources.length} competitor sources have a link, a day and a quote.`)
   }
 }
 

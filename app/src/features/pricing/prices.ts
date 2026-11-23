@@ -24,7 +24,7 @@ export function count(value: unknown): number {
 
 export const formatCount = (n: number) => n.toLocaleString('en-US')
 /** Whole US cents as micro-cents (1¢ = 1,000,000 µ¢), the billing code's unit. */
-const ucOf = (cents: number) => BigInt(cents) * 1_000_000n
+export const ucOf = (cents: number) => BigInt(cents) * 1_000_000n
 export const money = (cents: number) => usd(ucOf(cents))
 /** A price in a sentence: "$20" for whole dollars, else as money(). */
 export const dollars = (cents: number) => cents % 100 === 0 ? `$${(cents / 100).toLocaleString('en-US')}` : money(cents)
@@ -96,23 +96,51 @@ const MAILCHIMP = 'https://mailchimp.com/pricing/marketing/'
 const mailchimpTier = (size: number, cents: number, sends: number, quote: string): Tier => ({ size, cents, sends, source: read(MAILCHIMP, quote) })
 const mailchimpFree = read('https://mailchimp.com/help/about-mailchimp-pricing-plans/', 'The Free plan includes up to 250 contacts and 500 sends per month, with a daily send limit of 250.')
 const mailchimpSeats = (count: number | null) => ({ count, source: read(MAILCHIMP, '"seats":{"essential":3,"free":1,"premium":"unlimited","standard":5}') })
+// Every tier the pricing page lists up to 100,000 contacts (it loads them from /forms/pricing/?currency=USD), at list
+// price: the page itself shows a first-year discount. Still 'points': a size between two tiers has no checked price here,
+// because past a tier's sends Mailchimp bills overages, not the next tier.
 export const mailchimp: Offer = {
   id: 'mailchimp', vendor: 'Mailchimp', name: 'Mailchimp', pricing: MAILCHIMP, unit: 'contacts', ladder: 'points',
   counts: 'contacts, sends and seats',
   plans: [
     { name: 'Free', seats: mailchimpSeats(1), startsAtZero: true, note: '250 sends a day', max: { size: 250, source: mailchimpFree }, tiers: [{ size: 250, cents: 0, sends: 500, source: mailchimpFree }] },
     { name: 'Essentials', seats: mailchimpSeats(3), max: { size: 50_000, source: read(MAILCHIMP, 'Essentials at 100,000 contacts: not offered (max 50,000 contacts)') }, tiers: [
-      mailchimpTier(5_000, 7_500, 50_000, '"essential" ... {"value":75 ...},"audience_size":5000,"sends":50000'),
+      mailchimpTier(500, 1_300, 5_000, '"essential" ... {"value":13 ...},"audience_size":500,"sends":5000'),
+      mailchimpTier(1_500, 2_650, 15_000, '{"value":26.5 ...},"audience_size":1500,"sends":15000'),
+      mailchimpTier(2_500, 4_500, 25_000, '{"value":45 ...},"audience_size":2500,"sends":25000'),
+      mailchimpTier(5_000, 7_500, 50_000, '{"value":75 ...},"audience_size":5000,"sends":50000'),
+      mailchimpTier(10_000, 11_000, 100_000, '{"value":110 ...},"audience_size":10000,"sends":100000'),
+      mailchimpTier(15_000, 18_000, 150_000, '{"value":180 ...},"audience_size":15000,"sends":150000'),
+      mailchimpTier(20_000, 23_000, 200_000, '{"value":230 ...},"audience_size":20000,"sends":200000'),
       mailchimpTier(25_000, 27_000, 250_000, '{"value":270 ...},"audience_size":25000,"sends":250000'),
+      mailchimpTier(30_000, 30_000, 300_000, '{"value":300 ...},"audience_size":30000,"sends":300000'),
+      mailchimpTier(40_000, 34_000, 400_000, '{"value":340 ...},"audience_size":40000,"sends":400000'),
+      mailchimpTier(50_000, 38_500, 500_000, '{"value":385 ...},"audience_size":50000,"sends":500000'),
     ] },
     { name: 'Standard', seats: mailchimpSeats(5), tiers: [
-      mailchimpTier(5_000, 10_000, 60_000, '"standard" ... {"value":100 ...},"audience_size":5000,"sends":60000'),
+      mailchimpTier(500, 2_000, 6_000, '"standard" ... {"value":20 ...},"audience_size":500,"sends":6000'),
+      mailchimpTier(1_500, 4_500, 18_000, '{"value":45 ...},"audience_size":1500,"sends":18000'),
+      mailchimpTier(2_500, 6_000, 30_000, '{"value":60 ...},"audience_size":2500,"sends":30000'),
+      mailchimpTier(5_000, 10_000, 60_000, '{"value":100 ...},"audience_size":5000,"sends":60000'),
+      mailchimpTier(10_000, 13_500, 120_000, '{"value":135 ...},"audience_size":10000,"sends":120000'),
+      mailchimpTier(15_000, 23_000, 180_000, '{"value":230 ...},"audience_size":15000,"sends":180000'),
+      mailchimpTier(20_000, 28_500, 240_000, '{"value":285 ...},"audience_size":20000,"sends":240000'),
       mailchimpTier(25_000, 31_000, 300_000, '{"value":310 ...},"audience_size":25000,"sends":300000'),
+      mailchimpTier(30_000, 34_000, 360_000, '{"value":340 ...},"audience_size":30000,"sends":360000'),
+      mailchimpTier(40_000, 41_000, 480_000, '{"value":410 ...},"audience_size":40000,"sends":480000'),
+      mailchimpTier(50_000, 45_000, 600_000, '{"value":450 ...},"audience_size":50000,"sends":600000'),
+      mailchimpTier(75_000, 63_000, 900_000, '{"value":630 ...},"audience_size":75000,"sends":900000'),
       mailchimpTier(100_000, 80_000, 1_200_000, '{"value":800 ...},"audience_size":100000,"sends":1200000'),
     ] },
     { name: 'Premium', seats: mailchimpSeats(null), startsAtZero: true, tiers: [
       mailchimpTier(10_000, 35_000, 150_000, '"premium" ... {"value":350 ...},"audience_size":10000,"sends":150000 (Premium is not offered below 10,000)'),
+      mailchimpTier(15_000, 46_500, 225_000, '{"value":465 ...},"audience_size":15000,"sends":225000'),
+      mailchimpTier(20_000, 53_500, 300_000, '{"value":535 ...},"audience_size":20000,"sends":300000'),
       mailchimpTier(25_000, 62_000, 375_000, '{"value":620 ...},"audience_size":25000,"sends":375000'),
+      mailchimpTier(30_000, 68_500, 450_000, '{"value":685 ...},"audience_size":30000,"sends":450000'),
+      mailchimpTier(40_000, 75_000, 600_000, '{"value":750 ...},"audience_size":40000,"sends":600000'),
+      mailchimpTier(50_000, 81_500, 750_000, '{"value":815 ...},"audience_size":50000,"sends":750000'),
+      mailchimpTier(75_000, 90_000, 1_125_000, '{"value":900 ...},"audience_size":75000,"sends":1125000'),
       mailchimpTier(100_000, 102_500, 1_500_000, '{"value":1025 ...},"audience_size":100000,"sends":1500000'),
     ] },
   ],
@@ -223,7 +251,8 @@ export const sesBill = (u: Usage) => usd(BigInt(u.sent + u.received) * ses.ucPer
 
 // ---------------------------------------------------------------- the pages' comparisons and disclosures
 
-export type Fact = { text: string; source: Source }
+/** short: the same claim in a few words, for a list that is scanned (takes.tsx). */
+export type Fact = { text: string; short?: string; source: Source }
 /** Flodesk's flat monthly price, and the sent volume above which Nightmail costs more than it. */
 const FLODESK_CENTS = 4_600
 export const flodeskCrossover = RATES.freeSentEmails + Number(ucOf(FLODESK_CENTS) / RATES.emailUc)
@@ -245,12 +274,17 @@ export type Comparison = {
   lead: string
   /** What the competitor has that Nightmail doesn't, and the other way round. */
   theirs: Fact[]
-  ours: (Fact | { text: string; source?: undefined })[]
+  ours: (Fact | { text: string; short?: string; source?: undefined })[]
 }
+/** The Mailchimp comparison's use of a list: this many emails a month to every contact, this many teammates. */
+export const MAILCHIMP_USE = { sendsPerContact: 4, seats: 3 }
+const mailchimpSize = (contacts: number): Usage => ({ contacts, sent: contacts * MAILCHIMP_USE.sendsPerContact, received: 0, seats: MAILCHIMP_USE.seats })
+/** Every list size Mailchimp's page has a tier for, used that way and priced: each one a figure that was read. */
+export const mailchimpStops = [...new Set(mailchimp.plans.flatMap(plan => plan.tiers.map(tier => tier.size)))].sort((a, b) => a - b).map(mailchimpSize).filter(usage => quote(mailchimp, usage).kind === 'price')
 export const comparisons: Record<'mailchimp' | 'resend', Comparison> = {
   mailchimp: {
     offer: mailchimp,
-    sizes: [{ contacts: 5_000, sent: 20_000, received: 0, seats: 3 }, { contacts: 25_000, sent: 100_000, received: 0, seats: 3 }, { contacts: 100_000, sent: 400_000, received: 0, seats: 3 }],
+    sizes: [5_000, 25_000, 100_000].map(mailchimpSize),
     usage: 'Four campaigns a month to the whole list, 3 teammates, nothing received.',
     lead: 'Mailchimp prices by contacts. Nightmail prices by email.',
     theirs: [
@@ -260,10 +294,10 @@ export const comparisons: Record<'mailchimp' | 'resend', Comparison> = {
       { text: 'Phone support on Premium', source: read(MAILCHIMP, 'phone and priority support and dedicated onboarding (Premium)') },
     ],
     ours: [
-      { text: 'No charge for contacts. Mailchimp counts unsubscribed contacts too, at the month’s highest number.', source: read('https://mailchimp.com/help/about-mailchimp-pricing-plans/', '"Subscribed, unsubscribed, and non-subscribed contacts are included in your contact count." … "If your contact total increases beyond your contact limit at any time during your monthly billing cycle, we won’t interrupt your service. Instead, you’ll see an additional charge on your bill."') },
-      { text: `No charge for teammates. Mailchimp Essentials includes ${mailchimp.plans[1]!.seats!.count} seats and Standard ${mailchimp.plans[2]!.seats!.count}.`, source: mailchimpSeats(3).source },
-      { text: 'Every workspace has a role that edits campaigns but can’t send them. Mailchimp’s starts on Standard.', source: read('https://mailchimp.com/help/manage-user-levels-in-your-account/', 'Author "can create, edit, and delete emails and templates, and view reports" … Role-based Access: 5 Roles, 4 Roles, 2 Roles, Not included (Premium, Standard, Essentials, Free)') },
-      { text: `Receiving email, at ${nightmail.perThousand} per 1,000 after ${formatCount(nightmail.freeReceived)} free.` },
+      { short: 'Contacts at no charge', text: 'No charge for contacts. Mailchimp counts unsubscribed contacts too, at the month’s highest number.', source: read('https://mailchimp.com/help/about-mailchimp-pricing-plans/', '"Subscribed, unsubscribed, and non-subscribed contacts are included in your contact count." … "If your contact total increases beyond your contact limit at any time during your monthly billing cycle, we won’t interrupt your service. Instead, you’ll see an additional charge on your bill."') },
+      { short: 'Teammates at no charge', text: `No charge for teammates. Mailchimp Essentials includes ${mailchimp.plans[1]!.seats!.count} seats and Standard ${mailchimp.plans[2]!.seats!.count}.`, source: mailchimpSeats(3).source },
+      { short: 'A role that edits but can’t send', text: 'Every workspace has a role that edits campaigns but can’t send them. Mailchimp’s starts on Standard.', source: read('https://mailchimp.com/help/manage-user-levels-in-your-account/', 'Author "can create, edit, and delete emails and templates, and view reports" … Role-based Access: 5 Roles, 4 Roles, 2 Roles, Not included (Premium, Standard, Essentials, Free)') },
+      { short: 'Receiving email', text: `Receiving email, at ${nightmail.perThousand} per 1,000 after ${formatCount(nightmail.freeReceived)} free.` },
     ],
   },
   resend: {

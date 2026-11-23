@@ -66,6 +66,62 @@
 .price-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-12) var(--space-24); margin-top: var(--space-24); font-size: var(--text-md); }
 .price-actions .ui-button { height: 36px; padding-inline: var(--space-16); }
 
+/* Two takes on the Mailchimp comparison (takes.tsx: ?take=a and ?take=b), until one is chosen. The two prices come
+   first, as a picture: Mailchimp in the neutral series, Nightmail in the data navy, flat and square like Overview's. */
+.take { width: min(100%, 760px); }
+.take .price-intro { margin-bottom: var(--space-28); }
+.take .price-note { margin-top: var(--space-20); }
+.take .price-actions { margin-top: var(--space-28); }
+.take-diff { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-40); margin-top: 56px; }
+.take-diff h2 { margin-bottom: var(--space-8); font-family: var(--font-mono); font-size: 15px; font-weight: 700; line-height: 1.4; }
+.take-list { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--color-border-muted); font-size: 15px; line-height: var(--leading-sm); font-variant-numeric: normal; }
+.take-list li { display: flex; align-items: center; gap: var(--space-4); min-height: 44px; padding-block: var(--space-8); border-bottom: 1px solid var(--color-border-muted); }
+.take-list .price-cite { flex: none; margin: 0; }
+.take-small { margin-top: var(--space-40); border-bottom: 1px solid var(--color-border-muted); }
+.take-small .price-note, .take-small .price-terms { margin-top: 0; }
+.take-small .price-facts { font-size: var(--text-sm); line-height: var(--leading-sm); color: var(--color-muted); }
+
+/* A: the list size on a slider (each stop is a tier Mailchimp's page lists), then the two prices, a bar under each:
+   Mailchimp's the whole width, Nightmail's its share of that. */
+.ta-size { display: flex; flex-direction: column; gap: var(--space-4); }
+.ta-size output { font-family: var(--font-mono); font-size: var(--text-lg); font-weight: 700; line-height: var(--leading-lg); }
+.ta-size span { color: var(--color-muted); font-size: var(--text-md); line-height: var(--leading-sm); font-variant-numeric: normal; }
+.ta-range { -webkit-appearance: none; appearance: none; display: block; width: 100%; height: 44px; margin: 0; padding: 0; border: 0; background: transparent; cursor: pointer; }
+.ta-range:focus { outline: none; }
+.ta-range::-webkit-slider-runnable-track { height: 2px; background: var(--color-border-strong); }
+.ta-range::-moz-range-track { height: 2px; background: var(--color-border-strong); }
+.ta-range::-webkit-slider-thumb { -webkit-appearance: none; width: 24px; height: 24px; margin-top: -11px; border: 0; border-radius: 50%; background: var(--color-text); box-shadow: 0 0 0 3px var(--color-surface); }
+.ta-range::-moz-range-thumb { width: 24px; height: 24px; border: 0; border-radius: 50%; background: var(--color-text); box-shadow: 0 0 0 3px var(--color-surface); }
+.ta-range:focus-visible::-webkit-slider-thumb { outline: var(--focus-width) solid var(--color-focus); outline-offset: 3px; }
+.ta-range:focus-visible::-moz-range-thumb { outline: var(--focus-width) solid var(--color-focus); outline-offset: 3px; }
+.ta-ends { display: flex; justify-content: space-between; margin-top: calc(-1 * var(--space-4)); color: var(--color-faint); font-family: var(--font-mono); font-size: 10.5px; line-height: 12px; }
+.ta-prices { display: flex; flex-direction: column; gap: var(--space-20); margin-top: var(--space-28); }
+.ta-price { display: flex; flex-direction: column; align-items: flex-start; }
+.ta-price__name { font-size: 15px; font-weight: var(--font-weight-bold); line-height: var(--leading-sm); }
+.ta-price__name span { margin-inline-start: var(--space-8); color: var(--color-muted); font-size: var(--text-md); font-weight: var(--font-weight-regular); font-variant-numeric: normal; }
+.ta-price strong { font-family: var(--font-mono); font-size: 40px; font-weight: 700; line-height: 44px; letter-spacing: -.02em; }
+.ta-bar { align-self: stretch; height: 12px; margin-top: var(--space-8); background: var(--color-series); }
+.ta-bar--ours { background: var(--color-accent-data); transform: scaleX(var(--share)); transform-origin: left; transition: transform 200ms var(--ease-swap); }
+.ta-gap { margin-top: var(--space-20); font-family: var(--font-mono); font-size: var(--text-lg); font-weight: 700; line-height: var(--leading-lg); }
+@media (prefers-reduced-motion: reduce) { .ta-bar--ours { transition: none; } }
+
+/* B: three sizes at once. Two columns a size on one scale, each with its figure on top; the baseline is the axis. */
+.tb-legend { display: flex; justify-content: flex-end; gap: var(--space-16); color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.tb-legend span { display: inline-flex; align-items: center; gap: var(--space-6); }
+.tb-legend i { width: 8px; height: 8px; background: var(--color-series); }
+.tb-legend .tb-key--ours { background: var(--color-accent-data); }
+.tb-groups { --plot: 240px; --column: 72px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-16); margin: 0; padding: 0; list-style: none; }
+.tb-plot { display: flex; align-items: flex-end; justify-content: center; gap: var(--space-8); height: calc(var(--plot) + 48px); border-bottom: 1px solid var(--color-border-strong); }
+.tb-col { display: flex; flex-direction: column; align-items: center; width: var(--column); white-space: nowrap; }
+.tb-col b { font-family: var(--font-mono); font-size: 15px; font-weight: 700; line-height: 20px; }
+.tb-col small { color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.tb-col i { width: 100%; height: max(2px, calc(var(--plot) * var(--share))); margin-top: var(--space-4); background: var(--color-series); }
+.tb-col--ours i { background: var(--color-accent-data); }
+.tb-size { display: flex; flex-direction: column; align-items: center; margin-top: var(--space-12); font-size: 15px; line-height: var(--leading-sm); text-align: center; }
+.tb-size br { display: none; }
+.tb-size strong { font-weight: var(--font-weight-bold); }
+.tb-size span { color: var(--color-muted); font-size: var(--text-sm); font-variant-numeric: normal; }
+
 .price-footer { padding: var(--space-20) var(--space-24); border-top: 1px solid var(--color-border); color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
 
 /* Tablets and phones: the header as on the legal pages, one column, and each table row as a block. */
@@ -101,4 +157,13 @@
   .price-table td::before { content: attr(data-label); display: block; color: var(--color-muted); font-size: var(--text-sm); }
   .price-diff__lists { grid-template-columns: minmax(0, 1fr); gap: var(--space-20); }
   .price-actions .ui-button { width: 100%; height: 44px; }
+  .take-diff { grid-template-columns: minmax(0, 1fr); gap: var(--space-28); margin-top: var(--space-40); }
+  .ta-price strong { font-size: 34px; line-height: 40px; }
+  .tb-groups { --plot: 200px; --column: 48px; gap: var(--space-8); }
+  .tb-plot { gap: var(--space-6); }
+  .tb-col b { font-size: 12px; line-height: 16px; }
+  .tb-col small { font-size: 11px; }
+  .tb-size { font-size: var(--text-md); }
+  .tb-size span { font-size: var(--text-xs); line-height: var(--leading-xs); }
+  .tb-size br { display: inline; }
 }

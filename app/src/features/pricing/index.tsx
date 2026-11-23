@@ -1,5 +1,5 @@
 import { use, useEffect, useLayoutEffect, type ReactNode } from 'react'
-import { Link, NavLink, useLocation, useParams } from 'react-router'
+import { Link, NavLink, useLocation, useParams, useSearchParams } from 'react-router'
 import { ThemeToggle } from '../../components/ThemeToggle'
 import { NightmailWordmark } from '../../components/NightmailLogo'
 import { EmptyState } from '../../components/ui'
@@ -7,6 +7,7 @@ import { productName } from '../../../../api/src/brand'
 import { Calculator, Compare } from './content'
 import { PRICE_PAGES } from './pages'
 import { comparisons } from './prices'
+import { MailchimpTake } from './takes'
 import './pricing.css'
 
 // Public pages, no sign-in: the price calculator (/pricing) and one comparison per competitor (/compare/:vendor). Not
@@ -52,7 +53,9 @@ export function ComparePage() {
   const { vendor } = useParams()
   const comparison = vendor === 'mailchimp' || vendor === 'resend' ? comparisons[vendor] : null
   const page = PRICE_PAGES.find(p => p.path === `/compare/${vendor}`)
+  // Two takes on the Mailchimp page wait for a choice (takes.tsx); without ?take the page is the one it has been.
+  const take = useSearchParams()[0].get('take')
   return <PriceFrame title={page?.title ?? 'Page not found'}>
-    {comparison ? <Compare key={vendor} comparison={comparison} /> : <EmptyState headingAs="h1" title="Page not found" action={<Link to="/pricing">Price calculator</Link>} />}
+    {vendor === 'mailchimp' && (take === 'a' || take === 'b') ? <MailchimpTake key={take} take={take} /> : comparison ? <Compare key={vendor} comparison={comparison} /> : <EmptyState headingAs="h1" title="Page not found" action={<Link to="/pricing">Price calculator</Link>} />}
   </PriceFrame>
 }
