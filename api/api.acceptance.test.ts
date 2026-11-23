@@ -27511,9 +27511,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
   // launch that fails or is cancelled there leaves nothing behind.
   test('campaign launch: sends in the workspace never wait for the audience capture, and the frozen list is one snapshot',async t=>{
     const {g,w,host,call,audience,draft,launch,capturing}=await launchFixture(t);
-    // More than 50,000 members takes the large capture (a snapshot table, then recipient inserts in pages), as a list of
-    // millions does. Every 2,500th contact is subscribed; the first of those is also suppressed.
-    const listId=await audience(50_010,2500);
+    // Up to 5,000 members captures synchronously inside launch() using the same snapshotCampaignAudience path; >5,000
+    // defers to campaign.run (tested in part 3 below). Every 200th contact is subscribed; the first is also suppressed.
+    const listId=await audience(4_000,200);
     const contact=(n:number)=>'con_'+createHash('md5').update(w+n).digest('hex');
     // The audience as it stands before any launch: subscribed, not suppressed, in send order (hash of contact ID).
     const before=(await g.query("SELECT email FROM audience_contacts WHERE workspace_id=$1 AND marketing_consent='subscribed' AND NOT suppressed ORDER BY hashtextextended(id, 0), id",[w])).rows.map(r=>r.email);
@@ -27536,7 +27536,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       sends=[0,1,2].map(i=>settled(call('POST','/v1/emails/send',{from:`alerts@${host}`,to:'success@simulator.amazonses.com',subject:`Sign-in code ${i}`,text:'Synthetic.'})));
       second=settled(launch(first));
       // Consent changes and a new member after the snapshot: none of them reaches this launch's frozen list.
-      unsubscribe=settled(call('POST',`/v1/contacts/${contact(5000)}/consent`,{status:'unsubscribed'}));
+      unsubscribe=settled(call('POST',`/v1/contacts/${contact(400)}/consent`,{status:'unsubscribed'}));
       subscribe=settled(call('POST',`/v1/contacts/${contact(1)}/consent`,{status:'subscribed',source:'acceptance-fixture',policyVersion:'acceptance-v1',evidence:'Synthetic consent on a reserved fixture address.'}));
       await g.query("WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES('con_late_'||md5($1),$1,'late@'||$3,'subscribed') RETURNING workspace_id,id) INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT workspace_id,$2,id FROM c",[w,listId,`${w}.example.com`]);
       await within(Promise.all([...sends,second,unsubscribe,subscribe].map(s=>s.promise)),3000);
@@ -27589,6 +27589,38 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // contact who subscribed and the member added during the first capture, without the one who unsubscribed.
       if(ending==='cancelled'){const retried=await launch(c,key);assert.equal(retried.status,202,JSON.stringify(retried.body));assert.equal(retried.body.queued,20);}
     }
+
+    // 3. Deferred background REPEATABLE READ capture (>5,000 members): launch returns 202 immediately, and the background
+    //    capture holds a single consistent snapshot without blocking sends while concurrent consent/import changes commit.
+    const bigList = await audience(5_100, 250, 'bigsnap');
+    const bigBefore = (await g.query("SELECT c.email FROM audience_contacts c JOIN audience_list_members m ON m.workspace_id=c.workspace_id AND m.contact_id=c.id WHERE c.workspace_id=$1 AND m.list_id=$2 AND c.marketing_consent='subscribed' AND NOT c.suppressed ORDER BY hashtextextended(c.id, 0), c.id", [w, bigList])).rows.map(r => r.email);
+    const bigCamp = await draft('BigDeferred', bigList);
+    const bigLaunched = await launch(bigCamp);
+    assert.equal(bigLaunched.status, 202, JSON.stringify(bigLaunched.body));
+    assert.equal(bigLaunched.body.queued, bigBefore.length);
+    const { nodeRuntime } = await import('./src/adapters/node.js');
+    const { jobHandlers } = await import('./src/sending.js');
+    const { runtime, close } = nodeRuntime({ ...process.env, DATABASE_URL: FIXTURE_DATABASE_URL });
+    cleanup(t, close);
+    Object.assign(runtime.config, { multiTenant: false, liveEnabled: false });
+    const bigSubId = (await g.query("SELECT c.id FROM audience_contacts c JOIN audience_list_members m ON m.workspace_id=c.workspace_id AND m.contact_id=c.id WHERE c.workspace_id=$1 AND m.list_id=$2 AND c.marketing_consent='subscribed' AND NOT c.suppressed LIMIT 1", [w, bigList])).rows[0].id;
+    await gate.query('BEGIN');
+    let bgRun: Promise<unknown> | undefined;
+    try {
+      await gate.query('LOCK TABLE sending_review_recipients IN SHARE MODE');
+      bgRun = jobHandlers['campaign.run']!(runtime, { campaignId: bigCamp.id }, { id: 'campaign.run:' + bigCamp.id, attempts: 1, workspaceId: w, leaseFence: new Date().toISOString(), webhook: null, ingest: null, deleteBinding: null, recordWithSettlement() {} }).catch(e => { if (e?.constructor?.name !== 'JobDeferred') throw e; });
+      const bgPid = await capturing();
+      const midSend = await call('POST', '/v1/emails/send', { from: `alerts@${host}`, to: 'success@simulator.amazonses.com', subject: 'During bg capture', text: 'Synthetic.' });
+      assert.equal(midSend.status, 202);
+      assert.equal(await blockedBy(bgPid), 0, 'Direct sends never wait on background capture.');
+      // Unsubscribe an eligible contact and add a new subscribed contact AFTER the REPEATABLE READ snapshot started.
+      await call('POST', `/v1/contacts/${bigSubId}/consent`, { status: 'unsubscribed' });
+      await g.query("WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES('con_bglate_'||md5($1),$1,'bglate@'||$3,'subscribed') RETURNING workspace_id,id) INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT workspace_id,$2,id FROM c", [w, bigList, `${w}.example.com`]);
+    } finally { await gate.query('ROLLBACK'); }
+    await bgRun!;
+    const bigRev = (await g.query('SELECT review_id FROM sending_campaigns WHERE id=$1', [bigCamp.id])).rows[0].review_id;
+    const bigFrozen = (await g.query("SELECT recipient->>'email' AS email FROM sending_review_recipients WHERE review_id=$1 ORDER BY ordinal", [bigRev])).rows.map(r => r.email);
+    assert.deepEqual(bigFrozen, bigBefore, 'Deferred REPEATABLE READ capture freezes the exact pre-mutation snapshot.');
   });
   // The capture joins the audience's contacts and list members whole. When the statistics say both tables are empty
   // (autovacuum found them empty, then a list was imported before the next analyze) the planner expected one row on

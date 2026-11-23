@@ -18,7 +18,7 @@ export const validMailAddressSql = (expr: ReturnType<typeof sql>) => sql`(
   AND octet_length(${expr}) = char_length(${expr})
   AND left(${expr}, 1) <> '.'
   AND strpos(${expr}, '..') = 0
-  AND (${expr}) ~ '^[A-Za-z0-9_''+.-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+(?:[A-Za-z]{2,}|[Xx][Nn]--[A-Za-z0-9][A-Za-z0-9-]*[A-Za-z0-9])$'
+  AND (${expr}) ~ '^[A-Za-z0-9_''+.-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?[.])+(?:[A-Za-z]{2,}|[Xx][Nn]--[A-Za-z0-9][A-Za-z0-9-]*[A-Za-z0-9])$'
   AND (
     octet_length(${expr}) <= 64
     OR (
