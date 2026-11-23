@@ -22,8 +22,7 @@ function boardCard(id: keyof typeof comparisons) {
 export const PRICE_PAGES = [
   { path: '/pricing', file: 'pricing.html', title: 'Price calculator',
     description: `What your email costs on Nightmail, beside Mailchimp and Resend. ${nightmail.perThousand} per 1,000 emails; contacts and teammates are free.`,
-    card: card('pricing', `The Nightmail price calculator: ${formatCount(opening.sent)} emails sent a month to ${formatCount(opening.contacts)} contacts cost ${bill} a month on Nightmail, beside Mailchimp and Resend.`,
-      [bill, ...OFFERS.flatMap(offer => { const q = quote(offer, opening); return q.kind === 'price' ? [money(q.cents)] : [] })]) },
+    card: card('pricing', `The Nightmail price board under the headline “What Nightmail costs at your size”: a month at ${formatCount(opening.sent)} emails to ${formatCount(opening.contacts)} contacts, Nightmail ${bill}, ${list(OFFERS.flatMap(offer => { const q = quote(offer, opening); return q.kind === 'price' ? [`${offer.name} ${money(q.payg?.cents ?? q.cents)}`] : [] }))}.`, []) },
   { path: '/compare/mailchimp', file: 'compare/mailchimp.html', title: 'Nightmail vs Mailchimp',
     description: `Mailchimp prices by contacts, Nightmail by email. Monthly prices at ${sizes('mailchimp', 'contacts')} contacts, checked ${dayOf(CHECKED)}.`,
     card: boardCard('mailchimp') },

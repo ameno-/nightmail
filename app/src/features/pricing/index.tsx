@@ -1,18 +1,16 @@
 import { lazy, use, useEffect, useLayoutEffect, type ReactNode } from 'react'
-import { Link, NavLink, useParams, useSearchParams } from 'react-router'
+import { Link, NavLink, useLocation, useSearchParams } from 'react-router'
 import { ThemeToggle } from '../../components/ThemeToggle'
 import { NightmailWordmark } from '../../components/NightmailLogo'
 import { EmptyState } from '../../components/ui'
 import { productName } from '../../../../api/src/brand'
-import { Calculator } from './content'
 import { PRICE_PAGES } from './pages'
 import { comparisons } from './prices'
 import './pricing.css'
 
-// A comparison's page, its styles and its pictures are a module of their own (board-page.tsx), loaded only here: the
-// calculator's first paint waits for none of it.
+// The price pages' scene, its styles and its pictures are a module of their own (board-page.tsx), loaded only here.
 const boardPage = () => import('./board-page')
-const ComparisonScene = lazy(() => boardPage().then(m => ({ default: m.ComparisonScene })))
+const PriceScene = lazy(() => boardPage().then(m => ({ default: m.PriceScene })))
 const BoardEnd = lazy(() => boardPage().then(m => ({ default: m.BoardEnd })))
 
 // Public pages, no sign-in: the price calculator (/pricing) and one comparison per competitor (/compare/:vendor), linked
@@ -53,18 +51,17 @@ function PriceFrame({ title, children, variant, end, scene }: { title: string; c
   </div>
 }
 
-export function PricingPage() {
-  return <PriceFrame title={PRICE_PAGES[0].title}><Calculator /></PriceFrame>
-}
-
-export function ComparePage() {
-  const { vendor } = useParams()
+/** The three price pages are one page: the hall stays as the reader moves between them (App.tsx gives both addresses
+ *  this component, so it isn't drawn again) and only its board changes (scene.tsx). An unknown comparison is not found. */
+export function PricePage() {
+  const { pathname } = useLocation()
+  const vendor = pathname.startsWith('/compare/') ? pathname.slice('/compare/'.length).replace(/\/+$/, '') : null
   const comparison = vendor === 'mailchimp' || vendor === 'resend' ? comparisons[vendor] : null
-  const page = PRICE_PAGES.find(p => p.path === `/compare/${vendor}`)
+  const page = PRICE_PAGES.find(p => p.path === (vendor === null ? '/pricing' : `/compare/${vendor}`))
   // The board's frame in the homepage's steel, while its concrete waits for a yes (board.tsx): ?frame=steel.
   const [search] = useSearchParams()
-  if (!comparison) return <PriceFrame title="Page not found"><EmptyState headingAs="h1" title="Page not found" action={<Link to="/pricing">Price calculator</Link>} /></PriceFrame>
-  return <PriceFrame title={page?.title ?? comparison.offer.vendor} variant="price-page--board" end={<BoardEnd comparison={comparison} />} scene>
-    <ComparisonScene key={vendor} comparison={comparison} frame={search.get('frame')} />
+  if (vendor !== null && !comparison) return <PriceFrame title="Page not found"><EmptyState headingAs="h1" title="Page not found" action={<Link to="/pricing">Price calculator</Link>} /></PriceFrame>
+  return <PriceFrame title={page?.title ?? 'Price calculator'} variant="price-page--board" end={<BoardEnd comparison={comparison} />} scene>
+    <PriceScene comparison={comparison} frame={search.get('frame')} />
   </PriceFrame>
 }
