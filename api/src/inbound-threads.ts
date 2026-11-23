@@ -97,7 +97,7 @@ async function threadPage(db: DbExecutor, value: MailboxAccess, filter: Filter, 
   const countExpr = sql`CASE WHEN cardinality(threads.address_ids)=1 THEN threads.single_count
       ELSE (SELECT count(DISTINCT mm.message_id)::int FROM mailbox_messages mm
             WHERE mm.workspace_id=${value.workspaceId} AND mm.held_reason IS NULL AND mm.thread_id=threads.id AND mm.mailbox_id=ANY(threads.address_ids)) END`;
-  let rows;
+  let rows: { rows: PageRow[] } | undefined;
   if (singleAddress) {
     // One address has at most one mailbox_threads row per thread: walk the index directly without GROUP BY.
     // Check liveBox once as a constant InitPlan so the planner keeps the index scan instead of misestimating an anti-join.
@@ -115,50 +115,58 @@ async function threadPage(db: DbExecutor, value: MailboxAccess, filter: Filter, 
         FROM threads ${latest(sql`mm.mailbox_id=${singleAddress}`)}
         JOIN mail_messages m ON m.id=detail.latest_id ORDER BY threads.last_at DESC, threads.id DESC`);
   } else if (!filter.threadId && !options.q && (!view || view === 'all' || view === 'inbox')) {
-    // Workspace-wide or multi-address dense views (all, inbox): walk mailbox_threads_workspace_page newest-first,
-    // pick the winning live row per thread via one ordered LIMIT 1 probe on mailbox_threads_newest (avoids O(N^2)
-    // on broadcast conversations), stop after limit + 1, and collect address_ids only for those winners.
-    // Sparse views (archive, starred, trash, spam) use the grouped branch below so empty tabs don't walk all threads.
+    // REVIEW CANDIDATE (round 2). Read a bounded batch of the newest rows, keep the first row of each conversation in it,
+    // and check each such conversation ONCE for a better row outside the batch. Whatever index the planner picks for that
+    // check, a conversation on N addresses costs N once, not N per row. If the batch cannot fill the page (one very wide
+    // conversation, or a nearly empty Inbox), try a batch ten times larger, then fall back to the grouped statement below.
     const scopeList = value.mailboxIds ? sql.param(value.mailboxIds) : null;
+    const scoped = (alias: string) => scopeList ? sql`AND ${sql.raw(alias)}.mailbox_id=ANY(${scopeList}::text[])` : sql``;
     const state = viewMatch('s');
-    rows = await db.execute<PageRow>(sql`
-      WITH winners AS MATERIALIZED (
-        SELECT t.thread_id AS id, t.last_message_at AS last_at, t.message_count AS single_count
-        FROM mailbox_threads t
-        WHERE t.workspace_id=${value.workspaceId}
-          ${scopeList ? sql`AND t.mailbox_id=ANY(${scopeList}::text[])` : sql``}
-          AND ${liveBox(sql`t.mailbox_id`)}
-          ${after ? sql`AND (t.last_message_at, t.thread_id) < (${after[0]}::timestamptz, ${after[1]})` : sql``}
-          AND t.mailbox_id = (
-            SELECT n.mailbox_id FROM mailbox_threads n
-            WHERE n.workspace_id=${value.workspaceId} AND n.thread_id=t.thread_id
-              ${scopeList ? sql`AND n.mailbox_id=ANY(${scopeList}::text[])` : sql``}
+    const want = options.limit + 1;
+    for (const batch of [want * 8, want * 80]) {
+      const res = await db.execute<PageRow & { scanned: number; found: number }>(sql`
+        WITH head AS MATERIALIZED (
+          SELECT t.thread_id, t.last_message_at, t.mailbox_id, t.message_count
+          FROM mailbox_threads t
+          WHERE t.workspace_id=${value.workspaceId} ${scoped('t')}
+            AND ${liveBox(sql`t.mailbox_id`)}
+            ${after ? sql`AND (t.last_message_at, t.thread_id) < (${after[0]}::timestamptz, ${after[1]})` : sql``}
+          ORDER BY t.last_message_at DESC, t.thread_id DESC LIMIT ${batch}
+        ), firsts AS MATERIALIZED (
+          SELECT DISTINCT ON (h.thread_id) h.thread_id AS id, h.last_message_at AS last_at, h.mailbox_id, h.message_count AS single_count
+          FROM head h ORDER BY h.thread_id, h.last_message_at DESC, h.mailbox_id
+        ), winners AS MATERIALIZED (
+          SELECT f.id, f.last_at, f.single_count FROM firsts f
+          WHERE NOT EXISTS (
+            SELECT FROM mailbox_threads n
+            WHERE n.workspace_id=${value.workspaceId} AND n.thread_id=f.id ${scoped('n')}
               AND ${liveBox(sql`n.mailbox_id`)}
-            ORDER BY n.last_message_at DESC, n.mailbox_id LIMIT 1
+              AND (n.last_message_at > f.last_at OR (n.last_message_at = f.last_at AND n.mailbox_id < f.mailbox_id))
           )
           ${state ? sql`AND EXISTS (
-            SELECT 1 FROM mailbox_threads s
-            WHERE s.workspace_id=${value.workspaceId} AND s.thread_id=t.thread_id
-              ${scopeList ? sql`AND s.mailbox_id=ANY(${scopeList}::text[])` : sql``}
-              AND ${liveBox(sql`s.mailbox_id`)}
-              AND ${state}
+            SELECT FROM mailbox_threads s
+            WHERE s.workspace_id=${value.workspaceId} AND s.thread_id=f.id ${scoped('s')}
+              AND ${liveBox(sql`s.mailbox_id`)} AND ${state}
           )` : sql``}
-        ORDER BY t.last_message_at DESC, t.thread_id DESC LIMIT ${options.limit + 1}
-      ),
-      threads AS MATERIALIZED (
-        SELECT w.id, w.last_at, w.single_count,
-               ARRAY(
-                 SELECT s.mailbox_id FROM mailbox_threads s
-                 WHERE s.workspace_id=${value.workspaceId} AND s.thread_id=w.id
-                   ${scopeList ? sql`AND s.mailbox_id=ANY(${scopeList}::text[])` : sql``}
-                   AND ${liveBox(sql`s.mailbox_id`)}
-                 ORDER BY s.mailbox_id
-               ) AS address_ids
-        FROM winners w
-      ) SELECT threads.id, m.subject, m.snippet, m.from_name, m.from_address, ${preciseTime(sql`threads.last_at`)} AS at, threads.address_ids, ${countExpr} AS message_count
-        FROM threads ${latest(sql`mm.mailbox_id=ANY(threads.address_ids)`)}
-        JOIN mail_messages m ON m.id=detail.latest_id ORDER BY threads.last_at DESC, threads.id DESC`);
-  } else {
+          ORDER BY f.last_at DESC, f.id DESC LIMIT ${want}
+        ), threads AS MATERIALIZED (
+          SELECT w.id, w.last_at, w.single_count,
+                 ARRAY(SELECT s.mailbox_id FROM mailbox_threads s
+                       WHERE s.workspace_id=${value.workspaceId} AND s.thread_id=w.id ${scoped('s')} AND ${liveBox(sql`s.mailbox_id`)}
+                       ORDER BY s.mailbox_id) AS address_ids
+          FROM winners w
+        ), page AS (
+          SELECT threads.id, m.subject, m.snippet, m.from_name, m.from_address, ${preciseTime(sql`threads.last_at`)} AS at, threads.address_ids, ${countExpr} AS message_count, threads.last_at
+          FROM threads ${latest(sql`mm.mailbox_id=ANY(threads.address_ids)`)}
+          JOIN mail_messages m ON m.id=detail.latest_id
+        ) SELECT page.id, page.subject, page.snippet, page.from_name, page.from_address, page.at, page.address_ids, page.message_count, meta.scanned, meta.found
+          FROM (SELECT (SELECT count(*)::int FROM head) AS scanned, (SELECT count(*)::int FROM winners) AS found) meta
+          LEFT JOIN page ON true ORDER BY page.last_at DESC NULLS LAST, page.id DESC`);
+      const meta = res.rows[0]!;
+      if (meta.found >= want || meta.scanned < batch) { rows = { rows: res.rows.filter(r => r.id !== null) }; break; }
+    }
+  }
+  if (!rows) {
     // Single-thread lookup or full-text search: drive from mailbox_threads_workspace or mail_messages_search GIN.
     const state = view === 'trash' ? sql`${t.trashedAt} IS NOT NULL` : view && view !== 'all' ? sql`${t.trashedAt} IS NULL AND ${
       view === 'inbox' ? sql`NOT ${t.archived} AND NOT ${t.spam}` : view === 'archive' ? t.archived : view === 'spam' ? t.spam : t.starred}` : null;
