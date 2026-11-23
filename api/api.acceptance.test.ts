@@ -26451,6 +26451,135 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     }finally{await writer.query('ROLLBACK');}
     assert.deepEqual(await state(),before);
   });
+  test('claimUnrouted: batched inline + background drain matches legacy loop across multi-address, plus-tags, interruption, concurrent arrival and address mutation',async t=>{
+    await simulatedSesFixture(t,async({db,runtime,local})=>{
+      const {attachToMailboxes,CLAIM_UNROUTED_INLINE,drainClaimUnrouted}=await import('./src/mailbox-store.js');
+      const {mailboxIngestJobs}=await import('./src/mailbox-ingest.js');
+      const {JobDeferred}=await import('./src/jobs.js');
+      const wid=runtime.config.workspaceId,dom=unique('mdom'),host=wid+'.invalid';
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')",[dom,wid,host,REGION]);
+      const seedUnrouted=async(prefix:string,entries:{addr:string;n:number;spam?:boolean;sameMsgGroup?:string}[])=>{
+        const byGroup=new Map<string,{id:string;tid:string;at:string;spam:boolean;size:number}>();
+        let seq=0;
+        for(const item of entries){
+          for(let i=0;i<item.n;i++){
+            seq++;
+            const at=new Date(Date.parse('2026-11-23T10:00:00.000Z')+seq*1000).toISOString();
+            let rec=item.sameMsgGroup?byGroup.get(item.sameMsgGroup+':'+i):undefined;
+            if(!rec){
+              const id=`msg_${prefix}_${seq}`,tid=`thr_${prefix}_${seq}`;
+              await db.query('INSERT INTO mail_threads(id,workspace_id,subject,message_count,last_message_at) VALUES($1,$2,$3,1,$4)',[tid,wid,'Sub '+id,at]);
+              await db.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,subject,from_address,snippet,received_at,size_bytes,spam,lifecycle) VALUES($1,$2,$3,'inbound',$4,'ext@example.invalid',$4,$5,256,$6,'default')",[id,wid,tid,'Sub '+id,at,!!item.spam]);
+              rec={id,tid,at,spam:!!item.spam,size:256};
+              if(item.sameMsgGroup)byGroup.set(item.sameMsgGroup+':'+i,rec);
+            }
+            await db.query('INSERT INTO mail_unrouted(workspace_id,message_id,address,created_at) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING',[wid,rec.id,item.addr,rec.at]);
+          }
+        }
+      };
+      // 1. Condition (1): Seeded equivalence (legacy sequential attachToMailboxes vs new inline + background batches)
+      //    including: exact address, alias, multi-address same message, plus-addressed mail, spam mail, wildcard rule.
+      const shape=(p:string)=>[
+        {addr:`${p}@${host}`,n:60},
+        {addr:`${p}@${host}`,n:10,spam:true},
+        {addr:`${p}+vip@${host}`,n:20},
+        {addr:`${p}-alias@${host}`,n:15,sameMsgGroup:'shared'},
+        {addr:`${p}@${host}`,n:15,sameMsgGroup:'shared'},
+        {addr:`${p}-wild-1@${host}`,n:30},
+      ];
+      await seedUnrouted('old',shape('legacy'));
+      await seedUnrouted('new',shape('batched'));
+      // Legacy box: run the exact old sequential attachToMailboxes + DELETE loop on 'legacy'
+      const legacyId=unique('mbx');
+      await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,rules,kind) VALUES($1,$2,$3,$4,$5::jsonb,'address')",[legacyId,wid,dom,'legacy@'+host,JSON.stringify(['legacy-wild-*@'+host])]);
+      await db.query("INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,$4,'primary'),($1,$3,$4,'alias')",[wid,'legacy@'+host,'legacy-alias@'+host,legacyId]);
+      const legRows=(await db.query("SELECT * FROM mail_unrouted WHERE workspace_id=$1 AND address LIKE 'legacy%'",[wid])).rows;
+      const legMids=[...new Set(legRows.map((r:Json)=>r.message_id))];
+      const legMsgs=(await db.query('SELECT * FROM mail_messages WHERE workspace_id=$1 AND id=ANY($2::text[]) ORDER BY received_at,id',[wid,legMids])).rows;
+      for(const m of legMsgs)await attachToMailboxes(runtime.db,{workspaceId:wid},{...m,workspaceId:wid,threadId:m.thread_id,receivedAt:m.received_at.toISOString(),sizeBytes:m.size_bytes},[legacyId]);
+      for(const r of legRows)await db.query('DELETE FROM mail_unrouted WHERE workspace_id=$1 AND address=$2 AND message_id=$3',[wid,r.address,r.message_id]);
+
+      // New box: create via POST /v1/inbound/addresses (claims first 100 inline, queues mailbox.claimUnrouted for rest!)
+      const created=ok(await local('POST','/v1/inbound/addresses',{address:'batched@'+host,aliases:['batched-alias@'+host],rules:['batched-wild-*@'+host]}),201);
+      const newId=created.id as string;
+      assert.ok(created.stats.threads<=CLAIM_UNROUTED_INLINE&&created.stats.threads>0,'inline claim is bounded at 100 rows');
+      assert.equal((await db.query("SELECT status FROM jobs WHERE id=$1",['claim-unrouted:'+newId])).rows[0]?.status,'pending','overflow queued mailbox.claimUnrouted');
+      // Simulate mail arriving while background claim runs AND interruption after 1 small batch (maxBatches=1, batchSize=25)
+      const midArrive=unique('msg'),tArrive=unique('thr');
+      await db.query('INSERT INTO mail_threads(id,workspace_id,subject,message_count,last_message_at) VALUES($1,$2,$3,1,now())',[tArrive,wid,'Mid-drain arrival']);
+      await db.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,subject,from_address,snippet,received_at,size_bytes,spam,lifecycle) VALUES($1,$2,$3,'inbound','Mid-drain','ext@example.invalid','hi',now(),256,false,'default')",[midArrive,wid,tArrive]);
+      await db.query('INSERT INTO mail_unrouted(workspace_id,message_id,address) VALUES($1,$2,$3)',[wid,midArrive,'batched+late@'+host]);
+      const partial=await drainClaimUnrouted(runtime,wid,newId,{batchSize:25,maxBatches:1});
+      assert.equal(partial.done,false,'interrupted after 1 batch leaves remaining rows');
+      // Finish via the real job handler (loops across JobDeferred until complete)
+      for(let step=0;step<10;step++){
+        try{await mailboxIngestJobs['mailbox.claimUnrouted']!(runtime,{mailboxId:newId},{id:'claim-unrouted:'+newId,attempts:1,workspaceId:wid});break;}
+        catch(e){if(!(e instanceof JobDeferred))throw e;}
+      }
+      assert.equal((await db.query("SELECT count(*)::int n FROM mail_unrouted WHERE workspace_id=$1 AND address LIKE 'batched%'",[wid])).rows[0].n,0,'all matching unrouted rows drained');
+      // Compare legacy vs new (excluding the 1 extra mid-drain arrival we added to new)
+      const snap=async(bid:string)=>({
+        state:(await db.query('SELECT messages,bytes::int FROM inbox_state WHERE inbox_id=$1',[bid])).rows[0],
+        folders:(await db.query("SELECT role,total,unseen FROM inbox_folders WHERE inbox_id=$1 AND role IN ('inbox','junk') ORDER BY role",[bid])).rows,
+        unread:(await db.query('SELECT count(*)::int n FROM mailbox_messages WHERE mailbox_id=$1 AND NOT read AND held_reason IS NULL',[bid])).rows[0].n,
+        threads:(await db.query('SELECT count(*)::int n,coalesce(sum(message_count),0)::int msgs,coalesce(sum(unread_count),0)::int unreads FROM mailbox_threads WHERE mailbox_id=$1',[bid])).rows[0],
+        events:(await db.query("SELECT count(*)::int n FROM mailbox_events WHERE mailbox_id=$1 AND type='message.received'",[bid])).rows[0].n,
+      });
+      const oldSnap=await snap(legacyId),newSnap=await snap(newId);
+      assert.equal(newSnap.state.messages,oldSnap.state.messages+1,'exact message count (+1 mid-drain arrival)');
+      assert.equal(newSnap.state.bytes,oldSnap.state.bytes+256,'exact byte count');
+      assert.equal(newSnap.unread,oldSnap.unread+1,'exact unread count');
+      assert.equal(newSnap.threads.n,oldSnap.threads.n+1,'exact thread count');
+      assert.equal(newSnap.threads.msgs,oldSnap.threads.msgs+1,'exact thread message sum');
+      assert.equal(newSnap.events,0,'claimUnrouted never fires message.received events inline or in background');
+      assert.equal(oldSnap.events,0);
+      assert.equal(newSnap.folders.find((f:Json)=>f.role==='junk').total,oldSnap.folders.find((f:Json)=>f.role==='junk').total,'spam filed to junk identically');
+      assert.equal(newSnap.folders.find((f:Json)=>f.role==='inbox').total,oldSnap.folders.find((f:Json)=>f.role==='inbox').total+1,'inbox folder count exact');
+
+      // 2. Condition (3): Address deleted, expired, or alias removed under the background job -> zero mail attached to deleted/expired/removed alias!
+      await seedUnrouted('del',[{addr:'delme@'+host,n:130}]);
+      const delBox=ok(await local('POST','/v1/inbound/addresses',{address:'delme@'+host}),201);
+      ok(await local('DELETE',`/v1/inbound/addresses/${delBox.id}`));
+      const delRes=await drainClaimUnrouted(runtime,wid,delBox.id);
+      assert.deepEqual(delRes,{done:true,claimed:0,batches:1});
+      assert.equal((await db.query('SELECT count(*)::int n FROM mailbox_messages WHERE mailbox_id=$1',[delBox.id])).rows[0].n,0,'no mail attached to deleted inbox');
+      assert.equal((await db.query("SELECT count(*)::int n FROM mail_unrouted WHERE workspace_id=$1 AND address='delme@'||$2",[wid,host])).rows[0].n,30,'unclaimed rows preserved when inbox deleted');
+
+      await seedUnrouted('exp',[{addr:'expme@'+host,n:120}]);
+      const expBox=ok(await local('POST','/v1/inbound/addresses',{address:'expme@'+host}),201);
+      await db.query("UPDATE mailboxes SET expires_at=now()+interval '1 hour' WHERE id=$1",[expBox.id]);
+      const expRes=await drainClaimUnrouted(runtime,wid,expBox.id);
+      assert.deepEqual(expRes,{done:true,claimed:0,batches:1},'address given expiry stops draining');
+
+      await seedUnrouted('al',[{addr:'keepal@'+host,n:105},{addr:'dropal@'+host,n:20}]);
+      const alBox=ok(await local('POST','/v1/inbound/addresses',{address:'keepal@'+host,aliases:['dropal@'+host]}),201);
+      ok(await local('PATCH',`/v1/inbound/addresses/${alBox.id}`,{aliases:[]}));
+      await drainClaimUnrouted(runtime,wid,alBox.id);
+      assert.equal((await db.query("SELECT count(*)::int n FROM mail_unrouted WHERE workspace_id=$1 AND address='keepal@'||$2",[wid,host])).rows[0].n,0,'kept address drained');
+      assert.ok((await db.query("SELECT count(*)::int n FROM mail_unrouted WHERE workspace_id=$1 AND address='dropal@'||$2",[wid,host])).rows[0].n>0,'removed alias stops claiming');
+
+      // 3. Condition (3): Concurrent claimers racing on overlapping wildcard rows never attach the same message to both inboxes!
+      const c1=await fixtureDatabase(t),c2=await fixtureDatabase(t);
+      const {drizzle}=await import('drizzle-orm/node-postgres');
+      const rWid=unique('racew'),rDom=unique('mdom'),rHost=rWid+'.invalid',rBox1=unique('mbx'),rBox2=unique('mbx');
+      cleanup(t,async()=>{for(const tbl of ['mailbox_events','mail_unrouted','mailbox_addresses','mailbox_threads','mailbox_messages','mail_messages','mail_threads','mailboxes','mailbox_domains'])await c1.query(`DELETE FROM ${tbl} WHERE workspace_id=$1`,[rWid]);});
+      await c1.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')",[rDom,rWid,rHost,REGION]);
+      await c1.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,rules,kind) VALUES($1,$3,$4,'r1@'||$5,$6::jsonb,'address'),($2,$3,$4,'r2@'||$5,$6::jsonb,'address')",[rBox1,rBox2,rWid,rDom,rHost,JSON.stringify(['overlap-*@'+rHost])]);
+      for(let i=1;i<=40;i++){
+        const mid=unique('msg'),tid=unique('thr');
+        await c1.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)',[tid,rWid]);
+        await c1.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,received_at,size_bytes,lifecycle) VALUES($1,$2,$3,'inbound',now(),100,'default')",[mid,rWid,tid]);
+        await c1.query("INSERT INTO mail_unrouted(workspace_id,message_id,address) VALUES($1,$2,'overlap-'||$3||'@'||$4)",[rWid,mid,i,rHost]);
+      }
+      await Promise.all([
+        drainClaimUnrouted({...runtime,db:drizzle(c1)},rWid,rBox1,{batchSize:10,maxBatches:10}),
+        drainClaimUnrouted({...runtime,db:drizzle(c2)},rWid,rBox2,{batchSize:10,maxBatches:10}),
+      ]);
+      const totals=(await c1.query('SELECT count(*)::int total,count(DISTINCT message_id)::int uniq FROM mailbox_messages WHERE workspace_id=$1',[rWid])).rows[0];
+      assert.deepEqual(totals,{total:40,uniq:40},'every unrouted message claimed by exactly one inbox with zero duplicates');
+      assert.equal((await c1.query('SELECT count(*)::int n FROM mail_unrouted WHERE workspace_id=$1',[rWid])).rows[0].n,0);
+    });
+  });
   test('mail gateway: a signed folder edit waiting behind deletion is denied without a write',async t=>{
     const db=await fixtureDatabase(t),rt=fixtureWorker!.runtime,w=unique('gwdel'),bid=unique('mbx'),kid=unique('app');
     await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'gwdel.invalid',$3,'active','store')",[bid,w,REGION]);

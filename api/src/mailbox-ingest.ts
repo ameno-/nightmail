@@ -702,7 +702,16 @@ const deleteMailObjects:JobHandler=async(runtime,payload,job)=>{
     throw new ApiError(503,'MAIL_DELETE_UNAVAILABLE','Object deletion will retry.',undefined,true);
   }
 };
-export const mailboxIngestJobs: Record<string, JobHandler> = { ...stagingJobs,'mail.archiveSent':retryDatabaseFailures(async(r,p,j)=>(await import('./mailbox-send.js')).archiveSentMessage(r,j.workspaceId,String(p.messageId))),'mail.deleteObjects':deleteMailObjects,[recoveryPage]:retryDatabaseFailures(async runtime=>recoverMailReceipts(runtime,true)),'mailbox.ingest': async (runtime, payload, job) => {
+export const mailboxIngestJobs: Record<string, JobHandler> = { ...stagingJobs,'mail.archiveSent':retryDatabaseFailures(async(r,p,j)=>(await import('./mailbox-send.js')).archiveSentMessage(r,j.workspaceId,String(p.messageId))),'mail.deleteObjects':deleteMailObjects,[recoveryPage]:retryDatabaseFailures(async runtime=>recoverMailReceipts(runtime,true)),'mailbox.claimUnrouted':retryDatabaseFailures(async(runtime,payload,job)=>{
+  const mailboxId=String(payload.mailboxId??'');
+  if(!mailboxId)return;
+  const {drainClaimUnrouted}=await import('./mailbox-store.js');
+  const res=await drainClaimUnrouted(runtime,job.workspaceId,mailboxId);
+  if(!res.done)throw new JobDeferred(new Date(Date.now()+250).toISOString());
+  // If an alias or rule was added while this job was running, queueClaimUnrouted marked rescan:true.
+  const {rows:[again]}=await runtime.db.execute<{rescan:boolean}>(sql`UPDATE jobs SET payload=payload-'rescan' WHERE id=${job.id} AND payload->>'rescan'='true' RETURNING true AS rescan`);
+  if(again?.rescan)throw new JobDeferred(new Date(Date.now()+100).toISOString());
+}),'mailbox.ingest': async (runtime, payload, job) => {
   let reserved=0;
   const key=JSON.stringify([job.workspaceId,payload.sesMessageId]),claim:{recipients?:string[];createdAt?:string}={recipients:job.ingest?.recipients,createdAt:job.ingest?.createdAt};
   if(inProgress.has(key))throw new JobDeferred(new Date(Date.now()+2000).toISOString());
