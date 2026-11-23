@@ -235,6 +235,7 @@ export async function snapshotCampaignAudience(db: DbExecutor, identity: Actor, 
       FROM audience_ordered o
       JOIN audience_contacts c ON c.workspace_id = ${identity.workspaceId} AND c.id = o.id
       CROSS JOIN LATERAL (SELECT ${insertRecipientExpr} AS recipient) r
+      ORDER BY o.ordinal
       RETURNING recipient_bytes
     )
     SELECT count(*)::int AS captured, coalesce(max(recipient_bytes), 0)::int AS max_bytes, coalesce(sum(recipient_bytes), 0)::bigint AS total_bytes FROM inserted`);
