@@ -196,6 +196,71 @@
 .ft-tag b { color: var(--ft-ink); font-size: 14px; font-weight: 600; line-height: 1.2; }
 .ft-tag span { color: oklch(0.38 0.02 268); font-family: var(--font-mono); font-size: 11px; font-weight: 700; line-height: 1; letter-spacing: .1em; text-transform: uppercase; }
 
+/* ── The cards in the homepage machine's own concrete, while one is chosen (?cards=1 to 3, board.tsx CARDS): pale,
+   almost white "moondust" concrete with fine speckle (board/moondust-*.avif, generated with crops of the homepage's
+   machine as the reference; panels: moondust-panels-*.avif), lit from above as the lamps light the page, so top edges
+   catch the light, bottoms fall to a soft grey and each casts a shadow down the dark wall. Every card's picture is in
+   one recess: a dark display set into the concrete, its reveal in shadow at the top and lit at the bottom; its words
+   are lettered on the concrete under it, the same on every card. ── */
+.cb-hall[data-cards] {
+  --md-tex: image-set(url('./board/moondust-384.avif?no-inline') 1x, url('./board/moondust-768.avif?no-inline') 2x);
+  --md: oklch(0.87 0.005 262); --md-ink: oklch(0.24 0.012 262); --md-ink-2: oklch(0.33 0.01 262); --md-screen: rgb(14 16 20);
+  /* Light from above: the lit top, the shaded foot. */
+  --md-light: linear-gradient(rgb(255 255 255 / 30%), rgb(255 255 255 / 4%) 34%, rgb(30 33 40 / 0%) 64%, rgb(30 33 40 / 10%));
+  --md-edge: inset 0 2px 0 rgb(255 255 255 / 80%), inset 1px 0 0 rgb(255 255 255 / 34%), inset -1px 0 0 rgb(40 44 52 / 16%), inset 0 -3px 0 rgb(40 44 52 / 24%);
+  --md-drop: 0 1px 1px rgb(0 0 0 / 55%), 0 16px 26px -8px rgb(0 0 0 / 80%), 0 34px 64px -22px rgb(0 0 0 / 60%); }
+/* The section's own light: a strip light on the wall over it (as the machine's intake is lit), its wash falling down
+   the wall and onto the concrete from above. */
+.cb-hall[data-cards] .ft { background: radial-gradient(ellipse min(60%, 760px) 1100px at 50% 120px, rgb(52 51 49), rgb(20 20 20 / 0%) 100%); }
+.cb-hall[data-cards] .ft-slab { position: relative; }
+.cb-hall[data-cards] .ft-slab::before { content: ''; position: absolute; z-index: 2; top: -52px; left: 50%; width: min(64%, 600px); height: 10px; translate: -50% 0; border-radius: 2px; background: linear-gradient(rgb(92 96 102), rgb(40 43 48)); box-shadow: 0 5px 0 -2px oklch(0.985 0.012 90), 0 8px 22px 1px oklch(0.96 0.03 85 / 30%), 0 2px 3px rgb(0 0 0 / 60%); pointer-events: none; }
+/* The cards' words, on the concrete. */
+.cb-hall[data-cards] .ft-card[data-face] .ft-words { margin: 20px 0 0; padding: 0 2px; border: 0; border-image-source: none; background: none; box-shadow: none; }
+.cb-hall[data-cards] .ft-words h3 { color: var(--md-ink); }
+.cb-hall[data-cards] .ft-words p { color: var(--md-ink-2); }
+/* The recess: one display style for every card. */
+.cb-hall[data-cards] .ft-card[data-face] .ft-show { z-index: auto; border: 0; border-image-source: none; border-radius: 2px; background: var(--md-screen); box-shadow: inset 0 0 0 1px rgb(0 0 0 / 80%), inset 0 5px 12px rgb(0 0 0 / 85%); }
+.cb-hall[data-cards] .ft-show::before { content: ''; position: absolute; z-index: -1; inset: -9px; border-radius: 4px; background: linear-gradient(rgb(24 27 33 / 56%), rgb(24 27 33 / 26%) 12%, rgb(24 27 33 / 10%) 36%, rgb(24 27 33 / 6%) 64%, rgb(255 255 255 / 38%)); box-shadow: inset 0 1px 0 rgb(24 27 33 / 22%), 0 1px 0 rgb(255 255 255 / 45%); pointer-events: none; }
+.cb-hall[data-cards] .ft-card[data-face='steel'] .ft-show { padding: 16px 18px; }
+.cb-hall[data-cards] .ft-flapboard { padding: 0; background: none; box-shadow: none; }
+.cb-hall[data-cards] .ft-rail { padding-top: 26px; }
+.cb-hall[data-cards] .ft-rail::before { background: oklch(0.62 0.006 262); box-shadow: inset 0 1px 0 rgb(255 255 255 / 45%), 0 2px 3px rgb(0 0 0 / 60%); }
+
+/* 1: cast blocks. Each card a precast block standing off the wall, its edges eased, its texture its own (offset by its
+   place), its shadow on the wall below. */
+.cb-hall[data-cards='1'] .ft-card, .cb-hall[data-cards='1'] .ft-card[data-face='steel'] { position: relative; isolation: isolate; padding: 22px 22px 22px; border: 0; border-image-source: none; border-radius: 3px; background: var(--md-light), linear-gradient(oklch(0.9 0.004 262 / 22%), oklch(0.9 0.004 262 / 22%)), var(--md-tex) calc(var(--k) * -131px) calc(var(--k) * -89px) / 384px 384px, var(--md); box-shadow: var(--md-edge), var(--md-drop); transition: translate 260ms var(--cb-ease), box-shadow 260ms var(--cb-ease); }
+@media (hover: hover) and (pointer: fine) { .cb-hall[data-cards='1'] .ft-card:hover { translate: 0 -2px; box-shadow: var(--md-edge), 0 2px 2px rgb(0 0 0 / 50%), 0 22px 30px -8px rgb(0 0 0 / 80%), 0 40px 70px -22px rgb(0 0 0 / 60%); } }
+.cb-hall[data-cards='1'] .ft-grid { gap: 32px 28px; }
+
+/* 2: one wall. The section is one slab of the machine's concrete, cast in panels like the machine's face: a panel to
+   each card, their joints down the middle of the gutters, a bolt at each panel's corners, the heading lettered on the
+   top panel and every display set into its panel. The gutters are the concrete itself. */
+.cb-hall[data-cards='2'] .ft-slab { --gap: 44px; position: relative; isolation: isolate; width: min(100% - 2 * var(--cb-gutter), 1000px); margin-inline: auto; padding: 52px calc(var(--gap) / 2) calc(var(--gap) / 2); border-radius: 3px; background: var(--md-light), var(--md-tex) 0 0 / 384px 384px, var(--md); box-shadow: var(--md-edge), var(--md-drop); }
+.cb-hall[data-cards='2'] .ft-title { margin-bottom: 52px; padding: 0; color: var(--md-ink); text-shadow: 0 1px 0 rgb(255 255 255 / 55%); }
+.cb-hall[data-cards='2'] .ft-grid { width: 100%; gap: var(--gap); }
+.cb-hall[data-cards='2'] .ft-card[data-face] { position: relative; padding: 0; border: 0; border-image-source: none; background: none; box-shadow: none; outline: 1px solid rgb(40 44 52 / 20%); outline-offset: calc(var(--gap) / 2 - .5px); }
+/* A panel's joint: a hairline in shadow with the lit lip under it (the outline and this), and its four bolts. */
+.cb-hall[data-cards='2'] .ft-card[data-face]::after { content: ''; position: absolute; z-index: -1; inset: calc(var(--gap) / -2 + 9px); pointer-events: none;
+  background: radial-gradient(circle at 45% 40%, rgb(252 252 253) 0 1px, rgb(150 154 160) 1.6px 2.6px, rgb(70 74 80 / 75%) 3.2px, transparent 4px) 0 0 / 9px 9px no-repeat,
+    radial-gradient(circle at 45% 40%, rgb(252 252 253) 0 1px, rgb(150 154 160) 1.6px 2.6px, rgb(70 74 80 / 75%) 3.2px, transparent 4px) 100% 0 / 9px 9px no-repeat,
+    radial-gradient(circle at 45% 40%, rgb(252 252 253) 0 1px, rgb(150 154 160) 1.6px 2.6px, rgb(70 74 80 / 75%) 3.2px, transparent 4px) 0 100% / 9px 9px no-repeat,
+    radial-gradient(circle at 45% 40%, rgb(252 252 253) 0 1px, rgb(150 154 160) 1.6px 2.6px, rgb(70 74 80 / 75%) 3.2px, transparent 4px) 100% 100% / 9px 9px no-repeat; }
+.cb-hall[data-cards='2'] .ft-words h3, .cb-hall[data-cards='2'] .ft-words p { text-shadow: 0 1px 0 rgb(255 255 255 / 50%); }
+
+/* 3: quiet panels. Pale panels with the concrete's tone and only a breath of its grain, hairline edges, soft shadows. */
+.cb-hall[data-cards='3'] .ft-card, .cb-hall[data-cards='3'] .ft-card[data-face='steel'] { padding: 14px 14px 20px; border: 0; border-image-source: none; border-radius: 8px; background: linear-gradient(oklch(0.91 0.004 262 / 84%), oklch(0.875 0.005 262 / 84%)), var(--md-tex) calc(var(--k) * -131px) calc(var(--k) * -89px) / 384px 384px, var(--md); box-shadow: inset 0 1px 0 rgb(255 255 255 / 80%), 0 0 0 1px rgb(0 0 0 / 40%), 0 14px 34px -10px rgb(0 0 0 / 65%); transition: box-shadow 260ms var(--cb-ease); }
+.cb-hall[data-cards='3'] .ft-card[data-face] .ft-show { border-radius: 5px; box-shadow: 0 0 0 1px rgb(24 27 33 / 32%), inset 0 1px 4px rgb(0 0 0 / 70%); }
+.cb-hall[data-cards='3'] .ft-show::before { display: none; }
+.cb-hall[data-cards='3'] .ft-words { padding-inline: 4px; }
+@media (hover: hover) and (pointer: fine) { .cb-hall[data-cards='3'] .ft-card:hover { box-shadow: inset 0 1px 0 rgb(255 255 255 / 80%), 0 0 0 1px rgb(0 0 0 / 40%), 0 18px 40px -10px rgb(0 0 0 / 75%); } }
+
+/* The board's frame and console in the same concrete (?frame=concrete with a choice of cards): the face set into it. */
+.cb-hall[data-frame='concrete'] .cb-board { border-color: rgb(255 255 255 / 12%) transparent rgb(30 33 40 / 14%); border-image-source: none; border-radius: 3px; background: linear-gradient(var(--cb-face), var(--cb-face)) padding-box, var(--md-light) border-box, var(--md-tex) 0 0 / 384px 384px border-box, var(--md) border-box; box-shadow: inset 0 6px 12px rgb(0 0 0 / 70%), var(--md-drop); }
+.cb-hall[data-frame='concrete'] .cb-board::before { height: 2px; background: rgb(255 255 255 / 80%); }
+.cb-hall[data-frame='concrete'] .cb-console { border-color: rgb(255 255 255 / 12%) transparent rgb(30 33 40 / 14%); border-image-source: none; border-radius: 3px; background: var(--md-light) border-box, var(--md-tex) -200px -120px / 384px 384px border-box, var(--md) border-box; box-shadow: 0 -1px 0 rgb(255 255 255 / 70%), var(--md-drop); }
+.cb-hall[data-frame='concrete'] .cb-stencil { color: var(--md-ink); }
+.cb-hall[data-frame='concrete'] .cb-ticks i { background: rgb(40 44 52 / 60%); }
+
 /* ── The close: the bill and the way in, under a lamp of its own; its light, the wall's picture again, falls off into
    the dark all round. ── */
 .cb-close { position: relative; isolation: isolate; display: grid; justify-items: center; padding: 256px var(--cb-gutter) 168px; text-align: center; }
@@ -278,6 +343,12 @@
   .cb-bill { font-size: 30px; }
   .cb-key-start { width: 100%; max-width: 320px; margin-top: 32px; }
   .cb-fine { padding-top: 36px; }
+}
+@media (max-width: 640px) {
+  .cb-hall[data-cards='2'] .ft-slab { --gap: 36px; width: calc(100% - 2 * var(--cb-gutter) + 8px); padding-top: 40px; }
+  .cb-hall[data-cards='2'] .ft-title { margin-bottom: 40px; }
+  .cb-hall[data-cards='1'] .ft-card, .cb-hall[data-cards='1'] .ft-card[data-face='steel'] { padding: 16px 16px 18px; }
+  .cb-hall[data-cards] .ft-card[data-face='steel'] .ft-show { padding: 14px 12px; }
 }
 /* Two panels across, the first across both, on a tablet; one under another on a phone. */
 @container (width < 900px) {

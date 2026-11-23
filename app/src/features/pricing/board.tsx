@@ -74,12 +74,17 @@ function Fader({ c, size, onChange, id }: { c: Comparison; size: number; onChang
  *  a class of the page's. Without it (the pre-merge check's render) the page has no button. */
 export type Start = { signedIn: boolean; button: (className: string) => ReactNode }
 
-export function ComparisonBoard({ comparison: c, start }: { comparison: Comparison; start?: Start }) {
+/** The feature cards' material, while one is chosen (?cards=1 to 3, board.css): cast blocks, one wall, quiet panels;
+ *  without it, the homepage's steel. frame: the board's frame and console in the cards' concrete too (?frame=concrete). */
+export const CARDS = ['1', '2', '3'] as const
+
+export function ComparisonBoard({ comparison: c, start, cards, frame }: { comparison: Comparison; start?: Start; cards?: string | null; frame?: string | null }) {
   const room = useMemo(() => rooms(c), [c])
   const [size, setSize] = useState(() => opening(c))
   const p = pointAt(c, size), id = useId(), vendor = c.offer.vendor
   const lit = p.ours.uc === 0n ? 0 : Math.max(1, Math.round(CELLS * share(p)))
-  return <><section className="cb-hall" aria-labelledby="cb-title">
+  const material = CARDS.find(k => k === cards)
+  return <><section className="cb-hall" aria-labelledby="cb-title" data-cards={material} data-frame={material && frame === 'concrete' ? 'concrete' : undefined}>
     <div className="cb-stage">
       <div className="cb-backdrop" aria-hidden="true"><i className="cb-lamp" /></div>
       <div className="cb-wrap">

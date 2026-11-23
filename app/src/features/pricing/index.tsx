@@ -1,5 +1,5 @@
 import { lazy, use, useEffect, useLayoutEffect, type ReactNode } from 'react'
-import { Link, NavLink, useParams } from 'react-router'
+import { Link, NavLink, useParams, useSearchParams } from 'react-router'
 import { ThemeToggle } from '../../components/ThemeToggle'
 import { NightmailWordmark } from '../../components/NightmailLogo'
 import { EmptyState } from '../../components/ui'
@@ -62,8 +62,10 @@ export function ComparePage() {
   const { vendor } = useParams()
   const comparison = vendor === 'mailchimp' || vendor === 'resend' ? comparisons[vendor] : null
   const page = PRICE_PAGES.find(p => p.path === `/compare/${vendor}`)
+  // The feature cards' material waits for a choice (board.tsx, CARDS): ?cards=1 to 3, and ?frame=concrete with one.
+  const [search] = useSearchParams()
   if (!comparison) return <PriceFrame title="Page not found"><EmptyState headingAs="h1" title="Page not found" action={<Link to="/pricing">Price calculator</Link>} /></PriceFrame>
   return <PriceFrame title={page?.title ?? comparison.offer.vendor} variant="price-page--board" end={<BoardEnd />} scene>
-    <ComparisonScene key={vendor} comparison={comparison} />
+    <ComparisonScene key={vendor} comparison={comparison} cards={search.get('cards')} frame={search.get('frame')} />
   </PriceFrame>
 }

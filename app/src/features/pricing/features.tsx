@@ -69,15 +69,17 @@ export function Features({ comparison: c }: { comparison: Comparison }) {
   }, [])
   const layout = LAYOUTS[c.offer.id]
   return <section className="ft" ref={root} aria-labelledby="ft-title">
-    <h2 id="ft-title" className="ft-title">Also in the box.</h2>
-    <div className="ft-grid">{layout.map(([id, at], k) => {
-      const { title, line, face, show } = FEATURES[id]
-      // (A panel across more than half the wide grid is across both columns on a tablet.)
-      const [, from, , to] = at.split('/').map(Number), wide = to! - from! > 6
-      return <article key={id} className="ft-card" data-face={face} data-feature={id} data-lead={k === 0 || undefined} data-wide={wide || undefined} style={{ '--at': at } as CSSProperties}>
-        <div className="ft-show" aria-hidden="true">{show}</div>
-        <div className="ft-words"><h3>{title}</h3><p>{line}</p></div>
-      </article>
-    })}</div>
+    <div className="ft-slab">
+      <h2 id="ft-title" className="ft-title">Also in the box.</h2>
+      <div className="ft-grid">{layout.map(([id, at], k) => {
+        const { title, line, face, show } = FEATURES[id]
+        // (A panel across more than half the wide grid is across both columns on a tablet.)
+        const [, from, , to] = at.split('/').map(Number), wide = to! - from! > 6
+        return <article key={id} className="ft-card" data-face={face} data-feature={id} data-lead={k === 0 || undefined} data-wide={wide || undefined} style={{ '--at': at, '--k': k } as CSSProperties}>
+          <div className="ft-show" aria-hidden="true">{show}</div>
+          <div className="ft-words"><h3>{title}</h3><p>{line}</p></div>
+        </article>
+      })}</div>
+    </div>
   </section>
 }
