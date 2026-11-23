@@ -13,13 +13,13 @@ Each file comes in a light version (`-light`, ink `#0a0a0a`, for a pale backgrou
 | `app/public/brand/nightmail-wordmark-128-*.svg` | the wordmark alone |
 | `app/public/brand/nightmail-lockup-256-*.svg` | the lockup, from 32 px tall (the repository's README sets it at 32) |
 | `app/public/brand/nightmail-lockup-24-*.svg` | the lockup under 32 px tall, with the small stamp |
-| `app/public/favicon.svg`, `favicon-dark.svg` | the small stamp's light and dark files, for a browser tab |
-| `app/public/favicon.ico`, `apple-touch-icon.png`, `icon-192.png`, `icon-512.png`, `icon-maskable-512.png` | the tab icon for browsers without vectors, and the home-screen icons, made from the stamp |
+| `app/public/favicon.svg`, `favicon-dark.svg` | the tab icon: the stamp's crescent on a rounded tile, for a browser's pale and dark themes |
+| `app/public/favicon.ico`, `apple-touch-icon.png`, `icon-192.png`, `icon-512.png`, `icon-maskable-512.png` | the tab icon for browsers without vectors, and the home-screen icons |
 | `app/public/og.png` | the link-preview card: a fixed file, which still shows the old lockup and wordmark until it is re-rendered |
 | `app/src/lib/marks.ts` | the wordmark's and both stamps' outlines, as the app draws them |
 | `app/src/components/NightmailLogo.tsx` | `NightmailWordmark` (the wordmark) and `NightmailMark` (the stamp), each one inline SVG that follows the theme |
 
-`node scripts/brand-assets.mjs` in `app/` builds `favicon.svg`, `favicon-dark.svg`, `favicon.ico` and the four home-screen icons from the stamp files in `app/public/brand/`. Run it after changing a mark.
+`node scripts/brand-assets.mjs` in `app/` builds `favicon.svg`, `favicon-dark.svg`, `favicon.ico` and the four home-screen icons from the stamp files in `app/public/brand/` (the tab icon from the stamp's moon). Run it after changing a mark.
 
 Use PNGs in email, because many mail clients don't show SVG. No email Nightmail sends carries a logo today (account notices are words and one button, `api/src/notices.ts`). One that does should take a PNG of the light lockup or stamp, at twice its size in the message, on its own paper (`#fafafa`) rectangle with at least half the cap height of padding round it, so a client that darkens the message does not leave ink on a dark canvas.
 
@@ -52,7 +52,7 @@ Measured from the SVGs.
 
 ## Where the app sets them
 
-- **In the app, the wordmark stands alone.** The stamp is for places that need a square mark: the browser's tab, the app icons and the support chat's avatar.
+- **In the app, the wordmark stands alone.** The stamp is for places that need a square mark: the app icons and the support chat's avatar. The browser's tab takes its moon alone, on a tile.
 - **Dashboard sidebar:** `NightmailWordmark` at 13 px cap height, so 139 px across, at the top with the theme button beside it and the workspace picker under it. Its first stem stands on the text's left edge, the same x as the picker's name and the navigation labels (`--sidebar-gutter` + `--sidebar-inset`). In the narrower sidebar (900 to 1100 px wide) it is 11 px, so it clears the theme button.
 - **A phone's top bar (under 640 px):** 11 px, as tall as the caps of the workspace picker's name beside it; 10 px under 380 px. From 640 px the bar carries it at 13 px.
 - **Onboarding and the legal pages:** 13 px, at the head of the page.
@@ -62,7 +62,7 @@ Measured from the SVGs.
 
 ## Favicon and app icons
 
-- **Browser tab:** the small stamp, as a vector by the browser's theme: `favicon.svg` (ink) on a pale one and `favicon-dark.svg` (paper) on a dark one, its window showing the tab through it. `favicon.ico` holds the light stamp at 16 px (the small drawing) and 32 px, its window filled with paper, for browsers that take no vector: it does not know the tab's theme, so it carries its own pale face, and on a dark strip it still reads as a pale stamp with its moon.
+- **Browser tab:** the stamp's crescent alone on a rounded tile, because at 16 px the stamp's frame and perforations turn to noise and the outline has too little mass beside other sites' solid icons. It is drawn on the 16 px grid: a 16 px square with its corners rounded by 3, and the moon, at the real mark's shape and angle, 11 tall and centred (the same proportions at 32 px: corners 6, moon 22). `favicon.svg` is a paper moon on an ink tile, for a browser's pale theme; `favicon-dark.svg` an ink moon on a paper tile, for its dark one. `favicon.ico` holds the light one at 16 and 32 px, for browsers that take no vector: its paper moon reads on a strip of either theme.
   `<link rel="icon" href="/favicon.ico" sizes="32x32">`, then `<link rel="icon" type="image/svg+xml" href="/favicon.svg" media="(prefers-color-scheme: light)">` and the same for `/favicon-dark.svg` with `dark`. Keep `sizes="32x32"` on the `.ico`: with `16x16` listed too, Chrome takes the `.ico` over the vectors. `app/index.html` and `app/public/signed-in/index.html` carry the links; the support Worker serves the same two files for its own pages (`support/src/favicon.ts`: keep them the same).
 - **Home screen:** `apple-touch-icon.png` (180), `icon-192.png` and `icon-512.png` are the paper stamp at 66 % of the side, centred on a full square of ink: its corners stand 17 % in from the icon's, clear of the corners iOS rounds, and the perforations keep the ink round them. `icon-maskable-512.png` has it at 52 %, so the whole stamp, corners included, is inside the 80 % circle a launcher may crop to.
 
@@ -71,5 +71,6 @@ Measured from the SVGs.
 - Stretch, respace, redraw or rotate the marks, or set the wordmark in another typeface or in lowercase.
 - Scale the large stamp under 32 px, or the small one up past it.
 - Recolour them outside ink and paper, or add gradients, outlines, shadows or glows.
-- Fill the stamp's window with anything but its own ground. The `.ico`, filled with paper to be read on any tab, is the one exception.
+- Fill the stamp's window with anything but its own ground.
+- Set the moon alone anywhere but the tab icon.
 - Crop the marks. The homepage's end band, cut off by the page's edge as a poster's is, is the one exception; there the wordmark is given depth, its face stays the outline itself and its sides take a darker tone.
