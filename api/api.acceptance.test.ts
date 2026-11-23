@@ -9184,7 +9184,7 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.deepEqual([(await get('/v1/support/context')).grant.contentWorkspaceId, (await get('/v1/support/context', stamp(plain.id))).grant.contentWorkspaceId, (await get('/v1/support/workspaces', stamp(both.id))).data.length], [wid, null, 2]);
 
       // Synthetic mail of one workspace over the last days: providers, outcomes, a campaign, screen refusals, a simulated email.
-      const tag = randomUUID().slice(0, 8), domain = `news-${tag}.example.com`, mailFrom = `mail.${domain}`, domainId = unique('dom'), campaignId = unique('cmp'), listId = unique('lst');
+      const tag = randomUUID().slice(0, 8), domain = `news-${tag}.example.com`, mailFrom = `mail.${domain}`, domainId = unique('dom'), campaignId = unique('cmp'), listId = unique('lst'), importId = unique('imp'), theirImportId = unique('imp');
       await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES ($1,$2,$3,$4)', [domainId, wid, domain, REGION]);
       await db.query("INSERT INTO provider_connections(id,workspace_id,kind,region,state) VALUES ($1,$1,'shared',$2,'ready')", [wid, REGION]);
       await db.query(`INSERT INTO domain_claims(workspace_id,name,connection_id,sending_state,identity,created_at) VALUES ($1,$2,$1,'verified',$3,now() - interval '5 days')`, [wid, domain, JSON.stringify({ proven: true, mx: null, note: null,
@@ -9233,7 +9233,11 @@ describe('Hosted MCP OAuth and tools', () => {
           CASE WHEN n <= 50 THEN now() - interval '190 days' WHEN n <= 110 THEN now() - interval '3 days' END FROM generate_series(1,120) n`, [wid, tag]);
       await db.query(`INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM audience_contacts WHERE workspace_id=$1`, [wid, listId]);
       await db.query(`INSERT INTO audience_imports(id,workspace_id,list_id,status,rows,errors,imported,created_at) VALUES ($1,$2,$3,'committed',
-        (SELECT jsonb_agg(jsonb_build_object('row',n,'email','person'||n||'@'||CASE WHEN n <= 12 THEN 'gmial.com' ELSE 'gmail.com' END,'properties','{}'::jsonb)) FROM generate_series(11,40) n),'[{"row":41,"field":"email","message":"invalid"}]',30,now() - interval '5 days')`, [unique('imp'), wid, listId]);
+        (SELECT jsonb_agg(jsonb_build_object('row',n,'email','person'||n||'@'||CASE WHEN n <= 12 THEN 'gmial.com' ELSE 'gmail.com' END,'properties','{}'::jsonb)) FROM generate_series(11,40) n),'[{"row":41,"field":"email","message":"invalid"}]',30,now() - interval '5 days')`, [importId, wid, listId]);
+      // Imports audience health must leave out: this workspace's preview and its import of 100 days ago, and another workspace's newer one.
+      await db.query(`INSERT INTO audience_imports(id,workspace_id,status,rows,errors,imported,created_at) VALUES ($1,$3,'preview','[{"row":1,"email":"person20@gmail.com","properties":{}}]','[]',0,now() - interval '1 day'),
+        ($2,$3,'committed','[{"row":1,"email":"person21@gmail.com","properties":{}}]','[]',1,now() - interval '100 days'), ($4,$5,'committed','[{"row":1,"email":"person22@gmail.com","properties":{}}]','[]',1,now() - interval '1 hour')`,
+        [unique('imp'), unique('imp'), wid, theirImportId, other]);
       // A campaign whose draft breaks the screen's rules.
       await db.query(`INSERT INTO sending_campaigns(id,workspace_id,draft,state,total,prepared,expanded,created_at) VALUES ($1,$2,$3,'done',20,20,20,now() - interval '3 days')`, [campaignId, wid, JSON.stringify({ name: 'Early access', from: `hello@${domain}`, subject: 'SALE!!! EVERYTHING MUST GO',
         region: REGION, tracking: true, attachments: [], audience: { listId }, defaults: { firstName: 'there' }, previewText: 'Big news',
@@ -9362,6 +9366,7 @@ describe('Hosted MCP OAuth and tools', () => {
         const audience = await get('/v1/support/audience/health');
         const newsletter = audience.lists[0];
         assert.deepEqual([newsletter.name, newsletter.contacts, newsletter.role, newsletter.typoDomains, newsletter.stale, newsletter.neverObserved, newsletter.suppressedBy, newsletter.subscribed], ['Newsletter', 120, 10, 2, 50, 10, { hard_bounce: 3, complaint: 1 }, 100]);
+        assert.deepEqual(audience.imports.map((i: Json) => i.id), [importId], 'Only this workspace’s committed imports of the last 90 days.');
         assert.deepEqual([audience.imports[0].imported, audience.imports[0].errors, audience.imports[0].contacts, audience.imports[0].hardBounce.numerator], [30, 1, 30, 3]);
         assert.ok(['STALE_CONTACTS', 'ROLE_ADDRESSES', 'TYPO_DOMAINS', 'IMPORT_BOUNCES'].every(code => audience.findings.some((f: Json) => f.code === code)));
         assert.ok(!address.test(JSON.stringify(audience)), 'Audience health never shows an address.');
@@ -9371,7 +9376,8 @@ describe('Hosted MCP OAuth and tools', () => {
         ok(await send('GET', `/v1/support/deliverability/metrics?workspaceId=${second}`, stamp(both.id)));
         error(await send('GET', `/v1/support/deliverability/metrics?workspaceId=${other}`, support), 404);
         error(await send('GET', `/v1/support/emails/${lintable!.id}/lint`, stamp(theirs.id)), 404);
-        assert.equal(ok(await send('GET', '/v1/support/audience/health', stamp(theirs.id))).lists.length, 0);
+        const theirAudience = ok(await send('GET', '/v1/support/audience/health', stamp(theirs.id)));
+        assert.deepEqual([theirAudience.lists.length, theirAudience.imports.map((i: Json) => i.id)], [0, [theirImportId]]);
         // budgetedRead runs inside the fixture's transaction as a savepoint, so its SET LOCAL is still visible here.
         assert.equal((await db.query('SHOW statement_timeout')).rows[0].statement_timeout, '3s');
         // Each aggregate costs 5 of the conversation's 120 a minute: 24 of them use it up, a cheap read then gets 429 too.
