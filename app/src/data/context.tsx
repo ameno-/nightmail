@@ -29,8 +29,13 @@ type Session = { identity: Identity | null; logout: () => Promise<void>; switchW
   switchAccount: (id: string, path?: string, workspace?: string) => Promise<void>; addAccount: (path?: string) => void; signOutAccount: (id?: string) => Promise<void>; signOutAll: () => Promise<void>
   /** Staff tools need this account's Google sign-in (Identity.staffSignIn): signs in again with Google, back to this page. */
   signInForStaff: () => void
-  /** Sign in (with Google: a sign-in that proves the account's mailbox), back to this page: for the public pages that need one. */
+  /** Sign in (with Google: a sign-in that proves the account's mailbox), back to this page: for the public pages that need one.
+   *  From the price pages, as from the homepage, it opens Overview. */
   signIn: (method?: 'google') => void
+  /** A press starting on a sign-in button (pointer down): the sign-in request starts then, as the homepage's button does. */
+  signInIntent: (event: { button: number }) => void
+  /** A sign-in is under way (its button shows it). */
+  signingIn: boolean
   notice: string | null; dismissNotice: () => void }
 const homeChunk = chunk(() => import('../features/home'))
 export const loadHome = homeChunk.preload
@@ -140,9 +145,9 @@ function WaitlistPage({ busy, error, onSwitch }: { busy: boolean; error: unknown
 }
 /** Pages anyone can open, signed in or not. Continuing an emailed support request (features/support/continue.tsx) is one:
  *  a person signed in without a workspace has no /v1/me but can confirm it, and someone signed out signs in from it. */
-export const isPublicPath = (path: string) => path === '/docs' || path.startsWith('/docs/') || path === '/legal' || path.startsWith('/legal/') || path.startsWith('/support/continue/')
+export const isPublicPath = (path: string) => path === '/docs' || path.startsWith('/docs/') || path === '/legal' || path.startsWith('/legal/') || path === '/pricing' || path.startsWith('/compare/') || path.startsWith('/support/continue/')
 export function ApiProvider({ children }: { children: ReactNode }) {
-  // The docs and the legal pages are public: they render signed out, and /v1/me only adds the workspace's context.
+  // The docs, the legal pages and the price pages are public: they render signed out, and /v1/me only adds the workspace's context.
   const { pathname } = useLocation(), publicRoute = isPublicPath(pathname)
   const navigate = useNavigate()
   // A sign-in (or a return from a provider) this tab started names the account the page opens as; the tab then stays
@@ -346,10 +351,10 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   // select: the account service shows its account chooser first (the waitlist screen's "Use a different account").
   // method: it asks for that sign-in (staff tools need Google).
   function accountUrl(select = false, method?: 'google') {
-    // Assign path components rather than resolving an untrusted redirect parameter. Signing in from the homepage, or
-    // from an address the dashboard doesn't have, opens Overview.
+    // Assign path components rather than resolving an untrusted redirect parameter. Signing in from the homepage or a
+    // price page (their Get started), or from an address the dashboard doesn't have, opens Overview.
     const callback = new URL(window.location.origin), path = window.location.pathname
-    callback.pathname = path === '/' || !isKnownPath(path) ? '/overview' : path
+    callback.pathname = path === '/' || path === '/pricing' || path.startsWith('/compare/') || !isKnownPath(path) ? '/overview' : path
     callback.search = window.location.search
     callback.hash = window.location.hash
     callback.searchParams.delete('auth'); callback.searchParams.delete('place')
@@ -397,7 +402,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   // the invitation itself is readable. It gets the same review; nothing joins until the recipient clicks Join.
   const invitee = signedOut && invitation !== null && review.data?.status === 'pending'
   const reviewing = !publicRoute && invitation !== null && ((identity.data && !identity.isError) || invitee || (signedOut && review.isFetching))
-  return <ApiContext.Provider key={generation} value={client}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, switchAccount, addAccount, signOutAccount, signOutAll, signInForStaff: () => void startLogin(false, 'google'), signIn: method => void startLogin(false, method), notice, dismissNotice: () => setNotice(null)}}>
+  return <ApiContext.Provider key={generation} value={client}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, switchAccount, addAccount, signOutAccount, signOutAll, signInForStaff: () => void startLogin(false, 'google'), signIn: method => void startLogin(false, method), signInIntent: prepareLogin, signingIn: busy, notice, dismissNotice: () => setNotice(null)}}>
     <Analytics identity={identity.data && !identity.isError ? identity.data : null} signedOut={signedOut} />
     {reviewing ? review.data?.status === 'pending' ? <InvitationReview invitation={review.data} email={identity.data?.email ?? null} firstWorkspace={invitee} joining={join.isPending} error={join.error} onJoin={() => join.mutate(review.data!)} onCancel={invitee ? () => { clearInvitation(); void logout() } : clearInvitation} /> : <BootLoader />
     : publicRoute || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending ? <BootLoader /> : authResult === 'waitlist' && window.location.pathname === '/' ? <WaitlistPage busy={busy} error={authError} onSwitch={() => void startLogin(true)} />
