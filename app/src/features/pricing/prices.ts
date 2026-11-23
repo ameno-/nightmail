@@ -248,7 +248,7 @@ export type Comparison = {
   ours: (Fact | { text: string; short?: string; note?: string; source?: undefined })[]
   /** The same in one clause, after "Nightmail has". */
   summary?: string
-  /** The sizes the price-against-a-price control can reach (contacts or emails a month, by the offer's unit), each one
+  /** The sizes the comparison page's fader can reach (contacts or emails a month, by the offer's unit), each one
    *  the vendor prices; use turns one into the usage both prices are for; assume is the line under the picture. On a
    *  'complete' ladder a typed size between the first and the last is priced too (reachable). */
   steps: number[]

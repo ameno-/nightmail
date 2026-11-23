@@ -115,37 +115,3 @@ export function Terms({ floor }: { floor: string | null }) {
     <li>Received mail kept past {nightmail.storageAfterDays} days: {nightmail.storagePerGb} per GB a month after {nightmail.freeStorageGb} GB free.</li>
   </ul>
 }
-
-export function Compare({ comparison: c }: { comparison: Comparison }) {
-  const { offer } = c, contacts = offer.unit === 'contacts'
-  return <>
-    <header className="price-intro">
-      <h1>Nightmail vs {offer.vendor}</h1>
-      <p>{c.lead}</p>
-    </header>
-    <table className="price-table">
-      <thead><tr><th scope="col">Size</th><th scope="col">{offer.vendor}</th><th scope="col">Nightmail</th></tr></thead>
-      {/* (Only sizes the vendor's page prices.) */}
-      <tbody>{c.sizes.map(size => {
-        const q = quote(offer, size), bill = nightmailBill(size.sent, size.received)
-        return q.kind === 'price' && <tr key={size.sent} data-offer={offer.id}>
-          <th scope="row">{contacts ? <>{formatCount(size.contacts)} contacts<span className="price-table__sub">{formatCount(size.sent)} emails a month</span></> : <>{formatCount(size.sent)} emails a month</>}</th>
-          <td data-label={offer.vendor}><strong>{money(q.cents)}</strong><span className="price-table__sub">{q.plan.name}</span></td>
-          <td data-label="Nightmail"><strong><Ours sent={size.sent} received={size.received}>{bill.text}</Ours></strong><span className="price-table__sub">{billMath(bill.sent)}</span></td>
-        </tr>
-      })}</tbody>
-    </table>
-    <p className="price-note">{c.usage} Monthly billing, list prices before tax. <Checked source={{ checked: CHECKED, url: offer.pricing }} /></p>
-    <section className="price-section" aria-labelledby="price-ours">
-      <h2 id="price-ours">On Nightmail</h2>
-      <ul className="price-facts">{c.ours.map(fact => <li key={fact.text}>{fact.text}{fact.source && <Cite source={fact.source} />}</li>)}</ul>
-      <CheckedOn facts={c.ours} />
-    </section>
-    <section className="price-section">
-      <div className="price-actions">
-        <Link className="ui-button ui-button--primary ui-button--md" to={calculatorPath(c.sizes[1]!)}>Try your numbers<ArrowRight size={16} aria-hidden="true" /></Link>
-      </div>
-    </section>
-    <Disclosure className="price-small" headingAs="h2" title="Small print"><Terms floor={null} /></Disclosure>
-  </>
-}

@@ -1,0 +1,168 @@
+/* The comparison page (board.tsx, loaded only with it: board-page.tsx): a board hung in the homepage's factory. It takes the homepage's world
+   (features/home): its paper and ink (hue 268, warm paper at 92), the periwinkle its screens light things in (here
+   Nightmail's colour, the only one), its steel housings, floor slabs, stencils and label plates (home/kit), the lit key
+   it is entered by, and the wordmark across its end. Where the homepage draws depth (the kit's rendered steel, cast
+   shadows, the key's lit edges) the board does too. Figures are tabular and keep the room of the widest they can show.
+   Every picture is its own file (?no-inline): the build inlines the homepage's kit for its own lazy stylesheet
+   (vite.config.ts), and inlined here they would make this stylesheet a quarter of a megabyte. */
+.price-page--board {
+  --cb-floor: oklch(0.948 0.01 262); --cb-paper: oklch(0.955 0.014 92); --cb-text-2: oklch(0.79 0.014 268); --cb-mine: oklch(0.79 0.085 269);
+  --cb-ease: cubic-bezier(.22, 1, .36, 1); --cb-gutter: 32px; --cb-wall: rgb(38 41 45);
+  --srt-name: var(--color-logo); --srt-paper: oklch(0.985 0.01 92);
+  --srt-cta: oklch(0.975 0.02 92); --srt-cta-hover: oklch(0.995 0.012 92); --srt-cta-top: oklch(1 0 0); --srt-cta-side: oklch(0.78 0.03 92); --srt-on-cta: oklch(0.2 0.02 268); --srt-cta-edge: oklch(0.2 0.02 268 / 14%);
+  background: var(--cb-floor); -webkit-font-smoothing: antialiased; }
+:root[data-theme='dark'] .price-page--board { --cb-floor: oklch(0.158 0.014 268); --srt-paper: oklch(0.955 0.014 92); --srt-cta: oklch(0.945 0.016 92); --srt-cta-hover: oklch(0.975 0.012 92); --srt-cta-side: oklch(0.72 0.022 92); }
+.price-page--board .price-header { border-bottom-color: oklch(0.21 0.02 268 / 8%); background: var(--cb-floor); }
+:root[data-theme='dark'] .price-page--board .price-header { border-bottom-color: oklch(1 0 0 / 7%); }
+.price-page--board .price-main { width: 100%; padding: 0; }
+.price-page--board .price-footer { border-top: 0; text-align: center; }
+.cb-wrap { width: min(100% - 2 * var(--cb-gutter), 1120px); margin-inline: auto; }
+.cb-room { display: inline-grid; }
+.cb-room > * { grid-area: 1 / 1; }
+.cb-room > :first-child { visibility: hidden; }
+
+/* The hall: the stage the board hangs in (its backdrop a layer behind it, which never takes room), a floor slab, the
+   words under it, and another slab. Dark by day and by night, as the homepage's factory is. */
+.cb-hall {
+  --color-text: var(--cb-paper); --color-muted: var(--cb-text-2); --color-faint: oklch(0.63 0.016 268); --color-border-muted: oklch(1 0 0 / 12%); --color-border: oklch(1 0 0 / 14%); --color-border-strong: oklch(1 0 0 / 32%); --color-hover: oklch(1 0 0 / 6%); --color-focus: var(--cb-mine);
+  position: relative; container-type: inline-size; background: var(--cb-wall) url('../home/kit/wall.webp?no-inline') 0 0 / 288px 288px; color: var(--cb-paper); }
+.cb-stage { position: relative; isolation: isolate; padding: 112px 0 112px; }
+.cb-backdrop { position: absolute; z-index: -1; inset: 0; overflow: hidden; pointer-events: none; }
+.cb-backdrop > i { position: absolute; inset: 0; display: block; }
+.cb-slab { position: relative; height: 48px; background: rgb(112 116 122) url('../home/kit/floor.webp?no-inline') 0 0 / 192px 48px repeat-x; }
+.cb-wrap.cb-below, .cb-stage > .cb-wrap { display: grid; justify-items: center; text-align: center; }
+.cb-title { max-width: 17em; color: var(--cb-paper); font-family: var(--font-body); font-size: clamp(36px, 1.9cqw + 20px, 60px); font-weight: 600; font-variation-settings: 'opsz' 32; line-height: 1.04; letter-spacing: -.03em; text-wrap: balance; }
+
+/* The board: hung from the rail as the hero's boards are, split-flap tiles and pigeonholes in a steel frame. */
+.cb-hang { display: flex; justify-content: space-between; width: min(56%, 520px); height: 64px; margin-top: 40px; }
+.cb-hang i { width: 6px; background: oklch(0.42 0.01 268); box-shadow: inset -2px 0 0 oklch(0.3 0.01 268), inset 1px 0 0 oklch(0.6 0.01 268); }
+.cb-board { width: min(100%, 1000px); border: 28px solid rgb(90 94 100); border-image: url('../home/kit/housing-screen.webp?no-inline') 64 fill / 28px round; background: rgb(9 10 12) padding-box; box-shadow: 6px 14px 18px rgb(0 0 0 / 55%); text-align: start; }
+.cb-face { margin: 4px; padding: 30px 36px 26px; border: 2px solid oklch(0.85 0.012 92 / 72%); }
+.cb-head, .cb-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-8) var(--space-12); color: oklch(0.8 0.012 92); font-family: var(--font-mono); font-size: 14px; font-weight: 700; line-height: 20px; letter-spacing: .14em; text-transform: uppercase; font-variant-numeric: tabular-nums; }
+.cb-head { justify-content: center; }
+.cb-foot { margin-top: 22px; color: oklch(0.7 0.016 268); font-weight: 400; }
+.cb-row { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: var(--space-12) var(--space-24); margin-top: 30px; }
+/* A tile: a flap a character, its hinge across the middle. Nightmail's are lit, the others' are not. */
+.cb-flaps { display: inline-flex; gap: calc(var(--h) * .07); perspective: 600px; }
+.cb-small { --h: 30px; }
+.cb-name { --h: 44px; }
+.cb-price { --h: clamp(56px, 5cqw + 16px, 88px); }
+.cb-flap { position: relative; display: grid; place-items: center; width: calc(var(--h) * .66); height: var(--h); overflow: hidden; border-radius: 3px; background: oklch(0.25 0.008 268); box-shadow: inset 0 -1px 0 rgb(0 0 0 / 50%), inset 0 1px 0 oklch(1 0 0 / 7%); color: oklch(0.78 0.01 268); font-family: var(--font-mono); font-size: calc(var(--h) * .74); font-weight: 700; line-height: 1; }
+.cb-flap::after { content: ''; position: absolute; top: 50%; right: 0; left: 0; height: 1px; background: rgb(0 0 0 / 60%); }
+.cb-flap[data-blank] { background: oklch(0.16 0.006 268); }
+.cb-mine .cb-flap:not([data-blank]), .cb-head .cb-flap:not([data-blank]) { background: oklch(0.955 0.014 92); box-shadow: inset 0 -2px 0 oklch(0.8 0.02 92), inset 0 1px 0 oklch(1 0 0); color: oklch(0.2 0.02 268); }
+.cb-flap > span { display: block; }
+/* A row of pigeonholes: forty to the competitor's price, Nightmail's share lit in periwinkle, from the left in turn. */
+.cb-cells { display: grid; grid-template-columns: repeat(40, minmax(0, 1fr)); gap: 4px; height: 30px; margin-top: 16px; }
+.cb-cells i { border-radius: 2px; background: oklch(0.17 0.008 268); box-shadow: inset 0 2px 3px rgb(0 0 0 / 70%); transition: background-color 160ms var(--cb-ease), box-shadow 160ms var(--cb-ease); }
+.cb-cells i[data-on] { background: oklch(0.48 0.012 268); box-shadow: inset 0 1px 0 oklch(1 0 0 / 14%); }
+.cb-cells[data-mine] i { transition-delay: calc(var(--i) * 22ms); }
+.cb-cells[data-mine] i[data-on] { background: var(--cb-mine); box-shadow: inset 0 1px 0 oklch(1 0 0 / 40%); }
+
+/* The console: the fader and the key into the calculator, on a steel cabinet under the board. */
+.cb-console { display: flex; align-items: center; gap: 28px; width: min(100%, 1000px); height: 124px; margin-top: 44px; padding-inline: 10px 6px; border: 32px solid rgb(126 130 136); border-image: url('../home/kit/housing.webp?no-inline') 64 fill / 32px round; background: rgb(146 149 154) padding-box; box-shadow: 5px 11px 14px rgb(0 0 0 / 50%); }
+.cb-stencil { color: oklch(0.27 0.012 268); font-family: var(--font-mono); font-size: 15px; font-weight: 700; line-height: 1; letter-spacing: .14em; text-transform: uppercase; opacity: .82; }
+.cb-fader { --thumb: 26px; --at: 0; position: relative; display: block; flex: 1; min-width: 0; height: 52px; }
+.cb-fader::before { content: ''; position: absolute; top: 50%; right: 0; left: 0; height: 10px; margin-top: -5px; border-radius: 5px; background: rgb(24 27 31); box-shadow: inset 0 2px 2px rgb(0 0 0 / 70%), 0 1px 0 rgb(255 255 255 / 50%); }
+.cb-fader input { position: absolute; z-index: 1; inset: 0; width: 100%; height: 100%; margin: 0; background: transparent; cursor: pointer; appearance: none; -webkit-appearance: none; touch-action: pan-y; }
+.cb-fader input::-webkit-slider-runnable-track { height: 100%; background: transparent; }
+.cb-fader input::-moz-range-track { height: 100%; background: transparent; }
+.cb-fader input:focus-visible { outline: none; }
+.cb-fader input::-webkit-slider-thumb { width: var(--thumb); height: 46px; margin-top: 3px; border: 0; border-radius: 4px; background: oklch(0.9 0.006 268) linear-gradient(to bottom, transparent calc(50% - 1px), oklch(0.36 0.012 268) calc(50% - 1px) calc(50% + 1px), transparent calc(50% + 1px)); box-shadow: inset 0 -4px 0 oklch(0.68 0.01 268), inset 0 2px 0 oklch(1 0 0 / 80%), 0 0 0 1px oklch(0.32 0.012 268), 2px 5px 6px rgb(0 0 0 / 45%); appearance: none; -webkit-appearance: none; transition: background-color 120ms var(--cb-ease), translate 90ms var(--cb-ease); }
+.cb-fader input::-moz-range-thumb { box-sizing: border-box; width: var(--thumb); height: 46px; border: 0; border-radius: 4px; background: oklch(0.9 0.006 268); box-shadow: inset 0 -4px 0 oklch(0.68 0.01 268), 0 0 0 1px oklch(0.32 0.012 268), 2px 5px 6px rgb(0 0 0 / 45%); }
+@media (hover: hover) and (pointer: fine) { .cb-fader input:hover::-webkit-slider-thumb { background-color: oklch(0.97 0.004 268); } }
+.cb-fader input:active::-webkit-slider-thumb { translate: 0 1px; }
+.cb-fader input:focus-visible::-webkit-slider-thumb { outline: var(--focus-width) solid var(--cb-mine); outline-offset: 3px; }
+.cb-fader input:focus-visible::-moz-range-thumb { outline: var(--focus-width) solid var(--cb-mine); outline-offset: 3px; }
+.cb-ticks i { position: absolute; top: calc(50% + 10px); left: calc(var(--thumb) / 2 + (100% - var(--thumb)) * var(--k)); width: 2px; height: 7px; margin-left: -1px; background: oklch(0.3 0.012 268 / 70%); }
+/* The homepage's lit key (page.css .srt-cta), in the console: its top and left side show; pressed it goes in flush. */
+.cb-key { position: relative; display: inline-flex; flex: none; align-items: center; justify-content: center; height: 52px; padding: 3px 26px 0 26px; color: var(--srt-on-cta); font-family: var(--font-body); font-size: 17px; font-weight: 600; line-height: 1; letter-spacing: -.012em; text-decoration: none; white-space: nowrap; }
+.cb-key::before { content: ''; position: absolute; inset: 3px 0 0 2px; background: var(--srt-cta); box-shadow: 0 -2px 0 var(--srt-cta-top), -1px 0 0 var(--srt-cta-side), -1px -2px 0 var(--srt-cta-side); outline: 1px solid var(--srt-cta-edge); outline-offset: -5px; transition: background-color 150ms var(--cb-ease), translate 90ms var(--cb-ease), box-shadow 90ms var(--cb-ease); }
+.cb-try { position: relative; display: inline-flex; align-items: center; gap: .45em; transition: translate 90ms var(--cb-ease); }
+.cb-try svg { transition: translate 200ms var(--cb-ease); }
+@media (hover: hover) and (pointer: fine) { .cb-key:hover::before { background: var(--srt-cta-hover); } .cb-key:hover svg { translate: 4px 0; } }
+.cb-key:active::before { box-shadow: 0 0 0 var(--srt-cta-top), 0 0 0 var(--srt-cta-side), 0 0 0 var(--srt-cta-side); translate: -1px -2px; }
+.cb-key:active .cb-try { translate: -1px -2px; }
+.cb-key:focus-visible { outline: none; }
+.cb-key:focus-visible::after { content: ''; position: absolute; inset: -7px; border: var(--focus-width) solid var(--cb-mine); pointer-events: none; }
+
+/* Under the floor: what both prices are for and where the competitor's was read, what Nightmail has, the small print. */
+.cb-below { padding: 56px 0 104px; }
+.cb-note { max-width: 46em; color: var(--cb-text-2); font-size: 16px; line-height: 1.5; text-wrap: pretty; }
+.cb-note .price-checked { color: inherit; font-size: inherit; }
+.cb-note .price-checked a { color: var(--cb-paper); }
+.cb-has { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: center; gap: var(--space-12) var(--space-28); width: 100%; max-width: 900px; margin-top: 64px; padding-top: 28px; box-shadow: 0 -1px 0 oklch(1 0 0 / 12%); }
+.cb-has h2 { font-family: var(--font-body); font-size: 16px; font-weight: 600; line-height: var(--leading-lg); }
+.cb-has ul { display: flex; flex-wrap: wrap; justify-content: center; gap: var(--space-8) var(--space-24); margin: 0; padding: 0; list-style: none; }
+.cb-has li { display: flex; align-items: center; gap: var(--space-8); font-size: 16px; line-height: var(--leading-lg); }
+.cb-has svg { flex: none; color: var(--cb-mine); }
+.cb-print { width: 100%; max-width: 900px; margin-top: var(--space-32); text-align: start; }
+.cb-end { position: relative; }
+
+/* ── What the board hangs in, for one to be chosen (?bg=). Each backdrop is a picture on the stage's own layer behind
+   the board (it never takes room, and as a background it never holds up the text), one for a wide window and one for a
+   phone (a window only loads the one it shows); under the floor the page is the hall's plain dark. Pictures:
+   board/README.md. ── */
+.cb-hall[data-bg] { background: oklch(0.19 0.012 268); }
+.cb-hall[data-bg] .cb-backdrop > i { background-position: center top; background-size: cover; }
+/* Where the board hangs in a hall with something overhead, its rods run up out of the picture, outside the headline. */
+.cb-hall[data-bg='1'] .cb-hang, .cb-hall[data-bg='2'] .cb-hang, .cb-hall[data-bg='3'] .cb-hang { width: min(88%, 880px); }
+.cb-hall[data-bg='1'] .cb-hang i, .cb-hall[data-bg='2'] .cb-hang i, .cb-hall[data-bg='3'] .cb-hang i { position: relative; }
+.cb-hall[data-bg='1'] .cb-hang i::before, .cb-hall[data-bg='2'] .cb-hang i::before, .cb-hall[data-bg='3'] .cb-hang i::before { content: ''; position: absolute; z-index: -1; bottom: 100%; left: 0; width: 100%; height: 100vh; background: inherit; box-shadow: inherit; }
+.cb-hall[data-bg] .cb-stage { overflow: clip; }
+/* 1. The hall: the homepage hero's own render, its machine and boards taken out, dimmed under the headline. */
+.cb-hall[data-bg='1'] .cb-backdrop > i { background-image: url('./board/hall-1920.avif?no-inline'); background-position: center 22%; }
+.cb-hall[data-bg='1'] .cb-backdrop::after { content: ''; position: absolute; inset: 0; background: rgb(8 10 13 / 52%); }
+/* 2. The lit wall: one wall of that hall, a lamp over it, its rail and conduits. */
+.cb-hall[data-bg='2'] .cb-backdrop > i { background-image: url('./board/wall-1920.avif?no-inline'); }
+.cb-hall[data-bg='2'] .cb-backdrop::after { content: ''; position: absolute; inset: 0; background: rgb(8 10 13 / 30%); }
+/* 3. The lamp: a plain dark surface, one pendant lamp over the board and the pool of light it throws. */
+.cb-hall[data-bg='3'] .cb-backdrop > i { background-color: oklch(0.17 0.014 262); background-image: url('./board/quiet-1600.avif?no-inline'); }
+.cb-hall[data-bg='3'] .cb-backdrop::before { content: ''; position: absolute; z-index: 1; top: 0; left: 50%; width: 180px; height: 168px; translate: -50% 0; background: url('./board/lamp.webp?no-inline') center top / contain no-repeat; }
+.cb-hall[data-bg='3'] .cb-stage { padding-top: 216px; }
+/* 4. Lighter: the board as a dark object on the homepage's pale floor (by night, its dark one), with no picture. */
+.cb-hall[data-bg='4'] { background: var(--cb-floor); }
+:root:not([data-theme='dark']) .cb-hall[data-bg='4'] { --color-text: oklch(0.21 0.02 268); --color-muted: oklch(0.45 0.02 268); --color-faint: oklch(0.55 0.02 268); --color-border-muted: oklch(0.21 0.02 268 / 10%); --color-border: oklch(0.21 0.02 268 / 12%); --color-border-strong: oklch(0.21 0.02 268 / 24%); --color-hover: oklch(0.21 0.02 268 / 5%); --color-focus: oklch(0.21 0.02 268); color: var(--color-text); }
+:root:not([data-theme='dark']) .cb-hall[data-bg='4'] :is(.cb-title, .cb-note .price-checked a) { color: var(--color-text); }
+:root:not([data-theme='dark']) .cb-hall[data-bg='4'] .cb-note { color: var(--color-muted); }
+:root:not([data-theme='dark']) .cb-hall[data-bg='4'] .cb-has { box-shadow: 0 -1px 0 var(--color-border); }
+:root:not([data-theme='dark']) .cb-hall[data-bg='4'] .cb-has svg { color: var(--color-accent-data); }
+:root:not([data-theme='dark']) .cb-hall[data-bg='4'] .cb-board { box-shadow: 8px 18px 28px rgb(20 24 32 / 28%); }
+@media (max-width: 640px) {
+  .cb-hall[data-bg='1'] .cb-backdrop > i { background-image: url('./board/hall-828.avif?no-inline'); background-position: center 18%; }
+  .cb-hall[data-bg='2'] .cb-backdrop > i { background-image: url('./board/wall-828.avif?no-inline'); }
+  .cb-hall[data-bg='3'] .cb-backdrop > i { background-image: url('./board/quiet-720.avif?no-inline'); }
+  .cb-hall[data-bg='3'] .cb-backdrop::before { width: 120px; height: 112px; }
+  .cb-hall[data-bg='3'] .cb-stage { padding-top: 148px; }
+  .cb-hall[data-bg] .cb-hang { width: min(56%, 520px); }
+  .cb-hall[data-bg] .cb-hang i::before { display: none; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .cb-flap > span { animation: cb-flip 340ms var(--cb-ease) both; animation-delay: calc(var(--i) * 26ms); transform-origin: 50% 50%; }
+}
+@keyframes cb-flip { from { transform: rotateX(-88deg); opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .cb-cells i { transition: none; } }
+
+/* ── Phones ── */
+@media (max-width: 640px) {
+  .price-page--board { --cb-gutter: 16px; }
+  .cb-stage { padding: 64px 0 72px; }
+  .cb-title { padding-inline: 4px; font-size: 34px; }
+  .cb-hang { height: 40px; margin-top: 28px; }
+  .cb-board { border-width: 18px; border-image-width: 18px; }
+  .cb-face { margin: 2px; padding: 18px 14px 16px; }
+  .cb-head, .cb-foot { font-size: 12px; letter-spacing: .1em; }
+  .cb-small { --h: 24px; }
+  .cb-name { --h: 26px; }
+  .cb-price { --h: 54px; margin-left: auto; }
+  .cb-row { margin-top: 22px; }
+  .cb-cells { gap: 2px; height: 24px; margin-top: 12px; }
+  .cb-console { flex-wrap: wrap; gap: 6px 14px; height: auto; padding: 6px 4px 6px 6px; border-width: 24px; border-image-width: 24px; }
+  .cb-fader { order: 2; flex-basis: calc(100% - 110px); }
+  .cb-stencil { order: 1; }
+  .cb-key { order: 3; width: 100%; margin-top: 8px; }
+  .cb-below { padding: 44px 0 72px; }
+  .cb-has { flex-direction: column; align-items: center; gap: var(--space-8); margin-top: 48px; }
+  .cb-has ul { flex-direction: column; align-items: flex-start; gap: var(--space-4); }
+}

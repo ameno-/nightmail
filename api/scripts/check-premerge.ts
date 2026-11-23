@@ -297,22 +297,14 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
     "const content = await import('./src/features/pricing/content.tsx'), prices = await import('./src/features/pricing/prices.ts')",
     'const at = (path, element) => renderToStaticMarkup(h(MemoryRouter, { initialEntries: [path] }, element))',
     `const calculator = ${JSON.stringify(inputs)}.map(input => { const path = '/pricing?' + new URLSearchParams(input); return { input, path, html: at(path, h(content.Calculator)) } })`,
-    "const compare = ['resend'].map(id => ({ id, html: at('/compare/' + id, h(content.Compare, { comparison: prices.comparisons[id] })) }))",
-    // The Mailchimp page is a chart of its own (mailchimp.tsx), and compositions of it wait for a choice: three takes
-    // (mailchimp-takes.tsx) and five iterations on the first (mailchimp-hero.tsx).
-    "const sizes = prices.comparisons.mailchimp.sizes.length, takes = await import('./src/features/pricing/mailchimp-takes.tsx'), hero = await import('./src/features/pricing/mailchimp-hero.tsx')",
-    "const chart = [{ id: 'mailchimp', sizes, html: at('/compare/mailchimp', h((await import('./src/features/pricing/mailchimp.tsx')).MailchimpComparison)) }, ...['1', '2', '3'].map(take => ({ id: 'mailchimp (take ' + take + ')', sizes, html: at('/compare/mailchimp?take=' + take, h(takes.MailchimpTake, { take })) })), ...hero.HERO_TAKES.map(take => ({ id: 'mailchimp (take ' + take + ')', sizes, html: at('/compare/mailchimp?take=' + take, h(hero.MailchimpHero, { take })) }))]",
-    // The price-against-a-price component (price-against.tsx) in each look, and its three visual directions
-    // (compare-style.tsx), on each comparison, and every size its
-    // control can reach, with the competitor's price there.
-    "const pa = await import('./src/features/pricing/price-against.tsx')",
-    "const cs = await import('./src/features/pricing/compare-style.tsx')",
-    "const against = Object.entries(prices.comparisons).flatMap(([id, c]) => [...pa.LOOKS.map(look => ({ id: id + ' (calc ' + look + ')', html: at('/compare/' + id + '?calc=' + look, h(pa.ComparisonCalc, { comparison: c, look })) })), ...cs.STYLES.map(style => ({ id: id + ' (style ' + style + ')', html: at('/compare/' + id + '?style=' + style, h(cs.ComparisonStyle, { comparison: c, style })) }))])",
+    // Each comparison's page (board.tsx), and every size its fader can reach, with the competitor's price there.
+    "const board = await import('./src/features/pricing/board.tsx')",
+    "const boards = Object.entries(prices.comparisons).map(([id, c]) => ({ id, html: at('/compare/' + id, h(board.ComparisonBoard, { comparison: c })) }))",
     "const reach = Object.entries(prices.comparisons).map(([id, c]) => ({ id, sizes: prices.reachable(c).map(size => { const u = c.use(size), t = prices.theirPrice(c.offer, u); return { size, sent: u.sent, received: u.received, theirs: t ? t.cents : null } }) }))",
     'const { OFFERS, comparisons, resendOverage, resendReceived } = prices',
-    "process.stdout.write(JSON.stringify({ calculator, compare, chart, against, reach, data: { OFFERS, comparisons, resendOverage, resendReceived } }, (_k, v) => typeof v === 'bigint' ? String(v) : v))",
+    "process.stdout.write(JSON.stringify({ calculator, boards, reach, data: { OFFERS, comparisons, resendOverage, resendReceived } }, (_k, v) => typeof v === 'bigint' ? String(v) : v))",
   ].join('\n')
-  type Rendered = { calculator: { input: Record<string, string>; path: string; html: string }[]; compare: { id: string; html: string }[]; chart: { id: string; sizes: number; html: string }[]; against: { id: string; html: string }[]; reach: { id: string; sizes: { size: number; sent: number; received: number; theirs: number | null }[] }[]; data: unknown }
+  type Rendered = { calculator: { input: Record<string, string>; path: string; html: string }[]; boards: { id: string; html: string }[]; reach: { id: string; sizes: { size: number; sent: number; received: number; theirs: number | null }[] }[]; data: unknown }
   let out: Rendered | null = null
   try {
     out = JSON.parse(execFileSync('node', ['--import', import.meta.resolve('tsx'), '--input-type=module', '-e', script], { cwd: new URL('app/', root), encoding: 'utf8', maxBuffer: 64 << 20, stdio: ['ignore', 'pipe', 'pipe'] })) as Rendered
@@ -343,11 +335,6 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
       if (/\bNaN\b|undefined|Infinity/.test(page)) fail('Price pages', `The calculator at ${path} shows NaN, undefined or Infinity.`, file)
       if (/Not (published|checked)/.test(page)) fail('Price pages', `The calculator at ${path} lists a vendor without a price that was read: list only vendors priced at the size.`, file)
     }
-    for (const { id, html } of out.compare) {
-      checkFigures(`Nightmail vs ${id}`, html, 3)
-      for (const term of terms.slice(2)) if (!text(html).includes(term)) fail('Price pages', `Nightmail vs ${id} doesn't say “${term}”, as src/billing/rates.ts has it.`, file)
-      if (/Not (published|checked)/.test(text(html))) fail('Price pages', `Nightmail vs ${id} has a size without a verified competitor price: compare only at sizes the data has.`, file)
-    }
     // Every competitor figure (a tier, a per-email rate, a fact that names a price) and its source: the vendor's page
     // (https), the day it was read (not in the future) and the text it was read from. Facts without a source are
     // Nightmail's own (a comparison's \`ours\`).
@@ -372,32 +359,19 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
       if (typeof source.checked !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(source.checked) || Number.isNaN(Date.parse(source.checked)) || source.checked > today) fail('Price pages', `${at} has no valid day it was checked (YYYY-MM-DD, not in the future).`, file)
       if (typeof source.quote !== 'string' || source.quote.trim().length < 8) fail('Price pages', `${at} doesn't quote the text it was read from.`, file)
     }
-    // On the pages: each competitor row with a price names the day it was checked and links the vendor's page (a row with
-    // none links it); a comparison table says it under the table.
+    // On the calculator, each competitor row with a price names the day it was checked and links the vendor's page (a
+    // row with none links it).
     const dated = /Checked \d{1,2} \w{3} \d{4} on <a href="https:\/\//
     for (const { path, html } of out.calculator) for (const row of html.split(/(?=<li [^>]*data-offer=)/).slice(1).map(part => part.split('</li>')[0]!))
       if (!(/Not checked/.test(row) ? /See <a href="https:\/\//.test(row) : dated.test(row))) fail('Price pages', `A competitor row on the calculator at ${path} has no date and link to the vendor's page: ${text(row).slice(0, 80)}`, file)
-    for (const { id, html } of out.compare) if (!dated.test(html.split('</table>')[1] ?? '')) fail('Price pages', `Nightmail vs ${id} doesn't give the day its prices were checked and a link to the vendor's page under the table.`, file)
-    // A comparison drawn as a chart: one Nightmail figure for each of its sizes (a size without a read price would be
-    // missing), each for the emails a month written beside it; the competitor's prices dated and linked; and the terms
-    // on the page (in its small print).
-    for (const { id, sizes, html } of out.chart) {
-      const page = text(html), where = `Nightmail vs ${id}`, found = figures(html)
-      checkFigures(where, html, sizes)
-      if (new Set(found.map(f => f.sent)).size !== sizes) fail('Price pages', `${where} shows ${new Set(found.map(f => f.sent)).size} sizes, not the ${sizes} it compares: every size must be one the vendor's page prices (prices.ts).`, file)
-      for (const f of found) if (!page.includes(`${n(f.sent)} emails a month`) || f.received) fail('Price pages', `${where} prices ${n(f.sent)} sent and ${n(f.received)} received without saying so beside the figure.`, file)
-      for (const term of terms.slice(2)) if (!page.includes(term)) fail('Price pages', `${where} doesn't say “${term}”, as src/billing/rates.ts has it.`, file)
-      if (/Not (published|checked)|\bNaN\b|undefined/.test(page)) fail('Price pages', `${where} has a size without a verified competitor price: compare only at sizes the data has.`, file)
-      if (!dated.test(html)) fail('Price pages', `${where} doesn't give the day its prices were checked and a link to the vendor's page.`, file)
-    }
-    // The price-against-a-price component: every size its control can reach is one the competitor's page prices, and
-    // Nightmail costs less there (a size where it doesn't must not be offered); each rendering's Nightmail figure is the
-    // billed price for the emails a month written beside it, dated and linked, with the terms in its small print.
+    // A comparison's page: every size its fader can reach is one the competitor's page prices, and Nightmail costs less
+    // there (a size where it doesn't must not be offered); its Nightmail figure is the billed price for the emails a
+    // month written beside it, the competitor's price is dated and linked, and the terms are in its small print.
     for (const { id, sizes } of out.reach) for (const s of sizes) {
       if (s.theirs === null) fail('Price pages', `The ${id} control reaches ${n(s.size)}, a size ${id}'s page doesn't price: take it out of the comparison's steps (prices.ts).`, file)
       else if (charged(s.sent, s.received) >= BigInt(s.theirs) * 1_000_000n) fail('Price pages', `The ${id} control reaches ${n(s.size)}, where Nightmail (${dollarsOf(charged(s.sent, s.received))}) isn't cheaper than ${id} (${dollarsOf(BigInt(s.theirs) * 1_000_000n)}): the control must not offer it (prices.ts, steps).`, file)
     }
-    for (const { id, html } of out.against) {
+    for (const { id, html } of out.boards) {
       const page = text(html), where = `Nightmail vs ${id}`
       checkFigures(where, html, 1)
       for (const f of figures(html)) if (!page.includes(`${n(f.sent)} emails a month`) || f.received) fail('Price pages', `${where} prices ${n(f.sent)} sent and ${n(f.received)} received without saying so beside the figure.`, file)
@@ -405,7 +379,7 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
       if (!dated.test(html)) fail('Price pages', `${where} doesn't give the day its prices were checked and a link to the vendor's page.`, file)
       if (/\bNaN\b|undefined|Infinity/.test(page)) fail('Price pages', `${where} shows NaN, undefined or Infinity.`, file)
     }
-    if (failed === before) console.log(`Price pages: ${out.calculator.length} calculator inputs and ${out.compare.length + out.chart.length + out.against.length} renderings of the comparisons match src/billing/rates.ts; ${sources.length} competitor sources have a link, a day and a quote.`)
+    if (failed === before) console.log(`Price pages: ${out.calculator.length} calculator inputs and ${out.boards.length} comparison pages match src/billing/rates.ts; ${sources.length} competitor sources have a link, a day and a quote.`)
   }
 }
 

@@ -1,25 +1,19 @@
-import { use, useEffect, useLayoutEffect, type ReactNode } from 'react'
+import { lazy, use, useEffect, useLayoutEffect, type ReactNode } from 'react'
 import { Link, NavLink, useParams, useSearchParams } from 'react-router'
 import { ThemeToggle } from '../../components/ThemeToggle'
 import { NightmailWordmark } from '../../components/NightmailLogo'
 import { EmptyState } from '../../components/ui'
 import { productName } from '../../../../api/src/brand'
-import { Calculator, Compare } from './content'
+import { Calculator } from './content'
 import { PRICE_PAGES } from './pages'
 import { comparisons } from './prices'
-import { MailchimpComparison } from './mailchimp'
-import { MailchimpTake } from './mailchimp-takes'
-import { HERO_TAKES, MailchimpHero, type HeroTake } from './mailchimp-hero'
-import { ComparisonCalc, LOOKS, type Look } from './price-against'
-import { ComparisonStyle, StyleEnd, STYLES, type Style } from './compare-style'
 import './pricing.css'
-import './mailchimp-takes.css'
-import './mailchimp-hero.css'
-import './price-against.css'
-// (The homepage's own stylesheets: its end band's solids and its key, which the visual directions use.)
-import '../home/machines.css'
-import '../home/page.css'
-import './compare-style.css'
+
+// A comparison's page, its styles and its pictures are a module of their own (board-page.tsx), loaded only here: the
+// calculator's first paint waits for none of it.
+const boardPage = () => import('./board-page')
+const ComparisonBoard = lazy(() => boardPage().then(m => ({ default: m.ComparisonBoard })))
+const BoardEnd = lazy(() => boardPage().then(m => ({ default: m.BoardEnd })))
 
 // Public pages, no sign-in: the price calculator (/pricing) and one comparison per competitor (/compare/:vendor). Not
 // linked from the site until the legal review (pages.ts, PRICE_PAGES_LIVE).
@@ -60,14 +54,10 @@ export function ComparePage() {
   const { vendor } = useParams()
   const comparison = vendor === 'mailchimp' || vendor === 'resend' ? comparisons[vendor] : null
   const page = PRICE_PAGES.find(p => p.path === `/compare/${vendor}`)
-  // Compositions of the Mailchimp page wait for a choice: three takes (mailchimp-takes.tsx) and five iterations on the
-  // first (mailchimp-hero.tsx). Without ?take it is the chart.
-  const params = useSearchParams()[0], take = params.get('take'), calc = params.get('calc'), style = params.get('style')
-  // Three visual directions for the bars version (compare-style.tsx).
-  if (comparison && STYLES.includes(style as Style)) return <PriceFrame title={page?.title ?? 'Page not found'} variant={`price-page--cs price-page--cs${style}`} end={<StyleEnd />}><ComparisonStyle key={`${vendor}-${style}`} comparison={comparison} style={style as Style} /></PriceFrame>
-  // Three looks of the price-against-a-price component, on both comparisons (price-against.tsx).
-  if (comparison && LOOKS.includes(calc as Look)) return <PriceFrame title={page?.title ?? 'Page not found'}><ComparisonCalc key={`${vendor}-${calc}`} comparison={comparison} look={calc as Look} /></PriceFrame>
-  return <PriceFrame title={page?.title ?? 'Page not found'}>
-    {vendor === 'mailchimp' ? (take === '1' || take === '2' || take === '3' ? <MailchimpTake key={take} take={take} /> : HERO_TAKES.includes(take as HeroTake) ? <MailchimpHero key={take} take={take as HeroTake} /> : <MailchimpComparison />) : comparison ? <Compare key={vendor} comparison={comparison} /> : <EmptyState headingAs="h1" title="Page not found" action={<Link to="/pricing">Price calculator</Link>} />}
+  // What the board hangs in waits for a choice (board.tsx, BACKDROPS): ?bg=1 to 4.
+  const backdrop = useSearchParams()[0].get('bg')
+  if (!comparison) return <PriceFrame title="Page not found"><EmptyState headingAs="h1" title="Page not found" action={<Link to="/pricing">Price calculator</Link>} /></PriceFrame>
+  return <PriceFrame title={page?.title ?? comparison.offer.vendor} variant="price-page--board" end={<BoardEnd />}>
+    <ComparisonBoard key={vendor} comparison={comparison} backdrop={backdrop} />
   </PriceFrame>
 }
