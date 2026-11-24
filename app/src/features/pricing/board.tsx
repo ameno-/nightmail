@@ -6,13 +6,14 @@ import { NightmailWordmark } from '../../components/NightmailLogo'
 import { SignInConsent } from '../../components/LegalLinks'
 import { EndBand, endBand } from '../home/end-band'
 import { toneVars } from '../home/tones'
-import { calculatorPath, Checked, CheckedOn, Cite, Ours, Terms } from './content'
+import { calculatorPath, Checked, CheckedOn, CheckedPages, Cite, Ours, Terms } from './content'
 import { Features } from './features'
 import { FlapRow } from './splitflap'
 import { PRICE_LINKS } from './live'
 import { Bolts, keySound, reducedMotion, SoundSwitch, useReplay, useTypedWord } from './eggs'
 import { play, wake } from './sound'
-import { CHECKED, claim, dayOf, formatCount, money, nightmail, nightmailBill, OFFERS, theirPrice, ucOf, type Comparison, type Usage } from './prices'
+import { OFFERS } from './compare'
+import { claim, formatCount, money, nightmail, nightmailBill, theirPrice, ucOf, type Comparison, type Usage } from './prices'
 
 // The price pages' hall (Hall): a dark wall under one pendant lamp, with the board and its console hung in it, the same
 // for the three pages, so moving between them changes the board, not the room (scene.tsx; calculator.tsx is the
@@ -80,6 +81,11 @@ function Fader({ c, size, onChange, onStop, bump, id }: { c: Comparison; size: n
   </span>
 }
 
+/** Whether a board opens as the page painted before the app shows it (prerender.tsx paints it, index.tsx takes over
+ *  from it): settled, every tile and bar in place. True for that render and the board that takes its place; a board the
+ *  reader moves to afterwards settles from blank. */
+export const opensPainted = () => typeof document === 'undefined' || document.getElementById('price-shell') !== null
+
 /** The way in (board-page.tsx gives it: the homepage's Get started, or Open dashboard for someone signed in), drawn in
  *  a class of the page's. Without it (the pre-merge check's render) the page has no button. */
 export type Start = { signedIn: boolean; button: (className: string) => ReactNode }
@@ -140,8 +146,8 @@ export function ComparisonBoard({ comparison: c, start }: { comparison: Comparis
   const p = pointAt(c, size), id = useId(), vendor = c.offer.vendor
   const lit = p.ours.uc === 0n ? 0 : Math.max(1, Math.round(CELLS * share(p)))
   const { refresh, resend, sounding } = useHall()
-  // The board's tiles settle from blank once, as it opens, and its bars fill.
-  const settled = useRef(false), settle = !settled.current
+  // The board's tiles settle from blank once, as it opens, and its bars fill (unless it opens painted).
+  const [painted] = useState(opensPainted), settled = useRef(false), settle = !settled.current && !painted
   useEffect(() => { settled.current = true }, [])
   const theirs = byContacts(c) ? [`${formatCount(p.usage.sent)} emails a month`, `${p.usage.sent / p.usage.contacts} to each contact`] : ['One recipient each', 'Nothing received']
   const [bump, replayBump] = useReplay()
@@ -166,7 +172,7 @@ export function ComparisonBoard({ comparison: c, start }: { comparison: Comparis
         <div className="cb-row"><FlapRow text={vendor} width={vendor.length} className="cb-name" size="name" x={[0, .32]} row={2} {...flaps} /><FlapRow text={money(p.theirs.cents)} width={room.price.length} end className="cb-price" size="big" x={[.72, 1]} row={2} {...flaps} /></div>
         <Cells lit={CELLS} settle={settle} />
         {/* The board's small print: what both prices are for, the plan, and where and when it was read. */}
-        <div className="cb-foot"><p>{theirs.map(line => <span key={line}>{line}</span>)}</p><p><span>{vendor} {p.theirs.plan}, list price</span><Checked source={{ checked: CHECKED, url: c.offer.pricing }} /></p></div>
+        <div className="cb-foot"><p>{theirs.map(line => <span key={line}>{line}</span>)}</p><p><span>{vendor} {p.theirs.plan}, list price</span><Checked source={{ checked: c.offer.checked, url: c.offer.pricing }} /></p></div>
       </div>
     </div>
     {/* The console: the fader, then the page's two ways on: the calculator, quietly, and Get started, the key. What
@@ -182,10 +188,15 @@ export function ComparisonBoard({ comparison: c, start }: { comparison: Comparis
   </>
 }
 
-/** Under a comparison's stage: what else Nightmail does (features.tsx) and the close, the bill and the way in again. */
+/** Under a comparison's stage: what else Nightmail does (features.tsx), the questions its entry answers (when it has
+ *  some: its structured data lists them as an FAQ, readable.ts), and the close, the bill and the way in again. */
 export function ComparisonBelow({ comparison: c, start }: { comparison: Comparison; start?: Start }) {
   return <>
     <Features comparison={c} />
+    {c.faq?.length ? <section className="cb-faq" id="questions" aria-labelledby="cb-faq-title">
+      <h2 id="cb-faq-title" className="cb-faq-title">Questions</h2>
+      <dl>{c.faq.map(item => <div key={item.question}><dt>{item.question}</dt><dd>{item.answer}</dd></div>)}</dl>
+    </section> : null}
     <section className="cb-close" aria-labelledby="cb-close" {...keys}>
       <h2 id="cb-close" className="cb-bill"><span><b>{nightmail.perThousand}</b> per 1,000 emails, sent or received.</span> <span>Contacts and teammates are free.</span></h2>
       {start && <>{start.button('cb-key cb-key-start')}{!start.signedIn && <SignInConsent className="cb-consent" />}</>}
@@ -217,7 +228,7 @@ export function BoardEnd({ comparison: c }: { comparison?: Comparison | null }) 
   }, [])
   useEffect(() => { if (window.location.hash === '#sources') setOpen(true) }, [])
   const phone = W < 900, inset = { left: 0, right: 0, bottom: 0 }, band = W ? endBand(W, phone, inset) : null
-  const here = c ? `/compare/${c.offer.id}` : '/pricing'
+  const here = c ? c.path : '/pricing'
   return <footer className="mx-end cb-end" ref={ref} onClick={nudge} style={{ ...toneVars(true), ...band ? { '--mx-band': `${band.h}px` } : {} } as CSSProperties}>
     <nav aria-label="Site links">
       <a className="srt-by" href="https://anoma.ly" target="_blank" rel="noopener" title="Anomaly (opens in a new tab)">by <AnomalyLogo height={18} /></a>
@@ -228,12 +239,12 @@ export function BoardEnd({ comparison: c }: { comparison?: Comparison | null }) 
     <section className="cb-sources" id="sources" hidden={!open} aria-labelledby="sources-title">
       <h2 id="sources-title" className="cb-sources-title">Sources and small print</h2>
       {c ? <>
-        <p className="price-note">{c.assume} Monthly billing, no promotions. <Checked source={{ checked: CHECKED, url: c.offer.pricing }} /></p>
+        <p className="price-note">{c.assume} Monthly billing, no promotions. <Checked source={{ checked: c.offer.checked, url: c.offer.pricing }} /></p>
         <p className="price-note">Nightmail charges {nightmail.perThousand} per 1,000 emails after {formatCount(nightmail.freeSent)} free a month.</p>
         <Terms floor={null} />
-        <ul className="price-facts">{c.ours.map(fact => <li key={fact.text}>{fact.text}{fact.source && <Cite source={fact.source} />}</li>)}</ul>
-        <CheckedOn facts={c.ours} />
-      </> : <p className="price-note">Monthly billing, list prices before tax, no promotions: each vendor’s cheapest plan that holds your numbers. Checked {dayOf(CHECKED)} on {[...new Set(OFFERS.map(offer => offer.pricing))].map((url, i, all) => <span key={url}>{i > 0 && (i === all.length - 1 ? ' and ' : ', ')}<a href={url} target="_blank" rel="noopener noreferrer">{new URL(url).hostname.replace(/^www\./, '')}</a></span>)}.</p>}
+        <ul className="price-facts">{c.rows.map(fact => <li key={fact.text}>{fact.text}{fact.source && <Cite source={fact.source} />}</li>)}</ul>
+        <CheckedOn facts={c.rows} />
+      </> : <p className="price-note">Monthly billing, list prices before tax, no promotions: each vendor’s cheapest plan that holds your numbers. <CheckedPages offers={OFFERS} />.</p>}
       <p className="price-note">Product names belong to their owners and only identify their products. Nightmail isn’t affiliated with them.</p>
     </section>
     {band && <EndBand W={W} phone={phone} inset={inset} />}

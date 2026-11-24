@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useLocation, useNavigate } from 'react-router'
 import { ApiError, type Identity, type Api, type WorkspaceInvitationPreview, errorText, tooBroadCode } from './types'
 import { roleLabel, workspaceApi } from './workspaces'
-import { aborted, clearInterruptedWrites, createLiveApi, currentScope, isCurrentScope, rememberedWorkspace, request, selectAccount, selectedAccount, selectedWorkspace, selectWorkspace, takeInterruptedWrite, type RequestScope } from './live'
+import { aborted, asksOnlyIfLikely, clearInterruptedWrites, createLiveApi, currentScope, isCurrentScope, rememberedWorkspace, rememberSession, request, selectAccount, selectedAccount, selectedWorkspace, selectWorkspace, sessionLikely, takeInterruptedWrite, type RequestScope } from './live'
 import { accountApi, accountsKey, announce, expectAccount, onAccountEvent, POPUP_PATH, takeExpectedAccount, type AccountList } from './accounts'
 import { forgetInboxDrafts } from './support-inbox'
 import { regionCatalogKey } from './regions'
@@ -109,9 +109,12 @@ async function loadIdentity(signal?: AbortSignal, override?: { account?: string 
   let workspace = override ? (override.workspace !== undefined ? override.workspace : (account ? rememberedWorkspace(account) : null)) : selectedWorkspace()
   const opts = () => override ? { signal, account, workspace } : { signal }
   const read = () => !override && reviewRoute.test(window.location.pathname) ? readReviewIdentity(signal) : request<Identity>('/v1/me', opts())
+  // A visitor on a marketing page with no trace of a session here is signed out, without asking (live.ts, sessionLikely).
+  if (!override && asksOnlyIfLikely(window.location) && !sessionLikely()) throw new ApiError('Sign in to continue.', 'AUTH_REQUIRED', {}, undefined, 401)
   let result: Identity
   try { result = await read() }
   catch (error) {
+    if (!override && error instanceof ApiError && error.status === 401 && error.code === 'AUTH_REQUIRED') rememberSession(false)
     if (error instanceof ApiError && error.code === 'ACCOUNT_SIGNED_OUT' && account) { account = null; workspace = null; if (!override) selectAccount(null) }
     else if (error instanceof ApiError && error.code === 'WORKSPACE_ACCESS_DENIED' && workspace) { workspace = null; if (!override) selectWorkspace(null) }
     else throw error
@@ -126,6 +129,7 @@ async function loadIdentity(signal?: AbortSignal, override?: { account?: string 
   if (!override) {
     selectAccount(result.id)
     selectWorkspace(result.multiTenant ? result.workspaceId : null)
+    rememberSession(true)
   }
   return result
 }

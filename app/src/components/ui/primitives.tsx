@@ -408,7 +408,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     window.addEventListener('nightmail:scope-changed', clear);
     return () => { window.removeEventListener('nightmail:reloading', keep); window.removeEventListener('nightmail:scope-changed', clear); };
   }, [toast]);
-  return <ToastContext.Provider value={toast}>{children}<div className="ui-toasts" aria-label="Notifications">{toasts.map(item => <Toast key={item.id} id={item.id} tone={item.tone} message={item.message} action={item.action} duration={item.duration} dismiss={dismiss} />)}</div></ToastContext.Provider>;
+  return <ToastContext.Provider value={toast}>{children}<div className="ui-toasts" role="region" aria-label="Notifications">{toasts.map(item => <Toast key={item.id} id={item.id} tone={item.tone} message={item.message} action={item.action} duration={item.duration} dismiss={dismiss} />)}</div></ToastContext.Provider>;
 }
 /** Drops toasts emitted by an unmounted account/workspace scope (late catch blocks or unmount blur handlers). */
 export function ToastScope({ allow, children }: { allow: () => boolean; children: ReactNode }) {

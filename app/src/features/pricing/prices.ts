@@ -1,15 +1,17 @@
 import { CREDIT, perThousandUsd, RATES, STORAGE_AFTER_DAYS, usd } from '../../../../api/src/billing/rates.ts'
 
-// Every price the public price pages show (features/pricing), in one place. Nightmail's own come from the billing code
-// (api/src/billing/rates.ts), so a page can't drift from what is billed. Each competitor figure carries the vendor's
-// page, the day it was read and the text it was read from. Only figures read on the vendor's own page are here: none is
-// estimated or extrapolated, and a size the vendor's page doesn't price, or that wasn't read, shows no number. A figure
-// that fails a re-check is removed, not left stale. api/scripts/check-premerge.ts (price pages) checks all of it.
+// The price pages' arithmetic (features/pricing): Nightmail's prices, from the billing code (api/src/billing/rates.ts) so a
+// page can't drift from what is billed, and the shape of a competitor's, which each competitor's entry fills in
+// (compare/<vendor>.ts, listed in compare/index.ts). Each competitor figure carries the vendor's page, the day it was
+// read and the text it was read from. Only figures read on the vendor's own page are in an entry: none is estimated or
+// extrapolated, and a size the vendor's page doesn't price, or that wasn't read, shows no number. A figure that fails a
+// re-check is removed, not left stale. The build refuses an entry without its sources (entryProblems, below), and
+// api/scripts/check-premerge.ts (price pages) checks the pages against the billing code.
 
-/** The day every competitor figure below was read. */
-export const CHECKED = '2026-11-22'
+/** Where a figure was read: the vendor's page, the day (YYYY-MM-DD) and the text it was read from. */
 export type Source = { url: string; checked: string; quote: string }
-const read = (url: string, quote: string): Source => ({ url, checked: CHECKED, quote })
+/** The sources of an entry read on one day: read(url, quote). */
+export const readOn = (checked: string) => (url: string, quote: string): Source => ({ url, checked, quote })
 
 /** What the calculator asks: emails sent and received a month, contacts on the list, teammates. */
 export type Usage = { sent: number; received: number; contacts: number; seats: number }
@@ -22,6 +24,8 @@ export function count(value: unknown): number {
 }
 
 export const formatCount = (n: number) => n.toLocaleString('en-US')
+/** Items as a sentence lists them: "a, b and c". */
+export const listOf = (items: string[]) => items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items.at(-1)}` : items.join('')
 /** Whole US cents as micro-cents (1¢ = 1,000,000 µ¢), the billing code's unit. */
 export const ucOf = (cents: number) => BigInt(cents) * 1_000_000n
 /** A price as the pages print it: the billing code's usd() without the cents of a whole-dollar amount ("$270", "$26.50", "$0"). */
@@ -74,11 +78,14 @@ export type Plan = {
   note?: string
   tiers: Tier[]
 }
+/** How a vendor charges, and the price points read on its page. */
 export type Offer = {
-  id: 'mailchimp' | 'resend' | 'resend-marketing'
+  id: string
   vendor: string
   name: string
+  /** The vendor's pricing page, and the day its prices were read there (YYYY-MM-DD). */
   pricing: string
+  checked: string
   unit: 'contacts' | 'emails'
   /** complete: every tier the vendor's page lists, so a size between two is priced at the next one up, as the vendor
    *  does. points: only the sizes that were read; a size between them has no checked price. */
@@ -88,102 +95,6 @@ export type Offer = {
   counts: string
   plans: Plan[]
 }
-
-const MAILCHIMP = 'https://mailchimp.com/pricing/marketing/'
-const mailchimpTier = (size: number, cents: number, sends: number, quote: string): Tier => ({ size, cents, sends, source: read(MAILCHIMP, quote) })
-const mailchimpFree = read('https://mailchimp.com/help/about-mailchimp-pricing-plans/', 'The Free plan includes up to 250 contacts and 500 sends per month, with a daily send limit of 250.')
-const mailchimpSeats = (count: number | null) => ({ count, source: read(MAILCHIMP, '"seats":{"essential":3,"free":1,"premium":"unlimited","standard":5}') })
-// Every tier the pricing page lists up to 100,000 contacts (it loads them from /forms/pricing/?currency=USD), at list
-// price: the page itself shows a first-year discount. Still 'points': a size between two tiers has no checked price here,
-// because past a tier's sends Mailchimp bills overages, not the next tier.
-export const mailchimp: Offer = {
-  id: 'mailchimp', vendor: 'Mailchimp', name: 'Mailchimp', pricing: MAILCHIMP, unit: 'contacts', ladder: 'points',
-  counts: 'contacts, sends and seats',
-  plans: [
-    { name: 'Free', seats: mailchimpSeats(1), startsAtZero: true, note: '250 sends a day', max: { size: 250, source: mailchimpFree }, tiers: [{ size: 250, cents: 0, sends: 500, source: mailchimpFree }] },
-    { name: 'Essentials', seats: mailchimpSeats(3), max: { size: 50_000, source: read(MAILCHIMP, 'Essentials at 100,000 contacts: not offered (max 50,000 contacts)') }, tiers: [
-      mailchimpTier(500, 1_300, 5_000, '"essential" ... {"value":13 ...},"audience_size":500,"sends":5000'),
-      mailchimpTier(1_500, 2_650, 15_000, '{"value":26.5 ...},"audience_size":1500,"sends":15000'),
-      mailchimpTier(2_500, 4_500, 25_000, '{"value":45 ...},"audience_size":2500,"sends":25000'),
-      mailchimpTier(5_000, 7_500, 50_000, '{"value":75 ...},"audience_size":5000,"sends":50000'),
-      mailchimpTier(10_000, 11_000, 100_000, '{"value":110 ...},"audience_size":10000,"sends":100000'),
-      mailchimpTier(15_000, 18_000, 150_000, '{"value":180 ...},"audience_size":15000,"sends":150000'),
-      mailchimpTier(20_000, 23_000, 200_000, '{"value":230 ...},"audience_size":20000,"sends":200000'),
-      mailchimpTier(25_000, 27_000, 250_000, '{"value":270 ...},"audience_size":25000,"sends":250000'),
-      mailchimpTier(30_000, 30_000, 300_000, '{"value":300 ...},"audience_size":30000,"sends":300000'),
-      mailchimpTier(40_000, 34_000, 400_000, '{"value":340 ...},"audience_size":40000,"sends":400000'),
-      mailchimpTier(50_000, 38_500, 500_000, '{"value":385 ...},"audience_size":50000,"sends":500000'),
-    ] },
-    { name: 'Standard', seats: mailchimpSeats(5), tiers: [
-      mailchimpTier(500, 2_000, 6_000, '"standard" ... {"value":20 ...},"audience_size":500,"sends":6000'),
-      mailchimpTier(1_500, 4_500, 18_000, '{"value":45 ...},"audience_size":1500,"sends":18000'),
-      mailchimpTier(2_500, 6_000, 30_000, '{"value":60 ...},"audience_size":2500,"sends":30000'),
-      mailchimpTier(5_000, 10_000, 60_000, '{"value":100 ...},"audience_size":5000,"sends":60000'),
-      mailchimpTier(10_000, 13_500, 120_000, '{"value":135 ...},"audience_size":10000,"sends":120000'),
-      mailchimpTier(15_000, 23_000, 180_000, '{"value":230 ...},"audience_size":15000,"sends":180000'),
-      mailchimpTier(20_000, 28_500, 240_000, '{"value":285 ...},"audience_size":20000,"sends":240000'),
-      mailchimpTier(25_000, 31_000, 300_000, '{"value":310 ...},"audience_size":25000,"sends":300000'),
-      mailchimpTier(30_000, 34_000, 360_000, '{"value":340 ...},"audience_size":30000,"sends":360000'),
-      mailchimpTier(40_000, 41_000, 480_000, '{"value":410 ...},"audience_size":40000,"sends":480000'),
-      mailchimpTier(50_000, 45_000, 600_000, '{"value":450 ...},"audience_size":50000,"sends":600000'),
-      mailchimpTier(75_000, 63_000, 900_000, '{"value":630 ...},"audience_size":75000,"sends":900000'),
-      mailchimpTier(100_000, 80_000, 1_200_000, '{"value":800 ...},"audience_size":100000,"sends":1200000'),
-    ] },
-    { name: 'Premium', seats: mailchimpSeats(null), startsAtZero: true, tiers: [
-      mailchimpTier(10_000, 35_000, 150_000, '"premium" ... {"value":350 ...},"audience_size":10000,"sends":150000 (Premium is not offered below 10,000)'),
-      mailchimpTier(15_000, 46_500, 225_000, '{"value":465 ...},"audience_size":15000,"sends":225000'),
-      mailchimpTier(20_000, 53_500, 300_000, '{"value":535 ...},"audience_size":20000,"sends":300000'),
-      mailchimpTier(25_000, 62_000, 375_000, '{"value":620 ...},"audience_size":25000,"sends":375000'),
-      mailchimpTier(30_000, 68_500, 450_000, '{"value":685 ...},"audience_size":30000,"sends":450000'),
-      mailchimpTier(40_000, 75_000, 600_000, '{"value":750 ...},"audience_size":40000,"sends":600000'),
-      mailchimpTier(50_000, 81_500, 750_000, '{"value":815 ...},"audience_size":50000,"sends":750000'),
-      mailchimpTier(75_000, 90_000, 1_125_000, '{"value":900 ...},"audience_size":75000,"sends":1125000'),
-      mailchimpTier(100_000, 102_500, 1_500_000, '{"value":1025 ...},"audience_size":100000,"sends":1500000'),
-    ] },
-  ],
-}
-
-const RESEND = 'https://resend.com/pricing'
-const resendTier = (size: number, cents: number, overage: number | undefined, quote: string): Tier => ({ size, cents, ...overage === undefined ? {} : { overage }, source: read(RESEND, quote) })
-export const resend: Offer = {
-  id: 'resend', vendor: 'Resend', name: 'Resend', pricing: RESEND, unit: 'emails', ladder: 'complete',
-  counts: 'emails sent and received',
-  beyond: { text: 'Enterprise, custom pricing', source: read(RESEND, '| Enterprise | Custom |') },
-  plans: [
-    { name: 'Free', note: '100 a day', tiers: [resendTier(3_000, 0, undefined, '| Free | $0/mo | 3,000 | … "The Free plan is limited to 100 emails per day."')] },
-    { name: 'Pro', tiers: [
-      resendTier(50_000, 2_000, 90, '| Pro | $20/mo | 50,000 | $0.90 |'),
-      resendTier(100_000, 3_500, 90, '| Pro | $35/mo | 100,000 | $0.90 |'),
-    ] },
-    { name: 'Scale', tiers: [
-      resendTier(100_000, 9_000, 90, '| Scale | $90/mo | 100,000 | $0.90 |'),
-      resendTier(200_000, 16_000, 80, '| Scale | $160/mo | 200,000 | $0.80 |'),
-      resendTier(500_000, 35_000, 70, '| Scale | $350/mo | 500,000 | $0.70 |'),
-      resendTier(1_000_000, 65_000, 65, '| Scale | $650/mo | 1,000,000 | $0.65 |'),
-      resendTier(1_500_000, 82_500, 52, '| Scale | $825/mo | 1,500,000 | $0.52 |'),
-      resendTier(2_500_000, 115_000, 46, '| Scale | $1,150/mo | 2,500,000 | $0.46 |'),
-    ] },
-  ],
-}
-/** Resend's pay-as-you-go: past a paid tier, "Overages are billed in buckets of 1,000 emails at your plan's overage rate". */
-export const resendOverage = read(RESEND, 'Overages are billed in buckets of 1,000 emails at your plan\'s overage rate. You can enable this in your team settings under "Transactional Overages."')
-export const resendReceived = read(RESEND, 'Each received email counts towards your transactional emails quota.')
-
-const resendMarketingFree = read(RESEND, 'Free: marketing 1,000 contacts')
-export const resendMarketing: Offer = {
-  id: 'resend-marketing', vendor: 'Resend', name: 'Resend marketing', pricing: RESEND, unit: 'contacts', ladder: 'points',
-  counts: 'contacts, not sends',
-  plans: [
-    { name: 'Free', startsAtZero: true, max: { size: 1_000, source: resendMarketingFree }, tiers: [{ size: 1_000, cents: 0, source: resendMarketingFree }] },
-    { name: 'Pro marketing', tiers: [
-      { size: 5_000, cents: 4_000, source: read(RESEND, '| Pro marketing | $40/mo | 5,000 | … "Marketing plans are not limited by the number of emails sent — only by the number of contacts."') },
-      { size: 25_000, cents: 18_000, source: read(RESEND, '| Pro marketing | $180/mo | 25,000 |') },
-      { size: 100_000, cents: 45_000, source: read(RESEND, '| Pro marketing | $450/mo | 100,000 |') },
-    ] },
-  ],
-}
-
-export const OFFERS = [mailchimp, resend, resendMarketing] as const
 
 export type Quote =
   | { kind: 'price'; plan: Plan; tier: Tier; cents: number; payg: { plan: Plan; tier: Tier; buckets: number; cents: number } | null }
@@ -232,29 +143,88 @@ function payg(offer: Offer, size: number, price: number) {
   return found
 }
 
+/** A vendor's line on the calculator's board, as a buyer would pay it: its cheapest plan that holds the numbers, or
+ *  pay-as-you-go where that costs less. Vendors with no price read for the numbers have none. */
+export type VendorRow = { offer: Offer; plan: string; cents: number }
+export function vendorRows(offers: readonly Offer[], u: Usage): VendorRow[] {
+  return offers.flatMap(offer => {
+    if (offer.unit === 'contacts' && u.contacts === 0) return []
+    const q = quote(offer, u)
+    if (q.kind !== 'price') return []
+    if (q.payg) return [{ offer, plan: `${q.payg.plan.name}, pay as you go`, cents: q.payg.cents }]
+    return [{ offer, plan: offer.unit === 'contacts' && offer.name.endsWith(' marketing') && !/marketing/i.test(q.plan.name) ? `${q.plan.name} marketing` : q.plan.name, cents: q.cents }]
+  })
+}
+
 // ---------------------------------------------------------------- the pages' comparisons and disclosures
 
-/** short: the same claim in a few words, for a list that is scanned; note: what stands behind it, in a line (mailchimp.tsx). */
+/** short: the same claim in a few words, for a list that is scanned; note: what stands behind it, in a line. */
 export type Fact = { text: string; short?: string; note?: string; source: Source }
+/** One of the comparison's rows: what Nightmail has that the competitor charges for or lacks, with the competitor's page
+ *  where it says so (a row that names only Nightmail's own terms has no source). */
+export type Row = Fact | { text: string; short?: string; note?: string; source?: undefined }
 /** A claim about Nightmail and the competitor's own page for the other half of it: text is the two sentences together. */
-const fact = (short: string, ours: string, note: string, source: Source): Fact => ({ short, note, text: `${ours} ${note}`, source })
-export type Comparison = {
+export const fact = (short: string, ours: string, note: string, source: Source): Fact => ({ short, note, text: `${ours} ${note}`, source })
+
+/** The panels of "Also in the box" (panels.ts, features.tsx), in a comparison's reading order. */
+export type PanelId = 'send' | 'campaign' | 'contacts' | 'team' | 'free' | 'receive' | 'agent' | 'route' | 'domain'
+/** How many panels a comparison shows: the wall's slots (features.tsx). */
+export const PANEL_SLOTS = 7
+
+/** One competitor, as its comparison page (/compare/<slug>) and everything made from it say: the page, its Markdown
+ *  twin, its line in llms.txt, its sitemap entry and its structured data (app/price-pages.ts). A new comparison is one
+ *  of these in compare/<slug>.ts, listed in compare/index.ts, and its link-preview card (scripts/price-cards.mjs). */
+export type Entry = {
+  /** The page's address: /compare/<slug>. */
+  slug: string
+  vendor: string
+  /** How the vendor charges and its price points, each with its source. */
   offer: Offer
-  /** The three sizes, as the product map sets them. */
-  sizes: Usage[]
-  usage: string
-  lead: string
-  /** What Nightmail has that the competitor charges for or lacks, each with the competitor's page where it says so. */
-  ours: (Fact | { text: string; short?: string; note?: string; source?: undefined })[]
-  /** The same in one clause, after "Nightmail has". */
-  summary?: string
-  /** The sizes the comparison page's fader can reach (contacts or emails a month, by the offer's unit), each one
-   *  the vendor prices; use turns one into the usage both prices are for; assume is the line under the picture. On a
-   *  'complete' ladder a typed size between the first and the last is priced too (reachable). */
+  /** The usage both prices are for at a size on the fader: so many emails to every contact a month, with this many
+   *  teammates; or emails sent, one recipient each. */
+  model: { per: 'contact'; sendsPerContact: number; seats: number } | { per: 'email' }
+  /** Small, medium and large, in the offer's unit: the page opens at the middle one. */
+  sizes: [number, number, number]
+  /** The sizes the page's fader can reach, each one the vendor prices and Nightmail costs less at (the pre-merge check
+   *  proves both). On a 'complete' ladder a typed size between the first and the last is priced too (reachable). */
   steps: number[]
-  use: (size: number) => Usage
+  /** How each one charges, in two sentences (the Markdown twin's summary), and the line under the board: the usage
+   *  both prices are for. */
+  lead: string
   assume: string
+  rows: Row[]
+  /** The panels of "Also in the box", in reading order: the first is the lead. */
+  panels: PanelId[]
+  /** The search result's and the link preview's description. */
+  description: string
+  /** Questions the page answers, shown on it and given to search engines as an FAQ (FAQPage). */
+  faq?: { question: string; answer: string }[]
 }
+/** An entry as the pages use it: with its three sizes and each fader size as the usage both prices are for. */
+export type Comparison = Omit<Entry, 'sizes'> & {
+  title: string
+  path: string
+  sizes: Usage[]
+  use: (size: number) => Usage
+}
+export function comparisonOf(entry: Entry): Comparison {
+  const m = entry.model
+  const use = m.per === 'contact'
+    ? (contacts: number): Usage => ({ contacts, sent: contacts * m.sendsPerContact, received: 0, seats: m.seats })
+    : (sent: number): Usage => ({ contacts: 0, sent, received: 0, seats: 1 })
+  return { ...entry, title: `Nightmail vs ${entry.vendor}`, path: `/compare/${entry.slug}`, sizes: entry.sizes.map(use), use }
+}
+/** Every source an entry cites: its price points, its plans' limits and its rows. */
+export const sourcesOf = (entry: Pick<Entry, 'offer' | 'rows'>): Source[] => [
+  ...entry.offer.plans.flatMap(plan => [...plan.tiers.map(tier => tier.source), ...plan.seats ? [plan.seats.source] : [], ...plan.max ? [plan.max.source] : []]),
+  ...entry.offer.beyond ? [entry.offer.beyond.source] : [], ...entry.rows.flatMap(row => row.source ? [row.source] : []),
+]
+/** The last day any of an entry's figures was read: when its page last changed (the sitemap's lastmod). */
+export const lastChecked = (entry: Pick<Entry, 'offer' | 'rows'>) => [entry.offer.checked, ...sourcesOf(entry).map(source => source.checked)].sort().at(-1)!
+/** The tier sizes an offer's page lists from `from` to `to`, in order: a fader's usual steps. */
+export const tierSizes = (offer: Offer, from: number, to: number) =>
+  [...new Set(offer.plans.flatMap(plan => plan.tiers.map(tier => tier.size)))].filter(size => size >= from && size <= to).sort((a, b) => a - b)
+
 /** A competitor's price for a usage as a buyer would pay it: its cheapest plan, or pay-as-you-go where that costs less. */
 export function theirPrice(offer: Offer, u: Usage): { cents: number; plan: string } | null {
   const q = quote(offer, u)
@@ -277,41 +247,43 @@ export function claim(c: Comparison): string {
   if (least >= 2) return `${c.offer.vendor} costs ${Number.isInteger(least) ? 'at least' : 'over'} ${Math.floor(least)}\u00a0times as much as Nightmail`
   return `Nightmail costs less than ${c.offer.vendor}`
 }
-/** The Mailchimp comparison's use of a list: this many emails a month to every contact, this many teammates. */
-export const MAILCHIMP_USE = { sendsPerContact: 4, seats: 3 }
-const mailchimpSize = (contacts: number): Usage => ({ contacts, sent: contacts * MAILCHIMP_USE.sendsPerContact, received: 0, seats: MAILCHIMP_USE.seats })
-export const comparisons: Record<'mailchimp' | 'resend', Comparison> = {
-  mailchimp: {
-    offer: mailchimp,
-    sizes: [5_000, 25_000, 100_000].map(mailchimpSize),
-    usage: 'Four campaigns a month to the whole list, 3 teammates, nothing received.',
-    lead: 'Mailchimp prices by contacts. Nightmail prices by email.',
-    // Every list size Mailchimp's page prices from 500 to 100,000 contacts.
-    steps: [...new Set(mailchimp.plans.flatMap(plan => plan.tiers.map(tier => tier.size)))].filter(size => size >= 500 && size <= 100_000).sort((a, b) => a - b),
-    use: mailchimpSize,
-    assume: 'Four emails a month to each contact, 3 teammates, Mailchimp’s cheapest plan. List prices before tax.',
-    summary: 'contacts and teammates at no charge, a role that edits but can’t send, and receiving email',
-    ours: [
-      fact('Contacts at no charge', 'No charge for contacts.', 'Mailchimp counts unsubscribed contacts too, at the month’s highest number.', read('https://mailchimp.com/help/about-mailchimp-pricing-plans/', '"Subscribed, unsubscribed, and non-subscribed contacts are included in your contact count." … "If your contact total increases beyond your contact limit at any time during your monthly billing cycle, we won’t interrupt your service. Instead, you’ll see an additional charge on your bill."')),
-      fact('Teammates at no charge', 'No charge for teammates.', `Mailchimp Essentials includes ${mailchimp.plans[1]!.seats!.count} seats and Standard ${mailchimp.plans[2]!.seats!.count}.`, mailchimpSeats(3).source),
-      fact('A role that edits but can’t send', 'Every workspace has a role that edits campaigns but can’t send them.', 'Mailchimp’s starts on Standard.', read('https://mailchimp.com/help/manage-user-levels-in-your-account/', 'Author "can create, edit, and delete emails and templates, and view reports" … Role-based Access: 5 Roles, 4 Roles, 2 Roles, Not included (Premium, Standard, Essentials, Free)')),
-      { short: 'Receiving email', note: `${nightmail.perThousand} per 1,000 after ${formatCount(nightmail.freeReceived)} free.`, text: `Receiving email, at ${nightmail.perThousand} per 1,000 after ${formatCount(nightmail.freeReceived)} free.` },
-    ],
-  },
-  resend: {
-    offer: resend,
-    sizes: [{ contacts: 0, sent: 10_000, received: 0, seats: 1 }, { contacts: 0, sent: 100_000, received: 0, seats: 1 }, { contacts: 0, sent: 1_000_000, received: 0, seats: 1 }],
-    usage: 'Emails sent a month, one recipient each, nothing received.',
-    lead: 'Resend sells a monthly allowance of email. Nightmail charges for each email.',
-    // 10,000 emails, then every paid tier Resend's page lists up to its last (2,500,000; past it Resend names no price).
-    // Not below: up to Resend's free 3,000 both cost $0, so Nightmail isn't cheaper there.
-    steps: [10_000, ...new Set(resend.plans.flatMap(plan => plan.tiers.map(tier => tier.size)).filter(size => size >= 50_000))].sort((a, b) => a - b),
-    use: (sent: number): Usage => ({ contacts: 0, sent, received: 0, seats: 1 }),
-    assume: 'One recipient each, nothing received, Resend’s cheapest plan or pay-as-you-go. List prices before tax.',
-    ours: [
-      { short: 'A free allowance for received email', text: `Received email has its own ${formatCount(nightmail.freeReceived)} free a month. Resend counts it against the sending allowance.`, source: resendReceived },
-      { short: 'Inboxes at no charge', text: 'No charge per inbox. Resend includes 3 and charges $1 a month for each one after that.', source: read(RESEND, 'Every plan includes 3 inboxes. Paid plans can enable pay-as-you-go to add more at $1 per inbox per month') },
-      { short: 'Marketing without a contact plan', text: `No contact plan for marketing. Resend’s Pro marketing is ${money(resendMarketing.plans[1]!.tiers[0]!.cents)} a month at ${formatCount(resendMarketing.plans[1]!.tiers[0]!.size)} contacts.`, source: resendMarketing.plans[1]!.tiers[0]!.source },
-    ],
-  },
+
+/** What's wrong with an entry, as the build reports it (app/price-pages.ts): every competitor figure and row must carry
+ *  its source (an https page, the day it was read, not after `today`, and the text it was read from), and the page
+ *  needs its address, sizes, steps and panels. Empty when the entry can ship. */
+export function entryProblems(entry: Entry, today: string, panels: readonly string[]): string[] {
+  const problems: string[] = [], day = /^\d{4}-\d{2}-\d{2}$/
+  const at = (where: string, problem: string) => problems.push(`${entry.slug || '(no slug)'}: ${where} ${problem}`)
+  const checkSource = (where: string, source: Source | undefined) => {
+    if (!source) return at(where, 'has no source.')
+    let url: URL | null = null
+    try { url = new URL(source.url) } catch { url = null }
+    if (url?.protocol !== 'https:') at(where, `has no https link to the vendor's page (${source.url}).`)
+    if (!day.test(source.checked) || Number.isNaN(Date.parse(source.checked)) || source.checked > today) at(where, `has no valid day it was checked (YYYY-MM-DD, not after ${today}): ${source.checked}.`)
+    if (typeof source.quote !== 'string' || source.quote.trim().length < 8) at(where, 'doesn’t quote the text it was read from.')
+  }
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(entry.slug)) at('slug', 'must be lowercase letters, digits and hyphens.')
+  if (!entry.vendor.trim()) at('vendor', 'is empty.')
+  if (!day.test(entry.offer.checked) || entry.offer.checked > today) at('offer.checked', `must be a day (YYYY-MM-DD) not after ${today}.`)
+  try { if (new URL(entry.offer.pricing).protocol !== 'https:') at('offer.pricing', 'must be the vendor’s https pricing page.') } catch { at('offer.pricing', 'must be the vendor’s https pricing page.') }
+  if (!entry.offer.plans.length) at('offer.plans', 'lists no plans.')
+  entry.offer.plans.forEach((plan, p) => {
+    if (!plan.tiers.length) at(`offer.plans[${p}] (${plan.name})`, 'lists no price points.')
+    plan.tiers.forEach((tier, t) => checkSource(`offer.plans[${p}].tiers[${t}] (${plan.name} at ${tier.size})`, tier.source))
+    if (plan.seats) checkSource(`offer.plans[${p}].seats`, plan.seats.source)
+    if (plan.max) checkSource(`offer.plans[${p}].max`, plan.max.source)
+  })
+  if (entry.offer.beyond) checkSource('offer.beyond', entry.offer.beyond.source)
+  entry.rows.forEach((row, r) => {
+    // A row that names the competitor says something about it: it needs the page that says so. (One that doesn't is
+    // about Nightmail alone, such as its own price for received mail.)
+    if (row.source || row.text.includes(entry.vendor)) checkSource(`rows[${r}] (${row.short ?? row.text.slice(0, 40)})`, row.source)
+  })
+  if (!entry.rows.length) at('rows', 'is empty: the page lists what Nightmail has that the competitor charges for or lacks.')
+  if (entry.sizes.length !== 3 || entry.sizes.some(size => !(size > 0))) at('sizes', 'must be three sizes above zero.')
+  if (entry.steps.length < 2 || entry.steps.some((size, i) => i > 0 && size <= entry.steps[i - 1]!)) at('steps', 'must be at least two sizes, smallest first.')
+  if (entry.panels.length !== PANEL_SLOTS || new Set(entry.panels).size !== PANEL_SLOTS || entry.panels.some(id => !panels.includes(id))) at('panels', `must be ${PANEL_SLOTS} different panels of ${panels.join(', ')}.`)
+  if (!entry.description.trim() || entry.description.length > 160) at('description', 'must be a sentence or two, at most 160 characters.')
+  for (const [i, item] of (entry.faq ?? []).entries()) if (!item.question.trim() || !item.answer.trim()) at(`faq[${i}]`, 'needs a question and its answer.')
+  return problems
 }

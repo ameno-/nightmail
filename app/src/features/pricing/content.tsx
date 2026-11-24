@@ -1,5 +1,6 @@
 import { ArrowUpRight } from 'lucide-react'
-import { comparisons, dayOf, nightmail, type Source, type Usage } from './prices'
+import { comparisons } from './compare'
+import { dayOf, nightmail, type Offer, type Source, type Usage } from './prices'
 
 // The price pages' shared pieces (board.tsx, calculator.tsx): where a figure was read, Nightmail's figures marked with
 // the usage they price (data-nightmail-sent and -received, which api/scripts/check-premerge.ts reads back), the
@@ -9,7 +10,7 @@ import { comparisons, dayOf, nightmail, type Source, type Usage } from './prices
 export type Field = 'sent' | 'received' | 'contacts' | 'teammates'
 export const sizeOf = (u: Usage): Record<Field, number> => ({ sent: u.sent, received: u.received, contacts: u.contacts, teammates: u.seats })
 /** Small, medium and large: the sizes of the Mailchimp comparison, so the calculator opens on figures that were checked. */
-export const PRESETS = (['Small', 'Medium', 'Large'] as const).map((name, i) => ({ name, size: sizeOf(comparisons.mailchimp.sizes[i]!) }))
+export const PRESETS = (['Small', 'Medium', 'Large'] as const).map((name, i) => ({ name, size: sizeOf(comparisons.mailchimp!.sizes[i]!) }))
 /** A calculator address for a usage: /pricing?sent=…&received=…&contacts=…&teammates=… */
 export const calculatorPath = (u: Usage) => `/pricing?${new URLSearchParams(Object.entries(sizeOf(u)).map(([k, v]) => [k, String(v)]))}`
 
@@ -17,6 +18,16 @@ const host = (url: string) => new URL(url).hostname.replace(/^www\./, '')
 /** Where and when a figure was read: the date, and a link to the vendor's page. */
 export function Checked({ source: { checked, url } }: { source: Pick<Source, 'checked' | 'url'> }) {
   return <span className="price-checked">Checked {dayOf(checked)} on <a href={url} target="_blank" rel="noopener noreferrer">{host(url)}<ArrowUpRight size={12} aria-hidden="true" /></a></span>
+}
+/** The days the vendors' pricing pages were read, and links to them: "Checked 22 Nov 2026 on a.com and b.com". */
+export function CheckedPages({ offers }: { offers: readonly Pick<Offer, 'pricing' | 'checked'>[] }) {
+  const pages = [...new Map(offers.map(offer => [offer.pricing, offer.checked])).entries()]
+  const days = [...new Set(pages.map(([, checked]) => checked))].sort()
+  const join = (i: number, n: number) => i === 0 ? '' : i === n - 1 ? ' and ' : ', '
+  return <>{days.map((day, d) => {
+    const urls = pages.filter(([, checked]) => checked === day).map(([url]) => url)
+    return <span key={day}>{join(d, days.length)}{d === 0 && 'Checked '}{dayOf(day)} on {urls.map((url, i) => <span key={url}>{join(i, urls.length)}<a href={url} target="_blank" rel="noopener noreferrer">{host(url)}</a></span>)}</span>
+  })}</>
 }
 /** A claim's source, after it: a link to the page it was read on (the list's note says when). */
 export function Cite({ source: { checked, url } }: { source: Source }) {
