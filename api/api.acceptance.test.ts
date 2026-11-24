@@ -12119,6 +12119,9 @@ describe('Import property boundaries', () => {
       await db.query(`INSERT INTO audience_list_members(workspace_id,list_id,contact_id)
         SELECT $1, $2, id FROM audience_contacts WHERE workspace_id = $1 AND email IN ('info1@gmial.com', 'info2@gmial.com', 'user501@example.com')`, [wid, smallList.id]);
 
+      // Autoanalyze cannot see the uncommitted bulk seed; give the AudienceQL membership join current statistics.
+      await db.query('ANALYZE audience_contacts, audience_list_members');
+
       // 1. A1-4: >50k skinny capture with priority + referenced personalization + hashed send order.
       const { snapshotCampaignAudience } = await import('./src/audience.js');
       const actor = { workspaceId: wid, keyId: 'fixture', permissions: ['read', 'write', 'manage', 'send'], domains: [], role: 'owner', credential: 'dashboard' } as never;
@@ -15594,7 +15597,9 @@ describe('Dashboard API capabilities', () => {
     cleanup(t, async () => { await db.query('DELETE FROM sending_campaign_reviews WHERE id = $1', [reviewId]); });
     // Scoped terminal/active states exercise guards without scheduling or sending email.
     for (const state of ['preparing', 'scheduled', 'sending', 'paused', 'done', 'failed', 'canceled']) {
-      const seeded = await db.query("UPDATE sending_campaigns SET state = $1, review_id = $4, total = 1, prepared = CASE WHEN $1 = 'preparing' THEN 0 ELSE 1 END, expanded = CASE WHEN $1 IN ('sending','done') THEN 1 ELSE 0 END, paused_at = CASE WHEN $1 = 'paused' THEN now() END WHERE id = $2 AND workspace_id = $3 RETURNING id", [state, campaign.id, list.workspaceId, reviewId]);
+      // Keep one recipient unreleased while sending; otherwise the recovery sweep correctly marks it done.
+      const total = state === 'sending' ? 2 : 1;
+      const seeded = await db.query("UPDATE sending_campaigns SET state = $1, review_id = $4, total = $5, prepared = CASE WHEN $1 = 'preparing' THEN 0 ELSE $5 END, expanded = CASE WHEN $1 IN ('sending','done') THEN 1 ELSE 0 END, paused_at = CASE WHEN $1 = 'paused' THEN now() END WHERE id = $2 AND workspace_id = $3 RETURNING id", [state, campaign.id, list.workspaceId, reviewId, total]);
       assert.equal(seeded.rowCount, 1);
       const before = ok(await http('GET', path, key.secret));
       assert.equal(before.state, state);
