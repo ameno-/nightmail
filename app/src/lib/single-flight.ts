@@ -1,5 +1,6 @@
+import { useState } from 'react'
 import { useMutation, useQueryClient, type DefaultError, type UseMutationOptions, type UseMutationResult } from '@tanstack/react-query'
-import { selectedWorkspace } from '../data/live'
+import { aborted, currentScope, isCurrentScope, selectedWorkspace, type RequestScope } from '../data/live'
 import { flightKey, once } from './flight'
 
 /** A write dropped because the same write is still in flight. It rejects once that write settles, and is never shown. */
@@ -11,7 +12,7 @@ export const isDuplicateSubmission = (error: unknown): error is DuplicateSubmiss
 /** What a guarded write is: the operation (by default its function's source, which is the same in every render and
  *  remount, and differs between call sites unless they make the same call) and the target its function closes over
  *  rather than takes as input, such as the open conversation. A write whose target is in its input needs no target. */
-export type Flight = { target?: unknown; operation?: string }
+export type Flight = { target?: unknown; operation?: string; requestScope?: RequestScope | null }
 
 /**
  * useMutation that sends a write once while it is in flight. A double click, Enter then a click, or a click after the
@@ -21,11 +22,16 @@ export type Flight = { target?: unknown; operation?: string }
  * once. The same operation on another target or with another input is sent (Star on conversation B while Star on A is
  * pending). Once the first call settles, the same write can be sent again.
  */
-export function useGuardedMutation<TData = unknown, TError = DefaultError, TVariables = void, TContext = unknown>({ target, operation, ...options }: UseMutationOptions<TData, TError, TVariables, TContext> & Flight): UseMutationResult<TData, TError, TVariables, TContext> {
+const activeScope = (scope: RequestScope | null) => scope && (scope.account !== null || scope.workspace !== null) ? scope : null
+
+export function useGuardedMutation<TData = unknown, TError = DefaultError, TVariables = void, TContext = unknown>({ target, operation, requestScope: explicitScope, ...options }: UseMutationOptions<TData, TError, TVariables, TContext> & Flight): UseMutationResult<TData, TError, TVariables, TContext> {
   const client = useQueryClient()
+  const [mountedScope] = useState(currentScope)
+  const scope = explicitScope === undefined ? activeScope(mountedScope) : activeScope(explicitScope)
   const mutation = useMutation(options)
   const name = operation ?? options.mutationFn?.toString()
   const mutateAsync = ((...args: Parameters<typeof mutation.mutateAsync>) => {
+    if (scope && !isCurrentScope(scope)) return Promise.reject(aborted())
     const { call, duplicate } = once(client, name === undefined ? undefined : flightKey(selectedWorkspace(), name, target, args[0]), () => mutation.mutateAsync(...args))
     return duplicate ? new Promise<TData>((_, reject) => { const drop = () => reject(new DuplicateSubmission()); call.then(drop, drop) }) : call
   }) as typeof mutation.mutateAsync
@@ -41,7 +47,10 @@ export function useGuardedMutation<TData = unknown, TError = DefaultError, TVari
  */
 export function useSingleFlight<A extends unknown[], R>(operation: string, run: (...args: A) => Promise<R>, target?: unknown) {
   const client = useQueryClient()
+  const [mountedScope] = useState(currentScope)
+  const scope = activeScope(mountedScope)
   return (...args: A): Promise<R> => {
+    if (scope && !isCurrentScope(scope)) return Promise.reject(aborted())
     return once(client, flightKey(selectedWorkspace(), operation, target, args), () => run(...args)).call
   }
 }

@@ -2,9 +2,12 @@ import { useEffect, useState, type FormEvent, type ReactNode, type RefObject } f
 import { Link } from 'react-router'
 import { useInfiniteQuery } from '@tanstack/react-query'
 import { ChevronRight } from 'lucide-react'
-import { Button, Checkbox, Dialog, Disclosure, Field, Input, fieldError, MutationError } from '../../components/ui'
+import { Button, Checkbox, Dialog, Disclosure, Field, Input, SearchField, fieldError, MutationError } from '../../components/ui'
+import { mergeAddresses, useAddressOptions, useResolvedAddresses } from '../../data/addresses'
+import { useDebounced } from '../../lib/pagination'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { useApi, useApiDef, useApiMutation } from '../../data/context'
+import { invalidate } from '../../data/invalidation'
 import { useMailServers } from '../docs/mail-settings'
 import { queries } from '../../data/queries'
 import type { ApiKey, ApiKeyInput, ApiKeyUpdate, AppPasswordInput, AppPasswordProtocol, Inbox, KeyPermission, MailPermission, PageRequest } from '../../data/types'
@@ -118,14 +121,17 @@ export const chooseAddress = 'Choose an address, or Every address.'
 const tooManyDomains = 'Select up to 50 domains.'
 /** Which receiving addresses a key reaches, or every one: one control for Create key and a key's Edit addresses.
  *  `empty` takes the options' place while they load or when there are none. */
-export function AddressChoice({ id, options, every, chosen, onEvery, onToggle, disabled, error, empty }: { id: string; options: { id: string; address: string }[]; every: boolean; chosen: string[];
-  onEvery: (every: boolean) => void; onToggle: (id: string, checked: boolean) => void; disabled: boolean; error?: string; empty?: ReactNode }) {
+export function AddressChoice({ id, options, every, chosen, onEvery, onToggle, disabled, error, empty, search, onSearch, searchable, hasMore, loadingMore, onLoadMore }: { id: string; options: { id: string; address: string }[]; every: boolean; chosen: string[];
+  onEvery: (every: boolean) => void; onToggle: (id: string, checked: boolean) => void; disabled: boolean; error?: string; empty?: ReactNode;
+  search?: string; onSearch?: (value: string) => void; searchable?: boolean; hasMore?: boolean; loadingMore?: boolean; onLoadMore?: () => void }) {
   return <fieldset className="settings-key-domains" disabled={disabled} aria-describedby={error ? `${id}-error` : undefined}>
     <legend className="ui-field__label">Addresses</legend>
     <Checkbox label="Every address, including new ones" checked={every} onCheckedChange={onEvery} disabled={disabled} />
+    {searchable && onSearch && <SearchField aria-label="Search addresses" placeholder="Search addresses" value={search ?? ''} onChange={event => onSearch(event.target.value)} />}
     <div className="settings-key-domain-options">
       {empty ?? options.map(item => <Checkbox key={item.id} label={<PrivateAddress value={item.address} />} checked={!every && chosen.includes(item.id)} disabled={disabled} onCheckedChange={checked => onToggle(item.id, checked)} />)}
     </div>
+    {hasMore && onLoadMore && <Button variant="ghost" size="sm" loading={loadingMore} onClick={onLoadMore}>Load more addresses</Button>}
     {error && <p id={`${id}-error`} className="ui-field__error" role="alert">{error}</p>}
   </fieldset>
 }
@@ -185,10 +191,9 @@ const in30Days = () => utcInput(new Date(Date.now() + 30 * 86_400_000).toISOStri
  *  isn't undone; the key keeps its secret. A key's kind stays: a workspace key edits as one, a key limited to mail as
  *  one for addresses, one inbox or created inboxes. */
 function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial, editing }: FormProps & { initial?: { purpose?: Purpose; domain?: string }; editing?: ApiKey }) {
-  const create = useApiMutation((api, input: ApiKeyInput) => api.keys.create(input))
-  const update = useApiMutation((api, change: ApiKeyUpdate) => api.keys.update(editing!.id, change), 'Key updated')
+  const create = useApiMutation((api, input: ApiKeyInput) => api.keys.create(input), undefined, false, invalidate.apiKeys)
+  const update = useApiMutation((api, change: ApiKeyUpdate) => api.keys.update(editing!.id, change), 'Key updated', false, invalidate.apiKeys)
   const write = editing ? update : create
-  const addresses = useApiDef(queries.inboundAddressOptions())
   const was = editing?.access
   const [name, setName] = useState(editing?.name ?? '')
   const [purpose, setPurpose] = useState<FormPurpose>(editing ? purposeOf(editing) : initial?.purpose ?? 'send')
@@ -210,11 +215,16 @@ function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial, editing
   useEffect(() => onPending(pending), [pending, onPending])
   const domainOptions = useDomainOptions(open && workspace)
   const inboxes = useInboxOptions('key-options', {}, open && purpose === 'inbox')
+  const [addressSearch, setAddressSearch] = useState('')
+  const addressQuery = useDebounced(addressSearch)
+  const addresses = useAddressOptions({ enabled: open && purpose === 'addresses', search: addressQuery })
+  const savedAddressIds = was?.type === 'addresses' ? was.addressIds ?? [] : []
+  const resolvedSaved = useResolvedAddresses([...savedAddressIds, ...addressIds], addresses.items, open && purpose === 'addresses')
   const domains = domainNames(domainOptions, selectedDomains)
-  // Inboxes have their own choice; this list is the receiving addresses, and when editing anything else the key has
-  // (an inbox), so saving never drops it unseen.
-  const receiving = (addresses.data ?? []).filter(item => item.kind !== 'inbox' || was?.addressIds?.includes(item.id))
-  const shownAddresses = [...receiving, ...(was?.type === 'addresses' ? was.addressIds ?? [] : []).filter(id => !receiving.some(item => item.id === id)).map(id => ({ id, address: id }))]
+  // Inboxes have their own choice; saved/chosen off-page addresses resolve by ID and stay visible so saving never drops them.
+  const mergedAddresses = mergeAddresses(resolvedSaved.items, addresses.items)
+  const receiving = mergedAddresses.filter(item => item.kind !== 'inbox' || savedAddressIds.includes(item.id) || addressIds.includes(item.id))
+  const shownAddresses = [...receiving, ...savedAddressIds.filter(id => !receiving.some(item => item.id === id)).map(id => ({ id, address: id }))]
   const chosenInbox = inboxId || activeInboxes(inboxes)[0]?.id || ''
   const finalMail = mailOrder(purpose === 'create' ? [...new Set<MailPermission>(['create', ...mail])] : mail)
   const failed = (...fields: string[]) => fields.map(field => fieldError(write.error, field)).find(Boolean)
@@ -338,8 +348,10 @@ function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial, editing
       {workspace && <DomainChoice query={domainOptions} chosen={selectedDomains} onToggle={toggleDomain} disabled={pending} error={domainError} onLeave={() => onOpenChange(false)}
         every={{ checked: allDomains, onChange: checked => { setAllDomains(checked); setSelectedDomains([]); clearError('domains') } }} />}
       {purpose === 'addresses' && <AddressChoice id="key-address" options={shownAddresses} every={allAddresses} chosen={addressIds} disabled={pending} error={addressError}
-        onEvery={checked => { setAllAddresses(checked); setAddressIds(checked ? [] : was?.type === 'addresses' ? was.addressIds ?? [] : []); clearError('addressIds') }} onToggle={toggleAddress}
-        empty={addresses.isPending ? <p className="muted" role="status">Loading addresses…</p> : addresses.isError ? <AddressesFailed query={addresses} /> : !shownAddresses.length ? <Link className="keys-form-note" to="/receiving" onClick={() => onOpenChange(false)}>Create an address</Link> : undefined} />}
+        search={addressSearch} onSearch={setAddressSearch} searchable={addresses.hasMore || Boolean(addressSearch)}
+        hasMore={addresses.hasMore} loadingMore={addresses.loadingMore} onLoadMore={addresses.loadMore}
+        onEvery={checked => { setAllAddresses(checked); setAddressIds(checked ? [] : savedAddressIds); clearError('addressIds') }} onToggle={toggleAddress}
+        empty={addresses.isPending ? <p className="muted" role="status">Loading addresses…</p> : addresses.isError ? <AddressesFailed query={addresses} /> : !shownAddresses.length ? (addressSearch ? <p className="muted">No matching addresses.</p> : <Link className="keys-form-note" to="/receiving" onClick={() => onOpenChange(false)}>Create an address</Link>) : undefined} />}
       {purpose === 'inbox' && <InboxChoice name="key-inbox" query={inboxes} value={chosenInbox} onChange={id => { setInboxId(id); clearError('inboxId') }} disabled={pending} error={inboxError}
         none={<Link to="/receiving/inboxes" onClick={() => onOpenChange(false)}>Create an agent inbox</Link>} />}
       {!workspace && <fieldset className="keys-purpose" disabled={pending}>
@@ -376,7 +388,7 @@ export function EditKeyDialog({ apiKey, onClose, returnFocus }: { apiKey: ApiKey
 }
 
 function AppPasswordForm({ open, onOpenChange, onPending, onCreated }: FormProps) {
-  const create = useApiMutation((api, input: AppPasswordInput) => api.credentials.createAppPassword(input))
+  const create = useApiMutation((api, input: AppPasswordInput) => api.credentials.createAppPassword(input), undefined, false, invalidate.appPasswords)
   const inboxes = useInboxOptions('app-password-options', { type: 'persistent' }, open)
   const [inboxId, setInboxId] = useState('')
   const [name, setName] = useState('')
@@ -423,18 +435,21 @@ function AppPasswordForm({ open, onOpenChange, onPending, onCreated }: FormProps
 /** An SMTP login: an API key that can only send, from chosen domains or receiving addresses. An app signs in to SMTP
  *  as apikey with it; its mail goes out like an API send. */
 function SmtpLoginForm({ open, onOpenChange, onPending, onCreated }: FormProps) {
-  const create = useApiMutation((api, input: ApiKeyInput) => api.keys.create(input))
+  const create = useApiMutation((api, input: ApiKeyInput) => api.keys.create(input), undefined, false, invalidate.apiKeys)
   const domainOptions = useDomainOptions(open)
-  const addresses = useApiDef(queries.inboundAddressOptions())
   const [name, setName] = useState('')
   const [scope, setScope] = useState<'domains' | 'addresses'>('domains')
   const [domains, setDomains] = useState<string[]>([])
   const [allAddresses, setAllAddresses] = useState(false)
   const [addressIds, setAddressIds] = useState<string[]>([])
+  const [addressSearch, setAddressSearch] = useState('')
+  const addressQuery = useDebounced(addressSearch)
+  const addresses = useAddressOptions({ enabled: open && scope === 'addresses', search: addressQuery, kind: 'address' })
+  const resolvedSelected = useResolvedAddresses(addressIds, addresses.items, open && scope === 'addresses')
   const [errors, setErrors] = useState<Record<string, string>>({})
   const pending = create.isPending
   useEffect(() => onPending(pending), [pending, onPending])
-  const receiving = (addresses.data ?? []).filter(item => item.kind !== 'inbox')
+  const receiving = mergeAddresses(resolvedSelected.items, addresses.items).filter(item => item.kind !== 'inbox')
   const clearError = (field: string) => setErrors(current => { const next = { ...current }; delete next[field]; return next })
   const servers = useMailServers()
   async function submit(event: FormEvent) {
@@ -468,9 +483,11 @@ function SmtpLoginForm({ open, onOpenChange, onPending, onCreated }: FormProps) 
     {scope === 'domains' ? <DomainChoice query={domainOptions} chosen={domains} disabled={pending} error={errors.domains || fieldError(create.error, 'domains')} onLeave={() => onOpenChange(false)}
       onToggle={(domain, checked) => { clearError('domains'); setDomains(current => checked ? [...new Set([...current, domain])] : current.filter(item => item !== domain)) }} />
       : <AddressChoice id="smtp-login-address" options={receiving} every={allAddresses} chosen={addressIds} disabled={pending} error={errors.addressIds || fieldError(create.error, 'access.addressIds')}
+        search={addressSearch} onSearch={setAddressSearch} searchable={addresses.hasMore || Boolean(addressSearch)}
+        hasMore={addresses.hasMore} loadingMore={addresses.loadingMore} onLoadMore={addresses.loadMore}
         onEvery={checked => { setAllAddresses(checked); setAddressIds([]); clearError('addressIds') }}
         onToggle={(id, checked) => { clearError('addressIds'); setAllAddresses(false); setAddressIds(current => checked ? [...new Set([...current, id])] : current.filter(item => item !== id)) }}
-        empty={addresses.isPending ? <p className="muted" role="status">Loading addresses…</p> : addresses.isError ? <AddressesFailed query={addresses} /> : !receiving.length ? <Link className="keys-form-note" to="/receiving" onClick={() => onOpenChange(false)}>Create an address</Link> : undefined} />}
+        empty={addresses.isPending ? <p className="muted" role="status">Loading addresses…</p> : addresses.isError ? <AddressesFailed query={addresses} /> : !receiving.length ? (addressSearch ? <p className="muted">No matching addresses.</p> : <Link className="keys-form-note" to="/receiving" onClick={() => onOpenChange(false)}>Create an address</Link>) : undefined} />}
     <Disclosure className="keys-can" title="What this login can do"><ul>
       <li>Sends from an app over SMTP, as {scope === 'domains' ? 'any address on these domains and their subdomains' : 'these addresses'}.</li>
       <li>Mail goes out like an API send: the same limits, suppressions and events.</li>

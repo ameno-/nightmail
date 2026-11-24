@@ -3,6 +3,7 @@ import { useLocation } from 'react-router'
 import { Button, ErrorState, Field, Input, PageHeader, SectionHeader, Textarea, fieldError, MutationError } from '../../components/ui'
 import { postalAddressError } from '../../components/PostalAddress'
 import { useApiMutation, useApiQuery, useRegion, useSession, useWorkspaceAccess } from '../../data/context'
+import { invalidate } from '../../data/invalidation'
 import type { Workspace } from '../../data/types'
 import { SesSendingSkeleton, WorkspaceFormSkeleton } from './skeletons'
 import { RegionSetup } from './region-setup'
@@ -15,7 +16,7 @@ function WorkspaceForm({workspace, ruled}: {workspace: Workspace; ruled: boolean
   const [name, setName] = useState(workspace.name)
   const [address, setAddress] = useState(workspace.postalAddress ?? '')
   const [addressProblem, setAddressProblem] = useState('')
-  const save = useApiMutation((api, input: {name: string; postalAddress: string | null}) => api.workspace.update(input), 'Saved')
+  const save = useApiMutation((api, input: {name: string; postalAddress: string | null}) => api.workspace.update(input), 'Saved', false, invalidate.workspace)
   async function submit(event: FormEvent) {
     event.preventDefault()
     const problem = postalAddressError(address)

@@ -1,0 +1,230 @@
+{
+  "version": 1,
+  "modelId": "db-faults",
+  "cases": [
+    {
+      "name": "smoke-send-and-drain",
+      "steps": [
+        {
+          "op": "Send",
+          "key": "k1"
+        },
+        {
+          "op": "Drain"
+        }
+      ],
+      "expected": {
+        "outcome": "pass",
+        "control": true
+      },
+      "note": "Control: healthy send and drain delivers once"
+    },
+    {
+      "name": "canary-double-send",
+      "steps": [
+        {
+          "op": "Send",
+          "key": "k1"
+        },
+        {
+          "op": "Drain"
+        }
+      ],
+      "bug": "canary_double_send",
+      "expected": {
+        "outcome": "fail",
+        "operator": "dbfault.once/email/0",
+        "verdict": "violated",
+        "canary": true
+      },
+      "note": "Canary: planted duplicate SES send fails declarative temporal property dbfault.once"
+    },
+    {
+      "name": "idempotent-replay-same-key-sends-once",
+      "steps": [
+        {
+          "op": "Send",
+          "key": "k1"
+        },
+        {
+          "op": "Send",
+          "key": "k1"
+        },
+        {
+          "op": "Drain"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Repeating a Send with the same Idempotency-Key returns the same emailId and sends to SES at most once"
+    },
+    {
+      "name": "pool-exhausted-53300-is-retryable-and-recovers-once",
+      "steps": [
+        {
+          "op": "Send",
+          "key": "k1"
+        },
+        {
+          "op": "SetFault",
+          "mode": "pool_exhausted_53300"
+        },
+        {
+          "op": "Send",
+          "key": "k2"
+        },
+        {
+          "op": "CreateList"
+        },
+        {
+          "op": "ReadMe"
+        },
+        {
+          "op": "SetFault",
+          "mode": "none"
+        },
+        {
+          "op": "Send",
+          "key": "k1"
+        },
+        {
+          "op": "Send",
+          "key": "k2"
+        },
+        {
+          "op": "Drain"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "SQLSTATE 53300 returns retryable 503 DATABASE_UNAVAILABLE; after recovery k1 replays without double-send and k2 sends once"
+    },
+    {
+      "name": "pg-readonly-xx000-is-retryable",
+      "steps": [
+        {
+          "op": "SetFault",
+          "mode": "readonly_pg_readonly"
+        },
+        {
+          "op": "Send",
+          "key": "k1"
+        },
+        {
+          "op": "CreateList"
+        },
+        {
+          "op": "SetFault",
+          "mode": "none"
+        },
+        {
+          "op": "Send",
+          "key": "k1"
+        },
+        {
+          "op": "Drain"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Fixed by PR #593 (BUG-DB-01): PlanetScale XX000 pg_readonly returns retryable 503 and recovers cleanly"
+    },
+    {
+      "name": "statement-timeout-57014-is-retryable",
+      "steps": [
+        {
+          "op": "SetFault",
+          "mode": "stall_57014"
+        },
+        {
+          "op": "Send",
+          "key": "k1"
+        },
+        {
+          "op": "CreateList"
+        },
+        {
+          "op": "SetFault",
+          "mode": "none"
+        },
+        {
+          "op": "Send",
+          "key": "k1"
+        },
+        {
+          "op": "Drain"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Fixed by PR #593 (BUG-DB-02): SQLSTATE 57014 statement timeout returns retryable 503 and recovers cleanly"
+    },
+    {
+      "name": "readonly-25006-and-lock-55p03-are-retryable",
+      "steps": [
+        {
+          "op": "SetFault",
+          "mode": "readonly_25006"
+        },
+        {
+          "op": "Send",
+          "key": "k1"
+        },
+        {
+          "op": "SetFault",
+          "mode": "lock_55P03"
+        },
+        {
+          "op": "CreateList"
+        },
+        {
+          "op": "SetFault",
+          "mode": "none"
+        },
+        {
+          "op": "Send",
+          "key": "k1"
+        },
+        {
+          "op": "Drain"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "SQLSTATE 25006 read-only and 55P03 lock timeout return retryable 503 and recover cleanly"
+    },
+    {
+      "name": "mid-request-fault-after-first-write-recovers-once",
+      "steps": [
+        {
+          "op": "SetFault",
+          "mode": "after_first_write_57014"
+        },
+        {
+          "op": "Send",
+          "key": "k1"
+        },
+        {
+          "op": "SetFault",
+          "mode": "none"
+        },
+        {
+          "op": "Send",
+          "key": "k1"
+        },
+        {
+          "op": "Drain"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "A 57014 timeout after the first write inside a request returns retryable 503 and never double-sends on retry"
+    }
+  ]
+}

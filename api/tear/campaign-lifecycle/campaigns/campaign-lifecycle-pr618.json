@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "modelId": "campaign-lifecycle",
+  "cases": [
+    {
+      "name": "pr618-async-large-launch-s1-hash-and-deploy",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "asyncLarge"
+        },
+        {
+          "op": "SendNow"
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "GetCampaign"
+        },
+        {
+          "op": "DeployMidCampaign"
+        },
+        {
+          "op": "Pause"
+        },
+        {
+          "op": "Resume"
+        },
+        {
+          "op": "Cancel"
+        },
+        {
+          "op": "GetCampaign"
+        }
+      ],
+      "expected": {
+        "outcome": "pass",
+        "control": true
+      },
+      "note": "Expected on PR #618 (opt/campaigns-fast-launch): >5,000 list members launch asynchronously in campaign.run, stamp s1: static hashes, survive mid-campaign deploy, pause/resume, and cancel with exact accounting"
+    },
+    {
+      "name": "pr618-async-late-empty-audience-fails-loudly",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "asyncEmpty"
+        },
+        {
+          "op": "SendNow"
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "GetCampaign"
+        },
+        {
+          "op": "EditDraft",
+          "subject": "v2"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Expected on PR #618 (opt/campaigns-fast-launch): >5,000 unsubscribed members fail loudly in preparing with EMPTY_AUDIENCE and remain editable back to draft"
+    }
+  ]
+}

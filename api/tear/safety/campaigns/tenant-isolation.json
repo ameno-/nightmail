@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "modelId": "tenant-isolation",
+  "cases": [
+    {
+      "name": "smoke-victim-send-and-drain",
+      "steps": [
+        {
+          "op": "VictimSend"
+        },
+        {
+          "op": "DrainVictim"
+        }
+      ],
+      "expected": {
+        "outcome": "pass",
+        "control": true
+      },
+      "note": "Control: victim workspace transactional send succeeds and delivers"
+    },
+    {
+      "name": "canary-heavy-blocks-victim",
+      "steps": [
+        {
+          "op": "PreviewImport"
+        },
+        {
+          "op": "CommitImport"
+        },
+        {
+          "op": "VictimSend"
+        }
+      ],
+      "bug": "canary_block_victim",
+      "expected": {
+        "outcome": "fail",
+        "operator": "reply:VictimSend:satisfies:victim-send-not-blocked",
+        "verdict": "replyMismatch",
+        "canary": true
+      },
+      "note": "Canary: planted cross-workspace contention fails victim-send-not-blocked"
+    },
+    {
+      "name": "overlap-heavy-import-does-not-block-victim-send",
+      "steps": [
+        {
+          "op": "OverlapImportAndVictimSend"
+        },
+        {
+          "op": "DrainVictim"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Contact import commit in workspace A overlapped deterministically with workspace B's send does not lock out or deadlock B"
+    },
+    {
+      "name": "victim-transactional-beats-heavy-marketing-flood",
+      "steps": [
+        {
+          "op": "HeavyMarketingFlood"
+        },
+        {
+          "op": "VictimSend"
+        },
+        {
+          "op": "DrainVictim"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Workspace B's transactional send dispatches ahead of workspace A's 20-message marketing flood in the same region"
+    }
+  ]
+}

@@ -7,9 +7,9 @@ function initDeps() {
   return Promise.all([
     import('pg'), import('drizzle-orm/node-postgres'), import('drizzle-orm/sql'),
     import('./config.js'), import('./adapters/storage.js'), import('./dispatcher.js'),
-    import('./core.js'), import('./adapters/feedback-queue.js'),
-  ]).then(([{ Pool }, { drizzle }, { sql }, { loadConfig }, { r2Storage }, { initialGate, runDispatcher, dispatchWakeKey,shardLeaseSize }, { ApiError, log, logError, setLogContext }, { feedbackSink, workWake }]) => ({
-    Pool, drizzle, sql, loadConfig, r2Storage, initialGate, runDispatcher, dispatchWakeKey,shardLeaseSize, ApiError, log, logError, setLogContext, feedbackSink, workWake,
+    import('./core.js'), import('./adapters/feedback-queue.js'), import('./health-counters.js'),
+  ]).then(([{ Pool }, { drizzle }, { sql }, { loadConfig }, { r2Storage }, { initialGate, runDispatcher, dispatchWakeKey,shardLeaseSize }, { ApiError, log, logError, platformMessage, setLogContext }, { feedbackSink, workWake }, { flushCounters }]) => ({
+    Pool, drizzle, sql, loadConfig, r2Storage, initialGate, runDispatcher, dispatchWakeKey,shardLeaseSize, ApiError, log, logError, platformMessage, setLogContext, feedbackSink, workWake, flushCounters,
   }));
 }
 let depsPromise: ReturnType<typeof initDeps> | undefined;
@@ -174,7 +174,13 @@ export class DispatcherShard extends DurableObject<Env> {
       // Module loading itself can fail; still log, close and retry so the shard never wedges.
       if (!deps) console.error(JSON.stringify({ level: 'error', timestamp: new Date().toISOString(), service: 'worker', code: 'DISPATCHER_DEPS_FAILED' }));
       else {
-      deps.logError(error, { code: error instanceof deps.ApiError ? error.code : 'DISPATCHER_RUN_FAILED', shard: dispatcherName(identity) }); }
+        // `cause` says why (core.ts platformMessage): the platform's own words for a Durable Object storage or binding
+        // failure, never a database error's text. The line is also counted (src/health-counters.ts), so a shard that
+        // keeps failing becomes the dispatcher-failing alert (src/health.ts). The count is written after this run, on a
+        // connection of its own that recovery never waits for.
+        deps.logError(error, { code: error instanceof deps.ApiError ? error.code : 'DISPATCHER_RUN_FAILED', shard: dispatcherName(identity), cause: deps.platformMessage(error) });
+        this.ctx.waitUntil(this.flushCounts(deps));
+      }
       await this.closePool();
       next = Date.now() + RETRY_MS;
     } finally {
@@ -193,6 +199,16 @@ export class DispatcherShard extends DurableObject<Env> {
       this.pool.on('error', () => { /* Idle client errors surface on the next query; the run loop then recreates the pool. */ });
     }
     return { db: drizzle(this.pool), storage: r2Storage(this.env.ATTACHMENTS), config, feedback: feedbackSink(this.env.FEEDBACK_QUEUE, config.authSecret), wake: (count,kind)=>workWake(kind==='webhook' && this.env.WEBHOOK_QUEUE ? this.env.WEBHOOK_QUEUE : this.env.WAKE_QUEUE,6)(count) };
+  }
+
+  // One short-lived connection, bounded by flushCounters' own timeouts. It never throws or rejects, whatever is missing.
+  private async flushCounts(deps: Awaited<ReturnType<typeof loadDeps>>) {
+    let pool: InstanceType<typeof deps.Pool> | undefined;
+    try {
+      pool = new deps.Pool({ connectionString: this.env.HYPERDRIVE.connectionString, connectionTimeoutMillis: 5000, max: 1 });
+      pool.on('error', () => { /* Dropped with the sample. */ });
+      await deps.flushCounters(deps.drizzle(pool));
+    } catch { /* Counted again with the next failure. */ } finally { await pool?.end().catch(() => {}); }
   }
 
   private async closePool() {

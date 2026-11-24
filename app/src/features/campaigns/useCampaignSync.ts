@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useApi } from '../../data/context'
+import { isAbortError } from '../../data/live'
 import type { Campaign } from '../../data/types'
 
 export function campaignVersion(campaign: Pick<Campaign, 'id' | 'revision' | 'updatedAt' | 'status' | 'scheduledAt' | 'archivedAt'>) {
@@ -70,7 +71,7 @@ export function useCampaignSync(campaign: Campaign | null, onUpdate: (next: Camp
         failures = 0
         setStatus({ api, id, connection: 'live', error: null })
       } catch (cause) {
-        if (!active() || controller.signal.aborted) return
+        if (!active() || controller.signal.aborted || isAbortError(cause)) return
         delay = Math.min(3000 * 2 ** failures, 30000)
         failures = Math.min(failures + 1, 4)
         setStatus({ api, id, connection: 'offline', error: cause instanceof Error ? cause : new Error('Campaign synchronization failed.') })

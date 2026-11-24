@@ -1,7 +1,8 @@
 import {ActionRetry,actionDelay} from './ritual-retry.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { and, eq, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
-import { ApiError, databaseConflict, databaseUnavailable, rowId, log, logError, ModuleLoadError, transientDatabaseError } from './core.js';
+import { ApiError, databaseCodeOf, databaseConflict, databaseUnavailable, rowId, log, logError, ModuleLoadError, transientDatabaseError } from './core.js';
+import { countDatabaseError } from './health-counters.js';
 import type { ClaimedWebhook, DbExecutor, JobHandler, Runtime } from './core.js';
 import { jobs } from './db/core.js';
 import { resolveRegionRuntime } from './ses-region-state.js';
@@ -174,6 +175,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       // refusal used to strand a campaign in preparing.
       // So does a deadlock or serialization victim, which used to fail any handler not wrapped in retryDatabaseFailures.
       const failure = transientDatabaseError(error) || databaseConflict(error) ? databaseUnavailable(true) : error;
+      countDatabaseError(databaseCodeOf(error)); // For the health tick: a job's timeout or deadlock counts like a request's.
       const code = failure instanceof ApiError ? failure.code : 'JOB_INTERNAL_ERROR';
       // Domain failure-state persistence must eventually commit; stopping at the
       // ordinary attempt ceiling would strand a campaign in pending forever.

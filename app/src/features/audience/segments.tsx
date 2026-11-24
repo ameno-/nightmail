@@ -2,6 +2,7 @@ import { Fragment, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { Braces, ListFilter, Plus, X } from 'lucide-react'
 import { useApiMutation, useApiQuery } from '../../data/context'
+import { invalidate } from '../../data/invalidation'
 import { ApiError, type Segment } from '../../data/types'
 import { SearchField, Button, DataTable, EmptyState, ErrorState, Field, IconButton, Input, LoadingRegion, PageHeader, Pagination, SectionHeader, Select, Textarea, fieldError, MutationError } from '../../components/ui'
 import { AudienceRouteSkeleton, AudienceSummarySkeleton } from './skeletons'
@@ -92,7 +93,7 @@ function SegmentEditor({ initial, onCreated }: { initial: Segment | null; onCrea
   // Add condition at the limit says why instead of doing nothing; any other change clears it.
   const [full, setFull] = useState(false)
   const [countList, setCountList] = useState('')
-  const save = useApiMutation((api, input: { id?: string; name: string; rule: Record<string, unknown> }) => api.segments.save(input), 'Segment saved')
+  const save = useApiMutation((api, input: { id?: string; name: string; rule: Record<string, unknown> }) => api.segments.save(input), 'Segment saved', false, invalidate.segments)
   const errors = builder.rows.map(rowError)
   const serverField = save.error instanceof ApiError ? Object.keys(save.error.fields)[0] ?? '' : ''
   const serverRow = /^rule\.rules\.(\d+)/.exec(serverField)?.[1]
