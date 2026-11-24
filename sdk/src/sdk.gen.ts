@@ -282,7 +282,7 @@ export const updateApiKey = <ThrowOnError extends boolean = false>(options: Opti
 });
 
 /**
- * Active contacts with current list IDs. A search that is one complete email address returns that contact (exact, any case). Any other search is a case-insensitive literal substring of the email or name. Consent and suppression filters are independent.
+ * Active contacts with current list IDs. A search that is one complete email address returns that contact (exact, any case). Any other search is a case-insensitive literal substring of the email or name. Consent and suppression filters are independent. Pages are also bounded by response size and may return fewer than limit contacts; follow nextCursor while non-null. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.
  */
 export const listContacts = <ThrowOnError extends boolean = false>(options?: Options<ListContactsData, ThrowOnError>): RequestResult<ListContactsResponses, ListContactsErrors, ThrowOnError> => (options?.client ?? client).get<ListContactsResponses, ListContactsErrors, ThrowOnError>({
     security: [
@@ -526,6 +526,9 @@ export const updateContactList = <ThrowOnError extends boolean = false>(options:
     }
 });
 
+/**
+ * Active list members with current list IDs. Pages are also bounded by response size and may return fewer than limit contacts; follow nextCursor while non-null. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.
+ */
 export const listListMembers = <ThrowOnError extends boolean = false>(options: Options<ListListMembersData, ThrowOnError>): RequestResult<ListListMembersResponses, ListListMembersErrors, ThrowOnError> => (options.client ?? client).get<ListListMembersResponses, ListListMembersErrors, ThrowOnError>({
     security: [
         { scheme: 'bearer', type: 'http' },
@@ -683,7 +686,7 @@ export const updateSegment = <ThrowOnError extends boolean = false>(options: Opt
 });
 
 /**
- * Bounded to 1000 matches. Unknown observation history is never classified as inactive. Counts separate suppressed and other non-consenting contacts.
+ * Bounded to 1000 matches. Unknown observation history is never classified as inactive. Counts separate suppressed and other non-consenting contacts. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.
  */
 export const previewSegment = <ThrowOnError extends boolean = false>(options: Options<PreviewSegmentData, ThrowOnError>): RequestResult<PreviewSegmentResponses, PreviewSegmentErrors, ThrowOnError> => (options.client ?? client).post<PreviewSegmentResponses, PreviewSegmentErrors, ThrowOnError>({
     security: [
@@ -794,7 +797,7 @@ export const commitContactImport = <ThrowOnError extends boolean = false>(option
 });
 
 /**
- * Execute a bounded read-only AudienceQL SELECT against the virtual contacts schema.
+ * Execute a bounded read-only AudienceQL SELECT against the virtual contacts schema. Results are bounded by response size as well as LIMIT (truncated is true when capped). Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.
  */
 export const queryAudience = <ThrowOnError extends boolean = false>(options: Options<QueryAudienceData, ThrowOnError>): RequestResult<QueryAudienceResponses, QueryAudienceErrors, ThrowOnError> => (options.client ?? client).post<QueryAudienceResponses, QueryAudienceErrors, ThrowOnError>({
     security: [
@@ -819,7 +822,7 @@ export const queryAudience = <ThrowOnError extends boolean = false>(options: Opt
 });
 
 /**
- * Create a 15-minute immutable plan for a bounded AudienceQL bulk mutation. Does not modify contacts or memberships.
+ * Create a 15-minute immutable plan for a bounded AudienceQL bulk mutation. Does not modify contacts or memberships. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.
  */
 export const planAudienceMutation = <ThrowOnError extends boolean = false>(options: Options<PlanAudienceMutationData, ThrowOnError>): RequestResult<PlanAudienceMutationResponses, PlanAudienceMutationErrors, ThrowOnError> => (options.client ?? client).post<PlanAudienceMutationResponses, PlanAudienceMutationErrors, ThrowOnError>({
     security: [
