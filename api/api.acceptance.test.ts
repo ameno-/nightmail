@@ -1184,9 +1184,12 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   // Its address is a verified user's now, so nothing promises to write to it: the refusal is the plain one.
   assert.equal((await login()).headers.get('location'),origin+'/?auth=error','The same verified address under another subject is refused');
   assert.deepEqual(await waitlisted(email),[]);
-  // Workspace creation follows the sign-in's staff status, not the address.
+  // Workspace creation follows the sign-in's staff status, not the address. Everyone else is approved, with one workspace
+  // for now: /v1/me says so before they try, and the refusal says why in those words.
+  assert.equal(((await (await request('/v1/me','GET',seatSession)).json()) as {canCreateWorkspace:boolean}).canCreateWorkspace,false);
   const created=await request('/v1/workspaces','POST',seatSession,{name:'Not staff'});
-  assert.equal(created.status,403);assert.equal(((await created.json()) as {error:{code:string}}).error.code,'SIGNUP_NOT_APPROVED');
+  const refused=((await created.json()) as {error:{code:string;message:string}}).error;
+  assert.deepEqual([created.status,refused.code,refused.message],[403,'WORKSPACE_LIMIT','Your account can have one workspace for now.']);
 
   // GitHub and Google, as hosted: sign-in asks for no method, so the account service offers both, and the acr names
   // the one used. Staff is a Google Workspace sign-in only. Hosted, nothing is admitted without a verified address.
@@ -1200,6 +1203,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   const staffIn=await login(), staffSubject=subject, staffEmail=email, staffUser=accountOf(staffIn)!, staffSession=sessionOf(staffIn);
   assert.equal(landed(staffIn),origin+'/');
   assert.deepEqual(await attempt(),{acr:googleAcr,provider:'google',provider_hd:'example.org',outcome:'signed_in:staff'});
+  assert.equal(((await (await request('/v1/me','GET',staffSession)).json()) as {canCreateWorkspace:boolean}).canCreateWorkspace,true,'Staff can create more workspaces');
   for (const method of ['github','google'] as const) {
     use(method);if (method==='google') providerHd='example.org';fresh(`${method}-${randomUUID()}@example.org`);verified=false;
     assert.equal((await login()).headers.get('location'),origin+'/?auth=error',`${method}: an unverified address is refused`);
@@ -1270,7 +1274,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   assert.deepEqual([githubMe.id,githubMe.operator,githubMe.staffSignIn],[staffUser,null,true]);
   assert.deepEqual(await errorOf(await request('/v1/operator/waitlist','GET',githubSession)),[403,'OPERATOR_REQUIRED']);
   assert.deepEqual(await errorOf(await request('/v1/operator/support-inbox','GET',githubSession)),[403,'OPERATOR_REQUIRED']);
-  assert.deepEqual(await errorOf(await request('/v1/workspaces','POST',githubSession,{name:'Through GitHub'})),[403,'SIGNUP_NOT_APPROVED']);
+  assert.deepEqual(await errorOf(await request('/v1/workspaces','POST',githubSession,{name:'Through GitHub'})),[403,'WORKSPACE_LIMIT']);
   // Sign in with Google: the account service is asked for Google, and that session is staff again.
   use('google');providerHd='example.org';
   const stepUp=await login(undefined,origin+'/operator','google');
@@ -1299,7 +1303,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
     const emailSession=sessionOf(signedIn), emailMe=await (await request('/v1/me','GET',emailSession)).json() as {operator:string|null;staffSignIn:boolean};
     assert.deepEqual([emailMe.operator,emailMe.staffSignIn],[null,true],acr);
     assert.deepEqual(await errorOf(await request('/v1/operator/waitlist','GET',emailSession)),[403,'OPERATOR_REQUIRED']);
-    assert.deepEqual(await errorOf(await request('/v1/workspaces','POST',emailSession,{name:'Through email'})),[403,'SIGNUP_NOT_APPROVED']);
+    assert.deepEqual(await errorOf(await request('/v1/workspaces','POST',emailSession,{name:'Through email'})),[403,'WORKSPACE_LIMIT']);
     // A new, verified address at the staff domain is not staff: it is waitlisted, as any other address is.
     viaEmail(acr);fresh(`email-${randomUUID()}@example.org`);
     assert.equal((await login()).headers.get('location'),origin+'/?auth=waitlist',acr);
@@ -3396,7 +3400,8 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
       error(await local('GET','/v1/me',undefined,guest),401);
       assert.equal(ok(await local('POST',`/v1/workspaces/invitations/${invitation.id}/accept`,undefined,guest)).workspaceId,a.org.id);
       const me=ok(await local('GET','/v1/me',undefined,guest));assert.equal(me.role,'member');
-      error(await local('POST','/v1/workspaces',{name:'Guest workspace'},guest),403,'SIGNUP_NOT_APPROVED');
+      assert.equal(me.canCreateWorkspace,false);
+      error(await local('POST','/v1/workspaces',{name:'Guest workspace'},guest),403,'WORKSPACE_LIMIT');
       await mx.test('MX connections: shared provisioning is regional; BYO verifies and uniquely claims an account with an external ID', async providerTest => {
         const [{ STSClient }, { SESv2Client }, { SNSClient }, { getSes }] = await Promise.all([import('@aws-sdk/client-sts'), import('@aws-sdk/client-sesv2'), import('@aws-sdk/client-sns'), import('./src/core.js')]);
         const path = '/v1/connection', region = 'us-east-2', platform = '111111111111', customer = '222222222222';
