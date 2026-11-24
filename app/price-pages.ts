@@ -18,8 +18,9 @@ import { jsonLd, llmsFull, llmsSiteIndex, markdownFiles, markdownPath, structure
 //   it, in #price-shell) with the CSS it needs inlined (critical-css.ts), so it shows before any of the app's code.
 //   The app's stylesheet and modules are out of the page: the homepage's boot script (home/shell/boot.js) starts them
 //   at the reader's first touch, key or scroll (a press held, and what they typed, carried over) or after 8 s, and the
-//   app's page then takes the painted one's place (index.tsx), with the inlined CSS. Workers Assets answers /pricing with pricing.html, and api/src/server.ts does the same on Node; an
-//   address under /compare/ with no page is not found (api/src/worker.ts, server.ts).
+//   app's page then takes the painted one's place (index.tsx), with the inlined CSS. Workers Assets answers /pricing
+//   with pricing.html, and api/src/server.ts does the same on Node; an address under /compare/ with no page is not
+//   found (api/src/worker.ts, server.ts).
 // - Each page's Markdown twin, and the homepage's (readable.ts): pricing.md, compare/<slug>.md, index.md;
 //   llms-site.txt, the lines the API's llms.txt puts under its title (api/src/site-index.ts); llms-full.txt.
 // - robots.txt (every crawler welcome, and where the sitemap is) and sitemap.xml: the homepage and the price pages.
@@ -32,10 +33,10 @@ const prerenderModule = fileURLToPath(new URL('./src/features/pricing/prerender.
 const bootScript = fileURLToPath(new URL('./src/features/home/shell/boot.js', import.meta.url))
 /** Over the app's own page until it takes over (index.tsx); the rest is the app's stylesheet, cut down. */
 const SHELL_CSS = '#price-shell{position:absolute;top:0;left:0;z-index:2147483000;width:100%}'
-/** The first fonts (public/fonts/*-basic.woff2, features/pricing/fonts/README.md): the app's, cut down to these characters, and preloaded. The painted page
- *  knows only these (its CSS leaves out the app's own faces of those families: WHOLE_FACES), so it fetches nothing else;
- *  once the app's stylesheet is in, they still serve these characters (defined after its faces) and the whole fonts
- *  only the others. */
+/** The first fonts (public/fonts/*-basic.woff2, features/pricing/fonts/README.md): the app's, cut down to these
+ *  characters, and preloaded. The painted page knows only these (its CSS leaves out the app's own faces of those
+ *  families: WHOLE_FACES), so it fetches nothing else; once the app's stylesheet is in, they still serve these
+ *  characters (defined after its faces) and the whole fonts only the others. */
 const BASIC = 'U+0020-007E,U+00A0,U+00A9,U+00AB,U+00AE,U+00B7,U+00BB,U+00D7,U+2010-2027,U+2030,U+2039-203A,U+20AC,U+2122,U+2190-2193,U+2212,U+2713,U+FEFF,U+FFFD'
 /** What public/theme.js may set on <html> before the first paint, which the page's CSS may select. */
 const THEME_ATTRIBUTES = ['data-theme', 'data-shell', 'data-member', 'data-overview-panel', 'style']

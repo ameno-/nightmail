@@ -34,7 +34,9 @@
     start()
   })
   for (const type of ['pointerdown', 'keydown', 'wheel', 'touchstart']) addEventListener(type, start, { once: true, passive: true })
-  const later = () => { if ('requestIdleCallback' in window) requestIdleCallback(start, { timeout: 1000 }); else setTimeout(start, 200) }
+  // (Once the picture has been painted too: two frames on, so the app's files never start before the first screen shows.)
+  const idle = () => { if ('requestIdleCallback' in window) requestIdleCallback(start, { timeout: 1000 }); else setTimeout(start, 200) }
+  const later = () => requestAnimationFrame(() => requestAnimationFrame(idle))
   if (set.wait !== 'none') {
     const picture = [...shell.querySelectorAll(set.wait || '.fac-poster')].find(img => img.getClientRects().length)
     if (!picture || picture.complete) later()
