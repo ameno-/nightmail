@@ -54,8 +54,8 @@ export function provenMailbox(acr: unknown, upstream: ProviderIdentity | null, v
 /** The GitHub account's own verified address, for a GitHub sign-in only: the account service puts it in the provider
  * identity claim only when GitHub's `GET /user/emails` (its GitHub App's email-read permission, nothing more) lists it
  * as the primary address and verified. Never the account's asserted `email` claim, which another method may have
- * verified. It shows GitHub verified the address, not that its person reads the mailbox now, so it takes only a sign-up
- * place held for that address (signups.ts takePlace), and admits nothing else bound to an address. */
+ * verified. It shows GitHub verified the address, not that its person reads the mailbox now: it takes a sign-up place for
+ * that address, one per address (signups.ts takePlace), and admits nothing else bound to an address. */
 export function githubVerifiedAddress(acr: unknown, upstream: ProviderIdentity | null) {
   return acr === METHOD_ACR.github && upstream?.provider === 'github' && upstream.emailVerified && upstream.email ? upstream.email.toLowerCase() : null;
 }

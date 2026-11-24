@@ -12,6 +12,8 @@ import { requestNetwork, signInSignals, type RequestNetwork } from './abuse.js';
 import { placeReady, readPlaces, recordSignup, sendSigninLink, spendSigninLink, takePlace } from './signups.js';
 
 const verifiedEmail = z.email().max(320);
+/** How long POST /api/auth/sign-in/link takes to answer, whatever the address (far above the time a link takes to make). */
+const LINK_ANSWER_MS = 500;
 const loginFailed = () => new ApiError(403, 'SIGN_IN_DENIED', 'This account cannot sign in.');
 class AuthenticationMethodRequired extends Error {}
 /** place: one held for its address or open, which a sign-in proving the mailbox could take (signups.ts placeReady).
@@ -220,15 +222,14 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
         if (runtime.config.multiTenant && !emailAtLogin) throw new NotAdmitted('email_unverified');
         const selfHosted = !runtime.config.multiTenant && runtime.config.allowedSubjects.includes(claims.sub);
         const invited = runtime.config.multiTenant && !staff && !!invitation && !!mailbox && await pendingInvitation(db, mailbox, invitation);
-        // Signing up on its own (signups.ts): hosted, without an invitation link, while a place is held for the mailbox or
-        // open. A place held for an address this sign-in shows another way is taken too: the GitHub account's own
-        // verified address, or the address the sign-in link it followed was emailed to. At the limit it is refused as
-        // before, and joins the waitlist.
+        // Signing up on its own (signups.ts): hosted, without an invitation link, while a place is held for an address this
+        // sign-in shows, or open: the mailbox it proves, the address the sign-in link it followed was emailed to, or the
+        // GitHub account's verified primary address. At the limit it is refused as before, and joins the waitlist.
         const own = runtime.config.multiTenant && !staff && !invitation;
         const linked = own && link ? await spendSigninLink(db, runtime.config, link) : null, github = own ? githubVerifiedAddress(claims.acr, upstream) : null;
-        const signup = own && (mailbox || linked || github) ? await takePlace(db, mailbox, [linked, github]) : null;
-        // GitHub without the address verified, or a password, proves no mailbox: when a place is held for its address the
-        // refusal offers a sign-in link to it, and when one is open it says to sign in with an emailed link or Google.
+        const signup = own && (mailbox || linked || github) ? await takePlace(db, [mailbox, linked, github]) : null;
+        // GitHub without a verified primary address, or a password, shows nothing of its address: when a place is held for
+        // it or open, the refusal offers a sign-in link to it.
         if (!staff && !invited && !selfHosted && !signup) throw new NotAdmitted(invitation ? 'invitation' : 'not_approved', {
           place: own && !mailbox && !!emailAtLogin ? await placeReady(db, emailAtLogin) : null, staleLink: own && !!link && !linked });
         userId = crypto.randomUUID();
@@ -497,7 +498,11 @@ export async function accountBrowserRoute(c: Ctx) {
     const { email } = await body(z.object({ email: verifiedEmail }).strict());
     const slots = await runtime.db.execute(sql`SELECT reserve_auth_state(${await digest(c.req.header(clientIpHeader) ?? 'unknown')}) AS ok`);
     if (!slots.rows[0]?.ok) throw new ApiError(429, 'AUTH_STATE_LIMIT', 'Too many pending sign-ins. Try again later.');
-    await sendSigninLink(runtime, email);
+    // Making a link writes more than finding no held place, so the answer waits until a fixed time after the request, and
+    // a failure is logged rather than answered: neither its timing nor its status says whether a place is held.
+    const answerAt = Date.now() + LINK_ANSWER_MS;
+    await sendSigninLink(runtime, email).catch(error => log('error', { code: 'SIGNIN_LINK_FAILED', errorType: error instanceof Error ? error.name : typeof error }));
+    await new Promise(resolve => setTimeout(resolve, Math.max(0, answerAt - Date.now())));
     return c.json({ requested: true }, 202);
   }
   if (path === '/api/auth/accounts' && c.req.method === 'GET') {

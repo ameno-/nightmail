@@ -237,7 +237,8 @@ const pages = ids => [
   ['Signed out · page not found', '/no-such-page', { user: null, notFound: true }],
   // A hosted sign-in nothing admitted lands here, with its address in a short-lived cookie (api/src/account-login.ts).
   ['Signed out · waitlist', '/?auth=waitlist', { user: null, waitlist: 'mara.quinn@example.net' }],
-  // The same refusal for a GitHub or password sign-in with a place held for it or open: how to take it instead.
+  // The same refusal for a GitHub or password sign-in that showed nothing of its address, with a place open for it: a
+  // sign-in link to it in one click.
   ['Signed out · waitlist, place ready', '/?auth=waitlist&place=ready', { user: null, waitlist: 'kwame.mensah@example.net' }],
   // A place held for its address that the sign-in didn't show is the person's (GitHub without it verified): a sign-in
   // link to it in one click; and the refusal after a used or expired link.
