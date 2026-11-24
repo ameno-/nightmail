@@ -40648,6 +40648,7 @@ describe('dashboard analytics', () => {
     const map = new Map<string, Uint8Array>();
     const storage: import('./src/core.js').Storage = {
       async put(key, body) { map.set(key, body); },
+      async createIfAbsent(key, body) { if (!map.has(key)) map.set(key, body); },
       async get(key) { const body = map.get(key); return body ? { body, contentType: 'application/octet-stream' } : null; },
       async delete(key) { map.delete(key); },
       async list(prefix, after) {
@@ -40838,6 +40839,9 @@ describe('dashboard analytics', () => {
 
   test('dashboard analytics: hourly compaction folds settled hours into one gzip object and expires old days', async t => {
     const { post, map, runtime, rows } = await setup(), { compactAnalytics } = await import('./src/analytics.js'), { gunzipSync } = await import('node:zlib');
+    const client = await fixtureDatabase(t);
+    runtime.db = (await import('drizzle-orm/node-postgres')).drizzle(client);
+    cleanup(t, () => client.query("DELETE FROM analytics_hours WHERE hour='2026-11-19 10:00Z'").then(() => {}));
     const at = (iso: string) => t.mock.timers.setTime(Date.parse(iso));
     t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-19T10:30:00Z') });
     for (let i = 1; i <= 3; i++) assert.equal((await post(envelope([{ id: 'evt_0000000' + i, seq: i, t: Date.now(), type: 'page_view', route: '/overview' }]))).status, 204);
@@ -40858,5 +40862,88 @@ describe('dashboard analytics', () => {
     assert.deepEqual(await compactAnalytics(runtime, Date.parse('2026-11-19T11:07:00Z')), { hours: 0, batches: 0, expired: 0 });
     runtime.config.dashboardAnalytics = false;
     assert.deepEqual(await compactAnalytics(runtime, Date.parse('2026-11-19T12:07:00Z')), { hours: 0, batches: 0, expired: 0 });
+  });
+
+  test('first-party analytics: human, bot and funnel rollups, daily rotation, replay and signed delivery', async t => {
+    const { app, runtime, map, rows, post } = await setup();
+    const { compactAnalytics } = await import('./src/analytics.js');
+    const { pushDue } = await import('./src/analytics-rollups.js');
+    const { createServer } = await import('node:http');
+    const client = await fixtureDatabase(t), session = await sessionFixture(t,{staff:true});
+    const { drizzle } = await import('drizzle-orm/node-postgres');
+    // Place the analytics data in three real, transaction-local tables; use the fixture's normal operator checks.
+    const { nodeRuntime } = await import('./src/adapters/node.js');
+    const node = nodeRuntime({...process.env,DATABASE_URL:FIXTURE_DATABASE_URL,PUBLIC_URL:origin});
+    cleanup(t,node.close);
+    runtime.config = { ...node.runtime.config, dashboardAnalytics:true, multiTenant:true };
+    const operatorCookie = '__Host-nightmail.session_token='+session.token;
+    const secret = 'a-synthetic-hourly-receiver-secret', deliveries: {valid:boolean;body:Json}[] = [];
+    const receiver = createServer(async (req,res) => {
+      const chunks = []; for await (const part of req) chunks.push(part);
+      const raw = Buffer.concat(chunks).toString();
+      const mac = 'sha256='+createHmac('sha256',secret).update(req.headers['x-nightmail-timestamp']+'.'+raw).digest('hex');
+      deliveries.push({valid:mac===req.headers['x-nightmail-signature'],body:JSON.parse(raw)});
+      res.writeHead(deliveries.length===1?503:204).end();
+    });
+    await new Promise<void>(r => receiver.listen(0,'127.0.0.1',r));
+    cleanup(t,() => new Promise<void>(r=>receiver.close(()=>r())));
+    const start = Math.floor(Date.now()/86400000)*86400000 - 86400000;
+    t.mock.timers.enable({apis:['Date'], now:start+3600010});
+    const at = (hours:number) => t.mock.timers.setTime(start+hours*3600000+10);
+    const headers = {'user-agent':'Synthetic mobile browser'}, ip='198.51.100.200';
+    const page = {p:'/pricing',s:'page-session-0001',w:390,r:'search.example',u:['newsletter','email','launch'],email:'typed@example.org'};
+    runtime.analyticsPeer={ip,country:'CA'};
+    for (let i=0;i<2;i++) assert.equal((await post({...page,s:page.s+i},headers,ip)).status,204);
+    assert.equal((await post({...page,c:'/compare/resend'},headers,ip)).status,204);
+    assert.equal((await post(page,{'user-agent':'Googlebot/2.1'},ip)).status,204);
+    runtime.analyticsPeer.bot=true;
+    assert.equal((await post(page,headers,ip)).status,204);
+    assert.equal((await post({...page,c:'sign-in'},headers,ip)).status,204);
+    runtime.analyticsPeer.bot=false;
+    const steps=['signed_up','domain_verified','first_send'].map((step,i)=>({id:'funnel-id-'+i,seq:i,t:Date.now(),route:'/overview',type:'track',step}));
+    assert.equal((await post(envelope(steps),headers,ip)).status,204);
+    const raw=rows(), vid=raw.find(r=>r.type==='page_view')!.vid;
+    assert.equal(raw.filter(r=>r.type==='page_view' && r.vid===vid).length,2);
+    assert.match(String(vid),/^[a-f0-9]{32}$/);
+    assert.equal(raw.filter(r=>r.type==='bot_view').length,2);
+    for(const row of raw.filter(r=>r.type==='bot_view')) assert.deepEqual(Object.keys(row).sort(),['id','received','route','type','v']);
+    assert.doesNotMatch(JSON.stringify(raw),/typed@|198\.51\.100|Synthetic mobile|Googlebot/);
+    const replay=[...map].find(([key])=>key.includes('/raw/'))!;
+    at(2); await post(page,headers,ip); await post(envelope(steps.map(x=>({...x,id:x.id+'b'}))),headers,ip);
+    at(25); await post(page,headers,ip);
+    assert.notEqual(rows().at(-1)!.vid,vid);
+
+    await drizzle(client).transaction(async tx=>{
+      runtime.db=tx;
+      for(const table of ['analytics_hours','analytics_hourly','analytics_funnel_first'])
+        await client.query('CREATE TEMP TABLE '+table+' (LIKE public.'+table+' INCLUDING ALL) ON COMMIT DROP');
+      await client.query("INSERT INTO platform_operators(user_id,role,reason) VALUES($1,'operator:read','Synthetic analytics fixture')",[session.userId]);
+      cleanup(t,()=>client.query('DELETE FROM platform_operators WHERE user_id=$1',[session.userId]).then(()=>{}));
+      const day=new Date(start).toISOString().slice(0,10), next=new Date(start+86400000).toISOString().slice(0,10);
+      const exportUrl=origin+path+'/export?from='+day+'&to='+next+'&grain=day';
+      const get=(cookie?:string)=>app.fetch(new Request(exportUrl,{headers:cookie?{cookie}:{}}),runtime);
+      assert.equal((await get()).status,401);
+      assert.equal((await get('__Host-nightmail.session_token='+manager!.token)).status,403,'A workspace owner cannot export');
+      await compactAnalytics(runtime,Date.now());
+      assert.equal([...map.keys()].filter(k=>k.includes('/salts/')).length,1,'Discard yesterday’s salt');
+      const exported=await get(operatorCookie);
+      assert.equal(exported.status,200,await exported.clone().text());
+      const report=await exported.json() as Json, by=(metric:string)=>report.rows.find((r:Json)=>r.metric===metric);
+      assert.deepEqual([by('page_view').events,by('page_view').visitors,by('visit').visitors,by('bot_view').events,by('cta').events],[3,1,1,2,1]);
+      assert.deepEqual(by('page_view').dimensions,{path:'/pricing',referrer:'search.example',source:'newsletter',medium:'email',campaign:'launch',device:'phone',country:'CA',viewport:'phone'});
+      assert.deepEqual(steps.map(s=>by(s.step).events),[1,1,1]);
+      assert.doesNotMatch(JSON.stringify(report),new RegExp(String(vid)));
+      // An interrupted delete leaves one old batch beside the larger compacted part. Re-fold it and push one snapshot.
+      map.set(replay[0],replay[1]); runtime.config.analyticsPush={url:'http://127.0.0.1:'+(receiver.address() as {port:number}).port,secret};
+      const now=Date.now(); await compactAnalytics(runtime,now);
+      assert.deepEqual(await (await get(operatorCookie)).json(),report);
+      assert.ok(deliveries.length>=1); const failed=deliveries[0]!;
+      const before=deliveries.length;await pushDue(runtime,now+3599999);assert.equal(deliveries.length,before);
+      await pushDue(runtime,now+3600001);assert.equal(deliveries.length,before+1);
+      assert.deepEqual(deliveries.at(-1)!.body,failed.body);
+      assert.ok(deliveries.every(d=>d.valid)); assert.equal(failed.body.grain,'hour');
+      const hour=await app.fetch(new Request(origin+path+'/export?from='+failed.body.from+'&to='+failed.body.to,{headers:{cookie:operatorCookie}}),runtime);
+      assert.deepEqual((await hour.json() as Json).rows,failed.body.rows);
+    });
   });
 });

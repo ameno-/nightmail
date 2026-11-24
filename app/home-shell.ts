@@ -65,7 +65,7 @@ export function homeShell(): Plugin {
         return `<div class="srt-page fac-page" data-format="${format}" data-visitor><main><section class="fac-hero" aria-label="Pricing">`
           + '<h1 class="sr-only">$0.20 per 1,000 emails, sent or received via API.</h1><p class="sr-only">Free every month: 5,000 emails sent and 5,000 received. Responds in about 100 ms.</p>'
           + `<div class="fac-stage" style="${attr(Object.entries(vars).map(([key, value]) => `${key}:${value}`).join(';'))}"><div class="fac-frame"><picture>${soft}</picture><picture>${full}</picture>`
-          + `<button type="button" class="fac-cta hs-visitor" style="${box}"><span class="srt-cta-label">Get started${ARROW}${BUSY}</span></button>`
+          + `<button type="button" class="fac-cta hs-visitor" data-cta="sign-in" style="${box}"><span class="srt-cta-label">Get started${ARROW}${BUSY}</span></button>`
           + `<a class="fac-cta hs-member" href="/overview" style="${box}"><span class="srt-cta-label">Open dashboard${ARROW}</span></a></div></div>`
           + '<div class="fac-under"><p class="sign-in-consent fac-consent">By continuing you agree to the <a href="/legal/terms">Terms of Service</a> and <a href="/legal/privacy">Privacy Policy</a>.<span aria-hidden="true"> · </span><a href="/docs">API docs</a></p></div>'
           + '</section></main></div>'

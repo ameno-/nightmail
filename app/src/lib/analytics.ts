@@ -17,6 +17,8 @@ export type TrackerHost = {
   now(): number
   width(): number
   id(): string
+  sid?: string
+  attribution?: () => { r: string | null; u: (string | null)[] }
   /** Do Not Track or Global Privacy Control. */
   optedOut(): boolean
   every(ms: number, run: () => void): () => void
@@ -70,8 +72,9 @@ const nameOf = (el: ElementLike | null) => el ? analyticsName(el.getAttribute('d
 
 export type Tracker = ReturnType<typeof createTracker>
 export function createTracker(host: TrackerHost) {
-  const sid = host.id()
+  const sid = host.sid ?? host.id()
   let context: Context = { enabled: false }, on = false, decided = false, seq = 0, stop: (() => void) | null = null
+  let publicView = false
   let queue: Queued[] = [], route = '', visible = 0, since = host.now()
   // Before the page knows whether analytics are on (the API answers /v1/me or /health), events wait here.
   let early: Queued[] = []
@@ -89,7 +92,7 @@ export function createTracker(host: TrackerHost) {
   function flush() {
     if (!on) return
     while (queue.length) {
-      const envelope = { v: 1, sid, ws: context.ws ?? null, uid: context.uid ?? null, app: context.app ?? null, vp: viewportClass(host.width()) }
+      const envelope = { v: 1, sid, ...host.attribution?.(), ws: context.ws ?? null, uid: context.uid ?? null, app: context.app ?? null, vp: viewportClass(host.width()) }
       let count = Math.min(queue.length, ANALYTICS_LIMITS.events), body = JSON.stringify({ ...envelope, events: queue.slice(0, count) })
       while (count > 1 && body.length > BATCH_BYTES) { count = Math.ceil(count / 2); body = JSON.stringify({ ...envelope, events: queue.slice(0, count) }) }
       queue = queue.slice(count)
@@ -98,6 +101,7 @@ export function createTracker(host: TrackerHost) {
   }
   const visibleMs = () => visible + (host.document.visibilityState === 'visible' ? host.now() - since : 0)
   const onClick: Listener = event => {
+    if (publicView) return
     const element = event.target as ElementLike | null
     if (!element || typeof element.getAttribute !== 'function') return
     const control = closest(element, interactive)
@@ -145,11 +149,12 @@ export function createTracker(host: TrackerHost) {
       }
     },
     /** A route change, as its template (/domains/:id). The previous route's visible time goes with it. */
-    route(template: string) {
+    route(template: string, collectedByPublicHook = false) {
+      publicView = collectedByPublicHook
       const next = routeTemplate(template) ?? '/'
       const ms = route ? visibleMs() : null, ref = route || null
       route = next; visible = 0; since = host.now()
-      push('page_view', { ref, ms })
+      if (!publicView) push('page_view', { ref, ms })
     },
     dialog(open: boolean, title: unknown, name?: string, ms?: number) { push(open ? 'dialog_open' : 'dialog_close', { name, role: 'dialog', label: typeof title === 'string' ? title : null, ms }) },
     /** A field showing a validation error the dashboard wrote (components/ui Field). */
@@ -190,7 +195,13 @@ export function createTracker(host: TrackerHost) {
 let shared: Tracker | undefined
 export function analytics(): Tracker {
   return shared ??= createTracker({
-    document,
+    document, sid: (window as Window & { nmSid?: string }).nmSid,
+    attribution: () => {
+      const host = document.referrer ? new URL(document.referrer).hostname : '', query = new URLSearchParams(location.search)
+      return { r: /^[\w.-]+\.[a-z]+$/i.test(host) ? host : null, u: ['source','medium','campaign'].map(key => {
+        const value = query.get('utm_'+key); return value && /^[\w-]{1,48}$/.test(value) ? value : null
+      }) }
+    },
     send: body => navigator.sendBeacon(ANALYTICS_PATH, new Blob([body], { type: 'text/plain;charset=UTF-8' })),
     now: () => Date.now(), width: () => window.innerWidth, id: () => crypto.randomUUID().replaceAll('-', ''),
     optedOut: () => navigator.doNotTrack === '1' || (navigator as { globalPrivacyControl?: boolean }).globalPrivacyControl === true,
