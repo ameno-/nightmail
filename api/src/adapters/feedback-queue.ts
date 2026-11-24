@@ -5,7 +5,18 @@ import type { FeedbackSource } from './feedback-archive.js';
 // The feedback queue is an account-level resource: any Worker in the same Cloudflare account can
 // bind it as a producer. Items are therefore tagged with a MAC under the installation secret when
 // they leave the request path, and the tagged lane's consumer only ingests items that carry a valid tag.
-const macKey = (secret: string, purpose = 'bane:feedback-queue:v1') => hkdfSync('sha256', secret, '', purpose, 32);
+// Cache derived 32-byte HKDF keys per isolate (at most 16 entries across secret rotation) so a 100-item batch runs
+// HKDF once per isolate instead of 100-300 times per batch.
+const macKeyCache = new Map<string, Buffer>();
+const macKey = (secret: string, purpose = 'bane:feedback-queue:v1'): Buffer => {
+  const key = `${purpose}:${secret}`;
+  const cached = macKeyCache.get(key);
+  if (cached) return cached;
+  const derived = Buffer.from(hkdfSync('sha256', secret, '', purpose, 32));
+  if (macKeyCache.size >= 16) macKeyCache.delete(macKeyCache.keys().next().value!);
+  macKeyCache.set(key, derived);
+  return derived;
+};
 const canonical = (item: Omit<FeedbackItem, 'mac'>) => JSON.stringify([item.region, item.topicArn, item.messageId, item.topicKind ?? null, item.message]);
 export function feedbackMac(secret: string, item: Omit<FeedbackItem, 'mac'>): string {
   return createHmac('sha256', macKey(secret)).update(canonical(item)).digest('base64url');
@@ -56,12 +67,57 @@ const unsignedFeedback = (body: unknown): body is FeedbackItem => {
   return typeof item.region === 'string' && typeof item.topicArn === 'string' && typeof item.messageId === 'string' && !!item.message && typeof item.message === 'object' && !Array.isArray(item.message);
 };
 
-// Verified provider feedback (and simulated callbacks) leave the request path through the
-// feedback queue in batches of at most 100 messages; the queue consumer ingests them in bulk.
-export function feedbackSink(queue: Queue<FeedbackItem>, secret: string): NonNullable<Runtime['feedback']> {
+// Safety, suppression, consent and standing events route to the dedicated priority lane so bounces, complaints,
+// rejections, unsubscribes and tenant-status updates never wait behind routine deliveries, opens and clicks.
+const PRIORITY_EVENT_TYPES = new Set(['Bounce', 'Complaint', 'Reject', 'RenderingFailure', 'Subscription']);
+export function isPriorityFeedback(item: Pick<FeedbackItem, 'message'>): boolean {
+  const msg = item.message as { eventType?: unknown; notificationType?: unknown; source?: unknown } | undefined;
+  if (!msg || typeof msg !== 'object') return false;
+  if (msg.source === 'aws.ses') return true;
+  const kind = typeof msg.eventType === 'string' ? msg.eventType : typeof msg.notificationType === 'string' ? msg.notificationType : '';
+  return PRIORITY_EVENT_TYPES.has(kind);
+}
+
+/** Measure lane lag from first deliveries only (attempts === 1) so a single retried/poison message whose Cloudflare
+ *  enqueue timestamp is minutes old never holds every workspace's auto-pause campaigns. Returns null if the batch
+ *  contained only retries. */
+export function batchFirstDeliveryLag(messages: readonly { attempts: number; timestamp: Date }[], nowMs = Date.now()): { count: number; oldestMs: number } | null {
+  let count = 0, oldestMs = 0;
+  for (const m of messages) {
+    if (m.attempts !== 1) continue;
+    count++;
+    const age = Math.max(0, nowMs - m.timestamp.getTime());
+    if (age > oldestMs) oldestMs = age;
+  }
+  return count > 0 ? { count, oldestMs } : null;
+}
+
+/** Apply a depth floor to queue-level metrics() oldestMessageTimestamp so a handful of unmatchable/poison messages
+ *  sitting in Cloudflare retry backoff never trip an installation-wide hold. */
+export function metricsEffectiveLagMs(depth: number, oldestMessageTimestamp: Date | undefined, minDepth: number, nowMs = Date.now()): number {
+  if (!oldestMessageTimestamp || depth < minDepth) return 0;
+  return Math.max(0, nowMs - oldestMessageTimestamp.getTime());
+}
+
+// Verified provider feedback (and simulated callbacks) leave the request path through the feedback queues in batches of
+// at most 100 messages. When a priority queue is bound, safety/suppression/consent events go there; otherwise everything
+// falls back cleanly to the routine feedback queue.
+export function feedbackSink(queue: Queue<FeedbackItem>, secret: string, priorityQueue?: Queue<FeedbackItem>): NonNullable<Runtime['feedback']> {
+  const sendChunked = async (target: Queue<FeedbackItem>, batch: { body: FeedbackItem & { mac: string } }[]) => {
+    for (let i = 0; i < batch.length; i += 100) await target.sendBatch(batch.slice(i, i + 100));
+  };
   return { enqueue: async items => {
-    const tagged = items.map(item => { const { mac: _, ...body } = item; return { body: { ...body, mac: feedbackMac(secret, body) } }; });
-    for (let i = 0; i < tagged.length; i += 100) await queue.sendBatch(tagged.slice(i, i + 100));
+    const routine: { body: FeedbackItem & { mac: string } }[] = [];
+    const priority: { body: FeedbackItem & { mac: string } }[] = [];
+    for (const item of items) {
+      const { mac: _, ...body } = item;
+      const wrapped = { body: { ...body, mac: feedbackMac(secret, body) } };
+      if (priorityQueue && isPriorityFeedback(body)) priority.push(wrapped);
+      else routine.push(wrapped);
+    }
+    if (priority.length && routine.length) await Promise.all([sendChunked(priorityQueue!, priority), sendChunked(queue, routine)]);
+    else if (priority.length) await sendChunked(priorityQueue!, priority);
+    else if (routine.length) await sendChunked(queue, routine);
   } };
 }
 
@@ -129,7 +185,21 @@ export async function settleFeedbackBatch(options: {
 }) {
   const { secrets, lane, messages, ingest, archive } = options;
   const sourceOf = (message: FeedbackMessage): FeedbackSource => ({ queue: options.sourceQueue, id: message.id, enqueuedAt: message.timestamp!.toISOString(), attempts: message.attempts });
-  const verdicts = messages.map(message => feedbackVerdict(secrets, lane, message.body, { timestamp: message.timestamp, cutover: options.legacyCutover }));
+  // Classify and authenticate each message ONCE per batch (avoids re-running HMAC 2-3x per item).
+  const classified = messages.map(message => {
+    if (lane === 'tagged-dlq' || lane === 'legacy-dlq') return { verdict: 'refused' as FeedbackVerdict, item: undefined as FeedbackItem | undefined, isLegacyRecovery: false };
+    if (authenticLegacyRecovery(secrets, message.body)) return { verdict: 'ingest' as FeedbackVerdict, item: message.body.body, isLegacyRecovery: true };
+    if (authenticFeedback(secrets, message.body)) return { verdict: 'ingest' as FeedbackVerdict, item: message.body, isLegacyRecovery: false };
+    if (lane === 'legacy' && typeof message.body === 'object' && message.body !== null && !Array.isArray(message.body) && !('mac' in message.body) && !('refused' in message.body) && !('recovery' in message.body)) {
+      const timestamp = message.timestamp?.getTime(), cutover = options.legacyCutover;
+      if (timestamp !== undefined && Number.isFinite(timestamp) && timestamp > 0 && cutover !== undefined && Number.isFinite(cutover) && cutover <= Date.now() && timestamp < cutover && unsignedFeedback(message.body)) {
+        return { verdict: 'legacy' as FeedbackVerdict, item: undefined, isLegacyRecovery: false };
+      }
+      return { verdict: 'untagged' as FeedbackVerdict, item: undefined, isLegacyRecovery: false };
+    }
+    return { verdict: 'refused' as FeedbackVerdict, item: undefined, isLegacyRecovery: false };
+  });
+  const verdicts = classified.map(c => c.verdict);
   let retiredUnmatched = 0, quarantined = 0, deadLettered = 0, held = 0, promoted = 0;
   // Preserve provenance before any unrelated ingestion can throw and retry the entire batch.
   for (const [index, message] of messages.entries()) if (verdicts[index] === 'legacy') {
@@ -143,17 +213,17 @@ export async function settleFeedbackBatch(options: {
       catch { message.retry({ delaySeconds: 60 }); held++; }
     }
   }
-  const items = messages.filter((_, index) => verdicts[index] === 'ingest').map(message => authenticatedFeedbackItem(secrets, message.body)!);
+  const items = classified.filter(c => c.verdict === 'ingest').map(c => c.item!);
   let ingested: { ok: boolean; error?: string }[];
   try { ingested = items.length ? await ingest(items) : []; }
   catch { ingested = items.map(() => ({ ok: false, error: 'FEEDBACK_PERSIST_FAILED' })); }
   const outcomes = verdicts.map(verdict => verdict === 'ingest' ? ingested.shift()! : verdict === 'legacy' ? { ok: true } : { ok: false, error: verdict === 'untagged' ? 'FEEDBACK_UNTAGGED' : 'FEEDBACK_UNAUTHENTICATED' });
   for (const [index, message] of messages.entries()) {
-    const verdict = verdicts[index]!;
+    const { verdict, isLegacyRecovery } = classified[index]!;
     if (verdict === 'legacy') continue;
     if (verdict === 'ingest') {
-      if (outcomes[index]?.ok && authenticLegacyRecovery(secrets, message.body)) {
-        try { await options.completeLegacy(message.body); } catch { message.retry({ delaySeconds: 60 }); held++; continue; }
+      if (outcomes[index]?.ok && isLegacyRecovery) {
+        try { await options.completeLegacy(message.body as LegacyFeedbackRecovery); } catch { message.retry({ delaySeconds: 60 }); held++; continue; }
       }
       if (outcomes[index]?.ok) { message.ack(); continue; }
       const error = outcomes[index]?.error ?? 'FEEDBACK_PERSIST_FAILED';

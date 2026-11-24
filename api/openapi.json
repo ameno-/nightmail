@@ -4797,7 +4797,8 @@
                   "ses_daily_quota",
                   "hosted_daily_quota",
                   "list_probe",
-                  "balance"
+                  "balance",
+                  "feedback_lag"
                 ]
               },
               "until": {
@@ -4808,7 +4809,30 @@
               "reason",
               "until"
             ],
-            "description": "Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest."
+            "description": "Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up."
+          },
+          "feedbackLag": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "oldestMs": {
+                "type": "integer"
+              },
+              "lane": {
+                "type": "string",
+                "enum": [
+                  "routine",
+                  "priority"
+                ]
+              }
+            },
+            "required": [
+              "oldestMs",
+              "lane"
+            ],
+            "description": "Present while a campaign is preparing, sending, or paused when delivery feedback ingestion is at least 2 minutes behind."
           }
         },
         "required": [
@@ -4821,7 +4845,8 @@
           "pausedAt",
           "pauseReason",
           "deliveredOnly",
-          "waiting"
+          "waiting",
+          "feedbackLag"
         ],
         "description": "The current launch: null until the campaign is sent or scheduled, and cleared by a new revision."
       },

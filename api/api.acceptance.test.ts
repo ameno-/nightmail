@@ -23212,7 +23212,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const {ingestFeedbackBatch,operationJobs}=await import('./src/operations.js');
       const {rank}=await import('./src/sending.js');
       // The table a Worker deployed before migration 153 embeds; its statements are otherwise the same.
-      const current={...rank}, old={...current,suppressed:6,delivered:5,bounced:6,complained:7,rejected:6,rendering_failed:6,canceled:6,simulated:6};
+      const current={...rank}, old={scheduled:0,queued:0,attempting:1,acceptance_unknown:2,accepted:3,sent:4,delayed:4,suppressed:6,delivered:5,bounced:6,complained:7,rejected:6,rendering_failed:6,canceled:6,simulated:6};
       const asOld=async<T>(work:()=>Promise<T>)=>{Object.assign(rank,old);try{return await work();}finally{Object.assign(rank,current);}};
       const wid=runtime.config.workspaceId, account='111122223333', topicArn=`arn:aws:sns:${REGION}:${account}:fixture`;
       const recipients=Array.from({length:9},()=>[address(),address()] as const);
@@ -35829,6 +35829,170 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await db.query(`INSERT INTO sending_metrics_hourly(workspace_id,region,kind,hour,emails) VALUES ($1,$2,'marketing',date_trunc('hour',now(),'UTC'),$3)`, [wid, REGION, DASHBOARD_ACTIVE_SEND_HOUR_THRESHOLD]);
       const busyRev = await dashboardRevision(runtime, wid);
       assert.match(busyRev, /^bucket:\d+$/, 'High-volume hour quantizes Overview cache revision to 10-second buckets.');
+    });
+  });
+
+  test('feedback throughput: priority routing, cross-queue duplicates, concurrent out-of-order safety, exact tallies and priority-only lag hold', async t => {
+    const { feedbackSink, isPriorityFeedback, settleFeedbackBatch, feedbackMac, batchFirstDeliveryLag, metricsEffectiveLagMs } = await import('./src/adapters/feedback-queue.js');
+    const { ingestRoutineSesEvents, recordFeedbackLag, FEEDBACK_LAG_HOLD_MS, FEEDBACK_LAG_MIN_DEPTH } = await import('./src/sending.js');
+    // B6: retried messages (attempts > 1) and tiny metric backlogs (< FEEDBACK_LAG_MIN_DEPTH) never trigger lag holds.
+    const t0 = Date.now();
+    assert.equal(batchFirstDeliveryLag([{ attempts: 5, timestamp: new Date(t0 - 450_000) }], t0), null, 'Retry-only batch returns null lag');
+    assert.deepEqual(batchFirstDeliveryLag([{ attempts: 5, timestamp: new Date(t0 - 450_000) }, { attempts: 1, timestamp: new Date(t0 - 2_000) }], t0), { count: 1, oldestMs: 2_000 }, 'First-delivery lag ignores 450s retry');
+    assert.deepEqual(batchFirstDeliveryLag([{ attempts: 1, timestamp: new Date(t0 - 360_000) }], t0), { count: 1, oldestMs: 360_000 }, 'Genuine delayed first delivery reports 360s lag');
+    assert.equal(metricsEffectiveLagMs(FEEDBACK_LAG_MIN_DEPTH - 1, new Date(t0 - 450_000), FEEDBACK_LAG_MIN_DEPTH, t0), 0, 'Metrics depth below floor reports 0 lag');
+    assert.equal(metricsEffectiveLagMs(FEEDBACK_LAG_MIN_DEPTH, new Date(t0 - 450_000), FEEDBACK_LAG_MIN_DEPTH, t0), 450_000, 'Metrics depth at/above floor reports real lag');
+    const secret = '0'.repeat(64);
+    const routineSent: unknown[] = [], prioritySent: unknown[] = [];
+    const mkQ = (out: unknown[]) => ({ sendBatch: async (batch: { body: unknown }[]) => { out.push(...batch.map(b => b.body)); } }) as unknown as Queue<import('./src/core.js').FeedbackItem>;
+    const sampleItems: import('./src/core.js').FeedbackItem[] = [
+      { region: REGION, topicArn: 'urn:t', messageId: 'm1', message: { eventType: 'Delivery' } },
+      { region: REGION, topicArn: 'urn:t', messageId: 'm2', message: { eventType: 'Open' } },
+      { region: REGION, topicArn: 'urn:t', messageId: 'm3', message: { eventType: 'Click' } },
+      { region: REGION, topicArn: 'urn:t', messageId: 'm4', message: { eventType: 'Bounce' } },
+      { region: REGION, topicArn: 'urn:t', messageId: 'm5', message: { eventType: 'Complaint' } },
+      { region: REGION, topicArn: 'urn:t', messageId: 'm6', message: { eventType: 'Reject' } },
+      { region: REGION, topicArn: 'urn:t', messageId: 'm7', message: { eventType: 'RenderingFailure' } },
+      { region: REGION, topicArn: 'urn:t', messageId: 'm8', message: { eventType: 'Subscription' } },
+      { region: REGION, topicArn: 'urn:t', messageId: 'm9', message: { source: 'aws.ses', 'detail-type': 'SES Tenant' } },
+    ];
+    assert.deepEqual(sampleItems.map(isPriorityFeedback), [false, false, false, true, true, true, true, true, true]);
+    await feedbackSink(mkQ(routineSent), secret, mkQ(prioritySent)).enqueue(sampleItems);
+    assert.equal(routineSent.length, 3);
+    assert.equal(prioritySent.length, 6);
+    const fallbackOut: unknown[] = [];
+    await feedbackSink(mkQ(fallbackOut), secret).enqueue(sampleItems);
+    assert.equal(fallbackOut.length, 9);
+    let acked = 0, archived = 0;
+    const goodItem = { ...sampleItems[3]!, mac: feedbackMac(secret, sampleItems[3]!) };
+    const forgedItem = { ...sampleItems[3]!, mac: 'x'.repeat(43) };
+    const settled = await settleFeedbackBatch({
+      secrets: { authSecret: secret }, lane: 'priority', sourceQueue: 'fixture-priority',
+      messages: [
+        { id: '1', attempts: 1, timestamp: new Date(), body: goodItem, ack: () => { acked++; }, retry: () => {} },
+        { id: '2', attempts: 1, timestamp: new Date(), body: forgedItem, ack: () => { acked++; }, retry: () => {} },
+      ],
+      ingest: async items => items.map(() => ({ ok: true })),
+      promoteLegacy: async () => {}, completeLegacy: async () => {},
+      archive: async () => { archived++; },
+    });
+    assert.deepEqual([acked, archived, settled.unauthenticated], [2, 1, 1]);
+
+    await simulatedSesFixture(t, async ({ runtime, local, run, db }) => {
+      const ws = runtime.config.workspaceId;
+      const list = ok(await local('POST', '/v1/lists', { name: unique('fb-prio') }), 201);
+      await db.query(`INSERT INTO audience_contacts (id, workspace_id, email, marketing_consent)
+        SELECT 'con_fb_' || n, $1, 'fb-conc-' || n || '@example.com', 'subscribed' FROM generate_series(1, 80) n`, [ws]);
+      await db.query('INSERT INTO audience_list_members (workspace_id, list_id, contact_id) SELECT workspace_id, $2, id FROM audience_contacts WHERE workspace_id = $1', [ws, list.id]);
+      const camp = ok(await local('POST', '/v1/campaigns', { name: unique('fb-prio'), from: 'sender@example.com', subject: 'FB', html: '<p>Hi</p>', tracking: true, audience: { listId: list.id } }), 201);
+      ok(await local('POST', `/v1/campaigns/${camp.id}/send`, { revision: camp.revision }), 202);
+      await run('campaign.run');
+      await run('email.dispatch');
+      const sentRows = (await db.query('SELECT id, provider_id, to_addresses->>0 AS email FROM sending_emails WHERE workspace_id=$1 AND campaign_id=$2 ORDER BY id', [ws, camp.id])).rows as { id: string; provider_id: string; email: string }[];
+      assert.equal(sentRows.length, 80);
+
+      const topic = `urn:bane:simulated-ses:${REGION}`, nowIso = new Date().toISOString();
+      const events: import('./src/sending.js').RoutineIngress[] = [];
+      for (const [i, r] of sentRows.entries()) {
+        const mk = (kind: string, type: string, data: Record<string, unknown>, effects?: import('./src/sending.js').RoutineIngress['effects']): import('./src/sending.js').RoutineIngress => ({
+          workspaceId: ws, type, providerId: r.provider_id, taggedEmailId: r.id, createdAt: nowIso,
+          externalId: `${topic}:${r.id}:${kind}`, data: { providerId: r.provider_id, ...data }, ...(effects ? { effects } : {}),
+          ingress: { topicArn: topic, messageId: `${r.id}:${kind}`, region: REGION, payload: { message: { eventType: kind, mail: { messageId: r.provider_id } }, topicArn: topic, messageId: `${r.id}:${kind}`, region: REGION }, recoveryType: 'operation.simulatedFeedbackRecovery' },
+        });
+        events.push(mk('Open', 'open', { isBotEvent: false }, { reported: null, suppress: null, observe: 'open', receiptTime: false }));
+        events.push(mk('Open', 'open', { isBotEvent: false }, { reported: null, suppress: null, observe: 'open', receiptTime: false }));
+        events.push(mk('Delivery', 'delivery', {}));
+        events.push(mk('Delivery', 'delivery', {}));
+        if (i % 4 === 0) {
+          events.push(mk('Bounce', 'bounce', { bounceType: 'Permanent', bounceSubType: 'General' }, { reported: [r.email], suppress: 'hard_bounce', observe: null, receiptTime: false }));
+          events.push(mk('Bounce', 'bounce', { bounceType: 'Permanent', bounceSubType: 'General' }, { reported: [r.email], suppress: 'hard_bounce', observe: null, receiptTime: false }));
+        }
+        if (i % 5 === 0) events.push(mk('Click', 'click', { isBotEvent: false, link: 'https://example.com' }, { reported: null, suppress: null, observe: 'click', receiptTime: false }));
+      }
+      const chunks = [0, 1, 2, 3].map(k => events.filter((_, idx) => idx % 4 === k));
+      await Promise.all(chunks.map(chunk => ingestRoutineSesEvents(runtime, chunk)));
+
+      const dupCheck = await db.query('SELECT count(*)::int AS total, count(DISTINCT external_id)::int AS uniq FROM sending_email_events WHERE workspace_id=$1 AND external_id IS NOT NULL', [ws]);
+      assert.equal(dupCheck.rows[0].total, dupCheck.rows[0].uniq, 'Exactly-once event rows despite cross-queue duplicates');
+      assert.equal((await db.query('SELECT * FROM reconcile_sending_campaign_tallies($1, $2)', [ws, camp.id])).rowCount, 0);
+      assert.equal(Number((await db.query('SELECT emails_with_other_bits FROM check_sending_event_outcome_bits($1)', [ws])).rows[0].emails_with_other_bits), 0);
+      const listDrift = await db.query('SELECT * FROM reconcile_audience_list_counts($1, $2)', [ws, list.id]);
+      assert.equal(listDrift.rowCount, 0, 'Audience list counts stay exact after concurrent bounce suppressions');
+      const statusSummary = await db.query("SELECT count(*) FILTER (WHERE status='bounced')::int AS bnc, count(*) FILTER (WHERE (event_outcomes & 16) <> 0)::int AS opened, count(*) FILTER (WHERE (event_outcomes & 32) <> 0)::int AS clicked FROM sending_emails WHERE workspace_id=$1 AND campaign_id=$2", [ws, camp.id]);
+      assert.deepEqual(statusSummary.rows[0], { bnc: 20, opened: 80, clicked: 16 });
+
+      // B3: a later suppression for an already-suppressed contact advances suppressed_at even for the same reason.
+      const bouncedEmail = sentRows[0]!;
+      const laterIso = new Date(Date.now() + 60_000).toISOString();
+      await ingestRoutineSesEvents(runtime, [{
+        workspaceId: ws, type: 'bounce', providerId: bouncedEmail.provider_id, taggedEmailId: bouncedEmail.id, createdAt: laterIso,
+        externalId: `${topic}:${bouncedEmail.id}:BounceLater`, data: { providerId: bouncedEmail.provider_id, bounceType: 'Permanent', bounceSubType: 'General' },
+        effects: { reported: [bouncedEmail.email], suppress: 'hard_bounce', observe: null, receiptTime: false },
+        ingress: { topicArn: topic, messageId: `${bouncedEmail.id}:BounceLater`, region: REGION, payload: { message: { eventType: 'Bounce', mail: { messageId: bouncedEmail.provider_id } }, topicArn: topic, messageId: `${bouncedEmail.id}:BounceLater`, region: REGION }, recoveryType: 'operation.simulatedFeedbackRecovery' },
+      }]);
+      const supAt = (await db.query('SELECT suppressed_at FROM audience_contacts WHERE workspace_id=$1 AND email=$2', [ws, bouncedEmail.email])).rows[0].suppressed_at as Date;
+      assert.ok(supAt.getTime() >= Date.parse(laterIso) - 1000, 'Repeat suppression advances suppressed_at to the latest timestamp');
+
+      // B2: status precedence is order-independent across every cross-lane event pair (including delayed > sent).
+      const pairs: [string, string, string][] = [
+        ['send', 'delivery_delay', 'delayed'],
+        ['send', 'non_permanent_bounce', 'delayed'],
+        ['delivery_delay', 'validation_suppressed', 'suppressed'],
+        ['delivery_delay', 'delivery', 'delivered'],
+        ['validation_suppressed', 'delivery', 'delivered'],
+        ['delivery', 'bounce', 'bounced'],
+        ['bounce', 'complaint', 'complained'],
+      ];
+      for (const [idx, [aType, bType, expected]] of pairs.entries()) {
+        for (const [ord, seq] of ([[aType, bType], [bType, aType]] as [string, string][]).entries()) {
+          const eid = `em_ord_${idx}_${ord}_${Date.now().toString(36)}`;
+          const pid = `sim_ord_${idx}_${ord}_${Date.now().toString(36)}`;
+          await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, status, provider_id, simulated, snapshot)
+            SELECT $1, workspace_id, region, actor_key_id, 'sender@example.com', '["ord@example.com"]'::jsonb, '[]'::jsonb, '[]'::jsonb, 'Order', 'accepted', $2, true, '{}'::jsonb
+            FROM sending_emails WHERE id = $3`, [eid, pid, sentRows[0]!.id]);
+          for (const [step, evType] of seq.entries()) {
+            const evData = evType === 'bounce' ? { bounceType: 'Permanent', bounceSubType: 'General' }
+              : evType === 'non_permanent_bounce' ? { bounceType: 'Transient', bounceSubType: 'General' }
+              : evType === 'validation_suppressed' ? { bounceType: 'Permanent', bounceSubType: 'EmailValidationSuppressed' } : {};
+            await ingestRoutineSesEvents(runtime, [{
+              workspaceId: ws, type: evType, providerId: pid, taggedEmailId: eid, createdAt: nowIso,
+              externalId: `${topic}:${eid}:${step}`, data: { providerId: pid, ...evData },
+              ingress: { topicArn: topic, messageId: `${eid}:${step}`, region: REGION, payload: { message: { eventType: evType, mail: { messageId: pid } }, topicArn: topic, messageId: `${eid}:${step}`, region: REGION }, recoveryType: 'operation.simulatedFeedbackRecovery' },
+            }]);
+          }
+          const finalStatus = (await db.query('SELECT status FROM sending_emails WHERE id=$1', [eid])).rows[0].status;
+          assert.equal(finalStatus, expected, `${seq.join(' -> ')} must end as ${expected}`);
+        }
+      }
+
+      const camp2 = ok(await local('POST', '/v1/campaigns', { name: unique('fb-lag'), from: 'sender@example.com', subject: 'Lag', html: '<p>Hi</p>', audience: { listId: list.id } }), 201);
+      ok(await local('POST', `/v1/campaigns/${camp2.id}/send`, { revision: camp2.revision }), 202);
+      await recordFeedbackLag(runtime.db, 'routine', 150000, 20 * 60_000);
+      const viewRoutine = ok(await local('GET', `/v1/campaigns/${camp2.id}`));
+      assert.deepEqual(viewRoutine.delivery.feedbackLag, { lane: 'routine', oldestMs: 20 * 60_000 });
+      assert.equal('depth' in (viewRoutine.delivery.feedbackLag ?? {}), false, 'Public feedbackLag omits cross-tenant depth');
+      // Priority lag >= 5 min holds an autoPause campaign with waiting.reason='feedback_lag' (never a manual pause),
+      // while display reports the older lane (routine 20m > priority 6m).
+      await recordFeedbackLag(runtime.db, 'priority', 500, FEEDBACK_LAG_HOLD_MS + 60_000);
+      const viewBoth = ok(await local('GET', `/v1/campaigns/${camp2.id}`));
+      assert.deepEqual(viewBoth.delivery.feedbackLag, { lane: 'routine', oldestMs: 20 * 60_000 }, 'Display reports the older lane');
+      try {
+        await run('campaign.run');
+        const held = ok(await local('GET', `/v1/campaigns/${camp2.id}`));
+        assert.deepEqual([held.state, held.delivery.waiting?.reason, held.delivery.expanded], ['sending', 'feedback_lag', 0]);
+        // Stale priority sample (> 5 min old) expires automatically so a broken metrics read never holds forever,
+        // and the 20 min routine lag still does NOT hold releasing when priority queue is bound.
+        await db.query("UPDATE operation_feedback_lag SET updated_at = now() - interval '6 minutes' WHERE lane = 'priority'");
+        const staleView = ok(await local('GET', `/v1/campaigns/${camp2.id}`));
+        assert.deepEqual(staleView.delivery.feedbackLag, { lane: 'routine', oldestMs: 20 * 60_000 });
+        await db.query("UPDATE jobs SET status='pending', available_at=clock_timestamp() WHERE id=$1", ['campaign.run:' + camp2.id]);
+        await run('campaign.run');
+        const released = ok(await local('GET', `/v1/campaigns/${camp2.id}`));
+        assert.equal(released.delivery.expanded, 60, 'Campaign releases all 60 non-suppressed recipients once priority lag expires even with 20m routine lag');
+        assert.deepEqual(released.delivery.feedbackLag, { lane: 'routine', oldestMs: 20 * 60_000 }, 'feedbackLag remains visible once all recipients are released');
+      } finally {
+        await db.query('DELETE FROM operation_feedback_lag');
+      }
     });
   });
 

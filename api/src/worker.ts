@@ -24,8 +24,8 @@ function initRuntimeDeps() {
     import('./config.js'), import('./adapters/storage.js'),
     import('./jobs.js'), import('./core.js'),
     import('./adapters/browser-rendering.js'), import('./adapters/public-image.js'), import('./adapters/feedback-queue.js'),
-  ]).then(([{ Pool }, { drizzle }, { sql }, { CONFIG_KEYS, loadConfig }, { r2Storage }, { followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY }, core, { browserImageRenderer }, { publicImageImporter }, { feedbackSink, settleFeedbackBatch, legacyFeedbackCutover, workWake }]) => ({
-    Pool, drizzle, sql, CONFIG_KEYS, loadConfig, r2Storage, followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY, core, browserImageRenderer, publicImageImporter, feedbackSink, settleFeedbackBatch, legacyFeedbackCutover, workWake,
+  ]).then(([{ Pool }, { drizzle }, { sql }, { CONFIG_KEYS, loadConfig }, { r2Storage }, { followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY }, core, { browserImageRenderer }, { publicImageImporter }, { feedbackSink, settleFeedbackBatch, legacyFeedbackCutover, workWake, batchFirstDeliveryLag, metricsEffectiveLagMs }]) => ({
+    Pool, drizzle, sql, CONFIG_KEYS, loadConfig, r2Storage, followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY, core, browserImageRenderer, publicImageImporter, feedbackSink, settleFeedbackBatch, legacyFeedbackCutover, workWake, batchFirstDeliveryLag, metricsEffectiveLagMs,
   }));
 }
 async function toModuleLoadError(error: unknown): Promise<never> {
@@ -46,6 +46,7 @@ function loadHttpDeps() {
 
 // A provider group fits on one shard. Spread small sends across the pool without waking idle siblings.
 let nextShard: number | undefined;
+let lastPriorityLagWrite = 0, lastPriorityLagHigh = false;
 async function wakeDispatchers(env: Env, region: string, accountId?: string, emails?: number, kind?: 'shared' | 'byo', priority = false) {
   const count = kind === 'byo' ? 1 : shardCount('DISPATCH_SHARDS' in env ? env.DISPATCH_SHARDS : undefined);
   nextShard ??= Math.floor(Math.random() * 0x100000000);
@@ -172,7 +173,7 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
         throw error;
       }
       core.log('info', { code: 'QUEUE_WAKE', readyJobs, messages: 1 });
-    }, dispatch: (...args) => wakeDispatchers(env, ...args), feedback: feedbackSink(env.FEEDBACK_QUEUE, config.authSecret), renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
+    }, dispatch: (...args) => wakeDispatchers(env, ...args), feedback: feedbackSink(env.FEEDBACK_QUEUE, config.authSecret, env.FEEDBACK_PRIORITY_QUEUE), renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
   } finally {
     if (client) {
       if (ctx) ctx.waitUntil(client.end().catch(() => {}));
@@ -312,7 +313,7 @@ export default {
   },
   // Queue/scheduled continuations preserve worker chains and retry due times.
   async queue(batch, env, ctx) {
-    const { jobConcurrency, followDueJobs, core, settleFeedbackBatch, legacyFeedbackCutover } = await loadRuntimeDeps();
+    const { jobConcurrency, followDueJobs, core, settleFeedbackBatch, legacyFeedbackCutover, batchFirstDeliveryLag } = await loadRuntimeDeps();
     stampLogs(env, core);
     const concurrency = jobConcurrency('JOB_CONCURRENCY' in env ? env.JOB_CONCURRENCY : undefined, 6);
     // Queue names differ per installation (wrangler config); an unrecognized queue is retried, never acknowledged as a wake.
@@ -338,8 +339,23 @@ export default {
             catch { core.log('warn', { code: 'FEEDBACK_LEGACY_RECOVERY_PENDING', sourceQueue: item.source.queue, sourceId: item.source.id }); }
           }, completeLegacy: item => completeLegacyFeedback(runtime, item),
           archive: (source,body,error) => archiveQueueFeedback(runtime,source,body,error) });
-        const { outcomes: _, ...counts } = settled, oldestMs=Math.max(0,...messages.map(m=>Date.now()-m.timestamp.getTime()));
-        core.log(counts.failed || counts.untagged || counts.unauthenticated || counts.held || oldestMs>60000?'warn':'info', { code: 'FEEDBACK_BATCH', lane: feedbackLane, size: messages.length, ...counts, oldestMs });
+        const { outcomes: _, ...counts } = settled, nowMs = Date.now();
+        const oldestMs = Math.max(0, ...messages.map(m => nowMs - m.timestamp.getTime()));
+        // Measure priority lane lag from first deliveries only (attempts === 1): Cloudflare preserves the original
+        // enqueue timestamp on retried messages, so one poison/unmatchable retry must never hold every campaign.
+        const fresh = batchFirstDeliveryLag(messages, nowMs);
+        core.log(counts.failed || counts.untagged || counts.unauthenticated || counts.held || oldestMs>60000?'warn':'info', { code: 'FEEDBACK_BATCH', lane: feedbackLane, size: messages.length, ...counts, oldestMs, ...(fresh !== null && fresh.oldestMs !== oldestMs ? { freshOldestMs: fresh.oldestMs } : {}) });
+        // Keep priority safety-lane lag fresh within ~15 s during spikes or recovery so releaseStep reacts quickly.
+        if (feedbackLane === 'priority' && fresh !== null && (fresh.oldestMs >= 60_000 || lastPriorityLagHigh)) {
+          if (nowMs - lastPriorityLagWrite >= 15_000) {
+            lastPriorityLagWrite = nowMs;
+            lastPriorityLagHigh = fresh.oldestMs >= 60_000;
+            try {
+              const { recordFeedbackLag } = await import('./sending.js');
+              await recordFeedbackLag(runtime.db, 'priority', fresh.count, fresh.oldestMs);
+            } catch { /* Minute cron refreshes lag independently. */ }
+          }
+        }
       });
       await flushDueCounters(env, ctx);
       return;
@@ -362,7 +378,7 @@ export default {
     await flushDueCounters(env, ctx);
   },
   async scheduled(controller, env, ctx) {
-    const { jobConcurrency, followDueJobs, core } = await loadRuntimeDeps();
+    const { jobConcurrency, followDueJobs, core, metricsEffectiveLagMs } = await loadRuntimeDeps();
     stampLogs(env, core);
     const [{ dispatchPartitions, drainJobs }, { reconcileSharedConnections }, { syncOutboundMessages }, { publicStatsTick }] = await core.wrapModuleLoad(() => Promise.all([
       import('./dispatch.js'), import('./provider-connections.js'), import('./mailbox-send.js'), import('./public-stats.js'),
@@ -380,15 +396,29 @@ export default {
       // Independent of PostgreSQL: even a total DB outage must not hide DLQ growth.
       // A queue added here is on the Health page at once; its "falling behind" line is in src/health-thresholds.ts (QUEUES).
       const queues: import('./health.js').QueueSample[] = [];
-      await Promise.all([['feedback',env.FEEDBACK_QUEUE],['feedback-dlq',env.FEEDBACK_DLQ],['legacy-feedback-dlq',env.LEGACY_FEEDBACK_DLQ],['work',env.WAKE_QUEUE],['webhooks',env.WEBHOOK_QUEUE]].map(async pair=>{
+      const lagSamples: { lane: 'routine' | 'priority'; depth: number; oldestMessageTimestamp?: Date }[] = [];
+      await Promise.all([['feedback',env.FEEDBACK_QUEUE],...(env.FEEDBACK_PRIORITY_QUEUE?[['feedback-priority',env.FEEDBACK_PRIORITY_QUEUE]]:[]),['feedback-dlq',env.FEEDBACK_DLQ],['legacy-feedback-dlq',env.LEGACY_FEEDBACK_DLQ],['work',env.WAKE_QUEUE],['webhooks',env.WEBHOOK_QUEUE]].map(async pair=>{
         const [name,q]=pair as [string,Queue]; if(!q?.metrics)return;
         try{const m=await q.metrics(),oldestMs=m.oldestMessageTimestamp?Math.max(0,Date.now()-m.oldestMessageTimestamp.getTime()):0;
           const alarm=(name.endsWith('feedback-dlq') && m.backlogCount>0) || oldestMs>60000;
           core.log(alarm?'error':'info',{code:alarm?'QUEUE_BACKLOG_ALERT':'QUEUE_BACKLOG',queue:name,depth:m.backlogCount,oldestMs});
           queues.push({name,depth:m.backlogCount,oldestMs});
+          if (name === 'feedback') lagSamples.push({ lane: 'routine', depth: m.backlogCount, oldestMessageTimestamp: m.oldestMessageTimestamp });
+          if (name === 'feedback-priority') lagSamples.push({ lane: 'priority', depth: m.backlogCount, oldestMessageTimestamp: m.oldestMessageTimestamp });
         }catch{core.log('warn',{code:'QUEUE_METRICS_UNAVAILABLE',queue:name});}
       }));
       try {
+      if (lagSamples.length) {
+        try {
+          const { recordFeedbackLag, FEEDBACK_LAG_MIN_DEPTH } = await import('./sending.js');
+          // Apply a depth floor on queue-level metrics(): a few poison/unmatchable messages sitting in Cloudflare retry
+          // backoff carry their original enqueue timestamp but do not represent a stalled consumer backlog.
+          for (const sample of lagSamples) {
+            const effectiveOldestMs = metricsEffectiveLagMs(sample.depth, sample.oldestMessageTimestamp, FEEDBACK_LAG_MIN_DEPTH);
+            await recordFeedbackLag(runtime.db, sample.lane, sample.depth, effectiveOldestMs);
+          }
+        } catch { core.log('warn', { code: 'FEEDBACK_LAG_RECORD_FAILED' }); }
+      }
       try { const { drainFeedbackRecovery } = await import('./operations.js'); await drainFeedbackRecovery(runtime); }
       catch { core.log('error',{code:'FEEDBACK_RECOVERY_DRAIN_FAILED'}); }
       await reconcileSharedConnections(runtime); // Installation work must not depend on a workspace or a successful queue drain.
