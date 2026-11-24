@@ -29,6 +29,10 @@ export const deleteAttachment: JobHandler = async (runtime, payload, job) => {
 function resolveJobHandler(type: string): Promise<JobHandler | undefined> {
   return wrapModuleLoad(async () => {
     if (type === 'maintenance.deleteAttachment') return deleteAttachment;
+    if (type === 'maintenance.senderDisplayScore' || type === 'maintenance.discoverSenderDisplayScore') {
+      const display = await import('./sender-display-score.js');
+      return type === display.DISPLAY_DISCOVERY_JOB ? display.senderDisplayDiscoveryJob : display.senderDisplayScoreJob;
+    }
     if (type === 'email.dispatch' || type.startsWith('sending.') || type.startsWith('campaign.')) return (await import('./sending.js')).jobHandlers[type];
     if (type.startsWith('operation.') || type.startsWith('domain.')) return (await import('./operations.js')).operationJobs[type];
     if (type === 'ses.provision' || type === 'ses.discover') return (await import('./ses-regions.js')).sesRegionJobs[type];

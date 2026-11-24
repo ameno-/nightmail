@@ -15493,6 +15493,30 @@ describe('Dashboard API capabilities', () => {
     assert.deepEqual(ok(await http('GET', `/v1/lists/${other.id}`, key.secret)).counts, { total: 0, subscribed: 0, unsubscribed: 0, unknown: 0, suppressed: 0 });
   });
 
+  // Existing standing fixtures are scoped to one workspace, not a shared queue drain. Advance just its display
+  // handler to the fenced payload it would settle; the dedicated publication test below exercises real job settlement.
+  async function publishDisplayFixture(runtime: import('./src/core.js').Runtime, wid: string) {
+    const { sql } = await import('drizzle-orm');
+    const { DISPLAY_SCORE_JOB, displayScoreId } = await import('./src/sender-score.js');
+    const { senderDisplayScoreJob } = await import('./src/sender-display-score.js');
+    const { JobDeferred } = await import('./src/jobs.js');
+    const id = displayScoreId(wid);
+    await runtime.db.execute(sql`INSERT INTO jobs(id,workspace_id,type,payload) VALUES(
+      ${id},${wid},${DISPLAY_SCORE_JOB},${JSON.stringify({version:1,run:unique('display-run')})}::jsonb) ON CONFLICT DO NOTHING`);
+    for(let i=0;i<6;i++){
+      const {rows:[{payload}]}=await runtime.db.execute<{payload:Record<string,unknown>}>(sql`SELECT payload FROM jobs WHERE id=${id}`);
+      try { await senderDisplayScoreJob(runtime,payload,{id,attempts:1,workspaceId:wid}); }
+      catch(e){
+        if(!(e instanceof JobDeferred) || !e.payload)throw e;
+        await runtime.db.execute(sql`UPDATE jobs SET payload=${JSON.stringify(e.payload)}::jsonb WHERE id=${id}`);
+        if(e.payload.view && e.payload.view!==payload.view && !e.payload.pass)return;
+        continue;
+      }
+      throw new Error('Display unexpectedly retired');
+    }
+    assert.fail('Small display fixture did not publish in six steps');
+  }
+
   test('sender score: the model publishes its limit table and ladder; the evaluation grades the first 500, good standing has no daily limit and a warning freezes it', async t => {
     const m = await import('./src/standing-model.js'), E = m.EVALUATION.recipients;
     // Score → limit: none from 75 (good standing), the score's band under it, 2 points of hysteresis on the way down.
@@ -15587,14 +15611,18 @@ describe('Dashboard API capabilities', () => {
         [unique('score-'), wid, REGION, options.simulated ?? false, options.status ?? 'delivered', options.outcomes ?? 3, options.error ?? null, count, options.daysAgo ?? 0, options.campaign ? 'campaign_fixture' : null, options.to ?? 'recipient@example.com']);
       const key = ok(await local('POST', '/v1/api-keys', { name: 'Score reader', permissions: ['read'] }), 201); secrets.add(key.secret);
       const read = async () => ok(await request('GET', '/v1/sender-score', key.secret));
-      // Self-hosted (no standing): simulated mail never counts; computed on read for display only, with no limit.
+      assert.equal((await read()).emails.last30Days,0);
+      // Self-hosted display upkeep: simulated mail never counts, and the response has no limit.
       await insert(500, { simulated: true }); await insert(E - 1);
       // Review of #115: live mail to the SES mailbox simulator earned a grade and a higher limit. It is not evidence.
       await insert(300, { to: 'success+score@simulator.amazonses.com' });
+      await publishDisplayFixture(runtime,wid);
       const warm = await read();
       assert.deepEqual([warm.state, warm.emails.firstEmails, warm.needed, warm.score, warm.grade, warm.history, warm.limit, warm.standing], ['warmup', E - 1, E, null, null, [], null, null]);
       assert.deepEqual(warm.factors.filter((f: Json) => f.source === 'neutral').map((f: Json) => f.key), ['content', 'hygiene', 'auth', 'engagement']);
       await insert(1);
+      assert.equal((await read()).state,'warmup','GET does not recount a newly created email.');
+      await publishDisplayFixture(runtime,wid);
       const shown = await read();
       assert.deepEqual([shown.state, shown.score, shown.grade, shown.raw], ['graded', 100, 'A+', 100]);
       // Hosted: the job stores the standing. 500 accepted recipients are the evaluation, graded once their results are in;
@@ -15696,8 +15724,9 @@ describe('Dashboard API capabilities', () => {
       // Complaints (30) and bounces (15) are measured; with list quality at 0 for weight 15 this was 72.3, under good standing.
       await insert(600); await insert(6, { status: 'bounced', outcomes: 5 }); await insert(15, { status: 'suppressed', outcomes: 0 });
       const expected = m.round((30 * 100 + 15 * 100 * (0.05 - 6 / 606) / 0.045) / 45);
+      await publishDisplayFixture(runtime,wid);
       const shown = await read();
-      assert.deepEqual([factor(shown, 'hygiene').source, factor(shown, 'hygiene').value, measured(shown), shown.raw, expected], ['neutral', null, [['complaints', 30], ['bounces', 15]], 96.4, 96.4], 'Read on display (no stored standing).');
+      assert.deepEqual([factor(shown, 'hygiene').source, factor(shown, 'hygiene').value, measured(shown), shown.raw, expected], ['neutral', null, [['complaints', 30], ['bounces', 15]], 96.4, 96.4], 'Published display (no real standing).');
       // Hosted: the standing job stores the same factors and score, in good standing.
       Object.assign(runtime.config, { multiTenant: true });
       await db.query("INSERT INTO provider_connections(id,workspace_id,kind,region,state) VALUES ($1,$1,'shared',$2,'ready')", [wid, REGION]);
@@ -15735,6 +15764,135 @@ describe('Dashboard API capabilities', () => {
       const campaign = await read();
       assert.deepEqual([factor(campaign, 'hygiene').source, factor(campaign, 'hygiene').value, factor(campaign, 'hygiene').score, factor(campaign, 'bounces').value], ['measured', m.round(10 / 110, 6), 11.4, m.round(6 / 606, 6)]);
       assert.deepEqual(measured(campaign), [['complaints', 30], ['bounces', 15], ['hygiene', 15], ['engagement', 10]]);
+    });
+  });
+
+
+  test('sender score: durable display publishes exact evidence without a request scan or standing write', async t => {
+    await simulatedSesFixture(t,async ({runtime,db,request,local})=>{
+      const wid=runtime.config.workspaceId;
+      const { DISPLAY_SCORE_JOB,displayScoreId,loadStanding,scoreView }=await import('./src/sender-score.js');
+      const { senderDisplayScoreJob,senderDisplayDiscoveryJob,ensureSenderDisplayDiscovery,DISPLAY_DISCOVERY_JOB }=await import('./src/sender-display-score.js');
+      const { processJobs }=await import('./src/jobs.js');
+      const id=displayScoreId(wid);
+      // Keep general worker scheduling identical; exercise the real claim/deferral fence without picking another test's jobs.
+      await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
+      await ensureSenderDisplayDiscovery(runtime.db);
+      const discoveryRows=await db.query('SELECT id,status,payload,available_at::text,attempts FROM jobs WHERE type=$1',[DISPLAY_DISCOVERY_JOB]);
+      assert.equal(discoveryRows.rowCount,1);
+      const discovery=discoveryRows.rows[0];
+      assert.equal(discovery.status,'pending');
+      const key=ok(await local('POST','/v1/api-keys',{name:'Display reader',permissions:['read']}),201); secrets.add(key.secret);
+      const read=async()=>ok(await request('GET','/v1/sender-score',key.secret));
+      const beforeQueue=(await db.query('SELECT id,status,payload,available_at::text,attempts FROM jobs ORDER BY id')).rows;
+      const before=await read();
+      assert.deepEqual([before.state,before.emails.last30Days,before.standing,before.limit],['warmup',0,null,null]);
+      assert.deepEqual((await db.query('SELECT id,status,payload,available_at::text,attempts FROM jobs ORDER BY id')).rows,
+        beforeQueue,'The first empty GET leaves even the discovery row unchanged.');
+      assert.equal((await db.query('SELECT FROM jobs WHERE id=$1',[id])).rowCount,0,'GET never schedules a display scan.');
+      const discover=async (after?:string)=>{
+        if(after===undefined)await db.query("UPDATE jobs SET available_at='-infinity' WHERE id=$1",[discovery.id]);
+        else await db.query("UPDATE jobs SET available_at='-infinity',payload=jsonb_set(payload,'{after}',to_jsonb($2::text)) WHERE id=$1",[discovery.id,after]);
+        // Only discovery is due in this test connection's temporary ledger.
+        assert.equal(await processJobs(runtime,{[DISPLAY_DISCOVERY_JOB]:senderDisplayDiscoveryJob},1,1,5000,'work'),1);
+        const row=(await db.query('SELECT status,payload,attempts,available_at>now() AS scheduled FROM jobs WHERE id=$1',[discovery.id])).rows[0];
+        assert.deepEqual([row.status,row.attempts,row.scheduled],['pending',0,true]);
+        assert.equal(row.payload.run,discovery.payload.run);
+        return row.payload.after;
+      };
+      const end=(await db.query('SELECT max(id) AS cursor FROM workspaces')).rows[0].cursor;
+      assert.equal(await discover(end),'','A discovery turn past the last workspace wraps to the start.');
+      assert.equal((await db.query('SELECT FROM jobs')).rowCount,1,'An exhausted page creates no workspace jobs.');
+      await db.query("INSERT INTO provider_connections(id,workspace_id,kind,region) VALUES($1,$1,'shared',$2)",[wid,REGION]);
+      await db.query(`INSERT INTO domain_claims(workspace_id,name,sending_state,identity,claim_scope,connection_id) VALUES
+        ($1,'display.example','verified','{"ses":{"DkimAttributes":{"Status":"SUCCESS","SigningEnabled":true}},"dmarc":{"status":"reject"}}','account',$1),
+        ($1,'mx.display.example','verified','{"ses":{"MailFromAttributes":{"MailFromDomainStatus":"SUCCESS"}},"dmarc":{"status":"none"}}','account',$1),
+        ($1,'idle.example','verified','{}','account',$1)`,[wid]);
+      const prefix=unique('display-email-');
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,campaign_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,event_outcomes,error_code,created_at)
+        SELECT $3||n,$1,$2,'fixture',CASE WHEN n%3=0 THEN 'campaign_fixture' END,
+          CASE WHEN n%2=0 THEN 'hello@deep.mx.display.example' ELSE 'hello@display.example' END,
+          CASE WHEN n%11=0 THEN '["SUCCESS@SIMULATOR.AMAZONSES.COM"]' ELSE '["person@example.test"]' END::jsonb,
+          CASE WHEN n%22=0 THEN '["also-real@example.test"]' ELSE '[]' END::jsonb,'[]','Mixed fixture',
+          CASE WHEN n%5=0 THEN '{"kind":"marketing"}' ELSE '{"kind":"transactional"}' END::jsonb,n%13=0,
+          CASE WHEN n%7=0 THEN 'bounced' WHEN n%17=0 THEN 'suppressed' WHEN n%19=0 THEN 'rejected' ELSE 'delivered' END,
+          CASE WHEN n%17<>0 AND n%19<>0 THEN $3||n END,
+          CASE WHEN n%7=0 THEN 5 WHEN n%23=0 THEN 35 ELSE 3 END,
+          CASE WHEN n%19=0 THEN 'CONTENT_REJECTED_SPAM' END,
+          CASE WHEN n=700 THEN now()-interval '35 days' ELSE now()-(n%8)*interval '1 day' END
+        FROM generate_series(1,700)n`,[wid,REGION,prefix]);
+      await db.query(`INSERT INTO operation_events(id,workspace_id,type,data,created_at)
+        VALUES($1,$2,'contact.subscription_changed','{"status":"unsubscribed"}',now())`,[unique('display-consent-'),wid]);
+      // Fill the discovery page with inert rollback-only workspaces so its continuation has a real next page.
+      await db.query(`INSERT INTO workspaces(id,name,slug)
+        SELECT id,id,id FROM (SELECT $1||'-display-page-'||lpad(n::text,3,'0') AS id FROM generate_series(1,65)n) fixture`,[wid]);
+      const prior=(await db.query("SELECT coalesce(max(id),'') AS cursor FROM workspaces WHERE id<$1",[wid])).rows[0].cursor;
+      const workspacePage=(await db.query('SELECT id FROM workspaces WHERE id>$1 ORDER BY id LIMIT 65',[prior])).rows;
+      assert.equal(workspacePage.length,65);
+      assert.equal(workspacePage[0].id,wid);
+      const fullCursor=await discover(prior);
+      assert.equal(fullCursor,workspacePage[63].id,'A full discovery page checkpoints its last workspace for a due continuation.');
+      const queued=(await db.query('SELECT workspace_id,type,status,payload FROM jobs WHERE id=$1',[id])).rows[0];
+      assert.deepEqual([queued.workspace_id,queued.type,queued.status], [wid,DISPLAY_SCORE_JOB,'pending']);
+      assert.equal(queued.payload.version,1);
+      assert.equal(typeof queued.payload.run,'string');
+      assert.equal(queued.payload.view,undefined);
+      // Let just the scanner become due, without rewriting its saved cursor, to prove it resumes the tour.
+      await db.query("UPDATE jobs SET available_at='infinity' WHERE id<>$1",[discovery.id]);
+      const remainder=(await db.query('SELECT id FROM workspaces WHERE id>$1 ORDER BY id LIMIT 64',[fullCursor])).rows;
+      assert.ok(remainder.length>0);
+      const continued=await discover();
+      if(remainder.length===64)assert.equal(continued,remainder[63].id);
+      else assert.ok(continued===remainder.at(-1).id || continued==='', 'A final short page advances to its end or wraps.');
+      // Preserve discovery's lease/run identity. Only control the discovered job's fixture page size and due time.
+      await db.query("UPDATE jobs SET available_at='infinity' WHERE id<>$1",[id]);
+      await db.query("UPDATE jobs SET payload=jsonb_set(payload,'{size}','64'::jsonb) WHERE id=$1",[id]);
+      const step=async()=>{
+        await db.query("UPDATE jobs SET available_at='-infinity' WHERE id=$1",[id]);
+        const processed=await processJobs(runtime,{[DISPLAY_SCORE_JOB]:senderDisplayScoreJob},1,1,5000,'work');
+        assert.equal(processed,1);
+        return (await db.query('SELECT payload,status FROM jobs WHERE id=$1',[id])).rows[0];
+      };
+      let checkpoint=await step();
+      assert.equal(checkpoint.status,'pending');
+      assert.ok(checkpoint.payload.pass.after);
+      const asOf=checkpoint.payload.pass.asOf;
+      assert.equal(checkpoint.payload.view,undefined);
+      assert.equal((await read()).emails.last30Days,0,'Partial evidence is never published.');
+      for(let i=0;i<8 && !checkpoint.payload.view;i++)checkpoint=await step();
+      const published=await read();
+      assert.deepEqual(published,checkpoint.payload.view);
+      assert.equal(published.computedAt,new Date(asOf).toISOString());
+      assert.deepEqual(published,scoreView(await loadStanding(runtime,wid),new Date(asOf)));
+      const eligible=Array.from({length:699},(_,i)=>i+1).filter(n=>n%13!==0&&(n%11!==0||n%22===0)).length;
+      assert.equal(published.emails.last30Days,eligible);
+      assert.equal(published.factors.find((x:Json)=>x.key==='auth')?.source,'measured');
+      assert.equal(published.factors.find((x:Json)=>x.key==='content')?.source,'neutral');
+      await db.query(`UPDATE sending_emails SET status='complained',event_outcomes=11 WHERE id IN
+        (SELECT id FROM sending_emails WHERE workspace_id=$1 AND status='delivered' AND NOT simulated LIMIT 30)`,[wid]);
+      assert.deepEqual(await read(),published,'Feedback does not make GET recompute or advance the worker.');
+      assert.deepEqual((await db.query('SELECT payload FROM jobs WHERE id=$1',[id])).rows[0].payload,checkpoint.payload);
+      Object.assign(runtime.config,{multiTenant:true});
+      await db.query("INSERT INTO platform_operators(user_id,role,reason) VALUES($1,'operator:read','Synthetic display fixture')",[manager!.userId]);
+      assert.deepEqual(ok(await local('GET',`/v1/operator/workspaces/${wid}`)).score,published);
+      assert.deepEqual(ok(await local('GET','/v1/sender-score')),published);
+      const scoped=ok(await local('POST','/v1/api-keys',{name:'Domain scoped',permissions:['read'],domains:['display.example']}),201);
+      secrets.add(scoped.secret);
+      error(await request('GET','/v1/sender-score',scoped.secret),403,'UNRESTRICTED_KEY_REQUIRED');
+      const second=await step();
+      const next=await read();
+      assert.deepEqual(next,second.payload.view);
+      assert.deepEqual(next,scoreView(await loadStanding(runtime,wid),new Date(next.computedAt)));
+      assert.notEqual(next.raw,published.raw);
+      assert.equal((await db.query('SELECT FROM sender_standing WHERE workspace_id=$1',[wid])).rowCount,0);
+      // Exercise the supported birth path, not a database trigger or a direct INSERT used as production behavior.
+      const {applyChange}=await import('./src/standing.js');
+      await runtime.db.transaction(tx=>applyChange(tx,{workspaceId:wid,actor:{kind:'system'},kind:'step',step:'ok'}));
+      assert.ok((await read()).standing);
+      assert.equal((await db.query('SELECT FROM jobs WHERE id=$1',[id])).rowCount,0);
+      await db.query('DELETE FROM sender_standing WHERE workspace_id=$1',[wid]); // isolated rollback-only fixture
+      const retired=await read();
+      assert.deepEqual([retired.state,retired.standing,retired.emails.last30Days],['warmup',null,0]);
     });
   });
 
