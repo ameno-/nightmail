@@ -341,6 +341,8 @@ export function createLiveApi(scope?: RequestScope): Api {
         return mapCampaign(await request(input.id ? `/v1/campaigns/${idPath(input.id)}` : '/v1/campaigns', {method: input.id ? 'PATCH' : 'POST', body: input.id ? {revision: input.revision, draft} : {...draft, ...(input.templateId ? {templateId: input.templateId} : {})}, signal, idempotencyKey: input.id ? undefined : input.idempotencyKey, scope}))
       },
       audience: async (input, signal) => ({ ...await call(`/campaigns/${idPath(input.id)}/audience`, 'GET', undefined, signal), contacts: [] }),
+      reviewDisplay: (id, revision, check, signal) => call<import('./types').CampaignReviewDisplay>(
+        `/campaigns/${idPath(id)}/review-display?${new URLSearchParams({ revision: String(revision), check: String(check) })}`, 'GET', undefined, signal),
       send: async (input, signal) => {
         if (!input.revision) throw new ApiError('Reload this campaign before sending.', 'REVISION_REQUIRED')
         const receipt = await call(`/campaigns/${idPath(input.id)}/${input.mode === 'schedule' ? 'schedule' : 'send'}`, 'POST', {revision: input.revision, ...(input.mode === 'schedule' ? {scheduledAt: input.scheduledAt} : {}), ...(input.pacing ? {pacing: input.pacing} : {}), ...(input.confirmRequiredNotice ? {confirmRequiredNotice: true} : {})}, signal)
