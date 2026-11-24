@@ -22,6 +22,12 @@ export const chunksFor = (limitBytes: number) => { const width = MAX_BODY - MAX_
 const TTL_MS = 60 * 60 * 1000;
 const MAX_ENTRIES = 5000;
 const DEADLINE_MS = 500;
+const PRIMARY_FAILURES = 3, PRIMARY_COOLDOWN_MS = 60_000;
+const primaryBreakers = new Map<string, { failures: number; retryAt: number }>();
+const authOrBilling = (status?: number) => status === 401 || status === 402 || status === 403;
+// All preparation lanes of a dispatcher invocation share its db object. Allow at most two slow requests, leaving
+// four of the Worker's six outbound connections for its pool and SES. Waiting here holds neither a socket nor a DB client.
+const failoverSlots = new WeakMap<object, { active: number; waiting: (() => void)[] }>();
 const QUESTIONS = {
   spam: {
     type: 'noul',
@@ -386,7 +392,7 @@ export type ScreenCall = { emailId?: string; workspaceId?: string; campaignId?: 
    *  to the screen_comparisons rows of the requests that judged it, at most an hour earlier. */
   digest?: string };
 /** How one request went, filled in by jevQuestions as it goes. Only assignments: recording never throws or waits. */
-type CallTiming = { inFlight?: number; sesInFlight?: number; requestBytes?: number; headersMs?: number; ms?: number; outcome?: string; phase?: 'headers' | 'body'; httpStatus?: number; responseBytes?: number;
+type CallTiming = { classifier?: 'jev' | 'jevf'; failoverReason?: string; inFlight?: number; sesInFlight?: number; requestBytes?: number; headersMs?: number; ms?: number; outcome?: string; phase?: 'headers' | 'body'; httpStatus?: number; responseBytes?: number;
   requestId?: string; cfRay?: string; serverTiming?: string; retryAfter?: string; errorType?: string; errorCode?: string; errorMessage?: string };
 const CAMPAIGN_SAMPLE = 0.1;
 let inFlight = 0;
@@ -421,7 +427,7 @@ function logCall(timing: CallTiming, call: ScreenCall | undefined, window: numbe
   } catch { /* As above. */ }
 }
 export async function jevQuestions(endpoint:string,apiKey:string,model:string,state:unknown,questions:unknown,deadline:number,timing:CallTiming={}):Promise<unknown> {
-  // The deadline includes reading the response body. Never retry inside a send lease.
+  // The deadline includes reading the response body. One attempt at the configured endpoint.
   const started=Date.now();timing.inFlight=++inFlight;timing.sesInFlight=outbound.ses;
   try {
     let response: Response;
@@ -452,19 +458,63 @@ export async function jevQuestions(endpoint:string,apiKey:string,model:string,st
     try{return JSON.parse(Buffer.concat(chunks).toString())}catch{return null}
   } finally { inFlight--; }
 }
-/** One classifier request; `db` is the database client its content_screen_calls row is written with later. `handover`
- *  is read right before the request, with nothing awaited between it and the request going out. */
-async function evaluate(endpoint: string, apiKey: string, model: string, state: unknown, call: ScreenCall | undefined, window: number, windows: number, db: object | undefined, handover: (() => boolean) | undefined, sample = 1, shadow?: ShadowRef): Promise<ScreenResult> {
-  if (handover?.()) throw new ScreenHandover();
-  const timing: CallTiming = {}, at = Date.now();
-  let parsed: { model?: unknown; answers?: { spam?: { noul?: unknown } }; usage?: { input_tokens?: unknown } } | null | undefined;
+/** One window, one verdict. Each actual request has its own deadline, campaign charge and record. */
+async function evaluate(runtime: Runtime, state: unknown, call: ScreenCall | undefined, window: number, windows: number, sample: number, shadow?: ShadowRef, charge?: () => Promise<void>): Promise<ScreenResult> {
+  if (runtime.screenHandover?.()) throw new ScreenHandover();
+  const primary = runtime.config.screen!, backup = primary.failover;
+  const ask = async (settings: Pick<typeof primary, 'endpoint' | 'apiKey' | 'model'>, deadline: number, timing: CallTiming) => {
+    if (charge) { if (runtime.screenHandover?.()) throw new ScreenHandover(); await charge(); }
+    if (runtime.screenHandover?.()) throw new ScreenHandover(); // Also after waiting for a failover slot or a charge.
+    const at = Date.now(), { endpoint, apiKey, model } = settings;
+    let parsed: { model?: unknown; answers?: { spam?: { noul?: unknown } }; usage?: { input_tokens?: unknown } } | null | undefined;
+    try {
+      parsed = await jevQuestions(endpoint,apiKey,model,state,QUESTIONS,deadline,timing) as typeof parsed;
+      const spam = parsed?.answers?.spam?.noul;
+      if (typeof spam !== 'number' || !Number.isFinite(spam) || spam<0 || spam>1) { timing.outcome='invalid'; throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', 'The content classifier returned no valid spam score.', undefined, true); }
+      timing.outcome='ok';
+      return { spam, model: typeof parsed?.model === 'string' ? parsed.model : model };
+    } catch (error) {
+      // A body read can throw a raw stream error. A failed backup must take the existing retryable outage path.
+      if (timing.classifier === 'jevf' && !(error instanceof ApiError)) throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', 'The content classifier could not be reached.', undefined, true);
+      throw error;
+    } finally {
+      logCall(timing,call,window,windows,sample,at,runtime.db);
+      if (shadow && timing.classifier === 'jev' && !(backup && authOrBilling(timing.httpStatus))) shadowed(shadow,runtime.db,at,state,window,windows,timing,parsed,model);
+    }
+  };
+  const timing: CallTiming = { classifier: 'jev' };
+  if (!backup) return ask(primary, DEADLINE_MS, timing);
+  const key = primary.endpoint + '\n' + primary.model;
+  let breaker = primaryBreakers.get(key);
+  if (!breaker) primaryBreakers.set(key, breaker = { failures: 0, retryAt: 0 });
+  const now = Date.now();
+  if (now >= breaker.retryAt) {
+    // After cool-off, claim the single probe. The claim expires even if its Worker invocation disappears.
+    if (breaker.retryAt) breaker.retryAt = now + PRIMARY_COOLDOWN_MS;
+    const claim = breaker.retryAt;
+    try {
+      const result = await ask(primary, DEADLINE_MS, timing);
+      if (breaker.retryAt === claim) { breaker.failures = 0; breaker.retryAt = 0; }
+      return result;
+    } catch (error) {
+      const eligible = authOrBilling(timing.httpStatus);
+      if (breaker.retryAt === claim) {
+        if (eligible && ++breaker.failures >= PRIMARY_FAILURES) breaker.retryAt = Date.now() + PRIMARY_COOLDOWN_MS;
+        else if (!eligible && timing.outcome) { breaker.failures = 0; breaker.retryAt = 0; }
+        else if (!eligible && claim) breaker.retryAt = now; // No request made: leave the probe available.
+      }
+      if (!eligible) throw error;
+    }
+  }
+  let slots = failoverSlots.get(runtime.db);
+  if (!slots) failoverSlots.set(runtime.db, slots = { active: 0, waiting: [] });
+  if (slots.active < Math.min(2, backup.maxConcurrency)) slots.active++;
+  else await new Promise<void>(resolve => slots.waiting.push(resolve));
   try {
-    parsed = await jevQuestions(endpoint,apiKey,model,state,QUESTIONS,DEADLINE_MS,timing) as typeof parsed;
-    const spam = parsed?.answers?.spam?.noul;
-    if (typeof spam !== 'number' || !Number.isFinite(spam) || spam<0 || spam>1) { timing.outcome='invalid'; throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', 'The content classifier returned no valid spam score.', undefined, true); }
-    timing.outcome='ok';
-    return { spam, model: typeof parsed?.model === 'string' ? parsed.model : model };
-  } finally { logCall(timing,call,window,windows,sample,at,db); if (shadow) shadowed(shadow,db,at,state,window,windows,timing,parsed,model); }
+    return await ask(backup, backup.deadlineMs, { classifier: 'jevf', failoverReason: timing.outcome ?? 'primary_breaker' });
+  } finally {
+    const next = slots.waiting.shift(); if (next) next(); else slots.active--;
+  }
 }
 /** What a request is kept with for the second classifier (src/screen-shadow.ts): only made when it is configured. */
 type ShadowRef = Pick<ShadowItem, 'kind' | 'digest' | 'threshold' | 'workspaceId' | 'emailId' | 'campaignId'>;
@@ -508,7 +558,7 @@ export async function screenSnapshot(runtime: Runtime, snapshot: EmailSnapshot, 
     const state=classifierState(snapshot,required,textHtmlOverlap);
     let highest: ScreenResult | undefined;
     for (const [window, body] of bodies.entries()) {
-      const result=await evaluate(settings.endpoint,settings.apiKey,settings.model,state(body),call,window,bodies.length,runtime.db,runtime.screenHandover,1,shadow);
+      const result=await evaluate(runtime,state(body),call,window,bodies.length,1,shadow);
       if (!highest || result.spam>highest.spam) highest=result;
     }
     return highest!;
@@ -554,9 +604,9 @@ export async function screenInput(runtime: Runtime, snapshot: EmailSnapshot): Pr
   return { requests: bodies.map(state) };
 }
 /** One request of a campaign copy's screen; `call` names the campaign on its line, `key` the copy (copyKey) for the second classifier's record. */
-export async function screenWindow(runtime: Runtime, input: ScreenInput, window: number, call?: ScreenCall, key?: string): Promise<ScreenResult> {
+export async function screenWindow(runtime: Runtime, input: ScreenInput, window: number, call?: ScreenCall, key?: string, charge?: () => Promise<void>): Promise<ScreenResult> {
   const settings = runtime.config.screen;
   if (!settings) throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', 'Hosted content screening is unavailable.', undefined, true);
   const shadow: ShadowRef | undefined = runtime.config.shadow && key ? { kind: 'campaign_copy', digest: key, threshold: settings.threshold, workspaceId: call?.workspaceId, campaignId: call?.campaignId } : undefined;
-  return evaluate(settings.endpoint, settings.apiKey, settings.model, input.requests[window], call, window, input.requests.length, runtime.db, runtime.screenHandover, CAMPAIGN_SAMPLE, shadow);
+  return evaluate(runtime, input.requests[window], call, window, input.requests.length, CAMPAIGN_SAMPLE, shadow, charge);
 }

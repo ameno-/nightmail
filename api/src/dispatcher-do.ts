@@ -193,8 +193,7 @@ export class DispatcherShard extends DurableObject<Env> {
   private async runtime(): Promise<Runtime> {
     const { Pool, drizzle, loadConfig, r2Storage, feedbackSink, workWake, enqueueShadow } = await loadDeps();
     const config = loadConfig({ ...this.env });
-    // The second classifier (src/screen-shadow.ts) is never called from this object, whose six connections are for SES and
-    // the screen: when a run has ended, what it kept goes onto the second classifier's queue, in sends nothing waits for.
+    // Shadow comparisons go to their own queue. Only failover gate calls share the object's SES connections (at most two).
     const shadowQueue = this.env.JEVF_QUEUE;
     if (!shadowQueue) config.shadow = undefined;
     // A small persistent pool: claims are sequential per lane and provider calls do not hold connections.

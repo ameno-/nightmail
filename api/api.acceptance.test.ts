@@ -25131,13 +25131,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
   // The second classifier (src/screen-shadow.ts). Both classifiers as stubs on hostedScreenFixture's fetch mock: the screen's
   // flags SampleMarker, as there; the second's answers what `jevf` says. Each keeps the request bodies it was sent.
   const JEVF_URL = 'https://jevf.synthetic.invalid/v1/systemone';
-  function twoClassifiers(jevf: (init: RequestInit, body: string) => Response | Promise<Response>, jevDown: () => boolean = () => false) {
+  function twoClassifiers(jevf: (init: RequestInit, body: string) => Response | Promise<Response>, jevDown: () => boolean | number = () => false) {
     const sent = { jev: [] as string[], jevf: [] as { body: string; authorization: string | null }[] };
     (globalThis.fetch as unknown as { mock: { mockImplementation(fn: unknown): void } }).mock.mockImplementation(async (url: RequestInfo | URL, init: RequestInit = {}) => {
       const body = String(init.body);
       if (String(url) === JEVF_URL) { sent.jevf.push({ body, authorization: new Headers(init.headers).get('authorization') }); return jevf(init, body); }
       assert.equal(String(url), 'https://screen.synthetic.invalid'); sent.jev.push(body);
-      if (jevDown()) return new Response(null, { status: 503 });
+      const down = jevDown(); if (down) return new Response(null, { status: down === true ? 503 : down });
       const { subject, body: text } = JSON.parse(body).state.email as { subject: string; body: string };
       return Response.json({ model: 'jev-fixture', answers: { spam: { noul: /samplemarker/.test(`${subject}\n${text}`.toLowerCase()) ? 0.99 : 0.01 } }, usage: { input_tokens: Math.ceil(body.length / 4), output_tokens: 1 } });
     });
@@ -25164,6 +25164,70 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     return { sends, get dropped() { return dropped; }, settled: () => active || waiting.length ? new Promise<void>(resolve => { idle.push(resolve); }) : Promise.resolve(),
       queue: { sendBatch: async (messages: { body: string; contentType: 'text' }[]) => { sends.push(messages); for (const message of messages) waiting.push({ body: message.body, attempts: 1 }); pump(); } } };
   }
+
+  test('hosted screen failover: JevF gates on billing and auth errors, leaves SES capacity, and returns to the primary after cool-off', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, run, jobs }) => t.test('classifiers', async t => {
+      const { loadConfig } = await import('./src/config.js'), { screenWindow } = await import('./src/screen.js');
+      const acct = '112223330023', { wid, delivered } = await hostedScreenFixture(t, runtime, db, acct, 'failover.invalid');
+      const config = loadConfig({ BANE_ROOT_SECRET: AUTH_SECRET, PUBLIC_URL: PUBLIC_ORIGIN, TYPESAFE_API_KEY: 'fixture',
+        JEV_ENDPOINT: runtime.config.screen!.endpoint, JEV_MODEL: 'billing-fixture', JEVF_API_KEY: 'jevf-fixture-key', JEVF_ENDPOINT: JEVF_URL });
+      runtime.config.screen = config.screen; runtime.config.shadow = config.shadow;
+      const comparisons: unknown[] = []; runtime.shadow = items => comparisons.push(...items);
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'failover', permissions: ['send', 'read'] }), 201);
+      const post = async (subject: string, to = 'person@example.invalid') => ok(await local('POST', '/v1/emails/send',
+        { from: 'a@failover.invalid', to, subject, text: 'Synthetic receipt' }, 'live', { authorization: `Bearer ${key.secret}` }), 202).id as string;
+      const { dispatch, campaign, send } = await campaignHarness(runtime, db, local, run, jobs, wid, acct, 'news@failover.invalid');
+      let status = 402, active = 0, peak = 0, siblingSent = false, fail = false;
+      const logs: Json[] = []; for (const level of ['warn', 'info'] as const) t.mock.method(console, level, (line: string) => { logs.push(JSON.parse(line)); });
+      const sent = twoClassifiers(async (init, body) => {
+        peak = Math.max(peak, ++active);
+        try {
+          if (fail) return new Response(new ReadableStream({ start: c => c.error(new TypeError('Network connection lost.')) }));
+          const subject = JSON.parse(body).state.email.subject;
+          const delay = subject === 'Receipt' ? 2450 : subject.startsWith('Slow') ? 500 : 0;
+          if (delay) await Promise.race([new Promise(resolve => setTimeout(resolve, delay)), new Promise<never>((_, reject) =>
+            init.signal!.addEventListener('abort', () => reject(init.signal!.reason), { once: true }))]);
+          if (subject.startsWith('Slow')) siblingSent ||= delivered.has('cached@example.invalid');
+          return jevfAnswers(subject === 'Flagged' ? 0.7 : 0.11);
+        } finally { active--; }
+      }, () => status);
+      const first = await post('Receipt'); assert.equal((await dispatch()).sent, 1);
+      assert.equal(sent.jevf[0]!.body, sent.jev[0]!.replace('"model":"billing-fixture"', '"model":"jevf"'));
+      assert.equal(sent.jevf[0]!.authorization, 'Bearer jevf-fixture-key');
+      const line = logs.find(l => l.code === 'CONTENT_SCREEN_CALL' && l.emailId === first && l.classifier === 'jevf')!;
+      assert.deepEqual([line.outcome, line.failoverReason, line.ms >= 2300], ['ok', 'http_402', true]);
+      status = 403; const spam = await post('Flagged'); assert.equal((await dispatch()).sent, 0);
+      assert.deepEqual((await db.query("SELECT data->'screen' AS screen FROM sending_email_events WHERE email_id=$1 AND type='reject'", [spam])).rows[0].screen,
+        { spam: 0.7, threshold: 0.7, model: 'jevf' });
+      status = 401; fail = true; const held = await post('Needs retry'); assert.equal((await dispatch()).sent, 0);
+      assert.deepEqual((await db.query('SELECT status,error_code FROM sending_emails WHERE id=$1', [held])).rows[0], { status: 'queued', error_code: 'CONTENT_SCREEN_UNAVAILABLE' });
+      fail = false; await db.query('UPDATE sending_emails SET scheduled_at=now() WHERE id=$1', [held]);
+      await post('Slow A'); await post('Slow B'); await post('Slow C'); await post('Receipt', 'cached@example.invalid');
+      assert.equal((await dispatch()).sent, 5);
+      assert.deepEqual([sent.jev.length, sent.jevf.length, peak, siblingSent, comparisons.length], [3, 7, 2, true, 0]);
+
+      // The open breaker survives a new run. Campaign copies persist the deciding model, charge one gate call each
+      // while the primary is skipped, and reach SES under those verdicts without asking either classifier again.
+      const c = await campaign('Failover digest', '<p>Hello {{first_name}}</p>', [{ first_name: 'Ada' }]);
+      assert.equal((await send(c)).delivery.expanded, 1);
+      assert.deepEqual((await db.query('SELECT DISTINCT model,spam FROM sending_campaign_screens WHERE campaign_id=$1', [c.id])).rows, [{ model: 'jevf', spam: 0.11 }]);
+      const charges = (await db.query('SELECT screen_charged FROM sending_campaign_reviews WHERE campaign_id=$1', [c.id])).rows[0].screen_charged;
+      assert.equal(sent.jevf.length - 7, charges); assert.equal((await dispatch()).sent, 1);
+      assert.deepEqual([sent.jev.length, sent.jevf.length, comparisons.length], [3, 7 + charges, 0]);
+
+      // One probe after a minute, even with simultaneous callers. The next request uses the recovered primary.
+      const now = Date.now(), clock = t.mock.method(Date, 'now', () => now + 60_001); status = 0;
+      try {
+        const ask = (charge?: () => Promise<void>) => screenWindow(runtime, { requests: [{ email: { subject: 'Probe', body: 'Receipt' } }] }, 0, undefined, undefined, charge);
+        assert.deepEqual((await Promise.all([ask(), ask(), ask()])).map(r => r.model), ['jev-fixture', 'jevf', 'jevf']);
+        assert.equal((await ask()).model, 'jev-fixture'); assert.equal(sent.jev.length, 5);
+        status = 402; let charged = 0;
+        assert.equal((await ask(async () => { charged++; })).model, 'jevf'); assert.equal(charged, 2);
+        const before = sent.jevf.length; runtime.screenHandover = () => sent.jev.length > 6;
+        await assert.rejects(ask(), { name: 'ScreenHandover' }); assert.equal(sent.jevf.length, before);
+      } finally { clock.mock.restore(); }
+    }));
+  });
 
   test('second classifier: every request the screen makes is repeated after the run and both answers are kept, for an email, a campaign test and campaign copies of several requests; a cached verdict, a retried dispatch and a batch written twice add nothing; nothing runs without its key', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, jobs }) => t.test('classifiers', async t => {
