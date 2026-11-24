@@ -17238,6 +17238,55 @@ describe('Sealed Logs facets', () => {
     });
   });
 
+  test('aggregate Logs tickets publish scoped exact rows and reauthorize the viewer before returning a stamped result', {timeout:25_000}, async t=>{
+    if(!fixtureWorker||!FIXTURE_DATABASE_URL)return t.skip('requires isolated loopback database and simulated installation');
+    const [{drizzle},{createApp},{runFacetAggregateTurn},{ensureRegionSettings}]=await Promise.all([
+      import('drizzle-orm/node-postgres'),import('./src/app.js'),import('./src/log-facet-aggregate-worker.js'),import('./src/ses-region-state.js'),
+    ]);
+    const db=await fixtureDatabase(t),person=await sessionFixture(t),wid=unique('logs-aggregate');
+    const hp=new pg.Pool({connectionString:FIXTURE_DATABASE_URL,max:1}),wp=new pg.Pool({connectionString:FIXTURE_DATABASE_URL,max:1});
+    cleanup(t,async()=>{await Promise.all([hp.end(),wp.end()]);});
+    await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[wid]);
+    await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,'owner')",[randomUUID(),person.userId,wid]);
+    const runtime:import('./src/core.js').Runtime={...fixtureWorker.runtime,db:drizzle(hp),config:{...fixtureWorker.runtime.config,multiTenant:true,workspaceId:wid},
+      startLogFacetFold:()=>assert.fail('an aggregate dashboard must not enroll a legacy source scan'),startLogFacetAggregate:(_ws:string)=>{}};
+    await ensureRegionSettings(runtime.db,runtime.config);
+    cleanup(t,async()=>{
+      for(const name of ['mailbox_messages','mail_messages','mailboxes','mail_threads','mailbox_domains','sending_emails','log_facet_changes',
+        'log_facet_dirty_messages','log_facet_deadlines','log_facet_message_facts','log_facet_buckets','log_facet_sent_seeds','log_facet_inbound_progress',
+        'log_facet_results','log_facet_rolling','log_facet_demands','log_facet_wakes','log_facet_retired_generations','log_facet_generations','log_facet_coverage',
+        'sending_metrics_hourly','jobs','ses_installation_settings','workspace_members'])
+        await db.query(`DELETE FROM ${name} WHERE workspace_id=$1`,[wid]);
+      await db.query('DELETE FROM workspaces WHERE id=$1',[wid]);
+    });
+    const app=createApp(),region=REGION,from=earlierMinute(floorMinute(),90),href=(mode:string)=>facetPath({mode,range:'24h',region,...mode==='refresh'&&{from}});
+    const get=async(path:string,ws=wid)=>await app.fetch(new Request(PUBLIC_ORIGIN+path,{headers:{cookie:person.cookie,'x-nightmail-workspace':ws}}),runtime);
+    const fresh=async(afterEnroll?:()=>Promise<void>)=>{
+      let wake!:()=>void;const registered=new Promise<void>(resolve=>{wake=resolve;});
+      runtime.startLogFacetAggregate=w=>{assert.equal(w,wid);wake();};
+      const original=runtime.db,probe=stage('before');runtime.db=stageDatabase(original,[probe],true);
+      const answer=get(href('refresh'));
+      try{
+        await Promise.race([registered,answer.then(()=>assert.fail('No aggregate demand registered'))]);await waitAt(probe,answer);
+        if(afterEnroll)await afterEnroll();
+        for(let i=0;i<16;i++){const turn=await runFacetAggregateTurn(drizzle(wp),wid);if(turn?.ready)break;}
+      }finally{probe.release();runtime.db=original;}
+      const response=await answer;assert.equal(response.status,200);return await response.json() as Json;
+    };
+    await seedSent(db,wid,from,'transactional','delivered');await seedInbound(db,wid,from);
+    const initial=await get(href('last'));assert.equal(initial.status,200);assert.equal((await initial.json() as Json).counts,null);
+    const owner=await fresh();assert.equal(owner.visibility,'admin');assert.equal(owner.from,from);assert.match(owner.asOf,/\.\d{6}Z$/);
+    const live=await get('/v1/logs?counts=true&limit=1&region='+encodeURIComponent(region)+'&from='+encodeURIComponent(from));
+    assert.deepEqual(owner.counts,(await live.json() as Json).counts);assert.equal(owner.counts.status.spam,1);
+    const old=await get(href('last'));assert.equal((await old.json() as Json).asOf,owner.asOf);
+    const member=await fresh(async()=>{await db.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=$2",[wid,person.userId]);});
+    assert.equal(member.visibility,'member');assert(!Object.hasOwn(member.counts.status,'spam'));assert(member.asOf>owner.asOf);
+    const publicMember=await get('/v1/logs?counts=true&limit=1&region='+encodeURIComponent(region)+'&from='+encodeURIComponent(from));
+    assert.deepEqual(member.counts,(await publicMember.json() as Json).counts);
+    const foreign=await get(href('refresh'),unique('no-membership'));assert.equal(foreign.status,403);assert.equal((await foreign.json() as Json).counts,undefined);
+    assert.equal((await db.query("SELECT id FROM jobs WHERE workspace_id=$1 AND type='logs.facetFold'",[wid])).rowCount,0);
+  });
+
   test('busy dashboard Logs responds pending, with only a freshly authorized historical cut for the same view', {timeout:15_000}, async t=>{
     await facetFixture(t,async({runtime,db,local,jobs})=>{
       const {enrollLogFacet,foldLogFacetSlot,releaseLogFacetTicket}=await import('./src/log-facet-fold.js');

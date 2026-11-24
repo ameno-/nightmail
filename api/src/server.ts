@@ -60,6 +60,7 @@ try {
   const { runtime, close: closeApi } = nodeRuntime(process.env);
   const facets=nodeLogFacetLane(runtime,process.env.DATABASE_URL);
   runtime.startLogFacetFold=facets.nudge;
+  runtime.startLogFacetAggregate=facets.aggregate;
   const close=async()=>{await facets.close();await closeApi();};
   runtime.dispatch = async (region, account, _count, _kind, priority) => {
     if (priority) await runtime.db.execute(sql`SELECT pg_notify('bane_priority', ${dispatchWakeKey(region, account)})`);

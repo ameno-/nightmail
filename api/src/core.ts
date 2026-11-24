@@ -179,6 +179,8 @@ export interface Runtime {
   deferNudge?: (work: (runtime: Runtime) => Promise<void>) => void;
   /** Starts a sealed Logs fold on a separate worker connection. The caller never runs it on its HTTP pool. */
   startLogFacetFold?: (slot: string) => void;
+  /** Coalesced off-request nudge for a workspace's incrementally certified Logs buckets. */
+  startLogFacetAggregate?: (workspaceId: string) => void;
   // Nudges the long-lived dispatcher for one account/region after queued mail commits. Dispatch
   // never depends on it: the dispatcher also polls and the scheduler pings it every minute.
   dispatch?: (region: string, accountId?: string, emails?: number, kind?: ReadyConnection['kind'], priority?: boolean, maxSendRate?: number) => Promise<void>;

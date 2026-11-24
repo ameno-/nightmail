@@ -10,7 +10,7 @@ export async function captureFacetSignature(db:DbExecutor) {
     VALUES ('sending_emails','sent','log_facet_capture_sent'),('mail_messages','messages','log_facet_capture_messages'),
       ('mailbox_messages','links','log_facet_capture_links'),('mailboxes','boxes','log_facet_capture_mailboxes')),
     ops(op,bits,old_tab,new_tab) AS (VALUES ('insert',4,NULL::text,'facet_new'),('update',16,'facet_old','facet_new'),('delete',8,'facet_old',NULL::text))
-    SELECT to_regclass('log_facet_generations') IS NOT NULL AND count(t.oid)=12 AND bool_and(
+    SELECT to_regclass('log_facet_rolling') IS NOT NULL AND to_regclass('log_facet_generations') IS NOT NULL AND count(t.oid)=12 AND bool_and(
       t.tgenabled IN ('O','A') AND t.tgtype=o.bits AND f.proname=s.fn AND t.tgoldtable::text IS NOT DISTINCT FROM o.old_tab
       AND t.tgnewtable::text IS NOT DISTINCT FROM o.new_tab) AS installed,
       string_agg(concat_ws(':',t.tgrelid,pg_relation_filenode(t.tgrelid),t.oid,t.xmin,f.oid,f.xmin),'|' ORDER BY s.rel,o.op) AS signature
@@ -114,4 +114,40 @@ export async function pruneFacetViews(db:DbExecutor) {
       ORDER BY expires_at LIMIT ${GC_PAGE} FOR UPDATE SKIP LOCKED),
     remove_d AS (DELETE FROM log_facet_demands t USING d WHERE t.ctid=d.ctid)
     DELETE FROM log_facet_results t USING r WHERE t.ctid=r.ctid`);
+}
+
+/** Retain a full extra day beyond the private dashboard's maximum accepted 31-day anchor,
+ * including all future mail. Reclaim only private cells, deadline groups and lineage before that
+ * floor, plus empty cells. Source mail and a previously published historical cut are untouched. */
+export async function trimFacetFootprint(db:Database,workspace:string,limit=GC_PAGE) {
+  if(!Number.isInteger(limit)||limit<1||limit>GC_PAGE)throw new RangeError('Invalid Logs horizon cleanup');
+  return db.transaction(async tx=>{
+    const {rows:[gate]}=await tx.execute<{held:boolean}>(sql`SELECT set_config('lock_timeout','150ms',true),
+      set_config('statement_timeout','2s',true),pg_try_advisory_xact_lock(712008,hashtext(${workspace})) AS held`);
+    if(!gate?.held)return 0;
+    const {rows:[c]}=await tx.execute<{generation:string;floor:string}>(sql`SELECT c.generation,
+      greatest(c.covered_from,date_trunc('hour',statement_timestamp(),'UTC')-interval '768 hours')::text AS floor
+      FROM log_facet_coverage c JOIN log_facet_inbound_progress p USING(workspace_id,generation)
+      WHERE c.workspace_id=${workspace} AND c.sent_done AND c.sent_witnesses_retired AND p.seeded AND p.advancing_to IS NULL
+      FOR NO KEY UPDATE OF c`);
+    if(!c)return 0;
+    await tx.execute(sql`UPDATE log_facet_coverage SET covered_from=${c.floor}::timestamptz
+      WHERE workspace_id=${workspace} AND generation=${c.generation} AND covered_from<${c.floor}::timestamptz`);
+    const removals=[
+      ['log_facet_buckets',sql`grain='minute' AND bucket_at<${c.floor}::timestamptz`],
+      ['log_facet_buckets',sql`grain='hour' AND bucket_at<${c.floor}::timestamptz`],
+      ['log_facet_message_facts',sql`minute<${c.floor}::timestamptz`],
+      ['log_facet_deadlines',sql`minute<${c.floor}::timestamptz`],
+      ['log_facet_deadlines',sql`n=0`],['log_facet_buckets',sql`n=0`],
+    ] as const;
+    let left=limit;
+    for(const [table,predicate] of removals){
+      const name=sql.identifier(table);
+      const result=await tx.execute(sql`WITH page AS MATERIALIZED (SELECT ctid FROM ${name} WHERE workspace_id=${workspace}
+        AND generation=${c.generation} AND ${predicate} LIMIT ${left}) DELETE FROM ${name} t USING page p
+        WHERE t.ctid=p.ctid AND t.workspace_id=${workspace} AND t.generation=${c.generation}`);
+      left-=result.rowCount??0;if(!left)break;
+    }
+    return limit-left;
+  });
 }

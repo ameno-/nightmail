@@ -42,6 +42,7 @@ async function reconcile(db:DbExecutor,workspace:string,generation:string,floor:
       WHERE (o.minute,o.region,o.spam,o.admin_until,o.member_until) IS DISTINCT FROM
         (n.minute,n.region,n.spam,n.admin_until,n.member_until)),
     movement AS (SELECT o.minute,o.region,o.spam,o.admin_until,o.member_until,-1 AS d FROM prior o JOIN changed x ON x.id=o.message_id
+      WHERE o.minute>=${floor}::timestamptz
       UNION ALL SELECT n.minute,n.region,n.spam,n.admin_until,n.member_until,1 FROM current n JOIN changed x ON x.id=n.message_id),
     atoms AS MATERIALIZED (SELECT m.minute,m.region,m.d,k.band,k.status,k.deadline FROM movement m
       CROSS JOIN LATERAL (VALUES ('admin',CASE WHEN m.spam THEN 'spam' ELSE 'received' END,m.admin_until),
@@ -109,7 +110,7 @@ export async function advanceInboundFacetClock(db:Database,workspace:string,limi
         WHERE workspace_id=${workspace} AND generation=${c.generation} AND deadline<=(SELECT target FROM boundary)
         ORDER BY deadline,minute,region,band,status LIMIT ${limit+1}),
       batch AS MATERIALIZED (SELECT * FROM page ORDER BY deadline,minute,region,band,status LIMIT ${limit}),
-      delta AS (SELECT minute,region,band,status,-n AS n FROM batch),${mergeFacetCells(workspace,c.generation)},
+      delta AS (SELECT minute,region,band,status,-n AS n FROM batch WHERE minute>=${c.floor}::timestamptz),${mergeFacetCells(workspace,c.generation)},
       removed AS (DELETE FROM log_facet_deadlines d USING batch b WHERE d.workspace_id=${workspace} AND d.generation=${c.generation}
         AND (d.deadline,d.minute,d.region,d.band,d.status)=(b.deadline,b.minute,b.region,b.band,b.status)),
       size AS MATERIALIZED (SELECT count(*)::int AS n FROM page)
