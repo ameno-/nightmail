@@ -88,7 +88,8 @@ try {
       await client.query('RESET lock_timeout; RESET statement_timeout');continue;
     }
     if(source.startsWith('-- bane:no-transaction\n')) {
-      await client.query("SET lock_timeout='2s'; SET statement_timeout='10min'");
+      // CONCURRENTLY takes only SHARE UPDATE EXCLUSIVE (never blocks reads or writes) and waits for older snapshots.
+      await client.query("SET lock_timeout='15s'; SET statement_timeout='10min'");
       for(const statement of source.split('\n').map(s=>s.trim()).filter(s=>s && !s.startsWith('--'))) {
         const drop=/^DROP INDEX CONCURRENTLY IF EXISTS ([a-z_][a-z0-9_]*);$/i.exec(statement);
         const match=drop??/^CREATE (?:UNIQUE )?INDEX CONCURRENTLY IF NOT EXISTS ([a-z_][a-z0-9_]*) ON .+;$/i.exec(statement);

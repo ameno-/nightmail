@@ -75,11 +75,11 @@ export function establishedBy(o: { override: boolean; history: TrackRecord | nul
 }
 /**
  * Pacing protects the shared pool; it is not a customer limit. With a daily limit: clamp(limit ÷ 20, 50, 500) a minute.
- * Without one: a quarter of the pool's SES rate (the share campaign planning already uses), at least 500 a minute. Half
- * of it per sending domain (at least 50). The dispatcher also gives every workspace with queued mail a slot before any
- * gets a second, under the pool's own rate (docs/dispatch-scaling.md). hosted_minute_cap (migration 348) applies it.
+ * In good standing past growth: the full pool SES rate (at least 500 a minute; a quarter while in growth), half per
+ * sending domain (at least 50), with truly transactional mail exempt from the shared-pool minute/domain burst cap.
+ * The dispatcher shares marketing round-robin across active workspaces and puts transactional first (migration 457).
  */
-export const PACE = { floor: 50, ceiling: 500, perDay: 20, uncappedFloor: 500, poolShare: 4 } as const;
+export const PACE = { floor: 50, ceiling: 500, perDay: 20, uncappedFloor: 500, poolShare: 1 } as const;
 export const bandFor = (score: number) => LIMIT_BANDS.find(b => score >= b.min)!;
 export const nextBand = (score: number) => [...LIMIT_BANDS].reverse().find(b => b.min > score) ?? null;
 /**

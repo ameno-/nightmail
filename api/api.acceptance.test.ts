@@ -15784,7 +15784,7 @@ describe('Dashboard API capabilities', () => {
       ok(await send(), 202);
       assert.ok(await usedDay() > 12_000);
 
-      // The pace: without a daily limit, a quarter of the pool's SES rate (at least 500) a minute, half per domain.
+      // The pace: while in the 24h growth pace, a quarter of the pool's SES rate (at least 500) a minute; past growth, the full pool rate, half per domain.
       const pace = async () => (await db.query('SELECT hosted_minute_cap($1) AS cap', [wid])).rows[0].cap;
       assert.equal(await pace(), 500);
       await db.query(`INSERT INTO provider_account_limits(aws_account_id,region,refresh_after,checked_at,max_send_rate,max_24_hour_send,sent_last_24_hours) VALUES ($1,$2,now(),now(),200,1000000,0)`, [pool, REGION]);
@@ -15815,8 +15815,12 @@ describe('Dashboard API capabilities', () => {
       ok(await local('POST', `/v1/operator/workspaces/${wid}/growth/lift`, { reason: 'Known launch reviewed with the owner' }));
       assert.deepEqual([(await score()).limit.growth, (await db.query("SELECT count(*)::int AS n FROM hosted_operator_audit WHERE workspace_id=$1 AND action='operator-lift-growth'", [wid])).rows[0].n], [null, 1]);
       error(await local('POST', `/v1/operator/workspaces/${wid}/growth/lift`, { reason: 'Known launch reviewed with the owner' }), 409, 'GROWTH_NOT_ACTIVE');
+      // Past growth in good standing: full pool rate (12,000/min at 200/s), 0.5x per sending domain (6,000/min), and transactional exempt from the shared-pool burst cap.
+      assert.deepEqual([await pace(), (await score()).limit.perMinute], [12000, 12000]);
       await db.query('DELETE FROM hosted_burst_windows WHERE workspace_id=$1', [wid]);
-      assert.deepEqual(await burst([['a.example', 1501], ['a.example', 1500], ['b.example', 1500], ['c.example', 1]]), { c0: false, c1: true, c2: true, c3: false });
+      assert.deepEqual(await burst([['a.example', 6001], ['a.example', 6000], ['b.example', 6000], ['c.example', 1]]), { c0: false, c1: true, c2: true, c3: false });
+      const txAfterFull = (await db.query("SELECT hosted_burst_ok($1, 'a.example', 1, true) AS tx, hosted_burst_ok($1, 'a.example', 1, false) AS mkt", [wid])).rows[0];
+      assert.deepEqual(txAfterFull, { tx: true, mkt: false }, 'Transactional from a good-standing workspace is exempt from the shared-pool minute/domain burst cap.');
 
       // A new sender whose first 500 bring complaints is capped by the score its evaluation found.
       const other = wid + '-new';
@@ -15877,6 +15881,13 @@ describe('Dashboard API capabilities', () => {
       assert.deepEqual(await planned(), { [wid]: [200, 1000000], [byo]: [14, 50000] }, 'Exempt from hosted quotas: the full pooled rate. The BYO account is unchanged.');
       await db.query('UPDATE workspaces SET exempt_hosted_quotas=false WHERE id=$1', [wid]);
       assert.deepEqual((await planned())[wid], [50, 1000000], 'The flag off again: the quarter again.');
+      // A good-standing shared workspace (graded, daily_limit NULL, past growth) plans at the full pool rate too; growth/override/capped stay at a quarter.
+      await db.query(`INSERT INTO sender_standing(workspace_id,phase,first_recipients,score,target,quality,band_limit,daily_limit,growth_cap,growth_until,computed_at,evidence_at) VALUES($1,'graded',500,95,95,98,NULL,NULL,1000,now()+interval '12 hours',now(),now()) ON CONFLICT(workspace_id) DO UPDATE SET phase='graded',daily_limit=NULL,step='ok',growth_cap=1000,growth_until=now()+interval '12 hours'`, [wid]);
+      assert.deepEqual((await planned())[wid], [50, 1000000], 'Still in 24h growth: keeps the quarter.');
+      await db.query(`UPDATE sender_standing SET growth_until=now()-interval '1 minute' WHERE workspace_id=$1`, [wid]);
+      assert.deepEqual((await planned())[wid], [200, 1000000], 'Good standing past growth: full pooled rate.');
+      await db.query(`UPDATE sender_standing SET daily_limit=500 WHERE workspace_id=$1`, [wid]);
+      assert.deepEqual((await planned())[wid], [50, 1000000], 'Score-capped / frozen: back to a quarter.');
     });
   });
 
@@ -34333,7 +34344,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
 
   test('the pacing gate spaces slots evenly at the quota times the rate factor and brakes to the quota after throttling', async () => {
     const { initialGate, reserve, brake, shardRate,shardLeaseSize } = await import('./src/dispatcher.js');
-    assert.deepEqual([shardLeaseSize(14,8),shardLeaseSize(200,8),shardLeaseSize(1000,8)],[6,13,24]);
+    assert.deepEqual([shardLeaseSize(14,8),shardLeaseSize(50,8),shardLeaseSize(200,8),shardLeaseSize(1000,8)],[6,12,24,24]);
     const gate = initialGate();
     gate.quota = { maxSendRate: 20, max24HourSend: -1, sentLast24Hours: 0, checkedAt: Date.now() };
     const pacing = { rateFactor: 1.1, live: true } as const;
@@ -34352,6 +34363,20 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     assert.ok(gate.nextAllowedAt >= started + 1000, 'Braking also yields the slots that ran ahead.');
     gate.brakeUntil = Date.now() - 1;
     assert.equal(shardRate(gate, undefined, pacing), 22, 'The brake releases after its window.');
+    // Split 429 brake: marketing throttling brakes only marketing to (1 - txReservePercent) of raw quota and yields 1 s,
+    // without touching transactional rate or clock.
+    const { marketingShardRate } = await import('./src/dispatcher.js');
+    const g2 = initialGate();
+    g2.quota = { maxSendRate: 200, max24HourSend: -1, sentLast24Hours: 0, checkedAt: Date.now() };
+    const p2 = { rateFactor: 1.05, txReservePercent: 15, live: true } as const;
+    assert.equal(marketingShardRate(g2, undefined, p2), 210, 'Unbraked marketing borrows the full transactional reserve.');
+    const tBefore = Date.now();
+    brake(g2, 'marketing');
+    assert.equal(shardRate(g2, undefined, p2), 210, 'Marketing 429 never brakes transactional rate.');
+    assert.equal(g2.brakeUntil, undefined, 'Marketing 429 never sets the global brake.');
+    assert.equal(marketingShardRate(g2, undefined, p2), 170, 'Braked marketing drops to (1 - 15%) of raw quota.');
+    assert.ok((g2.marketingAllowedAt ?? 0) >= tBefore + 1000, 'Braked marketing yields 1 s of slots.');
+    assert.equal(reserve(g2, 1, undefined, p2, 'transactional'), 0, 'Transactional still sends immediately with 0 ms wait while marketing is braked.');
   });
 
   test('transactional mail wins the next lease ahead of older non-campaign marketing', async t => {
@@ -34368,6 +34393,44 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await dispatchDue(runtime, REGION, { batchSize: 1, until: Date.now() });
       const { rows } = await db.query('SELECT id, status FROM sending_emails WHERE id = ANY($1)', [[transactional.id, marketing.id, future.id]]);
       assert.deepEqual(Object.fromEntries(rows.map(r => [r.id, r.status])), { [transactional.id]: 'accepted', [marketing.id]: 'queued', [future.id]:'queued' });
+    });
+  });
+
+  test('transactional mail across workspaces leases strictly before marketing even behind ownerCursor, and marketing shares round-robin', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { dispatchDue, initialGate } = await import('./src/dispatcher.js');
+      const pool = '111122229999', wsTx = 'ws_a_tx', wsM1 = 'ws_m_one', wsM2 = 'ws_m_two';
+      Object.assign(runtime.config, { multiTenant: true });
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready') ON CONFLICT DO NOTHING`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:feedback`]);
+      await db.query(`INSERT INTO provider_account_limits(aws_account_id,region,refresh_after,checked_at,max_send_rate,max_24_hour_send,sent_last_24_hours) VALUES ($1,$2,now(),now(),200,1000000,0) ON CONFLICT (aws_account_id,region) DO UPDATE SET max_send_rate=200, checked_at=now()`, [pool, REGION]);
+      for (const [wid, dom] of [[wsTx, 'tx.example.net'], [wsM1, 'm1.example.net'], [wsM2, 'm2.example.net']] as const) {
+        await db.query('INSERT INTO workspaces(id,slug,name) VALUES($1,$1,$1) ON CONFLICT DO NOTHING', [wid]);
+        await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state,pool_tenant_name) VALUES ($1,$1,$2,'ready','shared',$3,'ready','t-'||$1) ON CONFLICT DO NOTHING`, [wid, REGION, pool]);
+        await db.query(`INSERT INTO provider_connection_regions(connection_id,region,tenant_state,sending_state) VALUES ($1,$2,'ready','ready') ON CONFLICT DO NOTHING`, [wid, REGION]);
+        await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified') ON CONFLICT DO NOTHING`, [dom, wid]);
+        await db.query(`INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES ($1,'inst_'||$1,$2,jsonb_build_array($2::text)) ON CONFLICT DO NOTHING`, [wid, REGION]);
+        await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES ('key_'||$1,$1,'k',md5($1),'nm_000000','["send"]','[]') ON CONFLICT DO NOTHING`, [wid]);
+        await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'c_'||$1||'_'||n,$1,'u'||n||'@example.net','subscribed' FROM generate_series(1,10) n ON CONFLICT DO NOTHING`, [wid]);
+      }
+      const queueMail = async (wid: string, dom: string, kind: 'transactional' | 'marketing', n: number) => {
+        const snap = JSON.stringify({ kind, from: `s@${dom}`, to: ['u1@example.net'], cc: [], bcc: [], replyTo: [], region: REGION, subject: kind, text: 'hi', attachments: [], tracking: false, headers: [] });
+        await db.query(`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,created_at)
+          SELECT $1||'_'||n,$2,'key_'||$2,$3,$4,jsonb_build_array('u'||n||'@example.net'),'[]','[]',$5,jsonb_set($6::jsonb,'{to}',jsonb_build_array('u'||n||'@example.net')),true,'queued',clock_timestamp()-interval '1 minute'+n*interval '1 millisecond'
+          FROM generate_series(1,$7::int) n`, [`em_${wid}_${kind}`, wid, REGION, `s@${dom}`, kind, snap, n]);
+      };
+      // Queue 6 marketing rows per marketing workspace and 4 transactional rows in ws_a_tx, with ownerCursor already past ws_a_tx.
+      await queueMail(wsM1, 'm1.example.net', 'marketing', 6);
+      await queueMail(wsM2, 'm2.example.net', 'marketing', 6);
+      await queueMail(wsTx, 'tx.example.net', 'transactional', 4);
+      const gate = { ...initialGate(), ownerCursor: 'ws_m_one' };
+      // Lease 6 rows: all 4 transactional rows MUST go first (even though ownerCursor > ws_a_tx), plus 1 marketing from each marketing workspace.
+      await dispatchDue(runtime, REGION, { accountId: pool, gate, batchSize: 6, lanes: 1, until: Date.now() });
+      const accepted = (await db.query(`SELECT workspace_id, snapshot->>'kind' AS kind, count(*)::int AS n FROM sending_emails WHERE workspace_id = ANY($1) AND status = 'accepted' GROUP BY 1, 2 ORDER BY 1, 2`, [[wsTx, wsM1, wsM2]])).rows;
+      assert.deepEqual(accepted, [
+        { workspace_id: wsTx, kind: 'transactional', n: 4 },
+        { workspace_id: wsM1, kind: 'marketing', n: 1 },
+        { workspace_id: wsM2, kind: 'marketing', n: 1 },
+      ], 'All 4 transactional rows beat marketing even behind ownerCursor, and remaining marketing slots split 1:1.');
     });
   });
 
