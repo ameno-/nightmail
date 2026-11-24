@@ -11,10 +11,14 @@ CREATE TABLE log_facet_changes (
   workspace_id text NOT NULL,
   entity_id text,
   minute timestamptz,
+  source_at timestamptz,
+  sent_ids text[],
   region text,
   kind text,
   status text,
   delta bigint
 );
-CREATE INDEX log_facet_changes_scope ON log_facet_changes(workspace_id,id);
+CREATE INDEX log_facet_changes_scope ON log_facet_changes(workspace_id,source,id);
+CREATE INDEX log_facet_changes_seed ON log_facet_changes(workspace_id,source_at,(sent_ids[1]),id) WHERE source='sent';
+CREATE INDEX log_facet_changes_inbound ON log_facet_changes(id) WHERE source IN ('message','link','box');
 CREATE INDEX log_facet_changes_age ON log_facet_changes(captured_at,id);
