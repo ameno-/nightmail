@@ -31,8 +31,9 @@ import { jsonLd, llmsFull, llmsSiteIndex, markdownFiles, markdownPath, structure
 const attr = (value: string) => value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;')
 const prerenderModule = fileURLToPath(new URL('./src/features/pricing/prerender.tsx', import.meta.url))
 const bootScript = fileURLToPath(new URL('./src/features/home/shell/boot.js', import.meta.url))
-/** Over the app's own page until it takes over (index.tsx); the rest is the app's stylesheet, cut down. */
-const SHELL_CSS = '#price-shell{position:absolute;top:0;left:0;z-index:2147483000;width:100%}'
+/** Over the app's own page until it takes over (index.tsx), and not at all at an address it doesn't show (theme.js,
+ *  data-plain); the rest is the app's stylesheet, cut down. */
+const SHELL_CSS = '#price-shell{position:absolute;top:0;left:0;z-index:2147483000;width:100%}html[data-shell=off] #price-shell{display:none}'
 /** The first fonts (public/fonts/*-basic.woff2, features/pricing/fonts/README.md): the app's, cut down to these
  *  characters, and preloaded. The painted page knows only these (its CSS leaves out the app's own faces of those
  *  families: WHOLE_FACES), so it fetches nothing else; once the app's stylesheet is in, they still serve these
@@ -118,8 +119,12 @@ export function pricePages(): Plugin {
           `<link rel="preload" href="${wall.phone}" as="image" type="image/avif" media="(max-width: 640px)" />`,
           `<link rel="preload" href="${wall.wide}" as="image" type="image/avif" media="(min-width: 641px)" />`,
         ].map(line => `\n    ${line}`).join(''))
+        set(/(<script src="\/theme.js")(?=><\/script>)/, ' data-plain="#sources"')
+        // Nothing is drawn until the whole painted page has arrived (#root follows it): over a slow connection a page drawn
+        // while its HTML streams in grows as each row's rest arrives (Chrome; other browsers ignore it).
+        set(/(<\/title>)/, '\n    <link rel="expect" href="#root" blocking="render" />')
         set(/(<\/title>)/, `\n    <style data-shell-css>${SHELL_CSS}${pruneCss(css, usedNames(html + shell, THEME_ATTRIBUTES)).replace(WHOLE_FACES, '')}</style>\n    <style>${faces}</style>`)
-        html = html.replace('<div id="root"></div>', `<div id="price-shell">${shell}</div>\n    <div id="root"></div>\n    <script src="${boot}" defer data-shell="price-shell" data-press="button" data-wait="none" data-plain="#sources" data-keep=".boot-loader, .price-page" data-css="${styles[0]}" data-preload="${preload.join(' ')}" data-entry="${entry[0]}"></script>`)
+        html = html.replace('<div id="root"></div>', `<div id="price-shell">${shell}</div>\n    <div id="root"></div>\n    <script src="${boot}" defer data-shell="price-shell" data-press="button" data-wait="none" data-keep=".boot-loader, .price-page" data-css="${styles[0]}" data-preload="${preload.join(' ')}" data-entry="${entry[0]}"></script>`)
         this.emitFile({ type: 'asset', fileName: page.file, source: html })
       }
       for (const { file, source } of markdownFiles()) this.emitFile({ type: 'asset', fileName: file, source })

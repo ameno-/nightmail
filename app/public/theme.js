@@ -29,6 +29,14 @@
   try { if (localStorage.getItem('nightmail.dashboard-ready')) root.dataset.member = '' } catch {}
 })()
 
+// A price page's painted first screen (app/price-pages.ts) shows its plain address: with a query (other than utm_*) or
+// the hash its script tag names (data-plain), the app draws it instead, from the start (home/shell/boot.js).
+;(() => {
+  const plain = document.currentScript?.dataset.plain
+  if (plain === undefined) return
+  if ([...new URLSearchParams(location.search).keys()].some(name => !name.startsWith('utm_')) || (plain && location.hash === plain)) document.documentElement.dataset.shell = 'off'
+})()
+
 ;(() => {
   // The homepage has no theme switch: it is in the system's theme (lib/theme.tsx). Elsewhere a saved choice wins.
   let saved = null

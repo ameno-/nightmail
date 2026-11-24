@@ -7,8 +7,8 @@
 // picture (.fac-poster), or none to wait for the reader; data-keep, what the app may show over it in the meantime
 // (.boot-loader, .fac-page); data-press, the buttons whose press is held (the homepage's Get started, button.fac-cta,
 // shown pressed at once). The app's stylesheet goes in before the page's own inlined one (style[data-shell-css]) where
-// there is one, so it can't restyle the painted page while the app loads. With data-plain, the first screen shows only
-// its own address: one with a query (other than utm_*) or the hash data-plain names is the app's at once.
+// there is one, so it can't restyle the painted page while the app loads. Where theme.js turned the first screen off
+// (html[data-shell=off]: an address it doesn't show), the app starts at once.
 ;(() => {
   const me = document.currentScript, set = me.dataset, root = document.getElementById('root')
   const shell = document.getElementById(set.shell || 'home-shell'), keep = set.keep || '.boot-loader, .fac-page'
@@ -23,8 +23,7 @@
     const entry = () => add('script', { type: 'module', src: set.entry, crossOrigin: '' })
     css.addEventListener('load', entry, { once: true }); css.addEventListener('error', entry, { once: true })
   }
-  const asked = set.plain !== undefined && ([...new URLSearchParams(location.search).keys()].some(name => !name.startsWith('utm_')) || (!!set.plain && location.hash === set.plain))
-  if (!shell || !root || asked || document.documentElement.dataset.shell === 'off') { if (shell) shell.remove(); start(); return }
+  if (!shell || !root || document.documentElement.dataset.shell === 'off') { if (shell) shell.remove(); start(); return }
 
   shell.addEventListener('click', event => {
     const button = event.target instanceof Element && event.target.closest(set.press || 'button.fac-cta')
