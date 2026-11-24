@@ -1373,7 +1373,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
 // The sign-up limit (src/signups.ts): an operator opens a number of places. A new account signing in with a mailbox
 // its sign-in proves takes one while there is one, a raise lets the oldest waiting addresses in first, two people racing
 // for the last place can't both have it, and staff and invitees sign in as before, uncounted.
-test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one each, each held address emailed once, and staff and invitees pass uncounted', async t => {
+test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one each, each held address emailed once, and staff and invitees pass uncounted; the sign-ups list keeps every waitlist join and sign-up', async t => {
   const {drizzle} = await import('drizzle-orm/node-postgres');
   const {loadConfig} = await import('./src/config.js');
   const {createApp} = await import('./src/app.js');
@@ -1434,7 +1434,23 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   const platform = `signup-platform-${randomUUID()}`;
   runtime.config.platformDomainWorkspace = platform;
   const told = async (...ps: Person[]) => (await db.query("SELECT p.email,(SELECT count(*)::int FROM account_notices WHERE kind='waitlist_admitted' AND data->>'email'=lower(p.email)) AS n FROM unnest($1::text[]) WITH ORDINALITY p(email,i) ORDER BY i",[ps.map(p=>p.email)])).rows.map(r=>r.n);
+  // The sign-ups list (signups.ts): every waitlist join and sign-up is a contact of one list in the platform workspace,
+  // kept up to date as it moves through. Its jobs are run here by hand, as the runner would, each once.
+  const signupsListId = `lst_${randomUUID().replaceAll('-','')}`, { signupJobs } = await import('./src/signups.js'), { JobDeferred } = await import('./src/jobs.js');
+  await db.query("INSERT INTO audience_lists(id,workspace_id,name) VALUES($1,$2,'Sign-ups')",[signupsListId,platform]);
+  runtime.config.signupsListId = signupsListId;
+  const syncList = async () => {
+    for (let job; (job = (await db.query("UPDATE jobs SET status='completed' WHERE id=(SELECT id FROM jobs WHERE workspace_id=$1 AND type LIKE 'signups.%' AND status='pending' ORDER BY created_at,id LIMIT 1) RETURNING id,type,payload",[platform])).rows[0]);) {
+      for (let payload = job.payload; payload;) payload = await signupJobs[job.type]!(runtime,payload,{id:job.id,workspaceId:platform,attempts:1}).then(()=>null,(error:unknown)=>{ if (error instanceof JobDeferred) return error.payload; throw error; });
+    }
+  };
+  const contactOf = async (p: Person) => (await db.query(`SELECT c.name,c.properties,c.marketing_consent AS consent,c.suppressed,c.deleted_at IS NOT NULL AS deleted,
+      EXISTS (SELECT FROM audience_list_members m WHERE m.workspace_id=c.workspace_id AND m.list_id=$3 AND m.contact_id=c.id) AS listed,
+      ARRAY(SELECT a.status||' '||a.source FROM audience_consent_audit a WHERE a.workspace_id=c.workspace_id AND a.contact_id=c.id ORDER BY a.id) AS consents
+    FROM audience_contacts c WHERE c.workspace_id=$1 AND c.email=lower($2)`,[platform,p.email,signupsListId])).rows[0] ?? null;
+  const stage = async (p: Person) => { const c = await contactOf(p); return c && [c.properties.status,c.consent,c.listed]; };
   cleanup(t,async()=>{
+    for (const table of ['audience_list_members','audience_consent_audit','audience_contacts','audience_list_counts','audience_lists']) await db.query(`DELETE FROM ${table} WHERE workspace_id=$1`,[platform]);
     await db.query('DELETE FROM jobs WHERE workspace_id=$1',[platform]);
     await db.query('DELETE FROM account_notices WHERE workspace_id=$1',[platform]);
     await db.query('UPDATE nightmail_signup_limit SET places=$1',[initial]);
@@ -1485,9 +1501,21 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   }
   // GitHub, with no place for it: the waitlist, said as before.
   const coder = someone(`coder-${randomUUID().slice(0,8)}@example.net`,githubAcr,'github');
+  // A contact deleted in the list's workspace stays deleted: what deletion keeps is there so it isn't enrolled again.
+  await db.query("INSERT INTO audience_contacts(id,workspace_id,email,deleted_at) VALUES($1,$2,lower($3),now())",[`con_${randomUUID().replaceAll('-','')}`,platform,coder.email]);
   assert.deepEqual(await signIn(coder).then(r=>[r.auth,r.place]),['waitlist',null]);
   // The oldest waiting addresses in the whole list, so a raise reaches them first.
   for (const [i, p] of [oldest, second, third].entries()) await db.query("UPDATE nightmail_waitlist SET first_at=timestamptz '2001-01-01'+$2*interval '1 day' WHERE email=lower($1)",[p.email,i]);
+  // Each waiting address is on the list, subscribed because it asked for access, with what a segment reads.
+  await syncList();
+  const firstAt = async (p: Person) => ((await db.query('SELECT first_at FROM nightmail_waitlist WHERE email=lower($1)',[p.email])).rows[0].first_at as Date).toISOString();
+  const joinedOldest = await firstAt(oldest);
+  assert.deepEqual(await contactOf(oldest),{name:null,properties:{status:'waiting',joined_at:joinedOldest,attempts:1,email_domain:'gmail.com',mailbox:'free'},
+    consent:'subscribed',suppressed:false,deleted:false,listed:true,consents:['subscribed Nightmail waitlist']});
+  assert.deepEqual((await contactOf(second)).properties,{status:'waiting',joined_at:await firstAt(second),attempts:1,email_domain:'example.net',mailbox:'company'});
+  assert.deepEqual(await contactOf(coder),{name:null,properties:{},consent:'unknown',suppressed:false,deleted:true,listed:false,consents:[]});
+  // Opting out sticks: later attempts keep the contact up to date and never subscribe it again.
+  await (await import('./src/audience.js')).recordUnsubscribe(runtime,platform,third.email,'footer-confirm');
   const closed = await places();
   assert.equal(closed.open,0);
 
@@ -1500,8 +1528,17 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   const audit = (await db.query("SELECT workspace_id,operator_id,before,after FROM hosted_operator_audit WHERE action='operator-set-signup-limit' AND operator_id=$1 ORDER BY at DESC LIMIT 1",[staff.account])).rows[0];
   assert.deepEqual(audit,{workspace_id:'platform',operator_id:staff.account,before:{limit:closed.limit},after:{limit:closed.limit+2,letIn:2}},'Every change is audited: who, before and after');
   const latecomer = gmail('latecomer');
+  // A suppressed address with no consent decision joins the list and its suppression stands; consent isn't recorded.
+  await db.query("INSERT INTO audience_contacts(id,workspace_id,email,suppressed,suppression_reason) VALUES($1,$2,lower($3),true,'hard_bounce')",[`con_${randomUUID().replaceAll('-','')}`,platform,latecomer.email]);
   assert.equal((await signIn(third)).auth,'waitlist','A place held for an older address is not the next arrival\'s');
   assert.equal((await signIn(latecomer)).auth,'waitlist');
+  await syncList();
+  const heldOldest = await contactOf(oldest);
+  assert.deepEqual([await stage(oldest),await stage(second),typeof heldOldest.properties.let_in_at],[['let_in','subscribed',true],['let_in','subscribed',true],'string']);
+  const unsubscribed = await contactOf(third);
+  assert.deepEqual([unsubscribed.properties.status,unsubscribed.properties.attempts,unsubscribed.consent,unsubscribed.consents],['waiting',2,'unsubscribed',['subscribed Nightmail waitlist','unsubscribed footer-confirm']]);
+  const late = await contactOf(latecomer);
+  assert.deepEqual([late.properties.status,late.consent,late.suppressed,late.listed,late.consents],['waiting','unknown',true,true,[]]);
   // A second raise emails only the address it lets in: nobody is told twice.
   const again = await setLimit(raised.limit+1);
   assert.deepEqual([again.letIn,again.emailed,again.notEmailed],[1,1,0]);
@@ -1514,6 +1551,12 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   const me = await (await request('/v1/me','GET',first.session)).json() as {workspaces:{id:string;role:string}[]};
   assert.deepEqual(me.workspaces.map(w=>w.role),['owner']);
   assert.deepEqual([await placeOf(first.account),await waiting(oldest)],['waitlist',null]);
+  // On the list it is the same contact, signed up now, still showing when it joined and was let in; nothing new consented.
+  await syncList();
+  const joinedUp = await contactOf(oldest);
+  assert.deepEqual([joinedUp.properties.status,joinedUp.properties.joined_at,joinedUp.properties.let_in_at,typeof joinedUp.properties.signed_up_at,joinedUp.properties.attempts,joinedUp.consents],
+    ['signed_up',joinedOldest,heldOldest.properties.let_in_at,'string',1,['subscribed Nightmail waitlist']]);
+  assert.deepEqual(await stage(third),['let_in','unsubscribed',true]);
   // Its card, once, after the sign-up committed: its place of the limit ("91 of 100"). Staff took no place and have none.
   const signedUp = await places();
   assert.deepEqual((await cards()).map(c => c.payload),[{kind:'signup',signedUp:signedUp.signedUp,limit:signedUp.limit}]);
@@ -1564,6 +1607,11 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   assert.equal(((await (await request('/v1/me','GET',winner.session)).json()) as {workspaces:unknown[]}).workspaces.length,1,'A new person under the limit gets in with a workspace');
   const full = await places();
   assert.deepEqual([full.signedUp,full.open],[taken.signedUp+1,0]);
+  // Who signed up without waiting is on the list as a sign-up; who lost the race waits there.
+  await syncList();
+  const opened = await contactOf([left, right][raced.findIndex(r=>r.session)]!);
+  assert.deepEqual([opened.properties.status,'joined_at' in opened.properties,opened.consents],['signed_up',false,['subscribed Nightmail sign-up']]);
+  assert.deepEqual(await stage([left, right][raced.findIndex(r=>!r.session)]!),['waiting','subscribed',true]);
 
   // At the limit, staff and an invitee sign in as before, and neither takes a place.
   const staffer = someone(`staff-${randomUUID()}@example.org`,googleAcr,'google','example.org'), moreStaff = await signIn(staffer);
@@ -1573,6 +1621,8 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   const joined = await signIn(invitee, invitation.acceptUrl);
   assert.deepEqual([await outcome(invitee),await placeOf(joined.account)],['signed_in:invitation',null]);
   assert.deepEqual(await places(),full);
+  await syncList();
+  assert.deepEqual([await contactOf(staffer),await contactOf(invitee)],[null,null],'Staff and invitees never asked for access');
 
   // An email that can't be queued (its table locked past the lock timeout) leaves the raise intact: the place is held
   // and the number saved, the answer says who wasn't emailed, and saving again emails them.
@@ -1593,8 +1643,23 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   const kept = await places(), lowered = await setLimit(0);
   assert.deepEqual([lowered.letIn,lowered.signedUp,lowered.held,lowered.emailed],[0,kept.signedUp,kept.held,0]);
   for (const session of [first.session,viaLink.session,winner.session]) assert.equal((await request('/v1/me','GET',session)).status,200);
+  // Without the list, a sign-in queues nothing for it.
+  await syncList();
+  runtime.config.signupsListId = undefined;
   const after = gmail('after');
   assert.equal((await signIn(after)).auth,'waitlist');
+  runtime.config.signupsListId = signupsListId;
+  assert.equal((await db.query("SELECT count(*)::int AS n FROM jobs WHERE workspace_id=$1 AND type LIKE 'signups.%' AND status='pending'",[platform])).rows[0].n,0);
+  // The backfill (scripts/sync-signups-list.ts) writes every waitlist address and sign-up, `after` too. Queued again
+  // before it runs, nothing changes; run again, it writes the same contacts.
+  const { queueSignupsBackfill } = await import('./scripts/sync-signups-list.js');
+  assert.deepEqual([(await queueSignupsBackfill(pool,platform)).queued,(await queueSignupsBackfill(pool,platform)).queued],[true,false]);
+  await syncList();
+  assert.deepEqual(await stage(after),['waiting','subscribed',true]);
+  const everyone = [oldest,second,third,coder,latecomer,left,right,after], once = await Promise.all(everyone.map(contactOf));
+  assert.equal((await queueSignupsBackfill(pool,platform)).queued,true);
+  await syncList();
+  assert.deepEqual(await Promise.all(everyone.map(contactOf)),once,'A second backfill writes the same contacts');
   // The Waitlist tab shows who is held and whether their email went.
   const entry = async (p: Person) => ((await (await request(`/v1/operator/waitlist?q=${encodeURIComponent(p.email)}`,'GET',staff.session)).json()) as {data:{letInAt:string|null;emailed:string|null}[]}).data.map(e=>[!!e.letInAt,e.emailed]);
   assert.deepEqual(await entry(after),[[false,null]]);

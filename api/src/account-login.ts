@@ -9,7 +9,7 @@ import { clientIpHeader, productName, requestHeader } from './brand.js';
 import { METHOD_ACR } from './config.js';
 import { ANALYTICS_SESSION_PARAM } from './analytics-events.js';
 import { requestNetwork, signInSignals, type RequestNetwork } from './abuse.js';
-import { placeReady, readPlaces, recordSignup, takePlace } from './signups.js';
+import { placeReady, queueSignupContacts, readPlaces, recordSignup, signupsList, takePlace } from './signups.js';
 
 const verifiedEmail = z.email().max(320);
 const loginFailed = () => new ApiError(403, 'SIGN_IN_DENIED', 'This account cannot sign in.');
@@ -138,11 +138,14 @@ async function recordAttempt(runtime: Runtime, claims: oidc.IDToken, upstream: P
 }
 
 // The waitlist (migration 366): a verified address nothing admitted, one row per address, every attempt counted. An
-// address that is already a verified user's isn't added. True when the address is on it now.
+// address that is already a verified user's isn't added. True when the address is on it now. With the sign-ups list on
+// (signups.ts), the same statement queues its contact's update; if that fails, the address joins without it.
 async function joinWaitlist(runtime: Runtime, email: string, name: string | null) {
-  const { rowCount } = await runtime.db.execute(sql`INSERT INTO nightmail_waitlist(email,name) SELECT lower(${email}),${name}
+  const list = signupsList(runtime.config), joined = sql`INSERT INTO nightmail_waitlist(email,name) SELECT lower(${email}),${name}
     WHERE NOT EXISTS (SELECT FROM nightmail_users WHERE email_verified AND lower(email)=lower(${email}))
-    ON CONFLICT(email) DO UPDATE SET name=coalesce(excluded.name,nightmail_waitlist.name),attempts=nightmail_waitlist.attempts+1,last_at=now()`);
+    ON CONFLICT(email) DO UPDATE SET name=coalesce(excluded.name,nightmail_waitlist.name),attempts=nightmail_waitlist.attempts+1,last_at=now() RETURNING email`;
+  const { rowCount } = list ? await runtime.db.execute(sql`WITH joined AS (${joined}), queued AS (${queueSignupContacts(list, sql`SELECT email FROM joined`)}) SELECT FROM joined`)
+    .catch(() => runtime.db.execute(joined)) : await runtime.db.execute(joined);
   return !!rowCount;
 }
 
@@ -276,8 +279,14 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
   await recordAttempt(runtime, claims, upstream, address, admitted, { email: emailAtLogin, network });
   // A sign-up is told to the operators (operator-alerts.ts) once it has committed, so the card can't block or fail it.
   if (signedUp && runtime.config.operatorSlackWebhookUrl) await readPlaces(runtime.db).then(async places => (await import('./operator-alerts.js')).alertNewSignup(runtime, runtime.db, userId, places)).catch(() => false);
-  // Admitted with a verified address: nothing is left to tell it at launch.
-  if (emailAtLogin && runtime.config.multiTenant) await runtime.db.execute(sql`DELETE FROM nightmail_waitlist WHERE email=lower(${emailAtLogin})`).catch(() => {});
+  // Admitted with a verified address: nothing is left to tell it at launch. With the sign-ups list on (signups.ts), the
+  // same statement queues the contact's update of an account that signed up or left the waitlist, once the sign-in has
+  // committed; if that fails, the address leaves without it.
+  if (emailAtLogin && runtime.config.multiTenant) {
+    const list = signupsList(runtime.config), left = sql`DELETE FROM nightmail_waitlist WHERE email=lower(${emailAtLogin}) RETURNING email`;
+    await (list ? runtime.db.execute(sql`WITH left_waitlist AS (${left}) ${queueSignupContacts(list, sql`SELECT email FROM left_waitlist UNION SELECT lower(${emailAtLogin}) WHERE ${signedUp}::boolean`)}`)
+      .catch(() => runtime.db.execute(left)) : runtime.db.execute(left)).catch(() => {});
+  }
   return {session, slot, userId, returnUrl:returnUrl.href};
 }
 
