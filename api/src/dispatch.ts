@@ -46,6 +46,7 @@ function resolveJobHandler(type: string): Promise<JobHandler | undefined> {
     if (type === 'audience.newsletterReaders') return (await import('./newsletters.js')).newsletterJobs[type];
     if (type.startsWith('billing.')) return (await import('./billing/jobs.js')).billingJobs[type];
     if (type === 'account.notify') return (await import('./account-notices.js')).accountNoticeJobs[type];
+    if (type.startsWith('signups.')) return (await import('./signups.js')).signupJobs[type];
     if (type.startsWith('byo.')) return (await import('./byo-regional.js')).regionalByoJobs[type];
     return undefined;
   });

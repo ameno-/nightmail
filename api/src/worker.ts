@@ -474,6 +474,8 @@ export default {
       await publicStatsTick(runtime);
       // Sender standing: every ten minutes (elected), the score, limit and ladder of each Hosted workspace.
       if (runtime.config.multiTenant) await (await core.wrapModuleLoad(() => import('./standing.js'))).standingTick(runtime);
+      // The sign-ups list: a sync run while any waitlist row or sign-up is due (src/signups.ts). It never throws.
+      if (runtime.config.multiTenant) await (await core.wrapModuleLoad(() => import('./signups.js'))).signupsTick(runtime);
       // Billing: the auto-recharge sweep and Stripe reconciliation (elected every 5 minutes).
       if (runtime.config.multiTenant) try { await (await core.wrapModuleLoad(() => import('./billing/stripe-jobs.js'))).billingMinute(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'BILLING_MINUTE_FAILED' }); }
       // Last, as it can take minutes: retention of the sent-side tables (elected every 15 minutes).

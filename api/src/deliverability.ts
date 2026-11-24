@@ -454,7 +454,8 @@ export async function screenActivity(db: DbExecutor, wid: string, since: string)
 
 // ---------- 5. audience health ----------
 const ROLE = ['admin', 'administrator', 'billing', 'contact', 'hello', 'help', 'hr', 'info', 'jobs', 'mail', 'marketing', 'media', 'news', 'newsletter', 'noreply', 'no-reply', 'office', 'postmaster', 'press', 'sales', 'support', 'team', 'webmaster'];
-const FREE = ['gmail.com', 'googlemail.com', 'yahoo.com', 'ymail.com', 'hotmail.com', 'outlook.com', 'live.com', 'msn.com', 'aol.com', 'icloud.com', 'me.com', 'mac.com', 'proton.me', 'protonmail.com', 'gmx.com', 'gmx.net', 'gmx.de', 'web.de', 'mail.com', 'yandex.com', 'yandex.ru', 'zoho.com', 'qq.com', '163.com'];
+// Free mailbox providers: an address at one is a person's own, not a company's (signups.ts reads it too).
+export const FREE_MAIL = ['gmail.com', 'googlemail.com', 'yahoo.com', 'ymail.com', 'hotmail.com', 'outlook.com', 'live.com', 'msn.com', 'aol.com', 'icloud.com', 'me.com', 'mac.com', 'proton.me', 'protonmail.com', 'gmx.com', 'gmx.net', 'gmx.de', 'web.de', 'mail.com', 'yandex.com', 'yandex.ru', 'zoho.com', 'qq.com', '163.com'];
 const TYPOS = ['gmial.com', 'gmai.com', 'gmal.com', 'gmaill.com', 'gnail.com', 'gmail.co', 'gmail.con', 'gmail.cm', 'gamil.com', 'hotmial.com', 'hotmal.com', 'hotmai.com', 'hotmail.co', 'hotmail.con', 'yaho.com', 'yahooo.com', 'yahoo.co', 'yahoo.con', 'outlok.com', 'outloo.com', 'outlook.co', 'outlook.con', 'iclod.com', 'icloud.co', 'aol.co'];
 const local = sql`lower(split_part(c.email, '@', 1))`, cdomain = sql`lower(split_part(c.email, '@', 2))`;
 const audienceMeasures = sql`count(*)::int AS contacts,
@@ -464,7 +465,7 @@ const audienceMeasures = sql`count(*)::int AS contacts,
   count(*) FILTER (WHERE c.last_click_at >= now() - interval '180 days')::int AS clicked180,
   count(*) FILTER (WHERE c.observed_since < now() - interval '180 days' AND coalesce(greatest(c.last_open_at, c.last_click_at), '-infinity') < now() - interval '180 days')::int AS stale,
   count(*) FILTER (WHERE c.observed_since IS NULL)::int AS "neverObserved",
-  count(*) FILTER (WHERE ${local} = ANY(${texts(ROLE)}))::int AS role, count(*) FILTER (WHERE ${cdomain} = ANY(${texts(FREE)}))::int AS "freeMail",
+  count(*) FILTER (WHERE ${local} = ANY(${texts(ROLE)}))::int AS role, count(*) FILTER (WHERE ${cdomain} = ANY(${texts(FREE_MAIL)}))::int AS "freeMail",
   count(*) FILTER (WHERE ${cdomain} = ANY(${texts(TYPOS)}))::int AS "typoDomains"`;
 const AUDIENCE_HEALTH_SAMPLE_LIMIT = 10_000, AUDIENCE_HEALTH_LIST_TOTAL_BUDGET = 40_000;
 type AudienceRow = { contacts: number; subscribed: number; unknown: number; unsubscribed: number; suppressed: number; clicked30: number; clicked90: number; clicked180: number; stale: number; neverObserved: number; role: number; freeMail: number; typoDomains: number };

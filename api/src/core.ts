@@ -105,6 +105,8 @@ export interface Config {
   platformDomainWorkspace?: string;
   /** Hosted only: From for Nightmail's own owner notices (sender standing), on the platform workspace's domain. */
   notifyFrom?: string;
+  /** Hosted only: the platform workspace's list of waitlist joins and sign-ups (src/signups.ts signupsList). */
+  signupsListId?: string;
   /** Hosted only: the support platform's operator credential, its URL and the handoff signing key (src/support.ts). */
   support?: { url?: string; signingKey?: { kty: 'OKP'; crv: 'Ed25519'; d: string; x: string }; addressIds?: string[] };
   /** Hosted only: where support reads this Worker's request lines (Workers Logs, src/support-logs.ts). */
