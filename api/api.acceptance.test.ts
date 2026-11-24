@@ -24910,12 +24910,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // removed when the test ends.
       const writer = new pg.Pool({ connectionString: FIXTURE_DATABASE_URL, max: 3 }), store = { write: (rows: Json[]) => writeComparisons(drizzle(writer), rows), written: (ids: string[]) => writtenComparisons(drizzle(writer), ids) };
       cleanup(t, async () => { await writer.query('DELETE FROM screen_comparisons WHERE workspace_id=$1', [wid]).catch(() => undefined); await writer.end(); });
-      type Mode = 'off' | 'ok' | 'slow' | 'down' | '429' | 'garbage' | 'hang';
-      let mode: Mode = 'off';
+      type Mode = 'off' | 'ok' | 'slow' | 'down' | '429' | 'garbage' | 'hang' | 'held';
+      let mode: Mode = 'off', letGo: (() => void)[] = [];
       const sent = twoClassifiers(async init => {
         const aborted = new Promise<never>((_, reject) => init.signal!.addEventListener('abort', () => reject(init.signal!.reason)));
         aborted.catch(() => undefined);
         if (mode === 'hang') return aborted;
+        if (mode === 'held') await Promise.race([new Promise<void>(resolve => { letGo.push(resolve); }), aborted]); // Answers when the test lets it.
         if (mode === 'down') throw new TypeError('fetch failed');
         if (mode === '429') return new Response('{"error":"rate limited"}', { status: 429, headers: { 'retry-after': '2', 'x-request-id': 'req_jevf_429' } });
         if (mode === 'garbage') return new Response('<html>502 Bad Gateway</html>');
@@ -24935,7 +24936,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const use = (next: Mode) => {
         mode = next; queued = undefined; runtime.config.shadow = undefined; runtime.shadow = undefined;
         if (next === 'off') return;
-        const settings = runtime.config.shadow = shadowSettings(1000, `jevf-${++uses}`), made = queued = jevfQueue(messages => consumeShadow(settings, store, messages));
+        const settings = runtime.config.shadow = shadowSettings(next === 'held' ? 30_000 : 1000, `jevf-${++uses}`), made = queued = jevfQueue(messages => consumeShadow(settings, store, messages));
         runtime.shadow = items => { sending = enqueueShadow(made.queue, items); };
       };
       const consumed = async () => { await sending; await queued!.settled(); };
@@ -24965,7 +24966,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
 
       // However the second classifier behaves, the round is the same, byte for byte: the screen's requests, what SES is sent,
       // every email's outcome and events. Each of the screen's requests still gets its row, once.
-      const expected: Record<Exclude<Mode, 'off'>, (counts: Record<string, number>, calls: number) => boolean> = {
+      const expected: Record<Exclude<Mode, 'off' | 'held'>, (counts: Record<string, number>, calls: number) => boolean> = {
         ok: (c, calls) => c.ok === requests && calls === requests,
         slow: (c, calls) => c.ok === requests && calls === requests,
         // Five failures in a row open the breaker; the calls already out by then end too. The rest are skipped.
@@ -24995,20 +24996,24 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual(breaker, ['opened', 'opened', 'opened'], 'down, garbage and hang each opened the breaker');
       assert.equal(logs.filter(l => l.code === 'SCREEN_SHADOW_RATE_LIMITED').length, 1); assert.equal(logs.filter(l => l.code === 'SCREEN_SHADOW_TIMEOUT').length, 1);
 
-      // No later: a dispatch run while the second classifier's calls from the run before are hanging takes what a run
+      // No later: a dispatch run while the second classifier's calls from the run before are still out takes what a run
       // without it takes. (A call starts only when its own run has ended, so the run after is the one it could delay.)
+      // The calls are held until the run has been timed, then answered.
       const timed = { off: [] as number[], hanging: [] as number[] };
       // Each is the second of two rounds, and the two take turns going first.
       for (let i = 0; i < 4; i++) for (const arm of i % 2 ? ['hanging', 'off'] as const : ['off', 'hanging'] as const) {
         if (arm === 'off') { use('off'); await round(); const without = await round(); timed.off.push(without.ms); assert.deepEqual(without.seen, baseline.seen); continue; }
-        use('hang'); const primed = await round();
-        assert.ok(primed.jevf >= 8, 'eight calls are hanging');
+        use('held'); const primed = await round();
+        assert.equal(primed.jevf, 8, 'eight calls are out');
         const during = await round(); timed.hanging.push(during.ms);
-        assert.deepEqual(during.seen, baseline.seen); assert.equal((await kept(primed.ids)).length, 0, 'They were still hanging when the run ended.');
-        await consumed();
+        assert.deepEqual(during.seen, baseline.seen); assert.deepEqual([(await kept(primed.ids)).length, letGo.length], [0, 8], 'They were still out when the run ended.');
+        // Let go, they and the requests behind them are answered as they come.
+        const free = setInterval(() => { for (const answer of letGo.splice(0)) answer(); }, 5);
+        try { await consumed(); } finally { clearInterval(free); }
+        assert.equal((await kept([...primed.ids, ...during.ids])).length, 2 * requests);
       }
       const median = (values: number[]) => { const sorted = [...values].sort((a, b) => a - b); return (sorted[1]! + sorted[2]!) / 2; };
-      t.diagnostic(`dispatch run of 12 emails, straight after another: without the second classifier ${timed.off.join(', ')} ms; with its calls from the run before hanging ${timed.hanging.join(', ')} ms (its deadline here: 1000 ms)`);
+      t.diagnostic(`dispatch run of 12 emails, straight after another: without the second classifier ${timed.off.join(', ')} ms; with eight of its calls from the run before still out ${timed.hanging.join(', ')} ms`);
       assert.ok(median(timed.hanging) < median(timed.off) + 500, `without ${timed.off} ms, with ${timed.hanging} ms`);
       const written = JSON.stringify([(await writer.query('SELECT to_jsonb(c) AS c FROM screen_comparisons c WHERE workspace_id=$1', [wid])).rows, logs.filter(l => String(l.code).startsWith('SCREEN_'))]);
       for (const secret of ['Private body', 'Receipt T', 'private.person', 'a@unmoved', 'SampleMarker', 'jevf-fixture-key', 'your order']) assert.ok(!written.includes(secret), secret);
@@ -25040,9 +25045,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
 
     // A 429 pauses everything for its Retry-After, and is not a failure.
     answer = () => new Response(null, { status: 429, headers: { 'retry-after': '1' } });
-    const limited = Date.now(); assert.deepEqual(await feed(3), ['rate_limited', 'skipped_rate_limited', 'skipped_rate_limited']);
+    assert.deepEqual(await feed(3), ['rate_limited', 'skipped_rate_limited', 'skipped_rate_limited']);
     answer = fine; assert.deepEqual(await feed(1), ['skipped_rate_limited']); assert.deepEqual([calls, runner.open], [8, false]);
-    await sleep(Math.max(0, 1100 - (Date.now() - limited))); assert.deepEqual(await feed(1), ['ok']);
+    await sleep(1100); assert.deepEqual(await feed(1), ['ok']); // The second after the 429 was answered has passed.
 
     // An over-long request is refused (413, or a 400 that says so): recorded as that, and however many, never a failure.
     answer = () => new Response('{"error":{"message":"input exceeds the 4096 token limit of this preview"}}', { status: 400 });

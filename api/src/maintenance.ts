@@ -215,6 +215,14 @@ function expired(name: string, table: string, by: SQL, where: SQL, extra: Partia
   return { name, oldest: sql`SELECT min(${by}) FROM ${t} WHERE ${where}`, size: extra.size, lane: extra.lane, batches: extra.batches,
     statement: () => sql`WITH gone AS (DELETE FROM ${t} WHERE ctid IN (SELECT ctid FROM ${t} WHERE ${where}${order} LIMIT ${size} FOR UPDATE SKIP LOCKED) RETURNING 1) SELECT count(*)::int AS n FROM gone` };
 }
+/** expired() for two tables as one step, under `name`: a batch of each in one statement, each taken as expired() takes it.
+ *  n is their sum, so the step repeats while either table still fills its batch; oldest is the older of the two. */
+function expiredTogether(name: string, tables: [{ table: string; by: SQL; where: SQL }, { table: string; by: SQL; where: SQL }]): Drain {
+  const [a, b] = tables.map(({ table, by, where }) => ({ t: sql`${sql.identifier(table)}`, by, where }));
+  const batch = ({ t, by, where }: { t: SQL; by: SQL; where: SQL }) => sql`DELETE FROM ${t} WHERE ctid IN (SELECT ctid FROM ${t} WHERE ${where} ORDER BY ${by} LIMIT ${RETENTION_BATCH} FOR UPDATE SKIP LOCKED) RETURNING 1`;
+  return { name, oldest: sql`SELECT least((SELECT min(${a!.by}) FROM ${a!.t} WHERE ${a!.where}),(SELECT min(${b!.by}) FROM ${b!.t} WHERE ${b!.where}))`,
+    statement: () => sql`WITH gone AS (${batch(a!)}), also AS (${batch(b!)}) SELECT ((SELECT count(*) FROM gone)+(SELECT count(*) FROM also))::int AS n` };
+}
 const unordered = { unordered: true } as const;
 const at = (column: string) => sql`${sql.identifier(column)}`;
 /**
@@ -298,10 +306,11 @@ async function retentionDrains(runtime: Runtime): Promise<Drain[]> {
         table === 'hosted_health_credits' ? {} : unordered)),
     ] : []),
     expired('agent_tokens', 'agent_tokens', at('expires_at'), sql`expires_at < ${cutoff}`),
-    // Classifier requests (src/screen-calls.ts), kept 30 days.
-    expired('content_screen_calls', 'content_screen_calls', at('created_at'), sql`created_at < ${cutoff}`),
-    // The second classifier's comparisons (src/screen-shadow.ts), kept 90 days.
-    expired('screen_comparisons', 'screen_comparisons', at('created_at'), sql`created_at < now() - interval '90 days'`),
+    // The classifier's records, in one step: its requests (src/screen-calls.ts), kept 30 days, and the second classifier's
+    // comparisons of them (src/screen-shadow.ts), kept 90. Each table's batch is taken as expired() takes one; the count
+    // logged under content_screen_calls is both tables' rows.
+    expiredTogether('content_screen_calls', [{ table: 'content_screen_calls', by: at('created_at'), where: sql`created_at < ${cutoff}` },
+      { table: 'screen_comparisons', by: at('created_at'), where: sql`created_at < now() - interval '90 days'` }]),
     // Abuse-monitoring signals past their retention (src/abuse.ts abuseExpired). Expiry runs whether monitoring is on or off.
     expired('abuse_signals', 'abuse_signals', at('last_at'), abuseExpired),
     expired('abuse_sampling', 'abuse_sampling', at('sampled_through'), sql`sampled_through < now()-interval '30 days'`, unordered),
