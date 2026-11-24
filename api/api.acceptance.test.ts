@@ -37590,7 +37590,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // An email sent through the API keeps the parts its caller attached.
       const direct = ok(await local('POST', '/v1/emails/send', mail({ html: `<img src="cid:${contentId}">`, attachments: [image.id] })), 202);
       await run('email.dispatch');
-      assert.ok(readable(input(direct.id)).includes(`Content-ID: <${contentId}>`) && !readable(input(direct.id)).includes('/i/'));
+      assert.ok(readable(input(direct.id)).includes(`Content-ID: <${contentId}>`) && !readable(input(direct.id)).includes(`${PUBLIC_ORIGIN}/i/`));
     });
   });
 
