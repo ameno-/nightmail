@@ -16855,13 +16855,15 @@ describe('Dashboard API capabilities', () => {
 describe('Sealed Logs facets', () => {
   const facetFixture = (t: TestContext, scenario: Parameters<typeof simulatedSesFixture>[1]) =>
     simulatedSesFixture(t, async fixtures => {
-      // The four fixed slot IDs are local to this connection, invisible to the normal runner.
+      // The fixed slots and published snapshots are local to this connection, invisible to the normal runner.
       await fixtures.db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
       await scenario(fixtures);
     });
   const floorMinute = () => new Date((Math.floor(Date.now() / 60_000) - 2) * 60_000).toISOString();
   const earlierMinute = (from: string, minutes: number) => new Date(Date.parse(from) - minutes * 60_000).toISOString();
+  const rollingFrom = (asOf: string, days: number) => new Date(Math.floor(Date.parse(asOf) / 60_000) * 60_000 - days * 86_400_000).toISOString();
   const otherRegion = REGION === 'us-west-1' ? 'us-east-1' : 'us-west-1';
+  const facetPath = (query: Record<string, string>) => `/v1/logs/facets?${new URLSearchParams(query)}`;
   const seedSent = (db: pg.Client, wid: string, from: string, kind: string, status: string, region = REGION, campaignId: string | null = null) =>
     db.query(`INSERT INTO sending_emails (id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,
         subject,snapshot,simulated,status,created_at,scheduled_at,campaign_id)
@@ -16961,7 +16963,7 @@ describe('Sealed Logs facets', () => {
       Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [] });
 
       const { enrollLogFacet, foldLogFacetSlot, readTicketCut } = await import('./src/log-facet-fold.js');
-      const ticket = await enrollLogFacet(runtime, wid, from, REGION);
+      const ticket = await enrollLogFacet(runtime, wid, from, REGION, '24h');
       await foldLogFacetSlot(runtime, ticket.slot);
       const cut = await readTicketCut(runtime.db, ticket);
       assert.ok(cut);
@@ -16973,7 +16975,7 @@ describe('Sealed Logs facets', () => {
 
       const scope = new URLSearchParams({ from, region: REGION }).toString();
       const raw = (filters = '', limit = 1) => local('GET', `/v1/logs?${scope}&counts=true&limit=${limit}${filters}`);
-      const dashboard = (filters = '') => local('GET', `/v1/logs/facets?${scope}${filters}`);
+      const dashboard = (filters = '') => local('GET', `/v1/logs/facets?mode=refresh&range=24h&${scope}${filters}`);
       const ids = (reply: Reply) => ok(reply).data.map((m: Json) => m.id).sort();
       const capped = { sent: false, received: false }, zero = { transactional: 0, marketing: 0 };
       for (const role of ['owner', 'member']) {
@@ -16996,13 +16998,104 @@ describe('Sealed Logs facets', () => {
           const { asOf, counts } = ok(reply);
           assert.deepEqual(counts, exact, label);
           assert.match(asOf, /\.\d{6}Z$/);
-          assert.deepEqual(Object.keys(reply.body).sort(), ['asOf', 'counts']);
+          const visibility = isOwner ? 'admin' : 'member';
+          assert.deepEqual(reply.body, { counts, asOf, from, visibility }, label);
           assert.equal(reply.headers.get('cache-control'), 'private, no-store');
+          const last = ok(await local('GET', `/v1/logs/facets?mode=last&range=24h&region=${REGION}${filters}`));
+          assert.equal(last.visibility, visibility, label);
+          assert.equal(last.asOf, asOf, label);
+          assert.equal(Date.parse(last.from), Date.parse(rollingFrom(asOf, 1)), label);
+          assert.deepEqual(last.counts, ok(await local('GET', `/v1/logs?from=${encodeURIComponent(last.from)}&region=${REGION}&counts=true&limit=1${filters}`)).counts, label);
         }
       }
-      for (const filters of ['&search=shared', `&campaignId=${campaignId}`, `&to=${encodeURIComponent(new Date(Date.parse(from) + 1).toISOString())}`]) {
-        assert.deepEqual(ok(await dashboard(filters)), { counts: ok(await raw(filters)).counts }, filters);
+    });
+  });
+
+  test('last Logs facets are read-only snapshots scoped by range and region, not live or anchored counts', { timeout: 15_000 }, async t => {
+    await facetFixture(t, async ({ runtime, db, local, request, jobs }) => {
+      const { enrollLogFacet, foldLogFacetSlot } = await import('./src/log-facet-fold.js');
+      const wid = runtime.config.workspaceId, recent = floorMinute(), boundary = rollingFrom(new Date().toISOString(), 1);
+      const from = earlierMinute(boundary, -10);
+      await db.query("SET LOCAL TIME ZONE 'America/New_York'");
+      await db.query('UPDATE ses_installation_settings SET enabled_regions=jsonb_build_array($2::text,$3::text) WHERE workspace_id=$1',
+        [wid, REGION, otherRegion]);
+      await seedSent(db, wid, earlierMinute(boundary, -5), 'marketing', 'accepted'); // In the rolling day, but before the anchored view.
+      await seedSent(db, wid, recent, 'transactional', 'delivered');
+      await seedSent(db, wid, earlierMinute(recent, 3 * 1440), 'marketing', 'bounced');
+      await seedSent(db, wid, earlierMinute(recent, 14 * 1440), 'transactional', 'canceled', otherRegion);
+
+      const last = (range = '24h', region = REGION) => request('GET', facetPath({ mode: 'last', range, region }), MANAGER, undefined, {}, 2_000);
+      const exact = async (from: string) =>
+        ok(await local('GET', `/v1/logs?counts=true&region=${REGION}&from=${encodeURIComponent(from)}`)).counts;
+      const missing = { counts: null, asOf: null, from: null, visibility: 'admin' };
+      const blank = await last();
+      assert.deepEqual(ok(blank), missing, 'Even nonempty mail is not a published matrix.');
+      assert.equal(blank.headers.get('cache-control'), 'private, no-store');
+      assert.deepEqual(await jobs('logs.facetFold'), [], 'Reading last did not enroll a fold.');
+
+      const first = await enrollLogFacet(runtime, wid, from, REGION, '24h');
+      await foldLogFacetSlot(runtime, first.slot);
+      const published = ok(await last());
+      assert.equal(published.visibility, 'admin');
+      assert.match(published.asOf, /\.\d{6}Z$/);
+      assert.equal(Date.parse(published.from), Date.parse(rollingFrom(published.asOf, 1)));
+      assert.notEqual(Date.parse(published.from), Date.parse(from), 'An anchored fold also publishes its distinct rolling boundary.');
+      assert.deepEqual(published.counts, await exact(published.from));
+      assert.deepEqual(published.counts.status, { accepted: 1, delivered: 1 });
+
+      await seedSent(db, wid, recent, 'transactional', 'delivered');
+      assert.deepEqual((await exact(published.from)).status, { accepted: 1, delivered: 2 });
+      assert.deepEqual(ok(await last()), published, 'Last reports the earlier completed counts and timestamp.');
+
+      const refresh = await parkedRead(runtime, () => local('GET', facetPath({ mode: 'refresh', range: '24h', region: REGION, from })), async () => {
+        const before = await jobs('logs.facetFold');
+        assert.deepEqual(ok(await last()), published, 'Last responds while the newer refresh is still waiting.');
+        assert.deepEqual(await jobs('logs.facetFold'), before, 'Last neither advances nor writes the waiting fold.');
+      });
+      const anchored = ok(refresh);
+      assert.equal(anchored.from, from);
+      assert.equal(anchored.visibility, 'admin');
+      assert.ok(anchored.asOf > published.asOf);
+      assert.deepEqual(anchored.counts, await exact(from));
+      assert.deepEqual(anchored.counts.status, { delivered: 2 });
+      const next = ok(await last());
+      assert.equal(next.asOf, anchored.asOf, 'Both boundaries share the exact source statement clock.');
+      assert.equal(Date.parse(next.from), Date.parse(rollingFrom(anchored.asOf, 1)));
+      assert.deepEqual(next.counts.status, { accepted: 1, delivered: 2 });
+
+      assert.deepEqual(ok(await last('7d')), missing);
+      assert.deepEqual(ok(await last('24h', otherRegion)), missing);
+      const week = await enrollLogFacet(runtime, wid, rollingFrom(next.asOf, 7), REGION, '7d');
+      await foldLogFacetSlot(runtime, week.slot);
+      const month = await enrollLogFacet(runtime, wid, rollingFrom(next.asOf, 30), otherRegion, '30d');
+      await foldLogFacetSlot(runtime, month.slot);
+      const weekLast = ok(await last('7d')), monthLast = ok(await last('30d', otherRegion));
+      assert.equal(Date.parse(weekLast.from), Date.parse(rollingFrom(weekLast.asOf, 7)));
+      assert.equal(Date.parse(monthLast.from), Date.parse(rollingFrom(monthLast.asOf, 30)));
+      assert.deepEqual(weekLast.counts.status, { accepted: 1, delivered: 2, bounced: 1 });
+      assert.deepEqual(monthLast.counts.status, { canceled: 1 });
+      assert.deepEqual(ok(await last('30d')), missing);
+      assert.deepEqual(ok(await last('7d', otherRegion)), missing);
+      assert.deepEqual(ok(await last()), next, 'Publishing other scopes does not replace this one.');
+
+      const ended = earlierMinute(recent, -1);
+      const beforeInvalid = await jobs('logs.facetFold');
+      const customDates = `from=${encodeURIComponent(recent)}&to=${encodeURIComponent(ended)}&region=${REGION}`;
+      for (const [query, status] of [[customDates, { delivered: 2 }], [`region=${REGION}&search=unmatched`, {}]] as const) {
+        const counts = ok(await local('GET', `/v1/logs?${query}&counts=true`)).counts;
+        assert.deepEqual(counts.status, status);
+        assert.deepEqual(ok(await local('GET', `/v1/logs/facets?${query}`)), { counts }, 'Custom views still have exact, unstamped counts.');
       }
+      // A timestamp one microsecond after the minute must not enroll a rounded-down fold or include its two sends.
+      const justAfter = recent.replace('.000Z', '.000001Z'), fractional = await exact(justAfter);
+      assert.equal(fractional.status.delivered, undefined);
+      assert.deepEqual(ok(await local('GET', facetPath({ mode: 'refresh', range: '24h', region: REGION, from: justAfter }))),
+        { counts: fractional, visibility: 'admin', from: justAfter });
+      for (const [field, value] of [['search', 'unmatched'], ['from', recent], ['to', ended], ['campaignId', 'synthetic']]) {
+        error(await local('GET', facetPath({ mode: 'last', range: '24h', region: REGION, [field]: value })), 422, 'VALIDATION_FAILED');
+      }
+      assert.deepEqual(await jobs('logs.facetFold'), beforeInvalid, 'Ineligible requests neither reuse nor enqueue a rolling cut.');
+      assert.deepEqual(ok(await last()), next);
     });
   });
 
@@ -17046,10 +17139,14 @@ describe('Sealed Logs facets', () => {
   });
 
   test('sealed Logs rejects stale lease publication and tickets for replaced slots', { timeout: 10_000 }, async t => {
-    await facetFixture(t, async ({ runtime, db }) => {
+    await facetFixture(t, async ({ runtime, db, local }) => {
       const { enrollLogFacet, foldLogFacetSlot, dueLogFacetSlots, readTicketCut } = await import('./src/log-facet-fold.js');
       const wid = runtime.config.workspaceId, from = floorMinute();
-      const original = await enrollLogFacet(runtime, wid, from, null);
+      const last = (region?: string) => local('GET', facetPath({ mode: 'last', range: '24h', ...(region ? { region } : {}) }));
+      const missing = { counts: null, asOf: null, from: null, visibility: 'admin' };
+      await db.query('UPDATE ses_installation_settings SET enabled_regions=jsonb_build_array($2::text,$3::text) WHERE workspace_id=$1',
+        [wid, REGION, otherRegion]);
+      const original = await enrollLogFacet(runtime, wid, from, null, '24h');
       await seedSent(db, wid, from, 'transactional', 'delivered');
       const delayed = stage('after');
       const stale = foldLogFacetSlot({ ...runtime, db: stageDatabase(runtime.db, [delayed]) }, original.slot);
@@ -17066,11 +17163,15 @@ describe('Sealed Logs facets', () => {
           delayed.release();
           await stale;
           assert.equal(await readTicketCut(runtime.db, original), null, 'The stale worker cannot publish under the new running lease.');
+          assert.deepEqual(ok(await last()), missing, 'The expired worker did not publish a rolling snapshot either.');
           assert.deepEqual(await dueLogFacetSlots(runtime.db), [], 'The stale worker did not release the current lease.');
         } finally { current.release(); await recovery; }
         const recovered = await readTicketCut(runtime.db, original);
         assert.ok(recovered);
         assert.deepEqual(recovered.sent, [{ kind: 'transactional', status: 'delivered', n: 2 }]);
+        const recent = ok(await last());
+        assert.equal(recent.asOf, recovered.asOf);
+        assert.deepEqual(recent.counts.status, { delivered: 2 });
 
         const other = unique('facet-workspace');
         await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)', [other]);
@@ -17082,49 +17183,100 @@ describe('Sealed Logs facets', () => {
         assert.equal(new Set([original, ...occupants].map(ticket => ticket.slot)).size, 4);
         await assert.rejects(enrollLogFacet(runtime, wid, from, otherRegion), { code: 'FACET_FOLD_CAPACITY' });
         assert.equal((await db.query("UPDATE jobs SET created_at=statement_timestamp()-interval '1 day' WHERE id=$1 AND workspace_id=$2 AND status='completed'", [original.slot, wid])).rowCount, 1);
-        const replacement = await enrollLogFacet(runtime, wid, from, otherRegion);
+        const replacement = await enrollLogFacet(runtime, wid, from, otherRegion, '24h');
         assert.equal(replacement.slot, original.slot);
         assert.notEqual(replacement.run, original.run);
         await assert.rejects(readTicketCut(runtime.db, original), { code: 'FACET_CATCHUP_UNAVAILABLE' });
         assert.equal(await readTicketCut(runtime.db, replacement), null, 'The replacement cannot see the old run’s cut.');
+        assert.deepEqual(ok(await last(otherRegion)), missing, 'Reusing the slot does not lend the original scope’s snapshot.');
         await foldLogFacetSlot(runtime, replacement.slot);
         const cut = await readTicketCut(runtime.db, replacement);
         assert.ok(cut);
         assert.deepEqual([cut.sent, cut.admin, cut.member], [[], { total: 0, spam: 0 }, { total: 0 }]);
+        const empty = ok(await last(otherRegion));
+        assert.equal(empty.asOf, cut.asOf);
+        assert.equal(Date.parse(empty.from), Date.parse(rollingFrom(cut.asOf, 1)));
+        assert.deepEqual(empty.counts, {
+          status: {}, kind: { transactional: 0, marketing: 0 }, capped: { sent: false, received: false },
+        }, 'A complete empty matrix is not the same as no published cut.');
+        assert.deepEqual(ok(await last()), recent, 'The original scope’s published snapshot survives slot reuse.');
         await assert.rejects(readTicketCut(runtime.db, original), { code: 'FACET_CATCHUP_UNAVAILABLE' });
       } finally { delayed.release(); await stale; }
     });
   });
 
-  test('private Logs facets refuse bearer keys and reauthorize dashboard requests while parked', { timeout: 10_000 }, async t => {
-    await facetFixture(t, async ({ runtime, db, local, request }) => {
+  test('private Logs facets deny keys and foreign workspaces, and refresh reauthorizes without selecting a workspace', { timeout: 15_000 }, async t => {
+    await facetFixture(t, async ({ runtime, db, local, request, jobs }) => {
       const wid = runtime.config.workspaceId, from = floorMinute();
       await seedInbound(db, wid, from);
       Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [] });
-      const query = new URLSearchParams({ from, region: REGION, direction: 'received' });
-      const path = `/v1/logs/facets?${query}`;
-      const key = ok(await local('POST', '/v1/api-keys', { name: 'Facet credential check', permissions: ['manage'] }), 201);
-      assert.equal(ok(await request('GET', `/v1/logs?${query}&counts=true`, key.secret)).counts.status.spam, 1);
-      const refused = await request('GET', path, key.secret);
-      error(refused, 403, 'DASHBOARD_AUTH_REQUIRED');
-      assert.equal(refused.body.counts, undefined);
-      assert.equal(refused.body.asOf, undefined);
-      const { dueLogFacetSlots } = await import('./src/log-facet-fold.js');
-      assert.deepEqual(await dueLogFacetSlots(runtime.db), [], 'Bearer refusal does not enroll work.');
+      const query = { region: REGION, direction: 'received' }, scope = { range: '24h', ...query };
+      const last = facetPath({ mode: 'last', ...scope });
+      const refresh = facetPath({ mode: 'refresh', from, ...scope });
+      const publicLogs = `/v1/logs?${new URLSearchParams({ ...query, from, counts: 'true' })}`;
+      const alternate = unique('selectable-workspace'), foreign = unique('foreign-workspace');
+      const select = (workspace: string) => ({ 'x-bane-workspace': workspace });
+      const selected = async () => (await db.query('SELECT selected_workspace_id FROM nightmail_users WHERE id=$1', [manager!.userId])).rows[0].selected_workspace_id;
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1),($2,$2,$2)', [alternate, foreign]);
+      await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,'owner')", [randomUUID(), manager!.userId, alternate]);
+      await db.query(`INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions)
+        SELECT $1,$1,default_region,enabled_regions FROM ses_installation_settings WHERE workspace_id=$2`, [foreign, wid]);
+      const { enrollLogFacet, foldLogFacetSlot, dueLogFacetSlots } = await import('./src/log-facet-fold.js');
+      await seedSent(db, foreign, from, 'marketing', 'bounced');
+      const foreignTicket = await enrollLogFacet(runtime, foreign, from, REGION, '24h');
+      await foldLogFacetSlot(runtime, foreignTicket.slot);
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'Facet credential check', permissions: ['manage'] }, 'live', select(wid)), 201);
+      assert.equal(ok(await request('GET', publicLogs, key.secret)).counts.status.spam, 1);
+      const publicAs = (workspace: string) => local('GET', '/v1/logs?limit=1', undefined, 'live', select(workspace));
+      ok(await publicAs(alternate));
+      assert.equal(await selected(), alternate, 'Normal Logs selects the explicitly requested accessible workspace.');
+      ok(await publicAs(wid));
+      assert.equal(await selected(), wid);
+      ok(await publicAs(alternate));
+      for (const path of [last, refresh]) {
+        for (const [keyOrSession, headers, status, code] of [
+          [key.secret, {}, 403, 'DASHBOARD_AUTH_REQUIRED'],
+          [MANAGER, select(foreign), 403, 'WORKSPACE_ACCESS_DENIED'],
+          [undefined, {}, 401, 'AUTH_REQUIRED'],
+        ] as const) {
+          const refused = await request('GET', path, keyOrSession, undefined, headers);
+          error(refused, status, code);
+          for (const field of ['counts', 'asOf', 'from', 'visibility']) assert.equal(refused.body[field], undefined);
+        }
+      }
+      assert.deepEqual(await dueLogFacetSlots(runtime.db), [], 'Authorization refusals do not enroll work.');
+      assert.deepEqual(await jobs('logs.facetFold'), []);
+      assert.equal(await selected(), alternate);
 
-      const downgraded = await parkedRead(runtime, () => local('GET', path), async () => {
+      const target = (path: string) => local('GET', path, undefined, 'live', select(wid));
+      const downgraded = await parkedRead(runtime, () => target(refresh), async () => {
+        assert.equal(await selected(), alternate, 'Even initial admission to the parked refresh did not persist its explicit workspace.');
         assert.equal((await db.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=$2 AND role='owner'", [wid, manager!.userId])).rowCount, 1);
       });
       assert.deepEqual(ok(downgraded).counts, {
         status: { received: 2 }, kind: { transactional: 0, marketing: 0 }, capped: { sent: false, received: false },
       }, 'An owner at enrollment receives only member counts after downgrade.');
-      const revoked = await parkedRead(runtime, () => local('GET', path), async () => {
+      assert.equal(downgraded.body.visibility, 'member');
+      assert.equal(await selected(), alternate, 'Reauthorization did not change the dashboard selection.');
+      const lastMember = ok(await target(last));
+      assert.equal(lastMember.visibility, 'member');
+      assert.deepEqual(lastMember.counts, downgraded.body.counts);
+      ok(await publicAs(alternate));
+      const removed = await parkedRead(runtime, () => target(refresh), async () => {
+        assert.equal((await db.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [wid, manager!.userId])).rowCount, 1);
+      });
+      error(removed, 403, 'WORKSPACE_ACCESS_DENIED');
+      for (const field of ['counts', 'asOf', 'from', 'visibility']) assert.equal(removed.body[field], undefined);
+      error(await target(last), 403, 'WORKSPACE_ACCESS_DENIED');
+      assert.equal(await selected(), alternate, 'Losing the target membership did not switch or select a workspace.');
+
+      await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,'member')", [randomUUID(), manager!.userId, wid]);
+      const revoked = await parkedRead(runtime, () => target(refresh), async () => {
         const tokenHash = createHash('sha256').update(manager!.token).digest('hex');
         assert.equal((await db.query('DELETE FROM nightmail_sessions WHERE token_hash=$1 AND user_id=$2', [tokenHash, manager!.userId])).rowCount, 1);
       });
       error(revoked, 401, 'AUTH_REQUIRED');
-      assert.equal(revoked.body.counts, undefined);
-      assert.equal(revoked.body.asOf, undefined);
+      for (const field of ['counts', 'asOf', 'from', 'visibility']) assert.equal(revoked.body[field], undefined);
     });
   });
 });

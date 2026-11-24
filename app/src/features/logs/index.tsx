@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router'
 import { Download, Paperclip, Search, X } from 'lucide-react'
 import { useApiDef, useApiQuery, useLogsVisibility, useRegion, useWorkspaceAccess } from '../../data/context'
@@ -18,6 +18,7 @@ import { ThreadChip, ThreadTimeline, threaded, threadItems, useThreadPrefetch } 
 import { useMediaQuery } from '../../lib/media'
 import { LogsBody, logStatuses, receivedStatuses, withStream, type LogFilters } from './facets'
 import { logRange, logRanges, rangeStart } from './range'
+import { useLogFacets } from './facet-query'
 
 const directions = [{ value: 'all', label: 'All' }, { value: 'sent', label: 'Sent' }, { value: 'received', label: 'Received' }]
 const option = (value: string) => ({ value, label: value === 'all' ? 'All statuses' : label(value) })
@@ -98,44 +99,36 @@ function Logs({ regionId, campaignId }: { regionId: string; campaignId?: string 
   const campaignOnly = Boolean(campaignId) && !searched && status === 'all' && stream === 'all' && range === '30d'
   // The filters beside the list set the same URL filters as the toolbar's pickers, which they replace from 1440 px.
   const setStatus = (value: string) => update({ status: value, ...receivedStatuses.includes(value) ? { stream: null } : {} })
-  const filters: LogFilters = { statuses, status, stream, streams: !receivedOnly, setStatus, setStream: value => update({ stream: value }) }
   // No mail at all yet: the first-run message alone, without a rail of zeros (its place stays, so nothing moves).
   const blank = Boolean(query.data && !query.isPlaceholderData && !query.data.items.length && !filtered && page === 1)
   const railed = useMediaQuery('(min-width: 1440px)')
   const rowsReady = measured && Boolean(query.data) && !query.isPlaceholderData && !query.isError && !(campaignOnly && campaign.isPending)
-  const facetQuery = queries.logCounts({ ...(campaignId ? { campaignId } : { regionId }), direction, search: searched, status: params.status, stream: params.stream, from })
-  // A filter/scope round trip or a newly visible rail needs a new authorized count, not its old cache entry.
-  const facetKey = JSON.stringify(facetQuery.key)
-  const railView = useMemo(() => crypto.randomUUID(), [facetKey, visibility, railed])
-  const eligible = railed && rowsReady && !blank && visibility !== null
-  const counts = useApiDef({ ...facetQuery, key: [...facetQuery.key, railView] }, { interval: (_, failed) => failed ? false : 30_000, enabled: eligible })
-  // Even a very fast response must not paint numbers in the table's first frame.
-  const [paintedFor, setPaintedFor] = useState<string>()
-  useEffect(() => {
-    if (!eligible || paintedFor === railView) return
-    let next = 0
-    const frame = requestAnimationFrame(() => { next = requestAnimationFrame(() => setPaintedFor(railView)) })
-    return () => { cancelAnimationFrame(frame); cancelAnimationFrame(next) }
-  }, [eligible, railView, paintedFor])
-  const numericFacets = eligible && paintedFor === railView && counts.isSuccess && counts.fetchStatus === 'idle' ? counts.data : undefined
+  const { cut, authorizationLost, view } = useLogFacets({
+    filters: { ...(campaignId ? { campaignId } : { regionId }), direction, search: searched, status: params.status, stream: params.stream, from },
+    range, scope: visibility, visibility: canAdminister ? 'admin' : 'member', railed, blank, rowsReady, rowError: query.error,
+  })
+  // A facet response can learn about a demotion before /v1/me does. Hide privileged rows and controls immediately.
+  const visibleStatuses = authorizationLost ? statuses.filter(value => value !== 'spam') : statuses
+  const visibleStatus = visibleStatuses.includes(status) ? status : 'all'
+  const filters: LogFilters = { statuses: visibleStatuses, status: visibleStatus, stream, streams: !receivedOnly, setStatus, setStream: value => update({ stream: value }) }
   // An export is the rows on screen for the filters shown: while the next filter's rows load, the previous rows stay up
   // but can't be exported, and neither can rows while the search box holds text the list hasn't searched for yet.
-  const exportable = Boolean(query.data?.items.length) && !query.isPlaceholderData && draft.trim() === searched
+  const exportable = !authorizationLost && Boolean(query.data?.items.length) && !query.isPlaceholderData && draft.trim() === searched
   return <div className="logs-page"><LogsHeader regionId={campaign.data?.regionId ?? regionId} direction={direction} onDirection={setDirection} locked={Boolean(campaignId)} range={range} onRange={value => update({ range: value === '30d' ? null : value })} />
     <div className="data-toolbar"><div className="cluster">{campaignId && <Button variant="secondary" aria-label={`Remove campaign filter: ${campaign.data?.name ?? campaignId}`} onClick={clearCampaign} title={campaign.data?.name}><span className="logs-campaign-chip">Campaign: {campaign.data?.name ?? campaignId}</span><X size={14} aria-hidden /></Button>}<div className="search-box"><Search size={16} /><Input type="search" aria-label="Search logs" placeholder="Search logs" maxLength={200} value={draft} onChange={event => type(event.target.value)} /></div>
-      <Select className="logs-filter" aria-label="Email status" value={status} onValueChange={setStatus} options={['all', ...statuses].map(value => ({ ...option(value), disabled: !withStream(value, stream) }))} />
+      <Select className="logs-filter" aria-label="Email status" value={visibleStatus} onValueChange={setStatus} options={['all', ...visibleStatuses].map(value => ({ ...option(value), disabled: !withStream(value, stream) }))} />
       <Select className="logs-filter" aria-label="Email stream filter" value={stream} disabled={receivedOnly} onValueChange={value => update({ stream: value })} options={streams} /></div>
       <Button className="logs-export" aria-label="Export this page as CSV" title="Download the rows on this page as a CSV file" disabled={!exportable} onClick={() => downloadCsv(campaignId ? `nightmail-${campaignId}-logs-page.csv` : 'nightmail-logs-page.csv', logCsvRows(query.data?.items ?? [], !multiTenant))}><Download size={16} /><span>Export CSV</span></Button>
     </div>
-    {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <LogsBody counts={numericFacets} filters={filters} blank={blank}>
-      <DataTable<LogEntry> className="logs-table" tableRef={tableRef} loading={query.isPending || (campaignOnly && campaign.isPending)} skeletonRows={pageSize} minRows={pageSize} rows={query.data?.items ?? []} rowKey={row => `${query.isPlaceholderData ? 'previous:' : ''}${row.direction}:${row.id}`} rowHref={logHref} rowLabel={logRowLabel} onRowIntent={rowIntent} columns={scheduled.columns(logsViewColumns(direction))}
+    {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <LogsBody counts={cut?.counts} asOf={cut?.asOf} from={cut?.from} viewKey={authorizationLost ? `denied:${view}` : view} filters={filters} blank={blank}>
+      <DataTable<LogEntry> className="logs-table" tableRef={tableRef} loading={authorizationLost || query.isPending || (campaignOnly && campaign.isPending)} skeletonRows={pageSize} minRows={pageSize} rows={authorizationLost ? [] : query.data?.items ?? []} rowKey={row => `${query.isPlaceholderData ? 'previous:' : ''}${row.direction}:${row.id}`} rowHref={logHref} rowLabel={logRowLabel} onRowIntent={rowIntent} columns={scheduled.columns(logsViewColumns(direction))}
         empty={campaignOnly && campaign.isError && !campaign.data ? <ErrorState error={campaign.error} onRetry={() => campaign.refetch()} />
           // A campaign that hasn't sent says when it will, in its heading.
           : campaignId && campaignOnly && campaign.data && !campaign.data.counts?.total ? <EmptyState title={campaign.data.scheduledAt && Date.parse(campaign.data.scheduledAt) > Date.now() ? `Scheduled for ${date(campaign.data.scheduledAt)} at ${time(campaign.data.scheduledAt)} UTC` : 'Nothing sent from this campaign yet'} action={<Link className="ui-button ui-button--secondary ui-button--md" to={`/campaigns/${encodeURIComponent(campaignId)}/review`}>Back to campaign</Link>} />
           : filtered ? <EmptyState title="No matching mail" action={<Button onClick={() => update({ q: null, status: null, stream: null, campaign: null, range: null, ...direction !== 'all' && !campaignId ? { view: null } : {} })}>Clear filters</Button>} />
           : <EmptyState title={direction === 'received' ? 'No mail received yet' : direction === 'sent' ? 'No mail sent yet' : 'No mail yet'} action={direction === 'received' ? <Link className="ui-button ui-button--primary ui-button--md" to="/receiving">Set up receiving</Link> : <Link className="ui-button ui-button--primary ui-button--md" to="/docs#quickstart">Send your first email</Link>} />} />
       {scheduled.dialogs}
-      {query.data ? <Pagination page={query.data.page} pageSize={query.data.pageSize} total={query.data.total} nextCursor={query.data.nextCursor} count={query.data.items.length} onPageChange={next => update({ page: next === 1 ? null : String(next) }, true)} /> : <PaginationSkeleton />}
+      {query.data && !authorizationLost ? <Pagination page={query.data.page} pageSize={query.data.pageSize} total={query.data.total} nextCursor={query.data.nextCursor} count={query.data.items.length} onPageChange={next => update({ page: next === 1 ? null : String(next) }, true)} /> : <PaginationSkeleton />}
     </LogsBody>}
   </div>
 }

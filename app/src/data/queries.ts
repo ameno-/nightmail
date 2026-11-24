@@ -1,5 +1,5 @@
 import { connectionApi } from './connections'
-import { ApiError, type InboundThreadView, type Api, type LogDirection, type PageRequest, type Stream, type TimeRange } from './types'
+import { ApiError, type InboundThreadView, type Api, type LogDirection, type LogFacetInput, type PageRequest, type Stream, type TimeRange } from './types'
 import { usageApi } from './usage'
 import { billingApi } from './billing'
 import { workspaceApi } from './workspaces'
@@ -15,7 +15,7 @@ export const queries = {
   senderScore: () => def(['sender-score'], (api, signal) => api.senderScore.get(signal)),
   emails: (params: PageRequest) => def(['emails', params], (api, signal) => api.emails.list(params, signal)),
   logs: (params: PageRequest & { direction?: LogDirection }, visibility?: string | null) => def(visibility === undefined ? ['logs', params] : ['logs', params, visibility], (api, signal) => api.logs.list(params, signal)),
-  logCounts: (params: PageRequest & { direction?: LogDirection }) => def(['logs', 'counts', params], (api, signal) => api.logs.counts(params, signal)),
+  logFacets: (input: LogFacetInput, view: string) => def(['logs', 'facets', view, input], (api, signal) => api.logs.facets(input, signal)),
   inboundDomains: () => def(['mailbox-domains'], (api, signal) => api.mailboxes.domains(signal)),
   inboundWebhooks: (cursor?: string) => def(['inbound-webhooks', cursor ?? null], (api, signal) => api.inbound.webhooks(signal, cursor)),
   forwardEndpoints: () => def(['forward-endpoints'], (api, signal) => api.inbound.forwards(signal)),

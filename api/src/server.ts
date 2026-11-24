@@ -6,7 +6,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createApp } from './app.js';
 import { flushCounters } from './health-counters.js';
-import { nodeRuntime } from './adapters/node.js';
+import { nodeLogFacetLane, nodeRuntime } from './adapters/node.js';
 import { sql } from 'drizzle-orm';
 import { dispatchWakeKey } from './dispatcher.js';
 import { clientIpHeader, clientNetworkHeader, legacyClientIpHeaders } from './brand.js';
@@ -57,7 +57,10 @@ async function encode(request: Request, path: string, response: Response, header
 
 setLogContext({ service: 'api', deploy: process.env.DEPLOY_SHA });
 try {
-  const { runtime, close } = nodeRuntime(process.env);
+  const { runtime, close: closeApi } = nodeRuntime(process.env);
+  const facets=nodeLogFacetLane(runtime,process.env.DATABASE_URL);
+  runtime.startLogFacetFold=facets.nudge;
+  const close=async()=>{await facets.close();await closeApi();};
   runtime.dispatch = async (region, account, _count, _kind, priority) => {
     if (priority) await runtime.db.execute(sql`SELECT pg_notify('bane_priority', ${dispatchWakeKey(region, account)})`);
   };

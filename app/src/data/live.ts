@@ -5,6 +5,7 @@ import type { CreatedInbox, Inbox, InboxMessageDetail, InboxMessagePage, LogDire
 import { headerPrefix, productName } from '../../../api/src/brand'
 import { analytics } from '../lib/analytics'
 import { webhookPatchBody } from '../features/settings/webhook-patch'
+import { decodeLogFacets } from './log-facets'
 type Json = Record<string, any>
 const idPath = (id: string) => encodeURIComponent(id)
 // The account this tab acts as (a browser can connect several, data/accounts.ts), sent as X-Nightmail-Account. It is per tab
@@ -304,18 +305,13 @@ export function createLiveApi(scope?: RequestScope): Api {
     setup: async signal => { const r = await call<Omit<OverviewSetup, 'domains'> & { domains: { data: Json[] } | null }>('/overview/setup', 'GET', undefined, signal); return { ...r, domains: r.domains ? r.domains.data.map(mapDomain) : null } } },
     logs: {
       list: (input, signal) => page('/logs', input, mapLog, logFilters(input), signal),
-      // The dashboard's exact counts read is separate from its rows and uses the same filters, never a page cursor.
-      counts: async (input, signal) => {
-        const params = new URLSearchParams()
-        for (const [key, value] of Object.entries(logFilters(input))) if (value !== undefined && value !== '') params.set(key, String(value))
-        const { counts } = await request<{ counts: { status: Record<string, number>; kind: { transactional: number; marketing: number }; capped: { sent: false; received: false } } }>(
-          `/v1/logs/facets?${params}`, { method: 'GET', expectedStatus: 200, scope, signal })
-        const exactCount = (n: unknown): n is number => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0
-        if (!counts?.status || typeof counts.status !== 'object' || Array.isArray(counts.status) || !Object.values(counts.status).every(exactCount) ||
-          !exactCount(counts.kind?.transactional) || !exactCount(counts.kind?.marketing) || counts.capped?.sent !== false || counts.capped.received !== false) {
-          throw new ApiError('The Logs facet response was not complete.', 'INVALID_RESPONSE')
-        }
-        return { status: counts.status, stream: counts.kind }
+      facets: async (input, signal) => {
+        const params = new URLSearchParams({ mode: input.mode, range: input.range })
+        const { from, to, search, campaignId, ...rolling } = logFilters(input)
+        const filters = input.mode === 'last' ? rolling : { ...rolling, from, to, search, campaignId }
+        for (const [key, value] of Object.entries(filters)) if (value !== undefined && value !== '') params.set(key, String(value))
+        const data = await request<unknown>(`/v1/logs/facets?${params}`, { method: 'GET', expectedStatus: 200, scope, signal })
+        return decodeLogFacets(data, input)
       },
     },
     emails: {

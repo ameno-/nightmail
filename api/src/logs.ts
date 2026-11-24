@@ -5,7 +5,8 @@ import { actor, ApiError, budgetedRead, denied, errors, PageQuery, readLimit, re
 import { createFairPool, PAGE_MAX_BYTES, READ_MAX_WAITERS, READ_MAX_WAITING_PER_WORKSPACE, withBoundedRead } from './read-bounds.js';
 import { fitPageByBytes, INBOUND_ADDRESS_PAGE_LIMIT, messageFieldCount, sliceAddressStrings, sliceJsonbArray } from './inbound-bounds.js';
 import { emails } from './db/sending.js';
-import { enrollLogFacet, LOG_FACET_WAIT_MS, readTicketCut } from './log-facet-fold.js';
+import { enrollLogFacet, logFacetPeriod, LOG_FACET_WAIT_MS, readPublishedLogFacet, readTicketCut } from './log-facet-fold.js';
+import type { LogFacetCut } from './log-facet-source.js';
 import { mailMessages as messages } from './db/mailbox.js';
 import { readsDelivery, visibleAddresses } from './inbound-threads.js';
 import { accessibleMessages, sentThreadId, threadSize } from './thread-view.js';
@@ -137,6 +138,25 @@ function facetCounts(q: Filters, sentRows: SentFacet[], receivedRow: ReceivedFac
   return { status, kind, capped: { sent: false, received: false } };
 }
 
+type LogScope = ReturnType<typeof logAccess>;
+const facetVisibility = (scope:LogScope) => scope.access?.admin && scope.delivery ? 'admin' as const : 'member' as const;
+function projectCut(q:Filters,scope:LogScope,cut:LogFacetCut) {
+  const received=q.direction==='sent' || q.kind || q.campaignId || !scope.access ? undefined
+    : scope.access.admin ? cut.admin : {total:cut.member.total,spam:0};
+  return facetCounts(q,q.direction==='received'?[]:cut.sent,received,scope.delivery);
+}
+async function currentFacetScope(c:Ctx, db:DbExecutor, q:Filters, original:LogScope, mailAccess:(a:Actor)=>MailboxAccess|null) {
+  const {accountSessionActorOnFacetRetry}=await import('./account-login.js');
+  const fresh=await accountSessionActorOnFacetRetry(c.env,c.req.raw.headers,db);
+  if(!fresh || fresh.keyId!==original.a.keyId)throw new ApiError(401,'AUTH_REQUIRED','Sign in or supply a bearer API key.');
+  if(fresh.workspaceId!==original.a.workspaceId)throw new ApiError(403,'WORKSPACE_ACCESS_DENIED','This workspace is not available to your session.');
+  c.set('actor',fresh);
+  const scope=logAccess(c,q,mailAccess);
+  if(scope.a.credential!=='dashboard'||scope.a.domains.length||scope.access?.mailboxIds!==null)
+    throw denied('DASHBOARD_AUTH_REQUIRED','Use an unrestricted signed-in dashboard session.',{credential:'dashboard'});
+  return scope;
+}
+
 // The unchanged public exact count and the private fallback for uncommon filters and narrowed credentials.
 async function countLiveFacets(db: DbExecutor, q: Filters, scope: ReturnType<typeof logAccess>): Promise<Facets> {
   const { a, access, delivery } = scope;
@@ -162,15 +182,34 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
     if (scope.a.credential !== 'dashboard') throw denied('DASHBOARD_AUTH_REQUIRED', 'Use a signed-in dashboard session.', { credential: 'dashboard' });
     c.header('Cache-Control', 'private, no-store');
     const opts = { route: 'logs.facets', workspaceId: scope.a.workspaceId }, signal = c.req.raw.signal;
+    const mode=c.req.query('mode'), askedPeriod=c.req.query('range'), period=logFacetPeriod(askedPeriod);
+    if ((mode !== undefined && mode !== 'last' && mode !== 'refresh') || (askedPeriod !== undefined && !period))
+      throw new ApiError(422,'VALIDATION_FAILED','Choose a supported Logs facet view and time range.');
+    if (mode==='last') {
+      // This is a relative range *as of the saved source statement*, not an older answer
+      // mislabeled with a new absolute from. Private custom searches/dates never use this matrix.
+      if(!period||q.from||q.to||q.search||q.campaignId||q.cursor)
+        throw new ApiError(422,'VALIDATION_FAILED','A last-folded read requires a rolling range without custom dates, search or campaign.');
+      const last=await withBoundedRead(c,()=>budgetedRead(c.env.db,async db=>{
+        const fresh=await currentFacetScope(c,db,q,scope,mailAccess);
+        const p=await readPublishedLogFacet(db,fresh.a.workspaceId,q.region??null,period);
+        const visibility=facetVisibility(fresh);
+        return p ? {counts:projectCut(q,fresh,p.cut),asOf:p.cut.asOf,from:p.from,visibility}
+          : {counts:null,asOf:null,from:null,visibility};
+      },readLimit(COUNTS_READ),'repeatable read'),opts);
+      if(last instanceof Response)return last;
+      return c.json(last,200);
+    }
+    if(mode==='refresh'&&(!q.from||!period))throw new ApiError(422,'VALIDATION_FAILED','A refresh requires the visible date range and its start.');
     const fromMs = q.from ? Date.parse(q.from) : NaN, age = Date.now() - fromMs;
     const foldable = !scope.a.domains.length && scope.access?.mailboxIds === null && !q.search && !q.campaignId && !q.to &&
-      fromMs % 60_000 === 0 && age >= 0 && age <= 31 * 86_400_000;
+      // Date.parse discards sub-millisecond digits: an absolute 00.000001Z start is not a whole minute.
+      !!q.from && /:00(?:\.0+)?(?:Z|[+-]\d\d:\d\d)$/.test(q.from) && fromMs % 60_000 === 0 && age >= 0 && age <= 31 * 86_400_000;
     if (!foldable) {
       const counts = await withBoundedRead(c, () => budgetedRead(c.env.db, db => countLiveFacets(db, q, scope), readLimit(COUNTS_READ)), opts);
       if (counts instanceof Response) return counts;
-      return c.json({ counts }, 200);
+      return c.json({ counts, ...(mode==='refresh' && { visibility:facetVisibility(scope),from:q.from }) }, 200);
     }
-    const { accountSessionActorOnFacetRetry } = await import('./account-login.js');
     const end = performance.now() + LOG_FACET_WAIT_MS;
     if (signal.aborted) return new Response(null, { status: 499 });
     let hold;
@@ -188,7 +227,7 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
       return new ApiError(503, 'FACET_CATCHUP_UNAVAILABLE', 'Exact Logs counts are temporarily unavailable.', undefined, true);
     };
     try {
-      const ticket = await enrollLogFacet(c.env, scope.a.workspaceId, new Date(fromMs).toISOString(), q.region ?? null);
+      const ticket = await enrollLogFacet(c.env, scope.a.workspaceId, new Date(fromMs).toISOString(), q.region ?? null, period);
       if (ticket.wake) c.env.startLogFacetFold?.(ticket.slot);
       let probes = 0;
       while (performance.now() < end) {
@@ -199,16 +238,11 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
         const next = await withBoundedRead(c, () => budgetedRead(c.env.db, async db => {
           if (performance.now() >= end) throw unavailable();
           // Every probe resolves the real session and role against the same snapshot that reads the published cut.
-          const fresh = await accountSessionActorOnFacetRetry(c.env, c.req.raw.headers, db);
-          if (!fresh || fresh.keyId !== scope.a.keyId) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in or supply a bearer API key.');
-          if (fresh.workspaceId !== scope.a.workspaceId) throw new ApiError(403, 'WORKSPACE_ACCESS_DENIED', 'This workspace is not available to your session.');
-          c.set('actor', fresh);
-          const { a, access, delivery } = logAccess(c, q, mailAccess);
-          if (a.credential !== 'dashboard' || a.domains.length || access?.mailboxIds !== null) throw unavailable();
-          const cut = await readTicketCut(db,ticket);
-          if (!cut) return null;
-          const received = q.direction === 'sent' || q.kind ? undefined : access.admin ? cut.admin : {total:cut.member.total,spam:0};
-          return { counts: facetCounts(q,q.direction === 'received' ? [] : cut.sent,received,delivery), asOf: cut.asOf };
+          const current=await currentFacetScope(c,db,q,scope,mailAccess);
+          const cut=await readTicketCut(db,ticket);
+          if(!cut)return null;
+          return {counts:projectCut(q,current,cut),asOf:cut.asOf,
+            ...(mode==='refresh' && {from:new Date(fromMs).toISOString(),visibility:facetVisibility(current)})};
         }, { seconds:COUNTS_READ, refusal:unavailable }, 'repeatable read'), { ...opts, maxWaitMs: Math.max(1, Math.ceil(end - performance.now())) });
         if (next instanceof Response) return next;
         if (signal.aborted) return new Response(null, { status: 499 });

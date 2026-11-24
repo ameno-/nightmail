@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { FacetRail, SplitPane, statusTone, type FacetGroup, type Tone } from '../../components/ui'
 import type { LogCounts, LogDirection, LogEntry } from '../../data/types'
 import { label, number } from '../../lib/format'
@@ -23,10 +23,13 @@ export function logStatuses(direction: LogDirection, { campaign, canAdminister }
 export const withStream = (status: string, stream: string) => stream === 'all' || !receivedStatuses.includes(status)
 // Always a row of their own: the outcomes people come for. Every other status is in one Other row's menu.
 const PINNED = ['delivered', 'received', 'bounced', 'complained', 'scheduled', 'spam']
+const countWidth = 80
 
 export type LogFilters = { statuses: string[]; status: string; stream: string; streams: boolean; setStatus: (value: string) => void; setStream: (value: string) => void }
 type RailFilters = Pick<LogFilters, 'statuses' | 'streams'> & Partial<LogFilters>
-export function logFacetGroups(counts: LogCounts | undefined, filters: RailFilters): FacetGroup[] {
+export function logFacetGroups(counts: LogCounts | undefined, filters: RailFilters, otherMenu?: {
+  choices?: string[]; remember: (choices?: string[]) => void
+}): FacetGroup[] {
   const count = (status: string) => counts ? counts.status[status] ?? 0 : null
   const choose = (status: string) => filters.setStatus?.(filters.status === status ? 'all' : status)
   // Received mail has no stream: while one is chosen, Received and Spam keep their rows (nothing moves) but neither count
@@ -34,14 +37,19 @@ export function logFacetGroups(counts: LogCounts | undefined, filters: RailFilte
   const streamless = (status: string) => !withStream(status, filters.stream ?? 'all')
   const pinned = PINNED.filter(status => filters.statuses.includes(status)), others = filters.statuses.filter(status => !PINNED.includes(status))
   const chosen = filters.status && others.includes(filters.status) ? filters.status : null
-  // Other opens the statuses with mail (all of them until the counts arrive), each with its count; none, and it is just a zero.
-  const listed = others.filter(status => !counts || status === chosen || (count(status) ?? 0) > 0)
-  const menu = filters.setStatus && listed.length ? listed.map(status => ({ label: counts ? `${label(status)} · ${number(count(status) ?? 0)}` : label(status), onSelect: () => choose(status) })) : undefined
+  const listed = otherMenu?.choices?.filter(status => others.includes(status)) ??
+    others.filter(status => !counts || status === chosen || (count(status) ?? 0) > 0)
+  // Stable labels preserve focus. Hold only the open menu's membership, so its counts can still update or clear.
+  const menu = filters.setStatus && others.length ? listed.map(status => {
+    const value = counts ? number(count(status) ?? 0) : '–'
+    return { label: label(status), hint: <span style={{ display: 'block', minInlineSize: countWidth, textAlign: 'right' }}><span key={value}>{value}</span></span>, onSelect: () => choose(status) }
+  }) : undefined
   const groups: FacetGroup[] = [{ key: 'status', title: 'Status', items: [
     ...pinned.map(status => streamless(status) ? { key: status, label: label(status), tone: logTone({ status }), count: null, title: 'Received mail has no stream' }
       : { key: status, label: label(status), tone: logTone({ status }), count: count(status), ...filters.setStatus && { selected: filters.status === status, onSelect: () => choose(status) } }),
     ...others.length ? [{ key: 'other', label: chosen ? label(chosen) : 'Other', tone: chosen ? logTone({ status: chosen }) : 'neutral' as Tone, dot: Boolean(chosen),
-      count: counts ? chosen ? count(chosen) : others.reduce((sum, status) => sum + (count(status) ?? 0), 0) : null, selected: Boolean(chosen), menuLabel: chosen ? `Other statuses: ${label(chosen)}` : 'Other statuses', menu }] : [],
+      count: counts ? chosen ? count(chosen) : others.reduce((sum, status) => sum + (count(status) ?? 0), 0) : null, selected: Boolean(chosen), menuLabel: chosen ? `Other statuses: ${label(chosen)}` : 'Other statuses', menu,
+      onMenuOpenChange: otherMenu && ((open: boolean) => otherMenu.remember(open ? listed : undefined)) }] : [],
   ] }]
   // Streams are sent mail's: received mail has none, so the group leaves with it.
   if (filters.streams) groups.push({ key: 'stream', title: 'Stream', items: (['transactional', 'marketing'] as const).map(stream => ({ key: stream, label: label(stream), dot: false, count: counts ? counts.stream[stream] : null,
@@ -50,6 +58,13 @@ export function logFacetGroups(counts: LogCounts | undefined, filters: RailFilte
 }
 
 /** The list's body with its filters beside it. `blank`: a log with no mail at all keeps the rail's place, empty. */
-export function LogsBody({ counts, filters, blank, children }: { counts: LogCounts | undefined; filters: RailFilters; blank?: boolean; children: ReactNode }) {
-  return <SplitPane className="logs-split" rail={blank ? null : <FacetRail label="Filters" replaceCountText groups={logFacetGroups(counts, filters)} />}>{children}</SplitPane>
+export function LogsBody({ counts, asOf, from, viewKey, filters, blank, children }: { counts: LogCounts | undefined; asOf?: string | null; from?: string; viewKey?: string; filters: RailFilters; blank?: boolean; children: ReactNode }) {
+  const [menu, setMenu] = useState<{ key: string; choices: string[] }>()
+  const key = JSON.stringify([viewKey, blank, filters.statuses, filters.status, filters.stream])
+  // A direction can remove Other without a close event. Don't carry its choices when the trigger comes back.
+  useEffect(() => { setMenu(previous => previous?.key === key ? previous : undefined) }, [key])
+  const choices = menu?.key === key ? menu.choices : undefined
+  const remember = (next?: string[]) => setMenu(next ? { key, choices: next } : undefined)
+  const detail = from ? `Exact counts from ${from}${asOf ? `, as of ${asOf}` : ''}.` : undefined
+  return <SplitPane className="logs-split" rail={blank ? null : <FacetRail key={viewKey} label="Filters" countSlot={{ width: countWidth, detail }} groups={logFacetGroups(counts, filters, { choices, remember })} />}>{children}</SplitPane>
 }

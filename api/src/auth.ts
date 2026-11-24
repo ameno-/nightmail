@@ -197,7 +197,12 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
     }
     if (!hasSessionCookie(c.req.raw.headers)) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in or supply a bearer API key.');
     const { getDashboardActor, migrateLegacyCookies, requireDashboardOrigin, settleDefaultAccount } = await wrapModuleLoad(() => import('./dashboard-auth.js'));
-    const dashboard = await timed(c,'session-db',()=>getDashboardActor(c.env,c.req.raw.headers));
+    // A background continuation for a private Logs view must not choose a workspace on the user's behalf.
+    // It uses the same session, expiry, membership and role resolver without the preference write.
+    const facetRefresh=c.req.method==='GET' && c.req.path==='/v1/logs/facets' && c.req.query('mode')==='refresh';
+    const dashboard = await timed(c,'session-db',async()=>facetRefresh
+      ? (await wrapModuleLoad(()=>import('./account-login.js'))).accountSessionActorOnFacetRetry(c.env,c.req.raw.headers,c.env.db)
+      : getDashboardActor(c.env,c.req.raw.headers));
     if (!dashboard) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in or supply a bearer API key.');
     migrateLegacyCookies(c); settleDefaultAccount(c, dashboard.keyId.slice('user_'.length));
     if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)) requireDashboardOrigin(c.env, c.req.raw);

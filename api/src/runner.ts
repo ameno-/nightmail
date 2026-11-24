@@ -1,6 +1,6 @@
 import { setTimeout } from 'node:timers/promises';
 import { Client } from 'pg';
-import { nodeRuntime, postgresConnection } from './adapters/node.js';
+import { nodeLogFacetLane, nodeRuntime, postgresConnection } from './adapters/node.js';
 import { drain,drainJobs } from './dispatch.js';
 import type { GateState } from './dispatcher.js';
 import { jobConcurrency } from './jobs.js';
@@ -13,7 +13,8 @@ import { flushCounters } from './health-counters.js';
 import { standingTick } from './standing.js';
 import { ensureSenderDisplayDiscovery } from './sender-display-score.js';
 import { signupsTick } from './signups.js';
-import { dueLogFacetSlots, foldLogFacetSlot, LOG_FACET_TICK_MS } from './log-facet-fold.js';
+import { dueLogFacetSlots, LOG_FACET_TICK_MS } from './log-facet-fold.js';
+import { bootstrapLogFacet, LOG_FACET_BOOTSTRAP_TICK_MS } from './log-facet-bootstrap.js';
 import { syncOutboundMessages } from './mailbox-send.js';
 import { scheduleHoldRelease } from './mailbox-staging.js';
 import { queueStartupDiscovery } from './ses-regions.js';
@@ -37,17 +38,25 @@ try {
   let listener: Client | undefined, lastListen = 0;
   for (const signal of ['SIGTERM', 'SIGINT'] as const) process.on(signal, () => { stopped = true; });
   log('info', { code: 'RUNNER_READY', liveSesEnabled: runtime.config.liveEnabled });
-  // A dedicated cadence: a busy general jobs queue or another workspace cannot move a sealed source cut.
-  const facetWork = new Map<string, Promise<void>>();
+  // A dedicated cadence and pool: up to four source folds plus one control connection, never a
+  // checkout from the mail runner's pool. Bootstrap yields to the ordinary viewer tickets.
+  const facetLane=nodeLogFacetLane(runtime,process.env.DATABASE_URL), facetRuntime=facetLane.get();
+  const startFacet=facetLane.nudge;
+  runtime.startLogFacetFold=startFacet;
   const facets = (async () => {
+    let bootstrap: Promise<void> | undefined, lastBootstrap = 0;
     while (!stopped) {
-      try { for (const slot of await dueLogFacetSlots(runtime.db)) if (!facetWork.has(slot)) {
-        const work = foldLogFacetSlot(runtime,slot).catch(() => log('warn',{code:'LOG_FACET_SLOT_FAILED',jobId:slot})).finally(() => { facetWork.delete(slot); });
-        facetWork.set(slot,work);
-      } } catch { log('warn',{code:'LOG_FACET_TICK_FAILED'}); }
+      try { for (const slot of await dueLogFacetSlots(facetRuntime.db)) startFacet(slot); }
+      catch { log('warn', { code: 'LOG_FACET_TICK_FAILED' }); }
+      if (runtime.config.multiTenant && !bootstrap && Date.now() - lastBootstrap >= LOG_FACET_BOOTSTRAP_TICK_MS) {
+        lastBootstrap = Date.now();
+        bootstrap = bootstrapLogFacet(facetRuntime).then(ticket => { if (ticket) startFacet(ticket.slot); })
+          .catch(() => log('warn', { code: 'LOG_FACET_BOOTSTRAP_FAILED' })).finally(() => { bootstrap = undefined; });
+      }
       await setTimeout(LOG_FACET_TICK_MS);
     }
-    await Promise.all(facetWork.values());
+    await bootstrap;
+    await facetLane.close();
   })();
   const hooks=(async()=>{while(!stopped){try{if(await drainJobs(runtime,20,2,5000,'webhooks'))continue;}catch{log('warn',{code:'WEBHOOK_DRAIN_FAILED'});}await setTimeout(1000);}})();
   try {

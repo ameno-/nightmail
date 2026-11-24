@@ -194,15 +194,11 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
     if (ctx && nudges.length) ctx.waitUntil(withRuntime(env, async runtime => { for (const nudge of nudges) await nudge(runtime); }));
   }
 }
-// Health bookkeeping (src/health.ts, src/health-counters.ts) is never awaited by a request, a queue batch, the minute
-// cron's own steps or a dispatcher: it runs after them in waitUntil, on a connection of its own, with a one-second
-// lock_timeout and a three-second statement_timeout on everything it writes. A health table that is locked or slow
-// costs a dropped sample, never a late batch.
-// Without a context to outlive the handler in (a handler called directly, as the cold-isolate check does) it does not
-// run at all: it is never awaited instead, and it can never throw into its caller.
+// Optional background work gets a separate connection and never delays its caller. Health samples
+// may be lost; durable Logs tickets have their own recovery cadence. Each task sets its own limits.
 function afterwards(env: Env, ctx: ExecutionContext | undefined, work: (runtime: Runtime) => Promise<unknown>) {
-  try { if (typeof ctx?.waitUntil === 'function') ctx.waitUntil(withRuntime(env, async runtime => { await work(runtime); }).catch(() => { /* Health never fails what it reports on. */ })); }
-  catch { /* Health never fails what it reports on. */ }
+  try { if (typeof ctx?.waitUntil === 'function') ctx.waitUntil(withRuntime(env, async runtime => { await work(runtime); }).catch(() => { /* Background failures do not fail the served request or queue event. */ })); }
+  catch { /* Background failures do not fail the served request or queue event. */ }
 }
 // What this isolate counted (its jobs' database errors, its error lines), at most every 20 seconds.
 async function flushDueCounters(env: Env, ctx: ExecutionContext | undefined) {
@@ -428,6 +424,15 @@ export default {
       afterwards(env,ctx,async background => {
         const {dueLogFacetSlots,foldLogFacetSlot}=await import('./log-facet-fold.js');
         for (const slot of await dueLogFacetSlots(background.db)) afterwards(env,ctx,separate => foldLogFacetSlot(separate,slot));
+      });
+      if (runtime.config.multiTenant) afterwards(env, ctx, async background => {
+        try {
+          const [{ bootstrapLogFacet }, { foldLogFacetSlot }] = await Promise.all([
+            import('./log-facet-bootstrap.js'), import('./log-facet-fold.js'),
+          ]);
+          const ticket = await bootstrapLogFacet(background);
+          if (ticket) await foldLogFacetSlot(background, ticket.slot);
+        } catch { core.log('warn', { code: 'LOG_FACET_BOOTSTRAP_FAILED' }); }
       });
       // Independent of PostgreSQL: even a total DB outage must not hide DLQ growth.
       // A queue added here is on the Health page at once; its "falling behind" line is in src/health-thresholds.ts (QUEUES).

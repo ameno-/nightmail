@@ -106,6 +106,8 @@ else if (['/docs', '/developer'].some(path => initialPath.startsWith(path))) loa
 // visit. A self-hosted installation remembered as ready has no homepage: "/" opens Overview there.
 // Its first picture starts loading with its code.
 else if (initialPath === '/') { if (selectedWorkspace() || !dashboardLikelyReady(null)) { preloadFirstPicture(); loadHome().catch(noop) } else loadOverview().catch(noop) }
+// The Logs chunk is safe to warm before /v1/me even in a fresh browser; its reads still wait for the signed-in shell.
+else if (/^\/logs\/?$/.test(initialPath)) loadLogs().catch(noop)
 else if (!dashboardLikelyReady(selectedWorkspace())) { /* /v1/me decides between onboarding and the dashboard. */ }
 else if (initialPath === '/overview') loadOverview().catch(noop)
 else if (initialPath.startsWith('/logs')) loadLogs().catch(noop)
