@@ -87,10 +87,11 @@
     // The handoff's Ed25519 key is the BANE_SUPPORT_SIGNING_KEY secret.
     "BANE_SUPPORT_URL": "https://support.dev.nightmail.dev/chat"
   },
-  "durable_objects": { "bindings": [{ "name": "DISPATCHER", "class_name": "DispatcherShard" }] },
+  // CAMPAIGN_ROOMS: one per campaign, who has it open in the dashboard (src/campaign-room.ts).
+  "durable_objects": { "bindings": [{ "name": "DISPATCHER", "class_name": "DispatcherShard" }, { "name": "CAMPAIGN_ROOMS", "class_name": "CampaignRoom" }] },
   // Run HTTP requests next to the nightmail/dev database (PlanetScale aws-us-east-2).
   "placement": { "region": "aws:us-east-2" },
-  "migrations": [{ "tag": "transfer-from-bane-dev", "transferred_classes": [{ "from_script": "bane-dev", "from": "DispatcherShard", "to": "DispatcherShard" }] }],
+  "migrations": [{ "tag": "transfer-from-bane-dev", "transferred_classes": [{ "from_script": "bane-dev", "from": "DispatcherShard", "to": "DispatcherShard" }] }, { "tag": "campaign-rooms", "new_sqlite_classes": ["CampaignRoom"] }],
   // Hyperdrive config `nightmail-dev` in anomaly-dev (caching disabled, 10 origin connections). The database allows 25 (22
   // for non-superusers), and Hyperdrive can open a second pool with its own allocation, so two pools must fit: at 15,
   // a second pool exhausted the database and Postgres refused connections mid-E2E (2026-11-11).

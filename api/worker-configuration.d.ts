@@ -41,6 +41,7 @@ interface __BaseEnv_Env {
 	LEGACY_FEEDBACK_QUEUE_NAME: "bane-prod-feedback";
 	LEGACY_FEEDBACK_CUTOVER: "";
 	DISPATCHER: DurableObjectNamespace<import("./src/worker").DispatcherShard>;
+	CAMPAIGN_ROOMS?: DurableObjectNamespace<import("./src/worker").CampaignRoom>;
 }
 declare namespace Cloudflare {
 	interface GlobalProps {

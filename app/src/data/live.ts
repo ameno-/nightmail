@@ -87,6 +87,14 @@ export function selectAccount(id: string | null) {
   if ((previousAccount !== null && accountSelection !== previousAccount) || (previousWorkspace !== null && workspaceSelection !== previousWorkspace)) bumpScope()
   try { if (id) sessionStorage.setItem(accountStorageKey, id); else sessionStorage.removeItem(accountStorageKey) } catch { /* Selection can remain in memory. */ }
 }
+/** A WebSocket URL on this origin for this tab's account and workspace. A browser's WebSocket can't send the headers every
+ *  other request carries, so the API reads them from the query for its sockets (the campaign room). */
+export function socketUrl(path: string, query: Record<string, string> = {}) {
+  const url = new URL(path, window.location.href)
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+  for (const [name, value] of Object.entries({ ...query, ...(accountSelection ? { account: accountSelection } : {}), ...(workspaceSelection ? { workspace: workspaceSelection } : {}) })) url.searchParams.set(name, value)
+  return url.href
+}
 // Responses public/theme.js started before the app loaded. Each is used once, and only while fresh
 // and for the account and workspace the app would have asked about.
 type EarlyRequests = { account?: string | null; workspace: string | null; at: number; responses: Record<string, Promise<Response> | undefined> }
