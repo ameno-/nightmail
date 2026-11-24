@@ -11,7 +11,7 @@
 .gauge-card > * { position: relative; z-index: 1; }
 /* Every score view is a button that opens the explainer. */
 button.gauge-card { width: 100%; border: 0; font: inherit; text-align: left; cursor: pointer; }
-button.gauge-card:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+button.gauge-card:focus-visible { background: var(--color-layer-1); }
 .gauge-skeleton { position: absolute; inset: 0; border-radius: inherit; background: var(--color-layer-1); animation: ui-pulse 1.2s ease-in-out infinite alternate; }
 
 .gauge-dial { display: block; overflow: visible; }
@@ -34,7 +34,7 @@ button.gauge-card:focus-visible { outline: 2px solid var(--color-focus); outline
 .gauge-card--compact:active { transform: scale(.98); }
 @media (hover: hover) and (pointer: fine) { .gauge-card--compact:hover { background: var(--color-layer-1); } }
 .gauge-card--compact .gauge-dial { flex: none; width: 60px; height: 34px; }
-.gauge-card--compact:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.gauge-card--compact:focus-visible { background: var(--color-layer-1); }
 .gauge-stack { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
 /* One 24px line in every state: the graded number keeps a fixed slot before its grade; ungraded or unread, a dash. */
 .gauge-readout { display: flex; align-items: baseline; gap: 8px; height: 24px; line-height: 24px; }
@@ -55,6 +55,8 @@ button.gauge-card:focus-visible { outline: 2px solid var(--color-focus); outline
   .next-steps a:hover > :first-child { text-decoration: underline; text-underline-offset: 4px; }
   .next-steps a:hover svg { transform: translate(2px, -2px); }
 }
+.next-steps a:focus-visible { text-decoration: none; }
+.next-steps a:focus-visible > :first-child { color: var(--color-text); text-decoration: underline; text-underline-offset: 4px; }
 
 /* The sidebar card's standing dot (Warn and up), in the card's top-right corner: positioned, so it never moves anything. */
 .gauge-card > .gauge-alert { position: absolute; top: 8px; right: 8px; width: 6px; height: 6px; border-radius: 50%; background: var(--tone-marker); box-shadow: 0 0 0 2px var(--color-surface); animation: gauge-alert-in 240ms var(--ease-out-strong) both; }

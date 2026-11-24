@@ -3,16 +3,16 @@ import { matches, PHONE, SHELL_COMPACT } from '../../lib/media'
 
 // How many Latest emails rows fill the main column down to the page card's bottom inset, from the window alone, so the
 // route skeleton and the page agree before anything loads. The fixed parts above the
-// rows are overview.css's heights: the card's inset and padding (8 + 24 each side), the header (28 + 16), the figure tiles
+// rows are overview.css's heights: the card's inset and padding (8 + 28 each side), the header (32 + 16), the figure tiles
 // (104), the chart (20 + 4 + 196) with a 20px gap either side, the section header
-// (24 + 4) and the table head (30). A banner above the header (standing, billing, notice) takes its own height. The list
-// ends at the card's 24px inset beside the detail column; in one column it also clears the Help button (styles/app.css,
+// (26 + 4) and the table head (30). A banner above the header (standing, billing, notice) takes its own height. The list
+// ends at the card's 28px inset beside the detail column; in one column it also clears the Help button (styles/app.css,
 // 56px). The compact shell (tablets and phones) scrolls the document, so it keeps seven, and a phone five.
-const ROW = 28, FIXED = 2 * 8 + 24 + 28 + 16 + 20 + 220 + 20 + 28 + 30
+const ROW = 28, FIXED = 2 * 8 + 28 + 32 + 16 + 20 + 220 + 20 + 30 + 30
 export function latestRowCount() {
   if (typeof window === 'undefined' || matches(SHELL_COMPACT)) return typeof window !== 'undefined' && matches(PHONE) ? 5 : 7
   const facts = 104
-  const inset = matches('(max-width: 960px)') && document.querySelector('.app-shell--support') ? 56 : 24
+  const inset = matches('(max-width: 960px)') && document.querySelector('.app-shell--support') ? 56 : 28
   const banners = [...document.querySelectorAll<HTMLElement>('.page-surface > :is(.standing-banner, .page-notice)')].reduce((sum, el) => { const style = getComputedStyle(el); return sum + el.offsetHeight + parseFloat(style.marginTop) + parseFloat(style.marginBottom) }, 0)
   return Math.min(50, Math.max(7, Math.floor((window.innerHeight - FIXED - facts - inset - banners) / ROW)))
 }

@@ -1,36 +1,32 @@
-/* A sent email (email-detail.tsx, detail-layout.ts): the subject with its facts and status, then the preview. From 900 px
-   the page is the window's height and the preview fills it, scrolling inside; from 1200 px the details column (delivery,
-   then the checks) sits beside it, and below that the delivery runs on one line under the header and the checks open
-   beside the preview from its toolbar. A phone or tablet reads the email first: a short header, one row of controls, the
-   email edge to edge, and everything else in sheets. No hairlines: space groups them. */
+/* A sent email (email-detail.tsx, detail-layout.ts): on a desktop the detail pattern (the subject under its type label,
+   then one row of facts over a hairline), then the preview. From 900 px the page is the window's height and the preview
+   fills it, scrolling inside; from 1200 px the details column (delivery, then the checks) sits beside it, and below that
+   the delivery runs on one line under the facts and the checks open beside the preview from its toolbar. A phone or
+   tablet reads the email first: a short header with its status, one row of controls, the email edge to edge, and
+   everything else in sheets. */
 .email-detail { --side-width: clamp(280px, 22cqi, 380px); container-type: inline-size; display: flex; flex-direction: column; min-width: 0; }
 .page-surface .email-detail > .ui-page-header { flex: none; flex-wrap: nowrap; align-items: flex-start; margin-bottom: var(--space-16); }
 .page-surface .email-detail > .ui-page-header > .cluster:first-child { flex: 1 1 0; flex-wrap: nowrap; align-items: flex-start; min-width: 0; max-width: none; }
 .page-surface .email-detail > .ui-page-header > .cluster:last-child:not(:first-child) { flex: none; align-items: center; min-height: var(--control-height); }
 .email-detail .ui-page-header__text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.page-surface .email-detail > .ui-page-header h1 { --title-line: 24px; min-width: 0; padding-block: calc((var(--control-height) - var(--title-line)) / 2); line-height: var(--title-line); overflow-wrap: anywhere; }
-/* To on one line; From · stream · date · ID on the next. On that line the ID gives way first, then the sender's address. */
-.email-facts { display: flex; flex-direction: column; min-width: 0; color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); }
-.email-facts__line { display: flex; align-items: center; min-width: 0; min-height: 24px; white-space: nowrap; }
-.email-facts__item { display: inline-flex; flex: none; align-items: center; min-width: 0; }
-.email-facts__item + .email-facts__item::before { content: '·'; flex: none; margin-inline: var(--space-8); color: var(--color-faint); }
-.email-facts__line > .email-facts__item:only-child { flex: 0 1 auto; overflow: clip; }
-.email-facts__from { flex: 0 1 auto; min-width: 0; overflow: clip; }
-.email-facts__id { flex: 0 100000 auto; min-width: 0; }
-.email-facts__id .identifier { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.email-facts__label { flex: none; margin-right: var(--space-6); color: var(--color-muted); font-family: var(--font-body); font-size: var(--text-xs); }
-.email-facts .email-sender .private-address[data-revealed] > .private-address__value, .email-facts .private-address__value { overflow: hidden; white-space: nowrap; overflow-wrap: normal; text-overflow: ellipsis; }
+/* The desktop's DetailHeader: the title on its own line box, the back button set level with it (ui.css). */
+.page-surface .email-detail > .ui-page-header--eyebrow h1 { padding-block: 0; }
+.email-detail > .ui-page-header--eyebrow .ui-page-header__text { gap: var(--space-4); }
+.page-surface .email-detail > .ui-page-header h1 { --title-line: var(--leading-title); min-width: 0; padding-block: calc((var(--control-height) - var(--title-line)) / 2); line-height: var(--title-line); overflow-wrap: anywhere; }
+/* A desktop's facts (EmailFacts): one FactsRow under the header, each value on one line. An address shrinks to its cell
+   and is cut with an ellipsis (its first characters and the blur stay in view); a sender's name gives way to its address. */
+.email-detail > .ui-facts-row { flex: none; margin-bottom: var(--space-16); }
+.email-facts dd:has(.private-address) { display: flex; align-items: center; }
+.email-facts dd > span:not(.ui-identifier), .email-facts__contact { display: flex; flex: 0 1 auto; min-width: 0; overflow: clip; white-space: pre; }
 .email-facts .email-sender { flex-wrap: nowrap; min-width: 0; }
 .email-facts :is(.email-sender > span, .email-sender__address) { min-width: 0; overflow: clip; text-overflow: ellipsis; }
-.email-facts .private-address__value { flex: 0 1 auto; min-width: 0; overflow: clip; }
+.email-facts .private-address { min-width: 0; }
+.email-facts .private-address__value, .email-facts .email-sender .private-address[data-revealed] > .private-address__value { flex: 0 1 auto; min-width: 0; overflow: clip; white-space: nowrap; overflow-wrap: normal; text-overflow: ellipsis; }
 .email-facts__contact { display: inline-flex; align-items: center; gap: 2px; min-width: 0; border-radius: 2px; color: inherit; text-decoration: none; }
 .email-facts__contact > svg { flex: none; color: var(--color-faint); }
 @media (hover: hover) and (pointer: fine) { .email-facts__contact:hover, .email-facts__contact:hover > svg { color: var(--color-text); } }
-.email-facts__item > [tabindex] { border-radius: 2px; cursor: default; }
-.email-facts .identifier { color: var(--color-muted); font-size: var(--text-xs); }
-.email-facts__id .ui-icon-button { position: relative; width: 24px; height: 24px; margin-left: 2px; }
-.email-facts__id .ui-icon-button::before { content: ''; position: absolute; inset: -10px; }
-.email-facts__id .ui-icon-button svg { width: 14px; height: 14px; }
+.email-facts__contact:focus-visible, .email-facts__contact:focus-visible > svg { color: var(--color-text); }
+.email-facts__note { border-radius: 2px; cursor: default; }
 /* Delivery: one line of steps, oldest first, joined by short rules, that scrolls sideways when long. */
 .delivery { display: flex; flex: none; align-items: center; gap: var(--space-12); min-width: 0; min-height: var(--control-height); margin-bottom: var(--space-16); }
 .delivery__steps { --fade-pad-x: var(--focus-reach); --fade-pad-y: var(--focus-reach); display: flex; align-items: center; min-width: 0; margin: calc(-1 * var(--focus-reach)); padding: var(--focus-reach); overflow-x: auto; list-style: none; white-space: nowrap; }
@@ -51,6 +47,7 @@
 .delivery .delivery__said[data-open] { display: block; overflow: visible; overflow-wrap: anywhere; white-space: normal; }
 .delivery__said[role='button'] { border-radius: 2px; cursor: pointer; }
 @media (hover: hover) and (pointer: fine) { .delivery__said[role='button']:hover { color: var(--color-text); } }
+.delivery__said[role='button']:focus-visible { color: var(--color-text); }
 .delivery__zone { color: var(--color-faint); font-size: var(--text-xs); }
 .delivery > .ui-alert { flex: 1; }
 .delivery-tip { display: flex; flex-direction: column; gap: 2px; }
@@ -81,7 +78,6 @@
   /* The split: the preview, a hairline, the details column. */
   .email-detail__side { --fade-pad-y: var(--focus-reach); display: flex; flex-direction: column; gap: var(--space-28); width: calc(var(--side-width) + var(--space-8) + var(--space-24)); min-height: 0; margin: calc(-1 * var(--focus-reach)) calc(-1 * var(--space-8)) calc(-1 * var(--focus-reach)) 0; padding: var(--focus-reach) var(--space-8) var(--focus-reach) var(--space-24); border-left: 1px solid var(--color-border-muted); overflow: hidden auto; }
   .email-detail__side[hidden] { display: none; }
-  .email-detail__side:focus-visible { outline-offset: calc(-1 * var(--focus-width)); }
   /* Opened from the toolbar, the checks' panel starts at the preview's top, under its toggle, which names it. */
   .email-detail[data-mode='panel'] .email-detail__side { padding-top: calc(var(--control-height) + var(--space-12) + var(--focus-reach)); }
   .email-detail[data-mode='panel'] .email-detail__side .ss > .ss__title { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
@@ -105,6 +101,7 @@
 /* A phone: why it ended this way, in the open under the status line. */
 .email-why { flex-basis: 100%; min-width: 0; margin: 0; text-wrap: pretty; }
 @media (hover: hover) and (pointer: fine) { .email-status__facts:hover { color: var(--color-text); } }
+.email-status__facts:focus-visible { color: var(--color-text); }
 /* The sheets: the delivery above the facts; the checks. */
 .email-detail-sheet .ui-sheet__body { display: flex; flex-direction: column; gap: var(--space-16); }
 .email-fact-list { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: var(--space-12); margin: 0; padding-top: var(--space-16); border-top: 1px solid var(--color-border-muted); }
@@ -139,7 +136,7 @@
 .page-surface .email-detail-page > .ui-page-header { flex-wrap: nowrap; align-items: flex-start; }
 .page-surface .email-detail-page > .ui-page-header > .cluster:first-child { flex: 1 1 0; flex-wrap: nowrap; align-items: flex-start; min-width: 0; max-width: none; }
 .page-surface .email-detail-page > .ui-page-header > .cluster:last-child:not(:first-child) { flex: none; align-items: center; min-height: var(--control-height); }
-.page-surface .email-detail-page > .ui-page-header h1 { --title-line: 24px; min-width: 0; padding-block: calc((var(--control-height) - var(--title-line)) / 2); line-height: var(--title-line); overflow-wrap: anywhere; }
+.page-surface .email-detail-page > .ui-page-header h1 { --title-line: var(--leading-title); min-width: 0; padding-block: calc((var(--control-height) - var(--title-line)) / 2); line-height: var(--title-line); overflow-wrap: anywhere; }
 /* The surface is a fixed-height flex column; headers, notices and toolbars keep their height when content overflows. */
 .page-surface .email-detail-page > :not(.email-detail-grid), .page-surface .logs-page > :not(.logs-table, .logs-split) { flex-shrink: 0; }
 /* Logs' body (facets.tsx): the filters beside the stream from 1440 px, where the subject still has room; narrower, the
@@ -202,7 +199,6 @@
   .page-surface .email-detail-page > .ui-page-header { flex-wrap: wrap; }
   .page-surface .email-detail-page > .ui-page-header > .cluster:first-child { flex-basis: 100%; }
   .page-surface .email-detail-page > .ui-page-header > .cluster:last-child:not(:first-child) { min-height: 0; }
-  .page-surface .email-detail-page > .ui-page-header h1 { --title-line: 28px; }
   .page-surface .email-detail-grid { margin-top: var(--space-20); padding-block: var(--space-16); }
   .email-detail-grid .ui-email-preview, .plain-text-preview, .message-source { min-height: 320px; }
   /* A plain-text message is as tall as its text: two lines don't push the details below the first screen. */
@@ -230,7 +226,7 @@
 .thread__time { flex: none; color: var(--color-muted); font-variant-numeric: tabular-nums; }
 .thread__clip { flex: none; color: var(--color-muted); }
 .thread__count { color: var(--color-muted); font-weight: normal; font-variant-numeric: tabular-nums; }
-:is(.thread-line__entry, .thread-rows__row):focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
+:is(.thread-line__entry, .thread-rows__row):focus-visible { background: var(--color-hover); text-decoration: none; }
 .thread-line { display: flex; flex: none; flex-direction: column; gap: var(--space-8); }
 .thread-line__title { display: flex; align-items: center; gap: var(--space-6); min-height: var(--control-height); margin: 0; }
 /* Section titles beside an email: quiet sentence-case labels over their data. */

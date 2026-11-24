@@ -4,13 +4,13 @@ import { ArrowUpRight, ChevronRight } from 'lucide-react'
 import { useApi, useApiDef, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { Email, EmailEvent } from '../../data/types'
-import { Alert, Button, CopyButton, elapsed, ErrorState, PageHeader, Sheet, Tooltip, Waterfall, type Tone } from '../../components/ui'
+import { Alert, Button, CopyButton, DetailHeader, elapsed, ErrorState, FactsRow, Icon, Identifier, PageHeader, Sheet, Tooltip, Waterfall, type Fact, type Tone } from '../../components/ui'
 import { useEmailDocument } from '../../components/EmailPreview'
 import { Checks, ChecksChip, ChecksToggle, EmailViews, useSendability, type InsightSource } from '../../components/EmailInsight'
 import { AddressList, Sender } from '../../components/PrivateAddress'
 import { AddressText } from '../../components/AddressText'
 import { date, label, shortDateTime, time } from '../../lib/format'
-import { EmailDetailSkeleton } from './skeletons'
+import { EmailDetailSkeleton, emailFactLabels } from './skeletons'
 import { useDetailLayout } from './detail-layout'
 import { ThreadChip, ThreadRows, ThreadTimeline, threaded, threadItems, useThreadPrefetch } from './thread'
 import { reasonOf, type Reason } from './reason'
@@ -65,7 +65,7 @@ function EmailDetail({ email, focus }: { email: Email; focus: string }) {
   const subject = email.subject || '(no subject)'
   return <div className="email-detail" data-mode={mode}>
     {compact ? <PageHeader title={<Subject text={subject} />} backTo="/logs" subtitle={<><StatusLine email={email} chip={<>{thread && <ThreadChip count={thread.count} onOpen={openSheet('thread')} />}<ChecksChip check={check} onOpen={openSheet('checks')} /></>} onOpen={openSheet('details')} />{why && <p className="email-why">{why.text}</p>}</>} />
-      : <PageHeader title={subject} backTo="/logs" subtitle={<EmailFacts email={email} />} />}
+      : <><DetailHeader typeLabel="Sent email" title={subject} backTo="/logs" /><EmailFacts email={email} /></>}
     {mode === 'panel' && delivery}
     <div className="email-detail__body">
       <section className="email-detail__preview" aria-label="Preview">
@@ -155,19 +155,20 @@ function FactList({ email }: { email: Email }) {
   </dl>
 }
 
-// To on one line; From, the stream, the date and the ID on the next. The recipient opens its contact when there is one.
+// A desktop's facts under the header, in one row: from whom, to whom (opening its contact when there is one), the
+// stream, when, the region and the ID; EmailDetailSkeleton draws the same labels (emailFactLabels).
 function EmailFacts({ email }: { email: Email }) {
   const { multiTenant } = useWorkspaceAccess()
   const to = email.to.split(', ').filter(Boolean)
-  return <div className="email-facts">
-    <div className="email-facts__line"><span className="email-facts__item"><span className="email-facts__label">To</span>{email.contact ? <Link className="email-facts__contact" to={`/audience/contacts/${encodeURIComponent(email.contact.id)}`} aria-label="Open contact"><AddressList values={to} /><ArrowUpRight size={12} aria-hidden="true" /></Link> : <AddressList values={to} />}</span></div>
-    <div className="email-facts__line"><span className="email-facts__item email-facts__from"><span className="email-facts__label">From</span><Sender name={email.fromName} address={email.from} /></span>
-    <span className="email-facts__item">{label(email.stream)}</span>
-    <span className="email-facts__item"><time dateTime={email.sentAt}>{date(email.sentAt)}</time></span>
-    {!multiTenant && <span className="email-facts__item">{email.regionId}</span>}
-    {email.simulated && <Tooltip content="Simulated: never sent to SES."><span className="email-facts__item" tabIndex={0}>Simulated</span></Tooltip>}
-    <span className="email-facts__item email-facts__id"><code className="identifier">{email.id}</code><CopyButton value={email.id} label="Copy email ID" /></span></div>
-  </div>
+  const facts: Record<string, Omit<Fact, 'label'>> = {
+    From: { value: <Sender name={email.fromName} address={email.from} /> },
+    To: { value: email.contact ? <Link className="email-facts__contact" to={`/audience/contacts/${encodeURIComponent(email.contact.id)}`} aria-label="Open contact"><AddressList values={to} /><Icon icon={ArrowUpRight} size="xs" /></Link> : <AddressList values={to} /> },
+    Stream: { value: <>{label(email.stream)}{email.simulated && <>{' · '}<Tooltip content="Simulated: never sent to SES."><span className="email-facts__note" tabIndex={0}>Simulated</span></Tooltip></>}</> },
+    Sent: { value: <time dateTime={email.sentAt}>{shortDateTime(email.sentAt)} UTC</time>, mono: true },
+    Region: { value: email.regionId, mono: true },
+    ID: { value: <Identifier value={email.id} copyLabel="Copy email ID" /> },
+  }
+  return <FactsRow className="email-facts" label="Email details" items={emailFactLabels(multiTenant).map(name => ({ label: name, ...facts[name] }))} />
 }
 
 // ── Delivery: every event, oldest first, with what each means on hover ──

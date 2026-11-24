@@ -15,6 +15,8 @@
 .ss__fix { display: inline-flex; align-items: baseline; gap: var(--space-6); max-width: 100%; padding-block: var(--space-4); border-radius: 2px; color: var(--color-text); text-decoration: none; text-wrap: pretty; }
 .ss__fix > svg { flex: none; width: 12px; height: 12px; color: var(--color-faint); transform: translateY(1px); }
 @media (hover: hover) and (pointer: fine) { a.ss__fix:hover { text-decoration: underline; text-underline-offset: 3px; } a.ss__fix:hover > svg { color: var(--color-text); } }
+a.ss__fix:focus-visible { text-decoration: underline; text-underline-offset: 3px; }
+a.ss__fix:focus-visible > svg { color: var(--color-text); }
 .ss__clear { padding-block: var(--space-4); color: var(--color-muted); }
 /* Technical details: the shared disclosure as one quiet row; open, the score, its categories and every finding. */
 .ss__technical > summary { min-height: var(--control-height); }
@@ -48,6 +50,7 @@
 .ei-finding__title > svg { flex-shrink: 0; color: var(--color-faint); transition: transform 200ms var(--ease-out-strong), color 100ms ease-out; }
 .ei-finding__title[aria-expanded='true'] > svg { transform: rotate(90deg); }
 @media (hover: hover) and (pointer: fine) { .ei-finding__title:hover > svg { color: var(--color-text); transition-duration: 200ms, 0ms; } }
+.ei-finding__title:focus-visible > svg { color: var(--color-text); }
 .ei-finding__fix { margin-top: 2px; color: var(--color-muted); }
 .ei-finding__detail, .ev-issues { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows 200ms var(--ease-out-strong), opacity 150ms ease-out; }
 :is(.ei-finding__detail, .ev-issues)[data-open] { grid-template-rows: 1fr; opacity: 1; }
@@ -76,7 +79,7 @@
 .ev-view[aria-checked='true'] { color: var(--color-text); }
 @media (hover: hover) and (pointer: fine) { .ev-view:hover { color: var(--color-text); transition-duration: 0ms, 160ms; } }
 .ev-view:active { transform: scale(.97); }
-.ev-view:focus-visible { outline-offset: 0; }
+.ev-view:focus-visible { background: var(--color-hover); color: var(--color-text); }
 .ev-view__count { color: var(--color-faint); font-size: var(--text-xs); font-weight: var(--font-weight-regular); font-variant-numeric: tabular-nums; }
 .ev-view__count[data-tone='danger'] { color: var(--color-danger); }
 .ev-views__loading { display: inline-flex; flex: none; align-items: center; height: var(--control-height); padding-left: var(--space-12); }
@@ -89,6 +92,7 @@
 .ev-theme[aria-pressed='true'] { background: var(--color-layer-2); color: var(--color-text); }
 .ev-theme:active { transform: scale(.94); }
 @media (hover: hover) and (pointer: fine) { .ev-theme:hover { color: var(--color-text); } }
+.ev-theme:focus-visible { color: var(--color-text); }
 .ev-issues-button { position: relative; display: inline-flex; flex: none; align-items: center; gap: var(--space-8); height: var(--control-height); padding: 0 var(--space-4); border: 0; border-radius: var(--radius-sm); background: none; color: var(--color-text); font: inherit; white-space: nowrap; }
 .ev-issues-button .ei-dot { margin-top: 0; }
 .ev-issues-button > svg { width: 14px; height: 14px; color: var(--color-success); }
@@ -102,6 +106,7 @@
 :is(.ev-more, .ev-details) { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-8); min-width: var(--control-height); height: var(--control-height); padding: 0 var(--space-8); border: 0; border-radius: var(--radius-sm); background: none; color: var(--color-muted); font: inherit; font-weight: var(--font-weight-bold); white-space: nowrap; transition: background-color 100ms ease-out, color 100ms ease-out, transform 160ms var(--ease-out-strong); }
 :is(.ev-more[data-active], .ev-details[aria-expanded='true']) { background: var(--color-layer-2); color: var(--color-text); }
 @media (hover: hover) and (pointer: fine) { :is(.ev-more, .ev-details):hover { color: var(--color-text); transition-duration: 0ms, 0ms, 160ms; } }
+:is(.ev-more, .ev-details):focus-visible { color: var(--color-text); }
 :is(.ev-more, .ev-details):active { transform: scale(.97); }
 /* The score's slot holds the widest score (100 · A+), so the button keeps its width while the check runs. */
 .ev-details__count { display: inline-flex; align-items: center; justify-content: flex-end; min-width: 7ch; height: var(--leading-sm); font-weight: var(--font-weight-regular); font-variant-numeric: tabular-nums; }
@@ -110,6 +115,7 @@
 .ev-toggle > button > svg { width: 14px; height: 14px; }
 .ev-toggle > button:is([aria-checked='true'], [aria-pressed='true']) { background: var(--color-surface); box-shadow: var(--shadow-button); color: var(--color-text); }
 @media (hover: hover) and (pointer: fine) { .ev-toggle:not([aria-disabled]) > button:hover:not([aria-checked='true'], [aria-pressed='true']) { color: var(--color-text); transition-duration: 0ms; } }
+.ev-toggle:not([aria-disabled]) > button:focus-visible:not([aria-checked='true'], [aria-pressed='true']) { color: var(--color-text); }
 .ev-toggle:not([aria-disabled]) > button:active { transform: scale(.94); }
 .ev-toggle[aria-disabled] > button { cursor: default; opacity: .45; }
 .ev-note { font-size: var(--text-xs); line-height: var(--leading-xs); }
@@ -145,6 +151,7 @@
 .ei-issues__link { position: relative; display: inline-flex; align-items: center; gap: var(--space-4); color: var(--color-muted); font-size: var(--text-xs); text-decoration: none; white-space: nowrap; }
 .ei-issues__link::before { content: ''; position: absolute; inset: -12px -6px; }
 @media (hover: hover) and (pointer: fine) { .ei-issues__link:hover { color: var(--color-text); } }
+.ei-issues__link:focus-visible { color: var(--color-text); }
 @container (max-width: 480px) {
   .ei-issues li { grid-template-columns: 6px minmax(0, 1fr) auto; }
   .ei-issues__link { grid-column: 2 / -1; justify-self: start; }
@@ -153,7 +160,7 @@
 /* A frame: its email's height before it loads, the next document fading in over the last. */
 .email-frame { position: relative; flex: none; box-sizing: content-box; overflow: clip; border-radius: var(--radius-sm); background: var(--color-layer-1); box-shadow: 0 0 0 1px var(--color-border); transition: width 200ms var(--ease-out-strong), height 200ms var(--ease-out-strong); }
 .email-frame[data-first] { transition: none; }
-.email-frame:has(iframe:focus-visible) { outline: var(--focus-width) solid var(--color-focus); outline-offset: var(--focus-offset); }
+.email-frame:has(iframe:focus-visible) { box-shadow: 0 0 0 1px var(--color-border-strong); }
 .email-frame iframe { position: absolute; top: 0; left: 0; display: block; border: 0; outline: 0; background: transparent; color-scheme: normal; transform-origin: 0 0; opacity: 0; transition: opacity 200ms ease-out; }
 .email-frame iframe[data-loaded] { opacity: 1; }
 .email-frame[data-pending] iframe[data-loaded] { opacity: .5; }

@@ -101,7 +101,7 @@
   color-scheme: light;
   --color-email-surface: #FFFFFF;
   --color-email-text: #181818;
-  --color-brand: #798ABA; /* a periwinkle accent, oklch(0.638 0.075 269.2): 3.3:1 on deep, 3.0:1 on layer-2 */
+  --color-brand: #798ABA; /* a periwinkle accent, oklch(0.638 0.075 269.2): 3.2:1 on deep, 3.0:1 on layer-2 */
   --color-logo: #0A0B0F; /* the brand's ink: the wordmark and the stamp on a pale ground; docs/brand.md */
   --color-contrast: #161616;
   --color-contrast-hover: #333333;
@@ -117,21 +117,40 @@
   --font-body: 'Inter', 'Inter Fallback', sans-serif;
   --font-mono: 'OpenTUI Mono', 'OpenTUI Mono Fallback', monospace;
   --font-email: 'Inter', Arial, sans-serif;
-  /* Labels over data: small, muted, in the mono face, tracked out. */
+  /* Type: Inter for the interface, OpenTUI Mono only for data (IDs, DNS, endpoints, code, timestamps, figures). One
+     size per role, each on a 4px line grid:
+     label 11/16 (tracked, mono hints) · xs 12/16 (field and fact labels, table headers, metadata, statuses)
+     · sm 13/20 (dense secondary controls, mono values) · md 14/20 (body, tables, inputs, buttons, navigation)
+     · section 15/22 (section titles) · heading 16/24 (groups, cards, empty states, dialogs) · lg 18/24
+     · title 24/32 (page titles, the same on a phone) · xl 30/36. */
   --text-label: 11px;
-  --tracking-label: .06em;
+  --leading-label: 16px;
+  --tracking-label: .04em;
   --tracking-email: -0.01em;
   --text-xs: 12px;
   --text-sm: 13px;
   --text-md: 14px;
+  --text-section: 15px;
+  --text-heading: 16px;
   --text-lg: 18px;
+  --text-title: 24px;
   --text-xl: 30px;
   --leading-xs: 16px;
   --leading-sm: 20px;
+  --leading-md: 20px;
+  --leading-section: 22px;
+  --leading-heading: 24px;
   --leading-lg: 24px;
+  --leading-title: 32px;
   --leading-xl: 36px;
-  --font-weight-regular: 440;
-  --font-weight-bold: 530;
+  --tracking-body: -0.006em;
+  --tracking-section: -0.01em;
+  --tracking-heading: -0.012em;
+  --tracking-title: -0.022em;
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 600;
   --space-4: 4px;
   --space-6: 6px;
   --space-8: 8px;
@@ -142,15 +161,17 @@
   --space-28: 28px;
   --space-32: 32px;
   --space-40: 40px;
-  --radius-sm: 6px;
-  --radius-lg: 6px;
-  --control-height: 28px;
-  /* The focus ring, and how far it reaches outside its control (width + offset; a plain length, because Chrome drops a
-     calc() in overflow-clip-margin): the room a clipping edge leaves for it (ui.css). */
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 12px;
+  --control-height: 32px;
+  --control-height-sm: 26px;
+  /* The dashboard draws no focus rings: focus shows the hover cue (ui.css). The homepage and price pages keep rings of
+     their own, from --focus-width and --color-focus. --focus-reach is the room a scroll area keeps at its edges. */
   --focus-width: 2px;
-  --focus-offset: 2px;
   --focus-reach: 4px;
-  --row-height: 44px;
+  --row-height: 53px;
   --row-height-lg: 56px;
   /* Log and event streams only (Logs, Overview's latest mail, delivery and thread timelines): one mono line. */
   --row-height-dense: 28px;
@@ -161,8 +182,10 @@
   --sidebar-gutter: var(--space-12);
   --sidebar-inset: var(--space-12);
   --page-inset: 8px;
-  --page-gap: var(--space-20);
-  --motion-duration: 85ms;
+  --page-gap: var(--space-24);
+  /* Colour, fill and border changes on controls, links, rows and tabs. */
+  --motion-duration: 150ms;
+  --ease-standard: cubic-bezier(.4, 0, .2, 1);
   /* Micro-interactions: strong ease-out for enters and feedback (120–250 ms), ease-in-out for on-screen moves. */
   --ease-out-strong: cubic-bezier(.23, 1, .32, 1);
   --ease-in-out-strong: cubic-bezier(.77, 0, .175, 1);
@@ -170,11 +193,12 @@
   --ease-swap: cubic-bezier(.2, .8, .2, 1);
   /* Sheets: the iOS drawer curve. */
   --ease-drawer: cubic-bezier(.32, .72, 0, 1);
-  /* Flat: surfaces and controls are drawn by a hairline, never lifted by a shadow. Overlays (popovers, dialogs) keep one. */
+  /* Flat: surfaces and controls are drawn by a hairline, never lifted by a shadow. Overlays (popovers, dialogs) keep a
+     soft drop under their own 1px border. */
   --shadow-raised: 0 0 0 1px var(--color-border-muted);
   --shadow-button: inset 0 0 0 1px var(--color-border);
-  --shadow-popover: 0 8px 16px rgb(0 0 0 / 4%), 0 4px 8px rgb(0 0 0 / 8%), 0 0 0 .5px rgb(0 0 0 / 12%);
-  --shadow-dialog: 0 16px 32px rgb(0 0 0 / 4%), 0 8px 16px rgb(0 0 0 / 8%), 0 0 0 .5px rgb(0 0 0 / 12%);
+  --shadow-popover: 0 8px 16px rgb(0 0 0 / 4%), 0 4px 8px rgb(0 0 0 / 6%);
+  --shadow-dialog: 0 16px 32px rgb(0 0 0 / 5%), 0 8px 16px rgb(0 0 0 / 6%);
   /* Sender score grade bands (the gauge's arcs). B is the data navy: a bright blue read as a second accent. */
   --grade-aplus: #13804A; --grade-a: #2EAF5A; --grade-b: var(--color-accent-data); --grade-c: #E7AF36; --grade-d: #EE7B30; --grade-f: #D92E3C;
 }
@@ -182,7 +206,7 @@
 :root[data-theme='dark'] {
   --grade-aplus: #3DD68C; --grade-a: #6BD586; --grade-b: var(--color-accent-data); --grade-c: #F2CF76; --grade-d: #F59A5B; --grade-f: #F17471;
   color-scheme: dark;
-  --color-brand: #798ABA; /* the same colour as light: 5.9:1 on deep */
+  --color-brand: #798ABA; /* the same colour as light: 5.6:1 on deep */
   --color-logo: #F4F2EC; /* the brand's paper: the marks on a dark ground */
   --color-contrast: #EDEDED;
   --color-contrast-hover: #FFFFFF;
@@ -190,33 +214,40 @@
   --shadow-on-contrast: none;
   --color-overlay: rgb(0 0 0 / 60%);
   --color-shadow: rgb(0 0 0 / 30%);
-  --color-hover: rgb(255 255 255 / 6%);
-  --color-pressed: rgb(255 255 255 / 10%);
-  --shadow-raised: 0 0 0 1px var(--color-border-muted);
-  --shadow-button: inset 0 0 0 1px var(--color-border);
-  --shadow-popover: 0 8px 16px rgb(0 0 0 / 30%), 0 4px 8px rgb(0 0 0 / 30%), 0 0 0 .5px rgb(255 255 255 / 16%), 0 -.5px rgb(255 255 255 / 6%);
-  --shadow-dialog: 0 16px 32px rgb(0 0 0 / 30%), 0 8px 16px rgb(0 0 0 / 30%), 0 0 0 .5px rgb(255 255 255 / 16%), 0 -.5px rgb(255 255 255 / 6%);
+  --color-hover: rgb(255 255 255 / 4.5%);
+  --color-pressed: rgb(255 255 255 / 8.5%);
+  --shadow-popover: 0 8px 16px rgb(0 0 0 / 28%), 0 4px 8px rgb(0 0 0 / 24%);
+  --shadow-dialog: 0 16px 32px rgb(0 0 0 / 32%), 0 8px 16px rgb(0 0 0 / 24%);
 }
 
 /* ── Colour (Signal Log) ──
-   OKLCH throughout. True neutral greys for every surface, line and text; one navy accent used only on buttons and chart
-   items; a data palette of matched lightness and chroma for multi-series charts; status colours (ok, warn, error, info)
-   only on status dots and words. Selection, the active page, tabs, toggles and focus are neutral: brighter text, a
-   neutral fill or a rule, and a neutral high-contrast focus ring.
-   The accent is an ink navy: muted and slate-leaning, one hue (263) with a role per lightness. A navy fill with white
+   OKLCH throughout. True neutral greys (chroma 0) for every surface, line and text; one navy accent used only on buttons
+   and chart items; a data palette of matched lightness and chroma for multi-series charts; status colours (ok, warn,
+   error, info) only on status dots and words. Selection, the active page, tabs, toggles and focus are neutral: brighter
+   text, a neutral fill or a rule; keyboard focus is the hover cue, never a ring.
+   Surfaces, outermost first: deep (the frame and sidebar), surface (the page), then layer-1 to layer-3 for what sits on
+   it. Light: a #F6F6F6 frame around a real #FFFFFF page, recessed fills #F8F8F8, #F0F0F0 and #E7E7E7. Dark: layered
+   near-blacks, never #000: #101010, #171717, then #1F1F1F, #272727 and #313131. Controls (fields, selects, secondary
+   buttons, checkboxes) sit on --color-control and overlays (menus, dialogs, sheets, toasts, tooltips) on
+   --color-overlay-surface: white on light, layer-1 on dark, so both read crisply against the page.
+   Text: light #151515 / #5C5C5C / #747474 (18.3, 6.7 and 4.7:1 on the page); dark #F0F0F0 / #ABABAB / #848484 (15.7,
+   7.8 and 4.8:1 on the page).
+   The accent is an ink navy: muted and slate-leaning, one hue (262) with a role per lightness. A navy fill with white
    text, a 1px lighter edge that keeps a fill visible on near-black (no glow), a lighter tint for chart items, and a
    light navy-blue for link text on dark.
-   Contrast (WCAG 2): white on every fill step 7:1 or more (light 12.3:1, dark 9.3:1); the dark edge 3.8:1 on the
-   surface; links 9.3:1 (light) and 9.3:1 (dark); chart series 6.0:1 (light) and 6.7:1 (dark); status inks 5.6:1 or
+   Contrast (WCAG 2): white on every fill step 6.8:1 or more (light 12.3:1, dark 8.6:1); the dark edge 3.8:1 on the
+   surface; links 9.2:1 (light) and 9.0:1 (dark); chart series 6.0:1 (light) and 6.4:1 (dark); status inks 5.6:1 or
    more on light and 8:1 or more on dark. */
 :root {
   /* Light: markers and series at L .62 (warnings .70: amber reads dirty lower), inks at L .50. */
   --mark-l: .62; --mark-c: .14; --warn-l: .70; --ink-l: .50; --ink-c: .12;
   --hue-ok: 152; --hue-warn: 85; --hue-error: 27; --hue-info: 250;
   --hue-received: 190; --hue-opened: 300; --hue-clicked: 345;
-  --l-deep: .985; --l-surface: 1; --l-layer-1: .982; --l-layer-2: .962; --l-layer-3: .945; --l-text: .205; --l-muted: .48; --l-faint: .555;
+  --l-deep: .974; --l-surface: 1; --l-layer-1: .978; --l-layer-2: .956; --l-layer-3: .928; --l-text: .195; --l-muted: .475; --l-faint: .56;
   /* An unticked checkbox's or radio's edge: 3:1 or more against the control and the surface or dialog around it. */
-  --l-control-edge: .64;
+  --l-control-edge: .62;
+  /* Hairlines: the text colour at these strengths. */
+  --border-muted-a: 7%; --border-a: 12%; --border-strong-a: 20%; --active-a: 8%;
   /* Ink navy: a fill with white text, hover and pressed steps (darker on light), its edge, text and charts. */
   --color-accent: oklch(.33 .07 263);
   --color-accent-hover: oklch(.29 .065 263);
@@ -228,15 +259,18 @@
 }
 :root[data-theme='dark'] {
   --mark-l: .74; --mark-c: .13; --warn-l: .80; --ink-l: .82; --ink-c: .11;
-  --l-deep: .135; --l-surface: .16; --l-layer-1: .195; --l-layer-2: .225; --l-layer-3: .27; --l-text: .945; --l-muted: .72; --l-faint: .62;
-  --l-control-edge: .52;
-  /* On near-black the fill lifts a little, hover goes lighter (white stays 7:1) and a 1px edge outlines it. */
-  --color-accent: oklch(.40 .075 262);
-  --color-accent-hover: oklch(.45 .08 262);
-  --color-accent-pressed: oklch(.35 .07 262);
-  --color-accent-edge: oklch(.54 .08 262);
-  --color-accent-text: oklch(.77 .065 260);
-  --color-accent-data: oklch(.68 .08 260);
+  --l-deep: .175; --l-surface: .205; --l-layer-1: .238; --l-layer-2: .272; --l-layer-3: .312; --l-text: .955; --l-muted: .74; --l-faint: .615;
+  --l-control-edge: .54;
+  --border-muted-a: 7.5%; --border-a: 11%; --border-strong-a: 19%; --active-a: 9%;
+  --color-control: var(--color-layer-1);
+  --color-overlay-surface: var(--color-layer-1);
+  /* On near-black the fill lifts a little, hover goes lighter (white stays near 7:1) and a 1px edge outlines it. */
+  --color-accent: oklch(.42 .08 262);
+  --color-accent-hover: oklch(.47 .085 262);
+  --color-accent-pressed: oklch(.37 .075 262);
+  --color-accent-edge: oklch(.56 .08 262);
+  --color-accent-text: oklch(.78 .07 260);
+  --color-accent-data: oklch(.69 .085 260);
 }
 :root {
   --color-deep: oklch(var(--l-deep) 0 0);
@@ -245,19 +279,23 @@
   --color-layer-1: oklch(var(--l-layer-1) 0 0);
   --color-layer-2: oklch(var(--l-layer-2) 0 0);
   --color-layer-3: oklch(var(--l-layer-3) 0 0);
+  /* A part of the page that takes input, and a surface floating over the page. A container that repaints its own
+     --color-surface (the composer's email sheet) sets these again: a custom property resolves where it is declared. */
+  --color-control: var(--color-surface);
+  --color-overlay-surface: var(--color-surface);
   --color-text: oklch(var(--l-text) 0 0);
   --color-muted: oklch(var(--l-muted) 0 0);
   --color-faint: oklch(var(--l-faint) 0 0);
-  --color-border: oklch(var(--l-text) 0 0 / 9%);
-  --color-border-muted: oklch(var(--l-text) 0 0 / 6.5%);
-  --color-border-strong: oklch(var(--l-text) 0 0 / 17%);
+  --color-border: oklch(var(--l-text) 0 0 / var(--border-a));
+  --color-border-muted: oklch(var(--l-text) 0 0 / var(--border-muted-a));
+  --color-border-strong: oklch(var(--l-text) 0 0 / var(--border-strong-a));
   --color-control-edge: oklch(var(--l-control-edge) 0 0);
   /* Neutral ink for secondary series and tracks. */
   --color-series: oklch(var(--l-text) 0 0 / 30%);
   --color-series-strong: oklch(var(--l-text) 0 0 / 64%);
   --color-track: oklch(var(--l-text) 0 0 / 7%);
   /* Selected rows, the active page, pressed facets, text selection: a neutral fill. Focus: the text colour's ring. */
-  --color-active-bg: oklch(var(--l-text) 0 0 / 8%);
+  --color-active-bg: oklch(var(--l-text) 0 0 / var(--active-a));
   --color-focus: var(--color-text);
   /* Status: ink for words, marker for dots, a 10% tint and a 30% rule (alerts and banners). */
   --color-success: oklch(var(--ink-l) var(--ink-c) var(--hue-ok));

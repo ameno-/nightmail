@@ -42,6 +42,7 @@
 .op-reasons li { display: flex; flex-direction: column; gap: 2px; }
 .op-reason { margin: 0; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; text-decoration: underline; text-decoration-color: var(--color-border); text-underline-offset: 3px; cursor: pointer; }
 @media (hover: hover) { .op-reason:hover { text-decoration-color: currentColor; } }
+.op-reason:focus-visible { text-decoration-color: currentColor; }
 .op-siblings { display: flex; flex-wrap: wrap; gap: var(--space-8) var(--space-16); margin: 0; padding: 0; list-style: none; font-size: var(--text-sm); }
 .op-more { align-self: flex-start; margin-top: var(--space-12); }
 /* The waitlist: its count under the table, and the export at the toolbar's end (its icon alone on a phone). */
@@ -82,6 +83,7 @@
 .op-cluster-rail__row { display: flex; align-items: center; gap: var(--space-12); height: 32px; margin: 0 calc(-1 * var(--space-6)); padding: 0 var(--space-6); border-radius: 4px; color: inherit; text-decoration: none; }
 a.op-cluster-rail__row[aria-current='page'] { background: var(--color-active-bg); }
 @media (hover: hover) and (pointer: fine) { a.op-cluster-rail__row:hover { background: var(--color-hover); } }
+a.op-cluster-rail__row:focus-visible { background: var(--color-hover); text-decoration: none; }
 .op-cluster-rail__why { flex: 1; color: var(--color-muted); font-size: var(--text-sm); }
 /* Reasons: a label, the count it was judged on and its points, 32px a row. */
 .op-why, .op-links { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; font-size: var(--text-sm); line-height: var(--leading-sm); }

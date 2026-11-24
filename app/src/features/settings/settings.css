@@ -42,6 +42,7 @@
 .domains-table .domain-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .domain-setup-link { text-decoration-line: underline; text-decoration-thickness: from-font; text-underline-offset: .18em; text-decoration-color: var(--color-border-strong); }
 @media (hover: hover) and (pointer: fine) { .domain-setup-link:hover { color: var(--color-text); text-decoration-color: currentColor; } }
+.domain-setup-link:focus-visible { color: var(--color-text); text-decoration-color: currentColor; }
 .settings-cell, .settings-webhook-events { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .settings-card-end { flex: none; width: 44px; height: 44px; }
 .settings-cell.settings-cell--two { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; white-space: normal; overflow-wrap: anywhere; }
@@ -65,7 +66,6 @@
 .webhook-header-row__error { grid-area: error; }
 .webhook-headers__actions:empty { display: none; }
 .webhook-headers__actions > .ui-button--ghost:first-child { margin-inline-start: calc(-1 * var(--focus-reach)); padding-inline-start: calc(var(--button-pad-x, 11px) - 9px + var(--focus-reach)); }
-.webhook-headers__actions > .ui-button--ghost:first-child:focus-visible { outline-offset: calc(-1 * var(--focus-width)); }
 .webhook-header-names { display: flex; gap: var(--space-6); min-width: 0; white-space: nowrap; }
 .webhook-header-names > :first-child { overflow: hidden; text-overflow: ellipsis; }
 /* A phone's fingers need 44px: the show and remove buttons (36px wide before), and the Add header / Replace headers buttons (36px tall). */
@@ -132,7 +132,7 @@
 .settings-key-domain-options .ui-check-field label { overflow-wrap: anywhere; }
 .ui-select-trigger.settings-default-region { width: 320px; max-width: 100%; }
 .settings-region-link { display: flex; align-items: center; width: 100%; min-height: 40px; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; text-decoration: underline; text-underline-offset: 4px; text-decoration-color: transparent; }
-.settings-region-link:hover { text-decoration-color: currentColor; }
+.settings-region-link:is(:hover, :focus-visible) { text-decoration-color: currentColor; }
 .domain-group-title { display: grid; gap: var(--space-4); min-width: 0; flex: 1 1 280px; }
 .ui-section-header:has(> .domain-group-title) { flex-wrap: wrap; }
 .settings-account-summary { grid-template-columns: repeat(4, minmax(0, 1fr)); }

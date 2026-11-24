@@ -14,6 +14,7 @@
 button.billing-balance__amount { justify-self: start; gap: var(--space-4); padding: 0; border: 0; border-radius: var(--radius-sm); background: none; color: var(--color-text); cursor: pointer; }
 button.billing-balance__amount > svg { flex: none; color: var(--color-muted); transition: transform 160ms var(--ease-out-strong), color var(--motion-duration); }
 @media (hover: hover) and (pointer: fine) { button.billing-balance__amount:hover > svg { color: var(--color-text); transform: translateX(2px); } }
+button.billing-balance__amount:focus-visible > svg { color: var(--color-text); }
 .billing-balance__amount--plan { font-family: var(--font-body); font-size: 30px; font-weight: var(--font-weight-bold); letter-spacing: -.01em; }
 /* The free allowance's meters, and the daily limit's row while there is one: it opens its steps, a short numbered ladder. */
 .usage-meter { display: inline-flex; align-items: center; gap: var(--space-12); }
@@ -27,7 +28,7 @@ button.billing-balance__amount > svg { flex: none; color: var(--color-muted); tr
 .usage-limit__title > svg { flex: none; color: var(--color-muted); transition: transform 180ms var(--ease-out-strong), color var(--motion-duration); }
 .usage-limit[open] .usage-limit__title > svg { transform: rotate(180deg); }
 @media (hover: hover) and (pointer: fine) { .usage-limit > summary:hover .usage-limit__title > svg { color: var(--color-text); } }
-.usage-limit > summary:focus-visible { outline-offset: calc(-1 * var(--focus-width)); }
+.usage-limit > summary:focus-visible .usage-limit__title > svg { color: var(--color-text); }
 .usage-steps-section { display: flex; flex-direction: column; gap: var(--space-12); padding-top: var(--space-12); }
 .usage-limit__title .ui-status { margin-left: var(--space-4); }
 .usage-steps { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--color-border-muted); }
@@ -65,6 +66,7 @@ button.billing-balance__amount > svg { flex: none; color: var(--color-muted); tr
 .billing-amount[data-sign='in'] { color: var(--color-success); }
 .billing-link { position: relative; display: inline-flex; align-items: center; gap: 2px; color: var(--color-muted); text-decoration: none; font-size: var(--text-xs); white-space: nowrap; }
 @media (hover: hover) and (pointer: fine) { .billing-link:hover { color: var(--color-text); } }
+.billing-link:focus-visible { color: var(--color-text); }
 @media (pointer: coarse), (max-width: 899px) { .billing-link::after { content: ''; position: absolute; inset: -14px -8px; } }
 .billing-links { justify-content: flex-start; gap: var(--space-12); flex-wrap: nowrap; }
 .billing-table td[data-col='amount'], .billing-table td[data-col='after'] { font-variant-numeric: tabular-nums; }
@@ -84,6 +86,7 @@ button.billing-balance__amount > svg { flex: none; color: var(--color-muted); tr
 .billing-choice__item:active:not(:disabled), .billing-method:active:not(:disabled) { transform: scale(.98); }
 .billing-choice__item:disabled, .billing-method:disabled { cursor: not-allowed; opacity: .6; }
 @media (hover: hover) and (pointer: fine) { .billing-choice__item:hover:not(:disabled, [aria-checked='true']), .billing-method:hover:not(:disabled, [aria-checked='true']) { background: var(--color-layer-2); } }
+:is(.billing-choice__item, .billing-method):focus-visible:not([aria-checked='true']) { background: var(--color-layer-2); }
 .billing-methods { display: flex; flex-direction: column; gap: var(--space-6); }
 .billing-method { justify-content: flex-start; height: 44px; padding-inline: var(--space-12); }
 .billing-method svg { color: var(--color-muted); }
@@ -92,6 +95,7 @@ button.billing-balance__amount > svg { flex: none; color: var(--color-muted); tr
 .billing-add__terms { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); text-wrap: pretty; }
 .billing-add__terms a { color: inherit; text-decoration-line: underline; text-decoration-thickness: from-font; text-underline-offset: .18em; transition: color var(--motion-duration); }
 @media (hover: hover) { .billing-add__terms a:hover { color: var(--color-text); } }
+.billing-add__terms a:focus-visible { color: var(--color-text); }
 
 @media (max-width: 640px) {
   /* Values sit in a fixed column one control tall, so a skeleton and the value it becomes share one box; the label takes
