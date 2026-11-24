@@ -4,7 +4,7 @@ import { Link } from 'react-router'
 import { useApiMutation, useWorkspaceAccess } from '../../data/context'
 import { campaignResumable, errorText, type Campaign, type CampaignPacingInput } from '../../data/types'
 import { Button, Checkbox, Input } from '../../components/ui'
-import { date, number, relativeTime, time } from '../../lib/format'
+import { approxRelativeTime, date, localTime, number, relativeTime, time } from '../../lib/format'
 import { isDuplicateSubmission } from '../../lib/single-flight'
 
 export const liveInterval = 3000
@@ -69,6 +69,9 @@ export function CampaignProgress({ campaign }: { campaign: Campaign }) {
     ['Canceled', (byStatus.canceled ?? 0) + canceledBeforeQueue, undefined], ['Acceptance unknown', byStatus.acceptance_unknown, 'acceptance_unknown'],
     ['Simulated', byStatus.simulated, 'simulated'],
   ] as const
+  const preparing = campaign.status === 'preparing'
+  const prepared = campaign.delivery?.prepared ?? 0
+  const expanded = campaign.delivery?.expanded ?? 0
   const activeStatus = ['preparing', 'sending', 'paused'].includes(campaign.status)
   const wait = releasing(campaign) ? campaign.delivery?.waiting : null
   const lag = campaign.delivery?.feedbackLag ?? null
@@ -76,15 +79,22 @@ export function CampaignProgress({ campaign }: { campaign: Campaign }) {
   const statusText = wait
     ? wait.reason === 'feedback_lag'
       ? 'Waiting for delivery reports to catch up.'
-      : `${waitingLabel[wait.reason] ?? 'Waiting to release more recipients'} · ${relativeTime(wait.until)}`
+      : wait.reason === 'list_probe'
+        ? `Test batch${expanded > 0 ? ` of ${number(expanded)}` : ''} sent. Rest release at ${localTime(wait.until)} if bounces stay low.`
+        : `${waitingLabel[wait.reason] ?? 'Waiting to release more recipients'} · ${approxRelativeTime(wait.until)}`
     : lag
       ? `Delivery stats are about ${Math.max(1, Math.round(lag.oldestMs / 60_000))} min behind.`
       : ''
   return <div className="campaign-audience-summary">
-    <div className="campaign-summary-line"><strong>Send progress</strong><span>{number(processed)} / {number(total)} processed</span></div>
-    {total > 0 ? <progress className="campaign-progress-bar" aria-label="Campaign send progress" aria-valuetext={`${number(processed)} of ${number(total)} emails processed`} value={processed} max={total} /> : <p className="muted">No email records available.</p>}
+    {preparing ? <>
+      <div className="campaign-summary-line"><strong>Preparing</strong><span>{total > 0 ? `Checking ${number(total)} ${total === 1 ? 'recipient' : 'recipients'} · ${number(prepared)} done` : 'Preparing recipient list…'}</span></div>
+      <progress className="campaign-progress-bar" aria-label="Campaign preparation progress" aria-valuetext={total > 0 ? `${number(prepared)} of ${number(total)} recipients checked` : 'Preparing recipient list'} value={total > 0 ? prepared : 0} max={total > 0 ? total : 1} />
+    </> : <>
+      <div className="campaign-summary-line"><strong>Send progress</strong><span>{number(processed)} / {number(total)} processed</span></div>
+      {total > 0 ? <progress className="campaign-progress-bar" aria-label="Campaign send progress" aria-valuetext={`${number(processed)} of ${number(total)} emails processed`} value={processed} max={total} /> : <p className="muted">No email records available.</p>}
+    </>}
     {activeStatus && <p className="campaign-status-line muted" role="status" title={statusTitle}>{statusText}</p>}
-    {awaitingQueue > 0 && <div className="campaign-summary-line"><span>Awaiting queue</span><span>{number(awaitingQueue)}</span></div>}
+    {!preparing && awaitingQueue > 0 && <div className="campaign-summary-line"><span>Awaiting queue</span><span>{number(awaitingQueue)}</span></div>}
     {queued > 0 && <div className="campaign-summary-line"><span>Queued</span><span>{number(queued)}</span></div>}
     {processing > 0 && <div className="campaign-summary-line"><span>Processing</span><span>{number(processing)}</span></div>}
     {outcomes.filter(([, count]) => count && count > 0).map(([label, count, status]) => <SummaryLine key={label} label={label} figure={number(count)} to={status && campaignLogs(campaign.id, status)} />)}

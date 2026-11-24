@@ -949,7 +949,7 @@ function CampaignReview({ campaign: latest, stats, stale, refreshing, refresh }:
     if (readinessError) { setError(readinessError); setConfirmation(null); return }
     guard.current = true
     setError('')
-    try { const result = await sendMutation.mutateAsync(input); if ('queued' in result && !result.scheduledAt) toast(`Sending started · ${number(result.queued)} ${result.queued === 1 ? 'recipient' : 'recipients'}${result.simulated ? ' · simulated' : ''}`, 'success'); setConfirmation(null) }
+    try { const result = await sendMutation.mutateAsync(input); if ('queued' in result && !result.scheduledAt) toast(result.queued > 0 ? `Sending started · ${number(result.queued)} ${result.queued === 1 ? 'recipient' : 'recipients'}${result.simulated ? ' · simulated' : ''}` : `Sending started · preparing recipients${result.simulated ? ' · simulated' : ''}`, 'success'); setConfirmation(null) }
     catch (cause) {
       setConfirmation(null)
       if (cause instanceof ApiError && cause.code === 'POSTAL_ADDRESS_REQUIRED') setAddressFor({ input, confirmed: true })
@@ -1001,6 +1001,7 @@ function CampaignReview({ campaign: latest, stats, stale, refreshing, refresh }:
     const next = (row: ReviewRowId) => <>{unreadNote && openRow === row && <ul className="campaign-notes"><li className="campaign-note" data-tone="warning"><span>{unreadNote}</span></li></ul>}<Button variant="primary" onClick={() => setOpenRow(order[order.indexOf(row) + 1]!)}>Next</Button></>
     return <div className="campaign-review campaign-review--draft">
       {bar}
+      {campaign.delivery?.error && <p className="campaign-note" data-tone="danger" role="alert">{campaign.delivery.error.message}</p>}
       <div className="review-stages">
         <ReviewStage n={1} id="to" title="Recipients" open={openRow === 'to'} done={Boolean(campaign.listId && eligible)} onOpen={() => setOpenRow('to')} summary={toSummary} footer={next('to')}>
           <AudiencePicker campaign={campaign} notices={settings.data?.requiredNotices === true} disabled={sendMutation.isPending} />

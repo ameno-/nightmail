@@ -29798,10 +29798,10 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
   // snapshot: sends, an edit and a second launch go on meanwhile, nothing that changes then reaches the frozen list, and a
   // launch that fails or is cancelled there leaves nothing behind.
   test('campaign launch: sends in the workspace never wait for the audience capture, and the frozen list is one snapshot',async t=>{
-    const {g,w,host,call,audience,draft,launch,capturing}=await launchFixture(t);
-    // More than 50,000 members takes the large capture (a snapshot table, then recipient inserts in pages), as a list of
-    // millions does. Every 2,500th contact is subscribed; the first of those is also suppressed.
-    const listId=await audience(50_010,2500);
+    const {runtime,g,w,host,call,audience,draft,launch,capturing}=await launchFixture(t);
+    // Up to 5,000 members captures synchronously inside launch() using the same snapshotCampaignAudience path; >5,000
+    // defers to campaign.run (tested in part 3 below). Every 200th contact is subscribed; the first is also suppressed.
+    const listId=await audience(4_000,200);
     const contact=(n:number)=>'con_'+createHash('md5').update(w+n).digest('hex');
     // The audience as it stands before any launch: subscribed, not suppressed, in send order (hash of contact ID).
     const before=(await g.query("SELECT email FROM audience_contacts WHERE workspace_id=$1 AND marketing_consent='subscribed' AND NOT suppressed ORDER BY hashtextextended(id, 0), id",[w])).rows.map(r=>r.email);
@@ -29824,7 +29824,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       sends=[0,1,2].map(i=>settled(call('POST','/v1/emails/send',{from:`alerts@${host}`,to:'success@simulator.amazonses.com',subject:`Sign-in code ${i}`,text:'Synthetic.'})));
       second=settled(launch(first));
       // Consent changes and a new member after the snapshot: none of them reaches this launch's frozen list.
-      unsubscribe=settled(call('POST',`/v1/contacts/${contact(5000)}/consent`,{status:'unsubscribed'}));
+      unsubscribe=settled(call('POST',`/v1/contacts/${contact(400)}/consent`,{status:'unsubscribed'}));
       subscribe=settled(call('POST',`/v1/contacts/${contact(1)}/consent`,{status:'subscribed',source:'acceptance-fixture',policyVersion:'acceptance-v1',evidence:'Synthetic consent on a reserved fixture address.'}));
       await g.query("WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES('con_late_'||md5($1),$1,'late@'||$3,'subscribed') RETURNING workspace_id,id) INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT workspace_id,$2,id FROM c",[w,listId,`${w}.example.com`]);
       await within(Promise.all([...sends,second,unsubscribe,subscribe].map(s=>s.promise)),3000);
@@ -29877,6 +29877,34 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // contact who subscribed and the member added during the first capture, without the one who unsubscribed.
       if(ending==='cancelled'){const retried=await launch(c,key);assert.equal(retried.status,202,JSON.stringify(retried.body));assert.equal(retried.body.queued,20);}
     }
+
+    // 3. Deferred background REPEATABLE READ capture (>5,000 members): launch returns 202 immediately, and the background
+    //    capture holds a single consistent snapshot without blocking sends while concurrent consent/import changes commit.
+    const bigList = await audience(5_100, 250, 'bigsnap');
+    const bigBefore = (await g.query("SELECT c.email FROM audience_contacts c JOIN audience_list_members m ON m.workspace_id=c.workspace_id AND m.contact_id=c.id WHERE c.workspace_id=$1 AND m.list_id=$2 AND c.marketing_consent='subscribed' AND NOT c.suppressed ORDER BY hashtextextended(c.id, 0), c.id", [w, bigList])).rows.map(r => r.email);
+    const bigCamp = await draft('BigDeferred', bigList);
+    const bigLaunched = await launch(bigCamp);
+    assert.equal(bigLaunched.status, 202, JSON.stringify(bigLaunched.body));
+    assert.equal(bigLaunched.body.queued, bigBefore.length);
+    const { jobHandlers } = await import('./src/sending.js');
+    const bigSubId = (await g.query("SELECT c.id FROM audience_contacts c JOIN audience_list_members m ON m.workspace_id=c.workspace_id AND m.contact_id=c.id WHERE c.workspace_id=$1 AND m.list_id=$2 AND c.marketing_consent='subscribed' AND NOT c.suppressed LIMIT 1", [w, bigList])).rows[0].id;
+    await gate.query('BEGIN');
+    let bgRun: Promise<unknown> | undefined;
+    try {
+      await gate.query('LOCK TABLE sending_review_recipients IN SHARE MODE');
+      bgRun = jobHandlers['campaign.run']!(runtime, { campaignId: bigCamp.id }, { id: 'campaign.run:' + bigCamp.id, attempts: 1, workspaceId: w, leaseFence: new Date().toISOString(), webhook: null, ingest: null, deleteBinding: null, recordWithSettlement() {} }).catch(e => { if (e?.constructor?.name !== 'JobDeferred') throw e; });
+      const bgPid = await capturing();
+      const midSend = await call('POST', '/v1/emails/send', { from: `alerts@${host}`, to: 'success@simulator.amazonses.com', subject: 'During bg capture', text: 'Synthetic.' });
+      assert.equal(midSend.status, 202);
+      assert.equal(await blockedBy(bgPid), 0, 'Direct sends never wait on background capture.');
+      // Unsubscribe an eligible contact and add a new subscribed contact AFTER the REPEATABLE READ snapshot started.
+      await call('POST', `/v1/contacts/${bigSubId}/consent`, { status: 'unsubscribed' });
+      await g.query("WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES('con_bglate_'||md5($1),$1,'bglate@'||$3,'subscribed') RETURNING workspace_id,id) INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT workspace_id,$2,id FROM c", [w, bigList, `${w}.example.com`]);
+    } finally { await gate.query('ROLLBACK'); }
+    await bgRun!;
+    const bigRev = (await g.query('SELECT review_id FROM sending_campaigns WHERE id=$1', [bigCamp.id])).rows[0].review_id;
+    const bigFrozen = (await g.query("SELECT recipient->>'email' AS email FROM sending_review_recipients WHERE review_id=$1 ORDER BY ordinal", [bigRev])).rows.map(r => r.email);
+    assert.deepEqual(bigFrozen, bigBefore, 'Deferred REPEATABLE READ capture freezes the exact pre-mutation snapshot.');
   });
   // The capture joins the audience's contacts and list members whole. When the statistics say both tables are empty
   // (autovacuum found them empty, then a list was imported before the next analyze) the planner expected one row on
@@ -29904,8 +29932,192 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       t.diagnostic(`${name} capture of ${members} members with statistics ${statistics}: ${Math.round(attempt.ms)} ms`);
       assert.equal(attempt.value!.status,202,JSON.stringify(attempt.value!.body));
       assert.equal(attempt.value!.body.queued,Math.floor(members/every));
-      assert.ok(attempt.ms<5000,`The ${name} capture took ${Math.round(attempt.ms)} ms.`);
+      assert.ok(attempt.ms<5000,`The ${name} launch took ${Math.round(attempt.ms)} ms.`);
+      // Also run the deferred background capture under the same stale statistics and verify it freezes the exact set in seconds.
+      const capStart = Date.now();
+      const { nodeRuntime } = await import('./src/adapters/node.js');
+      const { jobHandlers } = await import('./src/sending.js');
+      const { processJobs } = await import('./src/jobs.js');
+      const { runtime, close } = nodeRuntime({ ...process.env, DATABASE_URL: FIXTURE_DATABASE_URL });
+      try {
+        Object.assign(runtime.config, { multiTenant: false, liveEnabled: false });
+        const { rows: [cRow] } = await g.query('SELECT workspace_id, review_id FROM sending_campaigns WHERE id=$1', [c.id]);
+        await g.query("UPDATE jobs SET available_at = clock_timestamp() WHERE workspace_id=$1 AND id=$2", [cRow.workspace_id, 'campaign.run:' + c.id]);
+        await stale();
+        await processJobs(runtime, jobHandlers, 2, 1, 15_000);
+        const capMs = Date.now() - capStart;
+        const { rows: [after] } = await g.query('SELECT state, total, prepared FROM sending_campaigns WHERE id=$1', [c.id]);
+        const { rows: [rec] } = await g.query("SELECT count(*)::int AS n, count(*) FILTER (WHERE content_hash LIKE 's1:%')::int AS stamped FROM sending_review_recipients WHERE review_id=$1", [cRow.review_id]);
+        t.diagnostic(`${name} deferred capture+static prepare of ${members} members (${rec.n} eligible): ${capMs} ms`);
+        assert.equal(rec.n, Math.floor(members/every));
+        assert.equal(rec.stamped, Math.floor(members/every));
+        assert.equal(after.total, Math.floor(members/every));
+        assert.equal(after.prepared, Math.floor(members/every));
+        assert.ok(capMs < 10_000, `Deferred ${name} capture took ${capMs} ms.`);
+      } finally { await close(); }
     }
+  });
+
+  // Differential proof (L87 item 4): SQL validMailAddressSql must agree 100% with JS mailAddress() across an adversarial corpus.
+  test('fast campaign launch: SQL address validation matches JS mailAddress with zero disagreements', async t => {
+    const { mailAddress, validMailAddressSql } = await import('./src/outbound-content.js');
+    const { nodeRuntime } = await import('./src/adapters/node.js');
+    const { sql } = await import('drizzle-orm');
+    const { runtime, close } = nodeRuntime({ ...process.env, DATABASE_URL: FIXTURE_DATABASE_URL });
+    cleanup(t, close);
+    const Address = mailAddress();
+    const corpus: string[] = [
+      '', ' ', 'a', '@', '@example.com', 'a@', 'a@b', 'a@b.c', 'a@b.co', 'A@B.CO', 'User.Name+Tag_1@Sub-Domain.Example.COM',
+      "'a@b.co", "'@b.co", "a'@b.co", "o'brien+1@example.co.uk", '-a@b.co', 'a-@b.co', 'a@-b.co', 'a@b-.co', 'a@b-c.co',
+      '.a@b.co', 'a.@b.co', 'a..b@b.co', 'a@b..co', 'a@b.co.', 'a@.b.co', 'a@b.c.', 'a@b.co..uk',
+      '"quoted"@example.com', '"a b"@example.com', '"a..b"@example.com', 'a b@example.com', ' a@b.co', 'a@b.co ', 'a@b.co\n', 'a@b.co\r', 'a\t@b.co', 'a@b.co\u00a0', 'a\u200b@b.co',
+      'user@münchen.de', 'üser@example.com', 'user@xn--mnchen-3ya.de', 'USER@XN--MNCHEN-3YA.DE', 'a@b.xn--p1ai', 'a@b.xn--a', 'a@b.xn--ab', 'a@b.xn--a-', 'a@b.xn---a',
+      'a@[127.0.0.1]', 'a@127.0.0.1', 'a@b.123', 'a@b.c1', 'a@@b.co', 'a@b@c.co',
+      'a'.repeat(64) + '@example.com', 'a'.repeat(65) + '@example.com',
+      'a@' + 'b'.repeat(63) + '.com', 'a@' + 'b'.repeat(64) + '.com',
+      'a@example.' + 'c'.repeat(63), 'a@example.' + 'c'.repeat(64),
+      'a'.repeat(64) + '@' + 'b'.repeat(63) + '.' + 'c'.repeat(63) + '.' + 'd'.repeat(57) + '.com',
+      'a'.repeat(64) + '@' + 'b'.repeat(63) + '.' + 'c'.repeat(63) + '.' + 'd'.repeat(58) + '.com',
+      'a@' + 'b'.repeat(63) + '.' + 'c'.repeat(63) + '.' + 'd'.repeat(63) + '.' + 'e'.repeat(57) + '.com',
+      'a@' + 'b'.repeat(63) + '.' + 'c'.repeat(63) + '.' + 'd'.repeat(63) + '.' + 'e'.repeat(58) + '.com',
+      ...Array.from({ length: 95 }, (_, i) => String.fromCharCode(32 + i)).flatMap(ch => [
+        ch + 'a@example.com', 'a' + ch + 'b@example.com', 'a' + ch + '@example.com', 'a@ex' + ch + 'ample.com',
+      ]),
+      ...Array.from({ length: 31 }, (_, i) => 'a' + String.fromCharCode(i + 1) + '@example.com'),
+      'a' + String.fromCharCode(0x7f) + '@example.com',
+      'u_1@example.invalid', 'contact_123456@scale.example.com', 'notice-paced-1@example.com',
+    ];
+    const uniqueCorpus = [...new Set(corpus)];
+    const { rows } = await runtime.db.execute<{ i: number; ok: boolean }>(sql`
+      SELECT t.i, ${validMailAddressSql(sql`t.addr`)} AS ok
+      FROM unnest(${sql.param(uniqueCorpus)}::text[]) WITH ORDINALITY AS t(addr, i)
+      ORDER BY t.i`);
+    const diffs: string[] = [];
+    for (const r of rows) {
+      const addr = uniqueCorpus[r.i - 1]!;
+      const jsOk = Address.safeParse(addr).success;
+      if (Boolean(r.ok) !== jsOk) diffs.push(`${JSON.stringify(addr)}: sql=${r.ok} js=${jsOk}`);
+      if (jsOk) assert.equal(Buffer.byteLength(JSON.stringify(addr), 'utf8'), Buffer.byteLength(addr, 'utf8') + 2, `JSON length invariant for ${addr}`);
+    }
+    t.diagnostic(`Tested ${uniqueCorpus.length} adversarial email addresses: ${diffs.length} disagreements`);
+    assert.deepEqual(diffs, [], `SQL validMailAddressSql disagreed with JS mailAddress: ${diffs.slice(0, 10).join('; ')}`);
+  });
+
+  // Differential proof (L87 item 7) + s1: static content_hash deploy & rollback safety (L87 item 5).
+  test('fast campaign launch: URL-attribute shortcut matches per-row parse5 and s1: hashes preserve deploy/rollback safety', async t => {
+    const { analyzeHtmlPlaceholders, staticContentHash, verifyCampaignContentHash } = await import('./src/sending.js');
+    const { digest } = await import('./src/core.js');
+    const { canonical } = await import('./src/idempotency.js');
+    const { boundedHtmlFragment } = await import('./src/bounded-html.js');
+    const escaped = (v: string) => v.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
+    const interpolateHtml = (tpl: string, val: string) => tpl.replace(/\{\{\s*x\s*\}\}/g, escaped(val));
+    const URL_ATTRS = new Set(['href', 'src', 'action', 'formaction', 'poster', 'background', 'cite', 'longdesc', 'data', 'codebase', 'profile', 'manifest', 'xlink:href']);
+    const checkUrl = (v: string) => {
+      const u = new URL(v.replace(/[\x00-\x20\x7f]/g, ''), 'https://template.invalid/');
+      if (!['http:', 'https:', 'mailto:', 'tel:', 'cid:'].includes(u.protocol)) throw new Error('UNSAFE_HTML_URL');
+    };
+    const fullPerRowOk = (html: string) => {
+      const root = boundedHtmlFragment(html, 'document', { clients: true });
+      if (!root) return false;
+      const stack: any[] = [root];
+      while (stack.length) {
+        const node = stack.pop()!;
+        if ('tagName' in node) {
+          for (const attr of node.attrs) {
+            const name = attr.prefix ? `${attr.prefix}:${attr.name}` : attr.name;
+            try {
+              if (URL_ATTRS.has(name) || /:(?:href|src)$/.test(name)) checkUrl(attr.value);
+              if (['srcset', 'imagesrcset', 'ping', 'archive'].includes(name)) {
+                const urls = name.endsWith('srcset') ? attr.value.split(',').map((p: string) => p.trim().split(/\s+/)[0]!) : attr.value.trim().split(/\s+/);
+                for (const u of urls) if (u) checkUrl(u);
+              }
+            } catch { return false; }
+          }
+        }
+        if ('childNodes' in node) stack.push(...node.childNodes);
+        if ('content' in node) stack.push(node.content);
+      }
+      return true;
+    };
+    const templates = [
+      { html: '<html><body><p>Hello {{x}}</p><a href="https://example.com/ok">Read</a></body></html>', expectUrl: false },
+      { html: '<html><body><img src="https://example.com/a.png" alt="Photo of {{x}}" title="{{x}}"><p aria-label="{{x}}">Hi</p></body></html>', expectUrl: false },
+      { html: '<html><body><p>{{x}}</p><a href="javascript:alert(1)">Bad static link</a></body></html>', expectUrl: false },
+      { html: '<html><body><a href="{{x}}">Click</a></body></html>', expectUrl: true },
+      { html: '<html><body><a href="https://example.com/{{x}}">Click</a></body></html>', expectUrl: true },
+      { html: '<html><body><a href="java{{x}}">Split</a></body></html>', expectUrl: true },
+      { html: '<html><body><a href="&#x6a;avascript:{{x}}">Encoded</a></body></html>', expectUrl: true },
+      { html: '<html><body><a href="  {{x}}">Spaced</a></body></html>', expectUrl: true },
+      { html: '<html><body><a href="/users/{{x}}">Relative</a></body></html>', expectUrl: true },
+      { html: '<html><body><p>Hi {{x}}</p><img src="https://cdn.example.com/{{x}}.png"></body></html>', expectUrl: true },
+      { html: '<html><body><form action="{{x}}"><p>Hi</p></form></body></html>', expectUrl: true },
+    ];
+    const payloads = ['Alice', 'javascript:alert(1)', 'script:alert(1)', '<a href="javascript:x">', '"><script>alert(1)</script>', '<!--[if mso]><a href="javascript:1"><![endif]-->', '  javascript:void(0)', 'https://example.com/safe'];
+    for (const tc of templates) {
+      const info = await analyzeHtmlPlaceholders(tc.html);
+      assert.equal(info.hasUrlPlaceholder, tc.expectUrl, `hasUrlPlaceholder mismatch for ${tc.html}`);
+      if (!info.hasUrlPlaceholder) {
+        const onceOk = fullPerRowOk(tc.html);
+        for (const p of payloads) {
+          const rowOk = fullPerRowOk(interpolateHtml(tc.html, p));
+          assert.equal(onceOk, rowOk, `Shortcut disagreed with per-row parse5 on ${tc.html} with payload ${JSON.stringify(p)}`);
+        }
+      }
+    }
+    const customer = {
+      from: 'news@example.com', fromName: 'News', to: ['alice@example.com'], cc: [], bcc: [], replyTo: [],
+      region: 'us-west-2', kind: 'marketing' as const, subject: 'Hello', html: '<p>Static</p>', text: 'Static',
+      attachments: [], tracking: true, headers: [],
+    };
+    const legacyHash = await digest(canonical(customer));
+    const baseHash = await digest(canonical({ ...customer, to: [] }));
+    const s1Hash = await staticContentHash(baseHash, 'alice@example.com');
+    assert.ok(s1Hash.startsWith('s1:') && s1Hash.length === 67);
+    assert.equal(await verifyCampaignContentHash(customer, legacyHash), true);
+    assert.equal(await verifyCampaignContentHash(customer, s1Hash), true);
+    assert.equal(await verifyCampaignContentHash({ ...customer, to: ['bob@example.com'] }, s1Hash), false);
+    assert.equal(await verifyCampaignContentHash({ ...customer, html: '<p>Tampered</p>' }, s1Hash), false);
+    assert.equal(await verifyCampaignContentHash({ ...customer, subject: 'Tampered' }, s1Hash), false);
+    assert.notEqual(await digest(canonical(customer)), s1Hash);
+    // Repeated text-attribute placeholders count every occurrence so the 512 KiB attribute-byte guard scales by N.
+    const multiAttr = await analyzeHtmlPlaceholders('<html><body>' + '<img src="https://example.com/a.png" alt="{{x}}">'.repeat(10) + '</body></html>');
+    assert.deepEqual([multiAttr.hasUrlPlaceholder, multiAttr.hasAttrPlaceholder, multiAttr.attrPlaceholderCount], [false, true, 10]);
+    // Unknown future hash format throws retryable CAMPAIGN_HASH_FORMAT_UNSUPPORTED instead of silently rejecting.
+    await assert.rejects(verifyCampaignContentHash(customer, 's2:' + 'a'.repeat(64)), { code: 'CAMPAIGN_HASH_FORMAT_UNSUPPORTED', retryable: true });
+  });
+
+  // Deferred capture late failures (L87 item 3): EMPTY_AUDIENCE and invalid recipient fail loudly, leaving draft editable.
+  test('fast campaign launch: deferred >5k launch fails loudly on late EMPTY_AUDIENCE and leaves draft editable', async t => {
+    const { g, draft, launch, audience, call } = await launchFixture(t);
+    const listId = await audience(5_100, 10, 'latefail');
+    const c = await draft('latefail', listId);
+    // Preview caches audience_estimate on sending_campaigns.
+    const prev = await call('GET', `/v1/campaigns/${c.id}/audience`);
+    assert.equal(prev.status, 200);
+    assert.equal(prev.body.eligible, 510);
+    const res = await launch(c);
+    assert.equal(res.status, 202, JSON.stringify(res.body));
+    assert.equal(res.body.queued, 510);
+    // Everyone unsubscribes after the 202 before the background capture runs.
+    const { rows: [cRow] } = await g.query('SELECT workspace_id, review_id FROM sending_campaigns WHERE id=$1', [c.id]);
+    await g.query("UPDATE audience_contacts SET marketing_consent='unsubscribed' WHERE workspace_id=$1", [cRow.workspace_id]);
+    const { nodeRuntime } = await import('./src/adapters/node.js');
+    const { jobHandlers } = await import('./src/sending.js');
+    const { processJobs } = await import('./src/jobs.js');
+    const { runtime, close } = nodeRuntime({ ...process.env, DATABASE_URL: FIXTURE_DATABASE_URL });
+    cleanup(t, close);
+    Object.assign(runtime.config, { multiTenant: false, liveEnabled: false });
+    await g.query("UPDATE jobs SET available_at = clock_timestamp() WHERE workspace_id=$1 AND id=$2", [cRow.workspace_id, 'campaign.run:' + c.id]);
+    await processJobs(runtime, jobHandlers, 2, 1, 15_000);
+    const view = await call('GET', `/v1/campaigns/${c.id}`);
+    assert.equal(view.status, 200);
+    assert.equal(view.body.state, 'failed');
+    assert.equal(view.body.delivery.expanded, 0);
+    assert.equal(view.body.delivery.error?.code, 'EMPTY_AUDIENCE');
+    // Draft remains editable after late capture failure.
+    const patch = await call('PATCH', `/v1/campaigns/${c.id}`, { revision: view.body.revision, draft: { ...view.body.draft, subject: 'Updated after failure' } });
+    assert.equal(patch.status, 200, JSON.stringify(patch.body));
+    assert.equal(patch.body.state, 'draft');
   });
   // Migration 332 decides the inbound mail stored without forwardEligible; a message committed after the page that
   // would have seen it is never decided on read any more: a forward refuses it.

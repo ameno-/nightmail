@@ -1349,7 +1349,7 @@ export type Campaign = {
     sourceTemplateId: string | null;
     sourceTemplateRevision: number | null;
     /**
-     * draft: editable. preparing: the audience is frozen and every message is being validated in the background. scheduled: validated and waiting for scheduledAt. sending: recipients are being released into the dispatch queue. paused: releasing stopped by the user or the health check; queued mail still dispatches. done: every recipient was released and dispatched. failed: preparation or releasing failed (delivery.error); edit or launch again. canceled: terminal.
+     * draft: editable. preparing: the audience is being frozen (for large lists) and every message is being validated in the background. scheduled: validated and waiting for scheduledAt. sending: recipients are being released into the dispatch queue. paused: releasing stopped by the user or the health check; queued mail still dispatches. done: every recipient was released and dispatched. failed: capture, preparation or releasing failed (delivery.error); edit or launch again. canceled: terminal.
      */
     state: 'draft' | 'preparing' | 'scheduled' | 'sending' | 'paused' | 'done' | 'failed' | 'canceled';
     scheduledAt: string | null;
@@ -1433,7 +1433,7 @@ export type CampaignDraft = {
  */
 export type CampaignDelivery = {
     /**
-     * Fixed recipient count frozen at send or schedule.
+     * Fixed recipient count once the audience is frozen (recipients expected while a large audience is being captured).
      */
     total: number;
     /**
@@ -1573,7 +1573,7 @@ export type CampaignSummary = {
     sourceTemplateId: string | null;
     sourceTemplateRevision: number | null;
     /**
-     * draft: editable. preparing: the audience is frozen and every message is being validated in the background. scheduled: validated and waiting for scheduledAt. sending: recipients are being released into the dispatch queue. paused: releasing stopped by the user or the health check; queued mail still dispatches. done: every recipient was released and dispatched. failed: preparation or releasing failed (delivery.error); edit or launch again. canceled: terminal.
+     * draft: editable. preparing: the audience is being frozen (for large lists) and every message is being validated in the background. scheduled: validated and waiting for scheduledAt. sending: recipients are being released into the dispatch queue. paused: releasing stopped by the user or the health check; queued mail still dispatches. done: every recipient was released and dispatched. failed: capture, preparation or releasing failed (delivery.error); edit or launch again. canceled: terminal.
      */
     state: 'draft' | 'preparing' | 'scheduled' | 'sending' | 'paused' | 'done' | 'failed' | 'canceled';
     scheduledAt: string | null;
@@ -1645,7 +1645,7 @@ export type CampaignStats = {
     id: string;
     name: string;
     /**
-     * draft: editable. preparing: the audience is frozen and every message is being validated in the background. scheduled: validated and waiting for scheduledAt. sending: recipients are being released into the dispatch queue. paused: releasing stopped by the user or the health check; queued mail still dispatches. done: every recipient was released and dispatched. failed: preparation or releasing failed (delivery.error); edit or launch again. canceled: terminal.
+     * draft: editable. preparing: the audience is being frozen (for large lists) and every message is being validated in the background. scheduled: validated and waiting for scheduledAt. sending: recipients are being released into the dispatch queue. paused: releasing stopped by the user or the health check; queued mail still dispatches. done: every recipient was released and dispatched. failed: capture, preparation or releasing failed (delivery.error); edit or launch again. canceled: terminal.
      */
     state: 'draft' | 'preparing' | 'scheduled' | 'sending' | 'paused' | 'done' | 'failed' | 'canceled';
     tracking: boolean;
@@ -1788,7 +1788,7 @@ export type CampaignState = {
     revision: number;
     updatedAt: string;
     /**
-     * draft: editable. preparing: the audience is frozen and every message is being validated in the background. scheduled: validated and waiting for scheduledAt. sending: recipients are being released into the dispatch queue. paused: releasing stopped by the user or the health check; queued mail still dispatches. done: every recipient was released and dispatched. failed: preparation or releasing failed (delivery.error); edit or launch again. canceled: terminal.
+     * draft: editable. preparing: the audience is being frozen (for large lists) and every message is being validated in the background. scheduled: validated and waiting for scheduledAt. sending: recipients are being released into the dispatch queue. paused: releasing stopped by the user or the health check; queued mail still dispatches. done: every recipient was released and dispatched. failed: capture, preparation or releasing failed (delivery.error); edit or launch again. canceled: terminal.
      */
     state: 'draft' | 'preparing' | 'scheduled' | 'sending' | 'paused' | 'done' | 'failed' | 'canceled';
     scheduledAt: string | null;
@@ -1868,6 +1868,9 @@ export type CampaignTestInput = {
 export type CampaignQueued = {
     id: string;
     state: 'preparing';
+    /**
+     * Recipients expected (exact for lists up to 5,000 members and unsegmented lists once list counts are enabled; may be 0 if an uncounted large list exceeds the 200 ms launch budget without a prior preview); delivery.total is authoritative once the audience is frozen.
+     */
     queued: number;
     scheduledAt: string | null;
     simulated: boolean;
@@ -10788,7 +10791,7 @@ export type ListCampaignsData = {
         limit?: number;
         region?: string;
         /**
-         * draft: editable. preparing: the audience is frozen and every message is being validated in the background. scheduled: validated and waiting for scheduledAt. sending: recipients are being released into the dispatch queue. paused: releasing stopped by the user or the health check; queued mail still dispatches. done: every recipient was released and dispatched. failed: preparation or releasing failed (delivery.error); edit or launch again. canceled: terminal.
+         * draft: editable. preparing: the audience is being frozen (for large lists) and every message is being validated in the background. scheduled: validated and waiting for scheduledAt. sending: recipients are being released into the dispatch queue. paused: releasing stopped by the user or the health check; queued mail still dispatches. done: every recipient was released and dispatched. failed: capture, preparation or releasing failed (delivery.error); edit or launch again. canceled: terminal.
          */
         state?: 'draft' | 'preparing' | 'scheduled' | 'sending' | 'paused' | 'done' | 'failed' | 'canceled';
         /**

@@ -404,7 +404,7 @@ export default {
       core.log('info', { code: 'QUEUE_FOLLOW', outcome });
       // A campaign's copies are screened in these drains: their repeats go to the second classifier's queue under
       // waitUntil, so the acknowledgement below never waits for that queue.
-    }, concurrency, undefined, waitUntilOf(ctx));
+    }, concurrency + 2, undefined, waitUntilOf(ctx));
     batch.ackAll();
     await flushDueCounters(env, ctx);
   },
@@ -479,6 +479,6 @@ export default {
       if (runtime.config.multiTenant) try { await (await core.wrapModuleLoad(() => import('./billing/stripe-jobs.js'))).billingMinute(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'BILLING_MINUTE_FAILED' }); }
       // Last, as it can take minutes: retention of the sent-side tables (elected every 15 minutes).
       try { await (await core.wrapModuleLoad(() => import('./maintenance.js'))).retentionTick(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'RETENTION_TICK_FAILED' }); }
-    }, concurrency, undefined, waitUntilOf(ctx)); // The minute cron drains jobs too: as in queue(), nothing waits for the second classifier's queue.
+    }, concurrency + 2, undefined, waitUntilOf(ctx)); // The minute cron drains jobs too: as in queue(), nothing waits for the second classifier's queue.
   },
 } satisfies ExportedHandler<Env>;

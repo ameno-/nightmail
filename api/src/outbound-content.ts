@@ -9,6 +9,25 @@ import { SEND_LIMITS } from './send-limits.js';
 export const mailAddress = (base=z.string()) => base.email({pattern:/^(?!\.)(?!.*\.\.)[a-z0-9_'+.\-]*[a-z0-9_+\-]@(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:[a-z]{2,}|xn--[a-z0-9][a-z0-9-]*[a-z0-9])$/i}).max(254).regex(/^[\x21-\x7e]+$/, 'Use ASCII email addresses (punycode domains are supported).')
   .refine(v => v.indexOf('@') <= 64 && v.slice(v.indexOf('@')+1).split('.').every(label => label.length <= 63), 'The local part may not exceed 64 bytes or a domain label 63 bytes.');
 
+// Exact SQL counterpart to mailAddress() for set-based static campaign preparation.
+// Differential-tested against mailAddress() across adversarial addresses (quoted locals, IDN/punycode, trailing/double
+// dots, 64/63/254 byte limits, control chars, whitespace, mixed case) with zero disagreements.
+export const validMailAddressSql = (expr: ReturnType<typeof sql>) => sql`(
+  ${expr} IS NOT NULL
+  AND octet_length(${expr}) BETWEEN 1 AND 254
+  AND octet_length(${expr}) = char_length(${expr})
+  AND left(${expr}, 1) <> '.'
+  AND strpos(${expr}, '..') = 0
+  AND (${expr}) ~ '^[A-Za-z0-9_''+.-]*[A-Za-z0-9_+-]@(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?[.])+(?:[A-Za-z]{2,}|[Xx][Nn]--[A-Za-z0-9][A-Za-z0-9-]*[A-Za-z0-9])$'
+  AND (
+    octet_length(${expr}) <= 64
+    OR (
+      position('@' in (${expr})) BETWEEN 2 AND 65
+      AND substring((${expr}) FROM position('@' in (${expr})) + 1) !~ '[^.]{64}'
+    )
+  )
+)`;
+
 // A sender display name may not read as an address or an angle-bracketed route in any client, and may not carry the
 // characters that reorder or hide what a client renders. The address check runs on a folded copy of the name, built
 // the way Unicode TR39 builds a confusable skeleton: NFD, format characters removed, each character replaced by its
