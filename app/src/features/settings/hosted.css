@@ -30,6 +30,7 @@
 .settings-row__label .muted { font-size: var(--text-xs); line-height: var(--leading-xs); }
 .settings-row__control { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-8); min-width: 0; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .settings-inline { flex-wrap: nowrap; }
+.settings-version .ui-button[aria-hidden='true'] { display: none; }
 /* A connected AWS account's health finding: the message, in the warning tone. */
 .settings-attention { color: var(--color-warning); text-align: right; }
 .settings-name { position: relative; display: flex; align-items: center; justify-content: flex-end; gap: var(--space-8); width: 100%; }
@@ -86,6 +87,8 @@
   .settings-row:has(.settings-score--late) { grid-template-columns: auto minmax(0, 1fr); }
   .settings-inline:has(> code) { flex-wrap: nowrap; min-width: 0; max-width: 100%; }
   .settings-inline > code { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  /* Reserve the real action's size even before the connection tells us whether it needs an update. */
+  .settings-version .ui-button[aria-hidden='true'] { display: inline-flex; visibility: hidden; }
   .settings-name { justify-content: flex-start; }
   .settings-name-input.ui-input { flex: 1; width: auto; }
 }
