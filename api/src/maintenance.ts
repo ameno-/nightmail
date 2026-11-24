@@ -341,33 +341,57 @@ async function retentionDrains(runtime: Runtime): Promise<Drain[]> {
     { name: 'audience_list_counts', size: Infinity, statement: foldListCounts },
     // Uncommitted previews hold their parsed CSV (up to 5 MiB) and expire after IMPORT_PREVIEW_RETENTION_DAYS (7 days).
     expired('audience_import_previews', 'audience_imports', at('created_at'), sql`status = 'preview' AND created_at < now() - make_interval(days => ${IMPORT_PREVIEW_RETENTION_DAYS})`, { size: 100, unordered: true }),
-    // Backfill up to 2,000 opaque contact IDs onto legacy committed imports (<90 days) before their rows JSONB is
-    // scrubbed, so support's audienceHealth view never sees a window with neither sample_contact_ids nor rows.
-    { name: 'audience_import_samples', size: 10, oldest: sql`SELECT min(created_at) FROM audience_imports WHERE status = 'committed' AND sample_contact_ids IS NULL AND rows_scrubbed_at IS NULL AND created_at >= now() - make_interval(days => ${IMPORT_COMMITTED_DETAILS_RETENTION_DAYS})`, statement: () => sql`WITH due AS (
+    // Backfill import_id on pre-PR audience_consent_audit rows while each committed import's rows JSONB still exists.
+    // Indexed through audience_contacts(workspace_id, email) -> audience_consent_page(workspace_id, contact_id, id).
+    // Both scrub drains below require consent_linked_at IS NOT NULL, so no import's rows can be emptied before linking.
+    { name: 'audience_import_consent_links', size: 5, oldest: sql`SELECT min(updated_at) FROM audience_imports WHERE status = 'committed' AND consent_linked_at IS NULL AND rows_scrubbed_at IS NULL`, statement: () => sql`WITH due AS (
+        SELECT id FROM audience_imports WHERE status = 'committed' AND consent_linked_at IS NULL AND rows_scrubbed_at IS NULL
+        ORDER BY updated_at DESC LIMIT 5 FOR UPDATE SKIP LOCKED
+      ), linked AS (
+        UPDATE audience_consent_audit a SET import_id = d.id
+        FROM due d
+        JOIN audience_imports i ON i.id = d.id
+        CROSS JOIN LATERAL (
+          SELECT c.id AS contact_id
+          FROM jsonb_array_elements(i.rows) r
+          JOIN audience_contacts c ON c.workspace_id = i.workspace_id AND c.email = lower(r->>'email')
+        ) mc
+        WHERE a.workspace_id = i.workspace_id AND a.contact_id = mc.contact_id
+          AND a.source = 'import' AND a.import_id IS NULL
+          AND a.occurred_at >= i.created_at - interval '1 second'
+          AND a.occurred_at <= i.updated_at + interval '5 seconds'
+      ), marked AS (
+        UPDATE audience_imports i SET consent_linked_at = now() FROM due WHERE i.id = due.id RETURNING 1
+      ) SELECT count(*)::int AS n FROM marked` },
+    // Backfill up to 2,000 opaque contact IDs onto legacy committed imports (<90 days since commit) before their rows
+    // JSONB is scrubbed, so support's audienceHealth view never sees a window with neither sample_contact_ids nor rows.
+    { name: 'audience_import_samples', size: 10, oldest: sql`SELECT min(updated_at) FROM audience_imports WHERE status = 'committed' AND sample_contact_ids IS NULL AND rows_scrubbed_at IS NULL AND updated_at >= now() - make_interval(days => ${IMPORT_COMMITTED_DETAILS_RETENTION_DAYS})`, statement: () => sql`WITH due AS (
         SELECT id FROM audience_imports WHERE status = 'committed' AND sample_contact_ids IS NULL AND rows_scrubbed_at IS NULL
-          AND created_at >= now() - make_interval(days => ${IMPORT_COMMITTED_DETAILS_RETENTION_DAYS})
-        ORDER BY created_at DESC LIMIT 10 FOR UPDATE SKIP LOCKED
+          AND updated_at >= now() - make_interval(days => ${IMPORT_COMMITTED_DETAILS_RETENTION_DAYS})
+        ORDER BY updated_at DESC LIMIT 10 FOR UPDATE SKIP LOCKED
       ), updated AS (
         UPDATE audience_imports i SET sample_contact_ids = coalesce((
           SELECT array_agg(c.id) FROM (SELECT r->>'email' AS email FROM jsonb_array_elements(i.rows) r ORDER BY hashtextextended(lower(r->>'email'), 0) LIMIT 2000) x
           JOIN audience_contacts c ON c.workspace_id = i.workspace_id AND c.email = lower(x.email)
         ), ARRAY[]::text[]) FROM due WHERE i.id = due.id RETURNING 1
       ) SELECT count(*)::int AS n FROM updated` },
-    // Scrub committed 50k-row CSV payloads (and any deleted contacts' addresses inside them) in small paused batches
-    // once sample_contact_ids is populated (or past the 90-day diagnosis window); metadata and imported count stay.
-    { name: 'audience_import_rows', size: 10, oldest: sql`SELECT min(created_at) FROM audience_imports WHERE status = 'committed' AND rows_scrubbed_at IS NULL AND created_at < now() - make_interval(days => ${IMPORT_COMMITTED_ROWS_RETENTION_DAYS}) AND (sample_contact_ids IS NOT NULL OR created_at < now() - make_interval(days => ${IMPORT_COMMITTED_DETAILS_RETENTION_DAYS}))`, statement: () => sql`WITH due AS (
+    // Scrub committed 50k-row CSV payloads in small paused batches 7 days after commit (updated_at), strictly gated on
+    // consent_linked_at IS NOT NULL and sample_contact_ids populated (or past 90 days); metadata & imported count stay.
+    { name: 'audience_import_rows', size: 10, oldest: sql`SELECT min(updated_at) FROM audience_imports WHERE status = 'committed' AND rows_scrubbed_at IS NULL AND consent_linked_at IS NOT NULL AND updated_at < now() - make_interval(days => ${IMPORT_COMMITTED_ROWS_RETENTION_DAYS}) AND (sample_contact_ids IS NOT NULL OR updated_at < now() - make_interval(days => ${IMPORT_COMMITTED_DETAILS_RETENTION_DAYS}))`, statement: () => sql`WITH due AS (
         SELECT id FROM audience_imports WHERE status = 'committed' AND rows_scrubbed_at IS NULL
-          AND created_at < now() - make_interval(days => ${IMPORT_COMMITTED_ROWS_RETENTION_DAYS})
-          AND (sample_contact_ids IS NOT NULL OR created_at < now() - make_interval(days => ${IMPORT_COMMITTED_DETAILS_RETENTION_DAYS}))
-        ORDER BY created_at LIMIT 10 FOR UPDATE SKIP LOCKED
+          AND consent_linked_at IS NOT NULL
+          AND updated_at < now() - make_interval(days => ${IMPORT_COMMITTED_ROWS_RETENTION_DAYS})
+          AND (sample_contact_ids IS NOT NULL OR updated_at < now() - make_interval(days => ${IMPORT_COMMITTED_DETAILS_RETENTION_DAYS}))
+        ORDER BY updated_at LIMIT 10 FOR UPDATE SKIP LOCKED
       ), gone AS (
         UPDATE audience_imports i SET rows = '[]'::jsonb, rows_scrubbed_at = now() FROM due WHERE i.id = due.id RETURNING 1
       ) SELECT count(*)::int AS n FROM gone` },
-    // Past IMPORT_COMMITTED_DETAILS_RETENTION_DAYS (90 days), scrub sample_contact_ids and per-row errors too.
-    { name: 'audience_import_details', size: 50, oldest: sql`SELECT min(created_at) FROM audience_imports WHERE status = 'committed' AND errors_scrubbed_at IS NULL AND created_at < now() - make_interval(days => ${IMPORT_COMMITTED_DETAILS_RETENTION_DAYS})`, statement: () => sql`WITH due AS (
+    // Past 90 days since commit (updated_at), scrub sample_contact_ids and per-row errors too (still gated on consent_linked_at).
+    { name: 'audience_import_details', size: 50, oldest: sql`SELECT min(updated_at) FROM audience_imports WHERE status = 'committed' AND errors_scrubbed_at IS NULL AND consent_linked_at IS NOT NULL AND updated_at < now() - make_interval(days => ${IMPORT_COMMITTED_DETAILS_RETENTION_DAYS})`, statement: () => sql`WITH due AS (
         SELECT id FROM audience_imports WHERE status = 'committed' AND errors_scrubbed_at IS NULL
-          AND created_at < now() - make_interval(days => ${IMPORT_COMMITTED_DETAILS_RETENTION_DAYS})
-        ORDER BY created_at LIMIT 50 FOR UPDATE SKIP LOCKED
+          AND consent_linked_at IS NOT NULL
+          AND updated_at < now() - make_interval(days => ${IMPORT_COMMITTED_DETAILS_RETENTION_DAYS})
+        ORDER BY updated_at LIMIT 50 FOR UPDATE SKIP LOCKED
       ), gone AS (
         UPDATE audience_imports i SET sample_contact_ids = NULL, errors = '[]'::jsonb, errors_scrubbed_at = now(), rows = '[]'::jsonb, rows_scrubbed_at = coalesce(i.rows_scrubbed_at, now()) FROM due WHERE i.id = due.id RETURNING 1
       ) SELECT count(*)::int AS n FROM gone` },

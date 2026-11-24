@@ -11461,9 +11461,25 @@ describe('Import property boundaries', () => {
       assert.equal(legacyBefore.contacts, 2);
       assert.equal(legacyBefore.hardBounce.numerator, 1);
 
-      // Age our new committed import past 7 days, run cleanup: legacy gets backfilled AND both get rows scrubbed.
+      // New committed imports stamp import_id on every consent audit row immediately.
+      const linkedRows = (await db.query(`SELECT import_id FROM audience_consent_audit WHERE workspace_id = $1 AND source = 'import'`, [wid])).rows;
+      assert.equal(linkedRows.length, 2);
+      assert.ok(linkedRows.every(r => r.import_id === preview.id), 'Committed import consent audit rows must record import_id.');
+      // Seed an unlinked pre-PR consent audit row matching legacyId and verify backfill links it before rows scrub.
+      const bounceContact = (await db.query(`SELECT id FROM audience_contacts WHERE workspace_id = $1 AND email = 'bounce1@example.com'`, [wid])).rows[0];
+      await db.query(`INSERT INTO audience_consent_audit(id,workspace_id,contact_id,email,status,source,evidence,occurred_at)
+        VALUES('cns_legacy_' || substr(replace(gen_random_uuid()::text,'-',''),1,12),$1,$2,'bounce1@example.com','subscribed','import','Legacy',now()-interval '10 days')`, [wid, bounceContact.id]);
+
+      // An import previewed 10 days ago but committed today must NOT be scrubbed yet (clock uses updated_at, not created_at).
       await db.query(`UPDATE audience_imports SET created_at = now() - interval '10 days' WHERE id = $1`, [preview.id]);
       const { cleanup } = await import('./src/maintenance.js');
+      await cleanup(runtime);
+      assert.equal(ok(await local('GET', `/v1/contact-imports/${preview.id}`)).rowsRetained, true, 'Retention clock starts at commit (updated_at), not preview (created_at).');
+      const legacyLinked = (await db.query(`SELECT import_id FROM audience_consent_audit WHERE workspace_id = $1 AND evidence = 'Legacy'`, [wid])).rows[0];
+      assert.equal(legacyLinked.import_id, legacyId, 'Backfill must link legacy consent rows to their import_id before scrubbing rows.');
+
+      // Now age commit time (updated_at) past 7 days: cleanup scrubs rows on both.
+      await db.query(`UPDATE audience_imports SET updated_at = now() - interval '10 days' WHERE id = $1`, [preview.id]);
       await cleanup(runtime);
       const report = ok(await local('GET', `/v1/contact-imports/${preview.id}`));
       assert.deepEqual({ imported: report.imported, rows: report.rows, rowsRetained: report.rowsRetained, errorsRetained: report.errorsRetained, errorCount: report.errors.length }, { imported: 2, rows: [], rowsRetained: false, errorsRetained: true, errorCount: 1 });
@@ -11478,8 +11494,8 @@ describe('Import property boundaries', () => {
         assert.equal(view.hardBounce.numerator, 1);
       }
 
-      // Age past 90 days: cleanup scrubs sample_contact_ids and errors too, and marks errorsRetained = false.
-      await db.query(`UPDATE audience_imports SET created_at = now() - interval '91 days' WHERE id = $1`, [preview.id]);
+      // Age commit time past 90 days: cleanup scrubs sample_contact_ids and errors too, and marks errorsRetained = false.
+      await db.query(`UPDATE audience_imports SET updated_at = now() - interval '91 days' WHERE id = $1`, [preview.id]);
       await cleanup(runtime);
       const aged = ok(await local('GET', `/v1/contact-imports/${preview.id}`));
       assert.deepEqual({ imported: aged.imported, rows: aged.rows, errors: aged.errors, rowsRetained: aged.rowsRetained, errorsRetained: aged.errorsRetained }, { imported: 2, rows: [], errors: [], rowsRetained: false, errorsRetained: false });
@@ -23632,9 +23648,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         support_subjects: [null,"SELECT count(*) FROM support_conversations,p WHERE subject=p.tag"],
         audience_operation_plans: ["INSERT INTO audience_operation_plans(id,workspace_id,actor_key_id,statement,operation,matched,expires_at) SELECT 'aop_'||p.tag||p.day||'x'||i,p.wid,'k','fixture','{}',0,now()-interval '25 hours'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM audience_operation_plans,p WHERE starts_with(id,'aop_'||p.tag)"],
         audience_import_previews: ["INSERT INTO audience_imports(id,workspace_id,rows,errors,status,created_at) SELECT 'aim_'||p.tag||p.day||'x'||i,p.wid,'[]','[]','preview',now()-interval '8 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM audience_imports,p WHERE starts_with(id,'aim_'||p.tag)"],
-        audience_import_samples: ["INSERT INTO audience_imports(id,workspace_id,rows,errors,status,imported,created_at) SELECT 'aims_'||p.tag||p.day||'x'||i,p.wid,'[]','[]','committed',0,now()-interval '2 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM audience_imports,p WHERE starts_with(id,'aims_'||p.tag) AND sample_contact_ids IS NULL"],
-        audience_import_rows: ["INSERT INTO audience_imports(id,workspace_id,rows,errors,status,imported,sample_contact_ids,created_at) SELECT 'aimr_'||p.tag||p.day||'x'||i,p.wid,jsonb_build_array(jsonb_build_object('row',2,'email','a@example.invalid','properties','{}'::jsonb)),'[]','committed',1,'{}'::text[],now()-interval '8 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM audience_imports,p WHERE starts_with(id,'aimr_'||p.tag) AND rows_scrubbed_at IS NULL"],
-        audience_import_details: ["INSERT INTO audience_imports(id,workspace_id,rows,errors,status,imported,sample_contact_ids,rows_scrubbed_at,created_at) SELECT 'aimd_'||p.tag||p.day||'x'||i,p.wid,'[]',jsonb_build_array(jsonb_build_object('row',2,'field','email','message','bad')),'committed',1,'{}'::text[],now()-interval '80 days',now()-interval '91 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM audience_imports,p WHERE starts_with(id,'aimd_'||p.tag) AND errors_scrubbed_at IS NULL"],
+        audience_import_consent_links: ["INSERT INTO audience_imports(id,workspace_id,rows,errors,status,imported,sample_contact_ids,created_at,updated_at) SELECT 'aimc_'||p.tag||p.day||'x'||i,p.wid,'[]','[]','committed',0,'{}'::text[],now()-interval '2 days'-make_interval(days=>p.day),now()-interval '2 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM audience_imports,p WHERE starts_with(id,'aimc_'||p.tag) AND consent_linked_at IS NULL"],
+        audience_import_samples: ["INSERT INTO audience_imports(id,workspace_id,rows,errors,status,imported,consent_linked_at,created_at,updated_at) SELECT 'aims_'||p.tag||p.day||'x'||i,p.wid,'[]','[]','committed',0,now(),now()-interval '2 days'-make_interval(days=>p.day),now()-interval '2 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM audience_imports,p WHERE starts_with(id,'aims_'||p.tag) AND sample_contact_ids IS NULL"],
+        audience_import_rows: ["INSERT INTO audience_imports(id,workspace_id,rows,errors,status,imported,sample_contact_ids,consent_linked_at,created_at,updated_at) SELECT 'aimr_'||p.tag||p.day||'x'||i,p.wid,jsonb_build_array(jsonb_build_object('row',2,'email','a@example.invalid','properties','{}'::jsonb)),'[]','committed',1,'{}'::text[],now(),now()-interval '8 days'-make_interval(days=>p.day),now()-interval '8 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM audience_imports,p WHERE starts_with(id,'aimr_'||p.tag) AND rows_scrubbed_at IS NULL"],
+        audience_import_details: ["INSERT INTO audience_imports(id,workspace_id,rows,errors,status,imported,sample_contact_ids,consent_linked_at,rows_scrubbed_at,created_at,updated_at) SELECT 'aimd_'||p.tag||p.day||'x'||i,p.wid,'[]',jsonb_build_array(jsonb_build_object('row',2,'field','email','message','bad')),'committed',1,'{}'::text[],now(),now()-interval '80 days',now()-interval '91 days'-make_interval(days=>p.day),now()-interval '91 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM audience_imports,p WHERE starts_with(id,'aimd_'||p.tag) AND errors_scrubbed_at IS NULL"],
         sending_email_events: ["INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated,created_at) SELECT 'event_'||md5(p.tag||p.day||'x'||i),p.wid,'email_'||p.tag,'dispatch_attempt',true,now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM sending_email_events,p WHERE email_id='email_'||p.tag"],
         sending_emails: ["INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,created_at) SELECT 'email_'||md5(p.tag||p.day||'x'||i),p.wid,p.region,'fixture','a@example.org','[]','[]','[]',p.tag,'{}',true,'delivered',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM sending_emails,p WHERE workspace_id=p.wid AND subject=p.tag"],
         sending_idempotency: ["INSERT INTO sending_idempotency(workspace_id,actor_key_id,path,request_key,request_hash,result,created_at) SELECT p.wid,'fixture','/v1/emails/send','idem_'||p.tag||p.day||'x'||i,'h',jsonb_build_object('id','email_'||p.tag||p.day||'x'||i),now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM sending_idempotency,p WHERE workspace_id=p.wid AND starts_with(request_key,'idem_'||p.tag)"],

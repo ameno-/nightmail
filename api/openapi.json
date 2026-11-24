@@ -21538,6 +21538,13 @@
                               "null"
                             ]
                           },
+                          "importId": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "Committed import ID when source is import; null otherwise."
+                          },
                           "occurredAt": {
                             "type": "string"
                           },
@@ -21555,6 +21562,7 @@
                           "policyVersion",
                           "evidence",
                           "actorKeyId",
+                          "importId",
                           "occurredAt",
                           "createdAt"
                         ]

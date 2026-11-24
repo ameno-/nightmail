@@ -7075,6 +7075,10 @@ export type ListContactConsentEventsResponses = {
             policyVersion: string | null;
             evidence: string | null;
             actorKeyId: string | null;
+            /**
+             * Committed import ID when source is import; null otherwise.
+             */
+            importId: string | null;
             occurredAt: string;
             createdAt: string;
         }>;
