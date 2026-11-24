@@ -134,10 +134,10 @@ export function PresenceOverlay({ room }: { room: Room }) {
       const area = document.querySelector(WORKSPACE)?.getBoundingClientRect(), box = sheet()?.getBoundingClientRect(), root = editor()
       if (!area || !box) return
       Object.assign(clip.style, { left: `${area.left}px`, top: `${area.top}px`, width: `${area.width}px`, height: `${area.height}px` })
-      // Nothing of anyone else's covers this person's own formatting toolbar, which the message scrolls beneath: its
-      // rectangle is cut out of the layer.
+      // Nothing of anyone else's covers this person's own formatting toolbar, which the message scrolls beneath: the band
+      // it sits in is cut out of the layer, the whole width, so no outline edge or tag shows beside it either.
       const own = document.querySelector(TOOLBAR)?.getBoundingClientRect(), cut = own && own.bottom > area.top && own.top < area.bottom && own.width
-        ? (() => { const [l, t, r, b] = [own.left - area.left, own.top - area.top, own.right - area.left, own.bottom - area.top].map(n => `${Math.round(n)}px`); return `polygon(evenodd, 0 0, 100% 0, 100% 100%, 0 100%, 0 0, ${l} ${t}, ${r} ${t}, ${r} ${b}, ${l} ${b}, ${l} ${t})` })()
+        ? (() => { const [t, b] = [own.top - area.top, own.bottom - area.top].map(n => `${Math.round(n)}px`); return `polygon(evenodd, 0 0, 100% 0, 100% 100%, 0 100%, 0 0, 0 ${t}, 100% ${t}, 100% ${b}, 0 ${b}, 0 ${t})` })()
         : ''
       if (cut !== clipped) { clip.style.clipPath = cut; clipped = cut }
       const at = performance.now() - BEHIND_MS, blocks = root ? root.querySelectorAll(BLOCKS) : null
