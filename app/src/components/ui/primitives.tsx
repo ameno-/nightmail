@@ -443,14 +443,24 @@ export function SecretDialog({ secret, title, onClose, children, description = '
  * Copies text to the clipboard, for every copy control. `copied` holds for 1.8 s after a copy, for a button's check;
  * `done`, when given, is toasted instead, for a copy from a menu or action sheet. A failure says so in a toast.
  */
+/** Text made after the click (a prompt with a fresh setup token). Safari keeps the click's permission to write only for a
+ *  ClipboardItem whose text is still a promise; elsewhere, or where that is refused, the text is written once it's made. */
+async function writeLater(make: () => Promise<string>) {
+  const text = make();
+  if (typeof ClipboardItem !== 'undefined' && navigator.clipboard.write) {
+    try { await navigator.clipboard.write([new ClipboardItem({ 'text/plain': text.then(value => new Blob([value], { type: 'text/plain' })) })]); return; }
+    catch { /* Written below, once the text is ready. */ }
+  }
+  await navigator.clipboard.writeText(await text);
+}
 export function useCopy() {
   const toast = useContext(ToastContext);
   const [copied, setCopied] = useState(false);
   const [failed, setFailed] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(timer.current), []);
-  const copy = useCallback(async (value: string, done?: string) => {
-    try { await navigator.clipboard.writeText(value); } catch { setFailed(true); toast?.('Couldn’t copy to clipboard.', 'error'); return false; }
+  const copy = useCallback(async (value: string | (() => Promise<string>), done?: string) => {
+    try { await (typeof value === 'string' ? navigator.clipboard.writeText(value) : writeLater(value)); } catch { setFailed(true); toast?.('Couldn’t copy to clipboard.', 'error'); return false; }
     if (done) toast?.(done, 'success');
     setCopied(true); setFailed(false);
     clearTimeout(timer.current);
