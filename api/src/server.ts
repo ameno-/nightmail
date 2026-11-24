@@ -5,6 +5,7 @@ import { getPath } from 'hono/utils/url';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createApp } from './app.js';
+import { flushCounters } from './health-counters.js';
 import { nodeRuntime } from './adapters/node.js';
 import { sql } from 'drizzle-orm';
 import { dispatchWakeKey } from './dispatcher.js';
@@ -60,6 +61,8 @@ try {
   runtime.dispatch = async (region, account, _count, _kind, priority) => {
     if (priority) await runtime.db.execute(sql`SELECT pg_notify('bane_priority', ${dispatchWakeKey(region, account)})`);
   };
+  // The request counters (src/health-counters.ts), written every 20 seconds for the runner's health tick.
+  setInterval(() => void flushCounters(runtime.db), 20_000).unref();
   const publicRoot = fileURLToPath(new URL('../public/', import.meta.url));
   const assets = serveStatic({ root: publicRoot });
   const dashboard = serveStatic({ path: `${publicRoot}index.html` });

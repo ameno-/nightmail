@@ -24,6 +24,10 @@
 .op-facts.op-facts--four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .op-facts dd { display: flex; align-items: center; height: 24px; margin: var(--space-4) 0 0; min-width: 0; overflow: hidden; font-family: var(--font-mono); font-size: var(--text-sm); font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
 
+/* Health: identifiers (queue names, job types, route templates) in mono; a figure that is out of date in the danger tone. */
+.op-health-what { font-family: var(--font-mono); font-size: var(--text-xs); }
+.op-health-stale { color: var(--color-danger); }
+
 /* Label and value rows, 32px each. */
 .op-rows { margin: 0; }
 .op-rows > div { display: grid; grid-template-columns: 184px minmax(0, 1fr); gap: var(--space-12); align-items: baseline; min-height: 32px; padding-block: 6px; border-top: 1px solid var(--color-border-muted); font-size: var(--text-sm); line-height: var(--leading-sm); font-variant-numeric: tabular-nums; }
