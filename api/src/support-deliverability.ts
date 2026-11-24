@@ -280,9 +280,11 @@ export function registerSupportDeliverability(app: App, meta: Meta, WorkspaceFil
   });
   app.openapi(createRoute({ ...meta('getSupportCampaignLint', 'Checks one campaign’s draft the same way as an email: metadata always, content checks only with the customer’s content consent.'),
     path: '/v1/support/campaigns/{id}/lint', request: { query: WorkspaceFilter, params: z.object({ id: z.string().max(120) }) }, responses: { 200: response(Lint), ...errors } }), async c => {
-    const id = c.req.valid('param').id, scope = c.get('support')!;
-    return c.json(await cached(c, 'campaign-lint', narrowed(c), [id, scope.contentWorkspaceId], () => d.supportRead(c.env.db, async tx => {
-      const row = await campaignById(c, tx, id), draft = row.draft, files = await attachmentsOf(tx, row.workspace_id, draft.attachments ?? []);
+    const id = c.req.valid('param').id, scope = c.get('support')!, list = narrowed(c);
+    return c.json(await cached(c, 'campaign-lint', list, [id, scope.contentWorkspaceId], () => d.supportRead(c.env.db, async tx => {
+      const { rows } = list.length ? await tx.execute<Pick<Row, 'workspace_id' | 'draft'>>(sql`
+        SELECT workspace_id, draft FROM sending_campaigns WHERE id = ${id} AND workspace_id = ANY(${ids(list)})`) : { rows: [] };
+      const row = rows[0] ?? notFound('Campaign'), draft = row.draft, files = await attachmentsOf(tx, row.workspace_id, draft.attachments ?? []);
       let html: string | null = null, text: string | null = null;
       // The email a valid draft becomes (as the campaign preview renders it); a draft that is not valid block HTML as written.
       if (draft.html?.trim()) try {
