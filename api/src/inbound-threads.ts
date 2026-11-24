@@ -314,7 +314,16 @@ export async function signedUrl(runtime: Runtime,wid:string, kind:'raw'|'att', r
     return { url: await getSignedUrl(s3, new GetObjectCommand({ Bucket: bucket, Key: key, ResponseContentDisposition: disposition }), { expiresIn: 300 }), expiresAt: new Date(Date.now() + 300_000).toISOString() };
   } finally { if(!client)s3.destroy(); }
 }
-async function deliveryLinks(runtime: Runtime, row: typeof messages.$inferSelect, files: (typeof mailAttachments.$inferSelect)[]) {
+type AttachmentMetadata = Pick<typeof mailAttachments.$inferSelect, 'id' | 'filename' | 'contentType' | 'sizeBytes' | 'disposition' | 'contentId'>;
+type DeliveryAttachment = AttachmentMetadata & Pick<typeof mailAttachments.$inferSelect, 'bucket' | 'storageKey' | 'sourceId'>;
+// Read only the selected, visible message's attachments, in its snapshot and existing ID order.
+const attachmentRows = (storage = sql``) => sql`coalesce((SELECT jsonb_agg(jsonb_build_object(
+    'id', ${mailAttachments.id}, 'filename', ${mailAttachments.filename}, 'contentType', ${mailAttachments.contentType},
+    'sizeBytes', ${mailAttachments.sizeBytes}, 'disposition', ${mailAttachments.disposition}, 'contentId', ${mailAttachments.contentId}${storage}
+  ) ORDER BY ${mailAttachments.id}) FROM ${mailAttachments} WHERE ${mailAttachments.messageId}=${messages.id}), '[]'::jsonb)`;
+const attachmentView = (f: AttachmentMetadata) => ({id:f.id,filename:f.filename,contentType:f.contentType,size:f.sizeBytes,disposition:f.disposition,contentId:f.contentId});
+type DeliveryMessage = Pick<typeof messages.$inferSelect, 'id' | 'workspaceId' | 'direction' | 'verdicts' | 'region' | 'rawBucket' | 'rawKey' | 'lifecycle' | 'createdAt' | 'receivedAt'>;
+async function deliveryLinks(runtime: Runtime, row: DeliveryMessage, files: DeliveryAttachment[]) {
   const rawExpiresAt=row.rawKey&&row.lifecycle!=='kept'?new Date(Math.min(Date.parse(row.createdAt),Date.parse(row.receivedAt))+90*86400000).toISOString():null;
   const bucket = row.rawBucket ?? files[0]?.bucket, region = row.region;
   if (files.some(f => f.bucket !== bucket)) throw new ApiError(404, 'MAILBOX_OBJECT_NOT_FOUND', 'Message objects must use the same workspace storage connection.');
@@ -464,30 +473,29 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
     };
     return await withBoundedRead(c, async () => {
       if (q.includeDelivery==='true') {
-        const { result, files } = await budgetedRead(c.env.db, async db => {
+        const result = await budgetedRead(c.env.db, async db => {
           const [result]=await db.select({
             ...detailFields, workspaceId: messages.workspaceId, region: messages.region, spam: messages.spam, automated: messages.automated,
             headers: messages.headers, verdicts: messages.verdicts, sentAt: messages.sentAt, sizeBytes: messages.sizeBytes,
             rawBucket: messages.rawBucket, rawKey: messages.rawKey, lifecycle: messages.lifecycle, createdAt: messages.createdAt,
             envelopeTo: sql<string[]>`${sliceJsonbArray(messages.envelopeTo, storeCap)}`, envelopeToCount: sql<number>`jsonb_array_length(${messages.envelopeTo})::int`,
             thread, addresses: deliveryAddresses(v,q), addressIds: addressLinks(v,q),
+            files: sql<DeliveryAttachment[]>`${attachmentRows(sql`, 'bucket', ${mailAttachments.bucket}, 'storageKey', ${mailAttachments.storageKey}, 'sourceId', ${mailAttachments.sourceId}`)}`,
             isRead: sql<boolean>`coalesce((SELECT bool_and(${links.read}) FROM ${links} WHERE ${visibleLinks(v,q)} AND mailbox_messages.message_id=mail_messages.id),false)`,
           }).from(messages).where(and(eq(messages.id,id),accessible(v,q)));
           if (!result) throw new ApiError(404,'NOT_FOUND','Message was not found.');
-          const files=await db.select().from(mailAttachments).where(eq(mailAttachments.messageId,id)).orderBy(asc(mailAttachments.id));
-          return { result, files };
+          return result;
         }, readLimit(INBOUND_READ));
-        const {rawUrl,rawExpiresAt,urls}=await deliveryLinks(c.env,result as unknown as typeof messages.$inferSelect,files);
+        const {rawUrl,rawExpiresAt,urls}=await deliveryLinks(c.env,result,result.files);
         return c.json({...messageView(result,result.addressIds,result.isRead),addresses:result.addresses,envelopeTo:result.envelopeTo,envelopeToCount:result.envelopeToCount,region:result.region,spam:result.spam,headers:result.headers,verdicts:publicVerdicts(result.verdicts),sentAt:result.sentAt?timestamp(result.sentAt):null,sizeBytes:result.sizeBytes,rawUrl,...body(result.html),...auth(result),...conversation(result.thread),
-          rawExpiresAt,attachments:files.map((f,i)=>({id:f.id,filename:f.filename,contentType:f.contentType,size:f.sizeBytes,disposition:f.disposition,contentId:f.contentId,url:urls[i]!}))},200);
+          rawExpiresAt,attachments:result.files.map((f,i)=>({...attachmentView(f),url:urls[i]!}))},200);
       }
-      const { row, attachments } = await budgetedRead(c.env.db, async db => {
-        const [row] = await db.select({...detailFields,thread,verdicts:messages.verdicts,automated:messages.automated,addressIds:addressLinks(v,q),isRead:sql<boolean>`coalesce((SELECT bool_and(${links.read}) FROM ${links} WHERE ${visibleLinks(v,q)} AND mailbox_messages.message_id=mail_messages.id),false)`}).from(messages).where(and(eq(messages.id,id),accessible(v,q)));
+      const row = await budgetedRead(c.env.db, async db => {
+        const [row] = await db.select({...detailFields,thread,verdicts:messages.verdicts,automated:messages.automated,addressIds:addressLinks(v,q),isRead:sql<boolean>`coalesce((SELECT bool_and(${links.read}) FROM ${links} WHERE ${visibleLinks(v,q)} AND mailbox_messages.message_id=mail_messages.id),false)`,files:sql<AttachmentMetadata[]>`${attachmentRows()}`}).from(messages).where(and(eq(messages.id,id),accessible(v,q)));
         if (!row) throw new ApiError(404, 'NOT_FOUND', 'Message was not found.');
-        const attachments=await db.select({id:mailAttachments.id,filename:mailAttachments.filename,contentType:mailAttachments.contentType,size:mailAttachments.sizeBytes,disposition:mailAttachments.disposition,contentId:mailAttachments.contentId}).from(mailAttachments).where(eq(mailAttachments.messageId,id)).orderBy(asc(mailAttachments.id));
-        return { row, attachments };
+        return row;
       }, readLimit(INBOUND_READ));
-      return c.json({...messageView(row,row.addressIds,row.isRead),...body(row.html),...auth(row),...conversation(row.thread),attachments},200);
+      return c.json({...messageView(row,row.addressIds,row.isRead),...body(row.html),...auth(row),...conversation(row.thread),attachments:row.files.map(attachmentView)},200);
     }, { route: 'inbound.getMessage', workspaceId: v.workspaceId }) as never;
   });
   // rawUrl in webhook payloads is the delivery record (it names every recipient): only delivery-detail readers follow it.
