@@ -32253,7 +32253,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     assert.deepEqual([healthy.rate, healthy.acceptedRate, healthy.entitled, healthy.account, healthy.planned, healthy.behind], [38, 37, 40, 160, 40, false]);
     // A wait starts the samples over, and is itself an alert once it has lasted fifteen minutes (a daily pace never is).
     for (let minute = 0; minute < 15; minute++) found = lines({ ...quiet(), campaigns: [campaign('cmp_stalled', { expanded: 1_800, waitingReason: 'hosted_daily_quota', waitingSeconds: 7_200 - 60 * minute }), campaign('cmp_paced', { paced: true, waitingReason: 'pacing_window', waitingSeconds: 3_600 })] });
-    assert.deepEqual([found, memory.campaigns], [[`campaign-waiting:cmp_stalled warning 900: ${c('cmp_stalled')}: ${c('hosted_daily_quota')} for 15 min, 106 min to go. 1,798,200 left.`], {}]);
+    assert.deepEqual([found, memory.campaigns], [[`campaign-waiting:cmp_stalled warning 900: ${c('cmp_stalled')}: ${c('hosted_daily_quota')} for 15 min, 1.8 h to go. 1,798,200 left.`], {}]);
 
     // 3. Preparing for over five minutes, and the request that took 45 seconds. 2. One page asking 50 times a second.
     // 1. A read-only database, at its first error. 9. A dispatcher shard whose runs keep failing.

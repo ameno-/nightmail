@@ -14,6 +14,7 @@ import { factorFormats } from '../score'
 import { actionColumnDefs, ActionsTrigger, dailyLimitError, campaignColumnDefs, domainColumnDefs, factorColumnDefs, facts, memberColumnDefs, operatorView, useOperatorTabs, OperatorWorkspaceSkeleton, StaffOnly, QueueToolbar, queueColumnDefs, SetLimitTrigger, SignupFacts, signupColumnDefs, timelineColumnDefs, waitlistColumnDefs, WaitlistToolbar } from './skeletons'
 import { useDebounced } from '../../lib/pagination'
 import { AbuseView } from './abuse'
+import { HealthView } from './health'
 
 // The operator console (lazy, /operator): Nightmail staff with a platform role review flagged Hosted workspaces and act on
 // them through the audited operator API. Impersonation-free: it reads standing, score, limits and evidence, never
@@ -35,13 +36,15 @@ export function OperatorPage() {
   const role = useOperatorRole()
   const [params, setParams] = useSearchParams()
   const view = operatorView(params.toString())
-  const navigate = useNavigate(), tabs = useOperatorTabs()
+  const navigate = useNavigate(), tabs = useOperatorTabs(), identity = useSession()?.identity
+  // A self-hosted installation has no operator area: this address is its Health page, for anyone signed in.
+  if (!role && identity && identity.multiTenant !== true) return <><PageHeader title="Health" /><div className="op-page"><HealthView /></div></>
   if (!role) return <NotFound />
   return <>
     <PageHeader title="Operator" actions={view === 'signups' && role === 'operator' ? <SetLimit /> : undefined} />
     <div className="op-page">
       <Tabs value={view} label="Operator views" items={tabs} onValueChange={value => value === 'notes' ? navigate('/operator/notes') : setParams(previous => { const next = new URLSearchParams(previous); next.delete('band'); next.delete('show'); if (value === 'queue') next.delete('view'); else next.set('view', value); return next }, { replace: true })} />
-      {view === 'queue' ? <Queue /> : view === 'signups' ? <Signups /> : view === 'abuse' ? <AbuseView /> : view === 'waitlist' ? <Waitlist /> : <Actions />}
+      {view === 'queue' ? <Queue /> : view === 'signups' ? <Signups /> : view === 'abuse' ? <AbuseView /> : view === 'waitlist' ? <Waitlist /> : view === 'health' ? <HealthView /> : <Actions />}
     </div>
   </>
 }
