@@ -107,7 +107,7 @@ export function PricingBoard({ start }: { start?: Start }) {
     </div>
     {start && !start.signedIn && <><SignInConsent className="cb-consent cb-consent-hero" /><WaitlistLine className="cb-consent cb-consent-hero cb-full" full={start.full} /></>}
     <div className="cb-print">
-      <p>Nightmail charges {nightmail.perThousand} per 1,000 emails sent or received, after {formatCount(nightmail.freeSent)} of each free every month.</p>
+      <p>Nightmail charges {nightmail.perThousand} per 1,000 emails sent or received, after {formatCount(nightmail.freeSent)} sent and {formatCount(nightmail.freeReceived)} received free every month.</p>
       <Terms floor={floor} />
     </div>
   </>

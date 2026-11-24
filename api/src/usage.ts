@@ -23,7 +23,7 @@ const Usage = z.object({
   pricing: z.object({
     currency: z.literal('USD'),
     perThousand: z.number().describe('Price per 1,000 emails: each recipient of a sent email, each received message. SES mailbox simulator sends count like any other send.'),
-    freeEmails: z.number().int().describe('Emails included free each calendar month (UTC) in each direction, counted separately: this many sent and this many received (freeSentEmails, freeReceivedEmails). Sends beyond it are charged even while received mail is still free, and the other way round.'),
+    freeEmails: z.number().int().describe('The sent allowance (same as freeSentEmails), kept for older clients. Sent and received each have their own allowance (freeSentEmails, freeReceivedEmails), counted separately: sends beyond theirs are charged even while received mail is still free, and the other way round.'),
     freeSentEmails: z.number().int().describe('Sent emails (each recipient) included free each calendar month (UTC).'),
     freeReceivedEmails: z.number().int().describe('Received messages included free each calendar month (UTC), separate from the sent allowance.'),
     freeStorageBytes: z.number().int().describe('Bytes of received mail older than 90 days stored free.'),
@@ -52,7 +52,7 @@ export const PRICING = { currency: 'USD', perThousand: Number(RATES.emailUc) * 1
 
 export function registerUsage(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/usage', operationId: 'getUsage', tags: ['Metrics'], security, summary: 'Plan, pricing and sending limits',
-    description: 'Hosted only. Pricing and whether billing charges yet, this month\'s sent and received counts against their free allowances, ' + RATES.freeSentEmails.toLocaleString('en-US') + ' each, counted separately (received only for credentials that may read all received mail), and the rolling daily sending limit (none in good standing) with the evaluation before it. Workspace-wide: keys restricted to domains get 403. ' + DASHBOARD_CACHE_NOTE,
+    description: 'Hosted only. Pricing and whether billing charges yet, this month\'s sent and received counts against their free allowances (' + RATES.freeSentEmails.toLocaleString('en-US') + ' sent and ' + RATES.freeReceivedEmails.toLocaleString('en-US') + ' received), counted separately (received only for credentials that may read all received mail), and the rolling daily sending limit (none in good standing) with the evaluation before it. Workspace-wide: keys restricted to domains get 403. ' + DASHBOARD_CACHE_NOTE,
     responses: { 200: response(Usage), ...errors } }), async c => {
     if (!c.env.config.multiTenant) return notFound('Endpoint');
     const a = actor(c, 'read');

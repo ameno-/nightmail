@@ -44,7 +44,7 @@ export function comparisonMarkdown(c: Comparison): string {
     `## A month at each size`,
     `${c.assume} Monthly billing, no promotions. ${vendor}’s prices checked ${dayOf(c.offer.checked)} on [${host(c.offer.pricing)}](${c.offer.pricing}).`,
     table(head, rows, byContacts ? [0, 1, 2, 3] : [0, 1, 2]),
-    `${productName} charges ${nightmail.perThousand} per 1,000 emails after ${formatCount(nightmail.freeSent)} free a month.`,
+    `${productName} charges ${nightmail.perThousand} per 1,000 emails after ${free} free a month.`,
     `## What ${productName} has that ${vendor} charges for or lacks`,
     c.rows.map(row => `- ${row.text}${row.source ? ` ([${host(row.source.url)}](${row.source.url}), checked ${dayOf(row.source.checked)})` : ''}`).join('\n'),
     `## Also in the box`,

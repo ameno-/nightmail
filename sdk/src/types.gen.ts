@@ -2820,7 +2820,7 @@ export type Usage = {
          */
         perThousand: number;
         /**
-         * Emails included free each calendar month (UTC) in each direction, counted separately: this many sent and this many received (freeSentEmails, freeReceivedEmails). Sends beyond it are charged even while received mail is still free, and the other way round.
+         * The sent allowance (same as freeSentEmails), kept for older clients. Sent and received each have their own allowance (freeSentEmails, freeReceivedEmails), counted separately: sends beyond theirs are charged even while received mail is still free, and the other way round.
          */
         freeEmails: number;
         /**
@@ -5902,7 +5902,7 @@ export type BillingSummary = {
          */
         storagePerGbMonth: string;
         /**
-         * Free emails each calendar month (UTC) in each direction, counted separately (freeSentEmails, freeReceivedEmails).
+         * The sent allowance (same as freeSentEmails), kept for older clients. Each direction has its own allowance, counted separately (freeSentEmails, freeReceivedEmails).
          */
         freeEmails: number;
         /**

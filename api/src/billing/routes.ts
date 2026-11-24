@@ -22,7 +22,7 @@ import { productName } from '../brand.js';
 const MicroCents = MicroCentsJson;
 const FreeAllowance = z.object({ limit: z.number().int(), used: z.number().int().describe('Used this month, settled and unsettled.'), left: z.number().int() });
 const Prices = z.object({ emailPerThousand: z.string().describe('USD per 1,000 emails, sent (per recipient) or received (per message).'), decisionPerThousand: z.string().openapi({ deprecated: true, description: 'Deprecated: AI decisions are free, so this is always "0.00".' }), omenPerThousand: z.string().openapi({ deprecated: true, description: 'Deprecated: decisionPerThousand, always "0.00".' }), storagePerGbMonth: z.string().describe('USD per GB-month for received mail older than 90 days, beyond the free GB.'),
-  freeEmails: z.number().int().describe('Free emails each calendar month (UTC) in each direction, counted separately (freeSentEmails, freeReceivedEmails).'),
+  freeEmails: z.number().int().describe('The sent allowance (same as freeSentEmails), kept for older clients. Each direction has its own allowance, counted separately (freeSentEmails, freeReceivedEmails).'),
   freeSentEmails: z.number().int().describe('Sent emails (each recipient) free each calendar month (UTC).'),
   freeReceivedEmails: z.number().int().describe('Received messages free each calendar month (UTC), separate from the sent allowance.'),
   freeStorageBytes: z.number().int(), topUpMinCents: z.number().int(), currency: z.literal('USD') });
@@ -106,7 +106,7 @@ function describe(kind: LedgerKind, detail: Record<string, unknown>) {
   switch (kind) {
     case 'usage': {
       // A month settled at an earlier rate version, posted again at the version that replaced it: the larger free
-      // allowance (migration 367), or free AI decisions (380).
+      // allowance (migrations 367 and 476), or free AI decisions (380).
       const repriced = detail.repriced as { freeSent?: unknown; freeReceived?: unknown; decisionUc?: unknown } | undefined;
       if (repriced && typeof repriced === 'object') return 'decisionUc' in repriced ? `Usage ${detail.usageMonth}: AI decisions refunded, as AI rules are free`
         : `Usage ${detail.usageMonth}: repriced at ${count(repriced.freeSent)} sent and ${count(repriced.freeReceived)} received free`;
