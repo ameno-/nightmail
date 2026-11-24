@@ -39,6 +39,7 @@ interface __BaseEnv_Env {
 	WEBHOOK_QUEUE_NAME: "bane-prod-webhooks";
 	JEVF_QUEUE_NAME?: string;
 	FEEDBACK_QUEUE_NAME: "bane-prod-feedback-v2";
+	FEEDBACK_PRIORITY_QUEUE_NAME?: string;
 	FEEDBACK_DLQ_NAME: "bane-prod-feedback-v2-dlq";
 	LEGACY_FEEDBACK_DLQ_NAME: "bane-prod-feedback-dlq";
 	LEGACY_FEEDBACK_QUEUE_NAME: "bane-prod-feedback";

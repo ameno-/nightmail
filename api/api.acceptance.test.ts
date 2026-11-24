@@ -1330,7 +1330,14 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
     const joinedByEmail=await login(undefined,link.url), invitee=sessionOf(joinedByEmail);
     assert.equal(landed(joinedByEmail),link.url);
     assert.deepEqual(await attempt(),{acr,provider:null,provider_hd:null,outcome:'signed_in:invitation'});
-    assert.equal((await request(`/v1/workspaces/invitations/${link.id}`,'GET',invitee)).status,200);
+    // The review the dashboard shows before joining: the workspace's name as plain words, the inviter by address.
+    const {rows:[staffNames]}=await db.query('SELECT w.name,u.id AS inviter,u.name AS inviter_name FROM workspace_invitations i JOIN workspaces w ON w.id=i.workspace_id JOIN nightmail_users u ON u.id=i.inviter_id WHERE i.id=$1',[link.id]);
+    await db.query('UPDATE workspaces SET name=$2 WHERE id=$1',[staffWorkspace,'Acme, Inc. — call 1 800 555 0199 or see nightmail-dev.example.com/restore']);
+    await db.query('UPDATE nightmail_users SET name=$2 WHERE id=$1',[staffNames.inviter,'Nightmail Security Team (security@nightmail.dev)']);
+    const review=await request(`/v1/workspaces/invitations/${link.id}`,'GET',invitee), shown=await review.json() as Record<string,unknown>;
+    assert.deepEqual([review.status,shown.workspaceName,shown.inviterName,typeof shown.inviterEmail,shown.role,shown.status],[200,'Acme Inc call or see','Nightmail Security Team','string','member','pending']);
+    await db.query('UPDATE workspaces SET name=$2 WHERE id=$1',[staffWorkspace,staffNames.name]);
+    await db.query('UPDATE nightmail_users SET name=$2 WHERE id=$1',[staffNames.inviter,staffNames.inviter_name]);
     assert.deepEqual(await (await request(`/v1/workspaces/invitations/${link.id}/accept`,'POST',invitee,{})).json(),{workspaceId:staffWorkspace});
     assert.deepEqual((await db.query("SELECT mailbox_proved,mailbox_proved_at>now()-interval '1 minute' AS fresh FROM nightmail_users WHERE id=$1",[accountOf(joinedByEmail)])).rows[0],{mailbox_proved:address,fresh:true});
     // Accepted, the link is spent: another subject with the same verified address following it is refused.
@@ -2622,6 +2629,24 @@ function page(reply: Reply): Json[] {
   assert.ok(Array.isArray(body.data), diagnostic(reply));
   assert.ok(body.nextCursor === null || typeof body.nextCursor === 'string', diagnostic(reply));
   return body.data;
+}
+// A list's members counted the way readLists counted them on every load before migration 405: every membership joined to
+// its contact. The counts the API shows are kept by triggers instead and must equal this after any history of writes.
+type ListCounts = { total: number; subscribed: number; unsubscribed: number; unknown: number; suppressed: number };
+const NO_MEMBERS: ListCounts = { total: 0, subscribed: 0, unsubscribed: 0, unknown: 0, suppressed: 0 };
+async function countedMembers(db: pg.Client, listId: string): Promise<ListCounts> {
+  return (await db.query(`SELECT count(*)::int AS total, count(*) FILTER (WHERE NOT c.suppressed AND c.marketing_consent='subscribed')::int AS subscribed,
+      count(*) FILTER (WHERE NOT c.suppressed AND c.marketing_consent='unsubscribed')::int AS unsubscribed, count(*) FILTER (WHERE NOT c.suppressed AND c.marketing_consent='unknown')::int AS unknown,
+      count(*) FILTER (WHERE c.suppressed)::int AS suppressed
+    FROM audience_list_members m JOIN audience_contacts c ON c.workspace_id=m.workspace_id AND c.id=m.contact_id WHERE m.list_id=$1 AND c.deleted_at IS NULL`, [listId])).rows[0];
+}
+// Resolves once a backend is waiting for a lock inside a statement matching `statement`: the half of a race that must wait.
+async function waitingOnLock(observer: pg.Client, statement: string) {
+  for (const until = Date.now() + 4000; ;) {
+    if ((await observer.query(`SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock' AND query ~* $1`, [statement])).rowCount) return;
+    assert.ok(Date.now() < until, `No statement matching ${statement} waited for a lock.`);
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
 }
 async function keyFixture(t: TestContext, options: { permissions?: string[]; domains?: string[] } = {}): Promise<Key> {
   const body = ok(await http('POST', '/v1/api-keys', MANAGER, {
@@ -9095,6 +9120,10 @@ describe('Hosted MCP OAuth and tools', () => {
         ['POST', '/v1/operator/ui-note-keys', { name: 'more' }], ['POST', `/v1/operator/ui-note-keys/${key.id}/revoke`, {}], ['GET', '/v1/operator/workspaces'], ['GET', '/v1/operator/actions']] as const)
         error(await send(method, path, agent, body), 403, 'OPERATOR_REQUIRED');
       assert.equal((await send('HEAD', '/v1/operator/ui-notes', agent)).status, 403);
+      // The one other thing an agent key reads: the installation's health (src/health.ts), the open alerts and the rollup.
+      const health = ok(await send('GET', '/v1/operator/health', agent));
+      assert.deepEqual([Array.isArray(health.alerts), Array.isArray(health.queues), 'memory' in health], [true, true, false]);
+      error(await send('POST', '/v1/operator/health', agent, {}), 403, 'OPERATOR_REQUIRED');
       for (const path of ['/v1/me', '/v1/emails', '/v1/api-keys']) error(await send('GET', path, agent), 401, 'AUTH_INVALID');
       // The agent's script, end to end through the same key: list with screenshots, read one, set its status and PR.
       const { mkdtempSync, readFileSync, rmSync } = await import('node:fs'), { tmpdir } = await import('node:os'), { join } = await import('node:path');
@@ -10371,6 +10400,503 @@ describe('Lists, compound segments, imports and exports', () => {
     cleanup(t, async () => { ok(await http('DELETE', `/v1/contacts/${laterContact.id}`, key.secret), [200, 404]); });
     const [bulk] = page(await http('GET', `/v1/contacts/${laterContact.id}/consent`, key.secret));
     assert.deepEqual({ status: bulk.status, source: bulk.source, evidence: bulk.evidence }, { status: 'subscribed', source: 'audienceql', evidence: 'Signed up at the event' });
+  });
+
+  // A list's counts are kept by the triggers of migration 405, not counted on each load. The tests below compare what
+  // the API shows with a count of the memberships (countedMembers) and with the numbers each scenario must produce.
+  const exactly = async (db: pg.Client, key: Key, listId: string, expected: Partial<ListCounts>, label: string) => {
+    const shown = ok(await http('GET', `/v1/lists/${listId}`, key.secret)).counts;
+    assert.deepEqual(shown, await countedMembers(db, listId), `${label}: the counts shown are the memberships, counted`);
+    assert.deepEqual(shown, { ...NO_MEMBERS, ...expected }, label);
+  };
+  const keptCounts = async (db: pg.Client, listId: string): Promise<ListCounts & { rows: number }> => (await db.query(`SELECT coalesce(sum(subscribed+unsubscribed+unknown+suppressed),0)::int AS total, coalesce(sum(subscribed),0)::int AS subscribed,
+    coalesce(sum(unsubscribed),0)::int AS unsubscribed, coalesce(sum(unknown),0)::int AS unknown, coalesce(sum(suppressed),0)::int AS suppressed, count(*)::int AS rows FROM audience_list_counts WHERE list_id=$1`, [listId])).rows[0];
+  const recount = async (db: pg.Client, list: Json) => (await db.query('SELECT * FROM reconcile_audience_list_counts($1,$2)', [list.workspaceId, list.id])).rows;
+  const importInto = async (key: Key, listId: string, emails: string[], body?: Json) => {
+    const preview = ok(await http('POST', '/v1/contact-imports', key.secret, { csv: `email\n${emails.join('\n')}\n`, listId, mapping: { email: 'email' } }), 201);
+    return http('POST', `/v1/contact-imports/${preview.id}/commit`, key.secret, body);
+  };
+  const attested = { consent: { status: 'subscribed', evidence: 'Opted in at checkout' } };
+  // A list's members, each deleted with the test (an import's contacts have no other owner).
+  const membersOf = async (t: TestContext, key: Key, listId: string) => {
+    const rows = await allPages(`/v1/lists/${listId}/members`, key.secret);
+    for (const row of rows) cleanup(t, async () => { ok(await http('DELETE', `/v1/contacts/${row.id}`, key.secret), [200, 404]); });
+    return rows;
+  };
+  const contactsFor = async (t: TestContext, key: Key, n: number, state?: 'subscribed' | 'unsubscribed') => {
+    const rows: Json[] = [];
+    for (let i = 0; i < n; i++) { const row = await resource(t, key.secret, '/v1/contacts', { email: address() }); if (state) ok(await consent(key.secret, row.id, state)); rows.push(row); }
+    return rows;
+  };
+  // The suppression SES feedback writes for one address (operations.ts and sending.ts share mergeSuppression), and its lift (scripts/lift-suppression.ts).
+  const suppress = async (db: pg.Client, wid: string, email: string) => {
+    const [{ drizzle }, { sql }, { mergeSuppression }] = await Promise.all([import('drizzle-orm/node-postgres'), import('drizzle-orm'), import('./src/db/audience.js')]);
+    await drizzle(db).execute(sql`INSERT INTO audience_contacts AS c(id,workspace_id,email,suppressed,suppression_reason,suppressed_at) VALUES (${unique('con')},${wid},${email},true,'hard_bounce',now())
+      ON CONFLICT ON CONSTRAINT audience_contacts_email_scope DO UPDATE SET ${mergeSuppression},updated_at=now()`);
+  };
+  const lift = (db: pg.Client, id: string) => db.query('UPDATE audience_contacts SET suppressed = false, suppression_reason = NULL, suppressed_at = NULL, updated_at = now() WHERE id = $1 AND suppressed', [id]);
+  const join = (db: pg.Client, list: Json, ...contactIds: string[]) => db.query('INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,unnest($3::text[]) ON CONFLICT DO NOTHING', [list.workspaceId, list.id, contactIds]);
+  const membershipsOf = async (db: pg.Client, contactId: string) => (await db.query('SELECT count(*)::int AS n FROM audience_list_members WHERE contact_id=$1', [contactId])).rows[0].n as number;
+  const bulk = async (key: Key, statement: string, extra: Json = {}) => {
+    const plan = ok(await http('POST', '/v1/audience-query/plan', key.secret, { statement }), 201);
+    return http('POST', '/v1/audience-query/apply', key.secret, { planId: plan.id, ...extra });
+  };
+
+  test('list counts: every write that changes a membership or a contact\'s state moves them, a failed or rolled-back write moves nothing, and a recount has nothing to correct', async t => {
+    const key = await keyFixture(t), db = await fixtureDatabase(t);
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('counted') }), other = await resource(t, key.secret, '/v1/lists', { name: unique('counted-too') });
+    const counts = (expected: Partial<ListCounts>, label: string) => exactly(db, key, list.id, expected, label);
+    await counts({}, 'a new list');
+    const [existing] = await contactsFor(t, key, 1, 'subscribed'), fresh = [address(), address(), address()];
+    assert.equal(ok(await importInto(key, list.id, [existing!.email, ...fresh])).imported, 4);
+    const rows = await membersOf(t, key, list.id), [a, b, c] = fresh.map(email => rows.find(row => row.email === email)!) as [Json, Json, Json];
+    await counts({ total: 4, subscribed: 1, unknown: 3 }, 'an import without consent');
+    assert.equal(ok(await importInto(key, list.id, [existing!.email, ...fresh], attested)).subscribed, 3);
+    await counts({ total: 4, subscribed: 4 }, 'the same addresses again with consent: no membership twice, the three undecided subscribed');
+    ok(await consent(key.secret, a.id, 'unsubscribed'));
+    await counts({ total: 4, subscribed: 3, unsubscribed: 1 }, 'an opt-out');
+    // Suppression and its lift, written as SES feedback and the operator's script write them (the simulated-SES test
+    // "a list's counts follow a bounce..." runs the feedback batch, the feedback job and the script themselves).
+    await suppress(db, list.workspaceId, b.email);
+    await counts({ total: 4, subscribed: 2, unsubscribed: 1, suppressed: 1 }, 'a suppression');
+    ok(await consent(key.secret, b.id, 'unsubscribed'));
+    await counts({ total: 4, subscribed: 2, unsubscribed: 1, suppressed: 1 }, 'a suppressed contact opts out: suppression takes precedence');
+    await lift(db, b.id);
+    await counts({ total: 4, subscribed: 2, unsubscribed: 2 }, 'the suppression lifted');
+    // What changes no state, or another list, adds nothing here.
+    ok(await http('PATCH', `/v1/contacts/${c.id}`, key.secret, { name: 'Renamed' }));
+    assert.equal(ok(await http('POST', `/v1/lists/${other.id}/members`, key.secret, { contactIds: [a.id, c.id] })).added, 2);
+    await counts({ total: 4, subscribed: 2, unsubscribed: 2 }, 'a profile edit and another list\'s members');
+    await exactly(db, key, other.id, { total: 2, subscribed: 1, unsubscribed: 1 }, 'the other list');
+    // One membership at a time: removing or adding it twice counts once.
+    for (let i = 0; i < 2; i++) ok(await http('DELETE', `/v1/lists/${list.id}/members/${b.id}`, key.secret));
+    await counts({ total: 3, subscribed: 2, unsubscribed: 1 }, 'a member removed, twice');
+    assert.equal(ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [b.id, a.id] })).added, 1);
+    await counts({ total: 4, subscribed: 2, unsubscribed: 2 }, 'the member added back beside one already there');
+    // AudienceQL bulk changes: consent, removal, addition.
+    assert.equal(ok(await bulk(key, `UPDATE contacts SET consent = 'subscribed' WHERE list = '${list.id}' AND consent = 'unsubscribed'`, { confirmResubscribe: true, evidence: 'Asked to come back' })).affected, 2);
+    await counts({ total: 4, subscribed: 4 }, 'a bulk consent change');
+    assert.equal(ok(await bulk(key, `REMOVE contacts FROM LIST '${list.id}' WHERE list = '${other.id}'`)).affected, 2);
+    await counts({ total: 2, subscribed: 2 }, 'a bulk removal');
+    assert.equal(ok(await bulk(key, `ADD contacts TO LIST '${list.id}' WHERE list = '${other.id}'`)).affected, 2);
+    await counts({ total: 4, subscribed: 4 }, 'a bulk addition');
+    // A deleted contact leaves every list. An import restores it into the list it names, and no other.
+    ok(await http('DELETE', `/v1/contacts/${a.id}`, key.secret));
+    await counts({ total: 3, subscribed: 3 }, 'a contact deleted');
+    await exactly(db, key, other.id, { total: 1, subscribed: 1 }, 'the other list after the deletion');
+    assert.equal(await membershipsOf(db, a.id), 0);
+    assert.equal(ok(await importInto(key, list.id, [a.email])).imported, 1);
+    await counts({ total: 4, subscribed: 4 }, 'the contact restored by an import, with the consent it had');
+    await exactly(db, key, other.id, { total: 1, subscribed: 1 }, 'the restored contact is back in the imported list only');
+    // The import restores the contact and adds its membership in one statement; a restore and a membership in two
+    // statements (as an import that adds memberships separately issues them) count the same.
+    ok(await http('DELETE', `/v1/contacts/${a.id}`, key.secret));
+    await counts({ total: 3, subscribed: 3 }, 'the contact deleted again');
+    await db.query('UPDATE audience_contacts SET deleted_at = NULL WHERE id = $1', [a.id]);
+    await join(db, list, a.id);
+    await counts({ total: 4, subscribed: 4 }, 'restored, then added to the list, in two statements');
+    // A transaction that rolls back takes its differences with it. Inside it, the kept counts follow each statement.
+    const kept = await keptCounts(db, list.id);
+    await db.query('BEGIN');
+    try {
+      await db.query(`UPDATE audience_contacts SET marketing_consent='unsubscribed' WHERE id=$1`, [b.id]);
+      await db.query('DELETE FROM audience_list_members WHERE list_id=$1 AND contact_id=$2', [list.id, c.id]);
+      await join(db, other, b.id);
+      const { rows: _, ...inside } = await keptCounts(db, list.id);
+      assert.deepEqual([inside, await countedMembers(db, list.id)], [{ total: 3, subscribed: 2, unsubscribed: 1, unknown: 0, suppressed: 0 }, inside]);
+    } finally { await db.query('ROLLBACK'); }
+    assert.deepEqual(await keptCounts(db, list.id), kept);
+    await counts({ total: 4, subscribed: 4 }, 'a rolled-back transaction');
+    // An import that fails after its statement added members (merged properties over the limit) rolls back whole.
+    const full = await resource(t, key.secret, '/v1/contacts', { email: address(), properties: Object.fromEntries(Array.from({ length: 50 }, (_, i) => [`field${i}`, 'x'])) });
+    const refused = ok(await http('POST', '/v1/contact-imports', key.secret, { csv: `Email,Plan\n${address()},pro\n${full.email},pro\n`, listId: list.id, mapping: { email: 'Email', plan: 'Plan' } }), 201);
+    error(await http('POST', `/v1/contact-imports/${refused.id}/commit`, key.secret, attested), 422, 'IMPORT_PROPERTIES_INVALID');
+    await counts({ total: 4, subscribed: 4 }, 'an import that failed after adding members');
+    for (const each of [list, other]) assert.deepEqual(await recount(db, each), [], 'A recount has nothing to correct.');
+    // The listing shows the same numbers; counts=false still leaves them out.
+    const listed = (query: string) => http('GET', `/v1/lists?search=${encodeURIComponent(list.name)}${query}`, key.secret);
+    assert.deepEqual(page(await listed('')).map(row => [row.id, row.counts]), [[list.id, { total: 4, subscribed: 4, unsubscribed: 0, unknown: 0, suppressed: 0 }]]);
+    assert.deepEqual(page(await listed('&counts=false')).map(row => [row.id, row.counts]), [[list.id, null]]);
+    // A deleted list is gone with its counts; its members' other lists keep theirs.
+    ok(await http('DELETE', `/v1/lists/${list.id}`, key.secret));
+    error(await http('GET', `/v1/lists/${list.id}`, key.secret), 404, 'NOT_FOUND');
+    await exactly(db, key, other.id, { total: 1, subscribed: 1 }, 'another list after a list is deleted');
+  });
+
+  test('list counts: an opt-out and a suppression racing an import, a contact deleted while it joins a list, and a list deleted under a pending change are each counted once, whichever commits first', async t => {
+    const key = await keyFixture(t), a = await fixtureDatabase(t), b = await fixtureDatabase(t), observer = await fixtureDatabase(t);
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('raced') }), wid = list.workspaceId;
+    const counts = (expected: Partial<ListCounts>, label: string) => exactly(observer, key, list.id, expected, label);
+    const open = async <T,>(work: () => Promise<T>) => { await a.query('BEGIN'); try { const result = await work(); await a.query('COMMIT'); return result; } catch (cause) { await a.query('ROLLBACK').catch(() => {}); throw cause; } };
+    // 1. The state change first: an opt-out is uncommitted when the import reaches its contact. The import waits for the
+    // contact's row, then counts the membership it adds in the state the opt-out left.
+    const [early, late, bounced, leaving, joining, kept] = await contactsFor(t, key, 6) as [Json, Json, Json, Json, Json, Json];
+    const newcomer = address();
+    await open(async () => {
+      await a.query(`UPDATE audience_contacts SET marketing_consent='unsubscribed' WHERE id=$1`, [early.id]);
+      const importing = importInto(key, list.id, [early.email, newcomer], attested);
+      await waitingOnLock(observer, 'INSERT INTO audience_contacts AS c');
+      await a.query('COMMIT'); await a.query('BEGIN');
+      assert.equal(ok(await importing).subscribed, 1);
+    });
+    await membersOf(t, key, list.id);
+    await counts({ total: 2, subscribed: 1, unsubscribed: 1 }, 'an opt-out committed while the import waited for its contact');
+    // 2. The memberships first: they are uncommitted (as inside an import's transaction, which holds its contacts) when
+    // an opt-out and a bounce arrive for two of them. Both wait for the contact, then find and move the new membership.
+    let optingOut: Promise<Reply>, suppressing: Promise<void>;
+    await open(async () => {
+      await join(a, list, late.id, bounced.id);
+      optingOut = consent(key.secret, late.id, 'unsubscribed'); suppressing = suppress(b, wid, bounced.email);
+      await waitingOnLock(observer, 'audience_contacts.*for update'); await waitingOnLock(observer, 'ON CONFLICT ON CONSTRAINT audience_contacts_email_scope');
+      await counts({ total: 2, subscribed: 1, unsubscribed: 1 }, 'uncommitted memberships are not counted yet');
+    });
+    ok(await optingOut!); await suppressing!;
+    await counts({ total: 4, subscribed: 1, unsubscribed: 2, suppressed: 1 }, 'an opt-out and a bounce that waited for uncommitted memberships');
+    // 3. A contact deleted while it is being added to a list. The deletion first: the addition waits, then finds no contact.
+    await open(async () => {
+      await a.query(`UPDATE audience_contacts SET deleted_at=now(),name=NULL,properties='{}' WHERE id=$1`, [leaving.id]);
+      const adding = http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [leaving.id] });
+      await waitingOnLock(observer, 'audience_contacts.*for share');
+      await a.query('COMMIT'); await a.query('BEGIN');
+      error(await adding, 404, 'NOT_FOUND');
+    });
+    // The addition first: the deletion waits for it, then removes the membership it can now see.
+    await open(async () => {
+      await join(a, list, joining.id);
+      const deleting = http('DELETE', `/v1/contacts/${joining.id}`, key.secret);
+      await waitingOnLock(observer, 'update "audience_contacts" set.*"deleted_at"');
+      await a.query('COMMIT'); await a.query('BEGIN');
+      ok(await deleting);
+    });
+    assert.deepEqual([await membershipsOf(observer, leaving.id), await membershipsOf(observer, joining.id)], [0, 0]);
+    await counts({ total: 4, subscribed: 1, unsubscribed: 2, suppressed: 1 }, 'deleted contacts are in no list, whichever side committed first');
+    // A membership written beside the API for a deleted contact is counted nowhere, as it is listed nowhere. An import
+    // that restores the contact into that list counts it once: the restored contact's membership, not also a new one.
+    await join(a, list, leaving.id);
+    await counts({ total: 4, subscribed: 1, unsubscribed: 2, suppressed: 1 }, 'a deleted contact\'s membership');
+    assert.equal(ok(await importInto(key, list.id, [leaving.email])).imported, 1);
+    await counts({ total: 5, subscribed: 1, unsubscribed: 2, unknown: 1, suppressed: 1 }, 'the contact restored by an import into the list it was already in');
+    // 4. A list deleted while a member's opt-out is uncommitted: the deletion does not wait, and the opt-out's
+    // difference for the deleted list is dropped by the hourly fold. The member's other list counts the opt-out.
+    const doomed = await resource(t, key.secret, '/v1/lists', { name: unique('doomed') });
+    assert.equal(ok(await http('POST', `/v1/lists/${doomed.id}/members`, key.secret, { contactIds: [kept.id] })).added, 1);
+    assert.equal(ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [kept.id] })).added, 1);
+    await open(async () => {
+      await a.query(`UPDATE audience_contacts SET marketing_consent='unsubscribed' WHERE id=$1`, [kept.id]);
+      ok(await http('DELETE', `/v1/lists/${doomed.id}`, key.secret));
+    });
+    await counts({ total: 6, subscribed: 1, unsubscribed: 3, unknown: 1, suppressed: 1 }, 'an opt-out committed after one of its lists was deleted');
+    assert.ok((await keptCounts(observer, doomed.id)).rows > 0, 'The opt-out stored a difference for the list it still saw.');
+    const [{ drizzle }, { foldListCounts }] = await Promise.all([import('drizzle-orm/node-postgres'), import('./src/maintenance.js')]);
+    await drizzle(observer).execute(foldListCounts());
+    assert.equal((await keptCounts(observer, doomed.id)).rows, 0, 'The fold drops a deleted list\'s rows.');
+    assert.deepEqual(await recount(observer, list), []);
+  });
+
+  test('list counts: locks are taken contact first and several contacts in email order, so removing a member while its contact is deleted, or a bulk change crossing SES feedback, waits instead of deadlocking', async t => {
+    const key = await keyFixture(t), a = await fixtureDatabase(t), observer = await fixtureDatabase(t), writer = await fixtureDatabase(t);
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('ordered') }), wid = list.workspaceId;
+    const counts = (expected: Partial<ListCounts>, label: string) => exactly(observer, key, list.id, expected, label);
+    const held = async (membership: Json, work: () => Promise<void>) => {
+      // Another session holds the membership row, so whichever request reaches it stops there mid-transaction.
+      await a.query('BEGIN');
+      try { await a.query('SELECT 1 FROM audience_list_members WHERE list_id=$1 AND contact_id=$2 FOR UPDATE', [list.id, membership.id]); await work(); } finally { await a.query('COMMIT').catch(() => {}); }
+    };
+    const [first, second] = await contactsFor(t, key, 2, 'subscribed') as [Json, Json];
+    assert.equal(ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [first.id, second.id] })).added, 2);
+    // The removal first. It holds the contact before it touches the membership, so the deletion queues behind it on the
+    // contact, holding nothing. (Membership first, as a trigger alone would lock, the two would wait on each other.)
+    let removing: Promise<Reply>, deleting: Promise<Reply>;
+    await held(first, async () => {
+      removing = http('DELETE', `/v1/lists/${list.id}/members/${first.id}`, key.secret);
+      await waitingOnLock(observer, 'delete from "audience_list_members"');
+      await assert.rejects(observer.query('SELECT 1 FROM audience_contacts WHERE id=$1 FOR UPDATE NOWAIT', [first.id]), { code: '55P03' }, 'The removal holds its contact while it waits for the membership.');
+      deleting = http('DELETE', `/v1/contacts/${first.id}`, key.secret);
+      await waitingOnLock(observer, 'update "audience_contacts" set.*"deleted_at"');
+    });
+    ok(await removing!); ok(await deleting!);
+    await counts({ total: 1, subscribed: 1 }, 'a member removed while its contact was being deleted');
+    // The deletion first: it holds the contact and waits for the membership; the removal waits for the contact, holding nothing.
+    await held(second, async () => {
+      deleting = http('DELETE', `/v1/contacts/${second.id}`, key.secret);
+      await waitingOnLock(observer, 'delete from "audience_list_members"');
+      removing = http('DELETE', `/v1/lists/${list.id}/members/${second.id}`, key.secret);
+      await waitingOnLock(observer, 'audience_contacts.*for share');
+    });
+    ok(await deleting!); ok(await removing!);
+    await counts({}, 'a contact deleted while its membership was being removed');
+    assert.deepEqual([await membershipsOf(observer, first.id), await membershipsOf(observer, second.id)], [0, 0]);
+    // Several contacts. SES feedback and imports lock contacts in email order; a bulk change plans them in ID order. Two
+    // contacts whose email order is the reverse of their ID order: feedback holds the first by email, the bulk change
+    // must wait for that one before it locks the other, or each would hold what the other needs.
+    const pair = async () => {
+      for (;;) {
+        const tag = unique('order'), [x, y] = [await resource(t, key.secret, '/v1/contacts', { email: `a-${tag}@example.com` }), await resource(t, key.secret, '/v1/contacts', { email: `z-${tag}@example.com` })];
+        if (y.id < x.id) return { tag, byEmail: [x, y] as [Json, Json] };
+      }
+    };
+    const crossings: [string, (tag: string, ids: string[]) => Promise<Reply>][] = [
+      ['a bulk removal', tag => bulk(key, `REMOVE contacts FROM LIST '${list.id}' WHERE email CONTAINS '${tag}'`)],
+      ['a bulk consent change', tag => bulk(key, `UPDATE contacts SET consent = 'subscribed' WHERE email CONTAINS '${tag}'`, { evidence: 'Signed up at the event' })],
+      ['members added in one request', (_, ids) => http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: ids })],
+    ];
+    let expected = { total: 0, subscribed: 0, suppressed: 0 };
+    for (const [label, change] of crossings) {
+      const { tag, byEmail: [x, y] } = await pair(), joins = label !== 'a bulk removal';
+      if (label !== 'members added in one request') assert.equal(ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [x.id, y.id] })).added, 2);
+      await a.query('BEGIN');
+      let changing: Promise<Reply>;
+      try {
+        await suppress(a, wid, x.email);
+        changing = change(tag, [y.id, x.id]);
+        await waitingOnLock(observer, label === 'a bulk consent change' ? 'audience_contacts.*for update' : 'audience_contacts.*for share');
+        // Feedback's next contact is free: the bulk change is still waiting for the first and has not locked this one.
+        await suppress(a, wid, y.email);
+        await a.query('COMMIT');
+      } catch (cause) { await a.query('ROLLBACK').catch(() => {}); throw cause; }
+      // The consent change waited for the bounce, then found its planned contacts changed: refused whole, not half applied.
+      if (label === 'a bulk consent change') error(await changing, 409, 'STALE_AUDIENCE_PLAN'); else ok(await changing);
+      if (joins) expected = { total: expected.total + 2, subscribed: expected.subscribed, suppressed: expected.suppressed + 2 };
+      await counts(expected, `${label} crossing SES feedback for the same two contacts`);
+    }
+    // A bulk addition planned before one of its contacts was deleted is refused whole: nothing is added for the others.
+    const [stays, leaves] = await contactsFor(t, key, 2, 'subscribed') as [Json, Json], tag = unique('stale');
+    for (const person of [stays, leaves]) ok(await http('PATCH', `/v1/contacts/${person.id}`, key.secret, { name: tag }));
+    const plan = ok(await http('POST', '/v1/audience-query/plan', key.secret, { statement: `ADD contacts TO LIST '${list.id}' WHERE name = '${tag}'` }), 201);
+    assert.equal(plan.matched, 2);
+    ok(await http('DELETE', `/v1/contacts/${leaves.id}`, key.secret));
+    error(await http('POST', '/v1/audience-query/apply', key.secret, { planId: plan.id }), 409, 'STALE_AUDIENCE_PLAN');
+    assert.equal(await membershipsOf(observer, stays.id), 0);
+    await counts(expected, 'a bulk addition refused because a planned contact was deleted');
+    // Memberships written beside the API for two deleted contacts, while an import restores both in email order: the
+    // triggers lock contacts in email order too, so the writer waits for the first and holds neither.
+    const { byEmail: [x, y] } = await pair();
+    for (const person of [x, y]) ok(await http('DELETE', `/v1/contacts/${person.id}`, key.secret));
+    await a.query('BEGIN');
+    let writing: Promise<unknown>;
+    try {
+      await a.query('UPDATE audience_contacts SET deleted_at = NULL WHERE id = $1', [x.id]);
+      writing = join(writer, list, y.id, x.id);
+      await waitingOnLock(observer, 'INSERT INTO audience_list_members');
+      await a.query('UPDATE audience_contacts SET deleted_at = NULL WHERE id = $1', [y.id]);
+      await a.query('COMMIT');
+    } catch (cause) { await a.query('ROLLBACK').catch(() => {}); throw cause; }
+    await writing;
+    expected = { total: expected.total + 2, subscribed: expected.subscribed, suppressed: expected.suppressed };
+    await counts({ ...expected, unknown: 2 }, 'memberships written while their deleted contacts were being restored');
+    assert.deepEqual(await recount(observer, list), []);
+  });
+
+  test('list counts: two imports into one list at once, with opt-outs, bounces, deletions and removals for the same people, leave exactly the memberships counted', async t => {
+    const key = await keyFixture(t), db = await fixtureDatabase(t), sessions = [await fixtureDatabase(t), await fixtureDatabase(t)];
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('storm') }), other = await resource(t, key.secret, '/v1/lists', { name: unique('storm-too') }), wid = list.workspaceId;
+    for (let round = 0; round < 3; round++) {
+      const known = await contactsFor(t, key, 12, round % 2 ? 'subscribed' : undefined), both = Array.from({ length: 20 }, address), left = Array.from({ length: 20 }, address), right = Array.from({ length: 20 }, address);
+      assert.equal(ok(await http('POST', `/v1/lists/${other.id}/members`, key.secret, { contactIds: known.map(row => row.id) })).added, 12);
+      if (round) assert.equal(ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: known.slice(6).map(row => row.id) })).added, 6);
+      const emails = known.map(row => row.email);
+      const replies = await Promise.all([
+        importInto(key, list.id, [...both, ...left, ...emails], attested), importInto(key, list.id, [...right, ...emails.toReversed(), ...both]),
+        ...known.slice(0, 3).map(row => consent(key.secret, row.id, 'unsubscribed')),
+        ...known.slice(6, 9).map(row => consent(key.secret, row.id, 'unsubscribed')),
+        ...known.slice(3, 5).map(row => http('DELETE', `/v1/contacts/${row.id}`, key.secret)),
+        ...known.slice(9, 11).map(row => http('DELETE', `/v1/lists/${list.id}/members/${row.id}`, key.secret)),
+        ...sessions.map(async (session, i) => { for (const row of [known[5]!, known[11]!, known[i]!, known[6 + i]!]) await suppress(session, wid, row.email); return undefined; }),
+      ]);
+      for (const reply of replies) if (reply) ok(reply);
+      await membersOf(t, key, list.id);
+      const shown = ok(await http('GET', `/v1/lists/${list.id}`, key.secret)).counts, shownOther = ok(await http('GET', `/v1/lists/${other.id}`, key.secret)).counts;
+      assert.deepEqual([shown, shownOther], [await countedMembers(db, list.id), await countedMembers(db, other.id)], `round ${round}`);
+      assert.deepEqual([await recount(db, list), await recount(db, other)], [[], []], `round ${round}: a recount has nothing to correct`);
+      // Every address either import named is a member exactly once, unless it was deleted or removed while they ran.
+      assert.ok(shown.total >= 60 * (round + 1) + 6 * round, `round ${round}: every imported address is a member`);
+    }
+  });
+
+  test('list counts: the daily recount reports and corrects a difference without making a write wait, and the hourly fold changes no count', async t => {
+    const key = await keyFixture(t), db = await fixtureDatabase(t), a = await fixtureDatabase(t);
+    const [{ drizzle }, { foldListCounts, recountLists }] = await Promise.all([import('drizzle-orm/node-postgres'), import('./src/maintenance.js')]);
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('recounted') }), people = await contactsFor(t, key, 4, 'subscribed') as [Json, Json, Json, Json];
+    const counts = (expected: Partial<ListCounts>, label: string) => exactly(db, key, list.id, expected, label);
+    for (const person of people.slice(0, 3)) ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [person.id] }));
+    ok(await consent(key.secret, people[0].id, 'unsubscribed'));
+    // The fold: a list's four rows become one with the same sums. A write that is uncommitted while it runs keeps its own row.
+    assert.equal((await keptCounts(db, list.id)).rows, 4);
+    await a.query('BEGIN');
+    try {
+      await a.query(`UPDATE audience_contacts SET marketing_consent='unsubscribed' WHERE id=$1`, [people[1].id]);
+      await drizzle(db).execute(foldListCounts());
+      assert.equal((await keptCounts(db, list.id)).rows, 1);
+      await a.query('COMMIT');
+    } catch (cause) { await a.query('ROLLBACK').catch(() => {}); throw cause; }
+    assert.equal((await keptCounts(db, list.id)).rows, 2);
+    await counts({ total: 3, subscribed: 1, unsubscribed: 2 }, 'after a fold with a write in flight');
+    await drizzle(db).execute(foldListCounts());
+    assert.equal((await keptCounts(db, list.id)).rows, 1);
+    await counts({ total: 3, subscribed: 1, unsubscribed: 2 }, 'after a second fold');
+    // A recount in an open transaction: writes to the same list and its contacts do not wait for it, and a write that is
+    // uncommitted when it counts is on neither side of its comparison.
+    await a.query('BEGIN');
+    try {
+      await join(a, list, people[3].id);
+      await db.query('BEGIN');
+      try {
+        assert.deepEqual(await recount(db, list), [], 'An uncommitted membership is neither counted nor stored yet.');
+        ok(await consent(key.secret, people[2].id, 'unsubscribed'));
+        ok(await http('DELETE', `/v1/lists/${list.id}/members/${people[0].id}`, key.secret));
+        await db.query('COMMIT');
+      } catch (cause) { await db.query('ROLLBACK').catch(() => {}); throw cause; }
+      await a.query('COMMIT');
+    } catch (cause) { await a.query('ROLLBACK').catch(() => {}); throw cause; }
+    await counts({ total: 3, subscribed: 1, unsubscribed: 2 }, 'writes made while a recount was open');
+    // A difference is a bug: the daily recount stores what restores the count and says so at error level, once.
+    await db.query('INSERT INTO audience_list_counts(workspace_id,list_id,subscribed,suppressed) VALUES ($1,$2,7,-1)', [list.workspaceId, list.id]);
+    assert.deepEqual(ok(await http('GET', `/v1/lists/${list.id}`, key.secret)).counts, { total: 9, subscribed: 8, unsubscribed: 2, unknown: 0, suppressed: -1 });
+    const logs: Json[] = [];
+    for (const level of ['error', 'warn', 'info'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch { /* not a log line */ } });
+    const runtime = { db: drizzle(db) } as unknown as import('./src/core.js').Runtime;
+    await db.query(`DELETE FROM job_schedule WHERE workspace_id='maintenance:audience-list-counts'`);
+    assert.ok(await recountLists(runtime) >= 1);
+    const drift = logs.filter(line => line.code === 'AUDIENCE_LIST_COUNTS_DRIFT' && line.list === list.id);
+    assert.deepEqual(drift.map(({ level, workspace, subscribed, unsubscribed, unknown, suppressed }) => ({ level, workspace, subscribed, unsubscribed, unknown, suppressed })),
+      [{ level: 'error', workspace: list.workspaceId, subscribed: -7, unsubscribed: 0, unknown: 0, suppressed: 1 }]);
+    await counts({ total: 3, subscribed: 1, unsubscribed: 2 }, 'after the recount');
+    // Elected once a day: a second run the same day recounts nothing.
+    logs.length = 0;
+    assert.equal(await recountLists(runtime), 0);
+    assert.deepEqual(logs.filter(line => String(line.code).startsWith('AUDIENCE_LIST')), []);
+    // A list deleted while a run is under way has nothing to correct: its rows wait for the fold, and that is no difference.
+    const gone = await resource(t, key.secret, '/v1/lists', { name: unique('recount-gone') });
+    assert.equal(ok(await http('POST', `/v1/lists/${gone.id}/members`, key.secret, { contactIds: people.map(person => person.id) })).added, 4);
+    ok(await http('DELETE', `/v1/lists/${gone.id}`, key.secret));
+    const leftover = await keptCounts(db, gone.id);
+    assert.deepEqual([leftover.total, await recount(db, gone), await keptCounts(db, gone.id)], [4, [], leftover]);
+    // Each list is its own transaction with its own time limit: one whose recount cannot finish in time (here, another
+    // recount of it holds its lock) is reported and skipped, and a difference in another list is still found and corrected.
+    const stuck = await resource(t, key.secret, '/v1/lists', { name: unique('recount-stuck') }), lock = [list.workspaceId, stuck.id];
+    await db.query('INSERT INTO audience_list_counts(workspace_id,list_id,unknown) VALUES ($1,$2,3)', [list.workspaceId, list.id]);
+    await db.query(`DELETE FROM job_schedule WHERE workspace_id='maintenance:audience-list-counts'`);
+    await a.query(`SELECT pg_advisory_lock(275816, hashtext($1 || ':' || $2))`, lock);
+    try { assert.ok(await recountLists(runtime, 60_000, 1) >= 1); } finally { await a.query(`SELECT pg_advisory_unlock(275816, hashtext($1 || ':' || $2))`, lock); }
+    assert.deepEqual(logs.filter(line => line.code === 'AUDIENCE_LIST_RECOUNT_FAILED').map(({ level, list: id, databaseCode }) => ({ level, id, databaseCode })), [{ level: 'warn', id: stuck.id, databaseCode: '57014' }]);
+    assert.deepEqual(logs.filter(line => line.code === 'AUDIENCE_LIST_COUNTS_DRIFT' && line.list === list.id).map(({ level, unknown }) => ({ level, unknown })), [{ level: 'error', unknown: -3 }]);
+    assert.deepEqual(logs.filter(line => line.code === 'AUDIENCE_LISTS_RECOUNTED').map(({ level, failed }) => ({ level, failed })), [{ level: 'warn', failed: 1 }]);
+    await counts({ total: 3, subscribed: 1, unsubscribed: 2 }, 'after a run in which one list could not be counted');
+  });
+
+  test('list counts: migration 405 takes its lock between writers without holding other writes up, and 406 fills counts that stay right when writes land while it runs, and stores nothing when run again', async t => {
+    const key = await keyFixture(t), db = await fixtureDatabase(t), a = await fixtureDatabase(t), b = await fixtureDatabase(t);
+    const source = async (file: string) => (await readFile(new URL(`./migrations/${file}`, import.meta.url), 'utf8')).replace(/^--.*$/gm, '');
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('filled') }), people = await contactsFor(t, key, 4, 'subscribed') as [Json, Json, Json, Json];
+    assert.equal(ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: people.slice(0, 2).map(row => row.id) })).added, 2);
+    // Between 405 and 406 the table holds only the differences made since the triggers exist. The API that reads it is
+    // deployed after both; the release before it still counts members itself.
+    await db.query('DELETE FROM audience_list_counts WHERE list_id=$1', [list.id]);
+    assert.deepEqual(ok(await http('GET', `/v1/lists/${list.id}`, key.secret)).counts, NO_MEMBERS);
+    // The fill reads one snapshot. Writes that commit after it, before the fill itself commits, add their own rows.
+    // The file's own statements: three settings that keep the join a hash join whatever the statistics say, and the fill.
+    const fill = (await source('406_audience_list_counts_fill.sql')).split(/;\s*$/m).map(statement => statement.trim()).filter(Boolean);
+    assert.deepEqual(fill.map(statement => statement.split(' ').slice(0, 3).join(' ')), ['SET LOCAL enable_nestloop', 'SET LOCAL enable_mergejoin', 'SET LOCAL work_mem', 'INSERT INTO audience_list_counts']);
+    await a.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
+    try {
+      await a.query('SELECT 1 FROM audience_lists LIMIT 1');
+      assert.equal(ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [people[2].id] })).added, 1);
+      ok(await consent(key.secret, people[0].id, 'unsubscribed'));
+      ok(await http('DELETE', `/v1/lists/${list.id}/members/${people[1].id}`, key.secret));
+      for (const statement of fill.slice(0, 3)) await a.query(statement);
+      const nodes: string[] = [], walk = (plan: Json) => { nodes.push(plan['Node Type']); for (const child of plan.Plans ?? []) walk(child); };
+      walk((await a.query(`EXPLAIN (FORMAT JSON) ${fill[3]}`)).rows[0]['QUERY PLAN'][0].Plan);
+      assert.deepEqual(nodes.filter(node => /Nested Loop|Merge Join/.test(node)), [], 'Memberships and contacts are joined by hash.');
+      await a.query(fill[3]!);
+      await a.query('COMMIT');
+    } catch (cause) { await a.query('ROLLBACK').catch(() => {}); throw cause; }
+    await exactly(db, key, list.id, { total: 2, subscribed: 1, unsubscribed: 1 }, 'filled while writes landed');
+    const filled = await keptCounts(db, list.id);
+    await db.query('BEGIN');
+    try { for (const statement of fill) await db.query(statement); await db.query('COMMIT'); } catch (cause) { await db.query('ROLLBACK').catch(() => {}); throw cause; }
+    assert.deepEqual(await keptCounts(db, list.id), filled, 'A second fill stores nothing for a list that is already right.');
+    // 405's lock: asked for 2 s at a time. A writer's open transaction makes the first attempt give up; a write that
+    // queued behind that attempt goes ahead when it does; the next attempt gets the lock once the writer has committed.
+    const [lock] = /DO \$\$[\s\S]*?END \$\$;/.exec(await source('405_audience_list_counts.sql')) ?? [];
+    assert.ok(lock, 'Migration 405 begins by taking its lock in a retry loop.');
+    for (const session of [a, b, db]) await session.query('SET statement_timeout = 0');
+    await b.query('BEGIN'); await b.query('UPDATE audience_contacts SET updated_at=updated_at WHERE id=$1', [people[3].id]);
+    const writer = setTimeout(() => { void b.query('COMMIT'); }, 2400);
+    try {
+      await a.query('BEGIN');
+      const started = Date.now(), locking = a.query(lock);
+      await waitingOnLock(db, 'LOCK TABLE audience_contacts');
+      // Behind the migration's pending lock, another write waits only until that attempt gives up, not for the writer ahead of it.
+      await db.query('UPDATE audience_contacts SET updated_at=updated_at WHERE id=$1', [people[2].id]);
+      const queued = Date.now() - started;
+      assert.ok(queued < 2800, `A write behind the pending lock waited ${queued} ms.`);
+      await locking;
+      assert.ok(Date.now() - started >= 2400, 'The lock was granted only after the writer committed.');
+      // With the lock held to COMMIT, reads go on; nothing else in the migration reads these tables.
+      assert.deepEqual(ok(await http('GET', `/v1/lists/${list.id}`, key.secret)).counts, { ...NO_MEMBERS, total: 2, subscribed: 1, unsubscribed: 1 });
+      assert.equal(page(await http('GET', `/v1/lists/${list.id}/members`, key.secret)).length, 2);
+    } finally { clearTimeout(writer); await a.query('ROLLBACK').catch(() => {}); await b.query('COMMIT').catch(() => {}); }
+  });
+
+  test('list counts: a session whose first writes were one row each counts 20,000 members, their consent and their removal in time with the rows, not with their square', async t => {
+    // PL/pgSQL keeps a statement's first plan for the session. Planned on small tables, a lookup the planner can answer
+    // from two indexes took the one that reads a whole workspace per row: 50,000 members in one statement then ran
+    // minutes. Each statement here has this session's 5 s limit.
+    const db = await fixtureDatabase(t), wid = unique('wide-workspace'), tag = unique('wide');
+    const list = unique('lst'), n = 20_000, kept = () => keptCounts(db, list);
+    try {
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)', [wid]);
+      await db.query('INSERT INTO audience_lists(id,workspace_id,name) VALUES($1,$2,$1)', [list, wid]);
+      const add = (from: number, to: number) => db.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email) SELECT 'con_'||md5($3||i),$1,$3||i||'@example.com' FROM generate_series($4::int,$5::int) i RETURNING id)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM c`, [wid, list, tag, from, to]);
+      const all = (statement: string) => db.query(statement, [wid, n]);
+      // One row through each trigger first, so this session has its plans.
+      await add(0, 0); await all(`UPDATE audience_contacts SET marketing_consent='subscribed' WHERE workspace_id=$1 AND $2>0`);
+      await db.query('DELETE FROM audience_list_members WHERE workspace_id=$1', [wid]); await db.query(`UPDATE audience_contacts SET deleted_at=now() WHERE workspace_id=$1`, [wid]);
+      await add(1, n);
+      assert.deepEqual([(await kept()).total, (await kept()).unknown], [n, n]);
+      await all(`UPDATE audience_contacts SET marketing_consent='subscribed' WHERE workspace_id=$1 AND $2>0 AND deleted_at IS NULL`);
+      assert.deepEqual([(await kept()).total, (await kept()).subscribed], [n, n]);
+      await db.query(`DELETE FROM audience_list_members WHERE workspace_id=$1 AND contact_id IN (SELECT 'con_'||md5($2||i) FROM generate_series(1,$3::int/2) i)`, [wid, tag, n]);
+      assert.deepEqual([(await kept()).total, (await kept()).subscribed], [n / 2, n / 2]);
+      await all(`UPDATE audience_contacts SET deleted_at=now() WHERE workspace_id=$1 AND $2>0 AND deleted_at IS NULL`);
+      assert.equal((await kept()).total, 0);
+      assert.deepEqual((await db.query('SELECT * FROM reconcile_audience_list_counts($1,$2)', [wid, list])).rows, []);
+    } finally {
+      for (const table of ['audience_list_members', 'audience_lists', 'audience_contacts', 'audience_list_counts']) await db.query(`DELETE FROM ${table} WHERE workspace_id=$1`, [wid]);
+      await db.query('DELETE FROM workspaces WHERE id=$1', [wid]).catch(() => {});
+    }
+  });
+
+  test('a list\'s page is read through its memberships, and a search for one whole address is that contact', async t => {
+    const key = await keyFixture(t), tag = unique('find');
+    const empty = await resource(t, key.secret, '/v1/lists', { name: unique('empty') }), list = await resource(t, key.secret, '/v1/lists', { name: unique('searched') });
+    const ids = async (path: string) => page(await http('GET', path, key.secret)).map(row => row.id).sort();
+    // An empty list's page, however it is filtered (the page a new list opens on read every contact of the workspace).
+    for (const query of ['', '?consent=unknown', '?suppressed=true', `?search=${tag}`]) assert.deepEqual(await ids(`/v1/lists/${empty.id}/members${query}`), [], query);
+    assert.deepEqual(await ids(`/v1/contacts?listId=${empty.id}`), []);
+    const ann = await resource(t, key.secret, '/v1/contacts', { email: `${tag}@example.com` }), joann = await resource(t, key.secret, '/v1/contacts', { email: `jo${tag}@example.com` });
+    const named = await resource(t, key.secret, '/v1/contacts', { email: address(), name: `Forwarded for ${tag}@example.com` });
+    assert.equal(ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [ann.id, joann.id] })).added, 2);
+    // Part of an address or a name: a substring of either, as before.
+    assert.deepEqual(await ids(`/v1/contacts?search=${tag.toUpperCase()}`), [ann.id, joann.id, named.id].sort());
+    assert.deepEqual(await ids(`/v1/lists/${list.id}/members?search=${tag}`), [ann.id, joann.id].sort());
+    assert.deepEqual(await ids(`/v1/contacts?search=${encodeURIComponent(`${tag}@example`)}`), [ann.id, joann.id, named.id].sort());
+    // One whole address, in any case: that contact, not every address or name that contains it.
+    assert.deepEqual(await ids(`/v1/contacts?search=${encodeURIComponent(ann.email.toUpperCase())}`), [ann.id]);
+    assert.deepEqual(await ids(`/v1/contacts?search=${encodeURIComponent(` ${joann.email} `)}`), [joann.id]);
+    assert.deepEqual(await ids(`/v1/contacts?search=${encodeURIComponent(`nobody-${tag}@example.com`)}`), []);
+    assert.deepEqual(await ids(`/v1/lists/${list.id}/members?search=${encodeURIComponent(ann.email)}`), [ann.id]);
+    assert.deepEqual(await ids(`/v1/contacts?listId=${empty.id}&search=${encodeURIComponent(ann.email)}`), []);
+    assert.deepEqual(await ids(`/v1/lists/${list.id}/members?search=${encodeURIComponent(named.email)}`), []);
+    // A small list's filters and pages, through its memberships.
+    ok(await consent(key.secret, joann.id, 'subscribed'));
+    assert.deepEqual(await ids(`/v1/lists/${list.id}/members?consent=subscribed`), [joann.id]);
+    assert.deepEqual(await ids(`/v1/contacts?listId=${list.id}&consent=unknown&suppressed=false`), [ann.id]);
+    const firstPage = await http('GET', `/v1/lists/${list.id}/members?limit=1&search=${tag}`, key.secret), [lower] = [ann.id, joann.id].sort();
+    assert.deepEqual([page(firstPage).map(row => row.id), firstPage.body.nextCursor], [[lower], lower]);
+    assert.deepEqual(await ids(`/v1/lists/${list.id}/members?limit=1&search=${tag}&cursor=${firstPage.body.nextCursor}`), [[ann.id, joann.id].sort()[1]]);
+    assert.deepEqual(page(await http('GET', `/v1/lists/${list.id}/members`, key.secret)).map(row => row.listIds), [[list.id], [list.id]]);
   });
 });
 
@@ -22435,6 +22961,71 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.ok([...tags.values()].every(n=>n===1) && tags.size===50,'every email reached SES at most once');
     });
   });
+  test('MX: a list\'s counts follow a bounce on either feedback path, an operator\'s lift and a footer opt-out', async t => {
+    // The writers of a contact's suppression and consent that no dashboard request reaches: the SES feedback batch
+    // (sending.ts), the feedback job (operations.ts), scripts/lift-suppression.ts and recordUnsubscribe.
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const [{ ingestFeedbackBatch, operationJobs }, { liftSuppression }, { recordUnsubscribe }] = await Promise.all([import('./src/operations.js'), import('./scripts/lift-suppression.js'), import('./src/audience.js')]);
+      const wid = runtime.config.workspaceId, account = '111122223333', topicArn = `arn:aws:sns:${REGION}:${account}:fixture`;
+      const list = ok(await local('POST', '/v1/lists', { name: 'Counted' }), 201), people: Json[] = [], sent: Json[] = [];
+      for (let i = 0; i < 4; i++) {
+        const contact = ok(await local('POST', '/v1/contacts', { email: address() }), 201);
+        ok(await local('POST', `/v1/contacts/${contact.id}/consent`, { status: 'subscribed' })); people.push(contact);
+      }
+      assert.equal(ok(await local('POST', `/v1/lists/${list.id}/members`, { contactIds: people.map(person => person.id) })).added, 4);
+      for (const person of people.slice(0, 2)) sent.push(ok(await local('POST', '/v1/emails/send', mail({ to: person.email })), 202));
+      // One email to two people who are in no list, for the last step: its address order is the reverse of SES's.
+      const tag = unique('pair'), [early, late] = [`a-${tag}@example.com`, `z-${tag}@example.com`];
+      const both = ok(await local('POST', '/v1/emails/send', mail({ to: late, cc: [early] })), 202);
+      runtime.config.multiTenant = true;
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`, [REGION, account, topicArn]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, account]);
+      const counts = async (expected: Partial<ListCounts>, label: string) => {
+        const shown = ok(await local('GET', `/v1/lists/${list.id}`)).counts;
+        assert.deepEqual([shown, shown], [await countedMembers(db, list.id), { ...NO_MEMBERS, ...expected }], label);
+        assert.deepEqual((await db.query('SELECT * FROM reconcile_audience_list_counts($1,$2)', [wid, list.id])).rows, [], `${label}: a recount has nothing to correct`);
+      };
+      await counts({ total: 4, subscribed: 4 }, 'four subscribers');
+      for (const [i, path] of (['batch', 'job'] as const).entries()) {
+        const provider = unique('fixture-provider');
+        await db.query(`UPDATE sending_emails SET status='accepted',provider_id=$2,simulated=false,feedback_topic_arn=$3 WHERE id=$1`, [sent[i]!.id, provider, topicArn]);
+        const item = { topicArn, region: REGION, messageId: unique('sns'), message: { eventType: 'Bounce', mail: { messageId: provider, sendingAccountId: account }, bounce: { bounceType: 'Permanent', bounceSubType: 'General', bouncedRecipients: [{ emailAddress: people[i]!.email }] } } };
+        if (path === 'batch') assert.deepEqual(await ingestFeedbackBatch(runtime, [item]), [{ ok: true }]);
+        else {
+          await db.query('INSERT INTO operation_sns_receipts(topic_arn,message_id,workspace_id) VALUES($1,$2,$3)', [topicArn, item.messageId, wid]);
+          await operationJobs['operation.ses']!(runtime, item, { id: unique('job'), attempts: 1, workspaceId: wid });
+        }
+        await counts({ total: 4, subscribed: 3 - i, suppressed: 1 + i }, `a bounce through the feedback ${path}`);
+      }
+      const savepoint = async <T,>(work: () => Promise<T>) => {
+        await db.query('SAVEPOINT lift');
+        try { const result = await work(); await db.query('RELEASE SAVEPOINT lift'); return result; } catch (error) { await db.query('ROLLBACK TO SAVEPOINT lift'); throw error; }
+      };
+      await liftSuppression(db, [wid, people[0]!.email, '--reason', 'The mailbox exists now'], () => ({ account: async () => account, get: async () => null, remove: async () => false }), savepoint);
+      await counts({ total: 4, subscribed: 3, suppressed: 1 }, 'the first bounce lifted by an operator');
+      assert.deepEqual(await recordUnsubscribe(runtime, wid, people[2]!.email, 'footer-confirm'), { contactId: people[2]!.id, changed: true });
+      await counts({ total: 4, subscribed: 2, unsubscribed: 1, suppressed: 1 }, 'a footer opt-out');
+      // An opt-out from someone who is not a contact creates the contact, in no list.
+      assert.equal((await recordUnsubscribe(runtime, wid, address(), 'rfc8058-post')).changed, true);
+      await counts({ total: 4, subscribed: 2, unsubscribed: 1, suppressed: 1 }, 'an opt-out from a stranger');
+      // One bounce for two recipients, listed by SES in the reverse of their email order: the feedback job suppresses
+      // them in email order, the order imports, the feedback batch and lockContacts take contacts in, so it cannot
+      // deadlock with someone adding both to a list.
+      const provider = unique('fixture-provider');
+      await db.query(`UPDATE sending_emails SET status='accepted',provider_id=$2,simulated=false,feedback_topic_arn=$3 WHERE id=$1`, [both.id, provider, topicArn]);
+      const bounce = { topicArn, region: REGION, messageId: unique('sns'), message: { eventType: 'Bounce', mail: { messageId: provider, sendingAccountId: account }, bounce: { bounceType: 'Permanent', bounceSubType: 'General', bouncedRecipients: [{ emailAddress: late }, { emailAddress: early }] } } };
+      await db.query('INSERT INTO operation_sns_receipts(topic_arn,message_id,workspace_id) VALUES($1,$2,$3)', [topicArn, bounce.messageId, wid]);
+      const query = t.mock.method(db, 'query'), suppressed: string[] = [];
+      try { await operationJobs['operation.ses']!(runtime, bounce, { id: unique('job'), attempts: 1, workspaceId: wid }); }
+      finally {
+        for (const call of query.mock.calls) { const [first, second] = call.arguments as unknown as [any, any], text = String(first?.text ?? first), values = (first?.values ?? second ?? []) as unknown[];
+          if (text.includes('INSERT INTO audience_contacts AS c')) suppressed.push(...values.filter((value): value is string => value === early || value === late)); }
+        query.mock.restore();
+      }
+      assert.deepEqual(suppressed, [early, late]);
+    });
+  });
+
   test('MX: a queue redelivery suppresses after a recovery job stored the bounce and died before suppressing', async t => {
     // tear witness (api/tear/ses): h b1, accept e1, J b1, J go, J crash, q b1.
     await simulatedSesFixture(t,async ({runtime,local,db})=>{
@@ -22831,7 +23422,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         mail_receipts: ["INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,notification,recipients,status,processed_at,created_at) SELECT p.wid,'mr_'||p.tag||p.day||'x'||i,p.region,p.wid,'key','{}','[]','processed',now()-interval '31 days'-make_interval(days=>p.day),now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM mail_receipts,p WHERE starts_with(ses_message_id,'mr_'||p.tag)"],
         mail_receipt_holds: ["INSERT INTO mail_receipt_holds(bucket,ses_message_id,region,topic_arn,owners,recipients,notification,received_at,expires_at,status) SELECT p.wid,'mh_'||p.tag||p.day||'x'||i,p.region,'topic','{}','[]','{}',now(),now()-interval '31 days'-make_interval(days=>p.day),'released' FROM p,g","SELECT count(*) FROM mail_receipt_holds,p WHERE starts_with(ses_message_id,'mh_'||p.tag)"],
         mailbox_events: ["INSERT INTO mailbox_events(workspace_id,type,data,created_at) SELECT p.wid,'fixture.retention',jsonb_build_object('tag',p.tag),now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM mailbox_events,p WHERE data->>'tag'=p.tag"],
-        mail_ignored_staging: ["INSERT INTO mail_ignored_staging(bucket,ses_message_id,created_at) SELECT p.wid,'mi_'||p.tag||p.day||'x'||i,now()-interval '73 hours'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM mail_ignored_staging,p WHERE starts_with(ses_message_id,'mi_'||p.tag)"],
+        mail_ignored_staging: ["INSERT INTO mail_ignored_staging(bucket,ses_message_id,created_at) SELECT p.wid,'mi_'||p.tag||p.day||'x'||i,now()-interval '121 hours'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM mail_ignored_staging,p WHERE starts_with(ses_message_id,'mi_'||p.tag)"],
         mailbox_webhook_deliveries_paused_expired: ["INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,payload,status,created_at) SELECT 'mwdp_'||p.tag||p.day||'x'||i,p.wid,'mwh_'||p.tag,'{}','paused',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM mailbox_webhook_deliveries,p WHERE starts_with(id,'mwdp_'||p.tag) AND status='paused'"],
         mailbox_webhook_deliveries: ["INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,payload,status,created_at) SELECT 'mwd_'||p.tag||p.day||'x'||i,p.wid,'mwh_'||p.tag,'{}','delivered',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM mailbox_webhook_deliveries,p WHERE starts_with(id,'mwd_'||p.tag)"],
         sender_score_daily: ["INSERT INTO sender_score_daily(workspace_id,day) SELECT p.wid,(now() AT TIME ZONE 'UTC')::date-401-p.day*5-i FROM p,g","SELECT count(*) FROM sender_score_daily s,p WHERE s.workspace_id=p.wid AND s.day<(now() AT TIME ZONE 'UTC')::date-400"],
@@ -25776,6 +26367,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const wid = runtime.config.workspaceId, platform = unique('platform'), pool = '111122223333';
     Object.assign(runtime.config, { multiTenant: true, platformDomainWorkspace: platform, notifyFrom: 'notices@platform.example' });
     await db.query(`INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)`, [platform]);
+    // The name the emails show: a few plain words (notices.ts shownName).
+    const name = 'Driftwood & Co';
+    await db.query('UPDATE workspaces SET name=$2 WHERE id=$1', [wid, name]);
     await db.query(`INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) SELECT $1,'install_'||md5($1),default_region,enabled_regions FROM ses_installation_settings WHERE workspace_id=$2`, [platform, wid]);
     await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
     for (const id of [wid, platform]) await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [id, REGION, pool]);
@@ -25784,14 +26378,14 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const seen = new Set<string>();
     const sent = async () => (await db.query(`SELECT id,from_address,snapshot->>'fromName' AS from_name,to_addresses,subject,snapshot->>'text' AS text,snapshot->>'html' AS html,snapshot->>'kind' AS kind FROM sending_emails WHERE workspace_id=$1 ORDER BY id`, [platform])).rows;
     const fresh = async () => { const out = (await sent()).filter(r => !seen.has(r.id)); for (const r of out) seen.add(r.id); return out; };
-    return { wid, platform, pool, sent, fresh };
+    return { wid, name, platform, pool, sent, fresh };
   }
   // What no account email may print: a rate, a threshold, a provider's name, an error code.
   const HOW_IT_WORKS = /\d\s*%|line is|threshold|\bSES\b|AWS|Amazon|Stripe|\b[A-Z]{3,}_[A-Z_]+\b/;
 
   test('owner notices: a standing change emails owners and admins once, from the platform workspace, in plain words with no rates, thresholds or provider names', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
-      const { wid, platform, pool, sent: emails } = await noticeFixture(runtime, db);
+      const { wid, name, platform, pool, sent: emails } = await noticeFixture(runtime, db);
       const { applyChange, notifyJob } = await import('./src/standing.js');
       const reasons = [{ code: 'COMPLAINTS_WARN', metric: 'complaints' as const, value: 0.002, count: 2, threshold: 0.0005, minimum: 2, window: '24h' as const, step: 'warn' as const, message: '2 of 1,000 accepted emails were marked as spam in 24 hours (0.2%; the warn line is 0.05% and 2).' }];
       const change = await runtime.db.transaction(tx => applyChange(tx, { workspaceId: wid, actor: { kind: 'system' }, kind: 'step', step: 'warn', reasons }));
@@ -25800,7 +26394,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       for (let i = 0; i < 2; i++) await notifyJob(runtime, job[0].payload, { id: job[0].id, attempts: 1, workspaceId: wid });
       const sent = await emails();
       assert.deepEqual(sent.map(r => [r.from_name, r.from_address, r.to_addresses, r.kind]), [['Nightmail', 'notices@platform.example', [AUTH_EMAIL], 'transactional']], 'One email per owner, deduplicated on retry.');
-      assert.equal(sent[0].subject, `A warning about mail from ${wid}`);
+      assert.equal(sent[0].subject, `A warning about mail from ${name}`);
       // Review of #115: the notices were admitted but always canceled at dispatch (ORIGIN_KEY_REVOKED). They now dispatch
       // under their own narrow origin; a forged one (an event that does not exist) is still canceled.
       await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
@@ -25811,7 +26405,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.ok(['accepted', 'sent', 'delivered'].includes(outcome.notice[0]) && outcome.notice[1] === null, JSON.stringify(outcome));
       assert.deepEqual(outcome.forged, ['canceled', 'ORIGIN_KEY_REVOKED']);
       // What happened, what it means for mail now and the one thing to do, with one link; the same words in both parts.
-      for (const part of [`There is a problem with recent mail from ${wid}.`, 'Nothing is held and your mail still sends', `\nOpen the dashboard: ${PUBLIC_ORIGIN}/overview\n`, `sent this to the owners and admins of ${wid}`]) assert.ok(sent[0].text.includes(part), part);
+      for (const part of [`There is a problem with recent mail from ${name}.`, 'Nothing is held and your mail still sends', `\nOpen the dashboard: ${PUBLIC_ORIGIN}/overview\n`, `sent this to the owners and admins of ${name}`]) assert.ok(sent[0].text.includes(part), part);
       assert.ok(sent[0].html.includes('There is a problem with recent mail from ') && sent[0].html.includes(`href="${PUBLIC_ORIGIN}/overview"`), 'The HTML part carries the same words and link.');
       assert.equal(sent[0].text.match(/https?:\/\//g)!.length, 1, 'One link.');
       // The reason's numbers stay in the dashboard: an email never says how a check works.
@@ -25831,7 +26425,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
 
   test('owner notices: one problem sends its most serious email only, a pause that was told is told when it ends, and a retry or an earlier build\'s send is never a second email', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
-      const { wid, platform, fresh } = await noticeFixture(runtime, db);
+      const { wid, name, platform, fresh } = await noticeFixture(runtime, db);
       const { applyChange, notifyJob } = await import('./src/standing.js'), { JobDeferred } = await import('./src/jobs.js');
       const reasons = (step: 'warn' | 'restrict' | 'pause') => [{ code: 'BOUNCES', metric: 'bounces' as const, value: 0.05, count: 60, threshold: 0.04, minimum: 25, window: '24h' as const, step, message: '60 of 1,200 emails hard-bounced in 24 hours (5%; the line is 4% and 25).' }];
       const change = (c: Omit<Parameters<typeof applyChange>[1], 'workspaceId' | 'actor'>) => runtime.db.transaction(tx => applyChange(tx, { workspaceId: wid, actor: { kind: 'system' }, ...c }));
@@ -25856,7 +26450,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await change({ kind: 'quarantine', details: campaign });
       await change({ kind: 'step', step: 'restrict', reasons: reasons('restrict') });
       assert.deepEqual(await deliver(), [false, true]);
-      assert.deepEqual(await subjects(), [`Marketing mail is on hold for ${wid}`]);
+      assert.deepEqual(await subjects(), [`Marketing mail is on hold for ${name}`]);
 
       // A warning and a campaign's pause: both wait, and the campaign's is the one sent.
       await reset();
@@ -25877,7 +26471,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await change({ kind: 'step', step: 'warn', reasons: reasons('warn') });
       await change({ kind: 'step', step: 'pause', pause: { message: 'Hosted sending paused.' }, reasons: reasons('pause') });
       assert.deepEqual(await deliver(), [false, true]);
-      assert.deepEqual(await subjects(), [`Sending is paused for ${wid}`]);
+      assert.deepEqual(await subjects(), [`Sending is paused for ${name}`]);
       await change(resume);
       // While its SES tenants are still being enabled sending is not on yet: the email waits.
       const [resumed] = (await db.query(`SELECT id,payload FROM jobs WHERE workspace_id=$1 AND type='standing.notify' AND status='pending'`, [wid])).rows;
@@ -25887,7 +26481,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await db.query(`UPDATE provider_connections SET paused_at=NULL,pause_reason=NULL,resume_pending_at=NULL WHERE workspace_id=$1`, [wid]);
       assert.deepEqual(await deliver(), [false]);
       const [again] = await fresh();
-      assert.equal(again.subject, `Sending has resumed for ${wid}`);
+      assert.equal(again.subject, `Sending has resumed for ${name}`);
       assert.match(again.text, /Sending from .* is on again\..*and new mail goes out again\. For now the daily limit may be lower than before\.\n\nThe dashboard shows the limit\.\n/s);
       // A second pause inside the day is not emailed (once per step in 24 hours), so its end is not either.
       await change({ kind: 'step', step: 'pause', pause: { message: 'Hosted sending paused.' }, reasons: reasons('pause') });
@@ -25923,9 +26517,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
-  test('account notices: an invitation, the daily limit, the evaluation\'s end, a lost domain and a waitlist admission are each emailed once; what no longer holds, an exempt workspace and a used-up invitation allowance send nothing; a send that fails is retried and ends failed after its last attempt', async t => {
+  test('account notices: an invitation (only from a workspace with a verified domain or past its evaluation, in fixed words that name the inviter by address and not the workspace), the daily limit, the evaluation\'s end, a lost domain and a waitlist admission are each emailed once; what no longer holds, an exempt workspace and a used-up invitation allowance send nothing; a send that fails is retried and ends failed after its last attempt', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
-      const { wid, platform, pool, fresh } = await noticeFixture(runtime, db);
+      const { wid, name, platform, pool, fresh } = await noticeFixture(runtime, db);
       const { accountNotifyJob, domainUnverified, evaluationFinished, limitReached, waitlistAdmitted, INVITATION_EMAILS } = await import('./src/account-notices.js');
       const { ApiError } = await import('./src/core.js'), { JobDeferred, MAX_ATTEMPTS } = await import('./src/jobs.js');
       const { applyChange } = await import('./src/standing.js');
@@ -25938,21 +26532,90 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const notices = async (kind: string) => (await db.query(`SELECT count(*)::int AS n FROM account_notices WHERE workspace_id=$1 AND kind=$2`, [wid, kind])).rows[0].n;
       const invite = async (email: string) => ok(await local('POST', '/v1/workspaces/current/invitations', { email, role: 'admin' }), 201);
 
+      // A workspace with no verified domain that has not finished its evaluation emails nobody: the invitation is made,
+      // the inviter is told why and shares its link, and no allowance is spent.
+      const allowances = async () => (await db.query(`SELECT count(*)::int AS n FROM api_request_budgets WHERE key_id LIKE 'invitation-email%'`)).rows[0].n;
+      const early = await invite('early@elsewhere.example');
+      assert.deepEqual([early.emailed, early.notEmailedReason], [false, 'new_workspace']);
+      assert.match(early.nextStep, /^No email was sent: Nightmail emails invitations once this workspace has a verified domain or has finished its evaluation\. Share acceptUrl with early@elsewhere\.example yourself/);
+      assert.deepEqual([await notices('invitation'), await allowances(), await deliver()], [0, 0, []]);
+      // One with a verified domain does (one past its evaluation: below, where its standing is set).
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ('team.example',$1,$1,'verified')`, [wid]);
+
+      // An invitation goes to an address outside the workspace from this installation's own sender, and the names
+      // around it are the inviting account's to choose. So every word of it is fixed: the inviter is their verified
+      // address and nothing else, and the workspace is not named (the page its link opens names it).
+      const { rows: [inviter] } = await db.query('SELECT name FROM nightmail_users WHERE email=$1', [AUTH_EMAIL]);
+      const rename = async (workspace: string, inviter: string) => { await db.query('UPDATE workspaces SET name=$2 WHERE id=$1', [wid, workspace]); await db.query('UPDATE nightmail_users SET name=$2 WHERE email=$1', [AUTH_EMAIL, inviter]); };
+      const literal = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      for (const [i, [workspace, inviter]] of ([
+        ['ACTION REQUIRED: your domain is suspended, restore it at nightmail-dev.example.com/restore', 'Nightmail Security Team (security@nightmail.dev)'],
+        ['Verify now → https://nightmail.dev.evil.example/login\r\nBcc: victim@elsewhere.example', 'support@nightmail.dev'],
+        ['Call 1 800 555 0199 about your invoice', 'Nightmail <no-reply@nightmail.dev>'],
+        ['nightmail-dev\ua4f8example\ua4f8com nightmail-dev\u0660example\u0660com', 'Billing'],
+        ['W'.repeat(120), 'Quagga '.repeat(14)],
+      ] as const).entries()) {
+        await rename(workspace, inviter);
+        const made = await invite(`named-${i}@elsewhere.example`);
+        assert.equal(made.emailed, true);
+        assert.deepEqual(await deliver(), ['invitation:sent']);
+        const [mail] = await fresh();
+        assert.deepEqual([mail.subject, mail.from_name, mail.to_addresses], ['You are invited to a Nightmail workspace', 'Nightmail', [`named-${i}@elsewhere.example`]]);
+        assert.match(mail.text, new RegExp(`^${literal(`${AUTH_EMAIL} invited you to join a workspace on Nightmail as an admin.\n\nThe invitation is for this address only and expires on `)}[A-Z][a-z]{2} \\d{1,2}${literal(`.\n\nTo accept, sign in with this address.\n\nAccept the invitation: ${made.acceptUrl}\n\nNightmail sent this because ${AUTH_EMAIL} entered your address. If you were not expecting it, ignore it: nothing happens unless you accept.\n`)}$`));
+        // The HTML part says the same words and has one link.
+        const words = mail.html.replace(/<style>.*?<\/style>/s, '').replace(/<[^>]*>/g, '\n').split('\n').map((line: string) => line.trim()).filter(Boolean);
+        assert.deepEqual(words, ['You are invited to a Nightmail workspace', ...mail.text.trim().split(/\n+/).map((line: string) => line.replace(`Accept the invitation: ${made.acceptUrl}`, 'Accept the invitation'))]);
+        assert.deepEqual(mail.html.match(/href="[^"]*"/g), [`href="${made.acceptUrl.replaceAll('&', '&amp;')}"`]);
+      }
+      // The emails a workspace's own owners and admins get do name it, and a campaign: as a few plain words. Nothing
+      // that reads as an address, a URL or a host, each word in one writing system, no phone number, 40 characters.
+      const { customerNotice: written, shownName } = await import('./src/notices.js');
+      for (const [chosen, shown] of [
+        ['ACTION REQUIRED: your domain is suspended, restore it at nightmail-dev.example.com/restore', 'ACTION REQUIRED your domain is suspended…'],
+        ['Verify now → https://nightmail.dev.evil.example/login\r\nBcc: victim@elsewhere.example', 'Verify now Bcc'],
+        ['ｎｉｇｈｔｍａｉｌ．ｄｅｖ billing night\u200bmail.dev nightmail\u3002dev \u202egro.liamthgin www.evil.example Nіghtmail <b>team</b>', 'billing b team b'],
+        // Letters and digits of other scripts that draw as a dot or a slash, or as Latin capitals.
+        ['nightmail-dev\ua4f8example\ua4f8com billing', 'billing'], ['nightmail-dev\u0660example\u0660com billing', 'billing'], ['nightmail\ua78fdev com\u30cerestore ok', 'ok'],
+        ['\ua4e0\ua4f2\ua4d6\ua4e7\ua4d4\ua4df\ua4ee\ua4f2\ua4e1 Support', 'Support'],
+        // A phone number, however it is spaced; a few digits are a name's own.
+        ['Call 1 800 555 0199 about your invoice', 'Call about your invoice'], ['Call +1 (800) 555-0199', 'Call'], ['call18005550199now', ''], ['Call ١٨٠٠٥٥٥٠١٩٩', 'Call'],
+        ['Studio 54', 'Studio 54'], ['Acme 2026 Q4', 'Acme 2026 Q4'],
+        // Names as people write them.
+        ["Ryan Vogel's workspace", "Ryan Vogel's workspace"], ['Café Zoë & Søn – Ünïted', 'Café Zoë & Søn Ünïted'], ['Привет мир', 'Привет мир'], ['日本語のチーム', '日本語のチーム'], ['مرحبا بالعالم', 'مرحبا بالعالم'],
+        ['nightmail.dev', ''], ['W'.repeat(120), `${'W'.repeat(40)}…`],
+      ] as const) assert.equal(shownName(chosen), shown, chosen);
+      const pausedCampaign = written(PUBLIC_ORIGIN, { kind: 'campaign_paused', workspace: 'Acme, Inc. (see acme.example)', campaign: { id: 'cmp_1', name: 'Sale\r\nat https://evil.example/now for you@elsewhere.example' } });
+      assert.equal(pausedCampaign.subject, 'The campaign "Sale at for" is paused');
+      assert.ok(pausedCampaign.text.includes('sent this to the owners and admins of Acme Inc see. To reach us'), pausedCampaign.text);
+      assert.equal(written(PUBLIC_ORIGIN, { kind: 'campaign_paused', workspace: 'www.evil.example', campaign: { id: 'cmp_1', name: 'evil.example' } }).subject, 'A campaign is paused');
+      assert.equal(written(PUBLIC_ORIGIN, { kind: 'paused', workspace: 'Call 1 800 555 0199 nightmail-dev\ua4f8example\ua4f8com' }).subject, 'Sending is paused for Call');
+      assert.equal(written(PUBLIC_ORIGIN, { kind: 'paused', workspace: 'www.evil.example' }).subject, 'Sending is paused for your workspace');
+      assert.equal(written(PUBLIC_ORIGIN, { kind: 'domain_unverified', workspace: 'W', domain: { id: 'dom_1', name: 'Mail.Example\r\nBcc: x@y.example' } }).subject, 'A domain is no longer verified');
+      assert.equal(written(PUBLIC_ORIGIN, { kind: 'domain_unverified', workspace: 'W', domain: { id: 'dom_1', name: 'Mail.Example' } }).subject, 'mail.example is no longer verified');
+      // An address every workspace together has mailed five times in a day is not mailed a sixth.
+      await db.query(`UPDATE api_request_budgets SET used=$1 WHERE workspace_id='global' AND key_id LIKE 'invitation-email:%'`, [INVITATION_EMAILS.addressDay]);
+      const sixth = (await db.query(`SELECT id FROM workspace_invitations WHERE workspace_id=$1 AND email='named-0@elsewhere.example' AND status='pending'`, [wid])).rows[0].id;
+      ok(await local('DELETE', `/v1/workspaces/current/invitations?id=${sixth}`));
+      const refused = await invite('named-0@elsewhere.example');
+      assert.deepEqual([refused.emailed, refused.notEmailedReason, await deliver()], [false, 'allowance_used', []]);
+      assert.match(refused.nextStep, /^No email was sent: the invitation emails for today, or to this address, are used\. Share acceptUrl with named-0@elsewhere\.example yourself/);
+      await rename(name, inviter.name);
+
       // An invitation is emailed to the invited address, once, with the link the inviter was given.
       const invited = await invite('teammate@elsewhere.example');
-      assert.equal(invited.emailed, true); assert.match(invited.nextStep, /^teammate@elsewhere\.example was emailed the invitation/);
+      assert.deepEqual([invited.emailed, invited.notEmailedReason], [true, null]); assert.match(invited.nextStep, /^teammate@elsewhere\.example was emailed the invitation/);
       assert.deepEqual(await deliver(), ['invitation:sent']);
       const [invitation] = await fresh();
       assert.deepEqual([invitation.from_address, invitation.to_addresses, invitation.kind], ['notices@platform.example', ['teammate@elsewhere.example'], 'transactional']);
-      assert.match(invitation.subject, new RegExp(` invited you to ${wid} on Nightmail$`));
-      for (const part of [`(${AUTH_EMAIL}) invited you to join the workspace ${wid} on Nightmail as an admin.`, 'The invitation is for this address only and expires on ', `\nAccept the invitation: ${invited.acceptUrl}\n`, 'nothing happens unless you accept']) assert.ok(invitation.text.includes(part), part);
+      assert.equal(invitation.subject, 'You are invited to a Nightmail workspace');
+      for (const part of [`${AUTH_EMAIL} invited you to join a workspace on Nightmail as an admin.\n`, 'The invitation is for this address only and expires on ', `\nAccept the invitation: ${invited.acceptUrl}\n`, `because ${AUTH_EMAIL} entered your address`, 'nothing happens unless you accept']) assert.ok(invitation.text.includes(part), part);
       assert.ok(invitation.html.includes(`href="${invited.acceptUrl.replaceAll('&', '&amp;')}"`));
       // It dispatches under its own origin, as a standing notice does; nothing else may use that origin.
       await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
         SELECT 'email_forged_account_notice',workspace_id,region,'notice:ant_forged',from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated FROM sending_emails WHERE id=$1`, [invitation.id]);
       const { runDispatcher } = await import('./src/dispatcher.js');
       await runDispatcher(runtime, { region: REGION, accountId: pool });
-      const outcome = Object.fromEntries((await db.query(`SELECT id,status,error_code FROM sending_emails WHERE workspace_id=$1`, [platform])).rows.map(r => [r.id === invitation.id ? 'notice' : 'forged', [r.status, r.error_code]]));
+      const outcome = Object.fromEntries((await db.query(`SELECT id,status,error_code FROM sending_emails WHERE workspace_id=$1 AND id=ANY($2)`, [platform, [invitation.id, 'email_forged_account_notice']])).rows.map(r => [r.id === invitation.id ? 'notice' : 'forged', [r.status, r.error_code]]));
       assert.ok(['accepted', 'sent', 'delivered'].includes(outcome.notice[0]) && outcome.notice[1] === null, JSON.stringify(outcome));
       assert.deepEqual(outcome.forged, ['canceled', 'ORIGIN_KEY_REVOKED']);
       await fresh();
@@ -25966,7 +26629,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       for (let i = 0; i < 2; i++) { await revoke(last); last = await invite('teammate@elsewhere.example'); assert.equal(last.emailed, true); assert.deepEqual(await deliver(), ['invitation:sent']); }
       await revoke(last);
       const fourth = await invite('teammate@elsewhere.example');
-      assert.equal(fourth.emailed, false); assert.match(fourth.nextStep, /^No email was sent\./);
+      assert.deepEqual([fourth.emailed, fourth.notEmailedReason], [false, 'allowance_used']); assert.match(fourth.nextStep, /^No email was sent: /);
       // Another address is not held back by it, and the count starts again once the address has accepted an invitation.
       await db.query(`UPDATE workspace_invitations SET status='accepted' WHERE id=$1`, [last.id]);
       await revoke(fourth);
@@ -25976,13 +26639,18 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // The day's allowance: past it the invitation is made as before, and the inviter shares its link.
       await db.query(`UPDATE api_request_budgets SET used=$2 WHERE workspace_id=$1 AND key_id='invitation-email'`, [wid, INVITATION_EMAILS.workspaceDay]);
       const over = await invite('later@elsewhere.example');
-      assert.equal(over.emailed, false); assert.match(over.nextStep, /^No email was sent\. Share acceptUrl with later@elsewhere\.example yourself/);
+      assert.deepEqual([over.emailed, over.notEmailedReason], [false, 'allowance_used']); assert.match(over.nextStep, /^No email was sent: the invitation emails for today, or to this address, are used\. Share acceptUrl with later@elsewhere\.example yourself/);
       // An installation with no sender for account email emails nobody.
       await db.query(`UPDATE api_request_budgets SET used=0 WHERE workspace_id=$1 AND key_id='invitation-email'`, [wid]);
       runtime.config.notifyFrom = undefined;
-      assert.equal((await invite('nobody@elsewhere.example')).emailed, false);
+      const senderless = await invite('nobody@elsewhere.example');
+      assert.deepEqual([senderless.emailed, senderless.notEmailedReason], [false, 'not_available']); assert.match(senderless.nextStep, /^No email was sent\. Share acceptUrl with nobody@elsewhere\.example yourself/);
       runtime.config.notifyFrom = 'notices@platform.example';
-      assert.equal(await notices('invitation'), 5);
+      // Nor does an inviter whose own address is not verified: an invitation names them by it.
+      await db.query('UPDATE nightmail_users SET email_verified=false WHERE email=$1', [AUTH_EMAIL]);
+      assert.equal((await invite('unnamed@elsewhere.example')).notEmailedReason, 'not_available');
+      await db.query('UPDATE nightmail_users SET email_verified=true WHERE email=$1', [AUTH_EMAIL]);
+      assert.equal(await notices('invitation'), 10);
       assert.deepEqual((await fresh()).map(r => r.subject), []);
 
       // The daily limit: a workspace in its evaluation, one with no daily limit and an exempt one are told nothing.
@@ -25993,6 +26661,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await limitReached(runtime, wid);
       }
       assert.equal(await notices('limit_reached'), 0);
+      // Invitations again: without its verified domain, the workspace emails them once it is past its evaluation.
+      await db.query(`UPDATE domain_claims SET sending_state='pending' WHERE workspace_id=$1 AND name='team.example'`, [wid]);
+      await standing("phase='calibrating'");
+      assert.equal((await invite('calibrating@elsewhere.example')).notEmailedReason, 'new_workspace');
+      await standing("phase='graded'");
+      assert.equal((await invite('graded@elsewhere.example')).emailed, true);
+      assert.deepEqual([await deliver(), (await fresh()).map(r => r.to_addresses[0])], [['invitation:sent'], ['graded@elsewhere.example']]);
       // At a daily limit the owners are told, once in 24 hours however often a send is refused.
       await db.query('UPDATE workspaces SET exempt_hosted_quotas=false WHERE id=$1', [wid]);
       for (let i = 0; i < 3; i++) await limitReached(runtime, wid);
@@ -26013,7 +26688,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       failing(false);
       assert.deepEqual(await deliver(), ['limit_reached:sent']);
       const [limit] = await fresh();
-      assert.deepEqual([limit.to_addresses, limit.subject], [[AUTH_EMAIL], `${wid} has reached its daily sending limit`]);
+      assert.deepEqual([limit.to_addresses, limit.subject], [[AUTH_EMAIL], `${name} has reached its daily sending limit`]);
       assert.doesNotMatch(limit.text, /\b500\b/, 'The limit itself is on the dashboard.');
       assert.ok(limit.text.includes('Mail over the limit is refused for now.'), limit.text);
       await db.query(`UPDATE account_notices SET dedupe_key=dedupe_key||':yesterday' WHERE workspace_id=$1 AND kind='limit_reached'`, [wid]);
@@ -26030,7 +26705,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual([await evaluationFinished(runtime.db, wid, false), await evaluationFinished(runtime.db, wid, true)], [true, false]);
       assert.deepEqual(await deliver(), ['evaluation_finished:sent']);
       const [evaluation] = await fresh();
-      assert.equal(evaluation.subject, `${wid} has passed its evaluation`);
+      assert.equal(evaluation.subject, `${name} has passed its evaluation`);
       assert.match(evaluation.text, /so its starting limit is lifted\..*Over the next day the amount grows on its own/s);
       // One that ended with a limit says so; a first-party workspace, which has no limit, is not told at all.
       const { customerNotice } = await import('./src/notices.js');
@@ -27060,6 +27735,376 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual((await queued).rows[0].r,{error:'NOT_FOUND'});
     }finally{await writer.query('ROLLBACK');}
     assert.deepEqual(await state(),before);
+  });
+  test('inbox long-poll and from filter: modseq wake skips idle rescans, catches out-of-order inbox_seq and mutable flags, matches all email forms, and surfaces 422 READ_TOO_LARGE',async t=>{
+    const a=await fixtureDatabase(t),w=unique('pollw'),host=w+'.invalid',dom=unique('mdom'),bid=unique('mbx'),addr='poll@'+host;
+    const {digest,randomSecret}=await import('./src/core.js');
+    const tok=randomSecret('bane_mbx_');
+    cleanup(t,async()=>{for(const tbl of ['mailbox_events','mail_gc_candidates','mail_receipts','mailbox_keys','mailbox_addresses','mailbox_threads','mailbox_messages','mail_messages','mail_threads','mailboxes','mailbox_domains','api_request_budgets','mailbox_write_lanes'])await a.query(`DELETE FROM ${tbl} WHERE workspace_id=$1`,[w]);});
+    await a.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')",[dom,w,host,REGION]);
+    await a.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES($1,$2,$3,$4,'inbox','forever')",[bid,w,dom,addr]);
+    await a.query("INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,$3,'primary')",[w,addr,bid]);
+    await a.query('INSERT INTO inbox_state(inbox_id,workspace_id) VALUES($1,$2)',[bid,w]);
+    await a.query(`INSERT INTO mailbox_keys(id,workspace_id,name,hash,prefix,mailbox_ids,permissions) VALUES($1,$2,'poll',$3,'fixture',jsonb_build_array($4::text),'["read","modify"]')`,[unique('mbk'),w,await digest(tok),bid]);
+    const deliver=async(mid:string,opts:{from?:string;fromName?:string|null;subject?:string;text?:string;read?:boolean;flagged?:boolean}={})=>{
+      const at=new Date().toISOString();
+      await a.query("INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) VALUES($1,$2,$3,'fixture','k',$4,'{}') ON CONFLICT DO NOTHING",[w,mid,REGION,JSON.stringify([addr])]);
+      await a.query("SELECT * FROM mail_store_incoming($1::jsonb,'[]','[]',$2::jsonb,false,false,NULL,NULL)",[JSON.stringify({
+        id:mid,workspace_id:w,ses_message_id:mid,lifecycle:'kept',envelope_to:[addr],direction:'inbound',subject:opts.subject??('Sub '+mid),
+        from_address:(opts.from??'sender@example.invalid').toLowerCase(),from_name:opts.fromName??null,to:[{name:null,address:addr}],cc:[],bcc:[],reply_to:[],references:[],received_at:at,
+        body_truncated:false,snippet:opts.text??mid,text:opts.text??mid,headers:[],size_bytes:128,attachment_count:0,verdicts:{dmarc:'PASS'},spam:false,automated:false,status:'received',
+      }),JSON.stringify([{addr,n:0,valid:true}])]);
+      if(opts.read)await a.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"read":true}'::jsonb)`,[w,bid,mid]);
+      if(opts.flagged)await a.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"flagged":true}'::jsonb)`,[w,bid,mid]);
+    };
+    // 1. Condition (2): Tricky from addresses (display name, plus sign, mixed case, punycode IDN, body/subject-only mention).
+    const mDisp=unique('msg'),mPlus=unique('msg'),mMix=unique('msg'),mIdn=unique('msg'),mBodyOnly=unique('msg'),mOld=unique('msg');
+    await deliver(mDisp,{from:'alice@example.org',fromName:'Alice "The Boss" Smith',subject:'Hello display'});
+    await deliver(mPlus,{from:'user+tag-1@example.org',subject:'Hello plus'});
+    await deliver(mMix,{from:'Mixed.Case@Example.ORG',subject:'Hello case'});
+    await deliver(mIdn,{from:'user@xn--mnchen-3ya.de',subject:'Hello idn'});
+    await deliver(mBodyOnly,{from:'other@example.org',subject:'Mentioning alice@example.org',text:'Body mentions alice@example.org and user+tag-1@example.org'});
+    await deliver(mOld,{from:'old@example.org',subject:'Old already read',read:true});
+    assert.deepEqual(ok(await http('GET',`/v1/inboxes/${bid}/messages?from=alice@example.org`,tok)).data.map((m:Json)=>m.id),[mDisp],'from excludes body/subject-only mentions');
+    assert.deepEqual(ok(await http('GET',`/v1/inboxes/${bid}/messages?from=${encodeURIComponent('user+tag-1@example.org')}`,tok)).data.map((m:Json)=>m.id),[mPlus]);
+    assert.deepEqual(ok(await http('GET',`/v1/inboxes/${bid}/messages?from=MIXED.CASE@EXAMPLE.ORG`,tok)).data.map((m:Json)=>m.id),[mMix]);
+    assert.deepEqual(ok(await http('GET',`/v1/inboxes/${bid}/messages?from=user@xn--mnchen-3ya.de`,tok)).data.map((m:Json)=>m.id),[mIdn]);
+    assert.deepEqual(ok(await http('GET',`/v1/inboxes/${bid}/messages?subjectContains=plus`,tok)).data.map((m:Json)=>m.id),[mPlus]);
+    assert.deepEqual(ok(await http('GET',`/v1/inboxes/${bid}/messages?unread=false`,tok)).data.map((m:Json)=>m.id),[mOld]);
+    // SQL-level verification for quoted local parts, unicode IDN, and group-like display names (never drops true matches).
+    for(const raw of ['"john..doe"@example.org','"user@name"@example.org','user@münchen.de','user@例え.jp']){
+      const hit=(await a.query("SELECT to_tsvector('simple','Subj Display: '||$1||' body') @@ plainto_tsquery('simple',$1) AS ok",[raw.toLowerCase()])).rows[0].ok;
+      assert.equal(hit,true,`plainto_tsquery must match ${raw}`);
+    }
+    // 2. Condition (1): Mutable filter (flagged=true) wakes on the first tick when an OLD message is flagged mid-wait.
+    const waitFlag=http('GET',`/v1/inboxes/${bid}/messages?wait=5&flagged=true`,tok);
+    await new Promise(r=>setTimeout(r,400));
+    await a.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"flagged":true}'::jsonb)`,[w,bid,mOld]);
+    const flagRes=ok(await waitFlag);
+    assert.deepEqual(flagRes.data.map((m:Json)=>m.id),[mOld],'mutable flagged filter catches old message changed during wait');
+    // Mutable filter (unread=true) wakes when an OLD read message is marked unread mid-wait.
+    const cur=(await a.query('SELECT max(inbox_seq)::text s FROM mailbox_messages WHERE mailbox_id=$1',[bid])).rows[0].s;
+    const waitUnread=http('GET',`/v1/inboxes/${bid}/messages?wait=5&unread=true&from=old@example.org`,tok);
+    await new Promise(r=>setTimeout(r,400));
+    await a.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"read":false}'::jsonb)`,[w,bid,mOld]);
+    assert.deepEqual(ok(await waitUnread).data.map((m:Json)=>m.id),[mOld],'mutable unread filter catches old message marked unread during wait');
+    // 3. Condition (1): Out-of-order inbox_seq (lower seq commits AFTER higher seq with higher modseq) is never skipped.
+    const mOob=unique('msg'),tOob=unique('thr');
+    const waitOob=http('GET',`/v1/inboxes/${bid}/messages?wait=5&subjectContains=OutOfOrderNeedle`,tok);
+    await new Promise(r=>setTimeout(r,400));
+    const lowerSeq=Math.max(1,Number(cur)-1);
+    await a.query('INSERT INTO mail_threads(id,workspace_id,subject,message_count,last_message_at) VALUES($1,$2,$3,1,now())',[tOob,w,'OutOfOrderNeedle']);
+    await a.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,subject,from_address,snippet,received_at,lifecycle) VALUES($1,$2,$3,'inbound','OutOfOrderNeedle','oob@example.org','oob',now(),'kept')",[mOob,w,tOob]);
+    await a.query('UPDATE inbox_state SET modseq=modseq+1 WHERE inbox_id=$1 RETURNING modseq',[bid]).then(async r=>{
+      await a.query("INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,read,received_at,inbox_seq,modseq) VALUES($1,$2,$3,$4,'inbound',false,now(),$5,$6)",[bid,mOob,w,tOob,lowerSeq,r.rows[0].modseq]);
+    });
+    assert.deepEqual(ok(await waitOob).data.map((m:Json)=>m.id),[mOob],'lower inbox_seq committing with higher modseq is returned on the next tick');
+    // 4. Condition (1) + (3): Idle wait ticks skip message scans (only check inbox_state.modseq),
+    //    5-second timeout returns 422 READ_TOO_LARGE (never empty 200), and MCP descriptions tell agents how to recover.
+    await simulatedSesFixture(t,async({runtime,local})=>{
+      const sb=ok(await local('POST','/v1/inboxes',{type:'sandbox'}),201);
+      let msgScans=0,gateReads=0;
+      const origQuery=pg.Client.prototype.query;
+      const qSpy=t.mock.method(pg.Client.prototype,'query',function(this:pg.Client,...args:unknown[]){
+        const text=typeof args[0]==='string'?args[0]:(args[0] as {text?:string})?.text??'';
+        if(text.includes('strpos(lower(m.subject)'))msgScans++;
+        else if(text.includes('SELECT s.modseq::text AS state_modseq FROM mailboxes'))gateReads++;
+        return (origQuery as (...a:unknown[])=>unknown).apply(this,args);
+      });
+      try{
+        const idle=ok(await local('GET',`/v1/inboxes/${sb.id}/messages?wait=2&subjectContains=never`));
+        assert.deepEqual(idle,{data:[],cursor:'0',hasMore:false});
+        assert.equal(msgScans,1,'idle wait=2 scans mailbox_messages only on tick 0, not on ticks 1..2');
+        assert.ok(gateReads>=1,'subsequent idle ticks use the O(1) inbox_state.modseq gate');
+      }finally{qSpy.mock.restore();}
+      const origTx=runtime.db.transaction.bind(runtime.db);
+      const txSpy=t.mock.method(runtime.db,'transaction',async()=>{throw Object.assign(new Error('canceling statement due to statement timeout'),{code:'57014'});});
+      try{error(await local('GET',`/v1/inboxes/${sb.id}/messages?subjectContains=slow`),422,'READ_TOO_LARGE');}finally{txSpy.mock.restore();}
+      void origTx;
+      const [{buildMcpCatalog},{createOpenApiApp}]=await Promise.all([import('./src/mcp-catalog.js'),import('./src/app.js')]);
+      const catalog=buildMcpCatalog(await createOpenApiApp());
+      for(const name of ['listInboxMessages','waitForMessage']){
+        const desc=catalog.get(name)!.tool.description??'';
+        assert.match(desc,/READ_TOO_LARGE/,name+' description must explain READ_TOO_LARGE');
+        assert.match(desc,/narrow|cursor/i,name+' description must tell agents to narrow or use cursor');
+      }
+    });
+  });
+  test('mail gateway: IMAP SEARCH bounds to mailbox, uses unkept-append index, and returns 413 SEARCH_LIMIT on timeout',async t=>{
+    const db=await fixtureDatabase(t),rt=fixtureWorker!.runtime,w=unique('gwsrch'),bid=unique('mbx'),kid=unique('app'),dom=unique('mdom');
+    cleanup(t,async()=>{for(const tbl of ['inbox_entries','mailbox_messages','mail_messages','mail_threads','inbox_app_passwords','mailboxes','mailbox_domains'])await db.query(`DELETE FROM ${tbl} WHERE ${tbl==='inbox_entries'||tbl==='inbox_app_passwords'?'inbox_id':'workspace_id'}=$1`,[tbl==='inbox_entries'||tbl==='inbox_app_passwords'?bid:w]);});
+    await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'gwsrch.invalid',$3,'active','store')",[dom,w,REGION]);
+    await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES($1,$2,$3,'box@gwsrch.invalid','inbox','forever')",[bid,w,dom]);
+    await db.query('INSERT INTO inbox_state(inbox_id,workspace_id) VALUES($1,$2)',[bid,w]);
+    await db.query("INSERT INTO inbox_app_passwords(id,inbox_id,name,hash,protocols) VALUES($1,$2,'fixture',$1,ARRAY['imap'])",[kid,bid]);
+    const tid=unique('thr'),m1=unique('msg');
+    await db.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)',[tid,w]);
+    await db.query(`INSERT INTO mail_messages(id,workspace_id,thread_id,direction,subject,from_address,from_name,"to",received_at,lifecycle) VALUES($1,$2,$3,'inbound','Invoice Alpha','billing@vendor.test','Vendor Billing','[{"name":"Ops","address":"ops@gwsrch.invalid"}]'::jsonb,now(),'kept')`,[m1,w,tid]);
+    await db.query("INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,read,received_at,inbox_seq,modseq) VALUES($1,$2,$3,$4,'inbound',false,now(),1,2)",[bid,m1,w,tid]);
+    await db.query("INSERT INTO inbox_entries(inbox_id,role,uid,message_id,modseq,internal_date) VALUES($1,'inbox',7,$2,2,now())",[bid,m1]);
+    const key=randomUUID(),path='/internal/v1/mail';
+    const app=(await import('./src/app.js')).createApp();
+    const call=async(body:Json,dbOverride=rt.db)=>{
+      const raw=JSON.stringify(body),hash=(s:string)=>createHash('sha256').update(s).digest('hex');
+      const ts=String(Math.floor(Date.now()/1000)),scope=hash(kid),dig=hash(raw);
+      const headers={'x-bane-content':dig,'x-bane-timestamp':ts,'x-bane-scope':scope,'x-bane-signature':createHmac('sha256',key).update(['POST',path,ts,dig,scope].join('\n')).digest('hex')};
+      return app.fetch(new Request('http://127.0.0.1'+path,{method:'POST',headers,body:raw}),{...rt,db:dbOverride,config:{...rt.config,mailGatewayToken:key}});
+    };
+    assert.deepEqual(await (await call({op:'subject',kid,folder:'inbox',term:'invoice'})).json(),[7]);
+    assert.deepEqual(await (await call({op:'search',kid,folder:'inbox',field:'from',term:'vendor.test'})).json(),[7]);
+    assert.deepEqual(await (await call({op:'search',kid,folder:'inbox',field:'to',term:'ops@gwsrch'})).json(),[7]);
+    assert.deepEqual(await (await call({op:'subject',kid,folder:'inbox',term:'nomatch'})).json(),[]);
+    // Statement timeout (57014) MUST return 413 SEARCH_LIMIT (not 422, not empty 200 []).
+    const timeoutDb={...rt.db,transaction:async()=>{throw Object.assign(new Error('canceling statement due to statement timeout'),{code:'57014'});}} as unknown as typeof rt.db;
+    for(const body of [{op:'subject',kid,folder:'inbox',term:'slow'},{op:'search',kid,folder:'inbox',field:'from',term:'slow'}]){
+      const res=await call(body,timeoutDb);
+      assert.equal(res.status,413);
+      assert.equal(((await res.json()) as Json).error.code,'SEARCH_LIMIT');
+    }
+  });
+  test('inbox unread counter: every mutation path, concurrent races, NULL fallback, backfill and reconcile stay exact',async t=>{
+    const a=await fixtureDatabase(t),b=await fixtureDatabase(t),w=unique('unreadw'),host=w+'.invalid',dom=unique('mdom');
+    const {readFile}=await import('node:fs/promises');
+    const {attachToMailboxes}=await import('./src/mailbox-store.js');
+    const {reconcileInboxState}=await import('./src/maintenance.js');
+    const {drizzle}=await import('drizzle-orm/node-postgres');
+    const {digest,randomSecret}=await import('./src/core.js');
+    cleanup(t,async()=>{for(const tbl of ['mailbox_events','mail_gc_candidates','mail_receipts','mailbox_keys','mailbox_addresses','mailbox_threads','mailbox_messages','mail_messages','mail_threads','mailboxes','mailbox_domains','api_request_budgets','mailbox_write_lanes'])await a.query(`DELETE FROM ${tbl} WHERE workspace_id=$1`,[w]);});
+    await a.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')",[dom,w,host,REGION]);
+    const exact=async(bid:string)=>Number((await a.query('SELECT count(*)::int n FROM mailbox_messages WHERE mailbox_id=$1 AND NOT read AND held_reason IS NULL',[bid])).rows[0].n);
+    const stored=async(bid:string)=>(await a.query('SELECT unread FROM inbox_state WHERE inbox_id=$1',[bid])).rows[0].unread as number|null;
+    const viewed=async(bid:string)=>Number((await a.query("SELECT (inbox_view(b)->'usage'->>'unread')::int n FROM mailboxes b WHERE b.id=$1",[bid])).rows[0].n);
+    const assertExact=async(bid:string,label:string)=>{const e=await exact(bid),s=await stored(bid),v=await viewed(bid);assert.equal(s,e,`${label}: stored=${s} exact=${e}`);assert.equal(v,e,`${label}: view=${v} exact=${e}`);};
+    // 1. Managed inbox create starts at unread=0 (persistent, quota=10 so we can also test held).
+    const bid=unique('mbx'),addr='main@'+host,tok=randomSecret('bane_mbx_');
+    const created=(await a.query('SELECT create_managed_inbox($1::jsonb) r',[JSON.stringify({
+      wid:w,actor:'actor',admin:true,manageAddress:true,hosted:false,id:bid,
+      input:{type:'persistent',ttlSeconds:86400,graceHours:24,domain:host,localPart:'main',metadata:{},limits:{messages:4,bytes:1048576},send:{enabled:false,perDay:0}},
+      locals:['main'],
+    })])).rows[0].r;
+    assert.equal(created.error,undefined,JSON.stringify(created));
+    assert.equal(created.inbox.usage.unread,0);
+    await assertExact(bid,'after create');
+    await a.query(`INSERT INTO mailbox_keys(id,workspace_id,name,hash,prefix,mailbox_ids,permissions) VALUES($1,$2,'rw',$3,'fixture',jsonb_build_array($4::text),'["read","modify"]')`,[unique('mbk'),w,await digest(tok),bid]);
+    // 2. Inbound delivery + duplicate receipt replay + held delivery.
+    const deliver=async(db:pg.Client,mid:string,opts:{spam?:boolean;ts?:string}={})=>{
+      const at=opts.ts??new Date().toISOString();
+      await db.query("INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) VALUES($1,$2,$3,'fixture','k',$4,'{}') ON CONFLICT DO NOTHING",[w,mid,REGION,JSON.stringify([addr])]);
+      await db.query("SELECT * FROM mail_store_incoming($1::jsonb,'[]','[]',$2::jsonb,false,false,NULL,NULL)",[JSON.stringify({
+        id:mid,workspace_id:w,ses_message_id:mid,lifecycle:'kept',envelope_to:[addr],direction:'inbound',subject:'Sub '+mid,
+        from_address:'sender@example.invalid',to:[{name:null,address:addr}],cc:[],bcc:[],reply_to:[],references:[],received_at:at,
+        body_truncated:false,snippet:mid,headers:[],size_bytes:128,attachment_count:0,verdicts:{dmarc:'PASS'},spam:!!opts.spam,automated:false,status:'received',
+      }),JSON.stringify([{addr,n:0,valid:true}])]);
+    };
+    const m1=unique('msg'),m2=unique('msg'),m3=unique('msg'),m4=unique('msg'),mHeld=unique('msg');
+    await deliver(a,m1); await assertExact(bid,'after delivery 1');
+    await deliver(a,m1); await assertExact(bid,'after duplicate receipt replay');
+    await deliver(a,m2,{spam:true}); await assertExact(bid,'after spam delivery (unheld unread)');
+    await deliver(a,m3);
+    // 3. API read/unread, move, copy (must count once, not twice!), delete to trash, non-final & final expunge, custom folder delete.
+    ok(await http('PATCH',`/v1/inboxes/${bid}/messages/${m1}`,tok,{read:true}));
+    await assertExact(bid,'after API mark read');
+    ok(await http('PATCH',`/v1/inboxes/${bid}/messages/${m1}`,tok,{read:false}));
+    await assertExact(bid,'after API mark unread');
+    // Copy m1 to archive: 2 inbox_entries, still 1 mailbox_messages row -> unread must NOT double!
+    const copied=ok(await http('POST',`/v1/inboxes/${bid}/messages/${m1}/copy`,tok,{folder:'archive'}));
+    await assertExact(bid,'after copy unread message');
+    // Expunge only the archive copy: message still lives in inbox -> unread stays same!
+    ok(await http('DELETE',`/v1/inboxes/${bid}/messages/${m1}?source=archive&uid=${copied.uid}&permanent=true`,tok));
+    await assertExact(bid,'after expunging 1 of 2 copies');
+    // Move m1 to custom folder, then delete custom folder (moves to trash, preserves unread).
+    const fld=ok(await http('POST',`/v1/inboxes/${bid}/folders`,tok,{path:'Custom'}),201);
+    ok(await http('POST',`/v1/inboxes/${bid}/messages/${m1}/move`,tok,{folder:fld.id}));
+    await assertExact(bid,'after move to custom folder');
+    ok(await http('DELETE',`/v1/inboxes/${bid}/folders/${fld.id}`,tok));
+    await assertExact(bid,'after custom folder delete');
+    // Permanent expunge of last copy of m1 removes row and decrements unread.
+    ok(await http('DELETE',`/v1/inboxes/${bid}/messages/${m1}?permanent=true`,tok));
+    await assertExact(bid,'after final expunge of unread');
+    // 4. Thread patch (inbox_patch_thread) marking read/unread.
+    const t3=(await a.query('SELECT thread_id FROM mailbox_messages WHERE mailbox_id=$1 AND message_id=$2',[bid,m3])).rows[0].thread_id as string;
+    await a.query(`SELECT inbox_patch_thread($1,$2,$3,'{"read":true}'::jsonb)`,[w,bid,t3]);
+    await assertExact(bid,'after thread patch read=true');
+    await a.query(`SELECT inbox_patch_thread($1,$2,$3,'{"read":false}'::jsonb)`,[w,bid,t3]);
+    await assertExact(bid,'after thread patch read=false');
+    // 5. IMAP mailgw_mutate (flags) + mailgw_append (unseen & seen).
+    const u3=(await a.query("SELECT uid FROM inbox_entries WHERE inbox_id=$1 AND message_id=$2 AND role='inbox'",[bid,m3])).rows[0].uid;
+    await a.query(`SELECT mailgw_mutate($1,$2,'inbox',NULL,'flags',$3::bigint[],'add','{"read":true}'::jsonb,ARRAY[]::text[])`,[w,bid,[u3]]);
+    await assertExact(bid,'after IMAP mark seen');
+    await a.query(`SELECT mailgw_mutate($1,$2,'inbox',NULL,'flags',$3::bigint[],'remove','{"read":false}'::jsonb,ARRAY[]::text[])`,[w,bid,[u3]]);
+    await assertExact(bid,'after IMAP mark unseen');
+    const appUnseen=unique('msg'),appSeen=unique('msg');
+    await a.query("SELECT mailgw_append($1,$2,'inbox',$3,$4,NULL,'App unseen','a@b.test','hi',now(),64,'local:','k1','{}'::jsonb,ARRAY[]::text[])",[w,bid,appUnseen,unique('thr')]);
+    await assertExact(bid,'after IMAP APPEND unseen');
+    await a.query("SELECT mailgw_append($1,$2,'inbox',$3,$4,NULL,'App seen','a@b.test','hi',now(),64,'local:','k2','{}'::jsonb,ARRAY['\\Seen'])",[w,bid,appSeen,unique('thr')]);
+    await assertExact(bid,'after IMAP APPEND seen');
+    // Quota is 4 messages; we now have 4 (m2, m3, appUnseen, appSeen), so next delivery is held -> unread must NOT increase!
+    await deliver(a,mHeld);
+    assert.equal((await a.query('SELECT held_reason FROM mailbox_messages WHERE mailbox_id=$1 AND message_id=$2',[bid,mHeld])).rows[0].held_reason,'quota');
+    await assertExact(bid,'after held delivery');
+    // Marking a held message read must NOT decrement unread!
+    await a.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"read":true}'::jsonb)`,[w,bid,mHeld]);
+    await assertExact(bid,'after marking held message read');
+    // 6. inbox_adopt + attachToMailboxes (claimUnrouted inbound & outbound read=true).
+    const addrBox=unique('mbx');
+    await a.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind) VALUES($1,$2,$3,$4,'address')",[addrBox,w,dom,'claim@'+host]);
+    await assertExact(addrBox,'after inbox_adopt on new address');
+    const tClaim=unique('thr'),mClaimIn=unique('msg'),mClaimOut=unique('msg');
+    await a.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)',[tClaim,w]);
+    const [inRow]=(await a.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,received_at,size_bytes,spam) VALUES($1,$2,$3,'inbound',now(),50,false) RETURNING *",[mClaimIn,w,tClaim])).rows;
+    const [outRow]=(await a.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,received_at,size_bytes,spam) VALUES($1,$2,$3,'outbound',now(),50,false) RETURNING *",[mClaimOut,w,tClaim])).rows;
+    const drz=drizzle(a);
+    await attachToMailboxes(drz,{workspaceId:w},{...inRow,workspaceId:w,threadId:tClaim,receivedAt:inRow.received_at.toISOString(),sizeBytes:50},[addrBox]);
+    await assertExact(addrBox,'after attachToMailboxes inbound (claimUnrouted)');
+    await attachToMailboxes(drz,{workspaceId:w},{...outRow,workspaceId:w,threadId:tClaim,receivedAt:outRow.received_at.toISOString(),sizeBytes:50},[addrBox]);
+    await assertExact(addrBox,'after attachToMailboxes outbound');
+    // 7. Concurrent races: (a) two readers marking same message read, (b) delivery racing thread mark-all-read, (c) IMAP vs API flags.
+    await a.query('UPDATE mailboxes SET quota_messages=NULL WHERE id=$1',[bid]);
+    await deliver(a,m4);
+    await Promise.all([
+      a.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"read":true}'::jsonb)`,[w,bid,m4]),
+      b.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"read":true}'::jsonb)`,[w,bid,m4]),
+    ]);
+    await assertExact(bid,'after concurrent double mark-read');
+    const mRace=unique('msg'),tRace=(await a.query('SELECT thread_id FROM mailbox_messages WHERE mailbox_id=$1 AND message_id=$2',[bid,m4])).rows[0].thread_id as string;
+    await Promise.all([
+      deliver(a,mRace),
+      b.query(`SELECT inbox_patch_thread($1,$2,$3,'{"read":true}'::jsonb)`,[w,bid,tRace]),
+    ]);
+    await assertExact(bid,'after delivery racing thread mark-all-read');
+    const uRace=(await a.query("SELECT uid FROM inbox_entries WHERE inbox_id=$1 AND message_id=$2 AND role='inbox'",[bid,mRace])).rows[0].uid;
+    await Promise.all([
+      a.query(`SELECT mailgw_mutate($1,$2,'inbox',NULL,'flags',$3::bigint[],'add','{"read":true}'::jsonb,ARRAY[]::text[])`,[w,bid,[uRace]]),
+      b.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"read":false}'::jsonb)`,[w,bid,mRace]),
+    ]);
+    await assertExact(bid,'after concurrent IMAP + API flag toggle');
+    // 8. Pre-backfill NULL fallback (Condition 3) + idempotent re-run of migration 424.
+    await a.query('UPDATE inbox_state SET unread=NULL WHERE inbox_id=$1',[bid]);
+    assert.equal(await stored(bid),null);
+    const liveBefore=await exact(bid);
+    assert.ok(liveBefore>0,'fixture must have unread messages to prove fallback never shows 0');
+    assert.equal(await viewed(bid),liveBefore,'inbox_view falls back to live count while unread IS NULL');
+    const mDuring=unique('msg');
+    await deliver(a,mDuring);
+    assert.equal(await stored(bid),null,'writers leave NULL as NULL until backfill locks the row');
+    assert.equal(await viewed(bid),liveBefore+1,'inbox_view stays exact while mail arrives before backfill');
+    const backfillSql=await readFile(new URL('./migrations/424_inbox_unread_backfill.sql',import.meta.url),'utf8');
+    const bPid=(await b.query('SELECT pg_backend_pid() pid')).rows[0].pid as number;
+    const beforeBid=(await a.query('SELECT max(inbox_id) m FROM inbox_state WHERE inbox_id<$1',[bid])).rows[0].m as string|null ?? '';
+    // Two-session race: writer holds inbox_state FOR UPDATE while backfill starts and blocks on Lock;
+    // backfill must count on a post-lock snapshot (never pre-lock). Verify both read and delivery races.
+    for(const mode of ['read','delivery'] as const){
+      await a.query('UPDATE inbox_state SET unread=NULL WHERE inbox_id=$1',[bid]);
+      await a.query('BEGIN');
+      try{
+        if(mode==='read')await a.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"read":true}'::jsonb)`,[w,bid,mDuring]);
+        else await deliver(a,unique('msg'));
+        const pending=b.query(backfillSql,[beforeBid]);
+        let waiting=false;
+        for(let i=0;i<400&&!waiting;i++){waiting=(await a.query('SELECT wait_event_type FROM pg_stat_activity WHERE pid=$1',[bPid])).rows[0]?.wait_event_type==='Lock';if(!waiting)await new Promise(r=>setTimeout(r,5));}
+        assert.ok(waiting,`backfill must wait on ${mode} writer lock`);
+        await a.query('COMMIT');
+        await pending;
+      }catch(e){await a.query('ROLLBACK');throw e;}
+      await assertExact(bid,`after concurrent ${mode} during backfill`);
+    }
+    for(let pass=0;pass<2;pass++){
+      let cur='';
+      for(;;){const next=(await a.query(backfillSql,[cur])).rows[0].cursor as string|null;if(next===null)break;cur=next;}
+    }
+    await assertExact(bid,'after 2x idempotent backfill');
+    // 9. Scheduled reconcileInboxState corrects drift and reports it loudly.
+    await a.query('UPDATE inbox_state SET unread=unread+7 WHERE inbox_id=$1',[bid]);
+    await a.query("DELETE FROM sending_upload_reconcile WHERE id='inbox-state'");
+    const rec=await reconcileInboxState({...fixtureWorker!.runtime,db:drz},10_000);
+    assert.ok(rec.corrected>=1&&rec.drifted>=1,JSON.stringify(rec));
+    await assertExact(bid,'after reconcileInboxState');
+    // 10. inbox_retention_batch mid-drain keeps unread exact on ended ephemeral inbox.
+    const eph=unique('mbx');
+    await a.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode,expires_at,delete_after) VALUES($1,$2,$3,$4,'inbox','ephemeral',now()-interval '2 hours',now()-interval '1 hour')",[eph,w,dom,'eph@'+host]);
+    await a.query('INSERT INTO inbox_state(inbox_id,workspace_id,messages,unread) VALUES($1,$2,2,2)',[eph,w]);
+    const tEph=unique('thr');await a.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)',[tEph,w]);
+    for(const mid of [unique('msg'),unique('msg')]){
+      await a.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,lifecycle) VALUES($1,$2,$3,'inbound','ephemeral')",[mid,w,tEph]);
+      await a.query("INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,read,received_at) VALUES($1,$2,$3,$4,'inbound',false,now())",[eph,mid,w,tEph]);
+    }
+    await a.query('SELECT inbox_retention_batch(25)');
+    assert.equal((await a.query('SELECT FROM mailboxes WHERE id=$1',[eph])).rowCount,0);
+  });
+  test('inbound threads: workspace-wide and single-address paging match full grouping across multi-address, equal-timestamp and ended-inbox edges',async t=>{
+    await simulatedSesFixture(t,async({db,local,runtime})=>{
+      const w=runtime.config.workspaceId,dom=unique('mdom'),host=w+'.invalid';
+      const [boxA,boxB,boxC,boxEnded]=[unique('mbx'),unique('mbx'),unique('mbx'),unique('mbx')];
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')",[dom,w,host,REGION]);
+      for(const [id,addr,ended] of [[boxA,'a@'+host,false],[boxB,'b@'+host,false],[boxC,'c@'+host,false],[boxEnded,'ended@'+host,true]] as const){
+        await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode,expires_at,delete_after) VALUES($1,$2,$3,$4,'inbox',$5,$6,$7)",
+          [id,w,dom,addr,ended?'ephemeral':'forever',ended?new Date(Date.now()-7200_000).toISOString():null,ended?new Date(Date.now()-3600_000).toISOString():null]);
+        await db.query("INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,$3,'primary')",[w,addr,id]);
+        await db.query('INSERT INTO inbox_state(inbox_id,workspace_id,unread) VALUES($1,$2,0)',[id,w]);
+      }
+      const add=async(tid:string,mid:string,boxes:{id:string;at:string;starred?:boolean;archived?:boolean;trashed?:boolean}[],subject:string)=>{
+        const newest=boxes.map(x=>x.at).sort().at(-1)!;
+        await db.query('INSERT INTO mail_threads(id,workspace_id,subject,message_count,last_message_at) VALUES($1,$2,$3,1,$4) ON CONFLICT(id) DO UPDATE SET message_count=mail_threads.message_count+1,last_message_at=greatest(mail_threads.last_message_at,excluded.last_message_at)',[tid,w,subject,newest]);
+        await db.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,subject,from_address,snippet,received_at,lifecycle) VALUES($1,$2,$3,'inbound',$4,'ext@example.invalid',$4,$5,'kept')",[mid,w,tid,subject,newest]);
+        for(const x of boxes){
+          await db.query("INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,read,received_at) VALUES($1,$2,$3,$4,'inbound',false,$5)",[x.id,mid,w,tid,x.at]);
+          await db.query(`INSERT INTO mailbox_threads(mailbox_id,thread_id,workspace_id,subject,snippet,message_count,unread_count,last_message_at,last_inbound_at,starred,archived,trashed_at)
+            VALUES($1,$2,$3,$4,$4,1,1,$5,$5,$6,$7,$8)
+            ON CONFLICT(mailbox_id,thread_id) DO UPDATE SET message_count=mailbox_threads.message_count+1,last_message_at=greatest(mailbox_threads.last_message_at,excluded.last_message_at),starred=mailbox_threads.starred OR excluded.starred`,
+            [x.id,tid,w,subject,x.at,!!x.starred,!!x.archived,x.trashed?x.at:null]);
+        }
+      };
+      // 3 distinct threads with IDENTICAL timestamp (order must tie-break by id DESC).
+      const eqAt='2026-11-23T12:00:00.123456Z';
+      const [tEq1,tEq2,tEq3]=['thr_eq_a_'+unique('x'),'thr_eq_b_'+unique('x'),'thr_eq_c_'+unique('x')];
+      await add(tEq1,unique('msg'),[{id:boxA,at:eqAt}],'Equal 1');
+      await add(tEq2,unique('msg'),[{id:boxB,at:eqAt}],'Equal 2');
+      await add(tEq3,unique('msg'),[{id:boxC,at:eqAt}],'Equal 3');
+      // Multi-address thread: older boxB is starred, newer boxA is not, and boxEnded has an even newer message (must be excluded!).
+      const tMulti=unique('thr');
+      await add(tMulti,unique('msg'),[{id:boxB,at:'2026-11-23T12:00:01.000000Z',starred:true}],'Multi older starred');
+      await add(tMulti,unique('msg'),[{id:boxA,at:'2026-11-23T12:00:03.000000Z'}],'Multi newer live');
+      await add(tMulti,unique('msg'),[{id:boxEnded,at:'2026-11-23T12:00:09.000000Z'}],'Multi ended newest');
+      // Multi-address thread with IDENTICAL timestamp on boxA and boxB (shared single message -> messageCount must be 1, emitted once!).
+      const tShared=unique('thr');
+      await add(tShared,unique('msg'),[{id:boxA,at:'2026-11-23T12:00:04.000000Z'},{id:boxB,at:'2026-11-23T12:00:04.000000Z',starred:true}],'Shared equal ts');
+      // Trashed thread in boxC.
+      const tTrash=unique('thr');
+      await add(tTrash,unique('msg'),[{id:boxC,at:'2026-11-23T12:00:05.000000Z',trashed:true}],'Trashed');
+      const collectAll=async(qs:string)=>{
+        const out:Json[]=[],seen=new Set<string>();
+        let cursor:string|null=null;
+        for(let i=0;i<20;i++){
+          const page=ok(await local('GET',`/v1/inbound/threads?limit=2&${qs}${cursor?'&cursor='+encodeURIComponent(cursor):''}`));
+          for(const row of page.data){assert.ok(!seen.has(row.id),`duplicate thread ${row.id} on ${qs}`);seen.add(row.id);out.push(row);}
+          cursor=page.nextCursor;if(!cursor)break;
+        }
+        return out;
+      };
+      // Compare workspace-wide views and single-address view against reference GROUP BY ground truth.
+      const all=await collectAll('view=all');
+      assert.deepEqual(all.map(r=>r.id),[tTrash,tShared,tMulti,tEq3,tEq2,tEq1]);
+      const sharedRow=all.find(r=>r.id===tShared)!;
+      assert.deepEqual(sharedRow.addressIds,[boxA,boxB].sort());
+      assert.equal(sharedRow.messageCount,1,'shared delivery counts distinct messages');
+      const multiRow=all.find(r=>r.id===tMulti)!;
+      assert.deepEqual(multiRow.addressIds,[boxA,boxB].sort(),'ended inbox excluded');
+      assert.equal(multiRow.lastMessageAt,'2026-11-23T12:00:03.000Z','ended inbox timestamp excluded');
+      assert.equal(multiRow.messageCount,2);
+      const starred=await collectAll('view=starred');
+      assert.deepEqual(starred.map(r=>r.id),[tShared,tMulti]);
+      assert.equal(starred[1]!.lastMessageAt,'2026-11-23T12:00:03.000Z','starred view keeps live max timestamp');
+      const inbox=await collectAll('view=inbox');
+      assert.deepEqual(inbox.map(r=>r.id),[tShared,tMulti,tEq3,tEq2,tEq1]);
+      const trash=await collectAll('view=trash');
+      assert.deepEqual(trash.map(r=>r.id),[tTrash]);
+      const onlyA=await collectAll(`view=all&addressId=${boxA}`);
+      assert.deepEqual(onlyA.map(r=>r.id),[tShared,tMulti,tEq1]);
+      assert.equal(onlyA.find(r=>r.id===tMulti)!.messageCount,1);
+      // Full-text search path (q=) also works with LIMIT 1 latest_id.
+      const searched=await collectAll('view=all&q=Shared');
+      assert.deepEqual(searched.map(r=>r.id),[tShared]);
+    });
   });
   test('mail gateway: a signed folder edit waiting behind deletion is denied without a write',async t=>{
     const db=await fixtureDatabase(t),rt=fixtureWorker!.runtime,w=unique('gwdel'),bid=unique('mbx'),kid=unique('app');
@@ -28996,6 +30041,73 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const tags='vis\u{e0061}ible';assert.equal(visibleMail(tags,null).hiddenContent,true);assert.equal(displayText(tags),'visible');assert.equal(visibleMail(null,`<p>${tags}</p>`).text,'visible');
   });
   test('ephemeral inbox: extract finds codes and links only in visible text and flags hidden content',async()=>{const {visibleMail}=await import('./src/inbox-content.js');const m=visibleMail('code 000000','<div hidden>code 111111</div><p style="font-size:0">code 222222</p><p>Verify: A3B4</p><a href="https://real.invalid/">other.invalid</a><span>zero\u200bwidth</span>','codes,links');assert.equal(m.hiddenContent,true);assert.deepEqual(m.extract,{codes:['A3B4'],links:[{text:'other.invalid',href:'https://real.invalid/',mismatch:true}]});assert.ok(!m.text.includes('111111'));});
+  test('shared-pool staging redrive retires unattributed objects once, skips SES setup probe, and keeps mail_ignored_staging 5 days', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { S3Client } = await import('@aws-sdk/client-s3');
+      const { stagingJobs } = await import('./src/mailbox-staging.js');
+      const { pruneMailboxEvents } = await import('./src/maintenance.js');
+      const wid = runtime.config.workspaceId;
+      const old = new Date(Date.now() - 2 * 3600_000);
+      const poolBucket = 'fixture-pool-' + unique('b'), poolTopic = `arn:aws:sns:${REGION}:111122223333:nightmail-inbound`;
+      const poolRuntime = { ...runtime, config: { ...runtime.config, multiTenant: true, receivingRedrive: true, aws: { accessKeyId: 'synthetic-fixture', secretAccessKey: 'synthetic-fixture' } } };
+      await db.query('CREATE TEMP TABLE provider_pool_regions (LIKE public.provider_pool_regions INCLUDING ALL) ON COMMIT DROP');
+      await db.query("INSERT INTO provider_pool_regions(region,aws_account_id,receiving_state,inbound_bucket,inbound_topic_arn) VALUES($1,'111122223333','ready',$2,$3)", [REGION, poolBucket, poolTopic]);
+      const ownedHost = `owned-${unique('h')}.invalid`;
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all,receiving_host) VALUES($1,$2,$1,$3,$4,'active','store',$3)", [unique('mdom'), wid, ownedHost, REGION]);
+      const traceFor = (id: string, to: string) => Buffer.from(`Return-Path: <s@sender.invalid>\r\nReceived: from mx.invalid by inbound-smtp.${REGION}.amazonaws.com with SMTP id ${id} for ${to}; ${old.toUTCString()}\r\nSubject: hi\r\n\r\nbody`);
+      const copied: string[] = [];
+      let denyCopy = false;
+      t.mock.method(S3Client.prototype, 'send', async (cmd: any) => {
+        if (cmd.constructor.name === 'ListObjectsV2Command') return { Contents: [
+          { Key: 'staging/AMAZON_SES_SETUP_NOTIFICATION', ETag: '"setup"', LastModified: old },
+          { Key: 'staging/redrive-orphan-1', ETag: '"e1"', LastModified: old },
+          { Key: 'staging/redrive-denied-2', ETag: '"e2"', LastModified: old },
+          { Key: 'staging/redrive-owned-3', ETag: '"e3"', LastModified: old },
+        ], IsTruncated: false };
+        if (cmd.constructor.name === 'GetObjectCommand') {
+          const mid = String(cmd.input.Key).slice('staging/'.length);
+          const body = mid === 'redrive-owned-3' ? traceFor(mid, `boss@${ownedHost}`) : Buffer.from('Subject: orphan\r\n\r\nhi');
+          return { Body: { transformToByteArray: async () => body } };
+        }
+        if (cmd.constructor.name === 'CopyObjectCommand') {
+          if (denyCopy) throw Object.assign(new Error('denied'), { name: 'AccessDenied' });
+          copied.push(cmd.input.Key);
+          return {};
+        }
+        return {};
+      });
+      const sweepPayload = { bucket: poolBucket, topic: poolTopic, shared: true, started: Date.now() };
+      await stagingJobs['mailbox.sweepStaging']!(poolRuntime, sweepPayload, { id: 'sweep-pool', attempts: 1, workspaceId: wid });
+      const queued = (await db.query("SELECT id, payload FROM jobs WHERE type='mailbox.recoverStaging' AND payload->>'bucket'=$1 ORDER BY payload->>'mid'", [poolBucket])).rows;
+      assert.deepEqual(queued.map(r => r.payload.mid), ['redrive-denied-2', 'redrive-orphan-1', 'redrive-owned-3'], 'AMAZON_SES_SETUP_NOTIFICATION skipped');
+      const byMid = new Map(queued.map(r => [r.payload.mid as string, r]));
+      // 1. Unowned object with successful quarantine copy: retires once, records reason on job payload, not re-swept.
+      await stagingJobs['mailbox.recoverStaging']!(poolRuntime, byMid.get('redrive-orphan-1')!.payload, { id: byMid.get('redrive-orphan-1')!.id, attempts: 1, workspaceId: wid });
+      assert.deepEqual(copied, ['quarantine/redrive-orphan-1']);
+      assert.equal((await db.query("SELECT FROM mail_ignored_staging WHERE bucket=$1 AND ses_message_id='redrive-orphan-1'", [poolBucket])).rowCount, 1);
+      const retiredPayload = (await db.query("SELECT payload FROM jobs WHERE id=$1", [byMid.get('redrive-orphan-1')!.id])).rows[0].payload;
+      assert.equal(retiredPayload.retiredReason, 'envelope_unknown');
+      assert.equal(typeof retiredPayload.ageHours, 'number');
+      // 2. Denied quarantine copy: must NOT retire or insert into mail_ignored_staging; fails 422.
+      denyCopy = true;
+      await assert.rejects(stagingJobs['mailbox.recoverStaging']!(poolRuntime, byMid.get('redrive-denied-2')!.payload, { id: byMid.get('redrive-denied-2')!.id, attempts: 1, workspaceId: wid }), { code: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN' });
+      assert.equal((await db.query("SELECT FROM mail_ignored_staging WHERE bucket=$1 AND ses_message_id='redrive-denied-2'", [poolBucket])).rowCount, 0);
+      denyCopy = false;
+      // 3. Owned receiving host: copies to quarantine/, logs MAILBOX_STAGING_UNDELIVERED, does NOT retire, fails 422.
+      await assert.rejects(stagingJobs['mailbox.recoverStaging']!(poolRuntime, byMid.get('redrive-owned-3')!.payload, { id: byMid.get('redrive-owned-3')!.id, attempts: 1, workspaceId: wid }), { code: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN' });
+      assert.ok(copied.includes('quarantine/redrive-owned-3'));
+      assert.equal((await db.query("SELECT FROM mail_ignored_staging WHERE bucket=$1 AND ses_message_id='redrive-owned-3'", [poolBucket])).rowCount, 0);
+      // 4. Subsequent sweep skips the retired unowned object even after its job row is deleted.
+      await db.query("DELETE FROM jobs WHERE id=$1", [byMid.get('redrive-orphan-1')!.id]);
+      await stagingJobs['mailbox.sweepStaging']!(poolRuntime, sweepPayload, { id: 'sweep-pool-2', attempts: 1, workspaceId: wid });
+      assert.equal((await db.query("SELECT FROM jobs WHERE type='mailbox.recoverStaging' AND payload->>'bucket'=$1 AND payload->>'mid'='redrive-orphan-1'", [poolBucket])).rowCount, 0);
+      await db.query("INSERT INTO mail_ignored_staging(bucket,ses_message_id,created_at) VALUES($1,'keep-4d',now()-interval '4 days'),($1,'drop-6d',now()-interval '6 days')", [poolBucket]);
+      await pruneMailboxEvents(runtime);
+      const left = (await db.query("SELECT ses_message_id FROM mail_ignored_staging WHERE bucket=$1 ORDER BY ses_message_id", [poolBucket])).rows.map(r => r.ses_message_id);
+      assert.deepEqual(left, ['keep-4d', 'redrive-orphan-1']);
+    });
+  });
+
   test('inbound staging recovery and ingest limits',async t=>{
     await simulatedSesFixture(t,async({runtime,db,jobs,local,request,fetch:rawFetch})=>{
       const {acceptInboundNotification,mailboxIngestJobs,recoverMailReceipts}=await import('./src/mailbox-ingest.js'),{scheduleHoldRelease,scheduleMailRecovery}=await import('./src/mailbox-staging.js'),{S3Client}=await import('@aws-sdk/client-s3');
@@ -29060,6 +30172,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         stageError='AccessDenied';for(const item of [j,spoof])await assert.rejects(run(item.type,item.payload),{code:'MAILBOX_STAGING_ACCESS_DENIED',retryable:false});
         stageError='';quarantineDenied=true;await assert.rejects(run(spoof.type,spoof.payload),{code:'MAILBOX_STAGING_ENVELOPE_UNKNOWN',retryable:false});quarantineDenied=false;
       });
+
       await t.test('scan barriers precede MIME, including unknown verdicts and workspace spam policy',async()=>{
         for(const status of ['FAIL','GRAY','PROCESSING_FAILED',undefined]){const mid='unsafe-'+String(status);await submit(mid,['a@receive.example'],'Bad',{...cleanScans,virusVerdict:{status}});await run('mailbox.ingest',{sesMessageId:mid});assert.ok(quarantined.includes('quarantine/'+mid));}
         ok(await local('PATCH','/v1/inbound/policy',{spam:'quarantine'},'live'));for(const status of ['FAIL','GRAY','PROCESSING_FAILED',undefined]){const mid='spam-'+String(status);await submit(mid,['a@receive.example'],'Spam',{...cleanScans,spamVerdict:{status}});await run('mailbox.ingest',{sesMessageId:mid});assert.ok(quarantined.includes('quarantine/'+mid));}
@@ -32776,6 +33889,345 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.doesNotMatch(cut, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/, 'No half character.');
       assert.equal(Array.from(new Intl.Segmenter('en', { granularity: 'grapheme' }).segment(cut)).length, 80);
     }
+  });
+
+  // Health (src/health.ts): the incidents of 23 November 2026, each as the sample the minute tick would have read.
+  test('MX health: each incident of 23 November is an alert within its minutes, with a stable key, a severity and the number that matters, in words that carry numbers, codes and IDs only; a failed probe neither opens nor clears', async () => {
+    const { evaluate, emptyMemory } = await import('./src/health.js'), { LATENCY_BUCKETS } = await import('./src/health-counters.js');
+    type Sample = import('./src/health.js').Sample;
+    const GB = 1024 ** 3, c = (text: string) => '`' + text + '`';
+    const quiet = (): Sample => ({ queues: [], late: [], failed: [], campaigns: [], counters: [], database: { connections: 12, maxConnections: 100, longTransactions: 0, oldestTransactionSeconds: 0, slowQueries: 0, lockWaits: 0, sizeBytes: 4 * GB } });
+    let memory = emptyMemory(), now = 1_800_000_000;
+    const tick = (sample: Sample) => { const result = evaluate(sample, memory, now, 150 * GB); memory = result.rollup.memory; now += 60; return result; };
+    const lines = (sample: Sample) => tick(sample).findings.map(finding => `${finding.key} ${finding.severity} ${finding.value}: ${finding.words}`);
+    const campaign = (id: string, extra: Json) => ({ id, workspaceId: 'ws_fixture', state: 'sending', total: 1_800_000, prepared: 1_800_000, expanded: 0, canceled: 0, paced: false, rateShare: null, waitingReason: null, waitingSeconds: null,
+      pauseCode: null, pausedSeconds: null, quarantines: 0, launchedSeconds: 600, share: 'shared' as const, account: 160, planned: 40, accepted: null, delivered: null, bounced: null, complained: null, ...extra });
+    const hist = (counts: Record<number, number>) => Array.from({ length: LATENCY_BUCKETS.length + 1 }, (_, i) => counts[i] ?? 0);
+    const counter = (kind: string, key: string, extra: Json = {}) => ({ kind, key, n: 0, errors: 0, ms: 0, slowest: 0, n5: 0, errors5: 0, slowest5: 0, verySlow5: 0, stormMinutes: 0, stormRate: 0, hist: null, ...extra });
+    assert.deepEqual(lines(quiet()), []);
+
+    // 5 and 6. The feedback queue 20 minutes behind and 1,883 inbound jobs 13 minutes late: busy for one tick, behind on the second.
+    const behind = { ...quiet(), queues: [{ name: 'feedback', depth: 158_000, oldestMs: 20 * 60_000 }, { name: 'work', depth: 4_000, oldestMs: 9_000 }, { name: 'feedback-dlq', depth: 0, oldestMs: 0 }],
+      late: [{ class: 'ingest', type: 'mailbox.ingest', pending: 1_883, oldestSeconds: 780 }, { class: 'campaign', type: 'campaign.run', pending: 2, oldestSeconds: 12 }] };
+    assert.deepEqual(lines(behind), [], 'One tick is busy, not behind.');
+    const second = tick(behind);
+    assert.deepEqual(second.findings.map(finding => `${finding.key} ${finding.severity} ${finding.value}: ${finding.words}`),
+      [`queue-behind:feedback critical 1200: ${c('feedback')}: oldest 20 min, 158,000 waiting.`, `jobs-behind:mailbox.ingest critical 780: ${c('mailbox.ingest')}: 1,883 due, oldest 13 min.`]);
+    assert.deepEqual([second.rollup.feedbackLagSeconds, second.rollup.queues.map(q => [q.name, q.behind]), second.rollup.jobs!.map(job => [job.type, job.pending, job.behind])],
+      [1200, [['feedback', true], ['work', false], ['feedback-dlq', false]], [['mailbox.ingest', 1_883, true], ['campaign.run', 2, false]]], 'A deep queue that drains in time is not behind.');
+    // A dead letter alerts at once; a probe that failed leaves its alerts and their streaks alone.
+    const blind = tick({ ...behind, late: null, queues: [...behind.queues.slice(0, 2), { name: 'feedback-dlq', depth: 3, oldestMs: 0 }] });
+    assert.deepEqual([blind.findings.map(finding => finding.key), [...blind.blind], blind.rollup.jobs, blind.rollup.memory.streaks['jobs-behind:mailbox.ingest']], [['queue-behind:feedback', 'dead-letters:feedback-dlq'], ['jobs'], null, 2]);
+
+    // 8. 1,639 jobs of one type failed, at once. Customers' webhooks failing and a small pile are not alerts; one failed
+    // campaign job is; and so are six more of a type within half an hour, however small its pile.
+    memory = emptyMemory();
+    const failed = (imports: number) => ({ ...quiet(), failed: [{ type: 'mailbox.recoverStaging', error: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN', failed: 1_600 }, { type: 'mailbox.recoverStaging', error: 'JOB_LEASE_EXHAUSTED', failed: 39 },
+      { type: 'operation.webhook', error: 'WEBHOOK_HTTP_500', failed: 4_000 }, { type: 'mailbox.reconcile', error: 'JOB_INTERNAL_ERROR', failed: 24 }, { type: 'campaign.run', error: 'JOB_LEASE_EXHAUSTED', failed: 1 }, { type: 'audience.import', error: 'IMPORT_FAILED', failed: imports }] });
+    const piles = [`jobs-failed:mailbox.recoverStaging warning 1639: ${c('mailbox.recoverStaging')}: 1,639, mostly ${c('MAILBOX_STAGING_ENVELOPE_UNKNOWN')}.`, `jobs-failed:campaign.run critical 1: ${c('campaign.run')}: 1, mostly ${c('JOB_LEASE_EXHAUSTED')}.`];
+    assert.deepEqual([lines(failed(2)), lines(failed(8))], [piles.toReversed(), [...piles.toReversed(), `jobs-failed:audience.import warning 8: ${c('audience.import')}: 8, 6 in the last 30 min, mostly ${c('IMPORT_FAILED')}.`]]);
+
+    // 4. A first-party campaign of 1.8M releasing 32 a second on an account that allows 160, because the planner reads 40.
+    // What it releases is measured from its cursor and held against the account's rate and the workspace's share, never
+    // against the planner's number: after five minutes its time left is an alert that names all of them, after ten it is
+    // slow. A customer on the shared pool releasing 38 of its 40 is neither; one that releases nothing for five minutes is.
+    memory = emptyMemory();
+    let found: string[] = [];
+    const rates = '20% of the account’s 160/s (entitled to 160/s; the planner reads 40/s)';
+    for (let minute = 0; minute <= 10; minute++) {
+      found = lines({ ...quiet(), campaigns: [campaign('cmp_quartered', { workspaceId: 'ws_first_party', share: 'exempt', expanded: 32 * 60 * minute }), campaign('cmp_stalled', { workspaceId: 'ws_stalled', expanded: 1_800 }),
+        campaign('cmp_paced', { workspaceId: 'ws_paced', expanded: 60 * minute, paced: true }), campaign('cmp_healthy', { expanded: 38 * 60 * minute, total: 400_000, accepted: 37 * 60 * minute })] });
+      if (minute === 4) assert.deepEqual(found, [], 'Four minutes of samples are too few to say how long it takes.');
+      if (minute === 5) assert.deepEqual(found, [`campaign-slow:cmp_stalled critical 0: ${c('cmp_stalled')}: nothing released for 5 min, 0% of the account’s 160/s (entitled to 40/s). 1,798,200 left.`,
+        `campaign-long:cmp_quartered warning 55950: ${c('cmp_quartered')}: 15.5 h left at 32/s, ${rates}. 1,790,400 of 1,800,000 left.`], 'Critical first.');
+    }
+    assert.deepEqual(found.filter(line => line.startsWith('campaign-slow:cmp_quartered')), [`campaign-slow:cmp_quartered warning 32: ${c('cmp_quartered')}: 32/s for 10 min, ${rates}. 1,780,800 left.`]);
+    const healthy = tick({ ...quiet(), campaigns: [campaign('cmp_healthy', { expanded: 38 * 60 * 11, total: 400_000, accepted: 37 * 60 * 11 })] }).rollup.campaigns![0]!;
+    assert.deepEqual([healthy.rate, healthy.acceptedRate, healthy.entitled, healthy.account, healthy.planned, healthy.behind], [38, 37, 40, 160, 40, false]);
+    // An alert means slower than it is entitled to, never slow by choice or by design (review of #628). A delivered-only
+    // resume skipped half its list (each skip moves the cursor and counts in canceled, so it is not subtracted again):
+    // 499,900 left at 5 a second of 160 is slow and long. A campaign whose owner chose a tenth of the rate and runs at
+    // exactly that, a large one at 38 of its 40, two of one workspace sharing its 40, and one with everything released
+    // are not alerts; their time left is still on the page.
+    memory = emptyMemory();
+    const entitledCases = (minute: number): Sample => ({ ...quiet(), campaigns: [
+      campaign('cmp_delivered_only', { workspaceId: 'ws_skips', share: 'exempt', planned: 160, total: 1_000_000, expanded: 500_100 + 300 * minute, canceled: 500_000 }),
+      campaign('cmp_tenth', { workspaceId: 'ws_tenth', total: 150_000, rateShare: 0.1, account: 200, planned: 50, expanded: 300 * minute }),
+      campaign('cmp_large', { workspaceId: 'ws_large', expanded: 38 * 60 * minute }),
+      campaign('cmp_half_a', { workspaceId: 'ws_two', expanded: 19 * 60 * minute }), campaign('cmp_half_b', { workspaceId: 'ws_two', expanded: 19 * 60 * minute }),
+      campaign('cmp_draining', { workspaceId: 'ws_draining', expanded: 1_800_000 })] });
+    for (let minute = 0; minute < 10; minute++) lines(entitledCases(minute));
+    const entitled = tick(entitledCases(10)), skips = '3.1% of the account’s 160/s (entitled to 160/s)';
+    assert.deepEqual(entitled.findings.map(finding => `${finding.key} ${finding.severity} ${finding.value}: ${finding.words}`), [`campaign-slow:cmp_delivered_only warning 5: ${c('cmp_delivered_only')}: 5/s for 10 min, ${skips}. 496,900 left.`,
+      `campaign-long:cmp_delivered_only warning 99380: ${c('cmp_delivered_only')}: 27.6 h left at 5/s, ${skips}. 496,900 of 1,000,000 left.`]);
+    assert.deepEqual(entitled.rollup.campaigns!.map(row => [row.id, row.rate, row.entitled, row.etaSeconds, row.behind]), [['cmp_delivered_only', 5, 160, 99_380, true], ['cmp_tenth', 5, 5, 29_400, false],
+      ['cmp_large', 38, 40, Math.round((1_800_000 - 22_800) / 38), false], ['cmp_half_a', 19, 20, Math.round((1_800_000 - 11_400) / 19), false], ['cmp_half_b', 19, 20, Math.round((1_800_000 - 11_400) / 19), false], ['cmp_draining', 0, 40, null, false]]);
+    // A wait starts the samples over, and is itself an alert once it has lasted fifteen minutes (a daily pace never is).
+    for (let minute = 0; minute < 15; minute++) found = lines({ ...quiet(), campaigns: [campaign('cmp_stalled', { expanded: 1_800, waitingReason: 'hosted_daily_quota', waitingSeconds: 7_200 - 60 * minute }), campaign('cmp_paced', { paced: true, waitingReason: 'pacing_window', waitingSeconds: 3_600 })] });
+    assert.deepEqual([found, memory.campaigns], [[`campaign-waiting:cmp_stalled warning 900: ${c('cmp_stalled')}: ${c('hosted_daily_quota')} for 15 min, 1.8 h to go. 1,798,200 left.`], {}]);
+
+    // 3. Preparing for over five minutes, and the request that took 45 seconds. 2. One page asking 50 times a second.
+    // 1. A read-only database, at its first error. 9. A dispatcher shard whose runs keep failing.
+    memory = emptyMemory();
+    assert.deepEqual(lines({ ...quiet(), campaigns: [campaign('cmp_frozen', { state: 'preparing', prepared: 1_200_000, launchedSeconds: 380 }), campaign('cmp_new', { state: 'preparing', prepared: 0, launchedSeconds: 200 }),
+      campaign('cmp_quarantined', { state: 'paused', pauseCode: 'LIST_QUALITY', pausedSeconds: 120, quarantines: 1, expanded: 500 }), campaign('cmp_by_hand', { state: 'paused', pauseCode: 'PAUSED_BY_USER', pausedSeconds: 120 }),
+      campaign('cmp_last_week', { state: 'paused', pauseCode: 'LIST_QUALITY', pausedSeconds: 90_000 }), campaign('cmp_bouncing', { expanded: 1_800_000, delivered: 11_280, bounced: 720, complained: 2 })],
+      counters: [counter('route', 'POST /v1/campaigns/:id/send', { n: 3, n5: 3, slowest: 45_000, slowest5: 45_000, verySlow5: 1, hist: hist({ 5: 2, [LATENCY_BUCKETS.length]: 1 }) }),
+        counter('route', 'GET /v1/campaigns/:id/stats', { n: 45_000, n5: 15_000, slowest: 40, stormMinutes: 3, stormRate: 3_000, hist: hist({ 1: 45_000 }) }), counter('read', 'ws_fixture', { n: 45_000, n5: 15_000, stormMinutes: 4, stormRate: 3_010 }),
+        counter('route', 'POST /v1/emails/send', { n: 90_000, n5: 30_000, errors: 40, errors5: 40, slowest: 900, stormMinutes: 4, stormRate: 6_000, hist: hist({ 4: 90_000 }) }),
+        counter('code', 'DATABASE_UNAVAILABLE', { n: 40, n5: 40 }), counter('sqlstate', '25006', { n: 40, n5: 40 }), counter('sqlstate', '57014', { n: 4, n5: 4 }), counter('sqlstate', '23505', { n: 900, n5: 300 }),
+        counter('error', 'DISPATCHER_RUN_FAILED', { n: 3, n5: 1 }), counter('error', 'MAILBOX_STAGING_ENVELOPE_UNKNOWN', { n: 9, n5: 6 }), counter('error', 'QUEUE_BACKLOG_ALERT', { n: 15, n5: 5 }), counter('error', 'BILLING_DRIFT', { n: 4, n5: 4 }),
+        counter('error', 'MAILBOX_STAGING_UNDELIVERED', { n: 1, n5: 1 })] }), [
+      `campaign-bounces:cmp_bouncing critical 0.06: ${c('cmp_bouncing')}: 6% bounced and 2 complaints on 12,000 settled.`, `database-errors:25006 critical 40: read-only (${c('25006')}): 40 in 5 min.`,
+      `dispatcher-failing critical 3: 3 failed runs in 15 min, mostly ${c('DISPATCHER_RUN_FAILED')}.`, `errors:MAILBOX_STAGING_UNDELIVERED critical 1: ${c('MAILBOX_STAGING_UNDELIVERED')}: 1 in 5 min.`,
+      `campaign-preparing:cmp_frozen warning 380: ${c('cmp_frozen')}: 6 min, 1,200,000 of 1,800,000 ready.`, `campaign-paused:cmp_quarantined warning 1799500: ${c('cmp_quarantined')} of ${c('ws_fixture')}: ${c('LIST_QUALITY')}, quarantined. 1,799,500 left.`,
+      `slow-requests:POST:/v1/campaigns/:id/send warning 45000: ${c('POST /v1/campaigns/:id/send')}: slowest 45 s, p95 45 s over 3 in 15 min.`, `request-storm:GET:/v1/campaigns/:id/stats warning 3000: ${c('GET /v1/campaigns/:id/stats')}: 3,000 a minute for 3 minutes.`,
+      `request-storm:workspace:ws_fixture warning 3010: workspace ${c('ws_fixture')}: 3,010 reads a minute for 3 minutes.`, `errors:MAILBOX_STAGING_ENVELOPE_UNKNOWN warning 6: ${c('MAILBOX_STAGING_ENVELOPE_UNKNOWN')}: 6 in 5 min.`],
+      'Sending mail at 100 a second is not a storm, 40 errors in 45,000 requests are not an alert, unique violations are not database errors, a line every minute already says is not counted, and mail whose arrival notice was lost (#625) alerts at the first line.');
+    // The same code as a failed job's error: the first job, critical.
+    memory = emptyMemory();
+    assert.deepEqual(lines({ ...quiet(), failed: [{ type: 'mailbox.recoverStaging', error: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN', failed: 3 }, { type: 'mailbox.recoverStaging', error: 'MAILBOX_STAGING_UNDELIVERED', failed: 1 }] }),
+      [`jobs-failed:mailbox.recoverStaging critical 4: ${c('mailbox.recoverStaging')}: 4, mostly ${c('MAILBOX_STAGING_ENVELOPE_UNKNOWN')}.`]);
+    // No key holds a space, so the card's key=value line parses; and what is not an identifier never reaches a card.
+    memory = emptyMemory();
+    assert.deepEqual(lines({ ...quiet(), failed: [{ type: 'reader@example.net <b>', error: 'Subject: hello', failed: 30 }] }), [`jobs-failed:other warning 30: ${c('other')}: 30, mostly ${c('other')}.`]);
+    // The database: connections near the limit, slow queries and lock waits for two ticks; a transaction open ten minutes; the disk three quarters full.
+    const crowded = { ...quiet(), database: { connections: 85, maxConnections: 100, longTransactions: 2, oldestTransactionSeconds: 660, slowQueries: 4, lockWaits: 12, sizeBytes: 120 * GB } };
+    const always = ['database-transaction warning 660: open 11 min, 2 over a minute.', 'database-disk critical 0.8: 80% of 150 GB.'];
+    assert.deepEqual([lines(crowded), lines(crowded)], [always.toReversed(), ['database-connections critical 85: 85 of 100.', always[1], always[0], 'database-slow-queries warning 4: 4 running over 30 s.', 'database-lock-waits warning 12: 12 sessions waiting on a lock.']]);
+  });
+
+  test('MX health: the tick posts one card when an alert opens, tries a refused card again, reminds, posts a cleared card with the same key and forgets; each card ends with a line a program reads; the Health route reads what the tick wrote, for an operator or a self-hosted dashboard only; without a webhook nothing is posted', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const { healthTick } = await import('./src/health.js'), type = `health.fixture.${unique('t').slice(-8)}`, key = `jobs-failed:${type}`, path = '/v1/operator/health', c = (text: string) => '`' + text + '`';
+      let refuse = false;
+      const posted: Json[] = [], post = async (url: string, card: Json) => { assert.equal(url, OPERATOR_HOOK); if (refuse) throw new Error('Slack answered 500'); posted.push(card); };
+      // This database is shared with the other tests: only this fixture's own job type is asserted on.
+      const mine = () => posted.splice(0).filter(card => String(card.text).includes(type)).map(card => {
+        const [words, machine, ...rest] = String(card.text).split('\n');
+        assert.deepEqual([rest, card.blocks.length, card.blocks[1], card.blocks[0].accessory.url, card.unfurl_links], [[], 2, { type: 'context', elements: [{ type: 'mrkdwn', text: c(machine!), verbatim: true }] }, `${PUBLIC_ORIGIN}/operator?view=health`, false]);
+        return [card.blocks[0].text.text, words, Object.fromEntries(machine!.split(' ').map(pair => [pair.slice(0, pair.indexOf('=')), pair.slice(pair.indexOf('=') + 1)]))];
+      });
+      const tick = (force = true) => healthTick(runtime, { queues: [] }, { post, force });
+      const alert = async () => (await db.query('SELECT kind,severity,value,unit,words,sent_at IS NOT NULL AS sent FROM health_alerts WHERE key=$1', [key])).rows[0];
+      const fail = (n: number, status: string, minutesAgo = 0) => db.query(`INSERT INTO jobs(id,type,workspace_id,payload,status,last_error,available_at) SELECT $1||'-'||g,$2,$3,'{}',$4,CASE WHEN $4='failed' THEN 'FIXTURE_FAILED' END,now()-make_interval(mins=>$5) FROM generate_series(1,$6::int) g`,
+        [unique('job'), type, runtime.config.workspaceId, status, minutesAgo, n]);
+      const recent = (at: string) => Math.abs(Date.now() - Date.parse(at)) < 120_000;
+
+      // Self-hosted, no webhook: the alert is held and listed, and nothing is posted.
+      await fail(30, 'failed');
+      assert.equal(runtime.config.operatorSlackWebhookUrl, undefined);
+      const first = await tick();
+      assert.deepEqual([first.ran, first.cards, posted, await alert()], [true, [], [], { kind: 'jobs-failed', severity: 'warning', value: 30, unit: 'jobs', words: `${c(type)}: 30, mostly ${c('FIXTURE_FAILED')}.`, sent: false }]);
+      assert.ok(first.statements <= 36 && first.open >= 1, `A tick is a bounded number of statements (${first.statements}).`);
+      assert.equal((await tick(false)).ran, false, 'One tick a minute, whoever asks: a second one within 45 seconds does nothing.');
+      const page = ok(await local('GET', path)), listed = page.alerts.find((a: Json) => a.key === key);
+      assert.deepEqual([page.delivery, page.stale, typeof page.generatedAt, { ...listed, since: recent(listed.since) }, page.jobs.find((job: Json) => job.type === type), page.database.connections >= 1, 'memory' in page],
+        ['off', false, 'string', { key, kind: 'jobs-failed', label: 'Jobs failed', severity: 'warning', value: 30, unit: 'jobs', words: `${type}: 30, mostly FIXTURE_FAILED.`, since: true, sentAt: null, runbook: 'docs/operations.md#jobs-failed' },
+          { type, pending: 0, oldestSeconds: 0, failed: 30, error: 'FIXTURE_FAILED', behind: true }, true, false]);
+      const apiKey = ok(await local('POST', '/v1/api-keys', { name: 'Not a dashboard', permissions: ['manage'] }), 201); secrets.add(apiKey.secret);
+      error(await request('GET', path, apiKey.secret), 403, 'OPERATOR_REQUIRED');
+
+      // With the webhook: a card Slack refuses is tried again on the next tick, then posted once and not again.
+      runtime.config.operatorSlackWebhookUrl = OPERATOR_HOOK;
+      refuse = true;
+      assert.deepEqual([(await tick()).cards, (await alert()).sent], [[], false]);
+      refuse = false;
+      await tick(); await tick();
+      const opened = mine(), machine = { key, state: 'open', severity: 'warning', value: '30', unit: 'jobs', runbook: 'docs/operations.md#jobs-failed', health: `${PUBLIC_ORIGIN}/operator?view=health` };
+      assert.deepEqual([opened.map(card => [card[0], card[1], { ...card[2], since: recent(card[2].since) }]), (await alert()).sent],
+        [[[`:x: *Jobs failed* ${c(type)}: 30, mostly ${c('FIXTURE_FAILED')}.`, `Jobs failed: ${c(type)}: 30, mostly ${c('FIXTURE_FAILED')}.`, { ...machine, since: true }]], true]);
+      // A day on it is still open: one reminder, with how long, under the same key and since.
+      await db.query(`UPDATE health_alerts SET since=now()-interval '25 hours',sent_at=now()-interval '25 hours' WHERE key=$1`, [key]);
+      await tick(); await tick();
+      const reminded = mine();
+      assert.deepEqual(reminded.map(card => [card[1], card[2].key, card[2].state, Math.round((Date.now() - Date.parse(card[2].since)) / 3_600_000)]), [[`Jobs failed: ${c(type)}: 30, mostly ${c('FIXTURE_FAILED')}. For 25 h.`, key, 'open', 25]]);
+      // Gone for less than three minutes is not a recovery; after three, one cleared card with the same key, and the alert is forgotten.
+      await db.query(`UPDATE jobs SET status='completed' WHERE type=$1`, [type]);
+      await tick();
+      assert.deepEqual([mine(), (await alert()).kind], [[], 'jobs-failed']);
+      await db.query(`UPDATE health_alerts SET seen_at=now()-interval '4 minutes' WHERE key=$1`, [key]);
+      await tick(); await tick();
+      const cleared = mine();
+      assert.deepEqual([cleared.map(card => [card[0], card[1], { ...card[2], since: card[2].since === reminded[0]![2].since, cleared: recent(card[2].cleared) }]), await alert()],
+        [[[`:white_check_mark: *Cleared: Jobs failed* ${c(type)}, after 25 h.`, `Cleared: Jobs failed: ${c(type)}, after 25 h.`, { key, state: 'cleared', severity: 'warning', since: true, cleared: true, runbook: machine.runbook, health: machine.health }]], undefined]);
+
+      // Jobs due 13 minutes ago: behind on the second tick, through the jobs table's own indexes. Jobs due later are not late.
+      await fail(3, 'pending', 13); await fail(5, 'pending', -60);
+      await tick();
+      assert.deepEqual(mine(), []);
+      await tick();
+      assert.deepEqual(mine().map(card => [card[0], card[2].key, card[2].severity, card[2].unit, Number(card[2].value) >= 780]), [[`:hourglass_flowing_sand: *Jobs behind* ${c(type)}: 3 due, oldest 13 min.`, `jobs-behind:${type}`, 'warning', 'seconds', true]]);
+
+      // Campaigns by state (api/tear/campaign-lifecycle): the tick reads the ones that are preparing, sending or paused,
+      // and no draft, scheduled, done, failed or canceled one; a campaign Nightmail paused is an alert, one with
+      // everything released is not behind.
+      const draft = ok(await local('POST', '/v1/campaigns', { name: 'Health states' }), 201), states = ['preparing', 'scheduled', 'sending', 'paused', 'done', 'failed', 'canceled'], review = `${draft.id}_review`;
+      await db.query(`INSERT INTO sending_campaign_reviews(id,workspace_id,campaign_id,revision,draft,content_hash) SELECT $2,workspace_id,id,revision,draft,'fixture' FROM sending_campaigns WHERE id=$1`, [draft.id, review]);
+      // The table's own rules: expanded <= prepared <= total, preparing means not all prepared, done means all released.
+      for (const state of states) await db.query(`INSERT INTO sending_campaigns SELECT (jsonb_populate_record(NULL::sending_campaigns,to_jsonb(c)||jsonb_build_object('id',$2::text,'state',$3::text,'review_id',$4::text,'total',1000,
+        'prepared',CASE WHEN $3='preparing' THEN 400 ELSE 1000 END,'expanded',CASE WHEN $3 IN ('done','sending') THEN 1000 WHEN $3 IN ('preparing','scheduled') THEN 0 ELSE 400 END,
+        'paused_at',CASE WHEN $3='paused' THEN now() END,'pause_reason',CASE WHEN $3='paused' THEN '{"code":"LIST_QUALITY"}'::jsonb END))).* FROM sending_campaigns c WHERE id=$1`, [draft.id, `${draft.id}_${state}`, state, review]);
+      await tick();
+      const measured = ok(await local('GET', path));
+      assert.deepEqual([measured.campaigns.filter((row: Json) => row.id.startsWith(draft.id)).map((row: Json) => [row.id.slice(draft.id.length + 1), row.released, row.waiting, row.behind]).sort(), measured.alerts.filter((a: Json) => a.key.includes(draft.id)).map((a: Json) => [a.key, a.severity, a.value, a.unit])],
+        [[['paused', 400, 'LIST_QUALITY', true], ['preparing', 0, null, false], ['sending', 1000, null, false]], [[`campaign-paused:${draft.id}_paused`, 'warning', 600, 'recipients_left']]]);
+
+      // Hosted: an operator's staff session only (an operator's agent key too: the UI notes test reads it with one).
+      runtime.config.multiTenant = true;
+      await db.query('UPDATE nightmail_sessions SET staff=true WHERE user_id=$1', [manager!.userId]);
+      error(await local('GET', path), 403, 'OPERATOR_REQUIRED');
+      error(await request('GET', path, apiKey.secret), 403, 'OPERATOR_REQUIRED');
+      const { setOperator } = await import('./scripts/set-operator.js');
+      await setOperator(db, [AUTH_SUBJECT, 'operator:read', '--reason', 'Synthetic health reader']);
+      const hosted = ok(await local('GET', path));
+      assert.deepEqual([hosted.delivery, hosted.jobs.find((job: Json) => job.type === type).behind, hosted.alerts.some((a: Json) => a.key === `jobs-behind:${type}`)], ['slack', true, true]);
+      // A hosted tick reads the campaigns' rates from the account and the connection.
+      const last = await tick();
+      assert.deepEqual([last.ran, Array.isArray(ok(await local('GET', path)).campaigns)], [true, true]);
+    });
+  });
+
+  test('MX health: a locked health table costs a dropped sample within a second or two, never a wait and never a "database refusing" card; a burst posts critical alerts first and one summary for what does not fit; a cleared card Slack refuses is tried again, for a database that refused too', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { healthTick } = await import('./src/health.js'), counters = await import('./src/health-counters.js'), tag = unique('b').slice(-8);
+      runtime.config.operatorSlackWebhookUrl = OPERATOR_HOOK;
+      const posted: Json[] = [];
+      let refuse: (card: Json) => boolean = () => false;
+      const post = async (_url: string, card: Json) => { if (refuse(card)) throw new Error('Slack answered 503'); posted.push(card); };
+      const machine = (card: Json) => Object.fromEntries(String(card.text).split('\n')[1]!.split(' ').map(pair => [pair.slice(0, pair.indexOf('=')), pair.slice(pair.indexOf('=') + 1)]));
+
+      // 1. Another session holds health_minutes and health_state for as long as it likes (a migration, a stuck writer).
+      // The counters' flush gives up after its one-second lock_timeout and drops the sample; the tick cannot claim its
+      // minute and skips it. Neither waits, and a locked health row is not the database refusing.
+      const locker = new pg.Client({ connectionString: FIXTURE_DATABASE_URL });
+      await locker.connect(); cleanup(t, () => locker.end());
+      await locker.query('BEGIN'); await locker.query('LOCK TABLE health_minutes, health_state IN ACCESS EXCLUSIVE MODE');
+      counters.resetCounters();
+      for (let i = 0; i < 30; i++) counters.countRequest({ route: `/v1/locked-${tag}`, method: 'GET', status: 200, durationMs: 4 });
+      const warnings = t.mock.method(console, 'warn', () => {});
+      let started = Date.now();
+      assert.equal(await counters.flushCounters(runtime.db), 0);
+      const flushMs = Date.now() - started;
+      started = Date.now();
+      const skipped = await healthTick(runtime, {}, { post, force: true }), skipMs = Date.now() - started;
+      await locker.query('ROLLBACK');
+      // health_minutes alone: the tick claims its minute, its requests section is unknown, and its rollup write is dropped.
+      await locker.query('BEGIN'); await locker.query('LOCK TABLE health_minutes IN ACCESS EXCLUSIVE MODE');
+      started = Date.now();
+      const dropped = await healthTick(runtime, {}, { post, force: true }), dropMs = Date.now() - started;
+      await locker.query('ROLLBACK');
+      const warned = warnings.mock.calls.map(call => JSON.parse(String(call.arguments[0])).code);
+      warnings.mock.restore();
+      assert.ok(flushMs < 2_500 && skipMs < 2_500 && dropMs < 4_500, `bounded: flush ${flushMs} ms, skipped tick ${skipMs} ms, dropped tick ${dropMs} ms`);
+      assert.deepEqual([skipped.ran, dropped.ran, posted.filter(card => machine(card).key === 'database-refusing'), ['HEALTH_COUNTERS_DROPPED', 'HEALTH_TICK_SKIPPED', 'HEALTH_PROBE_FAILED', 'HEALTH_TICK_FAILED'].filter(code => !warned.includes(code)),
+        (await db.query(`SELECT count(*)::int AS n FROM health_minutes WHERE key LIKE '%'||$1`, [tag])).rows[0].n], [false, true, [], [], 0]);
+
+      // 2. A burst: twelve job types fail at once while the feedback queue is behind. Six cards at most: every critical one
+      // before any warning, then one summary that stands for the rest, and every alert counts as told.
+      await db.query('DELETE FROM health_alerts');
+      const queues = [{ name: 'feedback', depth: 9_000, oldestMs: 400_000 }];
+      await healthTick(runtime, { queues }, { post, force: true });
+      posted.length = 0;
+      for (let n = 1; n <= 12; n++) await db.query(`INSERT INTO jobs(id,type,workspace_id,payload,status,last_error) SELECT $1||'-'||g,$2,$3,'{}','failed','FIXTURE_FAILED' FROM generate_series(1,30) g`, [unique('job'), `health.burst.${tag}.${n}`, runtime.config.workspaceId]);
+      const burst = await healthTick(runtime, { queues }, { post, force: true });
+      const sent = posted.map(machine), severities = sent.map(line => line.severity), last = burst.cards.at(-1)!;
+      assert.ok(sent.length <= 6 && sent.some(line => line.key === 'queue-behind:feedback' && line.severity === 'critical') && severities.lastIndexOf('critical') < (severities.includes('warning') ? severities.indexOf('warning') : Infinity), JSON.stringify(sent.map(line => [line.key, line.severity])));
+      assert.deepEqual([last.key, sent.at(-1)!.key, sent.at(-1)!.state, Number(sent.at(-1)!.count) === last.covers!.length, last.covers!.length >= 8, /^\d+ more alerts: .*\d+ Jobs failed.*\. All of them are on the Health page\.$/.test(String(posted.at(-1)!.text).split('\n')[0]!),
+        (await db.query(`SELECT count(*)::int AS n FROM health_alerts WHERE key LIKE 'jobs-failed:health.burst.'||$1||'.%' AND sent_at IS NOT NULL`, [tag])).rows[0].n], ['summary', 'summary', 'open', true, true, true, 12]);
+      posted.length = 0;
+      await healthTick(runtime, { queues }, { post, force: true });
+      assert.deepEqual(posted.filter(card => String(card.text).includes(tag)), [], 'Nothing is said twice.');
+
+      // 3. Recoveries. Slack refuses the cleared cards on the first tick: the alerts stay held and their cards go out on the
+      // next. The same for a database that refused the tick's write and then answered again while Slack was down.
+      await db.query(`UPDATE jobs SET status='completed' WHERE type LIKE 'health.burst.'||$1||'.%'`, [tag]);
+      await db.query(`UPDATE health_alerts SET seen_at=now()-interval '4 minutes' WHERE key LIKE 'jobs-failed:health.burst.'||$1||'.%'`, [tag]);
+      refuse = card => machine(card).state === 'cleared';
+      await healthTick(runtime, { queues }, { post, force: true });
+      const heldRows = async () => (await db.query(`SELECT count(*)::int AS n FROM health_alerts WHERE key LIKE 'jobs-failed:health.burst.'||$1||'.%'`, [tag])).rows[0].n;
+      assert.deepEqual([posted.filter(card => machine(card).state === 'cleared'), await heldRows()], [[], 12]);
+      refuse = () => false;
+      await healthTick(runtime, { queues }, { post, force: true });
+      const clearedCards = posted.map(machine).filter(line => line.state === 'cleared');
+      assert.ok(clearedCards.length >= 2 && clearedCards.length <= 6 && clearedCards.at(-1)!.key === 'summary' && await heldRows() === 0, JSON.stringify(clearedCards));
+
+      const readOnly = { db: { transaction: async () => { throw Object.assign(new Error('cannot execute UPDATE in a read-only transaction'), { code: '25006' }); } }, config: runtime.config } as never;
+      posted.length = 0;
+      const errors = t.mock.method(console, 'error', () => {});
+      await healthTick(readOnly, {}, { post, force: true }); await healthTick(readOnly, {}, { post, force: true });
+      errors.mock.restore();
+      assert.deepEqual(posted.map(card => [String(card.text).split('\n')[0], machine(card).key, machine(card).state, machine(card).severity]), [['Database refusing: read-only (`25006`): the health tick’s own write was refused.', 'database-refusing', 'open', 'critical']]);
+      refuse = card => machine(card).key === 'database-refusing';
+      posted.length = 0;
+      await healthTick(runtime, { queues }, { post, force: true });
+      assert.deepEqual(posted.filter(card => machine(card).key === 'database-refusing'), []);
+      refuse = () => false;
+      await healthTick(runtime, { queues }, { post, force: true }); await healthTick(runtime, { queues }, { post, force: true });
+      assert.deepEqual(posted.map(machine).filter(line => line.key === 'database-refusing').map(line => [line.state, line.severity, 'value' in line]), [['cleared', 'critical', false]], 'The cleared card is tried again, and goes out once.');
+    });
+  });
+
+  test('MX health: a slow request is always logged whatever the sampling, error lines are counted by code, and the request counters give each route its count, errors and p95 without a log search, by minute and then by hour', async t => {
+    const { log } = await import('./src/log.js'), counters = await import('./src/health-counters.js'), { healthTick } = await import('./src/health.js'), { platformMessage, ApiError } = await import('./src/core.js'), c = (text: string) => '`' + text + '`';
+    // Sampling keeps one success in ten: with the dice against it a quick 200 is dropped, and a slow one is written whole.
+    const lines: Json[] = [];
+    const dice = t.mock.method(Math, 'random', () => 0.99), info = t.mock.method(console, 'info', (line: string) => { lines.push(JSON.parse(line)); });
+    log('info', { event: 'request', route: '/v1/campaigns/:id/send', status: 202, durationMs: 180 });
+    log('info', { event: 'request', route: '/v1/campaigns/:id/send', status: 202, durationMs: 45_210, slow: true });
+    log('info', { operation: 'worker-runtime', status: 202, runtimeMs: 45_300.5 });
+    log('info', { code: 'JOB_COMPLETED', jobMs: 12 }); log('info', { code: 'JOB_COMPLETED', operation: 'campaign.prepare', jobMs: 9_800 });
+    info.mock.restore(); dice.mock.restore();
+    assert.deepEqual(lines.map(line => [line.durationMs ?? line.runtimeMs ?? line.jobMs, line.slow, line.sampleRate]), [[45_210, true, undefined], [45_300.5, undefined, undefined], [9_800, undefined, undefined]]);
+    // Why a platform call failed is logged only when the error is the platform's: never a database error's text, which quotes parameters.
+    assert.deepEqual([platformMessage(new Error('Durable Object storage operation exceeded timeout which caused object to be reset.')), platformMessage(Object.assign(new Error('duplicate key value (reader@example.net)'), { code: '23505' })),
+      platformMessage(new Error('Failed query', { cause: Object.assign(new Error('timeout'), { severity: 'ERROR' }) })), platformMessage(new ApiError(500, 'INTERNAL_ERROR', 'no')), platformMessage('text'),
+      platformMessage(Object.assign(new Error('Email address is not verified: reader@example.net'), { name: 'MessageRejected', $metadata: { httpStatusCode: 400 } }))],
+      ['Durable Object storage operation exceeded timeout which caused object to be reset.', undefined, undefined, undefined, undefined, undefined]);
+
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const tag = unique('r').slice(-8), slowRoute = `GET /v1/fixture-${tag}/:id`, failing = `POST /v1/fixture-${tag}`, workspace = `ws_${tag}`, code = `FIXTURE_${tag.toUpperCase()}_FAILED`;
+      counters.resetCounters();
+      const errorLines = t.mock.method(console, 'error', () => {});
+      const batch = () => {
+        for (let i = 0; i < 38; i++) counters.countRequest({ route: `/v1/fixture-${tag}/:id`, method: 'GET', status: 200, durationMs: 20, workspace });
+        for (let i = 0; i < 2; i++) counters.countRequest({ route: `/v1/fixture-${tag}/:id`, method: 'GET', status: 200, durationMs: 45_000, workspace });
+        for (let i = 0; i < 30; i++) counters.countRequest({ route: `/v1/fixture-${tag}`, method: 'POST', status: 503, durationMs: 3, workspace, code: 'DATABASE_UNAVAILABLE', databaseCode: '25006' });
+        for (let i = 0; i < 3; i++) counters.countRequest({ route: `/v1/fixture-${tag}/:id`, method: 'GET', status: 200, durationMs: 20, workspace: `ws_quiet_${tag}` });
+        // Error lines by code: a job that keeps failing and a dispatcher run that failed. A request's own error line is the 5xx above.
+        for (let i = 0; i < 3; i++) log('error', { code, jobId: 'job_fixture' });
+        log('error', { code: 'DISPATCHER_RUN_FAILED', shard: 'fixture:us-east-2:6/8' }); log('error', { event: 'request', code, status: 500 }); log('warn', { code });
+      };
+      // Two flushes of one minute add up, histogram and all. A workspace under one read a second is not written.
+      batch(); const written = await counters.flushCounters(runtime.db);
+      batch(); assert.equal(await counters.flushCounters(runtime.db), written);
+      errorLines.mock.restore();
+      assert.equal(await counters.flushCounters(runtime.db), 0, 'Nothing counted, nothing written.');
+      const rows = (await db.query(`SELECT kind,key,sum(n)::int AS n,sum(errors)::int AS errors,max(slowest) AS slowest FROM health_minutes WHERE key ILIKE '%'||$1||'%' GROUP BY 1,2 ORDER BY 1,2`, [tag])).rows;
+      assert.deepEqual(rows, [{ kind: 'error', key: code, n: 6, errors: 0, slowest: 0 }, { kind: 'read', key: workspace, n: 80, errors: 0, slowest: 0 },
+        { kind: 'route', key: slowRoute, n: 86, errors: 0, slowest: 45_000 }, { kind: 'route', key: failing, n: 60, errors: 60, slowest: 3 }]);
+      const histOf = async (table: string) => (await db.query(`SELECT (SELECT array_agg(s ORDER BY i) FROM (SELECT i,sum(v)::int AS s FROM ${table} m,unnest(m.hist) WITH ORDINALITY u(v,i) WHERE m.key=$1 GROUP BY i) x) AS hist`, [slowRoute])).rows[0].hist;
+      const hist = await histOf('health_minutes');
+      assert.deepEqual([hist.length, hist[2], hist.at(-1)], [counters.LATENCY_BUCKETS.length + 1, 82, 4]);
+
+      // The tick turns them into the page's routes and error codes, and into cards: the slow route, the database's refusals, the failing job and the dispatcher.
+      runtime.config.operatorSlackWebhookUrl = OPERATOR_HOOK;
+      const posted: string[] = [];
+      for (let i = 0; i < 6 && !(posted.some(text => text.includes('database-errors:25006')) && posted.some(text => text.includes(`errors:${code}`))); i++) await healthTick(runtime, {}, { force: true, post: async (_url, card) => { posted.push(card.text); } });
+      const page = ok(await local('GET', '/v1/operator/health'));
+      assert.deepEqual(page.routes.filter((route: Json) => route.route.includes(tag)), [{ route: slowRoute, count: 86, errors: 0, p50Ms: 25, p95Ms: 25, slowestMs: 45_000, behind: true }, { route: failing, count: 60, errors: 60, p50Ms: 3, p95Ms: 3, slowestMs: 3, behind: false }]);
+      assert.ok(page.errors.some((e: Json) => e.kind === 'sqlstate' && e.code === '25006' && e.count >= 60) && page.errors.some((e: Json) => e.kind === 'error' && e.code === code && e.count === 6) && page.requests.errors >= 60, JSON.stringify(page.errors));
+      const words = posted.map(text => text.split('\n')[0]!), keys = posted.map(text => / ?key=(\S+) state=open /.exec(text.split('\n')[1]!)?.[1]);
+      assert.ok(words.includes(`Slow requests: ${c(slowRoute)}: slowest 45 s, p95 25 ms over 86 in 15 min.`) && keys.includes(`slow-requests:GET:/v1/fixture-${tag}/:id`), posted.join('\n'));
+      assert.ok(words.includes(`Errors: ${c(code)}: 6 in 5 min.`) && words.some(line => /^Database errors: read-only \(`25006`\): \d+ in 5 min\.$/.test(line)) && words.some(line => /^Server errors: \d[\d,]* of \d[\d,]* requests in 5 min \([\d.]+%\), mostly `DATABASE_UNAVAILABLE`\.$/.test(line)), posted.join('\n'));
+
+      // Minutes older than two hours fold into their hour, once, and are gone from the minutes: the p95 outlives the logs.
+      await db.query(`UPDATE health_minutes SET minute=date_trunc('hour',now())-interval '3 hours 20 minutes' WHERE key ILIKE '%'||$1||'%'`, [tag]);
+      await healthTick(runtime, {}, { force: true, post: async () => {} });
+      const folded = (await db.query(`SELECT kind,key,n::int,errors::int,slowest,hour=date_trunc('hour',now())-interval '4 hours' AS hour FROM health_hours WHERE key ILIKE '%'||$1||'%' ORDER BY 1,2`, [tag])).rows;
+      assert.deepEqual([folded, (await db.query(`SELECT count(*)::int AS n FROM health_minutes WHERE key ILIKE '%'||$1||'%'`, [tag])).rows[0].n, (await histOf('health_hours')).at(-1)],
+        [[{ kind: 'error', key: code, n: 6, errors: 0, slowest: 0, hour: true }, { kind: 'route', key: slowRoute, n: 86, errors: 0, slowest: 45_000, hour: true }, { kind: 'route', key: failing, n: 60, errors: 60, slowest: 3, hour: true }], 0, 4]);
+    });
   });
 
   test('SDK responses preserve acceptance, rejection, throttling and timeout semantics without network', async t => {

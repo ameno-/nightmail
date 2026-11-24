@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql, type SQL } from 'drizzle-orm';
-import { ApiError, denied, digest, id, randomSecret, errors, json, response, type App, type Ctx, type DbExecutor, type MailboxAccess } from './core.js';
+import { ApiError, budgetedRead, denied, digest, id, randomSecret, readLimit, readLimitNote, errors, json, response, type App, type Ctx, type DbExecutor, type MailboxAccess } from './core.js';
 import { longPoll, reservePolls } from './auth.js';
 import { auditContext, auditInsert, type AuditContext } from './audit.js';
 import type { MailboxPermission, MailAddress, Verdicts } from './db/mailbox.js';
@@ -213,16 +213,20 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
     if (r.replay) return c.json(r.inbox, 200);
     return c.json({ ...r.inbox, ...(credential && secret ? { credential: { id: credential.id, secret, permissions: input.credential!.permissions, expiresAt: r.inbox.deleteAfter } } : {}) }, 201);
   });
+  const INBOX_LIST_READ = 5;
   app.openapi(createRoute({
     ...meta, method: 'get', path: base, operationId: 'listInboxes', summary: 'List agent inboxes',
-    description: 'Inboxes this credential can see, ordered by ID, with status and usage. A provisioning key sees the inboxes it created. Pass nextCursor as cursor for the next page.',
+    description: 'Inboxes this credential can see, ordered by ID, with status and usage. A provisioning key sees the inboxes it created. Pass nextCursor as cursor for the next page. Filtered queries (type, status, q): ' + readLimitNote(INBOX_LIST_READ),
     request: { query: z.object({ type: type.optional(), status: status.optional(), q: z.string().max(200).optional().describe('Search address and name.'), cursor: key.optional(), limit: take }) },
     responses: { 200: response(z.object({ data: z.array(Inbox), nextCursor: z.string().nullable() }).openapi('InboxPage')), ...errors },
   }), async c => {
     const v = access(c, 'read'), q = c.req.valid('query');
-    const { rows } = await c.env.db.execute<{ box: Box }>(
+    const query = (db: DbExecutor) => db.execute<{ box: Box }>(
       sql`SELECT inbox_view(b) box FROM mailboxes b WHERE ${agentInbox(v)} ${q.type ? sql`AND b.create_request->>'type'=${q.type}` : sql``} ${q.cursor ? sql`AND b.id>${q.cursor}` : sql``} ${q.status ? sql`AND CASE WHEN delete_after<=now() THEN 'deleting' WHEN expires_at<=now() THEN 'expired' ELSE 'active' END=${q.status}` : sql``} ${q.q ? sql`AND strpos(lower(b.address||' '||coalesce(b.display_name,'')),lower(${q.q}))>0` : sql``} ORDER BY id LIMIT ${q.limit + 1}`,
     );
+    const { rows } = q.q || q.status || q.type
+      ? await budgetedRead(c.env.db, query, readLimit(INBOX_LIST_READ))
+      : await query(c.env.db);
     return c.json({ data: rows.slice(0, q.limit).map(r => r.box), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.box.id : null }, 200);
   });
   app.openapi(createRoute({
@@ -282,18 +286,43 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
     include: z.literal('held').optional().describe('Also list junk, unverified and held mail. Ignored with wait.'),
     extract,
   });
+  const INBOX_MESSAGES_READ = 5;
   app.openapi(createRoute({
     ...meta, method: 'get', path: messages, operationId: 'listInboxMessages', summary: 'List or wait for inbox messages',
-    description: 'Oldest first, in commit order. Without after, the page starts at the first message, so mail that arrived before the call is included. With wait, the call holds until a matching message arrives or the time runs out; pass the returned cursor as after on the next call. Junk, unverified and held mail never wake a waiter: list them with include=held. Each waited second counts as one request against the key’s per-minute budget.',
+    description: 'Oldest first, in commit order. Without after, the page starts at the first message, so mail that arrived before the call is included. With wait, the call holds until a matching message arrives or the time runs out; pass the returned cursor as after on the next call. Junk, unverified and held mail never wake a waiter: list them with include=held. Each waited second counts as one request against the key’s per-minute budget. Filtered queries: ' + readLimitNote(INBOX_MESSAGES_READ),
     request: { params, query },
     responses: { 200: response(z.object({ data: z.array(Message), cursor: z.string().describe('Pass as after on the next call; unchanged when data is empty.'), hasMore: z.boolean() }).openapi('InboxMessagePage')), ...errors },
   }), async c => {
     const v = access(c, 'read'), q = c.req.valid('query'), { id } = c.req.valid('param');
     if (q.wait) await reservePolls(c, v.workspaceId, v.keyId, q.wait);
+    const filtered = Boolean(q.subjectContains || q.from || q.unread || q.flagged);
+    const fromAddr = q.from?.toLowerCase();
+    // Exact from_address uses mail_messages_search GIN via plainto_tsquery as a sound candidate prefilter
+    // before exact equality confirms the sender (never drops a true match, never returns body-only hits).
+    const fromFilter = fromAddr ? sql`AND m.search @@ plainto_tsquery('simple', ${fromAddr}) AND m.from_address=${fromAddr}` : sql``;
+    const run = <T>(work: (db: DbExecutor) => Promise<T>) => filtered ? budgetedRead(c.env.db, work, readLimit(INBOX_MESSAGES_READ)) : work(c.env.db);
+    // Capture inbox_state.modseq in the same MVCC snapshot as the scan. Every delivery and flag/folder
+    // change locks inbox_state FOR UPDATE and assigns a strictly increasing modseq before commit, so
+    // subsequent wait ticks first check s.modseq in O(1) and, when it advances, scan only rows with
+    // modseq > lastModseq (handling out-of-order inbox_seq commits and mutable unread/flagged filters).
+    type PollRow = Row & { state_modseq: string };
+    const scan = (sinceModseq: string | null) => run(async db => (await db.execute<PollRow>(
+      sql`SELECT s.modseq::text AS state_modseq, page.* FROM mailboxes b JOIN inbox_state s ON s.inbox_id=b.id LEFT JOIN LATERAL(SELECT m.id,m.thread_id,m.from_name,m.from_address,m."to",m.subject,m.received_at,((m.spam AND NOT 'guard-allowed'=ANY(l.labels)) OR 'spam'=ANY(l.labels)) AS spam,m.attachment_count,m.verdicts,left(m.text,32768) AS text,left(m.html,32768) AS html,${q.folder ? sql`e.uid` : sql`l.inbox_seq`}::text AS inbox_seq,l.read,l.held_reason,l.modseq::text,l.flags,l.labels,${locations} folders,${q.folder ? sql`e.uid::float8 uid,f.uid_validity::float8 uid_validity` : sql`NULL uid,NULL uid_validity`} FROM mailbox_messages l ${q.folder ? sql`JOIN inbox_entries e ON e.inbox_id=l.mailbox_id AND e.message_id=l.message_id AND e.role=${q.folder} JOIN inbox_folders f USING(inbox_id,role)` : sql``} JOIN mail_messages m ON m.id=l.message_id AND m.workspace_id=b.workspace_id WHERE l.mailbox_id=b.id ${sinceModseq !== null ? sql`AND ${q.folder ? sql`e.modseq` : sql`l.modseq`}>${sinceModseq}::bigint` : sql``} AND ${q.folder ? sql`e.uid` : sql`l.inbox_seq`}>${q.after}::bigint ${q.flagged ? sql`AND ((l.flags&1)<>0)=${q.flagged==='true'}`:sql``} ${!q.folder ? sql`AND l.direction='inbound'`:sql``} ${!q.wait && (q.include || q.folder) ? sql`` : sql`AND l.held_reason IS NULL AND NOT ('spam'=ANY(l.labels)) AND (NOT m.spam OR 'guard-allowed'=ANY(l.labels)) AND NOT ('unverified'=ANY(l.labels))`} ${fromFilter} ${q.unread ? sql`AND l.read=${q.unread === 'false'}` : sql``} ${q.subjectContains ? sql`AND strpos(lower(m.subject),lower(${q.subjectContains}))>0` : sql``} ORDER BY ${q.folder ? sql`e.uid` : sql`l.inbox_seq`} LIMIT ${q.limit + 1}) page ON true WHERE ${visible(v)} AND b.id=${id} ORDER BY page.inbox_seq::bigint`,
+    )).rows);
+    let lastModseq: string | null = null;
     // No row at all: the inbox isn't visible. A row without an id: visible, nothing new yet.
-    const rows = await longPoll(c, q.wait, async () => (await c.env.db.execute<Row>(
-      sql`SELECT page.* FROM mailboxes b LEFT JOIN LATERAL(SELECT m.id,m.thread_id,m.from_name,m.from_address,m."to",m.subject,m.received_at,((m.spam AND NOT 'guard-allowed'=ANY(l.labels)) OR 'spam'=ANY(l.labels)) AS spam,m.attachment_count,m.verdicts,left(m.text,32768) AS text,left(m.html,32768) AS html,${q.folder ? sql`e.uid` : sql`l.inbox_seq`}::text AS inbox_seq,l.read,l.held_reason,l.modseq::text,l.flags,l.labels,${locations} folders,${q.folder ? sql`e.uid::float8 uid,f.uid_validity::float8 uid_validity` : sql`NULL uid,NULL uid_validity`} FROM mailbox_messages l ${q.folder ? sql`JOIN inbox_entries e ON e.inbox_id=l.mailbox_id AND e.message_id=l.message_id AND e.role=${q.folder} JOIN inbox_folders f USING(inbox_id,role)` : sql``} JOIN mail_messages m ON m.id=l.message_id AND m.workspace_id=b.workspace_id WHERE l.mailbox_id=b.id AND ${q.folder ? sql`e.uid` : sql`l.inbox_seq`}>${q.after}::bigint ${q.flagged ? sql`AND ((l.flags&1)<>0)=${q.flagged==='true'}`:sql``} ${!q.folder ? sql`AND l.direction='inbound'`:sql``} ${!q.wait && (q.include || q.folder) ? sql`` : sql`AND l.held_reason IS NULL AND NOT ('spam'=ANY(l.labels)) AND (NOT m.spam OR 'guard-allowed'=ANY(l.labels)) AND NOT ('unverified'=ANY(l.labels))`} ${q.from ? sql`AND m.from_address=${q.from.toLowerCase()}` : sql``} ${q.unread ? sql`AND l.read=${q.unread === 'false'}` : sql``} ${q.subjectContains ? sql`AND strpos(lower(m.subject),lower(${q.subjectContains}))>0` : sql``} ORDER BY ${q.folder ? sql`e.uid` : sql`l.inbox_seq`} LIMIT ${q.limit + 1}) page ON true WHERE ${visible(v)} AND b.id=${id} ORDER BY page.inbox_seq::bigint`,
-    )).rows, rows => !rows.length || rows.some(r => r.id));
+    const rows = await longPoll(c, q.wait, async () => {
+      if (lastModseq !== null) {
+        const gate = (await c.env.db.execute<{ state_modseq: string }>(
+          sql`SELECT s.modseq::text AS state_modseq FROM mailboxes b JOIN inbox_state s ON s.inbox_id=b.id WHERE ${visible(v)} AND b.id=${id}`,
+        )).rows[0];
+        if (!gate) return [];
+        if (gate.state_modseq === lastModseq) return [{ id: null, state_modseq: lastModseq } as unknown as PollRow];
+      }
+      const next = await scan(lastModseq);
+      if (next[0]?.state_modseq) lastModseq = next[0].state_modseq;
+      return next;
+    }, rows => !rows.length || rows.some(r => r.id));
     if (!rows.length) throw absent();
     const data = rows.filter(r => r.id).slice(0, q.limit).map(r => project(r, q.extract).message);
     return c.json({ data, cursor: data.at(-1)?.cursor ?? q.after, hasMore: rows.length > q.limit }, 200);

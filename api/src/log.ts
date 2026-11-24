@@ -15,10 +15,16 @@ export function setLogContext(context: { service: string; deploy?: unknown; samp
   logContext.sample = context.sample;
 }
 const ROUTINE_CODES = new Set(['JOB_COMPLETED', 'QUEUE_WAKE', 'QUEUE_WAKE_COALESCED', 'JOB_DEFERRED']);
+/**
+ * A request or job that took this long is evidence, so its line is always written, whatever the sampling: on 23 November
+ * 2026 a 45-second "Send now" answered 202 and was sampled out. Ordinary requests answer in well under a second.
+ */
+export const SLOW_REQUEST_MS = 2_000;
+const slow = (fields: Record<string, unknown>) => [fields.durationMs, fields.runtimeMs, fields.jobMs].some(ms => typeof ms === 'number' && ms >= SLOW_REQUEST_MS);
 // Sample routine successes at the source, NOT whole invocations: a sampled-out request still logs every failure, and
-// a kept line carries its `sampleRate` so counts are estimated as 1/sampleRate lines each.
+// a kept line carries its `sampleRate` so counts are estimated as 1/sampleRate lines each. A slow one is never sampled.
 function sampleRate(level: 'info' | 'warn' | 'error', fields: Record<string, unknown>) {
-  if (level !== 'info' || logContext.sample === false) return 1;
+  if (level !== 'info' || logContext.sample === false || slow(fields)) return 1;
   if (typeof fields.code === 'string' && ROUTINE_CODES.has(fields.code)) return 0.01;
   return typeof fields.status === 'number' && fields.status < 400 ? 0.1 : 1;
 }
@@ -67,6 +73,10 @@ function scrub(value: unknown, depth = 0): unknown {
     return entries;
   } catch { return '[object]'; } // A proxy that throws from getPrototypeOf, ownKeys or a revoked proxy.
 }
+// One listener for error-level lines that carry a code and are not request lines: the health counters
+// (src/health-counters.ts) count them by code, so a job or a dispatcher that keeps failing is a number, not a search.
+let errorLine: ((code: string) => void) | undefined;
+export const onErrorLine = (listener: (code: string) => void) => { errorLine = listener; };
 /** What `log` writes when a line cannot be built: logging never throws into a request. */
 const LOG_FALLBACK = '{"level":"error","code":"LOG_SERIALIZE_FAILED"}';
 export function logFallback() { try { console.error(LOG_FALLBACK); } catch { /* Nothing left to write with. */ } }
@@ -74,6 +84,7 @@ export function log(level: 'info' | 'warn' | 'error', fields: Record<string, unk
   let line: string, write: 'info' | 'warn' | 'error' = 'error';
   try {
     write = level === 'info' || level === 'warn' ? level : 'error';
+    if (write === 'error' && errorLine && typeof fields.code === 'string' && fields.event !== 'request' && /^[A-Z][A-Z0-9_]{0,63}$/.test(fields.code)) try { errorLine(fields.code); } catch { /* Counting never stops a line. */ }
     const rate = sampleRate(write, fields);
     if (rate < 1 && Math.random() >= rate) return;
     const clean = scrub(fields);

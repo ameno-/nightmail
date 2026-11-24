@@ -98,7 +98,7 @@ export function settleFeedbackMessage(message: Pick<Message, 'attempts' | 'retry
  * verified like the tagged lane's. One message's verdict never changes another's; a quarantine or
  * archive write that fails holds only that message for a later attempt.
  */
-export type FeedbackLane = 'tagged' | 'legacy' | 'tagged-dlq' | 'legacy-dlq';
+export type FeedbackLane = 'tagged' | 'priority' | 'legacy' | 'tagged-dlq' | 'legacy-dlq';
 export type FeedbackVerdict = 'ingest' | 'legacy' | 'untagged' | 'refused';
 /** Missing, malformed or future cutovers fail closed. Never derive this from a queued body. */
 export function legacyFeedbackCutover(value: unknown, now = Date.now()): number | undefined {

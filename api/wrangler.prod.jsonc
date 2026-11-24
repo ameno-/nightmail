@@ -80,6 +80,7 @@
     "WEBHOOK_QUEUE_NAME": "nightmail-prod-webhooks",
     "JEVF_QUEUE_NAME": "nightmail-prod-jevf",
     "FEEDBACK_QUEUE_NAME": "nightmail-prod-feedback-v2",
+    "FEEDBACK_PRIORITY_QUEUE_NAME": "nightmail-prod-feedback-priority",
     "FEEDBACK_DLQ_NAME": "nightmail-prod-feedback-v2-dlq",
     "LEGACY_FEEDBACK_DLQ_NAME": "nightmail-prod-feedback-dlq",
     // The queue the previous Worker version wrote to; consumed until it and its dead letters are drained, then removed.
