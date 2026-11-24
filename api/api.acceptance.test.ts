@@ -32371,8 +32371,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     assert.deepEqual(lines.map(line => [line.durationMs ?? line.runtimeMs ?? line.jobMs, line.slow, line.sampleRate]), [[45_210, true, undefined], [45_300.5, undefined, undefined], [9_800, undefined, undefined]]);
     // Why a platform call failed is logged only when the error is the platform's: never a database error's text, which quotes parameters.
     assert.deepEqual([platformMessage(new Error('Durable Object storage operation exceeded timeout which caused object to be reset.')), platformMessage(Object.assign(new Error('duplicate key value (reader@example.net)'), { code: '23505' })),
-      platformMessage(new Error('Failed query', { cause: Object.assign(new Error('timeout'), { severity: 'ERROR' }) })), platformMessage(new ApiError(500, 'INTERNAL_ERROR', 'no')), platformMessage('text')],
-      ['Durable Object storage operation exceeded timeout which caused object to be reset.', undefined, undefined, undefined, undefined]);
+      platformMessage(new Error('Failed query', { cause: Object.assign(new Error('timeout'), { severity: 'ERROR' }) })), platformMessage(new ApiError(500, 'INTERNAL_ERROR', 'no')), platformMessage('text'),
+      platformMessage(Object.assign(new Error('Email address is not verified: reader@example.net'), { name: 'MessageRejected', $metadata: { httpStatusCode: 400 } }))],
+      ['Durable Object storage operation exceeded timeout which caused object to be reset.', undefined, undefined, undefined, undefined, undefined]);
 
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
       const tag = unique('r').slice(-8), slowRoute = `GET /v1/fixture-${tag}/:id`, failing = `POST /v1/fixture-${tag}`, workspace = `ws_${tag}`, code = `FIXTURE_${tag.toUpperCase()}_FAILED`;
