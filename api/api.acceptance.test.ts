@@ -33612,6 +33612,94 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  test('campaign content hash reader: verifies legacy and s1: hashes, rejects tampering, and pauses without burning recipients on unknown formats', async t => {
+    const { staticContentHash, verifyCampaignContentHash, isSupportedContentHash, sentCampaignContent } = await import('./src/sending.js');
+    const { digest } = await import('./src/core.js');
+    const { canonical } = await import('./src/idempotency.js');
+    assert.deepEqual([
+      isSupportedContentHash('a'.repeat(64)),
+      isSupportedContentHash('s1:' + 'a'.repeat(64)),
+      isSupportedContentHash('s2:' + 'a'.repeat(64)),
+      isSupportedContentHash('s1:short'),
+      isSupportedContentHash(null),
+    ], [true, true, false, false, false]);
+
+    await simulatedSesFixture(t, async ({ runtime, local, run, db }) => {
+      const ws = runtime.config.workspaceId;
+      const list = ok(await local('POST', '/v1/lists', { name: unique('s1-reader') }), 201);
+      await db.query(`INSERT INTO audience_contacts (id, workspace_id, email, marketing_consent)
+        SELECT 'con_s1_' || n, $1, 's1-reader-' || n || '@example.com', 'subscribed' FROM generate_series(1, 6) n`, [ws]);
+      await db.query('INSERT INTO audience_list_members (workspace_id, list_id, contact_id) SELECT workspace_id, $2, id FROM audience_contacts WHERE workspace_id = $1', [ws, list.id]);
+
+      const camp = ok(await local('POST', '/v1/campaigns', { name: unique('s1-ok'), from: 'sender@example.com', subject: 'Static S1', html: '<p>Hello static world</p>', audience: { listId: list.id } }), 201);
+      ok(await local('POST', `/v1/campaigns/${camp.id}/send`, { revision: camp.revision }), 202);
+      await run('campaign.run');
+      await run('email.dispatch');
+      const revId = (await db.query('SELECT review_id FROM sending_campaigns WHERE id=$1', [camp.id])).rows[0].review_id as string;
+      const { rows: [revRow] } = await db.query('SELECT draft, rendered, renderer_version FROM sending_campaign_reviews WHERE id=$1', [revId]);
+      const baseCustomer = {
+        from: 'sender@example.com', to: ['s1-reader-1@example.com'], cc: [], bcc: [], replyTo: [],
+        region: REGION, kind: 'marketing' as const, subject: 'Static S1',
+        html: revRow.rendered.html, text: revRow.rendered.text, attachments: [], tracking: false, headers: [],
+      };
+      const baseHash = await digest(canonical({ ...baseCustomer, to: [] }));
+      assert.equal(await verifyCampaignContentHash(baseCustomer, await staticContentHash(baseHash, 's1-reader-1@example.com')), true);
+      assert.equal(await verifyCampaignContentHash({ ...baseCustomer, html: '<p>Tampered</p>' }, await staticContentHash(baseHash, 's1-reader-1@example.com')), false);
+      assert.equal(await verifyCampaignContentHash({ ...baseCustomer, to: ['other@example.com'] }, await staticContentHash(baseHash, 's1-reader-1@example.com')), false);
+      await assert.rejects(verifyCampaignContentHash(baseCustomer, 's2:' + 'a'.repeat(64)), { code: 'CAMPAIGN_HASH_FORMAT_UNSUPPORTED' });
+
+      // 1. Stamp a campaign with s1: hashes directly and verify full release, dispatch, and sentCampaignContent rebuild!
+      const campS1 = ok(await local('POST', '/v1/campaigns', { name: unique('s1-mixed'), from: 'sender@example.com', subject: 'Static S1', html: '<p>Hello static world</p>', audience: { listId: list.id } }), 201);
+      ok(await local('POST', `/v1/campaigns/${campS1.id}/send`, { revision: campS1.revision }), 202);
+      const s1RevId = (await db.query('SELECT review_id FROM sending_campaigns WHERE id=$1', [campS1.id])).rows[0].review_id as string;
+      const s1Recs = (await db.query("SELECT ordinal, recipient->>'email' AS email FROM sending_review_recipients WHERE review_id=$1 ORDER BY ordinal", [s1RevId])).rows as { ordinal: number; email: string }[];
+      for (const r of s1Recs) {
+        const h = await staticContentHash(baseHash, r.email);
+        await db.query('UPDATE sending_review_recipients SET content_hash=$1, snapshot_bytes=1024 WHERE review_id=$2 AND ordinal=$3', [h, s1RevId, r.ordinal]);
+      }
+      await db.query("UPDATE sending_campaigns SET state='sending', prepared=total WHERE id=$1", [campS1.id]);
+      await run('campaign.run');
+      await run('email.dispatch');
+      const s1View = ok(await local('GET', `/v1/campaigns/${campS1.id}`));
+      assert.equal(s1View.state, 'done');
+      assert.equal((s1View.counts.byStatus.simulated ?? 0) + (s1View.counts.byStatus.accepted ?? 0) + (s1View.counts.byStatus.delivered ?? 0), 6, 'All 6 s1:-hashed recipients dispatched cleanly');
+      assert.equal(s1View.counts.byStatus.rejected ?? 0, 0);
+      const s1Mail = (await db.query('SELECT * FROM sending_emails WHERE workspace_id=$1 AND campaign_id=$2 ORDER BY review_ordinal LIMIT 1', [ws, campS1.id])).rows[0];
+      const rebuiltS1 = await sentCampaignContent(runtime, { workspaceId: ws, keyId: 'test', permissions: ['manage'], domains: [] }, {
+        ...s1Mail, workspaceId: s1Mail.workspace_id, actorKeyId: s1Mail.actor_key_id, campaignId: s1Mail.campaign_id, reviewId: s1Mail.review_id, reviewOrdinal: s1Mail.review_ordinal,
+        fromAddress: s1Mail.from_address, toAddresses: s1Mail.to_addresses, ccAddresses: s1Mail.cc_addresses, bccAddresses: s1Mail.bcc_addresses,
+        providerId: s1Mail.provider_id, errorCode: s1Mail.error_code, suppressionReason: s1Mail.suppression_reason,
+        scheduledAt: s1Mail.scheduled_at, attemptStartedAt: s1Mail.attempt_started_at, leaseUntil: s1Mail.lease_until,
+        createdAt: s1Mail.created_at, updatedAt: s1Mail.updated_at, feedbackTopicArn: s1Mail.feedback_topic_arn,
+        dispatchVersion: s1Mail.dispatch_version, attachmentFailures: s1Mail.attachment_failures, eventOutcomes: s1Mail.event_outcomes,
+      });
+      assert.ok(rebuiltS1.html?.includes('Hello static world'), 'sentCampaignContent rebuilds s1: email cleanly');
+
+      // 2. Unknown future hash format (s2:...) pauses at releaseStep without releasing or burning any recipient!
+      const campFuture = ok(await local('POST', '/v1/campaigns', { name: unique('s2-future'), from: 'sender@example.com', subject: 'Future', html: '<p>Future</p>', audience: { listId: list.id } }), 201);
+      ok(await local('POST', `/v1/campaigns/${campFuture.id}/send`, { revision: campFuture.revision }), 202);
+      const futRevId = (await db.query('SELECT review_id FROM sending_campaigns WHERE id=$1', [campFuture.id])).rows[0].review_id as string;
+      await db.query("UPDATE sending_review_recipients SET content_hash=$1, snapshot_bytes=1024 WHERE review_id=$2", ['s2:' + 'b'.repeat(64), futRevId]);
+      await db.query("UPDATE sending_campaigns SET state='sending', prepared=total WHERE id=$1", [campFuture.id]);
+      await run('campaign.run');
+      const futView = ok(await local('GET', `/v1/campaigns/${campFuture.id}`));
+      assert.deepEqual([futView.state, futView.delivery.expanded, futView.delivery.pauseReason?.code], ['paused', 0, 'CAMPAIGN_HASH_FORMAT_UNSUPPORTED']);
+
+      // 3. Even if email rows were already queued referencing an s2: hash, dispatch defers them (never rejects/burns) and pauses the campaign loudly!
+      const campQueued = ok(await local('POST', '/v1/campaigns', { name: unique('s2-queued'), from: 'sender@example.com', subject: 'FutureQ', html: '<p>FutureQ</p>', audience: { listId: list.id } }), 201);
+      ok(await local('POST', `/v1/campaigns/${campQueued.id}/send`, { revision: campQueued.revision }), 202);
+      await run('campaign.run');
+      const qRevId = (await db.query('SELECT review_id FROM sending_campaigns WHERE id=$1', [campQueued.id])).rows[0].review_id as string;
+      await db.query("UPDATE sending_review_recipients SET content_hash=$1 WHERE review_id=$2", ['s2:' + 'c'.repeat(64), qRevId]);
+      await run('email.dispatch');
+      const qView = ok(await local('GET', `/v1/campaigns/${campQueued.id}`));
+      assert.equal(qView.state, 'paused', 'Campaign pauses instead of ending done');
+      assert.equal(qView.delivery.pauseReason?.code, 'CAMPAIGN_HASH_FORMAT_UNSUPPORTED');
+      assert.equal(qView.counts.byStatus.rejected ?? 0, 0, 'Zero recipients rejected/burned');
+      assert.equal(qView.counts.byStatus.queued, 6, 'All 6 recipients remain queued for the matching release');
+    });
+  });
+
   test('paced campaigns release one daily window at a time, pause and resume in place, hold for the SES daily quota, and pause automatically on bounces', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
       const ws = runtime.config.workspaceId;
