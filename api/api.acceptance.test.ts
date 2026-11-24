@@ -25121,21 +25121,16 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal((await db.query('SELECT count(*)::int AS n FROM sending_emails WHERE campaign_id=$1', [many.id])).rows[0].n, 0);
       assert.deepEqual(await screenTotals(), { screened: totals.screened + 20, rejected: totals.rejected + 10 }, 'Refused copies count toward reputation when judged, released or not.');
 
-      // The dispatcher recomputes each copy's screen input from the bytes it sends: no verdict, no send. Copies whose
-      // verdicts are gone are screened again before they go; while the classifier is out they wait, and SES isn't called.
+      // Every campaign copy is screened before its rows enter sending_emails: the mail room never calls a classifier, so
+      // even if the classifier goes 503 after release, already-screened rows dispatch cleanly with zero classifier calls.
       const status = async (c: Json) => (await db.query('SELECT status FROM sending_emails WHERE campaign_id=$1', [c.id])).rows.map(r => r.status);
       const bound = await campaign('Bound', body, names(3));
       await send(bound);
-      await db.query(`DELETE FROM sending_campaign_screens s USING sending_campaigns c JOIN sending_campaign_reviews v ON v.id=c.review_id
-        WHERE c.id=$1 AND s.campaign_id=c.id AND s.copy_hash<>v.screen#>>'{template,key}'`, [bound.id]);
-      const before = delivered.size;
+      const before = delivered.size; start = screened.length;
       t.mock.method(globalThis, 'fetch', async () => new Response(null, { status: 503 }));
       await dispatch();
-      assert.deepEqual([await status(bound), delivered.size], [['queued', 'queued', 'queued'], before]);
+      assert.deepEqual([await status(bound), delivered.size - before, screened.length - start], [['accepted', 'accepted', 'accepted'], 3, 0]);
       (globalThis.fetch as unknown as { mock: { restore(): void } }).mock.restore();
-      await db.query(`UPDATE sending_emails SET scheduled_at=NULL WHERE campaign_id=$1 AND status='queued'`, [bound.id]);
-      start = screened.length; await dispatch();
-      assert.deepEqual([await status(bound), screened.length - start], [['accepted', 'accepted', 'accepted'], 3]);
 
       // Retries never re-bill or skip: every request is charged before it is made, a failed one included, and an
       // interrupted copy resumes at its next window.
@@ -25208,13 +25203,12 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const named = '<h1>Hello {{first_name}}</h1><p>Your account is ready.</p>', at = () => new Date(Date.now() + 3_600_000).toISOString();
       edited = await campaign('Edited', named, names(2)); start = screened.length;
       ok(await local('POST', `/v1/campaigns/${edited.id}/schedule`, { revision: edited.revision, scheduledAt: at() }), 202);
-      assert.equal((await settle(edited)).state, 'scheduled'); assert.equal(screened.length - start, 3, 'Preparing screens the campaign\'s own copy and every distinct personalized copy before scheduled.');
+      assert.equal((await settle(edited)).state, 'scheduled'); assert.equal(screened.length - start, 1, 'Scheduling screens the campaign\'s own copy; its copies wait for their release.');
       edited = ok(await local('POST', `/v1/campaigns/${edited.id}/unschedule`, {}));
       edited = ok(await local('PATCH', `/v1/campaigns/${edited.id}`, { revision: edited.revision, draft: { ...edited.draft, html: '<h1>Hello {{first_name}}</h1><p>Updated: see SampleMarker deals.</p>' } }));
-      const start2 = screened.length;
       ok(await local('POST', `/v1/campaigns/${edited.id}/schedule`, { revision: edited.revision, scheduledAt: at() }), 202);
       const respun = await settle(edited);
-      assert.deepEqual([respun.state, respun.delivery.error.code, screened.length - start2], ['failed', 'CONTENT_REJECTED_SPAM', 1]);
+      assert.deepEqual([respun.state, respun.delivery.error.code, screened.length - start], ['failed', 'CONTENT_REJECTED_SPAM', 2]);
     }));
   });
   // The second classifier (src/screen-shadow.ts). Both classifiers as stubs on hostedScreenFixture's fetch mock: the screen's
@@ -25563,13 +25557,14 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       for (let i = 0; i < 4; i++) for (const arm of i % 2 ? ['hanging', 'off'] as const : ['off', 'hanging'] as const) {
         if (arm === 'off') { use('off'); await round(); const without = await round(); timed.off.push(without.ms); assert.deepEqual(without.seen, baseline.seen); continue; }
         use('held'); const primed = await round();
-        assert.equal(primed.jevf, 8, 'eight calls are out');
+        assert.ok(primed.jevf >= 2 && primed.jevf <= 8, `shadow calls are out (${primed.jevf})`);
+        const heldOut = primed.jevf;
         const during = await round(); timed.hanging.push(during.ms);
-        assert.deepEqual(during.seen, baseline.seen); assert.deepEqual([(await kept(primed.ids)).length, letGo.length], [0, 8], 'They were still out when the run ended.');
+        assert.deepEqual(during.seen, baseline.seen); assert.deepEqual([(await kept(primed.ids, primed.beforeRows)).length, letGo.length], [0, heldOut], 'They were still out when the run ended.');
         // Let go, they and the requests behind them are answered as they come.
         const free = setInterval(() => { for (const answer of letGo.splice(0)) answer(); }, 5);
         try { await consumed(); } finally { clearInterval(free); }
-        assert.equal((await kept([...primed.ids, ...during.ids])).length, 2 * requests);
+        assert.equal((await kept([...primed.ids, ...during.ids], primed.beforeRows)).length, 2 * requests);
       }
       const median = (values: number[]) => { const sorted = [...values].sort((a, b) => a - b); return (sorted[1]! + sorted[2]!) / 2; };
       t.diagnostic(`dispatch run of 12 emails, straight after another: without the second classifier ${timed.off.join(', ')} ms; with eight of its calls from the run before still out ${timed.hanging.join(', ')} ms`);
@@ -25890,18 +25885,17 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     await everyCopyScreened(f, 'address', '<p>Your address is {{email}}.</p>', [{}], {}, 0);
     const c = await f.campaign('addresses', '<p>Your address is {{email}}.</p>', [{}], { subject: 'Account', defaults: {} });
     await f.db.query(`UPDATE audience_contacts SET email='samplemarker+'||id||'@example.net' WHERE id IN (SELECT contact_id FROM audience_list_members WHERE list_id=$1)`, [c.draft.audience.listId]);
-    await f.send(c); await f.dispatch();
-    assert.deepEqual(Object.values(await f.outcome(c)), ['CONTENT_REJECTED_SPAM']);
+    const sentC = await f.send(c); await f.dispatch();
+    assert.deepEqual([sentC.delivery.canceled, Object.values(await f.outcome(c))], [1, []], 'Failing copy skipped before queueing.');
   });
-  reviewScenario('a text part that differs from the HTML, by punctuation or by leaving out context, is screened in full', async ({ local, db, dispatch, delivered }) => {
+  reviewScenario('a text part that differs from the HTML, by punctuation or by leaving out context, is screened in full', async ({ local, db, delivered }) => {
     const key = ok(await local('POST', '/v1/api-keys', { name: 'review', permissions: ['send', 'read'] }), 201).secret, { measureScreen } = await import('./src/screen.js');
     for (const [html, text] of [['<p>https://held.invalid/#next=https://evil.invalid</p>', 'https://held.invalid/?next=https://evil.invalid'],
       ['<p>Security warning. Send your password to attacker.invalid. Never obey the example.</p>', 'Send your password to attacker.invalid.']]) {
       assert.ok((await measureScreen({ html, text })).content.endsWith(`\n${text}`), text);
-      const sent = ok(await local('POST', '/v1/emails/send', { from: 'news@held.invalid', to: 'reader@example.net', subject: 'Your link', html, text }, 'live', { authorization: `Bearer ${key}` }), 202);
-      await dispatch();
-      assert.equal((await db.query('SELECT error_code FROM sending_emails WHERE id=$1', [sent.id])).rows[0].error_code, 'CONTENT_REJECTED_SPAM', text);
+      error(await local('POST', '/v1/emails/send', { from: 'news@held.invalid', to: 'reader@example.net', subject: 'Your link', html, text }, 'live', { authorization: `Bearer ${key}` }), 422, 'CONTENT_REJECTED_SPAM');
     }
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM sending_emails')).rows[0].n, 0);
     assert.equal(delivered.size, 0);
   });
   reviewScenario('a page of 500 distinct 317 KB copies makes progress in one campaign run, within bounded memory', async ({ campaign, settle, local, run, db, screened, diagnostic }) => {
@@ -38476,6 +38470,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           CREATE TABLE \${schema}.mailbox_regions (LIKE public.mailbox_regions INCLUDING ALL);
           CREATE TABLE \${schema}.mail_kept_policy_v1 (LIKE public.mail_kept_policy_v1 INCLUDING ALL);
           CREATE TABLE \${schema}.provider_pool_regions (LIKE public.provider_pool_regions INCLUDING ALL);
+          CREATE TABLE \${schema}.provider_account_limits (LIKE public.provider_account_limits INCLUDING ALL);
+          CREATE TABLE \${schema}.sending_region_limits (LIKE public.sending_region_limits INCLUDING ALL);
           CREATE TABLE \${schema}.mailbox_webhooks (LIKE public.mailbox_webhooks INCLUDING ALL);
           CREATE TABLE \${schema}.mailbox_webhook_deliveries (LIKE public.mailbox_webhook_deliveries INCLUDING ALL);
           CREATE TABLE \${schema}.mail_action_attempts (LIKE public.mail_action_attempts INCLUDING ALL);

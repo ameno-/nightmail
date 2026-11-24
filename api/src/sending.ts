@@ -3407,41 +3407,10 @@ async function captureStep(runtime: Runtime, a: Actor, row: RunRow, jobId: strin
 // preparing: validate the next chunk of frozen recipients (every substitution, URL and MIME size) and keep only each
 // message's digest; when the whole list is validated the campaign moves to its schedule or straight to sending.
 async function prepareStep(runtime: Runtime, a: Actor, row: RunRow, jobId: string) {
-  const hosted = runtime.config.multiTenant && row.account?.kind === 'shared';
-  const state = campaignScreened(runtime, hosted) ? row.reviewScreen?.contentHash === row.reviewHash ? row.reviewScreen : null : undefined;
+  const state = campaignScreened(runtime, row.account?.kind === 'shared') ? row.reviewScreen?.contentHash === row.reviewHash ? row.reviewScreen : null : undefined;
   if (state !== undefined && !state?.template) return screenCampaignStep(runtime, a, row);
   if (state?.template && state.template.spam >= runtime.config.screen!.threshold) return campaignRejected(runtime, a, row, state);
   const ref = campaignRef(a, row.id), review = { draft: row.reviewDraft!, rendered: row.reviewRendered! };
-  const isPersonalized = [review.draft.subject, review.rendered.html, review.rendered.text].some(value => value?.includes('{{'));
-  // Personalized Hosted campaigns screen every distinct copy during preparing before transitioning to sending/scheduled,
-  // so no failing copy ever enters sending_emails. While screening is in progress, prepared stays capped at total - 1 so
-  // sending_campaigns keeps its (state='preparing' => prepared < total) invariant.
-  if (state && isPersonalized && row.prepared >= Math.max(0, row.total - 1)) {
-    const { rows: [unstamped] } = await runtime.db.execute<{ n: number }>(sql`SELECT 1 AS n FROM sending_review_recipients WHERE review_id = ${row.reviewId} AND content_hash IS NULL LIMIT 1`);
-    if (!unstamped) {
-      let nextState = state;
-      if (nextState.screenedThrough < row.total) {
-        nextState = await screenAhead(runtime, a, row, nextState, Math.min(row.total, nextState.screenedThrough + SCREEN_AHEAD));
-      }
-      const line = (await wrapModuleLoad(() => import('./standing-model.js'))).LADDER.screen.restrict[0];
-      if (!nextState.quarantined && nextState.rejected >= line.count && nextState.rejected / nextState.recipients >= line.rate) {
-        await saveScreen(runtime, a, row, { ...nextState, quarantined: true });
-        const unhealthy = { code: 'CONTENT_REJECTED_SPAM', message: `Paused: the content screen refused ${nextState.rejected} of ${nextState.recipients} recipients' copies as spam (the line is ${line.rate * 100}% and ${line.count}). Refused copies are never sent. Review the content and contact values before resuming.` };
-        const paused = await runtime.db.transaction(async tx => {
-          const moved = await tx.execute(quarantineCampaign(ref, unhealthy));
-          if (moved.rows.length) await (await wrapModuleLoad(() => import('./standing.js'))).applyChange(tx, { workspaceId: a.workspaceId, actor: { kind: 'system', via: 'job' }, kind: 'quarantine',
-            details: { campaignId: row.id, campaignName: row.draft.name ?? row.id, code: unhealthy.code, message: unhealthy.message } });
-          return moved;
-        });
-        if (paused.rows.length) log('warn', { code: 'CAMPAIGN_AUTO_PAUSED', campaignId: row.id, reason: unhealthy.code });
-        return;
-      }
-      if (nextState.screenedThrough >= row.total) {
-        await runtime.db.execute(recordPrepared(ref, row.total, runningState({ prepared: row.total, total: row.total, scheduledAt: row.scheduledAt })));
-      }
-      return;
-    }
-  }
   await runtime.db.transaction(async db => {
     const campaign = await findCampaign(db, a, row.id, true);
     if (campaign.state !== 'preparing' || campaign.reviewId !== row.reviewId) return;
@@ -3520,11 +3489,7 @@ async function prepareStep(runtime: Runtime, a: Actor, row: RunRow, jobId: strin
     await db.execute(sql`UPDATE sending_review_recipients r SET content_hash = p.hash, subject = nullif(p.subject,${review.draft.subject}), snapshot_bytes = p.bytes
       FROM jsonb_to_recordset(${JSON.stringify(prepared)}::jsonb) AS p(ordinal integer, hash text, subject text, bytes integer)
       WHERE r.review_id = ${campaign.reviewId} AND r.ordinal = p.ordinal AND r.content_hash IS NULL`);
-    // Personalized Hosted campaigns stay in 'preparing' (with prepared capped below total) until every distinct copy is screened above.
-    const deferForScreen = Boolean(state && isPersonalized && cursor >= campaign.total);
-    const nextState = deferForScreen ? 'preparing' : runningState({ prepared: cursor, total: campaign.total, scheduledAt: campaign.scheduledAt });
-    const nextPrepared = deferForScreen ? Math.max(0, campaign.total - 1) : cursor;
-    await db.execute(recordPrepared(ref, nextPrepared, nextState));
+    await db.execute(recordPrepared(ref, cursor, runningState({ prepared: cursor, total: campaign.total, scheduledAt: campaign.scheduledAt })));
   });
 }
 /**
