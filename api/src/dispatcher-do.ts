@@ -1,6 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import type { Pool } from 'pg';
-import type { GateState } from './dispatcher.js';
+import { shardsForRate, TARGET_SHARD_RATE, type GateState } from './dispatcher.js';
+export { shardsForRate, TARGET_SHARD_RATE };
 import type { Runtime } from './core.js';
 
 function initDeps() {
@@ -34,21 +35,8 @@ type Identity = { region: string; accountId?: string; shard: { index: number; co
 const RUN_MS = 45000;      // Re-arm well inside the alarm wall-clock and default CPU budgets.
 const RETRY_MS = 15000;    // Dependency failure (database, quota) backoff.
 const OVERDUE_MS = 3000;   // An alarm this far past due with no run in progress is waiting out a platform retry: arm it again.
-/** Target per-shard SES send rate (emails/sec). A Durable Object holds 6 simultaneous outbound connections (~35/s ceiling
- *  at 170 ms SES RTT), so 25/s per shard gives 8 shards at 200/s and scales smoothly to 40 shards at 1,000/s. */
-export const TARGET_SHARD_RATE = 25;
-
 export function dispatcherName(identity: Identity) { return `dispatcher:${identity.accountId ? `${identity.accountId}:` : ''}${identity.region}:${identity.shard.index}/${identity.shard.count}`; }
 export function shardCount(value: unknown) { const n = Number(value); return Number.isInteger(n) && n >= 1 ? Math.min(n, 256) : 1; }
-/** Derives the number of mail-room shards from the SES account's MaxSendRate, falling back to `fallback` before the first quota sample. */
-export function shardsForRate(rate: number | null | undefined, fallback = 1, max = 256, targetRate = TARGET_SHARD_RATE): number {
-  const cap = Math.min(256, Math.max(1, Math.floor(max) || 256));
-  if (typeof rate === 'number' && Number.isFinite(rate) && rate > 0) {
-    const target = Number.isFinite(targetRate) && targetRate > 0 ? targetRate : TARGET_SHARD_RATE;
-    return Math.min(cap, Math.max(1, Math.ceil(rate / target)));
-  }
-  return Math.min(cap, Math.max(1, Math.floor(fallback) || 1));
-}
 
 export class DispatcherShard extends DurableObject<Env> {
   private pool?: Pool;

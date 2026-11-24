@@ -64,6 +64,18 @@ export interface QuotaSnapshot { maxSendRate: number; max24HourSend: number; sen
 // Serializable pacing state so a Durable Object survives eviction without bursting.
 export interface GateState { nextAllowedAt: number; txAllowedAt?: number; marketingAllowedAt?: number; quota: QuotaSnapshot | null; refreshAt?: number; sentSinceRefresh: number; brakeUntil?: number; marketingBrakeUntil?: number; recentTxUntil?: number; accountPauseAt?:number; outageUntil?: number; outageStreak?: number; dailyBlockedUntil?: number; ownerCursor?: string }
 export const initialGate = (): GateState => ({ nextAllowedAt: 0, quota: null, sentSinceRefresh: 0 });
+/** Target per-shard SES send rate (emails/sec). A Durable Object holds 6 simultaneous outbound connections (~35/s ceiling
+ *  at 170 ms SES RTT), so 25/s per shard gives 8 shards at 200/s and scales smoothly to 40 shards at 1,000/s. */
+export const TARGET_SHARD_RATE = 25;
+/** Derives the number of mail-room shards from the SES account's MaxSendRate, falling back to `fallback` before the first quota sample. */
+export function shardsForRate(rate: number | null | undefined, fallback = 1, max = 256, targetRate = TARGET_SHARD_RATE): number {
+  const cap = Math.min(256, Math.max(1, Math.floor(max) || 256));
+  if (typeof rate === 'number' && Number.isFinite(rate) && rate > 0) {
+    const target = Number.isFinite(targetRate) && targetRate > 0 ? targetRate : TARGET_SHARD_RATE;
+    return Math.min(cap, Math.max(1, Math.ceil(rate / target)));
+  }
+  return Math.min(cap, Math.max(1, Math.floor(fallback) || 1));
+}
 // Round up to a multiple of sendConcurrency (6) so a batch never ends in a 1-row tail claim.
 export const shardLeaseSize=(rate:number|undefined,count:number)=>rate!==undefined && count>1 ? Math.min(24,Math.max(6,Math.ceil(rate/count/6)*6)) : 24;
 export type Pacing = { rateFactor: number; txReservePercent?: number; targetRate?: number; live: boolean };

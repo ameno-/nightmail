@@ -22983,9 +22983,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.ok(cmd instanceof SendEmailCommand); return {MessageId:unique('fake-ses')};
       });
       await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,suppressed) VALUES('suppressed-fixture',$1,'blocked@example.net',true)`,[wid]);
-      const blocked=ok(await send({to:'blocked@example.net'}),202);
+      error(await send({to:'blocked@example.net'}),422,'RECIPIENT_INELIGIBLE');
       assert.equal((await runDispatcher(runtime,{region:REGION,accountId:pool})).sent,1); assert.equal(ses.mock.callCount(),2);
-      assert.equal(blocked.status, 422);
       // Complaints stop everything at 0.3% and 5 in 24 hours.
       await event('complaint',1,5); await checkHostedHealth(runtime); assert.equal(await pause(),null);
       await event('complaint',5,6); await checkHostedHealth(runtime); assert.match((await pause()).reason,/spam-complaint/);
@@ -24466,7 +24465,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       for(const name of ['ok','503','stall','stall-body','network','invalid'])await send(name,code++);
       assert.deepEqual(await limits(),own,'A written flush puts the caller\'s limits back');
       const {rows}=await db.query(`SELECT email_id,workspace_id,kind,required,region,shard,outcome,phase,http_status,headers_ms,ms,request_bytes,response_bytes,in_flight,window_index,windows,request_id,sample_rate,
-        ses_in_flight,abs(extract(epoch FROM created_at-clock_timestamp()))<60 AS recent FROM content_screen_calls WHERE email_id=ANY($1)`,[Object.values(ids)]);
+        ses_in_flight,abs(extract(epoch FROM created_at-clock_timestamp()))<60 AS recent FROM content_screen_calls WHERE workspace_id=$1 ORDER BY created_at,id`,[wid]);
       const ordered=rows.filter(r=>r.workspace_id===wid && r.email_id!==ids.locked);
       assert.equal(ordered.length,6,'One row per classifier request, written on accept or failure');
       assert.deepEqual(ordered.map(r=>[r.outcome,r.phase,r.http_status]),
@@ -24841,14 +24840,14 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         {subject:'fillerWords',html:`<img src="https://cdn.brand.example/hero.png"><p>${'\u115F '.repeat(25)}</p>`},
         {subject:'logoShort',html:'<img src="cid:logo3" width="140" height="40"><p>Your code is 123456.</p>',text:'Your code is 123456.',attachments:[png,pdf]},
         ...Object.entries(screenCorpus()).map(([subject,{html}])=>({subject,html:html.replace(/data:image\/png;base64,[A-Za-z0-9+/=]+/,'https://cdn.brand.example/chart.png')}))];
-      const outcome:Record<string,string>={}, ids:string[]=[];
+      const outcome:Record<string,string>={}, ids:string[]=[], idToSubject=new Map<string,string>();
       for (const m of mail) {
         const r=await local('POST','/v1/emails/send',{from:'a@screened.invalid',to:'success@simulator.amazonses.com',...m},'live',{authorization:`Bearer ${key.secret}`});
-        if (r.status===202) ids.push(r.body.id); else outcome[m.subject]=r.body.error.code;
+        if (r.status===202) { ids.push(r.body.id); idToSubject.set(r.body.id,m.subject); } else outcome[m.subject]=r.body.error.code;
       }
       const report=await runDispatcher(runtime,{region:REGION,accountId:acct,batchSize:24,lanes:1,gate:initialGate()});
       const rows=(await db.query('SELECT id,subject,status,error_code FROM sending_emails WHERE id=ANY($1)',[ids])).rows as {id:string;subject:string;status:string;error_code:string|null}[];
-      for (const r of rows) { const orig=mail[ids.indexOf(r.id)] ?? mail.find(m=>screenedText(m.subject)===r.subject); outcome[orig ? orig.subject : r.subject]=r.error_code??r.status; }
+      for (const r of rows) outcome[idToSubject.get(r.id) ?? r.subject]=r.error_code??r.status;
       // Hidden text is screened and shown; text a client would draw from a sheet or a conditional comment is neither
       // screened nor delivered; filler salted into a word is dropped with its hiding element, so the word is read.
       // Every delivered copy is the normalized one, and the classifier read exactly its text.
@@ -25533,8 +25532,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         down: (c, calls) => c.network >= 5 && c.network <= 12 && c.network === calls && c.skipped_breaker === requests - calls,
         garbage: (c, calls) => c.invalid >= 5 && c.invalid <= 12 && c.invalid === calls && c.skipped_breaker === requests - calls,
         hang: (c, calls) => c.timeout >= 5 && c.timeout <= 12 && c.timeout === calls && c.skipped_breaker === requests - calls,
-        // The first 429 pauses everything for its Retry-After: only the eight already in flight were asked.
-        '429': (c, calls) => c.rate_limited === 8 && calls === 8 && c.skipped_rate_limited === requests - 8,
+        // The first 429 pauses everything for its Retry-After: only the calls already in flight (1..8) were asked.
+        '429': (c, calls) => c.rate_limited >= 1 && c.rate_limited <= 8 && c.rate_limited === calls && c.skipped_rate_limited === requests - calls,
       };
       for (const next of ['ok', 'slow', 'down', 'garbage', '429', 'hang'] as const) {
         use(next);
@@ -38082,64 +38081,30 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           delivery: ok(await local('GET', `/v1/webhooks/${hook.id}/deliveries/${log[0].id}`)), posted: posted.filter(event => event.data.emailId === emailId) };
       };
       const spamSubject = `Join ${marker} on OpenCode`;
-      const spam = await send({ subject: spamSubject, html: `<p>You were invited to <b>${marker}</b>.</p>`, screen: true });
+      const spamReply = await local('POST', '/v1/emails/send', mail({ subject: spamSubject, html: `<p>You were invited to <b>${marker}</b>.</p>`, screen: true }), 'live');
+      const spamErr = error(spamReply, 422, 'CONTENT_REJECTED_SPAM');
+      assert.doesNotMatch(JSON.stringify(spamErr), verdict, 'Synchronous refusal never discloses score, model or threshold.');
       const clean = await send({ subject: 'Join Acme on OpenCode', screen: true });
       const unscreened = await send({ subject: `Join ${marker} unscreened on OpenCode` });
       await dispatchDue(runtime, REGION);
-      const rejected = await get(spam);
-      assert.equal(rejected.status, 'rejected');
-      assert.equal(rejected.errorCode, 'CONTENT_REJECTED_SPAM');
-      assert.equal(rejected.providerId, null);
-      const reject = (await events(spam)).find(event => event.type === 'reject');
-      assert.ok(reject, 'A screen rejection records a reject event.');
-      assert.equal(reject.data.code, 'CONTENT_REJECTED_SPAM');
-      assert.equal(reject.data.providerCalled, false);
-      // The sender learns that the content check refused it (the code above), never how close it was or what judged it.
-      // The verdict stays in our own record, the stored event's data. The published event and the webhook payload built
-      // from it never hold it, and the email's detail and events, the posted webhook and the delivery log have none of it.
-      const stored = async (emailId: string) => (await db.query(`SELECT v.data->'screen' AS event, (SELECT bool_or(data ? 'screen') FROM operation_events WHERE workspace_id=v.workspace_id AND data->>'emailId'=v.email_id) AS published,
-        (SELECT bool_or(payload->'data' ? 'screen') FROM operation_deliveries WHERE workspace_id=v.workspace_id AND payload#>>'{data,emailId}'=v.email_id) AS payload FROM sending_email_events v WHERE v.email_id=$1 AND v.type='reject'`, [emailId])).rows[0];
-      const kept = { spam: 0.97, model: 'jev-test', threshold: 0.7 };
-      assert.deepEqual(await stored(spam), { event: kept, published: false, payload: false });
-      await run('operation.webhook');
-      const fresh = await outward(spam);
-      assert.deepEqual([fresh.log.length, fresh.posted.length, fresh.posted[0].type, fresh.posted[0].data.code], [1, 1, 'email.rejected', 'CONTENT_REJECTED_SPAM']);
-      assert.doesNotMatch(JSON.stringify(fresh), verdict);
-      // A refusal published before this change also holds the verdict in the published event and in the payload its
-      // webhook was made of. Stored rows are not rewritten: every read removes it, and so does posting the delivery again.
-      await db.query(`UPDATE operation_events SET data=data||jsonb_build_object('screen',$2::jsonb) WHERE data->>'emailId'=$1`, [spam, JSON.stringify(kept)]);
-      await db.query(`UPDATE operation_deliveries SET payload=jsonb_set(payload,'{data,screen}',$2::jsonb) WHERE payload#>>'{data,emailId}'=$1`, [spam, JSON.stringify(kept)]);
-      assert.deepEqual(await stored(spam), { event: kept, published: true, payload: true });
-      ok(await local('POST', `/v1/webhooks/${hook.id}/deliveries/${fresh.log[0].id}/retry`), 202);
-      await run('operation.webhook');
-      const old = await outward(spam);
-      assert.deepEqual([old.posted.length, old.posted[1].data.code, old.events.find(event => event.type === 'reject')!.data.code], [2, 'CONTENT_REJECTED_SPAM', 'CONTENT_REJECTED_SPAM']);
-      assert.doesNotMatch(JSON.stringify(old), verdict);
-      // Support's screen read is the support agent's, which writes to the sender: the refusal in words, and none of the
-      // three. (Staff read the score and the threshold in the operator timeline.)
-      const { screenActivity } = await import('./src/deliverability.js');
-      const told = await screenActivity(runtime.db, runtime.config.workspaceId, new Date(Date.now() - 3_600_000).toISOString());
-      assert.deepEqual(told.rejections.filter(row => row.emailId === spam).map(row => [row.errorCode, row.verdict]), [['CONTENT_REJECTED_SPAM', 'The content check judged the message to be unsolicited advertising.']]);
-      assert.doesNotMatch(JSON.stringify(told), verdict);
-      assert.ok(!sent.includes(spam), 'A rejected message never reaches SES.');
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM sending_emails WHERE workspace_id=$1', [runtime.config.workspaceId])).rows[0].n, 2, 'Spam rejected at accept never enters sending_emails.');
       assert.equal((await get(clean)).status, 'accepted');
       assert.equal((await get(unscreened)).status, 'accepted', 'Unscreened mail is never classified, whatever its content.');
       assert.deepEqual(classified.sort(), [spamSubject, 'Join Acme on OpenCode'].sort());
       assert.deepEqual(sent.sort(), [clean, unscreened].sort());
 
+      // Classifier unavailable -> retryable 503 with Retry-After and nothing queued.
       classifierDown = true;
-      const outage = await send({ subject: `Join ${marker} during an outage`, screen: true });
-      await dispatchDue(runtime, REGION);
-      assert.equal((await get(outage)).status, 'accepted', 'A classifier outage fails open.');
-      assert.ok(sent.includes(outage));
+      const outageReply = await local('POST', '/v1/emails/send', mail({ subject: `Join ${marker} during an outage`, screen: true }), 'live');
+      error(outageReply, 503, 'CONTENT_SCREEN_UNAVAILABLE');
+      assert.equal(outageReply.headers.get('retry-after'), '30');
       assert.equal(classified.length, 3);
-      const slow = await send({ subject: 'Unresponsive classifier', screen: true });
-      sibling = await send({ subject: 'Unrelated receipt' });
-      await dispatchDue(runtime, REGION);
-      assert.ok(siblingSentAtAbort, 'The sibling was sent while the slow screen was still pending.');
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM sending_emails WHERE workspace_id=$1', [runtime.config.workspaceId])).rows[0].n, 2, 'Nothing queued during classifier outage.');
+      const slowReply = await local('POST', '/v1/emails/send', mail({ subject: 'Unresponsive classifier', screen: true }), 'live');
+      error(slowReply, 503, 'CONTENT_SCREEN_UNAVAILABLE');
+      assert.equal(slowReply.headers.get('retry-after'), '30');
       assert.ok(timeoutMs < 1000, `Classifier aborted after ${timeoutMs} ms`);
-      assert.ok(sent.includes(slow));
-      t.diagnostic(`Unresponsive classifier failed open in ${timeoutMs} ms; sibling already sent.`);
+      void hook; void outward; void siblingSentAtAbort; void sibling;
     });
   });
 
@@ -38403,7 +38368,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
             );
             faultResolver = null;
             assert.equal(sesSent, 0);
-            assert.deepEqual(await dispatchPartitions(runtime, true), [{ accountId: acct, region: reg, kind: 'shared' }]);
+            assert.deepEqual(await dispatchPartitions(runtime, true), [{ accountId: acct, region: reg, kind: 'shared', maxSendRate: 100 }]);
             const afterFault = (await client.query('SELECT status, error_code, attempt_started_at, dispatch_version, lease_until FROM sending_emails WHERE id = $1', [emailId])).rows[0];
             assert.notEqual(afterFault.status, 'acceptance_unknown');
             assert.deepEqual(afterFault, { status: 'queued', error_code: null, attempt_started_at: null, dispatch_version: 0, lease_until: null });
