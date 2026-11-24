@@ -85,7 +85,8 @@ export type NoticeInput =
   | Workspace & { kind: 'receive_held'; owed: string; since: Date | null }
   | Workspace & { kind: 'credit_expiring'; amount: string; expiresAt: Date | null }
   | { kind: 'invitation'; inviter: { email: string }; role: 'owner' | 'admin' | 'member'; expiresAt: Date; acceptUrl: string }
-  | { kind: 'waitlist_admitted' };
+  | { kind: 'waitlist_admitted' }
+  | { kind: 'signin_link'; url: string; minutes: number };
 export type NoticeKind = NoticeInput['kind'];
 
 /**
@@ -177,6 +178,12 @@ export function customerNotice(origin: string, n: NoticeInput): Notice {
     case 'waitlist_admitted': return notice({ subject: `You can sign in to ${productName} now`, action: { label: 'Sign in', url: `${base}/overview` },
       why: `${productName} sent this once, because this address joined the waitlist.`, lines: [
         `You asked to join ${productName} with this address. It is open to you now.`,
-        'Sign in with an emailed link to this address, or its Google account. Your account is created then.'] });
+        'Sign in with the account you joined with. If that sign-in can’t confirm this address, you can have a sign-in link sent here. Your account is created then.'] });
+    // Asked for on the page a refused sign-in lands on, by someone who may not be the person this address belongs to:
+    // it says what the link does and that ignoring it is safe.
+    case 'signin_link': return notice({ subject: `Your ${productName} sign-in link`, action: { label: 'Sign in', url: n.url },
+      why: `${productName} sent this because a sign-in link was asked for with this address. If it wasn’t you, ignore it: nothing happens unless the link is used.`, lines: [
+        `A place in ${productName} is held for this address. Open this link, then sign in with any account: that account takes the place.`,
+        `The link works once, for ${n.minutes} minutes.`] });
   }
 }

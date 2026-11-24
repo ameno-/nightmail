@@ -1,3 +1,4 @@
+import { createHmac, hkdfSync, timingSafeEqual } from 'node:crypto';
 import { sql, type SQL } from 'drizzle-orm';
 import { log, type Config, type Database, type DbExecutor, type JobHandler, type Runtime } from './core.js';
 import { productName } from './brand.js';
@@ -25,19 +26,28 @@ const lockLimit = (db: DbExecutor) => db.execute(sql`SELECT FROM nightmail_signu
 type Waited = { name: string | null; attempts: number; first_at: string; let_in_at: string | null };
 export type Place = { via: 'waitlist' | 'open'; mailbox: string; waited: Waited | null };
 /**
- * Whether a new account may sign up on its own, decided in the transaction that creates it (account-login.ts) from the
- * mailbox its sign-in proves (account-policy.ts provenMailbox), never an asserted address. A place held for that address
- * is taken; otherwise an open one is. Either way the address leaves the waitlist here, and what its row said comes back
- * for recordSignup; a sign-in refused after all rolls the transaction back with the row. An address that is already a
- * verified user's takes none: one place per person. The caller records the place once the user row exists.
+ * Whether a new account may sign up on its own, decided in the transaction that creates it (account-login.ts).
+ * `mailbox`: the mailbox its sign-in proves (account-policy.ts provenMailbox), never an asserted address; a place held
+ * for it is taken, otherwise an open one. `held`: addresses the sign-in shows another way (the GitHub account's own
+ * verified address, the address an emailed sign-in link went to), which take only a place held for them. Either way
+ * the address leaves the waitlist here, and what its row said comes back for recordSignup; a sign-in refused after all
+ * rolls the transaction back with the row. An address that is already a verified user's, or already took a place, takes
+ * none: one place per person. The caller records the place once the user row exists.
  */
-export async function takePlace(db: DbExecutor, mailbox: string): Promise<Place | null> {
+export async function takePlace(db: DbExecutor, mailbox: string | null, held: (string | null)[] = []): Promise<Place | null> {
   await lockLimit(db);
-  const address = mailbox.toLowerCase();
-  if ((await db.execute(sql`SELECT FROM nightmail_users WHERE email_verified AND lower(email)=${address}`)).rowCount) return null;
+  const own = mailbox?.toLowerCase() ?? null;
+  const spent = async (address: string) => !!(await db.execute(sql`SELECT WHERE EXISTS (SELECT FROM nightmail_users WHERE email_verified AND lower(email)=${address})
+    OR EXISTS (SELECT FROM nightmail_signups WHERE email=${address})`)).rowCount;
+  if (own && await spent(own)) return null;
   const evidence = sql`name,attempts,first_at::text,let_in_at::text`;
-  const { rows: [held] } = await db.execute<Waited>(sql`DELETE FROM nightmail_waitlist WHERE email=${address} AND let_in_at IS NOT NULL RETURNING ${evidence}`);
-  if (held) return { via: 'waitlist', mailbox: address, waited: held };
+  for (const address of new Set([own, ...held.map(other => other?.toLowerCase() ?? null)])) {
+    if (!address || (address !== own && await spent(address))) continue;
+    const { rows: [waited] } = await db.execute<Waited>(sql`DELETE FROM nightmail_waitlist WHERE email=${address} AND let_in_at IS NOT NULL RETURNING ${evidence}`);
+    if (waited) return { via: 'waitlist', mailbox: address, waited };
+  }
+  if (!own) return null;
+  const address = own;
   // As on dev, a closed gate never takes an unheld waitlist row lock while holding the installation's limit lock.
   // If a place is open, consume any waiting evidence in the statement already checking capacity.
   const { rows: [free] } = await db.execute<{ waited: Waited | null }>(sql`WITH capacity AS MATERIALIZED (
@@ -72,12 +82,58 @@ export async function setLimit(db: DbExecutor, limit: number) {
 }
 
 /**
- * Whether a sign-in that proved no mailbox (GitHub, a password) could take a place by proving it: one is held for its
- * address, or one is open. Read without the lock: it only decides what the refusal says.
+ * Whether a sign-in that proved no mailbox (GitHub without this address verified, a password) could take a place by
+ * proving it: 'held' for its address (the refusal offers a sign-in link to it), or 'open'. Read without the lock: it
+ * only decides what the refusal says.
  */
-export async function placeReady(db: DbExecutor, address: string) {
-  if ((await db.execute(sql`SELECT FROM nightmail_waitlist WHERE email=${address.toLowerCase()} AND let_in_at IS NOT NULL`)).rowCount) return true;
-  return (await readPlaces(db)).open > 0;
+export async function placeReady(db: DbExecutor, address: string): Promise<'held' | 'open' | null> {
+  if ((await db.execute(sql`SELECT FROM nightmail_waitlist WHERE email=${address.toLowerCase()} AND let_in_at IS NOT NULL`)).rowCount) return 'held';
+  return (await readPlaces(db)).open > 0 ? 'open' : null;
+}
+
+// Sign-in links (migration 464): a person a raise let in whose sign-in shows nothing of that address (a GitHub account
+// without it verified, another Google account) asks for a link to it. The link proves the mailbox: following it and then
+// signing in, with any method, takes the place held for the address (account-login.ts, takePlace's `held`). It goes
+// only to an address with a held place that no account has, at most LINKS_A_DAY a day, and works once, for LINK_MINUTES.
+// The row keeps the address and expiry; the link carries the row's ID and an HMAC of it, so the table alone makes none.
+// Rows are kept a day for the daily count (maintenance.ts removes them then).
+export const LINK_MINUTES = 30;
+const LINKS_A_DAY = 3;
+let linkKey: { secret: string; key: Buffer } | undefined;
+const linkMac = (config: Pick<Config, 'authSecret'>, id: string) => {
+  if (linkKey?.secret !== config.authSecret) linkKey = { secret: config.authSecret, key: Buffer.from(hkdfSync('sha256', config.authSecret, 'nightmail:signin-link:v1', 'link', 32)) };
+  return createHmac('sha256', linkKey.key).update(id).digest('base64url');
+};
+/** The link a sign-in link email carries: Overview, which signs in from it and keeps it in the sign-in's return URL. */
+export const signinLinkUrl = (config: Pick<Config, 'authSecret' | 'publicUrl'>, id: string) => `${new URL(config.publicUrl).origin}/overview?link=${id}.${linkMac(config, id)}`;
+/**
+ * Emails a sign-in link to `address` when a place is held for it (account-notices.ts signinLink, queued with the link in
+ * one transaction). Otherwise nothing, and the caller answers the same either way, so the answer says nothing of an
+ * address.
+ */
+export async function sendSigninLink(runtime: Runtime, address: string) {
+  const workspaceId = runtime.config.platformDomainWorkspace, email = address.toLowerCase();
+  if (!runtime.config.multiTenant || !workspaceId) return;
+  const id = Buffer.from(crypto.getRandomValues(new Uint8Array(18))).toString('base64url'), { signinLink } = await import('./account-notices.js');
+  await runtime.db.transaction(async tx => {
+    // One request per address at a time, so the daily count holds.
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${email},46400))`);
+    const { rows: [link] } = await tx.execute<{ id: string }>(sql`INSERT INTO nightmail_signin_links(id,email,expires_at) SELECT ${id},w.email,now()+make_interval(mins=>${LINK_MINUTES}::int) FROM nightmail_waitlist w
+      WHERE w.email=${email} AND w.let_in_at IS NOT NULL AND NOT EXISTS (SELECT FROM nightmail_users u WHERE u.email_verified AND lower(u.email)=w.email)
+        AND (SELECT count(*) FROM nightmail_signin_links l WHERE l.email=w.email AND l.created_at>now()-interval '1 day')<${LINKS_A_DAY}
+      RETURNING id`);
+    if (link) await tx.execute(signinLink(workspaceId, link.id));
+  });
+}
+/**
+ * The address a sign-in link went to, when `token` is one this installation made and it is unused and unexpired; else
+ * null. It is spent in the caller's transaction, the sign-in's, so a sign-in that ends up refused leaves it unspent.
+ */
+export async function spendSigninLink(db: DbExecutor, config: Pick<Config, 'authSecret'>, token: string) {
+  const [id = '', mac = '', ...rest] = token.split('.');
+  if (rest.length || !/^[A-Za-z0-9_-]{24}$/.test(id) || !/^[A-Za-z0-9_-]{43}$/.test(mac) || !timingSafeEqual(Buffer.from(mac), Buffer.from(linkMac(config, id)))) return null;
+  const { rows: [link] } = await db.execute<{ email: string }>(sql`DELETE FROM nightmail_signin_links WHERE id=${id} AND expires_at>now() RETURNING email`);
+  return link?.email ?? null;
 }
 
 /**

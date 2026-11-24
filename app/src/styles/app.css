@@ -121,6 +121,11 @@ html[data-privacy='on'] .private-field:not(:hover, :focus)::placeholder { color:
 .signed-out__link { align-self: center; color: var(--color-muted); text-decoration: underline; text-underline-offset: .18em; }
 .signed-out__link:hover { color: var(--color-text); }
 .signed-out__body [data-own-address] { overflow-wrap: anywhere; }
+.signed-out__link-form { display: flex; flex-direction: column; gap: var(--space-8); text-align: start; }
+/* Every line the form can say, stacked in one cell: the cell keeps the longest's height whichever shows. */
+.signed-out__status { display: grid; text-align: center; text-wrap: pretty; }
+.signed-out__status > span { grid-area: 1 / 1; visibility: hidden; }
+.signed-out__status > [data-shown] { visibility: visible; }
 .signed-out__links { display: flex; justify-content: center; gap: var(--space-24); }
 .signed-out__links a { color: var(--color-muted); text-decoration: underline; text-underline-offset: .18em; }
 .signed-out__links a:hover { color: var(--color-text); }
