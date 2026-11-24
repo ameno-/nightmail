@@ -13,6 +13,7 @@ interface __BaseEnv_Env {
 	ADMISSION: RateLimit;
 	SNS_CERT_MISSES: RateLimit;
 	ANALYTICS_INGEST?: RateLimit;
+	DISK_ALERT?: RateLimit;
 	BROWSER: BrowserRun;
 	BANE_MAIL_BUCKET: "bane-prod-mail";
 	BANE_MAIL_STORE: "r2";
