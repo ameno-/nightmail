@@ -25158,11 +25158,11 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       ok(await local('POST', `/v1/campaigns/${relaunched.id}/send`, { revision: edited.revision }), 202);
       assert.equal((await settle(relaunched)).delivery.expanded, 3); assert.equal(screened.length - start, 3, 'The campaign\'s own copy was screened at the first launch; only the copies are new.');
       assert.equal((await dispatch()).sent, 3);
-      // The key holds the classifier and model too: copies released under one model are screened again before they go.
+      // Rows already screened before entering sending_emails are never re-screened at dispatch even if the model setting changes.
       const remodelled = await campaign('Remodelled', body, names(3));
       await send(remodelled); const model = runtime.config.screen!.model;
       runtime.config.screen = { ...runtime.config.screen!, model: 'fixture-next' };
-      start = screened.length; assert.equal((await dispatch()).sent, 3); assert.equal(screened.length - start, 3, 'One request per distinct copy, at dispatch.');
+      start = screened.length; assert.equal((await dispatch()).sent, 3); assert.equal(screened.length - start, 0, 'Mail room never re-screens already-screened rows.');
       runtime.config.screen = { ...runtime.config.screen!, model };
       // An edit after screening is screened again: the campaign's own copy and every copy, since their bytes changed.
       const changed = await campaign('Changed', body, names(3));
