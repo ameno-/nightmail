@@ -42,3 +42,20 @@ export async function assertDisposable(query: (text: string) => Promise<{ rows: 
   if (r?.marker !== DISPOSABLE) throw new Error(`tear host: refusing database ${r?.name ?? '(unknown)'}: it is not marked disposable. Create a dedicated, migrated database and mark it with COMMENT ON DATABASE ... IS '${DISPOSABLE}' (see tear/disposable.ts).`);
   if (r.workspaces || r.users) throw new Error(`tear host: refusing database ${r.name}: it holds ${r.workspaces} workspaces and ${r.users} users that tear did not create.`);
 }
+
+/** Validates `url` is loopback-only and checks the disposable marker + foreign-data guard before any write. */
+export async function requireDisposableDatabase(url: string | undefined, name = 'TEAR_DATABASE_URL'): Promise<string> {
+  const checked = disposableUrl(url, name);
+  const { default: pg } = await import('pg');
+  const client = new pg.Client({ connectionString: checked });
+  await client.connect();
+  try { await assertDisposable(text => client.query(text)); } finally { await client.end(); }
+  return checked;
+}
+
+if (process.argv[1] && new URL(import.meta.url).pathname === process.argv[1]) {
+  requireDisposableDatabase(process.env.TEAR_DATABASE_URL ?? process.env.DATABASE_URL, 'TEAR_DATABASE_URL').catch(error => {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.exit(1);
+  });
+}

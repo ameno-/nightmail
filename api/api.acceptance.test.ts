@@ -14812,6 +14812,25 @@ describe('Dashboard API capabilities', () => {
     });
   });
 
+  test('campaign planning rate: a shared workspace plans at a quarter of the pooled SES rate, an exempt one at the full rate, and a BYO account at its own', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const wid = runtime.config.workspaceId, pool = '111122224444', own = '444455557777', byo = unique('byo-rate-');
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:feedback`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, pool]);
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1)', [byo]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,external_id,template_version,role_arn,platform_principal_arn,feedback_topic_arn)
+        VALUES ($1,$1,$2,'ready','byo',$3,gen_random_uuid(),'v4','fixture-role','fixture-platform',$4)`, [byo, REGION, own, `arn:aws:sns:${REGION}:${own}:feedback`]);
+      await db.query(`INSERT INTO provider_account_limits(aws_account_id,region,refresh_after,checked_at,max_send_rate,max_24_hour_send,sent_last_24_hours) VALUES ($1,$3,now(),now(),200,1000000,0),($2,$3,now(),now(),14,50000,0)`, [pool, own, REGION]);
+      // What the release planner reads: the rate, and beside it the daily quota, which is never divided.
+      const planned = async () => Object.fromEntries((await db.query('SELECT workspace_id,max_send_rate,max_24_hour_send FROM regional_workspace_limits WHERE workspace_id=ANY($1)', [[wid, byo]])).rows.map(r => [r.workspace_id, [r.max_send_rate, r.max_24_hour_send]]));
+      assert.deepEqual(await planned(), { [wid]: [50, 1000000], [byo]: [14, 50000] }, 'A shared workspace plans at a quarter of the pool account\'s rate.');
+      await db.query('UPDATE workspaces SET exempt_hosted_quotas=true WHERE id=$1', [wid]);
+      assert.deepEqual(await planned(), { [wid]: [200, 1000000], [byo]: [14, 50000] }, 'Exempt from hosted quotas: the full pooled rate. The BYO account is unchanged.');
+      await db.query('UPDATE workspaces SET exempt_hosted_quotas=false WHERE id=$1', [wid]);
+      assert.deepEqual((await planned())[wid], [50, 1000000], 'The flag off again: the quarter again.');
+    });
+  });
+
   test('sender score: the growth pace is for new senders only: an operator override or a clean track record SES accepted before the pace existed skips it, once and audited; later acceptances, seeds, one recipient or domain and bounces do not', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
       const { refreshStanding } = await import('./src/standing.js');
@@ -15579,6 +15598,65 @@ describe('Campaign authorization and dispatch credentials', () => {
     assert.deepEqual(page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, owner.secret)), []);
   });
 
+  // tear/workspace-isolation witness BUG-ISO-02: createCampaign and updateCampaign stored another workspace's audience IDs.
+  // Another workspace's list (one subscribed member) and segment, IDs nobody has, and this workspace's own list and member.
+  async function audienceIsolation({ runtime, db, local }: Parameters<Parameters<typeof simulatedSesFixture>[1]>[0]) {
+    const wid = runtime.config.workspaceId, other = unique('other-workspace');
+    const theirs = { list: unique('lst'), segment: unique('seg') }, nobodys = { list: unique('lst'), segment: unique('seg') };
+    await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)', [other]);
+    await db.query("INSERT INTO audience_lists(id,workspace_id,name) VALUES($1,$2,'Theirs')", [theirs.list, other]);
+    await db.query(`INSERT INTO audience_segments(id,workspace_id,name,rule) VALUES($1,$2,'Theirs','{"field":"lastOpenAt","operator":"inactive","days":90}')`, [theirs.segment, other]);
+    const member = `WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES($3,$1,$4,'subscribed') RETURNING id)
+      INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM c`;
+    await db.query(member, [other, theirs.list, unique('con'), 'theirs@example.net']);
+    const list = ok(await local('POST', '/v1/lists', { name: 'Ours' }), 201);
+    await db.query(member, [wid, list.id, unique('con'), 'ours@example.net']);
+    // Every way an audience names a list or a segment.
+    const naming = (ids: { list: string; segment: string }): Json[] => [{ listId: ids.list }, { listId: list.id, segmentId: ids.segment }, { listId: list.id, excludeListIds: [ids.list] }, { listId: list.id, excludeSegmentIds: [ids.segment] }];
+    const base = { name: 'Isolation', from: 'sender@example.com', subject: 'Hello', html: '<p>Hello</p>' };
+    const own = ok(await local('POST', '/v1/campaigns', { ...base, audience: { listId: list.id } }), 201);
+    assert.deepEqual(ok(await local('GET', `/v1/campaigns/${own.id}/audience`)), { matched: 1, eligible: 1, suppressed: 0, unsubscribed: 0 });
+    return { wid, list, base, own, foreign: naming(theirs), unknown: naming(nobodys) };
+  }
+  test('a campaign audience may name only lists and segments of its own workspace: an ID of another workspace is refused like one nobody has', async t => {
+    await simulatedSesFixture(t, async fixture => {
+      const { db, local } = fixture, { wid, list, base, own, foreign, unknown } = await audienceIsolation(fixture);
+      const refused = (reply: Reply) => { const e = error(reply, 404, 'NOT_FOUND'); return [e.code, e.message, e.field ?? null]; };
+      const save = (audience: Json) => local('PATCH', `/v1/campaigns/${own.id}`, { revision: own.revision, draft: { ...own.draft, audience } });
+      for (const [i, audience] of foreign.entries()) {
+        assert.deepEqual(refused(await local('POST', '/v1/campaigns', { ...base, audience })), refused(await local('POST', '/v1/campaigns', { ...base, audience: unknown[i] })), JSON.stringify(audience));
+        assert.deepEqual(refused(await save(audience)), refused(await save(unknown[i]!)), JSON.stringify(audience));
+      }
+      assert.deepEqual((await db.query('SELECT id, draft->\'audience\' AS audience FROM sending_campaigns WHERE workspace_id=$1', [wid])).rows, [{ id: own.id, audience: { listId: list.id } }], 'Nothing was stored.');
+    });
+  });
+  test('a campaign draft stored with a list or segment of another workspace reads nothing of it and stays editable', async t => {
+    // A draft stored before the check above (written here past the API) keeps the ID. Counting answers as for a list or
+    // segment that doesn't exist, launching is refused and queues nothing, and the draft is still listed, read and edited.
+    await simulatedSesFixture(t, async fixture => {
+      const { db, local } = fixture, { wid, base, own, foreign } = await audienceIsolation(fixture);
+      let revision = own.revision as number;
+      for (const [i, audience] of foreign.entries()) {
+        await db.query("UPDATE sending_campaigns SET draft=jsonb_set(draft,'{audience}',$2::jsonb) WHERE id=$1", [own.id, JSON.stringify(audience)]);
+        const stored = ok(await local('GET', `/v1/campaigns/${own.id}`));
+        assert.deepEqual(stored.draft.audience, audience);
+        error(await local('GET', `/v1/campaigns/${own.id}/audience`), 404, 'NOT_FOUND');
+        const launch = await local('POST', `/v1/campaigns/${own.id}/send`, { revision });
+        assert.ok(launch.status >= 400, `launch answered ${launch.status}`);
+        const edited = ok(await local('PATCH', `/v1/campaigns/${own.id}`, { revision, draft: { ...stored.draft, subject: `Edited ${i}` } }));
+        assert.deepEqual([edited.draft.audience, edited.draft.subject, edited.state], [audience, `Edited ${i}`, 'draft']);
+        revision = edited.revision;
+      }
+      assert.ok(ok(await local('GET', '/v1/campaigns')).data.some((row: Json) => row.id === own.id));
+      assert.deepEqual((await db.query('SELECT (SELECT count(*)::int FROM sending_emails WHERE workspace_id=$1) AS emails, (SELECT count(*)::int FROM sending_campaign_reviews WHERE workspace_id=$1) AS reviews', [wid])).rows[0], { emails: 0, reviews: 0 });
+      // The same for a list of this workspace deleted after its draft was saved.
+      const gone = ok(await local('POST', '/v1/lists', { name: 'Gone' }), 201);
+      const kept = ok(await local('POST', '/v1/campaigns', { ...base, audience: { listId: gone.id } }), 201);
+      ok(await local('DELETE', `/v1/lists/${gone.id}`));
+      assert.deepEqual(ok(await local('PATCH', `/v1/campaigns/${kept.id}`, { revision: kept.revision, draft: { ...kept.draft, subject: 'Edited' } })).draft.audience, { listId: gone.id });
+      error(await local('GET', `/v1/campaigns/${kept.id}/audience`), 404, 'NOT_FOUND');
+    });
+  });
   test('revoking the originating send key stops its future scheduled job before simulation or SES acceptance', async t => {
     const owner = await keyFixture(t);
     const origin = await keyFixture(t, { permissions: ['send'] });
@@ -18191,19 +18269,54 @@ test('a tear host refuses redirecting URLs, databases not marked disposable and 
     await client.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1)', [unique('foreign')]);
     await assert.rejects(check(), /holds [1-9]\d* workspaces/);
   } finally { await client.query('ROLLBACK'); }
-  // The real host process refuses before connecting with app modules or writing: exit 1, reason on stderr.
-  const host = (url: string) => new Promise<{ code: number | null; stdout: string; stderr: string }>(resolve => {
-    const child = execFile('node', ['--import', 'tsx', 'tear/dispatch/host.ts'], { cwd: fileURLToPath(new URL('.', import.meta.url)), timeout: 60_000,
+  // Run every real tear *.host.ts subprocess against the unmarked fixture DB and a redirecting URL.
+  // When private @tear/{mbt,host} is absent (public CI), install a minimal Proxy stand-in in the
+  // gitignored tear/node_modules/@tear directory for the duration of this test so every host runs
+  // its real module-init guard path.
+  const apiDir = fileURLToPath(new URL('.', import.meta.url));
+  const { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } = await import('node:fs');
+  const hostFiles = readdirSync(`${apiDir}/tear`, { recursive: true, encoding: 'utf8' })
+    .filter(f => f.endsWith('.host.ts') && !f.startsWith('node_modules/'))
+    .sort();
+  assert.ok(hostFiles.length >= 11, `Expected at least 11 tear hosts, found ${hostFiles.length}`);
+  const tearScope = `${apiDir}/tear/node_modules/@tear`;
+  const stubbed = !existsSync(`${tearScope}/mbt/package.json`);
+  if (stubbed) {
+    const stub = 'const p = new Proxy(() => p, { get: () => p, apply: () => p });\nexport const host = p, model = p, choice = p, exact = p, sel = p, prop = p, satisfies = p, serve = p, oneOf = p, channelFds = p, anyReply = p, matches = p, check = p, all = p, generated = p, g = p;\nexport default p;\n';
+    for (const pkg of ['mbt', 'host']) {
+      mkdirSync(`${tearScope}/${pkg}`, { recursive: true });
+      writeFileSync(`${tearScope}/${pkg}/package.json`, JSON.stringify({ name: `@tear/${pkg}`, type: 'module', main: './index.js' }));
+      writeFileSync(`${tearScope}/${pkg}/index.js`, stub);
+    }
+  }
+  const runHost = (rel: string, url: string) => new Promise<{ code: number | null; stdout: string; stderr: string }>(resolve => {
+    execFile('node', ['--import', 'tsx', `tear/${rel}`], { cwd: apiDir, timeout: 60_000,
       env: { PATH: process.env.PATH, HOME: process.env.HOME, TEAR_DATABASE_URL: url } as unknown as NodeJS.ProcessEnv, encoding: 'utf8' },
       (error, stdout, stderr) => resolve({ code: error ? (typeof error.code === 'number' ? error.code : null) : 0, stdout, stderr }));
-    child.stdin!.end('{"v":1,"id":1,"op":"open"}\n');
   });
-  const unmarked = await host(FIXTURE_DATABASE_URL!);
-  assert.equal(unmarked.code, 1, unmarked.stderr); assert.match(unmarked.stderr, /not marked disposable/); assert.equal(unmarked.stdout, '');
+  const redirected = new URL(FIXTURE_DATABASE_URL!);
+  redirected.search = `host=${redirected.hostname}&port=${redirected.port || 5432}`;
+  redirected.port = '1';
+  const dbFingerprint = async () => (await client.query(
+    "SELECT (SELECT count(*)::int FROM workspaces) AS ws, (SELECT count(*)::int FROM pg_namespace) AS ns, (SELECT count(*)::int FROM pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema')) AS tbl",
+  )).rows[0];
+  const beforeFp = await dbFingerprint();
+  try {
+    await Promise.all(hostFiles.map(async rel => {
+      const unmarked = await runHost(rel, FIXTURE_DATABASE_URL!);
+      assert.notEqual(unmarked.code, 0, `${rel} must exit non-zero on unmarked DB: ${unmarked.stderr}`);
+      assert.match(unmarked.stderr, /not marked disposable/, `${rel}: ${unmarked.stderr}`);
+      assert.equal(unmarked.stdout, '', `${rel} stdout must be empty`);
+      const refused = await runHost(rel, redirected.toString());
+      assert.notEqual(refused.code, 0, `${rel} must exit non-zero on redirecting URL: ${refused.stderr}`);
+      assert.match(refused.stderr, /query parameters/, `${rel}: ${refused.stderr}`);
+      assert.equal(refused.stdout, '', `${rel} stdout must be empty`);
+    }));
+  } finally {
+    if (stubbed) rmSync(tearScope, { recursive: true, force: true });
+  }
   assert.equal((await client.query("SELECT to_regnamespace('tear_clock')::text AS s")).rows[0].s, null, 'Nothing was written.');
-  const redirected = new URL(FIXTURE_DATABASE_URL!); redirected.search = `host=${redirected.hostname}&port=${redirected.port || 5432}`; redirected.port = '1';
-  const refused = await host(redirected.toString());
-  assert.equal(refused.code, 1); assert.match(refused.stderr, /query parameters/); assert.equal(refused.stdout, '');
+  assert.deepEqual(await dbFingerprint(), beforeFp, 'No workspace, schema, or table was written.');
 });
 
 test('MX deployment variables remain fallbacks and BANE variables take precedence',async()=>{
