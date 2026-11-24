@@ -13,8 +13,8 @@ import './no-domain.css'
 // (api/src/domain-setup.ts, off unless NO_DOMAIN_REMINDER=on).
 
 const DAY_MS = 24 * 3600_000
-/** What the card takes above the figures on a desktop: its fixed 76px (no-domain.css) and the main column's 20px gap. Latest emails fits its rows under it (latest.ts). */
-export const NO_DOMAIN_SPACE = 76 + 20
+/** What the card takes above the figures on a desktop: its fixed 76px (no-domain.css) and its .ov-lead row's 4 + 12px padding. Latest emails fits its rows under it (latest.ts). */
+export const NO_DOMAIN_SPACE = 76 + 16
 const dismissedKey = (workspaceId: string) => `nightmail.overview.no-domain.${workspaceId}`
 const listeners = new Set<() => void>()
 const subscribe = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener) } }

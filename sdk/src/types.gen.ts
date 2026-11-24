@@ -526,7 +526,7 @@ export type AgentKey = {
      */
     workspaceName: string;
     /**
-     * read, send and manage, on every sender domain: send email, manage domains, inboxes, receiving, webhooks and campaigns. Never API keys or agent tokens; members, billing and deleting the workspace are a person's.
+     * read, send and manage, on every sender domain: send email, manage domains, inboxes, receiving, webhooks and campaigns. It can't create API keys, agent tokens, inbox connection keys, inbox keys or mail-client (IMAP/SMTP) passwords; members, billing and deleting the workspace are a person's.
      */
     permissions: Array<'read' | 'send' | 'manage'>;
     /**

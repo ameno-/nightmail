@@ -24,7 +24,7 @@ export const setupTokenPlaceholder = `${secretPrefixes.agentSetup}… (added whe
 // owner or admin approves at /connect.
 function keyLines(origin: string, token: string | null | undefined) {
   const device = `POST ${origin}/v1/agent/device (JSON body {"client_name":"<your name>"}), show me its verification_uri_complete and user_code, then poll POST ${origin}/v1/agent/device/token with {"device_code":"<device_code>"} every interval seconds until it returns the key (AUTHORIZATION_PENDING means keep waiting).`
-  const keep = `Save the key it returns as ${apiKeyEnv} in the project's environment (a gitignored .env), never in code or a commit; it's shown once. It sends email and manages domains, inboxes and receiving; it can't manage API keys, members or billing.`
+  const keep = `Save the key it returns as ${apiKeyEnv} in the project's environment (a gitignored .env), never in code or a commit; it's shown once. It sends email and manages domains, inboxes and receiving; it can't create API keys, inbox connection keys, inbox keys or mail-client (IMAP/SMTP) passwords, and can't manage members or billing.`
   if (token === undefined) return [`- No ${apiKeyEnv} yet? Get your own key with a device code: ${device} ${keep}`]
   return [
     `- Get your own API key first: exchange this one-time setup token (it works once, for 15 minutes) with POST ${origin}/v1/agent/setup and the JSON body {"token":"${token ?? setupTokenPlaceholder}"}. ${keep}`,

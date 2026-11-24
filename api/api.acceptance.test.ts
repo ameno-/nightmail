@@ -54,6 +54,40 @@ async function byoTemplates() {
 }
 // The role's identity policy statements: inline policies, conditional ones (!If) included.
 const byoRoleStatements=(cfn:Json)=>cfn.Resources.Role.Properties.Policies.map((p:Json)=>Array.isArray(p)?p[1]:p).flatMap((p:Json)=>p.PolicyDocument.Statement) as IamStatement[];
+
+test('SES feedback forwarding backfill is read-only by default, tag scoped, paginated and idempotent', async t => {
+  const { SESv2Client } = await import('@aws-sdk/client-sesv2'), { backfillFeedbackForwarding } = await import('./scripts/backfill-feedback-forwarding.js');
+  const ses = new SESv2Client({ region:'us-east-2', credentials:{accessKeyId:'fixture',secretAccessKey:'fixture'} });
+  t.after(() => ses.destroy());
+  const claim = { Key:'bane:domain-claim', Value:randomUUID() };
+  const domains:Record<string,{ Tags:{Key:string;Value:string}[]; FeedbackForwardingStatus:boolean }> = {
+    'modern.example':{Tags:[{Key:'nightmail:owner',Value:'nightmail'}],FeedbackForwardingStatus:true},
+    'legacy.example':{Tags:[claim],FeedbackForwardingStatus:true},
+    'fixed.example':{Tags:[{Key:'bane:owner',Value:'bane'}],FeedbackForwardingStatus:false},
+    'imported.example':{Tags:[],FeedbackForwardingStatus:true},
+    'foreign.example':{Tags:[claim,{Key:'nightmail:owner',Value:'other'}],FeedbackForwardingStatus:true},
+  };
+  const writes:string[]=[];
+  t.mock.method(ses,'send',async (cmd:any)=>{
+    const name=cmd.input.EmailIdentity;
+    switch(cmd.constructor.name){
+      case 'ListEmailIdentitiesCommand': {
+        const names=Object.keys(domains), next=cmd.input.NextToken;
+        if(next) assert.equal(next,'page2');
+        return {EmailIdentities:(next?names.slice(2):names.slice(0,2)).map(IdentityName=>({IdentityType:'DOMAIN',IdentityName})),NextToken:next?undefined:'page2'};
+      }
+      case 'GetEmailIdentityCommand':return domains[name];
+      case 'PutEmailIdentityFeedbackAttributesCommand':assert.deepEqual(cmd.input,{EmailIdentity:name,EmailForwardingEnabled:false});writes.push(name);domains[name]!.FeedbackForwardingStatus=false;return {};
+      default:assert.fail(cmd.constructor.name);
+    }
+  });
+  const initial={listed:5,managed:3,on:2,off:1,disabled:0,errors:0};
+  assert.deepEqual(await backfillFeedbackForwarding(ses),initial);
+  assert.deepEqual(writes,[]);
+  assert.deepEqual(await backfillFeedbackForwarding(ses,true),{...initial,disabled:2});
+  assert.deepEqual(await backfillFeedbackForwarding(ses,true),{...initial,on:0,off:3});
+  assert.deepEqual(writes,['modern.example','legacy.example']);
+});
 // The IAM action and resource an SES v2 or SNS command asks for, and a check that a connected account's session (whose
 // fixture credentials carry their session policy as the token) allows it: code calls stay inside their session.
 function sessionCall(service:'ses'|'sns',cmd:any,region:string,account:string):[string,string] {
@@ -3498,7 +3532,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
             default:throw Error(cmd.constructor.name);
           }
         });
-        let loseCreateResponse = false, failTenantOnce = false, dropCreate = false,quotaFull=false;
+        let denyForwarding = false, loseCreateResponse = false, failTenantOnce = false, dropCreate = false,quotaFull=false;
         const root = `${unique('claims')}.invalid`, domain = `mail.${root}`, foreign = `existing.${unique('ses')}.invalid`;
         const importParent=`${unique('import')}.invalid`,imported=`mail.${importParent}`, reserved=`${unique('reserved')}.invalid`;
         const verifiedIdentity = { VerificationStatus:'SUCCESS', VerifiedForSendingStatus:true, DkimAttributes:{ SigningEnabled:true, Status:'SUCCESS', Tokens:['fixture1','fixture2','fixture3'], SigningHostedZone:'dkim.amazonses.com' } };
@@ -3516,7 +3550,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
               if (dropCreate) { dropCreate=false; throw new Error('Synthetic connection reset before SES received Create'); }
               if (identities.has(`${account}:${i.EmailIdentity}`)) throw Object.assign(new Error('Existing identity'),{name:'AlreadyExistsException'});
               assert.equal(i.Tags[0].Key,'bane:domain-claim');
-              identities.set(`${account}:${i.EmailIdentity}`, { ...verifiedIdentity, Tags:i.Tags });
+              identities.set(`${account}:${i.EmailIdentity}`, { ...verifiedIdentity, Tags:i.Tags, FeedbackForwardingStatus:true });
               if (loseCreateResponse) { loseCreateResponse=false; throw new Error('Synthetic connection reset after SES accepted Create'); }
               return {DkimAttributes:{...verifiedIdentity.DkimAttributes,Status:'PENDING'},VerifiedForSendingStatus:false};
             }
@@ -3528,6 +3562,13 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
               if (failImportRead) throw Object.assign(new Error('synthetic throttle'),{name:'ThrottlingException'});
               const listed=(name:string)=>({IdentityType:'DOMAIN',IdentityName:name,SendingEnabled:true,VerificationStatus:'SUCCESS'});
               return i.NextToken ? {EmailIdentities:[listed(imported),listed(`mail.${reserved}`),listed(reserved)]} : {EmailIdentities:[{...listed(domain),VerificationStatus:'PENDING'}, {...listed('me@'+domain),IdentityType:'EMAIL_ADDRESS'}],NextToken:'second'};
+            }
+            case 'PutEmailIdentityFeedbackAttributesCommand': {
+              const identity=identities.get(`${account}:${i.EmailIdentity}`)!;
+              assert.ok(identity.Tags?.length); assert.equal(i.EmailForwardingEnabled,false);
+              if (denyForwarding) throw Object.assign(Error('fixture denied'),{name:'AccessDeniedException'});
+              identity.FeedbackForwardingStatus=false;
+              return {};
             }
             case 'PutEmailIdentityMailFromAttributesCommand': {
               const identity=identities.get(`${account}:${i.EmailIdentity}`)!; mailFromWrites.push(i);
@@ -3664,6 +3705,17 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           const allowed=ok(await add(b.cookie,unique('customer')+'.co.uk'),201);
           ok(await local('DELETE',`/v1/domains/${allowed.id}`,undefined,b.cookie));
         });
+        await providerTest.test('SES feedback forwarding refusal leaves domain creation successful and logs the failure',async ft=>{
+          const name=unique('denied-feedback')+'.invalid', logs:string[]=[];
+          ft.mock.method(console,'warn',(line:string)=>logs.push(line));
+          denyForwarding=true;
+          try {
+            const domain=ok(await add(b.cookie,name),201);
+            assert.equal(identities.get(`${platform}:${name}`)!.FeedbackForwardingStatus,true);
+            assert.ok(logs.some(line=>line.includes('SES_FEEDBACK_FORWARDING_NOT_DISABLED')&&line.includes('SES_ACCESS_DENIED')));
+            ok(await local('DELETE',`/v1/domains/${domain.id}`,undefined,b.cookie));
+          } finally {denyForwarding=false;}
+        });
         await providerTest.test('MX serializes workspace claim limits across unrelated DNS names',async()=>{
           const prefix=unique('quota'),wid=b.org.id;
           await pool.query(`INSERT INTO domain_claims(name,workspace_id) SELECT $1||n||'.invalid',$2 FROM generate_series(1,9) n`,[prefix,wid]);
@@ -3671,14 +3723,15 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           try {
             const race=await Promise.all(names.map(name=>add(b.cookie,name)));
             assert.deepEqual(race.map(r=>r.status).sort(),[201,409]);error(race.find(r=>r.status===409)!,409,'DOMAIN_LIMIT_REACHED');
-            assert.deepEqual(calls.slice(start),['CreateEmailIdentityCommand']);
+            assert.deepEqual(calls.slice(start),['CreateEmailIdentityCommand','PutEmailIdentityFeedbackAttributesCommand']);
             const last=ok(race.find(r=>r.status===201)!,201);
+            assert.equal(identities.get(`${platform}:${last.name}`)!.FeedbackForwardingStatus,false);
             assert.equal(ok(await add(b.cookie,last.name),201).id,last.id,'Idempotent retries do not consume quota.');
             // Only one unproven claim remains; the next rejection must be the independent total limit.
             await pool.query(`UPDATE domain_claims SET ever_proven=true WHERE workspace_id=$1 AND name LIKE $2 AND name<>$3`,[wid,prefix+'%',last.name]);
             await pool.query(`INSERT INTO domain_claims(name,workspace_id,ever_proven) SELECT $1||n||'.invalid',$2,true FROM generate_series(10,99) n`,[prefix,wid]);
             error(await add(b.cookie,names.find(n=>n!==last.name)!),409,'DOMAIN_LIMIT_REACHED');
-            assert.deepEqual(calls.slice(start),['CreateEmailIdentityCommand']);
+            assert.deepEqual(calls.slice(start),['CreateEmailIdentityCommand','PutEmailIdentityFeedbackAttributesCommand']);
             ok(await local('DELETE',`/v1/domains/${last.id}`,undefined,b.cookie));
             const replacement=ok(await add(b.cookie,names.find(n=>n!==last.name)!),201);
             ok(await local('DELETE',`/v1/domains/${replacement.id}`,undefined,b.cookie));
@@ -3892,7 +3945,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           // The second failed request did reach SES. Recover only this claim's tagged identity.
           const restored=ok(await add(b.cookie,recovery),201);
           assert.equal(restored.dns.filter((r:Json)=>r.purpose==='sending' && r.type==='CNAME').length,3); assert.equal(restored.verified,false);
-          assert.deepEqual(calls.slice(before),['CreateEmailIdentityCommand','CreateEmailIdentityCommand','GetEmailIdentityCommand']);
+          assert.deepEqual(calls.slice(before),['CreateEmailIdentityCommand','CreateEmailIdentityCommand','GetEmailIdentityCommand','PutEmailIdentityFeedbackAttributesCommand']);
           ok(await local('DELETE',`/v1/domains/${restored.id}`,undefined,b.cookie));
           // A request that died before any SES call leaves a claim with no identity. The verify job it reserved owns the identity from then on.
           const {operationJobs:wedgeJobs}=await import('./src/operations.js'),{JobDeferred:Deferred}=await import('./src/jobs.js');
@@ -3902,7 +3955,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           assert.ok(wedge && wedge.identity===null,'The reservation keeps the claim and its verify job even though SES was never called.');
           await pool.query("UPDATE job_schedule SET wake_not_before=now() WHERE workspace_id='domain.verify:platform'");
           await assert.rejects(wedgeJobs['domain.verify']!(runtime,wedge.payload,{id:wedge.id,attempts:1,workspaceId:b.org.id}),Deferred);
-          assert.deepEqual(calls.slice(wedgeStart),['CreateEmailIdentityCommand','GetEmailIdentityCommand','CreateEmailIdentityCommand']);
+          assert.deepEqual(calls.slice(wedgeStart),['CreateEmailIdentityCommand','GetEmailIdentityCommand','CreateEmailIdentityCommand','PutEmailIdentityFeedbackAttributesCommand']);
           const unwedged=ok(await local('GET',`/v1/domains/${wedge.payload.domainId}`,undefined,b.cookie));
           assert.equal(unwedged.dns.filter((r:Json)=>r.purpose==='sending' && r.type==='CNAME').length,3); assert.ok(identities.get(`${platform}:${wedged}`));
           ok(await local('DELETE',`/v1/domains/${wedge.payload.domainId}`,undefined,b.cookie)); lookups=0;
@@ -3915,7 +3968,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           const n=queries.mock.callCount(),creates=calls.length;
           const created = ok(await add(b.cookie,domain),201), proof = created.dns.find((r:Json) => r.purpose==='sending' && r.type==='TXT');
           dt.diagnostic(`POST domain: ${queries.mock.callCount()-n} pg round trips including dashboard auth`);
-          assert.deepEqual(calls.slice(creates),['CreateEmailIdentityCommand']);
+          assert.deepEqual(calls.slice(creates),['CreateEmailIdentityCommand','PutEmailIdentityFeedbackAttributesCommand']);
           assert.equal(proof.name,`_nightmail.${domain}`); assert.ok(proof.value); assert.equal(created.dns.filter((r:Json)=>r.type==='CNAME' && r.purpose==='sending').length,3);
           // Receiving defaults to reply.<domain>: a pasted root MX would take the domain's existing mail.
           assert.deepEqual(created.dns.find((r:Json)=>r.purpose==='receiving'),{name:`reply.${domain}`,type:'MX',value:`inbound-smtp.${region}.amazonaws.com`,priority:10,purpose:'receiving',status:'pending'});
@@ -4537,7 +4590,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
         error(await add(a.cookie,domain),409,'CONNECTION_REQUIRED');
         ok(await choose('shared', a.cookie),201);
         const reproved=ok(await local('POST','/v1/domains',{name:domain},a.cookie),201); // Region defaults to the connection.
-        assert.equal(reproved.region,region); assert.equal(reproved.verified,false); assert.equal(calls.at(-1),'CreateEmailIdentityCommand'); assert.notEqual(reproved.id,byoDomain.id);
+        assert.equal(reproved.region,region); assert.equal(reproved.verified,false); assert.equal(calls.at(-1),'PutEmailIdentityFeedbackAttributesCommand'); assert.notEqual(reproved.id,byoDomain.id);
         const reconnected=ok(await local('GET', path, undefined, a.cookie)).connection;
         assert.equal((await released())[0].connection_id,reconnected.id);
         // Disconnecting a shared connection removes its tagged pool identities so a later reconnect never meets its own ghost.
@@ -21457,6 +21510,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
         case 'UpdateReputationEntityPolicyCommand':assert.equal(i.ReputationEntityPolicy,`arn:aws:ses:${r}:aws:reputation-policy/strict`);return {};
         case 'CreateTenantResourceAssociationCommand':assert.ok(tenants.has(i.TenantName));assert.ok(i.ResourceArn.startsWith(`arn:aws:ses:${r}:${dest}:`));assert.ok(!associations.has(i.TenantName+':'+i.ResourceArn));associations.add(i.TenantName+':'+i.ResourceArn);return {};
         case 'GetEmailIdentityCommand':if(!identities.has(i.EmailIdentity))throw Object.assign(Error('fresh account'),{name:'NotFoundException'});return identities.get(i.EmailIdentity);
+        case 'PutEmailIdentityFeedbackAttributesCommand':assert.ok(identities.has(i.EmailIdentity));assert.equal(i.EmailForwardingEnabled,false);return {};
         case 'CreateEmailIdentityCommand':{const n=names.indexOf(i.EmailIdentity);assert.ok(n>=0);assert.ok(!identities.has(i.EmailIdentity));assert.deepEqual(tags(i.Tags),{...owned,'bane:purpose':'domain-identity','bane:domain-claim':tokens[n]});
           const dkim={Tokens:['new-a','new-b','new-c'],SigningEnabled:true,SigningHostedZone:'dkim.amazonses.com',SigningAttributesOrigin:'AWS_SES'};identities.set(i.EmailIdentity,{Tags:i.Tags,VerificationStatus:'SUCCESS',VerifiedForSendingStatus:true,DkimAttributes:{...dkim,Status:'SUCCESS'}});return {DkimAttributes:{...dkim,Status:'PENDING'}};}
         default:return setup(name,i,r,dest);
@@ -21538,6 +21592,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     const {SESv2Client}=await import('@aws-sdk/client-sesv2'),{operationJobs}=await import('./src/operations.js'),{JobDeferred}=await import('./src/jobs.js');
     let tags:Json[]=[];const dkim={Status:'SUCCESS',SigningEnabled:true,SigningHostedZone:'dkim.amazonses.com',Tokens:['cold-a','cold-b','cold-c']};
     cold.mock.method(SESv2Client.prototype,'send',async function(this:InstanceType<typeof SESv2Client>,cmd:any){assert.equal(cmd.input.EmailIdentity,host);assert.equal((await this.config.credentials()).accessKeyId,'fixture-rehome');
+      if(cmd.constructor.name==='PutEmailIdentityFeedbackAttributesCommand'){assert.equal(cmd.input.EmailForwardingEnabled,false);return {};}
       if(cmd.constructor.name==='CreateEmailIdentityCommand'){tags=cmd.input.Tags;return {DkimAttributes:dkim};}assert.equal(cmd.constructor.name,'GetEmailIdentityCommand');return {VerificationStatus:'SUCCESS',VerifiedForSendingStatus:true,DkimAttributes:dkim,Tags:tags};});
     cold.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{const u=new URL(String(input));assert.equal(u.hostname,'cloudflare-dns.com');const name=u.searchParams.get('name');return Response.json({Status:0,Answer:name==='_bane.'+host?[{name,type:16,data:JSON.stringify(tags.find(t=>t.Key==='bane:domain-claim')!.Value)}]:[]});});
     ok(await api('POST','/v1/connection',{kind:'shared'}),201);assert.equal((await db.query('SELECT aws_account_id FROM provider_connections WHERE workspace_id=$1',[personal])).rows[0].aws_account_id,null);
@@ -22292,7 +22347,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const wire:string[]=[],ips:string[]=[],aws:string[]=[]; let mode:'live'|'private'|'redirect'|'timeout'|'listed'='live';
       let spfRecord='v=spf1 include:_spf.example.net ~all';
       t.mock.method(SESv2Client.prototype,'send',async(cmd:any)=>{
-        aws.push(cmd.constructor.name);assert.ok(['GetEmailIdentityCommand','CreateEmailIdentityCommand'].includes(cmd.constructor.name));
+        aws.push(cmd.constructor.name);assert.ok(['GetEmailIdentityCommand','CreateEmailIdentityCommand','PutEmailIdentityFeedbackAttributesCommand'].includes(cmd.constructor.name));
         return {DkimAttributes:{Tokens:['aaa','bbb','ccc'],SigningHostedZone:'dkim.fixture',Status:'PENDING'}};
       });
       t.mock.method(tls,'connect',(opts:{host:string;servername:string;rejectUnauthorized:boolean},ready:()=>void)=>{
@@ -22387,7 +22442,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(wire.length,probeCount);assert.deepEqual(dbCounts[0],dbCounts[1],'No added database round trip.');
       const p95=samples.map(times=>times.sort((a,b)=>a-b)[18]!);t.diagnostic(`Synthetic fresh POST p95 (20 each, alternating): off ${p95[0].toFixed(1)} ms / on ${p95[1].toFixed(1)} ms; ${dbCounts[1][0]} DB calls.`);
       assert.ok(p95[1]<250);queries.mock.restore();
-      assert.ok(aws.every(c=>['GetEmailIdentityCommand','CreateEmailIdentityCommand'].includes(c)));
+      assert.ok(aws.every(c=>['GetEmailIdentityCommand','CreateEmailIdentityCommand','PutEmailIdentityFeedbackAttributesCommand'].includes(c)));
       } finally { globalThis.fetch=forbiddenFetch; }
     });
   });
@@ -22451,6 +22506,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         case 'CreateTenantResourceAssociationCommand':assert.equal(i.TenantName,tenant);if(i.ResourceArn.includes(':configuration-set/'))assert.ok(sets.has(i.ResourceArn.split('/')[1]));else if (failAssociation && members.size===3){failAssociation=false;throw new Error('interrupted');}assert.ok(!members.has(i.ResourceArn));members.add(i.ResourceArn);return {};
         case 'ListResourceTenantsCommand':return {ResourceTenants:members.has(i.ResourceArn)?[{TenantName:tenant,TenantId:'tenant-fixture',ResourceArn:i.ResourceArn}]:[]};
         case 'GetEmailIdentityCommand':if(i.EmailIdentity===managed && !managedTags.length)throw missing();return {...identity(i.EmailIdentity),Tags:i.EmailIdentity===managed?managedTags:[],ConfigurationSetName:drift?'changed':undefined};
+        case 'PutEmailIdentityFeedbackAttributesCommand':assert.deepEqual(i,{EmailIdentity:managed,EmailForwardingEnabled:false});return {};
         case 'CreateEmailIdentityCommand':assert.equal(i.EmailIdentity,managed);checkTags(i.Tags.filter((t:Json)=>t.Key!=='bane:domain-claim'),'domain-identity');managedTags=i.Tags;return {Tags:i.Tags};
         case 'DeleteTenantResourceAssociationCommand':assert.equal(i.ResourceArn,`arn:aws:ses:${va}:${acct}:identity/${managed}`);assert.ok(members.delete(i.ResourceArn));return {};
         case 'DeleteEmailIdentityCommand':assert.equal(i.EmailIdentity,managed);managedTags=[];return {};
@@ -22575,6 +22631,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           if(hook){afterRuntimeRead=undefined;await hook();}
           return value;
         }
+        case 'PutEmailIdentityFeedbackAttributesCommand':assert.ok(children.has(i.EmailIdentity));assert.equal(i.EmailForwardingEnabled,false);return {};
         case 'CreateEmailIdentityCommand':assert.notEqual(i.EmailIdentity,host);children.set(i.EmailIdentity,{...identity,VerificationStatus:'PENDING',VerifiedForSendingStatus:false,Tags:i.Tags});return {DkimAttributes:identity.DkimAttributes,Tags:i.Tags};
         case 'ListResourceTenantsCommand':return {ResourceTenants:members.has(i.ResourceArn)?[{TenantName:members.get(i.ResourceArn),TenantId:'tenant-fixture',ResourceArn:i.ResourceArn}]:[]};
         case 'CreateTenantResourceAssociationCommand':assert.ok(!members.has(i.ResourceArn));members.set(i.ResourceArn,i.TenantName);return {};
@@ -22637,7 +22694,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     assert.equal(ok(await api(owner,'POST','/v1/domains',{name:host}),201).id,adopted.domainId,'Adding the adopted root again is idempotent.');
     // After adoption an ordinary subdomain is a normal claim with its own tagged identity.
     const sub=ok(await api(owner,'POST','/v1/domains',{name:`notify.${host}`}),201);ok(await api(owner,'DELETE',`/v1/domains/${sub.id}`));
-    assert.deepEqual(writes.slice(1),[`CreateEmailIdentityCommand:notify.${host}`,`DeleteEmailIdentityCommand:notify.${host}`]);
+    assert.deepEqual(writes.slice(1),[`CreateEmailIdentityCommand:notify.${host}`,`PutEmailIdentityFeedbackAttributesCommand:notify.${host}`,`DeleteEmailIdentityCommand:notify.${host}`]);
 
     // Sending: the configured workspace sends as the root and ordinary subdomains, never from a platform host.
     await send(owner,`security@${host}`);await send(owner,`noreply@notify.${host}`);
@@ -22725,7 +22782,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     // Deleting the claim leaves the identity and its tenant association alone; the runtime key couldn't change them anyway.
     ok(await api(owner,'DELETE',`/v1/domains/${adopted.domainId}`));assert.equal(writes.length,settled);assert.equal((await db.query('SELECT FROM domain_claims WHERE name=$1',[host])).rowCount,0);
     const statements=Object.values(render('--fresh',{account:acct,origin:publicUrl}) as Record<string,{Statement:IamStatement[]}>).flatMap(d=>d.Statement);
-    for (const action of ['ses:DeleteEmailIdentity','ses:PutEmailIdentityMailFromAttributes','ses:PutEmailIdentityDkimSigningAttributes','ses:PutEmailIdentityDkimAttributes','ses:CreateTenantResourceAssociation','ses:DeleteTenantResourceAssociation'])
+    for (const action of ['ses:DeleteEmailIdentity','ses:PutEmailIdentityMailFromAttributes','ses:PutEmailIdentityFeedbackAttributes','ses:PutEmailIdentityDkimSigningAttributes','ses:PutEmailIdentityDkimAttributes','ses:CreateTenantResourceAssociation','ses:DeleteTenantResourceAssociation'])
       assert.equal(iamAllows(statements,action,arn,{'aws:RequestedRegion':oh}),false,`${action} on the untagged platform identity`);
     assert.equal(iamAllows(statements,'ses:GetEmailIdentity',arn,{'aws:RequestedRegion':oh}),true);
     // Revoke: the operator undo releases the claim and leaves the workspace's tenant, even once the configuration has moved on.
@@ -23041,7 +23098,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         case 'DeleteConfigurationSetCommand':{const s=JSON.parse((await this.config.credentials()).sessionToken!).Statement;assert.ok(s[0].Action.includes('ses:DeleteConfigurationSet'));assert.ok(s[0].Resource.includes(`arn:aws:ses:${region}:${account}:configuration-set/${i.ConfigurationSetName}`));assert.ok(sets.delete(key));if(loseSetDelete){loseSetDelete=false;throw Object.assign(Error('lost delete acknowledgement'),{name:'TimeoutError'});}return {};}
         case 'ListEmailIdentitiesCommand':if(region===west)return {EmailIdentities:[]};if(region===ie&&i.NextToken)throw denied();return i.NextToken?{EmailIdentities:[{IdentityType:'DOMAIN',IdentityName:region+'.example'},{IdentityType:'DOMAIN',IdentityName:'reselect.example'}]}:{NextToken:'domains2',EmailIdentities:[{IdentityType:'DOMAIN',IdentityName:'both.example'},{IdentityType:'EMAIL_ADDRESS',IdentityName:'x@both.example'}]};
         case 'GetEmailIdentityCommand':{assert.ok(!i.EmailIdentity.includes('@'));if(i.EmailIdentity==='new.example'){if(!createdIdentity)throw missing();return createdIdentity;}const invalid=revoked===true || revoked===i.EmailIdentity;return {VerificationStatus:invalid?'FAILED':'SUCCESS',VerifiedForSendingStatus:!invalid,DkimAttributes:{Status:'SUCCESS',SigningEnabled:true},ConfigurationSetName:'existing'};}
-        case 'CreateEmailIdentityCommand':assert.equal(i.EmailIdentity,'new.example');assert.match(i.Tags.find((t:Json)=>t.Key==='bane:domain-claim').Value,/^[a-f0-9-]{36}$/);assert.deepEqual(i.Tags.slice(1),[{Key:'bane:owner',Value:'bane'},{Key:'bane:installation-id',Value:v5.id},{Key:'bane:purpose',Value:'domain-identity'}]);createdIdentity={Tags:i.Tags,DkimAttributes:{Status:'PENDING',Tokens:['a','b','c']}};return createdIdentity;
+        case 'PutEmailIdentityFeedbackAttributesCommand':assert.deepEqual(i,{EmailIdentity:'new.example',EmailForwardingEnabled:false});throw denied(); // The shipped 6.0 role does not grant the optional write.
+        case 'CreateEmailIdentityCommand':assert.equal(i.EmailIdentity,'new.example');assert.match(i.Tags.find((t:Json)=>t.Key==='bane:domain-claim').Value,/^[a-f0-9-]{36}$/);assert.deepEqual(i.Tags.slice(1),[{Key:'bane:owner',Value:'bane'},{Key:'bane:installation-id',Value:v5.id},{Key:'bane:purpose',Value:'domain-identity'}]);createdIdentity={Tags:i.Tags,FeedbackForwardingStatus:true,DkimAttributes:{Status:'PENDING',Tokens:['a','b','c']}};return createdIdentity;
         case 'PutEmailIdentityMailFromAttributesCommand':{assert.equal(i.EmailIdentity,'new.example');assert.ok(createdIdentity);const [s]=JSON.parse((await this.config.credentials()).sessionToken!).Statement;
           assert.deepEqual(s.Action,['ses:GetEmailIdentity','ses:PutEmailIdentityMailFromAttributes']);assert.equal(s.Resource,`arn:aws:ses:${region}:${account}:identity/new.example`);mailFromWrites.push(i);
           if(i.MailFromDomain)createdIdentity.MailFromAttributes={MailFromDomain:i.MailFromDomain,MailFromDomainStatus:'PENDING',BehaviorOnMxFailure:i.BehaviorOnMxFailure};else delete createdIdentity.MailFromAttributes;return {};}
@@ -23193,6 +23251,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     assert.equal((await db.query('SELECT region FROM domain_sending_bindings WHERE workspace_id=$1 AND name=$2',[wid,'new.example'])).rows[0].region,oh);
     const verify=(await db.query("SELECT j.* FROM jobs j JOIN operation_domains d ON d.id=j.payload->>'domainId' WHERE d.workspace_id=$1 AND d.name='new.example' AND j.type='domain.verify'",[wid])).rows[0];
     await assert.rejects((await import('./src/operations.js')).operationJobs['domain.verify']!(runtime,verify.payload,{workspaceId:wid,id:verify.id,attempts:1}),JobDeferred);
+    assert.equal(trace.filter(t=>t.op==='PutEmailIdentityFeedbackAttributesCommand').length,1);assert.equal(createdIdentity?.FeedbackForwardingStatus,true,'An unchanged BYO role refuses the optional write without blocking the domain');
     assert.equal(trace.filter(t=>t.op==='CreateEmailIdentityCommand').length,1);assert.ok(policies.at(-1)!.includes(`arn:aws:ses:${oh}:${account}:identity/new.example`));
     await t.test('terminal bind failures release both domain caps and allow regional reselection',async()=>{
       ok(await select(oh+':reselect.example'),202);revoked=true;
@@ -35348,7 +35407,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const role=byoRoleStatements(await byoTemplate(file,params,[region]));
       for(const purpose of purposes)for(const s of byoSessionStatements(purpose,{region,account,connectionId:connection,domain:'example.com',template:'bane-pilot',stack:params['AWS::StackName'],templateUrl,changeSet:'nightmail-update-6-0-x'}))
         for(const action of s.Action)for(const resource of [s.Resource].flat().map(sample)){
-          checked++;assert.ok(iamAllows(role,action,resource,context(action,resource)),`${file}: the ${purpose} session's ${action} on ${resource} isn't allowed by the role`);
+          // The current customer role does not grant this optional setting. Domain creation fails soft on its refusal.
+          const expected=!(file==='byo-templates/6.0.yaml' && purpose==='verify' && action==='ses:PutEmailIdentityFeedbackAttributes');
+          checked++;assert.equal(iamAllows(role,action,resource,context(action,resource)),expected,`${file}: ${purpose} session's ${action} on ${resource}`);
         }
     }
     assert.ok(checked>=50*templates.length,'Every purpose contributes its calls.');

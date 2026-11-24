@@ -574,6 +574,15 @@ function recoverIdentity(runtime:Runtime,wid:string,domainId:string,token:string
       const regionalByo=current.connection.kind==='byo' && current.connection.legacy===false;
       const pooled=current.connection.kind==='shared' && runtime.config.trustedPool;
       const identity=await ensureIdentity(client,current.name,token,pooled?POOL_INSTALLATION:current.connection.legacy===false || (runtime.config.regionalSending && current.connection.kind==='shared')?current.connection.id:undefined,regionalByo || pooled);
+      // A configuration-set SNS destination already receives feedback. Do this only after create or a
+      // tag-checked recovery, never on a customer import or an operator-adopted identity.
+      if (!('FeedbackForwardingStatus' in identity) || identity.FeedbackForwardingStatus !== false) {
+        try { await sesCall(({PutEmailIdentityFeedbackAttributesCommand}) => client.send(new PutEmailIdentityFeedbackAttributesCommand({EmailIdentity:current.name,EmailForwardingEnabled:false}))); }
+        catch (error) {
+          if (!(error instanceof ApiError)) throw error;
+          log('warn',{code:'SES_FEEDBACK_FORWARDING_NOT_DISABLED',workspaceId:wid,domain:current.name,region:current.region,reason:error.code});
+        }
+      }
       if (regionalByo) {
         const entry=JSON.stringify([identityJournalEntry(current)]);
         await db.execute(sql`UPDATE provider_connection_regions SET ownership_journal=ownership_journal||${entry}::jsonb WHERE connection_id=${current.connection.id} AND region=${current.region} AND NOT ownership_journal @> ${entry}::jsonb`);
@@ -715,11 +724,11 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
         (!ses?.VerificationStatus || ['PENDING','NOT_STARTED'].includes(ses.VerificationStatus)) && (!ses?.DkimAttributes?.Status || ses.DkimAttributes.Status==='NOT_STARTED');
       if (!(e instanceof ApiError) || e.code!=='SES_IDENTITY_NOT_FOUND' || row.identity && !reset) throw e;
     }
-    // The claim exists but the creating request never reached SES: the job owns the identity from here (ensureIdentity proves ownership itself).
-    if (!identity) {
+    // Recover an interrupted create, including a lost create acknowledgement before feedback forwarding was disabled.
+    if (!identity || (!row.identity && identity.FeedbackForwardingStatus === true && ownsIdentity(identity,row.token))) {
       const recovered=await recoverIdentity(runtime,job.workspaceId,row.id,row.token,client);
       if (!recovered) return;
-      identity={...recovered,VerificationStatus:'PENDING',$metadata:{}};
+      identity??={...recovered,VerificationStatus:'PENDING',$metadata:{}};
     }
     else if (row.identity?.adopted) {
       // Runtime IAM intentionally denies membership reads/writes on these ARNs. An SES send

@@ -94,9 +94,10 @@ function lookupError(error: unknown) {
 // What the agent's key may do (api/src/agent-setup.ts AGENT_PERMISSIONS), and what it never may.
 const grants: [boolean, string][] = [
   [true, 'Send email from your domains'],
-  [true, 'Add and verify domains; create inboxes, their mail logins and receiving'],
+  [true, 'Add and verify domains, create inboxes and set up receiving'],
   [true, 'Read logs and received mail; manage webhooks, audience and campaigns'],
-  [false, 'Never API keys, members or billing'],
+  [false, 'Never create API keys, inbox keys or mail-client (IMAP/SMTP) passwords'],
+  [false, 'Never members or billing'],
 ]
 function expiresIn(at: string) {
   const minutes = Math.max(1, Math.round((Date.parse(at) - Date.now()) / 60_000))
