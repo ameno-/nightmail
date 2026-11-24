@@ -32,7 +32,7 @@ const prerenderModule = fileURLToPath(new URL('./src/features/pricing/prerender.
 const bootScript = fileURLToPath(new URL('./src/features/home/shell/boot.js', import.meta.url))
 /** Over the app's own page until it takes over (index.tsx); the rest is the app's stylesheet, cut down. */
 const SHELL_CSS = '#price-shell{position:absolute;top:0;left:0;z-index:2147483000;width:100%}'
-/** The first fonts (features/pricing/fonts): the app's, cut down to these characters, and preloaded. The painted page
+/** The first fonts (public/fonts/*-basic.woff2, features/pricing/fonts/README.md): the app's, cut down to these characters, and preloaded. The painted page
  *  knows only these (its CSS leaves out the app's own faces of those families: WHOLE_FACES), so it fetches nothing else;
  *  once the app's stylesheet is in, they still serve these characters (defined after its faces) and the whole fonts
  *  only the others. */
@@ -79,7 +79,8 @@ export function pricePages(): Plugin {
       // wall behind it, the phone's or the wide window's (board.css).
       const wall = { phone: fileOf('pricing/board/wall-828.avif'), wide: fileOf('pricing/board/wall-1920.avif') }
       const boot = `/${this.getFileName(this.emitFile({ type: 'asset', name: 'home-boot.js', source: readFileSync(bootScript) }))}`
-      const fonts = FIRST_FONTS.map(font => ({ ...font, url: `/${this.getFileName(this.emitFile({ type: 'asset', name: font.file, source: readFileSync(fileURLToPath(new URL(`./src/features/pricing/fonts/${font.file}`, import.meta.url))) }))}` }))
+      const fonts = FIRST_FONTS.map(font => ({ ...font, url: `/fonts/${font.file}` }))
+      for (const font of fonts) if (!existsSync(resolve(publicDir, font.url.slice(1)))) return this.error(`public${font.url} is missing (features/pricing/fonts/README.md makes it).`)
       const faces = fonts.map(font => `@font-face{font-family:'${font.family}';src:url(${font.url}) format('woff2');font-style:normal;font-weight:${font.weight};font-display:swap;unicode-range:${BASIC}}`).join('')
       const moondust = { x1: fileOf('pricing/board/moondust-384.avif'), x2: fileOf('pricing/board/moondust-768.avif') }
       const { module: prerender } = await runnerImport<typeof import('./src/features/pricing/prerender.tsx')>(prerenderModule, { root, configFile: false, logLevel: 'error' })
@@ -132,7 +133,7 @@ export function pricePages(): Plugin {
 
 /** The files a price page's first screen and its app need, for the cache rules (asset-headers.ts): next in line after
  *  the homepage's. */
-export const priceFirstFiles = (files: string[]) => [/^assets\/(?:inter-basic|opentui-(?:regular|bold)-basic)-[\w-]+\.woff2$/, /^assets\/(?:moondust-\d+|wall-\d+|lamp)-[\w-]+\.(?:avif|webp)$/, /^assets\/(?:pricing|board-page|machines)-[\w-]+\.(?:js|css)$/]
+export const priceFirstFiles = (files: string[]) => [/^assets\/(?:moondust-\d+|wall-\d+|lamp)-[\w-]+\.(?:avif|webp)$/, /^assets\/(?:pricing|board-page|machines)-[\w-]+\.(?:js|css)$/]
   .flatMap(pattern => files.filter(name => pattern.test(name)))
 
 /** The stylesheets the chunks of these modules load, theirs and their imports'. */
