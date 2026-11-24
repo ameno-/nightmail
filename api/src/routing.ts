@@ -47,18 +47,18 @@ export const MailRoute = RouteFields.extend({
 }).openapi('MailRoute');
 export type Route = z.infer<typeof MailRoute>;
 type RouteInput = z.infer<typeof RouteFields>;
-const RoutingConfig = z.object({
-  version: z.number().int(),
-  routes: z.array(MailRoute),
-  nextCursor: z.string().nullable().optional().describe('Pass as cursor to read the next page of routes when non-null.'),
-}).openapi('RoutingConfig');
-const RoutingConfigFile = z
-  .object({ version: z.number().int().optional().describe('Ignored on apply; send the version in If-Match.'), routes: z.array(RouteFields).max(10000) })
-  .strict()
-  .openapi('RoutingConfigFile');
-const RoutingConfigFileResponse = RoutingConfigFile.extend({
+const routingConfigShape = { version: z.number().int(), routes: z.array(MailRoute) };
+const RoutingConfig = z.object(routingConfigShape).openapi('RoutingConfig');
+const RoutingConfigPage = z.object({
+  ...routingConfigShape,
   nextCursor: z.string().nullable().optional().describe('Pass as cursor to read the next page of routes when non-null.'),
 });
+const routingConfigFileShape = { version: z.number().int().optional().describe('Ignored on apply; send the version in If-Match.'), routes: z.array(RouteFields).max(10000) };
+const RoutingConfigFile = z.object(routingConfigFileShape).strict().openapi('RoutingConfigFile');
+const RoutingConfigFileResponse = z.object({
+  ...routingConfigFileShape,
+  nextCursor: z.string().nullable().optional().describe('Pass as cursor to read the next page of routes when non-null.'),
+}).strict();
 const RoutingDiff = z.object({ before: MailRoute.nullable(), after: MailRoute.nullable() }).openapi('RoutingDiff');
 const RoutingChange = z
   .object({
@@ -483,7 +483,7 @@ export function registerRouting(app: App) {
       description:
         "Explicit routes and the current version (also the ETag). With format=config, routes omit IDs and refer to keyed inboxes, webhooks and forwards as inbox:<key>, webhook:<key> and forward:<name>, ready to edit and PUT back. Large route sets are bounded by response size; pass nextCursor as cursor to read remaining routes. An inbox's own addresses route to it without a route. " + readLimitNote(5),
       request: { query: z.object({ format: z.enum(['config']).optional(), cursor: z.string().max(254).optional(), limit: z.coerce.number().int().min(1).max(10000).default(10000) }) },
-      responses: { 200: response(z.union([RoutingConfig, RoutingConfigFileResponse])), ...errors },
+      responses: { 200: response(z.union([RoutingConfigPage, RoutingConfigFileResponse])), ...errors },
     }),
     async (c) => {
       const w = workspace(c), q = c.req.valid('query');
@@ -698,7 +698,7 @@ export function registerRouting(app: App) {
       summary: 'Read a routing version',
       description: 'One page of routes as they were at v and that version’s changes. Pass nextCursor for the next page. History retains the latest 256 versions for up to one year.',
       request: { params: VersionParam,query:Page.extend({cursor:z.string().regex(/^\d{1,5}$/).optional()}) },
-      responses: { 200: response(RoutingConfig.extend({ diff: z.array(RoutingDiff),nextCursor:z.string().nullable() }).openapi('RoutingVersionDetail')), ...errors },
+      responses: { 200: response(z.object({ ...routingConfigShape, diff: z.array(RoutingDiff), nextCursor: z.string().nullable() }).openapi('RoutingVersionDetail')), ...errors },
     }),
     async (c) => {
       const w = workspace(c),

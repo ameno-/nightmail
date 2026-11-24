@@ -2772,15 +2772,6 @@ export type ConfigureSesAutoValidation = {
     confirm: true;
 };
 
-export type RoutingConfig = {
-    version: number;
-    routes: Array<MailRoute>;
-    /**
-     * Pass as cursor to read the next page of routes when non-null.
-     */
-    nextCursor?: string | null;
-};
-
 export type MailRoute = {
     /**
      * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key>, webhook:<key> and forward:<name>.
@@ -2799,6 +2790,35 @@ export type MailRoute = {
     note: string;
     id: string;
     createdAt: string;
+};
+
+export type RoutingChange = {
+    /**
+     * Routing version after the change; unchanged for a dry run or when nothing changed.
+     */
+    version: number;
+    /**
+     * before null: created; after null: deleted. Shortened to fit the response size budget when large; read the full history from getRoutingAudit.
+     */
+    diff: Array<RoutingDiff>;
+    /**
+     * Present when diff was shortened: total changed routes in this version.
+     */
+    diffCount?: number;
+    /**
+     * Present and true when diff was shortened to fit the response size budget; read full changes from getRoutingAudit.
+     */
+    diffTruncated?: true;
+    warnings: Array<string>;
+};
+
+export type RoutingDiff = {
+    before: MailRoute & ({
+        [key: string]: unknown;
+    } | null);
+    after: MailRoute & ({
+        [key: string]: unknown;
+    } | null);
 };
 
 export type RoutingConfigFile = {
@@ -2829,35 +2849,6 @@ export type RoutingConfigFile = {
         enabled?: boolean;
         note?: string;
     }>;
-};
-
-export type RoutingChange = {
-    /**
-     * Routing version after the change; unchanged for a dry run or when nothing changed.
-     */
-    version: number;
-    /**
-     * before null: created; after null: deleted. Shortened to fit the response size budget when large; read the full history from getRoutingAudit.
-     */
-    diff: Array<RoutingDiff>;
-    /**
-     * Present when diff was shortened: total changed routes in this version.
-     */
-    diffCount?: number;
-    /**
-     * Present and true when diff was shortened to fit the response size budget; read full changes from getRoutingAudit.
-     */
-    diffTruncated?: true;
-    warnings: Array<string>;
-};
-
-export type RoutingDiff = {
-    before: MailRoute & ({
-        [key: string]: unknown;
-    } | null);
-    after: MailRoute & ({
-        [key: string]: unknown;
-    } | null);
 };
 
 export type CreateMailRoute = {
@@ -2937,9 +2928,11 @@ export type RoutingVersion = {
     note: string | null;
 };
 
-export type RoutingVersionDetail = RoutingConfig & {
-    nextCursor: string | null;
+export type RoutingVersionDetail = {
+    version: number;
+    routes: Array<MailRoute>;
     diff: Array<RoutingDiff>;
+    nextCursor: string | null;
 };
 
 export type RoutingTestResult = {
@@ -14561,12 +14554,46 @@ export type GetRoutingResponses = {
     /**
      * Success
      */
-    200: RoutingConfig | (RoutingConfigFile & {
+    200: {
+        version: number;
+        routes: Array<MailRoute>;
         /**
          * Pass as cursor to read the next page of routes when non-null.
          */
         nextCursor?: string | null;
-    });
+    } | {
+        /**
+         * Ignored on apply; send the version in If-Match.
+         */
+        version?: number;
+        routes: Array<{
+            /**
+             * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key>, webhook:<key> and forward:<name>.
+             */
+            key?: string | null;
+            /**
+             * Recipient, case-insensitive: an address (support@acme.com), a local-part pattern (reply+*@acme.com, *-invoices@acme.com) or a catch-all (*@acme.com, or @acme.com). The most specific route wins: exact address, then the pattern with the most literal characters, then the plus-address base, then the catch-all, then the domain default.
+             */
+            match: string;
+            /**
+             * Up to 10 destinations (inboxes, webhooks and confirmed forwards), [] to keep mail stored without an inbox (readable by ID), or 'drop' to discard it. A route for an inbox's own address replaces its default delivery, so list the inbox to keep it.
+             */
+            to: 'drop' | Array<string | string>;
+            /**
+             * Also route user+tag@host here when nothing more specific matches. Default true.
+             */
+            subaddresses?: boolean;
+            /**
+             * A disabled route is skipped; its mail falls through to the next tier. Default true.
+             */
+            enabled?: boolean;
+            note?: string;
+        }>;
+        /**
+         * Pass as cursor to read the next page of routes when non-null.
+         */
+        nextCursor?: string | null;
+    };
 };
 
 export type GetRoutingResponse = GetRoutingResponses[keyof GetRoutingResponses];
