@@ -92,7 +92,7 @@ const InboundDomainStatus = z.enum(['off', 'provisioning', 'waiting_for_mx', 'ac
 const InboundDomainSchema = z.object({
   id: z.string().describe(`${productName} domain ID.`), name: z.string(), region: z.string(),
   status: InboundDomainStatus,
-  catchAll: InboundCatchAll.describe('For an unknown recipient, create_address creates a receiving address; store keeps the message as unrouted.'),
+  catchAll: InboundCatchAll.describe('For an unknown recipient, create_address creates a receiving address; store keeps the message as unrouted for 30 days.'),
   dns: z.array(MxRecord).describe('Records to publish for receiving.'), mx: MxReportSchema.nullable(), lastError: z.string().nullable(),
   enabledAt: z.string().nullable(), checkedAt: z.string().nullable(), addressCount: z.number().int(),
   subdomains: z.object({ enabled: z.boolean().describe('Whether the receipt rule also matches every subdomain.'), count: z.number().int().describe('Receiving subdomains.'), dns: z.array(MxRecord).describe('The wildcard MX record subdomains need, published once.') }),
@@ -324,7 +324,7 @@ function registerReceivingDomains(app: App) {
   // other than the domain's own row.
   const hosts = `${base}/{id}/hosts`;
   const HostParams = z.object({ id: z.string().min(1).max(120), hostId: z.string().min(1).max(120) });
-  const HostInput = z.object({ catchAll: InboundCatchAll.optional().describe('For an unknown recipient, store keeps the message as unrouted (default); create_address creates a receiving address.'), metadata: Metadata.optional() });
+  const HostInput = z.object({ catchAll: InboundCatchAll.optional().describe('For an unknown recipient, store keeps the message as unrouted for 30 days (default); create_address creates a receiving address.'), metadata: Metadata.optional() });
   app.openapi(createRoute({ ...meta, method: 'get', path: hosts, operationId: 'listReceivingHosts', summary: 'List receiving hosts',
     description: 'Every host the domain receives on: the domain itself and any of its subdomains, at once, the domain’s own host first. Each has its own status, MX record, catch-all and addresses. Removed hosts are listed with status removed.',
     request: { params: IdParam }, responses: { 200: response(z.object({ data: z.array(InboundHostSchema) }).openapi('InboundHostList')), ...errors } }), async c => {
@@ -363,7 +363,7 @@ function registerReceivingDomains(app: App) {
   });
   app.openapi(createRoute({ ...meta, method: 'post', path: subdomains, operationId: 'createInboundSubdomain', summary: 'Add a receiving subdomain',
     description: `Adds name.example.com as a receiving host beside the domain\u2019s others (POST ${hosts} with a label does the same). Publish the returned MX record on it. Hosted, the same DNS checks as for any host apply. Self-hosted, it needs no SES verification of its own: the first subdomain adds the wildcard recipient (.example.com) to the receipt rule, which takes up to a minute, and later ones are live immediately; a *.example.com MX record (the domain\u2019s subdomains.dns) also works instead of one record per subdomain. Receiving addresses can then be created on the subdomain. Re-adding a removed subdomain restores it.`,
-    request: { params: IdParam, body: json(z.object({ name: z.string().trim().toLowerCase().max(253).describe('A label (acme) or the full host (acme.example.com).'), catchAll: InboundCatchAll.default('store').describe('For an unknown recipient, store keeps the message as unrouted (default); create_address creates a receiving address.'), metadata: Metadata.default({}), confirm: z.boolean().default(false).describe('Hosted: choose the host even though another provider receives its mail today.') }).strict().openapi('CreateInboundSubdomain')) },
+    request: { params: IdParam, body: json(z.object({ name: z.string().trim().toLowerCase().max(253).describe('A label (acme) or the full host (acme.example.com).'), catchAll: InboundCatchAll.default('store').describe('For an unknown recipient, store keeps the message as unrouted for 30 days (default); create_address creates a receiving address.'), metadata: Metadata.default({}), confirm: z.boolean().default(false).describe('Hosted: choose the host even though another provider receives its mail today.') }).strict().openapi('CreateInboundSubdomain')) },
     responses: { 201: response(InboundSubdomainSchema), ...errors } }), async c => {
     hostAdmin(c); const { domain, parent } = await receivingParent(c, c.req.valid('param').id); const input = c.req.valid('json');
     const label = input.name.endsWith(`.${domain.name}`) ? input.name.slice(0, -(domain.name.length + 1)) : input.name;
@@ -424,7 +424,7 @@ function registerAddresses(app: App) {
       q.cursor ? lt(mailboxes.id, q.cursor) : undefined)).orderBy(desc(mailboxes.id)).limit(q.limit + 1);
     return c.json({ data: await mailboxViews(c.env, rows.slice(0, q.limit)), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
   });
-  app.openapi(createRoute({ ...meta, method: 'post', path: collection, ...addressAlias('createInboundAddress'), summary: 'Create a receivable address', description: 'Admin only. The domain must be verified for this workspace; mail arrives once its receiving MX record is active. Permanent addresses claim earlier unrouted mail for their address or rules; temporary addresses start empty. Expiry stops new delivery and sending without deleting history.', request: { body: json(MailboxInput) }, responses: { 201: response(InboundAddressSchema), ...errors } }), async c => {
+  app.openapi(createRoute({ ...meta, method: 'post', path: collection, ...addressAlias('createInboundAddress'), summary: 'Create a receivable address', description: 'Admin only. The domain must be verified for this workspace; mail arrives once its receiving MX record is active. Permanent addresses claim earlier unrouted mail (kept 30 days) for their address or rules; temporary addresses start empty. Expiry stops new delivery and sending without deleting history.', request: { body: json(MailboxInput) }, responses: { 201: response(InboundAddressSchema), ...errors } }), async c => {
     const value = admin(c); const input = c.req.valid('json'); const scope = scopeOf(value);
     if ([input.address, ...input.aliases].some(address => address.split('@')[0]!.includes('*'))) throw new ApiError(422, 'INVALID_ADDRESS', 'A * makes a catch-all or wildcard, which is a route: create it with createRoute.', 'address');
     if (input.flow) receivingAdmin(c, 'change routes and rules');

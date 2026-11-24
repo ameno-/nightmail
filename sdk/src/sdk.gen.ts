@@ -4701,7 +4701,7 @@ export const listInboundAddresses = <ThrowOnError extends boolean = false>(optio
 /**
  * Create a receivable address
  *
- * Admin only. The domain must be verified for this workspace; mail arrives once its receiving MX record is active. Permanent addresses claim earlier unrouted mail for their address or rules; temporary addresses start empty. Expiry stops new delivery and sending without deleting history.
+ * Admin only. The domain must be verified for this workspace; mail arrives once its receiving MX record is active. Permanent addresses claim earlier unrouted mail (kept 30 days) for their address or rules; temporary addresses start empty. Expiry stops new delivery and sending without deleting history.
  *
  * @deprecated
  */

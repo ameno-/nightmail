@@ -112,6 +112,7 @@
       { "binding": "FEEDBACK_DLQ", "queue": "nightmail-prod-feedback-v2-dlq" },
       { "binding": "LEGACY_FEEDBACK_DLQ", "queue": "nightmail-prod-feedback-dlq" },
       { "binding": "FEEDBACK_QUEUE", "queue": "nightmail-prod-feedback-v2" },
+      { "binding": "FEEDBACK_PRIORITY_QUEUE", "queue": "nightmail-prod-feedback-priority" },
       // The second classifier in the content screen's shadow (src/screen-shadow.ts). Nothing is sent to it without JEVF_API_KEY.
       { "binding": "JEVF_QUEUE", "queue": "nightmail-prod-jevf" }
     ],
@@ -124,7 +125,8 @@
       { "queue": "nightmail-prod-work", "max_batch_size": 1, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 8 },
       // Each wake opens up to six delivery slots. Don't merge a burst of wake hints into one drain.
       { "queue": "nightmail-prod-webhooks", "max_batch_size": 1, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 12 },
-      { "queue": "nightmail-prod-feedback-v2", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 1, "dead_letter_queue": "nightmail-prod-feedback-v2-dlq" },
+      { "queue": "nightmail-prod-feedback-v2", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 6, "dead_letter_queue": "nightmail-prod-feedback-v2-dlq" },
+      { "queue": "nightmail-prod-feedback-priority", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 4, "dead_letter_queue": "nightmail-prod-feedback-v2-dlq" },
       // Legacy lane (untagged items from the previous version); remove with LEGACY_FEEDBACK_QUEUE_NAME once drained.
       { "queue": "nightmail-prod-feedback", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 1, "dead_letter_queue": "nightmail-prod-feedback-dlq" },
       // Both DLQs archive to PostgreSQL/R2, never ingest. Cross-redrive keeps storage outages recoverable.

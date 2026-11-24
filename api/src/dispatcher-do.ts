@@ -202,7 +202,7 @@ export class DispatcherShard extends DurableObject<Env> {
       this.pool = new Pool({ connectionString: this.env.HYPERDRIVE.connectionString, connectionTimeoutMillis: 10000, max: 2, idleTimeoutMillis: 30000 });
       this.pool.on('error', () => { /* Idle client errors surface on the next query; the run loop then recreates the pool. */ });
     }
-    return { db: drizzle(this.pool), shadow: shadowQueue && (items => { this.ctx.waitUntil(enqueueShadow(shadowQueue, items)); }), storage: r2Storage(this.env.ATTACHMENTS), config, feedback: feedbackSink(this.env.FEEDBACK_QUEUE, config.authSecret), wake: (count,kind)=>workWake(kind==='webhook' && this.env.WEBHOOK_QUEUE ? this.env.WEBHOOK_QUEUE : this.env.WAKE_QUEUE,6)(count) };
+    return { db: drizzle(this.pool), shadow: shadowQueue && (items => { this.ctx.waitUntil(enqueueShadow(shadowQueue, items)); }), storage: r2Storage(this.env.ATTACHMENTS), config, feedback: feedbackSink(this.env.FEEDBACK_QUEUE, config.authSecret, this.env.FEEDBACK_PRIORITY_QUEUE), wake: (count,kind)=>workWake(kind==='webhook' && this.env.WEBHOOK_QUEUE ? this.env.WEBHOOK_QUEUE : this.env.WAKE_QUEUE,6)(count) };
   }
 
   // One short-lived connection, bounded by flushCounters' own timeouts. It never throws or rejects, whatever is missing.

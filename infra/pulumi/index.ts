@@ -62,7 +62,7 @@ for (const [purpose, queueId] of Object.entries(stage.queues)) {
 // archive-only Worker consumers; operators replay only from the authenticated quarantine records.
 // feedback-v2 is the tagged feedback lane the Worker writes to; the original feedback queue
 // stays as the legacy lane until drained (api/wrangler.<stage>.jsonc).
-for (const purpose of ['webhooks','feedback-dlq','feedback-v2','feedback-v2-dlq']) {
+for (const purpose of ['webhooks','feedback-dlq','feedback-v2','feedback-priority','feedback-v2-dlq']) {
   const id = stage.extraQueues?.[purpose];
   new cf.Queue(purpose, { accountId: cloudflareAccountId, queueName: `${queuePrefix}-${purpose}` }, {
     ...(id ? adopt(`${cloudflareAccountId}/${id}`, cloudflare) : { provider: cloudflare, protect: true }),

@@ -275,6 +275,9 @@ async function retentionDrains(runtime: Runtime): Promise<Drain[]> {
     { name: 'mail_routing_versions', size: 8, oldest: sql`SELECT min(created_at) FROM mail_routing_versions WHERE created_at<now()-interval '1 year'`, statement: () => sql`SELECT mail_prune_route_versions() AS n` },
     expired('mail_receipts', 'mail_receipts', sql`coalesce(processed_at,created_at)`, sql`status IN ('processed','failed') AND coalesce(processed_at,created_at)<${cutoff}`, inbound),
     expired('mail_receipt_holds', 'mail_receipt_holds', at('expires_at'), sql`status<>'held' AND expires_at<${cutoff}`, inbound),
+    // Unrouted mail for unknown recipients is kept 30 days: oldest first in 1,000-row batches (at most 5,000 per
+    // hourly run, with pauses between batches), also retiring unreferenced mail_messages and queueing storage deletes.
+    { name: 'mail_unrouted', ...inbound, size: 1000, batches: 5, oldest: sql`SELECT min(created_at) FROM mail_unrouted WHERE created_at<${cutoff}`, statement: () => sql`SELECT mail_unrouted_prune_batch(1000) AS n` },
     // Received-mail events and webhook deliveries are kept 30 days. A delivery still held for a paused endpoint after that is
     // dead-lettered with ENDPOINT_PAUSED_EXPIRED (unpause no longer resumes it) and kept 7 more days so the reason is seen.
     expired('mailbox_events', 'mailbox_events', at('created_at'), sql`created_at<${cutoff}`, inbound),

@@ -10,6 +10,7 @@ interface __BaseEnv_Env {
 	FEEDBACK_DLQ: Queue;
 	LEGACY_FEEDBACK_DLQ: Queue;
 	FEEDBACK_QUEUE: Queue;
+	FEEDBACK_PRIORITY_QUEUE?: Queue;
 	JEVF_QUEUE?: Queue;
 	ADMISSION: RateLimit;
 	SNS_CERT_MISSES: RateLimit;
