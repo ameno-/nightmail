@@ -183,7 +183,7 @@ export function customerNotice(origin: string, n: NoticeInput): Notice {
     // it says what the link does and that ignoring it is safe.
     case 'signin_link': return notice({ subject: `Your ${productName} sign-in link`, action: { label: 'Sign in', url: n.url },
       why: `${productName} sent this because a sign-in link was asked for with this address. If it wasn’t you, ignore it: nothing happens unless the link is used.`, lines: [
-        `A place in ${productName} is held for this address. Open this link, then sign in with any account: that account takes the place.`,
+        `There’s a place in ${productName} for this address. Open this link, then sign in with any account: that account takes the place.`,
         `The link works once, for ${n.minutes} minutes.`] });
   }
 }

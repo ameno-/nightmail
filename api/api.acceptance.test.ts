@@ -1373,7 +1373,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
 // The sign-up limit (src/signups.ts): an operator opens a number of places. A new account signing in with a mailbox
 // its sign-in proves takes one while there is one, a raise lets the oldest waiting addresses in first, two people racing
 // for the last place can't both have it, and staff and invitees sign in as before, uncounted.
-test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one each, each held address emailed once, and staff and invitees pass uncounted; a held place also takes the GitHub-verified address or a sign-in link emailed to it; the sign-ups list keeps every waitlist join and sign-up', async t => {
+test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one each, each held address emailed once, and staff and invitees pass uncounted; a GitHub-verified primary address or a sign-in link emailed to an address takes its held or open place, one per address; the sign-ups list keeps every waitlist join and sign-up', async t => {
   const {drizzle} = await import('drizzle-orm/node-postgres');
   const {loadConfig} = await import('./src/config.js');
   const {createApp} = await import('./src/app.js');
@@ -1427,7 +1427,7 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   }
   const signIn = async (p: Person, callbackURL?: string) => (await begin(p, callbackURL))();
   const people: Person[] = [];
-  const someone = (email: string, acr = googleAcr, provider: Person['provider'] = 'google', hd: string | null = null) => { const p = {subject:randomUUID(),email,acr,provider,hd}; people.push(p); return p; };
+  const someone = (email: string, acr = googleAcr, provider: Person['provider'] = 'google', hd: string | null = null) => { const p: Person = {subject:randomUUID(),email,acr,provider,hd}; people.push(p); return p; };
   const gmail = (name: string) => someone(`${name}-${randomUUID().slice(0,8)}@gmail.com`);
   const outcome = async (p: Person) => (await db.query('SELECT outcome FROM nightmail_signin_attempts WHERE issuer=$1 AND subject=$2',[issuer,p.subject])).rows[0]?.outcome;
   const waiting = async (p: Person) => (await db.query('SELECT let_in_at IS NOT NULL AS held FROM nightmail_waitlist WHERE email=lower($1)',[p.email])).rows[0] ?? null;
@@ -1764,6 +1764,45 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   assert.equal((await links(coder)).length,3);
   // An address that was never let in still waits.
   assert.equal((await signIn(after)).auth,'waitlist');
+
+  // Open places with nothing held (production after a raise past everyone waiting). GitHub takes one with its GitHub
+  // account's verified primary address, one place per address. GitHub without one (none, or listed unverified) is refused
+  // and offered a sign-in link to its address, which takes one. Full, GitHub waits, and no link goes out.
+  const before2 = await places();
+  await db.query('UPDATE nightmail_signup_limit SET places=$1',[before2.signedUp+before2.held+2]);
+  const dev = someone(`dev-${randomUUID().slice(0,8)}@example.net`,githubAcr,'github');
+  const devIn = await signIn(dev);
+  assert.ok(devIn.session);
+  assert.deepEqual([await outcome(dev),await placeOf(devIn.account),await waiting(dev)],['signed_in:signup','open',null]);
+  assert.deepEqual((await db.query('SELECT u.mailbox_proved,s.verified_email FROM nightmail_users u JOIN nightmail_sessions s ON s.user_id=u.id WHERE u.id=$1',[devIn.account])).rows,[{mailbox_proved:null,verified_email:null}]);
+  // Another account (another subject) with that address verified on GitHub gets no second place: not with it as the
+  // account's address too, nor with another account address. Neither takes the place left open.
+  const twin = someone(dev.email,githubAcr,'github');
+  assert.deepEqual(await signIn(twin).then(r=>[r.auth,r.session]),['error','']);
+  const sibling = someone(`sibling-${randomUUID().slice(0,8)}@example.net`,githubAcr,'github');
+  sibling.upstream = {email:dev.email,email_verified:true};
+  assert.deepEqual(await signIn(sibling).then(r=>[r.auth,r.place,r.session]),['waitlist','ready','']);
+  assert.deepEqual([(await places()).open,await placeOf(devIn.account)],[1,'open']);
+  // No verified primary address on GitHub, or one listed unverified: refused, offered a link (?place=ready), place kept.
+  const unverified = someone(`unverified-${randomUUID().slice(0,8)}@example.net`,githubAcr,'github');
+  for (const upstream of [{}, {email:unverified.email,email_verified:false}]) {
+    unverified.upstream = upstream;
+    assert.deepEqual(await signIn(unverified).then(r=>[r.auth,r.place,r.session]),['waitlist','ready',''],JSON.stringify(upstream));
+  }
+  assert.equal((await places()).open,1);
+  assert.deepEqual(await ask(unverified.email),[202,{requested:true}]);
+  const [openLink] = await links(unverified);
+  const viaOpenLink = await signIn(unverified, signinLinkUrl(runtime.config, openLink!));
+  assert.ok(viaOpenLink.session);
+  assert.deepEqual([await outcome(unverified),await placeOf(viaOpenLink.account),await waiting(unverified)],['signed_in:signup','open',null]);
+  // Full: GitHub, verified or not, waits as before, and no link goes out for it.
+  assert.equal((await places()).open,0);
+  const full2 = someone(`full-${randomUUID().slice(0,8)}@example.net`,githubAcr,'github');
+  assert.deepEqual(await signIn(full2).then(r=>[r.auth,r.place,r.session]),['waitlist',null,'']);
+  full2.upstream = {};
+  assert.deepEqual(await signIn(full2).then(r=>[r.auth,r.place,r.session]),['waitlist',null,'']);
+  assert.deepEqual(await ask(full2.email),[202,{requested:true}]);
+  assert.deepEqual(await links(full2),[]);
 });
 
 // Several accounts in one browser (account switcher): one session cookie per connected account, each request acts as

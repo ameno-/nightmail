@@ -222,15 +222,14 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
         if (runtime.config.multiTenant && !emailAtLogin) throw new NotAdmitted('email_unverified');
         const selfHosted = !runtime.config.multiTenant && runtime.config.allowedSubjects.includes(claims.sub);
         const invited = runtime.config.multiTenant && !staff && !!invitation && !!mailbox && await pendingInvitation(db, mailbox, invitation);
-        // Signing up on its own (signups.ts): hosted, without an invitation link, while a place is held for the mailbox or
-        // open. A place held for an address this sign-in shows another way is taken too: the GitHub account's own
-        // verified address, or the address the sign-in link it followed was emailed to. At the limit it is refused as
-        // before, and joins the waitlist.
+        // Signing up on its own (signups.ts): hosted, without an invitation link, while a place is held for an address this
+        // sign-in shows, or open: the mailbox it proves, the address the sign-in link it followed was emailed to, or the
+        // GitHub account's verified primary address. At the limit it is refused as before, and joins the waitlist.
         const own = runtime.config.multiTenant && !staff && !invitation;
         const linked = own && link ? await spendSigninLink(db, runtime.config, link) : null, github = own ? githubVerifiedAddress(claims.acr, upstream) : null;
-        const signup = own && (mailbox || linked || github) ? await takePlace(db, mailbox, [linked, github]) : null;
-        // GitHub without the address verified, or a password, proves no mailbox: when a place is held for its address the
-        // refusal offers a sign-in link to it, and when one is open it says to sign in with an emailed link or Google.
+        const signup = own && (mailbox || linked || github) ? await takePlace(db, [mailbox, linked, github]) : null;
+        // GitHub without a verified primary address, or a password, shows nothing of its address: when a place is held for
+        // it or open, the refusal offers a sign-in link to it.
         if (!staff && !invited && !selfHosted && !signup) throw new NotAdmitted(invitation ? 'invitation' : 'not_approved', {
           place: own && !mailbox && !!emailAtLogin ? await placeReady(db, emailAtLogin) : null, staleLink: own && !!link && !linked });
         userId = crypto.randomUUID();
