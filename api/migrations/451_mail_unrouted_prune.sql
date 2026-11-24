@@ -1,8 +1,9 @@
 SET LOCAL lock_timeout='2s';
 
 -- Deletes up to batch_size (max 1,000) oldest mail_unrouted rows past 30 days, and removes any
--- resulting unreferenced mail_messages (plus queues mail.deleteObjects for their raw .eml and
--- attachments, and cleans up empty mail_threads). Acquires the workspace ingest lane first, then
+-- resulting unreferenced mail_messages (plus queues mail.deleteObjects for R2/local raw .eml and
+-- attachments — leaving S3 objects to the bucket's own lifecycle — and cleans up empty mail_threads).
+-- Acquires the workspace ingest lane first, then
 -- deletes locked rows and checks mailbox_messages / remaining mail_unrouted in a separate statement
 -- so mail claimed moments before (or delivered to another inbox) is never deleted.
 CREATE OR REPLACE FUNCTION mail_unrouted_prune_batch(batch_size integer DEFAULT 1000) RETURNS integer LANGUAGE plpgsql AS $$
@@ -54,7 +55,7 @@ BEGIN
     ),
     chunks AS (
       SELECT *, (row_number() OVER (PARTITION BY workspace_id, bucket, region ORDER BY key) - 1) / 1000 AS chunk
-      FROM keys
+      FROM keys WHERE strpos(bucket, ':') > 0
     ),
     queued AS (
       INSERT INTO jobs(id, type, workspace_id, payload)
