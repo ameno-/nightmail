@@ -42,6 +42,9 @@
   for (const meta of document.querySelectorAll('meta[name="theme-color"]')) meta.setAttribute('content', theme === 'dark' ? '#080808' : '#FAFAFA')
 })()
 
+// Overview's detail column, where this browser hid it (features/overview/panel.ts): laid out without it from the first paint.
+try { if (localStorage.getItem('nightmail.overview-panel') === 'hidden') document.documentElement.dataset.overviewPanel = 'hidden' } catch {}
+
 // Start the session check while the app's scripts download. The app (data/live.ts) takes these
 // responses over, and only when the account and workspace headers match what it would have sent itself.
 // The account is this tab's (sessionStorage); a new tab asks as the browser default account.

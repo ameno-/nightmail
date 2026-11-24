@@ -121,6 +121,17 @@ a.ov-tile:focus-visible { outline: 2px solid var(--color-focus); outline-offset:
   .ov-split__aside:empty { display: none; }
   .page-surface > .ui-page-header:has(+ .ov-split) { --ov-aside: 0px; }
 }
+/* The panel toggle (index.tsx) keeps the header's top-right corner, over the detail column or the page's edge, and the
+   controls end before it. Hidden (panel.ts), the detail column is gone and the main column takes its width; one column
+   always shows it, so there is no toggle there. */
+.ui-page-header .ov-panel-toggle { display: none; }
+@media (min-width: 961px) {
+  .page-surface > .ui-page-header:has(+ .ov-split) { --ov-toggle: calc(var(--control-height) + var(--space-12)); position: relative; padding-right: var(--ov-toggle); }
+  .ui-page-header .ov-panel-toggle { position: absolute; top: 0; right: 0; display: inline-flex; }
+  :root[data-overview-panel='hidden'] .page-surface > .ui-page-header:has(+ .ov-split) { --ov-aside: var(--ov-toggle); }
+  :root[data-overview-panel='hidden'] .ov-split { grid-template-columns: minmax(0, 1fr); }
+  :root[data-overview-panel='hidden'] .ov-split__aside { display: none; }
+}
 /* Phone: the controls take their own row (range tabs, then the stream filter filling the rest); the four tiles are a
    2 × 2 grid. Heights stay fixed, as above. */
 @media (max-width: 640px) {
