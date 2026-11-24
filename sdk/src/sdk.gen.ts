@@ -683,7 +683,7 @@ export const updateSegment = <ThrowOnError extends boolean = false>(options: Opt
 });
 
 /**
- * Bounded to 1000 matches. Unknown observation history is never classified as inactive. Counts separate suppressed and other non-consenting contacts. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.
+ * Bounded to 1000 matches. Unknown observation history is never classified as inactive. Counts separate suppressed and other non-consenting contacts. Each statement stops after 15 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.
  */
 export const previewSegment = <ThrowOnError extends boolean = false>(options: Options<PreviewSegmentData, ThrowOnError>): RequestResult<PreviewSegmentResponses, PreviewSegmentErrors, ThrowOnError> => (options.client ?? client).post<PreviewSegmentResponses, PreviewSegmentErrors, ThrowOnError>({
     security: [

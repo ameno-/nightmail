@@ -309,7 +309,7 @@ export function registerSupportDeliverability(app: App, meta: Meta, WorkspaceFil
     sampleSize: z.number().int().nullable().describe('Number of contacts sampled when sampled is true; null when exact.'),
     shares: z.object({ stale: Rate.describe('stale / observed contacts'), role: Rate, freeMail: Rate }) });
   const Audience = z.object({
-    workspaceId: z.string(), computedAt: z.string(), lists: z.array(AudienceView.extend({ id: z.string(), name: z.string() })).describe('The 20 largest lists, or the one asked for.'),
+    workspaceId: z.string(), computedAt: z.string(), lists: z.array(AudienceView.extend({ id: z.string(), name: z.string(), listSize: z.number().int().nullable().describe('Total active members in the list when known (exact for lists <= 10,000 or when list counts are materialized; null otherwise).') })).describe('The 20 largest lists, or the one asked for.'),
     all: AudienceView.nullable().describe('Every contact; null when listId narrows the read.'),
     imports: z.array(z.object({ id: z.string(), listId: z.string().nullable(), listName: z.string().nullable(), at: z.string(), imported: z.number(), errors: z.number(), contacts: z.number().describe('Imported contacts sampled (up to 2,000 opaque contact IDs kept for 90 days) for bounce and complaint rates.'),
       hardBounce: Rate.describe('Sampled imported contacts suppressed for a hard bounce since the import.'), complaint: Rate, unsubscribed: z.number().describe('Sampled imported contacts currently unsubscribed.') })).describe('Committed imports of the last 90 days, newest first (10).'),

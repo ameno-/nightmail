@@ -162,6 +162,10 @@ function SegmentEditor({ initial, onCreated }: { initial: Segment | null; onCrea
 function SegmentCounts({ id, at, listId, stale }: { id: string; at: string; listId: string; stale: boolean }) {
   const query = useApiQuery(['segments', 'preview', id, at, listId], (api, signal) => api.segments.preview({ id, listId: listId || undefined }, signal))
   if (query.isPending) return <LoadingRegion label="Counting matching contacts"><AudienceSummarySkeleton /></LoadingRegion>
-  if (query.isError) return query.error instanceof ApiError && query.error.code === 'AUDIENCE_LIMIT_EXCEEDED' ? <div className="audience-summary cluster"><span><strong>Over 1,000</strong> match</span></div> : <ErrorState error={query.error} onRetry={() => query.refetch()} />
+  if (query.isError) {
+    if (query.error instanceof ApiError && query.error.code === 'AUDIENCE_LIMIT_EXCEEDED') return <div className="audience-summary cluster"><span><strong>Over 1,000</strong> match</span></div>
+    if (query.error instanceof ApiError && query.error.code === 'READ_TOO_LARGE') return <ErrorState error={new ApiError('This segment took too long to count across all contacts. Narrow the rules or pick a list to count within.', query.error.code, query.error.fields, query.error.requestId, query.error.status)} onRetry={() => query.refetch()} />
+    return <ErrorState error={query.error} onRetry={() => query.refetch()} />
+  }
   return <div className="audience-summary cluster"><span><strong>{number(query.data.matched)}</strong> match</span><span>{number(query.data.eligible)} can receive campaigns</span><span className="muted">{number(query.data.unsubscribed)} not subscribed</span><span className="muted">{number(query.data.suppressed)} suppressed</span>{stale && <span className="muted">Save to update</span>}</div>
 }

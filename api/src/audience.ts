@@ -114,7 +114,32 @@ export async function lockContacts(tx: DbExecutor, identity: Pick<Actor, 'worksp
 
 export function compileRule(rule: SegmentRule): SQL { return sql`coalesce((${compileRuleCondition(rule)}), false)`; }
 function compileRuleCondition(rule: SegmentRule): SQL {
-  if ('rules' in rule) return sql`(${sql.join(rule.rules.map(compileRule), rule.operator === 'and' ? sql` AND ` : sql` OR `)})`;
+  if ('rules' in rule) {
+    if (rule.operator === 'or') {
+      // Collapse same-field eq leaves inside OR into one ANY(...) test so 20-50 condition OR segments extract JSONB once per row.
+      const eqByField = new Map<string, string[]>();
+      const other: SegmentRule[] = [];
+      for (const child of rule.rules) {
+        if (!('rules' in child) && !('days' in child) && child.operator === 'eq') {
+          const val = child.field === 'email' ? child.value.trim().toLowerCase() : child.value;
+          const list = eqByField.get(child.field) ?? [];
+          list.push(val);
+          eqByField.set(child.field, list);
+        } else {
+          other.push(child);
+        }
+      }
+      const parts: SQL[] = other.map(compileRule);
+      for (const [f, vals] of eqByField) {
+        const expr = f === 'email' ? sql`${contacts.email}` : sql`(${contacts.properties} ->> ${f})`;
+        parts.push(vals.length === 1
+          ? sql`coalesce(${expr} = ${vals[0]!}, false)`
+          : sql`coalesce(${expr} = ANY(ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify([...new Set(vals)])}::jsonb))), false)`);
+      }
+      return sql`(${sql.join(parts, sql` OR `)})`;
+    }
+    return sql`(${sql.join(rule.rules.map(compileRule), sql` AND `)})`;
+  }
   if ('days' in rule) {
     const cutoff = new Date(Date.now() - rule.days * 86400000).toISOString();
     const timestamp = rule.field === 'lastOpenAt' ? contacts.lastOpenAt : contacts.lastClickAt;
@@ -131,15 +156,22 @@ function compileRuleCondition(rule: SegmentRule): SQL {
 // Keep the full membership-key probe correlated even immediately after a large import,
 // before PostgreSQL has analyzed the new row distribution.
 function inList(identity: Actor, listId: string): SQL { return sql`EXISTS (SELECT 1 FROM ${listMembers} WHERE ${scope(listMembers, identity)} AND ${listMembers.listId} = ${listId} AND ${listMembers.contactId} = ${contacts.id} OFFSET 0)`; }
-const PREVIEW_SMALL_LIST = 5000;
+const PREVIEW_SMALL_LIST = 5000, PREVIEW_VERY_LARGE_LIST = 100_000, PREVIEW_READ_SECONDS = 15;
 async function previewSegmentCounts(db: DbExecutor, identity: Actor, rule: SegmentRule, listId?: string) {
   const ruleSql = compileRule(rule);
   let fromSql: SQL;
   if (listId) {
     const big = await db.execute(sql`SELECT 1 FROM ${listMembers} WHERE ${scope(listMembers, identity)} AND ${listMembers.listId} = ${listId} ORDER BY ${listMembers.contactId} OFFSET ${PREVIEW_SMALL_LIST} LIMIT 1`);
-    fromSql = !big.rowCount
-      ? sql`${listMembers} JOIN ${contacts} ON ${contacts.workspaceId} = ${listMembers.workspaceId} AND ${contacts.id} = ${listMembers.contactId} WHERE ${scope(listMembers, identity)} AND ${listMembers.listId} = ${listId} AND ${isNull(contacts.deletedAt)} AND ${ruleSql}`
-      : sql`${contacts} WHERE ${scope(contacts, identity)} AND ${isNull(contacts.deletedAt)} AND ${ruleSql} AND EXISTS (SELECT 1 FROM ${listMembers} WHERE ${scope(listMembers, identity)} AND ${listMembers.listId} = ${listId} AND ${listMembers.contactId} = ${contacts.id})`;
+    if (!big.rowCount) {
+      fromSql = sql`${listMembers} JOIN ${contacts} ON ${contacts.workspaceId} = ${listMembers.workspaceId} AND ${contacts.id} = ${listMembers.contactId} WHERE ${scope(listMembers, identity)} AND ${listMembers.listId} = ${listId} AND ${isNull(contacts.deletedAt)} AND ${ruleSql}`;
+    } else {
+      // Medium lists (5k..100k) benefit from planner-chosen semi-joins; very large lists (>100k) fence EXISTS with OFFSET 0
+      // so Postgres filters contacts by the segment rule first instead of merge-joining millions of memberships.
+      const huge = await db.execute(sql`SELECT 1 FROM ${listMembers} WHERE ${scope(listMembers, identity)} AND ${listMembers.listId} = ${listId} ORDER BY ${listMembers.contactId} OFFSET ${PREVIEW_VERY_LARGE_LIST} LIMIT 1`);
+      fromSql = huge.rowCount
+        ? sql`${contacts} WHERE ${scope(contacts, identity)} AND ${isNull(contacts.deletedAt)} AND ${ruleSql} AND ${inList(identity, listId)}`
+        : sql`${contacts} WHERE ${scope(contacts, identity)} AND ${isNull(contacts.deletedAt)} AND ${ruleSql} AND EXISTS (SELECT 1 FROM ${listMembers} WHERE ${scope(listMembers, identity)} AND ${listMembers.listId} = ${listId} AND ${listMembers.contactId} = ${contacts.id})`;
+    }
   } else {
     fromSql = sql`${contacts} WHERE ${scope(contacts, identity)} AND ${isNull(contacts.deletedAt)} AND ${ruleSql}`;
   }
@@ -578,13 +610,13 @@ export function registerAudience(app: App) {
   app.openapi(createRoute({ method: 'delete', path: '/v1/segments/{id}', operationId: 'deleteSegment', tags: ['Audience'], security, request: { params: IdParams }, responses: { 200: response(Deleted), ...errors } }), async c => {
     const identity = actor(c, 'manage'), segmentId = c.req.valid('param').id; const [row] = await c.env.db.delete(segments).where(and(scope(segments, identity), eq(segments.id, segmentId))).returning(); if (!row) notFound('Segment'); return c.json({ id: segmentId, deleted: true as const }, 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/segments/{id}/preview', operationId: 'previewSegment', tags: ['Audience'], security, description: `Bounded to 1000 matches. Unknown observation history is never classified as inactive. Counts separate suppressed and other non-consenting contacts. ${readLimitNote(5)}`, request: { params: IdParams, body: json(z.object({ listId: z.string().min(1).max(120).optional() }).strict()) }, responses: { 200: response(Counts), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/segments/{id}/preview', operationId: 'previewSegment', tags: ['Audience'], security, description: `Bounded to 1000 matches. Unknown observation history is never classified as inactive. Counts separate suppressed and other non-consenting contacts. ${readLimitNote(PREVIEW_READ_SECONDS)}`, request: { params: IdParams, body: json(z.object({ listId: z.string().min(1).max(120).optional() }).strict()) }, responses: { 200: response(Counts), ...errors } }), async c => {
     const identity = actor(c), segmentId = c.req.valid('param').id, listId = c.req.valid('json').listId;
     const result = await budgetedRead(c.env.db, async tx => {
       const segment = await findSegment(tx, identity, segmentId);
       if (listId) await findList(tx, identity, listId);
       return previewSegmentCounts(tx, identity, segment.rule, listId);
-    }, readLimit(5));
+    }, readLimit(PREVIEW_READ_SECONDS));
     return c.json(result, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/contact-imports', operationId: 'previewContactImport', tags: ['Audience'], security, description: `Persist a preview before commit. Feature limit: 5 MiB UTF-8 CSV, 50,000 rows, 100 columns per import; preview and commit a larger file in parts of that size (the dashboard does this for files up to 1,000,000 rows and 100 MiB). Map headers explicitly. Valid rows can commit alongside a retained row-error report. Imports never lift suppression; consent changes only when the commit attests it. Each workspace keeps at most ${IMPORT_OPEN_PREVIEW_CAP} uncommitted previews (oldest evicted) and allows ${IMPORT_PREVIEW_RATE_PER_MINUTE} previews per minute.`, request: { body: json(ImportInput) }, responses: { 201: response(Import), ...errors } }), async c => {

@@ -531,19 +531,44 @@ export async function audienceHealth(db: DbExecutor, wid: string, listId?: strin
     : sql`(SELECT count(*)::int FROM (SELECT 1 FROM audience_list_members m WHERE m.workspace_id = l.workspace_id AND m.list_id = l.id LIMIT ${AUDIENCE_HEALTH_SAMPLE_LIMIT + 1}) x)`;
   const { rows: lists } = await db.execute<{ id: string; name: string; size: number }>(sql`SELECT l.id, l.name, ${listSizeSql} AS size
     FROM audience_lists l WHERE l.workspace_id = ${wid} ${listId ? sql`AND l.id = ${listId}` : sql``} ORDER BY size DESC, l.id LIMIT ${LIMITS.groups}`);
-  const perListLimit = lists.length ? Math.min(AUDIENCE_HEALTH_SAMPLE_LIMIT, Math.max(2_000, Math.floor(AUDIENCE_HEALTH_LIST_TOTAL_BUDGET / lists.length))) : AUDIENCE_HEALTH_SAMPLE_LIMIT;
-  const byList = lists.length ? await views(sql`
-    SELECT l.list_id AS g, x.contact_id, x.rn
-    FROM unnest(${texts(lists.map(l => l.id))}) AS l(list_id)
-    CROSS JOIN LATERAL (
-      SELECT m.contact_id, row_number() OVER () AS rn
-      FROM (
-        SELECT m.contact_id FROM audience_list_members m
-        WHERE m.workspace_id = ${wid} AND m.list_id = l.list_id
-        ORDER BY hashtextextended(m.contact_id, 0) LIMIT ${perListLimit + 1}
-      ) m
-    ) x`, perListLimit) : new Map<string, AudienceViewResult>();
-  const perList = lists.map(list => ({ id: list.id, name: list.name, ...byList.get(list.id) ?? empty() }));
+  // Keep lists that fit within AUDIENCE_HEALTH_SAMPLE_LIMIT (10,000) exact; only split the sampling budget across lists over it.
+  const exactLists = lists.filter(l => l.size <= AUDIENCE_HEALTH_SAMPLE_LIMIT);
+  const largeLists = lists.filter(l => l.size > AUDIENCE_HEALTH_SAMPLE_LIMIT);
+  const byList = new Map<string, AudienceViewResult>();
+  if (exactLists.length) {
+    const exactMap = await views(sql`
+      SELECT l.list_id AS g, x.contact_id, x.rn
+      FROM unnest(${texts(exactLists.map(l => l.id))}) AS l(list_id)
+      CROSS JOIN LATERAL (
+        SELECT m.contact_id, row_number() OVER () AS rn
+        FROM (
+          SELECT m.contact_id FROM audience_list_members m
+          WHERE m.workspace_id = ${wid} AND m.list_id = l.list_id
+          ORDER BY m.contact_id LIMIT ${AUDIENCE_HEALTH_SAMPLE_LIMIT + 1}
+        ) m
+      ) x`, AUDIENCE_HEALTH_SAMPLE_LIMIT);
+    for (const [k, v] of exactMap) byList.set(k, v);
+  }
+  if (largeLists.length) {
+    const perLargeLimit = Math.min(AUDIENCE_HEALTH_SAMPLE_LIMIT, Math.max(2_000, Math.floor(AUDIENCE_HEALTH_LIST_TOTAL_BUDGET / largeLists.length)));
+    const largeMap = await views(sql`
+      SELECT l.list_id AS g, x.contact_id, x.rn
+      FROM unnest(${texts(largeLists.map(l => l.id))}) AS l(list_id)
+      CROSS JOIN LATERAL (
+        SELECT m.contact_id, row_number() OVER () AS rn
+        FROM (
+          SELECT m.contact_id FROM audience_list_members m
+          WHERE m.workspace_id = ${wid} AND m.list_id = l.list_id
+          ORDER BY hashtextextended(m.contact_id, 0) LIMIT ${perLargeLimit + 1}
+        ) m
+      ) x`, perLargeLimit);
+    for (const [k, v] of largeMap) byList.set(k, v);
+  }
+  const perList = lists.map(list => ({
+    id: list.id, name: list.name,
+    listSize: hasListCounts || list.size <= AUDIENCE_HEALTH_SAMPLE_LIMIT ? list.size : null,
+    ...byList.get(list.id) ?? empty(),
+  }));
   const all = listId ? null : (await views(sql`
     SELECT ''::text AS g, x.id AS contact_id, row_number() OVER () AS rn
     FROM (
@@ -583,7 +608,7 @@ export async function audienceHealth(db: DbExecutor, wid: string, listId?: strin
       message: `${num(v.stale)} of ${num(s.stale.denominator)} observed contacts in ${scope}${sampleTag} have not opened or clicked in 180 days (${pct(s.stale.value)}). Add a sunset policy, or send a re-permission campaign and keep those who click.` });
     if (s.role.value !== null && v.contacts >= 100 && s.role.value > THRESHOLDS.role) findings.push({ severity: 'notice', code: 'ROLE_ADDRESSES', scope, evidence: { role: v.role, contacts: v.contacts, rate: s.role.value, ...(v.sampled && v.sampleSize !== null ? { sampleSize: v.sampleSize } : {}) },
       message: `${num(v.role)} of ${num(v.contacts)} contacts in ${scope}${sampleTag} are role addresses such as info@ or sales@ (${pct(s.role.value)}). They rarely opted in themselves: validate at signup and use double opt-in.` });
-    if (v.typoDomains > 0) findings.push({ severity: 'notice', code: 'TYPO_DOMAINS', scope, evidence: { contacts: v.typoDomains, ...(v.sampled && v.sampleSize !== null ? { sampleSize: v.sampleSize } : {}) }, message: `${num(v.typoDomains)} contacts in ${scope}${sampleTag} use a mistyped domain (gmial.com, hotmial.com…). They bounce: fix or remove them, and validate at signup.` });
+    if (v.typoDomains > 0) findings.push({ severity: 'notice', code: 'TYPO_DOMAINS', scope, evidence: { contacts: v.typoDomains, ...(v.sampled && v.sampleSize !== null ? { sampleSize: v.sampleSize } : {}) }, message: v.sampled && v.sampleSize !== null ? `${num(v.typoDomains)} of the ${num(v.sampleSize)} sampled contacts in ${scope} use a mistyped domain (gmial.com, hotmial.com…). They bounce: fix or remove them, and validate at signup.` : `${num(v.typoDomains)} contacts in ${scope} use a mistyped domain (gmial.com, hotmial.com…). They bounce: fix or remove them, and validate at signup.` });
   }
   for (const i of importViews) if (i.hardBounce.value !== null && i.hardBounce.numerator >= THRESHOLDS.minimumEvents && i.hardBounce.value > THRESHOLDS.firstSendBounce)
     findings.push({ severity: 'serious', code: 'IMPORT_BOUNCES', scope: `import ${i.at.slice(0, 10)}`, evidence: { hardBounced: i.hardBounce.numerator, contacts: i.contacts, rate: i.hardBounce.value, threshold: THRESHOLDS.firstSendBounce },
