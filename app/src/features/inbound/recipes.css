@@ -22,9 +22,10 @@
 /* A tile is a flat solid step off the canvas, a stronger one on hover and keyboard focus: no edge line. */
 .recipe-tile { display: flex; align-items: center; gap: var(--space-12); min-height: 48px; padding: var(--space-12); border: 0; border-radius: var(--radius-sm); background: var(--color-layer-1); color: var(--color-text); font: inherit; text-align: left; cursor: pointer; text-decoration: none; transition: background var(--motion-duration), transform 160ms var(--ease-out-strong); }
 .recipe-tile > strong { min-width: 0; font-size: var(--text-sm); font-weight: var(--font-weight-bold); line-height: var(--leading-sm); }
-@media (hover: hover) and (pointer: fine) { .recipe-tile:hover { background: var(--color-hover); } }
+/* A tile sits on the one surface step (layer-1), so hover and focus take the next one, as a well does. */
+@media (hover: hover) and (pointer: fine) { .recipe-tile:hover { background: var(--color-layer-2); } }
 .recipe-tile:active { transform: scale(.98); }
-.recipe-tile:focus-visible { background: var(--color-hover); text-decoration: none; }
+.recipe-tile:focus-visible { background: var(--color-layer-2); text-decoration: none; }
 .recipe-tile--skeleton { background: var(--color-layer-1); animation: ui-pulse 1.2s ease-in-out infinite alternate; }
 .recipe-agent-link { justify-self: start; margin-inline-start: -11px; color: var(--color-muted); }
 .recipe-advanced .cluster > .recipe-agent-link + .recipe-agent-link { margin-inline-start: 0; }

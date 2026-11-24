@@ -28,6 +28,8 @@
 .mailbox-thread-row:hover { background: var(--color-hover); }
 .mailbox-thread-row[data-selected] { background: var(--color-active-bg, var(--color-hover)); }
 .mailbox-thread-row:focus-visible:not([data-selected]) { background: var(--color-hover); }
+/* The selected conversation already wears the selection fill: keyboard focus on it takes one step past it. */
+.mailbox-thread-row[data-selected]:focus-visible { background: var(--color-raised-control-focus); }
 .mailbox-thread-row__top { display: flex; align-items: center; gap: var(--space-8); min-width: 0; font-size: var(--text-sm); line-height: 20px; }
 .mailbox-thread-row__people { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--color-muted); }
 .mailbox-thread-row__count { flex: none; min-width: 20px; height: 18px; padding: 0 6px; border-radius: 4px; background: var(--color-chip); color: var(--color-muted); font-size: 11px; line-height: 18px; text-align: center; font-variant-numeric: tabular-nums; }
@@ -337,7 +339,10 @@ ul.mailbox-attachments button:focus-visible { background: var(--color-control-fo
   .app-shell--compact .mailbox-threads { flex: none; overflow: visible; margin: 0; padding: 0 0 var(--space-16); gap: var(--space-6); }
   .app-shell--compact .mailbox-thread-row { padding-inline: var(--space-12); background: var(--color-card); }
   .app-shell--compact .mailbox-thread-row[data-selected] { background: var(--color-active-bg); }
-  @media (hover: hover) and (pointer: fine) { .app-shell--compact .mailbox-thread-row:not([data-selected]):hover { background: var(--color-hover); } }
+  /* On a card (layer-1), hover and focus take the next step. */
+  @media (hover: hover) and (pointer: fine) { .app-shell--compact .mailbox-thread-row:not([data-selected]):hover { background: var(--color-layer-2); } }
+  .app-shell--compact .mailbox-thread-row:focus-visible:not([data-selected]) { background: var(--color-layer-2); }
+  .app-shell--compact .mailbox-thread-row[data-selected]:focus-visible { background: var(--color-raised-control-focus); }
   .app-shell--compact .mailbox-thread-row:active { background: var(--color-pressed); }
   .app-shell--compact .mailbox-reader { overflow: visible; }
   .app-shell--compact .mailbox-composer { bottom: calc(var(--tab-bar-height) + env(safe-area-inset-bottom)); }
