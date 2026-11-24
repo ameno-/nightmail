@@ -8,10 +8,27 @@ Every change reaches production through `dev`: a PR merges into `dev`, the dev d
 
 - **Why:** with "require branches to be up to date", parallel PRs went BEHIND after every merge and re-ran CI each time; without it, two PRs that pass alone could break `dev` together (a migration number both picked, a route one added and the other's check missed). The queue removes both.
 - **Cost:** each PR's required checks run twice, once on the PR and once in the queue. The queue builds up to five entries at once, so a burst of PRs doesn't wait in series.
-- **Path-gated checks:** `cls` (dashboard, API or CI changes; every `dev` push) and `gateway` (`gateway/` or `ci.yml` changes) always run and pass when there is nothing to check: the job starts and skips its steps, so the required check reports success to the PR and the queue instead of never arriving.
+- **Path-gated checks:** the six required check names always report a result. A check passes only if its selected suite succeeded, or path detection succeeded and deliberately skipped it. Detection uses the PR merge checkout's first parent, or the **live dev tip** on a queue entry's first-parent chain (including pending PRs ahead of it). If dev has already advanced past the group, run everything.
 - **Failures:** a PR that fails in the queue is removed from it with the failing check linked; the entries behind it are rebuilt without it. Fix and re-add.
 - **Deploys:** the queue pushes `dev` as `github-merge-queue[bot]`. The dev deploy accepts that push when the PR merged at exactly that commit was merged (enqueued) by thdxr or R44VC0RP; anything else still fails "Only thdxr and R44VC0RP may deploy".
-- **Breaking API changes:** the `api-breaking` label on the PR still allows them; in the queue, the compatibility check compares just that PR's step.
+- **Breaking API changes:** the `api-breaking` label on the PR still allows them; in the queue, the compatibility check compares that PR's step; a multi-entry batch must also be compatible as a whole without using one PR's label as a blanket waiver.
+
+## Which changes select which suites
+
+| Changed input | Suites selected on a PR or queue entry |
+| --- | --- |
+| Workflow, shared action, CI/deploy script, or dependency lockfile | Everything. Non-queue pushes to dev also run everything. |
+| API code (including the hosted MCP), configuration, migrations or tests | Build (API types, both Worker bundles, pre-merge checks and generated contract/SDK), acceptance and preview. Bundling needs Vite's static assets, not a separate dashboard type-check. |
+| Dashboard including bundled legal Markdown | Dashboard build and pre-merge checks, Worker bundle/preview and CLS. Acceptance also exercises asset-headers, the theme and signed-in scripts, shared lib, data types and Settings helpers. |
+| API code used by the dashboard | Also dashboard build and CLS: `api/openapi.json` (rendered in Docs), and `api/src/{analytics-events,billing/rates,block-style,brand,mcp-clients,ritual-schema,standing-model,webhook-signature-guide}.ts`. The dashboard does not import the generated SDK. |
+| SDK or standalone MCP client code | Build (type-check the SDK consumer and regenerate the contract/SDK) and acceptance. |
+| Support Worker | Support, including its bundled system prompt and voice guide. Also selected by its API dependencies: brand, log, billing rates, mail-servers and the production Wrangler config. |
+| Gateway | Rust format, lint and tests. |
+| Other fixture/test inputs | Acceptance for Domain Connect templates, shared AWS policies, the Pulumi receiving alarm, the S3 fixture, `api/README.md`'s executable example or the asserted `docs/mcp-coverage.md`. |
+| API, app or SDK package manifest | Also audit (the three packages checked by Bun). |
+| Other Markdown/docs | No heavy suites. Nightly still runs the full acceptance and CLS suites on dev. |
+
+The routing table lives in `.github/scripts/ci-scope.sh`. Update it when a suite starts reading files outside its package. Renames select both the old and the new path.
 
 ## What runs where
 
@@ -20,14 +37,14 @@ Every change reaches production through `dev`: a PR merges into `dev`, the dev d
 | PR, merge group, `dev` push | `build` | Types, SDK and docs regenerate cleanly, both Workers bundle, the public API stays compatible, and the **pre-merge invariants** below |
 | PR, merge group, `dev` push | `acceptance` | Three isolated Postgres/S3 shards (integration, simulated, simulated-heavy), each with the **deadlock guard** |
 | PR, merge group, `dev` push | `preview` | The real Worker under `wrangler dev` on a database upgraded from `dev`'s schema; see **Preview stack** |
-| PR, merge group, `dev` push | `audit`, `gateway`, `cls`, `support` | Dependency advisories, the Rust mail gateway (built only when `gateway/` or `ci.yml` changed), layout shift on every main page in one job, and the support Worker tests |
+| PR, merge group, `dev` push | `audit`, `gateway`, `cls`, `support` | Dependency advisories, the Rust mail gateway (selected by the table above), layout shift on every main page in one job, and the support Worker tests |
 | `dev` push, alongside CI | Deploy dev | Migrate, deploy, health and live dev E2E. Support prepares alongside the main Worker but waits for its health check before changing D1 or its service binding. |
 | Daily 07:17 UTC, or by hand | Nightly | The acceptance suite (quarantined tests included) and the CLS gate, once each by default (5, 10 or 20 by hand), reported in one issue |
 | `production` push | Deploy production | Requires a passing live dev E2E and CI proof (see **Releasing to production**) |
 | Daily 03:00 ET, on Ryan's Mac | Nightly report | The last 24 hours of production and dev logs against the previous week; files `nightly` issues and starts a self-improve session (below) |
 | On demand (`api/ bun run tear:ci`) | Model-based tear suite | Runs on demand against a disposable local Postgres (`anomalyco/tear` is private); public CI's `acceptance` shard verifies the disposable-DB guard on all 11 real `api/tear/**/*.host.ts` processes |
 
-CI, nightly and deploy use Blacksmith Ubuntu 24.04 (4 vCPUs for builds, tests and deploys; 2 for lightweight checks). `release.yml` stays on GitHub-hosted runners for npm trusted publishing. Blacksmith routes `actions/cache` to its local cache. Postgres runs on tmpfs; the CLS cache holds the locked Playwright browser and an exact-SHA Vite build, never a deploy artifact. Each protected suite check requires every matrix job to succeed. [Measured PR CI: 93 seconds](https://github.com/anomalyco/nightmail/actions/runs/43788887814), including queue time.
+CI, nightly and deploy use Blacksmith Ubuntu 24.04 (4 vCPUs for builds, tests and deploys; 2 for lightweight checks). `release.yml` stays on GitHub-hosted runners for npm trusted publishing. Blacksmith routes `actions/cache` to its local cache. Postgres runs on tmpfs; the CLS cache holds the locked Playwright browser and an exact-SHA Vite build, never a deploy artifact. Each protected suite check requires every selected matrix job to succeed.
 
 ## Releasing to production
 
