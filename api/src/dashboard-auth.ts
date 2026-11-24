@@ -1,5 +1,6 @@
 import {createRoute,z} from '@hono/zod-openapi';
 import {and,asc,eq,isNotNull,sql} from 'drizzle-orm';
+import type {BillingAccountRow} from './billing/state.js';
 import {lists} from './db/audience.js';
 import {ApiError,denied,digest,errors,isSimulatedSes,response,security,type App,type Runtime} from './core.js';
 import {accountBrowserRoute,accountSessionActor,accountSessionUser,migrateLegacyCookies,requireDashboardOrigin,settleDefaultAccount} from './account-login.js';
@@ -41,18 +42,29 @@ export function registerDashboardAuth(app: App) {
       mailServers:z.object({imap:z.string(),smtp:z.string()}).nullable().optional().openapi({description:`The hosts mail apps connect to: IMAP on ${MAIL_PORTS.imap.tls} (TLS) or ${MAIL_PORTS.imap.starttls} (STARTTLS), SMTP on ${MAIL_PORTS.smtp.tls} (TLS) or ${MAIL_PORTS.smtp.starttls} (STARTTLS). An app password signs in to both; a send-only API key signs in to SMTP as apikey. Null when this installation has no IMAP/SMTP gateway.`})})),...errors}}),async c=>{
     const identity=c.get('actor'), userId=identity.keyId.startsWith('user_')?identity.keyId.slice(5):null;
     const origin=new URL(c.env.config.publicUrl).origin, hosted=c.env.config.multiTenant;
-    // Independent reads run together; the UI-notes and billing reads depend on the session, so they follow it. Newsletters:
-    // at most four rows of audience_lists through its partial index, for a credential that reads lists (as listNewsletters).
+    const dashboardUserId=hosted && identity.credential==='dashboard'?userId:null;
     const readsLists=!identity.domains.length && (identity.permissions.includes('read') || identity.permissions.includes('manage'));
-    const [connection,session,newsletters]=await Promise.all([hosted?connectionSummary(c.env,identity.workspaceId):null,
-      hosted && identity.credential==='dashboard' && userId?sessionMemberships(c.env.db,userId):null,
-      readsLists?c.env.db.select({id:lists.id,name:lists.name}).from(lists).where(and(eq(lists.workspaceId,identity.workspaceId),isNotNull(lists.newsletterFrom))).orderBy(asc(lists.createdAt),asc(lists.id)).limit(4):null]);
-    // One statement (billing_position and the account row), only for hosted dashboard sessions: the banner's first frame.
+    type Newsletter = {id:string;name:string};
+    // At most four rows through the newsletters partial index, only for a credential that can read lists.
+    const sidebarSource=readsLists?sql`FROM ${lists} WHERE ${and(eq(lists.workspaceId,identity.workspaceId),isNotNull(lists.newsletterFrom))}
+      ORDER BY ${asc(lists.createdAt)}, ${asc(lists.id)} LIMIT 4`:null;
+    const [connection,session,standaloneNewsletters]=await Promise.all([hosted?connectionSummary(c.env,identity.workspaceId):null,
+      dashboardUserId?sessionMemberships(c.env.db,dashboardUserId):null,
+      sidebarSource && !dashboardUserId?c.env.db.execute<Newsletter>(sql`SELECT ${lists.id}, ${lists.name} ${sidebarSource}`).then(({rows})=>rows):null]);
     // Staff UI notes: an operator in UI_NOTES_SUBJECTS only (operator-identity.ts); no query when the list is empty.
-    const [uiNotes,billing,byo]=await Promise.all([
+    const [uiNotes,billingAndNewsletters,byo]=await Promise.all([
       session?.operator==='operator' && identity.staff && userId ? import('./operator-identity.js').then(({uiNotesAllowed})=>uiNotesAllowed(c.env.db,c.env.config.uiNotesSubjects,userId)) : false,
-      session?import('./billing/state.js').then(async({readBilling})=>{const b=await readBilling(c.env.db,identity.workspaceId,{amounts:false,received:false});return {enforcement:b.enforcement,free:b.mode==='exempt',...b.state};}):null,
+      // Keep billing behind the session check, adding the sidebar to its statement only when lists are readable.
+      session?import('./billing/state.js').then(async({billingAccountQuery,billingSummary,readBilling})=>{
+        const view={amounts:false,received:false};
+        const [b,newsletters]=sidebarSource?await c.env.db.execute<BillingAccountRow & {newsletters:Newsletter[]}>(sql`
+          SELECT billing.*, to_json(ARRAY(SELECT json_build_object('id', ${lists.id}, 'name', ${lists.name}) ${sidebarSource})) AS newsletters
+          FROM (${billingAccountQuery(identity.workspaceId)}) billing`).then(({rows:[row]})=>[billingSummary(row!,view),row!.newsletters] as const)
+          :[await readBilling(c.env.db,identity.workspaceId,view),null] as const;
+        return {billing:{enforcement:b.enforcement,free:b.mode==='exempt',...b.state},newsletters};
+      }):null,
       session?import('./byo-pilot.js').then(({byoEnabled})=>byoEnabled(c.env,identity.workspaceId)):false]);
+    const billing=billingAndNewsletters?.billing??null, newsletters=billingAndNewsletters?.newsletters??standaloneNewsletters;
     return c.json({id:userId??identity.keyId,workspaceId:identity.workspaceId,role:WorkspaceRole.nullable().parse(identity.role??null),multiTenant:hosted,simulated:isSimulatedSes(c.env),email:identity.email??null,name:identity.name??null,permissions:identity.permissions,domains:identity.domains,origin,host:new URL(origin).host,mcpScopes:requestedScopes(c.env.config),connection,workspaces:session?.workspaces??null,operator:identity.staff?session?.operator??null:null,staffSignIn:!!session?.operator&&!identity.staff,uiNotes,byo,presence:Boolean(c.env.campaignRooms),analytics:c.env.config.dashboardAnalytics===true,billing,newsletters,mailServers:c.env.config.mailServers??null},200);
   });
 }
