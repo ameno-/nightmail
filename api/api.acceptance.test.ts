@@ -39315,7 +39315,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.equal(request.questions.spam.type, 'noul');
         assert.equal(request.state.signals.recipients, 1);
         classified.push(request.state.email.subject);
-        if (request.state.email.subject === 'Unresponsive classifier') {
+        if (classifierDown && request.state.email.subject === 'Unresponsive classifier') {
           const at = Date.now();
           return new Promise<Response>((_, reject) => init!.signal!.addEventListener('abort', () => {
             timeoutMs = Date.now() - at; siblingSentAtAbort = sent.includes(sibling); reject(new Error('Timed out'));
