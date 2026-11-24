@@ -80,7 +80,7 @@ export type NoticeInput =
   | Workspace & { kind: 'evaluation_finished'; limited: boolean }
   | Workspace & { kind: 'low_balance'; balance: string; emails: number }
   | Workspace & { kind: 'out_of_credit'; receivingUntil: Date | null }
-  | Workspace & { kind: 'recharge_failed'; last4: string | null; decline: string; balance: string }
+  | Workspace & { kind: 'recharge_failed'; last4: string | null; decline: string; taxLocation?: boolean; balance: string }
   | Workspace & { kind: 'receive_hold_soon'; owed: string; since: Date | null; holdAt: Date | null }
   | Workspace & { kind: 'receive_held'; owed: string; since: Date | null }
   | Workspace & { kind: 'credit_expiring'; amount: string; expiresAt: Date | null }
@@ -151,7 +151,7 @@ export function customerNotice(origin: string, n: NoticeInput): Notice {
     case 'recharge_failed': return notice({ subject: `Auto-recharge failed for ${w}`, action: billing('Update the card'), why: members, lines: [
       `${productName} could not charge the card${n.last4 ? ` ending ${n.last4}` : ''}: ${n.decline}.`,
       `Auto-recharge is off until the card is updated. The balance is ${n.balance}, and sending continues until it reaches $0.`,
-      'Update the card in Billing, then turn auto-recharge back on.'] });
+      n.taxLocation ? 'Save the card with a complete billing address in Billing, then turn auto-recharge back on. If the address is already correct, contact support to check the address on your account.' : 'Update the card in Billing, then turn auto-recharge back on.'] });
     case 'receive_hold_soon': return notice({ subject: `Received mail for ${w} will be held ${n.holdAt ? `from ${day(n.holdAt)}` : 'soon'}`, action: billing('Add credit'), why: members, lines: [
       owes(w, n.owed, n.since),
       `Sending is paused. ${n.holdAt ? `From ${day(n.holdAt)}` : 'Soon'}, new received mail is stored but not delivered to inboxes, webhooks or IMAP. Nothing is deleted.`,

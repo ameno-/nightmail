@@ -97,7 +97,7 @@ export function stripeConfig(runtime: Runtime): StripeConfig {
 // ---------- attempts ----------
 export type AttemptRow = {
   id: string; workspace_id: string; kind: 'checkout' | 'saved_card' | 'recharge' | 'setup'; status: string; amount_uc: string;
-  charged_cents: number | null; tax_cents: number | null; idempotency_key: string; stripe_checkout_session: string | null; stripe_payment_intent: string | null;
+  stripe_credit_product: string | null; charged_cents: number | null; tax_cents: number | null; idempotency_key: string; stripe_checkout_session: string | null; stripe_payment_intent: string | null;
   stripe_invoice: string | null; stripe_charge: string | null; checkout_url: string | null; expires_at: string | null; invoice_url: string | null; invoice_pdf: string | null;
   receipt_url: string | null; card_brand: string | null; card_last4: string | null; card_fingerprint: string | null; failure_code: string | null; failure_message: string | null;
   refunded_uc: string; created_by: string; created_at: string; updated_at: string; settled_at: string | null; age_s: number;
@@ -299,39 +299,43 @@ export async function setAutoRecharge(runtime: Runtime, workspaceId: string, set
 }
 
 // ---------- the credit product ----------
-const creditProducts = new WeakMap<StripeConfig, Promise<string>>();
+const creditProducts = new WeakMap<StripeConfig, Map<string, Promise<string>>>();
 /**
  * The one Stripe Product every top-up and recharge is for (STRIPE_CREDIT_PRODUCT_ID), so tax (STRIPE_TAX_CODE, SaaS for
  * business use) is set and seen on one object instead of a throwaway product per Checkout. Read once per isolate and
  * created under its fixed ID when missing, so isolates racing to create it make one. An existing product is never
  * changed: a different tax code or an archived product is logged for an operator, who may have set it in Stripe.
  */
-export function creditProduct(cfg: StripeConfig): Promise<string> {
-  const known = creditProducts.get(cfg);
+export function creditProduct(cfg: StripeConfig, productId = cfg.creditProduct): Promise<string> {
+  let cache = creditProducts.get(cfg);
+  if (!cache) creditProducts.set(cfg, cache = new Map());
+  const known = cache.get(productId);
   if (known) return known;
-  const ensuring = ensureCreditProduct(cfg);
-  creditProducts.set(cfg, ensuring);
-  ensuring.catch(() => { if (creditProducts.get(cfg) === ensuring) creditProducts.delete(cfg); });
+  const ensuring = ensureCreditProduct(cfg, productId);
+  cache.set(productId, ensuring);
+  ensuring.catch(() => { if (cache.get(productId) === ensuring) cache.delete(productId); });
   return ensuring;
 }
-async function ensureCreditProduct(cfg: StripeConfig): Promise<string> {
-  const productId = cfg.creditProduct, path = `/v1/products/${encodeURIComponent(productId)}`;
+async function ensureCreditProduct(cfg: StripeConfig, productId: string): Promise<string> {
+  const path = `/v1/products/${encodeURIComponent(productId)}`;
   try {
     let product: StripeObject;
     try { product = await stripeRequest(cfg, 'GET', path); }
     catch (error) {
       if (!(error instanceof StripeError) || error.uncertain || !error.missing) throw error;
       const params = { id: productId, name: `${productName} credit`, tax_code: cfg.taxCode };
-      try { await stripeRequest(cfg, 'POST', '/v1/products', params, `product:${productId}:${createHash('sha256').update(JSON.stringify(params)).digest('hex').slice(0, 16)}`); return productId; }
+      // Only retries of this POST share a key. Across isolates the fixed Product ID provides uniqueness.
+      try { await stripeRequest(cfg, 'POST', '/v1/products', params, `product:${productId}:${crypto.randomUUID()}`); return productId; }
       catch (refused) { if (!(refused instanceof StripeError) || refused.code !== 'resource_already_exists') throw refused; }
       product = await stripeRequest(cfg, 'GET', path);
     }
     const taxCode = ref(product.tax_code);
     if (taxCode !== cfg.taxCode || product.active === false)
       log('warn', { code: 'BILLING_CREDIT_PRODUCT_DIFFERS', product: productId, taxCode, expectedTaxCode: cfg.taxCode, active: product.active !== false });
+    if (product.active === false) throw new StripeError(400, 'invalid_request_error', 'credit_product_archived', undefined, undefined, 'The credit product is archived.');
     return productId;
   } catch (error) {
-    if (error instanceof StripeError && !error.uncertain) log('error', { code: 'BILLING_CREDIT_PRODUCT_UNAVAILABLE', product: productId, ...stripeErrorFields(error) });
+    if (error instanceof StripeError) log('error', { code: 'BILLING_CREDIT_PRODUCT_UNAVAILABLE', product: productId, ...stripeErrorFields(error) });
     throw error;
   }
 }
@@ -347,11 +351,11 @@ function providerError(error: unknown, context: Record<string, unknown> = {}): u
 
 /**
  * A new attempt in state created; false when none was written. Off-session charges record the saved card they will use
- * (disputes block it). A recharge is written only while no other recharge for the workspace is open: one charge at a time.
+ * (disputes block it) and the product ID so every replay sends the same item parameters. A recharge is written only while no other recharge for the workspace is open: one charge at a time.
  */
-export const insertAttempt = async (tx: Pick<DbExecutor, 'execute'>, attemptId: string, workspaceId: string, kind: AttemptRow['kind'], amountUc: bigint, actor: string) => (await tx.execute(sql`
-  INSERT INTO billing_payment_attempts(id,workspace_id,kind,status,amount_uc,idempotency_key,created_by,card_brand,card_last4,card_fingerprint)
-  SELECT ${attemptId},${workspaceId},${kind},'created',${amountUc},${'attempt:' + attemptId},${actor},
+export const insertAttempt = async (tx: Pick<DbExecutor, 'execute'>, attemptId: string, workspaceId: string, kind: AttemptRow['kind'], amountUc: bigint, actor: string, product: string | null) => (await tx.execute(sql`
+  INSERT INTO billing_payment_attempts(id,workspace_id,kind,status,amount_uc,idempotency_key,created_by,stripe_credit_product,card_brand,card_last4,card_fingerprint)
+  SELECT ${attemptId},${workspaceId},${kind},'created',${amountUc},${'attempt:' + attemptId},${actor},${product},
     CASE WHEN ${kind} IN ('saved_card','recharge') THEN b.card_brand END, CASE WHEN ${kind} IN ('saved_card','recharge') THEN b.card_last4 END,
     CASE WHEN ${kind} IN ('saved_card','recharge') THEN b.card_fingerprint END
   FROM (SELECT 1) one LEFT JOIN billing_accounts b ON b.workspace_id=${workspaceId}
@@ -376,7 +380,7 @@ async function openAttempt(runtime: Runtime, input: { workspaceId: string; kind:
     if (kind !== 'setup' && !a!.funded && amountCents > FIRST_MAX_CENTS) throw new ApiError(409, 'FIRST_TOP_UP_LIMIT', 'The first top-up is limited to $500. Larger top-ups work after it succeeds.', 'amountCents');
     if (kind === 'saved_card' && (!a!.stripe_payment_method || a!.blocked)) throw new ApiError(409, 'PAYMENT_METHOD_REQUIRED', 'Save a card in Settings → Billing first, or pay with Stripe Checkout.');
     const attemptId = id('bpa');
-    await insertAttempt(tx, attemptId, workspaceId, kind, kind === 'setup' ? 0n : BigInt(amountCents) * UC_PER_CENT, input.actor); // never a recharge: always written
+    await insertAttempt(tx, attemptId, workspaceId, kind, kind === 'setup' ? 0n : BigInt(amountCents) * UC_PER_CENT, input.actor, kind === 'saved_card' ? stripeConfig(runtime).creditProduct : null); // never a recharge: always written
     return attemptId;
   });
 }
@@ -396,16 +400,23 @@ async function createRefused(runtime: Runtime, attemptId: string, error: unknown
 const CARD_ONLY = ['card'];
 async function startCheckout(runtime: Runtime, attemptId: string, input: { workspaceId: string; amountCents: number; billingEmail: string | null; setup: boolean }) {
   const cfg = stripeConfig(runtime);
+  let product: string | null = null;
+  if (!input.setup) try { product = await creditProduct(cfg); }
+  catch (error) {
+    if (!(error instanceof StripeError)) throw error;
+    // No Checkout request was sent. A catalog outage is not a failed customer payment.
+    await failAttempt(runtime, attemptId, 'credit_product_unavailable', 'The credit product is unavailable.', 'canceled', false);
+    throw new ApiError(502, 'BILLING_PROVIDER_ERROR', 'The credit product is unavailable. Try again or contact support.', undefined, true);
+  }
   try {
-    const product = input.setup ? null : await creditProduct(cfg);
     const customer = await ensureCustomer(runtime, input.workspaceId, input.billingEmail);
     const meta = metadata(cfg, input.workspaceId, { bane_attempt: attemptId });
     const expiresAt = Math.floor(Date.now() / 1000) + 23 * 3600;
     const back = { success_url: `${runtime.config.publicUrl}/settings?billing=success&attempt=${attemptId}#billing`, cancel_url: `${runtime.config.publicUrl}/settings?billing=canceled#billing`, expires_at: expiresAt };
     const params: Params = input.setup
-      // With tax on, the saved card carries a full billing address: an off-session invoice takes its location from it.
+      // With tax on, the saved card carries a full billing address: replace the customer billing address that invoices consult before the card.
       ? { mode: 'setup', currency: 'usd', customer, client_reference_id: attemptId, allowed_payment_method_types: CARD_ONLY, metadata: meta, setup_intent_data: { metadata: meta },
-        ...(cfg.automaticTax ? { billing_address_collection: 'required' } : {}), ...back }
+        ...(cfg.automaticTax ? { billing_address_collection: 'required', customer_update: { address: 'auto' } } : {}), ...back }
       : { mode: 'payment', customer, client_reference_id: attemptId,
         line_items: [{ quantity: 1, price_data: { currency: 'usd', unit_amount: input.amountCents, tax_behavior: 'exclusive', product } }],
         allowed_payment_method_types: CARD_ONLY, payment_intent_data: { setup_future_usage: 'off_session', metadata: meta }, metadata: meta,
@@ -473,9 +484,15 @@ export async function chargeSavedCard(runtime: Runtime, attemptId: string): Prom
   if (!a || !OPEN.includes(a.status) || (a.kind !== 'saved_card' && a.kind !== 'recharge')) return a?.status ?? 'missing';
   if (!a.stripe_customer || !a.stripe_payment_method) return failAttempt(runtime, attemptId, 'payment_method_missing', 'No card is saved for this workspace.', 'failed', false);
   const key = a.idempotency_key, meta = metadata(cfg, a.workspace_id, { bane_attempt: attemptId }), pm = a.stripe_payment_method;
-  let invoiceId = a.stripe_invoice, product: string | null = null;
+  const product = a.stripe_credit_product;
+  let invoiceId = a.stripe_invoice, addingProductLine = false;
+  if (product) try { await creditProduct(cfg, product); }
+  catch (error) {
+    if (!(error instanceof StripeError)) throw error;
+    await touch(runtime, attemptId);
+    return a.status;
+  }
   try {
-    product = await creditProduct(cfg);
     if (!invoiceId) {
       const invoice = await stripeRequest(cfg, 'POST', '/v1/invoices', { customer: a.stripe_customer, collection_method: 'charge_automatically', auto_advance: false,
         pending_invoice_items_behavior: 'exclude', automatic_tax: { enabled: cfg.automaticTax }, default_payment_method: pm, metadata: meta }, `${key}:invoice`);
@@ -484,8 +501,12 @@ export async function chargeSavedCard(runtime: Runtime, attemptId: string): Prom
         WHERE id=${attemptId} AND status IN ('created','pending') AND (stripe_invoice IS NULL OR stripe_invoice=${invoiceId})`);
     }
     const path = `/v1/invoices/${encodeURIComponent(invoiceId)}`;
-    await stripeRequest(cfg, 'POST', '/v1/invoiceitems', { customer: a.stripe_customer, invoice: invoiceId, description: `${productName} credit`,
-      price_data: { currency: 'usd', product, unit_amount: cents(a.amount_uc), tax_behavior: 'exclusive' }, metadata: meta }, `${key}:item`);
+    // Old writers leave the product NULL. Replay their exact body, even if Stripe accepted it before the deploy.
+    addingProductLine = product !== null;
+    await stripeRequest(cfg, 'POST', '/v1/invoiceitems', product
+      ? { customer: a.stripe_customer, invoice: invoiceId, description: `${productName} credit`, price_data: { currency: 'usd', product, unit_amount: cents(a.amount_uc), tax_behavior: 'exclusive' }, metadata: meta }
+      : { customer: a.stripe_customer, invoice: invoiceId, amount: cents(a.amount_uc), currency: 'usd', description: `${productName} credit`, tax_behavior: 'exclusive', metadata: meta }, `${key}:item`);
+    addingProductLine = false;
     await stripeRequest(cfg, 'POST', `${path}/finalize`, { auto_advance: false }, `${key}:finalize`);
     // The invoice carries the card (default_payment_method), so a retry sends identical parameters under the same key.
     const paid = await stripeRequest(cfg, 'POST', `${path}/pay`, { off_session: true, expand: ['payments'] }, `${key}:pay`);
@@ -493,9 +514,13 @@ export async function chargeSavedCard(runtime: Runtime, attemptId: string): Prom
   } catch (error) {
     if (!(error instanceof StripeError)) throw error;
     if (error.uncertain) { log('warn', { code: 'BILLING_CHARGE_UNCONFIRMED', workspaceId: a.workspace_id, attemptId, ...stripeErrorFields(error) }); return 'pending'; }
-    // Stripe refused the credit product (BILLING_CREDIT_PRODUCT_UNAVAILABLE, logged): nothing was charged and it is not
-    // the card's fault, so the attempt waits for reconciliation and auto-recharge stays on without a notice.
-    if (!product) return a.status;
+    // A cached product can become unavailable between lookup and pricing. Adding a line does not charge the card.
+    if (addingProductLine && product && error.reason !== 'customer_tax_location_invalid') {
+      creditProducts.get(cfg)?.delete(product);
+      log('error', { code: 'BILLING_CREDIT_LINE_UNAVAILABLE', product, attemptId, ...stripeErrorFields(error) });
+      await touch(runtime, attemptId);
+      return (await readAttempt(runtime.db, attemptId))?.status ?? a.status;
+    }
     log('warn', { code: 'BILLING_STRIPE_ERROR', operation: 'charge', workspaceId: a.workspace_id, attemptId, kind: a.kind, ...stripeErrorFields(error) });
     // Any refusal Stripe won't change its mind about (a decline, 3DS, or a non-card one such as
     // customer_tax_location_invalid) ends the charge the same way: the invoice is voided and a recharge turns

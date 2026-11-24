@@ -34,7 +34,7 @@ const DECLINES: Record<string, string> = {
   insufficient_funds: 'the card has insufficient funds', expired_card: 'the card has expired', incorrect_cvc: 'the card’s security code was wrong',
   authentication_required: 'the bank asked for confirmation (3-D Secure), which needs you present', processing_error: 'the card processor had an error',
   card_velocity_exceeded: 'the card reached its spending limit', withdrawal_count_limit_exceeded: 'the card reached its spending limit',
-  customer_tax_location_invalid: 'the card has no billing address to work out tax from',
+  customer_tax_location_invalid: 'Stripe could not determine the tax location from the address on file',
 };
 export const declineWords = (code: unknown, message: unknown) => (typeof code === 'string' && DECLINES[code]) || (typeof message === 'string' && message.trim() ? message.trim().replace(/\.$/, '') : 'the bank declined it');
 
@@ -46,7 +46,7 @@ export function noticeEmail(kind: NoticeKind, n: NoticeContext): Notice {
     switch (kind) {
       case 'low_balance': return { kind, workspace, balance: total, emails: Number((n.totalUc > 0n ? n.totalUc / RATES.emailUc : 0n) + BigInt(Math.max(0, n.freeLeft))) };
       case 'sends_paused': return { kind: 'out_of_credit', workspace, receivingUntil: holdAt };
-      case 'recharge_failed': return { kind, workspace, last4: typeof n.data.last4 === 'string' && /^\d{4}$/.test(n.data.last4) ? n.data.last4 : null, decline: declineWords(n.data.code, n.data.message), balance: total };
+      case 'recharge_failed': return { kind, workspace, last4: typeof n.data.last4 === 'string' && /^\d{4}$/.test(n.data.last4) ? n.data.last4 : null, decline: declineWords(n.data.code, n.data.message), taxLocation: n.data.code === 'customer_tax_location_invalid', balance: total };
       case 'receive_hold_soon': return { kind, workspace, owed, since: n.unpaidSince, holdAt: n.unpaidSince && new Date(n.unpaidSince.getTime() + 7 * DAY) };
       case 'receive_held': return { kind, workspace, owed, since: n.unpaidSince };
       case 'credit_expiring': return { kind, workspace, amount: formatUsd(microCents(typeof n.data.remainingUc === 'string' ? n.data.remainingUc : '0')), expiresAt: typeof n.data.expiresAt === 'string' ? new Date(n.data.expiresAt) : null };

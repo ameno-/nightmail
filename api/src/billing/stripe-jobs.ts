@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { id, log, type JobHandler, type Runtime } from '../core.js';
-import { chargeSavedCard, insertAttempt, lockAccount, reconcileAttempt, reconcileRefund, stripeErrorFields } from './stripe.js';
+import { chargeSavedCard, insertAttempt, lockAccount, reconcileAttempt, reconcileRefund, stripeConfig, stripeErrorFields } from './stripe.js';
 
 /** Hosted and configured: the minute sweep and the recharge job do nothing on an installation without Stripe keys. */
 const configured = (runtime: Runtime) => runtime.config.multiTenant && !!runtime.config.billing?.stripe;
@@ -37,7 +37,7 @@ export const rechargeJob: JobHandler = async (runtime, _payload, job) => {
     if (!a?.enforce || !a.eligible || !a.below) return null;
     if (a.capped) { log('info', { code: 'BILLING_RECHARGE_CAPPED', workspaceId: job.workspaceId }); return null; }
     const attempt = id('bpa');
-    if (!await insertAttempt(tx, attempt, job.workspaceId, 'recharge', BigInt(a.amount_uc), 'system')) return null;
+    if (!await insertAttempt(tx, attempt, job.workspaceId, 'recharge', BigInt(a.amount_uc), 'system', stripeConfig(runtime).creditProduct)) return null;
     await tx.execute(sql`UPDATE billing_accounts SET recharge_pending_attempt=${attempt}, updated_at=now() WHERE workspace_id=${job.workspaceId}`);
     return attempt;
   });
