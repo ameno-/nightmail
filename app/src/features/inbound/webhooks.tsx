@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { useNavigate, useParams } from 'react-router'
 import { Alert, Button, Checkbox, ConfirmDialog, DataTable, EmptyState, ErrorState, Field, Input, SearchField, SecretInput, PageHeader, SectionHeader, Select, SkeletonText, StatusBadge, type Tone, fieldError, MutationError, SecretDialog } from '../../components/ui'
 import { useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
+import { invalidate } from '../../data/invalidation'
 import { mergeAddresses, useAddressOptions, useResolvedAddresses } from '../../data/addresses'
 import { useDebounced } from '../../lib/pagination'
 import { inboundEventTypes, type InboundAddress, type InboundWebhook, type InboundWebhookInput, type MailboxEventType, type MailboxWebhookDelivery } from '../../data/types'
@@ -86,9 +87,9 @@ function WebhookDetail() {
   const [addressSearch, setAddressSearch] = useState('')
   const addressQuery = useDebounced(addressSearch)
   const addresses = useAddressOptions({ search: addressQuery })
-  const save = useApiMutation((api, patch: Parameters<typeof api.inbound.updateWebhook>[1]) => api.inbound.updateWebhook(id, patch), 'Webhook saved', false, true, id)
-  const rotate = useApiMutation((api, _: void) => api.inbound.rotateWebhookSecret(id), undefined, false, true, id)
-  const remove = useApiMutation((api, _: void) => api.inbound.deleteWebhook(id), 'Webhook deleted', false, true, id)
+  const save = useApiMutation((api, patch: Parameters<typeof api.inbound.updateWebhook>[1]) => api.inbound.updateWebhook(id, patch), 'Webhook saved', false, invalidate.inboundWebhooks, id)
+  const rotate = useApiMutation((api, _: void) => api.inbound.rotateWebhookSecret(id), undefined, false, invalidate.inboundWebhooks, id)
+  const remove = useApiMutation((api, _: void) => api.inbound.deleteWebhook(id), 'Webhook deleted', false, invalidate.inboundWebhooks, id)
   const [input, setInput] = useState<Draft | null>(null)
   const [headers, setHeaders] = useState<HeaderDraft>(null)
   const [errors, setErrors] = useState<Record<string, string>>({})

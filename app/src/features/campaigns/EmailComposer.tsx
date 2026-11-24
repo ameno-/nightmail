@@ -19,7 +19,9 @@ import { errorText } from '../../data/types'
 type Draft = ComposedDraft
 export type EmailComposerRef = { prepare: () => Promise<Draft> }
 // personalize offers {{placeholder}} insertions.
-type Props = { attachmentIds?: string[]; attachmentApi?: AttachmentApi; initialHtml: string; disabled?: boolean; personalize?: boolean; onReady: () => void; onDirty: () => void; onAttach?: () => void; onBusy?: (busy: boolean) => void }
+// knownAttachmentIds: the attachments of this draft's other versions (a merge can leave the form without an image the
+// body still shows); the composer looks there for an image's attachment when attachmentIds lacks it.
+type Props = { attachmentIds?: string[]; knownAttachmentIds?: string[]; attachmentApi?: AttachmentApi; initialHtml: string; disabled?: boolean; personalize?: boolean; onReady: () => void; onDirty: () => void; onAttach?: () => void; onBusy?: (busy: boolean) => void }
 const linkForms = '[data-re-link-selector-form], [data-re-link-bm-form], [data-re-btn-bm-form], [data-re-img-bm-form]'
 
 // The library's slash menu reads this shared list and has no image entry, although the
@@ -33,11 +35,11 @@ if (!defaultSlashCommands.some(item => item.title === 'Image')) {
     command: ({ editor: value, range }) => { value.chain().focus().deleteRange(range).run(); pickImage?.() },
   })
 }
-export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailComposer({ attachmentIds = [], attachmentApi: providedAttachmentApi, initialHtml, disabled = false, personalize = false, onReady, onDirty, onAttach, onBusy }, ref) {
+export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailComposer({ attachmentIds = [], knownAttachmentIds = [], attachmentApi: providedAttachmentApi, initialHtml, disabled = false, personalize = false, onReady, onDirty, onAttach, onBusy }, ref) {
   const api = useApi()
   const attachmentApi = providedAttachmentApi ?? api.attachments
   const preparing = useRef<Promise<Draft> | null>(null)
-  const [initialSnapshot] = useState(() => ({ html: initialHtml, attachmentIds: [...attachmentIds] }))
+  const [initialSnapshot] = useState(() => { const known = [...new Set([...attachmentIds, ...knownAttachmentIds])]; return { html: initialHtml, attachmentIds: [...attachmentIds], hydrate: known.length > MAX_ATTACHMENTS ? [...attachmentIds] : known } })
   // Inline attachments open as data URLs and save back as their cid references.
   const cidBySource = useRef(new Map<string, string>())
   // Inline images uploaded or opened here, by source: an upload must survive a failed prepare/save before its ID
@@ -157,7 +159,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     if (!needed.size) return
     const controller = new AbortController()
     setHydrating(true)
-    loadInlineAttachments(attachmentApi, initialSnapshot.attachmentIds, needed, controller.signal).then(result => {
+    loadInlineAttachments(attachmentApi, initialSnapshot.hydrate, needed, controller.signal).then(result => {
       if (controller.signal.aborted) return
       cidBySource.current = new Map([...result.sources].map(([cid, url]) => [url, cid]))
       result.items.forEach((item, url) => uploadedInline.current.set(url, item))
@@ -192,7 +194,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     metadata = metadata.filter(item => !removedInlineIds.includes(item.id)); removedInlineIds.forEach(id => allIds.delete(id))
     let totalSize = metadata.reduce((total, item) => total + item.size, 0)
     if (allIds.size > MAX_ATTACHMENTS || totalSize > MAX_ATTACHMENT_BYTES) throw new Error(attachmentLimit)
-    const sources = new Map<string, string>()
+    const sources = new Map<string, string>(), covered = new Set(metadata.flatMap(item => item.contentId ? [item.contentId] : []))
     for (const source of inlineSources) {
       let cid = cidBySource.current.get(source)
       if (!cid) {
@@ -205,6 +207,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
         const extension = match[1].split('/')[1] === 'jpeg' ? 'jpg' : match[1].split('/')[1]
         const item = await attachmentApi.upload(new File([bytes], `image-${hash.slice(0, 12)}.${extension}`, { type: match[1] }), { contentId })
         cid = `cid:${contentId}`
+        covered.add(contentId)
         cidBySource.current.set(source, cid); uploadedInline.current.set(source, item); allIds.add(item.id); totalSize += item.size
         currentInline.push(item.id)
       } else {
@@ -216,6 +219,9 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     document = replaceEditorImageSources(document as Record<string, unknown>, sources) as EditorNode
     const html = documentToBlockHtml(document)
     if (html.length > 500_000) throw new Error('This email is too large. Remove an image or shorten the content before saving.')
+    // Every image the body shows is saved with its attachment, even one the form lost in a merge.
+    const missing = [...cidImageSources(html)].filter(cid => !covered.has(cid)), elsewhere = knownAttachmentIds.filter(id => !allIds.has(id))
+    if (missing.length && elsewhere.length) for (const item of await Promise.all(elsewhere.map(id => attachmentApi.get(id).catch(() => null)))) if (item?.contentId && missing.includes(item.contentId)) currentInline.push(item.id)
     return { html, inlineAttachmentIds: currentInline, removedInlineIds }
   }
   function prepare(): Promise<Draft> {

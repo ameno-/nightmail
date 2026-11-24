@@ -3,6 +3,7 @@ import { MoreHorizontal } from 'lucide-react'
 import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useApi, useApiDef, useApiMutation, useApiQuery, useRegion, useWorkspaceAccess } from '../../data/context'
+import { invalidate } from '../../data/invalidation'
 import { errorText, type CampaignTemplate, type CampaignTemplateDraft, type CampaignTemplateSummary } from '../../data/types'
 import { SearchField, Button, ConfirmDialog, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, Pagination, PaginationSkeleton, Select, SkeletonText, StatusBadge, useToast } from '../../components/ui'
 import { EmailPreview } from '../../components/EmailPreview'
@@ -33,7 +34,7 @@ export function useStartFromTemplate() {
   const { regionId } = useRegion()
   // Hosted campaigns follow their From domain's region, so they need no selected region.
   const { multiTenant } = useWorkspaceAccess()
-  const mutation = useApiMutation((client, template: {id: string; name: string}) => client.campaigns.save({ templateId: template.id, idempotencyKey: crypto.randomUUID(), regionId, name: template.name, subject: '', previewText: '', fromName: '', fromEmail: '', listId: '', segmentId: null, html: '' }), undefined, false, true, regionId)
+  const mutation = useApiMutation((client, template: {id: string; name: string}) => client.campaigns.save({ templateId: template.id, idempotencyKey: crypto.randomUUID(), regionId, name: template.name, subject: '', previewText: '', fromName: '', fromEmail: '', listId: '', segmentId: null, html: '' }), undefined, false, invalidate.campaignCreate, regionId)
   async function start(template: {id: string; name: string}) {
     try { const campaign = await mutation.mutateAsync(template); navigate(`/campaigns/${encodeURIComponent(campaign.id)}/edit`) }
     catch (error) { toast(errorText(error), 'error') }
@@ -76,7 +77,7 @@ export function TemplatesPage() {
   const requestedPage = Number(params.get('page'))
   const currentPage = Number.isSafeInteger(requestedPage) && requestedPage > 0 ? requestedPage : 1
   const query = useApiQuery(['templates', { search, archived, page: currentPage }], (client, signal) => client.templates.list({ search: search || undefined, archived, page: currentPage, pageSize: 10 }, signal))
-  const create = useApiMutation((client, name: string) => client.templates.create({ name }))
+  const create = useApiMutation((client, name: string) => client.templates.create({ name }), undefined, false, invalidate.templates)
   const [createOpen, setCreateOpen] = useState(false)
   const [name, setName] = useState('')
   async function createTemplate() {

@@ -6,6 +6,7 @@ import { Alert, Button, Checkbox, ConfirmDialog, Dialog, ErrorState, Field, Inpu
 import { mergeAddresses, useAddressOptions, useResolvedAddresses } from '../../data/addresses'
 import { useDebounced } from '../../lib/pagination'
 import { useApi, useApiDef, useApiMutation, useRequestScope } from '../../data/context'
+import { invalidate } from '../../data/invalidation'
 import { queries } from '../../data/queries'
 import { ApiError, type ForwardEndpoint, type InboundAddress, type InboundWebhook, type MailRoute } from '../../data/types'
 import { request } from '../../data/live'
@@ -88,8 +89,8 @@ function RouteDialog({ draft, version, destinations, owners, onClose, addressSea
     }
   }
   const path = route ? `/v1/routing/routes/${encodeURIComponent(route.id)}` : '/v1/routing/routes'
-  const save = useApiMutation((_api, input: { match: string; to: string[] | 'drop'; enabled: boolean }) => versioned(ifMatch => request<MailRoute>(path, { method: route ? 'PATCH' : 'POST', body: input, ifMatch, scope })), 'Saved', false, true, route?.id)
-  const remove = useApiMutation((_api, _: void) => versioned(ifMatch => request(path, { method: 'DELETE', ifMatch, scope })), 'Removed', false, true, route?.id)
+  const save = useApiMutation((_api, input: { match: string; to: string[] | 'drop'; enabled: boolean }) => versioned(ifMatch => request<MailRoute>(path, { method: route ? 'PATCH' : 'POST', body: input, ifMatch, scope })), 'Saved', false, invalidate.routing, route?.id)
+  const remove = useApiMutation((_api, _: void) => versioned(ifMatch => request(path, { method: 'DELETE', ifMatch, scope })), 'Removed', false, invalidate.routing, route?.id)
   const normalized = match.trim().toLowerCase()
   const owner = owners.find(a => a.address === normalized || a.aliases.includes(normalized))
   const losesOwner = owner && (action !== 'deliver' || !selected.includes(owner.id))

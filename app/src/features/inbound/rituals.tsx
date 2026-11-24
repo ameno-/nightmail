@@ -16,7 +16,7 @@ import { useDebounced } from '../../lib/pagination'
 import { isAbortError, request } from '../../data/live'
 import { ApiError, errorText } from '../../data/types'
 import { useApiDef, useApiQuery, useRequestScope, useWorkspaceAccess } from '../../data/context'
-import { staleAfterWrite } from '../../data/invalidation'
+import { invalidate, invalidateResources } from '../../data/invalidation'
 import { queries } from '../../data/queries'
 import { useLeaveGuard } from '../../lib/leave-guard'
 import { RITUALS_PER_ADDRESS } from '../../../../api/src/ritual-schema'
@@ -425,7 +425,7 @@ export function RulePage() {
     toast('Your edits now sit on version ' + s.version + '. Save to apply.', 'success')
   }
 
-  const refresh = () => void client.invalidateQueries({ predicate: query => staleAfterWrite(query.queryKey, false) }).catch(() => {})
+  const refresh = () => void invalidateResources(client, invalidate.rules).catch(() => {})
   /** The checker's problems, for the editor's own marks. It reports where a problem starts; the squiggle runs under the
    *  whole name there. */
   async function lint(text: string): Promise<Problem[]> {

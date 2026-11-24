@@ -14,7 +14,7 @@ import { FieldSkeleton, LoadingRegion, Skeleton } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { useApiDef, useApiQuery, useRequestScope, useWorkspaceAccess } from '../../data/context'
 import { isAbortError, request } from '../../data/live'
-import { staleAfterWrite } from '../../data/invalidation'
+import { invalidate, invalidateResources } from '../../data/invalidation'
 import { queries } from '../../data/queries'
 import { ApiError, errorText } from '../../data/types'
 import { useSingleFlight } from '../../lib/single-flight'
@@ -257,7 +257,7 @@ function RecipeForm({ recipeId }: { recipeId: string }) {
     addresses={mergeAddresses(resolvedPreset.items, options.items)} preset={preset} header={header} back={back}
     addressSearch={addressSearch} onAddressSearch={setAddressSearch} addressSearchable={options.hasMore || Boolean(addressSearch)}
     hasMoreAddresses={options.hasMore} loadingMoreAddresses={options.loadingMore} onLoadMoreAddresses={options.loadMore}
-    refresh={() => client.invalidateQueries({ predicate: query => staleAfterWrite(query.queryKey, false) })} />
+    refresh={() => invalidateResources(client, invalidate.rules)} />
 }
 
 type AddressOption = { id: string; address: string; aliases: string[]; expiresAt?: string | null }

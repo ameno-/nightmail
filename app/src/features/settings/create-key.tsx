@@ -7,6 +7,7 @@ import { mergeAddresses, useAddressOptions, useResolvedAddresses } from '../../d
 import { useDebounced } from '../../lib/pagination'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { useApi, useApiDef, useApiMutation } from '../../data/context'
+import { invalidate } from '../../data/invalidation'
 import { useMailServers } from '../docs/mail-settings'
 import { queries } from '../../data/queries'
 import type { ApiKey, ApiKeyInput, ApiKeyUpdate, AppPasswordInput, AppPasswordProtocol, Inbox, KeyPermission, MailPermission, PageRequest } from '../../data/types'
@@ -190,8 +191,8 @@ const in30Days = () => utcInput(new Date(Date.now() + 30 * 86_400_000).toISOStri
  *  isn't undone; the key keeps its secret. A key's kind stays: a workspace key edits as one, a key limited to mail as
  *  one for addresses, one inbox or created inboxes. */
 function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial, editing }: FormProps & { initial?: { purpose?: Purpose; domain?: string }; editing?: ApiKey }) {
-  const create = useApiMutation((api, input: ApiKeyInput) => api.keys.create(input))
-  const update = useApiMutation((api, change: ApiKeyUpdate) => api.keys.update(editing!.id, change), 'Key updated')
+  const create = useApiMutation((api, input: ApiKeyInput) => api.keys.create(input), undefined, false, invalidate.apiKeys)
+  const update = useApiMutation((api, change: ApiKeyUpdate) => api.keys.update(editing!.id, change), 'Key updated', false, invalidate.apiKeys)
   const write = editing ? update : create
   const was = editing?.access
   const [name, setName] = useState(editing?.name ?? '')
@@ -387,7 +388,7 @@ export function EditKeyDialog({ apiKey, onClose, returnFocus }: { apiKey: ApiKey
 }
 
 function AppPasswordForm({ open, onOpenChange, onPending, onCreated }: FormProps) {
-  const create = useApiMutation((api, input: AppPasswordInput) => api.credentials.createAppPassword(input))
+  const create = useApiMutation((api, input: AppPasswordInput) => api.credentials.createAppPassword(input), undefined, false, invalidate.appPasswords)
   const inboxes = useInboxOptions('app-password-options', { type: 'persistent' }, open)
   const [inboxId, setInboxId] = useState('')
   const [name, setName] = useState('')
@@ -434,7 +435,7 @@ function AppPasswordForm({ open, onOpenChange, onPending, onCreated }: FormProps
 /** An SMTP login: an API key that can only send, from chosen domains or receiving addresses. An app signs in to SMTP
  *  as apikey with it; its mail goes out like an API send. */
 function SmtpLoginForm({ open, onOpenChange, onPending, onCreated }: FormProps) {
-  const create = useApiMutation((api, input: ApiKeyInput) => api.keys.create(input))
+  const create = useApiMutation((api, input: ApiKeyInput) => api.keys.create(input), undefined, false, invalidate.apiKeys)
   const domainOptions = useDomainOptions(open)
   const [name, setName] = useState('')
   const [scope, setScope] = useState<'domains' | 'addresses'>('domains')
