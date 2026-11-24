@@ -4,7 +4,7 @@ import { gatewayLane } from './protocol-admission.js';
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { sql, type SQL } from 'drizzle-orm';
 import { z } from 'zod';
-import { ApiError, type App, type Runtime } from './core.js';
+import { ApiError, budgetedRead, type App, type Runtime } from './core.js';
 import { boundRequestBody } from './request-body.js';
 import { passwordDigest } from './inbox-passwords.js';
 import { receivingPolicy } from './mailbox-ingest-input.js';
@@ -208,15 +208,25 @@ export function registerMailGateway(app: App) {
       if (!row) throw bad();
       return c.json(await previewPage(runtime, row.w, row.items, writer(false)));
     }
+    // IMAP search: bound to the folder's inbox_entries (held messages are never filed in inbox_entries)
+    // and enforce a 5-second statement timeout returning 413 SEARCH_LIMIT (which mailgw maps to IMAP
+    // NO [LIMIT], never an empty SEARCH and never a raw-header fallback over object storage).
+    const searchBudget = { seconds: 5, refusal: () => new ApiError(413, 'SEARCH_LIMIT', 'Search timed out; narrow the search.') };
     if (p.op === 'search') {
       const term = sql`lower(${p.term})`, has = (text: SQL) => sql`strpos(lower(${text}),${term})>0`;
       const match = p.field === 'subject' ? has(sql`m.subject`) : p.field === 'from' ? has(sql`coalesce(m.from_name,'')||' '||m.from_address`)
         : sql`EXISTS(SELECT FROM jsonb_array_elements(m.${sql.identifier(p.field)}) x WHERE ${has(sql`coalesce(x->>'name','')||' '||coalesce(x->>'address','')`)})`;
-      const unkept = p.field === 'subject' ? sql`false` : sql`EXISTS(SELECT FROM inbox_entries e JOIN mail_messages m ON m.id=e.message_id AND m.workspace_id=a.w WHERE e.inbox_id=a.b AND e.role=${p.folder} AND m.verdicts->>'origin'='client-append' AND NOT m.verdicts ? 'fields')`;
+      const unkept = p.field === 'subject' ? sql`false` : sql`EXISTS(SELECT FROM mail_messages m JOIN inbox_entries e ON e.message_id=m.id WHERE m.workspace_id=a.w AND m.verdicts->>'origin'='client-append' AND NOT (m.verdicts ? 'fields') AND e.inbox_id=a.b AND e.role=${p.folder})`;
       const row = (
-        await runtime.db.execute<{ uids: number[]; unkept: boolean }>(
-          sql`WITH a AS (${auth}) SELECT ${unkept} AS unkept,ARRAY(SELECT e.uid::float8 FROM inbox_entries e JOIN mailbox_messages l ON l.mailbox_id=e.inbox_id AND l.message_id=e.message_id JOIN mail_messages m ON m.id=e.message_id AND m.workspace_id=a.w WHERE e.inbox_id=a.b AND l.held_reason IS NULL AND e.role=${p.folder} AND ${match} ORDER BY uid LIMIT 100001) uids FROM a`,
-        )
+        await budgetedRead(runtime.db, db => db.execute<{ uids: number[]; unkept: boolean }>(
+          sql`WITH a AS MATERIALIZED (${auth}), u AS MATERIALIZED (SELECT a.*, ${unkept} AS unkept FROM a)
+              SELECT u.unkept, CASE WHEN u.unkept THEN '{}'::float8[] ELSE ARRAY(
+                SELECT e.uid::float8 FROM inbox_entries e
+                WHERE e.inbox_id=u.b AND e.role=${p.folder}
+                  AND EXISTS(SELECT 1 FROM mail_messages m WHERE m.id=e.message_id AND m.workspace_id=u.w AND ${match})
+                ORDER BY e.uid LIMIT 100001
+              ) END AS uids FROM u`,
+        ), searchBudget)
       ).rows[0];
       if (!row) throw bad();
       if (row.uids.length > 100000) throw new ApiError(413, 'SEARCH_LIMIT', 'Narrow the search.');
@@ -224,9 +234,15 @@ export function registerMailGateway(app: App) {
     }
     if (p.op === 'subject') {
       const row = (
-        await runtime.db.execute<{ uids: number[] }>(
-          sql`WITH a AS (${auth}) SELECT ARRAY(SELECT e.uid::float8 FROM inbox_entries e JOIN mailbox_messages l ON l.mailbox_id=e.inbox_id AND l.message_id=e.message_id JOIN mail_messages m ON m.id=e.message_id AND m.workspace_id=a.w WHERE e.inbox_id=a.b AND l.held_reason IS NULL AND e.role=${p.folder} AND strpos(lower(m.subject),lower(${p.term}))>0 ORDER BY uid LIMIT 100001) uids FROM a`,
-        )
+        await budgetedRead(runtime.db, db => db.execute<{ uids: number[] }>(
+          sql`WITH a AS MATERIALIZED (${auth})
+              SELECT ARRAY(
+                SELECT e.uid::float8 FROM inbox_entries e
+                WHERE e.inbox_id=a.b AND e.role=${p.folder}
+                  AND EXISTS(SELECT 1 FROM mail_messages m WHERE m.id=e.message_id AND m.workspace_id=a.w AND strpos(lower(m.subject),lower(${p.term}))>0)
+                ORDER BY e.uid LIMIT 100001
+              ) AS uids FROM a`,
+        ), searchBudget)
       ).rows[0];
       if (!row) throw bad();
       if (row.uids.length > 100000) throw new ApiError(413, 'SEARCH_LIMIT', 'Narrow the search.');
@@ -261,13 +277,30 @@ export function registerMailGateway(app: App) {
         mid: string;
         header: number | null;
       };
-      // Changed messages, unless only expunges are asked for.
+      // Resolve the target folder role once, then page inbox_entries in UID order (stopping at PAGE + 1)
+      // before joining mailbox_messages and mail_messages so a 200k-entry folder never sorts or scans all rows per page.
       const entries = p.changed
-        ? sql`coalesce((SELECT jsonb_agg(to_jsonb(x) ORDER BY uid) FROM (SELECT e.uid,e.modseq,e.internal_date AS date,l.flags bits,l.read seen,e.deleted,l.labels,coalesce(m.size_bytes,0) size,m.raw_key key,m.raw_bucket bucket,m.region,m.id mid,(m.mime->>'headerLength')::int header FROM inbox_folders f JOIN inbox_entries e USING(inbox_id,role) JOIN mailbox_messages l ON l.mailbox_id=e.inbox_id AND l.message_id=e.message_id JOIN mail_messages m ON m.id=l.message_id AND m.workspace_id=a.w WHERE e.inbox_id=a.b AND inbox_folder_path(f)=${p.path} AND l.held_reason IS NULL AND e.uid>${p.after} AND e.modseq>${p.since} ORDER BY uid LIMIT ${PAGE + 1})x),'[]')`
+        ? sql`coalesce((SELECT jsonb_agg(to_jsonb(x) ORDER BY uid) FROM (
+            WITH page AS MATERIALIZED (
+              SELECT e.uid,e.modseq,e.internal_date AS date,e.deleted,e.message_id
+              FROM inbox_entries e
+              WHERE t.role IS NOT NULL AND e.inbox_id=t.b AND e.role=t.role AND e.uid>${p.after} AND e.modseq>${p.since}
+              ORDER BY e.uid LIMIT ${PAGE + 1}
+            )
+            SELECT p.uid,p.modseq,p.date,l.flags bits,l.read seen,p.deleted,l.labels,coalesce(m.size_bytes,0) size,m.raw_key key,m.raw_bucket bucket,m.region,m.id mid,(m.mime->>'headerLength')::int header
+            FROM page p
+            JOIN mailbox_messages l ON l.mailbox_id=t.b AND l.message_id=p.message_id AND l.held_reason IS NULL
+            JOIN mail_messages m ON m.id=p.message_id AND m.workspace_id=t.w
+            ORDER BY p.uid
+          )x),'[]')`
         : sql`'[]'::jsonb`;
       const r = (
         await runtime.db.execute<{ w: string; folders: unknown; entries: E[]; gone: { uid: number }[]; floor: string }>(
-          sql`WITH a AS (${auth}) SELECT a.w,${folders} folders,(SELECT changes_floor::text FROM inbox_state WHERE inbox_id=a.b) floor,coalesce((SELECT jsonb_agg(x ORDER BY uid) FROM (SELECT v.uid FROM inbox_vanished v JOIN inbox_folders f USING(inbox_id,role) WHERE ${p.since}::bigint>0 AND v.inbox_id=a.b AND inbox_folder_path(f)=${p.path} AND v.modseq>${p.since} AND v.uid>${p.after} ORDER BY uid LIMIT ${PAGE + 1})x),'[]') AS gone,${entries} AS entries FROM a`,
+          sql`WITH a AS MATERIALIZED (${auth}),
+              t AS MATERIALIZED (SELECT a.w,a.b,(SELECT f.role FROM inbox_folders f WHERE f.inbox_id=a.b AND inbox_folder_path(f)=${p.path} LIMIT 1) AS role FROM a)
+              SELECT t.w,${folders} folders,(SELECT changes_floor::text FROM inbox_state WHERE inbox_id=t.b) floor,
+                coalesce((SELECT jsonb_agg(x ORDER BY uid) FROM (SELECT v.uid FROM inbox_vanished v WHERE ${p.since}::bigint>0 AND t.role IS NOT NULL AND v.inbox_id=t.b AND v.role=t.role AND v.modseq>${p.since} AND v.uid>${p.after} ORDER BY v.uid LIMIT ${PAGE + 1})x),'[]') AS gone,
+                ${entries} AS entries FROM t a JOIN t USING(w,b)`,
         )
       ).rows[0];
       if (!r) throw bad();
