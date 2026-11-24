@@ -31,7 +31,8 @@ if remote_git push "$url" "$sha:refs/heads/production"; then
   echo "Promoted production $prod → $sha (last healthy $healthy)."
 else
   # A concurrent manual advance may have won. Never force or retry an uncertain write.
+  # Only production already containing this SHA counts as done; a dev advance must not hide a refused push.
   read_tips
-  if superseded; then exit 0; fi
+  if [[ $prod == "$sha" ]] || git merge-base --is-ancestor "$sha" "$prod"; then echo "Production already includes $sha at $prod."; exit 0; fi
   echo "::error::Fast-forward of production to $sha failed."; exit 1
 fi

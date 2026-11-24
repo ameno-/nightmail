@@ -90,7 +90,7 @@ Worker, its custom-domain zones and the Pulumi resources (see the `cloudflare` e
 token to the IP that minted it, so a token only works on the job that asked for it. Live API
 keys need read/send/manage on the dedicated **E2E** workspace, not on a customer workspace.
 
-**Production freeze:** production jobs require `PROD_DEPLOY_ENABLED` to be the exact lowercase string `true` on the `production` GitHub environment. Unset it or set it to `false` to freeze releases.
+**Production freeze:** production jobs require `PROD_DEPLOY_ENABLED` to be the exact lowercase string `true` on the `production` GitHub environment. Unset it or set it to `false` to freeze releases. A freeze does not stop automatic promotion, so also set the repository variable `AUTO_SHIP_ENABLED=false` while frozen. That variable and the `dev` environment secret `NIGHTMAIL_PROMOTION_TOKEN` (used only by the promotion push) are the two release settings stored in GitHub rather than AWS Secrets Manager.
 
 **Sign-in policy is committed, not a variable.** Identity is the issuer subject; no address or address domain admits anyone. `api/wrangler.<stage>.jsonc` sets `ACCOUNT_REQUIRED_ACR` (GitHub, Google, email link or password) and `AUTH_STAFF_GOOGLE_DOMAINS` (staff sign-up by the Google Workspace domain of a Google sign-in's provider identity; no other method is ever staff). Everyone else joins by invitation or is bound by subject by an operator (`api/scripts/list-signin-attempts.ts`). The old `AUTH_ALLOWED_EMAILS`/`AUTH_ALLOWED_DOMAINS` GitHub variables are no longer read; delete them, and any Worker secret of those names.
 
