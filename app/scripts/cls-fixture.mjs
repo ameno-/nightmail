@@ -259,15 +259,15 @@ export async function start(repo, { log = () => {}, servers = 1, delay = null, f
         // A kept-alive socket the API closed for idling (Node's 5 s keepAliveTimeout) just as it was reused resets
         // before any response: a GET or HEAD has no body to lose, so it goes again once on a fresh socket. Without this
         // the page saw an empty response (ERR_EMPTY_RESPONSE), now and then, on whichever load drew that socket.
-        const forward = (retry) => {
-          const up = httpRequest({ hostname: '127.0.0.1', port: apiPort, method: req.method, path: rawUrl, headers: req.headers, agent }, upRes => {
+        const forward = fresh => {
+          const up = httpRequest({ hostname: '127.0.0.1', port: apiPort, method: req.method, path: rawUrl, headers: req.headers, agent: fresh ? false : agent }, upRes => {
             answered = true;
             res.writeHead(upRes.statusCode ?? 502, upRes.headers);
             if (req.method === 'HEAD') { upRes.resume(); res.end(); return; }
             upRes.pipe(res);
           });
           up.on('error', error => {
-            if (retry && up.reusedSocket && error.code === 'ECONNRESET' && !answered && !res.destroyed) { forward(false); return; }
+            if (!fresh && bodyless && up.reusedSocket && error.code === 'ECONNRESET' && !answered && !res.destroyed) { forward(true); return; }
             if (!res.headersSent) res.writeHead(502); res.destroy();
           });
           res.on('close', () => { if (!res.writableEnded) up.destroy(); });
@@ -276,7 +276,7 @@ export async function start(repo, { log = () => {}, servers = 1, delay = null, f
         };
         const bodyless = req.method === 'GET' || req.method === 'HEAD';
         let answered = false;
-        const up = forward(bodyless);
+        const up = forward(false);
         req.on('error', () => up.destroy());
         if (body) up.end(body); else if (!bodyless) req.pipe(up);
       });
