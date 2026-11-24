@@ -2,9 +2,10 @@
 // prompt's prices against these). It imports nothing.
 
 // The current rate version, from November 2026. The database prices each UTC month at its own version (billing_rates_in,
-// migrations 367 and 380): months before it had 3,000 sent and 3,000 received free and charged $0.10 per 1,000 AI
-// decisions. AI decisions are free (omenUc 0): still metered and counted, never charged.
-export const RATES = { version: 3, emailUc: 20_000n, omenUc: 0n, storageUcPerGbMonth: 25_000_000n, freeSentEmails: 5000, freeReceivedEmails: 5000, freeStorageBytes: 1_000_000_000n } as const;
+// migrations 367, 380 and 476): months before it had 3,000 sent and 3,000 received free and charged $0.10 per 1,000 AI
+// decisions. AI decisions are free (omenUc 0): still metered and counted, never charged. freeReceivedEmails must match
+// billing_rates_in's free_received for the current month (the billing acceptance test checks it).
+export const RATES = { version: 4, emailUc: 20_000n, omenUc: 0n, storageUcPerGbMonth: 25_000_000n, freeSentEmails: 5000, freeReceivedEmails: 20_000, freeStorageBytes: 1_000_000_000n } as const;
 
 /** Prepaid credit: a top-up is $20 to $10,000 before tax (routes.ts), and what is left of it expires 12 months after
  *  purchase (migration 300, billing_credit_lots.expires_at). The public price pages quote these. */

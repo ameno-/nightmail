@@ -9367,7 +9367,7 @@
               },
               "freeEmails": {
                 "type": "integer",
-                "description": "Emails included free each calendar month (UTC) in each direction, counted separately: this many sent and this many received (freeSentEmails, freeReceivedEmails). Sends beyond it are charged even while received mail is still free, and the other way round."
+                "description": "The sent allowance (same as freeSentEmails), kept for older clients. Sent and received each have their own allowance (freeSentEmails, freeReceivedEmails), counted separately: sends beyond theirs are charged even while received mail is still free, and the other way round."
               },
               "freeSentEmails": {
                 "type": "integer",
@@ -18483,7 +18483,7 @@
               },
               "freeEmails": {
                 "type": "integer",
-                "description": "Free emails each calendar month (UTC) in each direction, counted separately (freeSentEmails, freeReceivedEmails)."
+                "description": "The sent allowance (same as freeSentEmails), kept for older clients. Each direction has its own allowance, counted separately (freeSentEmails, freeReceivedEmails)."
               },
               "freeSentEmails": {
                 "type": "integer",
@@ -42939,7 +42939,7 @@
           }
         ],
         "summary": "Plan, pricing and sending limits",
-        "description": "Hosted only. Pricing and whether billing charges yet, this month's sent and received counts against their free allowances, 5,000 each, counted separately (received only for credentials that may read all received mail), and the rolling daily sending limit (none in good standing) with the evaluation before it. Workspace-wide: keys restricted to domains get 403. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event (quantized to 10-second buckets during high-volume sending), or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results.",
+        "description": "Hosted only. Pricing and whether billing charges yet, this month's sent and received counts against their free allowances (5,000 sent and 20,000 received), counted separately (received only for credentials that may read all received mail), and the rolling daily sending limit (none in good standing) with the evaluation before it. Workspace-wide: keys restricted to domains get 403. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event (quantized to 10-second buckets during high-volume sending), or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results.",
         "responses": {
           "200": {
             "description": "Success",
