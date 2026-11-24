@@ -73,7 +73,17 @@ const ConsentInput = z.object({ status: z.enum(['subscribed', 'unsubscribed']), 
 const ImportRowSchema = z.object({ row: z.number().int(), email: z.string(), name: z.string().optional(), properties: Properties });
 const ImportErrorSchema = z.object({ row: z.number().int(), field: z.string(), message: z.string() });
 const Import = z.object({ id: z.string(), ...Scope, listId: z.string().nullable(), status: z.enum(['preview', 'committed']), rows: z.array(ImportRowSchema), errors: z.array(ImportErrorSchema), imported: z.number().int(), rowsRetained: z.boolean().describe('false once committed row payloads are no longer kept after the retention window (rows is then [] while imported keeps the count).'), errorsRetained: z.boolean().describe('false once per-row error details are no longer kept after the retention window (errors is then []).'), ...Dates }).openapi('AudienceImport');
-const IMPORT_MAX_BYTES = 5 * 1024 * 1024, IMPORT_MAX_ROWS = 50_000, IMPORT_OPEN_PREVIEW_CAP = 50, IMPORT_PREVIEW_RATE_PER_MINUTE = 40, IMPORT_SAMPLE_CONTACT_IDS = 2000;
+const IMPORT_MAX_BYTES = 5 * 1024 * 1024, IMPORT_MAX_ROWS = 50_000, IMPORT_OPEN_PREVIEW_CAP = 50, IMPORT_SAMPLE_CONTACT_IDS = 2000;
+export const IMPORT_PREVIEW_RATE_PER_MINUTE = 40;
+// Measured workerd isolate peaks (idle ~29 MB, 128 MB isolate cap, 64 MiB working budget):
+// - 1 x 5 MiB non-Latin commit: ~75 MB (+46 MB) -> 48 MiB prevents 2-3 commits overlapping past 128 MB (3 x 20 MiB hit 131 MB)
+//   while still fitting a 1.4 MB preview (~13 MiB) alongside a running commit (48 + 13 = 61 <= 64 MiB).
+// - 1 x 5 MiB preview: ~87 MB (+58 MB) -> 42 MiB (8x + 2 MiB) serializes two 5 MiB previews.
+// - 1 x 50k-row GET: ~81-90 MB (+52-61 MB) -> 24 MiB caps concurrent GETs under ~100 MB.
+// - Unread streamed responses shrink to <= 12 MiB and self-reclaim via isolate-memory.ts + streamTextPartsResponse.
+export const IMPORT_GET_RESERVATION_BYTES = 24 * 1024 * 1024;
+export const IMPORT_COMMIT_RESERVATION_BYTES = 48 * 1024 * 1024;
+export const importPreviewReservationBytes = (bytes: number) => Math.min(SEND_LIMITS.isolateWorkingBytes, Math.max(0, bytes) * 8 + 2 * 1024 * 1024);
 function importNotFound(): never { throw new ApiError(404, 'NOT_FOUND', `Import was not found. A preview that was never committed is removed once the workspace has ${IMPORT_OPEN_PREVIEW_CAP} newer ones (or after 7 days). Preview the file again.`); }
 const importMetaColumns = { id: imports.id, workspaceId: imports.workspaceId, listId: imports.listId, status: imports.status, imported: imports.imported, rowsScrubbedAt: imports.rowsScrubbedAt, errorsScrubbedAt: imports.errorsScrubbedAt, createdAt: imports.createdAt, updatedAt: imports.updatedAt };
 type ImportMeta = { [K in keyof typeof importMetaColumns]: (typeof imports.$inferSelect)[K] };
@@ -861,8 +871,9 @@ export function registerAudience(app: App) {
       c.header('Retry-After', '60');
       throw new ApiError(429, 'IMPORT_PREVIEW_RATE_LIMITED', `This workspace allows ${IMPORT_PREVIEW_RATE_PER_MINUTE} contact import previews per minute. Retry after the window resets.`, undefined, true);
     }
-    // Reuse the outer pre-parse lease from app.ts (or acquire one if invoked directly) and transfer it shrunk to the stream.
-    const reserveBytes = Math.min(SEND_LIMITS.isolateWorkingBytes, input.csv.length * 12 + 2 * 1024 * 1024);
+    // Reuse the outer self-reclaiming pre-parse lease from app.ts (or acquire one if invoked directly) and shrink it
+    // when handing off to streamImportResponse.
+    const reserveBytes = importPreviewReservationBytes(input.csv.length);
     const outerLease = c.get('importLease');
     let ownLease: MemoryLease | undefined;
     if (!outerLease) {
@@ -905,7 +916,7 @@ export function registerAudience(app: App) {
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/contact-imports/{id}', operationId: 'getContactImport', tags: ['Audience'], security, description: 'Read one import preview or committed import report. Committed row payloads are retained briefly after commit (rowsRetained is false and rows is [] once scrubbed; imported keeps the count); per-row errors are retained longer (errorsRetained is false once scrubbed).', request: { params: IdParams }, responses: { 200: response(Import), ...errors } }), async c => {
     const identity = actor(c);
-    const reserveBytes = 24 * 1024 * 1024;
+    const reserveBytes = IMPORT_GET_RESERVATION_BYTES;
     let lease: MemoryLease;
     try {
       lease = await reserveMemory(reserveBytes, { route: 'import.read', workspaceId: identity.workspaceId, signal: c.req.raw.signal, maxWorkspaceBytes: 32 * 1024 * 1024, wsBusyCode: 'IMPORT_CONCURRENCY_LIMIT', busyCode: 'IMPORT_CONCURRENCY_LIMIT' });
@@ -926,7 +937,7 @@ export function registerAudience(app: App) {
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/contact-imports/{id}/commit', operationId: 'commitContactImport', tags: ['Audience'], security, description: 'Imports every valid row of a previewed import. Without consent, imported contacts keep their consent decision (new contacts have none, so campaigns skip them). With consent, everyone imported who had no decision is marked subscribed with your evidence. A repeated commit changes nothing. One import commits at a time per workspace (503 IMPORT_COMMIT_BUSY if another is running; retryable).', request: { params: IdParams, body: { ...json(ImportCommit), required: false } }, responses: { 200: response(CommittedImport), ...errors } }), async c => {
     const identity = actor(c, 'editContent'), importId = c.req.valid('param').id, consent = c.req.valid('json').consent;
-    const reserveBytes = 48 * 1024 * 1024;
+    const reserveBytes = IMPORT_COMMIT_RESERVATION_BYTES;
     let lease: MemoryLease;
     try {
       lease = await reserveMemory(reserveBytes, { route: 'import.commit', workspaceId: identity.workspaceId, signal: c.req.raw.signal });

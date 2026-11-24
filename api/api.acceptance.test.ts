@@ -11657,6 +11657,88 @@ describe('Import property boundaries', () => {
     });
   });
 
+  test('import follow-ups: 48 MiB commit lease, self-reclaiming stream holds, pre-parse auth/budget gates, and queued abort rollback', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const wid = runtime.config.workspaceId;
+      const { importStream, IMPORT_COMMIT_RESERVATION_BYTES, IMPORT_GET_RESERVATION_BYTES, importPreviewReservationBytes } = await import('./src/audience.js');
+      const { reserveMemory, memoryInUse } = await import('./src/isolate-memory.js');
+      const { SEND_LIMITS } = await import('./src/send-limits.js');
+      const { createApp } = await import('./src/app.js');
+
+      // 1. Leases: commit (48 MiB) serializes concurrent commits while fitting a 1.4 MiB preview (~13 MiB); 2 x 5 MiB previews serialize.
+      assert.equal(IMPORT_COMMIT_RESERVATION_BYTES, 48 * 1024 * 1024);
+      assert.ok(IMPORT_COMMIT_RESERVATION_BYTES * 2 > SEND_LIMITS.isolateWorkingBytes);
+      assert.ok(IMPORT_COMMIT_RESERVATION_BYTES + importPreviewReservationBytes(1_400_000) <= SEND_LIMITS.isolateWorkingBytes);
+      assert.ok(IMPORT_GET_RESERVATION_BYTES + 19 * 1024 * 1024 <= SEND_LIMITS.isolateWorkingBytes);
+      assert.ok(importPreviewReservationBytes(5 * 1024 * 1024) * 2 > SEND_LIMITS.isolateWorkingBytes);
+
+      // 2. Response stream holds a shrunk self-reclaiming lease while unread and fails explicitly on idle timeout.
+      const prevIdle = importStream.idleMs;
+      const app = createApp();
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'Import deadline', permissions: ['read', 'manage'] }), 201).secret;
+      const readOnlyKey = ok(await local('POST', '/v1/api-keys', { name: 'Import readonly', permissions: ['read'] }), 201).secret;
+      const created = ok(await local('POST', '/v1/contact-imports', { csv: 'Email\ndeadline@example.com\n', mapping: { email: 'Email' } }), 201);
+      try {
+        importStream.idleMs = 60;
+        const res = await app.fetch(new Request(`http://127.0.0.1:8793/v1/contact-imports/${created.id}`, { headers: { authorization: `Bearer ${key}` } }), runtime);
+        assert.equal(res.status, 200);
+        assert.ok(memoryInUse() > 0 && memoryInUse() < IMPORT_GET_RESERVATION_BYTES, 'Unread import response must hold a shrunk memory lease.');
+        await new Promise(r => setTimeout(r, 110));
+        await assert.rejects(() => res.text(), /timed out/i);
+      } finally {
+        importStream.idleMs = prevIdle;
+      }
+      assert.equal(memoryInUse(), 0);
+
+      // 3. Read-only key fails immediately before touching the memory queue; GET queues and releases cleanly.
+      const blocker = await reserveMemory(50 * 1024 * 1024);
+      try {
+        const denied = await app.fetch(new Request('http://127.0.0.1:8793/v1/contact-imports', {
+          method: 'POST', headers: { authorization: `Bearer ${readOnlyKey}`, 'content-type': 'application/json', 'content-length': '5000000' },
+          body: JSON.stringify({ csv: 'Email\na@example.com\n', mapping: { email: 'Email' } }),
+        }), runtime);
+        assert.equal(denied.status, 403);
+        let getResolved = false;
+        const getPromise = Promise.resolve(app.fetch(new Request(`http://127.0.0.1:8793/v1/contact-imports/${created.id}`, { headers: { authorization: `Bearer ${key}` } }), runtime))
+          .then(r => { getResolved = true; return r; });
+        await new Promise(r => setTimeout(r, 40));
+        assert.equal(getResolved, false, 'GET must wait while insufficient isolate memory is free.');
+        blocker.release();
+        const getRes = await getPromise;
+        assert.equal(getRes.status, 200);
+        assert.ok(memoryInUse() > 0 && memoryInUse() < IMPORT_GET_RESERVATION_BYTES);
+        const getJson = await getRes.json() as { id: string };
+        assert.equal(getJson.id, created.id);
+        assert.equal(memoryInUse(), 0, 'GET must release its shrunk lease once the response stream finishes.');
+      } finally {
+        blocker.release();
+      }
+
+      // 4. POST /v1/contact-imports reserves before JSON parsing; aborting while queued skips parsing and DB writes.
+      const beforeCount = (await db.query(`SELECT count(*)::int AS n FROM audience_imports WHERE workspace_id = $1`, [wid])).rows[0].n;
+      const blocker2 = await reserveMemory(50 * 1024 * 1024);
+      try {
+        const ac = new AbortController();
+        const bigBody = JSON.stringify({ csv: 'Email\n' + 'x'.repeat(2_000_000) + '@example.com\n', mapping: { email: 'Email' } });
+        const previewPromise = app.fetch(new Request('http://127.0.0.1:8793/v1/contact-imports', {
+          method: 'POST', signal: ac.signal,
+          headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(bigBody)) },
+          body: bigBody,
+        }), runtime);
+        await new Promise(r => setTimeout(r, 40));
+        ac.abort();
+        blocker2.release();
+        const abortedRes = await previewPromise;
+        assert.equal(abortedRes.status, 499);
+      } finally {
+        blocker2.release();
+      }
+      assert.equal(memoryInUse(), 0);
+      const afterCount = (await db.query(`SELECT count(*)::int AS n FROM audience_imports WHERE workspace_id = $1`, [wid])).rows[0].n;
+      assert.equal(afterCount, beforeCount, 'Preview aborted while queued before JSON parsing must not write to the database.');
+    });
+  });
+
   test('large audience capture skinny path, sampled audienceHealth estimates, bounded previewSegment, and AudienceQL LIMIT + plan cap', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
       const wid = runtime.config.workspaceId;
