@@ -33638,7 +33638,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const revId = (await db.query('SELECT review_id FROM sending_campaigns WHERE id=$1', [camp.id])).rows[0].review_id as string;
       const { rows: [revRow] } = await db.query('SELECT draft, rendered, renderer_version FROM sending_campaign_reviews WHERE id=$1', [revId]);
       const baseCustomer = {
-        from: 'sender@example.com', to: ['s1-reader-1@example.com'], cc: [], bcc: [], replyTo: [],
+        testCampaignId: null, untrustedContent: false, from: 'sender@example.com', to: ['s1-reader-1@example.com'], cc: [], bcc: [], replyTo: [],
         region: REGION, kind: 'marketing' as const, subject: 'Static S1',
         html: revRow.rendered.html, text: revRow.rendered.text, attachments: [], tracking: Boolean(revRow.draft.tracking), headers: [],
       };
