@@ -1,6 +1,8 @@
 .campaign-row-name { display: flex; flex-direction: column; justify-content: center; gap: var(--space-4); min-height: 40px; padding: 0; line-height: 18px; }
 /* Names and subjects stay on one line, so every row is the shared 53 px; the full text is in the cell's title. */
 .campaigns-table .ui-table td[data-col='name'] { overflow: clip; text-overflow: ellipsis; white-space: nowrap; }
+/* Last activity and Updated read as data: mono, a size down, like the counts beside them. */
+.campaigns-table .ui-table td[data-col='updated'] { font-family: var(--font-mono); font-size: var(--text-xs); }
 .campaign-row-name > span { min-width: 0; overflow: clip; text-overflow: ellipsis; white-space: nowrap; }
 .campaign-audience-review-skeleton { display: contents; }
 .campaign-summary-line > .ui-skeleton-line { width: 45px; flex-shrink: 0; }
@@ -97,7 +99,9 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .campaign-recipients { grid-area: recipients; }
 .campaign-message { grid-area: message; }
 .campaign-delivery { grid-area: delivery; }
-.campaign-message .ui-email-preview { border: 1px solid var(--color-border-muted); border-radius: var(--radius-sm); }
+/* The sent email on its matte (a recessed solid surface, no edge line), as on a sent email's page. The frame's own
+   padding draws it, so the loading box and the loaded email are one size. */
+.campaign-message .ui-email-preview { padding: var(--space-12); border-radius: var(--radius-sm); background: var(--color-matte); }
 .campaign-fields { display: flex; min-width: 0; flex-direction: column; gap: var(--space-12); }
 /* Headers with and without actions keep one height, so both columns start their content on the same line. */
 .campaign-fields > .ui-section-header { min-height: var(--control-height); margin-bottom: 0; flex-wrap: wrap; }
@@ -116,25 +120,26 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .campaign-audience-summary > .campaign-progress-bar { margin-block: var(--space-8); }
 /* One reserved status row while preparing, sending, or paused so waiting/lag lines never shift layout (CLS 0). */
 .campaign-status-line { min-height: 20px; height: 20px; line-height: 20px; margin: 0 0 var(--space-4); overflow: clip; text-overflow: ellipsis; white-space: nowrap; }
-/* A summary line is a metric row: the label, then its mono figure on the right, a hairline under it. */
-.campaign-summary-line { display: flex; align-items: center; justify-content: space-between; gap: var(--space-16); min-height: 32px; border-bottom: 1px solid var(--color-border-muted); }
+/* A summary line is a metric row: the label, then its mono figure on the right; rows part by their 32px rhythm, no rule. */
+.campaign-summary-line { display: flex; align-items: center; justify-content: space-between; gap: var(--space-16); min-height: 32px; }
 .campaign-summary-line > :last-child { font-family: var(--font-mono); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
 /* A row that opens its emails in Logs: its figure is underlined like the app's other links, and the whole row is the target. */
-.campaign-summary-link { color: inherit; text-decoration: none; transition: background var(--motion-duration); }
+/* Its hover fill reaches 6px into the gutter, so the label and figure stay on the column's edges. */
+.campaign-summary-link { margin-inline: calc(-1 * var(--space-6)); padding-inline: var(--space-6); border-radius: var(--radius-xs); color: inherit; text-decoration: none; transition: background var(--motion-duration); }
 .campaign-summary-link > :last-child { text-decoration: underline; text-decoration-color: var(--color-border-strong); text-underline-offset: 3px; transition: text-decoration-color var(--motion-duration); }
 .campaign-summary-link:is(:hover, :focus-visible) { background: var(--color-hover); }
 .campaign-summary-link:is(:hover, :focus-visible) > :last-child { text-decoration-color: currentColor; }
 @media (pointer: coarse) { .campaign-audience-summary > .campaign-summary-line { min-height: 44px; } }
 .campaign-audience-source { min-height: 20px; margin: 0; overflow: clip; text-overflow: ellipsis; white-space: nowrap; }
 
-.campaign-delivery { display: flex; flex-direction: column; gap: var(--space-16); padding-top: var(--space-24); border-top: 1px solid var(--color-border-muted); }
+.campaign-delivery { display: flex; flex-direction: column; gap: var(--space-16); padding-top: var(--space-24); }
 .campaign-delivery > .ui-section-header { margin-bottom: calc(var(--space-12) - var(--space-16)); }
 .campaign-delivery > .ui-field .ui-input { max-width: 240px; }
 .campaign-delivery-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-8); }
 .campaign-delivery-reason { flex: 1 1 240px; margin: 0 0 0 var(--space-8); color: var(--color-muted); font-size: var(--text-sm); line-height: var(--leading-sm); text-wrap: pretty; }
 @media (max-width: 1050px) {
   .campaign-review-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; grid-template-areas: 'recipients' 'message' 'delivery'; row-gap: var(--space-24); }
-  .campaign-review-layout > * + * { padding-top: var(--space-24); border-top: 1px solid var(--color-border-muted); }
+  .campaign-review-layout > * + * { padding-top: var(--space-24); }
 }
 @media (max-width: 640px) {
   /* The status and actions always sit under the title, so the loading header and the loaded one are the same height. */
@@ -165,8 +170,10 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .campaign-pacing-fields { display: flex; flex-direction: column; gap: var(--space-12); }
 .campaign-pacing-options .ui-field .ui-input { max-width: 240px; }
 .template-picker-dialog { width: min(560px, calc(100vw - 32px)); }
-.template-picker { display: flex; flex-direction: column; max-height: min(424px, 60vh); overflow: auto; border-top: 1px solid var(--color-border-muted); }
-.template-picker__row { display: flex; flex-direction: column; justify-content: center; gap: var(--space-4); min-height: 53px; padding: var(--space-8) var(--space-4); border: 0; border-bottom: 1px solid var(--color-border-muted); background: transparent; color: var(--color-text); font: inherit; text-align: left; cursor: pointer; transition: background-color 120ms ease; }
+/* Templates to start from: 53px rows parted by their rhythm and a solid fill under the pointer, no rules. The fill
+   reaches 8px into the dialog's gutter, so names stay level with the title. */
+.template-picker { display: flex; flex-direction: column; max-height: min(424px, 60vh); margin-inline: calc(-1 * var(--space-8)); overflow: auto; }
+.template-picker__row { display: flex; flex-direction: column; justify-content: center; gap: var(--space-4); min-height: 53px; padding: var(--space-8); border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--color-text); font: inherit; text-align: left; cursor: pointer; transition: background-color 120ms ease; }
 .template-picker__row:disabled { cursor: default; }
 .template-picker__row:focus-visible { background: var(--color-active-bg); }
 .template-picker__row > .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -270,17 +277,22 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .campaign-review { display: flex; flex-direction: column; min-height: 100%; }
 .campaign-review__body { padding: var(--space-32); }
 /* Review: four numbered stages (recipients, message, checks, send), one open at a time. The open stage fills
-   the page; the others stay one header tall, saying what is set. Next moves on to the following stage. */
+   the page; the others stay one header tall, saying what is set. Next moves on. */
 .campaign-review--draft { flex: 1; min-height: 0; }
 .review-stages { display: flex; flex-direction: column; gap: var(--space-12); flex: 1; min-height: 0; padding: var(--space-24) var(--space-32); }
-.review-stage { display: flex; flex-direction: column; flex: 0 0 54px; min-height: 0; overflow: hidden; border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-surface); transition: flex-grow 320ms var(--ease-drawer), border-color 200ms ease-out; }
-.review-stage[data-open] { flex-grow: 1; border-color: var(--color-border-strong); }
-.review-stage__head { display: flex; align-items: center; gap: var(--space-12); flex: none; width: 100%; height: 52px; padding: 0 var(--space-20); border: 0; background: none; color: var(--color-text); font: inherit; text-align: left; }
+/* A closed stage is one solid well (no edge line) that brightens under the pointer; nothing shaded sits on it. The open
+   stage drops its well, so its fields, tables and preview sit on the page itself, set apart by space. */
+.review-stage { display: flex; flex-direction: column; flex: 0 0 54px; min-height: 0; overflow: hidden; border-radius: var(--radius-lg); background: var(--color-well); transition: flex-grow 320ms var(--ease-drawer), background-color var(--motion-duration) var(--ease-standard); }
+.review-stage[data-open] { flex-grow: 1; background: transparent; }
+@media (hover: hover) and (pointer: fine) { .review-stage:not([data-open]):has(> .review-stage__head:hover) { background: var(--color-well-hover); } }
+.review-stage:not([data-open]):has(> .review-stage__head:focus-visible) { background: var(--color-well-hover); }
+.review-stage__head { display: flex; align-items: center; gap: var(--space-12); flex: none; width: 100%; height: 54px; padding: 0 var(--space-20); border: 0; background: none; color: var(--color-text); font: inherit; text-align: left; }
 button.review-stage__head { cursor: pointer; }
 .review-stage[data-open] button.review-stage__head { cursor: default; }
-.review-stage__mark { flex: none; }
-.review-stage__mark[data-done] { border-color: var(--color-text); }
-.review-stage[data-open] .review-stage__mark { border-color: var(--color-text); background: var(--color-text); color: var(--color-surface); }
+/* A stage's number: a bare figure on the well (no ring, no disc); done, a check in the text's ink; open, the text colour as a fill. */
+.review-stage__mark { flex: none; border: 0; background: transparent; color: var(--color-muted); }
+.review-stage__mark[data-done] { color: var(--color-text); }
+.review-stage[data-open] .review-stage__mark { background: var(--color-text); color: var(--color-surface); }
 .review-stage__title { flex: none; font-weight: var(--font-weight-bold); }
 .review-stage__summary { flex: 1; min-width: 0; overflow: clip; color: var(--color-muted); font-size: var(--text-sm); text-align: right; text-overflow: ellipsis; white-space: nowrap; transition: opacity 200ms ease-out; }
 .review-stage[data-open] .review-stage__summary { opacity: 0; }
@@ -289,7 +301,7 @@ button.review-stage__head { cursor: pointer; }
 .review-stage__body { display: flex; flex-direction: column; flex: 1; min-height: 0; opacity: 0; transition: opacity 240ms ease-out; }
 .review-stage[data-open] .review-stage__body { opacity: 1; }
 .review-stage__content { display: flex; flex-direction: column; gap: var(--space-16); flex: 1; min-height: 0; overflow: auto; padding: var(--space-4) var(--space-20) var(--space-20) 52px; }
-.review-stage__footer { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-16); flex: none; padding: var(--space-12) var(--space-20); border-top: 1px solid var(--color-border); }
+.review-stage__footer { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-16); flex: none; padding: var(--space-12) var(--space-20); }
 .review-stage__footer .campaign-notes { flex: 1; }
 /* A required notice's confirmation sits beside Send; on a phone it has its own line above it. */
 @media (max-width: 640px) { .review-stage__footer:has(.review-confirm) { flex-wrap: wrap; } .review-confirm { flex-basis: 100%; } }
@@ -297,7 +309,8 @@ button.review-stage__head { cursor: pointer; }
 .review-message { display: grid; grid-template-columns: minmax(0, 320px) minmax(0, 1fr); gap: var(--space-32); flex: 1; min-height: 0; }
 .review-message__details { display: flex; flex-direction: column; gap: var(--space-16); min-width: 0; }
 .review-message__preview { display: flex; flex-direction: column; min-height: 0; }
-.review-message__preview .ui-email-preview { flex: 1; min-height: 320px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); }
+/* The email on its matte, as on a sent campaign's page: the open stage has no well, so the matte is the one step. */
+.review-message__preview .ui-email-preview { flex: 1; min-height: 320px; padding: var(--space-12); border-radius: var(--radius-sm); background: var(--color-matte); }
 .review-facts { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: var(--space-8) var(--space-12); margin: 0; font-size: var(--text-sm); }
 .review-facts dt { color: var(--color-muted); }
 .review-facts dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
@@ -360,7 +373,8 @@ button.review-stage__head { cursor: pointer; }
 .studio-bar__end > .campaign-note { margin-inline-end: var(--space-8); white-space: nowrap; }
 .campaign-notes { display: flex; flex-direction: column; gap: var(--space-8); margin: 0; padding: 0; list-style: none; }
 .campaign-notes > li { margin: 0; }
-.campaign-scheduled { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-12); padding-block: var(--space-12); border-block: 1px solid var(--color-border); }
+/* A schedule, a pause or missing counts: one solid strip (as a notice, no rules above and below), its buttons a step off it. */
+.campaign-scheduled { --color-hover: var(--color-raised-hover); --color-control: var(--color-raised-control); --color-control-hover: var(--color-raised-control-hover); --color-control-focus: var(--color-raised-control-focus); --color-control-pressed: var(--color-raised-control-pressed); display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-12); padding: var(--space-12) var(--space-16); border-radius: var(--radius-sm); background: var(--color-well); }
 .campaign-scheduled__text { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
 .campaign-scheduled .campaign-pacing-banner { flex: 1; }
 .campaign-scheduled[data-tone='danger'] strong { color: var(--color-danger); }
