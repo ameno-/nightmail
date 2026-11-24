@@ -43,7 +43,7 @@ import { usePhone } from '../../lib/media'
 import { useLeaveGuard } from '../../lib/leave-guard'
 import { emailIsValid, replyToAddresses, replyToError } from './reply-to'
 import { mergeCampaign, mergeFieldsText, type MergeField } from './merge'
-import { announceSave, CampaignPresence, useCampaignPresence, type Save } from './presence'
+import { announceSave, CampaignPresence, useCampaignPresence, type Room, type Save } from './presence'
 import { PresenceOverlay } from './presence-overlay'
 
 // {{placeholders}} the campaign uses; email always resolves, everything else needs a contact value or a fallback.
@@ -589,7 +589,7 @@ export function CampaignReviewPage() {
   const waitingStats = Boolean(query.data && campaignFinished(query.data) && stats.isPending && stats.errorUpdateCount === 0)
   if (query.isPending || (query.isError && !query.data && !missingOrDenied && fallbackState.isPending) || waitingStats || (editableDraft && settings.isPending)) return <CampaignRouteSkeleton kind="review" />
   if (!query.data) return fallbackState.data ? <CampaignControlFallback id={id} state={fallbackState.data} error={query.error} refreshing={query.isFetching} onRetry={() => void query.refetch()} /> : <ErrorState error={query.error} onRetry={() => query.refetch()} />
-  return <CampaignReview key={id} campaign={query.data} stats={stats} stale={query.isError} refreshing={query.isFetching} refresh={() => void query.refetch()} />
+  return <CampaignReview key={id} campaign={query.data} stats={stats} stale={query.isError} refreshing={query.isFetching} refresh={() => void query.refetch({ cancelRefetch: false })} />
 }
 
 // The server renders block HTML into the styled email; the review shows that rendering, not the blocks.
@@ -622,9 +622,46 @@ async function saveChange(api: ReturnType<typeof useApi>, campaign: Campaign, ch
   }
 }
 
+// The revisions of each campaign this tab saved itself, or this person saved in another tab (the room says so): what
+// Review shows without asking (useReadCampaign).
+const savedHere = new Map<string, Set<number>>()
+const noteSaved = (id: string, revision: number | undefined) => { if (revision) (savedHere.get(id) ?? savedHere.set(id, new Set()).get(id)!).add(revision) }
 function useCampaignCache() {
   const cache = useQueryClient()
-  return (next: Campaign) => { cache.setQueryData(['nightmail', 'campaign', next.id], next); void cache.invalidateQueries({ queryKey: ['nightmail', 'campaigns'], refetchType: 'none' }); announceSave(next.id, next.revision) }
+  return (next: Campaign) => { noteSaved(next.id, next.revision); cache.setQueryData(['nightmail', 'campaign', next.id], next); void cache.invalidateQueries({ queryKey: ['nightmail', 'campaigns'], refetchType: 'none' }); announceSave(next.id, next.revision) }
+}
+// A Review write the API refused because the draft changed meanwhile: read the campaign again, so the page learns of the
+// newer version (and holds it, useReadCampaign) instead of only saying it failed.
+function useStaleRefetch() {
+  const cache = useQueryClient()
+  return (cause: unknown, id: string) => { if (cause instanceof ApiError && cause.code === 'STALE_CAMPAIGN_REVISION') void cache.invalidateQueries({ queryKey: ['nightmail', 'campaign', id] }) }
+}
+
+// Review is where a draft is approved, so it shows the version this person has read and never puts a newer one in its
+// place by itself. However a teammate's or an agent's save arrives (the room's announcement, a refetch after a refused
+// write, a reconnect, a write that refreshes the page), it waits behind a note that says who saved, until they choose
+// "Read it again"; meanwhile Send and Schedule carry the revision read, so the API refuses them (409). Shown at once:
+// every revision this tab or this person saved (savedHere), and a draft that stopped being one (sent, scheduled,
+// archived), where there is nothing left to approve.
+function useReadCampaign(latest: Campaign, room: Room, refresh: () => void) {
+  const [read, setRead] = useState(latest)
+  const [authors, setAuthors] = useState<ReadonlyMap<number, string>>(new Map())
+  const editable = (version: Campaign) => !version.archivedAt && campaignEditable(version)
+  const from = read.revision ?? 1, to = latest.revision ?? 1
+  const unread = read.id === latest.id && editable(read) && editable(latest) && to > from
+    && Array.from({ length: to - from }, (_, i) => from + 1 + i).some(revision => !savedHere.get(latest.id)?.has(revision))
+  useEffect(() => { if (!unread && read !== latest) setRead(latest) }, [unread, read, latest])
+  const latestRef = useRef(latest), refreshRef = useRef(refresh)
+  latestRef.current = latest; refreshRef.current = refresh
+  useEffect(() => room.onSave(save => {
+    // Announcements of what the page already has say nothing new (and can't name the next save's author).
+    if (save.revision <= (latestRef.current.revision ?? 1)) return
+    if (save.by.id === room.self) noteSaved(latestRef.current.id, save.revision)
+    else setAuthors(names => new Map(names).set(save.revision, save.by.name))
+    refreshRef.current()
+  }), [room.onSave, room.self])
+  const by = unread ? [...new Set([...authors].filter(([revision]) => revision > from && revision <= to).map(([, name]) => name))] : []
+  return { campaign: unread ? read : latest, unread, by, readAgain: () => { setRead(latest); setAuthors(new Map()) } }
 }
 
 function ScheduledBanner({ campaign }: { campaign: Campaign }) {
@@ -715,9 +752,13 @@ function UnsubscribePageField({ campaign, disabled }: { campaign: Campaign; disa
   const api = useApi()
   const toast = useToast()
   const accept = useCampaignCache()
+  const staleRefetch = useStaleRefetch()
   const [value, setValue] = useState(campaign.unsubscribePageUrl ?? '')
   const [left, setLeft] = useState(true)
   const [saving, setSaving] = useState(false)
+  // The page moved to another version of the draft (read again, or this person's own save): the field follows, unless
+  // it is being typed in, so leaving it never writes back the old value.
+  useEffect(() => { if (left) setValue(campaign.unsubscribePageUrl ?? '') }, [campaign.unsubscribePageUrl]) // eslint-disable-line react-hooks/exhaustive-deps
   const problem = unsubscribePageError(value)
   async function save() {
     setLeft(true)
@@ -725,7 +766,7 @@ function UnsubscribePageField({ campaign, disabled }: { campaign: Campaign; disa
     if (problem || next === (campaign.unsubscribePageUrl ?? '')) return
     setSaving(true)
     try { accept(await saveChange(api, campaign, { unsubscribePageUrl: next })) }
-    catch (cause) { toast(errorText(cause), 'error') }
+    catch (cause) { toast(errorText(cause), 'error'); staleRefetch(cause, campaign.id) }
     finally { setSaving(false) }
   }
   return <Field label="Unsubscribe page" htmlFor="campaign-unsubscribe-page" error={left ? problem : ''}><Input id="campaign-unsubscribe-page" type="url" inputMode="url" autoCapitalize="none" spellCheck={false} maxLength={1000} placeholder={`${productName}’s page`} value={value} aria-invalid={(left && Boolean(problem)) || undefined} onChange={event => { setValue(event.target.value); setLeft(false) }} onBlur={() => void save()} disabled={disabled || saving} /></Field>
@@ -736,7 +777,7 @@ function UnsubscribePageField({ campaign, disabled }: { campaign: Campaign; disa
 function AudiencePicker({ campaign, notices, disabled }: { campaign: Campaign; notices: boolean; disabled?: boolean }) {
   const api = useApi()
   const toast = useToast()
-  const accept = useCampaignCache()
+  const accept = useCampaignCache(), staleRefetch = useStaleRefetch()
   const [cursor, setCursor] = useState<string | undefined>()
   const [segmentCursor, setSegmentCursor] = useState<string | undefined>()
   const [saving, setSaving] = useState(false)
@@ -753,7 +794,7 @@ function AudiencePicker({ campaign, notices, disabled }: { campaign: Campaign; n
   async function save(change: Partial<CampaignInput>) {
     setSaving(true)
     try { accept(await saveChange(api, campaign, change)) }
-    catch (cause) { toast(errorText(cause), 'error') }
+    catch (cause) { toast(errorText(cause), 'error'); staleRefetch(cause, campaign.id) }
     finally { setSaving(false) }
   }
   async function choose(listId: string, segmentId: string | null) {
@@ -819,8 +860,11 @@ function CampaignResults({ campaign, stats: statsQuery }: { campaign: Campaign; 
   </div>
 }
 
-function CampaignReview({ campaign, stats, stale, refreshing, refresh }: { campaign: Campaign; stats: ReturnType<typeof useCampaignStats>; stale: boolean; refreshing: boolean; refresh: () => void }) {
+function CampaignReview({ campaign: latest, stats, stale, refreshing, refresh }: { campaign: Campaign; stats: ReturnType<typeof useCampaignStats>; stale: boolean; refreshing: boolean; refresh: () => void }) {
   const navigate = useNavigate()
+  // Review joins the draft's room too: someone still writing sees you here, and you see them.
+  const { present, room } = useCampaignPresence(!latest.archivedAt && campaignEditable(latest) ? latest.id : null, 'review')
+  const { campaign, unread, by, readAgain } = useReadCampaign(latest, room, refresh)
   // An issue goes back to its newsletter, and the sidebar marks it.
   const issueOf = useNewsletterOf(campaign.listId), thing = issueOf ? 'issue' : 'campaign'
   useShowNewsletter(issueOf?.id ?? null)
@@ -843,8 +887,6 @@ function CampaignReview({ campaign, stats, stale, refreshing, refresh }: { campa
   const origin = multiTenant ? '' : ` from ${campaign.regionId}`
 
   const draft = !campaign.archivedAt && campaignEditable(campaign)
-  // Review joins the draft's room too: someone still writing sees you here, and you see them.
-  const { present, room } = useCampaignPresence(draft ? campaign.id : null, 'review')
   const readinessError = campaignReadinessError(campaign)
   const fallbacks = campaign.draft?.defaults ?? {}
   const keys = placeholders(campaign.subject, campaign.previewText, campaign.html)
@@ -863,10 +905,7 @@ function CampaignReview({ campaign, stats, stale, refreshing, refresh }: { campa
   const paceLine = [pace.limit && `${number(perDay)} per day`, `${pace.share.trim()}% speed`, !multiTenant && (pace.autoPause ? 'auto-pause on' : 'auto-pause off')].filter(Boolean).join(' · ')
   const paceSummary = (input: SendCampaignInput | null) => !input?.pacing ? '' : `${input.pacing.perDay ? ` Sends to up to ${number(input.pacing.perDay)} recipients per day${paceDays ? ` (about ${paceDays} ${paceDays === 1 ? 'day' : 'days'})` : ''}.` : ''}${input.pacing.rateShare != null && input.pacing.rateShare < 1 ? ` Uses at most ${Math.round(input.pacing.rateShare * 100)}% of your sending speed.` : ''}${input.pacing.autoPause === false ? ' Auto-pause on high bounces or complaints is off.' : ''}`
   const toast = useToast()
-  // A save made elsewhere (Write, another Review, an agent) shows here at once, with who made it.
-  const self = room.self, reload = useRef(refresh)
-  reload.current = refresh
-  useEffect(() => room.onSave(save => { reload.current(); if (save.by.id !== self) toast(`${save.by.name} saved this ${thing}`, 'info') }), [room.onSave, self, thing, toast])
+  const staleRefetch = useStaleRefetch()
   const sendMutation = useApiMutation((api, input: SendCampaignInput) => api.campaigns.send(input), undefined, false, invalidate.campaignSend)
   // Every campaign footer carries the workspace's postal address, so Send and Schedule ask for it first when it is
   // missing, then go on: to the confirmation, or straight to sending when the API asked after it was confirmed.
@@ -909,7 +948,7 @@ function CampaignReview({ campaign, stats, stale, refreshing, refresh }: { campa
     catch (cause) {
       setConfirmation(null)
       if (cause instanceof ApiError && cause.code === 'POSTAL_ADDRESS_REQUIRED') setAddressFor({ input, confirmed: true })
-      else setError(errorText(cause))
+      else { setError(errorText(cause)); staleRefetch(cause, campaign.id) }
     }
     finally { guard.current = false }
   }
@@ -927,9 +966,12 @@ function CampaignReview({ campaign, stats, stale, refreshing, refresh }: { campa
   // What the Write step still needs, each named, and what this step needs: shown under the send button.
   const missing = [!campaign.name.trim() && 'a name', !campaign.subject.trim() && 'a subject', !emailIsValid(campaign.fromEmail.trim()) && 'a sender', !campaign.html.trim() && 'content'].filter(Boolean) as string[]
   const writeLink = <Link to={campaignRoute(campaign, 'edit')}>Write</Link>
+  // Shown in every open stage's footer, until they read the newer version (useReadCampaign).
+  const unreadNote = unread && <>{by.length ? `${by.join(' and ')} saved this ${thing}` : `This ${thing} changed`} after you opened it. <Button size="sm" onClick={() => { readAgain(); setError(''); setOpenRow('message') }}>Read it again</Button></>
   const notes: ['neutral' | 'warning' | 'danger', ReactNode][] = !draft ? [] : [
     ...(missing.length ? [['neutral', <>Add {missing.join(', ').replace(/, ([^,]*)$/, ' and $1')} in {writeLink}.</>] as ['neutral', ReactNode]] : !campaign.listId ? [['neutral', 'Choose a list in Recipients.'] as ['neutral', ReactNode]] : []),
     ...(!canAdminister ? [['neutral', `Only owners and admins can send or schedule ${thing}s.`] as ['neutral', ReactNode]] : []),
+    ...(unreadNote ? [['warning', unreadNote] as ['warning', ReactNode]] : []),
     ...(error ? [['danger', error] as ['danger', ReactNode]] : []),
   ]
   const bar = <CampaignBar back={campaign.archivedAt ? '/campaigns?archived=true' : issueOf ? newsletterPath(issueOf.id) : '/campaigns'} title={<h1 className="studio-title">{campaign.name}</h1>} steps={draft && <CampaignSteps step="review" writeTo={campaignRoute(campaign, 'edit')} />} actions={<><CampaignPresence present={present} room={draft} />{stale && <span className="campaign-note" data-tone="warning" title="Showing the last available counts.">Couldn’t refresh</span>}{!campaignEditable(campaign) && !finished && sentSomething && <Link className="ui-button ui-button--secondary ui-button--md" to={`/logs?campaign=${encodeURIComponent(campaign.id)}`}>View logs</Link>}<StatusBadge status={campaignDisplayStatus(campaign)} />{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</>} />
@@ -951,7 +993,7 @@ function CampaignReview({ campaign, stats, stale, refreshing, refresh }: { campa
     const messageSummary = missing.length ? `Add ${missing.join(', ').replace(/, ([^,]*)$/, ' and $1')} in Write` : campaign.subject
     const whenSummary = mode === 'now' ? 'Send now' : scheduledAt ? utcLabel(scheduledAt) : 'Pick a time'
     const order: ReviewRowId[] = ['to', 'message', 'score', 'when']
-    const next = (row: ReviewRowId) => <Button variant="primary" onClick={() => setOpenRow(order[order.indexOf(row) + 1]!)}>Next</Button>
+    const next = (row: ReviewRowId) => <>{unreadNote && <ul className="campaign-notes"><li className="campaign-note" data-tone="warning"><span>{unreadNote}</span></li></ul>}<Button variant="primary" onClick={() => setOpenRow(order[order.indexOf(row) + 1]!)}>Next</Button></>
     return <div className="campaign-review campaign-review--draft">
       {bar}
       <div className="review-stages">
