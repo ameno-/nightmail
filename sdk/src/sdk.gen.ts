@@ -282,7 +282,7 @@ export const updateApiKey = <ThrowOnError extends boolean = false>(options: Opti
 });
 
 /**
- * Active contacts with current list IDs. Search is a case-insensitive literal email/name substring. Consent and suppression filters are independent.
+ * Active contacts with current list IDs. A search that is one complete email address returns that contact (exact, any case). Any other search is a case-insensitive literal substring of the email or name. Consent and suppression filters are independent.
  */
 export const listContacts = <ThrowOnError extends boolean = false>(options?: Options<ListContactsData, ThrowOnError>): RequestResult<ListContactsResponses, ListContactsErrors, ThrowOnError> => (options?.client ?? client).get<ListContactsResponses, ListContactsErrors, ThrowOnError>({
     security: [

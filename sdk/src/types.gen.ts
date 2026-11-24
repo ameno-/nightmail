@@ -7066,7 +7066,7 @@ export type ListContactListsData = {
         limit?: number;
         search?: string;
         /**
-         * false skips member counts (counts is null), for pickers that only need names. Counting scans every membership of each list.
+         * false leaves member counts out (counts is null). Counts are kept as memberships, consent and suppression change, so reading them does not count members.
          */
         counts?: 'true' | 'false';
     };

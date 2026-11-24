@@ -119,6 +119,20 @@ const SEND_PATH = sql.raw(`path ~ '^/v1/(emails/(send|batch)|campaigns/[^/]+/tes
 const SEND_KEYS = sql`result IS NOT NULL AND NOT (result ? 'scheduledAt') AND ${SEND_PATH}`, SCHEDULED_KEYS = sql`result ? 'scheduledAt' AND ${SEND_PATH}`;
 
 /**
+ * A list's counts are the sums of the differences its triggers add (migration 405): this folds each list's rows into
+ * one and drops a deleted list's, hourly. One statement, so a reader sees the rows before it or the one after it, never
+ * neither; a row another fold already took is skipped and only what this one removed is summed. n is the rows it saved.
+ */
+export const foldListCounts = () => sql`WITH folded AS (DELETE FROM audience_list_counts d
+    WHERE (d.workspace_id, d.list_id) IN (SELECT workspace_id, list_id FROM audience_list_counts GROUP BY 1, 2 HAVING count(*) > 1)
+      OR NOT EXISTS (SELECT FROM audience_lists l WHERE l.workspace_id = d.workspace_id AND l.id = d.list_id)
+    RETURNING d.workspace_id, d.list_id, d.subscribed, d.unsubscribed, d.unknown, d.suppressed
+  ), kept AS (INSERT INTO audience_list_counts (workspace_id, list_id, subscribed, unsubscribed, unknown, suppressed)
+    SELECT f.workspace_id, f.list_id, sum(f.subscribed), sum(f.unsubscribed), sum(f.unknown), sum(f.suppressed) FROM folded f
+    WHERE EXISTS (SELECT FROM audience_lists l WHERE l.workspace_id = f.workspace_id AND l.id = f.list_id) GROUP BY 1, 2 RETURNING 1
+  ) SELECT (SELECT count(*) FROM folded)::int - (SELECT count(*) FROM kept)::int AS n`;
+
+/**
  * Every retention step, in their usual order. Never erase contacts, consent, suppression, drafts or active scheduled
  * work. Idempotency keys go only with the email log of a finished send (SEND_KEYS).
  */
@@ -194,6 +208,7 @@ async function retentionDrains(runtime: Runtime): Promise<Drain[]> {
     { name: 'support_subjects', statement: () => sql`WITH gone AS (UPDATE support_conversations SET subject = NULL
         WHERE id IN (${closedLongAgo} AND subject IS NOT NULL LIMIT ${RETENTION_BATCH}) RETURNING 1) SELECT count(*)::int AS n FROM gone` },
     expired('audience_operation_plans', 'audience_operation_plans', at('expires_at'), sql`expires_at < now() - interval '1 day'`),
+    { name: 'audience_list_counts', size: Infinity, statement: foldListCounts },
     // A preview holds its whole parsed CSV (up to 5 MiB) and is replaced by each re-preview, so abandoned ones pile up.
     // A week leaves room to come back and commit; committed imports stay because deliverability reads them.
     expired('audience_import_previews', 'audience_imports', at('created_at'), sql`status = 'preview' AND created_at < now() - interval '7 days'`, { size: 100, unordered: true }),
@@ -406,6 +421,40 @@ export async function retentionTick(runtime: Runtime, budgetMs = SENT_BUDGET_MS)
   }
 }
 
+// How long one list's recount may take: a list of millions takes seconds, and reads only.
+const RECOUNT_STATEMENT_SECONDS = 30;
+/**
+ * Once a day (a durable election, as the other reconcilers), every list is counted the way readLists used to count it and
+ * compared with the counts the triggers keep (reconcile_audience_list_counts, migration 405). They must agree: a
+ * difference means a write changed a membership or a contact's state without its trigger's row, which is a bug, so it is
+ * logged at error level with the list and the difference, and stored so the list shows the right numbers again. The recount
+ * reads both sides in one snapshot and takes no lock a write waits for. Each list is its own transaction with its own
+ * time limit, so one that is too large to count in time (logged, not corrected) costs no other list its check; a list
+ * deleted since the run began has nothing to correct. Lists go in a different order each day, so a budget that doesn't
+ * reach them all today reaches the rest another day. Returns how many lists it corrected.
+ */
+export async function recountLists(runtime: Runtime, budgetMs = 60_000, statementSeconds = RECOUNT_STATEMENT_SECONDS, clock = Date.now) {
+  const until = clock() + budgetMs;
+  const { rows: lists } = await runtime.db.execute<{ workspace_id: string; id: string }>(sql`WITH elected AS (INSERT INTO job_schedule(workspace_id,next_wake_at)
+      VALUES ('maintenance:audience-list-counts',now()+interval '1 day') ON CONFLICT(workspace_id) DO UPDATE SET next_wake_at=excluded.next_wake_at
+      WHERE job_schedule.next_wake_at<=now() RETURNING 1)
+    SELECT l.workspace_id, l.id FROM audience_lists l, elected ORDER BY md5(l.id || current_date::text)`);
+  let recounted = 0, corrected = 0, failed = 0;
+  for (const list of lists) {
+    if (clock() >= until) break;
+    try {
+      const { rows: [difference] } = await runtime.db.transaction(async tx => {
+        await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${Math.max(1, Math.floor(statementSeconds))}s'`));
+        return tx.execute<{ subscribed: number; unsubscribed: number; unknown: number; suppressed: number }>(sql`SELECT * FROM reconcile_audience_list_counts(${list.workspace_id}, ${list.id})`);
+      });
+      recounted++;
+      if (difference) { corrected++; log('error', { code: 'AUDIENCE_LIST_COUNTS_DRIFT', workspace: list.workspace_id, list: list.id, ...difference }); }
+    } catch (error) { failed++; logError(error, { code: 'AUDIENCE_LIST_RECOUNT_FAILED', workspace: list.workspace_id, list: list.id }, 'warn'); }
+  }
+  if (lists.length) log(failed || recounted < lists.length ? 'warn' : 'info', { code: 'AUDIENCE_LISTS_RECOUNTED', lists: lists.length, recounted, corrected, failed });
+  return corrected;
+}
+
 /** Received-mail events and webhook deliveries alone (the hourly run includes them): for checks that run just these. */
 export async function pruneMailboxEvents(runtime: Runtime, budgetMs = 60_000) {
   const names = new Set(['mailbox_events', 'mail_ignored_staging', 'mailbox_webhook_deliveries_paused_expired', 'mailbox_webhook_deliveries']);
@@ -429,6 +478,8 @@ export async function hourlyUpkeep(runtime: Runtime, mailboxRuntime: () => Promi
     ['BYO_HEALTH_QUEUE_FAILED', async () => { await (await import('./byo-regional.js')).queueByoHealth(runtime); }],
     // Abuse monitoring (src/abuse.ts): a bounded, leased slice. Hosted, and only while it is on.
     ['ABUSE_HOURLY_FAILED', async () => { await (await import('./abuse.js')).abuseHourly(runtime); }],
+    // The daily exact recount of every list's counts.
+    ['AUDIENCE_LIST_RECOUNT_FAILED', async () => { await recountLists(runtime); }],
     ['MAINTENANCE_CLEANUP_FAILED', () => cleanup(runtime)],
   ] as const) {
     try { await step(); } catch (error) {
