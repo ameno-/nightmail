@@ -19,7 +19,7 @@ const Invitation = z.object({ id: z.string(), workspaceId: z.string(), email: z.
 const CreatedInvitation = Invitation.extend({ emailed: z.boolean().describe('Whether the invitation was emailed to the invitee, with acceptUrl. When false, share acceptUrl yourself; notEmailedReason says why.'),
   notEmailedReason: z.enum(['not_available', 'new_workspace', 'allowance_used']).nullable().describe('Why no email went out, null when one did. not_available: this installation sends no invitation email, or your account has no verified address to be named by. new_workspace: invitations are emailed once the workspace has a verified domain or has finished its evaluation. allowance_used: the invitation emails for today, or to this address, are used.'),
   nextStep: z.string().describe('What to do next, for people and agents: whether the invitee was emailed, or acceptUrl is yours to share.') }).openapi('CreatedWorkspaceInvitation');
-const InvitationPreview = z.object({ id: z.string(), workspaceId: z.string(), workspaceName: z.string().describe('The workspace’s name as plain words, at most 40 characters; empty when nothing of it can be shown.'), workspaceSlug: z.string(), inviterEmail: z.string(), role: WorkspaceRole, expiresAt: z.string(), status: z.enum(['pending', 'accepted']) }).openapi('WorkspaceInvitationPreview');
+const InvitationPreview = z.object({ id: z.string(), workspaceId: z.string(), workspaceName: z.string().describe('The workspace’s name as plain words, at most 40 characters; empty when nothing of it can be shown.'), workspaceSlug: z.string(), inviterName: z.string().describe('The inviter’s display name as plain words, like workspaceName; may be empty. Identify the inviter by inviterEmail.'), inviterEmail: z.string(), role: WorkspaceRole, expiresAt: z.string(), status: z.enum(['pending', 'accepted']) }).openapi('WorkspaceInvitationPreview');
 const Invite = z.object({ email: z.email().toLowerCase(), role: WorkspaceRole }).strict().openapi('InviteWorkspaceMember');
 const Removed = z.object({ id: z.string(), deleted: z.literal(true) });
 // Members and invitations also take an owner's or admin's own MCP sign-in (memberAdminRefusal), which reaches REST
@@ -229,21 +229,21 @@ export function registerWorkspaces(app: App) {
     return c.json({ id, deleted: true as const }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/workspaces/invitations/{id}', operationId: 'getWorkspaceInvitation', tags, security,
-    description: 'Shows the signed-in recipient the invitation they followed (the workspace’s name as plain words, the inviter’s address, the role). Read-only; acceptWorkspaceInvitation joins.',
+    description: 'Shows the signed-in recipient the invitation they followed (the workspace’s and the inviter’s names as plain words, the inviter’s address, the role). Read-only; acceptWorkspaceInvitation joins.',
     request: { params: IdParams }, responses: { 200: response(InvitationPreview), ...errors } }), async c => {
     if (!c.env.config.multiTenant) return notFound('Endpoint');
     const a = await verifiedDashboardUser(c.env, c.req.raw.headers,true), invitationId = c.req.valid('param').id;
     // Same conditions as claimInvitation for a pending invitation, plus the idempotent accepted case.
     const result = await c.env.db.execute<z.infer<typeof InvitationPreview>>(sql`SELECT i.id, i.workspace_id AS "workspaceId", w.name AS "workspaceName", w.slug AS "workspaceSlug",
-        u.email AS "inviterEmail", i.role, i.expires_at AS "expiresAt", CASE WHEN i.status = 'accepted' THEN 'accepted' ELSE 'pending' END AS status
+        u.name AS "inviterName", u.email AS "inviterEmail", i.role, i.expires_at AS "expiresAt", CASE WHEN i.status = 'accepted' THEN 'accepted' ELSE 'pending' END AS status
       FROM workspace_invitations i JOIN workspaces w ON w.id = i.workspace_id JOIN nightmail_users u ON u.id = i.inviter_id
       JOIN workspace_members inviter ON inviter.workspace_id = i.workspace_id AND inviter.user_id = i.inviter_id
       WHERE i.id = ${invitationId} AND i.email = ${a.email.toLowerCase()} AND i.role IN ('owner','admin','member') AND (
         (i.status = 'pending' AND i.expires_at > now() AND (inviter.role = 'owner' OR (inviter.role = 'admin' AND i.role <> 'owner')))
         OR (i.status = 'accepted' AND EXISTS(SELECT 1 FROM workspace_members m WHERE m.workspace_id = i.workspace_id AND m.user_id = ${a.userId})))`);
     const row = result.rows[0] ?? notFound('Invitation');
-    // The name is the inviting workspace's to choose and this page speaks for the product: plain words only, as in its emails.
-    return c.json(InvitationPreview.parse({ ...row, workspaceName: shownName(row.workspaceName), expiresAt: new Date(row.expiresAt).toISOString() }), 200);
+    // The names are the inviting account's to choose and this page speaks for the product: plain words only, as in its emails.
+    return c.json(InvitationPreview.parse({ ...row, workspaceName: shownName(row.workspaceName), inviterName: shownName(row.inviterName), expiresAt: new Date(row.expiresAt).toISOString() }), 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/workspaces/invitations/{id}/accept', operationId: 'acceptWorkspaceInvitation', tags, security, request: { params: IdParams }, responses: { 200: response(z.object({ workspaceId: z.string() })), ...errors } }), async c => {
     if (!c.env.config.multiTenant) return notFound('Endpoint');

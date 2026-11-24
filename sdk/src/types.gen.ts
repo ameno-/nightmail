@@ -5118,6 +5118,10 @@ export type WorkspaceInvitationPreview = {
      */
     workspaceName: string;
     workspaceSlug: string;
+    /**
+     * The inviter’s display name as plain words, like workspaceName; may be empty. Identify the inviter by inviterEmail.
+     */
+    inviterName: string;
     inviterEmail: string;
     role: 'owner' | 'admin' | 'member';
     expiresAt: string;

@@ -15880,6 +15880,10 @@
           "workspaceSlug": {
             "type": "string"
           },
+          "inviterName": {
+            "type": "string",
+            "description": "The inviter’s display name as plain words, like workspaceName; may be empty. Identify the inviter by inviterEmail."
+          },
           "inviterEmail": {
             "type": "string"
           },
@@ -15907,6 +15911,7 @@
           "workspaceId",
           "workspaceName",
           "workspaceSlug",
+          "inviterName",
           "inviterEmail",
           "role",
           "expiresAt",
@@ -65171,7 +65176,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Shows the signed-in recipient the invitation they followed (the workspace’s name as plain words, the inviter’s address, the role). Read-only; acceptWorkspaceInvitation joins.",
+        "description": "Shows the signed-in recipient the invitation they followed (the workspace’s and the inviter’s names as plain words, the inviter’s address, the role). Read-only; acceptWorkspaceInvitation joins.",
         "parameters": [
           {
             "schema": {

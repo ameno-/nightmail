@@ -1331,11 +1331,13 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
     assert.equal(landed(joinedByEmail),link.url);
     assert.deepEqual(await attempt(),{acr,provider:null,provider_hd:null,outcome:'signed_in:invitation'});
     // The review the dashboard shows before joining: the workspace's name as plain words, the inviter by address.
-    const {rows:[staffNames]}=await db.query('SELECT name FROM workspaces WHERE id=$1',[staffWorkspace]);
+    const {rows:[staffNames]}=await db.query('SELECT w.name,u.id AS inviter,u.name AS inviter_name FROM workspace_invitations i JOIN workspaces w ON w.id=i.workspace_id JOIN nightmail_users u ON u.id=i.inviter_id WHERE i.id=$1',[link.id]);
     await db.query('UPDATE workspaces SET name=$2 WHERE id=$1',[staffWorkspace,'Acme, Inc. — call 1 800 555 0199 or see nightmail-dev.example.com/restore']);
+    await db.query('UPDATE nightmail_users SET name=$2 WHERE id=$1',[staffNames.inviter,'Nightmail Security Team (security@nightmail.dev)']);
     const review=await request(`/v1/workspaces/invitations/${link.id}`,'GET',invitee), shown=await review.json() as Record<string,unknown>;
-    assert.deepEqual([review.status,shown.workspaceName,'inviterName' in shown,typeof shown.inviterEmail,shown.role,shown.status],[200,'Acme Inc call or see',false,'string','member','pending']);
+    assert.deepEqual([review.status,shown.workspaceName,shown.inviterName,typeof shown.inviterEmail,shown.role,shown.status],[200,'Acme Inc call or see','Nightmail Security Team','string','member','pending']);
     await db.query('UPDATE workspaces SET name=$2 WHERE id=$1',[staffWorkspace,staffNames.name]);
+    await db.query('UPDATE nightmail_users SET name=$2 WHERE id=$1',[staffNames.inviter,staffNames.inviter_name]);
     assert.deepEqual(await (await request(`/v1/workspaces/invitations/${link.id}/accept`,'POST',invitee,{})).json(),{workspaceId:staffWorkspace});
     assert.deepEqual((await db.query("SELECT mailbox_proved,mailbox_proved_at>now()-interval '1 minute' AS fresh FROM nightmail_users WHERE id=$1",[accountOf(joinedByEmail)])).rows[0],{mailbox_proved:address,fresh:true});
     // Accepted, the link is spent: another subject with the same verified address following it is refused.

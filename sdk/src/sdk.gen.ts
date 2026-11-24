@@ -5517,7 +5517,7 @@ export const updateWorkspaceMember = <ThrowOnError extends boolean = false>(opti
 });
 
 /**
- * Shows the signed-in recipient the invitation they followed (the workspace’s name as plain words, the inviter’s address, the role). Read-only; acceptWorkspaceInvitation joins.
+ * Shows the signed-in recipient the invitation they followed (the workspace’s and the inviter’s names as plain words, the inviter’s address, the role). Read-only; acceptWorkspaceInvitation joins.
  */
 export const getWorkspaceInvitation = <ThrowOnError extends boolean = false>(options: Options<GetWorkspaceInvitationData, ThrowOnError>): RequestResult<GetWorkspaceInvitationResponses, GetWorkspaceInvitationErrors, ThrowOnError> => (options.client ?? client).get<GetWorkspaceInvitationResponses, GetWorkspaceInvitationErrors, ThrowOnError>({
     security: [{
