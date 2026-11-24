@@ -2270,36 +2270,11 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
     ), matched AS (
       SELECT x.*, CASE WHEN x.effects->>'receiptTime'='true' THEN i.created_at ELSE x.created_at END AS event_time
       FROM distinct_receipts x JOIN incoming i USING (topic_arn,message_id,workspace_id) WHERE x.email_id IS NOT NULL
-    ), shared_locks AS MATERIALIZED (
-      -- When a batch contains a suppression transition (which triggers sending_emails billing/usage/health updates
-      -- after sending_email_events inserts), pre-acquire per-workspace advisory lock 275820 in ascending hashtext
-      -- order across all potentially-writing workspaces in this batch so multi-workspace mixed batches never invert.
-      SELECT pg_advisory_xact_lock(275820, h)
-      FROM (
-        SELECT DISTINCT hashtext(m.workspace_id) AS h
-        FROM matched m
-        WHERE EXISTS (SELECT 1 FROM matched s WHERE s.type = 'validation_suppressed' OR s.status = 'suppressed')
-          AND NOT m.simulated
-          AND (m.type IN ('validation_suppressed', 'complaint', 'accepted', 'send')
-               OR (m.type = 'bounce' AND m.data->>'bounceType' = 'Permanent')
-               OR m.status = 'suppressed')
-        ORDER BY 1
-      ) x
     ) ${effects ? sql`, recipients AS MATERIALIZED (
       SELECT DISTINCT x.event_id,lower(address) AS address FROM matched x,
         jsonb_array_elements_text(x.to_addresses || x.cc_addresses || x.bcc_addresses) AS address
       WHERE x.effects->'reported' ? lower(address) OR (x.effects->>'observe' IS NOT NULL AND jsonb_array_length(x.to_addresses)=1 AND x.cc_addresses='[]' AND x.bcc_addresses='[]')
-    )` : sql``}, inserted AS (
-      INSERT INTO sending_email_events(id, workspace_id, email_id, type, provider_id, external_id, data, simulated, created_at,recipient_hashes)
-       SELECT x.event_id, x.workspace_id, x.email_id, x.type, x.provider_id, x.external_id,
-         x.data || jsonb_build_object('emailId', x.email_id, 'providerId', x.provider_id), x.simulated, x.event_time,
-         ${mx && effects ? sql`CASE WHEN x.type IN ('bounce','complaint') AND jsonb_typeof(x.effects->'reported')='array'
-           AND EXISTS(SELECT FROM provider_feedback_history WHERE topic_arn=x.topic_arn AND kind='shared') THEN ARRAY(
-           SELECT encode(sha256(convert_to(x.email_id,'UTF8') || decode('00','hex') || convert_to(r.address,'UTF8')),'hex')
-           FROM recipients r WHERE r.event_id=x.event_id AND r.address NOT LIKE '%@simulator.amazonses.com' ORDER BY r.address) END` : sql`NULL`}
-       FROM matched x WHERE (SELECT count(*) FROM shared_locks) >= 0 ORDER BY x.workspace_id,x.email_id,x.ordinal
-      ON CONFLICT DO NOTHING RETURNING *
-    ) ${effects ? sql`, contact_events AS (
+    ), contact_events AS (
       -- Effects follow the receipt this statement processed, not a newly inserted event: a recovery
       -- job that stored the event and died before its suppression left the receipt open for us.
       -- The merges below are idempotent, so overlapping with that job's own retry is harmless.
@@ -2328,8 +2303,33 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
         OR (excluded.last_click_at IS NOT NULL AND (c.last_click_at IS NULL OR excluded.last_click_at > c.last_click_at))
         OR (excluded.open_observed_since IS NOT NULL AND (c.open_observed_since IS NULL OR excluded.open_observed_since < c.open_observed_since))
         OR (excluded.click_observed_since IS NOT NULL AND (c.click_observed_since IS NULL OR excluded.click_observed_since < c.click_observed_since))
-        OR (excluded.observed_since IS NOT NULL AND (c.observed_since IS NULL OR excluded.observed_since < c.observed_since))
-    )` : sql``}, outcome_totals AS (
+        OR (excluded.observed_since IS NOT NULL AND (c.observed_since IS NULL OR excluded.observed_since < c.observed_since)) RETURNING 1
+    )` : sql``}, shared_locks AS MATERIALIZED (
+      -- When a batch contains a suppression transition (which triggers sending_emails billing/usage/health updates
+      -- after sending_email_events inserts), pre-acquire per-workspace advisory lock 275820 in ascending hashtext
+      -- order across all potentially-writing workspaces in this batch so multi-workspace mixed batches never invert.
+      SELECT pg_advisory_xact_lock(275820, h)
+      FROM (
+        SELECT DISTINCT hashtext(m.workspace_id) AS h
+        FROM matched m
+        WHERE EXISTS (SELECT 1 FROM matched s WHERE s.type = 'validation_suppressed' OR s.status = 'suppressed')
+          AND NOT m.simulated
+          AND (m.type IN ('validation_suppressed', 'complaint', 'accepted', 'send')
+               OR (m.type = 'bounce' AND m.data->>'bounceType' = 'Permanent')
+               OR m.status = 'suppressed')
+        ORDER BY 1
+      ) x ${effects ? sql`WHERE (SELECT count(*) FROM contact_changes) >= 0` : sql``}
+    ), inserted AS (
+      INSERT INTO sending_email_events(id, workspace_id, email_id, type, provider_id, external_id, data, simulated, created_at,recipient_hashes)
+       SELECT x.event_id, x.workspace_id, x.email_id, x.type, x.provider_id, x.external_id,
+         x.data || jsonb_build_object('emailId', x.email_id, 'providerId', x.provider_id), x.simulated, x.event_time,
+         ${mx && effects ? sql`CASE WHEN x.type IN ('bounce','complaint') AND jsonb_typeof(x.effects->'reported')='array'
+           AND EXISTS(SELECT FROM provider_feedback_history WHERE topic_arn=x.topic_arn AND kind='shared') THEN ARRAY(
+           SELECT encode(sha256(convert_to(x.email_id,'UTF8') || decode('00','hex') || convert_to(r.address,'UTF8')),'hex')
+           FROM recipients r WHERE r.event_id=x.event_id AND r.address NOT LIKE '%@simulator.amazonses.com' ORDER BY r.address) END` : sql`NULL`}
+       FROM matched x WHERE (SELECT count(*) FROM shared_locks) >= 0 ORDER BY x.workspace_id,x.email_id,x.ordinal
+      ON CONFLICT DO NOTHING RETURNING *
+    ), outcome_totals AS (
       SELECT x.email_id, x.workspace_id, bit_or(x.outcome_bit)::smallint AS add_bits
       FROM matched x JOIN inserted ins ON ins.id = x.event_id
       GROUP BY x.email_id, x.workspace_id
