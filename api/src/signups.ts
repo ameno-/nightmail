@@ -35,9 +35,17 @@ export async function takePlace(db: DbExecutor, mailbox: string): Promise<Place 
   await lockLimit(db);
   const address = mailbox.toLowerCase();
   if ((await db.execute(sql`SELECT FROM nightmail_users WHERE email_verified AND lower(email)=${address}`)).rowCount) return null;
-  const { rows: [waited] } = await db.execute<Waited>(sql`DELETE FROM nightmail_waitlist WHERE email=${address} RETURNING name,attempts,first_at::text,let_in_at::text`);
-  if (waited?.let_in_at) return { via: 'waitlist', mailbox: address, waited };
-  return (await readPlaces(db)).open > 0 ? { via: 'open', mailbox: address, waited: waited ?? null } : null;
+  const evidence = sql`name,attempts,first_at::text,let_in_at::text`;
+  const { rows: [held] } = await db.execute<Waited>(sql`DELETE FROM nightmail_waitlist WHERE email=${address} AND let_in_at IS NOT NULL RETURNING ${evidence}`);
+  if (held) return { via: 'waitlist', mailbox: address, waited: held };
+  // As on dev, a closed gate never takes an unheld waitlist row lock while holding the installation's limit lock.
+  // If a place is open, consume any waiting evidence in the statement already checking capacity.
+  const { rows: [free] } = await db.execute<{ waited: Waited | null }>(sql`WITH capacity AS MATERIALIZED (
+    SELECT places > (SELECT count(*) FROM nightmail_signups) + (SELECT count(*) FROM nightmail_waitlist WHERE let_in_at IS NOT NULL) AS open
+    FROM nightmail_signup_limit WHERE singleton
+  ), consumed AS (DELETE FROM nightmail_waitlist WHERE email=${address} AND (SELECT open FROM capacity) RETURNING ${evidence})
+  SELECT (SELECT row_to_json(c) FROM consumed c) AS waited FROM capacity WHERE open`);
+  return free ? { via: 'open', mailbox: address, waited: free.waited } : null;
 }
 /**
  * The sign-up, with what the sign-ups list may say of it ever after: the mailbox this sign-in proved, the name it gave,
@@ -45,7 +53,7 @@ export async function takePlace(db: DbExecutor, mailbox: string): Promise<Place 
  * later: a changed address or name isn't the one that signed up.
  */
 export const recordSignup = (db: DbExecutor, userId: string, place: Place, name: string | null) =>
-  db.execute(sql`INSERT INTO nightmail_signups(user_id,via,email,name,joined_at,attempts,let_in_at) VALUES(${userId},${place.via},${place.mailbox},
+  db.execute(sql`INSERT INTO nightmail_signups(user_id,via,email,name,joined_at,attempts,let_in_at) VALUES(${userId},${place.via},${place.mailbox.length <= 320 ? place.mailbox : null},
     ${place.waited?.name ?? (name?.trim().slice(0, 200) || null)},${place.waited?.first_at ?? null}::timestamptz,${place.waited?.attempts ?? null},${place.waited?.let_in_at ?? null}::timestamptz)`);
 
 /**
@@ -112,12 +120,12 @@ export async function placesOpened(runtime: Runtime): Promise<{ emailed: number;
 export type SignupsList = { workspaceId: string; listId: string };
 export const signupsList = (config: Pick<Config, 'multiTenant' | 'platformDomainWorkspace' | 'signupsListId'>): SignupsList | null =>
   config.multiTenant && config.platformDomainWorkspace && config.signupsListId ? { workspaceId: config.platformDomainWorkspace, listId: config.signupsListId } : null;
-const waitlistDue = sql`(list_synced_at IS NULL OR list_synced_at < greatest(last_at,let_in_at))`;
+const waitlistDue = sql`(list_synced_at IS NULL OR list_synced_at IS DISTINCT FROM greatest(last_at,let_in_at) OR list_synced_attempts IS DISTINCT FROM attempts)`;
 const signupDue = sql`(list_synced_at IS NULL AND email IS NOT NULL)`;
 // One job per kind and workspace: queued again only once the last run has finished.
 const queueRun = (list: SignupsList, kind: 'sync' | 'reconcile', when = sql`true`) => sql`INSERT INTO jobs(id,type,workspace_id,payload)
   SELECT ${`signups.${kind}:${list.workspaceId}`},${`signups.${kind}`},${list.workspaceId},'{}'::jsonb WHERE ${when}
-  ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,lease_until=NULL,last_error=NULL,available_at=now() WHERE jobs.status IN ('completed','failed')`;
+  ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,status='pending',attempts=0,lease_until=NULL,last_error=NULL,available_at=now() WHERE jobs.status IN ('completed','failed')`;
 /** Every minute (worker cron, Node runner): a signups.sync run while any waitlist row or sign-up is due. Never throws. */
 export async function signupsTick(runtime: Runtime) {
   const list = signupsList(runtime.config);
@@ -150,7 +158,7 @@ const lockAddress = (tx: DbExecutor, list: SignupsList, address: string) => tx.e
  * One address's contact, from where it stands now: a sign-up's own record, else its waitlist row. Returns the waitlist
  * row's version it saw (null: none) for the caller to mark once the contact has committed.
  */
-async function syncAddress(db: Database, list: SignupsList, address: string): Promise<{ result: ListContactResult; version: string | null }> {
+async function syncAddress(db: Database, list: SignupsList, address: string): Promise<{ result: ListContactResult; version: string | null; attempts: number | null }> {
   const { upsertListContact } = await import('./audience.js'), byAddress = await addressProperties(address);
   return db.transaction(async tx => {
     await lockAddress(tx, list, address);
@@ -164,13 +172,13 @@ async function syncAddress(db: Database, list: SignupsList, address: string): Pr
         properties: { status: 'signed_up', ...byAddress, signed_up_at: iso(signup.at), ...signup.joinedAt ? { joined_at: iso(signup.joinedAt) } : {},
           ...signup.attempts !== null ? { attempts: signup.attempts } : {}, ...signup.letInAt ? { let_in_at: iso(signup.letInAt) } : {} },
         consent: signup.joinedAt ? waitlistConsent(signup.joinedAt) : { source: `${productName} sign-up`, evidence: 'Signed up for an account with this verified address.', occurredAt: iso(signup.at) } });
-      return { result, version: waiting?.version ?? null };
+      return { result, version: waiting?.version ?? null, attempts: waiting?.attempts ?? null };
     }
-    if (!waiting) return { result: 'gone' as const, version: null };
-    const result = await upsertListContact(tx, list, list.listId, { email: address, name: contactName(waiting.name),
+    if (!waiting) return { result: 'gone' as const, version: null, attempts: null };
+    const result = await upsertListContact(tx, list, list.listId, { email: address, name: contactName(waiting.name), fromWaitlist: true,
       properties: { status: waiting.letInAt ? 'let_in' : 'waiting', ...byAddress, joined_at: iso(waiting.joinedAt), attempts: waiting.attempts, ...waiting.letInAt ? { let_in_at: iso(waiting.letInAt) } : {} },
       consent: waitlistConsent(waiting.joinedAt) });
-    return { result, version: waiting.version };
+    return { result, version: waiting.version, attempts: waiting.attempts };
   });
 }
 // They asked for access: subscribed from when they first asked, unless they decided otherwise since.
@@ -199,16 +207,17 @@ export const signupJobs: Record<string, JobHandler> = {
         if (!signups.length && !waiting.length) return;
         for (const row of signups) {
           const { result } = await syncAddress(runtime.db, list, row.email);
-          if (result === 'no_list') return;
           count(counts, result);
+          if (result === 'no_list') return;
           await runtime.db.execute(sql`UPDATE nightmail_signups SET list_synced_at=now() WHERE user_id=${row.user_id}`);
         }
         for (const row of waiting) {
-          const { result, version } = await syncAddress(runtime.db, list, row.email);
-          if (result === 'no_list') return;
+          const { result, version, attempts } = await syncAddress(runtime.db, list, row.email);
           count(counts, result);
+          if (result === 'no_list') return;
           // The version written: a row changed meanwhile stays due.
-          if (version) await runtime.db.execute(sql`UPDATE nightmail_waitlist SET list_synced_at=${version}::timestamptz WHERE email=${row.email} AND (list_synced_at IS NULL OR list_synced_at<${version}::timestamptz)`);
+          if (version) await runtime.db.execute(sql`UPDATE nightmail_waitlist SET list_synced_at=${version}::timestamptz,list_synced_attempts=${attempts}
+            WHERE email=${row.email} AND attempts=${attempts} AND greatest(last_at,let_in_at)=${version}::timestamptz`);
         }
         if (Date.now() > until) throw more();
       }
@@ -216,30 +225,32 @@ export const signupJobs: Record<string, JobHandler> = {
   }),
   // Contacts still waiting or let in whose address left the waitlist without a sign-up, because an invitation, staff or
   // an operator's binding let its account in: status admitted, and nothing else about them changes.
-  'signups.reconcile': retryDatabaseFailures(async (runtime, _payload, job) => {
+  'signups.reconcile': retryDatabaseFailures(async (runtime, payload, job) => {
     const list = listOf(runtime, job.workspaceId), until = Date.now() + RUN_MS, counts: Counts = {};
     if (!list) return;
-    const { upsertListContact } = await import('./audience.js');
     const admitted = (address: SQL) => sql`NOT EXISTS (SELECT FROM nightmail_waitlist w WHERE w.email=${address}) AND NOT EXISTS (SELECT FROM nightmail_signups s WHERE s.email=${address})
       AND EXISTS (SELECT FROM nightmail_users u WHERE u.email_verified AND lower(u.email)=${address})`;
+    const { PropertiesInput } = await import('./audience.js');
+    let after = typeof payload.after === 'string' ? payload.after : '';
     try {
       for (;;) {
-        const { rows } = await runtime.db.execute<{ email: string }>(sql`SELECT c.email FROM audience_list_members m JOIN audience_contacts c ON c.workspace_id=m.workspace_id AND c.id=m.contact_id
-          WHERE m.workspace_id=${list.workspaceId} AND m.list_id=${list.listId} AND c.deleted_at IS NULL AND c.properties->>'status' IN ('waiting','let_in') AND ${admitted(sql`c.email`)}
-          ORDER BY c.email LIMIT ${BATCH}`);
-        let changed = 0;
-        for (const { email } of rows) {
-          const result = await runtime.db.transaction(async tx => {
-            await lockAddress(tx, list, email);
-            if (!(await tx.execute(sql`SELECT WHERE ${admitted(sql`${email}`)}`)).rowCount) return 'gone' as const;
-            return upsertListContact(tx, list, list.listId, { email, name: null, properties: { status: 'admitted' } });
-          });
-          if (result === 'no_list') return;
-          count(counts, result);
-          if (result === 'updated') changed++;
-        }
-        if (rows.length < BATCH || !changed) return;
-        if (Date.now() > until) throw more();
+        // Only this sync can mark a membership. Lock and recheck both member and contact; a user edit,
+        // deletion or manual re-add after the initial scan must not be overwritten.
+        const page = await runtime.db.transaction(async tx => {
+          const { rows } = await tx.execute<{ id: string; properties: Record<string, unknown> }>(sql`SELECT c.id,c.properties
+            FROM audience_list_members m JOIN audience_contacts c ON c.workspace_id=m.workspace_id AND c.id=m.contact_id
+            WHERE m.workspace_id=${list.workspaceId} AND m.list_id=${list.listId} AND m.signup_waitlist AND c.id>${after}
+              AND c.deleted_at IS NULL AND c.properties->>'status' IN ('waiting','let_in') AND ${admitted(sql`c.email`)}
+            ORDER BY c.id LIMIT ${BATCH} FOR UPDATE OF c SKIP LOCKED FOR SHARE OF m SKIP LOCKED`);
+          const ids = rows.filter(c => PropertiesInput.safeParse({ ...c.properties, status: 'admitted' }).success).map(c => c.id);
+          if (ids.length) await tx.execute(sql`UPDATE audience_contacts SET properties=jsonb_set(properties,'{status}','"admitted"'),updated_at=now()
+            WHERE workspace_id=${list.workspaceId} AND id=ANY(${sql.param(ids)}::text[])`);
+          return { rows, updated: ids.length };
+        });
+        counts.updated = (counts.updated ?? 0) + page.updated;
+        if (page.rows.length < BATCH) return;
+        after = page.rows[page.rows.length - 1]!.id;
+        if (Date.now() > until) throw new JobDeferred(new Date().toISOString(), { after }); // Opaque contact ID, never the mailbox.
       }
     } finally { if (Object.keys(counts).length) logRun(list, 'reconcile', counts); }
   }),

@@ -570,19 +570,19 @@ export type ListContactResult = 'added' | 'updated' | 'deleted' | 'invalid' | 'n
  * the 50-key and 16 KiB limits (a merge past them leaves the properties as they were), and the contact joins the list.
  * Consent is recorded only for a contact with no decision yet that isn't suppressed: an opt-out stays an opt-out, and
  * suppression is never touched. A deleted contact stays deleted: what deletion retains is there to keep it from being
- * enrolled again. Without `consent` it only updates a contact that exists ('gone' if none): no contact, membership or
- * consent is made. Takes the list, then the contact, as an import does.
+ * enrolled again. A waitlist sync marks the membership so reconciliation can distinguish it from a manual addition.
+ * Takes the list, then the contact, as an import does.
  */
 export async function upsertListContact(tx: DbExecutor, identity: Pick<Actor, 'workspaceId'>, listId: string,
-  input: { email: string; name: string | null; properties: Record<string, string | number | boolean | null>; consent?: { source: string; evidence: string; occurredAt: string } }): Promise<ListContactResult> {
+  input: { email: string; name: string | null; fromWaitlist?: boolean; properties: Record<string, string | number | boolean | null>; consent: { source: string; evidence: string; occurredAt: string } }): Promise<ListContactResult> {
   const parsed = ContactInput.safeParse({ email: input.email, ...input.name ? { name: input.name } : {}, properties: input.properties });
   if (!parsed.success) return 'invalid';
   const { email, name, properties } = parsed.data;
   const [list] = await tx.select({ id: lists.id }).from(lists).where(and(scope(lists, identity), eq(lists.id, listId))).limit(1).for('share');
   if (!list) return 'no_list';
-  const added = !!input.consent && (await tx.insert(contacts).values({ id: rowId('con'), ...scopeValues(identity), email, name: name || null, properties }).onConflictDoNothing().returning({ id: contacts.id })).length > 0;
+  const added = (await tx.insert(contacts).values({ id: rowId('con'), ...scopeValues(identity), email, name: name || null, properties }).onConflictDoNothing().returning({ id: contacts.id })).length > 0;
   const [contact] = await tx.select().from(contacts).where(and(scope(contacts, identity), eq(contacts.email, email))).limit(1).for('update');
-  if (!contact) { if (!input.consent) return 'gone'; throw new ApiError(500, 'CONTACT_WRITE_FAILED', 'Unable to persist the contact.', undefined, true); }
+  if (!contact) throw new ApiError(500, 'CONTACT_WRITE_FAILED', 'Unable to persist the contact.', undefined, true);
   if (contact.deletedAt) return 'deleted';
   if (!added) {
     const merged = { ...contact.properties, ...properties }, fits = PropertiesInput.safeParse(merged).success;
@@ -590,9 +590,11 @@ export async function upsertListContact(tx: DbExecutor, identity: Pick<Actor, 'w
     if (!fits) log('warn', { code: 'LIST_CONTACT_PROPERTIES_FULL', workspaceId: identity.workspaceId, contactId: contact.id });
     if (changed || (name && name !== contact.name)) await tx.update(contacts).set({ ...changed ? { properties: merged } : {}, ...name ? { name } : {}, updatedAt: new Date().toISOString() }).where(and(scope(contacts, identity), eq(contacts.id, contact.id)));
   }
-  if (!input.consent) return 'updated';
   if (contact.marketingConsent === 'unknown' && !contact.suppressed) await recordConsent(tx, identity, contact, { status: 'subscribed', ...input.consent, actorKeyId: null });
-  await tx.insert(listMembers).values({ ...scopeValues(identity), listId, contactId: contact.id }).onConflictDoNothing();
+  if (input.fromWaitlist) await tx.execute(sql`INSERT INTO audience_list_members(workspace_id,list_id,contact_id,signup_waitlist)
+    VALUES(${identity.workspaceId},${listId},${contact.id},true) ON CONFLICT(workspace_id,list_id,contact_id)
+    DO UPDATE SET signup_waitlist=true WHERE audience_list_members.signup_waitlist IS DISTINCT FROM true`);
+  else await tx.insert(listMembers).values({ ...scopeValues(identity), listId, contactId: contact.id }).onConflictDoNothing();
   return added ? 'added' : 'updated';
 }
 
