@@ -121,6 +121,8 @@ export interface Config {
   abuseSlackWebhookUrl?: string;
   /** OPERATOR_SLACK_WEBHOOK_URL: where the operator alerts are posted (src/operator-alerts.ts). Undefined: nothing is posted. */
   operatorSlackWebhookUrl?: string;
+  /** PLANETSCALE_WEBHOOK_SECRET: the database disk alert also checks PlanetScale's signature (src/disk-alert.ts). Undefined: its token alone. */
+  planetscaleWebhookSecret?: string;
   /** NIGHTMAIL_ABUSE_ENFORCE. Reserved: abuse monitoring never blocks, and no code reads this yet. */
   abuseEnforce?: boolean;
   /** Hosted billing. stripe is undefined until STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET are set (money routes answer 503 BILLING_NOT_CONFIGURED). */
@@ -172,9 +174,9 @@ export interface Runtime {
   dispatch?: (region: string, accountId?: string, emails?: number, kind?: ReadyConnection['kind'], priority?: boolean) => Promise<void>;
   /** Campaign rooms (src/campaign-room.ts): who has a campaign open in the dashboard. Cloudflare only: the Node server has
    *  none, and its dashboard shows no presence. connect answers the WebSocket upgrade. visit reports an agent's read or
-   *  save in the background, never delaying or failing the request: nothing when nobody is in the room, and its name
-   *  (lookup, given a runtime of its own) is looked up only when someone is. */
-  campaignRooms?: { connect: (name: string, person: import('./campaign-room-protocol.js').RoomPerson) => Promise<Response>; visit: (name: string, credential: string, lookup: (runtime: Runtime) => Promise<string | null>) => void };
+   *  save (saved: the revision it made) in the background, never delaying or failing the request: nothing when nobody
+   *  is in the room, and its name (lookup, given a runtime of its own) is looked up only when someone is. */
+  campaignRooms?: { connect: (name: string, person: import('./campaign-room-protocol.js').RoomPerson) => Promise<Response>; visit: (name: string, credential: string, lookup: (runtime: Runtime) => Promise<string | null>, saved?: number) => void };
   /** True once the content classifier must not be called in this run (src/dispatcher-do.ts: a request landed on the shard,
    *  and a call now would carry its visitor). Checked right before each request; a call not made throws ScreenHandover. */
   screenHandover?: () => boolean;
@@ -191,6 +193,8 @@ export interface Runtime {
   // the installation's bucket and a per-process cap.
   analyticsStorage?: Storage;
   allowAnalytics?: (peer: string) => Promise<boolean>;
+  // The database disk alert (src/disk-alert.ts): the Workers DISK_ALERT limiter, one card a minute per threshold. Node has the per-process count.
+  allowDiskAlert?: (key: string) => Promise<boolean>;
   jwksCacheScope?: object; // Workers create a new DB adapter per request; scope public keys to the binding instead.
   // Set only by the SupportPlatform service-binding entrypoint (src/support-platform.ts), never from a request.
   platformCaller?: 'bane-support';
