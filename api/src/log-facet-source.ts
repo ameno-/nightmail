@@ -36,6 +36,29 @@ export function parseLogFacetCut(raw: unknown): LogFacetCut | null {
   return cut.success && consistent(cut.data) ? cut.data : null;
 }
 
+/**
+ * Rows a fold from `lower` would read, or more than `cap` when it has more. A fold reads every email in its window
+ * (about 420 heap bytes each, with no index-only path), so a window past the cap is refused before it starts rather
+ * than read for 12 seconds, failed and retried. Sent mail comes from the hourly tallies (migration 407) when their
+ * triggers are on: a few rows per hour.
+ */
+export const LOG_FACET_MAX_SOURCE_ROWS = 5_000_000;
+export async function logFacetSourceRows(db: DbExecutor, workspaceId: string, lower: string, region: string | null, cap = LOG_FACET_MAX_SOURCE_ROWS) {
+  const { talliesEnabled } = await import('./sending-tallies.js');
+  const inRegion = (column: SQLWrapper) => region === null ? sql`` : sql` AND ${column} = ${region}`;
+  const { rows: [sent] } = await db.execute<{ n: string }>(await talliesEnabled(db)
+    ? sql`SELECT coalesce(sum(emails), 0)::bigint AS n FROM sending_metrics_hourly
+        WHERE workspace_id = ${workspaceId} AND hour >= date_trunc('hour', ${lower}::timestamptz, 'UTC')${inRegion(sql`region`)}`
+    : sql`SELECT count(*)::bigint AS n FROM (SELECT 1 FROM ${emails} WHERE ${eq(emails.workspaceId, workspaceId)}
+        AND ${emails.createdAt} >= ${lower}::timestamptz${inRegion(emails.region)} LIMIT ${cap + 1}) s`);
+  const rest = cap - Number(sent?.n ?? 0);
+  if (rest < 0) return cap + 1;
+  const { rows: [received] } = await db.execute<{ n: string }>(sql`SELECT count(*)::bigint AS n FROM (SELECT 1 FROM ${messages}
+    WHERE ${eq(messages.workspaceId, workspaceId)} AND ${messages.direction} = 'inbound' AND ${messages.receivedAt} >= ${lower}::timestamptz${inRegion(messages.region)}
+    LIMIT ${rest + 1}) r`);
+  return cap - rest + Number(received?.n ?? 0);
+}
+
 /** Exact, unfiltered cross-tab for the two unrestricted dashboard viewer bands. */
 export async function readLogFacetCut(db: DbExecutor, workspaceId: string, from: string, region: string | null): Promise<LogFacetCut> {
   return (await readLogFacetGeneration(db, workspaceId, from, region)).cut;
@@ -51,7 +74,11 @@ export async function readLogFacetGeneration(
 ): Promise<{ cut: LogFacetCut; rolling?: { period: LogFacetPeriod; from: string; cut: LogFacetCut } }> {
   const absoluteFrom = sql`${from}::timestamptz`;
   const rollingFrom = period === undefined ? null : sql`(SELECT rolling_from FROM bounds)`;
-  const lower = rollingFrom === null ? absoluteFrom : sql`least(${absoluteFrom}, ${rollingFrom})`;
+  // The scans' lower bound is the same instant written inline: the planner estimates a stable expression, but not
+  // the bounds CTE (an InitPlan counts as a third of the workspace and hashes every mailbox link in the installation).
+  // The counts still use the exact bands below.
+  const lower = period === undefined ? absoluteFrom : sql`least(${absoluteFrom}, (date_trunc('minute', statement_timestamp() AT TIME ZONE 'UTC')
+    - make_interval(hours => ${periodHours[period]}::int)) AT TIME ZONE 'UTC')`;
   const scopedRange = (date: SQLWrapper, regionColumn: typeof emails.region | typeof messages.region) =>
     sql`${date} >= ${lower}${region === null ? sql`` : sql` AND ${eq(regionColumn, region)}`}`;
   // The scalar bounds reference is computed once, not truncated per matching row. Doing the clock

@@ -1,6 +1,7 @@
 import { sql } from 'drizzle-orm';
-import type { Runtime } from './core.js';
+import { statementTimedOut, type Runtime } from './core.js';
 import { enrollLogFacet, readPublishedLogFacet, type FacetTicket } from './log-facet-fold.js';
+import { LOG_FACET_MAX_SOURCE_ROWS, logFacetSourceRows } from './log-facet-source.js';
 
 export const LOG_FACET_BOOTSTRAP_TICK_MS = 60_000;
 const CONTROL = 'maintenance:log-facet-bootstrap', TYPE = 'logs.facetBootstrap';
@@ -45,6 +46,16 @@ export async function bootstrapLogFacet(runtime: Runtime): Promise<FacetTicket |
       FROM page p CROSS JOIN boundary b ORDER BY p.id`);
     for (const candidate of page) {
       if (!candidate.mail || await readPublishedLogFacet(tx, candidate.id, null, '30d')) {
+        after = candidate.id;
+        continue;
+      }
+      // A window too large to fold (or to size within this turn's limit) is skipped, not enrolled to fail every cycle.
+      await tx.execute(sql`SAVEPOINT log_facet_size`);
+      let large = true;
+      try { large = await logFacetSourceRows(tx, candidate.id, candidate.from, null) > LOG_FACET_MAX_SOURCE_ROWS; }
+      catch (error) { if (!statementTimedOut(error)) throw error; }
+      finally { await tx.execute(sql`ROLLBACK TO SAVEPOINT log_facet_size`); await tx.execute(sql`RELEASE SAVEPOINT log_facet_size`); }
+      if (large) {
         after = candidate.id;
         continue;
       }

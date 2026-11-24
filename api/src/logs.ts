@@ -6,7 +6,7 @@ import { createFairPool, PAGE_MAX_BYTES, READ_MAX_WAITERS, READ_MAX_WAITING_PER_
 import { fitPageByBytes, INBOUND_ADDRESS_PAGE_LIMIT, messageFieldCount, sliceAddressStrings, sliceJsonbArray } from './inbound-bounds.js';
 import { emails } from './db/sending.js';
 import { enrollLogFacet, logFacetPeriod, LOG_FACET_WAIT_MS, readPublishedLogFacet, readTicketCut } from './log-facet-fold.js';
-import type { LogFacetCut } from './log-facet-source.js';
+import { LOG_FACET_MAX_SOURCE_ROWS, logFacetSourceRows, type LogFacetCut } from './log-facet-source.js';
 import { mailMessages as messages } from './db/mailbox.js';
 import { readsDelivery, visibleAddresses } from './inbound-threads.js';
 import { accessibleMessages, sentThreadId, threadSize } from './thread-view.js';
@@ -210,6 +210,14 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
       if (counts instanceof Response) return counts;
       return c.json({ counts, ...(mode==='refresh' && { visibility:facetVisibility(scope),from:q.from }) }, 200);
     }
+    // A fold reads every email in its window (no index-only path). Refuse a window too large to fold, as the live count
+    // refuses one, before anything is parked or enrolled: it would read gigabytes for 12 seconds, fail and be retried.
+    const fromIso = new Date(fromMs).toISOString();
+    const rolling = period ? Math.floor(Date.now() / 60_000) * 60_000 - { '24h': 1, '7d': 7, '30d': 30 }[period] * 86_400_000 : fromMs;
+    const sized = await withBoundedRead(c, () => budgetedRead(c.env.db,
+      db => logFacetSourceRows(db, scope.a.workspaceId, new Date(Math.min(fromMs, rolling)).toISOString(), q.region ?? null), readLimit(COUNTS_READ)), opts);
+    if (sized instanceof Response) return sized;
+    if (sized > LOG_FACET_MAX_SOURCE_ROWS) throw readLimit(COUNTS_READ).refusal();
     const end = performance.now() + LOG_FACET_WAIT_MS;
     if (signal.aborted) return new Response(null, { status: 499 });
     let hold;
@@ -227,7 +235,7 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
       return new ApiError(503, 'FACET_CATCHUP_UNAVAILABLE', 'Exact Logs counts are temporarily unavailable.', undefined, true);
     };
     try {
-      const ticket = await enrollLogFacet(c.env, scope.a.workspaceId, new Date(fromMs).toISOString(), q.region ?? null, period);
+      const ticket = await enrollLogFacet(c.env, scope.a.workspaceId, fromIso, q.region ?? null, period);
       if (ticket.wake) c.env.startLogFacetFold?.(ticket.slot);
       let probes = 0;
       while (performance.now() < end) {
