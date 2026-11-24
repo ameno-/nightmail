@@ -1013,6 +1013,9 @@ export class SupportConversation extends DurableObject<Env> {
       if (refused === 'closed') return;
       this.broadcast({ type: 'error', code: 'BUDGET_EXHAUSTED', message: `This conversation has reached its limit. I’ve passed it to the ${productName} team, who will follow up by email.`, retryable: false });
       await this.harnessTicket(meta, internal('Conversation limit reached', `The conversation reached its ${refused === 'turns' ? `${TURNS_PER_CONVERSATION}-turn` : 'token'} limit before it was resolved.`, input.text ?? '', 'Read the conversation and reply to the customer.'));
+      // The panel resumes this person's open chat on every open, and each message keeps it from going idle: left open, a
+      // spent conversation would answer nothing for up to 30 days. It ends here; the team follows up by email.
+      await this.close('limit');
       return;
     }
     // Staff have paused the agent (api/src/support-inbox.ts): the message is recorded and mirrored, and no turn runs. The

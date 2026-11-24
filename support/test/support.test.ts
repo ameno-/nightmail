@@ -168,7 +168,7 @@ export class SupportConversation extends Conversation {
     if (unavailable.delete(input.messageId)) throw new Error('fixture: unavailable');
     return super.enqueueInbound(input);
   }
-  async fixture({ expire, tick, age, unavailable: id, route, fail, ageActions, actionsDue }) {
+  async fixture({ expire, tick, age, unavailable: id, route, fail, ageActions, actionsDue, spend }) {
     const sql = this.ctx.storage.sql, has = name => sql.exec('SELECT 1 FROM sqlite_master WHERE name=?', name).toArray().length > 0;
     if (ageActions) sql.exec('UPDATE _support_actions SET created_at = created_at - ?', ageActions);
     if (actionsDue) sql.exec('UPDATE _support_actions SET next_check_at = 0');
@@ -176,6 +176,7 @@ export class SupportConversation extends Conversation {
     if (fail) failTurns = fail;
     if (expire && has('_support_work')) sql.exec('UPDATE _support_work SET due_at=1 WHERE id=?', expire);
     if (age) { const meta = this.meta(); meta.lastActivity -= age; if (meta.closedAt) meta.closedAt -= age; this.save(meta); }
+    if (spend) { const meta = this.meta(); meta.turns = spend; this.save(meta); }
     if (route) this.env = { ...this.env, SUPPORT_ADDRESS_ID: route };
     const before = Date.now();
     if (tick) await super.alarm();
@@ -1830,7 +1831,7 @@ describe('support Worker', () => {
     afterAll(() => instance?.dispose());
     type Row = { id: string; kind: string; state: string; attempts: number; due_at: number; last_error: string | null };
     type Run = { rows: Row[]; legacy: { message_id: string; state: string }[]; grant: boolean; alarm: number | null; before: number; meta: { closedAt: number | null } | null; actions: { id: string; state: string; attempts: number; next_check_at: number }[] };
-    async function drive(id: string, options: { tick?: boolean; expire?: string; age?: number; unavailable?: string; route?: string; fail?: 'throw' | 'reply'; ageActions?: number; actionsDue?: boolean } = {}) {
+    async function drive(id: string, options: { tick?: boolean; expire?: string; age?: number; unavailable?: string; route?: string; fail?: 'throw' | 'reply'; ageActions?: number; actionsDue?: boolean; spend?: number } = {}) {
       const res = await instance.dispatchFetch(`${SUPPORT}/__conversation`, { method: 'POST', body: JSON.stringify({ id, ...options }) });
       assert.equal(res.status, 200);
       return await res.json() as Run;
@@ -1946,6 +1947,24 @@ describe('support Worker', () => {
       await until(f => f.type === 'history');
       return { id: started.conversationId as string, ws, frames, until, say: (clientMessageId: string, text: string) => ws.send(JSON.stringify({ type: 'user.message', clientMessageId, text })) };
     }
+
+    test('continuous chat: a conversation that spent its turn budget ends after its ticket, so the next resume starts a fresh one', async () => {
+      const start = async () => await (await instance.dispatchFetch(`${SUPPORT}/chat/start`, { method: 'POST', headers: { 'content-type': 'application/json', origin: ORIGIN }, body: JSON.stringify({ handoff: handoff('usr_spent', false, 'ws_acme'), resume: true }) })).json() as any;
+      const first = await start();
+      const socket = await instance.dispatchFetch(first.socketUrl.replace('wss:', 'https:'), { headers: { upgrade: 'websocket', origin: ORIGIN } });
+      const ws = (socket as any).webSocket; ws.accept();
+      const frames: any[] = []; ws.addEventListener('message', (e: MessageEvent) => frames.push(JSON.parse(String(e.data))));
+      const until = async (match: (f: any) => boolean) => { for (let i = 0; i < 600 && !frames.some(match); i++) await new Promise(r => setTimeout(r, 100)); return frames.find(match); };
+      await until(f => f.type === 'history');
+      assert.equal((await start()).conversationId, first.conversationId, 'Resumed while it has budget.');
+      await drive(first.conversationId, { spend: 60 });
+      ws.send(JSON.stringify({ type: 'user.message', clientMessageId: 'spent1', text: 'One more question' }));
+      assert.ok(await until(f => f.type === 'error' && f.code === 'BUDGET_EXHAUSTED'));
+      assert.equal((await until(f => f.type === 'closed'))?.reason, 'limit');
+      ws.close();
+      const next = await start();
+      assert.ok(next.conversationId && next.conversationId !== first.conversationId, 'A fresh conversation, never the spent one.');
+    });
 
     test('the staff inbox: a chat’s transcript and state are mirrored in order; with Nightmail down they wait and catch up in order', async () => {
       const c = await chat();
