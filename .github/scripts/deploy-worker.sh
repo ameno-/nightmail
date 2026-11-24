@@ -165,8 +165,9 @@ if [[ $jevf_key == off || $jevf_key == 'not set' ]]; then
 fi
 echo "Second classifier: nightmail/$STAGE/JEVF_API_KEY is $jevf_key."
 args+=(--secrets-file "$secrets_file")
-# Every log line names the commit it runs (core.ts setLogContext), for the nightly report's 5xx-by-deploy table.
-if [[ ${DEPLOY_SHA:-} =~ ^[0-9a-f]{40}$ ]]; then args+=(--var "DEPLOY_SHA:$DEPLOY_SHA"); fi
+# Every log line names the commit it runs (core.ts setLogContext), for the nightly report's 5xx-by-deploy table; Glass
+# shows the commit and when it went out.
+if [[ ${DEPLOY_SHA:-} =~ ^[0-9a-f]{40}$ ]]; then args+=(--var "DEPLOY_SHA:$DEPLOY_SHA" --var "DEPLOY_AT:$(date -u +%Y-%m-%dT%H:%M:%SZ)"); fi
 # shellcheck source=/dev/null
 source "$(dirname "$0")/cloudflare-retry.sh"
 WRANGLER_LOG=error cloudflare_retry "$wrangler" "${args[@]}"

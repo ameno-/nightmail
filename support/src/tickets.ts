@@ -57,7 +57,7 @@ function addBusinessHours(start: number, hours: number) {
 export const expectation = (input: Pick<TicketInput, 'details' | 'severity'>) =>
   input.details.topic === 'enforcement_review' ? 'usually within 4 business hours' : input.details.topic === 'limit_increase' ? 'usually within two business days' : 'usually within one business day';
 
-const masked = (email: string | null) => {
+export const masked = (email: string | null) => {
   if (!email) return null;
   const [local = '', domain = ''] = email.split('@');
   return `${local.slice(0, 1)}…@${domain}`;
