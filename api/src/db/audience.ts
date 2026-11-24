@@ -1,7 +1,9 @@
 import { sql } from 'drizzle-orm';
 import { bigint, boolean, index, integer, jsonb, pgTable, primaryKey, text, timestamp, unique } from 'drizzle-orm/pg-core';
 
-export type SegmentRule = { field: 'email' | 'firstName' | 'plan' | 'country'; operator: 'eq' | 'neq' | 'contains'; value: string } | { field: 'lastOpenAt' | 'lastClickAt'; operator: 'within' | 'inactive'; days: number } | { operator: 'and' | 'or'; rules: SegmentRule[] };
+export type PropertyRule = { field: 'property'; key: string } & ({ type: 'string'; operator: 'eq' | 'neq' | 'contains'; value: string } | { type: 'number'; operator: 'eq' | 'lt' | 'gt'; value: number }
+  | { type: 'date'; operator: 'before' | 'after' | 'on'; value: string } | { type: 'string' | 'number' | 'date'; operator: 'set' | 'notSet' });
+export type SegmentRule = { field: 'email' | 'firstName' | 'plan' | 'country'; operator: 'eq' | 'neq' | 'contains'; value: string } | { field: 'lastOpenAt' | 'lastClickAt'; operator: 'within' | 'inactive'; days: number } | PropertyRule | { operator: 'and' | 'or'; rules: SegmentRule[] };
 export type ImportRow = { row: number; email: string; name?: string; properties: Record<string, string | number | boolean | null> };
 export type ImportError = { row: number; field: string; message: string };
 // Both SES feedback paths use the same precedence. Never downgrade an operator/complaint

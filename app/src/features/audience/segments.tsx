@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from 'react'
+import { Fragment, useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { Braces, ListFilter, Plus, X } from 'lucide-react'
 import { useApiMutation, useApiQuery } from '../../data/context'
@@ -24,35 +24,61 @@ export function SegmentsPage() {
   return <div className="audience-page"><AudienceHeader actions={<Link className="ui-button ui-button--primary ui-button--md" to="/audience/segments/new">Create segment</Link>} /><div className="data-toolbar"><SearchField className="search-box--list" aria-label="Search segments" placeholder="Search segments" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} /></div>{query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><DataTable tableRef={tableRef} rows={query.data?.items ?? []} loading={query.isPending} skeletonRows={adaptivePageSize} minRows={adaptivePageSize} rowKey={row => row.id} rowHref={row => `/audience/segments/${row.id}`} empty={<SegmentsEmpty search={search} onClear={() => { setSearch(''); setPage(1) }} />} columns={[{ key: 'name', label: 'Name', card: 'title', render: row => <span className="audience-cell-text" title={row.name}>{row.name}</span> }, { key: 'rule', label: 'Conditions', width: '50%', card: 'line', render: row => { const text = ruleSummary(row.rule); return <span className="audience-cell-text" title={text}>{text}</span> } }, { key: 'updatedAt', label: 'Updated', card: 'hide', render: row => date(row.updatedAt) }]} />{query.data && <Pagination page={query.data.page} pageSize={adaptivePageSize} nextCursor={query.data.nextCursor} onPageChange={setPage} />}</>}</div>
 }
 
-// The editor for the API's public segment rule: a leaf {field, operator, value} or {field, operator, days}, or a group
-// {operator: and|or, rules} (10 rules a group, 3 levels, 50 rules in all). The builder edits one group of leaves; a nested
-// group stays as a row you can remove or change in JSON, so JSON ⇄ builder never loses a rule.
-type Row = { id: string; field: string; operator: string; value: string; group?: Record<string, unknown> }
+// The editor for the API's public segment rule: a leaf {field, operator, value}, {field, operator, days} or a property's
+// {field: 'property', key, type, operator, value?}, or a group {operator: and|or, rules} (10 rules a group, 3 levels, 50
+// rules in all). The builder edits one group of leaves; a nested group stays as a row you can remove or change in JSON, so
+// JSON ⇄ builder never loses a rule. A property row's operator carries its type ('date:before'); set and notSet, which
+// fit every type, keep the rule's own type in `type`.
+type Row = { id: string; field: string; operator: string; value: string; key?: string; type?: string; group?: Record<string, unknown> }
 type Builder = { match: 'all' | 'any'; rows: Row[] }
-const fields = [{ value: 'email', label: 'Email' }, { value: 'firstName', label: 'First name' }, { value: 'plan', label: 'Plan' }, { value: 'country', label: 'Country' }, { value: 'lastOpenAt', label: 'Opened an email' }, { value: 'lastClickAt', label: 'Clicked a link' }]
+const fields = [{ value: 'email', label: 'Email' }, { value: 'firstName', label: 'First name' }, { value: 'plan', label: 'Plan' }, { value: 'country', label: 'Country' }, { value: 'property', label: 'Property' }, { value: 'lastOpenAt', label: 'Opened an email' }, { value: 'lastClickAt', label: 'Clicked a link' }]
 const textOperators = [{ value: 'eq', label: 'is' }, { value: 'neq', label: 'is not' }, { value: 'contains', label: 'contains' }]
 const activityOperators = [{ value: 'within', label: 'in the last' }, { value: 'inactive', label: 'not in the last' }]
+const propertyOperators = [...textOperators.map(op => ({ ...op, value: `string:${op.value}` })), { value: 'number:eq', label: 'equals (number)' }, { value: 'number:lt', label: 'is less than' }, { value: 'number:gt', label: 'is greater than' },
+  { value: 'date:before', label: 'is before' }, { value: 'date:after', label: 'is after' }, { value: 'date:on', label: 'is on' }, { value: 'set', label: 'is set' }, { value: 'notSet', label: 'is not set' }]
 const placeholders: Record<string, string> = { email: 'example.com', firstName: 'Ada', plan: 'pro', country: 'US' }
+const PROPERTY_TYPES: Record<string, string[]> = { string: ['eq', 'neq', 'contains'], number: ['eq', 'lt', 'gt'], date: ['before', 'after', 'on'] }
 const MAX_ROWS = 10
 const activity = (field: string) => field === 'lastOpenAt' || field === 'lastClickAt'
+const fieldKind = (field: string) => activity(field) ? 'activity' : field === 'property' ? 'property' : 'text'
+const presence = (operator: string) => operator === 'set' || operator === 'notSet'
+const propertyType = (row: Row) => presence(row.operator) ? row.type ?? 'string' : row.operator.split(':')[0]
+const isDay = (value: unknown) => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`)) && new Date(`${value}T00:00:00Z`).toISOString().startsWith(value)
 const newRow = (): Row => ({ id: crypto.randomUUID(), field: 'plan', operator: 'eq', value: '' })
 const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 function toRow(rule: unknown): Row {
   const r = isRecord(rule) ? rule : {}
   if (Array.isArray(r.rules)) return { id: crypto.randomUUID(), field: '', operator: '', value: '', group: r }
+  if (r.field === 'property') {
+    const operator = String(r.operator ?? 'eq'), type = String(r.type ?? 'string')
+    return { id: crypto.randomUUID(), field: 'property', key: String(r.key ?? ''), type, operator: presence(operator) ? operator : `${type}:${operator}`, value: r.value === undefined ? '' : String(r.value) }
+  }
   return { id: crypto.randomUUID(), field: String(r.field ?? 'plan'), operator: String(r.operator ?? 'eq'), value: String(activity(String(r.field)) ? r.days ?? '' : r.value ?? '') }
+}
+function propertyRule(row: Row): Record<string, unknown> {
+  const type = propertyType(row), operator = presence(row.operator) ? row.operator : row.operator.split(':')[1]
+  return { field: 'property', key: row.key ?? '', type, operator, ...presence(operator) ? {} : { value: type === 'number' ? (row.value.trim() ? Number(row.value) : null) : row.value } }
 }
 function toBuilder(rule: unknown): Builder {
   if (isRecord(rule) && Array.isArray(rule.rules)) return { match: rule.operator === 'or' ? 'any' : 'all', rows: rule.rules.map(toRow) }
   return { match: 'all', rows: [toRow(rule)] }
 }
 function fromBuilder({ match, rows }: Builder): Record<string, unknown> {
-  const rules = rows.map(row => row.group ?? (activity(row.field) ? { field: row.field, operator: row.operator, days: Number(row.value) } : { field: row.field, operator: row.operator, value: row.value.trim() }))
+  const rules = rows.map(row => row.group ?? (activity(row.field) ? { field: row.field, operator: row.operator, days: Number(row.value) } : row.field === 'property' ? propertyRule(row) : { field: row.field, operator: row.operator, value: row.value.trim() }))
   return rules.length === 1 ? rules[0] : { operator: match === 'any' ? 'or' : 'and', rules }
 }
 function rowError(row: Row) {
   if (row.group) return undefined
   if (activity(row.field)) return /^\d+$/.test(row.value) && Number(row.value) >= 1 && Number(row.value) <= 730 ? undefined : 'Enter a whole number of days from 1 to 730.'
+  if (row.field === 'property') {
+    const key = row.key ?? '', type = propertyType(row)
+    if (!key) return 'Enter the property to match, for example “status”.'
+    if (key.length > 80) return 'A property name has at most 80 characters.'
+    if (presence(row.operator)) return undefined
+    if (type === 'number') return row.value.trim() && Number.isFinite(Number(row.value)) ? undefined : 'Enter a number.'
+    if (type === 'date') return isDay(row.value) ? undefined : 'Pick a day.'
+    return row.value.length <= 200 ? undefined : 'Enter at most 200 characters.'
+  }
   return !row.value.trim() ? `Enter the ${fields.find(field => field.value === row.field)?.label.toLowerCase() ?? 'value'} to match, for example “${placeholders[row.field] ?? 'pro'}”.` : undefined
 }
 // The API's rule schema, checked before a JSON rule is sent so a typo is named here, not as a request error.
@@ -66,7 +92,19 @@ function ruleProblem(value: unknown, depth = 0, path = 'rule'): string | null {
   }
   if (['email', 'firstName', 'plan', 'country'].includes(String(value.field))) return !['eq', 'neq', 'contains'].includes(String(value.operator)) ? `${path}.operator must be eq, neq or contains.` : typeof value.value !== 'string' || value.value.length > 200 ? `${path}.value must be text of at most 200 characters.` : Object.keys(value).every(key => ['field', 'operator', 'value'].includes(key)) ? null : `${path} may only have field, operator and value.`
   if (['lastOpenAt', 'lastClickAt'].includes(String(value.field))) return !['within', 'inactive'].includes(String(value.operator)) ? `${path}.operator must be within or inactive.` : !Number.isInteger(value.days) || Number(value.days) < 1 || Number(value.days) > 730 ? `${path}.days must be a whole number from 1 to 730.` : Object.keys(value).every(key => ['field', 'operator', 'days'].includes(key)) ? null : `${path} may only have field, operator and days.`
-  return `${path}.field must be email, firstName, plan, country, lastOpenAt or lastClickAt (or use operator and/or with rules).`
+  if (value.field === 'property') {
+    const type = value.type, operator = value.operator
+    if (typeof type !== 'string' || !Object.hasOwn(PROPERTY_TYPES, type)) return `${path}.type must be string, number or date.`
+    if (typeof operator !== 'string') return `${path}.operator must be a string.`
+    const operators = PROPERTY_TYPES[type], allowed = ['field', 'key', 'type', 'operator', ...presence(operator) ? [] : ['value']]
+    if (typeof value.key !== 'string' || !value.key || value.key.length > 80) return `${path}.key must be a property name of 1 to 80 characters.`
+    if (!presence(operator) && !operators.includes(operator)) return `${path}.operator must be ${operators.join(', ')}, set or notSet for a ${type}.`
+    if (!presence(operator) && type === 'string' && (typeof value.value !== 'string' || value.value.length > 200)) return `${path}.value must be text of at most 200 characters.`
+    if (!presence(operator) && type === 'number' && (typeof value.value !== 'number' || !Number.isFinite(value.value))) return `${path}.value must be a number.`
+    if (!presence(operator) && type === 'date' && !isDay(value.value)) return `${path}.value must be a day, YYYY-MM-DD.`
+    return Object.keys(value).every(key => allowed.includes(key)) ? null : `${path} may only have ${allowed.slice(0, -1).join(', ')} and ${allowed.at(-1)}.`
+  }
+  return `${path}.field must be email, firstName, plan, country, property, lastOpenAt or lastClickAt (or use operator and/or with rules).`
 }
 // Two rules are the same when they read the same: key order (the database sorts JSON keys) and a one-rule group don't count.
 const canonical = (value: unknown): string => Array.isArray(value) ? `[${value.map(canonical).join(',')}]` : isRecord(value) ? `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}` : JSON.stringify(value)
@@ -100,9 +138,24 @@ function SegmentEditor({ initial, onCreated }: { initial: Segment | null; onCrea
   const update = (next: Builder) => { setBuilder(next); setFull(false); save.reset() }
   const updateRow = (id: string, patch: Partial<Row>) => update({ ...builder, rows: builder.rows.map(row => row.id === id ? { ...row, ...patch } : row) })
   function changeField(row: Row, field: string) {
-    if (activity(field) === activity(row.field)) return updateRow(row.id, { field })
-    updateRow(row.id, activity(field) ? { field, operator: 'within', value: '30' } : { field, operator: 'eq', value: '' })
+    if (fieldKind(field) === fieldKind(row.field)) return updateRow(row.id, { field })
+    updateRow(row.id, fieldKind(field) === 'activity' ? { field, operator: 'within', value: '30' } : fieldKind(field) === 'property' ? { field, operator: 'string:eq', value: '', key: '', type: undefined } : { field, operator: 'eq', value: '' })
   }
+  // A property's operator says its type; one of another type starts its value again (a day isn't a number).
+  const changeOperator = (row: Row, operator: string) => {
+    if (row.field !== 'property') return updateRow(row.id, { operator })
+    const prev = propertyType(row), type = presence(operator) ? prev : operator.split(':')[0]
+    updateRow(row.id, { operator, type, value: type === prev ? row.value : '' })
+  }
+  // Property names seen on up to 100 contacts (of the list counted within, if one is picked), most common first, for the
+  // name field's suggestions; read only once the conditions have a property row.
+  const usesProperties = json === null && builder.rows.some(row => row.field === 'property')
+  const sample = useApiQuery(['contacts', 'property-keys', countList], (api, signal) => api.contacts.list({ page: 1, pageSize: 100, listId: countList || undefined }, signal), { enabled: usesProperties })
+  const propertyKeys = useMemo(() => {
+    const seen = new Map<string, number>()
+    for (const contact of sample.data?.items ?? []) for (const key of Object.keys(contact.properties ?? {})) seen.set(key, (seen.get(key) ?? 0) + 1)
+    return [...seen].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([key]) => key)
+  }, [sample.data])
   function parseJson(text: string): Record<string, unknown> | null {
     let value: unknown
     try { value = JSON.parse(text) } catch { setJsonError('This isn’t valid JSON. Check the quotes, commas and brackets.'); return null }
@@ -137,16 +190,25 @@ function SegmentEditor({ initial, onCreated }: { initial: Segment | null; onCrea
             <div className="audience-condition audience-condition--head" aria-hidden="true"><span>Field</span><span>Condition</span><span>Value</span><span /></div>
             {builder.rows.map((row, index) => { const error = checked && errors[index] || (serverRow === String(index) ? save.error instanceof ApiError ? save.error.fields[serverField] : undefined : undefined), n = index + 1; return <Fragment key={row.id}>
               {row.group ? <div className="audience-condition"><div className="audience-condition-group"><span className="audience-cell-text" title={ruleSummary(row.group)}>{ruleSummary(row.group)}</span><Button variant="ghost" size="sm" onClick={toggleJson}><Braces size={14} aria-hidden="true" />Edit as JSON</Button></div><IconButton className="audience-condition-remove" label={`Remove condition ${n}`} disabled={builder.rows.length === 1} onClick={() => update({ ...builder, rows: builder.rows.filter(item => item.id !== row.id) })}><X size={16} /></IconButton></div>
-                : <div className="audience-condition">
-                  <Select className="audience-condition-field" aria-label={`Condition ${n} field`} value={row.field} onValueChange={value => changeField(row, value)} options={fields} />
-                  <Select className="audience-condition-operator" aria-label={`Condition ${n} operator`} value={row.operator} onValueChange={value => updateRow(row.id, { operator: value })} options={activity(row.field) ? activityOperators : textOperators} />
+                : <div className={row.field === 'property' ? 'audience-condition audience-condition--property' : 'audience-condition'}>
+                  {/* The field, and a property's name beside it: one subtree for every field, so choosing another keeps the field's select mounted. */}
+                  <div className="audience-condition-subject">
+                    <Select className="audience-condition-field" aria-label={`Condition ${n} field`} value={row.field} onValueChange={value => changeField(row, value)} options={fields} />
+                    {row.field === 'property' && <Input className="audience-condition-key" aria-label={`Condition ${n} property name`} aria-invalid={Boolean(error) && !row.key || undefined} list="segment-property-keys" maxLength={80} autoComplete="off" spellCheck={false} placeholder="Property name" value={row.key ?? ''} onChange={event => updateRow(row.id, { key: event.target.value })} />}
+                  </div>
+                  {/* Another kind of field brings other operators in a new select: one kept mounted would see its new value before its new options and report it empty. */}
+                  <Select key={fieldKind(row.field)} className="audience-condition-operator" aria-label={`Condition ${n} operator`} value={row.operator} onValueChange={value => changeOperator(row, value)} options={activity(row.field) ? activityOperators : row.field === 'property' ? propertyOperators : textOperators} />
                   {activity(row.field) ? <div className="audience-condition-value audience-condition-days"><Input type="number" inputMode="numeric" min={1} max={730} step={1} aria-label={`Condition ${n} days`} aria-invalid={Boolean(error) || undefined} value={row.value} onChange={event => updateRow(row.id, { value: event.target.value })} /><span className="muted">days</span></div>
-                    : <Input className="audience-condition-value" aria-label={`Condition ${n} value`} aria-invalid={Boolean(error) || undefined} maxLength={200} placeholder="Value" value={row.value} onChange={event => updateRow(row.id, { value: event.target.value })} />}
+                    : row.field !== 'property' ? <Input className="audience-condition-value" aria-label={`Condition ${n} value`} aria-invalid={Boolean(error) || undefined} maxLength={200} placeholder="Value" value={row.value} onChange={event => updateRow(row.id, { value: event.target.value })} />
+                    : presence(row.operator) ? <span className="audience-condition-value" aria-hidden="true" />
+                    : propertyType(row) === 'date' ? <div className="audience-condition-value audience-condition-day"><Input type="date" aria-label={`Condition ${n} day (UTC)`} aria-invalid={Boolean(error) || undefined} value={row.value} onChange={event => updateRow(row.id, { value: event.target.value })} /><span className="muted">UTC</span></div>
+                    : <Input className="audience-condition-value" type={propertyType(row) === 'number' ? 'number' : 'text'} inputMode={propertyType(row) === 'number' ? 'decimal' : undefined} step={propertyType(row) === 'number' ? 'any' : undefined} aria-label={`Condition ${n} value`} aria-invalid={Boolean(error) && Boolean(row.key) || undefined} maxLength={propertyType(row) === 'number' ? undefined : 200} placeholder={propertyType(row) === 'number' ? 'Number' : 'Value'} value={row.value} onChange={event => updateRow(row.id, { value: event.target.value })} />}
                   <IconButton className="audience-condition-remove" label={`Remove condition ${n}`} disabled={builder.rows.length === 1} onClick={() => update({ ...builder, rows: builder.rows.filter(item => item.id !== row.id) })}><X size={16} /></IconButton>
                 </div>}
               {error && <div className="ui-field__hint ui-field__error" role="alert">Condition {n}: {error}</div>}
             </Fragment> })}
           </div>
+          {propertyKeys.length > 0 && <datalist id="segment-property-keys">{propertyKeys.map(key => <option key={key} value={key} />)}</datalist>}
           <div className="cluster"><Button onClick={() => builder.rows.length >= MAX_ROWS ? setFull(true) : update({ ...builder, rows: [...builder.rows, newRow()] })}><Plus size={16} />Add condition</Button></div>
           {full && <div className="ui-field__hint ui-field__error" role="alert">A group holds 10 conditions. Edit as JSON to nest groups.</div>}
         </> : <Field label="Rule JSON" htmlFor="segment-rule" error={jsonError || (serverField.startsWith('rule') && save.error instanceof ApiError ? save.error.fields[serverField] : undefined)}><Textarea id="segment-rule" className="audience-json" rows={14} spellCheck={false} value={json} onChange={event => { setJson(event.target.value); setJsonError(''); save.reset() }} /></Field>}

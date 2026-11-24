@@ -10416,6 +10416,67 @@ describe('Lists, compound segments, imports and exports', () => {
     assert.deepEqual(remaining.map((row: Json) => row.id).sort(), [b.id, c.id].sort());
   });
 
+  // Property rules: any properties.<key>, with the operators of its value's type. A sign-ups list split by where people
+  // stand, the day they joined (UTC) and their mailbox, as the operator segments it.
+  test('property rules match any property as text, a number or a day in UTC, set or not set, beside the fixed fields', async t => {
+    const key = await keyFixture(t);
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('signups') });
+    const people: Json[] = [
+      { status: 'waiting', joined_at: '2026-11-19T23:59:59.999Z', mailbox: 'company', attempts: 3 },
+      { status: 'waiting', joined_at: '2026-11-20T00:00:00.000Z', mailbox: 'company', attempts: 1 },
+      { status: 'waiting', joined_at: '2026-11-21T08:00:00.000Z', mailbox: 'free', attempts: '12' },
+      { status: 'signed_up', joined_at: '2026-11-02', mailbox: 'company', signed_up_at: '2026-11-22T10:00:00Z', attempts: 'many' },
+      { status: 'let_in', joined_at: 'soon', plan: 'pro', let_in_at: null, "who's": 'x' },
+    ];
+    const contacts: Json[] = [];
+    for (const properties of people) contacts.push(await resource(t, key.secret, '/v1/contacts', { email: address(), properties }));
+    ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: contacts.map(c => c.id) }));
+    const index = new Map(contacts.map((c, i) => [c.id, i]));
+    const p = (key: string, type: string, operator: string, value?: unknown) => ({ field: 'property', key, type, operator, ...value === undefined ? {} : { value } });
+    // Who a rule matches, read through AudienceQL (segment = …), which compiles the same rule.
+    const matching = async (rule: Json) => {
+      const segment = await resource(t, key.secret, '/v1/segments', { name: unique('property'), rule });
+      const { rows } = ok(await http('POST', '/v1/audience-query/query', key.secret, { statement: `SELECT id FROM contacts WHERE list = '${list.id}' AND segment = '${segment.id}' LIMIT 100` }));
+      return rows.map((row: Json) => index.get(row.id)!).sort((a: number, b: number) => a - b);
+    };
+    const waitingCompanies = await resource(t, key.secret, '/v1/segments', { name: unique('waiting'), rule: { operator: 'and', rules: [p('status', 'string', 'eq', 'waiting'), p('joined_at', 'date', 'before', '2026-11-20'), p('mailbox', 'string', 'eq', 'company')] } });
+    assert.deepEqual(ok(await http('POST', `/v1/segments/${waitingCompanies.id}/preview`, key.secret, { listId: list.id })), { matched: 1, eligible: 0, suppressed: 0, unsubscribed: 1 });
+    assert.deepEqual(ok(await http('GET', `/v1/segments/${waitingCompanies.id}`, key.secret)).rule.rules[1], p('joined_at', 'date', 'before', '2026-11-20'));
+    // Date-only and Z timestamps use their UTC day; non-dates never match.
+    assert.deepEqual([await matching(p('joined_at', 'date', 'before', '2026-11-20')), await matching(p('joined_at', 'date', 'on', '2026-11-20')), await matching(p('joined_at', 'date', 'after', '2026-11-20'))], [[0, 3], [1], [2]]);
+    // A number is a JSON number or a numeric string.
+    assert.deepEqual([await matching(p('attempts', 'number', 'gt', 2)), await matching(p('attempts', 'number', 'lt', 2)), await matching(p('attempts', 'number', 'eq', 12))], [[0, 2], [1], [2]]);
+    // Set is a value other than null, whatever the type.
+    assert.deepEqual([await matching(p('mailbox', 'string', 'set')), await matching(p('mailbox', 'string', 'notSet')), await matching(p('let_in_at', 'date', 'set')), await matching(p('signed_up_at', 'date', 'set'))], [[0, 1, 2, 3], [4], [], [3]]);
+    assert.deepEqual([await matching(p('mailbox', 'string', 'neq', 'company')), await matching(p('status', 'string', 'contains', 'WAIT')), await matching(p("who's", 'string', 'eq', 'x'))], [[2], [0, 1, 2], [4]]);
+    // Beside the fixed fields, in one group: an OR of equalities on one property reads it once and keeps every value.
+    assert.deepEqual(await matching({ operator: 'or', rules: [p('status', 'string', 'eq', 'let_in'), { field: 'plan', operator: 'eq', value: 'pro' }, p('status', 'string', 'eq', 'signed_up'), p('attempts', 'number', 'eq', 1)] }), [1, 3, 4]);
+    const extra: Json[] = [
+      { mixed: '5', day: '2026-11-19T23:55:00-02:00', amount: '5e0' },
+      { mixed: 5, day: '2026-11-20T00:05:00+02:00', amount: '.5' },
+      { mixed: true, day: '2026-11-20T23:55:00-02:00', amount: '5e999999' },
+      { mixed: 'true', day: '2026-11-21T00:05:00+02:00' },
+      { day: '2026-11-20T99:00:00Z' }, { day: '2026-02-30' }, { day: '2026-11-20junk' }, { day: '9999-12-31' },
+    ];
+    for (const [i, properties] of extra.entries()) {
+      const c = await resource(t, key.secret, '/v1/contacts', { email: address(), properties });
+      index.set(c.id, people.length + i);
+      ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [c.id] }));
+    }
+    assert.deepEqual(await matching({ operator: 'or', rules: [p('mixed', 'string', 'eq', '5'), p('mixed', 'string', 'eq', 'true')] }), [5, 8]);
+    assert.deepEqual(await matching(p('mixed', 'string', 'neq', '5')), [8]);
+    assert.deepEqual(await matching(p('mixed', 'string', 'contains', 'TRU')), [8]);
+    assert.deepEqual(await matching(p('amount', 'number', 'eq', 5)), [5]);
+    assert.deepEqual(await matching(p('amount', 'number', 'lt', 1)), [6]);
+    assert.deepEqual(await matching(p('day', 'date', 'before', '2026-11-20')), [6]);
+    assert.deepEqual(await matching(p('day', 'date', 'on', '2026-11-20')), [5, 8]);
+    assert.deepEqual(await matching(p('day', 'date', 'after', '2026-11-20')), [7, 12]);
+    assert.deepEqual(await matching(p('day', 'date', 'on', '9999-12-31')), [12]);
+    assert.deepEqual(await matching(p('day', 'date', 'after', '9999-12-31')), []);
+    for (const rule of [p('attempts', 'number', 'gt', '2'), p('joined_at', 'date', 'on', '2026-02-30'), p('joined_at', 'date', 'contains', '2026'), p('status', 'string', 'set', 'x'), p('', 'string', 'eq', 'x'), p('k'.repeat(81), 'string', 'eq', 'x'), { ...p('status', 'string', 'eq', 'x'), days: 3 }, p('status', 'boolean', 'eq', 'x')])
+      error(await http('POST', '/v1/segments', key.secret, { name: unique('bad-property'), rule }), 422);
+  });
+
   test('CSV preview reports bad rows, commit is repeatable, quoted fields round-trip, and import preserves opt-outs', async t => {
     const key = await keyFixture(t);
     const list = await resource(t, key.secret, '/v1/lists', { name: unique('import-list') });
