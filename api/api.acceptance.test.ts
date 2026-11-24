@@ -33924,6 +33924,15 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const lane = { ...quiet(), queues: [{ name: 'feedback-priority', depth: 40, oldestMs: 90_000 }] };
     const laneFirst = lines(lane), laneSecond = tick(lane);
     assert.deepEqual([laneFirst, laneSecond.findings.map(finding => finding.key + ' ' + finding.severity + ' ' + finding.value), laneSecond.rollup.feedbackLagSeconds], [[], ['queue-behind:feedback-priority critical 90'], 90]);
+    // 24 November: the work queue held 40,100 wake hints, the oldest six hours old, while the jobs were being processed.
+    // A wake queue's depth and age are hints, not work: shown as such and never an alert, for as many ticks as it lasts.
+    // Whether work waits is the jobs table's to say: the same queues with jobs late are jobs-behind, by type.
+    memory = emptyMemory();
+    const hints = { ...quiet(), queues: [{ name: 'work', depth: 40_100, oldestMs: 370 * 60_000 }, { name: 'webhooks', depth: 900, oldestMs: 20 * 60_000 }] };
+    const hinted = [lines(hints), lines(hints), lines(hints)], shown = tick(hints);
+    assert.deepEqual([hinted, shown.findings, shown.rollup.queues], [[[], [], []], [], [{ name: 'work', depth: 40_100, oldestSeconds: 22_200, behind: false, wake: true }, { name: 'webhooks', depth: 900, oldestSeconds: 1_200, behind: false, wake: true }]]);
+    const waiting = { ...hints, late: [{ class: 'ingest', type: 'mailbox.ingest', pending: 3_900, oldestSeconds: 540 }, { class: 'hook', type: 'mailbox.webhook', pending: 50, oldestSeconds: 1_020 }] };
+    assert.deepEqual([lines(waiting), lines(waiting)], [[], [`jobs-behind:mailbox.ingest critical 540: ${c('mailbox.ingest')}: 3,900 due, oldest 9 min.`, `jobs-behind:mailbox.webhook warning 1020: ${c('mailbox.webhook')}: 50 due, oldest 17 min.`]]);
 
     // 8. 1,639 jobs of one type failed between the 11th and the 23rd and are still kept. Kept is history: it is on the
     // Health page and is never an alert. Failing now is one: 25 of a type within the hour, five within half an hour, one

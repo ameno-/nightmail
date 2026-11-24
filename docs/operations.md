@@ -56,14 +56,17 @@ the numbers. Do not pause, resume, cancel, requeue, delete or deploy: those are 
 ## Queues
 
 ### queue-behind
-The oldest message of a Cloudflare queue has waited too long (feedback 2 min, priority 1 min, work 3 min,
-webhooks 5 min) for two ticks: the consumers are not keeping up. A deep queue that drains in time is only busy
-and never alerts. `feedback` and `feedback-priority` are critical: bounces and complaints are late, so bounce rates read
+The oldest message of a Cloudflare queue has waited too long (feedback 2 min, priority 1 min) for two ticks: the
+consumers are not keeping up. A deep queue that drains in time is only busy and never alerts. The `work` and
+`webhooks` queues never alert at all: they carry wake hints for the jobs table, not work, and a burst's hints
+stay queued for hours while the jobs themselves are processed (24 Nov: 40,100 hints, the oldest six hours old,
+with mailbox.ingest draining). They are on the Health page as "wake hints"; whether work waits is `jobs-behind`.
+`feedback` and `feedback-priority` are critical: bounces and complaints are late, so bounce rates read
 low and the list probe and auto-pause decide on old numbers. (23 Nov: 158,000 waiting, 20 minutes behind.)
 
 **An agent checks first**
 1. `GET /v1/operator/health`: `queues[]` (depth and oldest, minute by minute: growing or draining?), `feedbackLagSeconds`, and whether `jobs-behind` or `database-*` is open too.
-2. Workers Logs, `code = FEEDBACK_BATCH` (feedback) or `JOB_DRAIN` (work), last 15 minutes: batch `size`, `durationMs`, `failed`. Slow batches point at the database; failed ones at the handler.
+2. Workers Logs, `code = FEEDBACK_BATCH`, last 15 minutes: batch `size`, `durationMs`, `failed`. Slow batches point at the database; failed ones at the handler.
 3. Workers Logs, `level = error`, last 15 minutes, grouped by `code`.
 
 **Then** see what is producing: a large campaign (`campaigns[]` on the Health tab) fills the feedback queue at its send rate. If the consumers are healthy but outpaced, slow the campaign (its pacing) rather than wait. `docs/dispatch-scaling.md` has the measured ceilings.

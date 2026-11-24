@@ -44,7 +44,7 @@ export interface HealthAlert { key: string; kind: string; label: string; severit
 export interface HealthCampaign { id: string; workspaceId: string; state: string; total: number; released: number; rate: number | null; acceptedRate: number | null; entitled: number | null; account: number | null; planned: number | null; etaSeconds: number | null; waiting: string | null; settled: number | null; bounceRate: number | null; behind: boolean }
 export interface OperatorHealth {
   generatedAt: string | null; stale: boolean; delivery: 'slack' | 'off'; alerts: HealthAlert[]
-  queues: { name: string; depth: number; oldestSeconds: number; behind: boolean }[]
+  queues: { name: string; depth: number; oldestSeconds: number; behind: boolean; wake?: boolean }[]
   jobs: { type: string; pending: number; oldestSeconds: number; failed: number; failedLastHour: number; error: string | null; behind: boolean }[] | null
   campaigns: HealthCampaign[] | null; feedbackLagSeconds: number | null
   routes: { route: string; count: number; errors: number; p50Ms: number; p95Ms: number; slowestMs: number; behind: boolean }[] | null
