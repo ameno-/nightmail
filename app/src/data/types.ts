@@ -255,9 +255,11 @@ export interface LogCounts { status: Record<string, number>; stream: { transacti
 export type LogVisibility = 'admin' | 'member'
 export type LogFacetFilters = Pick<PageRequest, 'regionId' | 'status' | 'stream' | 'search' | 'campaignId' | 'from' | 'to'> & { direction?: LogDirection }
 export type LogFacetInput = LogFacetFilters & { mode: 'last' | 'refresh'; range: TimeRange; visibility: LogVisibility }
+type LogFacetNumbers = { counts: LogCounts; asOf: ISODate | null; from: ISODate; visibility: LogVisibility }
 export type LogFacetRead =
   | { counts: null; asOf: null; from: null; visibility: LogVisibility }
-  | { counts: LogCounts; asOf: ISODate | null; from: ISODate; visibility: LogVisibility }
+  | LogFacetNumbers
+  | { state: 'pending'; last: (LogFacetNumbers & { asOf: ISODate }) | null; retryAfterSeconds: number; attempt?: number }
 export interface LogEntry {
   id: string; direction: 'sent' | 'received'; at: ISODate; status: string; from: MailAddress; to: string[]; toCount?: number; subject: string
   stream: Stream | null; campaignId: string | null; simulated: boolean; attachmentCount: number | null; threadId: string | null; threadCount: number | null

@@ -17238,6 +17238,112 @@ describe('Sealed Logs facets', () => {
     });
   });
 
+  test('busy dashboard Logs responds pending, with only a freshly authorized historical cut for the same view', {timeout:15_000}, async t=>{
+    await facetFixture(t,async({runtime,db,local,jobs})=>{
+      const {enrollLogFacet,foldLogFacetSlot,releaseLogFacetTicket}=await import('./src/log-facet-fold.js');
+      const {decodeLogFacets,facetPollMs,logFacetAccessLost}=await import('../app/src/data/log-facets.js');
+      const wid=runtime.config.workspaceId,from=floorMinute(),other=unique('logs-busy'),scope={range:'30d',region:REGION},path=facetPath({mode:'refresh',from,...scope});
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[other]);
+      await db.query('UPDATE ses_installation_settings SET enabled_regions=jsonb_build_array($2::text,$3::text) WHERE workspace_id=$1',[wid,REGION,otherRegion]);
+      await seedSent(db,wid,from,'transactional','delivered');await seedInbound(db,wid,from);
+      const a=await enrollLogFacet(runtime,wid,earlierMinute(from,1),REGION,'30d');
+      const held=[a,await enrollLogFacet(runtime,wid,earlierMinute(from,2),REGION,'30d'),
+        await enrollLogFacet(runtime,wid,earlierMinute(from,3),REGION,'30d'),await enrollLogFacet(runtime,other,from,null,'30d')];
+      assert.equal(new Set(held.map(x=>x.slot)).size,4);
+      const before=await jobs('logs.facetFold'),first=await local('GET',path);
+      assert.deepEqual(ok(first),{state:'pending',last:null,retryAfterSeconds:5});
+      assert.equal(first.headers.get('retry-after'),'5');assert.equal(first.headers.get('cache-control'),'private, no-store');
+      const input={mode:'refresh' as const,range:'30d' as const,from,regionId:REGION,visibility:'admin' as const};
+      const pending=decodeLogFacets(first.body,input);assert('state' in pending && pending.last===null);
+      assert(facetPollMs(pending,'abcd0000')>=5000&&facetPollMs(pending,'abcd0000')<7500);
+      assert.deepEqual(await jobs('logs.facetFold'),before,'No work was admitted by the pending response.');
+      const estimate=await db.query("INSERT INTO sending_metrics_hourly(workspace_id,region,kind,hour,emails) VALUES($1,$2,'transactional',date_trunc('hour',$3::timestamptz),5000001) RETURNING id",[wid,REGION,from]);
+      error(await local('GET',path),422,'READ_TOO_LARGE');
+      assert.deepEqual(await jobs('logs.facetFold'),before,'Sizing still refuses oversized input before enrollment.');
+      await db.query('DELETE FROM sending_metrics_hourly WHERE id=$1 AND workspace_id=$2',[estimate.rows[0].id,wid]);
+
+      // An actual completed publication, still retained for its existing waiter. Its rolling
+      // window is not the fresh caller's absolute from, and a new send changes the live result.
+      await foldLogFacetSlot(runtime,a.slot);
+      const published=ok(await local('GET',facetPath({mode:'last',...scope})));
+      assert.notEqual(published.from,from);
+      const historical=ok(await local('GET','/v1/logs?counts=true&limit=1&region='+REGION+'&from='+encodeURIComponent(published.from)));
+      assert.deepEqual(published.counts,historical.counts);assert(published.counts.status.spam>0);
+      await seedSent(db,wid,from,'transactional','delivered');
+      const busy=await local('GET',path),shown=ok(busy);
+      assert.deepEqual(shown.last,published);assert.equal(shown.state,'pending');
+      const decoded=decodeLogFacets(shown,input);assert('state' in decoded && decoded.last && decoded.last.asOf===published.asOf&&decoded.last.from===published.from);
+      assert.throws(()=>decodeLogFacets(shown,{...input,visibility:'member'}),logFacetAccessLost);
+      assert.equal(ok(await local('GET',facetPath({mode:'refresh',range:'30d',region:otherRegion,from}))).last,null);
+      const live=ok(await local('GET','/v1/logs?counts=true&limit=1&region='+REGION+'&from='+encodeURIComponent(from)));
+      assert.equal(live.counts.status.delivered,2);assert.equal(shown.last.counts.status.delivered,1);
+      await releaseLogFacetTicket(runtime.db,a);
+      for(const t of held.slice(1)){await foldLogFacetSlot(runtime,t.slot);await releaseLogFacetTicket(runtime.db,t);}
+      const recovered=ok(await parkedRead(runtime,()=>local('GET',path)));
+      assert.equal(recovered.state,undefined);assert.equal(recovered.from,from);assert.equal(recovered.counts.status.delivered,2);
+      assert(recovered.asOf>published.asOf);
+    });
+  });
+
+  test('failed Logs catch-up reauthorizes the historical fallback after demotion or removal', { timeout: 10_000 }, async t => {
+    await facetFixture(t, async ({ runtime, db, local }) => {
+      const { enrollLogFacet, foldLogFacetSlot } = await import('./src/log-facet-fold.js');
+      const wid = runtime.config.workspaceId, from = floorMinute(), base = runtime.db;
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [] });
+      await seedInbound(db, wid, from);
+      await foldLogFacetSlot(runtime, (await enrollLogFacet(runtime, wid, from, REGION, '30d', false)).slot);
+      const path = facetPath({ mode: 'refresh', range: '30d', region: REGION, from });
+      const read = () => local('GET', path, undefined, 'live', { 'x-bane-workspace': wid });
+      for (const remove of [false, true]) {
+        const probe = stage('before'), fallback = stage('before');
+        runtime.db = stageDatabase(base, [probe, fallback], true);
+        const request = read();
+        try {
+          await waitAt(probe, request);
+          assert.equal((await db.query("UPDATE jobs SET status='failed' WHERE type='logs.facetFold' AND workspace_id=$1 AND status='pending'", [wid])).rowCount, 1);
+          probe.release();
+          await waitAt(fallback, request);
+          const change = remove ? 'DELETE FROM workspace_members' : "UPDATE workspace_members SET role='member'";
+          assert.equal((await db.query(change+' WHERE workspace_id=$1 AND user_id=$2', [wid, manager!.userId])).rowCount, 1);
+        } finally {
+          probe.release(); fallback.release();
+          try { await request; } finally { runtime.db = base; }
+        }
+        const reply = await request;
+        if (remove) error(reply, 403, 'WORKSPACE_ACCESS_DENIED');
+        else {
+          const body = ok(reply);
+          assert.equal(body.state, 'pending'); assert.equal(body.retryAfterSeconds, 30);
+          assert.equal(body.last.visibility, 'member');
+          assert.deepEqual(body.last.counts.status, { received: 2 });
+        }
+      }
+    });
+  });
+
+  test('a saturated workspace or server read pool yields count-free pending Logs without relaxing public reads', {timeout:10_000}, async t=>{
+    await facetFixture(t,async({runtime,local})=>{
+      const {readPool,READ_MAX_ACTIVE,READ_MAX_WAITERS,READ_MAX_ACTIVE_PER_WORKSPACE,READ_MAX_WAITING_PER_WORKSPACE}=await import('./src/read-bounds.js');
+      const wid=runtime.config.workspaceId,from=floorMinute(),options={busyCode:'TEST_BUSY',busyMessage:'test',wsBusyCode:'TEST_BUSY',wsBusyMessage:'test'};
+      for(const global of [false,true]){
+        const active:Awaited<ReturnType<typeof readPool.acquire>>[]=[],stop=new AbortController(),waiting:Promise<unknown>[]=[];
+        try{
+          for(let i=0;i<(global?READ_MAX_ACTIVE:READ_MAX_ACTIVE_PER_WORKSPACE);i++)
+            active.push(await readPool.acquire(global?'fixture-reader-'+i:wid,undefined,options));
+          for(let i=0;i<(global?READ_MAX_WAITERS:READ_MAX_WAITING_PER_WORKSPACE);i++)
+            waiting.push(readPool.acquire(global?'fixture-waiter-'+i:wid,stop.signal,options).then(h=>h.release(),()=>{}));
+          for(const mode of ['last','refresh']){
+            const path=facetPath({mode,range:'30d',region:REGION,...mode==='refresh'&&{from}});
+            const res=await local('GET',path);assert.deepEqual(ok(res),{state:'pending',last:null,retryAfterSeconds:5});
+            assert.equal(res.headers.get('retry-after'),'5');
+          }
+          error(await local('GET','/v1/logs?counts=true&limit=1&from='+encodeURIComponent(from)),global?503:429,'READ_CONCURRENCY_LIMIT');
+          error(await local('GET',facetPath({mode:'last',range:'30d',from})),422,'VALIDATION_FAILED');
+        }finally{stop.abort();await Promise.all(waiting);for(const h of active)h.release();}
+      }
+    });
+  });
+
   test('private Logs facets deny keys and foreign workspaces, and refresh reauthorizes without selecting a workspace', { timeout: 15_000 }, async t => {
     await facetFixture(t, async ({ runtime, db, local, request, jobs }) => {
       const wid = runtime.config.workspaceId, from = floorMinute();

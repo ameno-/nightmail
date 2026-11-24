@@ -1,4 +1,4 @@
-import { ApiError, type LogFacetInput, type LogFacetRead, type TimeRange } from './types'
+import { ApiError, type LogFacetInput, type LogFacetRead, type TimeRange } from './types.js'
 
 export const logDays: Record<TimeRange, number> = { '24h': 1, '7d': 7, '30d': 30 }
 const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -21,6 +21,19 @@ export function foldableFacetView(input: Pick<LogFacetInput, 'search' | 'campaig
 
 export function decodeLogFacets(data: unknown, input: LogFacetInput): LogFacetRead {
   if (!record(data)) throw invalid()
+  if (data.state === 'pending') {
+    const delay = data.retryAfterSeconds
+    if (typeof delay !== 'number' || !Number.isInteger(delay) || delay < 1 || delay > 300 ||
+        Object.keys(data).some(key => !['state', 'last', 'retryAfterSeconds'].includes(key))) throw invalid()
+    if (data.last === null) return { state: 'pending', last: null, retryAfterSeconds: delay }
+    if (!record(data.last) || data.last.state !== undefined || input.search || input.campaignId || input.to ||
+        (input.mode === 'refresh' && !foldableFacetView(input))) throw invalid()
+    // Pending is not a fresh result. Apply the ordinary role, exact-count and *historical*
+    // lower-bound checks to its optional prior publication, never the visible list's new anchor.
+    const last = decodeLogFacets(data.last, { ...input, mode: 'last' })
+    if ('state' in last || !last.counts || !last.asOf) throw invalid()
+    return { state: 'pending', last: { ...last, asOf: last.asOf }, retryAfterSeconds: delay }
+  }
   // Check the authorization band before counts. Even a malformed response from a demoted role revokes the old view.
   const { visibility } = input
   if (data.visibility !== visibility) throw new ApiError('Logs access changed.', 'LOG_FACET_VISIBILITY_CHANGED')
@@ -45,6 +58,23 @@ export function decodeLogFacets(data: unknown, input: LogFacetInput): LogFacetRe
   return { counts: { status: counts.status as Record<string, number>, stream: { transactional: counts.kind.transactional, marketing: counts.kind.marketing } },
     asOf: typeof asOf === 'string' ? asOf : null, from, visibility }
 }
+
+// Consecutive pending replies for one request, counted on the reply itself. The stamped attempt also makes each reply
+// differ from the last (the query cache would keep an equal earlier object), so the quiet retry grows from the server's
+// delay to five minutes while the service stays busy, instead of returning every few seconds from every open tab.
+const pendingStreaks = new Map<string, number>()
+export function countPending(result: LogFacetRead, request: string): LogFacetRead {
+  if (!('state' in result)) { pendingStreaks.delete(request); return result }
+  const attempt = (pendingStreaks.get(request) ?? 0) + 1
+  pendingStreaks.delete(request)
+  pendingStreaks.set(request, attempt)
+  if (pendingStreaks.size > 32) pendingStreaks.delete(pendingStreaks.keys().next().value!)
+  return { ...result, attempt }
+}
+
+export const facetPollMs = (data: LogFacetRead | undefined, view: string) => data && 'state' in data
+  ? Math.min(300_000, data.retryAfterSeconds * 1000 * 2 ** Math.min(6, Math.max(0, (data.attempt ?? 1) - 1))) + parseInt(view.slice(0, 4), 16) % 2500
+  : 30_000
 
 export function logFacetAccessLost(error: unknown) {
   return error instanceof ApiError && (error.status === 401 || error.status === 403 || error.code === 'LOG_FACET_VISIBILITY_CHANGED')

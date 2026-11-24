@@ -1,12 +1,12 @@
 import { useEffect, useLayoutEffect, useMemo, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useApiDef } from '../../data/context'
-import { facetInstant, foldableFacetView, logFacetAccessLost, logFacetRefreshRetry } from '../../data/log-facets'
+import { facetInstant, facetPollMs, foldableFacetView, logFacetAccessLost, logFacetRefreshRetry } from '../../data/log-facets'
 import { queries } from '../../data/queries'
 import type { LogCounts, LogFacetFilters, LogFacetRead, LogVisibility, TimeRange } from '../../data/types'
 
 type Published = Extract<LogFacetRead, { counts: LogCounts }>
-const published = (result?: LogFacetRead) => result?.counts != null ? result : undefined
+const published = (result?: LogFacetRead) => result && ('state' in result ? result.last ?? undefined : result.counts != null ? result : undefined)
 const newer = (current?: Published, next?: Published) => {
   if (!next || !current) return next ?? current
   if (!current.asOf) return next
@@ -45,7 +45,7 @@ export function useLogFacets({ filters, range, visibility, scope, railed, blank,
   const fresh = useApiDef(queries.logFacets({ ...filters, mode: 'refresh', range, visibility }, view), {
     enabled: canRead && rowsPainted && !logFacetAccessLost(last.error) &&
       (!rolling || (last.isSuccess || last.isError) && (!historical || digitsPainted)),
-    interval: 30_000,
+    interval: data => facetPollMs(data, view),
     retryInterval: (error, failures) => rolling ? logFacetRefreshRetry(error, failures) : false,
   })
   const denied = logFacetAccessLost(last.error) || logFacetAccessLost(fresh.error) || logFacetAccessLost(rowError)
@@ -70,9 +70,14 @@ export function useLogFacets({ filters, range, visibility, scope, railed, blank,
   const [accepted, setAccepted] = useState<{ view: string; cut: Published }>()
   const latest = newer(newer(accepted?.view === view ? accepted.cut : undefined, historical), fresh.isSuccess ? published(fresh.data) : undefined)
   const authorizationLost = denied || blocked
-  const cut = !authorizationLost && canRead && rowsPainted ? latest : undefined
+  // A busy server may not have been able to reauthorize a stored band. In that case keep
+  // the stable count slots as dashes until a newer, scoped numerical result actually arrives.
+  const reply = fresh.dataUpdatedAt >= last.dataUpdatedAt && fresh.data ? fresh.data : last.data
+  const pending = reply && 'state' in reply ? reply : undefined
+  const cut = !authorizationLost && canRead && rowsPainted ? (pending ? pending.last ?? undefined : latest) : undefined
   useEffect(() => {
-    if (cut && (accepted?.view !== view || accepted.cut !== cut)) setAccepted({ view, cut })
-  }, [view, cut, accepted])
+    if (pending && !pending.last && accepted?.view === view) setAccepted(undefined)
+    else if (cut && (accepted?.view !== view || accepted.cut !== cut)) setAccepted({ view, cut })
+  }, [view, cut, accepted, pending])
   return { cut, authorizationLost, view }
 }

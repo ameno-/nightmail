@@ -5,7 +5,7 @@ import type { CreatedInbox, Inbox, InboxMessageDetail, InboxMessagePage, LogDire
 import { headerPrefix, productName } from '../../../api/src/brand'
 import { analytics } from '../lib/analytics'
 import { webhookPatchBody } from '../features/settings/webhook-patch'
-import { decodeLogFacets, foldableFacetView } from './log-facets'
+import { countPending, decodeLogFacets, foldableFacetView } from './log-facets'
 type Json = Record<string, any>
 const idPath = (id: string) => encodeURIComponent(id)
 // The account this tab acts as (a browser can connect several, data/accounts.ts), sent as X-Nightmail-Account. It is per tab
@@ -312,7 +312,7 @@ export function createLiveApi(scope?: RequestScope): Api {
         const filters = input.mode === 'last' ? rolling : { ...rolling, from, to, search, campaignId }
         for (const [key, value] of Object.entries(filters)) if (value !== undefined && value !== '') params.set(key, String(value))
         const data = await request<unknown>(`/v1/logs/facets?${params}`, { method: 'GET', expectedStatus: 200, scope, signal })
-        return decodeLogFacets(data, input)
+        return countPending(decodeLogFacets(data, input), params.toString())
       },
     },
     emails: {
