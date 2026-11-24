@@ -1,10 +1,10 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, eq, gt, inArray, isNull, sql, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
-import { actor, ApiError, AudienceSpec, budgetedRead, chargeBudget, databaseCodeOf, unrestrictedRequired, errors, id, IdParams, json, notFound, page, PageQuery, readLimit, readLimitNote, response, rowId, security, statementTimedOut, type Actor, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
+import { actor, ApiError, AudienceSpec, budgetedRead, chargeBudget, databaseCodeOf, unrestrictedRequired, errors, id, IdParams, json, log, notFound, page, PageQuery, readLimit, readLimitNote, response, rowId, security, statementTimedOut, type Actor, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
 import { productName } from './brand.js';
 export { AudienceSpec };
-import { contacts, consentAudit, imports, listCounts, listMembers, lists, segments, type SegmentRule } from './db/audience.js';
+import { contacts, consentAudit, imports, listCounts, listMembers, lists, segments, type PropertyRule, type SegmentRule } from './db/audience.js';
 import { enqueue, noteEnqueued } from './jobs.js';
 import { MEMORY_LIMITS, reserveMemory, runInMemoryScope, type MemoryLease } from './isolate-memory.js';
 import { buildBoundedPageJson, PAGE_MAX_BYTES, READ_MAX_WAITERS, READ_RESERVATION_BYTES, streamTextPartsResponse, utf8Bytes, withBoundedRead } from './read-bounds.js';
@@ -42,7 +42,7 @@ export function propertiesByteLength(properties: Record<string, unknown>): numbe
 const Email = mailAddress(z.string().trim()).transform(v => v.toLowerCase()).openapi({format:'email'});
 const Properties = z.record(z.string().min(1).max(80), z.union([z.string().max(2000), z.number().finite(), z.boolean(), z.null()])).refine(v => Object.keys(v).length <= CONTACT_PROPERTIES_MAX_KEYS, 'At most 50 properties are supported.');
 export const PropertiesInput = Properties.refine(v => propertiesByteLength(v) <= CONTACT_PROPERTIES_MAX_BYTES, 'Contact properties must total at most 16 KiB of JSON.').describe('Up to 50 key/value pairs, at most 16 KiB of JSON total.');
-const ContactInput = z.object({ email: Email, name: z.string().trim().max(200).optional(), properties: PropertiesInput.default({}) }).strict();
+export const ContactInput = z.object({ email: Email, name: z.string().trim().max(200).optional(), properties: PropertiesInput.default({}) }).strict();
 const ContactPatch = z.object({ name: z.string().trim().max(200).nullable().optional(), properties: PropertiesInput.optional() }).strict();
 export function withAudienceReadMemory(c: Ctx, work: () => Promise<Response>): Promise<Response> {
   return withBoundedRead(c, () => work(), { route: 'audience.read' });
@@ -58,10 +58,19 @@ const ListRead = z.object({ ...List.shape, counts: ListCounts.nullable() }).stri
 const SearchQuery = PageQuery.extend({ search: z.string().trim().min(1).max(200).optional() });
 const ListQuery = SearchQuery.extend({ counts: z.enum(['true', 'false']).default('true').describe('false leaves member counts out (counts is null). Counts are kept as memberships, consent and suppression change, so reading them does not count members.') }).openapi('ListContactListsQuery');
 const ContactQuery = SearchQuery.extend({ email: Email.optional().describe('Exact, case-insensitive email match. Uses the unique email index; prefer it over search for one address.'), consent: z.enum(['unknown', 'subscribed', 'unsubscribed']).optional(), suppressed: z.enum(['true', 'false']).optional(), listId: z.string().min(1).max(120).optional() }).openapi('ListContactsQuery');
+// A condition on any contact property, with the operators of its value's type (compilePropertyRule).
+const property = { field: z.literal('property'), key: z.string().min(1).max(80).describe('The property name, as in a contact\'s properties.') };
+const PropertyRule = z.union([
+  z.object({ ...property, type: z.literal('string'), operator: z.enum(['eq', 'neq', 'contains']).describe('Compare JSON strings only. eq and neq are case-sensitive; contains ignores case. Missing, null and non-string properties never match.'), value: z.string().max(200) }).strict(),
+  z.object({ ...property, type: z.literal('number'), operator: z.enum(['eq', 'lt', 'gt']), value: z.number().finite().describe('Compared with a property that is a JSON number or a signed decimal string, optionally in scientific notation, within PostgreSQL numeric range. Other values never match.') }).strict(),
+  z.object({ ...property, type: z.literal('date'), operator: z.enum(['before', 'after', 'on']), value: z.iso.date().describe('Compare UTC calendar days. Accept a valid YYYY-MM-DD or a date with T and HH:MM[:SS[.fraction]], optionally Z or a signed hour/minute offset. No offset means UTC; invalid values never match.') }).strict(),
+  z.object({ ...property, type: z.enum(['string', 'number', 'date']), operator: z.enum(['set', 'notSet']).describe('set: the property has a value other than null; notSet: it has none. The same for every type.') }).strict(),
+]);
 const RuleLeaf = z.union([z.object({ field: z.enum(['email', 'firstName', 'plan', 'country']), operator: z.enum(['eq', 'neq', 'contains']), value: z.string().max(200) }).strict(), z.object({ field: z.enum(['lastOpenAt', 'lastClickAt']), operator: z.enum(['within', 'inactive']), days: z.number().int().min(1).max(730) }).strict()]);
-// Finite-depth schemas remain fully representable in OpenAPI; no recursive lazy schema.
-let ruleSchema: z.ZodType<SegmentRule> = RuleLeaf;
-for (let depth = 0; depth < 3; depth++) ruleSchema = z.union([RuleLeaf, z.object({ operator: z.enum(['and', 'or']), rules: z.array(ruleSchema).min(1).max(10) }).strict()]);
+// Finite-depth schemas remain fully representable in OpenAPI; no recursive lazy schema. Property leaves come after the
+// alternatives that were there first, so the published anyOf keeps each earlier alternative at its index.
+let ruleSchema: z.ZodType<SegmentRule> = z.union([RuleLeaf, PropertyRule]);
+for (let depth = 0; depth < 3; depth++) ruleSchema = z.union([RuleLeaf, z.object({ operator: z.enum(['and', 'or']), rules: z.array(ruleSchema).min(1).max(10) }).strict(), PropertyRule]);
 function ruleSize(rule: SegmentRule): number { return 'rules' in rule ? 1 + rule.rules.reduce((n, child) => n + ruleSize(child), 0) : 1; }
 const Rule = ruleSchema.refine(v => ruleSize(v) <= 50, 'A segment supports at most 50 rules and three nested groups.').openapi('SegmentRule');
 const SegmentInput = z.object({ name: z.string().trim().min(1).max(200), rule: Rule }).strict();
@@ -196,25 +205,30 @@ export function compileRule(rule: SegmentRule): SQL { return sql`coalesce((${com
 function compileRuleCondition(rule: SegmentRule): SQL {
   if ('rules' in rule) {
     if (rule.operator === 'or') {
-      // Collapse same-field eq leaves inside OR into one ANY(...) test so 20-50 condition OR segments extract JSONB once per row.
+      // Collapse text-eq leaves on one target inside OR into one ANY(...) test so 20-50 condition OR segments extract JSONB once per row.
       const eqByField = new Map<string, string[]>();
+      const numberEq = new Map<string, number[]>();
       const other: SegmentRule[] = [];
       for (const child of rule.rules) {
-        if (!('rules' in child) && !('days' in child) && child.operator === 'eq') {
-          const val = child.field === 'email' ? child.value.trim().toLowerCase() : child.value;
-          const list = eqByField.get(child.field) ?? [];
-          list.push(val);
-          eqByField.set(child.field, list);
-        } else {
-          other.push(child);
-        }
+        const eq = textEquality(child);
+        if (eq) eqByField.set(eq.target, [...eqByField.get(eq.target) ?? [], eq.value]);
+        else if ('field' in child && child.field === 'property' && child.type === 'number' && child.operator === 'eq') {
+          const values = numberEq.get(child.key) ?? []; values.push(child.value); numberEq.set(child.key, values);
+        } else other.push(child);
       }
       const parts: SQL[] = other.map(compileRule);
       for (const [f, vals] of eqByField) {
-        const expr = f === 'email' ? sql`${contacts.email}` : sql`(${contacts.properties} ->> ${f})`;
-        parts.push(vals.length === 1
+        const typed = f.startsWith('property:'), key = typed ? f.slice('property:'.length) : f;
+        const expr = f === 'email' ? sql`${contacts.email}` : sql`(${contacts.properties} ->> ${key})`;
+        const condition = vals.length === 1
           ? sql`coalesce(${expr} = ${vals[0]!}, false)`
-          : sql`coalesce(${expr} = ANY(ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify([...new Set(vals)])}::jsonb))), false)`);
+          : sql`coalesce(${expr} = ANY(ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify([...new Set(vals)])}::jsonb))), false)`;
+        parts.push(typed ? sql`(${stringProperty(key)} AND ${condition})` : condition);
+      }
+      for (const [key, values] of numberEq) {
+        const number = propertyNumber(key);
+        parts.push(values.length === 1 ? sql`${number} = ${String(values[0])}::numeric`
+          : sql`${number} = ANY(ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify([...new Set(values)])}::jsonb)::numeric))`);
       }
       return sql`(${sql.join(parts, sql` OR `)})`;
     }
@@ -226,12 +240,67 @@ function compileRuleCondition(rule: SegmentRule): SQL {
     const coverage = rule.field === 'lastOpenAt' ? contacts.openObservedSince : contacts.clickObservedSince;
     return rule.operator === 'within' ? sql`${timestamp} >= ${cutoff}::timestamptz` : sql`(${coverage} <= ${cutoff}::timestamptz AND (${timestamp} IS NULL OR ${timestamp} < ${cutoff}::timestamptz))`;
   }
+  if (rule.field === 'property') return compilePropertyRule(rule);
   const field = rule.field === 'email' ? sql`${contacts.email}` : sql`(${contacts.properties} ->> ${rule.field})`;
   const value = rule.field === 'email' ? rule.value.trim().toLowerCase() : rule.value;
   if (rule.operator === 'eq') return sql`${field} = ${value}`;
   if (rule.operator === 'neq') return sql`(${field} IS NOT NULL AND ${field} <> ${value})`;
   // strpos treats wildcard characters as literal text, never SQL syntax.
   return sql`strpos(lower(${field}), lower(${rule.value})) > 0`;
+}
+// Keep typed comparisons separate from legacy fields, which compare their textual JSON representation.
+function textEquality(rule: SegmentRule): { target: string; value: string } | null {
+  if ('rules' in rule || 'days' in rule || rule.operator !== 'eq') return null;
+  if (rule.field !== 'property') return rule.field === 'email' ? { target: 'email', value: rule.value.trim().toLowerCase() } : { target: rule.field, value: rule.value };
+  return rule.type === 'string' ? { target: `property:${rule.key}`, value: rule.value } : null;
+}
+const stringProperty = (key: string) => sql`jsonb_typeof(${contacts.properties} -> ${key}) = 'string'`;
+const NUMBER_TEXT = '^[+-]?(?:[0-9]+(?:[.][0-9]*)?|[.][0-9]+)(?:[eE][+-]?[0-9]+)?$';
+const CLOCK = '(?:[01][0-9]|2[0-3]):[0-5][0-9](?::[0-5][0-9](?:[.][0-9]+)?)?|24:00(?::00(?:[.]0+)?)?';
+const ISO_TEXT = `^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])(?:[Tt](?:${CLOCK})(?:[Zz]|[+-](?:[01][0-9]|2[0-3])(?::?[0-5][0-9])?)?)?$`;
+const ZONE = '([+-])([0-9]{2})(?::?([0-9]{2}))?$';
+// C-collated sentinels outside the entire four-digit ISO range, including at either year boundary.
+function adjacentDay(day: string, delta: number) {
+  const date = new Date(Date.parse(`${day}T00:00:00Z`) + delta * 86_400_000), year = date.getUTCFullYear();
+  return year < 0 ? '' : year > 9999 ? ':' : date.toISOString().slice(0, 10);
+}
+// SQL dates have no year zero. ISO year 0000 is 1 BC in the same proleptic Gregorian calendar.
+function propertyDay(text: SQL, operator: 'before' | 'after' | 'on', target: string) {
+  const lexical = sql`(${text} COLLATE "C")`;
+  // Offsets and 24:00 can move a local date by at most one day. Reject distant misses before parsing.
+  const coarse = operator === 'before' ? sql`${lexical} < ${adjacentDay(target, 1)}` : operator === 'after' ? sql`${lexical} >= ${target}`
+    : sql`${lexical} >= ${adjacentDay(target, -1)} AND ${lexical} < ${adjacentDay(target, 2)}`;
+  const local = sql`(CASE WHEN left(${text},4) = '0000' THEN '0001' || substr(${text},5,6) || ' BC' ELSE left(${text},10) END)`;
+  // The shape enforces valid months and days 1..31. Only the last three days can need a calendar check.
+  const validCalendar = sql`(substr(${text},9,2) COLLATE "C" <= '28' OR pg_input_is_valid(${local}, 'date'))`;
+  // Shift the comparison day rather than rounding a timestamp: 23:59:59.999999999 still belongs to this day.
+  // A scalar offset expression keeps the whole scan parallelizable. Its casts are inside the full-shape CASE.
+  const zone = sql`(regexp_match(substr(${text},12), ${ZONE}))`;
+  const minutes = sql`(substr(${text},12,2)::int * 60 + substr(${text},15,2)::int -
+    (CASE ${zone}[1] WHEN '-' THEN -1 ELSE 1 END) * (coalesce(${zone}[2]::int,0)*60 + coalesce(${zone}[3]::int,0)))`;
+  const bound = sql`CASE WHEN length(${text}) = 10 OR (right(${text},1) IN ('Z','z') AND substr(${text},12,2) <> '24') THEN ${target}
+    WHEN ${minutes} < 0 THEN ${adjacentDay(target,1)} WHEN ${minutes} >= 1440 THEN ${adjacentDay(target,-1)} ELSE ${target} END`;
+  const comparison = sql.raw(operator === 'before' ? '<' : operator === 'after' ? '>' : '=');
+  return sql`(${coarse} AND CASE WHEN ${text} ~ ${ISO_TEXT} AND ${validCalendar}
+    THEN (left(${text},10) COLLATE "C") ${comparison} (${bound}) ELSE false END)`;
+}
+function propertyNumber(key: string) {
+  const value = sql`(${contacts.properties} -> ${key})`, text = sql`(${contacts.properties} ->> ${key})`;
+  return sql`(CASE jsonb_typeof(${value}) WHEN 'number' THEN ${value}::numeric WHEN 'string' THEN CASE WHEN ${text} ~ ${NUMBER_TEXT} AND pg_input_is_valid(${text}, 'numeric') THEN ${text}::numeric END END)`;
+}
+function compilePropertyRule(rule: PropertyRule): SQL {
+  const text = sql`(${contacts.properties} ->> ${rule.key})`;
+  if (!('value' in rule)) return rule.operator === 'set' ? sql`${text} IS NOT NULL` : sql`${text} IS NULL`;
+  if (rule.type === 'string') {
+    const condition = rule.operator === 'eq' ? sql`${text} = ${rule.value}` : rule.operator === 'neq' ? sql`${text} <> ${rule.value}`
+      : sql`strpos(lower(${text}), lower(${rule.value})) > 0`;
+    return sql`(${stringProperty(rule.key)} AND ${condition})`;
+  }
+  if (rule.type === 'number') {
+    const number = propertyNumber(rule.key);
+    return sql`${number} ${sql.raw(rule.operator === 'lt' ? '<' : rule.operator === 'gt' ? '>' : '=')} ${String(rule.value)}::numeric`;
+  }
+  return propertyDay(text, rule.operator, rule.value);
 }
 // Keep the full membership-key probe correlated even immediately after a large import,
 // before PostgreSQL has analyzed the new row distribution.
@@ -296,6 +365,28 @@ export async function countCampaignAudience(db: DbExecutor, identity: Actor, spe
       count(*) FILTER (WHERE NOT ${contacts.suppressed} AND NOT (${reachable(requiredNotice)}))::int AS unsubscribed
     FROM ${contacts} WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)}`)).rows;
   return row!;
+}
+
+/** Display-only whole-list counts. The list tally includes every committed delta, not just its last fold. */
+export async function countCampaignAudienceForDisplay(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>, requiredNotice = false) {
+  if (identity.domains.length || spec.segmentId || spec.excludeListIds?.length || spec.excludeSegmentIds?.length) {
+    return countCampaignAudience(db, identity, spec, requiredNotice);
+  }
+  // Anchor to the scoped list so a missing or foreign list still returns 404, not the counts of an empty list.
+  const { rows: [row] } = await db.execute<{ subscribed: number; unsubscribed: number; unknown: number; suppressed: number }>(sql`
+    SELECT coalesce(sum(c.subscribed), 0)::int AS subscribed, coalesce(sum(c.unsubscribed), 0)::int AS unsubscribed,
+      coalesce(sum(c.unknown), 0)::int AS unknown, coalesce(sum(c.suppressed), 0)::int AS suppressed
+    FROM audience_lists l LEFT JOIN audience_list_counts c ON c.workspace_id = l.workspace_id AND c.list_id = l.id
+    WHERE l.workspace_id = ${identity.workspaceId} AND l.id = ${spec.listId}
+    GROUP BY l.id`);
+  if (!row) return notFound('List');
+  const notSubscribed = row.unsubscribed + row.unknown;
+  return {
+    matched: row.subscribed + notSubscribed + row.suppressed,
+    eligible: requiredNotice ? row.subscribed + notSubscribed : row.subscribed,
+    suppressed: row.suppressed,
+    unsubscribed: requiredNotice ? 0 : notSubscribed,
+  };
 }
 export const SYNC_CAPTURE_MAX_LIST_MEMBERS = 5_000;
 const SNAPSHOT_MAX_MATCHED = 2_000_000, SNAPSHOT_MAX_RECIPIENT_BYTES = 1_048_576, SNAPSHOT_MAX_REVIEW_BYTES = 1_073_741_824;
@@ -544,13 +635,58 @@ export async function recordUnsubscribe(runtime: Runtime, workspaceId: string, e
     if (!contact) throw new ApiError(500, 'CONSENT_WRITE_FAILED', 'Unable to persist consent.');
     if (contact.marketingConsent === 'unsubscribed') return { contactId: contact.id, changed: false };
     const now = new Date().toISOString();
-    await tx.update(contacts).set({ marketingConsent: 'unsubscribed', updatedAt: now }).where(and(scope(contacts, identity), eq(contacts.id, contact.id)));
-    const auditId = rowId('cns');
     const evidence = source === 'ses-subscription' ? 'Signed SES subscription event reported unsubscribeAll for a single-recipient email.' : source === 'rfc8058-post' ? 'POST request presented a valid one-click unsubscribe token; no human identity asserted.' : 'Footer confirmation form submitted with a valid unsubscribe token; no human identity asserted.';
-    await tx.insert(consentAudit).values({ id: auditId, ...identity, contactId: contact.id, email: normalized.data, status: 'unsubscribed', source, evidence, actorKeyId: null, occurredAt: now });
-    await enqueue(tx, { type: 'operation.publish', ...identity, payload: { event: { id: auditId, type: 'contact.subscription_changed', createdAt: now, ...identity, region: null, data: { contactId: contact.id, status: 'unsubscribed', source } } } });
+    await recordConsent(tx, identity, contact, { status: 'unsubscribed', source, evidence, occurredAt: now, actorKeyId: null }, now);
     return { contactId: contact.id, changed: true };
   });
+}
+/**
+ * A consent decision for a contact its caller holds FOR UPDATE: its audit record, the contact.subscription_changed event
+ * when the status changes, and the contact itself. The consent route, an unsubscribe and the sign-ups list (signups.ts)
+ * all write consent through here. `at`: one time for the event and the contact (an unsubscribe's decision time);
+ * without it each is stamped when it is written, after the audit, as the consent route always has.
+ */
+export async function recordConsent(tx: DbExecutor, identity: Pick<Actor, 'workspaceId'>, contact: Pick<ContactRow, 'id' | 'email' | 'marketingConsent'>,
+  decision: { status: 'subscribed' | 'unsubscribed'; source: string; policyVersion?: string; evidence?: string; occurredAt: string; actorKeyId: string | null }, at?: string) {
+  const auditId = rowId('cns');
+  await tx.insert(consentAudit).values({ id: auditId, ...scopeValues(identity), contactId: contact.id, email: contact.email, status: decision.status, source: decision.source, policyVersion: decision.policyVersion ?? null, evidence: decision.evidence ?? null, occurredAt: decision.occurredAt, actorKeyId: decision.actorKeyId });
+  if (contact.marketingConsent !== decision.status) await enqueue(tx, { type: 'operation.publish', ...scopeValues(identity), payload: { event: { id: auditId, type: 'contact.subscription_changed', createdAt: at ?? new Date().toISOString(), ...scopeValues(identity), region: null, data: { contactId: contact.id, status: decision.status, source: decision.source } } } });
+  const [updated] = await tx.update(contacts).set({ marketingConsent: decision.status, updatedAt: at ?? new Date().toISOString() }).where(and(scope(contacts, identity), eq(contacts.id, contact.id))).returning();
+  return updated!;
+}
+export type ListContactResult = 'added' | 'updated' | 'deleted' | 'invalid' | 'no_list' | 'gone';
+/**
+ * A contact the installation keeps in a list from records of its own (the sign-ups list, signups.ts), under the API's
+ * rules: the address and name are checked as createContact checks them, properties merge into the contact's own within
+ * the 50-key and 16 KiB limits (a merge past them leaves the properties as they were), and the contact joins the list.
+ * Consent is recorded only for a contact with no decision yet that isn't suppressed: an opt-out stays an opt-out, and
+ * suppression is never touched. A deleted contact stays deleted: what deletion retains is there to keep it from being
+ * enrolled again. A waitlist sync marks the membership so reconciliation can distinguish it from a manual addition.
+ * Takes the list, then the contact, as an import does.
+ */
+export async function upsertListContact(tx: DbExecutor, identity: Pick<Actor, 'workspaceId'>, listId: string,
+  input: { email: string; name: string | null; fromWaitlist?: boolean; properties: Record<string, string | number | boolean | null>; consent: { source: string; evidence: string; occurredAt: string } }): Promise<ListContactResult> {
+  const parsed = ContactInput.safeParse({ email: input.email, ...input.name ? { name: input.name } : {}, properties: input.properties });
+  if (!parsed.success) return 'invalid';
+  const { email, name, properties } = parsed.data;
+  const [list] = await tx.select({ id: lists.id }).from(lists).where(and(scope(lists, identity), eq(lists.id, listId))).limit(1).for('share');
+  if (!list) return 'no_list';
+  const added = (await tx.insert(contacts).values({ id: rowId('con'), ...scopeValues(identity), email, name: name || null, properties }).onConflictDoNothing().returning({ id: contacts.id })).length > 0;
+  const [contact] = await tx.select().from(contacts).where(and(scope(contacts, identity), eq(contacts.email, email))).limit(1).for('update');
+  if (!contact) throw new ApiError(500, 'CONTACT_WRITE_FAILED', 'Unable to persist the contact.', undefined, true);
+  if (contact.deletedAt) return 'deleted';
+  if (!added) {
+    const merged = { ...contact.properties, ...properties }, fits = PropertiesInput.safeParse(merged).success;
+    const changed = fits && Object.entries(properties).some(([key, value]) => contact.properties[key] !== value);
+    if (!fits) log('warn', { code: 'LIST_CONTACT_PROPERTIES_FULL', workspaceId: identity.workspaceId, contactId: contact.id });
+    if (changed || (name && name !== contact.name)) await tx.update(contacts).set({ ...changed ? { properties: merged } : {}, ...name ? { name } : {}, updatedAt: new Date().toISOString() }).where(and(scope(contacts, identity), eq(contacts.id, contact.id)));
+  }
+  if (contact.marketingConsent === 'unknown' && !contact.suppressed) await recordConsent(tx, identity, contact, { status: 'subscribed', ...input.consent, actorKeyId: null });
+  if (input.fromWaitlist) await tx.execute(sql`INSERT INTO audience_list_members(workspace_id,list_id,contact_id,signup_waitlist)
+    VALUES(${identity.workspaceId},${listId},${contact.id},true) ON CONFLICT(workspace_id,list_id,contact_id)
+    DO UPDATE SET signup_waitlist=true WHERE audience_list_members.signup_waitlist IS DISTINCT FROM true`);
+  else await tx.insert(listMembers).values({ ...scopeValues(identity), listId, contactId: contact.id }).onConflictDoNothing();
+  return added ? 'added' : 'updated';
 }
 
 function utf8ByteLength(text: string): number {
@@ -792,11 +928,7 @@ export function registerAudience(app: App) {
         const [latest] = await tx.select().from(consentAudit).where(and(scope(consentAudit, identity), eq(consentAudit.contactId, contactId))).orderBy(sql`${consentAudit.occurredAt} DESC`).limit(1);
         if (latest && Date.parse(occurredAt) <= Date.parse(latest.occurredAt)) throw new ApiError(409, 'STALE_CONSENT', 'Renewed consent must be newer than the prior consent decision.');
       }
-      const auditId = rowId('cns');
-      await tx.insert(consentAudit).values({ id: auditId, ...scopeValues(identity), contactId, email: existing.email, status: input.status, source, policyVersion: input.policyVersion ?? null, evidence: input.evidence ?? null, occurredAt, actorKeyId: identity.keyId });
-      if (existing.marketingConsent !== input.status) await enqueue(tx, { type: 'operation.publish', ...scopeValues(identity), payload: { event: { id: auditId, type: 'contact.subscription_changed', createdAt: new Date().toISOString(), ...scopeValues(identity), region: null, data: { contactId, status: input.status } } } });
-      const [updated] = await tx.update(contacts).set({ marketingConsent: input.status, updatedAt: new Date().toISOString() }).where(and(scope(contacts, identity), eq(contacts.id, contactId))).returning();
-      return updated!;
+      return recordConsent(tx, identity, existing, { status: input.status, source, policyVersion: input.policyVersion, evidence: input.evidence, occurredAt, actorKeyId: identity.keyId });
     }); return c.json(contact, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/contacts/{id}/consent', operationId: 'listContactConsentEvents', tags: ['Consent'], security, request: { params: IdParams, query: PageQuery }, responses: { 200: response(page(Audit)), ...errors } }), async c => {

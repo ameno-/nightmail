@@ -13,7 +13,7 @@ import { lists, mergeSuppression, segments } from './db/audience.js';
 import { SuppressionReason, EmailEventData, readCursor, encodeCursor, nextCursor, budgetedRead, readLimit, readLimitNote } from './core.js';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import type { Attachment } from '@aws-sdk/client-sesv2';
-import { actor, actorMailAccess, ApiError, AudienceSpec, denied, unrestrictedRequired, uploadKey, chargeRenderBudget, digest, errors, getSes, isSimulatedSes, id, rowId, IdParams, json, lazyModule, log, ModuleLoadError, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, timed, withoutVerdict, wrapModuleLoad, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Runtime, type Storage } from './core.js';
+import { actor, actorMailAccess, ApiError, apiFailureBody, describeApiFailure, AudienceSpec, denied, unrestrictedRequired, uploadKey, chargeRenderBudget, digest, errors, getSes, isSimulatedSes, id, rowId, IdParams, json, lazyModule, log, logError, ModuleLoadError, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, timed, withoutVerdict, wrapModuleLoad, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Runtime, type Storage } from './core.js';
 import { enqueue, JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures, wakeWebhooks } from './jobs.js';
 import { countScreened, failScheduledRelease, CAMPAIGN_ACTIVE, CAMPAIGN_RUNNING, CAMPAIGN_STATES, campaignEditable, campaignReserved, campaignResumable, cancelCampaign, failCampaign, finishCampaigns, holdCampaign, launchCampaign, noteHealthChecked, pauseCampaign, quarantineCampaign, clearProbe, skipProbe, waitProbe, queueCampaignRun, recordExpanded, recordPrepared, rescheduleCampaign, restrictToDelivered, resumeCampaign, retireCampaignRun, reviseCampaign, runningState, setCampaignPacing, startSending, unscheduleCampaign, terminalColumns, terminalEvents, wakeCampaignRun, type CampaignState } from './states.js';
 import { productName } from './brand.js';
@@ -1752,6 +1752,51 @@ async function campaignWithFooter(runtime: Runtime, a: Actor, campaignId: string
   if (!found) return notFound('Campaign');
   return { row: found.row, footer: { unsubscribePageUrl: found.row.draft.unsubscribePageUrl, postalAddress: found.address, requiredNotice: found.row.draft.requiredNotice } };
 }
+const displayAudience = (runtime: Runtime, a: Actor, draft: CampaignDraft, spec: z.infer<typeof AudienceSpec>) =>
+  wrapModuleLoad(() => import('./audience.js')).then(m => m.countCampaignAudienceForDisplay(runtime.db, a, spec, draft.requiredNotice === true));
+type DisplayAudience = ReturnType<typeof displayAudience>;
+
+async function savedCampaignAudience(runtime: Runtime, a: Actor, row: typeof campaigns.$inferSelect, shared?: DisplayAudience) {
+  const audience = AudienceSpec.safeParse(row.draft.audience);
+  if (!audience.success) throw new ApiError(422, 'CAMPAIGN_INCOMPLETE', 'Choose an audience list before counting recipients.', 'audience.listId');
+  const counts = await (shared ?? displayAudience(runtime, a, row.draft, audience.data));
+  if (row.audienceEstimate !== counts.eligible) {
+    // Review's revision-bound read mustn't write its estimate over a teammate's newer saved draft.
+    await runtime.db.execute(sql`UPDATE sending_campaigns SET audience_estimate = ${counts.eligible}
+      WHERE workspace_id = ${a.workspaceId} AND id = ${row.id} ${shared ? sql`AND revision = ${row.revision}` : sql``}`).catch(() => {});
+  }
+  return AudienceCounts.parse(counts);
+}
+
+async function advisoryCheck(runtime: Runtime, a: Actor, mail: CheckMail, source: 'draft' | 'email' | 'campaign') {
+  const domain = splitMailbox(mail.from).address.split('@').at(-1)!.toLowerCase();
+  // Name the domain only when the caller sent it: a stored email's or campaign's sender is named by ID.
+  if (!senderDomainAllowed(a.domains, domain)) throw denied('DOMAIN_NOT_ALLOWED', 'The From domain is outside this key’s scope.', { permission: 'sendEmail', level: 'on', ...(source === 'draft' ? { scope: `domain:${domain}` as const } : {}) }, 'from');
+  const [{ checkMail }, { checkContext }] = await Promise.all([wrapModuleLoad(() => import('./sendability.js')), wrapModuleLoad(() => import('./sendability-context.js'))]);
+  const context = await checkContext(runtime, a, domain);
+  return checkMail(mail, source === 'campaign' ? { ...context, screenLimitBytes: runtime.config.screenLimits.campaignBytes } : context);
+}
+
+async function campaignAdvisory(runtime: Runtime, a: Actor, { row, footer }: Awaited<ReturnType<typeof campaignWithFooter>>, shared?: DisplayAudience) {
+  const d = row.draft, audience = AudienceSpec.safeParse(d.audience);
+  const [rendered, recipients, files] = await Promise.all([renderCampaignContent(runtime, d, false), row.reviewId ? row.total : audience.success && !a.domains.length
+    ? (shared ?? displayAudience(runtime, a, d, audience.data)).then(r => r.eligible) : undefined, attachmentRows(runtime.db, a, d.attachments)]);
+  if (!d.from || (!rendered.html && !rendered.text)) throw new ApiError(422, 'CAMPAIGN_INCOMPLETE', 'Set a sender and add content before checking this campaign.', 'campaignId');
+  const mail: CheckMail = { from: d.from, fromName: d.fromName, subject: d.subject, ...rendered, previewText: d.previewText, tracking: d.tracking,
+    ...d.requiredNotice ? { stream: 'transactional' as const } : { stream: 'marketing' as const, generatedUnsubscribe: true, postalAddress: !!footer.postalAddress },
+    recipientCount: recipients === undefined ? undefined : Math.min(recipients, row.pacePerDay ?? Infinity), attachments: files, headers: d.replyTo?.[0] ? { 'Reply-To': d.replyTo[0] } : undefined };
+  return advisoryCheck(runtime, a, mail, 'campaign');
+}
+
+async function reviewPart<T>(c: Ctx, read: Promise<T>) {
+  try { return { data: await read } as const; }
+  catch (error) {
+    const { responseError, known, transient, conflict } = describeApiFailure(error), requestId = c.get('requestId');
+    if (!known && responseError.status >= 500) logError(error, { requestId, route: 'campaign.review-display', code: responseError.code, status: responseError.status });
+    return { status: responseError.status, error: apiFailureBody(responseError, requestId), ...(transient || conflict ? { retryAfter: 1 } : {}) } as const;
+  }
+}
+
 /** A campaign's preview: its rendered draft with the footer its emails get, the link a placeholder. */
 async function previewParts(runtime: Runtime, draft: CampaignDraft, footer: Footer) {
   const rendered = await renderCampaignContent(runtime, draft, false);
@@ -1810,21 +1855,9 @@ export function registerSending(app: App) {
         // Marketing mail went out with the unsubscribe headers and link (and the workspace's postal address) Nightmail adds, however its copy is stored.
         previewText:s.previewText,tracking:s.tracking,...(s.kind==='marketing' && !notice ? {generatedUnsubscribe:true,postalAddress:!!await workspacePostalAddress(c.env,c.env.db,a.workspaceId)} : {}),attachments:await attachmentRows(c.env.db,a,body.attachments,false,!!s.mailbox && !!actorMailAccess(a))};
     } else if ('campaignId' in input) {
-      const {row,footer}=await campaignWithFooter(c.env,a,input.campaignId), d=row.draft, audience=AudienceSpec.safeParse(d.audience);
-      const [rendered,recipients,files]=await Promise.all([renderCampaignContent(c.env,d,false),row.reviewId ? row.total : audience.success && !a.domains.length
-        ? wrapModuleLoad(()=>import('./audience.js')).then(m=>m.countCampaignAudience(c.env.db,a,audience.data,d.requiredNotice===true)).then(r=>r.eligible) : undefined,attachmentRows(c.env.db,a,d.attachments)]);
-      if (!d.from || (!rendered.html && !rendered.text)) throw new ApiError(422,'CAMPAIGN_INCOMPLETE','Set a sender and add content before checking this campaign.','campaignId');
-      mail={from:d.from,fromName:d.fromName,subject:d.subject,...rendered,previewText:d.previewText,tracking:d.tracking,
-        ...d.requiredNotice ? {stream:'transactional' as const} : {stream:'marketing' as const,generatedUnsubscribe:true,postalAddress:!!footer.postalAddress},
-        recipientCount:recipients===undefined ? undefined : Math.min(recipients,row.pacePerDay??Infinity),attachments:files,headers:d.replyTo?.[0]?{'Reply-To':d.replyTo[0]}:undefined};
+      return c.json(await campaignAdvisory(c.env, a, await campaignWithFooter(c.env, a, input.campaignId)), 200);
     } else mail=input;
-    const domain=splitMailbox(mail.from).address.split('@').at(-1)!.toLowerCase();
-    // Name the domain only when the caller sent it: a stored email's or campaign's sender is named by ID.
-    if (!senderDomainAllowed(a.domains,domain)) throw denied('DOMAIN_NOT_ALLOWED','The From domain is outside this key’s scope.',{ permission: 'sendEmail', level: 'on', ...(mail === input ? { scope: `domain:${domain}` as const } : {}) },'from');
-    const [{checkMail},{checkContext}]=await Promise.all([wrapModuleLoad(()=>import('./sendability.js')),wrapModuleLoad(()=>import('./sendability-context.js'))]);
-    const context=await checkContext(c.env,a,domain);
-    // A campaign is screened once for all its recipients, up to its own limit.
-    return c.json(await checkMail(mail,'campaignId' in input ? {...context,screenLimitBytes:c.env.config.screenLimits.campaignBytes} : context),200);
+    return c.json(await advisoryCheck(c.env, a, mail, mail === input ? 'draft' : 'email'), 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/emails/send', operationId: 'sendEmail', description: SCREEN_LIMIT_NOTE, tags: ['Emails'], security, request: { headers: SendIdempotencyHeaders, body: json(SingleSendInput) }, responses: { 202: response(SingleReceipt), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
@@ -2167,13 +2200,24 @@ export function registerSending(app: App) {
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/audience', operationId: 'previewCampaignAudience', description: 'Counts the saved audience right now: matched contacts and how many are eligible, suppressed or unsubscribed. Read-only and never frozen; send or schedule takes its own snapshot and consent is rechecked at dispatch.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(AudienceCounts), ...errors } }), async c => {
     const a = actor(c), row = await findCampaign(c.env.db, a, c.req.valid('param').id);
-    const audience = AudienceSpec.safeParse(row.draft.audience);
-    if (!audience.success) throw new ApiError(422, 'CAMPAIGN_INCOMPLETE', 'Choose an audience list before counting recipients.', 'audience.listId');
-    const counts = await (await wrapModuleLoad(() => import('./audience.js'))).countCampaignAudience(c.env.db, a, audience.data, row.draft.requiredNotice === true);
-    if (row.audienceEstimate !== counts.eligible) {
-      await c.env.db.execute(sql`UPDATE sending_campaigns SET audience_estimate = ${counts.eligible} WHERE workspace_id = ${a.workspaceId} AND id = ${row.id}`).catch(() => {});
-    }
-    return c.json(AudienceCounts.parse(counts), 200);
+    return c.json(await savedCampaignAudience(c.env, a, row), 200);
+  });
+  // One authenticated presentation read for Review; public audience and advisory operations stay separate.
+  app.get('/v1/campaigns/:id/review-display', async c => {
+    const a = actor(c, 'read');
+    if (a.credential !== 'dashboard') throw denied('DASHBOARD_AUTH_REQUIRED', 'Use a signed-in dashboard session.', { credential: 'dashboard' });
+    const input = z.object({ id: IdParams.shape.id, revision: z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(z.int()),
+      check: z.enum(['true', 'false']) }).safeParse({ id: c.req.param('id'), revision: c.req.query('revision'), check: c.req.query('check') });
+    if (!input.success) throw new ApiError(422, 'VALIDATION_FAILED', 'Supply the saved campaign revision and whether to run Checks.');
+    const saved = await campaignWithFooter(c.env, a, input.data.id);
+    editable(saved.row, input.data.revision);
+    const spec = AudienceSpec.safeParse(saved.row.draft.audience);
+    const shared = spec.success ? displayAudience(c.env, a, saved.row.draft, spec.data) : undefined;
+    const [audience, check] = await Promise.all([
+      reviewPart(c, savedCampaignAudience(c.env, a, saved.row, shared)),
+      input.data.check === 'true' ? reviewPart(c, campaignAdvisory(c.env, a, saved, shared)) : null,
+    ]);
+    return c.json({ audience, check }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/preview-image', operationId: 'renderCampaignPreviewImage', description: 'Renders the saved campaign draft as a full-page, 720 px wide PNG for visual review. Inline CID images are embedded; remote HTTPS images are loaded by the isolated renderer.' + PREVIEW_ROUTE_NOTE, tags: ['Campaigns'], security, request: { params: IdParams }, responses: { ...previewResponses(CampaignPreviewImage), ...errors } }), async c => {
     refuseHead(c);

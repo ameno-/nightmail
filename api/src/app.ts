@@ -1,13 +1,12 @@
 import { OpenAPIHono } from '@hono/zod-openapi';
 import type { MiddlewareHandler } from 'hono';
-import { HTTPException } from 'hono/http-exception';
 import { allowMalformedSns, notFound, snsIngress } from './core.js';
 import { boundRequestBody } from './request-body.js';
 import { reserveMemory, runInMemoryScope, type MemoryLease } from './isolate-memory.js';
 import { IMPORT_PREVIEW_RATE_PER_MINUTE, importPreviewReservationBytes } from './audience.js';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { getPath } from 'hono/utils/url';
-import { actor, budgetExhausted, mailboxRoute, memberRefused, receivingConsentRoute, unrestrictedRoute, ApiError, denied, requiredHeader, requiredHeaderValue, requiredOf, unrestrictedRequired, databaseCodeOf, databaseConflict, databaseUnavailable, errorCodeOf, id, lazyModule, log, logError, ModuleLoadError, newRequestId, secureResponse, SECURITY_HEADERS, timed, transientDatabaseError, wrapModuleLoad } from './core.js';
+import { actor, budgetExhausted, mailboxRoute, memberRefused, receivingConsentRoute, unrestrictedRoute, ApiError, apiFailureBody, describeApiFailure, denied, requiredHeader, requiredHeaderValue, requiredOf, unrestrictedRequired, databaseCodeOf, errorCodeOf, id, lazyModule, log, logError, ModuleLoadError, newRequestId, secureResponse, SECURITY_HEADERS, timed, wrapModuleLoad } from './core.js';
 import type { App, Runtime } from './core.js';
 import type { AppEnv, Ctx } from './core.js';
 import { authenticate, registerAuth, requireReceivingConsent } from './auth.js';
@@ -318,30 +317,8 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
   app.on('DELETE', '/v1/campaigns/:id', regions);
   app.onError(async (error, c) => {
     const requestId = c.get('requestId');
-    const known = error instanceof ApiError;
-    const invalidJson = error instanceof SyntaxError || error instanceof HTTPException && error.status===400 && error.message==='Malformed JSON in request body';
-    const database = ((error as { cause?: unknown }).cause ?? error) as { code?: string; constraint?: string };
-    const keyTaken = database.code === '23505' && (database.constraint === 'mailboxes_key' || database.constraint === 'mailbox_webhooks_key');
-    // A deadlock or serialization victim was rolled back whole: retryable, not a 500 that tells clients never to retry.
-    const conflict = !known && !invalidJson && databaseConflict(error);
-    // An MCP approval revoked while its request ran: the object it would own has no grant left.
-    const grantRevoked = database.code === '23503' && database.constraint === 'mail_grant_objects_resource_grant_fkey';
-    // A refused or dropped database connection, a read-only or full database and a statement cancelled at its time or
-    // lock limit are a retryable 503, not an internal error (see transientDatabaseError).
-    const transient = !known && !invalidJson && transientDatabaseError(error);
-    // Values Postgres cannot store come from the request: U+0000 in any text (22021, or 22P05 inside JSON) and a
-    // date outside its range, such as year 0000 or a +16:00 offset, which ISO 8601 validation accepts (22007/22008/22009). A client error, not a 500.
-    const refused = known || invalidJson ? undefined : databaseCodeOf(error);
-    const nul = refused === '22021' || refused === '22P05', badDate = refused === '22007' || refused === '22008' || refused === '22009';
-    let responseError = known ? error : invalidJson ? new ApiError(400, 'INVALID_JSON', 'Request body is not valid JSON.')
-      : transient ? databaseUnavailable()
-      : nul ? new ApiError(422, 'VALIDATION_FAILED', 'Request fields are invalid: text cannot contain the NUL character (U+0000).')
-      : badDate ? new ApiError(422, 'VALIDATION_FAILED', 'Request fields are invalid: a date is out of range. Use a year from 0001 to 9999 and an offset within ±15:59.')
-      : database.code==='BR001' ? new ApiError(422,'ROUTING_PLAN_TOO_LARGE','A host routing plan exceeds 256 KiB. Shorten or remove wildcard rules before enabling routing.')
-      : conflict ? new ApiError(503, 'DATABASE_CONFLICT', 'The request conflicted with a concurrent change and was rolled back. Retry it.', undefined, true)
-      : grantRevoked ? new ApiError(401, 'AUTH_INVALID', 'The MCP approval behind this request was revoked while it ran. Nothing was created.')
-      : keyTaken ? new ApiError(409, 'KEY_TAKEN', `Another ${database.constraint === 'mailboxes_key' ? 'address' : 'webhook'} in this workspace already uses that key. Choose another.`, 'key')
-      : new ApiError(500, 'INTERNAL_ERROR', 'Unexpected server failure. Use the request ID to locate the server log.');
+    const { known, invalidJson, conflict, transient, responseError: classified } = describeApiFailure(error);
+    let responseError = classified;
     if(invalidJson && snsIngress(c.req.path)) {
       const peer=c.req.header(clientIpHeader)??'unknown';
       if(!allowMalformedSns(peer) || c.env.allowMalformedSns && !await c.env.allowMalformedSns(peer)) responseError=new ApiError(429,'PUBLIC_RATE_LIMITED','Too many malformed requests.',undefined,true);
@@ -360,7 +337,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     if (responseError.resetAt) c.header('Retry-After', new Date(responseError.resetAt).toUTCString());
     else if (responseError.retryAfterSeconds !== undefined) c.header('Retry-After', String(Math.max(1, Math.ceil(responseError.retryAfterSeconds))));
     else if (transient || conflict || responseError.code === 'IDEMPOTENCY_IN_PROGRESS') c.header('Retry-After', '1');
-    return c.json({ error: { code: responseError.code, message: responseError.message, requestId, retryable: responseError.retryable, ...(responseError.field ? { field: responseError.field } : {}), ...(responseError.resetAt ? { resetAt: responseError.resetAt } : {}), ...(responseError.details ? { details: responseError.details } : {}), ...(responseError.required ? { required: responseError.required } : {}) } }, responseError.status as ContentfulStatusCode);
+    return c.json({ error: apiFailureBody(responseError, requestId) }, responseError.status as ContentfulStatusCode);
   });
   app.notFound(c => { c.set('failure', { code: 'NOT_FOUND', unmatched: true }); return c.json({ error: { code: 'NOT_FOUND', message: 'Route not found.', requestId: c.get('requestId'), retryable: false } }, 404); });
   // origin is PUBLIC_URL's, never the request's Host: the dashboard and Docs build every example and connection URL from it.

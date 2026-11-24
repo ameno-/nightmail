@@ -1,5 +1,8 @@
-import { sql } from 'drizzle-orm';
-import { log, type DbExecutor, type Runtime } from './core.js';
+import { sql, type SQL } from 'drizzle-orm';
+import { log, type Config, type Database, type DbExecutor, type JobHandler, type Runtime } from './core.js';
+import { productName } from './brand.js';
+import { JobDeferred, retryDatabaseFailures } from './jobs.js';
+import type { ListContactResult } from './audience.js';
 
 // The sign-up limit (hosted, migration 404): how many accounts may sign up on their own, set by an operator at
 // Operator → Sign-ups (src/operator.ts). A place is taken by an account that signed up (nightmail_signups, one row per
@@ -19,21 +22,39 @@ export async function readPlaces(db: DbExecutor): Promise<Places> {
 // statement sees what the previous holder committed.
 const lockLimit = (db: DbExecutor) => db.execute(sql`SELECT FROM nightmail_signup_limit WHERE singleton FOR UPDATE`);
 
+type Waited = { name: string | null; attempts: number; first_at: string; let_in_at: string | null };
+export type Place = { via: 'waitlist' | 'open'; mailbox: string; waited: Waited | null };
 /**
  * Whether a new account may sign up on its own, decided in the transaction that creates it (account-login.ts) from the
  * mailbox its sign-in proves (account-policy.ts provenMailbox), never an asserted address. A place held for that address
- * is taken (its waitlist row leaves); otherwise an open one is. An address that is already a verified user's takes none:
- * one place per person. The caller records the place with recordSignup once the user row exists.
+ * is taken; otherwise an open one is. Either way the address leaves the waitlist here, and what its row said comes back
+ * for recordSignup; a sign-in refused after all rolls the transaction back with the row. An address that is already a
+ * verified user's takes none: one place per person. The caller records the place once the user row exists.
  */
-export async function takePlace(db: DbExecutor, mailbox: string): Promise<'waitlist' | 'open' | null> {
+export async function takePlace(db: DbExecutor, mailbox: string): Promise<Place | null> {
   await lockLimit(db);
   const address = mailbox.toLowerCase();
   if ((await db.execute(sql`SELECT FROM nightmail_users WHERE email_verified AND lower(email)=${address}`)).rowCount) return null;
-  if ((await db.execute(sql`DELETE FROM nightmail_waitlist WHERE email=${address} AND let_in_at IS NOT NULL`)).rowCount) return 'waitlist';
-  return (await readPlaces(db)).open > 0 ? 'open' : null;
+  const evidence = sql`name,attempts,first_at::text,let_in_at::text`;
+  const { rows: [held] } = await db.execute<Waited>(sql`DELETE FROM nightmail_waitlist WHERE email=${address} AND let_in_at IS NOT NULL RETURNING ${evidence}`);
+  if (held) return { via: 'waitlist', mailbox: address, waited: held };
+  // As on dev, a closed gate never takes an unheld waitlist row lock while holding the installation's limit lock.
+  // If a place is open, consume any waiting evidence in the statement already checking capacity.
+  const { rows: [free] } = await db.execute<{ waited: Waited | null }>(sql`WITH capacity AS MATERIALIZED (
+    SELECT places > (SELECT count(*) FROM nightmail_signups) + (SELECT count(*) FROM nightmail_waitlist WHERE let_in_at IS NOT NULL) AS open
+    FROM nightmail_signup_limit WHERE singleton
+  ), consumed AS (DELETE FROM nightmail_waitlist WHERE email=${address} AND (SELECT open FROM capacity) RETURNING ${evidence})
+  SELECT (SELECT row_to_json(c) FROM consumed c) AS waited FROM capacity WHERE open`);
+  return free ? { via: 'open', mailbox: address, waited: free.waited } : null;
 }
-export const recordSignup = (db: DbExecutor, userId: string, via: 'waitlist' | 'open') =>
-  db.execute(sql`INSERT INTO nightmail_signups(user_id,via) VALUES(${userId},${via})`);
+/**
+ * The sign-up, with what the sign-ups list may say of it ever after: the mailbox this sign-in proved, the name it gave,
+ * and the waitlist row it consumed (when it first asked, how often, when a raise let it in). Never read from the account
+ * later: a changed address or name isn't the one that signed up.
+ */
+export const recordSignup = (db: DbExecutor, userId: string, place: Place, name: string | null) =>
+  db.execute(sql`INSERT INTO nightmail_signups(user_id,via,email,name,joined_at,attempts,let_in_at) VALUES(${userId},${place.via},${place.mailbox.length <= 320 ? place.mailbox : null},
+    ${place.waited?.name ?? (name?.trim().slice(0, 200) || null)},${place.waited?.first_at ?? null}::timestamptz,${place.waited?.attempts ?? null},${place.waited?.let_in_at ?? null}::timestamptz)`);
 
 /**
  * Sets the limit. A raise holds the places it opens for the oldest waiting addresses (first attempt first); places
@@ -81,3 +102,156 @@ export async function placesOpened(runtime: Runtime): Promise<{ emailed: number;
     return { emailed, notEmailed: null };
   }
 }
+
+// The sign-ups list (hosted, NIGHTMAIL_SIGNUPS_LIST_ID): everyone who joins the waitlist or signs up is a contact of one
+// list in the platform workspace, subscribed because they asked for access, with properties to segment by:
+//   status         waiting, let_in (a raise holds a place for it), signed_up (it took a place) or admitted (an
+//                  invitation or staff let it in after it joined; nothing new is consented)
+//   joined_at      its first attempt; let_in_at and signed_up_at: ISO 8601 in UTC, which sorts in time order
+//   attempts       its sign-in attempts while it waited
+//   email_domain   its address's domain, and mailbox: free (gmail.com, …) or company
+// Nothing on the sign-in or raise path writes for it. A waitlist row is due when it changed since it was last written
+// (last_at or let_in_at after list_synced_at), a sign-up until it has been written once; every minute signupsTick queues
+// one signups.sync job while anything is due, and the job writes each due address and marks the version it wrote. The
+// contact is written from the waitlist row or the sign-up record alone (recordSignup), never the account's profile,
+// through the audience code (audience.ts upsertListContact): an opt-out stays an opt-out, suppression is never touched
+// and a deleted contact stays deleted. Hourly, signups.reconcile marks admitted the contacts still waiting whose address
+// got in another way. Jobs carry no address. Without the list or the platform workspace nothing is queued.
+export type SignupsList = { workspaceId: string; listId: string };
+export const signupsList = (config: Pick<Config, 'multiTenant' | 'platformDomainWorkspace' | 'signupsListId'>): SignupsList | null =>
+  config.multiTenant && config.platformDomainWorkspace && config.signupsListId ? { workspaceId: config.platformDomainWorkspace, listId: config.signupsListId } : null;
+const waitlistDue = sql`(list_synced_at IS NULL OR list_synced_at IS DISTINCT FROM greatest(last_at,let_in_at) OR list_synced_attempts IS DISTINCT FROM attempts)`;
+const signupDue = sql`(list_synced_at IS NULL AND email IS NOT NULL)`;
+// One job per kind and workspace: queued again only once the last run has finished.
+const queueRun = (list: SignupsList, kind: 'sync' | 'reconcile', when = sql`true`) => sql`INSERT INTO jobs(id,type,workspace_id,payload)
+  SELECT ${`signups.${kind}:${list.workspaceId}`},${`signups.${kind}`},${list.workspaceId},'{}'::jsonb WHERE ${when}
+  ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,status='pending',attempts=0,lease_until=NULL,last_error=NULL,available_at=now() WHERE jobs.status IN ('completed','failed')`;
+/** Every minute (worker cron, Node runner): a signups.sync run while any waitlist row or sign-up is due. Never throws. */
+export async function signupsTick(runtime: Runtime) {
+  const list = signupsList(runtime.config);
+  if (!list) return;
+  try { await runtime.db.execute(queueRun(list, 'sync', sql`EXISTS (SELECT FROM nightmail_waitlist WHERE ${waitlistDue}) OR EXISTS (SELECT FROM nightmail_signups WHERE ${signupDue})`)); }
+  catch { log('warn', { code: 'SIGNUPS_LIST_NOT_QUEUED' }); }
+}
+/** Hourly (maintenance.ts): a signups.reconcile run. */
+export async function queueSignupsReconcile(runtime: Runtime) {
+  const list = signupsList(runtime.config);
+  if (list) await runtime.db.execute(queueRun(list, 'reconcile'));
+}
+
+const iso = (at: string) => new Date(at).toISOString();
+/** A name as a contact's: one line of visible text with a letter, no address or link, at most 200 characters; else none. */
+function contactName(raw: string | null | undefined) {
+  const name = (raw ?? '').normalize('NFC').replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, '').replace(/\s+/g, ' ').trim().slice(0, 200).trim();
+  return /\p{L}/u.test(name) && !/@|:\/\/|www\./i.test(name) && name !== `${productName} user` ? name : null;
+}
+const addressProperties = async (address: string) => {
+  const domain = address.slice(address.lastIndexOf('@') + 1), { FREE_MAIL } = await import('./deliverability.js');
+  return { email_domain: domain, mailbox: FREE_MAIL.includes(domain) ? 'free' : 'company' };
+};
+type Standing = { waiting: { name: string | null; attempts: number; joinedAt: string; letInAt: string | null; version: string } | null;
+  signup: { name: string | null; joinedAt: string | null; attempts: number | null; letInAt: string | null; at: string } | null };
+// One address at a time: what a run reads is at least as new as what an earlier one wrote. A transaction lock, so
+// nothing is held on the waitlist or sign-up rows while the contact is written.
+const lockAddress = (tx: DbExecutor, list: SignupsList, address: string) => tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`${list.listId}:${address}`},40420))`);
+/**
+ * One address's contact, from where it stands now: a sign-up's own record, else its waitlist row. Returns the waitlist
+ * row's version it saw (null: none) for the caller to mark once the contact has committed.
+ */
+async function syncAddress(db: Database, list: SignupsList, address: string): Promise<{ result: ListContactResult; version: string | null; attempts: number | null }> {
+  const { upsertListContact } = await import('./audience.js'), byAddress = await addressProperties(address);
+  return db.transaction(async tx => {
+    await lockAddress(tx, list, address);
+    const { rows: [standing] } = await tx.execute<Standing>(sql`SELECT
+      (SELECT json_build_object('name',w.name,'attempts',w.attempts,'joinedAt',w.first_at,'letInAt',w.let_in_at,'version',greatest(w.last_at,w.let_in_at)) FROM nightmail_waitlist w WHERE w.email=${address}) AS waiting,
+      (SELECT json_build_object('name',s.name,'joinedAt',s.joined_at,'attempts',s.attempts,'letInAt',s.let_in_at,'at',s.at) FROM nightmail_signups s WHERE s.email=${address} ORDER BY s.at LIMIT 1) AS signup`);
+    const { waiting, signup } = standing!;
+    if (signup) {
+      // They asked on the waitlist first when the sign-up consumed a row; else signing up was the asking.
+      const result = await upsertListContact(tx, list, list.listId, { email: address, name: contactName(signup.name),
+        properties: { status: 'signed_up', ...byAddress, signed_up_at: iso(signup.at), ...signup.joinedAt ? { joined_at: iso(signup.joinedAt) } : {},
+          ...signup.attempts !== null ? { attempts: signup.attempts } : {}, ...signup.letInAt ? { let_in_at: iso(signup.letInAt) } : {} },
+        consent: signup.joinedAt ? waitlistConsent(signup.joinedAt) : { source: `${productName} sign-up`, evidence: 'Signed up for an account with this verified address.', occurredAt: iso(signup.at) } });
+      return { result, version: waiting?.version ?? null, attempts: waiting?.attempts ?? null };
+    }
+    if (!waiting) return { result: 'gone' as const, version: null, attempts: null };
+    const result = await upsertListContact(tx, list, list.listId, { email: address, name: contactName(waiting.name), fromWaitlist: true,
+      properties: { status: waiting.letInAt ? 'let_in' : 'waiting', ...byAddress, joined_at: iso(waiting.joinedAt), attempts: waiting.attempts, ...waiting.letInAt ? { let_in_at: iso(waiting.letInAt) } : {} },
+      consent: waitlistConsent(waiting.joinedAt) });
+    return { result, version: waiting.version, attempts: waiting.attempts };
+  });
+}
+// They asked for access: subscribed from when they first asked, unless they decided otherwise since.
+const waitlistConsent = (joinedAt: string) => ({ source: `${productName} waitlist`, evidence: 'Asked for access by signing in with this verified address while sign-ups were closed, and joined the waitlist.', occurredAt: iso(joinedAt) });
+
+const BATCH = 100, RUN_MS = 10_000;
+type Counts = Partial<Record<ListContactResult, number>>;
+const count = (counts: Counts, result: ListContactResult) => { counts[result] = (counts[result] ?? 0) + 1; };
+/** Counts only: addresses never reach a log. A missing list stops the run; the next one tries again. */
+function logRun(list: SignupsList, kind: string, counts: Counts) {
+  if (counts.no_list) log('warn', { code: 'SIGNUPS_LIST_MISSING', workspaceId: list.workspaceId, listId: list.listId });
+  else log('info', { code: 'SIGNUPS_LIST_SYNCED', workspaceId: list.workspaceId, kind, ...counts });
+}
+// A run queued under a list that has since been turned off or moved changes nothing.
+const listOf = (runtime: Runtime, workspaceId: string) => { const list = signupsList(runtime.config); return list?.workspaceId === workspaceId ? list : null; };
+const more = () => new JobDeferred(new Date().toISOString());
+export const signupJobs: Record<string, JobHandler> = {
+  // Due sign-ups, then due waitlist rows, 100 at a time, for up to ten seconds a run; it comes back while more are due.
+  'signups.sync': retryDatabaseFailures(async (runtime, _payload, job) => {
+    const list = listOf(runtime, job.workspaceId), until = Date.now() + RUN_MS, counts: Counts = {};
+    if (!list) return;
+    try {
+      for (;;) {
+        const { rows: signups } = await runtime.db.execute<{ user_id: string; email: string }>(sql`SELECT user_id,email FROM nightmail_signups WHERE ${signupDue} ORDER BY at LIMIT ${BATCH}`);
+        const { rows: waiting } = signups.length ? { rows: [] } : await runtime.db.execute<{ email: string }>(sql`SELECT email FROM nightmail_waitlist WHERE ${waitlistDue} ORDER BY first_at,email LIMIT ${BATCH}`);
+        if (!signups.length && !waiting.length) return;
+        for (const row of signups) {
+          const { result } = await syncAddress(runtime.db, list, row.email);
+          count(counts, result);
+          if (result === 'no_list') return;
+          await runtime.db.execute(sql`UPDATE nightmail_signups SET list_synced_at=now() WHERE user_id=${row.user_id}`);
+        }
+        for (const row of waiting) {
+          const { result, version, attempts } = await syncAddress(runtime.db, list, row.email);
+          count(counts, result);
+          if (result === 'no_list') return;
+          // The version written: a row changed meanwhile stays due.
+          if (version) await runtime.db.execute(sql`UPDATE nightmail_waitlist SET list_synced_at=${version}::timestamptz,list_synced_attempts=${attempts}
+            WHERE email=${row.email} AND attempts=${attempts} AND greatest(last_at,let_in_at)=${version}::timestamptz`);
+        }
+        if (Date.now() > until) throw more();
+      }
+    } finally { if (Object.keys(counts).length) logRun(list, 'sync', counts); }
+  }),
+  // Contacts still waiting or let in whose address left the waitlist without a sign-up, because an invitation, staff or
+  // an operator's binding let its account in: status admitted, and nothing else about them changes.
+  'signups.reconcile': retryDatabaseFailures(async (runtime, payload, job) => {
+    const list = listOf(runtime, job.workspaceId), until = Date.now() + RUN_MS, counts: Counts = {};
+    if (!list) return;
+    const admitted = (address: SQL) => sql`NOT EXISTS (SELECT FROM nightmail_waitlist w WHERE w.email=${address}) AND NOT EXISTS (SELECT FROM nightmail_signups s WHERE s.email=${address})
+      AND EXISTS (SELECT FROM nightmail_users u WHERE u.email_verified AND lower(u.email)=${address})`;
+    const { PropertiesInput } = await import('./audience.js');
+    let after = typeof payload.after === 'string' ? payload.after : '';
+    try {
+      for (;;) {
+        // Only this sync can mark a membership. Lock and recheck both member and contact; a user edit,
+        // deletion or manual re-add after the initial scan must not be overwritten.
+        const page = await runtime.db.transaction(async tx => {
+          const { rows } = await tx.execute<{ id: string; properties: Record<string, unknown> }>(sql`SELECT c.id,c.properties
+            FROM audience_list_members m JOIN audience_contacts c ON c.workspace_id=m.workspace_id AND c.id=m.contact_id
+            WHERE m.workspace_id=${list.workspaceId} AND m.list_id=${list.listId} AND m.signup_waitlist AND c.id>${after}
+              AND c.deleted_at IS NULL AND c.properties->>'status' IN ('waiting','let_in') AND ${admitted(sql`c.email`)}
+            ORDER BY c.id LIMIT ${BATCH} FOR UPDATE OF c SKIP LOCKED FOR SHARE OF m SKIP LOCKED`);
+          const ids = rows.filter(c => PropertiesInput.safeParse({ ...c.properties, status: 'admitted' }).success).map(c => c.id);
+          if (ids.length) await tx.execute(sql`UPDATE audience_contacts SET properties=jsonb_set(properties,'{status}','"admitted"'),updated_at=now()
+            WHERE workspace_id=${list.workspaceId} AND id=ANY(${sql.param(ids)}::text[])`);
+          return { rows, updated: ids.length };
+        });
+        counts.updated = (counts.updated ?? 0) + page.updated;
+        if (page.rows.length < BATCH) return;
+        after = page.rows[page.rows.length - 1]!.id;
+        if (Date.now() > until) throw new JobDeferred(new Date().toISOString(), { after }); // Opaque contact ID, never the mailbox.
+      }
+    } finally { if (Object.keys(counts).length) logRun(list, 'reconcile', counts); }
+  }),
+};

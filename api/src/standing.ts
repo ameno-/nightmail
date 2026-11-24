@@ -5,6 +5,7 @@ import { deliverNotice, evaluationFinished, noticeRecipients } from './account-n
 import { customerNotice, type NoticeInput } from './notices.js';
 import { queueTenantStatus, resumeHostedConnection, tenantStatusDrift, terminalColumns, terminalEvents, type HostedCaps } from './states.js';
 import { dailyLimit, ESTABLISHED, GOOD_STANDING, establishedBy, EVALUATION, evaluated, FREEZE_FLOOR, GROWTH, moveScore, nextGrowth, nextStanding, quality, stepRank, type DayEvidence, type GrowthHour, type DomainAuth, type Factor, type LadderInput, type Reason, type ScoreState, type Step, type TrackRecord, type Window } from './standing-model.js';
+import { DISPLAY_SCORE_ID_PREFIX, DISPLAY_SCORE_JOB } from './sender-score.js';
 import { productName } from './brand.js';
 import { checkSignInMail, standingAlert } from './operator-alerts.js';
 
@@ -37,11 +38,15 @@ export type Change = {
 };
 export const STANDING_EVENT = 'account.standing.changed';
 const STRIKE_DAYS = 90;
+// Only an actual birth retires a display. The same transaction fences a stale publisher without ever writing
+// display evidence to real standing. The worker also hides/completes a private job if it sees real standing.
+const retireDisplayAtBirth = sql`DELETE FROM jobs j USING created c
+  WHERE j.id=${DISPLAY_SCORE_ID_PREFIX}||c.workspace_id AND j.workspace_id=c.workspace_id AND j.type=${DISPLAY_SCORE_JOB}`;
 
 /** One transaction: lock the standing, check If-Match, write the change, its event and every side effect. */
 export async function applyChange(db: DbExecutor, change: Change): Promise<{ eventId: string; version: number; sequence: number; step: Step; previousStep: Step } | null> {
   const wid = change.workspaceId;
-  await db.execute(sql`INSERT INTO sender_standing(workspace_id,daily_limit,band_limit) SELECT workspace_id,${EVALUATION.limit}::int,${EVALUATION.limit}::int FROM provider_connections WHERE workspace_id=${wid} AND kind='shared' ON CONFLICT DO NOTHING`);
+  await db.execute(sql`WITH created AS (INSERT INTO sender_standing(workspace_id,daily_limit,band_limit) SELECT workspace_id,${EVALUATION.limit}::int,${EVALUATION.limit}::int FROM provider_connections WHERE workspace_id=${wid} AND kind='shared' ON CONFLICT DO NOTHING RETURNING workspace_id) ${retireDisplayAtBirth}`);
   // A pause that is resuming (waiting for its SES tenants to be enabled again) counts as lifted: a new pause re-arms it.
   const [row] = (await db.execute<StandingRow & { paused_at: string | null; held: boolean; exempt: boolean; connection_id: string }>(sql`SELECT s.*,CASE WHEN pc.resume_pending_at IS NULL THEN pc.paused_at END AS paused_at,
     pc.marketing_held_at IS NOT NULL AS held,w.exempt_hosted_quotas AS exempt,pc.id AS connection_id FROM sender_standing s
@@ -277,7 +282,7 @@ export async function refreshStanding(runtime: Runtime, options: { now?: Date; o
   if (!runtime.config.multiTenant) return { evaluated: 0, changed: 0 };
   const now = options.now ?? new Date(), limit = options.limit ?? 500;
   // A new workspace starts in its evaluation, at its limit (not the column's default, 100, which predates it).
-  await runtime.db.execute(sql`INSERT INTO sender_standing(workspace_id,daily_limit,band_limit) SELECT workspace_id,${EVALUATION.limit}::int,${EVALUATION.limit}::int FROM provider_connections WHERE kind='shared' ${options.only ? sql`AND workspace_id=${options.only}` : sql``} ON CONFLICT DO NOTHING`);
+  await runtime.db.execute(sql`WITH created AS (INSERT INTO sender_standing(workspace_id,daily_limit,band_limit) SELECT workspace_id,${EVALUATION.limit}::int,${EVALUATION.limit}::int FROM provider_connections WHERE kind='shared' ${options.only ? sql`AND workspace_id=${options.only}` : sql``} ON CONFLICT DO NOTHING RETURNING workspace_id) ${retireDisplayAtBirth}`);
   await refreshEvidence(runtime.db, options.only ? 1 : 200);
   const rows = await candidates(runtime, limit, options.only);
   const today = now.toISOString().slice(0, 10), routine: Record<string, unknown>[] = [];

@@ -594,9 +594,197 @@ export type SegmentRule = {
                 field: 'lastOpenAt' | 'lastClickAt';
                 operator: 'within' | 'inactive';
                 days: number;
+            } | {
+                field: 'property';
+                /**
+                 * The property name, as in a contact's properties.
+                 */
+                key: string;
+                type: 'string';
+                /**
+                 * Compare JSON strings only. eq and neq are case-sensitive; contains ignores case. Missing, null and non-string properties never match.
+                 */
+                operator: 'eq' | 'neq' | 'contains';
+                value: string;
+            } | {
+                field: 'property';
+                /**
+                 * The property name, as in a contact's properties.
+                 */
+                key: string;
+                type: 'number';
+                operator: 'eq' | 'lt' | 'gt';
+                /**
+                 * Compared with a property that is a JSON number or a signed decimal string, optionally in scientific notation, within PostgreSQL numeric range. Other values never match.
+                 */
+                value: number;
+            } | {
+                field: 'property';
+                /**
+                 * The property name, as in a contact's properties.
+                 */
+                key: string;
+                type: 'date';
+                operator: 'before' | 'after' | 'on';
+                /**
+                 * Compare UTC calendar days. Accept a valid YYYY-MM-DD or a date with T and HH:MM[:SS[.fraction]], optionally Z or a signed hour/minute offset. No offset means UTC; invalid values never match.
+                 */
+                value: string;
+            } | {
+                field: 'property';
+                /**
+                 * The property name, as in a contact's properties.
+                 */
+                key: string;
+                type: 'string' | 'number' | 'date';
+                /**
+                 * set: the property has a value other than null; notSet: it has none. The same for every type.
+                 */
+                operator: 'set' | 'notSet';
             }>;
+        } | {
+            field: 'property';
+            /**
+             * The property name, as in a contact's properties.
+             */
+            key: string;
+            type: 'string';
+            /**
+             * Compare JSON strings only. eq and neq are case-sensitive; contains ignores case. Missing, null and non-string properties never match.
+             */
+            operator: 'eq' | 'neq' | 'contains';
+            value: string;
+        } | {
+            field: 'property';
+            /**
+             * The property name, as in a contact's properties.
+             */
+            key: string;
+            type: 'number';
+            operator: 'eq' | 'lt' | 'gt';
+            /**
+             * Compared with a property that is a JSON number or a signed decimal string, optionally in scientific notation, within PostgreSQL numeric range. Other values never match.
+             */
+            value: number;
+        } | {
+            field: 'property';
+            /**
+             * The property name, as in a contact's properties.
+             */
+            key: string;
+            type: 'date';
+            operator: 'before' | 'after' | 'on';
+            /**
+             * Compare UTC calendar days. Accept a valid YYYY-MM-DD or a date with T and HH:MM[:SS[.fraction]], optionally Z or a signed hour/minute offset. No offset means UTC; invalid values never match.
+             */
+            value: string;
+        } | {
+            field: 'property';
+            /**
+             * The property name, as in a contact's properties.
+             */
+            key: string;
+            type: 'string' | 'number' | 'date';
+            /**
+             * set: the property has a value other than null; notSet: it has none. The same for every type.
+             */
+            operator: 'set' | 'notSet';
         }>;
+    } | {
+        field: 'property';
+        /**
+         * The property name, as in a contact's properties.
+         */
+        key: string;
+        type: 'string';
+        /**
+         * Compare JSON strings only. eq and neq are case-sensitive; contains ignores case. Missing, null and non-string properties never match.
+         */
+        operator: 'eq' | 'neq' | 'contains';
+        value: string;
+    } | {
+        field: 'property';
+        /**
+         * The property name, as in a contact's properties.
+         */
+        key: string;
+        type: 'number';
+        operator: 'eq' | 'lt' | 'gt';
+        /**
+         * Compared with a property that is a JSON number or a signed decimal string, optionally in scientific notation, within PostgreSQL numeric range. Other values never match.
+         */
+        value: number;
+    } | {
+        field: 'property';
+        /**
+         * The property name, as in a contact's properties.
+         */
+        key: string;
+        type: 'date';
+        operator: 'before' | 'after' | 'on';
+        /**
+         * Compare UTC calendar days. Accept a valid YYYY-MM-DD or a date with T and HH:MM[:SS[.fraction]], optionally Z or a signed hour/minute offset. No offset means UTC; invalid values never match.
+         */
+        value: string;
+    } | {
+        field: 'property';
+        /**
+         * The property name, as in a contact's properties.
+         */
+        key: string;
+        type: 'string' | 'number' | 'date';
+        /**
+         * set: the property has a value other than null; notSet: it has none. The same for every type.
+         */
+        operator: 'set' | 'notSet';
     }>;
+} | {
+    field: 'property';
+    /**
+     * The property name, as in a contact's properties.
+     */
+    key: string;
+    type: 'string';
+    /**
+     * Compare JSON strings only. eq and neq are case-sensitive; contains ignores case. Missing, null and non-string properties never match.
+     */
+    operator: 'eq' | 'neq' | 'contains';
+    value: string;
+} | {
+    field: 'property';
+    /**
+     * The property name, as in a contact's properties.
+     */
+    key: string;
+    type: 'number';
+    operator: 'eq' | 'lt' | 'gt';
+    /**
+     * Compared with a property that is a JSON number or a signed decimal string, optionally in scientific notation, within PostgreSQL numeric range. Other values never match.
+     */
+    value: number;
+} | {
+    field: 'property';
+    /**
+     * The property name, as in a contact's properties.
+     */
+    key: string;
+    type: 'date';
+    operator: 'before' | 'after' | 'on';
+    /**
+     * Compare UTC calendar days. Accept a valid YYYY-MM-DD or a date with T and HH:MM[:SS[.fraction]], optionally Z or a signed hour/minute offset. No offset means UTC; invalid values never match.
+     */
+    value: string;
+} | {
+    field: 'property';
+    /**
+     * The property name, as in a contact's properties.
+     */
+    key: string;
+    type: 'string' | 'number' | 'date';
+    /**
+     * set: the property has a value other than null; notSet: it has none. The same for every type.
+     */
+    operator: 'set' | 'notSet';
 };
 
 export type AudienceImport = {

@@ -1,6 +1,5 @@
 import { useCallback, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { Link } from 'react-router'
-import type { UseQueryResult } from '@tanstack/react-query'
 import { ArrowUpRight, Check as CheckIcon, ChevronDown, ChevronRight, ExternalLink, Monitor, Moon, MoreHorizontal, Smartphone, Sun } from 'lucide-react'
 import { useApiQuery } from '../data/context'
 import type { ClientPreview, PreviewClient, PreviewIssue, SendabilityCategory, SendabilityFinding, SendabilityReport } from '../data/types'
@@ -16,7 +15,7 @@ import './email-insight.css'
 // review shows Checks.
 export type InsightSource = { kind: 'email'; id: string; html: boolean } | { kind: 'campaign'; id: string; revision: number }
 type Theme = 'light' | 'dark'
-type Check = UseQueryResult<SendabilityReport, Error>
+type Check = { data: SendabilityReport | undefined; error: Error | null; isPending: boolean; refetch: () => Promise<unknown> }
 
 /** Below this the campaign editor and review warn before sending (grade C starts at 70). Never blocking. */
 export const LOW_SENDABILITY = 70

@@ -58,6 +58,9 @@ const values = z.object({
   // Hosted only: From for owner notices about sender standing (warn, restrict, pause, quarantine). Sent through the
   // platform workspace above; unset means notices appear only in the dashboard and the account.standing.changed webhook.
   NIGHTMAIL_NOTIFY_FROM: optional(z.email().max(254)),
+  // Hosted only: a list (lst_…) of the platform workspace above that everyone who joins the waitlist or signs up is
+  // kept in as a contact, with properties to segment by (src/signups.ts). Unset, or not a list ID: nothing is written.
+  NIGHTMAIL_SIGNUPS_LIST_ID: z.unknown().optional(),
   // Hosted only, support integration (api/README.md "Support integration"): where "Contact support" sends a member, and
   // the Ed25519 private JWK (with "x") that signs the handoff it carries. Treat the key as a secret. The support
   // platform itself has no credential here: it calls the SupportPlatform service-binding entrypoint (src/worker.ts).
@@ -100,6 +103,9 @@ const values = z.object({
   STRIPE_SECRET_KEY: optional(z.string().regex(/^(?:sk|rk)_(?:test|live)_[A-Za-z0-9_]+$/)),
   STRIPE_WEBHOOK_SECRET: optional(z.string().regex(/^whsec_[A-Za-z0-9_]+$/)),
   STRIPE_AUTOMATIC_TAX: z.enum(['true','false']).default('false'),
+  // The one Stripe Product every top-up and recharge is for, created on first use with STRIPE_TAX_CODE (api/README.md, Stripe setup).
+  STRIPE_CREDIT_PRODUCT_ID: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/).default('nightmail_credit'),
+  STRIPE_TAX_CODE: z.string().regex(/^txcd_\d{8}$/).default('txcd_10103001'),
   STRIPE_API_BASE: z.url().default('https://api.stripe.com'),
   NIGHTMAIL_PLACEMENT_SHADOW: z.enum(['true','false']).default('true'),
   // Licensed DBL-compatible DNS zone (may contain a subscription key). Never log it.
@@ -183,12 +189,23 @@ function planetscaleSecret(value: string | undefined) {
   signingSecretIgnored = true;
   return undefined;
 }
+let signupsListIgnored = false;
+/** The sign-ups list, or undefined for a value that isn't a list ID: the optional sync is off, and nothing else is. Said once, never with the value. */
+function signupsListId(value: unknown): string | undefined {
+  if (value == null || value === '') return undefined;
+  if (typeof value === 'string' && /^lst_[0-9a-f]{32}$/.test(value)) return value;
+  if (!signupsListIgnored) log('warn', { code: 'SIGNUPS_LIST_IGNORED', message: 'NIGHTMAIL_SIGNUPS_LIST_ID is not a list ID (lst_ and 32 hex digits), so sign-ups are not kept in a list.' });
+  signupsListIgnored = true;
+  return undefined;
+}
 // Separate from Better Auth's signing/encryption uses even though installers manage one root secret.
 export function deriveEncryptionKey(secret: string): string {
   return Buffer.from(hkdfSync('sha256', secret, 'opensend:keys:v1', 'webhook-encryption', 32)).toString('hex');
 }
 export function loadConfig(input: Record<string, unknown>): Config {
-  const parsed = values.safeParse({...input, ...Object.fromEntries(settingKeys.map(key => [key, namesOf(key).map(name => input[name]).find(value => value !== undefined && value !== null)]))});
+  const catalogUnused = input.MULTI_TENANT !== 'true' || !input.STRIPE_SECRET_KEY || !input.STRIPE_WEBHOOK_SECRET;
+  const parsed = values.safeParse({...input, ...Object.fromEntries(settingKeys.map(key => [key, namesOf(key).map(name => input[name]).find(value => value !== undefined && value !== null)])),
+    ...(catalogUnused ? { STRIPE_CREDIT_PRODUCT_ID: undefined, STRIPE_TAX_CODE: undefined } : {})});
   if (!parsed.success) throw new ApiError(503, 'CONFIG_INVALID', `Missing or invalid server configuration: ${parsed.error.issues.map(i => i.path.join('.')).join(', ')}.`);
   const v = parsed.data;
   if (Boolean(v.ACCOUNT_CLIENT_ID) !== Boolean(v.ACCOUNT_CLIENT_PRIVATE_KEY)) throw new ApiError(503,'CONFIG_INVALID','Set both ACCOUNT_CLIENT_ID and ACCOUNT_CLIENT_PRIVATE_KEY.');
@@ -250,6 +267,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     workspaceId: 'default', multiTenant: v.MULTI_TENANT === 'true', authSecret: v.NIGHTMAIL_ROOT_SECRET, previousAuthSecret: v.PREVIOUS_NIGHTMAIL_ROOT_SECRET,mailGatewayToken:v.MAILGW_API_TOKEN,
     mailServers: v.MAILGW_API_TOKEN ? mailServerHosts(v.MAILGW_PUBLIC_DOMAIN ?? url.hostname) : undefined,
     platformAccount: v.NIGHTMAIL_PLATFORM_AWS_ACCOUNT, platformDomainWorkspace: v.MULTI_TENANT==='true' ? v.NIGHTMAIL_PLATFORM_DOMAIN_WORKSPACE : undefined, notifyFrom: v.MULTI_TENANT==='true' ? v.NIGHTMAIL_NOTIFY_FROM : undefined,
+    signupsListId: v.MULTI_TENANT==='true' ? signupsListId(v.NIGHTMAIL_SIGNUPS_LIST_ID) : undefined,
     support: v.MULTI_TENANT==='true' ? { url: v.NIGHTMAIL_SUPPORT_URL, signingKey: supportSigningKey, addressIds: supportAddressIds } : undefined,
     observability: v.MULTI_TENANT==='true' && v.CF_OBSERVABILITY_TOKEN && v.CF_OBSERVABILITY_ACCOUNT_ID && v.CF_OBSERVABILITY_SCRIPT
       ? { token: v.CF_OBSERVABILITY_TOKEN, accountId: v.CF_OBSERVABILITY_ACCOUNT_ID, script: v.CF_OBSERVABILITY_SCRIPT } : undefined, receivingRedrive:v.NIGHTMAIL_RECEIVING_REDRIVE==='true',byoTemplateUrl: v.BYO_TEMPLATE_URL, sharedRegions, regionalSending: v.MULTI_TENANT === 'true' && v.NIGHTMAIL_REGIONAL_SENDING === 'true',
@@ -262,7 +280,8 @@ export function loadConfig(input: Record<string, unknown>): Config {
     operatorSlackWebhookUrl: v.MULTI_TENANT==='true' ? v.OPERATOR_SLACK_WEBHOOK_URL : undefined,
     databaseDiskBytes: v.DATABASE_DISK_GB === undefined ? undefined : v.DATABASE_DISK_GB * 1024 ** 3,
     planetscaleWebhookSecret: v.MULTI_TENANT==='true' ? planetscaleSecret(v.PLANETSCALE_WEBHOOK_SECRET) : undefined,
-    billing: v.MULTI_TENANT==='true' ? { stripe: v.STRIPE_SECRET_KEY && v.STRIPE_WEBHOOK_SECRET ? { secretKey: v.STRIPE_SECRET_KEY, webhookSecret: v.STRIPE_WEBHOOK_SECRET, automaticTax: v.STRIPE_AUTOMATIC_TAX === 'true', apiBase: v.STRIPE_API_BASE.replace(/\/$/, '') } : undefined } : undefined,
+    billing: v.MULTI_TENANT==='true' ? { stripe: v.STRIPE_SECRET_KEY && v.STRIPE_WEBHOOK_SECRET ? { secretKey: v.STRIPE_SECRET_KEY, webhookSecret: v.STRIPE_WEBHOOK_SECRET, automaticTax: v.STRIPE_AUTOMATIC_TAX === 'true',
+      creditProduct: v.STRIPE_CREDIT_PRODUCT_ID, taxCode: v.STRIPE_TAX_CODE, apiBase: v.STRIPE_API_BASE.replace(/\/$/, '') } : undefined } : undefined,
     placementShadow: v.MULTI_TENANT === 'true' && v.NIGHTMAIL_PLACEMENT_SHADOW === 'true', placementDblZone: v.NIGHTMAIL_PLACEMENT_DBL_ZONE,
     byoV2: v.MULTI_TENANT === 'true' && v.NIGHTMAIL_BYO_V2 === 'true', byoV5TemplateUrl: v.BYO_V5_TEMPLATE_URL, byoEventsOrigin: v.BYO_EVENTS_ORIGIN,
     // The daily limit of a workspace the standing job has not seen yet: the evaluation's (docs/sending-limits.md).

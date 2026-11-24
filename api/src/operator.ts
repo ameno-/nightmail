@@ -4,7 +4,7 @@ import { sql, type SQL } from 'drizzle-orm';
 import { ApiError, dashboardSession, errors, json, notFound, response, security, type App, type Ctx, type DbExecutor } from './core.js';
 import { operatorRole, type OperatorRole } from './operator-identity.js';
 import { applyChange, type Change } from './standing.js';
-import { loadStanding, scoreView, StandingSchema } from './sender-score.js';
+import { loadDisplayedStanding, scoreView, StandingSchema } from './sender-score.js';
 import { clearProbe, queueCampaignRun, resumeCampaign } from './states.js';
 import { productName } from './brand.js';
 import { placesOpened, readPlaces, setLimit } from './signups.js';
@@ -152,7 +152,7 @@ export function registerOperator(app: App) {
     await operatorActor(c, 'operator:read');
     const wid = c.req.valid('param').id;
     await hostedWorkspace(c.env.db, wid);
-    const score = scoreView(await loadStanding(c.env, wid));
+    const score = scoreView(await loadDisplayedStanding(c.env, wid));
     const { rows: [row] } = await c.env.db.execute<z.infer<typeof WorkspaceView>>(sql`SELECT
       (SELECT json_build_object('id',id,'name',name,'createdAt',created_at) FROM workspaces WHERE id=${wid}) AS workspace,
       (SELECT json_build_object('region',pc.region,'paused',pc.paused_at IS NOT NULL,'resuming',pc.resume_pending_at IS NOT NULL,'pauseReason',pc.pause_reason,'tenantGeneration',pc.tenant_generation,
