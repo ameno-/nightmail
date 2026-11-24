@@ -296,8 +296,8 @@ export default {
     // A linked campaign image (src/linked-images.ts) is the same bytes for every reader: once answered, this colo keeps it
     // and answers it again before admission, the database or storage.
     const images = request.method === 'GET' && pathname.startsWith('/i/') && typeof caches !== 'undefined' ? (caches as unknown as { default: Cache }).default : undefined;
-    const imageKey = new Request(url.origin + pathname);
-    if (images) { const kept = await images.match(imageKey).catch(() => undefined); if (kept) return kept; }
+    const imageKey = images && new Request(url.origin + pathname);
+    if (images && imageKey) { const kept = await images.match(imageKey).catch(() => undefined); if (kept) return kept; }
     let deps: Awaited<ReturnType<typeof loadHttpDeps>> | undefined;
     try {
       deps = await loadHttpDeps();
@@ -343,7 +343,7 @@ export default {
       if(innerTiming) responseHeaders.set('server-timing', [innerTiming, `admission;dur=${admissionMs.toFixed(1)}`, `runtime;dur=${runtimeMs.toFixed(1)}`].join(', '));
       if (!(feedbackIngress && [400,429].includes(response.status))) core.log('info', { requestId: responseHeaders.get('x-request-id'), operation: 'worker-runtime', status: response.status, admissionMs: Number(admissionMs.toFixed(1)), runtimeMs: Number(runtimeMs.toFixed(1)) });
       const answer = core.secureResponse(new Response(response.body, { status: response.status, statusText: response.statusText, headers: responseHeaders }));
-      if (images && answer.status === 200) {
+      if (images && imageKey && answer.status === 200) {
         const kept = new Response(answer.clone().body, answer);
         kept.headers.delete('x-request-id'); kept.headers.delete('server-timing');
         ctx.waitUntil(images.put(imageKey, kept).catch(() => {}));
