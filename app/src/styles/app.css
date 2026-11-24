@@ -6,8 +6,14 @@ button svg:not(:where(.ui-icon)), .ui-button svg:not(:where(.ui-icon)) { width: 
 .app-shell { display: flow-root; height: 100dvh; overflow: hidden; background: var(--color-deep); }
 /* The cockpit (from 900 px): a 224px sidebar and a 44px command bar on one deep frame (an L, so the canvas inside it has
    one even edge all round), and the page as a solid canvas with its inner corner rounded. No rule draws any of them. */
-/* The frame and a phone's bars sit on deep: hover, selection and controls there take deep's own solid steps. */
-:is(.sidebar, .topbar, .mobile-bar, .tab-bar) { --color-hover: var(--color-deep-hover); --color-active-bg: var(--color-deep-active); --color-pressed: var(--color-deep-active); --color-control: var(--color-deep-control); --color-control-hover: var(--color-deep-control-hover); --color-control-focus: var(--color-deep-control-focus); --color-control-pressed: var(--color-deep-control-pressed); }
+/* The frame, a phone's bars, onboarding's header and the signed-out pages sit on deep: hover, selection and controls there
+   take deep's own solid steps. */
+:is(.sidebar, .topbar, .mobile-bar, .tab-bar, .onboarding-header, .signed-out) { --color-hover: var(--color-deep-hover); --color-active-bg: var(--color-deep-active); --color-pressed: var(--color-deep-active); --color-control: var(--color-deep-control); --color-control-hover: var(--color-deep-control-hover); --color-control-focus: var(--color-deep-control-focus); --color-control-pressed: var(--color-deep-control-pressed); }
+/* The one surface step beyond the page (layer-1: the email preview's matte, a phone's card, a notice) keeps the same
+   distance to its hover, focus, selection and controls as the canvas does: the raised set, a step off layer-1. */
+:is(.email-detail__preview, .ui-card, .ui-alert) { --color-hover: var(--color-raised-hover); --color-active-bg: var(--color-raised-active); --color-pressed: var(--color-raised-active); --color-control: var(--color-raised-control); --color-control-hover: var(--color-raised-control-hover); --color-control-focus: var(--color-raised-control-focus); --color-control-pressed: var(--color-raised-control-pressed); }
+/* A selected row already wears the selection fill: keyboard focus on it takes one step past it. */
+.ui-table tr[data-selected]:is(:focus-visible, :has(.ui-row-link:focus-visible)) > td { background: var(--color-raised-control-focus); }
 .sidebar { position: fixed; inset: 0 auto 0 0; z-index: 20; display: flex; flex-direction: column; width: var(--sidebar-width); padding: 0; overflow-y: auto; background: var(--color-deep); }
 /* The wordmark's row is as tall as the command bar beside it, so the two read as one band. */
 .sidebar-head { display: flex; flex: none; align-items: center; height: var(--topbar-height); padding: 0 var(--space-16); }

@@ -256,6 +256,7 @@
 .logs-bar .logs-controls .ui-tabs:last-child .ui-tab { min-width: 38px; font-family: var(--font-mono); }
 .logs-bar .logs-controls .ui-tab[aria-selected='true'] { background: var(--color-segment); color: var(--color-text); }
 .logs-bar .logs-controls .ui-tab:focus-visible:not([aria-selected='true']) { background: var(--color-control-focus); }
+.logs-bar .logs-controls .ui-tab[aria-selected='true']:focus-visible { text-decoration: underline; text-underline-offset: 3px; }
 .logs-bar__tools { display: flex; flex: 1; align-items: center; justify-content: flex-end; gap: var(--space-8); min-width: 0; }
 .logs-search.search-box { flex: 1 1 280px; width: auto; min-width: 160px; max-width: 420px; }
 .logs-search.search-box .ui-input { width: 100%; padding-inline: 30px; }

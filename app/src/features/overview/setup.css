@@ -24,8 +24,8 @@ li[data-done] > .setup-rail__mark > svg { opacity: 1; transform: none; }
 .limit-row { position: relative; display: flex; flex-direction: column; gap: var(--space-6); width: 100%; padding: 0; border: 0; background: none; color: inherit; font: inherit; font-size: var(--text-sm); line-height: var(--leading-sm); text-align: left; cursor: pointer; }
 .limit-row::before { content: ''; position: absolute; inset: -6px -8px; border-radius: var(--radius-sm); transition: background var(--motion-duration); }
 .limit-row > * { position: relative; }
-@media (hover: hover) and (pointer: fine) { .limit-row:hover::before { background: var(--color-layer-1); } }
-.limit-row:focus-visible::before { background: var(--color-layer-1); }
+@media (hover: hover) and (pointer: fine) { .limit-row:hover::before { background: var(--color-hover); } }
+.limit-row:focus-visible::before { background: var(--color-hover); }
 .limit-row__label { display: inline-flex; align-items: center; gap: var(--space-6); }
 .limit-row__label > svg { color: var(--color-muted); }
 .limit-row__note { display: flex; align-items: baseline; gap: var(--space-6); margin: 0; color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); font-variant-numeric: tabular-nums; text-wrap: pretty; }
