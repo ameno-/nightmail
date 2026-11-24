@@ -3936,9 +3936,11 @@ export async function screenHeldMail(runtime: Runtime, limit = 50): Promise<{ le
     const rules: 'probation' | 'standard' | null = isSimulatedSes(runtime) || !hosted || trusted ? null : r.on_probation ? 'probation' : 'standard';
     const needsScreen = !r.simulated && !isSimulatedSes(runtime) && (hosted || Boolean(snapshot.screen && snapshot.kind === 'transactional'));
 
+    // A row that could not be judged now (an outage, a failure of its own) waits a minute out of the oldest-first order, so
+    // rows that keep failing never hold back the ones behind them.
     const releaseHeld = async () => {
       deferred++;
-      await runtime.db.execute(sql`UPDATE sending_emails SET lease_until = NULL
+      await runtime.db.execute(sql`UPDATE sending_emails SET lease_until = clock_timestamp() + interval '1 minute'
         WHERE workspace_id = ${wid} AND id = ${id} AND dispatch_version = ${ver} AND status IN ('queued', 'scheduled') AND NOT screened`);
     };
     const passHeld = async (nextSnapshot: EmailSnapshot, countHosted: boolean) => {

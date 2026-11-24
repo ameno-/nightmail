@@ -20666,15 +20666,18 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         { id: spamId, status: 'queued', screened: false, lease_until: null },
       ]);
 
-      // 2. Classifier outage during screenHeldMail: rows stay held (screened=false, lease_until=null) and retry later.
+      // 2. Classifier outage during screenHeldMail: rows stay held (screened=false) and wait a minute before the next try,
+      // so rows that keep failing never hold back the ones behind them.
       outage = true;
       const sweepOutage = await screenHeldMail(runtime);
       assert.deepEqual(sweepOutage, { leased: 2, passed: 0, rejected: 0, deferred: 2 });
-      const stillHeld = (await db.query('SELECT id,status,screened,lease_until FROM sending_emails WHERE id=ANY($1) ORDER BY id', [[cleanId, spamId]])).rows;
+      const stillHeld = (await db.query('SELECT id,status,screened,lease_until > clock_timestamp() AS backing_off FROM sending_emails WHERE id=ANY($1) ORDER BY id', [[cleanId, spamId]])).rows;
       assert.deepEqual(stillHeld, [
-        { id: cleanId, status: 'queued', screened: false, lease_until: null },
-        { id: spamId, status: 'queued', screened: false, lease_until: null },
+        { id: cleanId, status: 'queued', screened: false, backing_off: true },
+        { id: spamId, status: 'queued', screened: false, backing_off: true },
       ]);
+      assert.deepEqual(await screenHeldMail(runtime), { leased: 0, passed: 0, rejected: 0, deferred: 0 }, 'A failed row is not picked again at once.');
+      await db.query('UPDATE sending_emails SET lease_until = clock_timestamp() - interval \'1 second\' WHERE id=ANY($1)', [[cleanId, spamId]]);
 
       // 3. Classifier healthy: screenHeldMail passes clean row (wakes dispatcher), rejects spam row with reject event + email.rejected webhook + hosted_screen_hourly.
       outage = false;
