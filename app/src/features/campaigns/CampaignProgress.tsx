@@ -4,7 +4,7 @@ import { Link } from 'react-router'
 import { useApiMutation, useWorkspaceAccess } from '../../data/context'
 import { campaignResumable, errorText, type Campaign, type CampaignPacingInput } from '../../data/types'
 import { Button, Checkbox, Input } from '../../components/ui'
-import { approxRelativeTime, date, localTime, number, time } from '../../lib/format'
+import { approxRelativeTime, date, localTime, number, relativeTime, time } from '../../lib/format'
 import { isDuplicateSubmission } from '../../lib/single-flight'
 
 export const liveInterval = 3000
