@@ -391,7 +391,7 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
       addresses?: { id: string; address: string }[]; candidate_count: number;
     };
     return await withBoundedRead(c, async () => {
-      const where = and(accessible(v,q),eq(messages.direction,q.direction),q.region?eq(messages.region,q.region):undefined,q.threadId?eq(messages.threadId,q.threadId):undefined,
+      const where = and(accessible(v,q,'perMessage'),eq(messages.direction,q.direction),q.region?eq(messages.region,q.region):undefined,q.threadId?eq(messages.threadId,q.threadId):undefined,
         q.q?sql`mail_messages.search @@ websearch_to_tsquery('simple',${q.q})`:undefined,after?sql`(${messages.receivedAt}, ${messages.id}) < (${after[0]}::timestamptz,${after[1]})`:undefined);
       const rows = await budgetedRead(c.env.db, async db => (await db.execute<ListMsgRow>(sql`
         WITH candidate AS (

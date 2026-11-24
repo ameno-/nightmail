@@ -30,8 +30,8 @@ export function visibleLinks(value: MailboxAccess, filter: Filter) {
 }
 // Which stored messages a reader can see. Shared with the message reads and the unified logs (logs.ts), so every list
 // applies the same rule. It names mail_messages and mailbox_messages unaliased: mail_messages is the row being read.
-export const accessibleMessages = (v: MailboxAccess, f: Filter) => and(eq(messages.workspaceId, v.workspaceId),
-  v.admin && !f.addressId ? retainedMail() : sql`EXISTS (SELECT 1 FROM ${links} WHERE ${visibleLinks(v, f)} AND ${links.messageId}=${messages.id})`);
+export const accessibleMessages = (v: MailboxAccess, f: Filter, retentionProbe?: Parameters<typeof retainedMail>[0]) => and(eq(messages.workspaceId, v.workspaceId),
+  v.admin && !f.addressId ? retainedMail(retentionProbe) : sql`EXISTS (SELECT 1 FROM ${links} WHERE ${visibleLinks(v, f)} AND ${links.messageId}=${messages.id})`);
 
 // Mail sent from a receiving address or inbox is conversation mail: a reply can quote the message it answers and a
 // forward carries it whole. The sending log lists and reads it only for credentials the receiving API lets read
