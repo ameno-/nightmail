@@ -24,7 +24,8 @@ export function Analytics({ identity, signedOut }: { identity: Identity | null; 
   useEffect(() => {
     if (pathname === viewed) return
     viewed = pathname
-    analytics().route(routeTemplateOf(pathname))
+    // The inline collector owns public views/CTAs, including React Router navigation after the static paint.
+    analytics().route(routeTemplateOf(pathname), (window as Window & { nmView?: () => boolean }).nmView?.())
   }, [pathname])
   return null
 }

@@ -15,6 +15,7 @@ app/*
 !app/bun.lock
 !app/tsconfig*.json
 !app/vite.config.ts
+!app/public-beacon.js
 !app/index.html
 !app/src/
 !app/src/**

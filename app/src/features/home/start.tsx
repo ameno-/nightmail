@@ -13,7 +13,7 @@ export function DashboardLink({ className, style, ref, children }: { className?:
 export function StartButton({ start, className, style, ref }: { start: HomeStart; className: string; style?: CSSProperties; ref?: Ref<HTMLElement> }) {
   if (start.signedIn) return <DashboardLink className={className} style={style} ref={ref as Ref<HTMLAnchorElement>}><span className="srt-cta-label">Open dashboard<ArrowRight className="srt-cta-arrow" size={16} strokeWidth={2} aria-hidden="true" /></span></DashboardLink>
   const { busy, onSignIn, onSignInIntent } = start
-  return <button type="button" className={className} ref={ref as Ref<HTMLButtonElement>} style={style} disabled={busy} aria-busy={busy || undefined} data-busy={busy || undefined} onClick={onSignIn} onPointerDown={onSignInIntent}>
+  return <button type="button" data-cta="sign-in" className={className} ref={ref as Ref<HTMLButtonElement>} style={style} disabled={busy} aria-busy={busy || undefined} data-busy={busy || undefined} onClick={onSignIn} onPointerDown={onSignInIntent}>
     <span className="srt-cta-label">Get started{busy ? <LoaderCircle className="ui-spinner" size={16} aria-hidden="true" /> : <ArrowRight className="srt-cta-arrow" size={16} strokeWidth={2} aria-hidden="true" />}</span>
   </button>
 }

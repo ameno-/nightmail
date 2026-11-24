@@ -1,15 +1,14 @@
+import { authenticate } from './auth.js';
+import { ANALYTICS_ROOT, analyticsStore, attribution, expireSalts, publicRows, trafficRows } from './analytics-traffic.js';
+import { exportRange, exportRollups, partition, pushDue, rollupHour } from './analytics-rollups.js';
+import { sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { ApiError, digest, log, type App, type Runtime, type Storage } from './core.js';
+import { ApiError, digest, log, type App, type Runtime } from './core.js';
 import { clientIpHeader } from './brand.js';
 import { ANALYTICS_EVENT_TYPES, ANALYTICS_LIMITS, ANALYTICS_PATH, FUNNEL_STEPS, VALIDITY_REASONS, VIEWPORTS, analyticsId, analyticsName, fieldName, operationTemplate, routeTemplate, scrubLabel } from './analytics-events.js';
 
-// Dashboard usage analytics (docs/analytics.md). The dashboard keeps nothing on the device: its session ID lives in the
-// page's memory, and a signed-in page names the account and workspace. It posts batches here with sendBeacon; each accepted batch
-// becomes one NDJSON object under raw/, and the hourly upkeep compacts every settled hour into one gzip object under
-// events/. Nothing here reads or writes Postgres: the analytics bucket (Workers: ANALYTICS, else the installation's own
-// bucket under analytics/) is the whole store, so a burst of clicks never spends a database connection.
-
-export const ANALYTICS_ROOT = 'analytics/v1/';
+// One bucket-backed ingest for both clients. Only settled-hour upkeep writes analytics to Postgres.
+export { ANALYTICS_ROOT, analyticsStore } from './analytics-traffic.js';
 /** Compacted days older than this are deleted by the hourly upkeep (hosted buckets also have a lifecycle backstop). */
 export const ANALYTICS_RETENTION_DAYS = 400;
 /** Batches a minute from one client address: a tab flushes at most every five seconds, plus once when it hides. */
@@ -24,6 +23,7 @@ const Envelope = z.object({
   sid: id,
   ws: z.string().max(64).nullish(), uid: z.string().max(64).nullish(),
   app: z.string().max(40).nullish(), vp: z.enum(VIEWPORTS),
+  r: z.unknown().optional(), u: z.unknown().optional(),
   events: z.array(z.unknown()).min(1).max(ANALYTICS_LIMITS.events),
 });
 const text = (max: number) => z.string().max(max).nullish();
@@ -36,6 +36,7 @@ const Event = z.object({
 });
 export type AnalyticsRow = {
   v: 1; id: string; received: string; t: string; seq: number; sid: string; ws: string | null; uid: string | null; app: string | null; vp: typeof VIEWPORTS[number] | null;
+  vid?: string | null; public?: boolean; width?: number; referrer?: string | null; source?: string | null; medium?: string | null; campaign?: string | null; country?: string | null; device?: string | null;
   type: typeof ANALYTICS_EVENT_TYPES[number]; route: string; ref: string | null; target: string | null; name: string | null; role: string | null; label: string | null;
   field: string | null; reason: string | null; code: string | null; op: string | null; status: number | null; ms: number | null; step: string | null;
 };
@@ -55,10 +56,10 @@ export function analyticsRows(body: unknown, now: number): { rows: AnalyticsRow[
   for (const raw of events) {
     const parsed = Event.safeParse(raw), event = parsed.success ? parsed.data : null;
     const route = event && routeTemplate(event.route);
-    if (!event || !route || event.type === 'sign_in' || (event.type === 'track' && !event.step) || (event.type === 'api_error' && !event.code)) continue;
+    if (!event || !route || (event.type === 'sign_in' || event.type === 'bot_view') || (event.type === 'track' && !event.step) || (event.type === 'api_error' && !event.code)) continue;
     const name = analyticsName(event.name), role = typeof event.role === 'string' && /^[a-z]{1,16}$/.test(event.role) ? event.role : null;
     const label = name ? null : scrubLabel(event.label);
-    rows.push({ ...base, id: event.id, t: new Date(Math.abs(event.t - now) > DAY_MS ? now : event.t).toISOString(), seq: event.seq, type: event.type, route,
+    rows.push({ ...base, ...(event.type === 'page_view' ? attribution(envelope.data.r, envelope.data.u) : {}), id: event.id, t: new Date(Math.abs(event.t - now) > DAY_MS ? now : event.t).toISOString(), seq: event.seq, type: event.type, route,
       ref: routeTemplate(event.ref), target: name ?? (ELEMENT_EVENTS.has(event.type) && (role || label) ? (role ?? 'element') + ':' + (label ?? '') : null), name, role, label,
       field: fieldName(event.field), reason: event.reason ?? null, code: event.code && /^[A-Z][A-Z0-9_]{0,63}$/.test(event.code) ? event.code : null,
       op: operationTemplate(event.op), status: event.status ?? null, ms: event.ms ?? null, step: event.step ?? null });
@@ -69,12 +70,10 @@ export function analyticsRows(body: unknown, now: number): { rows: AnalyticsRow[
 const workspaceId = (value: unknown) => typeof value === 'string' && /^(?:ws_[0-9a-f]{32}|default)$/.test(value) ? value : null;
 const userId = (value: unknown) => typeof value === 'string' && /^[A-Za-z0-9-]{8,64}$/.test(value) ? value : null;
 
-/** Where analytics objects live: the Worker's ANALYTICS bucket, else the installation's own bucket. */
-export const analyticsStore = (runtime: Runtime): Storage => runtime.analyticsStorage ?? runtime.storage;
-const hourPath = (ms: number) => { const iso = new Date(ms).toISOString(); return 'dt=' + iso.slice(0, 10) + '/h=' + iso.slice(11, 13); };
 const encoder = new TextEncoder(), decoder = new TextDecoder();
-async function writeBatch(runtime: Runtime, rows: AnalyticsRow[], now: number) {
-  const key = ANALYTICS_ROOT + 'raw/' + hourPath(now) + '/' + now + '-' + crypto.randomUUID().replaceAll('-', '').slice(0, 16) + '.ndjson';
+type StoredRow = AnalyticsRow | Pick<AnalyticsRow, 'v' | 'id' | 'received' | 'type' | 'route'>;
+async function writeBatch(runtime: Runtime, rows: StoredRow[], now: number) {
+  const key = ANALYTICS_ROOT + 'raw/' + partition(now) + '/' + now + '-' + crypto.randomUUID().replaceAll('-', '').slice(0, 16) + '.ndjson';
   await analyticsStore(runtime).put(key, encoder.encode(rows.map(row => JSON.stringify(row)).join('\n') + '\n'), 'application/x-ndjson');
 }
 
@@ -108,12 +107,24 @@ async function allowBatch(runtime: Runtime, peer: string) {
 export function registerAnalytics(app: App) {
   // Internal: not in the OpenAPI document, the SDK or MCP. Anyone can post, so it answers only the dashboard's own
   // origin, counts batches per client address before reading a byte, and stores nothing it hasn't checked.
+  app.get(ANALYTICS_PATH + '/export', authenticate, async c => {
+    const { operatorActor } = await import('./operator.js');
+    await operatorActor(c, 'operator:read');
+    const range = exportRange(c.req.query('from'), c.req.query('to'), c.req.query('grain'));
+    return c.json(await exportRollups(c.env, range));
+  });
   app.post(ANALYTICS_PATH, async c => {
     const runtime = c.env, { config } = runtime;
     // Off (DASHBOARD_ANALYTICS): the dashboard sends nothing, and anything that arrives anyway is discarded unread.
     if (!config.dashboardAnalytics) return c.body(null, 204);
-    const origin = c.req.header('origin');
-    if (!origin || ![config.publicUrl, ...config.previousOrigins ?? []].includes(origin)) throw new ApiError(403, 'ORIGIN_NOT_ALLOWED', 'Analytics are accepted only from this installation’s dashboard.');
+    const origin = c.req.header('origin'), site = c.req.header('sec-fetch-site'), host = new URL(c.req.url).host;
+    const approved = [config.publicUrl, ...config.previousOrigins ?? []];
+    // WebKit redacts Origin under no-referrer, even on same-origin POSTs. Require explicit browser Fetch Metadata
+    // for that case and an approved destination host. Node may see HTTP behind a TLS-terminating proxy.
+    const allowed = origin === 'null'
+      ? site === 'same-origin' && approved.some(url => new URL(url).host === host)
+      : !!origin && approved.includes(origin) && new URL(origin).host === host && (site === undefined || site === 'same-origin');
+    if (!allowed) throw new ApiError(403, 'ORIGIN_NOT_ALLOWED', 'Analytics are accepted only from this installation’s dashboard.');
     // Do Not Track and Global Privacy Control: the dashboard sends nothing then, and a batch that says so is dropped.
     if (c.req.header('dnt') === '1' || c.req.header('sec-gpc') === '1') return c.body(null, 204);
     if (!(await allowBatch(runtime, await digest(c.req.header(clientIpHeader) ?? 'unknown')))) throw new ApiError(429, 'ANALYTICS_RATE_LIMITED', 'Too many analytics batches from this connection. Retry after one minute.', undefined, true);
@@ -122,10 +133,14 @@ export function registerAnalytics(app: App) {
     if (bytes.byteLength > ANALYTICS_LIMITS.bodyBytes) throw new ApiError(413, 'REQUEST_TOO_LARGE', 'Request exceeds the 32 KiB limit.');
     let body: unknown;
     try { body = JSON.parse(decoder.decode(bytes)); } catch { throw new ApiError(400, 'INVALID_JSON', 'Request body is not valid JSON.'); }
-    const now = Date.now(), { rows, dropped } = analyticsRows(body, now);
+    const now = Date.now(), { rows, dropped } = body && typeof body === 'object' && 'p' in body
+      ? { rows: publicRows(body, now), dropped: 0 } : analyticsRows(body, now);
     if (dropped) log('warn', { requestId: c.get('requestId'), code: 'ANALYTICS_EVENTS_DROPPED', dropped, accepted: rows.length });
     // A bucket that can't take the batch loses it: the dashboard never retries, and this isn't a database outage.
-    if (rows.length) await writeBatch(runtime, rows, now).catch(() => { throw new ApiError(503, 'ANALYTICS_UNAVAILABLE', 'Analytics storage is unavailable.', undefined, true); });
+    if (rows.length) await (async () => {
+      const enriched = await trafficRows(runtime, rows, c.req.header('user-agent') ?? '', runtime.analyticsPeer?.ip ?? c.req.header(clientIpHeader) ?? '', now);
+      if (enriched.length) await writeBatch(runtime, enriched, now);
+    })().catch(() => { throw new ApiError(503, 'ANALYTICS_UNAVAILABLE', 'Analytics storage is unavailable.', undefined, true); });
     return c.body(null, 204);
   });
 }
@@ -141,7 +156,7 @@ async function gzip(bytes: Uint8Array) {
 }
 
 /**
- * Hourly: each settled hour's raw batches become one gzip NDJSON object under events/ (per 1,000 batches), then the
+ * Hourly: each settled hour's raw batches become one gzip NDJSON object under events/ (per 64 batches), then the
  * batches are deleted; compacted days past the retention go too. The object's name is a digest of the batches in it, so
  * two runs at once write the same object. A batch whose delete failed is compacted again later; readers deduplicate
  * by event ID (docs/analytics.md).
@@ -149,26 +164,32 @@ async function gzip(bytes: Uint8Array) {
 export async function compactAnalytics(runtime: Runtime, now = Date.now()) {
   const store = analyticsStore(runtime), result = { hours: 0, batches: 0, expired: 0 };
   if (!runtime.config.dashboardAnalytics || !store.list) return result;
-  const raw = ANALYTICS_ROOT + 'raw/', settled = hourPath(now - SETTLE_MS), hours = new Map<string, string[]>();
-  let after: string | undefined, pages = 0;
+  const raw = ANALYTICS_ROOT + 'raw/', settled = partition(now - SETTLE_MS), hours = new Map<string, string[]>();
+  await expireSalts(runtime, new Date(now).toISOString().slice(0,10));
+  let after: string | undefined;
   do {
     const page = await store.list(raw, after);
     for (const { key } of page.objects) {
       const hour = key.slice(raw.length).split('/', 2).join('/');
       if (/^dt=\d{4}-\d{2}-\d{2}\/h=\d{2}$/.test(hour) && hour < settled) { const keys = hours.get(hour); if (keys) keys.push(key); else hours.set(hour, [key]); }
     }
-    after = page.cursor;
-  } while (after && ++pages < 20);
+    // Never publish a partial hour because its keys crossed a listing page.
+    const last = page.objects.at(-1)?.key;
+    after = last && last < raw + settled ? page.cursor : undefined;
+  } while (after);
   for (const [hour, keys] of hours) {
-    for (let start = 0; start < keys.length; start += 1000) {
-      const part = keys.slice(start, start + 1000);
+    for (let start = 0; start < keys.length; start += 64) {
+      const part = keys.slice(start, start + 64);
       const bodies = await eachLimit(part, 8, key => store.get(key));
+      // If another run already removed a raw object, don't overwrite its complete part with a partial body.
+      const present = part.filter((_key,index) => bodies[index]);
       const lines = bodies.map(object => object ? decoder.decode(object.body) : '').filter(Boolean).map(body => body.endsWith('\n') ? body : body + '\n').join('');
-      if (lines) await store.put(ANALYTICS_ROOT + 'events/' + hour + '/' + (await digest(part.join('\n'))).slice(0, 16) + '.ndjson.gz', await gzip(encoder.encode(lines)), 'application/gzip');
-      await eachLimit(part, 8, key => store.delete(key));
-      result.batches += part.length;
+      if (lines) await store.put(ANALYTICS_ROOT + 'events/' + hour + '/' + (await digest(present.join('\n'))).slice(0,16) + '.ndjson.gz', await gzip(encoder.encode(lines)), 'application/gzip');
     }
-    result.hours++;
+    const ms = Date.parse(hour.slice(3,13)+'T'+hour.slice(-2)+':00:00Z');
+    await rollupHour(runtime, ms); // Commit before deleting raw: a crash at any point leaves a retry trigger.
+    await eachLimit(keys, 8, key => store.delete(key));
+    result.batches += keys.length; result.hours++;
   }
   // The days just past the retention, a week of them, so a few missed runs still catch up.
   for (let back = 0; back < 7; back++) {
@@ -179,6 +200,14 @@ export async function compactAnalytics(runtime: Runtime, now = Date.now()) {
       await eachLimit(page.objects, 8, object => store.delete(object.key));
       result.expired += page.objects.length; cursor = page.cursor;
     } while (cursor);
+  }
+  const cutoff = new Date(now - ANALYTICS_RETENTION_DAYS*DAY_MS).toISOString().slice(0,10)+'T00:00:00Z';
+  await runtime.db.execute(sql`DELETE FROM analytics_hours WHERE hour < ${cutoff}`);
+  await runtime.db.execute(sql`DELETE FROM analytics_funnel_first WHERE hour < ${cutoff}`);
+  if (runtime.config.analyticsPush) {
+    const latest = (Math.floor((now-SETTLE_MS)/3_600_000)-1)*3_600_000;
+    if (!hours.has(partition(latest))) await rollupHour(runtime,latest);
+    await pushDue(runtime,now);
   }
   if (result.hours || result.expired) log('info', { code: 'ANALYTICS_COMPACTED', ...result });
   return result;

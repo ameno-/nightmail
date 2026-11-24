@@ -4,7 +4,7 @@
 
 export const ANALYTICS_PATH = '/internal/v1/analytics';
 /** sign_in is written by the API alone, at the sign-in callback: it links a signed-out page's session to the account. */
-export const ANALYTICS_EVENT_TYPES = ['page_view', 'page_hide', 'click', 'dialog_open', 'dialog_close', 'form_submit', 'form_invalid', 'api_error', 'track', 'sign_in'] as const;
+export const ANALYTICS_EVENT_TYPES = ['page_view', 'page_hide', 'click', 'dialog_open', 'dialog_close', 'form_submit', 'form_invalid', 'api_error', 'track', 'sign_in', 'bot_view'] as const;
 export type AnalyticsEventType = typeof ANALYTICS_EVENT_TYPES[number];
 /** The funnel steps the dashboard reports with track(). */
 export const FUNNEL_STEPS = ['signed_up', 'domain_added', 'domain_verified', 'first_send', 'key_created', 'inbox_created', 'campaign_sent', 'byo_connected'] as const;
