@@ -97,13 +97,14 @@ export async function drainDirtyFacetMessages(db:Database,workspace:string,limit
 
 /** Apply clock-only expirations using grouped deadlines, never a per-mail scan. A partly applied
  * time frontier is private: source reconciliation and certification wait until it is complete. */
-export async function advanceInboundFacetClock(db:Database,workspace:string,limit=DEADLINE_PAGE) {
+export async function advanceInboundFacetClock(db:Database,workspace:string,limit=DEADLINE_PAGE,sourceTime?:string) {
   if(!Number.isInteger(limit)||limit<1||limit>DEADLINE_PAGE)throw new RangeError('Invalid Logs expiry batch');
   return db.transaction(async tx=>{
     const c=await lockFacetCoverage(tx,workspace);if(!c)return null;
     const p=await progress(tx,workspace,c.generation);if(!p)return null;
     const {rows:[result]}=await tx.execute<{expired:number;done:boolean}>(sql`WITH boundary AS MATERIALIZED (
-      SELECT coalesce(${p.advancing}::timestamptz,greatest(${p.clock}::timestamptz,statement_timestamp())) AS target),
+      SELECT coalesce(${p.advancing}::timestamptz,greatest(${p.clock}::timestamptz,
+        coalesce(${sourceTime??null}::timestamptz,statement_timestamp()))) AS target),
       page AS MATERIALIZED (SELECT minute,region,band,status,deadline,n FROM log_facet_deadlines
         WHERE workspace_id=${workspace} AND generation=${c.generation} AND deadline<=(SELECT target FROM boundary)
         ORDER BY deadline,minute,region,band,status LIMIT ${limit+1}),

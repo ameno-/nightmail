@@ -14,7 +14,7 @@ const periods = { '24h': 1_440, '7d': 10_080, '30d': 43_200 } as const;
 export const logFacetPeriod = (value: unknown): LogFacetPeriod | undefined =>
   value === '24h' || value === '7d' || value === '30d' ? value : undefined;
 type Published = { version: 1; period: LogFacetPeriod; region: string | null; from: string; cut: LogFacetCut; absolute?: { from: string; cut: LogFacetCut } };
-const snapshotId = async (workspaceId:string, region:string|null, period:LogFacetPeriod) =>
+export const snapshotId = async (workspaceId:string, region:string|null, period:LogFacetPeriod) =>
   'job_logfacets_snapshot_' + await digest(JSON.stringify([1,workspaceId,region,period]));
 function canonicalLower(period:LogFacetPeriod, cut:LogFacetCut, from:string) {
   const stamp=Date.parse(cut.asOf);
