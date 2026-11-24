@@ -24277,7 +24277,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       t.mock.method(SESv2Client.prototype,'send',async(cmd:any)=>cmd instanceof GetAccountCommand?{SendingEnabled:true,SendQuota:{MaxSendRate:10000,Max24HourSend:100000,SentLast24Hours:0}}:{MessageId:randomUUID()});
       const gate=initialGate(),run=()=>runDispatcher(runtime,{region:REGION,accountId:acct,batchSize:24,lanes:1,gate});
       for(const [name,n] of [['attachment',24],['burst',48],['outage',96]] as const){
-        if(name==='burst'){await db.query(`DELETE FROM hosted_burst_windows WHERE workspace_id=$1`,[wid]);await db.query(`SELECT hosted_burst_ok($1,'bench.invalid',50,true),hosted_burst_ok($1,'bench.invalid',50,false)`,[wid]);}
+        if(name==='burst'){await db.query(`DELETE FROM hosted_burst_windows WHERE workspace_id=$1`,[wid]);await db.query(`SELECT hosted_burst_ok($1,'bench.invalid',50)`,[wid]);}
         if(name==='outage'){await db.query(`DELETE FROM hosted_burst_windows WHERE workspace_id=$1`,[wid]);outage=true;}
         const mail=Array.from({length:n},(_,i)=>({from:'a@bench.invalid',to:`success+${i}@simulator.amazonses.com`,subject:name+i,text:'Private fixture',attachments:[asset.id]}));
         const ids=ok(await local('POST','/v1/emails/batch',{emails:mail},'live',{authorization:`Bearer ${key.secret}`}),202).data.map((x:Json)=>x.id);
@@ -24286,7 +24286,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         t.diagnostic(`REVIEW ${name}: ${Date.now()-start}ms, ${screens} screen calls, peak ${peak}, ${q.mock.callCount()} SQL, ${rewritten} rows deferred, ${report.sent} accepted`);
         if(name==='attachment'){
           assert.equal(report.sent,n);assert.ok(peak>1 && peak<=6);
-          assert.equal((await db.query("SELECT sum(used)::int AS n FROM hosted_burst_windows WHERE workspace_id=$1 AND scope='#tx'",[wid])).rows[0].n,n);
+          assert.equal((await db.query("SELECT sum(used)::int AS n FROM hosted_burst_windows WHERE workspace_id=$1 AND scope=''",[wid])).rows[0].n,n);
         }
         if(name==='burst'){
           assert.deepEqual([report.sent,screens,rewritten],[0,0,0]);
@@ -34470,8 +34470,11 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       }
       await db.query(`INSERT INTO sender_standing(workspace_id,phase,first_recipients,score,target,quality,band_limit,daily_limit,step,computed_at,evidence_at) VALUES($1,'graded',500,80,80,80,10000,10000,'warn',now(),now()) ON CONFLICT(workspace_id) DO UPDATE SET daily_limit=10000, step='warn'`, [wsBlocked]);
       await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'c_'||$1||'_'||n,$1,'u'||n||'@example.net','subscribed' FROM generate_series(1,60) n`, [wsMkt]);
-      // Fill wsBlocked's transactional domain bucket (250/250 of 500/min cap) while leaving tenant room (250/500).
-      await db.query(`INSERT INTO hosted_burst_windows(workspace_id,scope,minute,used) VALUES ($1,'#tx',date_trunc('minute',now()),250),($1,'#tx:frozen.example.net',date_trunc('minute',now()),250)`, [wsBlocked]);
+      // Fill wsBlocked's domain bucket (250/250 of its 500/min cap, which both streams share under a daily limit) while
+      // leaving tenant room (250/500). Stay clear of a minute boundary, which would empty the windows mid-run; the fixture's
+      // transaction pins now() to its start, so stamp the windows with the clock the dispatcher's statements read.
+      while (new Date().getSeconds() > 50) await new Promise(resolve => setTimeout(resolve, 500));
+      await db.query(`INSERT INTO hosted_burst_windows(workspace_id,scope,minute,used) VALUES ($1,'',date_trunc('minute',clock_timestamp()),250),($1,'frozen.example.net',date_trunc('minute',clock_timestamp()),250)`, [wsBlocked]);
       const txSnap = JSON.stringify({ kind: 'transactional', from: 'a@frozen.example.net', to: ['u1@example.net'], cc: [], bcc: [], replyTo: [], region: REGION, subject: 'Notice', text: 'hi', attachments: [], tracking: false, headers: [] });
       const mktSnap = JSON.stringify({ kind: 'marketing', from: 'n@mkt.example.net', to: ['u1@example.net'], cc: [], bcc: [], replyTo: [], region: REGION, subject: 'News', text: 'hi', attachments: [], tracking: false, headers: [] });
       await db.query(`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,created_at)

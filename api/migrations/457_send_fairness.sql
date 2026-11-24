@@ -5,11 +5,12 @@ SET LOCAL lock_timeout='2s';
 --    a 0.5x per-sending-domain minute cap (hosted_burst_ok: cap / 2) as a softer guard and round-robin 1:1 fair share
 --    across concurrent marketing workspaces in the dispatcher. Evaluation, 24h growth, score caps, freezes, overrides,
 --    restore caps and the 50% customer daily share remain unchanged.
--- 2. Truly transactional mail (not campaign, not bulk-flagged) uses its own per-workspace ('#tx'), per-domain
---    ('#tx:' || domain) and per-sponsor ('#sponsor:tx') minute buckets in hosted_burst_windows at today's caps
---    (3,000/min workspace and 1,500/min domain at 200/s in good standing; the existing daily-limit formula otherwise),
---    separate from marketing's buckets. Marketing can never exhaust a workspace's transactional minute allowance, and
---    transactional stays bounded to prevent queue-jumping. hosted_growth still applies across all streams.
+-- 2. Truly transactional mail (not campaign, not bulk-flagged) from a good-standing workspace past growth uses its own
+--    per-workspace ('#tx'), per-domain ('#tx:' || domain) and per-sponsor ('#sponsor:tx') minute buckets in
+--    hosted_burst_windows at today's quarter-pool cap (3,000/min workspace and 1,500/min domain at 200/s), separate from
+--    marketing's buckets: marketing can never exhaust its transactional minute allowance, and transactional stays bounded
+--    to prevent queue-jumping. Every other workspace (calibration, growth, a daily limit, an override, a restore cap)
+--    keeps one minute cap shared by both streams, unchanged. hosted_growth still applies across all streams.
 -- 3. Tighten per-table autovacuum thresholds on sending_emails (SHARE UPDATE EXCLUSIVE only, no rewrite) so partial
 --    dispatch queue indexes do not accumulate hundreds of thousands of dead tuples during multi-million-row sends.
 
@@ -65,23 +66,27 @@ $$;
 -- from the previous release keep working without overload ambiguity during rollout.
 DROP FUNCTION IF EXISTS hosted_burst_ok(text, text, int);
 CREATE OR REPLACE FUNCTION hosted_burst_ok(wid text, domain_key text, cost int, is_transactional boolean DEFAULT false) RETURNS boolean LANGUAGE plpgsql VOLATILE AS $$
-DECLARE cap int; tenant int; dom int; sponsor text; gkey text; gcap int; gused int;
-  tscope text := CASE WHEN is_transactional THEN '#tx' ELSE '' END;
-  dscope text := CASE WHEN is_transactional THEN '#tx:' || domain_key ELSE domain_key END;
-  sscope text := CASE WHEN is_transactional THEN '#sponsor:tx' ELSE '#sponsor' END;
+DECLARE cap int; tenant int; dom int; sponsor text; gkey text; gcap int; gused int; split boolean; tscope text; dscope text; sscope text;
   tick timestamptz := date_trunc('minute', statement_timestamp());
 BEGIN
  IF cost = 0 THEN RETURN true; END IF;
- SELECT CASE WHEN is_transactional THEN hosted_tx_minute_cap(wid) ELSE hosted_minute_cap(wid) END,
+ SELECT hosted_minute_cap(wid),
    CASE WHEN p.send_cap_override IS NULL OR w.send_cap_override_expires_at <= now() THEN w.quota_sponsor END
  INTO cap, sponsor
  FROM hosted_admission_policy p JOIN workspaces w ON w.id = p.workspace_id WHERE p.workspace_id = wid AND NOT p.exempt_hosted_quotas;
  IF NOT FOUND THEN RETURN true; END IF;
+ SELECT g.key, g.cap INTO gkey, gcap FROM hosted_growth(wid) g;
+ -- Separate transactional buckets only where marketing paces at the full pool rate (good standing past growth); with a
+ -- daily limit, an override, a restore cap, during calibration or growth both streams share the one minute cap, as before.
+ split := is_transactional AND gkey IS NULL AND hosted_pool_paced(wid);
+ IF split THEN cap := hosted_tx_minute_cap(wid); END IF;
+ tscope := CASE WHEN split THEN '#tx' ELSE '' END;
+ dscope := CASE WHEN split THEN '#tx:' || domain_key ELSE domain_key END;
+ sscope := CASE WHEN split THEN '#sponsor:tx' ELSE '#sponsor' END;
  INSERT INTO hosted_burst_windows VALUES(wid, tscope, tick, 0) ON CONFLICT DO NOTHING;
  SELECT CASE WHEN minute = tick THEN used ELSE 0 END INTO tenant FROM hosted_burst_windows WHERE workspace_id = wid AND scope = tscope FOR UPDATE;
  SELECT used INTO dom FROM hosted_burst_windows WHERE workspace_id = wid AND scope = dscope AND minute = tick;
  IF tenant + cost > cap OR coalesce(dom, 0) + cost > greatest(50, cap / 2) THEN RETURN false; END IF;
- SELECT g.key, g.cap INTO gkey, gcap FROM hosted_growth(wid) g;
  IF gkey IS NOT NULL THEN
    -- The current minute's row is the sponsor's lock: claims of its growing workspaces count the hour one at a time.
    INSERT INTO hosted_growth_minutes AS m VALUES(gkey, tick, 0) ON CONFLICT ON CONSTRAINT hosted_growth_minutes_pkey DO UPDATE SET used = m.used WHERE false;
