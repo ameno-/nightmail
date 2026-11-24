@@ -5,7 +5,7 @@ import { setupResources } from './ses-setup.js';
 export type ByoPurpose = 'scan' | 'provision' | 'cleanup' | 'send' | 'template' | 'quota' | 'verify' | 'read' | 'delete' | 'mailfrom' | 'stack' | 'account' | 'update';
 export type ByoScope = { region: string; account: string; connectionId: string; domain?: string; template?: string; stack?: string; templateUrl?: string; changeSet?: string };
 /** The published role templates (api/byo-templates/<version>.yaml) a connected account may run. */
-export const BYO_TEMPLATE_VERSIONS = ['6.0'] as const;
+export const BYO_TEMPLATE_VERSIONS = ['6.0', '6.1'] as const;
 export const BYO_TEMPLATE_BUCKET = (platformAccount: string) => `nightmail-byo-templates-${platformAccount}`;
 export const byoTemplateUrl = (platformAccount: string, version: string = BYO_TEMPLATE_VERSIONS.at(-1)!) => `https://${BYO_TEMPLATE_BUCKET(platformAccount)}.s3.us-east-2.amazonaws.com/byo/${version}.yaml`;
 /** What each feature needs from a connected account's stack: the first published template version that grants it. A feature an
@@ -52,7 +52,7 @@ export function byoSessionStatements(purpose: ByoPurpose, s: ByoScope): Statemen
     // Requesting production access: read the account's state, then ask once (requestProductionAccess).
     case 'account': return [allow(['ses:GetAccount', 'ses:PutAccountDetails'], '*')];
     case 'read': return identity([]);
-    case 'verify': return identity(['ses:CreateEmailIdentity', 'ses:TagResource']);
+    case 'verify': return identity(['ses:CreateEmailIdentity', 'ses:TagResource', 'ses:PutEmailIdentityFeedbackAttributes']);
     case 'delete': return identity(['ses:DeleteEmailIdentity']);
     case 'mailfrom': return identity(['ses:PutEmailIdentityMailFromAttributes']);
     // The stack is always in us-east-2 (the template asserts it); Nightmail reads its status and outputs.

@@ -150,7 +150,7 @@ Resources:
                   StringEquals: { 'aws:RequestTag/bane:domain-claim': '${aws:ResourceTag/bane:domain-claim}' }
                   'Null': { 'aws:ResourceTag/bane:domain-claim': 'false' }
               - Effect: Allow
-                Action: ['ses:DeleteEmailIdentity', 'ses:PutEmailIdentityMailFromAttributes']
+                Action: ['ses:DeleteEmailIdentity', 'ses:PutEmailIdentityMailFromAttributes', 'ses:PutEmailIdentityFeedbackAttributes']
                 Resource: !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/*'
                 Condition: { 'Null': { 'aws:ResourceTag/bane:domain-claim': 'false' } }
               - Effect: Allow

@@ -1,0 +1,272 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Nightmail BYO 6.1. Creates one IAM role that Nightmail assumes to send mail through this account's Amazon SES, and tells Nightmail when the stack is created, updated or deleted. Install once, in us-east-2.
+# Versions are additive: a later 6.x only adds permissions and keeps the role's name, logical IDs and parameters.
+# Receiving isn't part of 6.1: classic SES can't limit receipt rules to Nightmail's own, and an account's active rule set
+# is never Nightmail's to change. Published: never edit this file; publish a change as a new version.
+Metadata:
+  TemplateVersion: '6.1'
+Parameters:
+  PlatformAccount:
+    Description: The Nightmail account allowed to assume the role (only through its nightmail-byo-* roles).
+    Type: String
+    Default: '009882681002'
+    AllowedValues: ['009882681002', '905840579680']
+  ExternalId:
+    Description: This connection's external ID, set by Nightmail. It isn't a secret; it stops another Nightmail workspace from using this role.
+    Type: String
+    AllowedPattern: '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}'
+  ConnectionId:
+    Type: String
+    AllowedPattern: 'conn_[0-9a-f]{32}'
+  WorkspaceId:
+    Description: The Nightmail workspace this account sends for.
+    Type: String
+    AllowedPattern: 'ws_[0-9a-f]{32}'
+  ResourcePrefix:
+    Description: nightmail- followed by the first 20 hex characters of SHA256(ConnectionId). Nightmail names everything it creates here with it.
+    Type: String
+    AllowedPattern: 'nightmail-[0-9a-f]{20}'
+  EventsHost:
+    Description: The only host SES feedback and inbound notifications may be sent to.
+    Type: String
+    Default: events.nightmail.dev
+    AllowedValues: [events.nightmail.dev, events.dev.nightmail.dev]
+  EnableAccountRequests:
+    Description: Let Nightmail request SES production access and higher sending quotas for you. PutAccountDetails can also turn production access off, and IAM can't limit it to turning it on.
+    Type: String
+    Default: 'true'
+    AllowedValues: ['false', 'true']
+  AccountRequestRegions:
+    Type: CommaDelimitedList
+    Default: us-east-1,us-east-2,us-west-1,us-west-2,af-south-1,ap-south-1,ap-south-2,ap-southeast-1,ap-southeast-2,ap-southeast-3,ap-southeast-4,ap-southeast-5,ap-southeast-6,ap-southeast-7,ap-northeast-1,ap-northeast-2,ap-northeast-3,ca-central-1,ca-west-1,eu-central-1,eu-central-2,eu-west-1,eu-west-2,eu-west-3,eu-south-1,eu-south-2,eu-north-1,il-central-1,mx-central-1,me-south-1,me-central-1,sa-east-1
+    AllowedValues: [us-east-1, us-east-2, us-west-1, us-west-2, af-south-1, ap-south-1, ap-south-2, ap-southeast-1, ap-southeast-2, ap-southeast-3, ap-southeast-4, ap-southeast-5, ap-southeast-6, ap-southeast-7, ap-northeast-1, ap-northeast-2, ap-northeast-3, ca-central-1, ca-west-1, eu-central-1, eu-central-2, eu-west-1, eu-west-2, eu-west-3, eu-south-1, eu-south-2, eu-north-1, il-central-1, mx-central-1, me-south-1, me-central-1, sa-east-1]
+Rules:
+  OhioOnly:
+    Assertions:
+      - Assert: !Equals [!Ref 'AWS::Region', us-east-2]
+        AssertDescription: Launch this stack in us-east-2 (Ohio), where Nightmail listens for it.
+  NotNightmail:
+    Assertions:
+      - Assert: !Not [!Equals [!Ref 'AWS::AccountId', '009882681002']]
+        AssertDescription: A Nightmail platform account can't be connected.
+      - Assert: !Not [!Equals [!Ref 'AWS::AccountId', '905840579680']]
+        AssertDescription: A Nightmail platform account can't be connected.
+Conditions:
+  AccountRequests: !Equals [!Ref EnableAccountRequests, 'true']
+Resources:
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref AWS::StackName
+      Description: !Sub 'Nightmail sends mail through Amazon SES with this role for workspace ${WorkspaceId} (connection ${ConnectionId}).'
+      MaxSessionDuration: 3600
+      Tags:
+        - {Key: 'nightmail:owner', Value: nightmail}
+        - {Key: 'nightmail:installation-id', Value: !Ref ConnectionId}
+        - {Key: 'nightmail:workspace', Value: !Ref WorkspaceId}
+        - {Key: 'nightmail:purpose', Value: byo-role}
+        - {Key: 'nightmail:template-version', Value: '6.1'}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # The Nightmail account, only through its broker roles, only with this connection's external ID. Every
+          # session is named nightmail-<purpose> and carries the connection ID, so CloudTrail shows what each call was for.
+          - Effect: Allow
+            Principal: {AWS: !Sub 'arn:aws:iam::${PlatformAccount}:root'}
+            Action: [sts:AssumeRole, sts:SetSourceIdentity]
+            Condition:
+              StringEquals: {'sts:ExternalId': !Ref ExternalId, 'sts:SourceIdentity': !Ref ConnectionId}
+              ArnLike: {'aws:PrincipalArn': !Sub 'arn:aws:iam::${PlatformAccount}:role/nightmail-byo-*'}
+              StringLike: {'sts:RoleSessionName': 'nightmail-*'}
+      Policies:
+        - PolicyName: Sending
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CommercialRegions
+                Effect: Deny
+                Action: '*'
+                Resource: '*'
+                Condition: {StringNotEquals: {'aws:RequestedRegion': [us-east-1, us-east-2, us-west-1, us-west-2, af-south-1, ap-south-1, ap-south-2, ap-southeast-1, ap-southeast-2, ap-southeast-3, ap-southeast-4, ap-southeast-5, ap-southeast-6, ap-southeast-7, ap-northeast-1, ap-northeast-2, ap-northeast-3, ca-central-1, ca-west-1, eu-central-1, eu-central-2, eu-west-1, eu-west-2, eu-west-3, eu-south-1, eu-south-2, eu-north-1, il-central-1, mx-central-1, me-south-1, me-central-1, sa-east-1]}}
+              - Sid: OnlyMailServices
+                Effect: Deny
+                NotAction: ['ses:*', 'sns:*', 'servicequotas:*', 'iam:GetRole', 'iam:ListRoleTags', 'iam:ListRolePolicies', 'iam:GetRolePolicy', 'iam:ListAttachedRolePolicies', 'cloudformation:DescribeStacks', 'cloudformation:DescribeStackResource', 'cloudformation:CreateChangeSet', 'cloudformation:DescribeChangeSet', 'cloudformation:DeleteChangeSet']
+                Resource: '*'
+              # Nothing that costs money or changes the whole account's mail settings.
+              - Sid: NeverAccountWide
+                Effect: Deny
+                Action: ['ses:CreateDedicatedIpPool', 'ses:PutDedicatedIp*', 'ses:PutAccountDedicatedIpWarmupAttributes', 'ses:PutDeliverabilityDashboardOption', 'ses:PutAccountVdmAttributes', 'ses:PutConfigurationSetVdmOptions', 'ses:PutAccountSuppressionAttributes', 'ses:PutAccountSendingAttributes', 'ses:CreateReceiptRuleSet', 'ses:DeleteReceiptRuleSet', 'ses:SetActiveReceiptRuleSet', 'ses:ReorderReceiptRuleSet', 'sns:AddPermission', 'sns:RemovePermission']
+                Resource: '*'
+              - Sid: OnlyNightmailEndpoint
+                Effect: Deny
+                Action: sns:Subscribe
+                Resource: '*'
+                Condition: {StringNotEquals: {'sns:Endpoint': !Sub 'https://${EventsHost}/v1/events/ses'}}
+              - Sid: OnlyHttps
+                Effect: Deny
+                Action: sns:Subscribe
+                Resource: '*'
+                Condition: {StringNotEquals: {'sns:Protocol': https}}
+              - Sid: NoAddressIdentities
+                Effect: Deny
+                Action: 'ses:*'
+                Resource: !Sub 'arn:aws:ses:*:${AWS::AccountId}:identity/*@*'
+              - Sid: ReadOwnRole
+                Effect: Allow
+                Action: ['iam:GetRole', 'iam:ListRoleTags', 'iam:ListRolePolicies', 'iam:GetRolePolicy', 'iam:ListAttachedRolePolicies']
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/${AWS::StackName}'
+              # Nightmail reads this stack (and its Connection resource, to check a request from CloudFormation is real) and
+              # can prepare an update of it from its own published templates. Only you can run it.
+              - Sid: ReadOwnStack
+                Effect: Allow
+                Action: ['cloudformation:DescribeStacks', 'cloudformation:DescribeStackResource', 'cloudformation:DescribeChangeSet', 'cloudformation:DeleteChangeSet']
+                Resource:
+                  - !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*'
+                  - !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:changeSet/nightmail-update-*/*'
+              - Sid: PrepareOwnUpdate
+                Effect: Allow
+                Action: cloudformation:CreateChangeSet
+                Resource: !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*'
+                Condition:
+                  StringLike: {'cloudformation:TemplateUrl': !Sub 'https://nightmail-byo-templates-${PlatformAccount}.s3.us-east-2.amazonaws.com/byo/*', 'cloudformation:ChangeSetName': 'nightmail-update-*'}
+                  'Null': {'cloudformation:RoleArn': 'true'}
+              - Sid: AccountReads
+                Effect: Allow
+                Action: ['ses:GetAccount', 'ses:ListEmailIdentities', 'ses:ListConfigurationSets', 'ses:DescribeActiveReceiptRuleSet']
+                Resource: '*'
+              - Sid: DomainReads
+                Effect: Allow
+                Action: ses:GetEmailIdentity
+                Resource: !Sub 'arn:aws:ses:*:${AWS::AccountId}:identity/?*.??*'
+              - Sid: OtherInstallations
+                Effect: Allow
+                Action: ses:GetConfigurationSet
+                Resource: [!Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/bane-*', !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/nightmail-*']
+              # Everything Nightmail creates here is named with ResourcePrefix and tagged with this connection when it's
+              # created. Reads need the name; every change needs the tags too, so a resource Nightmail didn't create is
+              # never changed, even under a matching name. New features in this namespace need no new permissions.
+              - Sid: ReadOwnResources
+                Effect: Allow
+                Action: ['ses:Get*', 'ses:List*', 'sns:Get*', 'sns:List*']
+                Resource:
+                  - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-*'
+                  - !Sub 'arn:aws:ses:*:${AWS::AccountId}:contact-list/${ResourcePrefix}-*'
+                  - !Sub 'arn:aws:sns:*:${AWS::AccountId}:${ResourcePrefix}-*'
+              - Sid: CreateOwnResources
+                Effect: Allow
+                Action: ['ses:CreateConfigurationSet', 'ses:CreateContactList', 'sns:CreateTopic']
+                Resource:
+                  - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-*'
+                  - !Sub 'arn:aws:ses:*:${AWS::AccountId}:contact-list/${ResourcePrefix}-*'
+                  - !Sub 'arn:aws:sns:*:${AWS::AccountId}:${ResourcePrefix}-*'
+                Condition:
+                  StringEquals: {'aws:RequestTag/nightmail:owner': nightmail, 'aws:RequestTag/nightmail:installation-id': !Ref ConnectionId}
+                  'Null': {'aws:RequestTag/nightmail:purpose': 'false'}
+                  'ForAllValues:StringLike': {'aws:TagKeys': 'nightmail:*'}
+              - Sid: ChangeOwnResources
+                Effect: Allow
+                Action: ['ses:*', 'sns:*']
+                Resource:
+                  - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-*'
+                  - !Sub 'arn:aws:ses:*:${AWS::AccountId}:contact-list/${ResourcePrefix}-*'
+                  - !Sub 'arn:aws:sns:*:${AWS::AccountId}:${ResourcePrefix}-*'
+                Condition:
+                  StringEquals: {'aws:ResourceTag/nightmail:owner': nightmail, 'aws:ResourceTag/nightmail:installation-id': !Ref ConnectionId}
+              # Tags are the ownership record: never rewrite or remove them.
+              - Sid: KeepOwnershipTags
+                Effect: Deny
+                Action: ['ses:UntagResource', 'sns:UntagResource']
+                Resource: '*'
+                Condition: {'ForAnyValue:StringLike': {'aws:TagKeys': 'nightmail:*'}}
+              - Sid: NoOtherOwner
+                Effect: Deny
+                Action: ['ses:TagResource', 'sns:TagResource']
+                Resource: '*'
+                Condition: {StringNotEqualsIfExists: {'aws:RequestTag/nightmail:owner': nightmail}}
+              - Sid: NoOtherInstallation
+                Effect: Deny
+                Action: ['ses:TagResource', 'sns:TagResource']
+                Resource: '*'
+                Condition: {StringNotEqualsIfExists: {'aws:RequestTag/nightmail:installation-id': !Ref ConnectionId}}
+              # Imported identities are never tagged, so the tags are IfExists: an identity Nightmail tagged
+              # for another installation in this account cannot be sent from through this role.
+              - Sid: Send
+                Effect: Allow
+                Action: ses:SendEmail
+                Resource: !Sub 'arn:aws:ses:*:${AWS::AccountId}:identity/?*.??*'
+                Condition:
+                  StringEquals: {'ses:ApiVersion': '2'}
+                  StringEqualsIfExists: {'aws:ResourceTag/nightmail:owner': nightmail, 'aws:ResourceTag/nightmail:installation-id': !Ref ConnectionId, 'aws:ResourceTag/nightmail:purpose': domain-identity}
+                  'Null': {'ses:TenantName': 'true', 'ses:MultiRegionEndpointId': 'true'}
+              # Sending through Nightmail's own configuration sets changes nothing, so it needs only the name.
+              - Sid: SendThroughOwnSets
+                Effect: Allow
+                Action: ses:SendEmail
+                Resource: !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-*'
+                Condition:
+                  StringEquals: {'ses:ApiVersion': '2'}
+                  'Null': {'ses:TenantName': 'true', 'ses:MultiRegionEndpointId': 'true'}
+              - Sid: Tracking
+                Effect: Allow
+                Action: ses:ApplyTrackingConfigurationOverrides
+                Resource: '*'
+                Condition: {StringEquals: {'ses:OpenTrackingEnabled': '${ses:ClickTrackingEnabled}'}}
+              - Sid: YourTemplates
+                Effect: Allow
+                Action: ['ses:GetEmailTemplate', 'ses:TestRenderEmailTemplate']
+                Resource: !Sub 'arn:aws:ses:*:${AWS::AccountId}:template/bane-*'
+              - Sid: CreateDomains
+                Effect: Allow
+                Action: ses:CreateEmailIdentity
+                Resource: !Sub 'arn:aws:ses:*:${AWS::AccountId}:identity/?*.??*'
+                Condition:
+                  StringEquals: {'aws:RequestTag/nightmail:owner': nightmail, 'aws:RequestTag/nightmail:installation-id': !Ref ConnectionId, 'aws:RequestTag/nightmail:purpose': domain-identity}
+                  StringLike: {'aws:RequestTag/nightmail:domain-claim': '????????-????-4???-????-????????????'}
+                  'ForAllValues:StringEquals': {'aws:TagKeys': ['nightmail:owner', 'nightmail:installation-id', 'nightmail:purpose', 'nightmail:domain-claim']}
+              - Sid: RetagOwnDomains
+                Effect: Allow
+                Action: ses:TagResource
+                Resource: !Sub 'arn:aws:ses:*:${AWS::AccountId}:identity/?*.??*'
+                Condition:
+                  StringEquals: {'aws:ResourceTag/nightmail:owner': nightmail, 'aws:ResourceTag/nightmail:installation-id': !Ref ConnectionId, 'aws:ResourceTag/nightmail:purpose': domain-identity, 'aws:RequestTag/nightmail:owner': nightmail, 'aws:RequestTag/nightmail:installation-id': !Ref ConnectionId, 'aws:RequestTag/nightmail:purpose': domain-identity, 'aws:RequestTag/nightmail:domain-claim': '${aws:ResourceTag/nightmail:domain-claim}'}
+                  StringLike: {'aws:ResourceTag/nightmail:domain-claim': '????????-????-4???-????-????????????'}
+                  'ForAllValues:StringEquals': {'aws:TagKeys': ['nightmail:owner', 'nightmail:installation-id', 'nightmail:purpose', 'nightmail:domain-claim']}
+              - Sid: OwnDomains
+                Effect: Allow
+                Action: ['ses:PutEmailIdentityMailFromAttributes', 'ses:PutEmailIdentityFeedbackAttributes', 'ses:DeleteEmailIdentity']
+                Resource: !Sub 'arn:aws:ses:*:${AWS::AccountId}:identity/?*.??*'
+                Condition:
+                  StringEquals: {'aws:ResourceTag/nightmail:owner': nightmail, 'aws:ResourceTag/nightmail:installation-id': !Ref ConnectionId, 'aws:ResourceTag/nightmail:purpose': domain-identity}
+                  StringLike: {'aws:ResourceTag/nightmail:domain-claim': '????????-????-4???-????-????????????'}
+        - !If
+          - AccountRequests
+          - PolicyName: AccountRequests
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action: ses:PutAccountDetails
+                  Resource: '*'
+                  Condition: {StringEquals: {'aws:RequestedRegion': !Ref AccountRequestRegions}}
+                - Effect: Allow
+                  Action: ['servicequotas:GetServiceQuota', 'servicequotas:RequestServiceQuotaIncrease', 'servicequotas:ListRequestedServiceQuotaChangeHistoryByQuota']
+                  Resource:
+                    - !Sub 'arn:aws:servicequotas:*:${AWS::AccountId}:ses/L-804C8AE8'
+                    - !Sub 'arn:aws:servicequotas:*:${AWS::AccountId}:ses/L-CDEF9B6B'
+                  Condition: {StringEquals: {'aws:RequestedRegion': !Ref AccountRequestRegions, 'servicequotas:service': ses}}
+          - !Ref AWS::NoValue
+  # CloudFormation tells Nightmail (an SNS topic in its account) when this stack is created, updated or deleted, so
+  # nothing has to be copied back and deleting the stack cleans up what Nightmail created. Nightmail answers only after it
+  # has proved it can use the role with this connection's external ID.
+  Connection:
+    Type: Custom::NightmailConnection
+    Properties:
+      ServiceToken: !Sub 'arn:aws:sns:us-east-2:${PlatformAccount}:nightmail-byo-setup'
+      ServiceTimeout: 900
+      ConnectionId: !Ref ConnectionId
+      RoleArn: !GetAtt Role.Arn
+      TemplateVersion: '6.1'
+Outputs:
+  AccountId: {Value: !Ref 'AWS::AccountId'}
+  RoleArn: {Value: !GetAtt Role.Arn}
+  TemplateVersion: {Value: '6.1'}
