@@ -19196,6 +19196,10 @@
                       "type": "boolean",
                       "description": "Nightmail staff only: this session may use staff UI notes. False for everyone else."
                     },
+                    "canCreateWorkspace": {
+                      "type": "boolean",
+                      "description": "Dashboard sessions: whether createWorkspace lets this session create another workspace. Hosted, only staff can for now; everyone else has one workspace and gets 403 WORKSPACE_LIMIT. False for keys, MCP and agent tokens."
+                    },
                     "analytics": {
                       "type": "boolean",
                       "description": "Whether this installation records how its dashboard is used (DASHBOARD_ANALYTICS). The dashboard sends nothing when false."
@@ -64551,7 +64555,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Create another workspace you own. Hosted: staff only (decided at sign-in), up to 10 per account. Select it with X-Nightmail-Workspace.",
+        "description": "Create another workspace you own. Hosted: staff only for now (decided at sign-in; everyone else gets 403 WORKSPACE_LIMIT, and GET /v1/me says so in canCreateWorkspace), up to 10 per account. Select it with X-Nightmail-Workspace.",
         "requestBody": {
           "required": true,
           "content": {

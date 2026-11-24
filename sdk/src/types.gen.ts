@@ -6288,6 +6288,10 @@ export type GetCurrentIdentityResponses = {
          */
         uiNotes?: boolean;
         /**
+         * Dashboard sessions: whether createWorkspace lets this session create another workspace. Hosted, only staff can for now; everyone else has one workspace and gets 403 WORKSPACE_LIMIT. False for keys, MCP and agent tokens.
+         */
+        canCreateWorkspace?: boolean;
+        /**
          * Whether this installation records how its dashboard is used (DASHBOARD_ANALYTICS). The dashboard sends nothing when false.
          */
         analytics?: boolean;

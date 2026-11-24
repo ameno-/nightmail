@@ -69,6 +69,7 @@ export function AccountSwitcher({ onConnectAgent }: { onConnectAgent?: () => voi
     setOpen(false); setBusy(true)
     try { await action() } catch (error) { if (isAbortError(error)) return; toast(errorText(error, failure), 'error'); void memberships.refresh() } finally { setBusy(false) }
   }
+  const oneWorkspace = identity.canCreateWorkspace === false
   const sections: Entry[][] = accounts.map(account => {
     const active = account.id === self.id
     return [
@@ -77,7 +78,8 @@ export function AccountSwitcher({ onConnectAgent }: { onConnectAgent?: () => voi
       ...account.workspaces.map(item => ({ key: `workspace:${account.id}:${item.id}`, text: item.name, label: <span className="account-menu__workspace-name">{item.name}</span>,
         checked: active && item.id === identity.workspaceId,
         onSelect: () => void run(() => active ? session!.switchWorkspace(item.id, sectionPath()) : session!.switchAccount(account.id, sectionPath(), item.id), 'Couldn’t switch workspace.') })),
-      ...active ? [{ key: 'new-workspace', text: 'New workspace…', label: 'New workspace…', icon: <Plus />, onSelect: () => { setOpen(false); setCreating(true) } }] : [],
+      // Hosted, only staff can create more workspaces for now (GET /v1/me canCreateWorkspace): nobody else is offered it.
+      ...active && !oneWorkspace ? [{ key: 'new-workspace', text: 'New workspace…', label: 'New workspace…', icon: <Plus />, onSelect: () => { setOpen(false); setCreating(true) } }] : [],
     ]
   })
   const full = accounts.length >= limit
@@ -88,7 +90,8 @@ export function AccountSwitcher({ onConnectAgent }: { onConnectAgent?: () => voi
     ...compact && onConnectAgent ? [{ key: 'connect-agent', text: 'Connect an agent…', label: 'Connect an agent…', icon: <Plug />, onSelect: () => { setOpen(false); onConnectAgent() } }] : [],
     { key: 'support', text: 'Contact support…', label: 'Contact support…', icon: <LifeBuoy />, onSelect: () => { setOpen(false); setSupport(true) } },
     // At the limit, Add account says why it can't, only when it is chosen.
-    { key: 'add', text: 'Add account', label: 'Add account', icon: <UserPlus />, onSelect: () => { setOpen(false); if (full) toast(`Up to ${limit} accounts. Sign out of one first.`, 'error'); else session!.addAccount() } },
+    // With one workspace per account, Add account says it signs in to an account that exists, not a new workspace.
+    { key: 'add', text: 'Add account', label: oneWorkspace ? <span className="account-menu__who"><span>Add account</span><span className="account-menu__note">For an account you already have</span></span> : 'Add account', icon: <UserPlus />, onSelect: () => { setOpen(false); if (full) toast(`Up to ${limit} accounts. Sign out of one first.`, 'error'); else session!.addAccount() } },
     { key: 'sign-out', text: 'Sign out of this account', label: 'Sign out of this account', icon: <LogOut />, onSelect: () => void run(() => session!.signOutAccount(self.id), 'Couldn’t sign out.') },
     ...accounts.length > 1 ? [{ key: 'sign-out-all', text: 'Sign out of all accounts', label: 'Sign out of all accounts', icon: <LogOut />, destructive: true, onSelect: () => void run(() => session!.signOutAll(), 'Couldn’t sign out.') }] : [],
   ])

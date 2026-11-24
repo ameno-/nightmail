@@ -5363,7 +5363,7 @@ export const listInboundWebhookDeliveries = <ThrowOnError extends boolean = fals
 });
 
 /**
- * Create another workspace you own. Hosted: staff only (decided at sign-in), up to 10 per account. Select it with X-Nightmail-Workspace.
+ * Create another workspace you own. Hosted: staff only for now (decided at sign-in; everyone else gets 403 WORKSPACE_LIMIT, and GET /v1/me says so in canCreateWorkspace), up to 10 per account. Select it with X-Nightmail-Workspace.
  */
 export const createWorkspace = <ThrowOnError extends boolean = false>(options: Options<CreateWorkspaceData, ThrowOnError>): RequestResult<CreateWorkspaceResponses, CreateWorkspaceErrors, ThrowOnError> => (options.client ?? client).post<CreateWorkspaceResponses, CreateWorkspaceErrors, ThrowOnError>({
     security: [{
