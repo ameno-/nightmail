@@ -2,10 +2,10 @@ import { sql } from 'drizzle-orm';
 import { logError, type Config, type Runtime } from './core.js';
 import { log } from './log.js';
 
-// A second classifier in the shadow of the content screen. Each request the screen really makes (src/screen.ts
+// A second classifier in the shadow of the content screen. Each primary request not routed to the failover gate (src/screen.ts
 // evaluate: a cache miss, one request per window) is repeated to it afterwards with the same state and questions, and
 // both answers are kept as one screen_comparisons row (migration 452), for operators to compare
-// (GET /v1/operator/screen-comparison). It decides nothing: the screen's verdict, cache, budget and thresholds never
+// (GET /v1/operator/screen-comparison). A comparison decides nothing: the screen's verdict, cache, budget and thresholds never
 // read anything here, and a request the screen did not make (a cached verdict, a handover, no screen) is not repeated.
 //
 // What is awaited where:

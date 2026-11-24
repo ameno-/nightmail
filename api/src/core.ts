@@ -155,7 +155,7 @@ export interface Config {
   inboundTopicArns?: string[];
   reputationAlertUrl?: string;
   // Opt-in Jev content screen for live transactional sends with `screen: true`; undefined without TYPESAFE_API_KEY.
-  screen?: { apiKey: string; endpoint: string; model: string; mode: 'reject' | 'flag'; threshold: number };
+  screen?: { apiKey: string; endpoint: string; model: string; mode: 'reject' | 'flag'; threshold: number; failover?: Config['shadow'] };
   // The second classifier that repeats the screen's requests after the fact (src/screen-shadow.ts); undefined without
   // JEVF_API_KEY (or without a screen), and then nothing of it runs.
   shadow?: { apiKey: string; endpoint: string; model: string; deadlineMs: number; maxConcurrency: number };

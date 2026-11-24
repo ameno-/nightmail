@@ -115,8 +115,7 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
   // simultaneous outbound-connection ceiling while the shared SES gate limits rate.
   const concurrency = jobConcurrency('JOB_CONCURRENCY' in env ? env.JOB_CONCURRENCY : undefined, 6);
   const config = configFor(env, CONFIG_KEYS, loadConfig);
-  // The second classifier's calls are made by its queue's consumer (queue() below), never in this invocation: what a
-  // job drain kept goes onto the queue when the drain has ended. With no queue bound there is nowhere to make them: off.
+  // Shadow comparisons go to the queue consumer when the drain ends. With no queue bound only comparisons are off.
   // Nothing here waits for those sends: the invocation's waitUntil keeps them alive after it has answered or
   // acknowledged. Only a caller with no waitUntil at all (none makes a classifier request) would wait for them at its end.
   const shadowQueue = env.JEVF_QUEUE, handovers: Promise<void>[] = [];
@@ -374,7 +373,7 @@ export default {
       return;
     }
     // The second classifier's queue (src/screen-shadow.ts): each message is one request the content screen made. Its
-    // consumer is the only place on Cloudflare that calls the second classifier: wrangler gives it at most
+    // consumer makes the comparisons: wrangler gives it at most
     // max_batch_size 4 messages an invocation (four calls and the database's connection, of an invocation's six) and
     // max_concurrency 2 invocations, eight calls in all. A batch whose rows are written is acknowledged; one whose rows
     // could not be written is delivered again (max_retries, no dead-letter queue), and then only recorded as lost.
