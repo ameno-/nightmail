@@ -10414,7 +10414,11 @@ describe('Lists, compound segments, imports and exports', () => {
   const recount = async (db: pg.Client, list: Json) => (await db.query('SELECT * FROM reconcile_audience_list_counts($1,$2)', [list.workspaceId, list.id])).rows;
   const importInto = async (key: Key, listId: string, emails: string[], body?: Json) => {
     const preview = ok(await http('POST', '/v1/contact-imports', key.secret, { csv: `email\n${emails.join('\n')}\n`, listId, mapping: { email: 'email' } }), 201);
-    return http('POST', `/v1/contact-imports/${preview.id}/commit`, key.secret, body);
+    for (let attempt = 0; ; attempt++) {
+      const reply = await http('POST', `/v1/contact-imports/${preview.id}/commit`, key.secret, body);
+      if (reply.status !== 503 || reply.body?.error?.code !== 'IMPORT_COMMIT_BUSY' || attempt >= 20) return reply;
+      await new Promise(resolve => setTimeout(resolve, 40 * (attempt + 1)));
+    }
   };
   const attested = { consent: { status: 'subscribed', evidence: 'Opted in at checkout' } };
   // A list's members, each deleted with the test (an import's contacts have no other owner).
@@ -10630,8 +10634,11 @@ describe('Lists, compound segments, imports and exports', () => {
     // contacts whose email order is the reverse of their ID order: feedback holds the first by email, the bulk change
     // must wait for that one before it locks the other, or each would hold what the other needs.
     const pair = async () => {
+      // Contact IDs are time-ordered (UUIDv7) since #600, so create z- before a- to make y.id < x.id.
       for (;;) {
-        const tag = unique('order'), [x, y] = [await resource(t, key.secret, '/v1/contacts', { email: `a-${tag}@example.com` }), await resource(t, key.secret, '/v1/contacts', { email: `z-${tag}@example.com` })];
+        const tag = unique('order');
+        const y = await resource(t, key.secret, '/v1/contacts', { email: `z-${tag}@example.com` });
+        const x = await resource(t, key.secret, '/v1/contacts', { email: `a-${tag}@example.com` });
         if (y.id < x.id) return { tag, byEmail: [x, y] as [Json, Json] };
       }
     };
