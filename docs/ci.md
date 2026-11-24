@@ -74,15 +74,14 @@ Workers Assets answers any path outside `run_worker_first` itself: a 405 for a P
 
 ### Migrations
 
-`src/migrate.ts` applies each `NNN_name.sql` once, in file-name order, and refuses a migration whose contents changed. **Fails when:**
+`src/migrate.ts` records applied filenames and SHA-256 checksums in `nightmail_migrations` and applies every unapplied `NNN_name.sql` in file-name order, refusing any already-applied migration whose contents changed. Any unused three-digit number is accepted so independent PRs can merge in any order; open-PR collisions are caught when the second PR merges. Because a fresh install applies migrations in number order while an upgraded database applies newly merged lower-numbered migrations after higher-numbered ones it already ran, a later-merged lower-numbered migration must not depend on a higher-numbered one. **Fails when:**
 
 - a file in `api/migrations/` doesn't match `^\d+_[a-z_]+\.sql$` (migrate.ts would silently skip it: no digits or capitals after the number);
-- a new migration's number is not greater than the newest one on `dev`, so a fresh database would apply it in a different order than dev did;
-- two files share a number (the pairs from before this check are listed in the script and stay);
-- an older open PR already adds a migration with the same number (the older PR keeps it; a newer one only gets a warning);
-- a migration that is on `dev` was edited, renamed or deleted (every upgraded database would fail with `MIGRATION_CHANGED`).
+- two files share a number (the historical pairs from before this check are listed in the script and stay);
+- a new migration reuses a number that is already on the base branch;
+- a migration that is on the base branch was edited, renamed or deleted (every upgraded database would fail with `MIGRATION_CHANGED`).
 
-**Fix:** rename your file to the number the message suggests. It is the next number after everything on `dev` and in open PRs.
+**Fix:** rename your file to an unused number (the message suggests the next free number above the current highest).
 
 ### Card slots
 
