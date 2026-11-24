@@ -495,10 +495,15 @@ function batchAttachments(runtime: Runtime, batch: Leased[]) {
     return (await rows).filter(row => row.workspaceId === mail.workspaceId && mail.snapshot.attachments.includes(row.id));
   };
 }
+class HeldForScreen extends Error { constructor() { super('Queued without a screen verdict.'); this.name = 'HeldForScreen'; } }
 async function prepareMail(leased: Leased & { owner: Owner }, loadAttachments: (mail: Mail) => Promise<AttachmentRow[]>): Promise<Prepared> {
   const { runtime, a } = leased.owner;
   let mail = leased.mail;
   if (mail.simulated && !isSimulatedSes(runtime)) throw new ApiError(409, 'SES_MODE_CHANGED', 'This message was queued for simulated delivery. Submit it again to send through SES.');
+  const hosted=Boolean(leased.owner.tenantName && runtime.config.hostedScreen);
+  // Mail queued before screen-at-accept (migration 459), or by an older isolate during the rollout, has no verdict. It never
+  // goes out unscreened: it leaves the mail room's queue (screened = false) for the screen sweep.
+  if (!isSimulatedSes(runtime) && (hosted || (mail.snapshot.screen && mail.snapshot.kind==='transactional')) && !mail.snapshot.screenVerdict) throw new HeldForScreen();
   let rows: AttachmentRow[] | undefined;
   let unsubscribe: Prepared['unsubscribe'];
   let stored: Prepared['stored'];
@@ -514,7 +519,6 @@ async function prepareMail(leased: Leased & { owner: Owner }, loadAttachments: (
   // Content screening runs at accept time / campaign prepare (src/sending.ts) before rows enter sending_emails; the mail
   // room never calls an external classifier. Deferred campaigns and any pre-deploy rows still apply local in-memory
   // hostedCopy / attachment checks here.
-  const hosted=Boolean(leased.owner.tenantName && runtime.config.hostedScreen);
   const rules=isSimulatedSes(runtime) || !hosted || leased.owner.trusted ? null : leased.owner.probation ? 'probation' : 'standard';
   const delivery=rules ? await import('./screened-html.js') : undefined;
   if (delivery && (mail.snapshot.deferredCampaign || s.screenVerdict?.rules !== rules)) s = delivery.hostedCopy(s, rules==='probation');
@@ -1040,6 +1044,7 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
     return { processed: 0, blocked: true };
   }
   const loadAttachments = batchAttachments(base, ready);
+  const unscreened: Mail[] = [];
   const prepare = async (item: typeof ready[number]) => {
     try {
       if (item.contentBytes) {
@@ -1057,6 +1062,7 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
     }
     catch (error) {
       if (error instanceof ModuleLoadError) { await releaseLeases(base, [item.mail]); throw error; }
+      if (error instanceof HeldForScreen) { unscreened.push(item.mail); counters.deferred++; lane.advanced++; logEmail(lane, item.mail, item.trace, 'deferred', 'SCREEN_REQUIRED'); return; }
       counters.skipped++; lane.advanced++;
       logEmail(lane, item.mail, item.trace, await rejectPreflight(item.owner.runtime, item.mail, error), error instanceof ApiError ? error.code : 'DISPATCH_PREFLIGHT_FAILED');
     }
@@ -1114,6 +1120,9 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
     const prepared = await phase('prepare', () => Promise.all(ready.map(prepare)));
     await dispatchPrepared(base, lane, prepared.filter((item): item is Prepared => item !== undefined));
   }
+  if (unscreened.length) await base.db.execute(sql`UPDATE sending_emails e SET screened = false, lease_until = NULL
+    FROM jsonb_to_recordset(${JSON.stringify(unscreened.map(m => ({ workspace_id: m.workspaceId, id: m.id, version: m.dispatchVersion, status: 'queued' })))}::jsonb) x(workspace_id text, id text, version int, status text)
+    WHERE e.workspace_id = x.workspace_id AND e.id = x.id AND e.dispatch_version = x.version AND e.status = x.status`);
   return { processed: ready.length, blocked: false };
 }
 const logLost = (count:number) => log('warn', { code:'DISPATCH_CLAIM_LOST', count, message:'Rows changed between lease and claim; they will be reconsidered on the next pass.' });

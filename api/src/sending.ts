@@ -1437,7 +1437,7 @@ async function admitSends(call: SendCall, body: unknown, out: Outgoing[], identi
     END AS reason) cause
     WHERE cause.reason IS NOT NULL
     ORDER BY r.ord, d.n`}
-  ), ${key !== undefined ? sql`released_key AS (DELETE FROM sending_idempotency i USING state k WHERE EXISTS (SELECT 1 FROM ineligible) AND k.s->>'allowed'='true' AND i.workspace_id = k.workspace_id AND i.actor_key_id = k.id AND i.path = ${call.path} AND i.request_key = ${key}),` : sql``}
+  ),
   submitted AS MATERIALIZED (SELECT * FROM raw_submitted WHERE NOT EXISTS (SELECT 1 FROM ineligible)),
   inserted AS (INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,screened,status,scheduled_at)
     SELECT id,workspace_id,actor_id,snapshot->>'region',snapshot->>'from',snapshot->'to',snapshot->'cc',snapshot->'bcc',snapshot->>'subject',snapshot,${sim},true,${at ? 'scheduled' : 'queued'},${at ?? null}::timestamptz FROM submitted),
@@ -1455,7 +1455,11 @@ async function admitSends(call: SendCall, body: unknown, out: Outgoing[], identi
   // The statement's claim is idempotency_claim: the one replay rule answers a key it did not get.
   if ('previous' in state) return replay<typeof receipt>(state, hash!);
   const decided = admitted(runtime, state as Admitted | Refused, a.workspaceId, { batch, invalid: i => out[i]!.invalid, oversize: i => out[i]!.oversize });
-  if (result.ineligible?.length) throw recipientIneligibleError(result.ineligible, batch);
+  if (result.ineligible?.length) {
+    // The statement's own claim holds this receipt, and nothing was queued: free the key so a retry is judged again.
+    if (key !== undefined) await (call.db ?? runtime.db).execute(sql`DELETE FROM sending_idempotency WHERE workspace_id = ${result.workspace_id} AND actor_key_id = ${result.id} AND path = ${call.path} AND request_key = ${key}`);
+    throw recipientIneligibleError(result.ineligible, batch);
+  }
   // Its release job wakes the dispatcher at its time; one due within a minute needs the scheduler awake now to follow it.
   if (at) { if (Date.parse(at) - Date.now() < 60_000) a.wakeJobs = Math.max(a.wakeJobs ?? 0, 1); return receipt; }
   const maxSendRate = typeof result.max_send_rate === 'number' && result.max_send_rate > 0 ? result.max_send_rate : undefined;
