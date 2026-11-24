@@ -99,10 +99,10 @@ export function HealthFacts({ values }: { values?: Record<(typeof healthFacts)[n
 }
 export const healthColumnDefs: SkeletonColumn[] = [
   { key: 'area', label: 'Area', width: 112, card: 'inline' },
-  { key: 'what', label: 'What', width: '30%', card: 'title' },
+  { key: 'what', label: 'What', width: '24%', card: 'title' },
   { key: 'state', label: 'State', width: 112, card: 'aside' },
   { key: 'now', label: 'Now', card: 'line' },
-  { key: 'detail', label: 'Detail', width: '26%', card: 'line' },
+  { key: 'detail', label: 'Detail', width: '24%', card: 'line' },
 ]
 export const HealthSkeleton = () => <><HealthFacts /><TableSkeleton className="op-table" columns={healthColumnDefs} rows={8} /></>
 // A self-hosted installation has no operator area: Health is its whole page.

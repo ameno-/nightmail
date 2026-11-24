@@ -40,14 +40,15 @@ function rows(health: OperatorHealth): Row[] {
   ]
   const order = { critical: 0, warning: 1, ok: 2 }
   return [
-    ...health.alerts.map(alert => ({ id: `alert:${alert.key}`, area: 'Alert', what: alert.label, now: alert.words, detail: `since ${shortDateTime(alert.since)} UTC`, state: alert.severity })),
+    // Critical first; within a severity the API's order, oldest first.
+    ...health.alerts.map(alert => ({ id: `alert:${alert.key}`, area: 'Alert', what: alert.label, now: alert.words, detail: `since ${shortDateTime(alert.since)} UTC`, state: alert.severity })).sort((a, b) => order[a.state] - order[b.state]),
     ...measured.map((row, index) => ({ row, index })).sort((a, b) => order[a.row.state] - order[b.row.state] || a.index - b.index).map(item => item.row),
   ]
 }
 const def = (key: string) => healthColumnDefs.find(column => column.key === key)!
 const columns: Column<Row>[] = [
   { ...def('area'), render: row => <span className="muted">{row.area}</span> },
-  { ...def('what'), render: row => <span className="op-cell op-health-what" title={row.what}>{row.what}</span> },
+  { ...def('what'), render: row => <span className={row.area === 'Alert' ? 'op-cell' : 'op-cell op-health-what'} title={row.what}>{row.what}</span> },
   { ...def('state'), render: row => row.state === 'ok' ? <span className="muted">OK</span> : <StatusBadge status={row.area === 'Alert' ? label(row.state) : 'Behind'} tone={row.state === 'critical' ? 'danger' : 'warning'} /> },
   { ...def('now'), render: row => <span className="op-cell" title={row.now}>{row.now}</span> },
   { ...def('detail'), render: row => row.detail ? <span className="op-cell muted" title={row.detail}>{row.detail}</span> : <span className="muted">—</span>, cardRender: row => row.detail || null },
