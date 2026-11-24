@@ -146,5 +146,33 @@
     "file": "api/src/dispatcher.ts",
     "old": "    ORDER BY (leased.snapshot->>'kind' = 'transactional') DESC, leased.created_at, leased.id`);",
     "neu": "    ORDER BY (leased.snapshot->>'kind' = 'transactional') ASC, leased.created_at, leased.id`);"
+  },
+  {
+    "label": "iso-1-support-imports-unscoped",
+    "checker": "workspace-isolation",
+    "file": "api/src/deliverability.ts",
+    "old": "    FROM i LEFT JOIN LATERAL (SELECT r->>'email' AS email FROM jsonb_array_elements(i.rows) r LIMIT 50000) x ON true",
+    "neu": "    FROM audience_imports i LEFT JOIN LATERAL (SELECT r->>'email' AS email FROM jsonb_array_elements(i.rows) r LIMIT 50000) x ON true"
+  },
+  {
+    "label": "iso-2-campaign-foreign-audience",
+    "checker": "workspace-isolation",
+    "file": "api/src/sending.ts",
+    "old": "      draftSender(c.env, a, draft);\n      await draftAudience(db, a, draft.audience);",
+    "neu": "      draftSender(c.env, a, draft);"
+  },
+  {
+    "label": "iso-3-webhook-foreign-addresses",
+    "checker": "workspace-isolation",
+    "file": "api/src/endpoints.ts",
+    "old": "    checkScope(spec.addressIds, eventTypes, spec.format);\n    await ownAddresses(tx, w, spec.addressIds);",
+    "neu": "    checkScope(spec.addressIds, eventTypes, spec.format);"
+  },
+  {
+    "label": "iso-4-contacts-unscoped-get",
+    "checker": "workspace-isolation",
+    "file": "api/src/audience.ts",
+    "old": "async function findContact(db: DbExecutor, identity: Actor, contactId: string) { const [row] = await db.select().from(contacts).where(and(scope(contacts, identity), eq(contacts.id, contactId), isNull(contacts.deletedAt))).limit(1); return row ?? notFound('Contact'); }",
+    "neu": "async function findContact(db: DbExecutor, identity: Actor, contactId: string) { const [row] = await db.select().from(contacts).where(and(eq(contacts.id, contactId), isNull(contacts.deletedAt))).limit(1); return row ?? notFound('Contact'); }"
   }
 ]

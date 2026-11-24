@@ -39,7 +39,8 @@ export type FieldProbeFocus =
   | "body-writes"
   | "query-reads"
   | "pr614-bug-iso-04"
-  | "nearby-ended-inboxes";
+  | "nearby-foreign-ended"
+  | "nearby-own-ended";
 
 export type McpPrincipal = "mcpA" | "mcpDual" | "keyA" | "dkeyA" | "anon";
 

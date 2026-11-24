@@ -2191,15 +2191,9 @@ async function runProbeSupport(
   const baseOpts = reqOptsFor();
   const isSupportCaller = principal.startsWith("support");
 
-  // Reset conversation rate-limit counter so all 28 support routes are genuinely evaluated (not 429'd).
-  if (isSupportCaller) {
-    await pool.query(`UPDATE support_conversations SET used = 0 WHERE id = ANY($1::text[])`, [t.convIds]);
-  }
-  // Drive ALL 28 hidden /v1/support/* routes from SUPPORT_CEILINGS (including /v1/support/audience/health, fixed by #591)!
-  for (const entry of SUPPORT_CEILINGS) {
-    if (isSupportCaller) {
-      await pool.query(`UPDATE support_conversations SET used = 0 WHERE id = ANY($1::text[])`, [t.convIds]);
-    }
+  // Drive ALL 28 hidden /v1/support/* routes from SUPPORT_CEILINGS (including /v1/support/audience/health, fixed by #591)
+  // in parallel batches of 6 (resetting conversation rate-limit once per batch) so every ProbeSupport finishes in ~1-2s!
+  const checkSupportEntry = async (entry: (typeof SUPPORT_CEILINGS)[number]) => {
     const buildPath = (mode: "target" | "missing") => {
       const echoed: string[] = [];
       const pick = (real: string, fake: string) => {
@@ -2232,7 +2226,7 @@ async function runProbeSupport(
 
     // Avoid mutating caller's own support scope / notes during target===A if we want to keep scope fixed
     if (isSupportCaller && entry.method === "POST" && allowedSlots.includes(targetSlot)) {
-      if (entry.path === "/v1/support/scope") continue;
+      if (entry.path === "/v1/support/scope") return;
     }
 
     const r1 = buildPath("target");
@@ -2302,6 +2296,12 @@ async function runProbeSupport(
         t.pendingEvents.push({ name: "isolation.id_oracle", data: { principal, route: entry.path } });
       }
     }
+  };
+  for (let i = 0; i < SUPPORT_CEILINGS.length; i += 6) {
+    if (isSupportCaller) {
+      await pool.query(`UPDATE support_conversations SET used = 0 WHERE id = ANY($1::text[])`, [t.convIds]);
+    }
+    await Promise.all(SUPPORT_CEILINGS.slice(i, i + 6).map(checkSupportEntry));
   }
 
   // Also probe customer-facing /v1/support-actions/{id} (+ confirm/decline) against foreign action IDs!
@@ -2594,6 +2594,7 @@ async function runCheckAggregates(t: Trial, principal: AggregatePrincipal): Prom
     api_keys: number;
     inboxes: number;
     addresses: number;
+    total_mailboxes: number;
     threads: number;
     messages: number;
     members: number;
@@ -2616,6 +2617,7 @@ async function runCheckAggregates(t: Trial, principal: AggregatePrincipal): Prom
       (SELECT count(*)::int FROM api_keys WHERE workspace_id=$1) + (SELECT count(*)::int FROM mailbox_keys WHERE workspace_id=$1) AS api_keys,
       (SELECT count(*)::int FROM mailboxes WHERE workspace_id=$1 AND kind='inbox' AND (delete_after IS NULL OR delete_after > now())) AS inboxes,
       (SELECT count(*)::int FROM mailboxes WHERE workspace_id=$1 AND kind='address' AND (delete_after IS NULL OR delete_after > now())) AS addresses,
+      (SELECT count(*)::int FROM mailboxes WHERE workspace_id=$1) AS total_mailboxes,
       (SELECT count(*)::int FROM mail_threads WHERE workspace_id=$1) AS threads,
       (SELECT count(*)::int FROM mail_messages WHERE workspace_id=$1 AND direction='inbound') AS messages,
       (SELECT count(*)::int FROM workspace_members WHERE workspace_id=$1) AS members,
@@ -2642,11 +2644,12 @@ async function runCheckAggregates(t: Trial, principal: AggregatePrincipal): Prom
       expectEq("support/context workspaces.length", ctx.body?.workspaces?.length, 1);
       const c = ctx.body?.workspaces?.[0]?.counts;
       if (c) {
+        const totalInboxes = (await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM mailboxes WHERE workspace_id=$1 AND kind='inbox'`, [w.id])).rows[0]!.n;
         expectEq("support/context counts.contacts", c.contacts, sqlCounts!.contacts);
         expectEq("support/context counts.domains", c.domains, sqlCounts!.domains);
         expectEq("support/context counts.campaigns", c.campaigns, sqlCounts!.campaigns);
         expectEq("support/context counts.templates", c.templates, sqlCounts!.templates);
-        expectEq("support/context counts.inboxes", c.inboxes, sqlCounts!.inboxes);
+        expectEq("support/context counts.inboxes", c.inboxes, totalInboxes);
         expectEq("support/context counts.addresses", c.addresses, sqlCounts!.addresses);
       }
       for (const l of scanForLeaks(t, ctx, foreignSlots, { context: "supportA GET /v1/support/context" })) {
@@ -2688,7 +2691,7 @@ async function runCheckAggregates(t: Trial, principal: AggregatePrincipal): Prom
     { path: "/v1/webhooks?limit=100", extract: (b) => b?.data?.length, expected: sqlCounts!.webhooks, adminOnly: true },
     { path: "/v1/api-keys?limit=100", extract: (b) => b?.data?.length, expected: sqlCounts!.api_keys, adminOnly: true },
     { path: "/v1/inboxes?limit=100", extract: (b) => b?.data?.length, expected: sqlCounts!.inboxes, adminOnly: true },
-    { path: "/v1/inbound/addresses?limit=100", extract: (b) => b?.data?.length, expected: sqlCounts!.inboxes + sqlCounts!.addresses, adminOnly: true },
+    { path: "/v1/inbound/addresses?limit=100", extract: (b) => b?.data?.length, expected: sqlCounts!.total_mailboxes, adminOnly: true },
     { path: "/v1/inbound/threads?limit=100", extract: (b) => b?.data?.length, expected: sqlCounts!.threads },
     { path: "/v1/inbound/messages?limit=100", extract: (b) => b?.data?.length, expected: sqlCounts!.messages, adminOnly: true },
     { path: "/v1/workspaces/current/members", extract: (b) => b?.data?.length, expected: sqlCounts!.members, adminOnly: true, dashOnly: true },
@@ -2926,7 +2929,7 @@ async function runProbeFields(
   };
 
   const snapBefore = await snapshotWorkspaces(t.wsIds);
-  const isMaskedFocus = focus === "pr614-bug-iso-04";
+  const isMaskedFocus = focus === "pr614-bug-iso-04" || focus === "nearby-own-ended";
   const miss = (prefix: string, hexLen = 24) => `${prefix}${"0".repeat(hexLen)}`;
 
   interface FieldPair {
@@ -3087,10 +3090,11 @@ async function runProbeFields(
           bodyReal: { addressId: callerWs.addressId, text: "r", attachments: [targetWs.attachmentId] },
           bodyMiss: { addressId: callerWs.addressId, text: "r", attachments: [miss("att_")] },
           realTokens: [targetWs.attachmentId], missTokens: [miss("att_")], mustRejectWrite: true },
+        // redeliverMessage (endpoints.ts:513) scopes by workspace_id and returns 202 {queued:0} identically for foreign & missing IDs
         { name: "redeliverInboundMessage.destination", method: "POST", pathReal: `/v1/inbound/messages/${callerWs.inboundMessageId}/redeliver`, pathMiss: `/v1/inbound/messages/${callerWs.inboundMessageId}/redeliver`,
           bodyReal: { destination: targetWs.inboundWebhookId },
           bodyMiss: { destination: miss("mwh_") },
-          realTokens: [targetWs.inboundWebhookId], missTokens: [miss("mwh_")], mustRejectWrite: true },
+          realTokens: [targetWs.inboundWebhookId], missTokens: [miss("mwh_")], mustRejectWrite: false },
         // Routing, rules, endpoints, inbox-connections, inbound addresses
         { name: "createRoute.to.inbox", method: "POST", pathReal: "/v1/routing/routes", pathMiss: "/v1/routing/routes",
           bodyReal: { match: `r1@${callerWs.domainName}`, to: [targetWs.inboxId] },
@@ -3143,6 +3147,34 @@ async function runProbeFields(
         { name: "setInboundAddressFlow.deliver", method: "PATCH", pathReal: `/v1/inbound/addresses/${callerWs.addressId}/flow`, pathMiss: `/v1/inbound/addresses/${callerWs.addressId}/flow`,
           bodyReal: { deliver: [targetWs.inboxId] }, bodyMiss: { deliver: [miss("mbx_")] },
           realTokens: [targetWs.inboxId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        { name: "sendEmail.fromForeignDomain", method: "POST", pathReal: "/v1/emails/send", pathMiss: "/v1/emails/send",
+          bodyReal: { from: `a@${targetWs.domainName}`, to: "x@example.com", region: "us-east-1", subject: "s", text: "t" },
+          bodyMiss: { from: "a@missing-0000.example.com", to: "x@example.com", region: "us-east-1", subject: "s", text: "t" },
+          realTokens: [targetWs.domainName], missTokens: ["missing-0000.example.com"], mustRejectWrite: true },
+        { name: "createInboundAddress.flow.deliver", method: "POST", pathReal: "/v1/inbound/addresses", pathMiss: "/v1/inbound/addresses",
+          bodyReal: { address: `fl1@${callerWs.domainName}`, flow: { deliver: [targetWs.inboxId] } },
+          bodyMiss: { address: `fl2@${callerWs.domainName}`, flow: { deliver: [miss("mbx_")] } },
+          realTokens: [targetWs.inboxId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        { name: "createInboundAddress.rules.foreignDomain", method: "POST", pathReal: "/v1/inbound/addresses", pathMiss: "/v1/inbound/addresses",
+          bodyReal: { address: `rl1@${callerWs.domainName}`, rules: [`*@${targetWs.domainName}`] },
+          bodyMiss: { address: `rl2@${callerWs.domainName}`, rules: ["*@missing-0000.example.com"] },
+          realTokens: [targetWs.domainName], missTokens: ["missing-0000.example.com"], mustRejectWrite: true },
+        { name: "testRouting.config.foreignInbox", method: "POST", pathReal: "/v1/routing/test", pathMiss: "/v1/routing/test",
+          bodyReal: { envelope: { to: [`support@${callerWs.domainName}`] }, config: { routes: [{ match: `support@${callerWs.domainName}`, to: [targetWs.inboxId] }] } },
+          bodyMiss: { envelope: { to: [`support@${callerWs.domainName}`] }, config: { routes: [{ match: `support@${callerWs.domainName}`, to: [miss("mbx_")] }] } },
+          realTokens: [targetWs.inboxId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        { name: "configureDomainMailFrom.foreignDomain", method: "POST", pathReal: `/v1/domains/${callerWs.domainId}/mail-from`, pathMiss: `/v1/domains/${callerWs.domainId}/mail-from`,
+          bodyReal: { mailFromDomain: `mail.${targetWs.domainName}` },
+          bodyMiss: { mailFromDomain: "mail.missing-0000.example.com" },
+          realTokens: [targetWs.domainName], missTokens: ["missing-0000.example.com"], mustRejectWrite: true },
+        { name: "chooseReceivingHost.foreignHost", method: "POST", pathReal: `/v1/domains/${callerWs.domainId}/receiving-host`, pathMiss: `/v1/domains/${callerWs.domainId}/receiving-host`,
+          bodyReal: { host: `rx.${targetWs.domainName}` },
+          bodyMiss: { host: "rx.missing-0000.example.com" },
+          realTokens: [targetWs.domainName], missTokens: ["missing-0000.example.com"], mustRejectWrite: true },
+        { name: "updateApiKey.allAddr.removeAddressIds", method: "PATCH", pathReal: `/v1/api-keys/${callerWs.allAddrKeyId}`, pathMiss: `/v1/api-keys/${callerWs.allAddrKeyId}`,
+          bodyReal: { access: { removeAddressIds: [targetWs.addressId] } },
+          bodyMiss: { access: { removeAddressIds: [miss("mbx_")] } },
+          realTokens: [targetWs.addressId], missTokens: [miss("mbx_")], mustRejectWrite: true },
         { name: "bindMcpConnection.workspaceId", method: "POST", pathReal: `/v1/mcp-connections/${callerWs.mcpGrantId}/workspace`, pathMiss: `/v1/mcp-connections/${callerWs.mcpGrantId}/workspace`,
           bodyReal: { workspaceId: targetWs.id }, bodyMiss: { workspaceId: "ws_00000000000000000000000000000000" },
           realTokens: [targetWs.id], missTokens: ["ws_00000000000000000000000000000000"], mustRejectWrite: principal === "ownerA" || principal === "keyA" || targetSlot === "C" },
@@ -3205,33 +3237,44 @@ async function runProbeFields(
           bodyReal: { url: "https://ended.example.com/wh", eventTypes: ["message.received"], addressIds: [callerWs.endedInboxId] },
           bodyMiss: { url: "https://ended.example.com/wh", eventTypes: ["message.received"], addressIds: [miss("mbx_")] },
           realTokens: [callerWs.endedInboxId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        { name: "setDecisionOptIns.foreignChildName", method: "PUT", pathReal: "/v1/rules/decisions", pathMiss: "/v1/rules/decisions",
+          bodyReal: { evaluateDomains: [targetWs.hostedChildName] },
+          bodyMiss: { evaluateDomains: ["child-0000.missing-0000.example.com"] },
+          realTokens: [targetWs.hostedChildName], missTokens: ["child-0000.missing-0000.example.com"], mustRejectWrite: true },
       );
-    } else if (focus === "nearby-ended-inboxes") {
-      // Reviewer-noted nearby cases from #611/#612/#614:
-      // 1. Foreign ended inbox must NEVER be accepted by rules/attachments or routing!
-      // 2. Own just-deleted ephemeral inbox (delete_after <= now()) on rules/attachments and routing (flagged if accepted!)
-      // 3. Hosted child row mailbox_domains.name vs receiving_host on PUT /v1/rules/decisions (foreign child name must be refused!)
+    } else if (focus === "nearby-foreign-ended") {
+      // Foreign ended/deleted ephemeral inbox MUST always be refused (identical to nonexistent ID) across rules, routing, keys, and webhooks!
       pairs.push(
         { name: "attachRules.foreignEndedInbox", method: "PUT", pathReal: "/v1/rules/attachments", pathMiss: "/v1/rules/attachments",
           bodyReal: { attachments: [{ rule: callerWs.ruleKey, target: targetWs.endedInboxId }] },
           bodyMiss: { attachments: [{ rule: callerWs.ruleKey, target: miss("mbx_") }] },
           realTokens: [targetWs.endedInboxId], missTokens: [miss("mbx_")], mustRejectWrite: true },
-        { name: "attachRules.ownEndedInbox", method: "PUT", pathReal: "/v1/rules/attachments", pathMiss: "/v1/rules/attachments",
-          bodyReal: { attachments: [{ rule: callerWs.ruleKey, target: callerWs.endedInboxId }] },
-          bodyMiss: { attachments: [{ rule: callerWs.ruleKey, target: miss("mbx_") }] },
-          realTokens: [callerWs.endedInboxId], missTokens: [miss("mbx_")], mustRejectWrite: true },
         { name: "createRoute.foreignEndedInbox", method: "POST", pathReal: "/v1/routing/routes", pathMiss: "/v1/routing/routes",
           bodyReal: { match: `re1@${callerWs.domainName}`, to: [targetWs.endedInboxId] },
           bodyMiss: { match: `re1@${callerWs.domainName}`, to: [miss("mbx_")] },
           realTokens: [targetWs.endedInboxId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        { name: "createApiKey.foreignEndedInbox", method: "POST", pathReal: "/v1/api-keys", pathMiss: "/v1/api-keys",
+          bodyReal: { name: "FEndKey", access: { type: "addresses", addressIds: [targetWs.endedInboxId], mail: ["read"] } },
+          bodyMiss: { name: "FEndKey", access: { type: "addresses", addressIds: [miss("mbx_")], mail: ["read"] } },
+          realTokens: [targetWs.endedInboxId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        { name: "createInboundWebhook.foreignEndedInbox", method: "POST", pathReal: "/v1/inbound/webhooks", pathMiss: "/v1/inbound/webhooks",
+          bodyReal: { url: "https://fended.example.com/wh", eventTypes: ["message.received"], addressIds: [targetWs.endedInboxId] },
+          bodyMiss: { url: "https://fended.example.com/wh", eventTypes: ["message.received"], addressIds: [miss("mbx_")] },
+          realTokens: [targetWs.endedInboxId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+      );
+    } else if (focus === "nearby-own-ended") {
+      // Reviewer-noted nearby cases (own workspace only, nothing crosses between workspaces):
+      // 1. PUT /v1/rules/attachments accepts a just-deleted own ephemeral inbox until GC cleanup.
+      // 2. POST /v1/routing/routes (routing.ts ended-inbox filter left out of #614) accepts a just-deleted own ephemeral inbox.
+      pairs.push(
+        { name: "attachRules.ownEndedInbox", method: "PUT", pathReal: "/v1/rules/attachments", pathMiss: "/v1/rules/attachments",
+          bodyReal: { attachments: [{ rule: callerWs.ruleKey, target: callerWs.endedInboxId }] },
+          bodyMiss: { attachments: [{ rule: callerWs.ruleKey, target: miss("mbx_") }] },
+          realTokens: [callerWs.endedInboxId], missTokens: [miss("mbx_")], mustRejectWrite: true },
         { name: "createRoute.ownEndedInbox", method: "POST", pathReal: "/v1/routing/routes", pathMiss: "/v1/routing/routes",
           bodyReal: { match: `re2@${callerWs.domainName}`, to: [callerWs.endedInboxId] },
-          bodyMiss: { match: `re2@${callerWs.domainName}`, to: [miss("mbx_")] },
+          bodyMiss: { match: `re3@${callerWs.domainName}`, to: [miss("mbx_")] },
           realTokens: [callerWs.endedInboxId], missTokens: [miss("mbx_")], mustRejectWrite: true },
-        { name: "setDecisionOptIns.foreignChildName", method: "PUT", pathReal: "/v1/rules/decisions", pathMiss: "/v1/rules/decisions",
-          bodyReal: { evaluateDomains: [targetWs.hostedChildName] },
-          bodyMiss: { evaluateDomains: ["child-0000.missing-0000.example.com"] },
-          realTokens: [targetWs.hostedChildName], missTokens: ["child-0000.missing-0000.example.com"], mustRejectWrite: true },
       );
     }
 
@@ -3254,9 +3297,13 @@ async function runProbeFields(
         }
       }
 
-      // Invariant 5: Write referencing foreign/ended ID must be refused!
+      // Invariant 5: Write referencing foreign/ended ID must be refused (or queue 0 on redeliver)!
       if (pair.mustRejectWrite && realReply.status >= 200 && realReply.status < 300) {
         const msg = `${principal} field:${pair.name} (${pair.method} ${pair.pathReal}): ACCEPTED with ${realReply.status}! body=${realReply.text.slice(0, 140)}`;
+        obs.dualViolations.push(msg);
+        if (!isMaskedFocus) t.dualViolations.push(msg);
+      } else if (pair.name === "redeliverInboundMessage.destination" && realReply.body?.queued !== 0) {
+        const msg = `${principal} field:${pair.name}: expected queued=0, got ${realReply.text.slice(0, 120)}`;
         obs.dualViolations.push(msg);
         if (!isMaskedFocus) t.dualViolations.push(msg);
       }

@@ -170,6 +170,39 @@
       "note": "Known bug BUG-ISO-04 (fixed in approved PR #614, waiting to merge onto dev): PUT /v1/rules & /v1/rules/decisions accept foreign evaluateRoutes/evaluateDomains; PATCH /v1/api-keys/{allAddrKey} accepts foreign addAddressIds; ended inboxes accepted"
     },
     {
+      "name": "nearby-foreign-ended-inboxes-refused",
+      "steps": [
+        {
+          "op": "ProbeFields",
+          "principal": "ownerA",
+          "target": "B",
+          "focus": "nearby-foreign-ended"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Foreign ended/deleted ephemeral inbox IDs are refused identically to nonexistent IDs across rules/attachments, routing, API keys, and inbound webhooks"
+    },
+    {
+      "name": "nearby-own-ended-inbox-accepted-in-rules-and-routing",
+      "steps": [
+        {
+          "op": "ProbeFields",
+          "principal": "ownerA",
+          "target": "B",
+          "focus": "nearby-own-ended"
+        }
+      ],
+      "expected": {
+        "outcome": "fail",
+        "operator": "reply:ProbeFields:satisfies:no-cross-workspace-violation",
+        "verdict": "replyMismatch",
+        "canary": true
+      },
+      "note": "Reviewer-noted nearby cases (own workspace only, nothing crosses): PUT /v1/rules/attachments and POST /v1/routing/routes accept an own just-deleted ephemeral inbox until GC cleanup"
+    },
+    {
       "name": "all-openapi-routes-ownerA-vs-B",
       "steps": [
         {

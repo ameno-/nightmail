@@ -89,7 +89,8 @@ const FIELD_FOCUSES: readonly FieldProbeFocus[] = [
   "body-writes",
   "query-reads",
   "pr614-bug-iso-04",
-  "nearby-ended-inboxes",
+  "nearby-foreign-ended",
+  "nearby-own-ended",
 ] as const;
 
 const TARGETS: readonly WorkspaceSlot[] = ["A", "B", "C"] as const;
@@ -161,6 +162,11 @@ function maskFor(a: WorkspaceIsolationAction): string | undefined {
   if (a.op === "ProbeFields" && a.focus === "pr614-bug-iso-04") {
     return "BUG-ISO-04";
   }
+  // Reviewer-noted nearby cases (own workspace only, nothing crosses between workspaces):
+  // PUT /v1/rules/attachments and POST /v1/routing/routes accept a just-deleted own ephemeral inbox until GC cleanup.
+  if (a.op === "ProbeFields" && a.focus === "nearby-own-ended") {
+    return "NEARBY-OWN-ENDED";
+  }
   return undefined;
 }
 
@@ -213,7 +219,7 @@ export const workspaceIsolation = model<
       }
     }
     for (const focus of FIELD_FOCUSES) {
-      const w = focus === "pr614-bug-iso-04" || focus === "nearby-ended-inboxes" ? 1 : 3;
+      const w = focus === "pr614-bug-iso-04" || focus === "nearby-own-ended" ? 1 : 3;
       out.push(choice({ op: "ProbeFields", principal: "ownerA", target: "B", focus }, w));
       out.push(choice({ op: "ProbeFields", principal: "dualA", target: "B", focus }, w));
       if (focus === "body-writes" || focus === "query-reads") {
