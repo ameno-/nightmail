@@ -91,7 +91,7 @@ export async function placeReady(db: DbExecutor, address: string): Promise<'held
   return (await readPlaces(db)).open > 0 ? 'open' : null;
 }
 
-// Sign-in links (migration 464): a person a raise let in whose sign-in shows nothing of that address (a GitHub account
+// Sign-in links (migration 466): a person a raise let in whose sign-in shows nothing of that address (a GitHub account
 // without it verified, another Google account) asks for a link to it. The link proves the mailbox: following it and then
 // signing in, with any method, takes the place held for the address (account-login.ts, takePlace's `held`). It goes
 // only to an address with a held place that no account has, at most LINKS_A_DAY a day, and works once, for LINK_MINUTES.

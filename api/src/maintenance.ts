@@ -281,7 +281,7 @@ async function retentionDrains(runtime: Runtime): Promise<Drain[]> {
     expired('nightmail_signin_attempts', 'nightmail_signin_attempts', at('last_at'), sql`last_at < now() - interval '30 days'`),
     // The waitlist keeps an address a year after its last attempt at most (migration 366).
     expired('nightmail_waitlist', 'nightmail_waitlist', at('last_at'), sql`last_at < now() - interval '1 year'`),
-    // A sign-in link (migration 464) works 30 minutes; its row is kept a day, for the daily count per address.
+    // A sign-in link (migration 466) works 30 minutes; its row is kept a day, for the daily count per address.
     expired('nightmail_signin_links', 'nightmail_signin_links', at('created_at'), sql`created_at < now() - interval '1 day'`),
     ...['auth_state_slots', 'nightmail_dpop_proofs', 'nightmail_sessions', 'nightmail_login_flows'].map(table => expired(table, table, at('expires_at'), sql`expires_at <= now()`)),
     // Eight routing versions a year old per statement (migration 124).
