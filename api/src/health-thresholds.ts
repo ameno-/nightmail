@@ -35,8 +35,8 @@ export const TICK = {
 } as const;
 
 /**
- * Cloudflare queues, by the name the minute cron reads them under (src/worker.ts). `oldestSeconds`: the oldest message
- * has waited this long. Consumers take a batch every few seconds, so a healthy queue's oldest message is seconds old
+ * Cloudflare queues whose messages are the work itself, by the name the minute cron reads them under (src/worker.ts).
+ * `oldestSeconds`: the oldest message has waited this long. Consumers take a batch every few seconds, so a healthy queue's oldest message is seconds old
  * however deep it is; minutes old means the consumers are not keeping up. On the 23rd the feedback queue reached 20
  * minutes; at these numbers the card comes in the fourth minute.
  */
@@ -44,13 +44,20 @@ export const QUEUES: Record<string, { oldestSeconds: number; sustain: number; re
   // Bounces and complaints ride here: a campaign's bounce rate reads low while they are late, and the list probe and
   // auto-pause decide on them.
   feedback: { oldestSeconds: 120, sustain: 2, remindMinutes: 30 },
-  // The safety lane (#619) for bounces and complaints of mail already under watch: it should never wait.
-  priority: { oldestSeconds: 60, sustain: 2, remindMinutes: 30 },
-  // Wake messages for the jobs table: each is consumed within seconds, and the cron sends one a minute regardless.
-  work: { oldestSeconds: 180, sustain: 2, remindMinutes: 30 },
-  // Customers' endpoints can be slow, and one slow endpoint must not page anyone: five minutes.
-  webhooks: { oldestSeconds: 300, sustain: 2, remindMinutes: 30 },
+  // The safety lane (#619) for bounces and complaints of mail already under watch: it should never wait. Under the
+  // name the cron reads it by: as `priority` this line matched no queue and the lane could not alert.
+  'feedback-priority': { oldestSeconds: 60, sustain: 2, remindMinutes: 30 },
 };
+/**
+ * Queues that carry wake hints for the jobs table, not work: a message says "look at the jobs now" and any consumer
+ * that runs takes whatever is due, so their depth and their oldest message say nothing about work waiting. While jobs
+ * are due, each consumer keeps its one hint for its whole 45-second stay and sends another as it leaves, so a burst's
+ * hints stay queued until the jobs table goes quiet. On 24 November `work` held 40,100 hints, the oldest six hours
+ * old, while mailbox.ingest drained 12,400 jobs in an hour: `queue-behind:work` opened and reminded every half hour
+ * about nothing. These never alert. Whether work waits is the jobs table's to say (JOBS_LATE below: `jobs-behind`, by
+ * the oldest due job of each type, webhook posts included); the hints are on the Health page as information.
+ */
+export const WAKE_QUEUES: readonly string[] = ['work', 'webhooks'];
 /** A dead-letter queue (a name ending in -dlq) alerts on its first message: each one is an event Nightmail gave up on. */
 export const DLQ = { depth: 1, sustain: 1, remindMinutes: 360 } as const;
 

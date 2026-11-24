@@ -23,7 +23,9 @@ function rows(health: OperatorHealth): Row[] {
   // A row whose only sign of trouble is an open alert about it (an error code, the database).
   const alerted = (...keys: string[]): Row['state'] => state(keys.some(key => open.has(key)), ...keys)
   const measured: Row[] = [
-    ...health.queues.map(q => ({ id: `queue:${q.name}`, area: 'Queue', what: q.name, now: q.depth ? `${number(q.depth)} waiting` : 'Empty', detail: q.depth ? `oldest ${span(q.oldestSeconds)}` : '', state: state(q.behind, `queue-behind:${q.name}`) })),
+    // A wake queue holds hints to look at the jobs, not work: it is shown and never behind. The Jobs rows say what waits.
+    ...health.queues.map(q => ({ id: `queue:${q.name}`, area: 'Queue', what: q.name, now: q.depth ? `${number(q.depth)} ${q.wake ? 'wake hints' : 'waiting'}` : 'Empty',
+      detail: q.depth ? `oldest ${span(q.oldestSeconds)}${q.wake ? ' · not work waiting, see Jobs' : ''}` : '', state: state(q.behind, `queue-behind:${q.name}`) })),
     ...(health.jobs ?? []).map(job => ({ id: `jobs:${job.type}`, area: 'Jobs', what: job.type, now: job.pending ? `${number(job.pending)} due, oldest ${span(job.oldestSeconds)}` : 'None due',
       // What failed in the last hour is what the alert counts; what is kept (30 days) is history, shown and never alerted on.
       detail: [job.failedLastHour ? `${number(job.failedLastHour)} failed in the last hour` : '', job.failed ? `${number(job.failed)} failed in 30 days` : '', job.error].filter(Boolean).join(' · '), state: state(job.behind, `jobs-behind:${job.type}`, `jobs-failed:${job.type}`) })),

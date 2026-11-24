@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql, type SQL } from 'drizzle-orm';
 import { ApiError, databaseCodeOf, errors, log, logError, response, security, transientDatabaseError, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
-import { CAMPAIGNS, DATABASE, DLQ, JOBS, JOBS_LATE, QUEUES, REQUESTS, SQLSTATES, TICK } from './health-thresholds.js';
+import { CAMPAIGNS, DATABASE, DLQ, JOBS, JOBS_LATE, QUEUES, REQUESTS, SQLSTATES, TICK, WAKE_QUEUES } from './health-thresholds.js';
 import { countDatabaseError, LATENCY_BUCKETS, WRITE_LIMITS } from './health-counters.js';
 import { slackCard } from './operator-alerts.js';
 import { postSlack } from './reputation-alerts.js';
@@ -100,7 +100,8 @@ export type Sample = { queues: QueueSample[]; late: Late[] | null; failed: Faile
 export type Memory = { streaks: Record<string, number>; campaigns: Record<string, [at: number, released: number, accepted: number | null][]> };
 export const emptyMemory = (): Memory => ({ streaks: {}, campaigns: {} });
 
-const Queue = z.object({ name: z.string(), depth: z.number().int(), oldestSeconds: z.number().int(), behind: z.boolean() });
+const Queue = z.object({ name: z.string(), depth: z.number().int(), oldestSeconds: z.number().int(), behind: z.boolean(),
+  wake: z.boolean().describe('A queue of wake hints for the jobs table: its depth and age are not work waiting and it never alerts. Whether work waits is in jobs[].') });
 const Jobs = z.object({ type: z.string(), pending: z.number().int().describe('Due now: jobs scheduled for later are not counted. At most 5,000 are read per class.'), oldestSeconds: z.number().int(), failed: z.number().int().describe('Failed jobs still kept (30 days), of the newest 5,000: information, never an alert.'),
   failedLastHour: z.number().int().describe('Of those, the ones that failed in the last hour: what the jobs-failed alert counts.'), error: z.string().nullable().describe('The most common error among those of the last hour, else among the kept.'), behind: z.boolean() });
 const Campaign = z.object({ id: z.string(), workspaceId: z.string(), state: z.string(), total: z.number().int(), released: z.number().int(),
@@ -155,8 +156,9 @@ export function evaluate(sample: Sample, memory: Memory, now: number, diskBytes:
     const name = safe(q.name), dlq = name.endsWith('-dlq'), rule = QUEUES[name], oldestSeconds = Math.round(q.oldestMs / 1000), key = `${dlq ? 'dead-letters' : 'queue-behind'}:${name}`;
     if (dlq) { if (held(key, q.depth >= DLQ.depth, DLQ.sustain)) find('dead-letters', name, q.depth, `${id(name)}: ${count(q.depth)}.`, DLQ.remindMinutes); }
     // Feedback is what bounce rates, the list probe and auto-pause decide on; the other queues only delay.
-    else if (rule && held(key, oldestSeconds >= rule.oldestSeconds, rule.sustain)) find('queue-behind', name, oldestSeconds, `${id(name)}: oldest ${span(oldestSeconds)}, ${count(q.depth)} waiting.`, rule.remindMinutes, name === 'feedback' || name === 'priority' ? 'critical' : 'warning');
-    return { name, depth: q.depth, oldestSeconds, behind: behind.has(key) };
+    else if (rule && held(key, oldestSeconds >= rule.oldestSeconds, rule.sustain)) find('queue-behind', name, oldestSeconds, `${id(name)}: oldest ${span(oldestSeconds)}, ${count(q.depth)} waiting.`, rule.remindMinutes, name === 'feedback' || name === 'feedback-priority' ? 'critical' : 'warning');
+    // A queue without a rule is shown and never alerts: the wake hints (WAKE_QUEUES), which the jobs below answer for.
+    return { name, depth: q.depth, oldestSeconds, behind: behind.has(key), wake: WAKE_QUEUES.includes(name) };
   });
 
   let jobs: Rollup['jobs'] = null;
@@ -191,7 +193,7 @@ export function evaluate(sample: Sample, memory: Memory, now: number, diskBytes:
     jobs = [...types.values()].map(({ top: _, half: __, first: ___, ...row }) => row).sort((a, b) => Number(b.behind) - Number(a.behind) || b.oldestSeconds - a.oldestSeconds || b.failedLastHour - a.failedLastHour || b.failed - a.failed);
   } else blind.add('jobs');
 
-  const feedbackQueue = sample.queues.filter(q => q.name === 'feedback' || q.name === 'priority').map(q => Math.round(q.oldestMs / 1000));
+  const feedbackQueue = sample.queues.filter(q => q.name === 'feedback' || q.name === 'feedback-priority').map(q => Math.round(q.oldestMs / 1000));
   const feedbackJobs = sample.late?.filter(late => late.class === 'feedback').map(late => late.oldestSeconds) ?? [];
   const feedbackLagSeconds = feedbackQueue.length || sample.late ? Math.max(0, ...feedbackQueue, ...feedbackJobs) : null;
 
