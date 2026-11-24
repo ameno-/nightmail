@@ -11396,7 +11396,7 @@ describe('Import property boundaries', () => {
       assert.equal(qProps.status, 200);
       assert.ok(Buffer.byteLength(JSON.stringify(qProps.body)) <= AUDIENCE_READ_MAX_BYTES);
       assert.ok(qProps.body.rows.length > 0 && qProps.body.rows.length < 82);
-      assert.equal(qProps.body.matched, 82);
+      assert.equal(qProps.body.matched, qProps.body.rows.length);
       assert.equal(qProps.body.truncated, true);
 
       const qSkinny = ok(await apiCall('POST', '/v1/audience-query/query', { statement: 'SELECT id, email FROM contacts LIMIT 1000' }));
@@ -11654,6 +11654,85 @@ describe('Import property boundaries', () => {
       assert.deepEqual({ imported: aged.imported, rows: aged.rows, errors: aged.errors, rowsRetained: aged.rowsRetained, errorsRetained: aged.errorsRetained }, { imported: 2, rows: [], errors: [], rowsRetained: false, errorsRetained: false });
       const [{ sample_contact_ids: after90 }] = (await db.query(`SELECT sample_contact_ids FROM audience_imports WHERE id = $1`, [preview.id])).rows;
       assert.equal(after90, null);
+    });
+  });
+
+  test('large audience capture skinny path, sampled audienceHealth estimates, bounded previewSegment, and AudienceQL LIMIT + plan cap', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const wid = runtime.config.workspaceId;
+      const bigList = ok(await local('POST', '/v1/lists', { name: 'Big Capture List' }), 201);
+      const smallList = ok(await local('POST', '/v1/lists', { name: 'Small Preview List' }), 201);
+
+      // Seed 50,005 contacts (exceeds both A1-5's 10k sample cap and A1-4's 50k skinny-capture threshold):
+      // 100 early UUIDv7 rows + 49,905 later UUIDv7 rows, 500 of them subscribed with plan='pro' / 'free' and 5 in smallList.
+      await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,name,properties,marketing_consent,suppressed,observed_since)
+        SELECT
+          CASE WHEN g <= 100 THEN 'con_019a000000017' ELSE 'con_019a000000097' END || lpad(to_hex(g), 19, '0'),
+          $1,
+          CASE WHEN g <= 200 THEN 'info' || g || '@gmial.com' ELSE 'user' || g || '@example.com' END,
+          'User ' || g,
+          jsonb_build_object('plan', CASE WHEN g <= 300 THEN 'pro' ELSE 'free' END, 'tier', 't' || (g % 3)),
+          CASE WHEN g <= 500 THEN 'subscribed' ELSE 'unknown' END,
+          (g > 500 AND g <= 510),
+          now() - interval '200 days'
+        FROM generate_series(1, 50005) g`, [wid]);
+      await db.query(`INSERT INTO audience_list_members(workspace_id,list_id,contact_id)
+        SELECT $1, $2, id FROM audience_contacts WHERE workspace_id = $1`, [wid, bigList.id]);
+      await db.query(`INSERT INTO audience_list_members(workspace_id,list_id,contact_id)
+        SELECT $1, $2, id FROM audience_contacts WHERE workspace_id = $1 AND email IN ('info1@gmial.com', 'info2@gmial.com', 'user501@example.com')`, [wid, smallList.id]);
+
+      // 1. A1-4: >50k skinny capture with priority + referenced personalization + hashed send order.
+      const { snapshotCampaignAudience } = await import('./src/audience.js');
+      const actor = { workspaceId: wid, keyId: 'fixture', permissions: ['read', 'write', 'manage', 'send'], domains: [], role: 'owner', credential: 'dashboard' } as never;
+      const revId = 'rev_skinny_' + randomUUID().replaceAll('-', '').slice(0, 12);
+      const snap = await snapshotCampaignAudience(runtime.db, actor, { listId: bigList.id, priority: { property: 'plan', values: ['pro', 'free'] } }, revId, ['name', 'plan'], false);
+      assert.deepEqual({ matched: snap.matched, eligible: snap.eligible, suppressed: snap.suppressed, unsubscribed: snap.unsubscribed }, { matched: 50005, eligible: 500, suppressed: 10, unsubscribed: 49495 });
+      const first300Pro = (await db.query(`SELECT count(*)::int AS n FROM sending_review_recipients WHERE review_id = $1 AND ordinal <= 300 AND recipient->'properties'->>'plan' = 'pro'`, [revId])).rows[0].n;
+      assert.equal(first300Pro, 300, 'Priority rank must place all 300 pro contacts before free contacts.');
+      const sampleRec = (await db.query(`SELECT recipient FROM sending_review_recipients WHERE review_id = $1 AND ordinal = 1`, [revId])).rows[0].recipient;
+      assert.deepEqual(Object.keys(sampleRec.properties), ['plan'], 'Only referenced personalization properties are materialized.');
+      assert.ok(typeof sampleRec.name === 'string' && sampleRec.name.startsWith('User '));
+      const laterInFirst100 = (await db.query(`SELECT count(*)::int AS n FROM sending_review_recipients WHERE review_id = $1 AND ordinal <= 100 AND recipient->>'id' LIKE 'con_019a000000097%'`, [revId])).rows[0].n;
+      assert.ok(laterInFirst100 >= 40 && laterInFirst100 <= 95, `Skinny capture must hash-order IDs inside each priority bucket (got ${laterInFirst100}/100 later).`);
+
+      // 2. A1-5: audienceHealth marks >10k scopes as sampled estimates (uniformly hashed) and <=10k scopes as exact.
+      const { audienceHealth } = await import('./src/deliverability.js');
+      const health = await audienceHealth(runtime.db, wid);
+      assert.equal(health.all?.sampled, true);
+      assert.equal(health.all?.sampleSize, 10000);
+      assert.equal(health.all?.contacts, 10000);
+      const bigView = health.lists.find(l => l.id === bigList.id)!;
+      const smallView = health.lists.find(l => l.id === smallList.id)!;
+      assert.deepEqual([bigView.sampled, bigView.sampleSize], [true, 10000]);
+      assert.deepEqual([smallView.sampled, smallView.sampleSize, smallView.contacts], [false, null, 3]);
+      assert.ok(health.findings.some(f => f.scope === 'all contacts' && f.message.includes('estimated from a 10,000-contact sample')), 'Sampled findings must be labeled as estimates.');
+
+      // 3. A1-6: previewSegment fast small-list path + bounded >1,000 rejection on large list.
+      const proSeg = ok(await local('POST', '/v1/segments', { name: 'Pro Seg', rule: { field: 'plan', operator: 'eq', value: 'pro' } }), 201);
+      const freeSeg = ok(await local('POST', '/v1/segments', { name: 'Free Seg', rule: { field: 'plan', operator: 'eq', value: 'free' } }), 201);
+      assert.deepEqual(ok(await local('POST', `/v1/segments/${proSeg.id}/preview`, { listId: smallList.id })), { matched: 2, eligible: 2, suppressed: 0, unsubscribed: 0 });
+      assert.deepEqual(ok(await local('POST', `/v1/segments/${proSeg.id}/preview`, { listId: bigList.id })), { matched: 300, eligible: 300, suppressed: 0, unsubscribed: 0 });
+      error(await local('POST', `/v1/segments/${freeSeg.id}/preview`, { listId: bigList.id }), 422, 'AUDIENCE_LIMIT_EXCEEDED');
+
+      // 4. A1-8: AudienceQL SELECT LIMIT 1 skips full-table count(*), UPDATE LIMIT batches cleanly, and open plans cap at 25.
+      const q1 = ok(await local('POST', '/v1/audience-query/query', { statement: 'SELECT email FROM contacts LIMIT 1' }));
+      assert.deepEqual({ len: q1.rows.length, matched: q1.matched, truncated: q1.truncated }, { len: 1, matched: 1, truncated: true });
+      const qCount = ok(await local('POST', '/v1/audience-query/query', { statement: "SELECT count(*) FROM contacts WHERE consent = 'subscribed'" }));
+      assert.deepEqual({ matched: qCount.matched, truncated: qCount.truncated }, { matched: 500, truncated: false });
+      error(await local('POST', '/v1/audience-query/plan', { statement: "UPDATE contacts SET consent = 'subscribed' WHERE consent = 'unknown' LIMIT 10001" }), 422, 'AUDIENCEQL_INVALID');
+      const batchPlan = ok(await local('POST', '/v1/audience-query/plan', { statement: `UPDATE contacts SET consent = 'subscribed' WHERE consent = 'unknown' AND suppressed = FALSE AND list = '${bigList.id}' LIMIT 2` }), 201);
+      assert.equal(batchPlan.matched, 2);
+      const applied = ok(await local('POST', '/v1/audience-query/apply', { planId: batchPlan.id, evidence: 'Batch checkout opt-in' }));
+      assert.equal(applied.affected, 2);
+      const planIds: string[] = [];
+      for (let i = 0; i < 27; i++) {
+        const p = ok(await local('POST', '/v1/audience-query/plan', { statement: `UPDATE contacts SET consent = 'subscribed' WHERE consent = 'unknown' AND list = '${smallList.id}' LIMIT 1` }), 201);
+        planIds.push(p.id);
+      }
+      const openPlans = (await db.query(`SELECT count(*)::int AS n FROM audience_operation_plans WHERE workspace_id = $1 AND applied_at IS NULL`, [wid])).rows[0].n;
+      assert.equal(openPlans, 25, 'Workspace keeps at most 25 unapplied AudienceQL plans.');
+      const evicted = error(await local('POST', '/v1/audience-query/apply', { planId: planIds[0], evidence: 'Too old' }), 404, 'NOT_FOUND');
+      assert.match(evicted.message, /25 newer ones/);
     });
   });
 });

@@ -195,7 +195,7 @@ export const TOOLS: ToolSpec[] = [
   { name: 'lint_campaign', description: 'The same checks as lint_email for a campaign’s current content.',
     params: { campaignId: { type: 'string', description: 'The campaign ID', max: 120, pattern: ID }, workspaceId: workspaceParam },
     label: fixed('Checking that campaign’s structure…', 'Checked that campaign’s structure'), execute: read((a, h) => `/v1/support/campaigns/${seg(a.campaignId)}/lint${query({ workspaceId: a.workspaceId }, h)}`) },
-  { name: 'audience_health', description: 'List hygiene per list or segment: consent mix, suppressions by reason, engagement recency and stale share, role and typo addresses, provider mix, and recent imports with their first-send bounce and complaint rates. No addresses.',
+  { name: 'audience_health', description: 'List hygiene per list or workspace: consent mix, suppressions by reason, engagement recency and stale share, role and typo addresses, provider mix, and recent imports with their first-send bounce and complaint rates. No addresses. When sampled is true on a view, present its counts and shares explicitly as estimates from sampleSize contacts, never as exact totals.',
     params: { workspaceId: workspaceParam, listId: { type: 'string', description: 'Only this list', optional: true, max: 120, pattern: ID } },
     label: fixed('Checking your audience’s health…', 'Checked your audience’s health'), execute: read((a, h) => `/v1/support/audience/health${query(a, h, ['listId'])}`) },
   { name: 'choose_workspace', description: 'When the customer has several workspaces and you need account data, call this with the workspace they named (an ID from the verified list in <customer>). Narrows access to that one workspace.',

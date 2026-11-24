@@ -1,16 +1,18 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, eq, gt, gte, inArray, isNotNull, isNull, lt, lte, ne, or, sql, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
-import { actor, ApiError, budgetedRead, errors, id, json, readLimit, readLimitNote, response, security, type Actor, type App, type Database, type DbExecutor } from './core.js';
+import { actor, ApiError, budgetedRead, errors, id, json, readLimit, readLimitNote, response, rowId, security, type Actor, type App, type Database, type DbExecutor } from './core.js';
 import { AUDIENCE_READ_MAX_BYTES, compileRule, CONTACT_PROPERTIES_DB_MAX_BYTES, CONTACT_PROPERTIES_MAX_BYTES, CONTACT_PROPERTIES_MAX_KEYS, isContactSizeCheckViolation, lockContacts, PropertiesInput, propertiesByteLength, utf8Bytes, withAudienceReadMemory } from './audience.js';
 import { auditContext, auditInsert, type AuditContext } from './audit.js';
 import { audiencePlans, consentAudit, contacts, listMembers, lists, segments, type AudienceOperation } from './db/audience.js';
-import { enqueue } from './jobs.js';
+import { jobs } from './db/core.js';
+import { noteEnqueued } from './jobs.js';
 
-const Statement = z.string().trim().min(1).max(4000).describe("AudienceQL statement. Supported: SELECT fields|count(*) FROM contacts [WHERE ...] [LIMIT n]; UPDATE contacts SET name|consent|properties.key = value WHERE ...; ADD contacts TO LIST 'name-or-id' WHERE ...; REMOVE contacts FROM LIST 'name-or-id' WHERE .... WHERE supports AND with =, !=, CONTAINS, IS NULL, IS NOT NULL and timestamp comparisons over id, email, name, consent, suppressed, list, segment, lastOpenAt, lastClickAt and properties.key. No raw tables, joins, comments or semicolons.");
+const AUDIENCEQL_OPEN_PLAN_CAP = 25, AUDIENCEQL_MAX_TARGETS = 10_000;
+const Statement = z.string().trim().min(1).max(4000).describe("AudienceQL statement. Supported: SELECT fields|count(*) FROM contacts [WHERE ...] [LIMIT n]; UPDATE contacts SET name|consent|properties.key = value WHERE ... [LIMIT n]; ADD contacts TO LIST 'name-or-id' WHERE ...; REMOVE contacts FROM LIST 'name-or-id' WHERE .... WHERE supports AND with =, !=, CONTAINS, IS NULL, IS NOT NULL and timestamp comparisons over id, email, name, consent, suppressed, list, segment, lastOpenAt, lastClickAt and properties.key. No raw tables, joins, comments or semicolons.");
 const Value = z.union([z.string(), z.number(), z.boolean(), z.null()]);
 const Sample = z.object({ id: z.string(), email: z.string(), name: z.string().nullable(), consent: z.enum(['unknown', 'subscribed', 'unsubscribed']), suppressed: z.boolean() });
-const QueryResult = z.object({ columns: z.array(z.string()), rows: z.array(z.record(z.string(), Value.or(z.record(z.string(), Value)))), matched: z.number().int(), truncated: z.boolean() }).openapi('AudienceQueryResult');
+const QueryResult = z.object({ columns: z.array(z.string()), rows: z.array(z.record(z.string(), Value.or(z.record(z.string(), Value)))), matched: z.number().int().describe('Exact count for SELECT count(*) or when truncated is false; otherwise the returned page size.'), truncated: z.boolean() }).openapi('AudienceQueryResult');
 const PlanResult = z.object({ id: z.string(), operation: z.enum(['update_contacts', 'add_to_list', 'remove_from_list']), matched: z.number().int(), sample: z.array(Sample), warnings: z.array(z.string()), requiresResubscribeConfirmation: z.boolean(), expiresAt: z.string() }).openapi('AudienceOperationPlan');
 const ApplyResult = z.object({ id: z.string(), operation: z.enum(['update_contacts', 'add_to_list', 'remove_from_list']), affected: z.number().int(), appliedAt: z.string() }).openapi('AudienceOperationResult');
 type Literal = string | number | boolean | null;
@@ -90,10 +92,11 @@ async function whereSql(db: DbExecutor, identity: Actor, source: string | undefi
 function mScope(identity: Actor) { return sql`m.workspace_id = ${identity.workspaceId}`; }
 const targetColumns = { id: contacts.id, email: contacts.email, name: contacts.name, updatedAt: contacts.updatedAt, marketingConsent: contacts.marketingConsent, suppressed: contacts.suppressed };
 type TargetRow = { [K in keyof typeof targetColumns]: (typeof contacts.$inferSelect)[K] };
-async function targetRows(db: DbExecutor, identity: Actor, where: string, extra?: SQL): Promise<TargetRow[]> {
+async function targetRows(db: DbExecutor, identity: Actor, where: string, extra?: SQL, explicitLimit?: number): Promise<TargetRow[]> {
   const conditions = await whereSql(db, identity, where);
-  const rows = await db.select(targetColumns).from(contacts).where(and(scoped(contacts, identity), isNull(contacts.deletedAt), ...conditions, extra)).orderBy(asc(contacts.id)).limit(10_001);
-  if (rows.length > 10_000) throw new ApiError(422, 'AUDIENCEQL_LIMIT_EXCEEDED', 'A mutation plan may target at most 10,000 contacts. Narrow the WHERE clause.', 'statement');
+  const cap = explicitLimit ?? AUDIENCEQL_MAX_TARGETS;
+  const rows = await db.select(targetColumns).from(contacts).where(and(scoped(contacts, identity), isNull(contacts.deletedAt), ...conditions, extra)).orderBy(asc(contacts.id)).limit(explicitLimit ? cap : cap + 1);
+  if (!explicitLimit && rows.length > AUDIENCEQL_MAX_TARGETS) throw new ApiError(422, 'AUDIENCEQL_LIMIT_EXCEEDED', 'A mutation plan may target at most 10,000 contacts. Narrow the WHERE clause or add LIMIT 10000 to update in batches.', 'statement');
   return rows;
 }
 function sample(rows: TargetRow[]) { return rows.slice(0, 10).map(row => ({ id: row.id, email: row.email, name: row.name, consent: row.marketingConsent, suppressed: row.suppressed })); }
@@ -119,8 +122,8 @@ async function assertMergedPropertiesWithinLimit(db: DbExecutor, identity: Actor
     }
   }
 }
-function parseMutation(statement: string): { kind: 'update'; set: UpdateSet; where: string } | { kind: 'add' | 'remove'; list: string; where: string } {
-  const update = /^UPDATE\s+contacts\s+SET\s+(.+?)\s+WHERE\s+(.+)$/is.exec(statement);
+function parseMutation(statement: string): { kind: 'update'; set: UpdateSet; where: string; limit?: number } | { kind: 'add' | 'remove'; list: string; where: string } {
+  const update = /^UPDATE\s+contacts\s+SET\s+(.+?)\s+WHERE\s+(.+?)(?:\s+LIMIT\s+(\d+))?$/is.exec(statement);
   if (update) {
     const set: UpdateSet = {};
     for (const assignment of splitOutside(update[1]!, ',')) {
@@ -141,7 +144,9 @@ function parseMutation(statement: string): { kind: 'update'; set: UpdateSet; whe
     if (set.properties && (Object.keys(set.properties).length > CONTACT_PROPERTIES_MAX_KEYS || propertiesByteLength(set.properties) > CONTACT_PROPERTIES_MAX_BYTES)) {
       throw new ApiError(422, 'AUDIENCEQL_PROPERTIES_INVALID', 'Contact properties must total at most 50 keys and 16 KiB of JSON.', 'statement');
     }
-    return { kind: 'update', set, where: update[2]!.trim() };
+    const limit = update[3] ? Number(update[3]) : undefined;
+    if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > AUDIENCEQL_MAX_TARGETS)) throw new ApiError(422, 'AUDIENCEQL_INVALID', `UPDATE LIMIT must be between 1 and ${AUDIENCEQL_MAX_TARGETS}.`, 'statement');
+    return { kind: 'update', set, where: update[2]!.trim(), limit };
   }
   const membership = /^(ADD\s+contacts\s+TO|REMOVE\s+contacts\s+FROM)\s+LIST\s+(.+?)\s+WHERE\s+(.+)$/is.exec(statement);
   if (membership) { const list = literal(membership[2]!); if (typeof list !== 'string') throw new ApiError(422, 'AUDIENCEQL_INVALID', 'LIST requires a quoted name or ID.', 'statement'); return { kind: membership[1]!.toUpperCase().startsWith('ADD') ? 'add' : 'remove', list, where: membership[3]!.trim() }; }
@@ -177,8 +182,11 @@ async function queryAudienceJson(db: Database, identity: Actor, statement: strin
   return budgetedRead(db, async tx => {
     const conditions = await whereSql(tx, identity, match[2]?.trim());
     const where = and(scoped(contacts, identity), isNull(contacts.deletedAt), ...conditions);
-    const [{ count }] = await tx.select({ count: sql<number>`count(*)::int` }).from(contacts).where(where);
-    if (isCount) return JSON.stringify({ columns: ['count'], rows: [{ count }], matched: count, truncated: false });
+    if (isCount) {
+      const [{ count }] = await tx.select({ count: sql<number>`count(*)::int` }).from(contacts).where(where);
+      return JSON.stringify({ columns: ['count'], rows: [{ count }], matched: count, truncated: false });
+    }
+    // Fetch limit + 1 in one pass (no full-table count(*)) while capping cumulative response bytes in SQL.
     const uniqueFields = [...new Set(fields)];
     const selectEntries = uniqueFields.map((f, i) => {
       const { expr } = fieldSqlExpr(f);
@@ -190,14 +198,15 @@ async function queryAudienceJson(db: Database, identity: Actor, statement: strin
       WITH candidate AS (
         SELECT ${contacts.id} AS _sort_id, ${sql.join(selectEntries, sql`, `)}, (${bytesSum} + 16) AS row_bytes
         FROM ${contacts} WHERE ${where}
-        ORDER BY ${contacts.id} ASC LIMIT ${limit}
+        ORDER BY ${contacts.id} ASC LIMIT ${limit + 1}
       ), sized AS (
         SELECT *, row_number() OVER (ORDER BY _sort_id) AS rn, sum(row_bytes) OVER (ORDER BY _sort_id ROWS UNBOUNDED PRECEDING) AS cum_bytes
         FROM candidate
       )
-      SELECT ${outerCols} FROM sized
-      WHERE rn = 1 OR cum_bytes <= ${AUDIENCE_READ_MAX_BYTES}
+      SELECT ${outerCols}, (SELECT count(*)::int FROM candidate) AS _cand_count FROM sized
+      WHERE rn <= ${limit} AND (rn = 1 OR cum_bytes <= ${AUDIENCE_READ_MAX_BYTES})
       ORDER BY rn`);
+    const candidateCount = Number(rows[0]?._cand_count ?? 0);
     const fieldIndex = new Map(uniqueFields.map((f, i) => [f, `f_${i}`]));
     const colsJson = JSON.stringify(fields);
     const overhead = utf8Bytes(colsJson) + 64;
@@ -216,8 +225,8 @@ async function queryAudienceJson(db: Database, identity: Actor, statement: strin
       serializedRows.push(line);
       bytes += size;
     }
-    const truncated = count > serializedRows.length;
-    return `{"columns":${colsJson},"rows":[${serializedRows.join(',')}],"matched":${count},"truncated":${truncated}}`;
+    const truncated = candidateCount > serializedRows.length;
+    return `{"columns":${colsJson},"rows":[${serializedRows.join(',')}],"matched":${serializedRows.length},"truncated":${truncated}}`;
   }, readLimit(5));
 }
 
@@ -225,7 +234,7 @@ async function planAudience(db: Database, identity: Actor, statement: string) {
   statement = clean(statement); const parsed = parseMutation(statement);
   const { rows, operation } = await budgetedRead(db, async tx => {
     if (parsed.kind === 'update') {
-      const matchedRows = await targetRows(tx, identity, parsed.where);
+      const matchedRows = await targetRows(tx, identity, parsed.where, undefined, parsed.limit);
       if (parsed.set.properties) await assertMergedPropertiesWithinLimit(tx, identity, matchedRows.map(r => r.id), parsed.set.properties);
       return { rows: matchedRows, operation: { kind: 'update_contacts', targets: matchedRows.map(row => ({ id: row.id, email: row.email, updatedAt: row.updatedAt, consent: row.marketingConsent })), set: parsed.set } as AudienceOperation };
     }
@@ -236,14 +245,20 @@ async function planAudience(db: Database, identity: Actor, statement: string) {
   const requiresResubscribeConfirmation = operation.kind === 'update_contacts' && operation.set.consent === 'subscribed' && operation.targets.some(target => target.consent === 'unsubscribed');
   const warnings = [...(rows.some(row => row.suppressed) ? [`${rows.filter(row => row.suppressed).length} suppressed contact(s) remain suppressed.`] : []), ...(requiresResubscribeConfirmation ? ['The plan includes prior opt-outs and requires explicit resubscribe confirmation.'] : [])];
   const planId = id('aqp'), expiresAt = new Date(Date.now() + 15 * 60_000).toISOString();
-  await db.insert(audiencePlans).values({ id: planId, workspaceId: identity.workspaceId, actorKeyId: identity.keyId, statement, operation, matched: rows.length, expiresAt });
+  await db.transaction(async tx => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(275819, hashtext(${identity.workspaceId}))`);
+    await tx.insert(audiencePlans).values({ id: planId, workspaceId: identity.workspaceId, actorKeyId: identity.keyId, statement, operation, matched: rows.length, expiresAt, createdAt: sql`clock_timestamp()` as unknown as string });
+    // Keep at most AUDIENCEQL_OPEN_PLAN_CAP unapplied plans per workspace (oldest evicted).
+    await tx.execute(sql`DELETE FROM audience_operation_plans WHERE workspace_id = ${identity.workspaceId} AND applied_at IS NULL AND id <> ${planId}
+      AND id IN (SELECT id FROM audience_operation_plans WHERE workspace_id = ${identity.workspaceId} AND applied_at IS NULL AND id <> ${planId} ORDER BY created_at DESC, id DESC OFFSET ${AUDIENCEQL_OPEN_PLAN_CAP - 1})`);
+  });
   return { id: planId, operation: operation.kind, matched: rows.length, sample: sample(rows), warnings, requiresResubscribeConfirmation, expiresAt };
 }
 const chunks = <T,>(values: T[], size: number) => Array.from({ length: Math.ceil(values.length / size) }, (_, index) => values.slice(index * size, (index + 1) * size));
 async function applyPlan(db: Database, identity: Actor, planId: string, confirmResubscribe: boolean, audit: AuditContext, evidence?: string) {
   return db.transaction(async tx => {
     const [plan] = await tx.select().from(audiencePlans).where(and(scoped(audiencePlans, identity), eq(audiencePlans.id, planId), eq(audiencePlans.actorKeyId, identity.keyId))).limit(1).for('update');
-    if (!plan) throw new ApiError(404, 'NOT_FOUND', 'Audience operation plan was not found.');
+    if (!plan) throw new ApiError(404, 'NOT_FOUND', `Audience operation plan was not found. Unapplied plans are removed once the workspace has ${AUDIENCEQL_OPEN_PLAN_CAP} newer ones (or after expiry). Create a new plan.`);
     if (plan.appliedAt) throw new ApiError(409, 'AUDIENCE_PLAN_APPLIED', 'This audience operation plan was already applied.');
     if (Date.parse(plan.expiresAt) <= Date.now()) throw new ApiError(409, 'AUDIENCE_PLAN_EXPIRED', 'This audience operation plan expired. Create a new plan.');
     const operation = plan.operation; const appliedAt = new Date().toISOString();
@@ -262,12 +277,13 @@ async function applyPlan(db: Database, identity: Actor, planId: string, confirmR
         throw err;
       }
       if (operation.set.consent) {
-        const changed = current.filter(row => row.marketingConsent !== operation.set.consent).map(row => ({ row, eventId: id('cns') }));
-        for (const batch of chunks(changed, 500)) await tx.insert(consentAudit).values(batch.map(({ row, eventId }) => ({ id: eventId, workspaceId: identity.workspaceId, contactId: row.id, email: row.email, status: operation.set.consent!, source: 'audienceql', evidence: evidence ?? null, actorKeyId: identity.keyId, occurredAt: appliedAt })));
-        for (const batch of chunks(changed, 100)) await enqueue(tx, { type: 'operation.publishBatch', workspaceId: identity.workspaceId, payload: { events: batch.map(({ row, eventId }) => ({ id: eventId, workspaceId: identity.workspaceId, type: 'contact.subscription_changed', region: null, createdAt: appliedAt, data: { contactId: row.id, status: operation.set.consent, source: 'audienceql' } })) } });
+        const changed = current.filter(row => row.marketingConsent !== operation.set.consent).map(row => ({ row, eventId: rowId('cns') }));
+        for (const batch of chunks(changed, 2500)) await tx.insert(consentAudit).values(batch.map(({ row, eventId }) => ({ id: eventId, workspaceId: identity.workspaceId, contactId: row.id, email: row.email, status: operation.set.consent!, source: 'audienceql', evidence: evidence ?? null, actorKeyId: identity.keyId, occurredAt: appliedAt })));
+        const jobRows = chunks(changed, 100).map(batch => ({ id: rowId('job'), workspaceId: identity.workspaceId, type: 'operation.publishBatch', payload: { events: batch.map(({ row, eventId }) => ({ id: eventId, workspaceId: identity.workspaceId, type: 'contact.subscription_changed', region: null, createdAt: appliedAt, data: { contactId: row.id, status: operation.set.consent, source: 'audienceql' } })) } }));
+        if (jobRows.length) { await tx.insert(jobs).values(jobRows); noteEnqueued(jobRows.length); }
       }
     } else {
-      const [list] = await tx.select({ id: lists.id }).from(lists).where(and(scoped(lists, identity), eq(lists.id, operation.listId))).limit(1).for('update');
+      const [list] = await tx.select({ id: lists.id }).from(lists).where(and(scoped(lists, identity), eq(lists.id, operation.listId))).limit(1).for('share');
       if (!list) throw new ApiError(409, 'STALE_AUDIENCE_PLAN', 'The planned list was deleted. Review a new plan.');
       const currentMemberships = operation.targetIds.length ? await tx.select({ contactId: listMembers.contactId }).from(listMembers).where(and(scoped(listMembers, identity), eq(listMembers.listId, operation.listId), inArray(listMembers.contactId, operation.targetIds))) : [];
       if (operation.kind === 'add_to_list' && currentMemberships.length || operation.kind === 'remove_from_list' && currentMemberships.length !== operation.targetIds.length) throw new ApiError(409, 'STALE_AUDIENCE_PLAN', 'List memberships changed after review. Review a new plan.');
@@ -295,7 +311,7 @@ export function registerAudienceQuery(app: App) {
       return new Response(body, { status: 200, headers: { 'content-type': 'application/json; charset=UTF-8' } });
     }) as never;
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/audience-query/plan', operationId: 'planAudienceMutation', tags: ['Audience'], security, description: `Create a 15-minute immutable plan for a bounded AudienceQL bulk mutation. Does not modify contacts or memberships. ${readLimitNote(5)}`, request: { body: json(z.object({ statement: Statement }).strict()) }, responses: { 201: response(PlanResult), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/audience-query/plan', operationId: 'planAudienceMutation', tags: ['Audience'], security, description: `Create a 15-minute immutable plan for a bounded AudienceQL bulk mutation. Does not modify contacts or memberships. ${readLimitNote(5)} At most 10,000 contacts per plan; newest ${AUDIENCEQL_OPEN_PLAN_CAP} unapplied plans kept per workspace.`, request: { body: json(z.object({ statement: Statement }).strict()) }, responses: { 201: response(PlanResult), ...errors } }), async c => {
     const identity = actor(c, 'manage'), statement = c.req.valid('json').statement;
     return await withAudienceReadMemory(c, async () => {
       const plan = PlanResult.parse(await planAudience(c.env.db, identity, statement));
