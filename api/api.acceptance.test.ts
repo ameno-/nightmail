@@ -40926,7 +40926,12 @@ describe('dashboard analytics', () => {
     runtime.analyticsPeer.bot=false;
     const steps=['signed_up','domain_verified','first_send'].map((step,i)=>({id:'funnel-id-'+i,seq:i,t:Date.now(),route:'/overview',type:'track',step}));
     assert.equal((await post(envelope(steps),headers,ip)).status,204);
+    // A forged batch can name any well-formed workspace: its milestones never reach the funnel.
+    assert.equal((await post({...envelope(steps.map(x=>({...x,id:x.id+'f'}))),ws:'ws_'+'f'.repeat(32)},headers,ip)).status,204);
     const raw=rows(), vid=raw.find(r=>r.type==='page_view')!.vid;
+    // The daily code only on public rows, whose page session is keyed by the day's salt: neither joins an account.
+    assert.ok(raw.filter(r=>r.uid).every(r=>!('vid' in r)));
+    assert.ok(raw.filter(r=>r.public).every(r=>/^[a-f0-9]{32}$/.test(String(r.sid)) && !String(r.sid).startsWith('page-session')));
     assert.equal(raw.filter(r=>r.type==='page_view' && r.vid===vid).length,2);
     assert.match(String(vid),/^[a-f0-9]{32}$/);
     assert.equal(raw.filter(r=>r.type==='bot_view').length,2);
@@ -40942,6 +40947,8 @@ describe('dashboard analytics', () => {
       for(const table of ['analytics_hours','analytics_hourly','analytics_funnel_first'])
         await client.query('CREATE TEMP TABLE '+table+' (LIKE public.'+table+' INCLUDING ALL) ON COMMIT DROP');
       await client.query("INSERT INTO platform_operators(user_id,role,reason) VALUES($1,'operator:read','Synthetic analytics fixture')",[session.userId]);
+      await client.query('INSERT INTO workspaces(id,slug,name) VALUES($1,$1,$1) ON CONFLICT DO NOTHING',['ws_'+'a'.repeat(32)]);
+      cleanup(t,()=>client.query('DELETE FROM workspaces WHERE id=$1',['ws_'+'a'.repeat(32)]).then(()=>{}));
       cleanup(t,()=>client.query('DELETE FROM platform_operators WHERE user_id=$1',[session.userId]).then(()=>{}));
       const day=new Date(start).toISOString().slice(0,10), next=new Date(start+86400000).toISOString().slice(0,10);
       const exportUrl=origin+path+'/export?from='+day+'&to='+next+'&grain=day';

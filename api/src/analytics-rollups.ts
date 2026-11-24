@@ -8,6 +8,10 @@ const HOUR = 3_600_000, DAY = 24 * HOUR;
 const iso = (ms: number) => new Date(ms).toISOString();
 export const partition = (ms: number) => 'dt=' + iso(ms).slice(0,10) + '/h=' + iso(ms).slice(11,13);
 const milestones = new Set(['signed_up','domain_verified','first_send']);
+// Anyone can post, and most dimensions are free-form (referrer host, UTM tags, path slugs, click targets): bound an hour's
+// rows, visitor codes and memory. Past a metric's group limit the rest of its events fold into one overflow group.
+export const ROLLUP_LIMITS = { events: 250_000, groups: 1_000, visitors: 50_000 } as const;
+const OVERFLOW: Dimensions = { overflow: 'true' };
 type Dimensions = Record<string, string | null>;
 type Group = { metric: string; dimensions: Dimensions; events: number; ids: Set<string> };
 
@@ -21,20 +25,28 @@ export async function rollupHour(runtime: Runtime, ms: number) {
   do { const page = await store.list!(prefix,cursor); keys.push(...page.objects.map(o => o.key)); cursor = page.cursor; } while (cursor);
   const snapshot = await digest(keys.join('\n'));
   if (snapshot === previous) return;
-  const groups = new Map<string,Group>(), seen = new Set<string>(), first = new Map<string,{workspace:string; step:string}>();
+  const groups = new Map<string,Group>(), seen = new Set<string>(), first = new Map<string,{workspace:string; step:string}>(), perMetric = new Map<string,number>();
   function count(metric: string, dimensions: Dimensions, vid?: string | null) {
-    const key = JSON.stringify([metric, dimensions]);
-    const group = groups.get(key) ?? { metric, dimensions, events: 0, ids: new Set<string>() };
+    let key = JSON.stringify([metric, dimensions]), group = groups.get(key);
+    if (!group) {
+      const n = perMetric.get(metric) ?? 0;
+      if (n >= ROLLUP_LIMITS.groups) { dimensions = OVERFLOW; key = JSON.stringify([metric, dimensions]); group = groups.get(key); }
+      else perMetric.set(metric, n + 1);
+    }
+    group ??= { metric, dimensions, events: 0, ids: new Set<string>() };
     groups.set(key, group); group.events++;
-    if (vid) group.ids.add(vid);
+    if (vid && group.ids.size < ROLLUP_LIMITS.visitors) group.ids.add(vid);
   }
+  let truncated = false;
   for (const key of keys) {
+    if (truncated) break;
     const object = await store.get(key);
     if (!object) throw new Error('Compacted analytics object missing');
     const body = await new Response(new Blob([object.body as BlobPart]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
     for (const line of body.trimEnd().split('\n')) {
       const row = JSON.parse(line) as AnalyticsRow;
       if (seen.has(row.id)) continue;
+      if (seen.size >= ROLLUP_LIMITS.events) { truncated = true; break; }
       seen.add(row.id);
       if (row.type === 'bot_view') count('bot_view', { path: row.route });
       if (row.type === 'page_view') {
@@ -46,6 +58,7 @@ export async function rollupHour(runtime: Runtime, ms: number) {
       if (row.type === 'track' && row.ws && row.step && milestones.has(row.step)) first.set(row.ws + ':' + row.step,{ workspace:row.ws, step:row.step });
     }
   }
+  if (truncated) log('warn', { code: 'ANALYTICS_ROLLUP_TRUNCATED', hour, events: seen.size });
   const values = Array.from(groups.values(),g => ({ metric:g.metric, dimensions:g.dimensions, events:g.events, ids:[...g.ids].sort() }));
   await runtime.db.transaction(async tx => {
     // Serialize just the small SQL commit of milestone moves across hours; simultaneous folds cannot miss a correction.
@@ -59,12 +72,14 @@ export async function rollupHour(runtime: Runtime, ms: number) {
     if (values.length) await tx.execute(sql`INSERT INTO analytics_hourly(hour,metric,dimensions,events,visitor_ids)
       SELECT ${hour}, metric, dimensions, events, ids FROM jsonb_to_recordset(${JSON.stringify(values)}::jsonb) AS r(metric text,dimensions jsonb,events int,ids text[])`);
     if (first.size) {
-      // Moving a first observation earlier corrects both hours, including an already delivered hour.
+      // Moving a first observation earlier corrects both hours, including an already delivered hour. Only workspaces that
+      // exist: a forged batch can name any well-formed ID.
       const data = JSON.stringify([...first.values()]);
+      const real = sql`SELECT n.* FROM jsonb_to_recordset(${data}::jsonb) AS n(workspace text,step text) WHERE EXISTS (SELECT 1 FROM workspaces w WHERE w.id=n.workspace)`;
       await tx.execute(sql`UPDATE analytics_hours SET revision=revision+1,push_after=${due},attempts=0 WHERE hour IN
-        (SELECT f.hour FROM analytics_funnel_first f JOIN jsonb_to_recordset(${data}::jsonb) AS n(workspace text,step text) USING(workspace,step) WHERE f.hour>${hour})`);
+        (SELECT f.hour FROM analytics_funnel_first f JOIN (${real}) n USING(workspace,step) WHERE f.hour>${hour})`);
       await tx.execute(sql`INSERT INTO analytics_funnel_first(workspace,step,hour)
-        SELECT workspace,step,${hour} FROM jsonb_to_recordset(${data}::jsonb) AS n(workspace text,step text) ORDER BY workspace,step
+        SELECT workspace,step,${hour} FROM (${real}) n ORDER BY workspace,step
         ON CONFLICT(workspace,step) DO UPDATE SET hour=excluded.hour WHERE excluded.hour<analytics_funnel_first.hour`);
     }
   });
@@ -102,7 +117,8 @@ export async function pushDue(runtime: Runtime, now: number) {
       const data = await exportRollups(runtime,{grain:'hour',from:hour,to:iso(ms+HOUR)});
       const body = JSON.stringify({ ...data, revision:job.revision }), timestamp=String(Math.floor(Date.now()/1000));
       const signature = createHmac('sha256',push.secret).update(timestamp+'.'+body).digest('hex');
-      const response = await fetch(push.url,{method:'POST',redirect:'error',signal:AbortSignal.timeout(5000),
+      // Workers refuse redirect:'error'; 'manual' never follows, and a 3xx is not ok, so it retries.
+      const response = await fetch(push.url,{method:'POST',redirect:'manual',signal:AbortSignal.timeout(5000),
         headers:{'content-type':'application/json','x-nightmail-timestamp':timestamp,'x-nightmail-signature':'sha256='+signature},body});
       ok=response.ok; await response.body?.cancel();
     } catch { /* Retry the hour from the durable queue. Never log the destination, body or secret. */ }

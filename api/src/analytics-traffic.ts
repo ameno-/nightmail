@@ -60,8 +60,12 @@ export async function trafficRows(runtime: Runtime, rows: AnalyticsRow[], ua: st
     v: 1 as const, id: r.id, received: r.received, type: 'bot_view' as const, route: r.route,
   }));
   const day = new Date(now).toISOString().slice(0,10);
-  const vid = ip && ua ? createHmac('sha256', await dailySalt(runtime, day)).update(JSON.stringify([day,ip,ua])).digest('hex').slice(0,32) : null;
+  const salt = rows.some(row => row.public) ? await dailySalt(runtime, day) : undefined;
+  const vid = salt && ip && ua ? createHmac('sha256', salt).update(JSON.stringify([day,ip,ua])).digest('hex').slice(0,32) : null;
   const country = runtime.analyticsPeer?.country;
   const device = /ipad|tablet|android(?!.*mobile)/i.test(ua) ? 'tablet' : /mobile|iphone|ipod/i.test(ua) ? 'phone' : ua ? 'desktop' : null;
-  return rows.map(row => ({ ...row, vid, country: country && /^[A-Z]{2}$/.test(country) ? country : null, device }));
+  const where = { country: country && /^[A-Z]{2}$/.test(country) ? country : null, device };
+  // Only public-hook rows get the daily code, and their page session is keyed by the same salt: a dashboard row carries
+  // the account, and sign_in keeps the page's raw session ID, so neither can join a visitor code to an account or across days.
+  return rows.map(row => row.public && salt ? { ...row, ...where, vid, sid: createHmac('sha256', salt).update('sid:' + row.sid).digest('hex').slice(0,32) } : { ...row, ...where });
 }
