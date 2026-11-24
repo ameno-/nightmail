@@ -77,7 +77,7 @@ type Stored = { workspace_id: string; phase: 'seed' | 'calibrating' | 'graded'; 
   release_percent: number | null; last_release_at: string | null; last_self_resume_at: string | null; strikes: unknown[]; strike_until: string | null; version: number; sequence: number; computed_at: string | null };
 type Row = { standing: Stored | null; history: { date: string; score: number }[]; last30: number; override: number | null; override_expires_at: string | null; exempt: boolean; minute_cap: number | null; pool_pace: number | null;
   growth: { cap: number; used: number; until: string } | null; probation: ProbationReason | null;
-  restore_until: string | null; restore_cap: number | null; paused_at: string | null; days: DayEvidence[] | null; domains: DomainAuth[] | null; screened: boolean };
+  restore_until: string | null; restore_cap: number | null; paused_at: string | null; days: DayEvidence[] | null; domains: DomainAuth[] | null; screened: boolean; display?: SenderScore | null };
 const iso = (v: string | null | undefined) => v ? new Date(v).toISOString() : null;
 /** The standing job runs every ten minutes (standingTick), so an evaluation's wait ends at most this much later. */
 const JOB_MINUTES = 10;
@@ -100,49 +100,68 @@ export function selfService(s: Pick<Stored, 'step' | 'since' | 'pause_kind' | 'l
   return { available: false, action: null, reason: null, availableAt: null };
 }
 
-// One statement: the stored standing with 14 days of history, or (without one) 30 days of mail counted on read.
-export async function loadStanding(runtime: Runtime, wid: string): Promise<Row> {
+export const DISPLAY_SCORE_JOB = 'maintenance.senderDisplayScore';
+export const DISPLAY_SCORE_ID_PREFIX = 'sender-display:';
+export const displayScoreId = (wid: string) => DISPLAY_SCORE_ID_PREFIX + wid;
+const publishedDisplay = (wid: string) => sql`(SELECT payload->'view' FROM jobs WHERE id=${displayScoreId(wid)}
+  AND workspace_id=${wid} AND type=${DISPLAY_SCORE_JOB} AND status IN ('pending','running','failed') AND payload->>'version'='1')`;
+
+// Common aggregation for the exact live advisory and the background's bounded pages.
+export const displayEvidenceColumns = sql`count(*)::int AS emails,
+  count(*) FILTER (WHERE status<>'suppressed' AND (provider_id IS NOT NULL OR status IN ('accepted','sent','delivered','bounced','complained','delayed') OR event_outcomes & 1 <> 0))::int AS accepted,
+  count(*) FILTER (WHERE status='delivered' OR event_outcomes & 2 <> 0)::int AS delivered,count(*) FILTER (WHERE status='bounced' OR event_outcomes & 4 <> 0)::int AS bounced,
+  count(*) FILTER (WHERE campaign_id IS NOT NULL AND status<>'suppressed' AND (provider_id IS NOT NULL OR event_outcomes & 1 <> 0))::int AS first_sends,
+  count(*) FILTER (WHERE campaign_id IS NOT NULL AND (status='bounced' OR event_outcomes & 4 <> 0))::int AS first_bounced,
+  count(*) FILTER (WHERE status='complained' OR event_outcomes & 8 <> 0)::int AS complained,
+  count(*) FILTER (WHERE error_code='CONTENT_REJECTED_SPAM' OR (status<>'suppressed' AND (provider_id IS NOT NULL OR event_outcomes & 1 <> 0)))::int AS screened,
+  count(*) FILTER (WHERE error_code='CONTENT_REJECTED_SPAM')::int AS rejected,count(*) FILTER (WHERE campaign_id IS NOT NULL AND status='suppressed')::int AS suppressed,
+  count(*) FILTER (WHERE (kind='marketing' OR campaign_id IS NOT NULL) AND (status='delivered' OR event_outcomes & 2 <> 0))::int AS marketing_delivered,0 AS unsubscribed,
+  count(*) FILTER (WHERE (kind='marketing' OR campaign_id IS NOT NULL) AND event_outcomes & 32 <> 0)::int AS clicked`;
+
+// Advisories still ask for exact live evidence. Public and staff score displays never select its mail CTE.
+export async function loadStanding(runtime: Runtime, wid: string, storedOnly = false): Promise<Row> {
   const screened = Boolean(runtime.config.screen && runtime.config.hostedScreen);
   const { rows: [row] } = await runtime.db.execute<Row>(sql`WITH s AS (SELECT * FROM sender_standing WHERE workspace_id=${wid}),
-    pc AS (SELECT * FROM provider_connections WHERE workspace_id=${wid} AND kind='shared'),
+    pc AS (SELECT * FROM provider_connections WHERE workspace_id=${wid} AND kind='shared')${storedOnly ? sql`` : sql`,
     mail AS MATERIALIZED (SELECT (e.created_at AT TIME ZONE 'UTC')::date AS day,e.status,e.error_code,e.event_outcomes,e.provider_id,e.campaign_id,e.snapshot->>'kind' AS kind,
         lower(substring(e.from_address from '@([A-Za-z0-9.-]+)')) AS domain
       FROM sending_emails e WHERE e.workspace_id=${wid} AND NOT e.simulated AND hosted_real_cost(e.to_addresses||e.cc_addresses||e.bcc_addresses)>0
-        AND NOT EXISTS (SELECT FROM s) AND e.created_at>=date_trunc('day',now(),'UTC')-interval '29 days')
+        AND NOT EXISTS (SELECT FROM s) AND e.created_at>=date_trunc('day',now(),'UTC')-interval '29 days')`}
     SELECT (SELECT to_jsonb(s) FROM s) AS standing,
       coalesce((SELECT json_agg(json_build_object('date',to_char(d.day,'YYYY-MM-DD'),'score',round(d.score,1)) ORDER BY d.day) FROM sender_score_daily d
-        WHERE d.workspace_id=${wid} AND d.score IS NOT NULL AND d.day>(now() AT TIME ZONE 'UTC')::date-14),'[]') AS history,
-      coalesce((SELECT sum(d.accepted) FROM sender_score_daily d WHERE d.workspace_id=${wid} AND d.day>(now() AT TIME ZONE 'UTC')::date-30),0)::int AS last30,
+        WHERE d.workspace_id=${wid} AND d.score IS NOT NULL AND d.day>(now() AT TIME ZONE 'UTC')::date-14 ${storedOnly ? sql`AND EXISTS (SELECT FROM s)` : sql``}),'[]') AS history,
+      coalesce((SELECT sum(d.accepted) FROM sender_score_daily d WHERE d.workspace_id=${wid} AND d.day>(now() AT TIME ZONE 'UTC')::date-30 ${storedOnly ? sql`AND EXISTS (SELECT FROM s)` : sql``}),0)::int AS last30,
       (SELECT send_cap_override FROM workspaces WHERE id=${wid}) AS override,(SELECT send_cap_override_expires_at FROM workspaces WHERE id=${wid}) AS override_expires_at,
       coalesce((SELECT exempt_hosted_quotas FROM workspaces WHERE id=${wid}),false) AS exempt,(SELECT hosted_minute_cap(${wid}) FROM s) AS minute_cap,(SELECT hosted_pool_pace(${wid}) FROM s) AS pool_pace,
       (SELECT json_build_object('cap',g.cap,'used',g.used,'until',(SELECT growth_until FROM s)) FROM hosted_growth(${wid}) g) AS growth,${probationReason(sql`${wid}::text`)} AS probation,
       (SELECT restore_until FROM pc) AS restore_until,(SELECT restore_cap FROM pc) AS restore_cap,(SELECT CASE WHEN resume_pending_at IS NULL THEN paused_at END FROM pc) AS paused_at,${screened} AND EXISTS (SELECT FROM pc) AS screened,
-      (SELECT json_agg(x) FROM (SELECT to_char(day,'YYYY-MM-DD') AS day,count(*)::int AS emails,
-        count(*) FILTER (WHERE status<>'suppressed' AND (provider_id IS NOT NULL OR status IN ('accepted','sent','delivered','bounced','complained','delayed') OR event_outcomes & 1 <> 0))::int AS accepted,
-        count(*) FILTER (WHERE status='delivered' OR event_outcomes & 2 <> 0)::int AS delivered,count(*) FILTER (WHERE status='bounced' OR event_outcomes & 4 <> 0)::int AS bounced,
-        count(*) FILTER (WHERE campaign_id IS NOT NULL AND status<>'suppressed' AND (provider_id IS NOT NULL OR event_outcomes & 1 <> 0))::int AS first_sends,
-        count(*) FILTER (WHERE campaign_id IS NOT NULL AND (status='bounced' OR event_outcomes & 4 <> 0))::int AS first_bounced,
-        count(*) FILTER (WHERE status='complained' OR event_outcomes & 8 <> 0)::int AS complained,
-        count(*) FILTER (WHERE error_code='CONTENT_REJECTED_SPAM' OR (status<>'suppressed' AND (provider_id IS NOT NULL OR event_outcomes & 1 <> 0)))::int AS screened,
-        count(*) FILTER (WHERE error_code='CONTENT_REJECTED_SPAM')::int AS rejected,count(*) FILTER (WHERE campaign_id IS NOT NULL AND status='suppressed')::int AS suppressed,
-        count(*) FILTER (WHERE (kind='marketing' OR campaign_id IS NOT NULL) AND (status='delivered' OR event_outcomes & 2 <> 0))::int AS marketing_delivered,0 AS unsubscribed,
-        count(*) FILTER (WHERE (kind='marketing' OR campaign_id IS NOT NULL) AND event_outcomes & 32 <> 0)::int AS clicked FROM mail GROUP BY day) x) AS days,
+      ${storedOnly ? sql`NULL::json AS days,NULL::json AS domains,
+        CASE WHEN NOT EXISTS (SELECT FROM s) THEN ${publishedDisplay(wid)} END AS display` : sql`
+      (SELECT json_agg(x) FROM (SELECT to_char(day,'YYYY-MM-DD') AS day,${displayEvidenceColumns} FROM mail GROUP BY day) x) AS days,
       (SELECT json_agg(json_build_object('name',dc.name,'dkim',dc.identity #>> '{ses,DkimAttributes,Status}'='SUCCESS' AND dc.identity #>> '{ses,DkimAttributes,SigningEnabled}'='true',
         'mailFrom',dc.identity #>> '{ses,MailFromAttributes,MailFromDomainStatus}'='SUCCESS','dmarc',dc.identity #>> '{dmarc,status}',
         'emails',(SELECT count(*) FROM mail m WHERE m.domain=dc.name OR m.domain LIKE '%.'||dc.name)))
-        FROM domain_claims dc WHERE dc.workspace_id=${wid} AND dc.sending_state='verified' AND NOT EXISTS (SELECT FROM s)) AS domains`);
+        FROM domain_claims dc WHERE dc.workspace_id=${wid} AND dc.sending_state='verified' AND NOT EXISTS (SELECT FROM s)) AS domains`}`);
   return row!;
 }
 
+export function loadDisplayedStanding(runtime: Runtime, wid: string) { return loadStanding(runtime, wid, true); }
+
+export function displayScoreView(days: DayEvidence[], domains: DomainAuth[], now: Date): SenderScore {
+  // Display only: no stored standing, so no movement limit; the score is the target once the evaluation's emails were counted.
+  const q = quality(days, domains, false, now.toISOString().slice(0, 10)), emails = days.reduce((n, d) => n + d.emails, 0);
+  const graded = emails >= EVALUATION.recipients, score = graded ? round(q.target) : null;
+  return { state: graded ? 'graded' : 'warmup', emails: { firstEmails: Math.min(emails, EVALUATION.recipients), last30Days: emails }, needed: EVALUATION.recipients, calibratedAt: null, gradedBy: null,
+    score, grade: score === null ? null : gradeOf(score), target: round(q.target), raw: round(q.quality), ...grades(score), factors: q.factors, history: [], limit: null, standing: null, computedAt: now.toISOString() };
+}
+
+const EMPTY_DISPLAY = displayScoreView([], [], new Date(0));
+
 export function scoreView(row: Row, now = new Date()): SenderScore {
   const s = row.standing;
-  if (!s) {
-    // Display only: no stored standing, so no movement limit; the score is the target once the evaluation's emails were counted.
-    const q = quality(row.days ?? [], row.domains ?? [], false, now.toISOString().slice(0, 10)), emails = (row.days ?? []).reduce((n, d) => n + d.emails, 0);
-    const graded = emails >= EVALUATION.recipients, score = graded ? round(q.target) : null;
-    return { state: graded ? 'graded' : 'warmup', emails: { firstEmails: Math.min(emails, EVALUATION.recipients), last30Days: emails }, needed: EVALUATION.recipients, calibratedAt: null, gradedBy: null,
-      score, grade: score === null ? null : gradeOf(score), target: round(q.target), raw: round(q.quality), ...grades(score), factors: q.factors, history: [], limit: null, standing: null, computedAt: now.toISOString() };
-  }
+  if (!s) return row.display ?? (row.days || row.domains
+    ? displayScoreView(row.days ?? [], row.domains ?? [], now) // exact legacy advisory, not the stored request path
+    : { ...EMPTY_DISPLAY, computedAt: now.toISOString() });
   const score = s.phase === 'graded' && s.score !== null ? round(Number(s.score)) : null;
   const overrideActive = row.override !== null && (!row.override_expires_at || Date.parse(row.override_expires_at) > now.getTime());
   // As admission computes it (hosted_allowance_read): the base is the override or the score's limit (none in good
@@ -197,12 +216,19 @@ export function registerSenderScore(app: App) {
     responses: { 200: response(SenderScoreSchema), ...errors } }), async c => {
     const a = actor(c, 'read');
     if (a.domains.length) throw unrestrictedRequired('Workspace-wide operations require a key without domain restrictions.', requiredOf(c, 'read'));
-    const compute = async () => scoreView(await loadStanding(c.env, a.workspaceId));
+    const compute = async () => scoreView(await loadDisplayedStanding(c.env, a.workspaceId));
     if (a.credential !== 'dashboard') return c.json(await compute(), 200);
     // Keyed by the standing's version and sequence too: a release, resume or operator action (or a limit change) shows at
     // once, on every isolate, instead of after the minute. One indexed read.
-    const { rows: [standing] } = await c.env.db.execute<{ v: string | null }>(sql`SELECT version||'.'||sequence AS v FROM sender_standing WHERE workspace_id=${a.workspaceId}`);
-    const body = await dashboardRead(c, ['sender-score', a.workspaceId, standing?.v ?? '-', Math.floor(Date.now() / 60_000)].join('|'), compute);
+    const { rows: [standing] } = await c.env.db.execute<{ v: string | null; display: SenderScore | null }>(sql`WITH s AS (
+      SELECT version||'.'||sequence AS v FROM sender_standing WHERE workspace_id=${a.workspaceId}
+    ) SELECT (SELECT v FROM s) AS v, CASE WHEN NOT EXISTS (SELECT FROM s) THEN ${publishedDisplay(a.workspaceId)} END AS display`);
+    // Already-published data needs neither a recomputation nor another round trip. Real standing retains its existing cache policy.
+    if (!standing?.v) {
+      c.header('x-nightmail-sender-score-cache', standing?.display ? 'hit' : 'miss');
+      return c.json(standing?.display ?? { ...EMPTY_DISPLAY, computedAt: new Date().toISOString() }, 200);
+    }
+    const body = await dashboardRead(c, ['sender-score', a.workspaceId, standing.v, Math.floor(Date.now() / 60_000)].join('|'), compute);
     c.header('x-nightmail-sender-score-cache', body.cache);
     return c.json(body.value, 200);
   });
@@ -223,6 +249,6 @@ export function registerSenderScore(app: App) {
     await c.env.db.transaction(tx => applyChange(tx, { workspaceId: session.workspaceId, actor: { kind: 'owner', id: session.userId, via: 'dashboard' }, kind: 'release', expectVersion: stored.version, step: 'warn',
       reasons: stored.reasons, ...(offer.action === 'release_marketing' ? { release: { percent: 50, hours: 48 }, touch: { lastRelease: true } } : { resume: { percent: 50, marketingHours: 24, caps: c.env.config.hostedSendCaps }, touch: { lastSelfResume: true } }),
       details: { checklist: ['bouncedRemoved', 'listSourceConfirmed'], action: offer.action } }));
-    return c.json(scoreView(await loadStanding(c.env, session.workspaceId)), 200);
+    return c.json(scoreView(await loadDisplayedStanding(c.env, session.workspaceId)), 200);
   });
 }

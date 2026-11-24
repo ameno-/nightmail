@@ -103,6 +103,9 @@ const values = z.object({
   STRIPE_SECRET_KEY: optional(z.string().regex(/^(?:sk|rk)_(?:test|live)_[A-Za-z0-9_]+$/)),
   STRIPE_WEBHOOK_SECRET: optional(z.string().regex(/^whsec_[A-Za-z0-9_]+$/)),
   STRIPE_AUTOMATIC_TAX: z.enum(['true','false']).default('false'),
+  // The one Stripe Product every top-up and recharge is for, created on first use with STRIPE_TAX_CODE (api/README.md, Stripe setup).
+  STRIPE_CREDIT_PRODUCT_ID: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/).default('nightmail_credit'),
+  STRIPE_TAX_CODE: z.string().regex(/^txcd_\d{8}$/).default('txcd_10103001'),
   STRIPE_API_BASE: z.url().default('https://api.stripe.com'),
   NIGHTMAIL_PLACEMENT_SHADOW: z.enum(['true','false']).default('true'),
   // Licensed DBL-compatible DNS zone (may contain a subscription key). Never log it.
@@ -200,7 +203,9 @@ export function deriveEncryptionKey(secret: string): string {
   return Buffer.from(hkdfSync('sha256', secret, 'opensend:keys:v1', 'webhook-encryption', 32)).toString('hex');
 }
 export function loadConfig(input: Record<string, unknown>): Config {
-  const parsed = values.safeParse({...input, ...Object.fromEntries(settingKeys.map(key => [key, namesOf(key).map(name => input[name]).find(value => value !== undefined && value !== null)]))});
+  const catalogUnused = input.MULTI_TENANT !== 'true' || !input.STRIPE_SECRET_KEY || !input.STRIPE_WEBHOOK_SECRET;
+  const parsed = values.safeParse({...input, ...Object.fromEntries(settingKeys.map(key => [key, namesOf(key).map(name => input[name]).find(value => value !== undefined && value !== null)])),
+    ...(catalogUnused ? { STRIPE_CREDIT_PRODUCT_ID: undefined, STRIPE_TAX_CODE: undefined } : {})});
   if (!parsed.success) throw new ApiError(503, 'CONFIG_INVALID', `Missing or invalid server configuration: ${parsed.error.issues.map(i => i.path.join('.')).join(', ')}.`);
   const v = parsed.data;
   if (Boolean(v.ACCOUNT_CLIENT_ID) !== Boolean(v.ACCOUNT_CLIENT_PRIVATE_KEY)) throw new ApiError(503,'CONFIG_INVALID','Set both ACCOUNT_CLIENT_ID and ACCOUNT_CLIENT_PRIVATE_KEY.');
@@ -275,7 +280,8 @@ export function loadConfig(input: Record<string, unknown>): Config {
     operatorSlackWebhookUrl: v.MULTI_TENANT==='true' ? v.OPERATOR_SLACK_WEBHOOK_URL : undefined,
     databaseDiskBytes: v.DATABASE_DISK_GB === undefined ? undefined : v.DATABASE_DISK_GB * 1024 ** 3,
     planetscaleWebhookSecret: v.MULTI_TENANT==='true' ? planetscaleSecret(v.PLANETSCALE_WEBHOOK_SECRET) : undefined,
-    billing: v.MULTI_TENANT==='true' ? { stripe: v.STRIPE_SECRET_KEY && v.STRIPE_WEBHOOK_SECRET ? { secretKey: v.STRIPE_SECRET_KEY, webhookSecret: v.STRIPE_WEBHOOK_SECRET, automaticTax: v.STRIPE_AUTOMATIC_TAX === 'true', apiBase: v.STRIPE_API_BASE.replace(/\/$/, '') } : undefined } : undefined,
+    billing: v.MULTI_TENANT==='true' ? { stripe: v.STRIPE_SECRET_KEY && v.STRIPE_WEBHOOK_SECRET ? { secretKey: v.STRIPE_SECRET_KEY, webhookSecret: v.STRIPE_WEBHOOK_SECRET, automaticTax: v.STRIPE_AUTOMATIC_TAX === 'true',
+      creditProduct: v.STRIPE_CREDIT_PRODUCT_ID, taxCode: v.STRIPE_TAX_CODE, apiBase: v.STRIPE_API_BASE.replace(/\/$/, '') } : undefined } : undefined,
     placementShadow: v.MULTI_TENANT === 'true' && v.NIGHTMAIL_PLACEMENT_SHADOW === 'true', placementDblZone: v.NIGHTMAIL_PLACEMENT_DBL_ZONE,
     byoV2: v.MULTI_TENANT === 'true' && v.NIGHTMAIL_BYO_V2 === 'true', byoV5TemplateUrl: v.BYO_V5_TEMPLATE_URL, byoEventsOrigin: v.BYO_EVENTS_ORIGIN,
     // The daily limit of a workspace the standing job has not seen yet: the evaluation's (docs/sending-limits.md).

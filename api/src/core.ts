@@ -1,3 +1,4 @@
+import { HTTPException } from 'hono/http-exception';
 import { z } from '@hono/zod-openapi';
 import type { OpenAPIHono } from '@hono/zod-openapi';
 import type { Context } from 'hono';
@@ -130,7 +131,7 @@ export interface Config {
   /** NIGHTMAIL_ABUSE_ENFORCE. Reserved: abuse monitoring never blocks, and no code reads this yet. */
   abuseEnforce?: boolean;
   /** Hosted billing. stripe is undefined until STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET are set (money routes answer 503 BILLING_NOT_CONFIGURED). */
-  billing?: { stripe?: { secretKey: string; webhookSecret: string; automaticTax: boolean; apiBase: string } };
+  billing?: { stripe?: { secretKey: string; webhookSecret: string; automaticTax: boolean; creditProduct: string; taxCode: string; apiBase: string } };
   placementShadow?: boolean;
   placementDblZone?: string;
   byoTemplateUrl?: string;
@@ -272,6 +273,37 @@ export class ApiError extends Error {
   /** The workspace whose daily limit refused this send (admission.ts): the error handler queues its once-a-day email and operator alert. */
   limitReachedFor?: string;
   constructor(public status: number, public code: string, message: string, public field?: string, public retryable = false, public resetAt?: string) { super(message); }
+}
+/** Classify once, whether the error is the whole response or a failed part of a private dashboard read. */
+export function describeApiFailure(error: unknown) {
+  const known = error instanceof ApiError;
+  const invalidJson = error instanceof SyntaxError || error instanceof HTTPException && error.status===400 && error.message==='Malformed JSON in request body';
+  const database = ((error as { cause?: unknown }).cause ?? error) as { code?: string; constraint?: string };
+  const keyTaken = database.code === '23505' && (database.constraint === 'mailboxes_key' || database.constraint === 'mailbox_webhooks_key');
+  // A deadlock or serialization victim was rolled back whole: retryable, not a 500 that tells clients never to retry.
+  const conflict = !known && !invalidJson && databaseConflict(error);
+  // An MCP approval revoked while its request ran: the object it would own has no grant left.
+  const grantRevoked = database.code === '23503' && database.constraint === 'mail_grant_objects_resource_grant_fkey';
+  // A refused or dropped database connection, a read-only or full database and a statement cancelled at its time or
+  // lock limit are a retryable 503, not an internal error (see transientDatabaseError).
+  const transient = !known && !invalidJson && transientDatabaseError(error);
+  // Values Postgres cannot store come from the request: U+0000 in any text (22021, or 22P05 inside JSON) and a
+  // date outside its range, such as year 0000 or a +16:00 offset, which ISO 8601 validation accepts (22007/22008/22009). A client error, not a 500.
+  const refused = known || invalidJson ? undefined : databaseCodeOf(error);
+  const nul = refused === '22021' || refused === '22P05', badDate = refused === '22007' || refused === '22008' || refused === '22009';
+  const responseError = known ? error : invalidJson ? new ApiError(400, 'INVALID_JSON', 'Request body is not valid JSON.')
+    : transient ? databaseUnavailable()
+    : nul ? new ApiError(422, 'VALIDATION_FAILED', 'Request fields are invalid: text cannot contain the NUL character (U+0000).')
+    : badDate ? new ApiError(422, 'VALIDATION_FAILED', 'Request fields are invalid: a date is out of range. Use a year from 0001 to 9999 and an offset within ±15:59.')
+    : database.code==='BR001' ? new ApiError(422,'ROUTING_PLAN_TOO_LARGE','A host routing plan exceeds 256 KiB. Shorten or remove wildcard rules before enabling routing.')
+    : conflict ? new ApiError(503, 'DATABASE_CONFLICT', 'The request conflicted with a concurrent change and was rolled back. Retry it.', undefined, true)
+    : grantRevoked ? new ApiError(401, 'AUTH_INVALID', 'The MCP approval behind this request was revoked while it ran. Nothing was created.')
+    : keyTaken ? new ApiError(409, 'KEY_TAKEN', `Another ${database.constraint === 'mailboxes_key' ? 'address' : 'webhook'} in this workspace already uses that key. Choose another.`, 'key')
+    : new ApiError(500, 'INTERNAL_ERROR', 'Unexpected server failure. Use the request ID to locate the server log.');
+  return { known, invalidJson, conflict, transient, responseError };
+}
+export function apiFailureBody(error: ApiError, requestId: string) {
+  return { code: error.code, message: error.message, requestId, retryable: error.retryable, ...(error.field ? { field: error.field } : {}), ...(error.resetAt ? { resetAt: error.resetAt } : {}), ...(error.details ? { details: error.details } : {}), ...(error.required ? { required: error.required } : {}) };
 }
 /** The permissions a refusal names in error.required, each covering one area of the API (requiredFor). */
 export const PERMISSIONS = { sendEmail: 'Send email', sentMail: 'Sent mail', receivedMail: 'Received mail', inboxes: 'Inboxes', audience: 'Audience & content',

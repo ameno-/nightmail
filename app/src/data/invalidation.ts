@@ -55,6 +55,8 @@ export type InvalidationTarget<TInput = unknown, TResult = unknown> =
 export function invalidateResources(client: QueryClient, resources: readonly string[]) {
   if (!resources.length) return Promise.resolve()
   const set = new Set(resources)
+  // Review reads these together, so either source changing invalidates the presentation result.
+  if (set.has('campaign-audience') || set.has('email-check')) set.add('campaign-review-display')
   const active = client.invalidateQueries({ predicate: query => query.queryKey[0] === 'nightmail' && set.has(resourceOf(query.queryKey)) })
   // Domain, list, and segment changes also mark cached campaign-options stale without refetching while unmounted.
   if (!set.has('campaign-options') && (set.has('domains') || set.has('lists') || set.has('segments'))) {

@@ -4,10 +4,11 @@ import { Check, ChevronRight, MoreHorizontal } from 'lucide-react'
 import { Link, Navigate, useLocation, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useApiDef, useApiMutation, useApiQuery, useRegion, useApi, useSession, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
+import { usePrefetchQueries } from '../../data/prefetch'
 import { priceUc, total, usd } from '../../data/billing'
 import { invalidate, useRefreshListsOnChange } from '../../data/invalidation'
 import { useRegionCatalog } from '../../data/regions'
-import { ApiError, campaignEditable, errorText, campaignResumable, type Campaign, type CampaignInput, type Newsletter, type SendCampaignInput } from '../../data/types'
+import { ApiError, campaignEditable, errorText, campaignResumable, type Api, type Campaign, type CampaignInput, type CampaignReviewDisplay, type Newsletter, type SendCampaignInput, type WorkspaceSettings } from '../../data/types'
 import { PostalAddressDialog } from '../../components/PostalAddress'
 import { newsletterPath, useNewsletterOf, useShowNewsletter } from '../newsletters/shared'
 import {
@@ -16,7 +17,7 @@ import {
   StatusBadge, Tabs, useToast,
 } from '../../components/ui'
 import { EmailPreview } from '../../components/EmailPreview'
-import { Checks, checksCount, checksSummary, LOW_SENDABILITY, useSendability } from '../../components/EmailInsight'
+import { Checks, checksCount, checksSummary, LOW_SENDABILITY } from '../../components/EmailInsight'
 import { date, label, number, percent } from '../../lib/format'
 import { CampaignAudienceSkeleton, CampaignRouteSkeleton } from './skeletons'
 import { CampaignPacing, CampaignProgress, SummaryLine, campaignDisplayStatus, campaignLogs, campaignPollInterval, maxPerDay, maxRatePercent, minPerDay, minRatePercent, perDayError, ratePercentError } from './CampaignProgress'
@@ -576,9 +577,27 @@ function CampaignControlFallback({ id, state, error, refreshing, onRetry }: { id
   </div>
 }
 
+const reviewDisplayQuery = (campaign: Campaign) => {
+  const revision = campaign.revision ?? 0, check = !campaignReadinessError(campaign)
+  return {
+    key: ['campaign-review-display', campaign.id, revision, check],
+    read: (api: Api, signal: AbortSignal) => api.campaigns.reviewDisplay(campaign.id, revision, check, signal),
+  }
+}
+
+function reviewCheckError(part: CampaignReviewDisplay['check'], requestError: Error | null) {
+  if (!part?.error) return requestError
+  const failure = part.error
+  const error = new ApiError(failure.message, failure.code, failure.field ? { [failure.field]: failure.message } : {}, failure.requestId, part.status)
+  error.details = failure.details
+  error.retryable = failure.retryable
+  error.retryAfter = part.retryAfter
+  return error
+}
+
 export function CampaignReviewPage() {
   const { id = '' } = useParams()
-  const query = useApiQuery(['campaign', id], (api, signal) => api.campaigns.get(id, signal), { interval: campaignPollInterval })
+  const query = useApiDef(queries.campaign(id), { interval: campaignPollInterval })
   // If detail fails (e.g. 422 READ_TOO_LARGE on a large send), fall back to compact /state so Pause & Cancel stay usable.
   const missingOrDenied = query.error instanceof ApiError && [401, 403, 404].includes(query.error.status ?? 0)
   const fallbackState = useApiQuery(['campaign-state', id], (api, signal) => api.campaigns.state(id, signal), { enabled: query.isError && !query.data && !missingOrDenied })
@@ -588,10 +607,22 @@ export function CampaignReviewPage() {
   // Whether a draft may be a required notice is read beside it, so the Recipients choice is there from the first frame.
   const settings = useApiDef(queries.workspaceSettings())
   const editableDraft = Boolean(query.data && !query.data.archivedAt && campaignEditable(query.data))
+  const prefetch = usePrefetchQueries()
+  useEffect(() => {
+    const saved = query.data
+    if (!saved || !editableDraft || !settings.isPending) return
+    const revision = saved.revision ?? 0
+    const previous = readHere.get(saved.id)
+    // Don't warm a newer revision over one held for approval. Leave that decision to useReadCampaign at mount.
+    if (previous && (previous.revision ?? 0) < revision) return
+    if (saved.listId) void prefetch([reviewDisplayQuery(saved)])
+  }, [query.data, editableDraft, settings.isPending, prefetch])
+  const refetch = query.refetch
+  const refresh = useCallback(() => void refetch({ cancelRefetch: false }), [refetch])
   const waitingStats = Boolean(query.data && campaignFinished(query.data) && stats.isPending && stats.errorUpdateCount === 0)
   if (query.isPending || (query.isError && !query.data && !missingOrDenied && fallbackState.isPending) || waitingStats || (editableDraft && settings.isPending)) return <CampaignRouteSkeleton kind="review" />
   if (!query.data) return fallbackState.data ? <CampaignControlFallback id={id} state={fallbackState.data} error={query.error} refreshing={query.isFetching} onRetry={() => void query.refetch()} /> : <ErrorState error={query.error} onRetry={() => query.refetch()} />
-  return <CampaignReview key={id} campaign={query.data} stats={stats} stale={query.isError} refreshing={query.isFetching} refresh={() => void query.refetch({ cancelRefetch: false })} />
+  return <CampaignReview key={id} campaign={query.data} stats={stats} settings={settings} stale={query.isError} refreshing={query.isFetching} refresh={refresh} />
 }
 
 // The server renders block HTML into the styled email; the review shows that rendering, not the blocks.
@@ -779,23 +810,30 @@ function UnsubscribePageField({ campaign, disabled }: { campaign: Campaign; disa
 
 // The Review step's recipient list and segment, and where an operator allowed it the campaign's kind: choosing one
 // saves the draft, and the counts under it follow.
-function AudiencePicker({ campaign, notices, disabled }: { campaign: Campaign; notices: boolean; disabled?: boolean }) {
-  const api = useApi()
-  const toast = useToast()
-  const accept = useCampaignCache(), staleRefetch = useStaleRefetch()
+function useReviewAudienceOptions(campaign: Campaign, enabled: boolean) {
   const [cursor, setCursor] = useState<string | undefined>()
   const [segmentCursor, setSegmentCursor] = useState<string | undefined>()
-  const [saving, setSaving] = useState(false)
   const options = useApiQuery(['campaign-audience-options', cursor ?? '', segmentCursor ?? ''], async (api, signal) => {
     const [listPage, segmentPage] = await Promise.all([api.lists.list({ pageSize: 100, cursor, counts: false }, signal), api.segments.list({ pageSize: 100, cursor: segmentCursor }, signal)])
     return { lists: [...listPage.items].sort((a, b) => a.name.localeCompare(b.name)), segments: [...segmentPage.items].sort((a, b) => a.name.localeCompare(b.name)), next: listPage.nextCursor, nextSegment: segmentPage.nextCursor }
-  })
+  }, { enabled })
   const lists = options.data?.lists ?? [], segments = options.data?.segments ?? []
   // The chosen list or segment may not be on the loaded page: read its name, so it never shows as an ID.
-  const listMissing = Boolean(campaign.listId) && !options.isPending && !lists.some(list => list.id === campaign.listId)
-  const segmentMissing = Boolean(campaign.segmentId) && !options.isPending && !segments.some(segment => segment.id === campaign.segmentId)
+  const listMissing = enabled && Boolean(campaign.listId) && !options.isPending && !lists.some(list => list.id === campaign.listId)
+  const segmentMissing = enabled && Boolean(campaign.segmentId) && !options.isPending && !segments.some(segment => segment.id === campaign.segmentId)
   const chosenList = useApiQuery(['lists', campaign.listId], (api, signal) => api.lists.get(campaign.listId, signal), { enabled: listMissing })
   const chosenSegment = useApiQuery(['segments', campaign.segmentId ?? ''], (api, signal) => api.segments.get(campaign.segmentId!, signal), { enabled: segmentMissing })
+  const listName = lists.find(list => list.id === campaign.listId)?.name ?? chosenList.data?.name
+  const segmentName = segments.find(segment => segment.id === campaign.segmentId)?.name ?? chosenSegment.data?.name
+  return { cursor, setCursor, segmentCursor, setSegmentCursor, options, lists, segments, listMissing, segmentMissing, chosenList, chosenSegment, listName, segmentName }
+}
+
+function AudiencePicker({ campaign, audience, notices, disabled }: { campaign: Campaign; audience: ReturnType<typeof useReviewAudienceOptions>; notices: boolean; disabled?: boolean }) {
+  const api = useApi()
+  const toast = useToast()
+  const accept = useCampaignCache(), staleRefetch = useStaleRefetch()
+  const [saving, setSaving] = useState(false)
+  const { cursor, setCursor, segmentCursor, setSegmentCursor, options, lists, segments, listMissing, segmentMissing, chosenList, chosenSegment } = audience
   async function save(change: Partial<CampaignInput>) {
     setSaving(true)
     try { accept(await saveChange(api, campaign, change)) }
@@ -865,7 +903,7 @@ function CampaignResults({ campaign, stats: statsQuery }: { campaign: Campaign; 
   </div>
 }
 
-function CampaignReview({ campaign: latest, stats, stale, refreshing, refresh }: { campaign: Campaign; stats: ReturnType<typeof useCampaignStats>; stale: boolean; refreshing: boolean; refresh: () => void }) {
+function CampaignReview({ campaign: latest, stats, settings, stale, refreshing, refresh }: { campaign: Campaign; stats: ReturnType<typeof useCampaignStats>; settings: ReturnType<typeof useApiDef<WorkspaceSettings>>; stale: boolean; refreshing: boolean; refresh: () => void }) {
   const navigate = useNavigate()
   // Review joins the draft's room too: someone still writing sees you here, and you see them.
   const { present, room } = useCampaignPresence(!latest.archivedAt && campaignEditable(latest) ? latest.id : null, 'review')
@@ -897,9 +935,22 @@ function CampaignReview({ campaign: latest, stats, stale, refreshing, refresh }:
   const keys = placeholders(campaign.subject, campaign.previewText, campaign.html)
   const missingFallbacks = keys.filter(key => key !== 'email' && (fallbacks[key] === undefined || fallbacks[key] === ''))
   // A live count of the saved audience, read as the page opens; the send freezes its own snapshot.
-  const audience = useApiQuery(['campaign-audience', campaign.id, campaign.revision ?? 0], (api, signal) => api.campaigns.audience({ id: campaign.id, listId: campaign.listId, segmentId: campaign.segmentId }, signal), { enabled: draft && Boolean(campaign.listId) })
-  const listName = useApiQuery(['lists', campaign.listId], (api, signal) => api.lists.get(campaign.listId, signal), { enabled: Boolean(campaign.listId) }).data?.name
-  const segmentName = useApiQuery(['segments', campaign.segmentId ?? ''], (api, signal) => api.segments.get(campaign.segmentId!, signal), { enabled: Boolean(campaign.segmentId) }).data?.name
+  const display = useApiDef(reviewDisplayQuery(campaign), { enabled: draft && Boolean(campaign.listId),
+    keepPrevious: previous => previous[1] === campaign.id && previous[3] === true && !readinessError })
+  // Keep the previous Checks result while a new revision is read, never the previous audience.
+  const count = display.isPlaceholderData ? undefined : display.data?.audience
+  const audience = { data: count?.data, isError: Boolean(count?.error || display.isError) }
+  const refreshedDisplayErrors = useRef(new Set<string>())
+  useEffect(() => {
+    if (!(display.error instanceof ApiError) || !['STALE_CAMPAIGN_REVISION', 'CAMPAIGN_ARCHIVED', 'CAMPAIGN_LOCKED'].includes(display.error.code)) return
+    // A retry of the held revision can return a new Error object without changing what Review holds.
+    const key = `${campaign.revision}:${display.error.code}`
+    if (refreshedDisplayErrors.current.has(key)) return
+    refreshedDisplayErrors.current.add(key)
+    refresh()
+  }, [campaign.revision, display.error, refresh])
+  const audienceOptions = useReviewAudienceOptions(campaign, draft)
+  const { listName, segmentName } = audienceOptions
   const perDay = Number(pace.perDay.trim().replaceAll(',', ''))
   const paceError = pace.limit ? perDayError(perDay) : ''
   const paceDays = pace.limit && !paceError && audience.data?.eligible ? Math.ceil(audience.data.eligible / perDay) : null
@@ -914,7 +965,6 @@ function CampaignReview({ campaign: latest, stats, stale, refreshing, refresh }:
   const sendMutation = useApiMutation((api, input: SendCampaignInput) => api.campaigns.send(input), undefined, false, invalidate.campaignSend)
   // Every campaign footer carries the workspace's postal address, so Send and Schedule ask for it first when it is
   // missing, then go on: to the confirmation, or straight to sending when the API asked after it was confirmed.
-  const settings = useApiDef(queries.workspaceSettings(), { enabled: draft })
   const [addressFor, setAddressFor] = useState<{ input: SendCampaignInput; confirmed: boolean } | null>(null)
   const recipients = audience.data ? `${number(audience.data.eligible)} eligible ${audience.data.eligible === 1 ? 'recipient' : 'recipients'}` : 'the eligible recipients'
   const audienceName = `${listName ? ` in ${listName}` : ''}`
@@ -963,7 +1013,9 @@ function CampaignReview({ campaign: latest, stats, stale, refreshing, refresh }:
   const sentSomething = (campaign.counts?.total ?? 0) > 0
   const finished = campaignFinished(campaign)
   const cancellable = !draft && !campaign.archivedAt && !scheduledView && (['preparing', 'sending', 'paused'].includes(campaign.status) || campaignResumable(campaign))
-  const sendability = useSendability(draft && !readinessError ? { kind: 'campaign', id: campaign.id, revision: campaign.revision ?? 0 } : null)
+  const check = draft && !readinessError ? display.data?.check ?? null : null
+  const sendability = { data: check?.data, error: !readinessError ? reviewCheckError(check, display.error) : null,
+    isPending: display.isPending, refetch: display.refetch }
   // The step is ticked when there is nothing to fix; the send confirmation mentions the checks only when the score is low.
   const toFix = sendability.data ? checksCount(sendability.data) : 0
   const scoreNote = sendability.data && sendability.data.score < LOW_SENDABILITY && toFix ? ` Checks found ${checksSummary(sendability.data)}.` : ''
@@ -991,9 +1043,9 @@ function CampaignReview({ campaign: latest, stats, stale, refreshing, refresh }:
     const segmentLabel = segmentName ? ` · only ${segmentName}` : ''
     const toSummary = !campaign.listId ? 'No list chosen'
       : !audience.data ? `${listName ?? 'Your list'}${audience.isError ? ' · couldn’t count' : ''}`
-      : eligible ? `${number(eligible)} ${eligible === 1 ? 'contact' : 'contacts'} in ${listName}${segmentLabel}${campaign.requiredNotice ? ' · required notice' : ''}`
-      : <span className="review-warn">Nobody in {listName} can receive it yet</span>
-    const scoreSummary = sendability.data ? checksSummary(sendability.data) : missing.length ? 'After the message is complete' : !campaign.listId ? 'After you choose a list' : 'Checking…'
+      : eligible ? `${number(eligible)} ${eligible === 1 ? 'contact' : 'contacts'} in ${listName ?? 'your list'}${segmentLabel}${campaign.requiredNotice ? ' · required notice' : ''}`
+      : <span className="review-warn">Nobody in {listName ?? 'your list'} can receive it yet</span>
+    const scoreSummary = sendability.data ? checksSummary(sendability.data) : missing.length ? 'After the message is complete' : !campaign.listId ? 'After you choose a list' : sendability.error ? 'Couldn’t check' : 'Checking…'
     const scheduledAt = mode === 'schedule' && scheduled && !scheduleError(scheduled) ? parseUtc(scheduled)!.toISOString() : null
     const messageSummary = missing.length ? `Add ${missing.join(', ').replace(/, ([^,]*)$/, ' and $1')} in Write` : campaign.subject
     const whenSummary = mode === 'now' ? 'Send now' : scheduledAt ? utcLabel(scheduledAt) : 'Pick a time'
@@ -1004,7 +1056,7 @@ function CampaignReview({ campaign: latest, stats, stale, refreshing, refresh }:
       {campaign.delivery?.error && <p className="campaign-note" data-tone="danger" role="alert">{campaign.delivery.error.message}</p>}
       <div className="review-stages">
         <ReviewStage n={1} id="to" title="Recipients" open={openRow === 'to'} done={Boolean(campaign.listId && eligible)} onOpen={() => setOpenRow('to')} summary={toSummary} footer={next('to')}>
-          <AudiencePicker campaign={campaign} notices={settings.data?.requiredNotices === true} disabled={sendMutation.isPending} />
+          <AudiencePicker campaign={campaign} audience={audienceOptions} notices={settings.data?.requiredNotices === true} disabled={sendMutation.isPending} />
           {audience.data && campaign.listId && <p className="review-detail">{number(audience.data.matched)} on the list{audience.data.suppressed ? ` · ${number(audience.data.suppressed)} suppressed` : ''}{audience.data.unsubscribed ? <> · {number(audience.data.unsubscribed)} not subscribed · <Link to={`/audience/lists/${encodeURIComponent(campaign.listId)}?status=unknown`}>Fix</Link></> : null}</p>}
         </ReviewStage>
         <ReviewStage n={2} id="message" title="Message" open={openRow === 'message'} done={!missing.length && !missingFallbacks.length} onOpen={() => setOpenRow('message')} summary={messageSummary} footer={next('message')}>
@@ -1025,7 +1077,7 @@ function CampaignReview({ campaign: latest, stats, stale, refreshing, refresh }:
           </div>
         </ReviewStage>
         <ReviewStage n={3} id="score" title="Checks" open={openRow === 'score'} done={Boolean(sendability.data && !toFix)} onOpen={() => setOpenRow('score')} summary={scoreSummary} footer={next('score')}>
-          {sendability.data ? <Checks check={sendability} titled={false} message={`${campaignRoute(campaign, 'edit')}#message`} /> : <p className="review-detail">{scoreSummary}.</p>}
+          {sendability.data || sendability.error ? <Checks check={sendability} titled={false} message={`${campaignRoute(campaign, 'edit')}#message`} /> : <p className="review-detail">{scoreSummary}.</p>}
         </ReviewStage>
         <ReviewStage n={4} id="when" title="Send" open={openRow === 'when'} done={false} onOpen={() => setOpenRow('when')} summary={whenSummary} footer={<>
           {campaign.requiredNotice && <div className="review-confirm"><Checkbox label="This is a required notice, with no promotion." checked={noticeConfirmed} disabled={sendMutation.isPending} onCheckedChange={value => { setNoticeConfirmed(value); setError('') }} /></div>}

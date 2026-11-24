@@ -13,7 +13,7 @@ import { BootLoader } from '../components/BootLoader'
 import { PrivateAddress } from '../components/PrivateAddress'
 import { chunk } from '../lib/preloadable'
 import { canonicalOrigin } from '../lib/public-origin'
-import type { QueryDef } from './queries'
+import { queries, type QueryDef } from './queries'
 import { invalidateResources, resourceOf, staleAfterWrite, type InvalidationTarget } from './invalidation'
 import { useGuardedMutation } from '../lib/single-flight'
 import { SignInConsent } from '../components/LegalLinks'
@@ -79,6 +79,28 @@ export function sectionPath(pathname = window.location.pathname) {
   const [section, child] = pathname.split('/').filter(Boolean)
   return (section === 'audience' && ['lists', 'segments'].includes(child)) || (section === 'campaigns' && child === 'templates') ? `/${section}/${child}` : section ? `/${section}` : '/'
 }
+const reviewRoute = /^\/campaigns\/([^/]+)\/review\/?$/
+// Review's boot observers can unmount or restart while the same identity is in flight. Cancel their wait,
+// not the transport: request still aborts on a scope switch, and no completed result is retained here.
+let reviewIdentity: { scope: RequestScope; result: Promise<Identity> } | undefined
+function readReviewIdentity(signal?: AbortSignal) {
+  if (signal?.aborted) return Promise.reject(aborted())
+  if (!reviewIdentity || !isCurrentScope(reviewIdentity.scope)) {
+    const scope = currentScope()
+    const result = request<Identity>('/v1/me', { scope })
+    const flight = reviewIdentity = { scope, result }
+    const clear = () => { if (reviewIdentity === flight) reviewIdentity = undefined }
+    void result.then(clear, clear)
+  }
+  const { scope, result } = reviewIdentity
+  if (!signal) return result
+  return new Promise<Identity>((resolve, reject) => {
+    const stop = () => reject(aborted())
+    signal.addEventListener('abort', stop, { once: true })
+    const finish = () => signal.removeEventListener('abort', stop)
+    void result.then(identity => { finish(); if (signal.aborted || !isCurrentScope(scope)) stop(); else resolve(identity) }, error => { finish(); reject(error) })
+  })
+}
 // /v1/me as the tab's account. A remembered workspace the account no longer belongs to falls back to the server's
 // choice; an account this browser signed out of (in another tab, or its session expired or was revoked) falls back to
 // the browser's default account.
@@ -86,18 +108,19 @@ async function loadIdentity(signal?: AbortSignal, override?: { account?: string 
   let account = override ? (override.account ?? null) : selectedAccount()
   let workspace = override ? (override.workspace !== undefined ? override.workspace : (account ? rememberedWorkspace(account) : null)) : selectedWorkspace()
   const opts = () => override ? { signal, account, workspace } : { signal }
+  const read = () => !override && reviewRoute.test(window.location.pathname) ? readReviewIdentity(signal) : request<Identity>('/v1/me', opts())
   let result: Identity
-  try { result = await request<Identity>('/v1/me', opts()) }
+  try { result = await read() }
   catch (error) {
     if (error instanceof ApiError && error.code === 'ACCOUNT_SIGNED_OUT' && account) { account = null; workspace = null; if (!override) selectAccount(null) }
     else if (error instanceof ApiError && error.code === 'WORKSPACE_ACCESS_DENIED' && workspace) { workspace = null; if (!override) selectWorkspace(null) }
     else throw error
-    try { result = await request<Identity>('/v1/me', opts()) }
+    try { result = await read() }
     catch (retry) {
       if (!(retry instanceof ApiError && retry.code === 'WORKSPACE_ACCESS_DENIED' && workspace)) throw retry
       workspace = null
       if (!override) selectWorkspace(null)
-      result = await request<Identity>('/v1/me', opts())
+      result = await read()
     }
   }
   if (!override) {
@@ -367,11 +390,17 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   }, [cache, client, publicRoute, invitation])
   useEffect(() => {
     if (!identity.data || identityOnboardingStage(identity.data)) return
-    const match = window.location.pathname.match(/^\/campaigns\/([^/]+)\/(?:edit|review)$/)
+    const path = window.location.pathname, review = reviewRoute.exec(path)
+    const match = review ?? /^\/campaigns\/([^/]+)\/edit$/.exec(path)
     if (!match) return
     let id: string
     try { id = decodeURIComponent(match[1]) } catch { return }
-    void cache.prefetchQuery({ queryKey: ['nightmail', 'campaign', id], queryFn: ({ signal }) => client.campaigns.get(id, signal), staleTime: 30_000 })
+    const detail = queries.campaign(id)
+    void cache.prefetchQuery({ queryKey: ['nightmail', ...detail.key], queryFn: ({ signal }) => detail.read(client, signal), staleTime: 30_000 })
+    if (review) {
+      const settings = queries.workspaceSettings()
+      void cache.prefetchQuery({ queryKey: ['nightmail', ...settings.key], queryFn: ({ signal }) => settings.read(client, signal), staleTime: 30_000 })
+    }
   }, [cache, client, identity.data])
   // Before a session is known, a 401 from the boot prefetch is answered by /v1/me itself.
   useEffect(() => { const denied = () => { if (!isPublicPath(window.location.pathname) && cache.getQueryData(['identity']) === undefined) return; cache.clear(); void identity.refetch() }; window.addEventListener('nightmail:unauthorized', denied); return () => window.removeEventListener('nightmail:unauthorized', denied) }, [cache])

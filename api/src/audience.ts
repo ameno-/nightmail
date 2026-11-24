@@ -4,7 +4,7 @@ import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { actor, ApiError, AudienceSpec, budgetedRead, chargeBudget, databaseCodeOf, unrestrictedRequired, errors, id, IdParams, json, log, notFound, page, PageQuery, readLimit, readLimitNote, response, rowId, security, statementTimedOut, type Actor, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
 import { productName } from './brand.js';
 export { AudienceSpec };
-import { contacts, consentAudit, imports, listCounts, listMembers, lists, segments, type SegmentRule } from './db/audience.js';
+import { contacts, consentAudit, imports, listCounts, listMembers, lists, segments, type PropertyRule, type SegmentRule } from './db/audience.js';
 import { enqueue, noteEnqueued } from './jobs.js';
 import { MEMORY_LIMITS, reserveMemory, runInMemoryScope, type MemoryLease } from './isolate-memory.js';
 import { buildBoundedPageJson, PAGE_MAX_BYTES, READ_MAX_WAITERS, READ_RESERVATION_BYTES, streamTextPartsResponse, utf8Bytes, withBoundedRead } from './read-bounds.js';
@@ -58,10 +58,19 @@ const ListRead = z.object({ ...List.shape, counts: ListCounts.nullable() }).stri
 const SearchQuery = PageQuery.extend({ search: z.string().trim().min(1).max(200).optional() });
 const ListQuery = SearchQuery.extend({ counts: z.enum(['true', 'false']).default('true').describe('false leaves member counts out (counts is null). Counts are kept as memberships, consent and suppression change, so reading them does not count members.') }).openapi('ListContactListsQuery');
 const ContactQuery = SearchQuery.extend({ email: Email.optional().describe('Exact, case-insensitive email match. Uses the unique email index; prefer it over search for one address.'), consent: z.enum(['unknown', 'subscribed', 'unsubscribed']).optional(), suppressed: z.enum(['true', 'false']).optional(), listId: z.string().min(1).max(120).optional() }).openapi('ListContactsQuery');
+// A condition on any contact property, with the operators of its value's type (compilePropertyRule).
+const property = { field: z.literal('property'), key: z.string().min(1).max(80).describe('The property name, as in a contact\'s properties.') };
+const PropertyRule = z.union([
+  z.object({ ...property, type: z.literal('string'), operator: z.enum(['eq', 'neq', 'contains']).describe('Compare JSON strings only. eq and neq are case-sensitive; contains ignores case. Missing, null and non-string properties never match.'), value: z.string().max(200) }).strict(),
+  z.object({ ...property, type: z.literal('number'), operator: z.enum(['eq', 'lt', 'gt']), value: z.number().finite().describe('Compared with a property that is a JSON number or a signed decimal string, optionally in scientific notation, within PostgreSQL numeric range. Other values never match.') }).strict(),
+  z.object({ ...property, type: z.literal('date'), operator: z.enum(['before', 'after', 'on']), value: z.iso.date().describe('Compare UTC calendar days. Accept a valid YYYY-MM-DD or a date with T and HH:MM[:SS[.fraction]], optionally Z or a signed hour/minute offset. No offset means UTC; invalid values never match.') }).strict(),
+  z.object({ ...property, type: z.enum(['string', 'number', 'date']), operator: z.enum(['set', 'notSet']).describe('set: the property has a value other than null; notSet: it has none. The same for every type.') }).strict(),
+]);
 const RuleLeaf = z.union([z.object({ field: z.enum(['email', 'firstName', 'plan', 'country']), operator: z.enum(['eq', 'neq', 'contains']), value: z.string().max(200) }).strict(), z.object({ field: z.enum(['lastOpenAt', 'lastClickAt']), operator: z.enum(['within', 'inactive']), days: z.number().int().min(1).max(730) }).strict()]);
-// Finite-depth schemas remain fully representable in OpenAPI; no recursive lazy schema.
-let ruleSchema: z.ZodType<SegmentRule> = RuleLeaf;
-for (let depth = 0; depth < 3; depth++) ruleSchema = z.union([RuleLeaf, z.object({ operator: z.enum(['and', 'or']), rules: z.array(ruleSchema).min(1).max(10) }).strict()]);
+// Finite-depth schemas remain fully representable in OpenAPI; no recursive lazy schema. Property leaves come after the
+// alternatives that were there first, so the published anyOf keeps each earlier alternative at its index.
+let ruleSchema: z.ZodType<SegmentRule> = z.union([RuleLeaf, PropertyRule]);
+for (let depth = 0; depth < 3; depth++) ruleSchema = z.union([RuleLeaf, z.object({ operator: z.enum(['and', 'or']), rules: z.array(ruleSchema).min(1).max(10) }).strict(), PropertyRule]);
 function ruleSize(rule: SegmentRule): number { return 'rules' in rule ? 1 + rule.rules.reduce((n, child) => n + ruleSize(child), 0) : 1; }
 const Rule = ruleSchema.refine(v => ruleSize(v) <= 50, 'A segment supports at most 50 rules and three nested groups.').openapi('SegmentRule');
 const SegmentInput = z.object({ name: z.string().trim().min(1).max(200), rule: Rule }).strict();
@@ -196,25 +205,30 @@ export function compileRule(rule: SegmentRule): SQL { return sql`coalesce((${com
 function compileRuleCondition(rule: SegmentRule): SQL {
   if ('rules' in rule) {
     if (rule.operator === 'or') {
-      // Collapse same-field eq leaves inside OR into one ANY(...) test so 20-50 condition OR segments extract JSONB once per row.
+      // Collapse text-eq leaves on one target inside OR into one ANY(...) test so 20-50 condition OR segments extract JSONB once per row.
       const eqByField = new Map<string, string[]>();
+      const numberEq = new Map<string, number[]>();
       const other: SegmentRule[] = [];
       for (const child of rule.rules) {
-        if (!('rules' in child) && !('days' in child) && child.operator === 'eq') {
-          const val = child.field === 'email' ? child.value.trim().toLowerCase() : child.value;
-          const list = eqByField.get(child.field) ?? [];
-          list.push(val);
-          eqByField.set(child.field, list);
-        } else {
-          other.push(child);
-        }
+        const eq = textEquality(child);
+        if (eq) eqByField.set(eq.target, [...eqByField.get(eq.target) ?? [], eq.value]);
+        else if ('field' in child && child.field === 'property' && child.type === 'number' && child.operator === 'eq') {
+          const values = numberEq.get(child.key) ?? []; values.push(child.value); numberEq.set(child.key, values);
+        } else other.push(child);
       }
       const parts: SQL[] = other.map(compileRule);
       for (const [f, vals] of eqByField) {
-        const expr = f === 'email' ? sql`${contacts.email}` : sql`(${contacts.properties} ->> ${f})`;
-        parts.push(vals.length === 1
+        const typed = f.startsWith('property:'), key = typed ? f.slice('property:'.length) : f;
+        const expr = f === 'email' ? sql`${contacts.email}` : sql`(${contacts.properties} ->> ${key})`;
+        const condition = vals.length === 1
           ? sql`coalesce(${expr} = ${vals[0]!}, false)`
-          : sql`coalesce(${expr} = ANY(ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify([...new Set(vals)])}::jsonb))), false)`);
+          : sql`coalesce(${expr} = ANY(ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify([...new Set(vals)])}::jsonb))), false)`;
+        parts.push(typed ? sql`(${stringProperty(key)} AND ${condition})` : condition);
+      }
+      for (const [key, values] of numberEq) {
+        const number = propertyNumber(key);
+        parts.push(values.length === 1 ? sql`${number} = ${String(values[0])}::numeric`
+          : sql`${number} = ANY(ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify([...new Set(values)])}::jsonb)::numeric))`);
       }
       return sql`(${sql.join(parts, sql` OR `)})`;
     }
@@ -226,12 +240,67 @@ function compileRuleCondition(rule: SegmentRule): SQL {
     const coverage = rule.field === 'lastOpenAt' ? contacts.openObservedSince : contacts.clickObservedSince;
     return rule.operator === 'within' ? sql`${timestamp} >= ${cutoff}::timestamptz` : sql`(${coverage} <= ${cutoff}::timestamptz AND (${timestamp} IS NULL OR ${timestamp} < ${cutoff}::timestamptz))`;
   }
+  if (rule.field === 'property') return compilePropertyRule(rule);
   const field = rule.field === 'email' ? sql`${contacts.email}` : sql`(${contacts.properties} ->> ${rule.field})`;
   const value = rule.field === 'email' ? rule.value.trim().toLowerCase() : rule.value;
   if (rule.operator === 'eq') return sql`${field} = ${value}`;
   if (rule.operator === 'neq') return sql`(${field} IS NOT NULL AND ${field} <> ${value})`;
   // strpos treats wildcard characters as literal text, never SQL syntax.
   return sql`strpos(lower(${field}), lower(${rule.value})) > 0`;
+}
+// Keep typed comparisons separate from legacy fields, which compare their textual JSON representation.
+function textEquality(rule: SegmentRule): { target: string; value: string } | null {
+  if ('rules' in rule || 'days' in rule || rule.operator !== 'eq') return null;
+  if (rule.field !== 'property') return rule.field === 'email' ? { target: 'email', value: rule.value.trim().toLowerCase() } : { target: rule.field, value: rule.value };
+  return rule.type === 'string' ? { target: `property:${rule.key}`, value: rule.value } : null;
+}
+const stringProperty = (key: string) => sql`jsonb_typeof(${contacts.properties} -> ${key}) = 'string'`;
+const NUMBER_TEXT = '^[+-]?(?:[0-9]+(?:[.][0-9]*)?|[.][0-9]+)(?:[eE][+-]?[0-9]+)?$';
+const CLOCK = '(?:[01][0-9]|2[0-3]):[0-5][0-9](?::[0-5][0-9](?:[.][0-9]+)?)?|24:00(?::00(?:[.]0+)?)?';
+const ISO_TEXT = `^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])(?:[Tt](?:${CLOCK})(?:[Zz]|[+-](?:[01][0-9]|2[0-3])(?::?[0-5][0-9])?)?)?$`;
+const ZONE = '([+-])([0-9]{2})(?::?([0-9]{2}))?$';
+// C-collated sentinels outside the entire four-digit ISO range, including at either year boundary.
+function adjacentDay(day: string, delta: number) {
+  const date = new Date(Date.parse(`${day}T00:00:00Z`) + delta * 86_400_000), year = date.getUTCFullYear();
+  return year < 0 ? '' : year > 9999 ? ':' : date.toISOString().slice(0, 10);
+}
+// SQL dates have no year zero. ISO year 0000 is 1 BC in the same proleptic Gregorian calendar.
+function propertyDay(text: SQL, operator: 'before' | 'after' | 'on', target: string) {
+  const lexical = sql`(${text} COLLATE "C")`;
+  // Offsets and 24:00 can move a local date by at most one day. Reject distant misses before parsing.
+  const coarse = operator === 'before' ? sql`${lexical} < ${adjacentDay(target, 1)}` : operator === 'after' ? sql`${lexical} >= ${target}`
+    : sql`${lexical} >= ${adjacentDay(target, -1)} AND ${lexical} < ${adjacentDay(target, 2)}`;
+  const local = sql`(CASE WHEN left(${text},4) = '0000' THEN '0001' || substr(${text},5,6) || ' BC' ELSE left(${text},10) END)`;
+  // The shape enforces valid months and days 1..31. Only the last three days can need a calendar check.
+  const validCalendar = sql`(substr(${text},9,2) COLLATE "C" <= '28' OR pg_input_is_valid(${local}, 'date'))`;
+  // Shift the comparison day rather than rounding a timestamp: 23:59:59.999999999 still belongs to this day.
+  // A scalar offset expression keeps the whole scan parallelizable. Its casts are inside the full-shape CASE.
+  const zone = sql`(regexp_match(substr(${text},12), ${ZONE}))`;
+  const minutes = sql`(substr(${text},12,2)::int * 60 + substr(${text},15,2)::int -
+    (CASE ${zone}[1] WHEN '-' THEN -1 ELSE 1 END) * (coalesce(${zone}[2]::int,0)*60 + coalesce(${zone}[3]::int,0)))`;
+  const bound = sql`CASE WHEN length(${text}) = 10 OR (right(${text},1) IN ('Z','z') AND substr(${text},12,2) <> '24') THEN ${target}
+    WHEN ${minutes} < 0 THEN ${adjacentDay(target,1)} WHEN ${minutes} >= 1440 THEN ${adjacentDay(target,-1)} ELSE ${target} END`;
+  const comparison = sql.raw(operator === 'before' ? '<' : operator === 'after' ? '>' : '=');
+  return sql`(${coarse} AND CASE WHEN ${text} ~ ${ISO_TEXT} AND ${validCalendar}
+    THEN (left(${text},10) COLLATE "C") ${comparison} (${bound}) ELSE false END)`;
+}
+function propertyNumber(key: string) {
+  const value = sql`(${contacts.properties} -> ${key})`, text = sql`(${contacts.properties} ->> ${key})`;
+  return sql`(CASE jsonb_typeof(${value}) WHEN 'number' THEN ${value}::numeric WHEN 'string' THEN CASE WHEN ${text} ~ ${NUMBER_TEXT} AND pg_input_is_valid(${text}, 'numeric') THEN ${text}::numeric END END)`;
+}
+function compilePropertyRule(rule: PropertyRule): SQL {
+  const text = sql`(${contacts.properties} ->> ${rule.key})`;
+  if (!('value' in rule)) return rule.operator === 'set' ? sql`${text} IS NOT NULL` : sql`${text} IS NULL`;
+  if (rule.type === 'string') {
+    const condition = rule.operator === 'eq' ? sql`${text} = ${rule.value}` : rule.operator === 'neq' ? sql`${text} <> ${rule.value}`
+      : sql`strpos(lower(${text}), lower(${rule.value})) > 0`;
+    return sql`(${stringProperty(rule.key)} AND ${condition})`;
+  }
+  if (rule.type === 'number') {
+    const number = propertyNumber(rule.key);
+    return sql`${number} ${sql.raw(rule.operator === 'lt' ? '<' : rule.operator === 'gt' ? '>' : '=')} ${String(rule.value)}::numeric`;
+  }
+  return propertyDay(text, rule.operator, rule.value);
 }
 // Keep the full membership-key probe correlated even immediately after a large import,
 // before PostgreSQL has analyzed the new row distribution.
@@ -296,6 +365,28 @@ export async function countCampaignAudience(db: DbExecutor, identity: Actor, spe
       count(*) FILTER (WHERE NOT ${contacts.suppressed} AND NOT (${reachable(requiredNotice)}))::int AS unsubscribed
     FROM ${contacts} WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)}`)).rows;
   return row!;
+}
+
+/** Display-only whole-list counts. The list tally includes every committed delta, not just its last fold. */
+export async function countCampaignAudienceForDisplay(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>, requiredNotice = false) {
+  if (identity.domains.length || spec.segmentId || spec.excludeListIds?.length || spec.excludeSegmentIds?.length) {
+    return countCampaignAudience(db, identity, spec, requiredNotice);
+  }
+  // Anchor to the scoped list so a missing or foreign list still returns 404, not the counts of an empty list.
+  const { rows: [row] } = await db.execute<{ subscribed: number; unsubscribed: number; unknown: number; suppressed: number }>(sql`
+    SELECT coalesce(sum(c.subscribed), 0)::int AS subscribed, coalesce(sum(c.unsubscribed), 0)::int AS unsubscribed,
+      coalesce(sum(c.unknown), 0)::int AS unknown, coalesce(sum(c.suppressed), 0)::int AS suppressed
+    FROM audience_lists l LEFT JOIN audience_list_counts c ON c.workspace_id = l.workspace_id AND c.list_id = l.id
+    WHERE l.workspace_id = ${identity.workspaceId} AND l.id = ${spec.listId}
+    GROUP BY l.id`);
+  if (!row) return notFound('List');
+  const notSubscribed = row.unsubscribed + row.unknown;
+  return {
+    matched: row.subscribed + notSubscribed + row.suppressed,
+    eligible: requiredNotice ? row.subscribed + notSubscribed : row.subscribed,
+    suppressed: row.suppressed,
+    unsubscribed: requiredNotice ? 0 : notSubscribed,
+  };
 }
 export const SYNC_CAPTURE_MAX_LIST_MEMBERS = 5_000;
 const SNAPSHOT_MAX_MATCHED = 2_000_000, SNAPSHOT_MAX_RECIPIENT_BYTES = 1_048_576, SNAPSHOT_MAX_REVIEW_BYTES = 1_073_741_824;

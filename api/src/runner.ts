@@ -11,6 +11,7 @@ import { foldSendingTallies } from './sending-tallies.js';
 import { healthTick } from './health.js';
 import { flushCounters } from './health-counters.js';
 import { standingTick } from './standing.js';
+import { ensureSenderDisplayDiscovery } from './sender-display-score.js';
 import { signupsTick } from './signups.js';
 import { dueLogFacetSlots, foldLogFacetSlot, LOG_FACET_TICK_MS } from './log-facet-fold.js';
 import { syncOutboundMessages } from './mailbox-send.js';
@@ -24,6 +25,7 @@ try {
   let stopped = false; let lastCleanup = 0; let lastOutboundSync = 0; let lastRecovery = 0;
   let sharedSetup: Promise<void> | undefined, lastSharedSetup = 0;
   let publicStats: Promise<void> | undefined, lastPublicStats = 0;
+  let display: Promise<void> | undefined, lastDisplay = 0;
   let health: Promise<unknown> | undefined, lastHealth = 0;
   let hourly: Promise<unknown> | undefined, sentRetention: Promise<unknown> | undefined, lastSentRetention = 0;
   // In-process pacing state per account/region. Run one runner per installation (or split
@@ -77,6 +79,11 @@ try {
           lastPublicStats = Date.now();
           publicStats = foldSendingTallies(runtime).catch(() => log('warn', { code: 'SENDING_TALLIES_FOLD_FAILED' })).then(() => publicStatsTick(runtime)).then(() => standingTick(runtime)).then(() => signupsTick(runtime)).finally(() => { publicStats = undefined; });
         }
+        // Keep the display scanner scheduled without reserving a dispatch lane or using a request to seed it.
+        if (!display && Date.now() - lastDisplay >= 60_000) {
+          lastDisplay = Date.now();
+          display = ensureSenderDisplayDiscovery(runtime.db).catch(() => log('warn', { code: 'DISPLAY_SCORE_DISCOVERY_FAILED' })).finally(() => { display = undefined; });
+        }
         // In the background, like shared setup: retention can take minutes, and a step that keeps failing used to throw
         // here before drain() on every pass, so no job ran and no mail was dispatched until it succeeded.
         if (!hourly && Date.now() - lastCleanup > 3600000) {
@@ -103,7 +110,7 @@ try {
         await setTimeout(5000);
       }
     }
-  } finally { stopped=true;await facets;await hooks;await sharedSetup;await publicStats;await health;await hourly;await sentRetention; await listener?.end(); await close(); }
+  } finally { stopped=true;await facets;await hooks;await sharedSetup;await publicStats;await display;await health;await hourly;await sentRetention; await listener?.end(); await close(); }
 } catch (error) {
   logError(error, { code: error instanceof ApiError ? error.code : 'STARTUP_FAILED' });
   process.exitCode = 1;
