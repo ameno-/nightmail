@@ -63,7 +63,7 @@ export function homeShell(): Plugin {
         const full = `${elsewhere}<source ${here}type="image/avif" srcset="${set(p.avif)}" sizes="100vw"><source ${here}srcset="${set(p.jpeg)}" sizes="100vw">`
           + `<img class="fac-poster" src="${format === 'phone' ? NOTHING : url(p.src)}" ${size} fetchpriority="low">`
         return `<div class="srt-page fac-page" data-format="${format}" data-visitor><main><section class="fac-hero" aria-label="Pricing">`
-          + '<h1 class="sr-only">$0.20 per 1,000 emails, sent or received via API.</h1><p class="sr-only">Free every month: 5,000 emails sent and 5,000 received. Responds in about 100 ms.</p>'
+          + '<h1 class="sr-only">$0.20 per 1,000 emails, sent or received via API.</h1><p class="sr-only">Free every month: 5,000 emails sent and 20,000 received. Responds in about 100 ms.</p>'
           + `<div class="fac-stage" style="${attr(Object.entries(vars).map(([key, value]) => `${key}:${value}`).join(';'))}"><div class="fac-frame"><picture>${soft}</picture><picture>${full}</picture>`
           + `<button type="button" class="fac-cta hs-visitor" style="${box}"><span class="srt-cta-label">Get started${ARROW}${BUSY}</span></button>`
           + `<a class="fac-cta hs-member" href="/overview" style="${box}"><span class="srt-cta-label">Open dashboard${ARROW}</span></a></div></div>`

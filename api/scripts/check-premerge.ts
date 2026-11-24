@@ -297,7 +297,7 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
     }
     // The rates and terms the pages quote, as the billing code has them.
     const minTopUp = '$' + n(CREDIT.minTopUpCents / 100)
-    const terms = ['$' + perThousandUsd(RATES.emailUc) + ' per 1,000', n(RATES.freeSentEmails) + ' of each free', dollarsOf(RATES.storageUcPerGbMonth) + ' per GB a month after ' + Number(RATES.freeStorageBytes / 1_000_000_000n) + ' GB free',
+    const terms = ['$' + perThousandUsd(RATES.emailUc) + ' per 1,000', n(RATES.freeSentEmails) + ' sent and ' + n(RATES.freeReceivedEmails) + ' received free', dollarsOf(RATES.storageUcPerGbMonth) + ' per GB a month after ' + Number(RATES.freeStorageBytes / 1_000_000_000n) + ' GB free',
       'past ' + STORAGE_AFTER_DAYS + ' days', 'Top-ups start at ' + minTopUp + ' and expire ' + CREDIT.expiresAfterMonths + ' months after purchase']
     for (const { input, path, html } of out.calculator) {
       const page = text(html), want = { sent: typed(input.sent ?? '100000'), received: typed(input.received ?? '0') }

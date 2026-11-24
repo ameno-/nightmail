@@ -13027,7 +13027,7 @@ describe('Billing: metering, gate and settlement', () => {
     });
   });
 
-  test('the free tier is 5,000 sent and 5,000 received a month, counted separately: nothing is charged up to 5,000 in each direction, the 5,001st is, both roll over, and months before November 2026 keep 3,000', async t => {
+  test('the free tier is 5,000 sent and 20,000 received a month, counted separately: nothing is charged up to each allowance, the next email is, both roll over, and months before November 2026 keep 3,000', async t => {
     await simulatedSesFixture(t, async ({ db }) => {
       // February 10, 2027, a second later for each settlement (a usage row's key carries the time it was posted).
       const at = await clock(db, '2027-02-10T09:00:00Z');
@@ -13043,28 +13043,28 @@ describe('Billing: metering, gate and settlement', () => {
         return [s.costUc, sum('send'), sum('receive')];
       };
       const both = unique('free-both'), sends = unique('free-sends'), receives = unique('free-receives');
-      // 5,000 sent (recipients) and 5,000 received in one month are free.
-      await meter(both, '2026-12-01 01:00Z', 'send', 5000); await meter(both, '2026-12-01 01:00Z', 'receive', 5000);
+      // 5,000 sent (recipients) and 20,000 received in one month are free.
+      await meter(both, '2026-12-01 01:00Z', 'send', 5000); await meter(both, '2026-12-01 01:00Z', 'receive', 20000);
       assert.deepEqual(await priced(both, '2026-12-01 02:00Z'), ['0', 0, 0]);
-      assert.deepEqual(await month(db, both, '2026-12-01'), { sent: 5000, received: 5000, unchargedSent: 0, unchargedReceived: 0 });
-      // The 5,001st send is charged while received mail is still free: the 5,000th received costs nothing, the 5,001st does.
-      await meter(sends, '2026-12-01 01:00Z', 'send', 5001); await meter(sends, '2026-12-01 01:00Z', 'receive', 4999);
+      assert.deepEqual(await month(db, both, '2026-12-01'), { sent: 5000, received: 20000, unchargedSent: 0, unchargedReceived: 0 });
+      // The 5,001st send is charged while received mail is still free: the 20,000th received costs nothing, the 20,001st does.
+      await meter(sends, '2026-12-01 01:00Z', 'send', 5001); await meter(sends, '2026-12-01 01:00Z', 'receive', 19999);
       assert.deepEqual(await priced(sends, '2026-12-01 02:00Z'), ['20000', 1, 0]);
       await meter(sends, '2026-12-01 02:00Z', 'receive', 1);
       assert.deepEqual(await priced(sends, '2026-12-01 03:00Z'), ['0', 0, 0]);
       await meter(sends, '2026-12-01 03:00Z', 'receive', 1);
       assert.deepEqual(await priced(sends, '2026-12-01 04:00Z'), ['20000', 0, 1]);
-      // And the other way round: the 5,001st received is charged while sends are still free, up to their own 5,000.
-      await meter(receives, '2026-12-01 01:00Z', 'receive', 5001); await meter(receives, '2026-12-01 01:00Z', 'send', 4000);
+      // And the other way round: the 20,001st received is charged while sends are still free, up to their own 5,000.
+      await meter(receives, '2026-12-01 01:00Z', 'receive', 20001); await meter(receives, '2026-12-01 01:00Z', 'send', 4000);
       assert.deepEqual(await priced(receives, '2026-12-01 02:00Z'), ['20000', 0, 1]);
       await meter(receives, '2026-12-01 02:00Z', 'send', 1000);
       assert.deepEqual(await priced(receives, '2026-12-01 03:00Z'), ['0', 0, 0]);
       await meter(receives, '2026-12-01 03:00Z', 'send', 1);
       assert.deepEqual(await priced(receives, '2026-12-01 04:00Z'), ['20000', 1, 0]);
       // Month rollover: both allowances start again in January.
-      await meter(sends, '2027-01-01 00:00Z', 'send', 5000); await meter(sends, '2027-01-01 00:00Z', 'receive', 5000);
+      await meter(sends, '2027-01-01 00:00Z', 'send', 5000); await meter(sends, '2027-01-01 00:00Z', 'receive', 20000);
       assert.deepEqual(await priced(sends, '2027-01-01 01:00Z'), ['0', 0, 0]);
-      assert.deepEqual(await month(db, sends, '2027-01-01'), { sent: 5000, received: 5000, unchargedSent: 0, unchargedReceived: 0 });
+      assert.deepEqual(await month(db, sends, '2027-01-01'), { sent: 5000, received: 20000, unchargedSent: 0, unchargedReceived: 0 });
       await meter(receives, '2027-01-01 00:00Z', 'send', 1);
       assert.deepEqual(await priced(receives, '2027-01-01 01:00Z'), ['0', 0, 0]);
       // A refund settled in February goes back into December, its mail's own hour, and gives back what December's cost
@@ -13077,34 +13077,34 @@ describe('Billing: metering, gate and settlement', () => {
       await refundInto(db, receives, '2026-12-01 01:00Z', 'send', -1);
       assert.deepEqual(await priced(receives, 'later'), ['0', 0, 0]);
       assert.deepEqual([await month(db, sends, '2027-01-01'), await month(db, receives, '2027-01-01')],
-        [{ sent: 5000, received: 5000, unchargedSent: 0, unchargedReceived: 0 }, { sent: 1, received: 0, unchargedSent: 0, unchargedReceived: 0 }]);
+        [{ sent: 5000, received: 20000, unchargedSent: 0, unchargedReceived: 0 }, { sent: 1, received: 0, unchargedSent: 0, unchargedReceived: 0 }]);
 
-      // Rate version 3 (5,000 and 5,000, as version 2 was) prices November 2026 on; October and earlier keep version 1, 3,000 and 3,000. October's 3,001st send
+      // Rate version 4 (5,000 sent and 20,000 received) prices November 2026 on, in place of versions 2 and 3; October and earlier keep version 1, 3,000 and 3,000. October's 3,001st send
       // was charged, and a refund of it settled now gives back one email's price, as October was charged.
       const october = unique('free-october'), november = unique('free-november');
       await meter(october, '2026-10-31 23:00Z', 'send', 3001); await meter(october, '2026-10-31 23:00Z', 'receive', 3000);
       assert.deepEqual(await priced(october, '2026-11-01 00:00Z'), ['20000', 1, 0]);
-      await meter(november, '2026-11-01 00:00Z', 'send', 5000); await meter(november, '2026-11-01 00:00Z', 'receive', 5001);
+      await meter(november, '2026-11-01 00:00Z', 'send', 5000); await meter(november, '2026-11-01 00:00Z', 'receive', 20001);
       assert.deepEqual(await priced(november, '2026-11-01 01:00Z'), ['20000', 0, 1]);
       await refundInto(db, october, '2026-10-31 23:00Z', 'send', -1);
       assert.deepEqual(await priced(october, 'later'), ['-20000', -1, 0]);
       assert.deepEqual((await db.query(`SELECT detail->>'usageMonth' AS m, detail->'rateVersion' AS v FROM billing_ledger WHERE workspace_id = ANY($1) ORDER BY id`, [[october, november]])).rows,
-        [{ m: '2026-10', v: 1 }, { m: '2026-11', v: 3 }, { m: '2026-10', v: 1 }]);
+        [{ m: '2026-10', v: 1 }, { m: '2026-11', v: 4 }, { m: '2026-10', v: 1 }]);
 
       // The gate prices sends against the sent allowance only. This month: free sends used, every received email left.
       const live = unique('free-live'), gate = async () => (await db.query('SELECT billing_gate($1, 1) AS g', [live])).rows[0].g;
       await settledThisMonth(db, live, 5000);
       let g = await gate();
-      assert.deepEqual([g.ok, g.requiredUc, g.freeSentLeft, g.freeReceivedLeft], [false, '20000', 0, 5000], 'The 5,001st send needs credit while received mail is still free.');
+      assert.deepEqual([g.ok, g.requiredUc, g.freeSentLeft, g.freeReceivedLeft], [false, '20000', 0, 20000], 'The 5,001st send needs credit while received mail is still free.');
       await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC'),'receive',1)`, [live]);
-      assert.deepEqual([(await gate()).openUc, (await gate()).freeReceivedLeft], ['0', 4999], 'An unsettled received message is free.');
+      assert.deepEqual([(await gate()).openUc, (await gate()).freeReceivedLeft], ['0', 19999], 'An unsettled received message is free.');
       // And the other way round: received allowance used, sends free.
-      await settledThisMonth(db, live, 0, 5000);
+      await settledThisMonth(db, live, 0, 20000);
       await db.query(`DELETE FROM billing_usage_hourly WHERE workspace_id=$1`, [live]);
       g = await gate();
       assert.deepEqual([g.ok, g.requiredUc, g.freeSentLeft, g.freeReceivedLeft], [true, '0', 5000, 0]);
       await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC'),'receive',1)`, [live]);
-      assert.deepEqual([(await gate()).openUc, (await gate()).freeSentLeft], ['20000', 5000], 'The 5,001st received is charged; the sends stay free.');
+      assert.deepEqual([(await gate()).openUc, (await gate()).freeSentLeft], ['20000', 5000], 'The 20,001st received is charged; the sends stay free.');
       // What the API publishes (RATES) is this month's version, the price of an AI decision included.
       const { RATES } = await import('./src/billing/money.js');
       assert.deepEqual((await db.query(`SELECT (billing_rates_in((date_trunc('month', now() AT TIME ZONE 'UTC'))::date)).*, billing_rate_uc('omen', 1::smallint, now())::text AS omen_uc`)).rows[0],
@@ -18966,7 +18966,7 @@ describe('Billing: API, MCP and notices', () => {
       const read = ok(await request('GET', '/v1/billing', reader));
       assert.deepEqual([read.balance, read.monthToDate, read.autoRecharge, read.paymentMethod, read.state.sending], [null, null, null, null, 'ok']);
       // The received allowance, like GET /v1/usage's received count, is for credentials that may read every received message.
-      assert.deepEqual([read.free.sent.limit, read.free.received, ok(await request('GET', '/v1/billing', manage)).free.received.limit], [5000, null, 5000]);
+      assert.deepEqual([read.free.sent.limit, read.free.received, ok(await request('GET', '/v1/billing', manage)).free.received.limit], [5000, null, 20000]);
       error(await request('GET', '/v1/billing/ledger', reader), 403, 'PERMISSION_DENIED');
       error(await request('GET', '/v1/billing/payments', reader), 403, 'PERMISSION_DENIED');
       error(await request('POST', '/v1/billing/top-up-links', reader, { amountCents: 5000 }), 403, 'PERMISSION_DENIED');
@@ -27922,14 +27922,14 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual([await rescore(), (await clusterOf(a))!.score], [15, 100], 'Together past one allowance.');
       await used(wid, 'send', 4200); await used(wsB, 'send', 4100);
       assert.equal(await rescore(), 20, 'Two workspaces each near their own cap.');
-      await used(wsC, 'receive', 5000); await used(wsB, 'receive', 5000);
+      await used(wsC, 'receive', 20000); await used(wsB, 'receive', 20000);
       assert.equal(await rescore(), 35, 'Twice the allowance.');
       // A workspace that bought credit, or one an operator made free, is not multiplying anything.
       await db.query(`SELECT billing_post($1,'topup',$2,$3,$4,'{}','operator:fixture')`, [wsB, unique('topup'), '2000000000', '0']);
       await db.query('UPDATE workspaces SET exempt_hosted_quotas=true WHERE id=$1', [wsC]);
       assert.equal(await rescore(), undefined);
       await db.query('UPDATE workspaces SET exempt_hosted_quotas=false WHERE id=$1', [wsC]);
-      assert.equal(await rescore(), 20, 'A and C: 4,200 sent and 5,000 received.');
+      assert.equal(await rescore(), 20, 'A and C: 4,200 sent and 20,000 received.');
       // Standing and payments are read live: a paused member and a dispute raise the score without any link changing.
       await db.query(`INSERT INTO sender_standing(workspace_id,step) VALUES ($1,'pause') ON CONFLICT (workspace_id) DO UPDATE SET step='pause'`, [wsB]);
       await db.query(`SELECT billing_post($1,'dispute',$2,$3,$4,'{}','stripe')`, [wsC, unique('dispute'), '-1000000', '0']);

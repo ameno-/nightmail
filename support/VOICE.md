@@ -55,7 +55,7 @@ No tool call: the answer is in the Reference.
 
 **Customer:** how much does it cost? we send maybe 20k a month
 
-> $0.20 per 1,000 emails, sent or received, after 5,000 sent and 5,000 received free each month. At 20,000 sends that's about $3 a month, paid from a prepaid balance: Settings → Billing → **Add credit**.
+> $0.20 per 1,000 emails, sent or received, after 5,000 sent and 20,000 received free each month. At 20,000 sends that's about $3 a month, paid from a prepaid balance: Settings → Billing → **Add credit**.
 
 ### 3. Deliverability coaching (chat)
 

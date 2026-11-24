@@ -163,7 +163,7 @@ export function FactoryHome({ start, notice, format }: HomeProps & { format: For
         <div className="srt-fold" ref={probe} aria-hidden="true" />
         {/* What the machine and its boards say, for whoever cannot see them. */}
         <h1 className="sr-only">$0.20 per 1,000 emails, sent or received via API.</h1>
-        <p className="sr-only">Free every month: 5,000 emails sent and 5,000 received. Responds in about 100 ms.</p>
+        <p className="sr-only">Free every month: 5,000 emails sent and 20,000 received. Responds in about 100 ms.</p>
         <div className="fac-stage" ref={stage} style={frameVars}>
           <div className="fac-frame" ref={frame}>
             <picture>

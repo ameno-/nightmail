@@ -229,7 +229,7 @@ export function BoardEnd({ comparison: c }: { comparison?: Comparison | null }) 
       <h2 id="sources-title" className="cb-sources-title">Sources and small print</h2>
       {c ? <>
         <p className="price-note">{c.assume} Monthly billing, no promotions. <Checked source={{ checked: CHECKED, url: c.offer.pricing }} /></p>
-        <p className="price-note">Nightmail charges {nightmail.perThousand} per 1,000 emails after {formatCount(nightmail.freeSent)} free a month.</p>
+        <p className="price-note">Nightmail charges {nightmail.perThousand} per 1,000 emails after {formatCount(nightmail.freeSent)} sent and {formatCount(nightmail.freeReceived)} received free a month.</p>
         <Terms floor={null} />
         <ul className="price-facts">{c.ours.map(fact => <li key={fact.text}>{fact.text}{fact.source && <Cite source={fact.source} />}</li>)}</ul>
         <CheckedOn facts={c.ours} />

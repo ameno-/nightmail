@@ -24,7 +24,7 @@ const TEAM = [['Dana', 'Owner'], ['Zahir', 'Admin'], ['Bertram', 'Member'], ['Mi
 // A domain's records as the product lists them (api/src/operations.ts, readiness): three DKIM CNAMEs, MAIL FROM's SPF,
 // the DMARC it checks for, and the MX that receives.
 const RECORDS = [['DKIM', 'x7k2._domainkey'], ['DKIM', 'p4qd._domainkey'], ['SPF', 'email'], ['DMARC', '_dmarc'], ['MX', 'acme.example']] as const
-const free = formatCount(nightmail.freeSent)
+const free = formatCount(nightmail.freeSent), freeReceived = formatCount(nightmail.freeReceived), flaps = Math.max(free.length, freeReceived.length)
 /** A paper tag on its pin: it swings when the pointer brushes it or it's tapped (and rustles when tapped). */
 function Tag({ name, role, k }: { name: string; role: string; k: number }) {
   const [swing, replay] = useReplay()
@@ -46,8 +46,8 @@ const FEATURES: Record<FeatureId, Feature> = {
     {TEAM.map(([name, role], i) => <Tag key={name} name={name} role={role} k={i} />)}
   </div> },
   free: { title: 'Free every month.', line: 'Sent and received each have their own allowance.', face: 'object', show: <div className="ft-flapboard">
-    <p><Flaps text={free} width={free.length} className="ft-flaps ft-lit" /><span>Sent</span></p>
-    <p><Flaps text={formatCount(nightmail.freeReceived)} width={free.length} className="ft-flaps ft-lit" /><span>Received</span></p>
+    <p><Flaps text={free} width={flaps} end className="ft-flaps ft-lit" /><span>Sent</span></p>
+    <p><Flaps text={freeReceived} width={flaps} end className="ft-flaps ft-lit" /><span>Received</span></p>
   </div> },
   receive: { title: 'Receive mail, and reply.', line: 'Inboxes at no charge, with IMAP and SMTP for mail apps.', face: 'screen', show: <div className="ft-screen ft-receive">{SCREENS.receive}</div> },
   agent: { title: 'Inboxes for your agents.', line: 'Agents read and answer email over MCP.', face: 'screen', show: <div className="ft-screen ft-agent">{SCREENS.agent}</div> },
