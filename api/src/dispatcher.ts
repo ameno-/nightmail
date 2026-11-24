@@ -9,7 +9,7 @@ import { principal } from './mail-gateway.js';
 import { regionalSender, sendingConnections, verifiedClaim } from './domain-claims.js';
 import { claimsOnly } from './send-scope.js';
 import { heldStream, probationReason } from './hosted-sending.js';
-import { countScreened, finishCampaigns, reopenQueuedCampaigns, type TenantState } from './states.js';
+import { countScreened, finishCampaigns, pauseCampaign, reopenQueuedCampaigns, type TenantState } from './states.js';
 import { credentialFingerprint, discoveryTarget } from './ses-region-state.js';
 import { mxResourceName, POOL_INSTALLATION, setupResources } from './ses-setup.js';
 import { forDelivery, type ReadyConnection } from './provider-credentials.js';
@@ -534,11 +534,18 @@ async function rejectPreflight(runtime: Runtime, mail: Mail, error: unknown): Pr
   const code = error instanceof ApiError ? error.code : 'DISPATCH_PREFLIGHT_FAILED';
   const retryable = error instanceof ApiError ? error.retryable : true;
   if (retryable) {
-    // Transient dependency failure: release the lease with a short backoff and let the loop retry.
-    const missing=code==='ATTACHMENT_STORAGE_UNAVAILABLE';
-    const retry=await runtime.db.execute(sql`UPDATE sending_emails SET lease_until = NULL, attachment_failures=attachment_failures+${missing?1:0}::smallint, scheduled_at = greatest(coalesce(scheduled_at, clock_timestamp()), clock_timestamp() + interval '15 seconds'), error_code = ${code}, updated_at = clock_timestamp()
+    // Transient dependency failure (or unknown future content-hash format on rollback): keep the recipient queued
+    // instead of rejecting/burning it. On CAMPAIGN_HASH_FORMAT_UNSUPPORTED, pause the parent campaign loudly too.
+    const missing = code === 'ATTACHMENT_STORAGE_UNAVAILABLE';
+    const unsupportedHash = code === 'CAMPAIGN_HASH_FORMAT_UNSUPPORTED';
+    const backoffSecs = unsupportedHash ? 60 : 15;
+    const retry = await runtime.db.execute(sql`UPDATE sending_emails SET lease_until = NULL, attachment_failures=attachment_failures+${missing?1:0}::smallint, scheduled_at = greatest(coalesce(scheduled_at, clock_timestamp()), clock_timestamp() + make_interval(secs => ${backoffSecs}::int)), error_code = ${code}, updated_at = clock_timestamp()
       WHERE workspace_id = ${mail.workspaceId} AND id = ${mail.id} AND status = 'queued' AND dispatch_version = ${mail.dispatchVersion} ${missing?sql`AND attachment_failures<4`:sql``}`);
-    if(!missing || retry.rowCount) { log('warn', { code, emailId: mail.id, message: 'Dispatch preflight failed; retrying after a short delay.' }); return 'deferred'; }
+    if (unsupportedHash && mail.campaignId) {
+      const msg = error instanceof ApiError ? error.message : 'Paused: this campaign uses a newer content hash format that this release cannot verify.';
+      await runtime.db.execute(pauseCampaign({ workspaceId: mail.workspaceId, id: mail.campaignId }, { code, message: msg })).catch(() => {});
+    }
+    if (!missing || retry.rowCount) { log('warn', { code, emailId: mail.id, message: 'Dispatch preflight failed; retrying after a short delay.' }); return 'deferred'; }
   }
   const rejected=await runtime.db.execute<{n:number}>(sql`WITH rejected AS (
       UPDATE sending_emails SET status = 'rejected', error_code = ${code}, lease_until = NULL, updated_at = clock_timestamp()

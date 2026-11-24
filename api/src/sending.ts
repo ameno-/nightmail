@@ -2375,6 +2375,29 @@ export function checkedDispatchAttachments(ids: string[], rows: (typeof attachme
   validateAttachmentRows(distinctAttachmentIds(ids), rows);
   return rows;
 }
+const LEGACY_CONTENT_HASH = /^[0-9a-f]{64}$/;
+const STATIC_S1_CONTENT_HASH = /^s1:[0-9a-f]{64}$/;
+export const isSupportedContentHash = (hash: string | null | undefined): hash is string =>
+  !!hash && (LEGACY_CONTENT_HASH.test(hash) || STATIC_S1_CONTENT_HASH.test(hash));
+const unsupportedHashFormat = () => new ApiError(409, 'CAMPAIGN_HASH_FORMAT_UNSUPPORTED', 'Paused: this campaign uses a newer content hash format that this release cannot verify. Deploy the matching release before resuming.', undefined, true);
+export async function staticContentHash(baseHash: string, email: string): Promise<string> {
+  return `s1:${await digest(`${baseHash}:${email}`)}`;
+}
+/**
+ * Verifies a frozen recipient's content_hash in either the legacy full-snapshot format (64 hex chars) or the compact
+ * static `s1:` format (`s1:${sha256(baseHash + ':' + email)}`). Unknown future formats throw retryable
+ * CAMPAIGN_HASH_FORMAT_UNSUPPORTED so release/dispatch pause and defer instead of rejecting unsent recipients.
+ */
+export async function verifyCampaignContentHash(customer: EmailSnapshot, storedHash: string): Promise<boolean> {
+  if (STATIC_S1_CONTENT_HASH.test(storedHash)) {
+    const baseHash = await digest(canonical({ ...customer, to: [] }));
+    return (await staticContentHash(baseHash, customer.to[0] ?? '')) === storedHash;
+  }
+  if (LEGACY_CONTENT_HASH.test(storedHash)) {
+    return (await digest(canonical(customer))) === storedHash;
+  }
+  throw unsupportedHashFormat();
+}
 export async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail: typeof emails.$inferSelect, review: { version: number; draft: CampaignDraft; rendered: { html?: string; text?: string }; contentHash: string | null; recipient: ReviewedRecipient } | null, prefetched?: (typeof attachments.$inferSelect)[]) {
   // Review/recipient data and attachment metadata are immutable; retained email
   // links prevent attachment deletion. No transaction is needed to render them.
@@ -2382,8 +2405,9 @@ export async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail:
   // discard their render without writing a different snapshot over the winner.
   const rows = prefetched ? checkedDispatchAttachments(mail.snapshot.attachments, prefetched) : await attachmentRows(runtime.db, a, mail.snapshot.attachments);
   if (!review?.rendered || !review.contentHash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The reviewed recipient is unavailable.');
+  if (!isSupportedContentHash(review.contentHash)) throw unsupportedHashFormat();
   const customer = await campaignMessage(runtime, review.draft, review.recipient, false, rows, review.rendered, true, !review.rendered.html?.includes('{{'), review.version);
-  if (await digest(canonical(customer)) !== review.contentHash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_CHANGED', 'The renderer no longer reproduces the reviewed message. No provider attempt was made.');
+  if (!(await verifyCampaignContentHash(customer, review.contentHash))) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_CHANGED', 'The renderer no longer reproduces the reviewed message. No provider attempt was made.');
   // `keyed`: the same customer copy with the footer generated for the placeholder link, as campaign screening keys it.
   const keyed = screenedAs(runtime, customer, review.draft);
   // A required notice has no unsubscribe link: it goes out exactly as it is keyed, and no token is made for it.
@@ -2424,8 +2448,9 @@ export async function rebuildCampaignEmail(runtime: Runtime, a: Actor, stub: Ema
   if (!review?.rendered || !review.content_hash) throw new ApiError(410, 'EMAIL_CONTENT_EXPIRED', 'The campaign review this email was rendered from has been retired.');
   if (![1, CAMPAIGN_RENDERER_VERSION].includes(review.renderer_version)) throw new ApiError(409, 'CAMPAIGN_RENDERER_CHANGED', `This email was rendered by campaign renderer v${review.renderer_version}; this release supports v1 and v${CAMPAIGN_RENDERER_VERSION}.`);
   if (!(review.draft.requiredNotice ? stub.requiredNotice : stub.unsubscribeUrl)) throw new ApiError(409, 'EMAIL_CONTENT_UNAVAILABLE', 'This campaign email has no stored content to rebuild.');
+  if (!isSupportedContentHash(review.content_hash)) throw unsupportedHashFormat();
   const snapshot = await campaignMessage(runtime, review.draft, review.recipient, false, rows, review.rendered, true, !review.rendered.html?.includes('{{'), review.renderer_version);
-  if (await digest(canonical(snapshot)) !== review.content_hash) throw new ApiError(409, 'CAMPAIGN_CONTENT_UNREPRODUCIBLE', 'The renderer no longer reproduces the message that was sent.');
+  if (!(await verifyCampaignContentHash(snapshot, review.content_hash))) throw new ApiError(409, 'CAMPAIGN_CONTENT_UNREPRODUCIBLE', 'The renderer no longer reproduces the message that was sent.');
   marketingFooter(snapshot, stub.unsubscribeUrl ?? '', review.draft);
   return snapshot;
 }
@@ -2929,6 +2954,8 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     const allowed = admitted(runtime, buffer!.decision, a.workspaceId);
     const chunk = await recipientChunk(db, campaign.reviewId!, campaign.expanded, capacity);
     if (!chunk.length || chunk.some((recipient, index) => !recipient.content_hash || recipient.ordinal !== campaign.expanded + index + 1)) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The prepared audience is incomplete.');
+    // Refuse unknown future hash formats before releasing any row so the campaign pauses intact instead of burning recipients.
+    if (chunk.some(recipient => !isSupportedContentHash(recipient.content_hash))) throw unsupportedHashFormat();
     const delivered = campaign.deliveredOnly ? await deliveredBefore(db, a.workspaceId, campaign.id, chunk.map(r => r.recipient.email)) : null;
     const affordable = allowed.hostedLeft ?? Number.POSITIVE_INFINITY;
     // The processed prefix: every recipient up to the last affordable one that is sent; skipped ones cost nothing.
@@ -3018,7 +3045,7 @@ const runCampaign: JobHandler = async (runtime, payload, job) => {
     }
   } catch (error) {
     if (error instanceof JobDeferred || error instanceof ModuleLoadError) throw error;
-    if (error instanceof ApiError && ['HOSTED_SENDING_PAUSED', 'MARKETING_HELD', 'POSTAL_ADDRESS_REQUIRED', 'REQUIRED_NOTICES_OFF'].includes(error.code)) {
+    if (error instanceof ApiError && ['HOSTED_SENDING_PAUSED', 'MARKETING_HELD', 'POSTAL_ADDRESS_REQUIRED', 'REQUIRED_NOTICES_OFF', 'CAMPAIGN_HASH_FORMAT_UNSUPPORTED'].includes(error.code)) {
       await runtime.db.execute(pauseCampaign(ref, { code: error.code, message: error.message }));
       return;
     }
