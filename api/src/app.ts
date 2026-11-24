@@ -264,7 +264,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
       const bytes = importPreviewReservationBytes(Number.isFinite(len) && len > 0 ? len : 5 * 1024 * 1024);
       let lease: MemoryLease;
       try {
-        lease = await reserveMemory(bytes, { route: 'import.preview', workspaceId: identity.workspaceId, signal: c.req.raw.signal, idleMs: 15_000, maxMs: 45_000 });
+        lease = await reserveMemory(bytes, { route: 'import.preview', workspaceId: identity.workspaceId, signal: c.req.raw.signal, idleMs: 15_000, maxMs: 45_000, wsBusyCode: 'IMPORT_CONCURRENCY_LIMIT', busyCode: 'IMPORT_CONCURRENCY_LIMIT' });
       } catch (err) {
         if (err instanceof DOMException && err.name === 'AbortError') { c.res = new Response(null, { status: 499 }); return; }
         if (err instanceof ApiError && (err.status === 429 || err.status === 503)) c.header('Retry-After', '1');
