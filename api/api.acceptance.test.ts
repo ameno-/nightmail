@@ -28499,6 +28499,44 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const tags='vis\u{e0061}ible';assert.equal(visibleMail(tags,null).hiddenContent,true);assert.equal(displayText(tags),'visible');assert.equal(visibleMail(null,`<p>${tags}</p>`).text,'visible');
   });
   test('ephemeral inbox: extract finds codes and links only in visible text and flags hidden content',async()=>{const {visibleMail}=await import('./src/inbox-content.js');const m=visibleMail('code 000000','<div hidden>code 111111</div><p style="font-size:0">code 222222</p><p>Verify: A3B4</p><a href="https://real.invalid/">other.invalid</a><span>zero\u200bwidth</span>','codes,links');assert.equal(m.hiddenContent,true);assert.deepEqual(m.extract,{codes:['A3B4'],links:[{text:'other.invalid',href:'https://real.invalid/',mismatch:true}]});assert.ok(!m.text.includes('111111'));});
+  test('shared-pool staging redrive retires unattributed objects once, skips SES setup probe, and keeps mail_ignored_staging 5 days', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { S3Client } = await import('@aws-sdk/client-s3');
+      const { stagingJobs } = await import('./src/mailbox-staging.js');
+      const { pruneMailboxEvents } = await import('./src/maintenance.js');
+      const wid = runtime.config.workspaceId;
+      const old = new Date(Date.now() - 2 * 3600_000);
+      const poolBucket = 'fixture-pool-' + unique('b'), poolTopic = `arn:aws:sns:${REGION}:111122223333:nightmail-inbound`;
+      const poolRuntime = { ...runtime, config: { ...runtime.config, multiTenant: true, receivingRedrive: true, aws: { accessKeyId: 'synthetic-fixture', secretAccessKey: 'synthetic-fixture' } } };
+      await db.query('CREATE TEMP TABLE provider_pool_regions (LIKE public.provider_pool_regions INCLUDING ALL) ON COMMIT DROP');
+      await db.query("INSERT INTO provider_pool_regions(region,aws_account_id,receiving_state,inbound_bucket,inbound_topic_arn) VALUES($1,'111122223333','ready',$2,$3)", [REGION, poolBucket, poolTopic]);
+      const copied: string[] = [];
+      t.mock.method(S3Client.prototype, 'send', async (cmd: any) => {
+        if (cmd.constructor.name === 'ListObjectsV2Command') return { Contents: [
+          { Key: 'staging/AMAZON_SES_SETUP_NOTIFICATION', ETag: '"setup"', LastModified: old },
+          { Key: 'staging/redrive-orphan-1', ETag: '"e1"', LastModified: old },
+        ], IsTruncated: false };
+        if (cmd.constructor.name === 'GetObjectCommand') return { Body: { transformToByteArray: async () => Buffer.from('Subject: orphan\r\n\r\nhi') } };
+        if (cmd.constructor.name === 'CopyObjectCommand') { copied.push(cmd.input.Key); return {}; }
+        return {};
+      });
+      const sweepPayload = { bucket: poolBucket, topic: poolTopic, shared: true, partition: 0, started: Date.now() };
+      await stagingJobs['mailbox.sweepStaging']!(poolRuntime, sweepPayload, { id: 'sweep-pool', attempts: 1, workspaceId: wid });
+      const queued = (await db.query("SELECT id, payload FROM jobs WHERE type='mailbox.recoverStaging' AND payload->>'bucket'=$1", [poolBucket])).rows;
+      assert.deepEqual(queued.map(r => r.payload.mid), ['redrive-orphan-1'], 'AMAZON_SES_SETUP_NOTIFICATION skipped');
+      await stagingJobs['mailbox.recoverStaging']!(poolRuntime, queued[0]!.payload, { id: queued[0]!.id, attempts: 1, workspaceId: wid });
+      assert.deepEqual(copied, ['quarantine/redrive-orphan-1']);
+      assert.equal((await db.query("SELECT FROM mail_ignored_staging WHERE bucket=$1 AND ses_message_id='redrive-orphan-1'", [poolBucket])).rowCount, 1);
+      await db.query("DELETE FROM jobs WHERE id=$1", [queued[0]!.id]);
+      await stagingJobs['mailbox.sweepStaging']!(poolRuntime, sweepPayload, { id: 'sweep-pool-2', attempts: 1, workspaceId: wid });
+      assert.equal((await db.query("SELECT FROM jobs WHERE type='mailbox.recoverStaging' AND payload->>'bucket'=$1", [poolBucket])).rowCount, 0);
+      await db.query("INSERT INTO mail_ignored_staging(bucket,ses_message_id,created_at) VALUES($1,'keep-4d',now()-interval '4 days'),($1,'drop-6d',now()-interval '6 days')", [poolBucket]);
+      await pruneMailboxEvents(runtime);
+      const left = (await db.query("SELECT ses_message_id FROM mail_ignored_staging WHERE bucket=$1 ORDER BY ses_message_id", [poolBucket])).rows.map(r => r.ses_message_id);
+      assert.deepEqual(left, ['keep-4d', 'redrive-orphan-1']);
+    });
+  });
+
   test('inbound staging recovery and ingest limits',async t=>{
     await simulatedSesFixture(t,async({runtime,db,jobs,local,request,fetch:rawFetch})=>{
       const {acceptInboundNotification,mailboxIngestJobs,recoverMailReceipts}=await import('./src/mailbox-ingest.js'),{scheduleHoldRelease,scheduleMailRecovery}=await import('./src/mailbox-staging.js'),{S3Client}=await import('@aws-sdk/client-s3');
@@ -28563,6 +28601,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         stageError='AccessDenied';for(const item of [j,spoof])await assert.rejects(run(item.type,item.payload),{code:'MAILBOX_STAGING_ACCESS_DENIED',retryable:false});
         stageError='';quarantineDenied=true;await assert.rejects(run(spoof.type,spoof.payload),{code:'MAILBOX_STAGING_ENVELOPE_UNKNOWN',retryable:false});quarantineDenied=false;
       });
+
       await t.test('scan barriers precede MIME, including unknown verdicts and workspace spam policy',async()=>{
         for(const status of ['FAIL','GRAY','PROCESSING_FAILED',undefined]){const mid='unsafe-'+String(status);await submit(mid,['a@receive.example'],'Bad',{...cleanScans,virusVerdict:{status}});await run('mailbox.ingest',{sesMessageId:mid});assert.ok(quarantined.includes('quarantine/'+mid));}
         ok(await local('PATCH','/v1/inbound/policy',{spam:'quarantine'},'live'));for(const status of ['FAIL','GRAY','PROCESSING_FAILED',undefined]){const mid='spam-'+String(status);await submit(mid,['a@receive.example'],'Spam',{...cleanScans,spamVerdict:{status}});await run('mailbox.ingest',{sesMessageId:mid});assert.ok(quarantined.includes('quarantine/'+mid));}

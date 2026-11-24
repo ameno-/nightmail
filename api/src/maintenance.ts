@@ -153,7 +153,9 @@ async function retentionDrains(runtime: Runtime): Promise<Drain[]> {
     // Received-mail events and webhook deliveries are kept 30 days. A delivery still held for a paused endpoint after that is
     // dead-lettered with ENDPOINT_PAUSED_EXPIRED (unpause no longer resumes it) and kept 7 more days so the reason is seen.
     expired('mailbox_events', 'mailbox_events', at('created_at'), sql`created_at<${cutoff}`, inbound),
-    expired('mail_ignored_staging', 'mail_ignored_staging', at('created_at'), sql`created_at<now()-interval '3 days'`, inbound),
+    // Keep ignored staging keys past S3's 3-day lifecycle (which rounds up to UTC midnight, 72-96 h + async delete)
+    // so ignored unknown-domain mail is never re-swept as an orphan before S3 expires it.
+    expired('mail_ignored_staging', 'mail_ignored_staging', at('created_at'), sql`created_at<now()-interval '5 days'`, inbound),
     { name: 'mailbox_webhook_deliveries_paused_expired', ...inbound, oldest: sql`SELECT min(created_at) FROM mailbox_webhook_deliveries WHERE created_at<${cutoff} AND status='paused'`,
       statement: () => sql`WITH held AS (UPDATE mailbox_webhook_deliveries SET status='failed',last_error='ENDPOINT_PAUSED_EXPIRED',updated_at=now() WHERE id IN (SELECT id FROM mailbox_webhook_deliveries
         WHERE created_at<${cutoff} AND status='paused' ORDER BY created_at LIMIT ${RETENTION_BATCH} FOR UPDATE SKIP LOCKED) RETURNING 1) SELECT count(*)::int AS n FROM held` },

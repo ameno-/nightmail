@@ -67,7 +67,7 @@ const stagingJob:JobHandler=async(runtime,payload,job)=>{
       const page=await s3.send(new ListObjectsV2Command({Bucket:bucket,ExpectedBucketOwner:account,Prefix:STAGING_PREFIX,StartAfter:typeof payload.after==='string'?payload.after:p?STAGING_PREFIX+bounds[p]:undefined,MaxKeys:256}));
       const objects=(page.Contents??[]).flatMap(o=>{
         const mid=o.Key?.slice(STAGING_PREFIX.length);
-        return mid && (!end || mid<=end) && o.Key===STAGING_PREFIX+mid && sesIdPattern.test(mid) && o.ETag && o.LastModified && o.LastModified.getTime()<Date.now()-3600_000?[{mid,etag:o.ETag,at:o.LastModified.toISOString()}]:[];
+        return mid && mid!=='AMAZON_SES_SETUP_NOTIFICATION' && (!end || mid<=end) && o.Key===STAGING_PREFIX+mid && sesIdPattern.test(mid) && o.ETag && o.LastModified && o.LastModified.getTime()<Date.now()-3600_000?[{mid,etag:o.ETag,at:o.LastModified.toISOString()}]:[];
       });
       if(objects.length) await runtime.db.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload)
         SELECT ${orphan}||':'||${bucket}||':'||mid,${orphan},${job.workspaceId},jsonb_build_object('bucket',${bucket}::text,'topic',${r.topic}::text,'shared',${r.owner===null}::boolean,'mid',mid,'etag',etag,'at',at)
@@ -87,9 +87,17 @@ const stagingJob:JobHandler=async(runtime,payload,job)=>{
     const object=await s3.send(new GetObjectCommand({Bucket:bucket,ExpectedBucketOwner:account,Key:key,IfMatch:etag,Range:'bytes=0-16383',ResponseContentEncoding:'identity'})).catch(e=>{if(['NoSuchKey','NotFound','PreconditionFailed'].includes(e?.name))return null;throw e;});
     if(!object)return;
     const env=traceEnvelope(await object.Body!.transformToByteArray(),r.region,mid);
-    if (!env || (r.owner===null && runtime.config.receivingRedrive)) {
+    const sharedRedrive=r.owner===null && runtime.config.receivingRedrive;
+    if (!env || sharedRedrive) {
       // Preserve evidence outside the 3-day lifecycle, strictly outside every workspace namespace.
       await s3.send(new CopyObjectCommand({Bucket:bucket,ExpectedBucketOwner:account,ExpectedSourceBucketOwner:account,Key:'quarantine/'+mid,CopySource:`${bucket}/${key}`,CopySourceIfMatch:etag,TaggingDirective:'REPLACE'})).catch(e=>{if(e?.name!=='AccessDenied')throw e;log('warn',{code:'MAILBOX_QUARANTINE_ACCESS_DENIED',jobId:job.id});});
+      if (sharedRedrive) {
+        // Shared-pool redrive recovers missed SNS notifications from the SQS DLQ rather than
+        // guessing recipients from headers. Retire the staged object once so sweeps stop alerting.
+        await runtime.db.execute(sql`INSERT INTO mail_ignored_staging(bucket,ses_message_id) VALUES(${bucket},${mid}) ON CONFLICT DO NOTHING`);
+        log('warn',{code:'MAILBOX_STAGING_QUARANTINED',bucket,mid,region:r.region,hasEnvelope:!!env,reason:env?'shared_pool_redrive':'envelope_unknown',jobId:job.id});
+        return;
+      }
       throw new ApiError(422,'MAILBOX_STAGING_ENVELOPE_UNKNOWN','No attributable SES envelope; operator review required.');
     }
     await acceptInboundNotification(runtime,{region:r.region,topicArn:r.topic,message:{notificationType:'Received',mail:{messageId:mid},receipt:{spamVerdict:env.spamVerdict,virusVerdict:env.virusVerdict,recipients:[env.addr],timestamp:new Date(Math.min(env.time,at)).toISOString(),action:{type:'S3',topicArn:r.topic,bucketName:bucket,objectKey:key}}}},{etag,bindingWorkspace:r.owner});
