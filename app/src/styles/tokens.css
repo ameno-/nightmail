@@ -287,20 +287,21 @@
      rail. Tables: the head's bar, every other row of a mail stream, and a phone's card. A sent email: the facts strip,
      the matte behind the preview and the inspector. The campaign studio: its bar, the sender rows, the toolbar, the
      panel and its block buttons. Chips (a tag, a thread's count) and the chart's reference lines. */
-  --color-well: #F4F4F4;
-  --color-well-hover: #ECECEC;
-  --color-rail: #F5F5F5;
-  --color-facets: #F6F6F6;
-  --color-thead: #F3F3F3;
-  --color-row-alt: #FAFAFA;
-  --color-card: #F5F5F5;
-  --color-strip: #F5F5F5;
-  --color-matte: #EFEFEF;
-  --color-inspector: #F6F6F6;
-  --color-studio-bar: #F5F5F5;
-  --color-studio-meta: #F7F7F7;
-  --color-studio-tools: #F3F3F3;
-  --color-studio-panel: #F4F4F4;
+  /* At most one surface step beyond the page canvas (--color-layer-1): no nested panels or stacked shades. */
+  --color-well: var(--color-layer-1);
+  --color-well-hover: var(--color-layer-2);
+  --color-rail: transparent;
+  --color-facets: transparent;
+  --color-thead: var(--color-layer-1);
+  --color-row-alt: transparent;
+  --color-card: var(--color-layer-1);
+  --color-strip: transparent;
+  --color-matte: var(--color-layer-1);
+  --color-inspector: transparent;
+  --color-studio-bar: var(--color-surface);
+  --color-studio-meta: var(--color-surface);
+  --color-studio-tools: var(--color-surface);
+  --color-studio-panel: var(--color-surface);
   --color-block: #E8E8E8;
   --color-block-hover: #DEDEDE;
   --color-chip: #E8E8E8;
@@ -386,20 +387,21 @@
   --color-overlay-control-hover: #363636;
   --color-overlay-control-focus: #3C3C3C;
   --color-overlay-control-pressed: #424242;
-  --color-well: #1F1F1F;
-  --color-well-hover: #262626;
-  --color-rail: #141414;
-  --color-facets: #141414;
-  --color-thead: #202020;
-  --color-row-alt: #1B1B1B;
-  --color-card: #1F1F1F;
-  --color-strip: #1E1E1E;
-  --color-matte: #131313;
-  --color-inspector: #141414;
-  --color-studio-bar: #1F1F1F;
-  --color-studio-meta: #1B1B1B;
-  --color-studio-tools: #1F1F1F;
-  --color-studio-panel: #1A1A1A;
+  /* At most one surface step beyond the page canvas (--color-layer-1): no nested panels or stacked shades. */
+  --color-well: var(--color-layer-1);
+  --color-well-hover: var(--color-layer-2);
+  --color-rail: transparent;
+  --color-facets: transparent;
+  --color-thead: var(--color-layer-1);
+  --color-row-alt: transparent;
+  --color-card: var(--color-layer-1);
+  --color-strip: transparent;
+  --color-matte: var(--color-layer-1);
+  --color-inspector: transparent;
+  --color-studio-bar: var(--color-surface);
+  --color-studio-meta: var(--color-surface);
+  --color-studio-tools: var(--color-surface);
+  --color-studio-panel: var(--color-surface);
   --color-block: #242424;
   --color-block-hover: #2C2C2C;
   --color-chip: #2C2C2C;
