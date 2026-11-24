@@ -10414,7 +10414,11 @@ describe('Lists, compound segments, imports and exports', () => {
   const recount = async (db: pg.Client, list: Json) => (await db.query('SELECT * FROM reconcile_audience_list_counts($1,$2)', [list.workspaceId, list.id])).rows;
   const importInto = async (key: Key, listId: string, emails: string[], body?: Json) => {
     const preview = ok(await http('POST', '/v1/contact-imports', key.secret, { csv: `email\n${emails.join('\n')}\n`, listId, mapping: { email: 'email' } }), 201);
-    return http('POST', `/v1/contact-imports/${preview.id}/commit`, key.secret, body);
+    for (let attempt = 0; ; attempt++) {
+      const reply = await http('POST', `/v1/contact-imports/${preview.id}/commit`, key.secret, body);
+      if (reply.status !== 503 || reply.body?.error?.code !== 'IMPORT_COMMIT_BUSY' || attempt >= 20) return reply;
+      await new Promise(resolve => setTimeout(resolve, 40 * (attempt + 1)));
+    }
   };
   const attested = { consent: { status: 'subscribed', evidence: 'Opted in at checkout' } };
   // A list's members, each deleted with the test (an import's contacts have no other owner).
@@ -10630,8 +10634,11 @@ describe('Lists, compound segments, imports and exports', () => {
     // contacts whose email order is the reverse of their ID order: feedback holds the first by email, the bulk change
     // must wait for that one before it locks the other, or each would hold what the other needs.
     const pair = async () => {
+      // Contact IDs are time-ordered (UUIDv7) since #600, so create z- before a- to make y.id < x.id.
       for (;;) {
-        const tag = unique('order'), [x, y] = [await resource(t, key.secret, '/v1/contacts', { email: `a-${tag}@example.com` }), await resource(t, key.secret, '/v1/contacts', { email: `z-${tag}@example.com` })];
+        const tag = unique('order');
+        const y = await resource(t, key.secret, '/v1/contacts', { email: `z-${tag}@example.com` });
+        const x = await resource(t, key.secret, '/v1/contacts', { email: `a-${tag}@example.com` });
         if (y.id < x.id) return { tag, byEmail: [x, y] as [Json, Json] };
       }
     };
@@ -11300,6 +11307,120 @@ describe('Import property boundaries', () => {
     }), 201);
     assert.equal(ok(await http('POST', `/v1/contact-imports/${replacement.id}/commit`, key.secret)).imported, 1);
     assert.deepEqual(ok(await http('GET', `/v1/contacts/${contact.id}`, key.secret)).properties, { ...properties, plan: 'enterprise' }, 'Replacing a property at the 50-property boundary remains supported.');
+  });
+
+  test('imports use time-ordered IDs, serialize commits per workspace, cap open previews, fold publishBatch jobs, and roll back cleanly on timeout', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const wid = runtime.config.workspaceId;
+      const list = ok(await local('POST', '/v1/lists', { name: 'Import Scale List' }), 201);
+
+      // 1. Time-ordered UUIDv7 IDs for contacts and consent records (same prefix, length and hex charset).
+      const uuidv7 = /^(?:con|cns)_[0-9a-f]{12}7[0-9a-f]{19}$/;
+      const manual = ok(await local('POST', '/v1/contacts', { email: 'manual@example.com', name: 'Manual' }), 201);
+      assert.match(manual.id, uuidv7);
+      ok(await local('POST', `/v1/contacts/${manual.id}/consent`, { status: 'subscribed', evidence: 'Direct' }));
+      const [manualAudit] = page(await local('GET', `/v1/contacts/${manual.id}/consent`));
+      assert.match(manualAudit.id, uuidv7);
+
+      // 2. 250-row attested import preview + one-commit-at-a-time per workspace check (must run before any commit in
+      // this fixture's outer transaction acquires advisory lock 275817).
+      const existingUnk = ok(await local('POST', '/v1/contacts', { email: 'existing-unk@example.com' }), 201);
+      const lines = ['Email,Name,Plan', 'existing-unk@example.com,Existing Unk,pro'];
+      for (let i = 0; i < 249; i++) lines.push(`batch${i}@example.com,Person ${i},free`);
+      const batchPreview = ok(await local('POST', '/v1/contact-imports', { csv: lines.join('\n'), listId: list.id, mapping: { email: 'Email', name: 'Name', plan: 'Plan' } }), 201);
+      assert.equal(batchPreview.rows.length, 250);
+
+      const blocker = new pg.Client({ connectionString: FIXTURE_DATABASE_URL! });
+      await blocker.connect();
+      try {
+        await blocker.query('BEGIN');
+        const locked = (await blocker.query('SELECT pg_try_advisory_xact_lock(275817, hashtext($1)) AS ok', [wid])).rows[0]?.ok;
+        assert.equal(locked, true);
+        const busy = error(await local('POST', `/v1/contact-imports/${batchPreview.id}/commit`, { consent: { status: 'subscribed', evidence: 'Opted in' } }), 503, 'IMPORT_COMMIT_BUSY');
+        assert.equal(busy.retryable, true);
+      } finally {
+        await blocker.query('ROLLBACK').catch(() => {});
+        await blocker.end();
+      }
+
+      // 3. 100%-errors CSV previews and commits cleanly with 0 imported and retained error report.
+      const allBad = ok(await local('POST', '/v1/contact-imports', { csv: 'Email,Name\nnot-an-email,A\nalso-bad,B\n', listId: list.id, mapping: { email: 'Email', name: 'Name' } }), 201);
+      assert.equal(allBad.rows.length, 0);
+      assert.equal(allBad.errors.length, 2);
+      const allBadCommit = ok(await local('POST', `/v1/contact-imports/${allBad.id}/commit`, { consent: { status: 'subscribed', evidence: 'None valid' } }));
+      assert.equal(allBadCommit.imported, 0);
+      assert.equal(allBadCommit.subscribed, 0);
+      assert.equal(allBadCommit.errors.length, 2);
+
+      // 5. Statement timeout (SQLSTATE 57014) rolls back the entire commit (nothing half-applied) and returns retryable 503 IMPORT_COMMIT_TIMEOUT.
+      const origQuery = db.query.bind(db);
+      let injectTimeout = true;
+      const stub = t.mock.method(db, 'query', async (...args: unknown[]) => {
+        const first = args[0] as string | { text?: string };
+        const text = typeof first === 'string' ? first : first?.text ?? '';
+        if (injectTimeout && text.includes('INSERT INTO audience_contacts')) {
+          injectTimeout = false;
+          throw Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' });
+        }
+        return (origQuery as (...a: unknown[]) => Promise<unknown>)(...args);
+      });
+      try {
+        const timedOut = error(await local('POST', `/v1/contact-imports/${batchPreview.id}/commit`, { consent: { status: 'subscribed', evidence: 'Opted in' } }), 503, 'IMPORT_COMMIT_TIMEOUT');
+        assert.equal(timedOut.retryable, true);
+      } finally { stub.mock.restore(); }
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM audience_contacts WHERE workspace_id = $1 AND email LIKE 'batch%@example.com'`, [wid])).rows[0].n, 0, 'Timed-out commit must leave zero contacts.');
+      assert.equal(ok(await local('GET', `/v1/contact-imports/${batchPreview.id}`)).status, 'preview');
+
+      // Retry succeeds atomically: 250 imported, 250 subscribed (249 new + 1 existing unknown), 3 folded publishBatch jobs.
+      const batchCommitted = ok(await local('POST', `/v1/contact-imports/${batchPreview.id}/commit`, { consent: { status: 'subscribed', evidence: 'Opted in' } }));
+      assert.equal(batchCommitted.imported, 250);
+      assert.equal(batchCommitted.subscribed, 250);
+      const importedIds = (await db.query(`SELECT id FROM audience_contacts WHERE workspace_id = $1 AND email LIKE 'batch%@example.com' UNION ALL SELECT id FROM audience_consent_audit WHERE workspace_id = $1 AND source = 'import'`, [wid])).rows;
+      assert.equal(importedIds.length, 499);
+      for (const row of importedIds) assert.match(row.id, uuidv7);
+      assert.equal(ok(await local('GET', `/v1/contacts/${existingUnk.id}`)).marketingConsent, 'subscribed');
+      const batchJobs = (await db.query(`SELECT jsonb_array_length(payload->'events')::int AS n FROM jobs WHERE workspace_id = $1 AND type = 'operation.publishBatch' ORDER BY n DESC`, [wid])).rows.map((r: Json) => r.n);
+      // 249 new rows fold into 100 + 100 + 49, plus 1 existing unknown row -> 100, 100, 49, 1 = 250 events total.
+      assert.deepEqual(batchJobs, [100, 100, 49, 1]);
+
+      // 6. Isolate memory reservation is released as soon as DB work ends (never held while response stream is unread).
+      const { memoryInUse } = await import('./src/isolate-memory.js');
+      assert.equal(memoryInUse(), 0, 'Preview and commit must release isolate memory before returning their streams.');
+
+      // 7. Campaign snapshot order hashes contact IDs so time-ordered UUIDv7 IDs do not skew the Hosted list probe.
+      const probeList = ok(await local('POST', '/v1/lists', { name: 'Probe Order List' }), 201);
+      await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_019a000000017'||substr(replace(gen_random_uuid()::text,'-',''),14),$1,'early_'||g||'@example.com','subscribed' FROM generate_series(1,100) g`, [wid]);
+      await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_019a000000097'||substr(replace(gen_random_uuid()::text,'-',''),14),$1,'late_'||g||'@example.com','subscribed' FROM generate_series(1,500) g`, [wid]);
+      await db.query(`INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM audience_contacts WHERE workspace_id=$1 AND (email LIKE 'early_%' OR email LIKE 'late_%')`, [wid, probeList.id]);
+      const { snapshotCampaignAudience } = await import('./src/audience.js');
+      const probeReviewId = 'rev_probe_' + randomUUID().replaceAll('-', '').slice(0, 12);
+      await snapshotCampaignAudience(runtime.db, { workspaceId: wid, keyId: 'fixture', permissions: ['read', 'write', 'manage', 'send'], domains: [], role: 'owner', credential: 'dashboard' } as never, { listId: probeList.id }, probeReviewId, [], false);
+      const lateInFirst100 = (await db.query(`SELECT count(*)::int AS n FROM sending_review_recipients WHERE review_id=$1 AND ordinal<=100 AND recipient->>'email' LIKE 'late_%'`, [probeReviewId])).rows[0].n;
+      assert.ok(lateInFirst100 >= 50 && lateInFirst100 <= 99, `Expected uniform mix of later UUIDv7 contacts in first 100 (got ${lateInFirst100}).`);
+
+      // 8. Open preview cap (keep newest 50, evict oldest with explanatory 404; committed imports stay) + 40/min budget.
+      const created: string[] = [];
+      for (let i = 0; i < 52; i++) {
+        if (i === 35) await db.query(`DELETE FROM api_request_budgets WHERE workspace_id = $1 AND key_id = 'imports:preview'`, [wid]);
+        const p = ok(await local('POST', '/v1/contact-imports', { csv: `Email\ncap${i}@example.com\n`, mapping: { email: 'Email' } }), 201);
+        created.push(p.id);
+      }
+      const openCount = (await db.query(`SELECT count(*)::int AS n FROM audience_imports WHERE workspace_id = $1 AND status = 'preview'`, [wid])).rows[0].n;
+      assert.equal(openCount, 50, 'Workspace keeps at most 50 open previews.');
+      const goneGet = error(await local('GET', `/v1/contact-imports/${created[0]}`), 404, 'NOT_FOUND');
+      assert.match(goneGet.message, /50 newer ones/);
+      const goneCommit = error(await local('POST', `/v1/contact-imports/${created[1]}/commit`), 404, 'NOT_FOUND');
+      assert.match(goneCommit.message, /50 newer ones/);
+      assert.equal(ok(await local('GET', `/v1/contact-imports/${created[51]}`)).status, 'preview');
+      assert.equal(ok(await local('GET', `/v1/contact-imports/${batchPreview.id}`)).status, 'committed', 'Committed imports are never evicted by the open preview cap.');
+      // Reset window and verify the 41st preview in one minute returns 429 IMPORT_PREVIEW_RATE_LIMITED.
+      await db.query(`DELETE FROM api_request_budgets WHERE workspace_id = $1 AND key_id = 'imports:preview'`, [wid]);
+      for (let i = 0; i < 40; i++) ok(await local('POST', '/v1/contact-imports', { csv: `Email\nrate${i}@example.com\n`, mapping: { email: 'Email' } }), 201);
+      const rateLimited = await local('POST', '/v1/contact-imports', { csv: 'Email\nover@example.com\n', mapping: { email: 'Email' } });
+      const rateErr = error(rateLimited, 429, 'IMPORT_PREVIEW_RATE_LIMITED');
+      assert.equal(rateErr.retryable, true);
+      assert.equal(rateLimited.headers.get('retry-after'), '60');
+    });
   });
 });
 
@@ -18123,12 +18244,12 @@ describe('Required notices', () => {
       await gradedSender(db, wid, 10000);
       await turn(db, wid, 'on');
       const list = ok(await local('POST', '/v1/lists', { name: unique('notice-probe') }), 201);
-      // Contact IDs in the order of n, so the review's order (by contact ID) is too: the probe is customers 1 to 100.
       await db.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_'||$1||lpad(n::text,4,'0'),$1,'customer-'||n||'@example.net','subscribed' FROM generate_series(1,150)n RETURNING id)
         INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM c`, [wid, list.id]);
-      // Ten of the last fifty were delivered to before, by an earlier receipt.
-      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,created_at)
-        SELECT 'email_prior_'||n,$1,$2,'fixture',$3,jsonb_build_array('customer-'||n||'@example.net'),'[]','[]','Receipt','{}',false,'delivered','prior-'||n,now()-interval '20 days' FROM generate_series(141,150) n`, [wid, REGION, from]);
+      // Ten of the last fifty in snapshot send order (hashtextextended(id, 0), id) were delivered to before.
+      await db.query(`WITH tail AS (SELECT email, row_number() OVER () AS n FROM (SELECT email FROM audience_contacts WHERE workspace_id=$1 ORDER BY hashtextextended(id, 0), id OFFSET 140 LIMIT 10) t)
+        INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,created_at)
+        SELECT 'email_prior_'||n,$1,$2,'fixture',$3,jsonb_build_array(email),'[]','[]','Receipt','{}',false,'delivered','prior-'||n,now()-interval '20 days' FROM tail`, [wid, REGION, from]);
       // A quarantined probe and the owner's resume, for a notice and for a marketing campaign to the same list.
       const quarantinedAndResumed = async (body: Json, confirm: Json) => {
         const c = ok(await local('POST', '/v1/campaigns', { from, subject: 'Probe', html: '<p>Fixture.</p>', audience: { listId: list.id }, ...body }), 201), path = `/v1/campaigns/${c.id}`;
@@ -22176,13 +22297,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const next=await job();
       assert.deepEqual([next.status,next.payload],['pending',{campaignId:c.id}]);
       assert.ok(new Date(next.available_at).getTime()-Date.now()>=55_000);
-      // 3. A read of a large campaign answers from that count: no aggregate over its emails and events.
+      // 3. A read of a large campaign answers from sending_campaign_tallies: exact at read time, no scan of emails or events.
       const q=t.mock.method(db,'query');let fromCount:Json;
       try{fromCount=ok(await local('GET',path));}finally{q.mock.restore();}
       const statements=q.mock.calls.map(call=>String((call.arguments[0] as any)?.text??call.arguments[0]));
-      t.diagnostic(`A read from the count: ${statements.length} statements.`);
-      assert.equal(statements.filter(s=>/count\(DISTINCT/i.test(s)).length,0,'No aggregate over the emails.');
-      assert.equal(fromCount!.computedAt,counted.computedAt);
+      t.diagnostic(`A read from tallies: ${statements.length} statements.`);
+      assert.equal(statements.filter(s=>/from "sending_emails"|sending_email_events/i.test(s)).length,0,'No scan of emails or events.');
       assert.deepEqual(figures(fromCount!),figures(await live()));
 
       // 4. Feedback after the count, then the campaign finishes: it is counted once more, and that count equals the old
@@ -22198,8 +22318,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // Every email has a delivery event; 3 are simulated and 3 suppressed; rejects on 1-10 plus rejected statuses 15 and 25.
       assert.deepEqual(done.totals,{accepted:24,delivered:30,bounced:3,complained:3,opened:30,clicked:20,failed:12,deliveryDelayed:3,simulated:3});
 
-      // 5. The 30-day retention deletes its emails and their events. The figures stay; a later count that finds fewer
-      // emails replaces nothing and freezes them, so reads stop queueing counts.
+      // 5. The 30-day retention deletes its emails and their events. The stored figures stay; a later count that finds
+      // fewer emails replaces nothing and freezes them, so reads stop queueing counts.
+      const doneStored=(await stored()).stats!;
       await db.query('DELETE FROM sending_email_events WHERE workspace_id=$1',[wid]);
       await db.query('DELETE FROM sending_emails WHERE campaign_id=$1',[c.id]);
       assert.deepEqual(figures(ok(await local('GET',path))),figures(done));
@@ -22207,14 +22328,14 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       ok(await local('GET',path));
       for(let step=0;step<5;step++)await run('sending.campaignStats');
       const frozen=(await stored()).stats!;
-      assert.deepEqual([frozen.frozen,frozen.emails,frozen.computedAt],[true,30,done.computedAt]);
+      assert.deepEqual([frozen.frozen,frozen.emails,frozen.computedAt],[true,30,doneStored.computedAt]);
       assert.equal((await job()).status,'completed');
       ok(await local('GET',path));
       assert.equal((await job()).status,'completed','A frozen count is never queued again.');
       // A small campaign (counted when read) also keeps a stored count that saw more emails than are left.
       CAMPAIGN_STATS.from=lowered.from;
       const small=ok(await local('GET',path));
-      assert.deepEqual([figures(small),small.computedAt],[figures(done),done.computedAt]);
+      assert.deepEqual([figures(small),small.computedAt],[figures(done),doneStored.computedAt]);
     });
   });
   // The background count pays for its database time with idle time: a run takes steps (pages) for about 250 ms, then
@@ -22235,7 +22356,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       let clock=Date.now(),stepMs=2000;
       const query=db.query.bind(db) as (...args:unknown[])=>unknown;
       t.mock.method(Date,'now',()=>clock);
-      t.mock.method(db,'query',(...args:unknown[])=>{if(/count\(DISTINCT/.test(String((args[0] as any)?.text??args[0])))clock+=stepMs;return query(...args);});
+      t.mock.method(db,'query',(...args:unknown[])=>{if(/from "sending_emails"/i.test(String((args[0] as any)?.text??args[0])))clock+=stepMs;return query(...args);});
       const due=async()=>new Date((await jobs('sending.campaignStats'))[0].available_at).getTime()-clock;
       // A 2-second step is followed by 64 seconds of nothing: 2 of every 66 seconds, 3%.
       await run('sending.campaignStats');
@@ -27788,6 +27909,150 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     }finally{await writer.query('ROLLBACK');}
     assert.deepEqual(await state(),before);
   });
+  test('claimUnrouted: batched inline + background drain matches legacy loop across multi-address, plus-tags, interruption, concurrent arrival and address mutation',async t=>{
+    await simulatedSesFixture(t,async({db,runtime,local})=>{
+      const {attachToMailboxes,CLAIM_UNROUTED_INLINE,drainClaimUnrouted}=await import('./src/mailbox-store.js');
+      const {mailboxIngestJobs}=await import('./src/mailbox-ingest.js');
+      const {JobDeferred}=await import('./src/jobs.js');
+      const wid=runtime.config.workspaceId,dom=unique('mdom'),host=wid+'.invalid';
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')",[dom,wid,host,REGION]);
+      const seedUnrouted=async(prefix:string,entries:{addr:string;n:number;spam?:boolean;sameMsgGroup?:string}[])=>{
+        const byGroup=new Map<string,{id:string;tid:string;at:string;spam:boolean;size:number}>();
+        let seq=0;
+        for(const item of entries){
+          for(let i=0;i<item.n;i++){
+            seq++;
+            const at=new Date(Date.parse('2026-11-23T10:00:00.000Z')+seq*1000).toISOString();
+            let rec=item.sameMsgGroup?byGroup.get(item.sameMsgGroup+':'+i):undefined;
+            if(!rec){
+              const id=`msg_${prefix}_${seq}`,tid=`thr_${prefix}_${seq}`;
+              await db.query('INSERT INTO mail_threads(id,workspace_id,subject,message_count,last_message_at) VALUES($1,$2,$3,1,$4)',[tid,wid,'Sub '+id,at]);
+              await db.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,subject,from_address,snippet,received_at,size_bytes,spam,lifecycle) VALUES($1,$2,$3,'inbound',$4,'ext@example.invalid',$4,$5,256,$6,'default')",[id,wid,tid,'Sub '+id,at,!!item.spam]);
+              rec={id,tid,at,spam:!!item.spam,size:256};
+              if(item.sameMsgGroup)byGroup.set(item.sameMsgGroup+':'+i,rec);
+            }
+            await db.query('INSERT INTO mail_unrouted(workspace_id,message_id,address,created_at) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING',[wid,rec.id,item.addr,rec.at]);
+          }
+        }
+      };
+      // 1. Condition (1): Seeded equivalence (legacy sequential attachToMailboxes vs new inline + background batches)
+      //    including: exact address, alias, multi-address same message, plus-addressed mail, spam mail, wildcard rule.
+      const shape=(p:string)=>[
+        {addr:`${p}@${host}`,n:60},
+        {addr:`${p}@${host}`,n:10,spam:true},
+        {addr:`${p}+vip@${host}`,n:20},
+        {addr:`${p}-alias@${host}`,n:15,sameMsgGroup:'shared'},
+        {addr:`${p}@${host}`,n:15,sameMsgGroup:'shared'},
+        {addr:`${p}-wild-1@${host}`,n:30},
+      ];
+      await seedUnrouted('old',shape('legacy'));
+      await seedUnrouted('new',shape('batched'));
+      // Legacy box: run the exact old sequential attachToMailboxes + DELETE loop on 'legacy'
+      const legacyId=unique('mbx');
+      await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,rules,kind) VALUES($1,$2,$3,$4,$5::jsonb,'address')",[legacyId,wid,dom,'legacy@'+host,JSON.stringify(['legacy-wild-*@'+host])]);
+      await db.query("INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,$4,'primary'),($1,$3,$4,'alias')",[wid,'legacy@'+host,'legacy-alias@'+host,legacyId]);
+      const legRows=(await db.query("SELECT * FROM mail_unrouted WHERE workspace_id=$1 AND address LIKE 'legacy%'",[wid])).rows;
+      const legMids=[...new Set(legRows.map((r:Json)=>r.message_id))];
+      const legMsgs=(await db.query('SELECT * FROM mail_messages WHERE workspace_id=$1 AND id=ANY($2::text[]) ORDER BY received_at,id',[wid,legMids])).rows;
+      for(const m of legMsgs)await attachToMailboxes(runtime.db,{workspaceId:wid},{...m,workspaceId:wid,threadId:m.thread_id,receivedAt:m.received_at.toISOString(),sizeBytes:m.size_bytes},[legacyId]);
+      for(const r of legRows)await db.query('DELETE FROM mail_unrouted WHERE workspace_id=$1 AND address=$2 AND message_id=$3',[wid,r.address,r.message_id]);
+
+      // New box: create via POST /v1/inbound/addresses (claims first 100 inline, queues mailbox.claimUnrouted for rest!)
+      const created=ok(await local('POST','/v1/inbound/addresses',{address:'batched@'+host,aliases:['batched-alias@'+host],rules:['batched-wild-*@'+host]}),201);
+      const newId=created.id as string;
+      assert.ok(created.stats.threads<=CLAIM_UNROUTED_INLINE&&created.stats.threads>0,'inline claim is bounded at 100 rows');
+      assert.equal((await db.query("SELECT status FROM jobs WHERE id=$1",['claim-unrouted:'+newId])).rows[0]?.status,'pending','overflow queued mailbox.claimUnrouted');
+      // Simulate mail arriving while background claim runs AND interruption after 1 small batch (maxBatches=1, batchSize=25)
+      const midArrive=unique('msg'),tArrive=unique('thr');
+      await db.query('INSERT INTO mail_threads(id,workspace_id,subject,message_count,last_message_at) VALUES($1,$2,$3,1,now())',[tArrive,wid,'Mid-drain arrival']);
+      await db.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,subject,from_address,snippet,received_at,size_bytes,spam,lifecycle) VALUES($1,$2,$3,'inbound','Mid-drain','ext@example.invalid','hi',now(),256,false,'default')",[midArrive,wid,tArrive]);
+      await db.query('INSERT INTO mail_unrouted(workspace_id,message_id,address) VALUES($1,$2,$3)',[wid,midArrive,'batched+late@'+host]);
+      const partial=await drainClaimUnrouted(runtime,wid,newId,{batchSize:25,maxBatches:1});
+      assert.equal(partial.done,false,'interrupted after 1 batch leaves remaining rows');
+      // Finish via the real job handler (loops across JobDeferred until complete)
+      for(let step=0;step<10;step++){
+        try{await mailboxIngestJobs['mailbox.claimUnrouted']!(runtime,{mailboxId:newId},{id:'claim-unrouted:'+newId,attempts:1,workspaceId:wid});break;}
+        catch(e){if(!(e instanceof JobDeferred))throw e;}
+      }
+      assert.equal((await db.query("SELECT count(*)::int n FROM mail_unrouted WHERE workspace_id=$1 AND address LIKE 'batched%'",[wid])).rows[0].n,0,'all matching unrouted rows drained');
+      // Compare legacy vs new (excluding the 1 extra mid-drain arrival we added to new)
+      const snap=async(bid:string)=>({
+        state:(await db.query('SELECT messages,bytes::int FROM inbox_state WHERE inbox_id=$1',[bid])).rows[0],
+        folders:(await db.query("SELECT role,total,unseen FROM inbox_folders WHERE inbox_id=$1 AND role IN ('inbox','junk') ORDER BY role",[bid])).rows,
+        unread:(await db.query('SELECT count(*)::int n FROM mailbox_messages WHERE mailbox_id=$1 AND NOT read AND held_reason IS NULL',[bid])).rows[0].n,
+        threads:(await db.query('SELECT count(*)::int n,coalesce(sum(message_count),0)::int msgs,coalesce(sum(unread_count),0)::int unreads FROM mailbox_threads WHERE mailbox_id=$1',[bid])).rows[0],
+        events:(await db.query("SELECT count(*)::int n FROM mailbox_events WHERE mailbox_id=$1 AND type='message.received'",[bid])).rows[0].n,
+      });
+      const oldSnap=await snap(legacyId),newSnap=await snap(newId);
+      assert.equal(newSnap.state.messages,oldSnap.state.messages+1,'exact message count (+1 mid-drain arrival)');
+      assert.equal(newSnap.state.bytes,oldSnap.state.bytes+256,'exact byte count');
+      assert.equal(newSnap.unread,oldSnap.unread+1,'exact unread count');
+      assert.equal(newSnap.threads.n,oldSnap.threads.n+1,'exact thread count');
+      assert.equal(newSnap.threads.msgs,oldSnap.threads.msgs+1,'exact thread message sum');
+      assert.equal(newSnap.events,0,'claimUnrouted never fires message.received events inline or in background');
+      assert.equal(oldSnap.events,0);
+      assert.equal(newSnap.folders.find((f:Json)=>f.role==='junk').total,oldSnap.folders.find((f:Json)=>f.role==='junk').total,'spam filed to junk identically');
+      assert.equal(newSnap.folders.find((f:Json)=>f.role==='inbox').total,oldSnap.folders.find((f:Json)=>f.role==='inbox').total+1,'inbox folder count exact');
+
+      // 2. Condition (3): Address deleted, expired, or alias removed under the background job -> zero mail attached to deleted/expired/removed alias!
+      await seedUnrouted('del',[{addr:'delme@'+host,n:130}]);
+      const delBox=ok(await local('POST','/v1/inbound/addresses',{address:'delme@'+host}),201);
+      ok(await local('DELETE',`/v1/inbound/addresses/${delBox.id}`));
+      const delRes=await drainClaimUnrouted(runtime,wid,delBox.id);
+      assert.deepEqual(delRes,{done:true,claimed:0,batches:1});
+      assert.equal((await db.query('SELECT count(*)::int n FROM mailbox_messages WHERE mailbox_id=$1',[delBox.id])).rows[0].n,0,'no mail attached to deleted inbox');
+      assert.equal((await db.query("SELECT count(*)::int n FROM mail_unrouted WHERE workspace_id=$1 AND address='delme@'||$2",[wid,host])).rows[0].n,30,'unclaimed rows preserved when inbox deleted');
+
+      await seedUnrouted('exp',[{addr:'expme@'+host,n:120}]);
+      const expBox=ok(await local('POST','/v1/inbound/addresses',{address:'expme@'+host}),201);
+      await db.query("UPDATE mailboxes SET expires_at=now()+interval '1 hour' WHERE id=$1",[expBox.id]);
+      const expRes=await drainClaimUnrouted(runtime,wid,expBox.id);
+      assert.deepEqual(expRes,{done:true,claimed:0,batches:1},'address given expiry stops draining');
+
+      await seedUnrouted('al',[{addr:'keepal@'+host,n:105},{addr:'dropal@'+host,n:120}]);
+      const alBox=ok(await local('POST','/v1/inbound/addresses',{address:'keepal@'+host,aliases:['dropal@'+host]}),201);
+      ok(await local('PATCH',`/v1/inbound/addresses/${alBox.id}`,{aliases:[]}));
+      await drainClaimUnrouted(runtime,wid,alBox.id);
+      assert.equal((await db.query("SELECT count(*)::int n FROM mail_unrouted WHERE workspace_id=$1 AND address='keepal@'||$2",[wid,host])).rows[0].n,0,'kept address drained');
+      assert.ok((await db.query("SELECT count(*)::int n FROM mail_unrouted WHERE workspace_id=$1 AND address='dropal@'||$2",[wid,host])).rows[0].n>0,'removed alias stops claiming');
+
+      // 3. Condition (3): Concurrent claimers racing on overlapping wildcard rows never attach the same message to both inboxes!
+      const c1=await fixtureDatabase(t),c2=await fixtureDatabase(t);
+      const {drizzle}=await import('drizzle-orm/node-postgres');
+      const rWid=unique('racew'),rDom=unique('mdom'),rHost=rWid+'.invalid',rBox1=unique('mbx'),rBox2=unique('mbx');
+      cleanup(t,async()=>{for(const tbl of ['mailbox_events','mail_unrouted','mailbox_addresses','mailbox_threads','mailbox_messages','mail_messages','mail_threads','mailboxes','mailbox_domains'])await c1.query(`DELETE FROM ${tbl} WHERE workspace_id=$1`,[rWid]);});
+      await c1.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')",[rDom,rWid,rHost,REGION]);
+      await c1.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,rules,kind) VALUES($1,$3,$4,'r1@'||$5,$6::jsonb,'address'),($2,$3,$4,'r2@'||$5,$6::jsonb,'address')",[rBox1,rBox2,rWid,rDom,rHost,JSON.stringify(['overlap-*@'+rHost])]);
+      for(let i=1;i<=40;i++){
+        const mid=unique('msg'),tid=unique('thr');
+        await c1.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)',[tid,rWid]);
+        await c1.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,received_at,size_bytes,lifecycle) VALUES($1,$2,$3,'inbound',now(),100,'default')",[mid,rWid,tid]);
+        await c1.query("INSERT INTO mail_unrouted(workspace_id,message_id,address) VALUES($1,$2,'overlap-'||$3||'@'||$4)",[rWid,mid,i,rHost]);
+      }
+      await Promise.all([
+        drainClaimUnrouted({...runtime,db:drizzle(c1)},rWid,rBox1,{batchSize:10,maxBatches:10}),
+        drainClaimUnrouted({...runtime,db:drizzle(c2)},rWid,rBox2,{batchSize:10,maxBatches:10}),
+      ]);
+      const totals=(await c1.query('SELECT count(*)::int total,count(DISTINCT message_id)::int uniq FROM mailbox_messages WHERE workspace_id=$1',[rWid])).rows[0];
+      assert.deepEqual(totals,{total:40,uniq:40},'every unrouted message claimed by exactly one inbox with zero duplicates');
+      assert.equal((await c1.query('SELECT count(*)::int n FROM mail_unrouted WHERE workspace_id=$1',[rWid])).rows[0].n,0);
+
+      // 4. Review fixes: (a) a mixed thread with a normal first message and a spam reply keeps spam=false; (b) queueClaimUnrouted queues a separate job while one is running.
+      const mixThr = unique('thr'), mixM1 = unique('msg'), mixM2 = unique('msg'), mixAddr = 'mixspam@' + host;
+      await db.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)', [mixThr, wid]);
+      await db.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,received_at,size_bytes,spam,lifecycle) VALUES($1,$3,$4,'inbound',now()-interval '2 minutes',100,false,'default'),($2,$3,$4,'inbound',now()-interval '1 minute',100,true,'default')", [mixM1, mixM2, wid, mixThr]);
+      await db.query('INSERT INTO mail_unrouted(workspace_id,message_id,address) VALUES($1,$2,$4),($1,$3,$4)', [wid, mixM1, mixM2, mixAddr]);
+      const mixBox = ok(await local('POST', '/v1/inbound/addresses', { address: mixAddr }), 201);
+      const mixRow = (await db.query('SELECT spam, labels FROM mailbox_threads WHERE mailbox_id=$1 AND thread_id=$2', [mixBox.id, mixThr])).rows[0];
+      assert.deepEqual(mixRow, { spam: false, labels: [] }, 'thread takes spam flag from earliest message in batch');
+      const { queueClaimUnrouted } = await import('./src/mailbox-store.js');
+      await queueClaimUnrouted(runtime.db, wid, mixBox.id);
+      await db.query("UPDATE jobs SET status='running', lease_until=now()+interval '5 minutes' WHERE id=$1", ['claim-unrouted:' + mixBox.id]);
+      await queueClaimUnrouted(runtime.db, wid, mixBox.id);
+      const extraJobs = (await db.query("SELECT count(*)::int n FROM jobs WHERE workspace_id=$1 AND type='mailbox.claimUnrouted' AND payload->>'mailboxId'=$2 AND status='pending'", [wid, mixBox.id])).rows[0].n;
+      assert.equal(extraJobs, 1, 'separate pending claim job queued while existing job is running');
+    });
+  });
   test('inbox long-poll and from filter: modseq wake skips idle rescans, catches out-of-order inbox_seq and mutable flags, matches all email forms, and surfaces 422 READ_TOO_LARGE',async t=>{
     const a=await fixtureDatabase(t),w=unique('pollw'),host=w+'.invalid',dom=unique('mdom'),bid=unique('mbx'),addr='poll@'+host;
     const {digest,randomSecret}=await import('./src/core.js');
@@ -28961,8 +29226,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     // millions does. Every 2,500th contact is subscribed; the first of those is also suppressed.
     const listId=await audience(50_010,2500);
     const contact=(n:number)=>'con_'+createHash('md5').update(w+n).digest('hex');
-    // The audience as it stands before any launch: subscribed, not suppressed, in send order (contact ID).
-    const before=(await g.query("SELECT email FROM audience_contacts WHERE workspace_id=$1 AND marketing_consent='subscribed' AND NOT suppressed ORDER BY id",[w])).rows.map(r=>r.email);
+    // The audience as it stands before any launch: subscribed, not suppressed, in send order (hash of contact ID).
+    const before=(await g.query("SELECT email FROM audience_contacts WHERE workspace_id=$1 AND marketing_consent='subscribed' AND NOT suppressed ORDER BY hashtextextended(id, 0), id",[w])).rows.map(r=>r.email);
     assert.equal(before.length,19);
     const blockedBy=async(pid:number)=>(await g.query('SELECT count(*)::int AS n FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))',[pid])).rows[0].n as number;
     const within=(p:Promise<unknown>,ms:number)=>Promise.race([p,new Promise(r=>setTimeout(r,ms))]);
@@ -33971,13 +34236,18 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const blind = tick({ ...behind, late: null, queues: [...behind.queues.slice(0, 2), { name: 'feedback-dlq', depth: 3, oldestMs: 0 }] });
     assert.deepEqual([blind.findings.map(finding => finding.key), [...blind.blind], blind.rollup.jobs, blind.rollup.memory.streaks['jobs-behind:mailbox.ingest']], [['queue-behind:feedback', 'dead-letters:feedback-dlq'], ['jobs'], null, 2]);
 
-    // 8. 1,639 jobs of one type failed, at once. Customers' webhooks failing and a small pile are not alerts; one failed
-    // campaign job is; and so are six more of a type within half an hour, however small its pile.
+    // 8. 1,639 jobs of one type failed between the 11th and the 23rd and are still kept. Kept is history: it is on the
+    // Health page and is never an alert. Failing now is one: 25 of a type within the hour, five within half an hour, one
+    // campaign job. Customers' webhooks failing and a few of a type are not.
     memory = emptyMemory();
-    const failed = (imports: number) => ({ ...quiet(), failed: [{ type: 'mailbox.recoverStaging', error: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN', failed: 1_600 }, { type: 'mailbox.recoverStaging', error: 'JOB_LEASE_EXHAUSTED', failed: 39 },
-      { type: 'operation.webhook', error: 'WEBHOOK_HTTP_500', failed: 4_000 }, { type: 'mailbox.reconcile', error: 'JOB_INTERNAL_ERROR', failed: 24 }, { type: 'campaign.run', error: 'JOB_LEASE_EXHAUSTED', failed: 1 }, { type: 'audience.import', error: 'IMPORT_FAILED', failed: imports }] });
-    const piles = [`jobs-failed:mailbox.recoverStaging warning 1639: ${c('mailbox.recoverStaging')}: 1,639, mostly ${c('MAILBOX_STAGING_ENVELOPE_UNKNOWN')}.`, `jobs-failed:campaign.run critical 1: ${c('campaign.run')}: 1, mostly ${c('JOB_LEASE_EXHAUSTED')}.`];
-    assert.deepEqual([lines(failed(2)), lines(failed(8))], [piles.toReversed(), [...piles.toReversed(), `jobs-failed:audience.import warning 8: ${c('audience.import')}: 8, 6 in the last 30 min, mostly ${c('IMPORT_FAILED')}.`]]);
+    const failed = (staging: number, imports: number) => ({ ...quiet(), failed: [{ type: 'mailbox.recoverStaging', error: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN', failed: 1_600, hour: staging, half: 0 }, { type: 'mailbox.recoverStaging', error: 'JOB_LEASE_EXHAUSTED', failed: 39, hour: 0, half: 0 },
+      { type: 'operation.webhook', error: 'WEBHOOK_HTTP_500', failed: 4_000, hour: 900, half: 500 }, { type: 'mailbox.reconcile', error: 'JOB_INTERNAL_ERROR', failed: 240, hour: 24, half: 4 }, { type: 'campaign.run', error: 'JOB_LEASE_EXHAUSTED', failed: 3, hour: 1, half: 0 },
+      { type: 'audience.import', error: 'IMPORT_FAILED', failed: imports, hour: imports, half: Math.max(0, imports - 2) }] });
+    const history = tick(failed(0, 2)), now1 = c('campaign.run') + ': 1 failed in the last hour, mostly ' + c('JOB_LEASE_EXHAUSTED') + '.';
+    assert.deepEqual([history.findings.map(finding => finding.key + ' ' + finding.severity + ' ' + finding.value + ': ' + finding.words), history.rollup.jobs!.find(job => job.type === 'mailbox.recoverStaging')],
+      [['jobs-failed:campaign.run critical 1: ' + now1], { type: 'mailbox.recoverStaging', pending: 0, oldestSeconds: 0, failed: 1_639, failedLastHour: 0, error: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN', behind: false }]);
+    assert.deepEqual(lines(failed(30, 7)), ['jobs-failed:campaign.run critical 1: ' + now1, 'jobs-failed:mailbox.recoverStaging warning 30: ' + c('mailbox.recoverStaging') + ': 30 failed in the last hour, mostly ' + c('MAILBOX_STAGING_ENVELOPE_UNKNOWN') + '.',
+      'jobs-failed:audience.import warning 7: ' + c('audience.import') + ': 7 failed in the last hour, mostly ' + c('IMPORT_FAILED') + '.']);
 
     // 4. A first-party campaign of 1.8M releasing 32 a second on an account that allows 160, because the planner reads 40.
     // What it releases is measured from its cursor and held against the account's rate and the workspace's share, never
@@ -34036,13 +34306,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       `slow-requests:POST:/v1/campaigns/:id/send warning 45000: ${c('POST /v1/campaigns/:id/send')}: slowest 45 s, p95 45 s over 3 in 15 min.`, `request-storm:GET:/v1/campaigns/:id/stats warning 3000: ${c('GET /v1/campaigns/:id/stats')}: 3,000 a minute for 3 minutes.`,
       `request-storm:workspace:ws_fixture warning 3010: workspace ${c('ws_fixture')}: 3,010 reads a minute for 3 minutes.`, `errors:MAILBOX_STAGING_ENVELOPE_UNKNOWN warning 6: ${c('MAILBOX_STAGING_ENVELOPE_UNKNOWN')}: 6 in 5 min.`],
       'Sending mail at 100 a second is not a storm, 40 errors in 45,000 requests are not an alert, unique violations are not database errors, a line every minute already says is not counted, and mail whose arrival notice was lost (#625) alerts at the first line.');
-    // The same code as a failed job's error: the first job, critical.
+    // The same code as a failed job's error: the first job of the hour, critical, and named before the errors that are only kept.
     memory = emptyMemory();
-    assert.deepEqual(lines({ ...quiet(), failed: [{ type: 'mailbox.recoverStaging', error: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN', failed: 3 }, { type: 'mailbox.recoverStaging', error: 'MAILBOX_STAGING_UNDELIVERED', failed: 1 }] }),
-      [`jobs-failed:mailbox.recoverStaging critical 4: ${c('mailbox.recoverStaging')}: 4, mostly ${c('MAILBOX_STAGING_ENVELOPE_UNKNOWN')}.`]);
+    const undelivered = (hour: number) => ({ ...quiet(), failed: [{ type: 'mailbox.recoverStaging', error: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN', failed: 3, hour: 0, half: 0 }, { type: 'mailbox.recoverStaging', error: 'MAILBOX_STAGING_UNDELIVERED', failed: 1, hour, half: hour }] });
+    assert.deepEqual([lines(undelivered(0)), lines(undelivered(1))], [[], [`jobs-failed:mailbox.recoverStaging critical 1: ${c('mailbox.recoverStaging')}: 1 failed in the last hour, mostly ${c('MAILBOX_STAGING_UNDELIVERED')}.`]]);
     // No key holds a space, so the card's key=value line parses; and what is not an identifier never reaches a card.
     memory = emptyMemory();
-    assert.deepEqual(lines({ ...quiet(), failed: [{ type: 'reader@example.net <b>', error: 'Subject: hello', failed: 30 }] }), [`jobs-failed:other warning 30: ${c('other')}: 30, mostly ${c('other')}.`]);
+    assert.deepEqual(lines({ ...quiet(), failed: [{ type: 'reader@example.net <b>', error: 'Subject: hello', failed: 30, hour: 30, half: 30 }] }), [`jobs-failed:other warning 30: ${c('other')}: 30 failed in the last hour, mostly ${c('other')}.`]);
     // The database: connections near the limit, slow queries and lock waits for two ticks; a transaction open ten minutes; the disk three quarters full.
     const crowded = { ...quiet(), database: { connections: 85, maxConnections: 100, longTransactions: 2, oldestTransactionSeconds: 660, slowQueries: 4, lockWaits: 12, sizeBytes: 120 * GB } };
     const always = ['database-transaction warning 660: open 11 min, 2 over a minute.', 'database-disk critical 0.8: 80% of 150 GB.'];
@@ -34070,13 +34340,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await fail(30, 'failed');
       assert.equal(runtime.config.operatorSlackWebhookUrl, undefined);
       const first = await tick();
-      assert.deepEqual([first.ran, first.cards, posted, await alert()], [true, [], [], { kind: 'jobs-failed', severity: 'warning', value: 30, unit: 'jobs', words: `${c(type)}: 30, mostly ${c('FIXTURE_FAILED')}.`, sent: false }]);
+      assert.deepEqual([first.ran, first.cards, posted, await alert()], [true, [], [], { kind: 'jobs-failed', severity: 'warning', value: 30, unit: 'jobs', words: `${c(type)}: 30 failed in the last hour, mostly ${c('FIXTURE_FAILED')}.`, sent: false }]);
       assert.ok(first.statements <= 36 && first.open >= 1, `A tick is a bounded number of statements (${first.statements}).`);
       assert.equal((await tick(false)).ran, false, 'One tick a minute, whoever asks: a second one within 45 seconds does nothing.');
       const page = ok(await local('GET', path)), listed = page.alerts.find((a: Json) => a.key === key);
       assert.deepEqual([page.delivery, page.stale, typeof page.generatedAt, { ...listed, since: recent(listed.since) }, page.jobs.find((job: Json) => job.type === type), page.database.connections >= 1, 'memory' in page],
-        ['off', false, 'string', { key, kind: 'jobs-failed', label: 'Jobs failed', severity: 'warning', value: 30, unit: 'jobs', words: `${type}: 30, mostly FIXTURE_FAILED.`, since: true, sentAt: null, runbook: 'docs/operations.md#jobs-failed' },
-          { type, pending: 0, oldestSeconds: 0, failed: 30, error: 'FIXTURE_FAILED', behind: true }, true, false]);
+        ['off', false, 'string', { key, kind: 'jobs-failed', label: 'Jobs failed', severity: 'warning', value: 30, unit: 'jobs', words: `${type}: 30 failed in the last hour, mostly FIXTURE_FAILED.`, since: true, sentAt: null, runbook: 'docs/operations.md#jobs-failed' },
+          { type, pending: 0, oldestSeconds: 0, failed: 30, failedLastHour: 30, error: 'FIXTURE_FAILED', behind: true }, true, false]);
       const apiKey = ok(await local('POST', '/v1/api-keys', { name: 'Not a dashboard', permissions: ['manage'] }), 201); secrets.add(apiKey.secret);
       error(await request('GET', path, apiKey.secret), 403, 'OPERATOR_REQUIRED');
 
@@ -34088,12 +34358,12 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await tick(); await tick();
       const opened = mine(), machine = { key, state: 'open', severity: 'warning', value: '30', unit: 'jobs', runbook: 'docs/operations.md#jobs-failed', health: `${PUBLIC_ORIGIN}/operator?view=health` };
       assert.deepEqual([opened.map(card => [card[0], card[1], { ...card[2], since: recent(card[2].since) }]), (await alert()).sent],
-        [[[`:x: *Jobs failed* ${c(type)}: 30, mostly ${c('FIXTURE_FAILED')}.`, `Jobs failed: ${c(type)}: 30, mostly ${c('FIXTURE_FAILED')}.`, { ...machine, since: true }]], true]);
+        [[[`:x: *Jobs failed* ${c(type)}: 30 failed in the last hour, mostly ${c('FIXTURE_FAILED')}.`, `Jobs failed: ${c(type)}: 30 failed in the last hour, mostly ${c('FIXTURE_FAILED')}.`, { ...machine, since: true }]], true]);
       // A day on it is still open: one reminder, with how long, under the same key and since.
       await db.query(`UPDATE health_alerts SET since=now()-interval '25 hours',sent_at=now()-interval '25 hours' WHERE key=$1`, [key]);
       await tick(); await tick();
       const reminded = mine();
-      assert.deepEqual(reminded.map(card => [card[1], card[2].key, card[2].state, Math.round((Date.now() - Date.parse(card[2].since)) / 3_600_000)]), [[`Jobs failed: ${c(type)}: 30, mostly ${c('FIXTURE_FAILED')}. For 25 h.`, key, 'open', 25]]);
+      assert.deepEqual(reminded.map(card => [card[1], card[2].key, card[2].state, Math.round((Date.now() - Date.parse(card[2].since)) / 3_600_000)]), [[`Jobs failed: ${c(type)}: 30 failed in the last hour, mostly ${c('FIXTURE_FAILED')}. For 25 h.`, key, 'open', 25]]);
       // Gone for less than three minutes is not a recovery; after three, one cleared card with the same key, and the alert is forgotten.
       await db.query(`UPDATE jobs SET status='completed' WHERE type=$1`, [type]);
       await tick();
@@ -34137,6 +34407,66 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // A hosted tick reads the campaigns' rates from the account and the connection.
       const last = await tick();
       assert.deepEqual([last.ran, Array.isArray(ok(await local('GET', path)).campaigns)], [true, true]);
+    });
+  });
+
+  test('MX health: jobs-failed counts the jobs that failed within the hour, by when the runner failed each, never the failed jobs still kept: history opens nothing, three new failures of a code that alerts at its first do, five of any type do, and it clears once the last is an hour old', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const { healthTick } = await import('./src/health.js'), { processJobs, MAX_ATTEMPTS } = await import('./src/jobs.js'), { ApiError } = await import('./src/core.js');
+      const tag = unique('w').slice(-8), staging = 'health.staging.' + tag, other = 'health.other.' + tag, c = (text: string) => '`' + text + '`';
+      // The runner below works on this test's jobs alone.
+      await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
+      runtime.config.operatorSlackWebhookUrl = OPERATOR_HOOK;
+      const posted: Json[] = [], post = async (_url: string, card: Json) => { posted.push(card); };
+      const cards = () => posted.splice(0).map(card => String(card.text).split('\n')[0]!).sort();
+      const tick = () => healthTick(runtime, { queues: [] }, { post, force: true });
+      const open = async () => (await db.query("SELECT key,severity,value,words FROM health_alerts WHERE key LIKE 'jobs-failed:health.%.'||$1 ORDER BY key", [tag])).rows;
+      const row = async (type: string) => { const { type: _, ...rest } = ok(await local('GET', '/v1/operator/health')).jobs.find((job: Json) => job.type === type); return rest; };
+      const enqueue = (type: string, n: number) => db.query("INSERT INTO jobs(id,type,workspace_id,payload) SELECT $1||'-'||g,$2,$3,'{}' FROM generate_series(1,$4::int) g", [unique('job'), type, runtime.config.workspaceId, n]);
+      // What the runner did with them: failed for good, and when (a failed job's available_at).
+      const failedNow = async (type: string) => (await db.query("SELECT last_error,attempts,count(*)::int AS n FROM jobs WHERE type=$1 AND status='failed' AND abs(extract(epoch FROM clock_timestamp()-available_at))<120 GROUP BY 1,2 ORDER BY 1", [type])).rows;
+      const refuse = (code: string) => async () => { throw new ApiError(422, code, 'A refusal that is not retryable fails the job at its first attempt.'); };
+      const run = () => processJobs(runtime, { [staging]: refuse('MAILBOX_STAGING_UNDELIVERED'), [other]: refuse('FIXTURE_FAILED') }, 20, 1);
+
+      // 1. History: 40 jobs that failed between an hour and twelve days ago, and two with a code that alerts at its first
+      // job, two hours ago. Nothing opens and nothing is posted; the Health page says how many are kept.
+      await db.query("INSERT INTO jobs(id,type,workspace_id,payload,status,attempts,last_error,available_at) SELECT $1||'-'||g,$2,$3,'{}','failed',6,CASE WHEN g>40 THEN 'MAILBOX_STAGING_UNDELIVERED' ELSE 'MAILBOX_STAGING_ENVELOPE_UNKNOWN' END," +
+        "now()-CASE WHEN g>40 THEN interval '2 hours' ELSE interval '61 minutes'+(g-1)*interval '7 hours' END FROM generate_series(1,42) g", [unique('job'), staging, runtime.config.workspaceId]);
+      await tick(); await tick();
+      assert.deepEqual([cards(), await open(), await row(staging)], [[], [], { pending: 0, oldestSeconds: 0, failed: 42, failedLastHour: 0, error: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN', behind: false }]);
+
+      // 2. Three more fail now, in the runner, with that code: one critical card, which counts the three and names their error.
+      await enqueue(staging, 3);
+      assert.equal(await run(), 3);
+      assert.deepEqual(await failedNow(staging), [{ last_error: 'MAILBOX_STAGING_UNDELIVERED', attempts: 1, n: 3 }]);
+      await tick(); await tick();
+      const three = c(staging) + ': 3 failed in the last hour, mostly ' + c('MAILBOX_STAGING_UNDELIVERED') + '.';
+      assert.deepEqual([cards(), await open(), await row(staging)], [['Jobs failed: ' + three], [{ key: 'jobs-failed:' + staging, severity: 'critical', value: 3, words: three }],
+        { pending: 0, oldestSeconds: 0, failed: 45, failedLastHour: 3, error: 'MAILBOX_STAGING_UNDELIVERED', behind: true }]);
+
+      // 3. Any other type: four in the hour are not an alert. The fifth, a job whose leases ran out five hours after it
+      // was due, failed now and not five hours ago: five within half an hour is one warning card.
+      await enqueue(other, 4);
+      assert.equal(await run(), 4);
+      await tick(); await tick();
+      assert.deepEqual([cards(), (await open()).length, await failedNow(other)], [[], 1, [{ last_error: 'FIXTURE_FAILED', attempts: 1, n: 4 }]]);
+      await db.query("INSERT INTO jobs(id,type,workspace_id,payload,status,attempts,lease_until,available_at) VALUES($1,$2,$3,'{}','running',$4,now()-interval '1 minute',now()-interval '5 hours')", [unique('job'), other, runtime.config.workspaceId, MAX_ATTEMPTS]);
+      assert.equal(await run(), 0);
+      assert.deepEqual(await failedNow(other), [{ last_error: 'FIXTURE_FAILED', attempts: 1, n: 4 }, { last_error: 'JOB_LEASE_EXHAUSTED', attempts: MAX_ATTEMPTS, n: 1 }]);
+      await tick(); await tick();
+      const five = c(other) + ': 5 failed in the last hour, mostly ' + c('FIXTURE_FAILED') + '.';
+      assert.deepEqual([cards(), (await open()).map(alert => [alert.key, alert.severity, alert.value])], [['Jobs failed: ' + five], [['jobs-failed:' + other, 'warning', 5], ['jobs-failed:' + staging, 'critical', 3]]]);
+
+      // 4. An hour later nothing more has failed: both clear (after the three quiet minutes every alert waits), one
+      // cleared card each, and the Health page still says how many are kept.
+      await db.query("UPDATE jobs SET available_at=available_at-interval '61 minutes' WHERE status='failed'");
+      await tick();
+      assert.deepEqual([cards(), (await open()).length], [[], 2]);
+      await db.query("UPDATE health_alerts SET seen_at=now()-interval '4 minutes' WHERE key LIKE 'jobs-failed:health.%.'||$1", [tag]);
+      await tick(); await tick();
+      const cleared = cards();
+      assert.deepEqual([cleared.map(line => line.slice(0, line.indexOf(', after'))), await open(), await row(staging), await row(other)], [['Cleared: Jobs failed: ' + c(other), 'Cleared: Jobs failed: ' + c(staging)], [],
+        { pending: 0, oldestSeconds: 0, failed: 45, failedLastHour: 0, error: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN', behind: false }, { pending: 0, oldestSeconds: 0, failed: 5, failedLastHour: 0, error: 'FIXTURE_FAILED', behind: false }]);
     });
   });
 
@@ -34553,8 +34883,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         contacts.push(contact);
       }
       // Seed invalid historical contact data before snapshotting. Recipient order
-      // is by contact ID; keep the first valid so the static-message cache is used.
-      const ordered = (await db.query("SELECT id FROM audience_contacts WHERE workspace_id = $1 ORDER BY id", [runtime.config.workspaceId])).rows;
+      // is by hashtextextended(id, 0), id; keep the first valid so the static-message cache is used.
+      const ordered = (await db.query("SELECT id FROM audience_contacts WHERE workspace_id = $1 ORDER BY hashtextextended(id, 0), id", [runtime.config.workspaceId])).rows;
       const invalidContactId = ordered[1].id;
       const invalidAddress = `${'a'.repeat(250)}@example.com`;
       assert.equal((await db.query("UPDATE audience_contacts SET email = $1 WHERE workspace_id = $2 AND id = $3", [invalidAddress, runtime.config.workspaceId, invalidContactId])).rowCount, 1);
@@ -35669,34 +35999,153 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         return body;
       };
       await run('campaign.run');
-      const first = await view(), cached = nonzero(first.counts);
-      assert.deepEqual(cached, { total: 400, byStatus: { queued: 400 } });
-      assert.deepEqual(cached, nonzero(await truth()));
+      const first = await view();
+      assert.deepEqual(nonzero(first.counts), { total: 400, byStatus: { queued: 400 } });
+      assert.deepEqual(nonzero(first.counts), nonzero(await truth()));
       await run('email.dispatch');
       const dispatched = await view();
+      assert.deepEqual(nonzero(dispatched.counts), nonzero(await truth()), 'Tallies stay exact at read time after dispatch.');
       await run('campaign.run');
       const released = await view(), more = [await view(), await view()];
-      assert.equal(released.delivery.expanded, total, 'Release reached the end while the counts were reused.');
-      for (const body of [dispatched, released, ...more]) {
+      assert.equal(released.delivery.expanded, total);
+      const afterRelease = nonzero(await truth());
+      for (const body of [released, ...more]) {
         assert.equal(body.state, 'sending');
-        assert.deepEqual(nonzero(body.counts), cached, 'Counts are reused within the window.');
+        assert.deepEqual(nonzero(body.counts), afterRelease, 'Every poll reads exact counts from sending_campaign_tallies.');
       }
-      assert.notDeepEqual(nonzero(await truth()), cached);
-      assert.equal(counted(), 1, `${polls} polls inside one ${window} s window count recipients once.`);
-      // Past the window the next read counts again.
-      const real = Date.now.bind(Date), skew = t.mock.method(Date, 'now', () => real() + (window + 1) * 1000);
-      let expired; try { expired = await view(); } finally { skew.mock.restore(); }
-      assert.equal(counted(), 2);
-      assert.equal(expired.state, 'sending');
-      assert.deepEqual(nonzero(expired.counts), nonzero(await truth()));
-      // Drain it: once done the counts are exact at once, inside the window of the entry just cached.
+      assert.equal(counted(), 0, `${polls} polls never scan sending_emails.`);
+      // Drain it: once done the counts stay exact with zero scans of sending_emails.
       for (let i = 0; i < 10 && (await cursors()).state !== 'done'; i++) await run('email.dispatch');
-      const before = counted(), done = await view(), again = await view(), exact = nonzero(await truth());
+      const done = await view(), again = await view(), exact = nonzero(await truth());
       assert.equal(done.state, 'done');
       assert.equal(exact.total, tail);
       assert.deepEqual([nonzero(done.counts), nonzero(again.counts)], [exact, exact], 'A finished campaign reports exact counts immediately.');
-      assert.equal(counted(), before + 2, 'A finished campaign is never served from the cache.');
-      t.diagnostic(`${polls} detail polls, ${counted()} count statements`);
+      assert.equal(counted(), 0, 'A finished campaign reads tallies without scanning sending_emails.');
+      // Unused window variable check preserved for reference: fallback uses CAMPAIGN_PROGRESS_CACHE_SECONDS.
+      assert.ok(window > 0);
+      t.diagnostic(`${polls} detail polls, ${counted()} sending_emails scans`);
+    });
+  });
+
+  test('sending tallies: exact campaign & hourly metrics at read time, bounded fold + alert, daily recount drift detection, one-statement undo fallback and 10s high-volume cache bucket', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, request, run, db }) => {
+      const { foldSendingTallies, recountSendingTallies, talliesEnabled, UNFOLDED_ALERT_THRESHOLD } = await import('./src/sending-tallies.js');
+      const { dashboardRevision, DASHBOARD_ACTIVE_SEND_HOUR_THRESHOLD } = await import('./src/dashboard-cache.js');
+      const wid = runtime.config.workspaceId;
+      const key = ok(await local('POST', '/v1/api-keys', { name: unique('tally-key'), permissions: ['read', 'send', 'manage'] }), 201).secret;
+      assert.equal(await talliesEnabled(runtime.db), true);
+
+      // 1. Seed emails across two non-hour-aligned windows + two streams + campaign + direct, verify /v1/metrics matches
+      // live sending_emails bit-for-bit across day/hour granularities and include=previous,streams.
+      const cid = ok(await local('POST', '/v1/campaigns', { name: 'Tallies' }), 201).id;
+      const rev = unique('rev');
+      await db.query("UPDATE sending_campaigns SET state='sending',review_id=$2,actor_key_id='fixture',total=12,prepared=12,expanded=12 WHERE id=$1", [cid, rev]);
+      const baseMs = Math.floor(Date.now() / 3_600_000) * 3_600_000;
+      const at = (offsetMs: number) => new Date(baseMs + offsetMs).toISOString();
+      // Previous window & edge-hour emails + current window emails (marketing campaign + transactional direct)
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,campaign_id,review_id,review_ordinal,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,created_at)
+        VALUES
+          ('t_m1',$1,$3,'fixture',$2,$4,1,'n@e.com','["a@e.com"]','[]','[]','S','{"kind":"marketing"}',false,'delivered','p1',$5),
+          ('t_m2',$1,$3,'fixture',$2,$4,2,'n@e.com','["b@e.com"]','[]','[]','S','{"kind":"marketing"}',false,'bounced','p2',$6),
+          ('t_m3',$1,$3,'fixture',$2,$4,3,'n@e.com','["c@e.com"]','[]','[]','S','{"kind":"marketing"}',false,'accepted','p3',$7),
+          ('t_m4',$1,$3,'fixture',$2,$4,4,'n@e.com','["d@e.com"]','[]','[]','S','{"kind":"marketing"}',false,'queued',NULL,$8),
+          ('t_tx1',$1,$3,'fixture',NULL,NULL,NULL,'t@e.com','["e@e.com"]','[]','[]','T','{"kind":"transactional"}',false,'delivered','p4',$6),
+          ('t_tx2',$1,$3,'fixture',NULL,NULL,NULL,'t@e.com','["f@e.com"]','[]','[]','T','{"kind":"transactional"}',false,'delivered','p5',$7)`,
+        [wid, cid, REGION, rev, at(-7_200_000 + 1_200_000), at(-3_600_000 + 600_000), at(-3_600_000 + 2_400_000), at(300_000)]);
+      await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated) VALUES
+        ('te_1',$1,'t_m1','open',false), ('te_2',$1,'t_m1','click',false), ('te_3',$1,'t_tx1','open',false)`, [wid]);
+
+      // Mid-hour boundaries exercising both left edge (inside hour -1) and right edge (now, empty tail -> zero raw scan)
+      const qFrom = at(-3_600_000 + 1_800_000), qTo = new Date(Date.now() + 1_000).toISOString();
+      const metricsPath = `/v1/metrics?from=${encodeURIComponent(qFrom)}&to=${encodeURIComponent(qTo)}&granularity=hour&include=previous,streams`;
+      const viaTallies = ok(await request('GET', metricsPath, key));
+      const detailViaTallies = ok(await request('GET', `/v1/campaigns/${cid}`, key));
+      const statsViaTallies = ok(await request('GET', `/v1/campaigns/${cid}/stats`, key));
+
+      // 2. Emergency one-statement undo: disabling triggers immediately falls back to live queries, producing exact same answers!
+      await db.query('ALTER TABLE sending_emails DISABLE TRIGGER sending_tally_insert, DISABLE TRIGGER sending_tally_update, DISABLE TRIGGER sending_tally_delete');
+      assert.equal(await talliesEnabled(runtime.db), false);
+      const viaLive = ok(await request('GET', metricsPath, key));
+      const detailViaLive = ok(await request('GET', `/v1/campaigns/${cid}`, key));
+      const statsViaLive = ok(await request('GET', `/v1/campaigns/${cid}/stats`, key));
+      assert.deepEqual(viaTallies, viaLive, 'Hourly metrics rollup + partial edge split equals live scan.');
+      assert.deepEqual(detailViaTallies.counts, detailViaLive.counts, 'Campaign detail tally equals live scan.');
+      assert.deepEqual({ counts: statsViaTallies.counts, totals: statsViaTallies.totals, rates: statsViaTallies.rates },
+        { counts: statsViaLive.counts, totals: statsViaLive.totals, rates: statsViaLive.rates }, 'Campaign stats tally equals live scan.');
+      await db.query('ALTER TABLE sending_emails ENABLE TRIGGER sending_tally_insert, ENABLE TRIGGER sending_tally_update, ENABLE TRIGGER sending_tally_delete');
+      assert.equal(await talliesEnabled(runtime.db), true);
+
+      // 2b. Record real feedback sequences (bounce without bounceType, validation_suppressed without bounceSubType,
+      // duplicate delivery_delay, and delivery_delay followed by delivery) via recordEmailEvent and verify tallies
+      // match raw sending_email_events semantics (no spurious deliveryDelayed from operation_events's ELSE 129) and
+      // reconcile produces 0 drift.
+      const { recordEmailEvent } = await import('./src/sending.js');
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,campaign_id,review_id,review_ordinal,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,created_at) VALUES
+        ('t_seq_bnc',$1,$3,'fixture',$2,$4,5,'n@e.com','["s1@e.com"]','[]','[]','S','{"kind":"marketing"}',false,'bounced','ps1',$5),
+        ('t_seq_val',$1,$3,'fixture',$2,$4,6,'n@e.com','["s2@e.com"]','[]','[]','S','{"kind":"marketing"}',false,'sent','ps2',$5),
+        ('t_seq_dly',$1,$3,'fixture',$2,$4,7,'n@e.com','["s3@e.com"]','[]','[]','S','{"kind":"marketing"}',false,'accepted','ps3',$5)`,
+        [wid, cid, REGION, rev, at(400_000)]);
+      await recordEmailEvent(runtime, { workspaceId: wid, emailId: 't_seq_bnc', type: 'bounce', externalId: unique('seq'), data: { synthetic: true } });
+      await recordEmailEvent(runtime, { workspaceId: wid, emailId: 't_seq_val', type: 'validation_suppressed', externalId: unique('seq'), data: { synthetic: true } });
+      await recordEmailEvent(runtime, { workspaceId: wid, emailId: 't_seq_dly', type: 'delivery_delay', externalId: unique('seq'), data: { synthetic: true } });
+      await recordEmailEvent(runtime, { workspaceId: wid, emailId: 't_seq_dly', type: 'delivery_delay', externalId: unique('seq'), data: { synthetic: true } });
+      await recordEmailEvent(runtime, { workspaceId: wid, emailId: 't_seq_dly', type: 'delivery', externalId: unique('seq'), data: { synthetic: true } });
+      const seqStats = ok(await request('GET', `/v1/campaigns/${cid}/stats`, key));
+      assert.equal(seqStats.totals.deliveryDelayed, 1, 'Only t_seq_dly counts as deliveryDelayed (once across duplicate delays + delivery); bounce and validation_suppressed never set deliveryDelayed.');
+      assert.equal(seqStats.totals.bounced, 2, 't_m2 and t_seq_bnc bounced; validation_suppressed did not.');
+      assert.equal(seqStats.totals.delivered, 2, 't_m1 and t_seq_dly delivered.');
+      assert.equal((await db.query('SELECT * FROM reconcile_sending_campaign_tallies($1,$2)', [wid, cid])).rowCount, 0, 'Zero tally drift after bounce/validation_suppressed/duplicate-delay/delivery sequence.');
+
+      // 3. Cancel inFlight reads sending_campaign_tallies without scanning sending_emails.
+      const cancelRes = ok(await local('POST', `/v1/campaigns/${cid}/cancel`, {}));
+      assert.equal(cancelRes.inFlight, 3, 't_m1 (delivered), t_m3 (accepted) and t_seq_dly (delivered) are inFlight; t_m4 (queued) canceled.');
+
+      // 4. Bounded folding collapses delta rows and logs SENDING_TALLIES_UNFOLDED_HIGH when above threshold.
+      await db.query(`INSERT INTO sending_campaign_tallies(workspace_id,campaign_id,status,simulated,email_count)
+        SELECT $1,$2,'delivered',false,CASE WHEN n%2=0 THEN 1 ELSE -1 END FROM generate_series(1,10) n`, [wid, cid]);
+      const beforeFold = Number((await db.query('SELECT count(*) AS n FROM sending_campaign_tallies WHERE workspace_id=$1 AND campaign_id=$2', [wid, cid])).rows[0].n);
+      assert.ok(beforeFold > 4);
+      const folded = await foldSendingTallies(runtime);
+      assert.ok(folded.campaignRemoved > 0);
+      const afterFold = Number((await db.query('SELECT count(*) AS n FROM sending_campaign_tallies WHERE workspace_id=$1 AND campaign_id=$2', [wid, cid])).rows[0].n);
+      assert.equal(afterFold, 5, 'Fold collapsed all repeated delta rows to one per (status, simulated): delivered, bounced, accepted, canceled, suppressed.');
+      assert.equal(folded.campaignUnfolded, 0);
+      assert.ok(UNFOLDED_ALERT_THRESHOLD > 0);
+
+      // 5. Daily exact recount detects injected drift, fixes it in one snapshot, and logs *_DRIFT at error level.
+      await db.query(`INSERT INTO sending_campaign_tallies(workspace_id,campaign_id,status,simulated,email_count) VALUES ($1,$2,'delivered',false,7)`, [wid, cid]);
+      await db.query(`INSERT INTO sending_metrics_hourly(workspace_id,region,kind,hour,emails) VALUES ($1,$2,'marketing',date_trunc('hour',now(),'UTC'),5)`, [wid, REGION]);
+      const errors: string[] = [];
+      const errSpy = t.mock.method(console, 'error', (...args: unknown[]) => { errors.push(String(args[0])); });
+      try {
+        await db.query("DELETE FROM job_schedule WHERE workspace_id='maintenance:sending-tallies'");
+        const recounted = await recountSendingTallies(runtime);
+        assert.ok(recounted.campaignsCorrected >= 1);
+        assert.ok(recounted.workspacesCorrected >= 1);
+      } finally { errSpy.mock.restore(); }
+      assert.ok(errors.some(line => line.includes('CAMPAIGN_TALLIES_DRIFT')), 'Logs CAMPAIGN_TALLIES_DRIFT at error level.');
+      assert.ok(errors.some(line => line.includes('METRICS_HOURLY_DRIFT')), 'Logs METRICS_HOURLY_DRIFT at error level.');
+      // Re-running reconcile produces zero diffs now; raw event_outcomes bit check also finds 0 mismatches.
+      assert.equal((await db.query('SELECT * FROM reconcile_sending_campaign_tallies($1,$2)', [wid, cid])).rowCount, 0);
+      assert.equal((await db.query('SELECT * FROM reconcile_sending_metrics_hourly($1)', [wid])).rowCount, 0);
+      assert.equal(Number((await db.query('SELECT emails_with_other_bits FROM check_sending_event_outcome_bits($1)', [wid])).rows[0].emails_with_other_bits), 0);
+      // Plant a mis-stamped event_outcomes bit (as old migration 088 did) and confirm daily recount logs SENDING_EVENT_OUTCOMES_DRIFT loudly!
+      await db.query("UPDATE sending_emails SET event_outcomes = event_outcomes | 128 WHERE workspace_id=$1 AND id='t_seq_bnc'", [wid]);
+      const bitErrors: string[] = [];
+      const bitSpy = t.mock.method(console, 'error', (...args: unknown[]) => { bitErrors.push(String(args[0])); });
+      try {
+        await db.query("DELETE FROM job_schedule WHERE workspace_id='maintenance:sending-tallies'");
+        const res = await recountSendingTallies(runtime);
+        assert.equal(res.outcomeBitsDrifted, 1);
+      } finally { bitSpy.mock.restore(); }
+      assert.ok(bitErrors.some(line => line.includes('SENDING_EVENT_OUTCOMES_DRIFT')), 'Logs SENDING_EVENT_OUTCOMES_DRIFT when event_outcomes disagrees with raw events.');
+
+      // 6. High-volume dashboard cache revision quantizes to 10-second buckets above 500 emails/hour.
+      const quietRev = await dashboardRevision(runtime, wid);
+      assert.ok(!quietRev.startsWith('bucket:'), 'Quiet workspace keeps exact per-email revision.');
+      await db.query(`INSERT INTO sending_metrics_hourly(workspace_id,region,kind,hour,emails) VALUES ($1,$2,'marketing',date_trunc('hour',now(),'UTC'),$3)`, [wid, REGION, DASHBOARD_ACTIVE_SEND_HOUR_THRESHOLD]);
+      const busyRev = await dashboardRevision(runtime, wid);
+      assert.match(busyRev, /^bucket:\d+$/, 'High-volume hour quantizes Overview cache revision to 10-second buckets.');
     });
   });
 

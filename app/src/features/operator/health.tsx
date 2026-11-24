@@ -25,7 +25,8 @@ function rows(health: OperatorHealth): Row[] {
   const measured: Row[] = [
     ...health.queues.map(q => ({ id: `queue:${q.name}`, area: 'Queue', what: q.name, now: q.depth ? `${number(q.depth)} waiting` : 'Empty', detail: q.depth ? `oldest ${span(q.oldestSeconds)}` : '', state: state(q.behind, `queue-behind:${q.name}`) })),
     ...(health.jobs ?? []).map(job => ({ id: `jobs:${job.type}`, area: 'Jobs', what: job.type, now: job.pending ? `${number(job.pending)} due, oldest ${span(job.oldestSeconds)}` : 'None due',
-      detail: job.failed ? `${number(job.failed)} failed${job.error ? ` · ${job.error}` : ''}` : '', state: state(job.behind, `jobs-behind:${job.type}`, `jobs-failed:${job.type}`) })),
+      // What failed in the last hour is what the alert counts; what is kept (30 days) is history, shown and never alerted on.
+      detail: [job.failedLastHour ? `${number(job.failedLastHour)} failed in the last hour` : '', job.failed ? `${number(job.failed)} failed in 30 days` : '', job.error].filter(Boolean).join(' · '), state: state(job.behind, `jobs-behind:${job.type}`, `jobs-failed:${job.type}`) })),
     ...(health.campaigns ?? []).map(c => ({ id: `campaign:${c.id}`, area: 'Campaign', what: c.id,
       now: c.waiting ? label(c.waiting.toLowerCase()) : c.state !== 'sending' ? label(c.state) : c.rate === null ? 'Sending' : `${perSecond(c.rate)}${c.account ? ` of ${perSecond(c.account)}` : ''}`,
       detail: [`${number(c.released)} of ${number(c.total)}`, c.etaSeconds !== null && `${span(c.etaSeconds)} left`, c.bounceRate !== null && c.settled ? `${(c.bounceRate * 100).toFixed(1)}% bounced` : false].filter(Boolean).join(' · '),
