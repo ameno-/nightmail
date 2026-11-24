@@ -25046,6 +25046,58 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     assert.deepEqual([calls, again.state, (await stored()).map(row => row.jevf_outcome)], [3, { acked: 1, retried: 0 }, ['ok', 'ok', 'ok', 'lost']]);
   });
 
+  test('second classifier on Cloudflare: a job drain that screened acknowledges its work-queue batch while the send to the second classifier\'s queue is still pending, kept alive by waitUntil', async t => {
+    // Node has no Workers host; provide only the base classes worker.ts extends.
+    const { registerHooks } = await import('node:module');
+    const hook = registerHooks({ resolve(specifier, context, next) {
+      return specifier === 'cloudflare:workers' ? { shortCircuit: true, url: 'data:text/javascript,export class DurableObject {constructor(ctx,env){this.ctx=ctx;this.env=env}} export class WorkerEntrypoint {constructor(ctx,env){this.ctx=ctx;this.env=env}}' } : next(specifier, context);
+    } });
+    const worker = (await import('./src/worker.js').finally(() => hook.deregister())).default as unknown as { queue(batch: unknown, env: unknown, ctx?: unknown): Promise<void> };
+    const [{ jobHandlers }, { screenWindow }] = await Promise.all([import('./src/sending.js'), import('./src/screen.js')]);
+    // The Worker's own jobs table, so its drain claims this test's job and nothing else; every other table is the fixture database's.
+    const db = new pg.Client({ connectionString: FIXTURE_DATABASE_URL }); await db.connect();
+    const wid = unique('jevf-drain-workspace'), schema = `jevf_drain_${randomUUID().replaceAll('-', '').slice(0, 12)}`, type = 'campaign.shadowFixture';
+    cleanup(t, async () => { release(); delete jobHandlers[type]; await db.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined); await db.query('DELETE FROM content_screen_calls WHERE workspace_id=$1', [wid]).catch(() => undefined);
+      await db.query('DELETE FROM ses_installation_settings WHERE workspace_id=$1', [wid]).catch(() => undefined); await db.end(); });
+    await (await import('./src/ses-region-state.js')).ensureRegionSettings((await import('drizzle-orm/node-postgres')).drizzle(db), { workspaceId: wid, regions: ['us-east-2'] });
+    await db.query(`CREATE SCHEMA ${schema}; CREATE TABLE ${schema}.jobs (LIKE public.jobs INCLUDING ALL); CREATE TABLE ${schema}.job_schedule (LIKE public.job_schedule INCLUDING ALL)`);
+    const scoped = new URL(FIXTURE_DATABASE_URL!); scoped.searchParams.set('options', `-c search_path=${schema},public`);
+    const logs: Json[] = []; for (const level of ['warn', 'info', 'error'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch { /* not a log line */ } });
+    // A campaign job that makes one request of the content screen, as a campaign's screen does for each copy.
+    const state = { email: { from: 'news@example.invalid', kind: 'marketing', subject: 'Private subject', body: 'Private body' }, signals: { recipients: 1 } };
+    let screened = 0;
+    jobHandlers[type] = async runtime => { await screenWindow(runtime, { requests: [state] }, 0, { workspaceId: wid, campaignId: 'cmp_fixture', kind: 'marketing', required: true }, 'c'.repeat(64)); screened++; };
+    t.mock.method(globalThis, 'fetch', async () => Response.json({ model: 'jev-fixture', answers: { spam: { noul: 0.01 } } }));
+    // The second classifier's queue takes the send and does not answer until released.
+    const sends: { body: string }[][] = [], waited: Promise<unknown>[] = [];
+    let release!: () => void, settled = false;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    const env = { PUBLIC_URL: 'https://dev.bane.mx', BANE_ROOT_SECRET: 's'.repeat(32), MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'false',
+      WORK_QUEUE_NAME: 'bane-dev-work', FEEDBACK_QUEUE_NAME: 'bane-dev-feedback', JEVF_QUEUE_NAME: 'fixture-jevf', TYPESAFE_API_KEY: 'jev-fixture-key', JEVF_API_KEY: 'jevf-fixture-key', JEVF_ENDPOINT: JEVF_URL,
+      HYPERDRIVE: { connectionString: scoped.href }, ATTACHMENTS: { async put() {}, async get() { return null; }, async delete() {} }, WAKE_QUEUE: { async send() {} },
+      FEEDBACK_QUEUE: { async send() {}, async sendBatch() {} }, ADMISSION: { async limit() { return { success: true }; } },
+      JEVF_QUEUE: { sendBatch: (messages: { body: string }[]) => { sends.push(messages); return pending; } } };
+    const ctx = { waitUntil(promise: Promise<unknown>) { waited.push(promise); void promise.then(() => { settled = true; }); } };
+    const drain = async (context?: unknown) => {
+      await db.query(`INSERT INTO ${schema}.jobs(id,workspace_id,type,payload,available_at) VALUES($1,$2,$3,'{}'::jsonb,now())`, [`job_${randomUUID()}`, wid, type]);
+      const state = { acked: 0, retried: 0 }, began = Date.now();
+      const done = worker.queue({ queue: 'bane-dev-work', messages: [], ackAll() { state.acked++; }, retryAll() { state.retried++; } }, env, context).then(() => 'returned' as const);
+      return { state, outcome: await Promise.race([done, new Promise<'waiting'>(resolve => setTimeout(() => resolve('waiting'), 5000))]), ms: Date.now() - began, done };
+    };
+    // The handler also flushes this process's health counters under waitUntil when they are due (src/health-counters.ts):
+    // started over here, they are not, so the only thing it gives waitUntil is the send, and nothing is written for health.
+    (await import('./src/health-counters.js')).resetCounters();
+    // The drain ran the job, the job's request was put on the queue, and the batch is acknowledged with that send still out.
+    const first = await drain(ctx);
+    assert.deepEqual([first.outcome, first.state, screened, sends.length, sends[0]?.length, settled], ['returned', { acked: 1, retried: 0 }, 1, 1, 1, false], `after ${first.ms} ms: ${JSON.stringify(logs.filter(l => l.level !== 'info' || l.code === 'JOB_DRAIN'))}`);
+    assert.equal(waited.length, 1, 'The send was given to waitUntil, once.');
+    assert.equal((await db.query(`SELECT status FROM ${schema}.jobs`)).rows.map(row => row.status).join(), 'completed');
+    assert.deepEqual(JSON.parse(sends[0]![0]!.body).request, { state, questions: JSON.parse(sends[0]![0]!.body).request.questions });
+    // Released, the promise waitUntil holds settles: nothing else was waiting on it.
+    release(); await Promise.all(waited); assert.equal(settled, true);
+    assert.ok(!logs.some(l => l.code === 'SCREEN_SHADOW_HANDOFF_FAILED'));
+  });
+
   test('hosted campaign copy keys: the customer copy byte for byte, with only the unsubscribe slots Nightmail generates set for a placeholder', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => t.test('classifier', async t => {
       await hostedScreenFixture(t, runtime, db, '112223330015', 'keyed.invalid');

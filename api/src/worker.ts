@@ -106,7 +106,9 @@ const queueName = (env: Env, key: 'FEEDBACK_QUEUE_NAME' | 'FEEDBACK_PRIORITY_QUE
   const value: unknown = (env as unknown as Record<string, unknown>)[key];
   return typeof value === 'string' && value ? value : fallback;
 };
-async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, max = 1, ctx?: ExecutionContext): Promise<T> {
+/** `shadowWaitUntil`: the invocation's waitUntil, for the sends to the second classifier's queue alone, from a handler that
+ *  gives no `ctx` here (queue, scheduled: their database connection is closed before they return, as before). */
+async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, max = 1, ctx?: ExecutionContext, shadowWaitUntil?: (sent: Promise<unknown>) => void): Promise<T> {
   const { Pool, drizzle, sql, CONFIG_KEYS, loadConfig, r2Storage, jobConcurrency, WAKE_SCHEDULE_KEY, core, browserImageRenderer, publicImageImporter, feedbackSink, workWake, enqueueShadow } = await loadRuntimeDeps();
   // Optional Worker variable, default two active jobs; six matches the platform's
   // simultaneous outbound-connection ceiling while the shared SES gate limits rate.
@@ -114,7 +116,10 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
   const config = configFor(env, CONFIG_KEYS, loadConfig);
   // The second classifier's calls are made by its queue's consumer (queue() below), never in this invocation: what a
   // job drain kept goes onto the queue when the drain has ended. With no queue bound there is nowhere to make them: off.
+  // Nothing here waits for those sends: the invocation's waitUntil keeps them alive after it has answered or
+  // acknowledged. Only a caller with no waitUntil at all (none makes a classifier request) would wait for them at its end.
   const shadowQueue = env.JEVF_QUEUE, handovers: Promise<void>[] = [];
+  const keepShadow = shadowWaitUntil ?? (ctx ? (sent: Promise<unknown>) => ctx.waitUntil(sent) : undefined);
   if (!shadowQueue) config.shadow = undefined;
   // Defer Hyperdrive/Pool creation until a handler actually touches db: missing-auth,
   // validation and cached responses never allocate a pool or touch Hyperdrive.
@@ -139,7 +144,7 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
   const rooms = env.CAMPAIGN_ROOMS;
   try {
     const notify = workWake(env.WAKE_QUEUE, concurrency);
-    return await work({ db, storage: r2Storage(env.ATTACHMENTS), config, shadow: shadowQueue && (items => { handovers.push(enqueueShadow(shadowQueue, items)); }), mailR2: env.MAIL && { bucket:env.MAIL,name:setting(env,'MAIL_BUCKET')!,write:setting(env,'MAIL_STORE')==='r2' }, jwksCacheScope: env.HYPERDRIVE,
+    return await work({ db, storage: r2Storage(env.ATTACHMENTS), config, shadow: shadowQueue && (items => { const sent = enqueueShadow(shadowQueue, items); if (keepShadow) keepShadow(sent); else handovers.push(sent); }), mailR2: env.MAIL && { bucket:env.MAIL,name:setting(env,'MAIL_BUCKET')!,write:setting(env,'MAIL_STORE')==='r2' }, jwksCacheScope: env.HYPERDRIVE,
       allowSnsCertMiss: async peer => (await env.SNS_CERT_MISSES.limit({key: `bane:sns-miss:${await core.digest(peer)}`})).success,
       allowMalformedSns: async peer => (await env.ADMISSION.limit({key:`bane:sns-malformed:${await core.digest(peer)}`})).success,
       // 6,000 units of 16 KiB a minute per workspace in each location: about 94 MiB of preview memory, eight previews at the limit.
@@ -182,8 +187,8 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
       if (ctx) ctx.waitUntil(client.end().catch(() => {}));
       else await client.end();
     }
-    // Sends to the second classifier's queue started when a job drain ended, already on their way.
-    if (handovers.length) { if (ctx) ctx.waitUntil(Promise.all(handovers)); else await Promise.all(handovers); }
+    // Sends to the second classifier's queue from a caller that gave no waitUntil: without this they would be cut off.
+    if (handovers.length) await Promise.all(handovers);
     // Dispatch and immediate webhook nudges open no database connection.
     if (ctx && nudges.length) ctx.waitUntil(withRuntime(env, async runtime => { for (const nudge of nudges) await nudge(runtime); }));
   }
@@ -202,6 +207,8 @@ function afterwards(env: Env, ctx: ExecutionContext | undefined, work: (runtime:
 async function flushDueCounters(env: Env, ctx: ExecutionContext | undefined) {
   try { const { countersDue, flushCounters } = await import('./health-counters.js'); if (countersDue()) afterwards(env, ctx, runtime => flushCounters(runtime.db)); } catch { /* Counted again with the next batch. */ }
 }
+/** A handler's waitUntil as withRuntime's shadowWaitUntil. (A test may call a handler with no context.) */
+const waitUntilOf = (ctx: ExecutionContext | undefined) => typeof ctx?.waitUntil === 'function' ? (sent: Promise<unknown>) => ctx.waitUntil(sent) : undefined;
 /**
  * The support platform's service-binding entrypoint (api/README.md "Support integration"): the bane-support Worker in
  * the same account binds `{ service: "bane-production" | "bane-dev", entrypoint: "SupportPlatform" }` and calls these
@@ -379,7 +386,9 @@ export default {
       // Wait in place up to 45 s for a job due soon (paced campaign releases), and schedule at most one follow-up.
       const outcome = await followDueJobs(runtime, () => drainJobs(runtime, 100, concurrency, 10000,pool), delaySeconds => (hooks?env.WEBHOOK_QUEUE:env.WAKE_QUEUE).send({ kind: 'wake' }, { delaySeconds }), 45000,pool);
       core.log('info', { code: 'QUEUE_FOLLOW', outcome });
-    }, concurrency);
+      // A campaign's copies are screened in these drains: their repeats go to the second classifier's queue under
+      // waitUntil, so the acknowledgement below never waits for that queue.
+    }, concurrency, undefined, waitUntilOf(ctx));
     batch.ackAll();
     await flushDueCounters(env, ctx);
   },
@@ -438,6 +447,6 @@ export default {
       if (runtime.config.multiTenant) try { await (await core.wrapModuleLoad(() => import('./billing/stripe-jobs.js'))).billingMinute(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'BILLING_MINUTE_FAILED' }); }
       // Last, as it can take minutes: retention of the sent-side tables (elected every 15 minutes).
       try { await (await core.wrapModuleLoad(() => import('./maintenance.js'))).retentionTick(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'RETENTION_TICK_FAILED' }); }
-    }, concurrency);
+    }, concurrency, undefined, waitUntilOf(ctx)); // The minute cron drains jobs too: as in queue(), nothing waits for the second classifier's queue.
   },
 } satisfies ExportedHandler<Env>;
