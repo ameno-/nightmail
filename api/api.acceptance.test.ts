@@ -26781,6 +26781,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const { mailboxIngestJobs } = await import('./src/mailbox-ingest.js');
       const { storeIncomingBatch } = await import('./src/mailbox-ingest-store.js');
       const { drizzle } = await import('drizzle-orm/node-postgres');
+      runtime.config.aws = { accessKeyId: 'synthetic-fixture', secretAccessKey: 'synthetic-fixture' };
       const wid = runtime.config.workspaceId, host = `burst-${unique('h')}.invalid`, dom = unique('mdom'), box = unique('mbx'), addr = `news@${host}`;
       await db.query("INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,'fixture-burst','arn:aws:sns:us-east-1:000000000000:burst') ON CONFLICT(workspace_id,region) DO NOTHING", [wid, REGION]);
       await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')", [dom, wid, host, REGION]);
