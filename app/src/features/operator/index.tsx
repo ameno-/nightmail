@@ -102,15 +102,17 @@ function SignupLimitForm({ places, idempotencyKey, onClose }: { places: SignupPl
   const limit = Number(value), error = value.trim() === '' || !(Number.isInteger(limit) && limit >= 0 && limit <= 1_000_000) ? 'A whole number from 0 to 1,000,000.' : ''
   // As api/src/signups.ts setLimit: a hold raise holds the places it adds, as far as the waitlist goes; an open one holds none.
   const raising = !error && limit > places.limit, added = raising ? Math.min(limit - places.limit, Math.max(0, limit - places.signedUp - places.held)) : 0
-  const letIn = raise === 'hold' ? Math.min(places.waiting, added) : 0, opened = added - letIn
+  // Only a raise has new places; any other save is sent as hold, so it still retries the emails an earlier save missed.
+  const sent: SignupRaise = raising ? raise : 'hold'
+  const letIn = sent === 'hold' ? Math.min(places.waiting, added) : 0, opened = added - letIn
   const hint = error ? '' : limit < places.limit ? 'Lowering it removes no one.'
-    : [letIn && `Holds ${number(letIn)} for the waitlist and emails them.`, opened && `Opens ${number(opened)} to anyone.`].filter(Boolean).join(' ')
+    : [letIn && `Holds ${number(letIn)} for the oldest waiting and emails them.`, opened && `Opens ${number(opened)} to anyone, first come, no emails.`].filter(Boolean).join(' ')
   const mutation = useMutation({
-    mutationFn: () => operatorApi.setSignupLimit(limit, raise, { idempotencyKey }),
+    mutationFn: () => operatorApi.setSignupLimit(limit, sent, { idempotencyKey }),
     // Everyone held is emailed once; one a failure missed is said here, and saving again emails it.
     onSuccess: saved => {
-      const missed = raise === 'hold' ? saved.notEmailed ?? 0 : 0
-      toast(raise === 'open' && raising ? `Limit saved. ${number(saved.open)} open to anyone.` : missed ? `Limit saved. ${number(missed)} held ${missed === 1 ? 'address isn’t' : 'addresses aren’t'} emailed yet: save again to retry.`
+      const missed = sent === 'hold' ? saved.notEmailed ?? 0 : 0
+      toast(sent === 'open' ? `Limit saved. ${number(saved.open)} open to anyone.` : missed ? `Limit saved. ${number(missed)} held ${missed === 1 ? 'address isn’t' : 'addresses aren’t'} emailed yet: save again to retry.`
         : saved.emailed ? `Limit saved. ${number(saved.emailed)} emailed that they can sign in.` : 'Limit saved', missed ? 'error' : 'success')
       void client.invalidateQueries({ queryKey: ['operator'] }); onClose()
     },
@@ -119,7 +121,7 @@ function SignupLimitForm({ places, idempotencyKey, onClose }: { places: SignupPl
   return <form className="op-dialog-fields" onSubmit={submit} noValidate>
     <Field label="Places" error={tried ? error : ''} hint={hint}><Input type="number" inputMode="numeric" min={0} max={1_000_000} step={1} autoFocus value={value} onChange={event => setValue(event.target.value)} /></Field>
     <Field label="New places" htmlFor="signup-raise"><Select id="signup-raise" value={raise} disabled={!raising} onValueChange={next => setRaise(next as SignupRaise)}
-      options={[{ value: 'hold', label: 'Hold for the waitlist (oldest first, emails them)' }, { value: 'open', label: 'Open to anyone (first come, no emails)' }]} /></Field>
+      options={[{ value: 'hold', label: 'Hold for the waitlist' }, { value: 'open', label: 'Open to anyone' }]} /></Field>
     <MutationError error={mutation.error} />
     <div className="ui-dialog__footer"><Button disabled={mutation.isPending} onClick={onClose}>Cancel</Button><Button type="submit" variant="primary" loading={mutation.isPending}>Save limit</Button></div>
   </form>
