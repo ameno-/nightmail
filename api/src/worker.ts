@@ -26,9 +26,25 @@ function fastSecure(response: Response): Response {
 function untransformed(response: Response, request: Request, status = response.status): Response {
   const headers = new Headers(response.headers), cache = headers.get('cache-control') ?? 'public, max-age=0, must-revalidate';
   if (!/\bno-transform\b/.test(cache)) headers.set('cache-control', `${cache}, no-transform`);
-  const accepts = request.headers.get('accept-encoding') ?? '', encoding = /\bbr\b/.test(accepts) ? 'br' : /\bgzip\b/.test(accepts) ? 'gzip' : null;
-  if (response.body && encoding && !headers.has('content-encoding')) { headers.set('content-encoding', encoding); headers.delete('content-length'); headers.append('vary', 'accept-encoding'); }
+  if ((response.status === 200 || response.status === 304) && !headers.has('content-encoding')) {
+    const encoding = clientEncoding(request), etag = headers.get('etag');
+    headers.append('vary', 'accept-encoding');
+    // The encoded body is another representation of the file: its validator is weak (on the 304 too), as Cloudflare makes
+    // it when it compresses. Workers Assets matches If-None-Match either way.
+    if (encoding && etag?.startsWith('"')) headers.set('etag', `W/${etag}`);
+    if (encoding && response.status === 200) { headers.set('content-encoding', encoding); headers.delete('content-length'); }
+  }
   return fastSecure(new Response(response.body, { status, statusText: status === response.status ? response.statusText : '', headers }));
+}
+
+// What the client accepts. Cloudflare tells every Worker "br, gzip" and keeps the client's own header in
+// cf.clientAcceptEncoding; with no-transform nothing on the way decodes a body for a client that can't, so the choice
+// is made from the client's header (q=0 refuses a coding).
+function clientEncoding(request: Request): 'br' | 'gzip' | null {
+  const header = request.cf ? (typeof request.cf.clientAcceptEncoding === 'string' ? request.cf.clientAcceptEncoding : '') : request.headers.get('accept-encoding') ?? '';
+  const accepted = new Set(header.toLowerCase().split(',').map(part => part.split(';'))
+    .filter(([, ...params]) => !params.some(param => /^\s*q\s*=\s*0(?:\.0*)?\s*$/.test(param))).map(([coding]) => coding!.trim()));
+  return accepted.has('br') ? 'br' : accepted.has('gzip') ? 'gzip' : null;
 }
 
 // /llms.txt: the API's, with the website's own pages under its title when the dashboard build lists them (site-index.ts).
@@ -314,10 +330,10 @@ export default {
       const home = pathname === '/' && ('MULTI_TENANT' in env ? env.MULTI_TENANT : undefined) === 'true';
       if (home) { const page = await assets.fetch(new Request(new URL('/home', url), request)); if (page.ok || page.status === 304) return untransformed(page, request); }
       // A price page (app/price-pages.ts writes one per comparison), or its Markdown twin: the file, compressed here
-      // (untransformed). The assets' own redirects (a trailing slash) and 304s go back as they are.
+      // (untransformed), and its 304 with the same validator. The assets' own redirects (a trailing slash) go back as they are.
       if (pathname === '/pricing' || pathname.startsWith('/compare/')) {
         const page = await assets.fetch(request);
-        if (page.ok) return untransformed(page, request);
+        if (page.ok || page.status === 304) return untransformed(page, request);
         if (page.status !== 404) return fastSecure(page);
       }
       const shell = await assets.fetch(new Request(new URL('/', url), request));
