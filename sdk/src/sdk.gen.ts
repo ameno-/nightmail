@@ -2501,7 +2501,7 @@ export const getDomain = <ThrowOnError extends boolean = false>(options: Options
 });
 
 /**
- * On MX, request a background verification and return the current stored status, with what public DNS shows now for each pending sending and MAIL FROM record (dns[].publicDns), so a missing or mistyped record can be named. Read the domain again for updates.
+ * On MX, request a background verification and return the current stored status, with what public DNS shows now for each pending sending and MAIL FROM record (dns[].publicDns), so a missing or mistyped record can be named, and where the domain's DNS is hosted (dnsHost). Read the domain again for updates.
  */
 export const verifyDomain = <ThrowOnError extends boolean = false>(options: Options<VerifyDomainData, ThrowOnError>): RequestResult<VerifyDomainResponses, VerifyDomainErrors, ThrowOnError> => (options.client ?? client).post<VerifyDomainResponses, VerifyDomainErrors, ThrowOnError>({
     security: [
