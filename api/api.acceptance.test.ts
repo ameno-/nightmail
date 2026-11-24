@@ -28269,7 +28269,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.ok(after.system.status === 'critical' || after.system.status === 'stale');
       assert.deepEqual([after.system.ses!.maxSendRate - (before.system.ses?.maxSendRate ?? 0), after.system.ses!.max24HourSend - (before.system.ses?.max24HourSend ?? 0), after.system.ses!.sentLast24Hours - (before.system.ses?.sentLast24Hours ?? 0)], [14, 50000, 1200]);
       assert.deepEqual(after.system.deploy, { sha: '0123456789abcdef0123456789abcdef01234567', at: '2026-11-24T12:00:00.000Z' });
-      assert.deepEqual([after.visitors.views - before.visitors.views, after.visitors.visitors - before.visitors.visitors, after.visitors.referrers[0]], [1000000, 2, { host: 'news.glass.example', views: after.visitors.referrers[0]!.views }]);
+      assert.deepEqual([after.visitors.views - before.visitors.views, after.visitors.visitors.n - before.visitors.visitors.n, after.visitors.visitors.atLeast, after.visitors.referrers[0]], [1000000, 2, false, { host: 'news.glass.example', views: after.visitors.referrers[0]!.views }]);
       assert.ok(after.visitors.referrers[0]!.views >= 1000000);
 
       // The route: an operator reads the same figures, every series its full length, cached for the next read.

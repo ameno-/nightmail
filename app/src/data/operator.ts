@@ -73,7 +73,7 @@ export interface Glass {
     alerts: { critical: number; warning: number; top: { key: string; label: string; severity: 'critical' | 'warning'; words: string; since: string }[] }
     ses: { regions: number; maxSendRate: number; max24HourSend: number; sentLast24Hours: number; checkedAt: string | null } | null
     deploy: { sha: string | null; at: string | null } }
-  visitors: { views: number; visitors: number; hourly: number[]; referrers: { host: string; views: number }[]; through: string | null }
+  visitors: { views: number; visitors: GlassCount; hourly: number[]; referrers: { host: string; views: number }[]; through: string | null }
 }
 /** Abuse monitoring (/v1/operator/abuse/*): accounts and workspaces that share signals, scored for a person to review. */
 export type AbuseBand = 'low' | 'watch' | 'review' | 'high'

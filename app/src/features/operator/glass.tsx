@@ -78,8 +78,8 @@ function fill(g: Glass) {
     },
     visitors: {
       views: { hint: 'today', spark: visitors.hourly, value: number(visitors.views) },
-      visitors: { hint: 'today', value: number(visitors.visitors) },
-      ...Object.fromEntries([0, 1, 2].map(i => { const r = visitors.referrers[i]; return [`referrer:${i}`, r ? { label: r.host, hint: i === 0 ? '7 days' : undefined, value: number(r.views) } : empty(i === 0, 'No referrers yet')] })),
+      visitors: { hint: 'today', value: count(visitors.visitors) },
+      ...Object.fromEntries([0, 1, 2].map(i => { const r = visitors.referrers[i]; return [`referrer:${i}`, r ? { label: r.host, value: number(r.views) } : empty(i === 0, 'No referrers yet')] })),
     },
   }
   return (group: string, row: string) => rows[group]?.[row] ?? { value: '—' }

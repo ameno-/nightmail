@@ -23,7 +23,8 @@ import { MicroCentsJson } from './billing/money.js';
 //    CAP + 1 a workspace (atLeast says when a count stopped there);
 //  - sign-ups, standing, billing accounts and the health tables: small tables (one row per account, workspace or alert);
 //  - money: topups through the ledger's (kind, source_id) index, this month's cost from billing_months per account;
-//  - visitors: analytics_hourly (#680), by its hour-first key.
+//  - visitors: analytics_hourly (#680), by its hour-first key: today's hours only, and at most GLASS_VISITOR_CODES visitor
+//    codes told apart (a busier day's count is a lower bound).
 // Hidden from the public OpenAPI document. Like every /v1/operator path it is behind support.ts operatorGate: anyone but a
 // signed-in operator gets the gate's one refusal, the same as for a path that doesn't exist, so nothing says it is here;
 // the dashboard's /glass answers them "Page not found".
@@ -31,6 +32,8 @@ import { MicroCentsJson } from './billing/money.js';
 const GLASS_TTL_SECONDS = 30;
 /** Bounded counts read at most this many rows (one more says the count is a lower bound). */
 export const GLASS_CAP = 10_000;
+/** Today's visitors are told apart among at most this many hourly visitor codes (#680 keeps up to 50,000 an hour). */
+export const GLASS_VISITOR_CODES = 50_000;
 const SEND_ROUTES = ['POST /v1/emails/send', 'POST /v1/emails/batch'];
 
 const int = z.number().int();
@@ -66,7 +69,7 @@ const Glass = z.object({
     ses: z.object({ regions: int, maxSendRate: z.number(), max24HourSend: z.number(), sentLast24Hours: z.number(), checkedAt: z.string().nullable() }).nullable(),
     deploy: z.object({ sha: z.string().nullable(), at: z.string().nullable() }),
   }),
-  visitors: z.object({ views: int, visitors: int, hourly: z.array(int), referrers: z.array(z.object({ host: z.string(), views: int })).describe('The last 7 days.'),
+  visitors: z.object({ views: int, visitors: Count.describe(`Told apart among at most ${GLASS_VISITOR_CODES.toLocaleString('en-US')} hourly visitor codes.`), hourly: z.array(int), referrers: z.array(z.object({ host: z.string(), views: int })).describe('Today.'),
     through: z.string().nullable().describe('The end of the last hour rolled up.') }),
 });
 export type Glass = z.infer<typeof Glass>;
@@ -81,7 +84,7 @@ type Raw = {
   health: { generatedAt: string | null; stale: boolean; campaigns: { id: string; rate: number | null }[] | null } | null;
   alerts: { key: string; kind: string; severity: 'critical' | 'warning'; words: string; since: string }[];
   ses: { regions: number; maxSendRate: number | null; max24HourSend: number | null; sentLast24Hours: number | null; checkedAt: string | null };
-  views: number; visitors: number; views_hourly: number[]; referrers: { host: string; views: number }[]; views_through: string | null;
+  views: number; visitors: { n: number; capped: boolean }; views_hourly: number[]; referrers: { host: string; views: number }[]; views_through: string | null;
 };
 
 const utc = (value: SQL) => sql`to_char((${value}) AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"')`;
@@ -102,7 +105,10 @@ export async function readGlass(runtime: Pick<Runtime, 'db' | 'config'>): Promis
     mail AS MATERIALIZED (SELECT x.hour,x.kind='marketing' AS marketing,sum(x.accepted)::bigint AS accepted,sum(x.delivered)::bigint AS delivered,sum(x.bounced)::bigint AS bounced,sum(x.complained)::bigint AS complained
       FROM workspaces w CROSS JOIN LATERAL (SELECT m.hour,m.kind,m.accepted,m.delivered,m.bounced,m.complained FROM sending_metrics_hourly m WHERE m.workspace_id=w.id AND m.hour>=(SELECT since FROM t)) x GROUP BY 1,2),
     inbound AS MATERIALIZED (SELECT w.id,y.received_at,y.spam FROM workspaces w CROSS JOIN LATERAL (SELECT m.received_at,m.spam FROM mail_messages m
-      WHERE m.workspace_id=w.id AND m.direction='inbound' AND m.received_at>=(SELECT since FROM t) ORDER BY m.received_at DESC LIMIT ${cap}) y)
+      WHERE m.workspace_id=w.id AND m.direction='inbound' AND m.received_at>=(SELECT since FROM t) ORDER BY m.received_at DESC LIMIT ${cap}) y),
+    -- Hashed, not sorted: count(DISTINCT) sorts.
+    visitor_codes AS MATERIALIZED (SELECT v FROM analytics_hourly a CROSS JOIN LATERAL unnest(a.visitor_ids) v
+      WHERE a.hour>=(SELECT today FROM t) AND a.metric='visit' LIMIT ${GLASS_VISITOR_CODES + 1})
     SELECT (SELECT row_to_json(p) FROM (${placesRow}) p) AS places,
       (SELECT json_build_object('today',json_build_object('open',count(*) FILTER (WHERE s.at>=t.today AND s.via='open'),'waitlist',count(*) FILTER (WHERE s.at>=t.today AND s.via='waitlist')),
           'week',json_build_object('open',count(*) FILTER (WHERE s.at>=now()-interval '7 days' AND s.via='open'),'waitlist',count(*) FILTER (WHERE s.at>=now()-interval '7 days' AND s.via='waitlist')))
@@ -127,7 +133,7 @@ export async function readGlass(runtime: Pick<Runtime, 'db' | 'config'>): Promis
       (SELECT json_build_object(${gradeCounts},'calibrating',count(*) FILTER (WHERE s.phase<>'graded' OR s.score IS NULL)) FROM sender_standing s) AS grades,
       (SELECT json_build_object('paused',count(*) FILTER (WHERE pc.paused_at IS NOT NULL),'held',count(*) FILTER (WHERE pc.paused_at IS NULL AND pc.marketing_held_at IS NOT NULL)) FROM provider_connections pc WHERE pc.kind='shared') AS standing,
       (SELECT json_build_object('today',count(*) FILTER (WHERE i.received_at>=t.today),'spam',count(*) FILTER (WHERE i.received_at>=t.today AND i.spam),
-          'capped',coalesce(bool_or(i.n>=${cap}),false)) FROM (SELECT received_at,spam,count(*) OVER (PARTITION BY id) AS n FROM inbound) i) AS received,
+          'capped',EXISTS (SELECT FROM inbound GROUP BY id HAVING count(*)>=${cap})) FROM inbound i) AS received,
       ${series(sql`t.hour-interval '23 hours'`, 'hour', 24, sql`SELECT date_trunc('hour',received_at,'UTC') AS at,count(*) AS n FROM inbound GROUP BY 1`)} AS received_hourly,
       (SELECT json_build_object('today',coalesce(sum(l.paid_uc) FILTER (WHERE l.created_at>=t.today),0)::text,'month',coalesce(sum(l.paid_uc),0)::text) FROM billing_ledger l WHERE l.kind='topup' AND l.created_at>=t.month) AS credit,
       ${series(sql`t.month`, 'day', 0, sql`SELECT date_trunc('day',l.created_at,'UTC') AS at,(sum(l.paid_uc)/1000000)::bigint AS n FROM billing_ledger l WHERE l.kind='topup' AND l.created_at>=t.month GROUP BY 1`, sql`t.today`)} AS credit_daily,
@@ -138,10 +144,10 @@ export async function readGlass(runtime: Pick<Runtime, 'db' | 'config'>): Promis
       (SELECT json_build_object('regions',count(*),'maxSendRate',sum(l.max_send_rate),'max24HourSend',sum(l.max_24_hour_send),'sentLast24Hours',sum(l.sent_last_24_hours),'checkedAt',${utc(sql`max(l.checked_at)`)})
         FROM provider_pool_regions p JOIN provider_account_limits l ON l.aws_account_id=p.aws_account_id AND l.region=p.region WHERE ${poolSends()}) AS ses,
       (SELECT coalesce(sum(events),0)::int FROM analytics_hourly WHERE hour>=t.today AND metric='page_view') AS views,
-      (SELECT count(DISTINCT v)::int FROM analytics_hourly a CROSS JOIN LATERAL unnest(a.visitor_ids) v WHERE a.hour>=t.today AND a.metric='visit') AS visitors,
+      json_build_object('n',(SELECT count(*) FROM (SELECT DISTINCT v FROM visitor_codes) d),'capped',(SELECT count(*) FROM visitor_codes)>${GLASS_VISITOR_CODES}) AS visitors,
       ${series(sql`t.hour-interval '24 hours'`, 'hour', 24, sql`SELECT hour AS at,sum(events) AS n FROM analytics_hourly WHERE hour>=t.hour-interval '24 hours' AND metric='page_view' GROUP BY 1`)} AS views_hourly,
       (SELECT coalesce(json_agg(r ORDER BY r.views DESC,r.host),'[]') FROM (SELECT dimensions->>'referrer' AS host,sum(events)::int AS views FROM analytics_hourly
-        WHERE hour>=t.today-interval '6 days' AND metric='page_view' AND dimensions->>'referrer' IS NOT NULL AND dimensions->>'referrer'<>${own} GROUP BY 1 ORDER BY 2 DESC,1 LIMIT 3) r) AS referrers,
+        WHERE hour>=t.today AND metric='page_view' AND dimensions->>'referrer' IS NOT NULL AND dimensions->>'referrer'<>${own} GROUP BY 1 ORDER BY 2 DESC,1 LIMIT 3) r) AS referrers,
       (SELECT ${utc(sql`max(hour)+interval '1 hour'`)} FROM analytics_hours) AS views_through
     FROM t`);
   return shape(r!, runtime.config);
@@ -174,7 +180,7 @@ function shape(r: Raw, config: Pick<Runtime['config'], 'deploy'>): Glass {
     receiving: { today: num(r.received.today), spam: num(r.received.spam), atLeast: r.received.capped, hourly: r.received_hourly.map(num) },
     money: { creditToday: r.credit.today, creditMonth: r.credit.month, creditDaily: r.credit_daily.map(num), owed: r.owed.uc, owing: num(r.owed.workspaces), usageMonth: r.usage },
     system: { status, measuredAt: r.health?.generatedAt ?? null, alerts: { critical, warning, top: alerts.slice(0, 3) }, ses, deploy: { sha: config.deploy?.sha ?? null, at: config.deploy?.at ?? null } },
-    visitors: { views: num(r.views), visitors: num(r.visitors), hourly: r.views_hourly.map(num), referrers: r.referrers, through: r.views_through },
+    visitors: { views: num(r.views), visitors: { n: num(r.visitors.n), atLeast: r.visitors.capped }, hourly: r.views_hourly.map(num), referrers: r.referrers, through: r.views_through },
   };
 }
 
