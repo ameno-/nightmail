@@ -16860,10 +16860,14 @@ describe('Campaign authorization and dispatch credentials', () => {
   });
 });
 
-// Package B (billing-build-spec §12.2). Stripe is a stateful in-memory fake behind STRIPE_API_BASE: customers, Checkout
-// sessions, invoices, payment and setup intents, refunds and credit notes, honouring idempotency keys, with switches for
-// declines, a 5xx before any effect, an answer lost after the effect, and refusals. No real key exists in this file.
+// Package B (billing-build-spec §12.2). Stripe is a stateful in-memory fake behind STRIPE_API_BASE: customers, products,
+// Checkout sessions, invoices, payment and setup intents, refunds and credit notes, honouring idempotency keys, with
+// switches for declines, a 5xx before any effect, an answer lost after the effect, and refusals. Tax is charged only when
+// automatic_tax is on, and an invoice with it needs a location (the customer's address, else its card's billing address),
+// as Stripe Tax does. No real key exists in this file.
 const STRIPE_TEST_BASE = 'https://stripe.test', STRIPE_TEST_WEBHOOK_SECRET = 'whsec_test';
+/** What Checkout collects with billing_address_collection=required. */
+const STRIPE_FULL_ADDRESS = { line1: '1 Market St', city: 'San Francisco', state: 'CA', postal_code: '94105', country: 'US' };
 type FakeRule = { match: RegExp; times: number; code?: string; param?: string; message?: string };
 function decodeStripeForm(form: URLSearchParams): Json {
   const out: Json = {};
@@ -16884,27 +16888,36 @@ function fakeStripe(t: TestContext, inTransaction: () => boolean) {
     objects, calls, violations: [] as string[],
     /** The card every checkout or setup saves; a fresh fingerprint per fixture. */
     card: { brand: 'visa', last4: '4242', exp_month: 12, exp_year: 2030, fingerprint: `fp_${randomUUID().slice(0, 12)}` },
+    /** The billing address the card form collects when a full one isn't required; null: none. */
+    billingAddress: { country: 'US', postal_code: '10001' } as Json | null,
     taxRate: 0, refundStatus: 'succeeded',
     decline: null as null | { code: string; decline_code?: string },
     unavailable: [] as FakeRule[], lost: [] as FakeRule[], refused: [] as FakeRule[],
     onRequest: undefined as undefined | ((method: string, path: string) => Promise<void>),
     count: (pattern: RegExp) => calls.filter(c => pattern.test(`${c.method} ${c.path}`)).length,
     invoices: () => [...objects.values()].filter(o => o.object === 'invoice'),
-    paymentMethod(customer: string | null) {
-      const pm = { id: next('pm'), object: 'payment_method', type: 'card', customer, card: { ...fake.card } };
+    paymentMethod(customer: string | null, address?: Json | null): Json {
+      const pm = { id: next('pm'), object: 'payment_method', type: 'card', customer, card: { ...fake.card }, billing_details: { address: address === undefined ? fake.billingAddress : address } };
       objects.set(pm.id, pm); return pm;
     },
-    charge(amount: number, customer: string | null, metadata: Json = {}) {
-      const pm = fake.paymentMethod(customer), pi = { id: next('pi'), object: 'payment_intent', amount, status: 'succeeded', customer, payment_method: pm.id, latest_charge: '', metadata };
+    /** The address a Checkout session collects, saved on its customer when customer_update.address is auto. */
+    address(s: Json): Json | null {
+      const address: Json | null = s.params.billing_address_collection === 'required' ? { ...STRIPE_FULL_ADDRESS } : fake.billingAddress;
+      if (address && s.params.customer_update?.address === 'auto' && objects.has(s.customer)) objects.get(s.customer)!.address = address;
+      return address;
+    },
+    charge(amount: number, customer: string | null, metadata: Json = {}, address?: Json | null) {
+      const pm = fake.paymentMethod(customer, address), pi = { id: next('pi'), object: 'payment_intent', amount, status: 'succeeded', customer, payment_method: pm.id, latest_charge: '', metadata };
       const ch = { id: next('ch'), object: 'charge', amount, payment_intent: pi.id, receipt_url: `https://pay.stripe.test/receipts/${pi.id}` };
       pi.latest_charge = ch.id; objects.set(pi.id, pi); objects.set(ch.id, ch); return pi;
     },
     /** A person paid on the Checkout page: the session completes with a PaymentIntent and Checkout's paid invoice. */
     payCheckout(sessionId: string, options: { subtotal?: number } = {}) {
-      const s = objects.get(sessionId)!, subtotal = options.subtotal ?? Number(s.params.line_items['0'].price_data.unit_amount), tax = Math.round(subtotal * fake.taxRate);
-      const pi = fake.charge(subtotal + tax, s.customer, s.params.payment_intent_data?.metadata ?? {});
+      const s = objects.get(sessionId)!, subtotal = options.subtotal ?? Number(s.params.line_items['0'].price_data.unit_amount);
+      const tax = s.params.automatic_tax?.enabled === 'true' ? Math.round(subtotal * fake.taxRate) : 0;
+      const pi = fake.charge(subtotal + tax, s.customer, s.params.payment_intent_data?.metadata ?? {}, fake.address(s));
       const invoice = { id: next('in'), object: 'invoice', status: 'paid', customer: s.customer, metadata: s.params.invoice_creation?.invoice_data?.metadata ?? {}, created: now(),
-        lines: { data: [{ id: next('il'), amount: subtotal }] }, subtotal, total: subtotal + tax, total_excluding_tax: subtotal, amount_paid: subtotal + tax,
+        lines: { data: [{ id: next('il'), amount: subtotal, product: s.params.line_items['0'].price_data.product }] }, subtotal, total: subtotal + tax, total_excluding_tax: subtotal, amount_paid: subtotal + tax,
         hosted_invoice_url: 'https://invoice.stripe.test/i/' + sessionId, invoice_pdf: 'https://invoice.stripe.test/pdf/' + sessionId,
         payments: { object: 'list', data: [{ status: 'paid', payment: { type: 'payment_intent', payment_intent: pi.id } }] } };
       objects.set(invoice.id, invoice);
@@ -16912,7 +16925,7 @@ function fakeStripe(t: TestContext, inTransaction: () => boolean) {
       return s;
     },
     completeSetup(sessionId: string) {
-      const s = objects.get(sessionId)!, pm = fake.paymentMethod(s.customer), si = { id: next('seti'), object: 'setup_intent', status: 'succeeded', payment_method: pm.id };
+      const s = objects.get(sessionId)!, pm = fake.paymentMethod(s.customer, fake.address(s)), si = { id: next('seti'), object: 'setup_intent', status: 'succeeded', payment_method: pm.id };
       objects.set(si.id, si); Object.assign(s, { status: 'complete', setup_intent: si.id }); return s;
     },
   };
@@ -16936,10 +16949,18 @@ function fakeStripe(t: TestContext, inTransaction: () => boolean) {
       return error(400, 'invalid_request_error', undefined, { param: 'reason', message: 'Invalid reason: must be one of duplicate, fraudulent, order_change, or product_unsatisfactory' });
     if (method === 'POST' && path === '/v1/refunds' && p.reason !== undefined && !['duplicate', 'fraudulent', 'requested_by_customer'].includes(p.reason))
       return error(400, 'invalid_request_error', undefined, { param: 'reason' });
+    const product = (data: Json | undefined) => data?.product === undefined || objects.get(data.product)?.object === 'product';
     switch (true) {
+      case method === 'POST' && path === '/v1/products': {
+        if (p.id && objects.has(p.id)) return error(400, 'invalid_request_error', 'resource_already_exists', { param: 'id' });
+        const prod = { id: p.id ?? next('prod'), object: 'product', active: true, name: p.name, tax_code: p.tax_code ?? null, metadata: p.metadata ?? {} };
+        objects.set(prod.id, prod); return [200, prod];
+      }
+      case method === 'GET' && /^\/v1\/products\/[^/]+$/.test(path): return found?.object === 'product' ? [200, found] : missing();
       case method === 'POST' && path === '/v1/customers': { const c = { id: next('cus'), object: 'customer', name: p.name, email: p.email, metadata: p.metadata, invoice_settings: {} }; objects.set(c.id, c); return [200, c]; }
       case method === 'POST' && /^\/v1\/customers\/[^/]+$/.test(path): return found ? [200, Object.assign(found, { invoice_settings: p.invoice_settings })] : missing();
       case method === 'POST' && path === '/v1/checkout/sessions': {
+        if (!product(p.line_items?.['0']?.price_data)) return error(400, 'invalid_request_error', 'resource_missing', { param: 'line_items[0][price_data][product]' });
         const s = { id: next('cs'), object: 'checkout.session', mode: p.mode, status: 'open', payment_status: 'unpaid', url: `https://checkout.stripe.test/c/${serial}`, expires_at: Number(p.expires_at),
           customer: p.customer, client_reference_id: p.client_reference_id, metadata: p.metadata, amount_subtotal: Number(p.line_items?.['0']?.price_data?.unit_amount ?? 0), amount_total: null,
           payment_intent: null, invoice: null, setup_intent: null, params: p };
@@ -16951,7 +16972,10 @@ function fakeStripe(t: TestContext, inTransaction: () => boolean) {
       case method === 'GET' && /^\/v1\/setup_intents\/[^/]+$/.test(path): return found ? [200, expand(found, fields)] : missing();
       case method === 'POST' && /^\/v1\/payment_methods\/[^/]+\/detach$/.test(path): return found ? [200, Object.assign(found, { customer: null })] : missing();
       case method === 'POST' && path === '/v1/invoices': {
-        const i = { id: next('in'), object: 'invoice', status: 'draft', customer: p.customer, metadata: p.metadata, default_payment_method: p.default_payment_method, created: now(),
+        const automaticTax = p.automatic_tax?.enabled === 'true';
+        const location = objects.get(p.customer)?.address ?? objects.get(p.default_payment_method)?.billing_details?.address;
+        if (automaticTax && !(location?.country && location?.postal_code)) return error(400, 'invalid_request_error', 'customer_tax_location_invalid');
+        const i = { id: next('in'), object: 'invoice', status: 'draft', customer: p.customer, metadata: p.metadata, default_payment_method: p.default_payment_method, created: now(), automatic_tax: automaticTax,
           lines: { data: [] as Json[] }, subtotal: 0, total: 0, total_excluding_tax: 0, amount_paid: 0, hosted_invoice_url: null, invoice_pdf: null, payments: { object: 'list', data: [] } };
         objects.set(i.id, i); return [200, i];
       }
@@ -16962,8 +16986,9 @@ function fakeStripe(t: TestContext, inTransaction: () => boolean) {
       case method === 'POST' && path === '/v1/invoiceitems': {
         const i = objects.get(p.invoice); if (!i) return missing();
         if (i.status !== 'draft') return error(400, 'invalid_request_error', 'invoice_not_editable');
-        const amount = Number(p.amount), tax = Math.round(amount * fake.taxRate);
-        i.lines.data.push({ id: next('il'), amount }); Object.assign(i, { subtotal: i.subtotal + amount, total_excluding_tax: i.total_excluding_tax + amount, total: i.total + amount + tax });
+        if (!product(p.price_data)) return error(400, 'invalid_request_error', 'resource_missing', { param: 'price_data[product]' });
+        const amount = Number(p.price_data?.unit_amount ?? p.amount), tax = i.automatic_tax ? Math.round(amount * fake.taxRate) : 0;
+        i.lines.data.push({ id: next('il'), amount, product: p.price_data?.product ?? null }); Object.assign(i, { subtotal: i.subtotal + amount, total_excluding_tax: i.total_excluding_tax + amount, total: i.total + amount + tax });
         return [200, { id: next('ii'), object: 'invoiceitem', invoice: i.id, amount }];
       }
       case method === 'GET' && /^\/v1\/invoices\/[^/]+$/.test(path): return found ? [200, found] : missing();
@@ -16986,7 +17011,10 @@ function fakeStripe(t: TestContext, inTransaction: () => boolean) {
       }
       case method === 'GET' && /^\/v1\/refunds\/[^/]+$/.test(path): return found ? [200, found] : missing();
       case method === 'GET' && path === '/v1/credit_notes/preview': {
-        const amount = Number(query.get('lines[0][amount]')); return [200, { object: 'credit_note', total: amount + Math.round(amount * fake.taxRate) }];
+        // Tax comes back in proportion to the invoice's own.
+        const amount = Number(query.get('lines[0][amount]')), invoice = objects.get(query.get('invoice') ?? '');
+        const rate = invoice?.total_excluding_tax ? (invoice.total - invoice.total_excluding_tax) / invoice.total_excluding_tax : 0;
+        return [200, { object: 'credit_note', total: amount + Math.round(amount * rate) }];
       }
       case method === 'POST' && path === '/v1/credit_notes': {
         const invoice = objects.get(p.invoice); if (!invoice) return missing();
@@ -17097,6 +17125,9 @@ describe('Billing: Stripe', () => {
       future: created.params.payment_intent_data.setup_future_usage, invoice: created.params.invoice_creation.enabled, attempt: created.params.metadata.bane_attempt, workspace: created.params.metadata.bane_workspace, env: created.params.metadata.bane_env },
       { mode: 'payment', amount: '5000', tax: 'exclusive', future: 'off_session', invoice: 'true', attempt: top.attemptId, workspace: wid, env: 'dev' });
     assert.equal(created.params.automatic_tax, undefined, 'Tax stays off until STRIPE_AUTOMATIC_TAX is set.');
+    // Every top-up is for the one credit product, created on first use with the SaaS tax code: never a product per page.
+    assert.deepEqual([created.params.line_items['0'].price_data.product, created.params.line_items['0'].price_data.product_data], ['nightmail_credit', undefined]);
+    assert.deepEqual(fake.objects.get('nightmail_credit'), { id: 'nightmail_credit', object: 'product', active: true, name: 'Nightmail credit', tax_code: 'txcd_10103001', metadata: {} });
     assert.deepEqual([created.params.payment_method_types, created.params.allowed_payment_method_types], [undefined, { 0: 'card' }], 'Cards only, without the parameter API 2026-09-30.endive removed.');
     assert.equal([...fake.objects.values()].find(o => o.object === 'customer')!.name, 'Billing fixture', 'The customer name is one line.');
     assert.equal((await attempt(top.attemptId)).status, 'pending');
@@ -17139,6 +17170,7 @@ describe('Billing: Stripe', () => {
     await stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 2000, actor: 'user:fixture', billingEmail: null });
     await assert.rejects(stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 2000, actor: 'user:fixture', billingEmail: null }), { status: 429, code: 'TOP_UP_RATE_LIMITED' });
     assert.equal(fake.count(/^POST \/v1\/customers$/), 1, 'One Stripe customer per workspace.');
+    assert.deepEqual([fake.count(/^GET \/v1\/products\//), fake.count(/^POST \/v1\/products$/)], [1, 1], 'The product is looked up and created once, then remembered.');
     const listed = await stripe.listPayments(runtime.db, wid, null, 2);
     assert.equal(listed.data.length, 2); assert.ok(listed.nextCursor);
     const rest = await stripe.listPayments(runtime.db, wid, listed.nextCursor, 10);
@@ -17239,6 +17271,9 @@ describe('Billing: Stripe', () => {
     const pay = fake.calls.find(c => /\/pay$/.test(c.path))!;
     const first = (await recharges())[0].id, charged = fake.invoices().find(i => i.metadata.bane_attempt === first)!;
     assert.deepEqual([pay.params.off_session, charged.default_payment_method, charged.metadata.bane_workspace, pay.key], ['true', saved.stripe_payment_method, wid, `attempt:${first}:pay`]);
+    const item = fake.calls.find(c => c.path === '/v1/invoiceitems')!;
+    assert.deepEqual([item.params.price_data, item.params.amount, item.key, fake.calls.find(c => c.path === '/v1/invoices' && c.method === 'POST')!.params.automatic_tax],
+      [{ currency: 'usd', product: 'nightmail_credit', unit_amount: '2500', tax_behavior: 'exclusive' }, undefined, `attempt:${first}:item`, { enabled: 'false' }], 'The invoice line is the credit product.');
     await recharge();
     assert.equal((await recharges()).length, 1, 'Above the threshold nothing is charged.');
     // Spend down: a second recharge fits the $50 month; a third would not.
@@ -17501,6 +17536,7 @@ describe('Billing: Stripe', () => {
     assert.equal(outcomes.filter(o => o.status === 'fulfilled').length, 5);
     assert.ok(outcomes.every(o => o.status === 'fulfilled' || (o.reason as Json).code === 'TOP_UP_RATE_LIMITED'));
     assert.deepEqual([fake.count(/^POST \/v1\/checkout\/sessions$/), new Set(fake.calls.filter(c => c.path === '/v1/customers').map(c => c.key)).size], [5, 1]);
+    assert.deepEqual([fake.count(/^GET \/v1\/products\//), fake.count(/^POST \/v1\/products$/)], [1, 1], 'Concurrent pages share one product lookup.');
   });
   // Production, 2026-11-13: every top-up failed because Checkout no longer takes payment_method_types (API 2026-09-30.endive),
   // and the log said only invalid_request_error. The fake refuses removed parameters like Stripe; the log carries Stripe's words.
@@ -17538,6 +17574,70 @@ describe('Billing: Stripe', () => {
     assert.deepEqual([paid.stripe_invoice, paid.invoice_url, paid.invoice_pdf], [invoice.id, invoice.hosted_invoice_url, invoice.invoice_pdf]);
     assert.equal((await stripe.getPayment(runtime.db, wid, top.attemptId))!.invoiceUrl, invoice.hosted_invoice_url);
     assert.deepEqual([(await ledger()).length, (await account()).balance], [1, String(2000n * UC)], 'Credited once.');
+  });
+  // Finance, 2026-11-24 (tax through Stripe Tax and its provider): every charge is a line for one product with the SaaS
+  // tax code, and with STRIPE_AUTOMATIC_TAX on, Checkout and every off-session invoice ask Stripe for tax.
+  test('Tax: one credit product that is never overwritten; with automatic tax on, Checkout, saved cards and invoices carry what Stripe Tax needs, and a card without an address stops auto-recharge with a plain notice', async t => {
+    const { runtime, db, fake, wid, deliver, account, attempt, ledger, enforcement, backdate, saveCard, recharge, stripe } = await stripeFixture(t);
+    const cfg = stripe.stripeConfig(runtime);
+    await enforcement('enforce');
+    const recharges = async () => (await db.query("SELECT id, status, failure_code, charged_cents, tax_cents FROM billing_payment_attempts WHERE workspace_id = $1 AND kind = 'recharge' ORDER BY created_at", [wid])).rows;
+    const notices = async () => (await db.query("SELECT data FROM billing_notices WHERE workspace_id = $1 AND kind = 'recharge_failed'", [wid])).rows;
+    const on = () => stripe.setAutoRecharge(runtime, wid, { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 100_000 });
+    const errors = t.mock.method(console, 'error', () => {}), warnings = t.mock.method(console, 'warn', () => {});
+    // A card saved before tax was on, with no billing address.
+    fake.billingAddress = null;
+    await saveCard();
+    await on();
+    // The key can't read products (configuration, not the card): nothing is charged, the recharge waits for
+    // reconciliation, and auto-recharge stays on without a notice.
+    fake.refused.push({ match: /^GET \/v1\/products\//, times: 1, message: 'The provided key does not have the required permissions for this endpoint.' });
+    await recharge();
+    const [stuck] = await recharges();
+    assert.ok(errors.mock.calls.some(c => String(c.arguments[0]).includes('BILLING_CREDIT_PRODUCT_UNAVAILABLE')));
+    assert.deepEqual([stuck.status, fake.count(/^POST \/v1\/invoices$/), (await account()).recharge_enabled, (await account()).recharge_pending_attempt, (await notices()).length], ['created', 0, true, stuck.id, 0]);
+    // Tax turns on. Meanwhile the product was made with another tax code (in Stripe by hand, or by another isolate
+    // first): it is used as it is and the difference logged, never overwritten.
+    cfg.automaticTax = true; fake.taxRate = 0.1;
+    fake.onRequest = async (method, path) => {
+      if (method === 'POST' && path === '/v1/products') fake.objects.set('nightmail_credit', { id: 'nightmail_credit', object: 'product', active: true, name: 'Nightmail credit', tax_code: 'txcd_10000000', metadata: {} });
+    };
+    await backdate(stuck.id, 600);
+    // Neither the customer nor the card has an address, so Stripe Tax can't place the charge: auto-recharge turns off
+    // with one notice in plain words, and updating the card is the fix.
+    assert.equal(await stripe.reconcileAttempt(runtime, stuck.id), 'failed');
+    fake.onRequest = undefined;
+    assert.deepEqual([(await attempt(stuck.id)).failure_code, (await account()).recharge_enabled, (await notices()).map(n => n.data.code)], ['customer_tax_location_invalid', false, ['customer_tax_location_invalid']]);
+    assert.equal((await import('./src/billing/notify.js')).declineWords('customer_tax_location_invalid', 'Synthetic.'), 'the card has no billing address to work out tax from');
+    assert.ok(warnings.mock.calls.some(c => /BILLING_CREDIT_PRODUCT_DIFFERS.*txcd_10000000/.test(String(c.arguments[0]))));
+    assert.equal(fake.objects.get('nightmail_credit')!.tax_code, 'txcd_10000000', 'An existing product is never overwritten.');
+    assert.deepEqual(fake.calls.filter(c => c.path.startsWith('/v1/products')).map(c => `${c.method} ${c.path}`),
+      ['GET /v1/products/nightmail_credit', 'GET /v1/products/nightmail_credit', 'POST /v1/products', 'GET /v1/products/nightmail_credit']);
+    assert.deepEqual(fake.calls.find(c => c.path === '/v1/products')!.params, { id: 'nightmail_credit', name: 'Nightmail credit', tax_code: 'txcd_10103001' });
+    // Updating the card asks for a full billing address now, and the next recharge is taxed on top of the credit.
+    await saveCard();
+    assert.equal(fake.calls.filter(c => c.path === '/v1/checkout/sessions').at(-1)!.params.billing_address_collection, 'required');
+    await on();
+    await recharge();
+    const taxed = (await recharges())[1];
+    assert.deepEqual([taxed.status, taxed.charged_cents, taxed.tax_cents], ['succeeded', 2750, 250]);
+    const invoiced = fake.calls.filter(c => c.path === '/v1/invoices' && c.method === 'POST').at(-1)!, item = fake.calls.filter(c => c.path === '/v1/invoiceitems').at(-1)!;
+    assert.deepEqual([invoiced.params.automatic_tax, item.params.price_data, item.params.amount], [{ enabled: 'true' }, { currency: 'usd', product: 'nightmail_credit', unit_amount: '2500', tax_behavior: 'exclusive' }, undefined]);
+    // Checkout with tax on: a full billing address saved on the customer, tax IDs offered, the credit product.
+    const top = await stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 5000, actor: 'user:fixture', billingEmail: null });
+    const session = fake.calls.filter(c => c.path === '/v1/checkout/sessions').at(-1)!.params;
+    assert.deepEqual({ tax: session.automatic_tax, address: session.billing_address_collection, update: session.customer_update, ids: session.tax_id_collection, product: session.line_items['0'].price_data.product },
+      { tax: { enabled: 'true' }, address: 'required', update: { address: 'auto', name: 'auto' }, ids: { enabled: 'true' }, product: 'nightmail_credit' });
+    await deliver('checkout.session.completed', fake.payCheckout((await attempt(top.attemptId)).stripe_checkout_session));
+    const paid = await attempt(top.attemptId);
+    assert.deepEqual([paid.status, paid.charged_cents, paid.tax_cents], ['succeeded', 5500, 500]);
+    assert.deepEqual(fake.objects.get((await account()).stripe_customer)!.address, STRIPE_FULL_ADDRESS);
+    // A refund credits the product line on the invoice and returns its tax in proportion.
+    const refund = await stripe.refundTopUp(runtime, { workspaceId: wid, attemptId: top.attemptId, amountCents: 1000, basis: 'billing_error', reason: 'Synthetic refund', operator: 'operator:fixture' });
+    const note = fake.calls.filter(c => c.path === '/v1/credit_notes' && c.method === 'POST').at(-1)!.params, line = fake.objects.get(paid.stripe_invoice)!.lines.data[0];
+    assert.deepEqual([refund.status, note.lines['0'].invoice_line_item, line.product, note.lines['0'].amount, note.refund_amount], ['succeeded', line.id, 'nightmail_credit', '1000', '1100']);
+    assert.deepEqual((await ledger()).filter(r => r.kind === 'topup').map(r => r.paid), [String(2500n * UC), String(5000n * UC)], 'Credit is what was bought; tax is on top.');
+    errors.mock.restore(); warnings.mock.restore();
   });
 });
 
@@ -17928,7 +18028,7 @@ describe('Billing: API, MCP and notices', () => {
   test('money routes reach Stripe: a manage key gets a top-up link once per Idempotency-Key; the owner pays, saves the card, sets auto-recharge and removes the card', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request, fetch }) => {
       const wid = await hostedBilling(runtime, db);
-      runtime.config.billing = { stripe: { secretKey: 'sk_test_fake', webhookSecret: STRIPE_TEST_WEBHOOK_SECRET, automaticTax: false, apiBase: STRIPE_TEST_BASE } };
+      runtime.config.billing = { stripe: { secretKey: 'sk_test_fake', webhookSecret: STRIPE_TEST_WEBHOOK_SECRET, automaticTax: false, creditProduct: 'nightmail_credit', taxCode: 'txcd_10103001', apiBase: STRIPE_TEST_BASE } };
       // The fixture's own fetch guard stays outside: Stripe is faked for this subtest only.
       await t.test('through the fake Stripe', async st => {
         const fake = fakeStripe(st, () => false);

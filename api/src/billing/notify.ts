@@ -34,6 +34,7 @@ const DECLINES: Record<string, string> = {
   insufficient_funds: 'the card has insufficient funds', expired_card: 'the card has expired', incorrect_cvc: 'the card’s security code was wrong',
   authentication_required: 'the bank asked for confirmation (3-D Secure), which needs you present', processing_error: 'the card processor had an error',
   card_velocity_exceeded: 'the card reached its spending limit', withdrawal_count_limit_exceeded: 'the card reached its spending limit',
+  customer_tax_location_invalid: 'the card has no billing address to work out tax from',
 };
 export const declineWords = (code: unknown, message: unknown) => (typeof code === 'string' && DECLINES[code]) || (typeof message === 'string' && message.trim() ? message.trim().replace(/\.$/, '') : 'the bank declined it');
 

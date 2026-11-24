@@ -9,14 +9,14 @@
 // - Lock order for money: billing_accounts, then billing_payment_attempts / billing_refunds, then billing_ledger.
 import { createHash } from 'node:crypto';
 import { sql, type SQL } from 'drizzle-orm';
-import { ApiError, id, log, notFound, type Database, type DbExecutor, type Runtime } from '../core.js';
+import { ApiError, id, log, notFound, type Config, type Database, type DbExecutor, type Runtime } from '../core.js';
 import { UC_PER_CENT } from './money.js';
 import type { AutoRechargeSettings, PaymentView } from './types.js';
 import { productName } from '../brand.js';
 
 /** The Stripe API version Nightmail is written against. Create the webhook endpoint with the same version. */
 export const STRIPE_API_VERSION = '2026-10-28.endive';
-export type StripeConfig = { secretKey: string; webhookSecret: string; automaticTax: boolean; apiBase: string };
+export type StripeConfig = NonNullable<NonNullable<Config['billing']>['stripe']>;
 type Params = { [key: string]: unknown };
 // Stripe objects are untyped JSON at this edge; each reader picks the fields it needs.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -109,6 +109,7 @@ export const readAttempt = async (db: Pick<DbExecutor, 'execute'>, attemptId: st
   (await rows<AttemptRow>(db, sql`SELECT *, extract(epoch FROM now()-created_at)::int AS age_s FROM billing_payment_attempts WHERE id=${attemptId}`))[0];
 const cents = (uc: string | bigint) => Number(BigInt(uc) / UC_PER_CENT);
 const oneLine = (value: string, max: number) => value.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
+const ref = (value: unknown): string | null => typeof value === 'string' ? value : value && typeof (value as StripeObject).id === 'string' ? (value as StripeObject).id : null;
 
 /**
  * Takes the workspace's account row lock in a statement of its own (creating the row when asked). Read what the
@@ -297,6 +298,44 @@ export async function setAutoRecharge(runtime: Runtime, workspaceId: string, set
   });
 }
 
+// ---------- the credit product ----------
+const creditProducts = new WeakMap<StripeConfig, Promise<string>>();
+/**
+ * The one Stripe Product every top-up and recharge is for (STRIPE_CREDIT_PRODUCT_ID), so tax (STRIPE_TAX_CODE, SaaS for
+ * business use) is set and seen on one object instead of a throwaway product per Checkout. Read once per isolate and
+ * created under its fixed ID when missing, so isolates racing to create it make one. An existing product is never
+ * changed: a different tax code or an archived product is logged for an operator, who may have set it in Stripe.
+ */
+export function creditProduct(cfg: StripeConfig): Promise<string> {
+  const known = creditProducts.get(cfg);
+  if (known) return known;
+  const ensuring = ensureCreditProduct(cfg);
+  creditProducts.set(cfg, ensuring);
+  ensuring.catch(() => { if (creditProducts.get(cfg) === ensuring) creditProducts.delete(cfg); });
+  return ensuring;
+}
+async function ensureCreditProduct(cfg: StripeConfig): Promise<string> {
+  const productId = cfg.creditProduct, path = `/v1/products/${encodeURIComponent(productId)}`;
+  try {
+    let product: StripeObject;
+    try { product = await stripeRequest(cfg, 'GET', path); }
+    catch (error) {
+      if (!(error instanceof StripeError) || error.uncertain || !error.missing) throw error;
+      const params = { id: productId, name: `${productName} credit`, tax_code: cfg.taxCode };
+      try { await stripeRequest(cfg, 'POST', '/v1/products', params, `product:${productId}:${createHash('sha256').update(JSON.stringify(params)).digest('hex').slice(0, 16)}`); return productId; }
+      catch (refused) { if (!(refused instanceof StripeError) || refused.code !== 'resource_already_exists') throw refused; }
+      product = await stripeRequest(cfg, 'GET', path);
+    }
+    const taxCode = ref(product.tax_code);
+    if (taxCode !== cfg.taxCode || product.active === false)
+      log('warn', { code: 'BILLING_CREDIT_PRODUCT_DIFFERS', product: productId, taxCode, expectedTaxCode: cfg.taxCode, active: product.active !== false });
+    return productId;
+  } catch (error) {
+    if (error instanceof StripeError && !error.uncertain) log('error', { code: 'BILLING_CREDIT_PRODUCT_UNAVAILABLE', product: productId, ...stripeErrorFields(error) });
+    throw error;
+  }
+}
+
 // ---------- top-ups ----------
 const MIN_CENTS = 2000, MAX_CENTS = 1_000_000, FIRST_MAX_CENTS = 50_000;
 function providerError(error: unknown, context: Record<string, unknown> = {}): unknown {
@@ -358,14 +397,17 @@ const CARD_ONLY = ['card'];
 async function startCheckout(runtime: Runtime, attemptId: string, input: { workspaceId: string; amountCents: number; billingEmail: string | null; setup: boolean }) {
   const cfg = stripeConfig(runtime);
   try {
+    const product = input.setup ? null : await creditProduct(cfg);
     const customer = await ensureCustomer(runtime, input.workspaceId, input.billingEmail);
     const meta = metadata(cfg, input.workspaceId, { bane_attempt: attemptId });
     const expiresAt = Math.floor(Date.now() / 1000) + 23 * 3600;
     const back = { success_url: `${runtime.config.publicUrl}/settings?billing=success&attempt=${attemptId}#billing`, cancel_url: `${runtime.config.publicUrl}/settings?billing=canceled#billing`, expires_at: expiresAt };
     const params: Params = input.setup
-      ? { mode: 'setup', currency: 'usd', customer, client_reference_id: attemptId, allowed_payment_method_types: CARD_ONLY, metadata: meta, setup_intent_data: { metadata: meta }, ...back }
+      // With tax on, the saved card carries a full billing address: an off-session invoice takes its location from it.
+      ? { mode: 'setup', currency: 'usd', customer, client_reference_id: attemptId, allowed_payment_method_types: CARD_ONLY, metadata: meta, setup_intent_data: { metadata: meta },
+        ...(cfg.automaticTax ? { billing_address_collection: 'required' } : {}), ...back }
       : { mode: 'payment', customer, client_reference_id: attemptId,
-        line_items: [{ quantity: 1, price_data: { currency: 'usd', unit_amount: input.amountCents, tax_behavior: 'exclusive', product_data: { name: `${productName} credit` } } }],
+        line_items: [{ quantity: 1, price_data: { currency: 'usd', unit_amount: input.amountCents, tax_behavior: 'exclusive', product } }],
         allowed_payment_method_types: CARD_ONLY, payment_intent_data: { setup_future_usage: 'off_session', metadata: meta }, metadata: meta,
         invoice_creation: { enabled: true, invoice_data: { metadata: meta } },
         custom_text: { submit: { message: `${productName} saves this card so auto-recharge can use it if you turn it on. Remove it any time in Settings → Billing.` } },
@@ -431,8 +473,9 @@ export async function chargeSavedCard(runtime: Runtime, attemptId: string): Prom
   if (!a || !OPEN.includes(a.status) || (a.kind !== 'saved_card' && a.kind !== 'recharge')) return a?.status ?? 'missing';
   if (!a.stripe_customer || !a.stripe_payment_method) return failAttempt(runtime, attemptId, 'payment_method_missing', 'No card is saved for this workspace.', 'failed', false);
   const key = a.idempotency_key, meta = metadata(cfg, a.workspace_id, { bane_attempt: attemptId }), pm = a.stripe_payment_method;
-  let invoiceId = a.stripe_invoice;
+  let invoiceId = a.stripe_invoice, product: string | null = null;
   try {
+    product = await creditProduct(cfg);
     if (!invoiceId) {
       const invoice = await stripeRequest(cfg, 'POST', '/v1/invoices', { customer: a.stripe_customer, collection_method: 'charge_automatically', auto_advance: false,
         pending_invoice_items_behavior: 'exclude', automatic_tax: { enabled: cfg.automaticTax }, default_payment_method: pm, metadata: meta }, `${key}:invoice`);
@@ -441,7 +484,8 @@ export async function chargeSavedCard(runtime: Runtime, attemptId: string): Prom
         WHERE id=${attemptId} AND status IN ('created','pending') AND (stripe_invoice IS NULL OR stripe_invoice=${invoiceId})`);
     }
     const path = `/v1/invoices/${encodeURIComponent(invoiceId)}`;
-    await stripeRequest(cfg, 'POST', '/v1/invoiceitems', { customer: a.stripe_customer, invoice: invoiceId, amount: cents(a.amount_uc), currency: 'usd', description: `${productName} credit`, tax_behavior: 'exclusive', metadata: meta }, `${key}:item`);
+    await stripeRequest(cfg, 'POST', '/v1/invoiceitems', { customer: a.stripe_customer, invoice: invoiceId, description: `${productName} credit`,
+      price_data: { currency: 'usd', product, unit_amount: cents(a.amount_uc), tax_behavior: 'exclusive' }, metadata: meta }, `${key}:item`);
     await stripeRequest(cfg, 'POST', `${path}/finalize`, { auto_advance: false }, `${key}:finalize`);
     // The invoice carries the card (default_payment_method), so a retry sends identical parameters under the same key.
     const paid = await stripeRequest(cfg, 'POST', `${path}/pay`, { off_session: true, expand: ['payments'] }, `${key}:pay`);
@@ -449,6 +493,9 @@ export async function chargeSavedCard(runtime: Runtime, attemptId: string): Prom
   } catch (error) {
     if (!(error instanceof StripeError)) throw error;
     if (error.uncertain) { log('warn', { code: 'BILLING_CHARGE_UNCONFIRMED', workspaceId: a.workspace_id, attemptId, ...stripeErrorFields(error) }); return 'pending'; }
+    // Stripe refused the credit product (BILLING_CREDIT_PRODUCT_UNAVAILABLE, logged): nothing was charged and it is not
+    // the card's fault, so the attempt waits for reconciliation and auto-recharge stays on without a notice.
+    if (!product) return a.status;
     log('warn', { code: 'BILLING_STRIPE_ERROR', operation: 'charge', workspaceId: a.workspace_id, attemptId, kind: a.kind, ...stripeErrorFields(error) });
     // Any refusal Stripe won't change its mind about (a decline, 3DS, or a non-card one such as
     // customer_tax_location_invalid) ends the charge the same way: the invoice is voided and a recharge turns
@@ -495,7 +542,6 @@ export async function listPayments(db: Database, workspaceId: string, cursor?: s
 }
 
 // ---------- resolving attempts against Stripe (webhook and reconciliation) ----------
-const ref = (value: unknown): string | null => typeof value === 'string' ? value : value && typeof (value as StripeObject).id === 'string' ? (value as StripeObject).id : null;
 /** Retries of a create stop at 22 h, inside Stripe's 24 h idempotency window; after that Nightmail looks the object up. */
 export const RETRY_STOP_S = 22 * 3600;
 const RECHARGE_EXPIRY_S = 24 * 3600;

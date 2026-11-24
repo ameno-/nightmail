@@ -17,7 +17,8 @@ const rechargeDue = sql`a.recharge_enabled AND a.recharge_pending_attempt IS NUL
  * charge at a time: take the account lock, then (in a new statement, so it sees every credit and attempt committed
  * while this job waited) re-check eligibility against billing_position (balance + promo − unsettled usage), write the
  * attempt only while no other recharge is open, and mark it pending; then charge the saved card outside the
- * transaction. Any refusal (a decline, 3DS, a non-card refusal) turns auto-recharge off with one email; no retry.
+ * transaction. Any refusal (a decline, 3DS, a non-card refusal) turns auto-recharge off with one email; no retry. A
+ * refused credit product is configuration, not the card: that attempt waits for reconciliation instead.
  */
 export const rechargeJob: JobHandler = async (runtime, _payload, job) => {
   if (!configured(runtime)) { log('warn', { code: 'BILLING_RECHARGE_SKIPPED', workspaceId: job.workspaceId, reason: 'stripe_not_configured' }); return; }
