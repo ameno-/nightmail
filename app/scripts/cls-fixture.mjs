@@ -812,9 +812,14 @@ export async function seed(fx) {
   // Audience and campaigns.
   const list = await dana.api('POST', '/v1/lists', { name: 'Customers' });
   const contacts = [];
-  for (const who of ['ada', 'grace', 'linus', 'margaret', 'ken']) contacts.push(await dana.api('POST', '/v1/contacts', { email: `${who}@example.net`, name: who[0].toUpperCase() + who.slice(1), properties: { plan: who.length > 4 ? 'pro' : 'free' } }));
+  for (const [i, who] of ['ada', 'grace', 'linus', 'margaret', 'ken'].entries()) contacts.push(await dana.api('POST', '/v1/contacts', { email: `${who}@example.net`, name: who[0].toUpperCase() + who.slice(1),
+    properties: { plan: who.length > 4 ? 'pro' : 'free', status: i < 3 ? 'waiting' : 'signed_up', joined_at: `2026-11-1${i}T09:30:00.000Z`, mailbox: i % 2 ? 'free' : 'company', attempts: i + 1 } }));
   await dana.api('POST', `/v1/lists/${list.id}/members`, { contactIds: contacts.map(c => c.id) });
   const segment = await dana.api('POST', '/v1/segments', { name: 'Pro plan', rule: { field: 'plan', operator: 'eq', value: 'pro' } });
+  // Property rules (Segment · property rules): a string, a day and a presence check.
+  const propertySegment = await dana.api('POST', '/v1/segments', { name: 'Waiting companies', rule: { operator: 'and', rules: [
+    { field: 'property', key: 'status', type: 'string', operator: 'eq', value: 'waiting' }, { field: 'property', key: 'joined_at', type: 'date', operator: 'before', value: '2026-11-20' },
+    { field: 'property', key: 'mailbox', type: 'string', operator: 'eq', value: 'company' }, { field: 'property', key: 'attempts', type: 'number', operator: 'gt', value: 0 }, { field: 'property', key: 'let_in_at', type: 'date', operator: 'notSet' }] } });
   const template = await dana.api('POST', '/v1/templates', { name: 'Receipt' });
   const campaign = await dana.api('POST', '/v1/campaigns', { name: 'November product update', subject: 'What shipped in November', from: 'news@mail.northwind.example', html: '<p>Hello</p>' });
   const contact = contacts[0];
@@ -950,6 +955,6 @@ export async function seed(fx) {
   fx.liveKey = agent.secret;
   return {
     ...newsletterIds, mcp, abuseCluster, restricted: 'ws_harbor', email, junkEmail, bouncedEmail: failed.bounced, delayedEmail: failed.delayed, receivedEmail: 'msg_northwind_invoice', threadEmail: thread.email, threadReceived: thread.received, supportThread: thread.thread, domain: nw.id, sendingDomain: sendingDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
-    webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, template: template.id ?? template.template?.id, segment: segment.id, supportConversation, supportAction, continueConversation, continueMessage,
+    webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, template: template.id ?? template.template?.id, segment: segment.id, propertySegment: propertySegment.id, supportConversation, supportAction, continueConversation, continueMessage,
   };
 }

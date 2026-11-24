@@ -4,7 +4,7 @@ import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { actor, ApiError, AudienceSpec, budgetedRead, chargeBudget, databaseCodeOf, unrestrictedRequired, errors, id, IdParams, json, notFound, page, PageQuery, readLimit, readLimitNote, response, rowId, security, statementTimedOut, type Actor, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
 import { productName } from './brand.js';
 export { AudienceSpec };
-import { contacts, consentAudit, imports, listCounts, listMembers, lists, segments, type SegmentRule } from './db/audience.js';
+import { contacts, consentAudit, imports, listCounts, listMembers, lists, segments, type PropertyRule, type SegmentRule } from './db/audience.js';
 import { enqueue, noteEnqueued } from './jobs.js';
 import { MEMORY_LIMITS, reserveMemory, runInMemoryScope, type MemoryLease } from './isolate-memory.js';
 import { buildBoundedPageJson, PAGE_MAX_BYTES, READ_MAX_WAITERS, READ_RESERVATION_BYTES, streamTextPartsResponse, utf8Bytes, withBoundedRead } from './read-bounds.js';
@@ -58,7 +58,15 @@ const ListRead = z.object({ ...List.shape, counts: ListCounts.nullable() }).stri
 const SearchQuery = PageQuery.extend({ search: z.string().trim().min(1).max(200).optional() });
 const ListQuery = SearchQuery.extend({ counts: z.enum(['true', 'false']).default('true').describe('false leaves member counts out (counts is null). Counts are kept as memberships, consent and suppression change, so reading them does not count members.') }).openapi('ListContactListsQuery');
 const ContactQuery = SearchQuery.extend({ email: Email.optional().describe('Exact, case-insensitive email match. Uses the unique email index; prefer it over search for one address.'), consent: z.enum(['unknown', 'subscribed', 'unsubscribed']).optional(), suppressed: z.enum(['true', 'false']).optional(), listId: z.string().min(1).max(120).optional() }).openapi('ListContactsQuery');
-const RuleLeaf = z.union([z.object({ field: z.enum(['email', 'firstName', 'plan', 'country']), operator: z.enum(['eq', 'neq', 'contains']), value: z.string().max(200) }).strict(), z.object({ field: z.enum(['lastOpenAt', 'lastClickAt']), operator: z.enum(['within', 'inactive']), days: z.number().int().min(1).max(730) }).strict()]);
+// A condition on any contact property, with the operators of its value's type (compilePropertyRule).
+const property = { field: z.literal('property'), key: z.string().min(1).max(80).describe('The property name, as in a contact\'s properties.') };
+const PropertyRule = z.union([
+  z.object({ ...property, type: z.literal('string'), operator: z.enum(['eq', 'neq', 'contains']).describe('neq matches a property that has another value; contains ignores case.'), value: z.string().max(200) }).strict(),
+  z.object({ ...property, type: z.literal('number'), operator: z.enum(['eq', 'lt', 'gt']), value: z.number().finite().describe('Compared with a property that is a JSON number or a numeric string; any other value never matches.') }).strict(),
+  z.object({ ...property, type: z.literal('date'), operator: z.enum(['before', 'after', 'on']), value: z.iso.date().describe('A day, YYYY-MM-DD, in UTC. A property is on the day its ISO 8601 text starts with: 2026-11-20T14:03:00Z is on 2026-11-20, before is an earlier day and after a later one; any other value never matches.') }).strict(),
+  z.object({ ...property, type: z.enum(['string', 'number', 'date']), operator: z.enum(['set', 'notSet']).describe('set: the property has a value other than null; notSet: it has none. The same for every type.') }).strict(),
+]);
+const RuleLeaf = z.union([z.object({ field: z.enum(['email', 'firstName', 'plan', 'country']), operator: z.enum(['eq', 'neq', 'contains']), value: z.string().max(200) }).strict(), z.object({ field: z.enum(['lastOpenAt', 'lastClickAt']), operator: z.enum(['within', 'inactive']), days: z.number().int().min(1).max(730) }).strict(), PropertyRule]);
 // Finite-depth schemas remain fully representable in OpenAPI; no recursive lazy schema.
 let ruleSchema: z.ZodType<SegmentRule> = RuleLeaf;
 for (let depth = 0; depth < 3; depth++) ruleSchema = z.union([RuleLeaf, z.object({ operator: z.enum(['and', 'or']), rules: z.array(ruleSchema).min(1).max(10) }).strict()]);
@@ -196,22 +204,17 @@ export function compileRule(rule: SegmentRule): SQL { return sql`coalesce((${com
 function compileRuleCondition(rule: SegmentRule): SQL {
   if ('rules' in rule) {
     if (rule.operator === 'or') {
-      // Collapse same-field eq leaves inside OR into one ANY(...) test so 20-50 condition OR segments extract JSONB once per row.
+      // Collapse text-eq leaves on one target inside OR into one ANY(...) test so 20-50 condition OR segments extract JSONB once per row.
       const eqByField = new Map<string, string[]>();
       const other: SegmentRule[] = [];
       for (const child of rule.rules) {
-        if (!('rules' in child) && !('days' in child) && child.operator === 'eq') {
-          const val = child.field === 'email' ? child.value.trim().toLowerCase() : child.value;
-          const list = eqByField.get(child.field) ?? [];
-          list.push(val);
-          eqByField.set(child.field, list);
-        } else {
-          other.push(child);
-        }
+        const eq = textEquality(child);
+        if (eq) eqByField.set(eq.target, [...eqByField.get(eq.target) ?? [], eq.value]);
+        else other.push(child);
       }
       const parts: SQL[] = other.map(compileRule);
       for (const [f, vals] of eqByField) {
-        const expr = f === 'email' ? sql`${contacts.email}` : sql`(${contacts.properties} ->> ${f})`;
+        const expr = f === '' ? sql`${contacts.email}` : sql`(${contacts.properties} ->> ${f})`;
         parts.push(vals.length === 1
           ? sql`coalesce(${expr} = ${vals[0]!}, false)`
           : sql`coalesce(${expr} = ANY(ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify([...new Set(vals)])}::jsonb))), false)`);
@@ -226,12 +229,43 @@ function compileRuleCondition(rule: SegmentRule): SQL {
     const coverage = rule.field === 'lastOpenAt' ? contacts.openObservedSince : contacts.clickObservedSince;
     return rule.operator === 'within' ? sql`${timestamp} >= ${cutoff}::timestamptz` : sql`(${coverage} <= ${cutoff}::timestamptz AND (${timestamp} IS NULL OR ${timestamp} < ${cutoff}::timestamptz))`;
   }
+  if (rule.field === 'property') return compilePropertyRule(rule);
   const field = rule.field === 'email' ? sql`${contacts.email}` : sql`(${contacts.properties} ->> ${rule.field})`;
   const value = rule.field === 'email' ? rule.value.trim().toLowerCase() : rule.value;
   if (rule.operator === 'eq') return sql`${field} = ${value}`;
   if (rule.operator === 'neq') return sql`(${field} IS NOT NULL AND ${field} <> ${value})`;
   // strpos treats wildcard characters as literal text, never SQL syntax.
   return sql`strpos(lower(${field}), lower(${rule.value})) > 0`;
+}
+// The text an equality leaf compares, so an OR of several on one target reads it once a row: '' is the email column, any
+// other target that property (a legacy field is the property of its name).
+function textEquality(rule: SegmentRule): { target: string; value: string } | null {
+  if ('rules' in rule || 'days' in rule || rule.operator !== 'eq') return null;
+  if (rule.field !== 'property') return rule.field === 'email' ? { target: '', value: rule.value.trim().toLowerCase() } : { target: rule.field, value: rule.value };
+  return rule.type === 'string' ? { target: rule.key, value: rule.value } : null;
+}
+// A property condition never casts what doesn't fit: a number is a JSON number or a numeric string (anything else matches
+// no number condition), and a day compares the ISO 8601 text of a value that starts with one, byte by byte (COLLATE "C"),
+// so no collation reorders it.
+const NUMBER_TEXT = '^-?[0-9]+(\\.[0-9]+)?$', DAY_TEXT = '^[0-9]{4}-[0-9]{2}-[0-9]{2}';
+const nextDay = (day: string) => new Date(Date.parse(`${day}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
+function compilePropertyRule(rule: PropertyRule): SQL {
+  const text = sql`(${contacts.properties} ->> ${rule.key})`;
+  if (!('value' in rule)) return rule.operator === 'set' ? sql`${text} IS NOT NULL` : sql`${text} IS NULL`;
+  if (rule.type === 'string') {
+    if (rule.operator === 'eq') return sql`${text} = ${rule.value}`;
+    if (rule.operator === 'neq') return sql`(${text} IS NOT NULL AND ${text} <> ${rule.value})`;
+    return sql`strpos(lower(${text}), lower(${rule.value})) > 0`;
+  }
+  if (rule.type === 'number') {
+    const value = sql`(${contacts.properties} -> ${rule.key})`;
+    const number = sql`(CASE jsonb_typeof(${value}) WHEN 'number' THEN ${value}::numeric WHEN 'string' THEN CASE WHEN ${text} ~ ${NUMBER_TEXT} THEN ${text}::numeric END END)`;
+    return sql`${number} ${sql.raw(rule.operator === 'lt' ? '<' : rule.operator === 'gt' ? '>' : '=')} ${String(rule.value)}::numeric`;
+  }
+  // The range first: on 2,000,000 contacts a day nobody has costs what an equality does, the pattern only checking matches.
+  const day = sql`(${text} COLLATE "C")`, next = nextDay(rule.value);
+  const range = rule.operator === 'before' ? sql`${day} < ${rule.value}` : rule.operator === 'after' ? sql`${day} >= ${next}` : sql`${day} >= ${rule.value} AND ${day} < ${next}`;
+  return sql`(${range} AND ${text} ~ ${DAY_TEXT})`;
 }
 // Keep the full membership-key probe correlated even immediately after a large import,
 // before PostgreSQL has analyzed the new row distribution.

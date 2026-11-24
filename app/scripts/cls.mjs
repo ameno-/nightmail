@@ -154,6 +154,8 @@ const pages = ids => [
   ['List', `/audience/lists/${ids.list}`, { from: '/audience/lists' }],
   ['Segments', '/audience/segments', { from: '/audience' }],
   ['Segment', `/audience/segments/${ids.segment}`, { from: '/audience/segments', row: 'Pro plan' }],
+  // Property rules: the name beside the field, a day with its zone, and a presence check without a value.
+  ['Segment · property rules', `/audience/segments/${ids.propertySegment}`, { from: '/audience/segments', row: 'Waiting companies' }],
   ['Domains', '/domains', { from: '/overview' }],
   ['Domain', `/domains/${ids.domain}`, { from: '/domains' }],
   // A domain with a custom MAIL FROM: its MX and SPF records join the table, each with a menu to change it.

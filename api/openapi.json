@@ -1662,6 +1662,177 @@
           {
             "type": "object",
             "properties": {
+              "field": {
+                "type": "string",
+                "enum": [
+                  "property"
+                ]
+              },
+              "key": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80,
+                "description": "The property name, as in a contact's properties."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "string"
+                ]
+              },
+              "operator": {
+                "type": "string",
+                "enum": [
+                  "eq",
+                  "neq",
+                  "contains"
+                ],
+                "description": "neq matches a property that has another value; contains ignores case."
+              },
+              "value": {
+                "type": "string",
+                "maxLength": 200
+              }
+            },
+            "required": [
+              "field",
+              "key",
+              "type",
+              "operator",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "field": {
+                "type": "string",
+                "enum": [
+                  "property"
+                ]
+              },
+              "key": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80,
+                "description": "The property name, as in a contact's properties."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "number"
+                ]
+              },
+              "operator": {
+                "type": "string",
+                "enum": [
+                  "eq",
+                  "lt",
+                  "gt"
+                ]
+              },
+              "value": {
+                "type": "number",
+                "description": "Compared with a property that is a JSON number or a numeric string; any other value never matches."
+              }
+            },
+            "required": [
+              "field",
+              "key",
+              "type",
+              "operator",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "field": {
+                "type": "string",
+                "enum": [
+                  "property"
+                ]
+              },
+              "key": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80,
+                "description": "The property name, as in a contact's properties."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "date"
+                ]
+              },
+              "operator": {
+                "type": "string",
+                "enum": [
+                  "before",
+                  "after",
+                  "on"
+                ]
+              },
+              "value": {
+                "type": "string",
+                "format": "date",
+                "description": "A day, YYYY-MM-DD, in UTC. A property is on the day its ISO 8601 text starts with: 2026-11-20T14:03:00Z is on 2026-11-20, before is an earlier day and after a later one; any other value never matches."
+              }
+            },
+            "required": [
+              "field",
+              "key",
+              "type",
+              "operator",
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "field": {
+                "type": "string",
+                "enum": [
+                  "property"
+                ]
+              },
+              "key": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80,
+                "description": "The property name, as in a contact's properties."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "string",
+                  "number",
+                  "date"
+                ]
+              },
+              "operator": {
+                "type": "string",
+                "enum": [
+                  "set",
+                  "notSet"
+                ],
+                "description": "set: the property has a value other than null; notSet: it has none. The same for every type."
+              }
+            },
+            "required": [
+              "field",
+              "key",
+              "type",
+              "operator"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
               "operator": {
                 "type": "string",
                 "enum": [
@@ -1732,6 +1903,177 @@
                         "field",
                         "operator",
                         "days"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "field": {
+                          "type": "string",
+                          "enum": [
+                            "property"
+                          ]
+                        },
+                        "key": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 80,
+                          "description": "The property name, as in a contact's properties."
+                        },
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "string"
+                          ]
+                        },
+                        "operator": {
+                          "type": "string",
+                          "enum": [
+                            "eq",
+                            "neq",
+                            "contains"
+                          ],
+                          "description": "neq matches a property that has another value; contains ignores case."
+                        },
+                        "value": {
+                          "type": "string",
+                          "maxLength": 200
+                        }
+                      },
+                      "required": [
+                        "field",
+                        "key",
+                        "type",
+                        "operator",
+                        "value"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "field": {
+                          "type": "string",
+                          "enum": [
+                            "property"
+                          ]
+                        },
+                        "key": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 80,
+                          "description": "The property name, as in a contact's properties."
+                        },
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "number"
+                          ]
+                        },
+                        "operator": {
+                          "type": "string",
+                          "enum": [
+                            "eq",
+                            "lt",
+                            "gt"
+                          ]
+                        },
+                        "value": {
+                          "type": "number",
+                          "description": "Compared with a property that is a JSON number or a numeric string; any other value never matches."
+                        }
+                      },
+                      "required": [
+                        "field",
+                        "key",
+                        "type",
+                        "operator",
+                        "value"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "field": {
+                          "type": "string",
+                          "enum": [
+                            "property"
+                          ]
+                        },
+                        "key": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 80,
+                          "description": "The property name, as in a contact's properties."
+                        },
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "date"
+                          ]
+                        },
+                        "operator": {
+                          "type": "string",
+                          "enum": [
+                            "before",
+                            "after",
+                            "on"
+                          ]
+                        },
+                        "value": {
+                          "type": "string",
+                          "format": "date",
+                          "description": "A day, YYYY-MM-DD, in UTC. A property is on the day its ISO 8601 text starts with: 2026-11-20T14:03:00Z is on 2026-11-20, before is an earlier day and after a later one; any other value never matches."
+                        }
+                      },
+                      "required": [
+                        "field",
+                        "key",
+                        "type",
+                        "operator",
+                        "value"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "field": {
+                          "type": "string",
+                          "enum": [
+                            "property"
+                          ]
+                        },
+                        "key": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 80,
+                          "description": "The property name, as in a contact's properties."
+                        },
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "string",
+                            "number",
+                            "date"
+                          ]
+                        },
+                        "operator": {
+                          "type": "string",
+                          "enum": [
+                            "set",
+                            "notSet"
+                          ],
+                          "description": "set: the property has a value other than null; notSet: it has none. The same for every type."
+                        }
+                      },
+                      "required": [
+                        "field",
+                        "key",
+                        "type",
+                        "operator"
                       ],
                       "additionalProperties": false
                     },
@@ -1814,6 +2156,177 @@
                               {
                                 "type": "object",
                                 "properties": {
+                                  "field": {
+                                    "type": "string",
+                                    "enum": [
+                                      "property"
+                                    ]
+                                  },
+                                  "key": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 80,
+                                    "description": "The property name, as in a contact's properties."
+                                  },
+                                  "type": {
+                                    "type": "string",
+                                    "enum": [
+                                      "string"
+                                    ]
+                                  },
+                                  "operator": {
+                                    "type": "string",
+                                    "enum": [
+                                      "eq",
+                                      "neq",
+                                      "contains"
+                                    ],
+                                    "description": "neq matches a property that has another value; contains ignores case."
+                                  },
+                                  "value": {
+                                    "type": "string",
+                                    "maxLength": 200
+                                  }
+                                },
+                                "required": [
+                                  "field",
+                                  "key",
+                                  "type",
+                                  "operator",
+                                  "value"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "field": {
+                                    "type": "string",
+                                    "enum": [
+                                      "property"
+                                    ]
+                                  },
+                                  "key": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 80,
+                                    "description": "The property name, as in a contact's properties."
+                                  },
+                                  "type": {
+                                    "type": "string",
+                                    "enum": [
+                                      "number"
+                                    ]
+                                  },
+                                  "operator": {
+                                    "type": "string",
+                                    "enum": [
+                                      "eq",
+                                      "lt",
+                                      "gt"
+                                    ]
+                                  },
+                                  "value": {
+                                    "type": "number",
+                                    "description": "Compared with a property that is a JSON number or a numeric string; any other value never matches."
+                                  }
+                                },
+                                "required": [
+                                  "field",
+                                  "key",
+                                  "type",
+                                  "operator",
+                                  "value"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "field": {
+                                    "type": "string",
+                                    "enum": [
+                                      "property"
+                                    ]
+                                  },
+                                  "key": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 80,
+                                    "description": "The property name, as in a contact's properties."
+                                  },
+                                  "type": {
+                                    "type": "string",
+                                    "enum": [
+                                      "date"
+                                    ]
+                                  },
+                                  "operator": {
+                                    "type": "string",
+                                    "enum": [
+                                      "before",
+                                      "after",
+                                      "on"
+                                    ]
+                                  },
+                                  "value": {
+                                    "type": "string",
+                                    "format": "date",
+                                    "description": "A day, YYYY-MM-DD, in UTC. A property is on the day its ISO 8601 text starts with: 2026-11-20T14:03:00Z is on 2026-11-20, before is an earlier day and after a later one; any other value never matches."
+                                  }
+                                },
+                                "required": [
+                                  "field",
+                                  "key",
+                                  "type",
+                                  "operator",
+                                  "value"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "field": {
+                                    "type": "string",
+                                    "enum": [
+                                      "property"
+                                    ]
+                                  },
+                                  "key": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 80,
+                                    "description": "The property name, as in a contact's properties."
+                                  },
+                                  "type": {
+                                    "type": "string",
+                                    "enum": [
+                                      "string",
+                                      "number",
+                                      "date"
+                                    ]
+                                  },
+                                  "operator": {
+                                    "type": "string",
+                                    "enum": [
+                                      "set",
+                                      "notSet"
+                                    ],
+                                    "description": "set: the property has a value other than null; notSet: it has none. The same for every type."
+                                  }
+                                },
+                                "required": [
+                                  "field",
+                                  "key",
+                                  "type",
+                                  "operator"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
                                   "operator": {
                                     "type": "string",
                                     "enum": [
@@ -1884,6 +2397,177 @@
                                             "field",
                                             "operator",
                                             "days"
+                                          ],
+                                          "additionalProperties": false
+                                        },
+                                        {
+                                          "type": "object",
+                                          "properties": {
+                                            "field": {
+                                              "type": "string",
+                                              "enum": [
+                                                "property"
+                                              ]
+                                            },
+                                            "key": {
+                                              "type": "string",
+                                              "minLength": 1,
+                                              "maxLength": 80,
+                                              "description": "The property name, as in a contact's properties."
+                                            },
+                                            "type": {
+                                              "type": "string",
+                                              "enum": [
+                                                "string"
+                                              ]
+                                            },
+                                            "operator": {
+                                              "type": "string",
+                                              "enum": [
+                                                "eq",
+                                                "neq",
+                                                "contains"
+                                              ],
+                                              "description": "neq matches a property that has another value; contains ignores case."
+                                            },
+                                            "value": {
+                                              "type": "string",
+                                              "maxLength": 200
+                                            }
+                                          },
+                                          "required": [
+                                            "field",
+                                            "key",
+                                            "type",
+                                            "operator",
+                                            "value"
+                                          ],
+                                          "additionalProperties": false
+                                        },
+                                        {
+                                          "type": "object",
+                                          "properties": {
+                                            "field": {
+                                              "type": "string",
+                                              "enum": [
+                                                "property"
+                                              ]
+                                            },
+                                            "key": {
+                                              "type": "string",
+                                              "minLength": 1,
+                                              "maxLength": 80,
+                                              "description": "The property name, as in a contact's properties."
+                                            },
+                                            "type": {
+                                              "type": "string",
+                                              "enum": [
+                                                "number"
+                                              ]
+                                            },
+                                            "operator": {
+                                              "type": "string",
+                                              "enum": [
+                                                "eq",
+                                                "lt",
+                                                "gt"
+                                              ]
+                                            },
+                                            "value": {
+                                              "type": "number",
+                                              "description": "Compared with a property that is a JSON number or a numeric string; any other value never matches."
+                                            }
+                                          },
+                                          "required": [
+                                            "field",
+                                            "key",
+                                            "type",
+                                            "operator",
+                                            "value"
+                                          ],
+                                          "additionalProperties": false
+                                        },
+                                        {
+                                          "type": "object",
+                                          "properties": {
+                                            "field": {
+                                              "type": "string",
+                                              "enum": [
+                                                "property"
+                                              ]
+                                            },
+                                            "key": {
+                                              "type": "string",
+                                              "minLength": 1,
+                                              "maxLength": 80,
+                                              "description": "The property name, as in a contact's properties."
+                                            },
+                                            "type": {
+                                              "type": "string",
+                                              "enum": [
+                                                "date"
+                                              ]
+                                            },
+                                            "operator": {
+                                              "type": "string",
+                                              "enum": [
+                                                "before",
+                                                "after",
+                                                "on"
+                                              ]
+                                            },
+                                            "value": {
+                                              "type": "string",
+                                              "format": "date",
+                                              "description": "A day, YYYY-MM-DD, in UTC. A property is on the day its ISO 8601 text starts with: 2026-11-20T14:03:00Z is on 2026-11-20, before is an earlier day and after a later one; any other value never matches."
+                                            }
+                                          },
+                                          "required": [
+                                            "field",
+                                            "key",
+                                            "type",
+                                            "operator",
+                                            "value"
+                                          ],
+                                          "additionalProperties": false
+                                        },
+                                        {
+                                          "type": "object",
+                                          "properties": {
+                                            "field": {
+                                              "type": "string",
+                                              "enum": [
+                                                "property"
+                                              ]
+                                            },
+                                            "key": {
+                                              "type": "string",
+                                              "minLength": 1,
+                                              "maxLength": 80,
+                                              "description": "The property name, as in a contact's properties."
+                                            },
+                                            "type": {
+                                              "type": "string",
+                                              "enum": [
+                                                "string",
+                                                "number",
+                                                "date"
+                                              ]
+                                            },
+                                            "operator": {
+                                              "type": "string",
+                                              "enum": [
+                                                "set",
+                                                "notSet"
+                                              ],
+                                              "description": "set: the property has a value other than null; notSet: it has none. The same for every type."
+                                            }
+                                          },
+                                          "required": [
+                                            "field",
+                                            "key",
+                                            "type",
+                                            "operator"
                                           ],
                                           "additionalProperties": false
                                         }
