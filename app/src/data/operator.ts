@@ -45,7 +45,7 @@ export interface HealthCampaign { id: string; workspaceId: string; state: string
 export interface OperatorHealth {
   generatedAt: string | null; stale: boolean; delivery: 'slack' | 'off'; alerts: HealthAlert[]
   queues: { name: string; depth: number; oldestSeconds: number; behind: boolean }[]
-  jobs: { type: string; pending: number; oldestSeconds: number; failed: number; error: string | null; behind: boolean }[] | null
+  jobs: { type: string; pending: number; oldestSeconds: number; failed: number; failedLastHour: number; error: string | null; behind: boolean }[] | null
   campaigns: HealthCampaign[] | null; feedbackLagSeconds: number | null
   routes: { route: string; count: number; errors: number; p50Ms: number; p95Ms: number; slowestMs: number; behind: boolean }[] | null
   errors: { kind: 'code' | 'sqlstate' | 'error'; code: string; count: number }[] | null; requests: { count: number; errors: number } | null

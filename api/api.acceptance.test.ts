@@ -33746,13 +33746,18 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const blind = tick({ ...behind, late: null, queues: [...behind.queues.slice(0, 2), { name: 'feedback-dlq', depth: 3, oldestMs: 0 }] });
     assert.deepEqual([blind.findings.map(finding => finding.key), [...blind.blind], blind.rollup.jobs, blind.rollup.memory.streaks['jobs-behind:mailbox.ingest']], [['queue-behind:feedback', 'dead-letters:feedback-dlq'], ['jobs'], null, 2]);
 
-    // 8. 1,639 jobs of one type failed, at once. Customers' webhooks failing and a small pile are not alerts; one failed
-    // campaign job is; and so are six more of a type within half an hour, however small its pile.
+    // 8. 1,639 jobs of one type failed between the 11th and the 23rd and are still kept. Kept is history: it is on the
+    // Health page and is never an alert. Failing now is one: 25 of a type within the hour, five within half an hour, one
+    // campaign job. Customers' webhooks failing and a few of a type are not.
     memory = emptyMemory();
-    const failed = (imports: number) => ({ ...quiet(), failed: [{ type: 'mailbox.recoverStaging', error: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN', failed: 1_600 }, { type: 'mailbox.recoverStaging', error: 'JOB_LEASE_EXHAUSTED', failed: 39 },
-      { type: 'operation.webhook', error: 'WEBHOOK_HTTP_500', failed: 4_000 }, { type: 'mailbox.reconcile', error: 'JOB_INTERNAL_ERROR', failed: 24 }, { type: 'campaign.run', error: 'JOB_LEASE_EXHAUSTED', failed: 1 }, { type: 'audience.import', error: 'IMPORT_FAILED', failed: imports }] });
-    const piles = [`jobs-failed:mailbox.recoverStaging warning 1639: ${c('mailbox.recoverStaging')}: 1,639, mostly ${c('MAILBOX_STAGING_ENVELOPE_UNKNOWN')}.`, `jobs-failed:campaign.run critical 1: ${c('campaign.run')}: 1, mostly ${c('JOB_LEASE_EXHAUSTED')}.`];
-    assert.deepEqual([lines(failed(2)), lines(failed(8))], [piles.toReversed(), [...piles.toReversed(), `jobs-failed:audience.import warning 8: ${c('audience.import')}: 8, 6 in the last 30 min, mostly ${c('IMPORT_FAILED')}.`]]);
+    const failed = (staging: number, imports: number) => ({ ...quiet(), failed: [{ type: 'mailbox.recoverStaging', error: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN', failed: 1_600, hour: staging, half: 0 }, { type: 'mailbox.recoverStaging', error: 'JOB_LEASE_EXHAUSTED', failed: 39, hour: 0, half: 0 },
+      { type: 'operation.webhook', error: 'WEBHOOK_HTTP_500', failed: 4_000, hour: 900, half: 500 }, { type: 'mailbox.reconcile', error: 'JOB_INTERNAL_ERROR', failed: 240, hour: 24, half: 4 }, { type: 'campaign.run', error: 'JOB_LEASE_EXHAUSTED', failed: 3, hour: 1, half: 0 },
+      { type: 'audience.import', error: 'IMPORT_FAILED', failed: imports, hour: imports, half: Math.max(0, imports - 2) }] });
+    const history = tick(failed(0, 2)), now1 = c('campaign.run') + ': 1 failed in the last hour, mostly ' + c('JOB_LEASE_EXHAUSTED') + '.';
+    assert.deepEqual([history.findings.map(finding => finding.key + ' ' + finding.severity + ' ' + finding.value + ': ' + finding.words), history.rollup.jobs!.find(job => job.type === 'mailbox.recoverStaging')],
+      [['jobs-failed:campaign.run critical 1: ' + now1], { type: 'mailbox.recoverStaging', pending: 0, oldestSeconds: 0, failed: 1_639, failedLastHour: 0, error: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN', behind: false }]);
+    assert.deepEqual(lines(failed(30, 7)), ['jobs-failed:campaign.run critical 1: ' + now1, 'jobs-failed:mailbox.recoverStaging warning 30: ' + c('mailbox.recoverStaging') + ': 30 failed in the last hour, mostly ' + c('MAILBOX_STAGING_ENVELOPE_UNKNOWN') + '.',
+      'jobs-failed:audience.import warning 7: ' + c('audience.import') + ': 7 failed in the last hour, mostly ' + c('IMPORT_FAILED') + '.']);
 
     // 4. A first-party campaign of 1.8M releasing 32 a second on an account that allows 160, because the planner reads 40.
     // What it releases is measured from its cursor and held against the account's rate and the workspace's share, never
@@ -33811,13 +33816,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       `slow-requests:POST:/v1/campaigns/:id/send warning 45000: ${c('POST /v1/campaigns/:id/send')}: slowest 45 s, p95 45 s over 3 in 15 min.`, `request-storm:GET:/v1/campaigns/:id/stats warning 3000: ${c('GET /v1/campaigns/:id/stats')}: 3,000 a minute for 3 minutes.`,
       `request-storm:workspace:ws_fixture warning 3010: workspace ${c('ws_fixture')}: 3,010 reads a minute for 3 minutes.`, `errors:MAILBOX_STAGING_ENVELOPE_UNKNOWN warning 6: ${c('MAILBOX_STAGING_ENVELOPE_UNKNOWN')}: 6 in 5 min.`],
       'Sending mail at 100 a second is not a storm, 40 errors in 45,000 requests are not an alert, unique violations are not database errors, a line every minute already says is not counted, and mail whose arrival notice was lost (#625) alerts at the first line.');
-    // The same code as a failed job's error: the first job, critical.
+    // The same code as a failed job's error: the first job of the hour, critical, and named before the errors that are only kept.
     memory = emptyMemory();
-    assert.deepEqual(lines({ ...quiet(), failed: [{ type: 'mailbox.recoverStaging', error: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN', failed: 3 }, { type: 'mailbox.recoverStaging', error: 'MAILBOX_STAGING_UNDELIVERED', failed: 1 }] }),
-      [`jobs-failed:mailbox.recoverStaging critical 4: ${c('mailbox.recoverStaging')}: 4, mostly ${c('MAILBOX_STAGING_ENVELOPE_UNKNOWN')}.`]);
+    const undelivered = (hour: number) => ({ ...quiet(), failed: [{ type: 'mailbox.recoverStaging', error: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN', failed: 3, hour: 0, half: 0 }, { type: 'mailbox.recoverStaging', error: 'MAILBOX_STAGING_UNDELIVERED', failed: 1, hour, half: hour }] });
+    assert.deepEqual([lines(undelivered(0)), lines(undelivered(1))], [[], [`jobs-failed:mailbox.recoverStaging critical 1: ${c('mailbox.recoverStaging')}: 1 failed in the last hour, mostly ${c('MAILBOX_STAGING_UNDELIVERED')}.`]]);
     // No key holds a space, so the card's key=value line parses; and what is not an identifier never reaches a card.
     memory = emptyMemory();
-    assert.deepEqual(lines({ ...quiet(), failed: [{ type: 'reader@example.net <b>', error: 'Subject: hello', failed: 30 }] }), [`jobs-failed:other warning 30: ${c('other')}: 30, mostly ${c('other')}.`]);
+    assert.deepEqual(lines({ ...quiet(), failed: [{ type: 'reader@example.net <b>', error: 'Subject: hello', failed: 30, hour: 30, half: 30 }] }), [`jobs-failed:other warning 30: ${c('other')}: 30 failed in the last hour, mostly ${c('other')}.`]);
     // The database: connections near the limit, slow queries and lock waits for two ticks; a transaction open ten minutes; the disk three quarters full.
     const crowded = { ...quiet(), database: { connections: 85, maxConnections: 100, longTransactions: 2, oldestTransactionSeconds: 660, slowQueries: 4, lockWaits: 12, sizeBytes: 120 * GB } };
     const always = ['database-transaction warning 660: open 11 min, 2 over a minute.', 'database-disk critical 0.8: 80% of 150 GB.'];
@@ -33845,13 +33850,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await fail(30, 'failed');
       assert.equal(runtime.config.operatorSlackWebhookUrl, undefined);
       const first = await tick();
-      assert.deepEqual([first.ran, first.cards, posted, await alert()], [true, [], [], { kind: 'jobs-failed', severity: 'warning', value: 30, unit: 'jobs', words: `${c(type)}: 30, mostly ${c('FIXTURE_FAILED')}.`, sent: false }]);
+      assert.deepEqual([first.ran, first.cards, posted, await alert()], [true, [], [], { kind: 'jobs-failed', severity: 'warning', value: 30, unit: 'jobs', words: `${c(type)}: 30 failed in the last hour, mostly ${c('FIXTURE_FAILED')}.`, sent: false }]);
       assert.ok(first.statements <= 36 && first.open >= 1, `A tick is a bounded number of statements (${first.statements}).`);
       assert.equal((await tick(false)).ran, false, 'One tick a minute, whoever asks: a second one within 45 seconds does nothing.');
       const page = ok(await local('GET', path)), listed = page.alerts.find((a: Json) => a.key === key);
       assert.deepEqual([page.delivery, page.stale, typeof page.generatedAt, { ...listed, since: recent(listed.since) }, page.jobs.find((job: Json) => job.type === type), page.database.connections >= 1, 'memory' in page],
-        ['off', false, 'string', { key, kind: 'jobs-failed', label: 'Jobs failed', severity: 'warning', value: 30, unit: 'jobs', words: `${type}: 30, mostly FIXTURE_FAILED.`, since: true, sentAt: null, runbook: 'docs/operations.md#jobs-failed' },
-          { type, pending: 0, oldestSeconds: 0, failed: 30, error: 'FIXTURE_FAILED', behind: true }, true, false]);
+        ['off', false, 'string', { key, kind: 'jobs-failed', label: 'Jobs failed', severity: 'warning', value: 30, unit: 'jobs', words: `${type}: 30 failed in the last hour, mostly FIXTURE_FAILED.`, since: true, sentAt: null, runbook: 'docs/operations.md#jobs-failed' },
+          { type, pending: 0, oldestSeconds: 0, failed: 30, failedLastHour: 30, error: 'FIXTURE_FAILED', behind: true }, true, false]);
       const apiKey = ok(await local('POST', '/v1/api-keys', { name: 'Not a dashboard', permissions: ['manage'] }), 201); secrets.add(apiKey.secret);
       error(await request('GET', path, apiKey.secret), 403, 'OPERATOR_REQUIRED');
 
@@ -33863,12 +33868,12 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await tick(); await tick();
       const opened = mine(), machine = { key, state: 'open', severity: 'warning', value: '30', unit: 'jobs', runbook: 'docs/operations.md#jobs-failed', health: `${PUBLIC_ORIGIN}/operator?view=health` };
       assert.deepEqual([opened.map(card => [card[0], card[1], { ...card[2], since: recent(card[2].since) }]), (await alert()).sent],
-        [[[`:x: *Jobs failed* ${c(type)}: 30, mostly ${c('FIXTURE_FAILED')}.`, `Jobs failed: ${c(type)}: 30, mostly ${c('FIXTURE_FAILED')}.`, { ...machine, since: true }]], true]);
+        [[[`:x: *Jobs failed* ${c(type)}: 30 failed in the last hour, mostly ${c('FIXTURE_FAILED')}.`, `Jobs failed: ${c(type)}: 30 failed in the last hour, mostly ${c('FIXTURE_FAILED')}.`, { ...machine, since: true }]], true]);
       // A day on it is still open: one reminder, with how long, under the same key and since.
       await db.query(`UPDATE health_alerts SET since=now()-interval '25 hours',sent_at=now()-interval '25 hours' WHERE key=$1`, [key]);
       await tick(); await tick();
       const reminded = mine();
-      assert.deepEqual(reminded.map(card => [card[1], card[2].key, card[2].state, Math.round((Date.now() - Date.parse(card[2].since)) / 3_600_000)]), [[`Jobs failed: ${c(type)}: 30, mostly ${c('FIXTURE_FAILED')}. For 25 h.`, key, 'open', 25]]);
+      assert.deepEqual(reminded.map(card => [card[1], card[2].key, card[2].state, Math.round((Date.now() - Date.parse(card[2].since)) / 3_600_000)]), [[`Jobs failed: ${c(type)}: 30 failed in the last hour, mostly ${c('FIXTURE_FAILED')}. For 25 h.`, key, 'open', 25]]);
       // Gone for less than three minutes is not a recovery; after three, one cleared card with the same key, and the alert is forgotten.
       await db.query(`UPDATE jobs SET status='completed' WHERE type=$1`, [type]);
       await tick();
@@ -33912,6 +33917,66 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // A hosted tick reads the campaigns' rates from the account and the connection.
       const last = await tick();
       assert.deepEqual([last.ran, Array.isArray(ok(await local('GET', path)).campaigns)], [true, true]);
+    });
+  });
+
+  test('MX health: jobs-failed counts the jobs that failed within the hour, by when the runner failed each, never the failed jobs still kept: history opens nothing, three new failures of a code that alerts at its first do, five of any type do, and it clears once the last is an hour old', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const { healthTick } = await import('./src/health.js'), { processJobs, MAX_ATTEMPTS } = await import('./src/jobs.js'), { ApiError } = await import('./src/core.js');
+      const tag = unique('w').slice(-8), staging = 'health.staging.' + tag, other = 'health.other.' + tag, c = (text: string) => '`' + text + '`';
+      // The runner below works on this test's jobs alone.
+      await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
+      runtime.config.operatorSlackWebhookUrl = OPERATOR_HOOK;
+      const posted: Json[] = [], post = async (_url: string, card: Json) => { posted.push(card); };
+      const cards = () => posted.splice(0).map(card => String(card.text).split('\n')[0]!).sort();
+      const tick = () => healthTick(runtime, { queues: [] }, { post, force: true });
+      const open = async () => (await db.query("SELECT key,severity,value,words FROM health_alerts WHERE key LIKE 'jobs-failed:health.%.'||$1 ORDER BY key", [tag])).rows;
+      const row = async (type: string) => { const { type: _, ...rest } = ok(await local('GET', '/v1/operator/health')).jobs.find((job: Json) => job.type === type); return rest; };
+      const enqueue = (type: string, n: number) => db.query("INSERT INTO jobs(id,type,workspace_id,payload) SELECT $1||'-'||g,$2,$3,'{}' FROM generate_series(1,$4::int) g", [unique('job'), type, runtime.config.workspaceId, n]);
+      // What the runner did with them: failed for good, and when (a failed job's available_at).
+      const failedNow = async (type: string) => (await db.query("SELECT last_error,attempts,count(*)::int AS n FROM jobs WHERE type=$1 AND status='failed' AND abs(extract(epoch FROM clock_timestamp()-available_at))<120 GROUP BY 1,2 ORDER BY 1", [type])).rows;
+      const refuse = (code: string) => async () => { throw new ApiError(422, code, 'A refusal that is not retryable fails the job at its first attempt.'); };
+      const run = () => processJobs(runtime, { [staging]: refuse('MAILBOX_STAGING_UNDELIVERED'), [other]: refuse('FIXTURE_FAILED') }, 20, 1);
+
+      // 1. History: 40 jobs that failed between an hour and twelve days ago, and two with a code that alerts at its first
+      // job, two hours ago. Nothing opens and nothing is posted; the Health page says how many are kept.
+      await db.query("INSERT INTO jobs(id,type,workspace_id,payload,status,attempts,last_error,available_at) SELECT $1||'-'||g,$2,$3,'{}','failed',6,CASE WHEN g>40 THEN 'MAILBOX_STAGING_UNDELIVERED' ELSE 'MAILBOX_STAGING_ENVELOPE_UNKNOWN' END," +
+        "now()-CASE WHEN g>40 THEN interval '2 hours' ELSE interval '61 minutes'+(g-1)*interval '7 hours' END FROM generate_series(1,42) g", [unique('job'), staging, runtime.config.workspaceId]);
+      await tick(); await tick();
+      assert.deepEqual([cards(), await open(), await row(staging)], [[], [], { pending: 0, oldestSeconds: 0, failed: 42, failedLastHour: 0, error: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN', behind: false }]);
+
+      // 2. Three more fail now, in the runner, with that code: one critical card, which counts the three and names their error.
+      await enqueue(staging, 3);
+      assert.equal(await run(), 3);
+      assert.deepEqual(await failedNow(staging), [{ last_error: 'MAILBOX_STAGING_UNDELIVERED', attempts: 1, n: 3 }]);
+      await tick(); await tick();
+      const three = c(staging) + ': 3 failed in the last hour, mostly ' + c('MAILBOX_STAGING_UNDELIVERED') + '.';
+      assert.deepEqual([cards(), await open(), await row(staging)], [['Jobs failed: ' + three], [{ key: 'jobs-failed:' + staging, severity: 'critical', value: 3, words: three }],
+        { pending: 0, oldestSeconds: 0, failed: 45, failedLastHour: 3, error: 'MAILBOX_STAGING_UNDELIVERED', behind: true }]);
+
+      // 3. Any other type: four in the hour are not an alert. The fifth, a job whose leases ran out five hours after it
+      // was due, failed now and not five hours ago: five within half an hour is one warning card.
+      await enqueue(other, 4);
+      assert.equal(await run(), 4);
+      await tick(); await tick();
+      assert.deepEqual([cards(), (await open()).length, await failedNow(other)], [[], 1, [{ last_error: 'FIXTURE_FAILED', attempts: 1, n: 4 }]]);
+      await db.query("INSERT INTO jobs(id,type,workspace_id,payload,status,attempts,lease_until,available_at) VALUES($1,$2,$3,'{}','running',$4,now()-interval '1 minute',now()-interval '5 hours')", [unique('job'), other, runtime.config.workspaceId, MAX_ATTEMPTS]);
+      assert.equal(await run(), 0);
+      assert.deepEqual(await failedNow(other), [{ last_error: 'FIXTURE_FAILED', attempts: 1, n: 4 }, { last_error: 'JOB_LEASE_EXHAUSTED', attempts: MAX_ATTEMPTS, n: 1 }]);
+      await tick(); await tick();
+      const five = c(other) + ': 5 failed in the last hour, mostly ' + c('FIXTURE_FAILED') + '.';
+      assert.deepEqual([cards(), (await open()).map(alert => [alert.key, alert.severity, alert.value])], [['Jobs failed: ' + five], [['jobs-failed:' + other, 'warning', 5], ['jobs-failed:' + staging, 'critical', 3]]]);
+
+      // 4. An hour later nothing more has failed: both clear (after the three quiet minutes every alert waits), one
+      // cleared card each, and the Health page still says how many are kept.
+      await db.query("UPDATE jobs SET available_at=available_at-interval '61 minutes' WHERE status='failed'");
+      await tick();
+      assert.deepEqual([cards(), (await open()).length], [[], 2]);
+      await db.query("UPDATE health_alerts SET seen_at=now()-interval '4 minutes' WHERE key LIKE 'jobs-failed:health.%.'||$1", [tag]);
+      await tick(); await tick();
+      const cleared = cards();
+      assert.deepEqual([cleared.map(line => line.slice(0, line.indexOf(', after'))), await open(), await row(staging), await row(other)], [['Cleared: Jobs failed: ' + c(other), 'Cleared: Jobs failed: ' + c(staging)], [],
+        { pending: 0, oldestSeconds: 0, failed: 45, failedLastHour: 0, error: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN', behind: false }, { pending: 0, oldestSeconds: 0, failed: 5, failedLastHour: 0, error: 'FIXTURE_FAILED', behind: false }]);
     });
   });
 
