@@ -22,6 +22,7 @@ import { HealthView } from './health'
 // UI notes (/operator/notes) live in ./notes and load with this chunk.
 export { OperatorNotesPage } from './notes'
 export { OperatorClusterPage } from './abuse'
+export { GlassPage } from './glass'
 const useOperatorRole = () => useSession()?.identity?.operator ?? null
 const NotFound = StaffOnly
 const def = (defs: typeof queueColumnDefs, key: string) => defs.find(column => column.key === key)!

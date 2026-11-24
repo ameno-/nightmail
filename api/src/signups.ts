@@ -12,12 +12,15 @@ import type { ListContactResult } from './audience.js';
 // number an operator sees is the number the gate keeps. Staff, invitations and subjects an operator bound take none.
 
 export type Places = { limit: number; signedUp: number; held: number; waiting: number; open: number };
+/** The limit and what fills it, as one row (Glass reads it inside its own statement). Open is worked out from it. */
+export const placesRow = sql`SELECT l.places AS "limit",(SELECT count(*)::int FROM nightmail_signups) AS "signedUp",
+    (SELECT count(*)::int FROM nightmail_waitlist WHERE let_in_at IS NOT NULL) AS held,(SELECT count(*)::int FROM nightmail_waitlist WHERE let_in_at IS NULL) AS waiting
+    FROM nightmail_signup_limit l WHERE l.singleton`;
+export const withOpen = (row: Omit<Places, 'open'>): Places => ({ ...row, open: Math.max(0, row.limit - row.signedUp - row.held) });
 /** The limit and what fills it, in one statement. Open: places left for anyone, after those held for the waitlist. */
 export async function readPlaces(db: DbExecutor): Promise<Places> {
-  const { rows: [row] } = await db.execute<Omit<Places, 'open'>>(sql`SELECT l.places AS "limit",(SELECT count(*)::int FROM nightmail_signups) AS "signedUp",
-    (SELECT count(*)::int FROM nightmail_waitlist WHERE let_in_at IS NOT NULL) AS held,(SELECT count(*)::int FROM nightmail_waitlist WHERE let_in_at IS NULL) AS waiting
-    FROM nightmail_signup_limit l WHERE l.singleton`);
-  return { ...row!, open: Math.max(0, row!.limit - row!.signedUp - row!.held) };
+  const { rows: [row] } = await db.execute<Omit<Places, 'open'>>(placesRow);
+  return withOpen(row!);
 }
 // One sign-up or one change of the limit at a time. Read the places in a later statement: under READ COMMITTED each
 // statement sees what the previous holder committed.

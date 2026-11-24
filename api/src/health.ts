@@ -55,6 +55,8 @@ const KINDS = {
 } as const satisfies Record<string, { emoji: string; label: string; severity: Severity; unit: string; section: Section }>;
 type Kind = keyof typeof KINDS;
 const isKind = (kind: string): kind is Kind => Object.hasOwn(KINDS, kind);
+/** An open alert's label, as Health shows it; null for a kind this version does not know (Health leaves those out too). */
+export const alertLabel = (kind: string) => isKind(kind) ? KINDS[kind].label : null;
 const sectionOf = (key: string): Section => { const kind = key.split(':')[0]!; return isKind(kind) ? KINDS[kind].section : 'requests'; };
 /** One condition that holds this tick. value is the one number that matters, in its kind's unit. */
 export type Finding = { key: string; kind: Kind; severity: Severity; value: number; words: string; remindMinutes: number };
@@ -121,7 +123,7 @@ type Measured = Omit<Health, 'generatedAt' | 'stale' | 'delivery' | 'alerts'>;
 type Rollup = Measured & { memory: Memory };
 
 /** A quantile's upper bound from a latency histogram: the bucket it falls in, or the slowest request for the last one. */
-function quantile(hist: number[], q: number, slowest: number) {
+export function quantile(hist: number[], q: number, slowest: number) {
   const total = hist.reduce((sum, n) => sum + n, 0);
   let seen = 0;
   for (let i = 0; i < hist.length; i++) { seen += hist[i]!; if (seen > 0 && seen >= total * q) return Math.min(LATENCY_BUCKETS[i] ?? slowest, Math.max(slowest, 1)); }

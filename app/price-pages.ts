@@ -18,9 +18,9 @@ import { jsonLd, llmsFull, llmsSiteIndex, markdownFiles, markdownPath, structure
 //   it, in #price-shell) with the CSS it needs inlined (critical-css.ts), so it shows before any of the app's code.
 //   The app's stylesheet and modules are out of the page: the homepage's boot script (home/shell/boot.js) starts them
 //   at the reader's first touch, key or scroll (a press held, and what they typed, carried over) or after 8 s, and the
-//   app's page then takes the painted one's place (index.tsx), with the inlined CSS. Workers Assets answers /pricing
-//   with pricing.html, and api/src/server.ts does the same on Node; an address under /compare/ with no page is not
-//   found (api/src/worker.ts, server.ts).
+//   app's page then takes the painted one's place (index.tsx), with the inlined CSS. The Worker answers /pricing
+//   with pricing.html from the assets, compressed (api/src/worker.ts), and api/src/server.ts does the same on Node; an
+//   address under /compare/ with no page is not found.
 // - Each page's Markdown twin, and the homepage's (readable.ts): pricing.md, compare/<slug>.md, index.md;
 //   llms-site.txt, the lines the API's llms.txt puts under its title (api/src/site-index.ts); llms-full.txt.
 // - robots.txt (every crawler welcome, and where the sitemap is) and sitemap.xml: the homepage and the price pages.
