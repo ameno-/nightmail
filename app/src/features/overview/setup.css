@@ -6,7 +6,7 @@
 .setup-rail ol { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
 .setup-rail li { display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: var(--space-12); padding-block: 6px; font-size: var(--text-sm); line-height: var(--leading-sm); animation: row-enter 220ms var(--ease-out-strong) both; animation-delay: calc(var(--i, 0) * 40ms); }
 /* The mark holds the number and a check in one cell; finishing a step cross-fades and pops the check in. */
-.setup-rail__mark { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--color-surface); box-shadow: var(--shadow-button); color: var(--color-muted); font-size: 11px; line-height: 1; font-variant-numeric: tabular-nums; transition: background-color 200ms ease, box-shadow 200ms ease, color 200ms ease; }
+.setup-rail__mark { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--color-control); color: var(--color-muted); font-size: 11px; line-height: 1; font-variant-numeric: tabular-nums; transition: background-color 200ms ease, box-shadow 200ms ease, color 200ms ease; }
 .setup-rail__mark > * { grid-area: 1 / 1; transition: opacity 160ms ease-out, transform 220ms var(--ease-out-strong); }
 .setup-rail__mark > svg { opacity: 0; transform: scale(.5) rotate(-20deg); }
 li[data-done] > .setup-rail__mark { background: var(--color-contrast); box-shadow: none; color: var(--color-on-contrast); }

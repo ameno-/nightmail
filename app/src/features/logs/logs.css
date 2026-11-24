@@ -27,11 +27,11 @@
 @media (hover: hover) and (pointer: fine) { .email-facts__contact:hover, .email-facts__contact:hover > svg { color: var(--color-text); } }
 .email-facts__contact:focus-visible, .email-facts__contact:focus-visible > svg { color: var(--color-text); }
 .email-facts__note { border-radius: 2px; cursor: default; }
-/* Delivery: one line of steps, oldest first, joined by short rules, that scrolls sideways when long. */
+/* Delivery: one line of steps, oldest first, joined by a faint chevron (no rule), that scrolls sideways when long. */
 .delivery { display: flex; flex: none; align-items: center; gap: var(--space-12); min-width: 0; min-height: var(--control-height); margin-bottom: var(--space-16); }
 .delivery__steps { --fade-pad-x: var(--focus-reach); --fade-pad-y: var(--focus-reach); display: flex; align-items: center; min-width: 0; margin: calc(-1 * var(--focus-reach)); padding: var(--focus-reach); overflow-x: auto; list-style: none; white-space: nowrap; }
 .delivery__step { display: flex; flex: none; align-items: center; }
-.delivery__step + .delivery__step::before { content: ''; flex: none; width: 20px; height: 1px; margin-inline: var(--space-8); background: var(--color-border-strong); }
+.delivery__step + .delivery__step::before { content: '›'; flex: none; margin-inline: var(--space-8); color: var(--color-faint); }
 .delivery__fact { display: inline-flex; align-items: center; gap: var(--space-6); border-radius: 2px; color: var(--color-text); text-decoration: none; cursor: default; }
 .delivery__dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--tone-marker); }
 .delivery__count, .delivery__time { color: var(--color-muted); font-variant-numeric: tabular-nums; }
@@ -52,12 +52,11 @@
 .delivery > .ui-alert { flex: 1; }
 .delivery-tip { display: flex; flex-direction: column; gap: 2px; }
 .delivery-tip code { font-family: var(--font-mono); }
-/* Vertical (the details column, a phone): a step per row with its time at the end, the dots joined by a rule. */
+/* Vertical (the details column, a phone): a step per row with its time at the end, rows apart by their rhythm. */
 .delivery[data-vertical] { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: var(--space-8); margin-bottom: 0; }
 .delivery[data-vertical] .delivery__steps { flex-direction: column; align-items: stretch; overflow: visible; white-space: normal; }
 .delivery[data-vertical] .delivery__step { position: relative; display: block; padding-block: var(--space-4); }
 .delivery[data-vertical] .delivery__step + .delivery__step::before { content: none; }
-.delivery[data-vertical] .delivery__step:not(:last-child)::after { content: ''; position: absolute; top: 20px; bottom: -8px; left: 2.5px; width: 1px; background: var(--color-border-strong); }
 .delivery[data-vertical] .delivery__fact { display: grid; grid-template-columns: 6px minmax(0, 1fr) auto; align-items: center; column-gap: var(--space-12); }
 .delivery[data-vertical] .delivery__name { grid-column: 2; }
 .delivery[data-vertical] .delivery__time { grid-column: 3; text-align: right; }
@@ -75,8 +74,8 @@
   .email-detail__body { flex: 1 1 0; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: minmax(0, 1fr); min-height: 0; }
   .email-detail__preview { display: flex; flex-direction: column; min-height: 0; }
   /* It scrolls down only; its sides keep room for the fixes' hover fill (8 px) and focus rings. */
-  /* The split: the preview, a hairline, the details column. */
-  .email-detail__side { --fade-pad-y: var(--focus-reach); display: flex; flex-direction: column; gap: var(--space-28); width: calc(var(--side-width) + var(--space-8) + var(--space-24)); min-height: 0; margin: calc(-1 * var(--focus-reach)) calc(-1 * var(--space-8)) calc(-1 * var(--focus-reach)) 0; padding: var(--focus-reach) var(--space-8) var(--focus-reach) var(--space-24); border-left: 1px solid var(--color-border-muted); overflow: hidden auto; }
+  /* The split: the preview beside the details column, apart by a gap. */
+  .email-detail__side { --fade-pad-y: var(--focus-reach); display: flex; flex-direction: column; gap: var(--space-28); width: calc(var(--side-width) + var(--space-8) + var(--space-24)); min-height: 0; margin: calc(-1 * var(--focus-reach)) calc(-1 * var(--space-8)) calc(-1 * var(--focus-reach)) 0; padding: var(--focus-reach) var(--space-8) var(--focus-reach) var(--space-24); overflow: hidden auto; }
   .email-detail__side[hidden] { display: none; }
   /* Opened from the toolbar, the checks' panel starts at the preview's top, under its toggle, which names it. */
   .email-detail[data-mode='panel'] .email-detail__side { padding-top: calc(var(--control-height) + var(--space-12) + var(--focus-reach)); }
@@ -104,7 +103,7 @@
 .email-status__facts:focus-visible { color: var(--color-text); }
 /* The sheets: the delivery above the facts; the checks. */
 .email-detail-sheet .ui-sheet__body { display: flex; flex-direction: column; gap: var(--space-16); }
-.email-fact-list { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: var(--space-12); margin: 0; padding-top: var(--space-16); border-top: 1px solid var(--color-border-muted); }
+.email-fact-list { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: var(--space-12); margin: 0; padding-top: var(--space-16); }
 .email-fact-list > div { display: contents; }
 .email-fact-list dt { color: var(--color-muted); }
 .email-fact-list dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
@@ -118,20 +117,18 @@
   .email-status__stream { display: none; }
   .email-detail .ev-canvas { margin-inline: calc(-1 * var(--bleed, 0px)); }
   .email-detail .ev-canvas :is(.email-frame, .email-source, .email-text) { border-radius: 0; }
-  .email-detail .email-frame { box-shadow: 0 -1px var(--color-border-muted), 0 1px var(--color-border-muted); }
 }
 
-/* Received mail: metadata, notices, body and identifiers on one 24px rhythm, split by hairlines. */
+/* Received mail: metadata, notices, body and identifiers on one 24px rhythm, apart by space alone. */
 .page-surface .email-metadata { padding-bottom: 0; }
 .page-surface .email-detail-page > .ui-alert { margin-top: var(--space-24); }
 .page-surface .email-detail-page > .ui-alert + .ui-alert { margin-top: var(--space-12); }
-.page-surface .email-detail-grid { margin-top: var(--space-24); padding-block: var(--space-24); border-top: 1px solid var(--color-border-muted); }
-.page-surface .delivery-timeline { border-left-color: var(--color-border-muted); }
+.page-surface .email-detail-grid { margin-top: var(--space-8); padding-block: var(--space-24); }
 .page-surface .delivery-timeline > .ui-section-header { min-height: var(--control-height); }
 .page-surface .delivery-timeline li:first-child { padding-top: 0; }
 .page-surface .received-details { gap: 0; }
 .page-surface .received-group { margin-top: var(--space-24); }
-.page-surface .message-identifiers { padding-top: var(--space-24); border-top-color: var(--color-border-muted); }
+.page-surface .message-identifiers { padding-top: var(--space-24); }
 /* The back button stays beside the first line of a long subject, and the status stays on that line's row. */
 .page-surface .email-detail-page > .ui-page-header { flex-wrap: nowrap; align-items: flex-start; }
 .page-surface .email-detail-page > .ui-page-header > .cluster:first-child { flex: 1 1 0; flex-wrap: nowrap; align-items: flex-start; min-width: 0; max-width: none; }
@@ -141,7 +138,7 @@
 .page-surface .email-detail-page > :not(.email-detail-grid), .page-surface .logs-page > :not(.logs-table, .logs-split) { flex-shrink: 0; }
 /* Logs' body (facets.tsx): the filters beside the stream from 1440 px, where the subject still has room; narrower, the
    toolbar's pickers filter instead. The stream column needs a wider window still: Transactional reads in full or not at all. */
-.ui-split.logs-split { --facet-width: 176px; flex: 1; min-height: 0; }
+.ui-split.logs-split { --facet-width: 188px; flex: 1; min-height: 0; }
 .logs-split > .ui-split__main > :not(.logs-table) { flex-shrink: 0; }
 .logs-split .ui-facets { padding-top: 2px; }
 @media (max-width: 1439px) {
@@ -150,44 +147,24 @@
   .ui-split.logs-split > .ui-split__main { padding-left: 0; }
 }
 @media (min-width: 1440px) { .logs-page .logs-filter { display: none; } }
-.ui-split.logs-split > .ui-split__rail:empty { border-right-color: transparent; }
+.ui-split.logs-split > .ui-split__rail:empty { background: none; }
 /* Collapsed to no width rather than removed: a short list's spacer row spans every column, and a removed one would
    leave an empty column at the table's end. */
 @media (max-width: 1759px) { .logs-page .logs-table :is(th, td)[data-col='stream'] { width: 0 !important; padding: 0 !important; visibility: hidden; } }
-.page-surface .logs-page .search-box { min-width: 0; }
+
 @media (max-width: 850px) {
   .page-surface .email-detail-page { min-height: auto; }
   .page-surface .email-detail-grid { row-gap: var(--space-24); }
-  .page-surface .delivery-timeline { padding-left: 0; padding-top: var(--space-20); border-left: 0; border-top: 1px solid var(--color-border-muted); }
+  .page-surface .delivery-timeline { padding-left: 0; padding-top: var(--space-20); }
   .page-surface .email-metadata { gap: var(--space-8); }
   .email-metadata > div { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: var(--space-12); align-items: baseline; }
   .email-metadata dt { margin: 0; }
 }
 
-/* Tablet: the toolbar in one row (search, both filters, an icon-only export), and the table drops its stream column to
-   fit without scrolling sideways. Phone: search on its own row, then the filters and export; rows are cards. */
+/* Tablet: the table drops its stream column to fit without scrolling sideways. */
 @media (max-width: 1100px) {
   .page-surface .logs-page .logs-table .ui-table { min-width: 720px; }
 }
-@media (max-width: 1100px) {
-  .logs-page > .data-toolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: var(--space-8); }
-  .logs-page > .data-toolbar > .cluster { display: contents; }
-  .logs-page > .data-toolbar .cluster > .ui-button { grid-column: 1 / -1; justify-self: start; }
-  .logs-page > .data-toolbar .search-box { width: 100%; min-width: 0; }
-  .logs-page > .data-toolbar .ui-select-trigger { width: 168px; min-width: 0; max-width: none; }
-  .logs-export { width: var(--control-height); padding: 0; }
-  .logs-export > span { display: none; }
-}
-@media (max-width: 640px) {
-  .logs-page > .data-toolbar { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }
-  .logs-page > .data-toolbar :is(.search-box, .cluster > .ui-button) { grid-column: 1 / -1; width: 100%; }
-  .logs-page > .data-toolbar .ui-select-trigger { width: 100%; }
-  .logs-page .logs-controls .ui-tab { padding-inline: var(--space-8); }
-  /* The header's tabs take their own row: the direction at its start, the dates at its end (under it when too narrow). */
-  .logs-page > .ui-page-header > .cluster:last-child, .logs-page .logs-controls { flex: 1 1 100%; }
-  .logs-page .logs-controls { flex-wrap: wrap; justify-content: space-between; row-gap: 0; }
-}
-@media (max-width: 400px) { .logs-page .logs-controls .ui-tab { padding-inline: var(--space-6); } }
 .ui-cards.logs-table .ui-card__segment + .ui-card__segment::before { content: none; }
 .ui-cards.logs-table .ui-card__line { gap: var(--space-8); }
 .ui-cards.logs-table .log-direction { display: inline-block; width: 22px; }
@@ -234,7 +211,6 @@
 .email-detail .thread__count { color: var(--color-faint); }
 .thread-line__steps { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
 .thread-line__step { position: relative; }
-.thread-line__step:not(:last-child)::after { content: ''; position: absolute; top: 22px; bottom: -10px; left: 2.5px; width: 1px; background: var(--color-border); pointer-events: none; }
 /* Two short lines per message: the sender first (it never gives way to the status), its time at the end; the status
    under the sender in small mono. */
 .thread-line__entry { display: grid; grid-template-columns: 6px minmax(0, 1fr) auto; grid-template-areas: 'dot top time' '. status status'; align-items: center; column-gap: var(--space-12); min-height: 44px; margin-inline: calc(-1 * var(--space-8)); padding: var(--space-4) var(--space-8); border-radius: 4px; color: var(--color-text); text-decoration: none; }
@@ -252,7 +228,7 @@
 /* The received details scroll on their own: the steps keep inside their right edge. */
 .received-details .thread-line__step { display: block; padding: 0; }
 .received-details .thread-line__entry { margin-right: 0; }
-.thread-chip { position: relative; display: inline-flex; flex: none; align-items: center; gap: var(--space-4); height: 28px; margin-left: auto; padding: 0 var(--space-8) 0 var(--space-12); border: 0; border-radius: 14px; background: var(--color-layer-2); color: var(--color-text); font: inherit; white-space: nowrap; }
+.thread-chip { position: relative; display: inline-flex; flex: none; align-items: center; gap: var(--space-4); height: 28px; margin-left: auto; padding: 0 var(--space-8) 0 var(--space-12); border: 0; border-radius: var(--radius-sm); background: var(--color-layer-2); color: var(--color-text); font: inherit; white-space: nowrap; }
 .thread-chip::before { content: ''; position: absolute; inset: -8px -4px; }
 .thread-chip > svg { color: var(--color-muted); }
 .thread-chip + :is(.ss-chip, .ss-chip-skeleton) { margin-left: 0; }
@@ -263,4 +239,103 @@
 .thread-rows__status { min-width: 0; overflow: hidden; color: var(--color-muted); text-overflow: ellipsis; white-space: nowrap; }
 .thread-rows__more { display: flex; padding-left: var(--space-8); color: var(--color-muted); cursor: pointer; }
 @media (hover: hover) and (pointer: fine) { .thread-rows__row:is(a, button):hover { background: var(--color-hover); } }
-.log-subject > .log-thread { display: inline-flex; flex: none; align-items: center; gap: 3px; height: 20px; padding: 0 7px 0 6px; overflow: visible; border-radius: 10px; background: var(--color-hover); color: var(--color-muted); font-size: 11px; font-variant-numeric: tabular-nums; line-height: 20px; }
+.log-subject > .log-thread { display: inline-flex; flex: none; align-items: center; gap: 3px; height: 18px; padding: 0 5px; overflow: visible; border-radius: var(--radius-xs); background: var(--color-chip); color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-label); font-variant-numeric: tabular-nums; line-height: 18px; }
+
+/* ── Console: Logs and a sent email, edge to edge from 900 px ── */
+/* Logs: one 40px strip (the title, direction, range, search with its / key, filters, export) over the facet rail and
+   the dense stream, no rule under it. Segmented switches (a solid track and a solid selected segment), not underlined
+   tabs, so the strip reads as one row of controls. */
+.logs-bar { display: flex; flex: none; align-items: center; gap: var(--space-12); min-height: 40px; padding: 0 var(--space-16); }
+.logs-bar__head { display: flex; flex: none; align-items: center; gap: var(--space-12); min-width: 0; }
+.logs-bar__title { margin: 0; font-size: var(--text-title); line-height: var(--leading-title); font-weight: var(--font-weight-semibold); letter-spacing: var(--tracking-title); }
+.logs-bar__region { color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); }
+.logs-bar .logs-controls { flex-wrap: nowrap; gap: var(--space-8); }
+.logs-bar .logs-controls .ui-tabs { gap: 0; height: 28px; min-height: 0; margin: 0; padding: 2px; overflow: visible; border-radius: var(--radius-sm); background: var(--color-control); }
+.logs-bar .logs-controls .ui-tabs__marker { display: none; }
+.logs-bar .logs-controls .ui-tab { height: 24px; padding: 0 var(--space-8); border-radius: 4px; font-size: var(--text-xs); transition: background var(--motion-duration) var(--ease-standard), color var(--motion-duration) var(--ease-standard); }
+.logs-bar .logs-controls .ui-tabs:last-child .ui-tab { min-width: 38px; font-family: var(--font-mono); }
+.logs-bar .logs-controls .ui-tab[aria-selected='true'] { background: var(--color-segment); color: var(--color-text); }
+.logs-bar .logs-controls .ui-tab:focus-visible:not([aria-selected='true']) { background: var(--color-control-focus); }
+.logs-bar__tools { display: flex; flex: 1; align-items: center; justify-content: flex-end; gap: var(--space-8); min-width: 0; }
+.logs-search.search-box { flex: 1 1 280px; width: auto; min-width: 160px; max-width: 420px; }
+.logs-search.search-box .ui-input { width: 100%; padding-inline: 30px; }
+.logs-search.search-box > .ui-icon { position: absolute; left: 10px; color: var(--color-faint); pointer-events: none; }
+.logs-search > .ui-kbd { position: absolute; right: 5px; background: var(--color-kbd-inset); pointer-events: none; }
+.logs-bar .ui-select-trigger.logs-filter, .logs-bar .logs-filter { width: 140px; min-width: 0; }
+@media (max-width: 1279px) { .logs-export { width: var(--control-height); padding: 0; } .logs-export > span { display: none; } }
+@media (min-width: 900px) and (max-width: 1180px) {
+  .logs-bar { flex-wrap: wrap; row-gap: var(--space-6); padding-block: var(--space-6); }
+  .logs-bar__tools { flex-basis: 100%; justify-content: flex-start; }
+  .logs-search.search-box { max-width: none; }
+}
+/* The body sits on the page's 16px gutter. The rail: 188px on a solid surface step of its own (#141414 dark, #F6F6F6
+   light), 16px inside, 8px from the stream, no rule; its rows' hover and selection take the frame's solid steps. The
+   stream: 32px rows on their quiet band under a sticky 28px head bar, its text 12px inside the bar. */
+.ui-split.logs-split { column-gap: var(--space-8); padding: var(--space-4) var(--space-16) var(--space-16); }
+.ui-split.logs-split > .ui-split__rail { --color-hover: var(--color-deep-hover); --color-active-bg: var(--color-deep-active); padding: var(--space-16); border-radius: var(--radius-sm); background: var(--color-facets); }
+.ui-split.logs-split > .ui-split__main { padding-left: 0; }
+.logs-split .ui-facets { gap: var(--space-16); padding-top: 0; }
+.logs-page .logs-table .ui-table thead th { position: sticky; top: 0; z-index: 2; }
+.logs-page .logs-table .ui-table :is(th, td):first-child, .ov-table .ui-table :is(th, td):first-child { padding-left: var(--space-12); }
+.logs-page .logs-table + .ui-pagination, .logs-page .ui-pagination { min-height: 40px; padding: var(--space-4) 0 0 var(--space-12); }
+/* The compact shell scrolls the document inside the page's margins: the strip wraps (title and switches, then the search
+   and filters) and every control is a 44px target. */
+@media (max-width: 899px) {
+  .logs-bar { flex-wrap: wrap; row-gap: var(--space-8); min-height: 0; margin-bottom: var(--space-12); padding: 0 0 var(--space-4); }
+  .ui-split.logs-split { padding: 0; }
+  .logs-bar__head { flex: 1 1 100%; flex-wrap: wrap; row-gap: var(--space-8); }
+  .logs-bar .logs-controls { margin-left: auto; }
+  .logs-bar .logs-controls .ui-tabs { height: 44px; }
+  .logs-bar .logs-controls .ui-tab { height: 40px; min-width: 44px; }
+  .logs-bar__tools { flex: 1 1 100%; flex-wrap: wrap; justify-content: flex-start; }
+  .logs-search.search-box { flex: 1 1 100%; max-width: none; }
+  .logs-bar .ui-select-trigger.logs-filter, .logs-bar .logs-filter { flex: 1 1 0; width: auto; }
+}
+@media (max-width: 640px) {
+  .logs-bar .logs-controls { flex: 1 1 100%; justify-content: space-between; margin-left: 0; }
+  .logs-bar .logs-controls .ui-tab { padding-inline: var(--space-8); }
+}
+
+/* A sent email on a desktop, with no rule anywhere: a 44px bar on the canvas (back, the kind as a solid mono tag, the
+   subject, its status and ID), a 36px facts strip on a solid surface (#1E1E1E dark, #F5F5F5 light), then the preview on
+   its matte (#131313, #EFEFEF) holding the white email, beside a 320px inspector (#141414, #F6F6F6) with the delivery's
+   waterfall and the checks. All on the page's 16px gutter, 8px apart. */
+.email-bar { display: flex; flex: none; align-items: center; gap: var(--space-12); height: 44px; padding: 0 var(--space-16) 0 var(--space-8); }
+.email-bar > .ui-button { box-shadow: none; background: none; color: var(--color-muted); }
+@media (hover: hover) and (pointer: fine) { .email-bar > .ui-button:hover { background: var(--color-hover); color: var(--color-text); } }
+.email-bar > .ui-button:focus-visible { background: var(--color-hover); color: var(--color-text); }
+.email-bar__tag { flex: none; height: 20px; padding: 0 var(--space-6); border-radius: var(--radius-xs); background: var(--color-chip); color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-label); line-height: 20px; letter-spacing: var(--tracking-label); text-transform: uppercase; white-space: nowrap; }
+.email-bar__title { flex: 1; min-width: 0; margin: 0; overflow: hidden; font-size: var(--text-title); line-height: var(--leading-title); font-weight: var(--font-weight-semibold); letter-spacing: var(--tracking-title); text-overflow: ellipsis; white-space: nowrap; }
+.email-bar__title > .ui-skeleton-line { height: 1lh !important; }
+.email-bar__end { display: flex; flex: none; align-items: center; gap: var(--space-16); }
+.email-bar__status { display: inline-flex; align-items: center; gap: var(--space-6); color: var(--color-text); font-family: var(--font-mono); font-size: var(--text-xs); white-space: nowrap; }
+.email-bar .ui-identifier { padding-left: var(--space-4); }
+.email-bar .ui-identifier__value { color: var(--color-muted); font-size: var(--text-xs); }
+.email-detail > .email-facts.ui-facts-row { display: flex; flex: none; gap: var(--space-24); height: 36px; margin: 0 var(--space-16); padding: 0 var(--space-12); border-radius: var(--radius-sm); background: var(--color-strip); }
+.email-facts .ui-facts-row__item { flex-direction: row; align-items: center; gap: var(--space-8); min-width: 0; padding: 0; }
+.email-facts .ui-facts-row__item:nth-child(-n + 2) { flex: 1 1 0; }
+.email-facts .ui-facts-row__item:nth-child(n + 3) { flex: none; }
+.email-facts dt { flex: none; color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); letter-spacing: var(--tracking-label); text-transform: uppercase; }
+.email-facts dd { flex: 1 1 auto; height: 16px; font-size: var(--text-xs); line-height: 16px; }
+.email-facts dd.ui-facts-row__mono { font-size: var(--text-xs); }
+/* Between 900 and 1199 px the delivery runs as one line under the facts, on the canvas, its text level with theirs. */
+.email-detail[data-mode='panel'] > .delivery { min-height: 36px; margin: 0; padding: var(--space-4) var(--space-28); font-size: var(--text-xs); }
+@media (min-width: 900px) {
+  /* The 8px between the preview and the inspector is the inspector's own margin, so a hidden panel leaves no gap and the
+     matte's right edge stays level with the facts strip's. */
+  .email-detail__body { gap: 0; padding: var(--space-8) var(--space-16) var(--space-16); }
+  /* The matte: the preview's toolbar and its email on one recessed solid surface; the switches inside step off it. */
+  .email-detail__preview { --color-hover: var(--color-deep-hover); --color-active-bg: var(--color-deep-active); --color-layer-2: var(--color-deep-control-hover); --color-control: var(--color-deep-control); --color-control-hover: var(--color-deep-control-hover); --color-control-focus: var(--color-deep-control-focus); --color-control-pressed: var(--color-deep-control-pressed); padding: var(--space-12); border-radius: var(--radius-sm); background: var(--color-matte); }
+  .email-detail .ev[data-fill] .ev-stage, :root[data-theme='dark'] .email-detail .ev[data-fill] .ev-stage { border-radius: 0; background: none; }
+  .email-detail .ev[data-fill] .ev-captions { padding-inline: 0; }
+  .email-detail .ev[data-fill] .ev-canvas { padding: var(--space-8) 0 0; }
+  .email-detail .ev[data-fill] .ev-placeholder { background: var(--color-hover); }
+  .email-detail .ev-stage:has(iframe:focus-visible) { background: var(--color-hover); }
+  /* The inspector: its own solid surface, its sections 20px apart, no rule between them. */
+  .email-detail__side { --fade-pad-y: 0px; --color-hover: var(--color-deep-hover); --color-active-bg: var(--color-deep-active); --color-control: var(--color-deep-control); --color-control-hover: var(--color-deep-control-hover); --color-control-focus: var(--color-deep-control-focus); --color-control-pressed: var(--color-deep-control-pressed); gap: var(--space-20); width: 320px; margin: 0 0 0 var(--space-8); padding: var(--space-16); border-radius: var(--radius-sm); background: var(--color-inspector); }
+  .email-detail[data-mode='panel'] .email-detail__side { padding-top: var(--space-16); }
+  .email-detail__side > * { flex: none; }
+  .email-detail__side :is(.ss__title, .thread-line__title) { min-height: 24px; color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); letter-spacing: var(--tracking-label); text-transform: uppercase; }
+  .email-detail__delivery > .ss__title { min-height: 24px; }
+  .email-detail__side .ui-waterfall__label { font-size: var(--text-md); }
+}
