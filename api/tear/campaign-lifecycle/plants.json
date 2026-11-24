@@ -62,5 +62,13 @@
     "file": "api/src/sending.ts",
     "old": "totals[key] += item[key];",
     "neu": "totals[key] += item[key] * 2;"
+  },
+  {
+    "label": "lc-9-delivered-only-skip-all-stays-sending",
+    "rule": "lifecycle.never-stuck",
+    "checker": "campaign-lifecycle",
+    "file": "api/src/sending.ts",
+    "old": "if (released.completed) { if (!released.count) await settle(); return 'done'; }",
+    "neu": "if (released.completed) return 'done';"
   }
 ]

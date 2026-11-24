@@ -795,7 +795,7 @@
       "note": "DB read-only outage, job lease crash/redelivery, and mid-campaign deploy recover cleanly with exact accounting and zero duplicates"
     },
     {
-      "name": "known-bug-lc-01-delivered-only-skip-all-stays-sending",
+      "name": "delivered-only-skip-all-finishes-done",
       "steps": [
         {
           "op": "Configure",
@@ -843,12 +843,9 @@
         }
       ],
       "expected": {
-        "outcome": "fail",
-        "operator": "reply:Settle:satisfies:settle-not-stuck",
-        "verdict": "replyMismatch",
-        "canary": true
+        "outcome": "pass"
       },
-      "note": "Known product bug BUG-LC-01: resuming a quarantined probe campaign where deliveredOnly skips all remaining recipients advances expanded=total without calling finishCampaigns, leaving state='sending' with waiting=null until interrupted-attempt sweep"
+      "note": "Fixed by PR #627 (BUG-LC-01): resuming a quarantined probe campaign where deliveredOnly skips every remaining recipient settles sending -> done immediately"
     }
   ]
 }

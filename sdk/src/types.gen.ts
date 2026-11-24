@@ -6053,6 +6053,10 @@ export type GetCurrentIdentityResponses = {
          */
         byo?: boolean;
         /**
+         * Whether this installation shows who else has a campaign open in the dashboard (campaign rooms run on the Cloudflare deployment). False on the Node server.
+         */
+        presence?: boolean;
+        /**
          * Hosted dashboard sessions: whether the workspace is free, whether an empty balance has paused sending or held received mail, and auto-recharge, so the dashboard can show it on its first frame. Null otherwise; GET /v1/billing has the detail.
          */
         billing?: {
