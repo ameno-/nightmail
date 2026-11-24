@@ -28208,16 +28208,17 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual(await outbox(), []);
     });
   });
-  test('Glass: everything going on in one read for operators, from rollups and bounded counts; anyone else gets exactly what a route that does not exist answers', async t => {
+  test('Glass: everything going on in one read for operators, from rollups and bounded counts; anyone else gets exactly what an operator path that does not exist answers', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const wid = runtime.config.workspaceId, path = '/v1/operator/glass', pool = '444455556666', region = 'eu-glass-1';
       Object.assign(runtime.config, { multiTenant: true, deploy: { sha: '0123456789abcdef0123456789abcdef01234567', at: '2026-11-24T12:00:00.000Z' } });
       const { readGlass, GLASS_CAP } = await import('./src/glass.js');
-      // Not an operator, by session or by API key: the 404 of a path that doesn't exist, the same but for its request ID.
-      const absent = (reply: Reply) => { const { requestId: _, ...rest } = error(reply, 404, 'NOT_FOUND'); return { status: reply.status, ...rest }; };
+      // Not an operator, by session or by API key: the operator area's one refusal, the same as for a path that doesn't
+      // exist but for its request ID, so nothing says Glass is there.
+      const refused = (reply: Reply) => { const { requestId: _, ...rest } = error(reply, 403, 'OPERATOR_REQUIRED'); return { status: reply.status, ...rest }; };
       const key = ok(await local('POST', '/v1/api-keys', { name: 'Not an operator', permissions: ['manage'] }), 201); secrets.add(key.secret);
       for (const read of [(p: string) => local('GET', p), (p: string) => request('GET', p, key.secret)])
-        assert.deepEqual(absent(await read(path)), absent(await read('/v1/operator/no-such-page')));
+        assert.deepEqual(refused(await read(path)), refused(await read('/v1/operator/no-such-page')));
       assert.equal(ok(await local('GET', '/openapi.json')).paths[path], undefined, 'Hidden from the public OpenAPI document.');
       const { setOperator } = await import('./scripts/set-operator.js');
       await setOperator(db, [AUTH_SUBJECT, 'operator:read', '--reason', 'Synthetic Glass reader']);
@@ -28282,9 +28283,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.ok([page.sending.queued, page.sending.held].every(c => c.n <= GLASS_CAP && typeof c.atLeast === 'boolean'));
       const second = await local('GET', path);
       assert.deepEqual([second.headers.get('x-nightmail-glass-cache'), ok(second).generatedAt], ['hit', page.generatedAt]);
-      // A role taken away answers 404 again, cache or no cache.
+      // A role taken away is refused again, cache or no cache.
       await db.query('DELETE FROM platform_operators WHERE user_id=$1', [manager!.userId]);
-      assert.deepEqual(absent(await local('GET', path)), absent(await local('GET', '/v1/operator/no-such-page')));
+      assert.deepEqual(refused(await local('GET', path)), refused(await local('GET', '/v1/operator/no-such-page')));
     });
   });
 

@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql, type SQL } from 'drizzle-orm';
-import { ApiError, errors, response, security, type App, type Ctx, type Runtime } from './core.js';
+import { errors, response, security, type App, type Runtime } from './core.js';
 import { operatorActor } from './operator.js';
 import { cachedDashboardRead } from './dashboard-cache.js';
 import { placesRow, withOpen, type Places } from './signups.js';
@@ -24,7 +24,9 @@ import { MicroCentsJson } from './billing/money.js';
 //  - sign-ups, standing, billing accounts and the health tables: small tables (one row per account, workspace or alert);
 //  - money: topups through the ledger's (kind, source_id) index, this month's cost from billing_months per account;
 //  - visitors: analytics_hourly (#680), by its hour-first key.
-// Hidden from the public OpenAPI document. Anyone but a signed-in operator gets the 404 of a route that doesn't exist.
+// Hidden from the public OpenAPI document. Like every /v1/operator path it is behind support.ts operatorGate: anyone but a
+// signed-in operator gets the gate's one refusal, the same as for a path that doesn't exist, so nothing says it is here;
+// the dashboard's /glass answers them "Page not found".
 
 const GLASS_TTL_SECONDS = 30;
 /** Bounded counts read at most this many rows (one more says the count is a lower bound). */
@@ -176,20 +178,11 @@ function shape(r: Raw, config: Pick<Runtime['config'], 'deploy'>): Glass {
   };
 }
 
-/** A signed-in operator, or exactly what a route that doesn't exist answers. */
-async function glassOperator(c: Ctx) {
-  try { return await operatorActor(c, 'operator:read'); }
-  catch (error) {
-    if (error instanceof ApiError && (error.status === 403 || error.status === 404)) { c.set('failure', { code: 'NOT_FOUND', unmatched: true }); throw new ApiError(404, 'NOT_FOUND', 'Route not found.'); }
-    throw error;
-  }
-}
-
 export function registerGlass(app: App) {
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'get', path: '/v1/operator/glass', operationId: 'operatorGetGlass',
     description: `Everything going on in the installation, for operators: sign-ups, sending, delivery, receiving, money, the system and visitors. One statement over rollups and bounded heads, cached ${GLASS_TTL_SECONDS} seconds.`,
     responses: { 200: response(Glass), ...errors } }), async c => {
-    await glassOperator(c);
+    await operatorActor(c, 'operator:read');
     const { value, hit } = await cachedDashboardRead(new URL(c.env.config.publicUrl).origin, 'operator-glass', () => readGlass(c.env), GLASS_TTL_SECONDS);
     c.header('cache-control', 'private, no-store');
     c.header('x-nightmail-glass-cache', hit ? 'hit' : 'miss');
