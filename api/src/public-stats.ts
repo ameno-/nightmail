@@ -156,6 +156,20 @@ export async function publicStatsTick(runtime: Pick<Runtime, 'db' | 'config'>, b
 }
 
 export function registerPublicStats(app: App) {
+  // Whether a new person can sign up now (src/signups.ts): with no place open, the homepage's and the price pages' Get
+  // started says Join the waitlist. Only yes or no, never the counts. A self-hosted installation has no limit.
+  app.openapi(createRoute({ hide: true, method: 'get', path: '/v1/public/signups', operationId: 'getPublicSignups', tags: ['Metrics'], security: [],
+    description: 'Whether a new account can sign up on its own now. Cached for up to 60 seconds.',
+    responses: { 200: response(z.object({ open: z.boolean().describe('False while every place under the sign-up limit is taken: a new sign-in joins the waitlist.') })), 429: errors[429]!, 500: errors[500]! } }), async c => {
+    const { db, config } = c.env;
+    const { value } = config.multiTenant ? await cachedDashboardRead(new URL(config.publicUrl).origin, 'public-signups', async () => {
+      const { readPlaces } = await import('./signups.js');
+      return { open: (await readPlaces(db)).open > 0 };
+    }) : { value: { open: true } };
+    c.header('cache-control', 'public, max-age=60');
+    return c.json(value, 200);
+  });
+
   app.openapi(createRoute({ method: 'get', path: '/v1/public/stats', operationId: 'getPublicStats', tags: ['Metrics'], security: [],
     description: 'Public, unauthenticated sending figures for the installation. A minute job computes them from stored mail; this route only reads the result, so a request never scans mail. Aggregates over whole UTC hours, rounded, and only once at least 10 workspaces have sent (available); a hosted installation counts only mail sent through its shared pool. No workspace, address or per-workspace figure is returned. Responses are cached for up to 60 seconds. 503 until the figures are first computed.',
     responses: { 200: response(PublicStats), 429: errors[429]!, 500: errors[500]!, 503: errors[503]! } }), async c => {

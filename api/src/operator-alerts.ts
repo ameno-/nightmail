@@ -9,7 +9,8 @@ import { postSlack } from './reputation-alerts.js';
 // the reputation alerts' Slack path (postSlack) and retries like them. Unset, nothing is posted: the hooks that read
 // the configuration queue nothing, and the standing's (applyChange has none to read) queues a job that posts nothing.
 //
-// A new sign-up posts every time. Every other card posts at most once in 24 hours per workspace ('platform' for the
+// A new sign-up posts every time, and so do sign-ups nearly full and full: once each time places reach the level
+// (signups.ts placesAlert keeps which was told). Every other card posts at most once in 24 hours per workspace ('platform' for the
 // installation-wide two), kept by the job's own ID: it names the UTC day, and yesterday's counts while it is under 24
 // hours old. Each is queued when its state begins (a rise of the standing, a refusal, a sample that became full, a
 // window that became slow), never while it simply continues.
@@ -28,7 +29,12 @@ const CARDS = {
   daily_limit: { emoji: ':no_entry_sign:', label: 'Daily limit' },
   share_full: { emoji: ':bucket:', label: 'Customer share full' },
   signin_slow: { emoji: ':snail:', label: 'Sign-in mail slow' },
+  signups_low: { emoji: ':hourglass_flowing_sand:', label: 'Sign-ups nearly full' },
+  signups_full: { emoji: ':no_entry:', label: 'Sign-ups are full' },
 } as const;
+// The installation's own cards, about no one workspace: queued under 'platform' and opening the Operator area.
+const PLATFORM_KINDS = new Set<string>(['share_full', 'signin_slow', 'signups_low', 'signups_full']);
+const RAISE = 'Raise the limit in Operator → Sign-ups.';
 type Kind = keyof typeof CARDS;
 const REASONS = { bounces: 'too many bounces', complaints: 'too many spam complaints', screen: 'too much mail flagged as spam', review: 'after a review' } as const;
 /**
@@ -61,7 +67,7 @@ export const slackCard = (card: { emoji: string; label: string } | null, words: 
     accessory: { type: 'button', action_id: 'open', text: { type: 'plain_text', text: 'Open', emoji: false }, url } }],
 });
 
-/** The Slack message for one alert (slackCard), its button opening the Operator area. Null for a payload that is not one of the seven. */
+/** The Slack message for one alert (slackCard), its button opening the Operator area. Null for a payload that is not one of the nine. */
 export function operatorCard(publicUrl: string, p: Record<string, unknown>, workspace: { id: string; name: string | null }) {
   const kind = p.kind as Kind, name = cardName(workspace.name ?? '');
   if (typeof kind !== 'string' || !Object.hasOwn(CARDS, kind)) return null;
@@ -73,10 +79,12 @@ export function operatorCard(publicUrl: string, p: Record<string, unknown>, work
     : kind === 'daily_limit' && whole(p.used) && whole(p.limit) ? `${name}, ${count(p.used)} of ${count(p.limit)}.`
     : kind === 'share_full' && whole(p.used) && whole(p.share) ? `${count(p.used)} of ${count(p.share)}.`
     : kind === 'signin_slow' && whole(p.slow) && whole(p.mail) && Number(p.slow) > 0 ? `${share(Number(p.slow), Number(p.mail))} over ${SLOW_SIGN_IN.seconds} seconds.`
+    : kind === 'signups_low' && whole(p.open) && whole(p.limit) ? `${count(p.open)} of ${count(p.limit)} places left. ${RAISE}`
+    : kind === 'signups_full' && whole(p.limit) ? `All ${count(p.limit)} places are taken. ${RAISE}`
     : null;
   if (!words) return null;
-  const origin = publicUrl.replace(/\/$/, ''), global = kind === 'share_full' || kind === 'signin_slow';
-  const url = global ? `${origin}/operator` : `${origin}/operator/workspaces/${encodeURIComponent(workspace.id)}`;
+  const origin = publicUrl.replace(/\/$/, '');
+  const url = kind === 'signups_low' || kind === 'signups_full' ? `${origin}/operator?view=signups` : PLATFORM_KINDS.has(kind) ? `${origin}/operator` : `${origin}/operator/workspaces/${encodeURIComponent(workspace.id)}`;
   return slackCard(card, words, url);
 }
 
@@ -84,9 +92,9 @@ export function operatorCard(publicUrl: string, p: Record<string, unknown>, work
  * Queues one card, in one statement that never fails its caller: a card that can't be queued is logged. Inside a
  * transaction pass `savepoint`, so a failed insert leaves the transaction usable. `daily`: at most one in 24 hours.
  */
-async function queue(db: DbExecutor, workspace: string | SQL, kind: Kind, data: Record<string, unknown> | SQL, options: { daily: boolean; savepoint?: boolean }) {
+async function queue(db: DbExecutor, workspace: string | SQL, kind: Kind, data: Record<string, unknown> | SQL, options: { daily: boolean; savepoint?: boolean; episode?: string }) {
   const workspaceId = typeof workspace === 'string' ? workspace : undefined;
-  const key = sql`${`operator-alert:${kind}:`}||w.id`, day = (ago: string) => sql`${key}||':'||to_char((now() AT TIME ZONE 'UTC')-${ago}::interval,'YYYYMMDD')`;
+  const key = sql`${`operator-alert:${kind}:`}||w.id${options.episode ? sql`||${`:${options.episode}`}` : sql``}`, day = (ago: string) => sql`${key}||':'||to_char((now() AT TIME ZONE 'UTC')-${ago}::interval,'YYYYMMDD')`;
   const payload = data instanceof SQL ? data : sql`${JSON.stringify(data)}::jsonb`;
   try {
     if (options.savepoint) await db.execute(sql`SAVEPOINT operator_alert`);
@@ -112,6 +120,28 @@ export async function alertNewSignup(runtime: Runtime, db: DbExecutor, userId: s
   if (!runtime.config.operatorSlackWebhookUrl) return false;
   const owned = sql`(SELECT workspace_id FROM workspace_members WHERE user_id=${userId} AND role='owner' ORDER BY created_at,id LIMIT 1)`;
   return queue(db, owned, 'signup', { signedUp: places.signedUp, limit: places.limit }, { daily: false });
+}
+
+/**
+ * Sign-ups nearly full ("8 of 200 places left") and Sign-ups are full, each once as places reach it (signups.ts
+ * placesAlert). Called after a sign-up or a change of the limit commits, so it can't block or fail it. The level and its
+ * card are written in one transaction: a card that can't be queued leaves the level untold, for the next check. Never throws.
+ */
+export async function signupPlacesAlert(runtime: Runtime) {
+  if (!runtime.config.operatorSlackWebhookUrl || !runtime.config.multiTenant) return false;
+  try {
+    const { placesAlert } = await import('./signups.js');
+    return await runtime.db.transaction(async tx => {
+      const reached = await placesAlert(tx);
+      if (!reached) return false;
+      const { open, limit } = reached.places;
+      if (await queue(tx, PLATFORM, reached.level === 'full' ? 'signups_full' : 'signups_low', { open, limit }, { daily: false, savepoint: true, episode: String(Date.now()) })) return true;
+      throw new Error('not queued');
+    });
+  } catch {
+    log('warn', { code: 'OPERATOR_ALERT_NOT_QUEUED', kind: 'signups' });
+    return false;
+  }
 }
 
 const PAUSE_WHY: Record<string, keyof typeof REASONS> = { bounces: 'bounces', marketing_bounces: 'bounces', transactional_bounces: 'bounces', complaints: 'complaints', screen: 'screen' };
@@ -208,7 +238,7 @@ const deliver: JobHandler = async (runtime, payload, job) => {
   const url = runtime.config.operatorSlackWebhookUrl;
   if (!url) return;
   let name: string | null = null;
-  if (payload.kind !== 'share_full' && payload.kind !== 'signin_slow') {
+  if (typeof payload.kind !== 'string' || !PLATFORM_KINDS.has(payload.kind)) {
     const [workspace] = (await runtime.db.execute<{ name: string }>(sql`SELECT name FROM workspaces WHERE id=${job.workspaceId}`)).rows;
     if (!workspace) return; // The workspace was deleted meanwhile.
     name = workspace.name;

@@ -1042,6 +1042,8 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   cleanup(t,async()=>{await db.query('DELETE FROM nightmail_waitlist WHERE email=ANY($1)',[waitlist.map(address=>address.toLowerCase())]);});
   const waitlisted = async (address:string) => (await db.query('SELECT email,name,attempts FROM nightmail_waitlist WHERE email=lower($1)',[address])).rows;
   const waitlistCookie = (response:Response) => response.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.waitlist='));
+  // A waitlisted refusal says where the address waits (position=N, 1 next): present, and otherwise the location as before.
+  const waitingAt = (location:string|null) => { assert.match(location??'',/[?&]position=[1-9]\d*$/); return location!.replace(/&position=\d+$/,''); };
   // Staff sign-up needs the provider identity of a staff domain. Nothing else admits a new subject: no claim, a provider
   // the acr doesn't name, another domain, an address the provider didn't verify. Each refusal is recorded by subject.
   // Exactly the account service's staff rule: Google, a verified Google address, and hd in AUTH_STAFF_GOOGLE_DOMAINS.
@@ -1050,7 +1052,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   for (const [name,hd,googleVerified] of [[null,null,true],['github','example.org',true],['google','other.example',true],['google','Example.org',true],['google','example.org',false]] as const) {
     providerName=name;providerHd=hd;providerVerified=googleVerified;
     const refused=await login();
-    assert.equal(refused.headers.get('location'),origin+'/?auth=waitlist',`${name}/${hd}/${googleVerified}`);
+    assert.equal(waitingAt(refused.headers.get('location')),origin+'/?auth=waitlist',`${name}/${hd}/${googleVerified}`);
     assert.deepEqual(await attempt(),{acr:googleAcr,provider:name,provider_hd:hd,outcome:'not_approved'});
     const notice=waitlistCookie(refused)!;
     assert.ok(notice.startsWith(`__Host-nightmail.waitlist=${encodeURIComponent(approved)};`) && /Max-Age=600/.test(notice) && /Secure/.test(notice) && !/HttpOnly/i.test(notice),notice);
@@ -1069,7 +1071,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   // One row per address, every attempt counted, whatever the address's case or the subject; the name when one is given.
   assert.deepEqual(await waitlisted(approved),[{email:approved,name:null,attempts:5}]);
   const firstSubject=subject;subject=randomUUID();subjects.push(subject);email=approved.toUpperCase();givenName='Avery Example';
-  assert.equal((await login()).headers.get('location'),origin+'/?auth=waitlist');
+  assert.equal(waitingAt((await login()).headers.get('location')),origin+'/?auth=waitlist');
   assert.deepEqual(await waitlisted(approved),[{email:approved,name:'Avery Example',attempts:6}]);
   subject=firstSubject;email=approved;givenName=undefined;
   // Hosted, a new subject needs a verified address whatever the method: a staff sign-in without one is refused before
@@ -1158,7 +1160,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   // user lands in that user's workspace with its role. Addresses never decide: the same address under another
   // subject gets nothing.
   subject=randomUUID();subjects.push(subject);email=`seat-${randomUUID()}@example.org`;providerName=null;providerHd=null;waitlist.push(email);
-  assert.equal((await login()).headers.get('location'),origin+'/?auth=waitlist');
+  assert.equal(waitingAt((await login()).headers.get('location')),origin+'/?auth=waitlist');
   assert.deepEqual(await attempt(),{acr:googleAcr,provider:null,provider_hd:null,outcome:'not_approved'});
   const seatId=randomUUID();
   await db.query("INSERT INTO nightmail_users(id,name,email,email_verified) VALUES($1,'Seat',NULL,false)",[seatId]);
@@ -1206,17 +1208,17 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
     assert.equal((await attempt()).outcome,'email_unverified');
     assert.deepEqual(await waitlisted(email),[]);
     use(method);if (method==='google') providerHd='other.example';fresh(`${method}-${randomUUID()}@example.net`);
-    assert.equal((await login()).headers.get('location'),origin+'/?auth=waitlist',`${method}: another domain is waitlisted`);
+    assert.equal(waitingAt((await login()).headers.get('location')),origin+'/?auth=waitlist',`${method}: another domain is waitlisted`);
     assert.equal((await attempt()).outcome,'not_approved');
   }
   // Review 1: GitHub proves no Workspace membership. Its verified address at the staff domain (a former colleague's,
   // say) is not staff: no account, no workspace, the waitlist. Nor is a Google account outside a Workspace.
   use('github');fresh(`former-${randomUUID()}@example.org`);
-  assert.equal((await login()).headers.get('location'),origin+'/?auth=waitlist');
+  assert.equal(waitingAt((await login()).headers.get('location')),origin+'/?auth=waitlist');
   assert.deepEqual(await attempt(),{acr:githubAcr,provider:'github',provider_hd:null,outcome:'not_approved'});
   assert.equal((await db.query('SELECT FROM nightmail_oidc_identities WHERE issuer=$1 AND subject=$2',[issuer,subject])).rowCount,0);
   use('google');fresh(`consumer-${randomUUID()}@example.org`);
-  assert.equal((await login()).headers.get('location'),origin+'/?auth=waitlist');
+  assert.equal(waitingAt((await login()).headers.get('location')),origin+'/?auth=waitlist');
   // A method the installation doesn't list is refused before anything else.
   use('github');tokenAcr='urn:anomaly:acr:passkey';fresh(`other-${randomUUID()}@example.org`);
   assert.equal((await login()).headers.get('location'),origin+'/?auth=method_required');
@@ -1240,7 +1242,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   }
   // Without an invitation, the page the dashboard signs in from admits nobody: a new Gmail address is waitlisted.
   use('google');fresh(`uninvited-${randomUUID()}@gmail.com`);
-  assert.equal((await login(undefined,origin+'/overview')).headers.get('location'),origin+'/?auth=waitlist');
+  assert.equal(waitingAt((await login(undefined,origin+'/overview')).headers.get('location')),origin+'/?auth=waitlist');
   assert.equal((await attempt()).outcome,'not_approved');
   // A new Gmail invitee following the link joins, and lands back on it, where the dashboard shows the review.
   use('google');const gmail=`invited-${randomUUID()}@gmail.com`, gmailInvite=await invite(gmail);fresh(gmail);const gmailSubject=subject;
@@ -1302,7 +1304,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
     assert.deepEqual(await errorOf(await request('/v1/workspaces','POST',emailSession,{name:'Through email'})),[403,'SIGNUP_NOT_APPROVED']);
     // A new, verified address at the staff domain is not staff: it is waitlisted, as any other address is.
     viaEmail(acr);fresh(`email-${randomUUID()}@example.org`);
-    assert.equal((await login()).headers.get('location'),origin+'/?auth=waitlist',acr);
+    assert.equal(waitingAt((await login()).headers.get('location')),origin+'/?auth=waitlist',acr);
     assert.deepEqual(await attempt(),{acr,provider:null,provider_hd:null,outcome:'not_approved'});
     // An unverified address is refused, and isn't waitlisted.
     viaEmail(acr);fresh(`email-${randomUUID()}@example.net`);verified=false;
@@ -1423,7 +1425,7 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
     return async () => {
       const done = await callback(cookie);
       const location = new URL(done.headers.get('location')!);
-      return { auth: location.searchParams.get('auth'), place: location.searchParams.get('place'), link: location.searchParams.get('link'), account: location.searchParams.get('account'),
+      return { auth: location.searchParams.get('auth'), place: location.searchParams.get('place'), link: location.searchParams.get('link'), account: location.searchParams.get('account'), position: location.searchParams.get('position'),
         landed: location.pathname + location.search, session: done.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.session_token='))?.split(';')[0] ?? '',
         waitlist: done.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.waitlist='))?.split(';')[0] ?? '',
         replay: async (held: string) => new URL((await callback(held)).headers.get('location')!).search };
@@ -1436,7 +1438,7 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   const outcome = async (p: Person) => (await db.query('SELECT outcome FROM nightmail_signin_attempts WHERE issuer=$1 AND subject=$2',[issuer,p.subject])).rows[0]?.outcome;
   const waiting = async (p: Person) => (await db.query('SELECT let_in_at IS NOT NULL AS held FROM nightmail_waitlist WHERE email=lower($1)',[p.email])).rows[0] ?? null;
   const placeOf = async (account: string | null) => (await db.query('SELECT via FROM nightmail_signups WHERE user_id=$1',[account])).rows[0]?.via ?? null;
-  const started = (await db.query('SELECT now() AS at')).rows[0].at, initial = (await db.query('SELECT places FROM nightmail_signup_limit')).rows[0].places;
+  const started = (await db.query('SELECT now() AS at')).rows[0].at, { places: initial, alerted_open: initialAlert } = (await db.query('SELECT places,alerted_open FROM nightmail_signup_limit')).rows[0];
   // Account emails go out as the platform workspace's (account-notices.ts); how many "you can sign in" emails an address got.
   const platform = `signup-platform-${randomUUID()}`;
   runtime.config.platformDomainWorkspace = platform;
@@ -1465,7 +1467,8 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
     for (const table of ['audience_list_members','audience_consent_audit','audience_contacts','audience_list_counts','audience_lists']) await db.query(`DELETE FROM ${table} WHERE workspace_id=$1`,[platform]);
     await db.query('DELETE FROM jobs WHERE workspace_id=$1',[platform]);
     await db.query('DELETE FROM account_notices WHERE workspace_id=$1',[platform]);
-    await db.query('UPDATE nightmail_signup_limit SET places=$1',[initial]);
+    await db.query('UPDATE nightmail_signup_limit SET places=$1,alerted_open=$2',[initial,initialAlert]);
+    await db.query("DELETE FROM jobs WHERE type='operator.alert' AND workspace_id='platform' AND id LIKE 'operator-alert:signups\\_%' AND created_at>=$1",[started]);
     await db.query('UPDATE nightmail_waitlist SET let_in_at=NULL WHERE let_in_at>=$1',[started]);
     await db.query('DELETE FROM nightmail_waitlist WHERE email=ANY($1)',[people.map(p=>p.email.toLowerCase())]);
     await db.query('DELETE FROM nightmail_signin_links WHERE email=ANY($1)',[people.map(p=>p.email.toLowerCase())]);
@@ -1713,6 +1716,62 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   assert.equal(await placeOf((await signIn(eldest)).account),'waitlist');
   const refilled = await places();
   assert.deepEqual([refilled.signedUp,refilled.held,refilled.open],[kept.signedUp+4,kept.held,0]);
+
+  // Full, a refused sign-in says where it waits: ?position=N, 1 next, in the order a hold raise lets the waitlist in
+  // (first attempt first, leaving out addresses that are already a verified user's).
+  const expectedPosition = async (p: Person) => (await db.query(`SELECT 1+count(*)::int AS n FROM nightmail_waitlist q, nightmail_waitlist me WHERE me.email=lower($1)
+    AND q.let_in_at IS NULL AND (q.first_at,q.email)<(me.first_at,me.email) AND NOT EXISTS (SELECT FROM nightmail_users u WHERE u.email_verified AND lower(u.email)=q.email)`,[p.email])).rows[0].n;
+  const [queuer, nextInLine] = [gmail('queuer'), gmail('next-in-line')];
+  const lined = await signIn(queuer), behind = await signIn(nextInLine);
+  assert.deepEqual([lined.auth,lined.place,behind.auth],['waitlist',null,'waitlist']);
+  assert.deepEqual([Number(lined.position),Number(behind.position)],[await expectedPosition(queuer),await expectedPosition(queuer)+1]);
+  await db.query("UPDATE nightmail_waitlist SET first_at=timestamptz '1999-01-01' WHERE email=lower($1)",[nextInLine.email]);
+  assert.equal((await signIn(nextInLine)).position,'1','The oldest waiting address is next');
+  // A refusal that offers a held place (?place=held) gives no position: there's a place for it.
+  Object.assign(tooLate,{acr:githubAcr,provider:'github',upstream:{}});
+  await db.query('UPDATE nightmail_waitlist SET let_in_at=now() WHERE email=lower($1)',[tooLate.email]);
+  assert.deepEqual(await signIn(tooLate).then(r=>[r.auth,r.place,r.position]),['waitlist','held',null]);
+  await db.query('UPDATE nightmail_waitlist SET let_in_at=NULL WHERE email=lower($1)',[tooLate.email]);
+  // Whether sign-ups are open is public, for the homepage's and the price pages' button: yes or no, never the counts,
+  // cached for a minute. (Each check reads as its own installation, so one's cached answer isn't the next one's.)
+  const signupsOpen = async (installation: string) => {
+    const response = await app.fetch(new Request(origin+'/v1/public/signups',{headers:{'x-nightmail-client-ip':ip()}}),{...runtime,config:{...runtime.config,publicUrl:`https://${installation}.example.org`}});
+    assert.deepEqual([response.status,response.headers.get('cache-control')],[200,'public, max-age=60']);
+    return await response.json();
+  };
+  assert.deepEqual(await signupsOpen(`full-${randomUUID().slice(0,8)}`),{open:false});
+
+  // The operators hear once when ten or fewer places are left and once when none are (operator-alerts.ts
+  // signupPlacesAlert), and neither again until places reopen past it.
+  const placeCards = async () => (await db.query("SELECT payload FROM jobs WHERE type='operator.alert' AND workspace_id='platform' AND id LIKE 'operator-alert:signups\\_%' AND created_at>=$1 ORDER BY created_at,id",[started])).rows.map(r=>r.payload);
+  const filled = await places(), taken12 = filled.signedUp+filled.held;
+  // Twelve open (an open raise holds none for the waitlist): over both levels, nothing to tell.
+  const twelve = await setLimit(taken12+12,'open');
+  assert.equal(twelve.open,12);
+  assert.deepEqual(await signupsOpen(`open-${randomUUID().slice(0,8)}`),{open:true});
+  const cardsBefore = (await placeCards()).length;
+  const newcomers = Array.from({length:6},(_,i)=>gmail(`newcomer-${i}`)), heard: number[] = [];
+  for (const p of newcomers.slice(0,3)) { assert.equal(await placeOf((await signIn(p)).account),'open'); heard.push((await placeCards()).length-cardsBefore); }
+  assert.deepEqual(heard,[0,1,1],'Told once, at ten left: not at eleven, not again at nine');
+  // Lowered to what is taken: full, told once; saving it again and a sign-in refused at the limit tell nothing more.
+  const nine = await places();
+  for (let i = 0; i < 2; i++) assert.equal((await setLimit(nine.signedUp+nine.held)).open,0);
+  assert.equal((await signIn(gmail('refused-at-full'))).auth,'waitlist');
+  // Three reopen (under ten, so nothing is told), and taking them fills it again: told again, once.
+  await setLimit(nine.signedUp+nine.held+3,'open');
+  for (const p of newcomers.slice(3)) assert.equal(await placeOf((await signIn(p)).account),'open');
+  assert.equal((await places()).open,0);
+  const limitNow = (await places()).limit;
+  assert.deepEqual((await placeCards()).slice(cardsBefore),[{kind:'signups_low',open:10,limit:taken12+12},{kind:'signups_full',open:0,limit:nine.signedUp+nine.held},{kind:'signups_full',open:0,limit:limitNow}]);
+  await t.test('the sign-ups full cards are posted to Slack', async t => {
+    const posted: Json[] = [], { operatorAlertJobs } = await import('./src/operator-alerts.js');
+    t.mock.method(globalThis,'fetch',async (url: RequestInfo|URL, init?: RequestInit) => { assert.equal(String(url),runtime.config.operatorSlackWebhookUrl); posted.push(JSON.parse(String(init!.body))); return new Response(null); });
+    for (const payload of (await placeCards()).slice(cardsBefore,cardsBefore+2)) await operatorAlertJobs['operator.alert']!(runtime, payload, { id: 'operator-alert:signups', workspaceId: 'platform', attempts: 1 });
+    assert.deepEqual(posted.map(p=>[p.text,p.blocks[0].accessory.url]),[
+      [`Sign-ups nearly full: 10 of ${(taken12+12).toLocaleString('en-US')} places left. Raise the limit in Operator → Sign-ups.`,`${origin}/operator?view=signups`],
+      [`Sign-ups are full: All ${(nine.signedUp+nine.held).toLocaleString('en-US')} places are taken. Raise the limit in Operator → Sign-ups.`,`${origin}/operator?view=signups`]]);
+  });
+
   // Without the list nothing is queued; a value that isn't a list ID turns it off and nothing else.
   await syncList();
   assert.equal(loadConfig({...configInput, NIGHTMAIL_PLATFORM_DOMAIN_WORKSPACE:`ws_${'0'.repeat(32)}`, NIGHTMAIL_SIGNUPS_LIST_ID:'not-a-list'}).signupsListId,undefined);

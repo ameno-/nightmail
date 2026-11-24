@@ -9,7 +9,7 @@ import { clientIpHeader, productName, requestHeader } from './brand.js';
 import { METHOD_ACR } from './config.js';
 import { ANALYTICS_SESSION_PARAM } from './analytics-events.js';
 import { requestNetwork, signInSignals, type RequestNetwork } from './abuse.js';
-import { placeReady, readPlaces, recordSignup, sendSigninLink, spendSigninLink, takePlace } from './signups.js';
+import { placeReady, readPlaces, recordSignup, sendSigninLink, spendSigninLink, takePlace, waitlistPosition } from './signups.js';
 
 const verifiedEmail = z.email().max(320);
 /** How long POST /api/auth/sign-in/link takes to answer, whatever the address (far above the time a link takes to make). */
@@ -20,8 +20,9 @@ class AuthenticationMethodRequired extends Error {}
  * staleLink: the sign-in link it followed was used, expired or not one of ours. */
 type Refusal = { place?: 'held' | 'open' | null; staleLink?: boolean };
 class NotAdmitted extends Error { constructor(readonly reason: string, readonly refusal: Refusal = {}) { super(reason); } }
-/** A refused hosted sign-in whose verified address is now on the waitlist: the refusal screen names it. */
-class Waitlisted extends Error { constructor(readonly email: string, readonly refusal: Refusal) { super('waitlist'); } }
+/** A refused hosted sign-in whose verified address is now on the waitlist: the refusal screen names it, and where it
+ *  stands in the order a raise lets the waitlist in (null: not known). */
+class Waitlisted extends Error { constructor(readonly email: string, readonly refusal: Refusal, readonly position: number | null) { super('waitlist'); } }
 
 function loginIssue(error: unknown, requiredAcr?: string[]) {
   const issuerError = error instanceof oidc.AuthorizationResponseError || error instanceof oidc.ResponseBodyError ? error.error : undefined;
@@ -285,13 +286,22 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
     // Without a verified address, or when the write fails, nothing is promised.
     if (error.reason === 'not_approved' && runtime.config.multiTenant && emailAtLogin) {
       const name = [claims.name, profile.name].find((value): value is string => typeof value === 'string' && value.trim() !== '')?.trim().slice(0, 200) ?? null;
-      if (await joinWaitlist(runtime, emailAtLogin, name).catch(() => false)) throw new Waitlisted(emailAtLogin.toLowerCase(), error.refusal);
+      if (await joinWaitlist(runtime, emailAtLogin, name).catch(() => false)) {
+        // Where it waits, only when no place is ready for it: then the screen offers the way to take that one instead.
+        const position = error.refusal.place ? null : await waitlistPosition(runtime.db, emailAtLogin).catch(() => null);
+        throw new Waitlisted(emailAtLogin.toLowerCase(), error.refusal, position);
+      }
     }
     throw loginFailed();
   }
   await recordAttempt(runtime, claims, upstream, address, admitted, { email: emailAtLogin, network });
   // A sign-up is told to the operators (operator-alerts.ts) once it has committed, so the card can't block or fail it.
-  if (signedUp && runtime.config.operatorSlackWebhookUrl) await readPlaces(runtime.db).then(async places => (await import('./operator-alerts.js')).alertNewSignup(runtime, runtime.db, userId, places)).catch(() => false);
+  // So is a sign-up that left ten or fewer places open, or none (signupPlacesAlert: once per level).
+  if (signedUp && runtime.config.operatorSlackWebhookUrl) {
+    const alerts = await import('./operator-alerts.js');
+    await readPlaces(runtime.db).then(places => alerts.alertNewSignup(runtime, runtime.db, userId, places)).catch(() => false);
+    await alerts.signupPlacesAlert(runtime);
+  }
   // Admitted with a verified address: nothing is left to tell it at launch.
   if (emailAtLogin && runtime.config.multiTenant) await runtime.db.execute(sql`DELETE FROM nightmail_waitlist WHERE email=lower(${emailAtLogin})`).catch(() => {});
   return {session, slot, userId, returnUrl:returnUrl.href};
@@ -498,6 +508,8 @@ export async function accountBrowserRoute(c: Ctx) {
       // (place=ready), and that a sign-in link it followed no longer works (link=expired).
       if (error instanceof Waitlisted && error.refusal.place) back.searchParams.set('place', error.refusal.place === 'held' ? 'held' : 'ready');
       if (error instanceof Waitlisted && error.refusal.staleLink) back.searchParams.set('link', 'expired');
+      // position=N: where the address waits, 1 next (signups.ts waitlistPosition).
+      if (error instanceof Waitlisted && error.position) back.searchParams.set('position', String(error.position));
       return c.redirect(back.href,303);
     }
   }

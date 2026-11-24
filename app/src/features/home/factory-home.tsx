@@ -1,8 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
 import { SignInConsent } from '../../components/LegalLinks'
+import { Alert } from '../../components/ui/primitives'
 import { useTheme } from '../../lib/theme'
 import type { HomeProps } from '.'
 import { StartButton } from './start'
+import { useSignupsFull } from './signups-open'
 import { plan, type Plan } from './plan'
 import { toneVars } from './tones'
 import { Machines } from './machines'
@@ -69,6 +71,10 @@ export function FactoryHome({ start, notice, format }: HomeProps & { format: For
   const m = MANIFESTS[format], { vars: frameVars, button: buttonBox } = FRAMES[format]
   const still = format === 'phone'
   const visitor = start.signedIn ? null : start
+  // No place open (signups-open.ts): the button says Join the waitlist, and the notice slot says why, unless a sign-in
+  // has something of its own to say there.
+  const full = useSignupsFull(!!visitor)
+  const shown = notice || (full ? <Alert tone="info">Full for now. Join the waitlist and we’ll email you when a place opens.</Alert> : null)
   const dark = useTheme().theme === 'dark'
   const scene = useRef<HTMLElement>(null), probe = useRef<HTMLDivElement>(null), stage = useRef<HTMLDivElement>(null), frame = useRef<HTMLDivElement>(null)
   const bg = useRef<HTMLDivElement>(null), boards = useRef<HTMLDivElement>(null), fg = useRef<HTMLDivElement>(null), tags = useRef<HTMLDivElement>(null)
@@ -181,7 +187,7 @@ export function FactoryHome({ start, notice, format }: HomeProps & { format: For
         {/* Under the button, off the frame (on a phone directly under it): what signing in agrees to, and the way to
             the API docs beside it (where the header had it). */}
         {visitor && <div className="fac-under"><SignInConsent className="fac-consent" after={<><span aria-hidden="true"> · </span><a href="/docs">API docs</a></>} /></div>}
-        {notice && <div className="srt-notice">{notice}</div>}
+        {shown && <div className="srt-notice">{shown}</div>}
       </section>
       <Machines plan={p} start={start} />
     </main>
