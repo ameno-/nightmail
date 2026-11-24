@@ -7,7 +7,7 @@ import { applyChange, type Change } from './standing.js';
 import { loadStanding, scoreView, StandingSchema } from './sender-score.js';
 import { clearProbe, queueCampaignRun, resumeCampaign } from './states.js';
 import { productName } from './brand.js';
-import { placesOpened, readPlaces, setLimit, signupsList } from './signups.js';
+import { placesOpened, readPlaces, setLimit } from './signups.js';
 import { waitlistNoticeStatus } from './account-notices.js';
 import { ScreenComparison, screenComparison } from './screen-comparison.js';
 import { diskAlertSetup } from './disk-alert.js';
@@ -358,7 +358,7 @@ export function registerOperator(app: App) {
       notEmailed: z.number().int().nullable().describe('Held addresses still not emailed (save again to retry); null when it could not be checked.') })), ...errors } }), async c => {
     const body = c.req.valid('json'), operator = await operatorActor(c, 'operator');
     const result = await mutate(c, operator, 'platform', body, async tx => {
-      const change = await setLimit(tx, body.limit, signupsList(c.env.config));
+      const change = await setLimit(tx, body.limit);
       return { result: { ...change.after, letIn: change.letIn.length },
         audit: { action: 'operator-set-signup-limit', before: { limit: change.before.limit }, after: { limit: body.limit, letIn: change.letIn.length }, reason: body.reason, ticketRef: body.ticketRef } };
     });
