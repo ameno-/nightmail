@@ -8,6 +8,8 @@ import { hourlyUpkeep, retentionTick } from './maintenance.js';
 import { reconcileSharedConnections } from './provider-connections.js';
 import { publicStatsTick } from './public-stats.js';
 import { foldSendingTallies } from './sending-tallies.js';
+import { healthTick } from './health.js';
+import { flushCounters } from './health-counters.js';
 import { standingTick } from './standing.js';
 import { syncOutboundMessages } from './mailbox-send.js';
 import { scheduleHoldRelease } from './mailbox-staging.js';
@@ -20,6 +22,7 @@ try {
   let stopped = false; let lastCleanup = 0; let lastOutboundSync = 0; let lastRecovery = 0;
   let sharedSetup: Promise<void> | undefined, lastSharedSetup = 0;
   let publicStats: Promise<void> | undefined, lastPublicStats = 0;
+  let health: Promise<unknown> | undefined, lastHealth = 0;
   let hourly: Promise<unknown> | undefined, sentRetention: Promise<unknown> | undefined, lastSentRetention = 0;
   // In-process pacing state per account/region. Run one runner per installation (or split
   // the quota explicitly): separate processes do not share this gate.
@@ -48,6 +51,12 @@ try {
         if (runtime.config.multiTenant && !sharedSetup && Date.now() - lastSharedSetup >= 60_000) {
           lastSharedSetup = Date.now();
           sharedSetup = reconcileSharedConnections(runtime).catch(() => log('warn', { code: 'SHARED_SETUP_FAILED' })).finally(() => { sharedSetup = undefined; });
+        }
+        // Health (src/health.ts): what is falling behind, once a minute, in the background. There are no Cloudflare
+        // queues here: the jobs table is the queue. This process's own counts (its jobs' database errors) go first.
+        if (!health && Date.now() - lastHealth >= 60_000) {
+          lastHealth = Date.now();
+          health = flushCounters(runtime.db).then(() => healthTick(runtime)).finally(() => { health = undefined; });
         }
         // GET /v1/public/stats serves only what this writes. In the background, so dispatch never waits on it.
         if (!publicStats && Date.now() - lastPublicStats >= 60_000) {
@@ -80,7 +89,7 @@ try {
         await setTimeout(5000);
       }
     }
-  } finally { stopped=true;await hooks;await sharedSetup;await publicStats;await hourly;await sentRetention; await listener?.end(); await close(); }
+  } finally { stopped=true;await hooks;await sharedSetup;await publicStats;await health;await hourly;await sentRetention; await listener?.end(); await close(); }
 } catch (error) {
   logError(error, { code: error instanceof ApiError ? error.code : 'STARTUP_FAILED' });
   process.exitCode = 1;
