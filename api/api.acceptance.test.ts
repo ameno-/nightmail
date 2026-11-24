@@ -21141,13 +21141,13 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // so rows that keep failing never hold back the ones behind them.
       outage = true;
       const sweepOutage = await screenHeldMail(runtime);
-      assert.deepEqual(sweepOutage, { leased: 2, passed: 0, rejected: 0, deferred: 2 });
+      assert.deepEqual(sweepOutage, { leased: 2, passed: 0, rejected: 0, deferred: 2, remaining: 2 });
       const stillHeld = (await db.query('SELECT id,status,screened,lease_until > clock_timestamp() AS backing_off FROM sending_emails WHERE id=ANY($1) ORDER BY id', [[cleanId, spamId]])).rows;
       assert.deepEqual(stillHeld, [
         { id: cleanId, status: 'queued', screened: false, backing_off: true },
         { id: spamId, status: 'queued', screened: false, backing_off: true },
       ]);
-      assert.deepEqual(await screenHeldMail(runtime), { leased: 0, passed: 0, rejected: 0, deferred: 0 }, 'A failed row is not picked again at once.');
+      assert.deepEqual(await screenHeldMail(runtime), { leased: 0, passed: 0, rejected: 0, deferred: 0, remaining: 2 }, 'A failed row is not picked again at once.');
       await db.query('UPDATE sending_emails SET lease_until = clock_timestamp() - interval \'1 second\' WHERE id=ANY($1)', [[cleanId, spamId]]);
 
       // 3. Classifier healthy: screenHeldMail passes clean row (wakes dispatcher), rejects spam row with reject event + email.rejected webhook + hosted_screen_hourly.
@@ -21155,7 +21155,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const wakes: { region: string; count?: number; priority?: boolean }[] = [];
       runtime.dispatch = async (region, _acct, count, _kind, priority) => { wakes.push({ region, count, priority }); };
       const sweepOk = await screenHeldMail(runtime);
-      assert.deepEqual(sweepOk, { leased: 2, passed: 1, rejected: 1, deferred: 0 });
+      assert.deepEqual(sweepOk, { leased: 2, passed: 1, rejected: 1, deferred: 0, remaining: 0 });
       assert.deepEqual(wakes, [{ region: REGION, count: 1, priority: true }]);
       const spamRow = (await db.query('SELECT status,error_code FROM sending_emails WHERE id=$1', [spamId])).rows[0];
       assert.deepEqual(spamRow, { status: 'rejected', error_code: 'CONTENT_REJECTED_SPAM' });
@@ -25483,8 +25483,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         screens=peak=0;
         const reply=await local('POST','/v1/emails/batch',{emails:mail},'live',{authorization:`Bearer ${key.secret}`});
         if(name==='outage'){
-          error(reply,503,'CONTENT_SCREEN_UNAVAILABLE');assert.equal(reply.headers.get('retry-after'),'30');
-          assert.equal((await db.query(`SELECT count(*)::int n FROM sending_emails WHERE workspace_id=$1 AND status='queued'`,[wid])).rows[0].n,0);
+          const heldIds=ok(reply,202).data.map((x:Json)=>x.id);
+          assert.equal(heldIds.length,n);
+          assert.ok(screens<=4,'Total batch outage short-circuits after bounded attempts');
+          assert.equal((await db.query(`SELECT count(*)::int n FROM sending_emails WHERE workspace_id=$1 AND status='queued' AND NOT screened`,[wid])).rows[0].n,n);
+          assert.equal((await run()).sent,0,'Mail room sends zero held unscreened rows');
+          await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=ANY($1) AND status='queued'`,[heldIds]);
           continue;
         }
         const ids=ok(reply,202).data.map((x:Json)=>x.id);
@@ -25549,8 +25553,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       for(const [name,code] of [['ok','111111'],['503','222222'],['stall','333333'],['stall-body','444444']] as const){
         answer=name;
         const reply=await local('POST','/v1/emails/send',{from:'a@bench.invalid',to:'private.person@example.invalid',subject:`Your sign-in code is ${code}`,text:`Private body ${code}`},'live',{authorization:`Bearer ${key.secret}`});
-        if(name==='ok'){ids[name]=ok(reply,202).id;await runDispatcher(runtime,{region:REGION,accountId:acct,batchSize:24,lanes:1,gate});}
-        else{error(reply,503,'CONTENT_SCREEN_UNAVAILABLE');assert.equal(reply.headers.get('retry-after'),'30');}
+        ids[name]=ok(reply,202).id;
+        await runDispatcher(runtime,{region:REGION,accountId:acct,batchSize:24,lanes:1,gate});
       }
       const screenCalls=logs.filter(l=>l.code==='CONTENT_SCREEN_CALL'), emailOk=logs.find(l=>l.code==='DISPATCH_EMAIL' && l.emailId===ids.ok)!;
       assert.deepEqual(screenCalls.map(c=>c.outcome),['ok','http_503','timeout','timeout']);
@@ -25562,7 +25566,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.ok(nearDeadline(cStall.ms) && cStall.headersMs===undefined && nearDeadline(cBody.ms) && cBody.headersMs<=cBody.ms, JSON.stringify([cStall,cBody]));
       assert.equal(emailOk.outcome,'accepted');
       assert.ok(['queueMs','ageMs','paceMs','sesMs','totalMs'].every(f=>typeof emailOk[f]==='number'));
-      assert.equal((await db.query('SELECT count(*)::int AS n FROM sending_emails WHERE workspace_id=$1',[wid])).rows[0].n,1,'Only the passing send entered sending_emails.');
+      assert.deepEqual((await db.query('SELECT count(*) FILTER (WHERE screened AND status=\'accepted\')::int AS sent, count(*) FILTER (WHERE NOT screened AND status=\'queued\')::int AS held FROM sending_emails WHERE workspace_id=$1',[wid])).rows,[{sent:1,held:3}],'Only the passing send went out; classifier outages stay held unscreened.');
       const written=JSON.stringify(logs.filter(l=>l.code==='CONTENT_SCREEN_CALL' || l.code==='DISPATCH_EMAIL'));
       for(const secret of ['sign-in code','111111','Private body','private.person','a@bench','classifier-fixture-key'])assert.ok(!written.includes(secret),secret);
     }));
@@ -25592,8 +25596,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const send=async(name:string,code:number)=>{
         answer=(['refused','locked'].includes(name)?'ok':name) as Answer;
         const reply=await local('POST','/v1/emails/send',{from:'a@bench.invalid',to:'private.person@example.invalid',subject:`Your sign-in code is ${code}`,text:`Private body ${code}`},'live',{authorization:`Bearer ${key.secret}`});
-        if(['ok','refused','locked'].includes(name)){ids[name]=ok(reply,202).id;await runDispatcher(runtime,{region:REGION,accountId:acct,batchSize:24,lanes:1,gate});}
-        else{error(reply,503,'CONTENT_SCREEN_UNAVAILABLE');}
+        ids[name]=ok(reply,202).id;
+        const report=await runDispatcher(runtime,{region:REGION,accountId:acct,batchSize:24,lanes:1,gate});
+        assert.equal(report.sent,['ok','refused','locked'].includes(name)?1:0,`only passing sends dispatch (${name})`);
       };
       let code=111111;
       // Another session holds a lock on the table: the database cancels the write once it has waited 1.5 s for the lock, the
@@ -26429,10 +26434,14 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       status = 403;
       error(await local('POST', '/v1/emails/send', { from: 'a@failover.invalid', to: 'person@example.invalid', subject: 'Flagged', text: 'Synthetic receipt' }, 'live', { authorization: `Bearer ${key.secret}` }), 422, 'CONTENT_REJECTED_SPAM');
       status = 401; fail = true;
-      const outageReply = await local('POST', '/v1/emails/send', { from: 'a@failover.invalid', to: 'person@example.invalid', subject: 'Needs retry', text: 'Synthetic receipt' }, 'live', { authorization: `Bearer ${key.secret}` });
-      error(outageReply, 503, 'CONTENT_SCREEN_UNAVAILABLE'); assert.equal(outageReply.headers.get('retry-after'), '30');
+      const heldOutage = ok(await local('POST', '/v1/emails/send', { from: 'a@failover.invalid', to: 'person@example.invalid', subject: 'Needs retry', text: 'Synthetic receipt' }, 'live', { authorization: `Bearer ${key.secret}` }), 202);
+      assert.equal(heldOutage.screen, undefined, 'Outage-held receipt omits screen verdict');
+      assert.equal((await dispatch()).sent, 0, 'Mail room never dispatches held unscreened row');
+      assert.equal((await db.query('SELECT screened FROM sending_emails WHERE id=$1', [heldOutage.id])).rows[0].screened, false);
       fail = false;
-      await Promise.all([post('Needs retry'), post('Slow A'), post('Slow B'), post('Slow C'), post('Receipt', 'cached@example.invalid')]);
+      const { screenHeldMail } = await import('./src/sending.js');
+      assert.deepEqual(await screenHeldMail(runtime), { leased: 1, passed: 1, rejected: 0, deferred: 0, remaining: 0 });
+      await Promise.all([post('Slow A'), post('Slow B'), post('Slow C'), post('Receipt', 'cached@example.invalid')]);
       assert.equal((await dispatch()).sent, 5);
       assert.deepEqual([sent.jev.length, sent.jevf.length, peak, comparisons.length], [3, 7, 2, 0]);
 
@@ -26454,6 +26463,113 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         status = 402; let charged = 0;
         assert.equal((await ask(async () => { charged++; })).model, 'jevf'); assert.equal(charged, 2);
       } finally { clock.mock.restore(); }
+    }));
+  });
+
+  test('hosted screen 451/5xx/timeout failover, accept-and-hold on dual outage, bounded sweep scaling and backlog log', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => t.test('classifiers', async t => {
+      const { loadConfig } = await import('./src/config.js'), { screenHeldMail } = await import('./src/sending.js');
+      const { runDispatcher, initialGate } = await import('./src/dispatcher.js');
+      const acct = '112223330029', { wid, delivered } = await hostedScreenFixture(t, runtime, db, acct, 'outage-hold.invalid');
+      const config = loadConfig({ BANE_ROOT_SECRET: AUTH_SECRET, PUBLIC_URL: PUBLIC_ORIGIN, TYPESAFE_API_KEY: 'fixture',
+        JEV_ENDPOINT: runtime.config.screen!.endpoint, JEV_MODEL: 'outage-hold-fixture', JEVF_API_KEY: 'jevf-fixture-key', JEVF_ENDPOINT: JEVF_URL });
+      runtime.config.screen = config.screen; runtime.config.shadow = config.shadow;
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'outage-hold', permissions: ['send', 'read'] }), 201);
+      const hook = ok(await local('POST', '/v1/webhooks', { url: 'https://example.com/hooks/outage-reject', eventTypes: ['email.rejected'] }), 201);
+      const auth = { authorization: `Bearer ${key.secret}` };
+      const logs: Json[] = []; for (const level of ['warn', 'info'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch {} });
+      let jevMode: 'ok' | '451' | '503' | 'timeout' = '451', jevfMode: 'ok' | '503' = 'ok';
+      let jevCalls = 0, jevfCalls = 0;
+      (globalThis.fetch as unknown as { mock: { mockImplementation(fn: unknown): void } }).mock.mockImplementation(async (url: RequestInfo | URL, init?: RequestInit) => {
+        const body = String(init?.body ?? '');
+        const isSpam = /buy cheap crypto/i.test(body);
+        if (String(url) === JEVF_URL) {
+          jevfCalls++;
+          if (jevfMode === '503') return new Response(null, { status: 503 });
+          return jevfAnswers(isSpam ? 0.99 : 0.05);
+        }
+        jevCalls++;
+        if (jevMode === '451') return new Response(null, { status: 451 });
+        if (jevMode === '503') return new Response(null, { status: 503 });
+        if (jevMode === 'timeout') return new Promise<never>((_, reject) => init!.signal!.addEventListener('abort', () => reject(init!.signal!.reason)));
+        return Response.json({ model: 'jev-fixture', answers: { spam: { noul: isSpam ? 0.99 : 0.05 } } });
+      });
+      const dispatch = () => runDispatcher(runtime, { region: REGION, accountId: acct, gate: initialGate(), lanes: 1 });
+      const send = (subject: string, text = 'Hello there', to = 'user@example.invalid') =>
+        local('POST', '/v1/emails/send', { from: 'a@outage-hold.invalid', to, subject, text }, 'live', auth);
+
+      // 1. Jev 451 fails over to JevF without tripping the primary breaker: 4 consecutive 451s still try Jev every time.
+      for (let i = 0; i < 4; i++) {
+        const r = ok(await send(`Edge451-${i}`), 202);
+        assert.equal(r.screen?.status, 'passed');
+      }
+      assert.deepEqual([jevCalls, jevfCalls], [4, 4], 'Every 451 fails over to JevF without tripping the global primary breaker');
+      assert.equal((await dispatch()).sent, 4);
+
+      // 2. Spam during Jev 451 failover (JevF answers spam) still rejects synchronously with 422 CONTENT_REJECTED_SPAM.
+      error(await send('Spam over 451', 'Buy cheap crypto now!'), 422, 'CONTENT_REJECTED_SPAM');
+      assert.deepEqual([jevCalls, jevfCalls], [5, 5]);
+
+      // 3. Dual outage: Jev 451 + JevF 503 accepts (202, same shape, screen omitted) and holds unscreened.
+      jevfMode = '503';
+      const heldClean = ok(await send('Held clean 451+503', 'Your login link is ready', 'clean451@example.invalid'), 202);
+      const heldSpam = ok(await send('Held spam 451+503', 'Buy cheap crypto right now!', 'spam451@example.invalid'), 202);
+      assert.equal(heldClean.screen, undefined);
+      assert.equal(heldSpam.screen, undefined);
+      assert.equal((await dispatch()).sent, 0, 'Mail room sends nothing while held unscreened');
+      assert.equal(delivered.has('clean451@example.invalid'), false);
+      assert.equal(delivered.has('spam451@example.invalid'), false);
+
+      // 4. Jev 503 + JevF 503 and Jev timeout + JevF 503: accept & hold AND 3 consecutive 5xx/timeouts trip the primary breaker.
+      const jevBefore5xx = jevCalls;
+      jevMode = '503';
+      const held503a = ok(await send('Held 503-a', 'Body A', 'h503a@example.invalid'), 202);
+      const held503b = ok(await send('Held 503-b', 'Body B', 'h503b@example.invalid'), 202);
+      jevMode = 'timeout';
+      const heldTimeout = ok(await send('Held timeout', 'Body C', 'htimeout@example.invalid'), 202);
+      // 4th request while breaker is open skips Jev completely (goes straight to JevF, which is 503 -> held).
+      const heldBreakerOpen = ok(await send('Held breaker open', 'Body D', 'hbreaker@example.invalid'), 202);
+      assert.equal(jevCalls - jevBefore5xx, 3, 'Three consecutive 5xx/timeouts trip the primary breaker; 4th skips Jev');
+      assert.equal((await dispatch()).sent, 0);
+
+      // 5. Ongoing dual outage during screenHeldMail: aborts early after 4 consecutive failures, releases unattempted rows,
+      //    and logs ONE HELD_SCREEN_SWEEP line with exact held backlog count (6).
+      logs.length = 0;
+      const outageSweep = await screenHeldMail(runtime);
+      assert.deepEqual(outageSweep, { leased: 4, passed: 0, rejected: 0, deferred: 4, remaining: 6 });
+      const sweepLogs1 = logs.filter(l => l.code === 'HELD_SCREEN_SWEEP');
+      assert.equal(sweepLogs1.length, 1);
+      assert.deepEqual([sweepLogs1[0]!.level, sweepLogs1[0]!.remaining, sweepLogs1[0]!.deferred], ['warn', 6, 4]);
+      const unattempted = (await db.query('SELECT count(*)::int AS n FROM sending_emails WHERE id=ANY($1) AND lease_until IS NULL', [[heldClean.id, heldSpam.id, held503a.id, held503b.id, heldTimeout.id, heldBreakerOpen.id]])).rows[0].n;
+      assert.equal(unattempted, 2, 'Unattempted rows from an outage-aborted chunk have their lease cleared immediately');
+
+      // 6. JevF recovers (while Jev breaker is still open): screenHeldMail screens all 6 held rows, passes 5 clean rows,
+      //    rejects the 1 spam row with email.rejected webhook, logs remaining=0, and mail room delivers all 5 clean rows.
+      await db.query('UPDATE sending_emails SET lease_until = NULL WHERE workspace_id = $1 AND NOT screened', [wid]);
+      jevfMode = 'ok';
+      logs.length = 0;
+      const recovered = await screenHeldMail(runtime);
+      assert.deepEqual(recovered, { leased: 6, passed: 5, rejected: 1, deferred: 0, remaining: 0 });
+      const sweepLogs2 = logs.filter(l => l.code === 'HELD_SCREEN_SWEEP');
+      assert.equal(sweepLogs2.length, 1);
+      assert.deepEqual([sweepLogs2[0]!.level, sweepLogs2[0]!.remaining, sweepLogs2[0]!.passed, sweepLogs2[0]!.rejected], ['info', 0, 5, 1]);
+      assert.equal((await dispatch()).sent, 5);
+      assert.equal(delivered.has('clean451@example.invalid'), true);
+      assert.equal(delivered.has('spam451@example.invalid'), false);
+      const rejectHook = (await db.query("SELECT payload->>'type' AS type, payload->'data'->>'emailId' AS eid, payload->'data'->>'code' AS code FROM operation_deliveries WHERE webhook_id=$1", [hook.id])).rows;
+      assert.deepEqual(rejectHook, [{ type: 'email.rejected', eid: heldSpam.id, code: 'CONTENT_REJECTED_SPAM' }]);
+
+      // 7. Bounded multi-chunk sweep (>50 rows): insert 65 held rows, verify screenHeldMail drains all 65 across two chunks.
+      for (let i = 0; i < 65; i++) {
+        const snap = JSON.stringify({ kind: 'transactional', from: 'a@outage-hold.invalid', to: [`bulk${i}@example.invalid`], cc: [], bcc: [], replyTo: [], region: REGION, subject: `Chunk ${i}`, text: `Hello ${i}`, attachments: [], tracking: false, headers: [] });
+        await db.query(`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,screened,status)
+          VALUES($1,$2,$3,$4,'a@outage-hold.invalid',$5::jsonb,'[]','[]',$6,$7::jsonb,false,false,'queued')`,
+          [`em_chunk_${i}`, wid, key.id, REGION, JSON.stringify([`bulk${i}@example.invalid`]), `Chunk ${i}`, snap]);
+      }
+      logs.length = 0;
+      const chunkSweep = await screenHeldMail(runtime);
+      assert.deepEqual(chunkSweep, { leased: 65, passed: 65, rejected: 0, deferred: 0, remaining: 0 });
+      assert.equal(logs.filter(l => l.code === 'HELD_SCREEN_SWEEP').length, 1, 'Single backlog summary log per sweep even across multiple chunks');
     }));
   });
 
@@ -26515,10 +26631,11 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await db.query('UPDATE sending_emails SET scheduled_at=now() WHERE id=$1', [retried]);
       assert.equal((await dispatch()).sent, 1); assert.deepEqual(await counts(), [3, 2, 2]);
 
-      // What the screen refuses (422) and a classifier outage (503) reject synchronously without queueing, and still record shadow pairs.
+      // What the screen refuses (422) rejects synchronously without queueing; a classifier outage accepts 202 held unscreened, and both record shadow pairs.
       error(await local('POST', '/v1/emails/send', { from: 'a@shadow.invalid', to: 'private.person@example.invalid', subject: 'Deals', text: 'See SampleMarker deals today' }, 'live', { authorization: `Bearer ${key.secret}` }), 422, 'CONTENT_REJECTED_SPAM');
       jevDown = true;
-      error(await local('POST', '/v1/emails/send', { from: 'a@shadow.invalid', to: 'private.person@example.invalid', subject: 'Receipt 1004', text: 'Private body 1004' }, 'live', { authorization: `Bearer ${key.secret}` }), 503, 'CONTENT_SCREEN_UNAVAILABLE');
+      const heldOutage = ok(await local('POST', '/v1/emails/send', { from: 'a@shadow.invalid', to: 'private.person@example.invalid', subject: 'Receipt 1004', text: 'Private body 1004' }, 'live', { authorization: `Bearer ${key.secret}` }), 202);
+      assert.equal((await db.query('SELECT screened FROM sending_emails WHERE id=$1', [heldOutage.id])).rows[0].screened, false);
       jevDown = false;
       await shadowSettled(runtime.db);
       const latestPairs = (await rows()).slice(-2);
@@ -39237,17 +39354,20 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual(classified.sort(), [spamSubject, 'Join Acme on OpenCode'].sort());
       assert.deepEqual(sent.sort(), [clean, unscreened].sort());
 
-      // Classifier unavailable -> retryable 503 with Retry-After and nothing queued.
+      // Classifier unavailable -> accepted 202 and held unscreened; mail room never dispatches until screenHeldMail judges it.
       classifierDown = true;
-      const outageReply = await local('POST', '/v1/emails/send', mail({ subject: `Join ${marker} during an outage`, screen: true }), 'live');
-      error(outageReply, 503, 'CONTENT_SCREEN_UNAVAILABLE');
-      assert.equal(outageReply.headers.get('retry-after'), '30');
+      const heldSpamId = ok(await local('POST', '/v1/emails/send', mail({ subject: `Join ${marker} during an outage`, screen: true }), 'live'), 202).id;
       assert.equal(classified.length, 3);
-      assert.equal((await db.query('SELECT count(*)::int AS n FROM sending_emails WHERE workspace_id=$1', [runtime.config.workspaceId])).rows[0].n, 2, 'Nothing queued during classifier outage.');
-      const slowReply = await local('POST', '/v1/emails/send', mail({ subject: 'Unresponsive classifier', screen: true }), 'live');
-      error(slowReply, 503, 'CONTENT_SCREEN_UNAVAILABLE');
-      assert.equal(slowReply.headers.get('retry-after'), '30');
+      const heldSlowId = ok(await local('POST', '/v1/emails/send', mail({ subject: 'Unresponsive classifier', screen: true }), 'live'), 202).id;
       assert.ok(timeoutMs < 1000, `Classifier aborted after ${timeoutMs} ms`);
+      await dispatchDue(runtime, REGION);
+      assert.deepEqual(sent.sort(), [clean, unscreened].sort(), 'Mail room never sends outage-held rows before screening.');
+      classifierDown = false;
+      const { screenHeldMail } = await import('./src/sending.js');
+      assert.deepEqual(await screenHeldMail(runtime), { leased: 2, passed: 1, rejected: 1, deferred: 0, remaining: 0 });
+      await dispatchDue(runtime, REGION);
+      assert.equal((await get(heldSpamId)).status, 'rejected');
+      assert.equal((await get(heldSlowId)).status, 'accepted');
       void hook; void outward; void siblingSentAtAbort; void sibling;
     });
   });
