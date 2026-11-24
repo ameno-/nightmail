@@ -908,14 +908,24 @@ async function ingestBatch(runtime: Runtime, items: JobBatchItem[]): Promise<Job
           candidate_key: st.keptStore!.rawKey,
         } : {}),
       }));
-      const resRows = (await runtime.db.execute<{ ses_message_id: string; ok: boolean; fits: boolean; due: string | null; receive_held: boolean }>(
-        sql`SELECT * FROM mail_reserve_ingest_batch(${workspaceId}, ${mailJson(reservePayload)}::jsonb, ${billed(runtime.config, workspaceId)})`,
-      )).rows;
-      const byMid = new Map(resRows.map(r => [r.ses_message_id, r]));
-      for (const st of headed) {
+      let resRows: { ses_message_id: string; pending: boolean; ok: boolean; fits: boolean; due: string | null; receive_held: boolean }[] | null = null;
+      try {
+        resRows = (await runtime.db.execute<{ ses_message_id: string; pending: boolean; ok: boolean; fits: boolean; due: string | null; receive_held: boolean }>(
+          sql`SELECT * FROM mail_reserve_ingest_batch(${workspaceId}, ${mailJson(reservePayload)}::jsonb, ${billed(runtime.config, workspaceId)})`,
+        )).rows;
+      } catch (error) {
+        for (const st of headed) await failState(st, error);
+      }
+      const byMid = new Map((resRows ?? []).map(r => [r.ses_message_id, r]));
+      for (const st of resRows ? headed : []) {
         const r = byMid.get(st.sesMessageId);
-        if (!r?.ok) {
-          if (r?.fits) outcomes.set(st.item.job.id, { id: st.item.job.id, error: new JobDeferred(new Date((Math.floor(Date.now() / 3600000) + 1) * 3600000).toISOString()) });
+        if (!r || !r.pending) {
+          // Another consumer already settled this receipt; complete cleanly without logging a budget error.
+          outcomes.set(st.item.job.id, { id: st.item.job.id });
+          continue;
+        }
+        if (!r.ok) {
+          if (r.fits) outcomes.set(st.item.job.id, { id: st.item.job.id, error: new JobDeferred(new Date((Math.floor(Date.now() / 3600000) + 1) * 3600000).toISOString()) });
           else await failState(st, new ApiError(422, 'MAILBOX_BYTE_BUDGET', 'Receipt exceeds the workspace byte budget.'));
           continue;
         }

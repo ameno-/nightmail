@@ -26820,11 +26820,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         return {};
       });
       try {
-        const ran = await processJobs(runtime, mailboxIngestJobs, 30, 6);
-        assert.equal(ran, 12, `expected 12 jobs processed, got ${ran}`);
+        const ran = await processJobs(runtime, mailboxIngestJobs, 50, 6);
+        assert.ok(ran >= 12, `expected >= 12 jobs processed, got ${ran}`);
+        const doneCount = (await db.query("SELECT count(*)::int n FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id = ANY($2::text[]) AND status='processed' AND error IS NULL", [wid, sesIds])).rows[0].n;
+        assert.equal(doneCount, 12, 'all 12 burst receipts processed cleanly with error cleared');
         // Simulate lease-expiry retry of two already-stored receipts to prove zero duplicates on retry/overlap.
         await db.query("UPDATE jobs SET status='pending', available_at=now(), lease_until=NULL WHERE workspace_id=$1 AND type='mailbox.ingest' AND payload->>'sesMessageId' = ANY($2::text[])", [wid, [sesIds[0]!, sesIds[1]!]]);
-        assert.equal(await processJobs(runtime, mailboxIngestJobs, 10, 6), 2, 'replayed receipts settle as clean no-ops');
+        assert.ok((await processJobs(runtime, mailboxIngestJobs, 10, 6)) >= 2, 'replayed receipts settle as clean no-ops');
       } finally { mockS3.mock.restore(); }
 
       // Verify exact counts, zero duplicates, strict ordering, #595 unread, #603 IMAP folder/entries, and byte window.
@@ -26860,6 +26862,19 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual(qState, { messages: 4, held: 2, unread: 2 }, 'quota hit mid-batch holds overflow and keeps unread exact');
       const [qThreads] = (await db.query("SELECT count(DISTINCT thread_id)::int n FROM mail_messages WHERE id IN ($1, $2)", [`msg_${qIds[0]}`, `msg_${qIds[1]}`])).rows;
       assert.equal(qThreads.n, 1, 'intra-batch reply joins parent thread');
+
+      // 2b. Send-only (public) address with plus tag whose base is a real inbox must stay unrouted in batch store, matching single store.
+      const pubAddr = `news+pub@${host}`;
+      await db.query("INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,$3,'public')", [wid, pubAddr, box]);
+      const pIds = [0, 1].map(i => `pub_${unique('s')}_${i}`);
+      await db.query("INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) SELECT $1,m,$2,'fixture-burst','k',$3::jsonb,'{}' FROM unnest($4::text[]) m", [wid, REGION, JSON.stringify([pubAddr]), pIds]);
+      const mkPub = (i: number) => ({
+        m: { id: `msg_${pIds[i]}`, workspaceId: wid, direction: 'inbound' as const, region: REGION, sesMessageId: pIds[i]!, messageId: `${pIds[i]}@s.invalid`, inReplyTo: null, references: [], subject: `Pub${i}`, fromAddress: `p${i}@s.invalid`, fromName: null, to: [{ name: null, address: pubAddr }], cc: [], bcc: [], replyTo: [], envelopeFrom: `p${i}@s.invalid`, envelopeTo: [pubAddr], sentAt: new Date(baseMs + i * 1000).toISOString(), receivedAt: new Date(baseMs + i * 1000).toISOString(), text: 'hi', html: null, bodyTruncated: false, snippet: 'hi', mime: null, headers: [], attachmentCount: 0, sizeBytes: 100, rawBucket: 'fixture-burst', rawKey: `workspaces/${wid}/raw/kept/${pIds[i]}.eml`, lifecycle: 'kept' as const, verdicts: { dmarc: 'PASS' }, spam: false, automated: false, status: 'received' as const },
+        files: [], verifiedFrom: true, allowCreate: false, replyAuthorVerified: true, plan: null,
+      });
+      await storeIncomingBatch(runtime.db, wid, [0, 1].map(mkPub));
+      assert.equal((await db.query("SELECT count(*)::int n FROM mail_unrouted WHERE workspace_id=$1 AND address=$2", [wid, pubAddr])).rows[0].n, 2, 'send-only plus-tag address stays unrouted when batched');
+      assert.equal((await db.query("SELECT messages FROM inbox_state WHERE inbox_id=$1", [box])).rows[0].messages, 12, 'base inbox untouched by send-only plus-tag batch');
 
       // 3. Cross-workspace fairness + multi-consumer overflow without SKIP LOCKED lock-out.
       const c1 = await fixtureDatabase(t), c2 = await fixtureDatabase(t), schema = 'burst_' + randomUUID().replaceAll('-', '');

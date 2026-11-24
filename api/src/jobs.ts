@@ -115,6 +115,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
   const active = new Set<Promise<void>>();
   const failures: unknown[] = [];
   let activeFeedback = 0;
+  let drainIngest = 0; // mailbox.ingest jobs this drain is running
   // Hold each class preference for four claims so it cannot line up with alternating feedback reservations.
   const rotation = Math.floor(Math.random() * 8);
   const budgetMs = Math.min(20000, Math.max(1, maxDurationMs));
@@ -248,7 +249,8 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
         AND NOT (j.type='mailbox.webhook' AND coalesce((j.payload->>'fenced')::boolean,false) AND j.attempts<=coalesce((j.payload->>'maxAttempts')::int,${WEBHOOK_ATTEMPTS}::int)
           AND NOT EXISTS(SELECT FROM mail_action_attempts a WHERE a.workspace_id=j.workspace_id AND a.delivery_id=j.payload->>'deliveryId' AND a.attempts>=j.attempts))`;
       const due = sql`((j.status='pending' AND j.available_at <= now()) OR (j.status='running' AND j.lease_until < now() AND NOT (${exhausted})))`;
-      const slots=pool==='webhooks'?0:Math.min(claimBatchSize,ingestSlots-ingestReserved);
+      // Inbound never takes a drain's last lane (when concurrency >= 3), so campaign/other/publish/hook work always has a lane.
+      const slots=pool==='webhooks'?0:Math.max(0,Math.min(claimBatchSize,ingestSlots-ingestReserved,(effectiveConcurrency>2?effectiveConcurrency-1:effectiveConcurrency)-drainIngest));
       // Only the head of each class enters the preference sort. The expression matches
       // jobs_ready_page, even for an expired running lease (no OR/BitmapOr + wide sort).
       // Seek over distinct queued hook owners (not over their backlog). Each gets
@@ -352,6 +354,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
         continue;
       }
       claims += claimed.rows.length;
+      drainIngest += claimed.rows.filter(j=>j.type==='mailbox.ingest').length;
       // Group >= 2 same-workspace mailbox.ingest jobs claimed together when the handler supports batching.
       const ingestByWs = new Map<string, Claimed[]>();
       const singles: Claimed[] = [];
@@ -384,7 +387,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
           }).finally(() => {
             active.delete(task);
             for (const idx of indices) freeLanes.add(idx);
-            ingestReserved -= group.length;
+            ingestReserved -= group.length; drainIngest -= group.length;
           });
           active.add(task);
         } else {
@@ -403,7 +406,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
           active.delete(task);
           freeLanes.add(index);
           if (feedback) activeFeedback--;
-          if (job.type==='mailbox.ingest') ingestReserved--;
+          if (job.type==='mailbox.ingest') { ingestReserved--; drainIngest--; }
         });
         active.add(task);
       }

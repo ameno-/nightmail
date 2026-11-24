@@ -3,8 +3,9 @@ SET LOCAL lock_timeout='2s';
 -- Batched byte-budget reservation for a workspace's claimed ingest batch: takes mail_receive_windows
 -- FOR UPDATE once, evaluates billing_position once, locks pending receipts in ses_message_id order,
 -- and debits cumulative bytes with the exact same continuous-refill math as single-message ingest.
+DROP FUNCTION IF EXISTS mail_reserve_ingest_batch(text, jsonb, boolean);
 CREATE OR REPLACE FUNCTION mail_reserve_ingest_batch(wid text, items jsonb, check_billing boolean DEFAULT false)
-RETURNS TABLE(ses_message_id text, ok boolean, fits boolean, due text, receive_held boolean)
+RETURNS TABLE(ses_message_id text, pending boolean, ok boolean, fits boolean, due text, receive_held boolean)
 LANGUAGE plpgsql VOLATILE AS $$
 DECLARE
   pol record;
@@ -19,6 +20,7 @@ DECLARE
   win_msgs int := 0;
   has_win boolean := false;
   held boolean := false;
+  item_pending boolean;
   item_ok boolean;
   item_fits boolean;
   item_due text;
@@ -66,6 +68,7 @@ BEGIN
     FROM jsonb_array_elements(items) x
     ORDER BY x->>'ses_message_id'
   LOOP
+    item_pending := false;
     item_ok := false;
     item_fits := false;
     item_due := NULL;
@@ -76,6 +79,7 @@ BEGIN
       WHERE r.workspace_id = wid AND r.ses_message_id = item.mid AND r.status = 'pending';
 
     IF FOUND THEN
+      item_pending := true;
       IF item.c_batch IS NOT NULL THEN
         INSERT INTO mail_candidate_uploads(batch, workspace_id, ses_message_id, bucket, region, message_id, keys)
         VALUES (item.c_batch, wid, item.mid, item.c_bucket, item.c_region, item.c_mid, ARRAY[item.c_key])
@@ -102,6 +106,7 @@ BEGIN
     END IF;
 
     ses_message_id := item.mid;
+    pending := item_pending;
     ok := item_ok;
     fits := item_fits;
     due := item_due;
@@ -267,6 +272,9 @@ BEGIN
         AND NOT EXISTS (
           SELECT 1 FROM mail_retired_addresses rt
           WHERE rt.workspace_id = wid AND rt.address IN (i.addr, i.base) AND rt.until > now() AND rt.address LIKE '%.sandbox.invalid'
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM mailbox_addresses pa WHERE pa.workspace_id = wid AND pa.address IN (i.addr, i.base) AND pa.kind = 'public'
         )
         AND NOT EXISTS (
           SELECT 1 FROM mailbox_addresses ea JOIN mailboxes eb ON eb.id = ea.mailbox_id
@@ -509,7 +517,8 @@ BEGIN
     SET status = 'processed',
         processed_at = now(),
         routing = CASE WHEN b.plan IS NOT NULL THEN mail_routing_trace(b.plan) END,
-        dropped_recipients = 0
+        dropped_recipients = 0,
+        error = NULL
     FROM _batch_ing b
     WHERE r.workspace_id = wid AND r.ses_message_id = b.ses_id;
 
