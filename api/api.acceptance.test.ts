@@ -7714,6 +7714,38 @@ describe('Hosted MCP OAuth and tools', () => {
         runtime.config.support!.addressIds = configured;
       });
 
+      await t.test('1b current chat: GET /v1/support-conversations/current returns only the caller’s open chat in the current workspace', async () => {
+        // Before any chat exists in either workspace for member, both answer null (no-store).
+        const empty = await send('GET', '/v1/support-conversations/current', session(member, acme));
+        assert.equal(empty.headers.get('cache-control'), 'no-store');
+        assert.deepEqual(ok(empty), { conversation: null });
+        assert.deepEqual(ok(await send('GET', '/v1/support-conversations/current', session(member, beta))), { conversation: null });
+        // An open email conversation for member never appears as a workspace chat.
+        const emailed = await email(member.email);
+        assert.deepEqual(ok(await send('GET', '/v1/support-conversations/current', session(member, acme))), { conversation: null });
+        ok(reply(await platform.closeConversation(emailed.id)));
+        // Once member has an open chat in acme, only member in acme sees it: beta and another user in acme see null.
+        const acmeChat = await chat(member, acme);
+        const found = ok(await send('GET', '/v1/support-conversations/current', session(member, acme)));
+        assert.equal(found.conversation?.id, acmeChat);
+        assert.equal(found.conversation?.status, 'open');
+        assert.deepEqual(ok(await send('GET', '/v1/support-conversations/current', session(member, beta))), { conversation: null });
+        assert.deepEqual(ok(await send('GET', '/v1/support-conversations/current', session(admin, acme))), { conversation: null });
+        // Opening a separate chat in beta keeps both workspaces isolated.
+        const betaChat = await chat(member, beta);
+        assert.equal(ok(await send('GET', '/v1/support-conversations/current', session(member, acme))).conversation?.id, acmeChat);
+        assert.equal(ok(await send('GET', '/v1/support-conversations/current', session(member, beta))).conversation?.id, betaChat);
+        // Closing acme's chat makes acme answer null again while beta stays open.
+        ok(reply(await platform.closeConversation(acmeChat)));
+        assert.deepEqual(ok(await send('GET', '/v1/support-conversations/current', session(member, acme))), { conversation: null });
+        assert.equal(ok(await send('GET', '/v1/support-conversations/current', session(member, beta))).conversation?.id, betaChat);
+        ok(reply(await platform.closeConversation(betaChat)));
+        // API keys and the support platform binding cannot call this dashboard-only route.
+        const key = ok(await send('POST', '/v1/api-keys', session(owner, acme), { name: 'current-chat-check', permissions: ['read'] }), 201).secret as string;
+        error(await send('GET', '/v1/support-conversations/current', { authorization: `Bearer ${key}` }), 403, 'DASHBOARD_AUTH_REQUIRED');
+        assert.equal((await platform.call('GET', '/v1/support-conversations/current')).status, 404);
+      });
+
       await t.test('2 stamp: only the binding’s request() names a conversation; nothing in an HTTP request can, and an unbound or closed one reads nothing', async () => {
         const id = await chat(owner), theirs = await chat(outsider, other);
         const asked = ok(await stamped(id, 'GET', `/v1/support/context?userId=${outsider.userId}&conversationId=${theirs}&workspaceId=${acme}`));

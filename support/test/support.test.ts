@@ -639,6 +639,40 @@ describe('support Worker', () => {
     assert.deepEqual([refused.status, refused.body?.error?.code], [403, 'NOT_YOUR_CONVERSATION']);
   });
 
+  test('/chat/start with resume rejoins the person and workspace’s open chat across reloads, stays isolated per workspace, and starts fresh after end', async () => {
+    const first = await post('/chat/start', { handoff: handoff('usr_cont', false, 'ws_acme'), resume: true });
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    const ws1 = await connect(first.body.socketUrl);
+    await ws1.until(f => f.type === 'history');
+    ws1.send({ type: 'user.message', clientMessageId: 'cont1', text: 'First continuous message' });
+    await ws1.until(f => f.type === 'message.end' && f.text === 'OK.', 60_000);
+    ws1.ws.close();
+
+    // A fresh handoff for the same person and workspace with resume: true rejoins the exact same conversation with history.
+    const second = await post('/chat/start', { handoff: handoff('usr_cont', false, 'ws_acme'), resume: true });
+    assert.equal(second.status, 200, JSON.stringify(second.body));
+    assert.equal(second.body.conversationId, first.body.conversationId);
+    const ws2 = await connect(second.body.socketUrl);
+    const replay = await ws2.until(f => f.type === 'history');
+    assert.deepEqual(replay.messages.map((m: any) => [m.role, m.text]), [['user', 'First continuous message'], ['assistant', 'OK.']]);
+
+    // Another workspace for the same person gets its own separate empty conversation.
+    const otherWs = await post('/chat/start', { handoff: handoff('usr_cont', false, 'ws_other'), resume: true });
+    assert.equal(otherWs.status, 200, JSON.stringify(otherWs.body));
+    assert.notEqual(otherWs.body.conversationId, first.body.conversationId);
+    const wsOther = await connect(otherWs.body.socketUrl);
+    assert.deepEqual((await wsOther.until(f => f.type === 'history')).messages, []);
+    wsOther.ws.close();
+
+    // Ending the conversation makes the next resume: true start a fresh one.
+    ws2.send({ type: 'end' });
+    await ws2.until(f => f.type === 'closed');
+    ws2.ws.close();
+    const afterEnd = await post('/chat/start', { handoff: handoff('usr_cont', false, 'ws_acme'), resume: true });
+    assert.equal(afterEnd.status, 200, JSON.stringify(afterEnd.body));
+    assert.notEqual(afterEnd.body.conversationId, first.body.conversationId);
+  }, 180_000);
+
   /** A new chat's first turn for this person in this workspace: its conversation and the turn's context (<customer> on). */
   async function firstTurn(user: string, workspace = 'ws_acme') {
     const chat = await chatIn(mf, handoff(user, false, workspace)), models = recorded.length, tag = `(notes check ${user} ${workspace})`;

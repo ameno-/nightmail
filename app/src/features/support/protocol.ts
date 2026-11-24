@@ -86,7 +86,8 @@ export function parseServerMessage(data: unknown): ServerMessage | null {
 }
 
 // Connection state, from the transport (not part of the wire protocol).
-export type Connection = 'idle' | 'connecting' | 'open' | 'offline' | 'unavailable'
+// 'ready': server checked and no open conversation exists yet; sending or attaching creates one.
+export type Connection = 'idle' | 'connecting' | 'ready' | 'open' | 'offline' | 'unavailable'
 export type TransportEvent =
   | { type: 'server'; message: ServerMessage }
   | { type: 'connection'; state: Connection; retryAt?: number; reason?: string }
@@ -94,8 +95,8 @@ export type TransportEvent =
 /** What the panel talks to: the support Worker's socket (socket.ts) or the scripted demo (demo.ts). */
 export interface SupportTransport {
   readonly kind: 'live' | 'demo'
-  /** Opens (or resumes) the conversation. Safe to call again after going offline. */
-  connect(): void
+  /** Checks for and resumes an existing conversation, or creates one when `create` is true. Safe to call again after going offline. */
+  connect(options?: { create?: boolean }): void
   send(message: ClientMessage): boolean
   /** Allow on a consent card: tells Nightmail (content access for this chat), then answers the request; the Worker checks
    *  Nightmail's answer itself. */
@@ -104,12 +105,8 @@ export interface SupportTransport {
   readAction(actionId: string, signal?: AbortSignal): Promise<SupportAction>
   /** Confirms or declines it with the person's own session, then tells the server it was decided (action.resolved). */
   decideAction(actionId: string, decision: 'confirm' | 'decline'): Promise<SupportAction>
-  /** Forgets this conversation and opens a new one. */
+  /** Forgets a closed conversation so the next message starts a new one. */
   restart(): void
-  /** The last conversation the person wrote in on an earlier page, when it isn't this one: only opened on request. */
-  last(): string | null
-  /** Opens that conversation in the panel, with its history. */
-  continueLast(): void
   /** Whether this transport takes screenshots. */
   readonly uploads: boolean
   /** Uploads one screenshot (§5.1), reporting progress from 0 to 1; the returned att_ ID goes in user.message.attachments.

@@ -326,6 +326,26 @@ export function registerSupportConversations(app: App) {
   });
 
   // ---------- the customer's own session ----------
+  const CurrentConversation = z.object({
+    conversation: z.object({
+      id: z.string(),
+      status: z.enum(['open', 'ticketed']),
+      createdAt: z.string(),
+      lastMessageAt: z.string().nullable(),
+    }).nullable(),
+  }).openapi('CurrentSupportConversation');
+  app.openapi(createRoute({ hide: true, tags: ['Workspaces'], security: sessionSecurity, method: 'get', path: '/v1/support-conversations/current', operationId: 'getCurrentSupportConversation',
+    description: 'The signed-in person’s open support chat conversation for the current workspace, or null when none is open.',
+    responses: { 200: response(CurrentConversation), ...errors } }), async c => {
+    if (c.env.platformCaller) throw denied('DASHBOARD_AUTH_REQUIRED', 'Use a signed-in dashboard session.', { credential: 'dashboard' });
+    const { userId, workspaceId } = dashboardSession(c);
+    const { rows: [row] } = await c.env.db.execute<{ id: string; status: 'open' | 'ticketed'; created_at: string; last_message_at: string | null }>(sql`SELECT id, status, created_at::text AS created_at, last_message_at::text AS last_message_at
+      FROM support_conversations
+      WHERE channel = 'chat' AND user_id = ${userId} AND workspace_id = ${workspaceId} AND status <> 'closed'
+      ORDER BY coalesce(last_message_at, created_at) DESC, created_at DESC, id DESC LIMIT 1`);
+    c.header('Cache-Control', 'no-store');
+    return c.json({ conversation: row ? { id: row.id, status: row.status, createdAt: new Date(row.created_at).toISOString(), lastMessageAt: row.last_message_at ? new Date(row.last_message_at).toISOString() : null } : null }, 200);
+  });
   const Claimed = z.object({ id: z.string(), messageId: z.string(), mode: Mode });
   const Pending = z.object({ id: z.string(), messageId: z.string(), subject: z.string().nullable().describe('The email’s subject as it arrived (untrusted text), so the person can tell which email they confirm. Never its body.'),
     receivedAt: z.string().nullable().describe('When support received it.') });
