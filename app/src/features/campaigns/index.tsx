@@ -993,7 +993,7 @@ function CampaignReview({ campaign: latest, stats, stale, refreshing, refresh }:
     const messageSummary = missing.length ? `Add ${missing.join(', ').replace(/, ([^,]*)$/, ' and $1')} in Write` : campaign.subject
     const whenSummary = mode === 'now' ? 'Send now' : scheduledAt ? utcLabel(scheduledAt) : 'Pick a time'
     const order: ReviewRowId[] = ['to', 'message', 'score', 'when']
-    const next = (row: ReviewRowId) => <>{unreadNote && <ul className="campaign-notes"><li className="campaign-note" data-tone="warning"><span>{unreadNote}</span></li></ul>}<Button variant="primary" onClick={() => setOpenRow(order[order.indexOf(row) + 1]!)}>Next</Button></>
+    const next = (row: ReviewRowId) => <>{unreadNote && openRow === row && <ul className="campaign-notes"><li className="campaign-note" data-tone="warning"><span>{unreadNote}</span></li></ul>}<Button variant="primary" onClick={() => setOpenRow(order[order.indexOf(row) + 1]!)}>Next</Button></>
     return <div className="campaign-review campaign-review--draft">
       {bar}
       <div className="review-stages">
