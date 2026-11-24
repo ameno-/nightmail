@@ -13,14 +13,15 @@ const span = (seconds: number) => seconds < 90 ? `${Math.round(seconds)} s` : se
 const took = (ms: number) => ms < 1_000 ? `${Math.round(ms)} ms` : span(ms / 1000)
 const perSecond = (rate: number) => `${rate >= 10 ? Math.round(rate) : Math.round(rate * 10) / 10}/s`
 const size = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(bytes < 10 * 1024 ** 3 ? 1 : 0)} GB`
-const behind = (is: boolean): Row['state'] => is ? 'warning' : 'ok'
 const measuredAgo = (at: string) => { const text = ago(at); return !text || text === '0m' ? 'Just now' : `${text} ago` }
 const errorKind = { code: 'Failed requests', sqlstate: 'Database', error: 'Log lines' } as const
 
 function rows(health: OperatorHealth): Row[] {
-  const critical = new Set(health.alerts.filter(alert => alert.severity === 'critical').map(alert => alert.key))
+  const open = new Map(health.alerts.map(alert => [alert.key, alert.severity]))
   // A measured row is as severe as its alert: a queue behind is "Behind" in the alert's own tone.
-  const state = (is: boolean, ...keys: string[]): Row['state'] => !is ? 'ok' : keys.some(key => critical.has(key)) ? 'critical' : 'warning'
+  const state = (is: boolean, ...keys: string[]): Row['state'] => !is ? 'ok' : keys.some(key => open.get(key) === 'critical') ? 'critical' : 'warning'
+  // A row whose only sign of trouble is an open alert about it (an error code, the database).
+  const alerted = (...keys: string[]): Row['state'] => state(keys.some(key => open.has(key)), ...keys)
   const measured: Row[] = [
     ...health.queues.map(q => ({ id: `queue:${q.name}`, area: 'Queue', what: q.name, now: q.depth ? `${number(q.depth)} waiting` : 'Empty', detail: q.depth ? `oldest ${span(q.oldestSeconds)}` : '', state: state(q.behind, `queue-behind:${q.name}`) })),
     ...(health.jobs ?? []).map(job => ({ id: `jobs:${job.type}`, area: 'Jobs', what: job.type, now: job.pending ? `${number(job.pending)} due, oldest ${span(job.oldestSeconds)}` : 'None due',
@@ -30,12 +31,13 @@ function rows(health: OperatorHealth): Row[] {
       detail: [`${number(c.released)} of ${number(c.total)}`, c.etaSeconds !== null && `${span(c.etaSeconds)} left`, c.bounceRate !== null && c.settled ? `${(c.bounceRate * 100).toFixed(1)}% bounced` : false].filter(Boolean).join(' · '),
       state: state(c.behind, `campaign-slow:${c.id}`, `campaign-bounces:${c.id}`) })),
     ...(health.routes ?? []).map(route => ({ id: `route:${route.route}`, area: 'Route', what: route.route, now: `p95 ${took(route.p95Ms)}`,
-      detail: [`${number(route.count)} in 15 min`, `slowest ${took(route.slowestMs)}`, route.errors > 0 && `${number(route.errors)} failed`].filter(Boolean).join(' · '), state: behind(route.behind) })),
-    ...(health.errors ?? []).map(error => ({ id: `error:${error.kind}:${error.code}`, area: 'Error', what: error.code, now: `${number(error.count)} in 15 min`, detail: errorKind[error.kind], state: 'ok' as const })),
+      detail: [`${number(route.count)} in 15 min`, `slowest ${took(route.slowestMs)}`, route.errors > 0 && `${number(route.errors)} failed`].filter(Boolean).join(' · '), state: state(route.behind) })),
+    ...(health.errors ?? []).map(error => ({ id: `error:${error.kind}:${error.code}`, area: 'Error', what: error.code, now: `${number(error.count)} in 15 min`, detail: errorKind[error.kind],
+      state: error.kind === 'sqlstate' ? alerted(`database-errors:${error.code}`) : error.kind === 'error' ? alerted(`errors:${error.code}`, ...(error.code.startsWith('DISPATCHER_') ? ['dispatcher-failing'] : [])) : alerted('server-errors') })),
     ...(health.database ? [
       { id: 'database:transactions', area: 'Database', what: 'Transactions', now: health.database.longTransactions ? `${number(health.database.longTransactions)} open over a minute` : 'None open over a minute',
-        detail: health.database.longTransactions ? `oldest ${span(health.database.oldestTransactionSeconds)}` : '', state: state(critical.has('database-transaction')) },
-      { id: 'database:queries', area: 'Database', what: 'Queries', now: `${number(health.database.slowQueries)} over 30 s`, detail: `${number(health.database.lockWaits)} waiting on a lock`, state: 'ok' as const },
+        detail: health.database.longTransactions ? `oldest ${span(health.database.oldestTransactionSeconds)}` : '', state: alerted('database-transaction') },
+      { id: 'database:queries', area: 'Database', what: 'Queries', now: `${number(health.database.slowQueries)} over 30 s`, detail: `${number(health.database.lockWaits)} waiting on a lock`, state: alerted('database-slow-queries', 'database-lock-waits') },
     ] : []),
   ]
   const order = { critical: 0, warning: 1, ok: 2 }
