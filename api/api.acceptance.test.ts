@@ -23418,7 +23418,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         mail_receipts: ["INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,notification,recipients,status,processed_at,created_at) SELECT p.wid,'mr_'||p.tag||p.day||'x'||i,p.region,p.wid,'key','{}','[]','processed',now()-interval '31 days'-make_interval(days=>p.day),now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM mail_receipts,p WHERE starts_with(ses_message_id,'mr_'||p.tag)"],
         mail_receipt_holds: ["INSERT INTO mail_receipt_holds(bucket,ses_message_id,region,topic_arn,owners,recipients,notification,received_at,expires_at,status) SELECT p.wid,'mh_'||p.tag||p.day||'x'||i,p.region,'topic','{}','[]','{}',now(),now()-interval '31 days'-make_interval(days=>p.day),'released' FROM p,g","SELECT count(*) FROM mail_receipt_holds,p WHERE starts_with(ses_message_id,'mh_'||p.tag)"],
         mailbox_events: ["INSERT INTO mailbox_events(workspace_id,type,data,created_at) SELECT p.wid,'fixture.retention',jsonb_build_object('tag',p.tag),now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM mailbox_events,p WHERE data->>'tag'=p.tag"],
-        mail_ignored_staging: ["INSERT INTO mail_ignored_staging(bucket,ses_message_id,created_at) SELECT p.wid,'mi_'||p.tag||p.day||'x'||i,now()-interval '73 hours'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM mail_ignored_staging,p WHERE starts_with(ses_message_id,'mi_'||p.tag)"],
+        mail_ignored_staging: ["INSERT INTO mail_ignored_staging(bucket,ses_message_id,created_at) SELECT p.wid,'mi_'||p.tag||p.day||'x'||i,now()-interval '121 hours'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM mail_ignored_staging,p WHERE starts_with(ses_message_id,'mi_'||p.tag)"],
         mailbox_webhook_deliveries_paused_expired: ["INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,payload,status,created_at) SELECT 'mwdp_'||p.tag||p.day||'x'||i,p.wid,'mwh_'||p.tag,'{}','paused',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM mailbox_webhook_deliveries,p WHERE starts_with(id,'mwdp_'||p.tag) AND status='paused'"],
         mailbox_webhook_deliveries: ["INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,payload,status,created_at) SELECT 'mwd_'||p.tag||p.day||'x'||i,p.wid,'mwh_'||p.tag,'{}','delivered',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM mailbox_webhook_deliveries,p WHERE starts_with(id,'mwd_'||p.tag)"],
         sender_score_daily: ["INSERT INTO sender_score_daily(workspace_id,day) SELECT p.wid,(now() AT TIME ZONE 'UTC')::date-401-p.day*5-i FROM p,g","SELECT count(*) FROM sender_score_daily s,p WHERE s.workspace_id=p.wid AND s.day<(now() AT TIME ZONE 'UTC')::date-400"],
@@ -29473,6 +29473,73 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const tags='vis\u{e0061}ible';assert.equal(visibleMail(tags,null).hiddenContent,true);assert.equal(displayText(tags),'visible');assert.equal(visibleMail(null,`<p>${tags}</p>`).text,'visible');
   });
   test('ephemeral inbox: extract finds codes and links only in visible text and flags hidden content',async()=>{const {visibleMail}=await import('./src/inbox-content.js');const m=visibleMail('code 000000','<div hidden>code 111111</div><p style="font-size:0">code 222222</p><p>Verify: A3B4</p><a href="https://real.invalid/">other.invalid</a><span>zero\u200bwidth</span>','codes,links');assert.equal(m.hiddenContent,true);assert.deepEqual(m.extract,{codes:['A3B4'],links:[{text:'other.invalid',href:'https://real.invalid/',mismatch:true}]});assert.ok(!m.text.includes('111111'));});
+  test('shared-pool staging redrive retires unattributed objects once, skips SES setup probe, and keeps mail_ignored_staging 5 days', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { S3Client } = await import('@aws-sdk/client-s3');
+      const { stagingJobs } = await import('./src/mailbox-staging.js');
+      const { pruneMailboxEvents } = await import('./src/maintenance.js');
+      const wid = runtime.config.workspaceId;
+      const old = new Date(Date.now() - 2 * 3600_000);
+      const poolBucket = 'fixture-pool-' + unique('b'), poolTopic = `arn:aws:sns:${REGION}:111122223333:nightmail-inbound`;
+      const poolRuntime = { ...runtime, config: { ...runtime.config, multiTenant: true, receivingRedrive: true, aws: { accessKeyId: 'synthetic-fixture', secretAccessKey: 'synthetic-fixture' } } };
+      await db.query('CREATE TEMP TABLE provider_pool_regions (LIKE public.provider_pool_regions INCLUDING ALL) ON COMMIT DROP');
+      await db.query("INSERT INTO provider_pool_regions(region,aws_account_id,receiving_state,inbound_bucket,inbound_topic_arn) VALUES($1,'111122223333','ready',$2,$3)", [REGION, poolBucket, poolTopic]);
+      const ownedHost = `owned-${unique('h')}.invalid`;
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all,receiving_host) VALUES($1,$2,$1,$3,$4,'active','store',$3)", [unique('mdom'), wid, ownedHost, REGION]);
+      const traceFor = (id: string, to: string) => Buffer.from(`Return-Path: <s@sender.invalid>\r\nReceived: from mx.invalid by inbound-smtp.${REGION}.amazonaws.com with SMTP id ${id} for ${to}; ${old.toUTCString()}\r\nSubject: hi\r\n\r\nbody`);
+      const copied: string[] = [];
+      let denyCopy = false;
+      t.mock.method(S3Client.prototype, 'send', async (cmd: any) => {
+        if (cmd.constructor.name === 'ListObjectsV2Command') return { Contents: [
+          { Key: 'staging/AMAZON_SES_SETUP_NOTIFICATION', ETag: '"setup"', LastModified: old },
+          { Key: 'staging/redrive-orphan-1', ETag: '"e1"', LastModified: old },
+          { Key: 'staging/redrive-denied-2', ETag: '"e2"', LastModified: old },
+          { Key: 'staging/redrive-owned-3', ETag: '"e3"', LastModified: old },
+        ], IsTruncated: false };
+        if (cmd.constructor.name === 'GetObjectCommand') {
+          const mid = String(cmd.input.Key).slice('staging/'.length);
+          const body = mid === 'redrive-owned-3' ? traceFor(mid, `boss@${ownedHost}`) : Buffer.from('Subject: orphan\r\n\r\nhi');
+          return { Body: { transformToByteArray: async () => body } };
+        }
+        if (cmd.constructor.name === 'CopyObjectCommand') {
+          if (denyCopy) throw Object.assign(new Error('denied'), { name: 'AccessDenied' });
+          copied.push(cmd.input.Key);
+          return {};
+        }
+        return {};
+      });
+      const sweepPayload = { bucket: poolBucket, topic: poolTopic, shared: true, started: Date.now() };
+      await stagingJobs['mailbox.sweepStaging']!(poolRuntime, sweepPayload, { id: 'sweep-pool', attempts: 1, workspaceId: wid });
+      const queued = (await db.query("SELECT id, payload FROM jobs WHERE type='mailbox.recoverStaging' AND payload->>'bucket'=$1 ORDER BY payload->>'mid'", [poolBucket])).rows;
+      assert.deepEqual(queued.map(r => r.payload.mid), ['redrive-denied-2', 'redrive-orphan-1', 'redrive-owned-3'], 'AMAZON_SES_SETUP_NOTIFICATION skipped');
+      const byMid = new Map(queued.map(r => [r.payload.mid as string, r]));
+      // 1. Unowned object with successful quarantine copy: retires once, records reason on job payload, not re-swept.
+      await stagingJobs['mailbox.recoverStaging']!(poolRuntime, byMid.get('redrive-orphan-1')!.payload, { id: byMid.get('redrive-orphan-1')!.id, attempts: 1, workspaceId: wid });
+      assert.deepEqual(copied, ['quarantine/redrive-orphan-1']);
+      assert.equal((await db.query("SELECT FROM mail_ignored_staging WHERE bucket=$1 AND ses_message_id='redrive-orphan-1'", [poolBucket])).rowCount, 1);
+      const retiredPayload = (await db.query("SELECT payload FROM jobs WHERE id=$1", [byMid.get('redrive-orphan-1')!.id])).rows[0].payload;
+      assert.equal(retiredPayload.retiredReason, 'envelope_unknown');
+      assert.equal(typeof retiredPayload.ageHours, 'number');
+      // 2. Denied quarantine copy: must NOT retire or insert into mail_ignored_staging; fails 422.
+      denyCopy = true;
+      await assert.rejects(stagingJobs['mailbox.recoverStaging']!(poolRuntime, byMid.get('redrive-denied-2')!.payload, { id: byMid.get('redrive-denied-2')!.id, attempts: 1, workspaceId: wid }), { code: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN' });
+      assert.equal((await db.query("SELECT FROM mail_ignored_staging WHERE bucket=$1 AND ses_message_id='redrive-denied-2'", [poolBucket])).rowCount, 0);
+      denyCopy = false;
+      // 3. Owned receiving host: copies to quarantine/, logs MAILBOX_STAGING_UNDELIVERED, does NOT retire, fails 422.
+      await assert.rejects(stagingJobs['mailbox.recoverStaging']!(poolRuntime, byMid.get('redrive-owned-3')!.payload, { id: byMid.get('redrive-owned-3')!.id, attempts: 1, workspaceId: wid }), { code: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN' });
+      assert.ok(copied.includes('quarantine/redrive-owned-3'));
+      assert.equal((await db.query("SELECT FROM mail_ignored_staging WHERE bucket=$1 AND ses_message_id='redrive-owned-3'", [poolBucket])).rowCount, 0);
+      // 4. Subsequent sweep skips the retired unowned object even after its job row is deleted.
+      await db.query("DELETE FROM jobs WHERE id=$1", [byMid.get('redrive-orphan-1')!.id]);
+      await stagingJobs['mailbox.sweepStaging']!(poolRuntime, sweepPayload, { id: 'sweep-pool-2', attempts: 1, workspaceId: wid });
+      assert.equal((await db.query("SELECT FROM jobs WHERE type='mailbox.recoverStaging' AND payload->>'bucket'=$1 AND payload->>'mid'='redrive-orphan-1'", [poolBucket])).rowCount, 0);
+      await db.query("INSERT INTO mail_ignored_staging(bucket,ses_message_id,created_at) VALUES($1,'keep-4d',now()-interval '4 days'),($1,'drop-6d',now()-interval '6 days')", [poolBucket]);
+      await pruneMailboxEvents(runtime);
+      const left = (await db.query("SELECT ses_message_id FROM mail_ignored_staging WHERE bucket=$1 ORDER BY ses_message_id", [poolBucket])).rows.map(r => r.ses_message_id);
+      assert.deepEqual(left, ['keep-4d', 'redrive-orphan-1']);
+    });
+  });
+
   test('inbound staging recovery and ingest limits',async t=>{
     await simulatedSesFixture(t,async({runtime,db,jobs,local,request,fetch:rawFetch})=>{
       const {acceptInboundNotification,mailboxIngestJobs,recoverMailReceipts}=await import('./src/mailbox-ingest.js'),{scheduleHoldRelease,scheduleMailRecovery}=await import('./src/mailbox-staging.js'),{S3Client}=await import('@aws-sdk/client-s3');
@@ -29537,6 +29604,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         stageError='AccessDenied';for(const item of [j,spoof])await assert.rejects(run(item.type,item.payload),{code:'MAILBOX_STAGING_ACCESS_DENIED',retryable:false});
         stageError='';quarantineDenied=true;await assert.rejects(run(spoof.type,spoof.payload),{code:'MAILBOX_STAGING_ENVELOPE_UNKNOWN',retryable:false});quarantineDenied=false;
       });
+
       await t.test('scan barriers precede MIME, including unknown verdicts and workspace spam policy',async()=>{
         for(const status of ['FAIL','GRAY','PROCESSING_FAILED',undefined]){const mid='unsafe-'+String(status);await submit(mid,['a@receive.example'],'Bad',{...cleanScans,virusVerdict:{status}});await run('mailbox.ingest',{sesMessageId:mid});assert.ok(quarantined.includes('quarantine/'+mid));}
         ok(await local('PATCH','/v1/inbound/policy',{spam:'quarantine'},'live'));for(const status of ['FAIL','GRAY','PROCESSING_FAILED',undefined]){const mid='spam-'+String(status);await submit(mid,['a@receive.example'],'Spam',{...cleanScans,spamVerdict:{status}});await run('mailbox.ingest',{sesMessageId:mid});assert.ok(quarantined.includes('quarantine/'+mid));}
