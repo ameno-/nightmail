@@ -27791,6 +27791,11 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     assert.equal(await verifyCampaignContentHash({ ...customer, html: '<p>Tampered</p>' }, s1Hash), false);
     assert.equal(await verifyCampaignContentHash({ ...customer, subject: 'Tampered' }, s1Hash), false);
     assert.notEqual(await digest(canonical(customer)), s1Hash);
+    // Repeated text-attribute placeholders count every occurrence so the 512 KiB attribute-byte guard scales by N.
+    const multiAttr = await analyzeHtmlPlaceholders('<html><body>' + '<img src="https://example.com/a.png" alt="{{x}}">'.repeat(10) + '</body></html>');
+    assert.deepEqual([multiAttr.hasUrlPlaceholder, multiAttr.hasAttrPlaceholder, multiAttr.attrPlaceholderCount], [false, true, 10]);
+    // Unknown future hash format throws retryable CAMPAIGN_HASH_FORMAT_UNSUPPORTED instead of silently rejecting.
+    await assert.rejects(verifyCampaignContentHash(customer, 's2:' + 'a'.repeat(64)), { code: 'CAMPAIGN_HASH_FORMAT_UNSUPPORTED', retryable: true });
   });
 
   // Deferred capture late failures (L87 item 3): EMPTY_AUDIENCE and invalid recipient fail loudly, leaving draft editable.

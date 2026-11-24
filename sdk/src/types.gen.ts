@@ -1850,7 +1850,7 @@ export type CampaignQueued = {
     id: string;
     state: 'preparing';
     /**
-     * Recipients expected; delivery.total is authoritative once the audience is frozen.
+     * Recipients expected (exact for lists up to 5,000 members and unsegmented lists once list counts are enabled; may be 0 if an uncounted large list exceeds the 200 ms launch budget without a prior preview); delivery.total is authoritative once the audience is frozen.
      */
     queued: number;
     scheduledAt: string | null;

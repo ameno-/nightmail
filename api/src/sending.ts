@@ -384,7 +384,7 @@ const Pacing = z.object({ perDay: z.number().int().min(100).max(10000000).nullab
 const CampaignSend = z.object({ revision: z.number().int().positive(), pacing: Pacing.optional(),
   confirmRequiredNotice: z.literal(true).optional().describe('Required for a required notice (422 REQUIRED_NOTICE_UNCONFIRMED without it): the sender confirms it is a required notice with no promotion. Recorded with who and when. An agent asks the person first.') }).strict().openapi('CampaignSendInput');
 const CampaignSchedule = z.object({ ...CampaignSend.shape, scheduledAt: z.string().datetime({ offset: true }) }).strict().openapi('CampaignScheduleInput');
-const CampaignQueued = z.object({ id: z.string(), state: z.literal('preparing'), queued: z.number().int().describe('Recipients expected; delivery.total is authoritative once the audience is frozen.'), scheduledAt: z.string().nullable(), simulated: z.boolean() }).openapi('CampaignQueued');
+const CampaignQueued = z.object({ id: z.string(), state: z.literal('preparing'), queued: z.number().int().describe('Recipients expected (exact for lists up to 5,000 members and unsegmented lists once list counts are enabled; may be 0 if an uncounted large list exceeds the 200 ms launch budget without a prior preview); delivery.total is authoritative once the audience is frozen.'), scheduledAt: z.string().nullable(), simulated: z.boolean() }).openapi('CampaignQueued');
 const CampaignCanceled = z.object({ id: z.string(), state: z.literal('canceled'), canceled: z.number().int(), inFlight: z.number().int() }).openapi('CampaignCanceled');
 const TestCampaign = z.object({ to: Address, data: Data }).strict().openapi('CampaignTestInput');
 export type SendRequest = z.infer<typeof SendInput>;
@@ -760,7 +760,7 @@ function validateUrl(value: string) {
   try { url = new URL(normalized, 'https://template.invalid/'); } catch { throw new ApiError(422, 'UNSAFE_HTML_URL', 'HTML contains an invalid URL.'); }
   if (!['http:', 'https:', 'mailto:', 'tel:', 'cid:'].includes(url.protocol)) throw new ApiError(422, 'UNSAFE_HTML_URL', 'HTML URLs must use HTTP(S), mailto, tel, CID, or relative references.');
 }
-type HtmlPlaceholderAnalysis = { hasUrlPlaceholder: boolean; hasAttrPlaceholder: boolean };
+type HtmlPlaceholderAnalysis = { hasUrlPlaceholder: boolean; hasAttrPlaceholder: boolean; attrPlaceholderCount: number };
 function inspectHtml(source: string, root: DefaultTreeAdapterMap['node'], template = false): HtmlPlaceholderAnalysis {
   const safe: { start: number; end: number; kind: 'text' | 'textAttr' | 'urlAttr' }[] = [];
   const stack: { node: DefaultTreeAdapterMap['node']; unsafe: boolean }[] = [{ node: root, unsafe: false }];
@@ -799,18 +799,18 @@ function inspectHtml(source: string, root: DefaultTreeAdapterMap['node'], templa
     if ('content' in node) stack.push({ node: (node as DefaultTreeAdapterMap['template']).content, unsafe: blocked });
   }
   safe.sort((a, b) => a.start - b.start); let rangeIndex = 0;
-  let hasUrlPlaceholder = false, hasAttrPlaceholder = false;
+  let hasUrlPlaceholder = false, hasAttrPlaceholder = false, attrPlaceholderCount = 0;
   if (template) for (const match of source.matchAll(/{{\s*[a-zA-Z_][a-zA-Z0-9_]*\s*}}/g)) {
     while (safe[rangeIndex] && safe[rangeIndex]!.end <= match.index) rangeIndex++;
     const range = safe[rangeIndex];
     if (!range || match.index < range.start || match.index + match[0].length > range.end) throw new ApiError(422, 'UNSAFE_TEMPLATE_CONTEXT', 'Campaign placeholders require HTML text nodes or quoted URL/title/alt/aria-label/aria-description attributes. Unquoted attributes, tag names, comments, script/style, event handlers and foreign markup are unsupported.');
     if (range.kind === 'urlAttr') hasUrlPlaceholder = true;
-    if (range.kind !== 'text') hasAttrPlaceholder = true;
+    if (range.kind !== 'text') { hasAttrPlaceholder = true; attrPlaceholderCount++; }
   }
-  return { hasUrlPlaceholder, hasAttrPlaceholder };
+  return { hasUrlPlaceholder, hasAttrPlaceholder, attrPlaceholderCount };
 }
 function validateInterpolationTemplate(source: string | undefined, html: boolean, parse?: HtmlParser): HtmlPlaceholderAnalysis {
-  if (!source) return { hasUrlPlaceholder: false, hasAttrPlaceholder: false };
+  if (!source) return { hasUrlPlaceholder: false, hasAttrPlaceholder: false, attrPlaceholderCount: 0 };
   const unsupported = source.replace(/{{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*}}/g, '');
   // Nested CSS blocks legitimately end in }}. Only an unmatched opening delimiter begins unsupported template syntax.
   if (unsupported.includes('{{')) throw new ApiError(422, 'UNSUPPORTED_TEMPLATE_SYNTAX', 'Campaigns support simple {{name}} substitutions, not helpers, HTML fragments, or Liquid syntax.');
@@ -818,7 +818,7 @@ function validateInterpolationTemplate(source: string | undefined, html: boolean
     if (!parse) throw new Error('HTML parser required');
     return inspectHtml(source, parse(source, {sourceCodeLocationInfo:true}), true);
   }
-  return { hasUrlPlaceholder: false, hasAttrPlaceholder: false };
+  return { hasUrlPlaceholder: false, hasAttrPlaceholder: false, attrPlaceholderCount: 0 };
 }
 /** Differential-test helper: validates HTML placeholders and reports whether any sit in a URL or text attribute. */
 export async function analyzeHtmlPlaceholders(html: string): Promise<HtmlPlaceholderAnalysis> {
@@ -1992,7 +1992,7 @@ function backgroundFailure(error: unknown) {
   // see the campaign, so other content errors stay the sanitized summary.
   const placeholder = error instanceof ApiError && code === 'MISSING_TEMPLATE_VARIABLE' ? /\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}/.exec(error.message)?.[1] : undefined;
   if (placeholder) return { code, message: `A recipient has no value for {{${placeholder}}} (${code}). Add a fallback value for ${placeholder} and send again.` };
-  if (error instanceof ApiError && code === 'CAMPAIGN_RECIPIENT_INVALID') return { code, message: 'A recipient has an invalid email address (CAMPAIGN_RECIPIENT_INVALID). Fix or remove the invalid contact and send again.' };
+  if (error instanceof ApiError && code === 'CAMPAIGN_RECIPIENT_INVALID') return { code, message: "A recipient's email address or personalized content is invalid (CAMPAIGN_RECIPIENT_INVALID). Fix or remove the contact and send again." };
   // Capture, screen, size and limit refusals name only counts, sizes and limits, never a contact or its values.
   if (error instanceof ApiError && (['EMPTY_AUDIENCE', 'AUDIENCE_LIMIT_EXCEEDED', 'CAMPAIGN_RECIPIENT_DATA_TOO_LARGE', 'ENCODED_MESSAGE_TOO_LARGE', 'RENDERED_CONTENT_TOO_LARGE', 'UNSAFE_HTML_URL', 'UNSAFE_TEMPLATE_CONTEXT', 'UNSUPPORTED_TEMPLATE_SYNTAX', 'CONTENT_REJECTED_SPAM', 'CONTENT_TOO_LARGE_TO_SCREEN', 'CONTENT_SCREEN_BUDGET_EXCEEDED', 'INSUFFICIENT_BALANCE'].includes(code) || code.endsWith('_LIMIT_EXCEEDED'))) return { code, message: error.message };
   return { code, message: `Campaign work could not finish (${code}). Correct the cause and send again, or cancel the campaign.` };
@@ -2401,15 +2401,23 @@ export function checkedDispatchAttachments(ids: string[], rows: (typeof attachme
  * - Rollback mid-campaign (new `s1:` rows met by old code): old code never produces `s1:` and refuses fail-closed with
  *   CAMPAIGN_SNAPSHOT_CHANGED / CAMPAIGN_CONTENT_UNREPRODUCIBLE without sending wrong content.
  */
+const LEGACY_CONTENT_HASH = /^[0-9a-f]{64}$/;
+const STATIC_S1_CONTENT_HASH = /^s1:[0-9a-f]{64}$/;
+export const isSupportedContentHash = (hash: string | null | undefined): hash is string =>
+  !!hash && (LEGACY_CONTENT_HASH.test(hash) || STATIC_S1_CONTENT_HASH.test(hash));
+const unsupportedHashFormat = () => new ApiError(409, 'CAMPAIGN_HASH_FORMAT_UNSUPPORTED', 'Paused: this campaign uses a newer content hash format that this release cannot verify. Deploy the matching release before resuming.', undefined, true);
 export async function staticContentHash(baseHash: string, email: string): Promise<string> {
   return `s1:${await digest(`${baseHash}:${email}`)}`;
 }
 export async function verifyCampaignContentHash(customer: EmailSnapshot, storedHash: string): Promise<boolean> {
-  if (storedHash.startsWith('s1:')) {
+  if (STATIC_S1_CONTENT_HASH.test(storedHash)) {
     const baseHash = await digest(canonical({ ...customer, to: [] }));
     return (await staticContentHash(baseHash, customer.to[0] ?? '')) === storedHash;
   }
-  return (await digest(canonical(customer))) === storedHash;
+  if (LEGACY_CONTENT_HASH.test(storedHash)) {
+    return (await digest(canonical(customer))) === storedHash;
+  }
+  throw unsupportedHashFormat();
 }
 export async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail: typeof emails.$inferSelect, review: { version: number; draft: CampaignDraft; rendered: { html?: string; text?: string }; contentHash: string | null; recipient: ReviewedRecipient } | null, prefetched?: (typeof attachments.$inferSelect)[]) {
   // Review/recipient data and attachment metadata are immutable; retained email
@@ -2418,6 +2426,7 @@ export async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail:
   // discard their render without writing a different snapshot over the winner.
   const rows = prefetched ? checkedDispatchAttachments(mail.snapshot.attachments, prefetched) : await attachmentRows(runtime.db, a, mail.snapshot.attachments);
   if (!review?.rendered || !review.contentHash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The reviewed recipient is unavailable.');
+  if (!isSupportedContentHash(review.contentHash)) throw unsupportedHashFormat();
   const customer = await campaignMessage(runtime, review.draft, review.recipient, false, rows, review.rendered, true, !review.rendered.html?.includes('{{'), review.version);
   if (!(await verifyCampaignContentHash(customer, review.contentHash))) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_CHANGED', 'The renderer no longer reproduces the reviewed message. No provider attempt was made.');
   // `keyed`: the same customer copy with the footer generated for the placeholder link, as campaign screening keys it.
@@ -2460,6 +2469,7 @@ export async function rebuildCampaignEmail(runtime: Runtime, a: Actor, stub: Ema
   if (!review?.rendered || !review.content_hash) throw new ApiError(410, 'EMAIL_CONTENT_EXPIRED', 'The campaign review this email was rendered from has been retired.');
   if (![1, CAMPAIGN_RENDERER_VERSION].includes(review.renderer_version)) throw new ApiError(409, 'CAMPAIGN_RENDERER_CHANGED', `This email was rendered by campaign renderer v${review.renderer_version}; this release supports v1 and v${CAMPAIGN_RENDERER_VERSION}.`);
   if (!(review.draft.requiredNotice ? stub.requiredNotice : stub.unsubscribeUrl)) throw new ApiError(409, 'EMAIL_CONTENT_UNAVAILABLE', 'This campaign email has no stored content to rebuild.');
+  if (!isSupportedContentHash(review.content_hash)) throw unsupportedHashFormat();
   const snapshot = await campaignMessage(runtime, review.draft, review.recipient, false, rows, review.rendered, true, !review.rendered.html?.includes('{{'), review.renderer_version);
   if (!(await verifyCampaignContentHash(snapshot, review.content_hash))) throw new ApiError(409, 'CAMPAIGN_CONTENT_UNREPRODUCIBLE', 'The renderer no longer reproduces the message that was sent.');
   marketingFooter(snapshot, stub.unsubscribeUrl ?? '', review.draft);
@@ -2798,8 +2808,18 @@ async function finalizeCapture(runtime: Runtime, a: Actor, row: RunRow, jobId: s
     if (!rev?.captured_at || rev.captured_count === null) return;
     const authorized = await originAllowed(runtime, db, { ...a, actorKeyId: a.keyId, campaignId: campaign.id, snapshot: { from: row.reviewDraft!.from } });
     if (!authorized) { await cancelCampaignWork(db, a, campaign, 'ORIGIN_KEY_REVOKED'); return; }
+    // Delta is > 0 when onProgress skipped under pool contention (leaving campaign.total at its initial estimate).
     const delta = Math.max(0, rev.captured_count - campaign.total);
-    await reserveCampaign(runtime, db, held, a, a.keyId, delta);
+    try {
+      await reserveCampaign(runtime, db, held, a, a.keyId, delta);
+    } catch (error) {
+      // A pending/recipient limit refusal after the 202 must fail the campaign immediately (leaving the draft editable)
+      // rather than retrying 6 times over ~81 minutes while the campaign looks stuck in preparing.
+      if (error instanceof ApiError && (error.code === 'CAMPAIGN_PENDING_LIMIT_EXCEEDED' || error.code.endsWith('_LIMIT_EXCEEDED'))) {
+        throw new ApiError(error.status, error.code, error.message, error.field, false);
+      }
+      throw error;
+    }
     if (campaignScreened(runtime, hosted)) {
       const limits = runtime.config.screenLimits, screen = await loadScreen();
       const needed = (rev.captured_count + 10) * screen.chunksFor(limits.campaignBytes);
@@ -2843,7 +2863,10 @@ async function captureStep(runtime: Runtime, a: Actor, row: RunRow, jobId: strin
     if (!authorized) { await cancelCampaignWork(db, a, campaign, 'ORIGIN_KEY_REVOKED'); return null; }
     const decision = await admission(runtime, a.workspaceId, actorJson(a), { stage: 'prepare', locks: 'none', mails: [reviewedMail(draft)] }, undefined, actorAssets(a, draft.attachments));
     const lockedAttachments = admitted(runtime, (await db.execute<{ s: Admitted | Refused }>(sql`SELECT ${decision} AS s`)).rows[0]!.s, a.workspaceId, { retryable: ['SES_SETUP_REQUIRED'] }).assets;
-    // Clear any stale progress left by a previously interrupted capture attempt before starting fresh.
+    // Verify the review is still uncaptured before clearing stale progress from an interrupted attempt (guards against
+    // a stalled run resetting a capture that another attempt already finished).
+    const [revCheck] = (await db.execute<{ captured_at: string | null }>(sql`SELECT captured_at::text FROM sending_campaign_reviews WHERE workspace_id = ${a.workspaceId} AND id = ${row.reviewId}`)).rows;
+    if (!revCheck || revCheck.captured_at !== null) return null;
     if (campaign.prepared > 0) await db.execute(sql`UPDATE sending_campaigns SET prepared = 0, updated_at = now() WHERE workspace_id = ${a.workspaceId} AND id = ${row.id} AND state = 'preparing' AND review_id = ${row.reviewId}`);
     return { lockedAttachments };
   });
@@ -2864,15 +2887,27 @@ async function captureStep(runtime: Runtime, a: Actor, row: RunRow, jobId: strin
         staticStamp,
         onProgress: async progress => {
           // Separate pool connection (runtime.db): checks for cancel/unschedule and publishes visible progress without
-          // mutating sending_campaigns inside the REPEATABLE READ transaction.
-          const [cur] = (await runtime.db.execute<{ state: string; review_id: string | null }>(sql`
-            SELECT state, review_id FROM sending_campaigns WHERE workspace_id = ${a.workspaceId} AND id = ${row.id}`)).rows;
-          if (!cur || cur.state !== 'preparing' || cur.review_id !== row.reviewId) return 'abort';
-          const visiblePrepared = Math.min(progress.prepared, Math.max(0, progress.total - 1));
-          await runtime.db.execute(sql`
-            UPDATE sending_campaigns SET total = ${progress.total}, prepared = ${visiblePrepared}, updated_at = now()
-            WHERE workspace_id = ${a.workspaceId} AND id = ${row.id} AND state = 'preparing' AND review_id = ${row.reviewId}`);
-          return 'continue';
+          // mutating sending_campaigns inside the REPEATABLE READ transaction. Degrades cleanly (skips progress write)
+          // if no spare pool connection is immediately available so a constrained pool never blocks or kills the freeze.
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            const checkAndWrite = async (): Promise<'continue' | 'abort'> => {
+              const [cur] = (await runtime.db.execute<{ state: string; review_id: string | null }>(sql`
+                SELECT state, review_id FROM sending_campaigns WHERE workspace_id = ${a.workspaceId} AND id = ${row.id}`)).rows;
+              if (!cur || cur.state !== 'preparing' || cur.review_id !== row.reviewId) return 'abort';
+              const visiblePrepared = Math.min(progress.prepared, Math.max(0, progress.total - 1));
+              await runtime.db.execute(sql`
+                UPDATE sending_campaigns SET total = ${progress.total}, prepared = ${visiblePrepared}, updated_at = now()
+                WHERE workspace_id = ${a.workspaceId} AND id = ${row.id} AND state = 'preparing' AND review_id = ${row.reviewId}`);
+              return 'continue';
+            };
+            const timeout = new Promise<'continue'>(resolve => { timer = setTimeout(() => resolve('continue'), 1000); });
+            return await Promise.race([checkAndWrite(), timeout]);
+          } catch {
+            return 'continue';
+          } finally {
+            if (timer) clearTimeout(timer);
+          }
         },
       });
       await tx.execute(sql`
@@ -2960,7 +2995,7 @@ async function prepareStep(runtime: Runtime, a: Actor, row: RunRow, jobId: strin
       if (recipient.ordinal !== cursor + 1 || recipient.content_hash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The frozen audience cursor is inconsistent.');
       // If a text attribute holds a placeholder and recipient data could push total attribute bytes past bounded-html's
       // 512 KiB budget, fall back to full per-row validateHtmlUrls so the result is always identical.
-      const rowHtmlValidated = htmlUrlsOnce && (!htmlInfo.hasAttrPlaceholder || templateHtmlBytes + (recipient.recipient_bytes ?? 0) <= 512 * 1024);
+      const rowHtmlValidated = htmlUrlsOnce && (!htmlInfo.hasAttrPlaceholder || templateHtmlBytes + htmlInfo.attrPlaceholderCount * (recipient.recipient_bytes ?? 0) <= 512 * 1024);
       const snapshot = await campaignMessage(runtime, review.draft, recipient.recipient, false, lockedAttachments, review.rendered, true, rowHtmlValidated, row.reviewVersion!);
       const contentHash = await digest(canonical(snapshot));
       marketingFooter(snapshot, unsubscribePlaceholder(runtime), review.draft);
@@ -3143,6 +3178,7 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     const allowed = admitted(runtime, buffer!.decision, a.workspaceId);
     const chunk = await recipientChunk(db, campaign.reviewId!, campaign.expanded, capacity);
     if (!chunk.length || chunk.some((recipient, index) => !recipient.content_hash || recipient.ordinal !== campaign.expanded + index + 1)) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The prepared audience is incomplete.');
+    if (chunk.some(recipient => !isSupportedContentHash(recipient.content_hash))) throw unsupportedHashFormat();
     const delivered = campaign.deliveredOnly ? await deliveredBefore(db, a.workspaceId, campaign.id, chunk.map(r => r.recipient.email)) : null;
     const affordable = allowed.hostedLeft ?? Number.POSITIVE_INFINITY;
     // The processed prefix: every recipient up to the last affordable one that is sent; skipped ones cost nothing.
@@ -3236,7 +3272,10 @@ const runCampaign: JobHandler = async (runtime, payload, job) => {
     }
   } catch (error) {
     if (error instanceof JobDeferred || error instanceof ModuleLoadError) throw error;
-    if (error instanceof ApiError && ['HOSTED_SENDING_PAUSED', 'MARKETING_HELD', 'POSTAL_ADDRESS_REQUIRED', 'REQUIRED_NOTICES_OFF'].includes(error.code)) {
+    if (error instanceof ApiError && error.code === 'AUDIENCE_CAPTURE_BUSY') {
+      throw new JobDeferred(new Date(Date.now() + 5_000).toISOString(), payload, true);
+    }
+    if (error instanceof ApiError && ['HOSTED_SENDING_PAUSED', 'MARKETING_HELD', 'POSTAL_ADDRESS_REQUIRED', 'REQUIRED_NOTICES_OFF', 'CAMPAIGN_HASH_FORMAT_UNSUPPORTED'].includes(error.code)) {
       await runtime.db.execute(pauseCampaign(ref, { code: error.code, message: error.message }));
       return;
     }

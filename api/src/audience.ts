@@ -190,7 +190,7 @@ export async function estimateCampaignAudience(
   cachedEstimate: number | null,
 ): Promise<{ queued: number; definitive?: 'empty' | 'over_limit' }> {
   const conditions = await audienceConditions(db, identity, spec, true);
-  if (!spec.segmentId) {
+  if (!spec.segmentId && !spec.excludeListIds?.length && !spec.excludeSegmentIds?.length) {
     const hasTally = (await db.execute<{ ok: boolean }>(sql`SELECT to_regclass('public.audience_list_counts') IS NOT NULL AS ok`)).rows[0]?.ok;
     if (hasTally) {
       const [tally] = (await db.execute<{ subscribed: number; reachable: number }>(sql`
@@ -212,16 +212,18 @@ export async function estimateCampaignAudience(
         WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)} AND ${reachable(requiredNotice)}
         LIMIT ${SNAPSHOT_MAX_MATCHED + 1}
       ) bounded`)).rows;
-    await db.execute(sql`RELEASE SAVEPOINT audience_estimate`);
     const eligible = row?.eligible ?? 0;
     if (eligible === 0) return { queued: 0, definitive: 'empty' };
     if (eligible > SNAPSHOT_MAX_MATCHED) return { queued: eligible, definitive: 'over_limit' };
     return { queued: eligible };
   } catch (error) {
-    await db.execute(sql`ROLLBACK TO SAVEPOINT audience_estimate`);
-    await db.execute(sql`RELEASE SAVEPOINT audience_estimate`);
     if (!statementTimedOut(error)) throw error;
     return { queued: cachedEstimate !== null && cachedEstimate > 0 ? cachedEstimate : 0 };
+  } finally {
+    // Always roll back the read-only savepoint (even on success) so SET LOCAL statement_timeout=200ms and
+    // enable_nestloop=off NEVER leak into the rest of the launch transaction.
+    await db.execute(sql`ROLLBACK TO SAVEPOINT audience_estimate`);
+    await db.execute(sql`RELEASE SAVEPOINT audience_estimate`);
   }
 }
 
@@ -386,6 +388,7 @@ export async function snapshotCampaignAudience(
       if (await options.onProgress({ total: eligible, captured, prepared: stamp ? captured : 0 }) === 'abort') throw new CaptureAborted();
     }
   }
+  if (large) await db.execute(sql`SET LOCAL work_mem TO DEFAULT`);
   return checkedSnapshot({ matched, eligible, suppressed, unsubscribed, captured, bytes: totalBytes, maxBytes }, requiredNotice);
 }
 export async function isSuppressed(runtime: Runtime, identity: Actor, email: string): Promise<boolean> {

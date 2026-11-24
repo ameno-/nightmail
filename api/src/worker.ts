@@ -293,7 +293,7 @@ export default {
       // Wait in place up to 45 s for a job due soon (paced campaign releases), and schedule at most one follow-up.
       const outcome = await followDueJobs(runtime, () => drainJobs(runtime, 100, concurrency, 10000,pool), delaySeconds => (hooks?env.WEBHOOK_QUEUE:env.WAKE_QUEUE).send({ kind: 'wake' }, { delaySeconds }), 45000,pool);
       core.log('info', { code: 'QUEUE_FOLLOW', outcome });
-    }, concurrency);
+    }, concurrency + 2);
     batch.ackAll();
   },
   async scheduled(controller, env) {
@@ -338,6 +338,6 @@ export default {
       if (runtime.config.multiTenant) try { await (await core.wrapModuleLoad(() => import('./billing/stripe-jobs.js'))).billingMinute(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'BILLING_MINUTE_FAILED' }); }
       // Last, as it can take minutes: retention of the sent-side tables (elected every 15 minutes).
       try { await (await core.wrapModuleLoad(() => import('./maintenance.js'))).retentionTick(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'RETENTION_TICK_FAILED' }); }
-    }, concurrency);
+    }, concurrency + 2);
   },
 } satisfies ExportedHandler<Env>;
