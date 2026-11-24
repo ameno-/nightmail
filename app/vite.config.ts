@@ -9,7 +9,7 @@ import react from '@vitejs/plugin-react'
 import { MAX_RULES, withFileRules } from './asset-headers.ts'
 import { renderLegal } from './legal-markdown.ts'
 import { homeFirstFiles, homeShell } from './home-shell.ts'
-import { pricePages } from './price-pages.ts'
+import { priceFirstFiles, pricePages } from './price-pages.ts'
 import { headerPrefix, publicOrigin as hostedOrigin } from '../api/src/brand.ts'
 
 // @react-email/editor's own "react-email" imports resolve to a slim shim (src/features/campaigns/react-email-shim.ts
@@ -36,9 +36,10 @@ const fileHeaders = (): Plugin => {
         first.add(name)
         if (file.type === 'chunk') for (const dependency of [...file.imports, ...file.viteMetadata?.importedCss ?? []]) add(dependency)
       }
-      // The dashboard's entry, then what the homepage's first screen loads (home-shell.ts).
+      // The dashboard's entry, then what the homepage's first screen loads (home-shell.ts), then the price pages' (price-pages.ts).
       for (const file of Object.values(bundle)) if (file.type === 'chunk' && file.isEntry && file.name === 'index') add(file.fileName)
       for (const file of homeFirstFiles(Object.keys(bundle))) add(file)
+      for (const file of priceFirstFiles(Object.keys(bundle))) add(file)
       const fonts = readdirSync(resolve(publicDir, 'fonts')).sort().map(name => `fonts/${name}`)
       const { headers, uncached } = withFileRules(readFileSync(resolve(publicDir, '_headers'), 'utf8'), [...first, ...fonts, ...Object.keys(bundle).sort()])
       writeFileSync(resolve(outDir, '_headers'), headers)

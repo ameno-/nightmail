@@ -1,42 +1,52 @@
-// The homepage's first screen (home.html, home-shell.ts) before the app: it starts the app's code once the first
-// picture is in and the page is idle (or at once on a touch, key or scroll, a press of the button, or after 8 s), so
-// nothing else takes the picture's bandwidth; it holds a press on Get started for the page to act on; and it gives
-// way at once to anything the app shows at "/" other than the homepage. The homepage itself takes over from it
-// (features/home/factory-home.tsx). Its script tag names the app's files: data-css, data-preload, data-entry.
+// A public page's first screen before the app (home.html, home-shell.ts; the price pages, price-pages.ts): it starts the
+// app's code at a touch, key or scroll, a press of a button, or after 8 s, and on the homepage once the first picture is
+// in and the page is idle, so nothing else takes the picture's bandwidth; it holds a press for the page to act on; and
+// it gives way at once to anything the app shows other than the page itself. The page itself takes over from it
+// (features/home/factory-home.tsx, features/pricing/index.tsx). Its script tag names the app's files (data-css,
+// data-preload, data-entry) and the page's: data-shell, the first screen's id (home-shell); data-wait, the first
+// picture (.fac-poster), or none to wait for the reader; data-keep, what the app may show over it in the meantime
+// (.boot-loader, .fac-page); data-press, the buttons whose press is held (the homepage's Get started, button.fac-cta,
+// shown pressed at once). The app's stylesheet goes in before the page's own inlined one (style[data-shell-css]) where
+// there is one, so it can't restyle the painted page while the app loads. With data-plain, the first screen shows only
+// its own address: one with a query (other than utm_*) or the hash data-plain names is the app's at once.
 ;(() => {
-  const me = document.currentScript, shell = document.getElementById('home-shell'), root = document.getElementById('root')
+  const me = document.currentScript, set = me.dataset, root = document.getElementById('root')
+  const shell = document.getElementById(set.shell || 'home-shell'), keep = set.keep || '.boot-loader, .fac-page'
   let started = false
-  const add = (tag, props) => document.head.appendChild(Object.assign(document.createElement(tag), props))
+  const add = (tag, props, before = null) => document.head.insertBefore(Object.assign(document.createElement(tag), props), before)
   const start = () => {
     if (started) return
     started = true
     // The stylesheet and the modules download side by side; the entry runs once the stylesheet is in.
-    const css = add('link', { rel: 'stylesheet', href: me.dataset.css, crossOrigin: '' })
-    for (const href of (me.dataset.preload || '').split(' ').filter(Boolean)) add('link', { rel: 'modulepreload', href, crossOrigin: '' })
-    const entry = () => add('script', { type: 'module', src: me.dataset.entry, crossOrigin: '' })
+    const css = add('link', { rel: 'stylesheet', href: set.css, crossOrigin: '' }, document.querySelector('style[data-shell-css]'))
+    for (const href of (set.preload || '').split(' ').filter(Boolean)) add('link', { rel: 'modulepreload', href, crossOrigin: '' })
+    const entry = () => add('script', { type: 'module', src: set.entry, crossOrigin: '' })
     css.addEventListener('load', entry, { once: true }); css.addEventListener('error', entry, { once: true })
   }
-  if (!shell || !root || document.documentElement.dataset.shell === 'off') { if (shell) shell.remove(); start(); return }
+  const asked = set.plain !== undefined && ([...new URLSearchParams(location.search).keys()].some(name => !name.startsWith('utm_')) || (!!set.plain && location.hash === set.plain))
+  if (!shell || !root || asked || document.documentElement.dataset.shell === 'off') { if (shell) shell.remove(); start(); return }
 
   shell.addEventListener('click', event => {
-    const button = event.target instanceof Element && event.target.closest('button.fac-cta')
+    const button = event.target instanceof Element && event.target.closest(set.press || 'button.fac-cta')
     if (!button) return
-    window.__nightmailHomeStart = true
-    button.setAttribute('aria-busy', 'true'); button.dataset.busy = ''
+    window.__nightmailShellPress = button
+    if (!set.press) { window.__nightmailHomeStart = true; button.setAttribute('aria-busy', 'true'); button.dataset.busy = '' }
     start()
   })
   for (const type of ['pointerdown', 'keydown', 'wheel', 'touchstart']) addEventListener(type, start, { once: true, passive: true })
   const later = () => { if ('requestIdleCallback' in window) requestIdleCallback(start, { timeout: 1000 }); else setTimeout(start, 200) }
-  const poster = [...shell.querySelectorAll('.fac-poster')].find(img => img.getClientRects().length)
-  if (!poster || poster.complete) later()
-  else { poster.addEventListener('load', later, { once: true }); poster.addEventListener('error', later, { once: true }) }
+  if (set.wait !== 'none') {
+    const picture = [...shell.querySelectorAll(set.wait || '.fac-poster')].find(img => img.getClientRects().length)
+    if (!picture || picture.complete) later()
+    else { picture.addEventListener('load', later, { once: true }); picture.addEventListener('error', later, { once: true }) }
+  }
   setTimeout(start, 8000)
 
-  // Anything but the homepage (and the moment's spinner before it) replaces the first screen at once.
+  // Anything but the page (and the moment's spinner before it) replaces the first screen at once.
   new MutationObserver((_, observer) => {
     const first = root.firstElementChild
     if (!shell.isConnected) return observer.disconnect()
-    if (!first || first.matches('.boot-loader, .fac-page')) return
+    if (!first || first.matches(keep)) return
     shell.remove(); observer.disconnect()
   }).observe(root, { childList: true })
 })()
