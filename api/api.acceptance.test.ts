@@ -35233,8 +35233,9 @@ test('Audit trail: sensitive actions each write one redacted row', async t => {
     assert.ok(trail.length >= 18, `${trail.length} rows`);
     for (const value of secrets) assert.ok(trail.every(summary => !summary.includes(value)), `A summary repeats ${value.slice(0, 12)}…`);
   });
+});
 
-  test('bounded inbound page sizes: address caps, byte-bounded pagination, routing diff bounds and unrouted claim projection', async t => {
+test('bounded inbound page sizes: address caps, byte-bounded pagination, routing diff bounds and unrouted claim projection', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, fetch }) => {
       const { S3Client, GetObjectCommand } = await import('@aws-sdk/client-s3');
       const { SESv2Client, GetAccountCommand, GetEmailIdentityCommand, SendEmailCommand } = await import('@aws-sdk/client-sesv2');
@@ -35396,7 +35397,6 @@ test('Audit trail: sensitive actions each write one redacted row', async t => {
       assert.equal(claimedMsgs.data.length, 3);
       assert.equal((await db.query('SELECT count(*)::int AS n FROM mail_unrouted WHERE workspace_id=$1 AND address=$2', [f.scope, claimTarget])).rows[0].n, 0);
     });
-  });
 });
 
 // Dashboard analytics (src/analytics.ts, docs/analytics.md): the ingest runs in-process here with an in-memory bucket and
