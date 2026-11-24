@@ -1,0 +1,854 @@
+{
+  "version": 1,
+  "modelId": "campaign-lifecycle",
+  "cases": [
+    {
+      "name": "smoke-draft-to-done",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "small"
+        },
+        {
+          "op": "PreviewAudience"
+        },
+        {
+          "op": "EditDraft",
+          "subject": "v2"
+        },
+        {
+          "op": "CheckPlannerRate"
+        },
+        {
+          "op": "SendNow"
+        },
+        {
+          "op": "Settle"
+        },
+        {
+          "op": "DeliverFeedback",
+          "kind": "delivery",
+          "count": 6
+        },
+        {
+          "op": "GetCampaign"
+        },
+        {
+          "op": "Archive",
+          "archived": true
+        },
+        {
+          "op": "Archive",
+          "archived": false
+        }
+      ],
+      "expected": {
+        "outcome": "pass",
+        "control": true
+      },
+      "note": "Control: full draft -> review -> edit -> launch -> prepare -> sending -> done -> feedback -> archive lifecycle"
+    },
+    {
+      "name": "canary-double-send",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "small"
+        },
+        {
+          "op": "SendNow"
+        },
+        {
+          "op": "Settle"
+        }
+      ],
+      "bug": "canary_double_send",
+      "expected": {
+        "outcome": "fail",
+        "operator": "lifecycle.once-per-recipient/rcpt/0",
+        "verdict": "violated",
+        "canary": true
+      },
+      "note": "Canary: planted duplicate recipient send violates temporal property lifecycle.once-per-recipient"
+    },
+    {
+      "name": "scheduled-reschedule-unschedule-relaunch",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "small"
+        },
+        {
+          "op": "Schedule",
+          "delaySec": 300
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "Reschedule",
+          "delaySec": 600
+        },
+        {
+          "op": "Reschedule",
+          "delaySec": 120
+        },
+        {
+          "op": "EditDraft",
+          "subject": "v2"
+        },
+        {
+          "op": "Unschedule"
+        },
+        {
+          "op": "EditDraft",
+          "subject": "v2"
+        },
+        {
+          "op": "Schedule",
+          "delaySec": 60
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "Tick",
+          "seconds": 60
+        },
+        {
+          "op": "Settle"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Schedule -> prepare -> reschedule (later & earlier) -> edit refused -> unschedule -> edit allowed -> reschedule -> tick -> done"
+    },
+    {
+      "name": "pause-resume-cancel-guards-across-states",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "small"
+        },
+        {
+          "op": "Pause"
+        },
+        {
+          "op": "Cancel"
+        },
+        {
+          "op": "SendNow"
+        },
+        {
+          "op": "Pause"
+        },
+        {
+          "op": "EditDraft",
+          "subject": "v2"
+        },
+        {
+          "op": "SendNow"
+        },
+        {
+          "op": "Archive",
+          "archived": true
+        },
+        {
+          "op": "Resume"
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "Pause"
+        },
+        {
+          "op": "Dispatch",
+          "limit": 2
+        },
+        {
+          "op": "Cancel"
+        },
+        {
+          "op": "Dispatch"
+        },
+        {
+          "op": "GetCampaign"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Pause/Resume/Cancel responsiveness in preparing and sending, plus edit/second-launch/archive refusal guards and zero sends after cancel"
+    },
+    {
+      "name": "pre-release-unsub-bounce-delete-win",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "small"
+        },
+        {
+          "op": "SendNow"
+        },
+        {
+          "op": "UnsubscribeContact",
+          "index": 1
+        },
+        {
+          "op": "BounceSuppressContact",
+          "index": 2
+        },
+        {
+          "op": "DeleteContact",
+          "index": 3
+        },
+        {
+          "op": "Settle"
+        },
+        {
+          "op": "GetCampaign"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Invariant 3: unsubscribe, bounce-suppression, and contact delete landing after launch/freeze but before release always prevent sending"
+    },
+    {
+      "name": "validate-before-any-send-bad-placeholder",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "badRecipient"
+        },
+        {
+          "op": "SendNow"
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "GetCampaign"
+        },
+        {
+          "op": "EditDraft",
+          "subject": "v2"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Invariant 2: missing placeholder fails in preparing with 0 recipients sent and leaves campaign editable back to draft"
+    },
+    {
+      "name": "list-probe-clean-wait-and-release",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "probe"
+        },
+        {
+          "op": "SendNow"
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "Dispatch",
+          "limit": 100
+        },
+        {
+          "op": "Tick",
+          "seconds": 10
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "GetCampaign"
+        },
+        {
+          "op": "Tick",
+          "seconds": 300
+        },
+        {
+          "op": "CrashJobAndRedeliver"
+        },
+        {
+          "op": "Pause"
+        },
+        {
+          "op": "Resume"
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "Tick",
+          "seconds": 300
+        },
+        {
+          "op": "Tick",
+          "seconds": 10
+        },
+        {
+          "op": "DeliverFeedback",
+          "kind": "delivery",
+          "count": 100
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "Settle"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Invariant 5: probe releases 100, waits 10 min on list_probe, survives job crash/redelivery + pause/resume without restarting or skipping, then clears and releases remaining 20"
+    },
+    {
+      "name": "list-probe-quarantine-bounces-and-delivered-only-resume",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "probe"
+        },
+        {
+          "op": "SendNow"
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "Dispatch",
+          "limit": 100
+        },
+        {
+          "op": "Tick",
+          "seconds": 10
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "DeliverFeedback",
+          "kind": "bounce",
+          "count": 4
+        },
+        {
+          "op": "DeliverFeedback",
+          "kind": "delivery",
+          "count": 96
+        },
+        {
+          "op": "Tick",
+          "seconds": 605
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "GetCampaign"
+        },
+        {
+          "op": "Resume"
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "GetCampaign"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Invariant 5: >3% hard bounces on list probe quarantines (paused + LIST_QUALITY); resume clears probe, restricts rest to deliveredOnly, and accounts for skipped recipients as canceled"
+    },
+    {
+      "name": "list-probe-quarantine-complaints",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "probe"
+        },
+        {
+          "op": "SendNow"
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "Dispatch",
+          "limit": 100
+        },
+        {
+          "op": "Tick",
+          "seconds": 10
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "DeliverFeedback",
+          "kind": "complaint",
+          "count": 2
+        },
+        {
+          "op": "Tick",
+          "seconds": 605
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "GetCampaign"
+        },
+        {
+          "op": "Cancel"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Invariant 5: >=2 complaints on list probe quarantines (paused + LIST_QUALITY); cancel settles cleanly"
+    },
+    {
+      "name": "list-probe-skipped-clean-sender-under-10k",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "probeCleanSkip"
+        },
+        {
+          "op": "SendNow"
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "Dispatch",
+          "limit": 200
+        },
+        {
+          "op": "GetCampaign"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Good-standing sender on a clean previously-delivered list <= 10,000 skips list probe and releases all 120 without waiting"
+    },
+    {
+      "name": "auto-pause-bounce-rate-high",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "autoPause"
+        },
+        {
+          "op": "SendNow",
+          "rateShare": 0.1
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "Dispatch",
+          "limit": 1000
+        },
+        {
+          "op": "Tick",
+          "seconds": 60
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "Dispatch",
+          "limit": 1000
+        },
+        {
+          "op": "DeliverFeedback",
+          "kind": "bounce",
+          "count": 25
+        },
+        {
+          "op": "Tick",
+          "seconds": 1805
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "GetCampaign"
+        },
+        {
+          "op": "Cancel"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Automatic pause on bounces (>2% over >=1,000 accepted) triggers BOUNCE_RATE_HIGH after 30-min health check"
+    },
+    {
+      "name": "pacing-window-and-24h-rollover",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "paced"
+        },
+        {
+          "op": "CheckPlannerRate"
+        },
+        {
+          "op": "SendNow"
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "Dispatch"
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "GetCampaign"
+        },
+        {
+          "op": "Tick",
+          "seconds": 86405
+        },
+        {
+          "op": "Settle"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Pacing window (4/day on 12 recipients) holds on pacing_window, then rolls over after 24h and finishes all 12"
+    },
+    {
+      "name": "rate-share-and-exempt-view-parity-mig422",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "exempt"
+        },
+        {
+          "op": "CheckPlannerRate"
+        },
+        {
+          "op": "SendNow",
+          "rateShare": 0.05
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "Tick",
+          "seconds": 10
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "Settle"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Invariant 7: exempt workspace plans at full pooled rate (40/s vs shared 10/s, migration 422) and rateShare=0.05 enforces release pacing"
+    },
+    {
+      "name": "shared-rate-share-enforcement",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "paced"
+        },
+        {
+          "op": "CheckPlannerRate"
+        },
+        {
+          "op": "SendNow",
+          "rateShare": 0.05
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "Tick",
+          "seconds": 10
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "Settle"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Invariant 7: non-exempt shared workspace plans at 40/4 = 10/s and rateShare=0.05 (0.5/s) bounds releases across windows"
+    },
+    {
+      "name": "quota-holds-ses-and-hosted-daily",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "small"
+        },
+        {
+          "op": "SetQuota",
+          "max24": 100,
+          "sent24": 98,
+          "customer24": 0
+        },
+        {
+          "op": "SendNow"
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "GetCampaign"
+        },
+        {
+          "op": "SetQuota",
+          "max24": 100,
+          "sent24": 0,
+          "customer24": 99
+        },
+        {
+          "op": "Tick",
+          "seconds": 60
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "GetCampaign"
+        },
+        {
+          "op": "Settle"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "SES daily quota and hosted customer share holds expose explicit waiting reasons and recover cleanly on Settle"
+    },
+    {
+      "name": "origin-key-revoked-mid-campaign",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "small"
+        },
+        {
+          "op": "SendNow"
+        },
+        {
+          "op": "RevokeOriginKey"
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "GetCampaign"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Revoking origin API key mid-campaign cancels with ORIGIN_KEY_REVOKED and exact canceled accounting"
+    },
+    {
+      "name": "required-notices-turned-off-and-resumed",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "requiredNotice"
+        },
+        {
+          "op": "UnsubscribeContact",
+          "index": 1
+        },
+        {
+          "op": "BounceSuppressContact",
+          "index": 2
+        },
+        {
+          "op": "DeleteContact",
+          "index": 3
+        },
+        {
+          "op": "SendNow",
+          "confirmNotice": true
+        },
+        {
+          "op": "SetRequiredNotices",
+          "enabled": false
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "GetCampaign"
+        },
+        {
+          "op": "Resume"
+        },
+        {
+          "op": "SetRequiredNotices",
+          "enabled": true
+        },
+        {
+          "op": "Resume"
+        },
+        {
+          "op": "Settle"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Required notices turned off mid-campaign pauses (REQUIRED_NOTICES_OFF), refuses resume until re-enabled, skips only unsubscribe while honoring bounce-suppression & delete"
+    },
+    {
+      "name": "ses-mode-changed-fails-cleanly",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "small"
+        },
+        {
+          "op": "SendNow"
+        },
+        {
+          "op": "FlipSesMode"
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "GetCampaign"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Flipping SES mode mid-campaign transitions cleanly to failed (SES_MODE_CHANGED), never stuck"
+    },
+    {
+      "name": "db-readonly-fault-crash-and-deploy-mid-campaign",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "small"
+        },
+        {
+          "op": "SendNow"
+        },
+        {
+          "op": "SetDbReadOnly",
+          "on": true
+        },
+        {
+          "op": "Pause"
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "SetDbReadOnly",
+          "on": false
+        },
+        {
+          "op": "CrashJobAndRedeliver"
+        },
+        {
+          "op": "DeployMidCampaign"
+        },
+        {
+          "op": "Settle"
+        },
+        {
+          "op": "GetCampaign"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "DB read-only outage, job lease crash/redelivery, and mid-campaign deploy recover cleanly with exact accounting and zero duplicates"
+    },
+    {
+      "name": "known-bug-lc-01-delivered-only-skip-all-stays-sending",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "probe"
+        },
+        {
+          "op": "SendNow"
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "Dispatch",
+          "limit": 100
+        },
+        {
+          "op": "Tick",
+          "seconds": 10
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "DeliverFeedback",
+          "kind": "bounce",
+          "count": 4
+        },
+        {
+          "op": "DeliverFeedback",
+          "kind": "delivery",
+          "count": 96
+        },
+        {
+          "op": "Tick",
+          "seconds": 605
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "Resume"
+        },
+        {
+          "op": "Settle"
+        }
+      ],
+      "expected": {
+        "outcome": "fail",
+        "operator": "reply:Settle:satisfies:settle-not-stuck",
+        "verdict": "replyMismatch",
+        "canary": true
+      },
+      "note": "Known product bug BUG-LC-01: resuming a quarantined probe campaign where deliveredOnly skips all remaining recipients advances expanded=total without calling finishCampaigns, leaving state='sending' with waiting=null until interrupted-attempt sweep"
+    }
+  ]
+}

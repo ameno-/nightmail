@@ -6,6 +6,7 @@ import { queries } from '../../data/queries'
 import { campaignEditable, errorText, type Campaign, type Newsletter, type NewsletterReaders } from '../../data/types'
 import { Button, DataTable, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, SkeletonText, StatusBadge, type Column } from '../../components/ui'
 import { date, number, percent } from '../../lib/format'
+import { useCursorPagination } from '../../lib/pagination'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { AdminOnlyPage } from '../settings/admin-only'
 import { CampaignSenderInput, SenderLines } from '../campaigns/CampaignSenderInput'
@@ -111,8 +112,8 @@ function NewNewsletter() {
   const api = useApi(), navigate = useNavigate(), remember = useRememberNewsletter(), nameId = useId()
   const [name, setName] = useState(''), [sender, setSender] = useState({ name: '', email: '' })
   const [pending, setPending] = useState(false), [errors, setErrors] = useState<{ name?: string; from?: string }>({})
-  // The workspace's domains: verified ones complete the address as it is typed, and decide where creating leads.
-  const domains = useApiQuery(['domains', 'newsletter-sender'], (client, signal) => client.domains.list({ pageSize: 100, refresh: false }, signal))
+  // First page of domains (API caps GET /v1/domains at 10) for autocomplete; submit walks remaining cursors if needed.
+  const domains = useApiQuery(['domains', 'newsletter-sender'], (client, signal) => client.domains.list({ pageSize: 10, refresh: false }, signal))
   const verified = (domains.data?.items ?? []).filter(domain => domain.status === 'verified').map(domain => domain.name)
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -123,12 +124,25 @@ function NewNewsletter() {
     try {
       const created = await api.newsletters.create({ name: name.trim(), from: sender.email, fromName: sender.name || name.trim() })
       remember({ id: created.id, name: created.name })
-      // Sending needs the address's domain verified: when it isn't, its setup comes next, and Back returns here.
+      // Sending needs the address's domain verified: walk domain pages (10/page, refresh=false) until matched or exhausted
+      // so workspaces with >10 domains never treat their 11th+ verified domain as unverified.
       const domain = sender.email.split('@')[1]!.toLowerCase(), back = newsletterPath(created.id)
-      const all = domains.data?.items ?? (await api.domains.list({ pageSize: 100, refresh: false }).catch(() => ({ items: [] }))).items
       const covers = (parent: string) => domain === parent || domain.endsWith(`.${parent}`)
-      const known = all.find(item => item.name === domain)
-      if (all.some(item => item.status === 'verified' && covers(item.name))) navigate(back, { replace: true })
+      let items = domains.data?.items ?? []
+      let cursor: string | null | undefined = domains.data ? domains.data.nextCursor : undefined
+      let verifiedMatch = items.some(item => item.status === 'verified' && covers(item.name))
+      let known = items.find(item => item.name === domain)
+      if (!verifiedMatch && (!domains.data || cursor)) {
+        for (let pages = domains.data ? 1 : 0; pages < 50; pages++) {
+          const page = await api.domains.list({ pageSize: 10, cursor: cursor ?? undefined, refresh: false }).catch(() => null)
+          if (!page) break
+          if (page.items.some(item => item.status === 'verified' && covers(item.name))) { verifiedMatch = true; break }
+          known ??= page.items.find(item => item.name === domain)
+          cursor = page.nextCursor
+          if (!cursor) break
+        }
+      }
+      if (verifiedMatch) navigate(back, { replace: true })
       else navigate(known ? `/domains/${encodeURIComponent(known.id)}?then=${encodeURIComponent(back)}` : `/domains?add=${encodeURIComponent(domain)}&then=${encodeURIComponent(back)}`, { replace: true })
     } catch (cause) { setErrors({ from: errorText(cause) }); setPending(false) }
   }
@@ -145,13 +159,18 @@ export function NewslettersPage() {
   return useWorkspaceAccess().canAdminister ? <NewslettersList /> : <AdminOnlyPage title="Newsletters" />
 }
 function NewslettersList() {
-  const query = useApiDef(queries.newsletters())
+  const pagination = useCursorPagination()
+  const query = useApiDef(queries.newsletters(pagination.cursor), { keepPrevious: true })
+  const next = query.data?.nextCursor ?? null
   return <div className="stack">
     <PageHeader title="Newsletters" />
-    {query.isError ? <ErrorState error={query.error} onRetry={() => void query.refetch()} /> : <DataTable className="newsletters-table" loading={query.isPending} skeletonRows={4} rows={query.data ?? []} rowKey={row => row.id} rowHref={row => newsletterPath(row.id)}
-      empty={<EmptyState title="No newsletters yet" />} columns={[
-        { ...newsletterColumns[0]!, render: row => row.name },
-        { ...newsletterColumns[1]!, render: row => <SenderLines name={row.fromName ?? ''} address={row.from} />, cardRender: row => <PrivateAddress value={row.from} /> },
-      ]} />}
+    {query.isError ? <ErrorState error={query.error} onRetry={() => void query.refetch()} /> : <>
+      <DataTable className="newsletters-table" loading={query.isPending} skeletonRows={4} rows={query.data ?? []} rowKey={row => row.id} rowHref={row => newsletterPath(row.id)}
+        empty={<EmptyState title="No newsletters yet" />} columns={[
+          { ...newsletterColumns[0]!, render: row => row.name },
+          { ...newsletterColumns[1]!, render: row => <SenderLines name={row.fromName ?? ''} address={row.from} />, cardRender: row => <PrivateAddress value={row.from} /> },
+        ]} />
+      {(pagination.page > 1 || next) && <Pagination page={pagination.page} pageSize={100} nextCursor={next} onPageChange={page => pagination.onPageChange(page, next)} />}
+    </>}
   </div>
 }

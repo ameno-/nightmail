@@ -2,7 +2,9 @@ import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'rea
 import { useSearchParams } from 'react-router'
 import { Button, Checkbox, ConfirmDialog, CopyButton, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, KeyValues, PageHeader, Pagination, StatusBadge, Tabs, useToast, SecretDialog } from '../../components/ui'
 import { useApiMutation, useApiDef, useWorkspaceAccess } from '../../data/context'
+import { invalidate } from '../../data/invalidation'
 import { queries } from '../../data/queries'
+import { useResolvedAddresses } from '../../data/addresses'
 import type { Agent, AgentTokenSummary, ApiKey, AppPassword, ApprovalTie } from '../../data/types'
 import { date, shortDateTime } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
@@ -64,11 +66,11 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
   const agents = useApiDef(queries.agents(showRevoked), { keepPrevious: true })
   const passwords = useApiDef(queries.appPasswords())
   const addresses = useApiDef(queries.inboundAddressOptions())
-  const revokeKey = useApiMutation((api, id: string) => api.keys.revoke(id), 'API key revoked')
+  const revokeKey = useApiMutation((api, id: string) => api.keys.revoke(id), 'API key revoked', false, invalidate.apiKeys)
   // Your own agent loses its sign-in and every token; another member's loses the tokens it made here.
-  const revokeAgent = useApiMutation(async (api, id: string) => { const result = await api.credentials.revokeAgent(id); toast(result.scope === 'agent' ? 'Agent revoked' : 'Agent tokens revoked', 'success') })
-  const revokeToken = useApiMutation((api, id: string) => api.credentials.revokeAgentToken(id), 'Agent token revoked')
-  const revokePassword = useApiMutation((api, password: AppPassword) => api.credentials.revokeAppPassword(password.inboxId, password.id), 'App password revoked')
+  const revokeAgent = useApiMutation(async (api, id: string) => { const result = await api.credentials.revokeAgent(id); toast(result.scope === 'agent' ? 'Agent revoked' : 'Agent tokens revoked', 'success') }, undefined, false, invalidate.agents)
+  const revokeToken = useApiMutation((api, id: string) => api.credentials.revokeAgentToken(id), 'Agent token revoked', false, invalidate.agents)
+  const revokePassword = useApiMutation((api, password: AppPassword) => api.credentials.revokeAppPassword(password.inboxId, password.id), 'App password revoked', false, invalidate.appPasswords)
   // /api-keys?create=send&domain=acme.com opens Create key on an API key, filled in (Overview's setup step links here),
   // and /api-keys?create=smtp on an SMTP login (the Keys guide links there);
   // the parameters then leave the URL, so Back and reload don't open it again.
@@ -94,7 +96,9 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
   // goes back there rather than to the page's top.
   const opener = useRef<HTMLElement | null>(null)
   const view = (row: Row) => { const focused = document.activeElement; opener.current = focused instanceof HTMLElement && focused !== document.body ? focused : null; setViewing(row) }
-  const address = (id: string) => addresses.data?.find(item => item.id === id)?.address ?? id
+  const referencedIds = (keys.data ?? []).flatMap(key => key.access.type === 'addresses' ? key.access.addressIds ?? [] : [])
+  const resolvedAddresses = useResolvedAddresses(referencedIds, addresses.data ?? [], Boolean(keys.data && addresses.data), addresses.data?.nextCursor ?? null)
+  const address = (id: string) => resolvedAddresses.byId.get(id)?.address ?? addresses.data?.find(item => item.id === id)?.address ?? id
   // Edit opens once what its form lists has loaded (a workspace key's domains, an inbox key's inboxes), so they don't
   // push its fields down as they arrive.
   const editDomains = useDomainOptions(editing?.access.type === 'workspace')

@@ -10,11 +10,13 @@ import { Decoration, EditorView, type DecorationSet } from '@codemirror/view'
 import { HighlightStyle, syntaxHighlighting, syntaxTree } from '@codemirror/language'
 import { tags } from '@lezer/highlight'
 import { ArrowDown, ArrowUp, ChevronDown, ChevronUp, X } from 'lucide-react'
-import { Button, Checkbox, ConfirmDialog, Dialog, DropdownMenu, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, Select, Sheet, Skeleton, Textarea, useToast, type MenuItem } from '../../components/ui'
+import { Button, Checkbox, ConfirmDialog, Dialog, DropdownMenu, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, SearchField, Select, Sheet, Skeleton, Textarea, useToast, type MenuItem } from '../../components/ui'
+import { mergeAddresses, useAddressOptions, useResolvedAddresses } from '../../data/addresses'
+import { useDebounced } from '../../lib/pagination'
 import { isAbortError, request } from '../../data/live'
 import { ApiError, errorText } from '../../data/types'
 import { useApiDef, useApiQuery, useRequestScope, useWorkspaceAccess } from '../../data/context'
-import { staleAfterWrite } from '../../data/invalidation'
+import { invalidate, invalidateResources } from '../../data/invalidation'
 import { queries } from '../../data/queries'
 import { useLeaveGuard } from '../../lib/leave-guard'
 import { RITUALS_PER_ADDRESS } from '../../../../api/src/ritual-schema'
@@ -251,7 +253,8 @@ export function RulePage() {
   const route = useParams(), wanted = route.key ?? (route.recipe === 'code' ? 'new' : '')
   const routeLocation = useLocation()
   const preset = useSearchParams()[0].get('address')
-  const addresses = useApiDef(queries.inboundAddressOptions(), { enabled: canAdminister })
+  const [addressSearch, setAddressSearch] = useState('')
+  const addresses = useAddressOptions({ enabled: canAdminister, search: useDebounced(addressSearch) })
   // The Receiving page's first read, usually cached: only its endpoints are used here, to name what the rule did.
   const overview = useOverview(firstOverview, false, canAdminister)
   const recent = useApiQuery(['rule-recent'], (_api, signal) => request<{ data: Received[] }>('/v1/logs?direction=received&limit=24', { signal }).then(r => r.data), { enabled: canAdminister })
@@ -422,7 +425,7 @@ export function RulePage() {
     toast('Your edits now sit on version ' + s.version + '. Save to apply.', 'success')
   }
 
-  const refresh = () => void client.invalidateQueries({ predicate: query => staleAfterWrite(query.queryKey, false) }).catch(() => {})
+  const refresh = () => void invalidateResources(client, invalidate.rules).catch(() => {})
   /** The checker's problems, for the editor's own marks. It reports where a problem starts; the squiggle runs under the
    *  whole name there. */
   async function lint(text: string): Promise<Problem[]> {
@@ -479,7 +482,10 @@ export function RulePage() {
     return () => window.removeEventListener('keydown', onKey, true)
   }, [])
 
-  const targets = (addresses.data ?? []).flatMap(a => [{ label: a.address, value: a.id }, ...a.aliases.map(alias => ({ label: alias, value: alias }))])
+  const attachedTargetIds = [...atts.map(b => b.target), ...(preset ? [preset] : [])]
+  const resolvedTargets = useResolvedAddresses(attachedTargetIds, addresses.items, canAdminister)
+  const knownAddresses = mergeAddresses(resolvedTargets.items, addresses.items)
+  const targets = knownAddresses.flatMap(a => [{ label: a.address, value: a.id }, ...a.aliases.map(alias => ({ label: alias, value: alias }))])
   const targetName = (value: string) => targets.find(t => t.value === value)?.label ?? value
   const mine = atts.filter(b => b.rule === id).map(b => targetName(b.target))
   const endpoints = overview.data?.endpoints ?? []
@@ -522,8 +528,8 @@ export function RulePage() {
   if (!canAdminister) return <div className="stack inbound-stack"><PageHeader title={title} backTo={LIST} /><EmptyState title={concepts.rules.adminOnly} /></div>
   if (loadError) return <div className="stack inbound-stack"><PageHeader title={title} backTo={LIST} /><ErrorState error={loadError} onRetry={() => location.reload()} /></div>
   if (missing) return <div className="stack inbound-stack"><PageHeader title={title} backTo={LIST} /><EmptyState title={'No rule named ' + wanted} action={<Link className="ui-button ui-button--secondary ui-button--md" to={LIST}>Rules</Link>} /></div>
-  const ready = !!saved && !!addresses.data && recent.isFetched
-  const builder = split && opened ? splitBuilderPath(opened, atts.filter(b => b.rule === opened).map(b => b.target), addresses.data) : null
+  const ready = !!saved && !addresses.isPending && !resolvedTargets.pending && recent.isFetched
+  const builder = split && opened ? splitBuilderPath(opened, atts.filter(b => b.rule === opened).map(b => b.target), knownAddresses) : null
   const items: MenuItem[] = [
     ...(builder ? [{ label: openBuilder, onSelect: () => navigate(builder) }] : []),
     { label: enabled ? 'Turn off' : 'Turn on', onSelect: () => setEnabled(!enabled) },
@@ -591,7 +597,11 @@ export function RulePage() {
       </div>
     </div>
     <Dialog open={runsOpen && ready} onOpenChange={setRunsOpen} title="Runs on" footer={<Button onClick={() => setRunsOpen(false)}>Done</Button>}>
-      <RunsOn id={id} name={key || 'this rule'} atts={atts} change={setAtts} targets={targets} />
+      <div className="stack">
+        {(addresses.hasMore || Boolean(addressSearch)) && <SearchField aria-label="Search addresses" placeholder="Search addresses" value={addressSearch} onChange={event => setAddressSearch(event.target.value)} />}
+        <RunsOn id={id} name={key || 'this rule'} atts={atts} change={setAtts} targets={targets} />
+        {addresses.hasMore && <Button variant="ghost" size="sm" loading={addresses.loadingMore} onClick={addresses.loadMore}>Load more addresses</Button>}
+      </div>
     </Dialog>
     {/* Shared by every rule, not just this one. A list is one per line (vip: an address, @partner.example); AI decisions
         read mail only at the hosts listed, and give their default answer everywhere else. */}

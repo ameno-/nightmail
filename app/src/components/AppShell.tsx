@@ -2,7 +2,7 @@ import { Component, Suspense, useCallback, useEffect, useLayoutEffect, useRef, u
 import { Link, NavLink, Outlet, useLocation, useNavigate, useNavigationType, type NavLinkProps } from 'react-router'
 import { BookOpen, Ellipsis, Globe, Inbox, KeyRound, LayoutGrid, LifeBuoy, Lock, Newspaper, Plug, ScrollText, Send, Settings, ShieldCheck, Users } from 'lucide-react'
 import { useRegion, useSession, useWorkspaceAccess } from '../data/context'
-import { sidebarPaths, usePrefetchQueries, usePrefetchRoute, useRouteIntent } from '../data/prefetch'
+import { preloadRouteChunk, sidebarPaths, usePrefetchQueries, usePrefetchRoute, useRouteIntent } from '../data/prefetch'
 import { useRegionCatalog, useRegionDiscovery } from '../data/regions'
 import { label, number, percent } from '../lib/format'
 import { chunk, ChunkFallback } from '../lib/preloadable'
@@ -103,8 +103,8 @@ export function AppShell() {
     if (regionReady && ((sidebarPaths as readonly string[]).includes(path) || path.startsWith('/newsletters'))) void latest.current.prefetchRoute(path)
     if (access.multiTenant) { void score.preload().catch(() => {}); void prefetchQueries([queries.senderScore()]) }
   }, [regionReady])
-  // Once the page in front of the user has settled, warm every other sidebar page one at a time (its code and
-  // first-screen queries, one request set per page, nothing already fresh). Hovering a link does the same at once.
+  // Once the page in front of the user has settled, warm every other sidebar page's JS chunk one at a time (never
+  // firing API requests for unvisited pages). Hovering a link warms its chunk and cheap single-page queries.
   const warming = useRef(false)
   const content = useRef<HTMLElement>(null)
   useEffect(() => {
@@ -126,10 +126,10 @@ export function AppShell() {
       for (const path of [...sidebarPaths, ...latest.current.newsletters.map(([path]) => path)]) {
         await visible()
         await idle()
-        const { pathname, canAdminister, prefetchRoute } = latest.current
+        const { pathname, canAdminister } = latest.current
         if (stopped) return
         if (pathname.startsWith(path) || (!canAdminister && adminOnly.has(path))) continue
-        await prefetchRoute(path)
+        await preloadRouteChunk(path)
       }
     })()
     return () => { stopped = true; release?.(); warming.current = false }

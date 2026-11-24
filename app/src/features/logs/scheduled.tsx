@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { ChevronRight, MoreHorizontal } from 'lucide-react'
 import { useApiMutation } from '../../data/context'
+import { invalidate } from '../../data/invalidation'
 import type { LogEntry } from '../../data/types'
 import { Button, ConfirmDialog, Dialog, DropdownMenu, IconButton, MutationError, useToast, type Column } from '../../components/ui'
 import { parseUtc, ScheduleField, scheduleError, utcLabel } from '../../components/ScheduleField'
@@ -13,7 +14,7 @@ export const isScheduled = (row: LogEntry) => row.direction === 'sent' && row.st
 export function useScheduledActions() {
   const [canceling, setCanceling] = useState<LogEntry | null>(null)
   const [moving, setMoving] = useState<LogEntry | null>(null)
-  const cancel = useApiMutation((api, id: string) => api.emails.cancel(id), 'Email canceled')
+  const cancel = useApiMutation((api, id: string) => api.emails.cancel(id), 'Email canceled', false, invalidate.scheduledEmail)
   const menu = (row: LogEntry) => <DropdownMenu label={`Actions for the email scheduled for ${utcLabel(row.scheduledAt!)}`} title={`Sends ${utcLabel(row.scheduledAt!)}`}
     trigger={<IconButton size="sm" label={`Actions for the email scheduled for ${utcLabel(row.scheduledAt!)}`}><MoreHorizontal size={14} /></IconButton>}
     items={[{ label: 'Reschedule', onSelect: () => setMoving(row) }, { label: 'Cancel email', destructive: true, onSelect: () => setCanceling(row) }]} />
@@ -31,7 +32,7 @@ export function useScheduledActions() {
 
 function RescheduleEmailDialog({ row, onClose }: { row: LogEntry; onClose: () => void }) {
   const toast = useToast()
-  const move = useApiMutation((api, at: string) => api.emails.reschedule(row.id, at), undefined, false, true, row.id)
+  const move = useApiMutation((api, at: string) => api.emails.reschedule(row.id, at), undefined, false, invalidate.scheduledEmail, row.id)
   const [value, setValue] = useState(() => row.scheduledAt!.slice(0, 16))
   const [error, setError] = useState('')
   async function submit(event: FormEvent) {

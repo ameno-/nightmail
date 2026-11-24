@@ -63,12 +63,10 @@ for (const plant of selected) {
     });
   } catch (err: any) {
     caught = true;
-    const out = String(err?.stdout ?? "") + "
-" + String(err?.stderr ?? "");
+    const out = String(err?.stdout ?? "") + "\n" + String(err?.stderr ?? "");
     const line =
       out
-        .split("
-")
+        .split("\n")
         .find((l) => /identity:|FAIL|BROKEN|violated|replyMismatch/.test(l))
         ?.trim() ?? `exit ${err?.status ?? 1}`;
     detail = line.slice(0, 140);

@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { Share } from 'lucide-react'
 import { Button, ConfirmDialog, CopyButton, SecretCode, DataTable, Dialog, Disclosure, DropdownMenu, EmptyState, ErrorState, Field, Input, SectionHeader, Select, useCopy, useToast, fieldError, MutationError } from '../../components/ui'
 import { useApiMutation, useApiDef, useSession } from '../../data/context'
+import { invalidate } from '../../data/invalidation'
 import { queries } from '../../data/queries'
 import type { CreatedWorkspaceInvitation, WorkspaceInvitation, WorkspaceMember, WorkspaceRole } from '../../data/types'
 import { roleLabel, workspaceApi } from '../../data/workspaces'
@@ -41,8 +42,8 @@ const [inviteEmail, inviteRole, inviteExpires, inviteActions] = settingsColumns.
 export function Members({ owner, onInvite }: { owner: boolean; onInvite: () => void }) {
   const session = useSession()
   const members = useApiDef(queries.workspaceMembers())
-  const update = useApiMutation((_api, input: { id: string; role: WorkspaceRole }) => workspaceApi.updateMember(input.id, input.role), 'Role updated')
-  const remove = useApiMutation((_api, id: string) => workspaceApi.removeMember(id), 'Member removed')
+  const update = useApiMutation((_api, input: { id: string; role: WorkspaceRole }) => workspaceApi.updateMember(input.id, input.role), 'Role updated', false, invalidate.workspaceMembers)
+  const remove = useApiMutation((_api, id: string) => workspaceApi.removeMember(id), 'Member removed', false, invalidate.workspaceMembers)
   const [removing, setRemoving] = useState<WorkspaceMember | null>(null)
   const [changing, setChanging] = useState<{ member: WorkspaceMember; role: WorkspaceRole } | null>(null)
   const change = changing && roleChange(changing.member, changing.role)
@@ -72,7 +73,7 @@ export function Members({ owner, onInvite }: { owner: boolean; onInvite: () => v
 export function Invitations({ owner }: { owner: boolean }) {
   const toast = useToast(), { copy } = useCopy()
   const invitations = useApiDef(queries.workspaceInvitations())
-  const revoke = useApiMutation((_api, id: string) => workspaceApi.revokeInvitation(id), 'Invitation revoked')
+  const revoke = useApiMutation((_api, id: string) => workspaceApi.revokeInvitation(id), 'Invitation revoked', false, invalidate.workspaceInvitations)
   const [revoking, setRevoking] = useState<WorkspaceInvitation | null>(null)
   return <section className="section stack settings-rule">
     <SectionHeader title="Invitations" />
@@ -93,7 +94,7 @@ export function Invitations({ owner }: { owner: boolean }) {
 
 export function InviteDialog({ open, owner, onOpenChange }: { open: boolean; owner: boolean; onOpenChange: (open: boolean) => void }) {
   const toast = useToast()
-  const create = useApiMutation((_api, input: { email: string; role: WorkspaceRole }) => workspaceApi.invite(input), undefined)
+  const create = useApiMutation((_api, input: { email: string; role: WorkspaceRole }) => workspaceApi.invite(input), undefined, false, invalidate.workspaceInvitations)
   const [email, setEmail] = useState('')
   const [role, setRole] = useState<WorkspaceRole>('member')
   const [emailError, setEmailError] = useState('')

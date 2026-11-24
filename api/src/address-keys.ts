@@ -52,7 +52,7 @@ export async function createLimitedKey(c: Ctx, workspaceId: string, name: string
         if (found[0]?.kind !== 'inbox' || !found[0].active) throw new ApiError(422, 'UNKNOWN_INBOX', 'Choose an active agent inbox in this workspace.', field.inbox);
         // It ends with the inbox (inbox_end), and with an expiring inbox's lease.
         expiresAt = inboxExpiry(asked ?? null, found[0].delete_after, asked != null);
-      } else if (found.length !== mailboxIds.length) throw new ApiError(422, 'MAILBOX_NOT_FOUND', 'Every ID must identify an existing receiving address.', field.addresses);
+      } else if (found.filter(box => box.active).length !== mailboxIds.length) throw new ApiError(422, 'MAILBOX_NOT_FOUND', 'Every ID must identify an existing receiving address.', field.addresses);
     }
     const [created] = await tx.insert(mailboxKeys).values({ id: id('mbk'), workspaceId, name, hash: await digest(secret), prefix: shownPrefix(secret), mailboxIds, inboxId, permissions: mail, expiresAt }).returning();
     await ownReceiving(tx, c, 'key', created!.id);
@@ -125,10 +125,13 @@ export async function updateLimitedKey(tx: DbExecutor, c: Ctx, a: Actor, keyId: 
     else if (ids !== null) ids = [...new Set([...ids, ...add])].filter(id => !remove.includes(id));
     if (ids && ids.length > 500) throw new ApiError(422, 'VALIDATION_FAILED', 'A key covers at most 500 addresses. Use a key for every address instead.', access.addressIds ? 'access.addressIds' : 'access.addAddressIds');
     if (ids?.length === 0 && !mail.includes('create')) throw noAddresses(access.addressIds ? 'access.addressIds' : 'access.removeAddressIds');
-    // Every address it gains is one of this workspace's, held until commit like createLimitedKey's.
-    const gained = ids?.filter(id => !row.mailboxIds?.includes(id)) ?? [];
+    // Every address it gains is one of this workspace's that hasn't ended, held until commit like createLimitedKey's. A key
+    // for every address gains nothing from addAddressIds, but what it names is checked the same: an ID that is another
+    // workspace's or nobody's is refused, not accepted as if the key now covered it.
+    const gained = ids === null ? [...new Set(add)] : ids.filter(id => !row.mailboxIds?.includes(id));
     if (gained.length) {
-      const found = (await tx.execute<{ id: string }>(sql`SELECT id FROM mailboxes WHERE workspace_id = ${a.workspaceId} AND id = ANY(${sql.param(gained)}::text[]) FOR SHARE`)).rows;
+      const found = (await tx.execute<{ id: string }>(sql`SELECT id FROM mailboxes WHERE workspace_id = ${a.workspaceId} AND id = ANY(${sql.param(gained)}::text[])
+        AND (delete_after IS NULL OR delete_after > now()) FOR SHARE`)).rows;
       if (found.length !== gained.length) throw new ApiError(422, 'MAILBOX_NOT_FOUND', 'Every ID must identify an existing receiving address.', access.addressIds ? 'access.addressIds' : 'access.addAddressIds');
     }
   }

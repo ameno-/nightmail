@@ -8,7 +8,7 @@ Because `anomalyco/tear` is a private repository, `api/package.json` does not de
 
 Each checker uses split files: `<name>.types.ts` (pure shared types), `<name>.model.ts` (pure reference model, idle rules, and temporal properties — never imports `api/src/`), `<name>.host.ts` (Bun host driving the real Nightmail API/SQL/jobs), and `campaigns/<name>.json` (concrete control, canary, and regression cases).
 
-### Core checkers (6)
+### Core checkers (7)
 
 | Checker | Area | Campaign cases |
 |---|---|---:|
@@ -18,8 +18,9 @@ Each checker uses split files: `<name>.types.ts` (pure shared types), `<name>.mo
 | `admission/` | Receive hourly window, 48 h recovery boundary (47 h / 49 h) & backlog, hosted send caps & sponsor holds, upload quota reservations | 47 |
 | `inbox/` | Inbox folders, UIDs, UIDVALIDITY, MODSEQ, flags, move/copy/expunge, tombstones, reopen job queueing, retention | 26 |
 | `delivery/` | Routing, rules, endpoints, retries, backoff, rate limits, fences, pause/resume (`DLV-1` pinned) | 42 |
+| `campaign-lifecycle/` | Full campaign life (draft → probe → sending → done/paused/canceled/failed), operational faults, crash/deploy, rate/view parity (migration 422), 8 named invariants (`BUG-LC-01` pinned) | 20 |
 
-### Preventative safety models (`safety/`, 5)
+### Preventative safety models (`safety/`, 6)
 
 | Model | What is checked |
 |---|---|
@@ -28,6 +29,7 @@ Each checker uses split files: `<name>.types.ts` (pure shared types), `<name>.mo
 | `db-faults` | Under DB read-only (`XX000`/`25006`), timeouts (`57014`/`55P03`), mid-request timeout after first write, or pool exhaustion (`53300`), API replies are 2xx or `retryable: true`, one `Idempotency-Key` produces at most one email id and one SES send, and healthy recovery drains all accepted mail. |
 | `scale-reads` | On `TEAR_SCALE_CONTACTS` (default `200000`, up to `2000000`), dashboard reads return 200 within fixed (data-size-independent) latency caps AND indexed contact pagination reads pass `EXPLAIN (ANALYZE, FORMAT JSON)` with no full-table `Seq Scan`, large `Sort`, or full-workspace filter scan (`BUG-SCALE-01` pinned). |
 | `tenant-isolation` | Workspace B's transactional sends return 202 within budget while overlapped deterministically inside workspace A's contact import commit transaction, and dispatch ahead of A's marketing backlog. |
+| `workspace-isolation` | Nothing crosses between workspaces on any route: 276 OpenAPI routes, 31 support routes, 242 MCP tools, and every ID-carrying body/query/path field across 14 principals and 3 workspaces (`BUG-ISO-01`/#591, `BUG-ISO-02`/#611, `BUG-ISO-03`/#612 passing; `BUG-ISO-04`/#614 pinned until merge). |
 
 ## Quickstart
 

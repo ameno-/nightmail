@@ -2,16 +2,19 @@
 // (recipes) grouped by what they do, and the short form a recipe opens to make its rule. Every write goes through the
 // public API (createRuleFromRecipe, updateRule, deleteRule, createEndpoint). A recipe's rule is an ordinary script the
 // API wrote: like every rule it opens as its code (rituals.tsx), and saving a hand edit there makes it a script.
-import { lazy, Suspense, useState, type FormEvent, type ReactNode } from 'react'
+import { useState, type FormEvent, type ReactNode } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useQueryClient } from '@tanstack/react-query'
 import { Archive, Ban, CodeXml, Forward, Hash, MessageSquare, ShieldAlert, Sparkles, Split, Star, Webhook, X, type LucideIcon } from 'lucide-react'
-import { Alert, Button, ConfirmDialog, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, SecretInput, Select, Switch, Textarea, useToast, type SelectOption } from '../../components/ui'
+import { Alert, Button, ConfirmDialog, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, SearchField, SecretInput, Select, Switch, Textarea, useToast, type SelectOption } from '../../components/ui'
+import { mergeAddresses, useAddressOptions, useResolvedAddresses } from '../../data/addresses'
+import { chunk } from '../../lib/preloadable'
+import { useDebounced } from '../../lib/pagination'
 import { FieldSkeleton, LoadingRegion, Skeleton } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { useApiDef, useApiQuery, useRequestScope, useWorkspaceAccess } from '../../data/context'
 import { isAbortError, request } from '../../data/live'
-import { staleAfterWrite } from '../../data/invalidation'
+import { invalidate, invalidateResources } from '../../data/invalidation'
 import { queries } from '../../data/queries'
 import { ApiError, errorText } from '../../data/types'
 import { useSingleFlight } from '../../lib/single-flight'
@@ -27,7 +30,7 @@ import './inbound.css'
 import './receiving.css'
 import './recipes.css'
 
-const RulePage = lazy(() => import('./rituals').then(m => ({ default: m.RulePage })))
+const RulePage = chunk(() => import('./rituals')).page(m => m.RulePage)
 const LIST = '/receiving?tab=rules'
 
 // listRuleRecipes, as the add screen and the form read it.
@@ -98,9 +101,12 @@ export function RulesTab({ overview, refresh }: { overview: Overview; refresh: (
   const navigate = useNavigate(), toast = useToast()
   useRecipes() // warms the add screen
   const options = useApiDef(queries.inboundAddressOptions())
+  const ruleTargetIds = overview.rules.flatMap(r => r.attachedTo)
+  const resolvedTargets = useResolvedAddresses(ruleTargetIds, options.data ?? [])
+  const knownRuleAddresses = mergeAddresses(resolvedTargets.items, options.data ?? [])
   // Every rule opens on its page, its code. A two-way rule (the address builder's) can also be changed in the builder,
   // on the one address it runs on.
-  const builderPath = (r: OverviewRule) => isSplitRule(r) ? splitBuilderPath(r.key, r.attachedTo, options.data) : null
+  const builderPath = (r: OverviewRule) => isSplitRule(r) ? splitBuilderPath(r.key, r.attachedTo, knownRuleAddresses) : null
   const [switching, setSwitching] = useState<Record<string, boolean>>({})
   const [deleting, setDeleting] = useState<OverviewRule | null>(null), [deleteOpen, setDeleteOpen] = useState(false)
   const scope = useRequestScope()
@@ -149,20 +155,23 @@ export function RulesTab({ overview, refresh }: { overview: Overview; refresh: (
 export function NewRulePage() {
   const { canAdminister } = useWorkspaceAccess()
   const catalog = useRecipes(canAdminister)
-  const options = useApiDef(queries.inboundAddressOptions(), { enabled: canAdminister })
+  const [splitSearch, setSplitSearch] = useState('')
+  const options = useAddressOptions({ enabled: canAdminister, search: useDebounced(splitSearch) })
   // The Receiving page's first read (usually cached by now): the prompts name the address rules run on most.
   const overview = useOverview(firstOverview, false, canAdminister)
   const [params] = useSearchParams()
   const [choosing, setChoosing] = useState<Condition | null>(null)
   const address = params.get('address')
+  const resolvedParam = useResolvedAddresses(address ? [address] : [], options.items, canAdminister && !options.isPending)
+  const allOptions = mergeAddresses(resolvedParam.items, options.items)
   const suffix = address ? `?address=${encodeURIComponent(address)}` : ''
   if (!canAdminister) return <div className="stack inbound-stack"><PageHeader title="New rule" backTo={LIST} /><EmptyState title={concepts.rules.adminOnly} /></div>
-  const c = catalog.data && (overview.data || overview.error) && (options.data || options.error) ? catalog.data : undefined
+  const c = catalog.data && (overview.data || overview.error) && (!options.isPending || options.isError) && !resolvedParam.pending ? catalog.data : undefined
   const used = (overview.data?.rules ?? []).flatMap(r => r.addresses)
-  const agentAddress = (options.data ?? []).find(a => a.id === address)?.address ?? [...new Set(used)].sort((a, b) => used.filter(x => x === b).length - used.filter(x => x === a).length)[0] ?? null
+  const agentAddress = allOptions.find(a => a.id === address)?.address ?? [...new Set(used)].sort((a, b) => used.filter(x => x === b).length - used.filter(x => x === a).length)[0] ?? null
   // Splitting mail two ways is the address builder's, on an address: the one this came from, else the one asked for.
-  const scoped = (options.data ?? []).find(a => a.id === address && a.kind !== 'inbox')
-  const splittable = (options.data ?? []).filter(a => a.kind !== 'inbox')
+  const scoped = allOptions.find(a => a.id === address && a.kind !== 'inbox')
+  const splittable = allOptions.filter(a => a.kind !== 'inbox')
   const splitTile = (condition: Condition, icon: ReactNode, name: string) => scoped
     ? <Link className="recipe-tile" to={`/receiving?build=${encodeURIComponent(scoped.id)}&split=${condition}`}>{icon}<strong>{name}</strong></Link>
     : <button type="button" className="recipe-tile" onClick={() => setChoosing(condition)}>{icon}<strong>{name}</strong></button>
@@ -195,19 +204,21 @@ export function NewRulePage() {
           <div className="cluster"><Link className="ui-button ui-button--ghost ui-button--sm recipe-agent-link" to={`/receiving/rules/new/script${suffix}`}><CodeXml size={14} aria-hidden="true" />Write code</Link><AskAgentLink address={agentAddress} /></div>
         </section>
       </div>}
-    <SplitChooser condition={choosing} onClose={() => setChoosing(null)} addresses={splittable} />
+    <SplitChooser condition={choosing} onClose={() => { setChoosing(null); setSplitSearch('') }} addresses={splittable} search={splitSearch} onSearch={setSplitSearch} searchable={options.hasMore || Boolean(splitSearch)} hasMore={options.hasMore} loadingMore={options.loadingMore} onLoadMore={options.loadMore} />
   </div>
 }
 
 /** Split mail from New rule without an address: which address's mail, before the builder opens on it. */
-function SplitChooser({ condition, onClose, addresses }: { condition: Condition | null; onClose: () => void; addresses: { id: string; address: string; displayName?: string | null }[] }) {
+function SplitChooser({ condition, onClose, addresses, search, onSearch, searchable, hasMore, loadingMore, onLoadMore }: { condition: Condition | null; onClose: () => void; addresses: { id: string; address: string; displayName?: string | null }[]; search: string; onSearch: (v: string) => void; searchable: boolean; hasMore: boolean; loadingMore: boolean; onLoadMore: () => void }) {
   const navigate = useNavigate()
   const [chosen, setChosen] = useState('')
   const go = (event: FormEvent) => { event.preventDefault(); if (chosen && condition) navigate(`/receiving?build=${encodeURIComponent(chosen)}&split=${condition}`) }
   return <Dialog open={condition !== null} onOpenChange={open => { if (!open) { onClose(); setChosen('') } }} title="Which address?"
     footer={<><Button onClick={onClose}>Cancel</Button><Button variant="primary" type="submit" form="split-chooser" disabled={!chosen}>Next</Button></>}>
     <form id="split-chooser" className="stack" onSubmit={go}>
+      {searchable && <SearchField aria-label="Search addresses" placeholder="Search addresses" value={search} onChange={event => onSearch(event.target.value)} />}
       <Field label="Split the mail of" htmlFor="split-chooser-address"><Select id="split-chooser-address" value={chosen} onValueChange={setChosen} placeholder="Choose an address" options={addresses.map(a => addressOption(a.id, a.address, a.displayName ?? undefined))} /></Field>
+      {hasMore && <Button variant="ghost" size="sm" loading={loadingMore} onClick={onLoadMore}>Load more addresses</Button>}
     </form>
   </Dialog>
 }
@@ -215,7 +226,7 @@ function SplitChooser({ condition, onClose, addresses }: { condition: Condition 
 /** /receiving/rules/new/:recipe: a recipe's form, which makes a rule. "code" is the page of a rule named new (see rulePath). */
 export function NewRecipeRoute() {
   const { recipe } = useParams()
-  if (recipe === 'code') return <Suspense fallback={null}><RulePage /></Suspense>
+  if (recipe === 'code') return <RulePage />
   return <RecipeForm recipeId={recipe ?? ''} />
 }
 
@@ -224,8 +235,11 @@ function RecipeForm({ recipeId }: { recipeId: string }) {
   const { canAdminister } = useWorkspaceAccess()
   const catalog = useRecipes(canAdminister)
   const overview = useOverview(firstOverview, false, canAdminister)
-  const options = useApiDef(queries.inboundAddressOptions(), { enabled: canAdminister })
+  const [addressSearch, setAddressSearch] = useState('')
+  const options = useAddressOptions({ enabled: canAdminister, search: useDebounced(addressSearch) })
   const [params] = useSearchParams()
+  const preset = params.get('address')
+  const resolvedPreset = useResolvedAddresses(preset ? [preset] : [], options.items, canAdminister && !options.isPending)
   const client = useQueryClient()
   // Endpoints confirmed or added elsewhere (a forward's recipient agreeing) show up in the pickers.
   useLiveVersion(canAdminister && !!overview.data, change => { if (!change.first && change.endpointsMoved) void overview.refetch() }, { endpoints: true })
@@ -234,15 +248,16 @@ function RecipeForm({ recipeId }: { recipeId: string }) {
   const title = recipe?.name ?? ritualRecipes.find(r => r.id === recipeId)?.name ?? 'New rule'
   const header = (actions?: ReactNode) => <PageHeader title={title} backTo={back} actions={actions} />
   if (!canAdminister) return <div className="stack inbound-stack">{header()}<EmptyState title={concepts.rules.adminOnly} /></div>
-  const error = catalog.error ?? overview.error ?? options.error
-  if (error && !(catalog.data && overview.data && options.data)) return <div className="stack inbound-stack">{header()}<ErrorState error={error} onRetry={() => { void catalog.refetch(); void overview.refetch(); void options.refetch() }} /></div>
-  if (!catalog.data || !overview.data || !options.data) return <div className="stack inbound-stack recipe-page">{header()}
+  const error = catalog.error ?? overview.error ?? (options.isError && !options.items.length ? options.error : null)
+  if (error && !(catalog.data && overview.data && !options.isPending)) return <div className="stack inbound-stack">{header()}<ErrorState error={error} onRetry={() => { void catalog.refetch(); void overview.refetch(); void options.refetch() }} /></div>
+  if (!catalog.data || !overview.data || options.isPending || resolvedPreset.pending) return <div className="stack inbound-stack recipe-page">{header()}
     <LoadingRegion label="Loading the form"><div className="recipe-form" aria-hidden="true">{ritualRecipes.find(r => r.id === recipeId)?.decisions && <Skeleton width="50%" height={14} />}<FieldSkeleton /><FieldSkeleton /></div></LoadingRegion></div>
   if (!recipe) return <div className="stack inbound-stack">{header()}<EmptyState title={`No recipe named ${recipeId}`} action={<Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/rules/new">New rule</Link>} /></div>
-  const preset = params.get('address')
   return <RecipeEditor key={recipe.id} recipe={recipe} overview={overview.data}
-    addresses={options.data} preset={preset} header={header} back={back}
-    refresh={() => client.invalidateQueries({ predicate: query => staleAfterWrite(query.queryKey, false) })} />
+    addresses={mergeAddresses(resolvedPreset.items, options.items)} preset={preset} header={header} back={back}
+    addressSearch={addressSearch} onAddressSearch={setAddressSearch} addressSearchable={options.hasMore || Boolean(addressSearch)}
+    hasMoreAddresses={options.hasMore} loadingMoreAddresses={options.loadingMore} onLoadMoreAddresses={options.loadMore}
+    refresh={() => invalidateResources(client, invalidate.rules)} />
 }
 
 type AddressOption = { id: string; address: string; aliases: string[]; expiresAt?: string | null }
@@ -271,9 +286,9 @@ const freeName = (base: string, taken: Set<string>) => { const stem = slug(base)
 const splitSenders = (text: string) => [...new Set(text.split(/[\s,;]+/).map(s => s.trim().toLowerCase()).filter(Boolean))]
 type Made = { name: string; type: EndpointType; status: OverviewEndpoint['status']; target: string }
 
-function RecipeEditor({ recipe, overview, addresses, preset, header, back, refresh }: {
+function RecipeEditor({ recipe, overview, addresses, preset, header, back, addressSearch, onAddressSearch, addressSearchable, hasMoreAddresses, loadingMoreAddresses, onLoadMoreAddresses, refresh }: {
   recipe: Recipe; overview: Overview; addresses: AddressOption[]; preset: string | null
-  header: (actions?: ReactNode) => ReactNode; back: string; refresh: () => Promise<unknown>
+  header: (actions?: ReactNode) => ReactNode; back: string; addressSearch: string; onAddressSearch: (v: string) => void; addressSearchable: boolean; hasMoreAddresses: boolean; loadingMoreAddresses: boolean; onLoadMoreAddresses: () => void; refresh: () => Promise<unknown>
 }) {
   const navigate = useNavigate(), toast = useToast()
   const targetsList = addresses.flatMap(a => [{ value: a.id, label: a.address, expires: !!a.expiresAt }, ...a.aliases.map(alias => ({ value: alias, label: alias, expires: false }))])
@@ -376,6 +391,8 @@ function RecipeEditor({ recipe, overview, addresses, preset, header, back, refre
           {remaining.length > 0 && targets.length < 10 && <Select className="address-select-trigger recipe-targets__add" menuClassName="address-select" aria-label="Add an address" value="" placeholder={targets.length ? 'Add another' : 'Choose an address'}
             onValueChange={v => { if (v) setTargets([...targets, v]) }} options={remaining.map(t => addressOption(t.value, t.label))} />}
         </div>
+        {addressSearchable && <SearchField aria-label="Search addresses" placeholder="Search addresses" value={addressSearch} onChange={event => onAddressSearch(event.target.value)} />}
+        {hasMoreAddresses && <Button variant="ghost" size="sm" loading={loadingMoreAddresses} onClick={onLoadMoreAddresses}>Load more addresses</Button>}
       </Field>
       {recipe.fields.map(f => {
         const err = fieldError(f), id = `recipe-${f.name}`
