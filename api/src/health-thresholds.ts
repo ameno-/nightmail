@@ -118,7 +118,9 @@ export const REQUESTS = {
   /**
    * A storm: one read route, or one workspace's reads, at this many a minute for three minutes in a row (20 a second).
    * On the 23rd one page asked for /stats 50 times a second for hours. Only GET and HEAD count: a customer sending
-   * mail at 20 a second is a customer sending mail, and the send limits govern that.
+   * mail at 20 a second is a customer sending mail, and the send limits govern that. 1,200 is also the default budget
+   * of one API key a minute (API_RATE_LIMIT_PER_MINUTE): a key held at its limit for three minutes is a storm, and
+   * what it asks beyond the limit is answered 429 and still counted for its route.
    */
   stormPerMinute: 1_200, stormMinutes: 3, stormRemindMinutes: 60,
   /** A request this slow is always logged in full (src/log.ts), whatever the sampling. */
