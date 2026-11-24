@@ -8,12 +8,13 @@ import './presence-overlay.css'
 // move, and are drawn 50 ms behind, between the last two, so they glide at the screen's own frame rate. A touch screen
 // sends no pointer and shows none; fields and selections show everywhere.
 const TICK_MS = 33, BEHIND_MS = 50, NONE = 0xffff, OFFSET = 32768, X_UNIT = 16384
-const SHEET = '.campaign-compose-sheet', WORKSPACE = '.campaign-compose-workspace', EDITOR = '.composer-canvas [contenteditable="true"]'
+const SHEET = '.campaign-compose-sheet', WORKSPACE = '.campaign-compose-workspace', EDITOR = '.composer-canvas [contenteditable="true"]', TOOLBAR = '.composer-toolbar'
 const BLOCKS = 'p, h1, h2, h3, h4, li, pre, blockquote'
 // The fields someone can be in, by number: the same list in every browser.
 const FIELDS = ['campaign-name', 'campaign-from-email', 'campaign-reply-to', 'campaign-subject', 'campaign-preview']
 const POINTER = '<svg width="16" height="20" viewBox="0 0 16 20" aria-hidden="true"><path d="M1.5 1.5 L1.5 15.5 L5.2 12.1 L7.8 18.1 L10.3 17 L7.8 11.2 L13 11.2 Z" fill="currentColor" stroke="#fff" stroke-width="1.3" stroke-linejoin="round"/></svg>'
-type Remote = { samples: [number, number, number][]; selection: [number, number, number] | null; field: string | null; pointer: HTMLDivElement; marks: HTMLDivElement; drawn: string; bar: HTMLDivElement; drawnBar: string }
+// What is drawn for a slot, and whose it is: a slot is handed to whoever joins next, so marks go when its person changes.
+type Remote = { id: string; samples: [number, number, number][]; selection: [number, number, number] | null; field: string | null; pointer: HTMLDivElement; marks: HTMLDivElement; drawn: string; bar: HTMLDivElement; drawnBar: string }
 
 function frame(kind: number, ...words: number[]) {
   const bytes = new Uint8Array(1 + words.length * 2)
@@ -101,16 +102,19 @@ export function PresenceOverlay({ room }: { room: Room }) {
       if (range !== sentSelection) { room.send(selection ? frame(2, ...selection.map(clampWord)) : frame(2, NONE, 0, 0)); sentSelection = range }
       if (field !== sentField) { room.send(frame(3, field)); sentField = field }
     }, TICK_MS)
+    const forget = (slot: number, item: Remote) => { item.pointer.remove(); item.marks.remove(); item.bar.remove(); remotes.delete(slot) }
     const remote = (slot: number) => {
+      const person = live.current.people.get(slot)
       let item = remotes.get(slot)
+      if (item && item.id !== person?.id) { forget(slot, item); item = undefined }
       if (!item) {
-        const person = live.current.people.get(slot), color = PRESENCE_COLORS[person?.color ?? 0], name = escape(person?.name ?? '')
+        const color = PRESENCE_COLORS[person?.color ?? 0], name = escape(person?.name ?? '')
         const marks = document.createElement('div'), pointerEl = document.createElement('div')
         pointerEl.className = 'presence-pointer'; pointerEl.style.color = color
         pointerEl.innerHTML = `${POINTER}<span style="background:${color}">${name}</span>`
         const bar = document.createElement('div')
         clip.append(marks, pointerEl); free.append(bar)
-        item = { samples: [], selection: null, field: null, pointer: pointerEl, marks, drawn: '', bar, drawnBar: '' }
+        item = { id: person?.id ?? '', samples: [], selection: null, field: null, pointer: pointerEl, marks, drawn: '', bar, drawnBar: '' }
         remotes.set(slot, item)
       }
       return item
@@ -124,16 +128,22 @@ export function PresenceOverlay({ room }: { room: Room }) {
       else if (kind === 2 && bytes.length >= 8) item.selection = word(bytes, 2) === NONE ? null : [word(bytes, 2), word(bytes, 4), word(bytes, 6)]
       else if (kind === 3 && bytes.length >= 4) item.field = FIELDS[word(bytes, 2)] ?? null
     })
-    let frameId = 0
+    let frameId = 0, clipped = ''
     const draw = () => {
       frameId = requestAnimationFrame(draw)
       const area = document.querySelector(WORKSPACE)?.getBoundingClientRect(), box = sheet()?.getBoundingClientRect(), root = editor()
       if (!area || !box) return
       Object.assign(clip.style, { left: `${area.left}px`, top: `${area.top}px`, width: `${area.width}px`, height: `${area.height}px` })
+      // Nothing of anyone else's covers this person's own formatting toolbar, which the message scrolls beneath: its
+      // rectangle is cut out of the layer.
+      const own = document.querySelector(TOOLBAR)?.getBoundingClientRect(), cut = own && own.bottom > area.top && own.top < area.bottom && own.width
+        ? (() => { const [l, t, r, b] = [own.left - area.left, own.top - area.top, own.right - area.left, own.bottom - area.top].map(n => `${Math.round(n)}px`); return `polygon(evenodd, 0 0, 100% 0, 100% 100%, 0 100%, 0 0, ${l} ${t}, ${r} ${t}, ${r} ${b}, ${l} ${b}, ${l} ${t})` })()
+        : ''
+      if (cut !== clipped) { clip.style.clipPath = cut; clipped = cut }
       const at = performance.now() - BEHIND_MS, blocks = root ? root.querySelectorAll(BLOCKS) : null
       for (const [slot, item] of remotes) {
         const person = live.current.people.get(slot)
-        if (!person) { item.pointer.remove(); item.marks.remove(); item.bar.remove(); remotes.delete(slot); continue }
+        if (!person || person.id !== item.id) { forget(slot, item); continue }
         const samples = item.samples
         if (samples.length && !touch) {
           const next = samples.findIndex(sample => sample[0] > at)
