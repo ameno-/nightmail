@@ -26812,18 +26812,18 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await db.query("INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) VALUES($1,$2,$3,'fixture-burst',$4,$5::jsonb,$6::jsonb)", [wid, sid, REGION, `workspaces/${wid}/raw/${sid}.eml`, JSON.stringify([addr]), JSON.stringify(notif)]);
         await db.query("INSERT INTO jobs(id,type,workspace_id,payload,available_at) VALUES(public.row_id('job'),'mailbox.ingest',$1,$2::jsonb,$3::timestamptz)", [wid, JSON.stringify({ sesMessageId: sid }), ts]);
       }
-      // Also queue a duplicate job for sesIds[0] to exercise retry/overlap idempotency.
-      await db.query("INSERT INTO jobs(id,type,workspace_id,payload) VALUES(public.row_id('job'),'mailbox.ingest',$1,$2::jsonb)", [wid, JSON.stringify({ sesMessageId: sesIds[0] })]);
-
       const mockS3 = t.mock.method(S3Client.prototype, 'send', async (cmd: any) => {
-        if (cmd.constructor.name === 'HeadObjectCommand') { const b = rawMap.get(cmd.input.Key); assert.ok(b, cmd.input.Key); return { ContentLength: b.length, ETag: '"etag"' }; }
+        if (cmd.constructor.name === 'HeadObjectCommand') { const b = rawMap.get(cmd.input.Key!); assert.ok(b, cmd.input.Key ?? ''); return { ContentLength: b.length, ETag: '"etag"' }; }
         if (cmd.constructor.name === 'CopyObjectCommand' || cmd.constructor.name === 'PutObjectCommand') return {};
         if (cmd instanceof GetObjectCommand) { const b = rawMap.get(cmd.input.Key!); assert.ok(b, cmd.input.Key ?? ''); return { Body: { transformToByteArray: async () => b } }; }
         return {};
       });
       try {
         const ran = await processJobs(runtime, mailboxIngestJobs, 30, 6);
-        assert.ok(ran >= 13, `expected >= 13 jobs processed, got ${ran}`);
+        assert.equal(ran, 12, `expected 12 jobs processed, got ${ran}`);
+        // Re-enqueue two already-processed receipts in a second batch to prove retry/overlap idempotency.
+        await db.query("INSERT INTO jobs(id,type,workspace_id,payload) SELECT public.row_id('job'),'mailbox.ingest',$1,jsonb_build_object('sesMessageId',m) FROM unnest($2::text[]) m", [wid, [sesIds[0]!, sesIds[1]!]]);
+        assert.equal(await processJobs(runtime, mailboxIngestJobs, 10, 6), 2, 'replayed receipts settle as clean no-ops');
       } finally { mockS3.mock.restore(); }
 
       // Verify exact counts, zero duplicates, strict ordering, #595 unread, #603 IMAP folder/entries, and byte window.
