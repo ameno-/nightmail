@@ -1,6 +1,6 @@
 # CI: what runs where, and how to fix it
 
-Every change reaches production through `dev`: a PR merges into `dev`, the dev deploy migrates the dev database, deploys the Worker and runs the live E2E (`api/scripts/e2e.ts`) against `dev.nightmail.dev`. Production requires a green live E2E and green dev push CI for the exact SHA.
+Every change reaches production through `dev`: a PR merges into `dev`, the dev deploy migrates the dev database, deploys the Worker and runs the live E2E (`api/scripts/e2e.ts`) against `dev.nightmail.dev`. Production requires a green live E2E and green dev merge-group CI (or full CI on a direct dev push) for the exact SHA.
 
 ## Merging into `dev`: the merge queue
 
@@ -34,11 +34,11 @@ The routing table lives in `.github/scripts/ci-scope.sh`. Update it when a suite
 
 | When | Job | What it proves |
 | --- | --- | --- |
-| PR, merge group, `dev` push | `build` | Types, SDK and docs regenerate cleanly, both Workers bundle, the public API stays compatible, and the **pre-merge invariants** below |
-| PR, merge group, `dev` push | `acceptance` | Three isolated Postgres/S3 shards (integration, simulated, simulated-heavy), each with the **deadlock guard** |
-| PR, merge group, `dev` push | `preview` | The real Worker under `wrangler dev` on a database upgraded from `dev`'s schema; see **Preview stack** |
-| PR, merge group, `dev` push | `audit`, `gateway`, `cls`, `support` | Dependency advisories, the Rust mail gateway (selected by the table above), layout shift on every main page across four independent runners, and the support Worker tests |
-| `dev` push, alongside CI | Deploy dev | Migrate, deploy, health and live dev E2E. Support prepares alongside the main Worker but waits for its health check before changing D1 or its service binding. |
+| PR, merge group, direct `dev` push | `build` | Types, SDK and docs regenerate cleanly, both Workers bundle, the public API stays compatible, and the **pre-merge invariants** below |
+| PR, merge group, direct `dev` push | `acceptance` | Three isolated Postgres/S3 shards (integration, simulated, simulated-heavy), each with the **deadlock guard** |
+| PR, merge group, direct `dev` push | `preview` | The real Worker under `wrangler dev` on a database upgraded from `dev`'s schema; see **Preview stack** |
+| PR, merge group, direct `dev` push | `audit`, `gateway`, `cls`, `support` | Dependency advisories, the Rust mail gateway (selected by the table above), layout shift on every main page across four independent runners, and the support Worker tests |
+| Every `dev` push | Deploy dev | Migrate, deploy, health and live dev E2E. Support prepares alongside the main Worker but waits for its health check before changing D1 or its service binding. |
 | Daily 07:17 UTC, or by hand | Nightly | The acceptance suite (quarantined tests included) and the CLS gate, once each by default (5, 10 or 20 by hand), reported in one issue |
 | `production` push | Deploy production | Requires a passing live dev E2E and CI proof (see **Releasing to production**) |
 | Daily 03:00 ET, on Ryan's Mac | Nightly report | The last 24 hours of production and dev logs against the previous week; files `nightly` issues and starts a self-improve session (below) |
@@ -48,7 +48,7 @@ CI, nightly and deploy use Blacksmith Ubuntu 24.04 (4 vCPUs for builds, tests an
 
 ## Releasing to production
 
-1. **Prove the commit.** Merge to `dev`. Wait for the main dev deploy, its live E2E and dev push CI to pass for the merge SHA. Nothing ships to production automatically.
+1. **Prove the commit.** Merge to `dev`. Wait for the main dev deploy and its live E2E for the merge SHA. Its successful `ci.yml` run on `gh-readonly-queue/dev/…` already proves the exact commit; the queue bot’s all-skipped dev push CI is never proof. A direct dev push still needs full push CI. PR checks or a green result for a different SHA do not count. Nothing ships to production automatically.
 2. **Promote it.** Fast-forward `production` to that SHA: `git push bane <sha>:refs/heads/production`. Only this push starts a production deployment. Under the stage lock, Authorize checks that the SHA is on `dev`, descends from the last healthy production deploy and has both proofs. Only `thdxr` and `R44VC0RP` may push; privileged jobs recheck the branch tip and the `PROD_DEPLOY_ENABLED` freeze switch. No separate reviewer approval is needed.
 3. **Verify it.** Watch the production push run through the Worker and support health checks. The branch names the release; if a push is pending or fails, `GITHUB_REPOSITORY=anomalyco/nightmail bash .github/scripts/deployed-sha.sh production` reports the last healthy main Worker SHA. Retry the full push run while it is still the tip, or fix forward. To undo a change, prove a revert on `dev` and fast-forward to it; never move `production` backwards.
 

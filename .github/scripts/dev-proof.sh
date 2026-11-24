@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Usage: dev-proof.sh <sha>. Require live dev E2E and dev push CI for this exact SHA.
+# Usage: dev-proof.sh <sha>. Require live dev E2E and queue CI (or a full direct dev push CI) for this exact SHA.
 set -euo pipefail
-sha=$1 repo="repos/$GITHUB_REPOSITORY" wait=${CI_WAIT_SECONDS:-1500} poll=${CI_POLL_SECONDS:-5}
+sha=$1 repo="repos/$GITHUB_REPOSITORY" wait=${CI_WAIT_SECONDS:-1500} poll=${CI_POLL_SECONDS:-30}
 [[ $sha =~ ^[0-9a-f]{40}$ ]] || { echo "usage: $0 <sha>" >&2; exit 2; }
 
 # The dev deploy job's name comes from the same pinned output as its checkout, so its E2E step proves this commit.
@@ -25,13 +25,19 @@ echo "Live dev E2E passed for $sha in run $e2e."
 
 deadline=$((SECONDS + wait))
 while :; do
-  runs=$(gh api "$repo/actions/workflows/ci.yml/runs?event=push&branch=dev&head_sha=$sha&per_page=100" |
-    jq -c --arg sha "$sha" --arg repo "$GITHUB_REPOSITORY" '[.workflow_runs[] | select(.head_sha == $sha and .head_repository.full_name == $repo and .event == "push" and .head_branch == "dev") | {id, status, conclusion}]')
-  ci=$(jq -r '[.[] | select(.conclusion == "success") | .id][0] // empty' <<< "$runs")
-  if [[ -n $ci ]]; then echo "Dev push CI passed for $sha in run $ci."; exit 0; fi
-
-  if ! jq -e 'any(.[]; .status != "completed")' <<< "$runs" >/dev/null; then
-    echo "::error::No passing dev push CI for $sha."
+  # A queue push produces an all-skipped green CI run. Only the queue's own CI on the
+  # dev queue ref (or the full CI of a direct dev push) can prove this SHA.
+  proof=$(gh api "$repo/actions/workflows/ci.yml/runs?head_sha=$sha&per_page=100" |
+    jq -c --arg sha "$sha" --arg repo "$GITHUB_REPOSITORY" '[.workflow_runs[] |
+      select(.head_sha == $sha and .head_repository.full_name == $repo) |
+      select((.event == "merge_group" and (.head_branch | startswith("gh-readonly-queue/dev/"))) or
+             (.event == "push" and .head_branch == "dev" and .actor.login != null and .actor.login != "github-merge-queue[bot]"))] |
+      max_by(.id) | {id, event, status, conclusion}')
+  if [[ $(jq -r '.conclusion' <<< "$proof") == success ]]; then
+    echo "CI passed for $sha: $(jq -r '.event + " run " + (.id|tostring)' <<< "$proof")."; exit 0
+  fi
+  if [[ $(jq -r '.status' <<< "$proof") == completed || $(jq -r '.id' <<< "$proof") == null ]]; then
+    echo "::error::No passing dev merge-group or direct dev push CI for $sha."
     exit 1
   fi
   if (( SECONDS >= deadline )); then echo "::error::CI for $sha was still running after $((wait / 60)) minutes."; exit 1; fi

@@ -19,6 +19,8 @@ concurrency:
 
 jobs:
   changes:
+    # The queue already tested the exact commit it pushed. Direct pushes still run every suite.
+    if: github.event_name != 'push' || github.actor != 'github-merge-queue[bot]'
     runs-on: blacksmith-2vcpu-ubuntu-2404
     outputs:
       base: ${{ steps.scope.outputs.base }}
@@ -366,7 +368,7 @@ jobs:
   required:
     name: ${{ matrix.check }}
     needs: [changes, build-work, acceptance-shard, cls-shard, preview-work, gateway-work, support-work]
-    if: always()
+    if: always() && (github.event_name != 'push' || github.actor != 'github-merge-queue[bot]')
     runs-on: blacksmith-2vcpu-ubuntu-2404
     strategy:
       fail-fast: false
