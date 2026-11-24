@@ -1197,6 +1197,7 @@ export const campaignLifecycleHost = host(campaignLifecycle, {
         dbReadOnly = false;
         t.accountMax24h = t.cfg.accountMax24h;
         t.accountSent24h = 0;
+        gate = initialGate();
         await adminPool.query(
           `UPDATE provider_account_limits
            SET max_24_hour_send = $1, sent_last_24_hours = 0, customer_sent_24_hours = 0,

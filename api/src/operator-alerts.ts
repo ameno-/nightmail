@@ -15,6 +15,9 @@ import { postSlack } from './reputation-alerts.js';
 // window that became slow), never while it simply continues.
 //
 // A card carries the workspace's name and plain words: never an address, a domain's contents, a score or a threshold.
+//
+// The database disk card is the exception to the queue: it must post while the database refuses writes, so it never
+// touches it (src/disk-alert.ts).
 
 const JOB = 'operator.alert', PLATFORM = 'platform';
 const CARDS = {

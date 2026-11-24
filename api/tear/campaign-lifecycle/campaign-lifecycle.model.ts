@@ -30,8 +30,6 @@ export interface LifecycleState {
   contactsMutated: number[];
   settled: boolean;
   faultOccurred: boolean;
-  bouncedProbe: boolean;
-  resumedProbe: boolean;
 }
 
 const CONTROL_BOUND_MS = 2500;
@@ -136,8 +134,6 @@ export const campaignLifecycle = model<LifecycleState, LifecycleAction, Lifecycl
     contactsMutated: [],
     settled: false,
     faultOccurred: false,
-    bouncedProbe: false,
-    resumedProbe: false,
   }),
 
   choices(s): Choice<LifecycleAction>[] {
@@ -241,8 +237,6 @@ export const campaignLifecycle = model<LifecycleState, LifecycleAction, Lifecycl
         contactsMutated: [],
         settled: false,
         faultOccurred: false,
-        bouncedProbe: false,
-        resumedProbe: false,
       };
       return {
         next,
@@ -330,9 +324,6 @@ export const campaignLifecycle = model<LifecycleState, LifecycleAction, Lifecycl
         if (!ro && a.op === "Cancel" && !["draft", "done"].includes(s.state)) {
           next.state = "canceled";
         }
-        if (!ro && a.op === "Resume" && s.preset === "probe" && s.bouncedProbe) {
-          next.resumedProbe = true;
-        }
         return {
           next,
           expect: satisfies("control-responsive-and-valid", (obs) => {
@@ -390,25 +381,20 @@ export const campaignLifecycle = model<LifecycleState, LifecycleAction, Lifecycl
         next.dbReadOnly = false;
         next.quotaTight = false;
         next.settled = true;
-        // Known product bug BUG-LC-01 (plans/tear/bugs-campaign-lifecycle.md): when a quarantined probe campaign
-        // is resumed (deliveredOnly=true) and every remaining recipient is skipped (0 emails inserted), releaseStep
-        // advances expanded=total but never calls finishCampaigns, leaving state='sending' with waiting=null.
-        const mask = s.preset === "probe" && s.bouncedProbe && s.resumedProbe ? "BUG-LC-01" : undefined;
-        const expect = satisfies("settle-not-stuck", (obs) => {
-          if (obs.status !== 200) return `Settle failed: status=${obs.status} code=${obs.code}`;
-          if (["draft", "done", "canceled", "failed"].includes(obs.state)) return true;
-          if (obs.state === "paused" && obs.pauseReasonCode !== null) return true;
-          if (obs.state === "scheduled") return true;
-          if (obs.state === "sending" && obs.waitingReason !== null) return true;
-          return `campaign stuck after Settle: state=${obs.state} prepared=${obs.prepared}/${obs.total} expanded=${obs.expanded} waiting=${obs.waitingReason} pauseReason=${obs.pauseReasonCode}`;
-        });
-        return mask ? { next, expect, mask } : { next, expect };
+        return {
+          next,
+          expect: satisfies("settle-not-stuck", (obs) => {
+            if (obs.status !== 200) return `Settle failed: status=${obs.status} code=${obs.code}`;
+            if (["draft", "done", "canceled", "failed"].includes(obs.state)) return true;
+            if (obs.state === "paused" && obs.pauseReasonCode !== null) return true;
+            if (obs.state === "scheduled") return true;
+            if (obs.state === "sending" && obs.waitingReason !== null) return true;
+            return `campaign stuck after Settle: state=${obs.state} prepared=${obs.prepared}/${obs.total} expanded=${obs.expanded} waiting=${obs.waitingReason} pauseReason=${obs.pauseReasonCode}`;
+          }),
+        };
       }
 
       default:
-        if (a.op === "DeliverFeedback" && (a.kind === "bounce" || a.kind === "complaint") && s.preset === "probe") {
-          next.bouncedProbe = true;
-        }
         return {
           next,
           expect: satisfies("step-safe", (obs) => {

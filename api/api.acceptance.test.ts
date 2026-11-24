@@ -1461,6 +1461,13 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
     assert.equal(response.status,200);
     return await response.json() as Places & { letIn: number; emailed: number; notEmailed: number | null };
   };
+  // The database disk alert's PlanetScale settings (src/disk-alert.ts) are read by a full operator, each read audited.
+  const diskSetup = await request('/v1/operator/database-disk-alert','GET',staff.session);
+  assert.deepEqual([diskSetup.status,await diskSetup.json()],[200,(await import('./src/disk-alert.js')).diskAlertSetup(runtime.config)]);
+  await db.query("UPDATE platform_operators SET role='operator:read' WHERE user_id=$1",[staff.account]);
+  assert.equal((await request('/v1/operator/database-disk-alert','GET',staff.session)).status,403);
+  await db.query("UPDATE platform_operators SET role='operator' WHERE user_id=$1",[staff.account]);
+  assert.equal((await db.query("SELECT count(*)::int AS n FROM hosted_operator_audit WHERE action='operator-read-disk-alert-setup' AND workspace_id='platform' AND operator_id=$1",[staff.account])).rows[0].n,1);
   // Closed: no place open, so a new person is waitlisted exactly as before.
   const before = await places();
   await setLimit(before.signedUp+before.held);
@@ -35576,6 +35583,112 @@ test('Audit trail: sensitive actions each write one redacted row', async t => {
     assert.ok(trail.length >= 18, `${trail.length} rows`);
     for (const value of secrets) assert.ok(trail.every(summary => !summary.includes(value)), `A summary repeats ${value.slice(0, 12)}…`);
   });
+});
+
+// Database disk alert (src/disk-alert.ts): PlanetScale's cluster.storage webhook posts one card straight to the operators'
+// Slack. It runs in-process here with a fake Slack and a database that fails the test if anything touches it.
+test('Database disk alert: a PlanetScale storage event with the derived Authorization header posts one card without the database, once per threshold; a wrong token, a bad signature or a stale event posts nothing', async t => {
+  const [{ createApp }, { loadConfig }, { diskAlertSetup, diskAlertCard }] = await Promise.all([import('./src/app.js'), import('./src/config.js'), import('./src/disk-alert.js')]);
+  const origin = 'https://disk.example.org', hook = 'https://hooks.slack.com/services/T0FIXTURE/B0FIXTURE/diskalert', secret = 'disk-fixture-'.repeat(4), signing = 'f'.repeat(64);
+  const db = new Proxy({}, { get(_target, prop) { throw new Error('The database disk alert touched Postgres (' + String(prop) + ').'); } }) as import('./src/core.js').Runtime['db'];
+  const storage: import('./src/core.js').Storage = { async put() { throw Error('unused'); }, async delete() { throw Error('unused'); }, async get() { throw Error('unused'); } };
+  const hosted = { PUBLIC_URL: origin, BANE_ROOT_SECRET: secret, MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google', OPERATOR_SLACK_WEBHOOK_URL: hook };
+  const runtime = (env: Record<string, string | undefined> = {}): import('./src/core.js').Runtime => ({ config: loadConfig({ ...hosted, ...env }), db, storage });
+  const app = createApp(), live = runtime(), setup = diskAlertSetup(live.config);
+  assert.deepEqual([setup.url, setup.events], [origin + '/internal/v1/database-disk', ['cluster.storage']]);
+  assert.match(setup.authorization, /^Bearer nmdisk_[A-Za-z0-9_-]{43}$/);
+  assert.ok(!setup.authorization.includes(secret) && setup.authorization !== diskAlertSetup({ ...live.config, authSecret: 'other-fixture-'.repeat(4) }).authorization);
+  const posted: Json[] = [];
+  t.mock.method(globalThis, 'fetch', async (url: RequestInfo | URL, init?: RequestInit) => {
+    assert.deepEqual([String(url), init?.method, init?.redirect], [hook, 'POST', 'manual']);
+    posted.push(JSON.parse(String(init!.body)));
+    return new Response(null);
+  });
+  const now = () => Math.floor(Date.now() / 1000);
+  // PlanetScale's documented cluster.storage body.
+  const storageEvent = (percent: number, extra: Json = {}) => ({ timestamp: now(), event: 'cluster.storage', organization: 'anomalyco', database: 'nightmail',
+    resource: { branch_name: 'production', storage_percentage: percent, storage: [{ bytes_used: 1, bytes_total_capacity: 2, bytes_available: 1, storage_percentage: percent + 0.1 }] }, ...extra });
+  const deliver = async (event: unknown, headers: Record<string, string> = { authorization: setup.authorization }, on = live, method = 'POST') => {
+    const response = await app.fetch(new Request(setup.url, { method, headers: { 'content-type': 'application/json', ...headers }, ...(method === 'POST' ? { body: typeof event === 'string' ? event : JSON.stringify(event) } : {}) }), on);
+    const text = await response.text();
+    return [response.status, text ? (JSON.parse(text) as Json).error.code : null];
+  };
+  const cards = () => posted.map(card => [card.blocks[0].text.text, card.text, card.blocks[0].accessory.url, card.blocks[0].accessory.text.text]);
+
+  // No credential, a wrong one, the bare token, another installation's, a self-hosted installation: the same 404, and
+  // nothing reaches Slack. The route answers POST only.
+  const other = diskAlertSetup({ ...live.config, authSecret: 'other-fixture-'.repeat(4) }).authorization;
+  for (const headers of <Record<string, string>[]>[{}, { authorization: 'Bearer nmdisk_' + 'A'.repeat(43) }, { authorization: setup.authorization.slice('Bearer '.length) }, { authorization: other }, { authorization: 'Bearer ' + secret }, { 'x-planetscale-signature': 'f'.repeat(64) }])
+    assert.deepEqual(await deliver(storageEvent(72), headers), [404, 'NOT_FOUND']);
+  assert.deepEqual(await deliver(storageEvent(72), undefined, runtime({ MULTI_TENANT: 'false', ACCOUNT_REQUIRED_ACR: undefined })), [404, 'NOT_FOUND']);
+  assert.deepEqual(await deliver(null, undefined, live, 'GET'), [404, 'NOT_FOUND']);
+  assert.deepEqual(posted, []);
+
+  // The event posts one card, with no database: its line, the plain-text fallback and a button to PlanetScale.
+  assert.deepEqual(await deliver(storageEvent(72)), [204, null]);
+  assert.deepEqual(cards(), [[':minidisc: *Database disk* production, 72% full.', 'Database disk: production, 72% full.', 'https://app.planetscale.com', 'Open']]);
+  // The same delivery again, and the same threshold a moment later, post nothing more; the next threshold posts at once.
+  assert.deepEqual([await deliver(storageEvent(72)), await deliver(storageEvent(74.9))], [[204, null], [204, null]]);
+  assert.equal(posted.length, 1);
+  // Nothing in an event shapes the button's address: whatever organization, database and branch it names, the button
+  // opens PlanetScale's own origin. The branch is text only, and only as a plain name: any other is left out.
+  assert.deepEqual(await deliver(storageEvent(75, { organization: 'evil-org', database: '../x', html_url: 'https://evil.example', resource: { branch_name: 'dev_2', storage_percentage: 75, html_url: 'https://evil.example' } })), [204, null]);
+  assert.deepEqual(cards()[1], [':minidisc: *Database disk* dev\u02cd2, 75% full.', 'Database disk: dev\u02cd2, 75% full.', 'https://app.planetscale.com', 'Open']);
+  for (const branch of ['<!channel>', 'evil.example', 'a/b', '../production', 'https://evil.example/x', '<https://evil.example|production>', '*bold*', 'prod uction', 'ünïcode', '', 'a'.repeat(64), 7, null, { name: 'production' }]) {
+    const hostile = JSON.stringify(diskAlertCard(storageEvent(61, { organization: branch, database: branch, resource: { branch_name: branch, storage_percentage: 61 } }))!.card);
+    assert.deepEqual([JSON.parse(hostile).blocks[0].text.text, JSON.parse(hostile).text, JSON.parse(hostile).blocks[0].accessory.url], [':minidisc: *Database disk* 61% full.', 'Database disk: 61% full.', 'https://app.planetscale.com'], String(branch));
+    assert.equal(hostile.includes('evil') || hostile.includes('channel'), false);
+  }
+
+  // An old delivery replayed, one dated ahead, and anything that is not the event are refused; other events post nothing.
+  for (const event of [storageEvent(86, { timestamp: now() - 61 * 60 }), storageEvent(86, { timestamp: now() + 61 * 60 })]) assert.deepEqual(await deliver(event), [400, 'EVENT_STALE']);
+  for (const event of [storageEvent(101), storageEvent(-1), storageEvent(86, { resource: { branch_name: 'production', storage_percentage: '86' } }), storageEvent(86, { resource: null }), storageEvent(86, { timestamp: 'now' }), [], 'null'])
+    assert.deepEqual(await deliver(event), [400, 'EVENT_INVALID']);
+  assert.deepEqual(await deliver('{'), [400, 'INVALID_JSON']);
+  assert.deepEqual(await deliver({ timestamp: now(), event: 'branch.ready', organization: 'anomalyco', database: 'nightmail', resource: {} }), [204, null]);
+  assert.equal(posted.length, 2);
+  // PlanetScale's "Test webhook" posts a card too, so the path can be checked without filling a disk.
+  assert.deepEqual(await deliver({ timestamp: now(), event: 'webhook.test', organization: 'anomalyco', database: 'nightmail', resource: { type: 'Database', html_url: 'https://evil.example' } }), [204, null]);
+  assert.deepEqual(cards()[2], [':minidisc: *Database disk* Test from PlanetScale.', 'Database disk: Test from PlanetScale.', 'https://app.planetscale.com', 'Open']);
+
+  // With the webhook's signing secret set, the header alone is not enough: a missing or wrong signature, or a body
+  // changed after signing, gets the same 404. Hosted only, like the Slack webhook.
+  const signedRuntime = runtime({ PLANETSCALE_WEBHOOK_SECRET: signing }), sign256 = (body: string, key = signing) => createHmac('sha256', key).update(body).digest('hex');
+  assert.deepEqual([signedRuntime.config.planetscaleWebhookSecret, loadConfig({ PUBLIC_URL: origin, BANE_ROOT_SECRET: secret, PLANETSCALE_WEBHOOK_SECRET: signing }).planetscaleWebhookSecret], [signing, undefined]);
+  // A secret too short or too long to be PlanetScale's never stops the installation: it is left unused, as if unset,
+  // and said once, without its value.
+  const warned: string[] = [];
+  await t.test('a signing secret of the wrong length is ignored with one warning', st => {
+    st.mock.method(console, 'warn', (line: string) => { warned.push(line); });
+    assert.deepEqual(['too-short-fixture', 'x'.repeat(31), 'y'.repeat(201), 'too-short-fixture'].map(value => runtime({ PLANETSCALE_WEBHOOK_SECRET: value }).config.planetscaleWebhookSecret), [undefined, undefined, undefined, undefined]);
+    assert.equal(loadConfig({ PUBLIC_URL: origin, BANE_ROOT_SECRET: secret, PLANETSCALE_WEBHOOK_SECRET: 'too-short-fixture' }).planetscaleWebhookSecret, undefined, 'Self-hosted, it is never read.');
+  });
+  assert.deepEqual(warned.map(line => (JSON.parse(line) as Json).code), ['PLANETSCALE_WEBHOOK_SECRET_IGNORED']);
+  assert.ok(!warned[0]!.includes('too-short-fixture') && !warned[0]!.includes('x'.repeat(31)));
+  const body = JSON.stringify(storageEvent(86));
+  for (const signature of [undefined, sign256(body, 'e'.repeat(64)), sign256(body.replace('86', '87')), sign256(body).slice(1)])
+    assert.deepEqual(await deliver(body, { authorization: setup.authorization, ...(signature ? { 'x-planetscale-signature': signature } : {}) }, signedRuntime), [404, 'NOT_FOUND']);
+  assert.deepEqual(await deliver(body, { 'x-planetscale-signature': sign256(body) }, signedRuntime), [404, 'NOT_FOUND'], 'A signature never replaces the token.');
+  assert.equal(posted.length, 3);
+  assert.deepEqual(await deliver(body, { authorization: setup.authorization, 'x-planetscale-signature': sign256(body) }, signedRuntime), [204, null]);
+  assert.equal(cards()[3]![0], ':minidisc: *Database disk* production, 86% full.');
+
+  // During a root-secret rotation the previous secret's header still works. Without the Slack webhook nothing is posted
+  // and PlanetScale is told.
+  const rotated = runtime({ BANE_ROOT_SECRET: 'next-fixture-'.repeat(4), PREVIOUS_BANE_ROOT_SECRET: secret });
+  assert.notEqual(diskAlertSetup(rotated.config).authorization, setup.authorization);
+  assert.deepEqual(await deliver(storageEvent(91), undefined, rotated), [204, null]);
+  assert.equal(cards()[4]![0], ':minidisc: *Database disk* production, 91% full.');
+  assert.deepEqual(await deliver(storageEvent(96), undefined, runtime({ OPERATOR_SLACK_WEBHOOK_URL: undefined })), [503, 'OPERATOR_ALERTS_OFF']);
+  // On Workers the DISK_ALERT limiter is asked with the threshold's key, and a card it refuses is not posted; the answer
+  // goes out before the card, which is posted after the response (PlanetScale waits two seconds).
+  const asked: string[] = [], later: ((runtime: import('./src/core.js').Runtime) => Promise<void>)[] = [];
+  assert.deepEqual(await deliver(storageEvent(44), undefined, { ...live, allowDiskAlert: async key => { asked.push(key); return false; } }), [204, null]);
+  const worker = { ...live, allowDiskAlert: async (key: string) => { asked.push(key); return true; }, deferNudge: (work: (typeof later)[number]) => { later.push(work); } };
+  assert.deepEqual(await deliver(storageEvent(96), undefined, worker), [204, null]);
+  assert.deepEqual([asked, later.length, posted.length], [['0', '95'], 1, 5]);
+  await later[0]!(worker);
+  assert.equal(cards()[5]![0], ':minidisc: *Database disk* production, 96% full.');
 });
 
 // Dashboard analytics (src/analytics.ts, docs/analytics.md): the ingest runs in-process here with an in-memory bucket and
