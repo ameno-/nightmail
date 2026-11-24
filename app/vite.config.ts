@@ -103,11 +103,23 @@ const publicBeacon: Plugin = {
   },
 }
 
+// Every page made from index.html (home.html, the price pages) keeps each script index.html carries inline byte for
+// byte: the CSP allows an inline script by the hash of its exact bytes, so one rewritten on the way would be refused.
+const inlineScriptsKept = (): Plugin => ({
+  name: 'nightmail:inline-scripts-kept', apply: 'build', enforce: 'post',
+  generateBundle: { order: 'post', handler(_options, bundle) {
+    const source = (name: string) => { const file = bundle[name]; return file?.type === 'asset' ? String(file.source) : '' }
+    const scripts = [...source('index.html').matchAll(/<script>[\s\S]*?<\/script>/g)].map(match => match[0])
+    for (const name of Object.keys(bundle).filter(name => name.endsWith('.html') && name !== 'index.html'))
+      for (const script of scripts) if (!source(name).includes(script)) this.error(`${name} lost or changed index.html's inline script ${script.slice(0, 60)}…: its CSP hash would refuse it.`)
+  } },
+})
+
 export default defineConfig({
   define: { __NIGHTMAIL_BUILD__: JSON.stringify(buildSha) },
   // (The homepage's station kit is inlined whatever its size: it is one lazily loaded stylesheet, features/home/machines.tsx.)
   build: { assetsInlineLimit: file => file.includes('/features/home/kit/') || undefined, rolldownOptions: { input: { index: fileURLToPath(new URL('./index.html', import.meta.url)) } } },
-  plugins: [slimReactEmail, legalMarkdown, react(), fileHeaders(), publicOrigin, brandedBootScript(), publicBeacon, homeShell(), pricePages()],
+  plugins: [slimReactEmail, legalMarkdown, react(), fileHeaders(), publicOrigin, brandedBootScript(), publicBeacon, homeShell(), pricePages(), inlineScriptsKept()],
   server: {
     host: '127.0.0.1', port: 5173, strictPort: true,
     proxy: Object.fromEntries(['/v1', '/api/auth', '/mcp', '/.well-known', '/unsubscribe', '/health', '/openapi.json', '/internal'].map(path => [path, {target: 'http://127.0.0.1:8793', changeOrigin: false}])),
