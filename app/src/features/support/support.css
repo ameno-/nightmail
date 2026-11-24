@@ -32,15 +32,14 @@ html:has(.support-overlay[data-open]) { overflow: hidden; }
 .support-panel__dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--dot); transition: background-color 240ms ease; }
 .support-panel__subtitle-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; animation: support-fade 200ms ease-out; }
 .support-panel__actions { display: flex; align-items: center; gap: 2px; }
-/* Keyboard focus in the panel is a solid fill, never a ring. */
-.support-panel .ui-button:focus-visible { outline: none; }
-.support-panel .ui-button--ghost:focus-visible { background: var(--color-hover); color: var(--color-text); }
+/* Keyboard focus in the panel is a solid fill: the overlay's own hover step (the panel floats over the page). */
+.support-panel .ui-button--ghost:focus-visible { background: var(--color-overlay-hover, var(--color-hover)); color: var(--color-text); }
 .support-panel .ui-button--primary:focus-visible { background: var(--color-accent-hover); }
 
 /* The card keeps 84 px free at the top, so on a short window it never covers a page's header actions (44 px tall on touch). */
 /* The conversation grows down from the top; while the reader is at the bottom it follows the newest line. */
 .support-log { flex: 1; min-height: 0; overflow-y: auto; overflow-anchor: none; overscroll-behavior: contain; outline: none; }
-.support-log:focus-visible { outline: none; background: var(--color-hover); }
+.support-log:focus-visible { background: var(--color-overlay-hover, var(--color-active-bg)); }
 /* --tray: the screenshot tray's height while it covers the bottom of the conversation (AttachmentTray). */
 .support-log__inner { display: flex; flex-direction: column; gap: var(--space-20); padding: var(--space-20) var(--space-16) calc(var(--space-24) + var(--tray, 0px)); }
 .support-loading { display: flex; flex-direction: column; gap: var(--space-20); }
@@ -57,7 +56,7 @@ html:has(.support-overlay[data-open]) { overflow: hidden; }
 .support-text li::marker { color: var(--color-muted); }
 .support-text strong { font-weight: var(--font-weight-bold); }
 .support-text a { color: var(--color-text); text-decoration-color: color-mix(in srgb, var(--color-text) 40%, transparent); text-underline-offset: 3px; }
-.support-text a:is(:hover, :focus-visible) { outline: none; text-decoration-color: currentColor; }
+.support-text a:is(:hover, :focus-visible) { text-decoration-color: currentColor; }
 .support-text code { padding: 1px 4px; border-radius: 4px; background: var(--color-chip, var(--color-layer-2)); font-size: 12px; }
 .support-text pre { padding: var(--space-8) var(--space-12); overflow-wrap: anywhere; white-space: pre-wrap; border-radius: var(--radius-sm); background: var(--color-well, var(--color-layer-2)); font-size: 12px; line-height: 18px; }
 .support-text pre code { padding: 0; background: none; }
@@ -99,9 +98,9 @@ html:has(.support-overlay[data-open]) { overflow: hidden; }
 .support-card { padding: var(--space-12); border-radius: var(--radius-sm); background: var(--color-well, var(--color-layer-2)); font-size: var(--text-sm); line-height: var(--leading-sm); animation: support-card-in 280ms var(--ease-out-strong) both; }
 .support-message[data-restored] .support-card { animation: none; }
 .support-card p { margin: 0; overflow-wrap: anywhere; }
-.support-card .ui-button--secondary { box-shadow: none; background: var(--color-control, var(--color-surface)); }
+.support-card .ui-button--secondary { background: var(--color-control, var(--color-surface)); }
 @media (hover: hover) and (pointer: fine) { .support-card .ui-button--secondary:hover:not(:disabled) { background: var(--color-control-hover, var(--color-layer-1)); } }
-.support-card .ui-button--secondary:focus-visible { outline: 0; background: var(--color-control-focus, var(--color-layer-1)); }
+.support-card .ui-button--secondary:focus-visible { background: var(--color-control-focus, var(--color-layer-1)); }
 .support-card__body { margin-top: var(--space-4); color: var(--color-muted); }
 .support-card__actions { display: grid; margin-top: var(--space-12); }
 .support-card__choice, .support-card__resolved { grid-area: 1 / 1; display: flex; align-items: center; gap: var(--space-8); margin: 0; transition: opacity 180ms ease-out, transform 240ms var(--ease-out-strong), filter 240ms var(--ease-out-strong), visibility 0s; }
@@ -150,9 +149,9 @@ html:has(.support-overlay[data-open]) { overflow: hidden; }
    writes and the box is empty, Send turns into Stop. */
 .support-composer { position: relative; flex: none; padding: var(--space-4) var(--space-12) var(--space-12); }
 /* The box is a solid control fill a step off the panel: a stronger step on hover and while typing, never an outline. */
-.support-composer__box { display: flex; align-items: flex-end; gap: var(--space-8); padding: 4px 4px 4px 12px; border-radius: var(--radius-sm); background: var(--color-control, var(--color-surface)); transition: background-color var(--motion-duration) var(--ease-standard); }
-@media (hover: hover) and (pointer: fine) { .support-composer__box:hover:not(:focus-within):not([data-disabled]) { background: var(--color-control-hover, var(--color-layer-2)); } }
-.support-composer__box:focus-within { background: var(--color-control-focus, var(--color-layer-2)); }
+.support-composer__box { display: flex; align-items: flex-end; gap: var(--space-8); padding: 4px 4px 4px 12px; border-radius: var(--radius-sm); background: var(--color-overlay-control, var(--color-control, var(--color-surface))); transition: background-color var(--motion-duration) var(--ease-standard); }
+@media (hover: hover) and (pointer: fine) { .support-composer__box:hover:not(:focus-within):not([data-disabled]) { background: var(--color-overlay-control-hover, var(--color-control-hover, var(--color-layer-2))); } }
+.support-composer__box:focus-within { background: var(--color-overlay-control-focus, var(--color-control-focus, var(--color-layer-2))); }
 .support-composer__box[data-disabled] { background: var(--color-well, var(--color-layer-2)); }
 .support-composer__input { flex: 1; min-width: 0; height: 28px; max-height: 132px; padding: 4px 0; border: 0; background: none; color: var(--color-text); font: inherit; font-size: var(--text-md); line-height: 20px; resize: none; outline: none; }
 .support-composer__input::placeholder { color: var(--color-muted); opacity: 1; }

@@ -201,16 +201,15 @@ html[data-privacy='on'] .private-field:not(:hover, :focus)::placeholder { color:
 .signed-out__links a:is(:hover, :focus-visible) { color: var(--color-text); }
 /* Flat and calm on the page's ground: no rule, outline or ring. A notice is one solid step off the ground (its tone in
    its ink), a field a solid control fill, and focus shows the hover fill. */
-.signed-out :focus-visible { outline: none; }
 .signed-out__body > .ui-alert { border-color: transparent; background: var(--color-surface); }
-.signed-out__body .ui-button--secondary { box-shadow: none; background: var(--color-deep-control, var(--color-surface)); }
+.signed-out__body .ui-button--secondary { background: var(--color-deep-control, var(--color-surface)); }
 @media (hover: hover) and (pointer: fine) { .signed-out__body .ui-button--secondary:hover:not(:disabled) { background: var(--color-deep-control-hover, var(--color-layer-1)); } }
 .signed-out__body .ui-button--secondary:focus-visible { background: var(--color-deep-control-focus, var(--color-layer-2)); }
 .signed-out__body .ui-button--primary:focus-visible { background: var(--color-accent-hover); }
-.signed-out__link-form .ui-input { outline: 0; box-shadow: none; background: var(--color-deep-control, var(--color-surface)); }
+.signed-out__link-form .ui-input { background: var(--color-deep-control, var(--color-surface)); }
 @media (hover: hover) and (pointer: fine) { .signed-out__link-form .ui-input:hover:not(:disabled, :focus, [aria-invalid='true']) { background: var(--color-deep-control-hover, var(--color-layer-1)); } }
-.signed-out__link-form .ui-input:is(:focus, :focus-visible) { outline: 0; box-shadow: none; background: var(--color-deep-control-focus, var(--color-layer-2)); }
-.signed-out__link-form .ui-input[aria-invalid='true'] { outline: 0; box-shadow: none; background: var(--color-control-invalid, var(--color-danger-bg)); }
+.signed-out__link-form .ui-input:is(:focus, :focus-visible) { background: var(--color-deep-control-focus, var(--color-layer-2)); }
+.signed-out__link-form .ui-input[aria-invalid='true'] { background: var(--color-control-invalid, var(--color-danger-bg)); }
 .between { justify-content: space-between; }
 .nowrap { white-space: nowrap; }
 .text-warning { color: var(--color-warning); }

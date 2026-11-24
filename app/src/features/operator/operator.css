@@ -46,7 +46,7 @@
 .op-reasons li { display: flex; flex-direction: column; gap: 2px; }
 .op-reason { margin: 0; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; text-decoration: underline; text-decoration-color: var(--color-faint); text-underline-offset: 3px; cursor: pointer; }
 @media (hover: hover) { .op-reason:hover { text-decoration-color: currentColor; } }
-.op-reason:focus-visible { outline: none; text-decoration-color: currentColor; }
+.op-reason:focus-visible { text-decoration-color: currentColor; }
 .op-siblings { display: flex; flex-wrap: wrap; gap: var(--space-8) var(--space-16); margin: 0; padding: 0; list-style: none; font-size: var(--text-sm); }
 .op-more { align-self: flex-start; margin-top: var(--space-12); }
 /* The waitlist: its count under the table, and the export at the toolbar's end (its icon alone on a phone). */
@@ -56,14 +56,14 @@
 .op-dialog-fields .op-add-date { align-self: flex-start; }
 /* The dialogs' fields (the sign-up limit, open to anyone or held): solid control fills, a stronger step on hover and
    focus, a danger-tinted fill when invalid; never an outline or a ring. */
-.op-dialog-fields .ui-input { outline: 0; box-shadow: none; background: var(--color-overlay-control, var(--color-control, var(--color-surface))); }
+.op-dialog-fields .ui-input { background: var(--color-overlay-control, var(--color-control, var(--color-surface))); }
 @media (hover: hover) and (pointer: fine) { .op-dialog-fields .ui-input:hover:not(:disabled, :focus, [aria-invalid='true']) { background: var(--color-overlay-control-hover, var(--color-control-hover, var(--color-layer-2))); } }
-.op-dialog-fields .ui-input:is(:focus, :focus-visible) { outline: 0; box-shadow: none; background: var(--color-overlay-control-focus, var(--color-control-focus, var(--color-layer-2))); }
+.op-dialog-fields .ui-input:is(:focus, :focus-visible) { background: var(--color-overlay-control-focus, var(--color-control-focus, var(--color-layer-2))); }
 .op-dialog-fields .ui-input:disabled { background: var(--color-overlay-control, var(--color-control, var(--color-surface))); color: var(--color-muted); }
-.op-dialog-fields .ui-button--secondary { box-shadow: none; background: var(--color-overlay-control, var(--color-control, var(--color-surface))); }
+.op-dialog-fields .ui-button--secondary { background: var(--color-overlay-control, var(--color-control, var(--color-surface))); }
 @media (hover: hover) and (pointer: fine) { .op-dialog-fields .ui-button--secondary:hover:not(:disabled) { background: var(--color-overlay-control-hover, var(--color-control-hover, var(--color-layer-2))); } }
-.op-dialog-fields .ui-button--secondary:focus-visible { outline: 0; background: var(--color-overlay-control-focus, var(--color-control-focus, var(--color-layer-2))); }
-.op-dialog-fields .ui-input[aria-invalid='true'] { outline: 0; box-shadow: none; background: var(--color-control-invalid, var(--color-danger-bg)); }
+.op-dialog-fields .ui-button--secondary:focus-visible { background: var(--color-overlay-control-focus, var(--color-control-focus, var(--color-layer-2))); }
+.op-dialog-fields .ui-input[aria-invalid='true'] { background: var(--color-control-invalid, var(--color-danger-bg)); }
 
 /* UI notes: a 64 × 36 screenshot thumbnail fits the 53px row; the bulk menu keeps its width as the count changes. */
 .op-shot { display: block; width: 64px; height: 36px; overflow: hidden; border-radius: 4px; background: var(--color-chip, var(--color-layer-2)); }
@@ -97,7 +97,7 @@
 .op-cluster-rail__row { display: flex; align-items: center; gap: var(--space-12); height: 32px; margin: 0 calc(-1 * var(--space-6)); padding: 0 var(--space-6); border-radius: 4px; color: inherit; text-decoration: none; }
 a.op-cluster-rail__row[aria-current='page'] { background: var(--color-active-bg); }
 @media (hover: hover) and (pointer: fine) { a.op-cluster-rail__row:hover { background: var(--color-hover); } }
-a.op-cluster-rail__row:focus-visible { outline: none; background: var(--color-hover); text-decoration: none; }
+a.op-cluster-rail__row:focus-visible { background: var(--color-hover); text-decoration: none; }
 .op-cluster-rail__why { flex: 1; color: var(--color-muted); font-size: var(--text-sm); }
 /* Reasons: a label, the count it was judged on and its points, 32px a row, apart by alignment alone. */
 .op-why, .op-links { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; font-size: var(--text-sm); line-height: var(--leading-sm); }
