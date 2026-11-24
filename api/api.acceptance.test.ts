@@ -23130,7 +23130,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       error(await local('GET', `/v1/webhooks/${hook.id}/deliveries?cursor=${edited}`), 422, 'INVALID_CURSOR');
     });
   });
-  test('dev E2E: the deploy sets a finite, audited fixture override that releases a held campaign without exempting it', async t => {
+  test('dev E2E: only the verified fixture releases marketing at the full sandbox customer share, never past SES headroom', async t => {
     await simulatedSesFixture(t, async ({runtime,db,local,run}) => {
       const {applyDevE2eFixture,DEV_E2E_SEND_CAP}=await import('./scripts/dev-e2e-fixture.js');
       const wid=runtime.config.workspaceId, domain='e2e.bane.mx', account='111122223333', domainId='dom_'+randomUUID().replaceAll('-','');
@@ -23142,14 +23142,17 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query(`INSERT INTO operation_domains(id,name,workspace_id,region) VALUES ($1,$2,$3,$4)`,[domainId,domain,wid,REGION]);
       const claim=(host:string)=>db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`,[host,wid]);
       await claim(domain);
-      const audits=async()=>(await db.query(`SELECT details FROM hosted_operator_audit WHERE workspace_id=$1 AND action='set-dev-e2e-send-cap'`,[wid])).rows.map(r=>r.details);
+      const audits=async()=>(await db.query(`SELECT details FROM hosted_operator_audit WHERE workspace_id=$1 AND action='set-dev-e2e-fixture-policy'`,[wid])).rows.map(r=>r.details);
       // Never production, never another workspace: a fixture without both verified claims is refused and unchanged.
       await assert.rejects(applyDevE2eFixture(db,{...dev,STAGE:'production',PUBLIC_URL:'https://bane.mx'}),/only to dev/);
       await assert.rejects(applyDevE2eFixture(db,{...dev,BANE_E2E_DOMAIN_ID:undefined}),/BANE_E2E_DOMAIN_ID/);
       await assert.rejects(applyDevE2eFixture(db,dev),/No unique E2E fixture/);
       await claim('e2e-va.bane.mx');
-      // A day of E2E volume at the old 500 override: the campaign is held.
-      await db.query(`UPDATE workspaces SET send_cap_override=500 WHERE id=$1`,[wid]);
+      // Dev already had the 100k workspace override. Its live Ohio sandbox sample (1/s, 200/day, 100 used) holds
+      // even a one-recipient simulator campaign because the outside customer share, not the workspace cap, is full.
+      await db.query(`UPDATE workspaces SET send_cap_override=$2 WHERE id=$1`,[wid,DEV_E2E_SEND_CAP]);
+      await db.query(`INSERT INTO provider_account_limits(aws_account_id,region,max_send_rate,max_24_hour_send,sent_last_24_hours,customer_sent_24_hours,checked_at,refresh_after)
+        VALUES($1,$2,1,200,100,100,clock_timestamp(),clock_timestamp()+interval '1 minute')`,[account,REGION]);
       await db.query(`INSERT INTO hosted_usage_hourly VALUES ($1,date_trunc('hour',now()),469)`,[wid]);
       const list=ok(await local('POST','/v1/lists',{name:'E2E fixture'}),201);
       await db.query(`WITH contact AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES ('e2e-cap-fixture',$1,'success@simulator.amazonses.com','subscribed') RETURNING id)
@@ -23158,20 +23161,37 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const path=`/v1/campaigns/${c.id}`, delivery=async()=>ok(await local('GET',path)).delivery;
       ok(await local('POST',path+'/send',{revision:c.revision}),202);await run('campaign.run');
       const held=await delivery(); assert.equal(held.waiting.reason,'hosted_daily_quota');assert.equal(held.expanded,0);
-      // The deploy raises it once, audited; the next deploys change and audit nothing.
+      // The dev deploy changes the fixture once, even though its override is already high enough.
       assert.deepEqual(await applyDevE2eFixture(db,dev),{workspaceId:wid,changed:true});
       assert.deepEqual(await applyDevE2eFixture(db,dev),{workspaceId:wid,changed:false});
-      assert.deepEqual((await audits()).map(d=>[d.old,d.new]),[[500,DEV_E2E_SEND_CAP]]);
-      await run('campaign.run');assert.equal((await delivery()).expanded,1);
+      assert.deepEqual((await audits()).map(d=>[d.old,d.new,d.exemptBefore,d.exemptAfter]),[[DEV_E2E_SEND_CAP,DEV_E2E_SEND_CAP,false,true]]);
+      // Exemption does not lift the real SES reserve. At 180 of 200, 10% is reserved for transactional mail.
+      const quota=(used:number)=>db.query('UPDATE provider_account_limits SET sent_last_24_hours=$3,checked_at=clock_timestamp() WHERE aws_account_id=$1 AND region=$2',[account,REGION,used]);
+      await quota(180); await run('campaign.run'); const sesHeld=await delivery();
+      assert.deepEqual([sesHeld.waiting.reason,sesHeld.expanded],['ses_daily_quota',0]);
+      await quota(100); await run('campaign.run'); assert.equal((await delivery()).expanded,1);
+      const {SESv2Client,GetAccountCommand,SendEmailCommand}=await import('@aws-sdk/client-sesv2');
+      let sends=0;
+      t.mock.method(SESv2Client.prototype,'send',async(cmd:any)=>{
+        if(cmd instanceof GetAccountCommand)return {SendingEnabled:true,SendQuota:{MaxSendRate:1,Max24HourSend:200,SentLast24Hours:100}};
+        assert.ok(cmd instanceof SendEmailCommand);assert.deepEqual(cmd.input.Destination?.ToAddresses,['success@simulator.amazonses.com']);
+        sends++;return {MessageId:randomUUID()};
+      });
+      const {runDispatcher}=await import('./src/dispatcher.js');
+      await runDispatcher(runtime,{region:REGION,accountId:account,lanes:1});
+      assert.equal(sends,1);assert.equal((await db.query('SELECT status FROM sending_emails WHERE workspace_id=$1 AND campaign_id=$2',[wid,c.id])).rows[0].status,'accepted');
       assert.deepEqual((await db.query(`SELECT a->>'used' AS used,a->>'marketingDayCap' AS marketing,hosted_minute_cap($1) AS burst,w.pending_cap_override,w.exempt_hosted_quotas FROM hosted_allowance_read($1,1,1,100,1000,10000,10) h(a) CROSS JOIN workspaces w WHERE w.id=$1`,[wid])).rows,
         // Bursts follow the limit (migration 231): clamp(100,000 ÷ 20, 50, 500) a minute.
-        [{used:'470',marketing:'90000',burst:500,pending_cap_override:null,exempt_hosted_quotas:false}]);
-      // A larger operator override and an exemption are left alone.
-      await db.query(`UPDATE workspaces SET send_cap_override=$2 WHERE id=$1`,[wid,DEV_E2E_SEND_CAP*2]);
+        [{used:'470',marketing:'90000',burst:500,pending_cap_override:null,exempt_hosted_quotas:true}]);
+      // Upgrading an old or larger override keeps at least the fixture cap. Do not cap an already exempt workspace.
+      for (const old of [500,DEV_E2E_SEND_CAP*2]) {
+        await db.query(`UPDATE workspaces SET send_cap_override=$2,exempt_hosted_quotas=false WHERE id=$1`,[wid,old]);
+        assert.equal((await applyDevE2eFixture(db,dev)).changed,true);
+        assert.equal((await db.query('SELECT send_cap_override FROM workspaces WHERE id=$1',[wid])).rows[0].send_cap_override,Math.max(old,DEV_E2E_SEND_CAP));
+      }
+      await db.query(`UPDATE workspaces SET send_cap_override=NULL WHERE id=$1`,[wid]);
       assert.equal((await applyDevE2eFixture(db,dev)).changed,false);
-      await db.query(`UPDATE workspaces SET send_cap_override=NULL,exempt_hosted_quotas=true WHERE id=$1`,[wid]);
-      assert.equal((await applyDevE2eFixture(db,dev)).changed,false);
-      assert.equal((await audits()).length,1);
+      assert.equal((await audits()).length,3);
     });
   });
 

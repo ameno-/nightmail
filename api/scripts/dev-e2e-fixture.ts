@@ -1,20 +1,14 @@
-// Dev E2E fixture capacity, applied by every dev deploy before its live E2E (deploy.yml; docs/ci.md). The fixture
-// workspace on dev.nightmail.dev (earlier dev.bane.mx) sends all day (deploys, the scheduled E2E, agents' runs), and its one-time 500/day override
-// ran out on Nov 12: campaigns held with hosted_daily_quota, three red deploys, every release blocked. This sets a
-// finite operator override of 100,000 recipients per rolling 24 hours (90,000 for marketing with the default reserve);
-// even a run every minute at the E2E's 25-admission ceiling (36,000 a day) stays under it. Minute limits, pending
-// limits, reputation holds and provider quotas still apply, and the workspace is not exempted.
-//
-// One statement, so it is atomic on its own or inside a caller's transaction. It writes hosted_operator_audit only
-// when it changes the row, never lowers a larger override, and leaves an exempted workspace alone (an override would
-// cap it). It refuses any stage but dev and any workspace that is not exactly the E2E fixture.
+// Only dev's named, verified E2E workspace is first-party: its live marketing must not wait for the outside
+// customer share (100 of 200 recipients in the Ohio SES sandbox). Keep a finite operator daily cap of at least
+// 100,000 for this fixture. SES's own daily quota, transactional reserve and sending rate still apply.
+// One atomic, audited transition. Never lower a larger override or change an already exempt workspace.
 //   STAGE=dev PUBLIC_URL=https://dev.nightmail.dev BANE_E2E_DOMAIN_ID=dom_... DATABASE_URL=... node --import tsx scripts/dev-e2e-fixture.ts
 import type { Client } from 'pg';
 import { log } from '../src/core.js';
 
 export const DEV_E2E_SEND_CAP = 100_000;
 const FIXTURE_DOMAINS = ['e2e.bane.mx', 'e2e-va.bane.mx'];
-const reason = 'Dev E2E fixture capacity, applied by every dev deploy (scripts/dev-e2e-fixture.ts)';
+const reason = 'First-party dev E2E fixture on the shared SES sandbox (scripts/dev-e2e-fixture.ts)';
 
 export async function applyDevE2eFixture(db: Pick<Client, 'query'>, env: Record<string, string | undefined>) {
   if (env.STAGE !== 'dev' || !['https://dev.nightmail.dev', 'https://dev.bane.mx'].includes(env.PUBLIC_URL ?? '')) throw new Error('The dev E2E fixture capacity applies only to dev (STAGE=dev, PUBLIC_URL=https://dev.nightmail.dev).');
@@ -31,12 +25,12 @@ export async function applyDevE2eFixture(db: Pick<Client, 'query'>, env: Record<
         AND (SELECT count(*) FROM domain_claims c WHERE c.workspace_id = w.id AND c.name = ANY($3) AND c.sending_state = 'verified') = cardinality($3::text[])
       FOR UPDATE OF w
     ), changed AS (
-      UPDATE workspaces w SET send_cap_override = $4 FROM fixture f
-      WHERE w.id = f.id AND NOT f.exempt_hosted_quotas AND (f.send_cap_override IS NULL OR f.send_cap_override < $4)
-      RETURNING w.id, f.send_cap_override AS old
+      UPDATE workspaces w SET exempt_hosted_quotas = true, send_cap_override = greatest(f.send_cap_override, $4::int) FROM fixture f
+      WHERE w.id = f.id AND NOT f.exempt_hosted_quotas
+      RETURNING w.id, f.send_cap_override AS old, w.send_cap_override AS new_cap
     ), audit AS (
       INSERT INTO hosted_operator_audit (workspace_id, action, details)
-      SELECT id, 'set-dev-e2e-send-cap', jsonb_build_object('old', old, 'new', $4::int, 'reason', $5::text) FROM changed
+      SELECT id, 'set-dev-e2e-fixture-policy', jsonb_build_object('old', old, 'new', new_cap, 'exemptBefore', false, 'exemptAfter', true, 'reason', $5::text) FROM changed
       RETURNING details
     )
     SELECT f.id, f.exempt_hosted_quotas AS exempt, f.send_cap_override AS current, (SELECT details FROM audit) AS details FROM fixture f`,
