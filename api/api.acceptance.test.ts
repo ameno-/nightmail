@@ -15815,12 +15815,19 @@ describe('Dashboard API capabilities', () => {
       ok(await local('POST', `/v1/operator/workspaces/${wid}/growth/lift`, { reason: 'Known launch reviewed with the owner' }));
       assert.deepEqual([(await score()).limit.growth, (await db.query("SELECT count(*)::int AS n FROM hosted_operator_audit WHERE workspace_id=$1 AND action='operator-lift-growth'", [wid])).rows[0].n], [null, 1]);
       error(await local('POST', `/v1/operator/workspaces/${wid}/growth/lift`, { reason: 'Known launch reviewed with the owner' }), 409, 'GROWTH_NOT_ACTIVE');
-      // Past growth in good standing: full pool rate (12,000/min at 200/s), 0.5x per sending domain (6,000/min), and transactional exempt from the shared-pool burst cap.
+      // Past growth in good standing: marketing gets full pool rate (12,000/min at 200/s, 6,000/min domain); transactional
+      // has its own separate minute/domain bucket at today's quarter cap (3,000/min ws, 1,500/min domain), bounded and isolated from marketing.
       assert.deepEqual([await pace(), (await score()).limit.perMinute], [12000, 12000]);
       await db.query('DELETE FROM hosted_burst_windows WHERE workspace_id=$1', [wid]);
       assert.deepEqual(await burst([['a.example', 6001], ['a.example', 6000], ['b.example', 6000], ['c.example', 1]]), { c0: false, c1: true, c2: true, c3: false });
-      const txAfterFull = (await db.query("SELECT hosted_burst_ok($1, 'a.example', 1, true) AS tx, hosted_burst_ok($1, 'a.example', 1, false) AS mkt", [wid])).rows[0];
-      assert.deepEqual(txAfterFull, { tx: true, mkt: false }, 'Transactional from a good-standing workspace is exempt from the shared-pool minute/domain burst cap.');
+      const txCap = (await db.query(`SELECT hosted_tx_minute_cap($1) AS cap,
+        hosted_burst_ok($1, 'a.example', 1501, true) AS over_dom,
+        hosted_burst_ok($1, 'a.example', 1500, true) AS at_dom,
+        hosted_burst_ok($1, 'a.example', 1, true) AS dom_full,
+        hosted_burst_ok($1, 'b.example', 1500, true) AS fill_ws,
+        hosted_burst_ok($1, 'c.example', 1, true) AS ws_full,
+        hosted_burst_ok($1, 'a.example', 1, false) AS mkt_still_full`, [wid])).rows[0];
+      assert.deepEqual(txCap, { cap: 3000, over_dom: false, at_dom: true, dom_full: false, fill_ws: true, ws_full: false, mkt_still_full: false }, 'Transactional uses its own 3,000/min workspace and 1,500/min domain bucket, isolated from marketing and bounded.');
 
       // A new sender whose first 500 bring complaints is capped by the score its evaluation found.
       const other = wid + '-new';
@@ -34438,6 +34445,45 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         { workspace_id: wsM1, kind: 'marketing', n: 2 },
         { workspace_id: wsM2, kind: 'marketing', n: 4 },
       ], 'Marketing shares remaining slots 1:1 round-robin across active workspaces.');
+    });
+  });
+
+  test('a burst-blocked transactional backlog does not stall another workspace\'s marketing on the live-MX path', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { runDispatcher, initialGate } = await import('./src/dispatcher.js');
+      const { SESv2Client, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
+      const pool = '111122228888', wsBlocked = 'ws_a_frozen', wsMkt = 'ws_z_mkt';
+      Object.assign(runtime.config, { multiTenant: true, liveEnabled: true, hostedScreen: false, aws: { accessKeyId: 'fixture-platform', secretAccessKey: 'fixture-only' } });
+      t.mock.method(SESv2Client.prototype, 'send', async (cmd: any) => {
+        if (cmd instanceof GetAccountCommand) return { SendingEnabled: true, SendQuota: { MaxSendRate: 200, Max24HourSend: 5_000_000, SentLast24Hours: 0 } };
+        return { MessageId: unique('live-sim') };
+      });
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready') ON CONFLICT DO NOTHING`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:feedback`]);
+      await db.query(`INSERT INTO provider_account_limits(aws_account_id,region,refresh_after,checked_at,max_send_rate,max_24_hour_send,sent_last_24_hours) VALUES ($1,$2,now(),now(),200,5000000,0) ON CONFLICT (aws_account_id,region) DO UPDATE SET max_send_rate=200, checked_at=now()`, [pool, REGION]);
+      for (const [wid, dom, exempt] of [[wsBlocked, 'frozen.example.net', false], [wsMkt, 'mkt.example.net', true]] as const) {
+        await db.query('INSERT INTO workspaces(id,slug,name,exempt_hosted_quotas) VALUES($1,$1,$1,$2) ON CONFLICT DO NOTHING', [wid, exempt]);
+        await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state,pool_tenant_name) VALUES ($1,$1,$2,'ready','shared',$3,'ready','t-'||$1) ON CONFLICT DO NOTHING`, [wid, REGION, pool]);
+        await db.query(`INSERT INTO provider_connection_regions(connection_id,region,tenant_state,sending_state) VALUES ($1,$2,'ready','ready') ON CONFLICT DO NOTHING`, [wid, REGION]);
+        await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified') ON CONFLICT DO NOTHING`, [dom, wid]);
+        await db.query(`INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES ($1,'inst_'||$1,$2,jsonb_build_array($2::text)) ON CONFLICT DO NOTHING`, [wid, REGION]);
+        await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES ('key_'||$1,$1,'k',md5($1),'nm_000000','["send"]','[]') ON CONFLICT DO NOTHING`, [wid]);
+      }
+      await db.query(`INSERT INTO sender_standing(workspace_id,phase,first_recipients,score,target,quality,band_limit,daily_limit,step,computed_at,evidence_at) VALUES($1,'graded',500,80,80,80,10000,10000,'warn',now(),now()) ON CONFLICT(workspace_id) DO UPDATE SET daily_limit=10000, step='warn'`, [wsBlocked]);
+      await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'c_'||$1||'_'||n,$1,'u'||n||'@example.net','subscribed' FROM generate_series(1,60) n`, [wsMkt]);
+      // Fill wsBlocked's transactional domain bucket (250/250 of 500/min cap) while leaving tenant room (250/500).
+      await db.query(`INSERT INTO hosted_burst_windows(workspace_id,scope,minute,used) VALUES ($1,'#tx',date_trunc('minute',now()),250),($1,'#tx:frozen.example.net',date_trunc('minute',now()),250)`, [wsBlocked]);
+      const txSnap = JSON.stringify({ kind: 'transactional', from: 'a@frozen.example.net', to: ['u1@example.net'], cc: [], bcc: [], replyTo: [], region: REGION, subject: 'Notice', text: 'hi', attachments: [], tracking: false, headers: [] });
+      const mktSnap = JSON.stringify({ kind: 'marketing', from: 'n@mkt.example.net', to: ['u1@example.net'], cc: [], bcc: [], replyTo: [], region: REGION, subject: 'News', text: 'hi', attachments: [], tracking: false, headers: [] });
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,created_at)
+        SELECT 'em_frz_'||n,$1,'key_'||$1,$2,'a@frozen.example.net',jsonb_build_array('t'||n||'@example.net'),'[]','[]','Notice',jsonb_set($3::jsonb,'{to}',jsonb_build_array('t'||n||'@example.net')),false,'queued',clock_timestamp()-interval '1 minute'
+        FROM generate_series(1,40) n`, [wsBlocked, REGION, txSnap]);
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,created_at)
+        SELECT 'em_mkt_'||n,$1,'key_'||$1,$2,'n@mkt.example.net',jsonb_build_array('u'||n||'@example.net'),'[]','[]','News',jsonb_set($3::jsonb,'{to}',jsonb_build_array('u'||n||'@example.net')),false,'queued',clock_timestamp()
+        FROM generate_series(1,48) n`, [wsMkt, REGION, mktSnap]);
+      const rep = await runDispatcher(runtime, { accountId: pool, region: REGION, gate: initialGate(), batchSize: 24, lanes: 1, until: Date.now() + 5000 });
+      assert.equal(rep.sent, 48, 'All 48 marketing rows dispatch in full batches past the blocked transactional backlog.');
+      const rem = (await db.query(`SELECT workspace_id, status, count(*)::int AS n FROM sending_emails WHERE workspace_id = ANY($1) GROUP BY 1, 2 ORDER BY 1, 2`, [[wsBlocked, wsMkt]])).rows;
+      assert.deepEqual(rem, [{ workspace_id: wsBlocked, status: 'queued', n: 40 }, { workspace_id: wsMkt, status: 'accepted', n: 48 }]);
     });
   });
 

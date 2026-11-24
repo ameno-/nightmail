@@ -75,8 +75,9 @@ export function establishedBy(o: { override: boolean; history: TrackRecord | nul
 }
 /**
  * Pacing protects the shared pool; it is not a customer limit. With a daily limit: clamp(limit ÷ 20, 50, 500) a minute.
- * In good standing past growth: the full pool SES rate (at least 500 a minute; a quarter while in growth), half per
- * sending domain (at least 50), with truly transactional mail exempt from the shared-pool minute/domain burst cap.
+ * In good standing past growth: the full pool SES rate for marketing (at least 500 a minute; a quarter while in growth),
+ * half per sending domain (at least 50). Transactional uses its own separate minute/domain buckets at a quarter of the
+ * pool rate in good standing (and the existing daily-limit formula otherwise), so marketing never consumes it.
  * The dispatcher shares marketing round-robin across active workspaces and puts transactional first (migration 457).
  */
 export const PACE = { floor: 50, ceiling: 500, perDay: 20, uncappedFloor: 500, poolShare: 1 } as const;

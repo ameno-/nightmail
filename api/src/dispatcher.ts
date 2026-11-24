@@ -340,15 +340,18 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
       UNION ALL SELECT n.workspace_id,o.step+1 FROM queued_owners o CROSS JOIN LATERAL (${seek(sql`o.workspace_id`)}) n WHERE o.step<${limit}`;
   const allOwners = sql`SELECT workspace_id FROM tx_owners ${priorityOnly ? sql`` : sql`UNION SELECT workspace_id FROM queued_owners`}`;
   const txUnheld = sql`(NOT ${heldStream(sql`e`)})`;
-  const ownersSql = mx ? sql`SELECT q.workspace_id,hosted_marketing_held(q.workspace_id) AS marketing_held,${liveMx?sql`(pc.kind='shared' AND NOT w.exempt_hosted_quotas)`:sql`false`} AS customer ${liveMx?sql`,p.cap,p.pool_paced,p.cap-coalesce(b.used,0) AS remaining,g.cap-g.used AS growth_left,pc.kind='shared' AS required_screen,
+  const ownersSql = mx ? sql`SELECT q.workspace_id,hosted_marketing_held(q.workspace_id) AS marketing_held,${liveMx?sql`(pc.kind='shared' AND NOT w.exempt_hosted_quotas)`:sql`false`} AS customer ${liveMx?sql`,p.cap,p.tx_cap,p.cap-coalesce(bm.used,0) AS mkt_remaining,p.tx_cap-coalesce(bt.used,0) AS tx_remaining,g.cap-g.used AS growth_left,pc.kind='shared' AS required_screen,
     (${!!runtime.config.trustedPool} AND pc.pool_tier='trusted' AND NOT pc.legacy_names) AS trusted`:sql``}
     FROM all_owners q JOIN ${sendingConnections(runtime)} pc USING(workspace_id)
-    ${liveMx?sql`LEFT JOIN workspaces w ON w.id=q.workspace_id LEFT JOIN hosted_burst_windows b ON b.workspace_id=q.workspace_id AND b.scope='' AND b.minute=${tick}
-      CROSS JOIN LATERAL (SELECT CASE WHEN pc.kind='shared' AND NOT w.exempt_hosted_quotas THEN hosted_minute_cap(q.workspace_id) END AS cap, CASE WHEN pc.kind='shared' AND NOT w.exempt_hosted_quotas THEN hosted_pool_paced(q.workspace_id) ELSE false END AS pool_paced) p
+    ${liveMx?sql`LEFT JOIN workspaces w ON w.id=q.workspace_id
+      LEFT JOIN hosted_burst_windows bm ON bm.workspace_id=q.workspace_id AND bm.scope='' AND bm.minute=${tick}
+      LEFT JOIN hosted_burst_windows bt ON bt.workspace_id=q.workspace_id AND bt.scope='#tx' AND bt.minute=${tick}
+      CROSS JOIN LATERAL (SELECT CASE WHEN pc.kind='shared' AND NOT w.exempt_hosted_quotas THEN hosted_minute_cap(q.workspace_id) END AS cap,
+        CASE WHEN pc.kind='shared' AND NOT w.exempt_hosted_quotas THEN hosted_tx_minute_cap(q.workspace_id) END AS tx_cap) p
       -- A new sender's growth pace (sponsor-wide rolling hour): an owner it has used up is not leased, so nothing is prepared or screened for it.
       LEFT JOIN LATERAL hosted_growth(q.workspace_id) g ON pc.kind='shared'`:sql``}
     WHERE pc.region=${region} AND pc.aws_account_id=${accountId} AND pc.paused_at IS NULL AND hosted_sponsor_hold(q.workspace_id) IS DISTINCT FROM 'pause'
-      ${liveMx?sql`AND (p.cap IS NULL OR p.pool_paced OR p.cap-coalesce(b.used,0)>0) AND (g.key IS NULL OR g.cap-g.used>0)`:sql``}` : sql`SELECT workspace_id,false AS marketing_held,false AS customer FROM all_owners`;
+      ${liveMx?sql`AND (p.cap IS NULL OR p.cap-coalesce(bm.used,0)>0 OR p.tx_cap-coalesce(bt.used,0)>0) AND (g.key IS NULL OR g.cap-g.used>0)`:sql``}` : sql`SELECT workspace_id,false AS marketing_held,false AS customer FROM all_owners`;
   const result = await runtime.db.execute<Record<string, unknown>>(sql`WITH RECURSIVE queued_owners(workspace_id,step) AS (${queuedOwners}), tx_owners AS (${txOwners}), all_owners AS (${allOwners}), owners AS MATERIALIZED (${ownersSql}), candidates AS (
       SELECT o.workspace_id, row_number() OVER (ORDER BY q.transactional DESC, q.turn, q.created_at, q.id) AS place FROM owners o CROSS JOIN LATERAL (
         SELECT p.*,row_number() OVER (ORDER BY transactional DESC,created_at,id) AS turn FROM (${page(sql`${limit}`)}) p
@@ -370,15 +373,16 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
         ${page(sql`${limit}`,true,sql`AND e.id NOT IN (SELECT id FROM allocated)`)}
       ) e LIMIT ${limit}
     ) ${liveMx ? sql`, fit AS MATERIALIZED (
-      SELECT p.*,e.snapshot->>'kind' AS stream,${txUnheld} AS tx_unheld,o.pool_paced,o.remaining,o.growth_left,o.cap,d.used,c.n,
-        sum(CASE WHEN o.pool_paced AND ${txUnheld} THEN 0 ELSE c.n END) OVER tenant AS total,
-        sum(CASE WHEN o.pool_paced AND ${txUnheld} THEN 0 ELSE c.n END) OVER identity AS subtotal,
-        sum(c.n) OVER tenant AS growth_total
+      SELECT p.*,e.snapshot->>'kind' AS stream,${txUnheld} AS tx_unheld,
+        CASE WHEN ${txUnheld} THEN o.tx_cap ELSE o.cap END AS eff_cap,
+        CASE WHEN ${txUnheld} THEN o.tx_remaining ELSE o.mkt_remaining END AS eff_remaining,
+        o.growth_left,d.used,c.n,
+        sum(c.n) OVER (PARTITION BY p.workspace_id,${txUnheld} ORDER BY ${transactional} DESC,e.created_at,p.id) AS total,
+        sum(c.n) OVER (PARTITION BY p.workspace_id,${txUnheld},${domain} ORDER BY ${transactional} DESC,e.created_at,p.id) AS subtotal,
+        sum(c.n) OVER (PARTITION BY p.workspace_id ORDER BY ${transactional} DESC,e.created_at,p.id) AS growth_total
       FROM picks p JOIN owners o USING(workspace_id) JOIN sending_emails e USING(workspace_id,id)
-      CROSS JOIN LATERAL (SELECT ${cost} AS n) c LEFT JOIN hosted_burst_windows d ON d.workspace_id=p.workspace_id AND d.scope=${domain} AND d.minute=${tick}
-      WINDOW tenant AS (PARTITION BY p.workspace_id ORDER BY ${transactional} DESC,e.created_at,p.id),
-        identity AS (PARTITION BY p.workspace_id,${domain} ORDER BY ${transactional} DESC,e.created_at,p.id)
-      )`:sql``}, due AS MATERIALIZED (${liveMx ? sql`SELECT workspace_id,id FROM fit WHERE (growth_left IS NULL OR growth_total<=growth_left) AND (cap IS NULL OR n=0 OR (pool_paced AND tx_unheld) OR (total<=remaining AND subtotal<=greatest(50,cap/2)-coalesce(used,0)))` : sql`SELECT * FROM picks`}
+      CROSS JOIN LATERAL (SELECT ${cost} AS n) c LEFT JOIN hosted_burst_windows d ON d.workspace_id=p.workspace_id AND d.scope=CASE WHEN ${txUnheld} THEN '#tx:'||${domain} ELSE ${domain} END AND d.minute=${tick}
+      )`:sql``}, due AS MATERIALIZED (${liveMx ? sql`SELECT workspace_id,id FROM fit WHERE (growth_left IS NULL OR growth_total<=growth_left) AND (eff_cap IS NULL OR n=0 OR (total<=eff_remaining AND subtotal<=greatest(50,eff_cap/2)-coalesce(used,0)))` : sql`SELECT * FROM picks`}
     ), selected AS MATERIALIZED (
       UPDATE sending_emails e SET lease_until = clock_timestamp() + interval '2 minutes' FROM due WHERE e.workspace_id = due.workspace_id AND e.id = due.id RETURNING e.*
     ), settings AS MATERIALIZED (
@@ -405,7 +409,7 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
         SELECT workspace_id, campaign_id, review_id, min(id) AS carrier FROM selected WHERE review_id IS NOT NULL GROUP BY 1,2,3
       ) refs JOIN sending_campaign_reviews r ON r.workspace_id=refs.workspace_id AND r.campaign_id=refs.campaign_id AND r.id=refs.review_id
     )
-    SELECT meta.cursor,${liveMx?sql`(SELECT jsonb_agg(to_jsonb(blocked)) FROM (SELECT DISTINCT workspace_id,stream FROM fit WHERE cap IS NOT NULL AND n>0 AND NOT (pool_paced AND tx_unheld) AND (used>=greatest(50,cap/2) OR remaining<=0)) blocked)`:sql`NULL`} AS blocked_streams,${sql.join(mailColumns, sql`, `)}, measured.bytes AS snapshot_bytes, s.installation_id, s.default_region, s.enabled_regions, s.ready, s.connection,s.quota_sample,s.probation AS on_probation,s.customer AS outside,
+    SELECT meta.cursor,${liveMx?sql`(SELECT jsonb_agg(to_jsonb(blocked)) FROM (SELECT DISTINCT workspace_id,stream FROM fit WHERE eff_cap IS NOT NULL AND n>0 AND (coalesce(used,0)+n>greatest(50,eff_cap/2) OR eff_remaining<n OR (growth_left IS NOT NULL AND growth_left<n))) blocked)`:sql`NULL`} AS blocked_streams,${sql.join(mailColumns, sql`, `)}, measured.bytes AS snapshot_bytes, s.installation_id, s.default_region, s.enabled_regions, s.ready, s.connection,s.quota_sample,s.probation AS on_probation,s.customer AS outside,
       CASE WHEN leased.dispatch_version > 0 THEN (SELECT count(*)::int FROM sending_email_events v
         WHERE v.workspace_id=leased.workspace_id AND v.email_id=leased.id AND v.type='provider_throttled' AND v.data->>'code'='SES_THROTTLED') ELSE 0 END AS rate_retries,
       r.renderer_version AS review_version, r.draft AS review_draft, r.rendered AS review_rendered,r.assets AS review_assets, r.screen AS review_screen, r.content_hash AS review_hash,
@@ -1377,11 +1381,18 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
     const caps = allowance();
     // Mail the allowance skips waits for a new sample: an idle run still wakes when it can change.
     if (caps && Object.values(caps).some(n => n < MAX_ENVELOPE)) counters.quotaRetryAt ??= quotaRetry(gate, lane.options.quotaRefreshMs);
-    const leaseOnce = () => phase('lease', () => leaseDue(runtime, transport, options.region, lane.options.batchSize, gate,lane.deferred, runClients, options.accountId, priorityOnly, first && (!gate.quota || now >= (gate.refreshAt ?? 0)), caps));
+    const leaseOnce = (size = lane.options.batchSize) => phase('lease', () => leaseDue(runtime, transport, options.region, size, gate,lane.deferred, runClients, options.accountId, priorityOnly, first && (!gate.quota || now >= (gate.refreshAt ?? 0)), caps));
+    const deferredBefore = lane.deferred.length;
     const fromCursor = gate.ownerCursor !== undefined;
     if (!fromCursor) { passStart = lane.advanced; passAllowance = caps; }
     let rows = await leaseOnce();
     if (fromCursor && !rows.length && gate.ownerCursor === undefined && (passStart < 0 || lane.advanced > passStart || tighter(caps, passAllowance))) { passStart = lane.advanced; passAllowance = caps; rows = await leaseOnce(); }
+    // Slots that went to a stream the burst check just deferred (a full burst window: fit/due dropped its rows) leave the
+    // lease short with other mail due, and transactional rows rank first: look again past the deferred streams at once.
+    for (let seen = deferredBefore; rows.length < lane.options.batchSize && lane.deferred.length > seen;) {
+      seen = lane.deferred.length;
+      rows = rows.concat(await leaseOnce(lane.options.batchSize - rows.length));
+    }
     leaseAllowance.set(rows, caps);
     return rows;
   };

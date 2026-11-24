@@ -3309,7 +3309,7 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
   const quotaUntil = new Date(Math.max(dbNow + 1000, Number.isFinite(refreshAt) ? refreshAt : dbNow + QUOTA_REFRESH_MS)).toISOString();
   if (sesCapacity <= buffered!.total) return hold('ses_daily_quota', quotaUntil);
   if (shareCapacity <= buffered!.total) return hold('hosted_daily_quota', quotaUntil);
-  // Release hysteresis: once this campaign already has rows buffered, wait until at least half its buffer has drained
+  // Release hysteresis: once this campaign already has rows buffered, wait until at least a quarter of its buffer has drained
   // (or the remaining recipients fit) instead of topping up tiny batches that contend on locks and wake shards nonstop.
   const room = Math.min(limits.campaign - buffered!.campaign, limits.total - buffered!.total);
   const minRelease = Math.min(row.total - row.expanded, Math.floor(limits.campaign / 4), CAMPAIGN_EXPAND_ROWS);
@@ -3432,7 +3432,7 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     const txMinRelease = Math.min(demand, Math.floor(cBuf / 4));
     const capacity = Math.min(demand, bufRoom);
     if (capacity <= 0 || (buffer!.campaign > 0 && bufRoom < txMinRelease)) {
-      // Lost a race with another release or buffer is still more than half full: wait for it to drain.
+      // Lost a race with another release or buffer is still more than three-quarters full: wait for it to drain.
       const backlog = capacity <= 0
         ? Math.max(buffer!.campaign - cBuf / 2, buffer!.total - wBuf / 2)
         : Math.max(buffer!.campaign - Math.max(0, cBuf - txMinRelease), buffer!.total - Math.max(0, wBuf - txMinRelease));
