@@ -6,7 +6,7 @@ import { SLOW_REQUEST_MS } from './log.js';
 // and keeps doing so; a deep queue that drains on time is only busy, and never alerts.
 //
 // An alert fires once its condition has held for `sustain` ticks in a row (one tick a minute), posts again every
-// `remindMinutes` while it lasts, and posts "All clear" once it has been gone for `clearMinutes`.
+// `remindMinutes` while it lasts if critical. Only a posted, long-lived incident gets a recovery card.
 
 /** The tick itself. */
 export const TICK = {
@@ -20,8 +20,8 @@ export const TICK = {
   statementMs: 3_000, lockMs: 1_000,
   /**
    * Cards per tick, one after the other (Slack takes about one a second from a webhook), each given `postMs`, all of
-   * them `postBudgetMs`: critical before warning, new before cleared before reminders. More new ones than fit become
-   * one summary card naming how many of each kind, so a burst of fifty is six cards, not fifty over eight minutes.
+   * them `postBudgetMs`: critical only, new before cleared before reminders. More new ones than fit become
+   * one summary card, so a burst of fifty is six cards, not fifty over eight minutes.
    */
   cards: 6, postMs: 5_000, postBudgetMs: 10_000,
   /** A cleared card Slack refuses is tried again each tick for this long, then given up on (and logged). */
@@ -30,24 +30,25 @@ export const TICK = {
   staleSeconds: 180,
   /** Gone this long before "All clear": one quiet minute between two bad ones is not a recovery. */
   clearMinutes: 3,
+  /** Within an hour of a critical recovery, wait for a 15-minute recurrence. Short incidents need no recovery card. */
+  flapMinutes: 60, longMinutes: 15,
   /** health_minutes is kept this long; the page shows 15 minutes and no rule looks further back. */
   keepMinutes: 120,
 } as const;
 
 /**
  * Cloudflare queues whose messages are the work itself, by the name the minute cron reads them under (src/worker.ts).
- * `oldestSeconds`: the oldest message has waited this long. Consumers take a batch every few seconds, so a healthy queue's oldest message is seconds old
- * however deep it is; minutes old means the consumers are not keeping up. On the 23rd the feedback queue reached 20
- * minutes; at these numbers the card comes in the fourth minute.
+ * After #619 the routine lane carries deliveries, opens and clicks; safety decisions have their own priority lane.
+ * On 23 Nov a 20-minute routine backlog merited investigation; on 24 Nov even one message read 14 minutes old
+ * while fresh batches were completing in seconds. Show ten minutes on Health; page only at thirty for two ticks.
  */
-export const QUEUES: Record<string, { oldestSeconds: number; sustain: number; remindMinutes: number }> = {
-  // Bounces and complaints ride here: a campaign's bounce rate reads low while they are late, and the list probe and
-  // auto-pause decide on them.
-  feedback: { oldestSeconds: 120, sustain: 2, remindMinutes: 30 },
-  // The safety lane (#619) for bounces and complaints of mail already under watch: it should never wait. Under the
-  // name the cron reads it by: as `priority` this line matched no queue and the lane could not alert.
-  'feedback-priority': { oldestSeconds: 60, sustain: 2, remindMinutes: 30 },
+type AgeRule = { warning?: number; critical?: number };
+export const QUEUES: Record<string, AgeRule> = {
+  feedback: { warning: 600, critical: 1_800 },
+  // Bounces, complaints and suppressions bypass routine deliveries. Late safety decisions can release unsafe mail.
+  'feedback-priority': { critical: 60 },
 };
+export const QUEUE = { sustain: 2, remindMinutes: 30 } as const;
 /**
  * Queues that carry wake hints for the jobs table, not work: a message says "look at the jobs now" and any consumer
  * that runs takes whatever is due, so their depth and their oldest message say nothing about work waiting. While jobs
@@ -65,13 +66,13 @@ export const DLQ = { depth: 1, sustain: 1, remindMinutes: 360 } as const;
  * The jobs table, by class (migration job_class): a due job (available now, or its lease ran out) has waited this long.
  * On the 23rd, 1,883 mailbox.ingest jobs were 13 minutes late. Jobs scheduled for later are not late and never count.
  */
-export const JOBS_LATE: Record<string, { oldestSeconds: number }> = {
-  ingest: { oldestSeconds: 180 },     // Received mail should be in the inbox within a minute.
-  feedback: { oldestSeconds: 180 },   // As the feedback queue.
-  campaign: { oldestSeconds: 300 },   // A release is due every 10 to 20 seconds; five minutes late is a stalled campaign.
-  publish: { oldestSeconds: 300 },
-  hook: { oldestSeconds: 900 },       // Webhook posts wait on customers' endpoints and each owner's turn.
-  other: { oldestSeconds: 600 },
+export const JOBS_LATE: Record<string, AgeRule> = {
+  ingest: { warning: 180, critical: 600 },    // A missed turn is visible; ten minutes without receiving due mail needs an operator (13 on the 23rd).
+  feedback: { warning: 600, critical: 1_800 }, // Delayed application of reports, as for the routine queue.
+  campaign: { warning: 300, critical: 600 },  // A five-minute release delay is worth seeing; ten is a stalled send.
+  publish: { warning: 300 },
+  hook: { warning: 900 },                     // Customers' endpoints and each owner's turn.
+  other: { warning: 600 },
 };
 export const JOBS = {
   sustain: 2, remindMinutes: 30,
@@ -112,7 +113,7 @@ export const CAMPAIGNS = {
    * Releasing below this share of what it is entitled to for the whole window, with nothing it is waiting for: the
    * planner, the dispatcher or the provider is holding it back. Or releasing nothing at all for `stalledMinutes`.
    */
-  slowShare: 0.5, stalledMinutes: 5,
+  slowShare: 0.5, stalledMinutes: 5, criticalStalledMinutes: 10, // An unpaced send with no wait and no progress for the entire window.
   /** Rules about rate need this much left to send, in seconds at the planned rate: the last stretch always slows. */
   tailSeconds: 600,
   /**
@@ -170,7 +171,8 @@ export const REQUESTS = {
   /**
    * A dispatcher shard's run failing (DISPATCHER_RUN_FAILED and its kin) this often in fifteen minutes. One failure
    * heals itself: the shard runs again 15 seconds later and its leased mail is taken back within three minutes. On the
-   * 23rd one shard failed 11 times in two hours; three in a quarter of an hour is a shard that keeps failing.
+   * 23rd one shard failed 11 times in two hours; three in a quarter of an hour is worth seeing, but these counts span shards and do not prove mail stopped.
+   * Warn on Health; a stalled campaign or due work not draining is what pages.
    */
   dispatcherFailures: 3,
   /** A client is counted on its own from this many requests in one 20-second flush (one a second). */
@@ -192,7 +194,7 @@ export const SQLSTATES: Record<string, { label: string; count: number }> = {
 export const DATABASE = {
   remindMinutes: 15,
   /** Connections in use, of max_connections. Above this a burst gets "too many connections" (53300). */
-  connectionShare: 0.8, sustain: 2,
+  connectionShare: 0.8, sustain: 2, // Pool occupancy alone is a warning; actual refusals (53300) page.
   /** A transaction open this long holds back vacuum and may hold locks; migrations and retention finish well inside it. */
   transactionSeconds: 600,
   /** Queries running over 30 seconds, and sessions waiting on a lock: each for two ticks. One long report is not an alert; three at once is a pile-up. */
@@ -201,5 +203,5 @@ export const DATABASE = {
    * With DATABASE_DISK_GB set: the database's size as a share of the disk. PlanetScale makes the cluster read-only near
    * 95%, as on the 23rd; its own webhook (#586) is the earlier, finer alert, and this one needs nothing from outside.
    */
-  diskShare: 0.75, diskRemindMinutes: 360,
+  diskShare: 0.75, criticalDiskShare: 0.90, diskRemindMinutes: 360, // Plan capacity at 75%; intervene before the 95% write cutoff.
 } as const;

@@ -7,17 +7,15 @@ page), as Slack cards on `OPERATOR_SLACK_WEBHOOK_URL`, and as JSON for a program
 
 ## How an alert reaches you
 
-- **Opens** when its condition has held for its number of ticks (one a minute); **reminds** at its interval
-  while it lasts; **clears** with a "Cleared" card under the same key once it has been gone three minutes.
-- **A card** is one line for a person and one for a program, which is also the last line of the message's
-  `text`: `key=queue-behind:feedback state=open severity=critical value=1200 unit=seconds since=2026-11-23T14:05:00Z runbook=docs/operations.md#queue-behind health=https://…/operator?view=health`.
-  `state` is `open` or `cleared` (a cleared line has `cleared=` and no value). No value holds a space. The
-  key is the alert's kind, then what it is about; it stays the same for as long as the alert lasts.
-- **Severity.** `critical`: customers' mail or requests are affected now. `warning`: look today.
-- **In a burst** at most six cards go out a minute, one after the other: new alerts first, critical before
-  warning, then recoveries, then reminders. New (or cleared) alerts that do not fit share one summary card,
-  `key=summary state=open severity=… count=8 kinds=jobs-failed health=…`, which says how many of each kind; every
-  one of them is on the Health page and in the route, and each still gets its own cleared card.
+- **Health** shows warnings and critical alerts once their thresholds hold. An alert closes after three quiet
+  minutes. Warnings stay on Health; only critical alerts go to Slack.
+- **Slack** posts one human line with an Open button. Critical alerts remind at their existing intervals. A
+  repeat within an hour of a critical recovery must stay open for 15 minutes before it posts. A warning that
+  becomes critical can page immediately if there was no recent critical recovery for that key.
+- **Recoveries** post only for incidents that sent an open card and were observed for at least 15 minutes.
+  The three quiet minutes and any Slack retry time do not count toward those 15.
+- **In a burst** at most six cards go out a minute: opens, recoveries, then reminders. Opens or recoveries
+  that do not fit share one summary. Every individual alert is listed on Health.
 - **A card Slack refuses** is tried again on the next tick: an open one for as long as the alert lasts, a cleared
   one for 30 minutes (then `HEALTH_ALERT_DROPPED` is logged). That holds for `database-refusing` too.
 - **Pull instead of push:** `GET /v1/operator/health` returns the open alerts and everything the tick measured
@@ -56,23 +54,24 @@ the numbers. Do not pause, resume, cancel, requeue, delete or deploy: those are 
 ## Queues
 
 ### queue-behind
-The oldest message of a Cloudflare queue has waited too long (feedback 2 min, priority 1 min) for two ticks: the
-consumers are not keeping up. A deep queue that drains in time is only busy and never alerts. The `work` and
+The oldest routine delivery report reaching 10 minutes for two ticks is a warning; 30 minutes for two ticks is
+critical. The priority lane is critical at 1 minute for two ticks. Oldest measures time since enqueue, including
+retry backoff; one old message alone does not mean consumers have stopped. A deep queue that drains in time is only busy and never alerts. The `work` and
 `webhooks` queues never alert at all: they carry wake hints for the jobs table, not work, and a burst's hints
 stay queued for hours while the jobs themselves are processed (24 Nov: 40,100 hints, the oldest six hours old,
 with mailbox.ingest draining). They are on the Health page as "wake hints"; whether work waits is `jobs-behind`.
-`feedback` and `feedback-priority` are critical: bounces and complaints are late, so bounce rates read
-low and the list probe and auto-pause decide on old numbers. (23 Nov: 158,000 waiting, 20 minutes behind.)
+Bounces and complaints use the priority lane so list probes and auto-pause do not wait behind routine delivery,
+open and click reports. The 23 Nov routine backlog (158,000 waiting, 20 minutes behind) would now warn on Health.
 
 **An agent checks first**
 1. `GET /v1/operator/health`: `queues[]` (depth and oldest, minute by minute: growing or draining?), `feedbackLagSeconds`, and whether `jobs-behind` or `database-*` is open too.
-2. Workers Logs, `code = FEEDBACK_BATCH`, last 15 minutes: batch `size`, `durationMs`, `failed`. Slow batches point at the database; failed ones at the handler.
+2. Workers Logs, `code = FEEDBACK_BATCH`, last 15 minutes: compare `lane`, `size`, `oldestMs`, `freshOldestMs` (when present), `failed` and `quarantined`. Old retry timestamps can coexist with prompt first deliveries.
 3. Workers Logs, `level = error`, last 15 minutes, grouped by `code`.
 
 **Then** see what is producing: a large campaign (`campaigns[]` on the Health tab) fills the feedback queue at its send rate. If the consumers are healthy but outpaced, slow the campaign (its pacing) rather than wait. `docs/dispatch-scaling.md` has the measured ceilings.
 
 ### dead-letters
-A dead-letter queue holds a message: an event Nightmail gave up on after its retries. Alerts on the first one.
+A dead-letter queue holds a message: normal processing exhausted its retries. Critical on the first one because the event needs recovery.
 
 **An agent checks first**
 1. `GET /v1/operator/health`: which queue and how many.
@@ -84,8 +83,8 @@ A dead-letter queue holds a message: an event Nightmail gave up on after its ret
 ## Jobs
 
 ### jobs-behind
-Jobs of one type that are due now (not scheduled for later) have waited too long: inbound and feedback 3 min,
-campaign 5 min, others 10, webhook posts 15. This is the jobs table itself, not the wake messages in the `work`
+Due inbound jobs warn at 3 min and page at 10; feedback warns at 10 and pages at 30; campaigns warn at 5
+and page at 10. Publishing (5 min), other jobs (10 min) and webhook posts (15 min) warn only. This is the jobs table itself, not the wake messages in the `work`
 queue. (23 Nov: 1,883 `mailbox.ingest` jobs 13 minutes late.)
 
 **An agent checks first**
@@ -124,7 +123,7 @@ pace, because it is scheduled, or because its list probe is waiting, is never on
 
 ### campaign-slow
 A sending campaign that is not waiting for anything released under half of what it is entitled to for ten
-minutes, or nothing at all for five (critical). The planner, the dispatcher or the provider is holding it back.
+minutes, or nothing at all for five (warning) or ten (critical). The planner, the dispatcher or the provider is holding it back.
 
 **An agent checks first**
 1. `GET /v1/operator/health`: the campaign's `rate`, `acceptedRate`, `entitled`, `account`, `planned`. `planned` far below `entitled`: the planner's view (`regional_workspace_limits`) is the cause. `rate` at `planned` but `acceptedRate` lower: the dispatcher or the provider.
@@ -135,7 +134,7 @@ minutes, or nothing at all for five (critical). The planner, the dispatcher or t
 
 ### campaign-long
 At its measured rate a campaign needs more than six hours, and it is releasing under 80% of what it is entitled
-to. This is the number nobody had on the 23rd (a 1.8M send at 32 a second of 160: 15 hours, not 3). The card names
+to. This is the number nobody had on the 23rd (a 1.8M send at 32 a second of 160: 15 hours, not 3). Health shows
 the rate, the account's, what it is entitled to and what the planner reads. A large send at its entitled rate is
 not an alert.
 
@@ -169,7 +168,7 @@ Nightmail paused a campaign (a quarantine after its list probe, an auto-pause on
 failure), not its owner. Open until it is resumed or canceled, or for a day.
 
 **An agent checks first**
-1. The card's code (`LIST_QUALITY`, `CONTENT_REJECTED_SPAM`, …) and `/operator/workspaces/<workspace>`: standing, score, quarantines.
+1. The Health alert's code (`LIST_QUALITY`, `CONTENT_REJECTED_SPAM`, …) and `/operator/workspaces/<workspace>`: standing, score, quarantines.
 2. `SELECT pause_reason,quarantines,expanded,total FROM sending_campaigns WHERE id='<id>';`
 3. Workers Logs, `code = CAMPAIGN_AUTO_PAUSED` for the `campaignId`.
 
@@ -227,7 +226,7 @@ job): mail arrived for a real workspace and its arrival notice was lost, so nobo
 ### dispatcher-failing
 A dispatcher shard's runs failed three times in fifteen minutes (`DISPATCHER_RUN_FAILED` and its kin). One
 failure heals itself: the shard runs again 15 seconds later, and mail it had leased is taken back within three
-minutes. A run of them means a shard is not sending. (23 Nov: 11 in two hours on one shard, at the write of its
+minutes. The count spans shards and does not prove a send stopped; it is a Health warning. A campaign stalled for ten minutes pages. (23 Nov: 11 in two hours on one shard, at the write of its
 pacing state to Durable Object storage.)
 
 **An agent checks first**
@@ -263,7 +262,7 @@ too many connections (`53300`) at 3; statement timeouts (`57014`) and deadlocks 
 3. `40P01`: the server log names both statements; `docs/ci.md`, Deadlock guard, has the lock order rules.
 
 ### database-connections
-Connections at 80% of `max_connections` for two ticks: above this a burst is refused (`53300`).
+Connections at 80% of `max_connections` for two ticks: a Health warning. Actual refusals (`53300`) page.
 
 **An agent checks first**
 1. `SELECT state,count(*) FROM pg_stat_activity WHERE datname=current_database() GROUP BY 1;` (`idle in transaction` is a leak).
@@ -295,7 +294,7 @@ Ten or more sessions waiting on a lock, for two ticks.
 3. `database-errors:55P03`: are requests already failing on it?
 
 ### database-disk
-With `DATABASE_DISK_GB` set: the database is at 75% of its disk. PlanetScale makes the cluster read-only near
+With `DATABASE_DISK_GB` set: 75% of disk is a warning; 90% is critical. PlanetScale makes the cluster read-only near
 95%. Its own webhook (#586) is the finer alert; this one needs nothing from outside.
 
 **An agent checks first**

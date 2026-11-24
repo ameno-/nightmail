@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql, type SQL } from 'drizzle-orm';
 import { ApiError, databaseCodeOf, errors, log, logError, response, security, transientDatabaseError, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
-import { CAMPAIGNS, DATABASE, DLQ, JOBS, JOBS_LATE, QUEUES, REQUESTS, SQLSTATES, TICK, WAKE_QUEUES } from './health-thresholds.js';
+import { CAMPAIGNS, DATABASE, DLQ, JOBS, JOBS_LATE, QUEUE, QUEUES, REQUESTS, SQLSTATES, TICK, WAKE_QUEUES } from './health-thresholds.js';
 import { countDatabaseError, LATENCY_BUCKETS, WRITE_LIMITS } from './health-counters.js';
 import { slackCard } from './operator-alerts.js';
 import { postSlack } from './reputation-alerts.js';
@@ -15,19 +15,8 @@ import { postSlack } from './reputation-alerts.js';
 // (health_state.rollup), which is all GET /v1/operator/health and the Operator area's Health tab read, and compared
 // with the thresholds in src/health-thresholds.ts.
 //
-// A condition that holds is an alert: a row in health_alerts and one Slack card on OPERATOR_SLACK_WEBHOOK_URL, posted
-// from the tick itself, never through the jobs table: the jobs table falling behind is one of the things it reports.
-// While it lasts the card repeats at its reminder interval; once it has been gone for three minutes a "Cleared" card
-// with the same key says so. Without the webhook (every self-hosted installation) nothing is posted: the Health page,
-// the route and the log lines are the whole of it.
-//
-// An alert is for a person and for a program. Its key is stable (queue-behind:feedback, campaign-slow:<campaign>), and
-// every card ends with one line of key=value pairs, also the last line of the message's text:
-//   key=queue-behind:feedback state=open severity=critical value=1200 unit=seconds since=2026-11-23T14:05:00Z runbook=docs/operations.md#queue-behind health=<origin>/operator?view=health
-// state is open or cleared; no value holds a space. An agent that would rather pull reads GET /v1/operator/health.
-//
-// A card carries numbers, queue names, job types, error codes, route templates and campaign and workspace IDs. Never
-// a name, an address, a subject or anything a customer wrote.
+// Both severities are on Health. Only critical conditions go to Slack, directly from the tick so a stuck jobs
+// queue cannot strand its own alert. Cards are plain human lines; stable keys and evidence live in the health API.
 
 export type QueueSample = { name: string; depth: number; oldestMs: number };
 export type SlackMessage = Record<string, unknown> & { text: string };
@@ -42,7 +31,7 @@ type Section = 'queues' | 'jobs' | 'campaigns' | 'requests' | 'database';
 // The kind is the first part of every key and its section in docs/operations.md; unit says what the alert's value counts.
 const KINDS = {
   'queue-behind': { emoji: ':hourglass_flowing_sand:', label: 'Queue behind', severity: 'critical', unit: 'seconds', section: 'queues' },
-  'dead-letters': { emoji: ':warning:', label: 'Dead letters', severity: 'warning', unit: 'messages', section: 'queues' },
+  'dead-letters': { emoji: ':warning:', label: 'Dead letters', severity: 'critical', unit: 'messages', section: 'queues' },
   'jobs-behind': { emoji: ':hourglass_flowing_sand:', label: 'Jobs behind', severity: 'critical', unit: 'seconds', section: 'jobs' },
   'jobs-failed': { emoji: ':x:', label: 'Jobs failed', severity: 'warning', unit: 'jobs', section: 'jobs' },
   'campaign-slow': { emoji: ':snail:', label: 'Campaign slow', severity: 'warning', unit: 'per_second', section: 'campaigns' },
@@ -55,9 +44,9 @@ const KINDS = {
   'slow-requests': { emoji: ':turtle:', label: 'Slow requests', severity: 'warning', unit: 'milliseconds', section: 'requests' },
   'server-errors': { emoji: ':x:', label: 'Server errors', severity: 'critical', unit: 'responses', section: 'requests' },
   'errors': { emoji: ':x:', label: 'Errors', severity: 'warning', unit: 'lines', section: 'requests' },
-  'dispatcher-failing': { emoji: ':rotating_light:', label: 'Dispatcher failing', severity: 'critical', unit: 'failures', section: 'requests' },
+  'dispatcher-failing': { emoji: ':rotating_light:', label: 'Dispatcher failing', severity: 'warning', unit: 'failures', section: 'requests' },
   'database-errors': { emoji: ':card_file_box:', label: 'Database errors', severity: 'critical', unit: 'errors', section: 'requests' },
-  'database-connections': { emoji: ':card_file_box:', label: 'Database connections', severity: 'critical', unit: 'connections', section: 'database' },
+  'database-connections': { emoji: ':card_file_box:', label: 'Database connections', severity: 'warning', unit: 'connections', section: 'database' },
   'database-transaction': { emoji: ':card_file_box:', label: 'Long transaction', severity: 'warning', unit: 'seconds', section: 'database' },
   'database-slow-queries': { emoji: ':card_file_box:', label: 'Slow queries', severity: 'warning', unit: 'queries', section: 'database' },
   'database-lock-waits': { emoji: ':card_file_box:', label: 'Lock waits', severity: 'warning', unit: 'sessions', section: 'database' },
@@ -97,7 +86,7 @@ export type Sample = { queues: QueueSample[]; late: Late[] | null; failed: Faile
  * What the next tick compares with: how many ticks each condition has held, and each sending campaign's minute samples
  * (when, released, accepted).
  */
-export type Memory = { streaks: Record<string, number>; campaigns: Record<string, [at: number, released: number, accepted: number | null][]> };
+export type Memory = { streaks: Record<string, number>; campaigns: Record<string, [at: number, released: number, accepted: number | null][]>; criticalKeys?: string[]; criticalClears?: Record<string, number> };
 export const emptyMemory = (): Memory => ({ streaks: {}, campaigns: {} });
 
 const Queue = z.object({ name: z.string(), depth: z.number().int(), oldestSeconds: z.number().int(), behind: z.boolean(),
@@ -112,7 +101,7 @@ const Campaign = z.object({ id: z.string(), workspaceId: z.string(), state: z.st
   etaSeconds: z.number().int().nullable(), waiting: z.string().nullable().describe('Why releasing waits (waiting_reason), or the pause code of a paused campaign.'),
   settled: z.number().int().nullable(), bounceRate: z.number().nullable().describe('Bounced ÷ (delivered + bounced), from the campaign’s stored counts.'), behind: z.boolean() });
 const Route = z.object({ route: z.string().describe('Method and route template.'), count: z.number().int(), errors: z.number().int(), p50Ms: z.number().int(), p95Ms: z.number().int(), slowestMs: z.number().int(), behind: z.boolean() });
-const Alert = z.object({ key: z.string().describe('Stable for as long as the condition lasts, and the same on its Slack cards: kind, then what it is about.'), kind: z.string(), label: z.string(), severity: z.enum(['critical', 'warning']),
+const Alert = z.object({ key: z.string().describe('Stable identifier: the kind, then what the condition is about.'), kind: z.string(), label: z.string(), severity: z.enum(['critical', 'warning']),
   value: z.number().describe('The one number that matters, in unit.'), unit: z.string(), words: z.string(), since: z.string(), sentAt: z.string().nullable().describe('When its last Slack card went out. Null: none did.'),
   runbook: z.string().describe('Its section of the runbook, in the repository.') });
 const Health = z.object({
@@ -152,11 +141,19 @@ export function evaluate(sample: Sample, memory: Memory, now: number, diskBytes:
     findings.push({ key, kind, severity, value: Math.round(value * 1000) / 1000, words, remindMinutes }); behind.add(key);
   };
 
+  // Each tier must hold on its own consecutive ticks; a warning streak alone cannot promote an alert.
+  const ageSeverity = (key: string, age: number, rule: { warning?: number; critical?: number }, sustain: number): Severity | undefined => {
+    const warning = held(key, rule.warning !== undefined && age >= rule.warning, sustain);
+    return held(key + ':critical', rule.critical !== undefined && age >= rule.critical, sustain) ? 'critical' : warning ? 'warning' : undefined;
+  };
+
   const queues = sample.queues.map(q => {
     const name = safe(q.name), dlq = name.endsWith('-dlq'), rule = QUEUES[name], oldestSeconds = Math.round(q.oldestMs / 1000), key = `${dlq ? 'dead-letters' : 'queue-behind'}:${name}`;
     if (dlq) { if (held(key, q.depth >= DLQ.depth, DLQ.sustain)) find('dead-letters', name, q.depth, `${id(name)}: ${count(q.depth)}.`, DLQ.remindMinutes); }
-    // Feedback is what bounce rates, the list probe and auto-pause decide on; the other queues only delay.
-    else if (rule && held(key, oldestSeconds >= rule.oldestSeconds, rule.sustain)) find('queue-behind', name, oldestSeconds, `${id(name)}: oldest ${span(oldestSeconds)}, ${count(q.depth)} waiting.`, rule.remindMinutes, name === 'feedback' || name === 'feedback-priority' ? 'critical' : 'warning');
+    else if (rule) {
+      const severity = ageSeverity(key, q.depth > 0 ? oldestSeconds : 0, rule, QUEUE.sustain);
+      if (severity) find('queue-behind', name, oldestSeconds, `${id(name)}: oldest ${span(oldestSeconds)}, ${count(q.depth)} waiting.`, QUEUE.remindMinutes, severity);
+    }
     // A queue without a rule is shown and never alerts: the wake hints (WAKE_QUEUES), which the jobs below answer for.
     return { name, depth: q.depth, oldestSeconds, behind: behind.has(key), wake: WAKE_QUEUES.includes(name) };
   });
@@ -168,8 +165,9 @@ export function evaluate(sample: Sample, memory: Memory, now: number, diskBytes:
     for (const late of sample.late) {
       const row = of(late.type), rule = JOBS_LATE[late.class] ?? JOBS_LATE.other!;
       row.pending += late.pending; row.oldestSeconds = Math.max(row.oldestSeconds, late.oldestSeconds);
-      if (held(`jobs-behind:${row.type}`, late.oldestSeconds >= rule.oldestSeconds, JOBS.sustain)) {
-        find('jobs-behind', row.type, late.oldestSeconds, `${id(row.type)}: ${count(late.pending)}${late.pending >= JOBS.read ? '+' : ''} due, oldest ${span(late.oldestSeconds)}.`, JOBS.remindMinutes, late.class === 'ingest' || late.class === 'feedback' || late.class === 'campaign' ? 'critical' : 'warning');
+      const severity = ageSeverity(`jobs-behind:${row.type}`, late.oldestSeconds, rule, JOBS.sustain);
+      if (severity) {
+        find('jobs-behind', row.type, late.oldestSeconds, `${id(row.type)}: ${count(late.pending)}${late.pending >= JOBS.read ? '+' : ''} due, oldest ${span(late.oldestSeconds)}.`, JOBS.remindMinutes, severity);
         row.behind = true;
       }
     }
@@ -225,7 +223,7 @@ export function evaluate(sample: Sample, memory: Memory, now: number, diskBytes:
       const measurable = c.state === 'sending' && !c.paced && rate !== null && remaining > 0;
       if (measurable && ((seconds >= CAMPAIGNS.stalledMinutes * 60 - 30 && released === 0)
         || (entitled !== null && entitled > 0 && seconds >= CAMPAIGNS.windowMinutes * 60 - 30 && remaining > entitled * CAMPAIGNS.tailSeconds && rate < entitled * CAMPAIGNS.slowShare)))
-        find('campaign-slow', cid, rate, `${id(cid)}: ${released === 0 ? 'nothing released' : perSecond(rate)} for ${span(seconds)}, ${against}. ${count(remaining)} left.`, CAMPAIGNS.remindMinutes, released === 0 ? 'critical' : 'warning');
+        find('campaign-slow', cid, rate, `${id(cid)}: ${released === 0 ? 'nothing released' : perSecond(rate)} for ${span(seconds)}, ${against}. ${count(remaining)} left.`, CAMPAIGNS.remindMinutes, released === 0 && seconds >= CAMPAIGNS.criticalStalledMinutes * 60 - 30 ? 'critical' : 'warning');
       // Long only counts when it is also slower than it is entitled to: a long send at its entitled rate is by choice.
       if (measurable && entitled !== null && entitled > 0 && rate < entitled * CAMPAIGNS.longShare && ring.length > CAMPAIGNS.etaSamples && etaSeconds !== null && etaSeconds > CAMPAIGNS.etaHours * 3600)
         find('campaign-long', cid, etaSeconds, `${id(cid)}: ${span(etaSeconds)} left at ${perSecond(rate)}, ${against}. ${count(remaining)} of ${count(c.total)} left.`, CAMPAIGNS.etaHours * 60);
@@ -290,7 +288,7 @@ export function evaluate(sample: Sample, memory: Memory, now: number, diskBytes:
       find('database-transaction', null, d.oldestTransactionSeconds, `open ${span(d.oldestTransactionSeconds)}${d.longTransactions > 1 ? `, ${count(d.longTransactions)} over a minute` : ''}.`, DATABASE.remindMinutes * 2);
     if (held('database-slow-queries', d.slowQueries >= DATABASE.slowQueries, DATABASE.sustain)) find('database-slow-queries', null, d.slowQueries, `${count(d.slowQueries)} running over 30 s.`, DATABASE.remindMinutes);
     if (held('database-lock-waits', d.lockWaits >= DATABASE.lockWaits, DATABASE.sustain)) find('database-lock-waits', null, d.lockWaits, `${count(d.lockWaits)} sessions waiting on a lock.`, DATABASE.remindMinutes);
-    if (diskBytes && d.sizeBytes >= diskBytes * DATABASE.diskShare) find('database-disk', null, d.sizeBytes / diskBytes, `${percent(d.sizeBytes / diskBytes)} of ${Math.round(diskBytes / 1024 ** 3)} GB.`, DATABASE.diskRemindMinutes);
+    if (diskBytes && d.sizeBytes >= diskBytes * DATABASE.diskShare) find('database-disk', null, d.sizeBytes / diskBytes, `${percent(d.sizeBytes / diskBytes)} of ${Math.round(diskBytes / 1024 ** 3)} GB.`, DATABASE.diskRemindMinutes, d.sizeBytes >= diskBytes * DATABASE.criticalDiskShare ? 'critical' : 'warning');
     database = { ...d, diskBytes };
   } else blind.add('database');
 
@@ -361,22 +359,33 @@ async function measure(runtime: Pick<Runtime, 'db' | 'config'>, queues: QueueSam
 }
 
 const runbookOf = (kind: Kind) => `docs/operations.md#${kind}`;
-const iso = (at: number | Date) => new Date(at).toISOString().replace(/\.\d{3}Z$/, 'Z');
-/**
- * One card: the operator alerts' line with its Open button into the Health tab, then the line a program reads, as the
- * card's context and as the last line of the message's text. Values hold no space; a cleared card has no value.
- */
-function alertCard(publicUrl: string, alert: { key: string; kind: Kind; severity: Severity; value?: number; since: string }, state: 'open' | 'cleared', label: string, words: string): SlackMessage {
-  const health = `${publicUrl.replace(/\/$/, '')}/operator?view=health`, card = slackCard({ emoji: state === 'cleared' ? ':white_check_mark:' : KINDS[alert.kind].emoji, label }, words, health);
-  const machine = `key=${alert.key} state=${state} severity=${alert.severity}${alert.value === undefined ? '' : ` value=${alert.value} unit=${KINDS[alert.kind].unit}`} since=${alert.since}${state === 'cleared' ? ` cleared=${iso(Date.now())}` : ''} runbook=${runbookOf(alert.kind)} health=${health}`;
-  return { ...card, text: `${card.text}\n${machine}`, blocks: [...card.blocks, { type: 'context', elements: [{ type: 'mrkdwn', text: '`' + machine + '`', verbatim: true }] }] };
+const queueLabel = (key: string) => key === 'queue-behind:feedback-priority' ? 'Bounce and complaint reports' : 'Delivery reports';
+function openLine(f: Finding) {
+  const subject = f.key.slice(f.kind.length + 1);
+  switch (f.kind) {
+    case 'queue-behind': return `${queueLabel(f.key)} are ${span(f.value)} behind`;
+    case 'dead-letters': return `${subject} has ${count(f.value)} ${f.value === 1 ? 'message' : 'messages'} to recover`;
+    case 'jobs-behind': return `${subject} jobs are ${span(f.value)} behind`;
+    case 'jobs-failed': return `${count(f.value)} ${subject} ${f.value === 1 ? 'job failed' : 'jobs failed'} in the last hour`;
+    case 'campaign-slow': return `Campaign ${subject} has stopped releasing mail`;
+    case 'campaign-bounces': return `Campaign ${f.words.replaceAll('`', '')}`;
+    case 'server-errors': return `${count(f.value)} requests failed in five minutes`;
+    case 'errors': return 'An inbound mail arrival notice could not be delivered';
+    case 'database-errors': return `Database: ${SQLSTATES[subject]?.label ?? subject} (${subject})`;
+    case 'database-disk': return `Database disk is ${percent(f.value)} full`;
+    default: return `${KINDS[f.kind].label}: ${f.words.replaceAll('`', '')}`;
+  }
 }
-/** What an alert is about, for its "Cleared" card: the identifier its words began with. */
-const subjectOf = (words: string) => /^(?:workspace )?`[^`]+`/.exec(words)?.[0] ?? '';
-// The one thing the database cannot be asked to remember: that it is refusing. Kept in this process, like the disk
-// alert's limiter; a process recycled during an outage posts its card again, at most once a minute.
-const refusing = { since: 0, sent: 0, words: '', clearTries: 0 };
-const critical = (alert: { severity: Severity }) => alert.severity === 'critical' ? 0 : 1;
+function clearLine(key: string, kind: Kind) {
+  if (kind === 'queue-behind') return `${queueLabel(key)} have caught up`;
+  if (kind === 'database-refusing') return 'Database writes are working again';
+  const subject = key.slice(kind.length + 1);
+  return `Resolved: ${KINDS[kind].label.toLowerCase()}${subject ? ` (${subject})` : ''}`;
+}
+// The database cannot remember its own outage. Keep its most recent recovery in this process as well.
+const refusing = { since: 0, sent: 0, ended: 0, lastClear: 0, clearTries: 0 };
+const longMs = TICK.longMinutes * 60_000, flapMs = TICK.flapMinutes * 60_000;
+const mayPage = (since: number, lastClear: number, now: number) => !lastClear || since - lastClear >= flapMs || now - since >= longMs;
 
 export type HealthCard = { key: string; state: 'open' | 'reminder' | 'cleared'; card: SlackMessage; /** A summary card stands for these alerts too. */ covers?: string[] };
 export type TickResult = { ran: boolean; ms: number; statements: number; open: number; cards: HealthCard[] };
@@ -389,6 +398,8 @@ export type TickResult = { ran: boolean; ms: number; statements: number; open: n
  */
 export async function healthTick(runtime: Pick<Runtime, 'db' | 'config'>, input: { queues?: QueueSample[] } = {}, options: { post?: HealthPost; force?: boolean } = {}): Promise<TickResult> {
   const started = Date.now(), { db, config } = runtime, url = config.operatorSlackWebhookUrl, post = options.post ?? slack, cards: HealthCard[] = [];
+  const health = `${config.publicUrl.replace(/\/$/, '')}/operator?view=health`;
+  const cardOf = (line: string) => slackCard(null, line, health);
   let statements = 0;
   // BEGIN, the limits and COMMIT around what each transaction runs.
   const run = <T>(inside: number, work: (tx: DbExecutor) => Promise<T>) => { statements += 3 + inside; return bounded(db, work); };
@@ -407,22 +418,20 @@ export async function healthTick(runtime: Pick<Runtime, 'db' | 'config'>, input:
     const sqlstate = databaseCodeOf(error);
     // The health row being locked or slow is this tick's loss, not the database refusing: skip it.
     if (!transientDatabaseError(error) || sqlstate === '55P03' || sqlstate === '57014') { logError(error, { code: 'HEALTH_TICK_SKIPPED' }, 'warn'); return result(false); }
-    const rule = sqlstate ? SQLSTATES[sqlstate] : undefined, since = refusing.since ||= Date.now(), seconds = Math.round((Date.now() - since) / 1000);
-    refusing.words = `${rule?.label ?? 'unreachable'}${sqlstate ? ` (${id(sqlstate)})` : ''}`; refusing.clearTries = 0;
+    const now = Date.now(), since = refusing.since ||= now, seconds = Math.round((now - since) / 1000);
+    refusing.ended = 0; refusing.clearTries = 0;
     log('error', { code: 'HEALTH_DATABASE_REFUSING', databaseCode: sqlstate, forSeconds: seconds });
-    const alert = { key: 'database-refusing', kind: 'database-refusing' as const, severity: 'critical' as const, value: seconds, since: iso(since) };
-    if (Date.now() - refusing.sent >= DATABASE.remindMinutes * 60_000 && await send({ key: alert.key, state: refusing.sent ? 'reminder' : 'open',
-      card: alertCard(config.publicUrl, alert, 'open', KINDS[alert.kind].label, `${refusing.words}: the health tick’s own write was refused.${refusing.sent ? ` For ${span(seconds)}.` : ''}`) })) refusing.sent = Date.now();
+    if (mayPage(since, refusing.lastClear, now) && now - refusing.sent >= DATABASE.remindMinutes * 60_000 &&
+      await send({ key: 'database-refusing', state: refusing.sent ? 'reminder' : 'open',
+        card: cardOf(`Database writes are failing: ${(sqlstate && SQLSTATES[sqlstate]?.label) || 'unreachable'}${sqlstate ? ` (${sqlstate})` : ''}`) })) refusing.sent = now;
     return result(true, 1);
   }
   try {
-    // It answered again. The outage is forgotten only once its cleared card has gone out (or it never had a card):
-    // a card Slack refuses now is tried again on the next ticks, for TICK.clearRetryMinutes.
     if (refusing.since) {
-      const alert = { key: 'database-refusing', kind: 'database-refusing' as const, severity: 'critical' as const, since: iso(refusing.since) };
-      const gone = !refusing.sent || !url || await send({ key: alert.key, state: 'cleared', card: alertCard(config.publicUrl, alert, 'cleared', `Cleared: ${KINDS[alert.kind].label}`, `${refusing.words}, after ${span((Date.now() - refusing.since) / 1000)}.`) });
-      if (!gone && ++refusing.clearTries >= TICK.clearRetryMinutes) log('warn', { code: 'HEALTH_ALERT_DROPPED', alert: alert.key });
-      if (gone || refusing.clearTries >= TICK.clearRetryMinutes) Object.assign(refusing, { since: 0, sent: 0, clearTries: 0 });
+      const ended = refusing.ended ||= Date.now();
+      const gone = !refusing.sent || !url || ended - refusing.since < longMs || await send({ key: 'database-refusing', state: 'cleared', card: cardOf(clearLine('database-refusing', 'database-refusing')) });
+      if (!gone && ++refusing.clearTries >= TICK.clearRetryMinutes) log('warn', { code: 'HEALTH_ALERT_DROPPED', alert: 'database-refusing' });
+      if (gone || refusing.clearTries >= TICK.clearRetryMinutes) Object.assign(refusing, { since: 0, sent: 0, ended: 0, lastClear: ended, clearTries: 0 });
     }
     statements += PROBES * 4; // Each probe: BEGIN, the limits, the read, COMMIT.
     const sample = await measure(runtime, input.queues ?? []);
@@ -434,8 +443,22 @@ export async function healthTick(runtime: Pick<Runtime, 'db' | 'config'>, input:
         acceptedRate: rounded(c.acceptedRate), entitledRate: rounded(c.entitled), accountRate: c.account ?? undefined, plannedRate: c.planned ?? undefined, etaSeconds: c.etaSeconds ?? undefined, waiting: c.waiting ?? undefined, accepted: row.accepted ?? undefined,
         delivered: row.delivered ?? undefined, bounced: row.bounced ?? undefined, complained: row.complained ?? undefined, feedbackLagSeconds: rollup.feedbackLagSeconds ?? undefined });
     }
-    type Held = { key: string; kind: string; severity: Severity; words: string; since: string; age: number; unseen: number; sent: number | null };
-    const held = await run(findings.length ? 3 : 2, async tx => {
+    type Held = { key: string; kind: string; severity: Severity; age: number; unseen: number; sent: number | null };
+    const found = new Set(findings.map(f => f.key)), now = Date.now();
+    const previousCritical = new Set(memory.criticalKeys);
+    const wasCritical = (alert: Held) => alert.severity === 'critical' || previousCritical.has(alert.key);
+    const wasPaged = (alert: Held | undefined) => alert?.sent != null && wasCritical(alert);
+    const { rows: held, recovered } = await run(findings.length ? 3 : 2, async tx => {
+      const rows = (await tx.execute<Held>(sql`SELECT key,kind,severity,extract(epoch FROM now()-since)::float8 AS age,
+        extract(epoch FROM now()-seen_at)::float8 AS unseen,extract(epoch FROM now()-sent_at)::float8 AS sent FROM health_alerts`)).rows;
+      const recovered = rows.filter(a => !found.has(a.key) && isKind(a.kind) && !blind.has(KINDS[a.kind].section) && a.unseen >= TICK.clearMinutes * 60);
+      // Remember the highest severity across a downgrade. Only critical recoveries can mute a future critical open:
+      // an escalation above a past warning is actionable immediately. This bounded memory survives Worker turnover.
+      const peaks = new Set(rows.filter(wasCritical).map(a => a.key));
+      for (const f of findings) if (f.severity === 'critical') peaks.add(f.key);
+      rollup.memory.criticalKeys = [...peaks];
+      const recent = rollup.memory.criticalClears = Object.fromEntries(Object.entries(memory.criticalClears ?? {}).filter(([, at]) => now - at < flapMs + longMs));
+      for (const a of recovered) if (peaks.has(a.key)) recent[a.key] = now - a.unseen * 1000 + TICK.clearMinutes * 60_000;
       // The rollup; and in the same statement, minutes older than two hours folded into their hours (kept 30 days), so a
       // route's count and p95 outlive the logs. Whole hours only, so each hour folds once; most ticks fold nothing.
       await tx.execute(sql`WITH old AS (DELETE FROM health_minutes WHERE minute<date_trunc('hour',now()-make_interval(mins=>${TICK.keepMinutes})) RETURNING *),
@@ -446,44 +469,42 @@ export async function healthTick(runtime: Pick<Runtime, 'db' | 'config'>, input:
               hist=CASE WHEN h.hist IS NULL THEN excluded.hist WHEN excluded.hist IS NULL THEN h.hist ELSE ARRAY(SELECT a+b FROM unnest(h.hist,excluded.hist) WITH ORDINALITY u(a,b,i) ORDER BY i) END),
           aged AS (DELETE FROM health_hours WHERE hour<now()-interval '30 days')
         UPDATE health_state SET rollup=${JSON.stringify(rollup)}::jsonb,generated_at=now() WHERE singleton`);
-      const rows = (await tx.execute<Held>(sql`SELECT key,kind,severity,words,to_char(since AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') AS since,extract(epoch FROM now()-since)::int AS age,
-        extract(epoch FROM now()-seen_at)::int AS unseen,extract(epoch FROM now()-sent_at)::int AS sent FROM health_alerts`)).rows;
       if (findings.length) await tx.execute(sql`INSERT INTO health_alerts AS a (key,kind,severity,value,unit,words)
         SELECT f.key,f.kind,f.severity,f.value,f.unit,f.words FROM jsonb_to_recordset(${JSON.stringify(findings.map(f => ({ key: f.key, kind: f.kind, severity: f.severity, value: f.value, unit: KINDS[f.kind].unit, words: f.words })))}::jsonb)
           f(key text,kind text,severity text,value float8,unit text,words text) ORDER BY f.key
-        ON CONFLICT (key) DO UPDATE SET seen_at=now(),severity=excluded.severity,value=excluded.value,words=excluded.words`);
-      return rows;
+        ON CONFLICT (key) DO UPDATE SET seen_at=now(),severity=excluded.severity,value=excluded.value,words=excluded.words,
+          sent_at=CASE WHEN a.severity='warning' AND NOT (a.key=ANY(${sql.param([...previousCritical])}::text[])) THEN NULL ELSE a.sent_at END`);
+      return { rows, recovered };
     });
-    const known = new Map(held.map(alert => [alert.key, alert])), found = new Map(findings.map(finding => [finding.key, finding])), health = `${config.publicUrl.replace(/\/$/, '')}/operator?view=health`;
-    // Gone for TICK.clearMinutes is cleared; an alert whose probe failed this tick is left as it is.
-    const recovered = held.filter(alert => !found.has(alert.key) && isKind(alert.kind) && !blind.has(KINDS[alert.kind].section) && alert.unseen >= TICK.clearMinutes * 60);
-    const open = (finding: Finding, forSeconds?: number) => alertCard(config.publicUrl, { ...finding, since: known.get(finding.key)?.since ?? iso(Date.now()) }, 'open', KINDS[finding.kind].label, forSeconds === undefined ? finding.words : `${finding.words} For ${span(forSeconds)}.`);
-    // One card for the alerts that did not fit: how many of each kind, most severe first. It stands for all of them.
-    const summary = (state: 'open' | 'cleared', rest: { key: string; kind: string; severity: Severity }[]): HealthCard => {
-      const kinds = new Map<string, number>(); for (const alert of rest) kinds.set(alert.kind, (kinds.get(alert.kind) ?? 0) + 1);
-      const severity: Severity = rest.some(alert => alert.severity === 'critical') ? 'critical' : 'warning', words = `${[...kinds].map(([kind, n]) => `${count(n)} ${isKind(kind) ? KINDS[kind].label : kind}`).join(', ')}. All of them are on the Health page.`;
-      const card = slackCard({ emoji: state === 'open' ? ':warning:' : ':white_check_mark:', label: `${count(rest.length)} more ${state === 'open' ? 'alerts' : 'cleared'}` }, words, health);
-      const machine = `key=summary state=${state} severity=${severity} count=${rest.length} kinds=${[...kinds.keys()].join(',')} health=${health}`;
-      return { key: 'summary', state, covers: rest.map(alert => alert.key), card: { ...card, text: `${card.text}\n${machine}`, blocks: [...card.blocks, { type: 'context', elements: [{ type: 'mrkdwn', text: '`' + machine + '`', verbatim: true }] }] } };
+    const known = new Map(held.map(a => [a.key, a]));
+    const critical = findings.filter(f => f.severity === 'critical');
+    const canClear = (a: Held) => wasPaged(a) && a.age - a.unseen >= TICK.longMinutes * 60;
+    // As before, an overflow card stands for all its keys and only counts as sent if Slack accepted it.
+    const fit = <T extends { key: string }>(state: 'open' | 'cleared', alerts: T[], room: number, line: (alert: T) => string): HealthCard[] => {
+      if (!room) return [];
+      const individual = alerts.length <= room ? alerts : alerts.slice(0, room - 1);
+      const cards: HealthCard[] = individual.map(a => ({ key: a.key, state, card: cardOf(line(a)) }));
+      const rest = alerts.slice(individual.length);
+      if (rest.length) cards.push({ key: 'summary', state, covers: rest.map(a => a.key),
+        card: cardOf(`${count(rest.length)} more critical alerts ${state === 'open' ? 'need attention' : 'have cleared'}`) });
+      return cards;
     };
-    // What goes out this tick, TICK.cards at most: new alerts first, critical before warning; then recoveries; then
-    // reminders, critical first. New or cleared ones that do not fit share one summary card.
-    const fit = <T extends { key: string; kind: string; severity: Severity }>(state: 'open' | 'cleared', alerts: T[], room: number, card: (alert: T) => HealthCard): HealthCard[] =>
-      room <= 0 ? [] : alerts.length <= room ? alerts.map(card) : [...alerts.slice(0, room - 1).map(card), summary(state, alerts.slice(room - 1))];
-    const fresh = fit('open', findings.filter(finding => known.get(finding.key)?.sent == null).sort((a, b) => critical(a) - critical(b)), TICK.cards, finding => ({ key: finding.key, state: 'open', card: open(finding) }));
-    const clears = fit('cleared', recovered.filter(alert => alert.sent !== null).sort((a, b) => critical(a) - critical(b)), TICK.cards - fresh.length, alert => ({ key: alert.key, state: 'cleared',
-      card: alertCard(config.publicUrl, { key: alert.key, kind: alert.kind as Kind, severity: alert.severity, since: alert.since }, 'cleared', `Cleared: ${KINDS[alert.kind as Kind].label}`, `${subjectOf(alert.words) ? `${subjectOf(alert.words)}, ` : ''}after ${span(alert.age)}.`) }));
-    const reminders = findings.filter(finding => { const alert = known.get(finding.key); return alert?.sent != null && alert.sent >= finding.remindMinutes * 60; }).sort((a, b) => critical(a) - critical(b))
-      .slice(0, Math.max(0, TICK.cards - fresh.length - clears.length)).map((finding): HealthCard => ({ key: finding.key, state: 'reminder', card: open(finding, known.get(finding.key)!.age) }));
+    const fresh = fit('open', critical.filter(f => {
+      const a = known.get(f.key);
+      return !wasPaged(a) && mayPage(now - (a?.age ?? 0) * 1000, rollup.memory.criticalClears![f.key] ?? 0, now);
+    }), TICK.cards, openLine);
+    const clears = fit('cleared', recovered.filter(canClear), TICK.cards - fresh.length, a => clearLine(a.key, a.kind as Kind));
+    const reminders = critical.filter(f => { const a = known.get(f.key); return wasPaged(a) && a!.sent! >= f.remindMinutes * 60; })
+      .slice(0, TICK.cards - fresh.length - clears.length).map((f): HealthCard => ({ key: f.key, state: 'reminder', card: cardOf(openLine(f)) }));
     // One after the other, inside the budget. A card that did not go out leaves its row as it was: the next tick tries again.
     const posted = new Set<string>(), deadline = Date.now() + TICK.postBudgetMs;
     for (const card of [...fresh, ...clears, ...reminders]) if (Date.now() < deadline && await send(card)) for (const key of card.covers ?? [card.key]) posted.add(`${card.state === 'cleared' ? 'cleared' : 'open'}:${key}`);
     const sent = findings.filter(finding => posted.has(`open:${finding.key}`)).map(finding => finding.key);
     // A recovery is forgotten once its card went out, or it never had one, or Slack has refused it for TICK.clearRetryMinutes;
     // a row of a kind this version does not know, at once.
-    const expired = recovered.filter(alert => alert.sent !== null && !!url && !posted.has(`cleared:${alert.key}`) && alert.unseen >= (TICK.clearMinutes + TICK.clearRetryMinutes) * 60);
+    const expired = recovered.filter(alert => canClear(alert) && !!url && !posted.has(`cleared:${alert.key}`) && alert.unseen >= (TICK.clearMinutes + TICK.clearRetryMinutes) * 60);
     for (const alert of expired) log('warn', { code: 'HEALTH_ALERT_DROPPED', alert: alert.key.split(':')[0] });
-    const forget = [...recovered.filter(alert => alert.sent === null || !url || posted.has(`cleared:${alert.key}`)), ...expired, ...held.filter(alert => !isKind(alert.kind))].map(alert => alert.key);
+    const forget = [...recovered.filter(alert => !canClear(alert) || !url || posted.has(`cleared:${alert.key}`)), ...expired, ...held.filter(alert => !isKind(alert.kind))].map(alert => alert.key);
     if (sent.length || forget.length) await run(Number(sent.length > 0) + Number(forget.length > 0), async tx => {
       if (sent.length) await tx.execute(sql`UPDATE health_alerts SET sent_at=now() WHERE key=ANY(${sql.param(sent)}::text[])`);
       if (forget.length) await tx.execute(sql`DELETE FROM health_alerts WHERE key=ANY(${sql.param(forget)}::text[])`);
