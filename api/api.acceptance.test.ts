@@ -28239,7 +28239,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // A graded sender, paused, on a pool region with SES limits; a critical alert.
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [region, pool, `arn:aws:sns:${region}:${pool}:glass`]);
       await db.query(`INSERT INTO provider_account_limits(aws_account_id,region,refresh_after,max_send_rate,max_24_hour_send,sent_last_24_hours) VALUES ($1,$2,now(),14,50000,1200)`, [pool, region]);
-      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state,paused_at) VALUES ($1,$1,$2,'ready','shared',$3,'ready',now())`, [wid, region, pool]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state,paused_at,pause_reason) VALUES ($1,$1,$2,'ready','shared',$3,'ready',now(),'Glass fixture hold')`, [wid, region, pool]);
       await db.query(`INSERT INTO sender_standing(workspace_id,phase,score) VALUES ($1,'graded',92)`, [wid]);
       await db.query(`INSERT INTO health_alerts(key,kind,severity,value,unit,words,since) VALUES ('jobs-behind:glass.fixture','jobs-behind','critical',600,'seconds','\`glass.fixture\`: 3 due, oldest 10 min.',now()-interval '10 years')`);
       // Received mail, one of it spam.
