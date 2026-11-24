@@ -304,15 +304,8 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
   }
   const inactive = locked || !ready
   const chooseImage = () => { if (inactive) return; onDirty(); fileInput.current?.click() }
-  // The panel's quick blocks and the rail's Text: one click inserts at the caret (the editor keeps focus; see keepFocus).
-  const blocks: { label: string; icon: LucideIcon; run: () => void }[] = [
-    { label: 'Text', icon: Type, run: () => command(e => e.chain().focus().setParagraph().run(), true, true) },
-    { label: 'Heading', icon: Heading2, run: () => command(e => e.chain().focus().setHeading({ level: 2 }).run(), true, true) },
-    { label: 'Button', icon: MousePointer2, run: () => command(e => e.chain().focus().setButton().run(), true, true) },
-    { label: 'Image', icon: ImagePlus, run: chooseImage },
-    { label: 'Divider', icon: Minus, run: () => command(e => e.chain().focus().setHorizontalRule().run(), true, true) },
-    { label: 'Columns', icon: Columns2, run: () => command(e => e.chain().focus().insertColumns(2).run(), true, true) },
-  ]
+  // The rail's Text: one click inserts at the caret (the editor keeps focus; see keepFocus).
+  const insertText = () => command(e => e.chain().focus().setParagraph().run(), true, true)
   const keepFocus = (event: { target: EventTarget; preventDefault: () => void }) => { if ((event.target as HTMLElement).closest('button')) event.preventDefault() }
   // Everything the rail's Components (and the toolbar's Insert, with the variables) can add at the caret.
   const componentItems: MenuItem[] = [
@@ -342,7 +335,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
   }}>
     {railed ? <nav className="composer-rail" aria-label="Email formatting" onMouseDown={keepFocus}>
       <div className="composer-rail__group">
-        {tool('Text', Type, blocks[0]!.run)}
+        {tool('Text', Type, insertText)}
         {tool('Image', ImagePlus, chooseImage)}
         <DropdownMenu label="Components" side="right" align="start" trigger={<IconButton label="Components" disabled={inactive}><Icon icon={Shapes} /></IconButton>} items={componentItems} />
         {personalize && <DropdownMenu label="Variables" side="right" align="start" trigger={<IconButton label="Variables" disabled={inactive}><Icon icon={Braces} /></IconButton>} items={variableItems} />}

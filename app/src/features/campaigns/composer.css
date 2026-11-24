@@ -62,7 +62,7 @@ body:has(.email-composer[data-inactive]) :is([data-re-bubble-menu], [data-re-sla
 .composer-document .tiptap a { cursor: text; }
 .composer-document .tiptap table { max-width: 100%; }
 .email-composer > :is(.ui-alert, .composer-error) { margin: 0 40px var(--space-16); }
-/* The Blocks & Style panel's own fields (the library's Inspector): controls on the control steps (campaigns.css places
+/* The Style panel's own fields (the library's Inspector): controls on the control steps (campaigns.css places
    the panel), solid fills, no edges, a stronger step while pointed at or typed in. */
 .composer-inspector :is(input, select, textarea) { max-width: 100%; }
 .composer-inspector :is(select, textarea, [data-re-inspector-select], [data-re-inspector-number], [data-re-inspector-color-control], [data-re-inspector-toggle-group], [data-re-inspector-button]) { border: 0; border-radius: var(--radius-sm); background: var(--color-control); color: var(--color-text); }
@@ -71,6 +71,8 @@ body:has(.email-composer[data-inactive]) :is([data-re-bubble-menu], [data-re-sla
 .composer-inspector :is([data-re-inspector-input], [data-re-inspector-color-hex]) { border: 0; background: transparent; color: var(--color-text); }
 .composer-inspector [data-re-inspector-breadcrumb-button] { color: var(--color-text); }
 .composer-inspector [data-re-inspector-breadcrumb-button][data-clickable] { color: var(--color-muted); }
+/* The path's buttons have no fill of their own: focus underlines the name, as on a focused link. */
+.composer-inspector [data-re-inspector-breadcrumb-button]:focus-visible { color: var(--color-text); text-decoration: underline; text-underline-offset: 3px; }
 .composer-inspector [data-re-inspector-toggle-item] { border: 0; background: transparent; color: var(--color-text); }
 .composer-inspector [data-re-inspector-toggle-item][data-active] { background: var(--color-text); color: var(--studio-desk); }
 .composer-inspector [data-re-inspector-section] { border: 0; }

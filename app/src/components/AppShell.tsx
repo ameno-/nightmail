@@ -15,9 +15,7 @@ import { modKey, useCompactShell } from '../lib/media'
 import { RouteSkeleton } from './RouteSkeleton'
 import { ThemeToggle } from './ThemeToggle'
 import { AccountSwitcher } from './AccountSwitcher'
-import { StandingBanner } from './StandingBanner'
-import { BillingBanner } from './BillingBanner'
-import { SetupBanner } from './SetupBanner'
+import { Notices } from './Notices'
 import { LegalFooterLinks } from './LegalLinks'
 import { PrivacyToggle } from './PrivacyToggle'
 import { NightmailWordmark } from './NightmailLogo'
@@ -280,9 +278,7 @@ export function AppShell() {
   const workspaceName = access.multiTenant ? session?.identity?.workspaces?.find(item => item.id === session?.identity?.workspaceId)?.name ?? 'Workspace' : regionId || productName
   const overlays = <>{connectHost}{support.mode && <SupportHost chat={support} />}{notesOn && <UiNotesLayer />}<CommandMenu open={commandOpen} onOpenChange={setCommandOpen} commands={commands} /></>
   const main = <main ref={content} id="main-content" className="page-surface" tabIndex={-1}>{session?.notice && <div className="page-notice"><Alert tone="danger" title="Invitation not accepted" onDismiss={session.dismissNotice}>{session.notice}</Alert></div>}
-    <SetupBanner />
-    <StandingBanner />
-    <BillingBanner />
+    <Notices />
     <ChunkFallback.Provider value={<RouteSkeleton />}><Suspense fallback={<RouteSkeleton />}>
       {needsRegion && regions.isError && !regions.data ? <ErrorState error={regions.error} onRetry={() => regions.refetch()} />
         : needsRegion && (regions.isPending ? !regionId : !current && enabled.length > 0) ? <RouteSkeleton />

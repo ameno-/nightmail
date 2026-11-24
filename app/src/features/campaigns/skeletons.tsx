@@ -1,8 +1,9 @@
-import { AlignCenter, AlignLeft, AlignRight, Bold, Braces, ChevronRight, Columns2, Heading2, ImagePlus, Italic, Minus, MoreHorizontal, MousePointer2, Redo2, Shapes, SlidersHorizontal, Type, Undo2, X, type LucideIcon } from 'lucide-react'
+import { AlignCenter, AlignLeft, AlignRight, Bold, Braces, ChevronRight, ImagePlus, Italic, MoreHorizontal, Redo2, Shapes, SlidersHorizontal, Type, Undo2, X, type LucideIcon } from 'lucide-react'
 import {
   Button, ControlSkeleton, Field, Icon, IconButton, LoadingRegion, PageHeader, SearchField, SectionHeader,
   Select, Skeleton, SkeletonText, StatusBadge, TableSkeleton, Tabs, type SkeletonColumn,
 } from '../../components/ui'
+import { Notices } from '../../components/Notices'
 import { CampaignsHeader } from './header'
 import { modKey, usePhone } from '../../lib/media'
 import { useSearchParams } from 'react-router'
@@ -45,20 +46,17 @@ export function CampaignAudienceSkeleton() {
 }
 
 // The composer's tools and panel as the editor opens them (EmailComposer, disabled until it is ready), so the studio's
-// rail (from 900 px) and its docked Blocks & Style panel (from 1150 px) are in place from the first frame; below 900 px
+// rail (from 900 px) and its docked Style panel (from 1150 px) are in place from the first frame; below 900 px
 // the toolbar row on the sheet. Outside the studio (a preview dialog) only the toolbar row and the canvas show.
 const railTools: LucideIcon[][] = [[Type, ImagePlus, Shapes, Braces], [Bold, Italic, AlignLeft, AlignCenter, AlignRight], [Undo2, Redo2], [SlidersHorizontal]]
-const panelBlocks: [string, LucideIcon][] = [['Text', Type], ['Heading', Heading2], ['Button', MousePointer2], ['Image', ImagePlus], ['Divider', Minus], ['Columns', Columns2], ['Variable', Braces]]
 export function ComposerSkeleton() {
   return <LoadingRegion label="Loading composer" className="composer-loading">
     <div className="composer-rail composer-skeleton-rail" aria-hidden="true">{railTools.map((group, index) => <div key={index} className="composer-rail__group">{group.map((glyph, tool) => <span key={tool} className="composer-skeleton-tool"><Icon icon={glyph} /></span>)}</div>)}</div>
     <div className="composer-skeleton-tools"><ControlSkeleton width={90} /><ControlSkeleton width={28} /><ControlSkeleton width={28} /></div>
     <div className="composer-skeleton-canvas"><SkeletonText width="55%" lineHeight={36} /><SkeletonText /><SkeletonText width="80%" /><SkeletonText width="60%" /></div>
     <div className="composer-inspector composer-skeleton-panel" aria-hidden="true">
-      <div className="composer-inspector-header"><span className="composer-inspector-title">Blocks</span><span className="composer-skeleton-tool composer-skeleton-tool--sm"><Icon icon={X} /></span></div>
-      <div className="composer-blocks">{panelBlocks.map(([label, glyph]) => <span key={label} className="composer-block" data-disabled=""><Icon icon={glyph} size="sm" /><span>{label}</span></span>)}</div>
-      <div className="composer-inspector-title composer-inspector-label">Style</div>
-      <p className="composer-inspector-hint">No block selected</p>
+      <div className="composer-inspector-header"><span className="composer-inspector-title">Style</span><span className="composer-skeleton-tool composer-skeleton-tool--sm"><Icon icon={X} /></span></div>
+      <p className="composer-inspector-hint">Select a block to style it.</p>
     </div>
   </LoadingRegion>
 }
@@ -79,7 +77,7 @@ export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 
   if (kind === 'template') return <div className="campaign-compose-page template-compose-page">
     <PageHeader title="Edit template" backTo="/campaigns/templates" actions={<>{!phone && <span className="campaign-sync-status"><span className="campaign-sync-dot" /></span>}{phone ? <><Button variant="primary" disabled>Publish</Button><IconButton label="More actions" disabled><Icon icon={MoreHorizontal} /></IconButton></> : <><Button variant="ghost" disabled>Preview</Button><Button variant="ghost" disabled>Archive</Button><Button variant="secondary" disabled>Use template</Button><Button variant="primary" disabled>Publish</Button></>}</>} />
     <LoadingRegion label="Loading template editor" className="campaign-compose-workspace">
-      <div className="campaign-compose-scroll"><div className="campaign-compose-sheet">
+      <div className="campaign-compose-scroll"><div className="studio-notices"><Notices /></div><div className="campaign-compose-sheet">
         <div className="campaign-compose-metadata" aria-hidden="true">
           {['Name', 'Purpose', 'Subject', 'Inbox preview', 'From name', 'Reply to'].map(label => <div className="campaign-compose-row" key={label}><span>{label}</span><ControlSkeleton /></div>)}
         </div>
@@ -96,7 +94,7 @@ export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 
       {phone ? <><Button variant="primary" disabled>Continue</Button><IconButton label="More actions" disabled><Icon icon={MoreHorizontal} /></IconButton></> : <>{isNew && <Button variant="ghost" disabled>Use a template</Button>}<Button variant="secondary" disabled>Send test</Button><Button variant="primary" disabled>Continue<kbd className="ui-kbd" aria-hidden="true">{modKey}↩</kbd></Button></>}
     </>} />
     <LoadingRegion label="Loading campaign editor" className="campaign-compose-workspace">
-      <div className="campaign-compose-scroll"><div className="campaign-compose-sheet">
+      <div className="campaign-compose-scroll"><div className="studio-notices"><Notices /></div><div className="campaign-compose-sheet">
         <div className="campaign-compose-metadata" aria-hidden="true">
           <div className="campaign-compose-row campaign-compose-sender"><span>From</span><ControlSkeleton /><Button variant="ghost" size="sm" className="campaign-sender-toggle" disabled>Reply-To<Icon icon={ChevronRight} size="sm" /></Button></div>
           <div className="campaign-compose-row campaign-compose-subject"><span>Subject</span><ControlSkeleton /><Button className="campaign-preview-toggle" variant="ghost" size="sm" disabled>Preview text</Button></div>

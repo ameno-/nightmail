@@ -17,6 +17,7 @@ import {
   StatusBadge, Tabs, useToast,
 } from '../../components/ui'
 import { EmailPreview } from '../../components/EmailPreview'
+import { Notices } from '../../components/Notices'
 import { Checks, checksCount, checksSummary, LOW_SENDABILITY } from '../../components/EmailInsight'
 import { date, label, number, percent } from '../../lib/format'
 import { CampaignAudienceSkeleton, CampaignRouteSkeleton } from './skeletons'
@@ -459,6 +460,7 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
     <PresenceOverlay room={room} />
     <section className="campaign-compose-workspace" aria-label={issueOf ? 'Issue composer' : 'Campaign composer'}>
       <div className="campaign-compose-scroll">
+        <div className="studio-notices"><Notices /></div>
         <div className="campaign-compose-sheet">
           <div className="campaign-compose-metadata">
             <div className="campaign-compose-row campaign-compose-sender"><label htmlFor="campaign-from-email">From</label><CampaignSenderInput key={`${generation}.${rebased.sender}`} name={form.fromName} email={form.fromEmail} domains={choices.domains.map(domain => domain.name)} disabled={controlsDisabled || options.isPending} onChange={({name, email}) => {const domain = email.split('@')[1]?.toLowerCase(); const supports = (parent: string) => domain === parent || domain?.endsWith(`.${parent}`); const match = choices.domains.find(item => supports(item.name) && item.regionId === formRef.current.regionId) ?? choices.domains.find(item => supports(item.name)); if (name !== formRef.current.fromName || email !== formRef.current.fromEmail || (match && match.regionId !== formRef.current.regionId)) updateForm({...formRef.current, fromName: name, fromEmail: email, ...(match ? {regionId: match.regionId} : {})}); markDirty()}} /><Button variant="ghost" size="sm" className="campaign-sender-toggle" aria-expanded={senderDetailsOpen} aria-controls="campaign-sender-details" onClick={toggleSender}>Reply-To<Icon icon={ChevronRight} size="sm" /></Button></div>

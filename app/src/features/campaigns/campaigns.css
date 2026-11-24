@@ -7,17 +7,17 @@
 /* ── The campaign studio: where a campaign, an issue or a template is written (index.tsx, templates.tsx, EmailComposer).
    From 900 px it is full-bleed: the sidebar and the command bar step aside and the studio covers the viewport, fixed
    over the page so the page itself never moves as the studio opens or closes. One surface and one step: the desk
-   (#F5F5F5; the page's #181818 in dark mode) carries the 48px bar and the docked Blocks & Style panel, set apart by
+   (#F5F5F5; the page's #181818 in dark mode) carries the 48px bar and the docked Style panel, set apart by
    spacing and alignment alone; one step off it sit the floating tool rail and the pure white 680px email sheet. Shading
    beyond that is only functional: controls, chips and fields, and hover, focus and selection. No panel sits in a panel,
    nothing has an edge, and focus is a solid fill, never a ring. ── */
 .campaign-compose-page {
-  --studio-desk: var(--color-layer-1); --studio-raised: var(--color-surface); --studio-raised-hover: #F0F0F0;
+  --studio-desk: var(--color-layer-1); --studio-raised: var(--color-surface); --studio-raised-hover: #F0F0F0; --studio-raised-pressed: #E0E0E0;
   /* Anchored menus keep the application theme even when they open from the light email sheet. */
   --campaign-menu-surface: var(--color-overlay-surface); --campaign-menu-text: var(--color-text); --campaign-menu-hover: var(--color-overlay-hover);
   display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--studio-desk); font-family: var(--font-body); font-size: var(--text-md);
 }
-:root[data-theme='dark'] .campaign-compose-page { --studio-desk: var(--color-surface); --studio-raised: var(--color-layer-1); --studio-raised-hover: #2C2C2C; }
+:root[data-theme='dark'] .campaign-compose-page { --studio-desk: var(--color-surface); --studio-raised: var(--color-layer-1); --studio-raised-hover: #2C2C2C; --studio-raised-pressed: #3A3A3A; }
 /* On the light desk (a grey surface) controls take the grey surfaces' control steps (tokens.css, raised-*); on the dark
    desk, the page's own. */
 :root:not([data-theme='dark']) .campaign-compose-page { --color-control: var(--color-raised-control); --color-control-hover: var(--color-raised-control-hover); --color-control-focus: var(--color-raised-control-focus); --color-control-pressed: var(--color-raised-control-pressed); --color-hover: var(--color-raised-hover); --color-pressed: var(--color-raised-active); --color-active-bg: var(--color-raised-active); }
@@ -45,9 +45,17 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .campaign-compose-workspace { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; overflow: hidden; background: var(--studio-desk); color: var(--color-text); }
 .campaign-compose-scroll { flex: 1; min-height: 0; overflow: auto; padding: var(--space-16) 76px 64px; overscroll-behavior: contain; }
 .campaign-compose-sheet { display: flex; flex-direction: column; width: 100%; max-width: 680px; min-height: 100%; margin: 0 auto; padding: var(--space-8) 0 var(--space-16); border: 0; border-radius: var(--radius-lg); background: var(--color-email-surface); color: var(--color-email-text); box-shadow: none; }
+/* The workspace's notices (components/Notices.tsx): from 900 px the studio covers the shell's, so it shows its own over
+   the sheet, as wide as it; below 900 px the shell's stay in view and these show none. */
+.studio-notices { display: none; }
+@media (min-width: 900px) {
+  body:has(.campaign-compose-page) .page-surface > :is(.standing-banner, .page-notice) { display: none; }
+  .studio-notices:not(:empty) { display: flex; flex-direction: column; gap: var(--space-8); max-width: 680px; margin: 0 auto var(--space-16); }
+  .studio-notices > .standing-banner { margin: 0; }
+}
 /* What sits on the sheet (the mail header rows, a phone's toolbar, the attachments, the fallbacks, their loading
    states) takes the light theme's steps and inks in either theme. */
-.campaign-compose-page :is(.campaign-compose-metadata, .composer-toolbar, .composer-error, .composer-starting, .campaign-file-blocks, .campaign-personalize, .composer-skeleton-tools, .composer-skeleton-canvas) { --color-surface: #FFFFFF; --color-canvas: #EFEFEF; --color-layer-1: #F5F5F5; --color-layer-2: #E8E8E8; --color-layer-3: #D8D8D8; --color-control: #F0F0F0; --color-control-hover: #E6E6E6; --color-control-focus: #DCDCDC; --color-control-pressed: #D4D4D4; --color-control-invalid: #FBEBEB; --color-control-invalid-focus: #F6DCDC; --color-hover: #F0F0F0; --color-pressed: #E6E6E6; --color-active-bg: #E8E8E8; --color-text: #111111; --color-muted: #555555; --color-faint: #767676; --color-accent: #111111; --color-accent-hover: #2B2B2B; --color-accent-pressed: #000000; --color-accent-text: #111111; --color-on-accent: #FFFFFF; --color-on-accent-muted: #BCBCBC; --color-kbd-inset: #FFFFFF; --color-success: #15803D; --color-success-marker: #15803D; --color-warning: #B45309; --color-warning-marker: #B45309; --color-danger: #DC2626; --color-danger-marker: #DC2626; --color-info: #1D4ED8; color-scheme: light; }
+.campaign-compose-page :is(.campaign-compose-metadata, .composer-toolbar, .composer-error, .composer-starting, .campaign-file-blocks, .campaign-personalize, .composer-skeleton-tools, .composer-skeleton-canvas) { --color-surface: #FFFFFF; --color-canvas: #EFEFEF; --color-layer-1: #F5F5F5; --color-layer-2: #E8E8E8; --color-layer-3: #D8D8D8; --color-control: #F0F0F0; --color-control-hover: #E6E6E6; --color-control-focus: #DCDCDC; --color-control-pressed: #D4D4D4; --color-control-invalid: #FBEBEB; --color-control-invalid-focus: #F6DCDC; --color-hover: #F0F0F0; --color-pressed: #E6E6E6; --color-active-bg: #E8E8E8; --color-text: #111111; --color-muted: #555555; --color-faint: #666666; --color-accent: #111111; --color-accent-hover: #2B2B2B; --color-accent-pressed: #000000; --color-accent-text: #111111; --color-on-accent: #FFFFFF; --color-on-accent-muted: #BCBCBC; --color-kbd-inset: #FFFFFF; --color-success: #147839; --color-success-marker: #15803D; --color-warning: #AA4E09; --color-warning-marker: #B45309; --color-danger: #CB2323; --color-danger-marker: #DC2626; --color-info: #1D4ED8; color-scheme: light; }
 /* The mail header rows: a 12px mono label, the field, its toggle (Reply-To, Preview text) at the right; no rules. The
    row being typed in takes the sheet's hover step. Labels line up with the email's text, 40px in. */
 .campaign-compose-metadata { flex-shrink: 0; padding-bottom: var(--space-16); color: var(--color-text); }
@@ -223,9 +231,11 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .composer-rail .ui-icon-button { width: 28px; height: 28px; border-radius: var(--radius-sm); color: var(--color-muted); }
 @media (hover: hover) and (pointer: fine) { .composer-rail .ui-icon-button:hover:not(:disabled) { background: var(--studio-raised-hover); color: var(--color-text); } }
 .composer-rail .ui-icon-button:focus-visible, .composer-rail .ui-icon-button:is([aria-pressed='true'], [data-state='open']) { background: var(--studio-raised-hover); color: var(--color-text); }
+/* A pressed tool (Style, its panel open) already has the hover step: under keyboard focus it takes the pressed one. */
+.composer-rail .ui-icon-button:is([aria-pressed='true'], [data-state='open']):focus-visible { background: var(--studio-raised-pressed); }
 .composer-rail__busy { display: grid; place-items: center; height: 28px; color: var(--color-muted); }
 .composer-rail.composer-skeleton-rail { display: none; }
-/* The Blocks & Style panel (EmailComposer): quick block chips over the selected block's styles, on the desk's own
+/* The Style panel (EmailComposer): the selected block's styles, on the desk's own
    surface. From 1150 px it is docked open at the right edge, 280px, under the bar, set apart by spacing alone; from
    900 px Style opens it there over the desk, and below it floats over the page, lifted as overlays are. Its chips and
    fields are controls, on the control steps. */
@@ -234,7 +244,6 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .composer-inspector[hidden], .composer-inspector.composer-skeleton-panel { display: none; }
 .composer-inspector-header { position: sticky; z-index: 1; top: 0; display: flex; align-items: center; justify-content: space-between; height: 44px; margin: 0 calc(-1 * var(--space-16)) var(--space-4); padding: 0 var(--space-12) 0 var(--space-16); border: 0; background: var(--studio-desk); }
 .composer-inspector-title { color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); line-height: var(--leading-xs); font-weight: 400; letter-spacing: var(--tracking-label); text-transform: uppercase; }
-.composer-inspector-label { margin: var(--space-20) 0 var(--space-8); }
 
 .composer-inspector-hint { margin: var(--space-8) 0 0; color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
 /* A touch screen gets 44px tools on the rail, and the desk keeps room for the wider rail. */
