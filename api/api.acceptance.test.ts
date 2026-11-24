@@ -28208,6 +28208,86 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual(await outbox(), []);
     });
   });
+  test('Glass: everything going on in one read for operators, from rollups and bounded counts; anyone else gets exactly what a route that does not exist answers', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const wid = runtime.config.workspaceId, path = '/v1/operator/glass', pool = '444455556666', region = 'eu-glass-1';
+      Object.assign(runtime.config, { multiTenant: true, deploy: { sha: '0123456789abcdef0123456789abcdef01234567', at: '2026-11-24T12:00:00.000Z' } });
+      const { readGlass, GLASS_CAP } = await import('./src/glass.js');
+      // Not an operator, by session or by API key: the 404 of a path that doesn't exist, the same but for its request ID.
+      const absent = (reply: Reply) => { const { requestId: _, ...rest } = error(reply, 404, 'NOT_FOUND'); return { status: reply.status, ...rest }; };
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'Not an operator', permissions: ['manage'] }), 201); secrets.add(key.secret);
+      for (const read of [(p: string) => local('GET', p), (p: string) => request('GET', p, key.secret)])
+        assert.deepEqual(absent(await read(path)), absent(await read('/v1/operator/no-such-page')));
+      assert.equal(ok(await local('GET', '/openapi.json')).paths[path], undefined, 'Hidden from the public OpenAPI document.');
+      const { setOperator } = await import('./scripts/set-operator.js');
+      await setOperator(db, [AUTH_SUBJECT, 'operator:read', '--reason', 'Synthetic Glass reader']);
+
+      // Everything is read in this transaction, so what the test adds shows as a difference from what the database held.
+      const before = await readGlass(runtime);
+      const user = unique('user');
+      await db.query('INSERT INTO nightmail_users(id,name,email,email_verified) VALUES($1,$2,$3,true)', [user, 'Glass sign-up', `${user}@example.org`]);
+      await db.query("INSERT INTO nightmail_signups(user_id,via) VALUES($1,'waitlist')", [user]);
+      // Queued mail held for screening, and an hour of sending outcomes.
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,status,simulated,screened)
+        VALUES ($1,$2,$3,'fixture','news@example.com','["someone@example.net"]','[]','[]','Held',$4,'queued',false,false)`, [unique('email'), wid, REGION, { kind: 'marketing', subject: 'Held', text: 'Held', attachments: [] }]);
+      await db.query(`INSERT INTO sending_metrics_hourly(workspace_id,region,kind,hour,emails,accepted,delivered,bounced,complained) VALUES ($1,$2,'marketing',date_trunc('hour',now(),'UTC'),100,100,90,6,1)`, [wid, REGION]);
+      await db.query(`INSERT INTO public_stats_minutes(minute,accepted,delivered,bounced,regions,workspaces,computed_at) VALUES (date_trunc('minute',now(),'UTC')-interval '1 minute',42,40,1,'{}','{}',now())
+        ON CONFLICT (minute) DO UPDATE SET accepted=public_stats_minutes.accepted+42`);
+      await db.query(`INSERT INTO health_minutes(minute,kind,key,n,errors,ms,slowest,hist) VALUES (date_trunc('minute',now()),'route','POST /v1/emails/send',4,0,200,90,$1)
+        ON CONFLICT (minute,kind,key) DO UPDATE SET n=health_minutes.n+4`, [[0, 0, 0, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0]]);
+      // A graded sender, paused, on a pool region with SES limits; a critical alert.
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [region, pool, `arn:aws:sns:${region}:${pool}:glass`]);
+      await db.query(`INSERT INTO provider_account_limits(aws_account_id,region,refresh_after,max_send_rate,max_24_hour_send,sent_last_24_hours) VALUES ($1,$2,now(),14,50000,1200)`, [pool, region]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state,paused_at) VALUES ($1,$1,$2,'ready','shared',$3,'ready',now())`, [wid, region, pool]);
+      await db.query(`INSERT INTO sender_standing(workspace_id,phase,score) VALUES ($1,'graded',92)`, [wid]);
+      await db.query(`INSERT INTO health_alerts(key,kind,severity,value,unit,words,since) VALUES ('jobs-behind:glass.fixture','jobs-behind','critical',600,'seconds','\`glass.fixture\`: 3 due, oldest 10 min.',now()-interval '10 years')`);
+      // Received mail, one of it spam.
+      const thread = unique('thr');
+      await db.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)', [thread, wid]);
+      for (const spam of [false, true]) await db.query("INSERT INTO mail_messages(id,workspace_id,direction,thread_id,status,lifecycle,spam) VALUES($1,$2,'inbound',$3,'received','default',$4)", [unique('msg'), wid, thread, spam]);
+      // Money: $25 of credit today, and $12.40 owed.
+      await db.query(`INSERT INTO billing_ledger(workspace_id,kind,source_id,paid_uc,balance_after_uc,promo_after_uc,actor) VALUES ($1,'topup',$2,2500000000,2500000000,0,'stripe')`, [wid, `attempt:${unique('glass')}`]);
+      await db.query(`INSERT INTO billing_accounts(workspace_id,balance_uc,unpaid_since) VALUES ($1,-1240000000,now()) ON CONFLICT (workspace_id) DO UPDATE SET balance_uc=-1240000000,unpaid_since=now()`, [wid]);
+      // Visitors: an hour rolled up today, from a referrer.
+      await db.query(`INSERT INTO analytics_hours(hour,snapshot) VALUES (date_trunc('day',now(),'UTC'),'glass') ON CONFLICT (hour) DO NOTHING`);
+      await db.query(`INSERT INTO analytics_hourly(hour,metric,dimensions,events,visitor_ids) VALUES (date_trunc('day',now(),'UTC'),'page_view',$1,1000000,'{glass-a,glass-b}'),(date_trunc('day',now(),'UTC'),'visit','{}',3,'{glass-a,glass-b}')
+        ON CONFLICT (hour,metric,dimensions) DO UPDATE SET events=analytics_hourly.events+excluded.events,visitor_ids=analytics_hourly.visitor_ids||excluded.visitor_ids`, [{ path: '/', referrer: 'news.glass.example' }]);
+
+      const after = await readGlass(runtime), hour = (g: typeof after) => g.sending.hourly.at(-1)!;
+      const usd = (uc: string) => BigInt(uc);
+      assert.deepEqual([after.signups.today.waitlist - before.signups.today.waitlist, after.signups.week.waitlist - before.signups.week.waitlist, after.signups.daily.at(-1)! - before.signups.daily.at(-1)!, after.signups.places.signedUp - before.signups.places.signedUp], [1, 1, 1, 1]);
+      assert.deepEqual([after.sending.queued.n - before.sending.queued.n, after.sending.held.n - before.sending.held.n, after.sending.today.marketing - before.sending.today.marketing, after.sending.perMinute - before.sending.perMinute], [1, 1, 100, 42]);
+      assert.deepEqual([hour(after).marketing - hour(before).marketing, hour(after).delivered - hour(before).delivered, hour(after).bounced - hour(before).bounced, hour(after).complained - hour(before).complained], [100, 90, 6, 1]);
+      assert.ok(after.sending.sendApi && after.sending.sendApi.requests >= 4 && after.sending.sendApi.p50Ms <= after.sending.sendApi.p95Ms);
+      assert.deepEqual([after.delivery.grades.A - before.delivery.grades.A, after.delivery.paused - before.delivery.paused], [1, 1]);
+      assert.deepEqual([after.receiving.today - before.receiving.today, after.receiving.spam - before.receiving.spam], [2, 1]);
+      assert.deepEqual([usd(after.money.creditToday) - usd(before.money.creditToday), usd(after.money.creditMonth) - usd(before.money.creditMonth), usd(after.money.owed) - usd(before.money.owed), after.money.owing - before.money.owing],
+        [2500000000n, 2500000000n, 1240000000n, 1]);
+      assert.equal(after.system.alerts.critical - before.system.alerts.critical, 1);
+      assert.deepEqual(after.system.alerts.top.find(a => a.key === 'jobs-behind:glass.fixture'), { key: 'jobs-behind:glass.fixture', label: 'Jobs behind', severity: 'critical', words: 'glass.fixture: 3 due, oldest 10 min.', since: after.system.alerts.top.find(a => a.key === 'jobs-behind:glass.fixture')!.since });
+      assert.ok(after.system.status === 'critical' || after.system.status === 'stale');
+      assert.deepEqual([after.system.ses!.maxSendRate - (before.system.ses?.maxSendRate ?? 0), after.system.ses!.max24HourSend - (before.system.ses?.max24HourSend ?? 0), after.system.ses!.sentLast24Hours - (before.system.ses?.sentLast24Hours ?? 0)], [14, 50000, 1200]);
+      assert.deepEqual(after.system.deploy, { sha: '0123456789abcdef0123456789abcdef01234567', at: '2026-11-24T12:00:00.000Z' });
+      assert.deepEqual([after.visitors.views - before.visitors.views, after.visitors.visitors - before.visitors.visitors, after.visitors.referrers[0]], [1000000, 2, { host: 'news.glass.example', views: after.visitors.referrers[0]!.views }]);
+      assert.ok(after.visitors.referrers[0]!.views >= 1000000);
+
+      // The route: an operator reads the same figures, every series its full length, cached for the next read.
+      const first = await local('GET', path), page = ok(first);
+      assert.deepEqual([first.headers.get('x-nightmail-glass-cache'), first.headers.get('cache-control')], ['miss', 'private, no-store']);
+      assert.deepEqual(Object.keys(page), ['generatedAt', 'signups', 'sending', 'delivery', 'receiving', 'money', 'system', 'visitors']);
+      assert.deepEqual({ ...page, generatedAt: null }, { ...after, generatedAt: null });
+      const day = new Date().getUTCDate();
+      assert.deepEqual([page.signups.daily.length, page.sending.minutes.length, page.sending.hourly.length, page.receiving.hourly.length, page.visitors.hourly.length, page.money.creditDaily.length], [14, 60, 24, 24, 24, day]);
+      assert.deepEqual(Object.keys(page.delivery.grades), ['A+', 'A', 'B', 'C', 'D', 'F']);
+      assert.ok([page.sending.queued, page.sending.held].every(c => c.n <= GLASS_CAP && typeof c.atLeast === 'boolean'));
+      const second = await local('GET', path);
+      assert.deepEqual([second.headers.get('x-nightmail-glass-cache'), ok(second).generatedAt], ['hit', page.generatedAt]);
+      // A role taken away answers 404 again, cache or no cache.
+      await db.query('DELETE FROM platform_operators WHERE user_id=$1', [manager!.userId]);
+      assert.deepEqual(absent(await local('GET', path)), absent(await local('GET', '/v1/operator/no-such-page')));
+    });
+  });
+
   test('operator API: only platform operators read and act; every action needs a reason and is audited in its transaction', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const wid = runtime.config.workspaceId, pool = '111122223333', base = `/v1/operator/workspaces/${wid}`;

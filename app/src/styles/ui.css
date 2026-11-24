@@ -430,6 +430,9 @@ select.ui-native-select:disabled { background-color: var(--color-layer-1); }
 .ui-metric__figure { position: absolute; top: 0; left: 100%; display: flex; align-items: baseline; gap: 2px; transform: translateX(-100%); }
 .ui-metric__value:not(.ui-tone--neutral)[class*='ui-tone--'] { color: var(--tone-ink); }
 .ui-metric__unit { color: var(--color-faint); font-size: var(--text-xs); }
+.ui-spark { display: block; overflow: visible; }
+.ui-spark polyline { fill: none; stroke: var(--color-accent-data); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.ui-spark:not(.ui-tone--neutral)[class*='ui-tone--'] polyline { stroke: var(--tone-marker); }
 /* Facet rail: groups of values with counts; a value filters when it can. 26px rows. */
 .ui-facets { display: flex; flex-direction: column; gap: var(--space-20); min-width: 0; }
 .ui-facets__group ul { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }

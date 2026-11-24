@@ -39,7 +39,7 @@ const loadInbound = inbound.preload
 const loadOperator = operator.preload
 const loadSupportInbox = supportInbox.preload
 const loadLegal = legal.preload
-Object.assign(routeChunks, { '/overview': loadOverview, '/logs': loadLogs, '/receiving': loadInbound, '/campaigns': loadCampaigns, '/newsletters': loadNewsletters, '/audience': loadAudience, '/domains': loadSettings, '/api-keys': loadSettings, '/settings': loadSettings, '/docs': loadDocs, '/operator': loadOperator, '/support': loadSupportInbox, '/legal': loadLegal })
+Object.assign(routeChunks, { '/overview': loadOverview, '/logs': loadLogs, '/receiving': loadInbound, '/campaigns': loadCampaigns, '/newsletters': loadNewsletters, '/audience': loadAudience, '/domains': loadSettings, '/api-keys': loadSettings, '/settings': loadSettings, '/docs': loadDocs, '/operator': loadOperator, '/glass': loadOperator, '/support': loadSupportInbox, '/legal': loadLegal })
 const LogsPage = logs.page(m => m.LogsPage)
 const LogDetailPage = logs.page(m => m.LogDetailPage)
 const CampaignsPage = campaigns.page(m => m.CampaignsPage)
@@ -84,6 +84,7 @@ const OperatorPage = operator.page(m => m.OperatorPage)
 const OperatorWorkspacePage = operator.page(m => m.OperatorWorkspacePage)
 const OperatorNotesPage = operator.page(m => m.OperatorNotesPage)
 const OperatorClusterPage = operator.page(m => m.OperatorClusterPage)
+const GlassPage = operator.page(m => m.GlassPage)
 const SupportInboxPage = supportInbox.page(m => m.SupportInboxPage)
 const SupportConversationPage = supportInbox.page(m => m.SupportConversationPage)
 const SupportActionDialog = supportAction.page(m => m.SupportActionDialog)
@@ -120,7 +121,7 @@ else if (initialPath.startsWith('/newsletters')) loadNewsletters().catch(noop)
 else if (['/audience', '/contacts', '/lists', '/segments'].some(path => initialPath.startsWith(path))) loadAudience().catch(noop)
 else if (['/api-keys', '/domains', '/settings'].some(path => initialPath.startsWith(path))) loadSettings().catch(noop)
 else if (['/receiving', '/inbound', '/mailboxes'].some(path => initialPath.startsWith(path))) loadInbound().catch(noop)
-else if (initialPath.startsWith('/operator')) loadOperator().catch(noop)
+else if (initialPath.startsWith('/operator') || initialPath === '/glass') loadOperator().catch(noop)
 // A change support proposed (its emailed link) opens over Overview.
 else if (initialPath.startsWith('/support/actions/')) { loadOverview().catch(noop); supportAction.preload().catch(noop) }
 else if (initialPath === '/support' || initialPath.startsWith('/support/')) loadSupportInbox().catch(noop)
@@ -192,7 +193,7 @@ const routes = <><Route path="legal/:doc?" element={<ChunkFallback.Provider valu
     <Route path="segments" element={<Moved to={() => '/audience/segments'} />} /><Route path="segments/:id" element={<Moved to={params => `/audience/segments/${id(params)}`} />} />
     <Route path="settings/webhooks" element={<Moved to={() => '/settings#webhooks'} />} /><Route path="settings/workspace" element={<Moved to={() => '/settings#workspace'} />} /><Route path="settings/account" element={<Moved to={() => '/settings#account'} />} />
     <Route path="docs/*" element={<DocsPage />} /><Route path="developer" element={<Moved to={() => '/docs'} />} />
-    <Route path="operator" element={<OperatorPage />} /><Route path="operator/notes" element={<OperatorNotesPage />} /><Route path="operator/workspaces/:id" element={<OperatorWorkspacePage />} /><Route path="operator/abuse/:id" element={<OperatorClusterPage />} />
+    <Route path="operator" element={<OperatorPage />} /><Route path="operator/notes" element={<OperatorNotesPage />} /><Route path="operator/workspaces/:id" element={<OperatorWorkspacePage />} /><Route path="operator/abuse/:id" element={<OperatorClusterPage />} /><Route path="glass" element={<GlassPage />} />
     <Route path="support" element={<SupportInboxPage />} /><Route path="support/:id" element={<SupportConversationPage />} />
     <Route path="support/actions/:id" element={<><OverviewPage /><ChunkFallback.Provider value={null}><SupportActionDialog /></ChunkFallback.Provider></>} />
     <Route path="*" element={<EmptyState headingAs="h1" title="Page not found" action={<Link to="/overview">Return to overview</Link>} />} />
