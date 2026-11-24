@@ -17,8 +17,9 @@ try {
   const browser = await chromium.launch({ channel: 'chrome' })
   mkdirSync('public/og', { recursive: true })
   for (const page of PRICE_PAGES) {
-    // Each page's headline and its whole board, centred, with the wall around them.
-    const width = 1800
+    // Each page's headline and its whole board, centred, with the wall around them. (The window is wide enough for a
+    // tall board's 1200 × 630 frame: a clip past its edge is cut, and the card comes out narrower than it says.)
+    const width = 2600
     const probe = await browser.newPage({ viewport: { width, height: 1100 } })
     await probe.goto(origin + page.path, { waitUntil: 'networkidle' })
     await probe.evaluate(() => document.fonts.ready)

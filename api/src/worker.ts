@@ -8,6 +8,7 @@ import { ROOM_PEER_HEADER } from './campaign-room-protocol.js';
 import type { SupportPlatformApi } from './support-platform.js';
 import { SECURITY_HEADERS } from './security-headers.js';
 import { clientIpHeader, clientNetworkHeader, healthService, legacyClientIpHeaders, requestHeaderNames, setting } from './brand.js';
+import { isMissingComparePage, SITE_INDEX, withSiteIndex } from './site-index.js';
 export { DispatcherShard, CampaignRoom };
 
 // Keep top-level evaluation empty so cold-started isolates answer /health without
@@ -16,6 +17,24 @@ function fastSecure(response: Response): Response {
   const headers = new Headers(response.headers);
   for (const [name, value] of Object.entries(SECURITY_HEADERS)) if (!headers.has(name)) headers.set(name, value);
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
+// A page from the static assets, as Workers Assets sent it but never transformed on the way: Cloudflare otherwise adds
+// its analytics beacon to HTML, which the CSP refuses (an error in every visitor's console). app/public/_headers says the
+// same for the pages Workers Assets answers without the Worker (/pricing, /compare/*).
+function untransformed(response: Response, status = response.status): Response {
+  const headers = new Headers(response.headers), cache = headers.get('cache-control') ?? 'public, max-age=0, must-revalidate';
+  if (!/\bno-transform\b/.test(cache)) headers.set('cache-control', `${cache}, no-transform`);
+  return fastSecure(new Response(response.body, { status, statusText: status === response.status ? response.statusText : '', headers }));
+}
+
+// /llms.txt: the API's, with the website's own pages under its title when the dashboard build lists them (site-index.ts).
+async function withSitePages(response: Response, assets: Fetcher, url: URL): Promise<Response> {
+  const site = await assets.fetch(new Request(new URL(SITE_INDEX, url))).catch(() => null);
+  if (!site?.ok || !site.headers.get('content-type')?.startsWith('text/plain')) return response;
+  const headers = new Headers(response.headers);
+  headers.delete('content-length');
+  return new Response(withSiteIndex(await response.text(), await site.text()), { status: response.status, statusText: response.statusText, headers });
 }
 
 function initRuntimeDeps() {
@@ -290,8 +309,13 @@ export default {
       // (app/home-shell.ts); Workers Assets answers /home with it.
       if (pathname.startsWith('/assets/')) return fastSecure(new Response(null, { status: 404, headers: { 'cache-control': 'no-store' } }));
       const home = pathname === '/' && ('MULTI_TENANT' in env ? env.MULTI_TENANT : undefined) === 'true';
-      if (home) { const page = await assets.fetch(new Request(new URL('/home', url), request)); if (page.ok) return fastSecure(page); }
-      return fastSecure(await assets.fetch(new Request(new URL('/', url), request)));
+      if (home) { const page = await assets.fetch(new Request(new URL('/home', url), request)); if (page.ok) return untransformed(page); }
+      const shell = await assets.fetch(new Request(new URL('/', url), request));
+      // A comparison the build has no page for (app/price-pages.ts writes one per entry, served before the Worker): not
+      // found, so search engines drop it rather than index the dashboard's shell under its address (a soft 404). The
+      // shell still says so to a person: its price pages show "Page not found" for an unknown comparison.
+      if (isMissingComparePage(pathname)) return untransformed(shell, 404);
+      return untransformed(shell);
     }
     let deps: Awaited<ReturnType<typeof loadHttpDeps>> | undefined;
     try {
@@ -320,13 +344,14 @@ export default {
       const cf = (request as Request & { cf?: { asn?: unknown; country?: string; botManagement?: { verifiedBot?: boolean; score?: number } } }).cf;
       if (typeof cf?.asn === 'number' || typeof cf?.country === 'string') headers.set(clientNetworkHeader, `${typeof cf.asn === 'number' ? `AS${cf.asn}` : ''};${typeof cf.country === 'string' ? cf.country : ''}`);
       const runtimeStarted = performance.now();
-      const response = staticDoc
+      let response = staticDoc
         ? await app.fetch(new Request(request, { headers }), {} as Runtime)
         : await core.guardPublicRequest(pathname, headers, peer, () => withRuntime(env, async runtime =>
           app.fetch(new Request(request, { headers }), pathname === '/internal/v1/analytics' ? { ...runtime, analyticsPeer: {
             ip: request.headers.get('CF-Connecting-IP') ?? '', country: cf?.country,
             bot: cf?.botManagement?.verifiedBot === true || (cf?.botManagement?.score ?? 100) === 1,
           } } : runtime), 1, ctx));
+      if (pathname === '/llms.txt' && request.method === 'GET' && response.ok && assets) response = await withSitePages(response, assets, url);
       const runtimeMs = performance.now() - runtimeStarted;
       // What this isolate counted (app.ts logRequest), written after the response, at most every 20 seconds. Without a
       // context (a handler called directly) nothing is written, and nothing here can throw into the request.

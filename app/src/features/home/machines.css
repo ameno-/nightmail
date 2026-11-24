@@ -33,8 +33,9 @@
 .mx-machine { position: relative; z-index: 1; display: flex; flex-direction: column; margin-bottom: -5px; }
 .mx-screen { position: relative; z-index: 1; box-sizing: border-box; height: calc(var(--mx-font) * 22); overflow: hidden; padding: 16px 20px; border: 32px solid rgb(126 130 136); background: rgb(17 20 25) padding-box; box-shadow: var(--mx-shadow); color: var(--mx-screen-text); font-size: var(--mx-font); line-height: 1.5; container: mx-screen / inline-size; }
 .mx-base { position: relative; z-index: 1; display: flex; align-items: center; gap: 10px; box-sizing: border-box; height: 96px; margin-inline: -12px; padding-inline: 6px 0; border: 32px solid rgb(126 130 136); background: rgb(146 149 154) padding-box; box-shadow: var(--mx-shadow); }
-.mx-stencil { color: var(--mx-ink); font-family: var(--font-mono); font-size: 15px; font-weight: 700; line-height: 1; letter-spacing: .14em; text-transform: uppercase; opacity: .82; }
-.mx-plate { display: grid; place-items: center; box-sizing: border-box; height: 28px; margin-left: auto; padding-inline: 7px; border: 10px solid rgb(28 31 36); background: rgb(28 31 36); color: oklch(0.89 0.008 260); font-family: var(--font-mono); font-size: 12px; font-weight: 700; line-height: 8px; letter-spacing: .1em; text-transform: uppercase; white-space: nowrap; }
+.mx-stencil { color: var(--mx-ink); font-family: var(--font-mono); font-size: 15px; font-weight: 700; line-height: 1; letter-spacing: .14em; text-transform: uppercase; }
+/* (The plate's dark reaches 10 px past its letters: padding, so the letters stand on the plate's own ground.) */
+.mx-plate { display: grid; place-items: center; box-sizing: border-box; height: 28px; margin-left: auto; padding: 8px 17px; background: rgb(28 31 36); color: oklch(0.89 0.008 260); font-family: var(--font-mono); font-size: 12px; font-weight: 700; line-height: 12px; letter-spacing: .1em; text-transform: uppercase; white-space: nowrap; }
 .mx-lamp { flex: none; width: 32px; height: 32px; margin-right: -4px; }
 .mx-feet { display: flex; justify-content: space-between; height: 20px; padding-inline: 9%; }
 .mx-feet i { width: 64px; }
@@ -97,6 +98,8 @@
 .mx-msg { max-width: 92%; padding: 8px 11px; border-radius: 10px 10px 10px 3px; background: var(--mx-hair); line-height: 1.4; }
 .mx-msg b { display: block; margin-bottom: 2px; color: var(--mx-screen-dim); font-size: var(--mx-small); font-weight: 500; }
 .mx-mine { justify-self: end; border-radius: 10px 10px 3px; background: color-mix(in oklab, var(--mx-accent) 30%, transparent); }
+/* (On the lighter bubble the sender's name is lighter too, to keep 4.5:1.) */
+.mx-mine b { color: color-mix(in oklab, var(--mx-screen-dim) 40%, var(--mx-screen-text)); }
 
 /* Agents: the agent's turn, a tool at a time, and the reply it is writing. */
 .mx-agent { display: grid; align-content: start; row-gap: 7px; line-height: 1.45; }

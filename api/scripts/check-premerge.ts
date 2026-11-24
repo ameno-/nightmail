@@ -251,7 +251,7 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
 // vendor's page it was read on, the day and the text. The pages are rendered as React renders them for a browser (in a
 // child process with the app's JSX settings), at their own sizes and at inputs a visitor might type.
 {
-  const before = failed, file = 'app/src/features/pricing/prices.ts'
+  const before = failed, file = 'app/src/features/pricing/compare/index.ts'
   const { RATES, CREDIT, STORAGE_AFTER_DAYS, perThousandUsd } = await import('../src/billing/rates.js')
   const n = (value: number) => value.toLocaleString('en-US')
   // Written again here, apart from the pages' own code: micro-cents to dollars, half up, four places under a cent, and
@@ -269,14 +269,14 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
   ]
   const script = [
     "import { createElement as h, Fragment } from 'react'", "import { renderToStaticMarkup } from 'react-dom/server'", "import { MemoryRouter } from 'react-router'",
-    "const scene = await import('./src/features/pricing/scene.tsx'), prices = await import('./src/features/pricing/prices.ts')",
+    "const scene = await import('./src/features/pricing/scene.tsx'), prices = await import('./src/features/pricing/prices.ts'), compare = await import('./src/features/pricing/compare/index.ts')",
     'const at = (path, element) => renderToStaticMarkup(h(MemoryRouter, { initialEntries: [path] }, element))',
     `const calculator = ${JSON.stringify(inputs)}.map(input => { const path = '/pricing?' + new URLSearchParams(input); return { input, path, html: at(path, h(scene.Scene, {})) } })`,
     // Each comparison's page (scene.tsx: the board in its hall, and the page's end, whose Sources has its small print), and every
     // size its fader can reach, with the competitor's price there.
-        "const boards = Object.entries(prices.comparisons).map(([id, c]) => ({ id, html: at('/compare/' + id, h(Fragment, null, h(scene.Scene, { comparison: c }), h(scene.BoardEnd, { comparison: c }))) }))",
-    "const reach = Object.entries(prices.comparisons).map(([id, c]) => ({ id, sizes: prices.reachable(c).map(size => { const u = c.use(size), t = prices.theirPrice(c.offer, u); return { size, sent: u.sent, received: u.received, theirs: t ? t.cents : null } }) }))",
-    'const { OFFERS, comparisons, resendOverage, resendReceived } = prices',
+        "const boards = Object.entries(compare.comparisons).map(([id, c]) => ({ id, html: at('/compare/' + id, h(Fragment, null, h(scene.Scene, { comparison: c }), h(scene.BoardEnd, { comparison: c }))) }))",
+    "const reach = Object.entries(compare.comparisons).map(([id, c]) => ({ id, sizes: prices.reachable(c).map(size => { const u = c.use(size), t = prices.theirPrice(c.offer, u); return { size, sent: u.sent, received: u.received, theirs: t ? t.cents : null } }) }))",
+    'const { OFFERS, comparisons, resendOverage, resendReceived } = compare',
     "process.stdout.write(JSON.stringify({ calculator, boards, reach, data: { OFFERS, comparisons, resendOverage, resendReceived } }, (_k, v) => typeof v === 'bigint' ? String(v) : v))",
   ].join('\n')
   type Rendered = { calculator: { input: Record<string, string>; path: string; html: string }[]; boards: { id: string; html: string }[]; reach: { id: string; sizes: { size: number; sent: number; received: number; theirs: number | null }[] }[]; data: unknown }
@@ -312,13 +312,13 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
     }
     // Every competitor figure (a tier, a per-email rate, a fact that names a price) and its source: the vendor's page
     // (https), the day it was read (not in the future) and the text it was read from. Facts without a source are
-    // Nightmail's own (a comparison's \`ours\`).
+    // Nightmail's own (a comparison's \`rows\`).
     const sources: [string, Record<string, unknown>][] = []
     const walk = (value: unknown, at: string) => {
       if (!value || typeof value !== 'object') return
       if (Array.isArray(value)) return value.forEach((item, i) => walk(item, `${at}[${i}]`))
       const record = value as Record<string, unknown>, cited = Object.keys(record).some(key => key === 'source' || key.endsWith('Source'))
-      const price = 'cents' in record || 'ucPerEmail' in record || ('text' in record && /\$\d/.test(String(record.text)) && !/\.ours\[\d+\]$/.test(at))
+      const price = 'cents' in record || 'ucPerEmail' in record || ('text' in record && /\$\d/.test(String(record.text)) && !/\.rows\[\d+\]$/.test(at))
       if (price && !cited) fail('Price pages', `${at} is a competitor price with no source.`, file)
       for (const [key, item] of Object.entries(record)) {
         if (key === 'source' || key.endsWith('Source') || key === 'resendOverage' || key === 'resendReceived') sources.push([`${at}.${key}`, (item ?? {}) as Record<string, unknown>])
@@ -343,8 +343,8 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
     // there (a size where it doesn't must not be offered); its Nightmail figure is the billed price for the emails a
     // month written beside it, the competitor's price is dated and linked, and the terms are in its small print.
     for (const { id, sizes } of out.reach) for (const s of sizes) {
-      if (s.theirs === null) fail('Price pages', `The ${id} control reaches ${n(s.size)}, a size ${id}'s page doesn't price: take it out of the comparison's steps (prices.ts).`, file)
-      else if (charged(s.sent, s.received) >= BigInt(s.theirs) * 1_000_000n) fail('Price pages', `The ${id} control reaches ${n(s.size)}, where Nightmail (${dollarsOf(charged(s.sent, s.received))}) isn't cheaper than ${id} (${dollarsOf(BigInt(s.theirs) * 1_000_000n)}): the control must not offer it (prices.ts, steps).`, file)
+      if (s.theirs === null) fail('Price pages', `The ${id} control reaches ${n(s.size)}, a size ${id}'s page doesn't price: take it out of the comparison's steps (compare/${id}.ts).`, file)
+      else if (charged(s.sent, s.received) >= BigInt(s.theirs) * 1_000_000n) fail('Price pages', `The ${id} control reaches ${n(s.size)}, where Nightmail (${dollarsOf(charged(s.sent, s.received))}) isn't cheaper than ${id} (${dollarsOf(BigInt(s.theirs) * 1_000_000n)}): the control must not offer it (compare/${id}.ts, steps).`, file)
     }
     for (const { id, html } of out.boards) {
       const page = text(html), where = `Nightmail vs ${id}`

@@ -1418,11 +1418,15 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
     assert.equal(start.status,200);
     const code = randomUUID(), state = pushed!.get('state')!, cookie = start.headers.getSetCookie()[0]!.split(';')[0]!, from = ip();
     flows.set(code,{person:p,nonce:pushed!.get('nonce')!});
+    // replay: the browser asks for the same callback again, with the cookies it holds then.
+    const callback = (cookie: string) => app.fetch(new Request(origin+'/api/auth/callback/account?'+new URLSearchParams({code,state,iss:issuer}),{headers:{cookie,'sec-fetch-site':'cross-site','x-nightmail-client-ip':from}}),runtime);
     return async () => {
-      const done = await app.fetch(new Request(origin+'/api/auth/callback/account?'+new URLSearchParams({code,state,iss:issuer}),{headers:{cookie,'sec-fetch-site':'cross-site','x-nightmail-client-ip':from}}),runtime);
+      const done = await callback(cookie);
       const location = new URL(done.headers.get('location')!);
       return { auth: location.searchParams.get('auth'), place: location.searchParams.get('place'), link: location.searchParams.get('link'), account: location.searchParams.get('account'),
-        landed: location.pathname + location.search, session: done.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.session_token='))?.split(';')[0] ?? '' };
+        landed: location.pathname + location.search, session: done.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.session_token='))?.split(';')[0] ?? '',
+        waitlist: done.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.waitlist='))?.split(';')[0] ?? '',
+        replay: async (held: string) => new URL((await callback(held)).headers.get('location')!).search };
     };
   }
   const signIn = async (p: Person, callbackURL?: string) => (await begin(p, callbackURL))();
@@ -1815,11 +1819,29 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   assert.deepEqual(await signIn(sibling).then(r=>[r.auth,r.place,r.session]),['waitlist','ready','']);
   assert.deepEqual([(await places()).open,await placeOf(devIn.account)],[1,'open']);
   // No verified primary address on GitHub, or one listed unverified: refused, offered a link (?place=ready), place kept.
+  // Each refusal's log line says which place it could have had and what GitHub said of the address, never the address.
   const unverified = someone(`unverified-${randomUUID().slice(0,8)}@example.net`,githubAcr,'github');
+  const refusals: Record<string, unknown>[] = [], warn = console.warn;
+  const capture = t.mock.method(console,'warn',(line: string) => { try { const o = JSON.parse(line); if (o.code === 'SIGN_IN_NOT_APPROVED') refusals.push(o); } catch { warn(line); } });
   for (const upstream of [{}, {email:unverified.email,email_verified:false}]) {
     unverified.upstream = upstream;
     assert.deepEqual(await signIn(unverified).then(r=>[r.auth,r.place,r.session]),['waitlist','ready',''],JSON.stringify(upstream));
   }
+  sibling.upstream = {email:dev.email,email_verified:true};
+  await signIn(sibling);
+  capture.mock.restore();
+  assert.deepEqual(refusals.map(o=>[o.place,o.github]),[['open','none'],['open','unverified'],['open','other']]);
+  assert.ok(!JSON.stringify(refusals).includes('@'),'No address in the log');
+  // The browser asks for the same callback again right after a refusal (production saw it 120 ms later): the sign-in is
+  // spent, and the waitlist cookie the refusal set brings it back to the waitlist screen and its link offer. Without
+  // that cookie it is the plain failure, as before.
+  const twice = await (await begin(unverified))();
+  assert.deepEqual([twice.auth,twice.place,!!twice.waitlist],['waitlist','ready',true]);
+  assert.deepEqual([await twice.replay(twice.waitlist),await twice.replay('')],['?auth=waitlist','?auth=error']);
+  // Asking for a link has its own allowance per browser: one that used up its pending sign-ins (production saw a retrier
+  // refused with AUTH_STATE_LIMIT) still gets one.
+  for (let i = 0; i < 8; i++) await request('/api/auth/sign-in/account','POST','',{callbackURL:origin+'/'});
+  assert.equal((await request('/api/auth/sign-in/account','POST','',{callbackURL:origin+'/'})).status,429);
   assert.equal((await places()).open,1);
   assert.deepEqual(await ask(unverified.email),[202,{requested:true}]);
   const [openLink] = await links(unverified);
@@ -16343,6 +16365,9 @@ describe('Dashboard API capabilities', () => {
         await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,event_outcomes,created_at)
           SELECT $1||n,$2,$3,'fixture',$4,jsonb_build_array($6::text||n%$7||'@example.net'),'[]','[]','Grown','{}',false,'delivered','p-'||$1||n,3,now() FROM generate_series(1,$5::int) n`, [tag, wid, REGION, from, n, to(0), to(1)]);
         await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated,created_at) SELECT 'ev-'||$1||n,$2,$1||n,'accepted',false,now() FROM generate_series(1,$3::int) n`, [tag, wid, n]); };
+      // Autoanalyze cannot see the 12,000 envelopes seeded in this uncommitted fixture. Give the accepted-event
+      // triggers accurate statistics before they join their 800 event IDs back to sending_emails.
+      await db.query('ANALYZE sending_emails');
       await accepted(800, i => i ? '800' : 'grown');
       await accepted(500, i => i ? '1' : 'same');
       // Graded half an hour after the hour those were accepted in ends.

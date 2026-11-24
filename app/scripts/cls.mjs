@@ -479,6 +479,8 @@ async function measure(browser, job, fx) {
   const work = (async () => {
     if (job.waitlist) await context.addCookies([{ name: 'nightmail.waitlist', value: encodeURIComponent(job.waitlist), url: origin }]);
     if (job.user) await context.addCookies([job.user].flat().map((user, slot) => ({ name: slot ? `nightmail.session_token.${slot}` : 'nightmail.session_token', value: encodeURIComponent(fx.sessions[user].cookie), url: origin, httpOnly: true })));
+    // A signed-in browser has been to the dashboard, which remembers it: the marketing pages ask for its session (data/live.ts, sessionLikely).
+    if (job.user) await context.addInitScript(() => { try { localStorage.setItem('nightmail.session', 'in'); } catch {} });
     await context.addInitScript(probe);
     // Privacy mode on (lib/privacy.ts; off by default), so the masking checks and the review screenshots see addresses masked.
     // (Init scripts run in every frame too, and an email preview's sandboxed frame has no storage.)
@@ -519,6 +521,14 @@ async function measure(browser, job, fx) {
     const missing = !lateFonts ? [] : await page.evaluate(() => Promise.all([...document.fonts].filter(f => f.family.includes('Fallback')).map(f => f.load().then(() => null, () => `${f.family} ${f.weight} ${f.unicodeRange}`))));
     for (const face of missing.filter(Boolean)) problems.push(`no local font for ${face}: install fonts-liberation and fonts-dejavu-core, or measure on a machine with Arial and Menlo`);
     await settle(page, net);
+    // A price page paints from its HTML first and its app takes over at the reader's first key or touch (app/price-pages.ts,
+    // features/pricing/index.tsx): wake it, as a reader would, so the painted page and the takeover are both measured and
+    // an in-app click lands in the app.
+    if (await page.evaluate(() => !!document.getElementById('price-shell'))) {
+      await page.keyboard.press('Shift');
+      await page.waitForFunction(() => !document.getElementById('price-shell'), null, { timeout: 30_000 }).catch(() => problems.push('the app never took over from the painted page'));
+      await settle(page, net);
+    }
     if (job.support) {
       // Open the chat and let the greeting finish: the panel is idle and no caret is left in it.
       const opened = await page.evaluate(() => { const button = document.getElementById('support-trigger'); button?.click(); return Boolean(button); });
