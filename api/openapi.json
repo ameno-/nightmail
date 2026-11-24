@@ -4820,9 +4820,6 @@
               "oldestMs": {
                 "type": "integer"
               },
-              "depth": {
-                "type": "integer"
-              },
               "lane": {
                 "type": "string",
                 "enum": [
@@ -4833,10 +4830,9 @@
             },
             "required": [
               "oldestMs",
-              "depth",
               "lane"
             ],
-            "description": "Present on active campaigns when delivery feedback ingestion is at least 2 minutes behind."
+            "description": "Present while a campaign is preparing, sending, or paused when delivery feedback ingestion is at least 2 minutes behind."
           }
         },
         "required": [

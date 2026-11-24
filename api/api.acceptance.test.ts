@@ -34277,8 +34277,15 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
   });
 
   test('feedback throughput: priority routing, cross-queue duplicates, concurrent out-of-order safety, exact tallies and priority-only lag hold', async t => {
-    const { feedbackSink, isPriorityFeedback, settleFeedbackBatch, feedbackMac } = await import('./src/adapters/feedback-queue.js');
-    const { ingestRoutineSesEvents, recordFeedbackLag, FEEDBACK_LAG_HOLD_MS } = await import('./src/sending.js');
+    const { feedbackSink, isPriorityFeedback, settleFeedbackBatch, feedbackMac, batchFirstDeliveryLag, metricsEffectiveLagMs } = await import('./src/adapters/feedback-queue.js');
+    const { ingestRoutineSesEvents, recordFeedbackLag, FEEDBACK_LAG_HOLD_MS, FEEDBACK_LAG_MIN_DEPTH } = await import('./src/sending.js');
+    // B6: retried messages (attempts > 1) and tiny metric backlogs (< FEEDBACK_LAG_MIN_DEPTH) never trigger lag holds.
+    const t0 = Date.now();
+    assert.equal(batchFirstDeliveryLag([{ attempts: 5, timestamp: new Date(t0 - 450_000) }], t0), null, 'Retry-only batch returns null lag');
+    assert.deepEqual(batchFirstDeliveryLag([{ attempts: 5, timestamp: new Date(t0 - 450_000) }, { attempts: 1, timestamp: new Date(t0 - 2_000) }], t0), { count: 1, oldestMs: 2_000 }, 'First-delivery lag ignores 450s retry');
+    assert.deepEqual(batchFirstDeliveryLag([{ attempts: 1, timestamp: new Date(t0 - 360_000) }], t0), { count: 1, oldestMs: 360_000 }, 'Genuine delayed first delivery reports 360s lag');
+    assert.equal(metricsEffectiveLagMs(FEEDBACK_LAG_MIN_DEPTH - 1, new Date(t0 - 450_000), FEEDBACK_LAG_MIN_DEPTH, t0), 0, 'Metrics depth below floor reports 0 lag');
+    assert.equal(metricsEffectiveLagMs(FEEDBACK_LAG_MIN_DEPTH, new Date(t0 - 450_000), FEEDBACK_LAG_MIN_DEPTH, t0), 450_000, 'Metrics depth at/above floor reports real lag');
     const secret = '0'.repeat(64);
     const routineSent: unknown[] = [], prioritySent: unknown[] = [];
     const mkQ = (out: unknown[]) => ({ sendBatch: async (batch: { body: unknown }[]) => { out.push(...batch.map(b => b.body)); } }) as unknown as Queue<import('./src/core.js').FeedbackItem>;
@@ -34358,30 +34365,74 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const statusSummary = await db.query("SELECT count(*) FILTER (WHERE status='bounced')::int AS bnc, count(*) FILTER (WHERE (event_outcomes & 16) <> 0)::int AS opened, count(*) FILTER (WHERE (event_outcomes & 32) <> 0)::int AS clicked FROM sending_emails WHERE workspace_id=$1 AND campaign_id=$2", [ws, camp.id]);
       assert.deepEqual(statusSummary.rows[0], { bnc: 20, opened: 80, clicked: 16 });
 
+      // B3: a later suppression for an already-suppressed contact advances suppressed_at even for the same reason.
+      const bouncedEmail = sentRows[0]!;
+      const laterIso = new Date(Date.now() + 60_000).toISOString();
+      await ingestRoutineSesEvents(runtime, [{
+        workspaceId: ws, type: 'bounce', providerId: bouncedEmail.provider_id, taggedEmailId: bouncedEmail.id, createdAt: laterIso,
+        externalId: `${topic}:${bouncedEmail.id}:BounceLater`, data: { providerId: bouncedEmail.provider_id, bounceType: 'Permanent', bounceSubType: 'General' },
+        effects: { reported: [bouncedEmail.email], suppress: 'hard_bounce', observe: null, receiptTime: false },
+        ingress: { topicArn: topic, messageId: `${bouncedEmail.id}:BounceLater`, region: REGION, payload: { message: { eventType: 'Bounce', mail: { messageId: bouncedEmail.provider_id } }, topicArn: topic, messageId: `${bouncedEmail.id}:BounceLater`, region: REGION }, recoveryType: 'operation.simulatedFeedbackRecovery' },
+      }]);
+      const supAt = (await db.query('SELECT suppressed_at FROM audience_contacts WHERE workspace_id=$1 AND email=$2', [ws, bouncedEmail.email])).rows[0].suppressed_at as Date;
+      assert.ok(supAt.getTime() >= Date.parse(laterIso) - 1000, 'Repeat suppression advances suppressed_at to the latest timestamp');
+
+      // B2: status precedence is order-independent across every cross-lane event pair (including delayed > sent).
+      const pairs: [string, string, string][] = [
+        ['send', 'delivery_delay', 'delayed'],
+        ['send', 'non_permanent_bounce', 'delayed'],
+        ['delivery_delay', 'validation_suppressed', 'suppressed'],
+        ['delivery_delay', 'delivery', 'delivered'],
+        ['validation_suppressed', 'delivery', 'delivered'],
+        ['delivery', 'bounce', 'bounced'],
+        ['bounce', 'complaint', 'complained'],
+      ];
+      for (const [idx, [aType, bType, expected]] of pairs.entries()) {
+        for (const [ord, seq] of ([[aType, bType], [bType, aType]] as [string, string][]).entries()) {
+          const eid = `em_ord_${idx}_${ord}_${Date.now().toString(36)}`;
+          const pid = `sim_ord_${idx}_${ord}_${Date.now().toString(36)}`;
+          await db.query(`INSERT INTO sending_emails (id, workspace_id, region, from_address, to_addresses, subject, status, provider_id, simulated, snapshot)
+            VALUES ($1, $2, $3, 'sender@example.com', '["ord@example.com"]'::jsonb, 'Order', 'accepted', $4, true, '{}'::jsonb)`, [eid, ws, REGION, pid]);
+          for (const [step, evType] of seq.entries()) {
+            const evData = evType === 'bounce' ? { bounceType: 'Permanent', bounceSubType: 'General' }
+              : evType === 'non_permanent_bounce' ? { bounceType: 'Transient', bounceSubType: 'General' }
+              : evType === 'validation_suppressed' ? { bounceType: 'Permanent', bounceSubType: 'EmailValidationSuppressed' } : {};
+            await ingestRoutineSesEvents(runtime, [{
+              workspaceId: ws, type: evType, providerId: pid, taggedEmailId: eid, createdAt: nowIso,
+              externalId: `${topic}:${eid}:${step}`, data: { providerId: pid, ...evData },
+              ingress: { topicArn: topic, messageId: `${eid}:${step}`, region: REGION, payload: { message: { eventType: evType, mail: { messageId: pid } }, topicArn: topic, messageId: `${eid}:${step}`, region: REGION }, recoveryType: 'operation.simulatedFeedbackRecovery' },
+            }]);
+          }
+          const finalStatus = (await db.query('SELECT status FROM sending_emails WHERE id=$1', [eid])).rows[0].status;
+          assert.equal(finalStatus, expected, `${seq.join(' -> ')} must end as ${expected}`);
+        }
+      }
+
       const camp2 = ok(await local('POST', '/v1/campaigns', { name: unique('fb-lag'), from: 'sender@example.com', subject: 'Lag', html: '<p>Hi</p>', audience: { listId: list.id } }), 201);
       ok(await local('POST', `/v1/campaigns/${camp2.id}/send`, { revision: camp2.revision }), 202);
       await recordFeedbackLag(runtime.db, 'routine', 150000, 20 * 60_000);
       const viewRoutine = ok(await local('GET', `/v1/campaigns/${camp2.id}`));
-      assert.equal(viewRoutine.delivery.feedbackLag?.lane, 'routine');
-      assert.equal(viewRoutine.delivery.feedbackLag?.oldestMs, 20 * 60_000);
+      assert.deepEqual(viewRoutine.delivery.feedbackLag, { lane: 'routine', oldestMs: 20 * 60_000 });
+      assert.equal('depth' in (viewRoutine.delivery.feedbackLag ?? {}), false, 'Public feedbackLag omits cross-tenant depth');
       // Priority lag >= 5 min holds an autoPause campaign with waiting.reason='feedback_lag' (never a manual pause),
-      // while routine lag alone never holds releasing.
+      // while display reports the older lane (routine 20m > priority 6m).
       await recordFeedbackLag(runtime.db, 'priority', 500, FEEDBACK_LAG_HOLD_MS + 60_000);
-      const viewPrio = ok(await local('GET', `/v1/campaigns/${camp2.id}`));
-      assert.equal(viewPrio.delivery.feedbackLag?.lane, 'priority');
+      const viewBoth = ok(await local('GET', `/v1/campaigns/${camp2.id}`));
+      assert.deepEqual(viewBoth.delivery.feedbackLag, { lane: 'routine', oldestMs: 20 * 60_000 }, 'Display reports the older lane');
       try {
         await run('campaign.run');
         const held = ok(await local('GET', `/v1/campaigns/${camp2.id}`));
         assert.deepEqual([held.state, held.delivery.waiting?.reason, held.delivery.expanded], ['sending', 'feedback_lag', 0]);
         // Stale priority sample (> 5 min old) expires automatically so a broken metrics read never holds forever,
-        // and the 20 min routine lag still does NOT hold releasing.
+        // and the 20 min routine lag still does NOT hold releasing when priority queue is bound.
         await db.query("UPDATE operation_feedback_lag SET updated_at = now() - interval '6 minutes' WHERE lane = 'priority'");
         const staleView = ok(await local('GET', `/v1/campaigns/${camp2.id}`));
-        assert.equal(staleView.delivery.feedbackLag?.lane, 'routine');
+        assert.deepEqual(staleView.delivery.feedbackLag, { lane: 'routine', oldestMs: 20 * 60_000 });
         await db.query("UPDATE jobs SET status='pending', available_at=clock_timestamp() WHERE id=$1", ['campaign.run:' + camp2.id]);
         await run('campaign.run');
         const released = ok(await local('GET', `/v1/campaigns/${camp2.id}`));
         assert.equal(released.delivery.expanded, 60, 'Campaign releases all 60 non-suppressed recipients once priority lag expires even with 20m routine lag');
+        assert.deepEqual(released.delivery.feedbackLag, { lane: 'routine', oldestMs: 20 * 60_000 }, 'feedbackLag remains visible once all recipients are released');
       } finally {
         await db.query('DELETE FROM operation_feedback_lag');
       }

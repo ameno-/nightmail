@@ -187,7 +187,10 @@ const Failure = z.object({ code: z.string(), message: z.string() });
 export const FEEDBACK_LAG_HOLD_MS = 5 * 60_000;
 export const FEEDBACK_LAG_FRESH_MS = 5 * 60_000;
 export const FEEDBACK_LAG_DISPLAY_MS = 2 * 60_000;
-export type FeedbackLag = { oldestMs: number; depth: number; lane: 'routine' | 'priority' };
+/** Minimum queue backlogCount required before queue-level metrics() oldestMessageTimestamp counts as lane lag,
+ *  so a handful of poison/unmatchable messages sitting in Cloudflare retry backoff never trip an installation-wide hold. */
+export const FEEDBACK_LAG_MIN_DEPTH = 10;
+export type FeedbackLag = { oldestMs: number; lane: 'routine' | 'priority' };
 
 /** Persist the latest feedback queue lag sample (single-row upsert, called from minute cron and throttled on backlog). */
 export async function recordFeedbackLag(db: DbExecutor, lane: 'routine' | 'priority', depth: number, oldestMs: number) {
@@ -196,12 +199,12 @@ export async function recordFeedbackLag(db: DbExecutor, lane: 'routine' | 'prior
     ON CONFLICT (lane) DO UPDATE SET depth = excluded.depth, oldest_ms = excluded.oldest_ms, updated_at = now()`);
 }
 async function activeFeedbackLag(db: DbExecutor): Promise<FeedbackLag | null> {
-  const { rows: [row] } = await db.execute<{ lane: 'routine' | 'priority'; depth: number; oldest_ms: number }>(sql`
-    SELECT lane, depth, oldest_ms FROM operation_feedback_lag
+  const { rows: [row] } = await db.execute<{ lane: 'routine' | 'priority'; oldest_ms: number }>(sql`
+    SELECT lane, oldest_ms FROM operation_feedback_lag
     WHERE updated_at > now() - make_interval(secs => ${Math.round(FEEDBACK_LAG_FRESH_MS / 1000)}::int)
       AND oldest_ms >= ${FEEDBACK_LAG_DISPLAY_MS}
-    ORDER BY (lane = 'priority') DESC, oldest_ms DESC LIMIT 1`);
-  return row ? { lane: row.lane, depth: Number(row.depth), oldestMs: Number(row.oldest_ms) } : null;
+    ORDER BY oldest_ms DESC, (lane = 'priority') DESC LIMIT 1`);
+  return row ? { lane: row.lane, oldestMs: Number(row.oldest_ms) } : null;
 }
 
 const Delivery = z.object({ total: z.number().int().describe('Fixed recipient count frozen at send or schedule.'), prepared: z.number().int().describe('Recipients whose message was validated.'), expanded: z.number().int().describe('Recipients materialized as immutable email records.'), canceled: z.number().int().describe('Recipients canceled before materialization. Materialized cancellations remain in counts.byStatus.canceled.'), error: Failure.nullable().describe('Why the campaign failed or was canceled by the system.'),
@@ -209,7 +212,7 @@ const Delivery = z.object({ total: z.number().int().describe('Fixed recipient co
   pausedAt: z.string().nullable(), pauseReason: Failure.nullable(),
   deliveredOnly: z.boolean().describe('After a resumed list-probe quarantine: the rest goes only to contacts this workspace delivered to before; the others are counted in canceled. Never for a required notice.'),
   waiting: z.object({ reason: z.enum(['pacing_window', 'ses_daily_quota', 'hosted_daily_quota', 'list_probe', 'balance', 'feedback_lag']), until: z.string() }).nullable().describe('Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up.'),
-  feedbackLag: z.object({ oldestMs: z.number().int(), depth: z.number().int(), lane: z.enum(['routine', 'priority']) }).nullable().describe('Present on active campaigns when delivery feedback ingestion is at least 2 minutes behind.') }).describe('The current launch: null until the campaign is sent or scheduled, and cleared by a new revision.').openapi('CampaignDelivery');
+  feedbackLag: z.object({ oldestMs: z.number().int(), lane: z.enum(['routine', 'priority']) }).nullable().describe('Present while a campaign is preparing, sending, or paused when delivery feedback ingestion is at least 2 minutes behind.') }).describe('The current launch: null until the campaign is sent or scheduled, and cleared by a new revision.').openapi('CampaignDelivery');
 function deliveryView(row: Omit<typeof campaigns.$inferSelect, 'draft' | 'stats'>, feedbackLag: FeedbackLag | null = null) {
   if (!row.reviewId) return null;
   const next = row.pacePerDay !== null && row.windowStartedAt ? new Date(Date.parse(row.windowStartedAt) + DAY_MS).toISOString() : null;
@@ -505,7 +508,7 @@ async function campaignViews<T extends CampaignRow>(runtime: Runtime, a: Actor, 
       : read && !read.detail && a.credential === 'dashboard' ? await cached(['campaign-counts', a.workspaceId, rows.map(r => [r.id, r.updatedAt])]) : await load();
   }
   const lag = rows.some(row => row.reviewId && ['preparing', 'sending', 'paused'].includes(row.state))
-    ? await activeFeedbackLag(runtime.db).catch(() => null)
+    ? await activeFeedbackLag(db).catch(() => null)
     : null;
   return rows.map(row => {
     const counts = emptyCounts();
@@ -2177,7 +2180,7 @@ export async function verifiedAttachment(runtime: Runtime, row: typeof attachmen
 export const statusForEvent: Record<string, EmailStatus> = { send: 'sent', delivery: 'delivered', bounce: 'bounced', non_permanent_bounce: 'delayed', validation_suppressed: 'suppressed', complaint: 'complained', complaint_feedback: 'accepted', reject: 'rejected', rendering_failure: 'rendering_failed', delivery_delay: 'delayed', accepted: 'accepted', suppressed: 'suppressed', acceptance_unknown: 'acceptance_unknown', simulated: 'simulated' };
 // Publish email.sent from the SendEmail response; a later SES Send is status feedback only.
 export const publicEventType: Record<string, string> = { accepted: 'email.sent', delivery: 'email.delivered', bounce: 'email.bounced', non_permanent_bounce: 'email.bounced', validation_suppressed: 'email.bounced', complaint: 'email.complained', reject: 'email.rejected', acceptance_unknown: 'email.rejected', rendering_failure: 'email.rendering_failed', delivery_delay: 'email.delivery_delayed', open: 'email.opened', click: 'email.clicked' };
-export const rank: Record<EmailStatus, number> = { scheduled: 0, queued: 0, attempting: 1, acceptance_unknown: 2, accepted: 3, sent: 4, delayed: 4, suppressed: 5, delivered: 6, bounced: 7, complained: 8, rejected: 7, rendering_failed: 7, canceled: 7, simulated: 7 };
+export const rank: Record<EmailStatus, number> = { scheduled: 0, queued: 0, attempting: 10, acceptance_unknown: 20, accepted: 30, sent: 40, delayed: 45, suppressed: 50, delivered: 60, bounced: 70, complained: 80, rejected: 70, rendering_failed: 70, canceled: 70, simulated: 70 };
 const outcomeBitForEvent: Record<string, number> = { send: 1, accepted: 1, delivery: 3, bounce: 5, non_permanent_bounce: 129, complaint: 9, delivery_delay: 129, open: 16, click: 32, reject: 64, rendering_failure: 64 };
 type EmailEventInput = { workspaceId: string; type: string; providerId?: string; errorCode?: string; data?: Record<string, unknown>; recipientHashes?: string[]; externalId?: string; createdAt?: string; receipt?: { topicArn: string; messageId: string } };
 type IncomingReceipt = { topicArn: string; messageId: string; region: string; payload: Record<string, unknown>; recoveryType?: 'operation.ses' | 'operation.simulatedFeedbackRecovery' };
@@ -2267,6 +2270,21 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
     ), matched AS (
       SELECT x.*, CASE WHEN x.effects->>'receiptTime'='true' THEN i.created_at ELSE x.created_at END AS event_time
       FROM distinct_receipts x JOIN incoming i USING (topic_arn,message_id,workspace_id) WHERE x.email_id IS NOT NULL
+    ), shared_locks AS MATERIALIZED (
+      -- When a batch contains a suppression transition (which triggers sending_emails billing/usage/health updates
+      -- after sending_email_events inserts), pre-acquire per-workspace advisory lock 275820 in ascending hashtext
+      -- order across all potentially-writing workspaces in this batch so multi-workspace mixed batches never invert.
+      SELECT pg_advisory_xact_lock(275820, h)
+      FROM (
+        SELECT DISTINCT hashtext(m.workspace_id) AS h
+        FROM matched m
+        WHERE EXISTS (SELECT 1 FROM matched s WHERE s.type = 'validation_suppressed' OR s.status = 'suppressed')
+          AND NOT m.simulated
+          AND (m.type IN ('validation_suppressed', 'complaint', 'accepted', 'send')
+               OR (m.type = 'bounce' AND m.data->>'bounceType' = 'Permanent')
+               OR m.status = 'suppressed')
+        ORDER BY 1
+      ) x
     ) ${effects ? sql`, recipients AS MATERIALIZED (
       SELECT DISTINCT x.event_id,lower(address) AS address FROM matched x,
         jsonb_array_elements_text(x.to_addresses || x.cc_addresses || x.bcc_addresses) AS address
@@ -2279,7 +2297,7 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
            AND EXISTS(SELECT FROM provider_feedback_history WHERE topic_arn=x.topic_arn AND kind='shared') THEN ARRAY(
            SELECT encode(sha256(convert_to(x.email_id,'UTF8') || decode('00','hex') || convert_to(r.address,'UTF8')),'hex')
            FROM recipients r WHERE r.event_id=x.event_id AND r.address NOT LIKE '%@simulator.amazonses.com' ORDER BY r.address) END` : sql`NULL`}
-       FROM matched x ORDER BY x.workspace_id,x.email_id,x.ordinal
+       FROM matched x WHERE (SELECT count(*) FROM shared_locks) >= 0 ORDER BY x.workspace_id,x.email_id,x.ordinal
       ON CONFLICT DO NOTHING RETURNING *
     ) ${effects ? sql`, contact_events AS (
       -- Effects follow the receipt this statement processed, not a newly inserted event: a recovery
@@ -2305,6 +2323,7 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
         open_observed_since=least(c.open_observed_since,excluded.open_observed_since),click_observed_since=least(c.click_observed_since,excluded.click_observed_since),
         observed_since=least(c.observed_since,excluded.observed_since),updated_at=now()
       WHERE (excluded.suppressed AND (NOT c.suppressed OR (excluded.suppression_reason = 'complaint' AND c.suppression_reason IS DISTINCT FROM 'complaint') OR (excluded.suppression_reason = 'hard_bounce' AND c.suppression_reason IS DISTINCT FROM 'complaint' AND c.suppression_reason IS DISTINCT FROM 'hard_bounce')))
+        OR (excluded.suppressed AND c.suppressed AND (c.suppressed_at IS NULL OR excluded.suppressed_at > c.suppressed_at))
         OR (excluded.last_open_at IS NOT NULL AND (c.last_open_at IS NULL OR excluded.last_open_at > c.last_open_at))
         OR (excluded.last_click_at IS NOT NULL AND (c.last_click_at IS NULL OR excluded.last_click_at > c.last_click_at))
         OR (excluded.open_observed_since IS NOT NULL AND (c.open_observed_since IS NULL OR excluded.open_observed_since < c.open_observed_since))
@@ -2317,7 +2336,7 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
     ), ranked AS (
       SELECT x.*,max(x.next_rank) OVER(PARTITION BY x.email_id ORDER BY x.ordinal) AS running_rank FROM matched x JOIN inserted ins ON ins.id=x.event_id
       WHERE x.next_rank IS NOT NULL
-    ), winner AS (
+    ), winner AS MATERIALIZED (
       SELECT DISTINCT ON (email_id) *,
         bool_or(type='validation_suppressed' AND next_rank>=greatest(running_rank,(${JSON.stringify(rank)}::jsonb->>status)::int)) OVER(PARTITION BY email_id) AS validation
       FROM ranked ORDER BY email_id,next_rank DESC,ordinal DESC
@@ -2604,7 +2623,11 @@ async function readRun(runtime: Runtime, a: Actor, campaignId: string): Promise<
     sent24: sql<number>`coalesce((SELECT sent_last_24_hours FROM ${limits} WHERE workspace_id=${a.workspaceId} AND region=${region}),0)`,
     customer24: runtime.config.multiTenant ? sql<number>`coalesce((SELECT customer_sent_24_hours FROM ${limits} WHERE workspace_id=${a.workspaceId} AND region=${region}),0)` : sql<number>`0`,
     quotaCheckedAt: sql<string | null>`(SELECT checked_at::text FROM ${limits} WHERE workspace_id=${a.workspaceId} AND region=${region})`,
-    priorityLagMs: sql<number | null>`(SELECT oldest_ms FROM operation_feedback_lag WHERE lane = 'priority' AND updated_at > now() - make_interval(secs => ${Math.round(FEEDBACK_LAG_FRESH_MS / 1000)}::int))`,
+    priorityLagMs: sql<number | null>`coalesce(
+      (SELECT oldest_ms FROM operation_feedback_lag WHERE lane = 'priority' AND updated_at > now() - make_interval(secs => ${Math.round(FEEDBACK_LAG_FRESH_MS / 1000)}::int)),
+      (SELECT oldest_ms FROM operation_feedback_lag WHERE lane = 'routine' AND updated_at > now() - make_interval(secs => ${Math.round(FEEDBACK_LAG_FRESH_MS / 1000)}::int)
+        AND NOT EXISTS (SELECT 1 FROM operation_feedback_lag WHERE lane = 'priority'))
+    )`,
     dbNow: sql<string>`clock_timestamp()::text`,
   }).from(campaigns).leftJoin(campaignReviews, eq(campaignReviews.id, campaigns.reviewId)).where(campaignWhere(a, campaignId));
   return row;
@@ -2966,12 +2989,18 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
       throw new JobDeferred(until, payload);
     }
     if (Date.parse(row.probeWaitUntil) > dbNow) await hold('list_probe', row.probeWaitUntil);
+    // Hold before passing the list probe when safety feedback is >= 5 min behind so a probe cannot clear blind.
+    if (row.autoPause && (row.priorityLagMs ?? 0) >= FEEDBACK_LAG_HOLD_MS) {
+      return hold('feedback_lag', new Date(dbNow + 60_000).toISOString());
+    }
     const unhealthy = await campaignHealth(runtime.db, a, row.id, true, probe);
     if (unhealthy) return quarantine(unhealthy);
     await runtime.db.execute(clearProbe(ref));
   } else if (probe !== null) probeLeft = probe - row.expanded;
   // Hold new releases (never a manual pause) when priority safety feedback (bounces/complaints) is >= 5 minutes behind
-  // so auto-pause does not send blind; routine opens/clicks lagging never hold a send, and stale samples (> 5 min old) expire.
+  // so auto-pause does not send blind; routine opens/clicks lagging never hold a send (unless running without a priority
+  // queue), and stale samples (> 5 min old) expire. Queue-level lag is installation-wide because Cloudflare Queues
+  // reports per-queue age, not per-workspace; workspaces with autoPause disabled are never held.
   if (row.autoPause && (row.priorityLagMs ?? 0) >= FEEDBACK_LAG_HOLD_MS) {
     return hold('feedback_lag', new Date(dbNow + 60_000).toISOString());
   }

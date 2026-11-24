@@ -89,6 +89,8 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .composer-skeleton-canvas .ui-skeleton-block { background: color-mix(in srgb, var(--color-email-text) 12%, var(--color-email-surface)); }
 .campaign-audience-summary { display: flex; flex-direction: column; gap: 0; }
 .campaign-audience-summary > .campaign-progress-bar { margin-block: var(--space-8); }
+/* One reserved status row while preparing, sending, or paused so waiting/lag lines never shift layout (CLS 0). */
+.campaign-status-line { min-height: 20px; height: 20px; line-height: 20px; margin: 0 0 var(--space-4); overflow: clip; text-overflow: ellipsis; white-space: nowrap; }
 /* A summary line is a metric row: the label, then its mono figure on the right, a hairline under it. */
 .campaign-summary-line { display: flex; align-items: center; justify-content: space-between; gap: var(--space-16); min-height: 32px; border-bottom: 1px solid var(--color-border-muted); }
 .campaign-summary-line > :last-child { font-family: var(--font-mono); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }

@@ -78,6 +78,27 @@ export function isPriorityFeedback(item: Pick<FeedbackItem, 'message'>): boolean
   return PRIORITY_EVENT_TYPES.has(kind);
 }
 
+/** Measure lane lag from first deliveries only (attempts === 1) so a single retried/poison message whose Cloudflare
+ *  enqueue timestamp is minutes old never holds every workspace's auto-pause campaigns. Returns null if the batch
+ *  contained only retries. */
+export function batchFirstDeliveryLag(messages: readonly { attempts: number; timestamp: Date }[], nowMs = Date.now()): { count: number; oldestMs: number } | null {
+  let count = 0, oldestMs = 0;
+  for (const m of messages) {
+    if (m.attempts !== 1) continue;
+    count++;
+    const age = Math.max(0, nowMs - m.timestamp.getTime());
+    if (age > oldestMs) oldestMs = age;
+  }
+  return count > 0 ? { count, oldestMs } : null;
+}
+
+/** Apply a depth floor to queue-level metrics() oldestMessageTimestamp so a handful of unmatchable/poison messages
+ *  sitting in Cloudflare retry backoff never trip an installation-wide hold. */
+export function metricsEffectiveLagMs(depth: number, oldestMessageTimestamp: Date | undefined, minDepth: number, nowMs = Date.now()): number {
+  if (!oldestMessageTimestamp || depth < minDepth) return 0;
+  return Math.max(0, nowMs - oldestMessageTimestamp.getTime());
+}
+
 // Verified provider feedback (and simulated callbacks) leave the request path through the feedback queues in batches of
 // at most 100 messages. When a priority queue is bound, safety/suppression/consent events go there; otherwise everything
 // falls back cleanly to the routine feedback queue.

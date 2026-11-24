@@ -1481,11 +1481,10 @@ export type CampaignDelivery = {
         until: string;
     } | null;
     /**
-     * Present on active campaigns when delivery feedback ingestion is at least 2 minutes behind.
+     * Present while a campaign is preparing, sending, or paused when delivery feedback ingestion is at least 2 minutes behind.
      */
     feedbackLag: {
         oldestMs: number;
-        depth: number;
         lane: 'routine' | 'priority';
     } | null;
 } | null;
