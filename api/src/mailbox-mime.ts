@@ -73,19 +73,27 @@ function workspaceMime(bytes:Uint8Array,region:string,recipients:string[]) {
   });
 }
 
-/** Inspect the exact bytes being copied. CopySourceIfMatch prevents substituting another object after inspection. */
-export async function copyWorkspaceRaw(client:S3Client,region:string,bucket:string,source:string,key:string,recipients:string[],kind:'raw'|'legacy-raw'|'kept',etag?:string,reserve?:(bytes:number)=>Promise<void>,objects?:MailObjects) {
-  const { HeadObjectCommand, GetObjectCommand, PutObjectCommand, CopyObjectCommand, CreateMultipartUploadCommand, UploadPartCommand, UploadPartCopyCommand, CompleteMultipartUploadCommand, AbortMultipartUploadCommand } = await loadS3Commands();
-  const location={Bucket:bucket,Key:source};
-  const head=await client.send(new HeadObjectCommand(location));
+export type RawObjectHead = { size: number; etag: string };
+
+/** Inspect staging object size and ETag before reserving byte budget or reading bytes. */
+export async function headWorkspaceRaw(client: S3Client, bucket: string, source: string, etag?: string): Promise<RawObjectHead> {
+  const { HeadObjectCommand } = await loadS3Commands();
+  const head = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: source }));
   if (head.ContentLength === undefined || !head.ETag) throw new Error('Raw message metadata unavailable');
-  if (etag && head.ETag!==etag) throw new ApiError(409,'MAILBOX_STAGING_CHANGED','The recovered message no longer matches the inspected object.');
-  const size=head.ContentLength;
-  if (size>40*MiB) throw new ApiError(413,'RAW_MESSAGE_TOO_LARGE','The raw message exceeds 40 MiB.');
-  await reserve?.(size); // Before GET, copy, MIME or attachment work. Idempotent by receipt.
+  if (etag && head.ETag !== etag) throw new ApiError(409, 'MAILBOX_STAGING_CHANGED', 'The recovered message no longer matches the inspected object.');
+  if (head.ContentLength > 40 * MiB) throw new ApiError(413, 'RAW_MESSAGE_TOO_LARGE', 'The raw message exceeds 40 MiB.');
+  return { size: head.ContentLength, etag: head.ETag };
+}
+
+/** Read, scrub blind headers, and store an already-inspected and byte-reserved staging object. */
+export async function transferWorkspaceRaw(client: S3Client, region: string, bucket: string, source: string, key: string, recipients: string[], kind: 'raw' | 'legacy-raw' | 'kept', head: RawObjectHead, objects?: MailObjects) {
+  const { GetObjectCommand, PutObjectCommand, CopyObjectCommand, CreateMultipartUploadCommand, UploadPartCommand, UploadPartCopyCommand, CompleteMultipartUploadCommand, AbortMultipartUploadCommand } = await loadS3Commands();
+  const location = { Bucket: bucket, Key: source };
+  const size = head.size;
+  const pinnedEtag = head.etag;
   // Pin the checked object and do not let fetch transparently expand BYO Content-Encoding metadata.
   const get=async(start:number,end:number,range:boolean)=>{
-    const object=await client.send(new GetObjectCommand({...location,IfMatch:head.ETag,ResponseContentEncoding:'identity',Range:range?`bytes=${start}-${end-1}`:undefined}));
+    const object=await client.send(new GetObjectCommand({...location,IfMatch:pinnedEtag,ResponseContentEncoding:'identity',Range:range?`bytes=${start}-${end-1}`:undefined}));
     if(range && object.ContentRange!==`bytes ${start}-${end-1}/${size}`) throw new Error('Expected a bounded S3 range response');
     const bytes=await object.Body!.transformToByteArray();if(bytes.length!==end-start)throw new Error('Incomplete S3 response');return bytes;
   };
@@ -99,7 +107,7 @@ export async function copyWorkspaceRaw(client:S3Client,region:string,bucket:stri
     if(!large) await objects.put(key,bytes,'message/rfc822');
     else {
       const start=original.length;
-      const rest=await client.send(new GetObjectCommand({...location,IfMatch:head.ETag,Range:`bytes=${start}-${size-1}`,ResponseContentEncoding:'identity'}));
+      const rest=await client.send(new GetObjectCommand({...location,IfMatch:pinnedEtag,Range:`bytes=${start}-${size-1}`,ResponseContentEncoding:'identity'}));
       if(!rest.Body || rest.ContentRange!==`bytes ${start}-${size-1}/${size}`)throw new Error('Incomplete S3 range');
       const reader=rest.Body.transformToWebStream().getReader();
       const stream=new ReadableStream<Uint8Array>({start:c=>c.enqueue(bytes),async pull(c){const part=await reader.read();if(part.done)c.close();else c.enqueue(part.value);},cancel:r=>reader.cancel(r)});
@@ -108,7 +116,7 @@ export async function copyWorkspaceRaw(client:S3Client,region:string,bucket:stri
     return {bytes,sizeBytes:size-removed,large};
   }
   const destination={Bucket:bucket,Key:key,Tagging:`${mailKindTag(bucket)}=${kind}`};
-  const copy={CopySource:`${bucket}/${source}`,CopySourceIfMatch:head.ETag};
+  const copy={CopySource:`${bucket}/${source}`,CopySourceIfMatch:pinnedEtag};
   if(!removed) await client.send(new CopyObjectCommand({...destination,...copy,TaggingDirective:'REPLACE'}));
   else if(!large) await client.send(new PutObjectCommand({...destination,Body:bytes,ContentType:'message/rfc822'}));
   else {
@@ -125,4 +133,11 @@ export async function copyWorkspaceRaw(client:S3Client,region:string,bucket:stri
     } catch(error){try{await client.send(new AbortMultipartUploadCommand(upload));}catch{/* bucket lifecycle also aborts abandoned uploads */}throw error;}
   }
   return {bytes,sizeBytes:size-removed,large};
+}
+
+/** Inspect the exact bytes being copied. CopySourceIfMatch prevents substituting another object after inspection. */
+export async function copyWorkspaceRaw(client:S3Client,region:string,bucket:string,source:string,key:string,recipients:string[],kind:'raw'|'legacy-raw'|'kept',etag?:string,reserve?:(bytes:number)=>Promise<void>,objects?:MailObjects) {
+  const head = await headWorkspaceRaw(client, bucket, source, etag);
+  await reserve?.(head.size); // Before GET, copy, MIME or attachment work. Idempotent by receipt.
+  return transferWorkspaceRaw(client, region, bucket, source, key, recipients, kind, head, objects);
 }

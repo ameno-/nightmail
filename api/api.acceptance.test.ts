@@ -26773,6 +26773,120 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual(searched.map(r=>r.id),[tShared]);
     });
   });
+
+  test('batched inbound ingest: burst ordering, threading, quota fallback, unread/IMAP exactness and cross-workspace fairness', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { S3Client, GetObjectCommand } = await import('@aws-sdk/client-s3');
+      const { processJobs, followDueJobs } = await import('./src/jobs.js');
+      const { mailboxIngestJobs } = await import('./src/mailbox-ingest.js');
+      const { storeIncomingBatch } = await import('./src/mailbox-ingest-store.js');
+      const { drizzle } = await import('drizzle-orm/node-postgres');
+      const wid = runtime.config.workspaceId, host = `burst-${unique('h')}.invalid`, dom = unique('mdom'), box = unique('mbx'), addr = `news@${host}`;
+      await db.query("INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,'fixture-burst','arn:aws:sns:us-east-1:000000000000:burst') ON CONFLICT(workspace_id,region) DO NOTHING", [wid, REGION]);
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')", [dom, wid, host, REGION]);
+      await db.query(`INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode,create_request,send_limits) VALUES($1,$2,$3,$4,'inbox','forever','{"type":"persistent"}','{"perDay":0}')`, [box, wid, dom, addr]);
+      await db.query("INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,$3,'primary')", [wid, addr, box]);
+      await db.query("INSERT INTO inbox_state(inbox_id,workspace_id) VALUES($1,$2) ON CONFLICT DO NOTHING", [box, wid]);
+      await db.query("SELECT inbox_seed_folders($1)", [box]);
+      // Seed root thread for in-reply-to tests.
+      const rootThr = unique('thr'), rootMid = `root-${unique('m')}@sender.invalid`;
+      await db.query("INSERT INTO mail_threads(id,workspace_id,message_count,last_message_at) VALUES($1,$2,1,now())", [rootThr, wid]);
+      await db.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,region,ses_message_id,message_id,subject,from_address,envelope_to,received_at,snippet,size_bytes,status,lifecycle,verdicts,spam,automated) VALUES($1,$2,$3,'inbound',$4,'ses_root_burst',$5,'Newsletter','news@sender.invalid','[]',now(),'root',100,'received','kept','{}',false,false)", [unique('msg'), wid, rootThr, REGION, rootMid]);
+      await db.query("INSERT INTO mail_message_ids(workspace_id,message_id,mail_message_id,thread_id) VALUES($1,$2,(SELECT id FROM mail_messages WHERE workspace_id=$1 AND ses_message_id='ses_root_burst'),$3)", [wid, rootMid, rootThr]);
+
+      // Build 12 staged messages: 6 replies on rootThr, 4 own-thread, 2 auto-replies (one with an attachment),
+      // plus re-enqueue one duplicate receipt/job to confirm idempotency on retry/overlap.
+      const rawMap = new Map<string, Buffer>();
+      const baseMs = Date.parse('2026-11-23T23:00:00.000Z');
+      const sesIds: string[] = [];
+      for (let i = 0; i < 12; i++) {
+        const sid = `burst_${unique('s')}_${String(i).padStart(2, '0')}`;
+        sesIds.push(sid);
+        const isReply = i < 6, isAuto = i >= 10, hasAtt = i === 11;
+        const ts = new Date(baseMs + i * 1000).toISOString();
+        const raw = hasAtt
+          ? Buffer.from(`From: u${i}@sender.invalid\r\nTo: ${addr}\r\nSubject: Auto OOO ${i}\r\nMessage-ID: <${sid}@sender.invalid>\r\nAuto-Submitted: auto-replied\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=b1\r\n\r\n--b1\r\nContent-Type: text/plain\r\n\r\nOut of office\r\n--b1\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=note.txt\r\n\r\nhi\r\n--b1--`)
+          : Buffer.from(`From: u${i}@sender.invalid\r\nTo: ${addr}\r\nSubject: ${isReply ? 'Re: Newsletter' : isAuto ? 'Auto OOO' : 'Topic ' + i}\r\nMessage-ID: <${sid}@sender.invalid>\r\n${isReply ? `In-Reply-To: <${rootMid}>\r\nReferences: <${rootMid}>\r\n` : ''}${isAuto ? 'Auto-Submitted: auto-replied\r\n' : ''}Date: ${ts}\r\n\r\nBody ${i}`);
+        rawMap.set(`staging/${sid}`, raw);
+        const notif = { mail: { source: `u${i}@sender.invalid`, timestamp: ts }, receipt: { timestamp: ts, spfVerdict: { status: 'PASS' }, dkimVerdict: { status: 'PASS' }, dmarcVerdict: { status: 'PASS' }, spamVerdict: { status: 'PASS' }, virusVerdict: { status: 'PASS' } } };
+        await db.query("INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) VALUES($1,$2,$3,'fixture-burst',$4,$5::jsonb,$6::jsonb)", [wid, sid, REGION, `workspaces/${wid}/raw/${sid}.eml`, JSON.stringify([addr]), JSON.stringify(notif)]);
+        await db.query("INSERT INTO jobs(id,type,workspace_id,payload,available_at) VALUES(public.row_id('job'),'mailbox.ingest',$1,$2::jsonb,$3::timestamptz)", [wid, JSON.stringify({ sesMessageId: sid }), ts]);
+      }
+      // Also queue a duplicate job for sesIds[0] to exercise retry/overlap idempotency.
+      await db.query("INSERT INTO jobs(id,type,workspace_id,payload) VALUES(public.row_id('job'),'mailbox.ingest',$1,$2::jsonb)", [wid, JSON.stringify({ sesMessageId: sesIds[0] })]);
+
+      const mockS3 = t.mock.method(S3Client.prototype, 'send', async (cmd: any) => {
+        if (cmd.constructor.name === 'HeadObjectCommand') { const b = rawMap.get(cmd.input.Key); assert.ok(b, cmd.input.Key); return { ContentLength: b.length, ETag: '"etag"' }; }
+        if (cmd.constructor.name === 'CopyObjectCommand' || cmd.constructor.name === 'PutObjectCommand') return {};
+        if (cmd instanceof GetObjectCommand) { const b = rawMap.get(cmd.input.Key!); assert.ok(b, cmd.input.Key ?? ''); return { Body: { transformToByteArray: async () => b } }; }
+        return {};
+      });
+      try {
+        const ran = await processJobs(runtime, mailboxIngestJobs, 30, 6);
+        assert.ok(ran >= 13, `expected >= 13 jobs processed, got ${ran}`);
+      } finally { mockS3.mock.restore(); }
+
+      // Verify exact counts, zero duplicates, strict ordering, #595 unread, #603 IMAP folder/entries, and byte window.
+      const [state] = (await db.query("SELECT messages, held, unread, modseq::int FROM inbox_state WHERE inbox_id=$1", [box])).rows;
+      const [folder] = (await db.query("SELECT uid_next::int, total, unseen, highest_modseq::int FROM inbox_folders WHERE inbox_id=$1 AND role='inbox'", [box])).rows;
+      const [rootRow] = (await db.query("SELECT message_count, unread_count FROM mailbox_threads WHERE mailbox_id=$1 AND thread_id=$2", [box, rootThr])).rows;
+      const [attCnt] = (await db.query("SELECT count(*)::int n FROM mail_attachments WHERE workspace_id=$1", [wid])).rows;
+      const entries = (await db.query("SELECT e.uid::int, e.modseq::int, m.ses_message_id, m.automated FROM inbox_entries e JOIN mail_messages m ON m.id=e.message_id WHERE e.inbox_id=$1 AND e.role='inbox' ORDER BY e.uid", [box])).rows;
+      assert.equal(entries.length, 12, 'exactly 12 unique messages delivered (duplicate job was a no-op)');
+      assert.deepEqual(state, { messages: 12, held: 0, unread: 12, modseq: 13 }, '#595 unread and modseq exact');
+      assert.deepEqual(folder, { uid_next: 13, total: 12, unseen: 12, highest_modseq: 13 }, '#603 IMAP folder counters exact');
+      assert.deepEqual(rootRow, { message_count: 6, unread_count: 6 }, 'all 6 replies joined root thread');
+      assert.equal(attCnt.n, 1, 'attachment item fell back cleanly and saved attachment');
+      assert.equal(entries.filter(e => e.automated).length, 2, 'auto-replies flagged automated');
+      // Replies 0..5 arrived in order inside the first batch of 6 -> strictly increasing UIDs.
+      const replyUids = sesIds.slice(0, 6).map(id => entries.find(e => e.ses_message_id === id)!.uid);
+      assert.deepEqual(replyUids, [...replyUids].sort((a, b) => a - b), 'conversation ordering preserved');
+
+      // 2. Quota boundary mid-batch + intra-batch parent/child reply fallback in mail_store_incoming_batch.
+      const qBox = unique('mbx'), qAddr = `quota@${host}`;
+      await db.query(`INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode,quota_messages,create_request,send_limits) VALUES($1,$2,$3,$4,'inbox','forever',2,'{"type":"persistent"}','{"perDay":0}')`, [qBox, wid, dom, qAddr]);
+      await db.query("INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,$3,'primary')", [wid, qAddr, qBox]);
+      await db.query("INSERT INTO inbox_state(inbox_id,workspace_id) VALUES($1,$2) ON CONFLICT DO NOTHING", [qBox, wid]);
+      await db.query("SELECT inbox_seed_folders($1)", [qBox]);
+      const qIds = [0, 1, 2, 3].map(i => `q_${unique('s')}_${i}`);
+      await db.query("INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) SELECT $1,m,$2,'fixture-burst','k',$3::jsonb,'{}' FROM unnest($4::text[]) m", [wid, REGION, JSON.stringify([qAddr]), qIds]);
+      const mkQ = (i: number) => ({
+        m: { id: `msg_${qIds[i]}`, workspaceId: wid, direction: 'inbound' as const, region: REGION, sesMessageId: qIds[i]!, messageId: `${qIds[i]}@s.invalid`, inReplyTo: i === 1 ? `${qIds[0]}@s.invalid` : null, references: i === 1 ? [`${qIds[0]}@s.invalid`] : [], subject: `Q${i}`, fromAddress: `q${i}@s.invalid`, fromName: null, to: [{ name: null, address: qAddr }], cc: [], bcc: [], replyTo: [], envelopeFrom: `q${i}@s.invalid`, envelopeTo: [qAddr], sentAt: new Date(baseMs + i * 1000).toISOString(), receivedAt: new Date(baseMs + i * 1000).toISOString(), text: 'hi', html: null, bodyTruncated: false, snippet: 'hi', mime: null, headers: [], attachmentCount: 0, sizeBytes: 100, rawBucket: 'fixture-burst', rawKey: `workspaces/${wid}/raw/kept/${qIds[i]}.eml`, lifecycle: 'kept' as const, verdicts: { dmarc: 'PASS' }, spam: false, automated: false, status: 'received' as const },
+        files: [], verifiedFrom: true, allowCreate: false, replyAuthorVerified: true, plan: null,
+      });
+      await storeIncomingBatch(runtime.db, wid, [0, 1, 2, 3].map(mkQ));
+      const [qState] = (await db.query("SELECT messages, held, unread FROM inbox_state WHERE inbox_id=$1", [qBox])).rows;
+      assert.deepEqual(qState, { messages: 4, held: 2, unread: 2 }, 'quota hit mid-batch holds overflow and keeps unread exact');
+      const [qThreads] = (await db.query("SELECT count(DISTINCT thread_id)::int n FROM mail_messages WHERE id IN ($1, $2)", [`msg_${qIds[0]}`, `msg_${qIds[1]}`])).rows;
+      assert.equal(qThreads.n, 1, 'intra-batch reply joins parent thread');
+
+      // 3. Cross-workspace fairness + multi-consumer overflow without SKIP LOCKED lock-out.
+      const c1 = await fixtureDatabase(t), c2 = await fixtureDatabase(t), schema = 'burst_' + randomUUID().replaceAll('-', '');
+      await c1.query(`CREATE SCHEMA ${schema}`);
+      try {
+        for (const c of [c1, c2]) await c.query(`SET search_path TO ${schema}, public`);
+        await c1.query("CREATE TABLE jobs (LIKE public.jobs INCLUDING ALL); CREATE TABLE mail_ingest_turns (LIKE public.mail_ingest_turns INCLUDING ALL); CREATE TABLE job_schedule (LIKE public.job_schedule INCLUDING ALL); CREATE TRIGGER mail_ingest_head AFTER INSERT OR UPDATE OR DELETE ON jobs FOR EACH ROW EXECUTE FUNCTION mail_ingest_head_change(); CREATE TRIGGER mail_ingest_admit BEFORE INSERT ON jobs FOR EACH ROW WHEN (NEW.type='mailbox.ingest' AND NEW.status IN ('pending','running')) EXECUTE FUNCTION mail_ingest_admit()");
+        await c1.query(`INSERT INTO jobs(id,type,workspace_id,payload,available_at) SELECT 'fa_'||lpad(i::text,3,'0'),'mailbox.ingest','floodA',jsonb_build_object('sesMessageId','m'||i),now()-interval '1 minute' FROM generate_series(1,36) i UNION ALL SELECT 'qb_1','mailbox.ingest','quietB','{"sesMessageId":"b1"}',now() UNION ALL SELECT 'qb_other','fixture.other','quietB','{}',now()`);
+        const order: string[] = [];
+        const perConsumer = [0, 0];
+        const mkHandlers = (idx: number): Record<string, import('./src/core.js').JobHandler> => ({
+          'mailbox.ingest': Object.assign(
+            async (_r: any, _p: any, j: any) => { order.push(`${j.workspaceId}:single`); perConsumer[idx]!++; await new Promise(r => setTimeout(r, 20)); },
+            { batch: async (_r: any, items: any[]) => { order.push(`${items[0].job.workspaceId}:batch(${items.length})`); perConsumer[idx]! += items.length; await new Promise(r => setTimeout(r, 20)); return items.map(it => ({ id: it.job.id })); } },
+          ),
+          'fixture.other': async (_r: any, _p: any, j: any) => { order.push(`${j.workspaceId}:other`); },
+        });
+        await Promise.all([
+          followDueJobs({ ...runtime, db: drizzle(c1) }, () => processJobs({ ...runtime, db: drizzle(c1) }, mkHandlers(0), 100, 6, 4000, 'work'), async () => {}, 5000, 'work'),
+          followDueJobs({ ...runtime, db: drizzle(c2) }, () => processJobs({ ...runtime, db: drizzle(c2) }, mkHandlers(1), 100, 6, 4000, 'work'), async () => {}, 5000, 'work'),
+        ]);
+        assert.equal(perConsumer[0]! + perConsumer[1]!, 37, 'all 37 ingest jobs completed');
+        assert.ok(perConsumer[0]! > 0 && perConsumer[1]! > 0, `both concurrent consumers must share the flood: ${JSON.stringify(perConsumer)}`);
+        assert.ok(order.slice(0, 6).some(s => s.startsWith('quietB:single') || s.startsWith('quietB:batch')), `quietB inbound must not wait behind floodA: ${order.slice(0, 6)}`);
+        assert.ok(order.slice(0, 6).includes('quietB:other'), `quietB other job must not wait behind floodA: ${order.slice(0, 6)}`);
+      } finally { await c1.query(`DROP SCHEMA ${schema} CASCADE`); }
+    });
+  });
   test('mail gateway: a signed folder edit waiting behind deletion is denied without a write',async t=>{
     const db=await fixtureDatabase(t),rt=fixtureWorker!.runtime,w=unique('gwdel'),bid=unique('mbx'),kid=unique('app');
     await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'gwdel.invalid',$3,'active','store')",[bid,w,REGION]);
