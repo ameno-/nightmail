@@ -24277,7 +24277,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       t.mock.method(SESv2Client.prototype,'send',async(cmd:any)=>cmd instanceof GetAccountCommand?{SendingEnabled:true,SendQuota:{MaxSendRate:10000,Max24HourSend:100000,SentLast24Hours:0}}:{MessageId:randomUUID()});
       const gate=initialGate(),run=()=>runDispatcher(runtime,{region:REGION,accountId:acct,batchSize:24,lanes:1,gate});
       for(const [name,n] of [['attachment',24],['burst',48],['outage',96]] as const){
-        if(name==='burst'){await db.query(`DELETE FROM hosted_burst_windows WHERE workspace_id=$1`,[wid]);await db.query(`SELECT hosted_burst_ok($1,'bench.invalid',50)`,[wid]);}
+        if(name==='burst'){await db.query(`DELETE FROM hosted_burst_windows WHERE workspace_id=$1`,[wid]);await db.query(`SELECT hosted_burst_ok($1,'bench.invalid',50,true),hosted_burst_ok($1,'bench.invalid',50,false)`,[wid]);}
         if(name==='outage'){await db.query(`DELETE FROM hosted_burst_windows WHERE workspace_id=$1`,[wid]);outage=true;}
         const mail=Array.from({length:n},(_,i)=>({from:'a@bench.invalid',to:`success+${i}@simulator.amazonses.com`,subject:name+i,text:'Private fixture',attachments:[asset.id]}));
         const ids=ok(await local('POST','/v1/emails/batch',{emails:mail},'live',{authorization:`Bearer ${key.secret}`}),202).data.map((x:Json)=>x.id);
@@ -24286,7 +24286,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         t.diagnostic(`REVIEW ${name}: ${Date.now()-start}ms, ${screens} screen calls, peak ${peak}, ${q.mock.callCount()} SQL, ${rewritten} rows deferred, ${report.sent} accepted`);
         if(name==='attachment'){
           assert.equal(report.sent,n);assert.ok(peak>1 && peak<=6);
-          assert.equal((await db.query("SELECT sum(used)::int AS n FROM hosted_burst_windows WHERE workspace_id=$1 AND scope=''",[wid])).rows[0].n,n);
+          assert.equal((await db.query("SELECT sum(used)::int AS n FROM hosted_burst_windows WHERE workspace_id=$1 AND scope='#tx'",[wid])).rows[0].n,n);
         }
         if(name==='burst'){
           assert.deepEqual([report.sent,screens,rewritten],[0,0,0]);

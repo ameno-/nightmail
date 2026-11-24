@@ -308,6 +308,7 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
   const tick=sql`date_trunc('minute',statement_timestamp())`;
   // A marketing hold leaves the held stream queued (heldStream); transactional mail keeps flowing.
   const dueForOwner = sql`FROM sending_emails e WHERE ${queued} AND e.workspace_id = o.workspace_id AND ${available} AND (NOT o.marketing_held OR NOT ${heldStream(sql`e`)})
+    ${liveMx ? sql`AND (o.cap IS NULL OR (CASE WHEN NOT ${heldStream(sql`e`)} THEN o.tx_remaining ELSE o.mkt_remaining END) > 0)` : sql``}
     ${liveMx && (gate.screenRetryAt??0)>Date.now() ? sql`AND (NOT o.required_screen OR (o.trusted AND ${transactional}))` : sql``}
     -- A boolean range is an index condition on 061's expression. Equality to true is
     -- simplified to a text comparison and can scan the kind index over delivered mail.
