@@ -126,6 +126,44 @@ if [[ $operator_hook == off || $operator_hook == 'not set' ]]; then
   fi
 fi
 echo "Operator alerts: nightmail/$STAGE/OPERATOR_SLACK_WEBHOOK_URL is $operator_hook."
+# The second classifier's key (api/src/screen-shadow.ts), optional: nightmail/<stage>/JEVF_API_KEY. As the operator
+# alerts' webhook above. Set and one line of printable characters, it is bound with the app secrets and the second
+# classifier runs in the content screen's shadow. Not set (or scheduled for deletion), the Worker keeps none: one left
+# from before is deleted here, and taking the secret out of Secrets Manager turns it off at the next deploy. Malformed,
+# it stays off. Any other read failure leaves the Worker as it is. None of these fails the deploy; the value never
+# reaches argv or the log.
+jevf_err=$(mktemp "${RUNNER_TEMP:?}/bane-jevf-key.XXXXXX")
+trap 'rm -f -- "$secrets_file" "$hook_err" "$jevf_err"' EXIT
+jevf_key=off
+if key=$(aws secretsmanager get-secret-value --secret-id "nightmail/$STAGE/JEVF_API_KEY" --query SecretString --output text 2>"$jevf_err"); then
+  # Check before masking: a workflow command masks one line and unescapes %XX.
+  if [[ $key =~ ^[A-Za-z0-9._~+/=:@-]{8,}$ && ${#key} -le 512 ]]; then
+    echo "::add-mask::$key"
+    # shellcheck disable=SC2016 # A jq program: $ENV is jq's, not the shell's.
+    with_key=$(JEVF_API_KEY=$key jq '. + ($ENV | {JEVF_API_KEY})' "$secrets_file") && printf '%s\n' "$with_key" > "$secrets_file"
+    unset with_key
+    jevf_key=bound
+  else
+    echo "::warning::nightmail/$STAGE/JEVF_API_KEY is not one line of 8 to 512 characters from [A-Za-z0-9._~+/=:@-]: the second classifier is off."
+  fi
+elif grep -qE 'ResourceNotFoundException|marked for deletion' "$jevf_err"; then
+  jevf_key='not set'
+else
+  jevf_key=unknown
+  echo "::warning::nightmail/$STAGE/JEVF_API_KEY could not be read; the Worker's second classifier is left as it was."
+fi
+unset key
+if [[ $jevf_key == off || $jevf_key == 'not set' ]]; then
+  # Before the deploy, so a failed deploy still leaves it off. Best effort: the next deploy tries again.
+  if listed=$("$wrangler" secret list --config "$config" 2>/dev/null) && jq -e 'any(.[]?; .name == "JEVF_API_KEY")' <<< "$listed" >/dev/null 2>&1; then
+    if WRANGLER_LOG=error "$wrangler" secret delete JEVF_API_KEY --config "$config" >/dev/null 2>&1; then
+      echo "Second classifier: removed JEVF_API_KEY from the Worker."
+    else
+      echo "::warning::Could not remove JEVF_API_KEY from the Worker; the next deploy tries again."
+    fi
+  fi
+fi
+echo "Second classifier: nightmail/$STAGE/JEVF_API_KEY is $jevf_key."
 args+=(--secrets-file "$secrets_file")
 # Every log line names the commit it runs (core.ts setLogContext), for the nightly report's 5xx-by-deploy table.
 if [[ ${DEPLOY_SHA:-} =~ ^[0-9a-f]{40}$ ]]; then args+=(--var "DEPLOY_SHA:$DEPLOY_SHA"); fi
