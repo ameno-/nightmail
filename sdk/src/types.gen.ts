@@ -565,53 +565,6 @@ export type SegmentRule = {
     operator: 'within' | 'inactive';
     days: number;
 } | {
-    field: 'property';
-    /**
-     * The property name, as in a contact's properties.
-     */
-    key: string;
-    type: 'string';
-    /**
-     * neq matches a property that has another value; contains ignores case.
-     */
-    operator: 'eq' | 'neq' | 'contains';
-    value: string;
-} | {
-    field: 'property';
-    /**
-     * The property name, as in a contact's properties.
-     */
-    key: string;
-    type: 'number';
-    operator: 'eq' | 'lt' | 'gt';
-    /**
-     * Compared with a property that is a JSON number or a numeric string; any other value never matches.
-     */
-    value: number;
-} | {
-    field: 'property';
-    /**
-     * The property name, as in a contact's properties.
-     */
-    key: string;
-    type: 'date';
-    operator: 'before' | 'after' | 'on';
-    /**
-     * A day, YYYY-MM-DD, in UTC. A property is on the day its ISO 8601 text starts with: 2026-11-20T14:03:00Z is on 2026-11-20, before is an earlier day and after a later one; any other value never matches.
-     */
-    value: string;
-} | {
-    field: 'property';
-    /**
-     * The property name, as in a contact's properties.
-     */
-    key: string;
-    type: 'string' | 'number' | 'date';
-    /**
-     * set: the property has a value other than null; notSet: it has none. The same for every type.
-     */
-    operator: 'set' | 'notSet';
-} | {
     operator: 'and' | 'or';
     rules: Array<{
         field: 'email' | 'firstName' | 'plan' | 'country';
@@ -622,53 +575,6 @@ export type SegmentRule = {
         operator: 'within' | 'inactive';
         days: number;
     } | {
-        field: 'property';
-        /**
-         * The property name, as in a contact's properties.
-         */
-        key: string;
-        type: 'string';
-        /**
-         * neq matches a property that has another value; contains ignores case.
-         */
-        operator: 'eq' | 'neq' | 'contains';
-        value: string;
-    } | {
-        field: 'property';
-        /**
-         * The property name, as in a contact's properties.
-         */
-        key: string;
-        type: 'number';
-        operator: 'eq' | 'lt' | 'gt';
-        /**
-         * Compared with a property that is a JSON number or a numeric string; any other value never matches.
-         */
-        value: number;
-    } | {
-        field: 'property';
-        /**
-         * The property name, as in a contact's properties.
-         */
-        key: string;
-        type: 'date';
-        operator: 'before' | 'after' | 'on';
-        /**
-         * A day, YYYY-MM-DD, in UTC. A property is on the day its ISO 8601 text starts with: 2026-11-20T14:03:00Z is on 2026-11-20, before is an earlier day and after a later one; any other value never matches.
-         */
-        value: string;
-    } | {
-        field: 'property';
-        /**
-         * The property name, as in a contact's properties.
-         */
-        key: string;
-        type: 'string' | 'number' | 'date';
-        /**
-         * set: the property has a value other than null; notSet: it has none. The same for every type.
-         */
-        operator: 'set' | 'notSet';
-    } | {
         operator: 'and' | 'or';
         rules: Array<{
             field: 'email' | 'firstName' | 'plan' | 'country';
@@ -678,53 +584,6 @@ export type SegmentRule = {
             field: 'lastOpenAt' | 'lastClickAt';
             operator: 'within' | 'inactive';
             days: number;
-        } | {
-            field: 'property';
-            /**
-             * The property name, as in a contact's properties.
-             */
-            key: string;
-            type: 'string';
-            /**
-             * neq matches a property that has another value; contains ignores case.
-             */
-            operator: 'eq' | 'neq' | 'contains';
-            value: string;
-        } | {
-            field: 'property';
-            /**
-             * The property name, as in a contact's properties.
-             */
-            key: string;
-            type: 'number';
-            operator: 'eq' | 'lt' | 'gt';
-            /**
-             * Compared with a property that is a JSON number or a numeric string; any other value never matches.
-             */
-            value: number;
-        } | {
-            field: 'property';
-            /**
-             * The property name, as in a contact's properties.
-             */
-            key: string;
-            type: 'date';
-            operator: 'before' | 'after' | 'on';
-            /**
-             * A day, YYYY-MM-DD, in UTC. A property is on the day its ISO 8601 text starts with: 2026-11-20T14:03:00Z is on 2026-11-20, before is an earlier day and after a later one; any other value never matches.
-             */
-            value: string;
-        } | {
-            field: 'property';
-            /**
-             * The property name, as in a contact's properties.
-             */
-            key: string;
-            type: 'string' | 'number' | 'date';
-            /**
-             * set: the property has a value other than null; notSet: it has none. The same for every type.
-             */
-            operator: 'set' | 'notSet';
         } | {
             operator: 'and' | 'or';
             rules: Array<{
@@ -783,8 +642,149 @@ export type SegmentRule = {
                  */
                 operator: 'set' | 'notSet';
             }>;
+        } | {
+            field: 'property';
+            /**
+             * The property name, as in a contact's properties.
+             */
+            key: string;
+            type: 'string';
+            /**
+             * neq matches a property that has another value; contains ignores case.
+             */
+            operator: 'eq' | 'neq' | 'contains';
+            value: string;
+        } | {
+            field: 'property';
+            /**
+             * The property name, as in a contact's properties.
+             */
+            key: string;
+            type: 'number';
+            operator: 'eq' | 'lt' | 'gt';
+            /**
+             * Compared with a property that is a JSON number or a numeric string; any other value never matches.
+             */
+            value: number;
+        } | {
+            field: 'property';
+            /**
+             * The property name, as in a contact's properties.
+             */
+            key: string;
+            type: 'date';
+            operator: 'before' | 'after' | 'on';
+            /**
+             * A day, YYYY-MM-DD, in UTC. A property is on the day its ISO 8601 text starts with: 2026-11-20T14:03:00Z is on 2026-11-20, before is an earlier day and after a later one; any other value never matches.
+             */
+            value: string;
+        } | {
+            field: 'property';
+            /**
+             * The property name, as in a contact's properties.
+             */
+            key: string;
+            type: 'string' | 'number' | 'date';
+            /**
+             * set: the property has a value other than null; notSet: it has none. The same for every type.
+             */
+            operator: 'set' | 'notSet';
         }>;
+    } | {
+        field: 'property';
+        /**
+         * The property name, as in a contact's properties.
+         */
+        key: string;
+        type: 'string';
+        /**
+         * neq matches a property that has another value; contains ignores case.
+         */
+        operator: 'eq' | 'neq' | 'contains';
+        value: string;
+    } | {
+        field: 'property';
+        /**
+         * The property name, as in a contact's properties.
+         */
+        key: string;
+        type: 'number';
+        operator: 'eq' | 'lt' | 'gt';
+        /**
+         * Compared with a property that is a JSON number or a numeric string; any other value never matches.
+         */
+        value: number;
+    } | {
+        field: 'property';
+        /**
+         * The property name, as in a contact's properties.
+         */
+        key: string;
+        type: 'date';
+        operator: 'before' | 'after' | 'on';
+        /**
+         * A day, YYYY-MM-DD, in UTC. A property is on the day its ISO 8601 text starts with: 2026-11-20T14:03:00Z is on 2026-11-20, before is an earlier day and after a later one; any other value never matches.
+         */
+        value: string;
+    } | {
+        field: 'property';
+        /**
+         * The property name, as in a contact's properties.
+         */
+        key: string;
+        type: 'string' | 'number' | 'date';
+        /**
+         * set: the property has a value other than null; notSet: it has none. The same for every type.
+         */
+        operator: 'set' | 'notSet';
     }>;
+} | {
+    field: 'property';
+    /**
+     * The property name, as in a contact's properties.
+     */
+    key: string;
+    type: 'string';
+    /**
+     * neq matches a property that has another value; contains ignores case.
+     */
+    operator: 'eq' | 'neq' | 'contains';
+    value: string;
+} | {
+    field: 'property';
+    /**
+     * The property name, as in a contact's properties.
+     */
+    key: string;
+    type: 'number';
+    operator: 'eq' | 'lt' | 'gt';
+    /**
+     * Compared with a property that is a JSON number or a numeric string; any other value never matches.
+     */
+    value: number;
+} | {
+    field: 'property';
+    /**
+     * The property name, as in a contact's properties.
+     */
+    key: string;
+    type: 'date';
+    operator: 'before' | 'after' | 'on';
+    /**
+     * A day, YYYY-MM-DD, in UTC. A property is on the day its ISO 8601 text starts with: 2026-11-20T14:03:00Z is on 2026-11-20, before is an earlier day and after a later one; any other value never matches.
+     */
+    value: string;
+} | {
+    field: 'property';
+    /**
+     * The property name, as in a contact's properties.
+     */
+    key: string;
+    type: 'string' | 'number' | 'date';
+    /**
+     * set: the property has a value other than null; notSet: it has none. The same for every type.
+     */
+    operator: 'set' | 'notSet';
 };
 
 export type AudienceImport = {

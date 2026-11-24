@@ -66,10 +66,11 @@ const PropertyRule = z.union([
   z.object({ ...property, type: z.literal('date'), operator: z.enum(['before', 'after', 'on']), value: z.iso.date().describe('A day, YYYY-MM-DD, in UTC. A property is on the day its ISO 8601 text starts with: 2026-11-20T14:03:00Z is on 2026-11-20, before is an earlier day and after a later one; any other value never matches.') }).strict(),
   z.object({ ...property, type: z.enum(['string', 'number', 'date']), operator: z.enum(['set', 'notSet']).describe('set: the property has a value other than null; notSet: it has none. The same for every type.') }).strict(),
 ]);
-const RuleLeaf = z.union([z.object({ field: z.enum(['email', 'firstName', 'plan', 'country']), operator: z.enum(['eq', 'neq', 'contains']), value: z.string().max(200) }).strict(), z.object({ field: z.enum(['lastOpenAt', 'lastClickAt']), operator: z.enum(['within', 'inactive']), days: z.number().int().min(1).max(730) }).strict(), PropertyRule]);
-// Finite-depth schemas remain fully representable in OpenAPI; no recursive lazy schema.
-let ruleSchema: z.ZodType<SegmentRule> = RuleLeaf;
-for (let depth = 0; depth < 3; depth++) ruleSchema = z.union([RuleLeaf, z.object({ operator: z.enum(['and', 'or']), rules: z.array(ruleSchema).min(1).max(10) }).strict()]);
+const RuleLeaf = z.union([z.object({ field: z.enum(['email', 'firstName', 'plan', 'country']), operator: z.enum(['eq', 'neq', 'contains']), value: z.string().max(200) }).strict(), z.object({ field: z.enum(['lastOpenAt', 'lastClickAt']), operator: z.enum(['within', 'inactive']), days: z.number().int().min(1).max(730) }).strict()]);
+// Finite-depth schemas remain fully representable in OpenAPI; no recursive lazy schema. Property leaves come after the
+// alternatives that were there first, so the published anyOf keeps each earlier alternative at its index.
+let ruleSchema: z.ZodType<SegmentRule> = z.union([RuleLeaf, PropertyRule]);
+for (let depth = 0; depth < 3; depth++) ruleSchema = z.union([RuleLeaf, z.object({ operator: z.enum(['and', 'or']), rules: z.array(ruleSchema).min(1).max(10) }).strict(), PropertyRule]);
 function ruleSize(rule: SegmentRule): number { return 'rules' in rule ? 1 + rule.rules.reduce((n, child) => n + ruleSize(child), 0) : 1; }
 const Rule = ruleSchema.refine(v => ruleSize(v) <= 50, 'A segment supports at most 50 rules and three nested groups.').openapi('SegmentRule');
 const SegmentInput = z.object({ name: z.string().trim().min(1).max(200), rule: Rule }).strict();
