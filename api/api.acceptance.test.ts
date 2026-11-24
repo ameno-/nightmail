@@ -23038,7 +23038,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const {ingestFeedbackBatch,operationJobs}=await import('./src/operations.js');
       const {rank}=await import('./src/sending.js');
       // The table a Worker deployed before migration 153 embeds; its statements are otherwise the same.
-      const current={...rank}, old={...current,suppressed:6,delivered:5,bounced:6,complained:7,rejected:6,rendering_failed:6,canceled:6,simulated:6};
+      const current={...rank}, old={scheduled:0,queued:0,attempting:1,acceptance_unknown:2,accepted:3,sent:4,delayed:4,suppressed:6,delivered:5,bounced:6,complained:7,rejected:6,rendering_failed:6,canceled:6,simulated:6};
       const asOld=async<T>(work:()=>Promise<T>)=>{Object.assign(rank,old);try{return await work();}finally{Object.assign(rank,current);}};
       const wid=runtime.config.workspaceId, account='111122223333', topicArn=`arn:aws:sns:${REGION}:${account}:fixture`;
       const recipients=Array.from({length:9},()=>[address(),address()] as const);
@@ -34391,8 +34391,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         for (const [ord, seq] of ([[aType, bType], [bType, aType]] as [string, string][]).entries()) {
           const eid = `em_ord_${idx}_${ord}_${Date.now().toString(36)}`;
           const pid = `sim_ord_${idx}_${ord}_${Date.now().toString(36)}`;
-          await db.query(`INSERT INTO sending_emails (id, workspace_id, region, from_address, to_addresses, subject, status, provider_id, simulated, snapshot)
-            VALUES ($1, $2, $3, 'sender@example.com', '["ord@example.com"]'::jsonb, 'Order', 'accepted', $4, true, '{}'::jsonb)`, [eid, ws, REGION, pid]);
+          await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, status, provider_id, simulated, snapshot)
+            SELECT $1, workspace_id, region, actor_key_id, 'sender@example.com', '["ord@example.com"]'::jsonb, '[]'::jsonb, '[]'::jsonb, 'Order', 'accepted', $2, true, '{}'::jsonb
+            FROM sending_emails WHERE id = $3`, [eid, pid, sentRows[0]!.id]);
           for (const [step, evType] of seq.entries()) {
             const evData = evType === 'bounce' ? { bounceType: 'Permanent', bounceSubType: 'General' }
               : evType === 'non_permanent_bounce' ? { bounceType: 'Transient', bounceSubType: 'General' }
