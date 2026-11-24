@@ -11309,6 +11309,159 @@ describe('Import property boundaries', () => {
     assert.deepEqual(ok(await http('GET', `/v1/contacts/${contact.id}`, key.secret)).properties, { ...properties, plan: 'enterprise' }, 'Replacing a property at the 50-property boundary remains supported.');
   });
 
+  test('contact properties cap at 16 KiB across all write paths and audience reads page within the byte and isolate memory budgets', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const wid = runtime.config.workspaceId;
+      const { AUDIENCE_READ_MAX_BYTES, CONTACT_PROPERTIES_MAX_BYTES } = await import('./src/audience.js');
+      const { memoryInUse, reserveMemory } = await import('./src/isolate-memory.js');
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'Audience bounds', permissions: ['read', 'manage'] }), 201).secret;
+      const apiCall = (method: string, path: string, body?: Json) => request(method, path, key, body);
+
+      const nearCap = Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`k${i}`, 'a'.repeat(1900)]));
+      const overCap = Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`k${i}`, 'a'.repeat(1900)]));
+      assert.ok(Buffer.byteLength(JSON.stringify(nearCap)) <= CONTACT_PROPERTIES_MAX_BYTES);
+      assert.ok(Buffer.byteLength(JSON.stringify(overCap)) > CONTACT_PROPERTIES_MAX_BYTES);
+
+      error(await apiCall('POST', '/v1/contacts', { email: 'over@example.net', properties: overCap }), 422, 'VALIDATION_FAILED');
+      const c1 = ok(await apiCall('POST', '/v1/contacts', { email: 'near@example.net', properties: nearCap }), 201);
+      error(await apiCall('PATCH', `/v1/contacts/${c1.id}`, { properties: overCap }), 422, 'VALIDATION_FAILED');
+
+      const impOver = ok(await apiCall('POST', '/v1/contact-imports', {
+        csv: `Email,Plan\nnear@example.net,${'p'.repeat(1500)}\n`, mapping: { email: 'Email', plan: 'Plan' },
+      }), 201);
+      error(await apiCall('POST', `/v1/contact-imports/${impOver.id}/commit`), 422, 'IMPORT_PROPERTIES_INVALID');
+
+      error(await apiCall('POST', '/v1/audience-query/plan', {
+        statement: `UPDATE contacts SET properties.extra = '${'z'.repeat(1500)}' WHERE email = 'near@example.net'`,
+      }), 422, 'AUDIENCEQL_PROPERTIES_INVALID');
+      error(await apiCall('POST', '/v1/audience-query/plan', {
+        statement: `UPDATE contacts SET properties.tooLong = '${'z'.repeat(2001)}' WHERE email = 'near@example.net'`,
+      }), 422, 'AUDIENCEQL_INVALID');
+      error(await apiCall('POST', '/v1/audience-query/plan', {
+        statement: `UPDATE contacts SET name = '${'n'.repeat(201)}' WHERE email = 'near@example.net'`,
+      }), 422, 'AUDIENCEQL_INVALID');
+      const fiftyProps = Object.fromEntries(Array.from({ length: 50 }, (_, i) => [`f${i}`, 'v']));
+      const at50 = ok(await apiCall('POST', '/v1/contacts', { email: 'fifty@example.net', properties: fiftyProps }), 201);
+      error(await apiCall('POST', '/v1/audience-query/plan', {
+        statement: `UPDATE contacts SET properties.f50 = 'overflow' WHERE email = 'fifty@example.net'`,
+      }), 422, 'AUDIENCEQL_PROPERTIES_INVALID');
+
+      await db.query('SAVEPOINT check_backstop');
+      await assert.rejects(
+        () => db.query(`INSERT INTO audience_contacts(id,workspace_id,email,name,properties) VALUES ($1,$2,'dbover@example.net','Ok',$3::jsonb)`, ['con_' + randomUUID().replaceAll('-', ''), wid, JSON.stringify(overCap)]),
+        (err: { code?: string }) => err.code === '23514',
+      );
+      await db.query('ROLLBACK TO SAVEPOINT check_backstop');
+      await assert.rejects(
+        () => db.query(`INSERT INTO audience_contacts(id,workspace_id,email,name,properties) VALUES ($1,$2,'dbname@example.net',$3,'{}'::jsonb)`, ['con_' + randomUUID().replaceAll('-', ''), wid, 'n'.repeat(201)]),
+        (err: { code?: string }) => err.code === '23514',
+      );
+      await db.query('ROLLBACK TO SAVEPOINT check_backstop; RELEASE SAVEPOINT check_backstop');
+      assert.equal(ok(await apiCall('GET', `/v1/contacts/${at50.id}`)).email, 'fifty@example.net');
+
+      const list = ok(await apiCall('POST', '/v1/lists', { name: 'Bounded List' }), 201);
+      await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,name,properties,marketing_consent)
+        SELECT 'con_b' || lpad(g::text, 31, '0'), $1, 'bound-' || g || '@example.net', 'User ' || g, $2::jsonb, 'subscribed'
+        FROM generate_series(1, 80) g`, [wid, JSON.stringify(nearCap)]);
+      await db.query(`INSERT INTO audience_list_members(workspace_id,list_id,contact_id)
+        SELECT $1, $2, id FROM audience_contacts WHERE workspace_id = $1 AND id LIKE 'con_b%'`, [wid, list.id]);
+
+      const walkAll = async (basePath: string) => {
+        const seen: string[] = [];
+        let cursor: string | null = null, pages = 0;
+        do {
+          const url = cursor ? `${basePath}${basePath.includes('?') ? '&' : '?'}cursor=${encodeURIComponent(cursor)}` : basePath;
+          const res = await apiCall('GET', url);
+          assert.equal(res.status, 200);
+          const pageBytes = Buffer.byteLength(JSON.stringify(res.body));
+          assert.ok(pageBytes <= AUDIENCE_READ_MAX_BYTES, `Page exceeded byte cap: ${pageBytes}`);
+          for (const row of res.body.data as Json[]) seen.push(row.id);
+          cursor = res.body.nextCursor;
+          pages++;
+          assert.ok(pages < 30, 'Pagination must converge without looping.');
+        } while (cursor);
+        return { seen, pages };
+      };
+      const contactsWalk = await walkAll('/v1/contacts?limit=100');
+      assert.ok(contactsWalk.pages >= 3, `Expected byte-bounded short pages (got ${contactsWalk.pages})`);
+      assert.equal(new Set(contactsWalk.seen).size, contactsWalk.seen.length, 'Every contact appears exactly once across short pages.');
+      assert.equal(contactsWalk.seen.length, 82);
+
+      const membersWalk = await walkAll(`/v1/lists/${list.id}/members?limit=100`);
+      assert.ok(membersWalk.pages >= 3, `Expected byte-bounded short member pages (got ${membersWalk.pages})`);
+      assert.equal(new Set(membersWalk.seen).size, 80);
+      assert.equal(membersWalk.seen.length, 80);
+
+      const qProps = await apiCall('POST', '/v1/audience-query/query', { statement: 'SELECT id, properties FROM contacts LIMIT 1000' });
+      assert.equal(qProps.status, 200);
+      assert.ok(Buffer.byteLength(JSON.stringify(qProps.body)) <= AUDIENCE_READ_MAX_BYTES);
+      assert.ok(qProps.body.rows.length > 0 && qProps.body.rows.length < 82);
+      assert.equal(qProps.body.matched, 82);
+      assert.equal(qProps.body.truncated, true);
+
+      const qSkinny = ok(await apiCall('POST', '/v1/audience-query/query', { statement: 'SELECT id, email FROM contacts LIMIT 1000' }));
+      assert.equal(qSkinny.rows.length, 82);
+      assert.equal(qSkinny.truncated, false);
+      const qField = ok(await apiCall('POST', '/v1/audience-query/query', { statement: "SELECT id, properties.k0 FROM contacts WHERE email = 'near@example.net' LIMIT 5" }));
+      assert.equal(qField.rows[0]['properties.k0'], 'a'.repeat(1900));
+
+      const plan = ok(await apiCall('POST', '/v1/audience-query/plan', { statement: `UPDATE contacts SET name = 'Planned' WHERE list = '${list.id}'` }), 201);
+      assert.equal(plan.matched, 80);
+      assert.equal(ok(await apiCall('POST', '/v1/audience-query/apply', { planId: plan.id })).affected, 80);
+      const seg = ok(await apiCall('POST', '/v1/segments', { name: 'All Bounded', rule: { field: 'email', operator: 'contains', value: 'bound-' } }), 201);
+      assert.deepEqual(ok(await apiCall('POST', `/v1/segments/${seg.id}/preview`, { listId: list.id })), { matched: 80, eligible: 80, suppressed: 0, unsubscribed: 0 });
+      const impMatch = ok(await apiCall('POST', '/v1/contact-imports', {
+        csv: 'Email\n' + Array.from({ length: 80 }, (_, i) => `bound-${i + 1}@example.net`).join('\n') + '\n',
+        mapping: { email: 'Email' },
+      }), 201);
+      assert.equal(ok(await apiCall('POST', `/v1/contact-imports/${impMatch.id}/commit`)).imported, 80);
+
+      const minNums = Object.fromEntries(Array.from({ length: 50 }, (_, i) => [`n${i}`, Number.MIN_VALUE]));
+      error(await apiCall('POST', '/v1/contacts', { email: 'minnums@example.net', properties: minNums }), 422, 'VALIDATION_FAILED');
+      const exactProps: Record<string, string> = Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`e${i}`, 'x'.repeat(2000)]));
+      const exactRemain = CONTACT_PROPERTIES_MAX_BYTES - Buffer.byteLength(JSON.stringify(exactProps)) - 7;
+      exactProps.z = 'y'.repeat(exactRemain);
+      assert.equal(Buffer.byteLength(JSON.stringify(exactProps)), CONTACT_PROPERTIES_MAX_BYTES);
+      assert.equal((await apiCall('POST', '/v1/contacts', { email: 'exact16k@example.net', properties: exactProps })).status, 201);
+      const exactImp = ok(await apiCall('POST', '/v1/contact-imports', { csv: 'Email\nexact16k@example.net\n', mapping: { email: 'Email' } }), 201);
+      assert.equal(ok(await apiCall('POST', `/v1/contact-imports/${exactImp.id}/commit`)).imported, 1);
+
+      await db.query(`INSERT INTO audience_lists(id,workspace_id,name) SELECT 'lst_cap_' || lpad(g::text, 3, '0'), $1, 'Cap ' || g FROM generate_series(1, 60) g`, [wid]);
+      await db.query(`INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1, 'lst_cap_' || lpad(g::text, 3, '0'), $2 FROM generate_series(1, 60) g`, [wid, c1.id]);
+      const pagedOne = ok(await apiCall('GET', `/v1/contacts?email=${encodeURIComponent(c1.email)}`));
+      assert.equal(pagedOne.data[0].listIds.length, 50, 'Paginated contact reads cap listIds at 50 per contact.');
+      const singleOne = ok(await apiCall('GET', `/v1/contacts/${c1.id}`));
+      assert.equal(singleOne.listIds.length, 60, 'Single contact read returns up to 200 listIds.');
+
+      const { createApp } = await import('./src/app.js');
+      const { boundedReadsActive } = await import('./src/read-bounds.js');
+      const app = createApp();
+      const heldRes = await app.fetch(new Request(`http://127.0.0.1:8793/v1/contact-imports/${impMatch.id}`, { headers: { authorization: `Bearer ${key}` } }), runtime);
+      assert.equal(heldRes.status, 200);
+      assert.ok(memoryInUse() > 0, 'Import response must hold its isolate memory lease while unread.');
+      await heldRes.text();
+      assert.equal(memoryInUse(), 0, 'Import response must release its isolate memory lease once read.');
+
+      const attachLease = await reserveMemory(64 * 1024 * 1024);
+      try {
+        assert.equal((await apiCall('GET', '/v1/contacts?limit=1')).status, 200, 'Bounded reads must not stall behind attachment/import memory.');
+      } finally {
+        attachLease.release();
+      }
+      const burst = await Promise.all([
+        ...Array.from({ length: 10 }, () => apiCall('GET', '/v1/contacts?limit=100')),
+        ...Array.from({ length: 10 }, () => apiCall('POST', '/v1/audience-query/query', { statement: 'SELECT id, properties FROM contacts LIMIT 100' })),
+      ]);
+      const okCount = burst.filter(r => r.status === 200).length;
+      const limitCount = burst.filter(r => r.status === 429 && r.body?.error?.code === 'READ_CONCURRENCY_LIMIT').length;
+      assert.ok(okCount >= 2, `Expected concurrent reads to succeed (got ${okCount})`);
+      assert.equal(okCount + limitCount, 20, `Every burst read must answer 200 or retryable 429 (got ${JSON.stringify(burst.map(r => r.status))})`);
+      for (const r of burst) if (r.status === 200) assert.ok(Buffer.byteLength(JSON.stringify(r.body)) <= AUDIENCE_READ_MAX_BYTES);
+      assert.equal(boundedReadsActive(), 0);
+      assert.equal(memoryInUse(), 0);
+    });
+  });
+
   test('imports use time-ordered IDs, serialize commits per workspace, cap open previews, fold publishBatch jobs, and roll back cleanly on timeout', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
       const wid = runtime.config.workspaceId;
