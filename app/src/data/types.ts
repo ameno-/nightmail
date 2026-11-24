@@ -194,7 +194,7 @@ export interface Inbox {
 export interface InboxInput { type: Inbox['type']; domain?: string; name?: string; ttlSeconds: number; send?: { enabled: boolean }; credential?: { name: string; permissions: ('read' | 'modify' | 'send')[] } }
 export interface CreatedInbox extends Inbox { credential?: { id: string; secret: string; permissions: string[]; expiresAt: ISODate } }
 export interface InboxMessage {
-  id: string; threadId: string; cursor: string; from: MailAddress; to: MailAddress[]; subject: string; snippet: string; receivedAt: ISODate; read: boolean; junk: boolean
+  id: string; threadId: string; cursor: string; from: MailAddress; to: MailAddress[]; toCount?: number; subject: string; snippet: string; receivedAt: ISODate; read: boolean; junk: boolean
   held: 'quota' | 'expired' | null; attachmentCount: number; auth: { spf?: string; dkim?: string; dmarc?: string }; simulated: boolean; hiddenContent: boolean
   extract: { codes: string[]; links: { text: string; href: string; mismatch: boolean }[] }
 }
@@ -209,9 +209,9 @@ export type InboundThreadView = 'inbox' | 'starred' | 'archive' | 'spam' | 'tras
 export interface InboundThread { id: string; subject: string; snippet: string; from?: MailAddress; lastMessageAt: ISODate; addressIds: string[]; messageCount: number }
 export interface InboundMessage {
   id: string; threadId: string; addressIds: string[]; direction: 'inbound' | 'outbound'; status: string
-  from: MailAddress; to: MailAddress[]; cc: MailAddress[]; replyTo: MailAddress[]; subject: string; snippet: string
+  from: MailAddress; to: MailAddress[]; toCount?: number; cc: MailAddress[]; ccCount?: number; replyTo: MailAddress[]; replyToCount?: number; subject: string; snippet: string
   text: string; replyText: string; receivedAt: ISODate; bodyTruncated: boolean; attachmentCount: number
-  emailId: string | null; messageId: string | null; inReplyTo: string | null; references: string[]
+  emailId: string | null; messageId: string | null; inReplyTo: string | null; references: string[]; referencesCount?: number
   /** Read state for the requested address scope; absent on older API responses. */
   read?: boolean
 }
@@ -247,20 +247,20 @@ export type LogDirection = 'all' | 'sent' | 'received'
 /** How many emails match each status and stream under the other filters, between the same dates (GET /v1/logs?counts=true). */
 export interface LogCounts { status: Record<string, number>; stream: { transactional: number; marketing: number } }
 export interface LogEntry {
-  id: string; direction: 'sent' | 'received'; at: ISODate; status: string; from: MailAddress; to: string[]; subject: string
+  id: string; direction: 'sent' | 'received'; at: ISODate; status: string; from: MailAddress; to: string[]; toCount?: number; subject: string
   stream: Stream | null; campaignId: string | null; simulated: boolean; attachmentCount: number | null; threadId: string | null; threadCount: number | null
   /** A sent email waiting to be sent (status scheduled): when it goes. */
   scheduledAt: ISODate | null
-  addresses: { id: string; address: string }[] | null; regionId: RegionId | null; envelopeTo: string[] | null
+  addresses: { id: string; address: string }[] | null; regionId: RegionId | null; envelopeTo: string[] | null; envelopeToCount?: number | null
 }
 export interface ReceivedEmail {
-  id: string; threadId: string; status: string; from: MailAddress; to: MailAddress[]; subject: string; snippet: string
+  id: string; threadId: string; status: string; from: MailAddress; to: MailAddress[]; toCount?: number; subject: string; snippet: string
   receivedAt: ISODate; attachmentCount: number
   // Delivery details: present for owners and admins only.
-  spam?: boolean; region?: RegionId | null; envelopeTo?: string[]; addresses?: { id: string; address: string }[]
+  spam?: boolean; region?: RegionId | null; envelopeTo?: string[]; envelopeToCount?: number; addresses?: { id: string; address: string }[]
 }
 export interface ReceivedEmailDetail extends ReceivedEmail {
-  sentAt: ISODate | null; cc: MailAddress[]; replyTo: MailAddress[]; messageId: string | null; inReplyTo: string | null; references: string[]
+  sentAt: ISODate | null; cc: MailAddress[]; ccCount?: number; replyTo: MailAddress[]; replyToCount?: number; messageId: string | null; inReplyTo: string | null; references: string[]; referencesCount?: number
   text: string; replyText: string; html: string | null; htmlTooComplex?: boolean; bodyTruncated: boolean; headers?: { name: string; value: string }[]
   attachments: { id: string; filename: string; contentType: string; size: number; contentId: string | null; disposition: 'attachment' | 'inline'; url: string | null }[]
   verdicts?: { spf?: string; dkim?: string; dmarc?: string; spam?: string; virus?: string }

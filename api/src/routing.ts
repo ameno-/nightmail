@@ -1,7 +1,8 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
 import { retainedMail } from './db/mailbox.js';
-import { actor, ApiError, denied, errors, id, json, receivingAdmin, response, security, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
+import { actor, ApiError, budgetedRead, denied, errors, id, json, readLimit, readLimitNote, receivingAdmin, response, security, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
+import { fitPageByBytes, INBOUND_PAGE_MAX_BYTES, INBOUND_READ_RESERVATION_BYTES, ROUTING_READ_RESERVATION_BYTES, withReadMemory } from './bounded-read.js';
 import { auditContext, auditInsert } from './audit.js';
 import { receivingPolicy } from './mailbox-ingest-input.js';
 import { PARSE_LIMIT } from './mailbox-mime.js';
@@ -45,16 +46,25 @@ export const MailRoute = RouteFields.extend({
 }).openapi('MailRoute');
 export type Route = z.infer<typeof MailRoute>;
 type RouteInput = z.infer<typeof RouteFields>;
-const RoutingConfig = z.object({ version: z.number().int(), routes: z.array(MailRoute) }).openapi('RoutingConfig');
+const RoutingConfig = z.object({
+  version: z.number().int(),
+  routes: z.array(MailRoute),
+  nextCursor: z.string().nullable().optional().describe('Pass as cursor to read the next page of routes when non-null.'),
+}).openapi('RoutingConfig');
 const RoutingConfigFile = z
   .object({ version: z.number().int().optional().describe('Ignored on apply; send the version in If-Match.'), routes: z.array(RouteFields).max(10000) })
   .strict()
   .openapi('RoutingConfigFile');
+const RoutingConfigFileResponse = RoutingConfigFile.extend({
+  nextCursor: z.string().nullable().optional().describe('Pass as cursor to read the next page of routes when non-null.'),
+});
 const RoutingDiff = z.object({ before: MailRoute.nullable(), after: MailRoute.nullable() }).openapi('RoutingDiff');
 const RoutingChange = z
   .object({
     version: z.number().int().describe('Routing version after the change; unchanged for a dry run or when nothing changed.'),
-    diff: z.array(RoutingDiff).describe('before null: created; after null: deleted.'),
+    diff: z.array(RoutingDiff).describe('before null: created; after null: deleted. Shortened to fit the response size budget when large; read the full history from getRoutingAudit.'),
+    diffCount: z.number().int().optional().describe('Present when diff was shortened: total changed routes in this version.'),
+    diffTruncated: z.literal(true).optional().describe('Present and true when diff was shortened to fit the response size budget; read full changes from getRoutingAudit.'),
     warnings: z.array(z.string()),
   })
   .openapi('RoutingChange');
@@ -132,6 +142,28 @@ const columns = sql`id,key,match,destinations AS "to",subaddresses,enabled,note,
 const hostOf = (match: string) => match.split('@')[1]!;
 export const listRoutes = async (tx: DbExecutor, w: string) =>
   (await tx.execute<Route>(sql`SELECT ${columns} FROM mail_routes WHERE workspace_id=${w} ORDER BY match`)).rows;
+async function boundedRoutePage(tx: DbExecutor, w: string, limit: number, cursor?: string) {
+  const { rows } = await tx.execute<Route & { candidate_count: number }>(sql`
+    WITH candidate AS (
+      SELECT ${columns},
+        (octet_length(match) + octet_length(destinations::text) + octet_length(note) + coalesce(octet_length(key), 0) + 192) AS row_bytes
+      FROM mail_routes
+      WHERE workspace_id=${w} ${cursor ? sql`AND match > ${cursor}` : sql``}
+      ORDER BY match LIMIT ${limit + 1}
+    ), sized AS (
+      SELECT *, row_number() OVER (ORDER BY match) AS rn,
+        sum(row_bytes) OVER (ORDER BY match ROWS UNBOUNDED PRECEDING) AS cum_bytes
+      FROM candidate
+    )
+    SELECT id, key, match, "to", subaddresses, enabled, note, "createdAt", (SELECT count(*)::int FROM candidate) AS candidate_count
+    FROM sized WHERE rn = 1 OR cum_bytes <= ${INBOUND_PAGE_MAX_BYTES}
+    ORDER BY rn`);
+  const candidateCount = rows[0]?.candidate_count ?? 0;
+  const pageRows: Route[] = rows.slice(0, limit).map(({ candidate_count: _c, ...route }) => route);
+  const fitted = fitPageByBytes(pageRows, candidateCount > pageRows.length, INBOUND_PAGE_MAX_BYTES, 512);
+  const last = fitted.items[fitted.items.length - 1];
+  return { routes: fitted.items, nextCursor: fitted.hasMore && last ? last.match : null };
+}
 /** The route whose match is exactly this address, as the read operations return it. */
 export const routeFor = async (tx: DbExecutor, w: string, match: string) =>
   (await tx.execute<Route>(sql`SELECT ${columns} FROM mail_routes WHERE workspace_id=${w} AND match=${match}`)).rows[0] ?? null;
@@ -308,38 +340,52 @@ export async function save(
         `${hostOf(r.match)} is not a receiving domain in this workspace. Check the spelling, or enable receiving for it first.`,
         'match',
       );
-  if (dryRun) return { version, diff, warnings };
+  const boundedDiff = () => {
+    const fitted = fitPageByBytes(diff, false, INBOUND_PAGE_MAX_BYTES, 512);
+    const truncated = fitted.items.length < diff.length;
+    return { diff: fitted.items, ...(truncated ? { diffCount: diff.length, diffTruncated: true as const } : {}) };
+  };
+  if (dryRun) return { version, ...boundedDiff(), warnings };
   const [{ next }] = (
     await tx.execute<{ next: number }>(
       sql`INSERT INTO mail_routing_state(workspace_id,version) VALUES(${w},1) ON CONFLICT(workspace_id) DO UPDATE SET version=mail_routing_state.version+1 RETURNING version AS next`,
     )
   ).rows as [{ next: number }];
-  await tx.execute(
-    sql`DELETE FROM mail_routes WHERE workspace_id=${w} AND id IN (SELECT jsonb_array_elements_text(${JSON.stringify(diff.map((d) => (d.before ?? d.after)!.id))}::jsonb))`,
-  );
+  const CHUNK = 500;
+  const changedIds = diff.map((d) => (d.before ?? d.after)!.id);
+  for (let i = 0; i < changedIds.length; i += CHUNK) {
+    await tx.execute(sql`DELETE FROM mail_routes WHERE workspace_id=${w} AND id = ANY(${sql.param(changedIds.slice(i, i + CHUNK))}::text[])`);
+  }
   const rows = diff.flatMap((d) => (d.after ? [{ ...d.after, domain: domains.get(hostOf(d.after.match)) }] : []));
-  await tx.execute(
-    sql`INSERT INTO mail_routes(id,workspace_id,key,domain_id,match,destinations,subaddresses,enabled,note,created_at) SELECT id,${w},key,domain,match,"to",subaddresses,enabled,note,"createdAt" FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) AS x(id text,key text,domain text,match text,"to" jsonb,subaddresses boolean,enabled boolean,note text,"createdAt" timestamptz)`,
-  );
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    await tx.execute(
+      sql`INSERT INTO mail_routes(id,workspace_id,key,domain_id,match,destinations,subaddresses,enabled,note,created_at) SELECT id,${w},key,domain,match,"to",subaddresses,enabled,note,"createdAt" FROM jsonb_to_recordset(${JSON.stringify(rows.slice(i, i + CHUNK))}::jsonb) AS x(id text,key text,domain text,match text,"to" jsonb,subaddresses boolean,enabled boolean,note text,"createdAt" timestamptz)`,
+    );
+  }
   const who = c.get('actor');if(who.grantId&&rows.length)await (await import('./rituals.js')).ownReceiving(tx,c,'route',rows.map(r=>r.id));
   await tx.execute(sql`INSERT INTO mail_routing_versions(workspace_id,version,route_ids,changed_ids,actor_type,actor_id,note)
-    VALUES(${w},${next},ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(after.map(r=>r.id).sort())}::jsonb)),ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(diff.map(d=>(d.before??d.after)!.id).sort())}::jsonb)),${who.credential??'apiKey'},${who.keyId},${note||null})`);
+    VALUES(${w},${next},ARRAY(SELECT id FROM mail_routes WHERE workspace_id=${w} ORDER BY id),${sql.param([...changedIds].sort())}::text[],${who.credential??'apiKey'},${who.keyId},${note||null})`);
   // At most one retired manifest on a normal write; its audit rows share the same transaction.
   await tx.execute(sql`DELETE FROM mail_routing_versions WHERE workspace_id=${w} AND version<=${next-256}`);
-  // One account audit row per committed version, in the statement that writes the per-route history.
+  // One account audit row per committed version, alongside chunked per-route history writes so large applies never stringify one 28 MB payload.
   const brief = (r: Route | null) => r && { match: r.match, key: r.key ?? null, enabled: r.enabled, destinations: Array.isArray(r.to) ? r.to.length : r.to };
   const single = audit?.action.startsWith('route.') ? diff[0]! : null;
-  await tx.execute(
-    sql`WITH changes AS (INSERT INTO mail_routing_audit(workspace_id,version,resource_id,before,after,actor_type,actor_id,request_id,note) SELECT ${w},${next},coalesce(before->>'id',after->>'id'),before,after,${who.credential ?? 'apiKey'},${who.keyId},${c.get('requestId')},${note || null} FROM jsonb_to_recordset(${JSON.stringify(diff)}::jsonb) x(before jsonb,after jsonb) RETURNING 1)
-      ${audit ? sql`, audit AS (${auditInsert(auditContext(c), { action: audit.action, workspaceId: w, target: single ? { type: 'route', id: (single.before ?? single.after)!.id } : { type: 'routing', id: w },
-        ...(single ? { before: brief(single.before) ?? undefined, after: brief(single.after) ?? undefined } : {}),
-        details: { version: next, changes: diff.length, created: diff.filter(d => !d.before).length, deleted: diff.filter(d => !d.after).length, routes: after.length, ...audit.details } })})` : sql``}
-      SELECT count(*) FROM changes`,
-  );
+  for (let i = 0; i < diff.length; i += CHUNK) {
+    await tx.execute(
+      sql`INSERT INTO mail_routing_audit(workspace_id,version,resource_id,before,after,actor_type,actor_id,request_id,note)
+        SELECT ${w},${next},coalesce(before->>'id',after->>'id'),before,after,${who.credential ?? 'apiKey'},${who.keyId},${c.get('requestId')},${note || null}
+        FROM jsonb_to_recordset(${JSON.stringify(diff.slice(i, i + CHUNK))}::jsonb) x(before jsonb,after jsonb)`,
+    );
+  }
+  if (audit) {
+    await tx.execute(auditInsert(auditContext(c), { action: audit.action, workspaceId: w, target: single ? { type: 'route', id: (single.before ?? single.after)!.id } : { type: 'routing', id: w },
+      ...(single ? { before: brief(single.before) ?? undefined, after: brief(single.after) ?? undefined } : {}),
+      details: { version: next, changes: diff.length, created: diff.filter(d => !d.before).length, deleted: diff.filter(d => !d.after).length, routes: after.length, ...audit.details } }));
+  }
   // Exact routes are point lookups; only pattern and catch-all changes rewrite their host's plan.
   for (const domain of new Set(routes.filter((r) => r.match.includes('*')).map((r) => domains.get(hostOf(r.match)))))
     if (domain) await tx.execute(sql`SELECT mail_compile_routes(${w},${domain})`);
-  return { version: next, diff, warnings };
+  return { version: next, ...boundedDiff(), warnings };
 }
 /** A route or address-flow write's If-Match against the version it read: a stale one is refused and nothing changes. */
 export function checkVersion(c: Ctx, version: number) {
@@ -434,29 +480,33 @@ export function registerRouting(app: App) {
       operationId: 'getRouting',
       summary: 'Read the routing config',
       description:
-        "Every explicit route and the current version (also the ETag). With format=config, routes omit IDs and refer to keyed inboxes, webhooks and forwards as inbox:<key>, webhook:<key> and forward:<name>, ready to edit and PUT back. An inbox's own addresses route to it without a route.",
-      request: { query: z.object({ format: z.enum(['config']).optional() }) },
-      responses: { 200: response(z.union([RoutingConfig, RoutingConfigFile])), ...errors },
+        "Explicit routes and the current version (also the ETag). With format=config, routes omit IDs and refer to keyed inboxes, webhooks and forwards as inbox:<key>, webhook:<key> and forward:<name>, ready to edit and PUT back. Large route sets are bounded by response size; pass nextCursor as cursor to read remaining routes. An inbox's own addresses route to it without a route. " + readLimitNote(5),
+      request: { query: z.object({ format: z.enum(['config']).optional(), cursor: z.string().max(254).optional(), limit: z.coerce.number().int().min(1).max(10000).default(10000) }) },
+      responses: { 200: response(z.union([RoutingConfig, RoutingConfigFileResponse])), ...errors },
     }),
     async (c) => {
-      const w = workspace(c);
-      const config = (
-        await c.env.db.execute<{ version: number; routes: Route[] }>(
-          sql`SELECT coalesce((SELECT version FROM mail_routing_state WHERE workspace_id=${w}),0) AS version,coalesce((SELECT jsonb_agg(r ORDER BY match) FROM (SELECT ${columns} FROM mail_routes WHERE workspace_id=${w}) r),'[]') AS routes`,
-        )
-      ).rows[0]!;
-      c.header('ETag', `"${config.version}"`);
-      if (c.req.valid('query').format !== 'config') return c.json(config, 200);
-      const keys = new Map(
-        (
-          await c.env.db.execute<{ id: string; ref: string }>(
-            sql`SELECT id,'inbox:'||key AS ref FROM mailboxes WHERE workspace_id=${w} AND key IS NOT NULL UNION ALL SELECT id,'webhook:'||key FROM mailbox_webhooks h WHERE workspace_id=${w} AND key IS NOT NULL AND ${realWebhook}
-              UNION ALL SELECT id,'forward:'||key FROM mailbox_webhooks h WHERE workspace_id=${w} AND key IS NOT NULL AND ${forward}`,
-          )
-        ).rows.map((r) => [r.id, r.ref]),
-      );
-      const routes = config.routes.map(({ id: _id, createdAt: _at, ...r }) => ({ ...r, to: Array.isArray(r.to) ? r.to.map((d) => keys.get(d) ?? d) : r.to }));
-      return c.json({ version: config.version, routes }, 200);
+      const w = workspace(c), q = c.req.valid('query');
+      return await withReadMemory(c, ROUTING_READ_RESERVATION_BYTES, async () => {
+        const { version, routes, nextCursor, keys } = await budgetedRead(c.env.db, async (db) => {
+          const version = await currentVersion(db, w);
+          const page = await boundedRoutePage(db, w, q.limit, q.cursor);
+          if (q.format !== 'config') return { version, ...page, keys: null as Map<string, string> | null };
+          const destIds = [...new Set(page.routes.flatMap((r) => (Array.isArray(r.to) ? r.to : [])))];
+          const keyRows = destIds.length
+            ? (await db.execute<{ id: string; ref: string }>(
+                sql`SELECT id,'inbox:'||key AS ref FROM mailboxes WHERE workspace_id=${w} AND key IS NOT NULL AND id = ANY(${sql.param(destIds)}::text[])
+                  UNION ALL SELECT id,'webhook:'||key FROM mailbox_webhooks h WHERE workspace_id=${w} AND key IS NOT NULL AND ${realWebhook} AND id = ANY(${sql.param(destIds)}::text[])
+                  UNION ALL SELECT id,'forward:'||key FROM mailbox_webhooks h WHERE workspace_id=${w} AND key IS NOT NULL AND ${forward} AND id = ANY(${sql.param(destIds)}::text[])`,
+              )).rows
+            : [];
+          return { version, ...page, keys: new Map(keyRows.map((r) => [r.id, r.ref])) };
+        }, readLimit(5));
+        c.header('ETag', `"${version}"`);
+        const cursorField = nextCursor ? { nextCursor } : {};
+        if (q.format !== 'config') return c.json({ version, routes, ...cursorField }, 200);
+        const mapped = routes.map(({ id: _id, createdAt: _at, ...r }) => ({ ...r, to: Array.isArray(r.to) ? r.to.map((d) => keys!.get(d) ?? d) : r.to }));
+        return c.json({ version, routes: mapped, ...cursorField }, 200);
+      }) as never;
     },
   );
   app.openapi(
@@ -475,12 +525,15 @@ export function registerRouting(app: App) {
       },
       responses: { 200: response(RoutingChange), ...errors },
     }),
-    async (c) => {checkReferenceBudget(c.req.valid('json').routes);return c.json(
-        await edit(c, (routes) => applyEntries(routes,c.req.valid('json').routes), {
+    async (c) => {
+      checkReferenceBudget(c.req.valid('json').routes);
+      return await withReadMemory(c, ROUTING_READ_RESERVATION_BYTES, async () => c.json(
+        await edit(c, (routes) => applyEntries(routes, c.req.valid('json').routes), {
           dryRun: c.req.valid('query').dryRun === 'true', audit: { action: 'routing.apply' },
         }),
         200,
-      );},
+      )) as never;
+    },
   );
   app.openapi(
     createRoute({
@@ -489,9 +542,17 @@ export function registerRouting(app: App) {
       path: path + '/routes',
       operationId: 'listRoutes',
       summary: 'List routes',
-      responses: { 200: response(z.object({ data: z.array(MailRoute) })), ...errors },
+      description: 'Explicit routes ordered by match. Pages are bounded by row count (up to 100) and response size; pass nextCursor as cursor to continue. ' + readLimitNote(5),
+      request: { query: z.object({ cursor: z.string().max(254).optional(), limit: z.coerce.number().int().min(1).max(100).default(100) }) },
+      responses: { 200: response(z.object({ data: z.array(MailRoute), nextCursor: z.string().nullable() })), ...errors },
     }),
-    async (c) => c.json({ data: await listRoutes(c.env.db, workspace(c)) }, 200),
+    async (c) => {
+      const w = workspace(c), q = c.req.valid('query');
+      return await withReadMemory(c, INBOUND_READ_RESERVATION_BYTES, async () => {
+        const page = await budgetedRead(c.env.db, db => boundedRoutePage(db, w, q.limit, q.cursor), readLimit(5));
+        return c.json({ data: page.routes, nextCursor: page.nextCursor }, 200);
+      }) as never;
+    },
   );
   app.openapi(
     createRoute({
@@ -521,7 +582,12 @@ export function registerRouting(app: App) {
       request: { params: RouteParam },
       responses: { 200: response(MailRoute), ...errors },
     }),
-    async (c) => c.json(findRoute(await listRoutes(c.env.db, workspace(c)), c.req.valid('param').id), 200),
+    async (c) => {
+      const w = workspace(c), ref = c.req.valid('param').id;
+      const route = (await c.env.db.execute<Route>(sql`SELECT ${columns} FROM mail_routes WHERE workspace_id=${w} AND (id=${ref} OR key=${ref}) LIMIT 1`)).rows[0];
+      if (!route) throw fail(404, 'NOT_FOUND', `Route ${ref} was not found. List routes with GET /v1/routing/routes.`);
+      return c.json(route, 200);
+    },
   );
   app.openapi(
     createRoute({

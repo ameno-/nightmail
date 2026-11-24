@@ -2775,6 +2775,10 @@ export type ConfigureSesAutoValidation = {
 export type RoutingConfig = {
     version: number;
     routes: Array<MailRoute>;
+    /**
+     * Pass as cursor to read the next page of routes when non-null.
+     */
+    nextCursor?: string | null;
 };
 
 export type MailRoute = {
@@ -2833,9 +2837,17 @@ export type RoutingChange = {
      */
     version: number;
     /**
-     * before null: created; after null: deleted.
+     * before null: created; after null: deleted. Shortened to fit the response size budget when large; read the full history from getRoutingAudit.
      */
     diff: Array<RoutingDiff>;
+    /**
+     * Present when diff was shortened: total changed routes in this version.
+     */
+    diffCount?: number;
+    /**
+     * Present and true when diff was shortened to fit the response size budget; read full changes from getRoutingAudit.
+     */
+    diffTruncated?: true;
     warnings: Array<string>;
 };
 
@@ -2926,8 +2938,8 @@ export type RoutingVersion = {
 };
 
 export type RoutingVersionDetail = RoutingConfig & {
-    diff: Array<RoutingDiff>;
     nextCursor: string | null;
+    diff: Array<RoutingDiff>;
 };
 
 export type RoutingTestResult = {
@@ -3536,10 +3548,17 @@ export type InboxMessage = {
         name: string | null;
         address: string;
     };
+    /**
+     * Addresses in the To header (at most 20 on list pages, up to 100 on getInboxMessage).
+     */
     to: Array<{
         name: string | null;
         address: string;
     }>;
+    /**
+     * Total addresses in the To header (may exceed to.length when shortened).
+     */
+    toCount: number;
     subject: string;
     snippet: string;
     receivedAt: string;
@@ -4184,18 +4203,39 @@ export type InboundMessage = {
         name: string | null;
         address: string;
     };
+    /**
+     * Addresses in the To header (at most 20 on conversation pages, up to 100 on getInboundMessage).
+     */
     to: Array<{
         name: string | null;
         address: string;
     }>;
+    /**
+     * Total addresses in the To header (may exceed to.length when shortened).
+     */
+    toCount: number;
+    /**
+     * Addresses in the Cc header (at most 20 on conversation pages, up to 100 on getInboundMessage).
+     */
     cc: Array<{
         name: string | null;
         address: string;
     }>;
+    /**
+     * Total addresses in the Cc header (may exceed cc.length when shortened).
+     */
+    ccCount: number;
+    /**
+     * Addresses in the Reply-To header (at most 20 on conversation pages, up to 100 on getInboundMessage).
+     */
     replyTo: Array<{
         name: string | null;
         address: string;
     }>;
+    /**
+     * Total addresses in the Reply-To header (may exceed replyTo.length when shortened).
+     */
+    replyToCount: number;
     subject: string;
     snippet: string;
     text: string;
@@ -4215,7 +4255,14 @@ export type InboundMessage = {
      */
     messageId: string | null;
     inReplyTo: string | null;
+    /**
+     * Message-IDs in the References header (at most 20 on conversation pages, up to 100 on getInboundMessage).
+     */
     references: Array<string>;
+    /**
+     * Total Message-IDs in the References header (may exceed references.length when shortened).
+     */
+    referencesCount: number;
 };
 
 export type InboundThreadAddressState = {
@@ -4251,13 +4298,27 @@ export type InboundMessagePage = {
             id: string;
             address: string;
         }>;
+        /**
+         * SMTP envelope recipients (at most 20 on list pages, up to 100 on getInboundMessage).
+         */
         envelopeTo?: Array<string>;
+        /**
+         * Total SMTP envelope recipients (may exceed envelopeTo.length when shortened).
+         */
+        envelopeToCount?: number;
         region?: string | null;
         spam?: boolean;
+        /**
+         * Addresses in the To header (at most 20 on list pages).
+         */
         to?: Array<{
             name: string | null;
             address: string;
         }>;
+        /**
+         * Total addresses in the To header (may exceed to.length when shortened).
+         */
+        toCount?: number;
     }>;
     nextCursor: string | null;
 };
@@ -4267,7 +4328,14 @@ export type InboundMessageDetail = InboundMessage & {
         id: string;
         address: string;
     }>;
+    /**
+     * SMTP envelope recipients (at most 20 on list pages, up to 100 on getInboundMessage).
+     */
     envelopeTo?: Array<string>;
+    /**
+     * Total SMTP envelope recipients (may exceed envelopeTo.length when shortened).
+     */
+    envelopeToCount?: number;
     region?: string | null;
     spam?: boolean;
     rawUrl?: string | null;
@@ -4369,9 +4437,13 @@ export type LogEntry = {
         address: string;
     };
     /**
-     * Sent: the To recipients. Received: the addresses in the To header.
+     * Sent: the To recipients (at most 20). Received: the addresses in the To header (at most 20).
      */
     to: Array<string>;
+    /**
+     * Total To recipients (may exceed to.length when shortened).
+     */
+    toCount: number;
     subject: string;
     /**
      * Sent mail only.
@@ -4410,9 +4482,13 @@ export type LogEntry = {
      */
     region: string | null;
     /**
-     * Received mail, administrators only: the SMTP envelope recipients.
+     * Received mail, administrators only: the SMTP envelope recipients (at most 20).
      */
     envelopeTo: Array<string> | null;
+    /**
+     * Received mail, administrators only: total SMTP envelope recipients.
+     */
+    envelopeToCount: number | null;
 };
 
 /**
@@ -14430,6 +14506,8 @@ export type GetRoutingData = {
     path?: never;
     query?: {
         format?: 'config';
+        cursor?: string;
+        limit?: number;
     };
     url: '/v1/routing';
 };
@@ -14483,7 +14561,12 @@ export type GetRoutingResponses = {
     /**
      * Success
      */
-    200: RoutingConfig | RoutingConfigFile;
+    200: RoutingConfig | (RoutingConfigFile & {
+        /**
+         * Pass as cursor to read the next page of routes when non-null.
+         */
+        nextCursor?: string | null;
+    });
 };
 
 export type GetRoutingResponse = GetRoutingResponses[keyof GetRoutingResponses];
@@ -14560,7 +14643,10 @@ export type ApplyRoutingResponse = ApplyRoutingResponses[keyof ApplyRoutingRespo
 export type ListRoutesData = {
     body?: never;
     path?: never;
-    query?: never;
+    query?: {
+        cursor?: string;
+        limit?: number;
+    };
     url: '/v1/routing/routes';
 };
 
@@ -14615,6 +14701,7 @@ export type ListRoutesResponses = {
      */
     200: {
         data: Array<MailRoute>;
+        nextCursor: string | null;
     };
 };
 

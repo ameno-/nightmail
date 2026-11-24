@@ -24,11 +24,15 @@ export function normalizeMessageId(value: string | null | undefined): string | n
   const result = (match ? match[1]! : value.trim().replace(/^<|>$/g, '')).trim();
   return result && result.length <= 998 && !/\s/.test(result) && utf8.encode(mailText(result)).length <= 998 ? result : null;
 }
-export function messageIdList(value: string | null | undefined): string[] {
-  if (!value) return [];
+export function messageIdListCounted(value: string | null | undefined): { items: string[]; count: number } {
+  if (!value) return { items: [], count: 0 };
   const bracketed = [...value.matchAll(/<([^<>\s]+)>/g)].map(match => match[1]!);
   const list = bracketed.length ? bracketed : value.split(/[\s,]+/).map(item => normalizeMessageId(item)).filter((item): item is string => !!item);
-  return [...new Set(list)].slice(-100);
+  const unique = [...new Set(list)];
+  return { items: unique.slice(-100), count: unique.length };
+}
+export function messageIdList(value: string | null | undefined): string[] {
+  return messageIdListCounted(value).items;
 }
 export function normalizeSubject(value: string) {
   let subject = value.trim();
@@ -120,7 +124,7 @@ export async function createMailbox(tx: DbExecutor, scope: Scope, input: { key?:
  * Every mailbox is an inbox (it has inbox_state from its insert, migration addresses_are_inboxes): received mail is counted and filed in its
  * folders, as ingest does, and sent mail is filed by the inbox_file_sent trigger.
  */
-export async function attachToMailboxes(tx: DbExecutor, scope: Scope, message: typeof mailMessages.$inferSelect, mailboxIds: string[]) {
+export async function attachToMailboxes(tx: DbExecutor, scope: Scope, message: Pick<typeof mailMessages.$inferSelect, 'id' | 'direction' | 'threadId' | 'receivedAt' | 'spam' | 'sizeBytes'>, mailboxIds: string[]) {
   if (!mailboxIds.length) return [];
   const inbound = message.direction === 'inbound';
   const result=await tx.execute<{mailbox_id:string;filed:boolean}>(sql`WITH states AS MATERIALIZED (SELECT inbox_id FROM inbox_state WHERE workspace_id=${scope.workspaceId} AND inbox_id=ANY(${sql.param(mailboxIds)}::text[]) ORDER BY inbox_id FOR UPDATE), added AS (

@@ -35233,6 +35233,170 @@ test('Audit trail: sensitive actions each write one redacted row', async t => {
     assert.ok(trail.length >= 18, `${trail.length} rows`);
     for (const value of secrets) assert.ok(trail.every(summary => !summary.includes(value)), `A summary repeats ${value.slice(0, 12)}…`);
   });
+
+  test('bounded inbound page sizes: address caps, byte-bounded pagination, routing diff bounds and unrouted claim projection', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, fetch }) => {
+      const { S3Client, GetObjectCommand } = await import('@aws-sdk/client-s3');
+      const { SESv2Client, GetAccountCommand, GetEmailIdentityCommand, SendEmailCommand } = await import('@aws-sdk/client-sesv2');
+      const { credentialFingerprint, discoveryTarget } = await import('./src/ses-region-state.js');
+      const { acceptInboundNotification, mailboxIngestJobs } = await import('./src/mailbox-ingest.js');
+      const scope = runtime.config.workspaceId, topic = 'arn:aws:sns:' + REGION + ':111122223333:bounded-inbound';
+      const domainId = unique('domain'), domain = 'inbox.example.com', publicAddress = 'support@example.com', address = 'support@' + domain, base = '/v1/inbound';
+      runtime.config.aws = { accessKeyId: 'synthetic-fixture', secretAccessKey: 'synthetic-fixture' }; runtime.config.liveEnabled = true;
+      await db.query("INSERT INTO ses_region_discovery(workspace_id,region,report,credentials_fingerprint,public_url,trusted_account_id,trusted_topic_arn) VALUES($1,$2,$3,$4,$5,'111122223333',$6)", [scope, REGION, { provisioned: true, account: { id: '111122223333', sendingEnabled: true }, resources: { topic: { arn: topic }, transactional: { sendingEnabled: true }, marketing: { sendingEnabled: true } } }, await credentialFingerprint(runtime.config), discoveryTarget(runtime.config), topic]);
+      await db.query("INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,'example.com',$3),($4,$2,$5,$3)", [unique('dom'), scope, REGION, domainId, domain]);
+      await db.query("INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,'fixture-inbox',$3)", [scope, REGION, topic]);
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$3,$4,$5,'active','store')", [unique('mdom'), scope, domainId, domain, REGION]);
+      t.mock.method(SESv2Client.prototype, 'send', async (cmd: any) => {
+        if (cmd instanceof GetEmailIdentityCommand) return { IdentityType: 'DOMAIN', VerifiedForSendingStatus: true, VerificationStatus: 'SUCCESS', DkimAttributes: { Status: 'SUCCESS', SigningEnabled: true } };
+        if (cmd instanceof GetAccountCommand) return { SendingEnabled: true, SendQuota: { MaxSendRate: 100, Max24HourSend: 10000, SentLast24Hours: 0 } };
+        assert.ok(cmd instanceof SendEmailCommand); return { MessageId: 'synthetic-' + unique('sent') };
+      });
+      const box = ok(await local('POST', base + '/addresses', { address, publicAddress }, 'live'), 201);
+      const rawObjects = new Map<string, string>();
+      t.mock.method(S3Client.prototype, 'send', async (cmd: any) => {
+        const key = String(cmd.input.Key);
+        if (cmd.constructor.name === 'HeadObjectCommand') return { ContentLength: Buffer.byteLength(rawObjects.get(key)!), ETag: '"fixture"' };
+        if (cmd.constructor.name === 'CopyObjectCommand' || cmd.constructor.name === 'PutObjectCommand') return {};
+        assert.ok(cmd instanceof GetObjectCommand);
+        return { Body: { transformToByteArray: async () => Buffer.from(rawObjects.get(key)!) } };
+      });
+      const receive = async (to: string, mime: string) => {
+        const receipt = unique('receipt'), objectKey = 'raw/' + receipt; rawObjects.set(objectKey, mime);
+        const input = { region: REGION, topicArn: topic, message: { notificationType: 'Received', mail: { messageId: receipt, source: 'sender@example.net' }, receipt: { ...cleanScans, timestamp: new Date().toISOString(), recipients: [to], dmarcVerdict: { status: 'PASS' }, dkimVerdict: { status: 'PASS' }, spfVerdict: { status: 'PASS' }, spamVerdict: { status: 'PASS' }, action: { type: 'S3', bucketName: 'fixture-inbox', objectKey, topicArn: topic } } } };
+        assert.equal(await acceptInboundNotification(runtime, input), 1);
+        await mailboxIngestJobs['mailbox.ingest']!(runtime, { sesMessageId: receipt }, { id: unique('job'), workspaceId: scope, attempts: 1 });
+        await expandFixtureOutbox(runtime, scope);
+      };
+      const rawRequest = (path: string, init: { method?: string; body?: string; headers?: Record<string, string> } = {}) => new Request(PUBLIC_ORIGIN + path, {
+        method: init.method ?? 'GET',
+        headers: { origin: PUBLIC_ORIGIN, cookie: manager!.cookie, 'x-bane-environment': 'live', ...init.headers },
+        ...(init.body !== undefined ? { body: init.body } : {}),
+      });
+      const f = { scope, base, domain, address, publicAddress, id: box.id as string, receive };
+      // 1. Ingest caps To/Cc/Reply-To/References at 100 while preserving exact counts.
+      const toLines: string[] = []; let line = 'To: ' + f.publicAddress;
+      for (let i = 0; i < 8200; i++) { if (line.length + 7 > 900) { toLines.push(line + ','); line = ' a@b.c'; } else line += ', a@b.c'; }
+      toLines.push(line);
+      const ccList = Array.from({ length: 130 }, (_, i) => `c${i}@b.c`).join(', ');
+      const refsList = Array.from({ length: 120 }, (_, i) => `<ref-${i}@example.net>`).join(' ');
+      const raw = (i: number) => [
+        'From: Sender <sender@example.net>', ...toLines, 'Cc: ' + ccList, 'Reply-To: ' + ccList,
+        'Subject: ' + (i ? 'Re: ' : '') + 'Many recipients',
+        'Message-ID: <many-' + i + '@example.net>',
+        ...(i ? ['In-Reply-To: <many-0@example.net>', 'References: <many-0@example.net> ' + refsList] : ['References: ' + refsList]),
+        '', 'hello ' + i,
+      ].join('\r\n');
+      for (let i = 0; i < 5; i++) await f.receive(f.address, raw(i));
+      const stored = (await db.query('SELECT count(*)::int AS n, max(jsonb_array_length("to"))::int AS to_len, max(jsonb_array_length(cc))::int AS cc_len, max(jsonb_array_length(reply_to))::int AS rt_len, max(jsonb_array_length("references"))::int AS ref_len, min(thread_id) AS thread, min(id) AS first_id FROM mail_messages WHERE workspace_id=$1', [f.scope])).rows[0];
+      assert.equal(stored.n, 5);
+      assert.deepEqual([stored.to_len, stored.cc_len, stored.rt_len, stored.ref_len], [100, 100, 100, 100]);
+
+      // Thread page caps address/reference arrays at 20 with exact counts and stays well under 20 KB/message.
+      const threadRes = await fetch(rawRequest(`${f.base}/threads/${stored.thread}?limit=100`));
+      const threadText = await threadRes.text();
+      assert.equal(threadRes.status, 200);
+      const threadBody = JSON.parse(threadText);
+      assert.equal(threadBody.messages.length, 5);
+      assert.ok(threadText.length / threadBody.messages.length < 20 * 1024, `thread page avg ${Math.round(threadText.length / threadBody.messages.length)} B/msg`);
+      for (const m of threadBody.messages) {
+        assert.deepEqual([m.to.length, m.toCount, m.cc.length, m.ccCount, m.replyTo.length, m.replyToCount, m.references.length], [20, 8201, 20, 130, 20, 130, 20]);
+        assert.ok(m.referencesCount >= 120);
+      }
+
+      // Single-message read returns up to 100 stored addresses with exact counts.
+      const detail = ok(await local('GET', `${f.base}/messages/${stored.first_id}?includeDelivery=true`, undefined, 'live'));
+      assert.deepEqual([detail.to.length, detail.toCount, detail.cc.length, detail.ccCount, detail.replyTo.length, detail.replyToCount, detail.references.length], [100, 8201, 100, 130, 100, 130, 100]);
+      assert.equal(detail.verdicts.toCount, undefined, 'internal counts stay out of verdicts');
+
+      // listInboundMessages?includeDelivery=true, listLogs, and listInboxMessages all cap to at 20 with toCount 8201.
+      const msgList = ok(await local('GET', `${f.base}/messages?limit=100&includeDelivery=true`, undefined, 'live'));
+      assert.equal(msgList.data[0].to.length, 20);
+      assert.equal(msgList.data[0].toCount, 8201);
+      const logs = ok(await local('GET', '/v1/logs?direction=received&limit=100', undefined, 'live'));
+      assert.equal(logs.data[0].to.length, 20);
+      assert.equal(logs.data[0].toCount, 8201);
+      const inboxList = ok(await local('GET', `/v1/inboxes/${f.id}/messages?limit=100`, undefined, 'live'));
+      assert.equal(inboxList.data[0].to.length, 20);
+      assert.equal(inboxList.data[0].toCount, 8201);
+      const inboxDetail = ok(await local('GET', `/v1/inboxes/${f.id}/messages/${stored.first_id}`, undefined, 'live'));
+      assert.equal(inboxDetail.to.length, 100);
+      assert.equal(inboxDetail.toCount, 8201);
+
+      // 2. Pre-existing oversized row (500 stored addresses, no verdicts count) is bounded on every read.
+      const legacyTo = Array.from({ length: 500 }, (_, i) => ({ name: null, address: `legacy${i}@example.net` }));
+      await db.query('UPDATE mail_messages SET "to"=$2::jsonb, cc=$2::jsonb, reply_to=$2::jsonb, verdicts=verdicts-\x27toCount\x27-\x27ccCount\x27-\x27replyToCount\x27 WHERE id=$1', [stored.first_id, JSON.stringify(legacyTo)]);
+      const legacyThread = ok(await local('GET', `${f.base}/threads/${stored.thread}?limit=100`, undefined, 'live')).messages.find((m: Json) => m.id === stored.first_id);
+      assert.deepEqual([legacyThread.to.length, legacyThread.toCount, legacyThread.cc.length, legacyThread.ccCount], [20, 500, 20, 500]);
+      const legacyDetail = ok(await local('GET', `${f.base}/messages/${stored.first_id}`, undefined, 'live'));
+      assert.deepEqual([legacyDetail.to.length, legacyDetail.toCount, legacyDetail.cc.length, legacyDetail.ccCount], [100, 500, 100, 500]);
+
+      // 3. Byte-bounded page ends early and advances via cursor without skipping (listInboundAddresses).
+      const bigMeta = { pad: 'x'.repeat(15_000) };
+      for (let i = 0; i < 45; i++) ok(await local('POST', `${f.base}/addresses`, { address: `pad${i}@${f.domain}`, metadata: bigMeta }, 'live'), 201);
+      const seenBoxes = new Set<string>();
+      let addrCursor: string | null = null, addrPages = 0;
+      do {
+        const res = await fetch(rawRequest(`${f.base}/addresses?limit=100${addrCursor ? `&cursor=${encodeURIComponent(addrCursor)}` : ''}`));
+        const txt = await res.text();
+        assert.equal(res.status, 200);
+        assert.ok(Buffer.byteLength(txt) <= 524_288 + 4096, `address page ${Buffer.byteLength(txt)} B`);
+        const body = JSON.parse(txt);
+        for (const item of body.data) seenBoxes.add(item.id);
+        addrCursor = body.nextCursor;
+        addrPages++;
+      } while (addrCursor && addrPages < 10);
+      assert.equal(addrCursor, null);
+      assert.ok(addrPages >= 2, '45 x 15 KB addresses split across multiple byte-bounded pages');
+      assert.ok(seenBoxes.size >= 46);
+
+      // 4. Routing: listRoutes/getRouting paginate by bytes and applyRouting bounds large diffs.
+      const bigNote = 'n'.repeat(450);
+      const routeCount = 1200;
+      const version0 = ok(await local('GET', '/v1/routing', undefined, 'live')).version;
+      const bulkRoutes = Array.from({ length: routeCount }, (_, i) => ({ match: `r${String(i).padStart(4, '0')}@${f.domain}`, to: [f.id], note: bigNote }));
+      const applied = await fetch(rawRequest('/v1/routing', { method: 'PUT', headers: { 'if-match': `"${version0}"`, 'content-type': 'application/json' }, body: JSON.stringify({ routes: bulkRoutes }) }));
+      const appliedText = await applied.text();
+      assert.equal(applied.status, 200);
+      assert.ok(Buffer.byteLength(appliedText) <= 524_288 + 4096, `applyRouting response ${Buffer.byteLength(appliedText)} B`);
+      const appliedBody = JSON.parse(appliedText);
+      assert.equal(appliedBody.diffTruncated, true);
+      assert.equal(appliedBody.diffCount, routeCount);
+      assert.ok(appliedBody.diff.length > 0 && appliedBody.diff.length < routeCount);
+
+      // Paginate GET /v1/routing and GET /v1/routing/routes cleanly.
+      const seenRouting = new Set<string>();
+      let rCursor: string | null = null, rPages = 0;
+      do {
+        const res = await fetch(rawRequest(`/v1/routing${rCursor ? `?cursor=${encodeURIComponent(rCursor)}` : ''}`));
+        const txt = await res.text();
+        assert.equal(res.status, 200);
+        assert.ok(Buffer.byteLength(txt) <= 524_288 + 4096, `getRouting page ${Buffer.byteLength(txt)} B`);
+        const body = JSON.parse(txt);
+        for (const r of body.routes) seenRouting.add(r.match);
+        rCursor = body.nextCursor ?? null;
+        rPages++;
+      } while (rCursor && rPages < 10);
+      assert.equal(rCursor, null);
+      assert.equal(seenRouting.size, routeCount);
+      assert.ok(rPages >= 2);
+
+      // 5. claimUnrouted projects only scalar columns and claims large-body messages cleanly.
+      const claimTarget = `late-claim@${f.domain}`;
+      const bigBody = 'B'.repeat(400_000);
+      const claimThr = unique('thr');
+      await db.query('INSERT INTO mail_threads(id,workspace_id,subject,message_count,last_message_at) VALUES($1,$2,$3,3,now())', [claimThr, f.scope, 'Large unrouted']);
+      for (let i = 0; i < 3; i++) {
+        const mid = unique('msg');
+        await db.query('INSERT INTO mail_messages(id,workspace_id,direction,thread_id,region,subject,from_address,text,html,size_bytes,received_at) VALUES($1,$2,\x27inbound\x27,$3,$4,$5,\x27ext@example.net\x27,$6,$6,$7,now())', [mid, f.scope, claimThr, REGION, 'Large ' + i, bigBody, bigBody.length]);
+        await db.query('INSERT INTO mail_unrouted(workspace_id,message_id,address) VALUES($1,$2,$3)', [f.scope, mid, claimTarget]);
+      }
+      const claimedBox = ok(await local('POST', `${f.base}/addresses`, { address: claimTarget }, 'live'), 201);
+      const claimedMsgs = ok(await local('GET', `${f.base}/messages?addressId=${claimedBox.id}&limit=10`, undefined, 'live'));
+      assert.equal(claimedMsgs.data.length, 3);
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM mail_unrouted WHERE workspace_id=$1 AND address=$2', [f.scope, claimTarget])).rows[0].n, 0);
+    });
+  });
 });
 
 // Dashboard analytics (src/analytics.ts, docs/analytics.md): the ingest runs in-process here with an in-memory bucket and

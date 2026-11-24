@@ -1,6 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
-import { actorMailAccess, mailboxRoute, receivingAdmin, receivingConsentRoute, workspaceMailAccess, ApiError, denied, requiredOf, unrestrictedRequired, RECEIVING_HOST_CHANGE, digest, errors, getSes, id, isoTime, json, lasting, lazyModule, log, ModuleLoadError, response, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
+import { actorMailAccess, budgetedRead, mailboxRoute, readLimit, readLimitNote, receivingAdmin, receivingConsentRoute, workspaceMailAccess, ApiError, denied, requiredOf, unrestrictedRequired, RECEIVING_HOST_CHANGE, digest, errors, getSes, id, isoTime, json, lasting, lazyModule, log, ModuleLoadError, response, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
+import { fitPageByBytes, INBOUND_PAGE_MAX_BYTES, INBOUND_READ_RESERVATION_BYTES, withReadMemory } from './bounded-read.js';
 import { authenticate, chargeCredential, createdInboxes, delegatedInbox, keyExpired, longPoll, requireReceivingConsent, reservePolls } from './auth.js';
 import { boundRequestBody } from './request-body.js';
 import { auditContext, auditInsert, recordAudit } from './audit.js';
@@ -193,7 +194,7 @@ export function mailboxView(row: MailboxRow, addresses: { address: string; kind:
     aliases: addresses.filter(item => item.kind === 'alias').map(item => item.address).sort(), rules: row.rules, metadata: row.metadata, origin: row.origin,
     createdAt: iso(row.createdAt)!, updatedAt: iso(row.updatedAt)!, expiresAt: iso(row.expiresAt), stats: { threads: stat?.threads ?? 0, unreadThreads: stat?.unread ?? 0, lastMessageAt: iso(stat?.last) }, sendLimits: sendLimitsFor(row), requireDmarc: row.requireDmarc, kind: row.kind };
 }
-async function mailboxViews(runtime: Runtime, rows: MailboxRow[]) {
+async function mailboxViews(runtime: { db: DbExecutor }, rows: MailboxRow[]) {
   if (!rows.length) return [];
   const ids = rows.map(row => row.id);
   const [addresses, stats] = await Promise.all([
@@ -235,10 +236,25 @@ async function claimUnrouted(tx: Parameters<Parameters<Runtime['db']['transactio
   const claimed = rows.filter(row => addresses.includes(row.address) || rules.some(rule => ruleMatches(rule, row.address)) || addresses.some(address => { const [local, host] = row.address.split('@'); return local?.includes('+') && `${local.split('+')[0]}@${host}` === address; }));
   if (!claimed.length) return 0;
   const messageIds = [...new Set(claimed.map(row => row.messageId))];
-  const messages = await tx.select().from(mailMessages).where(inArray(mailMessages.id, messageIds)).orderBy(asc(mailMessages.receivedAt));
-  for (const message of messages) await attachToMailboxes(tx, scope, message, [mailbox.id]);
-  for (const row of claimed) await tx.delete(mailUnrouted).where(and(eq(mailUnrouted.workspaceId, scope.workspaceId), eq(mailUnrouted.address, row.address), eq(mailUnrouted.messageId, row.messageId)));
-  return messages.length;
+  // Project only the scalar columns attachToMailboxes uses (never text, html, headers, addresses or mime),
+  // in bounded chunks so claiming up to 2,000 unrouted messages stays under a few tens of kilobytes.
+  let attached = 0;
+  const CHUNK = 200;
+  for (let i = 0; i < messageIds.length; i += CHUNK) {
+    const chunkIds = messageIds.slice(i, i + CHUNK);
+    const messages = await tx.select({
+      id: mailMessages.id, direction: mailMessages.direction, threadId: mailMessages.threadId,
+      receivedAt: mailMessages.receivedAt, spam: mailMessages.spam, sizeBytes: mailMessages.sizeBytes,
+    }).from(mailMessages).where(and(eq(mailMessages.workspaceId, scope.workspaceId), inArray(mailMessages.id, chunkIds))).orderBy(asc(mailMessages.receivedAt));
+    for (const message of messages) await attachToMailboxes(tx, scope, message, [mailbox.id]);
+    attached += messages.length;
+  }
+  for (let i = 0; i < claimed.length; i += CHUNK) {
+    const chunk = claimed.slice(i, i + CHUNK).map(row => ({ address: row.address, messageId: row.messageId }));
+    await tx.execute(sql`DELETE FROM mail_unrouted u USING jsonb_to_recordset(${JSON.stringify(chunk)}::jsonb) AS x(address text, "messageId" text)
+      WHERE u.workspace_id = ${scope.workspaceId} AND u.address = x.address AND u.message_id = x."messageId"`);
+  }
+  return attached;
 }
 
 function registerReceivingDomains(app: App) {
@@ -417,14 +433,48 @@ function registerAddresses(app: App) {
     requireDmarc: z.boolean().default(false).describe('Hold received mail without a DMARC pass for its From domain: it is stored with the unverified label and does not emit message.received.'),
     flow: CreateFlow.optional().describe('Where the new address’s mail goes, saved with the address in one transaction and one routing version: deliver creates the route for its own address, split adds a two-way rule on it (setInboundAddressFlow changes both later). If any part is refused, nothing is created. Needs what changing routes and rules needs.'),
   }).strict().openapi('CreateInboundAddress');
-  app.openapi(createRoute({ ...meta, method: 'get', path: collection, ...addressAlias('listInboundAddresses'), summary: 'List receivable addresses', description: 'An address key sees only addresses it can access.',
+  app.openapi(createRoute({ ...meta, method: 'get', path: collection, ...addressAlias('listInboundAddresses'), summary: 'List receivable addresses', description: 'An address key sees only addresses it can access. Pages are also bounded by response size and may return fewer than limit addresses; pass nextCursor as cursor to continue. ' + readLimitNote(5),
     request: { query: z.object({ domain: z.string().max(253).optional(), origin: z.enum(['api', 'auto']).optional(), kind: z.enum(['address', 'inbox']).optional().describe('address: receiving addresses only; inbox: agent inboxes only. Default: both.'), q: z.string().max(200).optional(), cursor: z.string().max(200).optional(), limit: Limit }) }, responses: { 200: response(pageOf(InboundAddressSchema, 'InboundAddressPage')), ...errors } }), async c => {
     const value = access(c, 'read'); const q = c.req.valid('query');
-    const rows = await c.env.db.select().from(mailboxes).where(and(eq(mailboxes.workspaceId, value.workspaceId), value.mailboxIds ? inArray(mailboxes.id, value.mailboxIds.length ? value.mailboxIds : ['']) : undefined,
-      q.domain ? sql`split_part(${mailboxes.address}, '@', 2) = ${q.domain.toLowerCase()}` : undefined, q.origin ? eq(mailboxes.origin, q.origin) : undefined, q.kind ? eq(mailboxes.kind, q.kind) : undefined,
-      q.q ? or(sql`${mailboxes.address} ILIKE ${`%${q.q.replace(/[\\%_]/g, ch => `\\${ch}`)}%`}`, sql`${mailboxes.displayName} ILIKE ${`%${q.q.replace(/[\\%_]/g, ch => `\\${ch}`)}%`}`) : undefined,
-      q.cursor ? lt(mailboxes.id, q.cursor) : undefined)).orderBy(desc(mailboxes.id)).limit(q.limit + 1);
-    return c.json({ data: await mailboxViews(c.env, rows.slice(0, q.limit)), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
+    type RawBoxRow = {
+      id: string; workspace_id: string; key: string | null; domain_id: string; address: string; display_name: string | null;
+      rules: string[]; metadata: Record<string, unknown>; origin: 'api' | 'auto'; send_limits: Partial<typeof mailboxes.$inferSelect.sendLimits>;
+      require_dmarc: boolean; expires_at: string | null; kind: 'inbox' | 'address'; delete_after: string | null; created_at: string; updated_at: string; candidate_count: number;
+    };
+    return await withReadMemory(c, INBOUND_READ_RESERVATION_BYTES, async () => {
+      const where = and(eq(mailboxes.workspaceId, value.workspaceId), value.mailboxIds ? inArray(mailboxes.id, value.mailboxIds.length ? value.mailboxIds : ['']) : undefined,
+        q.domain ? sql`split_part(${mailboxes.address}, '@', 2) = ${q.domain.toLowerCase()}` : undefined, q.origin ? eq(mailboxes.origin, q.origin) : undefined, q.kind ? eq(mailboxes.kind, q.kind) : undefined,
+        q.q ? or(sql`${mailboxes.address} ILIKE ${`%${q.q.replace(/[\\%_]/g, ch => `\\${ch}`)}%`}`, sql`${mailboxes.displayName} ILIKE ${`%${q.q.replace(/[\\%_]/g, ch => `\\${ch}`)}%`}`) : undefined,
+        q.cursor ? lt(mailboxes.id, q.cursor) : undefined);
+      const { views, candidateCount } = await budgetedRead(c.env.db, async db => {
+        const { rows } = await db.execute<RawBoxRow>(sql`
+          WITH candidate AS (
+            SELECT id, workspace_id, key, domain_id, address, display_name, rules, metadata, origin, send_limits, require_dmarc,
+              expires_at::text, kind, delete_after::text, created_at::text, updated_at::text,
+              (octet_length(metadata::text) + octet_length(rules::text) + octet_length(address) + coalesce(octet_length(display_name), 0) +
+                coalesce((SELECT sum(octet_length(a.address) + 8)::int FROM mailbox_addresses a WHERE a.mailbox_id = mailboxes.id), 0) + 512) AS row_bytes
+            FROM ${mailboxes} WHERE ${where}
+            ORDER BY ${mailboxes.id} DESC LIMIT ${q.limit + 1}
+          ), sized AS (
+            SELECT *, row_number() OVER (ORDER BY id DESC) AS rn,
+              sum(row_bytes) OVER (ORDER BY id DESC ROWS UNBOUNDED PRECEDING) AS cum_bytes
+            FROM candidate
+          )
+          SELECT id, workspace_id, key, domain_id, address, display_name, rules, metadata, origin, send_limits, require_dmarc,
+            expires_at, kind, delete_after, created_at, updated_at, (SELECT count(*)::int FROM candidate) AS candidate_count
+          FROM sized WHERE rn = 1 OR cum_bytes <= ${INBOUND_PAGE_MAX_BYTES}
+          ORDER BY rn`);
+        const mapped: MailboxRow[] = rows.slice(0, q.limit).map(r => ({
+          id: r.id, workspaceId: r.workspace_id, key: r.key, domainId: r.domain_id, address: r.address, displayName: r.display_name,
+          rules: r.rules, metadata: r.metadata, origin: r.origin, sendLimits: r.send_limits, requireDmarc: r.require_dmarc,
+          expiresAt: r.expires_at, kind: r.kind, deleteAfter: r.delete_after, createdAt: r.created_at, updatedAt: r.updated_at,
+        }));
+        return { views: await mailboxViews({ ...c.env, db }, mapped), candidateCount: rows[0]?.candidate_count ?? 0 };
+      }, readLimit(5));
+      const fitted = fitPageByBytes(views, candidateCount > views.length, INBOUND_PAGE_MAX_BYTES, 256);
+      const last = fitted.items[fitted.items.length - 1];
+      return c.json({ data: fitted.items, nextCursor: fitted.hasMore && last ? last.id : null }, 200);
+    }) as never;
   });
   app.openapi(createRoute({ ...meta, method: 'post', path: collection, ...addressAlias('createInboundAddress'), summary: 'Create a receivable address', description: 'Admin only. The domain must be verified for this workspace; mail arrives once its receiving MX record is active. Permanent addresses claim earlier unrouted mail for their address or rules; temporary addresses start empty. Expiry stops new delivery and sending without deleting history.', request: { body: json(MailboxInput) }, responses: { 201: response(InboundAddressSchema), ...errors } }), async c => {
     const value = admin(c); const input = c.req.valid('json'); const scope = scopeOf(value);

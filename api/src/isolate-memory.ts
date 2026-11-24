@@ -24,7 +24,7 @@ export type MemoryLease = { release(): void };
 const lease = (n: number): MemoryLease => { let held = true; return { release() { if (held) { held = false; used -= n; admit(); } } }; };
 /** Reserves `bytes` (at most the whole budget) and resolves once they are free. Release the lease exactly once its
  * buffers are unreachable; release is idempotent. */
-export async function reserveMemory(bytes: number): Promise<MemoryLease> {
+export async function reserveMemory(bytes: number, signal?: AbortSignal): Promise<MemoryLease> {
   const n = Math.max(1, Math.min(budget, Math.ceil(bytes))), outer = holding.getStore();
   if (outer) {
     if (n <= outer.bytes) return { release() {} };
@@ -32,16 +32,29 @@ export async function reserveMemory(bytes: number): Promise<MemoryLease> {
     used += n - outer.bytes;
     return lease(n - outer.bytes);
   }
-  await new Promise<void>(start => { waiting.push({ bytes: n, start }); admit(); });
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+  await new Promise<void>((resolve, reject) => {
+    const entry = { bytes: n, start: () => { signal?.removeEventListener('abort', onAbort); resolve(); } };
+    const onAbort = () => {
+      const idx = waiting.indexOf(entry);
+      if (idx >= 0) { waiting.splice(idx, 1); admit(); }
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    waiting.push(entry);
+    admit();
+  });
   return lease(n);
 }
 /** Runs `work` holding `bytes` of the isolate's budget. */
-export async function withMemory<T>(bytes: number, work: () => Promise<T>): Promise<T> {
-  const held = await reserveMemory(bytes), outer = holding.getStore();
+export async function withMemory<T>(bytes: number, work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  const held = await reserveMemory(bytes, signal), outer = holding.getStore();
   try { return await holding.run({ bytes: Math.max(outer?.bytes ?? 0, Math.min(budget, Math.ceil(bytes))) }, work); } finally { held.release(); }
 }
 /** What the budget has handed out now (for tests and measurements). */
 export const memoryInUse = () => used;
+/** Number of requests currently waiting for a memory lease. */
+export const memoryWaiting = () => waiting.length;
 
 /** A dispatcher page's peak: per byte of files, the files and the SES JSON body with their base64 (4/3), and for raw
  * MIME (inline images, at most the lane budget of files) also the message (1.37) and its base64 again (1.83); per byte

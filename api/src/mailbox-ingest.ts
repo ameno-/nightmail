@@ -13,7 +13,8 @@ import { ApiError, digest, lazyModule, log, ModuleLoadError, type JobHandler, ty
 import { JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
 import { mailAttachments, mailReceipts, type MailAddress, type MailHeader, type Verdicts } from './db/mailbox.js';
 import { mailboxS3, STAGING_PREFIX, refreshMailboxDns } from './mailbox-setup.js';
-import { ADDRESS, messageIdList, normalizeMessageId, snippetOf, type Scope } from './mailbox-store.js';
+import { ADDRESS, messageIdListCounted, normalizeMessageId, snippetOf, type Scope } from './mailbox-store.js';
+import { INBOUND_ADDRESS_ADDR_LIMIT, INBOUND_ADDRESS_NAME_LIMIT, INBOUND_ADDRESS_STORE_LIMIT } from './bounded-read.js';
 import type { ReceivedNotification } from './mailbox-receipts.js';
 import { scheduleMailRecovery, stagingJobs } from './mailbox-staging.js';
 import { billed } from './billing/gate.js';
@@ -31,7 +32,8 @@ const HEADER_LIMIT = 64 * 1024;
 const INGEST_OUTAGE_MS = 48 * 3600_000; // Below the 3-day staging lifecycle (mail-controls.ts), with a day to spare.
 
 export const flatten = (list: Address[] | Address | undefined): MailAddress[] => (Array.isArray(list) ? list : list ? [list] : []).flatMap(item => item.group ? item.group : [item])
-  .filter(item => typeof item.address === 'string' && item.address.includes('@')).map(item => ({ name: item.name?.trim() || null, address: item.address!.trim().toLowerCase() }));
+  .filter(item => typeof item.address === 'string' && item.address.includes('@')).map(item => ({ name: item.name?.trim().slice(0, INBOUND_ADDRESS_NAME_LIMIT) || null, address: item.address!.trim().toLowerCase().slice(0, INBOUND_ADDRESS_ADDR_LIMIT) }));
+const capAddresses = (list: MailAddress[]) => ({ items: list.slice(0, INBOUND_ADDRESS_STORE_LIMIT), count: list.length });
 const verdict = (value: { status?: string } | undefined) => typeof value?.status === 'string' ? value.status : undefined;
 /**
  * Whether a From field is exactly `address` (lowercase): one literal addr-spec, optionally with a display name. The
@@ -582,7 +584,8 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
   const from = flatten(email?.from)[0] ?? { name: null, address: (commonFrom?.address ?? notification.mail?.source ?? '').trim().toLowerCase() };
   const messageId = normalizeMessageId(email?.messageId ?? common.messageId);
   const inReplyTo = normalizeMessageId(email?.inReplyTo);
-  const references = messageIdList(email?.references);
+  const refs = messageIdListCounted(email?.references);
+  const references = refs.items;
   const subject = (email?.subject ?? common.subject ?? '').slice(0, 998);
   const text = cap(email?.text), html = cap(email?.html);
   const verifiedFrom = !!sesTimestamp && authenticatedFrom(email, from.address, notification.mail, verdicts);
@@ -615,9 +618,14 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
     throw new ApiError(503, 'MAILBOX_ATTACHMENT_UPLOAD_FAILED', 'An attachment could not be stored in S3; retrying.', undefined, true);
   }
 
+  const toList = capAddresses(flatten(email?.to)), ccList = capAddresses(flatten(email?.cc)), replyToList = capAddresses(flatten(email?.replyTo));
+  if (toList.count > INBOUND_ADDRESS_STORE_LIMIT) verdicts.toCount = toList.count;
+  if (ccList.count > INBOUND_ADDRESS_STORE_LIMIT) verdicts.ccCount = ccList.count;
+  if (replyToList.count > INBOUND_ADDRESS_STORE_LIMIT) verdicts.replyToCount = replyToList.count;
+  if (refs.count > INBOUND_ADDRESS_STORE_LIMIT) verdicts.referencesCount = refs.count;
   const message:Parameters<typeof storeIncoming>[1]={
         id: messageRowId, ...scope, direction: 'inbound', region: receipt.region, sesMessageId, messageId, inReplyTo, references, subject,
-         fromAddress: from.address, fromName: from.name, to: flatten(email?.to), cc: flatten(email?.cc), bcc: [], replyTo: flatten(email?.replyTo),
+         fromAddress: from.address, fromName: from.name, to: toList.items, cc: ccList.items, bcc: [], replyTo: replyToList.items,
         envelopeFrom: notification.mail?.source?.toLowerCase() ?? null, envelopeTo: receipt.recipients, sentAt, receivedAt,
         text: text.value, html: html.value, bodyTruncated: text.truncated || html.truncated || status === 'unparsed' || skipAttachments, snippet: snippetOf(text.value, html.value),
         mime:email?mimeIndex(raw):null, headers: headersOf(email), attachmentCount: attachments.length, sizeBytes, rawBucket: store.bucket, rawKey: store.rawKey, lifecycle: store.lifecycle,
