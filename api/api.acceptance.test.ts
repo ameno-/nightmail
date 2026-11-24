@@ -28520,7 +28520,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         if (cmd.constructor.name === 'CopyObjectCommand') { copied.push(cmd.input.Key); return {}; }
         return {};
       });
-      const sweepPayload = { bucket: poolBucket, topic: poolTopic, shared: true, partition: 0, started: Date.now() };
+      const sweepPayload = { bucket: poolBucket, topic: poolTopic, shared: true, started: Date.now() };
       await stagingJobs['mailbox.sweepStaging']!(poolRuntime, sweepPayload, { id: 'sweep-pool', attempts: 1, workspaceId: wid });
       const queued = (await db.query("SELECT id, payload FROM jobs WHERE type='mailbox.recoverStaging' AND payload->>'bucket'=$1", [poolBucket])).rows;
       assert.deepEqual(queued.map(r => r.payload.mid), ['redrive-orphan-1'], 'AMAZON_SES_SETUP_NOTIFICATION skipped');
