@@ -7193,6 +7193,39 @@
                 },
                 "note": {
                   "type": "string"
+                },
+                "publicDns": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "properties": {
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "found",
+                        "missing",
+                        "wrong_value"
+                      ],
+                      "description": "found: public DNS has this record as listed (it may still take SES a few minutes to verify). missing: nothing of this type at the name. wrong_value: the name has a record of this type with another value."
+                    },
+                    "values": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "wrong_value only: what public DNS has at the name instead (at most 5). Empty otherwise."
+                    },
+                    "checkedAt": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "values",
+                    "checkedAt"
+                  ],
+                  "description": "verifyDomain only, for pending sending and MAIL FROM records: what public DNS (Cloudflare 1.1.1.1, answers cached up to 30 seconds) shows for this record now. Null when DNS did not answer in time; absent on other reads and records."
                 }
               },
               "required": [
@@ -38148,7 +38181,7 @@
     "/v1/domains/{id}/verify": {
       "post": {
         "operationId": "verifyDomain",
-        "description": "On MX, request a background verification and return the current stored status. Read the domain again for updates.",
+        "description": "On MX, request a background verification and return the current stored status, with what public DNS shows now for each pending sending and MAIL FROM record (dns[].publicDns), so a missing or mistyped record can be named. Read the domain again for updates.",
         "tags": [
           "Domains"
         ],
