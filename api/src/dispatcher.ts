@@ -72,9 +72,8 @@ export const initialGate = (): GateState => ({ nextAllowedAt: 0, quota: null, se
 export const shardLeaseSize=(rate:number|undefined,count:number)=>rate!==undefined && count>1 ? Math.min(24,Math.max(6,Math.ceil(rate/count/6)*6)) : 24;
 export type Pacing = { rateFactor: number; txReservePercent?: number; targetRate?: number; live: boolean };
 const RECENT_TX_MS = 2000;
-const holdUntil = (gate: GateState) => Math.max(gate.outageUntil ?? 0, gate.accountPauseAt !== undefined ? gate.accountPauseAt + 300000 : 0);
-const txReadyAt = (gate: GateState, now: number) => Math.max(gate.txAllowedAt ?? 0, holdUntil(gate), (gate.brakeUntil ?? 0) > now ? gate.nextAllowedAt : 0);
-const mktReadyAt = (gate: GateState) => Math.max(gate.nextAllowedAt, gate.marketingAllowedAt ?? 0, holdUntil(gate));
+const txReadyAt = (gate: GateState, now: number) => Math.max(gate.txAllowedAt ?? 0, (gate.brakeUntil ?? 0) > now ? gate.nextAllowedAt : 0);
+const mktReadyAt = (gate: GateState) => Math.max(gate.nextAllowedAt, gate.marketingAllowedAt ?? 0);
 const BRAKE_MS = 10000;
 // SES gave no usable answer (transport error, timeout, 5xx, or no MessageId): an ambiguous call is never replayed, so stop starting new
 // calls instead of turning every queued email into acceptance_unknown. Doubles while SES stays silent.

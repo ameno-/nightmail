@@ -3314,7 +3314,9 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
   const room = Math.min(limits.campaign - buffered!.campaign, limits.total - buffered!.total);
   const minRelease = Math.min(row.total - row.expanded, Math.floor(limits.campaign / 2), CAMPAIGN_EXPAND_ROWS);
   if (room <= 0 || (buffered!.campaign > 0 && room < minRelease)) {
-    const backlog = Math.max(buffered!.campaign - Math.max(0, limits.campaign - minRelease), buffered!.total - Math.max(0, limits.total - minRelease));
+    const backlog = room <= 0
+      ? Math.max(buffered!.campaign - limits.campaign / 2, buffered!.total - limits.total / 2)
+      : Math.max(buffered!.campaign - Math.max(0, limits.campaign - minRelease), buffered!.total - Math.max(0, limits.total - minRelease));
     throw new JobDeferred(new Date(nowMs + drainDelayMs(backlog, row.rate)).toISOString(), payload);
   }
   const rolling = row.pacePerDay !== null && !!row.windowStartedAt && nowMs - Date.parse(row.windowStartedAt) >= DAY_MS;
@@ -3431,7 +3433,9 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     const capacity = Math.min(demand, bufRoom);
     if (capacity <= 0 || (buffer!.campaign > 0 && bufRoom < txMinRelease)) {
       // Lost a race with another release or buffer is still more than half full: wait for it to drain.
-      const backlog = Math.max(buffer!.campaign - Math.max(0, cBuf - txMinRelease), buffer!.total - Math.max(0, wBuf - txMinRelease));
+      const backlog = capacity <= 0
+        ? Math.max(buffer!.campaign - cBuf / 2, buffer!.total - wBuf / 2)
+        : Math.max(buffer!.campaign - Math.max(0, cBuf - txMinRelease), buffer!.total - Math.max(0, wBuf - txMinRelease));
       throw new JobDeferred(new Date(Date.now() + drainDelayMs(backlog, buffer!.rate)).toISOString(), payload);
     }
     const allowed = admitted(runtime, buffer!.decision, a.workspaceId);
