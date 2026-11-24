@@ -1939,7 +1939,7 @@ export function registerSending(app: App) {
     const a = actor(c), row = await findCampaign(c.env.db, a, c.req.valid('param').id);
     const audience = AudienceSpec.safeParse(row.draft.audience);
     if (!audience.success) throw new ApiError(422, 'CAMPAIGN_INCOMPLETE', 'Choose an audience list before counting recipients.', 'audience.listId');
-    const counts = await (await wrapModuleLoad(() => import('./audience.js'))).countCampaignAudience(c.env.db, a, audience.data, row.draft.requiredNotice === true);
+    const counts = await (await wrapModuleLoad(() => import('./audience.js'))).countCampaignAudienceForDisplay(c.env.db, a, audience.data, row.draft.requiredNotice === true);
     if (row.audienceEstimate !== counts.eligible) {
       await c.env.db.execute(sql`UPDATE sending_campaigns SET audience_estimate = ${counts.eligible} WHERE workspace_id = ${a.workspaceId} AND id = ${row.id}`).catch(() => {});
     }

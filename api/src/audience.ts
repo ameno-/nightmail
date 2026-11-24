@@ -295,6 +295,28 @@ export async function countCampaignAudience(db: DbExecutor, identity: Actor, spe
     FROM ${contacts} WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)}`)).rows;
   return row!;
 }
+
+/** Display-only whole-list counts. The list tally includes every committed delta, not just its last fold. */
+export async function countCampaignAudienceForDisplay(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>, requiredNotice = false) {
+  if (identity.domains.length || spec.segmentId || spec.excludeListIds?.length || spec.excludeSegmentIds?.length) {
+    return countCampaignAudience(db, identity, spec, requiredNotice);
+  }
+  // Anchor to the scoped list so a missing or foreign list still returns 404, not the counts of an empty list.
+  const { rows: [row] } = await db.execute<{ subscribed: number; unsubscribed: number; unknown: number; suppressed: number }>(sql`
+    SELECT coalesce(sum(c.subscribed), 0)::int AS subscribed, coalesce(sum(c.unsubscribed), 0)::int AS unsubscribed,
+      coalesce(sum(c.unknown), 0)::int AS unknown, coalesce(sum(c.suppressed), 0)::int AS suppressed
+    FROM audience_lists l LEFT JOIN audience_list_counts c ON c.workspace_id = l.workspace_id AND c.list_id = l.id
+    WHERE l.workspace_id = ${identity.workspaceId} AND l.id = ${spec.listId}
+    GROUP BY l.id`);
+  if (!row) return notFound('List');
+  const notSubscribed = row.unsubscribed + row.unknown;
+  return {
+    matched: row.subscribed + notSubscribed + row.suppressed,
+    eligible: requiredNotice ? row.subscribed + notSubscribed : row.subscribed,
+    suppressed: row.suppressed,
+    unsubscribed: requiredNotice ? 0 : notSubscribed,
+  };
+}
 export const SYNC_CAPTURE_MAX_LIST_MEMBERS = 5_000;
 const SNAPSHOT_MAX_MATCHED = 2_000_000, SNAPSHOT_MAX_RECIPIENT_BYTES = 1_048_576, SNAPSHOT_MAX_REVIEW_BYTES = 1_073_741_824;
 const DEFAULT_CAPTURE_SLICE_ROWS = 200_000;
