@@ -919,6 +919,8 @@ export async function seed(fx) {
   // An MCP client dana connected as a labelled profile, waiting for its workspace (its page is /settings/mcp/<id>).
   const mcp = 'mcp_at_cls_fixture';
   await db.query("INSERT INTO nightmail_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at,profile) VALUES($1,'https://account.anoma.ly','user_dana','user_dana','opencode',NULL,'{read,send}',now()+interval '1 day',0,'work')", [mcp]);
+  // An agent waiting at /connect with its device code (api/src/agent-setup.ts): Connect · agent code approves or denies it.
+  await db.query("INSERT INTO agent_setups(id,kind,secret_hash,user_code,client_name,expires_at) VALUES ($1,'device',repeat('0',64),'BCDFGHJK','OpenCode',now()+interval '1 day')", ['ags_' + 'c'.repeat(32)]);
   // API keys' agent tokens: that agent with two short-lived tokens it made in Northwind, and Sam's agent with one (an
   // owner sees another member's agent once it has made tokens here).
   await db.query("INSERT INTO nightmail_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at) VALUES('mcp_at_cls_sam','https://account.anoma.ly','user_sam','user_sam','claude-code',NULL,'{read}',now()+interval '1 day',0)");
@@ -978,7 +980,7 @@ export async function seed(fx) {
   await db.query("INSERT INTO nightmail_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at,profile,receiving) VALUES('mcp_at_cls_live','https://account.anoma.ly','user_kai','user_kai','opencode','ws_live','{read,send,manage}',now()+interval '1 day',0,'work',true)");
   fx.liveKey = agent.secret;
   return {
-    ...newsletterIds, mcp, abuseCluster, restricted: 'ws_harbor', email, junkEmail, bouncedEmail: failed.bounced, delayedEmail: failed.delayed, receivedEmail: 'msg_northwind_invoice', threadEmail: thread.email, threadReceived: thread.received, supportThread: thread.thread, domain: nw.id, sendingDomain: sendingDomain.id, stuckDomain: stuckDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
+    ...newsletterIds, mcp, deviceCode: 'BCDF-GHJK', abuseCluster, restricted: 'ws_harbor', email, junkEmail, bouncedEmail: failed.bounced, delayedEmail: failed.delayed, receivedEmail: 'msg_northwind_invoice', threadEmail: thread.email, threadReceived: thread.received, supportThread: thread.thread, domain: nw.id, sendingDomain: sendingDomain.id, stuckDomain: stuckDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
     webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, template: template.id ?? template.template?.id, segment: segment.id, propertySegment: propertySegment.id, supportConversation, supportAction, continueConversation, continueMessage,
   };
 }

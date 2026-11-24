@@ -21,8 +21,8 @@ import './onboarding-card.css'
 // stays away for a day in this browser, then comes back while it still applies.
 
 export type OnboardingCardKind = 'no-domain' | 'first-send'
-/** What each card takes above the figures on a desktop: its fixed height (onboarding-card.css) and the main column's 20px gap. */
-export const ONBOARDING_CARD_SPACE: Record<OnboardingCardKind, number> = { 'no-domain': 76 + 20, 'first-send': 120 + 20 }
+/** What each card takes above the figures on a desktop: its fixed height (onboarding-card.css) and its .ov-lead row's 4 + 12px padding. */
+export const ONBOARDING_CARD_SPACE: Record<OnboardingCardKind, number> = { 'no-domain': 76 + 16, 'first-send': 120 + 16 }
 
 const DAY_MS = 24 * 3600_000
 const dismissedKey = (kind: OnboardingCardKind, workspaceId: string) => `nightmail.overview.${kind}.${workspaceId}`

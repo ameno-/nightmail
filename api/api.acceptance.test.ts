@@ -54,6 +54,40 @@ async function byoTemplates() {
 }
 // The role's identity policy statements: inline policies, conditional ones (!If) included.
 const byoRoleStatements=(cfn:Json)=>cfn.Resources.Role.Properties.Policies.map((p:Json)=>Array.isArray(p)?p[1]:p).flatMap((p:Json)=>p.PolicyDocument.Statement) as IamStatement[];
+
+test('SES feedback forwarding backfill is read-only by default, tag scoped, paginated and idempotent', async t => {
+  const { SESv2Client } = await import('@aws-sdk/client-sesv2'), { backfillFeedbackForwarding } = await import('./scripts/backfill-feedback-forwarding.js');
+  const ses = new SESv2Client({ region:'us-east-2', credentials:{accessKeyId:'fixture',secretAccessKey:'fixture'} });
+  t.after(() => ses.destroy());
+  const claim = { Key:'bane:domain-claim', Value:randomUUID() };
+  const domains:Record<string,{ Tags:{Key:string;Value:string}[]; FeedbackForwardingStatus:boolean }> = {
+    'modern.example':{Tags:[{Key:'nightmail:owner',Value:'nightmail'}],FeedbackForwardingStatus:true},
+    'legacy.example':{Tags:[claim],FeedbackForwardingStatus:true},
+    'fixed.example':{Tags:[{Key:'bane:owner',Value:'bane'}],FeedbackForwardingStatus:false},
+    'imported.example':{Tags:[],FeedbackForwardingStatus:true},
+    'foreign.example':{Tags:[claim,{Key:'nightmail:owner',Value:'other'}],FeedbackForwardingStatus:true},
+  };
+  const writes:string[]=[];
+  t.mock.method(ses,'send',async (cmd:any)=>{
+    const name=cmd.input.EmailIdentity;
+    switch(cmd.constructor.name){
+      case 'ListEmailIdentitiesCommand': {
+        const names=Object.keys(domains), next=cmd.input.NextToken;
+        if(next) assert.equal(next,'page2');
+        return {EmailIdentities:(next?names.slice(2):names.slice(0,2)).map(IdentityName=>({IdentityType:'DOMAIN',IdentityName})),NextToken:next?undefined:'page2'};
+      }
+      case 'GetEmailIdentityCommand':return domains[name];
+      case 'PutEmailIdentityFeedbackAttributesCommand':assert.deepEqual(cmd.input,{EmailIdentity:name,EmailForwardingEnabled:false});writes.push(name);domains[name]!.FeedbackForwardingStatus=false;return {};
+      default:assert.fail(cmd.constructor.name);
+    }
+  });
+  const initial={listed:5,managed:3,on:2,off:1,disabled:0,errors:0};
+  assert.deepEqual(await backfillFeedbackForwarding(ses),initial);
+  assert.deepEqual(writes,[]);
+  assert.deepEqual(await backfillFeedbackForwarding(ses,true),{...initial,disabled:2});
+  assert.deepEqual(await backfillFeedbackForwarding(ses,true),{...initial,on:0,off:3});
+  assert.deepEqual(writes,['modern.example','legacy.example']);
+});
 // The IAM action and resource an SES v2 or SNS command asks for, and a check that a connected account's session (whose
 // fixture credentials carry their session policy as the token) allows it: code calls stay inside their session.
 function sessionCall(service:'ses'|'sns',cmd:any,region:string,account:string):[string,string] {
@@ -3498,7 +3532,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
             default:throw Error(cmd.constructor.name);
           }
         });
-        let loseCreateResponse = false, failTenantOnce = false, dropCreate = false,quotaFull=false;
+        let denyForwarding = false, loseCreateResponse = false, failTenantOnce = false, dropCreate = false,quotaFull=false;
         const root = `${unique('claims')}.invalid`, domain = `mail.${root}`, foreign = `existing.${unique('ses')}.invalid`;
         const importParent=`${unique('import')}.invalid`,imported=`mail.${importParent}`, reserved=`${unique('reserved')}.invalid`;
         const verifiedIdentity = { VerificationStatus:'SUCCESS', VerifiedForSendingStatus:true, DkimAttributes:{ SigningEnabled:true, Status:'SUCCESS', Tokens:['fixture1','fixture2','fixture3'], SigningHostedZone:'dkim.amazonses.com' } };
@@ -3516,7 +3550,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
               if (dropCreate) { dropCreate=false; throw new Error('Synthetic connection reset before SES received Create'); }
               if (identities.has(`${account}:${i.EmailIdentity}`)) throw Object.assign(new Error('Existing identity'),{name:'AlreadyExistsException'});
               assert.equal(i.Tags[0].Key,'bane:domain-claim');
-              identities.set(`${account}:${i.EmailIdentity}`, { ...verifiedIdentity, Tags:i.Tags });
+              identities.set(`${account}:${i.EmailIdentity}`, { ...verifiedIdentity, Tags:i.Tags, FeedbackForwardingStatus:true });
               if (loseCreateResponse) { loseCreateResponse=false; throw new Error('Synthetic connection reset after SES accepted Create'); }
               return {DkimAttributes:{...verifiedIdentity.DkimAttributes,Status:'PENDING'},VerifiedForSendingStatus:false};
             }
@@ -3528,6 +3562,13 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
               if (failImportRead) throw Object.assign(new Error('synthetic throttle'),{name:'ThrottlingException'});
               const listed=(name:string)=>({IdentityType:'DOMAIN',IdentityName:name,SendingEnabled:true,VerificationStatus:'SUCCESS'});
               return i.NextToken ? {EmailIdentities:[listed(imported),listed(`mail.${reserved}`),listed(reserved)]} : {EmailIdentities:[{...listed(domain),VerificationStatus:'PENDING'}, {...listed('me@'+domain),IdentityType:'EMAIL_ADDRESS'}],NextToken:'second'};
+            }
+            case 'PutEmailIdentityFeedbackAttributesCommand': {
+              const identity=identities.get(`${account}:${i.EmailIdentity}`)!;
+              assert.ok(identity.Tags?.length); assert.equal(i.EmailForwardingEnabled,false);
+              if (denyForwarding) throw Object.assign(Error('fixture denied'),{name:'AccessDeniedException'});
+              identity.FeedbackForwardingStatus=false;
+              return {};
             }
             case 'PutEmailIdentityMailFromAttributesCommand': {
               const identity=identities.get(`${account}:${i.EmailIdentity}`)!; mailFromWrites.push(i);
@@ -3665,6 +3706,17 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           const allowed=ok(await add(b.cookie,unique('customer')+'.co.uk'),201);
           ok(await local('DELETE',`/v1/domains/${allowed.id}`,undefined,b.cookie));
         });
+        await providerTest.test('SES feedback forwarding refusal leaves domain creation successful and logs the failure',async ft=>{
+          const name=unique('denied-feedback')+'.invalid', logs:string[]=[];
+          ft.mock.method(console,'warn',(line:string)=>logs.push(line));
+          denyForwarding=true;
+          try {
+            const domain=ok(await add(b.cookie,name),201);
+            assert.equal(identities.get(`${platform}:${name}`)!.FeedbackForwardingStatus,true);
+            assert.ok(logs.some(line=>line.includes('SES_FEEDBACK_FORWARDING_NOT_DISABLED')&&line.includes('SES_ACCESS_DENIED')));
+            ok(await local('DELETE',`/v1/domains/${domain.id}`,undefined,b.cookie));
+          } finally {denyForwarding=false;}
+        });
         await providerTest.test('MX serializes workspace claim limits across unrelated DNS names',async()=>{
           const prefix=unique('quota'),wid=b.org.id;
           await pool.query(`INSERT INTO domain_claims(name,workspace_id) SELECT $1||n||'.invalid',$2 FROM generate_series(1,9) n`,[prefix,wid]);
@@ -3672,14 +3724,15 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           try {
             const race=await Promise.all(names.map(name=>add(b.cookie,name)));
             assert.deepEqual(race.map(r=>r.status).sort(),[201,409]);error(race.find(r=>r.status===409)!,409,'DOMAIN_LIMIT_REACHED');
-            assert.deepEqual(calls.slice(start),['CreateEmailIdentityCommand']);
+            assert.deepEqual(calls.slice(start),['CreateEmailIdentityCommand','PutEmailIdentityFeedbackAttributesCommand']);
             const last=ok(race.find(r=>r.status===201)!,201);
+            assert.equal(identities.get(`${platform}:${last.name}`)!.FeedbackForwardingStatus,false);
             assert.equal(ok(await add(b.cookie,last.name),201).id,last.id,'Idempotent retries do not consume quota.');
             // Only one unproven claim remains; the next rejection must be the independent total limit.
             await pool.query(`UPDATE domain_claims SET ever_proven=true WHERE workspace_id=$1 AND name LIKE $2 AND name<>$3`,[wid,prefix+'%',last.name]);
             await pool.query(`INSERT INTO domain_claims(name,workspace_id,ever_proven) SELECT $1||n||'.invalid',$2,true FROM generate_series(10,99) n`,[prefix,wid]);
             error(await add(b.cookie,names.find(n=>n!==last.name)!),409,'DOMAIN_LIMIT_REACHED');
-            assert.deepEqual(calls.slice(start),['CreateEmailIdentityCommand']);
+            assert.deepEqual(calls.slice(start),['CreateEmailIdentityCommand','PutEmailIdentityFeedbackAttributesCommand']);
             ok(await local('DELETE',`/v1/domains/${last.id}`,undefined,b.cookie));
             const replacement=ok(await add(b.cookie,names.find(n=>n!==last.name)!),201);
             ok(await local('DELETE',`/v1/domains/${replacement.id}`,undefined,b.cookie));
@@ -3893,7 +3946,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           // The second failed request did reach SES. Recover only this claim's tagged identity.
           const restored=ok(await add(b.cookie,recovery),201);
           assert.equal(restored.dns.filter((r:Json)=>r.purpose==='sending' && r.type==='CNAME').length,3); assert.equal(restored.verified,false);
-          assert.deepEqual(calls.slice(before),['CreateEmailIdentityCommand','CreateEmailIdentityCommand','GetEmailIdentityCommand']);
+          assert.deepEqual(calls.slice(before),['CreateEmailIdentityCommand','CreateEmailIdentityCommand','GetEmailIdentityCommand','PutEmailIdentityFeedbackAttributesCommand']);
           ok(await local('DELETE',`/v1/domains/${restored.id}`,undefined,b.cookie));
           // A request that died before any SES call leaves a claim with no identity. The verify job it reserved owns the identity from then on.
           const {operationJobs:wedgeJobs}=await import('./src/operations.js'),{JobDeferred:Deferred}=await import('./src/jobs.js');
@@ -3903,7 +3956,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           assert.ok(wedge && wedge.identity===null,'The reservation keeps the claim and its verify job even though SES was never called.');
           await pool.query("UPDATE job_schedule SET wake_not_before=now() WHERE workspace_id='domain.verify:platform'");
           await assert.rejects(wedgeJobs['domain.verify']!(runtime,wedge.payload,{id:wedge.id,attempts:1,workspaceId:b.org.id}),Deferred);
-          assert.deepEqual(calls.slice(wedgeStart),['CreateEmailIdentityCommand','GetEmailIdentityCommand','CreateEmailIdentityCommand']);
+          assert.deepEqual(calls.slice(wedgeStart),['CreateEmailIdentityCommand','GetEmailIdentityCommand','CreateEmailIdentityCommand','PutEmailIdentityFeedbackAttributesCommand']);
           const unwedged=ok(await local('GET',`/v1/domains/${wedge.payload.domainId}`,undefined,b.cookie));
           assert.equal(unwedged.dns.filter((r:Json)=>r.purpose==='sending' && r.type==='CNAME').length,3); assert.ok(identities.get(`${platform}:${wedged}`));
           ok(await local('DELETE',`/v1/domains/${wedge.payload.domainId}`,undefined,b.cookie)); lookups=0;
@@ -3916,7 +3969,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           const n=queries.mock.callCount(),creates=calls.length;
           const created = ok(await add(b.cookie,domain),201), proof = created.dns.find((r:Json) => r.purpose==='sending' && r.type==='TXT');
           dt.diagnostic(`POST domain: ${queries.mock.callCount()-n} pg round trips including dashboard auth`);
-          assert.deepEqual(calls.slice(creates),['CreateEmailIdentityCommand']);
+          assert.deepEqual(calls.slice(creates),['CreateEmailIdentityCommand','PutEmailIdentityFeedbackAttributesCommand']);
           assert.equal(proof.name,`_nightmail.${domain}`); assert.ok(proof.value); assert.equal(created.dns.filter((r:Json)=>r.type==='CNAME' && r.purpose==='sending').length,3);
           // Receiving defaults to reply.<domain>: a pasted root MX would take the domain's existing mail.
           assert.deepEqual(created.dns.find((r:Json)=>r.purpose==='receiving'),{name:`reply.${domain}`,type:'MX',value:`inbound-smtp.${region}.amazonaws.com`,priority:10,purpose:'receiving',status:'pending'});
@@ -4538,7 +4591,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
         error(await add(a.cookie,domain),409,'CONNECTION_REQUIRED');
         ok(await choose('shared', a.cookie),201);
         const reproved=ok(await local('POST','/v1/domains',{name:domain},a.cookie),201); // Region defaults to the connection.
-        assert.equal(reproved.region,region); assert.equal(reproved.verified,false); assert.equal(calls.at(-1),'CreateEmailIdentityCommand'); assert.notEqual(reproved.id,byoDomain.id);
+        assert.equal(reproved.region,region); assert.equal(reproved.verified,false); assert.equal(calls.at(-1),'PutEmailIdentityFeedbackAttributesCommand'); assert.notEqual(reproved.id,byoDomain.id);
         const reconnected=ok(await local('GET', path, undefined, a.cookie)).connection;
         assert.equal((await released())[0].connection_id,reconnected.id);
         // Disconnecting a shared connection removes its tagged pool identities so a later reconnect never meets its own ghost.
@@ -4741,6 +4794,258 @@ test('permission refusals over HTTP: the same status and code, with error.requir
   const allowed = await http('GET', '/v1/lists', manage.secret);
   ok(allowed);
   assert.equal(allowed.headers.get('nightmail-required-permission'), null);
+});
+
+// Agent setup (src/agent-setup.ts): an agent's own lasting key from a setup token in the prompt a person copied, or from a
+// device code a person approved at /connect. Hosted, so the people are owners, admins and members of their workspaces.
+describe('Agent setup: a setup token in the copied prompt, and the device flow', () => {
+  type Person = { userId: string; cookie: string };
+  async function hosted(t: TestContext, scenario: (fixture: { db: pg.Client; request: typeof http; w: string; owner: Person;
+    person: (role: 'owner' | 'admin' | 'member', workspace?: string) => Promise<Person>; join: (who: Person, workspace: string, role: 'owner' | 'admin' | 'member') => Promise<unknown>;
+    as: (who: Person, workspace?: string) => Record<string, string>; workspace: () => Promise<string> }) => Promise<void>) {
+    await simulatedSesFixture(t, async ({ db, request, runtime }) => {
+      runtime.config.multiTenant = true;
+      cleanup(t, async () => { runtime.config.multiTenant = false; });
+      // Agent inboxes keep their mail in object storage: a stand-in bucket, as in the permission table.
+      runtime.mailR2 = { write: true, name: 'agent-setup', bucket: { put: async () => {} } as unknown as R2Bucket };
+      const w = runtime.config.workspaceId, issuer = process.env.ACCOUNT_ISSUER ?? 'https://account.anoma.ly';
+      const join = (who: Person, workspace: string, role: string) => db.query('INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,$4)', [randomUUID(), who.userId, workspace, role]);
+      const person = async (role: 'owner' | 'admin' | 'member', workspace = w) => {
+        const userId = unique('agent-setup-user'), token = createHash('sha256').update(randomUUID()).digest('base64url'), email = `${userId}@${AUTH_DOMAIN}`;
+        secrets.add(token);
+        await db.query('INSERT INTO nightmail_users(id,name,email,email_verified) VALUES($1,$1,$2,true)', [userId, email]);
+        await db.query('INSERT INTO nightmail_oidc_identities VALUES($1,$2,$3)', [issuer, userId, userId]);
+        await db.query("INSERT INTO nightmail_sessions(token_hash,user_id,issuer,subject,verified_email,expires_at) VALUES($1,$2,$3,$2,$4,now()+interval '1 hour')", [createHash('sha256').update(token).digest('hex'), userId, issuer, email]);
+        const who = { userId, cookie: `${COOKIE_NAME}=${token}` };
+        await join(who, workspace, role);
+        return who;
+      };
+      const as = (who: Person, workspace?: string) => ({ cookie: who.cookie, origin: PUBLIC_ORIGIN, ...(workspace ? { 'x-nightmail-workspace': workspace } : {}) });
+      const workspace = async () => { const id = unique('agent-setup-workspace'); await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [id]); return id; };
+      await scenario({ db, request, w, owner: { userId: manager!.userId, cookie: manager!.cookie }, person, join, as, workspace });
+    });
+  }
+  const mint = async (request: typeof http, headers: Record<string, string>) => { const made = ok(await request('POST', '/v1/agent/setup-tokens', undefined, undefined, headers), 201); secrets.add(made.token); return made; };
+  const exchange = (request: typeof http, token: string) => request('POST', '/v1/agent/setup', undefined, { token });
+
+  test('a copied prompt\'s setup token becomes one lasting key, made by the person who copied it, that never administers keys or billing', async t => {
+    await hosted(t, async ({ db, request, w, owner, as }) => {
+      const minted = await mint(request, as(owner));
+      assert.match(minted.token, /^nm_setup_[0-9a-f]{32}\.[0-9a-f]{64}$/);
+      assert.deepEqual(minted.permissions, ['read', 'send', 'manage']);
+      assert.ok(Math.abs(Date.parse(minted.expiresAt) - Date.now() - 15 * 60_000) < 60_000, 'fifteen minutes');
+      // Only the verifier's hash is kept, bound to the person and the workspace.
+      const verifier = minted.token.split('.')[1];
+      const { rows: [stored] } = await db.query('SELECT * FROM agent_setups WHERE id=$1', [minted.id]);
+      assert.equal(stored.secret_hash, createHash('sha256').update(verifier).digest('hex'));
+      assert.ok(!JSON.stringify(stored).includes(verifier));
+      assert.deepEqual([stored.kind, stored.workspace_id, stored.user_id, stored.status], ['prompt', w, owner.userId, 'pending']);
+      assert.equal(ok(await request('GET', `/v1/agent/setup-tokens/${minted.id}`, undefined, undefined, as(owner))).status, 'waiting');
+
+      // The agent needs nothing but the token.
+      const agent = ok(await exchange(request, minted.token), 201);
+      secrets.add(agent.key);
+      assert.match(agent.key, /^nm_[0-9a-f]{64}$/);
+      assert.deepEqual([agent.workspaceId, agent.workspaceName], [w, w]);
+      assert.match(agent.nextStep, new RegExp(`workspace "${w}"`));
+      assert.match(agent.name, /^Agent \(set up \d{4}-\d{2}-\d{2}\)$/);
+      assert.deepEqual(agent.permissions, ['read', 'send', 'manage']);
+      assert.equal(agent.baseUrl, PUBLIC_ORIGIN);
+      assert.deepEqual(agent.mcp, { url: `${PUBLIC_ORIGIN}/mcp`, config: { url: `${PUBLIC_ORIGIN}/mcp`, headers: { Authorization: 'Bearer ${NIGHTMAIL_API_KEY}' } } });
+      // The dashboard sees it connect, and lists the key where it is revoked.
+      const status = ok(await request('GET', `/v1/agent/setup-tokens/${minted.id}`, undefined, undefined, as(owner)));
+      assert.deepEqual([status.status, status.keyId, status.keyName], ['connected', agent.keyId, agent.name]);
+      assert.ok(status.connectedAt);
+      const listed = page(await request('GET', '/v1/api-keys?limit=100', MANAGER)).find(key => key.id === agent.keyId);
+      assert.deepEqual([listed?.name, listed?.permissions, listed?.domains, listed?.expiresAt, listed?.revokedAt], [agent.name, ['read', 'send', 'manage'], [], null, null]);
+      // The audit trail names the person who set the agent up, and how.
+      assert.equal(listed?.lastChange.action, 'api_key.create');
+      const { rows: [created] } = await db.query("SELECT actor_type, actor_id, user_id, via, summary FROM audit_events WHERE workspace_id=$1 AND action='api_key.create' AND target_id=$2", [w, agent.keyId]);
+      assert.deepEqual([created.actor_type, created.actor_id, created.user_id, created.via, created.summary.after.agentSetup, created.summary.after.flow], ['member', owner.userId, owner.userId, 'api', minted.id, 'prompt']);
+      assert.equal((await db.query("SELECT count(*)::int AS n FROM audit_events WHERE workspace_id=$1 AND action='agent_setup.create' AND target_id=$2 AND actor_id=$3", [w, minted.id, owner.userId])).rows[0].n, 1);
+
+      // What onboarding needs: it reads, sends and manages the workspace (an inbox here).
+      const me = ok(await request('GET', '/v1/me', agent.key));
+      assert.deepEqual([me.workspaceId, me.permissions], [w, ['read', 'send', 'manage']]);
+      const inbox = ok(await request('POST', '/v1/inboxes', agent.key, { type: 'sandbox' }), 201);
+      // No credential that would outlive it: an inbox connection's key, an inbox key made with the inbox, a mail client password.
+      for (const [path, body] of [['/v1/inbox-connections', { inboxes: [inbox.id], client: 'generic', auth: 'key' }], ['/v1/inboxes', { type: 'sandbox', credential: { name: 'kept', permissions: ['read'] } }],
+        [`/v1/inboxes/${inbox.id}/app-passwords`, { name: 'kept', protocols: ['imap'] }]] as const) {
+        const refused = error(await request('POST', path, agent.key, body), 403, 'PERMISSION_DENIED');
+        assert.equal(refused.required.person, 'admin', path);
+      }
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM mailbox_keys WHERE workspace_id=$1', [w])).rows[0].n, 0, 'No inbox key was made');
+      // No workspace administration: keys and agent tokens, billing, members.
+      for (const [method, path, body] of [['GET', '/v1/api-keys'], ['POST', '/v1/api-keys', { name: 'another' }], ['PATCH', `/v1/api-keys/${agent.keyId}`, { name: 'renamed' }],
+        ['POST', `/v1/api-keys/${agent.keyId}/revoke`], ['GET', `/v1/api-keys/${agent.keyId}/changes`], ['GET', '/v1/agent-tokens'], ['GET', '/v1/billing'], ['POST', '/v1/billing/top-up-links', { amountCents: 1000 }]] as const) {
+        const refused = error(await request(method, path, agent.key, body, method === 'PATCH' ? { 'idempotency-key': unique('agent-setup') } : {}), 403, 'PERMISSION_DENIED');
+        assert.equal(refused.required.person, 'admin', path);
+      }
+      error(await request('GET', '/v1/workspaces/current/members', agent.key), 403, 'DASHBOARD_AUTH_REQUIRED');
+      error(await request('POST', '/v1/agent/setup-tokens', agent.key), 403, 'DASHBOARD_AUTH_REQUIRED');
+      // Over MCP the same key is listed neither keys nor billing.
+      const tools = ok(await request('POST', '/mcp?codemode=false', agent.key, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, { accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-11-25' })).result.tools.map((tool: Json) => tool.name);
+      assert.ok(tools.includes('createInbox') && tools.includes('sendEmail'), tools.join());
+      for (const name of ['createApiKey', 'listApiKeys', 'revokeApiKey', 'getBilling', 'createBillingTopUpLink', 'createInboxConnection', 'createInboxAppPassword']) assert.ok(!tools.includes(name), name);
+
+      // The token works once.
+      error(await exchange(request, minted.token), 409, 'SETUP_TOKEN_USED');
+      // Revoking the key ends it, like any key.
+      ok(await request('POST', `/v1/api-keys/${agent.keyId}/revoke`, MANAGER));
+      error(await request('GET', '/v1/me', agent.key), 401, 'AUTH_INVALID');
+    });
+  });
+
+  test('a setup token that is wrong, expired, replaced by a newer copy, or whose person lost their role makes no key', async t => {
+    await hosted(t, async ({ db, request, w, owner, person, as }) => {
+      const keys = async () => (await db.query('SELECT count(*)::int AS n FROM api_keys WHERE workspace_id=$1 AND agent_setup_id IS NOT NULL', [w])).rows[0].n;
+      // Wrong: another verifier for a real token, a token for no row, and text that isn't one.
+      const real = await mint(request, as(owner));
+      const forged = real.token.slice(0, -1) + (real.token.endsWith('0') ? '1' : '0');
+      for (const token of [forged, `nm_setup_${'1'.repeat(32)}.${'2'.repeat(64)}`, 'nm_setup_x', real.token.split('.')[0]!]) assert.match(error(await exchange(request, token), 400, 'SETUP_TOKEN_INVALID').message, /Copy the prompt/);
+      error(await request('POST', '/v1/agent/setup', undefined, {}), 422, 'VALIDATION_FAILED');
+      // Copying again replaces the earlier unused token.
+      const newer = await mint(request, as(owner));
+      error(await exchange(request, real.token), 410, 'SETUP_TOKEN_REPLACED');
+      assert.equal(ok(await request('GET', `/v1/agent/setup-tokens/${real.id}`, undefined, undefined, as(owner))).status, 'replaced');
+      // Expired after fifteen minutes.
+      await db.query("UPDATE agent_setups SET expires_at=now()-interval '1 second' WHERE id=$1", [newer.id]);
+      error(await exchange(request, newer.token), 410, 'SETUP_TOKEN_EXPIRED');
+      assert.equal(ok(await request('GET', `/v1/agent/setup-tokens/${newer.id}`, undefined, undefined, as(owner))).status, 'expired');
+      // An admin who copied it and is a member by the time the agent exchanges it: no key.
+      const admin = await person('admin'), theirs = await mint(request, as(admin));
+      await db.query("UPDATE workspace_members SET role='member' WHERE user_id=$1 AND workspace_id=$2", [admin.userId, w]);
+      error(await exchange(request, theirs.token), 403, 'AGENT_SETUP_FORBIDDEN');
+      assert.equal(await keys(), 0);
+      // Another person's copy doesn't replace yours.
+      const mine = await mint(request, as(owner)), other = await person('admin');
+      await mint(request, as(other));
+      secrets.add(ok(await exchange(request, mine.token), 201).key);
+      assert.equal(await keys(), 1);
+    });
+  });
+
+  test('only an owner or admin in the dashboard mints a setup token; it and its status stay in its own workspace', async t => {
+    await hosted(t, async ({ request, w, owner, person, join, as, workspace }) => {
+      const member = await person('member');
+      assert.equal(error(await request('POST', '/v1/agent/setup-tokens', undefined, undefined, as(member)), 403, 'PERMISSION_DENIED').required.person, 'admin');
+      const key = ok(await request('POST', '/v1/api-keys', MANAGER, { name: unique('agent-setup'), permissions: ['read', 'send', 'manage'] }), 201).secret;
+      assert.equal(error(await request('POST', '/v1/agent/setup-tokens', key), 403, 'DASHBOARD_AUTH_REQUIRED').required.credential, 'dashboard');
+      error(await request('POST', '/v1/agent/setup-tokens'), 401, 'AUTH_REQUIRED');
+      // The member here owns another workspace: a token they mint there makes a key there, never here.
+      const theirs = await workspace();
+      await join(member, theirs, 'owner');
+      const minted = await mint(request, as(member, theirs));
+      const ours = await mint(request, as(owner));
+      error(await request('GET', `/v1/agent/setup-tokens/${minted.id}`, undefined, undefined, as(owner)), 404, 'NOT_FOUND');
+      error(await request('GET', `/v1/agent/setup-tokens/${ours.id}`, undefined, undefined, as(member, theirs)), 404, 'NOT_FOUND');
+      error(await request('GET', `/v1/agent/setup-tokens/${ours.id}`, undefined, undefined, as(member, w)), 403, 'PERMISSION_DENIED');
+      const agent = ok(await exchange(request, minted.token), 201);
+      secrets.add(agent.key);
+      assert.equal(agent.workspaceId, theirs);
+      assert.equal(ok(await request('GET', '/v1/me', agent.key)).workspaceId, theirs);
+      assert.ok(!page(await request('GET', '/v1/api-keys?limit=100', MANAGER)).some(listed => listed.id === agent.keyId));
+    });
+  });
+
+  test('device flow: an approved code gets one key on its next poll, as RFC 8628 says, in the workspace its approver chose', async t => {
+    await hosted(t, async ({ db, request, w, owner, person, join, as, workspace }) => {
+      const started = ok(await request('POST', '/v1/agent/device', undefined, { client_name: 'Open\u202eCode  agent' }));
+      secrets.add(started.device_code);
+      assert.match(started.device_code, /^nm_device_[0-9a-f]{32}\.[0-9a-f]{64}$/);
+      assert.match(started.user_code, /^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$/);
+      assert.deepEqual([started.verification_uri, started.verification_uri_complete, started.expires_in, started.interval],
+        [`${PUBLIC_ORIGIN}/connect`, `${PUBLIC_ORIGIN}/connect?code=${started.user_code}`, 900, 5]);
+      const poll = (code = started.device_code) => request('POST', '/v1/agent/device/token', undefined, { device_code: code, grant_type: 'urn:ietf:params:oauth:grant-type:device_code' });
+      const waited = () => db.query("UPDATE agent_setups SET last_polled_at=now()-interval '1 minute' WHERE kind='device' AND user_code=$1", [started.user_code.replace('-', '')]);
+      // Pending, then polled too soon: five seconds more from now on.
+      const pending = await poll();
+      assert.equal(error(pending, 400, 'AUTHORIZATION_PENDING').retryable, true);
+      assert.equal(pending.headers.get('retry-after'), '5');
+      const slow = await poll();
+      error(slow, 400, 'SLOW_DOWN');
+      assert.equal(slow.headers.get('retry-after'), '10');
+      await waited();
+      assert.equal((await poll()).headers.get('retry-after'), '10');
+      // The person sees the agent's claim, typed any way.
+      const looked = ok(await request('POST', '/v1/agent/device/lookup', undefined, { userCode: ` ${started.user_code.replace('-', '').toLowerCase()} ` }, as(owner)));
+      assert.deepEqual([looked.userCode, looked.clientName, looked.status, looked.permissions], [started.user_code, 'OpenCode agent', 'pending', ['read', 'send', 'manage']]);
+      // A member can't approve it, in a workspace where they're a member; their own workspace is theirs to choose.
+      const member = await person('member'), theirs = await workspace();
+      assert.equal(error(await request('POST', '/v1/agent/device/approve', undefined, { userCode: started.user_code }, as(member)), 403, 'PERMISSION_DENIED').required.person, 'admin');
+      await join(member, theirs, 'admin');
+      error(await request('POST', '/v1/agent/device/approve', undefined, { userCode: started.user_code }, as(member, 'not-a-workspace')), 403, 'WORKSPACE_ACCESS_DENIED');
+      assert.deepEqual(ok(await request('POST', '/v1/agent/device/approve', undefined, { userCode: started.user_code }, as(member, theirs))), { userCode: started.user_code, status: 'approved', workspaceId: theirs });
+      error(await request('POST', '/v1/agent/device/approve', undefined, { userCode: started.user_code }, as(owner)), 409, 'DEVICE_CODE_DECIDED');
+      error(await request('POST', '/v1/agent/device/deny', undefined, { userCode: started.user_code }, as(owner)), 409, 'DEVICE_CODE_DECIDED');
+      error(await poll(), 400, 'SLOW_DOWN');
+      await waited();
+      const agent = ok(await poll(), 201);
+      secrets.add(agent.key);
+      assert.deepEqual([agent.workspaceId, agent.workspaceName, agent.permissions], [theirs, theirs, ['read', 'send', 'manage']]);
+      assert.equal(ok(await request('GET', '/v1/me', agent.key)).workspaceId, theirs);
+      error(await request('GET', '/v1/api-keys', agent.key), 403, 'PERMISSION_DENIED');
+      // Once.
+      await waited();
+      error(await poll(), 409, 'DEVICE_CODE_USED');
+      assert.equal(ok(await request('POST', '/v1/agent/device/lookup', undefined, { userCode: started.user_code }, as(owner))).status, 'used');
+      // Approved and made by the member who approved it, in their workspace.
+      const { rows: trail } = await db.query("SELECT action, actor_id, workspace_id, summary FROM audit_events WHERE (target_id=$1 OR target_id=(SELECT id FROM agent_setups WHERE key_id=$1)) ORDER BY at, action", [agent.keyId]);
+      assert.deepEqual(trail.map(row => [row.action, row.actor_id, row.workspace_id]).sort(), [['agent_setup.approve', member.userId, theirs], ['api_key.create', member.userId, theirs]]);
+      assert.equal(trail.find(row => row.action === 'api_key.create').summary.after.client, 'OpenCode agent');
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM api_keys WHERE workspace_id=$1 AND agent_setup_id IS NOT NULL', [w])).rows[0].n, 0);
+      // An approver who lost their role by the agent's poll: no key.
+      const again = ok(await request('POST', '/v1/agent/device', undefined, {}));
+      ok(await request('POST', '/v1/agent/device/approve', undefined, { userCode: again.user_code }, as(member, theirs)));
+      await db.query("UPDATE workspace_members SET role='member' WHERE user_id=$1 AND workspace_id=$2", [member.userId, theirs]);
+      error(await poll(again.device_code), 403, 'AGENT_SETUP_FORBIDDEN');
+    });
+  });
+
+  test('device flow: denied, expired and wrong codes get their RFC 8628 answers, and user codes and public requests are rate limited', async t => {
+    await hosted(t, async ({ db, request, owner, person, as }) => {
+      const start = async () => ok(await request('POST', '/v1/agent/device'));
+      const poll = (code: string) => request('POST', '/v1/agent/device/token', undefined, { device_code: code });
+      // Denied, by any signed-in person: the agent stops.
+      const denied = await start(), member = await person('member');
+      assert.deepEqual(ok(await request('POST', '/v1/agent/device/deny', undefined, { userCode: denied.user_code }, as(member))), { userCode: denied.user_code, status: 'denied' });
+      error(await poll(denied.device_code), 400, 'ACCESS_DENIED');
+      error(await request('POST', '/v1/agent/device/approve', undefined, { userCode: denied.user_code }, as(owner)), 409, 'DEVICE_CODE_DECIDED');
+      // Expired: the agent starts again, and the page says so.
+      const expired = await start();
+      await db.query("UPDATE agent_setups SET expires_at=now()-interval '1 second' WHERE kind='device' AND user_code=$1", [expired.user_code.replace('-', '')]);
+      error(await poll(expired.device_code), 400, 'EXPIRED_TOKEN');
+      assert.equal(ok(await request('POST', '/v1/agent/device/lookup', undefined, { userCode: expired.user_code }, as(owner))).status, 'expired');
+      error(await request('POST', '/v1/agent/device/approve', undefined, { userCode: expired.user_code }, as(owner)), 410, 'DEVICE_CODE_EXPIRED');
+      // Wrong device codes, and a setup token where a device code goes.
+      const live = await start();
+      for (const code of [live.device_code.slice(0, -1) + (live.device_code.endsWith('0') ? '1' : '0'), `nm_device_${'3'.repeat(32)}.${'4'.repeat(64)}`, 'device', live.device_code.replace('nm_device_', 'nm_setup_')])
+        error(await poll(code), 400, 'DEVICE_CODE_INVALID');
+      error(await request('POST', '/v1/agent/device/token', undefined, { device_code: live.device_code, grant_type: 'authorization_code' }), 422, 'VALIDATION_FAILED');
+      // Dashboard steps are a person's.
+      const key = ok(await request('POST', '/v1/api-keys', MANAGER, { name: unique('agent-setup'), permissions: ['read', 'send', 'manage'] }), 201).secret;
+      for (const path of ['lookup', 'approve', 'deny']) error(await request('POST', `/v1/agent/device/${path}`, key, { userCode: live.user_code }), 403, 'DASHBOARD_AUTH_REQUIRED');
+      // Guessing: ten tries a minute per person, the right code included; then 429 until the minute passes.
+      const guesser = await person('owner');
+      for (let i = 0; i < 9; i++) error(await request('POST', '/v1/agent/device/lookup', undefined, { userCode: 'BBBB-BBB' + 'CDFGHJKLM'[i] }, as(guesser)), 404, 'NOT_FOUND');
+      error(await request('POST', '/v1/agent/device/lookup', undefined, { userCode: 'not a code' }, as(guesser)), 422, 'VALIDATION_FAILED');
+      for (const path of ['lookup', 'approve', 'deny']) error(await request('POST', `/v1/agent/device/${path}`, undefined, { userCode: live.user_code }, as(guesser)), 429, 'AGENT_SETUP_RATE_LIMITED');
+      // Another person is not charged for it.
+      assert.equal(ok(await request('POST', '/v1/agent/device/lookup', undefined, { userCode: live.user_code }, as(owner))).status, 'pending');
+      // Public requests are charged per client network: thirty exchanges and device codes a minute, 120 polls.
+      await db.query("DELETE FROM api_request_budgets WHERE workspace_id='agent-setup'");
+      for (let i = 0; i < 30; i++) error(await exchange(request, `nm_setup_${'5'.repeat(32)}.${'6'.repeat(64)}`), 400, 'SETUP_TOKEN_INVALID');
+      const limited = await exchange(request, `nm_setup_${'5'.repeat(32)}.${'6'.repeat(64)}`);
+      error(limited, 429, 'AGENT_SETUP_RATE_LIMITED');
+      assert.equal(limited.headers.get('retry-after'), '60');
+      for (let i = 0; i < 30; i++) ok(await request('POST', '/v1/agent/device', undefined, {}));
+      error(await request('POST', '/v1/agent/device', undefined, {}), 429, 'AGENT_SETUP_RATE_LIMITED');
+      // Every network together: 600 device codes a minute, however many networks they come from.
+      await db.query("DELETE FROM api_request_budgets WHERE workspace_id='agent-setup'");
+      await db.query("INSERT INTO api_request_budgets(workspace_id,key_id,window_start,used) VALUES('agent-setup','device:all',date_trunc('minute',now()),600)");
+      assert.match(error(await request('POST', '/v1/agent/device', undefined, {}), 429, 'AGENT_SETUP_RATE_LIMITED').message, /Too many agents/);
+    });
+  });
 });
 
 describe('Hosted MCP OAuth and tools', () => {
@@ -21206,6 +21511,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
         case 'UpdateReputationEntityPolicyCommand':assert.equal(i.ReputationEntityPolicy,`arn:aws:ses:${r}:aws:reputation-policy/strict`);return {};
         case 'CreateTenantResourceAssociationCommand':assert.ok(tenants.has(i.TenantName));assert.ok(i.ResourceArn.startsWith(`arn:aws:ses:${r}:${dest}:`));assert.ok(!associations.has(i.TenantName+':'+i.ResourceArn));associations.add(i.TenantName+':'+i.ResourceArn);return {};
         case 'GetEmailIdentityCommand':if(!identities.has(i.EmailIdentity))throw Object.assign(Error('fresh account'),{name:'NotFoundException'});return identities.get(i.EmailIdentity);
+        case 'PutEmailIdentityFeedbackAttributesCommand':assert.ok(identities.has(i.EmailIdentity));assert.equal(i.EmailForwardingEnabled,false);return {};
         case 'CreateEmailIdentityCommand':{const n=names.indexOf(i.EmailIdentity);assert.ok(n>=0);assert.ok(!identities.has(i.EmailIdentity));assert.deepEqual(tags(i.Tags),{...owned,'bane:purpose':'domain-identity','bane:domain-claim':tokens[n]});
           const dkim={Tokens:['new-a','new-b','new-c'],SigningEnabled:true,SigningHostedZone:'dkim.amazonses.com',SigningAttributesOrigin:'AWS_SES'};identities.set(i.EmailIdentity,{Tags:i.Tags,VerificationStatus:'SUCCESS',VerifiedForSendingStatus:true,DkimAttributes:{...dkim,Status:'SUCCESS'}});return {DkimAttributes:{...dkim,Status:'PENDING'}};}
         default:return setup(name,i,r,dest);
@@ -21287,6 +21593,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     const {SESv2Client}=await import('@aws-sdk/client-sesv2'),{operationJobs}=await import('./src/operations.js'),{JobDeferred}=await import('./src/jobs.js');
     let tags:Json[]=[];const dkim={Status:'SUCCESS',SigningEnabled:true,SigningHostedZone:'dkim.amazonses.com',Tokens:['cold-a','cold-b','cold-c']};
     cold.mock.method(SESv2Client.prototype,'send',async function(this:InstanceType<typeof SESv2Client>,cmd:any){assert.equal(cmd.input.EmailIdentity,host);assert.equal((await this.config.credentials()).accessKeyId,'fixture-rehome');
+      if(cmd.constructor.name==='PutEmailIdentityFeedbackAttributesCommand'){assert.equal(cmd.input.EmailForwardingEnabled,false);return {};}
       if(cmd.constructor.name==='CreateEmailIdentityCommand'){tags=cmd.input.Tags;return {DkimAttributes:dkim};}assert.equal(cmd.constructor.name,'GetEmailIdentityCommand');return {VerificationStatus:'SUCCESS',VerifiedForSendingStatus:true,DkimAttributes:dkim,Tags:tags};});
     cold.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{const u=new URL(String(input));assert.equal(u.hostname,'cloudflare-dns.com');const name=u.searchParams.get('name');return Response.json({Status:0,Answer:name==='_bane.'+host?[{name,type:16,data:JSON.stringify(tags.find(t=>t.Key==='bane:domain-claim')!.Value)}]:[]});});
     ok(await api('POST','/v1/connection',{kind:'shared'}),201);assert.equal((await db.query('SELECT aws_account_id FROM provider_connections WHERE workspace_id=$1',[personal])).rows[0].aws_account_id,null);
@@ -22041,7 +22348,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const wire:string[]=[],ips:string[]=[],aws:string[]=[]; let mode:'live'|'private'|'redirect'|'timeout'|'listed'='live';
       let spfRecord='v=spf1 include:_spf.example.net ~all';
       t.mock.method(SESv2Client.prototype,'send',async(cmd:any)=>{
-        aws.push(cmd.constructor.name);assert.ok(['GetEmailIdentityCommand','CreateEmailIdentityCommand'].includes(cmd.constructor.name));
+        aws.push(cmd.constructor.name);assert.ok(['GetEmailIdentityCommand','CreateEmailIdentityCommand','PutEmailIdentityFeedbackAttributesCommand'].includes(cmd.constructor.name));
         return {DkimAttributes:{Tokens:['aaa','bbb','ccc'],SigningHostedZone:'dkim.fixture',Status:'PENDING'}};
       });
       t.mock.method(tls,'connect',(opts:{host:string;servername:string;rejectUnauthorized:boolean},ready:()=>void)=>{
@@ -22136,7 +22443,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(wire.length,probeCount);assert.deepEqual(dbCounts[0],dbCounts[1],'No added database round trip.');
       const p95=samples.map(times=>times.sort((a,b)=>a-b)[18]!);t.diagnostic(`Synthetic fresh POST p95 (20 each, alternating): off ${p95[0].toFixed(1)} ms / on ${p95[1].toFixed(1)} ms; ${dbCounts[1][0]} DB calls.`);
       assert.ok(p95[1]<250);queries.mock.restore();
-      assert.ok(aws.every(c=>['GetEmailIdentityCommand','CreateEmailIdentityCommand'].includes(c)));
+      assert.ok(aws.every(c=>['GetEmailIdentityCommand','CreateEmailIdentityCommand','PutEmailIdentityFeedbackAttributesCommand'].includes(c)));
       } finally { globalThis.fetch=forbiddenFetch; }
     });
   });
@@ -22200,6 +22507,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         case 'CreateTenantResourceAssociationCommand':assert.equal(i.TenantName,tenant);if(i.ResourceArn.includes(':configuration-set/'))assert.ok(sets.has(i.ResourceArn.split('/')[1]));else if (failAssociation && members.size===3){failAssociation=false;throw new Error('interrupted');}assert.ok(!members.has(i.ResourceArn));members.add(i.ResourceArn);return {};
         case 'ListResourceTenantsCommand':return {ResourceTenants:members.has(i.ResourceArn)?[{TenantName:tenant,TenantId:'tenant-fixture',ResourceArn:i.ResourceArn}]:[]};
         case 'GetEmailIdentityCommand':if(i.EmailIdentity===managed && !managedTags.length)throw missing();return {...identity(i.EmailIdentity),Tags:i.EmailIdentity===managed?managedTags:[],ConfigurationSetName:drift?'changed':undefined};
+        case 'PutEmailIdentityFeedbackAttributesCommand':assert.deepEqual(i,{EmailIdentity:managed,EmailForwardingEnabled:false});return {};
         case 'CreateEmailIdentityCommand':assert.equal(i.EmailIdentity,managed);checkTags(i.Tags.filter((t:Json)=>t.Key!=='bane:domain-claim'),'domain-identity');managedTags=i.Tags;return {Tags:i.Tags};
         case 'DeleteTenantResourceAssociationCommand':assert.equal(i.ResourceArn,`arn:aws:ses:${va}:${acct}:identity/${managed}`);assert.ok(members.delete(i.ResourceArn));return {};
         case 'DeleteEmailIdentityCommand':assert.equal(i.EmailIdentity,managed);managedTags=[];return {};
@@ -22324,6 +22632,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           if(hook){afterRuntimeRead=undefined;await hook();}
           return value;
         }
+        case 'PutEmailIdentityFeedbackAttributesCommand':assert.ok(children.has(i.EmailIdentity));assert.equal(i.EmailForwardingEnabled,false);return {};
         case 'CreateEmailIdentityCommand':assert.notEqual(i.EmailIdentity,host);children.set(i.EmailIdentity,{...identity,VerificationStatus:'PENDING',VerifiedForSendingStatus:false,Tags:i.Tags});return {DkimAttributes:identity.DkimAttributes,Tags:i.Tags};
         case 'ListResourceTenantsCommand':return {ResourceTenants:members.has(i.ResourceArn)?[{TenantName:members.get(i.ResourceArn),TenantId:'tenant-fixture',ResourceArn:i.ResourceArn}]:[]};
         case 'CreateTenantResourceAssociationCommand':assert.ok(!members.has(i.ResourceArn));members.set(i.ResourceArn,i.TenantName);return {};
@@ -22386,7 +22695,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     assert.equal(ok(await api(owner,'POST','/v1/domains',{name:host}),201).id,adopted.domainId,'Adding the adopted root again is idempotent.');
     // After adoption an ordinary subdomain is a normal claim with its own tagged identity.
     const sub=ok(await api(owner,'POST','/v1/domains',{name:`notify.${host}`}),201);ok(await api(owner,'DELETE',`/v1/domains/${sub.id}`));
-    assert.deepEqual(writes.slice(1),[`CreateEmailIdentityCommand:notify.${host}`,`DeleteEmailIdentityCommand:notify.${host}`]);
+    assert.deepEqual(writes.slice(1),[`CreateEmailIdentityCommand:notify.${host}`,`PutEmailIdentityFeedbackAttributesCommand:notify.${host}`,`DeleteEmailIdentityCommand:notify.${host}`]);
 
     // Sending: the configured workspace sends as the root and ordinary subdomains, never from a platform host.
     await send(owner,`security@${host}`);await send(owner,`noreply@notify.${host}`);
@@ -22474,7 +22783,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     // Deleting the claim leaves the identity and its tenant association alone; the runtime key couldn't change them anyway.
     ok(await api(owner,'DELETE',`/v1/domains/${adopted.domainId}`));assert.equal(writes.length,settled);assert.equal((await db.query('SELECT FROM domain_claims WHERE name=$1',[host])).rowCount,0);
     const statements=Object.values(render('--fresh',{account:acct,origin:publicUrl}) as Record<string,{Statement:IamStatement[]}>).flatMap(d=>d.Statement);
-    for (const action of ['ses:DeleteEmailIdentity','ses:PutEmailIdentityMailFromAttributes','ses:PutEmailIdentityDkimSigningAttributes','ses:PutEmailIdentityDkimAttributes','ses:CreateTenantResourceAssociation','ses:DeleteTenantResourceAssociation'])
+    for (const action of ['ses:DeleteEmailIdentity','ses:PutEmailIdentityMailFromAttributes','ses:PutEmailIdentityFeedbackAttributes','ses:PutEmailIdentityDkimSigningAttributes','ses:PutEmailIdentityDkimAttributes','ses:CreateTenantResourceAssociation','ses:DeleteTenantResourceAssociation'])
       assert.equal(iamAllows(statements,action,arn,{'aws:RequestedRegion':oh}),false,`${action} on the untagged platform identity`);
     assert.equal(iamAllows(statements,'ses:GetEmailIdentity',arn,{'aws:RequestedRegion':oh}),true);
     // Revoke: the operator undo releases the claim and leaves the workspace's tenant, even once the configuration has moved on.
@@ -22790,7 +23099,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         case 'DeleteConfigurationSetCommand':{const s=JSON.parse((await this.config.credentials()).sessionToken!).Statement;assert.ok(s[0].Action.includes('ses:DeleteConfigurationSet'));assert.ok(s[0].Resource.includes(`arn:aws:ses:${region}:${account}:configuration-set/${i.ConfigurationSetName}`));assert.ok(sets.delete(key));if(loseSetDelete){loseSetDelete=false;throw Object.assign(Error('lost delete acknowledgement'),{name:'TimeoutError'});}return {};}
         case 'ListEmailIdentitiesCommand':if(region===west)return {EmailIdentities:[]};if(region===ie&&i.NextToken)throw denied();return i.NextToken?{EmailIdentities:[{IdentityType:'DOMAIN',IdentityName:region+'.example'},{IdentityType:'DOMAIN',IdentityName:'reselect.example'}]}:{NextToken:'domains2',EmailIdentities:[{IdentityType:'DOMAIN',IdentityName:'both.example'},{IdentityType:'EMAIL_ADDRESS',IdentityName:'x@both.example'}]};
         case 'GetEmailIdentityCommand':{assert.ok(!i.EmailIdentity.includes('@'));if(i.EmailIdentity==='new.example'){if(!createdIdentity)throw missing();return createdIdentity;}const invalid=revoked===true || revoked===i.EmailIdentity;return {VerificationStatus:invalid?'FAILED':'SUCCESS',VerifiedForSendingStatus:!invalid,DkimAttributes:{Status:'SUCCESS',SigningEnabled:true},ConfigurationSetName:'existing'};}
-        case 'CreateEmailIdentityCommand':assert.equal(i.EmailIdentity,'new.example');assert.match(i.Tags.find((t:Json)=>t.Key==='bane:domain-claim').Value,/^[a-f0-9-]{36}$/);assert.deepEqual(i.Tags.slice(1),[{Key:'bane:owner',Value:'bane'},{Key:'bane:installation-id',Value:v5.id},{Key:'bane:purpose',Value:'domain-identity'}]);createdIdentity={Tags:i.Tags,DkimAttributes:{Status:'PENDING',Tokens:['a','b','c']}};return createdIdentity;
+        case 'PutEmailIdentityFeedbackAttributesCommand':assert.deepEqual(i,{EmailIdentity:'new.example',EmailForwardingEnabled:false});throw denied(); // The shipped 6.0 role does not grant the optional write.
+        case 'CreateEmailIdentityCommand':assert.equal(i.EmailIdentity,'new.example');assert.match(i.Tags.find((t:Json)=>t.Key==='bane:domain-claim').Value,/^[a-f0-9-]{36}$/);assert.deepEqual(i.Tags.slice(1),[{Key:'bane:owner',Value:'bane'},{Key:'bane:installation-id',Value:v5.id},{Key:'bane:purpose',Value:'domain-identity'}]);createdIdentity={Tags:i.Tags,FeedbackForwardingStatus:true,DkimAttributes:{Status:'PENDING',Tokens:['a','b','c']}};return createdIdentity;
         case 'PutEmailIdentityMailFromAttributesCommand':{assert.equal(i.EmailIdentity,'new.example');assert.ok(createdIdentity);const [s]=JSON.parse((await this.config.credentials()).sessionToken!).Statement;
           assert.deepEqual(s.Action,['ses:GetEmailIdentity','ses:PutEmailIdentityMailFromAttributes']);assert.equal(s.Resource,`arn:aws:ses:${region}:${account}:identity/new.example`);mailFromWrites.push(i);
           if(i.MailFromDomain)createdIdentity.MailFromAttributes={MailFromDomain:i.MailFromDomain,MailFromDomainStatus:'PENDING',BehaviorOnMxFailure:i.BehaviorOnMxFailure};else delete createdIdentity.MailFromAttributes;return {};}
@@ -22942,6 +23252,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     assert.equal((await db.query('SELECT region FROM domain_sending_bindings WHERE workspace_id=$1 AND name=$2',[wid,'new.example'])).rows[0].region,oh);
     const verify=(await db.query("SELECT j.* FROM jobs j JOIN operation_domains d ON d.id=j.payload->>'domainId' WHERE d.workspace_id=$1 AND d.name='new.example' AND j.type='domain.verify'",[wid])).rows[0];
     await assert.rejects((await import('./src/operations.js')).operationJobs['domain.verify']!(runtime,verify.payload,{workspaceId:wid,id:verify.id,attempts:1}),JobDeferred);
+    assert.equal(trace.filter(t=>t.op==='PutEmailIdentityFeedbackAttributesCommand').length,1);assert.equal(createdIdentity?.FeedbackForwardingStatus,true,'An unchanged BYO role refuses the optional write without blocking the domain');
     assert.equal(trace.filter(t=>t.op==='CreateEmailIdentityCommand').length,1);assert.ok(policies.at(-1)!.includes(`arn:aws:ses:${oh}:${account}:identity/new.example`));
     await t.test('terminal bind failures release both domain caps and allow regional reselection',async()=>{
       ok(await select(oh+':reselect.example'),202);revoked=true;
@@ -25555,6 +25866,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         nightmail_signin_attempts: ["INSERT INTO nightmail_signin_attempts(issuer,subject,outcome,last_at) SELECT 'https://issuer.invalid','sub_'||p.tag||p.day||'x'||i,'refused',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM nightmail_signin_attempts,p WHERE starts_with(subject,'sub_'||p.tag)"],
         nightmail_waitlist: ["INSERT INTO nightmail_waitlist(email,last_at) SELECT p.tag||p.day||'x'||i||'@example.invalid',now()-interval '366 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM nightmail_waitlist,p WHERE starts_with(email,p.tag)"],
         nightmail_signin_links: ["INSERT INTO nightmail_signin_links(id,email,created_at,expires_at) SELECT 'lnk_'||p.tag||p.day||'x'||i,p.tag||p.day||'x'||i||'@example.invalid',now()-interval '25 hours'-make_interval(days=>p.day),now()-interval '24 hours'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM nightmail_signin_links,p WHERE starts_with(id,'lnk_'||p.tag)"],
+        agent_setups: ["INSERT INTO agent_setups(id,kind,secret_hash,workspace_id,user_id,client_name,expires_at) SELECT 'ags_'||md5(p.tag||p.day||'x'||i),'prompt',repeat('0',64),p.wid,p.uid,p.tag,now()-interval '25 hours'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM agent_setups,p WHERE client_name=p.tag"],
         auth_state_slots: ["INSERT INTO auth_state_slots(peer,slot,expires_at) SELECT 'peer_'||p.tag||p.day,i,now()-interval '0 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM auth_state_slots,p WHERE starts_with(peer,'peer_'||p.tag)"],
         nightmail_dpop_proofs: ["INSERT INTO nightmail_dpop_proofs(id,expires_at) SELECT 'dpop_'||p.tag||p.day||'x'||i,now()-interval '0 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM nightmail_dpop_proofs,p WHERE starts_with(id,'dpop_'||p.tag)"],
         nightmail_sessions: ["INSERT INTO nightmail_sessions(token_hash,user_id,issuer,subject,expires_at) SELECT 'tok_'||p.tag||p.day||'x'||i,p.uid,p.iss,p.sub,now()-interval '0 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM nightmail_sessions,p WHERE starts_with(token_hash,'tok_'||p.tag)"],
@@ -35101,7 +35413,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const role=byoRoleStatements(await byoTemplate(file,params,[region]));
       for(const purpose of purposes)for(const s of byoSessionStatements(purpose,{region,account,connectionId:connection,domain:'example.com',template:'bane-pilot',stack:params['AWS::StackName'],templateUrl,changeSet:'nightmail-update-6-0-x'}))
         for(const action of s.Action)for(const resource of [s.Resource].flat().map(sample)){
-          checked++;assert.ok(iamAllows(role,action,resource,context(action,resource)),`${file}: the ${purpose} session's ${action} on ${resource} isn't allowed by the role`);
+          // The current customer role does not grant this optional setting. Domain creation fails soft on its refusal.
+          const expected=!(file==='byo-templates/6.0.yaml' && purpose==='verify' && action==='ses:PutEmailIdentityFeedbackAttributes');
+          checked++;assert.equal(iamAllows(role,action,resource,context(action,resource)),expected,`${file}: ${purpose} session's ${action} on ${resource}`);
         }
     }
     assert.ok(checked>=50*templates.length,'Every purpose contributes its calls.');
