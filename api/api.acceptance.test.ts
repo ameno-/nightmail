@@ -10414,7 +10414,11 @@ describe('Lists, compound segments, imports and exports', () => {
   const recount = async (db: pg.Client, list: Json) => (await db.query('SELECT * FROM reconcile_audience_list_counts($1,$2)', [list.workspaceId, list.id])).rows;
   const importInto = async (key: Key, listId: string, emails: string[], body?: Json) => {
     const preview = ok(await http('POST', '/v1/contact-imports', key.secret, { csv: `email\n${emails.join('\n')}\n`, listId, mapping: { email: 'email' } }), 201);
-    return http('POST', `/v1/contact-imports/${preview.id}/commit`, key.secret, body);
+    for (let attempt = 0; ; attempt++) {
+      const reply = await http('POST', `/v1/contact-imports/${preview.id}/commit`, key.secret, body);
+      if (reply.status !== 503 || reply.body?.error?.code !== 'IMPORT_COMMIT_BUSY' || attempt >= 20) return reply;
+      await new Promise(resolve => setTimeout(resolve, 40 * (attempt + 1)));
+    }
   };
   const attested = { consent: { status: 'subscribed', evidence: 'Opted in at checkout' } };
   // A list's members, each deleted with the test (an import's contacts have no other owner).
@@ -10630,8 +10634,11 @@ describe('Lists, compound segments, imports and exports', () => {
     // contacts whose email order is the reverse of their ID order: feedback holds the first by email, the bulk change
     // must wait for that one before it locks the other, or each would hold what the other needs.
     const pair = async () => {
+      // Contact IDs are time-ordered (UUIDv7) since #600, so create z- before a- to make y.id < x.id.
       for (;;) {
-        const tag = unique('order'), [x, y] = [await resource(t, key.secret, '/v1/contacts', { email: `a-${tag}@example.com` }), await resource(t, key.secret, '/v1/contacts', { email: `z-${tag}@example.com` })];
+        const tag = unique('order');
+        const y = await resource(t, key.secret, '/v1/contacts', { email: `z-${tag}@example.com` });
+        const x = await resource(t, key.secret, '/v1/contacts', { email: `a-${tag}@example.com` });
         if (y.id < x.id) return { tag, byEmail: [x, y] as [Json, Json] };
       }
     };
@@ -11300,6 +11307,120 @@ describe('Import property boundaries', () => {
     }), 201);
     assert.equal(ok(await http('POST', `/v1/contact-imports/${replacement.id}/commit`, key.secret)).imported, 1);
     assert.deepEqual(ok(await http('GET', `/v1/contacts/${contact.id}`, key.secret)).properties, { ...properties, plan: 'enterprise' }, 'Replacing a property at the 50-property boundary remains supported.');
+  });
+
+  test('imports use time-ordered IDs, serialize commits per workspace, cap open previews, fold publishBatch jobs, and roll back cleanly on timeout', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const wid = runtime.config.workspaceId;
+      const list = ok(await local('POST', '/v1/lists', { name: 'Import Scale List' }), 201);
+
+      // 1. Time-ordered UUIDv7 IDs for contacts and consent records (same prefix, length and hex charset).
+      const uuidv7 = /^(?:con|cns)_[0-9a-f]{12}7[0-9a-f]{19}$/;
+      const manual = ok(await local('POST', '/v1/contacts', { email: 'manual@example.com', name: 'Manual' }), 201);
+      assert.match(manual.id, uuidv7);
+      ok(await local('POST', `/v1/contacts/${manual.id}/consent`, { status: 'subscribed', evidence: 'Direct' }));
+      const [manualAudit] = page(await local('GET', `/v1/contacts/${manual.id}/consent`));
+      assert.match(manualAudit.id, uuidv7);
+
+      // 2. 250-row attested import preview + one-commit-at-a-time per workspace check (must run before any commit in
+      // this fixture's outer transaction acquires advisory lock 275817).
+      const existingUnk = ok(await local('POST', '/v1/contacts', { email: 'existing-unk@example.com' }), 201);
+      const lines = ['Email,Name,Plan', 'existing-unk@example.com,Existing Unk,pro'];
+      for (let i = 0; i < 249; i++) lines.push(`batch${i}@example.com,Person ${i},free`);
+      const batchPreview = ok(await local('POST', '/v1/contact-imports', { csv: lines.join('\n'), listId: list.id, mapping: { email: 'Email', name: 'Name', plan: 'Plan' } }), 201);
+      assert.equal(batchPreview.rows.length, 250);
+
+      const blocker = new pg.Client({ connectionString: FIXTURE_DATABASE_URL! });
+      await blocker.connect();
+      try {
+        await blocker.query('BEGIN');
+        const locked = (await blocker.query('SELECT pg_try_advisory_xact_lock(275817, hashtext($1)) AS ok', [wid])).rows[0]?.ok;
+        assert.equal(locked, true);
+        const busy = error(await local('POST', `/v1/contact-imports/${batchPreview.id}/commit`, { consent: { status: 'subscribed', evidence: 'Opted in' } }), 503, 'IMPORT_COMMIT_BUSY');
+        assert.equal(busy.retryable, true);
+      } finally {
+        await blocker.query('ROLLBACK').catch(() => {});
+        await blocker.end();
+      }
+
+      // 3. 100%-errors CSV previews and commits cleanly with 0 imported and retained error report.
+      const allBad = ok(await local('POST', '/v1/contact-imports', { csv: 'Email,Name\nnot-an-email,A\nalso-bad,B\n', listId: list.id, mapping: { email: 'Email', name: 'Name' } }), 201);
+      assert.equal(allBad.rows.length, 0);
+      assert.equal(allBad.errors.length, 2);
+      const allBadCommit = ok(await local('POST', `/v1/contact-imports/${allBad.id}/commit`, { consent: { status: 'subscribed', evidence: 'None valid' } }));
+      assert.equal(allBadCommit.imported, 0);
+      assert.equal(allBadCommit.subscribed, 0);
+      assert.equal(allBadCommit.errors.length, 2);
+
+      // 5. Statement timeout (SQLSTATE 57014) rolls back the entire commit (nothing half-applied) and returns retryable 503 IMPORT_COMMIT_TIMEOUT.
+      const origQuery = db.query.bind(db);
+      let injectTimeout = true;
+      const stub = t.mock.method(db, 'query', async (...args: unknown[]) => {
+        const first = args[0] as string | { text?: string };
+        const text = typeof first === 'string' ? first : first?.text ?? '';
+        if (injectTimeout && text.includes('INSERT INTO audience_contacts')) {
+          injectTimeout = false;
+          throw Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' });
+        }
+        return (origQuery as (...a: unknown[]) => Promise<unknown>)(...args);
+      });
+      try {
+        const timedOut = error(await local('POST', `/v1/contact-imports/${batchPreview.id}/commit`, { consent: { status: 'subscribed', evidence: 'Opted in' } }), 503, 'IMPORT_COMMIT_TIMEOUT');
+        assert.equal(timedOut.retryable, true);
+      } finally { stub.mock.restore(); }
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM audience_contacts WHERE workspace_id = $1 AND email LIKE 'batch%@example.com'`, [wid])).rows[0].n, 0, 'Timed-out commit must leave zero contacts.');
+      assert.equal(ok(await local('GET', `/v1/contact-imports/${batchPreview.id}`)).status, 'preview');
+
+      // Retry succeeds atomically: 250 imported, 250 subscribed (249 new + 1 existing unknown), 3 folded publishBatch jobs.
+      const batchCommitted = ok(await local('POST', `/v1/contact-imports/${batchPreview.id}/commit`, { consent: { status: 'subscribed', evidence: 'Opted in' } }));
+      assert.equal(batchCommitted.imported, 250);
+      assert.equal(batchCommitted.subscribed, 250);
+      const importedIds = (await db.query(`SELECT id FROM audience_contacts WHERE workspace_id = $1 AND email LIKE 'batch%@example.com' UNION ALL SELECT id FROM audience_consent_audit WHERE workspace_id = $1 AND source = 'import'`, [wid])).rows;
+      assert.equal(importedIds.length, 499);
+      for (const row of importedIds) assert.match(row.id, uuidv7);
+      assert.equal(ok(await local('GET', `/v1/contacts/${existingUnk.id}`)).marketingConsent, 'subscribed');
+      const batchJobs = (await db.query(`SELECT jsonb_array_length(payload->'events')::int AS n FROM jobs WHERE workspace_id = $1 AND type = 'operation.publishBatch' ORDER BY n DESC`, [wid])).rows.map((r: Json) => r.n);
+      // 249 new rows fold into 100 + 100 + 49, plus 1 existing unknown row -> 100, 100, 49, 1 = 250 events total.
+      assert.deepEqual(batchJobs, [100, 100, 49, 1]);
+
+      // 6. Isolate memory reservation is released as soon as DB work ends (never held while response stream is unread).
+      const { memoryInUse } = await import('./src/isolate-memory.js');
+      assert.equal(memoryInUse(), 0, 'Preview and commit must release isolate memory before returning their streams.');
+
+      // 7. Campaign snapshot order hashes contact IDs so time-ordered UUIDv7 IDs do not skew the Hosted list probe.
+      const probeList = ok(await local('POST', '/v1/lists', { name: 'Probe Order List' }), 201);
+      await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_019a000000017'||substr(replace(gen_random_uuid()::text,'-',''),14),$1,'early_'||g||'@example.com','subscribed' FROM generate_series(1,100) g`, [wid]);
+      await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_019a000000097'||substr(replace(gen_random_uuid()::text,'-',''),14),$1,'late_'||g||'@example.com','subscribed' FROM generate_series(1,500) g`, [wid]);
+      await db.query(`INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM audience_contacts WHERE workspace_id=$1 AND (email LIKE 'early_%' OR email LIKE 'late_%')`, [wid, probeList.id]);
+      const { snapshotCampaignAudience } = await import('./src/audience.js');
+      const probeReviewId = 'rev_probe_' + randomUUID().replaceAll('-', '').slice(0, 12);
+      await snapshotCampaignAudience(runtime.db, { workspaceId: wid, keyId: 'fixture', permissions: ['read', 'write', 'manage', 'send'], domains: [], role: 'owner', credential: 'dashboard' } as never, { listId: probeList.id }, probeReviewId, [], false);
+      const lateInFirst100 = (await db.query(`SELECT count(*)::int AS n FROM sending_review_recipients WHERE review_id=$1 AND ordinal<=100 AND recipient->>'email' LIKE 'late_%'`, [probeReviewId])).rows[0].n;
+      assert.ok(lateInFirst100 >= 50 && lateInFirst100 <= 99, `Expected uniform mix of later UUIDv7 contacts in first 100 (got ${lateInFirst100}).`);
+
+      // 8. Open preview cap (keep newest 50, evict oldest with explanatory 404; committed imports stay) + 40/min budget.
+      const created: string[] = [];
+      for (let i = 0; i < 52; i++) {
+        if (i === 35) await db.query(`DELETE FROM api_request_budgets WHERE workspace_id = $1 AND key_id = 'imports:preview'`, [wid]);
+        const p = ok(await local('POST', '/v1/contact-imports', { csv: `Email\ncap${i}@example.com\n`, mapping: { email: 'Email' } }), 201);
+        created.push(p.id);
+      }
+      const openCount = (await db.query(`SELECT count(*)::int AS n FROM audience_imports WHERE workspace_id = $1 AND status = 'preview'`, [wid])).rows[0].n;
+      assert.equal(openCount, 50, 'Workspace keeps at most 50 open previews.');
+      const goneGet = error(await local('GET', `/v1/contact-imports/${created[0]}`), 404, 'NOT_FOUND');
+      assert.match(goneGet.message, /50 newer ones/);
+      const goneCommit = error(await local('POST', `/v1/contact-imports/${created[1]}/commit`), 404, 'NOT_FOUND');
+      assert.match(goneCommit.message, /50 newer ones/);
+      assert.equal(ok(await local('GET', `/v1/contact-imports/${created[51]}`)).status, 'preview');
+      assert.equal(ok(await local('GET', `/v1/contact-imports/${batchPreview.id}`)).status, 'committed', 'Committed imports are never evicted by the open preview cap.');
+      // Reset window and verify the 41st preview in one minute returns 429 IMPORT_PREVIEW_RATE_LIMITED.
+      await db.query(`DELETE FROM api_request_budgets WHERE workspace_id = $1 AND key_id = 'imports:preview'`, [wid]);
+      for (let i = 0; i < 40; i++) ok(await local('POST', '/v1/contact-imports', { csv: `Email\nrate${i}@example.com\n`, mapping: { email: 'Email' } }), 201);
+      const rateLimited = await local('POST', '/v1/contact-imports', { csv: 'Email\nover@example.com\n', mapping: { email: 'Email' } });
+      const rateErr = error(rateLimited, 429, 'IMPORT_PREVIEW_RATE_LIMITED');
+      assert.equal(rateErr.retryable, true);
+      assert.equal(rateLimited.headers.get('retry-after'), '60');
+    });
   });
 });
 
@@ -18123,12 +18244,12 @@ describe('Required notices', () => {
       await gradedSender(db, wid, 10000);
       await turn(db, wid, 'on');
       const list = ok(await local('POST', '/v1/lists', { name: unique('notice-probe') }), 201);
-      // Contact IDs in the order of n, so the review's order (by contact ID) is too: the probe is customers 1 to 100.
       await db.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_'||$1||lpad(n::text,4,'0'),$1,'customer-'||n||'@example.net','subscribed' FROM generate_series(1,150)n RETURNING id)
         INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM c`, [wid, list.id]);
-      // Ten of the last fifty were delivered to before, by an earlier receipt.
-      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,created_at)
-        SELECT 'email_prior_'||n,$1,$2,'fixture',$3,jsonb_build_array('customer-'||n||'@example.net'),'[]','[]','Receipt','{}',false,'delivered','prior-'||n,now()-interval '20 days' FROM generate_series(141,150) n`, [wid, REGION, from]);
+      // Ten of the last fifty in snapshot send order (hashtextextended(id, 0), id) were delivered to before.
+      await db.query(`WITH tail AS (SELECT email, row_number() OVER () AS n FROM (SELECT email FROM audience_contacts WHERE workspace_id=$1 ORDER BY hashtextextended(id, 0), id OFFSET 140 LIMIT 10) t)
+        INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,created_at)
+        SELECT 'email_prior_'||n,$1,$2,'fixture',$3,jsonb_build_array(email),'[]','[]','Receipt','{}',false,'delivered','prior-'||n,now()-interval '20 days' FROM tail`, [wid, REGION, from]);
       // A quarantined probe and the owner's resume, for a notice and for a marketing campaign to the same list.
       const quarantinedAndResumed = async (body: Json, confirm: Json) => {
         const c = ok(await local('POST', '/v1/campaigns', { from, subject: 'Probe', html: '<p>Fixture.</p>', audience: { listId: list.id }, ...body }), 201), path = `/v1/campaigns/${c.id}`;
@@ -28471,8 +28592,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     // millions does. Every 2,500th contact is subscribed; the first of those is also suppressed.
     const listId=await audience(50_010,2500);
     const contact=(n:number)=>'con_'+createHash('md5').update(w+n).digest('hex');
-    // The audience as it stands before any launch: subscribed, not suppressed, in send order (contact ID).
-    const before=(await g.query("SELECT email FROM audience_contacts WHERE workspace_id=$1 AND marketing_consent='subscribed' AND NOT suppressed ORDER BY id",[w])).rows.map(r=>r.email);
+    // The audience as it stands before any launch: subscribed, not suppressed, in send order (hash of contact ID).
+    const before=(await g.query("SELECT email FROM audience_contacts WHERE workspace_id=$1 AND marketing_consent='subscribed' AND NOT suppressed ORDER BY hashtextextended(id, 0), id",[w])).rows.map(r=>r.email);
     assert.equal(before.length,19);
     const blockedBy=async(pid:number)=>(await g.query('SELECT count(*)::int AS n FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))',[pid])).rows[0].n as number;
     const within=(p:Promise<unknown>,ms:number)=>Promise.race([p,new Promise(r=>setTimeout(r,ms))]);
@@ -34063,8 +34184,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         contacts.push(contact);
       }
       // Seed invalid historical contact data before snapshotting. Recipient order
-      // is by contact ID; keep the first valid so the static-message cache is used.
-      const ordered = (await db.query("SELECT id FROM audience_contacts WHERE workspace_id = $1 ORDER BY id", [runtime.config.workspaceId])).rows;
+      // is by hashtextextended(id, 0), id; keep the first valid so the static-message cache is used.
+      const ordered = (await db.query("SELECT id FROM audience_contacts WHERE workspace_id = $1 ORDER BY hashtextextended(id, 0), id", [runtime.config.workspaceId])).rows;
       const invalidContactId = ordered[1].id;
       const invalidAddress = `${'a'.repeat(250)}@example.com`;
       assert.equal((await db.query("UPDATE audience_contacts SET email = $1 WHERE workspace_id = $2 AND id = $3", [invalidAddress, runtime.config.workspaceId, invalidContactId])).rowCount, 1);
