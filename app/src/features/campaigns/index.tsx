@@ -179,6 +179,8 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
   const [senderOpen, setSenderOpen] = useState(false)
   const previewInput = useRef<HTMLInputElement>(null)
   const guard = useRef(false)
+  // Write shows the latest version, so Review starts from it next time.
+  useEffect(() => { if (initial?.id) readHere.delete(initial.id) }, [initial?.id])
   useEffect(() => {
     mounted.current = true
     return () => { mounted.current = false; refreshController.current?.abort() }
@@ -643,8 +645,11 @@ function useStaleRefetch() {
 // "Read it again"; meanwhile Send and Schedule carry the revision read, so the API refuses them (409). Shown at once:
 // every revision this tab or this person saved (savedHere), and a draft that stopped being one (sent, scheduled,
 // archived), where there is nothing left to approve.
+// What Review last showed of each campaign in this tab, so leaving the page and coming back keeps a newer version held.
+const readHere = new Map<string, Campaign>()
 function useReadCampaign(latest: Campaign, room: Room, refresh: () => void) {
-  const [read, setRead] = useState(latest)
+  const [read, setRead] = useState(() => { const kept = readHere.get(latest.id); return kept && (kept.revision ?? 1) < (latest.revision ?? 1) ? kept : latest })
+  useEffect(() => { readHere.set(read.id, read) }, [read])
   const [authors, setAuthors] = useState<ReadonlyMap<number, string>>(new Map())
   const editable = (version: Campaign) => !version.archivedAt && campaignEditable(version)
   const from = read.revision ?? 1, to = latest.revision ?? 1
