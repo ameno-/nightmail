@@ -165,7 +165,7 @@ export const DATABASE = {
   connectionShare: 0.8, sustain: 2,
   /** A transaction open this long holds back vacuum and may hold locks; migrations and retention finish well inside it. */
   transactionSeconds: 600,
-  /** Queries running over 30 seconds, and sessions waiting on a lock: each for two ticks. Statements time out at 30 s by default, so three at once is a pile-up. */
+  /** Queries running over 30 seconds, and sessions waiting on a lock: each for two ticks. One long report is not an alert; three at once is a pile-up. */
   slowQueries: 3, lockWaits: 10,
   /**
    * With DATABASE_DISK_GB set: the database's size as a share of the disk. PlanetScale makes the cluster read-only near
