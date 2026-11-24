@@ -14,6 +14,12 @@ page), as Slack cards on `OPERATOR_SLACK_WEBHOOK_URL`, and as JSON for a program
   `state` is `open` or `cleared` (a cleared line has `cleared=` and no value). No value holds a space. The
   key is the alert's kind, then what it is about; it stays the same for as long as the alert lasts.
 - **Severity.** `critical`: customers' mail or requests are affected now. `warning`: look today.
+- **In a burst** at most six cards go out a minute, one after the other: new alerts first, critical before
+  warning, then recoveries, then reminders. New (or cleared) alerts that do not fit share one summary card,
+  `key=summary state=open severity=… count=8 kinds=jobs-failed health=…`, which says how many of each kind; every
+  one of them is on the Health page and in the route, and each still gets its own cleared card.
+- **A card Slack refuses** is tried again on the next tick: an open one for as long as the alert lasts, a cleared
+  one for 30 minutes (then `HEALTH_ALERT_DROPPED` is logged). That holds for `database-refusing` too.
 - **Pull instead of push:** `GET /v1/operator/health` returns the open alerts and everything the tick measured
   (the Health tab reads the same). It takes an operator's session, or an agent key an operator made in Operator,
   UI notes, Agent keys: `curl -sH "Authorization: Bearer $NIGHTMAIL_AGENT_KEY" https://<origin>/v1/operator/health | jq '.alerts'`.
@@ -100,11 +106,14 @@ while the pile stays. (23 Nov: 1,639 `mailbox.recoverStaging` failed since the 1
 
 ## Campaigns
 
-A campaign's `rate` is what happened: recipients released per second, from its own cursor, a minute apart. It is
-held against what the campaign is `entitled` to: the provider account's send rate, times the share a workspace
-of its kind gets (a quarter on the shared pool, all of it for an exempt first-party workspace or its own
-account), times the campaign's rate share. The rate the release planner reads (`planned`) is shown beside them
-and no rule uses it: on 23 November it was the number that was wrong.
+A campaign's `rate` is what happened: recipients released per second, from its own cursor (`expanded`: everyone
+released or skipped so far), a minute apart. It is held against what the campaign is `entitled` to: the provider
+account's send rate, times the share a workspace of its kind gets (a quarter on the shared pool, all of it for an
+exempt first-party workspace or its own account), then the smaller of the campaign's own rate share and an even
+split with the workspace's other releasing campaigns. The rate the release planner reads (`planned`) is shown
+beside them and no rule uses it: on 23 November it was the number that was wrong. An alert about a rate always
+means "slower than it is entitled to": a campaign that is slow because its owner chose a rate share or a daily
+pace, because it is scheduled, or because its list probe is waiting, is never one. Its time left is on the page.
 
 ### campaign-slow
 A sending campaign that is not waiting for anything released under half of what it is entitled to for ten
@@ -118,13 +127,14 @@ minutes, or nothing at all for five (critical). The planner, the dispatcher or t
 **Then** `docs/dispatch-scaling.md`; an operator can raise a workspace's share (`api/scripts/set-workspace-exemption.ts`).
 
 ### campaign-long
-At its measured rate a campaign without a daily pace needs more than six hours. Not a fault by itself: it is the
-number nobody had on the 23rd (a 1.8M send at 32 a second: 15 hours, not 3). The card names the rate, the
-account's, what it is entitled to and what the planner reads.
+At its measured rate a campaign needs more than six hours, and it is releasing under 80% of what it is entitled
+to. This is the number nobody had on the 23rd (a 1.8M send at 32 a second of 160: 15 hours, not 3). The card names
+the rate, the account's, what it is entitled to and what the planner reads. A large send at its entitled rate is
+not an alert.
 
 **An agent checks first**
 1. `GET /v1/operator/health`: `etaSeconds`, `rate`, `entitled`, `account`, `planned` for the campaign.
-2. Is the rate what it is entitled to (then it is simply large) or below it (then see campaign-slow)?
+2. Why is it below what it is entitled to? `planned` under `entitled`: the planner's view. Otherwise see campaign-slow.
 3. `SELECT max_send_rate,max_24_hour_send,sent_last_24_hours FROM provider_account_limits;` against the list's size: does the day's quota cover it?
 
 ### campaign-preparing
@@ -199,6 +209,8 @@ A route had a request over 30 seconds in the last five minutes, or a p95 over 5 
 
 ### errors
 Error-level log lines of one code, five in five minutes (request lines are counted under server-errors).
+`MAILBOX_STAGING_UNDELIVERED` alerts at its first line, critical (and as a failed job's error, at the first
+job): mail arrived for a real workspace and its arrival notice was lost, so nobody would otherwise know (#625).
 
 **An agent checks first**
 1. Workers Logs, `code = <CODE>`, last 15 minutes: `service`, `operation`, `jobId` or `campaignId`, `databaseCode`, `stack`.
@@ -284,13 +296,29 @@ With `DATABASE_DISK_GB` set: the database is at 75% of its disk. PlanetScale mak
 2. Workers Logs, `RETENTION_*`: is retention running and deleting?
 3. Growth: `GET /v1/operator/health` `database.sizeBytes` now against an hour ago (the Health tab shows it each minute).
 
-## What the tick costs
+## What the tick costs, and what it can never cost
 
-One tick is at most 28 statements: one claim, five reads each in its own short transaction with a 3-second
-`statement_timeout`, one write of the rollup, one read and at most three writes of the alerts. Each read is
-bounded by an index and a `LIMIT` (5,000 jobs a class, 5,000 failed jobs, 200 campaigns) or by a small table;
-none touches `sending_emails` or `sending_email_events`. The pull request that added it has the timings
-measured on a 2-million-row database.
+Nothing waits for health. The counters are written after a response, a queue batch or a dispatcher run has
+finished (`waitUntil`), and the tick runs beside the minute cron's own steps once dispatch recovery has run,
+each on a connection of its own. Every statement they run, reads and writes alike, is in a short transaction
+with `lock_timeout` 1 s and `statement_timeout` 3 s; one that cannot get its lock or runs out is dropped, not
+retried: a flush loses 20 seconds of counts, a probe's section shows as unknown for a minute, a tick is skipped
+(`HEALTH_COUNTERS_DROPPED`, `HEALTH_PROBE_FAILED`, `HEALTH_TICK_SKIPPED`, `HEALTH_TICK_FAILED` in the logs, and
+`stale: true` on the route after three minutes). A health table locked for 30 seconds changes nothing else.
+
+One tick is at most 35 statements: the claim, five reads, the rollup with the alerts' read and write, and one
+transaction to mark what was posted, each wrapped in `BEGIN`, the limits and `COMMIT`. Each read is bounded by an
+index and a `LIMIT` (5,000 jobs a class, 5,000 failed jobs, 200 campaigns) or by a small table; none touches
+`sending_emails` or `sending_email_events`. Pull request #628 has the timings measured on a 2-million-row database.
+
+## What to set at deploy
+
+Nothing new is required. The cards go to `OPERATOR_SLACK_WEBHOOK_URL`, the secret production already binds for
+the operator alerts; without it (every self-hosted installation) nothing is posted and nothing is called.
+Optional: `DATABASE_DISK_GB` (the Health page shows the database against it, and `database-disk` opens at 75%).
+For an agent to pull: an operator makes an agent key (Operator, UI notes, Agent keys). Migration 440 creates four
+small tables and one small index and takes milliseconds. Expect `jobs-failed:mailbox.recoverStaging` on the first
+tick in production: the failed jobs of 11 November are still there.
 
 ## What is not covered yet
 
