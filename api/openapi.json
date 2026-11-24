@@ -1915,7 +1915,7 @@
                                                 "neq",
                                                 "contains"
                                               ],
-                                              "description": "neq matches a property that has another value; contains ignores case."
+                                              "description": "Compare JSON strings only. eq and neq are case-sensitive; contains ignores case. Missing, null and non-string properties never match."
                                             },
                                             "value": {
                                               "type": "string",
@@ -1962,7 +1962,7 @@
                                             },
                                             "value": {
                                               "type": "number",
-                                              "description": "Compared with a property that is a JSON number or a numeric string; any other value never matches."
+                                              "description": "Compared with a property that is a JSON number or a signed decimal string, optionally in scientific notation, within PostgreSQL numeric range. Other values never match."
                                             }
                                           },
                                           "required": [
@@ -2006,7 +2006,7 @@
                                             "value": {
                                               "type": "string",
                                               "format": "date",
-                                              "description": "A day, YYYY-MM-DD, in UTC. A property is on the day its ISO 8601 text starts with: 2026-11-20T14:03:00Z is on 2026-11-20, before is an earlier day and after a later one; any other value never matches."
+                                              "description": "Compare UTC calendar days. Accept a valid YYYY-MM-DD or a date with T and HH:MM[:SS[.fraction]], optionally Z or a signed hour/minute offset. No offset means UTC; invalid values never match."
                                             }
                                           },
                                           "required": [
@@ -2098,7 +2098,7 @@
                                       "neq",
                                       "contains"
                                     ],
-                                    "description": "neq matches a property that has another value; contains ignores case."
+                                    "description": "Compare JSON strings only. eq and neq are case-sensitive; contains ignores case. Missing, null and non-string properties never match."
                                   },
                                   "value": {
                                     "type": "string",
@@ -2145,7 +2145,7 @@
                                   },
                                   "value": {
                                     "type": "number",
-                                    "description": "Compared with a property that is a JSON number or a numeric string; any other value never matches."
+                                    "description": "Compared with a property that is a JSON number or a signed decimal string, optionally in scientific notation, within PostgreSQL numeric range. Other values never match."
                                   }
                                 },
                                 "required": [
@@ -2189,7 +2189,7 @@
                                   "value": {
                                     "type": "string",
                                     "format": "date",
-                                    "description": "A day, YYYY-MM-DD, in UTC. A property is on the day its ISO 8601 text starts with: 2026-11-20T14:03:00Z is on 2026-11-20, before is an earlier day and after a later one; any other value never matches."
+                                    "description": "Compare UTC calendar days. Accept a valid YYYY-MM-DD or a date with T and HH:MM[:SS[.fraction]], optionally Z or a signed hour/minute offset. No offset means UTC; invalid values never match."
                                   }
                                 },
                                 "required": [
@@ -2281,7 +2281,7 @@
                             "neq",
                             "contains"
                           ],
-                          "description": "neq matches a property that has another value; contains ignores case."
+                          "description": "Compare JSON strings only. eq and neq are case-sensitive; contains ignores case. Missing, null and non-string properties never match."
                         },
                         "value": {
                           "type": "string",
@@ -2328,7 +2328,7 @@
                         },
                         "value": {
                           "type": "number",
-                          "description": "Compared with a property that is a JSON number or a numeric string; any other value never matches."
+                          "description": "Compared with a property that is a JSON number or a signed decimal string, optionally in scientific notation, within PostgreSQL numeric range. Other values never match."
                         }
                       },
                       "required": [
@@ -2372,7 +2372,7 @@
                         "value": {
                           "type": "string",
                           "format": "date",
-                          "description": "A day, YYYY-MM-DD, in UTC. A property is on the day its ISO 8601 text starts with: 2026-11-20T14:03:00Z is on 2026-11-20, before is an earlier day and after a later one; any other value never matches."
+                          "description": "Compare UTC calendar days. Accept a valid YYYY-MM-DD or a date with T and HH:MM[:SS[.fraction]], optionally Z or a signed hour/minute offset. No offset means UTC; invalid values never match."
                         }
                       },
                       "required": [
@@ -2464,7 +2464,7 @@
                   "neq",
                   "contains"
                 ],
-                "description": "neq matches a property that has another value; contains ignores case."
+                "description": "Compare JSON strings only. eq and neq are case-sensitive; contains ignores case. Missing, null and non-string properties never match."
               },
               "value": {
                 "type": "string",
@@ -2511,7 +2511,7 @@
               },
               "value": {
                 "type": "number",
-                "description": "Compared with a property that is a JSON number or a numeric string; any other value never matches."
+                "description": "Compared with a property that is a JSON number or a signed decimal string, optionally in scientific notation, within PostgreSQL numeric range. Other values never match."
               }
             },
             "required": [
@@ -2555,7 +2555,7 @@
               "value": {
                 "type": "string",
                 "format": "date",
-                "description": "A day, YYYY-MM-DD, in UTC. A property is on the day its ISO 8601 text starts with: 2026-11-20T14:03:00Z is on 2026-11-20, before is an earlier day and after a later one; any other value never matches."
+                "description": "Compare UTC calendar days. Accept a valid YYYY-MM-DD or a date with T and HH:MM[:SS[.fraction]], optionally Z or a signed hour/minute offset. No offset means UTC; invalid values never match."
               }
             },
             "required": [

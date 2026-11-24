@@ -602,7 +602,7 @@ export type SegmentRule = {
                 key: string;
                 type: 'string';
                 /**
-                 * neq matches a property that has another value; contains ignores case.
+                 * Compare JSON strings only. eq and neq are case-sensitive; contains ignores case. Missing, null and non-string properties never match.
                  */
                 operator: 'eq' | 'neq' | 'contains';
                 value: string;
@@ -615,7 +615,7 @@ export type SegmentRule = {
                 type: 'number';
                 operator: 'eq' | 'lt' | 'gt';
                 /**
-                 * Compared with a property that is a JSON number or a numeric string; any other value never matches.
+                 * Compared with a property that is a JSON number or a signed decimal string, optionally in scientific notation, within PostgreSQL numeric range. Other values never match.
                  */
                 value: number;
             } | {
@@ -627,7 +627,7 @@ export type SegmentRule = {
                 type: 'date';
                 operator: 'before' | 'after' | 'on';
                 /**
-                 * A day, YYYY-MM-DD, in UTC. A property is on the day its ISO 8601 text starts with: 2026-11-20T14:03:00Z is on 2026-11-20, before is an earlier day and after a later one; any other value never matches.
+                 * Compare UTC calendar days. Accept a valid YYYY-MM-DD or a date with T and HH:MM[:SS[.fraction]], optionally Z or a signed hour/minute offset. No offset means UTC; invalid values never match.
                  */
                 value: string;
             } | {
@@ -650,7 +650,7 @@ export type SegmentRule = {
             key: string;
             type: 'string';
             /**
-             * neq matches a property that has another value; contains ignores case.
+             * Compare JSON strings only. eq and neq are case-sensitive; contains ignores case. Missing, null and non-string properties never match.
              */
             operator: 'eq' | 'neq' | 'contains';
             value: string;
@@ -663,7 +663,7 @@ export type SegmentRule = {
             type: 'number';
             operator: 'eq' | 'lt' | 'gt';
             /**
-             * Compared with a property that is a JSON number or a numeric string; any other value never matches.
+             * Compared with a property that is a JSON number or a signed decimal string, optionally in scientific notation, within PostgreSQL numeric range. Other values never match.
              */
             value: number;
         } | {
@@ -675,7 +675,7 @@ export type SegmentRule = {
             type: 'date';
             operator: 'before' | 'after' | 'on';
             /**
-             * A day, YYYY-MM-DD, in UTC. A property is on the day its ISO 8601 text starts with: 2026-11-20T14:03:00Z is on 2026-11-20, before is an earlier day and after a later one; any other value never matches.
+             * Compare UTC calendar days. Accept a valid YYYY-MM-DD or a date with T and HH:MM[:SS[.fraction]], optionally Z or a signed hour/minute offset. No offset means UTC; invalid values never match.
              */
             value: string;
         } | {
@@ -698,7 +698,7 @@ export type SegmentRule = {
         key: string;
         type: 'string';
         /**
-         * neq matches a property that has another value; contains ignores case.
+         * Compare JSON strings only. eq and neq are case-sensitive; contains ignores case. Missing, null and non-string properties never match.
          */
         operator: 'eq' | 'neq' | 'contains';
         value: string;
@@ -711,7 +711,7 @@ export type SegmentRule = {
         type: 'number';
         operator: 'eq' | 'lt' | 'gt';
         /**
-         * Compared with a property that is a JSON number or a numeric string; any other value never matches.
+         * Compared with a property that is a JSON number or a signed decimal string, optionally in scientific notation, within PostgreSQL numeric range. Other values never match.
          */
         value: number;
     } | {
@@ -723,7 +723,7 @@ export type SegmentRule = {
         type: 'date';
         operator: 'before' | 'after' | 'on';
         /**
-         * A day, YYYY-MM-DD, in UTC. A property is on the day its ISO 8601 text starts with: 2026-11-20T14:03:00Z is on 2026-11-20, before is an earlier day and after a later one; any other value never matches.
+         * Compare UTC calendar days. Accept a valid YYYY-MM-DD or a date with T and HH:MM[:SS[.fraction]], optionally Z or a signed hour/minute offset. No offset means UTC; invalid values never match.
          */
         value: string;
     } | {
@@ -746,7 +746,7 @@ export type SegmentRule = {
     key: string;
     type: 'string';
     /**
-     * neq matches a property that has another value; contains ignores case.
+     * Compare JSON strings only. eq and neq are case-sensitive; contains ignores case. Missing, null and non-string properties never match.
      */
     operator: 'eq' | 'neq' | 'contains';
     value: string;
@@ -759,7 +759,7 @@ export type SegmentRule = {
     type: 'number';
     operator: 'eq' | 'lt' | 'gt';
     /**
-     * Compared with a property that is a JSON number or a numeric string; any other value never matches.
+     * Compared with a property that is a JSON number or a signed decimal string, optionally in scientific notation, within PostgreSQL numeric range. Other values never match.
      */
     value: number;
 } | {
@@ -771,7 +771,7 @@ export type SegmentRule = {
     type: 'date';
     operator: 'before' | 'after' | 'on';
     /**
-     * A day, YYYY-MM-DD, in UTC. A property is on the day its ISO 8601 text starts with: 2026-11-20T14:03:00Z is on 2026-11-20, before is an earlier day and after a later one; any other value never matches.
+     * Compare UTC calendar days. Accept a valid YYYY-MM-DD or a date with T and HH:MM[:SS[.fraction]], optionally Z or a signed hour/minute offset. No offset means UTC; invalid values never match.
      */
     value: string;
 } | {

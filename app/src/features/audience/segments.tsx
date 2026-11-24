@@ -57,7 +57,7 @@ function toRow(rule: unknown): Row {
 }
 function propertyRule(row: Row): Record<string, unknown> {
   const type = propertyType(row), operator = presence(row.operator) ? row.operator : row.operator.split(':')[1]
-  return { field: 'property', key: (row.key ?? '').trim(), type, operator, ...presence(operator) ? {} : { value: type === 'number' ? Number(row.value) : row.value.trim() } }
+  return { field: 'property', key: row.key ?? '', type, operator, ...presence(operator) ? {} : { value: type === 'number' ? (row.value.trim() ? Number(row.value) : null) : row.value } }
 }
 function toBuilder(rule: unknown): Builder {
   if (isRecord(rule) && Array.isArray(rule.rules)) return { match: rule.operator === 'or' ? 'any' : 'all', rows: rule.rules.map(toRow) }
@@ -71,13 +71,13 @@ function rowError(row: Row) {
   if (row.group) return undefined
   if (activity(row.field)) return /^\d+$/.test(row.value) && Number(row.value) >= 1 && Number(row.value) <= 730 ? undefined : 'Enter a whole number of days from 1 to 730.'
   if (row.field === 'property') {
-    const key = (row.key ?? '').trim(), type = propertyType(row)
+    const key = row.key ?? '', type = propertyType(row)
     if (!key) return 'Enter the property to match, for example “status”.'
     if (key.length > 80) return 'A property name has at most 80 characters.'
     if (presence(row.operator)) return undefined
     if (type === 'number') return row.value.trim() && Number.isFinite(Number(row.value)) ? undefined : 'Enter a number.'
     if (type === 'date') return isDay(row.value) ? undefined : 'Pick a day.'
-    return row.value.trim() ? undefined : 'Enter the value to match, for example “waiting”.'
+    return row.value.length <= 200 ? undefined : 'Enter at most 200 characters.'
   }
   return !row.value.trim() ? `Enter the ${fields.find(field => field.value === row.field)?.label.toLowerCase() ?? 'value'} to match, for example “${placeholders[row.field] ?? 'pro'}”.` : undefined
 }
@@ -93,9 +93,11 @@ function ruleProblem(value: unknown, depth = 0, path = 'rule'): string | null {
   if (['email', 'firstName', 'plan', 'country'].includes(String(value.field))) return !['eq', 'neq', 'contains'].includes(String(value.operator)) ? `${path}.operator must be eq, neq or contains.` : typeof value.value !== 'string' || value.value.length > 200 ? `${path}.value must be text of at most 200 characters.` : Object.keys(value).every(key => ['field', 'operator', 'value'].includes(key)) ? null : `${path} may only have field, operator and value.`
   if (['lastOpenAt', 'lastClickAt'].includes(String(value.field))) return !['within', 'inactive'].includes(String(value.operator)) ? `${path}.operator must be within or inactive.` : !Number.isInteger(value.days) || Number(value.days) < 1 || Number(value.days) > 730 ? `${path}.days must be a whole number from 1 to 730.` : Object.keys(value).every(key => ['field', 'operator', 'days'].includes(key)) ? null : `${path} may only have field, operator and days.`
   if (value.field === 'property') {
-    const type = String(value.type), operator = String(value.operator), operators = PROPERTY_TYPES[type], allowed = ['field', 'key', 'type', 'operator', ...presence(operator) ? [] : ['value']]
+    const type = value.type, operator = value.operator
+    if (typeof type !== 'string' || !Object.hasOwn(PROPERTY_TYPES, type)) return `${path}.type must be string, number or date.`
+    if (typeof operator !== 'string') return `${path}.operator must be a string.`
+    const operators = PROPERTY_TYPES[type], allowed = ['field', 'key', 'type', 'operator', ...presence(operator) ? [] : ['value']]
     if (typeof value.key !== 'string' || !value.key || value.key.length > 80) return `${path}.key must be a property name of 1 to 80 characters.`
-    if (!operators) return `${path}.type must be string, number or date.`
     if (!presence(operator) && !operators.includes(operator)) return `${path}.operator must be ${operators.join(', ')}, set or notSet for a ${type}.`
     if (!presence(operator) && type === 'string' && (typeof value.value !== 'string' || value.value.length > 200)) return `${path}.value must be text of at most 200 characters.`
     if (!presence(operator) && type === 'number' && (typeof value.value !== 'number' || !Number.isFinite(value.value))) return `${path}.value must be a number.`
@@ -140,7 +142,11 @@ function SegmentEditor({ initial, onCreated }: { initial: Segment | null; onCrea
     updateRow(row.id, fieldKind(field) === 'activity' ? { field, operator: 'within', value: '30' } : fieldKind(field) === 'property' ? { field, operator: 'string:eq', value: '', key: '', type: undefined } : { field, operator: 'eq', value: '' })
   }
   // A property's operator says its type; one of another type starts its value again (a day isn't a number).
-  const changeOperator = (row: Row, operator: string) => updateRow(row.id, row.field === 'property' && propertyType({ ...row, operator }) !== propertyType(row) ? { operator, value: '', type: undefined } : { operator })
+  const changeOperator = (row: Row, operator: string) => {
+    if (row.field !== 'property') return updateRow(row.id, { operator })
+    const prev = propertyType(row), type = presence(operator) ? prev : operator.split(':')[0]
+    updateRow(row.id, { operator, type, value: type === prev ? row.value : '' })
+  }
   // Property names seen on up to 100 contacts (of the list counted within, if one is picked), most common first, for the
   // name field's suggestions; read only once the conditions have a property row.
   const usesProperties = json === null && builder.rows.some(row => row.field === 'property')
@@ -188,7 +194,7 @@ function SegmentEditor({ initial, onCreated }: { initial: Segment | null; onCrea
                   {/* The field, and a property's name beside it: one subtree for every field, so choosing another keeps the field's select mounted. */}
                   <div className="audience-condition-subject">
                     <Select className="audience-condition-field" aria-label={`Condition ${n} field`} value={row.field} onValueChange={value => changeField(row, value)} options={fields} />
-                    {row.field === 'property' && <Input className="audience-condition-key" aria-label={`Condition ${n} property name`} aria-invalid={Boolean(error) && !(row.key ?? '').trim() || undefined} list="segment-property-keys" maxLength={80} autoComplete="off" spellCheck={false} placeholder="Property name" value={row.key ?? ''} onChange={event => updateRow(row.id, { key: event.target.value })} />}
+                    {row.field === 'property' && <Input className="audience-condition-key" aria-label={`Condition ${n} property name`} aria-invalid={Boolean(error) && !row.key || undefined} list="segment-property-keys" maxLength={80} autoComplete="off" spellCheck={false} placeholder="Property name" value={row.key ?? ''} onChange={event => updateRow(row.id, { key: event.target.value })} />}
                   </div>
                   {/* Another kind of field brings other operators in a new select: one kept mounted would see its new value before its new options and report it empty. */}
                   <Select key={fieldKind(row.field)} className="audience-condition-operator" aria-label={`Condition ${n} operator`} value={row.operator} onValueChange={value => changeOperator(row, value)} options={activity(row.field) ? activityOperators : row.field === 'property' ? propertyOperators : textOperators} />
@@ -196,7 +202,7 @@ function SegmentEditor({ initial, onCreated }: { initial: Segment | null; onCrea
                     : row.field !== 'property' ? <Input className="audience-condition-value" aria-label={`Condition ${n} value`} aria-invalid={Boolean(error) || undefined} maxLength={200} placeholder="Value" value={row.value} onChange={event => updateRow(row.id, { value: event.target.value })} />
                     : presence(row.operator) ? <span className="audience-condition-value" aria-hidden="true" />
                     : propertyType(row) === 'date' ? <div className="audience-condition-value audience-condition-day"><Input type="date" aria-label={`Condition ${n} day (UTC)`} aria-invalid={Boolean(error) || undefined} value={row.value} onChange={event => updateRow(row.id, { value: event.target.value })} /><span className="muted">UTC</span></div>
-                    : <Input className="audience-condition-value" type={propertyType(row) === 'number' ? 'number' : 'text'} inputMode={propertyType(row) === 'number' ? 'decimal' : undefined} step={propertyType(row) === 'number' ? 'any' : undefined} aria-label={`Condition ${n} value`} aria-invalid={Boolean(error) && (row.key ?? '').trim() !== '' || undefined} maxLength={propertyType(row) === 'number' ? undefined : 200} placeholder={propertyType(row) === 'number' ? 'Number' : 'Value'} value={row.value} onChange={event => updateRow(row.id, { value: event.target.value })} />}
+                    : <Input className="audience-condition-value" type={propertyType(row) === 'number' ? 'number' : 'text'} inputMode={propertyType(row) === 'number' ? 'decimal' : undefined} step={propertyType(row) === 'number' ? 'any' : undefined} aria-label={`Condition ${n} value`} aria-invalid={Boolean(error) && Boolean(row.key) || undefined} maxLength={propertyType(row) === 'number' ? undefined : 200} placeholder={propertyType(row) === 'number' ? 'Number' : 'Value'} value={row.value} onChange={event => updateRow(row.id, { value: event.target.value })} />}
                   <IconButton className="audience-condition-remove" label={`Remove condition ${n}`} disabled={builder.rows.length === 1} onClick={() => update({ ...builder, rows: builder.rows.filter(item => item.id !== row.id) })}><X size={16} /></IconButton>
                 </div>}
               {error && <div className="ui-field__hint ui-field__error" role="alert">Condition {n}: {error}</div>}
