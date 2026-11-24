@@ -5,8 +5,8 @@ import { label, number } from '../../lib/format'
 
 // Logs' filters beside the list (Signal Log), from 1440 px; narrower, the toolbar's status and stream pickers filter
 // instead, so each filter is on screen once. Each value counts what choosing it would list: the log's dates under the
-// other filters (GET /v1/logs?counts=true), not the page on screen. Counts that take too long never arrive: the statuses
-// keep their dashes. A direction lists a fixed set of rows, so the route
+// other filters (GET /v1/logs/facets), not the page on screen. Until the exact response arrives, the statuses keep
+// their dashes. A direction lists a fixed set of rows, so the route
 // skeleton, a loading page and a loaded one hold the same space, and counts arriving move nothing.
 // A status's colour is its badge's in the table (rows.tsx): received mail is green, spam red, sent mail its StatusBadge tone.
 export const logTone = (row: Pick<LogEntry, 'status'>): Tone => row.status === 'received' ? 'success' : row.status === 'spam' ? 'danger' : statusTone(row.status)
@@ -51,5 +51,5 @@ export function logFacetGroups(counts: LogCounts | undefined, filters: RailFilte
 
 /** The list's body with its filters beside it. `blank`: a log with no mail at all keeps the rail's place, empty. */
 export function LogsBody({ counts, filters, blank, children }: { counts: LogCounts | undefined; filters: RailFilters; blank?: boolean; children: ReactNode }) {
-  return <SplitPane className="logs-split" rail={blank ? null : <FacetRail label="Filters" groups={logFacetGroups(counts, filters)} />}>{children}</SplitPane>
+  return <SplitPane className="logs-split" rail={blank ? null : <FacetRail label="Filters" replaceCountText groups={logFacetGroups(counts, filters)} />}>{children}</SplitPane>
 }

@@ -12,6 +12,7 @@ import { healthTick } from './health.js';
 import { flushCounters } from './health-counters.js';
 import { standingTick } from './standing.js';
 import { signupsTick } from './signups.js';
+import { dueLogFacetSlots, foldLogFacetSlot, LOG_FACET_TICK_MS } from './log-facet-fold.js';
 import { syncOutboundMessages } from './mailbox-send.js';
 import { scheduleHoldRelease } from './mailbox-staging.js';
 import { queueStartupDiscovery } from './ses-regions.js';
@@ -34,6 +35,18 @@ try {
   let listener: Client | undefined, lastListen = 0;
   for (const signal of ['SIGTERM', 'SIGINT'] as const) process.on(signal, () => { stopped = true; });
   log('info', { code: 'RUNNER_READY', liveSesEnabled: runtime.config.liveEnabled });
+  // A dedicated cadence: a busy general jobs queue or another workspace cannot move a sealed source cut.
+  const facetWork = new Map<string, Promise<void>>();
+  const facets = (async () => {
+    while (!stopped) {
+      try { for (const slot of await dueLogFacetSlots(runtime.db)) if (!facetWork.has(slot)) {
+        const work = foldLogFacetSlot(runtime,slot).catch(() => log('warn',{code:'LOG_FACET_SLOT_FAILED',jobId:slot})).finally(() => { facetWork.delete(slot); });
+        facetWork.set(slot,work);
+      } } catch { log('warn',{code:'LOG_FACET_TICK_FAILED'}); }
+      await setTimeout(LOG_FACET_TICK_MS);
+    }
+    await Promise.all(facetWork.values());
+  })();
   const hooks=(async()=>{while(!stopped){try{if(await drainJobs(runtime,20,2,5000,'webhooks'))continue;}catch{log('warn',{code:'WEBHOOK_DRAIN_FAILED'});}await setTimeout(1000);}})();
   try {
     await queueStartupDiscovery(runtime);
@@ -90,7 +103,7 @@ try {
         await setTimeout(5000);
       }
     }
-  } finally { stopped=true;await hooks;await sharedSetup;await publicStats;await health;await hourly;await sentRetention; await listener?.end(); await close(); }
+  } finally { stopped=true;await facets;await hooks;await sharedSetup;await publicStats;await health;await hourly;await sentRetention; await listener?.end(); await close(); }
 } catch (error) {
   logError(error, { code: error instanceof ApiError ? error.code : 'STARTUP_FAILED' });
   process.exitCode = 1;

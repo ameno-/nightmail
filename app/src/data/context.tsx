@@ -46,6 +46,13 @@ const SessionContext = createContext<Session | null>(null)
 export const useSession = () => useContext(SessionContext)
 /** The account/workspace scope of the mounted provider generation; passing it to request() fails closed after a switch. */
 export const useRequestScope = () => useContext(RequestScopeContext) ?? currentScope()
+/** Logs row prefetch and rendering share this key, but never a cache entry across visibility bands. */
+export function useLogsVisibility() {
+  const identity = useSession()?.identity
+  const scope = useRequestScope()
+  return identity ? JSON.stringify([scope.account, scope.workspace, scope.epoch, identity.id, identity.workspaceId,
+    identity.multiTenant ? identity.role : 'self-hosted']) : null
+}
 // Self-hosted installations have no workspace roles; every signed-in operator administers.
 export function useWorkspaceAccess() {
   const identity = useContext(SessionContext)?.identity

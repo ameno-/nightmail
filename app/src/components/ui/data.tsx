@@ -34,13 +34,14 @@ export function MetricRow({ label, hint, spark, value, unit, tone, meter, classN
 export type Facet = { key: string; label?: ReactNode; count?: number | null; atLeast?: boolean; title?: string; tone?: Tone; series?: string; dot?: boolean; selected?: boolean; onSelect?: () => void; menu?: MenuItem[]; menuLabel?: string; slot?: boolean };
 export type FacetGroup = { key: string; title: ReactNode; items: Facet[] };
 /** The facets beside a list: each group a small caps title over its values, each value with its count. */
-export function FacetRail({ groups, label = 'Facets' }: { groups: FacetGroup[]; label?: string }) {
+export function FacetRail({ groups, label = 'Facets', replaceCountText = false }: { groups: FacetGroup[]; label?: string; replaceCountText?: boolean }) {
   return <nav className="ui-facets" aria-label={label}>
     {groups.map(group => <section key={group.key} className="ui-facets__group" aria-label={typeof group.title === 'string' ? group.title : undefined}>
       <h3 className="ui-facets__title">{group.title}</h3>
       <ul>{group.items.map(item => {
         if (item.slot) return <li key={item.key} className="ui-facet ui-facet--slot" aria-hidden="true" />;
-        const body = <><span className={cx('ui-facet__dot', `ui-tone--${item.tone ?? 'neutral'}`, item.series && `ui-series--${item.series}`, (item.dot === false || (!item.tone && !item.series)) && 'ui-facet__dot--none')} aria-hidden="true" /><span className="ui-facet__label">{item.label}{item.menu && <ChevronDown size={12} aria-hidden="true" />}</span><span className="ui-facet__count">{item.count === null || item.count === undefined ? '–' : `${item.count.toLocaleString()}${item.atLeast ? '+' : ''}`}</span></>;
+        // Opt in where asynchronous digits replace dashes. The filter button and its focus stay in place.
+        const body = <><span className={cx('ui-facet__dot', `ui-tone--${item.tone ?? 'neutral'}`, item.series && `ui-series--${item.series}`, (item.dot === false || (!item.tone && !item.series)) && 'ui-facet__dot--none')} aria-hidden="true" /><span className="ui-facet__label">{item.label}{item.menu && <ChevronDown size={12} aria-hidden="true" />}</span><span key={replaceCountText ? item.count ?? 'empty' : undefined} className="ui-facet__count">{item.count === null || item.count === undefined ? '–' : `${item.count.toLocaleString()}${item.atLeast ? '+' : ''}`}</span></>;
         const empty = !item.count || undefined;
         return <li key={item.key}>{item.menu ? <DropdownMenu items={item.menu} label={item.menuLabel} align="start" trigger={<button type="button" className="ui-facet" aria-label={item.menuLabel} aria-pressed={item.selected ?? false} data-empty={empty}>{body}</button>} />
           : item.onSelect ? <button type="button" className="ui-facet" aria-pressed={item.selected ?? false} data-empty={empty} onClick={item.onSelect}>{body}</button> : <span className="ui-facet" data-empty={empty} title={item.title}>{body}</span>}</li>;

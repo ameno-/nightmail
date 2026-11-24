@@ -162,6 +162,7 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
         connect: (name, person) => { quietRooms.delete(name); return rooms.getByName(name).fetch('https://room/connect', { headers: { upgrade: 'websocket', [ROOM_PEER_HEADER]: encodeURIComponent(JSON.stringify(person)) } }); },
         visit: (name, credential, lookup, saved) => { const visit = roomVisit(env, rooms, name, credential, lookup, saved); if (ctx) ctx.waitUntil(visit); },
       },
+      startLogFacetFold: ctx ? slot => afterwards(env,ctx,async independent => { await (await import('./log-facet-fold.js')).foldLogFacetSlot(independent,slot); }) : undefined,
       placementEdge:{probesPerJob:Math.min(3,Math.floor(6/concurrency))}, deferNudge: ctx ? pending => { nudges.push(pending); } : undefined, wake: async (readyJobs = 1, immediate) => {
       if (immediate === 'webhook' && env.WEBHOOK_QUEUE) return workWake(env.WEBHOOK_QUEUE,concurrency)(readyJobs);
       if (immediate || readyJobs > concurrency) return notify(readyJobs);
@@ -423,6 +424,11 @@ export default {
       // Minute ping: recovers dispatchers that missed a nudge and expired-lease or interrupted rows.
       // Mailbox outbound status and Message-IDs follow the sending pipeline; best-effort.
       if (controller.cron !== '* * * * *') return;
+      // Backup for a missed or interrupted facet nudge: check only the four reserved job PKs.
+      afterwards(env,ctx,async background => {
+        const {dueLogFacetSlots,foldLogFacetSlot}=await import('./log-facet-fold.js');
+        for (const slot of await dueLogFacetSlots(background.db)) afterwards(env,ctx,separate => foldLogFacetSlot(separate,slot));
+      });
       // Independent of PostgreSQL: even a total DB outage must not hide DLQ growth.
       // A queue added here is on the Health page at once; its "falling behind" line is in src/health-thresholds.ts (QUEUES).
       const queues: import('./health.js').QueueSample[] = [];

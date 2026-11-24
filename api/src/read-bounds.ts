@@ -419,7 +419,7 @@ export function resolveReadWorkspaceId(c: Ctx, explicitWorkspaceId?: string): st
 export async function withBoundedRead<T>(
   c: Ctx,
   work: (hold: PoolHold) => Promise<T>,
-  opts: { route?: string; workspaceId?: string; idleMs?: number; maxMs?: number } = {},
+  opts: { route?: string; workspaceId?: string; idleMs?: number; maxMs?: number; maxWaitMs?: number } = {},
 ): Promise<T | Response> {
   const workspaceId = resolveReadWorkspaceId(c, opts.workspaceId);
   let hold: PoolHold;
@@ -428,6 +428,7 @@ export async function withBoundedRead<T>(
       route: opts.route ?? 'bounded.read',
       idleMs: opts.idleMs,
       maxMs: opts.maxMs,
+      maxWaitMs: opts.maxWaitMs,
       busyCode: 'READ_CONCURRENCY_LIMIT',
       busyMessage: 'Too many concurrent reads are running; retry in a moment.',
       wsBusyCode: 'READ_CONCURRENCY_LIMIT',

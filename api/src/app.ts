@@ -306,7 +306,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     await next();
   };
   // Discovery, provisioning and the catalog load persisted settings themselves.
-  app.on('GET', ['/v1/emails', '/v1/campaigns', '/v1/logs'], (c, next) => c.req.query('region') ? regions(c, next) : next());
+  app.on('GET', ['/v1/emails', '/v1/campaigns', '/v1/logs', '/v1/logs/facets'], (c, next) => c.req.query('region') ? regions(c, next) : next());
   const selfHostedRegions = (c: Ctx, next: () => Promise<void>) => c.env.config.multiTenant ? next() : regions(c, next);
   app.on('GET', ['/v1/settings/ses', '/v1/domains/:id'], selfHostedRegions);
   app.on('GET', '/v1/domains', (c, next) => c.req.query('region') !== undefined ? regions(c, next) : selfHostedRegions(c, next));

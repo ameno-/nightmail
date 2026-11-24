@@ -176,6 +176,8 @@ export interface Runtime {
   placementEdge?: { probesPerJob:number };
   wake?: (readyJobs?: number, immediate?: 'webhook'|'ingest') => Promise<void>;
   deferNudge?: (work: (runtime: Runtime) => Promise<void>) => void;
+  /** Starts a sealed Logs fold on a separate worker connection. The caller never runs it on its HTTP pool. */
+  startLogFacetFold?: (slot: string) => void;
   // Nudges the long-lived dispatcher for one account/region after queued mail commits. Dispatch
   // never depends on it: the dispatcher also polls and the scheduler pings it every minute.
   dispatch?: (region: string, accountId?: string, emails?: number, kind?: ReadyConnection['kind'], priority?: boolean) => Promise<void>;
@@ -380,13 +382,13 @@ export const readLimitNote = (seconds: number) => `Each statement stops after ${
  * slow read is refused (SQLSTATE 57014 becomes the budget's refusal) instead of holding its connection. Costs BEGIN,
  * SET and COMMIT: three round trips on the read's own connection.
  */
-export async function budgetedRead<T>(db: Runtime['db'], work: (tx: DbExecutor) => Promise<T>, budget: ReadBudget): Promise<T> {
+export async function budgetedRead<T>(db: Runtime['db'], work: (tx: DbExecutor) => Promise<T>, budget: ReadBudget, isolationLevel?: 'repeatable read'): Promise<T> {
   if (!Number.isInteger(budget.seconds) || budget.seconds < 1) throw new Error('A read budget is a whole number of seconds.');
   try {
     return await db.transaction(async tx => {
       await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${budget.seconds}s'`));
       return work(tx);
-    }, { accessMode: 'read only' });
+    }, { accessMode: 'read only', ...(isolationLevel && { isolationLevel }) });
   } catch (error) {
     if (statementTimedOut(error)) throw budget.refusal();
     throw error;

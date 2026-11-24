@@ -16586,6 +16586,283 @@ describe('Dashboard API capabilities', () => {
   });
 });
 
+describe('Sealed Logs facets', () => {
+  const facetFixture = (t: TestContext, scenario: Parameters<typeof simulatedSesFixture>[1]) =>
+    simulatedSesFixture(t, async fixtures => {
+      // The four fixed slot IDs are local to this connection, invisible to the normal runner.
+      await fixtures.db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
+      await scenario(fixtures);
+    });
+  const floorMinute = () => new Date((Math.floor(Date.now() / 60_000) - 2) * 60_000).toISOString();
+  const earlierMinute = (from: string, minutes: number) => new Date(Date.parse(from) - minutes * 60_000).toISOString();
+  const otherRegion = REGION === 'us-west-1' ? 'us-east-1' : 'us-west-1';
+  const seedSent = (db: pg.Client, wid: string, from: string, kind: string, status: string, region = REGION, campaignId: string | null = null) =>
+    db.query(`INSERT INTO sending_emails (id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,
+        subject,snapshot,simulated,status,created_at,scheduled_at,campaign_id)
+      VALUES ($1,$2,$3,'fixture','fixture@example.org','["synthetic@example.net"]','[]','[]','Facet fixture',
+        jsonb_build_object('kind',$4::text),true,$5,$6::timestamptz,CASE WHEN $5='scheduled' THEN now()+interval '1 day' END,$7)`,
+    [unique('facet-send'), wid, region, kind, status, from, campaignId]);
+
+  async function seedInbound(db: pg.Client, wid: string, from: string) {
+    const domain = unique('facet-domain'), thread = unique('facet-thread');
+    await db.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)', [thread, wid]);
+    await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,'facet.example',$3,'active')", [domain, wid, REGION]);
+    const boxes = ['live-a', 'live-b', 'expired'].map(name => ({ name, id: unique(name) }));
+    for (const box of boxes) {
+      // Expiry lies between the outer fixture transaction's start and the cut's statement. No GC or sleep.
+      await db.query(`INSERT INTO mailboxes(id,workspace_id,domain_id,address,delete_after)
+        VALUES($1,$2,$3,$4,CASE WHEN $5 THEN statement_timestamp() END)`,
+      [box.id, wid, domain, `${box.name}@facet.example`, box.name === 'expired']);
+    }
+    async function inbound(name: string, lifecycle: string, spam: boolean, links: readonly number[], held: string | null = null,
+      region = REGION, age = '0 seconds', direction = 'inbound') {
+      const id = unique(name);
+      await db.query(`INSERT INTO mail_messages(id,workspace_id,direction,thread_id,region,subject,lifecycle,spam,received_at)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::timestamptz-$10::interval)`, [id, wid, direction, thread, region, name, lifecycle, spam, from, age]);
+      for (const index of links) await db.query(`INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,received_at,held_reason)
+        VALUES($1,$2,$3,$4,$5,$6::timestamptz-$7::interval,$8)`, [boxes[index].id, id, wid, thread, direction, from, age, held]);
+      return id;
+    }
+    const unrouted = await inbound('Unrouted default', 'default', false, []);
+    const shared = await inbound('Shared live spam', 'ephemeral', true, [0,1]);
+    const held = await inbound('Held live', 'ephemeral', false, [0], 'quota');
+    const clean = await inbound('Live clean', 'ephemeral', false, [1]);
+    await inbound('Expired only, still linked', 'ephemeral', true, [2]);
+    await inbound('Outside region', 'default', false, [], null, otherRegion);
+    await inbound('Before from', 'default', true, [], null, REGION, '1 microsecond');
+    await inbound('Outbound copy', 'default', true, [], null, REGION, '0 seconds', 'outbound');
+    return { unrouted, shared, held, clean };
+  }
+
+  // Pause only at a transaction boundary. Every source query, seal, claim and authentication still runs on PostgreSQL.
+  function stage(when: 'before' | 'after') {
+    let hit!: () => void, release!: () => void;
+    const reached = new Promise<void>(resolve => { hit = resolve; });
+    const resumed = new Promise<void>(resolve => { release = resolve; });
+    return { when, reached, release, pause: () => { hit(); return resumed; } };
+  }
+  function stageDatabase(base: import('./src/core.js').Database, stages: ReturnType<typeof stage>[], retryOnly = false) {
+    let next = 0;
+    const transaction: typeof base.transaction = async (work, config) => {
+      const stop = config?.accessMode === 'read only' && (!retryOnly || config.isolationLevel === 'repeatable read') ? stages[next++] : undefined;
+      if (stop?.when === 'before') await stop.pause();
+      const result = await base.transaction(work, config);
+      if (stop?.when === 'after') await stop.pause();
+      return result;
+    };
+    return new Proxy(base, { get(target, prop) {
+      if (prop === 'transaction') return transaction;
+      const value = Reflect.get(target, prop);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+  }
+  const waitAt = (stop: ReturnType<typeof stage>, running: Promise<unknown>) =>
+    Promise.race([stop.reached, running.then(() => assert.fail('Operation completed before reaching its controlled stage.'))]);
+
+  async function parkedRead(
+    runtime: import('./src/core.js').Runtime,
+    read: () => Promise<Reply>,
+    whileParked?: () => Promise<unknown>,
+  ) {
+    const { dueLogFacetSlots, foldLogFacetSlot } = await import('./src/log-facet-fold.js');
+    const base = runtime.db, retry = stage('before');
+    runtime.db = stageDatabase(base, [retry], true);
+    const response = read();
+    try {
+      await waitAt(retry, response);
+      const due = await dueLogFacetSlots(base);
+      assert.equal(due.length, 1, 'The parked request enrolled exactly one new cut.');
+      await whileParked?.();
+      await foldLogFacetSlot({ ...runtime, db: base }, due[0]);
+      assert.deepEqual(await dueLogFacetSlots(base), [], 'The fresh cut was published before the retry reads it.');
+    } finally {
+      retry.release();
+      try { await response; } finally { runtime.db = base; }
+    }
+    return response;
+  }
+
+  test('sealed Logs cut matches public owner and member facets across retention, spam and filters', { timeout: 15_000 }, async t => {
+    await facetFixture(t, async ({ runtime, db, local }) => {
+      const wid = runtime.config.workspaceId, from = floorMinute(), campaignId = unique('facet-campaign');
+      const { unrouted, shared, held, clean } = await seedInbound(db, wid, from);
+      for (const [kind, status, campaign] of [
+        ['transactional', 'delivered', null], ['transactional', 'scheduled', null],
+        ['marketing', 'delivered', campaignId], ['marketing', 'bounced', null],
+      ] as const) await seedSent(db, wid, from, kind, status, REGION, campaign);
+      await seedSent(db, wid, from, 'transactional', 'canceled', otherRegion);
+      await seedSent(db, wid, earlierMinute(from, 1), 'marketing', 'accepted');
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [] });
+
+      const { enrollLogFacet, foldLogFacetSlot, readTicketCut } = await import('./src/log-facet-fold.js');
+      const ticket = await enrollLogFacet(runtime, wid, from, REGION);
+      await foldLogFacetSlot(runtime, ticket.slot);
+      const cut = await readTicketCut(runtime.db, ticket);
+      assert.ok(cut);
+      assert.deepEqual(cut.sent, [
+        { kind: 'marketing', status: 'bounced', n: 1 }, { kind: 'marketing', status: 'delivered', n: 1 },
+        { kind: 'transactional', status: 'delivered', n: 1 }, { kind: 'transactional', status: 'scheduled', n: 1 },
+      ]);
+      assert.deepEqual([cut.admin, cut.member], [{ total: 4, spam: 1 }, { total: 2 }]);
+
+      const scope = new URLSearchParams({ from, region: REGION }).toString();
+      const raw = (filters = '', limit = 1) => local('GET', `/v1/logs?${scope}&counts=true&limit=${limit}${filters}`);
+      const dashboard = (filters = '') => local('GET', `/v1/logs/facets?${scope}${filters}`);
+      const ids = (reply: Reply) => ok(reply).data.map((m: Json) => m.id).sort();
+      const capped = { sent: false, received: false }, zero = { transactional: 0, marketing: 0 };
+      for (const role of ['owner', 'member']) {
+        const isOwner = role === 'owner';
+        await db.query('UPDATE workspace_members SET role=$3 WHERE workspace_id=$1 AND user_id=$2', [wid, manager!.userId, role]);
+        assert.deepEqual(ids(await raw('&direction=received', 20)), (isOwner ? [unrouted, shared, held, clean] : [shared, clean]).sort());
+        assert.deepEqual(ids(await raw('&status=spam', 20)), isOwner ? [shared] : []);
+        const received = isOwner ? { received: 3, spam: 1 } : { received: 2 };
+        for (const [filters, status, kind] of [
+          ['', { delivered: 2, scheduled: 1, bounced: 1, ...received }, { transactional: 2, marketing: 2 }],
+          ['&status=bounced', { delivered: 2, scheduled: 1, bounced: 1, ...received }, { transactional: 0, marketing: 1 }],
+          ['&direction=received&status=spam', received, zero],
+          ['&direction=sent&status=delivered&kind=transactional', { delivered: 1, scheduled: 1 }, { transactional: 1, marketing: 1 }],
+          ['&kind=marketing&status=bounced', { delivered: 1, bounced: 1 }, { transactional: 0, marketing: 1 }],
+        ] as const) {
+          const label = `${role}: ${filters || 'all'}`;
+          const exact = ok(await raw(filters)).counts;
+          assert.deepEqual(exact, { status, kind, capped }, label);
+          const reply = await parkedRead(runtime, () => dashboard(filters));
+          const { asOf, counts } = ok(reply);
+          assert.deepEqual(counts, exact, label);
+          assert.match(asOf, /\.\d{6}Z$/);
+          assert.deepEqual(Object.keys(reply.body).sort(), ['asOf', 'counts']);
+          assert.equal(reply.headers.get('cache-control'), 'private, no-store');
+        }
+      }
+      for (const filters of ['&search=shared', `&campaignId=${campaignId}`, `&to=${encodeURIComponent(new Date(Date.parse(from) + 1).toISOString())}`]) {
+        assert.deepEqual(ok(await dashboard(filters)), { counts: ok(await raw(filters)).counts }, filters);
+      }
+    });
+  });
+
+  test('sealed Logs tickets coalesce before seal and later demands cannot use the earlier publication', { timeout: 10_000 }, async t => {
+    await facetFixture(t, async ({ runtime, db }) => {
+      const { enrollLogFacet, foldLogFacetSlot, dueLogFacetSlots, readTicketCut } = await import('./src/log-facet-fold.js');
+      const wid = runtime.config.workspaceId, from = floorMinute();
+      const first = await enrollLogFacet(runtime, wid, from, null), alongside = await enrollLogFacet(runtime, wid, from, null);
+      assert.deepEqual([alongside.slot, alongside.run, alongside.generation], [first.slot, first.run, first.generation]);
+      assert.deepEqual(await dueLogFacetSlots(runtime.db), [first.slot]);
+      assert.deepEqual([await readTicketCut(runtime.db, first), await readTicketCut(runtime.db, alongside)], [null, null]);
+      await seedSent(db, wid, from, 'transactional', 'delivered');
+
+      const firstRead = stage('after'), nextRead = stage('before');
+      const work = foldLogFacetSlot({ ...runtime, db: stageDatabase(runtime.db, [firstRead, nextRead]) }, first.slot);
+      try {
+        await waitAt(firstRead, work);
+        const later = await enrollLogFacet(runtime, wid, from, null);
+        assert.deepEqual([later.slot, later.run, later.generation], [first.slot, first.run, first.generation + 1]);
+        await seedSent(db, wid, from, 'marketing', 'bounced');
+        firstRead.release();
+        await waitAt(nextRead, work);
+
+        const earlier = await readTicketCut(runtime.db, first);
+        assert.ok(earlier);
+        assert.deepEqual(earlier.sent, [{ kind: 'transactional', status: 'delivered', n: 1 }]);
+        assert.deepEqual(await readTicketCut(runtime.db, alongside), earlier);
+        assert.equal(await readTicketCut(runtime.db, later), null, 'The earlier cut is published but cannot satisfy the later demand.');
+        await seedSent(db, wid, from, 'marketing', 'bounced');
+        assert.deepEqual(await readTicketCut(runtime.db, first), earlier, 'New mail does not invalidate the published ticket.');
+        nextRead.release();
+        await work;
+        const successor = await readTicketCut(runtime.db, later);
+        assert.ok(successor && successor.asOf > earlier.asOf);
+        assert.deepEqual(successor.sent, [
+          { kind: 'marketing', status: 'bounced', n: 2 }, { kind: 'transactional', status: 'delivered', n: 1 },
+        ]);
+        assert.deepEqual(await dueLogFacetSlots(runtime.db), []);
+      } finally { firstRead.release(); nextRead.release(); await work; }
+    });
+  });
+
+  test('sealed Logs rejects stale lease publication and tickets for replaced slots', { timeout: 10_000 }, async t => {
+    await facetFixture(t, async ({ runtime, db }) => {
+      const { enrollLogFacet, foldLogFacetSlot, dueLogFacetSlots, readTicketCut } = await import('./src/log-facet-fold.js');
+      const wid = runtime.config.workspaceId, from = floorMinute();
+      const original = await enrollLogFacet(runtime, wid, from, null);
+      await seedSent(db, wid, from, 'transactional', 'delivered');
+      const delayed = stage('after');
+      const stale = foldLogFacetSlot({ ...runtime, db: stageDatabase(runtime.db, [delayed]) }, original.slot);
+      try {
+        await waitAt(delayed, stale);
+        assert.deepEqual(await dueLogFacetSlots(runtime.db), [], 'A live lease is not due.');
+        assert.equal((await db.query("UPDATE jobs SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1 AND workspace_id=$2 AND status='running'", [original.slot, wid])).rowCount, 1);
+        assert.deepEqual(await dueLogFacetSlots(runtime.db), [original.slot]);
+        await seedSent(db, wid, from, 'transactional', 'delivered');
+        const current = stage('before');
+        const recovery = foldLogFacetSlot({ ...runtime, db: stageDatabase(runtime.db, [current]) }, original.slot);
+        try {
+          await waitAt(current, recovery);
+          delayed.release();
+          await stale;
+          assert.equal(await readTicketCut(runtime.db, original), null, 'The stale worker cannot publish under the new running lease.');
+          assert.deepEqual(await dueLogFacetSlots(runtime.db), [], 'The stale worker did not release the current lease.');
+        } finally { current.release(); await recovery; }
+        const recovered = await readTicketCut(runtime.db, original);
+        assert.ok(recovered);
+        assert.deepEqual(recovered.sent, [{ kind: 'transactional', status: 'delivered', n: 2 }]);
+
+        const other = unique('facet-workspace');
+        await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)', [other]);
+        const occupants = [
+          await enrollLogFacet(runtime, wid, earlierMinute(from, 1), null),
+          await enrollLogFacet(runtime, wid, earlierMinute(from, 2), null),
+          await enrollLogFacet(runtime, other, from, null),
+        ];
+        assert.equal(new Set([original, ...occupants].map(ticket => ticket.slot)).size, 4);
+        await assert.rejects(enrollLogFacet(runtime, wid, from, otherRegion), { code: 'FACET_FOLD_CAPACITY' });
+        assert.equal((await db.query("UPDATE jobs SET created_at=statement_timestamp()-interval '1 day' WHERE id=$1 AND workspace_id=$2 AND status='completed'", [original.slot, wid])).rowCount, 1);
+        const replacement = await enrollLogFacet(runtime, wid, from, otherRegion);
+        assert.equal(replacement.slot, original.slot);
+        assert.notEqual(replacement.run, original.run);
+        await assert.rejects(readTicketCut(runtime.db, original), { code: 'FACET_CATCHUP_UNAVAILABLE' });
+        assert.equal(await readTicketCut(runtime.db, replacement), null, 'The replacement cannot see the old run’s cut.');
+        await foldLogFacetSlot(runtime, replacement.slot);
+        const cut = await readTicketCut(runtime.db, replacement);
+        assert.ok(cut);
+        assert.deepEqual([cut.sent, cut.admin, cut.member], [[], { total: 0, spam: 0 }, { total: 0 }]);
+        await assert.rejects(readTicketCut(runtime.db, original), { code: 'FACET_CATCHUP_UNAVAILABLE' });
+      } finally { delayed.release(); await stale; }
+    });
+  });
+
+  test('private Logs facets refuse bearer keys and reauthorize dashboard requests while parked', { timeout: 10_000 }, async t => {
+    await facetFixture(t, async ({ runtime, db, local, request }) => {
+      const wid = runtime.config.workspaceId, from = floorMinute();
+      await seedInbound(db, wid, from);
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [] });
+      const query = new URLSearchParams({ from, region: REGION, direction: 'received' });
+      const path = `/v1/logs/facets?${query}`;
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'Facet credential check', permissions: ['manage'] }), 201);
+      assert.equal(ok(await request('GET', `/v1/logs?${query}&counts=true`, key.secret)).counts.status.spam, 1);
+      const refused = await request('GET', path, key.secret);
+      error(refused, 403, 'DASHBOARD_AUTH_REQUIRED');
+      assert.equal(refused.body.counts, undefined);
+      assert.equal(refused.body.asOf, undefined);
+      const { dueLogFacetSlots } = await import('./src/log-facet-fold.js');
+      assert.deepEqual(await dueLogFacetSlots(runtime.db), [], 'Bearer refusal does not enroll work.');
+
+      const downgraded = await parkedRead(runtime, () => local('GET', path), async () => {
+        assert.equal((await db.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=$2 AND role='owner'", [wid, manager!.userId])).rowCount, 1);
+      });
+      assert.deepEqual(ok(downgraded).counts, {
+        status: { received: 2 }, kind: { transactional: 0, marketing: 0 }, capped: { sent: false, received: false },
+      }, 'An owner at enrollment receives only member counts after downgrade.');
+      const revoked = await parkedRead(runtime, () => local('GET', path), async () => {
+        const tokenHash = createHash('sha256').update(manager!.token).digest('hex');
+        assert.equal((await db.query('DELETE FROM nightmail_sessions WHERE token_hash=$1 AND user_id=$2', [tokenHash, manager!.userId])).rowCount, 1);
+      });
+      error(revoked, 401, 'AUTH_REQUIRED');
+      assert.equal(revoked.body.counts, undefined);
+      assert.equal(revoked.body.asOf, undefined);
+    });
+  });
+});
+
 describe('Personalization context boundaries', () => {
   test('unquoted and executable placeholders fail review, while quoted URLs and literal-brace recipient data render safely', async t => {
     const key = await keyFixture(t);

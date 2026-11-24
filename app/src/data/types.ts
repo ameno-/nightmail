@@ -244,7 +244,7 @@ export interface RoutingTestInput { to?: string[]; raw?: string; junk?: boolean 
 // One row of the unified logs (GET /v1/logs): sent or received mail, newest first. Delivery details of received mail
 // (envelopeTo, regionId, the spam status) reach administrators only.
 export type LogDirection = 'all' | 'sent' | 'received'
-/** How many emails match each status and stream under the other filters, between the same dates (GET /v1/logs?counts=true). */
+/** Exact counts for each status and stream under the other filters, between the same dates (GET /v1/logs/facets). */
 export interface LogCounts { status: Record<string, number>; stream: { transactional: number; marketing: number } }
 export interface LogEntry {
   id: string; direction: 'sent' | 'received'; at: ISODate; status: string; from: MailAddress; to: string[]; toCount?: number; subject: string

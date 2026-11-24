@@ -307,10 +307,10 @@ export function migrateLegacyCookies(c: Ctx) {
 }
 
 /** The session this request acts as, or null. A tab naming an account this browser has no live session for gets null. */
-async function currentSession(runtime: Runtime, headers: Headers) {
+async function currentSession(runtime: Runtime, headers: Headers, db: DbExecutor = runtime.db) {
   const jar = await sessionJar(runtime, headers);
   if (!jar.slots.length) return null;
-  const { rows: [row] } = await runtime.db.execute<{ token_hash: string; user_id: string; subject: string; staff: boolean }>(activeSession(runtime, jar));
+  const { rows: [row] } = await db.execute<{ token_hash: string; user_id: string; subject: string; staff: boolean }>(activeSession(runtime, jar));
   return row ?? null;
 }
 
@@ -330,20 +330,29 @@ export async function accountSessionPolicy(runtime: Runtime, headers: Headers) {
 
 const signedOut = () => new ApiError(401, 'ACCOUNT_SIGNED_OUT', `This account is no longer signed in to ${productName} in this browser.`);
 export async function accountSessionActor(runtime: Runtime, headers: Headers): Promise<Actor|null> {
+  return resolveAccountSessionActor(runtime, headers, runtime.db, true);
+}
+
+/** Revalidate a parked dashboard facet request in its fresh read-only snapshot. A retry is not a workspace selection. */
+export async function accountSessionActorOnFacetRetry(runtime: Runtime, headers: Headers, db: DbExecutor): Promise<Actor|null> {
+  return resolveAccountSessionActor(runtime, headers, db, false);
+}
+
+async function resolveAccountSessionActor(runtime: Runtime, headers: Headers, db: DbExecutor, rememberSelection: boolean): Promise<Actor|null> {
   const jar = await sessionJar(runtime, headers);
   if (!jar.slots.length) return null;
   const selected = requestHeader(headers, 'workspace');
-  const {rows:[m]} = await runtime.db.execute<{id:string;email:string;name:string;workspace:string;role:string;staff:boolean}>(sql`
+  const {rows:[m]} = await db.execute<{id:string;email:string;name:string;workspace:string;role:string;staff:boolean}>(sql`
     WITH active AS MATERIALIZED (${activeSession(runtime, jar)}),
     member AS (SELECT u.id,u.email,u.name,m.workspace_id AS workspace,m.role,s.staff FROM active s JOIN nightmail_users u ON s.user_id=u.id
       JOIN workspace_members m ON m.user_id=u.id WHERE m.role IN ('owner','admin','member')
       ${runtime.config.multiTenant ? sql`` : sql`AND m.role IN ('owner','admin') AND ${JSON.stringify(runtime.config.allowedSubjects)}::jsonb ? s.subject`}
       ${selected && runtime.config.multiTenant ? sql`AND m.workspace_id=${selected}` : sql``}
       ORDER BY (m.workspace_id=u.selected_workspace_id) DESC NULLS LAST,m.created_at,m.id LIMIT 1
-    ), selected AS (UPDATE nightmail_users u SET selected_workspace_id=member.workspace FROM member WHERE u.id=member.id AND u.selected_workspace_id IS DISTINCT FROM member.workspace)
+    )${rememberSelection ? sql`, selected AS (UPDATE nightmail_users u SET selected_workspace_id=member.workspace FROM member WHERE u.id=member.id AND u.selected_workspace_id IS DISTINCT FROM member.workspace)` : sql``}
     SELECT * FROM member`);
   if (!m) {
-    const session = await currentSession(runtime, headers);
+    const session = await currentSession(runtime, headers, db);
     // The tab's account was signed out, expired or revoked: refuse, never fall back to another account's session.
     if (!session) { if (jar.selected !== null) throw signedOut(); return null; }
     if (selected && runtime.config.multiTenant) throw new ApiError(403,'WORKSPACE_ACCESS_DENIED','This workspace is not available to your session.');
