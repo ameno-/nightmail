@@ -12,10 +12,20 @@ import { SLOW_REQUEST_MS } from './log.js';
 export const TICK = {
   /** One tick per minute across every process: a second cron or runner within this window does nothing. */
   everySeconds: 45,
-  /** Each probe's statement_timeout. A probe that runs out is skipped (its alerts neither fire nor clear) and logged. */
-  statementMs: 3_000,
-  /** Cards posted per tick, together, each given this long: Slack being slow costs the minute cron five seconds at most. */
-  cards: 6, postMs: 5_000,
+  /**
+   * Every statement the tick and the counters run, reads and writes alike: a second to get a lock, three to run
+   * (src/health-counters.ts WRITE_LIMITS). One that runs out is dropped: a probe's section shows as unknown (its
+   * alerts neither open nor clear), a write's sample is lost, and nothing is retried before the next minute.
+   */
+  statementMs: 3_000, lockMs: 1_000,
+  /**
+   * Cards per tick, one after the other (Slack takes about one a second from a webhook), each given `postMs`, all of
+   * them `postBudgetMs`: critical before warning, new before cleared before reminders. More new ones than fit become
+   * one summary card naming how many of each kind, so a burst of fifty is six cards, not fifty over eight minutes.
+   */
+  cards: 6, postMs: 5_000, postBudgetMs: 10_000,
+  /** A cleared card Slack refuses is tried again each tick for this long, then given up on (and logged). */
+  clearRetryMinutes: 30,
   /** The Health page calls the rollup stale after this: three missed ticks. */
   staleSeconds: 180,
   /** Gone this long before "All clear": one quiet minute between two bad ones is not a recovery. */
@@ -95,10 +105,12 @@ export const CAMPAIGNS = {
   /** Rules about rate need this much left to send, in seconds at the planned rate: the last stretch always slows. */
   tailSeconds: 600,
   /**
-   * Time left at the measured rate, for a campaign without a daily pace. On the 23rd a 1.8M send planned at a quarter
-   * of the account's rate would have taken 15 hours instead of 3; the card names all three rates. After five samples.
+   * Time left at the measured rate over this many hours, while it releases under `longShare` of what it is entitled to.
+   * On the 23rd a 1.8M send released a fifth of what it was entitled to and would have taken 15 hours instead of 3;
+   * the card names every rate. A long send at the rate it is entitled to, or at a rate share its owner chose, is
+   * slow by choice: its time left is on the Health page, never an alert. After five samples.
    */
-  etaHours: 6, etaSamples: 5,
+  etaHours: 6, etaSamples: 5, longShare: 0.8,
   /** Preparing this long since launch (on the 23rd: 6.5 minutes for 1.8M recipients). */
   preparingSeconds: 300,
   /** Waiting on a quota, the balance or a hold this long. A list probe waits ten minutes by design, so it gets thirty. */
@@ -139,6 +151,11 @@ export const REQUESTS = {
   errorLines: 5,
   /** Lines every minute already says on its own, and the health tick's own. */
   errorLinesIgnored: /^(?:QUEUE_BACKLOG_ALERT|HEALTH_[A-Z_]+)$/,
+  /**
+   * Codes that alert at the first line, critical, and as a failed job's error at the first job. MAILBOX_STAGING_UNDELIVERED
+   * (#625): mail arrived for a real workspace and its arrival notice was lost, so nobody would otherwise know.
+   */
+  errorLinesFirst: ['MAILBOX_STAGING_UNDELIVERED'],
   /**
    * A dispatcher shard's run failing (DISPATCHER_RUN_FAILED and its kin) this often in fifteen minutes. One failure
    * heals itself: the shard runs again 15 seconds later and its leased mail is taken back within three minutes. On the

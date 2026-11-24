@@ -1,7 +1,7 @@
 import { sql } from 'drizzle-orm';
 import { log, onErrorLine } from './log.js';
 import { REQUESTS } from './health-thresholds.js';
-import type { DbExecutor } from './core.js';
+import type { Database } from './core.js';
 
 // Request counters for the health tick (src/health.ts): every request adds to a map in this process, and every
 // FLUSH_MS the map is written to health_minutes in one statement, after a response (Workers) or on a timer (Node). So
@@ -16,6 +16,8 @@ import type { DbExecutor } from './core.js';
 /** Upper bounds of the latency buckets in ms; the last bucket is everything slower. */
 export const LATENCY_BUCKETS = [5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, REQUESTS.verySlowMs] as const;
 const FLUSH_MS = 20_000, KEYS = 500;
+/** What every health write runs under, transaction-local: a second for a lock, three for the statement. Then it is dropped. */
+export const WRITE_LIMITS = sql`SELECT set_config('lock_timeout','1000',true),set_config('statement_timeout','3000',true)`;
 type Counter = { n: number; errors: number; ms: number; slowest: number; hist?: number[] };
 let pending = new Map<string, Counter>(), flushAfter = Date.now() + FLUSH_MS, flushing = false;
 
@@ -46,11 +48,13 @@ export const countDatabaseError = (sqlstate: string | undefined) => { if (sqlsta
 export const countersDue = () => pending.size > 0 && !flushing && Date.now() >= flushAfter;
 
 /**
- * Writes this process's counters and starts over. One statement; rows are written in key order, so two processes
- * flushing the same minute never deadlock. It never throws: a flush the database refuses is dropped, and the next one
- * waits a minute, so a database in trouble is not asked more often because it is in trouble.
+ * Writes this process's counters and starts over. One statement in a transaction of its own that waits at most a
+ * second for a lock and runs at most three (WRITE_LIMITS); rows are written in key order, so two processes flushing
+ * the same minute never deadlock. It never throws and never retries: a flush that is refused, locked out or too slow is
+ * dropped, and the next one waits a minute, so a database in trouble is not asked more often because it is in trouble.
+ * Nothing on a request, a queue batch, the cron's own steps or a dispatcher awaits it (worker.ts, dispatcher-do.ts).
  */
-export async function flushCounters(db: Pick<DbExecutor, 'execute'>) {
+export async function flushCounters(db: Pick<Database, 'transaction'>) {
   if (flushing || !pending.size) return 0;
   const batch = pending;
   pending = new Map(); flushing = true; flushAfter = Date.now() + FLUSH_MS;
@@ -58,11 +62,11 @@ export async function flushCounters(db: Pick<DbExecutor, 'execute'>) {
   const rows = [...batch].map(([id, c]) => { const [kind, key] = id.split('\n') as [string, string]; return { kind, key, ...c }; })
     .filter(row => row.kind !== 'read' || row.n >= REQUESTS.clientFlush);
   try {
-    if (rows.length) await db.execute(sql`INSERT INTO health_minutes AS m (minute,kind,key,n,errors,ms,slowest,hist)
+    if (rows.length) await db.transaction(async tx => { await tx.execute(WRITE_LIMITS); await tx.execute(sql`INSERT INTO health_minutes AS m (minute,kind,key,n,errors,ms,slowest,hist)
       SELECT date_trunc('minute',now()),r.kind,r.key,r.n,r.errors,r.ms,r.slowest,CASE WHEN r.hist IS NOT NULL THEN ARRAY(SELECT jsonb_array_elements_text(r.hist)::int) END
       FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) r(kind text,key text,n int,errors int,ms bigint,slowest int,hist jsonb) ORDER BY r.kind,r.key
       ON CONFLICT (minute,kind,key) DO UPDATE SET n=m.n+excluded.n,errors=m.errors+excluded.errors,ms=m.ms+excluded.ms,slowest=greatest(m.slowest,excluded.slowest),
-        hist=CASE WHEN m.hist IS NULL THEN excluded.hist WHEN excluded.hist IS NULL THEN m.hist ELSE ARRAY(SELECT a+b FROM unnest(m.hist,excluded.hist) WITH ORDINALITY u(a,b,i) ORDER BY i) END`);
+        hist=CASE WHEN m.hist IS NULL THEN excluded.hist WHEN excluded.hist IS NULL THEN m.hist ELSE ARRAY(SELECT a+b FROM unnest(m.hist,excluded.hist) WITH ORDINALITY u(a,b,i) ORDER BY i) END`); });
     return rows.length;
   } catch {
     flushAfter = Date.now() + 60_000;

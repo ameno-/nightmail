@@ -2,7 +2,7 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { sql, type SQL } from 'drizzle-orm';
 import { ApiError, databaseCodeOf, errors, log, logError, response, security, transientDatabaseError, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
 import { CAMPAIGNS, DATABASE, DLQ, JOBS, JOBS_LATE, QUEUES, REQUESTS, SQLSTATES, TICK } from './health-thresholds.js';
-import { countDatabaseError, LATENCY_BUCKETS } from './health-counters.js';
+import { countDatabaseError, LATENCY_BUCKETS, WRITE_LIMITS } from './health-counters.js';
 import { slackCard } from './operator-alerts.js';
 import { postSlack } from './reputation-alerts.js';
 
@@ -174,13 +174,15 @@ export function evaluate(sample: Sample, memory: Memory, now: number, diskBytes:
       row.failed += failed.failed;
       if (failed.failed > row.top) { row.top = failed.failed; row.error = failed.error ? safe(failed.error) : null; }
     }
+    const firstTypes = new Set(sample.failed.filter(failed => (REQUESTS.errorLinesFirst as readonly string[]).includes(failed.error)).map(failed => safe(failed.type)));
     // The pile as it stands, and how much it grew in the last half hour (the first tick has nothing to compare with).
     const before = failedRing.find(([at]) => now - at <= JOBS.failedWindowMinutes * 60)?.[1];
     for (const row of types.values()) {
       if (!row.failed || (JOBS.failedIgnored as readonly string[]).includes(row.type)) continue;
       const grew = before ? row.failed - (before[row.type] ?? 0) : 0;
-      if (row.failed >= (row.type.startsWith('campaign.') ? JOBS.failedCampaign : JOBS.failed) || grew >= JOBS.failedNew) {
-        find('jobs-failed', row.type, row.failed, `${id(row.type)}: ${count(row.failed)}${row.failed >= JOBS.read ? '+' : ''}${grew > 0 ? `, ${count(grew)} in the last ${JOBS.failedWindowMinutes} min` : ''}, mostly ${id(row.error ?? 'unknown')}.`, JOBS.failedRemindMinutes, row.type.startsWith('campaign.') ? 'critical' : 'warning');
+      const first = firstTypes.has(row.type);
+      if (first || row.failed >= (row.type.startsWith('campaign.') ? JOBS.failedCampaign : JOBS.failed) || grew >= JOBS.failedNew) {
+        find('jobs-failed', row.type, row.failed, `${id(row.type)}: ${count(row.failed)}${row.failed >= JOBS.read ? '+' : ''}${grew > 0 ? `, ${count(grew)} in the last ${JOBS.failedWindowMinutes} min` : ''}, mostly ${id(row.error ?? 'unknown')}.`, JOBS.failedRemindMinutes, first || row.type.startsWith('campaign.') ? 'critical' : 'warning');
         row.behind = true;
       }
     }
@@ -195,31 +197,41 @@ export function evaluate(sample: Sample, memory: Memory, now: number, diskBytes:
   let campaigns: Rollup['campaigns'] = null;
   const samples: Memory['campaigns'] = {};
   if (sample.campaigns) {
+    const waiting = (c: CampaignRow) => c.state === 'sending' && c.waitingReason !== null && (c.waitingSeconds ?? 0) > 0;
+    // A workspace's campaigns share what the workspace is entitled to: how many of them are releasing right now.
+    const releasing = new Map<string, number>();
+    for (const c of sample.campaigns) if (c.state === 'sending' && !waiting(c) && c.expanded < c.total) releasing.set(c.workspaceId, (releasing.get(c.workspaceId) ?? 0) + 1);
     campaigns = sample.campaigns.map(c => {
-      const cid = safe(c.id), remaining = Math.max(0, c.total - c.expanded - c.canceled), flagged = findings.length;
-      // What it may release: the account's rate, the share a workspace of its kind gets, its own rate share. What it
-      // does release: its cursor, a minute apart. The planner's own number is only shown.
-      const entitled = c.account === null ? null : c.account * CAMPAIGNS.share[c.share] * (c.rateShare ?? 1);
-      const waits = c.state === 'sending' && c.waitingReason !== null && (c.waitingSeconds ?? 0) > 0;
+      // `expanded` is the cursor over the frozen recipients: everyone released or skipped so far (a delivered-only
+      // resume skips recipients, and each skip also counts in `canceled`, so that is never subtracted again).
+      const cid = safe(c.id), remaining = Math.max(0, c.total - c.expanded), flagged = findings.length;
+      // What it may release: the account's rate, the share a workspace of its kind gets, then the smaller of its own
+      // rate share and an even split with the workspace's other releasing campaigns. What it does release: its cursor,
+      // a minute apart. The planner's own number is only shown.
+      const workspace = c.account === null ? null : c.account * CAMPAIGNS.share[c.share];
+      const entitled = workspace === null ? null : Math.min(workspace * (c.rateShare ?? 1), workspace / Math.max(1, releasing.get(c.workspaceId) ?? 1));
+      const waits = waiting(c);
       // Measured only over minutes it was free to send: a wait, a pause or preparing starts the samples over.
       const ring = c.state === 'sending' && !waits ? [...(memory.campaigns[c.id] ?? []), [now, c.expanded, c.accepted] as Memory['campaigns'][string][number]].slice(-(CAMPAIGNS.windowMinutes + 1)) : [];
       if (ring.length) samples[c.id] = ring;
       const first = ring[0], seconds = first ? now - first[0] : 0, released = first ? Math.max(0, c.expanded - first[1]) : 0, rate = first && seconds >= 30 ? released / seconds : null;
       const acceptedRate = first && seconds >= 30 && first[2] !== null && c.accepted !== null && c.accepted > first[2] ? (c.accepted - first[2]) / seconds : null;
       const etaSeconds = rate ? Math.round(remaining / rate) : null;
-      const against = c.account === null || entitled === null ? 'the account’s rate is unknown' : `${rate === null ? '' : `${percent(rate / c.account)} of `}the account’s ${perSecond(c.account)} (entitled to ${perSecond(entitled)}${c.planned !== null && Math.abs(c.planned * (c.rateShare ?? 1) - entitled) > entitled * 0.1 ? `; the planner reads ${perSecond(c.planned * (c.rateShare ?? 1))}` : ''})`;
+      const planned = c.planned === null ? null : c.planned * (c.rateShare ?? 1);
+      const against = c.account === null || entitled === null ? 'the account’s rate is unknown' : `${rate === null ? '' : `${percent(rate / c.account)} of `}the account’s ${perSecond(c.account)} (entitled to ${perSecond(entitled)}${planned !== null && planned < entitled * 0.9 ? `; the planner reads ${perSecond(planned)}` : ''})`;
       const measurable = c.state === 'sending' && !c.paced && rate !== null && remaining > 0;
       if (measurable && ((seconds >= CAMPAIGNS.stalledMinutes * 60 - 30 && released === 0)
         || (entitled !== null && entitled > 0 && seconds >= CAMPAIGNS.windowMinutes * 60 - 30 && remaining > entitled * CAMPAIGNS.tailSeconds && rate < entitled * CAMPAIGNS.slowShare)))
         find('campaign-slow', cid, rate, `${id(cid)}: ${released === 0 ? 'nothing released' : perSecond(rate)} for ${span(seconds)}, ${against}. ${count(remaining)} left.`, CAMPAIGNS.remindMinutes, released === 0 ? 'critical' : 'warning');
-      if (measurable && ring.length > CAMPAIGNS.etaSamples && etaSeconds !== null && etaSeconds > CAMPAIGNS.etaHours * 3600)
+      // Long only counts when it is also slower than it is entitled to: a long send at its entitled rate is by choice.
+      if (measurable && entitled !== null && entitled > 0 && rate < entitled * CAMPAIGNS.longShare && ring.length > CAMPAIGNS.etaSamples && etaSeconds !== null && etaSeconds > CAMPAIGNS.etaHours * 3600)
         find('campaign-long', cid, etaSeconds, `${id(cid)}: ${span(etaSeconds)} left at ${perSecond(rate)}, ${against}. ${count(remaining)} of ${count(c.total)} left.`, CAMPAIGNS.etaHours * 60);
       if (c.state === 'preparing' && (c.launchedSeconds ?? 0) >= CAMPAIGNS.preparingSeconds)
         find('campaign-preparing', cid, c.launchedSeconds!, `${id(cid)}: ${span(c.launchedSeconds!)}, ${count(c.prepared)} of ${count(c.total)} ready.`, CAMPAIGNS.remindMinutes);
       // How long it has waited is not stored; the streak counts the ticks, one a minute.
-      const waiting = `campaign-waiting:${cid}`;
-      if (held(waiting, waits && !(CAMPAIGNS.waitingIgnored as readonly string[]).includes(c.waitingReason!), Math.ceil((c.waitingReason === 'list_probe' ? CAMPAIGNS.probeSeconds : CAMPAIGNS.waitingSeconds) / 60)))
-        find('campaign-waiting', cid, streaks[waiting]! * 60, `${id(cid)}: ${id(c.waitingReason)} for ${span(streaks[waiting]! * 60)}, ${span(c.waitingSeconds!)} to go. ${count(remaining)} left.`, CAMPAIGNS.remindMinutes);
+      const wait = `campaign-waiting:${cid}`;
+      if (held(wait, waits && !(CAMPAIGNS.waitingIgnored as readonly string[]).includes(c.waitingReason!), Math.ceil((c.waitingReason === 'list_probe' ? CAMPAIGNS.probeSeconds : CAMPAIGNS.waitingSeconds) / 60)))
+        find('campaign-waiting', cid, streaks[wait]! * 60, `${id(cid)}: ${id(c.waitingReason)} for ${span(streaks[wait]! * 60)}, ${span(c.waitingSeconds!)} to go. ${count(remaining)} left.`, CAMPAIGNS.remindMinutes);
       // Paused by Nightmail (a quarantine, an auto-pause, a failure), not by its owner. Open until it is resumed or
       // canceled, or a day has passed: after that it is the owner's to decide and no longer news.
       if (c.state === 'paused' && c.pauseCode !== null && c.pauseCode !== 'PAUSED_BY_USER' && (c.pausedSeconds ?? 0) < 86_400)
@@ -227,7 +239,7 @@ export function evaluate(sample: Sample, memory: Memory, now: number, diskBytes:
       const settled = c.delivered === null || c.bounced === null ? null : c.delivered + c.bounced, bounceRate = settled ? c.bounced! / settled : null;
       if (c.state !== 'paused' && settled !== null && bounceRate !== null && settled >= CAMPAIGNS.settled && (bounceRate >= CAMPAIGNS.bounceRate || (c.complained ?? 0) / settled >= CAMPAIGNS.complaintRate))
         find('campaign-bounces', cid, bounceRate, `${id(cid)}: ${percent(bounceRate)} bounced and ${count(c.complained ?? 0)} complaints on ${count(settled)} settled.`, CAMPAIGNS.remindMinutes);
-      return { id: cid, workspaceId: safe(c.workspaceId), state: c.state, total: c.total, released: c.expanded, rate, acceptedRate, entitled, account: c.account, planned: c.planned === null ? null : c.planned * (c.rateShare ?? 1),
+      return { id: cid, workspaceId: safe(c.workspaceId), state: c.state, total: c.total, released: c.expanded, rate, acceptedRate, entitled, account: c.account, planned,
         etaSeconds: c.state === 'sending' ? etaSeconds : null, waiting: c.state === 'paused' ? c.pauseCode : waits ? c.waitingReason : null, settled, bounceRate, behind: findings.length > flagged };
     }).sort((a, b) => Number(b.behind) - Number(a.behind));
   } else { blind.add('campaigns'); Object.assign(samples, memory.campaigns); }
@@ -257,7 +269,10 @@ export function evaluate(sample: Sample, memory: Memory, now: number, diskBytes:
     const lines = of('error').filter(row => !REQUESTS.errorLinesIgnored.test(row.key)), dispatcher = lines.filter(row => row.key.startsWith('DISPATCHER_')).sort((a, b) => b.n - a.n);
     const failures = dispatcher.reduce((sum, row) => sum + row.n, 0);
     if (failures >= REQUESTS.dispatcherFailures) find('dispatcher-failing', null, failures, `${count(failures)} failed runs in 15 min, mostly ${id(dispatcher[0]!.key)}.`, REQUESTS.errorRemindMinutes);
-    for (const row of lines) if (!row.key.startsWith('DISPATCHER_') && row.n5 >= REQUESTS.errorLines) find('errors', safe(row.key), row.n5, `${id(row.key)}: ${count(row.n5)} in 5 min.`, REQUESTS.errorRemindMinutes);
+    for (const row of lines) {
+      const first = (REQUESTS.errorLinesFirst as readonly string[]).includes(row.key);
+      if (!row.key.startsWith('DISPATCHER_') && row.n5 >= (first ? 1 : REQUESTS.errorLines)) find('errors', safe(row.key), row.n5, `${id(row.key)}: ${count(row.n5)} in 5 min.`, REQUESTS.errorRemindMinutes, first ? 'critical' : 'warning');
+    }
     routes = [...all.filter(route => route.behind), ...all.filter(route => !route.behind && route.count >= 5).sort((a, b) => b.p95Ms - a.p95Ms).slice(0, 8)];
     errorCodes = (['code', 'sqlstate', 'error'] as const).flatMap(kind => of(kind).map(row => ({ kind, code: safe(row.key), count: row.n }))).sort((a, b) => b.count - a.count).slice(0, 12);
     requests = { count: of('route').reduce((sum, row) => sum + row.n, 0), errors: of('route').reduce((sum, row) => sum + row.errors, 0) };
@@ -281,14 +296,12 @@ export function evaluate(sample: Sample, memory: Memory, now: number, diskBytes:
   return { rollup: { queues, jobs, campaigns, feedbackLagSeconds, routes, errors: errorCodes, requests, database, memory: { streaks, campaigns: samples, failed: failedRing } }, findings, blind };
 }
 
-/** One probe in its own short transaction: its statement_timeout bounds it, and a probe that fails leaves the others alone. */
+/** Everything the tick asks the database runs in a short transaction of its own under WRITE_LIMITS: a second for a lock, three to run. */
+const bounded = <T>(db: Runtime['db'], work: (tx: DbExecutor) => Promise<T>): Promise<T> => db.transaction(async tx => { await tx.execute(WRITE_LIMITS); return work(tx); });
+/** One probe: bounded, and one that fails leaves the others alone. */
 async function probe<T>(db: Runtime['db'], name: string, read: (tx: DbExecutor) => Promise<T>): Promise<T | null> {
-  try {
-    return await db.transaction(async tx => {
-      await tx.execute(sql`SELECT set_config('statement_timeout',${String(TICK.statementMs)},true)`);
-      return read(tx);
-    });
-  } catch (error) {
+  try { return await bounded(db, read); }
+  catch (error) {
     countDatabaseError(databaseCodeOf(error));
     logError(error, { code: 'HEALTH_PROBE_FAILED', probe: name }, 'warn');
     return null;
@@ -355,19 +368,23 @@ function alertCard(publicUrl: string, alert: { key: string; kind: Kind; severity
 const subjectOf = (words: string) => /^(?:workspace )?`[^`]+`/.exec(words)?.[0] ?? '';
 // The one thing the database cannot be asked to remember: that it is refusing. Kept in this process, like the disk
 // alert's limiter; a process recycled during an outage posts its card again, at most once a minute.
-const refusing = { since: 0, sent: 0, words: '' };
+const refusing = { since: 0, sent: 0, words: '', clearTries: 0 };
+const critical = (alert: { severity: Severity }) => alert.severity === 'critical' ? 0 : 1;
 
-export type HealthCard = { key: string; state: 'open' | 'reminder' | 'cleared'; card: SlackMessage };
+export type HealthCard = { key: string; state: 'open' | 'reminder' | 'cleared'; card: SlackMessage; /** A summary card stands for these alerts too. */ covers?: string[] };
 export type TickResult = { ran: boolean; ms: number; statements: number; open: number; cards: HealthCard[] };
 /**
- * One tick: elect, measure, write the rollup, reconcile the alerts, post their cards. Never throws. Elected in the
- * database (one tick per TICK.everySeconds, whoever asks), and that first UPDATE is also the probe that tells a
- * database refusing writes: then one card says so, straight from here, and everything else waits for it to come back.
+ * One tick: elect, measure, write the rollup, reconcile the alerts, post their cards. Never throws, and nothing awaits
+ * it (worker.ts runs it in waitUntil after dispatch recovery; the runner in the background). Elected in the database
+ * (one tick per TICK.everySeconds, whoever asks), and that first UPDATE is also the probe that tells a database
+ * refusing writes: then one card says so, straight from here, and everything else waits for it to come back. Every
+ * statement runs under WRITE_LIMITS; one that cannot get its lock or runs out drops this tick's sample.
  */
 export async function healthTick(runtime: Pick<Runtime, 'db' | 'config'>, input: { queues?: QueueSample[] } = {}, options: { post?: HealthPost; force?: boolean } = {}): Promise<TickResult> {
   const started = Date.now(), { db, config } = runtime, url = config.operatorSlackWebhookUrl, post = options.post ?? slack, cards: HealthCard[] = [];
   let statements = 0;
-  const run = <T extends Record<string, unknown>>(query: SQL) => { statements++; return db.execute<T>(query); };
+  // BEGIN, the limits and COMMIT around what each transaction runs.
+  const run = <T>(inside: number, work: (tx: DbExecutor) => Promise<T>) => { statements += 3 + inside; return bounded(db, work); };
   const result = (ran: boolean, open = 0): TickResult => ({ ran, ms: Date.now() - started, statements, open, cards });
   const send = async (card: HealthCard) => {
     if (!url) return false;
@@ -376,13 +393,15 @@ export async function healthTick(runtime: Pick<Runtime, 'db' | 'config'>, input:
   };
   let memory: Memory;
   try {
-    const claimed = await run<{ rollup: Rollup | null }>(sql`UPDATE health_state SET tick_at=now() WHERE singleton AND (${options.force === true} OR tick_at<now()-make_interval(secs=>${TICK.everySeconds})) RETURNING rollup`);
+    const claimed = await run(1, tx => tx.execute<{ rollup: Rollup | null }>(sql`UPDATE health_state SET tick_at=now() WHERE singleton AND (${options.force === true} OR tick_at<now()-make_interval(secs=>${TICK.everySeconds})) RETURNING rollup`));
     if (!claimed.rows.length) return result(false);
     memory = { ...emptyMemory(), ...claimed.rows[0]!.rollup?.memory };
   } catch (error) {
-    if (!transientDatabaseError(error)) { logError(error, { code: 'HEALTH_TICK_FAILED' }); return result(false); }
-    const sqlstate = databaseCodeOf(error), rule = sqlstate ? SQLSTATES[sqlstate] : undefined, since = refusing.since ||= Date.now(), seconds = Math.round((Date.now() - since) / 1000);
-    refusing.words = `${rule?.label ?? 'unreachable'}${sqlstate ? ` (${id(sqlstate)})` : ''}`;
+    const sqlstate = databaseCodeOf(error);
+    // The health row being locked or slow is this tick's loss, not the database refusing: skip it.
+    if (!transientDatabaseError(error) || sqlstate === '55P03' || sqlstate === '57014') { logError(error, { code: 'HEALTH_TICK_SKIPPED' }, 'warn'); return result(false); }
+    const rule = sqlstate ? SQLSTATES[sqlstate] : undefined, since = refusing.since ||= Date.now(), seconds = Math.round((Date.now() - since) / 1000);
+    refusing.words = `${rule?.label ?? 'unreachable'}${sqlstate ? ` (${id(sqlstate)})` : ''}`; refusing.clearTries = 0;
     log('error', { code: 'HEALTH_DATABASE_REFUSING', databaseCode: sqlstate, forSeconds: seconds });
     const alert = { key: 'database-refusing', kind: 'database-refusing' as const, severity: 'critical' as const, value: seconds, since: iso(since) };
     if (Date.now() - refusing.sent >= DATABASE.remindMinutes * 60_000 && await send({ key: alert.key, state: refusing.sent ? 'reminder' : 'open',
@@ -390,63 +409,85 @@ export async function healthTick(runtime: Pick<Runtime, 'db' | 'config'>, input:
     return result(true, 1);
   }
   try {
+    // It answered again. The outage is forgotten only once its cleared card has gone out (or it never had a card):
+    // a card Slack refuses now is tried again on the next ticks, for TICK.clearRetryMinutes.
     if (refusing.since) {
       const alert = { key: 'database-refusing', kind: 'database-refusing' as const, severity: 'critical' as const, since: iso(refusing.since) };
-      if (refusing.sent) await send({ key: alert.key, state: 'cleared', card: alertCard(config.publicUrl, alert, 'cleared', `Cleared: ${KINDS[alert.kind].label}`, `${refusing.words}, after ${span((Date.now() - refusing.since) / 1000)}.`) });
-      refusing.since = 0; refusing.sent = 0;
+      const gone = !refusing.sent || !url || await send({ key: alert.key, state: 'cleared', card: alertCard(config.publicUrl, alert, 'cleared', `Cleared: ${KINDS[alert.kind].label}`, `${refusing.words}, after ${span((Date.now() - refusing.since) / 1000)}.`) });
+      if (!gone && ++refusing.clearTries >= TICK.clearRetryMinutes) log('warn', { code: 'HEALTH_ALERT_DROPPED', alert: alert.key });
+      if (gone || refusing.clearTries >= TICK.clearRetryMinutes) Object.assign(refusing, { since: 0, sent: 0, clearTries: 0 });
     }
-    statements += PROBES * 4; // Each probe: BEGIN, set_config, the read, COMMIT.
+    statements += PROBES * 4; // Each probe: BEGIN, the limits, the read, COMMIT.
     const sample = await measure(runtime, input.queues ?? []);
     const { rollup, findings, blind } = evaluate(sample, memory, Math.floor(Date.now() / 1000), config.databaseDiskBytes ?? null);
     // One line a minute per running campaign: what was released and accepted, how fast against what it may, and what came back.
     for (const c of rollup.campaigns ?? []) {
       const row = sample.campaigns!.find(row => safe(row.id) === c.id)!, rounded = (n: number | null) => n === null ? undefined : Math.round(n * 10) / 10;
-      if (c.state !== 'paused') log('info', { code: 'CAMPAIGN_MINUTE', campaignId: c.id, workspaceId: c.workspaceId, state: c.state, total: c.total, prepared: row.prepared, released: c.released, rate: rounded(c.rate), acceptedRate: rounded(c.acceptedRate),
-        entitledRate: rounded(c.entitled), accountRate: c.account ?? undefined, plannedRate: c.planned ?? undefined, etaSeconds: c.etaSeconds ?? undefined, waiting: c.waiting ?? undefined, accepted: row.accepted ?? undefined,
+      if (c.state !== 'paused') log('info', { code: 'CAMPAIGN_MINUTE', campaignId: c.id, workspaceId: c.workspaceId, state: c.state, total: c.total, prepared: row.prepared, released: c.released, skipped: row.canceled || undefined, rate: rounded(c.rate),
+        acceptedRate: rounded(c.acceptedRate), entitledRate: rounded(c.entitled), accountRate: c.account ?? undefined, plannedRate: c.planned ?? undefined, etaSeconds: c.etaSeconds ?? undefined, waiting: c.waiting ?? undefined, accepted: row.accepted ?? undefined,
         delivered: row.delivered ?? undefined, bounced: row.bounced ?? undefined, complained: row.complained ?? undefined, feedbackLagSeconds: rollup.feedbackLagSeconds ?? undefined });
     }
-    // The rollup; and in the same statement, minutes older than two hours folded into their hours (kept 30 days), so a
-    // route's count and p95 outlive the logs. Whole hours only, so each hour folds once; most ticks fold nothing.
-    await run(sql`WITH old AS (DELETE FROM health_minutes WHERE minute<date_trunc('hour',now()-make_interval(mins=>${TICK.keepMinutes})) RETURNING *),
-        sums AS (SELECT date_trunc('hour',minute) AS hour,kind,key,sum(n) AS n,sum(errors) AS errors,sum(ms) AS ms,max(slowest) AS slowest FROM old WHERE kind<>'read' GROUP BY 1,2,3),
-        hists AS (SELECT hour,kind,key,array_agg(s ORDER BY i) AS hist FROM (SELECT date_trunc('hour',minute) AS hour,kind,key,i,sum(v)::bigint AS s FROM old,unnest(old.hist) WITH ORDINALITY u(v,i) WHERE kind<>'read' GROUP BY 1,2,3,4) x GROUP BY 1,2,3),
-        folded AS (INSERT INTO health_hours AS h (hour,kind,key,n,errors,ms,slowest,hist) SELECT s.hour,s.kind,s.key,s.n,s.errors,s.ms,s.slowest,x.hist FROM sums s LEFT JOIN hists x USING (hour,kind,key) ORDER BY 1,2,3
-          ON CONFLICT (hour,kind,key) DO UPDATE SET n=h.n+excluded.n,errors=h.errors+excluded.errors,ms=h.ms+excluded.ms,slowest=greatest(h.slowest,excluded.slowest),
-            hist=CASE WHEN h.hist IS NULL THEN excluded.hist WHEN excluded.hist IS NULL THEN h.hist ELSE ARRAY(SELECT a+b FROM unnest(h.hist,excluded.hist) WITH ORDINALITY u(a,b,i) ORDER BY i) END),
-        aged AS (DELETE FROM health_hours WHERE hour<now()-interval '30 days')
-      UPDATE health_state SET rollup=${JSON.stringify(rollup)}::jsonb,generated_at=now() WHERE singleton`);
-
     type Held = { key: string; kind: string; severity: Severity; words: string; since: string; age: number; unseen: number; sent: number | null };
-    const held = (await run<Held>(sql`SELECT key,kind,severity,words,to_char(since AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') AS since,extract(epoch FROM now()-since)::int AS age,
-      extract(epoch FROM now()-seen_at)::int AS unseen,extract(epoch FROM now()-sent_at)::int AS sent FROM health_alerts`)).rows;
-    const known = new Map(held.map(alert => [alert.key, alert])), found = new Map(findings.map(finding => [finding.key, finding]));
-    if (findings.length) await run(sql`INSERT INTO health_alerts AS a (key,kind,severity,value,unit,words)
-      SELECT f.key,f.kind,f.severity,f.value,f.unit,f.words FROM jsonb_to_recordset(${JSON.stringify(findings.map(f => ({ key: f.key, kind: f.kind, severity: f.severity, value: f.value, unit: KINDS[f.kind].unit, words: f.words })))}::jsonb)
-        f(key text,kind text,severity text,value float8,unit text,words text) ORDER BY f.key
-      ON CONFLICT (key) DO UPDATE SET seen_at=now(),severity=excluded.severity,value=excluded.value,words=excluded.words`);
+    const held = await run(findings.length ? 3 : 2, async tx => {
+      // The rollup; and in the same statement, minutes older than two hours folded into their hours (kept 30 days), so a
+      // route's count and p95 outlive the logs. Whole hours only, so each hour folds once; most ticks fold nothing.
+      await tx.execute(sql`WITH old AS (DELETE FROM health_minutes WHERE minute<date_trunc('hour',now()-make_interval(mins=>${TICK.keepMinutes})) RETURNING *),
+          sums AS (SELECT date_trunc('hour',minute) AS hour,kind,key,sum(n) AS n,sum(errors) AS errors,sum(ms) AS ms,max(slowest) AS slowest FROM old WHERE kind<>'read' GROUP BY 1,2,3),
+          hists AS (SELECT hour,kind,key,array_agg(s ORDER BY i) AS hist FROM (SELECT date_trunc('hour',minute) AS hour,kind,key,i,sum(v)::bigint AS s FROM old,unnest(old.hist) WITH ORDINALITY u(v,i) WHERE kind<>'read' GROUP BY 1,2,3,4) x GROUP BY 1,2,3),
+          folded AS (INSERT INTO health_hours AS h (hour,kind,key,n,errors,ms,slowest,hist) SELECT s.hour,s.kind,s.key,s.n,s.errors,s.ms,s.slowest,x.hist FROM sums s LEFT JOIN hists x USING (hour,kind,key) ORDER BY 1,2,3
+            ON CONFLICT (hour,kind,key) DO UPDATE SET n=h.n+excluded.n,errors=h.errors+excluded.errors,ms=h.ms+excluded.ms,slowest=greatest(h.slowest,excluded.slowest),
+              hist=CASE WHEN h.hist IS NULL THEN excluded.hist WHEN excluded.hist IS NULL THEN h.hist ELSE ARRAY(SELECT a+b FROM unnest(h.hist,excluded.hist) WITH ORDINALITY u(a,b,i) ORDER BY i) END),
+          aged AS (DELETE FROM health_hours WHERE hour<now()-interval '30 days')
+        UPDATE health_state SET rollup=${JSON.stringify(rollup)}::jsonb,generated_at=now() WHERE singleton`);
+      const rows = (await tx.execute<Held>(sql`SELECT key,kind,severity,words,to_char(since AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') AS since,extract(epoch FROM now()-since)::int AS age,
+        extract(epoch FROM now()-seen_at)::int AS unseen,extract(epoch FROM now()-sent_at)::int AS sent FROM health_alerts`)).rows;
+      if (findings.length) await tx.execute(sql`INSERT INTO health_alerts AS a (key,kind,severity,value,unit,words)
+        SELECT f.key,f.kind,f.severity,f.value,f.unit,f.words FROM jsonb_to_recordset(${JSON.stringify(findings.map(f => ({ key: f.key, kind: f.kind, severity: f.severity, value: f.value, unit: KINDS[f.kind].unit, words: f.words })))}::jsonb)
+          f(key text,kind text,severity text,value float8,unit text,words text) ORDER BY f.key
+        ON CONFLICT (key) DO UPDATE SET seen_at=now(),severity=excluded.severity,value=excluded.value,words=excluded.words`);
+      return rows;
+    });
+    const known = new Map(held.map(alert => [alert.key, alert])), found = new Map(findings.map(finding => [finding.key, finding])), health = `${config.publicUrl.replace(/\/$/, '')}/operator?view=health`;
     // Gone for TICK.clearMinutes is cleared; an alert whose probe failed this tick is left as it is.
     const recovered = held.filter(alert => !found.has(alert.key) && isKind(alert.kind) && !blind.has(KINDS[alert.kind].section) && alert.unseen >= TICK.clearMinutes * 60);
     const open = (finding: Finding, forSeconds?: number) => alertCard(config.publicUrl, { ...finding, since: known.get(finding.key)?.since ?? iso(Date.now()) }, 'open', KINDS[finding.kind].label, forSeconds === undefined ? finding.words : `${finding.words} For ${span(forSeconds)}.`);
-    // New first, then recoveries, then reminders: TICK.cards a tick, together. A card that did not go out leaves its
-    // row as it was, so the next tick tries it again.
-    const queue: HealthCard[] = [
-      ...findings.filter(finding => known.get(finding.key)?.sent == null).map(finding => ({ key: finding.key, state: 'open' as const, card: open(finding) })),
-      ...recovered.filter(alert => alert.sent !== null).map(alert => ({ key: alert.key, state: 'cleared' as const,
-        card: alertCard(config.publicUrl, { key: alert.key, kind: alert.kind as Kind, severity: alert.severity, since: alert.since }, 'cleared', `Cleared: ${KINDS[alert.kind as Kind].label}`, `${subjectOf(alert.words) ? `${subjectOf(alert.words)}, ` : ''}after ${span(alert.age)}.`) })),
-      ...findings.filter(finding => { const alert = known.get(finding.key); return alert?.sent != null && alert.sent >= finding.remindMinutes * 60; }).map(finding => ({ key: finding.key, state: 'reminder' as const, card: open(finding, known.get(finding.key)!.age) })),
-    ];
-    const posted = new Set((await Promise.all(queue.slice(0, TICK.cards).map(async card => await send(card) ? `${card.state}:${card.key}` : ''))).filter(Boolean));
-    const sent = queue.filter(card => card.state !== 'cleared' && posted.has(`${card.state}:${card.key}`)).map(card => card.key);
-    if (sent.length) await run(sql`UPDATE health_alerts SET sent_at=now() WHERE key=ANY(${sql.param(sent)}::text[])`);
-    // A recovery is forgotten once its card went out (or it never had one); a row of a kind this version does not know, at once.
-    const forget = [...recovered.filter(alert => alert.sent === null || !url || posted.has(`cleared:${alert.key}`)), ...held.filter(alert => !isKind(alert.kind))].map(alert => alert.key);
-    if (forget.length) await run(sql`DELETE FROM health_alerts WHERE key=ANY(${sql.param(forget)}::text[])`);
+    // One card for the alerts that did not fit: how many of each kind, most severe first. It stands for all of them.
+    const summary = (state: 'open' | 'cleared', rest: { key: string; kind: string; severity: Severity }[]): HealthCard => {
+      const kinds = new Map<string, number>(); for (const alert of rest) kinds.set(alert.kind, (kinds.get(alert.kind) ?? 0) + 1);
+      const severity: Severity = rest.some(alert => alert.severity === 'critical') ? 'critical' : 'warning', words = `${[...kinds].map(([kind, n]) => `${count(n)} ${isKind(kind) ? KINDS[kind].label : kind}`).join(', ')}. All of them are on the Health page.`;
+      const card = slackCard({ emoji: state === 'open' ? ':warning:' : ':white_check_mark:', label: `${count(rest.length)} more ${state === 'open' ? 'alerts' : 'cleared'}` }, words, health);
+      const machine = `key=summary state=${state} severity=${severity} count=${rest.length} kinds=${[...kinds.keys()].join(',')} health=${health}`;
+      return { key: 'summary', state, covers: rest.map(alert => alert.key), card: { ...card, text: `${card.text}\n${machine}`, blocks: [...card.blocks, { type: 'context', elements: [{ type: 'mrkdwn', text: '`' + machine + '`', verbatim: true }] }] } };
+    };
+    // What goes out this tick, TICK.cards at most: new alerts first, critical before warning; then recoveries; then
+    // reminders, critical first. New or cleared ones that do not fit share one summary card.
+    const fit = <T extends { key: string; kind: string; severity: Severity }>(state: 'open' | 'cleared', alerts: T[], room: number, card: (alert: T) => HealthCard): HealthCard[] =>
+      room <= 0 ? [] : alerts.length <= room ? alerts.map(card) : [...alerts.slice(0, room - 1).map(card), summary(state, alerts.slice(room - 1))];
+    const fresh = fit('open', findings.filter(finding => known.get(finding.key)?.sent == null).sort((a, b) => critical(a) - critical(b)), TICK.cards, finding => ({ key: finding.key, state: 'open', card: open(finding) }));
+    const clears = fit('cleared', recovered.filter(alert => alert.sent !== null).sort((a, b) => critical(a) - critical(b)), TICK.cards - fresh.length, alert => ({ key: alert.key, state: 'cleared',
+      card: alertCard(config.publicUrl, { key: alert.key, kind: alert.kind as Kind, severity: alert.severity, since: alert.since }, 'cleared', `Cleared: ${KINDS[alert.kind as Kind].label}`, `${subjectOf(alert.words) ? `${subjectOf(alert.words)}, ` : ''}after ${span(alert.age)}.`) }));
+    const reminders = findings.filter(finding => { const alert = known.get(finding.key); return alert?.sent != null && alert.sent >= finding.remindMinutes * 60; }).sort((a, b) => critical(a) - critical(b))
+      .slice(0, Math.max(0, TICK.cards - fresh.length - clears.length)).map((finding): HealthCard => ({ key: finding.key, state: 'reminder', card: open(finding, known.get(finding.key)!.age) }));
+    // One after the other, inside the budget. A card that did not go out leaves its row as it was: the next tick tries again.
+    const posted = new Set<string>(), deadline = Date.now() + TICK.postBudgetMs;
+    for (const card of [...fresh, ...clears, ...reminders]) if (Date.now() < deadline && await send(card)) for (const key of card.covers ?? [card.key]) posted.add(`${card.state === 'cleared' ? 'cleared' : 'open'}:${key}`);
+    const sent = findings.filter(finding => posted.has(`open:${finding.key}`)).map(finding => finding.key);
+    // A recovery is forgotten once its card went out, or it never had one, or Slack has refused it for TICK.clearRetryMinutes;
+    // a row of a kind this version does not know, at once.
+    const expired = recovered.filter(alert => alert.sent !== null && !!url && !posted.has(`cleared:${alert.key}`) && alert.unseen >= (TICK.clearMinutes + TICK.clearRetryMinutes) * 60);
+    for (const alert of expired) log('warn', { code: 'HEALTH_ALERT_DROPPED', alert: alert.key.split(':')[0] });
+    const forget = [...recovered.filter(alert => alert.sent === null || !url || posted.has(`cleared:${alert.key}`)), ...expired, ...held.filter(alert => !isKind(alert.kind))].map(alert => alert.key);
+    if (sent.length || forget.length) await run(Number(sent.length > 0) + Number(forget.length > 0), async tx => {
+      if (sent.length) await tx.execute(sql`UPDATE health_alerts SET sent_at=now() WHERE key=ANY(${sql.param(sent)}::text[])`);
+      if (forget.length) await tx.execute(sql`DELETE FROM health_alerts WHERE key=ANY(${sql.param(forget)}::text[])`);
+    });
     const done = result(true, findings.length);
     log('info', { code: 'HEALTH_TICK', ms: done.ms, statements, open: findings.length, cards: cards.length, blind: blind.size ? [...blind] : undefined });
     return done;
   } catch (error) {
+    // Its own row locked or slow, or anything else: this tick's sample is dropped, and the next minute starts over.
     countDatabaseError(databaseCodeOf(error));
-    logError(error, { code: 'HEALTH_TICK_FAILED' });
+    logError(error, { code: 'HEALTH_TICK_FAILED' }, 'warn');
     return result(true);
   }
 }

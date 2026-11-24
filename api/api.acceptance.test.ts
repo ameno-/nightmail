@@ -32381,8 +32381,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     let found: string[] = [];
     const rates = '20% of the account’s 160/s (entitled to 160/s; the planner reads 40/s)';
     for (let minute = 0; minute <= 10; minute++) {
-      found = lines({ ...quiet(), campaigns: [campaign('cmp_quartered', { share: 'exempt', expanded: 32 * 60 * minute }), campaign('cmp_stalled', { expanded: 1_800 }), campaign('cmp_paced', { expanded: 60 * minute, paced: true }),
-        campaign('cmp_healthy', { expanded: 38 * 60 * minute, total: 400_000, accepted: 37 * 60 * minute })] });
+      found = lines({ ...quiet(), campaigns: [campaign('cmp_quartered', { workspaceId: 'ws_first_party', share: 'exempt', expanded: 32 * 60 * minute }), campaign('cmp_stalled', { workspaceId: 'ws_stalled', expanded: 1_800 }),
+        campaign('cmp_paced', { workspaceId: 'ws_paced', expanded: 60 * minute, paced: true }), campaign('cmp_healthy', { expanded: 38 * 60 * minute, total: 400_000, accepted: 37 * 60 * minute })] });
       if (minute === 4) assert.deepEqual(found, [], 'Four minutes of samples are too few to say how long it takes.');
       if (minute === 5) assert.deepEqual(found, [`campaign-long:cmp_quartered warning 55950: ${c('cmp_quartered')}: 15.5 h left at 32/s, ${rates}. 1,790,400 of 1,800,000 left.`,
         `campaign-slow:cmp_stalled critical 0: ${c('cmp_stalled')}: nothing released for 5 min, 0% of the account’s 160/s (entitled to 40/s). 1,798,200 left.`]);
@@ -32390,6 +32390,24 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     assert.deepEqual(found.filter(line => line.startsWith('campaign-slow:cmp_quartered')), [`campaign-slow:cmp_quartered warning 32: ${c('cmp_quartered')}: 32/s for 10 min, ${rates}. 1,780,800 left.`]);
     const healthy = tick({ ...quiet(), campaigns: [campaign('cmp_healthy', { expanded: 38 * 60 * 11, total: 400_000, accepted: 37 * 60 * 11 })] }).rollup.campaigns![0]!;
     assert.deepEqual([healthy.rate, healthy.acceptedRate, healthy.entitled, healthy.account, healthy.planned, healthy.behind], [38, 37, 40, 160, 40, false]);
+    // An alert means slower than it is entitled to, never slow by choice or by design (review of #628). A delivered-only
+    // resume skipped half its list (each skip moves the cursor and counts in canceled, so it is not subtracted again):
+    // 499,900 left at 5 a second of 160 is slow and long. A campaign whose owner chose a tenth of the rate and runs at
+    // exactly that, a large one at 38 of its 40, two of one workspace sharing its 40, and one with everything released
+    // are not alerts; their time left is still on the page.
+    memory = emptyMemory();
+    const entitledCases = (minute: number): Sample => ({ ...quiet(), campaigns: [
+      campaign('cmp_delivered_only', { workspaceId: 'ws_skips', share: 'exempt', planned: 160, total: 1_000_000, expanded: 500_100 + 300 * minute, canceled: 500_000 }),
+      campaign('cmp_tenth', { workspaceId: 'ws_tenth', total: 150_000, rateShare: 0.1, account: 200, planned: 50, expanded: 300 * minute }),
+      campaign('cmp_large', { workspaceId: 'ws_large', expanded: 38 * 60 * minute }),
+      campaign('cmp_half_a', { workspaceId: 'ws_two', expanded: 19 * 60 * minute }), campaign('cmp_half_b', { workspaceId: 'ws_two', expanded: 19 * 60 * minute }),
+      campaign('cmp_draining', { workspaceId: 'ws_draining', expanded: 1_800_000 })] });
+    for (let minute = 0; minute < 10; minute++) lines(entitledCases(minute));
+    const entitled = tick(entitledCases(10)), skips = '3.1% of the account’s 160/s (entitled to 160/s)';
+    assert.deepEqual(entitled.findings.map(finding => `${finding.key} ${finding.severity} ${finding.value}: ${finding.words}`), [`campaign-slow:cmp_delivered_only warning 5: ${c('cmp_delivered_only')}: 5/s for 10 min, ${skips}. 496,900 left.`,
+      `campaign-long:cmp_delivered_only warning 99380: ${c('cmp_delivered_only')}: 27.6 h left at 5/s, ${skips}. 496,900 of 1,000,000 left.`]);
+    assert.deepEqual(entitled.rollup.campaigns!.map(row => [row.id, row.rate, row.entitled, row.etaSeconds, row.behind]), [['cmp_delivered_only', 5, 160, 99_380, true], ['cmp_tenth', 5, 5, 29_400, false],
+      ['cmp_large', 38, 40, Math.round((1_800_000 - 22_800) / 38), false], ['cmp_half_a', 19, 20, Math.round((1_800_000 - 11_400) / 19), false], ['cmp_half_b', 19, 20, Math.round((1_800_000 - 11_400) / 19), false], ['cmp_draining', 0, 40, null, false]]);
     // A wait starts the samples over, and is itself an alert once it has lasted fifteen minutes (a daily pace never is).
     for (let minute = 0; minute < 15; minute++) found = lines({ ...quiet(), campaigns: [campaign('cmp_stalled', { expanded: 1_800, waitingReason: 'hosted_daily_quota', waitingSeconds: 7_200 - 60 * minute }), campaign('cmp_paced', { paced: true, waitingReason: 'pacing_window', waitingSeconds: 3_600 })] });
     assert.deepEqual([found, memory.campaigns], [[`campaign-waiting:cmp_stalled warning 900: ${c('cmp_stalled')}: ${c('hosted_daily_quota')} for 15 min, 1.8 h to go. 1,798,200 left.`], {}]);
@@ -32404,13 +32422,19 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         counter('route', 'GET /v1/campaigns/:id/stats', { n: 45_000, n5: 15_000, slowest: 40, stormMinutes: 3, stormRate: 3_000, hist: hist({ 1: 45_000 }) }), counter('read', 'ws_fixture', { n: 45_000, n5: 15_000, stormMinutes: 4, stormRate: 3_010 }),
         counter('route', 'POST /v1/emails/send', { n: 90_000, n5: 30_000, errors: 40, errors5: 40, slowest: 900, stormMinutes: 4, stormRate: 6_000, hist: hist({ 4: 90_000 }) }),
         counter('code', 'DATABASE_UNAVAILABLE', { n: 40, n5: 40 }), counter('sqlstate', '25006', { n: 40, n5: 40 }), counter('sqlstate', '57014', { n: 4, n5: 4 }), counter('sqlstate', '23505', { n: 900, n5: 300 }),
-        counter('error', 'DISPATCHER_RUN_FAILED', { n: 3, n5: 1 }), counter('error', 'MAILBOX_STAGING_ENVELOPE_UNKNOWN', { n: 9, n5: 6 }), counter('error', 'QUEUE_BACKLOG_ALERT', { n: 15, n5: 5 }), counter('error', 'BILLING_DRIFT', { n: 4, n5: 4 })] }), [
+        counter('error', 'DISPATCHER_RUN_FAILED', { n: 3, n5: 1 }), counter('error', 'MAILBOX_STAGING_ENVELOPE_UNKNOWN', { n: 9, n5: 6 }), counter('error', 'QUEUE_BACKLOG_ALERT', { n: 15, n5: 5 }), counter('error', 'BILLING_DRIFT', { n: 4, n5: 4 }),
+        counter('error', 'MAILBOX_STAGING_UNDELIVERED', { n: 1, n5: 1 })] }), [
       `campaign-preparing:cmp_frozen warning 380: ${c('cmp_frozen')}: 6 min, 1,200,000 of 1,800,000 ready.`, `campaign-paused:cmp_quarantined warning 1799500: ${c('cmp_quarantined')} of ${c('ws_fixture')}: ${c('LIST_QUALITY')}, quarantined. 1,799,500 left.`,
       `campaign-bounces:cmp_bouncing critical 0.06: ${c('cmp_bouncing')}: 6% bounced and 2 complaints on 12,000 settled.`,
       `slow-requests:POST:/v1/campaigns/:id/send warning 45000: ${c('POST /v1/campaigns/:id/send')}: slowest 45 s, p95 45 s over 3 in 15 min.`, `request-storm:GET:/v1/campaigns/:id/stats warning 3000: ${c('GET /v1/campaigns/:id/stats')}: 3,000 a minute for 3 minutes.`,
       `request-storm:workspace:ws_fixture warning 3010: workspace ${c('ws_fixture')}: 3,010 reads a minute for 3 minutes.`, `database-errors:25006 critical 40: read-only (${c('25006')}): 40 in 5 min.`,
-      `dispatcher-failing critical 3: 3 failed runs in 15 min, mostly ${c('DISPATCHER_RUN_FAILED')}.`, `errors:MAILBOX_STAGING_ENVELOPE_UNKNOWN warning 6: ${c('MAILBOX_STAGING_ENVELOPE_UNKNOWN')}: 6 in 5 min.`],
-      'Sending mail at 100 a second is not a storm, 40 errors in 45,000 requests are not an alert, unique violations are not database errors, and a line every minute already says is not counted.');
+      `dispatcher-failing critical 3: 3 failed runs in 15 min, mostly ${c('DISPATCHER_RUN_FAILED')}.`, `errors:MAILBOX_STAGING_ENVELOPE_UNKNOWN warning 6: ${c('MAILBOX_STAGING_ENVELOPE_UNKNOWN')}: 6 in 5 min.`,
+      `errors:MAILBOX_STAGING_UNDELIVERED critical 1: ${c('MAILBOX_STAGING_UNDELIVERED')}: 1 in 5 min.`],
+      'Sending mail at 100 a second is not a storm, 40 errors in 45,000 requests are not an alert, unique violations are not database errors, a line every minute already says is not counted, and mail whose arrival notice was lost (#625) alerts at the first line.');
+    // The same code as a failed job's error: the first job, critical.
+    memory = emptyMemory();
+    assert.deepEqual(lines({ ...quiet(), failed: [{ type: 'mailbox.recoverStaging', error: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN', failed: 3 }, { type: 'mailbox.recoverStaging', error: 'MAILBOX_STAGING_UNDELIVERED', failed: 1 }] }),
+      [`jobs-failed:mailbox.recoverStaging critical 4: ${c('mailbox.recoverStaging')}: 4, mostly ${c('MAILBOX_STAGING_ENVELOPE_UNKNOWN')}.`]);
     // No key holds a space, so the card's key=value line parses; and what is not an identifier never reaches a card.
     memory = emptyMemory();
     assert.deepEqual(lines({ ...quiet(), failed: [{ type: 'reader@example.net <b>', error: 'Subject: hello', failed: 30 }] }), [`jobs-failed:other warning 30: ${c('other')}: 30, mostly ${c('other')}.`]);
@@ -32442,7 +32466,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal(runtime.config.operatorSlackWebhookUrl, undefined);
       const first = await tick();
       assert.deepEqual([first.ran, first.cards, posted, await alert()], [true, [], [], { kind: 'jobs-failed', severity: 'warning', value: 30, unit: 'jobs', words: `${c(type)}: 30, mostly ${c('FIXTURE_FAILED')}.`, sent: false }]);
-      assert.ok(first.statements <= 30 && first.open >= 1, `A tick is a bounded number of statements (${first.statements}).`);
+      assert.ok(first.statements <= 36 && first.open >= 1, `A tick is a bounded number of statements (${first.statements}).`);
       assert.equal((await tick(false)).ran, false, 'One tick a minute, whoever asks: a second one within 45 seconds does nothing.');
       const page = ok(await local('GET', path)), listed = page.alerts.find((a: Json) => a.key === key);
       assert.deepEqual([page.delivery, page.stale, typeof page.generatedAt, { ...listed, since: recent(listed.since) }, page.jobs.find((job: Json) => job.type === type), page.database.connections >= 1, 'memory' in page],
@@ -32482,6 +32506,17 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await tick();
       assert.deepEqual(mine().map(card => [card[0], card[2].key, card[2].severity, card[2].unit, Number(card[2].value) >= 780]), [[`:hourglass_flowing_sand: *Jobs behind* ${c(type)}: 3 due, oldest 13 min.`, `jobs-behind:${type}`, 'warning', 'seconds', true]]);
 
+      // Campaigns by state (api/tear/campaign-lifecycle): the tick reads the ones that are preparing, sending or paused,
+      // and no draft, scheduled, done, failed or canceled one; a campaign Nightmail paused is an alert, one with
+      // everything released is not behind.
+      const draft = ok(await local('POST', '/v1/campaigns', { name: 'Health states' }), 201), states = ['preparing', 'scheduled', 'sending', 'paused', 'done', 'failed', 'canceled'];
+      for (const state of states) await db.query(`INSERT INTO sending_campaigns SELECT (jsonb_populate_record(NULL::sending_campaigns,to_jsonb(c)||jsonb_build_object('id',$2::text,'state',$3::text,'total',1000,
+        'expanded',CASE WHEN $3 IN ('done','canceled','sending') THEN 1000 ELSE 400 END,'paused_at',CASE WHEN $3='paused' THEN now() END,'pause_reason',CASE WHEN $3='paused' THEN '{"code":"LIST_QUALITY"}'::jsonb END))).* FROM sending_campaigns c WHERE id=$1`, [draft.id, `${draft.id}_${state}`, state]);
+      await tick();
+      const measured = ok(await local('GET', path));
+      assert.deepEqual([measured.campaigns.filter((row: Json) => row.id.startsWith(draft.id)).map((row: Json) => [row.id.slice(draft.id.length + 1), row.released, row.waiting, row.behind]).sort(), measured.alerts.filter((a: Json) => a.key.includes(draft.id)).map((a: Json) => [a.key, a.severity, a.value, a.unit])],
+        [[['paused', 400, 'LIST_QUALITY', true], ['preparing', 400, null, false], ['sending', 1000, null, false]], [[`campaign-paused:${draft.id}_paused`, 'warning', 600, 'recipients_left']]]);
+
       // Hosted: an operator's staff session only (an operator's agent key too: the UI notes test reads it with one).
       runtime.config.multiTenant = true;
       await db.query('UPDATE nightmail_sessions SET staff=true WHERE user_id=$1', [manager!.userId]);
@@ -32494,6 +32529,86 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // A hosted tick reads the campaigns' rates from the account and the connection.
       const last = await tick();
       assert.deepEqual([last.ran, Array.isArray(ok(await local('GET', path)).campaigns)], [true, true]);
+    });
+  });
+
+  test('MX health: a locked health table costs a dropped sample within a second or two, never a wait and never a "database refusing" card; a burst posts critical alerts first and one summary for what does not fit; a cleared card Slack refuses is tried again, for a database that refused too', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { healthTick } = await import('./src/health.js'), counters = await import('./src/health-counters.js'), tag = unique('b').slice(-8);
+      runtime.config.operatorSlackWebhookUrl = OPERATOR_HOOK;
+      const posted: Json[] = [];
+      let refuse: (card: Json) => boolean = () => false;
+      const post = async (_url: string, card: Json) => { if (refuse(card)) throw new Error('Slack answered 503'); posted.push(card); };
+      const machine = (card: Json) => Object.fromEntries(String(card.text).split('\n')[1]!.split(' ').map(pair => [pair.slice(0, pair.indexOf('=')), pair.slice(pair.indexOf('=') + 1)]));
+
+      // 1. Another session holds health_minutes and health_state for as long as it likes (a migration, a stuck writer).
+      // The counters' flush gives up after its one-second lock_timeout and drops the sample; the tick cannot claim its
+      // minute and skips it. Neither waits, and a locked health row is not the database refusing.
+      const locker = new pg.Client({ connectionString: FIXTURE_DATABASE_URL });
+      await locker.connect(); cleanup(t, () => locker.end());
+      await locker.query('BEGIN'); await locker.query('LOCK TABLE health_minutes, health_state IN ACCESS EXCLUSIVE MODE');
+      counters.resetCounters();
+      for (let i = 0; i < 30; i++) counters.countRequest({ route: `/v1/locked-${tag}`, method: 'GET', status: 200, durationMs: 4 });
+      const warnings = t.mock.method(console, 'warn', () => {});
+      let started = Date.now();
+      assert.equal(await counters.flushCounters(runtime.db), 0);
+      const flushMs = Date.now() - started;
+      started = Date.now();
+      const skipped = await healthTick(runtime, {}, { post, force: true }), skipMs = Date.now() - started;
+      await locker.query('ROLLBACK');
+      // health_minutes alone: the tick claims its minute, its requests section is unknown, and its rollup write is dropped.
+      await locker.query('BEGIN'); await locker.query('LOCK TABLE health_minutes IN ACCESS EXCLUSIVE MODE');
+      started = Date.now();
+      const dropped = await healthTick(runtime, {}, { post, force: true }), dropMs = Date.now() - started;
+      await locker.query('ROLLBACK');
+      const warned = warnings.mock.calls.map(call => JSON.parse(String(call.arguments[0])).code);
+      warnings.mock.restore();
+      assert.ok(flushMs < 2_500 && skipMs < 2_500 && dropMs < 4_500, `bounded: flush ${flushMs} ms, skipped tick ${skipMs} ms, dropped tick ${dropMs} ms`);
+      assert.deepEqual([skipped.ran, dropped.ran, posted.filter(card => machine(card).key === 'database-refusing'), ['HEALTH_COUNTERS_DROPPED', 'HEALTH_TICK_SKIPPED', 'HEALTH_PROBE_FAILED', 'HEALTH_TICK_FAILED'].filter(code => !warned.includes(code)),
+        (await db.query(`SELECT count(*)::int AS n FROM health_minutes WHERE key LIKE '%'||$1`, [tag])).rows[0].n], [false, true, [], [], 0]);
+
+      // 2. A burst: twelve job types fail at once while the feedback queue is behind. Six cards at most: every critical one
+      // before any warning, then one summary that stands for the rest, and every alert counts as told.
+      await db.query('DELETE FROM health_alerts');
+      const queues = [{ name: 'feedback', depth: 9_000, oldestMs: 400_000 }];
+      await healthTick(runtime, { queues }, { post, force: true });
+      posted.length = 0;
+      for (let n = 1; n <= 12; n++) await db.query(`INSERT INTO jobs(id,type,workspace_id,payload,status,last_error) SELECT $1||'-'||g,$2,$3,'{}','failed','FIXTURE_FAILED' FROM generate_series(1,30) g`, [unique('job'), `health.burst.${tag}.${n}`, runtime.config.workspaceId]);
+      const burst = await healthTick(runtime, { queues }, { post, force: true });
+      const sent = posted.map(machine), severities = sent.map(line => line.severity), last = burst.cards.at(-1)!;
+      assert.ok(sent.length <= 6 && sent.some(line => line.key === 'queue-behind:feedback' && line.severity === 'critical') && severities.lastIndexOf('critical') < (severities.includes('warning') ? severities.indexOf('warning') : Infinity), JSON.stringify(sent.map(line => [line.key, line.severity])));
+      assert.deepEqual([last.key, sent.at(-1)!.key, sent.at(-1)!.state, Number(sent.at(-1)!.count) === last.covers!.length, last.covers!.length >= 8, /^\d+ more alerts: .*\d+ Jobs failed.*\. All of them are on the Health page\.$/.test(String(posted.at(-1)!.text).split('\n')[0]!),
+        (await db.query(`SELECT count(*)::int AS n FROM health_alerts WHERE key LIKE 'jobs-failed:health.burst.'||$1||'.%' AND sent_at IS NOT NULL`, [tag])).rows[0].n], ['summary', 'summary', 'open', true, true, true, 12]);
+      posted.length = 0;
+      await healthTick(runtime, { queues }, { post, force: true });
+      assert.deepEqual(posted.filter(card => String(card.text).includes(tag)), [], 'Nothing is said twice.');
+
+      // 3. Recoveries. Slack refuses the cleared cards on the first tick: the alerts stay held and their cards go out on the
+      // next. The same for a database that refused the tick's write and then answered again while Slack was down.
+      await db.query(`UPDATE jobs SET status='completed' WHERE type LIKE 'health.burst.'||$1||'.%'`, [tag]);
+      await db.query(`UPDATE health_alerts SET seen_at=now()-interval '4 minutes' WHERE key LIKE 'jobs-failed:health.burst.'||$1||'.%'`, [tag]);
+      refuse = card => machine(card).state === 'cleared';
+      await healthTick(runtime, { queues }, { post, force: true });
+      const heldRows = async () => (await db.query(`SELECT count(*)::int AS n FROM health_alerts WHERE key LIKE 'jobs-failed:health.burst.'||$1||'.%'`, [tag])).rows[0].n;
+      assert.deepEqual([posted.filter(card => machine(card).state === 'cleared'), await heldRows()], [[], 12]);
+      refuse = () => false;
+      await healthTick(runtime, { queues }, { post, force: true });
+      const clearedCards = posted.map(machine).filter(line => line.state === 'cleared');
+      assert.ok(clearedCards.length >= 2 && clearedCards.length <= 6 && clearedCards.at(-1)!.key === 'summary' && await heldRows() === 0, JSON.stringify(clearedCards));
+
+      const readOnly = { db: { transaction: async () => { throw Object.assign(new Error('cannot execute UPDATE in a read-only transaction'), { code: '25006' }); } }, config: runtime.config } as never;
+      posted.length = 0;
+      const errors = t.mock.method(console, 'error', () => {});
+      await healthTick(readOnly, {}, { post, force: true }); await healthTick(readOnly, {}, { post, force: true });
+      errors.mock.restore();
+      assert.deepEqual(posted.map(card => [String(card.text).split('\n')[0], machine(card).key, machine(card).state, machine(card).severity]), [['Database refusing: read-only (`25006`): the health tick’s own write was refused.', 'database-refusing', 'open', 'critical']]);
+      refuse = card => machine(card).key === 'database-refusing';
+      posted.length = 0;
+      await healthTick(runtime, { queues }, { post, force: true });
+      assert.deepEqual(posted.filter(card => machine(card).key === 'database-refusing'), []);
+      refuse = () => false;
+      await healthTick(runtime, { queues }, { post, force: true }); await healthTick(runtime, { queues }, { post, force: true });
+      assert.deepEqual(posted.map(machine).filter(line => line.key === 'database-refusing').map(line => [line.state, line.severity, 'value' in line]), [['cleared', 'critical', false]], 'The cleared card is tried again, and goes out once.');
     });
   });
 

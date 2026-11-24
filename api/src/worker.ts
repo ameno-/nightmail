@@ -144,10 +144,16 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
     if (ctx && nudges.length) ctx.waitUntil(withRuntime(env, async runtime => { for (const nudge of nudges) await nudge(runtime); }));
   }
 }
-// What a queue consumer counted (its jobs' database errors, its error lines: src/health-counters.ts), written at most
-// every 20 seconds per isolate while it still holds its connection. It never throws.
-async function flushDueCounters(runtime: Runtime) {
-  try { const { countersDue, flushCounters } = await import('./health-counters.js'); if (countersDue()) await flushCounters(runtime.db); } catch { /* Counted again with the next batch. */ }
+// Health bookkeeping (src/health.ts, src/health-counters.ts) is never awaited by a request, a queue batch, the minute
+// cron's own steps or a dispatcher: it runs after them in waitUntil, on a connection of its own, with a one-second
+// lock_timeout and a three-second statement_timeout on everything it writes. A health table that is locked or slow
+// costs a dropped sample, never a late batch.
+function afterwards(env: Env, ctx: ExecutionContext, work: (runtime: Runtime) => Promise<unknown>) {
+  ctx.waitUntil(withRuntime(env, async runtime => { await work(runtime); }).catch(() => { /* Health never fails what it reports on. */ }));
+}
+// What this isolate counted (its jobs' database errors, its error lines), at most every 20 seconds.
+async function flushDueCounters(env: Env, ctx: ExecutionContext) {
+  try { const { countersDue, flushCounters } = await import('./health-counters.js'); if (countersDue()) afterwards(env, ctx, runtime => flushCounters(runtime.db)); } catch { /* Counted again with the next batch. */ }
 }
 /**
  * The support platform's service-binding entrypoint (api/README.md "Support integration"): the bane-support Worker in
@@ -254,7 +260,7 @@ export default {
     }
   },
   // Queue/scheduled continuations preserve worker chains and retry due times.
-  async queue(batch, env) {
+  async queue(batch, env, ctx) {
     const { jobConcurrency, followDueJobs, core, settleFeedbackBatch, legacyFeedbackCutover } = await loadRuntimeDeps();
     stampLogs(env, core);
     const concurrency = jobConcurrency('JOB_CONCURRENCY' in env ? env.JOB_CONCURRENCY : undefined, 6);
@@ -282,8 +288,8 @@ export default {
           archive: (source,body,error) => archiveQueueFeedback(runtime,source,body,error) });
         const { outcomes: _, ...counts } = settled, oldestMs=Math.max(0,...messages.map(m=>Date.now()-m.timestamp.getTime()));
         core.log(counts.failed || counts.untagged || counts.unauthenticated || counts.held || oldestMs>60000?'warn':'info', { code: 'FEEDBACK_BATCH', lane: feedbackLane, size: messages.length, ...counts, oldestMs });
-        await flushDueCounters(runtime);
       });
+      await flushDueCounters(env, ctx);
       return;
     }
     const hooks = batch.queue === env.WEBHOOK_QUEUE_NAME, pool = hooks ? 'webhooks' : 'work';
@@ -299,11 +305,11 @@ export default {
       // Wait in place up to 45 s for a job due soon (paced campaign releases), and schedule at most one follow-up.
       const outcome = await followDueJobs(runtime, () => drainJobs(runtime, 100, concurrency, 10000,pool), delaySeconds => (hooks?env.WEBHOOK_QUEUE:env.WAKE_QUEUE).send({ kind: 'wake' }, { delaySeconds }), 45000,pool);
       core.log('info', { code: 'QUEUE_FOLLOW', outcome });
-      await flushDueCounters(runtime);
     }, concurrency);
     batch.ackAll();
+    await flushDueCounters(env, ctx);
   },
-  async scheduled(controller, env) {
+  async scheduled(controller, env, ctx) {
     const { jobConcurrency, followDueJobs, core } = await loadRuntimeDeps();
     stampLogs(env, core);
     const [{ dispatchPartitions, drainJobs }, { reconcileSharedConnections }, { syncOutboundMessages }, { publicStatsTick }] = await core.wrapModuleLoad(() => Promise.all([
@@ -330,10 +336,7 @@ export default {
           queues.push({name,depth:m.backlogCount,oldestMs});
         }catch{core.log('warn',{code:'QUEUE_METRICS_UNAVAILABLE',queue:name});}
       }));
-      // Health (src/health.ts) before anything below can fail or take long: what is falling behind, on the Health page and
-      // as Slack cards, including a database that refuses the tick's own write. It never throws.
-      try { const [{ healthTick }, { flushCounters }] = await Promise.all([import('./health.js'), import('./health-counters.js')]); await flushCounters(runtime.db); await healthTick(runtime, { queues: queues.sort((a,b)=>a.name<b.name?-1:1) }); }
-      catch { core.log('error',{code:'HEALTH_TICK_FAILED'}); }
+      try {
       try { const { drainFeedbackRecovery } = await import('./operations.js'); await drainFeedbackRecovery(runtime); }
       catch { core.log('error',{code:'FEEDBACK_RECOVERY_DRAIN_FAILED'}); }
       await reconcileSharedConnections(runtime); // Installation work must not depend on a workspace or a successful queue drain.
@@ -341,6 +344,15 @@ export default {
       // Received mail queued for the refilling budget comes due within minutes; the drain below runs its release.
       try { await (await core.wrapModuleLoad(() => import('./mailbox-staging.js'))).scheduleHoldRelease(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'MAILBOX_HOLD_RELEASE_FAILED' }); }
       await Promise.allSettled((await dispatchPartitions(runtime, true)).map(({ region, accountId, kind }) => wakeDispatchers(env, region, accountId, undefined, kind)));
+      } finally {
+        // Health (src/health.ts), once dispatch recovery has run or failed: what is falling behind, on the Health page and as
+        // Slack cards, including a database that refuses the tick's own write. Started here and awaited by nothing: it runs
+        // beside the steps below on a connection of its own, so neither can delay or skip the other.
+        afterwards(env, ctx, async health => {
+          const [{ healthTick }, { flushCounters }] = await Promise.all([import('./health.js'), import('./health-counters.js')]);
+          await flushCounters(health.db); await healthTick(health, { queues: queues.sort((a,b)=>a.name<b.name?-1:1) });
+        });
+      }
       // Minute cron: recover orchestration jobs whose wake was lost.
       await followDueJobs(runtime, () => drainJobs(runtime, 100, concurrency, 10000,'work'), delaySeconds => env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds }),0,'work');
       if (env.WEBHOOK_QUEUE) await followDueJobs(runtime, async()=>{}, delaySeconds=>env.WEBHOOK_QUEUE.send({kind:'wake'},{delaySeconds}),0,'webhooks');

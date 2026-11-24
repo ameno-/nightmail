@@ -185,15 +185,16 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     const timings = c.get('serverTimings');
     if (c.get('actor') && timings.length) c.header('server-timing', timings.map(item => `${item.name};dur=${item.durationMs.toFixed(1)}`).join(', '));
     if (!(snsIngress(c.req.path) && [400,429].includes(c.res.status))) logRequest(c, Date.now() - start);
-    // The request counters go to health_minutes after the response, on a connection of their own, at most every 20
-    // seconds per isolate. The Node server writes them on a timer instead (src/server.ts).
-    if (c.env.deferNudge && countersDue()) c.env.deferNudge(runtime => flushCounters(runtime.db).then(() => {}));
+    // The request counters go to health_minutes after the response, at most every 20 seconds per isolate, and after
+    // this request's own wake and dispatch nudges, so those never wait behind them (the Node server writes them on a
+    // timer instead: src/server.ts).
+    const flush = c.env.deferNudge && countersDue() ? (runtime: Runtime) => flushCounters(runtime.db).then(() => {}) : undefined;
     // Wake only after this request committed jobs: each wake locks the shared job_schedule row and starts a drain.
     const wakeJobs = c.get('actor')?.wakeJobs;
     const wake = (wakeJobs || (enqueued > 0 && !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method))) && c.req.path !== '/v1/events/ses' && !/^\/mcp(?:\/|$)/.test(c.req.path) && c.res.status < 300 ? c.env.wake : undefined;
     const actor = c.get('actor'), targets = actor?.dispatchTargets;
     const dispatch = targets?.size && c.res.status < 300 ? c.env.dispatch : undefined;
-    if (!wake && !dispatch) return;
+    if (!wake && !dispatch) { if (flush) c.env.deferNudge!(flush); return; }
     const nudge = async (runtime: Runtime) => {
       if (wake) try { await runtime.wake?.(wakeJobs, actor?.wakeJobPool ?? (/^\/v1\/(?:inbound\/)?webhooks\//.test(c.req.path) ? 'webhook' : undefined)); } catch { log('warn', { requestId, code: 'QUEUE_WAKE_FAILED', message: 'The job is durable in Postgres; scheduler will recover it.' }); }
       if (dispatch && targets) for (const [region, { count, priority }] of targets) {
@@ -201,6 +202,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
       }
     };
     if (c.env.deferNudge) c.env.deferNudge(nudge); else await nudge(c.env);
+    if (flush) c.env.deferNudge!(flush);
   });
   // After the request line's middleware, so a refused request is logged like any other.
   app.use('*', (c, next) => {

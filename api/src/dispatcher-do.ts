@@ -175,10 +175,11 @@ export class DispatcherShard extends DurableObject<Env> {
       if (!deps) console.error(JSON.stringify({ level: 'error', timestamp: new Date().toISOString(), service: 'worker', code: 'DISPATCHER_DEPS_FAILED' }));
       else {
         // `cause` says why (core.ts platformMessage): the platform's own words for a Durable Object storage or binding
-        // failure, never a database error's text. The line is also counted (src/health-counters.ts) and written before
-        // the pool closes, so a shard that keeps failing becomes the dispatcher-failing alert (src/health.ts).
+        // failure, never a database error's text. The line is also counted (src/health-counters.ts), so a shard that
+        // keeps failing becomes the dispatcher-failing alert (src/health.ts). The count is written after this run, on a
+        // connection of its own that recovery never waits for.
         deps.logError(error, { code: error instanceof deps.ApiError ? error.code : 'DISPATCHER_RUN_FAILED', shard: dispatcherName(identity), cause: deps.platformMessage(error) });
-        try { await deps.flushCounters((await this.runtime()).db); } catch { /* Counted again with the next failure. */ }
+        this.ctx.waitUntil(this.flushCounts(deps));
       }
       await this.closePool();
       next = Date.now() + RETRY_MS;
@@ -198,6 +199,13 @@ export class DispatcherShard extends DurableObject<Env> {
       this.pool.on('error', () => { /* Idle client errors surface on the next query; the run loop then recreates the pool. */ });
     }
     return { db: drizzle(this.pool), storage: r2Storage(this.env.ATTACHMENTS), config, feedback: feedbackSink(this.env.FEEDBACK_QUEUE, config.authSecret), wake: (count,kind)=>workWake(kind==='webhook' && this.env.WEBHOOK_QUEUE ? this.env.WEBHOOK_QUEUE : this.env.WAKE_QUEUE,6)(count) };
+  }
+
+  // One short-lived connection, bounded by flushCounters' own timeouts; it never throws.
+  private async flushCounts(deps: Awaited<ReturnType<typeof loadDeps>>) {
+    const pool = new deps.Pool({ connectionString: this.env.HYPERDRIVE.connectionString, connectionTimeoutMillis: 5000, max: 1 });
+    pool.on('error', () => { /* Dropped with the sample. */ });
+    try { await deps.flushCounters(deps.drizzle(pool)); } catch { /* Counted again with the next failure. */ } finally { await pool.end().catch(() => {}); }
   }
 
   private async closePool() {
