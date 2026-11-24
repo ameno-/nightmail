@@ -91,6 +91,24 @@ export const signupColumnDefs: SkeletonColumn[] = [
   { key: 'sent', label: 'Sent', width: 104, align: 'right', card: 'inline' },
   { key: 'standing', label: 'Standing', width: 112, card: 'aside' },
 ]
+// Health (?view=health; the whole page on a self-hosted installation): six facts, then one table of what the minute
+// tick measured, alerts first. A phone's card shows what it is and its state, the area, then the figures.
+export const healthFacts = ['Measured', 'Open alerts', 'Feedback lag', 'Jobs due', 'Connections', 'Database'] as const
+export function HealthFacts({ values }: { values?: Record<(typeof healthFacts)[number], ReactNode> }) {
+  return <dl className="op-facts">{healthFacts.map(title => <div key={title}><dt>{title}</dt><dd>{values ? values[title] : <Skeleton width={72} height={14} />}</dd></div>)}</dl>
+}
+export const healthColumnDefs: SkeletonColumn[] = [
+  { key: 'area', label: 'Area', width: 112, card: 'inline' },
+  { key: 'what', label: 'What', width: '24%', card: 'title' },
+  { key: 'state', label: 'State', width: 112, card: 'aside' },
+  { key: 'now', label: 'Now', card: 'line' },
+  { key: 'detail', label: 'Detail', width: '24%', card: 'line' },
+]
+export const HealthSkeleton = () => <><HealthFacts /><TableSkeleton className="op-table" columns={healthColumnDefs} rows={8} /></>
+// A self-hosted installation has no operator area: Health is its whole page.
+export function SelfHostedHealthSkeleton() {
+  return <><PageHeader title="Health" /><LoadingRegion label="Loading health"><div className="op-page"><HealthSkeleton /></div></LoadingRegion></>
+}
 // The Sign-ups tab's header action, for the operator role: it opens the limit's dialog.
 export const SetLimitTrigger = (props: ButtonProps) => <Button {...props}>Set limit…</Button>
 
@@ -194,9 +212,9 @@ export function OperatorClusterSkeleton() {
   </>
 }
 
-const baseTabs = [{ value: 'queue', label: 'Review queue' }, { value: 'signups', label: 'Sign-ups' }, { value: 'abuse', label: 'Abuse' }, { value: 'actions', label: 'Actions' }, { value: 'waitlist', label: 'Waitlist' }]
-/** The tab a /operator address opens: ?view=signups, ?view=abuse, ?view=actions or ?view=waitlist, else the review queue. */
-export const operatorView = (search: string) => { const view = new URLSearchParams(search).get('view'); return view === 'actions' || view === 'waitlist' || view === 'abuse' || view === 'signups' ? view : 'queue' }
+const baseTabs = [{ value: 'queue', label: 'Review queue' }, { value: 'signups', label: 'Sign-ups' }, { value: 'abuse', label: 'Abuse' }, { value: 'actions', label: 'Actions' }, { value: 'waitlist', label: 'Waitlist' }, { value: 'health', label: 'Health' }]
+/** The tab a /operator address opens: ?view=signups, ?view=abuse, ?view=actions, ?view=waitlist or ?view=health, else the review queue. */
+export const operatorView = (search: string) => { const view = new URLSearchParams(search).get('view'); return view === 'actions' || view === 'waitlist' || view === 'abuse' || view === 'signups' || view === 'health' ? view : 'queue' }
 const notesTabs = [...baseTabs, { value: 'notes', label: 'UI notes' }]
 /** UI notes has a tab only for the people the API allows (GET /v1/me uiNotes). */
 export const useOperatorTabs = () => useSession()?.identity?.uiNotes === true ? notesTabs : baseTabs
@@ -219,12 +237,12 @@ export function WaitlistToolbar({ search = '', onSearch, onExport, exporting = f
 export function OperatorQueueSkeleton({ view = 'queue', search = '', canAct = false }: { view?: string; search?: string; canAct?: boolean }) {
   return <>
     <PageHeader title="Operator" actions={view === 'signups' && canAct ? <SetLimitTrigger disabled /> : undefined} />
-    <LoadingRegion label={view === 'waitlist' ? 'Loading the waitlist' : view === 'abuse' ? 'Loading related accounts' : view === 'signups' ? 'Loading sign-ups' : 'Loading the review queue'}><div className="op-page">
+    <LoadingRegion label={view === 'waitlist' ? 'Loading the waitlist' : view === 'abuse' ? 'Loading related accounts' : view === 'signups' ? 'Loading sign-ups' : view === 'health' ? 'Loading health' : 'Loading the review queue'}><div className="op-page">
       <Tabs value={view} onValueChange={() => {}} disabled items={useOperatorTabs()} label="Operator views" />
       {view === 'queue' && <QueueToolbar disabled />}
       {view === 'waitlist' && <WaitlistToolbar disabled />}
       {view === 'signups' && <SignupFacts />}
-      {view === 'abuse' ? <AbuseSkeleton search={search} /> : <TableSkeleton columns={view === 'queue' ? queueColumnDefs : view === 'waitlist' ? waitlistColumnDefs : view === 'signups' ? signupColumnDefs : actionColumnDefs} rows={6} />}
+      {view === 'abuse' ? <AbuseSkeleton search={search} /> : view === 'health' ? <HealthSkeleton /> : <TableSkeleton columns={view === 'queue' ? queueColumnDefs : view === 'waitlist' ? waitlistColumnDefs : view === 'signups' ? signupColumnDefs : actionColumnDefs} rows={6} />}
     </div></LoadingRegion>
   </>
 }
@@ -247,8 +265,8 @@ export function OperatorWorkspaceSkeleton({ actions }: { actions: boolean }) {
 }
 // The route-level placeholder while the operator chunk loads.
 export function OperatorRouteSkeleton({ operator }: { operator: 'operator' | 'operator:read' | null | undefined }) {
-  const { pathname, search } = useLocation(), uiNotes = useSession()?.identity?.uiNotes === true
-  if (!operator) return null
+  const { pathname, search } = useLocation(), identity = useSession()?.identity, uiNotes = identity?.uiNotes === true
+  if (!operator) return identity && identity.multiTenant !== true && pathname === '/operator' ? <SelfHostedHealthSkeleton /> : null
   if (pathname === '/operator/notes') return uiNotes ? <OperatorNotesSkeleton /> : null
   if (pathname.startsWith('/operator/abuse/')) return <OperatorClusterSkeleton />
   return pathname.startsWith('/operator/workspaces/') ? <OperatorWorkspaceSkeleton actions={operator === 'operator'} /> : <OperatorQueueSkeleton view={operatorView(search)} search={search} canAct={operator === 'operator'} />

@@ -119,12 +119,12 @@ const deliver: JobHandler = async (runtime, payload, job) => {
   await postSlack(url, { text: reputationAlertText({ region, metric, level: level as Level, previous: previous as Level, value, publicUrl: runtime.config.publicUrl }) });
 };
 /**
- * Posts one message to a Slack incoming webhook (these alerts and src/operator-alerts.ts). It never follows a redirect,
+ * Posts one message to a Slack incoming webhook (these alerts, src/operator-alerts.ts and src/health.ts). It never follows a redirect,
  * so the message goes to the configured webhook only; a refusal throws a retryable error, and so does a timeout
  * (retryDatabaseFailures), so the job that posts it runs again. Neither the URL nor the message is logged.
  */
-export async function postSlack(url: string, message: Record<string, unknown>, code = 'REPUTATION_ALERT_FAILED') {
-  const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(message), redirect: 'manual', signal: AbortSignal.timeout(10000) });
+export async function postSlack(url: string, message: Record<string, unknown>, code = 'REPUTATION_ALERT_FAILED', timeoutMs = 10000) {
+  const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(message), redirect: 'manual', signal: AbortSignal.timeout(timeoutMs) });
   await response.body?.cancel();
   if (!response.ok) throw new ApiError(503, code, `Slack rejected the alert with HTTP ${response.status}.`, undefined, true);
 }
