@@ -58,6 +58,9 @@ const values = z.object({
   // Hosted only: From for owner notices about sender standing (warn, restrict, pause, quarantine). Sent through the
   // platform workspace above; unset means notices appear only in the dashboard and the account.standing.changed webhook.
   NIGHTMAIL_NOTIFY_FROM: optional(z.email().max(254)),
+  // Hosted only: a list (lst_…) of the platform workspace above that everyone who joins the waitlist or signs up is
+  // kept in as a contact, with properties to segment by (src/signups.ts). Unset, or not a list ID: nothing is written.
+  NIGHTMAIL_SIGNUPS_LIST_ID: z.unknown().optional(),
   // Hosted only, support integration (api/README.md "Support integration"): where "Contact support" sends a member, and
   // the Ed25519 private JWK (with "x") that signs the handoff it carries. Treat the key as a secret. The support
   // platform itself has no credential here: it calls the SupportPlatform service-binding entrypoint (src/worker.ts).
@@ -183,6 +186,15 @@ function planetscaleSecret(value: string | undefined) {
   signingSecretIgnored = true;
   return undefined;
 }
+let signupsListIgnored = false;
+/** The sign-ups list, or undefined for a value that isn't a list ID: the optional sync is off, and nothing else is. Said once, never with the value. */
+function signupsListId(value: unknown): string | undefined {
+  if (value == null || value === '') return undefined;
+  if (typeof value === 'string' && /^lst_[0-9a-f]{32}$/.test(value)) return value;
+  if (!signupsListIgnored) log('warn', { code: 'SIGNUPS_LIST_IGNORED', message: 'NIGHTMAIL_SIGNUPS_LIST_ID is not a list ID (lst_ and 32 hex digits), so sign-ups are not kept in a list.' });
+  signupsListIgnored = true;
+  return undefined;
+}
 // Separate from Better Auth's signing/encryption uses even though installers manage one root secret.
 export function deriveEncryptionKey(secret: string): string {
   return Buffer.from(hkdfSync('sha256', secret, 'opensend:keys:v1', 'webhook-encryption', 32)).toString('hex');
@@ -250,6 +262,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     workspaceId: 'default', multiTenant: v.MULTI_TENANT === 'true', authSecret: v.NIGHTMAIL_ROOT_SECRET, previousAuthSecret: v.PREVIOUS_NIGHTMAIL_ROOT_SECRET,mailGatewayToken:v.MAILGW_API_TOKEN,
     mailServers: v.MAILGW_API_TOKEN ? mailServerHosts(v.MAILGW_PUBLIC_DOMAIN ?? url.hostname) : undefined,
     platformAccount: v.NIGHTMAIL_PLATFORM_AWS_ACCOUNT, platformDomainWorkspace: v.MULTI_TENANT==='true' ? v.NIGHTMAIL_PLATFORM_DOMAIN_WORKSPACE : undefined, notifyFrom: v.MULTI_TENANT==='true' ? v.NIGHTMAIL_NOTIFY_FROM : undefined,
+    signupsListId: v.MULTI_TENANT==='true' ? signupsListId(v.NIGHTMAIL_SIGNUPS_LIST_ID) : undefined,
     support: v.MULTI_TENANT==='true' ? { url: v.NIGHTMAIL_SUPPORT_URL, signingKey: supportSigningKey, addressIds: supportAddressIds } : undefined,
     observability: v.MULTI_TENANT==='true' && v.CF_OBSERVABILITY_TOKEN && v.CF_OBSERVABILITY_ACCOUNT_ID && v.CF_OBSERVABILITY_SCRIPT
       ? { token: v.CF_OBSERVABILITY_TOKEN, accountId: v.CF_OBSERVABILITY_ACCOUNT_ID, script: v.CF_OBSERVABILITY_SCRIPT } : undefined, receivingRedrive:v.NIGHTMAIL_RECEIVING_REDRIVE==='true',byoTemplateUrl: v.BYO_TEMPLATE_URL, sharedRegions, regionalSending: v.MULTI_TENANT === 'true' && v.NIGHTMAIL_REGIONAL_SENDING === 'true',

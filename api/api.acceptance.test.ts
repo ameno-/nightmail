@@ -1373,7 +1373,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
 // The sign-up limit (src/signups.ts): an operator opens a number of places. A new account signing in with a mailbox
 // its sign-in proves takes one while there is one, a raise lets the oldest waiting addresses in first, two people racing
 // for the last place can't both have it, and staff and invitees sign in as before, uncounted.
-test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one each, each held address emailed once, and staff and invitees pass uncounted', async t => {
+test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one each, each held address emailed once, and staff and invitees pass uncounted; the sign-ups list keeps every waitlist join and sign-up', async t => {
   const {drizzle} = await import('drizzle-orm/node-postgres');
   const {loadConfig} = await import('./src/config.js');
   const {createApp} = await import('./src/app.js');
@@ -1384,9 +1384,10 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   const origin = 'https://dashboard.example.org', issuer = 'https://signup-limit.example.org';
   const googleAcr = 'urn:anomaly:acr:google', githubAcr = 'urn:anomaly:acr:github', emailAcr = 'urn:anomaly:acr:email';
   const keys = generateKeyPairSync('ec',{namedCurve:'P-256'}), rp = generateKeyPairSync('ec',{namedCurve:'P-256'});
-  const runtime: import('./src/core.js').Runtime = { config:loadConfig({PUBLIC_URL:origin, ACCOUNT_ISSUER:issuer, ACCOUNT_CLIENT_ID:'dashboard',
+  const configInput = {PUBLIC_URL:origin, ACCOUNT_ISSUER:issuer, ACCOUNT_CLIENT_ID:'dashboard',
     ACCOUNT_CLIENT_PRIVATE_KEY:JSON.stringify({...rp.privateKey.export({format:'jwk'}),kid:'rp'}), BANE_ROOT_SECRET:'local-fixture-'.repeat(4), MULTI_TENANT:'true',
-    ACCOUNT_REQUIRED_ACR:`${googleAcr} ${githubAcr} ${emailAcr}`, AUTH_STAFF_GOOGLE_DOMAINS:'example.org'}),
+    ACCOUNT_REQUIRED_ACR:`${googleAcr} ${githubAcr} ${emailAcr}`, AUTH_STAFF_GOOGLE_DOMAINS:'example.org'};
+  const runtime: import('./src/core.js').Runtime = { config:loadConfig(configInput),
     db:drizzle(pool), snsCertificateState:new SnsCertificateState(), storage:{async put(){throw Error('unused');},async delete(){throw Error('unused');},async get(){throw Error('unused');}} };
   type Person = { subject: string; email: string; acr: string; provider: 'google' | 'github' | null; hd: string | null };
   // Each sign-in's code names its flow, so concurrent exchanges each get their own person and nonce.
@@ -1434,7 +1435,28 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   const platform = `signup-platform-${randomUUID()}`;
   runtime.config.platformDomainWorkspace = platform;
   const told = async (...ps: Person[]) => (await db.query("SELECT p.email,(SELECT count(*)::int FROM account_notices WHERE kind='waitlist_admitted' AND data->>'email'=lower(p.email)) AS n FROM unnest($1::text[]) WITH ORDINALITY p(email,i) ORDER BY i",[ps.map(p=>p.email)])).rows.map(r=>r.n);
+  // The sign-ups list (signups.ts): every waitlist join and sign-up is a contact of one list in the platform workspace,
+  // kept up to date as it moves through. Its jobs are run here by hand, as the runner would, each once.
+  // Nothing on the sign-in or raise path writes for it: the minute tick queues a run while rows are due, and the hourly
+  // reconcile marks who got in another way. The runs are done here by hand, as the runner would, until nothing is due.
+  const signupsListId = `lst_${randomUUID().replaceAll('-','')}`, { signupJobs, signupsTick, queueSignupsReconcile } = await import('./src/signups.js'), { JobDeferred } = await import('./src/jobs.js');
+  await db.query("INSERT INTO audience_lists(id,workspace_id,name) VALUES($1,$2,'Sign-ups')",[signupsListId,platform]);
+  runtime.config.signupsListId = signupsListId;
+  const pendingRuns = async () => (await db.query("SELECT count(*)::int AS n FROM jobs WHERE workspace_id=$1 AND type LIKE 'signups.%' AND status='pending'",[platform])).rows[0].n;
+  const runQueued = async () => {
+    for (let job; (job = (await db.query("UPDATE jobs SET status='completed' WHERE id=(SELECT id FROM jobs WHERE workspace_id=$1 AND type LIKE 'signups.%' AND status='pending' ORDER BY created_at,id LIMIT 1) RETURNING id,type,payload",[platform])).rows[0]);) {
+      for (let again = true; again;) again = await signupJobs[job.type]!(runtime,job.payload,{id:job.id,workspaceId:platform,attempts:1}).then(()=>false,(error:unknown)=>{ if (error instanceof JobDeferred) return true; throw error; });
+    }
+  };
+  const syncList = async () => { await signupsTick(runtime); await runQueued(); };
+  const reconcileList = async () => { await queueSignupsReconcile(runtime); await runQueued(); };
+  const contactOf = async (p: Person) => (await db.query(`SELECT c.name,c.properties,c.marketing_consent AS consent,c.suppressed,c.deleted_at IS NOT NULL AS deleted,
+      EXISTS (SELECT FROM audience_list_members m WHERE m.workspace_id=c.workspace_id AND m.list_id=$3 AND m.contact_id=c.id) AS listed,
+      ARRAY(SELECT a.status||' '||a.source FROM audience_consent_audit a WHERE a.workspace_id=c.workspace_id AND a.contact_id=c.id ORDER BY a.id) AS consents
+    FROM audience_contacts c WHERE c.workspace_id=$1 AND c.email=lower($2)`,[platform,p.email,signupsListId])).rows[0] ?? null;
+  const stage = async (p: Person) => { const c = await contactOf(p); return c && [c.properties.status,c.consent,c.listed]; };
   cleanup(t,async()=>{
+    for (const table of ['audience_list_members','audience_consent_audit','audience_contacts','audience_list_counts','audience_lists']) await db.query(`DELETE FROM ${table} WHERE workspace_id=$1`,[platform]);
     await db.query('DELETE FROM jobs WHERE workspace_id=$1',[platform]);
     await db.query('DELETE FROM account_notices WHERE workspace_id=$1',[platform]);
     await db.query('UPDATE nightmail_signup_limit SET places=$1',[initial]);
@@ -1485,9 +1507,23 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   }
   // GitHub, with no place for it: the waitlist, said as before.
   const coder = someone(`coder-${randomUUID().slice(0,8)}@example.net`,githubAcr,'github');
+  // A contact deleted in the list's workspace stays deleted: what deletion keeps is there so it isn't enrolled again.
+  await db.query("INSERT INTO audience_contacts(id,workspace_id,email,deleted_at) VALUES($1,$2,lower($3),now())",[`con_${randomUUID().replaceAll('-','')}`,platform,coder.email]);
   assert.deepEqual(await signIn(coder).then(r=>[r.auth,r.place]),['waitlist',null]);
   // The oldest waiting addresses in the whole list, so a raise reaches them first.
   for (const [i, p] of [oldest, second, third].entries()) await db.query("UPDATE nightmail_waitlist SET first_at=timestamptz '2001-01-01'+$2*interval '1 day' WHERE email=lower($1)",[p.email,i]);
+  // Joining wrote nothing for the list: each row is due, and no job was queued on the way.
+  assert.deepEqual([await pendingRuns(),(await db.query('SELECT count(*)::int AS n FROM nightmail_waitlist WHERE email=ANY($1) AND list_synced_at IS NULL',[[oldest,second,third,coder].map(p=>p.email.toLowerCase())])).rows[0].n],[0,4]);
+  // Each waiting address is on the list, subscribed because it asked for access, with what a segment reads.
+  await syncList();
+  const firstAt = async (p: Person) => ((await db.query('SELECT first_at FROM nightmail_waitlist WHERE email=lower($1)',[p.email])).rows[0].first_at as Date).toISOString();
+  const joinedOldest = await firstAt(oldest);
+  assert.deepEqual(await contactOf(oldest),{name:null,properties:{status:'waiting',joined_at:joinedOldest,attempts:1,email_domain:'gmail.com',mailbox:'free'},
+    consent:'subscribed',suppressed:false,deleted:false,listed:true,consents:['subscribed Nightmail waitlist']});
+  assert.deepEqual((await contactOf(second)).properties,{status:'waiting',joined_at:await firstAt(second),attempts:1,email_domain:'example.net',mailbox:'company'});
+  assert.deepEqual(await contactOf(coder),{name:null,properties:{},consent:'unknown',suppressed:false,deleted:true,listed:false,consents:[]});
+  // Opting out sticks: later attempts keep the contact up to date and never subscribe it again.
+  await (await import('./src/audience.js')).recordUnsubscribe(runtime,platform,third.email,'footer-confirm');
   const closed = await places();
   assert.equal(closed.open,0);
 
@@ -1500,8 +1536,17 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   const audit = (await db.query("SELECT workspace_id,operator_id,before,after FROM hosted_operator_audit WHERE action='operator-set-signup-limit' AND operator_id=$1 ORDER BY at DESC LIMIT 1",[staff.account])).rows[0];
   assert.deepEqual(audit,{workspace_id:'platform',operator_id:staff.account,before:{limit:closed.limit},after:{limit:closed.limit+2,letIn:2}},'Every change is audited: who, before and after');
   const latecomer = gmail('latecomer');
+  // A suppressed address with no consent decision joins the list and its suppression stands; consent isn't recorded.
+  await db.query("INSERT INTO audience_contacts(id,workspace_id,email,suppressed,suppression_reason) VALUES($1,$2,lower($3),true,'hard_bounce')",[`con_${randomUUID().replaceAll('-','')}`,platform,latecomer.email]);
   assert.equal((await signIn(third)).auth,'waitlist','A place held for an older address is not the next arrival\'s');
   assert.equal((await signIn(latecomer)).auth,'waitlist');
+  await syncList();
+  const heldOldest = await contactOf(oldest);
+  assert.deepEqual([await stage(oldest),await stage(second),typeof heldOldest.properties.let_in_at],[['let_in','subscribed',true],['let_in','subscribed',true],'string']);
+  const unsubscribed = await contactOf(third);
+  assert.deepEqual([unsubscribed.properties.status,unsubscribed.properties.attempts,unsubscribed.consent,unsubscribed.consents],['waiting',2,'unsubscribed',['subscribed Nightmail waitlist','unsubscribed footer-confirm']]);
+  const late = await contactOf(latecomer);
+  assert.deepEqual([late.properties.status,late.consent,late.suppressed,late.listed,late.consents],['waiting','unknown',true,true,[]]);
   // A second raise emails only the address it lets in: nobody is told twice.
   const again = await setLimit(raised.limit+1);
   assert.deepEqual([again.letIn,again.emailed,again.notEmailed],[1,1,0]);
@@ -1514,6 +1559,12 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   const me = await (await request('/v1/me','GET',first.session)).json() as {workspaces:{id:string;role:string}[]};
   assert.deepEqual(me.workspaces.map(w=>w.role),['owner']);
   assert.deepEqual([await placeOf(first.account),await waiting(oldest)],['waitlist',null]);
+  // On the list it is the same contact, signed up now, still showing when it joined and was let in; nothing new consented.
+  await syncList();
+  const joinedUp = await contactOf(oldest);
+  assert.deepEqual([joinedUp.properties.status,joinedUp.properties.joined_at,joinedUp.properties.let_in_at,typeof joinedUp.properties.signed_up_at,joinedUp.properties.attempts,joinedUp.consents],
+    ['signed_up',joinedOldest,heldOldest.properties.let_in_at,'string',1,['subscribed Nightmail waitlist']]);
+  assert.deepEqual(await stage(third),['let_in','unsubscribed',true]);
   // Its card, once, after the sign-up committed: its place of the limit ("91 of 100"). Staff took no place and have none.
   const signedUp = await places();
   assert.deepEqual((await cards()).map(c => c.payload),[{kind:'signup',signedUp:signedUp.signedUp,limit:signedUp.limit}]);
@@ -1537,6 +1588,10 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   assert.equal((await cards()).length,2,'Each sign-up has its one card; the refused GitHub sign-in has none.');
   // One place per person: another account with an address that is already a verified user's takes none.
   assert.equal((await signIn(someone(oldest.email))).auth,'error');
+  // Never written while it waits, is let in and signs up: its contact comes from what the sign-up recorded.
+  const patient = gmail('patient');
+  for (let i = 0; i < 2; i++) assert.equal((await signIn(patient)).auth,'waitlist');
+  const patientJoined = await firstAt(patient);
   const taken = await places();
   assert.deepEqual([taken.signedUp,taken.held,taken.open],[closed.signedUp+2,closed.held+1,0]);
 
@@ -1545,6 +1600,8 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   const all = await setLimit(taken.limit+taken.waiting+1);
   assert.deepEqual([all.letIn,all.open,all.emailed,all.notEmailed],[taken.waiting,1,taken.waiting,0]);
   assert.deepEqual(await told(third,coder),[1,1]);
+  const patientIn = await signIn(patient);
+  assert.deepEqual([await outcome(patient),await placeOf(patientIn.account)],['signed_in:signup','waitlist']);
   const [left, right] = [gmail('left'), gmail('right')];
   const finish = [await begin(left), await begin(right)], watcher = await fixtureDatabase(t);
   await db.query('BEGIN');
@@ -1563,16 +1620,35 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   assert.equal(await placeOf(winner.account),'open');
   assert.equal(((await (await request('/v1/me','GET',winner.session)).json()) as {workspaces:unknown[]}).workspaces.length,1,'A new person under the limit gets in with a workspace');
   const full = await places();
-  assert.deepEqual([full.signedUp,full.open],[taken.signedUp+1,0]);
+  assert.deepEqual([full.signedUp,full.open],[taken.signedUp+2,0]);
+  // Who signed up without waiting is on the list as a sign-up; who lost the race waits there.
+  await syncList();
+  const opened = await contactOf([left, right][raced.findIndex(r=>r.session)]!);
+  assert.deepEqual([opened.properties.status,'joined_at' in opened.properties,opened.consents],['signed_up',false,['subscribed Nightmail sign-up']]);
+  assert.deepEqual(await stage([left, right][raced.findIndex(r=>!r.session)]!),['waiting','subscribed',true]);
+  const patientContact = await contactOf(patient);
+  assert.deepEqual([patientContact.properties.status,patientContact.properties.attempts,patientContact.properties.joined_at,typeof patientContact.properties.let_in_at,patientContact.consents],
+    ['signed_up',2,patientJoined,'string',['subscribed Nightmail waitlist']]);
 
   // At the limit, staff and an invitee sign in as before, and neither takes a place.
   const staffer = someone(`staff-${randomUUID()}@example.org`,googleAcr,'google','example.org'), moreStaff = await signIn(staffer);
   assert.deepEqual([await outcome(staffer),await placeOf(moreStaff.account)],['signed_in:staff',null]);
-  const invitee = gmail('invitee');
-  const invitation = await (await request('/v1/workspaces/current/invitations','POST',staff.session,{email:invitee.email,role:'member'})).json() as {acceptUrl:string};
-  const joined = await signIn(invitee, invitation.acceptUrl);
-  assert.deepEqual([await outcome(invitee),await placeOf(joined.account)],['signed_in:invitation',null]);
+  // The invitee waited first, and is on the list; another waited too, but joined by invitation before the list next ran.
+  const invitee = gmail('invitee'), unwritten = gmail('unwritten');
+  assert.equal((await signIn(invitee)).auth,'waitlist');
+  await syncList();
+  assert.equal((await signIn(unwritten)).auth,'waitlist');
+  const invite = async (p: Person) => ((await (await request('/v1/workspaces/current/invitations','POST',staff.session,{email:p.email,role:'member'})).json()) as {acceptUrl:string}).acceptUrl;
+  const joined = await signIn(invitee, await invite(invitee)), alsoJoined = await signIn(unwritten, await invite(unwritten));
+  assert.deepEqual([await outcome(invitee),await placeOf(joined.account),await outcome(unwritten),await placeOf(alsoJoined.account)],['signed_in:invitation',null,'signed_in:invitation',null]);
   assert.deepEqual(await places(),full);
+  // An invitation or staff is never sign-up consent: no contact for staff or the one never written, and the one on the
+  // list is admitted, its consent as the waitlist left it.
+  await syncList();
+  await reconcileList();
+  assert.deepEqual([await contactOf(staffer),await contactOf(unwritten)],[null,null],'Staff and invitees never asked for access');
+  const admitted = await contactOf(invitee);
+  assert.deepEqual([admitted.properties.status,admitted.consent,admitted.listed,admitted.consents],['admitted','subscribed',true,['subscribed Nightmail waitlist']]);
 
   // An email that can't be queued (its table locked past the lock timeout) leaves the raise intact: the place is held
   // and the number saved, the answer says who wasn't emailed, and saving again emails them.
@@ -1593,8 +1669,30 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   const kept = await places(), lowered = await setLimit(0);
   assert.deepEqual([lowered.letIn,lowered.signedUp,lowered.held,lowered.emailed],[0,kept.signedUp,kept.held,0]);
   for (const session of [first.session,viaLink.session,winner.session]) assert.equal((await request('/v1/me','GET',session)).status,200);
+  // Without the list nothing is queued; a value that isn't a list ID turns it off and nothing else.
+  await syncList();
+  assert.equal(loadConfig({...configInput, NIGHTMAIL_PLATFORM_DOMAIN_WORKSPACE:`ws_${'0'.repeat(32)}`, NIGHTMAIL_SIGNUPS_LIST_ID:'not-a-list'}).signupsListId,undefined);
+  runtime.config.signupsListId = undefined;
   const after = gmail('after');
-  assert.equal((await signIn(after)).auth,'waitlist');
+  // Nor does the job queue hold up a sign-in: with its table locked past the lock timeout, a new address still waits.
+  await db.query('BEGIN');
+  await db.query('LOCK TABLE jobs IN EXCLUSIVE MODE');
+  runtime.db = drizzle(strict);
+  const blocked = await signIn(after).finally(()=>{ runtime.db = drizzle(pool); });
+  await db.query('ROLLBACK');
+  assert.equal(blocked.auth,'waitlist');
+  await signupsTick(runtime);
+  runtime.config.signupsListId = signupsListId;
+  assert.equal(await pendingRuns(),0);
+  // Every row stays due until it is written: set again, the list catches up with `after`. The resync
+  // (scripts/sync-signups-list.ts) writes the same contacts again.
+  await syncList();
+  assert.deepEqual(await stage(after),['waiting','subscribed',true]);
+  const everyone = [oldest,second,third,coder,latecomer,left,right,patient,invitee,after], once = await Promise.all(everyone.map(contactOf));
+  const { resyncSignupsList } = await import('./scripts/sync-signups-list.js');
+  assert.ok((await resyncSignupsList(pool)).due.waitlist > 0);
+  await syncList();
+  assert.deepEqual(await Promise.all(everyone.map(contactOf)),once,'A resync writes the same contacts');
   // The Waitlist tab shows who is held and whether their email went.
   const entry = async (p: Person) => ((await (await request(`/v1/operator/waitlist?q=${encodeURIComponent(p.email)}`,'GET',staff.session)).json()) as {data:{letInAt:string|null;emailed:string|null}[]}).data.map(e=>[!!e.letInAt,e.emailed]);
   assert.deepEqual(await entry(after),[[false,null]]);
@@ -1608,6 +1706,14 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   const page = await (await request('/v1/operator/signups/workspaces?limit=1','GET',staff.session)).json() as {data:{id:string}[];nextCursor:string};
   const next = await (await request(`/v1/operator/signups/workspaces?limit=1&cursor=${encodeURIComponent(page.nextCursor)}`,'GET',staff.session)).json() as {data:{id:string}[]};
   assert.deepEqual([page.data[0]!.id,next.data[0]!.id],listed.data.slice(0,2).map(w=>w.id));
+  // The same account signing in with another verified mailbox: that mailbox never asked, and no sync or resync puts it on
+  // the list; the address that signed up stays as it was.
+  const moved: Person = {...oldest, email:`moved-${randomUUID().slice(0,8)}@gmail.com`}; people.push(moved);
+  assert.ok((await signIn(moved)).session);
+  await resyncSignupsList(pool);
+  await syncList();
+  await reconcileList();
+  assert.deepEqual([await contactOf(moved),await stage(oldest)],[null,['signed_up','subscribed',true]]);
 });
 
 // Several accounts in one browser (account switcher): one session cookie per connected account, each request acts as
@@ -20201,7 +20307,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual([violations, calls], [[], ['alarm', 'alarm', 'alarm']]);
       assert.equal(sent.at(-1), first);
       // 2. A request that lands as the alarm begins, before the run is marked running: the run makes no classifier call and
-      // leases nothing; the follow-up alarm sends the email.
+      // hands the email back; the follow-up alarm screens and sends it.
       const second = await send('222222');
       await deliver();
       during = async at => { if (at === 'get:displacedAlarm') { during = undefined; await deliver(); } };
@@ -20209,7 +20315,62 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual([violations, calls.length], [[], 3]); assert.equal((await row(second)).status, 'queued');
       await fire();
       assert.deepEqual([violations, calls.length], [[], 5]); assert.equal(sent.at(-1), second);
+      // 3. A visitor wake landing while the alarm runs does NOT stop the batch when the queued transactional row needs no
+      // external classifier call (cached verdict): it is leased and sent in the same alarm run with zero handover.
+      const third = await send('222222'); // identical copy -> screenSnapshot cache hit, no classifier call
+      await deliver();
+      during = async at => { if (at === 'get:displacedAlarm') { during = undefined; await deliver(); } };
+      await fire();
+      assert.deepEqual([violations, calls.length], [[], 5], 'Cached copy needs no classifier call and makes no violation.');
+      assert.equal(sent.at(-1), third, 'Visitor wake without a classifier call sends in the same alarm run without stopping.');
     }));
+  });
+  test('mid-batch stop interleaves owners across sendConcurrency chunks while keeping transactional first', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { runDispatcher, initialGate, interleaveByOwner } = await import('./src/dispatcher.js');
+      const { SESv2Client, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
+      // Pure helper check: transactional stays first; marketing alternates owners; offset rotates start owner.
+      const sample = [
+        { k: 'marketing' as const, w: 'A', id: 1 }, { k: 'marketing' as const, w: 'A', id: 2 },
+        { k: 'marketing' as const, w: 'B', id: 3 }, { k: 'marketing' as const, w: 'B', id: 4 },
+        { k: 'transactional' as const, w: 'C', id: 5 },
+      ];
+      assert.deepEqual(interleaveByOwner(sample, x => x.k, x => x.w, 0).map(x => x.id), [5, 1, 3, 2, 4]);
+      assert.deepEqual(interleaveByOwner(sample, x => x.k, x => x.w, 1).map(x => x.id), [5, 3, 1, 4, 2]);
+      // End-to-end check: stop flips after the first 6-email chunk of a 24-row 2-workspace marketing batch.
+      const pool = '111122229999', wsOld = 'ws_a_old_mkt', wsNew = 'ws_z_new_mkt';
+      Object.assign(runtime.config, { multiTenant: true, liveEnabled: true, hostedScreen: false, aws: { accessKeyId: 'fixture-platform', secretAccessKey: 'fixture-only' } });
+      let sentInRun = 0, shouldStop = false;
+      t.mock.method(SESv2Client.prototype, 'send', async (cmd: any) => {
+        if (cmd instanceof GetAccountCommand) return { SendingEnabled: true, SendQuota: { MaxSendRate: 200, Max24HourSend: 5_000_000, SentLast24Hours: 0 } };
+        if (++sentInRun >= 6) shouldStop = true;
+        return { MessageId: unique('interleave') };
+      });
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready') ON CONFLICT DO NOTHING`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:feedback`]);
+      await db.query(`INSERT INTO provider_account_limits(aws_account_id,region,refresh_after,checked_at,max_send_rate,max_24_hour_send,sent_last_24_hours) VALUES ($1,$2,now(),now(),200,5000000,0) ON CONFLICT (aws_account_id,region) DO UPDATE SET max_send_rate=200, checked_at=now()`, [pool, REGION]);
+      for (const [wid, dom] of [[wsOld, 'old.example.net'], [wsNew, 'new.example.net']] as const) {
+        await db.query('INSERT INTO workspaces(id,slug,name,exempt_hosted_quotas) VALUES($1,$1,$1,true) ON CONFLICT DO NOTHING', [wid]);
+        await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state,pool_tenant_name) VALUES ($1,$1,$2,'ready','shared',$3,'ready','t-'||$1) ON CONFLICT DO NOTHING`, [wid, REGION, pool]);
+        await db.query(`INSERT INTO provider_connection_regions(connection_id,region,tenant_state,sending_state) VALUES ($1,$2,'ready','ready') ON CONFLICT DO NOTHING`, [wid, REGION]);
+        await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified') ON CONFLICT DO NOTHING`, [dom, wid]);
+        await db.query(`INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES ($1,'inst_'||$1,$2,jsonb_build_array($2::text)) ON CONFLICT DO NOTHING`, [wid, REGION]);
+        await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES ('key_'||$1,$1,'k',md5($1),'nm_000000','["send"]','[]') ON CONFLICT DO NOTHING`, [wid]);
+        await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'c_'||$1||'_'||n,$1,'u'||n||'@example.net','subscribed' FROM generate_series(1,20) n`, [wid]);
+      }
+      for (const [wid, dom, age] of [[wsOld, 'old.example.net', '2 minutes'], [wsNew, 'new.example.net', '0 seconds']] as const) {
+        const snap = JSON.stringify({ kind: 'marketing', from: `n@${dom}`, to: ['u1@example.net'], cc: [], bcc: [], replyTo: [], region: REGION, subject: 'News', text: 'hi', attachments: [], tracking: false, headers: [] });
+        await db.query(`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,created_at)
+          SELECT 'em_'||$1||'_'||n,$1,'key_'||$1,$2,$3,jsonb_build_array('u'||n||'@example.net'),'[]','[]','News',jsonb_set($4::jsonb,'{to}',jsonb_build_array('u'||n||'@example.net')),false,'queued',clock_timestamp()-$5::interval
+          FROM generate_series(1,12) n`, [wid, REGION, `n@${dom}`, snap, age]);
+      }
+      const rep = await runDispatcher(runtime, { accountId: pool, region: REGION, gate: initialGate(), batchSize: 24, sendConcurrency: 6, lanes: 1, stop: () => shouldStop, until: Date.now() + 5000 });
+      assert.equal(rep.sent, 6, 'Stops after the first 6-email chunk.');
+      const split = (await db.query(`SELECT workspace_id, count(*) FILTER (WHERE status='accepted')::int AS sent, count(*) FILTER (WHERE status='queued')::int AS returned FROM sending_emails WHERE workspace_id = ANY($1) GROUP BY 1 ORDER BY 1`, [[wsOld, wsNew]])).rows;
+      assert.deepEqual(split, [
+        { workspace_id: wsOld, sent: 3, returned: 9 },
+        { workspace_id: wsNew, sent: 3, returned: 9 },
+      ], 'Both sent and returned chunks split 1:1 across concurrent campaigns instead of dropping the newer one.');
+    });
   });
   // tear witness (api/tear/dispatch): send ok, send ok, then a one-row dispatcher stepped through
   // lease, claim, send, record and the next lease, which found nothing and ended the run.

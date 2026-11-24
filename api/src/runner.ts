@@ -12,6 +12,7 @@ import { healthTick } from './health.js';
 import { flushCounters } from './health-counters.js';
 import { standingTick } from './standing.js';
 import { ensureSenderDisplayDiscovery } from './sender-display-score.js';
+import { signupsTick } from './signups.js';
 import { syncOutboundMessages } from './mailbox-send.js';
 import { scheduleHoldRelease } from './mailbox-staging.js';
 import { queueStartupDiscovery } from './ses-regions.js';
@@ -63,7 +64,7 @@ try {
         // GET /v1/public/stats serves only what this writes. In the background, so dispatch never waits on it.
         if (!publicStats && Date.now() - lastPublicStats >= 60_000) {
           lastPublicStats = Date.now();
-          publicStats = foldSendingTallies(runtime).catch(() => log('warn', { code: 'SENDING_TALLIES_FOLD_FAILED' })).then(() => publicStatsTick(runtime)).then(() => standingTick(runtime)).finally(() => { publicStats = undefined; });
+          publicStats = foldSendingTallies(runtime).catch(() => log('warn', { code: 'SENDING_TALLIES_FOLD_FAILED' })).then(() => publicStatsTick(runtime)).then(() => standingTick(runtime)).then(() => signupsTick(runtime)).finally(() => { publicStats = undefined; });
         }
         // Keep the display scanner scheduled without reserving a dispatch lane or using a request to seed it.
         if (!display && Date.now() - lastDisplay >= 60_000) {

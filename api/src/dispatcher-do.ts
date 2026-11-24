@@ -155,10 +155,18 @@ export class DispatcherShard extends DurableObject<Env> {
       const { initialGate, runDispatcher } = deps;
       this.gate ??= (await this.ctx.storage.get<GateState>('gate')) ?? initialGate();
       // Once a visitor request lands, no classifier call in this run (screenHandover). Only stop early for a clean
-      // follow-up alarm when live Hosted screening is active; otherwise keep serving priorityWake and normal lanes.
+      // follow-up alarm when a message genuinely hits screenHandover (needs an external classifier call); otherwise keep
+      // serving priorityWake and normal batches without interrupting pre-screened or cached sends.
       const baseRuntime = await this.runtime();
-      const runtime: Runtime = { ...baseRuntime, screenHandover: () => this.landed };
-      const needsScreenHandover = Boolean(runtime.config.multiTenant && runtime.config.hostedScreen && runtime.config.screen && runtime.config.liveEnabled);
+      let handedOver = false;
+      const runtime: Runtime = {
+        ...baseRuntime,
+        screenHandover: () => {
+          if (!this.landed) return false;
+          handedOver = true;
+          return true;
+        },
+      };
       // An alarm persisted by an older MX deployment must not drain an unpartitioned region.
       if (runtime.config.multiTenant && !identity.accountId) return;
       // Throttle and guard gate persistence: a transient DO storage error must never crash a healthy run into a 15 s retry.
@@ -173,7 +181,7 @@ export class DispatcherShard extends DurableObject<Env> {
         catch (error) { deps?.log('warn', { code: 'DISPATCHER_GATE_PERSIST_FAILED', shard: dispatcherName(identity), cause: deps.platformMessage(error) }); }
       };
       const report = await runDispatcher(runtime, {
-        ...identity, gate: this.gate, priorityWake: this.priorityWake, stop: () => this.landed && needsScreenHandover,
+        ...identity, gate: this.gate, priorityWake: this.priorityWake, stop: () => handedOver,
         until: started + RUN_MS, lanes: 2, batchSize: deps.shardLeaseSize(this.gate.quota?.maxSendRate,identity.shard.count), sendConcurrency: 6, wakeMs,
         onGate: state => persistGate(state),
       });

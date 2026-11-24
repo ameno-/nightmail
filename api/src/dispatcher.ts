@@ -1130,7 +1130,7 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
       if (error instanceof ModuleLoadError) { await releaseLeases(base, [item.mail]); throw error; }
       // Its screen was left to the next run (Runtime.screenHandover): back to the queue as it was, due now. Not a classifier
       // failure: no deferral, no error code, no breaker.
-      if (error instanceof ScreenHandover) { handedOver.push(item.mail); counters.deferred++; logEmail(lane, item.mail, item.trace, 'deferred', 'SCREEN_HANDOVER'); return; }
+      if (error instanceof ScreenHandover) { handedOver.push(item.mail); counters.deferred++; counters.idle = false; logEmail(lane, item.mail, item.trace, 'deferred', 'SCREEN_HANDOVER'); return; }
       if (error instanceof ApiError && error.code==='CONTENT_SCREEN_UNAVAILABLE') {
         if (!(gate.screenRetryAt && gate.screenRetryAt>Date.now())) {
           gate.screenRetryAt=Date.now()+30_000; log('warn',{code:error.code,region:options.region,retryAt:gate.screenRetryAt});
@@ -1192,7 +1192,7 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
     if(page.length)await flush();
   } else if (ready.some(({mail, owner, review}) => (mail.snapshot.screen || owner.tenantName && owner.runtime.config.hostedScreen) && owner.runtime.config.screen && !isSimulatedSes(owner.runtime) && !(mail.snapshot.deferredCampaign && review?.screen?.template && review.screen.contentHash === review.reviewHash))) {
     // Bound simultaneous live classifier probes, but don't fragment pre-screened campaign batches into 1-row claims.
-    await streamPage(ready);
+    await streamPage(interleaveByOwner(ready, item => item.mail.snapshot.kind, item => item.mail.workspaceId, counters.batches + (options.shard?.index ?? 0)));
   } else {
     const prepared = await phase('prepare', () => Promise.all(ready.map(prepare)));
     await dispatchPrepared(base, lane, prepared.filter((item): item is Prepared => item !== undefined));
@@ -1238,12 +1238,41 @@ function schedulePartialFlush(flush: () => void) {
   const timer = setTimeout(flush, 300);
   return () => clearTimeout(timer);
 }
+/** Reorders a batch so transactional rows always stay ahead of marketing, and within each stream owners alternate
+ *  round-robin (preserving each owner's FIFO order). When a mid-batch stop or pacing cutoff returns later chunks of
+ *  `sendConcurrency`, both sent and returned chunks stay balanced across concurrent campaigns. */
+export function interleaveByOwner<T>(items: readonly T[], kindOf: (item: T) => EmailSnapshot['kind'], ownerOf: (item: T) => string, offset = 0): T[] {
+  if (items.length <= 1) return items.slice();
+  const roundRobin = (stream: T[]) => {
+    if (stream.length <= 1) return stream;
+    const byOwner = new Map<string, T[]>();
+    for (const item of stream) {
+      const id = ownerOf(item);
+      let list = byOwner.get(id);
+      if (!list) { list = []; byOwner.set(id, list); }
+      list.push(item);
+    }
+    if (byOwner.size <= 1) return stream;
+    const queues = [...byOwner.values()];
+    const shift = ((offset % queues.length) + queues.length) % queues.length;
+    if (shift) queues.push(...queues.splice(0, shift));
+    const out: T[] = [];
+    for (let i = 0; out.length < stream.length; i++) {
+      for (const q of queues) if (i < q.length) out.push(q[i]!);
+    }
+    return out;
+  };
+  const tx: T[] = [], mkt: T[] = [];
+  for (const item of items) (kindOf(item) === 'transactional' ? tx : mkt).push(item);
+  return [...roundRobin(tx), ...roundRobin(mkt)];
+}
 async function dispatchPrepared(base: Runtime, lane: Lane, prepared: Prepared[]) {
   if (!prepared.length) return;
   const {gate, options, counters, phase} = lane;
   const pendingRecords: Promise<void>[] = [];
   const delayed: Mail[] = [], unpaced: Mail[] = [];
-  for (const candidates of chunk(prepared, options.sendConcurrency)) {
+  const ordered = interleaveByOwner(prepared, item => item.snapshot.kind, item => item.mail.workspaceId, counters.batches + (options.shard?.index ?? 0));
+  for (const candidates of chunk(ordered, options.sendConcurrency)) {
     if (options.stop?.()) { for (const item of candidates) { unpaced.push(item.mail); counters.claimed--; counters.deferred++; } continue; }
     // Hold daily capacity synchronously across lanes before the durable attempt. A canceled/lost
     // claim returns it; a provider start moves it from held to sent. Rate slots are never held here.
