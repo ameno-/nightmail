@@ -32,8 +32,11 @@ const attr = (value: string) => value.replaceAll('&', '&amp;').replaceAll('"', '
 const prerenderModule = fileURLToPath(new URL('./src/features/pricing/prerender.tsx', import.meta.url))
 const bootScript = fileURLToPath(new URL('./src/features/home/shell/boot.js', import.meta.url))
 /** Over the app's own page until it takes over (index.tsx), and not at all at an address it doesn't show (theme.js,
- *  data-plain); the rest is the app's stylesheet, cut down. */
-const SHELL_CSS = '#price-shell{position:absolute;top:0;left:0;z-index:2147483000;width:100%}html[data-shell=off] #price-shell{display:none}'
+ *  data-plain). Unseen until all of it has arrived (#root follows it): drawn while its HTML streams in, its rows grow as
+ *  the rest of their tiles arrive. Chrome doesn't draw at all until then (<link rel="expect">, below); this keeps it
+ *  still in browsers that ignore that. The rest is the app's stylesheet, cut down (it has no visibility:visible to show
+ *  through). */
+const SHELL_CSS = '#price-shell{position:absolute;top:0;left:0;z-index:2147483000;width:100%}html[data-shell=off] #price-shell{display:none}body:not(:has(>#root)) #price-shell{visibility:hidden}'
 /** The first fonts (public/fonts/*-basic.woff2, features/pricing/fonts/README.md): the app's, cut down to these
  *  characters, and preloaded. The painted page knows only these (its CSS leaves out the app's own faces of those
  *  families: WHOLE_FACES), so it fetches nothing else; once the app's stylesheet is in, they still serve these
