@@ -101,6 +101,13 @@ const publicBeacon: Plugin = {
       || !readFileSync(new URL('./public/_headers', import.meta.url), 'utf8').includes(hash)) throw new Error('Check public beacon size and CSP hash.')
     return html.replace('</body>', '<script>' + js + '</script></body>')
   },
+  // Every page the build writes carries it byte for byte (its CSP hash allows only these bytes), the pages made from
+  // index.html included (home-shell.ts, price-pages.ts; inlineScriptsKept checks that they change nothing of it).
+  writeBundle(_options, bundle) {
+    const tag = '<script>' + readFileSync(new URL('./public-beacon.js', import.meta.url), 'utf8').trim() + '</script>'
+    const missing = Object.values(bundle).filter(file => file.type === 'asset' && file.fileName.endsWith('.html') && !String(file.source).includes(tag)).map(file => file.fileName)
+    if (missing.length) throw new Error(`The public beacon is missing or changed in ${missing.join(', ')}: its CSP hash would refuse it.`)
+  },
 }
 
 // Every page made from index.html (home.html, the price pages) keeps each script index.html carries inline byte for
