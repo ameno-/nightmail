@@ -11,22 +11,18 @@ const def = <T>(key: readonly unknown[], read: QueryDef<T>['read']): QueryDef<T>
 
 export const queries = {
   overview: (regionId: string, range: TimeRange, stream: Stream | 'all') => def(['overview', regionId, range, stream], (api, signal) => api.overview.get({ regionId, range, stream: stream === 'all' ? undefined : stream }, signal)),
+  recentCampaigns: (regionId: string) => def(['campaigns', 'recent', regionId], (api, signal) => api.campaigns.list({ regionId, pageSize: 4 }, signal)),
   senderScore: () => def(['sender-score'], (api, signal) => api.senderScore.get(signal)),
   emails: (params: PageRequest) => def(['emails', params], (api, signal) => api.emails.list(params, signal)),
   logs: (params: PageRequest & { direction?: LogDirection }) => def(['logs', params], (api, signal) => api.logs.list(params, signal)),
   logCounts: (params: PageRequest & { direction?: LogDirection }) => def(['logs', 'counts', params], (api, signal) => api.logs.counts(params, signal)),
   inboundDomains: () => def(['mailbox-domains'], (api, signal) => api.mailboxes.domains(signal)),
-  inboundWebhooks: () => def(['inbound-webhooks'], (api, signal) => api.inbound.webhooks(signal)),
+  inboundWebhooks: (cursor?: string) => def(['inbound-webhooks', cursor ?? null], (api, signal) => api.inbound.webhooks(signal, cursor)),
   forwardEndpoints: () => def(['forward-endpoints'], (api, signal) => api.inbound.forwards(signal)),
   routing: () => def(['routing'], (api, signal) => api.routing.routes(signal)),
   receivingAddresses: (search: string, cursor: string | undefined) => def(['inbound-addresses', 'address', search, cursor ?? null], (api, signal) => api.inbound.addresses({ kind: 'address', search: search || undefined, cursor }, signal)),
-  // Every picker's choices: all addresses, not just the first page (up to ten pages of 100).
-  inboundAddressOptions: () => def(['inbound-addresses', 'options'], async (api, signal) => {
-    let page = await api.inbound.addresses({}, signal)
-    const items = [...page]
-    for (let pages = 1; page.nextCursor && pages < 10; pages++) { page = await api.inbound.addresses({ cursor: page.nextCursor }, signal); items.push(...page) }
-    return Object.assign(items, { nextCursor: page.nextCursor ?? null })
-  }),
+  // First page of receiving addresses for pickers (100 addresses; callers check nextCursor to paginate or disclose more).
+  inboundAddressOptions: (cursor?: string) => def(['inbound-addresses', 'options', cursor ?? null], (api, signal) => api.inbound.addresses({ cursor }, signal)),
   inboundThreads: (addressId: string | undefined, view: InboundThreadView, q: string, cursor: string | undefined) => def(['inbound-threads', addressId ?? null, view, q, cursor ?? null], (api, signal) => api.inbound.threads({ addressId, view, q: q || undefined, cursor }, signal)),
   email: (id: string) => def(['email', id], (api, signal) => api.emails.get(id, signal)),
   receivedEmail: (id: string, canAdminister: boolean) => def(['received-email', id, canAdminister], (api, signal) => api.mailboxes.receivedEmail(id, signal, canAdminister)),
@@ -34,7 +30,7 @@ export const queries = {
   template: (id: string) => def(['template', id], (api, signal) => api.templates.get(id, signal)),
   domain: (id: string) => def(['domain', id], (api, signal) => api.domains.get(id, signal)),
   newsletter: (id: string) => def(['newsletter', id], (api, signal) => api.newsletters.get(id, signal)),
-  newsletters: () => def(['newsletters'], (api, signal) => api.newsletters.list(signal)),
+  newsletters: (cursor?: string) => def(['newsletters', cursor ?? null], (api, signal) => api.newsletters.list(signal, cursor)),
   campaigns: (request: PageRequest & { archived?: boolean; listId?: string; newsletter?: boolean }) => def(['campaigns', request], (api, signal) => api.campaigns.list(request, signal)),
   contacts: (params: PageRequest) => def(['contacts', params], (api, signal) => api.contacts.list(params, signal)),
   audienceLists: (search = '', cursor?: string) => def(['lists', 'options', { pageSize: 100, search, cursor }], async (api, signal) => {

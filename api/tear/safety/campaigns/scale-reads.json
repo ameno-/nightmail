@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "modelId": "scale-reads",
+  "cases": [
+    {
+      "name": "smoke-healthy-dashboard-reads-within-budget",
+      "steps": [
+        {
+          "op": "ContactsPage"
+        },
+        {
+          "op": "ContactsBigList"
+        },
+        {
+          "op": "ContactsSearchHit"
+        },
+        {
+          "op": "ListsWithCounts"
+        },
+        {
+          "op": "CampaignAudienceCount"
+        }
+      ],
+      "expected": {
+        "outcome": "pass",
+        "control": true
+      },
+      "note": "Control: all 5 healthy dashboard reads at 200k contacts finish within stated latency budgets"
+    },
+    {
+      "name": "canary-slow-read-budget-exceeded",
+      "steps": [
+        {
+          "op": "ContactsPage"
+        }
+      ],
+      "bug": "canary_slow_read",
+      "expected": {
+        "outcome": "fail",
+        "operator": "reply:ContactsPage:satisfies:within-budget",
+        "verdict": "replyMismatch",
+        "canary": true
+      },
+      "note": "Canary: planted slow-read bug exceeds budgetMs and fails named satisfies predicate within-budget"
+    },
+    {
+      "name": "known-bug-scale-01-small-list-full-scan",
+      "steps": [
+        {
+          "op": "ContactsSmallList"
+        }
+      ],
+      "expected": {
+        "outcome": "fail",
+        "operator": "reply:ContactsSmallList:satisfies:within-budget",
+        "verdict": "replyMismatch",
+        "canary": true
+      },
+      "note": "Known product bug BUG-SCALE-01 (review-582.md B1): 3-member list scans all 200k contacts via inList() OFFSET 0 fence (~300+ ms vs 150 ms budget; >5s at 1.5M)"
+    }
+  ]
+}

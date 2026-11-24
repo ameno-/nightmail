@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useApiMutation, useApiQuery } from '../../data/context'
+import { invalidate } from '../../data/invalidation'
 import { Button, Checkbox, Dialog, Field, Input, LoadingRegion, SkeletonText, Alert, useToast, MutationError } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { aqlString, evidenceRequired, number } from './shared'
@@ -14,7 +15,7 @@ export function BulkSubscribeDialog({ listId, listName, unknownCount, searchIgno
   const name = listName ?? list.data?.name
   const statement = `UPDATE contacts SET consent = 'subscribed' WHERE consent = 'unknown' AND suppressed = FALSE${listId ? ` AND list = ${aqlString(listId)}` : ''} LIMIT ${BATCH_LIMIT}`
   const plan = useApiMutation((api, value: string) => api.audienceQuery.plan(value), undefined, false, false)
-  const apply = useApiMutation((api, input: { planId: string; evidence: string; confirmResubscribe: boolean }) => api.audienceQuery.apply(input))
+  const apply = useApiMutation((api, input: { planId: string; evidence: string; confirmResubscribe: boolean }) => api.audienceQuery.apply(input), undefined, false, invalidate.audienceBulk)
   const [evidence, setEvidence] = useState(''), [attested, setAttested] = useState(false), [resubscribe, setResubscribe] = useState(false), [checked, setChecked] = useState(false)
   // `mutate` is a new function each render, so the effect waits on the statement alone: depending on it re-counted forever.
   const count = useRef(plan.mutate)

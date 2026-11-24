@@ -8,7 +8,7 @@ import { Buffer } from 'node:buffer';
 import type { DefaultTreeAdapterMap } from 'parse5';
 import { apiKeys } from './db/core.js';
 import { receivingPolicy } from './mailbox-ingest-input.js';
-import { mergeSuppression } from './db/audience.js';
+import { lists, mergeSuppression, segments } from './db/audience.js';
 import { SuppressionReason, EmailEventData, readCursor, nextCursor, budgetedRead, readLimit, readLimitNote } from './core.js';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import type { Attachment } from '@aws-sdk/client-sesv2';
@@ -508,6 +508,16 @@ function draftSender(runtime: Runtime, a: Actor, draft: CampaignDraft) {
   if (!draft.from && a.domains.length) throw denied('SENDER_DOMAIN_FORBIDDEN', 'A domain-restricted key must supply a From address on one of its domains.', { permission: 'sendEmail', level: 'on', scope: 'workspace' }, 'from');
   if (draft.from) keySender(a, draft.from);
   if (a.domains.length && Object.keys(draft.audience).length) throw unrestrictedRequired('Selecting a campaign audience requires an unrestricted credential.', { permission: 'audience', level: 'write' });
+}
+// A draft's audience names only this workspace's lists and segments. Another workspace's ID gets the answer of one that
+// doesn't exist, the answer the audience gives when it is read (audience.ts audienceConditions), so an ID can't be probed.
+// IDs the stored draft already names pass unchecked: a draft outlives a deleted list and must stay editable.
+async function draftAudience(db: DbExecutor, a: Actor, audience: CampaignDraft['audience'], stored: CampaignDraft['audience'] = {}) {
+  const added = (now: (string | undefined)[], before: (string | undefined)[]) => [...new Set(now.filter((id): id is string => id !== undefined && !before.includes(id)))];
+  const listIds = added([audience.listId, ...(audience.excludeListIds ?? [])], [stored.listId, ...(stored.excludeListIds ?? [])]);
+  const segmentIds = added([audience.segmentId, ...(audience.excludeSegmentIds ?? [])], [stored.segmentId, ...(stored.excludeSegmentIds ?? [])]);
+  if (listIds.length && (await db.select({ id: lists.id }).from(lists).where(and(scope(lists, a), inArray(lists.id, listIds)))).length !== listIds.length) notFound('List');
+  if (segmentIds.length && (await db.select({ id: segments.id }).from(segments).where(and(scope(segments, a), inArray(segments.id, segmentIds)))).length !== segmentIds.length) notFound('Segment');
 }
 async function draftRegion(runtime:Runtime,db:DbExecutor,a:Actor,input:{from:string;region?:string;regionPinned?:boolean},previous?:CampaignDraft) {
   if (!regionalSending(runtime)) return {region:await assertRegionEnabled(db,a.workspaceId,input.region ?? previous?.region),regionPinned:previous?.regionPinned};
@@ -1708,6 +1718,7 @@ export function registerSending(app: App) {
       const campaignId = id('campaign'); const source = input.templateId ? await (await wrapModuleLoad(() => import('./templates.js'))).instantiateTemplate(c.env, db, a, input.templateId) : null;
       const draft = { name: input.name, from: input.from, ...(input.fromName ?? source?.draft.fromName ? { fromName: input.fromName ?? source?.draft.fromName } : {}), ...(input.previewText ?? source?.draft.previewText ? { previewText: input.previewText ?? source?.draft.previewText } : {}), replyTo: input.replyTo.length ? input.replyTo : source?.draft.replyTo ?? [], ...await draftRegion(c.env,db,a,input), subject: input.subject || source?.draft.subject || '', attachments: [...new Set([...(source?.draft.attachments ?? []), ...input.attachments])], tracking: input.tracking ?? source?.draft.tracking ?? true, audience: input.audience, defaults: { ...(source?.draft.defaults ?? {}), ...input.defaults }, ...(input.html ?? source?.draft.html ? { html: input.html ?? source?.draft.html } : {}), ...(input.unsubscribePageUrl ?? source?.draft.unsubscribePageUrl ? { unsubscribePageUrl: input.unsubscribePageUrl ?? source?.draft.unsubscribePageUrl } : {}), ...(input.requiredNotice ? { requiredNotice: true } : {}) };
       draftSender(c.env, a, draft);
+      await draftAudience(db, a, draft.audience);
       await requiredNoticesAllowed(db, draft, a.workspaceId);
       await linkAttachments(db, a, draft.attachments, 'campaign', campaignId);
       const [row] = await db.insert(campaigns).values({ id: campaignId, workspaceId: a.workspaceId, draft, sourceTemplateId: source?.templateId ?? null, sourceTemplateRevision: source?.templateRevision ?? null }).returning();
@@ -1803,6 +1814,7 @@ export function registerSending(app: App) {
       const draft = {...input.draft,...await draftRegion(c.env,db,a,input.draft,current.draft)};
       draftSender(c.env, a, draft);
       draftSender(c.env, a, current.draft); editable(current, input.revision);
+      await draftAudience(db, a, draft.audience, current.draft.audience);
       await requiredNoticesAllowed(db, draft, a.workspaceId);
       await attachmentRows(db, a, input.draft.attachments, true);
       await db.delete(attachmentLinks).where(and(scope(attachmentLinks, a), eq(attachmentLinks.ownerType, 'campaign'), eq(attachmentLinks.ownerId, campaignId)));
@@ -1994,7 +2006,7 @@ function backgroundFailure(error: unknown) {
   if (placeholder) return { code, message: `A recipient has no value for {{${placeholder}}} (${code}). Add a fallback value for ${placeholder} and send again.` };
   if (error instanceof ApiError && code === 'CAMPAIGN_RECIPIENT_INVALID') return { code, message: "A recipient's email address or personalized content is invalid (CAMPAIGN_RECIPIENT_INVALID). Fix or remove the contact and send again." };
   // Capture, screen, size and limit refusals name only counts, sizes and limits, never a contact or its values.
-  if (error instanceof ApiError && (['EMPTY_AUDIENCE', 'AUDIENCE_LIMIT_EXCEEDED', 'CAMPAIGN_RECIPIENT_DATA_TOO_LARGE', 'ENCODED_MESSAGE_TOO_LARGE', 'RENDERED_CONTENT_TOO_LARGE', 'UNSAFE_HTML_URL', 'UNSAFE_TEMPLATE_CONTEXT', 'UNSUPPORTED_TEMPLATE_SYNTAX', 'CONTENT_REJECTED_SPAM', 'CONTENT_TOO_LARGE_TO_SCREEN', 'CONTENT_SCREEN_BUDGET_EXCEEDED', 'INSUFFICIENT_BALANCE'].includes(code) || code.endsWith('_LIMIT_EXCEEDED'))) return { code, message: error.message };
+  if (error instanceof ApiError && (['EMPTY_AUDIENCE', 'AUDIENCE_LIMIT_EXCEEDED', 'AUDIENCE_CAPTURE_BUSY', 'CAMPAIGN_RECIPIENT_DATA_TOO_LARGE', 'ENCODED_MESSAGE_TOO_LARGE', 'RENDERED_CONTENT_TOO_LARGE', 'UNSAFE_HTML_URL', 'UNSAFE_TEMPLATE_CONTEXT', 'UNSUPPORTED_TEMPLATE_SYNTAX', 'CONTENT_REJECTED_SPAM', 'CONTENT_TOO_LARGE_TO_SCREEN', 'CONTENT_SCREEN_BUDGET_EXCEEDED', 'INSUFFICIENT_BALANCE'].includes(code) || code.endsWith('_LIMIT_EXCEEDED'))) return { code, message: error.message };
   return { code, message: `Campaign work could not finish (${code}). Correct the cause and send again, or cancel the campaign.` };
 }
 // Send and schedule: freeze the audience and content now, reserve the recipients, and hand the one run job the rest.
@@ -2394,13 +2406,7 @@ export function checkedDispatchAttachments(ids: string[], rows: (typeof attachme
   validateAttachmentRows(distinctAttachmentIds(ids), rows);
   return rows;
 }
-/**
- * Compact cryptographic digest for static campaigns (no {{placeholders}}): hashes the full canonical snapshot without
- * `to` once (baseHash), then binds each recipient's exact address via `s1:${sha256(baseHash + ':' + email)}`.
- * - Deploy mid-campaign (old 64-hex rows met by new code): verified directly via `digest(canonical(customer))`.
- * - Rollback mid-campaign (new `s1:` rows met by old code): old code never produces `s1:` and refuses fail-closed with
- *   CAMPAIGN_SNAPSHOT_CHANGED / CAMPAIGN_CONTENT_UNREPRODUCIBLE without sending wrong content.
- */
+
 const LEGACY_CONTENT_HASH = /^[0-9a-f]{64}$/;
 const STATIC_S1_CONTENT_HASH = /^s1:[0-9a-f]{64}$/;
 export const isSupportedContentHash = (hash: string | null | undefined): hash is string =>
@@ -2409,6 +2415,11 @@ const unsupportedHashFormat = () => new ApiError(409, 'CAMPAIGN_HASH_FORMAT_UNSU
 export async function staticContentHash(baseHash: string, email: string): Promise<string> {
   return `s1:${await digest(`${baseHash}:${email}`)}`;
 }
+/**
+ * Verifies a frozen recipient's content_hash in either the legacy full-snapshot format (64 hex chars) or the compact
+ * static `s1:` format (`s1:${sha256(baseHash + ':' + email)}`). Unknown future formats throw retryable
+ * CAMPAIGN_HASH_FORMAT_UNSUPPORTED so release/dispatch pause and defer instead of rejecting unsent recipients.
+ */
 export async function verifyCampaignContentHash(customer: EmailSnapshot, storedHash: string): Promise<boolean> {
   if (STATIC_S1_CONTENT_HASH.test(storedHash)) {
     const baseHash = await digest(canonical({ ...customer, to: [] }));
@@ -2887,26 +2898,29 @@ async function captureStep(runtime: Runtime, a: Actor, row: RunRow, jobId: strin
         staticStamp,
         onProgress: async progress => {
           // Separate pool connection (runtime.db): checks for cancel/unschedule and publishes visible progress without
-          // mutating sending_campaigns inside the REPEATABLE READ transaction. Degrades cleanly (skips progress write)
-          // if no spare pool connection is immediately available so a constrained pool never blocks or kills the freeze.
-          let timer: ReturnType<typeof setTimeout> | undefined;
+          // mutating sending_campaigns inside the REPEATABLE READ transaction. Server-side lock_timeout (500 ms) and
+          // statement_timeout (800 ms) cancel blocked writes cleanly in Postgres (no leaked connections or hung backends),
+          // and fencing on v.captured_at IS NULL + greatest(c.prepared, ...) ensures a late write can never move prepared
+          // backwards or overwrite a finished capture.
           try {
-            const checkAndWrite = async (): Promise<'continue' | 'abort'> => {
-              const [cur] = (await runtime.db.execute<{ state: string; review_id: string | null }>(sql`
+            return await runtime.db.transaction(async ptx => {
+              await ptx.execute(sql`SET LOCAL lock_timeout = '500ms'`);
+              await ptx.execute(sql`SET LOCAL statement_timeout = '800ms'`);
+              const [cur] = (await ptx.execute<{ state: string; review_id: string | null }>(sql`
                 SELECT state, review_id FROM sending_campaigns WHERE workspace_id = ${a.workspaceId} AND id = ${row.id}`)).rows;
-              if (!cur || cur.state !== 'preparing' || cur.review_id !== row.reviewId) return 'abort';
+              if (!cur || cur.state !== 'preparing' || cur.review_id !== row.reviewId) return 'abort' as const;
               const visiblePrepared = Math.min(progress.prepared, Math.max(0, progress.total - 1));
-              await runtime.db.execute(sql`
-                UPDATE sending_campaigns SET total = ${progress.total}, prepared = ${visiblePrepared}, updated_at = now()
-                WHERE workspace_id = ${a.workspaceId} AND id = ${row.id} AND state = 'preparing' AND review_id = ${row.reviewId}`);
-              return 'continue';
-            };
-            const timeout = new Promise<'continue'>(resolve => { timer = setTimeout(() => resolve('continue'), 1000); });
-            return await Promise.race([checkAndWrite(), timeout]);
+              await ptx.execute(sql`
+                UPDATE sending_campaigns c
+                SET total = ${progress.total}, prepared = greatest(c.prepared, ${visiblePrepared}), updated_at = now()
+                FROM sending_campaign_reviews v
+                WHERE c.workspace_id = ${a.workspaceId} AND c.id = ${row.id}
+                  AND c.state = 'preparing' AND c.review_id = ${row.reviewId}
+                  AND v.id = c.review_id AND v.workspace_id = c.workspace_id AND v.captured_at IS NULL`);
+              return 'continue' as const;
+            });
           } catch {
             return 'continue';
-          } finally {
-            if (timer) clearTimeout(timer);
           }
         },
       });
@@ -3178,6 +3192,7 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     const allowed = admitted(runtime, buffer!.decision, a.workspaceId);
     const chunk = await recipientChunk(db, campaign.reviewId!, campaign.expanded, capacity);
     if (!chunk.length || chunk.some((recipient, index) => !recipient.content_hash || recipient.ordinal !== campaign.expanded + index + 1)) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The prepared audience is incomplete.');
+    // Refuse unknown future hash formats before releasing any row so the campaign pauses intact instead of burning recipients.
     if (chunk.some(recipient => !isSupportedContentHash(recipient.content_hash))) throw unsupportedHashFormat();
     const delivered = campaign.deliveredOnly ? await deliveredBefore(db, a.workspaceId, campaign.id, chunk.map(r => r.recipient.email)) : null;
     const affordable = allowed.hostedLeft ?? Number.POSITIVE_INFINITY;
@@ -3247,6 +3262,7 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
 // the dispatch buffer, pacing or quota, and stops as soon as the state is one it does not run (paused, done,
 // failed, canceled). A definitive error or the last retry leaves `failed`, never a campaign sending forever.
 const RUN_BUDGET_MS = 12000;
+const CAPTURE_BUSY_MAX_DEFERS = 60;
 const runCampaign: JobHandler = async (runtime, payload, job) => {
   if (typeof payload.campaignId !== 'string') throw new ApiError(422, 'INVALID_JOB', 'A campaign run needs its campaign.');
   const campaignId = payload.campaignId, a: Actor = { workspaceId: job.workspaceId, keyId: 'worker', permissions: ['manage'], domains: [] };
@@ -3273,7 +3289,13 @@ const runCampaign: JobHandler = async (runtime, payload, job) => {
   } catch (error) {
     if (error instanceof JobDeferred || error instanceof ModuleLoadError) throw error;
     if (error instanceof ApiError && error.code === 'AUDIENCE_CAPTURE_BUSY') {
-      throw new JobDeferred(new Date(Date.now() + 5_000).toISOString(), payload, true);
+      const busyCount = typeof payload._captureBusy === 'number' && Number.isInteger(payload._captureBusy) ? payload._captureBusy + 1 : 1;
+      if (busyCount <= CAPTURE_BUSY_MAX_DEFERS) {
+        if (busyCount % 12 === 0) log('warn', { code: 'CAMPAIGN_CAPTURE_BUSY_DEFERRED', campaignId, jobId: job.id, busyCount });
+        throw new JobDeferred(new Date(Date.now() + 5_000).toISOString(), { ...payload, _captureBusy: busyCount }, true);
+      }
+      // Ceiling reached (5 min): fail loudly with draft still editable instead of deferring forever.
+      error = new ApiError(503, 'AUDIENCE_CAPTURE_BUSY', 'Audience capture slots stayed busy for over 5 minutes; try sending this campaign again.', undefined, false);
     }
     if (error instanceof ApiError && ['HOSTED_SENDING_PAUSED', 'MARKETING_HELD', 'POSTAL_ADDRESS_REQUIRED', 'REQUIRED_NOTICES_OFF', 'CAMPAIGN_HASH_FORMAT_UNSUPPORTED'].includes(error.code)) {
       await runtime.db.execute(pauseCampaign(ref, { code: error.code, message: error.message }));

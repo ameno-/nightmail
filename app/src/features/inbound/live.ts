@@ -3,7 +3,7 @@
 // (api/src/ritual-version.ts), paused while the tab is hidden; if long requests are cut short on the way, it polls
 // every 4 s instead.
 import { useEffect, useRef } from 'react'
-import { request } from '../../data/live'
+import { currentScope, isAbortError, isCurrentScope, request } from '../../data/live'
 import { ApiError } from '../../data/types'
 
 export type ChangeActor = { type: 'member' | 'api_key' | 'mcp'; name: string | null; self: boolean }
@@ -31,6 +31,7 @@ export function useLiveVersion(enabled: boolean, onChange: (change: LiveChange) 
   latest.current = onChange
   useEffect(() => {
     if (!enabled) return
+    const scope = currentScope()
     let stopped = false, controller: AbortController | null = null, timer: ReturnType<typeof setTimeout> | undefined
     let wake: (() => void) | null = null
     let known: { version: number; endpoints: string } | null = null, failures = 0, cut = 0, polling = false
@@ -40,14 +41,15 @@ export function useLiveVersion(enabled: boolean, onChange: (change: LiveChange) 
     const onVisibility = () => { if (hidden()) controller?.abort(); else { clearTimeout(timer); wake?.() } }
     document.addEventListener('visibilitychange', onVisibility)
     void (async () => {
-      while (!stopped) {
+      while (!stopped && isCurrentScope(scope)) {
         if (hidden()) { await new Promise<void>(resolve => { wake = resolve }); continue }
+        if (!isCurrentScope(scope)) return
         const wait = known && !polling ? WAIT_S : 0, started = Date.now()
         const query: string = known ? `?after=${known.version}${endpoints ? `&endpoints=${known.endpoints}` : ''}&wait=${wait}` : ''
         controller = new AbortController()
         try {
-          const next: LiveVersion = await request<LiveVersion>(`/v1/rules/version${query}`, { signal: controller.signal })
-          if (stopped) return
+          const next: LiveVersion = await request<LiveVersion>(`/v1/rules/version${query}`, { signal: controller.signal, scope })
+          if (stopped || !isCurrentScope(scope)) return
           const versionMoved = !!known && next.version !== known.version, endpointsMoved = !!known && next.endpoints !== known.endpoints
           if (!known || versionMoved || endpointsMoved) latest.current({ ...next, first: !known, versionMoved, endpointsMoved })
           known = { version: next.version, endpoints: next.endpoints }
@@ -56,8 +58,8 @@ export function useLiveVersion(enabled: boolean, onChange: (change: LiveChange) 
           if (wait && !next.changed && Date.now() - started < 2000) { if (++cut >= 3) polling = true } else cut = 0
           if (polling || !wait) await pause(POLL_MS)
         } catch (error) {
-          if (stopped) return
-          if (error instanceof DOMException && error.name === 'AbortError') continue
+          if (stopped || !isCurrentScope(scope)) return
+          if (isAbortError(error)) continue
           // 401 and 403 end it: the page shows the sign-in or the refusal itself.
           if (error instanceof ApiError && (error.status === 401 || error.status === 403)) return
           failures++

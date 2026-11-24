@@ -19,19 +19,77 @@ const workspaceKey = (account: string | null) => account ? `nightmail.workspace:
 export const rememberedWorkspace = (account: string | null) => { try { return localStorage.getItem(workspaceKey(account)) } catch { return null } }
 let workspaceSelection: string | null = accountSelection ? rememberedWorkspace(accountSelection) : null
 export const selectedWorkspace = () => workspaceSelection
+// Every workspace or account switch bumps selectionEpoch and aborts scopeController so in-flight fetches from the
+// previous scope cancel immediately, stale responses are dropped even across A -> B -> A round trips, and any closure
+// pinned to the previous scope fails closed before calling fetch().
+export type RequestScope = { readonly account: string | null; readonly workspace: string | null; readonly epoch: number }
+let selectionEpoch = 0
+let scopeController = new AbortController()
+export const currentScope = (): RequestScope => ({ account: accountSelection, workspace: workspaceSelection, epoch: selectionEpoch })
+export const isCurrentScope = (scope: RequestScope) => scope.epoch === selectionEpoch && scope.account === accountSelection && scope.workspace === workspaceSelection
+export const aborted = () => new DOMException('The operation was aborted.', 'AbortError')
+export const isAbortError = (error: unknown): boolean => error instanceof DOMException && error.name === 'AbortError'
+
+// Combines two AbortSignals, falling back to a manual AbortController on browsers without AbortSignal.any (Safari < 17.4).
+function combineSignals(a: AbortSignal, b: AbortSignal): { signal: AbortSignal; cleanup: () => void } {
+  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.any === 'function') {
+    return { signal: AbortSignal.any([a, b]), cleanup: () => {} }
+  }
+  const combined = new AbortController()
+  if (a.aborted || b.aborted) { combined.abort(); return { signal: combined.signal, cleanup: () => {} } }
+  const onAbort = () => combined.abort()
+  a.addEventListener('abort', onAbort, { once: true })
+  b.addEventListener('abort', onAbort, { once: true })
+  return {
+    signal: combined.signal,
+    cleanup: () => { a.removeEventListener('abort', onAbort); b.removeEventListener('abort', onAbort) },
+  }
+}
+
+// Writes cut off by a workspace/account switch: remembered per (account, workspace) in memory so returning to that
+// workspace tells the person in a few words that their last save may have landed.
+const scopeId = (account: string | null, workspace: string | null) => `${account ?? ''}\0${workspace ?? ''}`
+const activeWrites = new Set<{ account: string | null; workspace: string | null }>()
+const interruptedWrites = new Set<string>()
+const isMutatingRequest = (method: string, path: string) =>
+  method !== 'GET' && method !== 'HEAD' &&
+  !path.startsWith('/api/auth/') &&
+  !/^\/v1\/(?:rules\/(?:test|check)|routing\/test|emails\/(?:check|preview)|audience-query\/plan|segments\/[^/]+\/preview)$/.test(path)
+export function takeInterruptedWrite(account: string | null, workspace: string | null): boolean {
+  const key = scopeId(account, workspace)
+  if (!interruptedWrites.has(key)) return false
+  interruptedWrites.delete(key)
+  return true
+}
+export function clearInterruptedWrites(account?: string | null) {
+  if (!account) { interruptedWrites.clear(); return }
+  const prefix = `${account}\0`
+  for (const key of interruptedWrites) if (key.startsWith(prefix)) interruptedWrites.delete(key)
+}
+
+function bumpScope() {
+  for (const write of activeWrites) interruptedWrites.add(scopeId(write.account, write.workspace))
+  selectionEpoch += 1
+  scopeController.abort()
+  scopeController = new AbortController()
+  try { window.dispatchEvent(new Event('nightmail:scope-changed')) } catch { /* Non-browser environment. */ }
+}
 export function selectWorkspace(id: string | null) {
+  const previous = workspaceSelection
   workspaceSelection = id
+  if (previous !== null && id !== previous) bumpScope()
   try { if (id) localStorage.setItem(workspaceKey(accountSelection), id); else localStorage.removeItem(workspaceKey(accountSelection)) } catch { /* Selection can remain session-only. */ }
 }
 /** Act as another account in this tab, in the workspace last used with it. Responses to earlier requests are dropped. */
 export function selectAccount(id: string | null) {
+  const previousAccount = accountSelection, previousWorkspace = workspaceSelection
   if (id !== accountSelection) { accountSelection = id; workspaceSelection = id ? rememberedWorkspace(id) : null }
+  if ((previousAccount !== null && accountSelection !== previousAccount) || (previousWorkspace !== null && workspaceSelection !== previousWorkspace)) bumpScope()
   try { if (id) sessionStorage.setItem(accountStorageKey, id); else sessionStorage.removeItem(accountStorageKey) } catch { /* Selection can remain in memory. */ }
 }
 // Responses public/theme.js started before the app loaded. Each is used once, and only while fresh
 // and for the account and workspace the app would have asked about.
 type EarlyRequests = { account?: string | null; workspace: string | null; at: number; responses: Record<string, Promise<Response> | undefined> }
-const aborted = () => new DOMException('The operation was aborted.', 'AbortError')
 // A request that is aborted before it reads the response (React StrictMode's first mount) puts it back for the next one.
 async function takeEarly(path: string, signal?: AbortSignal) {
   const early = (window as { __nightmailEarly?: EarlyRequests }).__nightmailEarly
@@ -56,24 +114,43 @@ function rememberFailedRequest(id: string) {
   failedRequests.length = Math.min(failedRequests.length, 5)
 }
 export const recentFailedRequestIds = () => [...failedRequests]
-export async function request<T = Json>(path: string, options: { method?: string; body?: unknown; signal?: AbortSignal; idempotencyKey?: string; ifMatch?: number; file?: { bytes: Blob; headers: Record<string, string> } } = {}): Promise<T> {
+export async function request<T = Json>(path: string, options: { method?: string; body?: unknown; signal?: AbortSignal; idempotencyKey?: string; ifMatch?: number; file?: { bytes: Blob; headers: Record<string, string> }; scope?: RequestScope; account?: string | null; workspace?: string | null } = {}): Promise<T> {
   const started = performance.now()
-  // Every request acts as the account selected when it was sent, never one chosen later.
-  const account = accountSelection
+  const sessionAgnostic = path.startsWith('/api/auth/') || path === '/health'
+  // Fail closed before calling fetch() when a caller pinned to an earlier account/workspace fires after a switch.
+  if (options.scope && !isCurrentScope(options.scope)) throw aborted()
+  const probe = options.account !== undefined || options.workspace !== undefined
+  const scoped = !probe && !sessionAgnostic
+  // Every request acts as the account and workspace selected when it was sent, never ones chosen later.
+  const account = options.account !== undefined ? options.account : accountSelection
+  const workspace = options.workspace !== undefined ? options.workspace : workspaceSelection
+  const epoch = selectionEpoch
+  const method = options.method ?? 'GET'
+  const linked = scoped && options.signal ? combineSignals(options.signal, scopeController.signal) : null
+  const signal = linked ? linked.signal : scoped ? scopeController.signal : options.signal
+  const trackedWrite = scoped && isMutatingRequest(method, path) ? { account, workspace } : null
+  if (trackedWrite) activeWrites.add(trackedWrite)
   let response: Response
+  let data: any
   try {
-    const early = options.method === undefined && options.body === undefined && !options.file ? takeEarly(path, options.signal) : null
-    response = (early && await early) ?? await fetch(path, { method: options.method ?? 'GET', credentials: 'include', signal: options.signal,
-      headers: { Accept: 'application/json', ...(options.ifMatch===undefined?{}:{'If-Match':String(options.ifMatch)}), ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }), ...options.file?.headers, ...(options.idempotencyKey ? { 'Idempotency-Key': options.idempotencyKey } : {}), ...(account ? { [accountHeader]: account } : {}), ...(workspaceSelection ? { [workspaceHeader]: workspaceSelection } : {}) },
-      body: options.file?.bytes ?? (options.body === undefined ? undefined : JSON.stringify(options.body)) })
-  } catch (error) {
-    if (error instanceof DOMException && error.name === 'AbortError') throw error
-    analytics().apiError(options.method ?? 'GET', path, undefined, 'NETWORK_UNAVAILABLE')
-    throw new ApiError(`Cannot reach ${productName}. Check the API service and try again.`, 'NETWORK_UNAVAILABLE')
+    try {
+      const early = !probe && options.method === undefined && options.body === undefined && !options.file ? takeEarly(path, signal) : null
+      response = (early && await early) ?? await fetch(path, { method, credentials: 'include', signal,
+        headers: { Accept: 'application/json', ...(options.ifMatch===undefined?{}:{'If-Match':String(options.ifMatch)}), ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }), ...options.file?.headers, ...(options.idempotencyKey ? { 'Idempotency-Key': options.idempotencyKey } : {}), ...(account ? { [accountHeader]: account } : {}), ...(workspace ? { [workspaceHeader]: workspace } : {}) },
+        body: options.file?.bytes ?? (options.body === undefined ? undefined : JSON.stringify(options.body)) })
+    } catch (error) {
+      if (isAbortError(error)) throw error
+      analytics().apiError(method, path, undefined, 'NETWORK_UNAVAILABLE')
+      throw new ApiError(`Cannot reach ${productName}. Check the API service and try again.`, 'NETWORK_UNAVAILABLE')
+    }
+    data = await response.json().catch(() => null)
+  } finally {
+    if (trackedWrite) activeWrites.delete(trackedWrite)
+    linked?.cleanup()
   }
-  const data = await response.json().catch(() => null)
-  // The tab switched accounts while this was in flight: its answer belongs to the other account and is never shown.
-  if (account !== accountSelection && !path.startsWith('/api/auth/')) throw aborted()
+  // The tab switched accounts or workspaces while this was in flight: its answer belongs to the other scope and is never shown.
+  if (options.scope && !isCurrentScope(options.scope)) throw aborted()
+  if (scoped && (epoch !== selectionEpoch || (account !== null && account !== accountSelection) || (workspace !== null && workspace !== workspaceSelection))) throw aborted()
   const durationMs = Number((performance.now() - started).toFixed(1))
   if (path.includes('/campaigns') || path === '/api/auth/get-session' || path === '/v1/me') console.info(`[${productName} timing] request`, {
     path: new URL(path, window.location.origin).pathname,
@@ -129,15 +206,15 @@ function regionCatalog(value: unknown): RegionCatalog {
   return value as RegionCatalog
 }
 
-export function createLiveApi(): Api {
-  const call = <T = Json>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal) => request<T>(`/v1${path}`, { method, body, signal })
+export function createLiveApi(scope?: RequestScope): Api {
+  const call = <T = Json>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal) => request<T>(`/v1${path}`, { method, body, signal, scope })
   const inboundCall = <T = Json>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal) => call<T>(`/inbound${path}`, method, body, signal)
   // Page numbers are local navigation only. The API owns cursors and never supplies fictional totals.
   const cursors = new Map<string, Map<number, string | undefined>>()
   // Attachments go up as raw bytes (up to 25 MiB); template assets as base64 JSON (up to 8 MiB).
   const uploadAttachment = (file: File, inline?: {contentId: string}) => {
     if (file.size > 25 * 1024 * 1024) throw new ApiError('Attachments must total at most 25 MiB.', 'ATTACHMENT_TOO_LARGE')
-    return request<any>('/v1/attachments/upload', { method: 'POST', file: { bytes: file, headers: { 'Content-Type': file.type || 'application/octet-stream', 'X-Nightmail-Filename': encodeURIComponent(file.name), ...(inline ? { 'X-Nightmail-Disposition': 'inline', 'X-Nightmail-Content-Id': inline.contentId } : {}) } } })
+    return request<any>('/v1/attachments/upload', { method: 'POST', scope, file: { bytes: file, headers: { 'Content-Type': file.type || 'application/octet-stream', 'X-Nightmail-Filename': encodeURIComponent(file.name), ...(inline ? { 'X-Nightmail-Disposition': 'inline', 'X-Nightmail-Content-Id': inline.contentId } : {}) } } })
   }
   const uploadFile = async (path: string, file: File, inline?: {contentId: string}) => {
     if (file.size > 8 * 1024 * 1024) throw new ApiError('Assets must total at most 8 MiB.', 'ATTACHMENT_TOO_LARGE')
@@ -189,9 +266,7 @@ export function createLiveApi(): Api {
       const hourly = input.range !== '30d'
       // One request returns the chart buckets and the previous period's totals.
       const chartParams = new URLSearchParams(params); chartParams.set('granularity', hourly ? 'hour' : 'day'); chartParams.set('include', 'previous')
-      const [metrics, campaigns] = await Promise.all([
-        call(`/metrics?${chartParams}`, 'GET', undefined, signal), page('/campaigns', {pageSize: 4}, mapCampaignSummary, {region: input.regionId}, signal),
-      ])
+      const metrics = await call(`/metrics?${chartParams}`, 'GET', undefined, signal)
       if (!metrics.previous) throw new ApiError('The API did not return the previous period’s totals.', 'INVALID_RESPONSE')
       // The public created-cohort contract defines absent UTC buckets as no emails.
       // Fill that known absence across the selected interval, not across guessed history.
@@ -205,7 +280,7 @@ export function createLiveApi(): Api {
         const at = new Date(bucket).toISOString(), row = series.get(bucket)
         points.push({at, sent: row?.count ?? 0, delivered: row?.delivered ?? 0, bounced: row?.bounced ?? 0, complaints: row?.complained ?? 0})
       }
-      return { periodStart: metrics.from, periodEnd: metrics.to, sent: metrics.totals.emails, delivered: metrics.totals.delivered, bounced: metrics.totals.bounced, complaints: metrics.totals.complained, deferred: metrics.totals.deliveryDelayed, previousSent: metrics.previous.totals.emails, points, recentCampaigns: campaigns.items }
+      return { periodStart: metrics.from, periodEnd: metrics.to, sent: metrics.totals.emails, delivered: metrics.totals.delivered, bounced: metrics.totals.bounced, complaints: metrics.totals.complained, deferred: metrics.totals.deliveryDelayed, previousSent: metrics.previous.totals.emails, points }
     },
     // One read for Overview's setup and next steps; each part is null where its own list would refuse this session.
     setup: async signal => { const r = await call<Omit<OverviewSetup, 'domains'> & { domains: { data: Json[] } | null }>('/overview/setup', 'GET', undefined, signal); return { ...r, domains: r.domains ? r.domains.data.map(mapDomain) : null } } },
@@ -231,7 +306,7 @@ export function createLiveApi(): Api {
       preview: async ({ source, ...options }, signal) => (await call<{ previews: import('./types').ClientPreview[] }>('/emails/preview', 'POST', { ...source, ...options }, signal)).previews,
     },
     newsletters: {
-      list: async signal => (await call<{ data: import('./types').Newsletter[] }>('/newsletters?limit=100', 'GET', undefined, signal)).data,
+      list: async (signal, cursor) => { const result = await call<{ data: import('./types').Newsletter[]; nextCursor: string | null }>(`/newsletters?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, 'GET', undefined, signal); return Object.assign(result.data, { nextCursor: result.nextCursor }) },
       get: (id, signal) => call<import('./types').Newsletter>(`/newsletters/${idPath(id)}`, 'GET', undefined, signal),
       create: (input, signal) => call<import('./types').Newsletter>('/newsletters', 'POST', input, signal),
     },
@@ -243,12 +318,12 @@ export function createLiveApi(): Api {
       save: async (input, signal) => {
         // The MX dashboard's current region is a navigation filter, not a delivery pin.
         const region = selectedWorkspace() ? undefined : input.regionId
-        if (!input.id && input.templateId) return mapCampaign(await request('/v1/campaigns', {method: 'POST', body: {templateId: input.templateId, name: input.name, region}, signal, idempotencyKey: input.idempotencyKey}))
+        if (!input.id && input.templateId) return mapCampaign(await request('/v1/campaigns', {method: 'POST', body: {templateId: input.templateId, name: input.name, region}, signal, idempotencyKey: input.idempotencyKey, scope}))
         const existing = input.draft ?? {}
         const {listId: _oldList, segmentId: _oldSegment, ...audience} = existing.audience ?? {}
         const draft = { ...existing, name: input.name, region, from: input.fromEmail, fromName: input.fromName, replyTo: input.replyTo ?? existing.replyTo ?? [], unsubscribePageUrl: input.unsubscribePageUrl === undefined ? existing.unsubscribePageUrl : input.unsubscribePageUrl.trim() || undefined, requiredNotice: input.requiredNotice === undefined ? existing.requiredNotice : input.requiredNotice || undefined, previewText: input.previewText, subject: input.subject, html: input.html, attachments: input.attachments ?? existing.attachments ?? [], defaults: input.defaults ?? existing.defaults ?? {}, audience: {...audience, ...(input.listId ? {listId: input.listId} : {}), ...(input.segmentId ? {segmentId: input.segmentId} : {})} }
         if (input.id && !input.revision) throw new ApiError('Reload this campaign before saving.', 'REVISION_REQUIRED')
-        return mapCampaign(await request(input.id ? `/v1/campaigns/${idPath(input.id)}` : '/v1/campaigns', {method: input.id ? 'PATCH' : 'POST', body: input.id ? {revision: input.revision, draft} : {...draft, ...(input.templateId ? {templateId: input.templateId} : {})}, signal, idempotencyKey: input.id ? undefined : input.idempotencyKey}))
+        return mapCampaign(await request(input.id ? `/v1/campaigns/${idPath(input.id)}` : '/v1/campaigns', {method: input.id ? 'PATCH' : 'POST', body: input.id ? {revision: input.revision, draft} : {...draft, ...(input.templateId ? {templateId: input.templateId} : {})}, signal, idempotencyKey: input.id ? undefined : input.idempotencyKey, scope}))
       },
       audience: async (input, signal) => ({ ...await call(`/campaigns/${idPath(input.id)}/audience`, 'GET', undefined, signal), contacts: [] }),
       send: async (input, signal) => {
@@ -261,7 +336,7 @@ export function createLiveApi(): Api {
       setPacing: async (id, input, signal) => mapCampaign(await call(`/campaigns/${idPath(id)}/pacing`, 'POST', {perDay: input.perDay, ...(input.autoPause === undefined ? {} : {autoPause: input.autoPause}), ...(input.rateShare === undefined ? {} : {rateShare: input.rateShare})}, signal)),
       unschedule: async (id, signal) => mapCampaign(await call(`/campaigns/${idPath(id)}/unschedule`, 'POST', {}, signal)),
       reschedule: async (id, scheduledAt, signal) => mapCampaign(await call(`/campaigns/${idPath(id)}/reschedule`, 'POST', {scheduledAt}, signal)),
-      cancel: async (id, signal) => { const result = await request<{canceled: number; inFlight: number}>(`/v1/campaigns/${idPath(id)}/cancel`, {method: 'POST', signal, idempotencyKey: crypto.randomUUID()}); return {canceled: result.canceled, inFlight: result.inFlight} },
+      cancel: async (id, signal) => { const result = await request<{canceled: number; inFlight: number}>(`/v1/campaigns/${idPath(id)}/cancel`, {method: 'POST', signal, idempotencyKey: crypto.randomUUID(), scope}); return {canceled: result.canceled, inFlight: result.inFlight} },
       stats: (id, signal) => call(`/campaigns/${idPath(id)}/stats`, 'GET', undefined, signal),
       test: async (input, signal) => { const result = await call(`/campaigns/${idPath(input.id)}/test`, 'POST', {to: input.to, ...(input.data && Object.keys(input.data).length ? {data: input.data} : {})}, signal); return {accepted: result.status === 'queued', id: result.id, status: result.status, simulated: result.simulated} }
     },
@@ -285,9 +360,11 @@ export function createLiveApi(): Api {
         const body = {name: input.name, properties: {...current?.properties, country: input.country}, ...(!input.id ? {email: input.email} : {})}
         const result = await call(input.id ? `/contacts/${idPath(input.id)}` : '/contacts', input.id ? 'PATCH' : 'POST', body, signal)
         const oldLists: string[] = current?.listIds ?? []
-        for (const listId of input.listIds.filter(x => !oldLists.includes(x))) await call(`/lists/${idPath(listId)}/members`, 'POST', {contactIds: [result.id]}, signal)
-        for (const listId of oldLists.filter(x => !input.listIds.includes(x))) await call(`/lists/${idPath(listId)}/members/${idPath(result.id)}`, 'DELETE', undefined, signal)
-        return getContact(result.id, signal)
+        const added = input.listIds.filter(x => !oldLists.includes(x))
+        const removed = oldLists.filter(x => !input.listIds.includes(x))
+        for (const listId of added) await call(`/lists/${idPath(listId)}/members`, 'POST', {contactIds: [result.id]}, signal)
+        for (const listId of removed) await call(`/lists/${idPath(listId)}/members/${idPath(result.id)}`, 'DELETE', undefined, signal)
+        return added.length || removed.length ? getContact(result.id, signal) : mapContact({ ...result, listIds: oldLists })
       },
     },
     consent: async (id, input) => mapContact(await call(`/contacts/${idPath(id)}/consent`, 'POST', input)),
@@ -358,9 +435,9 @@ export function createLiveApi(): Api {
       updateThread: (threadId, patch, signal) => inboundCall<InboundAddressState>(`/threads/${idPath(threadId)}`, 'PATCH', patch, signal),
       message: (id, input, signal) => inboundCall<InboundMessageDetail>(`/messages/${idPath(id)}?${new URLSearchParams({ includeHtml: 'true', ...(input.addressId ? { addressId: input.addressId } : {}) })}`, 'GET', undefined, signal),
       attachmentUrl: (messageId, attachmentId, input, signal) => inboundCall<{ url: string; expiresAt: string }>(`/messages/${idPath(messageId)}/attachments/${idPath(attachmentId)}${input.addressId ? `?addressId=${encodeURIComponent(input.addressId)}` : ''}`, 'GET', undefined, signal),
-      reply: (threadId, { idempotencyKey, ...input }, signal) => request<InboundMessage>(`/v1/inbound/threads/${idPath(threadId)}/reply`, { method: 'POST', body: input, signal, idempotencyKey }),
-      startThread: ({ idempotencyKey, ...input }, signal) => request<InboundMessage>('/v1/inbound/threads', { method: 'POST', body: input, signal, idempotencyKey }),
-      webhooks: async signal => (await inboundCall<{ data: InboundWebhook[] }>('/webhooks', 'GET', undefined, signal)).data,
+      reply: (threadId, { idempotencyKey, ...input }, signal) => request<InboundMessage>(`/v1/inbound/threads/${idPath(threadId)}/reply`, { method: 'POST', body: input, signal, idempotencyKey, scope }),
+      startThread: ({ idempotencyKey, ...input }, signal) => request<InboundMessage>('/v1/inbound/threads', { method: 'POST', body: input, signal, idempotencyKey, scope }),
+      webhooks: async (signal, cursor) => { const result = await inboundCall<{ data: InboundWebhook[]; nextCursor: string | null }>(`/webhooks?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, 'GET', undefined, signal); return Object.assign(result.data, { nextCursor: result.nextCursor }) },
       forwards: async signal => {
         const all: ForwardEndpoint[] = []
         for (let cursor: string | null = null; ;) {
