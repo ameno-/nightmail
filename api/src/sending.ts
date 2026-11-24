@@ -118,7 +118,7 @@ const SendInput = z.object({
   region: Region.optional().describe(`Usually omitted: hosted ${productName} sends from the region bound to the sender domain, and a different value fails with SENDER_REGION_MISMATCH. Self-hosted installations default to their default region.`), kind: z.enum(['transactional', 'marketing']).default('transactional').describe(`marketing adds ${productName}'s footer (an Unsubscribe link, with the workspace's postal address under it when it has one) and the one-click List-Unsubscribe headers.`), ...ContentFields,
   template: z.object({ name: z.string().min(1).max(64).regex(/^[a-zA-Z0-9_-]+$/), data: StoredTemplateData }).strict().describe('Uses native SES stored-template rendering and snapshots its rendered MIME. SES does not automatically escape HTML; callers must escape untrusted HTML-context values. Simulated deployments do not render AWS templates.').optional(),
   attachments: AttachmentIds, tracking: z.boolean().optional(), headers: CustomHeaders.optional(),
-  screen: z.boolean().optional().describe('Request Jev screening at accept time for live transactional mail (with JevF failover). Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Simulated mail is not screened. A positive reject verdict fails the request synchronously with 422 CONTENT_REJECTED_SPAM (nothing queued); if both classifiers are unavailable, the request fails with retryable 503 CONTENT_SCREEN_UNAVAILABLE and Retry-After (nothing queued).'),
+  screen: z.boolean().optional().describe('Request Jev screening at accept time for live transactional mail (with JevF failover). Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Simulated mail is not screened. A positive reject verdict fails the request synchronously with 422 CONTENT_REJECTED_SPAM (nothing queued); during a temporary outage of both classifiers, the message is accepted (202) and held unscreened until a classifier answers. Mandatory Hosted screening with no classifier configured returns retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After.'),
 }).strict().superRefine((v, ctx) => {
   if (v.template ? (v.subject !== undefined || v.html !== undefined || v.text !== undefined) : (!v.subject || (!v.html && !v.text))) ctx.addIssue({ code: 'custom', message: 'Provide subject and html/text, or template, but not both.' });
   if ((Array.isArray(v.to) ? v.to.length : 1) + v.cc.length + v.bcc.length > 50) ctx.addIssue({ code: 'custom', message: 'At most 50 recipients across to/cc/bcc.' });
@@ -127,7 +127,7 @@ const SendInput = z.object({
 }).openapi('BatchSendEmailItem');
 // The screen's limits (src/screen.ts), as the API reference states them; the defaults of JEV_MESSAGE_LIMIT_BYTES and JEV_CAMPAIGN_LIMIT_BYTES.
 const screenBytes = (n: number) => n.toLocaleString('en-US'), SCREEN = SEND_LIMITS.screen;
-const SCREEN_LIMIT_NOTE = `Front-door admission and content screening: Hosted sending checks validation, recipient suppression/consent, balance, limits, and the content screen (Jev with JevF failover) synchronously before queueing. Failing messages return an immediate error (422 RECIPIENT_INELIGIBLE, 422 CONTENT_REJECTED_SPAM, 422 CONTENT_TOO_LARGE_TO_SCREEN, or retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After when both classifiers are unavailable) and nothing is queued. Screened-text limits: at most ${screenBytes(SCREEN.messageBytes)} UTF-8 bytes per message (installation default) and ${SCREEN.linkHosts} distinct link hosts (${screenBytes(SCREEN.linkHostBytes)} bytes of host names), counting link labels that name another host; over either limit, error.details[0] holds { screenedBytes, limitBytes } or { linkHosts, linkHostLimit } (plus index in a batch).`;
+const SCREEN_LIMIT_NOTE = `Front-door admission and content screening: Hosted sending checks validation, recipient suppression/consent, balance, limits, and the content screen (Jev with JevF failover) synchronously before queueing. Failing messages return an immediate error (422 RECIPIENT_INELIGIBLE, 422 CONTENT_REJECTED_SPAM, 422 CONTENT_TOO_LARGE_TO_SCREEN, or retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After when no mandatory classifier is configured) and nothing is queued; during a temporary outage of both classifiers, eligible mail is accepted (202) and held unscreened until a classifier answers. Screened-text limits: at most ${screenBytes(SCREEN.messageBytes)} UTF-8 bytes per message (installation default) and ${SCREEN.linkHosts} distinct link hosts (${screenBytes(SCREEN.linkHostBytes)} bytes of host names), counting link labels that name another host; over either limit, error.details[0] holds { screenedBytes, limitBytes } or { linkHosts, linkHostLimit } (plus index in a batch).`;
 const CAMPAIGN_SCREEN_NOTE = `Hosted campaigns screen every distinct copy during launch and prepare before any row enters the sending queue, each distinct copy only once: recipients whose personalized copies read the same share one verdict. The campaign\u2019s own copy, placeholders unresolved, is screened first and may hold ${screenBytes(SCREEN.campaignBytes)} bytes of screened text (installation default; 422 CONTENT_TOO_LARGE_TO_SCREEN with error.details[0] { screenedBytes, limitBytes } otherwise); so may each copy. A failing copy never enters the sending queue (CONTENT_REJECTED_SPAM); when refused copies pass 5% and 10 recipients the campaign pauses once for review, and a positive verdict on the campaign\u2019s own copy fails it before anyone is sent to.`;
 // The audience is frozen inside the launch request (sending.ts launch): a large one takes seconds, and one statement of it
 // may run out of the database's time.
@@ -1049,14 +1049,14 @@ async function renderTemplate(runtime: Runtime, snapshot: EmailSnapshot, templat
   snapshot.raw = [`From: ${formattedSender(snapshot.from, snapshot.fromName, true)}`, `To: ${snapshot.to.join(', ')}`, ...(snapshot.cc.length ? [`Cc: ${snapshot.cc.join(', ')}`] : []), ...(snapshot.replyTo.length ? [`Reply-To: ${snapshot.replyTo.join(', ')}`] : []), ...headers, ...snapshot.headers.map(header => `${header.Name}: ${header.Value}`)].join('\r\n') + normalized.slice(split);
 }
 /** Writes an admitted mailbox send in one statement: its email row, which is the dispatch queue entry, and its attachment links. */
-async function queueEmail(runtime: Runtime, db: DbExecutor, a: Actor, snapshot: EmailSnapshot, emailId = rowId('email'), countHostedScreen = false) {
+async function queueEmail(runtime: Runtime, db: DbExecutor, a: Actor, snapshot: EmailSnapshot, emailId = rowId('email'), countHostedScreen = false, screened = true) {
   const sim = isSimulatedSes(runtime);
   await db.execute(sql`WITH inserted AS (INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,screened)
-      VALUES(${emailId},${a.workspaceId},${a.keyId},${snapshot.region},${snapshot.from},${JSON.stringify(snapshot.to)}::jsonb,${JSON.stringify(snapshot.cc)}::jsonb,${JSON.stringify(snapshot.bcc)}::jsonb,${snapshot.subject},${JSON.stringify(snapshot)}::jsonb,${sim},true) RETURNING id, workspace_id, to_addresses||cc_addresses||bcc_addresses AS recipients)
+      VALUES(${emailId},${a.workspaceId},${a.keyId},${snapshot.region},${snapshot.from},${JSON.stringify(snapshot.to)}::jsonb,${JSON.stringify(snapshot.cc)}::jsonb,${JSON.stringify(snapshot.bcc)}::jsonb,${snapshot.subject},${JSON.stringify(snapshot)}::jsonb,${sim},${screened}) RETURNING id, workspace_id, to_addresses||cc_addresses||bcc_addresses AS recipients)
     ${countHostedScreen ? sql`, screen_counted AS (${countScreened(sql`SELECT workspace_id, 0 AS rejected FROM inserted WHERE hosted_real_cost(recipients) > 0`)})` : sql``},
     links AS (INSERT INTO sending_attachment_links(workspace_id,attachment_id,owner_type,owner_id) SELECT ${a.workspaceId},f,'email',id FROM inserted,jsonb_array_elements_text(${JSON.stringify(snapshot.attachments)}::jsonb) f ON CONFLICT DO NOTHING)
     SELECT id FROM inserted`);
-  noteDispatch(a, snapshot);
+  if (screened) noteDispatch(a, snapshot);
   return { id: emailId, status: 'queued' as const, simulated: sim };
 }
 function noteDispatch(a: Actor, { region, kind }: EmailSnapshot) {
@@ -1181,7 +1181,7 @@ async function endRelease(runtime: Runtime, wid: string, emailId: string, run: u
 
 /** One message of a send, as built before admission: what TypeScript alone found wrong with it waits in `invalid`. */
 type ScreenSummaryValue = { status: 'passed' | 'skipped' };
-type Outgoing = { snapshot: EmailSnapshot; recipients: number; marketing: boolean; template?: SendRequest['template']; token?: { hash: string; email: string }; duplicate?: boolean; invalid?: unknown; oversize?: ApiError; emailId?: string; screenSummary?: ScreenSummaryValue; countScreened?: boolean };
+type Outgoing = { snapshot: EmailSnapshot; recipients: number; marketing: boolean; template?: SendRequest['template']; token?: { hash: string; email: string }; duplicate?: boolean; invalid?: unknown; oversize?: ApiError; emailId?: string; screenSummary?: ScreenSummaryValue; countScreened?: boolean; heldForScreen?: boolean };
 /** A direct send's messages, built and checked without the database: URLs, headers, duplicates and the batch's size.
  *  `postalAddress`: the workspace's, for the footer of its marketing mail (admitEmails reads it). */
 async function directMessages(runtime: Runtime, mails: SendRequest[], batch: boolean, postalAddress?: string | null): Promise<Outgoing[]> {
@@ -1288,7 +1288,6 @@ async function screenOutgoingAtAccept(runtime: Runtime, a: Actor, out: Outgoing[
       const delivery = await import('./screened-html.js');
       try { copy = delivery.hostedCopy(m.snapshot, rules === 'probation'); }
       catch (error) { throw atItem(error, batch ? i : undefined); }
-      if (rules === 'probation') m.snapshot = copy;
       if (m.snapshot.attachments.length) {
         if (!loadedAttachments) {
           const rows = await db.select().from(attachments).where(and(scope(attachments, a), inArray(attachments.id, allAttachIds))).orderBy(asc(attachments.id));
@@ -1325,29 +1324,53 @@ async function screenOutgoingAtAccept(runtime: Runtime, a: Actor, out: Outgoing[
   }
   const screen = await loadScreen();
   const scopedRuntime: Runtime = { ...runtime, config: { ...runtime.config, workspaceId: a.workspaceId } };
-  type Verdict = { task: ScreenTask; result: { spam: number; model: string; digest?: string }; rejected: boolean };
+  type JudgedVerdict = { kind: 'judged'; task: ScreenTask; result: { spam: number; model: string; digest?: string }; rejected: boolean };
+  type UnavailableVerdict = { kind: 'unavailable'; task: ScreenTask; message: string };
+  type Verdict = JudgedVerdict | UnavailableVerdict;
   const verdicts: Verdict[] = new Array(tasks.length);
-  let next = 0;
+  // failing: unavailable answers since the last verdict. A verdict earlier in the batch (a cached one included) must not
+  // switch the bound off, so this resets on each verdict instead of requiring none at all.
+  let next = 0, failing = 0;
   try {
     await Promise.all(Array.from({ length: Math.min(tasks.length, BATCH_SCREEN_CONCURRENCY) }, async () => {
       while (next < tasks.length) {
         const pos = next++, task = tasks[pos]!;
+        // Once BATCH_SCREEN_CONCURRENCY requests in a row found no classifier, the rest of the batch is held without asking:
+        // at most 2 × BATCH_SCREEN_CONCURRENCY - 1 requests start after the last verdict, however large the batch.
+        if (failing >= BATCH_SCREEN_CONCURRENCY) {
+          verdicts[pos] = { kind: 'unavailable', task, message: 'Content screening is temporarily unavailable.' };
+          continue;
+        }
         const call = { emailId: task.message.emailId, workspaceId: a.workspaceId, region: task.region, kind: task.copy.kind, required: task.required };
-        const result = await screen.screenSnapshot(scopedRuntime, task.copy, task.required, call);
-        if (!result) throw unavailableScreenError();
-        const rejected = result.spam >= settings.threshold && (task.required || settings.mode === 'reject');
-        verdicts[pos] = { task, result, rejected };
+        try {
+          const result = await screen.screenSnapshot(scopedRuntime, task.copy, task.required, call);
+          if (!result) {
+            failing++;
+            verdicts[pos] = { kind: 'unavailable', task, message: 'Content screening is temporarily unavailable.' };
+            continue;
+          }
+          failing = 0;
+          const rejected = result.spam >= settings.threshold && (task.required || settings.mode === 'reject');
+          verdicts[pos] = { kind: 'judged', task, result, rejected };
+        } catch (error) {
+          if (error instanceof ApiError && error.code === 'CONTENT_SCREEN_UNAVAILABLE') {
+            failing++;
+            verdicts[pos] = { kind: 'unavailable', task, message: error.message };
+            continue;
+          }
+          throw error;
+        }
       }
     }));
   } catch (error) {
     await flushScreenObservability(runtime).catch(() => {});
-    if (error instanceof ApiError && error.code === 'CONTENT_SCREEN_UNAVAILABLE') throw unavailableScreenError(error.message);
     throw error;
   }
-  const rejected = verdicts.filter(v => v.rejected);
+  const judged = verdicts.filter((v): v is JudgedVerdict => v.kind === 'judged');
+  const rejected = judged.filter(v => v.rejected);
   if (rejected.length) {
     // Count every judged real-destination Hosted verdict toward reputation even though nothing enters sending_emails.
-    const hostedJudged = verdicts.filter(v => v.task.hosted).map(v => ({
+    const hostedJudged = judged.filter(v => v.task.hosted).map(v => ({
       recipients: [...v.task.message.snapshot.to, ...v.task.message.snapshot.cc, ...v.task.message.snapshot.bcc],
       rejected: v.rejected ? 1 : 0,
     }));
@@ -1366,9 +1389,17 @@ async function screenOutgoingAtAccept(runtime: Runtime, a: Actor, out: Outgoing[
     throw err;
   }
   for (const v of verdicts) {
+    if (v.kind === 'unavailable') {
+      // Neither classifier answered: accept the email and hold it (screened = false) so screenHeldMail screens it
+      // once a classifier recovers. The mail room never sends unverdicted rows.
+      v.task.message.heldForScreen = true;
+      log('warn', { code: 'CONTENT_SCREEN_HELD', workspaceId: a.workspaceId, emailId: v.task.message.emailId, region: v.task.region, kind: v.task.copy.kind, required: v.task.required, message: v.message });
+      continue;
+    }
     if (v.result.spam >= settings.threshold) {
       log('warn', { code: 'CONTENT_SPAM_SUSPECTED', workspaceId: a.workspaceId, emailId: v.task.message.emailId, spam: v.result.spam, model: v.result.model });
     }
+    if (v.task.rules === 'probation') v.task.message.snapshot = v.task.copy;
     v.task.message.snapshot.screenVerdict = { status: 'passed', spam: v.result.spam, model: v.result.model, digest: v.result.digest, rules: v.task.rules };
     v.task.message.screenSummary = { status: 'passed' };
     if (v.task.hosted) v.task.message.countScreened = true;
@@ -1411,7 +1442,7 @@ async function admitSends(call: SendCall, body: unknown, out: Outgoing[], identi
   }
   const hash = key === undefined ? null : await requestHash(body);
   const data = out.map(m => ({ id: m.emailId ?? rowId('email'), status: 'queued' as const, simulated: sim, ...(at ? { scheduledAt: at } : {}), ...(m.screenSummary ? { screen: m.screenSummary } : {}) })), receipt = batch ? { data } : data[0]!;
-  const rows = out.map((m, ord) => ({ ord, id: data[ord]!.id, snapshot: m.snapshot, hash: m.token?.hash, email: m.token?.email, count_screened: !!m.countScreened, marketing: m.snapshot.kind === 'marketing', destinations: [...m.snapshot.to, ...m.snapshot.cc, ...m.snapshot.bcc].map(e => e.toLowerCase()), reply_authors: m.snapshot.replyAuthors ?? [] }));
+  const rows = out.map((m, ord) => ({ ord, id: data[ord]!.id, snapshot: m.snapshot, hash: m.token?.hash, email: m.token?.email, screened: !m.heldForScreen, count_screened: !!m.countScreened, marketing: m.snapshot.kind === 'marketing', destinations: [...m.snapshot.to, ...m.snapshot.cc, ...m.snapshot.bcc].map(e => e.toLowerCase()), reply_authors: m.snapshot.replyAuthors ?? [] }));
   const skipSuppression = 'actor' in identity && isSystemNoticeKey(identity.actor.keyId);
   const ids = [...new Set(out.flatMap(m => m.snapshot.attachments))];
   const principal = 'credential' in identity ? sql`SELECT k.*,b.used FROM credential k LEFT JOIN budget b ON true` : sql`SELECT ${identity.actor.keyId}::text AS id,${identity.actor.workspaceId}::text AS workspace_id,
@@ -1424,9 +1455,9 @@ async function admitSends(call: SendCall, body: unknown, out: Outgoing[], identi
     ...(at ? { cost: 0, marketing: 0, billable: 0, scheduledAt: at } : charges(runtime, out)), ...(key !== undefined ? { claim: { path: call.path, key, hash: hash!, receipt } } : {}), ...(options.campaign ? { campaign: options.campaign } : {}) }, undefined, assets);
   const { rows: [result] } = await (call.db ?? runtime.db).execute<Principal & { s: Admitted | Refused | ClaimState | null; ineligible: { ord: number; email: string; reason: string }[] | null; max_send_rate: number | null }>(sql`WITH ${'credential' in identity ? sql`${identity.credential},` : sql``} state AS MATERIALIZED (
     SELECT k.*, CASE WHEN k.used IS NULL THEN jsonb_build_object('previous',NULL,'busy',true) WHEN k.used<=k.max_requests AND k.permissions ?| ARRAY['manage','send'] THEN ${decision} END s FROM (${principal}) k
-  ), raw_submitted AS MATERIALIZED (SELECT k.workspace_id,k.id AS actor_id,m.ord,m.id,m.hash,m.email,m.count_screened,m.marketing,m.destinations,m.reply_authors,
+  ), raw_submitted AS MATERIALIZED (SELECT k.workspace_id,k.id AS actor_id,m.ord,m.id,m.hash,m.email,m.screened,m.count_screened,m.marketing,m.destinations,m.reply_authors,
       m.snapshot||jsonb_build_object('region',x->>'region')||CASE WHEN jsonb_typeof(x->'binding')='object' THEN jsonb_build_object('binding',x->'binding') ELSE '{}' END AS snapshot
-    FROM state k,jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) m(ord int,id text,hash text,email text,count_screened boolean,marketing boolean,destinations jsonb,reply_authors jsonb,snapshot jsonb) CROSS JOIN LATERAL (SELECT k.s->'mails'->m.ord AS x) r
+    FROM state k,jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) m(ord int,id text,hash text,email text,screened boolean,count_screened boolean,marketing boolean,destinations jsonb,reply_authors jsonb,snapshot jsonb) CROSS JOIN LATERAL (SELECT k.s->'mails'->m.ord AS x) r
     WHERE k.s->>'allowed'='true'
   ), ineligible AS MATERIALIZED (${skipSuppression ? sql`SELECT NULL::int AS ord, NULL::text AS email, NULL::text AS reason WHERE false` : sql`
     SELECT r.ord, d.email, cause.reason
@@ -1445,7 +1476,7 @@ async function admitSends(call: SendCall, body: unknown, out: Outgoing[], identi
   ),
   submitted AS MATERIALIZED (SELECT * FROM raw_submitted WHERE NOT EXISTS (SELECT 1 FROM ineligible)),
   inserted AS (INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,screened,status,scheduled_at)
-    SELECT id,workspace_id,actor_id,snapshot->>'region',snapshot->>'from',snapshot->'to',snapshot->'cc',snapshot->'bcc',snapshot->>'subject',snapshot,${sim},true,${at ? 'scheduled' : 'queued'},${at ?? null}::timestamptz FROM submitted),
+    SELECT id,workspace_id,actor_id,snapshot->>'region',snapshot->>'from',snapshot->'to',snapshot->'cc',snapshot->'bcc',snapshot->>'subject',snapshot,${sim},screened,${at ? 'scheduled' : 'queued'},${at ?? null}::timestamptz FROM submitted),
   ${out.some(m => m.countScreened) ? sql`screen_counted AS (${countScreened(sql`SELECT workspace_id, 0 AS rejected FROM submitted WHERE count_screened AND hosted_real_cost(destinations) > 0`)}),` : sql``}
   ${at ? sql`scheduled AS (${scheduledEvent(sql`SELECT workspace_id,id FROM submitted`, 'scheduled', at, sim)}), release AS (${queueRelease(sql`SELECT workspace_id,id FROM submitted`, at)}),` : sql``}
   links AS (INSERT INTO sending_attachment_links(workspace_id,attachment_id,owner_type,owner_id) SELECT workspace_id,a,'email',id FROM submitted,jsonb_array_elements_text(snapshot->'attachments') a),
@@ -1469,6 +1500,7 @@ async function admitSends(call: SendCall, body: unknown, out: Outgoing[], identi
   if (at) { if (Date.parse(at) - Date.now() < 60_000) a.wakeJobs = Math.max(a.wakeJobs ?? 0, 1); return receipt; }
   const maxSendRate = typeof result.max_send_rate === 'number' && result.max_send_rate > 0 ? result.max_send_rate : undefined;
   for (const [i, m] of out.entries()) {
+    if (m.heldForScreen) continue;
     const route = decided.mails[i]!;
     if (route.connection) a.dispatchAccount = { aws_account_id: route.connection.aws_account_id, kind: route.connection.kind, ...(maxSendRate ? { maxSendRate } : {}) };
     noteDispatch(a, { ...m.snapshot, region: route.region });
@@ -1722,7 +1754,7 @@ export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, held: 
     const prob = cfg.multiTenant ? (await db.execute<{ p: ProbationReason | null }>(sql`SELECT ${probationReason(sql`${a.workspaceId}`)} AS p`)).rows[0]?.p !== null : false;
     await screenOutgoingAtAccept(runtime, a, [message], decided, prob, false, db);
   }
-  const receipt = await queueEmail(runtime, db, a, message.snapshot, message.emailId, !!message.countScreened);
+  const receipt = await queueEmail(runtime, db, a, message.snapshot, message.emailId, !!message.countScreened, !message.heldForScreen);
   return { emailId: receipt.id, snapshot: message.snapshot };
 }
 /** An agent (API key or MCP) read or saved this draft: anyone with it open sees it for two minutes (src/campaign-room.ts),
@@ -3871,12 +3903,19 @@ export const jobHandlers: Record<string, JobHandler> = { 'sending.cancelPage':ca
  * (the dispatcher's claim); it is not a general system bypass.
  */
 
+const HELD_SCREEN_LIMIT = 300;
+const HELD_SCREEN_CHUNK = 50;
+const HELD_SCREEN_CONCURRENCY = 4;
+const HELD_SCREEN_BUDGET_MS = 15_000;
+const HELD_OUTAGE_ABORT = 4;
+
 /** Background screen sweep outside the mail room (minute cron & Node runner): leases queued/scheduled rows held with
- *  `screened = false` (pre-deploy rows, rollout-window rows, or pre-deploy scheduled releases), screens them with the
- *  same Jev + JevF failover screen used at accept time, and either marks them `screened = true` (waking the mail room)
- *  or rejects them with the same status, error code and `email.rejected` webhook/event. Outages release the lease and retry. */
-export async function screenHeldMail(runtime: Runtime, limit = 50): Promise<{ leased: number; passed: number; rejected: number; deferred: number }> {
-  const mx = runtime.config.multiTenant;
+ *  `screened = false` (outage-held accepts, pre-deploy rows, rollout-window rows, or pre-deploy scheduled releases) in
+ *  bounded chunks up to `limit` within `budgetMs`, screens them with the same Jev + JevF failover screen used at accept
+ *  time, and either marks them `screened = true` (waking the mail room) or rejects them with the same status, error code
+ *  and `email.rejected` webhook/event. Outages back off and abort the sweep early; logs one held-backlog summary line. */
+export async function screenHeldMail(runtime: Runtime, limit = HELD_SCREEN_LIMIT, budgetMs = HELD_SCREEN_BUDGET_MS): Promise<{ leased: number; passed: number; rejected: number; deferred: number; remaining: number }> {
+  const mx = runtime.config.multiTenant, started = Date.now(), deadline = started + budgetMs;
   type HeldRow = {
     id: string; workspace_id: string; region: string; actor_key_id: string; review_id: string | null; review_ordinal: number | null;
     campaign_id: string | null; from_address: string; to_addresses: string[]; cc_addresses: string[]; bcc_addresses: string[];
@@ -3889,41 +3928,10 @@ export async function screenHeldMail(runtime: Runtime, limit = 50): Promise<{ le
     review_version: number | null; review_draft: CampaignDraft | null; review_rendered: { html?: string; text?: string } | null;
     review_screen: CampaignScreen | null; review_hash: string | null; review_content_hash: string | null; review_recipient: ReviewedRecipient | null;
   };
-  const { rows } = await runtime.db.execute<HeldRow>(sql`
-    WITH due AS (
-      SELECT workspace_id, id FROM sending_emails
-      WHERE status IN ('queued', 'scheduled') AND NOT screened
-        AND (lease_until IS NULL OR lease_until < clock_timestamp())
-      ORDER BY created_at, id
-      LIMIT ${limit}
-      FOR UPDATE SKIP LOCKED
-    ), leased AS (
-      UPDATE sending_emails e SET lease_until = clock_timestamp() + interval '2 minutes'
-      FROM due WHERE e.workspace_id = due.workspace_id AND e.id = due.id
-      RETURNING e.*
-    )
-    SELECT leased.id, leased.workspace_id, leased.region, leased.actor_key_id, leased.review_id, leased.review_ordinal,
-      leased.campaign_id, leased.from_address, leased.to_addresses, leased.cc_addresses, leased.bcc_addresses,
-      leased.subject, leased.status, leased.provider_id, leased.snapshot, leased.simulated, leased.screened,
-      leased.attempt_started_at::text, leased.error_code, leased.suppression_reason, leased.scheduled_at::text,
-      leased.dispatch_version, leased.lease_until::text, leased.account_pause_started_at::text, leased.event_outcomes,
-      leased.created_at::text, leased.updated_at::text,
-      ${mx ? sql`to_jsonb(pc)` : sql`NULL`} AS connection,
-      ${mx ? sql`${probationReason(sql`leased.workspace_id`)} IS NOT NULL` : sql`false`} AS on_probation,
-      ${mx ? sql`(SELECT l.max_send_rate FROM provider_account_limits l WHERE l.aws_account_id = pc.aws_account_id AND l.region = leased.region AND l.max_send_rate > 0)` : sql`(SELECT l.max_send_rate FROM sending_region_limits l WHERE l.workspace_id = leased.workspace_id AND l.region = leased.region AND l.max_send_rate > 0)`} AS max_send_rate,
-      r.renderer_version AS review_version, r.draft AS review_draft, r.rendered AS review_rendered, r.screen AS review_screen, r.content_hash AS review_hash,
-      CASE WHEN leased.review_id IS NOT NULL THEN (SELECT x.content_hash FROM sending_review_recipients x WHERE x.review_id = leased.review_id AND x.ordinal = leased.review_ordinal) END AS review_content_hash,
-      CASE WHEN leased.review_id IS NOT NULL THEN (SELECT x.recipient FROM sending_review_recipients x WHERE x.review_id = leased.review_id AND x.ordinal = leased.review_ordinal) END AS review_recipient
-    FROM leased
-    ${mx ? sql`LEFT JOIN ${sendingConnections(runtime)} pc ON pc.workspace_id = leased.workspace_id AND pc.region = leased.region` : sql``}
-    LEFT JOIN sending_campaign_reviews r ON r.workspace_id = leased.workspace_id AND r.campaign_id = leased.campaign_id AND r.id = leased.review_id
-    ORDER BY leased.created_at, leased.id`);
-  if (!rows.length) return { leased: 0, passed: 0, rejected: 0, deferred: 0 };
-
-  let passed = 0, rejected = 0, deferred = 0;
+  let leased = 0, passed = 0, rejected = 0, deferred = 0, consecutiveOutages = 0;
   const toWake = new Map<string, { region: string; accountId?: string; kind?: ReadyConnection['kind']; count: number; priority: boolean; maxSendRate?: number }>();
-  const screen = await loadScreen();
   const settings = runtime.config.screen;
+  let screen: Awaited<ReturnType<typeof loadScreen>> | undefined;
 
   const processRow = async (r: HeldRow) => {
     const wid = r.workspace_id, id = r.id, ver = r.dispatch_version;
@@ -3936,11 +3944,12 @@ export async function screenHeldMail(runtime: Runtime, limit = 50): Promise<{ le
     const rules: 'probation' | 'standard' | null = isSimulatedSes(runtime) || !hosted || trusted ? null : r.on_probation ? 'probation' : 'standard';
     const needsScreen = !r.simulated && !isSimulatedSes(runtime) && (hosted || Boolean(snapshot.screen && snapshot.kind === 'transactional'));
 
-    // A row that could not be judged now (an outage, a failure of its own) waits a minute out of the oldest-first order, so
-    // rows that keep failing never hold back the ones behind them.
+    // A row that could not be judged now (an outage, a failure of its own) waits 45 s out of oldest-first order so
+    // failing rows never starve rows behind them while still coming due on the very next minute cron tick.
     const releaseHeld = async () => {
       deferred++;
-      await runtime.db.execute(sql`UPDATE sending_emails SET lease_until = clock_timestamp() + interval '1 minute'
+      consecutiveOutages++;
+      await runtime.db.execute(sql`UPDATE sending_emails SET lease_until = clock_timestamp() + interval '45 seconds'
         WHERE workspace_id = ${wid} AND id = ${id} AND dispatch_version = ${ver} AND status IN ('queued', 'scheduled') AND NOT screened`);
     };
     const passHeld = async (nextSnapshot: EmailSnapshot, countHosted: boolean) => {
@@ -3954,6 +3963,7 @@ export async function screenHeldMail(runtime: Runtime, limit = 50): Promise<{ le
         SELECT status FROM moved`);
       if (!updated) return;
       passed++;
+      consecutiveOutages = 0;
       if (updated.status === 'queued') {
         const key = `${conn?.aws_account_id ?? ''}:${r.region}`;
         const entry = toWake.get(key) ?? { region: r.region, accountId: conn?.aws_account_id, kind: conn?.kind, count: 0, priority: false, maxSendRate: typeof r.max_send_rate === 'number' && r.max_send_rate > 0 ? r.max_send_rate : undefined };
@@ -3973,6 +3983,7 @@ export async function screenHeldMail(runtime: Runtime, limit = 50): Promise<{ le
         SELECT (SELECT count(*)::int FROM webhook_jobs) AS n, (SELECT count(*)::int FROM rejected) AS moved`);
       if (!res?.moved) return;
       rejected++;
+      consecutiveOutages = 0;
       if (res.n) await wakeWebhooks(runtime, res.n);
       if (screenData) log('warn', { code, emailId: id, workspaceId: wid, spam: screenData.spam, model: screenData.model });
       else log('warn', { code, emailId: id, workspaceId: wid });
@@ -4035,6 +4046,7 @@ export async function screenHeldMail(runtime: Runtime, limit = 50): Promise<{ le
         await passHeld({ ...snapshot, screenVerdict: { status: 'skipped', rules } }, false);
         return;
       }
+      screen ??= await loadScreen();
       const result = await screen.screenSnapshot(scopedRt, copy, required, { emailId: id, workspaceId: wid, region: r.region, kind: copy.kind, required });
       if (!result) { await releaseHeld(); return; }
       if (result.spam >= settings.threshold && (required || settings.mode === 'reject')) {
@@ -4054,16 +4066,76 @@ export async function screenHeldMail(runtime: Runtime, limit = 50): Promise<{ le
     }
   };
 
-  let next = 0;
-  await Promise.all(Array.from({ length: Math.min(rows.length, BATCH_SCREEN_CONCURRENCY) }, async () => {
-    while (next < rows.length) await processRow(rows[next++]!);
-  }));
-  await flushScreenObservability(runtime).catch(() => {});
+  while (leased < limit && Date.now() < deadline && consecutiveOutages < HELD_OUTAGE_ABORT) {
+    const chunkLimit = Math.min(HELD_SCREEN_CHUNK, limit - leased);
+    const { rows } = await runtime.db.execute<HeldRow>(sql`
+      -- Rows not tried yet first, then the ones whose last try is oldest: a row that keeps failing goes to the back, so a
+      -- few of them can never trip the outage abort ahead of every other held row.
+      WITH due AS (
+        SELECT workspace_id, id, lease_until AS tried FROM sending_emails
+        WHERE status IN ('queued', 'scheduled') AND NOT screened
+          AND (lease_until IS NULL OR lease_until < clock_timestamp())
+        ORDER BY lease_until NULLS FIRST, created_at, id
+        LIMIT ${chunkLimit}
+        FOR UPDATE SKIP LOCKED
+      ), leased AS (
+        UPDATE sending_emails e SET lease_until = clock_timestamp() + interval '2 minutes'
+        FROM due WHERE e.workspace_id = due.workspace_id AND e.id = due.id
+        RETURNING e.*, due.tried
+      )
+      SELECT leased.id, leased.workspace_id, leased.region, leased.actor_key_id, leased.review_id, leased.review_ordinal,
+        leased.campaign_id, leased.from_address, leased.to_addresses, leased.cc_addresses, leased.bcc_addresses,
+        leased.subject, leased.status, leased.provider_id, leased.snapshot, leased.simulated, leased.screened,
+        leased.attempt_started_at::text, leased.error_code, leased.suppression_reason, leased.scheduled_at::text,
+        leased.dispatch_version, leased.lease_until::text, leased.account_pause_started_at::text, leased.event_outcomes,
+        leased.created_at::text, leased.updated_at::text,
+        ${mx ? sql`to_jsonb(pc)` : sql`NULL`} AS connection,
+        ${mx ? sql`${probationReason(sql`leased.workspace_id`)} IS NOT NULL` : sql`false`} AS on_probation,
+        ${mx ? sql`(SELECT l.max_send_rate FROM provider_account_limits l WHERE l.aws_account_id = pc.aws_account_id AND l.region = leased.region AND l.max_send_rate > 0)` : sql`(SELECT l.max_send_rate FROM sending_region_limits l WHERE l.workspace_id = leased.workspace_id AND l.region = leased.region AND l.max_send_rate > 0)`} AS max_send_rate,
+        r.renderer_version AS review_version, r.draft AS review_draft, r.rendered AS review_rendered, r.screen AS review_screen, r.content_hash AS review_hash,
+        CASE WHEN leased.review_id IS NOT NULL THEN (SELECT x.content_hash FROM sending_review_recipients x WHERE x.review_id = leased.review_id AND x.ordinal = leased.review_ordinal) END AS review_content_hash,
+        CASE WHEN leased.review_id IS NOT NULL THEN (SELECT x.recipient FROM sending_review_recipients x WHERE x.review_id = leased.review_id AND x.ordinal = leased.review_ordinal) END AS review_recipient
+      FROM leased
+      ${mx ? sql`LEFT JOIN ${sendingConnections(runtime)} pc ON pc.workspace_id = leased.workspace_id AND pc.region = leased.region` : sql``}
+      LEFT JOIN sending_campaign_reviews r ON r.workspace_id = leased.workspace_id AND r.campaign_id = leased.campaign_id AND r.id = leased.review_id
+      ORDER BY leased.tried NULLS FIRST, leased.created_at, leased.id`);
+    if (!rows.length) break;
+
+    let next = 0;
+    const beforeJudged = passed + rejected;
+    try {
+      await Promise.all(Array.from({ length: Math.min(rows.length, HELD_SCREEN_CONCURRENCY) }, async () => {
+        while (next < rows.length) {
+          if (Date.now() >= deadline || consecutiveOutages >= HELD_OUTAGE_ABORT) break;
+          const idx = next++;
+          await processRow(rows[idx]!);
+        }
+      }));
+    } finally {
+      const unattempted = rows.slice(next);
+      if (unattempted.length) {
+        await runtime.db.execute(sql`UPDATE sending_emails e SET lease_until = NULL
+          FROM jsonb_to_recordset(${JSON.stringify(unattempted.map(r => ({ workspace_id: r.workspace_id, id: r.id, dispatch_version: r.dispatch_version })))}::jsonb)
+            AS x(workspace_id text, id text, dispatch_version int)
+          WHERE e.workspace_id = x.workspace_id AND e.id = x.id AND e.dispatch_version = x.dispatch_version
+            AND e.status IN ('queued', 'scheduled') AND NOT e.screened`).catch(() => {});
+      }
+      leased += rows.length - unattempted.length;
+    }
+    if (rows.length < chunkLimit || next < rows.length || passed + rejected === beforeJudged) break;
+  }
+
+  if (leased > 0) await flushScreenObservability(runtime).catch(() => {});
   for (const target of toWake.values()) {
     try { await runtime.dispatch?.(target.region, target.accountId, target.count, target.kind, target.priority, target.maxSendRate); }
     catch { log('warn', { code: 'DISPATCH_WAKE_FAILED', region: target.region, message: 'Screened mail is durable; the dispatcher polls and the scheduler pings it.' }); }
   }
-  return { leased: rows.length, passed, rejected, deferred };
+  const { rows: [backlog] } = await runtime.db.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM sending_emails WHERE status IN ('queued', 'scheduled') AND NOT screened`);
+  const remaining = backlog?.n ?? 0;
+  if (leased > 0 || remaining > 0) {
+    log(remaining > 0 ? 'warn' : 'info', { code: 'HELD_SCREEN_SWEEP', leased, passed, rejected, deferred, remaining, ms: Date.now() - started });
+  }
+  return { leased, passed, rejected, deferred, remaining };
 }
 
 export async function sendSystemEmail(runtime: Runtime, workspaceId: string, mail: { from: string; to: string[]; subject: string; text: string; html?: string; idempotencyKey: string } & ({ standingEvent: string } | { billingNotice: string } | { notice: string })) {
