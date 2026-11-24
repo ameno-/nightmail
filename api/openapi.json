@@ -15874,12 +15874,10 @@
             "type": "string"
           },
           "workspaceName": {
-            "type": "string"
+            "type": "string",
+            "description": "The workspace’s name as plain words, at most 40 characters; empty when nothing of it can be shown."
           },
           "workspaceSlug": {
-            "type": "string"
-          },
-          "inviterName": {
             "type": "string"
           },
           "inviterEmail": {
@@ -15909,7 +15907,6 @@
           "workspaceId",
           "workspaceName",
           "workspaceSlug",
-          "inviterName",
           "inviterEmail",
           "role",
           "expiresAt",
@@ -65174,7 +65171,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Shows the signed-in recipient the invitation they followed (workspace, inviter, role). Read-only; acceptWorkspaceInvitation joins.",
+        "description": "Shows the signed-in recipient the invitation they followed (the workspace’s name as plain words, the inviter’s address, the role). Read-only; acceptWorkspaceInvitation joins.",
         "parameters": [
           {
             "schema": {

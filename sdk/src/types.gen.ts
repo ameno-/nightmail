@@ -5113,9 +5113,11 @@ export type InviteWorkspaceMember = {
 export type WorkspaceInvitationPreview = {
     id: string;
     workspaceId: string;
+    /**
+     * The workspace’s name as plain words, at most 40 characters; empty when nothing of it can be shown.
+     */
     workspaceName: string;
     workspaceSlug: string;
-    inviterName: string;
     inviterEmail: string;
     role: 'owner' | 'admin' | 'member';
     expiresAt: string;

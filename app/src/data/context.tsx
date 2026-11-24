@@ -107,15 +107,16 @@ function invitationError(error: unknown) {
   return `Couldn’t open the invitation. ${errorText(error, 'Try the link again.')}`
 }
 const expiry = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
-// Shown before anything changes: the question, its facts and the two answers. The slug tells apart workspaces that
-// share a name. An account whose only way in is this invitation has no workspace yet (M9): cancelling signs it out
+// Shown before anything changes: the question, its facts and the two answers. The question is the product's own words;
+// the workspace's name comes as plain words (the API's shownName), the inviter is their address, and the slug tells
+// apart workspaces that share a name. An account whose only way in is this invitation has no workspace yet (M9): cancelling signs it out
 // instead, and its button says so.
 function InvitationReview({ invitation, email, firstWorkspace, joining, error, onJoin, onCancel }: { invitation: WorkspaceInvitationPreview; email: string | null; firstWorkspace: boolean; joining: boolean; error: unknown; onJoin: () => void; onCancel: () => void }) {
   return <main className="page-surface"><PageHeader title={productName} /><div className="stack" style={{maxWidth: 520}}>
-    <h2>Join {invitation.workspaceName}?</h2>
+    <h2>Join this workspace?</h2>
     <dl className="invitation-facts">
-      <dt>Workspace</dt><dd><bdi>{invitation.workspaceName}</bdi> <code>{invitation.workspaceSlug}</code></dd>
-      <dt>Invited by</dt><dd><bdi>{invitation.inviterName}</bdi> <code><PrivateAddress value={invitation.inviterEmail} /></code></dd>
+      <dt>Workspace</dt><dd>{invitation.workspaceName ? <><bdi>{invitation.workspaceName}</bdi> </> : null}<code>{invitation.workspaceSlug}</code></dd>
+      <dt>Invited by</dt><dd><code><PrivateAddress value={invitation.inviterEmail} /></code></dd>
       {email ? <><dt>Invited as</dt><dd><bdi><PrivateAddress value={email} /></bdi></dd></> : null}
       <dt>Role</dt><dd>{roleLabel[invitation.role]}</dd>
       <dt>Expires</dt><dd>{expiry.format(new Date(invitation.expiresAt))}</dd>
@@ -216,7 +217,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
       // Joined from the homepage (an invitation link from before it moved to /overview): open the dashboard.
       await switchWorkspace(workspaceId, window.location.pathname === '/' ? '/overview' : undefined)
       clearInvitation()
-      toast(`Joined ${pending.workspaceName}`, 'success')
+      toast(pending.workspaceName ? `Joined ${pending.workspaceName}` : 'Joined the workspace', 'success')
     },
   })
   useEffect(() => {

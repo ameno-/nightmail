@@ -8,7 +8,8 @@ import { addresses, productName } from './brand.js';
 //
 // Words a customer chose (a workspace's name, a campaign's) are shown through shownName, an address through
 // plainAddress and a domain through hostName, and nowhere but where a template puts them. The invitation goes to an
-// address outside the workspace, so its subject is fixed and it names the inviter by address only.
+// address outside the workspace, so every word of it is this file's: it names the inviter by address and the
+// workspace not at all (the page its link opens shows that, through shownName).
 //
 // The jobs that send them: standing.notify (standing.ts), billing.notify (billing/notify.ts) and account.notify
 // (account-notices.ts). scripts/render-notices.ts renders every one in a mail client, for review.
@@ -17,24 +18,30 @@ export type Notice = { subject: string; text: string; html: string };
 type Parts = { subject: string; lines: string[]; action: { label: string; url: string }; why: string };
 
 const escapeHtml = (v: string) => v.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
-const NAME_LENGTH = 40;
+const NAME_LENGTH = 40, PHONE_DIGITS = 7;
 // A word that would read as somewhere to go: an address, a URL, or labels joined by a dot (a host).
 const pointsSomewhere = (word: string) => word.includes('@') || word.includes('://') || /[\p{L}\p{N}][.\u3002][\p{L}\p{N}]/u.test(word);
-// Latin letters beside Cyrillic or Greek ones in one word: letters picked to look like other letters.
-const mixedScripts = (word: string) => /\p{Script=Latin}/u.test(word) && /[\p{Script=Cyrillic}\p{Script=Greek}]/u.test(word);
+// The writing systems a word may be in, one at a time. Latin is its letters only (no click letters, modifier letters or
+// later additions that draw as punctuation); Chinese, Japanese and Korean write one word in several scripts. A word in
+// two of these, or in none (a script whose letters draw as dots, slashes or Latin capitals), is not shown.
+const SCRIPTS = [/^[A-Za-z\u00c0-\u00d6\u00d8-\u00f6\u00f8-\u01bf\u01c4-\u024f\u1e00-\u1eff]+$/, /^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\u30fc]+$/u,
+  ...['Cyrillic', 'Greek', 'Arabic', 'Hebrew', 'Armenian', 'Georgian', 'Devanagari', 'Bengali', 'Gurmukhi', 'Gujarati', 'Tamil', 'Telugu', 'Kannada', 'Malayalam', 'Sinhala', 'Thai', 'Lao', 'Khmer', 'Myanmar', 'Ethiopic']
+    .map(script => new RegExp(`^\\p{Script=${script}}+$`, 'u'))];
+const oneScript = (word: string) => { const letters = word.replace(/[\p{M}\p{Pd}0-9_'’&]+/gu, ''); return !letters || SCRIPTS.some(script => script.test(letters)); };
 /**
- * A name a customer chose (a workspace's, a campaign's) as an account email shows it: a few plain words on one line.
- * Compatibility forms are folded (full-width letters and dots become the ordinary ones), invisible characters go, words
- * that read as an address, a URL or a host, or that mix look-alike scripts, are left out whole, and of the rest only
- * letters, digits, spaces, dashes, underscores, apostrophes and "&" stay, up to NAME_LENGTH characters. '' when
- * nothing is left.
+ * A name a customer chose (a workspace's, a campaign's) as the product shows it in its own voice: a few plain words on
+ * one line. Compatibility forms are folded (full-width letters and dots become the ordinary ones) and invisible
+ * characters go. Words that read as an address, a URL or a host are left out whole. Of the rest only letters, digits,
+ * spaces, dashes, underscores, apostrophes and "&" stay, each word in one writing system (SCRIPTS). A name with enough
+ * digits for a phone number loses every word that has one. At most NAME_LENGTH characters; '' when nothing is left.
  */
 export function shownName(value: string): string {
   const words = value.normalize('NFKC').replace(/\p{Cf}+/gu, '').replace(/[\p{C}\p{Z}]+/gu, ' ').split(' ')
-    .filter(word => !pointsSomewhere(word) && !mixedScripts(word))
+    .filter(word => !pointsSomewhere(word))
     .flatMap(word => word.replace(/[^\p{L}\p{M}\p{N}\p{Pd}_'’&]+/gu, ' ').split(' '))
-    .filter(word => word === '&' || /[\p{L}\p{N}]/u.test(word));
-  const letters = [...words.join(' ')];
+    .filter(word => (word === '&' || /[\p{L}\p{N}]/u.test(word)) && oneScript(word));
+  const phone = (words.join('').match(/\p{N}/gu)?.length ?? 0) >= PHONE_DIGITS;
+  const letters = [...words.filter(word => !phone || !/\p{N}/u.test(word)).join(' ')];
   return letters.length > NAME_LENGTH ? letters.slice(0, NAME_LENGTH).join('').trimEnd() + '…' : letters.join('');
 }
 /** An email address an account email may print: plain ASCII, lowercased, or null. */
@@ -77,7 +84,7 @@ export type NoticeInput =
   | Workspace & { kind: 'receive_hold_soon'; owed: string; since: Date | null; holdAt: Date | null }
   | Workspace & { kind: 'receive_held'; owed: string; since: Date | null }
   | Workspace & { kind: 'credit_expiring'; amount: string; expiresAt: Date | null }
-  | Workspace & { kind: 'invitation'; inviter: { email: string }; role: 'owner' | 'admin' | 'member'; expiresAt: Date; acceptUrl: string }
+  | { kind: 'invitation'; inviter: { email: string }; role: 'owner' | 'admin' | 'member'; expiresAt: Date; acceptUrl: string }
   | { kind: 'waitlist_admitted' };
 export type NoticeKind = NoticeInput['kind'];
 
@@ -158,13 +165,12 @@ export function customerNotice(origin: string, n: NoticeInput): Notice {
       `Nothing changes for your mail. Usage spends the oldest credit first. Whatever is left of this credit ${n.expiresAt ? `on ${day(n.expiresAt)}` : 'then'} leaves the balance and is not refunded.`,
       'There is nothing you need to do. Billing shows the balance.'] });
     case 'invitation': {
-      // To someone outside the workspace: the subject is fixed, the inviter is their address, and the workspace's name
-      // stands in quotes at the end of its sentence. A sign-up without a name has "<local part>'s workspace", which
-      // leaves "workspace": that one is not named.
-      const inviter = plainAddress(n.inviter.email), name = shownName(n.workspace).replace(/^workspace$/i, '');
+      // To someone outside the workspace, so nothing in it is the workspace's to choose: the subject is fixed, the
+      // inviter is their address, and the workspace's name is not here at all. The page the link opens shows it.
+      const inviter = plainAddress(n.inviter.email);
       return notice({ subject: `You are invited to a ${productName} workspace`, action: { label: 'Accept the invitation', url: n.acceptUrl },
         why: `${productName} sent this because ${inviter ?? 'someone'} entered your address. If you were not expecting it, ignore it: nothing happens unless you accept.`, lines: [
-          `${inviter ?? 'Someone'} invited you to join a workspace on ${productName} as ${n.role === 'member' ? 'a member' : `an ${n.role}`}.${name ? ` They call it "${name}".` : ''}`,
+          `${inviter ?? 'Someone'} invited you to join a workspace on ${productName} as ${n.role === 'member' ? 'a member' : `an ${n.role}`}.`,
           `The invitation is for this address only and expires on ${day(n.expiresAt)}.`,
           'To accept, sign in with this address.'] });
     }

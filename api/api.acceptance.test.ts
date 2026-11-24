@@ -1330,7 +1330,12 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
     const joinedByEmail=await login(undefined,link.url), invitee=sessionOf(joinedByEmail);
     assert.equal(landed(joinedByEmail),link.url);
     assert.deepEqual(await attempt(),{acr,provider:null,provider_hd:null,outcome:'signed_in:invitation'});
-    assert.equal((await request(`/v1/workspaces/invitations/${link.id}`,'GET',invitee)).status,200);
+    // The review the dashboard shows before joining: the workspace's name as plain words, the inviter by address.
+    const {rows:[staffNames]}=await db.query('SELECT name FROM workspaces WHERE id=$1',[staffWorkspace]);
+    await db.query('UPDATE workspaces SET name=$2 WHERE id=$1',[staffWorkspace,'Acme, Inc. — call 1 800 555 0199 or see nightmail-dev.example.com/restore']);
+    const review=await request(`/v1/workspaces/invitations/${link.id}`,'GET',invitee), shown=await review.json() as Record<string,unknown>;
+    assert.deepEqual([review.status,shown.workspaceName,'inviterName' in shown,typeof shown.inviterEmail,shown.role,shown.status],[200,'Acme Inc call or see',false,'string','member','pending']);
+    await db.query('UPDATE workspaces SET name=$2 WHERE id=$1',[staffWorkspace,staffNames.name]);
     assert.deepEqual(await (await request(`/v1/workspaces/invitations/${link.id}/accept`,'POST',invitee,{})).json(),{workspaceId:staffWorkspace});
     assert.deepEqual((await db.query("SELECT mailbox_proved,mailbox_proved_at>now()-interval '1 minute' AS fresh FROM nightmail_users WHERE id=$1",[accountOf(joinedByEmail)])).rows[0],{mailbox_proved:address,fresh:true});
     // Accepted, the link is spent: another subject with the same verified address following it is refused.
@@ -25481,7 +25486,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
-  test('account notices: an invitation (only from a workspace with a verified domain or past its evaluation, in fixed words whatever the names), the daily limit, the evaluation\'s end, a lost domain and a waitlist admission are each emailed once; what no longer holds, an exempt workspace and a used-up invitation allowance send nothing; a send that fails is retried and ends failed after its last attempt', async t => {
+  test('account notices: an invitation (only from a workspace with a verified domain or past its evaluation, in fixed words that name the inviter by address and not the workspace), the daily limit, the evaluation\'s end, a lost domain and a waitlist admission are each emailed once; what no longer holds, an exempt workspace and a used-up invitation allowance send nothing; a send that fails is retried and ends failed after its last attempt', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
       const { wid, name, platform, pool, fresh } = await noticeFixture(runtime, db);
       const { accountNotifyJob, domainUnverified, evaluationFinished, limitReached, waitlistAdmitted, INVITATION_EMAILS } = await import('./src/account-notices.js');
@@ -25506,19 +25511,18 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // One with a verified domain does (one past its evaluation: below, where its standing is set).
       await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ('team.example',$1,$1,'verified')`, [wid]);
 
-      // The names in an invitation are the inviting account's to choose, and it goes to an address outside the
-      // workspace from this installation's own sender. So the subject is fixed, the inviter is their address and
-      // nothing else, and of the workspace's name only plain words are shown, in quotes: nothing that reads as a host,
-      // a URL or an address, no look-alike letters, no line of their own, and no more than 40 characters.
+      // An invitation goes to an address outside the workspace from this installation's own sender, and the names
+      // around it are the inviting account's to choose. So every word of it is fixed: the inviter is their verified
+      // address and nothing else, and the workspace is not named (the page its link opens names it).
       const { rows: [inviter] } = await db.query('SELECT name FROM nightmail_users WHERE email=$1', [AUTH_EMAIL]);
       const rename = async (workspace: string, inviter: string) => { await db.query('UPDATE workspaces SET name=$2 WHERE id=$1', [wid, workspace]); await db.query('UPDATE nightmail_users SET name=$2 WHERE email=$1', [AUTH_EMAIL, inviter]); };
-      const pointing = /@|:\/\/|[\p{L}\p{N}][.\u3002\uff0e][\p{L}\p{N}]/u;
-      for (const [i, [workspace, inviter, called]] of ([
-        ['ACTION REQUIRED: your domain is suspended, restore it at nightmail-dev.example.com/restore', 'Quagga Nightmail Security Team (security@nightmail.dev)', 'ACTION REQUIRED your domain is suspended…'],
-        ['Verify now → https://nightmail.dev.evil.example/login\r\nBcc: victim@elsewhere.example', 'Quagga support@nightmail.dev', 'Verify now Bcc'],
-        ['ｎｉｇｈｔｍａｉｌ．ｄｅｖ billing night\u200bmail.dev nightmail\u3002dev \u202egro.liamthgin www.evil.example Nіghtmail <b>team</b>', 'Quagga <no-reply@nightmail.dev>', 'billing b team b'],
-        ['nightmail.dev', 'Quagga', null],
-        ['W'.repeat(120), 'Quagga '.repeat(14), `${'W'.repeat(40)}…`],
+      const literal = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      for (const [i, [workspace, inviter]] of ([
+        ['ACTION REQUIRED: your domain is suspended, restore it at nightmail-dev.example.com/restore', 'Nightmail Security Team (security@nightmail.dev)'],
+        ['Verify now → https://nightmail.dev.evil.example/login\r\nBcc: victim@elsewhere.example', 'support@nightmail.dev'],
+        ['Call 1 800 555 0199 about your invoice', 'Nightmail <no-reply@nightmail.dev>'],
+        ['nightmail-dev\ua4f8example\ua4f8com nightmail-dev\u0660example\u0660com', 'Billing'],
+        ['W'.repeat(120), 'Quagga '.repeat(14)],
       ] as const).entries()) {
         await rename(workspace, inviter);
         const made = await invite(`named-${i}@elsewhere.example`);
@@ -25526,22 +25530,34 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.deepEqual(await deliver(), ['invitation:sent']);
         const [mail] = await fresh();
         assert.deepEqual([mail.subject, mail.from_name, mail.to_addresses], ['You are invited to a Nightmail workspace', 'Nightmail', [`named-${i}@elsewhere.example`]]);
-        assert.ok(mail.text.startsWith(`${AUTH_EMAIL} invited you to join a workspace on Nightmail as an admin.${called === null ? '' : ` They call it "${called}".`}\n\nThe invitation is for this address only`), mail.text);
-        // What a reader sees, in either part, apart from the inviter's address and the link: no address, no URL, no host.
-        const words = mail.html.replace(/<style>.*?<\/style>/s, '').replace(/<[^>]*>/g, ' ').replaceAll('&quot;', '"');
-        for (const part of [mail.text.replace(`Accept the invitation: ${made.acceptUrl}`, ''), words]) {
-          assert.doesNotMatch(part.replaceAll(AUTH_EMAIL, ''), pointing, part);
-          assert.doesNotMatch(part, /Quagga|[\u0000-\u0009\u000b-\u001f\u200b\u202e]|і/, part);
-        }
-        assert.ok(called === null || words.includes(`They call it "${called}".`), words);
+        assert.match(mail.text, new RegExp(`^${literal(`${AUTH_EMAIL} invited you to join a workspace on Nightmail as an admin.\n\nThe invitation is for this address only and expires on `)}[A-Z][a-z]{2} \\d{1,2}${literal(`.\n\nTo accept, sign in with this address.\n\nAccept the invitation: ${made.acceptUrl}\n\nNightmail sent this because ${AUTH_EMAIL} entered your address. If you were not expecting it, ignore it: nothing happens unless you accept.\n`)}$`));
+        // The HTML part says the same words and has one link.
+        const words = mail.html.replace(/<style>.*?<\/style>/s, '').replace(/<[^>]*>/g, '\n').split('\n').map((line: string) => line.trim()).filter(Boolean);
+        assert.deepEqual(words, ['You are invited to a Nightmail workspace', ...mail.text.trim().split(/\n+/).map((line: string) => line.replace(`Accept the invitation: ${made.acceptUrl}`, 'Accept the invitation'))]);
         assert.deepEqual(mail.html.match(/href="[^"]*"/g), [`href="${made.acceptUrl.replaceAll('&', '&amp;')}"`]);
       }
-      // The same rule in the emails a workspace's own owners and admins get: its name and a campaign's.
-      const { customerNotice: written } = await import('./src/notices.js');
+      // The emails a workspace's own owners and admins get do name it, and a campaign: as a few plain words. Nothing
+      // that reads as an address, a URL or a host, each word in one writing system, no phone number, 40 characters.
+      const { customerNotice: written, shownName } = await import('./src/notices.js');
+      for (const [chosen, shown] of [
+        ['ACTION REQUIRED: your domain is suspended, restore it at nightmail-dev.example.com/restore', 'ACTION REQUIRED your domain is suspended…'],
+        ['Verify now → https://nightmail.dev.evil.example/login\r\nBcc: victim@elsewhere.example', 'Verify now Bcc'],
+        ['ｎｉｇｈｔｍａｉｌ．ｄｅｖ billing night\u200bmail.dev nightmail\u3002dev \u202egro.liamthgin www.evil.example Nіghtmail <b>team</b>', 'billing b team b'],
+        // Letters and digits of other scripts that draw as a dot or a slash, or as Latin capitals.
+        ['nightmail-dev\ua4f8example\ua4f8com billing', 'billing'], ['nightmail-dev\u0660example\u0660com billing', 'billing'], ['nightmail\ua78fdev com\u30cerestore ok', 'ok'],
+        ['\ua4e0\ua4f2\ua4d6\ua4e7\ua4d4\ua4df\ua4ee\ua4f2\ua4e1 Support', 'Support'],
+        // A phone number, however it is spaced; a few digits are a name's own.
+        ['Call 1 800 555 0199 about your invoice', 'Call about your invoice'], ['Call +1 (800) 555-0199', 'Call'], ['call18005550199now', ''], ['Call ١٨٠٠٥٥٥٠١٩٩', 'Call'],
+        ['Studio 54', 'Studio 54'], ['Acme 2026 Q4', 'Acme 2026 Q4'],
+        // Names as people write them.
+        ["Ryan Vogel's workspace", "Ryan Vogel's workspace"], ['Café Zoë & Søn – Ünïted', 'Café Zoë & Søn Ünïted'], ['Привет мир', 'Привет мир'], ['日本語のチーム', '日本語のチーム'], ['مرحبا بالعالم', 'مرحبا بالعالم'],
+        ['nightmail.dev', ''], ['W'.repeat(120), `${'W'.repeat(40)}…`],
+      ] as const) assert.equal(shownName(chosen), shown, chosen);
       const pausedCampaign = written(PUBLIC_ORIGIN, { kind: 'campaign_paused', workspace: 'Acme, Inc. (see acme.example)', campaign: { id: 'cmp_1', name: 'Sale\r\nat https://evil.example/now for you@elsewhere.example' } });
       assert.equal(pausedCampaign.subject, 'The campaign "Sale at for" is paused');
       assert.ok(pausedCampaign.text.includes('sent this to the owners and admins of Acme Inc see. To reach us'), pausedCampaign.text);
       assert.equal(written(PUBLIC_ORIGIN, { kind: 'campaign_paused', workspace: 'www.evil.example', campaign: { id: 'cmp_1', name: 'evil.example' } }).subject, 'A campaign is paused');
+      assert.equal(written(PUBLIC_ORIGIN, { kind: 'paused', workspace: 'Call 1 800 555 0199 nightmail-dev\ua4f8example\ua4f8com' }).subject, 'Sending is paused for Call');
       assert.equal(written(PUBLIC_ORIGIN, { kind: 'paused', workspace: 'www.evil.example' }).subject, 'Sending is paused for your workspace');
       assert.equal(written(PUBLIC_ORIGIN, { kind: 'domain_unverified', workspace: 'W', domain: { id: 'dom_1', name: 'Mail.Example\r\nBcc: x@y.example' } }).subject, 'A domain is no longer verified');
       assert.equal(written(PUBLIC_ORIGIN, { kind: 'domain_unverified', workspace: 'W', domain: { id: 'dom_1', name: 'Mail.Example' } }).subject, 'mail.example is no longer verified');
@@ -25561,7 +25577,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const [invitation] = await fresh();
       assert.deepEqual([invitation.from_address, invitation.to_addresses, invitation.kind], ['notices@platform.example', ['teammate@elsewhere.example'], 'transactional']);
       assert.equal(invitation.subject, 'You are invited to a Nightmail workspace');
-      for (const part of [`${AUTH_EMAIL} invited you to join a workspace on Nightmail as an admin. They call it "${name}".`, 'The invitation is for this address only and expires on ', `\nAccept the invitation: ${invited.acceptUrl}\n`, `because ${AUTH_EMAIL} entered your address`, 'nothing happens unless you accept']) assert.ok(invitation.text.includes(part), part);
+      for (const part of [`${AUTH_EMAIL} invited you to join a workspace on Nightmail as an admin.\n`, 'The invitation is for this address only and expires on ', `\nAccept the invitation: ${invited.acceptUrl}\n`, `because ${AUTH_EMAIL} entered your address`, 'nothing happens unless you accept']) assert.ok(invitation.text.includes(part), part);
       assert.ok(invitation.html.includes(`href="${invited.acceptUrl.replaceAll('&', '&amp;')}"`));
       // It dispatches under its own origin, as a standing notice does; nothing else may use that origin.
       await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)

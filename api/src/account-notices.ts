@@ -182,7 +182,7 @@ function noticeOf(row: Row, origin: string): { to: string[]; input: NoticeInput 
     case 'evaluation_finished': return row.exempt || held ? null : { to: row.recipients, input: { kind: 'evaluation_finished', workspace, limited: row.data.limited === true } };
     case 'invitation': {
       const i = row.invitation;
-      return i && { to: [i.email], input: { kind: 'invitation', workspace, inviter: { email: i.inviterEmail }, role: i.role, expiresAt: new Date(i.expiresAt),
+      return i && { to: [i.email], input: { kind: 'invitation', inviter: { email: i.inviterEmail }, role: i.role, expiresAt: new Date(i.expiresAt),
         acceptUrl: `${origin}/overview?invitation=${encodeURIComponent(String(row.data.invitationId))}` } };
     }
     case 'waitlist_admitted': return typeof row.data.email === 'string' ? { to: [row.data.email], input: { kind: 'waitlist_admitted' } } : null;
