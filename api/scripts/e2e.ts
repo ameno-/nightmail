@@ -444,13 +444,20 @@ async function batch() {
     step('SES complaint feedback', () => outcome(data[1].id, complaint, 'complained')),
   ]);
   if (destructive) {
-    const page = await api('listContacts', {query:{ email:bounce, suppressed:'true' }});
-    check(page.data.length === 1 && page.data[0].email === bounce && page.data[0].suppressed,'permanent SES bounce did not suppress this contact');
-    const replay = await api('sendEmail', {body:message(bounce), headers:idKey('post-bounce')});
-    const blocked = await until('local suppression before SES',()=>api('getEmail',{path:{id:replay.id}}), row=>{
-      check(!row.providerId && ['queued','attempting','suppressed'].includes(row.status),'suppressed recipient reached SES'); return row.status === 'suppressed';
-    },row=>row.status);
-    check(blocked.to[0] === bounce && !blocked.simulated,'wrong suppressed recipient');
+    const page = await api('listContacts', { query: { email: bounce, suppressed: 'true' } });
+    check(page.data.length === 1 && page.data[0].email === bounce && page.data[0].suppressed, 'permanent SES bounce did not suppress this contact');
+    // Suppression is enforced synchronously at accept time: neither a single send nor an all-or-nothing batch containing
+    // the suppressed recipient enters sending_emails.
+    await expectDenial(() => api('sendEmail', { body: message(bounce), headers: idKey('post-bounce') }), 422, 'RECIPIENT_INELIGIBLE');
+    const batchRefusedSubject = `${subject}-suppressed-batch`;
+    await expectDenial(() => api('sendEmailBatch', {
+      body: { emails: [{ ...message(singleSuccess), subject: batchRefusedSubject }, { ...message(bounce), subject: batchRefusedSubject }] },
+      headers: idKey('post-bounce-batch'),
+    }), 422, 'RECIPIENT_INELIGIBLE');
+    const bounceLogs = await api('listEmails', { query: { search: bounce, region } });
+    check(bounceLogs.data.length === 1 && bounceLogs.data[0]!.id === data[0]!.id, 'suppressed recipient queued a second email');
+    const refusedBatchLogs = await api('listEmails', { query: { search: batchRefusedSubject, region } });
+    check(refusedBatchLogs.data.length === 0, 'all-or-nothing suppressed batch queued a sibling email');
   }
 }
 
