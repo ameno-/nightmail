@@ -29113,6 +29113,145 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  test('domain setup reminder: a domain still pending an hour after it was added has its DNS checked in the background (shown on reads), and with DOMAIN_SETUP_REMINDER on its owners are emailed once which records are missing and where its DNS is hosted; never twice, not for a domain that verified, not with the flag off', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const { wid, fresh } = await noticeFixture(runtime, db);
+      const { accountNotifyJob } = await import('./src/account-notices.js');
+      const { domainSetupTick, domainSetupCheckJob } = await import('./src/domain-setup.js');
+      // A new sign-up's domain: its ownership TXT and three DKIM CNAMEs, added `age` ago.
+      const add = async (label: string, age: string) => {
+        const name = `${unique(label)}.example`, tokens = ['tokena', 'tokenb', 'tokenc'];
+        const identity = { proven: false, mx: null, note: null, ses: { VerificationStatus: 'PENDING', VerifiedForSendingStatus: false,
+          DkimAttributes: { SigningEnabled: true, Status: 'PENDING', Tokens: tokens, SigningAttributesOrigin: 'AWS_SES', SigningHostedZone: 'dkim.amazonses.com' } } };
+        const { token } = (await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state,receiving_state,ever_proven,identity,created_at)
+          VALUES ($1,$2,$2,'pending','off',false,$3,now()-$4::interval) RETURNING token`, [name, wid, JSON.stringify(identity), age])).rows[0];
+        const id = unique('dom');
+        await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES ($1,$2,$3,$4)', [id, wid, name, REGION]);
+        return { name, token: token as string, id };
+      };
+      // Public DNS: each zone on Cloudflare's nameservers, with DKIM 1 and 2 published and the TXT and DKIM 3 not.
+      const networkGuard = globalThis.fetch;
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = new URL(String(input)); assert.equal(url.hostname, 'cloudflare-dns.com');
+        const type = url.searchParams.get('type')!, host = url.searchParams.get('name')!;
+        if (type === 'NS') return Response.json({ Status: 0, Answer: ['ada', 'bob'].map(ns => ({ name: `${host}.`, type: 2, data: `${ns}.ns.cloudflare.com.` })) });
+        const dkim = /^(token[ab])\._domainkey\./.exec(host);
+        if (type === 'CNAME' && dkim) return Response.json({ Status: 0, Answer: [{ name: `${host}.`, type: 5, data: `${dkim[1]}.dkim.amazonses.com.` }] });
+        return Response.json({ Status: 3 });
+      };
+      try {
+        const check = async (domain: { id: string; token: string }) => domainSetupCheckJob(runtime, { domainId: domain.id, token: domain.token }, { id: `domain.setupCheck:${domain.token}`, attempts: 1, workspaceId: wid });
+        const notices = async () => (await db.query(`SELECT data->>'name' AS name,status FROM account_notices WHERE workspace_id=$1 AND kind='domain_setup' ORDER BY created_at`, [wid])).rows;
+        const deliver = async () => {
+          const jobs = (await db.query(`SELECT j.id,j.payload FROM jobs j WHERE j.type='account.notify' AND j.status='pending' AND j.workspace_id=$1`, [wid])).rows;
+          for (const j of jobs) { for (let i = 0; i < 2; i++) await accountNotifyJob(runtime, j.payload, { id: j.id, attempts: i + 1, workspaceId: wid }); await db.query(`UPDATE jobs SET status='completed' WHERE id=$1`, [j.id]); }
+          return (await db.query(`SELECT kind,status FROM account_notices WHERE id=ANY($1)`, [jobs.map(j => j.payload.noticeId)])).rows.map(r => `${r.kind}:${r.status}`);
+        };
+
+        // Off (the default): the tick queues a check for the domain an hour old, not the one added half an hour ago, and the
+        // check stores what DNS showed, which reads carry, but no email is queued.
+        assert.equal(runtime.config.domainSetupReminder, false);
+        const stuck = await add('stuck', '2 hours'), recent = await add('recent', '30 minutes');
+        await domainSetupTick(runtime);
+        assert.deepEqual((await db.query(`SELECT id FROM jobs WHERE type='domain.setupCheck' AND workspace_id=$1`, [wid])).rows.map(r => r.id), [`domain.setupCheck:${stuck.token}`]);
+        await check(stuck);
+        const read = ok(await local('GET', `/v1/domains/${stuck.id}`));
+        assert.deepEqual(read.dnsHost, { name: 'Cloudflare', zone: stuck.name, url: `https://dash.cloudflare.com/?to=/:account/${stuck.name}/dns/records` });
+        assert.deepEqual(read.dns.filter((r: Json) => r.purpose === 'sending').map((r: Json) => [r.type, r.name.split('.')[0], r.publicDns?.state]),
+          [['CNAME', 'tokena', 'found'], ['CNAME', 'tokenb', 'found'], ['CNAME', 'tokenc', 'missing'], ['TXT', '_nightmail', 'missing']]);
+        assert.equal(ok(await local('GET', `/v1/domains/${recent.id}`)).dnsHost, undefined, 'A domain added within the hour is not checked, so its reads carry nothing.');
+        assert.ok(ok(await local('GET', '/v1/domains')).data.find((d: Json) => d.id === stuck.id).dnsHost, 'The list carries it too (Overview reads it).');
+        assert.deepEqual(await notices(), []);
+
+        // On: the next check queues the one email, and checks after it queue nothing more.
+        runtime.config.domainSetupReminder = true;
+        await check(stuck); await check(stuck);
+        assert.deepEqual(await notices(), [{ name: stuck.name, status: 'pending' }]);
+        assert.deepEqual(await deliver(), ['domain_setup:sent']);
+        const [mail] = await fresh();
+        assert.deepEqual([mail.subject, mail.to_addresses, mail.kind], [`Finish setting up ${stuck.name}`, [AUTH_EMAIL], 'transactional']);
+        for (const part of [`${stuck.name} was added over an hour ago, but public DNS doesn’t have 2 of its 4 records yet.`, 'Its DNS is hosted at Cloudflare. Add these records there:',
+          'CNAME record\nName: tokenc._domainkey\nValue: tokenc.dkim.amazonses.com', `TXT record\nName: _nightmail\nValue: ${stuck.token}`,
+          `Open Cloudflare DNS: https://dash.cloudflare.com/?to=/:account/${stuck.name}/dns/records`, `Open the domain: ${PUBLIC_ORIGIN}/domains/${stuck.id}`]) assert.ok(mail.text.includes(part), part);
+        assert.doesNotMatch(`${mail.subject}\n${mail.text}`, HOW_IT_WORKS);
+        await check(stuck);
+        assert.equal((await notices()).length, 1, 'Once per domain.');
+
+        // Another domain of the same workspace waits a day (one reminder a day per workspace), and one that verified before
+        // its email went is not told.
+        const second = await add('second', '3 hours');
+        await check(second);
+        assert.equal((await notices()).length, 1);
+        await db.query(`UPDATE account_notices SET created_at=created_at-interval '25 hours' WHERE workspace_id=$1 AND kind='domain_setup'`, [wid]);
+        await check(second);
+        await db.query(`UPDATE domain_claims SET sending_state='verified',ever_proven=true WHERE workspace_id=$1 AND name=$2`, [wid, second.name]);
+        assert.deepEqual(await deliver(), ['domain_setup:suppressed']);
+        // Nor is one verified before the check: it is neither checked nor told.
+        const verified = await add('verified', '2 hours');
+        await db.query(`UPDATE domain_claims SET sending_state='verified',ever_proven=true WHERE workspace_id=$1 AND name=$2`, [wid, verified.name]);
+        await db.query(`UPDATE account_notices SET created_at=created_at-interval '25 hours' WHERE workspace_id=$1 AND kind='domain_setup'`, [wid]);
+        await check(verified);
+        assert.equal((await db.query('SELECT setup_check FROM domain_claims WHERE workspace_id=$1 AND name=$2', [wid, verified.name])).rows[0].setup_check, null);
+        // Off again, a stuck domain is checked but nobody is emailed.
+        runtime.config.domainSetupReminder = false;
+        const quiet = await add('quiet', '2 hours');
+        await check(quiet);
+        assert.deepEqual((await notices()).map(n => n.name), [stuck.name, second.name]);
+        assert.deepEqual((await fresh()).map(r => r.subject), []);
+      } finally { globalThis.fetch = networkGuard; }
+    });
+  });
+
+  test('no-domain reminder: a workspace with no domain an hour after it was created is emailed once to add one, only with NO_DOMAIN_REMINDER on; not one created within the hour or days ago, not one with a domain, not one that adds a domain before the email goes', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { fresh } = await noticeFixture(runtime, db);
+      const { accountNotifyJob } = await import('./src/account-notices.js');
+      const { domainSetupTick } = await import('./src/domain-setup.js');
+      const { rows: [owner] } = await db.query('SELECT id FROM nightmail_users WHERE email=$1', [AUTH_EMAIL]);
+      // A workspace created `age` ago, owned by the fixture's verified user.
+      const workspace = async (age: string, domain = false) => {
+        const id = unique('nodomain');
+        await db.query(`INSERT INTO workspaces(id,name,slug,created_at) VALUES ($1,'Pine Studio',$1,now()-$2::interval)`, [id, age]);
+        await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner')`, [randomUUID(), id, owner.id]);
+        if (domain) await db.query(`INSERT INTO domain_claims(name,workspace_id,sending_state) VALUES ($1,$2,'pending')`, [`${id}.example`, id]);
+        return id;
+      };
+      // The tick is elected every five minutes; each call here is a new election.
+      const tick = async () => { await db.query(`DELETE FROM job_schedule WHERE workspace_id='maintenance:domain-setup'`); await domainSetupTick(runtime); };
+      const notices = async (ids: string[]) => (await db.query(`SELECT workspace_id,status FROM account_notices WHERE kind='no_domain' AND workspace_id=ANY($1) ORDER BY workspace_id`, [ids])).rows;
+      const deliver = async (ids: string[]) => {
+        const jobs = (await db.query(`SELECT j.id,j.payload,j.workspace_id FROM jobs j WHERE j.type='account.notify' AND j.status='pending' AND j.workspace_id=ANY($1)`, [ids])).rows;
+        for (const j of jobs) { for (let i = 0; i < 2; i++) await accountNotifyJob(runtime, j.payload, { id: j.id, attempts: i + 1, workspaceId: j.workspace_id }); await db.query(`UPDATE jobs SET status='completed' WHERE id=$1`, [j.id]); }
+        return (await db.query(`SELECT kind,status FROM account_notices WHERE id=ANY($1)`, [jobs.map(j => j.payload.noticeId)])).rows.map(r => `${r.kind}:${r.status}`);
+      };
+      const idle = await workspace('2 hours'), recent = await workspace('30 minutes'), old = await workspace('5 days'), started = await workspace('2 hours', true);
+      const all = [idle, recent, old, started];
+
+      // Off (the default): nothing is queued.
+      assert.equal(runtime.config.noDomainReminder, false);
+      await tick();
+      assert.deepEqual(await notices(all), []);
+      // On: the workspace an hour old with no domain is told, once however often the tick runs.
+      runtime.config.noDomainReminder = true;
+      await tick(); await tick();
+      assert.deepEqual(await notices(all), [{ workspace_id: idle, status: 'pending' }]);
+      assert.deepEqual(await deliver(all), ['no_domain:sent']);
+      const [mail] = await fresh();
+      assert.deepEqual([mail.subject, mail.to_addresses, mail.kind], ['Add your domain to start sending', [AUTH_EMAIL], 'transactional']);
+      assert.equal(mail.text, `Pine Studio was created over an hour ago, but it has no domain yet.\n\nNightmail sends from your own domain, so nothing can be sent until you add one.\n\nIt takes about 5 minutes: add the domain, then copy the records it lists to where its DNS is hosted.\n\nAdd your domain: ${PUBLIC_ORIGIN}/domains\n\nNightmail sends this once, to the owners and admins of Pine Studio. To reach us, write to support@nightmail.dev.\n`);
+      assert.doesNotMatch(`${mail.subject}\n${mail.text}`, HOW_IT_WORKS);
+      await tick();
+      assert.equal((await notices(all)).length, 1, 'Once per workspace.');
+      // One that adds a domain before its email goes is not told.
+      const late = await workspace('3 hours');
+      await tick();
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,sending_state) VALUES ($1,$2,'pending')`, [`${late}.example`, late]);
+      assert.deepEqual(await deliver([late]), ['no_domain:suppressed']);
+      assert.deepEqual((await fresh()).map(r => r.subject), []);
+      runtime.config.noDomainReminder = false;
+    });
+  });
+
   test('security admission: signature and key checks precede DB lookup and body reads respectively',async t=>{
     await simulatedSesFixture(t,async({db,runtime,local})=>{
       const {createApp}=await import('./src/app.js'),app=createApp();

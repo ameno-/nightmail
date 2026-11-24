@@ -2223,7 +2223,7 @@ export type DomainReadiness = {
         status: 'pending' | 'verified';
         note?: string;
         /**
-         * verifyDomain only, for pending sending and MAIL FROM records: what public DNS (Cloudflare 1.1.1.1, answers cached up to 30 seconds) shows for this record now. Null when DNS did not answer in time; absent on other reads and records.
+         * For pending sending and MAIL FROM records: what public DNS (Cloudflare 1.1.1.1) shows for this record. verifyDomain looks it up now (answers cached up to 30 seconds). Other reads show the last background check, which runs every 15 to 60 minutes for a Hosted domain still pending an hour after it was added. Null when DNS did not answer in time; absent before any check and on other records.
          */
         publicDns?: {
             /**
@@ -2237,6 +2237,23 @@ export type DomainReadiness = {
             checkedAt: string;
         } | null;
     }>;
+    /**
+     * Where this domain’s DNS is hosted, from its zone’s NS records, alongside publicDns: null when the provider is not one Nightmail recognizes.
+     */
+    dnsHost?: {
+        /**
+         * The provider, e.g. Cloudflare, Vercel, Route 53, GoDaddy or Namecheap.
+         */
+        name: string;
+        /**
+         * The zone it hosts, which record names are relative to there.
+         */
+        zone: string;
+        /**
+         * The provider's DNS page for the zone, when it has a known address.
+         */
+        url: string | null;
+    } | null;
     /**
      * Hosted only: when this domain is released if its records are still unproven (72 hours after it was added). Null once ownership has been proven.
      */

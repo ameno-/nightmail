@@ -19,6 +19,8 @@ import { composer } from '../campaigns/composer-chunk'
 import { DailyLimit, SetupRail, useSendingLimitPending, useSetupSteps } from './setup'
 import { useCompactShell, useMediaQuery } from '../../lib/media'
 import { setPanelHidden, usePanelHidden } from './panel'
+import { DomainSetupAlert } from '../settings/domain-setup-alert'
+import { NO_DOMAIN_SPACE, NoDomainCard, useNoDomainCard } from './no-domain'
 
 // Overview: is sending healthy? The range and stream over the figures they filter; four figure tiles, each a link to
 // that mail in Logs; the activity chart; and the latest emails, failures first (down to the card's bottom) on the
@@ -55,9 +57,12 @@ export function OverviewPage() {
   const setup = useSetupSteps()
   const detail = useDetail(setup, Boolean(recent.data || recent.isError))
   const held = stacked && setup.loading
+  const noDomain = useNoDomainCard(setup.hasDomain)
+  // The card leads with Add domain, so the setup steps' own domain step doesn't offer it again beside it.
+  const rail = noDomain ? withoutDomainAction(setup) : setup
   // Latest emails and the figures above it must agree: when a new email (or a new outcome for one) shows in the list,
   // the figures are read again (unless metrics already failed, so we never hammer an over-budget query).
-  const count = useLatestRowCount()
+  const count = useLatestRowCount(noDomain ? NO_DOMAIN_SPACE : 0)
   // A stream picked in the header scopes Latest emails too: its sent mail (received mail has no stream).
   const latestParams = latestRequest(regionId, stream)
   const latest = useApiDef(queries.logs(latestParams), { interval: 60_000, keepPrevious: sameRegion(regionId) })
@@ -71,7 +76,9 @@ export function OverviewPage() {
     <PageHeader title="Overview" actions={<>{controls}<PanelToggle /></>} />
     <div className="ov-split">
       <div className="ov-split__main">
-        {stacked && setup.steps && <SetupRail steps={setup.steps} current={setup.current} open={setup.open} />}
+        {noDomain && <NoDomainCard />}
+        {stacked && setup.stuck && <DomainSetupAlert domain={setup.stuck.domain} gap={setup.stuck.gap} />}
+        {stacked && rail.steps && <SetupRail steps={rail.steps} current={rail.current} open={rail.open} />}
         {stacked && setup.error ? <ErrorState error={setup.error} onRetry={setup.retry} /> : null}
         <Fragment key={held ? 'held' : 'ready'}>
           {query.isError && !data ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
@@ -82,11 +89,17 @@ export function OverviewPage() {
           {!stacked && latestEmails}
         </Fragment>
       </div>
-      <Aside setup={setup} detail={detail} showSetup={!stacked} placeholder={!stacked} campaigns={recent.data?.items} range={range} />
+      <Aside setup={rail} detail={detail} showSetup={!stacked} placeholder={!stacked} campaigns={recent.data?.items} range={range} />
       {/* Under the detail column, once that column has its final height (its own reads and the figures' campaigns). */}
       {stacked && detail.ready && (data || query.isError) ? latestEmails : null}
     </div>
   </>
+}
+
+function withoutDomainAction(setup: ReturnType<typeof useSetupSteps>) {
+  if (!setup.steps) return setup
+  const same = new Map(setup.steps.map(step => [step, step.key === 'domain' ? { ...step, action: undefined } : step]))
+  return { ...setup, steps: setup.steps.map(step => same.get(step)!), current: setup.current && same.get(setup.current), open: setup.open?.map(step => same.get(step)!) }
 }
 
 // What the detail column shows, and whether all of it is known (the page also waits on this to place the list under it).
@@ -123,6 +136,7 @@ function Aside({ setup, detail: { score, next, ready }, showSetup, placeholder, 
   }, [ready, hash, key])
   return <aside id="overview-panel" className="ov-split__aside" aria-label="Status">{!ready ? placeholder && <AsideSkeleton /> : <>
     {score.data && <StandingCard report={score.data} />}
+    {showSetup && setup.stuck && <section aria-label="Domain setup"><DomainSetupAlert domain={setup.stuck.domain} gap={setup.stuck.gap} /></section>}
     {showSetup && setup.steps && <SetupRail steps={setup.steps} current={setup.current} open={setup.open} />}
     {showSetup && setup.error ? <ErrorState error={setup.error} onRetry={setup.retry} /> : null}
     {compact ? null : score.isError && !score.data ? <ErrorState error={score.error} onRetry={() => score.refetch()} /> : !multiTenant && <SidebarScore />}

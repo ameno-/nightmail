@@ -7225,7 +7225,7 @@
                     "values",
                     "checkedAt"
                   ],
-                  "description": "verifyDomain only, for pending sending and MAIL FROM records: what public DNS (Cloudflare 1.1.1.1, answers cached up to 30 seconds) shows for this record now. Null when DNS did not answer in time; absent on other reads and records."
+                  "description": "For pending sending and MAIL FROM records: what public DNS (Cloudflare 1.1.1.1) shows for this record. verifyDomain looks it up now (answers cached up to 30 seconds). Other reads show the last background check, which runs every 15 to 60 minutes for a Hosted domain still pending an hour after it was added. Null when DNS did not answer in time; absent before any check and on other records."
                 }
               },
               "required": [
@@ -7236,6 +7236,35 @@
                 "status"
               ]
             }
+          },
+          "dnsHost": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "The provider, e.g. Cloudflare, Vercel, Route 53, GoDaddy or Namecheap."
+              },
+              "zone": {
+                "type": "string",
+                "description": "The zone it hosts, which record names are relative to there."
+              },
+              "url": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The provider's DNS page for the zone, when it has a known address."
+              }
+            },
+            "required": [
+              "name",
+              "zone",
+              "url"
+            ],
+            "description": "Where this domain’s DNS is hosted, from its zone’s NS records, alongside publicDns: null when the provider is not one Nightmail recognizes."
           },
           "releasesAt": {
             "type": [
@@ -38181,7 +38210,7 @@
     "/v1/domains/{id}/verify": {
       "post": {
         "operationId": "verifyDomain",
-        "description": "On MX, request a background verification and return the current stored status, with what public DNS shows now for each pending sending and MAIL FROM record (dns[].publicDns), so a missing or mistyped record can be named. Read the domain again for updates.",
+        "description": "On MX, request a background verification and return the current stored status, with what public DNS shows now for each pending sending and MAIL FROM record (dns[].publicDns), so a missing or mistyped record can be named, and where the domain's DNS is hosted (dnsHost). Read the domain again for updates.",
         "tags": [
           "Domains"
         ],
