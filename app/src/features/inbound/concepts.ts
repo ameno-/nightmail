@@ -40,7 +40,7 @@ export const kindNote = {
 } as const
 
 export const outcomes = {
-  store: 'Stored, no inbox',
+  store: 'Stored 30 days, no inbox',
   drop: 'Dropped',
   create_address: 'New address per recipient',
 } as const

@@ -27419,6 +27419,49 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     }finally{await writer.query('ROLLBACK');}
     assert.deepEqual(await state(),before);
   });
+  test('mail_unrouted retention: 29-day unrouted mail survives, 31-day unrouted mail and storage objects leave, and inbox-claimed mail is untouched',async t=>{
+    await simulatedSesFixture(t,async({db,runtime})=>{
+      const {cleanup}=await import('./src/maintenance.js');
+      const wid=runtime.config.workspaceId,dom=unique('mdom'),host=wid+'.invalid',box=unique('mbx');
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')",[dom,wid,host,REGION]);
+      await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind) VALUES($1,$2,$3,$4,'address')",[box,wid,dom,'claimed@'+host]);
+      const mk=async(label:string,daysAgo:number,opts:{attached?:boolean;bucket?:string}={})=>{
+        const tid=unique('thr'),mid=unique('msg'),aid=unique('matt'),bkt=opts.bucket??'r2:fixture-r2';
+        const at=`now() - interval '${daysAgo} days'`;
+        await db.query(`INSERT INTO mail_threads(id,workspace_id,subject,message_count,last_message_at,created_at) VALUES($1,$2,$3,1,${at},${at})`,[tid,wid,label]);
+        await db.query(`INSERT INTO mail_messages(id,workspace_id,thread_id,direction,region,subject,from_address,snippet,received_at,created_at,size_bytes,raw_bucket,raw_key,lifecycle) VALUES($1,$2,$3,'inbound',$4,$5,'ext@example.invalid',$5,${at},${at},512,$7,$6,'default')`,[mid,wid,tid,REGION,label,`d/${wid}/${mid}.eml`,bkt]);
+        await db.query(`INSERT INTO mail_attachments(id,workspace_id,message_id,filename,content_type,size_bytes,disposition,sha256,bucket,storage_key) VALUES($1,$2,$3,'doc.txt','text/plain',16,'attachment','00',$5,$4)`,[aid,wid,mid,`a/${wid}/${mid}/b1/${aid}`,bkt]);
+        await db.query(`INSERT INTO mail_unrouted(workspace_id,message_id,address,created_at) VALUES($1,$2,$3,${at})`,[wid,mid,`${label}@${host}`]);
+        if(opts.attached)await db.query(`INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,read,received_at) VALUES($1,$2,$3,$4,'inbound',false,${at})`,[box,mid,wid,tid]);
+        return {tid,mid,aid,rawKey:`d/${wid}/${mid}.eml`,attKey:`a/${wid}/${mid}/b1/${aid}`};
+      };
+      const fresh=await mk('fresh29',29);
+      const stale=await mk('stale31',31);
+      const staleS3=await mk('stales3',31,{bucket:'pool-s3-bucket'});
+      const claimed=await mk('claimed31',31,{attached:true});
+      await cleanup(runtime);
+      // 29-day unrouted mail survives completely
+      assert.equal((await db.query('SELECT FROM mail_unrouted WHERE message_id=$1',[fresh.mid])).rowCount,1,'29-day unrouted row survives');
+      assert.equal((await db.query('SELECT FROM mail_messages WHERE id=$1',[fresh.mid])).rowCount,1,'29-day mail_messages survives');
+      assert.equal((await db.query('SELECT FROM mail_attachments WHERE id=$1',[fresh.aid])).rowCount,1,'29-day attachment survives');
+      assert.equal((await db.query('SELECT FROM mail_threads WHERE id=$1',[fresh.tid])).rowCount,1,'29-day thread survives');
+      // 31-day unrouted mail is removed along with message, attachment, thread, and storage delete job
+      assert.equal((await db.query('SELECT FROM mail_unrouted WHERE message_id=$1',[stale.mid])).rowCount,0,'31-day unrouted row deleted');
+      assert.equal((await db.query('SELECT FROM mail_messages WHERE id=$1',[stale.mid])).rowCount,0,'31-day unreferenced mail_messages deleted');
+      assert.equal((await db.query('SELECT FROM mail_attachments WHERE id=$1',[stale.aid])).rowCount,0,'31-day attachment row deleted');
+      assert.equal((await db.query('SELECT FROM mail_threads WHERE id=$1',[stale.tid])).rowCount,0,'31-day empty thread deleted');
+      assert.equal((await db.query('SELECT FROM mail_messages WHERE id=$1',[staleS3.mid])).rowCount,0,'31-day S3 unrouted mail_messages deleted');
+      assert.equal((await db.query('SELECT FROM mail_threads WHERE id=$1',[staleS3.tid])).rowCount,0,'31-day S3 empty thread deleted');
+      const delKeys=(await db.query("SELECT payload->'keys' AS keys FROM jobs WHERE workspace_id=$1 AND type='mail.deleteObjects'",[wid])).rows.flatMap((r:Json)=>r.keys as string[]);
+      assert.ok(delKeys.includes(stale.rawKey)&&delKeys.includes(stale.attKey),`R2 raw and attachment storage keys queued for deletion: ${JSON.stringify(delKeys)}`);
+      assert.ok(!delKeys.includes(staleS3.rawKey)&&!delKeys.includes(staleS3.attKey),'S3 objects are left to the bucket lifecycle, never queued for mail.deleteObjects');
+      // 31-day row whose message IS attached to an inbox: only stale mail_unrouted row leaves; message, attachment & storage untouched!
+      assert.equal((await db.query('SELECT FROM mail_unrouted WHERE message_id=$1',[claimed.mid])).rowCount,0,'stale unclaimed recipient row removed');
+      assert.equal((await db.query('SELECT FROM mail_messages WHERE id=$1',[claimed.mid])).rowCount,1,'inbox-attached message preserved');
+      assert.equal((await db.query('SELECT FROM mail_attachments WHERE id=$1',[claimed.aid])).rowCount,1,'inbox-attached attachment preserved');
+      assert.ok(!delKeys.includes(claimed.rawKey)&&!delKeys.includes(claimed.attKey),'inbox-attached storage objects never queued for deletion');
+    });
+  });
   test('claimUnrouted: batched inline + background drain matches legacy loop across multi-address, plus-tags, interruption, concurrent arrival and address mutation',async t=>{
     await simulatedSesFixture(t,async({db,runtime,local})=>{
       const {attachToMailboxes,CLAIM_UNROUTED_INLINE,drainClaimUnrouted}=await import('./src/mailbox-store.js');
