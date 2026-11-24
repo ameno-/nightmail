@@ -2,22 +2,21 @@ import { getTableColumns, sql, type SQL } from 'drizzle-orm';
 import type { Attachment, SESv2Client, SendEmailCommandInput } from '@aws-sdk/client-sesv2';
 import { ApiError, getSes, isSimulatedSes, rowId, lazyModule, log, logError, ModuleLoadError, preloadSesTransport, wrapModuleLoad, type Actor, type DbExecutor, type Runtime } from './core.js';
 import { attachments, emails, type EmailSnapshot, type EmailStatus, type CampaignDraft, type ReviewedRecipient } from './db/sending.js';
-import { approvedOriginUser, campaignVerdicts, checkedDispatchAttachments, customerCredits, formattedSender, inlineMessage, materializeCampaignEmail, originAllowed, publicEventType, QUOTA_REFRESH_MS, queueSimulatedFeedback, rank, sesDailyReserve, sizeCheck, statusForEvent, terminalColumns, terminalEvents, verifiedAttachment } from './sending.js';
+import { approvedOriginUser, checkedDispatchAttachments, customerCredits, formattedSender, inlineMessage, materializeCampaignEmail, originAllowed, publicEventType, QUOTA_REFRESH_MS, queueSimulatedFeedback, rank, sesDailyReserve, sizeCheck, statusForEvent, terminalColumns, terminalEvents, verifiedAttachment } from './sending.js';
 import { receivingPolicy } from './mailbox-ingest-input.js';
 import { tieAllows } from './approval-ties.js';
 import { principal } from './mail-gateway.js';
 import { regionalSender, sendingConnections, verifiedClaim } from './domain-claims.js';
 import { claimsOnly } from './send-scope.js';
 import { heldStream, probationReason } from './hosted-sending.js';
-import { countScreened, finishCampaigns, pauseCampaign, reopenQueuedCampaigns, type TenantState } from './states.js';
+import { finishCampaigns, pauseCampaign, reopenQueuedCampaigns, type TenantState } from './states.js';
 import { credentialFingerprint, discoveryTarget } from './ses-region-state.js';
 import { mxResourceName, POOL_INSTALLATION, setupResources } from './ses-setup.js';
 import { forDelivery, type ReadyConnection } from './provider-credentials.js';
 import { wakeWebhooks } from './jobs.js';
 import { shareFullAlert } from './operator-alerts.js';
-import { copyKey, screenSnapshot, ScreenHandover, type CampaignScreen, type ScreenCall } from './screen.js';
-import { flushScreenCalls, outbound } from './screen-calls.js';
-import { flushShadow } from './screen-shadow.js';
+import type { CampaignScreen } from './screen.js';
+import { outbound } from './screen-calls.js';
 import { SEND_LIMITS } from './send-limits.js';
 import { SesBodyError } from './ses-body.js';
 import { sendReservation, withMemory } from './isolate-memory.js';
@@ -53,21 +52,30 @@ type Review = { version:number; draft: CampaignDraft; rendered: { html?: string;
 // `customer`: an outside workspace on the shared account (Hosted, live, not exempt), whose marketing waits for the customer share.
 type Owner = { runtime: Runtime; a: Actor; ses: SESv2Client; transport: DispatchTransport; sendClient?:(domainId:string)=>SESv2Client; trusted?:boolean; probation?:boolean; customer?: boolean; tenantName?: string; feedbackTopic?: string };
 type LeaseQuota = { rate: number; max: number; sent: number; customer: number; checked: string; age_ms: number };
-/** Where one email's time goes in a run, filled in stage by stage for its DISPATCH_EMAIL line (logEmail): the screen's path
- *  (a classifier call, the shard's open breaker, or a campaign copy's verdict) and how its last request ended, the wait for a
- *  send slot and the SES call. Records only: nothing reads it to decide anything. */
-type Trace = { leasedAt: number; shard?: number; screen?: 'call' | 'breaker' | 'verdict'; screenAt?: number; screenMs?: number; call?: ScreenCall; paceMs?: number; sesMs?: number };
+/** Where one email's time goes in a run, filled in stage by stage for its DISPATCH_EMAIL line (logEmail). */
+type Trace = { leasedAt: number; shard?: number; paceMs?: number; sesMs?: number };
 type Leased = { mail: Mail; contentBytes: number; review: Review | null; owner: Owner | null; rateRetries: number; quota?: LeaseQuota; trace: Trace };
-// `screened`: the Hosted content screen judged this mail and passed it (a rejection never reaches sending).
-type Prepared = Leased & { owner: Owner; snapshot: EmailSnapshot; content: SendEmailCommandInput['Content']; unsubscribe?: { tokenHash: string; email: string; page?: string }; stored?: Partial<EmailSnapshot>; screened?: boolean };
-type Outcome = { mail: Mail; type: 'accepted' | 'reject' | 'acceptance_unknown' | 'provider_throttled' | 'dispatch_deferred'; providerId?: string; errorCode?: string; data: Record<string, unknown>; requeueAt?: string; screened?: boolean; trace?: Trace };
+type Prepared = Leased & { owner: Owner; snapshot: EmailSnapshot; content: SendEmailCommandInput['Content']; unsubscribe?: { tokenHash: string; email: string; page?: string }; stored?: Partial<EmailSnapshot> };
+type Outcome = { mail: Mail; type: 'accepted' | 'reject' | 'acceptance_unknown' | 'provider_throttled' | 'dispatch_deferred'; providerId?: string; errorCode?: string; data: Record<string, unknown>; requeueAt?: string; trace?: Trace };
 const requeued = (o: Outcome) => o.type === 'provider_throttled' || o.type === 'dispatch_deferred';
 
 // customerSent: what outside workspaces on a shared account used of its daily limit (migration 401), read with the sample.
 export interface QuotaSnapshot { maxSendRate: number; max24HourSend: number; sentLast24Hours: number; customerSent?: number; checkedAt: number }
 // Serializable pacing state so a Durable Object survives eviction without bursting.
-export interface GateState { nextAllowedAt: number; txAllowedAt?: number; marketingAllowedAt?: number; quota: QuotaSnapshot | null; refreshAt?: number; sentSinceRefresh: number; brakeUntil?: number; marketingBrakeUntil?: number; recentTxUntil?: number; accountPauseAt?:number; outageUntil?: number; outageStreak?: number; dailyBlockedUntil?: number; ownerCursor?: string; screenRetryAt?: number }
+export interface GateState { nextAllowedAt: number; txAllowedAt?: number; marketingAllowedAt?: number; quota: QuotaSnapshot | null; refreshAt?: number; sentSinceRefresh: number; brakeUntil?: number; marketingBrakeUntil?: number; recentTxUntil?: number; accountPauseAt?:number; outageUntil?: number; outageStreak?: number; dailyBlockedUntil?: number; ownerCursor?: string }
 export const initialGate = (): GateState => ({ nextAllowedAt: 0, quota: null, sentSinceRefresh: 0 });
+/** Target per-shard SES send rate (emails/sec). A Durable Object holds 6 simultaneous outbound connections (~35/s ceiling
+ *  at 170 ms SES RTT), so 25/s per shard gives 8 shards at 200/s and scales smoothly to 40 shards at 1,000/s. */
+export const TARGET_SHARD_RATE = 25;
+/** Derives the number of mail-room shards from the SES account's MaxSendRate, falling back to `fallback` before the first quota sample. */
+export function shardsForRate(rate: number | null | undefined, fallback = 1, max = 256, targetRate = TARGET_SHARD_RATE): number {
+  const cap = Math.min(256, Math.max(1, Math.floor(max) || 256));
+  if (typeof rate === 'number' && Number.isFinite(rate) && rate > 0) {
+    const target = Number.isFinite(targetRate) && targetRate > 0 ? targetRate : TARGET_SHARD_RATE;
+    return Math.min(cap, Math.max(1, Math.ceil(rate / target)));
+  }
+  return Math.min(cap, Math.max(1, Math.floor(fallback) || 1));
+}
 // Round up to a multiple of sendConcurrency (6) so a batch never ends in a 1-row tail claim.
 export const shardLeaseSize=(rate:number|undefined,count:number)=>rate!==undefined && count>1 ? Math.min(24,Math.max(6,Math.ceil(rate/count/6)*6)) : 24;
 export type Pacing = { rateFactor: number; txReservePercent?: number; targetRate?: number; live: boolean };
@@ -298,7 +306,7 @@ type DeferredStream = { workspace_id: string; stream: EmailSnapshot['kind']; unt
 type Allowance = { transactional: number; marketing: number; customer: number };
 const MAX_ENVELOPE = 50;
 async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: string, limit: number, gate:GateState, deferred: DeferredStream[], runClients: Map<string, SESv2Client>, accountId?: string, priorityOnly = false, readQuota = false, allowance?: Allowance): Promise<Leased[]> {
-  const queued = sql`region = ${region} AND status = 'queued'`;
+  const queued = sql`region = ${region} AND status = 'queued' AND screened`;
   const available = sql`(lease_until IS NULL OR lease_until < statement_timestamp())`;
   const transactional = sql`(e.snapshot->>'kind' = 'transactional')`;
   const priority = sql`ORDER BY ${transactional} DESC, created_at, id`;
@@ -308,7 +316,6 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
   const tick=sql`date_trunc('minute',statement_timestamp())`;
   // A marketing hold leaves the held stream queued (heldStream); transactional mail keeps flowing.
   const dueForOwner = sql`FROM sending_emails e WHERE ${queued} AND e.workspace_id = o.workspace_id AND ${available} AND (NOT o.marketing_held OR NOT ${heldStream(sql`e`)})
-    ${liveMx && (gate.screenRetryAt??0)>Date.now() ? sql`AND (NOT o.required_screen OR (o.trusted AND ${transactional}))` : sql``}
     -- A boolean range is an index condition on 061's expression. Equality to true is
     -- simplified to a text comparison and can scan the kind index over delivered mail.
     ${priorityOnly ? sql`AND ${transactional} > false` : sql``}
@@ -469,37 +476,7 @@ async function leaseDue(runtime: Runtime, transport: DispatchTransport, region: 
   });
 }
 
-// A screen rejection carries its verdict into the reject event.
-// `counted`: the verdict already counted toward reputation when it was made (a campaign copy screened at its release).
-class ScreenRejected extends ApiError {
-  constructor(public screen: { spam: number; model: string; threshold: number }, public counted = false) { super(422, 'CONTENT_REJECTED_SPAM', 'The content classifier judged this message to be unsolicited advertising.'); }
-}
-let screenSkipLoggedAt = 0;
-// Fail closed for probation and marketing. Trusted transactional and explicit BYO
-// checks may fail open. Policy is decided from the leased connection, never caller input.
-// Returns true only when the screen actually judged the message (and passed it); a skip or a fail-open outage is not a clean verdict.
-async function screenMail(runtime: Runtime, mail: Mail, s: EmailSnapshot, required:boolean, hostedGate?:GateState, call?:ScreenCall): Promise<boolean> {
-  const settings = runtime.config.screen;
-  if (!settings) {
-    if(required) throw new ApiError(503,'CONTENT_SCREEN_UNAVAILABLE','Hosted content screening is unavailable; deferring without calling SES.',undefined,true);
-    if (Date.now() - screenSkipLoggedAt >= 60000) { screenSkipLoggedAt = Date.now(); log('warn', { code: 'CONTENT_SCREEN_SKIPPED', emailId: mail.id, message: 'screen requested but TYPESAFE_API_KEY is not configured' }); }
-    return false;
-  }
-  let result: Awaited<ReturnType<typeof screenSnapshot>>;
-  try { result = await screenSnapshot(runtime, s, required, call); }
-  catch (error) {
-    if(!(error instanceof ApiError) || error.code!=='CONTENT_SCREEN_UNAVAILABLE') throw error;
-    if(required) throw new ApiError(503,'CONTENT_SCREEN_UNAVAILABLE','Hosted content screening is unavailable; deferring without calling SES.',undefined,true);
-    if(hostedGate){if((hostedGate.screenRetryAt??0)>Date.now())return false;hostedGate.screenRetryAt=Date.now()+30_000;}
-    log('warn', { code: error instanceof ApiError ? error.code : 'CONTENT_SCREEN_UNAVAILABLE', emailId: mail.id }); // Sending unscreened.
-    return false;
-  }
-  if (!result) return false;
-  if (result.spam < settings.threshold) return true;
-  if (required || settings.mode === 'reject') throw new ScreenRejected({ spam: result.spam, model: result.model, threshold: settings.threshold });
-  log('warn', { code: 'CONTENT_SPAM_SUSPECTED', emailId: mail.id, spam: result.spam, model: result.model });
-  return true;
-}
+
 
 type AttachmentRow = typeof attachments.$inferSelect;
 function simpleContent(s: EmailSnapshot, parts: Attachment[]): SendEmailCommandInput['Content'] {
@@ -518,71 +495,33 @@ function batchAttachments(runtime: Runtime, batch: Leased[]) {
     return (await rows).filter(row => row.workspaceId === mail.workspaceId && mail.snapshot.attachments.includes(row.id));
   };
 }
-type VerdictCache = Map<string, { spam: number; model: string }>;
-const MAX_VERDICT_CACHE = 5000;
-async function prepareMail(leased: Leased & { owner: Owner }, loadAttachments: (mail: Mail) => Promise<AttachmentRow[]>, gate:GateState, verdictCache?: VerdictCache): Promise<Prepared> {
+class HeldForScreen extends Error { constructor() { super('Queued without a screen verdict.'); this.name = 'HeldForScreen'; } }
+async function prepareMail(leased: Leased & { owner: Owner }, loadAttachments: (mail: Mail) => Promise<AttachmentRow[]>): Promise<Prepared> {
   const { runtime, a } = leased.owner;
   let mail = leased.mail;
   if (mail.simulated && !isSimulatedSes(runtime)) throw new ApiError(409, 'SES_MODE_CHANGED', 'This message was queued for simulated delivery. Submit it again to send through SES.');
+  const hosted=Boolean(leased.owner.tenantName && runtime.config.hostedScreen);
+  // Mail queued before screen-at-accept (migration 459), or by an older isolate during the rollout, has no verdict. It never
+  // goes out unscreened: it leaves the mail room's queue (screened = false) for the screen sweep.
+  if (!isSimulatedSes(runtime) && (hosted || (mail.snapshot.screen && mail.snapshot.kind==='transactional')) && !mail.snapshot.screenVerdict) throw new HeldForScreen();
   let rows: AttachmentRow[] | undefined;
   let unsubscribe: Prepared['unsubscribe'];
   let stored: Prepared['stored'];
-  let keyed: EmailSnapshot | undefined;
   if (mail.snapshot.deferredCampaign) {
     const materialized = await materializeCampaignEmail(runtime, a, mail, leased.review, await loadAttachments(mail));
-    mail = materialized.mail; rows = materialized.rows; unsubscribe = materialized.unsubscribe; stored = materialized.stored; keyed = materialized.keyed;
+    mail = materialized.mail; rows = materialized.rows; unsubscribe = materialized.unsubscribe; stored = materialized.stored;
   }
   let s = mail.snapshot;
   if(leased.owner.tenantName && s.raw) throw new ApiError(422,'SHARED_RAW_UNSUPPORTED','Hosted sending requires structured SES content.');
   // A mail app's signed or encrypted message goes out as written (protocol-submit.ts sealedPassthrough): on Hosted only
   // from a sender past its evaluation, since a probation sender's mail goes out as the copy the screen read.
   if(leased.owner.tenantName && s.mime && !leased.owner.trusted) throw new ApiError(422,'SEALED_MAIL_UNAVAILABLE','Signed and encrypted mail goes out as written, which a sender can do once its first messages are evaluated.');
-  // What Hosted delivers (src/screened-html.ts hostedCopy): on probation (a sender still being evaluated, growing or below
-  // good standing) the copy the screen read, with the attachment allowlist; otherwise the message as written, screened
-  // whole (src/screen.ts readHtml), under the image rule and the picture checks on attachments, which apply to every sender
-  // because the screen reads no picture. The trusted tier is an operator's exemption from all of it.
-  const hosted=Boolean(leased.owner.tenantName && runtime.config.hostedScreen);
+  // Content screening runs at accept time / campaign prepare (src/sending.ts) before rows enter sending_emails; the mail
+  // room never calls an external classifier. Deferred campaigns and any pre-deploy rows still apply local in-memory
+  // hostedCopy / attachment checks here.
   const rules=isSimulatedSes(runtime) || !hosted || leased.owner.trusted ? null : leased.owner.probation ? 'probation' : 'standard';
   const delivery=rules ? await import('./screened-html.js') : undefined;
-  let screened=false;
-  if (!isSimulatedSes(runtime) && (hosted || (s.screen && s.kind==='transactional'))) {
-    leased.trace.screenAt=Date.now();
-    const required=hosted && (!leased.owner.trusted || s.kind==='marketing');
-    // A screened campaign's copy (src/sending.ts campaignVerdicts) goes out only under a verdict for its exact bytes
-    // (src/screen.ts copyKey): keyed here from the same customer copy it is delivered from, with Nightmail's
-    // unsubscribe slots generated for the placeholder link (src/sending.ts screenedAs), and rewritten for probation as
-    // the delivered copy is. The release screened it ahead, and a copy without a verdict (another tier or model since)
-    // is screened now, through the same path, or waits. No verdict, no send.
-    const review=hosted && keyed && leased.review?.screen?.template && leased.review.screen.contentHash===leased.review.reviewHash ? leased.review : null;
-    // Probation mail goes out as the copy the screen reads: every textual field without the bidi controls that
-    // reorder it, the markup reduced to what a client shows as text, the campaign preheader added back from its own
-    // field. Senders in good standing and the trusted tier keep their message.
-    if (delivery) s = delivery.hostedCopy(s, rules==='probation');
-    if (review) {
-      leased.trace.screen='verdict';
-      const copy = rules==='probation' ? delivery!.probationCopy(keyed!) : keyed!;
-      const key = await copyKey(runtime, copy);
-      const cacheKey = `${mail.workspaceId}\u0000${mail.campaignId!}\u0000${key}`;
-      let judged = review.screen?.template?.key === key ? review.screen.template : verdictCache?.get(cacheKey);
-      if (!judged) {
-        const [verdict] = await campaignVerdicts(runtime, { workspaceId: mail.workspaceId, campaignId: mail.campaignId!, reviewId: mail.reviewId! }, [copy], Date.now() + MAX_PRE_SEND_MS);
-        if (!verdict) throw new ApiError(503,'CONTENT_SCREEN_UNAVAILABLE','This copy has no verdict yet; deferring without calling SES.',undefined,true);
-        if ('refused' in verdict) throw verdict.refused;
-        judged = verdict;
-        if (verdictCache) { if (verdictCache.size >= MAX_VERDICT_CACHE) verdictCache.clear(); verdictCache.set(cacheKey, { spam: verdict.spam, model: verdict.model }); }
-      }
-      // The release counted every released recipient's verdict toward reputation (src/sending.ts screenAhead).
-      if (judged.spam>=runtime.config.screen!.threshold) throw new ScreenRejected({ spam: judged.spam, model: judged.model, threshold: runtime.config.screen!.threshold }, true);
-    } else if (hosted && (gate.screenRetryAt??0)>Date.now()) {
-      leased.trace.screen='breaker';
-      if (required) throw new ApiError(503,'CONTENT_SCREEN_UNAVAILABLE','Hosted screen temporarily unavailable.',undefined,true);
-    } else {
-      leased.trace.screen='call';
-      leased.trace.call={ emailId: mail.id, workspaceId: mail.workspaceId, region: mail.region, shard: leased.trace.shard, kind: s.kind, required };
-      screened=await screenMail(runtime,mail,s,required,hosted?gate:undefined,leased.trace.call) && !!leased.owner.tenantName;
-    }
-    leased.trace.screenMs=Date.now()-leased.trace.screenAt;
-  }
+  if (delivery && (mail.snapshot.deferredCampaign || s.screenVerdict?.rules !== rules)) s = delivery.hostedCopy(s, rules==='probation');
   const parts: Attachment[] = [];
   rows ??= checkedDispatchAttachments(s.attachments, await loadAttachments(mail));
   for (const row of rows) {
@@ -602,7 +541,7 @@ async function prepareMail(leased: Leased & { owner: Owner }, loadAttachments: (
     : !leased.owner.tenantName && s.html && parts.some(part => part.ContentDisposition === 'INLINE') && rows.reduce((n, row) => n + row.size, 0) <= SEND_LIMITS.laneBytes
       ? { Raw: { Data: inlineMessage(s, parts) } }
       : simpleContent(s, parts);
-  return { ...leased, mail, snapshot: s, content, unsubscribe, stored, screened };
+  return { ...leased, mail, snapshot: s, content, unsubscribe, stored };
 }
 
 // Preflight failures (storage, rendering, hash mismatch) cannot have sent email: reject the row.
@@ -626,12 +565,9 @@ async function rejectPreflight(runtime: Runtime, mail: Mail, error: unknown): Pr
   const rejected=await runtime.db.execute<{n:number}>(sql`WITH rejected AS (
       UPDATE sending_emails SET status = 'rejected', error_code = ${code}, lease_until = NULL, updated_at = clock_timestamp()
       WHERE workspace_id = ${mail.workspaceId} AND id = ${mail.id} AND status = 'queued' AND dispatch_version = ${mail.dispatchVersion} RETURNING ${terminalColumns},to_addresses||cc_addresses||bcc_addresses AS recipients
-    ), ${error instanceof ScreenRejected && !error.counted ? sql`screen_counted AS (${countScreened(sql`SELECT r.workspace_id,1 AS rejected FROM rejected r WHERE hosted_real_cost(r.recipients)>0`)}), ` : sql``}${terminalEvents(sql`SELECT * FROM rejected`,sql`${JSON.stringify({providerCalled:false,...(error instanceof ScreenRejected ? { screen: error.screen } : {})})}::jsonb`)} SELECT count(*)::int AS n FROM webhook_jobs`);
+    ), ${terminalEvents(sql`SELECT * FROM rejected`,sql`${JSON.stringify({providerCalled:false})}::jsonb`)} SELECT count(*)::int AS n FROM webhook_jobs`);
   await wakeWebhooks(runtime,rejected.rows[0]!.n);
-  // Screen rejections are an expected policy outcome, not a dispatcher fault.
-  if (error instanceof ScreenRejected) log('warn', { code, emailId: mail.id, spam: error.screen.spam, model: error.screen.model });
-  else if (code === 'CONTENT_SCREEN_BUDGET_EXCEEDED') log('warn', { code, emailId: mail.id, campaignId: mail.campaignId });
-  else logError(error, { code, emailId: mail.id });
+  logError(error, { code, emailId: mail.id });
   if (mail.campaignId) await finishSettledCampaigns(runtime, [{ workspace_id: mail.workspaceId, campaign_id: mail.campaignId }]);
   return 'rejected';
 }
@@ -870,16 +806,15 @@ async function recordOutcomes(runtime: Runtime, outcomes: Outcome[]) {
     next_status: requeued(o) ? 'queued' : statusForEvent[o.type] ?? null,
     next_rank: requeued(o) ? 0 : rank[statusForEvent[o.type]!], public_type: publicEventType[o.type] ?? null,
     outcome_bit: o.type === 'accepted' ? 1 : o.type === 'reject' ? 64 : 0,
-    wait_ms: o.requeueAt ? Math.max(0, Date.parse(o.requeueAt) - Date.now()) : null, screened: !!o.screened,
+    wait_ms: o.requeueAt ? Math.max(0, Date.parse(o.requeueAt) - Date.now()) : null,
   }));
   const statement = sql`WITH input AS (
       SELECT * FROM jsonb_to_recordset(${JSON.stringify(input)}::jsonb)
-        AS x(email_id text, workspace_id text, dispatch_version int, type text, provider_id text, event_id text, external_id text, data jsonb, error_code text, next_status text, next_rank int, public_type text, outcome_bit int, wait_ms float8, screened boolean)
+        AS x(email_id text, workspace_id text, dispatch_version int, type text, provider_id text, event_id text, external_id text, data jsonb, error_code text, next_status text, next_rank int, public_type text, outcome_bit int, wait_ms float8)
     ), mail AS MATERIALIZED (
-      SELECT e.id, e.workspace_id, e.status, e.error_code, e.region, e.dispatch_version, e.to_addresses||e.cc_addresses||e.bcc_addresses AS recipients FROM sending_emails e JOIN input x ON e.workspace_id = x.workspace_id AND e.id = x.email_id
+      SELECT e.id, e.workspace_id, e.status, e.error_code, e.region, e.dispatch_version FROM sending_emails e JOIN input x ON e.workspace_id = x.workspace_id AND e.id = x.email_id
       ORDER BY e.id FOR UPDATE
-    ), ${outcomes.some(o => o.screened) ? sql`screen_counted AS (${countScreened(sql`SELECT x.workspace_id,0 AS rejected FROM input x JOIN mail m ON m.id=x.email_id
-      WHERE x.screened AND x.next_status IS DISTINCT FROM 'queued' AND hosted_real_cost(m.recipients)>0`)}), ` : sql``}inserted AS (
+    ), inserted AS (
       INSERT INTO sending_email_events(id, workspace_id, email_id, type, provider_id, external_id, data, simulated, created_at)
       SELECT x.event_id, m.workspace_id, m.id, x.type, x.provider_id, x.external_id, x.data, ${simulated}::boolean, clock_timestamp()
       FROM input x JOIN mail m ON m.id = x.email_id ORDER BY m.workspace_id,m.id ON CONFLICT DO NOTHING RETURNING *
@@ -954,7 +889,7 @@ async function recordOutcomes(runtime: Runtime, outcomes: Outcome[]) {
 
 // `finishing` collects campaigns whose rows this run moved out of the queue; they are checked for completion in one
 // statement once the queue is draining (a short batch, the time budget or the end of the run), never per group.
-type Lane = { attachmentBytes:number; advanced: number; bytesReleased?:Promise<void>; notifyBytes?:()=>void; deferred: DeferredStream[]; gate: GateState; refresh?: Promise<boolean>; held: { recipients: number }; pacing: Pacing; verdictCache: VerdictCache; options: Required<Pick<DispatcherOptions, 'batchSize' | 'sendConcurrency' | 'quotaRefreshMs'>> & DispatcherOptions; finishing: Map<string, CampaignRef>; send: (item: Prepared, deadline: number) => Promise<Outcome>; record: (outcomes: Outcome[]) => Promise<void>; counters: DispatcherReport; phase: <T>(name: string, work: () => Promise<T>) => Promise<T> };
+type Lane = { attachmentBytes:number; advanced: number; bytesReleased?:Promise<void>; notifyBytes?:()=>void; deferred: DeferredStream[]; gate: GateState; refresh?: Promise<boolean>; held: { recipients: number }; pacing: Pacing; shadowOn: boolean; options: Required<Pick<DispatcherOptions, 'batchSize' | 'sendConcurrency' | 'quotaRefreshMs'>> & DispatcherOptions; finishing: Map<string, CampaignRef>; send: (item: Prepared, deadline: number) => Promise<Outcome>; record: (outcomes: Outcome[]) => Promise<void>; counters: DispatcherReport; phase: <T>(name: string, work: () => Promise<T>) => Promise<T> };
 function chunk<T>(items: T[], size: number): T[][] { const out: T[][] = []; for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size)); return out; }
 const cost = (item: Prepared) => item.snapshot.to.length + item.snapshot.cc.length + item.snapshot.bcc.length;
 const quotaRetry = (gate: GateState, refreshMs: number) => Math.ceil(Math.max(Date.now() + Math.min(1000, refreshMs), gate.refreshAt ?? 0, gate.dailyBlockedUntil ?? 0));
@@ -965,7 +900,7 @@ const quotaRetry = (gate: GateState, refreshMs: number) => Math.ceil(Math.max(Da
 // daily allowance, the burst limit) is info; anything else is warn. A campaign's flow-control lines are kept 1 in 10, since a
 // campaign can send 50 a second and an invocation keeps 256 KB of log lines; each kept one says sampleRate. Failures and
 // every other deferral are always kept.
-const FLOW = new Set(['PACING_WAIT', 'DAILY_ALLOWANCE', 'HOSTED_BURST_LIMIT', 'SCREEN_HANDOVER']);
+const FLOW = new Set(['PACING_WAIT', 'DAILY_ALLOWANCE', 'HOSTED_BURST_LIMIT']);
 function logEmail(lane: Lane, mail: Mail, trace: Trace | undefined, outcome: string, reason?: string) {
   try {
     const routine = outcome === 'accepted' || FLOW.has(reason ?? ''), rate = routine && mail.snapshot.kind === 'marketing' ? 0.1 : 1;
@@ -973,7 +908,7 @@ function logEmail(lane: Lane, mail: Mail, trace: Trace | undefined, outcome: str
     const now = Date.now(), leasedAt = trace?.leasedAt ?? now, created = Date.parse(mail.createdAt), due = mail.scheduledAt ? Math.max(created, Date.parse(mail.scheduledAt)) : created;
     log(routine ? 'info' : 'warn', { code: 'DISPATCH_EMAIL', outcome, reason, emailId: mail.id, workspaceId: mail.workspaceId, campaignId: mail.campaignId ?? undefined,
       region: lane.options.region, shard: lane.options.shard?.index ?? 0, kind: mail.snapshot.kind, attempt: mail.dispatchVersion, queueMs: leasedAt - due, ageMs: leasedAt - created,
-      screen: trace?.screen, screenMs: trace?.screenMs, screenCall: trace?.call?.outcome, screenDigest: trace?.call?.digest,
+      ...(lane.shadowOn && mail.snapshot.screenVerdict?.digest ? { screenDigest: mail.snapshot.screenVerdict.digest.slice(0, 32) } : {}),
       paceMs: trace?.paceMs, sesMs: trace?.sesMs, totalMs: now - leasedAt, ...(rate < 1 ? { sampleRate: rate } : {}) });
   } catch { /* A record never changes what happens to the email. */ }
 }
@@ -1031,7 +966,7 @@ function pacedSender(gate: GateState, options: DispatcherOptions, pacing: Pacing
       item.trace.paceMs = sendAt - queuedAt; outbound.ses++;
       sendOne(item.owner.runtime, item.owner.a, item.owner.ses, item).then(outcome => {
         item.trace.sesMs = Date.now() - sendAt;
-        outcome.screened = item.screened; outcome.trace = item.trace;
+        outcome.trace = item.trace;
         if (outcome.type === 'provider_throttled' && outcome.errorCode !== 'SES_DAILY_QUOTA_EXHAUSTED') brake(gate, s.kind);
         if (outcome.type === 'accepted') delete gate.outageStreak;
         // Every ambiguous answer (no response, 5xx, or success without a MessageId) opens it; the specific code stays in the
@@ -1109,7 +1044,7 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
     return { processed: 0, blocked: true };
   }
   const loadAttachments = batchAttachments(base, ready);
-  const screenDeferred:Mail[]=[], handedOver:Mail[]=[];
+  const unscreened: Mail[] = [];
   const prepare = async (item: typeof ready[number]) => {
     try {
       if (item.contentBytes) {
@@ -1121,22 +1056,13 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
           FROM sending_emails WHERE workspace_id=${m.workspaceId} AND id=${m.id} AND dispatch_version=${m.dispatchVersion} AND status='queued'`);
         if (!body) { counters.skipped++;return; }
         const snapshot={...m.snapshot,text:body.text??undefined,html:body.html??undefined,raw:body.raw??undefined,mime:body.mime??undefined,template:body.template??undefined};
-        return await prepareMail({...item,mail:{...m,snapshot}}, loadAttachments,gate,lane.verdictCache);
+        return await prepareMail({...item,mail:{...m,snapshot}}, loadAttachments);
       }
-      return await prepareMail(item, loadAttachments,gate,lane.verdictCache);
+      return await prepareMail(item, loadAttachments);
     }
     catch (error) {
-      if (item.trace.screenAt !== undefined) item.trace.screenMs ??= Date.now() - item.trace.screenAt; // It ended in the screen.
       if (error instanceof ModuleLoadError) { await releaseLeases(base, [item.mail]); throw error; }
-      // Its screen was left to the next run (Runtime.screenHandover): back to the queue as it was, due now. Not a classifier
-      // failure: no deferral, no error code, no breaker.
-      if (error instanceof ScreenHandover) { handedOver.push(item.mail); counters.deferred++; counters.idle = false; logEmail(lane, item.mail, item.trace, 'deferred', 'SCREEN_HANDOVER'); return; }
-      if (error instanceof ApiError && error.code==='CONTENT_SCREEN_UNAVAILABLE') {
-        if (!(gate.screenRetryAt && gate.screenRetryAt>Date.now())) {
-          gate.screenRetryAt=Date.now()+30_000; log('warn',{code:error.code,region:options.region,retryAt:gate.screenRetryAt});
-        }
-        counters.paceRetryAt=gate.screenRetryAt; counters.deferred++; screenDeferred.push(item.mail); lane.advanced++; logEmail(lane, item.mail, item.trace, 'deferred', error.code); return;
-      }
+      if (error instanceof HeldForScreen) { unscreened.push(item.mail); counters.deferred++; lane.advanced++; logEmail(lane, item.mail, item.trace, 'deferred', 'SCREEN_REQUIRED'); return; }
       counters.skipped++; lane.advanced++;
       logEmail(lane, item.mail, item.trace, await rejectPreflight(item.owner.runtime, item.mail, error), error instanceof ApiError ? error.code : 'DISPATCH_PREFLIGHT_FAILED');
     }
@@ -1190,18 +1116,13 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
       if(page.length && bytes+n>limit)await flush();page.push(item);bytes+=n;files+=attached;content+=item.contentBytes;
     }
     if(page.length)await flush();
-  } else if (ready.some(({mail, owner, review}) => (mail.snapshot.screen || owner.tenantName && owner.runtime.config.hostedScreen) && owner.runtime.config.screen && !isSimulatedSes(owner.runtime) && !(mail.snapshot.deferredCampaign && review?.screen?.template && review.screen.contentHash === review.reviewHash))) {
-    // Bound simultaneous live classifier probes, but don't fragment pre-screened campaign batches into 1-row claims.
-    await streamPage(interleaveByOwner(ready, item => item.mail.snapshot.kind, item => item.mail.workspaceId, counters.batches + (options.shard?.index ?? 0)));
   } else {
     const prepared = await phase('prepare', () => Promise.all(ready.map(prepare)));
     await dispatchPrepared(base, lane, prepared.filter((item): item is Prepared => item !== undefined));
   }
-  if (handedOver.length) await releaseLeases(base, handedOver);
-  // The status comes with each input row, not as a literal, to keep this on the primary key (see the claim in claimCtes).
-  if(screenDeferred.length) await base.db.execute(sql`UPDATE sending_emails e SET lease_until=NULL,error_code='CONTENT_SCREEN_UNAVAILABLE',scheduled_at=clock_timestamp()+interval '30 seconds'
-    FROM jsonb_to_recordset(${JSON.stringify(screenDeferred.map(m=>({id:m.id,version:m.dispatchVersion,status:'queued'})))}::jsonb) x(id text,version int,status text)
-    WHERE e.id=x.id AND e.dispatch_version=x.version AND e.status=x.status`);
+  if (unscreened.length) await base.db.execute(sql`UPDATE sending_emails e SET screened = false, lease_until = NULL
+    FROM jsonb_to_recordset(${JSON.stringify(unscreened.map(m => ({ workspace_id: m.workspaceId, id: m.id, version: m.dispatchVersion, status: 'queued' })))}::jsonb) x(workspace_id text, id text, version int, status text)
+    WHERE e.workspace_id = x.workspace_id AND e.id = x.id AND e.dispatch_version = x.version AND e.status = x.status`);
   return { processed: ready.length, blocked: false };
 }
 const logLost = (count:number) => log('warn', { code:'DISPATCH_CLAIM_LOST', count, message:'Rows changed between lease and claim; they will be reconsidered on the next pass.' });
@@ -1375,7 +1296,7 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
   const pacing: Pacing = { rateFactor: runtime.config.dispatch.rateFactor, txReservePercent: runtime.config.dispatch.txReservePercent ?? 15, targetRate: runtime.config.dispatch.targetRate, live: !isSimulatedSes(runtime) };
   const held = { recipients: 0 };
   const runClients = new Map<string, SESv2Client>();
-  const lane: Lane = { attachmentBytes:0,advanced:0,deferred: [], gate, pacing, verdictCache: new Map(), held, finishing: new Map(), send: pacedSender(gate, options, pacing, counters, held), record: outcomeRecorder(ready => recordBatch(runtime, lane, ready)), counters, phase, options: { ...options, batchSize: options.batchSize ?? 24, sendConcurrency: options.sendConcurrency ?? 6, quotaRefreshMs: options.quotaRefreshMs ?? QUOTA_REFRESH_MS } };
+  const lane: Lane = { attachmentBytes:0,advanced:0,deferred: [], gate, pacing, shadowOn: !!runtime.config.shadow, held, finishing: new Map(), send: pacedSender(gate, options, pacing, counters, held), record: outcomeRecorder(ready => recordBatch(runtime, lane, ready)), counters, phase, options: { ...options, batchSize: options.batchSize ?? 24, sendConcurrency: options.sendConcurrency ?? 6, quotaRefreshMs: options.quotaRefreshMs ?? QUOTA_REFRESH_MS } };
   // The owner cursor rotates where each lease starts, so every owner gets a turn, but a lease
   // never wraps past the last owner. One that started after the cursor and reached the end
   // empty-handed has not looked at the owners before it: with exactly a lease's worth of owners
@@ -1483,11 +1404,7 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
   counters.durationMs = Date.now() - started;
   // Idle polls are silent; runs that moved mail (or hit the budget) are the throughput record.
   if (counters.claimed || !counters.idle) log('info', { code: 'DISPATCH_RUN', accountId: options.accountId, region: options.region, shard: options.shard?.index ?? 0, ...counters, quota: gate.quota?.maxSendRate ?? null, rate: shardRate(gate, options.shard, pacing), braked: (gate.brakeUntil ?? 0) > Date.now(), wakeMs: options.wakeMs });
-  // The run's classifier requests as content_screen_calls rows (src/screen-calls.ts): now, with every lane and the priority
-  // loop finished and nothing leased waiting on SES. At most two seconds, and never throws.
-  await flushScreenCalls(runtime.db);
-  // And to the second classifier, where one is configured (src/screen-shadow.ts): handed over, never waited for.
-  flushShadow(runtime);
+
   return counters;
 }
 

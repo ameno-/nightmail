@@ -2,7 +2,7 @@ import {gatewayLane} from './protocol-admission.js';
 import { getPath } from 'hono/utils/url';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import type { Config, FeedbackItem, Runtime } from './core.js';
-import { DispatcherShard, dispatcherName, shardCount } from './dispatcher-do.js';
+import { DispatcherShard, dispatcherName, shardCount, shardsForRate } from './dispatcher-do.js';
 import { CampaignRoom } from './campaign-room.js';
 import { ROOM_PEER_HEADER } from './campaign-room-protocol.js';
 import type { SupportPlatformApi } from './support-platform.js';
@@ -44,17 +44,37 @@ function loadHttpDeps() {
   return Promise.all([loadRuntimeDeps(), loadApp()]).then(([runtimeDeps, { app }]) => ({ ...runtimeDeps, app }));
 }
 
-// A provider group fits on one shard. Spread small sends across the pool without waking idle siblings.
+// Derive mail-room shard count from the SES account's MaxSendRate (TARGET_SHARD_RATE = 25/s per shard), cached 60 s per isolate.
 let nextShard: number | undefined;
 let lastPriorityLagWrite = 0, lastPriorityLagHigh = false;
-async function wakeDispatchers(env: Env, region: string, accountId?: string, emails?: number, kind?: 'shared' | 'byo', priority = false, internal = false) {
-  const count = kind === 'byo' ? 1 : shardCount('DISPATCH_SHARDS' in env ? env.DISPATCH_SHARDS : undefined);
+const rateCache = new Map<string, { rate: number; until: number }>();
+const RATE_CACHE_MS = 60_000;
+async function wakeDispatchers(env: Env, region: string, accountId?: string, emails?: number, kind?: 'shared' | 'byo', priority = false, maxSendRate?: number, lookupRate?: (region: string, accountId?: string) => Promise<number | undefined>) {
+  const cacheKey = `${accountId ?? ''}:${region}`, now = Date.now();
+  let rate = typeof maxSendRate === 'number' && Number.isFinite(maxSendRate) && maxSendRate > 0 ? maxSendRate : undefined;
+  if (rate !== undefined) {
+    if (rateCache.size > 256) rateCache.clear();
+    rateCache.set(cacheKey, { rate, until: now + RATE_CACHE_MS });
+  } else {
+    const cached = rateCache.get(cacheKey);
+    if (cached && cached.until > now) rate = cached.rate;
+    else if (lookupRate) {
+      const fetched = await lookupRate(region, accountId).catch(() => undefined);
+      if (typeof fetched === 'number' && Number.isFinite(fetched) && fetched > 0) {
+        rate = fetched;
+        if (rateCache.size > 256) rateCache.clear();
+        rateCache.set(cacheKey, { rate, until: now + RATE_CACHE_MS });
+      }
+    }
+  }
+  const fallback = kind === 'byo' ? 1 : shardCount('DISPATCH_SHARDS' in env ? env.DISPATCH_SHARDS : undefined);
+  const count = shardsForRate(rate, fallback);
   nextShard ??= Math.floor(Math.random() * 0x100000000);
   const indexes = emails !== undefined && emails <= 6 ? [nextShard++ % count] : Array.from({ length: count }, (_, i) => i);
   await Promise.all(indexes.map(index => {
-    const identity = { accountId, region, shard: { index, count } };
+    const identity = { accountId, region, shard: { index, count }, autoScale: true };
     const stub = env.DISPATCHER.get(env.DISPATCHER.idFromName(dispatcherName(identity)), { locationHint: 'enam' });
-    return stub.fetch(`https://dispatcher/wake?region=${encodeURIComponent(region)}&shard=${index}&count=${count}${accountId ? `&account=${encodeURIComponent(accountId)}` : ''}${priority ? '&priority=1' : ''}${internal ? '&internal=1' : ''}`);
+    return stub.fetch(`https://dispatcher/wake?region=${encodeURIComponent(region)}&shard=${index}&count=${count}${accountId ? `&account=${encodeURIComponent(accountId)}` : ''}${priority ? '&priority=1' : ''}&auto=1`);
   }));
 }
 
@@ -109,7 +129,7 @@ const queueName = (env: Env, key: 'FEEDBACK_QUEUE_NAME' | 'FEEDBACK_PRIORITY_QUE
 };
 /** `shadowWaitUntil`: the invocation's waitUntil, for the sends to the second classifier's queue alone, from a handler that
  *  gives no `ctx` here (queue, scheduled: their database connection is closed before they return, as before). */
-async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, max = 1, ctx?: ExecutionContext, shadowWaitUntil?: (sent: Promise<unknown>) => void, internal = false): Promise<T> {
+async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, max = 1, ctx?: ExecutionContext, shadowWaitUntil?: (sent: Promise<unknown>) => void): Promise<T> {
   const { Pool, drizzle, sql, CONFIG_KEYS, loadConfig, r2Storage, jobConcurrency, WAKE_SCHEDULE_KEY, core, browserImageRenderer, publicImageImporter, feedbackSink, workWake, enqueueShadow } = await loadRuntimeDeps();
   // Optional Worker variable, default two active jobs; six matches the platform's
   // simultaneous outbound-connection ceiling while the shared SES gate limits rate.
@@ -181,7 +201,12 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
         throw error;
       }
       core.log('info', { code: 'QUEUE_WAKE', readyJobs, messages: 1 });
-    }, dispatch: (region, accountId, emails, kind, priority) => wakeDispatchers(env, region, accountId, emails, kind, priority, internal), feedback: feedbackSink(env.FEEDBACK_QUEUE, config.authSecret, env.FEEDBACK_PRIORITY_QUEUE), renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
+    }, dispatch: (region, accountId, emails, kind, priority, maxSendRate) => wakeDispatchers(env, region, accountId, emails, kind, priority, maxSendRate, async (r, a) => {
+      const { rows: [lim] } = await db.execute<{ rate: number | null }>(a
+        ? sql`SELECT max_send_rate AS rate FROM provider_account_limits WHERE aws_account_id=${a} AND region=${r} AND max_send_rate>0`
+        : sql`SELECT max(max_send_rate) AS rate FROM sending_region_limits WHERE region=${r} AND max_send_rate>0`);
+      return typeof lim?.rate === 'number' && lim.rate > 0 ? lim.rate : undefined;
+    }), feedback: feedbackSink(env.FEEDBACK_QUEUE, config.authSecret, env.FEEDBACK_PRIORITY_QUEUE), renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
   } finally {
     if (client) {
       if (ctx) ctx.waitUntil(client.end().catch(() => {}));
@@ -403,7 +428,7 @@ export default {
       core.log('info', { code: 'QUEUE_FOLLOW', outcome });
       // A campaign's copies are screened in these drains: their repeats go to the second classifier's queue under
       // waitUntil, so the acknowledgement below never waits for that queue.
-    }, concurrency + 2, undefined, waitUntilOf(ctx), true);
+    }, concurrency + 2, undefined, waitUntilOf(ctx));
     batch.ackAll();
     await flushDueCounters(env, ctx);
   },
@@ -453,9 +478,11 @@ export default {
       catch { core.log('error',{code:'FEEDBACK_RECOVERY_DRAIN_FAILED'}); }
       await reconcileSharedConnections(runtime); // Installation work must not depend on a workspace or a successful queue drain.
       try { await syncOutboundMessages(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'MAILBOX_OUTBOUND_SYNC_FAILED' }); }
+      // Screen any pre-deploy or rollout-window rows held with screened=false outside the mail room before waking shards.
+      try { await (await core.wrapModuleLoad(() => import('./sending.js'))).screenHeldMail(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'HELD_SCREEN_SWEEP_FAILED' }); }
       // Received mail queued for the refilling budget comes due within minutes; the drain below runs its release.
       try { await (await core.wrapModuleLoad(() => import('./mailbox-staging.js'))).scheduleHoldRelease(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'MAILBOX_HOLD_RELEASE_FAILED' }); }
-      await Promise.allSettled((await dispatchPartitions(runtime, true)).map(({ region, accountId, kind }) => wakeDispatchers(env, region, accountId, undefined, kind, false, true)));
+      await Promise.allSettled((await dispatchPartitions(runtime, true)).map(({ region, accountId, kind, maxSendRate }) => wakeDispatchers(env, region, accountId, undefined, kind, false, maxSendRate)));
       } finally {
         // Health (src/health.ts), once dispatch recovery has run or failed: what is falling behind, on the Health page and as
         // Slack cards, including a database that refuses the tick's own write. Started here and awaited by nothing: it runs
@@ -485,6 +512,6 @@ export default {
       if (runtime.config.multiTenant) try { await (await core.wrapModuleLoad(() => import('./billing/stripe-jobs.js'))).billingMinute(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'BILLING_MINUTE_FAILED' }); }
       // Last, as it can take minutes: retention of the sent-side tables (elected every 15 minutes).
       try { await (await core.wrapModuleLoad(() => import('./maintenance.js'))).retentionTick(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'RETENTION_TICK_FAILED' }); }
-    }, concurrency + 2, undefined, waitUntilOf(ctx), true); // The minute cron drains jobs too: as in queue(), nothing waits for the second classifier's queue.
+    }, concurrency + 2, undefined, waitUntilOf(ctx)); // The minute cron drains jobs too: as in queue(), nothing waits for the second classifier's queue.
   },
 } satisfies ExportedHandler<Env>;

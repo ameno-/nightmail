@@ -51,9 +51,9 @@ export function keepScreenCall(db: object | undefined, row: ScreenCallRow) {
   } catch { /* A record never changes the request's outcome. */ }
 }
 
-/** Writes the rows kept for `db` in one INSERT, in a transaction of its own (a savepoint inside one). Never throws. */
-export async function flushScreenCalls(db: Runtime['db']): Promise<void> {
-  const buffer = buffers.get(db);
+/** Writes the rows kept for `sourceDb` (default `db`) in one INSERT, in a transaction of its own (a savepoint inside one). Never throws. */
+export async function flushScreenCalls(db: Runtime['db'], sourceDb: object = db): Promise<void> {
+  const buffer = buffers.get(sourceDb);
   if (!buffer || (!buffer.rows.length && !buffer.dropped)) return;
   const rows = buffer.rows.splice(0), dropped = buffer.dropped;
   buffer.dropped = 0;

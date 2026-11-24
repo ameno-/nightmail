@@ -1156,6 +1156,7 @@ export type SingleEmailQueued = {
     id: string;
     status: 'queued';
     simulated: boolean;
+    screen?: EmailScreenSummary;
     /**
      * A scheduled send: when it goes (UTC).
      */
@@ -1168,6 +1169,13 @@ export type SingleEmailQueued = {
      */
     mailboxMessageId?: string;
     threadId?: string;
+};
+
+/**
+ * Content-screen outcome recorded at accept time when screening applies.
+ */
+export type EmailScreenSummary = {
+    status: 'passed' | 'skipped';
 };
 
 export type SendEmailInput = {
@@ -1210,7 +1218,7 @@ export type SendEmailInput = {
         value: string;
     }>;
     /**
-     * Request Jev screening for live transactional mail. Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Probation and marketing mail defer on classifier outages; trusted transactional mail can proceed. Simulated mail is not screened. A positive reject verdict records CONTENT_REJECTED_SPAM before calling SES.
+     * Request Jev screening at accept time for live transactional mail (with JevF failover). Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Simulated mail is not screened. A positive reject verdict fails the request synchronously with 422 CONTENT_REJECTED_SPAM (nothing queued); if both classifiers are unavailable, the request fails with retryable 503 CONTENT_SCREEN_UNAVAILABLE and Retry-After (nothing queued).
      */
     screen?: boolean;
     /**
@@ -1224,7 +1232,7 @@ export type SendEmailInput = {
      */
     replyMailboxId?: string;
     /**
-     * Send at this time instead of now: an RFC 3339 instant with Z or an offset, such as 2026-11-20T09:00:00Z; times without an offset are refused, and the time is returned in UTC. From now (up to a minute in the past, which sends at once) to 30 days ahead; up to 100,000 scheduled emails may wait per workspace (SCHEDULED_EMAIL_LIMIT_EXCEEDED). The email is stored now and reads status queued with scheduled true until then; cancel it with cancelEmail or move it with rescheduleEmail. Sending limits and the balance apply at that time, not now: an email they refuse then is rejected with their code (email.rejected). Not with replyAddressId.
+     * Send at this time instead of now: an RFC 3339 instant with Z or an offset, such as 2026-11-20T09:00:00Z; times without an offset are refused, and the time is returned in UTC. From now (up to a minute in the past, which sends at once) to 30 days ahead; up to 100,000 scheduled emails may wait per workspace (SCHEDULED_EMAIL_LIMIT_EXCEEDED). Content screening and suppression are checked at accept time; sending limits and the balance apply at scheduledAt, when an email they refuse is rejected with their code (email.rejected). Not with replyAddressId.
      */
     scheduledAt?: string;
 };
@@ -1237,6 +1245,7 @@ export type EmailQueued = {
     id: string;
     status: 'queued';
     simulated: boolean;
+    screen?: EmailScreenSummary;
 };
 
 export type SendEmailBatchInput = {
@@ -1286,7 +1295,7 @@ export type BatchSendEmailItem = {
         value: string;
     }>;
     /**
-     * Request Jev screening for live transactional mail. Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Probation and marketing mail defer on classifier outages; trusted transactional mail can proceed. Simulated mail is not screened. A positive reject verdict records CONTENT_REJECTED_SPAM before calling SES.
+     * Request Jev screening at accept time for live transactional mail (with JevF failover). Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Simulated mail is not screened. A positive reject verdict fails the request synchronously with 422 CONTENT_REJECTED_SPAM (nothing queued); if both classifiers are unavailable, the request fails with retryable 503 CONTENT_SCREEN_UNAVAILABLE and Retry-After (nothing queued).
      */
     screen?: boolean;
 };

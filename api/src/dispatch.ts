@@ -57,7 +57,7 @@ function resolveJobHandler(type: string): Promise<JobHandler | undefined> {
 }
 /** Background jobs only (campaign orchestration, feedback recovery, webhooks, maintenance). Cloudflare's queue consumer uses this; mail is dispatched by Durable Objects. */
 export async function drainJobs(runtime: Runtime, limit = 20, concurrency = 2, maxDurationMs = 20000, pool: import('./jobs.js').JobPool='all') { return processJobs(runtime, resolveJobHandler, limit, concurrency, maxDurationMs,pool); }
-type Partition = { region: string; accountId?: string; kind?: 'shared' | 'byo' };
+type Partition = { region: string; accountId?: string; kind?: 'shared' | 'byo'; maxSendRate?: number };
 export async function dispatchPartitions(runtime: Runtime, recoverInterrupted = false): Promise<Partition[]> {
   // Recover once per sweep, even if a disconnected account has no queued mail. A stale attempt may
   // already have reached SES: record uncertainty atomically; never put it back on the send queue. The same
@@ -88,13 +88,16 @@ export async function dispatchPartitions(runtime: Runtime, recoverInterrupted = 
   ), ${terminalEvents(sql`SELECT * FROM stale`)}, finished AS (${finishCampaigns(sql`SELECT workspace_id, id AS campaign_id FROM sending_campaigns WHERE state='sending' AND expanded=total`, sql`SELECT id FROM stale`)})` : sql``;
   const due = sql`e.status='queued' AND (e.scheduled_at IS NULL OR e.scheduled_at <= now()) AND (e.lease_until IS NULL OR e.lease_until < now())`;
   const partitions = runtime.config.multiTenant ? sql`
-    SELECT DISTINCT c.aws_account_id AS "accountId", c.region, c.kind FROM ${sendingConnections(runtime)} c
-    WHERE c.paused_at IS NULL AND EXISTS (SELECT 1 FROM sending_emails e WHERE e.workspace_id=c.workspace_id AND e.region=c.region AND e.status='queued'
+    SELECT DISTINCT c.aws_account_id AS "accountId", c.region, c.kind, l.max_send_rate AS "maxSendRate"
+    FROM ${sendingConnections(runtime)} c
+    LEFT JOIN provider_account_limits l ON l.aws_account_id = c.aws_account_id AND l.region = c.region AND l.max_send_rate > 0
+    WHERE c.paused_at IS NULL AND EXISTS (SELECT 1 FROM sending_emails e WHERE e.workspace_id=c.workspace_id AND e.region=c.region AND e.status='queued' AND e.screened
       AND e.scheduled_at IS NULL AND (e.lease_until IS NULL OR e.lease_until < now()) UNION ALL
-      SELECT 1 FROM sending_emails e WHERE e.workspace_id=c.workspace_id AND e.region=c.region AND e.status='queued'
+      SELECT 1 FROM sending_emails e WHERE e.workspace_id=c.workspace_id AND e.region=c.region AND e.status='queued' AND e.screened
       AND e.scheduled_at <= now() AND (e.lease_until IS NULL OR e.lease_until < now()))` : sql`
-    SELECT DISTINCT e.region FROM sending_emails e JOIN ses_installation_settings s ON s.workspace_id=e.workspace_id
-    WHERE ${due} AND s.enabled_regions ? e.region`;
+    SELECT DISTINCT e.region, (SELECT max(l.max_send_rate) FROM sending_region_limits l WHERE l.region = e.region AND l.max_send_rate > 0) AS "maxSendRate"
+    FROM sending_emails e JOIN ses_installation_settings s ON s.workspace_id=e.workspace_id
+    WHERE ${due} AND e.screened AND s.enabled_regions ? e.region`;
   if (!recoverInterrupted) return (await runtime.db.execute<Partition>(partitions)).rows;
   const {rows:[result]}=await runtime.db.execute<{n:number;partitions:Partition[]}>(sql`${recovery} SELECT (SELECT count(*)::int FROM webhook_jobs) AS n,
     coalesce((SELECT jsonb_agg(to_jsonb(p)) FROM (${partitions}) p),'[]') AS partitions`);

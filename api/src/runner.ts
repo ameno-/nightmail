@@ -87,6 +87,7 @@ try {
           try { await syncOutboundMessages(runtime); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'MAILBOX_OUTBOUND_SYNC_FAILED' }); }
         }
         const recover = Date.now() - lastRecovery >= 60_000;
+        if (recover) try { await (await import('./sending.js')).screenHeldMail(runtime); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'HELD_SCREEN_SWEEP_FAILED' }); }
         if (recover) try { await scheduleHoldRelease(runtime); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'MAILBOX_HOLD_RELEASE_FAILED' }); }
         if (recover && runtime.config.multiTenant) try { await (await import('./billing/stripe-jobs.js')).billingMinute(runtime); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'BILLING_MINUTE_FAILED' }); }
         const count = await drain(runtime, concurrency * 10, concurrency, 5000, gates, recover, priorityWake,'work');
