@@ -68,15 +68,16 @@ const SegmentInput = z.object({ name: z.string().trim().min(1).max(200), rule: R
 const Segment = SegmentInput.extend({ id: z.string(), ...Scope, ...Dates }).openapi('Segment');
 const Counts = z.object({ matched: z.number().int(), eligible: z.number().int(), suppressed: z.number().int(), unsubscribed: z.number().int() });
 const Deleted = z.object({ id: z.string(), deleted: z.literal(true) });
-const Audit = z.object({ id: z.string(), ...Scope, contactId: z.string(), email: z.string(), status: z.enum(['subscribed', 'unsubscribed']), source: z.string(), policyVersion: z.string().nullable(), evidence: z.string().nullable(), actorKeyId: z.string().nullable(), occurredAt: z.string(), createdAt: z.string() });
+const Audit = z.object({ id: z.string(), ...Scope, contactId: z.string(), email: z.string(), status: z.enum(['subscribed', 'unsubscribed']), source: z.string(), policyVersion: z.string().nullable(), evidence: z.string().nullable(), actorKeyId: z.string().nullable(), importId: z.string().nullable().describe('Committed import ID when source is import; null otherwise.'), occurredAt: z.string(), createdAt: z.string() });
 const ConsentInput = z.object({ status: z.enum(['subscribed', 'unsubscribed']), source: z.string().trim().min(1).max(200).optional(), policyVersion: z.string().trim().min(1).max(120).optional(), evidence: z.string().trim().min(1).max(2000).optional(), occurredAt: z.string().datetime({ offset: true }).refine(v => Date.parse(v) <= Date.now() + 60000, 'Consent cannot occur in the future.').optional(), confirmResubscribe: z.boolean().default(false) }).strict();
 const ImportRowSchema = z.object({ row: z.number().int(), email: z.string(), name: z.string().optional(), properties: Properties });
 const ImportErrorSchema = z.object({ row: z.number().int(), field: z.string(), message: z.string() });
-const Import = z.object({ id: z.string(), ...Scope, listId: z.string().nullable(), status: z.enum(['preview', 'committed']), rows: z.array(ImportRowSchema), errors: z.array(ImportErrorSchema), imported: z.number().int(), ...Dates }).openapi('AudienceImport');
-const IMPORT_MAX_BYTES = 5 * 1024 * 1024, IMPORT_MAX_ROWS = 50_000, IMPORT_OPEN_PREVIEW_CAP = 50, IMPORT_PREVIEW_RATE_PER_MINUTE = 40;
+const Import = z.object({ id: z.string(), ...Scope, listId: z.string().nullable(), status: z.enum(['preview', 'committed']), rows: z.array(ImportRowSchema), errors: z.array(ImportErrorSchema), imported: z.number().int(), rowsRetained: z.boolean().describe('false once committed row payloads are no longer kept after the retention window (rows is then [] while imported keeps the count).'), errorsRetained: z.boolean().describe('false once per-row error details are no longer kept after the retention window (errors is then []).'), ...Dates }).openapi('AudienceImport');
+const IMPORT_MAX_BYTES = 5 * 1024 * 1024, IMPORT_MAX_ROWS = 50_000, IMPORT_OPEN_PREVIEW_CAP = 50, IMPORT_PREVIEW_RATE_PER_MINUTE = 40, IMPORT_SAMPLE_CONTACT_IDS = 2000;
 function importNotFound(): never { throw new ApiError(404, 'NOT_FOUND', `Import was not found. A preview that was never committed is removed once the workspace has ${IMPORT_OPEN_PREVIEW_CAP} newer ones (or after 7 days). Preview the file again.`); }
-const importMetaColumns = { id: imports.id, workspaceId: imports.workspaceId, listId: imports.listId, status: imports.status, imported: imports.imported, createdAt: imports.createdAt, updatedAt: imports.updatedAt };
+const importMetaColumns = { id: imports.id, workspaceId: imports.workspaceId, listId: imports.listId, status: imports.status, imported: imports.imported, rowsScrubbedAt: imports.rowsScrubbedAt, errorsScrubbedAt: imports.errorsScrubbedAt, createdAt: imports.createdAt, updatedAt: imports.updatedAt };
 type ImportMeta = { [K in keyof typeof importMetaColumns]: (typeof imports.$inferSelect)[K] };
+const importSummary = ({ rowsScrubbedAt, errorsScrubbedAt, ...meta }: ImportMeta) => ({ ...meta, rowsRetained: rowsScrubbedAt === null, errorsRetained: errorsScrubbedAt === null });
 const ImportCommit = z.object({ consent: z.object({ status: z.literal('subscribed'), evidence: z.string().trim().min(1).max(2000).describe('How these people agreed to marketing email, for example "Opted in at checkout". Stored with each consent record.'), policyVersion: z.string().trim().min(1).max(120).optional() }).strict().optional().describe('Records that everyone in this import agreed to receive marketing email. It changes only contacts with no consent decision yet: prior opt-outs stay unsubscribed and suppressed addresses stay suppressed. Omit it to import without consent.') }).strict().openapi('CommitContactImportInput');
 const CommittedImport = Import.extend({ subscribed: z.number().int().describe('Contacts this commit marked subscribed; 0 without consent or when the import was already committed.') }).openapi('CommittedContactImport');
 const ImportInput = z.object({ csv: z.string().min(1).max(IMPORT_MAX_BYTES), listId: z.string().min(1).max(120).optional(), mapping: z.object({ email: z.string().min(1).max(200), name: z.string().min(1).max(200).optional(), firstName: z.string().min(1).max(200).optional(), plan: z.string().min(1).max(200).optional(), country: z.string().min(1).max(200).optional() }).strict() }).strict();
@@ -511,7 +512,7 @@ function streamImportResponse(c: Ctx, meta: ImportMeta, rowsJson: string, errors
     rowsJson,
     `,"errors":`,
     errorsJson,
-    `,"imported":${meta.imported},"createdAt":${JSON.stringify(meta.createdAt)},"updatedAt":${JSON.stringify(meta.updatedAt)}${subscribed !== undefined ? `,"subscribed":${subscribed}` : ''}}`,
+    `,"imported":${meta.imported},"rowsRetained":${meta.rowsScrubbedAt === null},"errorsRetained":${meta.errorsScrubbedAt === null},"createdAt":${JSON.stringify(meta.createdAt)},"updatedAt":${JSON.stringify(meta.updatedAt)}${subscribed !== undefined ? `,"subscribed":${subscribed}` : ''}}`,
   ];
   return streamTextPartsResponse(c, parts, status, { lease, idleMs: importStream.idleMs, maxMs: importStream.maxMs });
 }
@@ -699,9 +700,9 @@ export function registerAudience(app: App) {
     }
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/contact-imports', operationId: 'listContactImports', tags: ['Audience'], security, request: { query: PageQuery }, responses: { 200: response(page(Import.omit({ rows: true, errors: true }))), ...errors } }), async c => {
-    const identity = actor(c), query = c.req.valid('query'); const rows = await c.env.db.select(importMetaColumns).from(imports).where(and(scope(imports, identity), query.cursor ? gt(imports.id, query.cursor) : undefined)).orderBy(asc(imports.id)).limit(query.limit + 1); return c.json(paginate(rows, query.limit), 200);
+    const identity = actor(c), query = c.req.valid('query'); const rows = await c.env.db.select(importMetaColumns).from(imports).where(and(scope(imports, identity), query.cursor ? gt(imports.id, query.cursor) : undefined)).orderBy(asc(imports.id)).limit(query.limit + 1); const result = paginate(rows, query.limit); return c.json({ ...result, data: result.data.map(importSummary) }, 200);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/contact-imports/{id}', operationId: 'getContactImport', tags: ['Audience'], security, request: { params: IdParams }, responses: { 200: response(Import), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: '/v1/contact-imports/{id}', operationId: 'getContactImport', tags: ['Audience'], security, description: 'Read one import preview or committed import report. Committed row payloads are retained briefly after commit (rowsRetained is false and rows is [] once scrubbed; imported keeps the count); per-row errors are retained longer (errorsRetained is false once scrubbed).', request: { params: IdParams }, responses: { 200: response(Import), ...errors } }), async c => {
     const identity = actor(c);
     const reserveBytes = 24 * 1024 * 1024;
     let lease: MemoryLease;
@@ -752,6 +753,7 @@ export function registerAudience(app: App) {
           if (job.listId) { const [list] = await tx.select({ id: lists.id }).from(lists).where(and(scope(lists, identity), eq(lists.id, job.listId))).limit(1).for('share'); if (!list) notFound('List'); }
           const now = new Date().toISOString();
           let subscribed = 0;
+          let sampleContactIds: string[] = [];
           if (job.rowCount > 0) {
             // Statement 1: upsert contacts with time-ordered UUIDv7 IDs (row_id('con') format), check merged property
             // limits (<= 50) in SQL, and — when consent is attested — insert brand-new contacts directly as 'subscribed'
@@ -760,7 +762,7 @@ export function registerAudience(app: App) {
             // deleted contact) and audience_list_members never fire in the same statement and double-count.
             const initialConsent = consent ? 'subscribed' : 'unknown';
             const tsHex = Date.now().toString(16).padStart(12, '0');
-            const { rows: [step1] } = await tx.execute<{ bad_row: number | null; inserted_subscribed: number; jobs_enqueued: number; existing_unknown_ids: string[] | null; contact_ids: string[] | null }>(sql`
+            const { rows: [step1] } = await tx.execute<{ bad_row: number | null; inserted_subscribed: number; jobs_enqueued: number; existing_unknown_ids: string[] | null; contact_ids: string[] | null; sample_ids: string[] | null }>(sql`
               WITH incoming AS (
                 SELECT (r->>'row')::int AS row_num, r->>'email' AS email, r->>'name' AS name, coalesce(r->'properties', '{}'::jsonb) AS properties
                 FROM audience_imports i, jsonb_array_elements(i.rows) r
@@ -777,8 +779,8 @@ export function registerAudience(app: App) {
                   OR octet_length(u.properties::text) > ${CONTACT_PROPERTIES_DB_MAX_BYTES}
                 ORDER BY inc.row_num LIMIT 1
               )${consent ? sql`, audited AS (
-                INSERT INTO audience_consent_audit (id, workspace_id, contact_id, email, status, source, policy_version, evidence, actor_key_id, occurred_at)
-                SELECT 'cns_' || ${tsHex}::text || '7' || substr(replace(gen_random_uuid()::text, '-', ''), 14), ${identity.workspaceId}, id, email, 'subscribed', 'import', ${consent.policyVersion ?? null}, ${consent.evidence}, ${identity.keyId}, ${now}
+                INSERT INTO audience_consent_audit (id, workspace_id, contact_id, email, status, source, policy_version, evidence, actor_key_id, import_id, occurred_at)
+                SELECT 'cns_' || ${tsHex}::text || '7' || substr(replace(gen_random_uuid()::text, '-', ''), 14), ${identity.workspaceId}, id, email, 'subscribed', 'import', ${consent.policyVersion ?? null}, ${consent.evidence}, ${identity.keyId}, ${job.id}, ${now}
                 FROM upserted WHERE inserted
                 RETURNING id, contact_id
               ), numbered AS (
@@ -799,8 +801,10 @@ export function registerAudience(app: App) {
                 ${consent ? sql`(SELECT count(*)::int FROM audited)` : sql`0`} AS inserted_subscribed,
                 ${consent ? sql`(SELECT count(*)::int FROM enqueued)` : sql`0`} AS jobs_enqueued,
                 ${consent ? sql`ARRAY(SELECT id FROM upserted WHERE NOT inserted AND marketing_consent = 'unknown' ORDER BY id)` : sql`NULL::text[]`} AS existing_unknown_ids,
-                ${job.listId ? sql`ARRAY(SELECT id FROM upserted)` : sql`NULL::text[]`} AS contact_ids`);
+                ${job.listId ? sql`ARRAY(SELECT id FROM upserted)` : sql`NULL::text[]`} AS contact_ids,
+                ARRAY(SELECT id FROM upserted ORDER BY hashtextextended(id, 0) LIMIT ${IMPORT_SAMPLE_CONTACT_IDS}) AS sample_ids`);
             if (step1?.bad_row != null) throw new ApiError(422, 'IMPORT_PROPERTIES_INVALID', `Row ${step1.bad_row}: merged contact properties exceed the supported limits. No rows were imported.`, `rows.${step1.bad_row}.properties`);
+            sampleContactIds = step1?.sample_ids ?? [];
             subscribed += step1?.inserted_subscribed ?? 0;
             noteEnqueued(step1?.jobs_enqueued ?? 0);
             // Statement 2 (only when re-imported existing contacts had marketing_consent = 'unknown'): upgrade them
@@ -812,8 +816,8 @@ export function registerAudience(app: App) {
                   WHERE c.workspace_id = ${identity.workspaceId} AND c.id = ANY(${sql.param(step1.existing_unknown_ids)}::text[]) AND c.marketing_consent = 'unknown'
                   RETURNING c.id, c.email
                 ), audited AS (
-                  INSERT INTO audience_consent_audit (id, workspace_id, contact_id, email, status, source, policy_version, evidence, actor_key_id, occurred_at)
-                  SELECT 'cns_' || ${tsHex}::text || '7' || substr(replace(gen_random_uuid()::text, '-', ''), 14), ${identity.workspaceId}, id, email, 'subscribed', 'import', ${consent.policyVersion ?? null}, ${consent.evidence}, ${identity.keyId}, ${now} FROM changed
+                  INSERT INTO audience_consent_audit (id, workspace_id, contact_id, email, status, source, policy_version, evidence, actor_key_id, import_id, occurred_at)
+                  SELECT 'cns_' || ${tsHex}::text || '7' || substr(replace(gen_random_uuid()::text, '-', ''), 14), ${identity.workspaceId}, id, email, 'subscribed', 'import', ${consent.policyVersion ?? null}, ${consent.evidence}, ${identity.keyId}, ${job.id}, ${now} FROM changed
                   RETURNING id, contact_id
                 ), numbered AS (
                   SELECT id, contact_id, ((row_number() OVER () - 1) / 100) AS grp FROM audited
@@ -844,7 +848,7 @@ export function registerAudience(app: App) {
                 ON CONFLICT DO NOTHING`);
             }
           }
-          const [updated] = await tx.update(imports).set({ status: 'committed', imported: job.rowCount, updatedAt: new Date().toISOString() }).where(and(scope(imports, identity), eq(imports.id, job.id))).returning({ ...importMetaColumns, rowsText: sql<string>`${imports.rows}::text`, errorsText: sql<string>`${imports.errors}::text` });
+          const [updated] = await tx.update(imports).set({ status: 'committed', imported: job.rowCount, sampleContactIds, consentLinkedAt: now, updatedAt: now }).where(and(scope(imports, identity), eq(imports.id, job.id))).returning({ ...importMetaColumns, rowsText: sql<string>`${imports.rows}::text`, errorsText: sql<string>`${imports.errors}::text` });
           return { meta: updated!, rowsText: updated!.rowsText, errorsText: updated!.errorsText, subscribed };
         });
       });

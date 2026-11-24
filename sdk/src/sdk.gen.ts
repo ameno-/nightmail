@@ -753,6 +753,9 @@ export const previewContactImport = <ThrowOnError extends boolean = false>(optio
     }
 });
 
+/**
+ * Read one import preview or committed import report. Committed row payloads are retained briefly after commit (rowsRetained is false and rows is [] once scrubbed; imported keeps the count); per-row errors are retained longer (errorsRetained is false once scrubbed).
+ */
 export const getContactImport = <ThrowOnError extends boolean = false>(options: Options<GetContactImportData, ThrowOnError>): RequestResult<GetContactImportResponses, GetContactImportErrors, ThrowOnError> => (options.client ?? client).get<GetContactImportResponses, GetContactImportErrors, ThrowOnError>({
     security: [
         { scheme: 'bearer', type: 'http' },
