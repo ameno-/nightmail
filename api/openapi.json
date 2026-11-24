@@ -1429,7 +1429,7 @@
                 "manage"
               ]
             },
-            "description": "read, send and manage, on every sender domain: send email, manage domains, inboxes, receiving, webhooks and campaigns. Never API keys or agent tokens; members, billing and deleting the workspace are a person's."
+            "description": "read, send and manage, on every sender domain: send email, manage domains, inboxes, receiving, webhooks and campaigns. It can't create API keys, agent tokens, inbox connection keys, inbox keys or mail-client (IMAP/SMTP) passwords; members, billing and deleting the workspace are a person's."
           },
           "baseUrl": {
             "type": "string",

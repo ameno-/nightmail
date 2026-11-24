@@ -19,9 +19,9 @@ import { mcpClientConfig, mcpServerUrl } from './mcp-clients.js';
  *
  * Either way the agent gets one API key, "Agent (set up <date>)", listed and revocable under API keys like any other,
  * with AGENT_PERMISSIONS on every sender domain: what onboarding needs (sending, domains, inboxes and receiving, webhooks)
- * and the rest of the workspace's own resources, inbox-scoped credentials included (inbox connections, mail client
- * passwords). It never administers the workspace: keyAdminRefusal refuses it API keys and agent tokens, and
- * agentSetupRefusal billing (api_keys.agent_setup_id marks it). Members, invitations, the sending
+ * and the rest of the workspace's own resources. It never administers the workspace: keyAdminRefusal refuses it API keys
+ * and agent tokens, and agentSetupRefusal billing and the credentials that would outlive it (inbox connection keys, inbox
+ * keys, mail-client passwords); api_keys.agent_setup_id marks it. Members, invitations, the sending
  * connection and the workspace itself are a person's already: no API key reaches them.
  *
  * A secret is the row's ID (its selector) and a 256-bit verifier; only the verifier's SHA-256 is stored, and the
@@ -122,7 +122,7 @@ const AgentKey = z.object({
   key: z.string().describe(`The API key (${secretPrefixes.apiKey}…), shown once. Save it as ${apiKeyEnv} in the project's environment, never in code or a commit.`),
   keyId: z.string(), name: z.string().describe('Agent (set up <date>), under API keys, where a person revokes it.'),
   workspaceId: z.string(), workspaceName: z.string().describe('The workspace\'s name: tell the person, so they can confirm the key is in theirs.'),
-  permissions: Permissions.describe('read, send and manage, on every sender domain: send email, manage domains, inboxes, receiving, webhooks and campaigns. Never API keys or agent tokens; members, billing and deleting the workspace are a person\'s.'),
+  permissions: Permissions.describe('read, send and manage, on every sender domain: send email, manage domains, inboxes, receiving, webhooks and campaigns. It can\'t create API keys, agent tokens, inbox connection keys, inbox keys or mail-client (IMAP/SMTP) passwords; members, billing and deleting the workspace are a person\'s.'),
   baseUrl: z.string().describe('The API origin to call.'),
   mcp: z.object({ url: z.string(), config: z.record(z.string(), z.unknown()).describe(`A remote MCP server entry that reads the key from ${apiKeyEnv}.`) }),
   nextStep: z.string(),
