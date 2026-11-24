@@ -10,7 +10,7 @@ import { claimSends } from './states.js';
 import { endpoints, mailAttachments, mailboxes, mailboxWebhookDeliveries, mailMessages, retainedMail, type EndpointRecord } from './db/mailbox.js';
 import { ownReceiving, resumeNeedsUrl } from './rituals.js';
 import { recordAudit } from './audit.js';
-import { approvalField, approvalTie, tiedNextStep } from './approval-ties.js';
+import { approvalField, approvalTie, approvalTies, tiedNextStep, type Tie } from './approval-ties.js';
 import { encrypt, decrypt, encryptWebhookHeaders, postWebhook, webhookHeaderViews, WebhookHeaders, WebhookHeaderViews, webhookSecret, webhookUrl } from './operations.js';
 import { inboundEventTypes, webhookSecretBinding } from './mailbox-events.js';
 import { InboundAddressId } from './inbound-threads.js';
@@ -530,10 +530,10 @@ export function registerInboundWebhooks(app: App, deps: Access) {
   // A webhook outlives the credential that sets it up (requireReceivingConsent already refused approvals without consent).
   const manageHook = (c: Ctx) => { const value = deps.admin(c); lasting(c, WEBHOOK_CHANGE); return value; };
   const lockWebhook = async (tx: DbExecutor, c: Ctx, w: string, webhookId: string, hold = true) => { const row = await lockEndpoint(tx, c, w, { id: webhookId }, hold); if (!row || row.type !== 'webhook') throw notFound(); return row; };
-  const webhookView = async (c: Ctx, row: EndpointRecord) => ({ key: row.key, name: row.name, format: shownFormat(row.format), junk: row.junk, include: row.include, timeoutSeconds: row.timeoutSeconds, retryAttempts: row.retryAttempts,
+  const webhookView = async (c: Ctx, row: EndpointRecord, approval?: Tie | null) => ({ key: row.key, name: row.name, format: shownFormat(row.format), junk: row.junk, include: row.include, timeoutSeconds: row.timeoutSeconds, retryAttempts: row.retryAttempts,
     id: row.id, url: webhookUrlHint(row.url!), description: row.description, eventTypes: row.eventTypes as (typeof inboundEventTypes[number])[], addressIds: row.mailboxIds, paused: row.paused,
     headers: await webhookHeaderViews(c.env, row.encryptedHeaders, webhookSecretBinding(row.workspaceId, row.id), deps.access(c).admin), createdAt: isoTime(row.createdAt)!, updatedAt: isoTime(row.updatedAt)!,
-    approval: await approvalTie(c.env, row.workspaceId, ['endpoint'], row.id) });
+    approval: approval === undefined ? await approvalTie(c.env, row.workspaceId, ['endpoint'], row.id) : approval });
   const webhookFields = { ...z.object(hookOptions).partial().shape, format: FormatInput.optional(), url: z.string().url().max(2048), description: z.string().max(500), eventTypes: z.array(z.enum(inboundEventTypes)).max(inboundEventTypes.length).describe('Events to subscribe to. [] makes a route-only webhook: it receives only mail a route sends to it.'), paused: z.boolean(), headers: WebhookHeaders.optional() };
   const createFields = { ...webhookFields, description: webhookFields.description.default(''), eventTypes: webhookFields.eventTypes.default(['message.received']), paused: webhookFields.paused.default(false) };
   const create = z.object({ ...createFields, addressIds: idFilter.default(null) }).strict();
@@ -568,7 +568,8 @@ export function registerInboundWebhooks(app: App, deps: Access) {
       q.eventType ? sql`${endpoints.eventTypes} ? ${q.eventType}` : undefined,
       q.cursor ? lt(endpoints.id, q.cursor) : undefined)).orderBy(desc(endpoints.id)).limit(q.limit + 1);
     const page = rows.slice(0, q.limit);
-    return c.json({ data: await Promise.all(page.map(row => webhookView(c, row))), nextCursor: rows.length > q.limit ? page.at(-1)!.id : null }, 200);
+    const approvals = await approvalTies(c.env, value.workspaceId, ['endpoint'], page.map(row => row.id));
+    return c.json({ data: await Promise.all(page.map(row => webhookView(c, row, approvals.get(row.id) ?? null))), nextCursor: rows.length > q.limit ? page.at(-1)!.id : null }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: `${path}/{id}`, operationId: 'getInboundWebhook', security, tags, request: { params: IdParam }, responses: { 200: response(InboundWebhookSchema), ...errors } }), async c => c.json(await webhookView(c, await getWebhook(c.env.db, readAccess(c).workspaceId, c.req.valid('param').id)), 200));
   app.openapi(createRoute({ method: 'patch', path: `${path}/{id}`, operationId: 'updateInboundWebhook', security, tags, description: 'Only supplied fields change. Changing format resets junk to that format\'s default unless junk is supplied too.', request: { params: IdParam, body: json(patch.openapi('UpdateInboundWebhook')) }, responses: { 200: response(InboundWebhookSchema), ...errors } }), async c => {
