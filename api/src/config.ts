@@ -86,8 +86,11 @@ const values = z.object({
   // for operators and nothing is posted. Treat as a secret.
   ABUSE_SLACK_WEBHOOK_URL: optional(z.string().url().max(2048).refine(value => value.startsWith('https://hooks.slack.com/'), 'Use a Slack incoming webhook URL.')),
   // Hosted only: a Slack incoming webhook for the operator alerts (src/operator-alerts.ts): a new sign-up, a pause, a
-  // marketing hold, the daily limit, a full customer share, slow sign-in mail. Unset, nothing is posted. Treat as a secret.
+  // marketing hold, the daily limit, a full customer share, slow sign-in mail; and the health alerts (src/health.ts): a
+  // queue, the jobs, a campaign, a route or the database falling behind. Unset, nothing is posted. Treat as a secret.
   OPERATOR_SLACK_WEBHOOK_URL: optional(z.string().url().max(2048).refine(value => value.startsWith('https://hooks.slack.com/'), 'Use a Slack incoming webhook URL.')),
+  // The database's disk in GB, optional: the Health page shows the database's size against it (src/health.ts).
+  DATABASE_DISK_GB: optional(z.coerce.number().positive().max(1_000_000)),
   // Hosted only, optional: the signing secret of the PlanetScale webhook that reports the database disk (src/disk-alert.ts).
   // Set, a delivery must also carry a matching X-PlanetScale-Signature. Treat as a secret. Its length is checked in
   // loadConfig, not here: an optional secret that is wrong must not stop the installation.
@@ -249,6 +252,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     abuseMonitoring: v.MULTI_TENANT==='true' && v.NIGHTMAIL_ABUSE_MONITORING ? { since: new Date(v.NIGHTMAIL_ABUSE_MONITORING).toISOString() } : undefined,
     abuseEnforce: v.MULTI_TENANT==='true' && v.NIGHTMAIL_ABUSE_ENFORCE==='true', abuseSlackWebhookUrl: v.MULTI_TENANT==='true' ? v.ABUSE_SLACK_WEBHOOK_URL : undefined,
     operatorSlackWebhookUrl: v.MULTI_TENANT==='true' ? v.OPERATOR_SLACK_WEBHOOK_URL : undefined,
+    databaseDiskBytes: v.DATABASE_DISK_GB === undefined ? undefined : v.DATABASE_DISK_GB * 1024 ** 3,
     planetscaleWebhookSecret: v.MULTI_TENANT==='true' ? planetscaleSecret(v.PLANETSCALE_WEBHOOK_SECRET) : undefined,
     billing: v.MULTI_TENANT==='true' ? { stripe: v.STRIPE_SECRET_KEY && v.STRIPE_WEBHOOK_SECRET ? { secretKey: v.STRIPE_SECRET_KEY, webhookSecret: v.STRIPE_WEBHOOK_SECRET, automaticTax: v.STRIPE_AUTOMATIC_TAX === 'true', apiBase: v.STRIPE_API_BASE.replace(/\/$/, '') } : undefined } : undefined,
     placementShadow: v.MULTI_TENANT === 'true' && v.NIGHTMAIL_PLACEMENT_SHADOW === 'true', placementDblZone: v.NIGHTMAIL_PLACEMENT_DBL_ZONE,
