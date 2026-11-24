@@ -33640,7 +33640,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const baseCustomer = {
         from: 'sender@example.com', to: ['s1-reader-1@example.com'], cc: [], bcc: [], replyTo: [],
         region: REGION, kind: 'marketing' as const, subject: 'Static S1',
-        html: revRow.rendered.html, text: revRow.rendered.text, attachments: [], tracking: false, headers: [],
+        html: revRow.rendered.html, text: revRow.rendered.text, attachments: [], tracking: Boolean(revRow.draft.tracking), headers: [],
       };
       const baseHash = await digest(canonical({ ...baseCustomer, to: [] }));
       assert.equal(await verifyCampaignContentHash(baseCustomer, await staticContentHash(baseHash, 's1-reader-1@example.com')), true);
