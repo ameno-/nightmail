@@ -119,8 +119,10 @@ export interface Config {
   abuseMonitoring?: { since: string };
   /** ABUSE_SLACK_WEBHOOK_URL: where abuse-monitoring alerts are posted (src/abuse-alerts.ts). Undefined: stored only. */
   abuseSlackWebhookUrl?: string;
-  /** OPERATOR_SLACK_WEBHOOK_URL: where the operator alerts are posted (src/operator-alerts.ts). Undefined: nothing is posted. */
+  /** OPERATOR_SLACK_WEBHOOK_URL: where the operator alerts (src/operator-alerts.ts) and the health alerts (src/health.ts) are posted. Undefined: nothing is posted. */
   operatorSlackWebhookUrl?: string;
+  /** DATABASE_DISK_GB in bytes: the Health page shows the database's size against it. Undefined: the size alone. */
+  databaseDiskBytes?: number;
   /** NIGHTMAIL_ABUSE_ENFORCE. Reserved: abuse monitoring never blocks, and no code reads this yet. */
   abuseEnforce?: boolean;
   /** Hosted billing. stripe is undefined until STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET are set (money routes answer 503 BILLING_NOT_CONFIGURED). */
@@ -681,6 +683,24 @@ export function logError(error: unknown, fields: Record<string, unknown> & { cod
     entry = { ...fields, code: errorCodeOf(fields.code), errorType: known ? undefined : errorTypeOf(error), databaseCode: databaseCodeOf(error), stack: known ? undefined : stackFrames(error) };
   } catch { return logFallback(); }
   log(level, entry);
+}
+/**
+ * Why a platform call failed, for the few lines that must say so (a dispatcher run that failed): the error's own
+ * message, cut to 300 characters; log scrubs addresses and credential-like runs from it like any string. Undefined for
+ * an ApiError (its code says it) and for anything that came from the database or a socket: a driver error's text quotes
+ * the statement and its parameters, which can be a customer's data, and its SQLSTATE is logged instead. logError never
+ * logs a message; this is the one explicit exception, passed as `cause`.
+ */
+export function platformMessage(error: unknown): string | undefined {
+  try {
+    if (!(error instanceof Error) || error instanceof ApiError) return undefined;
+    for (const e of errorChain(error)) {
+      const driver = e as { code?: unknown; severity?: unknown; query?: unknown; params?: unknown; name?: unknown };
+      if (typeof driver.code === 'string' || driver.severity !== undefined || driver.query !== undefined || driver.params !== undefined || driver.name === 'DrizzleQueryError') return undefined;
+    }
+    const message: unknown = error.message;
+    return typeof message === 'string' && message ? message.slice(0, 300) : undefined;
+  } catch { return undefined; }
 }
 export { SECURITY_HEADERS };
 export function applySecurityHeaders(headers: Headers): Headers {

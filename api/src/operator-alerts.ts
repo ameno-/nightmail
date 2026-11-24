@@ -51,10 +51,14 @@ const count = (n: unknown) => Number(n).toLocaleString('en-US');
 const share = (slow: number, mail: number) => mail / slow >= 2 ? `1 in ${Math.round(mail / slow)}` : slow >= mail ? 'All' : 'Most';
 const whole = (v: unknown) => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
 
-/**
- * The Slack message for one alert: one section with an emoji, a bold label and a few words, an Open button into the
- * Operator area, and the same words as the plain-text fallback. Null for a payload that is not one of the seven.
- */
+/** One card: an emoji, a bold label and a few words, an Open button, and the same words as the plain-text fallback. */
+export const slackCard = (card: { emoji: string; label: string }, words: string, url: string) => ({
+  text: `${card.label}: ${words}`, unfurl_links: false, unfurl_media: false,
+  blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `${card.emoji} *${card.label}* ${words}`, verbatim: true },
+    accessory: { type: 'button', action_id: 'open', text: { type: 'plain_text', text: 'Open', emoji: false }, url } }],
+});
+
+/** The Slack message for one alert (slackCard), its button opening the Operator area. Null for a payload that is not one of the seven. */
 export function operatorCard(publicUrl: string, p: Record<string, unknown>, workspace: { id: string; name: string | null }) {
   const kind = p.kind as Kind, name = cardName(workspace.name ?? '');
   if (typeof kind !== 'string' || !Object.hasOwn(CARDS, kind)) return null;
@@ -70,11 +74,7 @@ export function operatorCard(publicUrl: string, p: Record<string, unknown>, work
   if (!words) return null;
   const origin = publicUrl.replace(/\/$/, ''), global = kind === 'share_full' || kind === 'signin_slow';
   const url = global ? `${origin}/operator` : `${origin}/operator/workspaces/${encodeURIComponent(workspace.id)}`;
-  return {
-    text: `${card.label}: ${words}`, unfurl_links: false, unfurl_media: false,
-    blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `${card.emoji} *${card.label}* ${words}`, verbatim: true },
-      accessory: { type: 'button', action_id: 'open', text: { type: 'plain_text', text: 'Open', emoji: false }, url } }],
-  };
+  return slackCard(card, words, url);
 }
 
 /**

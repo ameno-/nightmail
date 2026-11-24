@@ -44,10 +44,17 @@ const supportRequired = () => new ApiError(403, 'SUPPORT_GRANT_REQUIRED', `This 
  * /v1/operator and /v1/operator/*: an operator's dashboard session, or the support platform through the SupportPlatform
  * service binding (src/support-platform.ts) on the support routes only, else 403. No bearer token is an operator: the
  * static platform token (BANE_SUPPORT_PLATFORM_TOKEN) is retired. The one bearer credential here is a UI notes key
- * (src/ui-notes.ts), and only on the requests notesKeyRoute names: reading UI notes and setting their status.
+ * (src/ui-notes.ts), and only on the requests notesKeyRoute names: reading UI notes, setting their status and reading
+ * the installation's health.
  */
 export const operatorGate: MiddlewareHandler<AppEnv> = async (c, next) => {
-  if (!c.env.config.multiTenant) throw operatorRequired();
+  // A self-hosted installation has no operator area, with one exception: its Health page (src/health.ts), for anyone
+  // signed in to its dashboard. The route itself refuses any other credential.
+  if (!c.env.config.multiTenant) {
+    if (c.req.method !== 'GET' || c.req.path !== '/v1/operator/health' || c.req.header('authorization') !== undefined || !hasSessionCookie(c.req.raw.headers)) throw operatorRequired();
+    const { authenticate } = await import('./auth.js');
+    return authenticate(c, next);
+  }
   if (c.req.header('authorization') !== undefined) {
     const { notesKeyRoute, authenticateNotesKey } = await import('./ui-notes.js');
     if (!notesKeyRoute(c.req.method, c.req.path) || c.env.platformCaller) throw operatorRequired();

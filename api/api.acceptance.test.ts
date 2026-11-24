@@ -9088,6 +9088,10 @@ describe('Hosted MCP OAuth and tools', () => {
         ['POST', '/v1/operator/ui-note-keys', { name: 'more' }], ['POST', `/v1/operator/ui-note-keys/${key.id}/revoke`, {}], ['GET', '/v1/operator/workspaces'], ['GET', '/v1/operator/actions']] as const)
         error(await send(method, path, agent, body), 403, 'OPERATOR_REQUIRED');
       assert.equal((await send('HEAD', '/v1/operator/ui-notes', agent)).status, 403);
+      // The one other thing an agent key reads: the installation's health (src/health.ts), the open alerts and the rollup.
+      const health = ok(await send('GET', '/v1/operator/health', agent));
+      assert.deepEqual([Array.isArray(health.alerts), Array.isArray(health.queues), 'memory' in health], [true, true, false]);
+      error(await send('POST', '/v1/operator/health', agent, {}), 403, 'OPERATOR_REQUIRED');
       for (const path of ['/v1/me', '/v1/emails', '/v1/api-keys']) error(await send('GET', path, agent), 401, 'AUTH_INVALID');
       // The agent's script, end to end through the same key: list with screenshots, read one, set its status and PR.
       const { mkdtempSync, readFileSync, rmSync } = await import('node:fs'), { tmpdir } = await import('node:os'), { join } = await import('node:path');
@@ -32192,6 +32196,226 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.doesNotMatch(cut, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/, 'No half character.');
       assert.equal(Array.from(new Intl.Segmenter('en', { granularity: 'grapheme' }).segment(cut)).length, 80);
     }
+  });
+
+  // Health (src/health.ts): the incidents of 23 November 2026, each as the sample the minute tick would have read.
+  test('MX health: each incident of 23 November is an alert within its minutes, with a stable key, a severity and the number that matters, in words that carry numbers, codes and IDs only; a failed probe neither opens nor clears', async () => {
+    const { evaluate, emptyMemory } = await import('./src/health.js'), { LATENCY_BUCKETS } = await import('./src/health-counters.js');
+    type Sample = import('./src/health.js').Sample;
+    const GB = 1024 ** 3, c = (text: string) => '`' + text + '`';
+    const quiet = (): Sample => ({ queues: [], late: [], failed: [], campaigns: [], counters: [], database: { connections: 12, maxConnections: 100, longTransactions: 0, oldestTransactionSeconds: 0, slowQueries: 0, lockWaits: 0, sizeBytes: 4 * GB } });
+    let memory = emptyMemory(), now = 1_800_000_000;
+    const tick = (sample: Sample) => { const result = evaluate(sample, memory, now, 150 * GB); memory = result.rollup.memory; now += 60; return result; };
+    const lines = (sample: Sample) => tick(sample).findings.map(finding => `${finding.key} ${finding.severity} ${finding.value}: ${finding.words}`);
+    const campaign = (id: string, extra: Json) => ({ id, workspaceId: 'ws_fixture', state: 'sending', total: 1_800_000, prepared: 1_800_000, expanded: 0, canceled: 0, paced: false, rateShare: null, waitingReason: null, waitingSeconds: null,
+      pauseCode: null, pausedSeconds: null, quarantines: 0, launchedSeconds: 600, share: 'shared' as const, account: 160, planned: 40, accepted: null, delivered: null, bounced: null, complained: null, ...extra });
+    const hist = (counts: Record<number, number>) => Array.from({ length: LATENCY_BUCKETS.length + 1 }, (_, i) => counts[i] ?? 0);
+    const counter = (kind: string, key: string, extra: Json = {}) => ({ kind, key, n: 0, errors: 0, ms: 0, slowest: 0, n5: 0, errors5: 0, slowest5: 0, verySlow5: 0, stormMinutes: 0, stormRate: 0, hist: null, ...extra });
+    assert.deepEqual(lines(quiet()), []);
+
+    // 5 and 6. The feedback queue 20 minutes behind and 1,883 inbound jobs 13 minutes late: busy for one tick, behind on the second.
+    const behind = { ...quiet(), queues: [{ name: 'feedback', depth: 158_000, oldestMs: 20 * 60_000 }, { name: 'work', depth: 4_000, oldestMs: 9_000 }, { name: 'feedback-dlq', depth: 0, oldestMs: 0 }],
+      late: [{ class: 'ingest', type: 'mailbox.ingest', pending: 1_883, oldestSeconds: 780 }, { class: 'campaign', type: 'campaign.run', pending: 2, oldestSeconds: 12 }] };
+    assert.deepEqual(lines(behind), [], 'One tick is busy, not behind.');
+    const second = tick(behind);
+    assert.deepEqual(second.findings.map(finding => `${finding.key} ${finding.severity} ${finding.value}: ${finding.words}`),
+      [`queue-behind:feedback critical 1200: ${c('feedback')}: oldest 20 min, 158,000 waiting.`, `jobs-behind:mailbox.ingest critical 780: ${c('mailbox.ingest')}: 1,883 due, oldest 13 min.`]);
+    assert.deepEqual([second.rollup.feedbackLagSeconds, second.rollup.queues.map(q => [q.name, q.behind]), second.rollup.jobs!.map(job => [job.type, job.pending, job.behind])],
+      [1200, [['feedback', true], ['work', false], ['feedback-dlq', false]], [['mailbox.ingest', 1_883, true], ['campaign.run', 2, false]]], 'A deep queue that drains in time is not behind.');
+    // A dead letter alerts at once; a probe that failed leaves its alerts and their streaks alone.
+    const blind = tick({ ...behind, late: null, queues: [...behind.queues.slice(0, 2), { name: 'feedback-dlq', depth: 3, oldestMs: 0 }] });
+    assert.deepEqual([blind.findings.map(finding => finding.key), [...blind.blind], blind.rollup.jobs, blind.rollup.memory.streaks['jobs-behind:mailbox.ingest']], [['queue-behind:feedback', 'dead-letters:feedback-dlq'], ['jobs'], null, 2]);
+
+    // 8. 1,639 jobs of one type failed, at once. Customers' webhooks failing and a small pile are not alerts; one failed
+    // campaign job is; and so are six more of a type within half an hour, however small its pile.
+    memory = emptyMemory();
+    const failed = (imports: number) => ({ ...quiet(), failed: [{ type: 'mailbox.recoverStaging', error: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN', failed: 1_600 }, { type: 'mailbox.recoverStaging', error: 'JOB_LEASE_EXHAUSTED', failed: 39 },
+      { type: 'operation.webhook', error: 'WEBHOOK_HTTP_500', failed: 4_000 }, { type: 'mailbox.reconcile', error: 'JOB_INTERNAL_ERROR', failed: 24 }, { type: 'campaign.run', error: 'JOB_LEASE_EXHAUSTED', failed: 1 }, { type: 'audience.import', error: 'IMPORT_FAILED', failed: imports }] });
+    const piles = [`jobs-failed:mailbox.recoverStaging warning 1639: ${c('mailbox.recoverStaging')}: 1,639, mostly ${c('MAILBOX_STAGING_ENVELOPE_UNKNOWN')}.`, `jobs-failed:campaign.run critical 1: ${c('campaign.run')}: 1, mostly ${c('JOB_LEASE_EXHAUSTED')}.`];
+    assert.deepEqual([lines(failed(2)), lines(failed(8))], [piles, [...piles, `jobs-failed:audience.import warning 8: ${c('audience.import')}: 8, 6 in the last 30 min, mostly ${c('IMPORT_FAILED')}.`]]);
+
+    // 4. A first-party campaign of 1.8M releasing 32 a second on an account that allows 160, because the planner reads 40.
+    // What it releases is measured from its cursor and held against the account's rate and the workspace's share, never
+    // against the planner's number: after five minutes its time left is an alert that names all of them, after ten it is
+    // slow. A customer on the shared pool releasing 38 of its 40 is neither; one that releases nothing for five minutes is.
+    memory = emptyMemory();
+    let found: string[] = [];
+    const rates = '20% of the account’s 160/s (entitled to 160/s; the planner reads 40/s)';
+    for (let minute = 0; minute <= 10; minute++) {
+      found = lines({ ...quiet(), campaigns: [campaign('cmp_quartered', { share: 'exempt', expanded: 32 * 60 * minute }), campaign('cmp_stalled', { expanded: 1_800 }), campaign('cmp_paced', { expanded: 60 * minute, paced: true }),
+        campaign('cmp_healthy', { expanded: 38 * 60 * minute, total: 400_000, accepted: 37 * 60 * minute })] });
+      if (minute === 4) assert.deepEqual(found, [], 'Four minutes of samples are too few to say how long it takes.');
+      if (minute === 5) assert.deepEqual(found, [`campaign-long:cmp_quartered warning 55950: ${c('cmp_quartered')}: 15.5 h left at 32/s, ${rates}. 1,790,400 of 1,800,000 left.`,
+        `campaign-slow:cmp_stalled critical 0: ${c('cmp_stalled')}: nothing released for 5 min, 0% of the account’s 160/s (entitled to 40/s). 1,798,200 left.`]);
+    }
+    assert.deepEqual(found.filter(line => line.startsWith('campaign-slow:cmp_quartered')), [`campaign-slow:cmp_quartered warning 32: ${c('cmp_quartered')}: 32/s for 10 min, ${rates}. 1,780,800 left.`]);
+    const healthy = tick({ ...quiet(), campaigns: [campaign('cmp_healthy', { expanded: 38 * 60 * 11, total: 400_000, accepted: 37 * 60 * 11 })] }).rollup.campaigns![0]!;
+    assert.deepEqual([healthy.rate, healthy.acceptedRate, healthy.entitled, healthy.account, healthy.planned, healthy.behind], [38, 37, 40, 160, 40, false]);
+    // A wait starts the samples over, and is itself an alert once it has lasted fifteen minutes (a daily pace never is).
+    for (let minute = 0; minute < 15; minute++) found = lines({ ...quiet(), campaigns: [campaign('cmp_stalled', { expanded: 1_800, waitingReason: 'hosted_daily_quota', waitingSeconds: 7_200 - 60 * minute }), campaign('cmp_paced', { paced: true, waitingReason: 'pacing_window', waitingSeconds: 3_600 })] });
+    assert.deepEqual([found, memory.campaigns], [[`campaign-waiting:cmp_stalled warning 900: ${c('cmp_stalled')}: ${c('hosted_daily_quota')} for 15 min, 106 min to go. 1,798,200 left.`], {}]);
+
+    // 3. Preparing for over five minutes, and the request that took 45 seconds. 2. One page asking 50 times a second.
+    // 1. A read-only database, at its first error. 9. A dispatcher shard whose runs keep failing.
+    memory = emptyMemory();
+    assert.deepEqual(lines({ ...quiet(), campaigns: [campaign('cmp_frozen', { state: 'preparing', prepared: 1_200_000, launchedSeconds: 380 }), campaign('cmp_new', { state: 'preparing', prepared: 0, launchedSeconds: 200 }),
+      campaign('cmp_quarantined', { state: 'paused', pauseCode: 'LIST_QUALITY', pausedSeconds: 120, quarantines: 1, expanded: 500 }), campaign('cmp_by_hand', { state: 'paused', pauseCode: 'PAUSED_BY_USER', pausedSeconds: 120 }),
+      campaign('cmp_last_week', { state: 'paused', pauseCode: 'LIST_QUALITY', pausedSeconds: 90_000 }), campaign('cmp_bouncing', { expanded: 1_800_000, delivered: 11_280, bounced: 720, complained: 2 })],
+      counters: [counter('route', 'POST /v1/campaigns/:id/send', { n: 3, n5: 3, slowest: 45_000, slowest5: 45_000, verySlow5: 1, hist: hist({ 5: 2, [LATENCY_BUCKETS.length]: 1 }) }),
+        counter('route', 'GET /v1/campaigns/:id/stats', { n: 45_000, n5: 15_000, slowest: 40, stormMinutes: 3, stormRate: 3_000, hist: hist({ 1: 45_000 }) }), counter('read', 'ws_fixture', { n: 45_000, n5: 15_000, stormMinutes: 4, stormRate: 3_010 }),
+        counter('route', 'POST /v1/emails/send', { n: 90_000, n5: 30_000, errors: 40, errors5: 40, slowest: 900, stormMinutes: 4, stormRate: 6_000, hist: hist({ 4: 90_000 }) }),
+        counter('code', 'DATABASE_UNAVAILABLE', { n: 40, n5: 40 }), counter('sqlstate', '25006', { n: 40, n5: 40 }), counter('sqlstate', '57014', { n: 4, n5: 4 }), counter('sqlstate', '23505', { n: 900, n5: 300 }),
+        counter('error', 'DISPATCHER_RUN_FAILED', { n: 3, n5: 1 }), counter('error', 'MAILBOX_STAGING_ENVELOPE_UNKNOWN', { n: 9, n5: 6 }), counter('error', 'QUEUE_BACKLOG_ALERT', { n: 15, n5: 5 }), counter('error', 'BILLING_DRIFT', { n: 4, n5: 4 })] }), [
+      `campaign-preparing:cmp_frozen warning 380: ${c('cmp_frozen')}: 6 min, 1,200,000 of 1,800,000 ready.`, `campaign-paused:cmp_quarantined warning 1799500: ${c('cmp_quarantined')} of ${c('ws_fixture')}: ${c('LIST_QUALITY')}, quarantined. 1,799,500 left.`,
+      `campaign-bounces:cmp_bouncing critical 0.06: ${c('cmp_bouncing')}: 6% bounced and 2 complaints on 12,000 settled.`,
+      `slow-requests:POST:/v1/campaigns/:id/send warning 45000: ${c('POST /v1/campaigns/:id/send')}: slowest 45 s, p95 45 s over 3 in 15 min.`, `request-storm:GET:/v1/campaigns/:id/stats warning 3000: ${c('GET /v1/campaigns/:id/stats')}: 3,000 a minute for 3 minutes.`,
+      `request-storm:workspace:ws_fixture warning 3010: workspace ${c('ws_fixture')}: 3,010 reads a minute for 3 minutes.`, `database-errors:25006 critical 40: read-only (${c('25006')}): 40 in 5 min.`,
+      `dispatcher-failing critical 3: 3 failed runs in 15 min, mostly ${c('DISPATCHER_RUN_FAILED')}.`, `errors:MAILBOX_STAGING_ENVELOPE_UNKNOWN warning 6: ${c('MAILBOX_STAGING_ENVELOPE_UNKNOWN')}: 6 in 5 min.`],
+      'Sending mail at 100 a second is not a storm, 40 errors in 45,000 requests are not an alert, unique violations are not database errors, and a line every minute already says is not counted.');
+    // No key holds a space, so the card's key=value line parses; and what is not an identifier never reaches a card.
+    assert.ok(memory.streaks && lines({ ...quiet(), failed: [{ type: 'reader@example.net <b>', error: 'Subject: hello', failed: 30 }] }).every(line => line === `jobs-failed:other warning 30: ${c('other')}: 30, mostly ${c('other')}.`));
+    // The database: connections near the limit, slow queries and lock waits for two ticks; a transaction open ten minutes; the disk three quarters full.
+    const crowded = { ...quiet(), database: { connections: 85, maxConnections: 100, longTransactions: 2, oldestTransactionSeconds: 660, slowQueries: 4, lockWaits: 12, sizeBytes: 120 * GB } };
+    const always = ['database-transaction warning 660: open 11 min, 2 over a minute.', 'database-disk critical 0.8: 80% of 150 GB.'];
+    assert.deepEqual([lines(crowded), lines(crowded)], [always, ['database-connections critical 85: 85 of 100.', always[0], 'database-slow-queries warning 4: 4 running over 30 s.', 'database-lock-waits warning 12: 12 sessions waiting on a lock.', always[1]]]);
+  });
+
+  test('MX health: the tick posts one card when an alert opens, tries a refused card again, reminds, posts a cleared card with the same key and forgets; each card ends with a line a program reads; the Health route reads what the tick wrote, for an operator or a self-hosted dashboard only; without a webhook nothing is posted', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const { healthTick } = await import('./src/health.js'), type = `health.fixture.${unique('t').slice(-8)}`, key = `jobs-failed:${type}`, path = '/v1/operator/health', c = (text: string) => '`' + text + '`';
+      let refuse = false;
+      const posted: Json[] = [], post = async (url: string, card: Json) => { assert.equal(url, OPERATOR_HOOK); if (refuse) throw new Error('Slack answered 500'); posted.push(card); };
+      // This database is shared with the other tests: only this fixture's own job type is asserted on.
+      const mine = () => posted.splice(0).filter(card => String(card.text).includes(type)).map(card => {
+        const [words, machine, ...rest] = String(card.text).split('\n');
+        assert.deepEqual([rest, card.blocks.length, card.blocks[1], card.blocks[0].accessory.url, card.unfurl_links], [[], 2, { type: 'context', elements: [{ type: 'mrkdwn', text: c(machine!), verbatim: true }] }, `${PUBLIC_ORIGIN}/operator?view=health`, false]);
+        return [card.blocks[0].text.text, words, Object.fromEntries(machine!.split(' ').map(pair => [pair.slice(0, pair.indexOf('=')), pair.slice(pair.indexOf('=') + 1)]))];
+      });
+      const tick = (force = true) => healthTick(runtime, { queues: [] }, { post, force });
+      const alert = async () => (await db.query('SELECT kind,severity,value,unit,words,sent_at IS NOT NULL AS sent FROM health_alerts WHERE key=$1', [key])).rows[0];
+      const fail = (n: number, status: string, minutesAgo = 0) => db.query(`INSERT INTO jobs(id,type,workspace_id,payload,status,last_error,available_at) SELECT $1||'-'||g,$2,$3,'{}',$4,CASE WHEN $4='failed' THEN 'FIXTURE_FAILED' END,now()-make_interval(mins=>$5) FROM generate_series(1,$6::int) g`,
+        [unique('job'), type, runtime.config.workspaceId, status, minutesAgo, n]);
+      const recent = (at: string) => Math.abs(Date.now() - Date.parse(at)) < 120_000;
+
+      // Self-hosted, no webhook: the alert is held and listed, and nothing is posted.
+      await fail(30, 'failed');
+      assert.equal(runtime.config.operatorSlackWebhookUrl, undefined);
+      const first = await tick();
+      assert.deepEqual([first.ran, first.cards, posted, await alert()], [true, [], [], { kind: 'jobs-failed', severity: 'warning', value: 30, unit: 'jobs', words: `${c(type)}: 30, mostly ${c('FIXTURE_FAILED')}.`, sent: false }]);
+      assert.ok(first.statements <= 30 && first.open >= 1, `A tick is a bounded number of statements (${first.statements}).`);
+      assert.equal((await tick(false)).ran, false, 'One tick a minute, whoever asks: a second one within 45 seconds does nothing.');
+      const page = ok(await local('GET', path)), listed = page.alerts.find((a: Json) => a.key === key);
+      assert.deepEqual([page.delivery, page.stale, typeof page.generatedAt, { ...listed, since: recent(listed.since) }, page.jobs.find((job: Json) => job.type === type), page.database.connections >= 1, 'memory' in page],
+        ['off', false, 'string', { key, kind: 'jobs-failed', label: 'Jobs failed', severity: 'warning', value: 30, unit: 'jobs', words: `${type}: 30, mostly FIXTURE_FAILED.`, since: true, sentAt: null, runbook: 'docs/operations.md#jobs-failed' },
+          { type, pending: 0, oldestSeconds: 0, failed: 30, error: 'FIXTURE_FAILED', behind: true }, true, false]);
+      const apiKey = ok(await local('POST', '/v1/api-keys', { name: 'Not a dashboard', permissions: ['manage'] }), 201); secrets.add(apiKey.secret);
+      error(await request('GET', path, apiKey.secret), 403, 'OPERATOR_REQUIRED');
+
+      // With the webhook: a card Slack refuses is tried again on the next tick, then posted once and not again.
+      runtime.config.operatorSlackWebhookUrl = OPERATOR_HOOK;
+      refuse = true;
+      assert.deepEqual([(await tick()).cards, (await alert()).sent], [[], false]);
+      refuse = false;
+      await tick(); await tick();
+      const opened = mine(), machine = { key, state: 'open', severity: 'warning', value: '30', unit: 'jobs', runbook: 'docs/operations.md#jobs-failed', health: `${PUBLIC_ORIGIN}/operator?view=health` };
+      assert.deepEqual([opened.map(card => [card[0], card[1], { ...card[2], since: recent(card[2].since) }]), (await alert()).sent],
+        [[[`:x: *Jobs failed* ${c(type)}: 30, mostly ${c('FIXTURE_FAILED')}.`, `Jobs failed: ${c(type)}: 30, mostly ${c('FIXTURE_FAILED')}.`, { ...machine, since: true }]], true]);
+      // A day on it is still open: one reminder, with how long, under the same key and since.
+      await db.query(`UPDATE health_alerts SET since=now()-interval '25 hours',sent_at=now()-interval '25 hours' WHERE key=$1`, [key]);
+      await tick(); await tick();
+      const reminded = mine();
+      assert.deepEqual(reminded.map(card => [card[1], card[2].key, card[2].state, Math.round((Date.now() - Date.parse(card[2].since)) / 3_600_000)]), [[`Jobs failed: ${c(type)}: 30, mostly ${c('FIXTURE_FAILED')}. For 25 h.`, key, 'open', 25]]);
+      // Gone for less than three minutes is not a recovery; after three, one cleared card with the same key, and the alert is forgotten.
+      await db.query(`UPDATE jobs SET status='completed' WHERE type=$1`, [type]);
+      await tick();
+      assert.deepEqual([mine(), (await alert()).kind], [[], 'jobs-failed']);
+      await db.query(`UPDATE health_alerts SET seen_at=now()-interval '4 minutes' WHERE key=$1`, [key]);
+      await tick(); await tick();
+      const cleared = mine();
+      assert.deepEqual([cleared.map(card => [card[0], card[1], { ...card[2], since: card[2].since === reminded[0]![2].since, cleared: recent(card[2].cleared) }]), await alert()],
+        [[[`:white_check_mark: *Cleared: Jobs failed* ${c(type)}, after 25 h.`, `Cleared: Jobs failed: ${c(type)}, after 25 h.`, { key, state: 'cleared', severity: 'warning', since: true, cleared: true, runbook: machine.runbook, health: machine.health }]], undefined]);
+
+      // Jobs due 13 minutes ago: behind on the second tick, through the jobs table's own indexes. Jobs due later are not late.
+      await fail(3, 'pending', 13); await fail(5, 'pending', -60);
+      await tick();
+      assert.deepEqual(mine(), []);
+      await tick();
+      assert.deepEqual(mine().map(card => [card[0], card[2].key, card[2].severity, card[2].unit, Number(card[2].value) >= 780]), [[`:hourglass_flowing_sand: *Jobs behind* ${c(type)}: 3 due, oldest 13 min.`, `jobs-behind:${type}`, 'warning', 'seconds', true]]);
+
+      // Hosted: an operator's staff session only (an operator's agent key too: the UI notes test reads it with one).
+      runtime.config.multiTenant = true;
+      await db.query('UPDATE nightmail_sessions SET staff=true WHERE user_id=$1', [manager!.userId]);
+      error(await local('GET', path), 403, 'OPERATOR_REQUIRED');
+      error(await request('GET', path, apiKey.secret), 403, 'OPERATOR_REQUIRED');
+      const { setOperator } = await import('./scripts/set-operator.js');
+      await setOperator(db, [AUTH_SUBJECT, 'operator:read', '--reason', 'Synthetic health reader']);
+      const hosted = ok(await local('GET', path));
+      assert.deepEqual([hosted.delivery, hosted.jobs.find((job: Json) => job.type === type).behind, hosted.alerts.some((a: Json) => a.key === `jobs-behind:${type}`)], ['slack', true, true]);
+      // A hosted tick reads the campaigns' rates from the account and the connection.
+      const last = await tick();
+      assert.deepEqual([last.ran, Array.isArray(ok(await local('GET', path)).campaigns)], [true, true]);
+    });
+  });
+
+  test('MX health: a slow request is always logged whatever the sampling, error lines are counted by code, and the request counters give each route its count, errors and p95 without a log search, by minute and then by hour', async t => {
+    const { log } = await import('./src/log.js'), counters = await import('./src/health-counters.js'), { healthTick } = await import('./src/health.js'), { platformMessage, ApiError } = await import('./src/core.js'), c = (text: string) => '`' + text + '`';
+    // Sampling keeps one success in ten: with the dice against it a quick 200 is dropped, and a slow one is written whole.
+    const lines: Json[] = [];
+    const dice = t.mock.method(Math, 'random', () => 0.99), info = t.mock.method(console, 'info', (line: string) => { lines.push(JSON.parse(line)); });
+    log('info', { event: 'request', route: '/v1/campaigns/:id/send', status: 202, durationMs: 180 });
+    log('info', { event: 'request', route: '/v1/campaigns/:id/send', status: 202, durationMs: 45_210, slow: true });
+    log('info', { operation: 'worker-runtime', status: 202, runtimeMs: 45_300.5 });
+    log('info', { code: 'JOB_COMPLETED', jobMs: 12 }); log('info', { code: 'JOB_COMPLETED', operation: 'campaign.prepare', jobMs: 9_800 });
+    info.mock.restore(); dice.mock.restore();
+    assert.deepEqual(lines.map(line => [line.durationMs ?? line.runtimeMs ?? line.jobMs, line.slow, line.sampleRate]), [[45_210, true, undefined], [45_300.5, undefined, undefined], [9_800, undefined, undefined]]);
+    // Why a platform call failed is logged only when the error is the platform's: never a database error's text, which quotes parameters.
+    assert.deepEqual([platformMessage(new Error('Durable Object storage operation exceeded timeout which caused object to be reset.')), platformMessage(Object.assign(new Error('duplicate key value (reader@example.net)'), { code: '23505' })),
+      platformMessage(new Error('Failed query', { cause: Object.assign(new Error('timeout'), { severity: 'ERROR' }) })), platformMessage(new ApiError(500, 'INTERNAL_ERROR', 'no')), platformMessage('text')],
+      ['Durable Object storage operation exceeded timeout which caused object to be reset.', undefined, undefined, undefined, undefined]);
+
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const tag = unique('r').slice(-8), slowRoute = `GET /v1/fixture-${tag}/:id`, failing = `POST /v1/fixture-${tag}`, workspace = `ws_${tag}`, code = `FIXTURE_${tag.toUpperCase()}_FAILED`;
+      counters.resetCounters();
+      const errorLines = t.mock.method(console, 'error', () => {});
+      const batch = () => {
+        for (let i = 0; i < 38; i++) counters.countRequest({ route: `/v1/fixture-${tag}/:id`, method: 'GET', status: 200, durationMs: 20, workspace });
+        for (let i = 0; i < 2; i++) counters.countRequest({ route: `/v1/fixture-${tag}/:id`, method: 'GET', status: 200, durationMs: 45_000, workspace });
+        for (let i = 0; i < 30; i++) counters.countRequest({ route: `/v1/fixture-${tag}`, method: 'POST', status: 503, durationMs: 3, workspace, code: 'DATABASE_UNAVAILABLE', databaseCode: '25006' });
+        for (let i = 0; i < 3; i++) counters.countRequest({ route: `/v1/fixture-${tag}/:id`, method: 'GET', status: 200, durationMs: 20, workspace: `ws_quiet_${tag}` });
+        // Error lines by code: a job that keeps failing and a dispatcher run that failed. A request's own error line is the 5xx above.
+        for (let i = 0; i < 3; i++) log('error', { code, jobId: 'job_fixture' });
+        log('error', { code: 'DISPATCHER_RUN_FAILED', shard: 'fixture:us-east-2:6/8' }); log('error', { event: 'request', code, status: 500 }); log('warn', { code });
+      };
+      // Two flushes of one minute add up, histogram and all. A workspace under one read a second is not written.
+      batch(); const written = await counters.flushCounters(runtime.db);
+      batch(); assert.equal(await counters.flushCounters(runtime.db), written);
+      errorLines.mock.restore();
+      assert.equal(await counters.flushCounters(runtime.db), 0, 'Nothing counted, nothing written.');
+      const rows = (await db.query(`SELECT kind,key,sum(n)::int AS n,sum(errors)::int AS errors,max(slowest) AS slowest FROM health_minutes WHERE key ILIKE '%'||$1||'%' GROUP BY 1,2 ORDER BY 1,2`, [tag])).rows;
+      assert.deepEqual(rows, [{ kind: 'error', key: code, n: 6, errors: 0, slowest: 0 }, { kind: 'read', key: workspace, n: 80, errors: 0, slowest: 0 },
+        { kind: 'route', key: slowRoute, n: 86, errors: 0, slowest: 45_000 }, { kind: 'route', key: failing, n: 60, errors: 60, slowest: 3 }]);
+      const histOf = async (table: string) => (await db.query(`SELECT (SELECT array_agg(s ORDER BY i) FROM (SELECT i,sum(v)::int AS s FROM ${table} m,unnest(m.hist) WITH ORDINALITY u(v,i) WHERE m.key=$1 GROUP BY i) x) AS hist`, [slowRoute])).rows[0].hist;
+      const hist = await histOf('health_minutes');
+      assert.deepEqual([hist.length, hist[2], hist.at(-1)], [counters.LATENCY_BUCKETS.length + 1, 82, 4]);
+
+      // The tick turns them into the page's routes and error codes, and into cards: the slow route, the database's refusals, the failing job and the dispatcher.
+      runtime.config.operatorSlackWebhookUrl = OPERATOR_HOOK;
+      const posted: string[] = [];
+      for (let i = 0; i < 6 && !(posted.some(text => text.includes('database-errors:25006')) && posted.some(text => text.includes(`errors:${code}`))); i++) await healthTick(runtime, {}, { force: true, post: async (_url, card) => { posted.push(card.text); } });
+      const page = ok(await local('GET', '/v1/operator/health'));
+      assert.deepEqual(page.routes.filter((route: Json) => route.route.includes(tag)), [{ route: slowRoute, count: 86, errors: 0, p50Ms: 25, p95Ms: 25, slowestMs: 45_000, behind: true }, { route: failing, count: 60, errors: 60, p50Ms: 3, p95Ms: 3, slowestMs: 3, behind: false }]);
+      assert.ok(page.errors.some((e: Json) => e.kind === 'sqlstate' && e.code === '25006' && e.count >= 60) && page.errors.some((e: Json) => e.kind === 'error' && e.code === code && e.count === 6) && page.requests.errors >= 60, JSON.stringify(page.errors));
+      const words = posted.map(text => text.split('\n')[0]!), keys = posted.map(text => / ?key=(\S+) state=open /.exec(text.split('\n')[1]!)?.[1]);
+      assert.ok(words.includes(`Slow requests: ${c(slowRoute)}: slowest 45 s, p95 25 ms over 86 in 15 min.`) && keys.includes(`slow-requests:GET:/v1/fixture-${tag}/:id`), posted.join('\n'));
+      assert.ok(words.includes(`Errors: ${c(code)}: 6 in 5 min.`) && words.some(line => /^Database errors: read-only \(`25006`\): \d+ in 5 min\.$/.test(line)) && words.some(line => /^Server errors: \d[\d,]* of \d[\d,]* requests in 5 min \([\d.]+%\), mostly `DATABASE_UNAVAILABLE`\.$/.test(line)), posted.join('\n'));
+
+      // Minutes older than two hours fold into their hour, once, and are gone from the minutes: the p95 outlives the logs.
+      await db.query(`UPDATE health_minutes SET minute=date_trunc('hour',now())-interval '3 hours 20 minutes' WHERE key ILIKE '%'||$1||'%'`, [tag]);
+      await healthTick(runtime, {}, { force: true, post: async () => {} });
+      const folded = (await db.query(`SELECT kind,key,n::int,errors::int,slowest,hour=date_trunc('hour',now())-interval '4 hours' AS hour FROM health_hours WHERE key ILIKE '%'||$1||'%' ORDER BY 1,2`, [tag])).rows;
+      assert.deepEqual([folded, (await db.query(`SELECT count(*)::int AS n FROM health_minutes WHERE key ILIKE '%'||$1||'%'`, [tag])).rows[0].n, (await histOf('health_hours')).at(-1)],
+        [[{ kind: 'error', key: code, n: 6, errors: 0, slowest: 0, hour: true }, { kind: 'route', key: slowRoute, n: 86, errors: 0, slowest: 45_000, hour: true }, { kind: 'route', key: failing, n: 60, errors: 60, slowest: 3, hour: true }], 0, 4]);
+    });
   });
 
   test('SDK responses preserve acceptance, rejection, throttling and timeout semantics without network', async t => {

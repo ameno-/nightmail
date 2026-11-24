@@ -140,9 +140,14 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
       if (ctx) ctx.waitUntil(client.end().catch(() => {}));
       else await client.end();
     }
-    // Dispatch and immediate webhook nudges open no database connection.
+    // Dispatch and immediate webhook nudges open no database connection; the request counters' flush (app.ts) opens one.
     if (ctx && nudges.length) ctx.waitUntil(withRuntime(env, async runtime => { for (const nudge of nudges) await nudge(runtime); }));
   }
+}
+// What a queue consumer counted (its jobs' database errors, its error lines: src/health-counters.ts), written at most
+// every 20 seconds per isolate while it still holds its connection. It never throws.
+async function flushDueCounters(runtime: Runtime) {
+  try { const { countersDue, flushCounters } = await import('./health-counters.js'); if (countersDue()) await flushCounters(runtime.db); } catch { /* Counted again with the next batch. */ }
 }
 /**
  * The support platform's service-binding entrypoint (api/README.md "Support integration"): the bane-support Worker in
@@ -277,6 +282,7 @@ export default {
           archive: (source,body,error) => archiveQueueFeedback(runtime,source,body,error) });
         const { outcomes: _, ...counts } = settled, oldestMs=Math.max(0,...messages.map(m=>Date.now()-m.timestamp.getTime()));
         core.log(counts.failed || counts.untagged || counts.unauthenticated || counts.held || oldestMs>60000?'warn':'info', { code: 'FEEDBACK_BATCH', lane: feedbackLane, size: messages.length, ...counts, oldestMs });
+        await flushDueCounters(runtime);
       });
       return;
     }
@@ -293,6 +299,7 @@ export default {
       // Wait in place up to 45 s for a job due soon (paced campaign releases), and schedule at most one follow-up.
       const outcome = await followDueJobs(runtime, () => drainJobs(runtime, 100, concurrency, 10000,pool), delaySeconds => (hooks?env.WEBHOOK_QUEUE:env.WAKE_QUEUE).send({ kind: 'wake' }, { delaySeconds }), 45000,pool);
       core.log('info', { code: 'QUEUE_FOLLOW', outcome });
+      await flushDueCounters(runtime);
     }, concurrency);
     batch.ackAll();
   },
@@ -313,13 +320,20 @@ export default {
       // Mailbox outbound status and Message-IDs follow the sending pipeline; best-effort.
       if (controller.cron !== '* * * * *') return;
       // Independent of PostgreSQL: even a total DB outage must not hide DLQ growth.
+      // A queue added here is on the Health page at once; its "falling behind" line is in src/health-thresholds.ts (QUEUES).
+      const queues: import('./health.js').QueueSample[] = [];
       await Promise.all([['feedback',env.FEEDBACK_QUEUE],['feedback-dlq',env.FEEDBACK_DLQ],['legacy-feedback-dlq',env.LEGACY_FEEDBACK_DLQ],['work',env.WAKE_QUEUE],['webhooks',env.WEBHOOK_QUEUE]].map(async pair=>{
         const [name,q]=pair as [string,Queue]; if(!q?.metrics)return;
         try{const m=await q.metrics(),oldestMs=m.oldestMessageTimestamp?Math.max(0,Date.now()-m.oldestMessageTimestamp.getTime()):0;
           const alarm=(name.endsWith('feedback-dlq') && m.backlogCount>0) || oldestMs>60000;
           core.log(alarm?'error':'info',{code:alarm?'QUEUE_BACKLOG_ALERT':'QUEUE_BACKLOG',queue:name,depth:m.backlogCount,oldestMs});
+          queues.push({name,depth:m.backlogCount,oldestMs});
         }catch{core.log('warn',{code:'QUEUE_METRICS_UNAVAILABLE',queue:name});}
       }));
+      // Health (src/health.ts) before anything below can fail or take long: what is falling behind, on the Health page and
+      // as Slack cards, including a database that refuses the tick's own write. It never throws.
+      try { const [{ healthTick }, { flushCounters }] = await Promise.all([import('./health.js'), import('./health-counters.js')]); await flushCounters(runtime.db); await healthTick(runtime, { queues: queues.sort((a,b)=>a.name<b.name?-1:1) }); }
+      catch { core.log('error',{code:'HEALTH_TICK_FAILED'}); }
       try { const { drainFeedbackRecovery } = await import('./operations.js'); await drainFeedbackRecovery(runtime); }
       catch { core.log('error',{code:'FEEDBACK_RECOVERY_DRAIN_FAILED'}); }
       await reconcileSharedConnections(runtime); // Installation work must not depend on a workspace or a successful queue drain.

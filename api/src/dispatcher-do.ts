@@ -7,9 +7,9 @@ function initDeps() {
   return Promise.all([
     import('pg'), import('drizzle-orm/node-postgres'), import('drizzle-orm/sql'),
     import('./config.js'), import('./adapters/storage.js'), import('./dispatcher.js'),
-    import('./core.js'), import('./adapters/feedback-queue.js'),
-  ]).then(([{ Pool }, { drizzle }, { sql }, { loadConfig }, { r2Storage }, { initialGate, runDispatcher, dispatchWakeKey,shardLeaseSize }, { ApiError, log, logError, setLogContext }, { feedbackSink, workWake }]) => ({
-    Pool, drizzle, sql, loadConfig, r2Storage, initialGate, runDispatcher, dispatchWakeKey,shardLeaseSize, ApiError, log, logError, setLogContext, feedbackSink, workWake,
+    import('./core.js'), import('./adapters/feedback-queue.js'), import('./health-counters.js'),
+  ]).then(([{ Pool }, { drizzle }, { sql }, { loadConfig }, { r2Storage }, { initialGate, runDispatcher, dispatchWakeKey,shardLeaseSize }, { ApiError, log, logError, platformMessage, setLogContext }, { feedbackSink, workWake }, { flushCounters }]) => ({
+    Pool, drizzle, sql, loadConfig, r2Storage, initialGate, runDispatcher, dispatchWakeKey,shardLeaseSize, ApiError, log, logError, platformMessage, setLogContext, feedbackSink, workWake, flushCounters,
   }));
 }
 let depsPromise: ReturnType<typeof initDeps> | undefined;
@@ -174,7 +174,12 @@ export class DispatcherShard extends DurableObject<Env> {
       // Module loading itself can fail; still log, close and retry so the shard never wedges.
       if (!deps) console.error(JSON.stringify({ level: 'error', timestamp: new Date().toISOString(), service: 'worker', code: 'DISPATCHER_DEPS_FAILED' }));
       else {
-      deps.logError(error, { code: error instanceof deps.ApiError ? error.code : 'DISPATCHER_RUN_FAILED', shard: dispatcherName(identity) }); }
+        // `cause` says why (core.ts platformMessage): the platform's own words for a Durable Object storage or binding
+        // failure, never a database error's text. The line is also counted (src/health-counters.ts) and written before
+        // the pool closes, so a shard that keeps failing becomes the dispatcher-failing alert (src/health.ts).
+        deps.logError(error, { code: error instanceof deps.ApiError ? error.code : 'DISPATCHER_RUN_FAILED', shard: dispatcherName(identity), cause: deps.platformMessage(error) });
+        try { await deps.flushCounters((await this.runtime()).db); } catch { /* Counted again with the next failure. */ }
+      }
       await this.closePool();
       next = Date.now() + RETRY_MS;
     } finally {
