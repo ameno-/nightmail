@@ -52,6 +52,13 @@ async function changedBy(db: DbExecutor, a: Actor, w: string, who: ReturnType<ty
   return { type: row.kind, name: name && row.profile ? `${name} · ${row.profile}` : name, self: mine[0] === row.kind && mine[1] === row.id };
 }
 
+/** What the dashboard calls a credential, as changedBy names a change's author: a member's name, a key's, or the MCP client
+ *  and its profile. Null when it has none. */
+export async function credentialName(db: DbExecutor, a: Actor) {
+  const [kind, id] = a.credential === 'dashboard' ? ['member', a.keyId.slice('user_'.length)] : a.credential === 'apiKey' ? ['api_key', a.keyId] : ['mcp', a.keyId];
+  return (await changedBy(db, a, a.workspaceId, sql`SELECT ${kind}::text AS kind, ${id}::text AS id`))?.name ?? null;
+}
+
 export function registerRitualVersion(app: App) {
   const summary = 'Read the rules and routes version, or wait for it to change';
   const description = 'Without after, returns the current version at once. With after (and endpoints, to include endpoint changes), waits up to wait seconds for a rule, route or endpoint save and returns as soon as one commits, with who saved it. The dashboard keeps one of these open while you edit rules so an agent’s saves appear live. Each waited 2.5 seconds counts as one request against the credential’s per-minute budget.';

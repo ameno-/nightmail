@@ -1,4 +1,5 @@
 import { DASHBOARD_CACHE_NOTE, dashboardRead } from './dashboard-cache.js';
+import { talliesEnabled } from './sending-tallies.js';
 import { registerSenderScore } from './sender-score.js';
 import { auditContext, auditInsert, recordAudit } from './audit.js';
 import { registerUsage } from './usage.js';
@@ -1628,9 +1629,114 @@ function registerMetrics(app: App) {
         count(*) FILTER (WHERE ${cols.status} = 'delayed' OR ${has(OUTCOME.delayed)})::int AS "deliveryDelayed",
         count(*) FILTER (WHERE ${cols.simulated})::int AS "simulated"`;
     };
-    const total = (row?: Row) => ({ emails: row?.emails ?? 0, accepted: row?.accepted ?? 0, delivered: row?.delivered ?? 0, bounced: row?.bounced ?? 0, complained: row?.complained ?? 0, opened: row?.opened ?? 0, clicked: row?.clicked ?? 0, failed: row?.failed ?? 0, deliveryDelayed: row?.deliveryDelayed ?? 0, simulated: row?.simulated ?? 0 });
-    let rows: Row[], previous: { from: string; to: string; totals: ReturnType<typeof total> } | undefined, streams: { transactional: ReturnType<typeof total>; marketing: ReturnType<typeof total> } | undefined;
-    if (!extras.size) {
+    const total = (row?: Partial<Row>) => ({ emails: row?.emails ?? 0, accepted: row?.accepted ?? 0, delivered: row?.delivered ?? 0, bounced: row?.bounced ?? 0, complained: row?.complained ?? 0, opened: row?.opened ?? 0, clicked: row?.clicked ?? 0, failed: row?.failed ?? 0, deliveryDelayed: row?.deliveryDelayed ?? 0, simulated: row?.simulated ?? 0 });
+    type Totals = ReturnType<typeof total>;
+    type KindHourRow = Totals & { hour: string; kind: string };
+    const addTotals = (acc: Totals, item: Partial<Totals>) => {
+      for (const key of Object.keys(acc) as Array<keyof Totals>) acc[key] += Number(item[key] ?? 0);
+      return acc;
+    };
+    let rows: Row[], previous: { from: string; to: string; totals: Totals } | undefined, streams: { transactional: Totals; marketing: Totals } | undefined;
+    const HOUR_MS = 3_600_000;
+    const floorHour = (ms: number) => Math.floor(ms / HOUR_MS) * HOUR_MS;
+    const ceilHour = (ms: number) => (ms % HOUR_MS === 0 ? ms : floorHour(ms) + HOUR_MS);
+    const startMs = Date.parse(start), endMs = Date.parse(end);
+    const previousFromMs = startMs - (endMs - startMs), previousFrom = new Date(previousFromMs).toISOString();
+    const scanFromMs = extras.has('previous') ? previousFromMs : startMs;
+
+    if (await talliesEnabled(c.env.db)) {
+      // Exact at read time: reads sending_metrics_hourly (folded + unfolded deltas) for all whole UTC hours and only
+      // touches raw sending_emails for non-empty partial edge hours (zero raw rows for Overview's right edge to=now()).
+      const result = await budgetedRead(c.env.db, async db => {
+        const minHour = new Date(floorHour(scanFromMs)).toISOString();
+        const maxHour = new Date(floorHour(endMs - 1) + HOUR_MS).toISOString();
+        const hourlyRows = (await db.execute<KindHourRow>(sql`SELECT
+          to_char(hour AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24":00:00.000Z"') AS hour, kind,
+          sum(emails)::int AS emails, sum(accepted)::int AS accepted, sum(delivered)::int AS delivered,
+          sum(bounced)::int AS bounced, sum(complained)::int AS complained, sum(opened)::int AS opened,
+          sum(clicked)::int AS clicked, sum(failed)::int AS failed,
+          sum(delivery_delayed)::int AS "deliveryDelayed", sum(simulated)::int AS simulated
+          FROM sending_metrics_hourly
+          WHERE workspace_id = ${a.workspaceId} AND hour >= ${minHour}::timestamptz AND hour < ${maxHour}::timestamptz
+            ${q.region ? sql`AND region = ${q.region}` : sql``}
+            ${q.stream && !extras.has('streams') ? sql`AND kind = ${q.stream}` : sql``}
+          GROUP BY 1, 2 HAVING sum(emails) <> 0`)).rows;
+        const byHour = new Map<number, KindHourRow[]>();
+        for (const r of hourlyRows) {
+          const ms = Date.parse(r.hour);
+          const list = byHour.get(ms);
+          if (list) list.push(r); else byHour.set(ms, [r]);
+        }
+        const scanEdge = async (fromMs: number, toMs: number): Promise<KindHourRow[]> => {
+          const hMs = floorHour(fromMs);
+          if (!byHour.has(hMs)) return [];
+          const hourIso = new Date(hMs).toISOString();
+          const filter = and(scoped(emails, a), gte(emails.createdAt, new Date(fromMs).toISOString()), lt(emails.createdAt, new Date(toMs).toISOString()),
+            q.region ? eq(emails.region, q.region) : undefined, q.stream && !extras.has('streams') ? sql`${emails.snapshot}->>'kind' = ${q.stream}` : undefined);
+          const { rows: edgeRows } = await db.execute<Totals & { kind: string }>(sql`SELECT
+            coalesce(${emails.snapshot}->>'kind', '') AS kind,
+            ${counts({ status: sql`${emails.status}`, simulated: sql`${emails.simulated}`, providerId: sql`${emails.providerId}`, outcomes: sql`${emails.eventOutcomes}` })}
+            FROM ${emails} WHERE ${filter} GROUP BY 1`);
+          return edgeRows.map(r => ({ ...r, hour: hourIso }));
+        };
+        const collect = async (fromMs: number, toMs: number): Promise<KindHourRow[]> => {
+          const out: KindHourRow[] = [];
+          const wStart = ceilHour(fromMs);
+          let wEnd = floorHour(toMs);
+          // If the right edge falls mid-hour (always true for to=now()) and no email exists after toMs in that hour,
+          // the whole hour belongs to this window and comes directly from sending_metrics_hourly with zero raw scan.
+          if (toMs > wEnd && fromMs <= wEnd) {
+            if (!byHour.has(wEnd)) {
+              wEnd += HOUR_MS;
+            } else {
+              const nextHour = new Date(wEnd + HOUR_MS).toISOString();
+              const { rows: [after] } = await db.execute<{ any: boolean }>(sql`SELECT EXISTS (
+                SELECT 1 FROM sending_emails WHERE workspace_id = ${a.workspaceId}
+                  AND created_at >= ${new Date(toMs).toISOString()}::timestamptz AND created_at < ${nextHour}::timestamptz
+              ) AS any`);
+              if (!after?.any) wEnd += HOUR_MS;
+            }
+          }
+          if (wStart > wEnd) {
+            out.push(...await scanEdge(fromMs, toMs));
+            return out;
+          }
+          for (const [hMs, list] of byHour) if (hMs >= wStart && hMs < wEnd) out.push(...list);
+          if (fromMs < wStart) out.push(...await scanEdge(fromMs, wStart));
+          if (wEnd < toMs) out.push(...await scanEdge(wEnd, toMs));
+          return out;
+        };
+        const currentItems = await collect(startMs, endMs);
+        const previousItems = extras.has('previous') ? await collect(previousFromMs, startMs) : [];
+        return { currentItems, previousItems };
+      }, readLimit(METRICS_READ));
+
+      const matchShown = (item: KindHourRow) => !q.stream || item.kind === q.stream;
+      const byBucket = new Map<string, Totals>();
+      for (const item of result.currentItems) {
+        if (!matchShown(item)) continue;
+        const key = q.granularity === 'hour' ? item.hour : item.hour.slice(0, 10);
+        const acc = byBucket.get(key) ?? total();
+        addTotals(acc, item);
+        byBucket.set(key, acc);
+      }
+      rows = [...byBucket].map(([dateKey, acc]) => ({ ...acc, date: dateKey })).sort((x, y) => x.date < y.date ? -1 : x.date > y.date ? 1 : 0);
+      if (extras.has('previous')) {
+        const prevTotals = total();
+        for (const item of result.previousItems) if (matchShown(item)) addTotals(prevTotals, item);
+        previous = { from: previousFrom, to: start, totals: prevTotals };
+      }
+      if (extras.has('streams')) {
+        const ownKind: 'transactional' | 'marketing' = q.stream ?? 'marketing';
+        const all = total(), own = total();
+        for (const item of result.currentItems) {
+          addTotals(all, item);
+          if (item.kind === ownKind) addTotals(own, item);
+        }
+        const rest = Object.fromEntries(Object.keys(all).map(key => [key, all[key as keyof Totals] - own[key as keyof Totals]])) as Totals;
+        streams = ownKind === 'marketing' ? { transactional: rest, marketing: own } : { transactional: own, marketing: rest };
+      }
+    } else if (!extras.size) {
       const filter = and(scoped(emails, a), gte(emails.createdAt, start), lt(emails.createdAt, end), q.region ? eq(emails.region, q.region) : undefined, q.stream ? sql`${emails.snapshot}->>'kind' = ${q.stream}` : undefined);
       rows = (await budgetedRead(c.env.db, db => db.execute<Row>(sql`
       SELECT ${date} AS "date", ${counts({ status: sql`${emails.status}`, simulated: sql`${emails.simulated}`, providerId: sql`${emails.providerId}`, outcomes: sql`${emails.eventOutcomes}` })}
@@ -2104,7 +2210,11 @@ const processSesReceipt: JobHandler = async (runtime, payload, job) => {
   const suppress = classification === 'complaint' || classification === 'bounce' || validationSuppressed;
   const observeEngagement = (kind === 'Open' || kind === 'Click') && normalized.data.isBotEvent !== true && normalized.data.isBotEvent !== 'Likely';
   if (recipients.length && (suppress || observeEngagement)) await runtime.db.transaction(async tx => {
-    for (const address of recipients) {
+    // Several contacts are locked in email order, as the database sorts it, wherever several are (imports, the feedback
+    // batch, lockContacts in audience.ts): a bounce for two people and someone adding both to a list wait for each
+    // other instead of deadlocking. SES lists the recipients in its own order.
+    const ordered = recipients.length > 1 ? (await tx.execute<{ address: string }>(sql`SELECT address FROM unnest(${sql.param(recipients)}::text[]) address ORDER BY address`)).rows.map(row => row.address) : recipients;
+    for (const address of ordered) {
       const contactWhere = and(scoped(contacts, job), eq(contacts.email, address));
       if (suppress) {
         const suppressionReason = kind === 'Complaint' ? 'complaint' : validationSuppressed ? 'email_validation' : 'hard_bounce';

@@ -119,8 +119,12 @@ export interface Config {
   abuseMonitoring?: { since: string };
   /** ABUSE_SLACK_WEBHOOK_URL: where abuse-monitoring alerts are posted (src/abuse-alerts.ts). Undefined: stored only. */
   abuseSlackWebhookUrl?: string;
-  /** OPERATOR_SLACK_WEBHOOK_URL: where the operator alerts are posted (src/operator-alerts.ts). Undefined: nothing is posted. */
+  /** OPERATOR_SLACK_WEBHOOK_URL: where the operator alerts (src/operator-alerts.ts) and the health alerts (src/health.ts) are posted. Undefined: nothing is posted. */
   operatorSlackWebhookUrl?: string;
+  /** DATABASE_DISK_GB in bytes: the Health page shows the database's size against it. Undefined: the size alone. */
+  databaseDiskBytes?: number;
+  /** PLANETSCALE_WEBHOOK_SECRET: the database disk alert also checks PlanetScale's signature (src/disk-alert.ts). Undefined: its token alone. */
+  planetscaleWebhookSecret?: string;
   /** NIGHTMAIL_ABUSE_ENFORCE. Reserved: abuse monitoring never blocks, and no code reads this yet. */
   abuseEnforce?: boolean;
   /** Hosted billing. stripe is undefined until STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET are set (money routes answer 503 BILLING_NOT_CONFIGURED). */
@@ -170,6 +174,11 @@ export interface Runtime {
   // Nudges the long-lived dispatcher for one account/region after queued mail commits. Dispatch
   // never depends on it: the dispatcher also polls and the scheduler pings it every minute.
   dispatch?: (region: string, accountId?: string, emails?: number, kind?: ReadyConnection['kind'], priority?: boolean) => Promise<void>;
+  /** Campaign rooms (src/campaign-room.ts): who has a campaign open in the dashboard. Cloudflare only: the Node server has
+   *  none, and its dashboard shows no presence. connect answers the WebSocket upgrade. visit reports an agent's read or
+   *  save (saved: the revision it made) in the background, never delaying or failing the request: nothing when nobody
+   *  is in the room, and its name (lookup, given a runtime of its own) is looked up only when someone is. */
+  campaignRooms?: { connect: (name: string, person: import('./campaign-room-protocol.js').RoomPerson) => Promise<Response>; visit: (name: string, credential: string, lookup: (runtime: Runtime) => Promise<string | null>, saved?: number) => void };
   /** True once the content classifier must not be called in this run (src/dispatcher-do.ts: a request landed on the shard,
    *  and a call now would carry its visitor). Checked right before each request; a call not made throws ScreenHandover. */
   screenHandover?: () => boolean;
@@ -186,6 +195,8 @@ export interface Runtime {
   // the installation's bucket and a per-process cap.
   analyticsStorage?: Storage;
   allowAnalytics?: (peer: string) => Promise<boolean>;
+  // The database disk alert (src/disk-alert.ts): the Workers DISK_ALERT limiter, one card a minute per threshold. Node has the per-process count.
+  allowDiskAlert?: (key: string) => Promise<boolean>;
   jwksCacheScope?: object; // Workers create a new DB adapter per request; scope public keys to the binding instead.
   // Set only by the SupportPlatform service-binding entrypoint (src/support-platform.ts), never from a request.
   platformCaller?: 'bane-support';
@@ -681,6 +692,26 @@ export function logError(error: unknown, fields: Record<string, unknown> & { cod
     entry = { ...fields, code: errorCodeOf(fields.code), errorType: known ? undefined : errorTypeOf(error), databaseCode: databaseCodeOf(error), stack: known ? undefined : stackFrames(error) };
   } catch { return logFallback(); }
   log(level, entry);
+}
+/**
+ * Why a platform call failed, for the few lines that must say so (a dispatcher run that failed): the error's own
+ * message, cut to 300 characters; log scrubs addresses and credential-like runs from it like any string. Undefined for
+ * an ApiError (its code says it), for anything that came from the database or a socket (a driver error's text quotes
+ * the statement and its parameters, which can be a customer's data; its SQLSTATE is logged instead) and for an AWS SDK
+ * error (its text can name an identity or a domain; its class name is logged instead). What is left is the platform's
+ * own: a Durable Object storage or binding failure, a module that would not load. logError never logs a message; this
+ * is the one explicit exception, passed as `cause`.
+ */
+export function platformMessage(error: unknown): string | undefined {
+  try {
+    if (!(error instanceof Error) || error instanceof ApiError) return undefined;
+    for (const e of errorChain(error)) {
+      const driver = e as { code?: unknown; severity?: unknown; query?: unknown; params?: unknown; name?: unknown; $metadata?: unknown; $fault?: unknown };
+      if (typeof driver.code === 'string' || driver.severity !== undefined || driver.query !== undefined || driver.params !== undefined || driver.name === 'DrizzleQueryError' || driver.$metadata !== undefined || driver.$fault !== undefined) return undefined;
+    }
+    const message: unknown = error.message;
+    return typeof message === 'string' && message ? message.slice(0, 300) : undefined;
+  } catch { return undefined; }
 }
 export { SECURITY_HEADERS };
 export function applySecurityHeaders(headers: Headers): Headers {

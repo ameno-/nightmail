@@ -36,6 +36,21 @@ export interface SignupPlaces { limit: number; signedUp: number; held: number; w
 export interface WorkspaceSummary { id: string; name: string; createdAt: string; owner: string | null; domain: string | null; domains: number; sent: number; standing: StandingStep | null }
 /** One address on the waitlist: a verified sign-in nothing admitted yet (api/src/account-login.ts). */
 export interface WaitlistEntry { email: string; name: string | null; attempts: number; firstAt: string; lastAt: string; /** When a raise of the sign-up limit held a place for it. */ letInAt: string | null; /** The email saying it can sign in. */ emailed: 'queued' | 'sent' | 'failed' | null }
+/**
+ * Health (GET /v1/operator/health, api/src/health.ts): the alerts that are open and what the minute tick last measured.
+ * IDs and counts only. A section is null when its probe failed on the last tick: unknown, not fine.
+ */
+export interface HealthAlert { key: string; kind: string; label: string; severity: 'critical' | 'warning'; value: number; unit: string; words: string; since: string; sentAt: string | null; runbook: string }
+export interface HealthCampaign { id: string; workspaceId: string; state: string; total: number; released: number; rate: number | null; acceptedRate: number | null; entitled: number | null; account: number | null; planned: number | null; etaSeconds: number | null; waiting: string | null; settled: number | null; bounceRate: number | null; behind: boolean }
+export interface OperatorHealth {
+  generatedAt: string | null; stale: boolean; delivery: 'slack' | 'off'; alerts: HealthAlert[]
+  queues: { name: string; depth: number; oldestSeconds: number; behind: boolean }[]
+  jobs: { type: string; pending: number; oldestSeconds: number; failed: number; failedLastHour: number; error: string | null; behind: boolean }[] | null
+  campaigns: HealthCampaign[] | null; feedbackLagSeconds: number | null
+  routes: { route: string; count: number; errors: number; p50Ms: number; p95Ms: number; slowestMs: number; behind: boolean }[] | null
+  errors: { kind: 'code' | 'sqlstate' | 'error'; code: string; count: number }[] | null; requests: { count: number; errors: number } | null
+  database: { connections: number; maxConnections: number; longTransactions: number; oldestTransactionSeconds: number; slowQueries: number; lockWaits: number; sizeBytes: number; diskBytes: number | null } | null
+}
 /** Abuse monitoring (/v1/operator/abuse/*): accounts and workspaces that share signals, scored for a person to review. */
 export type AbuseBand = 'low' | 'watch' | 'review' | 'high'
 export interface AbuseReason { code: string; points: number; count?: number }
@@ -72,7 +87,7 @@ const evidence = ({ cluster, note, ticketRef }: AbuseEvidence) => ({ evidence: {
 const write = (path: string, method: 'POST' | 'PUT', body: unknown, guard: OperatorGuard) => request<OperatorReceipt>(`${base}${path}`, { method, body, idempotencyKey: guard.idempotencyKey, ifMatch: guard.ifMatch })
 
 export const operatorApi = {
-  queue: async (input: { step?: StandingStep; q?: string }, signal?: AbortSignal) => (await request<{ data: OperatorQueueItem[] }>(`${base}/workspaces${query({ step: input.step, q: input.q?.trim(), limit: 100 })}`, { signal })).data,
+  queue: async (input: { step?: StandingStep; q?: string }, signal?: AbortSignal) => (await request<{ data: OperatorQueueItem[] }>(`${base}/workspaces${query({ step: input.step, q: input.q?.trim(), limit: 200 })}`, { signal })).data,
   workspace: (workspaceId: string, signal?: AbortSignal) => request<OperatorWorkspace>(`${base}/workspaces/${id(workspaceId)}`, { signal }),
   // Paged by the API's opaque cursor, so rows that share a timestamp are never skipped at a page boundary.
   timeline: async (workspaceId: string, cursor: string | undefined, signal?: AbortSignal) => {
@@ -88,6 +103,7 @@ export const operatorApi = {
     return { items: page.data, nextCursor: page.nextCursor, total: page.total }
   },
   signups: (signal?: AbortSignal) => request<SignupPlaces>(`${base}/signups`, { signal }),
+  health: (signal?: AbortSignal) => request<OperatorHealth>(`${base}/health`, { signal }),
   setSignupLimit: (limit: number, guard: OperatorGuard) => request<SignupPlaces & { letIn: number; emailed: number; notEmailed: number | null }>(`${base}/signups`, { method: 'PUT', body: { limit }, idempotencyKey: guard.idempotencyKey }),
   allWorkspaces: async (input: { cursor?: string }, signal?: AbortSignal) => {
     const page = await request<{ data: WorkspaceSummary[]; nextCursor: string | null }>(`${base}/signups/workspaces${query({ cursor: input.cursor, limit: 100 })}`, { signal })

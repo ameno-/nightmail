@@ -67,6 +67,13 @@ shard() (
     echo "${1}: auth readiness expected 401 AUTH_REQUIRED, got HTTP $status" >&2
     exit 1
   fi
+  # An optional round-trip benchmark runs on this same migrated, loopback-only disposable fixture.
+  if [[ -n ${NIGHTMAIL_ROUNDTRIPS_SCENARIO:-} ]]; then
+    # A stray environment variable must never replace CI's acceptance shard with a benchmark.
+    [[ -z ${CI:-} ]] || { echo 'Use the regular acceptance suite in CI.' >&2; exit 2; }
+    node --import tsx --import ./scripts/roundtrips-preload.mjs scripts/roundtrips-fixture.mjs
+    return
+  fi
   reporters=(--test-reporter=spec --test-reporter-destination=stdout)
   if [[ -n ${ACCEPTANCE_JUNIT:-} ]]; then reporters+=(--test-reporter=junit "--test-reporter-destination=$ACCEPTANCE_JUNIT/$1.xml"); fi
   timeout 8m node --import tsx --test "${reporters[@]}" "${@:5}" api.acceptance.test.ts

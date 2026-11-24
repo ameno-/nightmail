@@ -1,8 +1,10 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { useNavigate, useParams } from 'react-router'
-import { Alert, Button, Checkbox, ConfirmDialog, DataTable, EmptyState, ErrorState, Field, Input, SecretInput, PageHeader, SectionHeader, Select, SkeletonText, StatusBadge, type Tone, fieldError, MutationError, SecretDialog } from '../../components/ui'
-import { useApiDef, useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
-import { queries } from '../../data/queries'
+import { Alert, Button, Checkbox, ConfirmDialog, DataTable, EmptyState, ErrorState, Field, Input, SearchField, SecretInput, PageHeader, SectionHeader, Select, SkeletonText, StatusBadge, type Tone, fieldError, MutationError, SecretDialog } from '../../components/ui'
+import { useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
+import { invalidate } from '../../data/invalidation'
+import { mergeAddresses, useAddressOptions, useResolvedAddresses } from '../../data/addresses'
+import { useDebounced } from '../../lib/pagination'
 import { inboundEventTypes, type InboundAddress, type InboundWebhook, type InboundWebhookInput, type MailboxEventType, type MailboxWebhookDelivery } from '../../data/types'
 import { date, time } from '../../lib/format'
 import { approvalLabel } from '../settings/key-labels'
@@ -35,7 +37,7 @@ function validate(input: Draft, editing = false) {
 
 // Editing never shows the saved URL: its field is Replace URL, with the saved one masked as its placeholder, and left
 // empty it keeps it. What each event and payload carries is in the API reference, not under each box.
-function WebhookFields({ input, urlHint, onChange, addresses, errors, apiError, disabled, headers }: { input: Draft; urlHint?: string; onChange: (input: Draft) => void; addresses?: InboundAddress[]; errors: Record<string, string>; apiError: unknown; disabled: boolean; headers: { current: InboundWebhook['headers']; draft: HeaderDraft; onChange: (draft: HeaderDraft) => void } }) {
+function WebhookFields({ input, urlHint, onChange, addresses, addressSearch, onAddressSearch, addressSearchable, hasMoreAddresses, loadingMoreAddresses, onLoadMoreAddresses, errors, apiError, disabled, headers }: { input: Draft; urlHint?: string; onChange: (input: Draft) => void; addresses?: InboundAddress[]; addressSearch?: string; onAddressSearch?: (value: string) => void; addressSearchable?: boolean; hasMoreAddresses?: boolean; loadingMoreAddresses?: boolean; onLoadMoreAddresses?: () => void; errors: Record<string, string>; apiError: unknown; disabled: boolean; headers: { current: InboundWebhook['headers']; draft: HeaderDraft; onChange: (draft: HeaderDraft) => void } }) {
   // Events a scope or payload can't carry aren't offered: message.stored needs every address, inbound.new's payload
   // only describes received mail. Changing either drops them from the selection too.
   const events = inboundEventTypes.filter(type => !(type === 'message.stored' && input.addressIds !== null) && !(input.format === 'inbound' && !receivedOnly([type]).length))
@@ -55,7 +57,11 @@ function WebhookFields({ input, urlHint, onChange, addresses, errors, apiError, 
       </Field>
     </div>
     <Checkbox disabled={disabled} checked={(input.junk ?? (input.format === 'inbound' ? 'include' : 'skip')) === 'include'} onCheckedChange={checked => onChange({ ...input, junk: checked ? 'include' : 'skip' })} label="Deliver junk mail too" />
-    {!input.routeOnly && input.addressIds !== null && <div className="settings-choices" role="group" aria-label="Addresses">{!addresses?.length ? <p className="muted">No addresses yet.</p> : addresses.map(address => <Checkbox key={address.id} label={<PrivateAddress value={address.address} />} disabled={disabled} checked={input.addressIds!.includes(address.id)} onCheckedChange={checked => onChange({ ...input, addressIds: checked ? [...input.addressIds!, address.id] : input.addressIds!.filter(id => id !== address.id) })} />)}</div>}
+    {!input.routeOnly && input.addressIds !== null && <div className="stack">
+      {addressSearchable && onAddressSearch && <SearchField aria-label="Search addresses" placeholder="Search addresses" value={addressSearch ?? ''} onChange={event => onAddressSearch(event.target.value)} />}
+      <div className="settings-choices" role="group" aria-label="Addresses">{!addresses?.length ? <p className="muted">{addressSearch ? 'No matching addresses.' : 'No addresses yet.'}</p> : addresses.map(address => <Checkbox key={address.id} label={<PrivateAddress value={address.address} />} disabled={disabled} checked={input.addressIds!.includes(address.id)} onCheckedChange={checked => onChange({ ...input, addressIds: checked ? [...input.addressIds!, address.id] : input.addressIds!.filter(id => id !== address.id) })} />)}</div>
+      {hasMoreAddresses && onLoadMoreAddresses && <Button variant="ghost" size="sm" loading={loadingMoreAddresses} onClick={onLoadMoreAddresses}>Load more addresses</Button>}
+    </div>}
     {!input.routeOnly && <fieldset className="mailbox-webhook-events" disabled={disabled}>
       <legend className="ui-field__label">Events</legend>
       {events.map(type => <Checkbox key={type} label={<code>{type}</code>} checked={input.eventTypes.includes(type)} onCheckedChange={checked => onChange({ ...input, eventTypes: checked ? [...input.eventTypes, type] : input.eventTypes.filter(value => value !== type) })} />)}
@@ -78,19 +84,24 @@ function WebhookDetail() {
   const navigate = useNavigate()
   const webhook = useApiQuery(['inbound-webhook', id], (api, signal) => api.inbound.webhook(id, signal))
   const deliveries = useApiQuery(['inbound-webhook-deliveries', id], (api, signal) => api.inbound.webhookDeliveries(id, undefined, signal))
-  const addresses = useApiDef(queries.inboundAddressOptions())
-  const save = useApiMutation((api, patch: Parameters<typeof api.inbound.updateWebhook>[1]) => api.inbound.updateWebhook(id, patch), 'Webhook saved', false, true, id)
-  const rotate = useApiMutation((api, _: void) => api.inbound.rotateWebhookSecret(id), undefined, false, true, id)
-  const remove = useApiMutation((api, _: void) => api.inbound.deleteWebhook(id), 'Webhook deleted', false, true, id)
+  const [addressSearch, setAddressSearch] = useState('')
+  const addressQuery = useDebounced(addressSearch)
+  const addresses = useAddressOptions({ search: addressQuery })
+  const save = useApiMutation((api, patch: Parameters<typeof api.inbound.updateWebhook>[1]) => api.inbound.updateWebhook(id, patch), 'Webhook saved', false, invalidate.inboundWebhooks, id)
+  const rotate = useApiMutation((api, _: void) => api.inbound.rotateWebhookSecret(id), undefined, false, invalidate.inboundWebhooks, id)
+  const remove = useApiMutation((api, _: void) => api.inbound.deleteWebhook(id), 'Webhook deleted', false, invalidate.inboundWebhooks, id)
   const [input, setInput] = useState<Draft | null>(null)
   const [headers, setHeaders] = useState<HeaderDraft>(null)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [secret, setSecret] = useState<string | null>(null)
   const [confirm, setConfirm] = useState<'rotate' | 'delete' | null>(null)
   useEffect(() => { if (webhook.data && !input) setInput(draftOf(webhook.data)) }, [webhook.data, input])
+  const current = webhook.data
+  const chosenIds = input?.addressIds ?? current?.addressIds ?? []
+  const resolvedSaved = useResolvedAddresses(chosenIds, addresses.items, Boolean(current))
+  const shownAddresses = mergeAddresses(resolvedSaved.items, addresses.items)
   // Only a failed first load replaces the page: a later refetch that fails keeps the form and its unsaved edits.
   if (webhook.error && !webhook.data) return <><PageHeader title="Webhook" backTo={list} /><ErrorState error={webhook.error} onRetry={() => void webhook.refetch()} /></>
-  const current = webhook.data
   // The saved response is newer than the cached endpoint until the refetch lands.
   const currentHeaders = save.data?.headers ?? current?.headers ?? []
   const dirty = !!current && !!input && (headersChanged(headers, currentHeaders) || JSON.stringify(draftOf(current)) !== JSON.stringify({ ...input, eventTypes: [...input.eventTypes].sort() }))
@@ -107,7 +118,7 @@ function WebhookDetail() {
       <Button onClick={() => setConfirm('rotate')}>Rotate secret</Button>
       <Button variant="danger" onClick={() => setConfirm('delete')}>Delete</Button>
     </>} />
-    {!current || addresses.isPending || deliveries.isPending ? <SkeletonText width="60%" /> : <>
+    {!current || addresses.isPending || resolvedSaved.pending || deliveries.isPending ? <SkeletonText width="60%" /> : <>
       <dl className="settings-facts">
         <div><dt>Status</dt><dd><StatusBadge status={current.paused ? 'Paused' : 'Active'} tone={current.paused ? 'neutral' : 'success'} /></dd></div>
         <div><dt>Created</dt><dd>{date(current.createdAt)}</dd></div>
@@ -129,7 +140,7 @@ function WebhookDetail() {
         <SectionHeader title="Settings" />
         {!input ? <SkeletonText width="60%" /> : <form className="stack" onSubmit={submit} noValidate>
           <MutationError error={save.error} />
-          <WebhookFields input={input} urlHint={save.data?.url ?? current.url} onChange={setInput} addresses={addresses.data} errors={errors} apiError={save.error} disabled={save.isPending} headers={{ current: currentHeaders, draft: headers, onChange: setHeaders }} />
+          <WebhookFields input={input} urlHint={save.data?.url ?? current.url} onChange={setInput} addresses={shownAddresses} addressSearch={addressSearch} onAddressSearch={setAddressSearch} addressSearchable={addresses.hasMore || Boolean(addressSearch)} hasMoreAddresses={addresses.hasMore} loadingMoreAddresses={addresses.loadingMore} onLoadMoreAddresses={addresses.loadMore} errors={errors} apiError={save.error} disabled={save.isPending} headers={{ current: currentHeaders, draft: headers, onChange: setHeaders }} />
           <div className="cluster form-actions"><Button variant="primary" type="submit" loading={save.isPending && dirty} disabled={!dirty}>Save changes</Button>{dirty && <Button onClick={() => { setInput(null); setHeaders(null); setErrors({}) }}>Discard</Button>}</div>
         </form>}
       </section>

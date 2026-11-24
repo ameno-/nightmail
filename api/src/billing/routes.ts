@@ -4,6 +4,7 @@ import { actor, actorMailAccess, ApiError, dashboardSession, requiredOf, unrestr
 import { mutate, operatorActor, operatorRequestHash, type OperatorAudit, type OperatorIdentity } from '../operator.js';
 import { operatorContext, recordAudit } from '../audit.js';
 import { MicroCentsJson } from './money.js';
+import { CREDIT } from './rates.js';
 import { readBilling } from './state.js';
 import { chargeSavedCardTopUp, createCardSetup, createCheckoutTopUp, getPayment, listPayments, refundTopUp, removePaymentMethod, setAutoRecharge } from './stripe.js';
 import type { BillingPosition, LedgerKind } from './types.js';
@@ -64,7 +65,7 @@ const Payment = z.object({
 }).openapi('BillingPayment');
 const UsagePoint = z.object({ start: z.string().describe('Start of the period, UTC.'), meter: z.enum(['send', 'receive', 'omen', 'storage', 'byo_send', 'byo_receive']),
   quantity: z.string().describe('send: recipients; receive: messages; omen: emails checked by AI decisions, which are free (the meter keeps its name from before the rename); storage: billable byte-days beyond the free GB; byo_*: reported only, $0.') }).openapi('BillingUsagePoint');
-const TopUpAmount = z.number().int().min(2000).max(1_000_000).describe('Whole US cents, $20 to $10,000, excluding tax.');
+const TopUpAmount = z.number().int().min(CREDIT.minTopUpCents).max(CREDIT.maxTopUpCents).describe('Whole US cents, $20 to $10,000, excluding tax.');
 const Cursor = z.string().regex(/^\d{1,19}$/).optional();
 
 /** Hosted only, and workspace-wide: a key restricted to domains never reads or moves money. */
@@ -227,7 +228,7 @@ export function registerBilling(app: App) {
   const AutoRecharge = z.object({
     enabled: z.boolean(),
     thresholdCents: z.number().int().min(500).max(100_000).describe('Recharge when the balance falls below this ($5 to $1,000).'),
-    amountCents: z.number().int().min(2000).max(1_000_000).describe('Credit to add each time ($20 to $10,000).'),
+    amountCents: z.number().int().min(CREDIT.minTopUpCents).max(CREDIT.maxTopUpCents).describe('Credit to add each time ($20 to $10,000).'),
     monthlyCapCents: z.number().int().min(2000).max(25_000_000).describe('At most this much auto-recharge per calendar month (UTC), at least amountCents and up to $250,000.'),
   }).strict().refine(v => v.monthlyCapCents >= v.amountCents, { message: 'monthlyCapCents must be at least amountCents.', path: ['monthlyCapCents'] }).openapi('BillingAutoRecharge');
   app.openapi(createRoute({ method: 'put', path: '/v1/billing/auto-recharge', operationId: 'updateBillingAutoRecharge', tags: ['Billing'], security, summary: 'Set auto-recharge',

@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Button, Dialog, Field, MutationError, Textarea, fieldError } from './ui'
 import { useApiMutation } from '../data/context'
+import { invalidate } from '../data/invalidation'
 import { queries } from '../data/queries'
 import type { WorkspaceSettings } from '../data/types'
 
@@ -29,7 +30,7 @@ export function PostalAddressDialog({ open, onOpenChange, initial, title, submit
   const [problem, setProblem] = useState('')
   const client = useQueryClient()
   // Settings confirms the save; Send goes straight on to its own confirmation.
-  const save = useApiMutation((api, postalAddress: string | null) => api.workspace.updateSettings({ postalAddress }), onSaved ? undefined : 'Saved')
+  const save = useApiMutation((api, postalAddress: string | null) => api.workspace.updateSettings({ postalAddress }), onSaved ? undefined : 'Saved', false, invalidate.postalAddress)
   async function submit(event: FormEvent) {
     event.preventDefault()
     const text = lines(value).join('\n'), invalid = text ? postalAddressError(value) : required ? 'Enter the postal address.' : ''

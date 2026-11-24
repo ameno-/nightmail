@@ -15777,7 +15777,20 @@
             "properties": {
               "emailed": {
                 "type": "boolean",
-                "description": "Whether the invitation was emailed to the invitee, with acceptUrl. False when this installation sends no account email or the day’s invitation emails are used: share acceptUrl yourself."
+                "description": "Whether the invitation was emailed to the invitee, with acceptUrl. When false, share acceptUrl yourself; notEmailedReason says why."
+              },
+              "notEmailedReason": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "not_available",
+                  "new_workspace",
+                  "allowance_used",
+                  null
+                ],
+                "description": "Why no email went out, null when one did. not_available: this installation sends no invitation email, or your account has no verified address to be named by. new_workspace: invitations are emailed once the workspace has a verified domain or has finished its evaluation. allowance_used: the invitation emails for today, or to this address, are used."
               },
               "nextStep": {
                 "type": "string",
@@ -15786,6 +15799,7 @@
             },
             "required": [
               "emailed",
+              "notEmailedReason",
               "nextStep"
             ]
           }
@@ -15860,13 +15874,15 @@
             "type": "string"
           },
           "workspaceName": {
-            "type": "string"
+            "type": "string",
+            "description": "The workspace’s name as plain words, at most 40 characters; empty when nothing of it can be shown."
           },
           "workspaceSlug": {
             "type": "string"
           },
           "inviterName": {
-            "type": "string"
+            "type": "string",
+            "description": "The inviter’s display name as plain words, like workspaceName; may be empty. Identify the inviter by inviterEmail."
           },
           "inviterEmail": {
             "type": "string"
@@ -18372,6 +18388,10 @@
                       "type": "boolean",
                       "description": "Hosted dashboard sessions: an operator lets this workspace connect its own AWS account (POST /v1/connection with kind byo). False otherwise, and the dashboard offers Hosted mail only."
                     },
+                    "presence": {
+                      "type": "boolean",
+                      "description": "Whether this installation shows who else has a campaign open in the dashboard (campaign rooms run on the Cloudflare deployment). False on the Node server."
+                    },
                     "billing": {
                       "type": [
                         "object",
@@ -20143,7 +20163,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Active contacts with current list IDs. Search is a case-insensitive literal email/name substring. Consent and suppression filters are independent.",
+        "description": "Active contacts with current list IDs. A search that is one complete email address returns that contact (exact, any case). Any other search is a case-insensitive literal substring of the email or name. Consent and suppression filters are independent.",
         "parameters": [
           {
             "schema": {
@@ -21625,10 +21645,10 @@
                 "false"
               ],
               "default": "true",
-              "description": "false skips member counts (counts is null), for pickers that only need names. Counting scans every membership of each list."
+              "description": "false leaves member counts out (counts is null). Counts are kept as memberships, consent and suppression change, so reading them does not count members."
             },
             "required": false,
-            "description": "false skips member counts (counts is null), for pickers that only need names. Counting scans every membership of each list.",
+            "description": "false leaves member counts out (counts is null). Counts are kept as memberships, consent and suppression change, so reading them does not count members.",
             "name": "counts",
             "in": "query"
           }
@@ -24210,7 +24230,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Persist a preview before commit. Feature limit: 5 MiB UTF-8 CSV, 50,000 rows, 100 columns per import; preview and commit a larger file in parts of that size (the dashboard does this for files up to 1,000,000 rows and 100 MiB). Map headers explicitly. Valid rows can commit alongside a retained row-error report. Imports never lift suppression; consent changes only when the commit attests it.",
+        "description": "Persist a preview before commit. Feature limit: 5 MiB UTF-8 CSV, 50,000 rows, 100 columns per import; preview and commit a larger file in parts of that size (the dashboard does this for files up to 1,000,000 rows and 100 MiB). Map headers explicitly. Valid rows can commit alongside a retained row-error report. Imports never lift suppression; consent changes only when the commit attests it. Each workspace keeps at most 50 uncommitted previews (oldest evicted) and allows 40 previews per minute.",
         "requestBody": {
           "required": true,
           "content": {
@@ -24808,7 +24828,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Imports every valid row of a previewed import. Without consent, imported contacts keep their consent decision (new contacts have none, so campaigns skip them). With consent, everyone imported who had no decision is marked subscribed with your evidence. A repeated commit changes nothing.",
+        "description": "Imports every valid row of a previewed import. Without consent, imported contacts keep their consent decision (new contacts have none, so campaigns skip them). With consent, everyone imported who had no decision is marked subscribed with your evidence. A repeated commit changes nothing. One import commits at a time per workspace (503 IMPORT_COMMIT_BUSY if another is running; retryable).",
         "parameters": [
           {
             "schema": {
@@ -39901,7 +39921,7 @@
     "/v1/metrics": {
       "get": {
         "operationId": "getMetrics",
-        "description": "Operational created-cohort metrics, not invoicing or provider reputation. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event, or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results. Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour additionally returns hourly UTC creation buckets with canonical ISO dates such as 2026-09-12T01:00:00.000Z, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
+        "description": "Operational created-cohort metrics, not invoicing or provider reputation. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event (quantized to 10-second buckets during high-volume sending), or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results. Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour additionally returns hourly UTC creation buckets with canonical ISO dates such as 2026-09-12T01:00:00.000Z, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
         "tags": [
           "Metrics"
         ],
@@ -40129,7 +40149,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "The workspace sender score, the daily limit it sets and the enforcement step (Hosted). In good standing (a score of 75 or more, no warning) there is no daily limit: limit.unlimited is true, limit.daily null, and only the per-minute pace (limit.perMinute) applies. A new workspace's first 500 real recipients are its evaluation, at 500 a day until their delivery results are in (gradedBy says by when); for 24 clean hours after it, sending grows from 1,000 recipients an hour, doubling with each clean hour (limit.growth). Under 75 the limit is 500 (70–74), 200 (65–69) or 100, and a warning freezes it. The score (0–100) is the quality of what the workspace sends (complaints, the spam screen, bounces, list quality, authentication and engagement), decayed with a 30-day half-life and recounted hourly. Self-hosted and BYO get the score for display only. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event, or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results. A change of standing or limit shows at once. Workspace-wide: keys restricted to domains get 403.",
+        "description": "The workspace sender score, the daily limit it sets and the enforcement step (Hosted). In good standing (a score of 75 or more, no warning) there is no daily limit: limit.unlimited is true, limit.daily null, and only the per-minute pace (limit.perMinute) applies. A new workspace's first 500 real recipients are its evaluation, at 500 a day until their delivery results are in (gradedBy says by when); for 24 clean hours after it, sending grows from 1,000 recipients an hour, doubling with each clean hour (limit.growth). Under 75 the limit is 500 (70–74), 200 (65–69) or 100, and a warning freezes it. The score (0–100) is the quality of what the workspace sends (complaints, the spam screen, bounces, list quality, authentication and engagement), decayed with a 30-day half-life and recounted hourly. Self-hosted and BYO get the score for display only. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event (quantized to 10-second buckets during high-volume sending), or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results. A change of standing or limit shows at once. Workspace-wide: keys restricted to domains get 403.",
         "responses": {
           "200": {
             "description": "Success",
@@ -40436,7 +40456,7 @@
           }
         ],
         "summary": "Plan, pricing and sending limits",
-        "description": "Hosted only. Pricing and whether billing charges yet, this month's sent and received counts against their free allowances, 5,000 each, counted separately (received only for credentials that may read all received mail), and the rolling daily sending limit (none in good standing) with the evaluation before it. Workspace-wide: keys restricted to domains get 403. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event, or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results.",
+        "description": "Hosted only. Pricing and whether billing charges yet, this month's sent and received counts against their free allowances, 5,000 each, counted separately (received only for credentials that may read all received mail), and the rolling daily sending limit (none in good standing) with the evaluation before it. Workspace-wide: keys restricted to domains get 403. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event (quantized to 10-second buckets during high-volume sending), or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results.",
         "responses": {
           "200": {
             "description": "Success",
@@ -53588,7 +53608,7 @@
         ],
         "operationId": "listInboxes",
         "summary": "List agent inboxes",
-        "description": "Inboxes this credential can see, ordered by ID, with status and usage. A provisioning key sees the inboxes it created. Pass nextCursor as cursor for the next page.",
+        "description": "Inboxes this credential can see, ordered by ID, with status and usage. A provisioning key sees the inboxes it created. Pass nextCursor as cursor for the next page. Filtered queries (type, status, q): Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
         "parameters": [
           {
             "schema": {
@@ -54552,7 +54572,7 @@
         ],
         "operationId": "listInboxMessages",
         "summary": "List or wait for inbox messages",
-        "description": "Oldest first, in commit order. Without after, the page starts at the first message, so mail that arrived before the call is included. With wait, the call holds until a matching message arrives or the time runs out; pass the returned cursor as after on the next call. Junk, unverified and held mail never wake a waiter: list them with include=held. Each waited second counts as one request against the key’s per-minute budget.",
+        "description": "Oldest first, in commit order. Without after, the page starts at the first message, so mail that arrived before the call is included. With wait, the call holds until a matching message arrives or the time runs out; pass the returned cursor as after on the next call. Junk, unverified and held mail never wake a waiter: list them with include=held. Each waited second counts as one request against the key’s per-minute budget. Filtered queries: Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
         "parameters": [
           {
             "schema": {
@@ -64139,7 +64159,7 @@
       },
       "post": {
         "operationId": "inviteWorkspaceMember",
-        "description": "Invite an email address. Membership starts only after acceptance by the verified address. Hosted, the invitee is emailed the link (emailed says so; at most 20 invitation emails a workspace a day); otherwise share the returned URL. An invitation never grants more than the inviter's role, and an owner invitation is made only in the dashboard.",
+        "description": "Invite an email address. Membership starts only after acceptance by the verified address. Hosted, the invitee is emailed the link once the workspace has a verified domain or has finished its evaluation (emailed says so; at most 20 invitation emails a workspace a day); otherwise share the returned URL. An invitation never grants more than the inviter's role, and an owner invitation is made only in the dashboard.",
         "tags": [
           "Workspaces"
         ],
@@ -64295,7 +64315,7 @@
     "/v1/workspaces/current/invitations": {
       "post": {
         "operationId": "createWorkspaceInvitation",
-        "description": "Invite an email address. Membership starts only after acceptance by the verified address. Hosted, the invitee is emailed the link (emailed says so; at most 20 invitation emails a workspace a day); otherwise share the returned URL. An invitation never grants more than the inviter's role, and an owner invitation is made only in the dashboard. Owners and admins, in the dashboard or over their own MCP sign-in; API keys and agent tokens get 403 DASHBOARD_AUTH_REQUIRED.",
+        "description": "Invite an email address. Membership starts only after acceptance by the verified address. Hosted, the invitee is emailed the link once the workspace has a verified domain or has finished its evaluation (emailed says so; at most 20 invitation emails a workspace a day); otherwise share the returned URL. An invitation never grants more than the inviter's role, and an owner invitation is made only in the dashboard. Owners and admins, in the dashboard or over their own MCP sign-in; API keys and agent tokens get 403 DASHBOARD_AUTH_REQUIRED.",
         "tags": [
           "Workspaces"
         ],
@@ -65156,7 +65176,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Shows the signed-in recipient the invitation they followed (workspace, inviter, role). Read-only; acceptWorkspaceInvitation joins.",
+        "description": "Shows the signed-in recipient the invitation they followed (the workspace’s and the inviter’s names as plain words, the inviter’s address, the role). Read-only; acceptWorkspaceInvitation joins.",
         "parameters": [
           {
             "schema": {

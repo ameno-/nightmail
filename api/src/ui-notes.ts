@@ -131,9 +131,13 @@ async function sessionOperator(c: Ctx): Promise<Caller> {
   return { userId: operator.userId, key: false, context: { ...auditContext(c), actor: { type: 'operator', id: operator.userId, userId: operator.userId, via: 'console' } } };
 }
 
-/** The only requests a UI notes key may make: list and read notes, and change one (support.ts operatorGate). */
+/**
+ * The only requests a UI notes key (an operator's agent key) may make: list and read notes, change one, and read the
+ * installation's health (src/health.ts: the open alerts and the rollup, IDs and counts only), so an agent can pull what
+ * the Slack cards push (support.ts operatorGate).
+ */
 export const notesKeyRoute = (method: string, path: string) =>
-  (method === 'GET' && /^\/v1\/operator\/ui-notes(?:\/uin_[0-9a-f]{32})?$/.test(path)) || (method === 'PATCH' && /^\/v1\/operator\/ui-notes\/uin_[0-9a-f]{32}$/.test(path));
+  (method === 'GET' && /^\/v1\/operator\/(?:ui-notes(?:\/uin_[0-9a-f]{32})?|health)$/.test(path)) || (method === 'PATCH' && /^\/v1\/operator\/ui-notes\/uin_[0-9a-f]{32}$/.test(path));
 const NOTES_KEY = /^Bearer ((?:nm|bane)_notes_[0-9a-f]{64})$/; // bane_: remove after rename cleanup
 /**
  * Authenticates a UI notes key for operatorGate, or refuses with the gate's own 403: a live, unexpired, unrevoked key

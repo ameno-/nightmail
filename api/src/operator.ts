@@ -9,6 +9,7 @@ import { clearProbe, queueCampaignRun, resumeCampaign } from './states.js';
 import { productName } from './brand.js';
 import { placesOpened, readPlaces, setLimit } from './signups.js';
 import { waitlistNoticeStatus } from './account-notices.js';
+import { diskAlertSetup } from './disk-alert.js';
 
 // The operator API: Anomaly staff with a platform role act on any Hosted workspace through one audited path. The
 // /operator dashboard area, Ryan's support platform (phase 2) and scripts are its clients. Roles live in
@@ -362,6 +363,14 @@ export function registerOperator(app: App) {
     });
     // After the commit: an email that fails or is slow can't undo the change. Each address is emailed once, ever.
     return c.json({ ...result, ...await placesOpened(c.env) }, 200);
+  });
+  // The database disk alert (src/disk-alert.ts): the URL and Authorization header to give PlanetScale's webhook. The header
+  // is a credential derived from the root secret, so only a full operator reads it, and each read is audited.
+  app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'get', path: '/v1/operator/database-disk-alert', operationId: 'operatorGetDiskAlertSetup',
+    responses: { 200: response(z.object({ url: z.string(), authorization: z.string(), events: z.array(z.string()) })), ...errors } }), async c => {
+    const operator = await operatorActor(c, 'operator');
+    await writeOperatorAudit(c.env.db, c, operator, 'platform', { action: 'operator-read-disk-alert-setup' });
+    return c.json(diskAlertSetup(c.env.config), 200);
   });
   // Every workspace, newest first, with what judging sign-ups needs: when it joined, its owner, a verified domain, what
   // it sent and its standing. Paged by the API's cursor.

@@ -17,24 +17,27 @@ export type CheckContext = {
 // Fresh facts for the exact From only: a parent's DMARC record does not prove the subdomain has no override.
 export async function checkContext(runtime: Runtime, a: Actor, fromDomain: string): Promise<CheckContext> {
   type Row = {id: string | null; identity: IdentityFacts | null; state: string; age: number | null; pool: string | null; probation: boolean | null; from_spf: boolean | null};
-  const domainRead = runtime.db.execute<Row>(sql`SELECT b.domain_id AS id,c.identity,c.sending_state AS state,
+  const domainRead = sql`SELECT b.domain_id AS id,c.identity,c.sending_state AS state,
     (s.signals->>'ageDays')::int + floor(extract(epoch FROM now()-s.started_at)/86400)::int AS age,
     CASE WHEN s.started_at>now()-interval '48 hours' THEN (s.signals #>> '{exact,spf}')::boolean END AS from_spf,
     CASE WHEN pc.kind='shared' THEN coalesce(p.pool_tier,'probation') END AS pool,
     CASE WHEN pc.kind='shared' THEN coalesce(p.pool_tier,'probation')='probation' AND ${probationReason(sql`c.workspace_id`)} IS NOT NULL END AS probation
     FROM domain_claims c LEFT JOIN domain_sending_bindings b ON (b.workspace_id,b.name)=(c.workspace_id,c.name)
     LEFT JOIN domain_placement_shadow s ON s.domain_id=b.domain_id LEFT JOIN provider_connections pc ON pc.id=c.connection_id
-    LEFT JOIN provider_pool_regions p ON p.region=b.region WHERE c.workspace_id=${a.workspaceId} AND c.name=${fromDomain}`);
+    LEFT JOIN provider_pool_regions p ON p.region=b.region WHERE c.workspace_id=${a.workspaceId} AND c.name=${fromDomain}`;
   type Standing = { score: string | null; phase: string | null; accepted: number; bounced: number; complained: number; allowance: HostedAllowance | null };
   // Match getSenderScore's workspace boundary. Scoped readers can check their own mail, not infer workspace totals.
-  const standingRead = !a.domains.length && runtime.config.multiTenant ? runtime.db.execute<Standing>(sql`SELECT st.score,st.phase,
-    mail.*, ${hostedAllowance(runtime.config,a.workspaceId,0,0,true)} AS allowance FROM provider_connections pc
-    LEFT JOIN sender_standing st ON st.workspace_id=pc.workspace_id CROSS JOIN LATERAL (
+  // Keep the numeric score as text through JSON, as in the direct PostgreSQL read.
+  const standingRead = !a.domains.length && runtime.config.multiTenant ? sql`(SELECT row_to_json(s) FROM (
+    SELECT st.score::text AS score,st.phase,mail.*, ${hostedAllowance(runtime.config,a.workspaceId,0,0,true)} AS allowance
+    FROM provider_connections pc LEFT JOIN sender_standing st ON st.workspace_id=pc.workspace_id CROSS JOIN LATERAL (
       SELECT coalesce(sum(accepted),0)::int AS accepted,coalesce(sum(bounced),0)::int AS bounced,coalesce(sum(complained),0)::int AS complained
       FROM sender_score_daily WHERE workspace_id=pc.workspace_id AND day>(now() AT TIME ZONE 'UTC')::date-7) mail
-    WHERE pc.workspace_id=${a.workspaceId} AND pc.kind='shared'`) : undefined;
-  const [domain, standing] = await Promise.all([domainRead, standingRead]);
-  const d=domain.rows[0], s=standing?.rows[0], ses=d?.identity?.ses, dm=ses && dmarcView(d?.identity?.dmarc,ses);
+    WHERE pc.workspace_id=${a.workspaceId} AND pc.kind='shared') s LIMIT 1)` : sql`NULL::json`;
+  // Independent nullable projections: a missing exact domain must not hide the workspace's standing.
+  const {rows:[row]} = await runtime.db.execute<{domain: Row | null; standing: Standing | null}>(sql`SELECT
+    (SELECT row_to_json(d) FROM (${domainRead}) d LIMIT 1) AS domain, ${standingRead} AS standing`);
+  const d=row?.domain??undefined, s=row?.standing, ses=d?.identity?.ses, dm=ses && dmarcView(d?.identity?.dmarc,ses);
   // Self-hosted/BYO has no persisted grade. Share the sender-score projection, cache only workspace aggregates
   // (never message content), and only compute for the unrestricted readers entitled to that projection.
   let rep:CheckContext['standing'];

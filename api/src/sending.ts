@@ -1,4 +1,5 @@
 import { cachedDashboardRead, mailRevision } from './dashboard-cache.js';
+import { talliesEnabled } from './sending-tallies.js';
 import { boundRequestBody } from './request-body.js';
 import { checkBudget } from './auth.js';
 import { recordAudit, type AuditContext } from './audit.js';
@@ -8,14 +9,15 @@ import { Buffer } from 'node:buffer';
 import type { DefaultTreeAdapterMap } from 'parse5';
 import { apiKeys } from './db/core.js';
 import { receivingPolicy } from './mailbox-ingest-input.js';
-import { mergeSuppression } from './db/audience.js';
+import { lists, mergeSuppression, segments } from './db/audience.js';
 import { SuppressionReason, EmailEventData, readCursor, nextCursor, budgetedRead, readLimit, readLimitNote } from './core.js';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import type { Attachment } from '@aws-sdk/client-sesv2';
 import { actor, actorMailAccess, ApiError, AudienceSpec, denied, unrestrictedRequired, uploadKey, chargeRenderBudget, digest, errors, getSes, isSimulatedSes, id, rowId, IdParams, json, lazyModule, log, ModuleLoadError, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, timed, withoutVerdict, wrapModuleLoad, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Runtime, type Storage } from './core.js';
 import { enqueue, JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures, wakeWebhooks } from './jobs.js';
-import { countScreened, failScheduledRelease, CAMPAIGN_ACTIVE, CAMPAIGN_RUNNING, CAMPAIGN_STATES, campaignEditable, campaignReserved, campaignResumable, cancelCampaign, failCampaign, holdCampaign, launchCampaign, noteHealthChecked, pauseCampaign, quarantineCampaign, clearProbe, skipProbe, waitProbe, queueCampaignRun, recordExpanded, recordPrepared, rescheduleCampaign, restrictToDelivered, resumeCampaign, retireCampaignRun, reviseCampaign, runningState, setCampaignPacing, startSending, unscheduleCampaign, terminalColumns, terminalEvents, wakeCampaignRun, type CampaignState } from './states.js';
+import { countScreened, failScheduledRelease, CAMPAIGN_ACTIVE, CAMPAIGN_RUNNING, CAMPAIGN_STATES, campaignEditable, campaignReserved, campaignResumable, cancelCampaign, failCampaign, finishCampaigns, holdCampaign, launchCampaign, noteHealthChecked, pauseCampaign, quarantineCampaign, clearProbe, skipProbe, waitProbe, queueCampaignRun, recordExpanded, recordPrepared, rescheduleCampaign, restrictToDelivered, resumeCampaign, retireCampaignRun, reviseCampaign, runningState, setCampaignPacing, startSending, unscheduleCampaign, terminalColumns, terminalEvents, wakeCampaignRun, type CampaignState } from './states.js';
 import { productName } from './brand.js';
+import { ADMISSION_MS, roomName } from './campaign-room-protocol.js';
 import type { CampaignScreen } from './screen.js';
 export { simulatedTopic, taggedEmailId, terminalColumns, terminalEvents };
 import { regionalSending, sendingConnections, type SendingBinding } from './domain-claims.js';
@@ -220,17 +222,30 @@ const STATS_NOTE = `A campaign of at least ${CAMPAIGN_STATS.from.toLocaleString(
  * page by page equal one count over all of them.
  */
 async function statsGroups(db: DbExecutor, a: Pick<Actor, 'workspaceId'>, where: SQL | undefined) {
-  const distinct = (condition: SQL) => sql<number>`count(DISTINCT ${emails.id}) FILTER (WHERE ${condition})::int`;
-  const outcome = (status: EmailStatus, type: string) => distinct(sql`${emails.status} = ${status} OR ${emailEvents.type} = ${type}`);
+  const has = (bit: number) => sql`(${emails.eventOutcomes} & ${bit}) <> 0`;
+  const count = (condition: SQL) => sql<number>`count(*) FILTER (WHERE ${condition})::int`;
   return db.select({
-    campaignId: emails.campaignId, status: emails.status, simulated: emails.simulated, count: sql<number>`count(DISTINCT ${emails.id})::int`,
-    accepted: distinct(sql`NOT ${emails.simulated} AND ${emails.status} <> 'suppressed' AND (${emails.providerId} IS NOT NULL OR ${emails.status} IN ('accepted', 'sent', 'delivered', 'bounced', 'complained', 'delayed') OR ${emailEvents.type} IN ('send', 'delivery', 'bounce', 'complaint', 'delivery_delay','non_permanent_bounce'))`),
-    delivered: outcome('delivered', 'delivery'), bounced: outcome('bounced', 'bounce'), complained: outcome('complained', 'complaint'),
-    opened: distinct(sql`${emailEvents.type} = 'open'`), clicked: distinct(sql`${emailEvents.type} = 'click'`),
-    failed: distinct(sql`${emails.status} IN ('rejected', 'rendering_failed') OR ${emailEvents.type} IN ('reject', 'rendering_failure')`),
-    deliveryDelayed: distinct(sql`${emails.status}='delayed' OR ${emailEvents.type} IN ('delivery_delay','non_permanent_bounce')`),
-  }).from(emails).leftJoin(emailEvents, and(scope(emailEvents, a), eq(emails.id, emailEvents.emailId)))
-    .where(and(scope(emails, a), where)).groupBy(emails.campaignId, emails.status, emails.simulated);
+    campaignId: emails.campaignId, status: emails.status, simulated: emails.simulated, count: sql<number>`count(*)::int`,
+    accepted: count(sql`NOT ${emails.simulated} AND ${emails.status} <> 'suppressed' AND (${emails.providerId} IS NOT NULL OR ${emails.status} IN ('accepted', 'sent', 'delivered', 'bounced', 'complained', 'delayed') OR ${has(1)})`),
+    delivered: count(sql`${emails.status} = 'delivered' OR ${has(2)}`),
+    bounced: count(sql`${emails.status} = 'bounced' OR ${has(4)}`),
+    complained: count(sql`${emails.status} = 'complained' OR ${has(8)}`),
+    opened: count(has(16)), clicked: count(has(32)),
+    failed: count(sql`${emails.status} IN ('rejected', 'rendering_failed') OR ${has(64)}`),
+    deliveryDelayed: count(sql`${emails.status} = 'delayed' OR ${has(128)}`),
+  }).from(emails).where(and(scope(emails, a), where)).groupBy(emails.campaignId, emails.status, emails.simulated);
+}
+async function tallyStatsGroups(db: DbExecutor, a: Pick<Actor, 'workspaceId'>, campaignIds: string[]) {
+  if (!campaignIds.length) return [];
+  const { rows } = await db.execute<CampaignStatsGroup & { campaignId: string }>(sql`SELECT
+    campaign_id AS "campaignId", status, simulated,
+    sum(email_count)::int AS count, sum(accepted)::int AS accepted, sum(delivered)::int AS delivered,
+    sum(bounced)::int AS bounced, sum(complained)::int AS complained, sum(opened)::int AS opened,
+    sum(clicked)::int AS clicked, sum(failed)::int AS failed, sum(delivery_delayed)::int AS "deliveryDelayed"
+    FROM sending_campaign_tallies
+    WHERE workspace_id = ${a.workspaceId} AND campaign_id = ANY(${sql.param(campaignIds)}::text[])
+    GROUP BY 1, 2, 3 HAVING sum(email_count) > 0`);
+  return rows;
 }
 /** The stored count of the campaign's current launch, if any (an earlier launch's never applies). */
 const storedStats = (row: Pick<typeof campaigns.$inferSelect, 'reviewId' | 'stats'>) => row.reviewId && row.stats?.reviewId === row.reviewId ? row.stats : null;
@@ -251,9 +266,23 @@ function listedStats(row: Pick<typeof campaigns.$inferSelect, 'reviewId' | 'stat
 export async function campaignStats(db: DbExecutor, a: Pick<Actor, 'workspaceId'>, rows: (typeof campaigns.$inferSelect)[]) {
   const result = new Map<string, z.infer<typeof CampaignStats>>();
   if (!rows.length) return result;
+  const useTallies = await talliesEnabled(db);
+  const countedAt = new Date().toISOString();
+  if (useTallies) {
+    // Exact at read time: sums folded rows + unfolded deltas in sending_campaign_tallies (< 2 ms at any scale).
+    // After 30-day retention removes emails, a frozen or larger stored snapshot in sending_campaigns.stats stays in force.
+    const grouped = await tallyStatsGroups(db, a, rows.map(row => row.id));
+    for (const row of rows) {
+      const stored = storedStats(row), counted = grouped.filter(item => item.campaignId === row.id);
+      const tallyEmails = counted.reduce((n, item) => n + item.count, 0);
+      const kept = stored && (stored.frozen || stored.emails > tallyEmails);
+      result.set(row.id, statsView(row, kept ? stored.groups : counted, kept ? stored.computedAt : countedAt));
+    }
+    return result;
+  }
+  // Fallback when tally triggers are disabled (emergency undo): live aggregate behind budgetedRead.
   const live = rows.filter(row => !(backgroundCounted(row) && storedStats(row)));
   const grouped = live.length ? await statsGroups(db, a, live.length === 1 ? eq(emails.campaignId, live[0]!.id) : inArray(emails.campaignId, live.map(row => row.id))) : [];
-  const countedAt = new Date().toISOString();
   for (const row of rows) {
     const stored = storedStats(row), counted = grouped.filter(item => item.campaignId === row.id);
     const kept = stored && (backgroundCounted(row) || stored.emails > counted.reduce((n, item) => n + item.count, 0));
@@ -434,14 +463,26 @@ const CAMPAIGN_PROGRESS_SCOPE = `while a campaign of at least ${CAMPAIGN_PROGRES
 const CAMPAIGN_PROGRESS_NOTE = `For every credential, counts may be up to ${CAMPAIGN_PROGRESS_CACHE_SECONDS} seconds old ${CAMPAIGN_PROGRESS_SCOPE}; state and delivery are always current. Counts are exact for smaller campaigns, once a campaign is done, canceled or failed, and in the campaign that pause, resume and other changes return.`;
 async function campaignViews<T extends CampaignRow>(runtime: Runtime, a: Actor, rows: T[], read?: { origin: string; detail?: boolean }, db: DbExecutor = runtime.db) {
   if (!rows.length) return [];
-  const load = async () => db.select({ campaignId: emails.campaignId, status: emails.status, count: sql<number>`count(*)::int` }).from(emails).where(and(scope(emails, a), inArray(emails.campaignId, rows.map(row => row.id)))).groupBy(emails.campaignId, emails.status);
-  const cached = async (scope: unknown[], ttlSeconds?: number) => (await cachedDashboardRead(read!.origin, JSON.stringify(scope), load, ttlSeconds)).value;
-  // Dashboard lists reuse counts for 60 s. Detail reuses a large active campaign's counts for every credential, keyed on its
-  // snapshot (review), not updatedAt, which every release step moves; delivery cursors come from the row and stay current.
-  // Mutations, small campaigns and finished ones stay exact.
-  const [one] = rows, progress = read?.detail && rows.length === 1 && (CAMPAIGN_ACTIVE as readonly string[]).includes(one!.state) && one!.total >= CAMPAIGN_PROGRESS_CACHE_MIN_RECIPIENTS;
-  const grouped = a.domains.length ? [] : progress ? await cached(['campaign-progress', a.workspaceId, one!.id, one!.reviewId], CAMPAIGN_PROGRESS_CACHE_SECONDS)
-    : read && !read.detail && a.credential === 'dashboard' ? await cached(['campaign-counts', a.workspaceId, rows.map(r => [r.id, r.updatedAt])]) : await load();
+  let grouped: { campaignId: string | null; status: EmailStatus; count: number }[];
+  if (a.domains.length) {
+    grouped = [];
+  } else if (await talliesEnabled(db)) {
+    // Exact at read time from sending_campaign_tallies (< 2 ms at any scale, never cached, never scans sending_emails).
+    const ids = rows.map(row => row.id);
+    const { rows: tallied } = await db.execute<{ campaignId: string; status: EmailStatus; count: number }>(sql`SELECT
+      campaign_id AS "campaignId", status, sum(email_count)::int AS count
+      FROM sending_campaign_tallies
+      WHERE workspace_id = ${a.workspaceId} AND campaign_id = ANY(${sql.param(ids)}::text[])
+      GROUP BY 1, 2 HAVING sum(email_count) > 0`);
+    grouped = tallied;
+  } else {
+    // Fallback when tally triggers are disabled (emergency undo): live GROUP BY with progress cache.
+    const load = async () => db.select({ campaignId: emails.campaignId, status: emails.status, count: sql<number>`count(*)::int` }).from(emails).where(and(scope(emails, a), inArray(emails.campaignId, rows.map(row => row.id)))).groupBy(emails.campaignId, emails.status);
+    const cached = async (scope: unknown[], ttlSeconds?: number) => (await cachedDashboardRead(read!.origin, JSON.stringify(scope), load, ttlSeconds)).value;
+    const [one] = rows, progress = read?.detail && rows.length === 1 && (CAMPAIGN_ACTIVE as readonly string[]).includes(one!.state) && one!.total >= CAMPAIGN_PROGRESS_CACHE_MIN_RECIPIENTS;
+    grouped = progress ? await cached(['campaign-progress', a.workspaceId, one!.id, one!.reviewId], CAMPAIGN_PROGRESS_CACHE_SECONDS)
+      : read && !read.detail && a.credential === 'dashboard' ? await cached(['campaign-counts', a.workspaceId, rows.map(r => [r.id, r.updatedAt])]) : await load();
+  }
   return rows.map(row => {
     const counts = emptyCounts();
     for (const item of grouped) if (item.campaignId === row.id) { counts.byStatus[item.status] = Number(item.count); counts.total += Number(item.count); }
@@ -508,6 +549,16 @@ function draftSender(runtime: Runtime, a: Actor, draft: CampaignDraft) {
   if (!draft.from && a.domains.length) throw denied('SENDER_DOMAIN_FORBIDDEN', 'A domain-restricted key must supply a From address on one of its domains.', { permission: 'sendEmail', level: 'on', scope: 'workspace' }, 'from');
   if (draft.from) keySender(a, draft.from);
   if (a.domains.length && Object.keys(draft.audience).length) throw unrestrictedRequired('Selecting a campaign audience requires an unrestricted credential.', { permission: 'audience', level: 'write' });
+}
+// A draft's audience names only this workspace's lists and segments. Another workspace's ID gets the answer of one that
+// doesn't exist, the answer the audience gives when it is read (audience.ts audienceConditions), so an ID can't be probed.
+// IDs the stored draft already names pass unchecked: a draft outlives a deleted list and must stay editable.
+async function draftAudience(db: DbExecutor, a: Actor, audience: CampaignDraft['audience'], stored: CampaignDraft['audience'] = {}) {
+  const added = (now: (string | undefined)[], before: (string | undefined)[]) => [...new Set(now.filter((id): id is string => id !== undefined && !before.includes(id)))];
+  const listIds = added([audience.listId, ...(audience.excludeListIds ?? [])], [stored.listId, ...(stored.excludeListIds ?? [])]);
+  const segmentIds = added([audience.segmentId, ...(audience.excludeSegmentIds ?? [])], [stored.segmentId, ...(stored.excludeSegmentIds ?? [])]);
+  if (listIds.length && (await db.select({ id: lists.id }).from(lists).where(and(scope(lists, a), inArray(lists.id, listIds)))).length !== listIds.length) notFound('List');
+  if (segmentIds.length && (await db.select({ id: segments.id }).from(segments).where(and(scope(segments, a), inArray(segments.id, segmentIds)))).length !== segmentIds.length) notFound('Segment');
 }
 async function draftRegion(runtime:Runtime,db:DbExecutor,a:Actor,input:{from:string;region?:string;regionPinned?:boolean},previous?:CampaignDraft) {
   if (!regionalSending(runtime)) return {region:await assertRegionEnabled(db,a.workspaceId,input.region ?? previous?.region),regionPinned:previous?.regionPinned};
@@ -1385,6 +1436,14 @@ export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, held: 
   const receipt = await queueEmail(runtime, db, a, snapshot);
   return { emailId: receipt.id, snapshot };
 }
+/** An agent (API key or MCP) read or saved this draft: anyone with it open sees it for two minutes (src/campaign-room.ts),
+ *  and a save (saved: its revision) shows on their pages at once, with the agent's name. In the background, only where
+ *  rooms exist (the Worker), and only for a campaign that can still be edited. People are in the room through their own
+ *  socket, and their tab tells it they saved. */
+function agentVisit(c: Ctx, a: Actor, campaign: typeof campaigns.$inferSelect, saved?: number) {
+  if (!c.env.campaignRooms || !(a.credential === 'apiKey' || a.credential === 'mcp' || a.credential === 'agentToken') || campaign.archivedAt || !campaignEditable(campaign)) return;
+  c.env.campaignRooms.visit(roomName(a.workspaceId, campaign.id), a.keyId, runtime => import('./ritual-version.js').then(({ credentialName }) => credentialName(runtime.db, a)), saved);
+}
 function editable(row: typeof campaigns.$inferSelect, revision?: number) {
   if (row.archivedAt) throw new ApiError(409, 'CAMPAIGN_ARCHIVED', 'Restore this campaign before editing, reviewing or sending it.');
   if (revision !== undefined && row.revision !== revision) throw new ApiError(409, 'STALE_CAMPAIGN_REVISION', 'The campaign has changed; fetch it and review again.');
@@ -1698,6 +1757,7 @@ export function registerSending(app: App) {
       const campaignId = id('campaign'); const source = input.templateId ? await (await wrapModuleLoad(() => import('./templates.js'))).instantiateTemplate(c.env, db, a, input.templateId) : null;
       const draft = { name: input.name, from: input.from, ...(input.fromName ?? source?.draft.fromName ? { fromName: input.fromName ?? source?.draft.fromName } : {}), ...(input.previewText ?? source?.draft.previewText ? { previewText: input.previewText ?? source?.draft.previewText } : {}), replyTo: input.replyTo.length ? input.replyTo : source?.draft.replyTo ?? [], ...await draftRegion(c.env,db,a,input), subject: input.subject || source?.draft.subject || '', attachments: [...new Set([...(source?.draft.attachments ?? []), ...input.attachments])], tracking: input.tracking ?? source?.draft.tracking ?? true, audience: input.audience, defaults: { ...(source?.draft.defaults ?? {}), ...input.defaults }, ...(input.html ?? source?.draft.html ? { html: input.html ?? source?.draft.html } : {}), ...(input.unsubscribePageUrl ?? source?.draft.unsubscribePageUrl ? { unsubscribePageUrl: input.unsubscribePageUrl ?? source?.draft.unsubscribePageUrl } : {}), ...(input.requiredNotice ? { requiredNotice: true } : {}) };
       draftSender(c.env, a, draft);
+      await draftAudience(db, a, draft.audience);
       await requiredNoticesAllowed(db, draft, a.workspaceId);
       await linkAttachments(db, a, draft.attachments, 'campaign', campaignId);
       const [row] = await db.insert(campaigns).values({ id: campaignId, workspaceId: a.workspaceId, draft, sourceTemplateId: source?.templateId ?? null, sourceTemplateRevision: source?.templateRevision ?? null }).returning();
@@ -1732,8 +1792,29 @@ export function registerSending(app: App) {
     const views = await timed(c, 'campaign-counts-db', () => campaignViews(c.env, a, listed.map(({ stats: _stats, tracking: _tracking, ...row }) => row), { origin: new URL(c.req.url).origin }));
     return c.json({ data: views.map((row, i) => CampaignSummary.parse({ ...row, stats: listedStats(listed[i]!) })), nextCursor: nextCursor(rows, q.limit, binding) }, 200);
   });
+  // The dashboard's campaign room (src/campaign-room.ts): a WebSocket that shows who else has the campaign open. Not part of
+  // the public API, and people only: agents appear through their own reads and saves (agentVisit). A browser's WebSocket
+  // carries no headers of its own, so the Worker takes its account and workspace from this URL's query (worker.ts).
+  app.get('/v1/campaigns/:id/room', async c => {
+    const rooms = c.env.campaignRooms;
+    if (!rooms) throw new ApiError(404, 'PRESENCE_UNAVAILABLE', 'Live presence needs campaign rooms, which only the Cloudflare deployment runs.');
+    if (c.req.header('upgrade')?.toLowerCase() !== 'websocket') throw new ApiError(426, 'WEBSOCKET_REQUIRED', 'Open the campaign room with a WebSocket.');
+    const a = actor(c);
+    if (a.credential !== 'dashboard') throw denied('DASHBOARD_AUTH_REQUIRED', 'Use a signed-in dashboard session.', { credential: 'dashboard' });
+    // Cookies ride along on any site's WebSocket to this host, so only the dashboard's own pages may open one.
+    (await import('./account-login.js')).requireDashboardOrigin(c.env, c.req.raw);
+    const campaignId = c.req.param('id');
+    const [row] = await c.env.db.select({ id: campaigns.id }).from(campaigns).where(campaignWhere(a, campaignId)).limit(1);
+    if (!row) notFound('Campaign');
+    // The room knows each person by a key of its own, never their user ID, and shows API keys' and MCP clients' names
+    // only to those who see them in Settings (owners and admins; self-hosted, everyone).
+    const room = roomName(a.workspaceId, campaignId), key = (await digest(`${room}:${a.keyId}`)).slice(0, 16);
+    const names = !c.env.config.multiTenant || a.role === 'owner' || a.role === 'admin';
+    return rooms.connect(room, { kind: 'person', id: key, name: a.name?.trim() || 'A teammate', view: c.req.query('view') === 'review' ? 'review' : 'write', names, until: Date.now() + ADMISSION_MS });
+  });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}', operationId: 'getCampaign', description: `The campaign with its full draft, per-status email counts and delivery progress. ${CAMPAIGN_PROGRESS_NOTE} ${readLimitNote(READ_LIMIT.campaign)}`, tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(Campaign), ...errors } }), async c => {
     const a = actor(c), row = await timed(c, 'campaign-db', () => findCampaign(c.env.db, a, c.req.valid('param').id));
+    agentVisit(c, a, row);
     const views = await timed(c, 'campaign-counts-db', () => budgetedRead(c.env.db, db => campaignViews(c.env, a, [row], { origin: new URL(c.req.url).origin, detail: true }, db), readLimit(READ_LIMIT.campaign)));
     return c.json(Campaign.parse(views[0]!), 200);
   });
@@ -1789,6 +1870,7 @@ export function registerSending(app: App) {
       const draft = {...input.draft,...await draftRegion(c.env,db,a,input.draft,current.draft)};
       draftSender(c.env, a, draft);
       draftSender(c.env, a, current.draft); editable(current, input.revision);
+      await draftAudience(db, a, draft.audience, current.draft.audience);
       await requiredNoticesAllowed(db, draft, a.workspaceId);
       await attachmentRows(db, a, input.draft.attachments, true);
       await db.delete(attachmentLinks).where(and(scope(attachmentLinks, a), eq(attachmentLinks.ownerType, 'campaign'), eq(attachmentLinks.ownerId, campaignId)));
@@ -1797,6 +1879,7 @@ export function registerSending(app: App) {
       if (!revised.rows.length) throw new ApiError(409, 'CAMPAIGN_LOCKED', 'The campaign changed while it was being saved; fetch it and try again.');
       return (await findCampaign(db, a, campaignId))!;
     });
+    agentVisit(c, a, row, row.revision);
     return c.json(Campaign.parse((await campaignViews(c.env, a, [row]))[0]!), 200);
   });
   app.openapi(createRoute({ method: 'patch', path: '/v1/campaigns/{id}/archive', operationId: 'setCampaignArchived', description: 'Archive a campaign to hide it from default lists, or restore it. Preserves its content, revision, delivery state and history. Preparing, scheduled, sending or paused campaigns must finish or be canceled before archiving. Archived campaigns cannot be edited, tested or sent until restored.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(CampaignArchive) }, responses: { 200: response(Campaign), ...errors } }), async c => {
@@ -1950,8 +2033,11 @@ async function cancelCampaignWork(db: DbExecutor, a: Actor, row: typeof campaign
   if (moved.rows.length) await db.execute(retireCampaignRun(ref, 'CAMPAIGN_CANCELED'));
   const page=moved.rows.length ? await cancelPage(db,a.workspaceId,row.id,errorCode??'CAMPAIGN_CANCELED',true) : {count:0,jobs:0};
   a.wakeJobs=(a.wakeJobs??0)+page.jobs;
-  const [inFlight] = await db.select({ count: sql<number>`count(*)::int` }).from(emails).where(and(scope(emails, a), eq(emails.campaignId, row.id), inArray(emails.status, ['attempting', 'accepted', 'sent', 'delivered', 'acceptance_unknown'])));
-  return { id: row.id, state: 'canceled' as const, canceled: page.count + unexpanded, inFlight: inFlight!.count };
+  const inFlight = await talliesEnabled(db)
+    ? Number((await db.execute<{ count: number }>(sql`SELECT coalesce(sum(email_count), 0)::int AS count FROM sending_campaign_tallies
+        WHERE workspace_id = ${a.workspaceId} AND campaign_id = ${row.id} AND status IN ('attempting', 'accepted', 'sent', 'delivered', 'acceptance_unknown')`)).rows[0]?.count ?? 0)
+    : (await db.select({ count: sql<number>`count(*)::int` }).from(emails).where(and(scope(emails, a), eq(emails.campaignId, row.id), inArray(emails.status, ['attempting', 'accepted', 'sent', 'delivered', 'acceptance_unknown']))))[0]!.count;
+  return { id: row.id, state: 'canceled' as const, canceled: page.count + unexpanded, inFlight };
 }
 /** Which of these addresses this workspace delivered to before, outside this campaign (lower case). */
 async function deliveredBefore(db: DbExecutor, wid: string, campaignId: string, emails: string[]) {
@@ -2098,6 +2184,7 @@ export const statusForEvent: Record<string, EmailStatus> = { send: 'sent', deliv
 // Publish email.sent from the SendEmail response; a later SES Send is status feedback only.
 export const publicEventType: Record<string, string> = { accepted: 'email.sent', delivery: 'email.delivered', bounce: 'email.bounced', non_permanent_bounce: 'email.bounced', validation_suppressed: 'email.bounced', complaint: 'email.complained', reject: 'email.rejected', acceptance_unknown: 'email.rejected', rendering_failure: 'email.rendering_failed', delivery_delay: 'email.delivery_delayed', open: 'email.opened', click: 'email.clicked' };
 export const rank: Record<EmailStatus, number> = { scheduled: 0, queued: 0, attempting: 1, acceptance_unknown: 2, accepted: 3, sent: 4, delayed: 4, suppressed: 5, delivered: 6, bounced: 7, complained: 8, rejected: 7, rendering_failed: 7, canceled: 7, simulated: 7 };
+const outcomeBitForEvent: Record<string, number> = { send: 1, accepted: 1, delivery: 3, bounce: 5, non_permanent_bounce: 129, complaint: 9, delivery_delay: 129, open: 16, click: 32, reject: 64, rendering_failure: 64 };
 type EmailEventInput = { workspaceId: string; type: string; providerId?: string; errorCode?: string; data?: Record<string, unknown>; recipientHashes?: string[]; externalId?: string; createdAt?: string; receipt?: { topicArn: string; messageId: string } };
 type IncomingReceipt = { topicArn: string; messageId: string; region: string; payload: Record<string, unknown>; recoveryType?: 'operation.ses' | 'operation.simulatedFeedbackRecovery' };
 export async function recordEmailEvent(runtime: Runtime, input: EmailEventInput & { emailId: string }) {
@@ -2130,7 +2217,7 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
   const topicMatch = mx ? sql`AND (x.simulated OR (e.feedback_topic_arn=x.topic_arn AND EXISTS(SELECT FROM provider_feedback_history h WHERE h.topic_arn=x.topic_arn AND h.region=x.region AND h.aws_account_id=split_part(x.topic_arn,':',5))))` : sql``;
   const rows = inputs.map((input, index) => ({
     ordinal: index, job_workspace: input.workspaceId, simulated: simulatedTopic(input.ingress.topicArn, input.ingress.region), topic_arn: input.ingress.topicArn, message_id: input.ingress.messageId, region: input.ingress.region, provider_id: input.providerId,
-    type: input.type, next_status: statusForEvent[input.type]!, next_rank: rank[statusForEvent[input.type]!], public_type: publicEventType[input.type] ?? null,
+    type: input.type, next_status: statusForEvent[input.type]!, next_rank: rank[statusForEvent[input.type]!], public_type: publicEventType[input.type] ?? null, outcome_bit: outcomeBitForEvent[input.type] ?? 0,
     external_id: input.externalId ?? null, data: input.data ?? {}, public_data: webhookData(input.data), effects: input.effects, created_at: input.createdAt ?? now(),
     event_id: rowId('event'), recovery_job_id: rowId('job'), recovery_type: input.ingress.recoveryType, payload: input.ingress.payload, tagged_email_id: input.taggedEmailId ?? null,
   }));
@@ -2138,7 +2225,7 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
   const json=JSON.stringify(rows), safe=json.includes('\\u0000') ? json.replace(/\\(?:u0000|.)/g,m=>m==='\\u0000'?'\uFFFD':m) : json;
   const result = await runtime.db.execute<{ ordinal: number; workspaceId: string | null; error: string | null; event: typeof emailEvents.$inferSelect | null; runnable: number; recovery:boolean; hooks:number }>(sql`WITH raw AS (
       SELECT * FROM jsonb_to_recordset(${safe}::jsonb) AS x(ordinal int, job_workspace text, simulated boolean, topic_arn text, message_id text, region text, provider_id text,
-        type text, next_status text, next_rank int, public_type text, external_id text, data jsonb, public_data jsonb, effects jsonb, created_at timestamptz, event_id text, recovery_job_id text, recovery_type text, payload jsonb, tagged_email_id text)
+        type text, next_status text, next_rank int, public_type text, outcome_bit int, external_id text, data jsonb, public_data jsonb, effects jsonb, created_at timestamptz, event_id text, recovery_job_id text, recovery_type text, payload jsonb, tagged_email_id text)
     ), candidates AS (
       SELECT x.ordinal, e.id FROM raw x JOIN sending_emails e ON e.provider_id = x.provider_id
       WHERE x.tagged_email_id IS NULL AND e.region = x.region AND e.simulated = x.simulated ${topicMatch}
@@ -2227,10 +2314,14 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
       SELECT x.*,max(x.next_rank) OVER(PARTITION BY x.email_id ORDER BY x.ordinal) AS running_rank FROM matched x JOIN inserted ins ON ins.id=x.event_id
       WHERE x.next_rank IS NOT NULL
     ), winner AS (
-      SELECT DISTINCT ON (email_id) *,bool_or(type='validation_suppressed' AND next_rank>=greatest(running_rank,(${JSON.stringify(rank)}::jsonb->>status)::int)) OVER(PARTITION BY email_id) AS validation
+      SELECT DISTINCT ON (email_id) *,
+        bool_or(type='validation_suppressed' AND next_rank>=greatest(running_rank,(${JSON.stringify(rank)}::jsonb->>status)::int)) OVER(PARTITION BY email_id) AS validation,
+        bit_or(outcome_bit) OVER(PARTITION BY email_id) AS outcome_bits
       FROM ranked ORDER BY email_id,next_rank DESC,ordinal DESC
     ), updated AS (
-      UPDATE sending_emails e SET status = w.next_status, provider_id = coalesce(w.provider_id, e.provider_id), error_code=CASE WHEN w.validation THEN 'EMAIL_VALIDATION_SUPPRESSED' ELSE e.error_code END, suppression_reason=CASE WHEN w.next_status='suppressed' AND w.validation THEN 'email_validation' END, updated_at = clock_timestamp()
+      UPDATE sending_emails e SET status = w.next_status, provider_id = coalesce(w.provider_id, e.provider_id),
+        event_outcomes = e.event_outcomes | w.outcome_bits::smallint,
+        error_code=CASE WHEN w.validation THEN 'EMAIL_VALIDATION_SUPPRESSED' ELSE e.error_code END, suppression_reason=CASE WHEN w.next_status='suppressed' AND w.validation THEN 'email_validation' END, updated_at = clock_timestamp()
        FROM winner w WHERE e.id = w.email_id AND e.workspace_id = w.workspace_id AND w.next_rank >= (${JSON.stringify(rank)}::jsonb ->> w.status)::int
     ), published AS (
       INSERT INTO operation_events(id, workspace_id, type, region, created_at, data)
@@ -2258,6 +2349,7 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
 async function persistEmailEvent(runtime: Runtime, input: EmailEventInput & { emailId: string }) {
   const next = statusForEvent[input.type];
   const publicType = publicEventType[input.type];
+  const outcomeBit = outcomeBitForEvent[input.type] ?? 0;
   // One transaction inside PostgreSQL instead of BEGIN/read/insert/update/enqueue/COMMIT over the
   // network. The locked row determines monotonic status; only a newly inserted event may change it
   // or publish a callback. Simulated acceptance also queues its Send/Delivery callback vehicles here
@@ -2272,7 +2364,9 @@ async function persistEmailEvent(runtime: Runtime, input: EmailEventInput & { em
       ${input.externalId ?? null}, ${JSON.stringify(input.data ?? {})}::jsonb, mail.simulated, ${input.createdAt ?? now()}::timestamptz, ${sql.param(input.recipientHashes ?? null)}::text[]
     FROM mail ON CONFLICT DO NOTHING RETURNING *
   ), updated AS (
-    UPDATE sending_emails e SET status = ${next ?? null}, provider_id = coalesce(${input.providerId || null}::text, e.provider_id), error_code = coalesce(${input.errorCode ?? null}::text, e.error_code), suppression_reason=${input.type==='validation_suppressed'?'email_validation':null}, updated_at = clock_timestamp()
+    UPDATE sending_emails e SET status = ${next ?? null}, provider_id = coalesce(${input.providerId || null}::text, e.provider_id),
+      event_outcomes = e.event_outcomes | ${outcomeBit}::smallint,
+      error_code = coalesce(${input.errorCode ?? null}::text, e.error_code), suppression_reason=${input.type==='validation_suppressed'?'email_validation':null}, updated_at = clock_timestamp()
     FROM mail, inserted WHERE e.id = mail.id AND e.workspace_id = ${input.workspaceId}
       AND ${next ?? null}::text IS NOT NULL AND ${next ? rank[next] : -1} >= (${JSON.stringify(rank)}::jsonb ->> mail.status)::int
   ), published AS (
@@ -2363,6 +2457,29 @@ export function checkedDispatchAttachments(ids: string[], rows: (typeof attachme
   validateAttachmentRows(distinctAttachmentIds(ids), rows);
   return rows;
 }
+const LEGACY_CONTENT_HASH = /^[0-9a-f]{64}$/;
+const STATIC_S1_CONTENT_HASH = /^s1:[0-9a-f]{64}$/;
+export const isSupportedContentHash = (hash: string | null | undefined): hash is string =>
+  !!hash && (LEGACY_CONTENT_HASH.test(hash) || STATIC_S1_CONTENT_HASH.test(hash));
+const unsupportedHashFormat = () => new ApiError(409, 'CAMPAIGN_HASH_FORMAT_UNSUPPORTED', 'Paused: this campaign uses a newer content hash format that this release cannot verify. Deploy the matching release before resuming.', undefined, true);
+export async function staticContentHash(baseHash: string, email: string): Promise<string> {
+  return `s1:${await digest(`${baseHash}:${email}`)}`;
+}
+/**
+ * Verifies a frozen recipient's content_hash in either the legacy full-snapshot format (64 hex chars) or the compact
+ * static `s1:` format (`s1:${sha256(baseHash + ':' + email)}`). Unknown future formats throw retryable
+ * CAMPAIGN_HASH_FORMAT_UNSUPPORTED so release/dispatch pause and defer instead of rejecting unsent recipients.
+ */
+export async function verifyCampaignContentHash(customer: EmailSnapshot, storedHash: string): Promise<boolean> {
+  if (STATIC_S1_CONTENT_HASH.test(storedHash)) {
+    const baseHash = await digest(canonical({ ...customer, to: [] }));
+    return (await staticContentHash(baseHash, customer.to[0] ?? '')) === storedHash;
+  }
+  if (LEGACY_CONTENT_HASH.test(storedHash)) {
+    return (await digest(canonical(customer))) === storedHash;
+  }
+  throw unsupportedHashFormat();
+}
 export async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail: typeof emails.$inferSelect, review: { version: number; draft: CampaignDraft; rendered: { html?: string; text?: string }; contentHash: string | null; recipient: ReviewedRecipient } | null, prefetched?: (typeof attachments.$inferSelect)[]) {
   // Review/recipient data and attachment metadata are immutable; retained email
   // links prevent attachment deletion. No transaction is needed to render them.
@@ -2370,8 +2487,9 @@ export async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail:
   // discard their render without writing a different snapshot over the winner.
   const rows = prefetched ? checkedDispatchAttachments(mail.snapshot.attachments, prefetched) : await attachmentRows(runtime.db, a, mail.snapshot.attachments);
   if (!review?.rendered || !review.contentHash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The reviewed recipient is unavailable.');
+  if (!isSupportedContentHash(review.contentHash)) throw unsupportedHashFormat();
   const customer = await campaignMessage(runtime, review.draft, review.recipient, false, rows, review.rendered, true, !review.rendered.html?.includes('{{'), review.version);
-  if (await digest(canonical(customer)) !== review.contentHash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_CHANGED', 'The renderer no longer reproduces the reviewed message. No provider attempt was made.');
+  if (!(await verifyCampaignContentHash(customer, review.contentHash))) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_CHANGED', 'The renderer no longer reproduces the reviewed message. No provider attempt was made.');
   // `keyed`: the same customer copy with the footer generated for the placeholder link, as campaign screening keys it.
   const keyed = screenedAs(runtime, customer, review.draft);
   // A required notice has no unsubscribe link: it goes out exactly as it is keyed, and no token is made for it.
@@ -2412,8 +2530,9 @@ export async function rebuildCampaignEmail(runtime: Runtime, a: Actor, stub: Ema
   if (!review?.rendered || !review.content_hash) throw new ApiError(410, 'EMAIL_CONTENT_EXPIRED', 'The campaign review this email was rendered from has been retired.');
   if (![1, CAMPAIGN_RENDERER_VERSION].includes(review.renderer_version)) throw new ApiError(409, 'CAMPAIGN_RENDERER_CHANGED', `This email was rendered by campaign renderer v${review.renderer_version}; this release supports v1 and v${CAMPAIGN_RENDERER_VERSION}.`);
   if (!(review.draft.requiredNotice ? stub.requiredNotice : stub.unsubscribeUrl)) throw new ApiError(409, 'EMAIL_CONTENT_UNAVAILABLE', 'This campaign email has no stored content to rebuild.');
+  if (!isSupportedContentHash(review.content_hash)) throw unsupportedHashFormat();
   const snapshot = await campaignMessage(runtime, review.draft, review.recipient, false, rows, review.rendered, true, !review.rendered.html?.includes('{{'), review.renderer_version);
-  if (await digest(canonical(snapshot)) !== review.content_hash) throw new ApiError(409, 'CAMPAIGN_CONTENT_UNREPRODUCIBLE', 'The renderer no longer reproduces the message that was sent.');
+  if (!(await verifyCampaignContentHash(snapshot, review.content_hash))) throw new ApiError(409, 'CAMPAIGN_CONTENT_UNREPRODUCIBLE', 'The renderer no longer reproduces the message that was sent.');
   marketingFooter(snapshot, stub.unsubscribeUrl ?? '', review.draft);
   return snapshot;
 }
@@ -2773,8 +2892,12 @@ async function frozenPostalAddress(runtime: Runtime, a: Actor, row: RunRow) {
 // place (JobDeferred on the same job row) otherwise.
 async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Record<string, unknown>): Promise<'again' | 'done'> {
   const ref = campaignRef(a, row.id), nowMs = Date.now();
-  // Every recipient is released: the dispatcher marks the campaign done when its last row leaves the queue.
-  if (row.expanded >= row.total) return 'done';
+  // Every recipient is released: the dispatcher marks the campaign done when its last row leaves the queue. When no row
+  // is left to leave it (the last release skipped everyone remaining, or the last rows went out while the campaign was
+  // paused) nothing would until the minute sweep, so the run finishes it. The statement moves sending -> done only with
+  // nothing queued or attempting: with a row in flight it changes nothing and the dispatcher finishes the campaign.
+  const settle = () => runtime.db.execute(finishCampaigns(sql`SELECT ${a.workspaceId}::text AS workspace_id, ${row.id}::text AS campaign_id`));
+  if (row.expanded >= row.total) { await settle(); return 'done'; }
   if (row.expanded === 0 && row.reviewDraft!.postalAddress === undefined) row.reviewDraft = { ...row.reviewDraft!, postalAddress: await frozenPostalAddress(runtime, a, row) };
   // Do not turn a retired generation into a pacing/quota wait, or refresh its provider quota.
   if (row.reviewDraft?.binding && row.account?.generation!==row.reviewDraft.binding.generation) throw staleReview();
@@ -2917,6 +3040,8 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     const allowed = admitted(runtime, buffer!.decision, a.workspaceId);
     const chunk = await recipientChunk(db, campaign.reviewId!, campaign.expanded, capacity);
     if (!chunk.length || chunk.some((recipient, index) => !recipient.content_hash || recipient.ordinal !== campaign.expanded + index + 1)) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The prepared audience is incomplete.');
+    // Refuse unknown future hash formats before releasing any row so the campaign pauses intact instead of burning recipients.
+    if (chunk.some(recipient => !isSupportedContentHash(recipient.content_hash))) throw unsupportedHashFormat();
     const delivered = campaign.deliveredOnly ? await deliveredBefore(db, a.workspaceId, campaign.id, chunk.map(r => r.recipient.email)) : null;
     const affordable = allowed.hostedLeft ?? Number.POSITIVE_INFINITY;
     // The processed prefix: every recipient up to the last affordable one that is sent; skipped ones cost nothing.
@@ -2973,7 +3098,7 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
   // Waiting on balance: billing.restored wakes the run as soon as credit lands; otherwise look again in an hour.
   if (released.balanceUntil && !released.completed) throw new JobDeferred(released.balanceUntil, payload);
   if (released.hostedUntil) throw new JobDeferred(new Date(Math.min(Date.parse(released.hostedUntil),dbNow+QUOTA_REFRESH_MS)).toISOString(),payload);
-  if (released.completed) return 'done';
+  if (released.completed) { if (!released.count) await settle(); return 'done'; }
   if (sesCapacity <= buffered!.total + released.count) return hold('ses_daily_quota', quotaUntil);
   if (shareCapacity <= buffered!.total + released.count) return hold('hosted_daily_quota', quotaUntil);
   // A rate-shared continuation runs once this release has been paid for at the campaign's share.
@@ -3006,7 +3131,7 @@ const runCampaign: JobHandler = async (runtime, payload, job) => {
     }
   } catch (error) {
     if (error instanceof JobDeferred || error instanceof ModuleLoadError) throw error;
-    if (error instanceof ApiError && ['HOSTED_SENDING_PAUSED', 'MARKETING_HELD', 'POSTAL_ADDRESS_REQUIRED', 'REQUIRED_NOTICES_OFF'].includes(error.code)) {
+    if (error instanceof ApiError && ['HOSTED_SENDING_PAUSED', 'MARKETING_HELD', 'POSTAL_ADDRESS_REQUIRED', 'REQUIRED_NOTICES_OFF', 'CAMPAIGN_HASH_FORMAT_UNSUPPORTED'].includes(error.code)) {
       await runtime.db.execute(pauseCampaign(ref, { code: error.code, message: error.message }));
       return;
     }

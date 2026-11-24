@@ -192,7 +192,7 @@ export function ConnectAgentDialog({ open, onOpenChange, inboxId }: { open: bool
       {!result && <>
         {searchable && <SearchField aria-label="Search inboxes" placeholder="Search address or name" value={query} onChange={event => setQuery(event.target.value)} />}
         {inboxes.error && !inboxes.data && !active.length ? <ErrorState error={inboxes.error} onRetry={() => void inboxes.refetch()} />
-          : inboxes.isPending || active.length || searchable ? <Field label="Inbox" hint={search && !inboxes.isFetching && !inboxes.data?.data.length ? 'No active inbox matches.' : undefined}>
+          : inboxes.isPending || active.length || searchable ? <Field label="Inbox" hint={search && !inboxes.isFetching && !inboxes.data?.data.length ? 'No active inbox matches.' : inboxes.data?.nextCursor ? 'Showing first 100 active inboxes — search above to find others.' : undefined}>
           <Select mask aria-label="Inbox" value={chosen} onValueChange={id => { setInbox(id); setPicked(active.find(box => box.id === id) ?? null) }} disabled={inboxes.isPending} placeholder="Loading inboxes…" options={active.map(box => ({ value: box.id, label: label(box) }))} />
         </Field> : <div className="connect-agent__empty"><span>No active agent inboxes</span><Link className="ui-button ui-button--secondary ui-button--sm" to="/receiving/inboxes" onClick={close}>Create an agent inbox</Link></div>}
         <Checkbox checked={reply} onCheckedChange={setReply} label="Let it reply to senders (the inbox needs replies on)" />

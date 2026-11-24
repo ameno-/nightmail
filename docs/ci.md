@@ -25,6 +25,7 @@ Every change reaches production through `dev`: a PR merges into `dev`, the dev d
 | Daily 07:17 UTC, or by hand | Nightly | The acceptance suite (quarantined tests included) and the CLS gate, once each by default (5, 10 or 20 by hand), reported in one issue |
 | `production` push | Deploy production | Requires a passing live dev E2E and CI proof (see **Releasing to production**) |
 | Daily 03:00 ET, on Ryan's Mac | Nightly report | The last 24 hours of production and dev logs against the previous week; files `nightly` issues and starts a self-improve session (below) |
+| On demand (`api/ bun run tear:ci`) | Model-based tear suite | Runs on demand against a disposable local Postgres (`anomalyco/tear` is private); public CI's `acceptance` shard verifies the disposable-DB guard on all 11 real `api/tear/**/*.host.ts` processes |
 
 CI, nightly and deploy use Blacksmith Ubuntu 24.04 (4 vCPUs for builds, tests and deploys; 2 for lightweight checks). `release.yml` stays on GitHub-hosted runners for npm trusted publishing. Blacksmith routes `actions/cache` to its local cache. Postgres runs on tmpfs; the CLS cache holds the locked Playwright browser and an exact-SHA Vite build, never a deploy artifact. Each protected suite check requires every matrix job to succeed. [Measured PR CI: 93 seconds](https://github.com/anomalyco/nightmail/actions/runs/43788887814), including queue time.
 
@@ -73,15 +74,14 @@ Workers Assets answers any path outside `run_worker_first` itself: a 405 for a P
 
 ### Migrations
 
-`src/migrate.ts` applies each `NNN_name.sql` once, in file-name order, and refuses a migration whose contents changed. **Fails when:**
+`src/migrate.ts` records applied filenames and SHA-256 checksums in `nightmail_migrations` and applies every unapplied `NNN_name.sql` in file-name order, refusing any already-applied migration whose contents changed. Any unused three-digit number is accepted so independent PRs can merge in any order; open-PR collisions are caught when the second PR merges. Because a fresh install applies migrations in number order while an upgraded database applies newly merged lower-numbered migrations after higher-numbered ones it already ran, a later-merged lower-numbered migration must not depend on a higher-numbered one. **Fails when:**
 
 - a file in `api/migrations/` doesn't match `^\d+_[a-z_]+\.sql$` (migrate.ts would silently skip it: no digits or capitals after the number);
-- a new migration's number is not greater than the newest one on `dev`, so a fresh database would apply it in a different order than dev did;
-- two files share a number (the pairs from before this check are listed in the script and stay);
-- an older open PR already adds a migration with the same number (the older PR keeps it; a newer one only gets a warning);
-- a migration that is on `dev` was edited, renamed or deleted (every upgraded database would fail with `MIGRATION_CHANGED`).
+- two files share a number (the historical pairs from before this check are listed in the script and stay);
+- a new migration reuses a number that is already on the base branch;
+- a migration that is on the base branch was edited, renamed or deleted (every upgraded database would fail with `MIGRATION_CHANGED`).
 
-**Fix:** rename your file to the number the message suggests. It is the next number after everything on `dev` and in open PRs.
+**Fix:** rename your file to an unused number (the message suggests the next free number above the current highest).
 
 ### Card slots
 
@@ -108,6 +108,16 @@ Every operation states what it needs: `x-nightmail-permission` in `api/openapi.j
 Connected AWS accounts run a published role template (`api/byo-templates/<major>.<minor>.yaml`, served from S3 as `byo/<version>.yaml`), and Nightmail must keep working with every supported version. **Fails when** a published file was edited, renamed or deleted, a new file isn't named `<major>.<minor>.yaml`, or a new version isn't newer than the newest published one.
 
 **Fix:** revert the published file and add the change as a new version. A minor version only adds permissions. The acceptance test `BYO contract` checks every session the code asks for (`api/src/byo-permissions.ts`) against the current draft and every published version; a call outside its session policy fails the BYO v5 enrollment test.
+
+### Price pages
+
+The public price pages (`/pricing` and `/compare/*`, `app/src/features/pricing`) compare Nightmail with named competitors, so a wrong figure is a false claim. The check renders them with React as a browser gets them, at their own sizes and at inputs a visitor might type (empty, negative, decimals, commas, past a billion). **Fails when:**
+
+- a Nightmail figure isn't what `api/src/billing/rates.ts` charges for the usage it is marked with (`data-nightmail-sent` and `data-nightmail-received`), or the pages don't quote the rate, the free allowances, storage, or the top-up minimum and expiry (`CREDIT`) as the billing code has them;
+- a competitor price in `prices.ts` has no source, or a source lacks an https link to the vendor's page, the day it was read (not in the future) or the text it was read from;
+- a competitor row has no date and link, or a comparison shows a size without a verified price.
+
+**Fix:** take prices from `rates.ts` and `prices.ts`, never as literals in the page; give a new figure its `source`. A price that changed is re-read on the vendor's page and updated in `prices.ts` with the new day; one that can't be re-read is removed, not left stale. The pages stay out of the site's links and search engines until `PRICE_PAGES_LIVE` in `app/src/features/pricing/live.ts` is true.
 
 ## Deadlock guard (`acceptance`)
 
@@ -167,20 +177,15 @@ A Workers preview version per PR (`wrangler versions upload --preview-alias pr-<
 
 The local workerd stack catches the classes that hit dev (routing, module loading, migrations) for free and without credentials. Recommendation: keep it. If live-provider coverage before merge is ever worth paying for, use one shared staging fixture, not one per PR.
 
-## tear (local nightly)
-
-tear, the model checker behind `api/tear/*` (access, admission, delivery, dispatch, inbox, ses), is a private repository, so CI cannot fetch it. `api/tear/nightly.sh` runs every checker's `ci` (with a seed that rotates by date) against a disposable Postgres in Docker, on a machine that can fetch it, in about 20 minutes. Logs and a summary go to `~/.cache/bane-tear/<date>`. With `TEAR_REPORT_REPO=anomalyco/nightmail`, a failing night opens or comments on the `tear-nightly` issue with each failing checker's minimal witnesses.
-
-Ryan's Mac runs it nightly with cronctl (`bane-tear-nightly`, 02:30) from a detached checkout of `dev` at `~/dev/bane-tear-nightly`. A witness after an API change is often model drift: for example, the first run found `rescheduleCampaign` and `unscheduleCampaign` missing from `api/tear/src/rest.rs`. Add new routes there when you add them to the API.
-
 ## Request logs
 
 Every process logs one JSON object per line (`log` and `logError` in `api/src/core.ts`): the Worker to Workers Logs (`observability` in both wrangler configs, 100% head sampling), the Node API and runner to stdout (CloudWatch on Fargate), and the mail gateway to CloudWatch `/ecs/nightmail-mail-gateway`. Each line carries `service` (`worker`, `api`, `runner`, `gateway`) and `deploy`, the first 12 characters of the commit (`DEPLOY_SHA`, which `deploy-worker.sh` sets on the Worker; set it in the environment for Node).
 
 - **One request line per request** (`event: "request"`, written by the first middleware in `app.ts`): `requestId`, `route` (the matched handler's template, such as `/v1/emails/:id` or `/mcp`, or `unmatched`; never the raw path), `method`, `status`, `code` and `field` for a failure, `databaseCode`, `durationMs`, `workspace` (the workspace ID only), `principal` (`apiKey`, `dashboard`, `mcp`, `agentToken`, `inboxKey`, `gateway`, `anonymous`) and per-step `timings`. Level: `info` below 400, `warn` for 4xx, `error` for 5xx. `field` names only the schema's own top-level fields: an unsupported key is whatever the caller sent, so it is never logged. MCP authenticates and answers inside its route, so `/mcp` records its principal and a failure code itself (`MCP_AUTH_REQUIRED`, `AUTH_UNAVAILABLE`, `ORIGIN_NOT_ALLOWED`, `MCP_HTTP_<status>`).
 - **One error line per unexpected failure** (`logError`): the same `requestId` (or `jobId` for a job), `code` (an upper-case code string, else `UNKNOWN_ERROR`), `errorType` (a string `name` shaped like a class name, else `Error`), `databaseCode` (a five-character SQLSTATE string from the `cause` chain) and up to 12 stack frames from Nightmail's own code (the Worker bundle, `src/` or `dist/`), rebuilt as `function (file:line:column)`. Never a message, neither the error's nor an `ApiError`'s: a database error's message quotes its parameters, and an error's name is just a property, and either can span lines that look like frames. So `stackFrames` reads frames only after the exact `name: message` header text (matched by characters, not lines), and logs no frames when the stack does not start with it.
-- **Sampling:** successful requests are logged 1 in 10 and routine job and queue successes 1 in 100. A kept line carries `sampleRate`, so a count is the number of lines divided by it. Failures, warnings and errors are always logged.
-- **Never logged:** bodies, headers, query strings, messages, addresses, tokens, keys, or any object but a plain one. `log` rebuilds every value itself (arrays by index up to 50 elements, objects from their own data properties up to 50 keys) and never calls a method, getter or `toJSON` of what it logs; an error, class instance, accessor, proxy that throws or anything nested deeper than three levels becomes `"[object]"`. It reads every error property once, as a primitive, and never throws: a line it cannot build is written as `{"level":"error","code":"LOG_SERIALIZE_FAILED"}`. Callers log operations, IDs and codes; `log` also replaces anything shaped like an address or a long hex credential before writing. The acceptance test `request logs: one line per request…` sends addresses, bodies, forged tokens, unsupported keys and a NUL byte that PostgreSQL refuses (SQLSTATE 22021, its message quoting fake frames) and checks none of it reaches a line.
+- **Sampling:** successful requests are logged 1 in 10 and routine job and queue successes 1 in 100. A kept line carries `sampleRate`, so a count is the number of lines divided by it. Failures, warnings and errors are always logged, and so is any request or job that took 2 seconds or more (`SLOW_REQUEST_MS` in `api/src/log.ts`; a slow request line carries `slow: true` and no `sampleRate`, so it counts once).
+- **Counted as well as logged:** every request adds to per-route counters with a latency histogram (`api/src/health-counters.ts`), kept by minute for two hours and by hour for 30 days, so a route's count and p95 need no log search and outlive Workers Logs. `docs/operations.md` describes them and the alerts read from them.
+- **Never logged:** bodies, headers, query strings, messages (one exception: a failed dispatcher run logs `cause`, the platform's own message for a Durable Object storage or binding failure, never a database's or AWS's text: `platformMessage` in `api/src/core.ts`), addresses, tokens, keys, or any object but a plain one. `log` rebuilds every value itself (arrays by index up to 50 elements, objects from their own data properties up to 50 keys) and never calls a method, getter or `toJSON` of what it logs; an error, class instance, accessor, proxy that throws or anything nested deeper than three levels becomes `"[object]"`. It reads every error property once, as a primitive, and never throws: a line it cannot build is written as `{"level":"error","code":"LOG_SERIALIZE_FAILED"}`. Callers log operations, IDs and codes; `log` also replaces anything shaped like an address or a long hex credential before writing. The acceptance test `request logs: one line per request…` sends addresses, bodies, forged tokens, unsupported keys and a NUL byte that PostgreSQL refuses (SQLSTATE 22021, its message quoting fake frames) and checks none of it reaches a line.
 - **Workers Logs retention is short** (about three days on these accounts), which is why the nightly report keeps its own daily aggregates.
 
 To find a request: Workers Logs for `bane-dev` or `bane-production`, filter `requestId`. Production volume is small (about 8,000 lines a day), well inside the Workers Paid allowance.
@@ -200,7 +205,7 @@ Each window's aggregate is cached under `reports/state/<stage>/`, and the seven-
 
 **Issues.** With `NIGHTLY_FILE_ISSUES=1` it opens one issue labeled `nightly` per new problem, at most five a night: a route and error code that answered 5xx, a new error code at error level (a new client error only from 50 a day), a p95 regression, or a jump in gateway auth failures. The body starts with a `nightly-fingerprint` comment; a problem with an open issue is only linked from the report, and one whose issue was closed gets a new issue that names the old one. The repository is public, so an issue is built only from values that pass `publicText` in the script: route templates, error codes, SQLSTATEs, stage names and counts. Request IDs stay in the private report; stack frames and log messages are never read, because a multiline database error can put caller text where a frame is expected.
 
-**Self-improve.** Ryan's Mac runs `~/.config/opensend-mx/nightly-report.sh` with cronctl (`bane-nightly-report`, 03:00 America/New_York, after tear's 02:30). It moves the detached checkout `~/dev/bane-nightly-report` to `bane/dev`, refreshes the `cf` work profile's token, runs the report, then starts one OpenCode child session (`anthropic/claude-opus-5-5`, high) under the Bane session that set it up. That session takes the top one to three issues filed that night, reproduces each on the isolated local harness (the acceptance suite or the preview stack against a disposable Postgres in Docker, never dev or production), opens a small fix PR to `dev` for each one it reproduces (never merged), comments on the ones it cannot, and appends what it did to the report's `## Self-improve` section.
+**Self-improve.** Ryan's Mac runs `~/.config/opensend-mx/nightly-report.sh` with cronctl (`bane-nightly-report`, 03:00 America/New_York). It moves the detached checkout `~/dev/bane-nightly-report` to `bane/dev`, refreshes the `cf` work profile's token, runs the report, then starts one OpenCode child session (`anthropic/claude-opus-5-5`, high) under the Bane session that set it up. That session takes the top one to three issues filed that night, reproduces each on the isolated local harness (the acceptance suite or the preview stack against a disposable Postgres in Docker, never dev or production), opens a small fix PR to `dev` for each one it reproduces (never merged), comments on the ones it cannot, and appends what it did to the report's `## Self-improve` section.
 
 Run the report by hand from `api/` (read-only unless `NIGHTLY_FILE_ISSUES=1`):
 

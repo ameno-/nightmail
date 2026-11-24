@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import type { Plugin } from 'vite'
-import { productName } from '../api/src/brand.ts'
+import { productName, publicOrigin } from '../api/src/brand.ts'
 import type { Format, Manifest } from './src/features/home/factory/manifest.ts'
 import { frameOf, UPRIGHT } from './src/features/home/frame.ts'
 import { toneVars } from './src/features/home/tones.ts'
@@ -73,6 +73,8 @@ export function homeShell(): Plugin {
       html = html
         .replace('<script src="/theme.js"></script>', '<script src="/theme.js" data-home></script>')
         .replace(/<title>[^<]*<\/title>/, `<title>${productName.toLowerCase()} · Email infrastructure</title>`)
+        // (Served only at the hosted site's "/", so it can name its address: the sitemap lists it, app/price-pages.ts.)
+        .replace(/<!-- Link previews\.[^>]*-->/, `<!-- Link previews: the homepage's own (app/home-shell.ts). -->\n    <meta property="og:url" content="${publicOrigin}/" />\n    <link rel="canonical" href="${publicOrigin}/" />`)
         .replace('</head>', `  <link rel="preload" href="${font}" as="font" type="font/woff2" crossorigin />\n    <style>${style}</style>\n  </head>`)
         .replace('<div id="root"></div>', `<div id="home-shell">${variant('desktop')}${variant('phone')}</div>\n    <div id="root"></div>\n    <script src="${boot}" defer data-css="${styles[0]}" data-preload="${preload.join(' ')}" data-entry="${entry[0]}"></script>`)
       this.emitFile({ type: 'asset', fileName: 'home.html', source: html })
