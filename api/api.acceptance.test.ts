@@ -11071,6 +11071,17 @@ describe('Lists, compound segments, imports and exports', () => {
     assert.deepEqual([page(firstPage).map(row => row.id), firstPage.body.nextCursor], [[lower], lower]);
     assert.deepEqual(await ids(`/v1/lists/${list.id}/members?limit=1&search=${tag}&cursor=${firstPage.body.nextCursor}`), [[ann.id, joann.id].sort()[1]]);
     assert.deepEqual(page(await http('GET', `/v1/lists/${list.id}/members`, key.secret)).map(row => row.listIds), [[list.id], [list.id]]);
+    const literalName = `${tag}%_\\!Élodie`;
+    const literal = await resource(t, key.secret, '/v1/contacts', { email: address(), name: literalName });
+    const decoy = await resource(t, key.secret, '/v1/contacts', { email: address(), name: `${tag}xyz!Élodie` });
+    assert.equal(ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [literal.id, decoy.id] })).added, 2);
+    for (const path of ['/v1/contacts', `/v1/lists/${list.id}/members`]) {
+      assert.deepEqual(await ids(`${path}?search=${encodeURIComponent(literalName.toUpperCase())}`), [literal.id]);
+    }
+    ok(await http('DELETE', `/v1/contacts/${literal.id}`, key.secret));
+    for (const path of ['/v1/contacts', `/v1/lists/${list.id}/members`]) {
+      assert.deepEqual(await ids(`${path}?search=${encodeURIComponent(literalName.toUpperCase())}`), []);
+    }
   });
 });
 

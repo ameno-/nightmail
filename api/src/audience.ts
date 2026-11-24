@@ -113,12 +113,18 @@ async function findSegment(db: DbExecutor, identity: Actor, segmentId: string) {
 
 // Literal substring search: %, _ and backslash have no wildcard meaning.
 function searchText(column: AnyPgColumn, search: string): SQL { return sql`strpos(lower(${column}), lower(${search})) > 0`; }
-// A search that is one complete address is that contact, through the unique email index. Any other search is a
-// substring of the email or name, which no index serves: it reads every contact of the workspace.
+function searchContactText(column: AnyPgColumn, search: string): SQL {
+  // With no guaranteed trigram, GIN can scan the whole index. Keep the ordered scan for these terms.
+  if (!/[a-zA-Z0-9]{3}/.test(search)) return searchText(column, search);
+  // Fold the original term in Postgres before adding escapes; a custom escape leaves backslash literal.
+  const escaped = sql`replace(replace(replace(lower(${search}), '!', '!!'), '%', '!%'), '_', '!_')`;
+  return sql`lower(${column}) LIKE ('%' || ${escaped} || '%') ESCAPE '!'`;
+}
+// A complete address uses the unique email index; other searches match a literal substring of either field.
 const wholeAddress = (search: string | undefined) => { const address = Email.safeParse(search); return address.success ? address.data : undefined; };
-function contactFilters(identity: Actor, query: z.infer<typeof ContactQuery>) {
+function contactFilters(identity: Actor, query: z.infer<typeof ContactQuery>, searchField = searchContactText) {
   const address = wholeAddress(query.search);
-  return [query.email ? eq(contacts.email, query.email) : undefined, address ? eq(contacts.email, address) : query.search ? sql`(${searchText(contacts.email, query.search)} OR ${searchText(contacts.name, query.search)})` : undefined, query.consent ? eq(contacts.marketingConsent, query.consent) : undefined, query.suppressed !== undefined ? eq(contacts.suppressed, query.suppressed === 'true') : undefined, query.listId ? inList(identity, query.listId) : undefined];
+  return [query.email ? eq(contacts.email, query.email) : undefined, address ? eq(contacts.email, address) : query.search ? sql`(${searchField(contacts.email, query.search)} OR ${searchField(contacts.name, query.search)})` : undefined, query.consent ? eq(contacts.marketingConsent, query.consent) : undefined, query.suppressed !== undefined ? eq(contacts.suppressed, query.suppressed === 'true') : undefined, query.listId ? inList(identity, query.listId) : undefined];
 }
 async function readContacts(db: DbExecutor, identity: Actor, rows: Array<typeof contacts.$inferSelect>, maxListsPerContact = CONTACT_LIST_IDS_PAGE_MAX) {
   if (!rows.length) return [];
@@ -161,7 +167,7 @@ async function boundedContactPage(db: DbExecutor, identity: Actor, query: z.infe
         (octet_length(${contacts.properties}::text) + octet_length(${contacts.email}) + coalesce(octet_length(${contacts.name}), 0) + 384) AS row_bytes
       FROM ${listMembers}
       JOIN ${contacts} ON ${contacts.workspaceId} = ${listMembers.workspaceId} AND ${contacts.id} = ${listMembers.contactId}
-      WHERE ${and(scope(listMembers, identity), eq(listMembers.listId, listId!), isNull(contacts.deletedAt), ...contactFilters(identity, { ...query, listId: undefined }), membershipCursor)}
+      WHERE ${and(scope(listMembers, identity), eq(listMembers.listId, listId!), isNull(contacts.deletedAt), ...contactFilters(identity, { ...query, listId: undefined }, searchText), membershipCursor)}
       ORDER BY ${listMembers.contactId} ASC LIMIT ${query.limit + 1}`
     : sql`SELECT id, workspace_id, email, name, properties, marketing_consent, suppressed, suppression_reason,
         last_open_at, last_click_at, observed_since, open_observed_since, click_observed_since, deleted_at, created_at, updated_at,
