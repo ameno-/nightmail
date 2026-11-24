@@ -130,7 +130,7 @@ export interface Config {
   /** NIGHTMAIL_ABUSE_ENFORCE. Reserved: abuse monitoring never blocks, and no code reads this yet. */
   abuseEnforce?: boolean;
   /** Hosted billing. stripe is undefined until STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET are set (money routes answer 503 BILLING_NOT_CONFIGURED). */
-  billing?: { stripe?: { secretKey: string; webhookSecret: string; automaticTax: boolean; apiBase: string } };
+  billing?: { stripe?: { secretKey: string; webhookSecret: string; automaticTax: boolean; creditProduct: string; taxCode: string; apiBase: string } };
   placementShadow?: boolean;
   placementDblZone?: string;
   byoTemplateUrl?: string;
