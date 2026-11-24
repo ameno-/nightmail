@@ -4678,6 +4678,246 @@ test('permission refusals over HTTP: the same status and code, with error.requir
   assert.equal(allowed.headers.get('nightmail-required-permission'), null);
 });
 
+// Agent setup (src/agent-setup.ts): an agent's own lasting key from a setup token in the prompt a person copied, or from a
+// device code a person approved at /connect. Hosted, so the people are owners, admins and members of their workspaces.
+describe('Agent setup: a setup token in the copied prompt, and the device flow', () => {
+  type Person = { userId: string; cookie: string };
+  async function hosted(t: TestContext, scenario: (fixture: { db: pg.Client; request: typeof http; w: string; owner: Person;
+    person: (role: 'owner' | 'admin' | 'member', workspace?: string) => Promise<Person>; join: (who: Person, workspace: string, role: 'owner' | 'admin' | 'member') => Promise<unknown>;
+    as: (who: Person, workspace?: string) => Record<string, string>; workspace: () => Promise<string> }) => Promise<void>) {
+    await simulatedSesFixture(t, async ({ db, request, runtime }) => {
+      runtime.config.multiTenant = true;
+      cleanup(t, async () => { runtime.config.multiTenant = false; });
+      // Agent inboxes keep their mail in object storage: a stand-in bucket, as in the permission table.
+      runtime.mailR2 = { write: true, name: 'agent-setup', bucket: { put: async () => {} } as unknown as R2Bucket };
+      const w = runtime.config.workspaceId, issuer = process.env.ACCOUNT_ISSUER ?? 'https://account.anoma.ly';
+      const join = (who: Person, workspace: string, role: string) => db.query('INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,$4)', [randomUUID(), who.userId, workspace, role]);
+      const person = async (role: 'owner' | 'admin' | 'member', workspace = w) => {
+        const userId = unique('agent-setup-user'), token = createHash('sha256').update(randomUUID()).digest('base64url'), email = `${userId}@${AUTH_DOMAIN}`;
+        secrets.add(token);
+        await db.query('INSERT INTO nightmail_users(id,name,email,email_verified) VALUES($1,$1,$2,true)', [userId, email]);
+        await db.query('INSERT INTO nightmail_oidc_identities VALUES($1,$2,$3)', [issuer, userId, userId]);
+        await db.query("INSERT INTO nightmail_sessions(token_hash,user_id,issuer,subject,verified_email,expires_at) VALUES($1,$2,$3,$2,$4,now()+interval '1 hour')", [createHash('sha256').update(token).digest('hex'), userId, issuer, email]);
+        const who = { userId, cookie: `${COOKIE_NAME}=${token}` };
+        await join(who, workspace, role);
+        return who;
+      };
+      const as = (who: Person, workspace?: string) => ({ cookie: who.cookie, origin: PUBLIC_ORIGIN, ...(workspace ? { 'x-nightmail-workspace': workspace } : {}) });
+      const workspace = async () => { const id = unique('agent-setup-workspace'); await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [id]); return id; };
+      await scenario({ db, request, w, owner: { userId: manager!.userId, cookie: manager!.cookie }, person, join, as, workspace });
+    });
+  }
+  const mint = async (request: typeof http, headers: Record<string, string>) => { const made = ok(await request('POST', '/v1/agent/setup-tokens', undefined, undefined, headers), 201); secrets.add(made.token); return made; };
+  const exchange = (request: typeof http, token: string) => request('POST', '/v1/agent/setup', undefined, { token });
+
+  test('a copied prompt\'s setup token becomes one lasting key, made by the person who copied it, that never administers keys or billing', async t => {
+    await hosted(t, async ({ db, request, w, owner, as }) => {
+      const minted = await mint(request, as(owner));
+      assert.match(minted.token, /^nm_setup_[0-9a-f]{32}\.[0-9a-f]{64}$/);
+      assert.deepEqual(minted.permissions, ['read', 'send', 'manage']);
+      assert.ok(Math.abs(Date.parse(minted.expiresAt) - Date.now() - 15 * 60_000) < 60_000, 'fifteen minutes');
+      // Only the verifier's hash is kept, bound to the person and the workspace.
+      const verifier = minted.token.split('.')[1];
+      const { rows: [stored] } = await db.query('SELECT * FROM agent_setups WHERE id=$1', [minted.id]);
+      assert.equal(stored.secret_hash, createHash('sha256').update(verifier).digest('hex'));
+      assert.ok(!JSON.stringify(stored).includes(verifier));
+      assert.deepEqual([stored.kind, stored.workspace_id, stored.user_id, stored.status], ['prompt', w, owner.userId, 'pending']);
+      assert.equal(ok(await request('GET', `/v1/agent/setup-tokens/${minted.id}`, undefined, undefined, as(owner))).status, 'waiting');
+
+      // The agent needs nothing but the token.
+      const agent = ok(await exchange(request, minted.token), 201);
+      secrets.add(agent.key);
+      assert.match(agent.key, /^nm_[0-9a-f]{64}$/);
+      assert.equal(agent.workspaceId, w);
+      assert.match(agent.name, /^Agent \(set up \d{4}-\d{2}-\d{2}\)$/);
+      assert.deepEqual(agent.permissions, ['read', 'send', 'manage']);
+      assert.equal(agent.baseUrl, PUBLIC_ORIGIN);
+      assert.deepEqual(agent.mcp, { url: `${PUBLIC_ORIGIN}/mcp`, config: { url: `${PUBLIC_ORIGIN}/mcp`, headers: { Authorization: 'Bearer ${NIGHTMAIL_API_KEY}' } } });
+      // The dashboard sees it connect, and lists the key where it is revoked.
+      const status = ok(await request('GET', `/v1/agent/setup-tokens/${minted.id}`, undefined, undefined, as(owner)));
+      assert.deepEqual([status.status, status.keyId, status.keyName], ['connected', agent.keyId, agent.name]);
+      assert.ok(status.connectedAt);
+      const listed = page(await request('GET', '/v1/api-keys?limit=100', MANAGER)).find(key => key.id === agent.keyId);
+      assert.deepEqual([listed?.name, listed?.permissions, listed?.domains, listed?.expiresAt, listed?.revokedAt], [agent.name, ['read', 'send', 'manage'], [], null, null]);
+      // The audit trail names the person who set the agent up, and how.
+      assert.equal(listed?.lastChange.action, 'api_key.create');
+      const { rows: [created] } = await db.query("SELECT actor_type, actor_id, user_id, via, summary FROM audit_events WHERE workspace_id=$1 AND action='api_key.create' AND target_id=$2", [w, agent.keyId]);
+      assert.deepEqual([created.actor_type, created.actor_id, created.user_id, created.via, created.summary.after.agentSetup, created.summary.after.flow], ['member', owner.userId, owner.userId, 'api', minted.id, 'prompt']);
+      assert.equal((await db.query("SELECT count(*)::int AS n FROM audit_events WHERE workspace_id=$1 AND action='agent_setup.create' AND target_id=$2 AND actor_id=$3", [w, minted.id, owner.userId])).rows[0].n, 1);
+
+      // What onboarding needs: it reads, sends and manages the workspace (an inbox here).
+      const me = ok(await request('GET', '/v1/me', agent.key));
+      assert.deepEqual([me.workspaceId, me.permissions], [w, ['read', 'send', 'manage']]);
+      ok(await request('POST', '/v1/inboxes', agent.key, { type: 'sandbox' }), 201);
+      // No workspace administration: keys and agent tokens, billing, members.
+      for (const [method, path, body] of [['GET', '/v1/api-keys'], ['POST', '/v1/api-keys', { name: 'another' }], ['PATCH', `/v1/api-keys/${agent.keyId}`, { name: 'renamed' }],
+        ['POST', `/v1/api-keys/${agent.keyId}/revoke`], ['GET', `/v1/api-keys/${agent.keyId}/changes`], ['GET', '/v1/agent-tokens'], ['GET', '/v1/billing'], ['POST', '/v1/billing/top-up-links', { amountCents: 1000 }]] as const) {
+        const refused = error(await request(method, path, agent.key, body, method === 'PATCH' ? { 'idempotency-key': unique('agent-setup') } : {}), 403, 'PERMISSION_DENIED');
+        assert.equal(refused.required.person, 'admin', path);
+      }
+      error(await request('GET', '/v1/workspaces/current/members', agent.key), 403, 'DASHBOARD_AUTH_REQUIRED');
+      error(await request('POST', '/v1/agent/setup-tokens', agent.key), 403, 'DASHBOARD_AUTH_REQUIRED');
+      // Over MCP the same key is listed neither keys nor billing.
+      const tools = ok(await request('POST', '/mcp?codemode=false', agent.key, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, { accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-11-25' })).result.tools.map((tool: Json) => tool.name);
+      assert.ok(tools.includes('createInbox') && tools.includes('sendEmail'), tools.join());
+      for (const name of ['createApiKey', 'listApiKeys', 'revokeApiKey', 'getBilling', 'createBillingTopUpLink']) assert.ok(!tools.includes(name), name);
+
+      // The token works once.
+      error(await exchange(request, minted.token), 409, 'SETUP_TOKEN_USED');
+      // Revoking the key ends it, like any key.
+      ok(await request('POST', `/v1/api-keys/${agent.keyId}/revoke`, MANAGER));
+      error(await request('GET', '/v1/me', agent.key), 401, 'AUTH_INVALID');
+    });
+  });
+
+  test('a setup token that is wrong, expired, replaced by a newer copy, or whose person lost their role makes no key', async t => {
+    await hosted(t, async ({ db, request, w, owner, person, as }) => {
+      const keys = async () => (await db.query('SELECT count(*)::int AS n FROM api_keys WHERE workspace_id=$1 AND agent_setup_id IS NOT NULL', [w])).rows[0].n;
+      // Wrong: another verifier for a real token, a token for no row, and text that isn't one.
+      const real = await mint(request, as(owner));
+      const forged = real.token.slice(0, -1) + (real.token.endsWith('0') ? '1' : '0');
+      for (const token of [forged, `nm_setup_${'1'.repeat(32)}.${'2'.repeat(64)}`, 'nm_setup_x', real.token.split('.')[0]!]) assert.match(error(await exchange(request, token), 400, 'SETUP_TOKEN_INVALID').message, /Copy the prompt/);
+      error(await request('POST', '/v1/agent/setup', undefined, {}), 422, 'VALIDATION_FAILED');
+      // Copying again replaces the earlier unused token.
+      const newer = await mint(request, as(owner));
+      error(await exchange(request, real.token), 410, 'SETUP_TOKEN_REPLACED');
+      assert.equal(ok(await request('GET', `/v1/agent/setup-tokens/${real.id}`, undefined, undefined, as(owner))).status, 'replaced');
+      // Expired after fifteen minutes.
+      await db.query("UPDATE agent_setups SET expires_at=now()-interval '1 second' WHERE id=$1", [newer.id]);
+      error(await exchange(request, newer.token), 410, 'SETUP_TOKEN_EXPIRED');
+      assert.equal(ok(await request('GET', `/v1/agent/setup-tokens/${newer.id}`, undefined, undefined, as(owner))).status, 'expired');
+      // An admin who copied it and is a member by the time the agent exchanges it: no key.
+      const admin = await person('admin'), theirs = await mint(request, as(admin));
+      await db.query("UPDATE workspace_members SET role='member' WHERE user_id=$1 AND workspace_id=$2", [admin.userId, w]);
+      error(await exchange(request, theirs.token), 403, 'AGENT_SETUP_FORBIDDEN');
+      assert.equal(await keys(), 0);
+      // Another person's copy doesn't replace yours.
+      const mine = await mint(request, as(owner)), other = await person('admin');
+      await mint(request, as(other));
+      secrets.add(ok(await exchange(request, mine.token), 201).key);
+      assert.equal(await keys(), 1);
+    });
+  });
+
+  test('only an owner or admin in the dashboard mints a setup token; it and its status stay in its own workspace', async t => {
+    await hosted(t, async ({ request, w, owner, person, join, as, workspace }) => {
+      const member = await person('member');
+      assert.equal(error(await request('POST', '/v1/agent/setup-tokens', undefined, undefined, as(member)), 403, 'PERMISSION_DENIED').required.person, 'admin');
+      const key = ok(await request('POST', '/v1/api-keys', MANAGER, { name: unique('agent-setup'), permissions: ['read', 'send', 'manage'] }), 201).secret;
+      assert.equal(error(await request('POST', '/v1/agent/setup-tokens', key), 403, 'DASHBOARD_AUTH_REQUIRED').required.credential, 'dashboard');
+      error(await request('POST', '/v1/agent/setup-tokens'), 401, 'AUTH_REQUIRED');
+      // The member here owns another workspace: a token they mint there makes a key there, never here.
+      const theirs = await workspace();
+      await join(member, theirs, 'owner');
+      const minted = await mint(request, as(member, theirs));
+      const ours = await mint(request, as(owner));
+      error(await request('GET', `/v1/agent/setup-tokens/${minted.id}`, undefined, undefined, as(owner)), 404, 'NOT_FOUND');
+      error(await request('GET', `/v1/agent/setup-tokens/${ours.id}`, undefined, undefined, as(member, theirs)), 404, 'NOT_FOUND');
+      error(await request('GET', `/v1/agent/setup-tokens/${ours.id}`, undefined, undefined, as(member, w)), 403, 'PERMISSION_DENIED');
+      const agent = ok(await exchange(request, minted.token), 201);
+      secrets.add(agent.key);
+      assert.equal(agent.workspaceId, theirs);
+      assert.equal(ok(await request('GET', '/v1/me', agent.key)).workspaceId, theirs);
+      assert.ok(!page(await request('GET', '/v1/api-keys?limit=100', MANAGER)).some(listed => listed.id === agent.keyId));
+    });
+  });
+
+  test('device flow: an approved code gets one key on its next poll, as RFC 8628 says, in the workspace its approver chose', async t => {
+    await hosted(t, async ({ db, request, w, owner, person, join, as, workspace }) => {
+      const started = ok(await request('POST', '/v1/agent/device', undefined, { client_name: 'Open\u202eCode  agent' }));
+      secrets.add(started.device_code);
+      assert.match(started.device_code, /^nm_device_[0-9a-f]{32}\.[0-9a-f]{64}$/);
+      assert.match(started.user_code, /^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$/);
+      assert.deepEqual([started.verification_uri, started.verification_uri_complete, started.expires_in, started.interval],
+        [`${PUBLIC_ORIGIN}/connect`, `${PUBLIC_ORIGIN}/connect?code=${started.user_code}`, 900, 5]);
+      const poll = (code = started.device_code) => request('POST', '/v1/agent/device/token', undefined, { device_code: code, grant_type: 'urn:ietf:params:oauth:grant-type:device_code' });
+      const waited = () => db.query("UPDATE agent_setups SET last_polled_at=now()-interval '1 minute' WHERE kind='device' AND user_code=$1", [started.user_code.replace('-', '')]);
+      // Pending, then polled too soon: five seconds more from now on.
+      const pending = await poll();
+      assert.equal(error(pending, 400, 'AUTHORIZATION_PENDING').retryable, true);
+      assert.equal(pending.headers.get('retry-after'), '5');
+      const slow = await poll();
+      error(slow, 400, 'SLOW_DOWN');
+      assert.equal(slow.headers.get('retry-after'), '10');
+      await waited();
+      assert.equal((await poll()).headers.get('retry-after'), '10');
+      // The person sees the agent's claim, typed any way.
+      const looked = ok(await request('POST', '/v1/agent/device/lookup', undefined, { userCode: ` ${started.user_code.replace('-', '').toLowerCase()} ` }, as(owner)));
+      assert.deepEqual([looked.userCode, looked.clientName, looked.status, looked.permissions], [started.user_code, 'OpenCode agent', 'pending', ['read', 'send', 'manage']]);
+      // A member can't approve it, in a workspace where they're a member; their own workspace is theirs to choose.
+      const member = await person('member'), theirs = await workspace();
+      assert.equal(error(await request('POST', '/v1/agent/device/approve', undefined, { userCode: started.user_code }, as(member)), 403, 'PERMISSION_DENIED').required.person, 'admin');
+      await join(member, theirs, 'admin');
+      error(await request('POST', '/v1/agent/device/approve', undefined, { userCode: started.user_code }, as(member, 'not-a-workspace')), 403, 'WORKSPACE_ACCESS_DENIED');
+      assert.deepEqual(ok(await request('POST', '/v1/agent/device/approve', undefined, { userCode: started.user_code }, as(member, theirs))), { userCode: started.user_code, status: 'approved', workspaceId: theirs });
+      error(await request('POST', '/v1/agent/device/approve', undefined, { userCode: started.user_code }, as(owner)), 409, 'DEVICE_CODE_DECIDED');
+      error(await request('POST', '/v1/agent/device/deny', undefined, { userCode: started.user_code }, as(owner)), 409, 'DEVICE_CODE_DECIDED');
+      error(await poll(), 400, 'SLOW_DOWN');
+      await waited();
+      const agent = ok(await poll(), 201);
+      secrets.add(agent.key);
+      assert.deepEqual([agent.workspaceId, agent.permissions], [theirs, ['read', 'send', 'manage']]);
+      assert.equal(ok(await request('GET', '/v1/me', agent.key)).workspaceId, theirs);
+      error(await request('GET', '/v1/api-keys', agent.key), 403, 'PERMISSION_DENIED');
+      // Once.
+      await waited();
+      error(await poll(), 409, 'DEVICE_CODE_USED');
+      assert.equal(ok(await request('POST', '/v1/agent/device/lookup', undefined, { userCode: started.user_code }, as(owner))).status, 'used');
+      // Approved and made by the member who approved it, in their workspace.
+      const { rows: trail } = await db.query("SELECT action, actor_id, workspace_id, summary FROM audit_events WHERE (target_id=$1 OR target_id=(SELECT id FROM agent_setups WHERE key_id=$1)) ORDER BY at, action", [agent.keyId]);
+      assert.deepEqual(trail.map(row => [row.action, row.actor_id, row.workspace_id]).sort(), [['agent_setup.approve', member.userId, theirs], ['api_key.create', member.userId, theirs]]);
+      assert.equal(trail.find(row => row.action === 'api_key.create').summary.after.client, 'OpenCode agent');
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM api_keys WHERE workspace_id=$1 AND agent_setup_id IS NOT NULL', [w])).rows[0].n, 0);
+      // An approver who lost their role by the agent's poll: no key.
+      const again = ok(await request('POST', '/v1/agent/device', undefined, {}));
+      ok(await request('POST', '/v1/agent/device/approve', undefined, { userCode: again.user_code }, as(member, theirs)));
+      await db.query("UPDATE workspace_members SET role='member' WHERE user_id=$1 AND workspace_id=$2", [member.userId, theirs]);
+      error(await poll(again.device_code), 403, 'AGENT_SETUP_FORBIDDEN');
+    });
+  });
+
+  test('device flow: denied, expired and wrong codes get their RFC 8628 answers, and user codes and public requests are rate limited', async t => {
+    await hosted(t, async ({ db, request, owner, person, as }) => {
+      const start = async () => ok(await request('POST', '/v1/agent/device'));
+      const poll = (code: string) => request('POST', '/v1/agent/device/token', undefined, { device_code: code });
+      // Denied, by any signed-in person: the agent stops.
+      const denied = await start(), member = await person('member');
+      assert.deepEqual(ok(await request('POST', '/v1/agent/device/deny', undefined, { userCode: denied.user_code }, as(member))), { userCode: denied.user_code, status: 'denied' });
+      error(await poll(denied.device_code), 400, 'ACCESS_DENIED');
+      error(await request('POST', '/v1/agent/device/approve', undefined, { userCode: denied.user_code }, as(owner)), 409, 'DEVICE_CODE_DECIDED');
+      // Expired: the agent starts again, and the page says so.
+      const expired = await start();
+      await db.query("UPDATE agent_setups SET expires_at=now()-interval '1 second' WHERE kind='device' AND user_code=$1", [expired.user_code.replace('-', '')]);
+      error(await poll(expired.device_code), 400, 'EXPIRED_TOKEN');
+      assert.equal(ok(await request('POST', '/v1/agent/device/lookup', undefined, { userCode: expired.user_code }, as(owner))).status, 'expired');
+      error(await request('POST', '/v1/agent/device/approve', undefined, { userCode: expired.user_code }, as(owner)), 410, 'DEVICE_CODE_EXPIRED');
+      // Wrong device codes, and a setup token where a device code goes.
+      const live = await start();
+      for (const code of [live.device_code.slice(0, -1) + (live.device_code.endsWith('0') ? '1' : '0'), `nm_device_${'3'.repeat(32)}.${'4'.repeat(64)}`, 'device', live.device_code.replace('nm_device_', 'nm_setup_')])
+        error(await poll(code), 400, 'DEVICE_CODE_INVALID');
+      error(await request('POST', '/v1/agent/device/token', undefined, { device_code: live.device_code, grant_type: 'authorization_code' }), 422, 'VALIDATION_FAILED');
+      // Dashboard steps are a person's.
+      const key = ok(await request('POST', '/v1/api-keys', MANAGER, { name: unique('agent-setup'), permissions: ['read', 'send', 'manage'] }), 201).secret;
+      for (const path of ['lookup', 'approve', 'deny']) error(await request('POST', `/v1/agent/device/${path}`, key, { userCode: live.user_code }), 403, 'DASHBOARD_AUTH_REQUIRED');
+      // Guessing: ten tries a minute per person, the right code included; then 429 until the minute passes.
+      const guesser = await person('owner');
+      for (let i = 0; i < 9; i++) error(await request('POST', '/v1/agent/device/lookup', undefined, { userCode: 'BBBB-BBB' + 'CDFGHJKLM'[i] }, as(guesser)), 404, 'NOT_FOUND');
+      error(await request('POST', '/v1/agent/device/lookup', undefined, { userCode: 'not a code' }, as(guesser)), 422, 'VALIDATION_FAILED');
+      for (const path of ['lookup', 'approve', 'deny']) error(await request('POST', `/v1/agent/device/${path}`, undefined, { userCode: live.user_code }, as(guesser)), 429, 'AGENT_SETUP_RATE_LIMITED');
+      // Another person is not charged for it.
+      assert.equal(ok(await request('POST', '/v1/agent/device/lookup', undefined, { userCode: live.user_code }, as(owner))).status, 'pending');
+      // Public requests are charged per client network: thirty exchanges and device codes a minute, 120 polls.
+      await db.query("DELETE FROM api_request_budgets WHERE workspace_id='agent-setup'");
+      for (let i = 0; i < 30; i++) error(await exchange(request, `nm_setup_${'5'.repeat(32)}.${'6'.repeat(64)}`), 400, 'SETUP_TOKEN_INVALID');
+      const limited = await exchange(request, `nm_setup_${'5'.repeat(32)}.${'6'.repeat(64)}`);
+      error(limited, 429, 'AGENT_SETUP_RATE_LIMITED');
+      assert.equal(limited.headers.get('retry-after'), '60');
+      for (let i = 0; i < 30; i++) ok(await request('POST', '/v1/agent/device', undefined, {}));
+      error(await request('POST', '/v1/agent/device', undefined, {}), 429, 'AGENT_SETUP_RATE_LIMITED');
+    });
+  });
+});
+
 describe('Hosted MCP OAuth and tools', () => {
   const resourceUrl = `${PUBLIC_ORIGIN}/mcp`;
   const writableScope = 'bane:read bane:manage offline_access';
@@ -25432,6 +25672,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         nightmail_signin_attempts: ["INSERT INTO nightmail_signin_attempts(issuer,subject,outcome,last_at) SELECT 'https://issuer.invalid','sub_'||p.tag||p.day||'x'||i,'refused',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM nightmail_signin_attempts,p WHERE starts_with(subject,'sub_'||p.tag)"],
         nightmail_waitlist: ["INSERT INTO nightmail_waitlist(email,last_at) SELECT p.tag||p.day||'x'||i||'@example.invalid',now()-interval '366 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM nightmail_waitlist,p WHERE starts_with(email,p.tag)"],
         nightmail_signin_links: ["INSERT INTO nightmail_signin_links(id,email,created_at,expires_at) SELECT 'lnk_'||p.tag||p.day||'x'||i,p.tag||p.day||'x'||i||'@example.invalid',now()-interval '25 hours'-make_interval(days=>p.day),now()-interval '24 hours'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM nightmail_signin_links,p WHERE starts_with(id,'lnk_'||p.tag)"],
+        agent_setups: ["INSERT INTO agent_setups(id,kind,secret_hash,workspace_id,user_id,client_name,expires_at) SELECT 'ags_'||md5(p.tag||p.day||'x'||i),'prompt',repeat('0',64),p.wid,p.uid,p.tag,now()-interval '25 hours'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM agent_setups,p WHERE client_name=p.tag"],
         auth_state_slots: ["INSERT INTO auth_state_slots(peer,slot,expires_at) SELECT 'peer_'||p.tag||p.day,i,now()-interval '0 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM auth_state_slots,p WHERE starts_with(peer,'peer_'||p.tag)"],
         nightmail_dpop_proofs: ["INSERT INTO nightmail_dpop_proofs(id,expires_at) SELECT 'dpop_'||p.tag||p.day||'x'||i,now()-interval '0 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM nightmail_dpop_proofs,p WHERE starts_with(id,'dpop_'||p.tag)"],
         nightmail_sessions: ["INSERT INTO nightmail_sessions(token_hash,user_id,issuer,subject,expires_at) SELECT 'tok_'||p.tag||p.day||'x'||i,p.uid,p.iss,p.sub,now()-interval '0 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM nightmail_sessions,p WHERE starts_with(token_hash,'tok_'||p.tag)"],
