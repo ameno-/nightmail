@@ -201,11 +201,14 @@ export class DispatcherShard extends DurableObject<Env> {
     return { db: drizzle(this.pool), storage: r2Storage(this.env.ATTACHMENTS), config, feedback: feedbackSink(this.env.FEEDBACK_QUEUE, config.authSecret), wake: (count,kind)=>workWake(kind==='webhook' && this.env.WEBHOOK_QUEUE ? this.env.WEBHOOK_QUEUE : this.env.WAKE_QUEUE,6)(count) };
   }
 
-  // One short-lived connection, bounded by flushCounters' own timeouts; it never throws.
+  // One short-lived connection, bounded by flushCounters' own timeouts. It never throws or rejects, whatever is missing.
   private async flushCounts(deps: Awaited<ReturnType<typeof loadDeps>>) {
-    const pool = new deps.Pool({ connectionString: this.env.HYPERDRIVE.connectionString, connectionTimeoutMillis: 5000, max: 1 });
-    pool.on('error', () => { /* Dropped with the sample. */ });
-    try { await deps.flushCounters(deps.drizzle(pool)); } catch { /* Counted again with the next failure. */ } finally { await pool.end().catch(() => {}); }
+    let pool: InstanceType<typeof deps.Pool> | undefined;
+    try {
+      pool = new deps.Pool({ connectionString: this.env.HYPERDRIVE.connectionString, connectionTimeoutMillis: 5000, max: 1 });
+      pool.on('error', () => { /* Dropped with the sample. */ });
+      await deps.flushCounters(deps.drizzle(pool));
+    } catch { /* Counted again with the next failure. */ } finally { await pool?.end().catch(() => {}); }
   }
 
   private async closePool() {
