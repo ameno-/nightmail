@@ -849,8 +849,13 @@ try {
   const weight = job => (job.support ? 4 : 0) + (job.live ? 2 : 0) + (job.name === 'Overview' && job.mode === 'load' ? 3 : 0);
   jobs.forEach((job, index) => { job.index = index; });
   const queue = [...jobs].sort((a, b) => weight(b) - weight(a));
-  // Round-robin each lane after the weight sort. Keep job.index global: it selects the origin and throttle bucket.
-  const lane = alone => queue.filter(job => Boolean(job.alone) === alone).filter((_, i) => i % shards === shard);
+  // Deal each lane round-robin within each origin. A stride of four over alternating origins aimed up to
+  // 20 simultaneous pages at one fixture API and hit READ_CONCURRENCY_LIMIT. Keep global IDs for the
+  // origin and throttle bucket; the two buckets are fixed even on local runs with a single API.
+  const lane = alone => {
+    const next = [0, Math.floor(shards / 2)];
+    return queue.filter(job => Boolean(job.alone) === alone && next[job.index % 2]++ % shards === shard);
+  };
   const shared = lane(false), alone = lane(true);
   console.log(`${elapsed()} shard ${shard + 1}/${shards}: measuring ${shared.length + alone.length} of ${queue.length} page loads, ${workers} at a time`);
   const run = async job => {

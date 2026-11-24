@@ -160,7 +160,7 @@ A flaky check costs every PR a re-run and teaches everyone to ignore red. The po
 
 ### CLS shards
 
-PR/queue CI divides the complete measurement list round-robin across four Postgres/browser fixtures after sorting by weight, distributing the shared and exclusive measurements separately. Each job keeps its original global page index, network timing, viewport, theme and 0.001 threshold. Exclusive mutations still run after shared pages on their own fixture. A failing shard uploads its own shift sources. Local and nightly runs default to the whole list; to reproduce one CI shard use `CLS_SHARD_INDEX=0 CLS_SHARD_COUNT=4 bun run cls` from `app/` (indices 0–3).
+PR/queue CI divides the complete measurement list round-robin across four Postgres/browser fixtures after sorting by weight, distributing the shared and exclusive measurements separately within each fixture API's traffic. Each job keeps its original global page index, network timing, viewport, theme and 0.001 threshold. Exclusive mutations still run after shared pages on their own fixture. A failing shard uploads its own shift sources. Local and nightly runs default to the whole list; to reproduce one CI shard use `CLS_SHARD_INDEX=0 CLS_SHARD_COUNT=4 bun run cls` from `app/` (indices 0–3).
 
 ### CLS: web fonts load before any text, every run
 
