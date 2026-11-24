@@ -78,6 +78,7 @@
     "API_RATE_LIMIT_PER_MINUTE": "10000",
     "WORK_QUEUE_NAME": "nightmail-prod-work",
     "WEBHOOK_QUEUE_NAME": "nightmail-prod-webhooks",
+    "JEVF_QUEUE_NAME": "nightmail-prod-jevf",
     "FEEDBACK_QUEUE_NAME": "nightmail-prod-feedback-v2",
     "FEEDBACK_PRIORITY_QUEUE_NAME": "nightmail-prod-feedback-priority",
     "FEEDBACK_DLQ_NAME": "nightmail-prod-feedback-v2-dlq",
@@ -111,9 +112,15 @@
       { "binding": "FEEDBACK_DLQ", "queue": "nightmail-prod-feedback-v2-dlq" },
       { "binding": "LEGACY_FEEDBACK_DLQ", "queue": "nightmail-prod-feedback-dlq" },
       { "binding": "FEEDBACK_QUEUE", "queue": "nightmail-prod-feedback-v2" },
-      { "binding": "FEEDBACK_PRIORITY_QUEUE", "queue": "nightmail-prod-feedback-priority" }
+      { "binding": "FEEDBACK_PRIORITY_QUEUE", "queue": "nightmail-prod-feedback-priority" },
+      // The second classifier in the content screen's shadow (src/screen-shadow.ts). Nothing is sent to it without JEVF_API_KEY.
+      { "binding": "JEVF_QUEUE", "queue": "nightmail-prod-jevf" }
     ],
     "consumers": [
+      // The only place the second classifier is called: four calls an invocation (and the database's connection, of an
+      // invocation's six) by two invocations, eight calls in all. A batch whose rows could not be written is delivered
+      // again twice, then gone: no dead-letter queue, and a redelivered request is recorded as lost, never asked again.
+      { "queue": "nightmail-prod-jevf", "max_batch_size": 4, "max_batch_timeout": 1, "max_retries": 2, "max_concurrency": 2 },
       // Wake messages are hints, not jobs: drain Postgres once for hints already waiting together.
       { "queue": "nightmail-prod-work", "max_batch_size": 1, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 8 },
       // Each wake opens up to six delivery slots. Don't merge a burst of wake hints into one drain.

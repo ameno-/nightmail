@@ -17,6 +17,7 @@ import { wakeWebhooks } from './jobs.js';
 import { shareFullAlert } from './operator-alerts.js';
 import { screenSnapshot, ScreenHandover, type CampaignScreen, type ScreenCall } from './screen.js';
 import { flushScreenCalls, outbound } from './screen-calls.js';
+import { flushShadow } from './screen-shadow.js';
 import { SEND_LIMITS } from './send-limits.js';
 import { SesBodyError } from './ses-body.js';
 import { sendReservation, withMemory } from './isolate-memory.js';
@@ -897,7 +898,7 @@ function logEmail(lane: Lane, mail: Mail, trace: Trace | undefined, outcome: str
     const now = Date.now(), leasedAt = trace?.leasedAt ?? now, created = Date.parse(mail.createdAt), due = mail.scheduledAt ? Math.max(created, Date.parse(mail.scheduledAt)) : created;
     log(routine ? 'info' : 'warn', { code: 'DISPATCH_EMAIL', outcome, reason, emailId: mail.id, workspaceId: mail.workspaceId, campaignId: mail.campaignId ?? undefined,
       region: lane.options.region, shard: lane.options.shard?.index ?? 0, kind: mail.snapshot.kind, attempt: mail.dispatchVersion, queueMs: leasedAt - due, ageMs: leasedAt - created,
-      screen: trace?.screen, screenMs: trace?.screenMs, screenCall: trace?.call?.outcome,
+      screen: trace?.screen, screenMs: trace?.screenMs, screenCall: trace?.call?.outcome, screenDigest: trace?.call?.digest,
       paceMs: trace?.paceMs, sesMs: trace?.sesMs, totalMs: now - leasedAt, ...(rate < 1 ? { sampleRate: rate } : {}) });
   } catch { /* A record never changes what happens to the email. */ }
 }
@@ -1352,6 +1353,8 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
   // The run's classifier requests as content_screen_calls rows (src/screen-calls.ts): now, with every lane and the priority
   // loop finished and nothing leased waiting on SES. At most two seconds, and never throws.
   await flushScreenCalls(runtime.db);
+  // And to the second classifier, where one is configured (src/screen-shadow.ts): handed over, never waited for.
+  flushShadow(runtime);
   return counters;
 }
 

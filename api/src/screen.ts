@@ -2,6 +2,7 @@ import { ApiError, digest, type Runtime } from './core.js';
 import type { EmailSnapshot } from './db/sending.js';
 import { errorTypeOf, log } from './log.js';
 import { keepScreenCall, outbound } from './screen-calls.js';
+import { keepShadow, type ShadowItem } from './screen-shadow.js';
 import { unescapeCss, VISIBLE_WORDS } from './screened-html.js';
 import { formattedSender } from './sending.js';
 import { SEND_LIMITS } from './send-limits.js';
@@ -379,7 +380,11 @@ async function body(snapshot: EmailSnapshot, limitBytes: number, scope: 'message
 // line kept is also kept as a content_screen_calls row (src/screen-calls.ts), written after the send, never before it.
 /** Where a classifier request came from, for its line: IDs and routing only. The screen writes back how the last request
  *  ended (outcome) and how long it took (ms), for the email's own record (src/dispatcher.ts DISPATCH_EMAIL). */
-export type ScreenCall = { emailId?: string; workspaceId?: string; campaignId?: string; region?: string; shard?: number; kind?: string; required?: boolean; outcome?: string; ms?: number };
+export type ScreenCall = { emailId?: string; workspaceId?: string; campaignId?: string; region?: string; shard?: number; kind?: string; required?: boolean; outcome?: string; ms?: number;
+  /** With the second classifier on (src/screen-shadow.ts): the first 32 characters of the message's verdict cache key, for
+   *  its DISPATCH_EMAIL line (a longer run is redacted there as credential-like), so an email served from the cache links
+   *  to the screen_comparisons rows of the requests that judged it, at most an hour earlier. */
+  digest?: string };
 /** How one request went, filled in by jevQuestions as it goes. Only assignments: recording never throws or waits. */
 type CallTiming = { inFlight?: number; sesInFlight?: number; requestBytes?: number; headersMs?: number; ms?: number; outcome?: string; phase?: 'headers' | 'body'; httpStatus?: number; responseBytes?: number;
   requestId?: string; cfRay?: string; serverTiming?: string; retryAfter?: string; errorType?: string; errorCode?: string; errorMessage?: string };
@@ -449,16 +454,30 @@ export async function jevQuestions(endpoint:string,apiKey:string,model:string,st
 }
 /** One classifier request; `db` is the database client its content_screen_calls row is written with later. `handover`
  *  is read right before the request, with nothing awaited between it and the request going out. */
-async function evaluate(endpoint: string, apiKey: string, model: string, state: unknown, call: ScreenCall | undefined, window: number, windows: number, db: object | undefined, handover: (() => boolean) | undefined, sample = 1): Promise<ScreenResult> {
+async function evaluate(endpoint: string, apiKey: string, model: string, state: unknown, call: ScreenCall | undefined, window: number, windows: number, db: object | undefined, handover: (() => boolean) | undefined, sample = 1, shadow?: ShadowRef): Promise<ScreenResult> {
   if (handover?.()) throw new ScreenHandover();
   const timing: CallTiming = {}, at = Date.now();
+  let parsed: { model?: unknown; answers?: { spam?: { noul?: unknown } }; usage?: { input_tokens?: unknown } } | null | undefined;
   try {
-    const parsed = await jevQuestions(endpoint,apiKey,model,state,QUESTIONS,DEADLINE_MS,timing) as { model?: unknown; answers?: { spam?: { noul?: unknown } } } | null;
+    parsed = await jevQuestions(endpoint,apiKey,model,state,QUESTIONS,DEADLINE_MS,timing) as typeof parsed;
     const spam = parsed?.answers?.spam?.noul;
     if (typeof spam !== 'number' || !Number.isFinite(spam) || spam<0 || spam>1) { timing.outcome='invalid'; throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', 'The content classifier returned no valid spam score.', undefined, true); }
     timing.outcome='ok';
     return { spam, model: typeof parsed?.model === 'string' ? parsed.model : model };
-  } finally { logCall(timing,call,window,windows,sample,at,db); }
+  } finally { logCall(timing,call,window,windows,sample,at,db); if (shadow) shadowed(shadow,db,at,state,window,windows,timing,parsed,model); }
+}
+/** What a request is kept with for the second classifier (src/screen-shadow.ts): only made when it is configured. */
+type ShadowRef = Pick<ShadowItem, 'kind' | 'digest' | 'threshold' | 'workspaceId' | 'emailId' | 'campaignId'>;
+// The request just made, kept to be repeated later with the same state and questions: how it ended and, answered, its
+// score, model and input tokens. Only assignments, after the request and its record: it never throws, waits or changes
+// what evaluate returns.
+function shadowed(ref: ShadowRef, db: object | undefined, at: number, state: unknown, window: number, windows: number, timing: CallTiming, parsed: { model?: unknown; answers?: { spam?: { noul?: unknown } }; usage?: { input_tokens?: unknown } } | null | undefined, model: string) {
+  try {
+    const answered = timing.outcome === 'ok', spam = parsed?.answers?.spam?.noul, tokens = parsed?.usage?.input_tokens;
+    keepShadow(db, { ...ref, id: crypto.randomUUID(), at, window, windows, request: { state, questions: QUESTIONS },
+      jev: { outcome: timing.outcome ?? 'unknown', httpStatus: timing.httpStatus, ms: timing.ms, score: answered && typeof spam === 'number' ? spam : undefined,
+        model: answered ? (typeof parsed?.model === 'string' ? parsed.model : model) : undefined, inputTokens: typeof tokens === 'number' ? tokens : undefined } }, timing.requestBytes);
+  } catch { /* A record never changes the request's outcome. */ }
 }
 
 // The classifier's input for a snapshot: what screenSnapshot sends it, request by request.
@@ -475,6 +494,9 @@ export async function screenSnapshot(runtime: Runtime, snapshot: EmailSnapshot, 
   const recipients=snapshot.to.length+snapshot.cc.length+snapshot.bcc.length;
   const key = await digest(JSON.stringify([runtime.config.workspaceId,settings.endpoint,settings.model,required,from,snapshot.kind,snapshot.subject,snapshot.text,snapshot.html,snapshot.raw,recipients]));
   const now = Date.now();
+  const shadow: ShadowRef | undefined = runtime.config.shadow && { kind: snapshot.testCampaignId ? 'campaign_test' : 'email', digest: key, threshold: settings.threshold,
+    workspaceId: call?.workspaceId ?? runtime.config.workspaceId, emailId: call?.emailId, campaignId: snapshot.testCampaignId ?? call?.campaignId };
+  if (shadow && call) call.digest = key.slice(0, 32);
   const hit = cache.get(key);
   if (hit && hit.expires > now) return hit.result;
   if (hit) cache.delete(key);
@@ -486,7 +508,7 @@ export async function screenSnapshot(runtime: Runtime, snapshot: EmailSnapshot, 
     const state=classifierState(snapshot,required,textHtmlOverlap);
     let highest: ScreenResult | undefined;
     for (const [window, body] of bodies.entries()) {
-      const result=await evaluate(settings.endpoint,settings.apiKey,settings.model,state(body),call,window,bodies.length,runtime.db,runtime.screenHandover);
+      const result=await evaluate(settings.endpoint,settings.apiKey,settings.model,state(body),call,window,bodies.length,runtime.db,runtime.screenHandover,1,shadow);
       if (!highest || result.spam>highest.spam) highest=result;
     }
     return highest!;
@@ -531,9 +553,10 @@ export async function screenInput(runtime: Runtime, snapshot: EmailSnapshot): Pr
   const state = classifierState({ ...snapshot, to: ['recipient'], cc: [], bcc: [] }, true, textHtmlOverlap);
   return { requests: bodies.map(state) };
 }
-/** One request of a campaign copy's screen; `call` names the campaign on its line. */
-export async function screenWindow(runtime: Runtime, input: ScreenInput, window: number, call?: ScreenCall): Promise<ScreenResult> {
+/** One request of a campaign copy's screen; `call` names the campaign on its line, `key` the copy (copyKey) for the second classifier's record. */
+export async function screenWindow(runtime: Runtime, input: ScreenInput, window: number, call?: ScreenCall, key?: string): Promise<ScreenResult> {
   const settings = runtime.config.screen;
   if (!settings) throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', 'Hosted content screening is unavailable.', undefined, true);
-  return evaluate(settings.endpoint, settings.apiKey, settings.model, input.requests[window], call, window, input.requests.length, runtime.db, runtime.screenHandover, CAMPAIGN_SAMPLE);
+  const shadow: ShadowRef | undefined = runtime.config.shadow && key ? { kind: 'campaign_copy', digest: key, threshold: settings.threshold, workspaceId: call?.workspaceId, campaignId: call?.campaignId } : undefined;
+  return evaluate(settings.endpoint, settings.apiKey, settings.model, input.requests[window], call, window, input.requests.length, runtime.db, runtime.screenHandover, CAMPAIGN_SAMPLE, shadow);
 }

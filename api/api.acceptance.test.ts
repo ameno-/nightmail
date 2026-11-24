@@ -24729,6 +24729,501 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual([respun.state, respun.delivery.error.code, screened.length - start], ['failed', 'CONTENT_REJECTED_SPAM', 2]);
     }));
   });
+  // The second classifier (src/screen-shadow.ts). Both classifiers as stubs on hostedScreenFixture's fetch mock: the screen's
+  // flags SampleMarker, as there; the second's answers what `jevf` says. Each keeps the request bodies it was sent.
+  const JEVF_URL = 'https://jevf.synthetic.invalid/v1/systemone';
+  function twoClassifiers(jevf: (init: RequestInit, body: string) => Response | Promise<Response>, jevDown: () => boolean = () => false) {
+    const sent = { jev: [] as string[], jevf: [] as { body: string; authorization: string | null }[] };
+    (globalThis.fetch as unknown as { mock: { mockImplementation(fn: unknown): void } }).mock.mockImplementation(async (url: RequestInfo | URL, init: RequestInit = {}) => {
+      const body = String(init.body);
+      if (String(url) === JEVF_URL) { sent.jevf.push({ body, authorization: new Headers(init.headers).get('authorization') }); return jevf(init, body); }
+      assert.equal(String(url), 'https://screen.synthetic.invalid'); sent.jev.push(body);
+      if (jevDown()) return new Response(null, { status: 503 });
+      const { subject, body: text } = JSON.parse(body).state.email as { subject: string; body: string };
+      return Response.json({ model: 'jev-fixture', answers: { spam: { noul: /samplemarker/.test(`${subject}\n${text}`.toLowerCase()) ? 0.99 : 0.01 } }, usage: { input_tokens: Math.ceil(body.length / 4), output_tokens: 1 } });
+    });
+    return sent;
+  }
+  const jevfAnswers = (noul: number) => Response.json({ model: 'jevf', answers: { spam: { type: 'noul', noul } }, usage: { input_tokens: 239, output_tokens: 1 } }, { headers: { 'x-request-id': `req_jevf_${randomUUID()}`, 'x-jevf-preview': 'team-4096' } });
+  const shadowSettings = (deadlineMs = 5000, model = 'jevf') => ({ apiKey: 'jevf-fixture-key', endpoint: JEVF_URL, model, deadlineMs, maxConcurrency: 8 });
+  // The second classifier's queue as Cloudflare runs it under the wrangler config: messages wait, a consumer invocation
+  // takes at most four, two invocations run at once, and a batch that is not acknowledged is delivered again, twice at most.
+  function jevfQueue(consume: (messages: { body: unknown; attempts: number }[]) => Promise<boolean>, size = 4, concurrency = 2, retries = 2) {
+    const waiting: { body: unknown; attempts: number }[] = [], sends: { body: string; contentType: 'text' }[][] = [], idle: (() => void)[] = [];
+    let active = 0, dropped = 0;
+    const pump = () => {
+      while (active < concurrency && waiting.length) {
+        const batch = waiting.splice(0, size); active++;
+        void consume(batch).catch(() => false).then(done => {
+          active--;
+          if (!done) for (const message of batch) { if (message.attempts > retries) dropped++; else waiting.push({ ...message, attempts: message.attempts + 1 }); }
+          pump();
+          if (!active && !waiting.length) for (const resolve of idle.splice(0)) resolve();
+        });
+      }
+    };
+    return { sends, get dropped() { return dropped; }, settled: () => active || waiting.length ? new Promise<void>(resolve => { idle.push(resolve); }) : Promise.resolve(),
+      queue: { sendBatch: async (messages: { body: string; contentType: 'text' }[]) => { sends.push(messages); for (const message of messages) waiting.push({ body: message.body, attempts: 1 }); pump(); } } };
+  }
+
+  test('second classifier: every request the screen makes is repeated after the run and both answers are kept, for an email, a campaign test and campaign copies of several requests; a cached verdict, a retried dispatch and a batch written twice add nothing; nothing runs without its key', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, jobs }) => t.test('classifiers', async t => {
+      const [{ shadowSettled, writeComparisons }, { processJobs }, { jobHandlers }, { operationJobs }, { newsletterJobs }, { SESv2Client, GetAccountCommand }] = await Promise.all([import('./src/screen-shadow.js'), import('./src/jobs.js'),
+        import('./src/sending.js'), import('./src/operations.js'), import('./src/newsletters.js'), import('@aws-sdk/client-sesv2')]);
+      const acct = '112223330021', started = new Date(Date.now() - 1000).toISOString(), { wid } = await hostedScreenFixture(t, runtime, db, acct, 'shadow.invalid');
+      // The second classifier flags a copy that greets Ben, which the screen passes, and passes SampleMarker, which the screen flags.
+      let jevDown = false;
+      const sent = twoClassifiers((_init, body) => jevfAnswers(/hello ben/i.test(body) ? 0.91 : 0.1037), () => jevDown);
+      let throttle = 0;
+      (SESv2Client.prototype.send as unknown as { mock: { mockImplementation(fn: unknown): void } }).mock.mockImplementation(async (cmd: unknown) => {
+        if (cmd instanceof GetAccountCommand) return { SendingEnabled: true, SendQuota: { MaxSendRate: 10000, Max24HourSend: 1000000, SentLast24Hours: 0 } };
+        if (throttle-- > 0) throw Object.assign(new Error('Maximum sending rate exceeded.'), { name: 'TooManyRequestsException', $metadata: { httpStatusCode: 429 } });
+        return { MessageId: randomUUID() };
+      });
+      const logs: Json[] = []; for (const level of ['warn', 'info'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch { /* not a log line */ } });
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'shadow', permissions: ['send', 'read'] }), 201);
+      // The campaign job through processJobs, whose end is where a drain's requests are handed over; rows are written on the
+      // fixture's one connection, so each step waits for them before it goes on.
+      const handlers = { ...jobHandlers, ...operationJobs, ...newsletterJobs };
+      const run = async (type: string) => {
+        await db.query("UPDATE jobs SET available_at=now() WHERE workspace_id=$1 AND type=$2 AND status='pending'", [wid, type]);
+        await processJobs(runtime, handlers, 5, 1, 20000, 'work'); await shadowSettled(runtime.db);
+      };
+      const harness = await campaignHarness(runtime, db, local, run, jobs, wid, acct, 'news@shadow.invalid');
+      const dispatch = async () => { const report = await harness.dispatch(); await shadowSettled(runtime.db); return report; };
+      const post = async (subject: string, text: string) => ok(await local('POST', '/v1/emails/send', { from: 'a@shadow.invalid', to: 'private.person@example.invalid', subject, text }, 'live', { authorization: `Bearer ${key.secret}` }), 202).id as string;
+      const rows = async () => (await db.query('SELECT * FROM screen_comparisons WHERE workspace_id=$1 ORDER BY created_at,id', [wid])).rows as Json[];
+      const line = (id: string) => logs.find(l => l.code === 'DISPATCH_EMAIL' && l.emailId === id)!;
+      const counts = async () => [sent.jev.length, sent.jevf.length, (await rows()).length];
+
+      // Without its key: the screen is asked, the second classifier is not, nothing is kept and the email's line is as before.
+      const off = await post('Receipt 1001', 'Private body 1001'); assert.equal((await dispatch()).sent, 1);
+      assert.deepEqual([...await counts(), 'screenDigest' in line(off)], [1, 0, 0, false]);
+
+      // With it: the same request again, byte for byte but for the model, under its own key, after the run.
+      runtime.config.shadow = shadowSettings();
+      const first = await post('Receipt 1002', 'Private body 1002'); assert.equal((await dispatch()).sent, 1);
+      assert.deepEqual(await counts(), [2, 1, 1]);
+      assert.equal(sent.jevf[0]!.body, sent.jev[1]!.replace('{"model":"fixture"', '{"model":"jevf"')); assert.notEqual(sent.jevf[0]!.body, sent.jev[1]);
+      assert.equal(sent.jevf[0]!.authorization, 'Bearer jevf-fixture-key');
+      const [r] = await rows();
+      assert.deepEqual([r.kind, r.email_id, r.campaign_id, r.window_index, r.windows, r.threshold, r.jev_outcome, r.jev_http_status, r.jev_score, r.jev_model, r.jev_flagged, r.jevf_outcome, r.jevf_http_status, r.jevf_score, r.jevf_model, r.jevf_input_tokens, r.jevf_flagged],
+        ['email', first, null, 0, 1, 0.7, 'ok', 200, 0.01, 'jev-fixture', false, 'ok', 200, 0.1037, 'jevf', 239, false]);
+      assert.ok(r.jev_input_tokens > 0 && r.jev_ms >= 0 && r.jevf_ms >= 0 && /^req_jevf_/.test(r.jevf_request_id) && /^[0-9a-f]{64}$/.test(r.digest) && Math.abs(Date.now() - new Date(r.created_at).getTime()) < 60_000, JSON.stringify(r));
+      assert.equal(line(first).screenDigest, r.digest.slice(0, 32));
+
+      // The same message again has its verdict from the cache: neither is asked and no row is added; its line carries the
+      // start of the digest of the request that judged it.
+      const cached = await post('Receipt 1002', 'Private body 1002'); assert.equal((await dispatch()).sent, 1);
+      assert.deepEqual([...await counts(), line(cached).screenDigest], [2, 1, 1, r.digest.slice(0, 32)]);
+
+      // SES throttles an email's first attempt: its retry is a second dispatch of the same email, and asks neither again.
+      throttle = 1;
+      const retried = await post('Receipt 1003', 'Private body 1003'); assert.equal((await dispatch()).sent, 0);
+      assert.deepEqual([(await db.query('SELECT status,error_code FROM sending_emails WHERE id=$1', [retried])).rows[0].error_code, ...await counts()], ['SES_THROTTLED', 3, 2, 2]);
+      await db.query('UPDATE sending_emails SET scheduled_at=now() WHERE id=$1', [retried]);
+      assert.equal((await dispatch()).sent, 1); assert.deepEqual(await counts(), [3, 2, 2]);
+
+      // What the screen refuses, and a request of the screen's that fails, are pairs too: the second classifier is asked all the same.
+      const spam = await post('Deals', 'See SampleMarker deals today'); assert.equal((await dispatch()).sent, 0);
+      jevDown = true; const outage = await post('Receipt 1004', 'Private body 1004'); assert.equal((await dispatch()).sent, 0); jevDown = false;
+      assert.deepEqual((await db.query('SELECT error_code FROM sending_emails WHERE id=ANY($1) ORDER BY array_position($1,id)', [[spam, outage]])).rows.map(x => x.error_code), ['CONTENT_REJECTED_SPAM', 'CONTENT_SCREEN_UNAVAILABLE']);
+      const pair = async (id: string) => (await rows()).filter(x => x.email_id === id).map(x => [x.jev_outcome, x.jev_http_status, x.jev_score, x.jev_flagged, x.jevf_outcome, x.jevf_score, x.jevf_flagged]);
+      assert.deepEqual([await pair(spam), await pair(outage)], [[['ok', 200, 0.99, true, 'ok', 0.1037, false]], [['http_503', 503, null, null, 'ok', 0.1037, false]]]);
+
+      // A campaign test of several requests: a row per request, all under the test email and its campaign.
+      const paragraphs = (n: number) => Array.from({ length: n }, (_, i) => `<p>Section ${i}: what changed this month in sync, search and sharing, and how to try it from your dashboard.</p>`).join('');
+      const long = await harness.campaign('Long digest', `<h1>Hello {{first_name}}</h1>${paragraphs(150)}<p><a href="https://shadow.invalid/notes">Read the notes</a></p>`, ['Ana', 'Ben', 'Ana', 'Ben', 'Ana'].map(first_name => ({ first_name })));
+      let before = await counts();
+      const tested = ok(await local('POST', `/v1/campaigns/${long.id}/test`, { to: 'me@example.net', data: {} }), 202); assert.equal((await dispatch()).sent, 1);
+      const windows = sent.jev.length - before[0]!, testRows = (await rows()).filter(x => x.kind === 'campaign_test');
+      assert.ok(windows >= 2, `${windows} requests`); assert.deepEqual([sent.jevf.length - before[1]!, testRows.length], [windows, windows]);
+      assert.ok(testRows.every(x => x.email_id === tested.id && x.campaign_id === long.id && x.windows === windows && x.digest === testRows[0]!.digest));
+      assert.deepEqual(testRows.map(x => x.window_index).sort((a, b) => a - b), Array.from({ length: windows }, (_, i) => i));
+
+      // The campaign itself: its own copy and one per distinct name, each of several requests. A row per request of each copy,
+      // under the campaign and the copy's key, however many recipients share it; dispatch then asks nothing.
+      before = await counts();
+      assert.equal((await harness.send(long)).delivery.expanded, 5);
+      const copies = (await db.query('SELECT copy_hash,requests FROM sending_campaign_screens WHERE campaign_id=$1', [long.id])).rows, copyRows = (await rows()).filter(x => x.kind === 'campaign_copy');
+      assert.equal(copies.length, 3); assert.ok(copies.every(c => c.requests >= 2));
+      assert.deepEqual([sent.jev.length - before[0]!, sent.jevf.length - before[1]!, copyRows.length], Array(3).fill(copies.reduce((n, c) => n + c.requests, 0)));
+      assert.ok(copyRows.every(x => x.campaign_id === long.id && x.email_id === null && x.workspace_id === wid));
+      for (const copy of copies) assert.deepEqual(copyRows.filter(x => x.digest === copy.copy_hash).map(x => [x.window_index, x.windows]).sort((a, b) => a[0] - b[0]), Array.from({ length: copy.requests }, (_, i) => [i, copy.requests]));
+      before = await counts(); assert.equal((await dispatch()).sent, 5); assert.deepEqual(await counts(), before);
+      // The second classifier's requests are the screen's, one for one, in every case above.
+      assert.deepEqual(sent.jevf.map(x => x.body).sort(), sent.jev.slice(1).map(x => x.replace('{"model":"fixture"', '{"model":"jevf"')).sort());
+
+      // A pair is written once: its batch written again, or again beside another, leaves it as it was.
+      const all = await rows(), again = (id: string) => ({ pair_id: id, at: Date.now(), workspace_id: wid, kind: 'email', digest: 'again', window_index: 0, windows: 1, jev_outcome: 'ok', jevf_outcome: 'timeout' });
+      assert.equal(new Set(all.map(x => x.pair_id)).size, all.length);
+      await writeComparisons(runtime.db, [again(r.pair_id), again(all.at(-1)!.pair_id)]); await writeComparisons(runtime.db, [again(r.pair_id)]);
+      assert.deepEqual((await rows()).map(x => [x.pair_id, x.digest, x.jevf_outcome]), all.map(x => [x.pair_id, x.digest, x.jevf_outcome]));
+
+      // The operator's comparison, from the table alone: only for operators, and absent from the public API document.
+      error(await local('GET', '/v1/operator/screen-comparison'), 403, 'OPERATOR_REQUIRED');
+      await (await import('./scripts/set-operator.js')).setOperator(db, [AUTH_SUBJECT, 'operator:read', '--reason', 'Synthetic comparison reader']);
+      const report = ok(await local('GET', `/v1/operator/screen-comparison?since=${encodeURIComponent(started)}`));
+      const n = (test: (x: Json) => boolean) => all.filter(test).length, both = (x: Json) => x.jev_flagged !== null && x.jevf_flagged !== null;
+      assert.deepEqual(report.counts, { pairs: all.length, digests: new Set(all.map(x => x.digest)).size, email: 4, campaignTest: windows, campaignCopy: copyRows.length, jevAnswered: all.length - 1, jevfAnswered: all.length, bothAnswered: all.length - 1 });
+      assert.deepEqual(report.coverage, { called: all.length, answered: all.length, refusedTooLarge: 0, skippedBreaker: 0, skippedRateLimited: 0, skippedBacklog: 0, lost: 0, answeredShare: 1 });
+      assert.deepEqual(report.outcomes, { jev: { ok: all.length - 1, http_503: 1 }, jevf: { ok: all.length } });
+      // They decide differently both ways: the screen alone refuses SampleMarker, the second classifier alone the copy that greets Ben.
+      const onlyJevf = n(x => x.jev_flagged === false && x.jevf_flagged === true); assert.ok(onlyJevf >= 1);
+      assert.deepEqual(report.agreement.requests, { compared: all.length - 1, bothFlag: 0, bothPass: all.length - 2 - onlyJevf, jevFlagJevfPass: 1, jevPassJevfFlag: onlyJevf });
+      assert.deepEqual(report.agreement.messages, { compared: 3 + 1 + 3, bothFlag: 0, bothPass: 5, jevFlagJevfPass: 1, jevPassJevfFlag: 1 });
+      assert.deepEqual(report.agreement.threshold, { min: 0.7, max: 0.7 });
+      assert.deepEqual(report.disagreements.map((d: Json) => [d.pairId, d.kind, d.emailId, d.campaignId, d.digest, d.window, d.jevScore, d.jevfScore, d.threshold]).sort(),
+        all.filter(x => both(x) && x.jev_flagged !== x.jevf_flagged).map(x => [x.pair_id, x.kind, x.email_id, x.campaign_id, x.digest, x.window_index, x.jev_score, x.jevf_score, 0.7]).sort());
+      assert.deepEqual(report.disagreements.map((d: Json) => [d.kind, d.emailId ?? d.campaignId, d.jevScore, d.jevfScore]).filter((d: unknown[], i: number, list: unknown[][]) => list.findIndex(o => String(o) === String(d)) === i).sort(), [['campaign_copy', long.id, 0.01, 0.91], ['email', spam, 0.99, 0.1037]]);
+      assert.equal(report.scoreDifference.histogram.reduce((sum: number, step: Json) => sum + step.count, 0), all.length - 1);
+      assert.ok(report.scoreDifference.meanAbsolute > 0 && report.scoreDifference.p99Absolute >= report.scoreDifference.p50Absolute);
+      assert.deepEqual([report.latencyMs.jev.requests, report.latencyMs.jevf.requests], [all.length, all.length]);
+      assert.ok([report.latencyMs.jev, report.latencyMs.jevf].every(q => q.p50 >= 0 && q.p95 >= q.p50 && q.p99 >= q.p95));
+      assert.deepEqual(report.tokens.jevf, { reported: all.length, total: 239 * all.length, mean: 239, max: 239 });
+      assert.deepEqual([report.tokens.jev.reported, report.tokens.jev.max, report.tokens.jevOver4096], [all.length - 1, Math.max(...all.map(x => x.jev_input_tokens ?? 0)), n(x => x.jev_input_tokens > 4096)]);
+      assert.equal(report.hourly.reduce((sum: number, hour: Json) => sum + hour.pairs, 0), all.length);
+      assert.deepEqual(report.hourly.reduce((sum: number[], hour: Json) => [sum[0]! + hour.jev.errors, sum[1]! + hour.jevf.calls, sum[2]! + hour.jevf.errors + hour.jevf.timeouts + hour.jevf.rateLimited + hour.jevf.skipped], [0, 0, 0]), [1, all.length, 0]);
+      assert.equal(report.configured, true); assert.equal(n(both), all.length - 1);
+      assert.equal(ok(await local('GET', `/v1/operator/screen-comparison?since=${encodeURIComponent(new Date(Date.now() + 60_000).toISOString())}`)).counts.pairs, 0);
+      assert.ok([400, 422].includes((await local('GET', '/v1/operator/screen-comparison?since=yesterday')).status));
+      assert.ok(!JSON.stringify(ok(await local('GET', '/openapi.json'))).includes('screen-comparison'));
+
+      // Kept 90 days by the hourly retention.
+      await db.query(`INSERT INTO screen_comparisons(created_at,pair_id,kind,digest,window_index,windows,jev_outcome,jevf_outcome,workspace_id)
+        VALUES (now()-interval '91 days','old-'||$1,'email','d',0,1,'ok','ok',$1),(now()-interval '89 days','recent-'||$1,'email','d',0,1,'ok','ok',$1)`, [wid]);
+      await (await import('./src/maintenance.js')).cleanup(runtime);
+      assert.deepEqual((await rows()).map(x => x.pair_id).filter(id => id.endsWith(wid)), [`recent-${wid}`]); assert.equal((await rows()).length, all.length + 1);
+
+      // Rows, lines and the report hold IDs, digests, scores and codes: never the text, an address or a key.
+      const written = JSON.stringify([await rows(), report, logs.filter(l => /^(SCREEN_|DISPATCH_EMAIL|CONTENT_SCREEN)/.test(String(l.code)))]);
+      for (const secret of ['Private body', 'Receipt 100', 'private.person', 'a@shadow', 'Section 3', 'SampleMarker', 'jevf-fixture-key', 'Hello Ben']) assert.ok(!written.includes(secret), secret);
+    }));
+  });
+
+  test('second classifier slow, down, rate limited, answering garbage or hanging past its deadline: the same mail goes out under the same verdicts and no later, nothing is retried, and what became of each repeat is kept', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => t.test('classifiers', async t => {
+      const [{ enqueueShadow, consumeShadow, writeComparisons, writtenComparisons }, { drizzle }, { runDispatcher, initialGate }, { SESv2Client, GetAccountCommand }] = await Promise.all([import('./src/screen-shadow.js'), import('drizzle-orm/node-postgres'), import('./src/dispatcher.js'), import('@aws-sdk/client-sesv2')]);
+      const acct = '112223330022', { wid } = await hostedScreenFixture(t, runtime, db, acct, 'unmoved.invalid');
+      // As on Cloudflare: the run puts its requests on the second classifier's queue and the queue's consumer asks, on
+      // connections of its own (the fixture's one connection is a transaction in use). Its rows are committed, and
+      // removed when the test ends.
+      const writer = new pg.Pool({ connectionString: FIXTURE_DATABASE_URL, max: 3 }), store = { write: (rows: Json[]) => writeComparisons(drizzle(writer), rows), written: (ids: string[]) => writtenComparisons(drizzle(writer), ids) };
+      cleanup(t, async () => { await writer.query('DELETE FROM screen_comparisons WHERE workspace_id=$1', [wid]).catch(() => undefined); await writer.end(); });
+      type Mode = 'off' | 'ok' | 'slow' | 'down' | '429' | 'garbage' | 'hang' | 'held';
+      let mode: Mode = 'off', letGo: (() => void)[] = [];
+      const sent = twoClassifiers(async init => {
+        const aborted = new Promise<never>((_, reject) => init.signal!.addEventListener('abort', () => reject(init.signal!.reason)));
+        aborted.catch(() => undefined);
+        if (mode === 'hang') return aborted;
+        if (mode === 'held') await Promise.race([new Promise<void>(resolve => { letGo.push(resolve); }), aborted]); // Answers when the test lets it.
+        if (mode === 'down') throw new TypeError('fetch failed');
+        if (mode === '429') return new Response('{"error":"rate limited"}', { status: 429, headers: { 'retry-after': '2', 'x-request-id': 'req_jevf_429' } });
+        if (mode === 'garbage') return new Response('<html>502 Bad Gateway</html>');
+        if (mode === 'slow') await Promise.race([new Promise(resolve => setTimeout(resolve, 700)), aborted]);
+        return jevfAnswers(0.1037);
+      });
+      const ses: string[] = [];
+      (SESv2Client.prototype.send as unknown as { mock: { mockImplementation(fn: unknown): void } }).mock.mockImplementation(async (cmd: { input: unknown }) => {
+        if (cmd instanceof GetAccountCommand) return { SendingEnabled: true, SendQuota: { MaxSendRate: 10000, Max24HourSend: 1000000, SentLast24Hours: 0 } };
+        ses.push(JSON.stringify(cmd.input)); return { MessageId: randomUUID() };
+      });
+      const logs: Json[] = []; for (const level of ['warn', 'info'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch { /* not a log line */ } });
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'unmoved', permissions: ['send', 'read'] }), 201);
+      const long = Array.from({ length: 160 }, (_, i) => `Line ${i}: your order, its items and where each one is on its way to you.`).join('\n');
+      // Each use has a queue and a model of its own: the pause and the breaker are kept per endpoint and model.
+      let queued: ReturnType<typeof jevfQueue> | undefined, sending: Promise<void> = Promise.resolve(), tags = 0, uses = 0;
+      const use = (next: Mode) => {
+        mode = next; queued = undefined; runtime.config.shadow = undefined; runtime.shadow = undefined;
+        if (next === 'off') return;
+        const settings = runtime.config.shadow = shadowSettings(next === 'held' ? 30_000 : 1000, `jevf-${++uses}`), made = queued = jevfQueue(messages => consumeShadow(settings, store, messages));
+        runtime.shadow = items => { sending = enqueueShadow(made.queue, items); };
+      };
+      const consumed = async () => { await sending; await queued!.settled(); };
+      // One round: twelve emails (one the screen refuses, one of several requests) and one dispatch run. What it returns is
+      // everything a sender or SES could see, with the round's tag and email IDs taken out.
+      const round = async () => {
+        const tag = `T${String(++tags).padStart(4, '0')}`, ids: string[] = [], from = { jev: sent.jev.length, jevf: sent.jevf.length, ses: ses.length };
+        await db.query('UPDATE hosted_burst_windows SET used=0 WHERE workspace_id=$1', [wid]); // Every round has the workspace's whole minute allowance.
+        for (let i = 0; i < 12; i++) ids.push(ok(await local('POST', '/v1/emails/send', { from: 'a@unmoved.invalid', to: 'private.person@example.invalid', subject: `Receipt ${tag}-${i}`,
+          text: i === 3 ? `See SampleMarker deals ${tag}` : i === 7 ? `Order ${tag}\n${long}` : `Private body ${tag}-${i}` }, 'live', { authorization: `Bearer ${key.secret}` }), 202).id);
+        const began = Date.now(), report = await runDispatcher(runtime, { region: REGION, accountId: acct, batchSize: 24, lanes: 1, gate: initialGate() }), ms = Date.now() - began;
+        const plain = (text: string) => ids.reduce((out, id, i) => out.replaceAll(id, `email-${i}`), text).replaceAll(tag, 'TAG');
+        const outcome = (await db.query('SELECT status,error_code FROM sending_emails WHERE id=ANY($1) ORDER BY array_position($1,id)', [ids])).rows.map(x => [x.status, x.error_code]);
+        const events = (await db.query(`SELECT array_position($1,email_id) AS email,type,data->'screen' AS screen,data->>'code' AS code FROM sending_email_events WHERE email_id=ANY($1) ORDER BY 1,2,3,4`, [ids])).rows;
+        return { ids, ms, from: from.jevf, jevf: sent.jevf.length - from.jevf, seen: { sent: report.sent, outcome, events, jev: sent.jev.slice(from.jev).map(plain).sort(), ses: ses.slice(from.ses).map(plain).sort() } };
+      };
+      const kept = async (ids: string[]) => (await db.query('SELECT pair_id,email_id,window_index,windows,jev_outcome,jev_score,jevf_outcome,jevf_ms,jevf_http_status,jevf_request_id FROM screen_comparisons WHERE email_id=ANY($1)', [ids])).rows as Json[];
+      const tally = (rows: Json[]) => rows.reduce((counts: Record<string, number>, row) => ({ ...counts, [row.jevf_outcome]: (counts[row.jevf_outcome] ?? 0) + 1 }), {});
+
+      // Without the second classifier: the baseline. Eleven emails of one request and one of several; eleven go out.
+      use('off');
+      const baseline = await round(), requests = baseline.seen.jev.length;
+      assert.deepEqual([baseline.seen.sent, baseline.seen.ses.length, baseline.jevf, requests > 12], [11, 11, 0, true]);
+      assert.deepEqual(baseline.seen.outcome[3], ['rejected', 'CONTENT_REJECTED_SPAM']);
+      assert.deepEqual((await round()).seen, baseline.seen, 'Two rounds without it are the same but for their tag and IDs.');
+      assert.equal((await writer.query('SELECT count(*)::int AS n FROM screen_comparisons WHERE workspace_id=$1', [wid])).rows[0].n, 0);
+
+      // However the second classifier behaves, the round is the same, byte for byte: the screen's requests, what SES is sent,
+      // every email's outcome and events. Each of the screen's requests still gets its row, once.
+      const expected: Record<Exclude<Mode, 'off' | 'held'>, (counts: Record<string, number>, calls: number) => boolean> = {
+        ok: (c, calls) => c.ok === requests && calls === requests,
+        slow: (c, calls) => c.ok === requests && calls === requests,
+        // Five failures in a row open the breaker; the calls already out by then end too. The rest are skipped.
+        down: (c, calls) => c.network >= 5 && c.network <= 12 && c.network === calls && c.skipped_breaker === requests - calls,
+        garbage: (c, calls) => c.invalid >= 5 && c.invalid <= 12 && c.invalid === calls && c.skipped_breaker === requests - calls,
+        hang: (c, calls) => c.timeout >= 5 && c.timeout <= 12 && c.timeout === calls && c.skipped_breaker === requests - calls,
+        // The first 429 pauses everything for its Retry-After: only the eight already in flight were asked.
+        '429': (c, calls) => c.rate_limited === 8 && calls === 8 && c.skipped_rate_limited === requests - 8,
+      };
+      for (const next of ['ok', 'slow', 'down', 'garbage', '429', 'hang'] as const) {
+        use(next);
+        const now = await round();
+        assert.deepEqual(now.seen, baseline.seen, `${next}: the round is unchanged`);
+        await consumed();
+        const rows = await kept(now.ids), calls = sent.jevf.length - now.from;
+        assert.equal(queued!.dropped, 0); assert.ok(queued!.sends.flat().length === requests && queued!.sends.flat().every(message => message.contentType === 'text'), 'a message per request');
+        assert.equal(rows.length, requests, `${next}: a row per request of the screen`); assert.equal(new Set(rows.map(row => row.pair_id)).size, requests);
+        assert.ok(rows.every(row => row.jev_outcome === 'ok' && typeof row.jev_score === 'number'));
+        assert.ok(expected[next](tally(rows), calls), `${next}: ${JSON.stringify(tally(rows))} after ${calls} calls`);
+        if (next === 'slow') assert.ok(rows.every(row => row.jevf_ms >= 650), 'It may take longer than the screen\'s own 500 ms deadline.');
+        if (next === 'hang') assert.ok(rows.filter(row => row.jevf_outcome === 'timeout').every(row => row.jevf_ms >= 950 && row.jevf_ms < 4000));
+        if (next === '429') assert.ok(rows.filter(row => row.jevf_outcome === 'rate_limited').every(row => row.jevf_http_status === 429 && row.jevf_request_id === 'req_jevf_429'));
+        // Nothing is retried: the calls made by now are all there will be.
+        const asked = sent.jevf.length; await new Promise(resolve => setTimeout(resolve, 100)); assert.equal(sent.jevf.length, asked); assert.equal((await kept(now.ids)).length, requests);
+      }
+      const breaker = logs.filter(l => l.code === 'SCREEN_SHADOW_BREAKER').map(l => l.state);
+      assert.deepEqual(breaker, ['opened', 'opened', 'opened'], 'down, garbage and hang each opened the breaker');
+      assert.equal(logs.filter(l => l.code === 'SCREEN_SHADOW_RATE_LIMITED').length, 1); assert.equal(logs.filter(l => l.code === 'SCREEN_SHADOW_TIMEOUT').length, 1);
+
+      // No later: a dispatch run while the second classifier's calls from the run before are still out takes what a run
+      // without it takes. (A call starts only when its own run has ended, so the run after is the one it could delay.)
+      // The calls are held until the run has been timed, then answered.
+      const timed = { off: [] as number[], hanging: [] as number[] };
+      // Each is the second of two rounds, and the two take turns going first.
+      for (let i = 0; i < 4; i++) for (const arm of i % 2 ? ['hanging', 'off'] as const : ['off', 'hanging'] as const) {
+        if (arm === 'off') { use('off'); await round(); const without = await round(); timed.off.push(without.ms); assert.deepEqual(without.seen, baseline.seen); continue; }
+        use('held'); const primed = await round();
+        assert.equal(primed.jevf, 8, 'eight calls are out');
+        const during = await round(); timed.hanging.push(during.ms);
+        assert.deepEqual(during.seen, baseline.seen); assert.deepEqual([(await kept(primed.ids)).length, letGo.length], [0, 8], 'They were still out when the run ended.');
+        // Let go, they and the requests behind them are answered as they come.
+        const free = setInterval(() => { for (const answer of letGo.splice(0)) answer(); }, 5);
+        try { await consumed(); } finally { clearInterval(free); }
+        assert.equal((await kept([...primed.ids, ...during.ids])).length, 2 * requests);
+      }
+      const median = (values: number[]) => { const sorted = [...values].sort((a, b) => a - b); return (sorted[1]! + sorted[2]!) / 2; };
+      t.diagnostic(`dispatch run of 12 emails, straight after another: without the second classifier ${timed.off.join(', ')} ms; with eight of its calls from the run before still out ${timed.hanging.join(', ')} ms`);
+      assert.ok(median(timed.hanging) < median(timed.off) + 500, `without ${timed.off} ms, with ${timed.hanging} ms`);
+      const written = JSON.stringify([(await writer.query('SELECT to_jsonb(c) AS c FROM screen_comparisons c WHERE workspace_id=$1', [wid])).rows, logs.filter(l => String(l.code).startsWith('SCREEN_'))]);
+      for (const secret of ['Private body', 'Receipt T', 'private.person', 'a@unmoved', 'SampleMarker', 'jevf-fixture-key', 'your order']) assert.ok(!written.includes(secret), secret);
+    }));
+  });
+
+  test('second classifier breaker: failures in a row open it, nothing is asked while it is open, one probe closes it or opens it for twice as long; a 429 pauses for its Retry-After; a refusal of an over-long request is an answer; one line per failure class', async t => {
+    const { ShadowRunner } = await import('./src/screen-shadow.js');
+    const logs: Json[] = []; for (const level of ['warn', 'info'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch { /* not a log line */ } });
+    const rows: Json[] = [], sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms)), fine = () => jevfAnswers(0.2);
+    let calls = 0, answer: (init: RequestInit) => Response | Promise<Response> = fine;
+    t.mock.method(globalThis, 'fetch', async (_url: RequestInfo | URL, init: RequestInit) => { calls++; return answer(init); });
+    const runner = new ShadowRunner({ ...shadowSettings(300), maxConcurrency: 1 }, async batch => { rows.push(...batch); }, { failuresToOpen: 3, openMs: 400 });
+    let made = 0;
+    const item = (request = true) => ({ id: `pair-${++made}`, at: Date.now(), workspaceId: 'ws_fixture', kind: 'email' as const, emailId: `email-${made}`, digest: 'd'.repeat(64), window: 0, windows: 1, threshold: 0.7,
+      jev: { outcome: 'ok', httpStatus: 200, ms: 5, score: 0.2, model: 'jev' }, ...(request ? { request: { state: { email: { subject: 'Private subject', body: 'Private body' } }, questions: { spam: {} } } } : {}) });
+    const feed = async (count: number, request = true) => { const from = rows.length; runner.accept(Array.from({ length: count }, () => item(request))); await runner.settled(); return rows.slice(from).map(row => row.jevf_outcome); };
+    const failing = () => new Response(null, { status: 500 });
+
+    // Three failures in a row open it; what was waiting, and what comes while it is open, is skipped without a request.
+    answer = failing;
+    assert.deepEqual(await feed(5), ['http_500', 'http_500', 'http_500', 'skipped_breaker', 'skipped_breaker']); assert.deepEqual([calls, runner.open], [3, true]);
+    assert.deepEqual(await feed(2), ['skipped_breaker', 'skipped_breaker']); assert.equal(calls, 3);
+    // After its pause one request is let through. It fails: open again, for twice as long.
+    await sleep(450); assert.deepEqual(await feed(3), ['http_500', 'skipped_breaker', 'skipped_breaker']); assert.equal(calls, 4);
+    await sleep(450); assert.deepEqual(await feed(1), ['skipped_breaker'], 'still open after the first pause\'s length'); assert.equal(calls, 4);
+    // The next one let through is answered: closed, and requests go again.
+    await sleep(450); answer = fine; assert.deepEqual(await feed(3), ['ok', 'ok', 'ok']); assert.deepEqual([calls, runner.open], [7, false]);
+
+    // A 429 pauses everything for its Retry-After, and is not a failure.
+    answer = () => new Response(null, { status: 429, headers: { 'retry-after': '1' } });
+    assert.deepEqual(await feed(3), ['rate_limited', 'skipped_rate_limited', 'skipped_rate_limited']);
+    answer = fine; assert.deepEqual(await feed(1), ['skipped_rate_limited']); assert.deepEqual([calls, runner.open], [8, false]);
+    await sleep(1100); assert.deepEqual(await feed(1), ['ok']); // The second after the 429 was answered has passed.
+
+    // An over-long request is refused (413, or a 400 that says so): recorded as that, and however many, never a failure.
+    answer = () => new Response('{"error":{"message":"input exceeds the 4096 token limit of this preview"}}', { status: 400 });
+    assert.deepEqual(await feed(4), Array(4).fill('refused_too_large')); assert.equal(runner.open, false);
+    answer = () => new Response(null, { status: 413 }); assert.deepEqual(await feed(1), ['refused_too_large']);
+    // Another 400, an answer without a score, a request that hangs to the deadline, and one kept without its text.
+    answer = () => new Response('{"error":"unknown model"}', { status: 400 }); assert.deepEqual(await feed(1), ['http_400']);
+    answer = () => Response.json({ answers: { spam: { noul: 7 } } }); assert.deepEqual(await feed(1), ['invalid']);
+    answer = fine; assert.deepEqual(await feed(1), ['ok']);
+    answer = init => new Promise<never>((_, reject) => init.signal!.addEventListener('abort', () => reject(init.signal!.reason)));
+    const hung = Date.now(); assert.deepEqual(await feed(1), ['timeout']); assert.ok(Date.now() - hung >= 250 && rows.at(-1)!.jevf_ms >= 250);
+    answer = fine; const before = calls; assert.deepEqual(await feed(1, false), ['skipped_backlog']); assert.equal(calls, before);
+
+    assert.equal(new Set(rows.map(row => row.pair_id)).size, made, 'Every request has its row, once.');
+    assert.deepEqual(logs.filter(l => l.code === 'SCREEN_SHADOW_BREAKER').map(l => [l.level, l.state, l.again ?? false, l.pauseMs]), [['warn', 'opened', false, 400], ['warn', 'opened', true, 800], ['info', 'closed', false, undefined]]);
+    // One line a minute per failure class, however many it stands for.
+    assert.deepEqual(['SCREEN_SHADOW_ERROR', 'SCREEN_SHADOW_RATE_LIMITED', 'SCREEN_SHADOW_TIMEOUT'].map(code => logs.filter(l => l.code === code).length), [1, 1, 1]);
+    const written = JSON.stringify([rows, logs]);
+    for (const secret of ['Private', 'jevf-fixture-key']) assert.ok(!written.includes(secret), secret);
+  });
+
+  test('second classifier on Cloudflare: a run only puts messages on its queue; the consumer asks at most four at a time, writes each pair once, never asks twice for a message delivered again, and gives up after the queue\'s retries; both Worker configs bind the queue and nothing else', async t => {
+    const { enqueueShadow, consumeShadow } = await import('./src/screen-shadow.js');
+    const logs: Json[] = []; for (const level of ['warn', 'info'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch { /* not a log line */ } });
+    let calls = 0, active = 0, peak = 0, made = 0;
+    t.mock.method(globalThis, 'fetch', async () => { calls++; peak = Math.max(peak, ++active); await new Promise(resolve => setTimeout(resolve, 20)); active--; return jevfAnswers(0.2); });
+    const items = (count: number, body = 'Private body') => Array.from({ length: count }, () => ({ id: `pair-${++made}`, at: Date.now(), workspaceId: 'ws_fixture', kind: 'email' as const, emailId: `email-${made}`, digest: 'd'.repeat(64), window: 0, windows: 1, threshold: 0.7,
+      jev: { outcome: 'ok', httpStatus: 200, ms: 5, score: 0.9, model: 'jev' }, request: { state: { email: { subject: 'Private subject', body } }, questions: { spam: {} } } }));
+    // Where rows go: a pair is kept once, as the table keeps it; `fail` makes the next writes fail.
+    const rows = new Map<string, Json>(); let fail = 0, lookups = 0;
+    const store = { write: async (batch: Json[]) => { if (fail-- > 0) throw Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' }); for (const row of batch) if (!rows.has(row.pair_id)) rows.set(row.pair_id, row); },
+      written: async (ids: string[]) => { lookups++; return new Set(ids.filter(id => rows.has(id))); } };
+    const outcomes = (from: number) => [...rows.values()].slice(from).map(row => row.jevf_outcome);
+
+    // What a run does: one message per request, as text, in as few sends as a queue takes (100 messages and 256 KB a
+    // send, 128 KB a message). A request too large for a message goes without its text. Nothing is asked from here.
+    const plain = jevfQueue(async () => true), many = [...items(120), ...items(40, 'x'.repeat(8000)), ...items(1, 'y'.repeat(130_000))];
+    await enqueueShadow(plain.queue, many);
+    assert.equal(plain.sends.flat().length, 161); assert.ok(plain.sends.length >= 3 && plain.sends.every(send => send.length <= 100 && send.reduce((bytes, message) => bytes + Buffer.byteLength(message.body), 0) <= 256_000));
+    assert.ok(plain.sends.flat().every(message => message.contentType === 'text' && Buffer.byteLength(message.body) <= 128_000));
+    assert.deepEqual(plain.sends.flat().map(message => JSON.parse(message.body)), many.map((item, index) => index === 160 ? { ...item, request: undefined } : item).map(item => JSON.parse(JSON.stringify(item))));
+    assert.equal(calls, 0);
+    // A send that fails loses what was not sent, with one line; it never throws where the run ended.
+    await enqueueShadow({ sendBatch: async () => { throw new TypeError('Network connection lost.'); } }, items(3));
+    assert.deepEqual(logs.filter(l => l.code === 'SCREEN_SHADOW_HANDOFF_FAILED').map(l => [l.level, l.items, l.sent]), [['warn', 3, 0]]);
+
+    // The consumer: four messages an invocation, two invocations at once. Every pair gets its row.
+    const settings = shadowSettings(2000, 'jevf-queue'), queue = jevfQueue(messages => consumeShadow(settings, store, messages));
+    await enqueueShadow(queue.queue, items(10)); await queue.settled();
+    assert.deepEqual([calls, rows.size, peak <= 8, peak >= 5, lookups, queue.dropped], [10, 10, true, true, 0, 0], `peak ${peak}`);
+    assert.deepEqual(outcomes(0), Array(10).fill('ok'));
+    // The rows of a batch cannot be written: the queue delivers it again. The second classifier is not asked again:
+    // what the first delivery learned is gone, and the row says lost.
+    let from = rows.size, asked = calls; fail = 1;
+    await enqueueShadow(queue.queue, items(4)); await queue.settled();
+    assert.deepEqual([calls - asked, outcomes(from), lookups, queue.dropped], [4, Array(4).fill('lost'), 1, 0]);
+    assert.ok([...rows.values()].slice(from).every(row => row.jev_score === 0.9 && row.jevf_score === null && row.jevf_ms === null));
+    // A message delivered again whose first delivery did write its row (only the acknowledgement was lost) adds nothing.
+    from = rows.size; asked = calls;
+    const [once] = items(1); await consumeShadow(settings, store, [{ body: JSON.stringify(once), attempts: 1 }]);
+    assert.equal(await consumeShadow(settings, store, [{ body: JSON.stringify(once), attempts: 2 }]), true);
+    assert.deepEqual([calls - asked, outcomes(from)], [1, ['ok']]);
+    // Rows that can never be written: three deliveries, one request to the second classifier, then the message is gone.
+    from = rows.size; asked = calls; fail = Number.POSITIVE_INFINITY;
+    await enqueueShadow(queue.queue, items(4)); await queue.settled(); fail = 0;
+    assert.deepEqual([calls - asked, rows.size - from, queue.dropped], [4, 0, 4]);
+    assert.equal(logs.filter(l => l.code === 'SCREEN_COMPARISONS_UNWRITTEN').length, 1 + 3);
+    // Anything that is not one of its messages is dropped, not retried.
+    assert.equal(await consumeShadow(settings, store, [{ body: 'not json', attempts: 1 }, { body: '{"id":7}', attempts: 1 }]), true); assert.equal(rows.size, from);
+    assert.ok(!JSON.stringify([[...rows.values()], logs]).includes('Private'));
+
+    // Both Worker configs: the queue is bound and consumed with no dead-letter queue, four messages an invocation (and
+    // the database's connection, of the six an invocation waits on), eight calls in all; no Durable Object is added for it.
+    const ts = (await import('typescript')).default;
+    for (const file of ['wrangler.dev.jsonc', 'wrangler.prod.jsonc']) {
+      const config = ts.parseConfigFileTextToJson(file, await readFile(new URL(file, import.meta.url), 'utf8')).config;
+      const name = config.queues.producers.find((producer: Json) => producer.binding === 'JEVF_QUEUE')?.queue, consumer = config.queues.consumers.find((queue: Json) => queue.queue === name);
+      assert.ok(name && config.vars.JEVF_QUEUE_NAME === name && consumer, file);
+      assert.ok(consumer.max_batch_size <= 5 && consumer.max_batch_size * consumer.max_concurrency <= 8 && consumer.max_retries <= 3 && !('dead_letter_queue' in consumer), JSON.stringify(consumer));
+      assert.ok(!config.queues.consumers.some((queue: Json) => queue.dead_letter_queue === name));
+      assert.ok(!('JEVF_API_KEY' in config.vars), 'The key is a secret, never a variable.');
+      assert.ok(!JSON.stringify([config.durable_objects, config.migrations]).includes('Shadow'));
+    }
+  });
+
+  test('second classifier on Cloudflare: the Worker\'s queue handler consumes its queue, writes the rows and acknowledges; without the key it drops what is queued and asks nothing', async t => {
+    // Node has no Workers host; provide only the base classes worker.ts extends.
+    const { registerHooks } = await import('node:module');
+    const hook = registerHooks({ resolve(specifier, context, next) {
+      return specifier === 'cloudflare:workers' ? { shortCircuit: true, url: 'data:text/javascript,export class DurableObject {constructor(ctx,env){this.ctx=ctx;this.env=env}} export class WorkerEntrypoint {constructor(ctx,env){this.ctx=ctx;this.env=env}}' } : next(specifier, context);
+    } });
+    const worker = (await import('./src/worker.js').finally(() => hook.deregister())).default as unknown as { queue(batch: unknown, env: unknown): Promise<void> };
+    const db = new pg.Client({ connectionString: FIXTURE_DATABASE_URL }); await db.connect();
+    const wid = unique('jevf-queue-workspace');
+    cleanup(t, async () => { await db.query('DELETE FROM screen_comparisons WHERE workspace_id=$1', [wid]).catch(() => undefined); await db.end(); });
+    for (const level of ['warn', 'info', 'error'] as const) t.mock.method(console, level, () => undefined);
+    let calls = 0; const asked: string[] = [];
+    t.mock.method(globalThis, 'fetch', async (url: RequestInfo | URL, init: RequestInit) => { calls++; assert.equal(String(url), JEVF_URL); asked.push(String(init.body)); return jevfAnswers(0.2); });
+    const env = (key?: string) => ({ PUBLIC_URL: 'https://dev.bane.mx', BANE_ROOT_SECRET: 's'.repeat(32), MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'false',
+      WORK_QUEUE_NAME: 'bane-dev-work', FEEDBACK_QUEUE_NAME: 'bane-dev-feedback', JEVF_QUEUE_NAME: 'fixture-jevf', TYPESAFE_API_KEY: 'jev-fixture-key', ...(key ? { JEVF_API_KEY: key, JEVF_ENDPOINT: JEVF_URL } : {}),
+      HYPERDRIVE: { connectionString: FIXTURE_DATABASE_URL }, ATTACHMENTS: { async put() {}, async get() { return null; }, async delete() {} }, WAKE_QUEUE: { async send() {} },
+      FEEDBACK_QUEUE: { async send() {}, async sendBatch() {} }, JEVF_QUEUE: { async sendBatch() {} }, ADMISSION: { async limit() { return { success: true }; } } });
+    let made = 0;
+    const batch = (count: number, attempts = 1) => {
+      const state = { acked: 0, retried: 0 };
+      return { state, queue: 'fixture-jevf', ackAll() { state.acked++; }, retryAll() { state.retried++; }, messages: Array.from({ length: count }, () => ({ attempts, timestamp: new Date(), ack() {}, retry() {},
+        body: JSON.stringify({ id: `${wid}-${++made}`, at: Date.now(), workspaceId: wid, kind: 'email', emailId: `email-${made}`, digest: 'd'.repeat(64), window: 0, windows: 1, threshold: 0.7,
+          jev: { outcome: 'ok', httpStatus: 200, ms: 5, score: 0.9, model: 'jev' }, request: { state: { email: { subject: 'Private subject', body: 'Private body' } }, questions: { spam: {} } } }) })) };
+    };
+    const stored = async () => (await db.query('SELECT pair_id,jev_score,jev_flagged,jevf_outcome,jevf_score,jevf_flagged,jevf_model FROM screen_comparisons WHERE workspace_id=$1 ORDER BY created_at,id', [wid])).rows;
+    // Without the key: acknowledged, so the queue empties, with no request and no row.
+    const dropped = batch(2); await worker.queue(dropped, env());
+    assert.deepEqual([dropped.state, calls, (await stored()).length], [{ acked: 1, retried: 0 }, 0, 0]);
+    // With it: each message's request goes to the second classifier under its key's model, and its row is written.
+    const first = batch(3); await worker.queue(first, env('jevf-fixture-key'));
+    assert.deepEqual([first.state, calls], [{ acked: 1, retried: 0 }, 3]);
+    assert.deepEqual(asked.map(body => JSON.parse(body)), Array(3).fill({ model: 'jevf', state: { email: { subject: 'Private subject', body: 'Private body' } }, questions: { spam: {} } }));
+    assert.deepEqual((await stored()).map(row => [row.jev_score, row.jev_flagged, row.jevf_outcome, row.jevf_score, row.jevf_flagged, row.jevf_model]), Array(3).fill([0.9, true, 'ok', 0.2, false, 'jevf']));
+    // The same messages delivered again: no request, no second row. A message delivered again that never had a row: lost.
+    await worker.queue({ ...first, messages: first.messages.map(message => ({ ...message, attempts: 2 })) }, env('jevf-fixture-key'));
+    const again = batch(1, 2); await worker.queue(again, env('jevf-fixture-key'));
+    assert.deepEqual([calls, again.state, (await stored()).map(row => row.jevf_outcome)], [3, { acked: 1, retried: 0 }, ['ok', 'ok', 'ok', 'lost']]);
+  });
+
+  test('second classifier on Cloudflare: a job drain that screened acknowledges its work-queue batch while the send to the second classifier\'s queue is still pending, kept alive by waitUntil', async t => {
+    // Node has no Workers host; provide only the base classes worker.ts extends.
+    const { registerHooks } = await import('node:module');
+    const hook = registerHooks({ resolve(specifier, context, next) {
+      return specifier === 'cloudflare:workers' ? { shortCircuit: true, url: 'data:text/javascript,export class DurableObject {constructor(ctx,env){this.ctx=ctx;this.env=env}} export class WorkerEntrypoint {constructor(ctx,env){this.ctx=ctx;this.env=env}}' } : next(specifier, context);
+    } });
+    const worker = (await import('./src/worker.js').finally(() => hook.deregister())).default as unknown as { queue(batch: unknown, env: unknown, ctx?: unknown): Promise<void> };
+    const [{ jobHandlers }, { screenWindow }] = await Promise.all([import('./src/sending.js'), import('./src/screen.js')]);
+    // The Worker's own jobs table, so its drain claims this test's job and nothing else; every other table is the fixture database's.
+    const db = new pg.Client({ connectionString: FIXTURE_DATABASE_URL }); await db.connect();
+    const wid = unique('jevf-drain-workspace'), schema = `jevf_drain_${randomUUID().replaceAll('-', '').slice(0, 12)}`, type = 'campaign.shadowFixture';
+    cleanup(t, async () => { release(); delete jobHandlers[type]; await db.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined); await db.query('DELETE FROM content_screen_calls WHERE workspace_id=$1', [wid]).catch(() => undefined);
+      await db.query('DELETE FROM ses_installation_settings WHERE workspace_id=$1', [wid]).catch(() => undefined); await db.end(); });
+    await (await import('./src/ses-region-state.js')).ensureRegionSettings((await import('drizzle-orm/node-postgres')).drizzle(db), { workspaceId: wid, regions: ['us-east-2'] });
+    await db.query(`CREATE SCHEMA ${schema}; CREATE TABLE ${schema}.jobs (LIKE public.jobs INCLUDING ALL); CREATE TABLE ${schema}.job_schedule (LIKE public.job_schedule INCLUDING ALL)`);
+    const scoped = new URL(FIXTURE_DATABASE_URL!); scoped.searchParams.set('options', `-c search_path=${schema},public`);
+    const logs: Json[] = []; for (const level of ['warn', 'info', 'error'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch { /* not a log line */ } });
+    // A campaign job that makes one request of the content screen, as a campaign's screen does for each copy.
+    const state = { email: { from: 'news@example.invalid', kind: 'marketing', subject: 'Private subject', body: 'Private body' }, signals: { recipients: 1 } };
+    let screened = 0;
+    jobHandlers[type] = async runtime => { await screenWindow(runtime, { requests: [state] }, 0, { workspaceId: wid, campaignId: 'cmp_fixture', kind: 'marketing', required: true }, 'c'.repeat(64)); screened++; };
+    t.mock.method(globalThis, 'fetch', async () => Response.json({ model: 'jev-fixture', answers: { spam: { noul: 0.01 } } }));
+    // The second classifier's queue takes the send and does not answer until released.
+    const sends: { body: string }[][] = [], waited: Promise<unknown>[] = [];
+    let release!: () => void, settled = false;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    const env = { PUBLIC_URL: 'https://dev.bane.mx', BANE_ROOT_SECRET: 's'.repeat(32), MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'false',
+      WORK_QUEUE_NAME: 'bane-dev-work', FEEDBACK_QUEUE_NAME: 'bane-dev-feedback', JEVF_QUEUE_NAME: 'fixture-jevf', TYPESAFE_API_KEY: 'jev-fixture-key', JEVF_API_KEY: 'jevf-fixture-key', JEVF_ENDPOINT: JEVF_URL,
+      HYPERDRIVE: { connectionString: scoped.href }, ATTACHMENTS: { async put() {}, async get() { return null; }, async delete() {} }, WAKE_QUEUE: { async send() {} },
+      FEEDBACK_QUEUE: { async send() {}, async sendBatch() {} }, ADMISSION: { async limit() { return { success: true }; } },
+      JEVF_QUEUE: { sendBatch: (messages: { body: string }[]) => { sends.push(messages); return pending; } } };
+    const ctx = { waitUntil(promise: Promise<unknown>) { waited.push(promise); void promise.then(() => { settled = true; }); } };
+    const drain = async (context?: unknown) => {
+      await db.query(`INSERT INTO ${schema}.jobs(id,workspace_id,type,payload,available_at) VALUES($1,$2,$3,'{}'::jsonb,now())`, [`job_${randomUUID()}`, wid, type]);
+      const state = { acked: 0, retried: 0 }, began = Date.now();
+      const done = worker.queue({ queue: 'bane-dev-work', messages: [], ackAll() { state.acked++; }, retryAll() { state.retried++; } }, env, context).then(() => 'returned' as const);
+      return { state, outcome: await Promise.race([done, new Promise<'waiting'>(resolve => setTimeout(() => resolve('waiting'), 5000))]), ms: Date.now() - began, done };
+    };
+    // The handler also flushes this process's health counters under waitUntil when they are due (src/health-counters.ts):
+    // started over here, they are not, so the only thing it gives waitUntil is the send, and nothing is written for health.
+    (await import('./src/health-counters.js')).resetCounters();
+    // The drain ran the job, the job's request was put on the queue, and the batch is acknowledged with that send still out.
+    const first = await drain(ctx);
+    assert.deepEqual([first.outcome, first.state, screened, sends.length, sends[0]?.length, settled], ['returned', { acked: 1, retried: 0 }, 1, 1, 1, false], `after ${first.ms} ms: ${JSON.stringify(logs.filter(l => l.level !== 'info' || l.code === 'JOB_DRAIN'))}`);
+    assert.equal(waited.length, 1, 'The send was given to waitUntil, once.');
+    assert.equal((await db.query(`SELECT status FROM ${schema}.jobs`)).rows.map(row => row.status).join(), 'completed');
+    assert.deepEqual(JSON.parse(sends[0]![0]!.body).request, { state, questions: JSON.parse(sends[0]![0]!.body).request.questions });
+    // Released, the promise waitUntil holds settles: nothing else was waiting on it.
+    release(); await Promise.all(waited); assert.equal(settled, true);
+    assert.ok(!logs.some(l => l.code === 'SCREEN_SHADOW_HANDOFF_FAILED'));
+  });
+
   test('hosted campaign copy keys: the customer copy byte for byte, with only the unsubscribe slots Nightmail generates set for a placeholder', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => t.test('classifier', async t => {
       await hostedScreenFixture(t, runtime, db, '112223330015', 'keyed.invalid');
