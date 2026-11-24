@@ -32,6 +32,8 @@ export interface OperatorTimelineItem { at: string; kind: TimelineKind; title: s
 export interface OperatorAction { at: string; workspaceId: string; action: string; operatorId: string | null; operatorEmail: string | null; via: string | null; reason: string | null; ticketRef: string | null; requestId: string | null; before: unknown; after: unknown; details: unknown }
 /** The sign-up limit (api/src/signups.ts) and what fills it: accounts that signed up, places held for waiting addresses, and the rest. */
 export interface SignupPlaces { limit: number; signedUp: number; held: number; waiting: number; open: number }
+/** How a raise gives out the places it adds: held for the oldest waiting addresses (each emailed), or open to anyone. */
+export type SignupRaise = 'hold' | 'open'
 /** One workspace on the Sign-ups tab. standing is pause while its sending is paused, and null without hosted sending. */
 export interface WorkspaceSummary { id: string; name: string; createdAt: string; owner: string | null; domain: string | null; domains: number; sent: number; standing: StandingStep | null }
 /** One address on the waitlist: a verified sign-in nothing admitted yet (api/src/account-login.ts). */
@@ -104,7 +106,7 @@ export const operatorApi = {
   },
   signups: (signal?: AbortSignal) => request<SignupPlaces>(`${base}/signups`, { signal }),
   health: (signal?: AbortSignal) => request<OperatorHealth>(`${base}/health`, { signal }),
-  setSignupLimit: (limit: number, guard: OperatorGuard) => request<SignupPlaces & { letIn: number; emailed: number; notEmailed: number | null }>(`${base}/signups`, { method: 'PUT', body: { limit }, idempotencyKey: guard.idempotencyKey }),
+  setSignupLimit: (limit: number, raise: SignupRaise, guard: OperatorGuard) => request<SignupPlaces & { letIn: number; emailed: number; notEmailed: number | null }>(`${base}/signups`, { method: 'PUT', body: { limit, raise }, idempotencyKey: guard.idempotencyKey }),
   allWorkspaces: async (input: { cursor?: string }, signal?: AbortSignal) => {
     const page = await request<{ data: WorkspaceSummary[]; nextCursor: string | null }>(`${base}/signups/workspaces${query({ cursor: input.cursor, limit: 100 })}`, { signal })
     return { items: page.data, nextCursor: page.nextCursor }

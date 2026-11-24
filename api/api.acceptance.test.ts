@@ -1485,8 +1485,8 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
     assert.deepEqual(seen,{...counted,open:Math.max(0,counted.limit-counted.signedUp-counted.held)},'The count the operator sees is the one the gate keeps');
     return seen;
   };
-  const setLimit = async (limit: number) => {
-    const response = await request('/v1/operator/signups','PUT',staff.session,{limit});
+  const setLimit = async (limit: number, raise?: 'hold' | 'open') => {
+    const response = await request('/v1/operator/signups','PUT',staff.session,{limit,raise});
     assert.equal(response.status,200);
     return await response.json() as Places & { letIn: number; emailed: number; notEmailed: number | null };
   };
@@ -1534,7 +1534,7 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   assert.deepEqual([await waiting(oldest),await waiting(second),await waiting(third)],[{held:true},{held:true},{held:false}]);
   assert.deepEqual(await told(oldest,second,third),[1,1,0]);
   const audit = (await db.query("SELECT workspace_id,operator_id,before,after FROM hosted_operator_audit WHERE action='operator-set-signup-limit' AND operator_id=$1 ORDER BY at DESC LIMIT 1",[staff.account])).rows[0];
-  assert.deepEqual(audit,{workspace_id:'platform',operator_id:staff.account,before:{limit:closed.limit},after:{limit:closed.limit+2,letIn:2}},'Every change is audited: who, before and after');
+  assert.deepEqual(audit,{workspace_id:'platform',operator_id:staff.account,before:{limit:closed.limit},after:{limit:closed.limit+2,raise:'hold',letIn:2}},'Every change is audited: who, before and after');
   const latecomer = gmail('latecomer');
   // A suppressed address with no consent decision joins the list and its suppression stands; consent isn't recorded.
   await db.query("INSERT INTO audience_contacts(id,workspace_id,email,suppressed,suppression_reason) VALUES($1,$2,lower($3),true,'hard_bounce')",[`con_${randomUUID().replaceAll('-','')}`,platform,latecomer.email]);
@@ -1669,6 +1669,37 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   const kept = await places(), lowered = await setLimit(0);
   assert.deepEqual([lowered.letIn,lowered.signedUp,lowered.held,lowered.emailed],[0,kept.signedUp,kept.held,0]);
   for (const session of [first.session,viaLink.session,winner.session]) assert.equal((await request('/v1/me','GET',session)).status,200);
+
+  // An open raise holds nothing and emails nobody: its places go to whoever signs in next, waiting or not, first come.
+  // Two wait at a full limit, one of them the oldest address there is; the open raise adds three places.
+  const shut = await setLimit(kept.signedUp+kept.held);
+  assert.deepEqual([shut.letIn,shut.open,shut.emailed],[0,0,0]);
+  const [early, eldest] = [gmail('early'), gmail('eldest')];
+  for (const p of [early, eldest]) assert.equal((await signIn(p)).auth,'waitlist');
+  await db.query("UPDATE nightmail_waitlist SET first_at=timestamptz '2000-01-01' WHERE email=lower($1)",[eldest.email]);
+  const notices = async () => (await db.query("SELECT count(*)::int AS n FROM account_notices WHERE kind='waitlist_admitted'")).rows[0].n;
+  const noticed = await notices(), opening = await places();
+  const open = await setLimit(opening.limit+3,'open');
+  assert.deepEqual([open.letIn,open.held,open.open,open.waiting,open.emailed,await notices()],[0,opening.held,3,opening.waiting,0,noticed]);
+  assert.deepEqual(await told(early,eldest),[0,0]);
+  assert.deepEqual([await waiting(early),await waiting(eldest)],[{held:false},{held:false}]);
+  const openAudit = (await db.query("SELECT before,after FROM hosted_operator_audit WHERE action='operator-set-signup-limit' AND operator_id=$1 ORDER BY at DESC LIMIT 1",[staff.account])).rows[0];
+  assert.deepEqual(openAudit,{before:{limit:opening.limit},after:{limit:opening.limit+3,raise:'open',letIn:0}});
+  // One who waited signs in and takes an open place, as does a newcomer; one is left.
+  const earlyIn = await signIn(early), walkIn = gmail('walk-in'), walkedIn = await signIn(walkIn);
+  assert.deepEqual([await placeOf(earlyIn.account),await waiting(early),await placeOf(walkedIn.account)],['open',null,'open']);
+  assert.deepEqual((await places()).open,1);
+  // A hold raise after it holds only the place it adds, for the oldest waiting, and emails it; the open place stays open.
+  const holding = await setLimit(opening.limit+4);
+  assert.deepEqual([holding.letIn,holding.held,holding.open,holding.emailed],[1,opening.held+1,1,1]);
+  assert.deepEqual([await waiting(eldest),await told(eldest)],[{held:true},[1]]);
+  // The last open place goes to the next one in; then it is full again, and the one after waits.
+  const [lastIn, tooLate] = [gmail('last-in'), gmail('too-late')];
+  assert.equal(await placeOf((await signIn(lastIn)).account),'open');
+  assert.equal((await signIn(tooLate)).auth,'waitlist');
+  assert.equal(await placeOf((await signIn(eldest)).account),'waitlist');
+  const refilled = await places();
+  assert.deepEqual([refilled.signedUp,refilled.held,refilled.open],[kept.signedUp+4,kept.held,0]);
   // Without the list nothing is queued; a value that isn't a list ID turns it off and nothing else.
   await syncList();
   assert.equal(loadConfig({...configInput, NIGHTMAIL_PLATFORM_DOMAIN_WORKSPACE:`ws_${'0'.repeat(32)}`, NIGHTMAIL_SIGNUPS_LIST_ID:'not-a-list'}).signupsListId,undefined);

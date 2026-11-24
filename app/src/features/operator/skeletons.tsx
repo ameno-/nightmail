@@ -79,7 +79,7 @@ export const waitlistColumnDefs: SkeletonColumn[] = [
 
 // Sign-ups (?view=signups): the limit and what fills it, then every workspace, newest first. A phone's card shows the
 // name and standing, the owner and when it joined, then its verified domain and what it sent.
-export const signupFacts = ['Signed up', 'Held for the waitlist', 'Waiting', 'Open'] as const
+export const signupFacts = ['Signed up', 'Held for the waitlist', 'Open', 'Waiting'] as const
 export function SignupFacts({ values }: { values?: Record<(typeof signupFacts)[number], ReactNode> }) {
   return <dl className="op-facts op-facts--four">{signupFacts.map(title => <div key={title}><dt>{title}</dt><dd>{values ? values[title] : <Skeleton width={72} height={14} />}</dd></div>)}</dl>
 }

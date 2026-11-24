@@ -182,7 +182,7 @@ const pages = ids => [
   ['Operator · workspace', `/operator/workspaces/${ids.restricted}`, { from: '/operator', row: 'Harbor Supply' }],
   ['Operator · UI notes', '/operator/notes', { from: '/operator', click: 'UI notes' }],
   ['Operator · waitlist', '/operator?view=waitlist', { from: '/operator', click: 'Waitlist' }],
-  // Sign-ups: the limit and what fills it over every workspace; Set limit opens its one field once the numbers are in.
+  // Sign-ups: the limit and what fills it over every workspace; Set limit opens its fields once the numbers are in.
   ['Operator · sign-ups', '/operator?view=signups', { from: '/operator', click: 'Sign-ups' }],
   ['Operator · sign-up limit dialog', '/operator?view=signups', { dialog: 'Set limit' }],
   // Abuse: clusters of related accounts beside their facet rail, one cluster beside the list of the others, the alert
