@@ -1,0 +1,66 @@
+[
+  {
+    "label": "lc-1-accounting-cancel-drops-unexpanded",
+    "rule": "lifecycle.accounting-exact",
+    "checker": "campaign-lifecycle",
+    "file": "api/src/states.ts",
+    "old": "canceled=canceled+(total-expanded)",
+    "neu": "canceled=canceled"
+  },
+  {
+    "label": "lc-2-send-before-prepared",
+    "rule": "lifecycle.validate-before-send-and-stop-bounds",
+    "checker": "campaign-lifecycle",
+    "file": "api/src/sending.ts",
+    "old": "await db.execute(recordPrepared(ref, cursor, runningState({ prepared: cursor, total: campaign.total, scheduledAt: campaign.scheduledAt })));",
+    "neu": "await db.execute(recordPrepared(ref, Math.max(0, cursor - 1), 'sending'));"
+  },
+  {
+    "label": "lc-3-unsubscribed-not-suppressed",
+    "rule": "lifecycle.pre-release-suppression-wins",
+    "checker": "campaign-lifecycle",
+    "file": "api/src/dispatcher.ts",
+    "old": "WHERE d.email_id=x.id AND cause.reason IS NOT NULL ORDER BY d.n LIMIT 1",
+    "neu": "WHERE false ORDER BY d.n LIMIT 1"
+  },
+  {
+    "label": "lc-4-pause-broken-while-preparing",
+    "rule": "lifecycle.controls-responsive",
+    "checker": "campaign-lifecycle",
+    "file": "api/src/states.ts",
+    "old": "export const CAMPAIGN_RUNNING = ['preparing', 'scheduled', 'sending'] as const satisfies readonly RunningState[];",
+    "neu": "export const CAMPAIGN_RUNNING = ['scheduled', 'sending'] as const satisfies readonly RunningState[];"
+  },
+  {
+    "label": "lc-5-probe-wait-skipped",
+    "rule": "lifecycle.probe-enforced",
+    "checker": "campaign-lifecycle",
+    "file": "api/src/sending.ts",
+    "old": "if (Date.parse(row.probeWaitUntil) > dbNow) await hold('list_probe', row.probeWaitUntil);",
+    "neu": "if (false) await hold('list_probe', row.probeWaitUntil);"
+  },
+  {
+    "label": "lc-6-stuck-in-sending-never-done",
+    "rule": "lifecycle.never-stuck",
+    "checker": "campaign-lifecycle",
+    "file": "api/src/states.ts",
+    "old": "WHERE c.workspace_id=x.workspace_id AND c.id=x.campaign_id AND c.state='sending' AND c.expanded=c.total",
+    "neu": "WHERE c.workspace_id=x.workspace_id AND c.id=x.campaign_id AND c.state='sending' AND c.expanded>c.total"
+  },
+  {
+    "label": "lc-7-rate-share-ignored",
+    "rule": "lifecycle.rate-matches-view",
+    "checker": "campaign-lifecycle",
+    "file": "api/src/sending.ts",
+    "old": "if (row.rateShare !== null && row.rateShare < 1 && Number(row.rate) > 0) {",
+    "neu": "if (false && row.rateShare !== null && row.rateShare < 1 && Number(row.rate) > 0) {"
+  },
+  {
+    "label": "lc-8-stats-double-count-exceeds-released",
+    "rule": "lifecycle.stats-monotonic-bounded",
+    "checker": "campaign-lifecycle",
+    "file": "api/src/sending.ts",
+    "old": "totals[key] += item[key];",
+    "neu": "totals[key] += item[key] * 2;"
+  }
+]

@@ -17,6 +17,7 @@ import { access } from "./access/access.model.ts";
 import { admission } from "./admission/admission.model.ts";
 import { inbox } from "./inbox/inbox.model.ts";
 import { delivery } from "./delivery/delivery.model.ts";
+import { campaignLifecycle } from "./campaign-lifecycle/campaign-lifecycle.model.ts";
 
 interface EdgeProfile {
   name: string;
@@ -115,6 +116,18 @@ const MODELS: Record<string, { model: Model<any, any, any, any>; profiles: EdgeP
         starts: [[{ op: "Configure", preset: "core" }]],
         maxDepth: 2,
         maxStates: 350,
+      },
+    ],
+  },
+  "campaign-lifecycle": {
+    model: campaignLifecycle,
+    profiles: [
+      {
+        name: "small-d2",
+        starts: [[{ op: "Configure", preset: "small" }]],
+        maxDepth: 2,
+        maxStates: 120,
+        filter: (a) => !["Tick", "SetQuota", "InjectFeedbackLag"].includes(a.op),
       },
     ],
   },
