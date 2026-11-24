@@ -1330,7 +1330,14 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
     const joinedByEmail=await login(undefined,link.url), invitee=sessionOf(joinedByEmail);
     assert.equal(landed(joinedByEmail),link.url);
     assert.deepEqual(await attempt(),{acr,provider:null,provider_hd:null,outcome:'signed_in:invitation'});
-    assert.equal((await request(`/v1/workspaces/invitations/${link.id}`,'GET',invitee)).status,200);
+    // The review the dashboard shows before joining: the workspace's name as plain words, the inviter by address.
+    const {rows:[staffNames]}=await db.query('SELECT w.name,u.id AS inviter,u.name AS inviter_name FROM workspace_invitations i JOIN workspaces w ON w.id=i.workspace_id JOIN nightmail_users u ON u.id=i.inviter_id WHERE i.id=$1',[link.id]);
+    await db.query('UPDATE workspaces SET name=$2 WHERE id=$1',[staffWorkspace,'Acme, Inc. — call 1 800 555 0199 or see nightmail-dev.example.com/restore']);
+    await db.query('UPDATE nightmail_users SET name=$2 WHERE id=$1',[staffNames.inviter,'Nightmail Security Team (security@nightmail.dev)']);
+    const review=await request(`/v1/workspaces/invitations/${link.id}`,'GET',invitee), shown=await review.json() as Record<string,unknown>;
+    assert.deepEqual([review.status,shown.workspaceName,shown.inviterName,typeof shown.inviterEmail,shown.role,shown.status],[200,'Acme Inc call or see','Nightmail Security Team','string','member','pending']);
+    await db.query('UPDATE workspaces SET name=$2 WHERE id=$1',[staffWorkspace,staffNames.name]);
+    await db.query('UPDATE nightmail_users SET name=$2 WHERE id=$1',[staffNames.inviter,staffNames.inviter_name]);
     assert.deepEqual(await (await request(`/v1/workspaces/invitations/${link.id}/accept`,'POST',invitee,{})).json(),{workspaceId:staffWorkspace});
     assert.deepEqual((await db.query("SELECT mailbox_proved,mailbox_proved_at>now()-interval '1 minute' AS fresh FROM nightmail_users WHERE id=$1",[accountOf(joinedByEmail)])).rows[0],{mailbox_proved:address,fresh:true});
     // Accepted, the link is spent: another subject with the same verified address following it is refused.
@@ -1461,6 +1468,13 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
     assert.equal(response.status,200);
     return await response.json() as Places & { letIn: number; emailed: number; notEmailed: number | null };
   };
+  // The database disk alert's PlanetScale settings (src/disk-alert.ts) are read by a full operator, each read audited.
+  const diskSetup = await request('/v1/operator/database-disk-alert','GET',staff.session);
+  assert.deepEqual([diskSetup.status,await diskSetup.json()],[200,(await import('./src/disk-alert.js')).diskAlertSetup(runtime.config)]);
+  await db.query("UPDATE platform_operators SET role='operator:read' WHERE user_id=$1",[staff.account]);
+  assert.equal((await request('/v1/operator/database-disk-alert','GET',staff.session)).status,403);
+  await db.query("UPDATE platform_operators SET role='operator' WHERE user_id=$1",[staff.account]);
+  assert.equal((await db.query("SELECT count(*)::int AS n FROM hosted_operator_audit WHERE action='operator-read-disk-alert-setup' AND workspace_id='platform' AND operator_id=$1",[staff.account])).rows[0].n,1);
   // Closed: no place open, so a new person is waitlisted exactly as before.
   const before = await places();
   await setLimit(before.signedUp+before.held);
@@ -18784,19 +18798,54 @@ test('a tear host refuses redirecting URLs, databases not marked disposable and 
     await client.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1)', [unique('foreign')]);
     await assert.rejects(check(), /holds [1-9]\d* workspaces/);
   } finally { await client.query('ROLLBACK'); }
-  // The real host process refuses before connecting with app modules or writing: exit 1, reason on stderr.
-  const host = (url: string) => new Promise<{ code: number | null; stdout: string; stderr: string }>(resolve => {
-    const child = execFile('node', ['--import', 'tsx', 'tear/dispatch/host.ts'], { cwd: fileURLToPath(new URL('.', import.meta.url)), timeout: 60_000,
+  // Run every real tear *.host.ts subprocess against the unmarked fixture DB and a redirecting URL.
+  // When private @tear/{mbt,host} is absent (public CI), install a minimal Proxy stand-in in the
+  // gitignored tear/node_modules/@tear directory for the duration of this test so every host runs
+  // its real module-init guard path.
+  const apiDir = fileURLToPath(new URL('.', import.meta.url));
+  const { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } = await import('node:fs');
+  const hostFiles = readdirSync(`${apiDir}/tear`, { recursive: true, encoding: 'utf8' })
+    .filter(f => f.endsWith('.host.ts') && !f.startsWith('node_modules/'))
+    .sort();
+  assert.ok(hostFiles.length >= 11, `Expected at least 11 tear hosts, found ${hostFiles.length}`);
+  const tearScope = `${apiDir}/tear/node_modules/@tear`;
+  const stubbed = !existsSync(`${tearScope}/mbt/package.json`);
+  if (stubbed) {
+    const stub = 'const p = new Proxy(() => p, { get: () => p, apply: () => p });\nexport const host = p, model = p, choice = p, exact = p, sel = p, prop = p, satisfies = p, serve = p, oneOf = p, channelFds = p, anyReply = p, matches = p, check = p, all = p, generated = p, g = p;\nexport default p;\n';
+    for (const pkg of ['mbt', 'host']) {
+      mkdirSync(`${tearScope}/${pkg}`, { recursive: true });
+      writeFileSync(`${tearScope}/${pkg}/package.json`, JSON.stringify({ name: `@tear/${pkg}`, type: 'module', main: './index.js' }));
+      writeFileSync(`${tearScope}/${pkg}/index.js`, stub);
+    }
+  }
+  const runHost = (rel: string, url: string) => new Promise<{ code: number | null; stdout: string; stderr: string }>(resolve => {
+    execFile('node', ['--import', 'tsx', `tear/${rel}`], { cwd: apiDir, timeout: 60_000,
       env: { PATH: process.env.PATH, HOME: process.env.HOME, TEAR_DATABASE_URL: url } as unknown as NodeJS.ProcessEnv, encoding: 'utf8' },
       (error, stdout, stderr) => resolve({ code: error ? (typeof error.code === 'number' ? error.code : null) : 0, stdout, stderr }));
-    child.stdin!.end('{"v":1,"id":1,"op":"open"}\n');
   });
-  const unmarked = await host(FIXTURE_DATABASE_URL!);
-  assert.equal(unmarked.code, 1, unmarked.stderr); assert.match(unmarked.stderr, /not marked disposable/); assert.equal(unmarked.stdout, '');
+  const redirected = new URL(FIXTURE_DATABASE_URL!);
+  redirected.search = `host=${redirected.hostname}&port=${redirected.port || 5432}`;
+  redirected.port = '1';
+  const dbFingerprint = async () => (await client.query(
+    "SELECT (SELECT count(*)::int FROM workspaces) AS ws, (SELECT count(*)::int FROM pg_namespace) AS ns, (SELECT count(*)::int FROM pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema')) AS tbl",
+  )).rows[0];
+  const beforeFp = await dbFingerprint();
+  try {
+    await Promise.all(hostFiles.map(async rel => {
+      const unmarked = await runHost(rel, FIXTURE_DATABASE_URL!);
+      assert.notEqual(unmarked.code, 0, `${rel} must exit non-zero on unmarked DB: ${unmarked.stderr}`);
+      assert.match(unmarked.stderr, /not marked disposable/, `${rel}: ${unmarked.stderr}`);
+      assert.equal(unmarked.stdout, '', `${rel} stdout must be empty`);
+      const refused = await runHost(rel, redirected.toString());
+      assert.notEqual(refused.code, 0, `${rel} must exit non-zero on redirecting URL: ${refused.stderr}`);
+      assert.match(refused.stderr, /query parameters/, `${rel}: ${refused.stderr}`);
+      assert.equal(refused.stdout, '', `${rel} stdout must be empty`);
+    }));
+  } finally {
+    if (stubbed) rmSync(tearScope, { recursive: true, force: true });
+  }
   assert.equal((await client.query("SELECT to_regnamespace('tear_clock')::text AS s")).rows[0].s, null, 'Nothing was written.');
-  const redirected = new URL(FIXTURE_DATABASE_URL!); redirected.search = `host=${redirected.hostname}&port=${redirected.port || 5432}`; redirected.port = '1';
-  const refused = await host(redirected.toString());
-  assert.equal(refused.code, 1); assert.match(refused.stderr, /query parameters/); assert.equal(refused.stdout, '');
+  assert.deepEqual(await dbFingerprint(), beforeFp, 'No workspace, schema, or table was written.');
 });
 
 test('MX deployment variables remain fallbacks and BANE variables take precedence',async()=>{
@@ -23369,7 +23418,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         mail_receipts: ["INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,notification,recipients,status,processed_at,created_at) SELECT p.wid,'mr_'||p.tag||p.day||'x'||i,p.region,p.wid,'key','{}','[]','processed',now()-interval '31 days'-make_interval(days=>p.day),now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM mail_receipts,p WHERE starts_with(ses_message_id,'mr_'||p.tag)"],
         mail_receipt_holds: ["INSERT INTO mail_receipt_holds(bucket,ses_message_id,region,topic_arn,owners,recipients,notification,received_at,expires_at,status) SELECT p.wid,'mh_'||p.tag||p.day||'x'||i,p.region,'topic','{}','[]','{}',now(),now()-interval '31 days'-make_interval(days=>p.day),'released' FROM p,g","SELECT count(*) FROM mail_receipt_holds,p WHERE starts_with(ses_message_id,'mh_'||p.tag)"],
         mailbox_events: ["INSERT INTO mailbox_events(workspace_id,type,data,created_at) SELECT p.wid,'fixture.retention',jsonb_build_object('tag',p.tag),now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM mailbox_events,p WHERE data->>'tag'=p.tag"],
-        mail_ignored_staging: ["INSERT INTO mail_ignored_staging(bucket,ses_message_id,created_at) SELECT p.wid,'mi_'||p.tag||p.day||'x'||i,now()-interval '73 hours'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM mail_ignored_staging,p WHERE starts_with(ses_message_id,'mi_'||p.tag)"],
+        mail_ignored_staging: ["INSERT INTO mail_ignored_staging(bucket,ses_message_id,created_at) SELECT p.wid,'mi_'||p.tag||p.day||'x'||i,now()-interval '121 hours'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM mail_ignored_staging,p WHERE starts_with(ses_message_id,'mi_'||p.tag)"],
         mailbox_webhook_deliveries_paused_expired: ["INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,payload,status,created_at) SELECT 'mwdp_'||p.tag||p.day||'x'||i,p.wid,'mwh_'||p.tag,'{}','paused',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM mailbox_webhook_deliveries,p WHERE starts_with(id,'mwdp_'||p.tag) AND status='paused'"],
         mailbox_webhook_deliveries: ["INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,payload,status,created_at) SELECT 'mwd_'||p.tag||p.day||'x'||i,p.wid,'mwh_'||p.tag,'{}','delivered',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM mailbox_webhook_deliveries,p WHERE starts_with(id,'mwd_'||p.tag)"],
         sender_score_daily: ["INSERT INTO sender_score_daily(workspace_id,day) SELECT p.wid,(now() AT TIME ZONE 'UTC')::date-401-p.day*5-i FROM p,g","SELECT count(*) FROM sender_score_daily s,p WHERE s.workspace_id=p.wid AND s.day<(now() AT TIME ZONE 'UTC')::date-400"],
@@ -25648,6 +25697,58 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  // tear/campaign-lifecycle witness BUG-LC-01. A Hosted sender with a list of `size` subscribed contacts and a launched campaign to it.
+  async function releasingCampaign({ runtime, db, local }: Parameters<Parameters<typeof simulatedSesFixture>[1]>[0], size: number) {
+    const wid = runtime.config.workspaceId, pool = '111122223335', domain = 'settles.example', from = `news@${domain}`;
+    Object.assign(runtime.config, { multiTenant: true, liveEnabled: true, aws: { accessKeyId: 'fixture-platform', secretAccessKey: 'fixture-only' } });
+    await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
+    await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, pool]);
+    await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`, [domain, wid]);
+    await gradedSender(db, wid, 10000);
+    const list = ok(await local('POST', '/v1/lists', { name: unique('settles') }), 201);
+    await db.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_'||md5($1||n),$1,'settles-'||n||'@example.net','subscribed' FROM generate_series(1,$3::int)n RETURNING id)
+      INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM c`, [wid, list.id, size]);
+    const c = ok(await local('POST', '/v1/campaigns', { name: 'Settles', from, subject: 'Settles', html: '<p>Fixture.</p>', audience: { listId: list.id } }), 201), path = `/v1/campaigns/${c.id}`;
+    ok(await local('POST', `${path}/send`, { revision: c.revision }), 202);
+    // What the campaign shows, and how many of its emails are still queued or attempting.
+    const shown = async () => { const v = ok(await local('GET', path)); return [v.state, v.delivery.expanded, v.delivery.canceled, (await db.query(`SELECT count(*)::int AS n FROM sending_emails WHERE campaign_id=$1 AND status IN ('queued','attempting')`, [c.id])).rows[0].n]; };
+    return { c, path, shown };
+  }
+  test('a resumed list-probe quarantine that skips everyone left finishes the campaign instead of leaving it sending', async t => {
+    await simulatedSesFixture(t, async fixture => {
+      const { db, local, run } = fixture, { c, path, shown } = await releasingCampaign(fixture, 150);
+      await run('campaign.run');
+      // The probe of 100 went out and 4 bounced (4%, over the 3% line): the campaign is quarantined at 100 of 150.
+      await db.query(`UPDATE sending_emails SET status=CASE WHEN review_ordinal<=4 THEN 'bounced' ELSE 'delivered' END,provider_id='probe-'||id WHERE campaign_id=$1`, [c.id]);
+      await run('campaign.run');
+      await db.query(`UPDATE sending_campaigns SET probe_wait_until=now()-interval '1 second',waiting_until=now()-interval '1 second' WHERE id=$1`, [c.id]);
+      await db.query(`UPDATE jobs SET available_at=now() WHERE id=$1`, [`campaign.run:${c.id}`]);
+      await run('campaign.run');
+      const quarantined = ok(await local('GET', path));
+      assert.deepEqual([quarantined.state, quarantined.delivery.pauseReason.code, quarantined.delivery.expanded], ['paused', 'LIST_QUALITY', 100]);
+      // The owner resumes. The rest goes only to contacts this workspace delivered to before, and it delivered to none of
+      // the 50: the release skips them all and queues nothing, so no row is left whose leaving the queue finishes the campaign.
+      ok(await local('POST', `${path}/resume`, {}));
+      await run('campaign.run');
+      assert.deepEqual(await shown(), ['done', 150, 50, 0]);
+    });
+  });
+  test('a campaign whose last emails went out while it was paused finishes when it is resumed', async t => {
+    await simulatedSesFixture(t, async fixture => {
+      const { db, local, run } = fixture, { c, path, shown } = await releasingCampaign(fixture, 30);
+      await db.query('UPDATE sending_campaigns SET probe_cleared_at=now() WHERE id=$1', [c.id]); // A clean list; the probe is tested above.
+      await run('campaign.run');
+      assert.deepEqual(await shown(), ['sending', 30, 0, 30]);
+      // The dispatcher pauses a campaign it cannot verify even with everyone released (dispatcher.ts rejectPreflight). Queued
+      // mail still dispatches while it is paused, and the dispatcher finishes only a sending campaign.
+      await db.query(`UPDATE sending_campaigns SET state='paused',paused_at=now(),pause_reason='{"code":"CAMPAIGN_HASH_FORMAT_UNSUPPORTED","message":"Paused."}' WHERE id=$1`, [c.id]);
+      await db.query(`UPDATE sending_emails SET status='delivered',provider_id='settles-'||id WHERE campaign_id=$1 AND status='queued'`, [c.id]);
+      assert.deepEqual(await shown(), ['paused', 30, 0, 0]);
+      ok(await local('POST', `${path}/resume`, {}));
+      await run('campaign.run');
+      assert.deepEqual(await shown(), ['done', 30, 0, 0]);
+    });
+  });
   test('campaign list probe follows standing: in good standing, recipients an earlier campaign delivered to with clean, mature feedback go out without the probe; swapped or unresolved recipients, a growing or capped sender, and a sender that falls below mid-campaign are probed', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, run }) => {
       const wid = runtime.config.workspaceId, pool = '111122223334', domain = 'clean-list.example', from = `news@${domain}`;
@@ -25824,6 +25925,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const wid = runtime.config.workspaceId, platform = unique('platform'), pool = '111122223333';
     Object.assign(runtime.config, { multiTenant: true, platformDomainWorkspace: platform, notifyFrom: 'notices@platform.example' });
     await db.query(`INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)`, [platform]);
+    // The name the emails show: a few plain words (notices.ts shownName).
+    const name = 'Driftwood & Co';
+    await db.query('UPDATE workspaces SET name=$2 WHERE id=$1', [wid, name]);
     await db.query(`INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) SELECT $1,'install_'||md5($1),default_region,enabled_regions FROM ses_installation_settings WHERE workspace_id=$2`, [platform, wid]);
     await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
     for (const id of [wid, platform]) await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [id, REGION, pool]);
@@ -25832,14 +25936,14 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const seen = new Set<string>();
     const sent = async () => (await db.query(`SELECT id,from_address,snapshot->>'fromName' AS from_name,to_addresses,subject,snapshot->>'text' AS text,snapshot->>'html' AS html,snapshot->>'kind' AS kind FROM sending_emails WHERE workspace_id=$1 ORDER BY id`, [platform])).rows;
     const fresh = async () => { const out = (await sent()).filter(r => !seen.has(r.id)); for (const r of out) seen.add(r.id); return out; };
-    return { wid, platform, pool, sent, fresh };
+    return { wid, name, platform, pool, sent, fresh };
   }
   // What no account email may print: a rate, a threshold, a provider's name, an error code.
   const HOW_IT_WORKS = /\d\s*%|line is|threshold|\bSES\b|AWS|Amazon|Stripe|\b[A-Z]{3,}_[A-Z_]+\b/;
 
   test('owner notices: a standing change emails owners and admins once, from the platform workspace, in plain words with no rates, thresholds or provider names', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
-      const { wid, platform, pool, sent: emails } = await noticeFixture(runtime, db);
+      const { wid, name, platform, pool, sent: emails } = await noticeFixture(runtime, db);
       const { applyChange, notifyJob } = await import('./src/standing.js');
       const reasons = [{ code: 'COMPLAINTS_WARN', metric: 'complaints' as const, value: 0.002, count: 2, threshold: 0.0005, minimum: 2, window: '24h' as const, step: 'warn' as const, message: '2 of 1,000 accepted emails were marked as spam in 24 hours (0.2%; the warn line is 0.05% and 2).' }];
       const change = await runtime.db.transaction(tx => applyChange(tx, { workspaceId: wid, actor: { kind: 'system' }, kind: 'step', step: 'warn', reasons }));
@@ -25848,7 +25952,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       for (let i = 0; i < 2; i++) await notifyJob(runtime, job[0].payload, { id: job[0].id, attempts: 1, workspaceId: wid });
       const sent = await emails();
       assert.deepEqual(sent.map(r => [r.from_name, r.from_address, r.to_addresses, r.kind]), [['Nightmail', 'notices@platform.example', [AUTH_EMAIL], 'transactional']], 'One email per owner, deduplicated on retry.');
-      assert.equal(sent[0].subject, `A warning about mail from ${wid}`);
+      assert.equal(sent[0].subject, `A warning about mail from ${name}`);
       // Review of #115: the notices were admitted but always canceled at dispatch (ORIGIN_KEY_REVOKED). They now dispatch
       // under their own narrow origin; a forged one (an event that does not exist) is still canceled.
       await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
@@ -25859,7 +25963,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.ok(['accepted', 'sent', 'delivered'].includes(outcome.notice[0]) && outcome.notice[1] === null, JSON.stringify(outcome));
       assert.deepEqual(outcome.forged, ['canceled', 'ORIGIN_KEY_REVOKED']);
       // What happened, what it means for mail now and the one thing to do, with one link; the same words in both parts.
-      for (const part of [`There is a problem with recent mail from ${wid}.`, 'Nothing is held and your mail still sends', `\nOpen the dashboard: ${PUBLIC_ORIGIN}/overview\n`, `sent this to the owners and admins of ${wid}`]) assert.ok(sent[0].text.includes(part), part);
+      for (const part of [`There is a problem with recent mail from ${name}.`, 'Nothing is held and your mail still sends', `\nOpen the dashboard: ${PUBLIC_ORIGIN}/overview\n`, `sent this to the owners and admins of ${name}`]) assert.ok(sent[0].text.includes(part), part);
       assert.ok(sent[0].html.includes('There is a problem with recent mail from ') && sent[0].html.includes(`href="${PUBLIC_ORIGIN}/overview"`), 'The HTML part carries the same words and link.');
       assert.equal(sent[0].text.match(/https?:\/\//g)!.length, 1, 'One link.');
       // The reason's numbers stay in the dashboard: an email never says how a check works.
@@ -25879,7 +25983,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
 
   test('owner notices: one problem sends its most serious email only, a pause that was told is told when it ends, and a retry or an earlier build\'s send is never a second email', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
-      const { wid, platform, fresh } = await noticeFixture(runtime, db);
+      const { wid, name, platform, fresh } = await noticeFixture(runtime, db);
       const { applyChange, notifyJob } = await import('./src/standing.js'), { JobDeferred } = await import('./src/jobs.js');
       const reasons = (step: 'warn' | 'restrict' | 'pause') => [{ code: 'BOUNCES', metric: 'bounces' as const, value: 0.05, count: 60, threshold: 0.04, minimum: 25, window: '24h' as const, step, message: '60 of 1,200 emails hard-bounced in 24 hours (5%; the line is 4% and 25).' }];
       const change = (c: Omit<Parameters<typeof applyChange>[1], 'workspaceId' | 'actor'>) => runtime.db.transaction(tx => applyChange(tx, { workspaceId: wid, actor: { kind: 'system' }, ...c }));
@@ -25904,7 +26008,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await change({ kind: 'quarantine', details: campaign });
       await change({ kind: 'step', step: 'restrict', reasons: reasons('restrict') });
       assert.deepEqual(await deliver(), [false, true]);
-      assert.deepEqual(await subjects(), [`Marketing mail is on hold for ${wid}`]);
+      assert.deepEqual(await subjects(), [`Marketing mail is on hold for ${name}`]);
 
       // A warning and a campaign's pause: both wait, and the campaign's is the one sent.
       await reset();
@@ -25925,7 +26029,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await change({ kind: 'step', step: 'warn', reasons: reasons('warn') });
       await change({ kind: 'step', step: 'pause', pause: { message: 'Hosted sending paused.' }, reasons: reasons('pause') });
       assert.deepEqual(await deliver(), [false, true]);
-      assert.deepEqual(await subjects(), [`Sending is paused for ${wid}`]);
+      assert.deepEqual(await subjects(), [`Sending is paused for ${name}`]);
       await change(resume);
       // While its SES tenants are still being enabled sending is not on yet: the email waits.
       const [resumed] = (await db.query(`SELECT id,payload FROM jobs WHERE workspace_id=$1 AND type='standing.notify' AND status='pending'`, [wid])).rows;
@@ -25935,7 +26039,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await db.query(`UPDATE provider_connections SET paused_at=NULL,pause_reason=NULL,resume_pending_at=NULL WHERE workspace_id=$1`, [wid]);
       assert.deepEqual(await deliver(), [false]);
       const [again] = await fresh();
-      assert.equal(again.subject, `Sending has resumed for ${wid}`);
+      assert.equal(again.subject, `Sending has resumed for ${name}`);
       assert.match(again.text, /Sending from .* is on again\..*and new mail goes out again\. For now the daily limit may be lower than before\.\n\nThe dashboard shows the limit\.\n/s);
       // A second pause inside the day is not emailed (once per step in 24 hours), so its end is not either.
       await change({ kind: 'step', step: 'pause', pause: { message: 'Hosted sending paused.' }, reasons: reasons('pause') });
@@ -25971,9 +26075,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
-  test('account notices: an invitation, the daily limit, the evaluation\'s end, a lost domain and a waitlist admission are each emailed once; what no longer holds, an exempt workspace and a used-up invitation allowance send nothing; a send that fails is retried and ends failed after its last attempt', async t => {
+  test('account notices: an invitation (only from a workspace with a verified domain or past its evaluation, in fixed words that name the inviter by address and not the workspace), the daily limit, the evaluation\'s end, a lost domain and a waitlist admission are each emailed once; what no longer holds, an exempt workspace and a used-up invitation allowance send nothing; a send that fails is retried and ends failed after its last attempt', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
-      const { wid, platform, pool, fresh } = await noticeFixture(runtime, db);
+      const { wid, name, platform, pool, fresh } = await noticeFixture(runtime, db);
       const { accountNotifyJob, domainUnverified, evaluationFinished, limitReached, waitlistAdmitted, INVITATION_EMAILS } = await import('./src/account-notices.js');
       const { ApiError } = await import('./src/core.js'), { JobDeferred, MAX_ATTEMPTS } = await import('./src/jobs.js');
       const { applyChange } = await import('./src/standing.js');
@@ -25986,21 +26090,90 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const notices = async (kind: string) => (await db.query(`SELECT count(*)::int AS n FROM account_notices WHERE workspace_id=$1 AND kind=$2`, [wid, kind])).rows[0].n;
       const invite = async (email: string) => ok(await local('POST', '/v1/workspaces/current/invitations', { email, role: 'admin' }), 201);
 
+      // A workspace with no verified domain that has not finished its evaluation emails nobody: the invitation is made,
+      // the inviter is told why and shares its link, and no allowance is spent.
+      const allowances = async () => (await db.query(`SELECT count(*)::int AS n FROM api_request_budgets WHERE key_id LIKE 'invitation-email%'`)).rows[0].n;
+      const early = await invite('early@elsewhere.example');
+      assert.deepEqual([early.emailed, early.notEmailedReason], [false, 'new_workspace']);
+      assert.match(early.nextStep, /^No email was sent: Nightmail emails invitations once this workspace has a verified domain or has finished its evaluation\. Share acceptUrl with early@elsewhere\.example yourself/);
+      assert.deepEqual([await notices('invitation'), await allowances(), await deliver()], [0, 0, []]);
+      // One with a verified domain does (one past its evaluation: below, where its standing is set).
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ('team.example',$1,$1,'verified')`, [wid]);
+
+      // An invitation goes to an address outside the workspace from this installation's own sender, and the names
+      // around it are the inviting account's to choose. So every word of it is fixed: the inviter is their verified
+      // address and nothing else, and the workspace is not named (the page its link opens names it).
+      const { rows: [inviter] } = await db.query('SELECT name FROM nightmail_users WHERE email=$1', [AUTH_EMAIL]);
+      const rename = async (workspace: string, inviter: string) => { await db.query('UPDATE workspaces SET name=$2 WHERE id=$1', [wid, workspace]); await db.query('UPDATE nightmail_users SET name=$2 WHERE email=$1', [AUTH_EMAIL, inviter]); };
+      const literal = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      for (const [i, [workspace, inviter]] of ([
+        ['ACTION REQUIRED: your domain is suspended, restore it at nightmail-dev.example.com/restore', 'Nightmail Security Team (security@nightmail.dev)'],
+        ['Verify now → https://nightmail.dev.evil.example/login\r\nBcc: victim@elsewhere.example', 'support@nightmail.dev'],
+        ['Call 1 800 555 0199 about your invoice', 'Nightmail <no-reply@nightmail.dev>'],
+        ['nightmail-dev\ua4f8example\ua4f8com nightmail-dev\u0660example\u0660com', 'Billing'],
+        ['W'.repeat(120), 'Quagga '.repeat(14)],
+      ] as const).entries()) {
+        await rename(workspace, inviter);
+        const made = await invite(`named-${i}@elsewhere.example`);
+        assert.equal(made.emailed, true);
+        assert.deepEqual(await deliver(), ['invitation:sent']);
+        const [mail] = await fresh();
+        assert.deepEqual([mail.subject, mail.from_name, mail.to_addresses], ['You are invited to a Nightmail workspace', 'Nightmail', [`named-${i}@elsewhere.example`]]);
+        assert.match(mail.text, new RegExp(`^${literal(`${AUTH_EMAIL} invited you to join a workspace on Nightmail as an admin.\n\nThe invitation is for this address only and expires on `)}[A-Z][a-z]{2} \\d{1,2}${literal(`.\n\nTo accept, sign in with this address.\n\nAccept the invitation: ${made.acceptUrl}\n\nNightmail sent this because ${AUTH_EMAIL} entered your address. If you were not expecting it, ignore it: nothing happens unless you accept.\n`)}$`));
+        // The HTML part says the same words and has one link.
+        const words = mail.html.replace(/<style>.*?<\/style>/s, '').replace(/<[^>]*>/g, '\n').split('\n').map((line: string) => line.trim()).filter(Boolean);
+        assert.deepEqual(words, ['You are invited to a Nightmail workspace', ...mail.text.trim().split(/\n+/).map((line: string) => line.replace(`Accept the invitation: ${made.acceptUrl}`, 'Accept the invitation'))]);
+        assert.deepEqual(mail.html.match(/href="[^"]*"/g), [`href="${made.acceptUrl.replaceAll('&', '&amp;')}"`]);
+      }
+      // The emails a workspace's own owners and admins get do name it, and a campaign: as a few plain words. Nothing
+      // that reads as an address, a URL or a host, each word in one writing system, no phone number, 40 characters.
+      const { customerNotice: written, shownName } = await import('./src/notices.js');
+      for (const [chosen, shown] of [
+        ['ACTION REQUIRED: your domain is suspended, restore it at nightmail-dev.example.com/restore', 'ACTION REQUIRED your domain is suspended…'],
+        ['Verify now → https://nightmail.dev.evil.example/login\r\nBcc: victim@elsewhere.example', 'Verify now Bcc'],
+        ['ｎｉｇｈｔｍａｉｌ．ｄｅｖ billing night\u200bmail.dev nightmail\u3002dev \u202egro.liamthgin www.evil.example Nіghtmail <b>team</b>', 'billing b team b'],
+        // Letters and digits of other scripts that draw as a dot or a slash, or as Latin capitals.
+        ['nightmail-dev\ua4f8example\ua4f8com billing', 'billing'], ['nightmail-dev\u0660example\u0660com billing', 'billing'], ['nightmail\ua78fdev com\u30cerestore ok', 'ok'],
+        ['\ua4e0\ua4f2\ua4d6\ua4e7\ua4d4\ua4df\ua4ee\ua4f2\ua4e1 Support', 'Support'],
+        // A phone number, however it is spaced; a few digits are a name's own.
+        ['Call 1 800 555 0199 about your invoice', 'Call about your invoice'], ['Call +1 (800) 555-0199', 'Call'], ['call18005550199now', ''], ['Call ١٨٠٠٥٥٥٠١٩٩', 'Call'],
+        ['Studio 54', 'Studio 54'], ['Acme 2026 Q4', 'Acme 2026 Q4'],
+        // Names as people write them.
+        ["Ryan Vogel's workspace", "Ryan Vogel's workspace"], ['Café Zoë & Søn – Ünïted', 'Café Zoë & Søn Ünïted'], ['Привет мир', 'Привет мир'], ['日本語のチーム', '日本語のチーム'], ['مرحبا بالعالم', 'مرحبا بالعالم'],
+        ['nightmail.dev', ''], ['W'.repeat(120), `${'W'.repeat(40)}…`],
+      ] as const) assert.equal(shownName(chosen), shown, chosen);
+      const pausedCampaign = written(PUBLIC_ORIGIN, { kind: 'campaign_paused', workspace: 'Acme, Inc. (see acme.example)', campaign: { id: 'cmp_1', name: 'Sale\r\nat https://evil.example/now for you@elsewhere.example' } });
+      assert.equal(pausedCampaign.subject, 'The campaign "Sale at for" is paused');
+      assert.ok(pausedCampaign.text.includes('sent this to the owners and admins of Acme Inc see. To reach us'), pausedCampaign.text);
+      assert.equal(written(PUBLIC_ORIGIN, { kind: 'campaign_paused', workspace: 'www.evil.example', campaign: { id: 'cmp_1', name: 'evil.example' } }).subject, 'A campaign is paused');
+      assert.equal(written(PUBLIC_ORIGIN, { kind: 'paused', workspace: 'Call 1 800 555 0199 nightmail-dev\ua4f8example\ua4f8com' }).subject, 'Sending is paused for Call');
+      assert.equal(written(PUBLIC_ORIGIN, { kind: 'paused', workspace: 'www.evil.example' }).subject, 'Sending is paused for your workspace');
+      assert.equal(written(PUBLIC_ORIGIN, { kind: 'domain_unverified', workspace: 'W', domain: { id: 'dom_1', name: 'Mail.Example\r\nBcc: x@y.example' } }).subject, 'A domain is no longer verified');
+      assert.equal(written(PUBLIC_ORIGIN, { kind: 'domain_unverified', workspace: 'W', domain: { id: 'dom_1', name: 'Mail.Example' } }).subject, 'mail.example is no longer verified');
+      // An address every workspace together has mailed five times in a day is not mailed a sixth.
+      await db.query(`UPDATE api_request_budgets SET used=$1 WHERE workspace_id='global' AND key_id LIKE 'invitation-email:%'`, [INVITATION_EMAILS.addressDay]);
+      const sixth = (await db.query(`SELECT id FROM workspace_invitations WHERE workspace_id=$1 AND email='named-0@elsewhere.example' AND status='pending'`, [wid])).rows[0].id;
+      ok(await local('DELETE', `/v1/workspaces/current/invitations?id=${sixth}`));
+      const refused = await invite('named-0@elsewhere.example');
+      assert.deepEqual([refused.emailed, refused.notEmailedReason, await deliver()], [false, 'allowance_used', []]);
+      assert.match(refused.nextStep, /^No email was sent: the invitation emails for today, or to this address, are used\. Share acceptUrl with named-0@elsewhere\.example yourself/);
+      await rename(name, inviter.name);
+
       // An invitation is emailed to the invited address, once, with the link the inviter was given.
       const invited = await invite('teammate@elsewhere.example');
-      assert.equal(invited.emailed, true); assert.match(invited.nextStep, /^teammate@elsewhere\.example was emailed the invitation/);
+      assert.deepEqual([invited.emailed, invited.notEmailedReason], [true, null]); assert.match(invited.nextStep, /^teammate@elsewhere\.example was emailed the invitation/);
       assert.deepEqual(await deliver(), ['invitation:sent']);
       const [invitation] = await fresh();
       assert.deepEqual([invitation.from_address, invitation.to_addresses, invitation.kind], ['notices@platform.example', ['teammate@elsewhere.example'], 'transactional']);
-      assert.match(invitation.subject, new RegExp(` invited you to ${wid} on Nightmail$`));
-      for (const part of [`(${AUTH_EMAIL}) invited you to join the workspace ${wid} on Nightmail as an admin.`, 'The invitation is for this address only and expires on ', `\nAccept the invitation: ${invited.acceptUrl}\n`, 'nothing happens unless you accept']) assert.ok(invitation.text.includes(part), part);
+      assert.equal(invitation.subject, 'You are invited to a Nightmail workspace');
+      for (const part of [`${AUTH_EMAIL} invited you to join a workspace on Nightmail as an admin.\n`, 'The invitation is for this address only and expires on ', `\nAccept the invitation: ${invited.acceptUrl}\n`, `because ${AUTH_EMAIL} entered your address`, 'nothing happens unless you accept']) assert.ok(invitation.text.includes(part), part);
       assert.ok(invitation.html.includes(`href="${invited.acceptUrl.replaceAll('&', '&amp;')}"`));
       // It dispatches under its own origin, as a standing notice does; nothing else may use that origin.
       await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
         SELECT 'email_forged_account_notice',workspace_id,region,'notice:ant_forged',from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated FROM sending_emails WHERE id=$1`, [invitation.id]);
       const { runDispatcher } = await import('./src/dispatcher.js');
       await runDispatcher(runtime, { region: REGION, accountId: pool });
-      const outcome = Object.fromEntries((await db.query(`SELECT id,status,error_code FROM sending_emails WHERE workspace_id=$1`, [platform])).rows.map(r => [r.id === invitation.id ? 'notice' : 'forged', [r.status, r.error_code]]));
+      const outcome = Object.fromEntries((await db.query(`SELECT id,status,error_code FROM sending_emails WHERE workspace_id=$1 AND id=ANY($2)`, [platform, [invitation.id, 'email_forged_account_notice']])).rows.map(r => [r.id === invitation.id ? 'notice' : 'forged', [r.status, r.error_code]]));
       assert.ok(['accepted', 'sent', 'delivered'].includes(outcome.notice[0]) && outcome.notice[1] === null, JSON.stringify(outcome));
       assert.deepEqual(outcome.forged, ['canceled', 'ORIGIN_KEY_REVOKED']);
       await fresh();
@@ -26014,7 +26187,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       for (let i = 0; i < 2; i++) { await revoke(last); last = await invite('teammate@elsewhere.example'); assert.equal(last.emailed, true); assert.deepEqual(await deliver(), ['invitation:sent']); }
       await revoke(last);
       const fourth = await invite('teammate@elsewhere.example');
-      assert.equal(fourth.emailed, false); assert.match(fourth.nextStep, /^No email was sent\./);
+      assert.deepEqual([fourth.emailed, fourth.notEmailedReason], [false, 'allowance_used']); assert.match(fourth.nextStep, /^No email was sent: /);
       // Another address is not held back by it, and the count starts again once the address has accepted an invitation.
       await db.query(`UPDATE workspace_invitations SET status='accepted' WHERE id=$1`, [last.id]);
       await revoke(fourth);
@@ -26024,13 +26197,18 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // The day's allowance: past it the invitation is made as before, and the inviter shares its link.
       await db.query(`UPDATE api_request_budgets SET used=$2 WHERE workspace_id=$1 AND key_id='invitation-email'`, [wid, INVITATION_EMAILS.workspaceDay]);
       const over = await invite('later@elsewhere.example');
-      assert.equal(over.emailed, false); assert.match(over.nextStep, /^No email was sent\. Share acceptUrl with later@elsewhere\.example yourself/);
+      assert.deepEqual([over.emailed, over.notEmailedReason], [false, 'allowance_used']); assert.match(over.nextStep, /^No email was sent: the invitation emails for today, or to this address, are used\. Share acceptUrl with later@elsewhere\.example yourself/);
       // An installation with no sender for account email emails nobody.
       await db.query(`UPDATE api_request_budgets SET used=0 WHERE workspace_id=$1 AND key_id='invitation-email'`, [wid]);
       runtime.config.notifyFrom = undefined;
-      assert.equal((await invite('nobody@elsewhere.example')).emailed, false);
+      const senderless = await invite('nobody@elsewhere.example');
+      assert.deepEqual([senderless.emailed, senderless.notEmailedReason], [false, 'not_available']); assert.match(senderless.nextStep, /^No email was sent\. Share acceptUrl with nobody@elsewhere\.example yourself/);
       runtime.config.notifyFrom = 'notices@platform.example';
-      assert.equal(await notices('invitation'), 5);
+      // Nor does an inviter whose own address is not verified: an invitation names them by it.
+      await db.query('UPDATE nightmail_users SET email_verified=false WHERE email=$1', [AUTH_EMAIL]);
+      assert.equal((await invite('unnamed@elsewhere.example')).notEmailedReason, 'not_available');
+      await db.query('UPDATE nightmail_users SET email_verified=true WHERE email=$1', [AUTH_EMAIL]);
+      assert.equal(await notices('invitation'), 10);
       assert.deepEqual((await fresh()).map(r => r.subject), []);
 
       // The daily limit: a workspace in its evaluation, one with no daily limit and an exempt one are told nothing.
@@ -26041,6 +26219,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await limitReached(runtime, wid);
       }
       assert.equal(await notices('limit_reached'), 0);
+      // Invitations again: without its verified domain, the workspace emails them once it is past its evaluation.
+      await db.query(`UPDATE domain_claims SET sending_state='pending' WHERE workspace_id=$1 AND name='team.example'`, [wid]);
+      await standing("phase='calibrating'");
+      assert.equal((await invite('calibrating@elsewhere.example')).notEmailedReason, 'new_workspace');
+      await standing("phase='graded'");
+      assert.equal((await invite('graded@elsewhere.example')).emailed, true);
+      assert.deepEqual([await deliver(), (await fresh()).map(r => r.to_addresses[0])], [['invitation:sent'], ['graded@elsewhere.example']]);
       // At a daily limit the owners are told, once in 24 hours however often a send is refused.
       await db.query('UPDATE workspaces SET exempt_hosted_quotas=false WHERE id=$1', [wid]);
       for (let i = 0; i < 3; i++) await limitReached(runtime, wid);
@@ -26061,7 +26246,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       failing(false);
       assert.deepEqual(await deliver(), ['limit_reached:sent']);
       const [limit] = await fresh();
-      assert.deepEqual([limit.to_addresses, limit.subject], [[AUTH_EMAIL], `${wid} has reached its daily sending limit`]);
+      assert.deepEqual([limit.to_addresses, limit.subject], [[AUTH_EMAIL], `${name} has reached its daily sending limit`]);
       assert.doesNotMatch(limit.text, /\b500\b/, 'The limit itself is on the dashboard.');
       assert.ok(limit.text.includes('Mail over the limit is refused for now.'), limit.text);
       await db.query(`UPDATE account_notices SET dedupe_key=dedupe_key||':yesterday' WHERE workspace_id=$1 AND kind='limit_reached'`, [wid]);
@@ -26078,7 +26263,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual([await evaluationFinished(runtime.db, wid, false), await evaluationFinished(runtime.db, wid, true)], [true, false]);
       assert.deepEqual(await deliver(), ['evaluation_finished:sent']);
       const [evaluation] = await fresh();
-      assert.equal(evaluation.subject, `${wid} has passed its evaluation`);
+      assert.equal(evaluation.subject, `${name} has passed its evaluation`);
       assert.match(evaluation.text, /so its starting limit is lifted\..*Over the next day the amount grows on its own/s);
       // One that ended with a limit says so; a first-party workspace, which has no limit, is not told at all.
       const { customerNotice } = await import('./src/notices.js');
@@ -27108,6 +27293,250 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual((await queued).rows[0].r,{error:'NOT_FOUND'});
     }finally{await writer.query('ROLLBACK');}
     assert.deepEqual(await state(),before);
+  });
+  test('inbox unread counter: every mutation path, concurrent races, NULL fallback, backfill and reconcile stay exact',async t=>{
+    const a=await fixtureDatabase(t),b=await fixtureDatabase(t),w=unique('unreadw'),host=w+'.invalid',dom=unique('mdom');
+    const {readFile}=await import('node:fs/promises');
+    const {attachToMailboxes}=await import('./src/mailbox-store.js');
+    const {reconcileInboxState}=await import('./src/maintenance.js');
+    const {drizzle}=await import('drizzle-orm/node-postgres');
+    const {digest,randomSecret}=await import('./src/core.js');
+    cleanup(t,async()=>{for(const tbl of ['mailbox_events','mail_gc_candidates','mail_receipts','mailbox_keys','mailbox_addresses','mailbox_threads','mailbox_messages','mail_messages','mail_threads','mailboxes','mailbox_domains','api_request_budgets','mailbox_write_lanes'])await a.query(`DELETE FROM ${tbl} WHERE workspace_id=$1`,[w]);});
+    await a.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')",[dom,w,host,REGION]);
+    const exact=async(bid:string)=>Number((await a.query('SELECT count(*)::int n FROM mailbox_messages WHERE mailbox_id=$1 AND NOT read AND held_reason IS NULL',[bid])).rows[0].n);
+    const stored=async(bid:string)=>(await a.query('SELECT unread FROM inbox_state WHERE inbox_id=$1',[bid])).rows[0].unread as number|null;
+    const viewed=async(bid:string)=>Number((await a.query("SELECT (inbox_view(b)->'usage'->>'unread')::int n FROM mailboxes b WHERE b.id=$1",[bid])).rows[0].n);
+    const assertExact=async(bid:string,label:string)=>{const e=await exact(bid),s=await stored(bid),v=await viewed(bid);assert.equal(s,e,`${label}: stored=${s} exact=${e}`);assert.equal(v,e,`${label}: view=${v} exact=${e}`);};
+    // 1. Managed inbox create starts at unread=0 (persistent, quota=10 so we can also test held).
+    const bid=unique('mbx'),addr='main@'+host,tok=randomSecret('bane_mbx_');
+    const created=(await a.query('SELECT create_managed_inbox($1::jsonb) r',[JSON.stringify({
+      wid:w,actor:'actor',admin:true,manageAddress:true,hosted:false,id:bid,
+      input:{type:'persistent',ttlSeconds:86400,graceHours:24,domain:host,localPart:'main',metadata:{},limits:{messages:4,bytes:1048576},send:{enabled:false,perDay:0}},
+      locals:['main'],
+    })])).rows[0].r;
+    assert.equal(created.error,undefined,JSON.stringify(created));
+    assert.equal(created.inbox.usage.unread,0);
+    await assertExact(bid,'after create');
+    await a.query(`INSERT INTO mailbox_keys(id,workspace_id,name,hash,prefix,mailbox_ids,permissions) VALUES($1,$2,'rw',$3,'fixture',jsonb_build_array($4::text),'["read","modify"]')`,[unique('mbk'),w,await digest(tok),bid]);
+    // 2. Inbound delivery + duplicate receipt replay + held delivery.
+    const deliver=async(db:pg.Client,mid:string,opts:{spam?:boolean;ts?:string}={})=>{
+      const at=opts.ts??new Date().toISOString();
+      await db.query("INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) VALUES($1,$2,$3,'fixture','k',$4,'{}') ON CONFLICT DO NOTHING",[w,mid,REGION,JSON.stringify([addr])]);
+      await db.query("SELECT * FROM mail_store_incoming($1::jsonb,'[]','[]',$2::jsonb,false,false,NULL,NULL)",[JSON.stringify({
+        id:mid,workspace_id:w,ses_message_id:mid,lifecycle:'kept',envelope_to:[addr],direction:'inbound',subject:'Sub '+mid,
+        from_address:'sender@example.invalid',to:[{name:null,address:addr}],cc:[],bcc:[],reply_to:[],references:[],received_at:at,
+        body_truncated:false,snippet:mid,headers:[],size_bytes:128,attachment_count:0,verdicts:{dmarc:'PASS'},spam:!!opts.spam,automated:false,status:'received',
+      }),JSON.stringify([{addr,n:0,valid:true}])]);
+    };
+    const m1=unique('msg'),m2=unique('msg'),m3=unique('msg'),m4=unique('msg'),mHeld=unique('msg');
+    await deliver(a,m1); await assertExact(bid,'after delivery 1');
+    await deliver(a,m1); await assertExact(bid,'after duplicate receipt replay');
+    await deliver(a,m2,{spam:true}); await assertExact(bid,'after spam delivery (unheld unread)');
+    await deliver(a,m3);
+    // 3. API read/unread, move, copy (must count once, not twice!), delete to trash, non-final & final expunge, custom folder delete.
+    ok(await http('PATCH',`/v1/inboxes/${bid}/messages/${m1}`,tok,{read:true}));
+    await assertExact(bid,'after API mark read');
+    ok(await http('PATCH',`/v1/inboxes/${bid}/messages/${m1}`,tok,{read:false}));
+    await assertExact(bid,'after API mark unread');
+    // Copy m1 to archive: 2 inbox_entries, still 1 mailbox_messages row -> unread must NOT double!
+    const copied=ok(await http('POST',`/v1/inboxes/${bid}/messages/${m1}/copy`,tok,{folder:'archive'}));
+    await assertExact(bid,'after copy unread message');
+    // Expunge only the archive copy: message still lives in inbox -> unread stays same!
+    ok(await http('DELETE',`/v1/inboxes/${bid}/messages/${m1}?source=archive&uid=${copied.uid}&permanent=true`,tok));
+    await assertExact(bid,'after expunging 1 of 2 copies');
+    // Move m1 to custom folder, then delete custom folder (moves to trash, preserves unread).
+    const fld=ok(await http('POST',`/v1/inboxes/${bid}/folders`,tok,{path:'Custom'}),201);
+    ok(await http('POST',`/v1/inboxes/${bid}/messages/${m1}/move`,tok,{folder:fld.id}));
+    await assertExact(bid,'after move to custom folder');
+    ok(await http('DELETE',`/v1/inboxes/${bid}/folders/${fld.id}`,tok));
+    await assertExact(bid,'after custom folder delete');
+    // Permanent expunge of last copy of m1 removes row and decrements unread.
+    ok(await http('DELETE',`/v1/inboxes/${bid}/messages/${m1}?permanent=true`,tok));
+    await assertExact(bid,'after final expunge of unread');
+    // 4. Thread patch (inbox_patch_thread) marking read/unread.
+    const t3=(await a.query('SELECT thread_id FROM mailbox_messages WHERE mailbox_id=$1 AND message_id=$2',[bid,m3])).rows[0].thread_id as string;
+    await a.query(`SELECT inbox_patch_thread($1,$2,$3,'{"read":true}'::jsonb)`,[w,bid,t3]);
+    await assertExact(bid,'after thread patch read=true');
+    await a.query(`SELECT inbox_patch_thread($1,$2,$3,'{"read":false}'::jsonb)`,[w,bid,t3]);
+    await assertExact(bid,'after thread patch read=false');
+    // 5. IMAP mailgw_mutate (flags) + mailgw_append (unseen & seen).
+    const u3=(await a.query("SELECT uid FROM inbox_entries WHERE inbox_id=$1 AND message_id=$2 AND role='inbox'",[bid,m3])).rows[0].uid;
+    await a.query(`SELECT mailgw_mutate($1,$2,'inbox',NULL,'flags',$3::bigint[],'add','{"read":true}'::jsonb,ARRAY[]::text[])`,[w,bid,[u3]]);
+    await assertExact(bid,'after IMAP mark seen');
+    await a.query(`SELECT mailgw_mutate($1,$2,'inbox',NULL,'flags',$3::bigint[],'remove','{"read":false}'::jsonb,ARRAY[]::text[])`,[w,bid,[u3]]);
+    await assertExact(bid,'after IMAP mark unseen');
+    const appUnseen=unique('msg'),appSeen=unique('msg');
+    await a.query("SELECT mailgw_append($1,$2,'inbox',$3,$4,NULL,'App unseen','a@b.test','hi',now(),64,'local:','k1','{}'::jsonb,ARRAY[]::text[])",[w,bid,appUnseen,unique('thr')]);
+    await assertExact(bid,'after IMAP APPEND unseen');
+    await a.query("SELECT mailgw_append($1,$2,'inbox',$3,$4,NULL,'App seen','a@b.test','hi',now(),64,'local:','k2','{}'::jsonb,ARRAY['\\Seen'])",[w,bid,appSeen,unique('thr')]);
+    await assertExact(bid,'after IMAP APPEND seen');
+    // Quota is 4 messages; we now have 4 (m2, m3, appUnseen, appSeen), so next delivery is held -> unread must NOT increase!
+    await deliver(a,mHeld);
+    assert.equal((await a.query('SELECT held_reason FROM mailbox_messages WHERE mailbox_id=$1 AND message_id=$2',[bid,mHeld])).rows[0].held_reason,'quota');
+    await assertExact(bid,'after held delivery');
+    // Marking a held message read must NOT decrement unread!
+    await a.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"read":true}'::jsonb)`,[w,bid,mHeld]);
+    await assertExact(bid,'after marking held message read');
+    // 6. inbox_adopt + attachToMailboxes (claimUnrouted inbound & outbound read=true).
+    const addrBox=unique('mbx');
+    await a.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind) VALUES($1,$2,$3,$4,'address')",[addrBox,w,dom,'claim@'+host]);
+    await assertExact(addrBox,'after inbox_adopt on new address');
+    const tClaim=unique('thr'),mClaimIn=unique('msg'),mClaimOut=unique('msg');
+    await a.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)',[tClaim,w]);
+    const [inRow]=(await a.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,received_at,size_bytes,spam) VALUES($1,$2,$3,'inbound',now(),50,false) RETURNING *",[mClaimIn,w,tClaim])).rows;
+    const [outRow]=(await a.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,received_at,size_bytes,spam) VALUES($1,$2,$3,'outbound',now(),50,false) RETURNING *",[mClaimOut,w,tClaim])).rows;
+    const drz=drizzle(a);
+    await attachToMailboxes(drz,{workspaceId:w},{...inRow,workspaceId:w,threadId:tClaim,receivedAt:inRow.received_at.toISOString(),sizeBytes:50},[addrBox]);
+    await assertExact(addrBox,'after attachToMailboxes inbound (claimUnrouted)');
+    await attachToMailboxes(drz,{workspaceId:w},{...outRow,workspaceId:w,threadId:tClaim,receivedAt:outRow.received_at.toISOString(),sizeBytes:50},[addrBox]);
+    await assertExact(addrBox,'after attachToMailboxes outbound');
+    // 7. Concurrent races: (a) two readers marking same message read, (b) delivery racing thread mark-all-read, (c) IMAP vs API flags.
+    await a.query('UPDATE mailboxes SET quota_messages=NULL WHERE id=$1',[bid]);
+    await deliver(a,m4);
+    await Promise.all([
+      a.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"read":true}'::jsonb)`,[w,bid,m4]),
+      b.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"read":true}'::jsonb)`,[w,bid,m4]),
+    ]);
+    await assertExact(bid,'after concurrent double mark-read');
+    const mRace=unique('msg'),tRace=(await a.query('SELECT thread_id FROM mailbox_messages WHERE mailbox_id=$1 AND message_id=$2',[bid,m4])).rows[0].thread_id as string;
+    await Promise.all([
+      deliver(a,mRace),
+      b.query(`SELECT inbox_patch_thread($1,$2,$3,'{"read":true}'::jsonb)`,[w,bid,tRace]),
+    ]);
+    await assertExact(bid,'after delivery racing thread mark-all-read');
+    const uRace=(await a.query("SELECT uid FROM inbox_entries WHERE inbox_id=$1 AND message_id=$2 AND role='inbox'",[bid,mRace])).rows[0].uid;
+    await Promise.all([
+      a.query(`SELECT mailgw_mutate($1,$2,'inbox',NULL,'flags',$3::bigint[],'add','{"read":true}'::jsonb,ARRAY[]::text[])`,[w,bid,[uRace]]),
+      b.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"read":false}'::jsonb)`,[w,bid,mRace]),
+    ]);
+    await assertExact(bid,'after concurrent IMAP + API flag toggle');
+    // 8. Pre-backfill NULL fallback (Condition 3) + idempotent re-run of migration 424.
+    await a.query('UPDATE inbox_state SET unread=NULL WHERE inbox_id=$1',[bid]);
+    assert.equal(await stored(bid),null);
+    const liveBefore=await exact(bid);
+    assert.ok(liveBefore>0,'fixture must have unread messages to prove fallback never shows 0');
+    assert.equal(await viewed(bid),liveBefore,'inbox_view falls back to live count while unread IS NULL');
+    const mDuring=unique('msg');
+    await deliver(a,mDuring);
+    assert.equal(await stored(bid),null,'writers leave NULL as NULL until backfill locks the row');
+    assert.equal(await viewed(bid),liveBefore+1,'inbox_view stays exact while mail arrives before backfill');
+    const backfillSql=await readFile(new URL('./migrations/424_inbox_unread_backfill.sql',import.meta.url),'utf8');
+    const bPid=(await b.query('SELECT pg_backend_pid() pid')).rows[0].pid as number;
+    const beforeBid=(await a.query('SELECT max(inbox_id) m FROM inbox_state WHERE inbox_id<$1',[bid])).rows[0].m as string|null ?? '';
+    // Two-session race: writer holds inbox_state FOR UPDATE while backfill starts and blocks on Lock;
+    // backfill must count on a post-lock snapshot (never pre-lock). Verify both read and delivery races.
+    for(const mode of ['read','delivery'] as const){
+      await a.query('UPDATE inbox_state SET unread=NULL WHERE inbox_id=$1',[bid]);
+      await a.query('BEGIN');
+      try{
+        if(mode==='read')await a.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"read":true}'::jsonb)`,[w,bid,mDuring]);
+        else await deliver(a,unique('msg'));
+        const pending=b.query(backfillSql,[beforeBid]);
+        let waiting=false;
+        for(let i=0;i<400&&!waiting;i++){waiting=(await a.query('SELECT wait_event_type FROM pg_stat_activity WHERE pid=$1',[bPid])).rows[0]?.wait_event_type==='Lock';if(!waiting)await new Promise(r=>setTimeout(r,5));}
+        assert.ok(waiting,`backfill must wait on ${mode} writer lock`);
+        await a.query('COMMIT');
+        await pending;
+      }catch(e){await a.query('ROLLBACK');throw e;}
+      await assertExact(bid,`after concurrent ${mode} during backfill`);
+    }
+    for(let pass=0;pass<2;pass++){
+      let cur='';
+      for(;;){const next=(await a.query(backfillSql,[cur])).rows[0].cursor as string|null;if(next===null)break;cur=next;}
+    }
+    await assertExact(bid,'after 2x idempotent backfill');
+    // 9. Scheduled reconcileInboxState corrects drift and reports it loudly.
+    await a.query('UPDATE inbox_state SET unread=unread+7 WHERE inbox_id=$1',[bid]);
+    await a.query("DELETE FROM sending_upload_reconcile WHERE id='inbox-state'");
+    const rec=await reconcileInboxState({...fixtureWorker!.runtime,db:drz},10_000);
+    assert.ok(rec.corrected>=1&&rec.drifted>=1,JSON.stringify(rec));
+    await assertExact(bid,'after reconcileInboxState');
+    // 10. inbox_retention_batch mid-drain keeps unread exact on ended ephemeral inbox.
+    const eph=unique('mbx');
+    await a.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode,expires_at,delete_after) VALUES($1,$2,$3,$4,'inbox','ephemeral',now()-interval '2 hours',now()-interval '1 hour')",[eph,w,dom,'eph@'+host]);
+    await a.query('INSERT INTO inbox_state(inbox_id,workspace_id,messages,unread) VALUES($1,$2,2,2)',[eph,w]);
+    const tEph=unique('thr');await a.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)',[tEph,w]);
+    for(const mid of [unique('msg'),unique('msg')]){
+      await a.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,lifecycle) VALUES($1,$2,$3,'inbound','ephemeral')",[mid,w,tEph]);
+      await a.query("INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,read,received_at) VALUES($1,$2,$3,$4,'inbound',false,now())",[eph,mid,w,tEph]);
+    }
+    await a.query('SELECT inbox_retention_batch(25)');
+    assert.equal((await a.query('SELECT FROM mailboxes WHERE id=$1',[eph])).rowCount,0);
+  });
+  test('inbound threads: workspace-wide and single-address paging match full grouping across multi-address, equal-timestamp and ended-inbox edges',async t=>{
+    await simulatedSesFixture(t,async({db,local,runtime})=>{
+      const w=runtime.config.workspaceId,dom=unique('mdom'),host=w+'.invalid';
+      const [boxA,boxB,boxC,boxEnded]=[unique('mbx'),unique('mbx'),unique('mbx'),unique('mbx')];
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')",[dom,w,host,REGION]);
+      for(const [id,addr,ended] of [[boxA,'a@'+host,false],[boxB,'b@'+host,false],[boxC,'c@'+host,false],[boxEnded,'ended@'+host,true]] as const){
+        await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode,expires_at,delete_after) VALUES($1,$2,$3,$4,'inbox',$5,$6,$7)",
+          [id,w,dom,addr,ended?'ephemeral':'forever',ended?new Date(Date.now()-7200_000).toISOString():null,ended?new Date(Date.now()-3600_000).toISOString():null]);
+        await db.query("INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,$3,'primary')",[w,addr,id]);
+        await db.query('INSERT INTO inbox_state(inbox_id,workspace_id,unread) VALUES($1,$2,0)',[id,w]);
+      }
+      const add=async(tid:string,mid:string,boxes:{id:string;at:string;starred?:boolean;archived?:boolean;trashed?:boolean}[],subject:string)=>{
+        const newest=boxes.map(x=>x.at).sort().at(-1)!;
+        await db.query('INSERT INTO mail_threads(id,workspace_id,subject,message_count,last_message_at) VALUES($1,$2,$3,1,$4) ON CONFLICT(id) DO UPDATE SET message_count=mail_threads.message_count+1,last_message_at=greatest(mail_threads.last_message_at,excluded.last_message_at)',[tid,w,subject,newest]);
+        await db.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,subject,from_address,snippet,received_at,lifecycle) VALUES($1,$2,$3,'inbound',$4,'ext@example.invalid',$4,$5,'kept')",[mid,w,tid,subject,newest]);
+        for(const x of boxes){
+          await db.query("INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,read,received_at) VALUES($1,$2,$3,$4,'inbound',false,$5)",[x.id,mid,w,tid,x.at]);
+          await db.query(`INSERT INTO mailbox_threads(mailbox_id,thread_id,workspace_id,subject,snippet,message_count,unread_count,last_message_at,last_inbound_at,starred,archived,trashed_at)
+            VALUES($1,$2,$3,$4,$4,1,1,$5,$5,$6,$7,$8)
+            ON CONFLICT(mailbox_id,thread_id) DO UPDATE SET message_count=mailbox_threads.message_count+1,last_message_at=greatest(mailbox_threads.last_message_at,excluded.last_message_at),starred=mailbox_threads.starred OR excluded.starred`,
+            [x.id,tid,w,subject,x.at,!!x.starred,!!x.archived,x.trashed?x.at:null]);
+        }
+      };
+      // 3 distinct threads with IDENTICAL timestamp (order must tie-break by id DESC).
+      const eqAt='2026-11-23T12:00:00.123456Z';
+      const [tEq1,tEq2,tEq3]=['thr_eq_a_'+unique('x'),'thr_eq_b_'+unique('x'),'thr_eq_c_'+unique('x')];
+      await add(tEq1,unique('msg'),[{id:boxA,at:eqAt}],'Equal 1');
+      await add(tEq2,unique('msg'),[{id:boxB,at:eqAt}],'Equal 2');
+      await add(tEq3,unique('msg'),[{id:boxC,at:eqAt}],'Equal 3');
+      // Multi-address thread: older boxB is starred, newer boxA is not, and boxEnded has an even newer message (must be excluded!).
+      const tMulti=unique('thr');
+      await add(tMulti,unique('msg'),[{id:boxB,at:'2026-11-23T12:00:01.000000Z',starred:true}],'Multi older starred');
+      await add(tMulti,unique('msg'),[{id:boxA,at:'2026-11-23T12:00:03.000000Z'}],'Multi newer live');
+      await add(tMulti,unique('msg'),[{id:boxEnded,at:'2026-11-23T12:00:09.000000Z'}],'Multi ended newest');
+      // Multi-address thread with IDENTICAL timestamp on boxA and boxB (shared single message -> messageCount must be 1, emitted once!).
+      const tShared=unique('thr');
+      await add(tShared,unique('msg'),[{id:boxA,at:'2026-11-23T12:00:04.000000Z'},{id:boxB,at:'2026-11-23T12:00:04.000000Z',starred:true}],'Shared equal ts');
+      // Trashed thread in boxC.
+      const tTrash=unique('thr');
+      await add(tTrash,unique('msg'),[{id:boxC,at:'2026-11-23T12:00:05.000000Z',trashed:true}],'Trashed');
+      const collectAll=async(qs:string)=>{
+        const out:Json[]=[],seen=new Set<string>();
+        let cursor:string|null=null;
+        for(let i=0;i<20;i++){
+          const page=ok(await local('GET',`/v1/inbound/threads?limit=2&${qs}${cursor?'&cursor='+encodeURIComponent(cursor):''}`));
+          for(const row of page.data){assert.ok(!seen.has(row.id),`duplicate thread ${row.id} on ${qs}`);seen.add(row.id);out.push(row);}
+          cursor=page.nextCursor;if(!cursor)break;
+        }
+        return out;
+      };
+      // Compare workspace-wide views and single-address view against reference GROUP BY ground truth.
+      const all=await collectAll('view=all');
+      assert.deepEqual(all.map(r=>r.id),[tTrash,tShared,tMulti,tEq3,tEq2,tEq1]);
+      const sharedRow=all.find(r=>r.id===tShared)!;
+      assert.deepEqual(sharedRow.addressIds,[boxA,boxB].sort());
+      assert.equal(sharedRow.messageCount,1,'shared delivery counts distinct messages');
+      const multiRow=all.find(r=>r.id===tMulti)!;
+      assert.deepEqual(multiRow.addressIds,[boxA,boxB].sort(),'ended inbox excluded');
+      assert.equal(multiRow.lastMessageAt,'2026-11-23T12:00:03.000Z','ended inbox timestamp excluded');
+      assert.equal(multiRow.messageCount,2);
+      const starred=await collectAll('view=starred');
+      assert.deepEqual(starred.map(r=>r.id),[tShared,tMulti]);
+      assert.equal(starred[1]!.lastMessageAt,'2026-11-23T12:00:03.000Z','starred view keeps live max timestamp');
+      const inbox=await collectAll('view=inbox');
+      assert.deepEqual(inbox.map(r=>r.id),[tShared,tMulti,tEq3,tEq2,tEq1]);
+      const trash=await collectAll('view=trash');
+      assert.deepEqual(trash.map(r=>r.id),[tTrash]);
+      const onlyA=await collectAll(`view=all&addressId=${boxA}`);
+      assert.deepEqual(onlyA.map(r=>r.id),[tShared,tMulti,tEq1]);
+      assert.equal(onlyA.find(r=>r.id===tMulti)!.messageCount,1);
+      // Full-text search path (q=) also works with LIMIT 1 latest_id.
+      const searched=await collectAll('view=all&q=Shared');
+      assert.deepEqual(searched.map(r=>r.id),[tShared]);
+    });
   });
   test('mail gateway: a signed folder edit waiting behind deletion is denied without a write',async t=>{
     const db=await fixtureDatabase(t),rt=fixtureWorker!.runtime,w=unique('gwdel'),bid=unique('mbx'),kid=unique('app');
@@ -29044,6 +29473,73 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const tags='vis\u{e0061}ible';assert.equal(visibleMail(tags,null).hiddenContent,true);assert.equal(displayText(tags),'visible');assert.equal(visibleMail(null,`<p>${tags}</p>`).text,'visible');
   });
   test('ephemeral inbox: extract finds codes and links only in visible text and flags hidden content',async()=>{const {visibleMail}=await import('./src/inbox-content.js');const m=visibleMail('code 000000','<div hidden>code 111111</div><p style="font-size:0">code 222222</p><p>Verify: A3B4</p><a href="https://real.invalid/">other.invalid</a><span>zero\u200bwidth</span>','codes,links');assert.equal(m.hiddenContent,true);assert.deepEqual(m.extract,{codes:['A3B4'],links:[{text:'other.invalid',href:'https://real.invalid/',mismatch:true}]});assert.ok(!m.text.includes('111111'));});
+  test('shared-pool staging redrive retires unattributed objects once, skips SES setup probe, and keeps mail_ignored_staging 5 days', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { S3Client } = await import('@aws-sdk/client-s3');
+      const { stagingJobs } = await import('./src/mailbox-staging.js');
+      const { pruneMailboxEvents } = await import('./src/maintenance.js');
+      const wid = runtime.config.workspaceId;
+      const old = new Date(Date.now() - 2 * 3600_000);
+      const poolBucket = 'fixture-pool-' + unique('b'), poolTopic = `arn:aws:sns:${REGION}:111122223333:nightmail-inbound`;
+      const poolRuntime = { ...runtime, config: { ...runtime.config, multiTenant: true, receivingRedrive: true, aws: { accessKeyId: 'synthetic-fixture', secretAccessKey: 'synthetic-fixture' } } };
+      await db.query('CREATE TEMP TABLE provider_pool_regions (LIKE public.provider_pool_regions INCLUDING ALL) ON COMMIT DROP');
+      await db.query("INSERT INTO provider_pool_regions(region,aws_account_id,receiving_state,inbound_bucket,inbound_topic_arn) VALUES($1,'111122223333','ready',$2,$3)", [REGION, poolBucket, poolTopic]);
+      const ownedHost = `owned-${unique('h')}.invalid`;
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all,receiving_host) VALUES($1,$2,$1,$3,$4,'active','store',$3)", [unique('mdom'), wid, ownedHost, REGION]);
+      const traceFor = (id: string, to: string) => Buffer.from(`Return-Path: <s@sender.invalid>\r\nReceived: from mx.invalid by inbound-smtp.${REGION}.amazonaws.com with SMTP id ${id} for ${to}; ${old.toUTCString()}\r\nSubject: hi\r\n\r\nbody`);
+      const copied: string[] = [];
+      let denyCopy = false;
+      t.mock.method(S3Client.prototype, 'send', async (cmd: any) => {
+        if (cmd.constructor.name === 'ListObjectsV2Command') return { Contents: [
+          { Key: 'staging/AMAZON_SES_SETUP_NOTIFICATION', ETag: '"setup"', LastModified: old },
+          { Key: 'staging/redrive-orphan-1', ETag: '"e1"', LastModified: old },
+          { Key: 'staging/redrive-denied-2', ETag: '"e2"', LastModified: old },
+          { Key: 'staging/redrive-owned-3', ETag: '"e3"', LastModified: old },
+        ], IsTruncated: false };
+        if (cmd.constructor.name === 'GetObjectCommand') {
+          const mid = String(cmd.input.Key).slice('staging/'.length);
+          const body = mid === 'redrive-owned-3' ? traceFor(mid, `boss@${ownedHost}`) : Buffer.from('Subject: orphan\r\n\r\nhi');
+          return { Body: { transformToByteArray: async () => body } };
+        }
+        if (cmd.constructor.name === 'CopyObjectCommand') {
+          if (denyCopy) throw Object.assign(new Error('denied'), { name: 'AccessDenied' });
+          copied.push(cmd.input.Key);
+          return {};
+        }
+        return {};
+      });
+      const sweepPayload = { bucket: poolBucket, topic: poolTopic, shared: true, started: Date.now() };
+      await stagingJobs['mailbox.sweepStaging']!(poolRuntime, sweepPayload, { id: 'sweep-pool', attempts: 1, workspaceId: wid });
+      const queued = (await db.query("SELECT id, payload FROM jobs WHERE type='mailbox.recoverStaging' AND payload->>'bucket'=$1 ORDER BY payload->>'mid'", [poolBucket])).rows;
+      assert.deepEqual(queued.map(r => r.payload.mid), ['redrive-denied-2', 'redrive-orphan-1', 'redrive-owned-3'], 'AMAZON_SES_SETUP_NOTIFICATION skipped');
+      const byMid = new Map(queued.map(r => [r.payload.mid as string, r]));
+      // 1. Unowned object with successful quarantine copy: retires once, records reason on job payload, not re-swept.
+      await stagingJobs['mailbox.recoverStaging']!(poolRuntime, byMid.get('redrive-orphan-1')!.payload, { id: byMid.get('redrive-orphan-1')!.id, attempts: 1, workspaceId: wid });
+      assert.deepEqual(copied, ['quarantine/redrive-orphan-1']);
+      assert.equal((await db.query("SELECT FROM mail_ignored_staging WHERE bucket=$1 AND ses_message_id='redrive-orphan-1'", [poolBucket])).rowCount, 1);
+      const retiredPayload = (await db.query("SELECT payload FROM jobs WHERE id=$1", [byMid.get('redrive-orphan-1')!.id])).rows[0].payload;
+      assert.equal(retiredPayload.retiredReason, 'envelope_unknown');
+      assert.equal(typeof retiredPayload.ageHours, 'number');
+      // 2. Denied quarantine copy: must NOT retire or insert into mail_ignored_staging; fails 422.
+      denyCopy = true;
+      await assert.rejects(stagingJobs['mailbox.recoverStaging']!(poolRuntime, byMid.get('redrive-denied-2')!.payload, { id: byMid.get('redrive-denied-2')!.id, attempts: 1, workspaceId: wid }), { code: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN' });
+      assert.equal((await db.query("SELECT FROM mail_ignored_staging WHERE bucket=$1 AND ses_message_id='redrive-denied-2'", [poolBucket])).rowCount, 0);
+      denyCopy = false;
+      // 3. Owned receiving host: copies to quarantine/, logs MAILBOX_STAGING_UNDELIVERED, does NOT retire, fails 422.
+      await assert.rejects(stagingJobs['mailbox.recoverStaging']!(poolRuntime, byMid.get('redrive-owned-3')!.payload, { id: byMid.get('redrive-owned-3')!.id, attempts: 1, workspaceId: wid }), { code: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN' });
+      assert.ok(copied.includes('quarantine/redrive-owned-3'));
+      assert.equal((await db.query("SELECT FROM mail_ignored_staging WHERE bucket=$1 AND ses_message_id='redrive-owned-3'", [poolBucket])).rowCount, 0);
+      // 4. Subsequent sweep skips the retired unowned object even after its job row is deleted.
+      await db.query("DELETE FROM jobs WHERE id=$1", [byMid.get('redrive-orphan-1')!.id]);
+      await stagingJobs['mailbox.sweepStaging']!(poolRuntime, sweepPayload, { id: 'sweep-pool-2', attempts: 1, workspaceId: wid });
+      assert.equal((await db.query("SELECT FROM jobs WHERE type='mailbox.recoverStaging' AND payload->>'bucket'=$1 AND payload->>'mid'='redrive-orphan-1'", [poolBucket])).rowCount, 0);
+      await db.query("INSERT INTO mail_ignored_staging(bucket,ses_message_id,created_at) VALUES($1,'keep-4d',now()-interval '4 days'),($1,'drop-6d',now()-interval '6 days')", [poolBucket]);
+      await pruneMailboxEvents(runtime);
+      const left = (await db.query("SELECT ses_message_id FROM mail_ignored_staging WHERE bucket=$1 ORDER BY ses_message_id", [poolBucket])).rows.map(r => r.ses_message_id);
+      assert.deepEqual(left, ['keep-4d', 'redrive-orphan-1']);
+    });
+  });
+
   test('inbound staging recovery and ingest limits',async t=>{
     await simulatedSesFixture(t,async({runtime,db,jobs,local,request,fetch:rawFetch})=>{
       const {acceptInboundNotification,mailboxIngestJobs,recoverMailReceipts}=await import('./src/mailbox-ingest.js'),{scheduleHoldRelease,scheduleMailRecovery}=await import('./src/mailbox-staging.js'),{S3Client}=await import('@aws-sdk/client-s3');
@@ -29108,6 +29604,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         stageError='AccessDenied';for(const item of [j,spoof])await assert.rejects(run(item.type,item.payload),{code:'MAILBOX_STAGING_ACCESS_DENIED',retryable:false});
         stageError='';quarantineDenied=true;await assert.rejects(run(spoof.type,spoof.payload),{code:'MAILBOX_STAGING_ENVELOPE_UNKNOWN',retryable:false});quarantineDenied=false;
       });
+
       await t.test('scan barriers precede MIME, including unknown verdicts and workspace spam policy',async()=>{
         for(const status of ['FAIL','GRAY','PROCESSING_FAILED',undefined]){const mid='unsafe-'+String(status);await submit(mid,['a@receive.example'],'Bad',{...cleanScans,virusVerdict:{status}});await run('mailbox.ingest',{sesMessageId:mid});assert.ok(quarantined.includes('quarantine/'+mid));}
         ok(await local('PATCH','/v1/inbound/policy',{spam:'quarantine'},'live'));for(const status of ['FAIL','GRAY','PROCESSING_FAILED',undefined]){const mid='spam-'+String(status);await submit(mid,['a@receive.example'],'Spam',{...cleanScans,spamVerdict:{status}});await run('mailbox.ingest',{sesMessageId:mid});assert.ok(quarantined.includes('quarantine/'+mid));}
@@ -31872,6 +32369,93 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual(ok(await local('PATCH', path, { description: 'Edited again', addressIds: [nobodys] })).addressIds, [nobodys]);
     });
   });
+  // tear/workspace-isolation class BUG-ISO-04: the rules' AI opt-ins (evaluateRoutes, evaluateDomains) stored another
+  // workspace's route ID and a domain the workspace doesn't receive on.
+  // Another workspace's receiving host and route, ones nobody has, and this workspace's own (a sandbox inbox's host and a route on it).
+  async function optInIsolation({ runtime, db, local }: Parameters<Parameters<typeof simulatedSesFixture>[1]>[0]) {
+    const wid = runtime.config.workspaceId, other = unique('other-workspace');
+    const theirs = { route: unique('rt'), domain: `${other}.invalid` }, nobodys = { route: unique('rt'), domain: `${unique('nobody')}.invalid` };
+    await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)', [other]);
+    await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,$3,$4,'active')", [unique('mbd'), other, theirs.domain, REGION]);
+    const route = "INSERT INTO mail_routes(id,workspace_id,domain_id,match,destinations) SELECT $1,$2,id,'support@'||name,'[]' FROM mailbox_domains WHERE workspace_id=$2 AND name=$3";
+    await db.query(route, [theirs.route, other, theirs.domain]);
+    const box = ok(await local('POST', '/v1/inboxes', { type: 'sandbox' }), 201), ours = { route: unique('rt'), domain: (box.address as string).split('@')[1]! };
+    await db.query(route, [ours.route, wid, ours.domain]);
+    return { wid, other, box, ours, theirs, nobodys };
+  }
+  test('rule AI opt-ins may name only routes and receiving domains of their own workspace: one of another workspace is refused like one nobody has', async t => {
+    await simulatedSesFixture(t, async fixture => {
+      const { local } = fixture, { ours, theirs, nobodys } = await optInIsolation(fixture);
+      // The refusal names what was sent; apart from that, another workspace's and nobody's get the same answer.
+      const refused = (reply: Reply, code: string, sent: string) => { const e = error(reply, 422, code); return [e.code, (e.message as string).replace(sent, '…'), e.field]; };
+      for (const path of ['/v1/rules/decisions', '/v1/rules']) {
+        assert.deepEqual(refused(await local('PUT', path, { evaluateRoutes: [ours.route, theirs.route] }), 'UNKNOWN_ROUTE', theirs.route), refused(await local('PUT', path, { evaluateRoutes: [ours.route, nobodys.route] }), 'UNKNOWN_ROUTE', nobodys.route), path);
+        assert.deepEqual(refused(await local('PUT', path, { evaluateDomains: [ours.domain, theirs.domain] }), 'UNKNOWN_DOMAIN', theirs.domain), refused(await local('PUT', path, { evaluateDomains: [ours.domain, nobodys.domain] }), 'UNKNOWN_DOMAIN', nobodys.domain), path);
+      }
+      // Its own route and receiving host, and a host under it, are taken.
+      const saved = ok(await local('PUT', '/v1/rules/decisions', { evaluateRoutes: [ours.route], evaluateDomains: [ours.domain, `sub.${ours.domain}`] }));
+      assert.deepEqual([saved.config.evaluateRoutes, saved.config.evaluateDomains], [[ours.route], [ours.domain, `sub.${ours.domain}`]]);
+    });
+  });
+  test('rule AI opt-ins stored with a route or domain of another workspace open nothing of it and stay editable', async t => {
+    // Opt-ins stored before the check above (written here past the API) keep the route ID and the domain. They are read
+    // only against this workspace's own mail (its recipient's host, the route it matched), so they match nothing: the AI's
+    // answer is used for this workspace's mail only once its own host is opted in, and the other workspace has no rule config.
+    await simulatedSesFixture(t, async fixture => {
+      const { db, local } = fixture, { wid, other, box, ours, theirs } = await optInIsolation(fixture);
+      const rules = { rules: [{ key: 'asks', source: 'export default function route(email){const r=decisions(email,{refund:"Requests a refund?"});if(r.refund>0.8)label("refund")}' }], attachments: [{ rule: 'asks', target: box.address }] };
+      ok(await local('PUT', '/v1/rules', rules));
+      const store = `UPDATE mail_ritual_configs SET config=config||$2::jsonb, programs=CASE WHEN programs IS NULL THEN NULL ELSE programs||$2::jsonb END WHERE workspace_id=$1`;
+      await db.query(store, [wid, JSON.stringify({ evaluateRoutes: [theirs.route], evaluateDomains: [theirs.domain] })]);
+      const stored = ok(await local('GET', '/v1/rules'));
+      assert.deepEqual([stored.config.evaluateRoutes, stored.config.evaluateDomains], [[theirs.route], [theirs.domain]]);
+      const mime = `From: a@example.net\r\nTo: ${box.address}\r\nSubject: Refund\r\n\r\nRefund please`, scores = { 'Requests a refund?': 0.9 };
+      // What a dry run of this workspace's own mail does with the AI's answer: the score the rule saw, and its labels.
+      const dry = async () => { const run = ok(await local('POST', '/v1/rules/test', { mime, scores })); return [run.trace[0].scores, run.recipients[0].labels]; };
+      assert.deepEqual(await dry(), [{ refund: 0 }, []], 'Not opted in: the answer is not used.');
+      // Still editable with what it has, and its own host can be opted in beside them.
+      const edited = ok(await local('PUT', '/v1/rules/decisions', { evaluateRoutes: [theirs.route], evaluateDomains: [theirs.domain, ours.domain] }));
+      assert.deepEqual([edited.config.evaluateRoutes, edited.config.evaluateDomains], [[theirs.route], [theirs.domain, ours.domain]]);
+      assert.deepEqual(await dry(), [{ refund: 0.9 }, ['refund']], 'Its own host opted in: the answer is used.');
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM mail_ritual_configs WHERE workspace_id=$1', [other])).rows[0].n, 0);
+    });
+  });
+  test('an API key for every address refuses addAddressIds that name no address of its workspace; removing one it does not have changes nothing', async t => {
+    await simulatedSesFixture(t, async fixture => {
+      const { db, local } = fixture, { theirs, nobodys, ours } = await addressIsolation(fixture);
+      const keyIds = async (id: string) => (await db.query('SELECT mailbox_ids FROM mailbox_keys WHERE id=$1', [id])).rows[0].mailbox_ids;
+      const refused = (reply: Reply) => { const e = error(reply, 422, 'MAILBOX_NOT_FOUND'); return [e.code, e.message, e.field]; };
+      // A key for every address: adding one of its own changes nothing; another workspace's ID is refused like one nobody has.
+      const every = ok(await local('POST', '/v1/api-keys', { name: 'Every address', access: { type: 'addresses', mail: ['read'] } }), 201);
+      assert.deepEqual(refused(await local('PATCH', `/v1/api-keys/${every.id}`, { access: { addAddressIds: [theirs] } })), refused(await local('PATCH', `/v1/api-keys/${every.id}`, { access: { addAddressIds: [ours, nobodys] } })));
+      ok(await local('PATCH', `/v1/api-keys/${every.id}`, { access: { addAddressIds: [ours] } }));
+      assert.equal(await keyIds(every.id), null);
+      // Removing is idempotent: an ID the key does not have, whoever's it is, leaves the key as it was.
+      const some = ok(await local('POST', '/v1/api-keys', { name: 'One address', access: { type: 'addresses', addressIds: [ours], mail: ['read'] } }), 201);
+      for (const id of [theirs, nobodys]) ok(await local('PATCH', `/v1/api-keys/${some.id}`, { access: { removeAddressIds: [id] } }));
+      assert.deepEqual(await keyIds(some.id), [ours]);
+    });
+  });
+  test('an agent inbox that was just deleted is no longer an address a webhook or an API key can be given', async t => {
+    // DELETE /v1/inboxes/{id} ends the inbox at once (delete_after) and its row goes with the hourly sweep. Until then it
+    // answered as a live address here, while reading it already answered 404.
+    await simulatedSesFixture(t, async fixture => {
+      const { db, local } = fixture, { ours, url, hook, path } = await addressIsolation(fixture);
+      const ended = ok(await local('POST', '/v1/inboxes', { type: 'sandbox' }), 201).id as string;
+      const some = ok(await local('POST', '/v1/api-keys', { name: 'One address', access: { type: 'addresses', addressIds: [ours], mail: ['read'] } }), 201);
+      // Chosen while it was live, it stays on the webhook after it ends.
+      ok(await local('PATCH', path, { addressIds: [ours, ended] }));
+      const gone = await local('DELETE', `/v1/inboxes/${ended}`);
+      assert.ok(gone.status < 300, `delete answered ${gone.status}`);
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM mailboxes WHERE id=$1 AND delete_after<=now()', [ended])).rows[0].n, 1, 'The row waits for the sweep.');
+      const refused = (reply: Reply) => { const e = error(reply, 422, 'MAILBOX_NOT_FOUND'); return [e.code, e.field]; };
+      assert.deepEqual(refused(await local('POST', '/v1/inbound/webhooks', { url, addressIds: [ended] })), ['MAILBOX_NOT_FOUND', 'addressIds']);
+      assert.deepEqual(refused(await local('POST', '/v1/api-keys', { name: 'Ended', access: { type: 'addresses', addressIds: [ended], mail: ['read'] } })), ['MAILBOX_NOT_FOUND', 'access.addressIds']);
+      assert.deepEqual(refused(await local('PATCH', `/v1/api-keys/${some.id}`, { access: { addAddressIds: [ended] } })), ['MAILBOX_NOT_FOUND', 'access.addAddressIds']);
+      assert.deepEqual(ok(await local('PATCH', path, { description: 'Edited', addressIds: [ours, ended] })).addressIds, [ours, ended]);
+      assert.equal(hook.id, ok(await local('GET', path)).id);
+    });
+  });
   test('a plain event subscription takes the delivery fence: paused after its claim, claimed stale or behind the breaker',async t=>{
     // tear/delivery witnesses: ingest m1 b, claim K m1:U, pause U, go K; ingest m1 b, claim K m1:U, expire m1:U,
     // run L m1:U, reply L 410, go K; three timeouts, then run K m1:U (the breaker defers, attempts kept).
@@ -34440,6 +35024,97 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  test('campaign content hash reader: verifies legacy and s1: hashes, rejects tampering, and pauses without burning recipients on unknown formats', async t => {
+    const { staticContentHash, verifyCampaignContentHash, isSupportedContentHash, sentCampaignContent } = await import('./src/sending.js');
+    const { digest } = await import('./src/core.js');
+    const { canonical } = await import('./src/idempotency.js');
+    assert.deepEqual([
+      isSupportedContentHash('a'.repeat(64)),
+      isSupportedContentHash('s1:' + 'a'.repeat(64)),
+      isSupportedContentHash('s2:' + 'a'.repeat(64)),
+      isSupportedContentHash('s1:short'),
+      isSupportedContentHash(null),
+    ], [true, true, false, false, false]);
+
+    await simulatedSesFixture(t, async ({ runtime, local, run, db }) => {
+      const ws = runtime.config.workspaceId;
+      const list = ok(await local('POST', '/v1/lists', { name: unique('s1-reader') }), 201);
+      await db.query(`INSERT INTO audience_contacts (id, workspace_id, email, marketing_consent)
+        SELECT 'con_s1_' || n, $1, 's1-reader-' || n || '@example.com', 'subscribed' FROM generate_series(1, 6) n`, [ws]);
+      await db.query('INSERT INTO audience_list_members (workspace_id, list_id, contact_id) SELECT workspace_id, $2, id FROM audience_contacts WHERE workspace_id = $1', [ws, list.id]);
+
+      const camp = ok(await local('POST', '/v1/campaigns', { name: unique('s1-ok'), from: 'sender@example.com', subject: 'Static S1', html: '<p>Hello static world</p>', audience: { listId: list.id } }), 201);
+      ok(await local('POST', `/v1/campaigns/${camp.id}/send`, { revision: camp.revision }), 202);
+      await run('campaign.run');
+      await run('email.dispatch');
+      const revId = (await db.query('SELECT review_id FROM sending_campaigns WHERE id=$1', [camp.id])).rows[0].review_id as string;
+      const { rows: [revRow] } = await db.query('SELECT draft, rendered, renderer_version FROM sending_campaign_reviews WHERE id=$1', [revId]);
+      const baseCustomer = {
+        testCampaignId: null, untrustedContent: false, from: 'sender@example.com', to: ['s1-reader-1@example.com'], cc: [], bcc: [], replyTo: [],
+        region: REGION, kind: 'marketing' as const, subject: 'Static S1',
+        html: revRow.rendered.html, text: revRow.rendered.text, attachments: [], tracking: Boolean(revRow.draft.tracking), headers: [],
+      };
+      const baseHash = await digest(canonical({ ...baseCustomer, to: [] }));
+      assert.equal(await verifyCampaignContentHash(baseCustomer, await staticContentHash(baseHash, 's1-reader-1@example.com')), true);
+      assert.equal(await verifyCampaignContentHash({ ...baseCustomer, html: '<p>Tampered</p>' }, await staticContentHash(baseHash, 's1-reader-1@example.com')), false);
+      assert.equal(await verifyCampaignContentHash({ ...baseCustomer, to: ['other@example.com'] }, await staticContentHash(baseHash, 's1-reader-1@example.com')), false);
+      await assert.rejects(verifyCampaignContentHash(baseCustomer, 's2:' + 'a'.repeat(64)), { code: 'CAMPAIGN_HASH_FORMAT_UNSUPPORTED' });
+
+      // 1. Stamp a campaign with s1: hashes directly and verify full release, dispatch, and sentCampaignContent rebuild!
+      const campS1 = ok(await local('POST', '/v1/campaigns', { name: unique('s1-mixed'), from: 'sender@example.com', subject: 'Static S1', html: '<p>Hello static world</p>', audience: { listId: list.id } }), 201);
+      ok(await local('POST', `/v1/campaigns/${campS1.id}/send`, { revision: campS1.revision }), 202);
+      const s1RevId = (await db.query('SELECT review_id FROM sending_campaigns WHERE id=$1', [campS1.id])).rows[0].review_id as string;
+      const s1Recs = (await db.query("SELECT ordinal, recipient->>'email' AS email FROM sending_review_recipients WHERE review_id=$1 ORDER BY ordinal", [s1RevId])).rows as { ordinal: number; email: string }[];
+      for (const r of s1Recs) {
+        const h = await staticContentHash(baseHash, r.email);
+        await db.query('UPDATE sending_review_recipients SET content_hash=$1, snapshot_bytes=1024 WHERE review_id=$2 AND ordinal=$3', [h, s1RevId, r.ordinal]);
+      }
+      await db.query("UPDATE sending_campaigns SET state='sending', prepared=total WHERE id=$1", [campS1.id]);
+      await run('campaign.run');
+      await run('email.dispatch');
+      const s1View = ok(await local('GET', `/v1/campaigns/${campS1.id}`));
+      assert.equal(s1View.state, 'done');
+      assert.equal((s1View.counts.byStatus.simulated ?? 0) + (s1View.counts.byStatus.accepted ?? 0) + (s1View.counts.byStatus.delivered ?? 0), 6, 'All 6 s1:-hashed recipients dispatched cleanly');
+      assert.equal(s1View.counts.byStatus.rejected ?? 0, 0);
+      const s1Mail = (await db.query('SELECT * FROM sending_emails WHERE workspace_id=$1 AND campaign_id=$2 ORDER BY review_ordinal LIMIT 1', [ws, campS1.id])).rows[0];
+      const rebuiltS1 = await sentCampaignContent(runtime, { workspaceId: ws, keyId: 'test', permissions: ['manage'], domains: [] }, {
+        ...s1Mail, workspaceId: s1Mail.workspace_id, actorKeyId: s1Mail.actor_key_id, campaignId: s1Mail.campaign_id, reviewId: s1Mail.review_id, reviewOrdinal: s1Mail.review_ordinal,
+        fromAddress: s1Mail.from_address, toAddresses: s1Mail.to_addresses, ccAddresses: s1Mail.cc_addresses, bccAddresses: s1Mail.bcc_addresses,
+        providerId: s1Mail.provider_id, errorCode: s1Mail.error_code, suppressionReason: s1Mail.suppression_reason,
+        scheduledAt: s1Mail.scheduled_at, attemptStartedAt: s1Mail.attempt_started_at, leaseUntil: s1Mail.lease_until,
+        createdAt: s1Mail.created_at, updatedAt: s1Mail.updated_at, feedbackTopicArn: s1Mail.feedback_topic_arn,
+        dispatchVersion: s1Mail.dispatch_version, attachmentFailures: s1Mail.attachment_failures, eventOutcomes: s1Mail.event_outcomes,
+      });
+      assert.ok(rebuiltS1.html?.includes('Hello static world'), 'sentCampaignContent rebuilds s1: email cleanly');
+
+      // 2. Unknown future hash format (s2:...) pauses at releaseStep without releasing or burning any recipient!
+      const campFuture = ok(await local('POST', '/v1/campaigns', { name: unique('s2-future'), from: 'sender@example.com', subject: 'Future', html: '<p>Future</p>', audience: { listId: list.id } }), 201);
+      ok(await local('POST', `/v1/campaigns/${campFuture.id}/send`, { revision: campFuture.revision }), 202);
+      const futRevId = (await db.query('SELECT review_id FROM sending_campaigns WHERE id=$1', [campFuture.id])).rows[0].review_id as string;
+      await db.query("UPDATE sending_review_recipients SET content_hash=$1, snapshot_bytes=1024 WHERE review_id=$2", ['s2:' + 'b'.repeat(64), futRevId]);
+      await db.query("UPDATE sending_campaigns SET state='sending', prepared=total WHERE id=$1", [campFuture.id]);
+      await run('campaign.run');
+      const futView = ok(await local('GET', `/v1/campaigns/${campFuture.id}`));
+      assert.deepEqual([futView.state, futView.delivery.expanded, futView.delivery.pauseReason?.code], ['paused', 0, 'CAMPAIGN_HASH_FORMAT_UNSUPPORTED']);
+
+      // 3. Even if email rows were already queued by a newer release referencing an s2: hash, dispatch defers them (never rejects/burns) and pauses the campaign loudly!
+      const campQueued = ok(await local('POST', '/v1/campaigns', { name: unique('s2-queued'), from: 'sender@example.com', subject: 'FutureQ', html: '<p>FutureQ</p>', audience: { listId: list.id } }), 201);
+      ok(await local('POST', `/v1/campaigns/${campQueued.id}/send`, { revision: campQueued.revision }), 202);
+      const qRevId = (await db.query('SELECT review_id FROM sending_campaigns WHERE id=$1', [campQueued.id])).rows[0].review_id as string;
+      await db.query("UPDATE sending_review_recipients SET content_hash=$1, snapshot_bytes=1024 WHERE review_id=$2", ['s2:' + 'c'.repeat(64), qRevId]);
+      await db.query("UPDATE sending_campaigns SET state='sending', prepared=total, expanded=total WHERE id=$1", [campQueued.id]);
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,campaign_id,review_id,review_ordinal,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
+        SELECT 'em_s2_'||r.ordinal, $1, c.actor_key_id, $2, c.id, c.review_id, r.ordinal, 'sender@example.com', jsonb_build_array(r.recipient->>'email'), '[]', '[]', 'FutureQ', '{"kind":"marketing","deferredCampaign":true}'::jsonb, true
+        FROM sending_campaigns c JOIN sending_review_recipients r ON r.review_id=c.review_id WHERE c.id=$3`, [ws, REGION, campQueued.id]);
+      await run('email.dispatch');
+      const qView = ok(await local('GET', `/v1/campaigns/${campQueued.id}`));
+      assert.equal(qView.state, 'paused', 'Campaign pauses instead of ending done');
+      assert.equal(qView.delivery.pauseReason?.code, 'CAMPAIGN_HASH_FORMAT_UNSUPPORTED');
+      assert.equal(qView.counts.byStatus.rejected ?? 0, 0, 'Zero recipients rejected/burned');
+      assert.equal(qView.counts.byStatus.queued, 6, 'All 6 recipients remain queued for the matching release');
+    });
+  });
+
   test('paced campaigns release one daily window at a time, pause and resume in place, hold for the SES daily quota, and pause automatically on bounces', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
       const ws = runtime.config.workspaceId;
@@ -35831,6 +36506,112 @@ test('Audit trail: sensitive actions each write one redacted row', async t => {
     assert.ok(trail.length >= 18, `${trail.length} rows`);
     for (const value of secrets) assert.ok(trail.every(summary => !summary.includes(value)), `A summary repeats ${value.slice(0, 12)}…`);
   });
+});
+
+// Database disk alert (src/disk-alert.ts): PlanetScale's cluster.storage webhook posts one card straight to the operators'
+// Slack. It runs in-process here with a fake Slack and a database that fails the test if anything touches it.
+test('Database disk alert: a PlanetScale storage event with the derived Authorization header posts one card without the database, once per threshold; a wrong token, a bad signature or a stale event posts nothing', async t => {
+  const [{ createApp }, { loadConfig }, { diskAlertSetup, diskAlertCard }] = await Promise.all([import('./src/app.js'), import('./src/config.js'), import('./src/disk-alert.js')]);
+  const origin = 'https://disk.example.org', hook = 'https://hooks.slack.com/services/T0FIXTURE/B0FIXTURE/diskalert', secret = 'disk-fixture-'.repeat(4), signing = 'f'.repeat(64);
+  const db = new Proxy({}, { get(_target, prop) { throw new Error('The database disk alert touched Postgres (' + String(prop) + ').'); } }) as import('./src/core.js').Runtime['db'];
+  const storage: import('./src/core.js').Storage = { async put() { throw Error('unused'); }, async delete() { throw Error('unused'); }, async get() { throw Error('unused'); } };
+  const hosted = { PUBLIC_URL: origin, BANE_ROOT_SECRET: secret, MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google', OPERATOR_SLACK_WEBHOOK_URL: hook };
+  const runtime = (env: Record<string, string | undefined> = {}): import('./src/core.js').Runtime => ({ config: loadConfig({ ...hosted, ...env }), db, storage });
+  const app = createApp(), live = runtime(), setup = diskAlertSetup(live.config);
+  assert.deepEqual([setup.url, setup.events], [origin + '/internal/v1/database-disk', ['cluster.storage']]);
+  assert.match(setup.authorization, /^Bearer nmdisk_[A-Za-z0-9_-]{43}$/);
+  assert.ok(!setup.authorization.includes(secret) && setup.authorization !== diskAlertSetup({ ...live.config, authSecret: 'other-fixture-'.repeat(4) }).authorization);
+  const posted: Json[] = [];
+  t.mock.method(globalThis, 'fetch', async (url: RequestInfo | URL, init?: RequestInit) => {
+    assert.deepEqual([String(url), init?.method, init?.redirect], [hook, 'POST', 'manual']);
+    posted.push(JSON.parse(String(init!.body)));
+    return new Response(null);
+  });
+  const now = () => Math.floor(Date.now() / 1000);
+  // PlanetScale's documented cluster.storage body.
+  const storageEvent = (percent: number, extra: Json = {}) => ({ timestamp: now(), event: 'cluster.storage', organization: 'anomalyco', database: 'nightmail',
+    resource: { branch_name: 'production', storage_percentage: percent, storage: [{ bytes_used: 1, bytes_total_capacity: 2, bytes_available: 1, storage_percentage: percent + 0.1 }] }, ...extra });
+  const deliver = async (event: unknown, headers: Record<string, string> = { authorization: setup.authorization }, on = live, method = 'POST') => {
+    const response = await app.fetch(new Request(setup.url, { method, headers: { 'content-type': 'application/json', ...headers }, ...(method === 'POST' ? { body: typeof event === 'string' ? event : JSON.stringify(event) } : {}) }), on);
+    const text = await response.text();
+    return [response.status, text ? (JSON.parse(text) as Json).error.code : null];
+  };
+  const cards = () => posted.map(card => [card.blocks[0].text.text, card.text, card.blocks[0].accessory.url, card.blocks[0].accessory.text.text]);
+
+  // No credential, a wrong one, the bare token, another installation's, a self-hosted installation: the same 404, and
+  // nothing reaches Slack. The route answers POST only.
+  const other = diskAlertSetup({ ...live.config, authSecret: 'other-fixture-'.repeat(4) }).authorization;
+  for (const headers of <Record<string, string>[]>[{}, { authorization: 'Bearer nmdisk_' + 'A'.repeat(43) }, { authorization: setup.authorization.slice('Bearer '.length) }, { authorization: other }, { authorization: 'Bearer ' + secret }, { 'x-planetscale-signature': 'f'.repeat(64) }])
+    assert.deepEqual(await deliver(storageEvent(72), headers), [404, 'NOT_FOUND']);
+  assert.deepEqual(await deliver(storageEvent(72), undefined, runtime({ MULTI_TENANT: 'false', ACCOUNT_REQUIRED_ACR: undefined })), [404, 'NOT_FOUND']);
+  assert.deepEqual(await deliver(null, undefined, live, 'GET'), [404, 'NOT_FOUND']);
+  assert.deepEqual(posted, []);
+
+  // The event posts one card, with no database: its line, the plain-text fallback and a button to PlanetScale.
+  assert.deepEqual(await deliver(storageEvent(72)), [204, null]);
+  assert.deepEqual(cards(), [[':minidisc: *Database disk* production, 72% full.', 'Database disk: production, 72% full.', 'https://app.planetscale.com', 'Open']]);
+  // The same delivery again, and the same threshold a moment later, post nothing more; the next threshold posts at once.
+  assert.deepEqual([await deliver(storageEvent(72)), await deliver(storageEvent(74.9))], [[204, null], [204, null]]);
+  assert.equal(posted.length, 1);
+  // Nothing in an event shapes the button's address: whatever organization, database and branch it names, the button
+  // opens PlanetScale's own origin. The branch is text only, and only as a plain name: any other is left out.
+  assert.deepEqual(await deliver(storageEvent(75, { organization: 'evil-org', database: '../x', html_url: 'https://evil.example', resource: { branch_name: 'dev_2', storage_percentage: 75, html_url: 'https://evil.example' } })), [204, null]);
+  assert.deepEqual(cards()[1], [':minidisc: *Database disk* dev\u02cd2, 75% full.', 'Database disk: dev\u02cd2, 75% full.', 'https://app.planetscale.com', 'Open']);
+  for (const branch of ['<!channel>', 'evil.example', 'a/b', '../production', 'https://evil.example/x', '<https://evil.example|production>', '*bold*', 'prod uction', 'ünïcode', '', 'a'.repeat(64), 7, null, { name: 'production' }]) {
+    const hostile = JSON.stringify(diskAlertCard(storageEvent(61, { organization: branch, database: branch, resource: { branch_name: branch, storage_percentage: 61 } }))!.card);
+    assert.deepEqual([JSON.parse(hostile).blocks[0].text.text, JSON.parse(hostile).text, JSON.parse(hostile).blocks[0].accessory.url], [':minidisc: *Database disk* 61% full.', 'Database disk: 61% full.', 'https://app.planetscale.com'], String(branch));
+    assert.equal(hostile.includes('evil') || hostile.includes('channel'), false);
+  }
+
+  // An old delivery replayed, one dated ahead, and anything that is not the event are refused; other events post nothing.
+  for (const event of [storageEvent(86, { timestamp: now() - 61 * 60 }), storageEvent(86, { timestamp: now() + 61 * 60 })]) assert.deepEqual(await deliver(event), [400, 'EVENT_STALE']);
+  for (const event of [storageEvent(101), storageEvent(-1), storageEvent(86, { resource: { branch_name: 'production', storage_percentage: '86' } }), storageEvent(86, { resource: null }), storageEvent(86, { timestamp: 'now' }), [], 'null'])
+    assert.deepEqual(await deliver(event), [400, 'EVENT_INVALID']);
+  assert.deepEqual(await deliver('{'), [400, 'INVALID_JSON']);
+  assert.deepEqual(await deliver({ timestamp: now(), event: 'branch.ready', organization: 'anomalyco', database: 'nightmail', resource: {} }), [204, null]);
+  assert.equal(posted.length, 2);
+  // PlanetScale's "Test webhook" posts a card too, so the path can be checked without filling a disk.
+  assert.deepEqual(await deliver({ timestamp: now(), event: 'webhook.test', organization: 'anomalyco', database: 'nightmail', resource: { type: 'Database', html_url: 'https://evil.example' } }), [204, null]);
+  assert.deepEqual(cards()[2], [':minidisc: *Database disk* Test from PlanetScale.', 'Database disk: Test from PlanetScale.', 'https://app.planetscale.com', 'Open']);
+
+  // With the webhook's signing secret set, the header alone is not enough: a missing or wrong signature, or a body
+  // changed after signing, gets the same 404. Hosted only, like the Slack webhook.
+  const signedRuntime = runtime({ PLANETSCALE_WEBHOOK_SECRET: signing }), sign256 = (body: string, key = signing) => createHmac('sha256', key).update(body).digest('hex');
+  assert.deepEqual([signedRuntime.config.planetscaleWebhookSecret, loadConfig({ PUBLIC_URL: origin, BANE_ROOT_SECRET: secret, PLANETSCALE_WEBHOOK_SECRET: signing }).planetscaleWebhookSecret], [signing, undefined]);
+  // A secret too short or too long to be PlanetScale's never stops the installation: it is left unused, as if unset,
+  // and said once, without its value.
+  const warned: string[] = [];
+  await t.test('a signing secret of the wrong length is ignored with one warning', st => {
+    st.mock.method(console, 'warn', (line: string) => { warned.push(line); });
+    assert.deepEqual(['too-short-fixture', 'x'.repeat(31), 'y'.repeat(201), 'too-short-fixture'].map(value => runtime({ PLANETSCALE_WEBHOOK_SECRET: value }).config.planetscaleWebhookSecret), [undefined, undefined, undefined, undefined]);
+    assert.equal(loadConfig({ PUBLIC_URL: origin, BANE_ROOT_SECRET: secret, PLANETSCALE_WEBHOOK_SECRET: 'too-short-fixture' }).planetscaleWebhookSecret, undefined, 'Self-hosted, it is never read.');
+  });
+  assert.deepEqual(warned.map(line => (JSON.parse(line) as Json).code), ['PLANETSCALE_WEBHOOK_SECRET_IGNORED']);
+  assert.ok(!warned[0]!.includes('too-short-fixture') && !warned[0]!.includes('x'.repeat(31)));
+  const body = JSON.stringify(storageEvent(86));
+  for (const signature of [undefined, sign256(body, 'e'.repeat(64)), sign256(body.replace('86', '87')), sign256(body).slice(1)])
+    assert.deepEqual(await deliver(body, { authorization: setup.authorization, ...(signature ? { 'x-planetscale-signature': signature } : {}) }, signedRuntime), [404, 'NOT_FOUND']);
+  assert.deepEqual(await deliver(body, { 'x-planetscale-signature': sign256(body) }, signedRuntime), [404, 'NOT_FOUND'], 'A signature never replaces the token.');
+  assert.equal(posted.length, 3);
+  assert.deepEqual(await deliver(body, { authorization: setup.authorization, 'x-planetscale-signature': sign256(body) }, signedRuntime), [204, null]);
+  assert.equal(cards()[3]![0], ':minidisc: *Database disk* production, 86% full.');
+
+  // During a root-secret rotation the previous secret's header still works. Without the Slack webhook nothing is posted
+  // and PlanetScale is told.
+  const rotated = runtime({ BANE_ROOT_SECRET: 'next-fixture-'.repeat(4), PREVIOUS_BANE_ROOT_SECRET: secret });
+  assert.notEqual(diskAlertSetup(rotated.config).authorization, setup.authorization);
+  assert.deepEqual(await deliver(storageEvent(91), undefined, rotated), [204, null]);
+  assert.equal(cards()[4]![0], ':minidisc: *Database disk* production, 91% full.');
+  assert.deepEqual(await deliver(storageEvent(96), undefined, runtime({ OPERATOR_SLACK_WEBHOOK_URL: undefined })), [503, 'OPERATOR_ALERTS_OFF']);
+  // On Workers the DISK_ALERT limiter is asked with the threshold's key, and a card it refuses is not posted; the answer
+  // goes out before the card, which is posted after the response (PlanetScale waits two seconds).
+  const asked: string[] = [], later: ((runtime: import('./src/core.js').Runtime) => Promise<void>)[] = [];
+  assert.deepEqual(await deliver(storageEvent(44), undefined, { ...live, allowDiskAlert: async key => { asked.push(key); return false; } }), [204, null]);
+  const worker = { ...live, allowDiskAlert: async (key: string) => { asked.push(key); return true; }, deferNudge: (work: (typeof later)[number]) => { later.push(work); } };
+  assert.deepEqual(await deliver(storageEvent(96), undefined, worker), [204, null]);
+  assert.deepEqual([asked, later.length, posted.length], [['0', '95'], 1, 5]);
+  await later[0]!(worker);
+  assert.equal(cards()[5]![0], ':minidisc: *Database disk* production, 96% full.');
 });
 
 // Dashboard analytics (src/analytics.ts, docs/analytics.md): the ingest runs in-process here with an in-memory bucket and

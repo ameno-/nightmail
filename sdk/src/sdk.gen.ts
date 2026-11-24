@@ -4071,7 +4071,7 @@ export const revokeInboxAppPassword = <ThrowOnError extends boolean = false>(opt
 /**
  * List agent inboxes
  *
- * Inboxes this credential can see, ordered by ID, with status and usage. A provisioning key sees the inboxes it created. Pass nextCursor as cursor for the next page.
+ * Inboxes this credential can see, ordered by ID, with status and usage. A provisioning key sees the inboxes it created. Pass nextCursor as cursor for the next page. Filtered queries (type, status, q): Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.
  */
 export const listInboxes = <ThrowOnError extends boolean = false>(options?: Options<ListInboxesData, ThrowOnError>): RequestResult<ListInboxesResponses, ListInboxesErrors, ThrowOnError> => (options?.client ?? client).get<ListInboxesResponses, ListInboxesErrors, ThrowOnError>({
     security: [
@@ -5409,7 +5409,7 @@ export const listWorkspaceMembers = <ThrowOnError extends boolean = false>(optio
 });
 
 /**
- * Invite an email address. Membership starts only after acceptance by the verified address. Hosted, the invitee is emailed the link (emailed says so; at most 20 invitation emails a workspace a day); otherwise share the returned URL. An invitation never grants more than the inviter's role, and an owner invitation is made only in the dashboard.
+ * Invite an email address. Membership starts only after acceptance by the verified address. Hosted, the invitee is emailed the link once the workspace has a verified domain or has finished its evaluation (emailed says so; at most 20 invitation emails a workspace a day); otherwise share the returned URL. An invitation never grants more than the inviter's role, and an owner invitation is made only in the dashboard.
  */
 export const inviteWorkspaceMember = <ThrowOnError extends boolean = false>(options: Options<InviteWorkspaceMemberData, ThrowOnError>): RequestResult<InviteWorkspaceMemberResponses, InviteWorkspaceMemberErrors, ThrowOnError> => (options.client ?? client).post<InviteWorkspaceMemberResponses, InviteWorkspaceMemberErrors, ThrowOnError>({
     security: [{
@@ -5464,7 +5464,7 @@ export const listWorkspaceInvitations = <ThrowOnError extends boolean = false>(o
 });
 
 /**
- * Invite an email address. Membership starts only after acceptance by the verified address. Hosted, the invitee is emailed the link (emailed says so; at most 20 invitation emails a workspace a day); otherwise share the returned URL. An invitation never grants more than the inviter's role, and an owner invitation is made only in the dashboard. Owners and admins, in the dashboard or over their own MCP sign-in; API keys and agent tokens get 403 DASHBOARD_AUTH_REQUIRED.
+ * Invite an email address. Membership starts only after acceptance by the verified address. Hosted, the invitee is emailed the link once the workspace has a verified domain or has finished its evaluation (emailed says so; at most 20 invitation emails a workspace a day); otherwise share the returned URL. An invitation never grants more than the inviter's role, and an owner invitation is made only in the dashboard. Owners and admins, in the dashboard or over their own MCP sign-in; API keys and agent tokens get 403 DASHBOARD_AUTH_REQUIRED.
  */
 export const createWorkspaceInvitation = <ThrowOnError extends boolean = false>(options: Options<CreateWorkspaceInvitationData, ThrowOnError>): RequestResult<CreateWorkspaceInvitationResponses, CreateWorkspaceInvitationErrors, ThrowOnError> => (options.client ?? client).post<CreateWorkspaceInvitationResponses, CreateWorkspaceInvitationErrors, ThrowOnError>({
     security: [{
@@ -5517,7 +5517,7 @@ export const updateWorkspaceMember = <ThrowOnError extends boolean = false>(opti
 });
 
 /**
- * Shows the signed-in recipient the invitation they followed (workspace, inviter, role). Read-only; acceptWorkspaceInvitation joins.
+ * Shows the signed-in recipient the invitation they followed (the workspace’s and the inviter’s names as plain words, the inviter’s address, the role). Read-only; acceptWorkspaceInvitation joins.
  */
 export const getWorkspaceInvitation = <ThrowOnError extends boolean = false>(options: Options<GetWorkspaceInvitationData, ThrowOnError>): RequestResult<GetWorkspaceInvitationResponses, GetWorkspaceInvitationErrors, ThrowOnError> => (options.client ?? client).get<GetWorkspaceInvitationResponses, GetWorkspaceInvitationErrors, ThrowOnError>({
     security: [{

@@ -1,10 +1,8 @@
-// Pre-merge invariants that broke dev only after merge. Fast and offline except the open-PR scan.
+// Pre-merge invariants that broke dev only after merge. Fast and offline except the quarantine issue check.
 //   node --import tsx scripts/check-premerge.ts [--base <sha>]
 // --base is the commit this change lands on (the PR's base tip, the merge group's base, or the previous dev tip).
-// Locally it defaults to the merge-base with dev. Set GH_TOKEN, GITHUB_REPOSITORY and PR_NUMBER to also compare
-// migration numbers with other open pull requests. docs/ci.md explains each failure and how to fix it.
+// Locally it defaults to the merge-base with dev. docs/ci.md explains each failure and how to fix it.
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { register } from 'node:module';
 import { isDeepStrictEqual } from 'node:util';
@@ -87,9 +85,11 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
   if (failed === before) console.log(`Worker routes: ${paths.length} API paths reach the Worker in both wrangler configs and src/worker.ts.`);
 }
 
-// 3. Migrations. src/migrate.ts applies every /^\d+_[a-z_]+\.sql$/ file once, in name order, and refuses a changed one.
-// A migration that sorts before one dev already applied runs in a different order on a fresh database than on dev,
-// and two open PRs picking the same next number collide when the second one merges.
+// 3. Migrations. src/migrate.ts tracks applied filenames in nightmail_migrations and runs every unapplied
+// /^\d+_[a-z_]+\.sql$/ file in name order (refusing a changed file). Any unused three-digit number is accepted so
+// independent PRs can merge in any order; duplicate numbers (two files with the same number, or a number already on
+// the base branch) are refused. Open-PR collisions are caught when the second PR merges. Because a fresh install
+// applies migrations in number order, a later-merged lower-numbered migration must not depend on a higher-numbered one.
 {
   const dir = 'api/migrations', applied = /^\d+_[a-z_]+\.sql$/, numbered = /^(\d{3})_[a-z_]+\.sql$/;
   // Pairs that shipped before this check, ordered by name everywhere since. Never add to this list.
@@ -103,53 +103,28 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
   const byNumber = new Map<string, string[]>();
   for (const name of head) { const n = number(name); if (n) byNumber.set(n, [...byNumber.get(n) ?? [], name]); }
   const baseList = base ? (tryGit('ls-tree', '--name-only', `${base}:${dir}`) ?? '').split('\n').filter(Boolean) : [];
+  const baseNumbers = new Map<string, string>();
+  for (const name of baseList) { const n = number(name); if (n && !baseNumbers.has(n)) baseNumbers.set(n, name); }
   const baseMax = baseList.map(number).filter(Boolean).sort().at(-1) ?? '000';
   const added = head.filter(n => !baseList.includes(n));
-  // A new file that reuses a dev number is reported below with the number to use instead.
-  for (const [n, names] of byNumber) if (names.length > 1 && !grandfathered.has(n) && (n > baseMax || !names.some(name => added.includes(name)))) fail('Migrations', `Migration number ${n} is used by ${names.join(' and ')}. Renumber the newer one to the next free number.`, `${dir}/${names.find(name => added.includes(name)) ?? names.at(-1)}`);
+  let next = Math.max(Number(baseMax), ...[...byNumber.keys()].map(Number)) + 1;
+  const free = () => String(next++).padStart(3, '0');
   for (const name of baseList) {
     if (!head.includes(name)) fail('Migrations', `${name} is on the base branch and was deleted or renamed. Applied migrations are permanent: restore it and add a new migration.`, `${dir}/${name}`);
     else if (atBase(`${dir}/${name}`) !== readFileSync(new URL(`migrations/${name}`, api), 'utf8').trim()) fail('Migrations', `${name} is already on the base branch, and dev has applied it. Editing it fails every upgraded database with MIGRATION_CHANGED: revert the edit and add a new migration.`, `${dir}/${name}`);
   }
-  let next = Number(baseMax) + 1;
-  const claimed = new Map<string, number>();
-  const token = process.env.GH_TOKEN, repo = process.env.GITHUB_REPOSITORY, pr = Number(process.env.PR_NUMBER);
-  if (added.length && token && repo && pr) {
-    // Other open PRs into dev that add a migration. An older PR keeps its number; this one renumbers.
-    const get = async (path: string) => {
-      const response = await fetch(`https://api.github.com/${path}`, { headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json' } });
-      if (!response.ok) throw new Error(`GitHub ${path}: HTTP ${response.status}`);
-      return response.json() as Promise<{ number: number; filename: string; status: string; sha: string }[]>;
-    };
-    // A stacked PR (one built on this one) carries this PR's migration files unchanged: the same blob is the same
-    // migration, not a second PR claiming its number.
-    const blob = (name: string) => { const bytes = readFileSync(new URL(`migrations/${name}`, api)); return createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex'); };
-    const ours = new Map(added.map(name => [name, blob(name)]));
-    const pulls: { number: number }[] = [];
-    for (let page = 1; ; page++) { const rows = await get(`repos/${repo}/pulls?state=open&base=dev&per_page=100&page=${page}`); pulls.push(...rows); if (rows.length < 100) break; }
-    await Promise.all(pulls.filter(p => p.number !== pr).map(async p => {
-      for (let page = 1; page <= 30; page++) {
-        const files = await get(`repos/${repo}/pulls/${p.number}/files?per_page=100&page=${page}`);
-        for (const f of files) {
-          const name = f.filename.slice(dir.length + 1), n = f.status === 'added' && f.filename.startsWith(`${dir}/`) ? number(name) : undefined;
-          if (n && ours.get(name) !== f.sha && (!claimed.has(n) || claimed.get(n)! > p.number)) claimed.set(n, p.number);
-        }
-        if (files.length < 100) break;
-      }
-    }));
-    next = Math.max(next, ...[...claimed.keys()].map(n => Number(n) + 1));
-  }
-  const free = () => String(next++).padStart(3, '0');
   for (const name of added) {
     const n = number(name);
     if (!n) continue;
-    const other = claimed.get(n);
-    const taken = baseList.find(b => number(b) === n);
-    if (n <= baseMax) fail('Migrations', `${name} ${taken ? `reuses number ${n} (${taken} on dev)` : `sorts before ${baseMax}, the newest migration on dev`}, so a fresh database applies it in a different order than dev did. Renumber it to ${free()}.`, `${dir}/${name}`);
-    else if (other !== undefined && other < pr) fail('Migrations', `Open PR #${other} already adds migration ${n}. The older PR keeps the number: renumber ${name} to ${free()}.`, `${dir}/${name}`);
-    else if (other !== undefined) warn('Migrations', `Newer open PR #${other} also adds migration ${n}; it will be asked to renumber.`, `${dir}/${name}`);
+    const taken = baseNumbers.get(n);
+    if (taken) fail('Migrations', `${name} reuses migration number ${n} (${taken} is already on the base branch). Renumber it to ${free()}.`, `${dir}/${name}`);
   }
-  console.log(`Migrations: ${head.length} files, ${added.length} new on top of ${baseMax}${base ? ` (base ${base.slice(0, 12)})` : ' (no base: order not checked)'}.`);
+  for (const [n, names] of byNumber) {
+    if (names.length > 1 && !grandfathered.has(n) && !(baseNumbers.has(n) && names.some(name => added.includes(name)))) {
+      fail('Migrations', `Migration number ${n} is used by ${names.join(' and ')}. Renumber the newer one to ${free()}.`, `${dir}/${names.find(name => added.includes(name)) ?? names.at(-1)}`);
+    }
+  }
+  console.log(`Migrations: ${head.length} files, ${added.length} new${base ? ` (base ${base.slice(0, 12)}, highest ${baseMax})` : ' (no base: base collisions not checked)'}.`);
 }
 
 // 4. Phone layout: below 640 px every DataTable renders cards from each column's `card` slot (AGENTS.md). A column

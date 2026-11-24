@@ -94,10 +94,11 @@
     // The handoff's Ed25519 key is the BANE_SUPPORT_SIGNING_KEY secret.
     "BANE_SUPPORT_URL": "https://support.nightmail.dev/chat"
   },
-  "durable_objects": { "bindings": [{ "name": "DISPATCHER", "class_name": "DispatcherShard" }] },
+  // CAMPAIGN_ROOMS: one per campaign, who has it open in the dashboard (src/campaign-room.ts).
+  "durable_objects": { "bindings": [{ "name": "DISPATCHER", "class_name": "DispatcherShard" }, { "name": "CAMPAIGN_ROOMS", "class_name": "CampaignRoom" }] },
   // Run HTTP requests next to the bane-prod database (PlanetScale aws-us-east-2), as production does.
   "placement": { "region": "aws:us-east-2" },
-  "migrations": [{ "tag": "transfer-from-bane-production", "transferred_classes": [{ "from_script": "bane-production", "from": "DispatcherShard", "to": "DispatcherShard" }] }],
+  "migrations": [{ "tag": "transfer-from-bane-production", "transferred_classes": [{ "from_script": "bane-production", "from": "DispatcherShard", "to": "DispatcherShard" }] }, { "tag": "campaign-rooms", "new_sqlite_classes": ["CampaignRoom"] }],
   // Operator-verified nightmail/production runtime origin; the workflow checks the matching migrator.
   "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "4e85373aed5e4d5ca66e62fd13b254d2" }],
   "browser": { "binding": "BROWSER" },
@@ -132,7 +133,9 @@
     { "name": "ADMISSION", "namespace_id": "8793301", "simple": { "limit": 6000, "period": 60 } },
     { "name": "SNS_CERT_MISSES", "namespace_id": "8793302", "simple": { "limit": 60, "period": 60 } },
     // Analytics batches per client address a minute (src/analytics.ts ANALYTICS_BATCHES_PER_MINUTE).
-    { "name": "ANALYTICS_INGEST", "namespace_id": "8793303", "simple": { "limit": 60, "period": 60 } }
+    { "name": "ANALYTICS_INGEST", "namespace_id": "8793303", "simple": { "limit": 60, "period": 60 } },
+    // Database disk cards a minute per storage threshold (src/disk-alert.ts).
+    { "name": "DISK_ALERT", "namespace_id": "8793304", "simple": { "limit": 1, "period": 60 } }
   ],
   "observability": {
     "enabled": true,

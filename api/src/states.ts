@@ -511,8 +511,10 @@ export const setCampaignPacing = (ref: CampaignRef, pacing: { pacePerDay: number
 /**
  * sending -> done once every recipient is released and no row is queued or attempting. The dispatcher runs it once
  * per draining batch over the campaigns it moved rows for (locking only campaign rows, after the row statements, so it
- * never serializes concurrent shards nor deadlocks with cancel or the run job); the interrupted-attempt sweep appends
- * it over every sending campaign so a missed edge can never leave one sending with nothing queued. `refs` yields
+ * never serializes concurrent shards nor deadlocks with cancel or the run job); the campaign run runs it when it finds
+ * every recipient released, since a release that queued nothing leaves no row whose leaving would finish the campaign;
+ * the interrupted-attempt sweep appends it over every sending campaign so a missed edge can never leave one sending with
+ * nothing queued. `refs` yields
  * (workspace_id, campaign_id); `leaving` the ids the same statement is finishing, which its own subqueries cannot see yet.
  */
 export const finishCampaigns = (refs: SQL, leaving: SQL = sql`SELECT NULL::text AS id WHERE false`) => sql`UPDATE sending_campaigns c SET state='done',updated_at=clock_timestamp()

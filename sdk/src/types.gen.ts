@@ -5090,9 +5090,13 @@ export type WorkspaceMember = {
 
 export type CreatedWorkspaceInvitation = WorkspaceInvitation & {
     /**
-     * Whether the invitation was emailed to the invitee, with acceptUrl. False when this installation sends no account email or the day’s invitation emails are used: share acceptUrl yourself.
+     * Whether the invitation was emailed to the invitee, with acceptUrl. When false, share acceptUrl yourself; notEmailedReason says why.
      */
     emailed: boolean;
+    /**
+     * Why no email went out, null when one did. not_available: this installation sends no invitation email, or your account has no verified address to be named by. new_workspace: invitations are emailed once the workspace has a verified domain or has finished its evaluation. allowance_used: the invitation emails for today, or to this address, are used.
+     */
+    notEmailedReason: 'not_available' | 'new_workspace' | 'allowance_used' | null;
     /**
      * What to do next, for people and agents: whether the invitee was emailed, or acceptUrl is yours to share.
      */
@@ -5116,8 +5120,14 @@ export type InviteWorkspaceMember = {
 export type WorkspaceInvitationPreview = {
     id: string;
     workspaceId: string;
+    /**
+     * The workspace’s name as plain words, at most 40 characters; empty when nothing of it can be shown.
+     */
     workspaceName: string;
     workspaceSlug: string;
+    /**
+     * The inviter’s display name as plain words, like workspaceName; may be empty. Identify the inviter by inviterEmail.
+     */
     inviterName: string;
     inviterEmail: string;
     role: 'owner' | 'admin' | 'member';
@@ -5990,6 +6000,10 @@ export type GetCurrentIdentityResponses = {
          * Hosted dashboard sessions: an operator lets this workspace connect its own AWS account (POST /v1/connection with kind byo). False otherwise, and the dashboard offers Hosted mail only.
          */
         byo?: boolean;
+        /**
+         * Whether this installation shows who else has a campaign open in the dashboard (campaign rooms run on the Cloudflare deployment). False on the Node server.
+         */
+        presence?: boolean;
         /**
          * Hosted dashboard sessions: whether the workspace is free, whether an empty balance has paused sending or held received mail, and auto-recharge, so the dashboard can show it on its first frame. Null otherwise; GET /v1/billing has the detail.
          */

@@ -124,7 +124,7 @@ function ClusterRail({ current }: { current: string }) {
   return <ul className="op-cluster-rail" aria-label="Clusters">{list.data.items.map(cluster => <li key={cluster.id}>
     <Link className="op-cluster-rail__row" to={`/operator/abuse/${cluster.id}`} aria-current={cluster.id === current ? 'page' : undefined} replace>
       <Risk band={cluster.band} score={cluster.score} /><span className="op-cell op-cluster-rail__why">{cluster.reasons.length ? reasonText([...cluster.reasons].sort((a, b) => b.points - a.points)[0]!) : ''}</span>
-    </Link></li>)}</ul>
+    </Link></li>)}{list.data.nextCursor && <li><Link className="op-cluster-rail__row muted" to="/operator?view=abuse">More clusters…</Link></li>}</ul>
 }
 
 const stepTone: Record<StandingStep, Tone> = { ok: 'success', notice: 'neutral', warn: 'warning', restrict: 'warning', pause: 'danger' }

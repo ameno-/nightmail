@@ -4,6 +4,7 @@ import { Archive, Inbox, Mail, MailOpen, Paperclip, Reply, Search, Star, Trash2,
 import { Alert, Button, Checkbox, ConfirmDialog, Dialog, EmptyState, ErrorState, Field, IconButton, Input, Pagination, Select, SkeletonText, StatusBadge, Textarea, useToast, fieldError, MutationError, ErrorText } from '../../components/ui'
 import { ReceivedEmailPreview } from '../../components/EmailPreview'
 import { useApi, useApiDef, useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
+import { invalidate } from '../../data/invalidation'
 import { request } from '../../data/live'
 import { OutcomeFlow, outcomeOf } from './flow'
 import { firstOverview, useOverview, type Overview } from './overview'
@@ -179,7 +180,7 @@ function Conversation({ thread, addressId, addresses, focusMessage, onAddress }:
   }, [focusMessage, messages])
   const isExpanded = (message: InboundMessage) => expanded[message.id] ?? (message.id === lastId || messages.length <= 3 || message.read === false)
   const toggle = (message: InboundMessage) => setExpanded(current => ({ ...current, [message.id]: !isExpanded(message) }))
-  const update = useApiMutation((api, patch: Omit<InboundThreadPatch, 'addressId'>) => api.inbound.updateThread(thread.id, { addressId: stateAddress, ...patch }), undefined, false, true, [thread.id, stateAddress])
+  const update = useApiMutation((api, patch: Omit<InboundThreadPatch, 'addressId'>) => api.inbound.updateThread(thread.id, { addressId: stateAddress, ...patch }), undefined, false, invalidate.inboundThreads, [thread.id, stateAddress])
   const act = (patch: Omit<InboundThreadPatch, 'addressId'>) => { update.mutateAsync(patch).catch(() => undefined) }
   async function loadOlder() {
     if (!olderCursor) return
@@ -238,7 +239,7 @@ function Composer({ thread, target, explicit, onClearTarget, addressId, addresse
   const [chosen, setChosen] = useState('')
   const [automated, setAutomated] = useState<string | null>(null)
   const key = useRef({ key: '', body: '' })
-  const send = useApiMutation((api, input: Omit<Parameters<typeof api.inbound.reply>[1], 'idempotencyKey'>) => api.inbound.reply(thread.id, { ...input, idempotencyKey: idempotencyFor(key.current, { threadId: thread.id, ...input }) }), 'Reply queued', false, true, thread.id)
+  const send = useApiMutation((api, input: Omit<Parameters<typeof api.inbound.reply>[1], 'idempotencyKey'>) => api.inbound.reply(thread.id, { ...input, idempotencyKey: idempotencyFor(key.current, { threadId: thread.id, ...input }) }), 'Reply queued', false, invalidate.inboundReply, thread.id)
   useEffect(() => { setText(''); setReplyAll(false); send.reset(); key.current = { key: '', body: '' } }, [thread.id]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { setChosen('') }, [target.id])
   // A message linked to several addresses needs an explicit sender; the API refuses to guess (ADDRESS_REQUIRED).
@@ -298,7 +299,7 @@ function NewThreadDialog({ open, onOpenChange, addresses, defaultAddress, onSent
   const [text, setText] = useState('')
   const [errors, setErrors] = useState<Record<string, string>>({})
   const key = useRef({ key: '', body: '' })
-  const send = useApiMutation((api, input: Omit<Parameters<typeof api.inbound.startThread>[0], 'idempotencyKey'>) => api.inbound.startThread({ ...input, idempotencyKey: idempotencyFor(key.current, input) }), 'Message queued')
+  const send = useApiMutation((api, input: Omit<Parameters<typeof api.inbound.startThread>[0], 'idempotencyKey'>) => api.inbound.startThread({ ...input, idempotencyKey: idempotencyFor(key.current, input) }), 'Message queued', false, invalidate.inboundReply)
   useEffect(() => { if (open) { send.reset(); setErrors({}); setFrom(current => current || defaultAddress || (addresses.length === 1 ? addresses[0]!.id : '')) } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
   const selected = addresses.find(address => address.id === from)
   const sender = selected ? senderOf(selected) : null

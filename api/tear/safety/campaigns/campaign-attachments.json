@@ -1,0 +1,103 @@
+{
+  "version": 1,
+  "modelId": "campaign-attachments",
+  "cases": [
+    {
+      "name": "smoke-inline-and-file-sent",
+      "steps": [
+        {
+          "op": "AddInline",
+          "key": "img1"
+        },
+        {
+          "op": "AddFile",
+          "key": "doc1"
+        },
+        {
+          "op": "LaunchAndSend"
+        }
+      ],
+      "expected": {
+        "outcome": "pass",
+        "control": true
+      },
+      "note": "Control: inline PNG + PDF file in draft are both delivered by SES with matching CID"
+    },
+    {
+      "name": "canary-pr583-removed-inline-stays-attached",
+      "steps": [
+        {
+          "op": "AddInline",
+          "key": "img1"
+        },
+        {
+          "op": "RemoveInline",
+          "key": "img1"
+        },
+        {
+          "op": "LaunchAndSend"
+        }
+      ],
+      "bug": "canary_keep_removed_inline",
+      "expected": {
+        "outcome": "fail",
+        "operator": "reply:RemoveInline:/draftAttachments",
+        "verdict": "replyMismatch",
+        "canary": true
+      },
+      "note": "Canary (PR #583): keeping removed inline image in draft.attachments fails immediately and sends stray MIME part"
+    },
+    {
+      "name": "add-replace-remove-images-only-final-sent",
+      "steps": [
+        {
+          "op": "AddInline",
+          "key": "img1"
+        },
+        {
+          "op": "AddInline",
+          "key": "img2"
+        },
+        {
+          "op": "AddFile",
+          "key": "doc1"
+        },
+        {
+          "op": "RemoveInline",
+          "key": "img1"
+        },
+        {
+          "op": "RemoveFile",
+          "key": "doc1"
+        },
+        {
+          "op": "LaunchAndSend"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "After adding img1+img2+doc1 then removing img1+doc1, only img2 stays linked and is delivered by SES"
+    },
+    {
+      "name": "remove-all-attachments-sends-plain-html-only",
+      "steps": [
+        {
+          "op": "AddInline",
+          "key": "img1"
+        },
+        {
+          "op": "RemoveInline",
+          "key": "img1"
+        },
+        {
+          "op": "LaunchAndSend"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Removing the last inline image leaves zero DB links and zero SES attachments"
+    }
+  ]
+}

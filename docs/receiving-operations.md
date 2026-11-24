@@ -142,7 +142,13 @@ aws sns publish --topic-arn "$topic" --message "file://$dir/message" --query Mes
 aws sqs delete-message --queue-url "$q" --receipt-handle "$(jq -er '.Messages[0].ReceiptHandle' "$dir/item")"
 ```
 
-No SQS message means no replay. If an object or binding is gone, or a step fails, stop before delete. Do not reconstruct recipients from MIME headers. Workspace raw copies are required for private Bcc/trace stripping and separate access; S3 staging/quarantine/raw retention remains 3/30/90 days. Published attachments do not acquire an age-based expiry; only positively unreferenced uploads get an orphan expiration tag.
+No SQS message means no replay. If an object or binding is gone, or a step fails, stop before delete. Do not reconstruct recipients from MIME headers.
+
+### `MAILBOX_STAGING_UNDELIVERED` and the three-day replay gap
+
+When `BANE_RECEIVING_REDRIVE=true` on the shared pool, `mailbox.recoverStaging` only retires objects whose `quarantine/<mid>` copy succeeded **and** whose SES trace host belongs to no workspace in `mailbox_domains` (logging `MAILBOX_STAGING_QUARANTINED` with `ageHours` and writing `retiredReason` onto the completed job payload). If the trace names a workspace's receiving host—or if the quarantine copy itself is denied—the Worker logs `MAILBOX_STAGING_UNDELIVERED` at `error` (with `bucket`, `mid`, `region`, `ageHours`, `copied`, `jobId`, never the recipient address) and leaves the job `failed` with `MAILBOX_STAGING_ENVELOPE_UNKNOWN`.
+
+**Operational gap to be aware of:** dead-letter replay is manual and requires operator AWS access **within the three-day `staging/` lifetime** (the `quarantine/` copy lasts 30 days for forensic inspection, not automated replay). On `MAILBOX_STAGING_UNDELIVERED` (watchtower alert code), inspect `bane-inbound-dead-letters` and run the redrive steps above before `staging/<mid>` expires. Workspace raw copies are required for private Bcc/trace stripping and separate access; S3 staging/quarantine/raw retention remains 3/30/90 days. Published attachments do not acquire an age-based expiry; only positively unreferenced uploads get an orphan expiration tag.
 
 ## Capacity and alerts
 

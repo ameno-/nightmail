@@ -10,12 +10,14 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Link, useNavigate } from 'react-router'
 import { useQueryClient } from '@tanstack/react-query'
-import { Alert, Button, ConfirmDialog, Dialog, Field, Input, Select, type SelectOption } from '../../components/ui'
+import { Alert, Button, ConfirmDialog, Dialog, Field, Input, SearchField, Select, type SelectOption } from '../../components/ui'
+import { mergeAddresses, useAddressOptions, useResolvedAddresses } from '../../data/addresses'
+import { useDebounced } from '../../lib/pagination'
 import { PrivateAddress } from '../../components/PrivateAddress'
-import { useApiDef, useRequestScope } from '../../data/context'
+import { useApi, useRequestScope } from '../../data/context'
 import { queries } from '../../data/queries'
 import { isAbortError, request } from '../../data/live'
-import { staleAfterWrite } from '../../data/invalidation'
+import { invalidate, invalidateResources } from '../../data/invalidation'
 import { ApiError, errorText, type InboundAddress, type MailboxDomain } from '../../data/types'
 import { idempotencyFor, addressOption } from './shared'
 import { Flow, FlowFork, FlowItem, FlowStage, isSplit, splitOf } from './flow'
@@ -175,20 +177,30 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   const attempts = useRef(new Map<string, { key: string; body: string }>())
   const made = useRef(new Map<string, { id: string; name: string; key?: string | null }>())
   const attempt = (name: string) => { let a = attempts.current.get(name); if (!a) attempts.current.set(name, a = { key: '', body: '' }); return a }
-  const boxes = useApiDef(queries.inboundAddressOptions(), { enabled: open })
+  const api = useApi()
+  const [boxSearch, setBoxSearch] = useState('')
+  const [checkingAddress, setCheckingAddress] = useState(false)
+  const boxes = useAddressOptions({ enabled: open, search: useDebounced(boxSearch) })
   const current = saved?.address ?? form.address.trim().toLowerCase()
   const overview = useOverview({ q: current, kind: 'address', limit: 5 }, false, open && step !== 'address')
   const entry = saved ? overview.data?.routes.data.find(r => r.address?.id === saved.id) : undefined
+  const routeRefIds = [
+    saved?.id,
+    ...(Array.isArray(entry?.route?.to) ? entry.route.to : []),
+    ...(entry?.to ?? []).map(t => t.id),
+  ].filter((id): id is string => Boolean(id && id.startsWith('mbx_')))
+  const resolvedBoxes = useResolvedAddresses(routeRefIds, boxes.items, open && !boxes.isPending)
+  const allBoxes = mergeAddresses(resolvedBoxes.items, boxes.items)
   // The flow as it was when the builder opened it: what a save compares with, and the version it sends.
   const [opened, setOpened] = useState<{ entry: RouteEntry; overview: Overview } | null>(null)
   const [plan, setPlan] = useState<Plan | null>(null)
   // Opening starts afresh. Before the effects below, so the flow they capture from cached data isn't cleared after.
-  useEffect(() => { if (open) { setEditing(!!address); setStep(address ? 'flow' : 'address'); setSaved(address ?? null); setForm({ address: initial, displayName: '', lifetime: '', publicAddress: '' }); setErrors({}); setProblem(null); setPlan(null); setWaiting(null); setConflict(false); setOpened(null); setReplace(false); made.current.clear() } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => { if (open && editing && !opened && entry && overview.data && boxes.data) setOpened({ entry, overview: overview.data }) }, [open, editing, opened, entry, overview.data, boxes.data])
+  useEffect(() => { if (open) { setEditing(!!address); setStep(address ? 'flow' : 'address'); setSaved(address ?? null); setForm({ address: initial, displayName: '', lifetime: '', publicAddress: '' }); setErrors({}); setProblem(null); setPlan(null); setWaiting(null); setConflict(false); setOpened(null); setReplace(false); setBoxSearch(''); made.current.clear() } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (open && editing && !opened && entry && overview.data && !boxes.isPending && !resolvedBoxes.pending) setOpened({ entry, overview: overview.data }) }, [open, editing, opened, entry, overview.data, boxes.isPending, resolvedBoxes.pending])
   // A rule given by key changes that rule only (its fork and its sides), on an address with any number of rules:
   // the address's route and its other rules stay.
   const ruleMode = editing && !!ruleKey
-  const base = opened && boxes.data ? baseOf(opened.entry, opened.overview, boxes.data, ruleMode ? ruleKey : undefined) : null
+  const base = opened && !boxes.isPending && !resolvedBoxes.pending ? baseOf(opened.entry, opened.overview, allBoxes, ruleMode ? ruleKey : undefined) : null
   const fits = !editing || !opened || ((ruleMode || builderFits(opened.entry, opened.overview)) && !!base)
   // New rule's Split on an address that already splits its mail: replacing that rule is asked first, never assumed.
   const [replace, setReplace] = useState(false)
@@ -200,7 +212,7 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   // Rules the builder doesn't draw (ready-made ones, scripts) keep running beside it.
   const others = (opened?.entry.rules ?? entry?.rules ?? []).filter(key => key !== base?.rule?.key).length
   const set = (patch: Partial<Plan>) => { setPlan({ ...draft, ...patch }); setProblem(null); setErrors({}) }
-  const refresh = () => client.invalidateQueries({ predicate: query => staleAfterWrite(query.queryKey, false) })
+  const refresh = () => invalidateResources(client, invalidate.rules)
   const dirty = step !== 'done' && (plan !== null || form.address !== initial || !!form.displayName || !!form.lifetime || !!form.publicAddress)
   // Leaving with something typed asks first: closing, Cancel, or a link out of the builder.
   const close = (then?: () => void) => {
@@ -213,15 +225,24 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   // The * the address step turned away, for its button to the catch-all's or wildcard's route editor.
   const typed = form.address.trim().toLowerCase()
   const pattern = errors.address && EMAIL.test(typed) && typed.split('@')[0]!.includes('*') && receiving.some(d => d.name === typed.split('@')[1]) ? typed : null
-  const existing = errors.address ? (boxes.data ?? []).find(b => b.address === typed || b.aliases.includes(typed)) : undefined
-  function next(event: FormEvent) {
+  const existing = errors.address ? allBoxes.find(b => b.address === typed || b.aliases.includes(typed)) : undefined
+  async function next(event: FormEvent) {
     event.preventDefault()
+    if (boxes.isPending || checkingAddress) return
     const value = form.address.trim().toLowerCase(), sender = form.publicAddress.trim().toLowerCase(), found: Record<string, string> = {}
     if (!EMAIL.test(value)) found.address = 'Enter a full email address, such as support@example.com.'
     // A * makes a catch-all or wildcard (a route), never an address with a * in its name.
     else if (value.split('@')[0]!.includes('*')) found.address = value.startsWith('*@') ? catchAllNote : 'An address with * is a wildcard.'
     else if (receiving.length && !receiving.some(d => d.name === value.split('@')[1])) found.address = onDomains(receiving)
-    else if ((boxes.data ?? []).some(b => b.address === value || b.aliases.includes(value))) found.address = 'That address exists.'
+    else if (allBoxes.some(b => b.address === value || b.aliases.includes(value))) found.address = 'That address exists.'
+    else if (boxes.hasMore) {
+      setCheckingAddress(true)
+      try {
+        const matches = await api.inbound.addresses({ search: value })
+        if (matches.some(b => b.address === value || b.aliases.includes(value))) found.address = 'That address exists.'
+      } catch { /* Server validates uniqueness on submit if lookup fails. */ }
+      finally { setCheckingAddress(false) }
+    }
     if (sender && form.lifetime) found.publicAddress = 'Temporary addresses cannot have a public sender address.'
     else if (sender && !EMAIL.test(sender)) found.publicAddress = FULL
     // The API takes a public sender only as the same local part on a parent domain.
@@ -232,7 +253,7 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
 
   const scope = useRequestScope()
   const own = saved?.address ?? form.address.trim().toLowerCase()
-  const ownKeys = () => new Set((boxes.data ?? []).map(b => b.key).filter((k): k is string => !!k))
+  const ownKeys = () => new Set(allBoxes.map(b => b.key).filter((k): k is string => !!k))
   /** A key for an inbox a rule names, which a new one gets from its address (another inbox: PATCH, a write to its name only). */
   async function keyed(box: InboundAddress): Promise<string> {
     if (box.key) return box.key
@@ -243,7 +264,7 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
     if (!pick.startsWith('new:')) return ''
     const type = pick.slice(4) as NewType, v = value.trim().toLowerCase()
     if (!v) return type === 'forward' || type === 'inbox' ? 'Enter its address.' : 'Paste the URL.'
-    if (type === 'inbox') return !EMAIL.test(v) || v.split('@')[0]!.includes('*') ? FULL : !receiving.some(d => d.name === v.split('@')[1]) ? onDomains(receiving) : v === own || (boxes.data ?? []).some(b => b.address === v) ? 'That address exists: pick it above.' : ''
+    if (type === 'inbox') return !EMAIL.test(v) || v.split('@')[0]!.includes('*') ? FULL : !receiving.some(d => d.name === v.split('@')[1]) ? onDomains(receiving) : v === own || allBoxes.some(b => b.address === v) ? 'That address exists: pick it above.' : ''
     return type === 'slack' && !slackUrl.test(v) ? targetProblem('slack', v) : type === 'discord' && !discordUrl.test(v) ? targetProblem('discord', v) : targetProblem(type, v)
   }
 
@@ -266,7 +287,7 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
       if (pick === 'own') { out[side] = { param: `inbox:${ownKey ?? ''}`, route: null, chat: false }; continue }
       if (pick === 'store') { out[side] = { param: 'store', route: [], chat: false }; continue }
       if (pick === 'drop') { out[side] = { param: 'drop', route: 'drop', chat: false }; continue }
-      if (pick.startsWith('inbox:')) { const box = (boxes.data ?? []).find(b => b.id === pick.slice(6))!; out[side] = { param: asRule ? `inbox:${await keyed(box)}` : '', route: [box.id], chat: false }; continue }
+      if (pick.startsWith('inbox:')) { const box = allBoxes.find(b => b.id === pick.slice(6))!; out[side] = { param: asRule ? `inbox:${await keyed(box)}` : '', route: [box.id], chat: false }; continue }
       if (pick.startsWith('hook:')) { out[side] = { param: '', route: [pick.slice(5)], chat: false }; continue }
       if (pick.startsWith('endpoint:')) {
         const e = o.endpoints.find(x => x.source === 'endpoint' && x.name === pick.slice(9))!
@@ -393,15 +414,19 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   }
 
   const title = step === 'address' ? 'New address' : step === 'flow' && asking ? 'Replace the existing split?' : <PrivateAddress value={own} />
-  const ready = step !== 'flow' || (!!boxes.data && overview.data !== undefined && (!editing || !!opened))
+  const ready = step !== 'flow' || (!boxes.isPending && !resolvedBoxes.pending && overview.data !== undefined && (!editing || !!opened))
   const stepsPath = saved ? `/receiving/addresses/${saved.id}?tab=flow&edit=1` : null
-  const footer = step === 'address' ? <><Button onClick={() => close()}>Cancel</Button><Button variant="primary" type="submit" form="builder-address">Next</Button></>
+  const footer = step === 'address' ? <><Button onClick={() => close()}>Cancel</Button><Button variant="primary" type="submit" form="builder-address" loading={checkingAddress} disabled={boxes.isPending}>Next</Button></>
     : step === 'flow' && asking ? <><Button onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" onClick={() => { setReplace(true); setPlan({ ...base!.plan, split: true, condition: split!, value: '' }) }}>Replace it</Button></>
     : step === 'flow' ? <>{editing ? <Button disabled={busy} onClick={() => close()}>Cancel</Button> : <Button disabled={busy} onClick={() => setStep('address')}>Back</Button>}{fits && <Button variant="primary" type="submit" form="builder-flow" loading={busy} disabled={!ready || conflict}>Save</Button>}</>
     : <>{saved && <Link className="ui-button ui-button--secondary ui-button--md" to={`/receiving/addresses/${saved.id}`} onClick={() => onOpenChange(false)}>Open address</Link>}<Button variant="primary" onClick={() => onOpenChange(false)}>Done</Button></>
-  const picker = (side: Side, routeOnly: boolean) => <DestinationPicker id={`builder-${side}`} value={draft[side]} onChange={value => set({ [side]: value })} target={draft.targets[side] ?? ''} onTarget={value => set({ targets: { ...draft.targets, [side]: value } })} own={own} boxes={boxes.data ?? []} overview={overview.data!} routeOnly={routeOnly} error={errors[side]} domain={own.split('@')[1]} />
+  const picker = (side: Side, routeOnly: boolean) => <div className="stack">
+    {(boxes.hasMore || Boolean(boxSearch)) && <SearchField aria-label="Search addresses" placeholder="Search addresses" value={boxSearch} onChange={event => setBoxSearch(event.target.value)} />}
+    <DestinationPicker id={`builder-${side}`} value={draft[side]} onChange={value => set({ [side]: value })} target={draft.targets[side] ?? ''} onTarget={value => set({ targets: { ...draft.targets, [side]: value } })} own={own} boxes={allBoxes} overview={overview.data!} routeOnly={routeOnly} error={errors[side]} domain={own.split('@')[1]} />
+    {boxes.hasMore && <Button variant="ghost" size="sm" loading={boxes.loadingMore} onClick={boxes.loadMore}>Load more addresses</Button>}
+  </div>
   let body: ReactNode
-  if (step === 'address') body = <form id="builder-address" className="stack" onSubmit={next} noValidate>
+  if (step === 'address') body = <form id="builder-address" className="stack" onSubmit={e => void next(e)} noValidate>
     <Field label="Address" htmlFor="builder-address-input" error={errors.address}>
       <Input id="builder-address-input" type="email" value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} placeholder={`name@${receiving[0]?.name ?? 'example.com'}`} autoFocus autoComplete="off" />
     </Field>
