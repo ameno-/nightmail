@@ -302,12 +302,14 @@ export function registerSupportDeliverability(app: App, meta: Meta, WorkspaceFil
   });
 
   // ---------- 7. audience health ----------
-  const AudienceView = z.object({ contacts: z.number(), subscribed: z.number(), unknown: z.number(), unsubscribed: z.number(), suppressed: z.number(), suppressedBy: z.record(z.string(), z.number()),
+  const AudienceView = z.object({ contacts: z.number().describe('Exact count when sampled is false; number of contacts in the sample (estimate basis, not total audience size) when sampled is true.'), subscribed: z.number(), unknown: z.number(), unsubscribed: z.number(), suppressed: z.number(), suppressedBy: z.record(z.string(), z.number()),
     clicked30: z.number(), clicked90: z.number(), clicked180: z.number(), stale: z.number().describe('Observed for more than 180 days with no open or click.'), neverObserved: z.number(),
     role: z.number().describe('info@, sales@ and other role addresses.'), freeMail: z.number(), typoDomains: z.number().describe('gmial.com, hotmial.com, gmail.co…'), providers: z.record(z.string(), z.number()),
+    sampled: z.boolean().describe('true when this scope exceeded the sample cap (up to 10,000 contacts): all counts and shares in this view are estimates from the sample and must be presented as estimates, never exact totals.'),
+    sampleSize: z.number().int().nullable().describe('Number of contacts sampled when sampled is true; null when exact.'),
     shares: z.object({ stale: Rate.describe('stale / observed contacts'), role: Rate, freeMail: Rate }) });
   const Audience = z.object({
-    workspaceId: z.string(), computedAt: z.string(), lists: z.array(AudienceView.extend({ id: z.string(), name: z.string() })).describe('The 20 largest lists, or the one asked for.'),
+    workspaceId: z.string(), computedAt: z.string(), lists: z.array(AudienceView.extend({ id: z.string(), name: z.string(), listSize: z.number().int().nullable().describe('Total active members in the list when known (exact for lists <= 10,000 or when list counts are materialized; null otherwise).') })).describe('The 20 largest lists, or the one asked for.'),
     all: AudienceView.nullable().describe('Every contact; null when listId narrows the read.'),
     imports: z.array(z.object({ id: z.string(), listId: z.string().nullable(), listName: z.string().nullable(), at: z.string(), imported: z.number(), errors: z.number(), contacts: z.number().describe('Imported contacts sampled (up to 2,000 opaque contact IDs kept for 90 days) for bounce and complaint rates.'),
       hardBounce: Rate.describe('Sampled imported contacts suppressed for a hard bounce since the import.'), complaint: Rate, unsubscribed: z.number().describe('Sampled imported contacts currently unsubscribed.') })).describe('Committed imports of the last 90 days, newest first (10).'),

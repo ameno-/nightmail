@@ -466,28 +466,116 @@ const audienceMeasures = sql`count(*)::int AS contacts,
   count(*) FILTER (WHERE c.observed_since IS NULL)::int AS "neverObserved",
   count(*) FILTER (WHERE ${local} = ANY(${texts(ROLE)}))::int AS role, count(*) FILTER (WHERE ${cdomain} = ANY(${texts(FREE)}))::int AS "freeMail",
   count(*) FILTER (WHERE ${cdomain} = ANY(${texts(TYPOS)}))::int AS "typoDomains"`;
+const AUDIENCE_HEALTH_SAMPLE_LIMIT = 10_000, AUDIENCE_HEALTH_LIST_TOTAL_BUDGET = 40_000;
 type AudienceRow = { contacts: number; subscribed: number; unknown: number; unsubscribed: number; suppressed: number; clicked30: number; clicked90: number; clicked180: number; stale: number; neverObserved: number; role: number; freeMail: number; typoDomains: number };
+type AudienceViewResult = AudienceRow & { sampled: boolean; sampleSize: number | null; suppressedBy: Record<string, number>; providers: Record<string, number>; shares: { stale: Rate; role: Rate; freeMail: Rate } };
 /** Counts per list (the 20 largest, or one) and for the whole audience, imports of the last 90 days; never an address. */
 export async function audienceHealth(db: DbExecutor, wid: string, listId?: string) {
-  // Three statements per scope (counts, suppression reasons, providers), each grouped by list: never one per list.
-  const views = async (group: SQL, from: SQL) => {
-    const { rows } = await db.execute<AudienceRow & { g: string }>(sql`SELECT ${group} AS g, ${audienceMeasures} FROM ${from} GROUP BY 1`);
-    const { rows: reasons } = await db.execute<{ g: string; reason: string; n: number }>(sql`SELECT ${group} AS g, coalesce(c.suppression_reason, 'unspecified') AS reason, count(*)::int AS n FROM ${from} AND c.suppressed GROUP BY 1, 2`);
-    const { rows: providers } = await db.execute<{ g: string; provider: Provider; n: number }>(sql`SELECT x.g, ${providerSql(sql`x.domain`)} AS provider, sum(x.n)::int AS n
-      FROM (SELECT ${group} AS g, ${cdomain} AS domain, count(*) AS n FROM ${from} GROUP BY 1, 2) x GROUP BY 1, 2`);
-    return new Map(rows.map(({ g, ...counts }) => [g, { ...counts,
-      suppressedBy: Object.fromEntries(reasons.filter(r => r.g === g).sort((a, b) => b.n - a.n).slice(0, 10).map(r => [r.reason, r.n])),
-      providers: Object.fromEntries(providers.filter(p => p.g === g).sort((a, b) => b.n - a.n).map(p => [p.provider, p.n])),
-      shares: { stale: rate(counts.stale, counts.contacts - counts.neverObserved), role: rate(counts.role, counts.contacts), freeMail: rate(counts.freeMail, counts.contacts) } }]));
+  // Pick up to sampleLimit + 1 contact IDs per group uniformly by hashtextextended(id, 0) via Index-Only Scan
+  // (avoiding both time-ordered UUIDv7 skew and random-IO blowup inside LATERAL), fetch distinct contacts once,
+  // and compute core measures + suppression reasons + providers in one pass. Scopes exceeding sampleLimit mark
+  // sampled=true and sampleSize=contacts so callers present every count and share as an estimate, never an exact total.
+  const views = async (pickedCte: SQL, sampleLimit: number): Promise<Map<string, AudienceViewResult>> => {
+    const { rows } = await db.execute<AudienceRow & { g: string; picked_n: number; reasons: Array<{ reason: string; n: number }>; providers: Array<{ provider: Provider; n: number }> }>(sql`
+      WITH picked AS MATERIALIZED (${pickedCte}),
+      overflow AS (SELECT g, count(*)::int AS picked_n FROM picked GROUP BY g),
+      kept AS MATERIALIZED (
+        SELECT contact_id, array_agg(g) AS gs FROM picked WHERE rn <= ${sampleLimit} GROUP BY contact_id
+      ),
+      -- LATERAL on c.id alone forces audience_contacts_pkey even when table statistics are stale; workspace/deleted checks run outside.
+      fetched AS (
+        SELECT k.gs, c.email, c.marketing_consent, c.suppressed, c.suppression_reason, c.last_open_at, c.last_click_at, c.observed_since
+        FROM kept k CROSS JOIN LATERAL (
+          SELECT c.workspace_id, c.deleted_at, c.email, c.marketing_consent, c.suppressed, c.suppression_reason, c.last_open_at, c.last_click_at, c.observed_since
+          FROM audience_contacts c
+          WHERE c.id = k.contact_id
+          LIMIT 1
+        ) c
+        WHERE c.workspace_id = ${wid} AND c.deleted_at IS NULL
+      ),
+      c AS MATERIALIZED (
+        SELECT g, email, marketing_consent, suppressed, suppression_reason, last_open_at, last_click_at, observed_since
+        FROM fetched, unnest(gs) AS g
+      ),
+      measures AS (SELECT g, ${audienceMeasures} FROM c GROUP BY g),
+      reasons AS (
+        SELECT g, jsonb_agg(jsonb_build_object('reason', reason, 'n', n) ORDER BY n DESC, reason) AS reasons
+        FROM (
+          SELECT g, coalesce(suppression_reason, 'unspecified') AS reason, count(*)::int AS n,
+            row_number() OVER (PARTITION BY g ORDER BY count(*) DESC, coalesce(suppression_reason, 'unspecified')) AS rk
+          FROM c WHERE suppressed GROUP BY 1, 2
+        ) r WHERE rk <= 10 GROUP BY g
+      ),
+      providers AS (
+        SELECT g, jsonb_agg(jsonb_build_object('provider', provider, 'n', n) ORDER BY n DESC, provider) AS providers
+        FROM (
+          SELECT x.g, ${providerSql(sql`x.domain`)} AS provider, sum(x.n)::int AS n
+          FROM (SELECT g, ${cdomain} AS domain, count(*) AS n FROM c GROUP BY 1, 2) x GROUP BY 1, 2
+        ) p GROUP BY g
+      )
+      SELECT m.*, o.picked_n, coalesce(r.reasons, '[]'::jsonb) AS reasons, coalesce(p.providers, '[]'::jsonb) AS providers
+      FROM measures m JOIN overflow o USING (g) LEFT JOIN reasons r USING (g) LEFT JOIN providers p USING (g)`);
+    return new Map(rows.map(({ g, picked_n, reasons, providers, ...counts }) => {
+      const sampled = picked_n > sampleLimit;
+      return [g, { ...counts, sampled, sampleSize: sampled ? counts.contacts : null,
+        suppressedBy: Object.fromEntries(reasons.map(r => [r.reason, r.n])),
+        providers: Object.fromEntries(providers.map(p => [p.provider, p.n])),
+        shares: { stale: rate(counts.stale, counts.contacts - counts.neverObserved), role: rate(counts.role, counts.contacts), freeMail: rate(counts.freeMail, counts.contacts) } }];
+    }));
   };
-  const empty = () => ({ contacts: 0, subscribed: 0, unknown: 0, unsubscribed: 0, suppressed: 0, clicked30: 0, clicked90: 0, clicked180: 0, stale: 0, neverObserved: 0, role: 0, freeMail: 0, typoDomains: 0,
-    suppressedBy: {}, providers: {}, shares: { stale: rate(0, 0), role: rate(0, 0), freeMail: rate(0, 0) } });
-  const { rows: lists } = await db.execute<{ id: string; name: string; size: number }>(sql`SELECT l.id, l.name, (SELECT count(*)::int FROM audience_list_members m WHERE m.workspace_id = l.workspace_id AND m.list_id = l.id) AS size
+  const empty = (): AudienceViewResult => ({ contacts: 0, subscribed: 0, unknown: 0, unsubscribed: 0, suppressed: 0, clicked30: 0, clicked90: 0, clicked180: 0, stale: 0, neverObserved: 0, role: 0, freeMail: 0, typoDomains: 0,
+    sampled: false, sampleSize: null, suppressedBy: {}, providers: {}, shares: { stale: rate(0, 0), role: rate(0, 0), freeMail: rate(0, 0) } });
+  // Use audience_list_counts when present (audience-scale); otherwise bound each list's sort probe at 10,001 rows.
+  const hasListCounts = Boolean((await db.execute<{ t: string | null }>(sql`SELECT to_regclass('public.audience_list_counts')::text AS t`)).rows[0]?.t);
+  const listSizeSql = hasListCounts
+    ? sql`coalesce((SELECT sum(subscribed + unsubscribed + unknown + suppressed)::int FROM audience_list_counts n WHERE n.workspace_id = l.workspace_id AND n.list_id = l.id), 0)`
+    : sql`(SELECT count(*)::int FROM (SELECT 1 FROM audience_list_members m WHERE m.workspace_id = l.workspace_id AND m.list_id = l.id LIMIT ${AUDIENCE_HEALTH_SAMPLE_LIMIT + 1}) x)`;
+  const { rows: lists } = await db.execute<{ id: string; name: string; size: number }>(sql`SELECT l.id, l.name, ${listSizeSql} AS size
     FROM audience_lists l WHERE l.workspace_id = ${wid} ${listId ? sql`AND l.id = ${listId}` : sql``} ORDER BY size DESC, l.id LIMIT ${LIMITS.groups}`);
-  const byList = lists.length ? await views(sql`m.list_id`, sql`audience_list_members m JOIN audience_contacts c ON c.workspace_id = m.workspace_id AND c.id = m.contact_id
-    WHERE m.workspace_id = ${wid} AND m.list_id = ANY(${texts(lists.map(l => l.id))}) AND c.deleted_at IS NULL`) : new Map();
-  const perList = lists.map(list => ({ id: list.id, name: list.name, ...byList.get(list.id) ?? empty() }));
-  const all = listId ? null : (await views(sql`''`, sql`audience_contacts c WHERE c.workspace_id = ${wid} AND c.deleted_at IS NULL`)).get('') ?? empty();
+  // Keep lists that fit within AUDIENCE_HEALTH_SAMPLE_LIMIT (10,000) exact; only split the sampling budget across lists over it.
+  const exactLists = lists.filter(l => l.size <= AUDIENCE_HEALTH_SAMPLE_LIMIT);
+  const largeLists = lists.filter(l => l.size > AUDIENCE_HEALTH_SAMPLE_LIMIT);
+  const byList = new Map<string, AudienceViewResult>();
+  if (exactLists.length) {
+    const exactMap = await views(sql`
+      SELECT l.list_id AS g, x.contact_id, x.rn
+      FROM unnest(${texts(exactLists.map(l => l.id))}) AS l(list_id)
+      CROSS JOIN LATERAL (
+        SELECT m.contact_id, row_number() OVER () AS rn
+        FROM (
+          SELECT m.contact_id FROM audience_list_members m
+          WHERE m.workspace_id = ${wid} AND m.list_id = l.list_id
+          ORDER BY m.contact_id LIMIT ${AUDIENCE_HEALTH_SAMPLE_LIMIT + 1}
+        ) m
+      ) x`, AUDIENCE_HEALTH_SAMPLE_LIMIT);
+    for (const [k, v] of exactMap) byList.set(k, v);
+  }
+  if (largeLists.length) {
+    const perLargeLimit = Math.min(AUDIENCE_HEALTH_SAMPLE_LIMIT, Math.max(2_000, Math.floor(AUDIENCE_HEALTH_LIST_TOTAL_BUDGET / largeLists.length)));
+    const largeMap = await views(sql`
+      SELECT l.list_id AS g, x.contact_id, x.rn
+      FROM unnest(${texts(largeLists.map(l => l.id))}) AS l(list_id)
+      CROSS JOIN LATERAL (
+        SELECT m.contact_id, row_number() OVER () AS rn
+        FROM (
+          SELECT m.contact_id FROM audience_list_members m
+          WHERE m.workspace_id = ${wid} AND m.list_id = l.list_id
+          ORDER BY hashtextextended(m.contact_id, 0) LIMIT ${perLargeLimit + 1}
+        ) m
+      ) x`, perLargeLimit);
+    for (const [k, v] of largeMap) byList.set(k, v);
+  }
+  const perList = lists.map(list => ({
+    id: list.id, name: list.name,
+    listSize: hasListCounts || list.size <= AUDIENCE_HEALTH_SAMPLE_LIMIT ? list.size : null,
+    ...byList.get(list.id) ?? empty(),
+  }));
+  const all = listId ? null : (await views(sql`
+    SELECT ''::text AS g, x.id AS contact_id, row_number() OVER () AS rn
+    FROM (
+      SELECT id FROM audience_contacts WHERE workspace_id = ${wid}
+      ORDER BY hashtextextended(id, 0) LIMIT ${AUDIENCE_HEALTH_SAMPLE_LIMIT + 1}
+    ) x`, AUDIENCE_HEALTH_SAMPLE_LIMIT)).get('') ?? empty();
   // Imports: each committed import's contacts, now. Suppressions after the import stand for its bounces and complaints:
   // the outcome of first mailing that list (Nightmail does not record which send first reached each imported contact).
   // Reads up to 2,000 opaque contact IDs saved at commit (sample_contact_ids, zero PII) so support diagnosis stays
@@ -516,12 +604,12 @@ export async function audienceHealth(db: DbExecutor, wid: string, listId?: strin
     hardBounce: rate(i.hard_bounced, i.matched), complaint: rate(i.complained, i.matched), unsubscribed: i.unsubscribed }));
   const findings: Finding[] = [];
   for (const [scope, v] of [...perList.map(l => [`list ${l.name}`, l] as const), ...(all ? [['all contacts', all] as const] : [])]) {
-    const s = v.shares;
-    if (s.stale.value !== null && s.stale.denominator >= 100 && s.stale.value > THRESHOLDS.stale) findings.push({ severity: 'notice', code: 'STALE_CONTACTS', scope, evidence: { stale: v.stale, observed: s.stale.denominator, rate: s.stale.value },
-      message: `${num(v.stale)} of ${num(s.stale.denominator)} observed contacts in ${scope} have not opened or clicked in 180 days (${pct(s.stale.value)}). Add a sunset policy, or send a re-permission campaign and keep those who click.` });
-    if (s.role.value !== null && v.contacts >= 100 && s.role.value > THRESHOLDS.role) findings.push({ severity: 'notice', code: 'ROLE_ADDRESSES', scope, evidence: { role: v.role, contacts: v.contacts, rate: s.role.value },
-      message: `${num(v.role)} of ${num(v.contacts)} contacts in ${scope} are role addresses such as info@ or sales@ (${pct(s.role.value)}). They rarely opted in themselves: validate at signup and use double opt-in.` });
-    if (v.typoDomains > 0) findings.push({ severity: 'notice', code: 'TYPO_DOMAINS', scope, evidence: { contacts: v.typoDomains }, message: `${num(v.typoDomains)} contacts in ${scope} use a mistyped domain (gmial.com, hotmial.com…). They bounce: fix or remove them, and validate at signup.` });
+    const s = v.shares, sampleTag = v.sampled ? ` (estimated from a ${num(v.sampleSize!)}-contact sample)` : '';
+    if (s.stale.value !== null && s.stale.denominator >= 100 && s.stale.value > THRESHOLDS.stale) findings.push({ severity: 'notice', code: 'STALE_CONTACTS', scope, evidence: { stale: v.stale, observed: s.stale.denominator, rate: s.stale.value, ...(v.sampled && v.sampleSize !== null ? { sampleSize: v.sampleSize } : {}) },
+      message: `${num(v.stale)} of ${num(s.stale.denominator)} observed contacts in ${scope}${sampleTag} have not opened or clicked in 180 days (${pct(s.stale.value)}). Add a sunset policy, or send a re-permission campaign and keep those who click.` });
+    if (s.role.value !== null && v.contacts >= 100 && s.role.value > THRESHOLDS.role) findings.push({ severity: 'notice', code: 'ROLE_ADDRESSES', scope, evidence: { role: v.role, contacts: v.contacts, rate: s.role.value, ...(v.sampled && v.sampleSize !== null ? { sampleSize: v.sampleSize } : {}) },
+      message: `${num(v.role)} of ${num(v.contacts)} contacts in ${scope}${sampleTag} are role addresses such as info@ or sales@ (${pct(s.role.value)}). They rarely opted in themselves: validate at signup and use double opt-in.` });
+    if (v.typoDomains > 0) findings.push({ severity: 'notice', code: 'TYPO_DOMAINS', scope, evidence: { contacts: v.typoDomains, ...(v.sampled && v.sampleSize !== null ? { sampleSize: v.sampleSize } : {}) }, message: v.sampled && v.sampleSize !== null ? `${num(v.typoDomains)} of the ${num(v.sampleSize)} sampled contacts in ${scope} use a mistyped domain (gmial.com, hotmial.com…). They bounce: fix or remove them, and validate at signup.` : `${num(v.typoDomains)} contacts in ${scope} use a mistyped domain (gmial.com, hotmial.com…). They bounce: fix or remove them, and validate at signup.` });
   }
   for (const i of importViews) if (i.hardBounce.value !== null && i.hardBounce.numerator >= THRESHOLDS.minimumEvents && i.hardBounce.value > THRESHOLDS.firstSendBounce)
     findings.push({ severity: 'serious', code: 'IMPORT_BOUNCES', scope: `import ${i.at.slice(0, 10)}`, evidence: { hardBounced: i.hardBounce.numerator, contacts: i.contacts, rate: i.hardBounce.value, threshold: THRESHOLDS.firstSendBounce },
