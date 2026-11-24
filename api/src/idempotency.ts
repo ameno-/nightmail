@@ -1,6 +1,7 @@
 import { z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
 import { ApiError, digest, webhookUrlHint, type Ctx, type Database, type DbExecutor } from './core.js';
+import { utf8Bytes } from './read-bounds.js';
 import { SEND_LIMITS } from './send-limits.js';
 
 /**
@@ -62,7 +63,23 @@ const where = (s: IdempotencyScope) => sql`workspace_id = ${s.workspaceId} AND a
 async function claim(db: DbExecutor, s: IdempotencyScope, hash: string) {
   return (await db.execute<{ state: ClaimState | null }>(sql`SELECT ${claimKey(s, hash)} AS state`)).rows[0]!.state;
 }
-const complete = (db: DbExecutor, s: IdempotencyScope, result: unknown) => db.execute(sql`UPDATE sending_idempotency SET result = ${JSON.stringify(result)}::jsonb WHERE ${where(s)}`);
+export const MAX_IDEMPOTENT_RESULT_BYTES = 256 * 1024;
+const oversizedResultError = (id?: string | null) => {
+  const err = new ApiError(409, 'IDEMPOTENT_RESPONSE_TOO_LARGE', `This Idempotency-Key already completed${id ? ` (${id})` : ''}, but its response exceeded the replay size limit. Fetch the resource instead of repeating the request.`);
+  if (id) err.details = [{ id }];
+  return err;
+};
+const complete = (db: DbExecutor, s: IdempotencyScope, result: unknown) => {
+  const serialized = JSON.stringify(result);
+  if (utf8Bytes(serialized) > MAX_IDEMPOTENT_RESULT_BYTES) {
+    const rec = result && typeof result === 'object' ? result as { status?: unknown; id?: unknown; body?: unknown } : null;
+    const bodyId = rec?.body && typeof rec.body === 'object' && typeof (rec.body as { id?: unknown }).id === 'string' ? (rec.body as { id: string }).id : null;
+    const id = typeof rec?.id === 'string' ? rec.id : bodyId;
+    const compact = typeof rec?.status === 'number' ? { status: rec.status, oversized: true, id } : { oversized: true, id };
+    return db.execute(sql`UPDATE sending_idempotency SET result = ${JSON.stringify(compact)}::jsonb WHERE ${where(s)}`);
+  }
+  return db.execute(sql`UPDATE sending_idempotency SET result = ${serialized}::jsonb WHERE ${where(s)}`);
+};
 // Frees a claim that has no result: one whose request was refused or never wrote.
 // Requests whose handler failed inside a transaction that rolled back: nothing was committed, so their key is
 // released like a refusal's, and a retry runs again (rolledBack). A failure that may follow a commit keeps the unknown outcome.
@@ -77,6 +94,7 @@ export function replay<T>(state: ClaimState, hash: string): T {
   if (state.hash !== hash) throw new ApiError(409, 'IDEMPOTENCY_CONFLICT', 'This Idempotency-Key was already used with a different request. Use a new key for a new request.');
   const stored = state.previous;
   if (stored?.unknown === true) throw new ApiError(409, 'IDEMPOTENCY_OUTCOME_UNKNOWN', 'The original request failed after it may have committed. Check whether it took effect before starting another request.');
+  if (stored?.oversized === true) throw oversizedResultError(typeof stored.id === 'string' ? stored.id : null);
   if (!stored) {
     if (Date.now() - Date.parse(state.createdAt!) >= 600_000) throw new ApiError(409, 'IDEMPOTENCY_OUTCOME_UNKNOWN', 'No result was recorded within ten minutes. Check whether the request took effect before starting another.');
     throw inProgress();
@@ -176,8 +194,9 @@ function idempotentCreates(paths: RegExp[]) {
     const db = c.env.db;
     const state = await claim(db, identity, hash);
     if (state) {
-      const stored = replay<{ status: number; body?: unknown; withheld?: boolean; id?: string | null }>(state, hash);
+      const stored = replay<{ status: number; body?: unknown; withheld?: boolean; oversized?: boolean; id?: string | null }>(state, hash);
       if (stored.withheld) throw new ApiError(409, 'IDEMPOTENT_SECRET_WITHHELD', `This Idempotency-Key already created ${stored.id ?? 'the resource'}. Its secret was shown once and is not stored; revoke it and create another if it was lost.`);
+      if (stored.oversized) throw oversizedResultError(stored.id);
       c.header('Idempotent-Replayed', 'true');
       // Receipts created before URL masking contain the full outbound webhook URL.
       if (c.req.path === '/v1/webhooks' && stored.body && typeof stored.body === 'object' && 'url' in stored.body && typeof stored.body.url === 'string') {
@@ -200,13 +219,74 @@ function idempotentCreates(paths: RegExp[]) {
       if (status >= 400) await settle(status);
       return c.res;
     }
-    let body: unknown = null;
-    try { body = await c.res.clone().json(); } catch { body = null; }
+    // Inspect the response body once without calling Response.clone() (teeing + cancelling one branch deadlocks
+    // under Node's stream implementation when the other branch has not been consumed yet). For responses within
+    // MAX_IDEMPOTENT_RESULT_BYTES we buffer and replay the exact bytes; once a response exceeds the limit we stop
+    // buffering, extract its leading resource id, and pipe the remaining chunks directly to the caller.
+    const captured = await captureBoundedResponse(c.res, MAX_IDEMPOTENT_RESULT_BYTES);
+    c.res = captured.response;
+    if (captured.oversized) {
+      await complete(db, identity, { status, oversized: true, id: captured.id });
+      return c.res;
+    }
+    const body = captured.body;
     const withheld = carriesSecret(body);
     const id = body && typeof body === 'object' && typeof (body as { id?: unknown }).id === 'string' ? (body as { id: string }).id : null;
     await complete(db, identity, withheld ? { status, withheld: true, id } : { status, body });
     return c.res;
   };
+}
+async function captureBoundedResponse(res: Response, limit: number): Promise<
+  { oversized: true; id: string | null; response: Response } | { oversized: false; body: unknown; response: Response }
+> {
+  if (!res.body) return { oversized: false, body: null, response: res };
+  const reader = res.body.getReader();
+  const kept: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        reader.releaseLock();
+        const combined = concatBytes(kept, bytes);
+        const text = new TextDecoder().decode(combined);
+        let body: unknown = null;
+        try { body = text ? JSON.parse(text) : null; } catch { body = null; }
+        return { oversized: false, body, response: new Response(combined as Uint8Array<ArrayBuffer>, { status: res.status, statusText: res.statusText, headers: res.headers }) };
+      }
+      kept.push(value);
+      bytes += value.byteLength;
+      if (bytes > limit) {
+        const headText = new TextDecoder().decode(concatBytes(kept, Math.min(bytes, 1024)));
+        const m = /"id"\s*:\s*"([^"\\]{1,120})"/.exec(headText);
+        let index = 0;
+        const passthrough = new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            if (index < kept.length) { controller.enqueue(kept[index++]!); return; }
+            const next = await reader.read();
+            if (next.done) { reader.releaseLock(); controller.close(); return; }
+            controller.enqueue(next.value);
+          },
+          cancel(reason) { return reader.cancel(reason).catch(() => {}); },
+        });
+        return { oversized: true, id: m ? m[1]! : null, response: new Response(passthrough, { status: res.status, statusText: res.statusText, headers: res.headers }) };
+      }
+    }
+  } catch (error) {
+    reader.releaseLock();
+    throw error;
+  }
+}
+function concatBytes(chunks: Uint8Array[], maxBytes: number): Uint8Array {
+  const out = new Uint8Array(maxBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    if (offset >= maxBytes) break;
+    const take = Math.min(chunk.byteLength, maxBytes - offset);
+    out.set(chunk.subarray(0, take), offset);
+    offset += take;
+  }
+  return out;
 }
 export const authenticatedCreates = idempotentCreates(AUTHENTICATED_CREATES);
 export const mailboxCreates = idempotentCreates(MAILBOX_CREATES);
