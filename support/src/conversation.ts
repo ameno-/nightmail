@@ -44,7 +44,7 @@ const TURNS_PER_CONVERSATION = 60;
 const TOKEN_BUDGET = 500_000;
 /** How long a turn's account summary (<account>) is reused, so quick follow-up turns keep the same, cached prompt. */
 const CONTEXT_MS = 5 * 60_000;
-const CHAT_IDLE_MS = 24 * 3_600_000, EMAIL_IDLE_MS = 7 * 86_400_000, KEEP_AFTER_CLOSE_MS = 7 * 86_400_000;
+const CHAT_IDLE_MS = 30 * 86_400_000, EMAIL_IDLE_MS = 7 * 86_400_000, KEEP_AFTER_CLOSE_MS = 7 * 86_400_000;
 const EMAIL_BURST = 5, EMAIL_BURST_MS = 10 * 60_000;
 const MAX_FRAME = 16_384, MAX_TEXT = 8000;
 const MODEL_LABEL = `${MODEL.model}#${MODEL.variant}`;
@@ -575,9 +575,12 @@ export class SupportConversation extends DurableObject<Env> {
     if (opening) this.record({ id: newId('msg'), role: 'user', kind: null, text: opening, at: new Date().toISOString(), tools: [] });
     const pair = new WebSocketPair();
     this.ctx.acceptWebSocket(pair[1]);
+    const messages = this.history();
     this.sendTo(pair[1], this.hello(meta));
-    this.sendTo(pair[1], { type: 'history', messages: this.history(), pending: { consent: this.pendingConsent(), ticket: meta.ticketId ? { ticketId: meta.ticketId } : null, actions: cards } });
+    this.sendTo(pair[1], { type: 'history', messages, pending: { consent: this.pendingConsent(), ticket: meta.ticketId ? { ticketId: meta.ticketId } : null, actions: cards } });
     if (opening) this.enqueueTurn({ text: opening });
+    // Pull any staff replies queued in Nightmail's outbox while the panel was closed (in case a wake was missed).
+    if (messages.length) this.ctx.waitUntil(this.wake().catch(error => logError(error, { event: 'inbox', code: 'SUPPORT_CONNECT_WAKE_FAILED' }, 'warn')));
     this.warm();
     return new Response(null, { status: 101, webSocket: pair[0] });
   }
@@ -601,6 +604,7 @@ export class SupportConversation extends DurableObject<Env> {
         if (this.sql.exec('INSERT INTO _support_client_ids (id) VALUES (?) ON CONFLICT (id) DO NOTHING', clientId).rowsWritten === 0) return;
         const messageId = newId('msg');
         for (const id of requested) this.sql.exec('UPDATE _support_attachments SET message_id = ? WHERE id = ?', messageId, id);
+        this.update(m => { m.lastActivity = Date.now(); });
         this.record({ id: messageId, role: 'user', kind: null, text, at: new Date().toISOString(), tools: [], attachments: requested.map(id => unused.get(id)!) });
         this.enqueueTurn({ text: text || '(The customer sent a screenshot without text.)', attachments: requested });
         return;
@@ -814,6 +818,7 @@ export class SupportConversation extends DurableObject<Env> {
       } else {
         const open = this.ctx.getWebSockets().length > 0;
         if (!progress.recorded) {
+          this.update(m => { m.lastActivity = Date.now(); });
           this.record({ id: reply.id, role: 'staff', kind: 'staff', text: reply.text, at, tools: [], author });
           this.broadcast({ type: 'message.start', messageId: reply.id, kind: 'staff', author });
           this.broadcast({ type: 'message.end', messageId: reply.id, text: reply.text, redacted: false });
@@ -1008,6 +1013,9 @@ export class SupportConversation extends DurableObject<Env> {
       if (refused === 'closed') return;
       this.broadcast({ type: 'error', code: 'BUDGET_EXHAUSTED', message: `This conversation has reached its limit. I’ve passed it to the ${productName} team, who will follow up by email.`, retryable: false });
       await this.harnessTicket(meta, internal('Conversation limit reached', `The conversation reached its ${refused === 'turns' ? `${TURNS_PER_CONVERSATION}-turn` : 'token'} limit before it was resolved.`, input.text ?? '', 'Read the conversation and reply to the customer.'));
+      // The panel resumes this person's open chat on every open, and each message keeps it from going idle: left open, a
+      // spent conversation would answer nothing for up to 30 days. It ends here; the team follows up by email.
+      await this.close('limit');
       return;
     }
     // Staff have paused the agent (api/src/support-inbox.ts): the message is recorded and mirrored, and no turn runs. The
