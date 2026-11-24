@@ -220,7 +220,7 @@ export async function claimUnroutedBatch(
     threads AS (
       INSERT INTO mailbox_threads AS t(mailbox_id, thread_id, workspace_id, message_count, unread_count, last_message_at, last_inbound_at, spam, labels)
       SELECT ${mailboxId}, a.thread_id, ${scope.workspaceId}, count(*)::int, count(*)::int, max(a.received_at), max(a.received_at),
-             bool_or(d.spam), CASE WHEN bool_or(d.spam) THEN ARRAY['spam'] ELSE ARRAY[]::text[] END
+             (array_agg(d.spam ORDER BY a.received_at, a.message_id))[1], CASE WHEN (array_agg(d.spam ORDER BY a.received_at, a.message_id))[1] THEN ARRAY['spam'] ELSE ARRAY[]::text[] END
       FROM added a JOIN distinct_msgs d ON d.message_id = a.message_id
       GROUP BY a.thread_id
       ON CONFLICT (mailbox_id, thread_id) DO UPDATE SET
@@ -254,7 +254,7 @@ export async function claimUnroutedBatch(
 /** Enqueues or refreshes the durable background job that drains remaining unrouted mail for a mailbox. */
 export async function queueClaimUnrouted(tx: DbExecutor, workspaceId: string, mailboxId: string) {
   const jobId = `claim-unrouted:${mailboxId}`;
-  await tx.execute(sql`
+  const queued = await tx.execute<{ status: string }>(sql`
     INSERT INTO jobs(id, type, workspace_id, payload)
     VALUES (${jobId}, 'mailbox.claimUnrouted', ${workspaceId}, jsonb_build_object('mailboxId', ${mailboxId}::text))
     ON CONFLICT (id) DO UPDATE SET
@@ -264,7 +264,11 @@ export async function queueClaimUnrouted(tx: DbExecutor, workspaceId: string, ma
       available_at = now(),
       lease_until = CASE WHEN jobs.status = 'running' THEN jobs.lease_until ELSE NULL END,
       last_error = NULL
+    RETURNING status
   `);
+  if (queued.rows[0]?.status === 'running') {
+    await tx.execute(sql`INSERT INTO jobs(id, type, workspace_id, payload) VALUES (public.row_id('job'), 'mailbox.claimUnrouted', ${workspaceId}, jsonb_build_object('mailboxId', ${mailboxId}::text))`);
+  }
 }
 
 /**

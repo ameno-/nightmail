@@ -26578,6 +26578,21 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const totals=(await c1.query('SELECT count(*)::int total,count(DISTINCT message_id)::int uniq FROM mailbox_messages WHERE workspace_id=$1',[rWid])).rows[0];
       assert.deepEqual(totals,{total:40,uniq:40},'every unrouted message claimed by exactly one inbox with zero duplicates');
       assert.equal((await c1.query('SELECT count(*)::int n FROM mail_unrouted WHERE workspace_id=$1',[rWid])).rows[0].n,0);
+
+      // 4. Review fixes: (a) a mixed thread with a normal first message and a spam reply keeps spam=false; (b) queueClaimUnrouted queues a separate job while one is running.
+      const mixThr = unique('thr'), mixM1 = unique('msg'), mixM2 = unique('msg'), mixAddr = 'mixspam@' + host;
+      await db.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)', [mixThr, wid]);
+      await db.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,received_at,size_bytes,spam,lifecycle) VALUES($1,$3,$4,'inbound',now()-interval '2 minutes',100,false,'default'),($2,$3,$4,'inbound',now()-interval '1 minute',100,true,'default')", [mixM1, mixM2, wid, mixThr]);
+      await db.query('INSERT INTO mail_unrouted(workspace_id,message_id,address) VALUES($1,$2,$4),($1,$3,$4)', [wid, mixM1, mixM2, mixAddr]);
+      const mixBox = ok(await local('POST', '/v1/inbound/addresses', { address: mixAddr }), 201);
+      const mixRow = (await db.query('SELECT spam, labels FROM mailbox_threads WHERE mailbox_id=$1 AND thread_id=$2', [mixBox.id, mixThr])).rows[0];
+      assert.deepEqual(mixRow, { spam: false, labels: [] }, 'thread takes spam flag from earliest message in batch');
+      const { queueClaimUnrouted } = await import('./src/mailbox-store.js');
+      await queueClaimUnrouted(runtime.db, wid, mixBox.id);
+      await db.query("UPDATE jobs SET status='running', lease_until=now()+interval '5 minutes' WHERE id=$1", ['claim-unrouted:' + mixBox.id]);
+      await queueClaimUnrouted(runtime.db, wid, mixBox.id);
+      const extraJobs = (await db.query("SELECT count(*)::int n FROM jobs WHERE workspace_id=$1 AND type='mailbox.claimUnrouted' AND payload->>'mailboxId'=$2 AND status='pending'", [wid, mixBox.id])).rows[0].n;
+      assert.equal(extraJobs, 1, 'separate pending claim job queued while existing job is running');
     });
   });
   test('mail gateway: a signed folder edit waiting behind deletion is denied without a write',async t=>{
