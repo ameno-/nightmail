@@ -12,7 +12,8 @@ import './support.css'
 /** Nightmail's sentence for a proposed change, from its own records, with each name a person typed (a workspace, a
  *  campaign, the end of a webhook URL) put in as text and set apart. Never Markdown or HTML. */
 export function ActionSummary({ action }: { action: SupportAction }) {
-  const { template, labels } = action.parts
+  const template = action.parts?.template ?? action.summary ?? ''
+  const labels = action.parts?.labels ?? {}
   return <>{template.split(/(\{[a-z]+\})/g).map((piece, i) => {
     const name = /^\{([a-z]+)\}$/.exec(piece)?.[1]
     return name && Object.hasOwn(labels, name) ? <span key={i} className="support-action__name">“{labels[name]}”</span> : piece

@@ -17,9 +17,9 @@ export interface TicketFiled {
   /** billing, bug, deliverability, account, abuse_report, feature_request or other. Absent from older servers. */
   ticketType?: string
   /** The topic within the type when there is one (refund, limit_increase…), else the type. */
-  category: string
-  replyTo: string
-  expect: string
+  category?: string
+  replyTo?: string | null
+  expect?: string | null
 }
 /** A screenshot as the server keeps it (§5.1); the image itself never comes back. */
 export interface AttachmentInfo { id: string; type: string; width: number | null; height: number | null; name: string | null }

@@ -398,7 +398,7 @@ describe('support Worker', () => {
     const before = recorded.length;
     const chat = await connect(started.body.socketUrl);
     const hello = await chat.until(f => f.type === 'hello');
-    assert.deepEqual([hello.v, hello.agent, hello.workspace, hello.channel], [1, { name: 'Nightmail support', ai: true }, { id: 'ws_acme', name: 'Acme Prod' }, 'chat']);
+    assert.deepEqual([hello.v, hello.agent, hello.workspace, hello.channel], [1, { name: 'Nightmail Support', ai: true }, { id: 'ws_acme', name: 'Acme Prod' }, 'chat']);
     const history = await chat.until(f => f.type === 'history');
     assert.deepEqual(history.messages, [], 'A new conversation starts empty: the panel shows its own opening line.');
     // Opening a chat makes no model call and writes no greeting; OpenCode boots in the background meanwhile.
@@ -485,6 +485,11 @@ describe('support Worker', () => {
     assert.equal(team[4], `Bearer bane_mbx_${'7'.repeat(64)}`);
     assert.match(customer[3].text, new RegExp(`passed your request to the Nightmail team as ${filed.ticketId}`));
     chat.ws.close();
+    // Reconnecting to a ticketed conversation replays the full ticket card fields (never only ticketId).
+    const rejoined = await connect(started.body.socketUrl);
+    const replay = await rejoined.until(f => f.type === 'history');
+    assert.deepEqual(replay.pending.ticket, { ticketId: filed.ticketId, ticketType: 'billing', category: 'refund', replyTo: 'a…@acme.test', expect: 'usually within one business day' });
+    rejoined.ws.close();
   }, 180_000);
 
   test('consent counts only when Nightmail’s scope says so, never on the frame', async () => {
