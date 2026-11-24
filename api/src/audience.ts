@@ -113,12 +113,29 @@ async function findSegment(db: DbExecutor, identity: Actor, segmentId: string) {
 
 // Literal substring search: %, _ and backslash have no wildcard meaning.
 function searchText(column: AnyPgColumn, search: string): SQL { return sql`strpos(lower(${column}), lower(${search})) > 0`; }
-// A search that is one complete address is that contact, through the unique email index. Any other search is a
-// substring of the email or name, which no index serves: it reads every contact of the workspace.
+// The same match through the trigram index (migration 462). Fold the original term in Postgres before adding escapes; a
+// custom escape leaves backslash literal.
+function searchLike(column: AnyPgColumn, search: string): SQL {
+  const escaped = sql`replace(replace(replace(lower(${search}), '!', '!!'), '%', '!%'), '_', '!_')`;
+  return sql`lower(${column}) LIKE ('%' || ${escaped} || '%') ESCAPE '!'`;
+}
+// The trigram index returns every match before a page can be sorted: milliseconds for a rare term, seconds for one in a
+// third of the workspace, and the planner can't tell them apart (a partial index's expressions have no statistics). So it
+// is asked for at most this many matches; a term with more is common enough that the ID-order walk reaches its page first.
+const TRIGRAM_CANDIDATES = 2_000;
+async function trigramCandidates(db: DbExecutor, identity: Actor, search: string) {
+  // With no guaranteed trigram, GIN can scan the whole index.
+  if (!/[a-zA-Z0-9]{3}/.test(search) || wholeAddress(search)) return undefined;
+  const { rows } = await db.execute<{ id: string }>(sql`SELECT ${contacts.id} AS id FROM ${contacts}
+    WHERE ${scope(contacts, identity)} AND ${isNull(contacts.deletedAt)} AND (${searchLike(contacts.email, search)} OR ${searchLike(contacts.name, search)})
+    LIMIT ${TRIGRAM_CANDIDATES + 1}`);
+  return rows.length > TRIGRAM_CANDIDATES ? undefined : rows.map(row => row.id);
+}
+// A complete address uses the unique email index; other searches match a literal substring of either field.
 const wholeAddress = (search: string | undefined) => { const address = Email.safeParse(search); return address.success ? address.data : undefined; };
-function contactFilters(identity: Actor, query: z.infer<typeof ContactQuery>) {
+function contactFilters(identity: Actor, query: z.infer<typeof ContactQuery>, candidates?: string[]) {
   const address = wholeAddress(query.search);
-  return [query.email ? eq(contacts.email, query.email) : undefined, address ? eq(contacts.email, address) : query.search ? sql`(${searchText(contacts.email, query.search)} OR ${searchText(contacts.name, query.search)})` : undefined, query.consent ? eq(contacts.marketingConsent, query.consent) : undefined, query.suppressed !== undefined ? eq(contacts.suppressed, query.suppressed === 'true') : undefined, query.listId ? inList(identity, query.listId) : undefined];
+  return [query.email ? eq(contacts.email, query.email) : undefined, address ? eq(contacts.email, address) : candidates ? sql`${contacts.id} = ANY(${sql.param(candidates)}::text[])` : query.search ? sql`(${searchText(contacts.email, query.search)} OR ${searchText(contacts.name, query.search)})` : undefined, query.consent ? eq(contacts.marketingConsent, query.consent) : undefined, query.suppressed !== undefined ? eq(contacts.suppressed, query.suppressed === 'true') : undefined, query.listId ? inList(identity, query.listId) : undefined];
 }
 async function readContacts(db: DbExecutor, identity: Actor, rows: Array<typeof contacts.$inferSelect>, maxListsPerContact = CONTACT_LIST_IDS_PAGE_MAX) {
   if (!rows.length) return [];
@@ -155,6 +172,8 @@ async function boundedContactPage(db: DbExecutor, identity: Actor, query: z.infe
     || !(await db.execute(sql`SELECT 1 FROM ${listMembers} WHERE ${scope(listMembers, identity)} AND ${listMembers.listId} = ${listId} OFFSET ${SMALL_LIST} LIMIT 1`)).rows.length);
   // Bound both sides of the membership join so a merge can seek instead of scanning contacts up to the cursor.
   const membershipCursor = query.cursor ? and(gt(listMembers.contactId, query.cursor), gt(contacts.id, query.cursor)) : undefined;
+  const candidates = !byMembership && query.search ? await trigramCandidates(db, identity, query.search) : undefined;
+  if (candidates?.length === 0) return { rows: [], hasMore: false };
   const candidateSql = byMembership
     ? sql`SELECT ${contacts.id} AS id, ${contacts.workspaceId} AS workspace_id, ${contacts.email} AS email, ${contacts.name} AS name, ${contacts.properties} AS properties, ${contacts.marketingConsent} AS marketing_consent, ${contacts.suppressed} AS suppressed, ${contacts.suppressionReason} AS suppression_reason,
         ${contacts.lastOpenAt} AS last_open_at, ${contacts.lastClickAt} AS last_click_at, ${contacts.observedSince} AS observed_since, ${contacts.openObservedSince} AS open_observed_since, ${contacts.clickObservedSince} AS click_observed_since, ${contacts.deletedAt} AS deleted_at, ${contacts.createdAt} AS created_at, ${contacts.updatedAt} AS updated_at,
@@ -167,7 +186,7 @@ async function boundedContactPage(db: DbExecutor, identity: Actor, query: z.infe
         last_open_at, last_click_at, observed_since, open_observed_since, click_observed_since, deleted_at, created_at, updated_at,
         (octet_length(properties::text) + octet_length(email) + coalesce(octet_length(name), 0) + 384) AS row_bytes
       FROM ${contacts}
-      WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...contactFilters(identity, query), query.cursor ? gt(contacts.id, query.cursor) : undefined)}
+      WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...contactFilters(identity, query, candidates), query.cursor ? gt(contacts.id, query.cursor) : undefined)}
       ORDER BY ${contacts.id} ASC LIMIT ${query.limit + 1}`;
   const { rows } = await db.execute<RawContactRow>(sql`
     WITH candidate AS (${candidateSql}), sized AS (
