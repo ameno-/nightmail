@@ -33,28 +33,41 @@ const pageLinks = (label: (page: (typeof PRICE_PAGES)[number]) => string) => PRI
  *  Whether there was one. */
 function useShellTakeover() {
   const [painted] = useRef([typeof document !== 'undefined' && document.getElementById('price-shell') !== null]).current
-  const carried = useRef<{ typed: (string | null)[]; pressed: number } | null>(null)
+  const carried = useRef<{ typed: (string | null)[]; pressed: Place | null } | null>(null)
   useLayoutEffect(() => {
     const shell = document.getElementById('price-shell')
     if (!shell) return
-    const focused = controls(shell).indexOf(document.activeElement as HTMLElement)
+    const focused = placeOf(shell, document.activeElement)
     const held = window as Window & { __nightmailShellPress?: Element }
-    carried.current = { typed: [...shell.querySelectorAll('input')].map(input => input.value !== input.defaultValue ? input.value : null), pressed: held.__nightmailShellPress ? controls(shell).indexOf(held.__nightmailShellPress as HTMLElement) : -1 }
+    carried.current = { typed: [...shell.querySelectorAll('input')].map(input => input.value !== input.defaultValue ? input.value : null), pressed: placeOf(shell, held.__nightmailShellPress) }
     delete held.__nightmailShellPress
     shell.remove()
     document.querySelector('style[data-shell-css]')?.remove()
-    if (focused >= 0) controls(document.querySelector('#root .price-page'))[focused]?.focus({ preventScroll: true })
+    atPlace(document.querySelector('#root .price-page'), focused)?.focus({ preventScroll: true })
   }, [])
   useEffect(() => {
     const was = carried.current, page = document.querySelector('#root .price-page')
     if (!was || !page) return
     const inputs = [...page.querySelectorAll('input')], setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
     was.typed.forEach((value, i) => { const input = inputs[i]; if (value !== null && input) { setValue.call(input, value); input.dispatchEvent(new Event('input', { bubbles: true })) } })
-    if (was.pressed >= 0) controls(page)[was.pressed]?.click()
+    atPlace(page, was.pressed)?.click()
   }, [])
   return painted
 }
 const controls = (root: ParentNode | null) => [...root?.querySelectorAll<HTMLElement>('a[href], button, input') ?? []]
+// A control's place, the same on the painted page and the app's: which of the controls with its class it is (Get started
+// and the Open dashboard drawn in its place for someone signed in share theirs), or for one without a class, of those
+// with its tag, address and words. Not its place among all controls: signed in, the app's page has no sign-in consent
+// and its links, so every control after them would be another one, pressed or focused in the reader's place.
+type Place = { key: string; nth: number }
+const keyOf = (control: HTMLElement) => control.className ? `.${control.className}` : `${control.tagName}|${control.getAttribute('href') ?? ''}|${control.textContent?.trim() ?? ''}`
+function placeOf(root: ParentNode | null, control: Element | null | undefined): Place | null {
+  const all = controls(root), at = all.indexOf(control as HTMLElement)
+  if (at < 0) return null
+  const key = keyOf(all[at]!)
+  return { key, nth: all.slice(0, at).filter(other => keyOf(other) === key).length }
+}
+const atPlace = (root: ParentNode | null, place: Place | null) => place ? controls(root).filter(control => keyOf(control) === place.key)[place.nth] : undefined
 
 /** A price page's frame: a scene (frame.tsx), or for a comparison that doesn't exist, a bar along the top (the
  *  wordmark, the price pages and the theme) over one plain column. */
