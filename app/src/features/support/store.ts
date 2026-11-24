@@ -67,11 +67,12 @@ export function ticketTitle(ticket: TicketFiled) {
   const filed: Record<string, string> = { bug: 'Bug report', abuse_report: 'Abuse report', feature_request: 'Feature request', security: 'Security report' }
   const topics: Record<string, string> = { refund: 'Refund request', billing_dispute: 'Billing question', account_closure: 'Account closure request', limit_increase: 'Limit increase request', enforcement_review: 'Account review request', legal: 'Legal question' }
   const types: Record<string, string> = { billing: 'Billing question', deliverability: 'Deliverability question', account: 'Account question' }
-  const kind = filed[ticket.ticketType ?? ''] ?? filed[ticket.category]
+  const category = ticket.category ?? ''
+  const kind = filed[ticket.ticketType ?? ''] ?? filed[category]
   if (kind) return `${kind} filed`
-  const request = topics[ticket.category] ?? types[ticket.ticketType ?? '']
+  const request = topics[category] ?? types[ticket.ticketType ?? '']
   if (request) return `${request} passed to the ${productName} team`
-  return ticket.category === 'human_requested' ? `Passed to a person on the ${productName} team` : `Passed to the ${productName} team`
+  return category === 'human_requested' ? `Passed to a person on the ${productName} team` : `Passed to the ${productName} team`
 }
 
 /** What a proposed change does, as the card's question. */
@@ -352,18 +353,19 @@ export class SupportStore {
         // History replaces what the panel shows; an open consent card or a filed ticket comes back with it. Screenshots
         // come back as names only (the server never returns the images): this tab's own previews, else placeholders.
         // A staff reply shows as the team's, with its author's name.
-        const messages: ChatMessage[] = message.messages.map(item => ({ id: item.id, role: item.role === 'staff' ? 'assistant' : item.role, kind: item.role === 'staff' ? 'staff' : item.kind ?? 'reply', author: item.author ?? null, restored: true, streaming: false,
+        const raw = Array.isArray(message.messages) ? message.messages : []
+        const messages: ChatMessage[] = raw.map(item => ({ id: item.id, role: item.role === 'staff' ? 'assistant' : item.role, kind: item.role === 'staff' ? 'staff' : item.kind ?? 'reply', author: item.author ?? null, restored: true, streaming: false,
           images: item.attachments?.map(attachment => ({ url: this.previews.get(attachment.id) ?? null, name: attachment.name || 'Screenshot' })),
-          parts: [...(item.tools ?? []).map(tool => ({ kind: 'tool' as const, id: tool.id, label: tool.label, state: tool.ok ? 'done' as const : 'failed' as const })), ...item.text ? [{ kind: 'text' as const, text: item.text }] : []] }))
-        const imagesSent = message.messages.reduce((sum, item) => sum + (item.attachments?.length ?? 0), 0)
+          parts: [...(item.tools ?? []).map(tool => ({ kind: 'tool' as const, id: tool.id, label: tool.label, state: tool.ok ? 'done' as const : 'failed' as const })), ...typeof item.text === 'string' && item.text ? [{ kind: 'text' as const, text: item.text }] : []] }))
+        const imagesSent = raw.reduce((sum, item) => sum + (item.attachments?.length ?? 0), 0)
         // What the server doesn't have yet stays after its history: messages waiting to go out, and the reply placeholder
         // (one is made for an answer already under way on a reconnect).
         const local = this.state.messages.filter(item => item.local)
         const answering = this.state.busy && messages.at(-1)?.role === 'user' && !local.some(item => item.role === 'assistant')
         this.set({ messages: [...messages, ...local, ...answering ? [placeholder(messages.at(-1)!.id)] : []], imagesSent: imagesSent + this.outbox.reduce((sum, item) => sum + (item.attachments?.length ?? 0), 0) })
-        if (message.pending.consent) this.append({ kind: 'consent', request: message.pending.consent, state: 'open' })
-        if (message.pending.ticket) this.append({ kind: 'ticket', ticket: message.pending.ticket, screenshots: imagesSent })
-        for (const request of message.pending.actions ?? []) this.proposeAction(request)
+        if (message.pending?.consent) this.append({ kind: 'consent', request: message.pending.consent, state: 'open' })
+        if (message.pending?.ticket?.ticketId) this.append({ kind: 'ticket', ticket: message.pending.ticket, screenshots: imagesSent })
+        for (const request of message.pending?.actions ?? []) this.proposeAction(request)
         this.socketSynced = true
         if (!this.state.synced) this.set({ synced: true })
         this.flush()
@@ -400,7 +402,7 @@ export class SupportStore {
         const parts: Part[] = !replace ? item.parts : [...item.parts.filter(part => part.kind !== 'text')]
         if (replace && message.text) parts.splice(first < 0 ? parts.length : Math.min(first, parts.length), 0, { kind: 'text', text: message.text })
         this.update(item.id, entry => ({ ...entry, parts, streaming: false }))
-        this.set({ announcement: `${this.state.hello?.agent.name ?? `${productName} support`}: ${spoken(message.text)}`, unread: this.state.unread || !this.visible })
+        this.set({ announcement: `${productName} Support: ${spoken(message.text ?? '')}`, unread: this.state.unread || !this.visible })
         break
       }
       case 'tool.start': this.adopt(message.messageId); this.append({ kind: 'tool', id: message.toolCallId, label: message.label, state: 'running' }, message.messageId); break
@@ -410,12 +412,12 @@ export class SupportStore {
         break
       case 'consent.request':
         this.append({ kind: 'consent', request: { requestId: message.requestId, workspace: message.workspace, why: message.why }, state: 'open' })
-        this.set({ announcement: `${productName} support asks to read the content of your emails in ${message.workspace.name}. ${message.why}`, unread: this.state.unread || !this.visible })
+        this.set({ announcement: `${productName} Support asks to read the content of your emails in ${message.workspace.name}. ${message.why}`, unread: this.state.unread || !this.visible })
         break
       case 'consent.resolved': this.setConsent(message.requestId, message.decision); break
       case 'action.request':
         this.proposeAction({ actionId: message.actionId, kind: message.kind, summary: message.summary })
-        this.set({ announcement: `${productName} support asks you to confirm a change. ${actionTitle(message.kind)}`, unread: this.state.unread || !this.visible })
+        this.set({ announcement: `${productName} Support asks you to confirm a change. ${actionTitle(message.kind)}`, unread: this.state.unread || !this.visible })
         break
       // Decided elsewhere (another tab, the emailed link): the card reads where it stands.
       case 'action.resolved': if (this.actionPart(message.actionId)) void this.readAction(message.actionId); break
@@ -423,7 +425,7 @@ export class SupportStore {
         // Screenshots sent in the conversation go with the ticket (§5.1).
         const ticket: TicketFiled = { ticketId: message.ticketId, ticketType: message.ticketType, category: message.category, replyTo: message.replyTo, expect: message.expect }
         this.append({ kind: 'ticket', ticket, screenshots: this.state.imagesSent })
-        this.set({ status: 'ticketed', humanRequested: true, announcement: `${ticketTitle(ticket)}: ${message.ticketId}. Someone will reply by email, ${message.expect}.` })
+        this.set({ status: 'ticketed', humanRequested: true, announcement: `${ticketTitle(ticket)}: ${message.ticketId}.${message.expect ? ` Someone will reply by email, ${message.expect}.` : ''}` })
         break
       }
       case 'error':
