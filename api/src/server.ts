@@ -104,7 +104,7 @@ try {
     headers.set(clientIpHeader, address);
     headers.delete(clientNetworkHeader);
     const path = getPath(request);
-    const response = await dashboardFile(request, path, await guardPublicRequest(path, headers, await digest(address), async () => app.fetch(new Request(request, { headers }), runtime)));
+    const response = await dashboardFile(request, path, await guardPublicRequest(path, headers, await digest(address), async () => app.fetch(new Request(request, { headers }), path === '/internal/v1/analytics' ? { ...runtime, analyticsPeer: { ip: connection.incoming.socket.remoteAddress ?? '' } } : runtime)));
     // A size rejection can leave upload bytes unread. Do not offer that HTTP/1 socket for reuse.
     if (response.status === 413 && !connection.incoming.readableEnded && 'shouldKeepAlive' in connection.outgoing) connection.outgoing.shouldKeepAlive = false;
     return response;

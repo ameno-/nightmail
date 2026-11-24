@@ -317,13 +317,16 @@ export default {
       if (/^\/v1\/campaigns\/[^/]+\/room$/.test(pathname) && request.headers.get('upgrade')?.toLowerCase() === 'websocket') {
         for (const name of ['account', 'workspace']) { const value = url.searchParams.get(name); if (value && !requestHeaderNames(name).some(header => headers.has(header))) headers.set(requestHeaderNames(name)[0]!, value); }
       }
-      const cf = (request as Request & { cf?: { asn?: unknown; country?: unknown } }).cf;
+      const cf = (request as Request & { cf?: { asn?: unknown; country?: string; botManagement?: { verifiedBot?: boolean; score?: number } } }).cf;
       if (typeof cf?.asn === 'number' || typeof cf?.country === 'string') headers.set(clientNetworkHeader, `${typeof cf.asn === 'number' ? `AS${cf.asn}` : ''};${typeof cf.country === 'string' ? cf.country : ''}`);
       const runtimeStarted = performance.now();
       const response = staticDoc
         ? await app.fetch(new Request(request, { headers }), {} as Runtime)
         : await core.guardPublicRequest(pathname, headers, peer, () => withRuntime(env, async runtime =>
-          app.fetch(new Request(request, { headers }), runtime), 1, ctx));
+          app.fetch(new Request(request, { headers }), pathname === '/internal/v1/analytics' ? { ...runtime, analyticsPeer: {
+            ip: request.headers.get('CF-Connecting-IP') ?? '', country: cf?.country,
+            bot: cf?.botManagement?.verifiedBot === true || (cf?.botManagement?.score ?? 100) === 1,
+          } } : runtime), 1, ctx));
       const runtimeMs = performance.now() - runtimeStarted;
       // What this isolate counted (app.ts logRequest), written after the response, at most every 20 seconds. Without a
       // context (a handler called directly) nothing is written, and nothing here can throw into the request.

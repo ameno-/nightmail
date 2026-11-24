@@ -1373,7 +1373,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
 // The sign-up limit (src/signups.ts): an operator opens a number of places. A new account signing in with a mailbox
 // its sign-in proves takes one while there is one, a raise lets the oldest waiting addresses in first, two people racing
 // for the last place can't both have it, and staff and invitees sign in as before, uncounted.
-test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one each, each held address emailed once, and staff and invitees pass uncounted; a held place also takes the GitHub-verified address or a sign-in link emailed to it; the sign-ups list keeps every waitlist join and sign-up', async t => {
+test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one each, each held address emailed once, and staff and invitees pass uncounted; a GitHub-verified primary address or a sign-in link emailed to an address takes its held or open place, one per address; the sign-ups list keeps every waitlist join and sign-up', async t => {
   const {drizzle} = await import('drizzle-orm/node-postgres');
   const {loadConfig} = await import('./src/config.js');
   const {createApp} = await import('./src/app.js');
@@ -1427,7 +1427,7 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   }
   const signIn = async (p: Person, callbackURL?: string) => (await begin(p, callbackURL))();
   const people: Person[] = [];
-  const someone = (email: string, acr = googleAcr, provider: Person['provider'] = 'google', hd: string | null = null) => { const p = {subject:randomUUID(),email,acr,provider,hd}; people.push(p); return p; };
+  const someone = (email: string, acr = googleAcr, provider: Person['provider'] = 'google', hd: string | null = null) => { const p: Person = {subject:randomUUID(),email,acr,provider,hd}; people.push(p); return p; };
   const gmail = (name: string) => someone(`${name}-${randomUUID().slice(0,8)}@gmail.com`);
   const outcome = async (p: Person) => (await db.query('SELECT outcome FROM nightmail_signin_attempts WHERE issuer=$1 AND subject=$2',[issuer,p.subject])).rows[0]?.outcome;
   const waiting = async (p: Person) => (await db.query('SELECT let_in_at IS NOT NULL AS held FROM nightmail_waitlist WHERE email=lower($1)',[p.email])).rows[0] ?? null;
@@ -1795,6 +1795,45 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   assert.equal((await links(coder)).length,3);
   // An address that was never let in still waits.
   assert.equal((await signIn(after)).auth,'waitlist');
+
+  // Open places with nothing held (production after a raise past everyone waiting). GitHub takes one with its GitHub
+  // account's verified primary address, one place per address. GitHub without one (none, or listed unverified) is refused
+  // and offered a sign-in link to its address, which takes one. Full, GitHub waits, and no link goes out.
+  const before2 = await places();
+  await db.query('UPDATE nightmail_signup_limit SET places=$1',[before2.signedUp+before2.held+2]);
+  const dev = someone(`dev-${randomUUID().slice(0,8)}@example.net`,githubAcr,'github');
+  const devIn = await signIn(dev);
+  assert.ok(devIn.session);
+  assert.deepEqual([await outcome(dev),await placeOf(devIn.account),await waiting(dev)],['signed_in:signup','open',null]);
+  assert.deepEqual((await db.query('SELECT u.mailbox_proved,s.verified_email FROM nightmail_users u JOIN nightmail_sessions s ON s.user_id=u.id WHERE u.id=$1',[devIn.account])).rows,[{mailbox_proved:null,verified_email:null}]);
+  // Another account (another subject) with that address verified on GitHub gets no second place: not with it as the
+  // account's address too, nor with another account address. Neither takes the place left open.
+  const twin = someone(dev.email,githubAcr,'github');
+  assert.deepEqual(await signIn(twin).then(r=>[r.auth,r.session]),['error','']);
+  const sibling = someone(`sibling-${randomUUID().slice(0,8)}@example.net`,githubAcr,'github');
+  sibling.upstream = {email:dev.email,email_verified:true};
+  assert.deepEqual(await signIn(sibling).then(r=>[r.auth,r.place,r.session]),['waitlist','ready','']);
+  assert.deepEqual([(await places()).open,await placeOf(devIn.account)],[1,'open']);
+  // No verified primary address on GitHub, or one listed unverified: refused, offered a link (?place=ready), place kept.
+  const unverified = someone(`unverified-${randomUUID().slice(0,8)}@example.net`,githubAcr,'github');
+  for (const upstream of [{}, {email:unverified.email,email_verified:false}]) {
+    unverified.upstream = upstream;
+    assert.deepEqual(await signIn(unverified).then(r=>[r.auth,r.place,r.session]),['waitlist','ready',''],JSON.stringify(upstream));
+  }
+  assert.equal((await places()).open,1);
+  assert.deepEqual(await ask(unverified.email),[202,{requested:true}]);
+  const [openLink] = await links(unverified);
+  const viaOpenLink = await signIn(unverified, signinLinkUrl(runtime.config, openLink!));
+  assert.ok(viaOpenLink.session);
+  assert.deepEqual([await outcome(unverified),await placeOf(viaOpenLink.account),await waiting(unverified)],['signed_in:signup','open',null]);
+  // Full: GitHub, verified or not, waits as before, and no link goes out for it.
+  assert.equal((await places()).open,0);
+  const full2 = someone(`full-${randomUUID().slice(0,8)}@example.net`,githubAcr,'github');
+  assert.deepEqual(await signIn(full2).then(r=>[r.auth,r.place,r.session]),['waitlist',null,'']);
+  full2.upstream = {};
+  assert.deepEqual(await signIn(full2).then(r=>[r.auth,r.place,r.session]),['waitlist',null,'']);
+  assert.deepEqual(await ask(full2.email),[202,{requested:true}]);
+  assert.deepEqual(await links(full2),[]);
 });
 
 // Several accounts in one browser (account switcher): one session cookie per connected account, each request acts as
@@ -7793,6 +7832,38 @@ describe('Hosted MCP OAuth and tools', () => {
         runtime.config.support!.addressIds = [];
         error(await register(conversation(), { kind: 'email', messageId: await mail(owner.email) }), 503, 'SUPPORT_NOT_CONFIGURED');
         runtime.config.support!.addressIds = configured;
+      });
+
+      await t.test('1b current chat: GET /v1/support-conversations/current returns only the caller’s open chat in the current workspace', async () => {
+        // Before any chat exists in either workspace for member, both answer null (no-store).
+        const empty = await send('GET', '/v1/support-conversations/current', session(member, acme));
+        assert.equal(empty.headers.get('cache-control'), 'no-store');
+        assert.deepEqual(ok(empty), { conversation: null });
+        assert.deepEqual(ok(await send('GET', '/v1/support-conversations/current', session(member, beta))), { conversation: null });
+        // An open email conversation for member never appears as a workspace chat.
+        const emailed = await email(member.email);
+        assert.deepEqual(ok(await send('GET', '/v1/support-conversations/current', session(member, acme))), { conversation: null });
+        ok(reply(await platform.closeConversation(emailed.id)));
+        // Once member has an open chat in acme, only member in acme sees it: beta and another user in acme see null.
+        const acmeChat = await chat(member, acme);
+        const found = ok(await send('GET', '/v1/support-conversations/current', session(member, acme)));
+        assert.equal(found.conversation?.id, acmeChat);
+        assert.equal(found.conversation?.status, 'open');
+        assert.deepEqual(ok(await send('GET', '/v1/support-conversations/current', session(member, beta))), { conversation: null });
+        assert.deepEqual(ok(await send('GET', '/v1/support-conversations/current', session(admin, acme))), { conversation: null });
+        // Opening a separate chat in beta keeps both workspaces isolated.
+        const betaChat = await chat(member, beta);
+        assert.equal(ok(await send('GET', '/v1/support-conversations/current', session(member, acme))).conversation?.id, acmeChat);
+        assert.equal(ok(await send('GET', '/v1/support-conversations/current', session(member, beta))).conversation?.id, betaChat);
+        // Closing acme's chat makes acme answer null again while beta stays open.
+        ok(reply(await platform.closeConversation(acmeChat)));
+        assert.deepEqual(ok(await send('GET', '/v1/support-conversations/current', session(member, acme))), { conversation: null });
+        assert.equal(ok(await send('GET', '/v1/support-conversations/current', session(member, beta))).conversation?.id, betaChat);
+        ok(reply(await platform.closeConversation(betaChat)));
+        // API keys and the support platform binding cannot call this dashboard-only route.
+        const key = ok(await send('POST', '/v1/api-keys', session(owner, acme), { name: 'current-chat-check', permissions: ['read'] }), 201).secret as string;
+        error(await send('GET', '/v1/support-conversations/current', { authorization: `Bearer ${key}` }), 403, 'DASHBOARD_AUTH_REQUIRED');
+        assert.equal((await platform.call('GET', '/v1/support-conversations/current')).status, 404);
       });
 
       await t.test('2 stamp: only the binding’s request() names a conversation; nothing in an HTTP request can, and an unbound or closed one reads nothing', async () => {
@@ -28974,6 +29045,12 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const signInUrl = signinLinkUrl(runtime.config, made.id);
       assert.ok(link.text.includes(`Sign in: ${signInUrl}\n`), link.text);
       assert.deepEqual(link.html.match(/href="[^"]*"/g), [`href="${signInUrl}"`]);
+      // The link is its recipient's alone: whoever reads the platform workspace's sent mail (a member here) sees it withheld.
+      const { rows: [{ user_id: reader }] } = await db.query(`SELECT user_id FROM workspace_members WHERE workspace_id=$1 AND role='owner' ORDER BY id LIMIT 1`, [wid]);
+      await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'member')`, [randomUUID(), platform, reader]);
+      cleanup(t, async () => { await db.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [platform, reader]); });
+      const read = ok(await local('GET', `/v1/emails/${link.id}/content`, undefined, 'live', { 'x-nightmail-workspace': platform }));
+      for (const body of [read.text, read.html]) { assert.ok(!body.includes(made.id), body); assert.match(body, /link withheld/); }
       // The link's random characters aren't words: the check reads the email without it.
       for (const email of [invitation, limit, evaluation, domain, waitlist, { ...link, text: link.text.replace(signInUrl, '') }]) {
         for (const body of [email.subject, email.text]) assert.doesNotMatch(body, HOW_IT_WORKS);
@@ -40896,6 +40973,7 @@ describe('dashboard analytics', () => {
     const map = new Map<string, Uint8Array>();
     const storage: import('./src/core.js').Storage = {
       async put(key, body) { map.set(key, body); },
+      async createIfAbsent(key, body) { if (!map.has(key)) map.set(key, body); },
       async get(key) { const body = map.get(key); return body ? { body, contentType: 'application/octet-stream' } : null; },
       async delete(key) { map.delete(key); },
       async list(prefix, after) {
@@ -40999,6 +41077,30 @@ describe('dashboard analytics', () => {
     assert.equal((await post(batch, {}, '203.0.113.50')).status, 204);
   });
 
+  test('dashboard analytics: no-referrer beacons require positive same-origin evidence on an approved host', async t => {
+    const { app, runtime, post, rows } = await setup();
+    const page = { p: '/pricing', s: 'public-session', w: 390 };
+    const dashboard = envelope([{ id: 'evt_nullorigin', seq: 1, t: Date.now(), type: 'page_view', route: '/overview' }]);
+    const same = { origin: 'null', 'sec-fetch-site': 'same-origin' };
+    for (const body of [page, dashboard]) assert.equal((await post(body, same)).status, 204);
+    const warnings: string[] = [];
+    t.mock.method(console, 'warn', (line: string) => { warnings.push(line); });
+    for (const site of [undefined, 'same-site', 'cross-site', 'none']) {
+      const headers: Record<string, string> = { origin: 'null' };
+      if (site) headers['sec-fetch-site'] = site;
+      assert.equal((await post(page, headers)).status, 403);
+    }
+    const foreign = 'https://refused.example';
+    assert.equal((await post(page, { origin: foreign, 'sec-fetch-site': 'same-origin' })).status, 403);
+    const direct = (url: string, headers: Record<string, string>) => app.fetch(new Request(url + path, { method: 'POST', headers, body: JSON.stringify(page) }), runtime);
+    assert.equal((await direct(foreign, same)).status, 403);
+    assert.equal((await direct(origin, { 'sec-fetch-site': 'same-origin' })).status, 403);
+    assert.deepEqual(rows().map(row => row.route).sort(), ['/overview', '/pricing']);
+    assert.deepEqual(warnings.map(line => JSON.parse(line)).filter(row => row.code === 'ORIGIN_NOT_ALLOWED').map(row => row.originClass),
+      ['null', 'null', 'null', 'null', 'cross-site', 'null', 'missing']);
+    assert.ok(!warnings.join('\n').includes('refused.example'));
+  });
+
   test('dashboard analytics: the dashboard tracker stores nothing on the device, never reads what was typed and sends no address, name or ID', async () => {
     const { createTracker } = await import('../app/src/lib/analytics.js');
     type El = { tagName: string; parentElement: El | null; textContent: string | null; getAttribute(name: string): string | null; validity?: Record<string, boolean> };
@@ -41086,6 +41188,9 @@ describe('dashboard analytics', () => {
 
   test('dashboard analytics: hourly compaction folds settled hours into one gzip object and expires old days', async t => {
     const { post, map, runtime, rows } = await setup(), { compactAnalytics } = await import('./src/analytics.js'), { gunzipSync } = await import('node:zlib');
+    const client = await fixtureDatabase(t);
+    runtime.db = (await import('drizzle-orm/node-postgres')).drizzle(client);
+    cleanup(t, () => client.query("DELETE FROM analytics_hours WHERE hour='2026-11-19 10:00Z'").then(() => {}));
     const at = (iso: string) => t.mock.timers.setTime(Date.parse(iso));
     t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-19T10:30:00Z') });
     for (let i = 1; i <= 3; i++) assert.equal((await post(envelope([{ id: 'evt_0000000' + i, seq: i, t: Date.now(), type: 'page_view', route: '/overview' }]))).status, 204);
@@ -41106,5 +41211,95 @@ describe('dashboard analytics', () => {
     assert.deepEqual(await compactAnalytics(runtime, Date.parse('2026-11-19T11:07:00Z')), { hours: 0, batches: 0, expired: 0 });
     runtime.config.dashboardAnalytics = false;
     assert.deepEqual(await compactAnalytics(runtime, Date.parse('2026-11-19T12:07:00Z')), { hours: 0, batches: 0, expired: 0 });
+  });
+
+  test('first-party analytics: human, bot and funnel rollups, daily rotation, replay and signed delivery', async t => {
+    const { app, runtime, map, rows, post } = await setup();
+    const { compactAnalytics } = await import('./src/analytics.js');
+    const { pushDue } = await import('./src/analytics-rollups.js');
+    const { createServer } = await import('node:http');
+    const client = await fixtureDatabase(t), session = await sessionFixture(t,{staff:true});
+    const { drizzle } = await import('drizzle-orm/node-postgres');
+    // Place the analytics data in three real, transaction-local tables; use the fixture's normal operator checks.
+    const { nodeRuntime } = await import('./src/adapters/node.js');
+    const node = nodeRuntime({...process.env,DATABASE_URL:FIXTURE_DATABASE_URL,PUBLIC_URL:origin});
+    cleanup(t,node.close);
+    runtime.config = { ...node.runtime.config, dashboardAnalytics:true, multiTenant:true };
+    const operatorCookie = '__Host-nightmail.session_token='+session.token;
+    const secret = 'a-synthetic-hourly-receiver-secret', deliveries: {valid:boolean;body:Json}[] = [];
+    const receiver = createServer(async (req,res) => {
+      const chunks = []; for await (const part of req) chunks.push(part);
+      const raw = Buffer.concat(chunks).toString();
+      const mac = 'sha256='+createHmac('sha256',secret).update(req.headers['x-nightmail-timestamp']+'.'+raw).digest('hex');
+      deliveries.push({valid:mac===req.headers['x-nightmail-signature'],body:JSON.parse(raw)});
+      res.writeHead(deliveries.length===1?503:204).end();
+    });
+    await new Promise<void>(r => receiver.listen(0,'127.0.0.1',r));
+    cleanup(t,() => new Promise<void>(r=>receiver.close(()=>r())));
+    const start = Math.floor(Date.now()/86400000)*86400000 - 86400000;
+    t.mock.timers.enable({apis:['Date'], now:start+3600010});
+    const at = (hours:number) => t.mock.timers.setTime(start+hours*3600000+10);
+    const headers = {'user-agent':'Synthetic mobile browser'}, ip='198.51.100.200';
+    const page = {p:'/pricing',s:'page-session-0001',w:390,r:'search.example',u:['newsletter','email','launch'],email:'typed@example.org'};
+    runtime.analyticsPeer={ip,country:'CA'};
+    for (let i=0;i<2;i++) assert.equal((await post({...page,s:page.s+i},headers,ip)).status,204);
+    assert.equal((await post({...page,c:'/compare/resend'},headers,ip)).status,204);
+    assert.equal((await post(page,{'user-agent':'Googlebot/2.1'},ip)).status,204);
+    runtime.analyticsPeer.bot=true;
+    assert.equal((await post(page,headers,ip)).status,204);
+    assert.equal((await post({...page,c:'sign-in'},headers,ip)).status,204);
+    runtime.analyticsPeer.bot=false;
+    const steps=['signed_up','domain_verified','first_send'].map((step,i)=>({id:'funnel-id-'+i,seq:i,t:Date.now(),route:'/overview',type:'track',step}));
+    assert.equal((await post(envelope(steps),headers,ip)).status,204);
+    // A forged batch can name any well-formed workspace: its milestones never reach the funnel.
+    assert.equal((await post({...envelope(steps.map(x=>({...x,id:x.id+'f'}))),ws:'ws_'+'f'.repeat(32)},headers,ip)).status,204);
+    const raw=rows(), vid=raw.find(r=>r.type==='page_view')!.vid;
+    // The daily code only on public rows, whose page session is keyed by the day's salt: neither joins an account.
+    assert.ok(raw.filter(r=>r.uid).every(r=>!('vid' in r)));
+    assert.ok(raw.filter(r=>r.public).every(r=>/^[a-f0-9]{32}$/.test(String(r.sid)) && !String(r.sid).startsWith('page-session')));
+    assert.equal(raw.filter(r=>r.type==='page_view' && r.vid===vid).length,2);
+    assert.match(String(vid),/^[a-f0-9]{32}$/);
+    assert.equal(raw.filter(r=>r.type==='bot_view').length,2);
+    for(const row of raw.filter(r=>r.type==='bot_view')) assert.deepEqual(Object.keys(row).sort(),['id','received','route','type','v']);
+    assert.doesNotMatch(JSON.stringify(raw),/typed@|198\.51\.100|Synthetic mobile|Googlebot/);
+    const replay=[...map].find(([key])=>key.includes('/raw/'))!;
+    at(2); await post(page,headers,ip); await post(envelope(steps.map(x=>({...x,id:x.id+'b'}))),headers,ip);
+    at(25); await post(page,headers,ip);
+    assert.notEqual(rows().at(-1)!.vid,vid);
+
+    await drizzle(client).transaction(async tx=>{
+      runtime.db=tx;
+      for(const table of ['analytics_hours','analytics_hourly','analytics_funnel_first'])
+        await client.query('CREATE TEMP TABLE '+table+' (LIKE public.'+table+' INCLUDING ALL) ON COMMIT DROP');
+      await client.query("INSERT INTO platform_operators(user_id,role,reason) VALUES($1,'operator:read','Synthetic analytics fixture')",[session.userId]);
+      await client.query('INSERT INTO workspaces(id,slug,name) VALUES($1,$1,$1) ON CONFLICT DO NOTHING',['ws_'+'a'.repeat(32)]);
+      cleanup(t,()=>client.query('DELETE FROM workspaces WHERE id=$1',['ws_'+'a'.repeat(32)]).then(()=>{}));
+      cleanup(t,()=>client.query('DELETE FROM platform_operators WHERE user_id=$1',[session.userId]).then(()=>{}));
+      const day=new Date(start).toISOString().slice(0,10), next=new Date(start+86400000).toISOString().slice(0,10);
+      const exportUrl=origin+path+'/export?from='+day+'&to='+next+'&grain=day';
+      const get=(cookie?:string)=>app.fetch(new Request(exportUrl,{headers:cookie?{cookie}:{}}),runtime);
+      assert.equal((await get()).status,401);
+      assert.equal((await get('__Host-nightmail.session_token='+manager!.token)).status,403,'A workspace owner cannot export');
+      await compactAnalytics(runtime,Date.now());
+      assert.equal([...map.keys()].filter(k=>k.includes('/salts/')).length,1,'Discard yesterday’s salt');
+      const exported=await get(operatorCookie);
+      assert.equal(exported.status,200,await exported.clone().text());
+      const report=await exported.json() as Json, by=(metric:string)=>report.rows.find((r:Json)=>r.metric===metric);
+      assert.deepEqual([by('page_view').events,by('page_view').visitors,by('visit').visitors,by('bot_view').events,by('cta').events],[3,1,1,2,1]);
+      assert.deepEqual(by('page_view').dimensions,{path:'/pricing',referrer:'search.example',source:'newsletter',medium:'email',campaign:'launch',device:'phone',country:'CA',viewport:'phone'});
+      assert.deepEqual(steps.map(s=>by(s.step).events),[1,1,1]);
+      assert.doesNotMatch(JSON.stringify(report),new RegExp(String(vid)));
+      // An interrupted delete leaves one old batch beside the larger compacted part. Re-fold it and push one snapshot.
+      map.set(replay[0],replay[1]); runtime.config.analyticsPush={url:'http://127.0.0.1:'+(receiver.address() as {port:number}).port,secret};
+      const now=Date.now(); await compactAnalytics(runtime,now);
+      assert.deepEqual(await (await get(operatorCookie)).json(),report);
+      assert.ok(deliveries.length>=1); const failed=deliveries[0]!;
+      const before=deliveries.length;await pushDue(runtime,now+3599999);assert.equal(deliveries.length,before);
+      await pushDue(runtime,now+3600001);assert.equal(deliveries.length,before+1);
+      assert.deepEqual(deliveries.at(-1)!.body,failed.body);
+      assert.ok(deliveries.every(d=>d.valid)); assert.equal(failed.body.grain,'hour');
+      const hour=await app.fetch(new Request(origin+path+'/export?from='+failed.body.from+'&to='+failed.body.to,{headers:{cookie:operatorCookie}}),runtime);
+      assert.deepEqual((await hour.json() as Json).rows,failed.body.rows);
+    });
   });
 });

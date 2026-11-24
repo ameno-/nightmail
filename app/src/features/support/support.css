@@ -38,6 +38,9 @@ html:has(.support-overlay[data-open]) { overflow: hidden; }
 .support-log:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
 /* --tray: the screenshot tray's height while it covers the bottom of the conversation (AttachmentTray). */
 .support-log__inner { display: flex; flex-direction: column; gap: var(--space-20); padding: var(--space-20) var(--space-16) calc(var(--space-24) + var(--tray, 0px)); }
+.support-loading { display: flex; flex-direction: column; gap: var(--space-20); }
+.support-loading__agent { display: flex; flex-direction: column; gap: var(--space-8); }
+.support-loading__user { display: flex; justify-content: flex-end; padding-left: 12%; }
 .support-message { min-width: 0; animation: support-enter 240ms var(--ease-out-strong) both; }
 .support-message[data-restored], .support-message--opening { animation: none; }
 .support-message--agent { display: flex; flex-direction: column; gap: var(--space-12); }

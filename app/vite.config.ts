@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+import { SECURITY_HEADERS } from '../api/src/security-headers.ts'
 import { execFileSync } from 'node:child_process'
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
@@ -88,11 +90,23 @@ const brandedBootScript = (): Plugin => {
   }
 }
 
+// Inject before homeShell/pricePages copy index.html, so a static document needs no React for collection.
+const publicBeacon: Plugin = {
+  name: 'nightmail:public-beacon',
+  transformIndexHtml(html) {
+    const js = readFileSync(new URL('./public-beacon.js', import.meta.url), 'utf8').trim()
+    const hash = "'sha256-" + createHash('sha256').update(js).digest('base64') + "'"
+    if (Buffer.byteLength(js) >= 1024 || !SECURITY_HEADERS['Content-Security-Policy']!.includes(hash)
+      || !readFileSync(new URL('./public/_headers', import.meta.url), 'utf8').includes(hash)) throw new Error('Check public beacon size and CSP hash.')
+    return html.replace('</body>', '<script>' + js + '</script></body>')
+  },
+}
+
 export default defineConfig({
   define: { __NIGHTMAIL_BUILD__: JSON.stringify(buildSha) },
   // (The homepage's station kit is inlined whatever its size: it is one lazily loaded stylesheet, features/home/machines.tsx.)
   build: { assetsInlineLimit: file => file.includes('/features/home/kit/') || undefined, rolldownOptions: { input: { index: fileURLToPath(new URL('./index.html', import.meta.url)) } } },
-  plugins: [slimReactEmail, legalMarkdown, react(), fileHeaders(), publicOrigin, brandedBootScript(), homeShell(), pricePages()],
+  plugins: [slimReactEmail, legalMarkdown, react(), fileHeaders(), publicOrigin, brandedBootScript(), publicBeacon, homeShell(), pricePages()],
   server: {
     host: '127.0.0.1', port: 5173, strictPort: true,
     proxy: Object.fromEntries(['/v1', '/api/auth', '/mcp', '/.well-known', '/unsubscribe', '/health', '/openapi.json', '/internal'].map(path => [path, {target: 'http://127.0.0.1:8793', changeOrigin: false}])),

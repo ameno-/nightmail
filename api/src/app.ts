@@ -23,7 +23,7 @@ const operatorPath = (pathname: string) => pathname === '/v1/operator' || pathna
 const supportPath = (pathname: string) => pathname === '/v1/support' || pathname.startsWith('/v1/support/');
 function routeGroupFor(pathname: string): RouteGroup | null {
   if(pathname==='/internal/v1/mail')return 'mailbox';
-  if (pathname === '/internal/v1/analytics') return 'analytics';
+  if (pathname === '/internal/v1/analytics' || pathname === '/internal/v1/analytics/export') return 'analytics';
   if (pathname === '/internal/v1/database-disk') return 'disk-alert';
   if (pathname === '/v1/public/stats') return 'public-stats';
   // Billing: balance, usage, ledger, payments, the Stripe webhook and the operator's billing tools (behind the operator gate).
@@ -128,11 +128,14 @@ function principalOf(c: Ctx, route: string) {
 function logRequest(c: Ctx, durationMs: number) {
   const status = c.res.status, route = routeOf(c), failure = c.get('failure');
   const timings = c.get('serverTimings'), code = failure ? errorCodeOf(failure.code) : undefined;
+  const refusedOrigin = route === '/internal/v1/analytics' && code === 'ORIGIN_NOT_ALLOWED';
+  const origin = refusedOrigin ? c.req.header('origin') : undefined;
   const workspace = c.get('principal')?.workspace ?? (c.get('actor') as Ctx['var']['actor'] | undefined)?.workspaceId ?? c.get('mailboxAccess')?.workspaceId;
   countRequest({ route, method: c.req.method, status, durationMs, workspace: workspace || undefined, code, databaseCode: failure?.databaseCode });
   log(status >= 500 ? 'error' : status >= 400 ? 'warn' : 'info', {
     event: 'request', requestId: c.get('requestId'), route, method: c.req.method, status, durationMs, slow: durationMs >= SLOW_REQUEST_MS || undefined,
     code, field: failure?.field, databaseCode: failure?.databaseCode,
+    originClass: refusedOrigin ? !origin ? 'missing' : origin === 'null' ? 'null' : 'cross-site' : undefined,
     workspace, principal: principalOf(c, route),
     timings: timings.length ? Object.fromEntries(timings.map(item => [item.name, Number(item.durationMs.toFixed(1))])) : undefined,
   });
