@@ -3,24 +3,29 @@ import type { MiddlewareHandler } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { allowMalformedSns, notFound, snsIngress } from './core.js';
 import { boundRequestBody } from './request-body.js';
+import { reserveMemory, runInMemoryScope, type MemoryLease } from './isolate-memory.js';
+import { SEND_LIMITS } from './send-limits.js';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { getPath } from 'hono/utils/url';
-import { mailboxRoute, memberRefused, receivingConsentRoute, unrestrictedRoute, ApiError, denied, requiredHeader, requiredHeaderValue, requiredOf, unrestrictedRequired, databaseCodeOf, databaseConflict, databaseUnavailable, errorCodeOf, id, lazyModule, log, logError, ModuleLoadError, newRequestId, secureResponse, SECURITY_HEADERS, timed, transientDatabaseError, wrapModuleLoad } from './core.js';
+import { actor, mailboxRoute, memberRefused, receivingConsentRoute, unrestrictedRoute, ApiError, denied, requiredHeader, requiredHeaderValue, requiredOf, unrestrictedRequired, databaseCodeOf, databaseConflict, databaseUnavailable, errorCodeOf, id, lazyModule, log, logError, ModuleLoadError, newRequestId, secureResponse, SECURITY_HEADERS, timed, transientDatabaseError, wrapModuleLoad } from './core.js';
 import type { App, Runtime } from './core.js';
 import type { AppEnv, Ctx } from './core.js';
 import { authenticate, registerAuth, requireReceivingConsent } from './auth.js';
 import { withRegionSettings } from './ses-region-state.js';
 import { countEnqueued } from './jobs.js';
+import { countRequest } from './health-counters.js';
+import { SLOW_REQUEST_MS } from './log.js';
 import { authenticatedCreates } from './idempotency.js';
 import { addresses, clientIpHeader, headerPrefix, healthService, productName, requestHeaderNames } from './brand.js';
 
-type RouteGroup = 'analytics' | 'auth-ui' | 'mcp' | 'auth' | 'operator' | 'support' | 'audience' | 'audience-query' | 'newsletters' | 'templates' | 'sending-emails' | 'sending-other' | 'ops-domains' | 'ops-events' | 'ops-other' | 'ses-regions' | 'mailbox' | 'workspaces' | 'provider-connections' | 'public-stats' | 'overview' | 'billing';
+type RouteGroup = 'analytics' | 'disk-alert' | 'auth-ui' | 'mcp' | 'auth' | 'operator' | 'support' | 'audience' | 'audience-query' | 'newsletters' | 'templates' | 'sending-emails' | 'sending-other' | 'ops-domains' | 'ops-events' | 'ops-other' | 'ses-regions' | 'mailbox' | 'workspaces' | 'provider-connections' | 'public-stats' | 'overview' | 'billing';
 // Internal areas: /v1/operator/* answers only Nightmail operators and /v1/support/* only support grants (src/support.ts).
 const operatorPath = (pathname: string) => pathname === '/v1/operator' || pathname.startsWith('/v1/operator/');
 const supportPath = (pathname: string) => pathname === '/v1/support' || pathname.startsWith('/v1/support/');
 function routeGroupFor(pathname: string): RouteGroup | null {
   if(pathname==='/internal/v1/mail')return 'mailbox';
   if (pathname === '/internal/v1/analytics') return 'analytics';
+  if (pathname === '/internal/v1/database-disk') return 'disk-alert';
   if (pathname === '/v1/public/stats') return 'public-stats';
   // Billing: balance, usage, ledger, payments, the Stripe webhook and the operator's billing tools (behind the operator gate).
   if (pathname === '/v1/billing' || pathname.startsWith('/v1/billing/') || pathname.startsWith('/v1/operator/billing/')) return 'billing';
@@ -66,6 +71,7 @@ function loadGroupRegistrar(group: Exclude<RouteGroup, 'mcp'>): Promise<(app: Ap
   return groupRegistrars[group] ??= wrapModuleLoad(async () => {
     switch (group) {
       case 'analytics': return (await import('./analytics.js')).registerAnalytics;
+      case 'disk-alert': return (await import('./disk-alert.js')).registerDiskAlert;
       case 'auth': return registerAuth;
       case 'auth-ui': {
         const [{ registerMcpAuth }, { registerDashboardAuth }] = await Promise.all([import('./mcp-auth.js'), import('./dashboard-auth.js')]);
@@ -89,8 +95,8 @@ function loadGroupRegistrar(group: Exclude<RouteGroup, 'mcp'>): Promise<(app: Ap
       case 'operator':
       case 'support': {
         const [{ registerOperator }, { registerAudit }, { registerSupport, registerSupportOperator }, { registerSupportConversations }, { registerSupportInbox }, { registerUiNotes }] = await Promise.all([import('./operator.js'), import('./audit.js'), import('./support.js'), import('./support-conversations.js'), import('./support-inbox.js'), import('./ui-notes.js')]);
-        const [{ registerSupportNotes }, { registerSupportActions }, { registerAbuse }, { registerAbuseAlerts }] = await Promise.all([import('./support-notes.js'), import('./support-actions.js'), import('./abuse-clusters.js'), import('./abuse-alerts.js')]);
-        return (target: App) => { registerOperator(target); registerAbuse(target); registerAbuseAlerts(target); registerAudit(target); registerSupport(target); registerSupportOperator(target); registerSupportConversations(target); registerSupportInbox(target); registerUiNotes(target); registerSupportNotes(target); registerSupportActions(target); };
+        const [{ registerSupportNotes }, { registerSupportActions }, { registerAbuse }, { registerAbuseAlerts }, { registerHealth }] = await Promise.all([import('./support-notes.js'), import('./support-actions.js'), import('./abuse-clusters.js'), import('./abuse-alerts.js'), import('./health.js')]);
+        return (target: App) => { registerOperator(target); registerHealth(target); registerAbuse(target); registerAbuseAlerts(target); registerAudit(target); registerSupport(target); registerSupportOperator(target); registerSupportConversations(target); registerSupportInbox(target); registerUiNotes(target); registerSupportNotes(target); registerSupportActions(target); };
       }
       case 'billing': {
         const [{ registerBilling }, { registerStripeWebhook }] = await Promise.all([import('./billing/routes.js'), import('./billing/stripe-webhook.js')]);
@@ -116,13 +122,19 @@ function principalOf(c: Ctx, route: string) {
   return c.get('principal')?.type ?? actor?.credential ?? (actor ? 'internal' : c.get('mailboxAccess') ? 'inboxKey' : 'anonymous');
 }
 // One line per request: what the nightly report (scripts/nightly-report.ts) counts. Successes are sampled (core.log).
+// A request that took SLOW_REQUEST_MS or longer is marked `slow` and always written (src/log.ts), like every 5xx. Each
+// request is also counted for the health tick (src/health-counters.ts): its route's latency, its workspace's reads, its
+// error code and SQLSTATE, so those exist without a log search. Counting is in memory; the Worker (src/worker.ts) and the
+// Node server (src/server.ts) write the counts afterwards, on their own, so nothing here waits for or schedules that.
 function logRequest(c: Ctx, durationMs: number) {
   const status = c.res.status, route = routeOf(c), failure = c.get('failure');
-  const timings = c.get('serverTimings');
+  const timings = c.get('serverTimings'), code = failure ? errorCodeOf(failure.code) : undefined;
+  const workspace = c.get('principal')?.workspace ?? (c.get('actor') as Ctx['var']['actor'] | undefined)?.workspaceId ?? c.get('mailboxAccess')?.workspaceId;
+  countRequest({ route, method: c.req.method, status, durationMs, workspace: workspace || undefined, code, databaseCode: failure?.databaseCode });
   log(status >= 500 ? 'error' : status >= 400 ? 'warn' : 'info', {
-    event: 'request', requestId: c.get('requestId'), route, method: c.req.method, status, durationMs,
-    code: failure ? errorCodeOf(failure.code) : undefined, field: failure?.field, databaseCode: failure?.databaseCode,
-    workspace: c.get('principal')?.workspace ?? (c.get('actor') as Ctx['var']['actor'] | undefined)?.workspaceId ?? c.get('mailboxAccess')?.workspaceId, principal: principalOf(c, route),
+    event: 'request', requestId: c.get('requestId'), route, method: c.req.method, status, durationMs, slow: durationMs >= SLOW_REQUEST_MS || undefined,
+    code, field: failure?.field, databaseCode: failure?.databaseCode,
+    workspace, principal: principalOf(c, route),
     timings: timings.length ? Object.fromEntries(timings.map(item => [item.name, Number(item.durationMs.toFixed(1))])) : undefined,
   });
 }
@@ -237,6 +249,32 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
       // isolate memory for it (sending.ts), so it is not buffered here first.
       if (!(c.req.method==='POST' && c.req.path==='/v1/attachments/upload' && c.get('actor')))
         await boundRequestBody(c,snsIngress(c.req.path)||c.req.path==='/v1/billing/stripe'?512*1024:matched && c.get('actor')?undefined:64*1024);
+    }
+    // Single self-reclaiming isolate memory gate for contact-import previews before Hono parses the JSON body
+    // (after boundRequestBody finished reading wire bytes). Check domain restriction and editContent permission first.
+    if (c.req.method === 'POST' && c.req.path === '/v1/contact-imports' && c.get('actor')) {
+      if (c.get('actor')?.domains.length) throw unrestrictedRequired('Workspace-wide operations require a key without domain restrictions.', requiredOf(c));
+      const identity = actor(c, 'editContent');
+      const len = Number(c.req.raw.headers.get('content-length'));
+      const bytes = Math.min(SEND_LIMITS.isolateWorkingBytes, (Number.isFinite(len) && len > 0 ? len : 5 * 1024 * 1024) * 12 + 4 * 1024 * 1024);
+      let lease: MemoryLease;
+      try {
+        lease = await reserveMemory(bytes, { route: 'import.preview', workspaceId: identity.workspaceId, signal: c.req.raw.signal, idleMs: 15_000, maxMs: 45_000, wsBusyCode: 'IMPORT_CONCURRENCY_LIMIT', busyCode: 'IMPORT_CONCURRENCY_LIMIT' });
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') { c.res = new Response(null, { status: 499 }); return; }
+        if (err instanceof ApiError && (err.status === 429 || err.status === 503)) c.header('Retry-After', '1');
+        throw err;
+      }
+      c.set('importLease', lease);
+      try {
+        await runInMemoryScope(bytes, async () => {
+          if (c.req.raw.signal?.aborted) { c.res = new Response(null, { status: 499 }); return; }
+          await next();
+        }, () => lease.touch());
+      } finally {
+        if (!c.get('importLeaseTransferred')) lease.release();
+      }
+      return;
     }
     await next();
   });
@@ -360,8 +398,8 @@ export async function createOpenApiApp(): Promise<App> {
   registerWorkspaces(full); registerProviderConnections(full); registerMcp(full); registerPublicStats(full); registerOverviewSetup(full); registerOperator(full);
   registerAudit(full); registerSupport(full); registerSupportOperator(full); registerSupportConversations(full); registerSupportInbox(full); registerUiNotes(full);
   registerBilling(full); registerStripeWebhook(full);
-  const [{ registerSupportNotes }, { registerSupportActions }, { registerAnalytics }, { registerAbuse }, { registerAbuseAlerts }] = await wrapModuleLoad(() => Promise.all([import('./support-notes.js'), import('./support-actions.js'), import('./analytics.js'), import('./abuse-clusters.js'), import('./abuse-alerts.js')]));
-  registerSupportNotes(full); registerSupportActions(full); registerAnalytics(full); registerAbuse(full); registerAbuseAlerts(full);
+  const [{ registerSupportNotes }, { registerSupportActions }, { registerAnalytics }, { registerAbuse }, { registerAbuseAlerts }, { registerDiskAlert }, { registerHealth }] = await wrapModuleLoad(() => Promise.all([import('./support-notes.js'), import('./support-actions.js'), import('./analytics.js'), import('./abuse-clusters.js'), import('./abuse-alerts.js'), import('./disk-alert.js'), import('./health.js')]));
+  registerSupportNotes(full); registerSupportActions(full); registerAnalytics(full); registerAbuse(full); registerAbuseAlerts(full); registerDiskAlert(full); registerHealth(full);
   return full;
 }
 

@@ -1,12 +1,14 @@
 import {ActionRetry,actionDelay} from './ritual-retry.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { and, eq, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
-import { ApiError, databaseConflict, databaseUnavailable, rowId, log, logError, ModuleLoadError, transientDatabaseError } from './core.js';
+import { ApiError, databaseCodeOf, databaseConflict, databaseUnavailable, rowId, log, logError, ModuleLoadError, transientDatabaseError } from './core.js';
+import { countDatabaseError } from './health-counters.js';
 import type { ClaimedWebhook, DbExecutor, JobHandler, Runtime } from './core.js';
 import { jobs } from './db/core.js';
 import { resolveRegionRuntime } from './ses-region-state.js';
 import { failCampaign, failScheduledRelease } from './states.js';
 import { flushScreenCalls } from './screen-calls.js';
+import { flushShadow } from './screen-shadow.js';
 import { storageBinding, ingestInput,type IngestInput } from './mailbox-ingest-input.js';
 export const MAX_ATTEMPTS = 6;
 export const WEBHOOK_ATTEMPTS = 10;
@@ -103,8 +105,8 @@ export const inboundHookClaim=sql`inbound_hooks AS MATERIALIZED (SELECT j.id AS 
   JOIN LATERAL (SELECT h.type,h.url,h.encrypted_secret,h.encrypted_headers,h.paused,h.event_types,h.mailbox_ids,h.name,h.include,h.retry_attempts,h.timeout_seconds,h.junk FROM mailbox_webhooks h WHERE h.workspace_id=d.workspace_id AND h.id=d.webhook_id FOR SHARE) w ON true),
   inbound_parked AS (UPDATE mailbox_webhook_deliveries d SET status=CASE WHEN h.blocked='ENDPOINT_PAUSED' THEN 'paused' ELSE 'failed' END,last_error=h.blocked,updated_at=now() FROM inbound_hooks h WHERE h.blocked IS NOT NULL AND d.id=h.delivery_id AND d.generation=h.generation AND d.status='pending')`;
 export const claimedWithWebhooks = sql`SELECT j.*,to_jsonb(h) AS webhook FROM claimed j ${hookJoin}`;
-// Reserve before awaiting the claim, so overlapping drains in one isolate cannot both lease MIME work.
-const ingestSlots=3;
+// Reserve before awaiting the claim, so overlapping drains in one isolate stay within PARSE_LIMIT (6 MiB / 128 KiB floor).
+const ingestSlots=36;
 let ingestReserved=0;
 let hookCursor='';
 export type JobHandlerResolver = Record<string, JobHandler> | ((type: string) => Promise<JobHandler | undefined> | JobHandler | undefined);
@@ -119,26 +121,66 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
   const active = new Set<Promise<void>>();
   const failures: unknown[] = [];
   let activeFeedback = 0;
+  let drainIngest = 0; // mailbox.ingest jobs this drain is running
   // Hold each class preference for four claims so it cannot line up with alternating feedback reservations.
   const rotation = Math.floor(Math.random() * 8);
   const budgetMs = Math.min(20000, Math.max(1, maxDurationMs));
   const maximumClaims = Math.min(Math.max(1, limit), 100);
   const regionalRuntime = workspaceRuntimes(runtime);
   type Claimed = { id: string; workspace_id: string; type: string; payload: Record<string, unknown>; attempts: number; lease_fence: string; webhook: ClaimedWebhook | null;ingest:IngestInput|null;delete_binding:import('./provider-credentials.js').ReadyConnection|null };
+  const jobFence = (job: Claimed) => and(eq(jobs.id, job.id), eq(jobs.attempts, job.attempts), eq(jobs.status, 'running'), sql`${jobs.leaseUntil}=${job.lease_fence}::timestamptz`, typeof job.payload.run === 'string' ? sql`${jobs.payload}->>'run' = ${job.payload.run}` : undefined);
+  const stripLoadFailures = (payload: Record<string, unknown>) => '_loadFailures' in payload ? (() => { const { _loadFailures: _, ...rest } = payload; return rest; })() : payload;
+  const settleError = async (job: Claimed, handlerPayload: Record<string, unknown>, error: unknown, settle: (update: SQLWrapper) => Promise<unknown>, claimMs: number, claimBatchSize: number, jobStarted: number) => {
+    const fence = jobFence(job);
+    const context = { event: 'job', jobId: job.id, operation: job.type, attempt: job.attempts, workspaceId: job.workspace_id, requestId: typeof job.payload.requestId === 'string' ? job.payload.requestId : undefined };
+    if (error instanceof ModuleLoadError) {
+      const priorLoadFailures = typeof job.payload._loadFailures === 'number' && Number.isInteger(job.payload._loadFailures) && job.payload._loadFailures >= 0 ? job.payload._loadFailures : 0;
+      const loadFailures = priorLoadFailures + 1;
+      const refundedAttempts = Math.max(0, job.attempts - 1);
+      const delay = Math.min(15 * 60_000, 15_000 * 4 ** (loadFailures - 1));
+      const nextPayload = { ...handlerPayload, _loadFailures: loadFailures };
+      await runtime.db.update(jobs).set({ status: 'pending', attempts: refundedAttempts, leaseUntil: null, lastError: error.code, availableAt: new Date(Date.now() + delay).toISOString(), payload: nextPayload }).where(fence);
+      log(loadFailures >= LOAD_ERROR_THRESHOLD ? 'error' : 'warn', { ...context, jobType: job.type, attempt: refundedAttempts, loadFailures, code: error.code, retryable: true, claimMs, claimBatchSize, jobMs: Date.now() - jobStarted });
+      return;
+    }
+    if (error instanceof JobDeferred) {
+      // A successful polling turn breaks a streak of failures/evictions.
+      const nextPayload = error.payload ?? (handlerPayload !== job.payload ? handlerPayload : undefined);
+      await runtime.db.update(jobs).set({ status: 'pending', attempts: error.keepAttempts ? Math.max(0, job.attempts - 1) : 0, leaseUntil: null, lastError: null, availableAt: error.availableAt, ...(nextPayload ? { payload: nextPayload } : {}) }).where(fence);
+      log('info', { ...context, code: 'JOB_DEFERRED', availableAt: error.availableAt, claimMs, claimBatchSize, jobMs: Date.now() - jobStarted });
+      return;
+    }
+    // A transient database failure (a refused or dropped connection, a read-only or full database, a statement cancelled
+    // at its time or lock limit) retries like any retryable failure instead of failing the job for good: one transient
+    // refusal used to strand a campaign in preparing.
+    // So does a deadlock or serialization victim, which used to fail any handler not wrapped in retryDatabaseFailures.
+    const failure = transientDatabaseError(error) || databaseConflict(error) ? databaseUnavailable(true) : error;
+    countDatabaseError(databaseCodeOf(error)); // For the health tick: a job's timeout or deadlock counts like a request's.
+    const code = failure instanceof ApiError ? failure.code : 'JOB_INTERNAL_ERROR';
+    // Domain failure-state persistence must eventually commit; stopping at the
+    // ordinary attempt ceiling would strand a campaign in pending forever.
+    const hook=job.type==='operation.webhook' || job.type==='mailbox.webhook';
+    const retry = failure instanceof ApiError && failure.retryable && (job.attempts < (job.type==='mailbox.webhook'?mailboxWebhookAttempts(job.webhook):hook?WEBHOOK_ATTEMPTS:MAX_ATTEMPTS) || failure.code === 'JOB_FINALIZATION_FAILED');
+    const delay=error instanceof ActionRetry?actionDelay(job.attempts,error.afterMs):Math.min(hook ? 12*3600000 : 3600000,15000 * 4 ** (job.attempts - 1));
+    // A job that fails for good is never due again: its available_at is when it failed, which the health tick counts
+    // within the hour (src/health.ts jobs-failed), where a retry's is when it is next due.
+    await settle(runtime.db.update(jobs).set({ status: retry ? 'pending' : 'failed', leaseUntil: null, lastError: code, availableAt: new Date(Date.now() + (retry ? delay : 0)).toISOString(), ...(job.type==='mailbox.webhook' && job.webhook?{payload:{...handlerPayload,maxAttempts:mailboxWebhookAttempts(job.webhook)}}:handlerPayload!==job.payload?{payload:handlerPayload}:{}) }).where(fence));
+    logError(error, { ...context, code, retryable: retry, claimMs, claimBatchSize, jobMs: Date.now() - jobStarted });
+  };
   const handle = async (job: Claimed, index: number, claimMs: number, claimBatchSize: number) => {
     const jobStarted = Date.now();
     processed++; laneJobs[index]!++;
     peakActiveJobs = Math.max(peakActiveJobs, ++activeJobs);
     // A job row that is requeued under the same id (campaign runs) carries a fresh payload.run token; fencing on it keeps
     // a worker that still holds the retired run from completing or requeueing the row the new run now owns.
-    const fence = and(eq(jobs.id, job.id), eq(jobs.attempts, job.attempts), eq(jobs.status, 'running'), sql`${jobs.leaseUntil}=${job.lease_fence}::timestamptz`, typeof job.payload.run === 'string' ? sql`${jobs.payload}->>'run' = ${job.payload.run}` : undefined);
+    const fence = jobFence(job);
     const context = { event: 'job', jobId: job.id, operation: job.type, attempt: job.attempts, workspaceId: job.workspace_id, requestId: typeof job.payload.requestId === 'string' ? job.payload.requestId : undefined };
     let records: SQL | undefined, settling = false;
     const settle = (update: SQLWrapper) => {
       settling = true;
       return runtime.db.execute(records ? sql`WITH settled AS (${update.getSQL()} RETURNING id), ${records} SELECT 1` : update.getSQL());
     };
-    const handlerPayload = '_loadFailures' in job.payload ? (() => { const { _loadFailures: _, ...rest } = job.payload; return rest; })() : job.payload;
+    const handlerPayload = stripLoadFailures(job.payload);
     try {
       let handler: JobHandler | undefined;
       try { handler = typeof handlers === 'function' ? await handlers(job.type) : handlers[job.type]; }
@@ -152,38 +194,50 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       log('info', { ...context, code: 'JOB_COMPLETED', claimMs, claimBatchSize, jobMs: Date.now() - jobStarted });
     } catch (error) {
       if (settling) throw error; // Outcome and job settle atomically. Let the durable lease recover a failed commit.
-      if (error instanceof ModuleLoadError) {
-        const priorLoadFailures = typeof job.payload._loadFailures === 'number' && Number.isInteger(job.payload._loadFailures) && job.payload._loadFailures >= 0 ? job.payload._loadFailures : 0;
-        const loadFailures = priorLoadFailures + 1;
-        const refundedAttempts = Math.max(0, job.attempts - 1);
-        const delay = Math.min(15 * 60_000, 15_000 * 4 ** (loadFailures - 1));
-        const nextPayload = { ...handlerPayload, _loadFailures: loadFailures };
-        await runtime.db.update(jobs).set({ status: 'pending', attempts: refundedAttempts, leaseUntil: null, lastError: error.code, availableAt: new Date(Date.now() + delay).toISOString(), payload: nextPayload }).where(fence);
-        log(loadFailures >= LOAD_ERROR_THRESHOLD ? 'error' : 'warn', { ...context, jobType: job.type, attempt: refundedAttempts, loadFailures, code: error.code, retryable: true, claimMs, claimBatchSize, jobMs: Date.now() - jobStarted });
-        return;
-      }
-      if (error instanceof JobDeferred) {
-        // A successful polling turn breaks a streak of failures/evictions.
-        const nextPayload = error.payload ?? (handlerPayload !== job.payload ? handlerPayload : undefined);
-        await runtime.db.update(jobs).set({ status: 'pending', attempts: error.keepAttempts ? Math.max(0, job.attempts - 1) : 0, leaseUntil: null, lastError: null, availableAt: error.availableAt, ...(nextPayload ? { payload: nextPayload } : {}) }).where(fence);
-        log('info', { ...context, code: 'JOB_DEFERRED', availableAt: error.availableAt, claimMs, claimBatchSize, jobMs: Date.now() - jobStarted });
-        return;
-      }
-      // A transient database failure (a refused or dropped connection, a read-only or full database, a statement cancelled
-      // at its time or lock limit) retries like any retryable failure instead of failing the job for good: one transient
-      // refusal used to strand a campaign in preparing.
-      // So does a deadlock or serialization victim, which used to fail any handler not wrapped in retryDatabaseFailures.
-      const failure = transientDatabaseError(error) || databaseConflict(error) ? databaseUnavailable(true) : error;
-      const code = failure instanceof ApiError ? failure.code : 'JOB_INTERNAL_ERROR';
-      // Domain failure-state persistence must eventually commit; stopping at the
-      // ordinary attempt ceiling would strand a campaign in pending forever.
-      const hook=job.type==='operation.webhook' || job.type==='mailbox.webhook';
-      const retry = failure instanceof ApiError && failure.retryable && (job.attempts < (job.type==='mailbox.webhook'?mailboxWebhookAttempts(job.webhook):hook?WEBHOOK_ATTEMPTS:MAX_ATTEMPTS) || failure.code === 'JOB_FINALIZATION_FAILED');
-      const delay=error instanceof ActionRetry?actionDelay(job.attempts,error.afterMs):Math.min(hook ? 12*3600000 : 3600000,15000 * 4 ** (job.attempts - 1));
-      await settle(runtime.db.update(jobs).set({ status: retry ? 'pending' : 'failed', leaseUntil: null, lastError: code, availableAt: new Date(Date.now() + delay).toISOString(), ...(job.type==='mailbox.webhook' && job.webhook?{payload:{...handlerPayload,maxAttempts:mailboxWebhookAttempts(job.webhook)}}:handlerPayload!==job.payload?{payload:handlerPayload}:{}) }).where(fence));
-      logError(error, { ...context, code, retryable: retry, claimMs, claimBatchSize, jobMs: Date.now() - jobStarted });
+      await settleError(job, handlerPayload, error, settle, claimMs, claimBatchSize, jobStarted);
     } finally {
       activeJobs--;
+    }
+  };
+  const handleBatch = async (group: Claimed[], indices: number[], handler: NonNullable<JobHandler['batch']>, claimMs: number, claimBatchSize: number) => {
+    const batchStarted = Date.now();
+    for (const idx of indices) { processed++; laneJobs[idx]!++; activeJobs++; }
+    peakActiveJobs = Math.max(peakActiveJobs, activeJobs);
+    const ownerRuntime = { ...runtime, config: { ...runtime.config, workspaceId: group[0]!.workspace_id } };
+    const payloads = group.map(j => stripLoadFailures(j.payload));
+    try {
+      const outcomes = await handler(ownerRuntime, group.map((j, i) => ({
+        payload: payloads[i]!,
+        job: { id: j.id, attempts: j.attempts, workspaceId: j.workspace_id, leaseFence: j.lease_fence, webhook: j.webhook, ingest: j.ingest, deleteBinding: j.delete_binding },
+      })));
+      const byId = new Map(outcomes.map(o => [o.id, o]));
+      const done: Claimed[] = [];
+      const failedItems: { job: Claimed; payload: Record<string, unknown>; error: unknown }[] = [];
+      for (let i = 0; i < group.length; i++) {
+        const job = group[i]!, outcome = byId.get(job.id);
+        if (outcome?.error !== undefined) failedItems.push({ job, payload: payloads[i]!, error: outcome.error });
+        else done.push(job);
+      }
+      if (done.length) {
+        const ids = done.map(j => j.id), attempts = done.map(j => j.attempts), fences = done.map(j => j.lease_fence);
+        const stripped = done.map(j => stripLoadFailures(j.payload) !== j.payload ? JSON.stringify(stripLoadFailures(j.payload)) : null);
+        await runtime.db.execute(sql`UPDATE jobs j SET status='completed',lease_until=NULL,last_error=NULL,payload=coalesce(v.payload::jsonb,j.payload)
+          FROM unnest(${sql.param(ids)}::text[],${sql.param(attempts)}::int[],${sql.param(fences)}::timestamptz[],${sql.param(stripped)}::text[]) AS v(id,attempts,lease_fence,payload)
+          WHERE j.id=v.id AND j.attempts=v.attempts AND j.status='running' AND j.lease_until=v.lease_fence`);
+        const jobMs = Date.now() - batchStarted;
+        for (const job of done) {
+          log('info', { event: 'job', jobId: job.id, operation: job.type, attempt: job.attempts, workspaceId: job.workspace_id, code: 'JOB_COMPLETED', claimMs, claimBatchSize, jobMs, batchSize: done.length });
+        }
+      }
+      for (const item of failedItems) {
+        await settleError(item.job, item.payload, item.error, u => runtime.db.execute(u.getSQL()), claimMs, claimBatchSize, batchStarted);
+      }
+    } catch (error) {
+      for (let i = 0; i < group.length; i++) {
+        await settleError(group[i]!, payloads[i]!, error, u => runtime.db.execute(u.getSQL()), claimMs, claimBatchSize, batchStarted);
+      }
+    } finally {
+      activeJobs -= group.length;
     }
   };
   try {
@@ -204,7 +258,8 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
         AND NOT (j.type='mailbox.webhook' AND coalesce((j.payload->>'fenced')::boolean,false) AND j.attempts<=coalesce((j.payload->>'maxAttempts')::int,${WEBHOOK_ATTEMPTS}::int)
           AND NOT EXISTS(SELECT FROM mail_action_attempts a WHERE a.workspace_id=j.workspace_id AND a.delivery_id=j.payload->>'deliveryId' AND a.attempts>=j.attempts))`;
       const due = sql`((j.status='pending' AND j.available_at <= now()) OR (j.status='running' AND j.lease_until < now() AND NOT (${exhausted})))`;
-      const slots=pool==='webhooks'?0:Math.min(claimBatchSize,ingestSlots-ingestReserved);
+      // Inbound never takes a drain's last lane (when concurrency >= 3), so campaign/other/publish/hook work always has a lane.
+      const slots=pool==='webhooks'?0:Math.max(0,Math.min(claimBatchSize,ingestSlots-ingestReserved,(effectiveConcurrency>2?effectiveConcurrency-1:effectiveConcurrency)-drainIngest));
       // Only the head of each class enters the preference sort. The expression matches
       // jobs_ready_page, even for an expired running lease (no OR/BitmapOr + wide sort).
       // Seek over distinct queued hook owners (not over their backlog). Each gets
@@ -239,7 +294,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
         -- campaign: one busy in a cancel, reschedule or release under way is left for the next claim.
         SELECT e.workspace_id,e.id FROM sending_emails e WHERE (e.workspace_id,e.id) IN (SELECT workspace_id,email_id FROM exhausted)
         ORDER BY e.id FOR NO KEY UPDATE SKIP LOCKED
-      ), failed AS (UPDATE jobs j SET status='failed',last_error='JOB_LEASE_EXHAUSTED',lease_until=NULL FROM exhausted x WHERE j.id=x.id AND
+      ), failed AS (UPDATE jobs j SET status='failed',last_error='JOB_LEASE_EXHAUSTED',lease_until=NULL,available_at=now() /* when it failed, as above */ FROM exhausted x WHERE j.id=x.id AND
         (x.campaign_id IS NULL OR EXISTS(SELECT FROM parents p WHERE (p.workspace_id,p.id)=(x.workspace_id,x.campaign_id)) OR NOT EXISTS(SELECT FROM sending_campaigns c WHERE (c.workspace_id,c.id)=(x.workspace_id,x.campaign_id)))
         AND (x.email_id IS NULL OR EXISTS(SELECT FROM releases r WHERE (r.workspace_id,r.id)=(x.workspace_id,x.email_id)) OR NOT EXISTS(SELECT FROM sending_emails e WHERE (e.workspace_id,e.id)=(x.workspace_id,x.email_id)))
         RETURNING j.workspace_id,j.type,j.payload,x.campaign_id,x.email_id), ${failScheduledRelease(sql`SELECT workspace_id,email_id AS id FROM failed WHERE email_id IS NOT NULL`)}, campaigns_failed AS (${failCampaign(sql`(workspace_id,id) IN (SELECT workspace_id,campaign_id FROM failed WHERE campaign_id IS NOT NULL)`,{code:'JOB_LEASE_EXHAUSTED',message:'The campaign worker exhausted its leases.'})}),
@@ -251,15 +306,40 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
         SELECT t.workspace_id FROM mail_ingest_turns t WHERE t.active>0 AND EXISTS(
           SELECT FROM jobs j WHERE j.workspace_id=t.workspace_id AND j.type='mailbox.ingest' AND j.status IN ('pending','running') AND ${jobDue}<=now() AND (j.status='pending' OR NOT (${exhausted})))
         ORDER BY t.served_at,t.workspace_id LIMIT (SELECT least(${slots}::int,${claimBatchSize}-count(*)) FROM feedback) FOR UPDATE OF t SKIP LOCKED
-      ), ingest AS (
+      ), ingest_first AS MATERIALIZED (
         SELECT h.id FROM ingest_head t CROSS JOIN LATERAL (SELECT j.id FROM jobs j WHERE j.workspace_id=t.workspace_id AND j.type='mailbox.ingest' AND j.status IN ('pending','running') AND ${jobDue}<=now() AND (j.status='pending' OR NOT (${exhausted})) ORDER BY ${jobDue},j.id LIMIT 1 FOR UPDATE OF j SKIP LOCKED) h
-      ), regular AS (
+      ), regular AS MATERIALIZED (
         SELECT j.id FROM (${sql.join(classes(pool).map(kind=>sql`SELECT * FROM (${head(kind,claimBatchSize)}) page`),sql` UNION ALL `)}) j
         WHERE NOT EXISTS (SELECT 1 FROM feedback f WHERE f.id = j.id)
         ORDER BY CASE WHEN j.type IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery','operation.publish','operation.publishBatch') THEN 1 ELSE 0 END,
           CASE WHEN ${Math.floor((rotation + claimRequests) / 4) % 2}::int = CASE WHEN starts_with(j.type, 'campaign.') THEN 1 ELSE 0 END THEN 0 ELSE 1 END,
           CASE WHEN starts_with(j.type, 'campaign.') THEN 1 WHEN j.type IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery') THEN 2 WHEN j.type IN ('operation.publish','operation.publishBatch') THEN 3 ELSE 4 END,
-          j.available_at, j.id LIMIT (${claimBatchSize} - (SELECT count(*) FROM feedback) - (SELECT count(*) FROM ingest))
+          j.available_at, j.id LIMIT (${claimBatchSize} - (SELECT count(*) FROM feedback) - (SELECT count(*) FROM ingest_first))
+      ), ingest_overflow_ws AS MATERIALIZED (
+        -- When no regular work is due and slots remain, let busy workspaces borrow idle ingest slots
+        -- round-robin without locking mail_ingest_turns (so sibling consumers never exit empty).
+        SELECT t.workspace_id, t.served_at FROM mail_ingest_turns t
+        WHERE t.active>0 AND ${slots} > (SELECT count(*) FROM ingest_first)
+          AND (${claimBatchSize} - (SELECT count(*) FROM feedback) - (SELECT count(*) FROM ingest_first) - (SELECT count(*) FROM regular)) > 0
+          AND NOT EXISTS (SELECT 1 FROM regular)
+          AND EXISTS(SELECT FROM jobs j WHERE j.workspace_id=t.workspace_id AND j.type='mailbox.ingest' AND j.status IN ('pending','running') AND ${jobDue}<=now() AND (j.status='pending' OR NOT (${exhausted})))
+        ORDER BY t.served_at, t.workspace_id LIMIT ${slots}
+      ), ingest_overflow_picks AS (
+        SELECT h.id, t.served_at, h.due, row_number() OVER (PARTITION BY t.workspace_id ORDER BY h.due, h.id) AS slot
+        FROM ingest_overflow_ws t CROSS JOIN LATERAL (
+          SELECT j.id, ${jobDue} AS due FROM jobs j
+          WHERE j.workspace_id=t.workspace_id AND j.type='mailbox.ingest' AND j.status IN ('pending','running')
+            AND ${jobDue}<=now() AND (j.status='pending' OR NOT (${exhausted}))
+            AND NOT EXISTS (SELECT 1 FROM ingest_first f WHERE f.id = j.id)
+          ORDER BY ${jobDue}, j.id LIMIT ${slots}
+        ) h
+      ), ingest_overflow AS (
+        SELECT j.id FROM ingest_overflow_picks p JOIN jobs j USING(id) WHERE ${due}
+        ORDER BY p.slot, p.served_at, p.due, p.id
+        LIMIT greatest(0, least(${slots}::int - (SELECT count(*)::int FROM ingest_first), ${claimBatchSize}::int - (SELECT count(*)::int FROM feedback) - (SELECT count(*)::int FROM ingest_first) - (SELECT count(*)::int FROM regular)))
+        FOR UPDATE OF j SKIP LOCKED
+      ), ingest AS (
+        SELECT id FROM ingest_first UNION ALL SELECT id FROM ingest_overflow
       ), due AS (
         SELECT id FROM feedback UNION ALL SELECT id FROM ingest UNION ALL SELECT id FROM regular
       ), claimed AS (UPDATE jobs SET status = 'running', attempts = jobs.attempts + 1, lease_until = clock_timestamp() + interval '3 minutes',
@@ -267,7 +347,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
           -- whether the delivery is fenced) at its first claim, so the lease expiry after its last
           -- attempt dead-letters it.
           payload = CASE WHEN jobs.type='mailbox.webhook' AND NOT jobs.payload ? 'maxAttempts' THEN jobs.payload||coalesce((SELECT jsonb_build_object('maxAttempts',1+h.retry_attempts,'fenced',d.routed OR d.payload ? 'ritualAction') FROM mailbox_webhook_deliveries d JOIN mailbox_webhooks h ON h.id=d.webhook_id WHERE d.workspace_id=jobs.workspace_id AND d.id=jobs.payload->>'deliveryId'),jsonb_build_object('maxAttempts',${WEBHOOK_ATTEMPTS}::int)) ELSE jobs.payload END
-        FROM due WHERE jobs.id = due.id RETURNING jobs.*,jobs.lease_until::text AS lease_fence), served AS (INSERT INTO mail_ingest_turns(workspace_id,served_at) SELECT workspace_id,clock_timestamp() FROM claimed WHERE type='mailbox.ingest' ORDER BY workspace_id
+        FROM due WHERE jobs.id = due.id RETURNING jobs.*,jobs.lease_until::text AS lease_fence), served AS (INSERT INTO mail_ingest_turns(workspace_id,served_at) SELECT DISTINCT ON (workspace_id) workspace_id,clock_timestamp() FROM claimed WHERE type='mailbox.ingest' AND workspace_id IN (SELECT workspace_id FROM ingest_head) ORDER BY workspace_id
           ON CONFLICT(workspace_id) DO UPDATE SET served_at=excluded.served_at), ${pool==='work'?sql``:sql`hook_served AS (INSERT INTO webhook_turns SELECT DISTINCT workspace_id,statement_timestamp() FROM claimed WHERE public.job_class(type)='hook' ORDER BY 1
           ON CONFLICT(workspace_id) DO UPDATE SET served_at=excluded.served_at),`} ${webhookClaimCtes},${inboundHookClaim}
         SELECT j.id,j.workspace_id,j.type,j.payload,j.attempts,j.lease_fence,${pool==='work'?sql`NULL`:sql`(SELECT wid FROM owners WHERE step=${claimBatchSize*4})`} AS hook_cursor,coalesce(to_jsonb(h),to_jsonb(mh)) AS webhook,CASE WHEN j.type='mailbox.ingest' THEN ${ingestInput(runtime.config,sql`j.workspace_id`,sql`j.payload->>'sesMessageId'`)} END AS ingest,${runtime.config.multiTenant ? sql`CASE WHEN j.type='mail.deleteObjects' AND strpos(j.payload->>'bucket',':')=0 THEN ${storageBinding(sql`j.workspace_id`,sql`j.payload->>'region'`,sql`j.payload->>'bucket'`)} END` : sql`NULL`} AS delete_binding FROM claimed j ${hookJoin} LEFT JOIN inbound_hooks mh ON mh.job_id=j.id AND mh.blocked IS NULL`); }
@@ -283,7 +363,47 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
         continue;
       }
       claims += claimed.rows.length;
+      drainIngest += claimed.rows.filter(j=>j.type==='mailbox.ingest').length;
+      // Group >= 2 same-workspace mailbox.ingest jobs claimed together when the handler supports batching.
+      const ingestByWs = new Map<string, Claimed[]>();
+      const singles: Claimed[] = [];
       for (const job of claimed.rows) {
+        if (job.type === 'mailbox.ingest') {
+          let list = ingestByWs.get(job.workspace_id);
+          if (!list) { list = []; ingestByWs.set(job.workspace_id, list); }
+          list.push(job);
+        } else {
+          singles.push(job);
+        }
+      }
+      let ingestBatchFn: JobHandler['batch'] | undefined;
+      if ([...ingestByWs.values()].some(g => g.length >= 2)) {
+        try {
+          const resolved = typeof handlers === 'function' ? await handlers('mailbox.ingest') : handlers['mailbox.ingest'];
+          ingestBatchFn = resolved?.batch;
+        } catch { /* single-job path records ModuleLoadError cleanly */ }
+      }
+      for (const group of ingestByWs.values()) {
+        if (group.length >= 2 && ingestBatchFn) {
+          const indices: number[] = [];
+          for (let i = 0; i < group.length; i++) {
+            const idx = freeLanes.values().next().value!;
+            freeLanes.delete(idx);
+            indices.push(idx);
+          }
+          const task = handleBatch(group, indices, ingestBatchFn, claimMs, claimed.rows.length).catch(error => {
+            if (!failures.length) failures.push(error);
+          }).finally(() => {
+            active.delete(task);
+            for (const idx of indices) freeLanes.add(idx);
+            ingestReserved -= group.length; drainIngest -= group.length;
+          });
+          active.add(task);
+        } else {
+          singles.push(...group);
+        }
+      }
+      for (const job of singles) {
         const index = freeLanes.values().next().value!;
         freeLanes.delete(index);
         const feedback = job.type === 'operation.ses' || job.type === 'operation.simulatedFeedback' || job.type === 'operation.simulatedFeedbackRecovery';
@@ -295,7 +415,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
           active.delete(task);
           freeLanes.add(index);
           if (feedback) activeFeedback--;
-          if (job.type==='mailbox.ingest') ingestReserved--;
+          if (job.type==='mailbox.ingest') { ingestReserved--; drainIngest--; }
         });
         active.add(task);
       }
@@ -306,6 +426,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
     log('info', { code: 'JOB_DRAIN', processed, claims, claimRequests, concurrency: effectiveConcurrency, peakActiveJobs, laneJobs, budgetMs, durationMs: Date.now() - started });
     // Classifier requests the drain's jobs made (a campaign's copies, screened before release) as content_screen_calls rows.
     await flushScreenCalls(runtime.db);
+    flushShadow(runtime); // And to the second classifier, where one is configured (src/screen-shadow.ts): handed over, never waited for.
   }
   if (failures.length) throw failures[0];
   return processed;
@@ -336,9 +457,12 @@ export async function reserveNextWake(runtime: Runtime, delaySeconds: number, po
 export async function followDueJobs(runtime: Runtime, drain: () => Promise<unknown>, sendWake: (delaySeconds: number) => Promise<unknown>, keepAliveMs = 0, pool: JobPool='all'): Promise<'idle' | 'covered' | 'scheduled'> {
   const deadline = Date.now() + keepAliveMs;
   for (;;) {
-    await drain();
+    const ran = await drain();
     const delaySeconds = await nextWakeDelay(runtime,pool);
     if (delaySeconds === null) return 'idle';
+    // Work is due now and this drain actively made progress: keep draining without a 1.15 s sleep
+    // or forcing sibling consumers out via reserveNextWake.
+    if (delaySeconds === 0 && typeof ran === 'number' && ran > 0 && Date.now() + 2000 <= deadline) continue;
     if (!await reserveNextWake(runtime, delaySeconds,pool)) return 'covered';
     const waitMs = Math.max(1000, delaySeconds * 1000) + 150;
     if (Date.now() + waitMs + 2000 <= deadline) { await new Promise(resolve => setTimeout(resolve, waitMs)); continue; }

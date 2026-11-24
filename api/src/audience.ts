@@ -1,29 +1,62 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, eq, gt, inArray, isNull, sql, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
-import { actor, ApiError, AudienceSpec, budgetedRead, chargeBudget, unrestrictedRequired, errors, id, IdParams, json, notFound, page, PageQuery, readLimit, readLimitNote, response, rowId, security, statementTimedOut, type Actor, type App, type DbExecutor, type Runtime } from './core.js';
+import { actor, ApiError, AudienceSpec, budgetedRead, chargeBudget, databaseCodeOf, unrestrictedRequired, errors, id, IdParams, json, notFound, page, PageQuery, readLimit, readLimitNote, response, rowId, security, statementTimedOut, type Actor, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
 import { productName } from './brand.js';
 export { AudienceSpec };
-import { contacts, consentAudit, imports, listMembers, lists, segments, type SegmentRule } from './db/audience.js';
+import { contacts, consentAudit, imports, listCounts, listMembers, lists, segments, type SegmentRule } from './db/audience.js';
 import { enqueue, noteEnqueued } from './jobs.js';
-import { withMemory } from './isolate-memory.js';
+import { MEMORY_LIMITS, reserveMemory, runInMemoryScope, type MemoryLease } from './isolate-memory.js';
+import { buildBoundedPageJson, PAGE_MAX_BYTES, READ_MAX_WAITERS, READ_RESERVATION_BYTES, streamTextPartsResponse, utf8Bytes, withBoundedRead } from './read-bounds.js';
 import { mailAddress, validMailAddressSql } from './outbound-content.js';
 import { SEND_LIMITS } from './send-limits.js';
 
+export const CONTACT_PROPERTIES_MAX_KEYS = 50;
+export const CONTACT_PROPERTIES_MAX_BYTES = 16 * 1024;
+/** Matches migration 453's CHECK constraint (16 KiB compact JSON + 256 B Postgres jsonb::text formatting slack). */
+export const CONTACT_PROPERTIES_DB_MAX_BYTES = 16_640;
+export const CONTACT_LIST_IDS_PAGE_MAX = 50;
+export const CONTACT_LIST_IDS_SINGLE_MAX = 200;
+export const AUDIENCE_READ_MAX_BYTES = PAGE_MAX_BYTES;
+export const AUDIENCE_READ_RESERVATION_BYTES = READ_RESERVATION_BYTES;
+export const AUDIENCE_READ_MAX_WAITERS = READ_MAX_WAITERS;
+const AUDIENCE_READ_SECONDS = 5;
+export { utf8Bytes };
+export function isContactSizeCheckViolation(err: unknown): boolean {
+  if (databaseCodeOf(err) !== '23514') return false;
+  const text = String((err as { constraint?: unknown; cause?: { constraint?: unknown; message?: unknown }; message?: unknown })?.constraint ?? (err as { cause?: { constraint?: unknown; message?: unknown } })?.cause?.constraint ?? (err as { cause?: { message?: unknown } })?.cause?.message ?? (err as { message?: unknown })?.message ?? '');
+  return text.includes('audience_contacts_properties_size') || text.includes('audience_contacts_name_length');
+}
+/** Counts UTF-8 JSON bytes conservatively for both JS and Postgres jsonb (where extreme-exponent numbers expand to full decimal). */
+export function propertiesByteLength(properties: Record<string, unknown>): number {
+  let bytes = utf8Bytes(JSON.stringify(properties));
+  for (const val of Object.values(properties)) {
+    if (typeof val === 'number' && val !== 0 && Number.isFinite(val)) {
+      const exp = Math.abs(Math.floor(Math.log10(Math.abs(val))));
+      if (exp >= 20) bytes += exp + 4;
+    }
+  }
+  return bytes;
+}
+
 const Email = mailAddress(z.string().trim()).transform(v => v.toLowerCase()).openapi({format:'email'});
-const Properties = z.record(z.string().min(1).max(80), z.union([z.string().max(2000), z.number().finite(), z.boolean(), z.null()])).refine(v => Object.keys(v).length <= 50, 'At most 50 properties are supported.');
-const ContactInput = z.object({ email: Email, name: z.string().trim().max(200).optional(), properties: Properties.default({}) }).strict();
-const ContactPatch = z.object({ name: z.string().trim().max(200).nullable().optional(), properties: Properties.optional() }).strict();
+const Properties = z.record(z.string().min(1).max(80), z.union([z.string().max(2000), z.number().finite(), z.boolean(), z.null()])).refine(v => Object.keys(v).length <= CONTACT_PROPERTIES_MAX_KEYS, 'At most 50 properties are supported.');
+export const PropertiesInput = Properties.refine(v => propertiesByteLength(v) <= CONTACT_PROPERTIES_MAX_BYTES, 'Contact properties must total at most 16 KiB of JSON.').describe('Up to 50 key/value pairs, at most 16 KiB of JSON total.');
+const ContactInput = z.object({ email: Email, name: z.string().trim().max(200).optional(), properties: PropertiesInput.default({}) }).strict();
+const ContactPatch = z.object({ name: z.string().trim().max(200).nullable().optional(), properties: PropertiesInput.optional() }).strict();
+export function withAudienceReadMemory(c: Ctx, work: () => Promise<Response>): Promise<Response> {
+  return withBoundedRead(c, () => work(), { route: 'audience.read' });
+}
 const Scope = { workspaceId: z.string() };
 const Dates = { createdAt: z.string(), updatedAt: z.string() };
 const Contact = z.object({ id: z.string(), ...Scope, email: z.string(), name: z.string().nullable(), properties: Properties, marketingConsent: z.enum(['unknown', 'subscribed', 'unsubscribed']), suppressed: z.boolean(), suppressionReason: z.string().nullable(), lastOpenAt: z.string().nullable(), lastClickAt: z.string().nullable(), observedSince: z.string().nullable(), openObservedSince: z.string().nullable(), clickObservedSince: z.string().nullable(), deletedAt: z.string().nullable(), ...Dates }).openapi('Contact');
 const ListInput = z.object({ name: z.string().trim().min(1).max(200), description: z.string().max(2000).default('') }).strict();
 const List = ListInput.extend({ id: z.string(), ...Scope, ...Dates }).openapi('ContactList');
-const ContactRead = Contact.extend({ listIds: z.array(z.string()) }).openapi('ContactRead');
+const ContactRead = Contact.extend({ listIds: z.array(z.string()).describe('Up to 50 list IDs on paginated contact reads (200 on getContact), sorted by ID.') }).openapi('ContactRead');
 const ListCounts = z.object({ total: z.number().int(), subscribed: z.number().int(), unsubscribed: z.number().int(), unknown: z.number().int(), suppressed: z.number().int() }).describe('Active members only. Suppressed takes precedence over consent; subscribed, unsubscribed, unknown and suppressed are mutually exclusive and sum to total.');
 const ListRead = z.object({ ...List.shape, counts: ListCounts.nullable() }).strict().openapi('ContactListRead');
 const SearchQuery = PageQuery.extend({ search: z.string().trim().min(1).max(200).optional() });
-const ListQuery = SearchQuery.extend({ counts: z.enum(['true', 'false']).default('true').describe('false skips member counts (counts is null), for pickers that only need names. Counting scans every membership of each list.') }).openapi('ListContactListsQuery');
+const ListQuery = SearchQuery.extend({ counts: z.enum(['true', 'false']).default('true').describe('false leaves member counts out (counts is null). Counts are kept as memberships, consent and suppression change, so reading them does not count members.') }).openapi('ListContactListsQuery');
 const ContactQuery = SearchQuery.extend({ email: Email.optional().describe('Exact, case-insensitive email match. Uses the unique email index; prefer it over search for one address.'), consent: z.enum(['unknown', 'subscribed', 'unsubscribed']).optional(), suppressed: z.enum(['true', 'false']).optional(), listId: z.string().min(1).max(120).optional() }).openapi('ListContactsQuery');
 const RuleLeaf = z.union([z.object({ field: z.enum(['email', 'firstName', 'plan', 'country']), operator: z.enum(['eq', 'neq', 'contains']), value: z.string().max(200) }).strict(), z.object({ field: z.enum(['lastOpenAt', 'lastClickAt']), operator: z.enum(['within', 'inactive']), days: z.number().int().min(1).max(730) }).strict()]);
 // Finite-depth schemas remain fully representable in OpenAPI; no recursive lazy schema.
@@ -35,7 +68,7 @@ const SegmentInput = z.object({ name: z.string().trim().min(1).max(200), rule: R
 const Segment = SegmentInput.extend({ id: z.string(), ...Scope, ...Dates }).openapi('Segment');
 const Counts = z.object({ matched: z.number().int(), eligible: z.number().int(), suppressed: z.number().int(), unsubscribed: z.number().int() });
 const Deleted = z.object({ id: z.string(), deleted: z.literal(true) });
-const Audit = z.object({ id: z.string(), ...Scope, contactId: z.string(), email: z.string(), status: z.enum(['subscribed', 'unsubscribed']), source: z.string(), policyVersion: z.string().nullable(), evidence: z.string().nullable(), actorKeyId: z.string().nullable(), occurredAt: z.string(), createdAt: z.string() });
+const Audit = z.object({ id: z.string(), ...Scope, contactId: z.string(), email: z.string(), status: z.enum(['subscribed', 'unsubscribed']), source: z.string(), policyVersion: z.string().nullable(), evidence: z.string().nullable(), actorKeyId: z.string().nullable(), importId: z.string().nullable().describe('Committed import ID when source is import; null otherwise.'), occurredAt: z.string(), createdAt: z.string() });
 const ConsentInput = z.object({ status: z.enum(['subscribed', 'unsubscribed']), source: z.string().trim().min(1).max(200).optional(), policyVersion: z.string().trim().min(1).max(120).optional(), evidence: z.string().trim().min(1).max(2000).optional(), occurredAt: z.string().datetime({ offset: true }).refine(v => Date.parse(v) <= Date.now() + 60000, 'Consent cannot occur in the future.').optional(), confirmResubscribe: z.boolean().default(false) }).strict();
 const ImportRowSchema = z.object({ row: z.number().int(), email: z.string(), name: z.string().optional(), properties: Properties });
 const ImportErrorSchema = z.object({ row: z.number().int(), field: z.string(), message: z.string() });
@@ -61,26 +94,120 @@ async function findSegment(db: DbExecutor, identity: Actor, segmentId: string) {
 
 // Literal substring search: %, _ and backslash have no wildcard meaning.
 function searchText(column: AnyPgColumn, search: string): SQL { return sql`strpos(lower(${column}), lower(${search})) > 0`; }
+// A search that is one complete address is that contact, through the unique email index. Any other search is a
+// substring of the email or name, which no index serves: it reads every contact of the workspace.
+const wholeAddress = (search: string | undefined) => { const address = Email.safeParse(search); return address.success ? address.data : undefined; };
 function contactFilters(identity: Actor, query: z.infer<typeof ContactQuery>) {
-  return [query.email ? eq(contacts.email, query.email) : undefined, query.search ? sql`(${searchText(contacts.email, query.search)} OR ${searchText(contacts.name, query.search)})` : undefined, query.consent ? eq(contacts.marketingConsent, query.consent) : undefined, query.suppressed !== undefined ? eq(contacts.suppressed, query.suppressed === 'true') : undefined, query.listId ? inList(identity, query.listId) : undefined];
+  const address = wholeAddress(query.search);
+  return [query.email ? eq(contacts.email, query.email) : undefined, address ? eq(contacts.email, address) : query.search ? sql`(${searchText(contacts.email, query.search)} OR ${searchText(contacts.name, query.search)})` : undefined, query.consent ? eq(contacts.marketingConsent, query.consent) : undefined, query.suppressed !== undefined ? eq(contacts.suppressed, query.suppressed === 'true') : undefined, query.listId ? inList(identity, query.listId) : undefined];
 }
-async function readContacts(db: DbExecutor, identity: Actor, rows: Array<typeof contacts.$inferSelect>) {
+async function readContacts(db: DbExecutor, identity: Actor, rows: Array<typeof contacts.$inferSelect>, maxListsPerContact = CONTACT_LIST_IDS_PAGE_MAX) {
   if (!rows.length) return [];
-  const memberships = await db.select({ contactId: listMembers.contactId, listId: listMembers.listId }).from(listMembers).innerJoin(lists, and(eq(lists.id, listMembers.listId), eq(lists.workspaceId, listMembers.workspaceId))).where(and(scope(listMembers, identity), scope(lists, identity), inArray(listMembers.contactId, rows.map(row => row.id)))).orderBy(asc(listMembers.listId));
+  const idsJson = JSON.stringify(rows.map(row => row.id));
+  const { rows: memberships } = await db.execute<{ contact_id: string; list_id: string }>(sql`
+    SELECT cid.id AS contact_id, m.list_id
+    FROM jsonb_array_elements_text(${idsJson}::jsonb) AS cid(id)
+    CROSS JOIN LATERAL (
+      SELECT m.list_id
+      FROM audience_list_members m
+      JOIN audience_lists l ON l.workspace_id = m.workspace_id AND l.id = m.list_id
+      WHERE m.workspace_id = ${identity.workspaceId} AND m.contact_id = cid.id
+      ORDER BY m.list_id ASC
+      LIMIT ${maxListsPerContact}
+    ) m`);
   const byContact = new Map<string, string[]>();
-  for (const member of memberships) { const ids = byContact.get(member.contactId) ?? []; ids.push(member.listId); byContact.set(member.contactId, ids); }
+  for (const member of memberships) { const ids = byContact.get(member.contact_id) ?? []; ids.push(member.list_id); byContact.set(member.contact_id, ids); }
   return rows.map(row => ({ ...row, listIds: byContact.get(row.id) ?? [] }));
 }
+// A list this size or smaller is read through its own memberships whatever the filter: at most this many contact probes.
+const SMALL_LIST = 5000;
+type ContactRow = typeof contacts.$inferSelect;
+type RawContactRow = { id: string; workspace_id: string; email: string; name: string | null; properties: Record<string, string | number | boolean | null>; marketing_consent: 'unknown' | 'subscribed' | 'unsubscribed'; suppressed: boolean; suppression_reason: string | null; last_open_at: string | null; last_click_at: string | null; observed_since: string | null; open_observed_since: string | null; click_observed_since: string | null; deleted_at: string | null; created_at: string; updated_at: string; candidate_count: number };
+function mapRawContact(r: RawContactRow): ContactRow {
+  return { id: r.id, workspaceId: r.workspace_id, email: r.email, name: r.name, properties: r.properties, marketingConsent: r.marketing_consent, suppressed: r.suppressed, suppressionReason: r.suppression_reason, lastOpenAt: r.last_open_at, lastClickAt: r.last_click_at, observedSince: r.observed_since, openObservedSince: r.open_observed_since, clickObservedSince: r.click_observed_since, deletedAt: r.deleted_at, createdAt: r.created_at, updatedAt: r.updated_at };
+}
+/**
+ * Fetches one page of active contacts in ID order while capping cumulative serialized bytes in SQL (always >= 1 row
+ * if any match), preserving membership-ordered index scans for unfiltered or small lists.
+ */
+async function boundedContactPage(db: DbExecutor, identity: Actor, query: z.infer<typeof ContactQuery>) {
+  const { listId } = query, filtered = !!query.search || !!query.consent || query.suppressed !== undefined;
+  const byMembership = !!listId && !query.email && !wholeAddress(query.search) && (!filtered
+    || !(await db.execute(sql`SELECT 1 FROM ${listMembers} WHERE ${scope(listMembers, identity)} AND ${listMembers.listId} = ${listId} OFFSET ${SMALL_LIST} LIMIT 1`)).rows.length);
+  const candidateSql = byMembership
+    ? sql`SELECT ${contacts.id} AS id, ${contacts.workspaceId} AS workspace_id, ${contacts.email} AS email, ${contacts.name} AS name, ${contacts.properties} AS properties, ${contacts.marketingConsent} AS marketing_consent, ${contacts.suppressed} AS suppressed, ${contacts.suppressionReason} AS suppression_reason,
+        ${contacts.lastOpenAt} AS last_open_at, ${contacts.lastClickAt} AS last_click_at, ${contacts.observedSince} AS observed_since, ${contacts.openObservedSince} AS open_observed_since, ${contacts.clickObservedSince} AS click_observed_since, ${contacts.deletedAt} AS deleted_at, ${contacts.createdAt} AS created_at, ${contacts.updatedAt} AS updated_at,
+        (octet_length(${contacts.properties}::text) + octet_length(${contacts.email}) + coalesce(octet_length(${contacts.name}), 0) + 384) AS row_bytes
+      FROM ${listMembers}
+      JOIN ${contacts} ON ${contacts.workspaceId} = ${listMembers.workspaceId} AND ${contacts.id} = ${listMembers.contactId}
+      WHERE ${and(scope(listMembers, identity), eq(listMembers.listId, listId!), isNull(contacts.deletedAt), ...contactFilters(identity, { ...query, listId: undefined }), query.cursor ? gt(listMembers.contactId, query.cursor) : undefined)}
+      ORDER BY ${listMembers.contactId} ASC LIMIT ${query.limit + 1}`
+    : sql`SELECT id, workspace_id, email, name, properties, marketing_consent, suppressed, suppression_reason,
+        last_open_at, last_click_at, observed_since, open_observed_since, click_observed_since, deleted_at, created_at, updated_at,
+        (octet_length(properties::text) + octet_length(email) + coalesce(octet_length(name), 0) + 384) AS row_bytes
+      FROM ${contacts}
+      WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...contactFilters(identity, query), query.cursor ? gt(contacts.id, query.cursor) : undefined)}
+      ORDER BY ${contacts.id} ASC LIMIT ${query.limit + 1}`;
+  const { rows } = await db.execute<RawContactRow>(sql`
+    WITH candidate AS (${candidateSql}), sized AS (
+      SELECT *, row_number() OVER (ORDER BY id) AS rn, sum(row_bytes) OVER (ORDER BY id ROWS UNBOUNDED PRECEDING) AS cum_bytes
+      FROM candidate
+    )
+    SELECT id, workspace_id, email, name, properties, marketing_consent, suppressed, suppression_reason,
+      last_open_at::text, last_click_at::text, observed_since::text, open_observed_since::text, click_observed_since::text,
+      deleted_at::text, created_at::text, updated_at::text,
+      (SELECT count(*)::int FROM candidate) AS candidate_count
+    FROM sized WHERE rn = 1 OR cum_bytes <= ${AUDIENCE_READ_MAX_BYTES}
+    ORDER BY rn`);
+  const candidateCount = rows[0]?.candidate_count ?? 0;
+  const pageRows = rows.slice(0, query.limit).map(mapRawContact);
+  const hasMore = candidateCount > pageRows.length;
+  return { rows: pageRows, hasMore };
+}
+// Counts are the sums of the list's rows in audience_list_counts, which the database keeps as memberships and contacts
+// change (migration 405): a few rows per list, however many members it has.
 async function readLists(db: DbExecutor, identity: Actor, rows: ListRow[]) {
   if (!rows.length) return [];
-  const totals = await db.select({ listId: listMembers.listId, total: sql<number>`count(*)::int`, subscribed: sql<number>`count(*) FILTER (WHERE NOT ${contacts.suppressed} AND ${contacts.marketingConsent} = 'subscribed')::int`, unsubscribed: sql<number>`count(*) FILTER (WHERE NOT ${contacts.suppressed} AND ${contacts.marketingConsent} = 'unsubscribed')::int`, unknown: sql<number>`count(*) FILTER (WHERE NOT ${contacts.suppressed} AND ${contacts.marketingConsent} = 'unknown')::int`, suppressed: sql<number>`count(*) FILTER (WHERE ${contacts.suppressed})::int` }).from(listMembers).innerJoin(contacts, and(eq(contacts.id, listMembers.contactId), eq(contacts.workspaceId, listMembers.workspaceId))).where(and(scope(listMembers, identity), scope(contacts, identity), isNull(contacts.deletedAt), inArray(listMembers.listId, rows.map(row => row.id)))).groupBy(listMembers.listId);
-  const byList = new Map(totals.map(({ listId, ...counts }) => [listId, counts]));
+  const sums = await db.select({ listId: listCounts.listId, subscribed: sql<number>`sum(${listCounts.subscribed})::int`, unsubscribed: sql<number>`sum(${listCounts.unsubscribed})::int`, unknown: sql<number>`sum(${listCounts.unknown})::int`, suppressed: sql<number>`sum(${listCounts.suppressed})::int` }).from(listCounts).where(and(scope(listCounts, identity), inArray(listCounts.listId, rows.map(row => row.id)))).groupBy(listCounts.listId);
+  const byList = new Map(sums.map(({ listId, ...counts }) => [listId, { total: counts.subscribed + counts.unsubscribed + counts.unknown + counts.suppressed, ...counts }]));
   return rows.map(row => ({ ...row, counts: byList.get(row.id) ?? { total: 0, subscribed: 0, unsubscribed: 0, unknown: 0, suppressed: 0 } }));
+}
+// A membership change reads its contact's state to count it (migration 405), so it locks the contact first, as an
+// import, a consent change and a deletion do: contact, then membership, several contacts in email order. Deleted
+// contacts are locked too (an import may be restoring one). Returns the IDs that are active contacts.
+export async function lockContacts(tx: DbExecutor, identity: Pick<Actor, 'workspaceId'>, contactIds: string[]) {
+  const rows = await tx.select({ id: contacts.id, deletedAt: contacts.deletedAt }).from(contacts).where(and(scope(contacts, identity), inArray(contacts.id, contactIds))).orderBy(asc(contacts.email)).for('share');
+  return rows.filter(row => !row.deletedAt).map(row => row.id);
 }
 
 export function compileRule(rule: SegmentRule): SQL { return sql`coalesce((${compileRuleCondition(rule)}), false)`; }
 function compileRuleCondition(rule: SegmentRule): SQL {
-  if ('rules' in rule) return sql`(${sql.join(rule.rules.map(compileRule), rule.operator === 'and' ? sql` AND ` : sql` OR `)})`;
+  if ('rules' in rule) {
+    if (rule.operator === 'or') {
+      // Collapse same-field eq leaves inside OR into one ANY(...) test so 20-50 condition OR segments extract JSONB once per row.
+      const eqByField = new Map<string, string[]>();
+      const other: SegmentRule[] = [];
+      for (const child of rule.rules) {
+        if (!('rules' in child) && !('days' in child) && child.operator === 'eq') {
+          const val = child.field === 'email' ? child.value.trim().toLowerCase() : child.value;
+          const list = eqByField.get(child.field) ?? [];
+          list.push(val);
+          eqByField.set(child.field, list);
+        } else {
+          other.push(child);
+        }
+      }
+      const parts: SQL[] = other.map(compileRule);
+      for (const [f, vals] of eqByField) {
+        const expr = f === 'email' ? sql`${contacts.email}` : sql`(${contacts.properties} ->> ${f})`;
+        parts.push(vals.length === 1
+          ? sql`coalesce(${expr} = ${vals[0]!}, false)`
+          : sql`coalesce(${expr} = ANY(ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify([...new Set(vals)])}::jsonb))), false)`);
+      }
+      return sql`(${sql.join(parts, sql` OR `)})`;
+    }
+    return sql`(${sql.join(rule.rules.map(compileRule), sql` AND `)})`;
+  }
   if ('days' in rule) {
     const cutoff = new Date(Date.now() - rule.days * 86400000).toISOString();
     const timestamp = rule.field === 'lastOpenAt' ? contacts.lastOpenAt : contacts.lastClickAt;
@@ -97,15 +224,22 @@ function compileRuleCondition(rule: SegmentRule): SQL {
 // Keep the full membership-key probe correlated even immediately after a large import,
 // before PostgreSQL has analyzed the new row distribution.
 function inList(identity: Actor, listId: string): SQL { return sql`EXISTS (SELECT 1 FROM ${listMembers} WHERE ${scope(listMembers, identity)} AND ${listMembers.listId} = ${listId} AND ${listMembers.contactId} = ${contacts.id} OFFSET 0)`; }
-const PREVIEW_SMALL_LIST = 5000;
+const PREVIEW_SMALL_LIST = 5000, PREVIEW_VERY_LARGE_LIST = 100_000, PREVIEW_READ_SECONDS = 15;
 async function previewSegmentCounts(db: DbExecutor, identity: Actor, rule: SegmentRule, listId?: string) {
   const ruleSql = compileRule(rule);
   let fromSql: SQL;
   if (listId) {
     const big = await db.execute(sql`SELECT 1 FROM ${listMembers} WHERE ${scope(listMembers, identity)} AND ${listMembers.listId} = ${listId} ORDER BY ${listMembers.contactId} OFFSET ${PREVIEW_SMALL_LIST} LIMIT 1`);
-    fromSql = !big.rowCount
-      ? sql`${listMembers} JOIN ${contacts} ON ${contacts.workspaceId} = ${listMembers.workspaceId} AND ${contacts.id} = ${listMembers.contactId} WHERE ${scope(listMembers, identity)} AND ${listMembers.listId} = ${listId} AND ${isNull(contacts.deletedAt)} AND ${ruleSql}`
-      : sql`${contacts} WHERE ${scope(contacts, identity)} AND ${isNull(contacts.deletedAt)} AND ${ruleSql} AND EXISTS (SELECT 1 FROM ${listMembers} WHERE ${scope(listMembers, identity)} AND ${listMembers.listId} = ${listId} AND ${listMembers.contactId} = ${contacts.id})`;
+    if (!big.rowCount) {
+      fromSql = sql`${listMembers} JOIN ${contacts} ON ${contacts.workspaceId} = ${listMembers.workspaceId} AND ${contacts.id} = ${listMembers.contactId} WHERE ${scope(listMembers, identity)} AND ${listMembers.listId} = ${listId} AND ${isNull(contacts.deletedAt)} AND ${ruleSql}`;
+    } else {
+      // Medium lists (5k..100k) benefit from planner-chosen semi-joins; very large lists (>100k) fence EXISTS with OFFSET 0
+      // so Postgres filters contacts by the segment rule first instead of merge-joining millions of memberships.
+      const huge = await db.execute(sql`SELECT 1 FROM ${listMembers} WHERE ${scope(listMembers, identity)} AND ${listMembers.listId} = ${listId} ORDER BY ${listMembers.contactId} OFFSET ${PREVIEW_VERY_LARGE_LIST} LIMIT 1`);
+      fromSql = huge.rowCount
+        ? sql`${contacts} WHERE ${scope(contacts, identity)} AND ${isNull(contacts.deletedAt)} AND ${ruleSql} AND ${inList(identity, listId)}`
+        : sql`${contacts} WHERE ${scope(contacts, identity)} AND ${isNull(contacts.deletedAt)} AND ${ruleSql} AND EXISTS (SELECT 1 FROM ${listMembers} WHERE ${scope(listMembers, identity)} AND ${listMembers.listId} = ${listId} AND ${listMembers.contactId} = ${contacts.id})`;
+    }
   } else {
     fromSql = sql`${contacts} WHERE ${scope(contacts, identity)} AND ${isNull(contacts.deletedAt)} AND ${ruleSql}`;
   }
@@ -247,17 +381,6 @@ function recipientJsonSql(propertyKeys: string[], idCol: SQL, emailCol: SQL, nam
     : sql`'{}'::jsonb`;
   return sql`jsonb_strip_nulls(jsonb_build_object('id', ${idCol}, 'email', ${emailCol}, 'name', nullif(${propertyKeys.includes('name') ? nameCol : sql`NULL::text`}, ''), 'properties', ${propsExpr}))`;
 }
-/**
- * Unified campaign audience freeze used by both small synchronous launches (<=5,000 list members) and deferred
- * background captures (>5,000 members, called inside a REPEATABLE READ transaction).
- *
- * Every SQL statement is bounded so large captures stay well inside a 30 s statement timeout even under production load:
- * 1. Stage skinny (rank, id[, email], eligible, suppressed) in a temp table ON COMMIT DROP via hash join.
- * 2. Sort eligible rows once by (rank, hashtextextended(id, 0), id) into pg_temp.audience_ordered.
- * 3. Insert sending_review_recipients in bounded ordinal slices (default 200,000 rows). For static campaigns with no
- *    referenced contact properties, email is carried in audience_ordered so each slice needs no second join to
- *    audience_contacts, validates every address with validMailAddressSql, and stamps s1: content_hash inline.
- */
 export async function snapshotCampaignAudience(
   db: DbExecutor,
   identity: Actor,
@@ -580,8 +703,12 @@ function previewImport(input: z.infer<typeof ImportInput>) {
   seen.clear();
   return { rowsJson: rows.finish(), errorsJson: failures.finish(), rowCount: rows.count };
 }
-// Stream large import JSON responses one 64 KiB chunk at a time on pull(), avoiding a second 8 MB copy or 50,000 JS objects.
-function streamImportResponse(meta: ImportMeta, rowsJson: string, errorsJson: string, status: 200 | 201, subscribed?: number): Response {
+export const importStream = { idleMs: MEMORY_LIMITS.streamIdleMs, maxMs: MEMORY_LIMITS.streamMaxMs };
+const importStreamBytes = (chars: number) => Math.min(12 * 1024 * 1024, Math.max(256 * 1024, Math.ceil(chars)));
+
+// Stream large import JSON responses one 64 KiB chunk at a time on pull(), holding a shrunk self-reclaiming memory lease.
+function streamImportResponse(c: Ctx, meta: ImportMeta, rowsJson: string, errorsJson: string, status: 200 | 201, subscribed?: number, lease?: MemoryLease): Response {
+  lease?.shrink(importStreamBytes(rowsJson.length + errorsJson.length));
   const parts = [
     `{"id":${JSON.stringify(meta.id)},"workspaceId":${JSON.stringify(meta.workspaceId)},"listId":${JSON.stringify(meta.listId)},"status":${JSON.stringify(meta.status)},"rows":`,
     rowsJson,
@@ -589,51 +716,47 @@ function streamImportResponse(meta: ImportMeta, rowsJson: string, errorsJson: st
     errorsJson,
     `,"imported":${meta.imported},"rowsRetained":${meta.rowsScrubbedAt === null},"errorsRetained":${meta.errorsScrubbedAt === null},"createdAt":${JSON.stringify(meta.createdAt)},"updatedAt":${JSON.stringify(meta.updatedAt)}${subscribed !== undefined ? `,"subscribed":${subscribed}` : ''}}`,
   ];
-  const encoder = new TextEncoder();
-  let partIndex = 0, offset = 0;
-  const stream = new ReadableStream<Uint8Array>({
-    pull(controller) {
-      while (partIndex < parts.length) {
-        const part = parts[partIndex]!;
-        if (offset < part.length) {
-          const next = Math.min(part.length, offset + 65536);
-          controller.enqueue(encoder.encode(part.slice(offset, next)));
-          offset = next;
-          return;
-        }
-        parts[partIndex] = '';
-        partIndex++;
-        offset = 0;
-      }
-      parts.length = 0;
-      controller.close();
-    },
-    cancel() { parts.length = 0; },
-  });
-  return new Response(stream, { status, headers: { 'content-type': 'application/json; charset=UTF-8' } });
+  return streamTextPartsResponse(c, parts, status, { lease, idleMs: importStream.idleMs, maxMs: importStream.maxMs });
 }
 
 export function registerAudience(app: App) {
-  app.openapi(createRoute({ method: 'get', path: '/v1/contacts', operationId: 'listContacts', tags: ['Audience'], security, description: 'Active contacts with current list IDs. Search is a case-insensitive literal email/name substring. Consent and suppression filters are independent.', request: { query: ContactQuery }, responses: { 200: response(page(ContactRead)), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: '/v1/contacts', operationId: 'listContacts', tags: ['Audience'], security, description: `Active contacts with current list IDs. A search that is one complete email address returns that contact (exact, any case). Any other search is a case-insensitive literal substring of the email or name. Consent and suppression filters are independent. Pages are also bounded by response size and may return fewer than limit contacts; follow nextCursor while non-null. ${readLimitNote(AUDIENCE_READ_SECONDS)}`, request: { query: ContactQuery }, responses: { 200: response(page(ContactRead)), ...errors } }), async c => {
     const identity = actor(c), query = c.req.valid('query');
-    if (query.listId) await findList(c.env.db, identity, query.listId);
-    const rows = await c.env.db.select().from(contacts).where(and(scope(contacts, identity), isNull(contacts.deletedAt), ...contactFilters(identity, query), query.cursor ? gt(contacts.id, query.cursor) : undefined)).orderBy(asc(contacts.id)).limit(query.limit + 1);
-    const result = paginate(rows, query.limit);
-    return c.json({ ...result, data: await readContacts(c.env.db, identity, result.data) }, 200);
+    return await withAudienceReadMemory(c, async () => {
+      const { items, hasMore } = await budgetedRead(c.env.db, async tx => {
+        if (query.listId) await findList(tx, identity, query.listId);
+        const { rows, hasMore: more } = await boundedContactPage(tx, identity, query);
+        return { items: await readContacts(tx, identity, rows, CONTACT_LIST_IDS_PAGE_MAX), hasMore: more };
+      }, readLimit(AUDIENCE_READ_SECONDS));
+      const { json: body } = buildBoundedPageJson(items, hasMore, AUDIENCE_READ_MAX_BYTES);
+      return new Response(body, { status: 200, headers: { 'content-type': 'application/json; charset=UTF-8' } });
+    }) as never;
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/contacts', operationId: 'createContact', tags: ['Audience'], security, request: { body: json(ContactInput) }, responses: { 201: response(Contact), ...errors } }), async c => {
     const identity = actor(c, 'editContent'), input = c.req.valid('json');
-    const [contact] = await c.env.db.insert(contacts).values({ id: rowId('con'), ...scopeValues(identity), ...input }).onConflictDoNothing().returning();
+    let contact: typeof contacts.$inferSelect | undefined;
+    try {
+      [contact] = await c.env.db.insert(contacts).values({ id: rowId('con'), ...scopeValues(identity), ...input }).onConflictDoNothing().returning();
+    } catch (err) {
+      if (isContactSizeCheckViolation(err)) throw new ApiError(422, 'VALIDATION_FAILED', 'Contact properties must total at most 16 KiB of JSON.', 'properties');
+      throw err;
+    }
     if (!contact) throw new ApiError(409, 'CONTACT_EXISTS', 'This address already has a contact or retained consent record. Use imports to restore a deleted contact without changing consent.');
     return c.json(contact, 201);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/contacts/{id}', operationId: 'getContact', tags: ['Audience'], security, request: { params: IdParams }, responses: { 200: response(ContactRead), ...errors } }), async c => {
     const identity = actor(c), row = await findContact(c.env.db, identity, c.req.valid('param').id);
-    return c.json((await readContacts(c.env.db, identity, [row]))[0]!, 200);
+    return c.json((await readContacts(c.env.db, identity, [row], CONTACT_LIST_IDS_SINGLE_MAX))[0]!, 200);
   });
   app.openapi(createRoute({ method: 'patch', path: '/v1/contacts/{id}', operationId: 'updateContact', tags: ['Audience'], security, request: { params: IdParams, body: json(ContactPatch) }, responses: { 200: response(Contact), ...errors } }), async c => {
     const identity = actor(c, 'editContent'), contactId = c.req.valid('param').id; await findContact(c.env.db, identity, contactId);
-    const [contact] = await c.env.db.update(contacts).set({ ...c.req.valid('json'), updatedAt: new Date().toISOString() }).where(and(scope(contacts, identity), eq(contacts.id, contactId), isNull(contacts.deletedAt))).returning();
+    let contact: typeof contacts.$inferSelect | undefined;
+    try {
+      [contact] = await c.env.db.update(contacts).set({ ...c.req.valid('json'), updatedAt: new Date().toISOString() }).where(and(scope(contacts, identity), eq(contacts.id, contactId), isNull(contacts.deletedAt))).returning();
+    } catch (err) {
+      if (isContactSizeCheckViolation(err)) throw new ApiError(422, 'VALIDATION_FAILED', 'Contact properties must total at most 16 KiB of JSON.', 'properties');
+      throw err;
+    }
     return c.json(contact ?? notFound('Contact'), 200);
   });
   app.openapi(createRoute({ method: 'delete', path: '/v1/contacts/{id}', operationId: 'deleteContact', tags: ['Audience'], security, description: 'Remove contact profile and memberships, retaining minimal consent/suppression to prevent accidental re-enrollment.', request: { params: IdParams }, responses: { 200: response(Deleted), ...errors } }), async c => {
@@ -687,17 +810,25 @@ export function registerAudience(app: App) {
     const identity = actor(c, 'manage'), listId = c.req.valid('param').id;
     await c.env.db.transaction(async tx => { const [row] = await tx.delete(lists).where(and(scope(lists, identity), eq(lists.id, listId))).returning(); if (!row) notFound('List'); await tx.delete(listMembers).where(and(scope(listMembers, identity), eq(listMembers.listId, listId))); }); return c.json({ id: listId, deleted: true as const }, 200);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/lists/{id}/members', operationId: 'listListMembers', tags: ['Audience'], security, request: { params: IdParams, query: ContactQuery.omit({ listId: true }) }, responses: { 200: response(page(ContactRead)), ...errors } }), async c => {
-    const identity = actor(c), listId = c.req.valid('param').id, query = c.req.valid('query'); await findList(c.env.db, identity, listId);
-    const rows = await c.env.db.select().from(contacts).where(and(scope(contacts, identity), isNull(contacts.deletedAt), ...contactFilters(identity, { ...query, listId }), query.cursor ? gt(contacts.id, query.cursor) : undefined)).orderBy(asc(contacts.id)).limit(query.limit + 1);
-    const result = paginate(rows, query.limit); return c.json({ ...result, data: await readContacts(c.env.db, identity, result.data) }, 200);
+  app.openapi(createRoute({ method: 'get', path: '/v1/lists/{id}/members', operationId: 'listListMembers', tags: ['Audience'], security, description: `Active list members with current list IDs. Pages are also bounded by response size and may return fewer than limit contacts; follow nextCursor while non-null. ${readLimitNote(AUDIENCE_READ_SECONDS)}`, request: { params: IdParams, query: ContactQuery.omit({ listId: true }) }, responses: { 200: response(page(ContactRead)), ...errors } }), async c => {
+    const identity = actor(c), listId = c.req.valid('param').id, query = c.req.valid('query');
+    return await withAudienceReadMemory(c, async () => {
+      const { items, hasMore } = await budgetedRead(c.env.db, async tx => {
+        await findList(tx, identity, listId);
+        const { rows, hasMore: more } = await boundedContactPage(tx, identity, { ...query, listId });
+        return { items: await readContacts(tx, identity, rows, CONTACT_LIST_IDS_PAGE_MAX), hasMore: more };
+      }, readLimit(AUDIENCE_READ_SECONDS));
+      const { json: body } = buildBoundedPageJson(items, hasMore, AUDIENCE_READ_MAX_BYTES);
+      return new Response(body, { status: 200, headers: { 'content-type': 'application/json; charset=UTF-8' } });
+    }) as never;
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/lists/{id}/members', operationId: 'addListMembers', tags: ['Audience'], security, request: { params: IdParams, body: json(z.object({ contactIds: z.array(z.string().min(1).max(120)).min(1).max(100) }).strict()) }, responses: { 200: response(z.object({ added: z.number().int() })), ...errors } }), async c => {
     const identity = actor(c, 'manage'), listId = c.req.valid('param').id, contactIds = [...new Set(c.req.valid('json').contactIds)];
-    const added = await c.env.db.transaction(async tx => { const [list] = await tx.select().from(lists).where(and(scope(lists, identity), eq(lists.id, listId))).limit(1).for('update'); if (!list) notFound('List'); for (const contactId of contactIds) await findContact(tx, identity, contactId); const result = await tx.insert(listMembers).values(contactIds.map(contactId => ({ ...scopeValues(identity), listId, contactId }))).onConflictDoNothing().returning(); return result.length; }); return c.json({ added }, 200);
+    const added = await c.env.db.transaction(async tx => { const [list] = await tx.select().from(lists).where(and(scope(lists, identity), eq(lists.id, listId))).limit(1).for('update'); if (!list) notFound('List'); if ((await lockContacts(tx, identity, contactIds)).length !== contactIds.length) notFound('Contact'); const result = await tx.insert(listMembers).values(contactIds.map(contactId => ({ ...scopeValues(identity), listId, contactId }))).onConflictDoNothing().returning(); return result.length; }); return c.json({ added }, 200);
   });
   app.openapi(createRoute({ method: 'delete', path: '/v1/lists/{id}/members/{contactId}', operationId: 'removeListMember', tags: ['Audience'], security, request: { params: IdParams.extend({ contactId: z.string().min(1).max(120) }) }, responses: { 200: response(Deleted), ...errors } }), async c => {
-    const identity = actor(c, 'manage'), params = c.req.valid('param'); await findList(c.env.db, identity, params.id); await c.env.db.delete(listMembers).where(and(scope(listMembers, identity), eq(listMembers.listId, params.id), eq(listMembers.contactId, params.contactId))); return c.json({ id: params.contactId, deleted: true as const }, 200);
+    const identity = actor(c, 'manage'), params = c.req.valid('param'); await findList(c.env.db, identity, params.id);
+    await c.env.db.transaction(async tx => { await lockContacts(tx, identity, [params.contactId]); await tx.delete(listMembers).where(and(scope(listMembers, identity), eq(listMembers.listId, params.id), eq(listMembers.contactId, params.contactId))); }); return c.json({ id: params.contactId, deleted: true as const }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/segments', operationId: 'listSegments', tags: ['Audience'], security, request: { query: SearchQuery }, responses: { 200: response(page(Segment)), ...errors } }), async c => {
     const identity = actor(c), query = c.req.valid('query'); const rows = await c.env.db.select().from(segments).where(and(scope(segments, identity), query.search ? searchText(segments.name, query.search) : undefined, query.cursor ? gt(segments.id, query.cursor) : undefined)).orderBy(asc(segments.id)).limit(query.limit + 1); return c.json(paginate(rows, query.limit), 200);
@@ -712,14 +843,16 @@ export function registerAudience(app: App) {
   app.openapi(createRoute({ method: 'delete', path: '/v1/segments/{id}', operationId: 'deleteSegment', tags: ['Audience'], security, request: { params: IdParams }, responses: { 200: response(Deleted), ...errors } }), async c => {
     const identity = actor(c, 'manage'), segmentId = c.req.valid('param').id; const [row] = await c.env.db.delete(segments).where(and(scope(segments, identity), eq(segments.id, segmentId))).returning(); if (!row) notFound('Segment'); return c.json({ id: segmentId, deleted: true as const }, 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/segments/{id}/preview', operationId: 'previewSegment', tags: ['Audience'], security, description: `Bounded to 1000 matches. Unknown observation history is never classified as inactive. Counts separate suppressed and other non-consenting contacts. ${readLimitNote(5)}`, request: { params: IdParams, body: json(z.object({ listId: z.string().min(1).max(120).optional() }).strict()) }, responses: { 200: response(Counts), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/segments/{id}/preview', operationId: 'previewSegment', tags: ['Audience'], security, description: `Bounded to 1000 matches. Unknown observation history is never classified as inactive. Counts separate suppressed and other non-consenting contacts. ${readLimitNote(PREVIEW_READ_SECONDS)}`, request: { params: IdParams, body: json(z.object({ listId: z.string().min(1).max(120).optional() }).strict()) }, responses: { 200: response(Counts), ...errors } }), async c => {
     const identity = actor(c), segmentId = c.req.valid('param').id, listId = c.req.valid('json').listId;
-    const result = await budgetedRead(c.env.db, async tx => {
-      const segment = await findSegment(tx, identity, segmentId);
-      if (listId) await findList(tx, identity, listId);
-      return previewSegmentCounts(tx, identity, segment.rule, listId);
-    }, readLimit(5));
-    return c.json(result, 200);
+    return await withAudienceReadMemory(c, async () => {
+      const result = await budgetedRead(c.env.db, async tx => {
+        const segment = await findSegment(tx, identity, segmentId);
+        if (listId) await findList(tx, identity, listId);
+        return previewSegmentCounts(tx, identity, segment.rule, listId);
+      }, readLimit(PREVIEW_READ_SECONDS));
+      return new Response(JSON.stringify(result), { status: 200, headers: { 'content-type': 'application/json; charset=UTF-8' } });
+    }) as never;
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/contact-imports', operationId: 'previewContactImport', tags: ['Audience'], security, description: `Persist a preview before commit. Feature limit: 5 MiB UTF-8 CSV, 50,000 rows, 100 columns per import; preview and commit a larger file in parts of that size (the dashboard does this for files up to 1,000,000 rows and 100 MiB). Map headers explicitly. Valid rows can commit alongside a retained row-error report. Imports never lift suppression; consent changes only when the commit attests it. Each workspace keeps at most ${IMPORT_OPEN_PREVIEW_CAP} uncommitted previews (oldest evicted) and allows ${IMPORT_PREVIEW_RATE_PER_MINUTE} previews per minute.`, request: { body: json(ImportInput) }, responses: { 201: response(Import), ...errors } }), async c => {
     const identity = actor(c, 'editContent'), input = c.req.valid('json');
@@ -728,39 +861,83 @@ export function registerAudience(app: App) {
       c.header('Retry-After', '60');
       throw new ApiError(429, 'IMPORT_PREVIEW_RATE_LIMITED', `This workspace allows ${IMPORT_PREVIEW_RATE_PER_MINUTE} contact import previews per minute. Retry after the window resets.`, undefined, true);
     }
-    // Hold the isolate memory budget only through parse + DB write (never across the response stream, so a stalled
-    // or dropped client cannot wedge the isolate). 12 B/char covers two-byte non-Latin strings + wire buffers.
-    const built = await withMemory(Math.min(SEND_LIMITS.isolateWorkingBytes, input.csv.length * 12 + 2 * 1024 * 1024), async () => {
-      if (c.req.raw.signal?.aborted) return null;
-      const { rowsJson, errorsJson } = previewImport(input);
-      const newId = id('imp');
-      const meta = await c.env.db.transaction(async tx => {
-        // Transaction-scoped advisory lock (supported by Hyperdrive and PgBouncer transaction pooling) keeps the
-        // newest IMPORT_OPEN_PREVIEW_CAP uncommitted previews per workspace even under concurrent previews.
-        await tx.execute(sql`SELECT pg_advisory_xact_lock(275818, hashtext(${identity.workspaceId}))`);
-        const [row] = await tx.insert(imports).values({ id: newId, ...scopeValues(identity), listId: input.listId, rows: sql`${rowsJson}::jsonb` as unknown as never, errors: sql`${errorsJson}::jsonb` as unknown as never, createdAt: sql`clock_timestamp()` as unknown as string, updatedAt: sql`clock_timestamp()` as unknown as string }).returning(importMetaColumns);
-        await tx.execute(sql`DELETE FROM audience_imports WHERE workspace_id = ${identity.workspaceId} AND status = 'preview' AND id <> ${newId}
-          AND id IN (SELECT id FROM audience_imports WHERE workspace_id = ${identity.workspaceId} AND status = 'preview' AND id <> ${newId} ORDER BY created_at DESC, id DESC OFFSET ${IMPORT_OPEN_PREVIEW_CAP - 1})`);
-        return row!;
-      });
-      return { meta, rowsJson, errorsJson };
-    });
-    if (!built) return new Response(null, { status: 499 }) as never;
-    return streamImportResponse(built.meta, built.rowsJson, built.errorsJson, 201) as never;
+    // Reuse the outer pre-parse lease from app.ts (or acquire one if invoked directly) and transfer it shrunk to the stream.
+    const reserveBytes = Math.min(SEND_LIMITS.isolateWorkingBytes, input.csv.length * 12 + 2 * 1024 * 1024);
+    const outerLease = c.get('importLease');
+    let ownLease: MemoryLease | undefined;
+    if (!outerLease) {
+      try {
+        ownLease = await reserveMemory(reserveBytes, { route: 'import.preview', workspaceId: identity.workspaceId, signal: c.req.raw.signal, idleMs: 15_000, maxMs: 45_000, wsBusyCode: 'IMPORT_CONCURRENCY_LIMIT', busyCode: 'IMPORT_CONCURRENCY_LIMIT' });
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') return new Response(null, { status: 499 }) as never;
+        if (error instanceof ApiError && (error.status === 429 || error.status === 503)) c.header('Retry-After', '1');
+        throw error;
+      }
+    }
+    const lease = outerLease ?? ownLease!;
+    let transferred = false;
+    try {
+      const built = await runInMemoryScope(reserveBytes, async () => {
+        if (c.req.raw.signal?.aborted) return null;
+        const { rowsJson, errorsJson } = previewImport(input);
+        const newId = id('imp');
+        const meta = await c.env.db.transaction(async tx => {
+          // Transaction-scoped advisory lock (supported by Hyperdrive and PgBouncer transaction pooling) keeps the
+          // newest IMPORT_OPEN_PREVIEW_CAP uncommitted previews per workspace even under concurrent previews.
+          await tx.execute(sql`SELECT pg_advisory_xact_lock(275818, hashtext(${identity.workspaceId}))`);
+          const [row] = await tx.insert(imports).values({ id: newId, ...scopeValues(identity), listId: input.listId, rows: sql`${rowsJson}::jsonb` as unknown as never, errors: sql`${errorsJson}::jsonb` as unknown as never, createdAt: sql`clock_timestamp()` as unknown as string, updatedAt: sql`clock_timestamp()` as unknown as string }).returning(importMetaColumns);
+          await tx.execute(sql`DELETE FROM audience_imports WHERE workspace_id = ${identity.workspaceId} AND status = 'preview' AND id <> ${newId}
+            AND id IN (SELECT id FROM audience_imports WHERE workspace_id = ${identity.workspaceId} AND status = 'preview' AND id <> ${newId} ORDER BY created_at DESC, id DESC OFFSET ${IMPORT_OPEN_PREVIEW_CAP - 1})`);
+          return row!;
+        });
+        return { meta, rowsJson, errorsJson };
+      }, () => lease.touch());
+      if (!built) return new Response(null, { status: 499 }) as never;
+      transferred = true;
+      if (outerLease) c.set('importLeaseTransferred', true);
+      return streamImportResponse(c, built.meta, built.rowsJson, built.errorsJson, 201, undefined, lease) as never;
+    } finally {
+      if (!transferred && ownLease) ownLease.release();
+    }
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/contact-imports', operationId: 'listContactImports', tags: ['Audience'], security, request: { query: PageQuery }, responses: { 200: response(page(Import.omit({ rows: true, errors: true }))), ...errors } }), async c => {
     const identity = actor(c), query = c.req.valid('query'); const rows = await c.env.db.select(importMetaColumns).from(imports).where(and(scope(imports, identity), query.cursor ? gt(imports.id, query.cursor) : undefined)).orderBy(asc(imports.id)).limit(query.limit + 1); const result = paginate(rows, query.limit); return c.json({ ...result, data: result.data.map(importSummary) }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/contact-imports/{id}', operationId: 'getContactImport', tags: ['Audience'], security, description: 'Read one import preview or committed import report. Committed row payloads are retained briefly after commit (rowsRetained is false and rows is [] once scrubbed; imported keeps the count); per-row errors are retained longer (errorsRetained is false once scrubbed).', request: { params: IdParams }, responses: { 200: response(Import), ...errors } }), async c => {
     const identity = actor(c);
-    const [row] = await c.env.db.select({ ...importMetaColumns, rowsText: sql<string>`${imports.rows}::text`, errorsText: sql<string>`${imports.errors}::text` }).from(imports).where(and(scope(imports, identity), eq(imports.id, c.req.valid('param').id))).limit(1);
-    if (!row) importNotFound();
-    return streamImportResponse(row, row.rowsText, row.errorsText, 200) as never;
+    const reserveBytes = 24 * 1024 * 1024;
+    let lease: MemoryLease;
+    try {
+      lease = await reserveMemory(reserveBytes, { route: 'import.read', workspaceId: identity.workspaceId, signal: c.req.raw.signal, maxWorkspaceBytes: 32 * 1024 * 1024, wsBusyCode: 'IMPORT_CONCURRENCY_LIMIT', busyCode: 'IMPORT_CONCURRENCY_LIMIT' });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return new Response(null, { status: 499 }) as never;
+      if (error instanceof ApiError && (error.status === 429 || error.status === 503)) c.header('Retry-After', '1');
+      throw error;
+    }
+    let transferred = false;
+    try {
+      const [row] = await runInMemoryScope(reserveBytes, () => c.env.db.select({ ...importMetaColumns, rowsText: sql<string>`${imports.rows}::text`, errorsText: sql<string>`${imports.errors}::text` }).from(imports).where(and(scope(imports, identity), eq(imports.id, c.req.valid('param').id))).limit(1), () => lease.touch());
+      if (!row) importNotFound();
+      transferred = true;
+      return streamImportResponse(c, row, row.rowsText, row.errorsText, 200, undefined, lease) as never;
+    } finally {
+      if (!transferred) lease.release();
+    }
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/contact-imports/{id}/commit', operationId: 'commitContactImport', tags: ['Audience'], security, description: 'Imports every valid row of a previewed import. Without consent, imported contacts keep their consent decision (new contacts have none, so campaigns skip them). With consent, everyone imported who had no decision is marked subscribed with your evidence. A repeated commit changes nothing. One import commits at a time per workspace (503 IMPORT_COMMIT_BUSY if another is running; retryable).', request: { params: IdParams, body: { ...json(ImportCommit), required: false } }, responses: { 200: response(CommittedImport), ...errors } }), async c => {
     const identity = actor(c, 'editContent'), importId = c.req.valid('param').id, consent = c.req.valid('json').consent;
+    const reserveBytes = 48 * 1024 * 1024;
+    let lease: MemoryLease;
     try {
-      const result = await withMemory(48 * 1024 * 1024, async () => {
+      lease = await reserveMemory(reserveBytes, { route: 'import.commit', workspaceId: identity.workspaceId, signal: c.req.raw.signal });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return new Response(null, { status: 499 }) as never;
+      if (error instanceof ApiError && (error.status === 429 || error.status === 503)) c.header('Retry-After', '1');
+      throw error;
+    }
+    let transferred = false;
+    try {
+      const result = await runInMemoryScope(reserveBytes, async () => {
         if (c.req.raw.signal?.aborted) return null;
         return c.env.db.transaction(async tx => {
           // One commit at a time per workspace (transaction-scoped try-lock: supported by Hyperdrive and PgBouncer
@@ -799,11 +976,12 @@ export function registerAudience(app: App) {
                 RETURNING c.id, c.email, c.properties, (xmax = 0) AS inserted, c.marketing_consent
               ), bad AS (
                 SELECT inc.row_num FROM upserted u JOIN incoming inc ON inc.email = u.email
-                WHERE NOT u.inserted AND (SELECT count(*) FROM jsonb_object_keys(u.properties)) > 50
+                WHERE (NOT u.inserted AND (SELECT count(*) FROM jsonb_object_keys(u.properties)) > ${CONTACT_PROPERTIES_MAX_KEYS})
+                  OR octet_length(u.properties::text) > ${CONTACT_PROPERTIES_DB_MAX_BYTES}
                 ORDER BY inc.row_num LIMIT 1
               )${consent ? sql`, audited AS (
-                INSERT INTO audience_consent_audit (id, workspace_id, contact_id, email, status, source, policy_version, evidence, actor_key_id, occurred_at)
-                SELECT 'cns_' || ${tsHex}::text || '7' || substr(replace(gen_random_uuid()::text, '-', ''), 14), ${identity.workspaceId}, id, email, 'subscribed', 'import', ${consent.policyVersion ?? null}, ${consent.evidence}, ${identity.keyId}, ${now}
+                INSERT INTO audience_consent_audit (id, workspace_id, contact_id, email, status, source, policy_version, evidence, actor_key_id, import_id, occurred_at)
+                SELECT 'cns_' || ${tsHex}::text || '7' || substr(replace(gen_random_uuid()::text, '-', ''), 14), ${identity.workspaceId}, id, email, 'subscribed', 'import', ${consent.policyVersion ?? null}, ${consent.evidence}, ${identity.keyId}, ${job.id}, ${now}
                 FROM upserted WHERE inserted
                 RETURNING id, contact_id
               ), numbered AS (
@@ -839,8 +1017,8 @@ export function registerAudience(app: App) {
                   WHERE c.workspace_id = ${identity.workspaceId} AND c.id = ANY(${sql.param(step1.existing_unknown_ids)}::text[]) AND c.marketing_consent = 'unknown'
                   RETURNING c.id, c.email
                 ), audited AS (
-                  INSERT INTO audience_consent_audit (id, workspace_id, contact_id, email, status, source, policy_version, evidence, actor_key_id, occurred_at)
-                  SELECT 'cns_' || ${tsHex}::text || '7' || substr(replace(gen_random_uuid()::text, '-', ''), 14), ${identity.workspaceId}, id, email, 'subscribed', 'import', ${consent.policyVersion ?? null}, ${consent.evidence}, ${identity.keyId}, ${now} FROM changed
+                  INSERT INTO audience_consent_audit (id, workspace_id, contact_id, email, status, source, policy_version, evidence, actor_key_id, import_id, occurred_at)
+                  SELECT 'cns_' || ${tsHex}::text || '7' || substr(replace(gen_random_uuid()::text, '-', ''), 14), ${identity.workspaceId}, id, email, 'subscribed', 'import', ${consent.policyVersion ?? null}, ${consent.evidence}, ${identity.keyId}, ${job.id}, ${now} FROM changed
                   RETURNING id, contact_id
                 ), numbered AS (
                   SELECT id, contact_id, ((row_number() OVER () - 1) / 100) AS grp FROM audited
@@ -871,15 +1049,19 @@ export function registerAudience(app: App) {
                 ON CONFLICT DO NOTHING`);
             }
           }
-          const [updated] = await tx.update(imports).set({ status: 'committed', imported: job.rowCount, sampleContactIds, updatedAt: new Date().toISOString() }).where(and(scope(imports, identity), eq(imports.id, job.id))).returning({ ...importMetaColumns, rowsText: sql<string>`${imports.rows}::text`, errorsText: sql<string>`${imports.errors}::text` });
+          const [updated] = await tx.update(imports).set({ status: 'committed', imported: job.rowCount, sampleContactIds, consentLinkedAt: now, updatedAt: now }).where(and(scope(imports, identity), eq(imports.id, job.id))).returning({ ...importMetaColumns, rowsText: sql<string>`${imports.rows}::text`, errorsText: sql<string>`${imports.errors}::text` });
           return { meta: updated!, rowsText: updated!.rowsText, errorsText: updated!.errorsText, subscribed };
         });
       });
       if (!result) return new Response(null, { status: 499 }) as never;
-      return streamImportResponse(result.meta, result.rowsText, result.errorsText, 200, result.subscribed) as never;
+      transferred = true;
+      return streamImportResponse(c, result.meta, result.rowsText, result.errorsText, 200, result.subscribed, lease) as never;
     } catch (error) {
+      if (isContactSizeCheckViolation(error)) throw new ApiError(422, 'IMPORT_PROPERTIES_INVALID', 'Merged contact properties exceed the 50-property or 16 KiB JSON limit. No rows were imported.', 'rows');
       if (statementTimedOut(error)) throw new ApiError(503, 'IMPORT_COMMIT_TIMEOUT', 'The contact import commit ran out of time and nothing was imported. Retry the commit.', undefined, true);
       throw error;
+    } finally {
+      if (!transferred) lease.release();
     }
   });
 }

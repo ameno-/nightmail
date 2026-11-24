@@ -100,6 +100,7 @@ function MessageCard({ message, addressId, parent, expanded, onToggle, onReply, 
   const unread = message.read === false
   const text = loaded?.text ?? message.text, replyText = loaded?.replyText ?? message.replyText
   const recipients = [...message.to, ...message.cc]
+  const extraRecipients = Math.max(0, (message.toCount ?? message.to.length) - message.to.length) + Math.max(0, (message.ccCount ?? message.cc.length) - message.cc.length)
   const hasQuote = text.trim() !== replyText.trim() && replyText.trim().length > 0
   const pending = detail.isFetching && wanted !== null
   async function download(attachmentId: string) {
@@ -117,7 +118,7 @@ function MessageCard({ message, addressId, parent, expanded, onToggle, onReply, 
         </span>
       </button>
       <p className="mailbox-message__context">
-        <span>to {recipients.length ? recipients.map((person, i) => <span key={`${i}:${person.address}`}>{i > 0 && ', '}{own.has(person.address.toLowerCase()) ? <PrivateAddress value={person.address} /> : <Sender name={person.name} address={person.address} nameOnly />}</span>) : '—'}</span>
+        <span>to {recipients.length ? <>{recipients.map((person, i) => <span key={`${i}:${person.address}`}>{i > 0 && ', '}{own.has(person.address.toLowerCase()) ? <PrivateAddress value={person.address} /> : <Sender name={person.name} address={person.address} nameOnly />}</span>)}{extraRecipients > 0 && <span className="muted"> +{extraRecipients} more</span>}</> : '—'}</span>
         {showAddresses && <span>via <AddressList values={message.addressIds.map(id => addressName(addresses, id))} /></span>}
         {parent ? <span className="mailbox-message__reply-to"><Undo2 size={12} aria-hidden="true" />Replying to <a href={`#message-${parent.id}`} onClick={event => { event.preventDefault(); document.getElementById(`message-${parent.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }) }}>{parent.direction === 'outbound' ? 'your message' : <Sender name={parent.from.name} address={parent.from.address} nameOnly />}</a> · {when(parent.receivedAt)}</span>
           : message.inReplyTo ? <span className="mailbox-message__reply-to"><Undo2 size={12} aria-hidden="true" />Reply to an earlier message</span> : null}

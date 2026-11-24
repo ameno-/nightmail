@@ -119,8 +119,12 @@ export interface Config {
   abuseMonitoring?: { since: string };
   /** ABUSE_SLACK_WEBHOOK_URL: where abuse-monitoring alerts are posted (src/abuse-alerts.ts). Undefined: stored only. */
   abuseSlackWebhookUrl?: string;
-  /** OPERATOR_SLACK_WEBHOOK_URL: where the operator alerts are posted (src/operator-alerts.ts). Undefined: nothing is posted. */
+  /** OPERATOR_SLACK_WEBHOOK_URL: where the operator alerts (src/operator-alerts.ts) and the health alerts (src/health.ts) are posted. Undefined: nothing is posted. */
   operatorSlackWebhookUrl?: string;
+  /** DATABASE_DISK_GB in bytes: the Health page shows the database's size against it. Undefined: the size alone. */
+  databaseDiskBytes?: number;
+  /** PLANETSCALE_WEBHOOK_SECRET: the database disk alert also checks PlanetScale's signature (src/disk-alert.ts). Undefined: its token alone. */
+  planetscaleWebhookSecret?: string;
   /** NIGHTMAIL_ABUSE_ENFORCE. Reserved: abuse monitoring never blocks, and no code reads this yet. */
   abuseEnforce?: boolean;
   /** Hosted billing. stripe is undefined until STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET are set (money routes answer 503 BILLING_NOT_CONFIGURED). */
@@ -152,6 +156,9 @@ export interface Config {
   reputationAlertUrl?: string;
   // Opt-in Jev content screen for live transactional sends with `screen: true`; undefined without TYPESAFE_API_KEY.
   screen?: { apiKey: string; endpoint: string; model: string; mode: 'reject' | 'flag'; threshold: number };
+  // The second classifier that repeats the screen's requests after the fact (src/screen-shadow.ts); undefined without
+  // JEVF_API_KEY (or without a screen), and then nothing of it runs.
+  shadow?: { apiKey: string; endpoint: string; model: string; deadlineMs: number; maxConcurrency: number };
   // Screened-text limits (src/screen.ts): one message, and one campaign screened once for all its recipients.
   screenLimits: { messageBytes: number; campaignBytes: number };
   aws?: { accessKeyId: string; secretAccessKey: string; sessionToken?: string };
@@ -170,9 +177,18 @@ export interface Runtime {
   // Nudges the long-lived dispatcher for one account/region after queued mail commits. Dispatch
   // never depends on it: the dispatcher also polls and the scheduler pings it every minute.
   dispatch?: (region: string, accountId?: string, emails?: number, kind?: ReadyConnection['kind'], priority?: boolean) => Promise<void>;
+  /** Campaign rooms (src/campaign-room.ts): who has a campaign open in the dashboard. Cloudflare only: the Node server has
+   *  none, and its dashboard shows no presence. connect answers the WebSocket upgrade. visit reports an agent's read or
+   *  save (saved: the revision it made) in the background, never delaying or failing the request: nothing when nobody
+   *  is in the room, and its name (lookup, given a runtime of its own) is looked up only when someone is. */
+  campaignRooms?: { connect: (name: string, person: import('./campaign-room-protocol.js').RoomPerson) => Promise<Response>; visit: (name: string, credential: string, lookup: (runtime: Runtime) => Promise<string | null>, saved?: number) => void };
   /** True once the content classifier must not be called in this run (src/dispatcher-do.ts: a request landed on the shard,
    *  and a call now would carry its visitor). Checked right before each request; a call not made throws ScreenHandover. */
   screenHandover?: () => boolean;
+  /** Where the screen's requests go to be repeated to the second classifier (src/screen-shadow.ts flushShadow), on a
+   *  platform that must not make those calls in the invocation that sends mail: Cloudflare puts them on a queue whose
+   *  consumer makes them. Returns at once and never throws. Without it they run in this process, in the background. */
+  shadow?: (items: import('./screen-shadow.js').ShadowItem[]) => void;
   // Verified provider feedback (and simulated callbacks) leave the request path through this
   // sink and are ingested in batches, never through the sending jobs table.
   feedback?: { enqueue: (items: FeedbackItem[]) => Promise<void> };
@@ -186,6 +202,8 @@ export interface Runtime {
   // the installation's bucket and a per-process cap.
   analyticsStorage?: Storage;
   allowAnalytics?: (peer: string) => Promise<boolean>;
+  // The database disk alert (src/disk-alert.ts): the Workers DISK_ALERT limiter, one card a minute per threshold. Node has the per-process count.
+  allowDiskAlert?: (key: string) => Promise<boolean>;
   jwksCacheScope?: object; // Workers create a new DB adapter per request; scope public keys to the binding instead.
   // Set only by the SupportPlatform service-binding entrypoint (src/support-platform.ts), never from a request.
   platformCaller?: 'bane-support';
@@ -208,7 +226,7 @@ export type MailboxAccess = { keyId: string; grantId?:string; workspaceId: strin
 export type SupportScope = { userId: string; contentWorkspaceId: string | null;
   workspaces: { id: string; name: string; role: 'owner' | 'admin' | 'member' }[];
   conversation: { id: string; channel: 'chat' | 'email'; verification: string; workspaceId: string | null } };
-export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody?: boolean; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess;
+export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody?: boolean; importLease?: import('./isolate-memory.js').MemoryLease; importLeaseTransferred?: boolean; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess;
   /** The error code and field a failed request answered with, for its request log line. `unmatched`: no route did. */
   failure?: { code: string; field?: string; databaseCode?: string; unmatched?: boolean };
   /** Who a protocol handler authenticated (MCP authenticates inside its route), for the request log line. */
@@ -228,11 +246,17 @@ export const requestOrigin = (c: Ctx): RequestOrigin => outerOf(c.env)
   ?? { requestId: c.get('requestId'), clientIp: c.req.header(clientIpHeader) ?? null, userAgent: c.req.header('user-agent') ?? null };
 /** One claimed delivery and what its endpoint needs to post it. `type` is the endpoint's (absent for sent-mail webhooks); url and encrypted_secret are a webhook's. */
 export type ClaimedWebhook = { type?: 'webhook' | 'slack' | 'discord' | 'forward'; routed?:boolean;format?:string;name?:string;include?:string[];timeout_seconds?:number;retry_attempts?:number; delivery_id: string; generation: number; event_id: string; payload: unknown; synthetic: boolean; webhook_id: string; url: string; encrypted_secret: string; encrypted_headers: string | null; owned?: boolean };
-export type JobHandler = (runtime: Runtime, payload: Record<string, unknown>, job: { id: string; attempts: number; workspaceId: string;
+export type JobContext = { id: string; attempts: number; workspaceId: string;
   /** The claim's lease (lease_until as claimed): the job is still this runner's while it matches. Absent when a handler is called directly. */
   leaseFence?: string;
   ingest?:import('./mailbox-ingest-input.js').IngestInput|null;
-  deleteBinding?:ReadyConnection|null; webhook?: ClaimedWebhook | null; recordWithSettlement?: (ctes: import('drizzle-orm').SQL) => void }) => Promise<void>;
+  deleteBinding?:ReadyConnection|null; webhook?: ClaimedWebhook | null; recordWithSettlement?: (ctes: import('drizzle-orm').SQL) => void };
+export type JobBatchItem = { payload: Record<string, unknown>; job: JobContext };
+export type JobBatchOutcome = { id: string; error?: unknown };
+export type JobHandler = ((runtime: Runtime, payload: Record<string, unknown>, job: JobContext) => Promise<void>) & {
+  /** Optional batch entry point for >= 2 same-workspace jobs claimed together. Returns one outcome per item. */
+  batch?: (runtime: Runtime, items: JobBatchItem[]) => Promise<JobBatchOutcome[]>;
+};
 
 export class ApiError extends Error {
   /** Structured detail for errors that have several parts, such as rule compile diagnostics. */
@@ -398,9 +422,12 @@ export function readCursor(value: string | undefined, binding: string): { at: st
     return { at: tuple[0], id: tuple[1] };
   } catch { throw new ApiError(422, 'INVALID_CURSOR', 'Use the returned cursor with the same filters.', 'cursor'); }
 }
+export function encodeCursor(last: { id: string; createdAt: string }, binding: string) {
+  return Buffer.from(JSON.stringify([last.createdAt.replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00'), last.id, binding])).toString('base64url');
+}
 export function nextCursor(rows: { id: string; createdAt: string }[], limit: number, binding: string) {
   const last = rows[limit - 1];
-  return rows.length > limit && last ? Buffer.from(JSON.stringify([last.createdAt.replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00'), last.id, binding])).toString('base64url') : null;
+  return rows.length > limit && last ? encodeCursor(last, binding) : null;
 }
 /**
  * Where a sending upload is stored. The prefix belongs to uploads alone: every other key family starts
@@ -681,6 +708,26 @@ export function logError(error: unknown, fields: Record<string, unknown> & { cod
     entry = { ...fields, code: errorCodeOf(fields.code), errorType: known ? undefined : errorTypeOf(error), databaseCode: databaseCodeOf(error), stack: known ? undefined : stackFrames(error) };
   } catch { return logFallback(); }
   log(level, entry);
+}
+/**
+ * Why a platform call failed, for the few lines that must say so (a dispatcher run that failed): the error's own
+ * message, cut to 300 characters; log scrubs addresses and credential-like runs from it like any string. Undefined for
+ * an ApiError (its code says it), for anything that came from the database or a socket (a driver error's text quotes
+ * the statement and its parameters, which can be a customer's data; its SQLSTATE is logged instead) and for an AWS SDK
+ * error (its text can name an identity or a domain; its class name is logged instead). What is left is the platform's
+ * own: a Durable Object storage or binding failure, a module that would not load. logError never logs a message; this
+ * is the one explicit exception, passed as `cause`.
+ */
+export function platformMessage(error: unknown): string | undefined {
+  try {
+    if (!(error instanceof Error) || error instanceof ApiError) return undefined;
+    for (const e of errorChain(error)) {
+      const driver = e as { code?: unknown; severity?: unknown; query?: unknown; params?: unknown; name?: unknown; $metadata?: unknown; $fault?: unknown };
+      if (typeof driver.code === 'string' || driver.severity !== undefined || driver.query !== undefined || driver.params !== undefined || driver.name === 'DrizzleQueryError' || driver.$metadata !== undefined || driver.$fault !== undefined) return undefined;
+    }
+    const message: unknown = error.message;
+    return typeof message === 'string' && message ? message.slice(0, 300) : undefined;
+  } catch { return undefined; }
 }
 export { SECURITY_HEADERS };
 export function applySecurityHeaders(headers: Headers): Headers {

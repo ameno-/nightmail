@@ -56,7 +56,7 @@ billing('recharge-failed', 'Auto-recharge is declined', 'recharge_failed', { tot
 billing('receive-hold-soon', 'Two days before received mail is held', 'receive_hold_soon', { totalUc: usd(-1.84), unpaidSince: date('2026-11-29') });
 billing('receive-held', 'Received mail is held', 'receive_held', { totalUc: usd(-1.84), unpaidSince: date('2026-11-29') });
 billing('credit-expiring', '30 days before credit expires', 'credit_expiring', { totalUc: usd(40), data: { remainingUc: String(usd(12)), expiresAt: '2026-12-22T00:00:00Z' } });
-account('invitation', 'A teammate is invited', { kind: 'invitation', workspace, inviter: { name: 'Mara Lindqvist', email: 'mara@driftwood.example' }, role: 'admin', expiresAt: date('2026-11-29'),
+account('invitation', 'A teammate is invited', { kind: 'invitation', inviter: { email: 'mara@driftwood.example' }, role: 'admin', expiresAt: date('2026-11-29'),
   acceptUrl: origin + '/overview?invitation=inv_6t2m9d' }, 'the invited address');
 account('waitlist', 'A waitlisted address is let in (no trigger yet)', { kind: 'waitlist_admitted' }, 'the waitlisted address');
 

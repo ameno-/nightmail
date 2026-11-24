@@ -4,7 +4,7 @@ import { Link } from 'react-router'
 import { useApiMutation, useWorkspaceAccess } from '../../data/context'
 import { campaignResumable, errorText, type Campaign, type CampaignPacingInput } from '../../data/types'
 import { Button, Checkbox, Input } from '../../components/ui'
-import { approxRelativeTime, date, localTime, number, relativeTime, time } from '../../lib/format'
+import { approxRelativeTime, date, localTime, number, time } from '../../lib/format'
 import { isDuplicateSubmission } from '../../lib/single-flight'
 
 export const liveInterval = 3000
@@ -22,7 +22,7 @@ type Progress = Pick<Campaign, 'status' | 'delivery'>
 const releasing = (campaign: Progress) => ['preparing', 'sending'].includes(campaign.status) && (campaign.delivery?.expanded ?? 0) < (campaign.delivery?.total ?? 0)
 // Paused or waiting for a pacing window / SES quota: nothing new is released for a while.
 export const sendingHeld = (campaign: Progress) => campaign.status === 'paused' || (releasing(campaign) && Boolean(campaign.delivery?.waiting))
-const waitingLabel = { pacing_window: 'Waiting for the next daily slice', ses_daily_quota: 'Holding for the SES daily quota', hosted_daily_quota: 'Waiting for Hosted sending capacity', balance: 'Waiting for account credit' } as const
+const waitingLabel = { pacing_window: 'Waiting for the next daily slice', ses_daily_quota: 'Holding for the SES daily quota', hosted_daily_quota: 'Waiting for Hosted sending capacity', list_probe: 'Waiting for test batch feedback', balance: 'Waiting for account credit', feedback_lag: 'Waiting for delivery reports to catch up' } as const
 const atUtc = (value: string) => `${date(value)} · ${time(value)} UTC`
 /** What people see as the state: a launch still checking messages for a future send is already "scheduled" to them. */
 export const campaignDisplayStatus = (campaign: Pick<Campaign, 'status' | 'scheduledAt' | 'archivedAt'>) => campaign.archivedAt ? 'archived' : campaign.status === 'preparing' && campaign.scheduledAt && Date.parse(campaign.scheduledAt) > Date.now() ? 'scheduled' : campaign.status
@@ -71,6 +71,20 @@ export function CampaignProgress({ campaign }: { campaign: Campaign }) {
   ] as const
   const preparing = campaign.status === 'preparing'
   const prepared = campaign.delivery?.prepared ?? 0
+  const expanded = campaign.delivery?.expanded ?? 0
+  const activeStatus = ['preparing', 'sending', 'paused'].includes(campaign.status)
+  const wait = releasing(campaign) ? campaign.delivery?.waiting : null
+  const lag = campaign.delivery?.feedbackLag ?? null
+  const statusTitle = wait ? atUtc(wait.until) : undefined
+  const statusText = wait
+    ? wait.reason === 'feedback_lag'
+      ? 'Waiting for delivery reports to catch up.'
+      : wait.reason === 'list_probe'
+        ? `Test batch${expanded > 0 ? ` of ${number(expanded)}` : ''} sent. Rest release at ${localTime(wait.until)} if bounces stay low.`
+        : `${waitingLabel[wait.reason] ?? 'Waiting to release more recipients'} · ${approxRelativeTime(wait.until)}`
+    : lag
+      ? `Delivery stats are about ${Math.max(1, Math.round(lag.oldestMs / 60_000))} min behind.`
+      : ''
   return <div className="campaign-audience-summary">
     {preparing ? <>
       <div className="campaign-summary-line"><strong>Preparing</strong><span>{total > 0 ? `Checking ${number(total)} ${total === 1 ? 'recipient' : 'recipients'} · ${number(prepared)} done` : 'Preparing recipient list…'}</span></div>
@@ -79,6 +93,7 @@ export function CampaignProgress({ campaign }: { campaign: Campaign }) {
       <div className="campaign-summary-line"><strong>Send progress</strong><span>{number(processed)} / {number(total)} processed</span></div>
       {total > 0 ? <progress className="campaign-progress-bar" aria-label="Campaign send progress" aria-valuetext={`${number(processed)} of ${number(total)} emails processed`} value={processed} max={total} /> : <p className="muted">No email records available.</p>}
     </>}
+    {activeStatus && <p className="campaign-status-line muted" role="status" title={statusTitle}>{statusText}</p>}
     {!preparing && awaitingQueue > 0 && <div className="campaign-summary-line"><span>Awaiting queue</span><span>{number(awaitingQueue)}</span></div>}
     {queued > 0 && <div className="campaign-summary-line"><span>Queued</span><span>{number(queued)}</span></div>}
     {processing > 0 && <div className="campaign-summary-line"><span>Processing</span><span>{number(processing)}</span></div>}
@@ -155,9 +170,6 @@ export function CampaignPacing({ campaign }: { campaign: Campaign }) {
       {active && canAdminister && <Button variant="secondary" size="sm" loading={pause.isPending} disabled={busy} onClick={() => void run(() => pause.mutateAsync(campaign.id))}>Pause</Button>}
     </div>
     {perDay && (active || paused) && <div className="campaign-summary-line muted"><span>Released in this 24-hour slice</span><span>{number(pacing?.windowExpanded ?? 0)} / {number(perDay)}</span></div>}
-    {active && expansion.waiting && <p className="muted" role="status" title={atUtc(expansion.waiting.until)}>{expansion.waiting.reason === 'list_probe'
-      ? `Test batch${expansion.expanded > 0 ? ` of ${number(expansion.expanded)}` : ''} sent. The rest release at ${localTime(expansion.waiting.until)} if bounces and complaints stay low.`
-      : `${waitingLabel[expansion.waiting.reason] ?? 'Waiting to release more recipients'} · ${approxRelativeTime(expansion.waiting.until)}`}</p>}
     {(active || paused) && canAdminister && <form className="campaign-pacing-form" onSubmit={save}>
       <div className="campaign-pacing-limit">
         <label htmlFor="campaign-pacing-limit" className="muted">Daily limit</label>

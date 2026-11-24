@@ -27,7 +27,7 @@ const catchAll = customType<{data:'create_address'|'store';driverData:'create_ma
 });
 export type MailboxPermission = 'read' | 'send' | 'modify' | 'create';
 export type SendLimits = { perHour: number; perDay: number; perRecipientPerHour: number; perThreadPer10Minutes: number };
-export type Verdicts = { simulated?:boolean; spf?: string; dkim?: string; dmarc?: string; spam?: string; virus?: string; /** Set at ingest by forwardEligibility (mailbox-ingest.ts); without it a message is never forwarded. */ forwardEligible?: boolean };
+export type Verdicts = { simulated?:boolean; spf?: string; dkim?: string; dmarc?: string; spam?: string; virus?: string; /** Set at ingest by forwardEligibility (mailbox-ingest.ts); without it a message is never forwarded. */ forwardEligible?: boolean; toCount?: number; ccCount?: number; replyToCount?: number; referencesCount?: number };
 
 const scope = () => ({ workspaceId: text('workspace_id').notNull() });
 const ts = (name: string) => timestamp(name, { withTimezone: true, mode: 'string' });
@@ -64,7 +64,7 @@ export const mailboxes = pgTable('mailboxes', {
   expiresAt: ts('expires_at'),
   kind: text('kind').$type<'inbox' | 'address'>().notNull().default('address'), deleteAfter: ts('delete_after'),
   createdAt: ts('created_at').notNull().defaultNow(), updatedAt: ts('updated_at').notNull().defaultNow(),
-}, t => [index('mailboxes_page').on(t.workspaceId, t.id), index('mailboxes_domain').on(t.workspaceId, t.domainId)]);
+}, t => [index('mailboxes_page').on(t.workspaceId, t.id), index('mailboxes_domain').on(t.workspaceId, t.domainId), index('mailboxes_inbox_page').on(t.workspaceId, t.id).where(sql`${t.kind} = 'inbox'`)]);
 
 export const mailboxAddresses = pgTable('mailbox_addresses', {
   ...scope(), address: text('address').notNull(), mailboxId: text('mailbox_id').notNull(), kind: text('kind').$type<'primary' | 'alias' | 'public'>().notNull(),
@@ -101,7 +101,7 @@ export const mailMessageIds = pgTable('mail_message_ids', {
 
 export const mailUnrouted = pgTable('mail_unrouted', {
   ...scope(), messageId: text('message_id').notNull(), address: text('address').notNull(), createdAt: ts('created_at').notNull().defaultNow(),
-}, t => [primaryKey({ columns: [t.workspaceId, t.address, t.messageId] }), index('mail_unrouted_message').on(t.messageId)]);
+}, t => [primaryKey({ columns: [t.workspaceId, t.address, t.messageId] }), index('mail_unrouted_message').on(t.messageId), index('mail_unrouted_created_at').on(t.createdAt)]);
 
 export const mailboxMessages = pgTable('mailbox_messages', {
   heldReason:text('held_reason'),
@@ -118,7 +118,7 @@ export const mailboxThreads = pgTable('mailbox_threads', {
   lastMessageAt: ts('last_message_at').notNull(), lastInboundAt: ts('last_inbound_at'),
   archived: boolean('archived').notNull().default(false), starred: boolean('starred').notNull().default(false), spam: boolean('spam').notNull().default(false),
   trashedAt: ts('trashed_at'), labels: text('labels').array().notNull().default([]), createdAt: ts('created_at').notNull().defaultNow(),
-}, t => [primaryKey({ columns: [t.mailboxId, t.threadId] })]);
+}, t => [primaryKey({ columns: [t.mailboxId, t.threadId] }), index('mailbox_threads_workspace_page').on(t.workspaceId, t.lastMessageAt.desc(), t.threadId.desc())]);
 
 export const mailAttachments = pgTable('mail_attachments', {
   sourceId:text('source_attachment_id'),

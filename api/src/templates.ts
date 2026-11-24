@@ -2,6 +2,8 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { and, desc, eq, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 import { Buffer } from 'node:buffer';
 import { actor, ApiError, chargeRenderBudget, requiredOf, unrestrictedRequired, errors, id, IdParams, json, notFound, PageQuery, page, response, security, type Actor, type App, type DbExecutor, type Runtime } from './core.js';
+import { assertResponseWithinLimit, MEMORY_LIMITS, reserveMemory, type MemoryLease } from './isolate-memory.js';
+import { streamBase64JsonResponse } from './read-bounds.js';
 import { attachmentLinks, attachments } from './db/sending.js';
 import { templateAssetLinks, templateAssets, templates, type TemplateDraft } from './db/templates.js';
 import { BlockContentError, renderBlockHtml, renderBlockText, validateBlockHtml } from './campaign-blocks.js';
@@ -37,7 +39,20 @@ const Query = PageQuery.extend({ search: z.string().trim().min(1).max(200).optio
 function assertContent(html?: string, complete = false) { if (!html) return; try { validateBlockHtml(html, { complete }); } catch (error) { if (error instanceof BlockContentError) throw new ApiError(422, 'TEMPLATE_CONTENT_INVALID', error.message, 'html'); throw error; } }
 function templateUrl(runtime: Runtime, templateId: string) { return new URL(`/campaigns/templates/${encodeURIComponent(templateId)}`, runtime.config.publicUrl).href; }
 function view(runtime: Runtime, row: typeof templates.$inferSelect) { return Template.parse({ ...row, published: row.published ?? null, publishedRevision: row.publishedRevision ?? null, archivedAt: row.archivedAt ?? null, url: templateUrl(runtime, row.id) }); }
-function summary(runtime: Runtime, row: typeof templates.$inferSelect) { return TemplateSummary.parse({ id: row.id, url: templateUrl(runtime, row.id), revision: row.revision, publishedRevision: row.publishedRevision ?? null, archivedAt: row.archivedAt ?? null, createdAt: row.createdAt, updatedAt: row.updatedAt, name: row.draft.name, description: row.draft.description, subject: row.draft.subject, published: !!row.published }); }
+const templateSummaryColumns = {
+  id: templates.id,
+  revision: templates.revision,
+  publishedRevision: templates.publishedRevision,
+  archivedAt: templates.archivedAt,
+  createdAt: templates.createdAt,
+  updatedAt: templates.updatedAt,
+  name: sql<string>`coalesce(${templates.draft}->>'name', '')`,
+  description: sql<string>`coalesce(${templates.draft}->>'description', '')`,
+  subject: sql<string>`coalesce(${templates.draft}->>'subject', '')`,
+  published: sql<boolean>`${templates.published} IS NOT NULL`,
+};
+type TemplateSummaryRow = { id: string; revision: number; publishedRevision: number | null; archivedAt: string | null; createdAt: string; updatedAt: string; name: string; description: string; subject: string; published: boolean };
+function summary(runtime: Runtime, row: TemplateSummaryRow) { return TemplateSummary.parse({ id: row.id, url: templateUrl(runtime, row.id), revision: row.revision, publishedRevision: row.publishedRevision ?? null, archivedAt: row.archivedAt ?? null, createdAt: row.createdAt, updatedAt: row.updatedAt, name: row.name, description: row.description, subject: row.subject, published: row.published }); }
 async function findTemplate(db: DbExecutor, workspaceId: string, templateId: string, lock = false) { const query = db.select().from(templates).where(and(eq(templates.workspaceId, workspaceId), eq(templates.id, templateId))).limit(1); const [row] = lock ? await query.for('update') : await query; return row ?? notFound('Template'); }
 async function assetRows(db: DbExecutor, workspaceId: string, ids: string[], lock = false) { const unique = [...new Set(ids)]; if (unique.length !== ids.length) throw new ApiError(422, 'DUPLICATE_TEMPLATE_ASSET', 'Template asset IDs must be unique.'); const query = db.select().from(templateAssets).where(and(eq(templateAssets.workspaceId, workspaceId), inArray(templateAssets.id, unique))).orderBy(templateAssets.id); const rows = unique.length ? lock ? await query.for('update') : await query : []; if (rows.length !== unique.length) throw new ApiError(422, 'TEMPLATE_ASSET_NOT_FOUND', 'A template asset was not found.'); if (rows.reduce((sum, row) => sum + row.size, 0) > MAX_ASSET_BYTES) throw new ApiError(413, 'TEMPLATE_ASSETS_TOO_LARGE', 'Template assets may total at most 8 MiB.'); return unique.map(value => rows.find(row => row.id === value)!); }
 async function replaceLinks(db: DbExecutor, workspaceId: string, templateId: string, stage: 'draft' | 'published', ids: string[]) { await assetRows(db, workspaceId, ids, true); await db.delete(templateAssetLinks).where(and(eq(templateAssetLinks.workspaceId, workspaceId), eq(templateAssetLinks.templateId, templateId), eq(templateAssetLinks.stage, stage))); if (ids.length) await db.insert(templateAssetLinks).values(ids.map(assetId => ({ workspaceId, templateId, assetId, stage }))); }
@@ -60,7 +75,7 @@ function readTemplateCursor(value?: string) {
   try { const parsed = z.tuple([z.string().regex(/^(?!0000)\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])[ T](?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,6})?(?:Z|[+-](?:0\d|1[0-5])(?::?[0-5]\d)?)$/).refine(calendarDay), z.string().min(1).max(120)]).parse(JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))); return { at: parsed[0], id: parsed[1] }; }
   catch { throw new ApiError(422, 'INVALID_CURSOR', 'Use the returned template cursor with the same filters.', 'cursor'); }
 }
-function templateCursor(rows: (typeof templates.$inferSelect)[], limit: number) { const last = rows[limit - 1]; return rows.length > limit && last ? Buffer.from(JSON.stringify([last.updatedAt, last.id])).toString('base64url') : null; }
+function templateCursor(rows: { updatedAt: string; id: string }[], limit: number) { const last = rows[limit - 1]; return rows.length > limit && last ? Buffer.from(JSON.stringify([last.updatedAt, last.id])).toString('base64url') : null; }
 
 export async function instantiateTemplate(runtime: Runtime, db: DbExecutor, identity: Actor, templateId: string) {
   const template = await findTemplate(db, identity.workspaceId, templateId, true);
@@ -78,7 +93,7 @@ function manageTemplates(c: Parameters<typeof actor>[0]) {
 }
 
 export function registerTemplates(app: App) {
-  app.openapi(createRoute({ method: 'get', path: '/v1/templates', operationId: 'listCampaignTemplates', tags: ['Templates'], security, request: { query: Query }, responses: { 200: response(page(TemplateSummary)), ...errors } }), async c => { const identity = actor(c), query = c.req.valid('query'), cursor = readTemplateCursor(query.cursor), search = query.search ? `%${query.search.replaceAll('%', '\\%').replaceAll('_', '\\_')}%` : undefined; const rows = await c.env.db.select().from(templates).where(and(eq(templates.workspaceId, identity.workspaceId), query.archived === 'true' ? isNotNull(templates.archivedAt) : isNull(templates.archivedAt), query.publishedOnly === 'true' ? isNotNull(templates.published) : undefined, cursor ? or(lt(templates.updatedAt, cursor.at), and(eq(templates.updatedAt, cursor.at), lt(templates.id, cursor.id))) : undefined, search ? or(sql`${templates.draft}->>'name' ILIKE ${search}`, sql`${templates.draft}->>'description' ILIKE ${search}`) : undefined)).orderBy(desc(templates.updatedAt), desc(templates.id)).limit(query.limit + 1); return c.json({ data: rows.slice(0, query.limit).map(row => summary(c.env, row)), nextCursor: templateCursor(rows, query.limit) }, 200); });
+  app.openapi(createRoute({ method: 'get', path: '/v1/templates', operationId: 'listCampaignTemplates', tags: ['Templates'], security, request: { query: Query }, responses: { 200: response(page(TemplateSummary)), ...errors } }), async c => { const identity = actor(c), query = c.req.valid('query'), cursor = readTemplateCursor(query.cursor), search = query.search ? `%${query.search.replaceAll('%', '\\%').replaceAll('_', '\\_')}%` : undefined; const rows = await c.env.db.select(templateSummaryColumns).from(templates).where(and(eq(templates.workspaceId, identity.workspaceId), query.archived === 'true' ? isNotNull(templates.archivedAt) : isNull(templates.archivedAt), query.publishedOnly === 'true' ? isNotNull(templates.published) : undefined, cursor ? or(lt(templates.updatedAt, cursor.at), and(eq(templates.updatedAt, cursor.at), lt(templates.id, cursor.id))) : undefined, search ? or(sql`${templates.draft}->>'name' ILIKE ${search}`, sql`${templates.draft}->>'description' ILIKE ${search}`) : undefined)).orderBy(desc(templates.updatedAt), desc(templates.id)).limit(query.limit + 1); return c.json({ data: rows.slice(0, query.limit).map(row => summary(c.env, row)), nextCursor: templateCursor(rows, query.limit) }, 200); });
   app.openapi(createRoute({ method: 'post', path: '/v1/templates', operationId: 'createCampaignTemplate', tags: ['Templates'], security, request: { body: json(TemplateCreate) }, responses: { 201: response(Template), ...errors } }), async c => { const identity = manageTemplates(c), input = c.req.valid('json'); const [row] = await c.env.db.insert(templates).values({ id: id('tpl'), workspaceId: identity.workspaceId, draft: TemplateDraftSchema.parse({ name: input.name, description: input.description ?? '' }) }).returning(); return c.json(view(c.env, row!), 201); });
   app.openapi(createRoute({ method: 'get', path: '/v1/templates/{id}', operationId: 'getCampaignTemplate', tags: ['Templates'], security, request: { params: IdParams }, responses: { 200: response(Template), ...errors } }), async c => c.json(view(c.env, await findTemplate(c.env.db, actor(c).workspaceId, c.req.valid('param').id)), 200));
   app.openapi(createRoute({ method: 'patch', path: '/v1/templates/{id}', operationId: 'updateCampaignTemplate', tags: ['Templates'], security, request: { params: IdParams, body: json(TemplateUpdate) }, responses: { 200: response(Template), ...errors } }), async c => { const identity = manageTemplates(c), input = c.req.valid('json'); assertContent(input.draft.html); const row = await c.env.db.transaction(async db => { const current = await findTemplate(db, identity.workspaceId, c.req.valid('param').id, true); if (current.archivedAt) throw new ApiError(409, 'TEMPLATE_ARCHIVED', 'Restore this template before editing.'); if (current.revision !== input.revision) throw new ApiError(409, 'STALE_TEMPLATE_REVISION', 'The template changed. Load the latest revision before saving.'); await replaceLinks(db, identity.workspaceId, current.id, 'draft', input.draft.attachments); const [updated] = await db.update(templates).set({ draft: input.draft, revision: current.revision + 1, updatedAt: new Date().toISOString() }).where(and(eq(templates.workspaceId, identity.workspaceId), eq(templates.id, current.id))).returning(); return updated!; }); return c.json(view(c.env, row), 200); });
@@ -118,6 +133,30 @@ export function registerTemplates(app: App) {
     return c.json({ asset, src: `cid:${contentId}` }, 201);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/template-assets/{id}', operationId: 'getTemplateAsset', tags: ['Templates'], security, request: { params: IdParams }, responses: { 200: response(Asset), ...errors } }), async c => { const identity = actor(c), [row] = await c.env.db.select().from(templateAssets).where(and(eq(templateAssets.workspaceId, identity.workspaceId), eq(templateAssets.id, c.req.valid('param').id))).limit(1); return c.json(Asset.parse(row ?? notFound('Template asset')), 200); });
-  app.openapi(createRoute({ method: 'get', path: '/v1/template-assets/{id}/content', operationId: 'getTemplateAssetContent', tags: ['Templates'], security, request: { params: IdParams }, responses: { 200: response(Asset.extend({ content: z.string() })), ...errors } }), async c => { const identity = actor(c), [row] = await c.env.db.select().from(templateAssets).where(and(eq(templateAssets.workspaceId, identity.workspaceId), eq(templateAssets.id, c.req.valid('param').id))).limit(1); if (!row) notFound('Template asset'); const stored = await c.env.storage.get(row!.storageKey); if (!stored || stored.body.length !== row!.size || await checksum(stored.body) !== row!.checksum) throw new ApiError(503, 'TEMPLATE_ASSET_STORAGE_UNAVAILABLE', 'A template asset is missing or changed.', undefined, true); return c.json({ ...Asset.parse(row), content: Buffer.from(stored.body).toString('base64') }, 200); });
+  app.openapi(createRoute({ method: 'get', path: '/v1/template-assets/{id}/content', operationId: 'getTemplateAssetContent', tags: ['Templates'], security, request: { params: IdParams }, responses: { 200: response(Asset.extend({ content: z.string() })), ...errors } }), async c => {
+    const identity = actor(c), [row] = await c.env.db.select().from(templateAssets).where(and(eq(templateAssets.workspaceId, identity.workspaceId), eq(templateAssets.id, c.req.valid('param').id))).limit(1);
+    if (!row) notFound('Template asset');
+    assertResponseWithinLimit(c.req.raw, Math.ceil(row.size / 3) * 4 + 512);
+    let lease: MemoryLease;
+    try {
+      lease = await reserveMemory(row.size * 1.15 + 1024 * 1024, { route: 'template.asset', workspaceId: identity.workspaceId, signal: c.req.raw.signal, idleMs: MEMORY_LIMITS.streamIdleMs, maxMs: MEMORY_LIMITS.streamMaxMs });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return new Response(null, { status: 499 }) as never;
+      if (error instanceof ApiError && (error.status === 429 || error.status === 503)) c.header('Retry-After', '1');
+      throw error;
+    }
+    let file: Uint8Array;
+    try {
+      const stored = await c.env.storage.get(row.storageKey);
+      if (!stored || stored.body.length !== row.size || await checksum(stored.body) !== row.checksum) throw new ApiError(503, 'TEMPLATE_ASSET_STORAGE_UNAVAILABLE', 'A template asset is missing or changed.', undefined, true);
+      file = stored.body;
+    } catch (error) { lease.release(); throw error; }
+    const jsonMeta = JSON.stringify({ ...Asset.parse(row), content: '' });
+    return streamBase64JsonResponse(c, lease, jsonMeta, file, {
+      idleMs: MEMORY_LIMITS.streamIdleMs,
+      maxMs: MEMORY_LIMITS.streamMaxMs,
+      timeoutError: () => new ApiError(504, 'DOWNLOAD_TIMEOUT', 'The template asset was not read in time.'),
+    }) as never;
+  });
   app.openapi(createRoute({ method: 'delete', path: '/v1/template-assets/{id}', operationId: 'deleteTemplateAsset', tags: ['Templates'], security, request: { params: IdParams }, responses: { 200: response(Removed), ...errors } }), async c => { const identity = manageTemplates(c), assetId = c.req.valid('param').id; await c.env.db.transaction(async db => { const [row] = await db.select().from(templateAssets).where(and(eq(templateAssets.workspaceId, identity.workspaceId), eq(templateAssets.id, assetId))).limit(1).for('update'); if (!row) notFound('Template asset'); const linked = await db.select({ id: templateAssetLinks.assetId }).from(templateAssetLinks).where(and(eq(templateAssetLinks.workspaceId, identity.workspaceId), eq(templateAssetLinks.assetId, assetId))).limit(1); const cloned = await db.select({ id: attachments.id }).from(attachments).where(and(eq(attachments.workspaceId, identity.workspaceId), eq(attachments.sourceTemplateAssetId, assetId))).limit(1); if (linked.length || cloned.length) throw new ApiError(409, 'TEMPLATE_ASSET_IN_USE', 'Remove this asset from template drafts, published revisions, and retained campaigns first.'); await c.env.storage.delete(row!.storageKey); await db.delete(templateAssets).where(and(eq(templateAssets.workspaceId, identity.workspaceId), eq(templateAssets.id, assetId))); }); return c.json({ id: assetId, deleted: true as const }, 200); });
 }

@@ -1,5 +1,5 @@
 import { createRoute, z } from '@hono/zod-openapi';
-import { and, asc, eq, isNotNull, isNull, sql } from 'drizzle-orm';
+import { and, asc, eq, isNotNull, isNull, sql, type SQL } from 'drizzle-orm';
 import { actor, ApiError, budgetedRead, digest, errors, id, IdParams, isoTime, json, nextCursor, notFound, page, PageQuery, readCursor, readLimit, readLimitNote, response, security, type Actor, type App, type DbExecutor, type JobHandler, type Runtime } from './core.js';
 import { lists, type StoredNewsletterReaders } from './db/audience.js';
 import { JobDeferred, retryDatabaseFailures } from './jobs.js';
@@ -105,10 +105,13 @@ const utcDay = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 const readersView = (r: Pick<Pass, 'count' | 'daily' | 'since' | 'countedAt'>) => ({ count: r.count, daily: r.daily, since: r.since, countedAt: r.countedAt });
 const readersJobId = (listId: string) => `newsletter-readers:${listId}`;
 /** Starts the list's background count now, unless one is already waiting or running (one job row per list). */
-const queueReaders = (workspaceId: string, listId: string) => sql`INSERT INTO jobs(id,type,workspace_id,payload,available_at)
-  VALUES (${readersJobId(listId)},'audience.newsletterReaders',${workspaceId},${JSON.stringify({ listId })}::jsonb,now())
-  ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,payload=excluded.payload,available_at=excluded.available_at,lease_until=NULL,last_error=NULL
-  WHERE jobs.status IN ('completed','failed')`;
+const queueReaders = (workspaceId: string, listId: string, eligible?: SQL) => {
+  const values = sql`${readersJobId(listId)},'audience.newsletterReaders',${workspaceId},${JSON.stringify({ listId })}::jsonb,now()`;
+  return sql`INSERT INTO jobs(id,type,workspace_id,payload,available_at)
+    ${eligible ? sql`SELECT ${values} WHERE ${eligible}` : sql`VALUES (${values})`}
+    ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,payload=excluded.payload,available_at=excluded.available_at,lease_until=NULL,last_error=NULL
+    WHERE jobs.status IN ('completed','failed')`;
+};
 const readersDue = (stored: StoredNewsletterReaders | null) => !stored || Date.now() - Date.parse(stored.countedAt) >= NEWSLETTER_READERS.refreshMs;
 
 /**
@@ -157,17 +160,19 @@ export function registerNewsletters(app: App) {
       const [row] = await c.env.db.insert(lists).values({ id: id('lst'), workspaceId: a.workspaceId, name: input.name, newsletterFrom: input.from, newsletterFromName: fromName }).returning(columns);
       return c.json(view(c.env, row!), 201);
     }
-    const row = await c.env.db.transaction(async db => {
-      const [row] = await db.update(lists).set({ newsletterFrom: input.from, newsletterFromName: fromName, updatedAt: new Date().toISOString() }).where(and(scope(a, input.listId), isNull(lists.newsletterFrom))).returning(columns);
-      if (!row) {
-        const [list] = await db.select({ id: lists.id }).from(lists).where(scope(a, input.listId)).limit(1);
-        if (list) throw new ApiError(409, 'NEWSLETTER_EXISTS', 'This list is already a newsletter. Change its sender with updateNewsletter.', 'listId');
-        notFound('List');
-      }
-      // Count its readers now: a large list's are read from that count.
-      await db.execute(queueReaders(a.workspaceId, row.id));
-      return row;
-    });
+    const db = c.env.db, target = scope(a, input.listId);
+    // Start the reader count only if this request converted the list, and commit both writes together.
+    const { rows: [row] } = await db.execute<Row>(sql`WITH converted AS (
+      UPDATE ${lists} SET newsletter_from = ${input.from}, newsletter_from_name = ${fromName}, updated_at = ${new Date().toISOString()}
+      WHERE ${and(target, isNull(lists.newsletterFrom))}
+      RETURNING id, name, newsletter_from AS "from", newsletter_from_name AS "fromName", created_at::text AS "createdAt"
+    ), queued AS (${queueReaders(a.workspaceId, input.listId, sql`EXISTS (SELECT 1 FROM converted)`)})
+    SELECT * FROM converted`);
+    if (!row) {
+      const [list] = await db.select({ id: lists.id }).from(lists).where(target).limit(1);
+      if (list) throw new ApiError(409, 'NEWSLETTER_EXISTS', 'This list is already a newsletter. Change its sender with updateNewsletter.', 'listId');
+      notFound('List');
+    }
     return c.json(view(c.env, row), 201);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/newsletters/{id}', operationId: 'getNewsletter', tags, security, description: `The newsletter with its readers. ${READERS_NOTE} ${readLimitNote(READ_SECONDS)}`, request: { params: IdParams }, responses: { 200: response(NewsletterRead), ...errors } }), async c => {

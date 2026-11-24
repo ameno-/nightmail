@@ -492,6 +492,9 @@ export type UpdateApiKey = {
 };
 
 export type ContactRead = Contact & {
+    /**
+     * Up to 50 list IDs on paginated contact reads (200 on getContact), sorted by ID.
+     */
     listIds: Array<string>;
 };
 
@@ -1485,11 +1488,18 @@ export type CampaignDelivery = {
      */
     deliveredOnly: boolean;
     /**
-     * Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest.
+     * Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up.
      */
     waiting: {
-        reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance';
+        reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance' | 'feedback_lag';
         until: string;
+    } | null;
+    /**
+     * Present while a campaign is preparing, sending, or paused when delivery feedback ingestion is at least 2 minutes behind.
+     */
+    feedbackLag: {
+        oldestMs: number;
+        lane: 'routine' | 'priority';
     } | null;
 } | null;
 
@@ -1526,6 +1536,9 @@ export type CreateCampaignInput = {
             values: Array<string>;
         };
     };
+    /**
+     * Up to 100 key/value pairs, at most 64 KiB of JSON total.
+     */
     defaults?: {
         [key: string]: string | number | boolean | null;
     };
@@ -1817,6 +1830,9 @@ export type CampaignUpdateInput = {
                 values: Array<string>;
             };
         };
+        /**
+         * Up to 100 key/value pairs, at most 64 KiB of JSON total.
+         */
         defaults?: {
             [key: string]: string | number | boolean | null;
         };
@@ -1841,6 +1857,9 @@ export type CampaignArchiveInput = {
 
 export type CampaignTestInput = {
     to: string;
+    /**
+     * Up to 100 key/value pairs, at most 64 KiB of JSON total.
+     */
     data?: {
         [key: string]: string | number | boolean | null;
     };
@@ -2847,9 +2866,17 @@ export type RoutingChange = {
      */
     version: number;
     /**
-     * before null: created; after null: deleted.
+     * before null: created; after null: deleted. Shortened to fit the response size budget when large; read the full history from getRoutingAudit.
      */
     diff: Array<RoutingDiff>;
+    /**
+     * Present when diff was shortened: total changed routes in this version.
+     */
+    diffCount?: number;
+    /**
+     * Present and true when diff was shortened to fit the response size budget; read full changes from getRoutingAudit.
+     */
+    diffTruncated?: true;
     warnings: Array<string>;
 };
 
@@ -3550,10 +3577,17 @@ export type InboxMessage = {
         name: string | null;
         address: string;
     };
+    /**
+     * Addresses in the To header (at most 20 on list pages, up to 100 on getInboxMessage).
+     */
     to: Array<{
         name: string | null;
         address: string;
     }>;
+    /**
+     * Total addresses in the To header (may exceed to.length when shortened).
+     */
+    toCount: number;
     subject: string;
     snippet: string;
     receivedAt: string;
@@ -3683,7 +3717,7 @@ export type InboundDomain = {
     region: string;
     status: 'off' | 'provisioning' | 'waiting_for_mx' | 'active' | 'disabling' | 'disabled' | 'failed';
     /**
-     * For an unknown recipient, create_address creates a receiving address; store keeps the message as unrouted.
+     * For an unknown recipient, create_address creates a receiving address; store keeps the message as unrouted for 30 days.
      */
     catchAll: 'create_address' | 'store';
     /**
@@ -3828,7 +3862,7 @@ export type ReceivingIssue = {
 
 export type AddReceivingHost = {
     /**
-     * For an unknown recipient, store keeps the message as unrouted (default); create_address creates a receiving address.
+     * For an unknown recipient, store keeps the message as unrouted for 30 days (default); create_address creates a receiving address.
      */
     catchAll?: 'create_address' | 'store';
     metadata?: {
@@ -3843,7 +3877,7 @@ export type AddReceivingHost = {
 
 export type UpdateReceivingHost = {
     /**
-     * For an unknown recipient, store keeps the message as unrouted (default); create_address creates a receiving address.
+     * For an unknown recipient, store keeps the message as unrouted for 30 days (default); create_address creates a receiving address.
      */
     catchAll?: 'create_address' | 'store';
     metadata?: {
@@ -3896,7 +3930,7 @@ export type CreateInboundSubdomain = {
      */
     name: string;
     /**
-     * For an unknown recipient, store keeps the message as unrouted (default); create_address creates a receiving address.
+     * For an unknown recipient, store keeps the message as unrouted for 30 days (default); create_address creates a receiving address.
      */
     catchAll?: 'create_address' | 'store';
     metadata?: {
@@ -4198,18 +4232,39 @@ export type InboundMessage = {
         name: string | null;
         address: string;
     };
+    /**
+     * Addresses in the To header (at most 20 on conversation pages, up to 100 on getInboundMessage).
+     */
     to: Array<{
         name: string | null;
         address: string;
     }>;
+    /**
+     * Total addresses in the To header (may exceed to.length when shortened).
+     */
+    toCount: number;
+    /**
+     * Addresses in the Cc header (at most 20 on conversation pages, up to 100 on getInboundMessage).
+     */
     cc: Array<{
         name: string | null;
         address: string;
     }>;
+    /**
+     * Total addresses in the Cc header (may exceed cc.length when shortened).
+     */
+    ccCount: number;
+    /**
+     * Addresses in the Reply-To header (at most 20 on conversation pages, up to 100 on getInboundMessage).
+     */
     replyTo: Array<{
         name: string | null;
         address: string;
     }>;
+    /**
+     * Total addresses in the Reply-To header (may exceed replyTo.length when shortened).
+     */
+    replyToCount: number;
     subject: string;
     snippet: string;
     text: string;
@@ -4229,7 +4284,14 @@ export type InboundMessage = {
      */
     messageId: string | null;
     inReplyTo: string | null;
+    /**
+     * Message-IDs in the References header (at most 20 on conversation pages, up to 100 on getInboundMessage).
+     */
     references: Array<string>;
+    /**
+     * Total Message-IDs in the References header (may exceed references.length when shortened).
+     */
+    referencesCount: number;
 };
 
 export type InboundThreadAddressState = {
@@ -4265,13 +4327,27 @@ export type InboundMessagePage = {
             id: string;
             address: string;
         }>;
+        /**
+         * SMTP envelope recipients (at most 20 on list pages, up to 100 on getInboundMessage).
+         */
         envelopeTo?: Array<string>;
+        /**
+         * Total SMTP envelope recipients (may exceed envelopeTo.length when shortened).
+         */
+        envelopeToCount?: number;
         region?: string | null;
         spam?: boolean;
+        /**
+         * Addresses in the To header (at most 20 on list pages).
+         */
         to?: Array<{
             name: string | null;
             address: string;
         }>;
+        /**
+         * Total addresses in the To header (may exceed to.length when shortened).
+         */
+        toCount?: number;
     }>;
     nextCursor: string | null;
 };
@@ -4281,7 +4357,14 @@ export type InboundMessageDetail = InboundMessage & {
         id: string;
         address: string;
     }>;
+    /**
+     * SMTP envelope recipients (at most 20 on list pages, up to 100 on getInboundMessage).
+     */
     envelopeTo?: Array<string>;
+    /**
+     * Total SMTP envelope recipients (may exceed envelopeTo.length when shortened).
+     */
+    envelopeToCount?: number;
     region?: string | null;
     spam?: boolean;
     rawUrl?: string | null;
@@ -4383,9 +4466,13 @@ export type LogEntry = {
         address: string;
     };
     /**
-     * Sent: the To recipients. Received: the addresses in the To header.
+     * Sent: the To recipients (at most 20). Received: the addresses in the To header (at most 20).
      */
     to: Array<string>;
+    /**
+     * Total To recipients (may exceed to.length when shortened).
+     */
+    toCount: number;
     subject: string;
     /**
      * Sent mail only.
@@ -4424,9 +4511,13 @@ export type LogEntry = {
      */
     region: string | null;
     /**
-     * Received mail, administrators only: the SMTP envelope recipients.
+     * Received mail, administrators only: the SMTP envelope recipients (at most 20).
      */
     envelopeTo: Array<string> | null;
+    /**
+     * Received mail, administrators only: total SMTP envelope recipients.
+     */
+    envelopeToCount: number | null;
 };
 
 /**
@@ -5097,9 +5188,13 @@ export type WorkspaceMember = {
 
 export type CreatedWorkspaceInvitation = WorkspaceInvitation & {
     /**
-     * Whether the invitation was emailed to the invitee, with acceptUrl. False when this installation sends no account email or the day’s invitation emails are used: share acceptUrl yourself.
+     * Whether the invitation was emailed to the invitee, with acceptUrl. When false, share acceptUrl yourself; notEmailedReason says why.
      */
     emailed: boolean;
+    /**
+     * Why no email went out, null when one did. not_available: this installation sends no invitation email, or your account has no verified address to be named by. new_workspace: invitations are emailed once the workspace has a verified domain or has finished its evaluation. allowance_used: the invitation emails for today, or to this address, are used.
+     */
+    notEmailedReason: 'not_available' | 'new_workspace' | 'allowance_used' | null;
     /**
      * What to do next, for people and agents: whether the invitee was emailed, or acceptUrl is yours to share.
      */
@@ -5123,8 +5218,14 @@ export type InviteWorkspaceMember = {
 export type WorkspaceInvitationPreview = {
     id: string;
     workspaceId: string;
+    /**
+     * The workspace’s name as plain words, at most 40 characters; empty when nothing of it can be shown.
+     */
     workspaceName: string;
     workspaceSlug: string;
+    /**
+     * The inviter’s display name as plain words, like workspaceName; may be empty. Identify the inviter by inviterEmail.
+     */
     inviterName: string;
     inviterEmail: string;
     role: 'owner' | 'admin' | 'member';
@@ -5998,6 +6099,10 @@ export type GetCurrentIdentityResponses = {
          */
         byo?: boolean;
         /**
+         * Whether this installation shows who else has a campaign open in the dashboard (campaign rooms run on the Cloudflare deployment). False on the Node server.
+         */
+        presence?: boolean;
+        /**
          * Hosted dashboard sessions: whether the workspace is free, whether an empty balance has paused sending or held received mail, and auto-recharge, so the dashboard can show it on its first frame. Null otherwise; GET /v1/billing has the detail.
          */
         billing?: {
@@ -6647,6 +6752,9 @@ export type CreateContactData = {
     body: {
         email: string;
         name?: string;
+        /**
+         * Up to 50 key/value pairs, at most 16 KiB of JSON total.
+         */
         properties?: {
             [key: string]: string | number | boolean | null;
         };
@@ -6842,6 +6950,9 @@ export type GetContactResponse = GetContactResponses[keyof GetContactResponses];
 export type UpdateContactData = {
     body: {
         name?: string | null;
+        /**
+         * Up to 50 key/value pairs, at most 16 KiB of JSON total.
+         */
         properties?: {
             [key: string]: string | number | boolean | null;
         };
@@ -6979,6 +7090,10 @@ export type ListContactConsentEventsResponses = {
             policyVersion: string | null;
             evidence: string | null;
             actorKeyId: string | null;
+            /**
+             * Committed import ID when source is import; null otherwise.
+             */
+            importId: string | null;
             occurredAt: string;
             createdAt: string;
         }>;
@@ -7066,7 +7181,7 @@ export type ListContactListsData = {
         limit?: number;
         search?: string;
         /**
-         * false skips member counts (counts is null), for pickers that only need names. Counting scans every membership of each list.
+         * false leaves member counts out (counts is null). Counts are kept as memberships, consent and suppression change, so reading them does not count members.
          */
         counts?: 'true' | 'false';
     };
@@ -14582,7 +14697,10 @@ export type ApplyRoutingResponse = ApplyRoutingResponses[keyof ApplyRoutingRespo
 export type ListRoutesData = {
     body?: never;
     path?: never;
-    query?: never;
+    query?: {
+        cursor?: string;
+        limit?: number;
+    };
     url: '/v1/routing/routes';
 };
 
@@ -14637,6 +14755,7 @@ export type ListRoutesResponses = {
      */
     200: {
         data: Array<MailRoute>;
+        nextCursor: string | null;
     };
 };
 

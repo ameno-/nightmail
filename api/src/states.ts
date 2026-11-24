@@ -505,14 +505,16 @@ export function recordExpanded(ref: CampaignRef, expanded: number, windowStarted
 }
 /** An owner resumed a failed list probe: release the rest only to contacts delivered before, and check health at once. */
 export const restrictToDelivered = (ref: CampaignRef) => sql`UPDATE sending_campaigns SET delivered_only=true,health_checked_at=NULL,updated_at=now() WHERE ${campaignRow(ref)} RETURNING id`;
-export const holdCampaign = (ref: CampaignRef, reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance', until: string) => progressCampaign(ref, 'sending', sql`,waiting_reason=${reason},waiting_until=${until}::timestamptz`);
+export const holdCampaign = (ref: CampaignRef, reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance' | 'feedback_lag', until: string) => progressCampaign(ref, 'sending', sql`,waiting_reason=${reason},waiting_until=${until}::timestamptz`);
 export const noteHealthChecked = (ref: CampaignRef) => progressCampaign(ref, 'sending', sql`,health_checked_at=now()`);
 export const setCampaignPacing = (ref: CampaignRef, pacing: { pacePerDay: number | null; autoPause: boolean; rateShare: number | null }) => sql`UPDATE sending_campaigns SET updated_at=now(),pace_per_day=${pacing.pacePerDay},auto_pause=${pacing.autoPause},rate_share=${pacing.rateShare},waiting_reason=NULL,waiting_until=NULL WHERE ${campaignRow(ref)} AND ${campaignActive(sql`sending_campaigns`)} RETURNING id`;
 /**
  * sending -> done once every recipient is released and no row is queued or attempting. The dispatcher runs it once
  * per draining batch over the campaigns it moved rows for (locking only campaign rows, after the row statements, so it
- * never serializes concurrent shards nor deadlocks with cancel or the run job); the interrupted-attempt sweep appends
- * it over every sending campaign so a missed edge can never leave one sending with nothing queued. `refs` yields
+ * never serializes concurrent shards nor deadlocks with cancel or the run job); the campaign run runs it when it finds
+ * every recipient released, since a release that queued nothing leaves no row whose leaving would finish the campaign;
+ * the interrupted-attempt sweep appends it over every sending campaign so a missed edge can never leave one sending with
+ * nothing queued. `refs` yields
  * (workspace_id, campaign_id); `leaving` the ids the same statement is finishing, which its own subqueries cannot see yet.
  */
 export const finishCampaigns = (refs: SQL, leaving: SQL = sql`SELECT NULL::text AS id WHERE false`) => sql`UPDATE sending_campaigns c SET state='done',updated_at=clock_timestamp()

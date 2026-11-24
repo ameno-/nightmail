@@ -17,6 +17,7 @@ import { wakeWebhooks } from './jobs.js';
 import { shareFullAlert } from './operator-alerts.js';
 import { screenSnapshot, ScreenHandover, type CampaignScreen, type ScreenCall } from './screen.js';
 import { flushScreenCalls, outbound } from './screen-calls.js';
+import { flushShadow } from './screen-shadow.js';
 import { SEND_LIMITS } from './send-limits.js';
 import { SesBodyError } from './ses-body.js';
 import { sendReservation, withMemory } from './isolate-memory.js';
@@ -793,11 +794,12 @@ async function recordOutcomes(runtime: Runtime, outcomes: Outcome[]) {
     event_id: rowId('event'), external_id: `attempt-result:${o.mail.id}:${o.mail.dispatchVersion}`, data: o.type === 'acceptance_unknown' ? {...o.data,status:o.type} : o.data, error_code: o.errorCode ?? null,
     next_status: requeued(o) ? 'queued' : statusForEvent[o.type] ?? null,
     next_rank: requeued(o) ? 0 : rank[statusForEvent[o.type]!], public_type: publicEventType[o.type] ?? null,
+    outcome_bit: o.type === 'accepted' ? 1 : o.type === 'reject' ? 64 : 0,
     wait_ms: o.requeueAt ? Math.max(0, Date.parse(o.requeueAt) - Date.now()) : null, screened: !!o.screened,
   }));
   const statement = sql`WITH input AS (
       SELECT * FROM jsonb_to_recordset(${JSON.stringify(input)}::jsonb)
-        AS x(email_id text, workspace_id text, dispatch_version int, type text, provider_id text, event_id text, external_id text, data jsonb, error_code text, next_status text, next_rank int, public_type text, wait_ms float8, screened boolean)
+        AS x(email_id text, workspace_id text, dispatch_version int, type text, provider_id text, event_id text, external_id text, data jsonb, error_code text, next_status text, next_rank int, public_type text, outcome_bit int, wait_ms float8, screened boolean)
     ), mail AS MATERIALIZED (
       SELECT e.id, e.workspace_id, e.status, e.error_code, e.region, e.dispatch_version, e.to_addresses||e.cc_addresses||e.bcc_addresses AS recipients FROM sending_emails e JOIN input x ON e.workspace_id = x.workspace_id AND e.id = x.email_id
       ORDER BY e.id FOR UPDATE
@@ -808,7 +810,9 @@ async function recordOutcomes(runtime: Runtime, outcomes: Outcome[]) {
       FROM input x JOIN mail m ON m.id = x.email_id ORDER BY m.workspace_id,m.id ON CONFLICT DO NOTHING RETURNING *
     ), updated AS (
       UPDATE sending_emails e SET
-        status = x.next_status, provider_id = coalesce(x.provider_id, e.provider_id), error_code = CASE WHEN x.next_status='queued' THEN x.error_code WHEN x.type = 'accepted' AND e.error_code IN ('SES_DAILY_QUOTA_EXHAUSTED','SES_ACCOUNT_SENDING_PAUSED','SES_CREDENTIALS_INVALID','INTERRUPTED_PROVIDER_ATTEMPT') THEN NULL ELSE coalesce(x.error_code, e.error_code) END,
+        status = x.next_status, provider_id = coalesce(x.provider_id, e.provider_id),
+        event_outcomes = e.event_outcomes | x.outcome_bit::smallint,
+        error_code = CASE WHEN x.next_status='queued' THEN x.error_code WHEN x.type = 'accepted' AND e.error_code IN ('SES_DAILY_QUOTA_EXHAUSTED','SES_ACCOUNT_SENDING_PAUSED','SES_CREDENTIALS_INVALID','INTERRUPTED_PROVIDER_ATTEMPT') THEN NULL ELSE coalesce(x.error_code, e.error_code) END,
         account_pause_started_at = CASE WHEN x.error_code='SES_ACCOUNT_SENDING_PAUSED' THEN coalesce(e.account_pause_started_at,clock_timestamp()) END,
         dispatch_version = CASE WHEN x.next_status = 'queued' THEN e.dispatch_version + 1 ELSE e.dispatch_version END,
         scheduled_at = CASE WHEN x.next_status = 'queued' THEN clock_timestamp() + x.wait_ms * interval '1 millisecond' ELSE e.scheduled_at END,
@@ -894,7 +898,7 @@ function logEmail(lane: Lane, mail: Mail, trace: Trace | undefined, outcome: str
     const now = Date.now(), leasedAt = trace?.leasedAt ?? now, created = Date.parse(mail.createdAt), due = mail.scheduledAt ? Math.max(created, Date.parse(mail.scheduledAt)) : created;
     log(routine ? 'info' : 'warn', { code: 'DISPATCH_EMAIL', outcome, reason, emailId: mail.id, workspaceId: mail.workspaceId, campaignId: mail.campaignId ?? undefined,
       region: lane.options.region, shard: lane.options.shard?.index ?? 0, kind: mail.snapshot.kind, attempt: mail.dispatchVersion, queueMs: leasedAt - due, ageMs: leasedAt - created,
-      screen: trace?.screen, screenMs: trace?.screenMs, screenCall: trace?.call?.outcome,
+      screen: trace?.screen, screenMs: trace?.screenMs, screenCall: trace?.call?.outcome, screenDigest: trace?.call?.digest,
       paceMs: trace?.paceMs, sesMs: trace?.sesMs, totalMs: now - leasedAt, ...(rate < 1 ? { sampleRate: rate } : {}) });
   } catch { /* A record never changes what happens to the email. */ }
 }
@@ -1349,6 +1353,8 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
   // The run's classifier requests as content_screen_calls rows (src/screen-calls.ts): now, with every lane and the priority
   // loop finished and nothing leased waiting on SES. At most two seconds, and never throws.
   await flushScreenCalls(runtime.db);
+  // And to the second classifier, where one is configured (src/screen-shadow.ts): handed over, never waited for.
+  flushShadow(runtime);
   return counters;
 }
 

@@ -1,16 +1,17 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
-import { actorMailAccess, mailboxRoute, receivingAdmin, receivingConsentRoute, workspaceMailAccess, ApiError, denied, requiredOf, unrestrictedRequired, RECEIVING_HOST_CHANGE, digest, errors, getSes, id, isoTime, json, lasting, lazyModule, log, ModuleLoadError, response, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
+import { actorMailAccess, budgetedRead, mailboxRoute, readLimit, readLimitNote, receivingAdmin, receivingConsentRoute, workspaceMailAccess, ApiError, denied, requiredOf, unrestrictedRequired, RECEIVING_HOST_CHANGE, digest, errors, getSes, id, isoTime, json, lasting, lazyModule, log, ModuleLoadError, response, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
+import { buildBoundedPageJson, PAGE_MAX_BYTES, withBoundedRead } from './read-bounds.js';
 import { authenticate, chargeCredential, createdInboxes, delegatedInbox, keyExpired, longPoll, requireReceivingConsent, reservePolls } from './auth.js';
 import { boundRequestBody } from './request-body.js';
 import { auditContext, auditInsert, recordAudit } from './audit.js';
 import { domains } from './db/operations.js';
 import { claimReceivable, claimReceives, claimSends, connectionReady, receivingSetup, setupError, type ReceivingSetup } from './states.js';
-import { mailboxAddresses, mailboxDomains, mailboxes, mailboxKeys, mailboxThreads, mailMessages, mailUnrouted, type MailboxPermission } from './db/mailbox.js';
+import { mailboxAddresses, mailboxDomains, mailboxes, mailboxKeys, mailboxThreads, mailMessages, type MailboxPermission } from './db/mailbox.js';
 import { expectedMx, checkMx, mxBlocksEnable } from './mailbox-dns.js';
 import { eventView, inboundEventTypes, latestCursor, readEvents, recordEvents } from './mailbox-events.js';
 import { queueReconcile,saveMailboxMx } from './mailbox-setup.js';
-import { attachToMailboxes, checkRuleCapacity, checkTemporaryMailboxRouting, createMailbox, htmlToPlain, lockMailboxLane, ruleMatches, validateRule, ADDRESS, type Scope } from './mailbox-store.js';
+import { CLAIM_UNROUTED_INLINE, claimUnroutedBatch, checkRuleCapacity, checkTemporaryMailboxRouting, createMailbox, htmlToPlain, lockMailboxLane, queueClaimUnrouted, validateRule, ADDRESS, type Scope } from './mailbox-store.js';
 import { currentVersion, detachDestination, registerRouting, RoutingKey } from './routing.js';
 import { applyFlow, CreateFlow, registerAddressFlow, releaseAddress } from './address-flow.js';
 import { registerRituals } from './rituals.js';
@@ -92,7 +93,7 @@ const InboundDomainStatus = z.enum(['off', 'provisioning', 'waiting_for_mx', 'ac
 const InboundDomainSchema = z.object({
   id: z.string().describe(`${productName} domain ID.`), name: z.string(), region: z.string(),
   status: InboundDomainStatus,
-  catchAll: InboundCatchAll.describe('For an unknown recipient, create_address creates a receiving address; store keeps the message as unrouted.'),
+  catchAll: InboundCatchAll.describe('For an unknown recipient, create_address creates a receiving address; store keeps the message as unrouted for 30 days.'),
   dns: z.array(MxRecord).describe('Records to publish for receiving.'), mx: MxReportSchema.nullable(), lastError: z.string().nullable(),
   enabledAt: z.string().nullable(), checkedAt: z.string().nullable(), addressCount: z.number().int(),
   subdomains: z.object({ enabled: z.boolean().describe('Whether the receipt rule also matches every subdomain.'), count: z.number().int().describe('Receiving subdomains.'), dns: z.array(MxRecord).describe('The wildcard MX record subdomains need, published once.') }),
@@ -193,7 +194,7 @@ export function mailboxView(row: MailboxRow, addresses: { address: string; kind:
     aliases: addresses.filter(item => item.kind === 'alias').map(item => item.address).sort(), rules: row.rules, metadata: row.metadata, origin: row.origin,
     createdAt: iso(row.createdAt)!, updatedAt: iso(row.updatedAt)!, expiresAt: iso(row.expiresAt), stats: { threads: stat?.threads ?? 0, unreadThreads: stat?.unread ?? 0, lastMessageAt: iso(stat?.last) }, sendLimits: sendLimitsFor(row), requireDmarc: row.requireDmarc, kind: row.kind };
 }
-async function mailboxViews(runtime: Runtime, rows: MailboxRow[]) {
+async function mailboxViews(runtime: { db: DbExecutor }, rows: MailboxRow[]) {
   if (!rows.length) return [];
   const ids = rows.map(row => row.id);
   const [addresses, stats] = await Promise.all([
@@ -223,22 +224,20 @@ async function patchThread(c: Ctx, mailboxId: string, threadId: string, patch: T
   return AddressState.parse({...updated,addressId:mailboxId,trashed:!!updated?.trashedAt});
 }
 
-/** Links earlier stored mail for newly claimed addresses and rules to a mailbox. */
+/**
+ * Links earlier stored mail for newly claimed addresses and rules to a mailbox.
+ * Claims the first CLAIM_UNROUTED_INLINE (100) rows in one set-based batch so the address lane lock
+ * stays bounded; if more may remain, queues mailbox.claimUnrouted to drain the rest in short
+ * independent background transactions without holding the address lane.
+ */
 async function claimUnrouted(tx: Parameters<Parameters<Runtime['db']['transaction']>[0]>[0], scope: Scope, mailbox: typeof mailboxes.$inferSelect, addresses: string[], rules: string[]) {
-  if (mailbox.expiresAt !== null) return 0; // A new lease starts with an empty mailbox, including on address reuse.
-  const domain = mailbox.address.split('@')[1]!;
-  // Neither a retained lease nor a send-only address (including plus-tags) grants historical delivery.
-  const outsideReservation = sql`NOT EXISTS (SELECT 1 FROM mailbox_addresses a JOIN mailboxes m ON m.id = a.mailbox_id
-    WHERE a.workspace_id = ${mailUnrouted.workspaceId} AND (m.expires_at IS NOT NULL OR a.kind = 'public')
-    AND a.address IN (${mailUnrouted.address}, regexp_replace(${mailUnrouted.address}, '[+][^@]*@', '@')))`;
-  const rows = await tx.select().from(mailUnrouted).where(and(eq(mailUnrouted.workspaceId, scope.workspaceId), outsideReservation, or(inArray(mailUnrouted.address, addresses), rules.length ? sql`${mailUnrouted.address} LIKE ${`%@${domain}`} OR ${mailUnrouted.address} LIKE ${`%.${domain}`}` : sql`false`))).limit(2000);
-  const claimed = rows.filter(row => addresses.includes(row.address) || rules.some(rule => ruleMatches(rule, row.address)) || addresses.some(address => { const [local, host] = row.address.split('@'); return local?.includes('+') && `${local.split('+')[0]}@${host}` === address; }));
-  if (!claimed.length) return 0;
-  const messageIds = [...new Set(claimed.map(row => row.messageId))];
-  const messages = await tx.select().from(mailMessages).where(inArray(mailMessages.id, messageIds)).orderBy(asc(mailMessages.receivedAt));
-  for (const message of messages) await attachToMailboxes(tx, scope, message, [mailbox.id]);
-  for (const row of claimed) await tx.delete(mailUnrouted).where(and(eq(mailUnrouted.workspaceId, scope.workspaceId), eq(mailUnrouted.address, row.address), eq(mailUnrouted.messageId, row.messageId)));
-  return messages.length;
+  if (mailbox.expiresAt !== null) return { claimed: 0, queued: false }; // A new lease starts with an empty mailbox, including on address reuse.
+  const res = await claimUnroutedBatch(tx, scope, mailbox.id, addresses, rules, CLAIM_UNROUTED_INLINE);
+  if (res.picked >= CLAIM_UNROUTED_INLINE) {
+    await queueClaimUnrouted(tx, scope.workspaceId, mailbox.id);
+    return { claimed: res.attached, queued: true };
+  }
+  return { claimed: res.attached, queued: false };
 }
 
 function registerReceivingDomains(app: App) {
@@ -326,7 +325,7 @@ function registerReceivingDomains(app: App) {
   // other than the domain's own row.
   const hosts = `${base}/{id}/hosts`;
   const HostParams = z.object({ id: z.string().min(1).max(120), hostId: z.string().min(1).max(120) });
-  const HostInput = z.object({ catchAll: InboundCatchAll.optional().describe('For an unknown recipient, store keeps the message as unrouted (default); create_address creates a receiving address.'), metadata: Metadata.optional() });
+  const HostInput = z.object({ catchAll: InboundCatchAll.optional().describe('For an unknown recipient, store keeps the message as unrouted for 30 days (default); create_address creates a receiving address.'), metadata: Metadata.optional() });
   app.openapi(createRoute({ ...meta, method: 'get', path: hosts, operationId: 'listReceivingHosts', summary: 'List receiving hosts',
     description: 'Every host the domain receives on: the domain itself and any of its subdomains, at once, the domain’s own host first. Each has its own status, MX record, catch-all and addresses. Removed hosts are listed with status removed.',
     request: { params: IdParam }, responses: { 200: response(z.object({ data: z.array(InboundHostSchema) }).openapi('InboundHostList')), ...errors } }), async c => {
@@ -365,7 +364,7 @@ function registerReceivingDomains(app: App) {
   });
   app.openapi(createRoute({ ...meta, method: 'post', path: subdomains, operationId: 'createInboundSubdomain', summary: 'Add a receiving subdomain',
     description: `Adds name.example.com as a receiving host beside the domain\u2019s others (POST ${hosts} with a label does the same). Publish the returned MX record on it. Hosted, the same DNS checks as for any host apply. Self-hosted, it needs no SES verification of its own: the first subdomain adds the wildcard recipient (.example.com) to the receipt rule, which takes up to a minute, and later ones are live immediately; a *.example.com MX record (the domain\u2019s subdomains.dns) also works instead of one record per subdomain. Receiving addresses can then be created on the subdomain. Re-adding a removed subdomain restores it.`,
-    request: { params: IdParam, body: json(z.object({ name: z.string().trim().toLowerCase().max(253).describe('A label (acme) or the full host (acme.example.com).'), catchAll: InboundCatchAll.default('store').describe('For an unknown recipient, store keeps the message as unrouted (default); create_address creates a receiving address.'), metadata: Metadata.default({}), confirm: z.boolean().default(false).describe('Hosted: choose the host even though another provider receives its mail today.') }).strict().openapi('CreateInboundSubdomain')) },
+    request: { params: IdParam, body: json(z.object({ name: z.string().trim().toLowerCase().max(253).describe('A label (acme) or the full host (acme.example.com).'), catchAll: InboundCatchAll.default('store').describe('For an unknown recipient, store keeps the message as unrouted for 30 days (default); create_address creates a receiving address.'), metadata: Metadata.default({}), confirm: z.boolean().default(false).describe('Hosted: choose the host even though another provider receives its mail today.') }).strict().openapi('CreateInboundSubdomain')) },
     responses: { 201: response(InboundSubdomainSchema), ...errors } }), async c => {
     hostAdmin(c); const { domain, parent } = await receivingParent(c, c.req.valid('param').id); const input = c.req.valid('json');
     const label = input.name.endsWith(`.${domain.name}`) ? input.name.slice(0, -(domain.name.length + 1)) : input.name;
@@ -417,16 +416,49 @@ function registerAddresses(app: App) {
     requireDmarc: z.boolean().default(false).describe('Hold received mail without a DMARC pass for its From domain: it is stored with the unverified label and does not emit message.received.'),
     flow: CreateFlow.optional().describe('Where the new address’s mail goes, saved with the address in one transaction and one routing version: deliver creates the route for its own address, split adds a two-way rule on it (setInboundAddressFlow changes both later). If any part is refused, nothing is created. Needs what changing routes and rules needs.'),
   }).strict().openapi('CreateInboundAddress');
-  app.openapi(createRoute({ ...meta, method: 'get', path: collection, ...addressAlias('listInboundAddresses'), summary: 'List receivable addresses', description: 'An address key sees only addresses it can access.',
+  app.openapi(createRoute({ ...meta, method: 'get', path: collection, ...addressAlias('listInboundAddresses'), summary: 'List receivable addresses', description: 'An address key sees only addresses it can access. Pages are also bounded by response size and may return fewer than limit addresses; pass nextCursor as cursor to continue. ' + readLimitNote(5),
     request: { query: z.object({ domain: z.string().max(253).optional(), origin: z.enum(['api', 'auto']).optional(), kind: z.enum(['address', 'inbox']).optional().describe('address: receiving addresses only; inbox: agent inboxes only. Default: both.'), q: z.string().max(200).optional(), cursor: z.string().max(200).optional(), limit: Limit }) }, responses: { 200: response(pageOf(InboundAddressSchema, 'InboundAddressPage')), ...errors } }), async c => {
     const value = access(c, 'read'); const q = c.req.valid('query');
-    const rows = await c.env.db.select().from(mailboxes).where(and(eq(mailboxes.workspaceId, value.workspaceId), value.mailboxIds ? inArray(mailboxes.id, value.mailboxIds.length ? value.mailboxIds : ['']) : undefined,
-      q.domain ? sql`split_part(${mailboxes.address}, '@', 2) = ${q.domain.toLowerCase()}` : undefined, q.origin ? eq(mailboxes.origin, q.origin) : undefined, q.kind ? eq(mailboxes.kind, q.kind) : undefined,
-      q.q ? or(sql`${mailboxes.address} ILIKE ${`%${q.q.replace(/[\\%_]/g, ch => `\\${ch}`)}%`}`, sql`${mailboxes.displayName} ILIKE ${`%${q.q.replace(/[\\%_]/g, ch => `\\${ch}`)}%`}`) : undefined,
-      q.cursor ? lt(mailboxes.id, q.cursor) : undefined)).orderBy(desc(mailboxes.id)).limit(q.limit + 1);
-    return c.json({ data: await mailboxViews(c.env, rows.slice(0, q.limit)), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
+    type RawBoxRow = {
+      id: string; workspace_id: string; key: string | null; domain_id: string; address: string; display_name: string | null;
+      rules: string[]; metadata: Record<string, unknown>; origin: 'api' | 'auto'; send_limits: Partial<typeof mailboxes.$inferSelect.sendLimits>;
+      require_dmarc: boolean; expires_at: string | null; kind: 'inbox' | 'address'; delete_after: string | null; created_at: string; updated_at: string; candidate_count: number;
+    };
+    return await withBoundedRead(c, async () => {
+      const where = and(eq(mailboxes.workspaceId, value.workspaceId), value.mailboxIds ? inArray(mailboxes.id, value.mailboxIds.length ? value.mailboxIds : ['']) : undefined,
+        q.domain ? sql`split_part(${mailboxes.address}, '@', 2) = ${q.domain.toLowerCase()}` : undefined, q.origin ? eq(mailboxes.origin, q.origin) : undefined, q.kind ? eq(mailboxes.kind, q.kind) : undefined,
+        q.q ? or(sql`${mailboxes.address} ILIKE ${`%${q.q.replace(/[\\%_]/g, ch => `\\${ch}`)}%`}`, sql`${mailboxes.displayName} ILIKE ${`%${q.q.replace(/[\\%_]/g, ch => `\\${ch}`)}%`}`) : undefined,
+        q.cursor ? lt(mailboxes.id, q.cursor) : undefined);
+      const { views, candidateCount } = await budgetedRead(c.env.db, async db => {
+        const { rows } = await db.execute<RawBoxRow>(sql`
+          WITH candidate AS (
+            SELECT id, workspace_id, key, domain_id, address, display_name, rules, metadata, origin, send_limits, require_dmarc,
+              expires_at::text, kind, delete_after::text, created_at::text, updated_at::text,
+              (octet_length(metadata::text) + octet_length(rules::text) + octet_length(address) + coalesce(octet_length(display_name), 0) +
+                coalesce((SELECT sum(octet_length(a.address) + 8)::int FROM mailbox_addresses a WHERE a.mailbox_id = mailboxes.id), 0) + 512) AS row_bytes
+            FROM ${mailboxes} WHERE ${where}
+            ORDER BY ${mailboxes.id} DESC LIMIT ${q.limit + 1}
+          ), sized AS (
+            SELECT *, row_number() OVER (ORDER BY id DESC) AS rn,
+              sum(row_bytes) OVER (ORDER BY id DESC ROWS UNBOUNDED PRECEDING) AS cum_bytes
+            FROM candidate
+          )
+          SELECT id, workspace_id, key, domain_id, address, display_name, rules, metadata, origin, send_limits, require_dmarc,
+            expires_at, kind, delete_after, created_at, updated_at, (SELECT count(*)::int FROM candidate) AS candidate_count
+          FROM sized WHERE rn = 1 OR cum_bytes <= ${PAGE_MAX_BYTES}
+          ORDER BY rn`);
+        const mapped: MailboxRow[] = rows.slice(0, q.limit).map(r => ({
+          id: r.id, workspaceId: r.workspace_id, key: r.key, domainId: r.domain_id, address: r.address, displayName: r.display_name,
+          rules: r.rules, metadata: r.metadata, origin: r.origin, sendLimits: r.send_limits, requireDmarc: r.require_dmarc,
+          expiresAt: r.expires_at, kind: r.kind, deleteAfter: r.delete_after, createdAt: r.created_at, updatedAt: r.updated_at,
+        }));
+        return { views: await mailboxViews({ ...c.env, db }, mapped), candidateCount: rows[0]?.candidate_count ?? 0 };
+      }, readLimit(5));
+      const { json: body } = buildBoundedPageJson(views, candidateCount > views.length);
+      return new Response(body, { status: 200, headers: { 'content-type': 'application/json; charset=UTF-8' } });
+    }, { route: 'inbound.listAddresses', workspaceId: value.workspaceId }) as never;
   });
-  app.openapi(createRoute({ ...meta, method: 'post', path: collection, ...addressAlias('createInboundAddress'), summary: 'Create a receivable address', description: 'Admin only. The domain must be verified for this workspace; mail arrives once its receiving MX record is active. Permanent addresses claim earlier unrouted mail for their address or rules; temporary addresses start empty. Expiry stops new delivery and sending without deleting history.', request: { body: json(MailboxInput) }, responses: { 201: response(InboundAddressSchema), ...errors } }), async c => {
+  app.openapi(createRoute({ ...meta, method: 'post', path: collection, ...addressAlias('createInboundAddress'), summary: 'Create a receivable address', description: 'Admin only. The domain must be verified for this workspace; mail arrives once its receiving MX record is active. Permanent addresses claim earlier unrouted mail (kept 30 days) for their address or rules; temporary addresses start empty. Expiry stops new delivery and sending without deleting history.', request: { body: json(MailboxInput) }, responses: { 201: response(InboundAddressSchema), ...errors } }), async c => {
     const value = admin(c); const input = c.req.valid('json'); const scope = scopeOf(value);
     if ([input.address, ...input.aliases].some(address => address.split('@')[0]!.includes('*'))) throw new ApiError(422, 'INVALID_ADDRESS', 'A * makes a catch-all or wildcard, which is a route: create it with createRoute.', 'address');
     if (input.flow) receivingAdmin(c, 'change routes and rules');
@@ -454,7 +486,7 @@ function registerAddresses(app: App) {
       }
     }
     // A failure inside this transaction rolled all of it back: its Idempotency-Key is released for a retry.
-    const { row, runnable } = await c.env.db.transaction(async tx => { try {
+    const { row, runnable, claimQueued } = await c.env.db.transaction(async tx => { try {
       await lockMailboxLane(tx,scope.workspaceId, 'address');
       if (publicAddress && c.env.config.multiTenant) {
         const host=publicAddress.split('@')[1]!;
@@ -467,12 +499,13 @@ function registerAddresses(app: App) {
         if (!claimed) throw new ApiError(409, 'ADDRESS_TAKEN', `${publicAddress} already belongs to a mailbox.`, 'publicAddress');
       }
       if (input.flow) await applyFlow(tx, c, scope.workspaceId, created, input.flow, await currentVersion(tx, scope.workspaceId));
-      await claimUnrouted(tx, scope, created, [created.address, ...input.aliases], created.rules);
+      const { queued: claimQueued } = await claimUnrouted(tx, scope, created, [created.address, ...input.aliases], created.rules);
       // Temporary addresses are agent working state, created at a high rate: only permanent ones are audited.
       if (input.ttlSeconds === undefined) await recordAudit(tx, c, { action: 'address.create', workspaceId: scope.workspaceId, target: { type: 'address', id: created.id }, after: { address: created.address, key: input.key ?? null, publicAddress: publicAddress ?? null, aliases: input.aliases.length, rules: created.rules.length } });
-      return { row: created, runnable: await recordEvents(tx, scope.workspaceId, [{ type: 'address.created', mailboxId: created.id, data: { origin: 'api', address: created.address } }]) };
+      return { row: created, runnable: await recordEvents(tx, scope.workspaceId, [{ type: 'address.created', mailboxId: created.id, data: { origin: 'api', address: created.address } }]), claimQueued };
     } catch (e) { rolledBack(c); throw e; } });
     if (runnable) try { await c.env.wake?.(runnable,'webhook'); } catch { /* durable */ }
+    if (claimQueued) try { await c.env.wake?.(1); } catch { /* durable */ }
     return c.json((await mailboxViews(c.env, [row]))[0]!, 201);
   });
   app.openapi(createRoute({ ...meta, method: 'get', path: detail, ...addressAlias('getInboundAddress'), summary: 'Read a receivable address', request: { params }, responses: { 200: response(InboundAddressSchema), ...errors } }), async c => {
@@ -493,7 +526,7 @@ function registerAddresses(app: App) {
     }
     if (mailbox.expiresAt !== null) checkTemporaryMailboxRouting(input);
     const domain = mailbox.address.split('@')[1]!;
-    await c.env.db.transaction(async tx => {
+    const claimQueued = await c.env.db.transaction(async tx => {
       const rules = input.rules ? [...new Set(input.rules.map(rule => validateRule(rule, domain)))] : undefined;
       if(rules || input.aliases)await lockMailboxLane(tx,scope.workspaceId,'address');
       if(rules?.length)await checkRuleCapacity(tx,scope.workspaceId,mailbox.domainId,mailbox.id);
@@ -513,9 +546,11 @@ function registerAddresses(app: App) {
           await tx.insert(mailboxAddresses).values(added.map(address => ({ ...scope, address, mailboxId: mailbox.id, kind: 'alias' as const })));
         }
       }
-      if (added.length || rules?.length) await claimUnrouted(tx, scope, updated!, added, rules ?? []);
+      const { queued } = added.length || rules?.length ? await claimUnrouted(tx, scope, updated!, added, rules ?? []) : { queued: false };
       if (mailbox.expiresAt === null) await recordAudit(tx, c, { action: 'address.update', workspaceId: scope.workspaceId, target: { type: 'address', id: mailbox.id }, details: { fields: Object.keys(input) }, after: { address: mailbox.address, key: input.key, requireDmarc: input.requireDmarc } });
+      return queued;
     });
+    if (claimQueued) try { await c.env.wake?.(1); } catch { /* durable */ }
     const [row] = await c.env.db.select().from(mailboxes).where(eq(mailboxes.id, mailbox.id));
     return c.json((await mailboxViews(c.env, [row!]))[0]!, 200);
   });

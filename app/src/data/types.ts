@@ -101,7 +101,7 @@ export interface Campaign { stats?: CampaignListStats | null; counts?: { total: 
 // pacing, pausedAt, pauseReason, waiting, and rateShare are optional so older API responses still type-check.
 // rateShare is the fraction (0.05–1) of the SES per-second send rate the campaign may use; 1 is the full rate.
 export interface CampaignPacing { perDay: number | null; autoPause: boolean; rateShare?: number; windowStartedAt: ISODate | null; windowExpanded: number; nextWindowAt: ISODate | null }
-export interface CampaignDelivery { total: number; prepared: number; expanded: number; canceled: number; error: { code: string; message: string } | null; pacing?: CampaignPacing; pausedAt?: ISODate | null; pauseReason?: { code: string; message: string } | null; waiting?: { reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance'; until: ISODate } | null }
+export interface CampaignDelivery { total: number; prepared: number; expanded: number; canceled: number; error: { code: string; message: string } | null; pacing?: CampaignPacing; pausedAt?: ISODate | null; pauseReason?: { code: string; message: string } | null; waiting?: { reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance' | 'feedback_lag'; until: ISODate } | null; feedbackLag?: { oldestMs: number; lane: 'routine' | 'priority' } | null }
 export interface CampaignPacingInput { perDay: number | null; autoPause?: boolean; rateShare?: number }
 type CampaignRate = { value: number | null; numerator: number; denominator: number }
 // Lifetime distinct email outcomes (GET /v1/campaigns/{id}/stats); outcomes overlap and simulated mail is counted separately.
@@ -194,7 +194,7 @@ export interface Inbox {
 export interface InboxInput { type: Inbox['type']; domain?: string; name?: string; ttlSeconds: number; send?: { enabled: boolean }; credential?: { name: string; permissions: ('read' | 'modify' | 'send')[] } }
 export interface CreatedInbox extends Inbox { credential?: { id: string; secret: string; permissions: string[]; expiresAt: ISODate } }
 export interface InboxMessage {
-  id: string; threadId: string; cursor: string; from: MailAddress; to: MailAddress[]; subject: string; snippet: string; receivedAt: ISODate; read: boolean; junk: boolean
+  id: string; threadId: string; cursor: string; from: MailAddress; to: MailAddress[]; toCount?: number; subject: string; snippet: string; receivedAt: ISODate; read: boolean; junk: boolean
   held: 'quota' | 'expired' | null; attachmentCount: number; auth: { spf?: string; dkim?: string; dmarc?: string }; simulated: boolean; hiddenContent: boolean
   extract: { codes: string[]; links: { text: string; href: string; mismatch: boolean }[] }
 }
@@ -209,9 +209,9 @@ export type InboundThreadView = 'inbox' | 'starred' | 'archive' | 'spam' | 'tras
 export interface InboundThread { id: string; subject: string; snippet: string; from?: MailAddress; lastMessageAt: ISODate; addressIds: string[]; messageCount: number }
 export interface InboundMessage {
   id: string; threadId: string; addressIds: string[]; direction: 'inbound' | 'outbound'; status: string
-  from: MailAddress; to: MailAddress[]; cc: MailAddress[]; replyTo: MailAddress[]; subject: string; snippet: string
+  from: MailAddress; to: MailAddress[]; toCount?: number; cc: MailAddress[]; ccCount?: number; replyTo: MailAddress[]; replyToCount?: number; subject: string; snippet: string
   text: string; replyText: string; receivedAt: ISODate; bodyTruncated: boolean; attachmentCount: number
-  emailId: string | null; messageId: string | null; inReplyTo: string | null; references: string[]
+  emailId: string | null; messageId: string | null; inReplyTo: string | null; references: string[]; referencesCount?: number
   /** Read state for the requested address scope; absent on older API responses. */
   read?: boolean
 }
@@ -247,20 +247,20 @@ export type LogDirection = 'all' | 'sent' | 'received'
 /** How many emails match each status and stream under the other filters, between the same dates (GET /v1/logs?counts=true). */
 export interface LogCounts { status: Record<string, number>; stream: { transactional: number; marketing: number } }
 export interface LogEntry {
-  id: string; direction: 'sent' | 'received'; at: ISODate; status: string; from: MailAddress; to: string[]; subject: string
+  id: string; direction: 'sent' | 'received'; at: ISODate; status: string; from: MailAddress; to: string[]; toCount?: number; subject: string
   stream: Stream | null; campaignId: string | null; simulated: boolean; attachmentCount: number | null; threadId: string | null; threadCount: number | null
   /** A sent email waiting to be sent (status scheduled): when it goes. */
   scheduledAt: ISODate | null
-  addresses: { id: string; address: string }[] | null; regionId: RegionId | null; envelopeTo: string[] | null
+  addresses: { id: string; address: string }[] | null; regionId: RegionId | null; envelopeTo: string[] | null; envelopeToCount?: number | null
 }
 export interface ReceivedEmail {
-  id: string; threadId: string; status: string; from: MailAddress; to: MailAddress[]; subject: string; snippet: string
+  id: string; threadId: string; status: string; from: MailAddress; to: MailAddress[]; toCount?: number; subject: string; snippet: string
   receivedAt: ISODate; attachmentCount: number
   // Delivery details: present for owners and admins only.
-  spam?: boolean; region?: RegionId | null; envelopeTo?: string[]; addresses?: { id: string; address: string }[]
+  spam?: boolean; region?: RegionId | null; envelopeTo?: string[]; envelopeToCount?: number; addresses?: { id: string; address: string }[]
 }
 export interface ReceivedEmailDetail extends ReceivedEmail {
-  sentAt: ISODate | null; cc: MailAddress[]; replyTo: MailAddress[]; messageId: string | null; inReplyTo: string | null; references: string[]
+  sentAt: ISODate | null; cc: MailAddress[]; ccCount?: number; replyTo: MailAddress[]; replyToCount?: number; messageId: string | null; inReplyTo: string | null; references: string[]; referencesCount?: number
   text: string; replyText: string; html: string | null; htmlTooComplex?: boolean; bodyTruncated: boolean; headers?: { name: string; value: string }[]
   attachments: { id: string; filename: string; contentType: string; size: number; contentId: string | null; disposition: 'attachment' | 'inline'; url: string | null }[]
   verdicts?: { spf?: string; dkim?: string; dmarc?: string; spam?: string; virus?: string }
@@ -404,7 +404,7 @@ export interface Api {
 }
 
 export interface SendingLimit { cap: number | null; used: number; resetAt: string | null; nextCap: number | null; nextCapAt: string | null }
-export interface Identity { /** The workspace's newsletters, oldest first, at most 4: the sidebar names up to three. */ newsletters?: { id: string; name: string }[] | null; id: string; workspaceId: string; /** The OAuth scopes this installation's MCP server asks for (read, send, manage). */ mcpScopes?: string[]; role?: WorkspaceRole | null; multiTenant?: boolean; workspaces?: WorkspaceMembership[] | null; connection?: (Pick<ProviderConnection, 'kind' | 'region' | 'state' | 'tenant'> & { attention?: string | null; sendingLimit?: SendingLimit | null; domains?: { total: number; verified: number }; standing?: { step: StandingStep; marketingHeld: boolean } | null }) | null; /** Nightmail staff only: the platform operator role, which opens /operator. Null in a session that didn't sign in with Google. */ operator?: 'operator' | 'operator:read' | null; /** Nightmail staff only: an operator role this session can't use until it signs in with Google. */ staffSignIn?: boolean; /** Staff UI notes, for the people the API allows (UI_NOTES_SUBJECTS); false for everyone else. */ uiNotes?: boolean; /** Whether this installation records dashboard use (lib/analytics.ts). */ analytics?: boolean; /** Hosted: an operator lets this workspace connect its own AWS account. Otherwise onboarding sets up Hosted mail without asking. */ byo?: boolean; /** Hosted dashboard sessions: an empty balance pausing sending or holding received mail, and auto-recharge. */ billing?: { enforcement: 'off' | 'shadow' | 'enforce'; /** Anomaly made the workspace free: never charged or paused for the balance. */ free?: boolean; sending: 'ok' | 'low' | 'paused'; receiving: 'ok' | 'grace' | 'held'; autoRecharge: 'off' | 'on' | 'pending' | 'failed' | 'capped' } | null; /** The hosts mail apps connect to; null when this installation has no IMAP/SMTP gateway. */ mailServers?: { imap: string; smtp: string } | null; name: string | null; email: string | null; permissions: string[]; domains: string[]; origin: string; host: string }
+export interface Identity { /** The workspace's newsletters, oldest first, at most 4: the sidebar names up to three. */ newsletters?: { id: string; name: string }[] | null; id: string; workspaceId: string; /** The OAuth scopes this installation's MCP server asks for (read, send, manage). */ mcpScopes?: string[]; role?: WorkspaceRole | null; multiTenant?: boolean; workspaces?: WorkspaceMembership[] | null; connection?: (Pick<ProviderConnection, 'kind' | 'region' | 'state' | 'tenant'> & { attention?: string | null; sendingLimit?: SendingLimit | null; domains?: { total: number; verified: number }; standing?: { step: StandingStep; marketingHeld: boolean } | null }) | null; /** Nightmail staff only: the platform operator role, which opens /operator. Null in a session that didn't sign in with Google. */ operator?: 'operator' | 'operator:read' | null; /** Nightmail staff only: an operator role this session can't use until it signs in with Google. */ staffSignIn?: boolean; /** Staff UI notes, for the people the API allows (UI_NOTES_SUBJECTS); false for everyone else. */ uiNotes?: boolean; /** Whether this installation records dashboard use (lib/analytics.ts). */ analytics?: boolean; /** Hosted: an operator lets this workspace connect its own AWS account. Otherwise onboarding sets up Hosted mail without asking. */ byo?: boolean; /** Whether this installation shows who else has a campaign open (the Cloudflare deployment's campaign rooms). */ presence?: boolean; /** Hosted dashboard sessions: an empty balance pausing sending or holding received mail, and auto-recharge. */ billing?: { enforcement: 'off' | 'shadow' | 'enforce'; /** Anomaly made the workspace free: never charged or paused for the balance. */ free?: boolean; sending: 'ok' | 'low' | 'paused'; receiving: 'ok' | 'grace' | 'held'; autoRecharge: 'off' | 'on' | 'pending' | 'failed' | 'capped' } | null; /** The hosts mail apps connect to; null when this installation has no IMAP/SMTP gateway. */ mailServers?: { imap: string; smtp: string } | null; name: string | null; email: string | null; permissions: string[]; domains: string[]; origin: string; host: string }
 
 export type WorkspaceRole = 'owner' | 'admin' | 'member'
 export interface WorkspaceMembership { id: string; name: string; slug: string; role: WorkspaceRole }
@@ -430,9 +430,9 @@ export interface ByoRegion { region: string; regionLabel: string; scanState: str
   pending: { domain: string; importing: boolean; error: string | null }[]; failedIntents: { domain: string; importing: boolean; error: string }[] }
 export interface ByoCandidate { id: string; domain: string; region: string; regionLabel: string; selectable: boolean; status: 'verified' | 'signing_pending' | 'not_verified' | 'incomplete' | 'already_bound' | 'overlap'; sandbox: boolean | null }
 export interface WorkspaceInvitation { id: string; workspaceId: string; email: string; role: WorkspaceRole; expiresAt: string; acceptUrl: string }
-/** A new invitation: emailed says whether the invitee was sent the link. */
-export interface CreatedWorkspaceInvitation extends WorkspaceInvitation { emailed?: boolean }
-export interface WorkspaceInvitationPreview { id: string; workspaceId: string; workspaceName: string; workspaceSlug: string; inviterName: string; inviterEmail: string; role: WorkspaceRole; expiresAt: string; status: 'pending' | 'accepted' }
+/** A new invitation: emailed says whether the invitee was sent the link, and notEmailedReason why not. */
+export interface CreatedWorkspaceInvitation extends WorkspaceInvitation { emailed?: boolean; notEmailedReason?: 'not_available' | 'new_workspace' | 'allowance_used' | null }
+export interface WorkspaceInvitationPreview { id: string; workspaceId: string; workspaceName: string; workspaceSlug: string; inviterEmail: string; role: WorkspaceRole; expiresAt: string; status: 'pending' | 'accepted' }
 export interface Attachment { disposition?: 'attachment' | 'inline'; contentId?: string | null; id: string; filename: string; contentType: string; size: number }
 export interface ConsentInput { status: "subscribed" | "unsubscribed"; source?: string; evidence?: string; policyVersion?: string; occurredAt?: string; confirmResubscribe?: boolean }
 export interface ConsentEvent { id: string; status: "subscribed" | "unsubscribed"; source: string; evidence: string | null; policyVersion: string | null; occurredAt: string }

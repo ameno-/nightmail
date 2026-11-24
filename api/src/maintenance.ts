@@ -4,6 +4,7 @@ import { log, logError } from './core.js';
 import { campaignActive } from './states.js';
 import { expireDomainClaims } from './operations.js';
 import { SEND_LIMITS } from './send-limits.js';
+import { foldSendingTallies, recountSendingTallies } from './sending-tallies.js';
 
 // Rows per delete statement: small enough to finish well inside Hyperdrive's 60 s statement limit on 1 vCPU.
 const RETENTION_BATCH = 5000;
@@ -82,6 +83,116 @@ export async function sweepInboxes(runtime:Runtime, budgetMs:number,clock=Date.n
   return pending.length===0;
 }
 
+const INBOX_RECONCILE_PAGE = 50;
+const INBOX_RECONCILE_LOCK_CAP = 50_000;
+/**
+ * Scheduled exact recount of inbox_state counters (messages, held, unread) from mailbox_messages.
+ * Pages across inbox_state with a persisted cursor (sending_upload_reconcile id='inbox-state') and a
+ * per-inbox statement timeout, reading without locks first so a 2M-message inbox never stalls live
+ * ingest. Only takes FOR UPDATE SKIP LOCKED when a difference is found, confirms modseq did not move
+ * during the scan (or recounts under lock for small inboxes), corrects the row, and logs INBOX_STATE_DRIFT
+ * at error level whenever an initialized counter drifted (a difference is a bug).
+ */
+export async function reconcileInboxState(runtime: Runtime, budgetMs = 15_000, clock = Date.now) {
+  const deadline = clock() + budgetMs;
+  let checked = 0, corrected = 0, drifted = 0, skipped = 0;
+  let after = (await runtime.db.execute<{ after: string }>(sql`SELECT after FROM sending_upload_reconcile WHERE id='inbox-state'`)).rows[0]?.after ?? '';
+  type Tally = { messages: number; held: number; unread: number };
+  const zero: Tally = { messages: 0, held: 0, unread: 0 };
+  const countOne = (inboxId: string) => runtime.db.transaction(async tx => {
+    await tx.execute(sql`SET LOCAL statement_timeout = '5s'`);
+    return (await tx.execute<Tally>(sql`
+      SELECT count(*)::int AS messages,
+             count(*) FILTER (WHERE held_reason IS NOT NULL)::int AS held,
+             count(*) FILTER (WHERE NOT read AND held_reason IS NULL)::int AS unread
+      FROM mailbox_messages WHERE mailbox_id=${inboxId}`)).rows[0]!;
+  }, { accessMode: 'read only' });
+  while (clock() < deadline) {
+    const { rows } = await runtime.db.execute<{ inbox_id: string; workspace_id: string; modseq: string; messages: number; held: number; unread: number | null }>(sql`
+      SELECT s.inbox_id, s.workspace_id, s.modseq::text, s.messages, s.held, s.unread
+      FROM inbox_state s JOIN mailboxes b ON b.id=s.inbox_id
+      WHERE s.inbox_id > ${after} AND (b.delete_after IS NULL OR b.delete_after > statement_timestamp())
+      ORDER BY s.inbox_id LIMIT ${INBOX_RECONCILE_PAGE}`);
+    if (!rows.length) {
+      if (after !== '') await runtime.db.execute(sql`INSERT INTO sending_upload_reconcile(id,after) VALUES('inbox-state','') ON CONFLICT(id) DO UPDATE SET after=''`);
+      break;
+    }
+    // Count all small inboxes on the page in one grouped query; count large inboxes individually so
+    // one 2M-message inbox cannot time out the other 49 inboxes on the page.
+    const smallIds = rows.filter(r => r.messages <= INBOX_RECONCILE_LOCK_CAP).map(r => r.inbox_id);
+    let batched: Map<string, Tally> | null = null;
+    if (smallIds.length) {
+      try {
+        const grouped = await runtime.db.transaction(async tx => {
+          await tx.execute(sql`SET LOCAL statement_timeout = '5s'`);
+          return (await tx.execute<Tally & { mailbox_id: string }>(sql`
+            SELECT mailbox_id, count(*)::int AS messages,
+                   count(*) FILTER (WHERE held_reason IS NOT NULL)::int AS held,
+                   count(*) FILTER (WHERE NOT read AND held_reason IS NULL)::int AS unread
+            FROM mailbox_messages WHERE mailbox_id = ANY(${sql.param(smallIds)}::text[])
+            GROUP BY mailbox_id`)).rows;
+        }, { accessMode: 'read only' });
+        batched = new Map(grouped.map(g => [g.mailbox_id, { messages: g.messages, held: g.held, unread: g.unread }]));
+      } catch (error) {
+        log('warn', { code: 'INBOX_STATE_RECONCILE_BATCH_FALLBACK', count: smallIds.length, timedOut: timedOut(error) });
+      }
+    }
+    let advanced = after;
+    for (const s of rows) {
+      if (clock() >= deadline) break;
+      try {
+        const actual = batched && s.messages <= INBOX_RECONCILE_LOCK_CAP
+          ? (batched.get(s.inbox_id) ?? zero)
+          : await countOne(s.inbox_id);
+        checked++;
+        if (s.unread === actual.unread && s.messages === actual.messages && s.held === actual.held) { advanced = s.inbox_id; continue; }
+        const outcome = await runtime.db.transaction(async tx => {
+          await tx.execute(sql`SET LOCAL lock_timeout = '1s'; SET LOCAL statement_timeout = '5s'`);
+          const [locked] = (await tx.execute<{ modseq: string; messages: number; held: number; unread: number | null }>(sql`
+            SELECT modseq::text, messages, held, unread FROM inbox_state WHERE inbox_id=${s.inbox_id} FOR UPDATE SKIP LOCKED`)).rows;
+          if (!locked) return { skipped: 'busy' as const };
+          let exact = actual;
+          if (locked.modseq !== s.modseq) {
+            if (locked.messages > INBOX_RECONCILE_LOCK_CAP) return { skipped: 'busy' as const };
+            exact = (await tx.execute<Tally>(sql`
+              SELECT count(*)::int AS messages,
+                     count(*) FILTER (WHERE held_reason IS NOT NULL)::int AS held,
+                     count(*) FILTER (WHERE NOT read AND held_reason IS NULL)::int AS unread
+              FROM mailbox_messages WHERE mailbox_id=${s.inbox_id}`)).rows[0]!;
+          }
+          if (locked.unread === exact.unread && locked.messages === exact.messages && locked.held === exact.held) return null;
+          await tx.execute(sql`UPDATE inbox_state SET messages=${exact.messages}, held=${exact.held}, unread=${exact.unread} WHERE inbox_id=${s.inbox_id}`);
+          return { wasInitialized: locked.unread !== null, stored: { messages: locked.messages, held: locked.held, unread: locked.unread }, exact };
+        });
+        if (outcome && 'skipped' in outcome) {
+          skipped++;
+          log('warn', { code: 'INBOX_STATE_RECONCILE_SKIPPED', workspaceId: s.workspace_id, inboxId: s.inbox_id, reason: outcome.skipped });
+        } else if (outcome) {
+          corrected++;
+          if (outcome.wasInitialized) {
+            drifted++;
+            log('error', { code: 'INBOX_STATE_DRIFT', workspaceId: s.workspace_id, inboxId: s.inbox_id, stored: outcome.stored, actual: outcome.exact });
+          }
+        }
+        advanced = s.inbox_id;
+      } catch (error) {
+        if (timedOut(error)) {
+          skipped++;
+          log('warn', { code: 'INBOX_STATE_RECONCILE_SKIPPED', workspaceId: s.workspace_id, inboxId: s.inbox_id, reason: 'timeout' });
+        } else {
+          logError(error, { code: 'INBOX_STATE_RECONCILE_FAILED', inboxId: s.inbox_id }, 'warn');
+        }
+        advanced = s.inbox_id;
+      }
+    }
+    const next = rows.length < INBOX_RECONCILE_PAGE && advanced === rows.at(-1)!.inbox_id ? '' : advanced;
+    await runtime.db.execute(sql`INSERT INTO sending_upload_reconcile(id,after) VALUES('inbox-state',${next}) ON CONFLICT(id) DO UPDATE SET after=excluded.after`);
+    after = next;
+    if (!next) break;
+  }
+  return { checked, corrected, drifted, skipped };
+}
+
 /**
  * One retention step: a bounded statement that removes (or retires) at most `size` rows, oldest first, and returns their
  * count as n. `oldest` selects the time of the oldest row the step would still take, for the log. `lane` groups the steps in
@@ -107,6 +218,14 @@ function expired(name: string, table: string, by: SQL, where: SQL, extra: Partia
   return { name, oldest: sql`SELECT min(${by}) FROM ${t} WHERE ${where}`, size: extra.size, lane: extra.lane, batches: extra.batches,
     statement: () => sql`WITH gone AS (DELETE FROM ${t} WHERE ctid IN (SELECT ctid FROM ${t} WHERE ${where}${order} LIMIT ${size} FOR UPDATE SKIP LOCKED) RETURNING 1) SELECT count(*)::int AS n FROM gone` };
 }
+/** expired() for two tables as one step, under `name`: a batch of each in one statement, each taken as expired() takes it.
+ *  n is their sum, so the step repeats while either table still fills its batch; oldest is the older of the two. */
+function expiredTogether(name: string, tables: [{ table: string; by: SQL; where: SQL }, { table: string; by: SQL; where: SQL }]): Drain {
+  const [a, b] = tables.map(({ table, by, where }) => ({ t: sql`${sql.identifier(table)}`, by, where }));
+  const batch = ({ t, by, where }: { t: SQL; by: SQL; where: SQL }) => sql`DELETE FROM ${t} WHERE ctid IN (SELECT ctid FROM ${t} WHERE ${where} ORDER BY ${by} LIMIT ${RETENTION_BATCH} FOR UPDATE SKIP LOCKED) RETURNING 1`;
+  return { name, oldest: sql`SELECT least((SELECT min(${a!.by}) FROM ${a!.t} WHERE ${a!.where}),(SELECT min(${b!.by}) FROM ${b!.t} WHERE ${b!.where}))`,
+    statement: () => sql`WITH gone AS (${batch(a!)}), also AS (${batch(b!)}) SELECT ((SELECT count(*) FROM gone)+(SELECT count(*) FROM also))::int AS n` };
+}
 const unordered = { unordered: true } as const;
 const at = (column: string) => sql`${sql.identifier(column)}`;
 /**
@@ -120,6 +239,20 @@ const at = (column: string) => sql`${sql.identifier(column)}`;
  */
 const SEND_PATH = sql.raw(`path ~ '^/v1/(emails/(send|batch)|campaigns/[^/]+/test|domains/[^/]+/test-send|inbound/threads(/[^/]+/reply)?)$'`);
 const SEND_KEYS = sql`result IS NOT NULL AND NOT (result ? 'scheduledAt') AND ${SEND_PATH}`, SCHEDULED_KEYS = sql`result ? 'scheduledAt' AND ${SEND_PATH}`;
+
+/**
+ * A list's counts are the sums of the differences its triggers add (migration 405): this folds each list's rows into
+ * one and drops a deleted list's, hourly. One statement, so a reader sees the rows before it or the one after it, never
+ * neither; a row another fold already took is skipped and only what this one removed is summed. n is the rows it saved.
+ */
+export const foldListCounts = () => sql`WITH folded AS (DELETE FROM audience_list_counts d
+    WHERE (d.workspace_id, d.list_id) IN (SELECT workspace_id, list_id FROM audience_list_counts GROUP BY 1, 2 HAVING count(*) > 1)
+      OR NOT EXISTS (SELECT FROM audience_lists l WHERE l.workspace_id = d.workspace_id AND l.id = d.list_id)
+    RETURNING d.workspace_id, d.list_id, d.subscribed, d.unsubscribed, d.unknown, d.suppressed
+  ), kept AS (INSERT INTO audience_list_counts (workspace_id, list_id, subscribed, unsubscribed, unknown, suppressed)
+    SELECT f.workspace_id, f.list_id, sum(f.subscribed), sum(f.unsubscribed), sum(f.unknown), sum(f.suppressed) FROM folded f
+    WHERE EXISTS (SELECT FROM audience_lists l WHERE l.workspace_id = f.workspace_id AND l.id = f.list_id) GROUP BY 1, 2 RETURNING 1
+  ) SELECT (SELECT count(*) FROM folded)::int - (SELECT count(*) FROM kept)::int AS n`;
 
 /**
  * Every retention step, in their usual order. Never erase contacts, consent, suppression, drafts or active scheduled
@@ -153,10 +286,15 @@ async function retentionDrains(runtime: Runtime): Promise<Drain[]> {
     { name: 'mail_routing_versions', size: 8, oldest: sql`SELECT min(created_at) FROM mail_routing_versions WHERE created_at<now()-interval '1 year'`, statement: () => sql`SELECT mail_prune_route_versions() AS n` },
     expired('mail_receipts', 'mail_receipts', sql`coalesce(processed_at,created_at)`, sql`status IN ('processed','failed') AND coalesce(processed_at,created_at)<${cutoff}`, inbound),
     expired('mail_receipt_holds', 'mail_receipt_holds', at('expires_at'), sql`status<>'held' AND expires_at<${cutoff}`, inbound),
+    // Unrouted mail for unknown recipients is kept 30 days: oldest first in 1,000-row batches (at most 5,000 per
+    // hourly run, with pauses between batches), also retiring unreferenced mail_messages and queueing storage deletes.
+    { name: 'mail_unrouted', ...inbound, size: 1000, batches: 5, oldest: sql`SELECT min(created_at) FROM mail_unrouted WHERE created_at<${cutoff}`, statement: () => sql`SELECT mail_unrouted_prune_batch(1000) AS n` },
     // Received-mail events and webhook deliveries are kept 30 days. A delivery still held for a paused endpoint after that is
     // dead-lettered with ENDPOINT_PAUSED_EXPIRED (unpause no longer resumes it) and kept 7 more days so the reason is seen.
     expired('mailbox_events', 'mailbox_events', at('created_at'), sql`created_at<${cutoff}`, inbound),
-    expired('mail_ignored_staging', 'mail_ignored_staging', at('created_at'), sql`created_at<now()-interval '3 days'`, inbound),
+    // Keep ignored staging keys past S3's 3-day lifecycle (which rounds up to UTC midnight, 72-96 h + async delete)
+    // so ignored unknown-domain mail is never re-swept as an orphan before S3 expires it.
+    expired('mail_ignored_staging', 'mail_ignored_staging', at('created_at'), sql`created_at<now()-interval '5 days'`, inbound),
     { name: 'mailbox_webhook_deliveries_paused_expired', ...inbound, oldest: sql`SELECT min(created_at) FROM mailbox_webhook_deliveries WHERE created_at<${cutoff} AND status='paused'`,
       statement: () => sql`WITH held AS (UPDATE mailbox_webhook_deliveries SET status='failed',last_error='ENDPOINT_PAUSED_EXPIRED',updated_at=now() WHERE id IN (SELECT id FROM mailbox_webhook_deliveries
         WHERE created_at<${cutoff} AND status='paused' ORDER BY created_at LIMIT ${RETENTION_BATCH} FOR UPDATE SKIP LOCKED) RETURNING 1) SELECT count(*)::int AS n FROM held` },
@@ -171,8 +309,11 @@ async function retentionDrains(runtime: Runtime): Promise<Drain[]> {
         table === 'hosted_health_credits' ? {} : unordered)),
     ] : []),
     expired('agent_tokens', 'agent_tokens', at('expires_at'), sql`expires_at < ${cutoff}`),
-    // Classifier requests (src/screen-calls.ts), kept 30 days.
-    expired('content_screen_calls', 'content_screen_calls', at('created_at'), sql`created_at < ${cutoff}`),
+    // The classifier's records, in one step: its requests (src/screen-calls.ts), kept 30 days, and the second classifier's
+    // comparisons of them (src/screen-shadow.ts), kept 90. Each table's batch is taken as expired() takes one; the count
+    // logged under content_screen_calls is both tables' rows.
+    expiredTogether('content_screen_calls', [{ table: 'content_screen_calls', by: at('created_at'), where: sql`created_at < ${cutoff}` },
+      { table: 'screen_comparisons', by: at('created_at'), where: sql`created_at < now() - interval '90 days'` }]),
     // Abuse-monitoring signals past their retention (src/abuse.ts abuseExpired). Expiry runs whether monitoring is on or off.
     expired('abuse_signals', 'abuse_signals', at('last_at'), abuseExpired),
     expired('abuse_sampling', 'abuse_sampling', at('sampled_through'), sql`sampled_through < now()-interval '30 days'`, unordered),
@@ -197,38 +338,64 @@ async function retentionDrains(runtime: Runtime): Promise<Drain[]> {
     { name: 'support_subjects', statement: () => sql`WITH gone AS (UPDATE support_conversations SET subject = NULL
         WHERE id IN (${closedLongAgo} AND subject IS NOT NULL LIMIT ${RETENTION_BATCH}) RETURNING 1) SELECT count(*)::int AS n FROM gone` },
     expired('audience_operation_plans', 'audience_operation_plans', at('expires_at'), sql`expires_at < now() - interval '1 day'`),
+    { name: 'audience_list_counts', size: Infinity, statement: foldListCounts },
     // Uncommitted previews hold their parsed CSV (up to 5 MiB) and expire after IMPORT_PREVIEW_RETENTION_DAYS (7 days).
     expired('audience_import_previews', 'audience_imports', at('created_at'), sql`status = 'preview' AND created_at < now() - make_interval(days => ${IMPORT_PREVIEW_RETENTION_DAYS})`, { size: 100, unordered: true }),
-    // Backfill up to 2,000 opaque contact IDs onto legacy committed imports (<90 days) before their rows JSONB is
-    // scrubbed, so support's audienceHealth view never sees a window with neither sample_contact_ids nor rows.
-    { name: 'audience_import_samples', size: 10, oldest: sql`SELECT min(created_at) FROM audience_imports WHERE status = 'committed' AND sample_contact_ids IS NULL AND rows_scrubbed_at IS NULL AND created_at >= now() - make_interval(days => ${IMPORT_COMMITTED_DETAILS_RETENTION_DAYS})`, statement: () => sql`WITH due AS (
+    // Backfill import_id on pre-PR audience_consent_audit rows while each committed import's rows JSONB still exists.
+    // Indexed through audience_contacts(workspace_id, email) -> audience_consent_page(workspace_id, contact_id, id).
+    // Both scrub drains below require consent_linked_at IS NOT NULL, so no import's rows can be emptied before linking.
+    { name: 'audience_import_consent_links', size: 1, oldest: sql`SELECT min(updated_at) FROM audience_imports WHERE status = 'committed' AND consent_linked_at IS NULL AND rows_scrubbed_at IS NULL`, statement: () => sql`WITH due AS (
+        SELECT id FROM audience_imports WHERE status = 'committed' AND consent_linked_at IS NULL AND rows_scrubbed_at IS NULL
+        ORDER BY updated_at ASC, id ASC LIMIT 1 FOR UPDATE SKIP LOCKED
+      ), linked AS (
+        UPDATE audience_consent_audit a SET import_id = d.id
+        FROM due d
+        JOIN audience_imports i ON i.id = d.id
+        CROSS JOIN LATERAL (
+          SELECT c.id AS contact_id
+          FROM jsonb_array_elements(i.rows) r
+          JOIN audience_contacts c ON c.workspace_id = i.workspace_id AND c.email = lower(r->>'email')
+        ) mc
+        WHERE a.workspace_id = i.workspace_id AND a.contact_id = mc.contact_id
+          AND a.source = 'import' AND a.import_id IS NULL
+          AND a.occurred_at >= i.created_at - interval '1 second'
+          AND a.occurred_at <= i.updated_at + interval '5 seconds'
+      ), marked AS (
+        UPDATE audience_imports i SET consent_linked_at = now() FROM due WHERE i.id = due.id RETURNING 1
+      ) SELECT count(*)::int AS n FROM marked` },
+    // Backfill up to 2,000 opaque contact IDs onto legacy committed imports (<90 days since commit) before their rows
+    // JSONB is scrubbed, so support's audienceHealth view never sees a window with neither sample_contact_ids nor rows.
+    { name: 'audience_import_samples', size: 10, oldest: sql`SELECT min(updated_at) FROM audience_imports WHERE status = 'committed' AND sample_contact_ids IS NULL AND rows_scrubbed_at IS NULL AND updated_at >= now() - make_interval(days => ${IMPORT_COMMITTED_DETAILS_RETENTION_DAYS})`, statement: () => sql`WITH due AS (
         SELECT id FROM audience_imports WHERE status = 'committed' AND sample_contact_ids IS NULL AND rows_scrubbed_at IS NULL
-          AND created_at >= now() - make_interval(days => ${IMPORT_COMMITTED_DETAILS_RETENTION_DAYS})
-        ORDER BY created_at DESC LIMIT 10 FOR UPDATE SKIP LOCKED
+          AND updated_at >= now() - make_interval(days => ${IMPORT_COMMITTED_DETAILS_RETENTION_DAYS})
+        ORDER BY updated_at DESC LIMIT 10 FOR UPDATE SKIP LOCKED
       ), updated AS (
         UPDATE audience_imports i SET sample_contact_ids = coalesce((
           SELECT array_agg(c.id) FROM (SELECT r->>'email' AS email FROM jsonb_array_elements(i.rows) r ORDER BY hashtextextended(lower(r->>'email'), 0) LIMIT 2000) x
           JOIN audience_contacts c ON c.workspace_id = i.workspace_id AND c.email = lower(x.email)
         ), ARRAY[]::text[]) FROM due WHERE i.id = due.id RETURNING 1
       ) SELECT count(*)::int AS n FROM updated` },
-    // Scrub committed 50k-row CSV payloads (and any deleted contacts' addresses inside them) in small paused batches
-    // once sample_contact_ids is populated (or past the 90-day diagnosis window); metadata and imported count stay.
-    { name: 'audience_import_rows', size: 10, oldest: sql`SELECT min(created_at) FROM audience_imports WHERE status = 'committed' AND rows_scrubbed_at IS NULL AND created_at < now() - make_interval(days => ${IMPORT_COMMITTED_ROWS_RETENTION_DAYS}) AND (sample_contact_ids IS NOT NULL OR created_at < now() - make_interval(days => ${IMPORT_COMMITTED_DETAILS_RETENTION_DAYS}))`, statement: () => sql`WITH due AS (
+    // Scrub committed 50k-row CSV payloads in small paused batches 7 days after commit (updated_at), strictly gated on
+    // consent_linked_at IS NOT NULL and sample_contact_ids populated (or past 90 days); metadata & imported count stay.
+    { name: 'audience_import_rows', size: 10, oldest: sql`SELECT min(updated_at) FROM audience_imports WHERE status = 'committed' AND rows_scrubbed_at IS NULL AND consent_linked_at IS NOT NULL AND updated_at < now() - make_interval(days => ${IMPORT_COMMITTED_ROWS_RETENTION_DAYS}) AND (sample_contact_ids IS NOT NULL OR updated_at < now() - make_interval(days => ${IMPORT_COMMITTED_DETAILS_RETENTION_DAYS}))`, statement: () => sql`WITH due AS (
         SELECT id FROM audience_imports WHERE status = 'committed' AND rows_scrubbed_at IS NULL
-          AND created_at < now() - make_interval(days => ${IMPORT_COMMITTED_ROWS_RETENTION_DAYS})
-          AND (sample_contact_ids IS NOT NULL OR created_at < now() - make_interval(days => ${IMPORT_COMMITTED_DETAILS_RETENTION_DAYS}))
-        ORDER BY created_at LIMIT 10 FOR UPDATE SKIP LOCKED
+          AND consent_linked_at IS NOT NULL
+          AND updated_at < now() - make_interval(days => ${IMPORT_COMMITTED_ROWS_RETENTION_DAYS})
+          AND (sample_contact_ids IS NOT NULL OR updated_at < now() - make_interval(days => ${IMPORT_COMMITTED_DETAILS_RETENTION_DAYS}))
+        ORDER BY updated_at LIMIT 10 FOR UPDATE SKIP LOCKED
       ), gone AS (
         UPDATE audience_imports i SET rows = '[]'::jsonb, rows_scrubbed_at = now() FROM due WHERE i.id = due.id RETURNING 1
       ) SELECT count(*)::int AS n FROM gone` },
-    // Past IMPORT_COMMITTED_DETAILS_RETENTION_DAYS (90 days), scrub sample_contact_ids and per-row errors too.
-    { name: 'audience_import_details', size: 50, oldest: sql`SELECT min(created_at) FROM audience_imports WHERE status = 'committed' AND errors_scrubbed_at IS NULL AND created_at < now() - make_interval(days => ${IMPORT_COMMITTED_DETAILS_RETENTION_DAYS})`, statement: () => sql`WITH due AS (
+    // Past 90 days since commit (updated_at), scrub sample_contact_ids and per-row errors too (still gated on consent_linked_at).
+    { name: 'audience_import_details', size: 50, oldest: sql`SELECT min(updated_at) FROM audience_imports WHERE status = 'committed' AND errors_scrubbed_at IS NULL AND consent_linked_at IS NOT NULL AND updated_at < now() - make_interval(days => ${IMPORT_COMMITTED_DETAILS_RETENTION_DAYS})`, statement: () => sql`WITH due AS (
         SELECT id FROM audience_imports WHERE status = 'committed' AND errors_scrubbed_at IS NULL
-          AND created_at < now() - make_interval(days => ${IMPORT_COMMITTED_DETAILS_RETENTION_DAYS})
-        ORDER BY created_at LIMIT 50 FOR UPDATE SKIP LOCKED
+          AND consent_linked_at IS NOT NULL
+          AND updated_at < now() - make_interval(days => ${IMPORT_COMMITTED_DETAILS_RETENTION_DAYS})
+        ORDER BY updated_at LIMIT 50 FOR UPDATE SKIP LOCKED
       ), gone AS (
         UPDATE audience_imports i SET sample_contact_ids = NULL, errors = '[]'::jsonb, errors_scrubbed_at = now(), rows = '[]'::jsonb, rows_scrubbed_at = coalesce(i.rows_scrubbed_at, now()) FROM due WHERE i.id = due.id RETURNING 1
       ) SELECT count(*)::int AS n FROM gone` },
+
     expired('sending_email_events', 'sending_email_events', at('created_at'), sql`created_at < ${cutoff}`, sent),
     // An email and its attachment links leave in the same statement, so no link can outlive its email.
     { name: 'sending_emails', ...sent, oldest: sql`SELECT min(created_at) FROM sending_emails WHERE created_at < ${cutoff} AND status NOT IN ('queued','attempting','scheduled')`, statement: () => sql`WITH gone AS (
@@ -353,8 +520,10 @@ async function retire(runtime: Runtime, drains: Drain[], budgetMs: number, first
   await pass(order.filter(d => behind.has(d)));
   const unreached = order.filter(d => !reached.has(d)).map(d => d.name);
   const waiting: ByLane = {};
+  // Reserve time to report oldest waiting rows even when the final statement ran past `until` (bounded within grace).
+  const oldestDeadline = clock() < ceiling ? ceiling : Math.min(clock() + OLDEST_RESERVE_MS, ceiling + 55_000);
   for (const d of [...order.filter(d => failed.includes(d.name)), ...order.filter(d => behind.has(d) || capped.has(d))]) {
-    if (!d.oldest || clock() >= ceiling) continue;
+    if (!d.oldest || clock() >= oldestDeadline) continue;
     try {
       const age = (await runtime.db.execute<{ s: string | null }>(sql`SELECT floor(extract(epoch FROM now() - (${d.oldest})))::bigint AS s`)).rows[0]?.s;
       if (age != null) note(waiting, d, Number(age));
@@ -388,6 +557,8 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
     const inboxComplete = await sweepInboxes(runtime, Math.min(60_000, Math.floor(budgetMs / 5)));
     // A durable daily election prevents two reconcilers from applying the same
     // snapshot difference. Dispatch continues adding deltas while this runs.
+    try { await foldSendingTallies(runtime, Math.min(10_000, Math.max(1_000, ceiling - Date.now()))); }
+    catch (error) { failed.push('sending_tallies_fold'); logError(error, { code: 'RETENTION_STEP_FAILED', table: 'sending_tallies_fold' }, 'warn'); }
     try {
       await runtime.db.execute(sql`WITH elected AS (INSERT INTO job_schedule(workspace_id,next_wake_at)
         VALUES ('maintenance:sending-depth',now()+interval '1 day') ON CONFLICT(workspace_id) DO UPDATE SET next_wake_at=excluded.next_wake_at
@@ -438,6 +609,40 @@ export async function retentionTick(runtime: Runtime, budgetMs = SENT_BUDGET_MS)
   }
 }
 
+// How long one list's recount may take: a list of millions takes seconds, and reads only.
+const RECOUNT_STATEMENT_SECONDS = 30;
+/**
+ * Once a day (a durable election, as the other reconcilers), every list is counted the way readLists used to count it and
+ * compared with the counts the triggers keep (reconcile_audience_list_counts, migration 405). They must agree: a
+ * difference means a write changed a membership or a contact's state without its trigger's row, which is a bug, so it is
+ * logged at error level with the list and the difference, and stored so the list shows the right numbers again. The recount
+ * reads both sides in one snapshot and takes no lock a write waits for. Each list is its own transaction with its own
+ * time limit, so one that is too large to count in time (logged, not corrected) costs no other list its check; a list
+ * deleted since the run began has nothing to correct. Lists go in a different order each day, so a budget that doesn't
+ * reach them all today reaches the rest another day. Returns how many lists it corrected.
+ */
+export async function recountLists(runtime: Runtime, budgetMs = 60_000, statementSeconds = RECOUNT_STATEMENT_SECONDS, clock = Date.now) {
+  const until = clock() + budgetMs;
+  const { rows: lists } = await runtime.db.execute<{ workspace_id: string; id: string }>(sql`WITH elected AS (INSERT INTO job_schedule(workspace_id,next_wake_at)
+      VALUES ('maintenance:audience-list-counts',now()+interval '1 day') ON CONFLICT(workspace_id) DO UPDATE SET next_wake_at=excluded.next_wake_at
+      WHERE job_schedule.next_wake_at<=now() RETURNING 1)
+    SELECT l.workspace_id, l.id FROM audience_lists l, elected ORDER BY md5(l.id || current_date::text)`);
+  let recounted = 0, corrected = 0, failed = 0;
+  for (const list of lists) {
+    if (clock() >= until) break;
+    try {
+      const { rows: [difference] } = await runtime.db.transaction(async tx => {
+        await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${Math.max(1, Math.floor(statementSeconds))}s'`));
+        return tx.execute<{ subscribed: number; unsubscribed: number; unknown: number; suppressed: number }>(sql`SELECT * FROM reconcile_audience_list_counts(${list.workspace_id}, ${list.id})`);
+      });
+      recounted++;
+      if (difference) { corrected++; log('error', { code: 'AUDIENCE_LIST_COUNTS_DRIFT', workspace: list.workspace_id, list: list.id, ...difference }); }
+    } catch (error) { failed++; logError(error, { code: 'AUDIENCE_LIST_RECOUNT_FAILED', workspace: list.workspace_id, list: list.id }, 'warn'); }
+  }
+  if (lists.length) log(failed || recounted < lists.length ? 'warn' : 'info', { code: 'AUDIENCE_LISTS_RECOUNTED', lists: lists.length, recounted, corrected, failed });
+  return corrected;
+}
+
 /** Received-mail events and webhook deliveries alone (the hourly run includes them): for checks that run just these. */
 export async function pruneMailboxEvents(runtime: Runtime, budgetMs = 60_000) {
   const names = new Set(['mailbox_events', 'mail_ignored_staging', 'mailbox_webhook_deliveries_paused_expired', 'mailbox_webhook_deliveries']);
@@ -451,6 +656,7 @@ export async function hourlyUpkeep(runtime: Runtime, mailboxRuntime: () => Promi
   for (const [code, step] of [
     ['HOSTED_HEALTH_CHECK_FAILED', () => checkHostedHealth(runtime)],
     ['UPLOAD_RECONCILE_FAILED', () => reconcileUploads(runtime)],
+    ['INBOX_RECONCILE_FAILED', () => reconcileInboxState(runtime)],
     ['PREVIEW_SWEEP_FAILED', async () => (await import('./preview-images.js')).sweepPreviews(runtime)],
     ['REPUTATION_ALERT_CHECK_FAILED', async () => (await import('./reputation-alerts.js')).checkReputationAlerts(runtime)],
     ['MAILBOX_HOURLY_FAILED', async () => (await import('./mailbox-ingest.js')).mailboxHourly(await mailboxRuntime())],
@@ -461,6 +667,10 @@ export async function hourlyUpkeep(runtime: Runtime, mailboxRuntime: () => Promi
     ['BYO_HEALTH_QUEUE_FAILED', async () => { await (await import('./byo-regional.js')).queueByoHealth(runtime); }],
     // Abuse monitoring (src/abuse.ts): a bounded, leased slice. Hosted, and only while it is on.
     ['ABUSE_HOURLY_FAILED', async () => { await (await import('./abuse.js')).abuseHourly(runtime); }],
+    // Daily exact recount of sending_campaign_tallies and sending_metrics_hourly.
+    ['SENDING_TALLIES_RECOUNT_FAILED', async () => { await recountSendingTallies(runtime); }],
+    // The daily exact recount of every list's counts.
+    ['AUDIENCE_LIST_RECOUNT_FAILED', async () => { await recountLists(runtime); }],
     ['MAINTENANCE_CLEANUP_FAILED', () => cleanup(runtime)],
   ] as const) {
     try { await step(); } catch (error) {

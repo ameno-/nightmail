@@ -3,10 +3,12 @@ import { getPath } from 'hono/utils/url';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import type { Config, FeedbackItem, Runtime } from './core.js';
 import { DispatcherShard, dispatcherName, shardCount } from './dispatcher-do.js';
+import { CampaignRoom } from './campaign-room.js';
+import { ROOM_PEER_HEADER } from './campaign-room-protocol.js';
 import type { SupportPlatformApi } from './support-platform.js';
 import { SECURITY_HEADERS } from './security-headers.js';
 import { clientIpHeader, clientNetworkHeader, healthService, legacyClientIpHeaders, requestHeaderNames, setting } from './brand.js';
-export { DispatcherShard };
+export { DispatcherShard, CampaignRoom };
 
 // Keep top-level evaluation empty so cold-started isolates answer /health without
 // loading OpenAPI/Zod schemas, Better Auth, MCP, Drizzle, pg or AWS SDK clients.
@@ -21,9 +23,9 @@ function initRuntimeDeps() {
     import('pg'), import('drizzle-orm/node-postgres'), import('drizzle-orm/sql'),
     import('./config.js'), import('./adapters/storage.js'),
     import('./jobs.js'), import('./core.js'),
-    import('./adapters/browser-rendering.js'), import('./adapters/public-image.js'), import('./adapters/feedback-queue.js'),
-  ]).then(([{ Pool }, { drizzle }, { sql }, { CONFIG_KEYS, loadConfig }, { r2Storage }, { followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY }, core, { browserImageRenderer }, { publicImageImporter }, { feedbackSink, settleFeedbackBatch, legacyFeedbackCutover, workWake }]) => ({
-    Pool, drizzle, sql, CONFIG_KEYS, loadConfig, r2Storage, followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY, core, browserImageRenderer, publicImageImporter, feedbackSink, settleFeedbackBatch, legacyFeedbackCutover, workWake,
+    import('./adapters/browser-rendering.js'), import('./adapters/public-image.js'), import('./adapters/feedback-queue.js'), import('./screen-shadow.js'),
+  ]).then(([{ Pool }, { drizzle }, { sql }, { CONFIG_KEYS, loadConfig }, { r2Storage }, { followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY }, core, { browserImageRenderer }, { publicImageImporter }, { feedbackSink, settleFeedbackBatch, legacyFeedbackCutover, workWake, batchFirstDeliveryLag, metricsEffectiveLagMs }, { enqueueShadow, consumeShadow, writeComparisons, writtenComparisons }]) => ({
+    Pool, drizzle, sql, CONFIG_KEYS, loadConfig, r2Storage, followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY, core, browserImageRenderer, publicImageImporter, feedbackSink, settleFeedbackBatch, legacyFeedbackCutover, workWake, batchFirstDeliveryLag, metricsEffectiveLagMs, enqueueShadow, consumeShadow, writeComparisons, writtenComparisons,
   }));
 }
 async function toModuleLoadError(error: unknown): Promise<never> {
@@ -44,6 +46,7 @@ function loadHttpDeps() {
 
 // A provider group fits on one shard. Spread small sends across the pool without waking idle siblings.
 let nextShard: number | undefined;
+let lastPriorityLagWrite = 0, lastPriorityLagHigh = false;
 async function wakeDispatchers(env: Env, region: string, accountId?: string, emails?: number, kind?: 'shared' | 'byo', priority = false) {
   const count = kind === 'byo' ? 1 : shardCount('DISPATCH_SHARDS' in env ? env.DISPATCH_SHARDS : undefined);
   nextShard ??= Math.floor(Math.random() * 0x100000000);
@@ -54,6 +57,34 @@ async function wakeDispatchers(env: Env, region: string, accountId?: string, ema
     return stub.fetch(`https://dispatcher/wake?region=${encodeURIComponent(region)}&shard=${index}&count=${count}${accountId ? `&account=${encodeURIComponent(accountId)}` : ''}${priority ? '&priority=1' : ''}`);
   }));
 }
+
+// An agent's read or save, told to the campaign's room (src/campaign-room.ts) beside the request, never in its way. A
+// room that says nobody is in it isn't asked again from this isolate for half a minute, so an agent polling a draft
+// nobody has open wakes it at most twice a minute here and costs no query or storage. Names are kept for ten minutes,
+// so a room with people in it takes one call; the first needs one lookup on a connection of its own. An agent the room
+// heard from lately isn't reported again from here for a quarter of a minute (it stays on screen for two), unless it saved:
+// a save (saved, its revision) always reaches a room with people in it, who read it at once.
+const quietRooms = new Map<string, number>(), agentNames = new Map<string, { name: string; until: number }>(), reported = new Map<string, number>();
+const QUIET_MS = 30_000, NAME_MS = 600_000, REPORTED_MS = 15_000;
+async function roomVisit(env: Env, rooms: NonNullable<Env['CAMPAIGN_ROOMS']>, room: string, credential: string, lookup: (runtime: Runtime) => Promise<string | null>, saved?: number) {
+  const now = Date.now(), visit = `${room}|${credential}`;
+  if ((quietRooms.get(room) ?? 0) > now || (saved === undefined && (reported.get(visit) ?? 0) > now)) return;
+  try {
+    const stub = rooms.getByName(room);
+    const id = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${room}:${credential}`))), n => n.toString(16).padStart(2, '0')).join('').slice(0, 16);
+    let known = agentNames.get(credential);
+    if (!known || known.until <= now) {
+      if (!await stub.visit({ id })) { quiet(room, now); return; }
+      known = { name: await withRuntime(env, lookup).catch(() => null) ?? 'An agent', until: now + NAME_MS };
+      if (agentNames.size > 1000) agentNames.clear();
+      agentNames.set(credential, known);
+    }
+    if (!await stub.visit({ id, name: known.name }, saved)) { quiet(room, now); return; }
+    if (reported.size > 1000) reported.clear();
+    reported.set(visit, now + REPORTED_MS);
+  } catch { /* Presence is best-effort: the request it follows has already answered. */ }
+}
+function quiet(room: string, now: number) { if (quietRooms.size > 1000) quietRooms.clear(); quietRooms.set(room, now + QUIET_MS); }
 
 // Every line names the Worker and the commit it runs (DEPLOY_SHA, set by .github/scripts/deploy-worker.sh).
 function stampLogs(env: Env, core: typeof import('./core.js')) {
@@ -72,16 +103,25 @@ function configFor(env: Env, keys: readonly string[], loadConfig: (input: Record
   return { ...config };
 }
 
-const queueName = (env: Env, key: 'FEEDBACK_QUEUE_NAME' | 'LEGACY_FEEDBACK_QUEUE_NAME' | 'FEEDBACK_DLQ_NAME' | 'LEGACY_FEEDBACK_DLQ_NAME' | 'WORK_QUEUE_NAME', fallback: string) => {
+const queueName = (env: Env, key: 'FEEDBACK_QUEUE_NAME' | 'FEEDBACK_PRIORITY_QUEUE_NAME' | 'LEGACY_FEEDBACK_QUEUE_NAME' | 'FEEDBACK_DLQ_NAME' | 'LEGACY_FEEDBACK_DLQ_NAME' | 'WORK_QUEUE_NAME', fallback: string) => {
   const value: unknown = (env as unknown as Record<string, unknown>)[key];
   return typeof value === 'string' && value ? value : fallback;
 };
-async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, max = 1, ctx?: ExecutionContext): Promise<T> {
-  const { Pool, drizzle, sql, CONFIG_KEYS, loadConfig, r2Storage, jobConcurrency, WAKE_SCHEDULE_KEY, core, browserImageRenderer, publicImageImporter, feedbackSink, workWake } = await loadRuntimeDeps();
+/** `shadowWaitUntil`: the invocation's waitUntil, for the sends to the second classifier's queue alone, from a handler that
+ *  gives no `ctx` here (queue, scheduled: their database connection is closed before they return, as before). */
+async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, max = 1, ctx?: ExecutionContext, shadowWaitUntil?: (sent: Promise<unknown>) => void): Promise<T> {
+  const { Pool, drizzle, sql, CONFIG_KEYS, loadConfig, r2Storage, jobConcurrency, WAKE_SCHEDULE_KEY, core, browserImageRenderer, publicImageImporter, feedbackSink, workWake, enqueueShadow } = await loadRuntimeDeps();
   // Optional Worker variable, default two active jobs; six matches the platform's
   // simultaneous outbound-connection ceiling while the shared SES gate limits rate.
   const concurrency = jobConcurrency('JOB_CONCURRENCY' in env ? env.JOB_CONCURRENCY : undefined, 6);
   const config = configFor(env, CONFIG_KEYS, loadConfig);
+  // The second classifier's calls are made by its queue's consumer (queue() below), never in this invocation: what a
+  // job drain kept goes onto the queue when the drain has ended. With no queue bound there is nowhere to make them: off.
+  // Nothing here waits for those sends: the invocation's waitUntil keeps them alive after it has answered or
+  // acknowledged. Only a caller with no waitUntil at all (none makes a classifier request) would wait for them at its end.
+  const shadowQueue = env.JEVF_QUEUE, handovers: Promise<void>[] = [];
+  const keepShadow = shadowWaitUntil ?? (ctx ? (sent: Promise<unknown>) => ctx.waitUntil(sent) : undefined);
+  if (!shadowQueue) config.shadow = undefined;
   // Defer Hyperdrive/Pool creation until a handler actually touches db: missing-auth,
   // validation and cached responses never allocate a pool or touch Hyperdrive.
   let client: InstanceType<typeof Pool> | undefined;
@@ -102,9 +142,10 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
     },
   });
   const nudges: ((runtime: Runtime) => Promise<void>)[] = [];
+  const rooms = env.CAMPAIGN_ROOMS;
   try {
     const notify = workWake(env.WAKE_QUEUE, concurrency);
-    return await work({ db, storage: r2Storage(env.ATTACHMENTS), config, mailR2: env.MAIL && { bucket:env.MAIL,name:setting(env,'MAIL_BUCKET')!,write:setting(env,'MAIL_STORE')==='r2' }, jwksCacheScope: env.HYPERDRIVE,
+    return await work({ db, storage: r2Storage(env.ATTACHMENTS), config, shadow: shadowQueue && (items => { const sent = enqueueShadow(shadowQueue, items); if (keepShadow) keepShadow(sent); else handovers.push(sent); }), mailR2: env.MAIL && { bucket:env.MAIL,name:setting(env,'MAIL_BUCKET')!,write:setting(env,'MAIL_STORE')==='r2' }, jwksCacheScope: env.HYPERDRIVE,
       allowSnsCertMiss: async peer => (await env.SNS_CERT_MISSES.limit({key: `bane:sns-miss:${await core.digest(peer)}`})).success,
       allowMalformedSns: async peer => (await env.ADMISSION.limit({key:`bane:sns-malformed:${await core.digest(peer)}`})).success,
       // 6,000 units of 16 KiB a minute per workspace in each location: about 94 MiB of preview memory, eight previews at the limit.
@@ -115,6 +156,13 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
       // fails lets the batch through; the per-process cap still applies.
       analyticsStorage: env.ANALYTICS ? r2Storage(env.ANALYTICS) : undefined,
       allowAnalytics: env.ANALYTICS_INGEST ? peer => env.ANALYTICS_INGEST!.limit({ key: `analytics:${peer}` }).then(r => r.success, () => true) : undefined,
+      // The database disk alert (src/disk-alert.ts): one card a minute per threshold. A limiter that fails lets the card through.
+      allowDiskAlert: env.DISK_ALERT ? key => env.DISK_ALERT!.limit({ key: `disk-alert:${key}` }).then(r => r.success, () => true) : undefined,
+      // Campaign rooms (src/campaign-room.ts). A room answers the upgrade itself; the person rides in a header only this builds.
+      campaignRooms: rooms && {
+        connect: (name, person) => { quietRooms.delete(name); return rooms.getByName(name).fetch('https://room/connect', { headers: { upgrade: 'websocket', [ROOM_PEER_HEADER]: encodeURIComponent(JSON.stringify(person)) } }); },
+        visit: (name, credential, lookup, saved) => { const visit = roomVisit(env, rooms, name, credential, lookup, saved); if (ctx) ctx.waitUntil(visit); },
+      },
       placementEdge:{probesPerJob:Math.min(3,Math.floor(6/concurrency))}, deferNudge: ctx ? pending => { nudges.push(pending); } : undefined, wake: async (readyJobs = 1, immediate) => {
       if (immediate === 'webhook' && env.WEBHOOK_QUEUE) return workWake(env.WEBHOOK_QUEUE,concurrency)(readyJobs);
       if (immediate || readyJobs > concurrency) return notify(readyJobs);
@@ -134,16 +182,34 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
         throw error;
       }
       core.log('info', { code: 'QUEUE_WAKE', readyJobs, messages: 1 });
-    }, dispatch: (...args) => wakeDispatchers(env, ...args), feedback: feedbackSink(env.FEEDBACK_QUEUE, config.authSecret), renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
+    }, dispatch: (...args) => wakeDispatchers(env, ...args), feedback: feedbackSink(env.FEEDBACK_QUEUE, config.authSecret, env.FEEDBACK_PRIORITY_QUEUE), renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
   } finally {
     if (client) {
       if (ctx) ctx.waitUntil(client.end().catch(() => {}));
       else await client.end();
     }
+    // Sends to the second classifier's queue from a caller that gave no waitUntil: without this they would be cut off.
+    if (handovers.length) await Promise.all(handovers);
     // Dispatch and immediate webhook nudges open no database connection.
     if (ctx && nudges.length) ctx.waitUntil(withRuntime(env, async runtime => { for (const nudge of nudges) await nudge(runtime); }));
   }
 }
+// Health bookkeeping (src/health.ts, src/health-counters.ts) is never awaited by a request, a queue batch, the minute
+// cron's own steps or a dispatcher: it runs after them in waitUntil, on a connection of its own, with a one-second
+// lock_timeout and a three-second statement_timeout on everything it writes. A health table that is locked or slow
+// costs a dropped sample, never a late batch.
+// Without a context to outlive the handler in (a handler called directly, as the cold-isolate check does) it does not
+// run at all: it is never awaited instead, and it can never throw into its caller.
+function afterwards(env: Env, ctx: ExecutionContext | undefined, work: (runtime: Runtime) => Promise<unknown>) {
+  try { if (typeof ctx?.waitUntil === 'function') ctx.waitUntil(withRuntime(env, async runtime => { await work(runtime); }).catch(() => { /* Health never fails what it reports on. */ })); }
+  catch { /* Health never fails what it reports on. */ }
+}
+// What this isolate counted (its jobs' database errors, its error lines), at most every 20 seconds.
+async function flushDueCounters(env: Env, ctx: ExecutionContext | undefined) {
+  try { const { countersDue, flushCounters } = await import('./health-counters.js'); if (countersDue()) afterwards(env, ctx, runtime => flushCounters(runtime.db)); } catch { /* Counted again with the next batch. */ }
+}
+/** A handler's waitUntil as withRuntime's shadowWaitUntil. (A test may call a handler with no context.) */
+const waitUntilOf = (ctx: ExecutionContext | undefined) => typeof ctx?.waitUntil === 'function' ? (sent: Promise<unknown>) => ctx.waitUntil(sent) : undefined;
 /**
  * The support platform's service-binding entrypoint (api/README.md "Support integration"): the bane-support Worker in
  * the same account binds `{ service: "bane-production" | "bane-dev", entrypoint: "SupportPlatform" }` and calls these
@@ -225,6 +291,11 @@ export default {
       headers.set(clientIpHeader, address);
       // The network Cloudflare resolved the client to, never a value the request carried.
       headers.delete(clientNetworkHeader);
+      // A browser's WebSocket can't send headers: the campaign room's upgrade names its account and workspace in the query,
+      // which stand in for the headers the dashboard sends with every other request (sending.ts, the room route).
+      if (/^\/v1\/campaigns\/[^/]+\/room$/.test(pathname) && request.headers.get('upgrade')?.toLowerCase() === 'websocket') {
+        for (const name of ['account', 'workspace']) { const value = url.searchParams.get(name); if (value && !requestHeaderNames(name).some(header => headers.has(header))) headers.set(requestHeaderNames(name)[0]!, value); }
+      }
       const cf = (request as Request & { cf?: { asn?: unknown; country?: unknown } }).cf;
       if (typeof cf?.asn === 'number' || typeof cf?.country === 'string') headers.set(clientNetworkHeader, `${typeof cf.asn === 'number' ? `AS${cf.asn}` : ''};${typeof cf.country === 'string' ? cf.country : ''}`);
       const runtimeStarted = performance.now();
@@ -233,6 +304,11 @@ export default {
         : await core.guardPublicRequest(pathname, headers, peer, () => withRuntime(env, async runtime =>
           app.fetch(new Request(request, { headers }), runtime), 1, ctx));
       const runtimeMs = performance.now() - runtimeStarted;
+      // What this isolate counted (app.ts logRequest), written after the response, at most every 20 seconds. Without a
+      // context (a handler called directly) nothing is written, and nothing here can throw into the request.
+      if (typeof ctx?.waitUntil === 'function') ctx.waitUntil(flushDueCounters(env, ctx));
+      // The campaign room's accepted upgrade goes back as it is: a copy would drop its socket.
+      if (response.webSocket) return response;
       const responseHeaders = new Headers(response.headers);
       const innerTiming = responseHeaders.get('server-timing');
       if(innerTiming) responseHeaders.set('server-timing', [innerTiming, `admission;dur=${admissionMs.toFixed(1)}`, `runtime;dur=${runtimeMs.toFixed(1)}`].join(', '));
@@ -249,12 +325,13 @@ export default {
     }
   },
   // Queue/scheduled continuations preserve worker chains and retry due times.
-  async queue(batch, env) {
-    const { jobConcurrency, followDueJobs, core, settleFeedbackBatch, legacyFeedbackCutover } = await loadRuntimeDeps();
+  async queue(batch, env, ctx) {
+    const { jobConcurrency, followDueJobs, core, settleFeedbackBatch, legacyFeedbackCutover, batchFirstDeliveryLag } = await loadRuntimeDeps();
     stampLogs(env, core);
     const concurrency = jobConcurrency('JOB_CONCURRENCY' in env ? env.JOB_CONCURRENCY : undefined, 6);
     // Queue names differ per installation (wrangler config); an unrecognized queue is retried, never acknowledged as a wake.
     const feedbackLane = batch.queue === queueName(env, 'FEEDBACK_QUEUE_NAME', 'bane-feedback') ? 'tagged'
+      : (queueName(env, 'FEEDBACK_PRIORITY_QUEUE_NAME', '') && batch.queue === queueName(env, 'FEEDBACK_PRIORITY_QUEUE_NAME', '')) ? 'priority'
       : batch.queue === queueName(env, 'LEGACY_FEEDBACK_QUEUE_NAME', '') ? 'legacy'
       : batch.queue === queueName(env, 'FEEDBACK_DLQ_NAME', '') ? 'tagged-dlq'
       : batch.queue === queueName(env, 'LEGACY_FEEDBACK_DLQ_NAME', '') ? 'legacy-dlq' : undefined;
@@ -275,8 +352,40 @@ export default {
             catch { core.log('warn', { code: 'FEEDBACK_LEGACY_RECOVERY_PENDING', sourceQueue: item.source.queue, sourceId: item.source.id }); }
           }, completeLegacy: item => completeLegacyFeedback(runtime, item),
           archive: (source,body,error) => archiveQueueFeedback(runtime,source,body,error) });
-        const { outcomes: _, ...counts } = settled, oldestMs=Math.max(0,...messages.map(m=>Date.now()-m.timestamp.getTime()));
-        core.log(counts.failed || counts.untagged || counts.unauthenticated || counts.held || oldestMs>60000?'warn':'info', { code: 'FEEDBACK_BATCH', lane: feedbackLane, size: messages.length, ...counts, oldestMs });
+        const { outcomes: _, ...counts } = settled, nowMs = Date.now();
+        const oldestMs = Math.max(0, ...messages.map(m => nowMs - m.timestamp.getTime()));
+        // Measure priority lane lag from first deliveries only (attempts === 1): Cloudflare preserves the original
+        // enqueue timestamp on retried messages, so one poison/unmatchable retry must never hold every campaign.
+        const fresh = batchFirstDeliveryLag(messages, nowMs);
+        core.log(counts.failed || counts.untagged || counts.unauthenticated || counts.held || oldestMs>60000?'warn':'info', { code: 'FEEDBACK_BATCH', lane: feedbackLane, size: messages.length, ...counts, oldestMs, ...(fresh !== null && fresh.oldestMs !== oldestMs ? { freshOldestMs: fresh.oldestMs } : {}) });
+        // Keep priority safety-lane lag fresh within ~15 s during spikes or recovery so releaseStep reacts quickly.
+        if (feedbackLane === 'priority' && fresh !== null && (fresh.oldestMs >= 60_000 || lastPriorityLagHigh)) {
+          if (nowMs - lastPriorityLagWrite >= 15_000) {
+            lastPriorityLagWrite = nowMs;
+            lastPriorityLagHigh = fresh.oldestMs >= 60_000;
+            try {
+              const { recordFeedbackLag } = await import('./sending.js');
+              await recordFeedbackLag(runtime.db, 'priority', fresh.count, fresh.oldestMs);
+            } catch { /* Minute cron refreshes lag independently. */ }
+          }
+        }
+      });
+      await flushDueCounters(env, ctx);
+      return;
+    }
+    // The second classifier's queue (src/screen-shadow.ts): each message is one request the content screen made. Its
+    // consumer is the only place on Cloudflare that calls the second classifier: wrangler gives it at most
+    // max_batch_size 4 messages an invocation (four calls and the database's connection, of an invocation's six) and
+    // max_concurrency 2 invocations, eight calls in all. A batch whose rows are written is acknowledged; one whose rows
+    // could not be written is delivered again (max_retries, no dead-letter queue), and then only recorded as lost.
+    if (env.JEVF_QUEUE_NAME && batch.queue === env.JEVF_QUEUE_NAME) {
+      const { consumeShadow, writeComparisons, writtenComparisons } = await loadRuntimeDeps();
+      await withRuntime(env, async runtime => {
+        const settings = runtime.config.shadow;
+        if (!settings) { batch.ackAll(); return; } // Turned off since they were queued: the messages are dropped.
+        const done = await consumeShadow(settings, { write: rows => writeComparisons(runtime.db, rows), written: ids => writtenComparisons(runtime.db, ids) },
+          batch.messages.map(message => ({ body: message.body, attempts: message.attempts })));
+        if (done) batch.ackAll(); else batch.retryAll();
       });
       return;
     }
@@ -293,11 +402,14 @@ export default {
       // Wait in place up to 45 s for a job due soon (paced campaign releases), and schedule at most one follow-up.
       const outcome = await followDueJobs(runtime, () => drainJobs(runtime, 100, concurrency, 10000,pool), delaySeconds => (hooks?env.WEBHOOK_QUEUE:env.WAKE_QUEUE).send({ kind: 'wake' }, { delaySeconds }), 45000,pool);
       core.log('info', { code: 'QUEUE_FOLLOW', outcome });
-    }, concurrency + 2);
+      // A campaign's copies are screened in these drains: their repeats go to the second classifier's queue under
+      // waitUntil, so the acknowledgement below never waits for that queue.
+    }, concurrency + 2, undefined, waitUntilOf(ctx));
     batch.ackAll();
+    await flushDueCounters(env, ctx);
   },
-  async scheduled(controller, env) {
-    const { jobConcurrency, followDueJobs, core } = await loadRuntimeDeps();
+  async scheduled(controller, env, ctx) {
+    const { jobConcurrency, followDueJobs, core, metricsEffectiveLagMs } = await loadRuntimeDeps();
     stampLogs(env, core);
     const [{ dispatchPartitions, drainJobs }, { reconcileSharedConnections }, { syncOutboundMessages }, { publicStatsTick }] = await core.wrapModuleLoad(() => Promise.all([
       import('./dispatch.js'), import('./provider-connections.js'), import('./mailbox-send.js'), import('./public-stats.js'),
@@ -313,13 +425,31 @@ export default {
       // Mailbox outbound status and Message-IDs follow the sending pipeline; best-effort.
       if (controller.cron !== '* * * * *') return;
       // Independent of PostgreSQL: even a total DB outage must not hide DLQ growth.
-      await Promise.all([['feedback',env.FEEDBACK_QUEUE],['feedback-dlq',env.FEEDBACK_DLQ],['legacy-feedback-dlq',env.LEGACY_FEEDBACK_DLQ],['work',env.WAKE_QUEUE],['webhooks',env.WEBHOOK_QUEUE]].map(async pair=>{
+      // A queue added here is on the Health page at once; its "falling behind" line is in src/health-thresholds.ts (QUEUES).
+      const queues: import('./health.js').QueueSample[] = [];
+      const lagSamples: { lane: 'routine' | 'priority'; depth: number; oldestMessageTimestamp?: Date }[] = [];
+      await Promise.all([['feedback',env.FEEDBACK_QUEUE],...(env.FEEDBACK_PRIORITY_QUEUE?[['feedback-priority',env.FEEDBACK_PRIORITY_QUEUE]]:[]),['feedback-dlq',env.FEEDBACK_DLQ],['legacy-feedback-dlq',env.LEGACY_FEEDBACK_DLQ],['work',env.WAKE_QUEUE],['webhooks',env.WEBHOOK_QUEUE]].map(async pair=>{
         const [name,q]=pair as [string,Queue]; if(!q?.metrics)return;
         try{const m=await q.metrics(),oldestMs=m.oldestMessageTimestamp?Math.max(0,Date.now()-m.oldestMessageTimestamp.getTime()):0;
           const alarm=(name.endsWith('feedback-dlq') && m.backlogCount>0) || oldestMs>60000;
           core.log(alarm?'error':'info',{code:alarm?'QUEUE_BACKLOG_ALERT':'QUEUE_BACKLOG',queue:name,depth:m.backlogCount,oldestMs});
+          queues.push({name,depth:m.backlogCount,oldestMs});
+          if (name === 'feedback') lagSamples.push({ lane: 'routine', depth: m.backlogCount, oldestMessageTimestamp: m.oldestMessageTimestamp });
+          if (name === 'feedback-priority') lagSamples.push({ lane: 'priority', depth: m.backlogCount, oldestMessageTimestamp: m.oldestMessageTimestamp });
         }catch{core.log('warn',{code:'QUEUE_METRICS_UNAVAILABLE',queue:name});}
       }));
+      try {
+      if (lagSamples.length) {
+        try {
+          const { recordFeedbackLag, FEEDBACK_LAG_MIN_DEPTH } = await import('./sending.js');
+          // Apply a depth floor on queue-level metrics(): a few poison/unmatchable messages sitting in Cloudflare retry
+          // backoff carry their original enqueue timestamp but do not represent a stalled consumer backlog.
+          for (const sample of lagSamples) {
+            const effectiveOldestMs = metricsEffectiveLagMs(sample.depth, sample.oldestMessageTimestamp, FEEDBACK_LAG_MIN_DEPTH);
+            await recordFeedbackLag(runtime.db, sample.lane, sample.depth, effectiveOldestMs);
+          }
+        } catch { core.log('warn', { code: 'FEEDBACK_LAG_RECORD_FAILED' }); }
+      }
       try { const { drainFeedbackRecovery } = await import('./operations.js'); await drainFeedbackRecovery(runtime); }
       catch { core.log('error',{code:'FEEDBACK_RECOVERY_DRAIN_FAILED'}); }
       await reconcileSharedConnections(runtime); // Installation work must not depend on a workspace or a successful queue drain.
@@ -327,9 +457,20 @@ export default {
       // Received mail queued for the refilling budget comes due within minutes; the drain below runs its release.
       try { await (await core.wrapModuleLoad(() => import('./mailbox-staging.js'))).scheduleHoldRelease(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'MAILBOX_HOLD_RELEASE_FAILED' }); }
       await Promise.allSettled((await dispatchPartitions(runtime, true)).map(({ region, accountId, kind }) => wakeDispatchers(env, region, accountId, undefined, kind)));
+      } finally {
+        // Health (src/health.ts), once dispatch recovery has run or failed: what is falling behind, on the Health page and as
+        // Slack cards, including a database that refuses the tick's own write. Started here and awaited by nothing: it runs
+        // beside the steps below on a connection of its own, so neither can delay or skip the other.
+        afterwards(env, ctx, async health => {
+          const [{ healthTick }, { flushCounters }] = await Promise.all([import('./health.js'), import('./health-counters.js')]);
+          await flushCounters(health.db); await healthTick(health, { queues: queues.sort((a,b)=>a.name<b.name?-1:1) });
+        });
+      }
       // Minute cron: recover orchestration jobs whose wake was lost.
       await followDueJobs(runtime, () => drainJobs(runtime, 100, concurrency, 10000,'work'), delaySeconds => env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds }),0,'work');
       if (env.WEBHOOK_QUEUE) await followDueJobs(runtime, async()=>{}, delaySeconds=>env.WEBHOOK_QUEUE.send({kind:'wake'},{delaySeconds}),0,'webhooks');
+      // Fold sending_campaign_tallies and sending_metrics_hourly delta rows in bounded chunks every minute.
+      try { await (await core.wrapModuleLoad(() => import('./sending-tallies.js'))).foldSendingTallies(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'SENDING_TALLIES_FOLD_FAILED' }); }
       // Last, after recovery: GET /v1/public/stats serves only what this writes. Best-effort and time-bounded.
       await publicStatsTick(runtime);
       // Sender standing: every ten minutes (elected), the score, limit and ladder of each Hosted workspace.
@@ -338,6 +479,6 @@ export default {
       if (runtime.config.multiTenant) try { await (await core.wrapModuleLoad(() => import('./billing/stripe-jobs.js'))).billingMinute(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'BILLING_MINUTE_FAILED' }); }
       // Last, as it can take minutes: retention of the sent-side tables (elected every 15 minutes).
       try { await (await core.wrapModuleLoad(() => import('./maintenance.js'))).retentionTick(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'RETENTION_TICK_FAILED' }); }
-    }, concurrency + 2);
+    }, concurrency + 2, undefined, waitUntilOf(ctx)); // The minute cron drains jobs too: as in queue(), nothing waits for the second classifier's queue.
   },
 } satisfies ExportedHandler<Env>;

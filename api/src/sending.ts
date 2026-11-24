@@ -1,4 +1,5 @@
 import { cachedDashboardRead, mailRevision } from './dashboard-cache.js';
+import { talliesEnabled } from './sending-tallies.js';
 import { boundRequestBody } from './request-body.js';
 import { checkBudget } from './auth.js';
 import { recordAudit, type AuditContext } from './audit.js';
@@ -9,13 +10,14 @@ import type { DefaultTreeAdapterMap } from 'parse5';
 import { apiKeys } from './db/core.js';
 import { receivingPolicy } from './mailbox-ingest-input.js';
 import { lists, mergeSuppression, segments } from './db/audience.js';
-import { SuppressionReason, EmailEventData, readCursor, nextCursor, budgetedRead, readLimit, readLimitNote } from './core.js';
+import { SuppressionReason, EmailEventData, readCursor, encodeCursor, nextCursor, budgetedRead, readLimit, readLimitNote } from './core.js';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import type { Attachment } from '@aws-sdk/client-sesv2';
 import { actor, actorMailAccess, ApiError, AudienceSpec, denied, unrestrictedRequired, uploadKey, chargeRenderBudget, digest, errors, getSes, isSimulatedSes, id, rowId, IdParams, json, lazyModule, log, ModuleLoadError, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, timed, withoutVerdict, wrapModuleLoad, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Runtime, type Storage } from './core.js';
 import { enqueue, JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures, wakeWebhooks } from './jobs.js';
-import { countScreened, failScheduledRelease, CAMPAIGN_ACTIVE, CAMPAIGN_RUNNING, CAMPAIGN_STATES, campaignEditable, campaignReserved, campaignResumable, cancelCampaign, failCampaign, holdCampaign, launchCampaign, noteHealthChecked, pauseCampaign, quarantineCampaign, clearProbe, skipProbe, waitProbe, queueCampaignRun, recordExpanded, recordPrepared, rescheduleCampaign, restrictToDelivered, resumeCampaign, retireCampaignRun, reviseCampaign, runningState, setCampaignPacing, startSending, unscheduleCampaign, terminalColumns, terminalEvents, wakeCampaignRun, type CampaignState } from './states.js';
+import { countScreened, failScheduledRelease, CAMPAIGN_ACTIVE, CAMPAIGN_RUNNING, CAMPAIGN_STATES, campaignEditable, campaignReserved, campaignResumable, cancelCampaign, failCampaign, finishCampaigns, holdCampaign, launchCampaign, noteHealthChecked, pauseCampaign, quarantineCampaign, clearProbe, skipProbe, waitProbe, queueCampaignRun, recordExpanded, recordPrepared, rescheduleCampaign, restrictToDelivered, resumeCampaign, retireCampaignRun, reviseCampaign, runningState, setCampaignPacing, startSending, unscheduleCampaign, terminalColumns, terminalEvents, wakeCampaignRun, type CampaignState } from './states.js';
 import { productName } from './brand.js';
+import { ADMISSION_MS, roomName } from './campaign-room-protocol.js';
 import type { CampaignScreen } from './screen.js';
 export { simulatedTopic, taggedEmailId, terminalColumns, terminalEvents };
 import { regionalSending, sendingConnections, type SendingBinding } from './domain-claims.js';
@@ -36,7 +38,8 @@ import { canonical, idempotencyGate, idempotencyKey, idempotent, IdempotencyHead
 import { PREVIEW_ROUTE_NOTE, previewResponses, refuseHead, registerPreviewImages, renderPreview } from './preview-images.js';
 import { actorJson, admission, admitted, charges, duplicateAttachment, refusal, shadowBilling, type AdmissionMail, type Admitted, type Refused, type Released } from './admission.js';
 import { contentBytes, estimatedMimeBytes, SEND_LIMITS } from './send-limits.js';
-import { reserveMemory, withMemory } from './isolate-memory.js';
+import { assertResponseWithinLimit, reserveMemory, responseByteLimit, withMemory } from './isolate-memory.js';
+import { buildBoundedPageJson, PAGE_MAX_BYTES, streamBase64JsonResponse, utf8Bytes, withBoundedRead } from './read-bounds.js';
 import { RATES } from './billing/money.js';
 
 type HtmlParser = typeof import('parse5').parse;
@@ -94,8 +97,16 @@ const Address = mailAddress();
 const Subject = z.string().min(1).max(998).refine(v => !/[\r\n]/.test(v), 'Subject cannot contain line breaks.');
 const FromName = senderDisplayName();
 const PreviewText = z.string().max(200).describe('Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader.');
+export const CAMPAIGN_DEFAULTS_MAX_KEYS = 100;
+export const CAMPAIGN_DEFAULTS_MAX_BYTES = 64 * 1024;
+export const EMAIL_LIST_MAX_BYTES = PAGE_MAX_BYTES;
+const LARGE_READ_RESERVE_THRESHOLD = 64 * 1024;
 const Scalar = z.union([z.string().max(65536), z.number().finite(), z.boolean(), z.null()]);
-const Data = z.record(z.string().max(120), Scalar).default({});
+const DataView = z.record(z.string().max(120), Scalar).default({});
+const Data = DataView
+  .refine(v => Object.keys(v).length <= CAMPAIGN_DEFAULTS_MAX_KEYS, `At most ${CAMPAIGN_DEFAULTS_MAX_KEYS} keys are supported.`)
+  .refine(v => utf8Bytes(JSON.stringify(v)) <= CAMPAIGN_DEFAULTS_MAX_BYTES, 'Defaults must total at most 64 KiB of JSON.')
+  .describe('Up to 100 key/value pairs, at most 64 KiB of JSON total.');
 const StoredTemplateData = z.record(z.string(), z.unknown()).default({}).refine(value => {
   try { return JSON.stringify(value).length <= 262144; } catch { return false; }
 }, 'Template data must be JSON serializable and at most 262,144 serialized characters.').describe('JSON substitution data, including nested objects and arrays, is passed unchanged to SES. SES stored templates do not automatically escape HTML: callers must escape untrusted values for their HTML context. Maximum serialized JSON length: 262,144 characters.');
@@ -140,8 +151,8 @@ const batchContent = (mails: { html?: string; text?: string }[]) => mails.reduce
 /** A batch with more than 2 MiB of content (the limit before 10 MiB) reserves, in the isolate's memory budget
  *  (isolate-memory.ts), what admitting it builds beside the parsed request: the rows' JSON and the statement's buffers,
  *  about three times its content. The largest batches then never peak together in one isolate; smaller ones run at once. */
-const batchMemory = <T>(mails: SendRequest[], work: () => Promise<T>) =>
-  batchContent(mails) > 2 * 1024 * 1024 ? withMemory(3 * mails.reduce((n, m) => n + contentBytes(m), 0), work) : work();
+const batchMemory = <T>(mails: SendRequest[], work: () => Promise<T>, opts?: { workspaceId?: string; signal?: AbortSignal }) =>
+  batchContent(mails) > 2 * 1024 * 1024 ? withMemory(3 * mails.reduce((n, m) => n + contentBytes(m), 0), work, { route: 'email.batch', ...opts }) : work();
 export const Status = z.enum(['queued', 'attempting', 'accepted', 'sent', 'delivered', 'bounced', 'complained', 'rejected', 'rendering_failed', 'delayed', 'suppressed', 'canceled', 'acceptance_unknown', 'simulated']);
 const UntrustedContent = z.boolean().describe('True for replies and older non-campaign mail of unknown origin: the subject or body may contain received content.');
 const Email = z.object({ untrustedContent: UntrustedContent, id: z.string(), region: z.string(), campaignId: z.string().nullable(), from: z.string(), fromName: z.string().nullable(), kind: z.enum(['transactional', 'marketing']), to: z.array(z.string()), cc: z.array(z.string()), bcc: z.array(z.string()), subject: z.string(),
@@ -175,25 +186,50 @@ const CampaignDraftFields = { name: z.string().trim().min(1).max(200), from: z.u
   requiredNotice: z.boolean().optional().describe('A required notice: a message every recipient must get whatever their marketing choice, such as a change to terms, prices or taxes, never a promotion. It goes to everyone in the audience who is not suppressed, people who unsubscribed from marketing included, without an Unsubscribe link or List-Unsubscribe header, and is paced, limited and paused like any campaign. Only where an operator turned required notices on for the workspace (requiredNotices in getWorkspaceSettings); 403 REQUIRED_NOTICES_OFF otherwise. Sending or scheduling one needs confirmRequiredNotice. Turned off later, a launched notice pauses before releasing anyone more (pause reason REQUIRED_NOTICES_OFF) and is resumed or rescheduled only once they are on again. Resumed after a list-probe quarantine, it goes on to everyone captured for it (never deliveredOnly).') };
 const CAMPAIGN_INPUT_NOTES = 'Drafts may omit sender, subject, content and audience until review or send, except that domain-restricted keys must supply a From address on one of their domains. Content is block HTML (see html); the same form is what the dashboard composer reads and writes, so people and agents edit one document. Simple {{name}} personalization works in text and quoted href/alt attributes; values are HTML-escaped and rendered URLs are validated. Durable campaign preparation is bounded and runs in background jobs.';
 const CampaignInput = z.object({ ...CampaignDraftFields, html: BlockHtml.optional() }).strict().describe(CAMPAIGN_INPUT_NOTES).openapi('CampaignDraftInput');
-// Stored drafts predating block HTML remain readable; they are revalidated when saved or reviewed.
-const CampaignDraftView = z.object({ ...CampaignDraftFields, html: z.string().optional() }).strict().describe(CAMPAIGN_INPUT_NOTES).openapi('CampaignDraft');
+// Stored drafts predating block HTML or defaults caps remain readable; they are revalidated when saved or reviewed.
+const CampaignDraftView = z.object({ ...CampaignDraftFields, defaults: DataView, html: z.string().optional() }).strict().describe(CAMPAIGN_INPUT_NOTES).openapi('CampaignDraft');
 const CampaignCreate = z.object({ ...CampaignInput.shape, region: Region.optional().describe('Defaults to the installation region. With regional MX delivery, omitting region follows the From domain.'), tracking: z.boolean().optional(), templateId: z.string().regex(/^tpl_[0-9a-f]{32}$/).optional().describe('Copies the active published revision of this global campaign template into a new independent campaign draft.') }).strict().openapi('CreateCampaignInput');
 const CampaignReady = CampaignInput.extend({ from: Address, subject: Subject, audience: AudienceSpec }).refine(v => !!v.html?.trim(), { message: 'Provide html before reviewing.', path: ['html'] });
 const CampaignStateValue = z.enum(CAMPAIGN_STATES).describe('draft: editable. preparing: the audience is being frozen (for large lists) and every message is being validated in the background. scheduled: validated and waiting for scheduledAt. sending: recipients are being released into the dispatch queue. paused: releasing stopped by the user or the health check; queued mail still dispatches. done: every recipient was released and dispatched. failed: capture, preparation or releasing failed (delivery.error); edit or launch again. canceled: terminal.');
 const emptyCounts = () => ({ total: 0, byStatus: Object.fromEntries(Status.options.map(status => [status, 0])) as Record<EmailStatus, number> });
 const CampaignCounts = z.object({ total: z.number().int().nonnegative(), byStatus: z.record(Status, z.number().int().nonnegative()) }).describe('Counts of immutable campaign email records grouped by their current status, not cumulative provider events or delivery rates. Drafts with no queued emails have zero counts.');
 const Failure = z.object({ code: z.string(), message: z.string() });
+export const FEEDBACK_LAG_HOLD_MS = 5 * 60_000;
+export const FEEDBACK_LAG_FRESH_MS = 5 * 60_000;
+export const FEEDBACK_LAG_DISPLAY_MS = 2 * 60_000;
+/** Minimum queue backlogCount required before queue-level metrics() oldestMessageTimestamp counts as lane lag,
+ *  so a handful of poison/unmatchable messages sitting in Cloudflare retry backoff never trip an installation-wide hold. */
+export const FEEDBACK_LAG_MIN_DEPTH = 10;
+export type FeedbackLag = { oldestMs: number; lane: 'routine' | 'priority' };
+
+/** Persist the latest feedback queue lag sample (single-row upsert, called from minute cron and throttled on backlog). */
+export async function recordFeedbackLag(db: DbExecutor, lane: 'routine' | 'priority', depth: number, oldestMs: number) {
+  const safeDepth = Math.max(0, Math.round(depth)), safeOldest = Math.max(0, Math.round(oldestMs));
+  await db.execute(sql`INSERT INTO operation_feedback_lag(lane, depth, oldest_ms, updated_at) VALUES (${lane}, ${safeDepth}, ${safeOldest}, now())
+    ON CONFLICT (lane) DO UPDATE SET depth = excluded.depth, oldest_ms = excluded.oldest_ms, updated_at = now()`);
+}
+async function activeFeedbackLag(db: DbExecutor): Promise<FeedbackLag | null> {
+  const { rows: [row] } = await db.execute<{ lane: 'routine' | 'priority'; oldest_ms: number }>(sql`
+    SELECT lane, oldest_ms FROM operation_feedback_lag
+    WHERE updated_at > now() - make_interval(secs => ${Math.round(FEEDBACK_LAG_FRESH_MS / 1000)}::int)
+      AND oldest_ms >= ${FEEDBACK_LAG_DISPLAY_MS}
+    ORDER BY oldest_ms DESC, (lane = 'priority') DESC LIMIT 1`);
+  return row ? { lane: row.lane, oldestMs: Number(row.oldest_ms) } : null;
+}
+
 const Delivery = z.object({ total: z.number().int().describe('Fixed recipient count once the audience is frozen (recipients expected while a large audience is being captured).'), prepared: z.number().int().describe('Recipients whose message was validated.'), expanded: z.number().int().describe('Recipients materialized as immutable email records.'), canceled: z.number().int().describe('Recipients canceled before materialization. Materialized cancellations remain in counts.byStatus.canceled.'), error: Failure.nullable().describe('Why the campaign failed or was canceled by the system.'),
   pacing: z.object({ perDay: z.number().int().nullable().describe('Maximum recipients released per rolling 24-hour window; null means no daily cap.'), autoPause: z.boolean().describe('Pause automatically when bounce or complaint rates exceed safe thresholds.'), rateShare: z.number().describe('Maximum fraction of the SES per-second send rate this campaign uses; 1 is the full rate.'), windowStartedAt: z.string().nullable(), windowExpanded: z.number().int().describe('Recipients released in the current 24-hour window.'), nextWindowAt: z.string().nullable().describe('When the next 24-hour window opens, when a daily cap is set.') }),
   pausedAt: z.string().nullable(), pauseReason: Failure.nullable(),
   deliveredOnly: z.boolean().describe('After a resumed list-probe quarantine: the rest goes only to contacts this workspace delivered to before; the others are counted in canceled. Never for a required notice.'),
-  waiting: z.object({ reason: z.enum(['pacing_window', 'ses_daily_quota', 'hosted_daily_quota', 'list_probe', 'balance']), until: z.string() }).nullable().describe('Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest.') }).describe('The current launch: null until the campaign is sent or scheduled, and cleared by a new revision.').openapi('CampaignDelivery');
-function deliveryView(row: Omit<typeof campaigns.$inferSelect, 'draft' | 'stats'>) {
+  waiting: z.object({ reason: z.enum(['pacing_window', 'ses_daily_quota', 'hosted_daily_quota', 'list_probe', 'balance', 'feedback_lag']), until: z.string() }).nullable().describe('Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up.'),
+  feedbackLag: z.object({ oldestMs: z.number().int(), lane: z.enum(['routine', 'priority']) }).nullable().describe('Present while a campaign is preparing, sending, or paused when delivery feedback ingestion is at least 2 minutes behind.') }).describe('The current launch: null until the campaign is sent or scheduled, and cleared by a new revision.').openapi('CampaignDelivery');
+function deliveryView(row: Omit<typeof campaigns.$inferSelect, 'draft' | 'stats'>, feedbackLag: FeedbackLag | null = null) {
   if (!row.reviewId) return null;
   const next = row.pacePerDay !== null && row.windowStartedAt ? new Date(Date.parse(row.windowStartedAt) + DAY_MS).toISOString() : null;
   return Delivery.parse({ total: row.total, prepared: row.prepared, expanded: row.expanded, canceled: row.canceled, error: row.error ?? null,
     pacing: { perDay: row.pacePerDay, autoPause: row.autoPause, rateShare: row.rateShare ?? 1, windowStartedAt: row.windowStartedAt, windowExpanded: row.windowExpanded, nextWindowAt: next },
-    pausedAt: row.pausedAt, pauseReason: row.pauseReason ?? null, deliveredOnly: row.deliveredOnly, waiting: row.waitingReason && row.waitingUntil ? { reason: row.waitingReason, until: row.waitingUntil } : null });
+    pausedAt: row.pausedAt, pauseReason: row.pauseReason ?? null, deliveredOnly: row.deliveredOnly, waiting: row.waitingReason && row.waitingUntil ? { reason: row.waitingReason, until: row.waitingUntil } : null,
+    feedbackLag: ['preparing', 'sending', 'paused'].includes(row.state) ? feedbackLag : null });
 }
 const Campaign = z.object({ id: z.string(), url: z.string().url().describe('Dashboard URL for opening this campaign. Drafts open in the editor; launched campaigns open in review.'), revision: z.number().int(), draft: CampaignDraftView, sourceTemplateId: z.string().nullable(), sourceTemplateRevision: z.number().int().nullable(), state: CampaignStateValue, scheduledAt: z.string().nullable(), archivedAt: z.string().nullable(), createdAt: z.string(), updatedAt: z.string(), counts: CampaignCounts, delivery: Delivery.nullable() }).openapi('Campaign');
 const CampaignRate = z.object({ value: z.number().nonnegative().nullable().describe('Fraction, not percent. Both counts exclude simulated emails. Null when the denominator is zero or engagement tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator.'), numerator: z.number().int().nonnegative(), denominator: z.number().int().nonnegative() });
@@ -220,17 +256,30 @@ const STATS_NOTE = `A campaign of at least ${CAMPAIGN_STATS.from.toLocaleString(
  * page by page equal one count over all of them.
  */
 async function statsGroups(db: DbExecutor, a: Pick<Actor, 'workspaceId'>, where: SQL | undefined) {
-  const distinct = (condition: SQL) => sql<number>`count(DISTINCT ${emails.id}) FILTER (WHERE ${condition})::int`;
-  const outcome = (status: EmailStatus, type: string) => distinct(sql`${emails.status} = ${status} OR ${emailEvents.type} = ${type}`);
+  const has = (bit: number) => sql`(${emails.eventOutcomes} & ${bit}) <> 0`;
+  const count = (condition: SQL) => sql<number>`count(*) FILTER (WHERE ${condition})::int`;
   return db.select({
-    campaignId: emails.campaignId, status: emails.status, simulated: emails.simulated, count: sql<number>`count(DISTINCT ${emails.id})::int`,
-    accepted: distinct(sql`NOT ${emails.simulated} AND ${emails.status} <> 'suppressed' AND (${emails.providerId} IS NOT NULL OR ${emails.status} IN ('accepted', 'sent', 'delivered', 'bounced', 'complained', 'delayed') OR ${emailEvents.type} IN ('send', 'delivery', 'bounce', 'complaint', 'delivery_delay','non_permanent_bounce'))`),
-    delivered: outcome('delivered', 'delivery'), bounced: outcome('bounced', 'bounce'), complained: outcome('complained', 'complaint'),
-    opened: distinct(sql`${emailEvents.type} = 'open'`), clicked: distinct(sql`${emailEvents.type} = 'click'`),
-    failed: distinct(sql`${emails.status} IN ('rejected', 'rendering_failed') OR ${emailEvents.type} IN ('reject', 'rendering_failure')`),
-    deliveryDelayed: distinct(sql`${emails.status}='delayed' OR ${emailEvents.type} IN ('delivery_delay','non_permanent_bounce')`),
-  }).from(emails).leftJoin(emailEvents, and(scope(emailEvents, a), eq(emails.id, emailEvents.emailId)))
-    .where(and(scope(emails, a), where)).groupBy(emails.campaignId, emails.status, emails.simulated);
+    campaignId: emails.campaignId, status: emails.status, simulated: emails.simulated, count: sql<number>`count(*)::int`,
+    accepted: count(sql`NOT ${emails.simulated} AND ${emails.status} <> 'suppressed' AND (${emails.providerId} IS NOT NULL OR ${emails.status} IN ('accepted', 'sent', 'delivered', 'bounced', 'complained', 'delayed') OR ${has(1)})`),
+    delivered: count(sql`${emails.status} = 'delivered' OR ${has(2)}`),
+    bounced: count(sql`${emails.status} = 'bounced' OR ${has(4)}`),
+    complained: count(sql`${emails.status} = 'complained' OR ${has(8)}`),
+    opened: count(has(16)), clicked: count(has(32)),
+    failed: count(sql`${emails.status} IN ('rejected', 'rendering_failed') OR ${has(64)}`),
+    deliveryDelayed: count(sql`${emails.status} = 'delayed' OR ${has(128)}`),
+  }).from(emails).where(and(scope(emails, a), where)).groupBy(emails.campaignId, emails.status, emails.simulated);
+}
+async function tallyStatsGroups(db: DbExecutor, a: Pick<Actor, 'workspaceId'>, campaignIds: string[]) {
+  if (!campaignIds.length) return [];
+  const { rows } = await db.execute<CampaignStatsGroup & { campaignId: string }>(sql`SELECT
+    campaign_id AS "campaignId", status, simulated,
+    sum(email_count)::int AS count, sum(accepted)::int AS accepted, sum(delivered)::int AS delivered,
+    sum(bounced)::int AS bounced, sum(complained)::int AS complained, sum(opened)::int AS opened,
+    sum(clicked)::int AS clicked, sum(failed)::int AS failed, sum(delivery_delayed)::int AS "deliveryDelayed"
+    FROM sending_campaign_tallies
+    WHERE workspace_id = ${a.workspaceId} AND campaign_id = ANY(${sql.param(campaignIds)}::text[])
+    GROUP BY 1, 2, 3 HAVING sum(email_count) > 0`);
+  return rows;
 }
 /** The stored count of the campaign's current launch, if any (an earlier launch's never applies). */
 const storedStats = (row: Pick<typeof campaigns.$inferSelect, 'reviewId' | 'stats'>) => row.reviewId && row.stats?.reviewId === row.reviewId ? row.stats : null;
@@ -251,9 +300,23 @@ function listedStats(row: Pick<typeof campaigns.$inferSelect, 'reviewId' | 'stat
 export async function campaignStats(db: DbExecutor, a: Pick<Actor, 'workspaceId'>, rows: (typeof campaigns.$inferSelect)[]) {
   const result = new Map<string, z.infer<typeof CampaignStats>>();
   if (!rows.length) return result;
+  const useTallies = await talliesEnabled(db);
+  const countedAt = new Date().toISOString();
+  if (useTallies) {
+    // Exact at read time: sums folded rows + unfolded deltas in sending_campaign_tallies (< 2 ms at any scale).
+    // After 30-day retention removes emails, a frozen or larger stored snapshot in sending_campaigns.stats stays in force.
+    const grouped = await tallyStatsGroups(db, a, rows.map(row => row.id));
+    for (const row of rows) {
+      const stored = storedStats(row), counted = grouped.filter(item => item.campaignId === row.id);
+      const tallyEmails = counted.reduce((n, item) => n + item.count, 0);
+      const kept = stored && (stored.frozen || stored.emails > tallyEmails);
+      result.set(row.id, statsView(row, kept ? stored.groups : counted, kept ? stored.computedAt : countedAt));
+    }
+    return result;
+  }
+  // Fallback when tally triggers are disabled (emergency undo): live aggregate behind budgetedRead.
   const live = rows.filter(row => !(backgroundCounted(row) && storedStats(row)));
   const grouped = live.length ? await statsGroups(db, a, live.length === 1 ? eq(emails.campaignId, live[0]!.id) : inArray(emails.campaignId, live.map(row => row.id))) : [];
-  const countedAt = new Date().toISOString();
   for (const row of rows) {
     const stored = storedStats(row), counted = grouped.filter(item => item.campaignId === row.id);
     const kept = stored && (backgroundCounted(row) || stored.emails > counted.reduce((n, item) => n + item.count, 0));
@@ -434,18 +497,33 @@ const CAMPAIGN_PROGRESS_SCOPE = `while a campaign of at least ${CAMPAIGN_PROGRES
 const CAMPAIGN_PROGRESS_NOTE = `For every credential, counts may be up to ${CAMPAIGN_PROGRESS_CACHE_SECONDS} seconds old ${CAMPAIGN_PROGRESS_SCOPE}; state and delivery are always current. Counts are exact for smaller campaigns, once a campaign is done, canceled or failed, and in the campaign that pause, resume and other changes return.`;
 async function campaignViews<T extends CampaignRow>(runtime: Runtime, a: Actor, rows: T[], read?: { origin: string; detail?: boolean }, db: DbExecutor = runtime.db) {
   if (!rows.length) return [];
-  const load = async () => db.select({ campaignId: emails.campaignId, status: emails.status, count: sql<number>`count(*)::int` }).from(emails).where(and(scope(emails, a), inArray(emails.campaignId, rows.map(row => row.id)))).groupBy(emails.campaignId, emails.status);
-  const cached = async (scope: unknown[], ttlSeconds?: number) => (await cachedDashboardRead(read!.origin, JSON.stringify(scope), load, ttlSeconds)).value;
-  // Dashboard lists reuse counts for 60 s. Detail reuses a large active campaign's counts for every credential, keyed on its
-  // snapshot (review), not updatedAt, which every release step moves; delivery cursors come from the row and stay current.
-  // Mutations, small campaigns and finished ones stay exact.
-  const [one] = rows, progress = read?.detail && rows.length === 1 && (CAMPAIGN_ACTIVE as readonly string[]).includes(one!.state) && one!.total >= CAMPAIGN_PROGRESS_CACHE_MIN_RECIPIENTS;
-  const grouped = a.domains.length ? [] : progress ? await cached(['campaign-progress', a.workspaceId, one!.id, one!.reviewId], CAMPAIGN_PROGRESS_CACHE_SECONDS)
-    : read && !read.detail && a.credential === 'dashboard' ? await cached(['campaign-counts', a.workspaceId, rows.map(r => [r.id, r.updatedAt])]) : await load();
+  let grouped: { campaignId: string | null; status: EmailStatus; count: number }[];
+  if (a.domains.length) {
+    grouped = [];
+  } else if (await talliesEnabled(db)) {
+    // Exact at read time from sending_campaign_tallies (< 2 ms at any scale, never cached, never scans sending_emails).
+    const ids = rows.map(row => row.id);
+    const { rows: tallied } = await db.execute<{ campaignId: string; status: EmailStatus; count: number }>(sql`SELECT
+      campaign_id AS "campaignId", status, sum(email_count)::int AS count
+      FROM sending_campaign_tallies
+      WHERE workspace_id = ${a.workspaceId} AND campaign_id = ANY(${sql.param(ids)}::text[])
+      GROUP BY 1, 2 HAVING sum(email_count) > 0`);
+    grouped = tallied;
+  } else {
+    // Fallback when tally triggers are disabled (emergency undo): live GROUP BY with progress cache.
+    const load = async () => db.select({ campaignId: emails.campaignId, status: emails.status, count: sql<number>`count(*)::int` }).from(emails).where(and(scope(emails, a), inArray(emails.campaignId, rows.map(row => row.id)))).groupBy(emails.campaignId, emails.status);
+    const cached = async (scope: unknown[], ttlSeconds?: number) => (await cachedDashboardRead(read!.origin, JSON.stringify(scope), load, ttlSeconds)).value;
+    const [one] = rows, progress = read?.detail && rows.length === 1 && (CAMPAIGN_ACTIVE as readonly string[]).includes(one!.state) && one!.total >= CAMPAIGN_PROGRESS_CACHE_MIN_RECIPIENTS;
+    grouped = progress ? await cached(['campaign-progress', a.workspaceId, one!.id, one!.reviewId], CAMPAIGN_PROGRESS_CACHE_SECONDS)
+      : read && !read.detail && a.credential === 'dashboard' ? await cached(['campaign-counts', a.workspaceId, rows.map(r => [r.id, r.updatedAt])]) : await load();
+  }
+  const lag = rows.some(row => row.reviewId && ['preparing', 'sending', 'paused'].includes(row.state))
+    ? await activeFeedbackLag(db).catch(() => null)
+    : null;
   return rows.map(row => {
     const counts = emptyCounts();
     for (const item of grouped) if (item.campaignId === row.id) { counts.byStatus[item.status] = Number(item.count); counts.total += Number(item.count); }
-    return { ...row, url: campaignUrl(runtime, row), counts, delivery: deliveryView(row) };
+    return { ...row, url: campaignUrl(runtime, row), counts, delivery: deliveryView(row, lag) };
   });
 }
 // Per-statement limits of the reads a dashboard repeats (budgetedRead): a list walk or aggregate gets 5 seconds; the
@@ -1311,7 +1389,7 @@ async function uploadBody(request: Request, length: number | null): Promise<Uint
   } finally { void reader.cancel().catch(() => {}); }
 }
 /** How long a download's response may take to be read before it is ended and its file let go (tests shorten it). */
-export const attachmentDownload = { readMs: 120_000 };
+export const attachmentDownload = { idleMs: 6_000, readMs: 60_000 };
 async function saveAttachment(c: Ctx, a: Actor, metadata: AttachmentMetadataInput, bytes: Uint8Array, max = MAX_ATTACHMENT_BYTES) {
   sesAttachment(metadata);
   const input = validateAttachment(metadata, bytes, max);
@@ -1404,6 +1482,14 @@ export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, held: 
   snapshot.mailbox = true;
   const receipt = await queueEmail(runtime, db, a, snapshot);
   return { emailId: receipt.id, snapshot };
+}
+/** An agent (API key or MCP) read or saved this draft: anyone with it open sees it for two minutes (src/campaign-room.ts),
+ *  and a save (saved: its revision) shows on their pages at once, with the agent's name. In the background, only where
+ *  rooms exist (the Worker), and only for a campaign that can still be edited. People are in the room through their own
+ *  socket, and their tab tells it they saved. */
+function agentVisit(c: Ctx, a: Actor, campaign: typeof campaigns.$inferSelect, saved?: number) {
+  if (!c.env.campaignRooms || !(a.credential === 'apiKey' || a.credential === 'mcp' || a.credential === 'agentToken') || campaign.archivedAt || !campaignEditable(campaign)) return;
+  c.env.campaignRooms.visit(roomName(a.workspaceId, campaign.id), a.keyId, runtime => import('./ritual-version.js').then(({ credentialName }) => credentialName(runtime.db, a)), saved);
 }
 function editable(row: typeof campaigns.$inferSelect, revision?: number) {
   if (row.archivedAt) throw new ApiError(409, 'CAMPAIGN_ARCHIVED', 'Restore this campaign before editing, reviewing or sending it.');
@@ -1528,7 +1614,7 @@ export function registerSending(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/emails/batch', operationId: 'sendEmailBatch', description: SCREEN_LIMIT_NOTE, tags: ['Emails'], security, request: { headers: SendIdempotencyHeaders, body: json(BatchInput) }, responses: { 202: response(BatchReceipt), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
     if (batchContent(input.emails) > SEND_LIMITS.batchContentChars) throw new ApiError(413, 'BATCH_CONTENT_TOO_LARGE', `Combined batch body content may not exceed ${SEND_LIMITS.batchContentChars / 1024 / 1024} MiB.`);
-    const result = await batchMemory(input.emails, () => admitEmails(sendCall(c), a, input));
+    const result = await batchMemory(input.emails, () => admitEmails(sendCall(c), a, input), { workspaceId: a.workspaceId, signal: c.req.raw.signal });
     return c.json(BatchReceipt.parse(result), 202);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/emails/preview', operationId: 'previewEmail', tags: ['Emails'], security,
@@ -1552,48 +1638,105 @@ export function registerSending(app: App) {
       throw error;
     }
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/emails', operationId: 'listEmails', description: readLimitNote(READ_LIMIT.emails), tags: ['Emails'], security, request: { query: EmailQuery }, responses: { 200: response(page(Email)), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: '/v1/emails', operationId: 'listEmails', description: `Pages are also bounded by response size and may return fewer than limit emails; follow nextCursor while non-null. ${readLimitNote(READ_LIMIT.emails)}`, tags: ['Emails'], security, request: { query: EmailQuery }, responses: { 200: response(page(Email)), ...errors } }), async c => {
     const a = actor(c), q = c.req.valid('query'), binding = await pageBinding(a, 'emails', q), cursor = readCursor(q.cursor, binding);
     if (q.region) region(c.env, q.region);
     const search = q.search ? literalSearch(q.search) : null;
-    const rows = await budgetedRead(c.env.db, db => db.select(emailColumns).from(emails).where(and(mailWhere(a),
+    const maxBytes = Math.min(EMAIL_LIST_MAX_BYTES, responseByteLimit(c.req.raw) ?? EMAIL_LIST_MAX_BYTES);
+    const where = and(mailWhere(a),
       cursor ? sql`(${emails.createdAt}, ${emails.id}) < (${cursor.at}::timestamptz, ${cursor.id})` : undefined,
       q.campaignId ? eq(emails.campaignId, q.campaignId) : undefined, q.status === 'queued' ? inArray(emails.status, ['queued', 'scheduled']) : q.status ? eq(emails.status, q.status) : undefined,
       q.region ? eq(emails.region, q.region) : undefined, q.kind ? sql`${emails.snapshot}->>'kind' = ${q.kind}` : undefined,
       q.from ? gte(emails.createdAt, q.from) : undefined, q.to ? lt(emails.createdAt, q.to) : undefined,
       search ? sql`sending_log_text(${emails.id},${emails.campaignId},${emails.providerId},${emails.from},${emails.subject},${emails.to} || ${emails.cc} || ${emails.bcc}) ILIKE ${search}` : undefined,
-    )).orderBy(desc(emails.createdAt), desc(emails.id)).limit(q.limit + 1), readLimit(READ_LIMIT.emails));
-    return c.json({ data: rows.slice(0, q.limit).map(row => emailView(listedSubject(a, row))), nextCursor: nextCursor(rows, q.limit, binding) }, 200);
+    );
+    type RawEmailRow = { untrusted_content: boolean; id: string; region: string; campaign_id: string | null; from_address: string; from_name: string | null; kind: 'transactional' | 'marketing'; to_addresses: string[]; cc_addresses: string[]; bcc_addresses: string[]; subject: string; status: EmailStatus; provider_id: string | null; simulated: boolean; attempt_started_at: string | null; error_code: string | null; suppression_reason: string | null; scheduled_at: string | null; created_at: string; updated_at: string; candidate_count: number };
+    const { rows } = await budgetedRead(c.env.db, db => db.execute<RawEmailRow>(sql`
+      WITH candidate AS (
+        SELECT (${sentUntrustedContent}) AS untrusted_content,
+          ${emails.id} AS id, ${emails.region} AS region, ${emails.campaignId} AS campaign_id,
+          ${emails.from} AS from_address,
+          coalesce(${emails.snapshot}->>'fromName', CASE WHEN ${emails.reviewId} IS NOT NULL THEN (SELECT draft->>'fromName' FROM sending_campaign_reviews cr WHERE cr.id = ${emails.reviewId} AND cr.workspace_id = ${emails.workspaceId}) END) AS from_name,
+          ${emails.snapshot}->>'kind' AS kind,
+          ${emails.to} AS to_addresses, ${emails.cc} AS cc_addresses, ${emails.bcc} AS bcc_addresses,
+          ${emails.subject} AS subject, ${emails.status} AS status, ${emails.providerId} AS provider_id,
+          ${emails.simulated} AS simulated, ${emails.attemptStartedAt} AS attempt_started_at,
+          ${emails.errorCode} AS error_code, ${emails.suppressionReason} AS suppression_reason,
+          ${emails.scheduledAt} AS scheduled_at, ${emails.createdAt} AS created_at, ${emails.updatedAt} AS updated_at,
+          (octet_length(${emails.to}::text) + octet_length(${emails.cc}::text) + octet_length(${emails.bcc}::text) + octet_length(${emails.subject}) + 512) AS row_bytes
+        FROM ${emails} WHERE ${where}
+        ORDER BY ${emails.createdAt} DESC, ${emails.id} DESC LIMIT ${q.limit + 1}
+      ), sized AS (
+        SELECT *, row_number() OVER (ORDER BY created_at DESC, id DESC) AS rn,
+          sum(row_bytes) OVER (ORDER BY created_at DESC, id DESC ROWS UNBOUNDED PRECEDING) AS cum_bytes
+        FROM candidate
+      )
+      SELECT untrusted_content, id, region, campaign_id, from_address, from_name, kind,
+        to_addresses, cc_addresses, bcc_addresses, subject, status, provider_id, simulated,
+        attempt_started_at::text, error_code, suppression_reason, scheduled_at::text,
+        created_at::text, updated_at::text,
+        (SELECT count(*)::int FROM candidate) AS candidate_count
+      FROM sized WHERE rn = 1 OR cum_bytes <= ${maxBytes}
+      ORDER BY rn`), readLimit(READ_LIMIT.emails));
+    const candidateCount = rows[0]?.candidate_count ?? 0;
+    const rawPage = rows.slice(0, q.limit);
+    const items = rawPage.map(r => emailView(listedSubject(a, {
+      untrustedContent: r.untrusted_content, id: r.id, region: r.region, campaignId: r.campaign_id,
+      from: r.from_address, fromName: r.from_name, kind: r.kind, to: r.to_addresses, cc: r.cc_addresses,
+      bcc: r.bcc_addresses, subject: r.subject, status: r.status, providerId: r.provider_id,
+      simulated: r.simulated, attemptStartedAt: r.attempt_started_at, errorCode: r.error_code,
+      suppressionReason: r.suppression_reason, scheduledAt: r.scheduled_at, createdAt: r.created_at, updatedAt: r.updated_at,
+    })));
+    const rawById = new Map(rawPage.map(r => [r.id, r.created_at]));
+    const bounded = buildBoundedPageJson(items, candidateCount > items.length, maxBytes);
+    const encodedNext = bounded.nextCursor ? encodeCursor({ id: bounded.nextCursor, createdAt: rawById.get(bounded.nextCursor) ?? items[bounded.count - 1]!.createdAt }, binding) : null;
+    const payload = encodedNext
+      ? bounded.json.slice(0, bounded.json.lastIndexOf(',"nextCursor":')) + ',"nextCursor":' + JSON.stringify(encodedNext) + '}'
+      : bounded.json;
+    return c.body(payload, 200, { 'content-type': 'application/json; charset=UTF-8' }) as never;
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/emails/{id}', operationId: 'getEmail', tags: ['Emails'], security, request: { params: IdParams }, responses: { 200: response(Email), ...errors } }), async c => {
     const a = actor(c), [row] = await c.env.db.select(emailColumns).from(emails).where(mailWhere(a, c.req.valid('param').id)).limit(1);
     return c.json(emailView(listedSubject(a, row ?? notFound('Email'))), 200);
   });
+  const emailSnapshotBytes = async (db: DbExecutor, a: Actor, emailId: string) => {
+    const [probe] = await db.select({ bytes: sql<number>`coalesce(octet_length(${emails.snapshot}::text), 0)::int` }).from(emails).where(mailWhere(a, emailId)).limit(1);
+    if (!probe) notFound('Email');
+    return probe.bytes;
+  };
   app.openapi(createRoute({ method:'get', path:'/v1/emails/{id}/detail', operationId:'getEmailDetail', tags:['Emails'], security,
     description:'One log detail: metadata, visible HTML/text, attachment IDs, the first 100 events, active contact for a single To address, and the conversation the email belongs to. Uses the same content and event redaction as their individual endpoints; no raw MIME. Continue events with listEmailEvents.',
     request:{params:IdParams},responses:{200:response(z.object({email:Email,content:EmailContent.pick({html:true,text:true,attachments:true}),events:page(Event),contact:z.object({id:z.string(),suppressed:z.boolean(),suppressedAt:z.string().nullable().describe('When the address was suppressed (UTC). Null when it is not suppressed, and for a suppression from before these dates were kept.')}).nullable(),
       thread:EmailThread.nullable().describe('The conversation: of a reply from a receiving address or inbox, or of an email whose In-Reply-To named a stored message its sender could read, with the messages around it that you can read. Null for an email in none, when you can read none of the conversation\'s received or stored messages, and for credentials that cannot read received mail.')}).openapi('EmailDetail')),...errors} }),async c=>{
     const a=actor(c), emailId=c.req.valid('param').id, access=actorMailAccess(a);
-    // Single-table select fields render columns unqualified, which would bind to the subquery's own
-    // table (events matching their own id; contacts matching any workspace). Name the outer row.
-    const [detail]=await c.env.db.select({mail:emails,fromName:emailColumns.fromName,untrustedContent:sentUntrustedContent,
-      contact:a.domains.length ? sql<null>`NULL` : sql<{id:string;suppressed:boolean;suppressedAt:string|null}|null>`(SELECT jsonb_build_object('id',c.id,'suppressed',c.suppressed,'suppressedAt',CASE WHEN c.suppressed THEN c.suppressed_at END) FROM audience_contacts c
-        WHERE c.workspace_id=sending_emails.workspace_id AND c.deleted_at IS NULL AND jsonb_array_length(sending_emails.to_addresses)=1 AND c.email=lower(sending_emails.to_addresses->>0))`,
-      timeline:sql<z.input<typeof Event>[]>`(SELECT coalesce(jsonb_agg(t ORDER BY t."createdAt"::timestamptz,t.id),'[]') FROM (
-        SELECT id,email_id AS "emailId",type,provider_id AS "providerId",simulated,created_at::text AS "createdAt",data FROM sending_email_events
-        WHERE workspace_id=sending_emails.workspace_id AND email_id=sending_emails.id ORDER BY created_at,id LIMIT 101) t)`,
-      // Its conversation, in this statement: only for a reader that sees one of the thread's stored messages (thread-view.ts).
-      thread:access ? threadBlock(access,{thread:sentThreadId,focus:sql`sending_emails.id`,sends:true}) : sql<RawThread|null>`NULL`,
-    }).from(emails).where(mailWhere(a,emailId)).limit(1);
-    if(!detail) return notFound('Email');
-    const {mail,contact,timeline,untrustedContent}=detail, {html,text,attachments}=await visibleEmailContent(c.env,a,mail,untrustedContent);
-    const thread=threadView(detail.thread,a.permissions.includes('manage'));
-    const email=emailView({...mail,untrustedContent,subject:a.permissions.includes('manage') ? mail.subject : redactCapabilityText(mail.subject),fromName:detail.fromName,kind:mail.snapshot.kind});
-    return c.json({email,content:{html,text,attachments},contact,thread,events:{data:timeline.slice(0,100).map(r=>visibleEmailEvent(a,r)),nextCursor:nextCursor(timeline as {id:string;createdAt:string}[],100,`email-events:${mail.id}`)}},200);
+    const snapBytes = await emailSnapshotBytes(c.env.db, a, emailId);
+    assertResponseWithinLimit(c.req.raw, snapBytes + 16384);
+    const run = async (): Promise<Response> => {
+      const [detail]=await c.env.db.select({mail:emails,fromName:emailColumns.fromName,untrustedContent:sentUntrustedContent,
+        contact:a.domains.length ? sql<null>`NULL` : sql<{id:string;suppressed:boolean;suppressedAt:string|null}|null>`(SELECT jsonb_build_object('id',c.id,'suppressed',c.suppressed,'suppressedAt',CASE WHEN c.suppressed THEN c.suppressed_at END) FROM audience_contacts c
+          WHERE c.workspace_id=sending_emails.workspace_id AND c.deleted_at IS NULL AND jsonb_array_length(sending_emails.to_addresses)=1 AND c.email=lower(sending_emails.to_addresses->>0))`,
+        timeline:sql<z.input<typeof Event>[]>`(SELECT coalesce(jsonb_agg(t ORDER BY t."createdAt"::timestamptz,t.id),'[]') FROM (
+          SELECT id,email_id AS "emailId",type,provider_id AS "providerId",simulated,created_at::text AS "createdAt",data FROM sending_email_events
+          WHERE workspace_id=sending_emails.workspace_id AND email_id=sending_emails.id ORDER BY created_at,id LIMIT 101) t)`,
+        thread:access ? threadBlock(access,{thread:sentThreadId,focus:sql`sending_emails.id`,sends:true}) : sql<RawThread|null>`NULL`,
+      }).from(emails).where(mailWhere(a,emailId)).limit(1);
+      if(!detail) return notFound('Email');
+      const {mail,contact,timeline,untrustedContent}=detail, {html,text,attachments}=await visibleEmailContent(c.env,a,mail,untrustedContent);
+      const thread=threadView(detail.thread,a.permissions.includes('manage'));
+      const email=emailView({...mail,untrustedContent,subject:a.permissions.includes('manage') ? mail.subject : redactCapabilityText(mail.subject),fromName:detail.fromName,kind:mail.snapshot.kind});
+      return c.json({email,content:{html,text,attachments},contact,thread,events:{data:timeline.slice(0,100).map(r=>visibleEmailEvent(a,r)),nextCursor:nextCursor(timeline as {id:string;createdAt:string}[],100,`email-events:${mail.id}`)}},200);
+    };
+    return (snapBytes > LARGE_READ_RESERVE_THRESHOLD ? await withBoundedRead(c, () => run(), { route: 'email.detail', workspaceId: a.workspaceId }) : await run()) as never;
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/emails/{id}/content', operationId: 'getEmailContent', description: 'Manage keys receive full snapshots. Other readers receive app unsubscribe tokens redacted from subject/HTML/text and raw MIME withheld (null), since MIME encodings can conceal capabilities. Other transactional bearer links are not sanitized; grant content-read access only to trusted integrations.', tags: ['Emails'], security, request: { params: IdParams }, responses: { 200: response(EmailContent), ...errors } }), async c => {
-    const a = actor(c); const row = await findEmail(c.env.db, a, c.req.valid('param').id);
-    return c.json(await visibleEmailContent(c.env,a,row,row.untrustedContent),200);
+    const a = actor(c), emailId = c.req.valid('param').id;
+    const snapBytes = await emailSnapshotBytes(c.env.db, a, emailId);
+    assertResponseWithinLimit(c.req.raw, snapBytes + 4096);
+    const run = async (): Promise<Response> => {
+      const row = await findEmail(c.env.db, a, emailId);
+      return c.json(await visibleEmailContent(c.env, a, row, row.untrustedContent), 200);
+    };
+    return (snapBytes > LARGE_READ_RESERVE_THRESHOLD ? await withBoundedRead(c, () => run(), { route: 'email.content', workspaceId: a.workspaceId }) : await run()) as never;
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/emails/{id}/events', operationId: 'listEmailEvents', tags: ['Emails'], security, request: { params: IdParams, query: PageQuery }, responses: { 200: response(page(Event)), ...errors } }), async c => {
     // Oldest first by creation time: event IDs are random, so ordering by ID shuffled an email's history.
@@ -1656,48 +1799,38 @@ export function registerSending(app: App) {
     // The isolate's memory for this file is held before a byte is read (isolate-memory.ts): with a Content-Length the
     // body is read into one buffer of that size; without one, into chunks of at most the limit, then one copy.
     const known = Number.isFinite(contentLength) && contentLength >= 0;
-    const result = await withMemory(known ? contentLength * 1.15 + 1024 * 1024 : 2.15 * MAX_ATTACHMENT_BYTES, async () => saveAttachment(c, a, parsed.data, await uploadBody(c.req.raw, known ? contentLength : null)));
+    const result = await withMemory(known ? contentLength * 1.15 + 1024 * 1024 : 2.15 * MAX_ATTACHMENT_BYTES, async () => saveAttachment(c, a, parsed.data, await uploadBody(c.req.raw, known ? contentLength : null)), { route: 'attachment.upload', workspaceId: a.workspaceId, signal: c.req.raw.signal });
     return c.json(AttachmentInfo.parse(result), 201);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/attachments/{id}', operationId: 'getAttachment', tags: ['Attachments'], security, request: { params: IdParams }, responses: { 200: response(AttachmentInfo), ...errors } }), async c => {
     const [row] = await attachmentRows(c.env.db, actor(c), [c.req.valid('param').id]); return c.json(AttachmentInfo.parse(row), 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/attachments/{id}/content', operationId: 'getAttachmentContent', description: 'Returns the private attachment as canonical base64 JSON, scoped like its metadata. At most 25 MiB decoded; never a public object URL or executable inline response.', tags: ['Attachments'], security, request: { params: IdParams }, responses: { 200: response(AttachmentInfo.extend({ content: z.string().max(Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4) }).openapi('AttachmentContent')), ...errors } }), async c => {
-    const [row] = await attachmentRows(c.env.db, actor(c), [c.req.valid('param').id]);
-    // The file counts against the isolate's budget (isolate-memory.ts) until its response has been read, and the JSON
-    // streams out with the base64 written from the file a chunk at a time: the file is the only large buffer.
-    const lease = await reserveMemory(row!.size * 1.15 + 1024 * 1024);
-    let file: Uint8Array | null;
+    const a = actor(c);
+    const [row] = await attachmentRows(c.env.db, a, [c.req.valid('param').id]);
+    assertResponseWithinLimit(c.req.raw, Math.ceil(row!.size / 3) * 4 + 512);
+    // The file counts against the isolate's self-reclaiming budget (isolate-memory.ts) until read, canceled, or past
+    // its idle/hard deadline, and streams out base64 a chunk at a time so the file is the only large buffer.
+    let lease: import('./isolate-memory.js').MemoryLease;
+    try {
+      lease = await reserveMemory(row!.size * 1.15 + 1024 * 1024, { route: 'attachment.download', workspaceId: a.workspaceId, signal: c.req.raw.signal, idleMs: attachmentDownload.idleMs, maxMs: attachmentDownload.readMs });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return new Response(null, { status: 499 }) as never;
+      if (error instanceof ApiError && (error.status === 429 || error.status === 503)) c.header('Retry-After', '1');
+      throw error;
+    }
+    let file: Uint8Array;
     try {
       const asset = await c.env.storage.get(row!.storageKey);
       if (!asset || asset.body.length !== row!.size || asset.body.length > MAX_ATTACHMENT_BYTES || await bytesDigest(asset.body) !== row!.checksum) throw new ApiError(503, 'ATTACHMENT_STORAGE_UNAVAILABLE', 'An immutable attachment is missing or changed.', undefined, true);
       file = asset.body;
     } catch (error) { lease.release(); throw error; }
-    const json = JSON.stringify({ ...AttachmentInfo.parse(row), content: '' }), encoder = new TextEncoder();
-    let at = 0, stream: ReadableStreamDefaultController<Uint8Array> | undefined;
-    // Read to the end, canceled, or not read within attachmentDownload.readMs: the response is ended and the file let go
-    // first, so its bytes are unreachable when they return to the budget. Once only.
-    const end = (timedOut: boolean) => {
-      if (!file) return;
-      file = null; clearTimeout(watchdog as never);
-      if (timedOut) try { stream?.error(new ApiError(504, 'DOWNLOAD_TIMEOUT', 'The attachment was not read in time.')); } catch { /* already closed */ }
-      lease.release();
-    };
-    const watchdog = setTimeout(() => end(true), attachmentDownload.readMs) as unknown as { unref?: () => void };
-    watchdog.unref?.();
-    const body = new ReadableStream<Uint8Array>({
-      start(controller) { stream = controller; controller.enqueue(encoder.encode(json.slice(0, -2))); },
-      pull(controller) {
-        if (!file) return;
-        if (at >= file.length) { controller.enqueue(encoder.encode(json.slice(-2))); controller.close(); end(false); return; }
-        const next = Math.min(file.length, at + 3 * 64 * 1024);
-        controller.enqueue(encoder.encode(Buffer.from(file.buffer, file.byteOffset + at, next - at).toString('base64')));
-        at = next;
-      },
-      cancel() { end(false); },
-    });
-    c.header('X-Content-Type-Options', 'nosniff');
-    return c.body(body, 200, { 'content-type': 'application/json' }) as never;
+    const jsonMeta = JSON.stringify({ ...AttachmentInfo.parse(row), content: '' });
+    return streamBase64JsonResponse(c, lease, jsonMeta, file, {
+      idleMs: attachmentDownload.idleMs,
+      maxMs: attachmentDownload.readMs,
+      timeoutError: () => new ApiError(504, 'DOWNLOAD_TIMEOUT', 'The attachment was not read in time.'),
+    }) as never;
   });
   app.openapi(createRoute({ method: 'delete', path: '/v1/attachments/{id}', operationId: 'deleteAttachment', tags: ['Attachments'], security, request: { params: IdParams }, responses: { 200: response(Removed), ...errors } }), async c => {
     const a = actor(c, 'send'); const attachmentId = c.req.valid('param').id;
@@ -1753,10 +1886,38 @@ export function registerSending(app: App) {
     const views = await timed(c, 'campaign-counts-db', () => campaignViews(c.env, a, listed.map(({ stats: _stats, tracking: _tracking, ...row }) => row), { origin: new URL(c.req.url).origin }));
     return c.json({ data: views.map((row, i) => CampaignSummary.parse({ ...row, stats: listedStats(listed[i]!) })), nextCursor: nextCursor(rows, q.limit, binding) }, 200);
   });
+  // The dashboard's campaign room (src/campaign-room.ts): a WebSocket that shows who else has the campaign open. Not part of
+  // the public API, and people only: agents appear through their own reads and saves (agentVisit). A browser's WebSocket
+  // carries no headers of its own, so the Worker takes its account and workspace from this URL's query (worker.ts).
+  app.get('/v1/campaigns/:id/room', async c => {
+    const rooms = c.env.campaignRooms;
+    if (!rooms) throw new ApiError(404, 'PRESENCE_UNAVAILABLE', 'Live presence needs campaign rooms, which only the Cloudflare deployment runs.');
+    if (c.req.header('upgrade')?.toLowerCase() !== 'websocket') throw new ApiError(426, 'WEBSOCKET_REQUIRED', 'Open the campaign room with a WebSocket.');
+    const a = actor(c);
+    if (a.credential !== 'dashboard') throw denied('DASHBOARD_AUTH_REQUIRED', 'Use a signed-in dashboard session.', { credential: 'dashboard' });
+    // Cookies ride along on any site's WebSocket to this host, so only the dashboard's own pages may open one.
+    (await import('./account-login.js')).requireDashboardOrigin(c.env, c.req.raw);
+    const campaignId = c.req.param('id');
+    const [row] = await c.env.db.select({ id: campaigns.id }).from(campaigns).where(campaignWhere(a, campaignId)).limit(1);
+    if (!row) notFound('Campaign');
+    // The room knows each person by a key of its own, never their user ID, and shows API keys' and MCP clients' names
+    // only to those who see them in Settings (owners and admins; self-hosted, everyone).
+    const room = roomName(a.workspaceId, campaignId), key = (await digest(`${room}:${a.keyId}`)).slice(0, 16);
+    const names = !c.env.config.multiTenant || a.role === 'owner' || a.role === 'admin';
+    return rooms.connect(room, { kind: 'person', id: key, name: a.name?.trim() || 'A teammate', view: c.req.query('view') === 'review' ? 'review' : 'write', names, until: Date.now() + ADMISSION_MS });
+  });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}', operationId: 'getCampaign', description: `The campaign with its full draft, per-status email counts and delivery progress. ${CAMPAIGN_PROGRESS_NOTE} ${readLimitNote(READ_LIMIT.campaign)}`, tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(Campaign), ...errors } }), async c => {
-    const a = actor(c), row = await timed(c, 'campaign-db', () => findCampaign(c.env.db, a, c.req.valid('param').id));
-    const views = await timed(c, 'campaign-counts-db', () => budgetedRead(c.env.db, db => campaignViews(c.env, a, [row], { origin: new URL(c.req.url).origin, detail: true }, db), readLimit(READ_LIMIT.campaign)));
-    return c.json(Campaign.parse(views[0]!), 200);
+    const a = actor(c), campaignId = c.req.valid('param').id;
+    const [probe] = await c.env.db.select({ bytes: sql<number>`coalesce(octet_length(${campaigns.draft}::text), 0)::int` }).from(campaigns).where(campaignWhere(a, campaignId)).limit(1);
+    if (!probe) notFound('Campaign');
+    assertResponseWithinLimit(c.req.raw, probe.bytes + 4096);
+    const run = async (): Promise<Response> => {
+      const row = await timed(c, 'campaign-db', () => findCampaign(c.env.db, a, campaignId));
+      agentVisit(c, a, row);
+      const views = await timed(c, 'campaign-counts-db', () => budgetedRead(c.env.db, db => campaignViews(c.env, a, [row], { origin: new URL(c.req.url).origin, detail: true }, db), readLimit(READ_LIMIT.campaign)));
+      return c.json(Campaign.parse(views[0]!), 200);
+    };
+    return (probe.bytes > LARGE_READ_RESERVE_THRESHOLD * 2 ? await withBoundedRead(c, () => run(), { route: 'campaign.get', workspaceId: a.workspaceId }) : await run()) as never;
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/stats', operationId: 'getCampaignStats', description: 'Lifetime campaign delivery and unique open/click statistics, progress, tracking setting and rates with numeric numerators/denominators. Counts distinct emails across all stored feedback, not event occurrences. Delivery/bounce/complaint rates use accepted emails; open/click rates use delivered emails. Both rate counts exclude simulated emails. Rates are fractions, null for zero denominators; engagement rates are also null with tracking disabled. Delivered means receiving-server acceptance, not inbox placement. Engagement includes bots/privacy proxies. Done means dispatch finished; asynchronous feedback can still change totals. ' + STATS_NOTE + ' ' + readLimitNote(READ_LIMIT.campaignStats), tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignStats), ...errors } }), async c => {
     const a = actor(c), row = await findCampaign(c.env.db, a, c.req.valid('param').id);
@@ -1824,6 +1985,7 @@ export function registerSending(app: App) {
       if (!revised.rows.length) throw new ApiError(409, 'CAMPAIGN_LOCKED', 'The campaign changed while it was being saved; fetch it and try again.');
       return (await findCampaign(db, a, campaignId))!;
     });
+    agentVisit(c, a, row, row.revision);
     return c.json(Campaign.parse((await campaignViews(c.env, a, [row]))[0]!), 200);
   });
   app.openapi(createRoute({ method: 'patch', path: '/v1/campaigns/{id}/archive', operationId: 'setCampaignArchived', description: 'Archive a campaign to hide it from default lists, or restore it. Preserves its content, revision, delivery state and history. Preparing, scheduled, sending or paused campaigns must finish or be canceled before archiving. Archived campaigns cannot be edited, tested or sent until restored.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(CampaignArchive) }, responses: { 200: response(Campaign), ...errors } }), async c => {
@@ -1977,8 +2139,11 @@ async function cancelCampaignWork(db: DbExecutor, a: Actor, row: typeof campaign
   if (moved.rows.length) await db.execute(retireCampaignRun(ref, 'CAMPAIGN_CANCELED'));
   const page=moved.rows.length ? await cancelPage(db,a.workspaceId,row.id,errorCode??'CAMPAIGN_CANCELED',true) : {count:0,jobs:0};
   a.wakeJobs=(a.wakeJobs??0)+page.jobs;
-  const [inFlight] = await db.select({ count: sql<number>`count(*)::int` }).from(emails).where(and(scope(emails, a), eq(emails.campaignId, row.id), inArray(emails.status, ['attempting', 'accepted', 'sent', 'delivered', 'acceptance_unknown'])));
-  return { id: row.id, state: 'canceled' as const, canceled: page.count + unexpanded, inFlight: inFlight!.count };
+  const inFlight = await talliesEnabled(db)
+    ? Number((await db.execute<{ count: number }>(sql`SELECT coalesce(sum(email_count), 0)::int AS count FROM sending_campaign_tallies
+        WHERE workspace_id = ${a.workspaceId} AND campaign_id = ${row.id} AND status IN ('attempting', 'accepted', 'sent', 'delivered', 'acceptance_unknown')`)).rows[0]?.count ?? 0)
+    : (await db.select({ count: sql<number>`count(*)::int` }).from(emails).where(and(scope(emails, a), eq(emails.campaignId, row.id), inArray(emails.status, ['attempting', 'accepted', 'sent', 'delivered', 'acceptance_unknown']))))[0]!.count;
+  return { id: row.id, state: 'canceled' as const, canceled: page.count + unexpanded, inFlight };
 }
 /** Which of these addresses this workspace delivered to before, outside this campaign (lower case). */
 async function deliveredBefore(db: DbExecutor, wid: string, campaignId: string, emails: string[]) {
@@ -2140,7 +2305,8 @@ export async function verifiedAttachment(runtime: Runtime, row: typeof attachmen
 export const statusForEvent: Record<string, EmailStatus> = { send: 'sent', delivery: 'delivered', bounce: 'bounced', non_permanent_bounce: 'delayed', validation_suppressed: 'suppressed', complaint: 'complained', complaint_feedback: 'accepted', reject: 'rejected', rendering_failure: 'rendering_failed', delivery_delay: 'delayed', accepted: 'accepted', suppressed: 'suppressed', acceptance_unknown: 'acceptance_unknown', simulated: 'simulated' };
 // Publish email.sent from the SendEmail response; a later SES Send is status feedback only.
 export const publicEventType: Record<string, string> = { accepted: 'email.sent', delivery: 'email.delivered', bounce: 'email.bounced', non_permanent_bounce: 'email.bounced', validation_suppressed: 'email.bounced', complaint: 'email.complained', reject: 'email.rejected', acceptance_unknown: 'email.rejected', rendering_failure: 'email.rendering_failed', delivery_delay: 'email.delivery_delayed', open: 'email.opened', click: 'email.clicked' };
-export const rank: Record<EmailStatus, number> = { scheduled: 0, queued: 0, attempting: 1, acceptance_unknown: 2, accepted: 3, sent: 4, delayed: 4, suppressed: 5, delivered: 6, bounced: 7, complained: 8, rejected: 7, rendering_failed: 7, canceled: 7, simulated: 7 };
+export const rank: Record<EmailStatus, number> = { scheduled: 0, queued: 0, attempting: 10, acceptance_unknown: 20, accepted: 30, sent: 40, delayed: 45, suppressed: 50, delivered: 60, bounced: 70, complained: 80, rejected: 70, rendering_failed: 70, canceled: 70, simulated: 70 };
+const outcomeBitForEvent: Record<string, number> = { send: 1, accepted: 1, delivery: 3, bounce: 5, non_permanent_bounce: 129, complaint: 9, delivery_delay: 129, open: 16, click: 32, reject: 64, rendering_failure: 64 };
 type EmailEventInput = { workspaceId: string; type: string; providerId?: string; errorCode?: string; data?: Record<string, unknown>; recipientHashes?: string[]; externalId?: string; createdAt?: string; receipt?: { topicArn: string; messageId: string } };
 type IncomingReceipt = { topicArn: string; messageId: string; region: string; payload: Record<string, unknown>; recoveryType?: 'operation.ses' | 'operation.simulatedFeedbackRecovery' };
 export async function recordEmailEvent(runtime: Runtime, input: EmailEventInput & { emailId: string }) {
@@ -2173,7 +2339,7 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
   const topicMatch = mx ? sql`AND (x.simulated OR (e.feedback_topic_arn=x.topic_arn AND EXISTS(SELECT FROM provider_feedback_history h WHERE h.topic_arn=x.topic_arn AND h.region=x.region AND h.aws_account_id=split_part(x.topic_arn,':',5))))` : sql``;
   const rows = inputs.map((input, index) => ({
     ordinal: index, job_workspace: input.workspaceId, simulated: simulatedTopic(input.ingress.topicArn, input.ingress.region), topic_arn: input.ingress.topicArn, message_id: input.ingress.messageId, region: input.ingress.region, provider_id: input.providerId,
-    type: input.type, next_status: statusForEvent[input.type]!, next_rank: rank[statusForEvent[input.type]!], public_type: publicEventType[input.type] ?? null,
+    type: input.type, next_status: statusForEvent[input.type]!, next_rank: rank[statusForEvent[input.type]!], public_type: publicEventType[input.type] ?? null, outcome_bit: outcomeBitForEvent[input.type] ?? 0,
     external_id: input.externalId ?? null, data: input.data ?? {}, public_data: webhookData(input.data), effects: input.effects, created_at: input.createdAt ?? now(),
     event_id: rowId('event'), recovery_job_id: rowId('job'), recovery_type: input.ingress.recoveryType, payload: input.ingress.payload, tagged_email_id: input.taggedEmailId ?? null,
   }));
@@ -2181,7 +2347,7 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
   const json=JSON.stringify(rows), safe=json.includes('\\u0000') ? json.replace(/\\(?:u0000|.)/g,m=>m==='\\u0000'?'\uFFFD':m) : json;
   const result = await runtime.db.execute<{ ordinal: number; workspaceId: string | null; error: string | null; event: typeof emailEvents.$inferSelect | null; runnable: number; recovery:boolean; hooks:number }>(sql`WITH raw AS (
       SELECT * FROM jsonb_to_recordset(${safe}::jsonb) AS x(ordinal int, job_workspace text, simulated boolean, topic_arn text, message_id text, region text, provider_id text,
-        type text, next_status text, next_rank int, public_type text, external_id text, data jsonb, public_data jsonb, effects jsonb, created_at timestamptz, event_id text, recovery_job_id text, recovery_type text, payload jsonb, tagged_email_id text)
+        type text, next_status text, next_rank int, public_type text, outcome_bit int, external_id text, data jsonb, public_data jsonb, effects jsonb, created_at timestamptz, event_id text, recovery_job_id text, recovery_type text, payload jsonb, tagged_email_id text)
     ), candidates AS (
       SELECT x.ordinal, e.id FROM raw x JOIN sending_emails e ON e.provider_id = x.provider_id
       WHERE x.tagged_email_id IS NULL AND e.region = x.region AND e.simulated = x.simulated ${topicMatch}
@@ -2233,17 +2399,7 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
       SELECT DISTINCT x.event_id,lower(address) AS address FROM matched x,
         jsonb_array_elements_text(x.to_addresses || x.cc_addresses || x.bcc_addresses) AS address
       WHERE x.effects->'reported' ? lower(address) OR (x.effects->>'observe' IS NOT NULL AND jsonb_array_length(x.to_addresses)=1 AND x.cc_addresses='[]' AND x.bcc_addresses='[]')
-    )` : sql``}, inserted AS (
-      INSERT INTO sending_email_events(id, workspace_id, email_id, type, provider_id, external_id, data, simulated, created_at,recipient_hashes)
-       SELECT x.event_id, x.workspace_id, x.email_id, x.type, x.provider_id, x.external_id,
-         x.data || jsonb_build_object('emailId', x.email_id, 'providerId', x.provider_id), x.simulated, x.event_time,
-         ${mx && effects ? sql`CASE WHEN x.type IN ('bounce','complaint') AND jsonb_typeof(x.effects->'reported')='array'
-           AND EXISTS(SELECT FROM provider_feedback_history WHERE topic_arn=x.topic_arn AND kind='shared') THEN ARRAY(
-           SELECT encode(sha256(convert_to(x.email_id,'UTF8') || decode('00','hex') || convert_to(r.address,'UTF8')),'hex')
-           FROM recipients r WHERE r.event_id=x.event_id AND r.address NOT LIKE '%@simulator.amazonses.com' ORDER BY r.address) END` : sql`NULL`}
-       FROM matched x ORDER BY x.workspace_id,x.email_id,x.ordinal
-      ON CONFLICT DO NOTHING RETURNING *
-    ) ${effects ? sql`, contact_events AS (
+    ), contact_events AS (
       -- Effects follow the receipt this statement processed, not a newly inserted event: a recovery
       -- job that stored the event and died before its suppression left the receipt open for us.
       -- The merges below are idempotent, so overlapping with that job's own retry is harmless.
@@ -2266,15 +2422,68 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
         last_open_at=greatest(c.last_open_at,excluded.last_open_at),last_click_at=greatest(c.last_click_at,excluded.last_click_at),
         open_observed_since=least(c.open_observed_since,excluded.open_observed_since),click_observed_since=least(c.click_observed_since,excluded.click_observed_since),
         observed_since=least(c.observed_since,excluded.observed_since),updated_at=now()
-    )` : sql``}, ranked AS (
+      WHERE (excluded.suppressed AND (NOT c.suppressed OR (excluded.suppression_reason = 'complaint' AND c.suppression_reason IS DISTINCT FROM 'complaint') OR (excluded.suppression_reason = 'hard_bounce' AND c.suppression_reason IS DISTINCT FROM 'complaint' AND c.suppression_reason IS DISTINCT FROM 'hard_bounce')))
+        OR (excluded.suppressed AND c.suppressed AND (c.suppressed_at IS NULL OR excluded.suppressed_at > c.suppressed_at))
+        OR (excluded.last_open_at IS NOT NULL AND (c.last_open_at IS NULL OR excluded.last_open_at > c.last_open_at))
+        OR (excluded.last_click_at IS NOT NULL AND (c.last_click_at IS NULL OR excluded.last_click_at > c.last_click_at))
+        OR (excluded.open_observed_since IS NOT NULL AND (c.open_observed_since IS NULL OR excluded.open_observed_since < c.open_observed_since))
+        OR (excluded.click_observed_since IS NOT NULL AND (c.click_observed_since IS NULL OR excluded.click_observed_since < c.click_observed_since))
+        OR (excluded.observed_since IS NOT NULL AND (c.observed_since IS NULL OR excluded.observed_since < c.observed_since)) RETURNING 1
+    )` : sql``}, shared_locks AS MATERIALIZED (
+      -- When a batch contains a suppression transition (which triggers sending_emails billing/usage/health updates
+      -- after sending_email_events inserts), pre-acquire per-workspace advisory lock 275820 in ascending hashtext
+      -- order across all potentially-writing workspaces in this batch so multi-workspace mixed batches never invert.
+      SELECT pg_advisory_xact_lock(275820, h)
+      FROM (
+        SELECT DISTINCT hashtext(m.workspace_id) AS h
+        FROM matched m
+        WHERE EXISTS (SELECT 1 FROM matched s WHERE s.type = 'validation_suppressed' OR s.status = 'suppressed')
+          AND NOT m.simulated
+          AND (m.type IN ('validation_suppressed', 'complaint', 'accepted', 'send')
+               OR (m.type = 'bounce' AND m.data->>'bounceType' = 'Permanent')
+               OR m.status = 'suppressed')
+        ORDER BY 1
+      ) x ${effects ? sql`WHERE (SELECT count(*) FROM contact_changes) >= 0` : sql``}
+    ), inserted AS (
+      INSERT INTO sending_email_events(id, workspace_id, email_id, type, provider_id, external_id, data, simulated, created_at,recipient_hashes)
+       SELECT x.event_id, x.workspace_id, x.email_id, x.type, x.provider_id, x.external_id,
+         x.data || jsonb_build_object('emailId', x.email_id, 'providerId', x.provider_id), x.simulated, x.event_time,
+         ${mx && effects ? sql`CASE WHEN x.type IN ('bounce','complaint') AND jsonb_typeof(x.effects->'reported')='array'
+           AND EXISTS(SELECT FROM provider_feedback_history WHERE topic_arn=x.topic_arn AND kind='shared') THEN ARRAY(
+           SELECT encode(sha256(convert_to(x.email_id,'UTF8') || decode('00','hex') || convert_to(r.address,'UTF8')),'hex')
+           FROM recipients r WHERE r.event_id=x.event_id AND r.address NOT LIKE '%@simulator.amazonses.com' ORDER BY r.address) END` : sql`NULL`}
+       FROM matched x WHERE (SELECT count(*) FROM shared_locks) >= 0 ORDER BY x.workspace_id,x.email_id,x.ordinal
+      ON CONFLICT DO NOTHING RETURNING *
+    ), outcome_totals AS (
+      SELECT x.email_id, x.workspace_id, bit_or(x.outcome_bit)::smallint AS add_bits
+      FROM matched x JOIN inserted ins ON ins.id = x.event_id
+      GROUP BY x.email_id, x.workspace_id
+    ), ranked AS (
       SELECT x.*,max(x.next_rank) OVER(PARTITION BY x.email_id ORDER BY x.ordinal) AS running_rank FROM matched x JOIN inserted ins ON ins.id=x.event_id
       WHERE x.next_rank IS NOT NULL
-    ), winner AS (
-      SELECT DISTINCT ON (email_id) *,bool_or(type='validation_suppressed' AND next_rank>=greatest(running_rank,(${JSON.stringify(rank)}::jsonb->>status)::int)) OVER(PARTITION BY email_id) AS validation
+    ), winner AS MATERIALIZED (
+      SELECT DISTINCT ON (email_id) *,
+        bool_or(type='validation_suppressed' AND next_rank>=greatest(running_rank,(${JSON.stringify(rank)}::jsonb->>status)::int)) OVER(PARTITION BY email_id) AS validation
       FROM ranked ORDER BY email_id,next_rank DESC,ordinal DESC
+    ), email_updates AS (
+      SELECT o.email_id, o.workspace_id, o.add_bits,
+        (w.email_id IS NOT NULL AND w.next_rank >= (${JSON.stringify(rank)}::jsonb ->> w.status)::int) AS advance_status,
+        w.next_status, w.provider_id, coalesce(w.validation, false) AS validation
+      FROM outcome_totals o LEFT JOIN winner w ON w.email_id = o.email_id AND w.workspace_id = o.workspace_id
+      ORDER BY o.email_id
     ), updated AS (
-      UPDATE sending_emails e SET status = w.next_status, provider_id = coalesce(w.provider_id, e.provider_id), error_code=CASE WHEN w.validation THEN 'EMAIL_VALIDATION_SUPPRESSED' ELSE e.error_code END, suppression_reason=CASE WHEN w.next_status='suppressed' AND w.validation THEN 'email_validation' END, updated_at = clock_timestamp()
-       FROM winner w WHERE e.id = w.email_id AND e.workspace_id = w.workspace_id AND w.next_rank >= (${JSON.stringify(rank)}::jsonb ->> w.status)::int
+      -- Apply status upgrades AND outcome bits (including opens/clicks/delays where next_status IS NULL) in ONE update
+      -- so sending_email_events_outcomes and operation_events_email_outcomes become 0-row no-ops on the hot path.
+      UPDATE sending_emails e SET
+        status = CASE WHEN u.advance_status THEN u.next_status ELSE e.status END,
+        provider_id = CASE WHEN u.advance_status THEN coalesce(u.provider_id, e.provider_id) ELSE e.provider_id END,
+        event_outcomes = e.event_outcomes | u.add_bits,
+        error_code = CASE WHEN u.advance_status AND u.validation THEN 'EMAIL_VALIDATION_SUPPRESSED' ELSE e.error_code END,
+        suppression_reason = CASE WHEN u.advance_status THEN CASE WHEN u.next_status='suppressed' AND u.validation THEN 'email_validation' END ELSE e.suppression_reason END,
+        updated_at = CASE WHEN u.advance_status THEN clock_timestamp() ELSE e.updated_at END
+      FROM email_updates u
+      WHERE e.id = u.email_id AND e.workspace_id = u.workspace_id
+        AND (u.advance_status OR (u.add_bits <> 0 AND (e.event_outcomes | u.add_bits) <> e.event_outcomes))
     ), published AS (
       INSERT INTO operation_events(id, workspace_id, type, region, created_at, data)
       SELECT ins.id, ins.workspace_id, x.public_type, x.region, ins.created_at,
@@ -2301,6 +2510,7 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
 async function persistEmailEvent(runtime: Runtime, input: EmailEventInput & { emailId: string }) {
   const next = statusForEvent[input.type];
   const publicType = publicEventType[input.type];
+  const outcomeBit = outcomeBitForEvent[input.type] ?? 0;
   // One transaction inside PostgreSQL instead of BEGIN/read/insert/update/enqueue/COMMIT over the
   // network. The locked row determines monotonic status; only a newly inserted event may change it
   // or publish a callback. Simulated acceptance also queues its Send/Delivery callback vehicles here
@@ -2315,9 +2525,16 @@ async function persistEmailEvent(runtime: Runtime, input: EmailEventInput & { em
       ${input.externalId ?? null}, ${JSON.stringify(input.data ?? {})}::jsonb, mail.simulated, ${input.createdAt ?? now()}::timestamptz, ${sql.param(input.recipientHashes ?? null)}::text[]
     FROM mail ON CONFLICT DO NOTHING RETURNING *
   ), updated AS (
-    UPDATE sending_emails e SET status = ${next ?? null}, provider_id = coalesce(${input.providerId || null}::text, e.provider_id), error_code = coalesce(${input.errorCode ?? null}::text, e.error_code), suppression_reason=${input.type==='validation_suppressed'?'email_validation':null}, updated_at = clock_timestamp()
+    UPDATE sending_emails e SET
+      status = CASE WHEN ${next ?? null}::text IS NOT NULL AND ${next ? rank[next] : -1} >= (${JSON.stringify(rank)}::jsonb ->> mail.status)::int THEN ${next ?? null} ELSE e.status END,
+      provider_id = CASE WHEN ${next ?? null}::text IS NOT NULL AND ${next ? rank[next] : -1} >= (${JSON.stringify(rank)}::jsonb ->> mail.status)::int THEN coalesce(${input.providerId || null}::text, e.provider_id) ELSE e.provider_id END,
+      event_outcomes = e.event_outcomes | ${outcomeBit}::smallint,
+      error_code = CASE WHEN ${next ?? null}::text IS NOT NULL AND ${next ? rank[next] : -1} >= (${JSON.stringify(rank)}::jsonb ->> mail.status)::int THEN coalesce(${input.errorCode ?? null}::text, e.error_code) ELSE e.error_code END,
+      suppression_reason = CASE WHEN ${next ?? null}::text IS NOT NULL AND ${next ? rank[next] : -1} >= (${JSON.stringify(rank)}::jsonb ->> mail.status)::int THEN ${input.type==='validation_suppressed'?'email_validation':null} ELSE e.suppression_reason END,
+      updated_at = CASE WHEN ${next ?? null}::text IS NOT NULL AND ${next ? rank[next] : -1} >= (${JSON.stringify(rank)}::jsonb ->> mail.status)::int THEN clock_timestamp() ELSE e.updated_at END
     FROM mail, inserted WHERE e.id = mail.id AND e.workspace_id = ${input.workspaceId}
-      AND ${next ?? null}::text IS NOT NULL AND ${next ? rank[next] : -1} >= (${JSON.stringify(rank)}::jsonb ->> mail.status)::int
+      AND ((${next ?? null}::text IS NOT NULL AND ${next ? rank[next] : -1} >= (${JSON.stringify(rank)}::jsonb ->> mail.status)::int)
+        OR (${outcomeBit}::smallint <> 0 AND (e.event_outcomes | ${outcomeBit}::smallint) <> e.event_outcomes))
   ), published AS (
     INSERT INTO operation_events(id, workspace_id, type, region, created_at, data)
     SELECT inserted.id, inserted.workspace_id, ${publicType ?? null}::text, mail.region, inserted.created_at,
@@ -2543,7 +2760,7 @@ export async function listMailedCleanly(db: DbExecutor, a: Pick<Actor, 'workspac
 }
 // The campaign row with its frozen snapshot and the cached regional limits: one read per step of the run job.
 type RunAccount = NonNullable<Actor['dispatchAccount']> & { pauseReason: string | null; generation:number; trusted: boolean; probation: ProbationReason | null; exempt: boolean };
-type RunRow = typeof campaigns.$inferSelect & { reviewVersion: number | null; reviewDraft: CampaignDraft | null; reviewRendered: { html?: string; text?: string } | null; reviewHash: string | null; reviewScreen: CampaignScreen | null; reviewCapturedAt: string | null; reviewCapturedCount: number | null; reviewStaticPrepared: boolean | null; rate: number; max24: number; sent24: number; customer24: number; quotaCheckedAt: string | null; dbNow: string; account: RunAccount | null };
+type RunRow = typeof campaigns.$inferSelect & { reviewVersion: number | null; reviewDraft: CampaignDraft | null; reviewRendered: { html?: string; text?: string } | null; reviewHash: string | null; reviewScreen: CampaignScreen | null; reviewCapturedAt: string | null; reviewCapturedCount: number | null; reviewStaticPrepared: boolean | null; rate: number; max24: number; sent24: number; customer24: number; quotaCheckedAt: string | null; priorityLagMs: number | null; dbNow: string; account: RunAccount | null };
 async function readRun(runtime: Runtime, a: Actor, campaignId: string): Promise<RunRow | undefined> {
   const limits = limitsTable(runtime), region = sql`${campaignReviews.draft}->>'region'`;
   const [row] = await runtime.db.select({ ...getTableColumns(campaigns), reviewVersion: campaignReviews.rendererVersion, reviewDraft: campaignReviews.draft, reviewRendered: campaignReviews.rendered, reviewHash: campaignReviews.contentHash, reviewScreen: campaignReviews.screen, reviewCapturedAt: campaignReviews.capturedAt, reviewCapturedCount: campaignReviews.capturedCount, reviewStaticPrepared: campaignReviews.staticPrepared,
@@ -2557,6 +2774,11 @@ async function readRun(runtime: Runtime, a: Actor, campaignId: string): Promise<
     sent24: sql<number>`coalesce((SELECT sent_last_24_hours FROM ${limits} WHERE workspace_id=${a.workspaceId} AND region=${region}),0)`,
     customer24: runtime.config.multiTenant ? sql<number>`coalesce((SELECT customer_sent_24_hours FROM ${limits} WHERE workspace_id=${a.workspaceId} AND region=${region}),0)` : sql<number>`0`,
     quotaCheckedAt: sql<string | null>`(SELECT checked_at::text FROM ${limits} WHERE workspace_id=${a.workspaceId} AND region=${region})`,
+    priorityLagMs: sql<number | null>`coalesce(
+      (SELECT oldest_ms FROM operation_feedback_lag WHERE lane = 'priority' AND updated_at > now() - make_interval(secs => ${Math.round(FEEDBACK_LAG_FRESH_MS / 1000)}::int)),
+      (SELECT oldest_ms FROM operation_feedback_lag WHERE lane = 'routine' AND updated_at > now() - make_interval(secs => ${Math.round(FEEDBACK_LAG_FRESH_MS / 1000)}::int)
+        AND NOT EXISTS (SELECT 1 FROM operation_feedback_lag WHERE lane = 'priority'))
+    )`,
     dbNow: sql<string>`clock_timestamp()::text`,
   }).from(campaigns).leftJoin(campaignReviews, eq(campaignReviews.id, campaigns.reviewId)).where(campaignWhere(a, campaignId));
   return row;
@@ -2630,7 +2852,7 @@ export async function campaignVerdicts(runtime: Runtime, ref: CampaignScreenRef,
         const charged = await runtime.db.execute(sql`UPDATE sending_campaign_reviews SET screen_charged=screen_charged+1
           WHERE workspace_id=${ref.workspaceId} AND id=${ref.reviewId} AND screen_charged<screen_budget`);
         if (!charged.rowCount) throw new ApiError(422, 'CONTENT_SCREEN_BUDGET_EXCEEDED', 'This campaign has used the classifier requests its audience allows; its unscreened copies are not sent.');
-        const result = await screen.screenWindow(runtime, input, row.windows, call);
+        const result = await screen.screenWindow(runtime, input, row.windows, call, key);
         const [moved] = (await runtime.db.execute<Row>(sql`UPDATE sending_campaign_screens SET windows=windows+1,spam=greatest(spam,${result.spam}),model=${result.model},
           judged_at=CASE WHEN windows+1>=requests THEN clock_timestamp() END
           WHERE campaign_id=${ref.campaignId} AND copy_hash=${key} AND windows=${row.windows}
@@ -3048,8 +3270,12 @@ async function frozenPostalAddress(runtime: Runtime, a: Actor, row: RunRow) {
 // place (JobDeferred on the same job row) otherwise.
 async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Record<string, unknown>): Promise<'again' | 'done'> {
   const ref = campaignRef(a, row.id), nowMs = Date.now();
-  // Every recipient is released: the dispatcher marks the campaign done when its last row leaves the queue.
-  if (row.expanded >= row.total) return 'done';
+  // Every recipient is released: the dispatcher marks the campaign done when its last row leaves the queue. When no row
+  // is left to leave it (the last release skipped everyone remaining, or the last rows went out while the campaign was
+  // paused) nothing would until the minute sweep, so the run finishes it. The statement moves sending -> done only with
+  // nothing queued or attempting: with a row in flight it changes nothing and the dispatcher finishes the campaign.
+  const settle = () => runtime.db.execute(finishCampaigns(sql`SELECT ${a.workspaceId}::text AS workspace_id, ${row.id}::text AS campaign_id`));
+  if (row.expanded >= row.total) { await settle(); return 'done'; }
   if (row.expanded === 0 && row.reviewDraft!.postalAddress === undefined) row.reviewDraft = { ...row.reviewDraft!, postalAddress: await frozenPostalAddress(runtime, a, row) };
   // Do not turn a retired generation into a pacing/quota wait, or refresh its provider quota.
   if (row.reviewDraft?.binding && row.account?.generation!==row.reviewDraft.binding.generation) throw staleReview();
@@ -3059,7 +3285,7 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     (SELECT count(*)::int FROM (SELECT 1 FROM sending_emails WHERE workspace_id=${a.workspaceId} AND campaign_id IS NOT NULL AND status IN ('queued','attempting') LIMIT ${limits.total}) e) AS total,
     (SELECT count(*)::int FROM (SELECT 1 FROM sending_emails WHERE workspace_id=${a.workspaceId} AND campaign_id=${row.id} AND status IN ('queued','attempting') LIMIT ${limits.campaign}) c) AS campaign`)).rows;
   // Record why releasing is held (shown on the campaign), then wait in place.
-  const hold = async (reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe', until: string): Promise<never> => {
+  const hold = async (reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'feedback_lag', until: string): Promise<never> => {
     await runtime.db.execute(holdCampaign(ref, reason, until));
     throw new JobDeferred(until, payload);
   };
@@ -3124,10 +3350,21 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
       throw new JobDeferred(until, payload);
     }
     if (Date.parse(row.probeWaitUntil) > dbNow) await hold('list_probe', row.probeWaitUntil);
+    // Hold before passing the list probe when safety feedback is >= 5 min behind so a probe cannot clear blind.
+    if (row.autoPause && (row.priorityLagMs ?? 0) >= FEEDBACK_LAG_HOLD_MS) {
+      return hold('feedback_lag', new Date(dbNow + 60_000).toISOString());
+    }
     const unhealthy = await campaignHealth(runtime.db, a, row.id, true, probe);
     if (unhealthy) return quarantine(unhealthy);
     await runtime.db.execute(clearProbe(ref));
   } else if (probe !== null) probeLeft = probe - row.expanded;
+  // Hold new releases (never a manual pause) when priority safety feedback (bounces/complaints) is >= 5 minutes behind
+  // so auto-pause does not send blind; routine opens/clicks lagging never hold a send (unless running without a priority
+  // queue), and stale samples (> 5 min old) expire. Queue-level lag is installation-wide because Cloudflare Queues
+  // reports per-queue age, not per-workspace; workspaces with autoPause disabled are never held.
+  if (row.autoPause && (row.priorityLagMs ?? 0) >= FEEDBACK_LAG_HOLD_MS) {
+    return hold('feedback_lag', new Date(dbNow + 60_000).toISOString());
+  }
   if (row.autoPause && (!row.healthCheckedAt || nowMs - Date.parse(row.healthCheckedAt) >= AUTO_PAUSE.intervalMs)) {
     const unhealthy = await campaignHealth(runtime.db, a, row.id, hosted);
     if (unhealthy) return quarantine(unhealthy);
@@ -3250,7 +3487,7 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
   // Waiting on balance: billing.restored wakes the run as soon as credit lands; otherwise look again in an hour.
   if (released.balanceUntil && !released.completed) throw new JobDeferred(released.balanceUntil, payload);
   if (released.hostedUntil) throw new JobDeferred(new Date(Math.min(Date.parse(released.hostedUntil),dbNow+QUOTA_REFRESH_MS)).toISOString(),payload);
-  if (released.completed) return 'done';
+  if (released.completed) { if (!released.count) await settle(); return 'done'; }
   if (sesCapacity <= buffered!.total + released.count) return hold('ses_daily_quota', quotaUntil);
   if (shareCapacity <= buffered!.total + released.count) return hold('hosted_daily_quota', quotaUntil);
   // A rate-shared continuation runs once this release has been paid for at the campaign's share.

@@ -62,12 +62,16 @@ for (const [purpose, queueId] of Object.entries(stage.queues)) {
 // archive-only Worker consumers; operators replay only from the authenticated quarantine records.
 // feedback-v2 is the tagged feedback lane the Worker writes to; the original feedback queue
 // stays as the legacy lane until drained (api/wrangler.<stage>.jsonc).
-for (const purpose of ['webhooks','feedback-dlq','feedback-v2','feedback-v2-dlq']) {
+for (const purpose of ['webhooks','feedback-dlq','feedback-v2','feedback-priority','feedback-v2-dlq']) {
   const id = stage.extraQueues?.[purpose];
   new cf.Queue(purpose, { accountId: cloudflareAccountId, queueName: `${queuePrefix}-${purpose}` }, {
     ...(id ? adopt(`${cloudflareAccountId}/${id}`, cloudflare) : { provider: cloudflare, protect: true }),
   });
 }
+// The second classifier in the content screen's shadow (api/src/screen-shadow.ts): each message is one request the
+// screen made, text included, waiting for the Worker's consumer. An experiment: not protected, so taking it out of the
+// Worker's config and then from here removes it, and a message nobody consumed is gone after ten minutes.
+new cf.Queue('jevf', { accountId: cloudflareAccountId, queueName: `${queuePrefix}-jevf`, settings: { messageRetentionPeriod: 600 } }, { provider: cloudflare });
 const bucket = `${stage.prefix}-attachments`;
 // Both buckets already hold attachments; adopt each in its stage's account.
 new cf.R2Bucket("attachments", { accountId: cloudflareAccountId, name: bucket, jurisdiction: "default", storageClass: "Standard" }, {

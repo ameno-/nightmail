@@ -72,7 +72,9 @@
     "API_RATE_LIMIT_PER_MINUTE": "10000",
     "WORK_QUEUE_NAME": "nightmail-dev-work",
     "WEBHOOK_QUEUE_NAME": "nightmail-dev-webhooks",
+    "JEVF_QUEUE_NAME": "nightmail-dev-jevf",
     "FEEDBACK_QUEUE_NAME": "nightmail-dev-feedback-v2",
+    "FEEDBACK_PRIORITY_QUEUE_NAME": "nightmail-dev-feedback-priority",
     "FEEDBACK_DLQ_NAME": "nightmail-dev-feedback-v2-dlq",
     "LEGACY_FEEDBACK_DLQ_NAME": "nightmail-dev-feedback-dlq",
     // The queue the previous Worker version wrote to; consumed until it and its dead letters are drained, then removed.
@@ -87,10 +89,11 @@
     // The handoff's Ed25519 key is the BANE_SUPPORT_SIGNING_KEY secret.
     "BANE_SUPPORT_URL": "https://support.dev.nightmail.dev/chat"
   },
-  "durable_objects": { "bindings": [{ "name": "DISPATCHER", "class_name": "DispatcherShard" }] },
+  // CAMPAIGN_ROOMS: one per campaign, who has it open in the dashboard (src/campaign-room.ts).
+  "durable_objects": { "bindings": [{ "name": "DISPATCHER", "class_name": "DispatcherShard" }, { "name": "CAMPAIGN_ROOMS", "class_name": "CampaignRoom" }] },
   // Run HTTP requests next to the nightmail/dev database (PlanetScale aws-us-east-2).
   "placement": { "region": "aws:us-east-2" },
-  "migrations": [{ "tag": "transfer-from-bane-dev", "transferred_classes": [{ "from_script": "bane-dev", "from": "DispatcherShard", "to": "DispatcherShard" }] }],
+  "migrations": [{ "tag": "transfer-from-bane-dev", "transferred_classes": [{ "from_script": "bane-dev", "from": "DispatcherShard", "to": "DispatcherShard" }] }, { "tag": "campaign-rooms", "new_sqlite_classes": ["CampaignRoom"] }],
   // Hyperdrive config `nightmail-dev` in anomaly-dev (caching disabled, 10 origin connections). The database allows 25 (22
   // for non-superusers), and Hyperdrive can open a second pool with its own allocation, so two pools must fit: at 15,
   // a second pool exhausted the database and Postgres refused connections mid-E2E (2026-11-11).
@@ -103,14 +106,22 @@
       { "binding": "WEBHOOK_QUEUE", "queue": "nightmail-dev-webhooks" },
       { "binding": "FEEDBACK_DLQ", "queue": "nightmail-dev-feedback-v2-dlq" },
       { "binding": "LEGACY_FEEDBACK_DLQ", "queue": "nightmail-dev-feedback-dlq" },
-      { "binding": "FEEDBACK_QUEUE", "queue": "nightmail-dev-feedback-v2" }
+      { "binding": "FEEDBACK_QUEUE", "queue": "nightmail-dev-feedback-v2" },
+      { "binding": "FEEDBACK_PRIORITY_QUEUE", "queue": "nightmail-dev-feedback-priority" },
+      // The second classifier in the content screen's shadow (src/screen-shadow.ts). Nothing is sent to it without JEVF_API_KEY.
+      { "binding": "JEVF_QUEUE", "queue": "nightmail-dev-jevf" }
     ],
     "consumers": [
+      // The only place the second classifier is called: four calls an invocation (and the database's connection, of an
+      // invocation's six) by two invocations, eight calls in all. A batch whose rows could not be written is delivered
+      // again twice, then gone: no dead-letter queue, and a redelivered request is recorded as lost, never asked again.
+      { "queue": "nightmail-dev-jevf", "max_batch_size": 4, "max_batch_timeout": 1, "max_retries": 2, "max_concurrency": 2 },
       // Wake messages are hints, not jobs: drain Postgres once for hints already waiting together.
       { "queue": "nightmail-dev-work", "max_batch_size": 1, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 8 },
       // Start an idle callback immediately; arrivals during its DB round trip form the next batch.
       { "queue": "nightmail-dev-webhooks", "max_batch_size": 8, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 2 },
-      { "queue": "nightmail-dev-feedback-v2", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 1, "dead_letter_queue": "nightmail-dev-feedback-v2-dlq" },
+      { "queue": "nightmail-dev-feedback-v2", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 6, "dead_letter_queue": "nightmail-dev-feedback-v2-dlq" },
+      { "queue": "nightmail-dev-feedback-priority", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 4, "dead_letter_queue": "nightmail-dev-feedback-v2-dlq" },
       // Legacy lane (untagged items from the previous version); remove with LEGACY_FEEDBACK_QUEUE_NAME once drained.
       { "queue": "nightmail-dev-feedback", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 1, "dead_letter_queue": "nightmail-dev-feedback-dlq" },
       // Both DLQs archive to PostgreSQL/R2, never ingest. Cross-redrive keeps storage outages recoverable.
@@ -124,7 +135,9 @@
     { "name": "ADMISSION", "namespace_id": "8794001", "simple": { "limit": 6000, "period": 60 } },
     { "name": "SNS_CERT_MISSES", "namespace_id": "8794002", "simple": { "limit": 60, "period": 60 } },
     // Analytics batches per client address a minute (src/analytics.ts ANALYTICS_BATCHES_PER_MINUTE).
-    { "name": "ANALYTICS_INGEST", "namespace_id": "8794003", "simple": { "limit": 60, "period": 60 } }
+    { "name": "ANALYTICS_INGEST", "namespace_id": "8794003", "simple": { "limit": 60, "period": 60 } },
+    // Database disk cards a minute per storage threshold (src/disk-alert.ts).
+    { "name": "DISK_ALERT", "namespace_id": "8794004", "simple": { "limit": 1, "period": 60 } }
   ],
   "observability": {
     "enabled": true,

@@ -1,6 +1,6 @@
 import { createPrivateKey, hkdfSync } from 'node:crypto';
 import { z } from 'zod';
-import { ApiError } from './core.js';
+import { ApiError, log } from './core.js';
 import type { Config } from './core.js';
 import { envNames, settingNames } from './brand.js';
 import { mailServerHosts } from './mail-servers.js';
@@ -86,8 +86,15 @@ const values = z.object({
   // for operators and nothing is posted. Treat as a secret.
   ABUSE_SLACK_WEBHOOK_URL: optional(z.string().url().max(2048).refine(value => value.startsWith('https://hooks.slack.com/'), 'Use a Slack incoming webhook URL.')),
   // Hosted only: a Slack incoming webhook for the operator alerts (src/operator-alerts.ts): a new sign-up, a pause, a
-  // marketing hold, the daily limit, a full customer share, slow sign-in mail. Unset, nothing is posted. Treat as a secret.
+  // marketing hold, the daily limit, a full customer share, slow sign-in mail; and the health alerts (src/health.ts): a
+  // queue, the jobs, a campaign, a route or the database falling behind. Unset, nothing is posted. Treat as a secret.
   OPERATOR_SLACK_WEBHOOK_URL: optional(z.string().url().max(2048).refine(value => value.startsWith('https://hooks.slack.com/'), 'Use a Slack incoming webhook URL.')),
+  // The database's disk in GB, optional: the Health page shows the database's size against it (src/health.ts).
+  DATABASE_DISK_GB: optional(z.coerce.number().positive().max(1_000_000)),
+  // Hosted only, optional: the signing secret of the PlanetScale webhook that reports the database disk (src/disk-alert.ts).
+  // Set, a delivery must also carry a matching X-PlanetScale-Signature. Treat as a secret. Its length is checked in
+  // loadConfig, not here: an optional secret that is wrong must not stop the installation.
+  PLANETSCALE_WEBHOOK_SECRET: optional(z.string()),
   // Hosted only. Reserved for a later release: monitoring only observes, and nothing reads this.
   NIGHTMAIL_ABUSE_ENFORCE: z.enum(['true','false']).default('false'),
   STRIPE_SECRET_KEY: optional(z.string().regex(/^(?:sk|rk)_(?:test|live)_[A-Za-z0-9_]+$/)),
@@ -142,6 +149,14 @@ const values = z.object({
   // (about 7 KB for a message with few link hosts): src/screen.ts chunksFor.
   JEV_MESSAGE_LIMIT_BYTES: z.preprocess(v => v === '' ? undefined : v, z.coerce.number().int().min(4096).max(256 * 1024).default(SEND_LIMITS.screen.messageBytes)),
   JEV_CAMPAIGN_LIMIT_BYTES: z.preprocess(v => v === '' ? undefined : v, z.coerce.number().int().min(4096).max(256 * 1024).default(SEND_LIMITS.screen.campaignBytes)),
+  // A second classifier in the shadow of the content screen (src/screen-shadow.ts): each request the screen makes is
+  // repeated to it afterwards and both answers are kept (screen_comparisons). It decides nothing. Off without the key,
+  // which is a secret.
+  JEVF_API_KEY: optional(z.string().min(1)),
+  JEVF_ENDPOINT: z.preprocess(v => v === '' ? undefined : v, z.string().url().refine(v => v.startsWith('https://'), 'Use an https URL.').default('https://jevf-inference.opencode.ai/v1/systemone')),
+  JEVF_MODEL: z.preprocess(v => v === '' ? undefined : v, z.string().min(1).max(100).default('jevf')),
+  JEVF_DEADLINE_MS: z.preprocess(v => v === '' ? undefined : v, z.coerce.number().int().min(100).max(30000).default(5000)),
+  JEVF_MAX_CONCURRENCY: z.preprocess(v => v === '' ? undefined : v, z.coerce.number().int().min(1).max(64).default(8)),
 });
 // Each NIGHTMAIL_<x> setting is also read under its earlier names (brand.ts settingNames: BANE_<x>, then MX_<x>), and
 // PREVIOUS_NIGHTMAIL_ROOT_SECRET as PREVIOUS_BANE_ROOT_SECRET. The NIGHTMAIL_ name wins. Remove after rename cleanup.
@@ -158,6 +173,17 @@ export function requirePlatformAccount(account: Config['platformAccount']): stri
   return account;
 }
 const list = (value: string) => [...new Set(value.split(',').map(v => v.trim()).filter(Boolean))];
+let signingSecretIgnored = false;
+/**
+ * PlanetScale's signing secret, or undefined for one that cannot be it (under 32 or over 200 characters): the disk
+ * alert then checks its token alone, as when the secret is unset. Said once per process, never with the value.
+ */
+function planetscaleSecret(value: string | undefined) {
+  if (!value || value.length >= 32 && value.length <= 200) return value;
+  if (!signingSecretIgnored) log('warn', { code: 'PLANETSCALE_WEBHOOK_SECRET_IGNORED', message: 'PLANETSCALE_WEBHOOK_SECRET is not 32 to 200 characters, so it is not used: the database disk alert checks its Authorization header alone.' });
+  signingSecretIgnored = true;
+  return undefined;
+}
 // Separate from Better Auth's signing/encryption uses even though installers manage one root secret.
 export function deriveEncryptionKey(secret: string): string {
   return Buffer.from(hkdfSync('sha256', secret, 'opensend:keys:v1', 'webhook-encryption', 32)).toString('hex');
@@ -234,6 +260,8 @@ export function loadConfig(input: Record<string, unknown>): Config {
     abuseMonitoring: v.MULTI_TENANT==='true' && v.NIGHTMAIL_ABUSE_MONITORING ? { since: new Date(v.NIGHTMAIL_ABUSE_MONITORING).toISOString() } : undefined,
     abuseEnforce: v.MULTI_TENANT==='true' && v.NIGHTMAIL_ABUSE_ENFORCE==='true', abuseSlackWebhookUrl: v.MULTI_TENANT==='true' ? v.ABUSE_SLACK_WEBHOOK_URL : undefined,
     operatorSlackWebhookUrl: v.MULTI_TENANT==='true' ? v.OPERATOR_SLACK_WEBHOOK_URL : undefined,
+    databaseDiskBytes: v.DATABASE_DISK_GB === undefined ? undefined : v.DATABASE_DISK_GB * 1024 ** 3,
+    planetscaleWebhookSecret: v.MULTI_TENANT==='true' ? planetscaleSecret(v.PLANETSCALE_WEBHOOK_SECRET) : undefined,
     billing: v.MULTI_TENANT==='true' ? { stripe: v.STRIPE_SECRET_KEY && v.STRIPE_WEBHOOK_SECRET ? { secretKey: v.STRIPE_SECRET_KEY, webhookSecret: v.STRIPE_WEBHOOK_SECRET, automaticTax: v.STRIPE_AUTOMATIC_TAX === 'true', apiBase: v.STRIPE_API_BASE.replace(/\/$/, '') } : undefined } : undefined,
     placementShadow: v.MULTI_TENANT === 'true' && v.NIGHTMAIL_PLACEMENT_SHADOW === 'true', placementDblZone: v.NIGHTMAIL_PLACEMENT_DBL_ZONE,
     byoV2: v.MULTI_TENANT === 'true' && v.NIGHTMAIL_BYO_V2 === 'true', byoV5TemplateUrl: v.BYO_V5_TEMPLATE_URL, byoEventsOrigin: v.BYO_EVENTS_ORIGIN,
@@ -253,6 +281,8 @@ export function loadConfig(input: Record<string, unknown>): Config {
     snsTopicArns: [], inboundTopicArns: [],
     reputationAlertUrl: v.REPUTATION_ALERT_SLACK_URL,
     screen: v.TYPESAFE_API_KEY ? { apiKey: v.TYPESAFE_API_KEY, endpoint: v.JEV_ENDPOINT, model: v.JEV_MODEL, mode: v.JEV_SCREEN_MODE, threshold: v.JEV_SCREEN_THRESHOLD } : undefined,
+    // Only beside a content screen: with no screen there is no request to repeat.
+    shadow: v.TYPESAFE_API_KEY && v.JEVF_API_KEY ? { apiKey: v.JEVF_API_KEY, endpoint: v.JEVF_ENDPOINT, model: v.JEVF_MODEL, deadlineMs: v.JEVF_DEADLINE_MS, maxConcurrency: v.JEVF_MAX_CONCURRENCY } : undefined,
     screenLimits: { messageBytes: v.JEV_MESSAGE_LIMIT_BYTES, campaignBytes: v.JEV_CAMPAIGN_LIMIT_BYTES },
     apiRateLimitPerMinute: v.API_RATE_LIMIT_PER_MINUTE,
     configurationSets: { transactional: '', marketing: '' },

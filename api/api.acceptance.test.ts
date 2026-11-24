@@ -1330,7 +1330,14 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
     const joinedByEmail=await login(undefined,link.url), invitee=sessionOf(joinedByEmail);
     assert.equal(landed(joinedByEmail),link.url);
     assert.deepEqual(await attempt(),{acr,provider:null,provider_hd:null,outcome:'signed_in:invitation'});
-    assert.equal((await request(`/v1/workspaces/invitations/${link.id}`,'GET',invitee)).status,200);
+    // The review the dashboard shows before joining: the workspace's name as plain words, the inviter by address.
+    const {rows:[staffNames]}=await db.query('SELECT w.name,u.id AS inviter,u.name AS inviter_name FROM workspace_invitations i JOIN workspaces w ON w.id=i.workspace_id JOIN nightmail_users u ON u.id=i.inviter_id WHERE i.id=$1',[link.id]);
+    await db.query('UPDATE workspaces SET name=$2 WHERE id=$1',[staffWorkspace,'Acme, Inc. — call 1 800 555 0199 or see nightmail-dev.example.com/restore']);
+    await db.query('UPDATE nightmail_users SET name=$2 WHERE id=$1',[staffNames.inviter,'Nightmail Security Team (security@nightmail.dev)']);
+    const review=await request(`/v1/workspaces/invitations/${link.id}`,'GET',invitee), shown=await review.json() as Record<string,unknown>;
+    assert.deepEqual([review.status,shown.workspaceName,shown.inviterName,typeof shown.inviterEmail,shown.role,shown.status],[200,'Acme Inc call or see','Nightmail Security Team','string','member','pending']);
+    await db.query('UPDATE workspaces SET name=$2 WHERE id=$1',[staffWorkspace,staffNames.name]);
+    await db.query('UPDATE nightmail_users SET name=$2 WHERE id=$1',[staffNames.inviter,staffNames.inviter_name]);
     assert.deepEqual(await (await request(`/v1/workspaces/invitations/${link.id}/accept`,'POST',invitee,{})).json(),{workspaceId:staffWorkspace});
     assert.deepEqual((await db.query("SELECT mailbox_proved,mailbox_proved_at>now()-interval '1 minute' AS fresh FROM nightmail_users WHERE id=$1",[accountOf(joinedByEmail)])).rows[0],{mailbox_proved:address,fresh:true});
     // Accepted, the link is spent: another subject with the same verified address following it is refused.
@@ -1461,6 +1468,13 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
     assert.equal(response.status,200);
     return await response.json() as Places & { letIn: number; emailed: number; notEmailed: number | null };
   };
+  // The database disk alert's PlanetScale settings (src/disk-alert.ts) are read by a full operator, each read audited.
+  const diskSetup = await request('/v1/operator/database-disk-alert','GET',staff.session);
+  assert.deepEqual([diskSetup.status,await diskSetup.json()],[200,(await import('./src/disk-alert.js')).diskAlertSetup(runtime.config)]);
+  await db.query("UPDATE platform_operators SET role='operator:read' WHERE user_id=$1",[staff.account]);
+  assert.equal((await request('/v1/operator/database-disk-alert','GET',staff.session)).status,403);
+  await db.query("UPDATE platform_operators SET role='operator' WHERE user_id=$1",[staff.account]);
+  assert.equal((await db.query("SELECT count(*)::int AS n FROM hosted_operator_audit WHERE action='operator-read-disk-alert-setup' AND workspace_id='platform' AND operator_id=$1",[staff.account])).rows[0].n,1);
   // Closed: no place open, so a new person is waitlisted exactly as before.
   const before = await places();
   await setLimit(before.signedUp+before.held);
@@ -2615,6 +2629,24 @@ function page(reply: Reply): Json[] {
   assert.ok(Array.isArray(body.data), diagnostic(reply));
   assert.ok(body.nextCursor === null || typeof body.nextCursor === 'string', diagnostic(reply));
   return body.data;
+}
+// A list's members counted the way readLists counted them on every load before migration 405: every membership joined to
+// its contact. The counts the API shows are kept by triggers instead and must equal this after any history of writes.
+type ListCounts = { total: number; subscribed: number; unsubscribed: number; unknown: number; suppressed: number };
+const NO_MEMBERS: ListCounts = { total: 0, subscribed: 0, unsubscribed: 0, unknown: 0, suppressed: 0 };
+async function countedMembers(db: pg.Client, listId: string): Promise<ListCounts> {
+  return (await db.query(`SELECT count(*)::int AS total, count(*) FILTER (WHERE NOT c.suppressed AND c.marketing_consent='subscribed')::int AS subscribed,
+      count(*) FILTER (WHERE NOT c.suppressed AND c.marketing_consent='unsubscribed')::int AS unsubscribed, count(*) FILTER (WHERE NOT c.suppressed AND c.marketing_consent='unknown')::int AS unknown,
+      count(*) FILTER (WHERE c.suppressed)::int AS suppressed
+    FROM audience_list_members m JOIN audience_contacts c ON c.workspace_id=m.workspace_id AND c.id=m.contact_id WHERE m.list_id=$1 AND c.deleted_at IS NULL`, [listId])).rows[0];
+}
+// Resolves once a backend is waiting for a lock inside a statement matching `statement`: the half of a race that must wait.
+async function waitingOnLock(observer: pg.Client, statement: string) {
+  for (const until = Date.now() + 4000; ;) {
+    if ((await observer.query(`SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock' AND query ~* $1`, [statement])).rowCount) return;
+    assert.ok(Date.now() < until, `No statement matching ${statement} waited for a lock.`);
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
 }
 async function keyFixture(t: TestContext, options: { permissions?: string[]; domains?: string[] } = {}): Promise<Key> {
   const body = ok(await http('POST', '/v1/api-keys', MANAGER, {
@@ -9088,6 +9120,10 @@ describe('Hosted MCP OAuth and tools', () => {
         ['POST', '/v1/operator/ui-note-keys', { name: 'more' }], ['POST', `/v1/operator/ui-note-keys/${key.id}/revoke`, {}], ['GET', '/v1/operator/workspaces'], ['GET', '/v1/operator/actions']] as const)
         error(await send(method, path, agent, body), 403, 'OPERATOR_REQUIRED');
       assert.equal((await send('HEAD', '/v1/operator/ui-notes', agent)).status, 403);
+      // The one other thing an agent key reads: the installation's health (src/health.ts), the open alerts and the rollup.
+      const health = ok(await send('GET', '/v1/operator/health', agent));
+      assert.deepEqual([Array.isArray(health.alerts), Array.isArray(health.queues), 'memory' in health], [true, true, false]);
+      error(await send('POST', '/v1/operator/health', agent, {}), 403, 'OPERATOR_REQUIRED');
       for (const path of ['/v1/me', '/v1/emails', '/v1/api-keys']) error(await send('GET', path, agent), 401, 'AUTH_INVALID');
       // The agent's script, end to end through the same key: list with screenshots, read one, set its status and PR.
       const { mkdtempSync, readFileSync, rmSync } = await import('node:fs'), { tmpdir } = await import('node:os'), { join } = await import('node:path');
@@ -10365,6 +10401,510 @@ describe('Lists, compound segments, imports and exports', () => {
     const [bulk] = page(await http('GET', `/v1/contacts/${laterContact.id}/consent`, key.secret));
     assert.deepEqual({ status: bulk.status, source: bulk.source, evidence: bulk.evidence }, { status: 'subscribed', source: 'audienceql', evidence: 'Signed up at the event' });
   });
+
+  // A list's counts are kept by the triggers of migration 405, not counted on each load. The tests below compare what
+  // the API shows with a count of the memberships (countedMembers) and with the numbers each scenario must produce.
+  const exactly = async (db: pg.Client, key: Key, listId: string, expected: Partial<ListCounts>, label: string) => {
+    const shown = ok(await http('GET', `/v1/lists/${listId}`, key.secret)).counts;
+    assert.deepEqual(shown, await countedMembers(db, listId), `${label}: the counts shown are the memberships, counted`);
+    assert.deepEqual(shown, { ...NO_MEMBERS, ...expected }, label);
+  };
+  const keptCounts = async (db: pg.Client, listId: string): Promise<ListCounts & { rows: number }> => (await db.query(`SELECT coalesce(sum(subscribed+unsubscribed+unknown+suppressed),0)::int AS total, coalesce(sum(subscribed),0)::int AS subscribed,
+    coalesce(sum(unsubscribed),0)::int AS unsubscribed, coalesce(sum(unknown),0)::int AS unknown, coalesce(sum(suppressed),0)::int AS suppressed, count(*)::int AS rows FROM audience_list_counts WHERE list_id=$1`, [listId])).rows[0];
+  const recount = async (db: pg.Client, list: Json) => (await db.query('SELECT * FROM reconcile_audience_list_counts($1,$2)', [list.workspaceId, list.id])).rows;
+  const importInto = async (key: Key, listId: string, emails: string[], body?: Json) => {
+    const preview = ok(await http('POST', '/v1/contact-imports', key.secret, { csv: `email\n${emails.join('\n')}\n`, listId, mapping: { email: 'email' } }), 201);
+    for (let attempt = 0; ; attempt++) {
+      const reply = await http('POST', `/v1/contact-imports/${preview.id}/commit`, key.secret, body);
+      if (reply.status !== 503 || reply.body?.error?.code !== 'IMPORT_COMMIT_BUSY' || attempt >= 20) return reply;
+      await new Promise(resolve => setTimeout(resolve, 40 * (attempt + 1)));
+    }
+  };
+  const attested = { consent: { status: 'subscribed', evidence: 'Opted in at checkout' } };
+  // A list's members, each deleted with the test (an import's contacts have no other owner).
+  const membersOf = async (t: TestContext, key: Key, listId: string) => {
+    const rows = await allPages(`/v1/lists/${listId}/members`, key.secret);
+    for (const row of rows) cleanup(t, async () => { ok(await http('DELETE', `/v1/contacts/${row.id}`, key.secret), [200, 404]); });
+    return rows;
+  };
+  const contactsFor = async (t: TestContext, key: Key, n: number, state?: 'subscribed' | 'unsubscribed') => {
+    const rows: Json[] = [];
+    for (let i = 0; i < n; i++) { const row = await resource(t, key.secret, '/v1/contacts', { email: address() }); if (state) ok(await consent(key.secret, row.id, state)); rows.push(row); }
+    return rows;
+  };
+  // The suppression SES feedback writes for one address (operations.ts and sending.ts share mergeSuppression), and its lift (scripts/lift-suppression.ts).
+  const suppress = async (db: pg.Client, wid: string, email: string) => {
+    const [{ drizzle }, { sql }, { mergeSuppression }] = await Promise.all([import('drizzle-orm/node-postgres'), import('drizzle-orm'), import('./src/db/audience.js')]);
+    await drizzle(db).execute(sql`INSERT INTO audience_contacts AS c(id,workspace_id,email,suppressed,suppression_reason,suppressed_at) VALUES (${unique('con')},${wid},${email},true,'hard_bounce',now())
+      ON CONFLICT ON CONSTRAINT audience_contacts_email_scope DO UPDATE SET ${mergeSuppression},updated_at=now()`);
+  };
+  const lift = (db: pg.Client, id: string) => db.query('UPDATE audience_contacts SET suppressed = false, suppression_reason = NULL, suppressed_at = NULL, updated_at = now() WHERE id = $1 AND suppressed', [id]);
+  const join = (db: pg.Client, list: Json, ...contactIds: string[]) => db.query('INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,unnest($3::text[]) ON CONFLICT DO NOTHING', [list.workspaceId, list.id, contactIds]);
+  const membershipsOf = async (db: pg.Client, contactId: string) => (await db.query('SELECT count(*)::int AS n FROM audience_list_members WHERE contact_id=$1', [contactId])).rows[0].n as number;
+  const bulk = async (key: Key, statement: string, extra: Json = {}) => {
+    const plan = ok(await http('POST', '/v1/audience-query/plan', key.secret, { statement }), 201);
+    return http('POST', '/v1/audience-query/apply', key.secret, { planId: plan.id, ...extra });
+  };
+
+  test('list counts: every write that changes a membership or a contact\'s state moves them, a failed or rolled-back write moves nothing, and a recount has nothing to correct', async t => {
+    const key = await keyFixture(t), db = await fixtureDatabase(t);
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('counted') }), other = await resource(t, key.secret, '/v1/lists', { name: unique('counted-too') });
+    const counts = (expected: Partial<ListCounts>, label: string) => exactly(db, key, list.id, expected, label);
+    await counts({}, 'a new list');
+    const [existing] = await contactsFor(t, key, 1, 'subscribed'), fresh = [address(), address(), address()];
+    assert.equal(ok(await importInto(key, list.id, [existing!.email, ...fresh])).imported, 4);
+    const rows = await membersOf(t, key, list.id), [a, b, c] = fresh.map(email => rows.find(row => row.email === email)!) as [Json, Json, Json];
+    await counts({ total: 4, subscribed: 1, unknown: 3 }, 'an import without consent');
+    assert.equal(ok(await importInto(key, list.id, [existing!.email, ...fresh], attested)).subscribed, 3);
+    await counts({ total: 4, subscribed: 4 }, 'the same addresses again with consent: no membership twice, the three undecided subscribed');
+    ok(await consent(key.secret, a.id, 'unsubscribed'));
+    await counts({ total: 4, subscribed: 3, unsubscribed: 1 }, 'an opt-out');
+    // Suppression and its lift, written as SES feedback and the operator's script write them (the simulated-SES test
+    // "a list's counts follow a bounce..." runs the feedback batch, the feedback job and the script themselves).
+    await suppress(db, list.workspaceId, b.email);
+    await counts({ total: 4, subscribed: 2, unsubscribed: 1, suppressed: 1 }, 'a suppression');
+    ok(await consent(key.secret, b.id, 'unsubscribed'));
+    await counts({ total: 4, subscribed: 2, unsubscribed: 1, suppressed: 1 }, 'a suppressed contact opts out: suppression takes precedence');
+    await lift(db, b.id);
+    await counts({ total: 4, subscribed: 2, unsubscribed: 2 }, 'the suppression lifted');
+    // What changes no state, or another list, adds nothing here.
+    ok(await http('PATCH', `/v1/contacts/${c.id}`, key.secret, { name: 'Renamed' }));
+    assert.equal(ok(await http('POST', `/v1/lists/${other.id}/members`, key.secret, { contactIds: [a.id, c.id] })).added, 2);
+    await counts({ total: 4, subscribed: 2, unsubscribed: 2 }, 'a profile edit and another list\'s members');
+    await exactly(db, key, other.id, { total: 2, subscribed: 1, unsubscribed: 1 }, 'the other list');
+    // One membership at a time: removing or adding it twice counts once.
+    for (let i = 0; i < 2; i++) ok(await http('DELETE', `/v1/lists/${list.id}/members/${b.id}`, key.secret));
+    await counts({ total: 3, subscribed: 2, unsubscribed: 1 }, 'a member removed, twice');
+    assert.equal(ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [b.id, a.id] })).added, 1);
+    await counts({ total: 4, subscribed: 2, unsubscribed: 2 }, 'the member added back beside one already there');
+    // AudienceQL bulk changes: consent, removal, addition.
+    assert.equal(ok(await bulk(key, `UPDATE contacts SET consent = 'subscribed' WHERE list = '${list.id}' AND consent = 'unsubscribed'`, { confirmResubscribe: true, evidence: 'Asked to come back' })).affected, 2);
+    await counts({ total: 4, subscribed: 4 }, 'a bulk consent change');
+    assert.equal(ok(await bulk(key, `REMOVE contacts FROM LIST '${list.id}' WHERE list = '${other.id}'`)).affected, 2);
+    await counts({ total: 2, subscribed: 2 }, 'a bulk removal');
+    assert.equal(ok(await bulk(key, `ADD contacts TO LIST '${list.id}' WHERE list = '${other.id}'`)).affected, 2);
+    await counts({ total: 4, subscribed: 4 }, 'a bulk addition');
+    // A deleted contact leaves every list. An import restores it into the list it names, and no other.
+    ok(await http('DELETE', `/v1/contacts/${a.id}`, key.secret));
+    await counts({ total: 3, subscribed: 3 }, 'a contact deleted');
+    await exactly(db, key, other.id, { total: 1, subscribed: 1 }, 'the other list after the deletion');
+    assert.equal(await membershipsOf(db, a.id), 0);
+    assert.equal(ok(await importInto(key, list.id, [a.email])).imported, 1);
+    await counts({ total: 4, subscribed: 4 }, 'the contact restored by an import, with the consent it had');
+    await exactly(db, key, other.id, { total: 1, subscribed: 1 }, 'the restored contact is back in the imported list only');
+    // The import restores the contact and adds its membership in one statement; a restore and a membership in two
+    // statements (as an import that adds memberships separately issues them) count the same.
+    ok(await http('DELETE', `/v1/contacts/${a.id}`, key.secret));
+    await counts({ total: 3, subscribed: 3 }, 'the contact deleted again');
+    await db.query('UPDATE audience_contacts SET deleted_at = NULL WHERE id = $1', [a.id]);
+    await join(db, list, a.id);
+    await counts({ total: 4, subscribed: 4 }, 'restored, then added to the list, in two statements');
+    // A transaction that rolls back takes its differences with it. Inside it, the kept counts follow each statement.
+    const kept = await keptCounts(db, list.id);
+    await db.query('BEGIN');
+    try {
+      await db.query(`UPDATE audience_contacts SET marketing_consent='unsubscribed' WHERE id=$1`, [b.id]);
+      await db.query('DELETE FROM audience_list_members WHERE list_id=$1 AND contact_id=$2', [list.id, c.id]);
+      await join(db, other, b.id);
+      const { rows: _, ...inside } = await keptCounts(db, list.id);
+      assert.deepEqual([inside, await countedMembers(db, list.id)], [{ total: 3, subscribed: 2, unsubscribed: 1, unknown: 0, suppressed: 0 }, inside]);
+    } finally { await db.query('ROLLBACK'); }
+    assert.deepEqual(await keptCounts(db, list.id), kept);
+    await counts({ total: 4, subscribed: 4 }, 'a rolled-back transaction');
+    // An import that fails after its statement added members (merged properties over the limit) rolls back whole.
+    const full = await resource(t, key.secret, '/v1/contacts', { email: address(), properties: Object.fromEntries(Array.from({ length: 50 }, (_, i) => [`field${i}`, 'x'])) });
+    const refused = ok(await http('POST', '/v1/contact-imports', key.secret, { csv: `Email,Plan\n${address()},pro\n${full.email},pro\n`, listId: list.id, mapping: { email: 'Email', plan: 'Plan' } }), 201);
+    error(await http('POST', `/v1/contact-imports/${refused.id}/commit`, key.secret, attested), 422, 'IMPORT_PROPERTIES_INVALID');
+    await counts({ total: 4, subscribed: 4 }, 'an import that failed after adding members');
+    for (const each of [list, other]) assert.deepEqual(await recount(db, each), [], 'A recount has nothing to correct.');
+    // The listing shows the same numbers; counts=false still leaves them out.
+    const listed = (query: string) => http('GET', `/v1/lists?search=${encodeURIComponent(list.name)}${query}`, key.secret);
+    assert.deepEqual(page(await listed('')).map(row => [row.id, row.counts]), [[list.id, { total: 4, subscribed: 4, unsubscribed: 0, unknown: 0, suppressed: 0 }]]);
+    assert.deepEqual(page(await listed('&counts=false')).map(row => [row.id, row.counts]), [[list.id, null]]);
+    // A deleted list is gone with its counts; its members' other lists keep theirs.
+    ok(await http('DELETE', `/v1/lists/${list.id}`, key.secret));
+    error(await http('GET', `/v1/lists/${list.id}`, key.secret), 404, 'NOT_FOUND');
+    await exactly(db, key, other.id, { total: 1, subscribed: 1 }, 'another list after a list is deleted');
+  });
+
+  test('list counts: an opt-out and a suppression racing an import, a contact deleted while it joins a list, and a list deleted under a pending change are each counted once, whichever commits first', async t => {
+    const key = await keyFixture(t), a = await fixtureDatabase(t), b = await fixtureDatabase(t), observer = await fixtureDatabase(t);
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('raced') }), wid = list.workspaceId;
+    const counts = (expected: Partial<ListCounts>, label: string) => exactly(observer, key, list.id, expected, label);
+    const open = async <T,>(work: () => Promise<T>) => { await a.query('BEGIN'); try { const result = await work(); await a.query('COMMIT'); return result; } catch (cause) { await a.query('ROLLBACK').catch(() => {}); throw cause; } };
+    // 1. The state change first: an opt-out is uncommitted when the import reaches its contact. The import waits for the
+    // contact's row, then counts the membership it adds in the state the opt-out left.
+    const [early, late, bounced, leaving, joining, kept] = await contactsFor(t, key, 6) as [Json, Json, Json, Json, Json, Json];
+    const newcomer = address();
+    await open(async () => {
+      await a.query(`UPDATE audience_contacts SET marketing_consent='unsubscribed' WHERE id=$1`, [early.id]);
+      const importing = importInto(key, list.id, [early.email, newcomer], attested);
+      await waitingOnLock(observer, 'INSERT INTO audience_contacts AS c');
+      await a.query('COMMIT'); await a.query('BEGIN');
+      assert.equal(ok(await importing).subscribed, 1);
+    });
+    await membersOf(t, key, list.id);
+    await counts({ total: 2, subscribed: 1, unsubscribed: 1 }, 'an opt-out committed while the import waited for its contact');
+    // 2. The memberships first: they are uncommitted (as inside an import's transaction, which holds its contacts) when
+    // an opt-out and a bounce arrive for two of them. Both wait for the contact, then find and move the new membership.
+    let optingOut: Promise<Reply>, suppressing: Promise<void>;
+    await open(async () => {
+      await join(a, list, late.id, bounced.id);
+      optingOut = consent(key.secret, late.id, 'unsubscribed'); suppressing = suppress(b, wid, bounced.email);
+      await waitingOnLock(observer, 'audience_contacts.*for update'); await waitingOnLock(observer, 'ON CONFLICT ON CONSTRAINT audience_contacts_email_scope');
+      await counts({ total: 2, subscribed: 1, unsubscribed: 1 }, 'uncommitted memberships are not counted yet');
+    });
+    ok(await optingOut!); await suppressing!;
+    await counts({ total: 4, subscribed: 1, unsubscribed: 2, suppressed: 1 }, 'an opt-out and a bounce that waited for uncommitted memberships');
+    // 3. A contact deleted while it is being added to a list. The deletion first: the addition waits, then finds no contact.
+    await open(async () => {
+      await a.query(`UPDATE audience_contacts SET deleted_at=now(),name=NULL,properties='{}' WHERE id=$1`, [leaving.id]);
+      const adding = http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [leaving.id] });
+      await waitingOnLock(observer, 'audience_contacts.*for share');
+      await a.query('COMMIT'); await a.query('BEGIN');
+      error(await adding, 404, 'NOT_FOUND');
+    });
+    // The addition first: the deletion waits for it, then removes the membership it can now see.
+    await open(async () => {
+      await join(a, list, joining.id);
+      const deleting = http('DELETE', `/v1/contacts/${joining.id}`, key.secret);
+      await waitingOnLock(observer, 'update "audience_contacts" set.*"deleted_at"');
+      await a.query('COMMIT'); await a.query('BEGIN');
+      ok(await deleting);
+    });
+    assert.deepEqual([await membershipsOf(observer, leaving.id), await membershipsOf(observer, joining.id)], [0, 0]);
+    await counts({ total: 4, subscribed: 1, unsubscribed: 2, suppressed: 1 }, 'deleted contacts are in no list, whichever side committed first');
+    // A membership written beside the API for a deleted contact is counted nowhere, as it is listed nowhere. An import
+    // that restores the contact into that list counts it once: the restored contact's membership, not also a new one.
+    await join(a, list, leaving.id);
+    await counts({ total: 4, subscribed: 1, unsubscribed: 2, suppressed: 1 }, 'a deleted contact\'s membership');
+    assert.equal(ok(await importInto(key, list.id, [leaving.email])).imported, 1);
+    await counts({ total: 5, subscribed: 1, unsubscribed: 2, unknown: 1, suppressed: 1 }, 'the contact restored by an import into the list it was already in');
+    // 4. A list deleted while a member's opt-out is uncommitted: the deletion does not wait, and the opt-out's
+    // difference for the deleted list is dropped by the hourly fold. The member's other list counts the opt-out.
+    const doomed = await resource(t, key.secret, '/v1/lists', { name: unique('doomed') });
+    assert.equal(ok(await http('POST', `/v1/lists/${doomed.id}/members`, key.secret, { contactIds: [kept.id] })).added, 1);
+    assert.equal(ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [kept.id] })).added, 1);
+    await open(async () => {
+      await a.query(`UPDATE audience_contacts SET marketing_consent='unsubscribed' WHERE id=$1`, [kept.id]);
+      ok(await http('DELETE', `/v1/lists/${doomed.id}`, key.secret));
+    });
+    await counts({ total: 6, subscribed: 1, unsubscribed: 3, unknown: 1, suppressed: 1 }, 'an opt-out committed after one of its lists was deleted');
+    assert.ok((await keptCounts(observer, doomed.id)).rows > 0, 'The opt-out stored a difference for the list it still saw.');
+    const [{ drizzle }, { foldListCounts }] = await Promise.all([import('drizzle-orm/node-postgres'), import('./src/maintenance.js')]);
+    await drizzle(observer).execute(foldListCounts());
+    assert.equal((await keptCounts(observer, doomed.id)).rows, 0, 'The fold drops a deleted list\'s rows.');
+    assert.deepEqual(await recount(observer, list), []);
+  });
+
+  test('list counts: locks are taken contact first and several contacts in email order, so removing a member while its contact is deleted, or a bulk change crossing SES feedback, waits instead of deadlocking', async t => {
+    const key = await keyFixture(t), a = await fixtureDatabase(t), observer = await fixtureDatabase(t), writer = await fixtureDatabase(t);
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('ordered') }), wid = list.workspaceId;
+    const counts = (expected: Partial<ListCounts>, label: string) => exactly(observer, key, list.id, expected, label);
+    const held = async (membership: Json, work: () => Promise<void>) => {
+      // Another session holds the membership row, so whichever request reaches it stops there mid-transaction.
+      await a.query('BEGIN');
+      try { await a.query('SELECT 1 FROM audience_list_members WHERE list_id=$1 AND contact_id=$2 FOR UPDATE', [list.id, membership.id]); await work(); } finally { await a.query('COMMIT').catch(() => {}); }
+    };
+    const [first, second] = await contactsFor(t, key, 2, 'subscribed') as [Json, Json];
+    assert.equal(ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [first.id, second.id] })).added, 2);
+    // The removal first. It holds the contact before it touches the membership, so the deletion queues behind it on the
+    // contact, holding nothing. (Membership first, as a trigger alone would lock, the two would wait on each other.)
+    let removing: Promise<Reply>, deleting: Promise<Reply>;
+    await held(first, async () => {
+      removing = http('DELETE', `/v1/lists/${list.id}/members/${first.id}`, key.secret);
+      await waitingOnLock(observer, 'delete from "audience_list_members"');
+      await assert.rejects(observer.query('SELECT 1 FROM audience_contacts WHERE id=$1 FOR UPDATE NOWAIT', [first.id]), { code: '55P03' }, 'The removal holds its contact while it waits for the membership.');
+      deleting = http('DELETE', `/v1/contacts/${first.id}`, key.secret);
+      await waitingOnLock(observer, 'update "audience_contacts" set.*"deleted_at"');
+    });
+    ok(await removing!); ok(await deleting!);
+    await counts({ total: 1, subscribed: 1 }, 'a member removed while its contact was being deleted');
+    // The deletion first: it holds the contact and waits for the membership; the removal waits for the contact, holding nothing.
+    await held(second, async () => {
+      deleting = http('DELETE', `/v1/contacts/${second.id}`, key.secret);
+      await waitingOnLock(observer, 'delete from "audience_list_members"');
+      removing = http('DELETE', `/v1/lists/${list.id}/members/${second.id}`, key.secret);
+      await waitingOnLock(observer, 'audience_contacts.*for share');
+    });
+    ok(await deleting!); ok(await removing!);
+    await counts({}, 'a contact deleted while its membership was being removed');
+    assert.deepEqual([await membershipsOf(observer, first.id), await membershipsOf(observer, second.id)], [0, 0]);
+    // Several contacts. SES feedback and imports lock contacts in email order; a bulk change plans them in ID order. Two
+    // contacts whose email order is the reverse of their ID order: feedback holds the first by email, the bulk change
+    // must wait for that one before it locks the other, or each would hold what the other needs.
+    const pair = async () => {
+      // Contact IDs are time-ordered (UUIDv7) since #600, so create z- before a- to make y.id < x.id.
+      for (;;) {
+        const tag = unique('order');
+        const y = await resource(t, key.secret, '/v1/contacts', { email: `z-${tag}@example.com` });
+        const x = await resource(t, key.secret, '/v1/contacts', { email: `a-${tag}@example.com` });
+        if (y.id < x.id) return { tag, byEmail: [x, y] as [Json, Json] };
+      }
+    };
+    const crossings: [string, (tag: string, ids: string[]) => Promise<Reply>][] = [
+      ['a bulk removal', tag => bulk(key, `REMOVE contacts FROM LIST '${list.id}' WHERE email CONTAINS '${tag}'`)],
+      ['a bulk consent change', tag => bulk(key, `UPDATE contacts SET consent = 'subscribed' WHERE email CONTAINS '${tag}'`, { evidence: 'Signed up at the event' })],
+      ['members added in one request', (_, ids) => http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: ids })],
+    ];
+    let expected = { total: 0, subscribed: 0, suppressed: 0 };
+    for (const [label, change] of crossings) {
+      const { tag, byEmail: [x, y] } = await pair(), joins = label !== 'a bulk removal';
+      if (label !== 'members added in one request') assert.equal(ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [x.id, y.id] })).added, 2);
+      await a.query('BEGIN');
+      let changing: Promise<Reply>;
+      try {
+        await suppress(a, wid, x.email);
+        changing = change(tag, [y.id, x.id]);
+        await waitingOnLock(observer, label === 'a bulk consent change' ? 'audience_contacts.*for update' : 'audience_contacts.*for share');
+        // Feedback's next contact is free: the bulk change is still waiting for the first and has not locked this one.
+        await suppress(a, wid, y.email);
+        await a.query('COMMIT');
+      } catch (cause) { await a.query('ROLLBACK').catch(() => {}); throw cause; }
+      // The consent change waited for the bounce, then found its planned contacts changed: refused whole, not half applied.
+      if (label === 'a bulk consent change') error(await changing, 409, 'STALE_AUDIENCE_PLAN'); else ok(await changing);
+      if (joins) expected = { total: expected.total + 2, subscribed: expected.subscribed, suppressed: expected.suppressed + 2 };
+      await counts(expected, `${label} crossing SES feedback for the same two contacts`);
+    }
+    // A bulk addition planned before one of its contacts was deleted is refused whole: nothing is added for the others.
+    const [stays, leaves] = await contactsFor(t, key, 2, 'subscribed') as [Json, Json], tag = unique('stale');
+    for (const person of [stays, leaves]) ok(await http('PATCH', `/v1/contacts/${person.id}`, key.secret, { name: tag }));
+    const plan = ok(await http('POST', '/v1/audience-query/plan', key.secret, { statement: `ADD contacts TO LIST '${list.id}' WHERE name = '${tag}'` }), 201);
+    assert.equal(plan.matched, 2);
+    ok(await http('DELETE', `/v1/contacts/${leaves.id}`, key.secret));
+    error(await http('POST', '/v1/audience-query/apply', key.secret, { planId: plan.id }), 409, 'STALE_AUDIENCE_PLAN');
+    assert.equal(await membershipsOf(observer, stays.id), 0);
+    await counts(expected, 'a bulk addition refused because a planned contact was deleted');
+    // Memberships written beside the API for two deleted contacts, while an import restores both in email order: the
+    // triggers lock contacts in email order too, so the writer waits for the first and holds neither.
+    const { byEmail: [x, y] } = await pair();
+    for (const person of [x, y]) ok(await http('DELETE', `/v1/contacts/${person.id}`, key.secret));
+    await a.query('BEGIN');
+    let writing: Promise<unknown>;
+    try {
+      await a.query('UPDATE audience_contacts SET deleted_at = NULL WHERE id = $1', [x.id]);
+      writing = join(writer, list, y.id, x.id);
+      await waitingOnLock(observer, 'INSERT INTO audience_list_members');
+      await a.query('UPDATE audience_contacts SET deleted_at = NULL WHERE id = $1', [y.id]);
+      await a.query('COMMIT');
+    } catch (cause) { await a.query('ROLLBACK').catch(() => {}); throw cause; }
+    await writing;
+    expected = { total: expected.total + 2, subscribed: expected.subscribed, suppressed: expected.suppressed };
+    await counts({ ...expected, unknown: 2 }, 'memberships written while their deleted contacts were being restored');
+    assert.deepEqual(await recount(observer, list), []);
+  });
+
+  test('list counts: two imports into one list at once, with opt-outs, bounces, deletions and removals for the same people, leave exactly the memberships counted', async t => {
+    const key = await keyFixture(t), db = await fixtureDatabase(t), sessions = [await fixtureDatabase(t), await fixtureDatabase(t)];
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('storm') }), other = await resource(t, key.secret, '/v1/lists', { name: unique('storm-too') }), wid = list.workspaceId;
+    for (let round = 0; round < 3; round++) {
+      const known = await contactsFor(t, key, 12, round % 2 ? 'subscribed' : undefined), both = Array.from({ length: 20 }, address), left = Array.from({ length: 20 }, address), right = Array.from({ length: 20 }, address);
+      assert.equal(ok(await http('POST', `/v1/lists/${other.id}/members`, key.secret, { contactIds: known.map(row => row.id) })).added, 12);
+      if (round) assert.equal(ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: known.slice(6).map(row => row.id) })).added, 6);
+      const emails = known.map(row => row.email);
+      const replies = await Promise.all([
+        importInto(key, list.id, [...both, ...left, ...emails], attested), importInto(key, list.id, [...right, ...emails.toReversed(), ...both]),
+        ...known.slice(0, 3).map(row => consent(key.secret, row.id, 'unsubscribed')),
+        ...known.slice(6, 9).map(row => consent(key.secret, row.id, 'unsubscribed')),
+        ...known.slice(3, 5).map(row => http('DELETE', `/v1/contacts/${row.id}`, key.secret)),
+        ...known.slice(9, 11).map(row => http('DELETE', `/v1/lists/${list.id}/members/${row.id}`, key.secret)),
+        ...sessions.map(async (session, i) => { for (const row of [known[5]!, known[11]!, known[i]!, known[6 + i]!]) await suppress(session, wid, row.email); return undefined; }),
+      ]);
+      for (const reply of replies) if (reply) ok(reply);
+      await membersOf(t, key, list.id);
+      const shown = ok(await http('GET', `/v1/lists/${list.id}`, key.secret)).counts, shownOther = ok(await http('GET', `/v1/lists/${other.id}`, key.secret)).counts;
+      assert.deepEqual([shown, shownOther], [await countedMembers(db, list.id), await countedMembers(db, other.id)], `round ${round}`);
+      assert.deepEqual([await recount(db, list), await recount(db, other)], [[], []], `round ${round}: a recount has nothing to correct`);
+      // Every address either import named is a member exactly once, unless it was deleted or removed while they ran.
+      assert.ok(shown.total >= 60 * (round + 1) + 6 * round, `round ${round}: every imported address is a member`);
+    }
+  });
+
+  test('list counts: the daily recount reports and corrects a difference without making a write wait, and the hourly fold changes no count', async t => {
+    const key = await keyFixture(t), db = await fixtureDatabase(t), a = await fixtureDatabase(t);
+    const [{ drizzle }, { foldListCounts, recountLists }] = await Promise.all([import('drizzle-orm/node-postgres'), import('./src/maintenance.js')]);
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('recounted') }), people = await contactsFor(t, key, 4, 'subscribed') as [Json, Json, Json, Json];
+    const counts = (expected: Partial<ListCounts>, label: string) => exactly(db, key, list.id, expected, label);
+    for (const person of people.slice(0, 3)) ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [person.id] }));
+    ok(await consent(key.secret, people[0].id, 'unsubscribed'));
+    // The fold: a list's four rows become one with the same sums. A write that is uncommitted while it runs keeps its own row.
+    assert.equal((await keptCounts(db, list.id)).rows, 4);
+    await a.query('BEGIN');
+    try {
+      await a.query(`UPDATE audience_contacts SET marketing_consent='unsubscribed' WHERE id=$1`, [people[1].id]);
+      await drizzle(db).execute(foldListCounts());
+      assert.equal((await keptCounts(db, list.id)).rows, 1);
+      await a.query('COMMIT');
+    } catch (cause) { await a.query('ROLLBACK').catch(() => {}); throw cause; }
+    assert.equal((await keptCounts(db, list.id)).rows, 2);
+    await counts({ total: 3, subscribed: 1, unsubscribed: 2 }, 'after a fold with a write in flight');
+    await drizzle(db).execute(foldListCounts());
+    assert.equal((await keptCounts(db, list.id)).rows, 1);
+    await counts({ total: 3, subscribed: 1, unsubscribed: 2 }, 'after a second fold');
+    // A recount in an open transaction: writes to the same list and its contacts do not wait for it, and a write that is
+    // uncommitted when it counts is on neither side of its comparison.
+    await a.query('BEGIN');
+    try {
+      await join(a, list, people[3].id);
+      await db.query('BEGIN');
+      try {
+        assert.deepEqual(await recount(db, list), [], 'An uncommitted membership is neither counted nor stored yet.');
+        ok(await consent(key.secret, people[2].id, 'unsubscribed'));
+        ok(await http('DELETE', `/v1/lists/${list.id}/members/${people[0].id}`, key.secret));
+        await db.query('COMMIT');
+      } catch (cause) { await db.query('ROLLBACK').catch(() => {}); throw cause; }
+      await a.query('COMMIT');
+    } catch (cause) { await a.query('ROLLBACK').catch(() => {}); throw cause; }
+    await counts({ total: 3, subscribed: 1, unsubscribed: 2 }, 'writes made while a recount was open');
+    // A difference is a bug: the daily recount stores what restores the count and says so at error level, once.
+    await db.query('INSERT INTO audience_list_counts(workspace_id,list_id,subscribed,suppressed) VALUES ($1,$2,7,-1)', [list.workspaceId, list.id]);
+    assert.deepEqual(ok(await http('GET', `/v1/lists/${list.id}`, key.secret)).counts, { total: 9, subscribed: 8, unsubscribed: 2, unknown: 0, suppressed: -1 });
+    const logs: Json[] = [];
+    for (const level of ['error', 'warn', 'info'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch { /* not a log line */ } });
+    const runtime = { db: drizzle(db) } as unknown as import('./src/core.js').Runtime;
+    await db.query(`DELETE FROM job_schedule WHERE workspace_id='maintenance:audience-list-counts'`);
+    assert.ok(await recountLists(runtime) >= 1);
+    const drift = logs.filter(line => line.code === 'AUDIENCE_LIST_COUNTS_DRIFT' && line.list === list.id);
+    assert.deepEqual(drift.map(({ level, workspace, subscribed, unsubscribed, unknown, suppressed }) => ({ level, workspace, subscribed, unsubscribed, unknown, suppressed })),
+      [{ level: 'error', workspace: list.workspaceId, subscribed: -7, unsubscribed: 0, unknown: 0, suppressed: 1 }]);
+    await counts({ total: 3, subscribed: 1, unsubscribed: 2 }, 'after the recount');
+    // Elected once a day: a second run the same day recounts nothing.
+    logs.length = 0;
+    assert.equal(await recountLists(runtime), 0);
+    assert.deepEqual(logs.filter(line => String(line.code).startsWith('AUDIENCE_LIST')), []);
+    // A list deleted while a run is under way has nothing to correct: its rows wait for the fold, and that is no difference.
+    const gone = await resource(t, key.secret, '/v1/lists', { name: unique('recount-gone') });
+    assert.equal(ok(await http('POST', `/v1/lists/${gone.id}/members`, key.secret, { contactIds: people.map(person => person.id) })).added, 4);
+    ok(await http('DELETE', `/v1/lists/${gone.id}`, key.secret));
+    const leftover = await keptCounts(db, gone.id);
+    assert.deepEqual([leftover.total, await recount(db, gone), await keptCounts(db, gone.id)], [4, [], leftover]);
+    // Each list is its own transaction with its own time limit: one whose recount cannot finish in time (here, another
+    // recount of it holds its lock) is reported and skipped, and a difference in another list is still found and corrected.
+    const stuck = await resource(t, key.secret, '/v1/lists', { name: unique('recount-stuck') }), lock = [list.workspaceId, stuck.id];
+    await db.query('INSERT INTO audience_list_counts(workspace_id,list_id,unknown) VALUES ($1,$2,3)', [list.workspaceId, list.id]);
+    await db.query(`DELETE FROM job_schedule WHERE workspace_id='maintenance:audience-list-counts'`);
+    await a.query(`SELECT pg_advisory_lock(275816, hashtext($1 || ':' || $2))`, lock);
+    try { assert.ok(await recountLists(runtime, 60_000, 1) >= 1); } finally { await a.query(`SELECT pg_advisory_unlock(275816, hashtext($1 || ':' || $2))`, lock); }
+    assert.deepEqual(logs.filter(line => line.code === 'AUDIENCE_LIST_RECOUNT_FAILED').map(({ level, list: id, databaseCode }) => ({ level, id, databaseCode })), [{ level: 'warn', id: stuck.id, databaseCode: '57014' }]);
+    assert.deepEqual(logs.filter(line => line.code === 'AUDIENCE_LIST_COUNTS_DRIFT' && line.list === list.id).map(({ level, unknown }) => ({ level, unknown })), [{ level: 'error', unknown: -3 }]);
+    assert.deepEqual(logs.filter(line => line.code === 'AUDIENCE_LISTS_RECOUNTED').map(({ level, failed }) => ({ level, failed })), [{ level: 'warn', failed: 1 }]);
+    await counts({ total: 3, subscribed: 1, unsubscribed: 2 }, 'after a run in which one list could not be counted');
+  });
+
+  test('list counts: migration 405 takes its lock between writers without holding other writes up, and 406 fills counts that stay right when writes land while it runs, and stores nothing when run again', async t => {
+    const key = await keyFixture(t), db = await fixtureDatabase(t), a = await fixtureDatabase(t), b = await fixtureDatabase(t);
+    const source = async (file: string) => (await readFile(new URL(`./migrations/${file}`, import.meta.url), 'utf8')).replace(/^--.*$/gm, '');
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('filled') }), people = await contactsFor(t, key, 4, 'subscribed') as [Json, Json, Json, Json];
+    assert.equal(ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: people.slice(0, 2).map(row => row.id) })).added, 2);
+    // Between 405 and 406 the table holds only the differences made since the triggers exist. The API that reads it is
+    // deployed after both; the release before it still counts members itself.
+    await db.query('DELETE FROM audience_list_counts WHERE list_id=$1', [list.id]);
+    assert.deepEqual(ok(await http('GET', `/v1/lists/${list.id}`, key.secret)).counts, NO_MEMBERS);
+    // The fill reads one snapshot. Writes that commit after it, before the fill itself commits, add their own rows.
+    // The file's own statements: three settings that keep the join a hash join whatever the statistics say, and the fill.
+    const fill = (await source('406_audience_list_counts_fill.sql')).split(/;\s*$/m).map(statement => statement.trim()).filter(Boolean);
+    assert.deepEqual(fill.map(statement => statement.split(' ').slice(0, 3).join(' ')), ['SET LOCAL enable_nestloop', 'SET LOCAL enable_mergejoin', 'SET LOCAL work_mem', 'INSERT INTO audience_list_counts']);
+    await a.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
+    try {
+      await a.query('SELECT 1 FROM audience_lists LIMIT 1');
+      assert.equal(ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [people[2].id] })).added, 1);
+      ok(await consent(key.secret, people[0].id, 'unsubscribed'));
+      ok(await http('DELETE', `/v1/lists/${list.id}/members/${people[1].id}`, key.secret));
+      for (const statement of fill.slice(0, 3)) await a.query(statement);
+      const nodes: string[] = [], walk = (plan: Json) => { nodes.push(plan['Node Type']); for (const child of plan.Plans ?? []) walk(child); };
+      walk((await a.query(`EXPLAIN (FORMAT JSON) ${fill[3]}`)).rows[0]['QUERY PLAN'][0].Plan);
+      assert.deepEqual(nodes.filter(node => /Nested Loop|Merge Join/.test(node)), [], 'Memberships and contacts are joined by hash.');
+      await a.query(fill[3]!);
+      await a.query('COMMIT');
+    } catch (cause) { await a.query('ROLLBACK').catch(() => {}); throw cause; }
+    await exactly(db, key, list.id, { total: 2, subscribed: 1, unsubscribed: 1 }, 'filled while writes landed');
+    const filled = await keptCounts(db, list.id);
+    await db.query('BEGIN');
+    try { for (const statement of fill) await db.query(statement); await db.query('COMMIT'); } catch (cause) { await db.query('ROLLBACK').catch(() => {}); throw cause; }
+    assert.deepEqual(await keptCounts(db, list.id), filled, 'A second fill stores nothing for a list that is already right.');
+    // 405's lock: asked for 2 s at a time. A writer's open transaction makes the first attempt give up; a write that
+    // queued behind that attempt goes ahead when it does; the next attempt gets the lock once the writer has committed.
+    const [lock] = /DO \$\$[\s\S]*?END \$\$;/.exec(await source('405_audience_list_counts.sql')) ?? [];
+    assert.ok(lock, 'Migration 405 begins by taking its lock in a retry loop.');
+    for (const session of [a, b, db]) await session.query('SET statement_timeout = 0');
+    await b.query('BEGIN'); await b.query('UPDATE audience_contacts SET updated_at=updated_at WHERE id=$1', [people[3].id]);
+    const writer = setTimeout(() => { void b.query('COMMIT'); }, 2400);
+    try {
+      await a.query('BEGIN');
+      const started = Date.now(), locking = a.query(lock);
+      await waitingOnLock(db, 'LOCK TABLE audience_contacts');
+      // Behind the migration's pending lock, another write waits only until that attempt gives up, not for the writer ahead of it.
+      await db.query('UPDATE audience_contacts SET updated_at=updated_at WHERE id=$1', [people[2].id]);
+      const queued = Date.now() - started;
+      assert.ok(queued < 2800, `A write behind the pending lock waited ${queued} ms.`);
+      await locking;
+      assert.ok(Date.now() - started >= 2400, 'The lock was granted only after the writer committed.');
+      // With the lock held to COMMIT, reads go on; nothing else in the migration reads these tables.
+      assert.deepEqual(ok(await http('GET', `/v1/lists/${list.id}`, key.secret)).counts, { ...NO_MEMBERS, total: 2, subscribed: 1, unsubscribed: 1 });
+      assert.equal(page(await http('GET', `/v1/lists/${list.id}/members`, key.secret)).length, 2);
+    } finally { clearTimeout(writer); await a.query('ROLLBACK').catch(() => {}); await b.query('COMMIT').catch(() => {}); }
+  });
+
+  test('list counts: a session whose first writes were one row each counts 20,000 members, their consent and their removal in time with the rows, not with their square', async t => {
+    // PL/pgSQL keeps a statement's first plan for the session. Planned on small tables, a lookup the planner can answer
+    // from two indexes took the one that reads a whole workspace per row: 50,000 members in one statement then ran
+    // minutes. Each statement here has this session's 5 s limit.
+    const db = await fixtureDatabase(t), wid = unique('wide-workspace'), tag = unique('wide');
+    const list = unique('lst'), n = 20_000, kept = () => keptCounts(db, list);
+    try {
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)', [wid]);
+      await db.query('INSERT INTO audience_lists(id,workspace_id,name) VALUES($1,$2,$1)', [list, wid]);
+      const add = (from: number, to: number) => db.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email) SELECT 'con_'||md5($3||i),$1,$3||i||'@example.com' FROM generate_series($4::int,$5::int) i RETURNING id)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM c`, [wid, list, tag, from, to]);
+      const all = (statement: string) => db.query(statement, [wid, n]);
+      // One row through each trigger first, so this session has its plans.
+      await add(0, 0); await all(`UPDATE audience_contacts SET marketing_consent='subscribed' WHERE workspace_id=$1 AND $2>0`);
+      await db.query('DELETE FROM audience_list_members WHERE workspace_id=$1', [wid]); await db.query(`UPDATE audience_contacts SET deleted_at=now() WHERE workspace_id=$1`, [wid]);
+      await add(1, n);
+      assert.deepEqual([(await kept()).total, (await kept()).unknown], [n, n]);
+      await all(`UPDATE audience_contacts SET marketing_consent='subscribed' WHERE workspace_id=$1 AND $2>0 AND deleted_at IS NULL`);
+      assert.deepEqual([(await kept()).total, (await kept()).subscribed], [n, n]);
+      await db.query(`DELETE FROM audience_list_members WHERE workspace_id=$1 AND contact_id IN (SELECT 'con_'||md5($2||i) FROM generate_series(1,$3::int/2) i)`, [wid, tag, n]);
+      assert.deepEqual([(await kept()).total, (await kept()).subscribed], [n / 2, n / 2]);
+      await all(`UPDATE audience_contacts SET deleted_at=now() WHERE workspace_id=$1 AND $2>0 AND deleted_at IS NULL`);
+      assert.equal((await kept()).total, 0);
+      assert.deepEqual((await db.query('SELECT * FROM reconcile_audience_list_counts($1,$2)', [wid, list])).rows, []);
+    } finally {
+      for (const table of ['audience_list_members', 'audience_lists', 'audience_contacts', 'audience_list_counts']) await db.query(`DELETE FROM ${table} WHERE workspace_id=$1`, [wid]);
+      await db.query('DELETE FROM workspaces WHERE id=$1', [wid]).catch(() => {});
+    }
+  });
+
+  test('a list\'s page is read through its memberships, and a search for one whole address is that contact', async t => {
+    const key = await keyFixture(t), tag = unique('find');
+    const empty = await resource(t, key.secret, '/v1/lists', { name: unique('empty') }), list = await resource(t, key.secret, '/v1/lists', { name: unique('searched') });
+    const ids = async (path: string) => page(await http('GET', path, key.secret)).map(row => row.id).sort();
+    // An empty list's page, however it is filtered (the page a new list opens on read every contact of the workspace).
+    for (const query of ['', '?consent=unknown', '?suppressed=true', `?search=${tag}`]) assert.deepEqual(await ids(`/v1/lists/${empty.id}/members${query}`), [], query);
+    assert.deepEqual(await ids(`/v1/contacts?listId=${empty.id}`), []);
+    const ann = await resource(t, key.secret, '/v1/contacts', { email: `${tag}@example.com` }), joann = await resource(t, key.secret, '/v1/contacts', { email: `jo${tag}@example.com` });
+    const named = await resource(t, key.secret, '/v1/contacts', { email: address(), name: `Forwarded for ${tag}@example.com` });
+    assert.equal(ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [ann.id, joann.id] })).added, 2);
+    // Part of an address or a name: a substring of either, as before.
+    assert.deepEqual(await ids(`/v1/contacts?search=${tag.toUpperCase()}`), [ann.id, joann.id, named.id].sort());
+    assert.deepEqual(await ids(`/v1/lists/${list.id}/members?search=${tag}`), [ann.id, joann.id].sort());
+    assert.deepEqual(await ids(`/v1/contacts?search=${encodeURIComponent(`${tag}@example`)}`), [ann.id, joann.id, named.id].sort());
+    // One whole address, in any case: that contact, not every address or name that contains it.
+    assert.deepEqual(await ids(`/v1/contacts?search=${encodeURIComponent(ann.email.toUpperCase())}`), [ann.id]);
+    assert.deepEqual(await ids(`/v1/contacts?search=${encodeURIComponent(` ${joann.email} `)}`), [joann.id]);
+    assert.deepEqual(await ids(`/v1/contacts?search=${encodeURIComponent(`nobody-${tag}@example.com`)}`), []);
+    assert.deepEqual(await ids(`/v1/lists/${list.id}/members?search=${encodeURIComponent(ann.email)}`), [ann.id]);
+    assert.deepEqual(await ids(`/v1/contacts?listId=${empty.id}&search=${encodeURIComponent(ann.email)}`), []);
+    assert.deepEqual(await ids(`/v1/lists/${list.id}/members?search=${encodeURIComponent(named.email)}`), []);
+    // A small list's filters and pages, through its memberships.
+    ok(await consent(key.secret, joann.id, 'subscribed'));
+    assert.deepEqual(await ids(`/v1/lists/${list.id}/members?consent=subscribed`), [joann.id]);
+    assert.deepEqual(await ids(`/v1/contacts?listId=${list.id}&consent=unknown&suppressed=false`), [ann.id]);
+    const firstPage = await http('GET', `/v1/lists/${list.id}/members?limit=1&search=${tag}`, key.secret), [lower] = [ann.id, joann.id].sort();
+    assert.deepEqual([page(firstPage).map(row => row.id), firstPage.body.nextCursor], [[lower], lower]);
+    assert.deepEqual(await ids(`/v1/lists/${list.id}/members?limit=1&search=${tag}&cursor=${firstPage.body.nextCursor}`), [[ann.id, joann.id].sort()[1]]);
+    assert.deepEqual(page(await http('GET', `/v1/lists/${list.id}/members`, key.secret)).map(row => row.listIds), [[list.id], [list.id]]);
+  });
 });
 
 // A newsletter is a contact list with a sender (src/newsletters.ts, migration 394): its ID and name are the list's, and its
@@ -10769,6 +11309,159 @@ describe('Import property boundaries', () => {
     assert.deepEqual(ok(await http('GET', `/v1/contacts/${contact.id}`, key.secret)).properties, { ...properties, plan: 'enterprise' }, 'Replacing a property at the 50-property boundary remains supported.');
   });
 
+  test('contact properties cap at 16 KiB across all write paths and audience reads page within the byte and isolate memory budgets', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const wid = runtime.config.workspaceId;
+      const { AUDIENCE_READ_MAX_BYTES, CONTACT_PROPERTIES_MAX_BYTES } = await import('./src/audience.js');
+      const { memoryInUse, reserveMemory } = await import('./src/isolate-memory.js');
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'Audience bounds', permissions: ['read', 'manage'] }), 201).secret;
+      const apiCall = (method: string, path: string, body?: Json) => request(method, path, key, body);
+
+      const nearCap = Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`k${i}`, 'a'.repeat(1900)]));
+      const overCap = Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`k${i}`, 'a'.repeat(1900)]));
+      assert.ok(Buffer.byteLength(JSON.stringify(nearCap)) <= CONTACT_PROPERTIES_MAX_BYTES);
+      assert.ok(Buffer.byteLength(JSON.stringify(overCap)) > CONTACT_PROPERTIES_MAX_BYTES);
+
+      error(await apiCall('POST', '/v1/contacts', { email: 'over@example.net', properties: overCap }), 422, 'VALIDATION_FAILED');
+      const c1 = ok(await apiCall('POST', '/v1/contacts', { email: 'near@example.net', properties: nearCap }), 201);
+      error(await apiCall('PATCH', `/v1/contacts/${c1.id}`, { properties: overCap }), 422, 'VALIDATION_FAILED');
+
+      const impOver = ok(await apiCall('POST', '/v1/contact-imports', {
+        csv: `Email,Plan\nnear@example.net,${'p'.repeat(1500)}\n`, mapping: { email: 'Email', plan: 'Plan' },
+      }), 201);
+      error(await apiCall('POST', `/v1/contact-imports/${impOver.id}/commit`), 422, 'IMPORT_PROPERTIES_INVALID');
+
+      error(await apiCall('POST', '/v1/audience-query/plan', {
+        statement: `UPDATE contacts SET properties.extra = '${'z'.repeat(1500)}' WHERE email = 'near@example.net'`,
+      }), 422, 'AUDIENCEQL_PROPERTIES_INVALID');
+      error(await apiCall('POST', '/v1/audience-query/plan', {
+        statement: `UPDATE contacts SET properties.tooLong = '${'z'.repeat(2001)}' WHERE email = 'near@example.net'`,
+      }), 422, 'AUDIENCEQL_INVALID');
+      error(await apiCall('POST', '/v1/audience-query/plan', {
+        statement: `UPDATE contacts SET name = '${'n'.repeat(201)}' WHERE email = 'near@example.net'`,
+      }), 422, 'AUDIENCEQL_INVALID');
+      const fiftyProps = Object.fromEntries(Array.from({ length: 50 }, (_, i) => [`f${i}`, 'v']));
+      const at50 = ok(await apiCall('POST', '/v1/contacts', { email: 'fifty@example.net', properties: fiftyProps }), 201);
+      error(await apiCall('POST', '/v1/audience-query/plan', {
+        statement: `UPDATE contacts SET properties.f50 = 'overflow' WHERE email = 'fifty@example.net'`,
+      }), 422, 'AUDIENCEQL_PROPERTIES_INVALID');
+
+      await db.query('SAVEPOINT check_backstop');
+      await assert.rejects(
+        () => db.query(`INSERT INTO audience_contacts(id,workspace_id,email,name,properties) VALUES ($1,$2,'dbover@example.net','Ok',$3::jsonb)`, ['con_' + randomUUID().replaceAll('-', ''), wid, JSON.stringify(overCap)]),
+        (err: { code?: string }) => err.code === '23514',
+      );
+      await db.query('ROLLBACK TO SAVEPOINT check_backstop');
+      await assert.rejects(
+        () => db.query(`INSERT INTO audience_contacts(id,workspace_id,email,name,properties) VALUES ($1,$2,'dbname@example.net',$3,'{}'::jsonb)`, ['con_' + randomUUID().replaceAll('-', ''), wid, 'n'.repeat(201)]),
+        (err: { code?: string }) => err.code === '23514',
+      );
+      await db.query('ROLLBACK TO SAVEPOINT check_backstop; RELEASE SAVEPOINT check_backstop');
+      assert.equal(ok(await apiCall('GET', `/v1/contacts/${at50.id}`)).email, 'fifty@example.net');
+
+      const list = ok(await apiCall('POST', '/v1/lists', { name: 'Bounded List' }), 201);
+      await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,name,properties,marketing_consent)
+        SELECT 'con_b' || lpad(g::text, 31, '0'), $1, 'bound-' || g || '@example.net', 'User ' || g, $2::jsonb, 'subscribed'
+        FROM generate_series(1, 80) g`, [wid, JSON.stringify(nearCap)]);
+      await db.query(`INSERT INTO audience_list_members(workspace_id,list_id,contact_id)
+        SELECT $1, $2, id FROM audience_contacts WHERE workspace_id = $1 AND id LIKE 'con_b%'`, [wid, list.id]);
+
+      const walkAll = async (basePath: string) => {
+        const seen: string[] = [];
+        let cursor: string | null = null, pages = 0;
+        do {
+          const url = cursor ? `${basePath}${basePath.includes('?') ? '&' : '?'}cursor=${encodeURIComponent(cursor)}` : basePath;
+          const res = await apiCall('GET', url);
+          assert.equal(res.status, 200);
+          const pageBytes = Buffer.byteLength(JSON.stringify(res.body));
+          assert.ok(pageBytes <= AUDIENCE_READ_MAX_BYTES, `Page exceeded byte cap: ${pageBytes}`);
+          for (const row of res.body.data as Json[]) seen.push(row.id);
+          cursor = res.body.nextCursor;
+          pages++;
+          assert.ok(pages < 30, 'Pagination must converge without looping.');
+        } while (cursor);
+        return { seen, pages };
+      };
+      const contactsWalk = await walkAll('/v1/contacts?limit=100');
+      assert.ok(contactsWalk.pages >= 3, `Expected byte-bounded short pages (got ${contactsWalk.pages})`);
+      assert.equal(new Set(contactsWalk.seen).size, contactsWalk.seen.length, 'Every contact appears exactly once across short pages.');
+      assert.equal(contactsWalk.seen.length, 82);
+
+      const membersWalk = await walkAll(`/v1/lists/${list.id}/members?limit=100`);
+      assert.ok(membersWalk.pages >= 3, `Expected byte-bounded short member pages (got ${membersWalk.pages})`);
+      assert.equal(new Set(membersWalk.seen).size, 80);
+      assert.equal(membersWalk.seen.length, 80);
+
+      const qProps = await apiCall('POST', '/v1/audience-query/query', { statement: 'SELECT id, properties FROM contacts LIMIT 1000' });
+      assert.equal(qProps.status, 200);
+      assert.ok(Buffer.byteLength(JSON.stringify(qProps.body)) <= AUDIENCE_READ_MAX_BYTES);
+      assert.ok(qProps.body.rows.length > 0 && qProps.body.rows.length < 82);
+      assert.equal(qProps.body.matched, qProps.body.rows.length);
+      assert.equal(qProps.body.truncated, true);
+
+      const qSkinny = ok(await apiCall('POST', '/v1/audience-query/query', { statement: 'SELECT id, email FROM contacts LIMIT 1000' }));
+      assert.equal(qSkinny.rows.length, 82);
+      assert.equal(qSkinny.truncated, false);
+      const qField = ok(await apiCall('POST', '/v1/audience-query/query', { statement: "SELECT id, properties.k0 FROM contacts WHERE email = 'near@example.net' LIMIT 5" }));
+      assert.equal(qField.rows[0]['properties.k0'], 'a'.repeat(1900));
+
+      const plan = ok(await apiCall('POST', '/v1/audience-query/plan', { statement: `UPDATE contacts SET name = 'Planned' WHERE list = '${list.id}'` }), 201);
+      assert.equal(plan.matched, 80);
+      assert.equal(ok(await apiCall('POST', '/v1/audience-query/apply', { planId: plan.id })).affected, 80);
+      const seg = ok(await apiCall('POST', '/v1/segments', { name: 'All Bounded', rule: { field: 'email', operator: 'contains', value: 'bound-' } }), 201);
+      assert.deepEqual(ok(await apiCall('POST', `/v1/segments/${seg.id}/preview`, { listId: list.id })), { matched: 80, eligible: 80, suppressed: 0, unsubscribed: 0 });
+      const impMatch = ok(await apiCall('POST', '/v1/contact-imports', {
+        csv: 'Email\n' + Array.from({ length: 80 }, (_, i) => `bound-${i + 1}@example.net`).join('\n') + '\n',
+        mapping: { email: 'Email' },
+      }), 201);
+      assert.equal(ok(await apiCall('POST', `/v1/contact-imports/${impMatch.id}/commit`)).imported, 80);
+
+      const minNums = Object.fromEntries(Array.from({ length: 50 }, (_, i) => [`n${i}`, Number.MIN_VALUE]));
+      error(await apiCall('POST', '/v1/contacts', { email: 'minnums@example.net', properties: minNums }), 422, 'VALIDATION_FAILED');
+      const exactProps: Record<string, string> = Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`e${i}`, 'x'.repeat(2000)]));
+      const exactRemain = CONTACT_PROPERTIES_MAX_BYTES - Buffer.byteLength(JSON.stringify(exactProps)) - 7;
+      exactProps.z = 'y'.repeat(exactRemain);
+      assert.equal(Buffer.byteLength(JSON.stringify(exactProps)), CONTACT_PROPERTIES_MAX_BYTES);
+      assert.equal((await apiCall('POST', '/v1/contacts', { email: 'exact16k@example.net', properties: exactProps })).status, 201);
+      const exactImp = ok(await apiCall('POST', '/v1/contact-imports', { csv: 'Email\nexact16k@example.net\n', mapping: { email: 'Email' } }), 201);
+      assert.equal(ok(await apiCall('POST', `/v1/contact-imports/${exactImp.id}/commit`)).imported, 1);
+
+      await db.query(`INSERT INTO audience_lists(id,workspace_id,name) SELECT 'lst_cap_' || lpad(g::text, 3, '0'), $1, 'Cap ' || g FROM generate_series(1, 60) g`, [wid]);
+      await db.query(`INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1, 'lst_cap_' || lpad(g::text, 3, '0'), $2 FROM generate_series(1, 60) g`, [wid, c1.id]);
+      const pagedOne = ok(await apiCall('GET', `/v1/contacts?email=${encodeURIComponent(c1.email)}`));
+      assert.equal(pagedOne.data[0].listIds.length, 50, 'Paginated contact reads cap listIds at 50 per contact.');
+      const singleOne = ok(await apiCall('GET', `/v1/contacts/${c1.id}`));
+      assert.equal(singleOne.listIds.length, 60, 'Single contact read returns up to 200 listIds.');
+
+      const { createApp } = await import('./src/app.js');
+      const { boundedReadsActive } = await import('./src/read-bounds.js');
+      const app = createApp();
+      const heldRes = await app.fetch(new Request(`http://127.0.0.1:8793/v1/contact-imports/${impMatch.id}`, { headers: { authorization: `Bearer ${key}` } }), runtime);
+      assert.equal(heldRes.status, 200);
+      assert.ok(memoryInUse() > 0, 'Import response must hold its isolate memory lease while unread.');
+      await heldRes.text();
+      assert.equal(memoryInUse(), 0, 'Import response must release its isolate memory lease once read.');
+
+      const attachLease = await reserveMemory(64 * 1024 * 1024);
+      try {
+        assert.equal((await apiCall('GET', '/v1/contacts?limit=1')).status, 200, 'Bounded reads must not stall behind attachment/import memory.');
+      } finally {
+        attachLease.release();
+      }
+      const burst = await Promise.all([
+        ...Array.from({ length: 10 }, () => apiCall('GET', '/v1/contacts?limit=100')),
+        ...Array.from({ length: 10 }, () => apiCall('POST', '/v1/audience-query/query', { statement: 'SELECT id, properties FROM contacts LIMIT 100' })),
+      ]);
+      const okCount = burst.filter(r => r.status === 200).length;
+      const limitCount = burst.filter(r => r.status === 429 && r.body?.error?.code === 'READ_CONCURRENCY_LIMIT').length;
+      assert.ok(okCount >= 2, `Expected concurrent reads to succeed (got ${okCount})`);
+      assert.equal(okCount + limitCount, 20, `Every burst read must answer 200 or retryable 429 (got ${JSON.stringify(burst.map(r => r.status))})`);
+      for (const r of burst) if (r.status === 200) assert.ok(Buffer.byteLength(JSON.stringify(r.body)) <= AUDIENCE_READ_MAX_BYTES);
+      assert.equal(boundedReadsActive(), 0);
+      assert.equal(memoryInUse(), 0);
+    });
+  });
+
   test('imports use time-ordered IDs, serialize commits per workspace, cap open previews, fold publishBatch jobs, and roll back cleanly on timeout', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
       const wid = runtime.config.workspaceId;
@@ -10921,9 +11614,25 @@ describe('Import property boundaries', () => {
       assert.equal(legacyBefore.contacts, 2);
       assert.equal(legacyBefore.hardBounce.numerator, 1);
 
-      // Age our new committed import past 7 days, run cleanup: legacy gets backfilled AND both get rows scrubbed.
+      // New committed imports stamp import_id on every consent audit row immediately.
+      const linkedRows = (await db.query(`SELECT import_id FROM audience_consent_audit WHERE workspace_id = $1 AND source = 'import'`, [wid])).rows;
+      assert.equal(linkedRows.length, 2);
+      assert.ok(linkedRows.every(r => r.import_id === preview.id), 'Committed import consent audit rows must record import_id.');
+      // Seed an unlinked pre-PR consent audit row matching legacyId and verify backfill links it before rows scrub.
+      const bounceContact = (await db.query(`SELECT id FROM audience_contacts WHERE workspace_id = $1 AND email = 'bounce1@example.com'`, [wid])).rows[0];
+      await db.query(`INSERT INTO audience_consent_audit(id,workspace_id,contact_id,email,status,source,evidence,occurred_at)
+        VALUES('cns_legacy_' || substr(replace(gen_random_uuid()::text,'-',''),1,12),$1,$2,'bounce1@example.com','subscribed','import','Legacy',now()-interval '10 days')`, [wid, bounceContact.id]);
+
+      // An import previewed 10 days ago but committed today must NOT be scrubbed yet (clock uses updated_at, not created_at).
       await db.query(`UPDATE audience_imports SET created_at = now() - interval '10 days' WHERE id = $1`, [preview.id]);
       const { cleanup } = await import('./src/maintenance.js');
+      await cleanup(runtime);
+      assert.equal(ok(await local('GET', `/v1/contact-imports/${preview.id}`)).rowsRetained, true, 'Retention clock starts at commit (updated_at), not preview (created_at).');
+      const legacyLinked = (await db.query(`SELECT import_id FROM audience_consent_audit WHERE workspace_id = $1 AND evidence = 'Legacy'`, [wid])).rows[0];
+      assert.equal(legacyLinked.import_id, legacyId, 'Backfill must link legacy consent rows to their import_id before scrubbing rows.');
+
+      // Now age commit time (updated_at) past 7 days: cleanup scrubs rows on both.
+      await db.query(`UPDATE audience_imports SET updated_at = now() - interval '10 days' WHERE id = $1`, [preview.id]);
       await cleanup(runtime);
       const report = ok(await local('GET', `/v1/contact-imports/${preview.id}`));
       assert.deepEqual({ imported: report.imported, rows: report.rows, rowsRetained: report.rowsRetained, errorsRetained: report.errorsRetained, errorCount: report.errors.length }, { imported: 2, rows: [], rowsRetained: false, errorsRetained: true, errorCount: 1 });
@@ -10938,8 +11647,8 @@ describe('Import property boundaries', () => {
         assert.equal(view.hardBounce.numerator, 1);
       }
 
-      // Age past 90 days: cleanup scrubs sample_contact_ids and errors too, and marks errorsRetained = false.
-      await db.query(`UPDATE audience_imports SET created_at = now() - interval '91 days' WHERE id = $1`, [preview.id]);
+      // Age commit time past 90 days: cleanup scrubs sample_contact_ids and errors too, and marks errorsRetained = false.
+      await db.query(`UPDATE audience_imports SET updated_at = now() - interval '91 days' WHERE id = $1`, [preview.id]);
       await cleanup(runtime);
       const aged = ok(await local('GET', `/v1/contact-imports/${preview.id}`));
       assert.deepEqual({ imported: aged.imported, rows: aged.rows, errors: aged.errors, rowsRetained: aged.rowsRetained, errorsRetained: aged.errorsRetained }, { imported: 2, rows: [], errors: [], rowsRetained: false, errorsRetained: false });
@@ -21901,13 +22610,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const next=await job();
       assert.deepEqual([next.status,next.payload],['pending',{campaignId:c.id}]);
       assert.ok(new Date(next.available_at).getTime()-Date.now()>=55_000);
-      // 3. A read of a large campaign answers from that count: no aggregate over its emails and events.
+      // 3. A read of a large campaign answers from sending_campaign_tallies: exact at read time, no scan of emails or events.
       const q=t.mock.method(db,'query');let fromCount:Json;
       try{fromCount=ok(await local('GET',path));}finally{q.mock.restore();}
       const statements=q.mock.calls.map(call=>String((call.arguments[0] as any)?.text??call.arguments[0]));
-      t.diagnostic(`A read from the count: ${statements.length} statements.`);
-      assert.equal(statements.filter(s=>/count\(DISTINCT/i.test(s)).length,0,'No aggregate over the emails.');
-      assert.equal(fromCount!.computedAt,counted.computedAt);
+      t.diagnostic(`A read from tallies: ${statements.length} statements.`);
+      assert.equal(statements.filter(s=>/from "sending_emails"|sending_email_events/i.test(s)).length,0,'No scan of emails or events.');
       assert.deepEqual(figures(fromCount!),figures(await live()));
 
       // 4. Feedback after the count, then the campaign finishes: it is counted once more, and that count equals the old
@@ -21923,8 +22631,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // Every email has a delivery event; 3 are simulated and 3 suppressed; rejects on 1-10 plus rejected statuses 15 and 25.
       assert.deepEqual(done.totals,{accepted:24,delivered:30,bounced:3,complained:3,opened:30,clicked:20,failed:12,deliveryDelayed:3,simulated:3});
 
-      // 5. The 30-day retention deletes its emails and their events. The figures stay; a later count that finds fewer
-      // emails replaces nothing and freezes them, so reads stop queueing counts.
+      // 5. The 30-day retention deletes its emails and their events. The stored figures stay; a later count that finds
+      // fewer emails replaces nothing and freezes them, so reads stop queueing counts.
+      const doneStored=(await stored()).stats!;
       await db.query('DELETE FROM sending_email_events WHERE workspace_id=$1',[wid]);
       await db.query('DELETE FROM sending_emails WHERE campaign_id=$1',[c.id]);
       assert.deepEqual(figures(ok(await local('GET',path))),figures(done));
@@ -21932,14 +22641,14 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       ok(await local('GET',path));
       for(let step=0;step<5;step++)await run('sending.campaignStats');
       const frozen=(await stored()).stats!;
-      assert.deepEqual([frozen.frozen,frozen.emails,frozen.computedAt],[true,30,done.computedAt]);
+      assert.deepEqual([frozen.frozen,frozen.emails,frozen.computedAt],[true,30,doneStored.computedAt]);
       assert.equal((await job()).status,'completed');
       ok(await local('GET',path));
       assert.equal((await job()).status,'completed','A frozen count is never queued again.');
       // A small campaign (counted when read) also keeps a stored count that saw more emails than are left.
       CAMPAIGN_STATS.from=lowered.from;
       const small=ok(await local('GET',path));
-      assert.deepEqual([figures(small),small.computedAt],[figures(done),done.computedAt]);
+      assert.deepEqual([figures(small),small.computedAt],[figures(done),doneStored.computedAt]);
     });
   });
   // The background count pays for its database time with idle time: a run takes steps (pages) for about 250 ms, then
@@ -21960,7 +22669,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       let clock=Date.now(),stepMs=2000;
       const query=db.query.bind(db) as (...args:unknown[])=>unknown;
       t.mock.method(Date,'now',()=>clock);
-      t.mock.method(db,'query',(...args:unknown[])=>{if(/count\(DISTINCT/.test(String((args[0] as any)?.text??args[0])))clock+=stepMs;return query(...args);});
+      t.mock.method(db,'query',(...args:unknown[])=>{if(/from "sending_emails"/i.test(String((args[0] as any)?.text??args[0])))clock+=stepMs;return query(...args);});
       const due=async()=>new Date((await jobs('sending.campaignStats'))[0].available_at).getTime()-clock;
       // A 2-second step is followed by 64 seconds of nothing: 2 of every 66 seconds, 3%.
       await run('sending.campaignStats');
@@ -22686,6 +23395,71 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.ok([...tags.values()].every(n=>n===1) && tags.size===50,'every email reached SES at most once');
     });
   });
+  test('MX: a list\'s counts follow a bounce on either feedback path, an operator\'s lift and a footer opt-out', async t => {
+    // The writers of a contact's suppression and consent that no dashboard request reaches: the SES feedback batch
+    // (sending.ts), the feedback job (operations.ts), scripts/lift-suppression.ts and recordUnsubscribe.
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const [{ ingestFeedbackBatch, operationJobs }, { liftSuppression }, { recordUnsubscribe }] = await Promise.all([import('./src/operations.js'), import('./scripts/lift-suppression.js'), import('./src/audience.js')]);
+      const wid = runtime.config.workspaceId, account = '111122223333', topicArn = `arn:aws:sns:${REGION}:${account}:fixture`;
+      const list = ok(await local('POST', '/v1/lists', { name: 'Counted' }), 201), people: Json[] = [], sent: Json[] = [];
+      for (let i = 0; i < 4; i++) {
+        const contact = ok(await local('POST', '/v1/contacts', { email: address() }), 201);
+        ok(await local('POST', `/v1/contacts/${contact.id}/consent`, { status: 'subscribed' })); people.push(contact);
+      }
+      assert.equal(ok(await local('POST', `/v1/lists/${list.id}/members`, { contactIds: people.map(person => person.id) })).added, 4);
+      for (const person of people.slice(0, 2)) sent.push(ok(await local('POST', '/v1/emails/send', mail({ to: person.email })), 202));
+      // One email to two people who are in no list, for the last step: its address order is the reverse of SES's.
+      const tag = unique('pair'), [early, late] = [`a-${tag}@example.com`, `z-${tag}@example.com`];
+      const both = ok(await local('POST', '/v1/emails/send', mail({ to: late, cc: [early] })), 202);
+      runtime.config.multiTenant = true;
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`, [REGION, account, topicArn]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, account]);
+      const counts = async (expected: Partial<ListCounts>, label: string) => {
+        const shown = ok(await local('GET', `/v1/lists/${list.id}`)).counts;
+        assert.deepEqual([shown, shown], [await countedMembers(db, list.id), { ...NO_MEMBERS, ...expected }], label);
+        assert.deepEqual((await db.query('SELECT * FROM reconcile_audience_list_counts($1,$2)', [wid, list.id])).rows, [], `${label}: a recount has nothing to correct`);
+      };
+      await counts({ total: 4, subscribed: 4 }, 'four subscribers');
+      for (const [i, path] of (['batch', 'job'] as const).entries()) {
+        const provider = unique('fixture-provider');
+        await db.query(`UPDATE sending_emails SET status='accepted',provider_id=$2,simulated=false,feedback_topic_arn=$3 WHERE id=$1`, [sent[i]!.id, provider, topicArn]);
+        const item = { topicArn, region: REGION, messageId: unique('sns'), message: { eventType: 'Bounce', mail: { messageId: provider, sendingAccountId: account }, bounce: { bounceType: 'Permanent', bounceSubType: 'General', bouncedRecipients: [{ emailAddress: people[i]!.email }] } } };
+        if (path === 'batch') assert.deepEqual(await ingestFeedbackBatch(runtime, [item]), [{ ok: true }]);
+        else {
+          await db.query('INSERT INTO operation_sns_receipts(topic_arn,message_id,workspace_id) VALUES($1,$2,$3)', [topicArn, item.messageId, wid]);
+          await operationJobs['operation.ses']!(runtime, item, { id: unique('job'), attempts: 1, workspaceId: wid });
+        }
+        await counts({ total: 4, subscribed: 3 - i, suppressed: 1 + i }, `a bounce through the feedback ${path}`);
+      }
+      const savepoint = async <T,>(work: () => Promise<T>) => {
+        await db.query('SAVEPOINT lift');
+        try { const result = await work(); await db.query('RELEASE SAVEPOINT lift'); return result; } catch (error) { await db.query('ROLLBACK TO SAVEPOINT lift'); throw error; }
+      };
+      await liftSuppression(db, [wid, people[0]!.email, '--reason', 'The mailbox exists now'], () => ({ account: async () => account, get: async () => null, remove: async () => false }), savepoint);
+      await counts({ total: 4, subscribed: 3, suppressed: 1 }, 'the first bounce lifted by an operator');
+      assert.deepEqual(await recordUnsubscribe(runtime, wid, people[2]!.email, 'footer-confirm'), { contactId: people[2]!.id, changed: true });
+      await counts({ total: 4, subscribed: 2, unsubscribed: 1, suppressed: 1 }, 'a footer opt-out');
+      // An opt-out from someone who is not a contact creates the contact, in no list.
+      assert.equal((await recordUnsubscribe(runtime, wid, address(), 'rfc8058-post')).changed, true);
+      await counts({ total: 4, subscribed: 2, unsubscribed: 1, suppressed: 1 }, 'an opt-out from a stranger');
+      // One bounce for two recipients, listed by SES in the reverse of their email order: the feedback job suppresses
+      // them in email order, the order imports, the feedback batch and lockContacts take contacts in, so it cannot
+      // deadlock with someone adding both to a list.
+      const provider = unique('fixture-provider');
+      await db.query(`UPDATE sending_emails SET status='accepted',provider_id=$2,simulated=false,feedback_topic_arn=$3 WHERE id=$1`, [both.id, provider, topicArn]);
+      const bounce = { topicArn, region: REGION, messageId: unique('sns'), message: { eventType: 'Bounce', mail: { messageId: provider, sendingAccountId: account }, bounce: { bounceType: 'Permanent', bounceSubType: 'General', bouncedRecipients: [{ emailAddress: late }, { emailAddress: early }] } } };
+      await db.query('INSERT INTO operation_sns_receipts(topic_arn,message_id,workspace_id) VALUES($1,$2,$3)', [topicArn, bounce.messageId, wid]);
+      const query = t.mock.method(db, 'query'), suppressed: string[] = [];
+      try { await operationJobs['operation.ses']!(runtime, bounce, { id: unique('job'), attempts: 1, workspaceId: wid }); }
+      finally {
+        for (const call of query.mock.calls) { const [first, second] = call.arguments as unknown as [any, any], text = String(first?.text ?? first), values = (first?.values ?? second ?? []) as unknown[];
+          if (text.includes('INSERT INTO audience_contacts AS c')) suppressed.push(...values.filter((value): value is string => value === early || value === late)); }
+        query.mock.restore();
+      }
+      assert.deepEqual(suppressed, [early, late]);
+    });
+  });
+
   test('MX: a queue redelivery suppresses after a recovery job stored the bounce and died before suppressing', async t => {
     // tear witness (api/tear/ses): h b1, accept e1, J b1, J go, J crash, q b1.
     await simulatedSesFixture(t,async ({runtime,local,db})=>{
@@ -22751,7 +23525,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const {ingestFeedbackBatch,operationJobs}=await import('./src/operations.js');
       const {rank}=await import('./src/sending.js');
       // The table a Worker deployed before migration 153 embeds; its statements are otherwise the same.
-      const current={...rank}, old={...current,suppressed:6,delivered:5,bounced:6,complained:7,rejected:6,rendering_failed:6,canceled:6,simulated:6};
+      const current={...rank}, old={scheduled:0,queued:0,attempting:1,acceptance_unknown:2,accepted:3,sent:4,delayed:4,suppressed:6,delivered:5,bounced:6,complained:7,rejected:6,rendering_failed:6,canceled:6,simulated:6};
       const asOld=async<T>(work:()=>Promise<T>)=>{Object.assign(rank,old);try{return await work();}finally{Object.assign(rank,current);}};
       const wid=runtime.config.workspaceId, account='111122223333', topicArn=`arn:aws:sns:${REGION}:${account}:fixture`;
       const recipients=Array.from({length:9},()=>[address(),address()] as const);
@@ -23082,7 +23856,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         mail_receipts: ["INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,notification,recipients,status,processed_at,created_at) SELECT p.wid,'mr_'||p.tag||p.day||'x'||i,p.region,p.wid,'key','{}','[]','processed',now()-interval '31 days'-make_interval(days=>p.day),now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM mail_receipts,p WHERE starts_with(ses_message_id,'mr_'||p.tag)"],
         mail_receipt_holds: ["INSERT INTO mail_receipt_holds(bucket,ses_message_id,region,topic_arn,owners,recipients,notification,received_at,expires_at,status) SELECT p.wid,'mh_'||p.tag||p.day||'x'||i,p.region,'topic','{}','[]','{}',now(),now()-interval '31 days'-make_interval(days=>p.day),'released' FROM p,g","SELECT count(*) FROM mail_receipt_holds,p WHERE starts_with(ses_message_id,'mh_'||p.tag)"],
         mailbox_events: ["INSERT INTO mailbox_events(workspace_id,type,data,created_at) SELECT p.wid,'fixture.retention',jsonb_build_object('tag',p.tag),now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM mailbox_events,p WHERE data->>'tag'=p.tag"],
-        mail_ignored_staging: ["INSERT INTO mail_ignored_staging(bucket,ses_message_id,created_at) SELECT p.wid,'mi_'||p.tag||p.day||'x'||i,now()-interval '73 hours'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM mail_ignored_staging,p WHERE starts_with(ses_message_id,'mi_'||p.tag)"],
+        mail_ignored_staging: ["INSERT INTO mail_ignored_staging(bucket,ses_message_id,created_at) SELECT p.wid,'mi_'||p.tag||p.day||'x'||i,now()-interval '121 hours'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM mail_ignored_staging,p WHERE starts_with(ses_message_id,'mi_'||p.tag)"],
         mailbox_webhook_deliveries_paused_expired: ["INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,payload,status,created_at) SELECT 'mwdp_'||p.tag||p.day||'x'||i,p.wid,'mwh_'||p.tag,'{}','paused',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM mailbox_webhook_deliveries,p WHERE starts_with(id,'mwdp_'||p.tag) AND status='paused'"],
         mailbox_webhook_deliveries: ["INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,payload,status,created_at) SELECT 'mwd_'||p.tag||p.day||'x'||i,p.wid,'mwh_'||p.tag,'{}','delivered',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM mailbox_webhook_deliveries,p WHERE starts_with(id,'mwd_'||p.tag)"],
         sender_score_daily: ["INSERT INTO sender_score_daily(workspace_id,day) SELECT p.wid,(now() AT TIME ZONE 'UTC')::date-401-p.day*5-i FROM p,g","SELECT count(*) FROM sender_score_daily s,p WHERE s.workspace_id=p.wid AND s.day<(now() AT TIME ZONE 'UTC')::date-400"],
@@ -23106,9 +23880,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         support_subjects: [null,"SELECT count(*) FROM support_conversations,p WHERE subject=p.tag"],
         audience_operation_plans: ["INSERT INTO audience_operation_plans(id,workspace_id,actor_key_id,statement,operation,matched,expires_at) SELECT 'aop_'||p.tag||p.day||'x'||i,p.wid,'k','fixture','{}',0,now()-interval '25 hours'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM audience_operation_plans,p WHERE starts_with(id,'aop_'||p.tag)"],
         audience_import_previews: ["INSERT INTO audience_imports(id,workspace_id,rows,errors,status,created_at) SELECT 'aim_'||p.tag||p.day||'x'||i,p.wid,'[]','[]','preview',now()-interval '8 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM audience_imports,p WHERE starts_with(id,'aim_'||p.tag)"],
-        audience_import_samples: ["INSERT INTO audience_imports(id,workspace_id,rows,errors,status,imported,created_at) SELECT 'aims_'||p.tag||p.day||'x'||i,p.wid,'[]','[]','committed',0,now()-interval '2 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM audience_imports,p WHERE starts_with(id,'aims_'||p.tag) AND sample_contact_ids IS NULL"],
-        audience_import_rows: ["INSERT INTO audience_imports(id,workspace_id,rows,errors,status,imported,sample_contact_ids,created_at) SELECT 'aimr_'||p.tag||p.day||'x'||i,p.wid,jsonb_build_array(jsonb_build_object('row',2,'email','a@example.invalid','properties','{}'::jsonb)),'[]','committed',1,'{}'::text[],now()-interval '8 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM audience_imports,p WHERE starts_with(id,'aimr_'||p.tag) AND rows_scrubbed_at IS NULL"],
-        audience_import_details: ["INSERT INTO audience_imports(id,workspace_id,rows,errors,status,imported,sample_contact_ids,rows_scrubbed_at,created_at) SELECT 'aimd_'||p.tag||p.day||'x'||i,p.wid,'[]',jsonb_build_array(jsonb_build_object('row',2,'field','email','message','bad')),'committed',1,'{}'::text[],now()-interval '80 days',now()-interval '91 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM audience_imports,p WHERE starts_with(id,'aimd_'||p.tag) AND errors_scrubbed_at IS NULL"],
+        audience_import_consent_links: ["INSERT INTO audience_imports(id,workspace_id,rows,errors,status,imported,sample_contact_ids,created_at,updated_at) SELECT 'aimc_'||p.tag||p.day||'x'||i,p.wid,'[]','[]','committed',0,'{}'::text[],now()-interval '2 days'-make_interval(days=>p.day),now()-interval '2 days'-make_interval(days=>p.day) FROM p,g WHERE i=1","SELECT count(*) FROM audience_imports,p WHERE starts_with(id,'aimc_'||p.tag) AND consent_linked_at IS NULL"],
+        audience_import_samples: ["INSERT INTO audience_imports(id,workspace_id,rows,errors,status,imported,consent_linked_at,created_at,updated_at) SELECT 'aims_'||p.tag||p.day||'x'||i,p.wid,'[]','[]','committed',0,now(),now()-interval '2 days'-make_interval(days=>p.day),now()-interval '2 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM audience_imports,p WHERE starts_with(id,'aims_'||p.tag) AND sample_contact_ids IS NULL"],
+        audience_import_rows: ["INSERT INTO audience_imports(id,workspace_id,rows,errors,status,imported,sample_contact_ids,consent_linked_at,created_at,updated_at) SELECT 'aimr_'||p.tag||p.day||'x'||i,p.wid,jsonb_build_array(jsonb_build_object('row',2,'email','a@example.invalid','properties','{}'::jsonb)),'[]','committed',1,'{}'::text[],now(),now()-interval '8 days'-make_interval(days=>p.day),now()-interval '8 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM audience_imports,p WHERE starts_with(id,'aimr_'||p.tag) AND rows_scrubbed_at IS NULL"],
+        audience_import_details: ["INSERT INTO audience_imports(id,workspace_id,rows,errors,status,imported,sample_contact_ids,consent_linked_at,rows_scrubbed_at,created_at,updated_at) SELECT 'aimd_'||p.tag||p.day||'x'||i,p.wid,'[]',jsonb_build_array(jsonb_build_object('row',2,'field','email','message','bad')),'committed',1,'{}'::text[],now(),now()-interval '80 days',now()-interval '91 days'-make_interval(days=>p.day),now()-interval '91 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM audience_imports,p WHERE starts_with(id,'aimd_'||p.tag) AND errors_scrubbed_at IS NULL"],
         sending_email_events: ["INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated,created_at) SELECT 'event_'||md5(p.tag||p.day||'x'||i),p.wid,'email_'||p.tag,'dispatch_attempt',true,now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM sending_email_events,p WHERE email_id='email_'||p.tag"],
         sending_emails: ["INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,created_at) SELECT 'email_'||md5(p.tag||p.day||'x'||i),p.wid,p.region,'fixture','a@example.org','[]','[]','[]',p.tag,'{}',true,'delivered',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM sending_emails,p WHERE workspace_id=p.wid AND subject=p.tag"],
         sending_idempotency: ["INSERT INTO sending_idempotency(workspace_id,actor_key_id,path,request_key,request_hash,result,created_at) SELECT p.wid,'fixture','/v1/emails/send','idem_'||p.tag||p.day||'x'||i,'h',jsonb_build_object('id','email_'||p.tag||p.day||'x'||i),now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM sending_idempotency,p WHERE workspace_id=p.wid AND starts_with(request_key,'idem_'||p.tag)"],
@@ -23204,7 +23979,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const failing = t.mock.method(runtime.db, 'execute', async (query: Parameters<typeof execute>[0]) => { if (/DELETE FROM "sending_email_events"/.test(sql(query))) throw timeout(); return execute(query); });
       await retentionTick(runtime); failing.mock.restore();
       let counts = await left();
-      assert.deepEqual(counts, only(counts, 3, Object.fromEntries(sent.map(name => [name, name === 'sending_email_events' ? 9 : 0]))));
+      assert.deepEqual(counts, only(counts, 3, { audience_import_consent_links: 1, ...Object.fromEntries(sent.map(name => [name, name === 'sending_email_events' ? 9 : 0])) }));
       assert.deepEqual(Object.keys(await held()), ['sending_email_events']);
       await db.query("UPDATE retention_state SET due_at=now() WHERE scope='sent'");
       await seed(4, ['sending_email_events', 'operation_events']); await retentionTick(runtime);
@@ -24271,6 +25046,501 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual([respun.state, respun.delivery.error.code, screened.length - start], ['failed', 'CONTENT_REJECTED_SPAM', 2]);
     }));
   });
+  // The second classifier (src/screen-shadow.ts). Both classifiers as stubs on hostedScreenFixture's fetch mock: the screen's
+  // flags SampleMarker, as there; the second's answers what `jevf` says. Each keeps the request bodies it was sent.
+  const JEVF_URL = 'https://jevf.synthetic.invalid/v1/systemone';
+  function twoClassifiers(jevf: (init: RequestInit, body: string) => Response | Promise<Response>, jevDown: () => boolean = () => false) {
+    const sent = { jev: [] as string[], jevf: [] as { body: string; authorization: string | null }[] };
+    (globalThis.fetch as unknown as { mock: { mockImplementation(fn: unknown): void } }).mock.mockImplementation(async (url: RequestInfo | URL, init: RequestInit = {}) => {
+      const body = String(init.body);
+      if (String(url) === JEVF_URL) { sent.jevf.push({ body, authorization: new Headers(init.headers).get('authorization') }); return jevf(init, body); }
+      assert.equal(String(url), 'https://screen.synthetic.invalid'); sent.jev.push(body);
+      if (jevDown()) return new Response(null, { status: 503 });
+      const { subject, body: text } = JSON.parse(body).state.email as { subject: string; body: string };
+      return Response.json({ model: 'jev-fixture', answers: { spam: { noul: /samplemarker/.test(`${subject}\n${text}`.toLowerCase()) ? 0.99 : 0.01 } }, usage: { input_tokens: Math.ceil(body.length / 4), output_tokens: 1 } });
+    });
+    return sent;
+  }
+  const jevfAnswers = (noul: number) => Response.json({ model: 'jevf', answers: { spam: { type: 'noul', noul } }, usage: { input_tokens: 239, output_tokens: 1 } }, { headers: { 'x-request-id': `req_jevf_${randomUUID()}`, 'x-jevf-preview': 'team-4096' } });
+  const shadowSettings = (deadlineMs = 5000, model = 'jevf') => ({ apiKey: 'jevf-fixture-key', endpoint: JEVF_URL, model, deadlineMs, maxConcurrency: 8 });
+  // The second classifier's queue as Cloudflare runs it under the wrangler config: messages wait, a consumer invocation
+  // takes at most four, two invocations run at once, and a batch that is not acknowledged is delivered again, twice at most.
+  function jevfQueue(consume: (messages: { body: unknown; attempts: number }[]) => Promise<boolean>, size = 4, concurrency = 2, retries = 2) {
+    const waiting: { body: unknown; attempts: number }[] = [], sends: { body: string; contentType: 'text' }[][] = [], idle: (() => void)[] = [];
+    let active = 0, dropped = 0;
+    const pump = () => {
+      while (active < concurrency && waiting.length) {
+        const batch = waiting.splice(0, size); active++;
+        void consume(batch).catch(() => false).then(done => {
+          active--;
+          if (!done) for (const message of batch) { if (message.attempts > retries) dropped++; else waiting.push({ ...message, attempts: message.attempts + 1 }); }
+          pump();
+          if (!active && !waiting.length) for (const resolve of idle.splice(0)) resolve();
+        });
+      }
+    };
+    return { sends, get dropped() { return dropped; }, settled: () => active || waiting.length ? new Promise<void>(resolve => { idle.push(resolve); }) : Promise.resolve(),
+      queue: { sendBatch: async (messages: { body: string; contentType: 'text' }[]) => { sends.push(messages); for (const message of messages) waiting.push({ body: message.body, attempts: 1 }); pump(); } } };
+  }
+
+  test('second classifier: every request the screen makes is repeated after the run and both answers are kept, for an email, a campaign test and campaign copies of several requests; a cached verdict, a retried dispatch and a batch written twice add nothing; nothing runs without its key', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, jobs }) => t.test('classifiers', async t => {
+      const [{ shadowSettled, writeComparisons }, { processJobs }, { jobHandlers }, { operationJobs }, { newsletterJobs }, { SESv2Client, GetAccountCommand }] = await Promise.all([import('./src/screen-shadow.js'), import('./src/jobs.js'),
+        import('./src/sending.js'), import('./src/operations.js'), import('./src/newsletters.js'), import('@aws-sdk/client-sesv2')]);
+      const acct = '112223330021', started = new Date(Date.now() - 1000).toISOString(), { wid } = await hostedScreenFixture(t, runtime, db, acct, 'shadow.invalid');
+      // The second classifier flags a copy that greets Ben, which the screen passes, and passes SampleMarker, which the screen flags.
+      let jevDown = false;
+      const sent = twoClassifiers((_init, body) => jevfAnswers(/hello ben/i.test(body) ? 0.91 : 0.1037), () => jevDown);
+      let throttle = 0;
+      (SESv2Client.prototype.send as unknown as { mock: { mockImplementation(fn: unknown): void } }).mock.mockImplementation(async (cmd: unknown) => {
+        if (cmd instanceof GetAccountCommand) return { SendingEnabled: true, SendQuota: { MaxSendRate: 10000, Max24HourSend: 1000000, SentLast24Hours: 0 } };
+        if (throttle-- > 0) throw Object.assign(new Error('Maximum sending rate exceeded.'), { name: 'TooManyRequestsException', $metadata: { httpStatusCode: 429 } });
+        return { MessageId: randomUUID() };
+      });
+      const logs: Json[] = []; for (const level of ['warn', 'info'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch { /* not a log line */ } });
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'shadow', permissions: ['send', 'read'] }), 201);
+      // The campaign job through processJobs, whose end is where a drain's requests are handed over; rows are written on the
+      // fixture's one connection, so each step waits for them before it goes on.
+      const handlers = { ...jobHandlers, ...operationJobs, ...newsletterJobs };
+      const run = async (type: string) => {
+        await db.query("UPDATE jobs SET available_at=now() WHERE workspace_id=$1 AND type=$2 AND status='pending'", [wid, type]);
+        await processJobs(runtime, handlers, 5, 1, 20000, 'work'); await shadowSettled(runtime.db);
+      };
+      const harness = await campaignHarness(runtime, db, local, run, jobs, wid, acct, 'news@shadow.invalid');
+      const dispatch = async () => { const report = await harness.dispatch(); await shadowSettled(runtime.db); return report; };
+      const post = async (subject: string, text: string) => ok(await local('POST', '/v1/emails/send', { from: 'a@shadow.invalid', to: 'private.person@example.invalid', subject, text }, 'live', { authorization: `Bearer ${key.secret}` }), 202).id as string;
+      const rows = async () => (await db.query('SELECT * FROM screen_comparisons WHERE workspace_id=$1 ORDER BY created_at,id', [wid])).rows as Json[];
+      const line = (id: string) => logs.find(l => l.code === 'DISPATCH_EMAIL' && l.emailId === id)!;
+      const counts = async () => [sent.jev.length, sent.jevf.length, (await rows()).length];
+
+      // Without its key: the screen is asked, the second classifier is not, nothing is kept and the email's line is as before.
+      const off = await post('Receipt 1001', 'Private body 1001'); assert.equal((await dispatch()).sent, 1);
+      assert.deepEqual([...await counts(), 'screenDigest' in line(off)], [1, 0, 0, false]);
+
+      // With it: the same request again, byte for byte but for the model, under its own key, after the run.
+      runtime.config.shadow = shadowSettings();
+      const first = await post('Receipt 1002', 'Private body 1002'); assert.equal((await dispatch()).sent, 1);
+      assert.deepEqual(await counts(), [2, 1, 1]);
+      assert.equal(sent.jevf[0]!.body, sent.jev[1]!.replace('{"model":"fixture"', '{"model":"jevf"')); assert.notEqual(sent.jevf[0]!.body, sent.jev[1]);
+      assert.equal(sent.jevf[0]!.authorization, 'Bearer jevf-fixture-key');
+      const [r] = await rows();
+      assert.deepEqual([r.kind, r.email_id, r.campaign_id, r.window_index, r.windows, r.threshold, r.jev_outcome, r.jev_http_status, r.jev_score, r.jev_model, r.jev_flagged, r.jevf_outcome, r.jevf_http_status, r.jevf_score, r.jevf_model, r.jevf_input_tokens, r.jevf_flagged],
+        ['email', first, null, 0, 1, 0.7, 'ok', 200, 0.01, 'jev-fixture', false, 'ok', 200, 0.1037, 'jevf', 239, false]);
+      assert.ok(r.jev_input_tokens > 0 && r.jev_ms >= 0 && r.jevf_ms >= 0 && /^req_jevf_/.test(r.jevf_request_id) && /^[0-9a-f]{64}$/.test(r.digest) && Math.abs(Date.now() - new Date(r.created_at).getTime()) < 60_000, JSON.stringify(r));
+      assert.equal(line(first).screenDigest, r.digest.slice(0, 32));
+
+      // The same message again has its verdict from the cache: neither is asked and no row is added; its line carries the
+      // start of the digest of the request that judged it.
+      const cached = await post('Receipt 1002', 'Private body 1002'); assert.equal((await dispatch()).sent, 1);
+      assert.deepEqual([...await counts(), line(cached).screenDigest], [2, 1, 1, r.digest.slice(0, 32)]);
+
+      // SES throttles an email's first attempt: its retry is a second dispatch of the same email, and asks neither again.
+      throttle = 1;
+      const retried = await post('Receipt 1003', 'Private body 1003'); assert.equal((await dispatch()).sent, 0);
+      assert.deepEqual([(await db.query('SELECT status,error_code FROM sending_emails WHERE id=$1', [retried])).rows[0].error_code, ...await counts()], ['SES_THROTTLED', 3, 2, 2]);
+      await db.query('UPDATE sending_emails SET scheduled_at=now() WHERE id=$1', [retried]);
+      assert.equal((await dispatch()).sent, 1); assert.deepEqual(await counts(), [3, 2, 2]);
+
+      // What the screen refuses, and a request of the screen's that fails, are pairs too: the second classifier is asked all the same.
+      const spam = await post('Deals', 'See SampleMarker deals today'); assert.equal((await dispatch()).sent, 0);
+      jevDown = true; const outage = await post('Receipt 1004', 'Private body 1004'); assert.equal((await dispatch()).sent, 0); jevDown = false;
+      assert.deepEqual((await db.query('SELECT error_code FROM sending_emails WHERE id=ANY($1) ORDER BY array_position($1,id)', [[spam, outage]])).rows.map(x => x.error_code), ['CONTENT_REJECTED_SPAM', 'CONTENT_SCREEN_UNAVAILABLE']);
+      const pair = async (id: string) => (await rows()).filter(x => x.email_id === id).map(x => [x.jev_outcome, x.jev_http_status, x.jev_score, x.jev_flagged, x.jevf_outcome, x.jevf_score, x.jevf_flagged]);
+      assert.deepEqual([await pair(spam), await pair(outage)], [[['ok', 200, 0.99, true, 'ok', 0.1037, false]], [['http_503', 503, null, null, 'ok', 0.1037, false]]]);
+
+      // A campaign test of several requests: a row per request, all under the test email and its campaign.
+      const paragraphs = (n: number) => Array.from({ length: n }, (_, i) => `<p>Section ${i}: what changed this month in sync, search and sharing, and how to try it from your dashboard.</p>`).join('');
+      const long = await harness.campaign('Long digest', `<h1>Hello {{first_name}}</h1>${paragraphs(150)}<p><a href="https://shadow.invalid/notes">Read the notes</a></p>`, ['Ana', 'Ben', 'Ana', 'Ben', 'Ana'].map(first_name => ({ first_name })));
+      let before = await counts();
+      const tested = ok(await local('POST', `/v1/campaigns/${long.id}/test`, { to: 'me@example.net', data: {} }), 202); assert.equal((await dispatch()).sent, 1);
+      const windows = sent.jev.length - before[0]!, testRows = (await rows()).filter(x => x.kind === 'campaign_test');
+      assert.ok(windows >= 2, `${windows} requests`); assert.deepEqual([sent.jevf.length - before[1]!, testRows.length], [windows, windows]);
+      assert.ok(testRows.every(x => x.email_id === tested.id && x.campaign_id === long.id && x.windows === windows && x.digest === testRows[0]!.digest));
+      assert.deepEqual(testRows.map(x => x.window_index).sort((a, b) => a - b), Array.from({ length: windows }, (_, i) => i));
+
+      // The campaign itself: its own copy and one per distinct name, each of several requests. A row per request of each copy,
+      // under the campaign and the copy's key, however many recipients share it; dispatch then asks nothing.
+      before = await counts();
+      assert.equal((await harness.send(long)).delivery.expanded, 5);
+      const copies = (await db.query('SELECT copy_hash,requests FROM sending_campaign_screens WHERE campaign_id=$1', [long.id])).rows, copyRows = (await rows()).filter(x => x.kind === 'campaign_copy');
+      assert.equal(copies.length, 3); assert.ok(copies.every(c => c.requests >= 2));
+      assert.deepEqual([sent.jev.length - before[0]!, sent.jevf.length - before[1]!, copyRows.length], Array(3).fill(copies.reduce((n, c) => n + c.requests, 0)));
+      assert.ok(copyRows.every(x => x.campaign_id === long.id && x.email_id === null && x.workspace_id === wid));
+      for (const copy of copies) assert.deepEqual(copyRows.filter(x => x.digest === copy.copy_hash).map(x => [x.window_index, x.windows]).sort((a, b) => a[0] - b[0]), Array.from({ length: copy.requests }, (_, i) => [i, copy.requests]));
+      before = await counts(); assert.equal((await dispatch()).sent, 5); assert.deepEqual(await counts(), before);
+      // The second classifier's requests are the screen's, one for one, in every case above.
+      assert.deepEqual(sent.jevf.map(x => x.body).sort(), sent.jev.slice(1).map(x => x.replace('{"model":"fixture"', '{"model":"jevf"')).sort());
+
+      // A pair is written once: its batch written again, or again beside another, leaves it as it was.
+      const all = await rows(), again = (id: string) => ({ pair_id: id, at: Date.now(), workspace_id: wid, kind: 'email', digest: 'again', window_index: 0, windows: 1, jev_outcome: 'ok', jevf_outcome: 'timeout' });
+      assert.equal(new Set(all.map(x => x.pair_id)).size, all.length);
+      await writeComparisons(runtime.db, [again(r.pair_id), again(all.at(-1)!.pair_id)]); await writeComparisons(runtime.db, [again(r.pair_id)]);
+      assert.deepEqual((await rows()).map(x => [x.pair_id, x.digest, x.jevf_outcome]), all.map(x => [x.pair_id, x.digest, x.jevf_outcome]));
+
+      // The operator's comparison, from the table alone: only for operators, and absent from the public API document.
+      error(await local('GET', '/v1/operator/screen-comparison'), 403, 'OPERATOR_REQUIRED');
+      await (await import('./scripts/set-operator.js')).setOperator(db, [AUTH_SUBJECT, 'operator:read', '--reason', 'Synthetic comparison reader']);
+      const report = ok(await local('GET', `/v1/operator/screen-comparison?since=${encodeURIComponent(started)}`));
+      const n = (test: (x: Json) => boolean) => all.filter(test).length, both = (x: Json) => x.jev_flagged !== null && x.jevf_flagged !== null;
+      assert.deepEqual(report.counts, { pairs: all.length, digests: new Set(all.map(x => x.digest)).size, email: 4, campaignTest: windows, campaignCopy: copyRows.length, jevAnswered: all.length - 1, jevfAnswered: all.length, bothAnswered: all.length - 1 });
+      assert.deepEqual(report.coverage, { called: all.length, answered: all.length, refusedTooLarge: 0, skippedBreaker: 0, skippedRateLimited: 0, skippedBacklog: 0, lost: 0, answeredShare: 1 });
+      assert.deepEqual(report.outcomes, { jev: { ok: all.length - 1, http_503: 1 }, jevf: { ok: all.length } });
+      // They decide differently both ways: the screen alone refuses SampleMarker, the second classifier alone the copy that greets Ben.
+      const onlyJevf = n(x => x.jev_flagged === false && x.jevf_flagged === true); assert.ok(onlyJevf >= 1);
+      assert.deepEqual(report.agreement.requests, { compared: all.length - 1, bothFlag: 0, bothPass: all.length - 2 - onlyJevf, jevFlagJevfPass: 1, jevPassJevfFlag: onlyJevf });
+      assert.deepEqual(report.agreement.messages, { compared: 3 + 1 + 3, bothFlag: 0, bothPass: 5, jevFlagJevfPass: 1, jevPassJevfFlag: 1 });
+      assert.deepEqual(report.agreement.threshold, { min: 0.7, max: 0.7 });
+      assert.deepEqual(report.disagreements.map((d: Json) => [d.pairId, d.kind, d.emailId, d.campaignId, d.digest, d.window, d.jevScore, d.jevfScore, d.threshold]).sort(),
+        all.filter(x => both(x) && x.jev_flagged !== x.jevf_flagged).map(x => [x.pair_id, x.kind, x.email_id, x.campaign_id, x.digest, x.window_index, x.jev_score, x.jevf_score, 0.7]).sort());
+      assert.deepEqual(report.disagreements.map((d: Json) => [d.kind, d.emailId ?? d.campaignId, d.jevScore, d.jevfScore]).filter((d: unknown[], i: number, list: unknown[][]) => list.findIndex(o => String(o) === String(d)) === i).sort(), [['campaign_copy', long.id, 0.01, 0.91], ['email', spam, 0.99, 0.1037]]);
+      assert.equal(report.scoreDifference.histogram.reduce((sum: number, step: Json) => sum + step.count, 0), all.length - 1);
+      assert.ok(report.scoreDifference.meanAbsolute > 0 && report.scoreDifference.p99Absolute >= report.scoreDifference.p50Absolute);
+      assert.deepEqual([report.latencyMs.jev.requests, report.latencyMs.jevf.requests], [all.length, all.length]);
+      assert.ok([report.latencyMs.jev, report.latencyMs.jevf].every(q => q.p50 >= 0 && q.p95 >= q.p50 && q.p99 >= q.p95));
+      assert.deepEqual(report.tokens.jevf, { reported: all.length, total: 239 * all.length, mean: 239, max: 239 });
+      assert.deepEqual([report.tokens.jev.reported, report.tokens.jev.max, report.tokens.jevOver4096], [all.length - 1, Math.max(...all.map(x => x.jev_input_tokens ?? 0)), n(x => x.jev_input_tokens > 4096)]);
+      assert.equal(report.hourly.reduce((sum: number, hour: Json) => sum + hour.pairs, 0), all.length);
+      assert.deepEqual(report.hourly.reduce((sum: number[], hour: Json) => [sum[0]! + hour.jev.errors, sum[1]! + hour.jevf.calls, sum[2]! + hour.jevf.errors + hour.jevf.timeouts + hour.jevf.rateLimited + hour.jevf.skipped], [0, 0, 0]), [1, all.length, 0]);
+      assert.equal(report.configured, true); assert.equal(n(both), all.length - 1);
+      assert.equal(ok(await local('GET', `/v1/operator/screen-comparison?since=${encodeURIComponent(new Date(Date.now() + 60_000).toISOString())}`)).counts.pairs, 0);
+      assert.ok([400, 422].includes((await local('GET', '/v1/operator/screen-comparison?since=yesterday')).status));
+      assert.ok(!JSON.stringify(ok(await local('GET', '/openapi.json'))).includes('screen-comparison'));
+
+      // Kept 90 days by the hourly retention.
+      await db.query(`INSERT INTO screen_comparisons(created_at,pair_id,kind,digest,window_index,windows,jev_outcome,jevf_outcome,workspace_id)
+        VALUES (now()-interval '91 days','old-'||$1,'email','d',0,1,'ok','ok',$1),(now()-interval '89 days','recent-'||$1,'email','d',0,1,'ok','ok',$1)`, [wid]);
+      await (await import('./src/maintenance.js')).cleanup(runtime);
+      assert.deepEqual((await rows()).map(x => x.pair_id).filter(id => id.endsWith(wid)), [`recent-${wid}`]); assert.equal((await rows()).length, all.length + 1);
+
+      // Rows, lines and the report hold IDs, digests, scores and codes: never the text, an address or a key.
+      const written = JSON.stringify([await rows(), report, logs.filter(l => /^(SCREEN_|DISPATCH_EMAIL|CONTENT_SCREEN)/.test(String(l.code)))]);
+      for (const secret of ['Private body', 'Receipt 100', 'private.person', 'a@shadow', 'Section 3', 'SampleMarker', 'jevf-fixture-key', 'Hello Ben']) assert.ok(!written.includes(secret), secret);
+    }));
+  });
+
+  test('second classifier slow, down, rate limited, answering garbage or hanging past its deadline: the same mail goes out under the same verdicts and no later, nothing is retried, and what became of each repeat is kept', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => t.test('classifiers', async t => {
+      const [{ enqueueShadow, consumeShadow, writeComparisons, writtenComparisons }, { drizzle }, { runDispatcher, initialGate }, { SESv2Client, GetAccountCommand }] = await Promise.all([import('./src/screen-shadow.js'), import('drizzle-orm/node-postgres'), import('./src/dispatcher.js'), import('@aws-sdk/client-sesv2')]);
+      const acct = '112223330022', { wid } = await hostedScreenFixture(t, runtime, db, acct, 'unmoved.invalid');
+      // As on Cloudflare: the run puts its requests on the second classifier's queue and the queue's consumer asks, on
+      // connections of its own (the fixture's one connection is a transaction in use). Its rows are committed, and
+      // removed when the test ends.
+      const writer = new pg.Pool({ connectionString: FIXTURE_DATABASE_URL, max: 3 }), store = { write: (rows: Json[]) => writeComparisons(drizzle(writer), rows), written: (ids: string[]) => writtenComparisons(drizzle(writer), ids) };
+      cleanup(t, async () => { await writer.query('DELETE FROM screen_comparisons WHERE workspace_id=$1', [wid]).catch(() => undefined); await writer.end(); });
+      type Mode = 'off' | 'ok' | 'slow' | 'down' | '429' | 'garbage' | 'hang' | 'held';
+      let mode: Mode = 'off', letGo: (() => void)[] = [];
+      const sent = twoClassifiers(async init => {
+        const aborted = new Promise<never>((_, reject) => init.signal!.addEventListener('abort', () => reject(init.signal!.reason)));
+        aborted.catch(() => undefined);
+        if (mode === 'hang') return aborted;
+        if (mode === 'held') await Promise.race([new Promise<void>(resolve => { letGo.push(resolve); }), aborted]); // Answers when the test lets it.
+        if (mode === 'down') throw new TypeError('fetch failed');
+        if (mode === '429') return new Response('{"error":"rate limited"}', { status: 429, headers: { 'retry-after': '2', 'x-request-id': 'req_jevf_429' } });
+        if (mode === 'garbage') return new Response('<html>502 Bad Gateway</html>');
+        if (mode === 'slow') await Promise.race([new Promise(resolve => setTimeout(resolve, 700)), aborted]);
+        return jevfAnswers(0.1037);
+      });
+      const ses: string[] = [];
+      (SESv2Client.prototype.send as unknown as { mock: { mockImplementation(fn: unknown): void } }).mock.mockImplementation(async (cmd: { input: unknown }) => {
+        if (cmd instanceof GetAccountCommand) return { SendingEnabled: true, SendQuota: { MaxSendRate: 10000, Max24HourSend: 1000000, SentLast24Hours: 0 } };
+        ses.push(JSON.stringify(cmd.input)); return { MessageId: randomUUID() };
+      });
+      const logs: Json[] = []; for (const level of ['warn', 'info'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch { /* not a log line */ } });
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'unmoved', permissions: ['send', 'read'] }), 201);
+      const long = Array.from({ length: 160 }, (_, i) => `Line ${i}: your order, its items and where each one is on its way to you.`).join('\n');
+      // Each use has a queue and a model of its own: the pause and the breaker are kept per endpoint and model.
+      let queued: ReturnType<typeof jevfQueue> | undefined, sending: Promise<void> = Promise.resolve(), tags = 0, uses = 0;
+      const use = (next: Mode) => {
+        mode = next; queued = undefined; runtime.config.shadow = undefined; runtime.shadow = undefined;
+        if (next === 'off') return;
+        const settings = runtime.config.shadow = shadowSettings(next === 'held' ? 30_000 : 1000, `jevf-${++uses}`), made = queued = jevfQueue(messages => consumeShadow(settings, store, messages));
+        runtime.shadow = items => { sending = enqueueShadow(made.queue, items); };
+      };
+      const consumed = async () => { await sending; await queued!.settled(); };
+      // One round: twelve emails (one the screen refuses, one of several requests) and one dispatch run. What it returns is
+      // everything a sender or SES could see, with the round's tag and email IDs taken out.
+      const round = async () => {
+        const tag = `T${String(++tags).padStart(4, '0')}`, ids: string[] = [], from = { jev: sent.jev.length, jevf: sent.jevf.length, ses: ses.length };
+        await db.query('UPDATE hosted_burst_windows SET used=0 WHERE workspace_id=$1', [wid]); // Every round has the workspace's whole minute allowance.
+        for (let i = 0; i < 12; i++) ids.push(ok(await local('POST', '/v1/emails/send', { from: 'a@unmoved.invalid', to: 'private.person@example.invalid', subject: `Receipt ${tag}-${i}`,
+          text: i === 3 ? `See SampleMarker deals ${tag}` : i === 7 ? `Order ${tag}\n${long}` : `Private body ${tag}-${i}` }, 'live', { authorization: `Bearer ${key.secret}` }), 202).id);
+        const began = Date.now(), report = await runDispatcher(runtime, { region: REGION, accountId: acct, batchSize: 24, lanes: 1, gate: initialGate() }), ms = Date.now() - began;
+        const plain = (text: string) => ids.reduce((out, id, i) => out.replaceAll(id, `email-${i}`), text).replaceAll(tag, 'TAG');
+        const outcome = (await db.query('SELECT status,error_code FROM sending_emails WHERE id=ANY($1) ORDER BY array_position($1,id)', [ids])).rows.map(x => [x.status, x.error_code]);
+        const events = (await db.query(`SELECT array_position($1,email_id) AS email,type,data->'screen' AS screen,data->>'code' AS code FROM sending_email_events WHERE email_id=ANY($1) ORDER BY 1,2,3,4`, [ids])).rows;
+        return { ids, ms, from: from.jevf, jevf: sent.jevf.length - from.jevf, seen: { sent: report.sent, outcome, events, jev: sent.jev.slice(from.jev).map(plain).sort(), ses: ses.slice(from.ses).map(plain).sort() } };
+      };
+      const kept = async (ids: string[]) => (await db.query('SELECT pair_id,email_id,window_index,windows,jev_outcome,jev_score,jevf_outcome,jevf_ms,jevf_http_status,jevf_request_id FROM screen_comparisons WHERE email_id=ANY($1)', [ids])).rows as Json[];
+      const tally = (rows: Json[]) => rows.reduce((counts: Record<string, number>, row) => ({ ...counts, [row.jevf_outcome]: (counts[row.jevf_outcome] ?? 0) + 1 }), {});
+
+      // Without the second classifier: the baseline. Eleven emails of one request and one of several; eleven go out.
+      use('off');
+      const baseline = await round(), requests = baseline.seen.jev.length;
+      assert.deepEqual([baseline.seen.sent, baseline.seen.ses.length, baseline.jevf, requests > 12], [11, 11, 0, true]);
+      assert.deepEqual(baseline.seen.outcome[3], ['rejected', 'CONTENT_REJECTED_SPAM']);
+      assert.deepEqual((await round()).seen, baseline.seen, 'Two rounds without it are the same but for their tag and IDs.');
+      assert.equal((await writer.query('SELECT count(*)::int AS n FROM screen_comparisons WHERE workspace_id=$1', [wid])).rows[0].n, 0);
+
+      // However the second classifier behaves, the round is the same, byte for byte: the screen's requests, what SES is sent,
+      // every email's outcome and events. Each of the screen's requests still gets its row, once.
+      const expected: Record<Exclude<Mode, 'off' | 'held'>, (counts: Record<string, number>, calls: number) => boolean> = {
+        ok: (c, calls) => c.ok === requests && calls === requests,
+        slow: (c, calls) => c.ok === requests && calls === requests,
+        // Five failures in a row open the breaker; the calls already out by then end too. The rest are skipped.
+        down: (c, calls) => c.network >= 5 && c.network <= 12 && c.network === calls && c.skipped_breaker === requests - calls,
+        garbage: (c, calls) => c.invalid >= 5 && c.invalid <= 12 && c.invalid === calls && c.skipped_breaker === requests - calls,
+        hang: (c, calls) => c.timeout >= 5 && c.timeout <= 12 && c.timeout === calls && c.skipped_breaker === requests - calls,
+        // The first 429 pauses everything for its Retry-After: only the eight already in flight were asked.
+        '429': (c, calls) => c.rate_limited === 8 && calls === 8 && c.skipped_rate_limited === requests - 8,
+      };
+      for (const next of ['ok', 'slow', 'down', 'garbage', '429', 'hang'] as const) {
+        use(next);
+        const now = await round();
+        assert.deepEqual(now.seen, baseline.seen, `${next}: the round is unchanged`);
+        await consumed();
+        const rows = await kept(now.ids), calls = sent.jevf.length - now.from;
+        assert.equal(queued!.dropped, 0); assert.ok(queued!.sends.flat().length === requests && queued!.sends.flat().every(message => message.contentType === 'text'), 'a message per request');
+        assert.equal(rows.length, requests, `${next}: a row per request of the screen`); assert.equal(new Set(rows.map(row => row.pair_id)).size, requests);
+        assert.ok(rows.every(row => row.jev_outcome === 'ok' && typeof row.jev_score === 'number'));
+        assert.ok(expected[next](tally(rows), calls), `${next}: ${JSON.stringify(tally(rows))} after ${calls} calls`);
+        if (next === 'slow') assert.ok(rows.every(row => row.jevf_ms >= 650), 'It may take longer than the screen\'s own 500 ms deadline.');
+        if (next === 'hang') assert.ok(rows.filter(row => row.jevf_outcome === 'timeout').every(row => row.jevf_ms >= 950 && row.jevf_ms < 4000));
+        if (next === '429') assert.ok(rows.filter(row => row.jevf_outcome === 'rate_limited').every(row => row.jevf_http_status === 429 && row.jevf_request_id === 'req_jevf_429'));
+        // Nothing is retried: the calls made by now are all there will be.
+        const asked = sent.jevf.length; await new Promise(resolve => setTimeout(resolve, 100)); assert.equal(sent.jevf.length, asked); assert.equal((await kept(now.ids)).length, requests);
+      }
+      const breaker = logs.filter(l => l.code === 'SCREEN_SHADOW_BREAKER').map(l => l.state);
+      assert.deepEqual(breaker, ['opened', 'opened', 'opened'], 'down, garbage and hang each opened the breaker');
+      assert.equal(logs.filter(l => l.code === 'SCREEN_SHADOW_RATE_LIMITED').length, 1); assert.equal(logs.filter(l => l.code === 'SCREEN_SHADOW_TIMEOUT').length, 1);
+
+      // No later: a dispatch run while the second classifier's calls from the run before are still out takes what a run
+      // without it takes. (A call starts only when its own run has ended, so the run after is the one it could delay.)
+      // The calls are held until the run has been timed, then answered.
+      const timed = { off: [] as number[], hanging: [] as number[] };
+      // Each is the second of two rounds, and the two take turns going first.
+      for (let i = 0; i < 4; i++) for (const arm of i % 2 ? ['hanging', 'off'] as const : ['off', 'hanging'] as const) {
+        if (arm === 'off') { use('off'); await round(); const without = await round(); timed.off.push(without.ms); assert.deepEqual(without.seen, baseline.seen); continue; }
+        use('held'); const primed = await round();
+        assert.equal(primed.jevf, 8, 'eight calls are out');
+        const during = await round(); timed.hanging.push(during.ms);
+        assert.deepEqual(during.seen, baseline.seen); assert.deepEqual([(await kept(primed.ids)).length, letGo.length], [0, 8], 'They were still out when the run ended.');
+        // Let go, they and the requests behind them are answered as they come.
+        const free = setInterval(() => { for (const answer of letGo.splice(0)) answer(); }, 5);
+        try { await consumed(); } finally { clearInterval(free); }
+        assert.equal((await kept([...primed.ids, ...during.ids])).length, 2 * requests);
+      }
+      const median = (values: number[]) => { const sorted = [...values].sort((a, b) => a - b); return (sorted[1]! + sorted[2]!) / 2; };
+      t.diagnostic(`dispatch run of 12 emails, straight after another: without the second classifier ${timed.off.join(', ')} ms; with eight of its calls from the run before still out ${timed.hanging.join(', ')} ms`);
+      assert.ok(median(timed.hanging) < median(timed.off) + 500, `without ${timed.off} ms, with ${timed.hanging} ms`);
+      const written = JSON.stringify([(await writer.query('SELECT to_jsonb(c) AS c FROM screen_comparisons c WHERE workspace_id=$1', [wid])).rows, logs.filter(l => String(l.code).startsWith('SCREEN_'))]);
+      for (const secret of ['Private body', 'Receipt T', 'private.person', 'a@unmoved', 'SampleMarker', 'jevf-fixture-key', 'your order']) assert.ok(!written.includes(secret), secret);
+    }));
+  });
+
+  test('second classifier breaker: failures in a row open it, nothing is asked while it is open, one probe closes it or opens it for twice as long; a 429 pauses for its Retry-After; a refusal of an over-long request is an answer; one line per failure class', async t => {
+    const { ShadowRunner } = await import('./src/screen-shadow.js');
+    const logs: Json[] = []; for (const level of ['warn', 'info'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch { /* not a log line */ } });
+    const rows: Json[] = [], sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms)), fine = () => jevfAnswers(0.2);
+    let calls = 0, answer: (init: RequestInit) => Response | Promise<Response> = fine;
+    t.mock.method(globalThis, 'fetch', async (_url: RequestInfo | URL, init: RequestInit) => { calls++; return answer(init); });
+    const runner = new ShadowRunner({ ...shadowSettings(300), maxConcurrency: 1 }, async batch => { rows.push(...batch); }, { failuresToOpen: 3, openMs: 400 });
+    let made = 0;
+    const item = (request = true) => ({ id: `pair-${++made}`, at: Date.now(), workspaceId: 'ws_fixture', kind: 'email' as const, emailId: `email-${made}`, digest: 'd'.repeat(64), window: 0, windows: 1, threshold: 0.7,
+      jev: { outcome: 'ok', httpStatus: 200, ms: 5, score: 0.2, model: 'jev' }, ...(request ? { request: { state: { email: { subject: 'Private subject', body: 'Private body' } }, questions: { spam: {} } } } : {}) });
+    const feed = async (count: number, request = true) => { const from = rows.length; runner.accept(Array.from({ length: count }, () => item(request))); await runner.settled(); return rows.slice(from).map(row => row.jevf_outcome); };
+    const failing = () => new Response(null, { status: 500 });
+
+    // Three failures in a row open it; what was waiting, and what comes while it is open, is skipped without a request.
+    answer = failing;
+    assert.deepEqual(await feed(5), ['http_500', 'http_500', 'http_500', 'skipped_breaker', 'skipped_breaker']); assert.deepEqual([calls, runner.open], [3, true]);
+    assert.deepEqual(await feed(2), ['skipped_breaker', 'skipped_breaker']); assert.equal(calls, 3);
+    // After its pause one request is let through. It fails: open again, for twice as long.
+    await sleep(450); assert.deepEqual(await feed(3), ['http_500', 'skipped_breaker', 'skipped_breaker']); assert.equal(calls, 4);
+    await sleep(450); assert.deepEqual(await feed(1), ['skipped_breaker'], 'still open after the first pause\'s length'); assert.equal(calls, 4);
+    // The next one let through is answered: closed, and requests go again.
+    await sleep(450); answer = fine; assert.deepEqual(await feed(3), ['ok', 'ok', 'ok']); assert.deepEqual([calls, runner.open], [7, false]);
+
+    // A 429 pauses everything for its Retry-After, and is not a failure.
+    answer = () => new Response(null, { status: 429, headers: { 'retry-after': '1' } });
+    assert.deepEqual(await feed(3), ['rate_limited', 'skipped_rate_limited', 'skipped_rate_limited']);
+    answer = fine; assert.deepEqual(await feed(1), ['skipped_rate_limited']); assert.deepEqual([calls, runner.open], [8, false]);
+    await sleep(1100); assert.deepEqual(await feed(1), ['ok']); // The second after the 429 was answered has passed.
+
+    // An over-long request is refused (413, or a 400 that says so): recorded as that, and however many, never a failure.
+    answer = () => new Response('{"error":{"message":"input exceeds the 4096 token limit of this preview"}}', { status: 400 });
+    assert.deepEqual(await feed(4), Array(4).fill('refused_too_large')); assert.equal(runner.open, false);
+    answer = () => new Response(null, { status: 413 }); assert.deepEqual(await feed(1), ['refused_too_large']);
+    // Another 400, an answer without a score, a request that hangs to the deadline, and one kept without its text.
+    answer = () => new Response('{"error":"unknown model"}', { status: 400 }); assert.deepEqual(await feed(1), ['http_400']);
+    answer = () => Response.json({ answers: { spam: { noul: 7 } } }); assert.deepEqual(await feed(1), ['invalid']);
+    answer = fine; assert.deepEqual(await feed(1), ['ok']);
+    answer = init => new Promise<never>((_, reject) => init.signal!.addEventListener('abort', () => reject(init.signal!.reason)));
+    const hung = Date.now(); assert.deepEqual(await feed(1), ['timeout']); assert.ok(Date.now() - hung >= 250 && rows.at(-1)!.jevf_ms >= 250);
+    answer = fine; const before = calls; assert.deepEqual(await feed(1, false), ['skipped_backlog']); assert.equal(calls, before);
+
+    assert.equal(new Set(rows.map(row => row.pair_id)).size, made, 'Every request has its row, once.');
+    assert.deepEqual(logs.filter(l => l.code === 'SCREEN_SHADOW_BREAKER').map(l => [l.level, l.state, l.again ?? false, l.pauseMs]), [['warn', 'opened', false, 400], ['warn', 'opened', true, 800], ['info', 'closed', false, undefined]]);
+    // One line a minute per failure class, however many it stands for.
+    assert.deepEqual(['SCREEN_SHADOW_ERROR', 'SCREEN_SHADOW_RATE_LIMITED', 'SCREEN_SHADOW_TIMEOUT'].map(code => logs.filter(l => l.code === code).length), [1, 1, 1]);
+    const written = JSON.stringify([rows, logs]);
+    for (const secret of ['Private', 'jevf-fixture-key']) assert.ok(!written.includes(secret), secret);
+  });
+
+  test('second classifier on Cloudflare: a run only puts messages on its queue; the consumer asks at most four at a time, writes each pair once, never asks twice for a message delivered again, and gives up after the queue\'s retries; both Worker configs bind the queue and nothing else', async t => {
+    const { enqueueShadow, consumeShadow } = await import('./src/screen-shadow.js');
+    const logs: Json[] = []; for (const level of ['warn', 'info'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch { /* not a log line */ } });
+    let calls = 0, active = 0, peak = 0, made = 0;
+    t.mock.method(globalThis, 'fetch', async () => { calls++; peak = Math.max(peak, ++active); await new Promise(resolve => setTimeout(resolve, 20)); active--; return jevfAnswers(0.2); });
+    const items = (count: number, body = 'Private body') => Array.from({ length: count }, () => ({ id: `pair-${++made}`, at: Date.now(), workspaceId: 'ws_fixture', kind: 'email' as const, emailId: `email-${made}`, digest: 'd'.repeat(64), window: 0, windows: 1, threshold: 0.7,
+      jev: { outcome: 'ok', httpStatus: 200, ms: 5, score: 0.9, model: 'jev' }, request: { state: { email: { subject: 'Private subject', body } }, questions: { spam: {} } } }));
+    // Where rows go: a pair is kept once, as the table keeps it; `fail` makes the next writes fail.
+    const rows = new Map<string, Json>(); let fail = 0, lookups = 0;
+    const store = { write: async (batch: Json[]) => { if (fail-- > 0) throw Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' }); for (const row of batch) if (!rows.has(row.pair_id)) rows.set(row.pair_id, row); },
+      written: async (ids: string[]) => { lookups++; return new Set(ids.filter(id => rows.has(id))); } };
+    const outcomes = (from: number) => [...rows.values()].slice(from).map(row => row.jevf_outcome);
+
+    // What a run does: one message per request, as text, in as few sends as a queue takes (100 messages and 256 KB a
+    // send, 128 KB a message). A request too large for a message goes without its text. Nothing is asked from here.
+    const plain = jevfQueue(async () => true), many = [...items(120), ...items(40, 'x'.repeat(8000)), ...items(1, 'y'.repeat(130_000))];
+    await enqueueShadow(plain.queue, many);
+    assert.equal(plain.sends.flat().length, 161); assert.ok(plain.sends.length >= 3 && plain.sends.every(send => send.length <= 100 && send.reduce((bytes, message) => bytes + Buffer.byteLength(message.body), 0) <= 256_000));
+    assert.ok(plain.sends.flat().every(message => message.contentType === 'text' && Buffer.byteLength(message.body) <= 128_000));
+    assert.deepEqual(plain.sends.flat().map(message => JSON.parse(message.body)), many.map((item, index) => index === 160 ? { ...item, request: undefined } : item).map(item => JSON.parse(JSON.stringify(item))));
+    assert.equal(calls, 0);
+    // A send that fails loses what was not sent, with one line; it never throws where the run ended.
+    await enqueueShadow({ sendBatch: async () => { throw new TypeError('Network connection lost.'); } }, items(3));
+    assert.deepEqual(logs.filter(l => l.code === 'SCREEN_SHADOW_HANDOFF_FAILED').map(l => [l.level, l.items, l.sent]), [['warn', 3, 0]]);
+
+    // The consumer: four messages an invocation, two invocations at once. Every pair gets its row.
+    const settings = shadowSettings(2000, 'jevf-queue'), queue = jevfQueue(messages => consumeShadow(settings, store, messages));
+    await enqueueShadow(queue.queue, items(10)); await queue.settled();
+    assert.deepEqual([calls, rows.size, peak <= 8, peak >= 5, lookups, queue.dropped], [10, 10, true, true, 0, 0], `peak ${peak}`);
+    assert.deepEqual(outcomes(0), Array(10).fill('ok'));
+    // The rows of a batch cannot be written: the queue delivers it again. The second classifier is not asked again:
+    // what the first delivery learned is gone, and the row says lost.
+    let from = rows.size, asked = calls; fail = 1;
+    await enqueueShadow(queue.queue, items(4)); await queue.settled();
+    assert.deepEqual([calls - asked, outcomes(from), lookups, queue.dropped], [4, Array(4).fill('lost'), 1, 0]);
+    assert.ok([...rows.values()].slice(from).every(row => row.jev_score === 0.9 && row.jevf_score === null && row.jevf_ms === null));
+    // A message delivered again whose first delivery did write its row (only the acknowledgement was lost) adds nothing.
+    from = rows.size; asked = calls;
+    const [once] = items(1); await consumeShadow(settings, store, [{ body: JSON.stringify(once), attempts: 1 }]);
+    assert.equal(await consumeShadow(settings, store, [{ body: JSON.stringify(once), attempts: 2 }]), true);
+    assert.deepEqual([calls - asked, outcomes(from)], [1, ['ok']]);
+    // Rows that can never be written: three deliveries, one request to the second classifier, then the message is gone.
+    from = rows.size; asked = calls; fail = Number.POSITIVE_INFINITY;
+    await enqueueShadow(queue.queue, items(4)); await queue.settled(); fail = 0;
+    assert.deepEqual([calls - asked, rows.size - from, queue.dropped], [4, 0, 4]);
+    assert.equal(logs.filter(l => l.code === 'SCREEN_COMPARISONS_UNWRITTEN').length, 1 + 3);
+    // Anything that is not one of its messages is dropped, not retried.
+    assert.equal(await consumeShadow(settings, store, [{ body: 'not json', attempts: 1 }, { body: '{"id":7}', attempts: 1 }]), true); assert.equal(rows.size, from);
+    assert.ok(!JSON.stringify([[...rows.values()], logs]).includes('Private'));
+
+    // Both Worker configs: the queue is bound and consumed with no dead-letter queue, four messages an invocation (and
+    // the database's connection, of the six an invocation waits on), eight calls in all; no Durable Object is added for it.
+    const ts = (await import('typescript')).default;
+    for (const file of ['wrangler.dev.jsonc', 'wrangler.prod.jsonc']) {
+      const config = ts.parseConfigFileTextToJson(file, await readFile(new URL(file, import.meta.url), 'utf8')).config;
+      const name = config.queues.producers.find((producer: Json) => producer.binding === 'JEVF_QUEUE')?.queue, consumer = config.queues.consumers.find((queue: Json) => queue.queue === name);
+      assert.ok(name && config.vars.JEVF_QUEUE_NAME === name && consumer, file);
+      assert.ok(consumer.max_batch_size <= 5 && consumer.max_batch_size * consumer.max_concurrency <= 8 && consumer.max_retries <= 3 && !('dead_letter_queue' in consumer), JSON.stringify(consumer));
+      assert.ok(!config.queues.consumers.some((queue: Json) => queue.dead_letter_queue === name));
+      assert.ok(!('JEVF_API_KEY' in config.vars), 'The key is a secret, never a variable.');
+      assert.ok(!JSON.stringify([config.durable_objects, config.migrations]).includes('Shadow'));
+    }
+  });
+
+  test('second classifier on Cloudflare: the Worker\'s queue handler consumes its queue, writes the rows and acknowledges; without the key it drops what is queued and asks nothing', async t => {
+    // Node has no Workers host; provide only the base classes worker.ts extends.
+    const { registerHooks } = await import('node:module');
+    const hook = registerHooks({ resolve(specifier, context, next) {
+      return specifier === 'cloudflare:workers' ? { shortCircuit: true, url: 'data:text/javascript,export class DurableObject {constructor(ctx,env){this.ctx=ctx;this.env=env}} export class WorkerEntrypoint {constructor(ctx,env){this.ctx=ctx;this.env=env}}' } : next(specifier, context);
+    } });
+    const worker = (await import('./src/worker.js').finally(() => hook.deregister())).default as unknown as { queue(batch: unknown, env: unknown): Promise<void> };
+    const db = new pg.Client({ connectionString: FIXTURE_DATABASE_URL }); await db.connect();
+    const wid = unique('jevf-queue-workspace');
+    cleanup(t, async () => { await db.query('DELETE FROM screen_comparisons WHERE workspace_id=$1', [wid]).catch(() => undefined); await db.end(); });
+    for (const level of ['warn', 'info', 'error'] as const) t.mock.method(console, level, () => undefined);
+    let calls = 0; const asked: string[] = [];
+    t.mock.method(globalThis, 'fetch', async (url: RequestInfo | URL, init: RequestInit) => { calls++; assert.equal(String(url), JEVF_URL); asked.push(String(init.body)); return jevfAnswers(0.2); });
+    const env = (key?: string) => ({ PUBLIC_URL: 'https://dev.bane.mx', BANE_ROOT_SECRET: 's'.repeat(32), MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'false',
+      WORK_QUEUE_NAME: 'bane-dev-work', FEEDBACK_QUEUE_NAME: 'bane-dev-feedback', JEVF_QUEUE_NAME: 'fixture-jevf', TYPESAFE_API_KEY: 'jev-fixture-key', ...(key ? { JEVF_API_KEY: key, JEVF_ENDPOINT: JEVF_URL } : {}),
+      HYPERDRIVE: { connectionString: FIXTURE_DATABASE_URL }, ATTACHMENTS: { async put() {}, async get() { return null; }, async delete() {} }, WAKE_QUEUE: { async send() {} },
+      FEEDBACK_QUEUE: { async send() {}, async sendBatch() {} }, JEVF_QUEUE: { async sendBatch() {} }, ADMISSION: { async limit() { return { success: true }; } } });
+    let made = 0;
+    const batch = (count: number, attempts = 1) => {
+      const state = { acked: 0, retried: 0 };
+      return { state, queue: 'fixture-jevf', ackAll() { state.acked++; }, retryAll() { state.retried++; }, messages: Array.from({ length: count }, () => ({ attempts, timestamp: new Date(), ack() {}, retry() {},
+        body: JSON.stringify({ id: `${wid}-${++made}`, at: Date.now(), workspaceId: wid, kind: 'email', emailId: `email-${made}`, digest: 'd'.repeat(64), window: 0, windows: 1, threshold: 0.7,
+          jev: { outcome: 'ok', httpStatus: 200, ms: 5, score: 0.9, model: 'jev' }, request: { state: { email: { subject: 'Private subject', body: 'Private body' } }, questions: { spam: {} } } }) })) };
+    };
+    const stored = async () => (await db.query('SELECT pair_id,jev_score,jev_flagged,jevf_outcome,jevf_score,jevf_flagged,jevf_model FROM screen_comparisons WHERE workspace_id=$1 ORDER BY created_at,id', [wid])).rows;
+    // Without the key: acknowledged, so the queue empties, with no request and no row.
+    const dropped = batch(2); await worker.queue(dropped, env());
+    assert.deepEqual([dropped.state, calls, (await stored()).length], [{ acked: 1, retried: 0 }, 0, 0]);
+    // With it: each message's request goes to the second classifier under its key's model, and its row is written.
+    const first = batch(3); await worker.queue(first, env('jevf-fixture-key'));
+    assert.deepEqual([first.state, calls], [{ acked: 1, retried: 0 }, 3]);
+    assert.deepEqual(asked.map(body => JSON.parse(body)), Array(3).fill({ model: 'jevf', state: { email: { subject: 'Private subject', body: 'Private body' } }, questions: { spam: {} } }));
+    assert.deepEqual((await stored()).map(row => [row.jev_score, row.jev_flagged, row.jevf_outcome, row.jevf_score, row.jevf_flagged, row.jevf_model]), Array(3).fill([0.9, true, 'ok', 0.2, false, 'jevf']));
+    // The same messages delivered again: no request, no second row. A message delivered again that never had a row: lost.
+    await worker.queue({ ...first, messages: first.messages.map(message => ({ ...message, attempts: 2 })) }, env('jevf-fixture-key'));
+    const again = batch(1, 2); await worker.queue(again, env('jevf-fixture-key'));
+    assert.deepEqual([calls, again.state, (await stored()).map(row => row.jevf_outcome)], [3, { acked: 1, retried: 0 }, ['ok', 'ok', 'ok', 'lost']]);
+  });
+
+  test('second classifier on Cloudflare: a job drain that screened acknowledges its work-queue batch while the send to the second classifier\'s queue is still pending, kept alive by waitUntil', async t => {
+    // Node has no Workers host; provide only the base classes worker.ts extends.
+    const { registerHooks } = await import('node:module');
+    const hook = registerHooks({ resolve(specifier, context, next) {
+      return specifier === 'cloudflare:workers' ? { shortCircuit: true, url: 'data:text/javascript,export class DurableObject {constructor(ctx,env){this.ctx=ctx;this.env=env}} export class WorkerEntrypoint {constructor(ctx,env){this.ctx=ctx;this.env=env}}' } : next(specifier, context);
+    } });
+    const worker = (await import('./src/worker.js').finally(() => hook.deregister())).default as unknown as { queue(batch: unknown, env: unknown, ctx?: unknown): Promise<void> };
+    const [{ jobHandlers }, { screenWindow }] = await Promise.all([import('./src/sending.js'), import('./src/screen.js')]);
+    // The Worker's own jobs table, so its drain claims this test's job and nothing else; every other table is the fixture database's.
+    const db = new pg.Client({ connectionString: FIXTURE_DATABASE_URL }); await db.connect();
+    const wid = unique('jevf-drain-workspace'), schema = `jevf_drain_${randomUUID().replaceAll('-', '').slice(0, 12)}`, type = 'campaign.shadowFixture';
+    cleanup(t, async () => { release(); delete jobHandlers[type]; await db.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined); await db.query('DELETE FROM content_screen_calls WHERE workspace_id=$1', [wid]).catch(() => undefined);
+      await db.query('DELETE FROM ses_installation_settings WHERE workspace_id=$1', [wid]).catch(() => undefined); await db.end(); });
+    await (await import('./src/ses-region-state.js')).ensureRegionSettings((await import('drizzle-orm/node-postgres')).drizzle(db), { workspaceId: wid, regions: ['us-east-2'] });
+    await db.query(`CREATE SCHEMA ${schema}; CREATE TABLE ${schema}.jobs (LIKE public.jobs INCLUDING ALL); CREATE TABLE ${schema}.job_schedule (LIKE public.job_schedule INCLUDING ALL)`);
+    const scoped = new URL(FIXTURE_DATABASE_URL!); scoped.searchParams.set('options', `-c search_path=${schema},public`);
+    const logs: Json[] = []; for (const level of ['warn', 'info', 'error'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch { /* not a log line */ } });
+    // A campaign job that makes one request of the content screen, as a campaign's screen does for each copy.
+    const state = { email: { from: 'news@example.invalid', kind: 'marketing', subject: 'Private subject', body: 'Private body' }, signals: { recipients: 1 } };
+    let screened = 0;
+    jobHandlers[type] = async runtime => { await screenWindow(runtime, { requests: [state] }, 0, { workspaceId: wid, campaignId: 'cmp_fixture', kind: 'marketing', required: true }, 'c'.repeat(64)); screened++; };
+    t.mock.method(globalThis, 'fetch', async () => Response.json({ model: 'jev-fixture', answers: { spam: { noul: 0.01 } } }));
+    // The second classifier's queue takes the send and does not answer until released.
+    const sends: { body: string }[][] = [], waited: Promise<unknown>[] = [];
+    let release!: () => void, settled = false;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    const env = { PUBLIC_URL: 'https://dev.bane.mx', BANE_ROOT_SECRET: 's'.repeat(32), MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'false',
+      WORK_QUEUE_NAME: 'bane-dev-work', FEEDBACK_QUEUE_NAME: 'bane-dev-feedback', JEVF_QUEUE_NAME: 'fixture-jevf', TYPESAFE_API_KEY: 'jev-fixture-key', JEVF_API_KEY: 'jevf-fixture-key', JEVF_ENDPOINT: JEVF_URL,
+      HYPERDRIVE: { connectionString: scoped.href }, ATTACHMENTS: { async put() {}, async get() { return null; }, async delete() {} }, WAKE_QUEUE: { async send() {} },
+      FEEDBACK_QUEUE: { async send() {}, async sendBatch() {} }, ADMISSION: { async limit() { return { success: true }; } },
+      JEVF_QUEUE: { sendBatch: (messages: { body: string }[]) => { sends.push(messages); return pending; } } };
+    const ctx = { waitUntil(promise: Promise<unknown>) { waited.push(promise); void promise.then(() => { settled = true; }); } };
+    const drain = async (context?: unknown) => {
+      await db.query(`INSERT INTO ${schema}.jobs(id,workspace_id,type,payload,available_at) VALUES($1,$2,$3,'{}'::jsonb,now())`, [`job_${randomUUID()}`, wid, type]);
+      const state = { acked: 0, retried: 0 }, began = Date.now();
+      const done = worker.queue({ queue: 'bane-dev-work', messages: [], ackAll() { state.acked++; }, retryAll() { state.retried++; } }, env, context).then(() => 'returned' as const);
+      return { state, outcome: await Promise.race([done, new Promise<'waiting'>(resolve => setTimeout(() => resolve('waiting'), 5000))]), ms: Date.now() - began, done };
+    };
+    // The handler also flushes this process's health counters under waitUntil when they are due (src/health-counters.ts):
+    // started over here, they are not, so the only thing it gives waitUntil is the send, and nothing is written for health.
+    (await import('./src/health-counters.js')).resetCounters();
+    // The drain ran the job, the job's request was put on the queue, and the batch is acknowledged with that send still out.
+    const first = await drain(ctx);
+    assert.deepEqual([first.outcome, first.state, screened, sends.length, sends[0]?.length, settled], ['returned', { acked: 1, retried: 0 }, 1, 1, 1, false], `after ${first.ms} ms: ${JSON.stringify(logs.filter(l => l.level !== 'info' || l.code === 'JOB_DRAIN'))}`);
+    assert.equal(waited.length, 1, 'The send was given to waitUntil, once.');
+    assert.equal((await db.query(`SELECT status FROM ${schema}.jobs`)).rows.map(row => row.status).join(), 'completed');
+    assert.deepEqual(JSON.parse(sends[0]![0]!.body).request, { state, questions: JSON.parse(sends[0]![0]!.body).request.questions });
+    // Released, the promise waitUntil holds settles: nothing else was waiting on it.
+    release(); await Promise.all(waited); assert.equal(settled, true);
+    assert.ok(!logs.some(l => l.code === 'SCREEN_SHADOW_HANDOFF_FAILED'));
+  });
+
   test('hosted campaign copy keys: the customer copy byte for byte, with only the unsubscribe slots Nightmail generates set for a placeholder', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => t.test('classifier', async t => {
       await hostedScreenFixture(t, runtime, db, '112223330015', 'keyed.invalid');
@@ -25364,6 +26634,58 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  // tear/campaign-lifecycle witness BUG-LC-01. A Hosted sender with a list of `size` subscribed contacts and a launched campaign to it.
+  async function releasingCampaign({ runtime, db, local }: Parameters<Parameters<typeof simulatedSesFixture>[1]>[0], size: number) {
+    const wid = runtime.config.workspaceId, pool = '111122223335', domain = 'settles.example', from = `news@${domain}`;
+    Object.assign(runtime.config, { multiTenant: true, liveEnabled: true, aws: { accessKeyId: 'fixture-platform', secretAccessKey: 'fixture-only' } });
+    await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
+    await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, pool]);
+    await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`, [domain, wid]);
+    await gradedSender(db, wid, 10000);
+    const list = ok(await local('POST', '/v1/lists', { name: unique('settles') }), 201);
+    await db.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_'||md5($1||n),$1,'settles-'||n||'@example.net','subscribed' FROM generate_series(1,$3::int)n RETURNING id)
+      INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM c`, [wid, list.id, size]);
+    const c = ok(await local('POST', '/v1/campaigns', { name: 'Settles', from, subject: 'Settles', html: '<p>Fixture.</p>', audience: { listId: list.id } }), 201), path = `/v1/campaigns/${c.id}`;
+    ok(await local('POST', `${path}/send`, { revision: c.revision }), 202);
+    // What the campaign shows, and how many of its emails are still queued or attempting.
+    const shown = async () => { const v = ok(await local('GET', path)); return [v.state, v.delivery.expanded, v.delivery.canceled, (await db.query(`SELECT count(*)::int AS n FROM sending_emails WHERE campaign_id=$1 AND status IN ('queued','attempting')`, [c.id])).rows[0].n]; };
+    return { c, path, shown };
+  }
+  test('a resumed list-probe quarantine that skips everyone left finishes the campaign instead of leaving it sending', async t => {
+    await simulatedSesFixture(t, async fixture => {
+      const { db, local, run } = fixture, { c, path, shown } = await releasingCampaign(fixture, 150);
+      await run('campaign.run');
+      // The probe of 100 went out and 4 bounced (4%, over the 3% line): the campaign is quarantined at 100 of 150.
+      await db.query(`UPDATE sending_emails SET status=CASE WHEN review_ordinal<=4 THEN 'bounced' ELSE 'delivered' END,provider_id='probe-'||id WHERE campaign_id=$1`, [c.id]);
+      await run('campaign.run');
+      await db.query(`UPDATE sending_campaigns SET probe_wait_until=now()-interval '1 second',waiting_until=now()-interval '1 second' WHERE id=$1`, [c.id]);
+      await db.query(`UPDATE jobs SET available_at=now() WHERE id=$1`, [`campaign.run:${c.id}`]);
+      await run('campaign.run');
+      const quarantined = ok(await local('GET', path));
+      assert.deepEqual([quarantined.state, quarantined.delivery.pauseReason.code, quarantined.delivery.expanded], ['paused', 'LIST_QUALITY', 100]);
+      // The owner resumes. The rest goes only to contacts this workspace delivered to before, and it delivered to none of
+      // the 50: the release skips them all and queues nothing, so no row is left whose leaving the queue finishes the campaign.
+      ok(await local('POST', `${path}/resume`, {}));
+      await run('campaign.run');
+      assert.deepEqual(await shown(), ['done', 150, 50, 0]);
+    });
+  });
+  test('a campaign whose last emails went out while it was paused finishes when it is resumed', async t => {
+    await simulatedSesFixture(t, async fixture => {
+      const { db, local, run } = fixture, { c, path, shown } = await releasingCampaign(fixture, 30);
+      await db.query('UPDATE sending_campaigns SET probe_cleared_at=now() WHERE id=$1', [c.id]); // A clean list; the probe is tested above.
+      await run('campaign.run');
+      assert.deepEqual(await shown(), ['sending', 30, 0, 30]);
+      // The dispatcher pauses a campaign it cannot verify even with everyone released (dispatcher.ts rejectPreflight). Queued
+      // mail still dispatches while it is paused, and the dispatcher finishes only a sending campaign.
+      await db.query(`UPDATE sending_campaigns SET state='paused',paused_at=now(),pause_reason='{"code":"CAMPAIGN_HASH_FORMAT_UNSUPPORTED","message":"Paused."}' WHERE id=$1`, [c.id]);
+      await db.query(`UPDATE sending_emails SET status='delivered',provider_id='settles-'||id WHERE campaign_id=$1 AND status='queued'`, [c.id]);
+      assert.deepEqual(await shown(), ['paused', 30, 0, 0]);
+      ok(await local('POST', `${path}/resume`, {}));
+      await run('campaign.run');
+      assert.deepEqual(await shown(), ['done', 30, 0, 0]);
+    });
+  });
   test('campaign list probe follows standing: in good standing, recipients an earlier campaign delivered to with clean, mature feedback go out without the probe; swapped or unresolved recipients, a growing or capped sender, and a sender that falls below mid-campaign are probed', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, run }) => {
       const wid = runtime.config.workspaceId, pool = '111122223334', domain = 'clean-list.example', from = `news@${domain}`;
@@ -25540,6 +26862,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const wid = runtime.config.workspaceId, platform = unique('platform'), pool = '111122223333';
     Object.assign(runtime.config, { multiTenant: true, platformDomainWorkspace: platform, notifyFrom: 'notices@platform.example' });
     await db.query(`INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)`, [platform]);
+    // The name the emails show: a few plain words (notices.ts shownName).
+    const name = 'Driftwood & Co';
+    await db.query('UPDATE workspaces SET name=$2 WHERE id=$1', [wid, name]);
     await db.query(`INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) SELECT $1,'install_'||md5($1),default_region,enabled_regions FROM ses_installation_settings WHERE workspace_id=$2`, [platform, wid]);
     await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
     for (const id of [wid, platform]) await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [id, REGION, pool]);
@@ -25548,14 +26873,14 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const seen = new Set<string>();
     const sent = async () => (await db.query(`SELECT id,from_address,snapshot->>'fromName' AS from_name,to_addresses,subject,snapshot->>'text' AS text,snapshot->>'html' AS html,snapshot->>'kind' AS kind FROM sending_emails WHERE workspace_id=$1 ORDER BY id`, [platform])).rows;
     const fresh = async () => { const out = (await sent()).filter(r => !seen.has(r.id)); for (const r of out) seen.add(r.id); return out; };
-    return { wid, platform, pool, sent, fresh };
+    return { wid, name, platform, pool, sent, fresh };
   }
   // What no account email may print: a rate, a threshold, a provider's name, an error code.
   const HOW_IT_WORKS = /\d\s*%|line is|threshold|\bSES\b|AWS|Amazon|Stripe|\b[A-Z]{3,}_[A-Z_]+\b/;
 
   test('owner notices: a standing change emails owners and admins once, from the platform workspace, in plain words with no rates, thresholds or provider names', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
-      const { wid, platform, pool, sent: emails } = await noticeFixture(runtime, db);
+      const { wid, name, platform, pool, sent: emails } = await noticeFixture(runtime, db);
       const { applyChange, notifyJob } = await import('./src/standing.js');
       const reasons = [{ code: 'COMPLAINTS_WARN', metric: 'complaints' as const, value: 0.002, count: 2, threshold: 0.0005, minimum: 2, window: '24h' as const, step: 'warn' as const, message: '2 of 1,000 accepted emails were marked as spam in 24 hours (0.2%; the warn line is 0.05% and 2).' }];
       const change = await runtime.db.transaction(tx => applyChange(tx, { workspaceId: wid, actor: { kind: 'system' }, kind: 'step', step: 'warn', reasons }));
@@ -25564,7 +26889,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       for (let i = 0; i < 2; i++) await notifyJob(runtime, job[0].payload, { id: job[0].id, attempts: 1, workspaceId: wid });
       const sent = await emails();
       assert.deepEqual(sent.map(r => [r.from_name, r.from_address, r.to_addresses, r.kind]), [['Nightmail', 'notices@platform.example', [AUTH_EMAIL], 'transactional']], 'One email per owner, deduplicated on retry.');
-      assert.equal(sent[0].subject, `A warning about mail from ${wid}`);
+      assert.equal(sent[0].subject, `A warning about mail from ${name}`);
       // Review of #115: the notices were admitted but always canceled at dispatch (ORIGIN_KEY_REVOKED). They now dispatch
       // under their own narrow origin; a forged one (an event that does not exist) is still canceled.
       await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
@@ -25575,7 +26900,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.ok(['accepted', 'sent', 'delivered'].includes(outcome.notice[0]) && outcome.notice[1] === null, JSON.stringify(outcome));
       assert.deepEqual(outcome.forged, ['canceled', 'ORIGIN_KEY_REVOKED']);
       // What happened, what it means for mail now and the one thing to do, with one link; the same words in both parts.
-      for (const part of [`There is a problem with recent mail from ${wid}.`, 'Nothing is held and your mail still sends', `\nOpen the dashboard: ${PUBLIC_ORIGIN}/overview\n`, `sent this to the owners and admins of ${wid}`]) assert.ok(sent[0].text.includes(part), part);
+      for (const part of [`There is a problem with recent mail from ${name}.`, 'Nothing is held and your mail still sends', `\nOpen the dashboard: ${PUBLIC_ORIGIN}/overview\n`, `sent this to the owners and admins of ${name}`]) assert.ok(sent[0].text.includes(part), part);
       assert.ok(sent[0].html.includes('There is a problem with recent mail from ') && sent[0].html.includes(`href="${PUBLIC_ORIGIN}/overview"`), 'The HTML part carries the same words and link.');
       assert.equal(sent[0].text.match(/https?:\/\//g)!.length, 1, 'One link.');
       // The reason's numbers stay in the dashboard: an email never says how a check works.
@@ -25595,7 +26920,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
 
   test('owner notices: one problem sends its most serious email only, a pause that was told is told when it ends, and a retry or an earlier build\'s send is never a second email', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
-      const { wid, platform, fresh } = await noticeFixture(runtime, db);
+      const { wid, name, platform, fresh } = await noticeFixture(runtime, db);
       const { applyChange, notifyJob } = await import('./src/standing.js'), { JobDeferred } = await import('./src/jobs.js');
       const reasons = (step: 'warn' | 'restrict' | 'pause') => [{ code: 'BOUNCES', metric: 'bounces' as const, value: 0.05, count: 60, threshold: 0.04, minimum: 25, window: '24h' as const, step, message: '60 of 1,200 emails hard-bounced in 24 hours (5%; the line is 4% and 25).' }];
       const change = (c: Omit<Parameters<typeof applyChange>[1], 'workspaceId' | 'actor'>) => runtime.db.transaction(tx => applyChange(tx, { workspaceId: wid, actor: { kind: 'system' }, ...c }));
@@ -25620,7 +26945,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await change({ kind: 'quarantine', details: campaign });
       await change({ kind: 'step', step: 'restrict', reasons: reasons('restrict') });
       assert.deepEqual(await deliver(), [false, true]);
-      assert.deepEqual(await subjects(), [`Marketing mail is on hold for ${wid}`]);
+      assert.deepEqual(await subjects(), [`Marketing mail is on hold for ${name}`]);
 
       // A warning and a campaign's pause: both wait, and the campaign's is the one sent.
       await reset();
@@ -25641,7 +26966,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await change({ kind: 'step', step: 'warn', reasons: reasons('warn') });
       await change({ kind: 'step', step: 'pause', pause: { message: 'Hosted sending paused.' }, reasons: reasons('pause') });
       assert.deepEqual(await deliver(), [false, true]);
-      assert.deepEqual(await subjects(), [`Sending is paused for ${wid}`]);
+      assert.deepEqual(await subjects(), [`Sending is paused for ${name}`]);
       await change(resume);
       // While its SES tenants are still being enabled sending is not on yet: the email waits.
       const [resumed] = (await db.query(`SELECT id,payload FROM jobs WHERE workspace_id=$1 AND type='standing.notify' AND status='pending'`, [wid])).rows;
@@ -25651,7 +26976,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await db.query(`UPDATE provider_connections SET paused_at=NULL,pause_reason=NULL,resume_pending_at=NULL WHERE workspace_id=$1`, [wid]);
       assert.deepEqual(await deliver(), [false]);
       const [again] = await fresh();
-      assert.equal(again.subject, `Sending has resumed for ${wid}`);
+      assert.equal(again.subject, `Sending has resumed for ${name}`);
       assert.match(again.text, /Sending from .* is on again\..*and new mail goes out again\. For now the daily limit may be lower than before\.\n\nThe dashboard shows the limit\.\n/s);
       // A second pause inside the day is not emailed (once per step in 24 hours), so its end is not either.
       await change({ kind: 'step', step: 'pause', pause: { message: 'Hosted sending paused.' }, reasons: reasons('pause') });
@@ -25687,9 +27012,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
-  test('account notices: an invitation, the daily limit, the evaluation\'s end, a lost domain and a waitlist admission are each emailed once; what no longer holds, an exempt workspace and a used-up invitation allowance send nothing; a send that fails is retried and ends failed after its last attempt', async t => {
+  test('account notices: an invitation (only from a workspace with a verified domain or past its evaluation, in fixed words that name the inviter by address and not the workspace), the daily limit, the evaluation\'s end, a lost domain and a waitlist admission are each emailed once; what no longer holds, an exempt workspace and a used-up invitation allowance send nothing; a send that fails is retried and ends failed after its last attempt', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
-      const { wid, platform, pool, fresh } = await noticeFixture(runtime, db);
+      const { wid, name, platform, pool, fresh } = await noticeFixture(runtime, db);
       const { accountNotifyJob, domainUnverified, evaluationFinished, limitReached, waitlistAdmitted, INVITATION_EMAILS } = await import('./src/account-notices.js');
       const { ApiError } = await import('./src/core.js'), { JobDeferred, MAX_ATTEMPTS } = await import('./src/jobs.js');
       const { applyChange } = await import('./src/standing.js');
@@ -25702,21 +27027,90 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const notices = async (kind: string) => (await db.query(`SELECT count(*)::int AS n FROM account_notices WHERE workspace_id=$1 AND kind=$2`, [wid, kind])).rows[0].n;
       const invite = async (email: string) => ok(await local('POST', '/v1/workspaces/current/invitations', { email, role: 'admin' }), 201);
 
+      // A workspace with no verified domain that has not finished its evaluation emails nobody: the invitation is made,
+      // the inviter is told why and shares its link, and no allowance is spent.
+      const allowances = async () => (await db.query(`SELECT count(*)::int AS n FROM api_request_budgets WHERE key_id LIKE 'invitation-email%'`)).rows[0].n;
+      const early = await invite('early@elsewhere.example');
+      assert.deepEqual([early.emailed, early.notEmailedReason], [false, 'new_workspace']);
+      assert.match(early.nextStep, /^No email was sent: Nightmail emails invitations once this workspace has a verified domain or has finished its evaluation\. Share acceptUrl with early@elsewhere\.example yourself/);
+      assert.deepEqual([await notices('invitation'), await allowances(), await deliver()], [0, 0, []]);
+      // One with a verified domain does (one past its evaluation: below, where its standing is set).
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ('team.example',$1,$1,'verified')`, [wid]);
+
+      // An invitation goes to an address outside the workspace from this installation's own sender, and the names
+      // around it are the inviting account's to choose. So every word of it is fixed: the inviter is their verified
+      // address and nothing else, and the workspace is not named (the page its link opens names it).
+      const { rows: [inviter] } = await db.query('SELECT name FROM nightmail_users WHERE email=$1', [AUTH_EMAIL]);
+      const rename = async (workspace: string, inviter: string) => { await db.query('UPDATE workspaces SET name=$2 WHERE id=$1', [wid, workspace]); await db.query('UPDATE nightmail_users SET name=$2 WHERE email=$1', [AUTH_EMAIL, inviter]); };
+      const literal = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      for (const [i, [workspace, inviter]] of ([
+        ['ACTION REQUIRED: your domain is suspended, restore it at nightmail-dev.example.com/restore', 'Nightmail Security Team (security@nightmail.dev)'],
+        ['Verify now → https://nightmail.dev.evil.example/login\r\nBcc: victim@elsewhere.example', 'support@nightmail.dev'],
+        ['Call 1 800 555 0199 about your invoice', 'Nightmail <no-reply@nightmail.dev>'],
+        ['nightmail-dev\ua4f8example\ua4f8com nightmail-dev\u0660example\u0660com', 'Billing'],
+        ['W'.repeat(120), 'Quagga '.repeat(14)],
+      ] as const).entries()) {
+        await rename(workspace, inviter);
+        const made = await invite(`named-${i}@elsewhere.example`);
+        assert.equal(made.emailed, true);
+        assert.deepEqual(await deliver(), ['invitation:sent']);
+        const [mail] = await fresh();
+        assert.deepEqual([mail.subject, mail.from_name, mail.to_addresses], ['You are invited to a Nightmail workspace', 'Nightmail', [`named-${i}@elsewhere.example`]]);
+        assert.match(mail.text, new RegExp(`^${literal(`${AUTH_EMAIL} invited you to join a workspace on Nightmail as an admin.\n\nThe invitation is for this address only and expires on `)}[A-Z][a-z]{2} \\d{1,2}${literal(`.\n\nTo accept, sign in with this address.\n\nAccept the invitation: ${made.acceptUrl}\n\nNightmail sent this because ${AUTH_EMAIL} entered your address. If you were not expecting it, ignore it: nothing happens unless you accept.\n`)}$`));
+        // The HTML part says the same words and has one link.
+        const words = mail.html.replace(/<style>.*?<\/style>/s, '').replace(/<[^>]*>/g, '\n').split('\n').map((line: string) => line.trim()).filter(Boolean);
+        assert.deepEqual(words, ['You are invited to a Nightmail workspace', ...mail.text.trim().split(/\n+/).map((line: string) => line.replace(`Accept the invitation: ${made.acceptUrl}`, 'Accept the invitation'))]);
+        assert.deepEqual(mail.html.match(/href="[^"]*"/g), [`href="${made.acceptUrl.replaceAll('&', '&amp;')}"`]);
+      }
+      // The emails a workspace's own owners and admins get do name it, and a campaign: as a few plain words. Nothing
+      // that reads as an address, a URL or a host, each word in one writing system, no phone number, 40 characters.
+      const { customerNotice: written, shownName } = await import('./src/notices.js');
+      for (const [chosen, shown] of [
+        ['ACTION REQUIRED: your domain is suspended, restore it at nightmail-dev.example.com/restore', 'ACTION REQUIRED your domain is suspended…'],
+        ['Verify now → https://nightmail.dev.evil.example/login\r\nBcc: victim@elsewhere.example', 'Verify now Bcc'],
+        ['ｎｉｇｈｔｍａｉｌ．ｄｅｖ billing night\u200bmail.dev nightmail\u3002dev \u202egro.liamthgin www.evil.example Nіghtmail <b>team</b>', 'billing b team b'],
+        // Letters and digits of other scripts that draw as a dot or a slash, or as Latin capitals.
+        ['nightmail-dev\ua4f8example\ua4f8com billing', 'billing'], ['nightmail-dev\u0660example\u0660com billing', 'billing'], ['nightmail\ua78fdev com\u30cerestore ok', 'ok'],
+        ['\ua4e0\ua4f2\ua4d6\ua4e7\ua4d4\ua4df\ua4ee\ua4f2\ua4e1 Support', 'Support'],
+        // A phone number, however it is spaced; a few digits are a name's own.
+        ['Call 1 800 555 0199 about your invoice', 'Call about your invoice'], ['Call +1 (800) 555-0199', 'Call'], ['call18005550199now', ''], ['Call ١٨٠٠٥٥٥٠١٩٩', 'Call'],
+        ['Studio 54', 'Studio 54'], ['Acme 2026 Q4', 'Acme 2026 Q4'],
+        // Names as people write them.
+        ["Ryan Vogel's workspace", "Ryan Vogel's workspace"], ['Café Zoë & Søn – Ünïted', 'Café Zoë & Søn Ünïted'], ['Привет мир', 'Привет мир'], ['日本語のチーム', '日本語のチーム'], ['مرحبا بالعالم', 'مرحبا بالعالم'],
+        ['nightmail.dev', ''], ['W'.repeat(120), `${'W'.repeat(40)}…`],
+      ] as const) assert.equal(shownName(chosen), shown, chosen);
+      const pausedCampaign = written(PUBLIC_ORIGIN, { kind: 'campaign_paused', workspace: 'Acme, Inc. (see acme.example)', campaign: { id: 'cmp_1', name: 'Sale\r\nat https://evil.example/now for you@elsewhere.example' } });
+      assert.equal(pausedCampaign.subject, 'The campaign "Sale at for" is paused');
+      assert.ok(pausedCampaign.text.includes('sent this to the owners and admins of Acme Inc see. To reach us'), pausedCampaign.text);
+      assert.equal(written(PUBLIC_ORIGIN, { kind: 'campaign_paused', workspace: 'www.evil.example', campaign: { id: 'cmp_1', name: 'evil.example' } }).subject, 'A campaign is paused');
+      assert.equal(written(PUBLIC_ORIGIN, { kind: 'paused', workspace: 'Call 1 800 555 0199 nightmail-dev\ua4f8example\ua4f8com' }).subject, 'Sending is paused for Call');
+      assert.equal(written(PUBLIC_ORIGIN, { kind: 'paused', workspace: 'www.evil.example' }).subject, 'Sending is paused for your workspace');
+      assert.equal(written(PUBLIC_ORIGIN, { kind: 'domain_unverified', workspace: 'W', domain: { id: 'dom_1', name: 'Mail.Example\r\nBcc: x@y.example' } }).subject, 'A domain is no longer verified');
+      assert.equal(written(PUBLIC_ORIGIN, { kind: 'domain_unverified', workspace: 'W', domain: { id: 'dom_1', name: 'Mail.Example' } }).subject, 'mail.example is no longer verified');
+      // An address every workspace together has mailed five times in a day is not mailed a sixth.
+      await db.query(`UPDATE api_request_budgets SET used=$1 WHERE workspace_id='global' AND key_id LIKE 'invitation-email:%'`, [INVITATION_EMAILS.addressDay]);
+      const sixth = (await db.query(`SELECT id FROM workspace_invitations WHERE workspace_id=$1 AND email='named-0@elsewhere.example' AND status='pending'`, [wid])).rows[0].id;
+      ok(await local('DELETE', `/v1/workspaces/current/invitations?id=${sixth}`));
+      const refused = await invite('named-0@elsewhere.example');
+      assert.deepEqual([refused.emailed, refused.notEmailedReason, await deliver()], [false, 'allowance_used', []]);
+      assert.match(refused.nextStep, /^No email was sent: the invitation emails for today, or to this address, are used\. Share acceptUrl with named-0@elsewhere\.example yourself/);
+      await rename(name, inviter.name);
+
       // An invitation is emailed to the invited address, once, with the link the inviter was given.
       const invited = await invite('teammate@elsewhere.example');
-      assert.equal(invited.emailed, true); assert.match(invited.nextStep, /^teammate@elsewhere\.example was emailed the invitation/);
+      assert.deepEqual([invited.emailed, invited.notEmailedReason], [true, null]); assert.match(invited.nextStep, /^teammate@elsewhere\.example was emailed the invitation/);
       assert.deepEqual(await deliver(), ['invitation:sent']);
       const [invitation] = await fresh();
       assert.deepEqual([invitation.from_address, invitation.to_addresses, invitation.kind], ['notices@platform.example', ['teammate@elsewhere.example'], 'transactional']);
-      assert.match(invitation.subject, new RegExp(` invited you to ${wid} on Nightmail$`));
-      for (const part of [`(${AUTH_EMAIL}) invited you to join the workspace ${wid} on Nightmail as an admin.`, 'The invitation is for this address only and expires on ', `\nAccept the invitation: ${invited.acceptUrl}\n`, 'nothing happens unless you accept']) assert.ok(invitation.text.includes(part), part);
+      assert.equal(invitation.subject, 'You are invited to a Nightmail workspace');
+      for (const part of [`${AUTH_EMAIL} invited you to join a workspace on Nightmail as an admin.\n`, 'The invitation is for this address only and expires on ', `\nAccept the invitation: ${invited.acceptUrl}\n`, `because ${AUTH_EMAIL} entered your address`, 'nothing happens unless you accept']) assert.ok(invitation.text.includes(part), part);
       assert.ok(invitation.html.includes(`href="${invited.acceptUrl.replaceAll('&', '&amp;')}"`));
       // It dispatches under its own origin, as a standing notice does; nothing else may use that origin.
       await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
         SELECT 'email_forged_account_notice',workspace_id,region,'notice:ant_forged',from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated FROM sending_emails WHERE id=$1`, [invitation.id]);
       const { runDispatcher } = await import('./src/dispatcher.js');
       await runDispatcher(runtime, { region: REGION, accountId: pool });
-      const outcome = Object.fromEntries((await db.query(`SELECT id,status,error_code FROM sending_emails WHERE workspace_id=$1`, [platform])).rows.map(r => [r.id === invitation.id ? 'notice' : 'forged', [r.status, r.error_code]]));
+      const outcome = Object.fromEntries((await db.query(`SELECT id,status,error_code FROM sending_emails WHERE workspace_id=$1 AND id=ANY($2)`, [platform, [invitation.id, 'email_forged_account_notice']])).rows.map(r => [r.id === invitation.id ? 'notice' : 'forged', [r.status, r.error_code]]));
       assert.ok(['accepted', 'sent', 'delivered'].includes(outcome.notice[0]) && outcome.notice[1] === null, JSON.stringify(outcome));
       assert.deepEqual(outcome.forged, ['canceled', 'ORIGIN_KEY_REVOKED']);
       await fresh();
@@ -25730,7 +27124,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       for (let i = 0; i < 2; i++) { await revoke(last); last = await invite('teammate@elsewhere.example'); assert.equal(last.emailed, true); assert.deepEqual(await deliver(), ['invitation:sent']); }
       await revoke(last);
       const fourth = await invite('teammate@elsewhere.example');
-      assert.equal(fourth.emailed, false); assert.match(fourth.nextStep, /^No email was sent\./);
+      assert.deepEqual([fourth.emailed, fourth.notEmailedReason], [false, 'allowance_used']); assert.match(fourth.nextStep, /^No email was sent: /);
       // Another address is not held back by it, and the count starts again once the address has accepted an invitation.
       await db.query(`UPDATE workspace_invitations SET status='accepted' WHERE id=$1`, [last.id]);
       await revoke(fourth);
@@ -25740,13 +27134,18 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // The day's allowance: past it the invitation is made as before, and the inviter shares its link.
       await db.query(`UPDATE api_request_budgets SET used=$2 WHERE workspace_id=$1 AND key_id='invitation-email'`, [wid, INVITATION_EMAILS.workspaceDay]);
       const over = await invite('later@elsewhere.example');
-      assert.equal(over.emailed, false); assert.match(over.nextStep, /^No email was sent\. Share acceptUrl with later@elsewhere\.example yourself/);
+      assert.deepEqual([over.emailed, over.notEmailedReason], [false, 'allowance_used']); assert.match(over.nextStep, /^No email was sent: the invitation emails for today, or to this address, are used\. Share acceptUrl with later@elsewhere\.example yourself/);
       // An installation with no sender for account email emails nobody.
       await db.query(`UPDATE api_request_budgets SET used=0 WHERE workspace_id=$1 AND key_id='invitation-email'`, [wid]);
       runtime.config.notifyFrom = undefined;
-      assert.equal((await invite('nobody@elsewhere.example')).emailed, false);
+      const senderless = await invite('nobody@elsewhere.example');
+      assert.deepEqual([senderless.emailed, senderless.notEmailedReason], [false, 'not_available']); assert.match(senderless.nextStep, /^No email was sent\. Share acceptUrl with nobody@elsewhere\.example yourself/);
       runtime.config.notifyFrom = 'notices@platform.example';
-      assert.equal(await notices('invitation'), 5);
+      // Nor does an inviter whose own address is not verified: an invitation names them by it.
+      await db.query('UPDATE nightmail_users SET email_verified=false WHERE email=$1', [AUTH_EMAIL]);
+      assert.equal((await invite('unnamed@elsewhere.example')).notEmailedReason, 'not_available');
+      await db.query('UPDATE nightmail_users SET email_verified=true WHERE email=$1', [AUTH_EMAIL]);
+      assert.equal(await notices('invitation'), 10);
       assert.deepEqual((await fresh()).map(r => r.subject), []);
 
       // The daily limit: a workspace in its evaluation, one with no daily limit and an exempt one are told nothing.
@@ -25757,6 +27156,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await limitReached(runtime, wid);
       }
       assert.equal(await notices('limit_reached'), 0);
+      // Invitations again: without its verified domain, the workspace emails them once it is past its evaluation.
+      await db.query(`UPDATE domain_claims SET sending_state='pending' WHERE workspace_id=$1 AND name='team.example'`, [wid]);
+      await standing("phase='calibrating'");
+      assert.equal((await invite('calibrating@elsewhere.example')).notEmailedReason, 'new_workspace');
+      await standing("phase='graded'");
+      assert.equal((await invite('graded@elsewhere.example')).emailed, true);
+      assert.deepEqual([await deliver(), (await fresh()).map(r => r.to_addresses[0])], [['invitation:sent'], ['graded@elsewhere.example']]);
       // At a daily limit the owners are told, once in 24 hours however often a send is refused.
       await db.query('UPDATE workspaces SET exempt_hosted_quotas=false WHERE id=$1', [wid]);
       for (let i = 0; i < 3; i++) await limitReached(runtime, wid);
@@ -25777,7 +27183,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       failing(false);
       assert.deepEqual(await deliver(), ['limit_reached:sent']);
       const [limit] = await fresh();
-      assert.deepEqual([limit.to_addresses, limit.subject], [[AUTH_EMAIL], `${wid} has reached its daily sending limit`]);
+      assert.deepEqual([limit.to_addresses, limit.subject], [[AUTH_EMAIL], `${name} has reached its daily sending limit`]);
       assert.doesNotMatch(limit.text, /\b500\b/, 'The limit itself is on the dashboard.');
       assert.ok(limit.text.includes('Mail over the limit is refused for now.'), limit.text);
       await db.query(`UPDATE account_notices SET dedupe_key=dedupe_key||':yesterday' WHERE workspace_id=$1 AND kind='limit_reached'`, [wid]);
@@ -25794,7 +27200,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual([await evaluationFinished(runtime.db, wid, false), await evaluationFinished(runtime.db, wid, true)], [true, false]);
       assert.deepEqual(await deliver(), ['evaluation_finished:sent']);
       const [evaluation] = await fresh();
-      assert.equal(evaluation.subject, `${wid} has passed its evaluation`);
+      assert.equal(evaluation.subject, `${name} has passed its evaluation`);
       assert.match(evaluation.text, /so its starting limit is lifted\..*Over the next day the amount grows on its own/s);
       // One that ended with a limit says so; a first-party workspace, which has no limit, is not told at all.
       const { customerNotice } = await import('./src/notices.js');
@@ -26824,6 +28230,693 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual((await queued).rows[0].r,{error:'NOT_FOUND'});
     }finally{await writer.query('ROLLBACK');}
     assert.deepEqual(await state(),before);
+  });
+  test('mail_unrouted retention: 29-day unrouted mail survives, 31-day unrouted mail and storage objects leave, and inbox-claimed mail is untouched',async t=>{
+    await simulatedSesFixture(t,async({db,runtime})=>{
+      const {cleanup}=await import('./src/maintenance.js');
+      const wid=runtime.config.workspaceId,dom=unique('mdom'),host=wid+'.invalid',box=unique('mbx');
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')",[dom,wid,host,REGION]);
+      await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind) VALUES($1,$2,$3,$4,'address')",[box,wid,dom,'claimed@'+host]);
+      const mk=async(label:string,daysAgo:number,opts:{attached?:boolean;bucket?:string}={})=>{
+        const tid=unique('thr'),mid=unique('msg'),aid=unique('matt'),bkt=opts.bucket??'r2:fixture-r2';
+        const at=`now() - interval '${daysAgo} days'`;
+        await db.query(`INSERT INTO mail_threads(id,workspace_id,subject,message_count,last_message_at,created_at) VALUES($1,$2,$3,1,${at},${at})`,[tid,wid,label]);
+        await db.query(`INSERT INTO mail_messages(id,workspace_id,thread_id,direction,region,subject,from_address,snippet,received_at,created_at,size_bytes,raw_bucket,raw_key,lifecycle) VALUES($1,$2,$3,'inbound',$4,$5,'ext@example.invalid',$5,${at},${at},512,$7,$6,'default')`,[mid,wid,tid,REGION,label,`d/${wid}/${mid}.eml`,bkt]);
+        await db.query(`INSERT INTO mail_attachments(id,workspace_id,message_id,filename,content_type,size_bytes,disposition,sha256,bucket,storage_key) VALUES($1,$2,$3,'doc.txt','text/plain',16,'attachment','00',$5,$4)`,[aid,wid,mid,`a/${wid}/${mid}/b1/${aid}`,bkt]);
+        await db.query(`INSERT INTO mail_unrouted(workspace_id,message_id,address,created_at) VALUES($1,$2,$3,${at})`,[wid,mid,`${label}@${host}`]);
+        if(opts.attached)await db.query(`INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,read,received_at) VALUES($1,$2,$3,$4,'inbound',false,${at})`,[box,mid,wid,tid]);
+        return {tid,mid,aid,rawKey:`d/${wid}/${mid}.eml`,attKey:`a/${wid}/${mid}/b1/${aid}`};
+      };
+      const fresh=await mk('fresh29',29);
+      const stale=await mk('stale31',31);
+      const staleS3=await mk('stales3',31,{bucket:'pool-s3-bucket'});
+      const claimed=await mk('claimed31',31,{attached:true});
+      await cleanup(runtime);
+      // 29-day unrouted mail survives completely
+      assert.equal((await db.query('SELECT FROM mail_unrouted WHERE message_id=$1',[fresh.mid])).rowCount,1,'29-day unrouted row survives');
+      assert.equal((await db.query('SELECT FROM mail_messages WHERE id=$1',[fresh.mid])).rowCount,1,'29-day mail_messages survives');
+      assert.equal((await db.query('SELECT FROM mail_attachments WHERE id=$1',[fresh.aid])).rowCount,1,'29-day attachment survives');
+      assert.equal((await db.query('SELECT FROM mail_threads WHERE id=$1',[fresh.tid])).rowCount,1,'29-day thread survives');
+      // 31-day unrouted mail is removed along with message, attachment, thread, and storage delete job
+      assert.equal((await db.query('SELECT FROM mail_unrouted WHERE message_id=$1',[stale.mid])).rowCount,0,'31-day unrouted row deleted');
+      assert.equal((await db.query('SELECT FROM mail_messages WHERE id=$1',[stale.mid])).rowCount,0,'31-day unreferenced mail_messages deleted');
+      assert.equal((await db.query('SELECT FROM mail_attachments WHERE id=$1',[stale.aid])).rowCount,0,'31-day attachment row deleted');
+      assert.equal((await db.query('SELECT FROM mail_threads WHERE id=$1',[stale.tid])).rowCount,0,'31-day empty thread deleted');
+      assert.equal((await db.query('SELECT FROM mail_messages WHERE id=$1',[staleS3.mid])).rowCount,0,'31-day S3 unrouted mail_messages deleted');
+      assert.equal((await db.query('SELECT FROM mail_threads WHERE id=$1',[staleS3.tid])).rowCount,0,'31-day S3 empty thread deleted');
+      const delKeys=(await db.query("SELECT payload->'keys' AS keys FROM jobs WHERE workspace_id=$1 AND type='mail.deleteObjects'",[wid])).rows.flatMap((r:Json)=>r.keys as string[]);
+      assert.ok(delKeys.includes(stale.rawKey)&&delKeys.includes(stale.attKey),`R2 raw and attachment storage keys queued for deletion: ${JSON.stringify(delKeys)}`);
+      assert.ok(!delKeys.includes(staleS3.rawKey)&&!delKeys.includes(staleS3.attKey),'S3 objects are left to the bucket lifecycle, never queued for mail.deleteObjects');
+      // 31-day row whose message IS attached to an inbox: only stale mail_unrouted row leaves; message, attachment & storage untouched!
+      assert.equal((await db.query('SELECT FROM mail_unrouted WHERE message_id=$1',[claimed.mid])).rowCount,0,'stale unclaimed recipient row removed');
+      assert.equal((await db.query('SELECT FROM mail_messages WHERE id=$1',[claimed.mid])).rowCount,1,'inbox-attached message preserved');
+      assert.equal((await db.query('SELECT FROM mail_attachments WHERE id=$1',[claimed.aid])).rowCount,1,'inbox-attached attachment preserved');
+      assert.ok(!delKeys.includes(claimed.rawKey)&&!delKeys.includes(claimed.attKey),'inbox-attached storage objects never queued for deletion');
+    });
+  });
+  test('claimUnrouted: batched inline + background drain matches legacy loop across multi-address, plus-tags, interruption, concurrent arrival and address mutation',async t=>{
+    await simulatedSesFixture(t,async({db,runtime,local})=>{
+      const {attachToMailboxes,CLAIM_UNROUTED_INLINE,drainClaimUnrouted}=await import('./src/mailbox-store.js');
+      const {mailboxIngestJobs}=await import('./src/mailbox-ingest.js');
+      const {JobDeferred}=await import('./src/jobs.js');
+      const wid=runtime.config.workspaceId,dom=unique('mdom'),host=wid+'.invalid';
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')",[dom,wid,host,REGION]);
+      const seedUnrouted=async(prefix:string,entries:{addr:string;n:number;spam?:boolean;sameMsgGroup?:string}[])=>{
+        const byGroup=new Map<string,{id:string;tid:string;at:string;spam:boolean;size:number}>();
+        let seq=0;
+        for(const item of entries){
+          for(let i=0;i<item.n;i++){
+            seq++;
+            const at=new Date(Date.parse('2026-11-23T10:00:00.000Z')+seq*1000).toISOString();
+            let rec=item.sameMsgGroup?byGroup.get(item.sameMsgGroup+':'+i):undefined;
+            if(!rec){
+              const id=`msg_${prefix}_${seq}`,tid=`thr_${prefix}_${seq}`;
+              await db.query('INSERT INTO mail_threads(id,workspace_id,subject,message_count,last_message_at) VALUES($1,$2,$3,1,$4)',[tid,wid,'Sub '+id,at]);
+              await db.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,subject,from_address,snippet,received_at,size_bytes,spam,lifecycle) VALUES($1,$2,$3,'inbound',$4,'ext@example.invalid',$4,$5,256,$6,'default')",[id,wid,tid,'Sub '+id,at,!!item.spam]);
+              rec={id,tid,at,spam:!!item.spam,size:256};
+              if(item.sameMsgGroup)byGroup.set(item.sameMsgGroup+':'+i,rec);
+            }
+            await db.query('INSERT INTO mail_unrouted(workspace_id,message_id,address,created_at) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING',[wid,rec.id,item.addr,rec.at]);
+          }
+        }
+      };
+      // 1. Condition (1): Seeded equivalence (legacy sequential attachToMailboxes vs new inline + background batches)
+      //    including: exact address, alias, multi-address same message, plus-addressed mail, spam mail, wildcard rule.
+      const shape=(p:string)=>[
+        {addr:`${p}@${host}`,n:60},
+        {addr:`${p}@${host}`,n:10,spam:true},
+        {addr:`${p}+vip@${host}`,n:20},
+        {addr:`${p}-alias@${host}`,n:15,sameMsgGroup:'shared'},
+        {addr:`${p}@${host}`,n:15,sameMsgGroup:'shared'},
+        {addr:`${p}-wild-1@${host}`,n:30},
+      ];
+      await seedUnrouted('old',shape('legacy'));
+      await seedUnrouted('new',shape('batched'));
+      // Legacy box: run the exact old sequential attachToMailboxes + DELETE loop on 'legacy'
+      const legacyId=unique('mbx');
+      await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,rules,kind) VALUES($1,$2,$3,$4,$5::jsonb,'address')",[legacyId,wid,dom,'legacy@'+host,JSON.stringify(['legacy-wild-*@'+host])]);
+      await db.query("INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,$4,'primary'),($1,$3,$4,'alias')",[wid,'legacy@'+host,'legacy-alias@'+host,legacyId]);
+      const legRows=(await db.query("SELECT * FROM mail_unrouted WHERE workspace_id=$1 AND address LIKE 'legacy%'",[wid])).rows;
+      const legMids=[...new Set(legRows.map((r:Json)=>r.message_id))];
+      const legMsgs=(await db.query('SELECT * FROM mail_messages WHERE workspace_id=$1 AND id=ANY($2::text[]) ORDER BY received_at,id',[wid,legMids])).rows;
+      for(const m of legMsgs)await attachToMailboxes(runtime.db,{workspaceId:wid},{...m,workspaceId:wid,threadId:m.thread_id,receivedAt:m.received_at.toISOString(),sizeBytes:m.size_bytes},[legacyId]);
+      for(const r of legRows)await db.query('DELETE FROM mail_unrouted WHERE workspace_id=$1 AND address=$2 AND message_id=$3',[wid,r.address,r.message_id]);
+
+      // New box: create via POST /v1/inbound/addresses (claims first 100 inline, queues mailbox.claimUnrouted for rest!)
+      const created=ok(await local('POST','/v1/inbound/addresses',{address:'batched@'+host,aliases:['batched-alias@'+host],rules:['batched-wild-*@'+host]}),201);
+      const newId=created.id as string;
+      assert.ok(created.stats.threads<=CLAIM_UNROUTED_INLINE&&created.stats.threads>0,'inline claim is bounded at 100 rows');
+      assert.equal((await db.query("SELECT status FROM jobs WHERE id=$1",['claim-unrouted:'+newId])).rows[0]?.status,'pending','overflow queued mailbox.claimUnrouted');
+      // Simulate mail arriving while background claim runs AND interruption after 1 small batch (maxBatches=1, batchSize=25)
+      const midArrive=unique('msg'),tArrive=unique('thr');
+      await db.query('INSERT INTO mail_threads(id,workspace_id,subject,message_count,last_message_at) VALUES($1,$2,$3,1,now())',[tArrive,wid,'Mid-drain arrival']);
+      await db.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,subject,from_address,snippet,received_at,size_bytes,spam,lifecycle) VALUES($1,$2,$3,'inbound','Mid-drain','ext@example.invalid','hi',now(),256,false,'default')",[midArrive,wid,tArrive]);
+      await db.query('INSERT INTO mail_unrouted(workspace_id,message_id,address) VALUES($1,$2,$3)',[wid,midArrive,'batched+late@'+host]);
+      const partial=await drainClaimUnrouted(runtime,wid,newId,{batchSize:25,maxBatches:1});
+      assert.equal(partial.done,false,'interrupted after 1 batch leaves remaining rows');
+      // Finish via the real job handler (loops across JobDeferred until complete)
+      for(let step=0;step<10;step++){
+        try{await mailboxIngestJobs['mailbox.claimUnrouted']!(runtime,{mailboxId:newId},{id:'claim-unrouted:'+newId,attempts:1,workspaceId:wid});break;}
+        catch(e){if(!(e instanceof JobDeferred))throw e;}
+      }
+      assert.equal((await db.query("SELECT count(*)::int n FROM mail_unrouted WHERE workspace_id=$1 AND address LIKE 'batched%'",[wid])).rows[0].n,0,'all matching unrouted rows drained');
+      // Compare legacy vs new (excluding the 1 extra mid-drain arrival we added to new)
+      const snap=async(bid:string)=>({
+        state:(await db.query('SELECT messages,bytes::int FROM inbox_state WHERE inbox_id=$1',[bid])).rows[0],
+        folders:(await db.query("SELECT role,total,unseen FROM inbox_folders WHERE inbox_id=$1 AND role IN ('inbox','junk') ORDER BY role",[bid])).rows,
+        unread:(await db.query('SELECT count(*)::int n FROM mailbox_messages WHERE mailbox_id=$1 AND NOT read AND held_reason IS NULL',[bid])).rows[0].n,
+        threads:(await db.query('SELECT count(*)::int n,coalesce(sum(message_count),0)::int msgs,coalesce(sum(unread_count),0)::int unreads FROM mailbox_threads WHERE mailbox_id=$1',[bid])).rows[0],
+        events:(await db.query("SELECT count(*)::int n FROM mailbox_events WHERE mailbox_id=$1 AND type='message.received'",[bid])).rows[0].n,
+      });
+      const oldSnap=await snap(legacyId),newSnap=await snap(newId);
+      assert.equal(newSnap.state.messages,oldSnap.state.messages+1,'exact message count (+1 mid-drain arrival)');
+      assert.equal(newSnap.state.bytes,oldSnap.state.bytes+256,'exact byte count');
+      assert.equal(newSnap.unread,oldSnap.unread+1,'exact unread count');
+      assert.equal(newSnap.threads.n,oldSnap.threads.n+1,'exact thread count');
+      assert.equal(newSnap.threads.msgs,oldSnap.threads.msgs+1,'exact thread message sum');
+      assert.equal(newSnap.events,0,'claimUnrouted never fires message.received events inline or in background');
+      assert.equal(oldSnap.events,0);
+      assert.equal(newSnap.folders.find((f:Json)=>f.role==='junk').total,oldSnap.folders.find((f:Json)=>f.role==='junk').total,'spam filed to junk identically');
+      assert.equal(newSnap.folders.find((f:Json)=>f.role==='inbox').total,oldSnap.folders.find((f:Json)=>f.role==='inbox').total+1,'inbox folder count exact');
+
+      // 2. Condition (3): Address deleted, expired, or alias removed under the background job -> zero mail attached to deleted/expired/removed alias!
+      await seedUnrouted('del',[{addr:'delme@'+host,n:130}]);
+      const delBox=ok(await local('POST','/v1/inbound/addresses',{address:'delme@'+host}),201);
+      ok(await local('DELETE',`/v1/inbound/addresses/${delBox.id}`));
+      const delRes=await drainClaimUnrouted(runtime,wid,delBox.id);
+      assert.deepEqual(delRes,{done:true,claimed:0,batches:1});
+      assert.equal((await db.query('SELECT count(*)::int n FROM mailbox_messages WHERE mailbox_id=$1',[delBox.id])).rows[0].n,0,'no mail attached to deleted inbox');
+      assert.equal((await db.query("SELECT count(*)::int n FROM mail_unrouted WHERE workspace_id=$1 AND address='delme@'||$2",[wid,host])).rows[0].n,30,'unclaimed rows preserved when inbox deleted');
+
+      await seedUnrouted('exp',[{addr:'expme@'+host,n:120}]);
+      const expBox=ok(await local('POST','/v1/inbound/addresses',{address:'expme@'+host}),201);
+      await db.query("UPDATE mailboxes SET expires_at=now()+interval '1 hour' WHERE id=$1",[expBox.id]);
+      const expRes=await drainClaimUnrouted(runtime,wid,expBox.id);
+      assert.deepEqual(expRes,{done:true,claimed:0,batches:1},'address given expiry stops draining');
+
+      await seedUnrouted('al',[{addr:'keepal@'+host,n:105},{addr:'dropal@'+host,n:120}]);
+      const alBox=ok(await local('POST','/v1/inbound/addresses',{address:'keepal@'+host,aliases:['dropal@'+host]}),201);
+      ok(await local('PATCH',`/v1/inbound/addresses/${alBox.id}`,{aliases:[]}));
+      await drainClaimUnrouted(runtime,wid,alBox.id);
+      assert.equal((await db.query("SELECT count(*)::int n FROM mail_unrouted WHERE workspace_id=$1 AND address='keepal@'||$2",[wid,host])).rows[0].n,0,'kept address drained');
+      assert.ok((await db.query("SELECT count(*)::int n FROM mail_unrouted WHERE workspace_id=$1 AND address='dropal@'||$2",[wid,host])).rows[0].n>0,'removed alias stops claiming');
+
+      // 3. Condition (3): Concurrent claimers racing on overlapping wildcard rows never attach the same message to both inboxes!
+      const c1=await fixtureDatabase(t),c2=await fixtureDatabase(t);
+      const {drizzle}=await import('drizzle-orm/node-postgres');
+      const rWid=unique('racew'),rDom=unique('mdom'),rHost=rWid+'.invalid',rBox1=unique('mbx'),rBox2=unique('mbx');
+      cleanup(t,async()=>{for(const tbl of ['mailbox_events','mail_unrouted','mailbox_addresses','mailbox_threads','mailbox_messages','mail_messages','mail_threads','mailboxes','mailbox_domains'])await c1.query(`DELETE FROM ${tbl} WHERE workspace_id=$1`,[rWid]);});
+      await c1.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')",[rDom,rWid,rHost,REGION]);
+      await c1.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,rules,kind) VALUES($1,$3,$4,'r1@'||$5,$6::jsonb,'address'),($2,$3,$4,'r2@'||$5,$6::jsonb,'address')",[rBox1,rBox2,rWid,rDom,rHost,JSON.stringify(['overlap-*@'+rHost])]);
+      for(let i=1;i<=40;i++){
+        const mid=unique('msg'),tid=unique('thr');
+        await c1.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)',[tid,rWid]);
+        await c1.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,received_at,size_bytes,lifecycle) VALUES($1,$2,$3,'inbound',now(),100,'default')",[mid,rWid,tid]);
+        await c1.query("INSERT INTO mail_unrouted(workspace_id,message_id,address) VALUES($1,$2,'overlap-'||$3||'@'||$4)",[rWid,mid,i,rHost]);
+      }
+      await Promise.all([
+        drainClaimUnrouted({...runtime,db:drizzle(c1)},rWid,rBox1,{batchSize:10,maxBatches:10}),
+        drainClaimUnrouted({...runtime,db:drizzle(c2)},rWid,rBox2,{batchSize:10,maxBatches:10}),
+      ]);
+      const totals=(await c1.query('SELECT count(*)::int total,count(DISTINCT message_id)::int uniq FROM mailbox_messages WHERE workspace_id=$1',[rWid])).rows[0];
+      assert.deepEqual(totals,{total:40,uniq:40},'every unrouted message claimed by exactly one inbox with zero duplicates');
+      assert.equal((await c1.query('SELECT count(*)::int n FROM mail_unrouted WHERE workspace_id=$1',[rWid])).rows[0].n,0);
+
+      // 4. Review fixes: (a) a mixed thread with a normal first message and a spam reply keeps spam=false; (b) queueClaimUnrouted queues a separate job while one is running.
+      const mixThr = unique('thr'), mixM1 = unique('msg'), mixM2 = unique('msg'), mixAddr = 'mixspam@' + host;
+      await db.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)', [mixThr, wid]);
+      await db.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,received_at,size_bytes,spam,lifecycle) VALUES($1,$3,$4,'inbound',now()-interval '2 minutes',100,false,'default'),($2,$3,$4,'inbound',now()-interval '1 minute',100,true,'default')", [mixM1, mixM2, wid, mixThr]);
+      await db.query('INSERT INTO mail_unrouted(workspace_id,message_id,address) VALUES($1,$2,$4),($1,$3,$4)', [wid, mixM1, mixM2, mixAddr]);
+      const mixBox = ok(await local('POST', '/v1/inbound/addresses', { address: mixAddr }), 201);
+      const mixRow = (await db.query('SELECT spam, labels FROM mailbox_threads WHERE mailbox_id=$1 AND thread_id=$2', [mixBox.id, mixThr])).rows[0];
+      assert.deepEqual(mixRow, { spam: false, labels: [] }, 'thread takes spam flag from earliest message in batch');
+      const { queueClaimUnrouted } = await import('./src/mailbox-store.js');
+      await queueClaimUnrouted(runtime.db, wid, mixBox.id);
+      await db.query("UPDATE jobs SET status='running', lease_until=now()+interval '5 minutes' WHERE id=$1", ['claim-unrouted:' + mixBox.id]);
+      await queueClaimUnrouted(runtime.db, wid, mixBox.id);
+      const extraJobs = (await db.query("SELECT count(*)::int n FROM jobs WHERE workspace_id=$1 AND type='mailbox.claimUnrouted' AND payload->>'mailboxId'=$2 AND status='pending'", [wid, mixBox.id])).rows[0].n;
+      assert.equal(extraJobs, 1, 'separate pending claim job queued while existing job is running');
+    });
+  });
+  test('inbox long-poll and from filter: modseq wake skips idle rescans, catches out-of-order inbox_seq and mutable flags, matches all email forms, and surfaces 422 READ_TOO_LARGE',async t=>{
+    const a=await fixtureDatabase(t),w=unique('pollw'),host=w+'.invalid',dom=unique('mdom'),bid=unique('mbx'),addr='poll@'+host;
+    const {digest,randomSecret}=await import('./src/core.js');
+    const tok=randomSecret('bane_mbx_');
+    cleanup(t,async()=>{for(const tbl of ['mailbox_events','mail_gc_candidates','mail_receipts','mailbox_keys','mailbox_addresses','mailbox_threads','mailbox_messages','mail_messages','mail_threads','mailboxes','mailbox_domains','api_request_budgets','mailbox_write_lanes'])await a.query(`DELETE FROM ${tbl} WHERE workspace_id=$1`,[w]);});
+    await a.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')",[dom,w,host,REGION]);
+    await a.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES($1,$2,$3,$4,'inbox','forever')",[bid,w,dom,addr]);
+    await a.query("INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,$3,'primary')",[w,addr,bid]);
+    await a.query('INSERT INTO inbox_state(inbox_id,workspace_id) VALUES($1,$2)',[bid,w]);
+    await a.query(`INSERT INTO mailbox_keys(id,workspace_id,name,hash,prefix,mailbox_ids,permissions) VALUES($1,$2,'poll',$3,'fixture',jsonb_build_array($4::text),'["read","modify"]')`,[unique('mbk'),w,await digest(tok),bid]);
+    const deliver=async(mid:string,opts:{from?:string;fromName?:string|null;subject?:string;text?:string;read?:boolean;flagged?:boolean}={})=>{
+      const at=new Date().toISOString();
+      await a.query("INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) VALUES($1,$2,$3,'fixture','k',$4,'{}') ON CONFLICT DO NOTHING",[w,mid,REGION,JSON.stringify([addr])]);
+      await a.query("SELECT * FROM mail_store_incoming($1::jsonb,'[]','[]',$2::jsonb,false,false,NULL,NULL)",[JSON.stringify({
+        id:mid,workspace_id:w,ses_message_id:mid,lifecycle:'kept',envelope_to:[addr],direction:'inbound',subject:opts.subject??('Sub '+mid),
+        from_address:(opts.from??'sender@example.invalid').toLowerCase(),from_name:opts.fromName??null,to:[{name:null,address:addr}],cc:[],bcc:[],reply_to:[],references:[],received_at:at,
+        body_truncated:false,snippet:opts.text??mid,text:opts.text??mid,headers:[],size_bytes:128,attachment_count:0,verdicts:{dmarc:'PASS'},spam:false,automated:false,status:'received',
+      }),JSON.stringify([{addr,n:0,valid:true}])]);
+      if(opts.read)await a.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"read":true}'::jsonb)`,[w,bid,mid]);
+      if(opts.flagged)await a.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"flagged":true}'::jsonb)`,[w,bid,mid]);
+    };
+    // 1. Condition (2): Tricky from addresses (display name, plus sign, mixed case, punycode IDN, body/subject-only mention).
+    const mDisp=unique('msg'),mPlus=unique('msg'),mMix=unique('msg'),mIdn=unique('msg'),mBodyOnly=unique('msg'),mOld=unique('msg');
+    await deliver(mDisp,{from:'alice@example.org',fromName:'Alice "The Boss" Smith',subject:'Hello display'});
+    await deliver(mPlus,{from:'user+tag-1@example.org',subject:'Hello plus'});
+    await deliver(mMix,{from:'Mixed.Case@Example.ORG',subject:'Hello case'});
+    await deliver(mIdn,{from:'user@xn--mnchen-3ya.de',subject:'Hello idn'});
+    await deliver(mBodyOnly,{from:'other@example.org',subject:'Mentioning alice@example.org',text:'Body mentions alice@example.org and user+tag-1@example.org'});
+    await deliver(mOld,{from:'old@example.org',subject:'Old already read',read:true});
+    assert.deepEqual(ok(await http('GET',`/v1/inboxes/${bid}/messages?from=alice@example.org`,tok)).data.map((m:Json)=>m.id),[mDisp],'from excludes body/subject-only mentions');
+    assert.deepEqual(ok(await http('GET',`/v1/inboxes/${bid}/messages?from=${encodeURIComponent('user+tag-1@example.org')}`,tok)).data.map((m:Json)=>m.id),[mPlus]);
+    assert.deepEqual(ok(await http('GET',`/v1/inboxes/${bid}/messages?from=MIXED.CASE@EXAMPLE.ORG`,tok)).data.map((m:Json)=>m.id),[mMix]);
+    assert.deepEqual(ok(await http('GET',`/v1/inboxes/${bid}/messages?from=user@xn--mnchen-3ya.de`,tok)).data.map((m:Json)=>m.id),[mIdn]);
+    assert.deepEqual(ok(await http('GET',`/v1/inboxes/${bid}/messages?subjectContains=plus`,tok)).data.map((m:Json)=>m.id),[mPlus]);
+    assert.deepEqual(ok(await http('GET',`/v1/inboxes/${bid}/messages?unread=false`,tok)).data.map((m:Json)=>m.id),[mOld]);
+    // SQL-level verification for quoted local parts, unicode IDN, and group-like display names (never drops true matches).
+    for(const raw of ['"john..doe"@example.org','"user@name"@example.org','user@münchen.de','user@例え.jp']){
+      const hit=(await a.query("SELECT to_tsvector('simple','Subj Display: '||$1||' body') @@ plainto_tsquery('simple',$1) AS ok",[raw.toLowerCase()])).rows[0].ok;
+      assert.equal(hit,true,`plainto_tsquery must match ${raw}`);
+    }
+    // 2. Condition (1): Mutable filter (flagged=true) wakes on the first tick when an OLD message is flagged mid-wait.
+    const waitFlag=http('GET',`/v1/inboxes/${bid}/messages?wait=5&flagged=true`,tok);
+    await new Promise(r=>setTimeout(r,400));
+    await a.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"flagged":true}'::jsonb)`,[w,bid,mOld]);
+    const flagRes=ok(await waitFlag);
+    assert.deepEqual(flagRes.data.map((m:Json)=>m.id),[mOld],'mutable flagged filter catches old message changed during wait');
+    // Mutable filter (unread=true) wakes when an OLD read message is marked unread mid-wait.
+    const cur=(await a.query('SELECT max(inbox_seq)::text s FROM mailbox_messages WHERE mailbox_id=$1',[bid])).rows[0].s;
+    const waitUnread=http('GET',`/v1/inboxes/${bid}/messages?wait=5&unread=true&from=old@example.org`,tok);
+    await new Promise(r=>setTimeout(r,400));
+    await a.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"read":false}'::jsonb)`,[w,bid,mOld]);
+    assert.deepEqual(ok(await waitUnread).data.map((m:Json)=>m.id),[mOld],'mutable unread filter catches old message marked unread during wait');
+    // 3. Condition (1): Out-of-order inbox_seq (lower seq commits AFTER higher seq with higher modseq) is never skipped.
+    const mOob=unique('msg'),tOob=unique('thr');
+    const waitOob=http('GET',`/v1/inboxes/${bid}/messages?wait=5&subjectContains=OutOfOrderNeedle`,tok);
+    await new Promise(r=>setTimeout(r,400));
+    const lowerSeq=Math.max(1,Number(cur)-1);
+    await a.query('INSERT INTO mail_threads(id,workspace_id,subject,message_count,last_message_at) VALUES($1,$2,$3,1,now())',[tOob,w,'OutOfOrderNeedle']);
+    await a.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,subject,from_address,snippet,received_at,lifecycle) VALUES($1,$2,$3,'inbound','OutOfOrderNeedle','oob@example.org','oob',now(),'kept')",[mOob,w,tOob]);
+    await a.query('UPDATE inbox_state SET modseq=modseq+1 WHERE inbox_id=$1 RETURNING modseq',[bid]).then(async r=>{
+      await a.query("INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,read,received_at,inbox_seq,modseq) VALUES($1,$2,$3,$4,'inbound',false,now(),$5,$6)",[bid,mOob,w,tOob,lowerSeq,r.rows[0].modseq]);
+    });
+    assert.deepEqual(ok(await waitOob).data.map((m:Json)=>m.id),[mOob],'lower inbox_seq committing with higher modseq is returned on the next tick');
+    // 4. Condition (1) + (3): Idle wait ticks skip message scans (only check inbox_state.modseq),
+    //    5-second timeout returns 422 READ_TOO_LARGE (never empty 200), and MCP descriptions tell agents how to recover.
+    await simulatedSesFixture(t,async({runtime,local})=>{
+      const sb=ok(await local('POST','/v1/inboxes',{type:'sandbox'}),201);
+      let msgScans=0,gateReads=0;
+      const origQuery=pg.Client.prototype.query;
+      const qSpy=t.mock.method(pg.Client.prototype,'query',function(this:pg.Client,...args:unknown[]){
+        const text=typeof args[0]==='string'?args[0]:(args[0] as {text?:string})?.text??'';
+        if(text.includes('strpos(lower(m.subject)'))msgScans++;
+        else if(text.includes('SELECT s.modseq::text AS state_modseq FROM mailboxes'))gateReads++;
+        return (origQuery as (...a:unknown[])=>unknown).apply(this,args);
+      });
+      try{
+        const idle=ok(await local('GET',`/v1/inboxes/${sb.id}/messages?wait=2&subjectContains=never`));
+        assert.deepEqual(idle,{data:[],cursor:'0',hasMore:false});
+        assert.equal(msgScans,1,'idle wait=2 scans mailbox_messages only on tick 0, not on ticks 1..2');
+        assert.ok(gateReads>=1,'subsequent idle ticks use the O(1) inbox_state.modseq gate');
+      }finally{qSpy.mock.restore();}
+      const origTx=runtime.db.transaction.bind(runtime.db);
+      const txSpy=t.mock.method(runtime.db,'transaction',async()=>{throw Object.assign(new Error('canceling statement due to statement timeout'),{code:'57014'});});
+      try{error(await local('GET',`/v1/inboxes/${sb.id}/messages?subjectContains=slow`),422,'READ_TOO_LARGE');}finally{txSpy.mock.restore();}
+      void origTx;
+      const [{buildMcpCatalog},{createOpenApiApp}]=await Promise.all([import('./src/mcp-catalog.js'),import('./src/app.js')]);
+      const catalog=buildMcpCatalog(await createOpenApiApp());
+      for(const name of ['listInboxMessages','waitForMessage']){
+        const desc=catalog.get(name)!.tool.description??'';
+        assert.match(desc,/READ_TOO_LARGE/,name+' description must explain READ_TOO_LARGE');
+        assert.match(desc,/narrow|cursor/i,name+' description must tell agents to narrow or use cursor');
+      }
+    });
+  });
+  test('mail gateway: IMAP SEARCH bounds to mailbox, uses unkept-append index, and returns 413 SEARCH_LIMIT on timeout',async t=>{
+    const db=await fixtureDatabase(t),rt=fixtureWorker!.runtime,w=unique('gwsrch'),bid=unique('mbx'),kid=unique('app'),dom=unique('mdom');
+    cleanup(t,async()=>{for(const tbl of ['inbox_entries','mailbox_messages','mail_messages','mail_threads','inbox_app_passwords','mailboxes','mailbox_domains'])await db.query(`DELETE FROM ${tbl} WHERE ${tbl==='inbox_entries'||tbl==='inbox_app_passwords'?'inbox_id':'workspace_id'}=$1`,[tbl==='inbox_entries'||tbl==='inbox_app_passwords'?bid:w]);});
+    await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'gwsrch.invalid',$3,'active','store')",[dom,w,REGION]);
+    await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES($1,$2,$3,'box@gwsrch.invalid','inbox','forever')",[bid,w,dom]);
+    await db.query('INSERT INTO inbox_state(inbox_id,workspace_id) VALUES($1,$2)',[bid,w]);
+    await db.query("INSERT INTO inbox_app_passwords(id,inbox_id,name,hash,protocols) VALUES($1,$2,'fixture',$1,ARRAY['imap'])",[kid,bid]);
+    const tid=unique('thr'),m1=unique('msg');
+    await db.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)',[tid,w]);
+    await db.query(`INSERT INTO mail_messages(id,workspace_id,thread_id,direction,subject,from_address,from_name,"to",received_at,lifecycle) VALUES($1,$2,$3,'inbound','Invoice Alpha','billing@vendor.test','Vendor Billing','[{"name":"Ops","address":"ops@gwsrch.invalid"}]'::jsonb,now(),'kept')`,[m1,w,tid]);
+    await db.query("INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,read,received_at,inbox_seq,modseq) VALUES($1,$2,$3,$4,'inbound',false,now(),1,2)",[bid,m1,w,tid]);
+    await db.query("INSERT INTO inbox_entries(inbox_id,role,uid,message_id,modseq,internal_date) VALUES($1,'inbox',7,$2,2,now())",[bid,m1]);
+    const key=randomUUID(),path='/internal/v1/mail';
+    const app=(await import('./src/app.js')).createApp();
+    const call=async(body:Json,dbOverride=rt.db)=>{
+      const raw=JSON.stringify(body),hash=(s:string)=>createHash('sha256').update(s).digest('hex');
+      const ts=String(Math.floor(Date.now()/1000)),scope=hash(kid),dig=hash(raw);
+      const headers={'x-bane-content':dig,'x-bane-timestamp':ts,'x-bane-scope':scope,'x-bane-signature':createHmac('sha256',key).update(['POST',path,ts,dig,scope].join('\n')).digest('hex')};
+      return app.fetch(new Request('http://127.0.0.1'+path,{method:'POST',headers,body:raw}),{...rt,db:dbOverride,config:{...rt.config,mailGatewayToken:key}});
+    };
+    assert.deepEqual(await (await call({op:'subject',kid,folder:'inbox',term:'invoice'})).json(),[7]);
+    assert.deepEqual(await (await call({op:'search',kid,folder:'inbox',field:'from',term:'vendor.test'})).json(),[7]);
+    assert.deepEqual(await (await call({op:'search',kid,folder:'inbox',field:'to',term:'ops@gwsrch'})).json(),[7]);
+    assert.deepEqual(await (await call({op:'subject',kid,folder:'inbox',term:'nomatch'})).json(),[]);
+    // Statement timeout (57014) MUST return 413 SEARCH_LIMIT (not 422, not empty 200 []).
+    const timeoutDb={...rt.db,transaction:async()=>{throw Object.assign(new Error('canceling statement due to statement timeout'),{code:'57014'});}} as unknown as typeof rt.db;
+    for(const body of [{op:'subject',kid,folder:'inbox',term:'slow'},{op:'search',kid,folder:'inbox',field:'from',term:'slow'}]){
+      const res=await call(body,timeoutDb);
+      assert.equal(res.status,413);
+      assert.equal(((await res.json()) as Json).error.code,'SEARCH_LIMIT');
+    }
+  });
+  test('inbox unread counter: every mutation path, concurrent races, NULL fallback, backfill and reconcile stay exact',async t=>{
+    const a=await fixtureDatabase(t),b=await fixtureDatabase(t),w=unique('unreadw'),host=w+'.invalid',dom=unique('mdom');
+    const {readFile}=await import('node:fs/promises');
+    const {attachToMailboxes}=await import('./src/mailbox-store.js');
+    const {reconcileInboxState}=await import('./src/maintenance.js');
+    const {drizzle}=await import('drizzle-orm/node-postgres');
+    const {digest,randomSecret}=await import('./src/core.js');
+    cleanup(t,async()=>{for(const tbl of ['mailbox_events','mail_gc_candidates','mail_receipts','mailbox_keys','mailbox_addresses','mailbox_threads','mailbox_messages','mail_messages','mail_threads','mailboxes','mailbox_domains','api_request_budgets','mailbox_write_lanes'])await a.query(`DELETE FROM ${tbl} WHERE workspace_id=$1`,[w]);});
+    await a.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')",[dom,w,host,REGION]);
+    const exact=async(bid:string)=>Number((await a.query('SELECT count(*)::int n FROM mailbox_messages WHERE mailbox_id=$1 AND NOT read AND held_reason IS NULL',[bid])).rows[0].n);
+    const stored=async(bid:string)=>(await a.query('SELECT unread FROM inbox_state WHERE inbox_id=$1',[bid])).rows[0].unread as number|null;
+    const viewed=async(bid:string)=>Number((await a.query("SELECT (inbox_view(b)->'usage'->>'unread')::int n FROM mailboxes b WHERE b.id=$1",[bid])).rows[0].n);
+    const assertExact=async(bid:string,label:string)=>{const e=await exact(bid),s=await stored(bid),v=await viewed(bid);assert.equal(s,e,`${label}: stored=${s} exact=${e}`);assert.equal(v,e,`${label}: view=${v} exact=${e}`);};
+    // 1. Managed inbox create starts at unread=0 (persistent, quota=10 so we can also test held).
+    const bid=unique('mbx'),addr='main@'+host,tok=randomSecret('bane_mbx_');
+    const created=(await a.query('SELECT create_managed_inbox($1::jsonb) r',[JSON.stringify({
+      wid:w,actor:'actor',admin:true,manageAddress:true,hosted:false,id:bid,
+      input:{type:'persistent',ttlSeconds:86400,graceHours:24,domain:host,localPart:'main',metadata:{},limits:{messages:4,bytes:1048576},send:{enabled:false,perDay:0}},
+      locals:['main'],
+    })])).rows[0].r;
+    assert.equal(created.error,undefined,JSON.stringify(created));
+    assert.equal(created.inbox.usage.unread,0);
+    await assertExact(bid,'after create');
+    await a.query(`INSERT INTO mailbox_keys(id,workspace_id,name,hash,prefix,mailbox_ids,permissions) VALUES($1,$2,'rw',$3,'fixture',jsonb_build_array($4::text),'["read","modify"]')`,[unique('mbk'),w,await digest(tok),bid]);
+    // 2. Inbound delivery + duplicate receipt replay + held delivery.
+    const deliver=async(db:pg.Client,mid:string,opts:{spam?:boolean;ts?:string}={})=>{
+      const at=opts.ts??new Date().toISOString();
+      await db.query("INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) VALUES($1,$2,$3,'fixture','k',$4,'{}') ON CONFLICT DO NOTHING",[w,mid,REGION,JSON.stringify([addr])]);
+      await db.query("SELECT * FROM mail_store_incoming($1::jsonb,'[]','[]',$2::jsonb,false,false,NULL,NULL)",[JSON.stringify({
+        id:mid,workspace_id:w,ses_message_id:mid,lifecycle:'kept',envelope_to:[addr],direction:'inbound',subject:'Sub '+mid,
+        from_address:'sender@example.invalid',to:[{name:null,address:addr}],cc:[],bcc:[],reply_to:[],references:[],received_at:at,
+        body_truncated:false,snippet:mid,headers:[],size_bytes:128,attachment_count:0,verdicts:{dmarc:'PASS'},spam:!!opts.spam,automated:false,status:'received',
+      }),JSON.stringify([{addr,n:0,valid:true}])]);
+    };
+    const m1=unique('msg'),m2=unique('msg'),m3=unique('msg'),m4=unique('msg'),mHeld=unique('msg');
+    await deliver(a,m1); await assertExact(bid,'after delivery 1');
+    await deliver(a,m1); await assertExact(bid,'after duplicate receipt replay');
+    await deliver(a,m2,{spam:true}); await assertExact(bid,'after spam delivery (unheld unread)');
+    await deliver(a,m3);
+    // 3. API read/unread, move, copy (must count once, not twice!), delete to trash, non-final & final expunge, custom folder delete.
+    ok(await http('PATCH',`/v1/inboxes/${bid}/messages/${m1}`,tok,{read:true}));
+    await assertExact(bid,'after API mark read');
+    ok(await http('PATCH',`/v1/inboxes/${bid}/messages/${m1}`,tok,{read:false}));
+    await assertExact(bid,'after API mark unread');
+    // Copy m1 to archive: 2 inbox_entries, still 1 mailbox_messages row -> unread must NOT double!
+    const copied=ok(await http('POST',`/v1/inboxes/${bid}/messages/${m1}/copy`,tok,{folder:'archive'}));
+    await assertExact(bid,'after copy unread message');
+    // Expunge only the archive copy: message still lives in inbox -> unread stays same!
+    ok(await http('DELETE',`/v1/inboxes/${bid}/messages/${m1}?source=archive&uid=${copied.uid}&permanent=true`,tok));
+    await assertExact(bid,'after expunging 1 of 2 copies');
+    // Move m1 to custom folder, then delete custom folder (moves to trash, preserves unread).
+    const fld=ok(await http('POST',`/v1/inboxes/${bid}/folders`,tok,{path:'Custom'}),201);
+    ok(await http('POST',`/v1/inboxes/${bid}/messages/${m1}/move`,tok,{folder:fld.id}));
+    await assertExact(bid,'after move to custom folder');
+    ok(await http('DELETE',`/v1/inboxes/${bid}/folders/${fld.id}`,tok));
+    await assertExact(bid,'after custom folder delete');
+    // Permanent expunge of last copy of m1 removes row and decrements unread.
+    ok(await http('DELETE',`/v1/inboxes/${bid}/messages/${m1}?permanent=true`,tok));
+    await assertExact(bid,'after final expunge of unread');
+    // 4. Thread patch (inbox_patch_thread) marking read/unread.
+    const t3=(await a.query('SELECT thread_id FROM mailbox_messages WHERE mailbox_id=$1 AND message_id=$2',[bid,m3])).rows[0].thread_id as string;
+    await a.query(`SELECT inbox_patch_thread($1,$2,$3,'{"read":true}'::jsonb)`,[w,bid,t3]);
+    await assertExact(bid,'after thread patch read=true');
+    await a.query(`SELECT inbox_patch_thread($1,$2,$3,'{"read":false}'::jsonb)`,[w,bid,t3]);
+    await assertExact(bid,'after thread patch read=false');
+    // 5. IMAP mailgw_mutate (flags) + mailgw_append (unseen & seen).
+    const u3=(await a.query("SELECT uid FROM inbox_entries WHERE inbox_id=$1 AND message_id=$2 AND role='inbox'",[bid,m3])).rows[0].uid;
+    await a.query(`SELECT mailgw_mutate($1,$2,'inbox',NULL,'flags',$3::bigint[],'add','{"read":true}'::jsonb,ARRAY[]::text[])`,[w,bid,[u3]]);
+    await assertExact(bid,'after IMAP mark seen');
+    await a.query(`SELECT mailgw_mutate($1,$2,'inbox',NULL,'flags',$3::bigint[],'remove','{"read":false}'::jsonb,ARRAY[]::text[])`,[w,bid,[u3]]);
+    await assertExact(bid,'after IMAP mark unseen');
+    const appUnseen=unique('msg'),appSeen=unique('msg');
+    await a.query("SELECT mailgw_append($1,$2,'inbox',$3,$4,NULL,'App unseen','a@b.test','hi',now(),64,'local:','k1','{}'::jsonb,ARRAY[]::text[])",[w,bid,appUnseen,unique('thr')]);
+    await assertExact(bid,'after IMAP APPEND unseen');
+    await a.query("SELECT mailgw_append($1,$2,'inbox',$3,$4,NULL,'App seen','a@b.test','hi',now(),64,'local:','k2','{}'::jsonb,ARRAY['\\Seen'])",[w,bid,appSeen,unique('thr')]);
+    await assertExact(bid,'after IMAP APPEND seen');
+    // Quota is 4 messages; we now have 4 (m2, m3, appUnseen, appSeen), so next delivery is held -> unread must NOT increase!
+    await deliver(a,mHeld);
+    assert.equal((await a.query('SELECT held_reason FROM mailbox_messages WHERE mailbox_id=$1 AND message_id=$2',[bid,mHeld])).rows[0].held_reason,'quota');
+    await assertExact(bid,'after held delivery');
+    // Marking a held message read must NOT decrement unread!
+    await a.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"read":true}'::jsonb)`,[w,bid,mHeld]);
+    await assertExact(bid,'after marking held message read');
+    // 6. inbox_adopt + attachToMailboxes (claimUnrouted inbound & outbound read=true).
+    const addrBox=unique('mbx');
+    await a.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind) VALUES($1,$2,$3,$4,'address')",[addrBox,w,dom,'claim@'+host]);
+    await assertExact(addrBox,'after inbox_adopt on new address');
+    const tClaim=unique('thr'),mClaimIn=unique('msg'),mClaimOut=unique('msg');
+    await a.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)',[tClaim,w]);
+    const [inRow]=(await a.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,received_at,size_bytes,spam) VALUES($1,$2,$3,'inbound',now(),50,false) RETURNING *",[mClaimIn,w,tClaim])).rows;
+    const [outRow]=(await a.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,received_at,size_bytes,spam) VALUES($1,$2,$3,'outbound',now(),50,false) RETURNING *",[mClaimOut,w,tClaim])).rows;
+    const drz=drizzle(a);
+    await attachToMailboxes(drz,{workspaceId:w},{...inRow,workspaceId:w,threadId:tClaim,receivedAt:inRow.received_at.toISOString(),sizeBytes:50},[addrBox]);
+    await assertExact(addrBox,'after attachToMailboxes inbound (claimUnrouted)');
+    await attachToMailboxes(drz,{workspaceId:w},{...outRow,workspaceId:w,threadId:tClaim,receivedAt:outRow.received_at.toISOString(),sizeBytes:50},[addrBox]);
+    await assertExact(addrBox,'after attachToMailboxes outbound');
+    // 7. Concurrent races: (a) two readers marking same message read, (b) delivery racing thread mark-all-read, (c) IMAP vs API flags.
+    await a.query('UPDATE mailboxes SET quota_messages=NULL WHERE id=$1',[bid]);
+    await deliver(a,m4);
+    await Promise.all([
+      a.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"read":true}'::jsonb)`,[w,bid,m4]),
+      b.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"read":true}'::jsonb)`,[w,bid,m4]),
+    ]);
+    await assertExact(bid,'after concurrent double mark-read');
+    const mRace=unique('msg'),tRace=(await a.query('SELECT thread_id FROM mailbox_messages WHERE mailbox_id=$1 AND message_id=$2',[bid,m4])).rows[0].thread_id as string;
+    await Promise.all([
+      deliver(a,mRace),
+      b.query(`SELECT inbox_patch_thread($1,$2,$3,'{"read":true}'::jsonb)`,[w,bid,tRace]),
+    ]);
+    await assertExact(bid,'after delivery racing thread mark-all-read');
+    const uRace=(await a.query("SELECT uid FROM inbox_entries WHERE inbox_id=$1 AND message_id=$2 AND role='inbox'",[bid,mRace])).rows[0].uid;
+    await Promise.all([
+      a.query(`SELECT mailgw_mutate($1,$2,'inbox',NULL,'flags',$3::bigint[],'add','{"read":true}'::jsonb,ARRAY[]::text[])`,[w,bid,[uRace]]),
+      b.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"read":false}'::jsonb)`,[w,bid,mRace]),
+    ]);
+    await assertExact(bid,'after concurrent IMAP + API flag toggle');
+    // 8. Pre-backfill NULL fallback (Condition 3) + idempotent re-run of migration 424.
+    await a.query('UPDATE inbox_state SET unread=NULL WHERE inbox_id=$1',[bid]);
+    assert.equal(await stored(bid),null);
+    const liveBefore=await exact(bid);
+    assert.ok(liveBefore>0,'fixture must have unread messages to prove fallback never shows 0');
+    assert.equal(await viewed(bid),liveBefore,'inbox_view falls back to live count while unread IS NULL');
+    const mDuring=unique('msg');
+    await deliver(a,mDuring);
+    assert.equal(await stored(bid),null,'writers leave NULL as NULL until backfill locks the row');
+    assert.equal(await viewed(bid),liveBefore+1,'inbox_view stays exact while mail arrives before backfill');
+    const backfillSql=await readFile(new URL('./migrations/424_inbox_unread_backfill.sql',import.meta.url),'utf8');
+    const bPid=(await b.query('SELECT pg_backend_pid() pid')).rows[0].pid as number;
+    const beforeBid=(await a.query('SELECT max(inbox_id) m FROM inbox_state WHERE inbox_id<$1',[bid])).rows[0].m as string|null ?? '';
+    // Two-session race: writer holds inbox_state FOR UPDATE while backfill starts and blocks on Lock;
+    // backfill must count on a post-lock snapshot (never pre-lock). Verify both read and delivery races.
+    for(const mode of ['read','delivery'] as const){
+      await a.query('UPDATE inbox_state SET unread=NULL WHERE inbox_id=$1',[bid]);
+      await a.query('BEGIN');
+      try{
+        if(mode==='read')await a.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"read":true}'::jsonb)`,[w,bid,mDuring]);
+        else await deliver(a,unique('msg'));
+        const pending=b.query(backfillSql,[beforeBid]);
+        let waiting=false;
+        for(let i=0;i<400&&!waiting;i++){waiting=(await a.query('SELECT wait_event_type FROM pg_stat_activity WHERE pid=$1',[bPid])).rows[0]?.wait_event_type==='Lock';if(!waiting)await new Promise(r=>setTimeout(r,5));}
+        assert.ok(waiting,`backfill must wait on ${mode} writer lock`);
+        await a.query('COMMIT');
+        await pending;
+      }catch(e){await a.query('ROLLBACK');throw e;}
+      await assertExact(bid,`after concurrent ${mode} during backfill`);
+    }
+    for(let pass=0;pass<2;pass++){
+      let cur='';
+      for(;;){const next=(await a.query(backfillSql,[cur])).rows[0].cursor as string|null;if(next===null)break;cur=next;}
+    }
+    await assertExact(bid,'after 2x idempotent backfill');
+    // 9. Scheduled reconcileInboxState corrects drift and reports it loudly.
+    await a.query('UPDATE inbox_state SET unread=unread+7 WHERE inbox_id=$1',[bid]);
+    await a.query("DELETE FROM sending_upload_reconcile WHERE id='inbox-state'");
+    const rec=await reconcileInboxState({...fixtureWorker!.runtime,db:drz},10_000);
+    assert.ok(rec.corrected>=1&&rec.drifted>=1,JSON.stringify(rec));
+    await assertExact(bid,'after reconcileInboxState');
+    // 10. inbox_retention_batch mid-drain keeps unread exact on ended ephemeral inbox.
+    const eph=unique('mbx');
+    await a.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode,expires_at,delete_after) VALUES($1,$2,$3,$4,'inbox','ephemeral',now()-interval '2 hours',now()-interval '1 hour')",[eph,w,dom,'eph@'+host]);
+    await a.query('INSERT INTO inbox_state(inbox_id,workspace_id,messages,unread) VALUES($1,$2,2,2)',[eph,w]);
+    const tEph=unique('thr');await a.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)',[tEph,w]);
+    for(const mid of [unique('msg'),unique('msg')]){
+      await a.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,lifecycle) VALUES($1,$2,$3,'inbound','ephemeral')",[mid,w,tEph]);
+      await a.query("INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,read,received_at) VALUES($1,$2,$3,$4,'inbound',false,now())",[eph,mid,w,tEph]);
+    }
+    await a.query('SELECT inbox_retention_batch(25)');
+    assert.equal((await a.query('SELECT FROM mailboxes WHERE id=$1',[eph])).rowCount,0);
+  });
+  test('inbound threads: workspace-wide and single-address paging match full grouping across multi-address, equal-timestamp and ended-inbox edges',async t=>{
+    await simulatedSesFixture(t,async({db,local,runtime})=>{
+      const w=runtime.config.workspaceId,dom=unique('mdom'),host=w+'.invalid';
+      const [boxA,boxB,boxC,boxEnded]=[unique('mbx'),unique('mbx'),unique('mbx'),unique('mbx')];
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')",[dom,w,host,REGION]);
+      for(const [id,addr,ended] of [[boxA,'a@'+host,false],[boxB,'b@'+host,false],[boxC,'c@'+host,false],[boxEnded,'ended@'+host,true]] as const){
+        await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode,expires_at,delete_after) VALUES($1,$2,$3,$4,'inbox',$5,$6,$7)",
+          [id,w,dom,addr,ended?'ephemeral':'forever',ended?new Date(Date.now()-7200_000).toISOString():null,ended?new Date(Date.now()-3600_000).toISOString():null]);
+        await db.query("INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,$3,'primary')",[w,addr,id]);
+        await db.query('INSERT INTO inbox_state(inbox_id,workspace_id,unread) VALUES($1,$2,0)',[id,w]);
+      }
+      const add=async(tid:string,mid:string,boxes:{id:string;at:string;starred?:boolean;archived?:boolean;trashed?:boolean}[],subject:string)=>{
+        const newest=boxes.map(x=>x.at).sort().at(-1)!;
+        await db.query('INSERT INTO mail_threads(id,workspace_id,subject,message_count,last_message_at) VALUES($1,$2,$3,1,$4) ON CONFLICT(id) DO UPDATE SET message_count=mail_threads.message_count+1,last_message_at=greatest(mail_threads.last_message_at,excluded.last_message_at)',[tid,w,subject,newest]);
+        await db.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,subject,from_address,snippet,received_at,lifecycle) VALUES($1,$2,$3,'inbound',$4,'ext@example.invalid',$4,$5,'kept')",[mid,w,tid,subject,newest]);
+        for(const x of boxes){
+          await db.query("INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,read,received_at) VALUES($1,$2,$3,$4,'inbound',false,$5)",[x.id,mid,w,tid,x.at]);
+          await db.query(`INSERT INTO mailbox_threads(mailbox_id,thread_id,workspace_id,subject,snippet,message_count,unread_count,last_message_at,last_inbound_at,starred,archived,trashed_at)
+            VALUES($1,$2,$3,$4,$4,1,1,$5,$5,$6,$7,$8)
+            ON CONFLICT(mailbox_id,thread_id) DO UPDATE SET message_count=mailbox_threads.message_count+1,last_message_at=greatest(mailbox_threads.last_message_at,excluded.last_message_at),starred=mailbox_threads.starred OR excluded.starred`,
+            [x.id,tid,w,subject,x.at,!!x.starred,!!x.archived,x.trashed?x.at:null]);
+        }
+      };
+      // 3 distinct threads with IDENTICAL timestamp (order must tie-break by id DESC).
+      const eqAt='2026-11-23T12:00:00.123456Z';
+      const [tEq1,tEq2,tEq3]=['thr_eq_a_'+unique('x'),'thr_eq_b_'+unique('x'),'thr_eq_c_'+unique('x')];
+      await add(tEq1,unique('msg'),[{id:boxA,at:eqAt}],'Equal 1');
+      await add(tEq2,unique('msg'),[{id:boxB,at:eqAt}],'Equal 2');
+      await add(tEq3,unique('msg'),[{id:boxC,at:eqAt}],'Equal 3');
+      // Multi-address thread: older boxB is starred, newer boxA is not, and boxEnded has an even newer message (must be excluded!).
+      const tMulti=unique('thr');
+      await add(tMulti,unique('msg'),[{id:boxB,at:'2026-11-23T12:00:01.000000Z',starred:true}],'Multi older starred');
+      await add(tMulti,unique('msg'),[{id:boxA,at:'2026-11-23T12:00:03.000000Z'}],'Multi newer live');
+      await add(tMulti,unique('msg'),[{id:boxEnded,at:'2026-11-23T12:00:09.000000Z'}],'Multi ended newest');
+      // Multi-address thread with IDENTICAL timestamp on boxA and boxB (shared single message -> messageCount must be 1, emitted once!).
+      const tShared=unique('thr');
+      await add(tShared,unique('msg'),[{id:boxA,at:'2026-11-23T12:00:04.000000Z'},{id:boxB,at:'2026-11-23T12:00:04.000000Z',starred:true}],'Shared equal ts');
+      // Trashed thread in boxC.
+      const tTrash=unique('thr');
+      await add(tTrash,unique('msg'),[{id:boxC,at:'2026-11-23T12:00:05.000000Z',trashed:true}],'Trashed');
+      const collectAll=async(qs:string)=>{
+        const out:Json[]=[],seen=new Set<string>();
+        let cursor:string|null=null;
+        for(let i=0;i<20;i++){
+          const page=ok(await local('GET',`/v1/inbound/threads?limit=2&${qs}${cursor?'&cursor='+encodeURIComponent(cursor):''}`));
+          for(const row of page.data){assert.ok(!seen.has(row.id),`duplicate thread ${row.id} on ${qs}`);seen.add(row.id);out.push(row);}
+          cursor=page.nextCursor;if(!cursor)break;
+        }
+        return out;
+      };
+      // Compare workspace-wide views and single-address view against reference GROUP BY ground truth.
+      const all=await collectAll('view=all');
+      assert.deepEqual(all.map(r=>r.id),[tTrash,tShared,tMulti,tEq3,tEq2,tEq1]);
+      const sharedRow=all.find(r=>r.id===tShared)!;
+      assert.deepEqual(sharedRow.addressIds,[boxA,boxB].sort());
+      assert.equal(sharedRow.messageCount,1,'shared delivery counts distinct messages');
+      const multiRow=all.find(r=>r.id===tMulti)!;
+      assert.deepEqual(multiRow.addressIds,[boxA,boxB].sort(),'ended inbox excluded');
+      assert.equal(multiRow.lastMessageAt,'2026-11-23T12:00:03.000Z','ended inbox timestamp excluded');
+      assert.equal(multiRow.messageCount,2);
+      const starred=await collectAll('view=starred');
+      assert.deepEqual(starred.map(r=>r.id),[tShared,tMulti]);
+      assert.equal(starred[1]!.lastMessageAt,'2026-11-23T12:00:03.000Z','starred view keeps live max timestamp');
+      const inbox=await collectAll('view=inbox');
+      assert.deepEqual(inbox.map(r=>r.id),[tShared,tMulti,tEq3,tEq2,tEq1]);
+      const trash=await collectAll('view=trash');
+      assert.deepEqual(trash.map(r=>r.id),[tTrash]);
+      const onlyA=await collectAll(`view=all&addressId=${boxA}`);
+      assert.deepEqual(onlyA.map(r=>r.id),[tShared,tMulti,tEq1]);
+      assert.equal(onlyA.find(r=>r.id===tMulti)!.messageCount,1);
+      // Full-text search path (q=) also works with LIMIT 1 latest_id.
+      const searched=await collectAll('view=all&q=Shared');
+      assert.deepEqual(searched.map(r=>r.id),[tShared]);
+    });
+  });
+
+  test('batched inbound ingest: burst ordering, threading, quota fallback, unread/IMAP exactness and cross-workspace fairness', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { S3Client, GetObjectCommand } = await import('@aws-sdk/client-s3');
+      const { processJobs, followDueJobs } = await import('./src/jobs.js');
+      const { mailboxIngestJobs } = await import('./src/mailbox-ingest.js');
+      const { storeIncomingBatch } = await import('./src/mailbox-ingest-store.js');
+      const { drizzle } = await import('drizzle-orm/node-postgres');
+      runtime.config.aws = { accessKeyId: 'synthetic-fixture', secretAccessKey: 'synthetic-fixture' };
+      const wid = runtime.config.workspaceId, host = `burst-${unique('h')}.invalid`, dom = unique('mdom'), box = unique('mbx'), addr = `news@${host}`;
+      await db.query("INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,'fixture-burst','arn:aws:sns:us-east-1:000000000000:burst') ON CONFLICT(workspace_id,region) DO NOTHING", [wid, REGION]);
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')", [dom, wid, host, REGION]);
+      await db.query(`INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode,create_request,send_limits) VALUES($1,$2,$3,$4,'inbox','forever','{"type":"persistent"}','{"perDay":0}')`, [box, wid, dom, addr]);
+      await db.query("INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,$3,'primary')", [wid, addr, box]);
+      await db.query("INSERT INTO inbox_state(inbox_id,workspace_id) VALUES($1,$2) ON CONFLICT DO NOTHING", [box, wid]);
+      await db.query("SELECT inbox_seed_folders($1)", [box]);
+      // Seed root thread for in-reply-to tests.
+      const rootThr = unique('thr'), rootMid = `root-${unique('m')}@sender.invalid`;
+      await db.query("INSERT INTO mail_threads(id,workspace_id,message_count,last_message_at) VALUES($1,$2,1,now())", [rootThr, wid]);
+      await db.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,region,ses_message_id,message_id,subject,from_address,envelope_to,received_at,snippet,size_bytes,status,lifecycle,verdicts,spam,automated) VALUES($1,$2,$3,'inbound',$4,'ses_root_burst',$5,'Newsletter','news@sender.invalid','[]',now(),'root',100,'received','kept','{}',false,false)", [unique('msg'), wid, rootThr, REGION, rootMid]);
+      await db.query("INSERT INTO mail_message_ids(workspace_id,message_id,mail_message_id,thread_id) VALUES($1,$2,(SELECT id FROM mail_messages WHERE workspace_id=$1 AND ses_message_id='ses_root_burst'),$3)", [wid, rootMid, rootThr]);
+
+      // Build 12 staged messages: 6 replies on rootThr, 4 own-thread, 2 auto-replies (one with an attachment),
+      // plus re-enqueue one duplicate receipt/job to confirm idempotency on retry/overlap.
+      const rawMap = new Map<string, Buffer>();
+      const baseMs = Date.parse('2026-11-23T23:00:00.000Z');
+      const sesIds: string[] = [];
+      for (let i = 0; i < 12; i++) {
+        const sid = `burst_${unique('s')}_${String(i).padStart(2, '0')}`;
+        sesIds.push(sid);
+        const isReply = i < 6, isAuto = i >= 10, hasAtt = i === 11;
+        const ts = new Date(baseMs + i * 1000).toISOString();
+        const raw = hasAtt
+          ? Buffer.from(`From: u${i}@sender.invalid\r\nTo: ${addr}\r\nSubject: Auto OOO ${i}\r\nMessage-ID: <${sid}@sender.invalid>\r\nAuto-Submitted: auto-replied\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=b1\r\n\r\n--b1\r\nContent-Type: text/plain\r\n\r\nOut of office\r\n--b1\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=note.txt\r\n\r\nhi\r\n--b1--`)
+          : Buffer.from(`From: u${i}@sender.invalid\r\nTo: ${addr}\r\nSubject: ${isReply ? 'Re: Newsletter' : isAuto ? 'Auto OOO' : 'Topic ' + i}\r\nMessage-ID: <${sid}@sender.invalid>\r\n${isReply ? `In-Reply-To: <${rootMid}>\r\nReferences: <${rootMid}>\r\n` : ''}${isAuto ? 'Auto-Submitted: auto-replied\r\n' : ''}Date: ${ts}\r\n\r\nBody ${i}`);
+        rawMap.set(`staging/${sid}`, raw);
+        const notif = { mail: { source: `u${i}@sender.invalid`, timestamp: ts }, receipt: { timestamp: ts, spfVerdict: { status: 'PASS' }, dkimVerdict: { status: 'PASS' }, dmarcVerdict: { status: 'PASS' }, spamVerdict: { status: 'PASS' }, virusVerdict: { status: 'PASS' } } };
+        await db.query("INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) VALUES($1,$2,$3,'fixture-burst',$4,$5::jsonb,$6::jsonb)", [wid, sid, REGION, `workspaces/${wid}/raw/${sid}.eml`, JSON.stringify([addr]), JSON.stringify(notif)]);
+        await db.query("INSERT INTO jobs(id,type,workspace_id,payload,available_at) VALUES(public.row_id('job'),'mailbox.ingest',$1,$2::jsonb,$3::timestamptz)", [wid, JSON.stringify({ sesMessageId: sid }), ts]);
+      }
+      const mockS3 = t.mock.method(S3Client.prototype, 'send', async (cmd: any) => {
+        if (cmd.constructor.name === 'HeadObjectCommand') { const b = rawMap.get(cmd.input.Key!); assert.ok(b, cmd.input.Key ?? ''); return { ContentLength: b.length, ETag: '"etag"' }; }
+        if (cmd.constructor.name === 'CopyObjectCommand' || cmd.constructor.name === 'PutObjectCommand') return {};
+        if (cmd instanceof GetObjectCommand) { const b = rawMap.get(cmd.input.Key!); assert.ok(b, cmd.input.Key ?? ''); return { Body: { transformToByteArray: async () => b } }; }
+        return {};
+      });
+      try {
+        const ran = await processJobs(runtime, mailboxIngestJobs, 50, 6);
+        assert.ok(ran >= 12, `expected >= 12 jobs processed, got ${ran}`);
+        const doneCount = (await db.query("SELECT count(*)::int n FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id = ANY($2::text[]) AND status='processed' AND error IS NULL", [wid, sesIds])).rows[0].n;
+        assert.equal(doneCount, 12, 'all 12 burst receipts processed cleanly with error cleared');
+        // Simulate lease-expiry retry of two already-stored receipts to prove zero duplicates on retry/overlap.
+        await db.query("UPDATE jobs SET status='pending', available_at=now(), lease_until=NULL WHERE workspace_id=$1 AND type='mailbox.ingest' AND payload->>'sesMessageId' = ANY($2::text[])", [wid, [sesIds[0]!, sesIds[1]!]]);
+        assert.ok((await processJobs(runtime, mailboxIngestJobs, 10, 6)) >= 2, 'replayed receipts settle as clean no-ops');
+      } finally { mockS3.mock.restore(); }
+
+      // Verify exact counts, zero duplicates, strict ordering, #595 unread, #603 IMAP folder/entries, and byte window.
+      const [state] = (await db.query("SELECT messages, held, unread, modseq::int FROM inbox_state WHERE inbox_id=$1", [box])).rows;
+      const [folder] = (await db.query("SELECT uid_next::int, total, unseen, highest_modseq::int FROM inbox_folders WHERE inbox_id=$1 AND role='inbox'", [box])).rows;
+      const [rootRow] = (await db.query("SELECT message_count, unread_count FROM mailbox_threads WHERE mailbox_id=$1 AND thread_id=$2", [box, rootThr])).rows;
+      const [attCnt] = (await db.query("SELECT count(*)::int n FROM mail_attachments WHERE workspace_id=$1", [wid])).rows;
+      const entries = (await db.query("SELECT e.uid::int, e.modseq::int, m.ses_message_id, m.automated FROM inbox_entries e JOIN mail_messages m ON m.id=e.message_id WHERE e.inbox_id=$1 AND e.role='inbox' ORDER BY e.uid", [box])).rows;
+      assert.equal(entries.length, 12, 'exactly 12 unique messages delivered (duplicate job was a no-op)');
+      assert.deepEqual(state, { messages: 12, held: 0, unread: 12, modseq: 13 }, '#595 unread and modseq exact');
+      assert.deepEqual(folder, { uid_next: 13, total: 12, unseen: 12, highest_modseq: 13 }, '#603 IMAP folder counters exact');
+      assert.deepEqual(rootRow, { message_count: 6, unread_count: 6 }, 'all 6 replies joined root thread');
+      assert.equal(attCnt.n, 1, 'attachment item fell back cleanly and saved attachment');
+      assert.equal(entries.filter(e => e.automated).length, 2, 'auto-replies flagged automated');
+      // Replies 0..5 arrived in order inside the first batch of 6 -> strictly increasing UIDs.
+      const replyUids = sesIds.slice(0, 6).map(id => entries.find(e => e.ses_message_id === id)!.uid);
+      assert.deepEqual(replyUids, [...replyUids].sort((a, b) => a - b), 'conversation ordering preserved');
+
+      // 2. Quota boundary mid-batch + intra-batch parent/child reply fallback in mail_store_incoming_batch.
+      const qBox = unique('mbx'), qAddr = `quota@${host}`;
+      await db.query(`INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode,quota_messages,create_request,send_limits) VALUES($1,$2,$3,$4,'inbox','forever',2,'{"type":"persistent"}','{"perDay":0}')`, [qBox, wid, dom, qAddr]);
+      await db.query("INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,$3,'primary')", [wid, qAddr, qBox]);
+      await db.query("INSERT INTO inbox_state(inbox_id,workspace_id) VALUES($1,$2) ON CONFLICT DO NOTHING", [qBox, wid]);
+      await db.query("SELECT inbox_seed_folders($1)", [qBox]);
+      const qIds = [0, 1, 2, 3].map(i => `q_${unique('s')}_${i}`);
+      await db.query("INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) SELECT $1,m,$2,'fixture-burst','k',$3::jsonb,'{}' FROM unnest($4::text[]) m", [wid, REGION, JSON.stringify([qAddr]), qIds]);
+      const mkQ = (i: number) => ({
+        m: { id: `msg_${qIds[i]}`, workspaceId: wid, direction: 'inbound' as const, region: REGION, sesMessageId: qIds[i]!, messageId: `${qIds[i]}@s.invalid`, inReplyTo: i === 1 ? `${qIds[0]}@s.invalid` : null, references: i === 1 ? [`${qIds[0]}@s.invalid`] : [], subject: `Q${i}`, fromAddress: `q${i}@s.invalid`, fromName: null, to: [{ name: null, address: qAddr }], cc: [], bcc: [], replyTo: [], envelopeFrom: `q${i}@s.invalid`, envelopeTo: [qAddr], sentAt: new Date(baseMs + i * 1000).toISOString(), receivedAt: new Date(baseMs + i * 1000).toISOString(), text: 'hi', html: null, bodyTruncated: false, snippet: 'hi', mime: null, headers: [], attachmentCount: 0, sizeBytes: 100, rawBucket: 'fixture-burst', rawKey: `workspaces/${wid}/raw/kept/${qIds[i]}.eml`, lifecycle: 'kept' as const, verdicts: { dmarc: 'PASS' }, spam: false, automated: false, status: 'received' as const },
+        files: [], verifiedFrom: true, allowCreate: false, replyAuthorVerified: true, plan: null,
+      });
+      await storeIncomingBatch(runtime.db, wid, [0, 1, 2, 3].map(mkQ));
+      const [qState] = (await db.query("SELECT messages, held, unread FROM inbox_state WHERE inbox_id=$1", [qBox])).rows;
+      assert.deepEqual(qState, { messages: 4, held: 2, unread: 2 }, 'quota hit mid-batch holds overflow and keeps unread exact');
+      const [qThreads] = (await db.query("SELECT count(DISTINCT thread_id)::int n FROM mail_messages WHERE id IN ($1, $2)", [`msg_${qIds[0]}`, `msg_${qIds[1]}`])).rows;
+      assert.equal(qThreads.n, 1, 'intra-batch reply joins parent thread');
+
+      // 2b. Send-only (public) address with plus tag whose base is a real inbox must stay unrouted in batch store, matching single store.
+      const pubAddr = `news+pub@${host}`;
+      await db.query("INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,$3,'public')", [wid, pubAddr, box]);
+      const pIds = [0, 1].map(i => `pub_${unique('s')}_${i}`);
+      await db.query("INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) SELECT $1,m,$2,'fixture-burst','k',$3::jsonb,'{}' FROM unnest($4::text[]) m", [wid, REGION, JSON.stringify([pubAddr]), pIds]);
+      const mkPub = (i: number) => ({
+        m: { id: `msg_${pIds[i]}`, workspaceId: wid, direction: 'inbound' as const, region: REGION, sesMessageId: pIds[i]!, messageId: `${pIds[i]}@s.invalid`, inReplyTo: null, references: [], subject: `Pub${i}`, fromAddress: `p${i}@s.invalid`, fromName: null, to: [{ name: null, address: pubAddr }], cc: [], bcc: [], replyTo: [], envelopeFrom: `p${i}@s.invalid`, envelopeTo: [pubAddr], sentAt: new Date(baseMs + i * 1000).toISOString(), receivedAt: new Date(baseMs + i * 1000).toISOString(), text: 'hi', html: null, bodyTruncated: false, snippet: 'hi', mime: null, headers: [], attachmentCount: 0, sizeBytes: 100, rawBucket: 'fixture-burst', rawKey: `workspaces/${wid}/raw/kept/${pIds[i]}.eml`, lifecycle: 'kept' as const, verdicts: { dmarc: 'PASS' }, spam: false, automated: false, status: 'received' as const },
+        files: [], verifiedFrom: true, allowCreate: false, replyAuthorVerified: true, plan: null,
+      });
+      await storeIncomingBatch(runtime.db, wid, [0, 1].map(mkPub));
+      assert.equal((await db.query("SELECT count(*)::int n FROM mail_unrouted WHERE workspace_id=$1 AND address=$2", [wid, pubAddr])).rows[0].n, 2, 'send-only plus-tag address stays unrouted when batched');
+      assert.equal((await db.query("SELECT messages FROM inbox_state WHERE inbox_id=$1", [box])).rows[0].messages, 12, 'base inbox untouched by send-only plus-tag batch');
+
+      // 3. Cross-workspace fairness + multi-consumer overflow without SKIP LOCKED lock-out.
+      const c1 = await fixtureDatabase(t), c2 = await fixtureDatabase(t), schema = 'burst_' + randomUUID().replaceAll('-', '');
+      await c1.query(`CREATE SCHEMA ${schema}`);
+      try {
+        for (const c of [c1, c2]) await c.query(`SET search_path TO ${schema}, public`);
+        await c1.query("CREATE TABLE jobs (LIKE public.jobs INCLUDING ALL); CREATE TABLE mail_ingest_turns (LIKE public.mail_ingest_turns INCLUDING ALL); CREATE TABLE job_schedule (LIKE public.job_schedule INCLUDING ALL); CREATE TRIGGER mail_ingest_head AFTER INSERT OR UPDATE OR DELETE ON jobs FOR EACH ROW EXECUTE FUNCTION mail_ingest_head_change(); CREATE TRIGGER mail_ingest_admit BEFORE INSERT ON jobs FOR EACH ROW WHEN (NEW.type='mailbox.ingest' AND NEW.status IN ('pending','running')) EXECUTE FUNCTION mail_ingest_admit()");
+        await c1.query(`INSERT INTO jobs(id,type,workspace_id,payload,available_at) SELECT 'fa_'||lpad(i::text,3,'0'),'mailbox.ingest','floodA',jsonb_build_object('sesMessageId','m'||i),now()-interval '1 minute' FROM generate_series(1,36) i UNION ALL SELECT 'qb_1','mailbox.ingest','quietB','{"sesMessageId":"b1"}',now() UNION ALL SELECT 'qb_other','fixture.other','quietB','{}',now()`);
+        const order: string[] = [];
+        const perConsumer = [0, 0];
+        const mkHandlers = (idx: number): Record<string, import('./src/core.js').JobHandler> => ({
+          'mailbox.ingest': Object.assign(
+            async (_r: any, _p: any, j: any) => { order.push(`${j.workspaceId}:single`); perConsumer[idx]!++; await new Promise(r => setTimeout(r, 20)); },
+            { batch: async (_r: any, items: any[]) => { order.push(`${items[0].job.workspaceId}:batch(${items.length})`); perConsumer[idx]! += items.length; await new Promise(r => setTimeout(r, 20)); return items.map(it => ({ id: it.job.id })); } },
+          ),
+          'fixture.other': async (_r: any, _p: any, j: any) => { order.push(`${j.workspaceId}:other`); },
+        });
+        await Promise.all([
+          followDueJobs({ ...runtime, db: drizzle(c1) }, () => processJobs({ ...runtime, db: drizzle(c1) }, mkHandlers(0), 100, 6, 4000, 'work'), async () => {}, 5000, 'work'),
+          followDueJobs({ ...runtime, db: drizzle(c2) }, () => processJobs({ ...runtime, db: drizzle(c2) }, mkHandlers(1), 100, 6, 4000, 'work'), async () => {}, 5000, 'work'),
+        ]);
+        assert.equal(perConsumer[0]! + perConsumer[1]!, 37, 'all 37 ingest jobs completed');
+        assert.ok(perConsumer[0]! > 0 && perConsumer[1]! > 0, `both concurrent consumers must share the flood: ${JSON.stringify(perConsumer)}`);
+        assert.ok(order.slice(0, 6).some(s => s.startsWith('quietB:single') || s.startsWith('quietB:batch')), `quietB inbound must not wait behind floodA: ${order.slice(0, 6)}`);
+        assert.ok(order.slice(0, 6).includes('quietB:other'), `quietB other job must not wait behind floodA: ${order.slice(0, 6)}`);
+      } finally { await c1.query(`DROP SCHEMA ${schema} CASCADE`); }
+    });
   });
   test('mail gateway: a signed folder edit waiting behind deletion is denied without a write',async t=>{
     const db=await fixtureDatabase(t),rt=fixtureWorker!.runtime,w=unique('gwdel'),bid=unique('mbx'),kid=unique('app');
@@ -28972,6 +31065,73 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const tags='vis\u{e0061}ible';assert.equal(visibleMail(tags,null).hiddenContent,true);assert.equal(displayText(tags),'visible');assert.equal(visibleMail(null,`<p>${tags}</p>`).text,'visible');
   });
   test('ephemeral inbox: extract finds codes and links only in visible text and flags hidden content',async()=>{const {visibleMail}=await import('./src/inbox-content.js');const m=visibleMail('code 000000','<div hidden>code 111111</div><p style="font-size:0">code 222222</p><p>Verify: A3B4</p><a href="https://real.invalid/">other.invalid</a><span>zero\u200bwidth</span>','codes,links');assert.equal(m.hiddenContent,true);assert.deepEqual(m.extract,{codes:['A3B4'],links:[{text:'other.invalid',href:'https://real.invalid/',mismatch:true}]});assert.ok(!m.text.includes('111111'));});
+  test('shared-pool staging redrive retires unattributed objects once, skips SES setup probe, and keeps mail_ignored_staging 5 days', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { S3Client } = await import('@aws-sdk/client-s3');
+      const { stagingJobs } = await import('./src/mailbox-staging.js');
+      const { pruneMailboxEvents } = await import('./src/maintenance.js');
+      const wid = runtime.config.workspaceId;
+      const old = new Date(Date.now() - 2 * 3600_000);
+      const poolBucket = 'fixture-pool-' + unique('b'), poolTopic = `arn:aws:sns:${REGION}:111122223333:nightmail-inbound`;
+      const poolRuntime = { ...runtime, config: { ...runtime.config, multiTenant: true, receivingRedrive: true, aws: { accessKeyId: 'synthetic-fixture', secretAccessKey: 'synthetic-fixture' } } };
+      await db.query('CREATE TEMP TABLE provider_pool_regions (LIKE public.provider_pool_regions INCLUDING ALL) ON COMMIT DROP');
+      await db.query("INSERT INTO provider_pool_regions(region,aws_account_id,receiving_state,inbound_bucket,inbound_topic_arn) VALUES($1,'111122223333','ready',$2,$3)", [REGION, poolBucket, poolTopic]);
+      const ownedHost = `owned-${unique('h')}.invalid`;
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all,receiving_host) VALUES($1,$2,$1,$3,$4,'active','store',$3)", [unique('mdom'), wid, ownedHost, REGION]);
+      const traceFor = (id: string, to: string) => Buffer.from(`Return-Path: <s@sender.invalid>\r\nReceived: from mx.invalid by inbound-smtp.${REGION}.amazonaws.com with SMTP id ${id} for ${to}; ${old.toUTCString()}\r\nSubject: hi\r\n\r\nbody`);
+      const copied: string[] = [];
+      let denyCopy = false;
+      t.mock.method(S3Client.prototype, 'send', async (cmd: any) => {
+        if (cmd.constructor.name === 'ListObjectsV2Command') return { Contents: [
+          { Key: 'staging/AMAZON_SES_SETUP_NOTIFICATION', ETag: '"setup"', LastModified: old },
+          { Key: 'staging/redrive-orphan-1', ETag: '"e1"', LastModified: old },
+          { Key: 'staging/redrive-denied-2', ETag: '"e2"', LastModified: old },
+          { Key: 'staging/redrive-owned-3', ETag: '"e3"', LastModified: old },
+        ], IsTruncated: false };
+        if (cmd.constructor.name === 'GetObjectCommand') {
+          const mid = String(cmd.input.Key).slice('staging/'.length);
+          const body = mid === 'redrive-owned-3' ? traceFor(mid, `boss@${ownedHost}`) : Buffer.from('Subject: orphan\r\n\r\nhi');
+          return { Body: { transformToByteArray: async () => body } };
+        }
+        if (cmd.constructor.name === 'CopyObjectCommand') {
+          if (denyCopy) throw Object.assign(new Error('denied'), { name: 'AccessDenied' });
+          copied.push(cmd.input.Key);
+          return {};
+        }
+        return {};
+      });
+      const sweepPayload = { bucket: poolBucket, topic: poolTopic, shared: true, started: Date.now() };
+      await stagingJobs['mailbox.sweepStaging']!(poolRuntime, sweepPayload, { id: 'sweep-pool', attempts: 1, workspaceId: wid });
+      const queued = (await db.query("SELECT id, payload FROM jobs WHERE type='mailbox.recoverStaging' AND payload->>'bucket'=$1 ORDER BY payload->>'mid'", [poolBucket])).rows;
+      assert.deepEqual(queued.map(r => r.payload.mid), ['redrive-denied-2', 'redrive-orphan-1', 'redrive-owned-3'], 'AMAZON_SES_SETUP_NOTIFICATION skipped');
+      const byMid = new Map(queued.map(r => [r.payload.mid as string, r]));
+      // 1. Unowned object with successful quarantine copy: retires once, records reason on job payload, not re-swept.
+      await stagingJobs['mailbox.recoverStaging']!(poolRuntime, byMid.get('redrive-orphan-1')!.payload, { id: byMid.get('redrive-orphan-1')!.id, attempts: 1, workspaceId: wid });
+      assert.deepEqual(copied, ['quarantine/redrive-orphan-1']);
+      assert.equal((await db.query("SELECT FROM mail_ignored_staging WHERE bucket=$1 AND ses_message_id='redrive-orphan-1'", [poolBucket])).rowCount, 1);
+      const retiredPayload = (await db.query("SELECT payload FROM jobs WHERE id=$1", [byMid.get('redrive-orphan-1')!.id])).rows[0].payload;
+      assert.equal(retiredPayload.retiredReason, 'envelope_unknown');
+      assert.equal(typeof retiredPayload.ageHours, 'number');
+      // 2. Denied quarantine copy: must NOT retire or insert into mail_ignored_staging; fails 422.
+      denyCopy = true;
+      await assert.rejects(stagingJobs['mailbox.recoverStaging']!(poolRuntime, byMid.get('redrive-denied-2')!.payload, { id: byMid.get('redrive-denied-2')!.id, attempts: 1, workspaceId: wid }), { code: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN' });
+      assert.equal((await db.query("SELECT FROM mail_ignored_staging WHERE bucket=$1 AND ses_message_id='redrive-denied-2'", [poolBucket])).rowCount, 0);
+      denyCopy = false;
+      // 3. Owned receiving host: copies to quarantine/, logs MAILBOX_STAGING_UNDELIVERED, does NOT retire, fails 422.
+      await assert.rejects(stagingJobs['mailbox.recoverStaging']!(poolRuntime, byMid.get('redrive-owned-3')!.payload, { id: byMid.get('redrive-owned-3')!.id, attempts: 1, workspaceId: wid }), { code: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN' });
+      assert.ok(copied.includes('quarantine/redrive-owned-3'));
+      assert.equal((await db.query("SELECT FROM mail_ignored_staging WHERE bucket=$1 AND ses_message_id='redrive-owned-3'", [poolBucket])).rowCount, 0);
+      // 4. Subsequent sweep skips the retired unowned object even after its job row is deleted.
+      await db.query("DELETE FROM jobs WHERE id=$1", [byMid.get('redrive-orphan-1')!.id]);
+      await stagingJobs['mailbox.sweepStaging']!(poolRuntime, sweepPayload, { id: 'sweep-pool-2', attempts: 1, workspaceId: wid });
+      assert.equal((await db.query("SELECT FROM jobs WHERE type='mailbox.recoverStaging' AND payload->>'bucket'=$1 AND payload->>'mid'='redrive-orphan-1'", [poolBucket])).rowCount, 0);
+      await db.query("INSERT INTO mail_ignored_staging(bucket,ses_message_id,created_at) VALUES($1,'keep-4d',now()-interval '4 days'),($1,'drop-6d',now()-interval '6 days')", [poolBucket]);
+      await pruneMailboxEvents(runtime);
+      const left = (await db.query("SELECT ses_message_id FROM mail_ignored_staging WHERE bucket=$1 ORDER BY ses_message_id", [poolBucket])).rows.map(r => r.ses_message_id);
+      assert.deepEqual(left, ['keep-4d', 'redrive-orphan-1']);
+    });
+  });
+
   test('inbound staging recovery and ingest limits',async t=>{
     await simulatedSesFixture(t,async({runtime,db,jobs,local,request,fetch:rawFetch})=>{
       const {acceptInboundNotification,mailboxIngestJobs,recoverMailReceipts}=await import('./src/mailbox-ingest.js'),{scheduleHoldRelease,scheduleMailRecovery}=await import('./src/mailbox-staging.js'),{S3Client}=await import('@aws-sdk/client-s3');
@@ -29036,6 +31196,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         stageError='AccessDenied';for(const item of [j,spoof])await assert.rejects(run(item.type,item.payload),{code:'MAILBOX_STAGING_ACCESS_DENIED',retryable:false});
         stageError='';quarantineDenied=true;await assert.rejects(run(spoof.type,spoof.payload),{code:'MAILBOX_STAGING_ENVELOPE_UNKNOWN',retryable:false});quarantineDenied=false;
       });
+
       await t.test('scan barriers precede MIME, including unknown verdicts and workspace spam policy',async()=>{
         for(const status of ['FAIL','GRAY','PROCESSING_FAILED',undefined]){const mid='unsafe-'+String(status);await submit(mid,['a@receive.example'],'Bad',{...cleanScans,virusVerdict:{status}});await run('mailbox.ingest',{sesMessageId:mid});assert.ok(quarantined.includes('quarantine/'+mid));}
         ok(await local('PATCH','/v1/inbound/policy',{spam:'quarantine'},'live'));for(const status of ['FAIL','GRAY','PROCESSING_FAILED',undefined]){const mid='spam-'+String(status);await submit(mid,['a@receive.example'],'Spam',{...cleanScans,spamVerdict:{status}});await run('mailbox.ingest',{sesMessageId:mid});assert.ok(quarantined.includes('quarantine/'+mid));}
@@ -32754,6 +34915,425 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     }
   });
 
+  // Health (src/health.ts): the incidents of 23 November 2026, each as the sample the minute tick would have read.
+  test('MX health: each incident of 23 November is an alert within its minutes, with a stable key, a severity and the number that matters, in words that carry numbers, codes and IDs only; a failed probe neither opens nor clears', async () => {
+    const { evaluate, emptyMemory } = await import('./src/health.js'), { LATENCY_BUCKETS } = await import('./src/health-counters.js');
+    type Sample = import('./src/health.js').Sample;
+    const GB = 1024 ** 3, c = (text: string) => '`' + text + '`';
+    const quiet = (): Sample => ({ queues: [], late: [], failed: [], campaigns: [], counters: [], database: { connections: 12, maxConnections: 100, longTransactions: 0, oldestTransactionSeconds: 0, slowQueries: 0, lockWaits: 0, sizeBytes: 4 * GB } });
+    let memory = emptyMemory(), now = 1_800_000_000;
+    const tick = (sample: Sample) => { const result = evaluate(sample, memory, now, 150 * GB); memory = result.rollup.memory; now += 60; return result; };
+    const lines = (sample: Sample) => tick(sample).findings.map(finding => `${finding.key} ${finding.severity} ${finding.value}: ${finding.words}`);
+    const campaign = (id: string, extra: Json) => ({ id, workspaceId: 'ws_fixture', state: 'sending', total: 1_800_000, prepared: 1_800_000, expanded: 0, canceled: 0, paced: false, rateShare: null, waitingReason: null, waitingSeconds: null,
+      pauseCode: null, pausedSeconds: null, quarantines: 0, launchedSeconds: 600, share: 'shared' as const, account: 160, planned: 40, accepted: null, delivered: null, bounced: null, complained: null, ...extra });
+    const hist = (counts: Record<number, number>) => Array.from({ length: LATENCY_BUCKETS.length + 1 }, (_, i) => counts[i] ?? 0);
+    const counter = (kind: string, key: string, extra: Json = {}) => ({ kind, key, n: 0, errors: 0, ms: 0, slowest: 0, n5: 0, errors5: 0, slowest5: 0, verySlow5: 0, stormMinutes: 0, stormRate: 0, hist: null, ...extra });
+    assert.deepEqual(lines(quiet()), []);
+
+    // 5 and 6. The feedback queue 20 minutes behind and 1,883 inbound jobs 13 minutes late: busy for one tick, behind on the second.
+    const behind = { ...quiet(), queues: [{ name: 'feedback', depth: 158_000, oldestMs: 20 * 60_000 }, { name: 'work', depth: 4_000, oldestMs: 9_000 }, { name: 'feedback-dlq', depth: 0, oldestMs: 0 }],
+      late: [{ class: 'ingest', type: 'mailbox.ingest', pending: 1_883, oldestSeconds: 780 }, { class: 'campaign', type: 'campaign.run', pending: 2, oldestSeconds: 12 }] };
+    assert.deepEqual(lines(behind), [], 'One tick is busy, not behind.');
+    const second = tick(behind);
+    assert.deepEqual(second.findings.map(finding => `${finding.key} ${finding.severity} ${finding.value}: ${finding.words}`),
+      [`queue-behind:feedback critical 1200: ${c('feedback')}: oldest 20 min, 158,000 waiting.`, `jobs-behind:mailbox.ingest critical 780: ${c('mailbox.ingest')}: 1,883 due, oldest 13 min.`]);
+    assert.deepEqual([second.rollup.feedbackLagSeconds, second.rollup.queues.map(q => [q.name, q.behind]), second.rollup.jobs!.map(job => [job.type, job.pending, job.behind])],
+      [1200, [['feedback', true], ['work', false], ['feedback-dlq', false]], [['mailbox.ingest', 1_883, true], ['campaign.run', 2, false]]], 'A deep queue that drains in time is not behind.');
+    // A dead letter alerts at once; a probe that failed leaves its alerts and their streaks alone.
+    const blind = tick({ ...behind, late: null, queues: [...behind.queues.slice(0, 2), { name: 'feedback-dlq', depth: 3, oldestMs: 0 }] });
+    assert.deepEqual([blind.findings.map(finding => finding.key), [...blind.blind], blind.rollup.jobs, blind.rollup.memory.streaks['jobs-behind:mailbox.ingest']], [['queue-behind:feedback', 'dead-letters:feedback-dlq'], ['jobs'], null, 2]);
+    // The safety lane (#619), under the name the cron reads it by: a minute and a half behind for two ticks is critical, and
+    // it is what feedbackLagSeconds reads.
+    memory = emptyMemory();
+    const lane = { ...quiet(), queues: [{ name: 'feedback-priority', depth: 40, oldestMs: 90_000 }] };
+    const laneFirst = lines(lane), laneSecond = tick(lane);
+    assert.deepEqual([laneFirst, laneSecond.findings.map(finding => finding.key + ' ' + finding.severity + ' ' + finding.value), laneSecond.rollup.feedbackLagSeconds], [[], ['queue-behind:feedback-priority critical 90'], 90]);
+    // 24 November: the work queue held 40,100 wake hints, the oldest six hours old, while the jobs were being processed.
+    // A wake queue's depth and age are hints, not work: shown as such and never an alert, for as many ticks as it lasts.
+    // Whether work waits is the jobs table's to say: the same queues with jobs late are jobs-behind, by type.
+    memory = emptyMemory();
+    const hints = { ...quiet(), queues: [{ name: 'work', depth: 40_100, oldestMs: 370 * 60_000 }, { name: 'webhooks', depth: 900, oldestMs: 20 * 60_000 }] };
+    const hinted = [lines(hints), lines(hints), lines(hints)], shown = tick(hints);
+    assert.deepEqual([hinted, shown.findings, shown.rollup.queues], [[[], [], []], [], [{ name: 'work', depth: 40_100, oldestSeconds: 22_200, behind: false, wake: true }, { name: 'webhooks', depth: 900, oldestSeconds: 1_200, behind: false, wake: true }]]);
+    const waiting = { ...hints, late: [{ class: 'ingest', type: 'mailbox.ingest', pending: 3_900, oldestSeconds: 540 }, { class: 'hook', type: 'mailbox.webhook', pending: 50, oldestSeconds: 1_020 }] };
+    assert.deepEqual([lines(waiting), lines(waiting)], [[], [`jobs-behind:mailbox.ingest critical 540: ${c('mailbox.ingest')}: 3,900 due, oldest 9 min.`, `jobs-behind:mailbox.webhook warning 1020: ${c('mailbox.webhook')}: 50 due, oldest 17 min.`]]);
+
+    // 8. 1,639 jobs of one type failed between the 11th and the 23rd and are still kept. Kept is history: it is on the
+    // Health page and is never an alert. Failing now is one: 25 of a type within the hour, five within half an hour, one
+    // campaign job. Customers' webhooks failing and a few of a type are not.
+    memory = emptyMemory();
+    const failed = (staging: number, imports: number) => ({ ...quiet(), failed: [{ type: 'mailbox.recoverStaging', error: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN', failed: 1_600, hour: staging, half: 0 }, { type: 'mailbox.recoverStaging', error: 'JOB_LEASE_EXHAUSTED', failed: 39, hour: 0, half: 0 },
+      { type: 'operation.webhook', error: 'WEBHOOK_HTTP_500', failed: 4_000, hour: 900, half: 500 }, { type: 'mailbox.reconcile', error: 'JOB_INTERNAL_ERROR', failed: 240, hour: 24, half: 4 }, { type: 'campaign.run', error: 'JOB_LEASE_EXHAUSTED', failed: 3, hour: 1, half: 0 },
+      { type: 'audience.import', error: 'IMPORT_FAILED', failed: imports, hour: imports, half: Math.max(0, imports - 2) }] });
+    const history = tick(failed(0, 2)), now1 = c('campaign.run') + ': 1 failed in the last hour, mostly ' + c('JOB_LEASE_EXHAUSTED') + '.';
+    assert.deepEqual([history.findings.map(finding => finding.key + ' ' + finding.severity + ' ' + finding.value + ': ' + finding.words), history.rollup.jobs!.find(job => job.type === 'mailbox.recoverStaging')],
+      [['jobs-failed:campaign.run critical 1: ' + now1], { type: 'mailbox.recoverStaging', pending: 0, oldestSeconds: 0, failed: 1_639, failedLastHour: 0, error: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN', behind: false }]);
+    assert.deepEqual(lines(failed(30, 7)), ['jobs-failed:campaign.run critical 1: ' + now1, 'jobs-failed:mailbox.recoverStaging warning 30: ' + c('mailbox.recoverStaging') + ': 30 failed in the last hour, mostly ' + c('MAILBOX_STAGING_ENVELOPE_UNKNOWN') + '.',
+      'jobs-failed:audience.import warning 7: ' + c('audience.import') + ': 7 failed in the last hour, mostly ' + c('IMPORT_FAILED') + '.']);
+
+    // 4. A first-party campaign of 1.8M releasing 32 a second on an account that allows 160, because the planner reads 40.
+    // What it releases is measured from its cursor and held against the account's rate and the workspace's share, never
+    // against the planner's number: after five minutes its time left is an alert that names all of them, after ten it is
+    // slow. A customer on the shared pool releasing 38 of its 40 is neither; one that releases nothing for five minutes is.
+    memory = emptyMemory();
+    let found: string[] = [];
+    const rates = '20% of the account’s 160/s (entitled to 160/s; the planner reads 40/s)';
+    for (let minute = 0; minute <= 10; minute++) {
+      found = lines({ ...quiet(), campaigns: [campaign('cmp_quartered', { workspaceId: 'ws_first_party', share: 'exempt', expanded: 32 * 60 * minute }), campaign('cmp_stalled', { workspaceId: 'ws_stalled', expanded: 1_800 }),
+        campaign('cmp_paced', { workspaceId: 'ws_paced', expanded: 60 * minute, paced: true }), campaign('cmp_healthy', { expanded: 38 * 60 * minute, total: 400_000, accepted: 37 * 60 * minute })] });
+      if (minute === 4) assert.deepEqual(found, [], 'Four minutes of samples are too few to say how long it takes.');
+      if (minute === 5) assert.deepEqual(found, [`campaign-slow:cmp_stalled critical 0: ${c('cmp_stalled')}: nothing released for 5 min, 0% of the account’s 160/s (entitled to 40/s). 1,798,200 left.`,
+        `campaign-long:cmp_quartered warning 55950: ${c('cmp_quartered')}: 15.5 h left at 32/s, ${rates}. 1,790,400 of 1,800,000 left.`], 'Critical first.');
+    }
+    assert.deepEqual(found.filter(line => line.startsWith('campaign-slow:cmp_quartered')), [`campaign-slow:cmp_quartered warning 32: ${c('cmp_quartered')}: 32/s for 10 min, ${rates}. 1,780,800 left.`]);
+    const healthy = tick({ ...quiet(), campaigns: [campaign('cmp_healthy', { expanded: 38 * 60 * 11, total: 400_000, accepted: 37 * 60 * 11 })] }).rollup.campaigns![0]!;
+    assert.deepEqual([healthy.rate, healthy.acceptedRate, healthy.entitled, healthy.account, healthy.planned, healthy.behind], [38, 37, 40, 160, 40, false]);
+    // An alert means slower than it is entitled to, never slow by choice or by design (review of #628). A delivered-only
+    // resume skipped half its list (each skip moves the cursor and counts in canceled, so it is not subtracted again):
+    // 499,900 left at 5 a second of 160 is slow and long. A campaign whose owner chose a tenth of the rate and runs at
+    // exactly that, a large one at 38 of its 40, two of one workspace sharing its 40, and one with everything released
+    // are not alerts; their time left is still on the page.
+    memory = emptyMemory();
+    const entitledCases = (minute: number): Sample => ({ ...quiet(), campaigns: [
+      campaign('cmp_delivered_only', { workspaceId: 'ws_skips', share: 'exempt', planned: 160, total: 1_000_000, expanded: 500_100 + 300 * minute, canceled: 500_000 }),
+      campaign('cmp_tenth', { workspaceId: 'ws_tenth', total: 150_000, rateShare: 0.1, account: 200, planned: 50, expanded: 300 * minute }),
+      campaign('cmp_large', { workspaceId: 'ws_large', expanded: 38 * 60 * minute }),
+      campaign('cmp_half_a', { workspaceId: 'ws_two', expanded: 19 * 60 * minute }), campaign('cmp_half_b', { workspaceId: 'ws_two', expanded: 19 * 60 * minute }),
+      campaign('cmp_draining', { workspaceId: 'ws_draining', expanded: 1_800_000 })] });
+    for (let minute = 0; minute < 10; minute++) lines(entitledCases(minute));
+    const entitled = tick(entitledCases(10)), skips = '3.1% of the account’s 160/s (entitled to 160/s)';
+    assert.deepEqual(entitled.findings.map(finding => `${finding.key} ${finding.severity} ${finding.value}: ${finding.words}`), [`campaign-slow:cmp_delivered_only warning 5: ${c('cmp_delivered_only')}: 5/s for 10 min, ${skips}. 496,900 left.`,
+      `campaign-long:cmp_delivered_only warning 99380: ${c('cmp_delivered_only')}: 27.6 h left at 5/s, ${skips}. 496,900 of 1,000,000 left.`]);
+    assert.deepEqual(entitled.rollup.campaigns!.map(row => [row.id, row.rate, row.entitled, row.etaSeconds, row.behind]), [['cmp_delivered_only', 5, 160, 99_380, true], ['cmp_tenth', 5, 5, 29_400, false],
+      ['cmp_large', 38, 40, Math.round((1_800_000 - 22_800) / 38), false], ['cmp_half_a', 19, 20, Math.round((1_800_000 - 11_400) / 19), false], ['cmp_half_b', 19, 20, Math.round((1_800_000 - 11_400) / 19), false], ['cmp_draining', 0, 40, null, false]]);
+    // A wait starts the samples over, and is itself an alert once it has lasted fifteen minutes (a daily pace never is).
+    for (let minute = 0; minute < 15; minute++) found = lines({ ...quiet(), campaigns: [campaign('cmp_stalled', { expanded: 1_800, waitingReason: 'hosted_daily_quota', waitingSeconds: 7_200 - 60 * minute }), campaign('cmp_paced', { paced: true, waitingReason: 'pacing_window', waitingSeconds: 3_600 })] });
+    assert.deepEqual([found, memory.campaigns], [[`campaign-waiting:cmp_stalled warning 900: ${c('cmp_stalled')}: ${c('hosted_daily_quota')} for 15 min, 1.8 h to go. 1,798,200 left.`], {}]);
+
+    // 3. Preparing for over five minutes, and the request that took 45 seconds. 2. One page asking 50 times a second.
+    // 1. A read-only database, at its first error. 9. A dispatcher shard whose runs keep failing.
+    memory = emptyMemory();
+    assert.deepEqual(lines({ ...quiet(), campaigns: [campaign('cmp_frozen', { state: 'preparing', prepared: 1_200_000, launchedSeconds: 380 }), campaign('cmp_new', { state: 'preparing', prepared: 0, launchedSeconds: 200 }),
+      campaign('cmp_quarantined', { state: 'paused', pauseCode: 'LIST_QUALITY', pausedSeconds: 120, quarantines: 1, expanded: 500 }), campaign('cmp_by_hand', { state: 'paused', pauseCode: 'PAUSED_BY_USER', pausedSeconds: 120 }),
+      campaign('cmp_last_week', { state: 'paused', pauseCode: 'LIST_QUALITY', pausedSeconds: 90_000 }), campaign('cmp_bouncing', { expanded: 1_800_000, delivered: 11_280, bounced: 720, complained: 2 })],
+      counters: [counter('route', 'POST /v1/campaigns/:id/send', { n: 3, n5: 3, slowest: 45_000, slowest5: 45_000, verySlow5: 1, hist: hist({ 5: 2, [LATENCY_BUCKETS.length]: 1 }) }),
+        counter('route', 'GET /v1/campaigns/:id/stats', { n: 45_000, n5: 15_000, slowest: 40, stormMinutes: 3, stormRate: 3_000, hist: hist({ 1: 45_000 }) }), counter('read', 'ws_fixture', { n: 45_000, n5: 15_000, stormMinutes: 4, stormRate: 3_010 }),
+        counter('route', 'POST /v1/emails/send', { n: 90_000, n5: 30_000, errors: 40, errors5: 40, slowest: 900, stormMinutes: 4, stormRate: 6_000, hist: hist({ 4: 90_000 }) }),
+        counter('code', 'DATABASE_UNAVAILABLE', { n: 40, n5: 40 }), counter('sqlstate', '25006', { n: 40, n5: 40 }), counter('sqlstate', '57014', { n: 4, n5: 4 }), counter('sqlstate', '23505', { n: 900, n5: 300 }),
+        counter('error', 'DISPATCHER_RUN_FAILED', { n: 3, n5: 1 }), counter('error', 'MAILBOX_STAGING_ENVELOPE_UNKNOWN', { n: 9, n5: 6 }), counter('error', 'QUEUE_BACKLOG_ALERT', { n: 15, n5: 5 }), counter('error', 'BILLING_DRIFT', { n: 4, n5: 4 }),
+        counter('error', 'MAILBOX_STAGING_UNDELIVERED', { n: 1, n5: 1 })] }), [
+      `campaign-bounces:cmp_bouncing critical 0.06: ${c('cmp_bouncing')}: 6% bounced and 2 complaints on 12,000 settled.`, `database-errors:25006 critical 40: read-only (${c('25006')}): 40 in 5 min.`,
+      `dispatcher-failing critical 3: 3 failed runs in 15 min, mostly ${c('DISPATCHER_RUN_FAILED')}.`, `errors:MAILBOX_STAGING_UNDELIVERED critical 1: ${c('MAILBOX_STAGING_UNDELIVERED')}: 1 in 5 min.`,
+      `campaign-preparing:cmp_frozen warning 380: ${c('cmp_frozen')}: 6 min, 1,200,000 of 1,800,000 ready.`, `campaign-paused:cmp_quarantined warning 1799500: ${c('cmp_quarantined')} of ${c('ws_fixture')}: ${c('LIST_QUALITY')}, quarantined. 1,799,500 left.`,
+      `slow-requests:POST:/v1/campaigns/:id/send warning 45000: ${c('POST /v1/campaigns/:id/send')}: slowest 45 s, p95 45 s over 3 in 15 min.`, `request-storm:GET:/v1/campaigns/:id/stats warning 3000: ${c('GET /v1/campaigns/:id/stats')}: 3,000 a minute for 3 minutes.`,
+      `request-storm:workspace:ws_fixture warning 3010: workspace ${c('ws_fixture')}: 3,010 reads a minute for 3 minutes.`, `errors:MAILBOX_STAGING_ENVELOPE_UNKNOWN warning 6: ${c('MAILBOX_STAGING_ENVELOPE_UNKNOWN')}: 6 in 5 min.`],
+      'Sending mail at 100 a second is not a storm, 40 errors in 45,000 requests are not an alert, unique violations are not database errors, a line every minute already says is not counted, and mail whose arrival notice was lost (#625) alerts at the first line.');
+    // The same code as a failed job's error: the first job of the hour, critical, and named before the errors that are only kept.
+    memory = emptyMemory();
+    const undelivered = (hour: number) => ({ ...quiet(), failed: [{ type: 'mailbox.recoverStaging', error: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN', failed: 3, hour: 0, half: 0 }, { type: 'mailbox.recoverStaging', error: 'MAILBOX_STAGING_UNDELIVERED', failed: 1, hour, half: hour }] });
+    assert.deepEqual([lines(undelivered(0)), lines(undelivered(1))], [[], [`jobs-failed:mailbox.recoverStaging critical 1: ${c('mailbox.recoverStaging')}: 1 failed in the last hour, mostly ${c('MAILBOX_STAGING_UNDELIVERED')}.`]]);
+    // No key holds a space, so the card's key=value line parses; and what is not an identifier never reaches a card.
+    memory = emptyMemory();
+    assert.deepEqual(lines({ ...quiet(), failed: [{ type: 'reader@example.net <b>', error: 'Subject: hello', failed: 30, hour: 30, half: 30 }] }), [`jobs-failed:other warning 30: ${c('other')}: 30 failed in the last hour, mostly ${c('other')}.`]);
+    // The database: connections near the limit, slow queries and lock waits for two ticks; a transaction open ten minutes; the disk three quarters full.
+    const crowded = { ...quiet(), database: { connections: 85, maxConnections: 100, longTransactions: 2, oldestTransactionSeconds: 660, slowQueries: 4, lockWaits: 12, sizeBytes: 120 * GB } };
+    const always = ['database-transaction warning 660: open 11 min, 2 over a minute.', 'database-disk critical 0.8: 80% of 150 GB.'];
+    assert.deepEqual([lines(crowded), lines(crowded)], [always.toReversed(), ['database-connections critical 85: 85 of 100.', always[1], always[0], 'database-slow-queries warning 4: 4 running over 30 s.', 'database-lock-waits warning 12: 12 sessions waiting on a lock.']]);
+  });
+
+  test('MX health: the tick posts one card when an alert opens, tries a refused card again, reminds, posts a cleared card with the same key and forgets; each card ends with a line a program reads; the Health route reads what the tick wrote, for an operator or a self-hosted dashboard only; without a webhook nothing is posted', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const { healthTick } = await import('./src/health.js'), type = `health.fixture.${unique('t').slice(-8)}`, key = `jobs-failed:${type}`, path = '/v1/operator/health', c = (text: string) => '`' + text + '`';
+      let refuse = false;
+      const posted: Json[] = [], post = async (url: string, card: Json) => { assert.equal(url, OPERATOR_HOOK); if (refuse) throw new Error('Slack answered 500'); posted.push(card); };
+      // This database is shared with the other tests: only this fixture's own job type is asserted on.
+      const mine = () => posted.splice(0).filter(card => String(card.text).includes(type)).map(card => {
+        const [words, machine, ...rest] = String(card.text).split('\n');
+        assert.deepEqual([rest, card.blocks.length, card.blocks[1], card.blocks[0].accessory.url, card.unfurl_links], [[], 2, { type: 'context', elements: [{ type: 'mrkdwn', text: c(machine!), verbatim: true }] }, `${PUBLIC_ORIGIN}/operator?view=health`, false]);
+        return [card.blocks[0].text.text, words, Object.fromEntries(machine!.split(' ').map(pair => [pair.slice(0, pair.indexOf('=')), pair.slice(pair.indexOf('=') + 1)]))];
+      });
+      const tick = (force = true) => healthTick(runtime, { queues: [] }, { post, force });
+      const alert = async () => (await db.query('SELECT kind,severity,value,unit,words,sent_at IS NOT NULL AS sent FROM health_alerts WHERE key=$1', [key])).rows[0];
+      const fail = (n: number, status: string, minutesAgo = 0) => db.query(`INSERT INTO jobs(id,type,workspace_id,payload,status,last_error,available_at) SELECT $1||'-'||g,$2,$3,'{}',$4,CASE WHEN $4='failed' THEN 'FIXTURE_FAILED' END,now()-make_interval(mins=>$5) FROM generate_series(1,$6::int) g`,
+        [unique('job'), type, runtime.config.workspaceId, status, minutesAgo, n]);
+      const recent = (at: string) => Math.abs(Date.now() - Date.parse(at)) < 120_000;
+
+      // Self-hosted, no webhook: the alert is held and listed, and nothing is posted.
+      await fail(30, 'failed');
+      assert.equal(runtime.config.operatorSlackWebhookUrl, undefined);
+      const first = await tick();
+      assert.deepEqual([first.ran, first.cards, posted, await alert()], [true, [], [], { kind: 'jobs-failed', severity: 'warning', value: 30, unit: 'jobs', words: `${c(type)}: 30 failed in the last hour, mostly ${c('FIXTURE_FAILED')}.`, sent: false }]);
+      assert.ok(first.statements <= 36 && first.open >= 1, `A tick is a bounded number of statements (${first.statements}).`);
+      assert.equal((await tick(false)).ran, false, 'One tick a minute, whoever asks: a second one within 45 seconds does nothing.');
+      const page = ok(await local('GET', path)), listed = page.alerts.find((a: Json) => a.key === key);
+      assert.deepEqual([page.delivery, page.stale, typeof page.generatedAt, { ...listed, since: recent(listed.since) }, page.jobs.find((job: Json) => job.type === type), page.database.connections >= 1, 'memory' in page],
+        ['off', false, 'string', { key, kind: 'jobs-failed', label: 'Jobs failed', severity: 'warning', value: 30, unit: 'jobs', words: `${type}: 30 failed in the last hour, mostly FIXTURE_FAILED.`, since: true, sentAt: null, runbook: 'docs/operations.md#jobs-failed' },
+          { type, pending: 0, oldestSeconds: 0, failed: 30, failedLastHour: 30, error: 'FIXTURE_FAILED', behind: true }, true, false]);
+      const apiKey = ok(await local('POST', '/v1/api-keys', { name: 'Not a dashboard', permissions: ['manage'] }), 201); secrets.add(apiKey.secret);
+      error(await request('GET', path, apiKey.secret), 403, 'OPERATOR_REQUIRED');
+
+      // With the webhook: a card Slack refuses is tried again on the next tick, then posted once and not again.
+      runtime.config.operatorSlackWebhookUrl = OPERATOR_HOOK;
+      refuse = true;
+      assert.deepEqual([(await tick()).cards, (await alert()).sent], [[], false]);
+      refuse = false;
+      await tick(); await tick();
+      const opened = mine(), machine = { key, state: 'open', severity: 'warning', value: '30', unit: 'jobs', runbook: 'docs/operations.md#jobs-failed', health: `${PUBLIC_ORIGIN}/operator?view=health` };
+      assert.deepEqual([opened.map(card => [card[0], card[1], { ...card[2], since: recent(card[2].since) }]), (await alert()).sent],
+        [[[`:x: *Jobs failed* ${c(type)}: 30 failed in the last hour, mostly ${c('FIXTURE_FAILED')}.`, `Jobs failed: ${c(type)}: 30 failed in the last hour, mostly ${c('FIXTURE_FAILED')}.`, { ...machine, since: true }]], true]);
+      // A day on it is still open: one reminder, with how long, under the same key and since.
+      await db.query(`UPDATE health_alerts SET since=now()-interval '25 hours',sent_at=now()-interval '25 hours' WHERE key=$1`, [key]);
+      await tick(); await tick();
+      const reminded = mine();
+      assert.deepEqual(reminded.map(card => [card[1], card[2].key, card[2].state, Math.round((Date.now() - Date.parse(card[2].since)) / 3_600_000)]), [[`Jobs failed: ${c(type)}: 30 failed in the last hour, mostly ${c('FIXTURE_FAILED')}. For 25 h.`, key, 'open', 25]]);
+      // Gone for less than three minutes is not a recovery; after three, one cleared card with the same key, and the alert is forgotten.
+      await db.query(`UPDATE jobs SET status='completed' WHERE type=$1`, [type]);
+      await tick();
+      assert.deepEqual([mine(), (await alert()).kind], [[], 'jobs-failed']);
+      await db.query(`UPDATE health_alerts SET seen_at=now()-interval '4 minutes' WHERE key=$1`, [key]);
+      await tick(); await tick();
+      const cleared = mine();
+      assert.deepEqual([cleared.map(card => [card[0], card[1], { ...card[2], since: card[2].since === reminded[0]![2].since, cleared: recent(card[2].cleared) }]), await alert()],
+        [[[`:white_check_mark: *Cleared: Jobs failed* ${c(type)}, after 25 h.`, `Cleared: Jobs failed: ${c(type)}, after 25 h.`, { key, state: 'cleared', severity: 'warning', since: true, cleared: true, runbook: machine.runbook, health: machine.health }]], undefined]);
+
+      // Jobs due 13 minutes ago: behind on the second tick, through the jobs table's own indexes. Jobs due later are not late.
+      await fail(3, 'pending', 13); await fail(5, 'pending', -60);
+      await tick();
+      assert.deepEqual(mine(), []);
+      await tick();
+      assert.deepEqual(mine().map(card => [card[0], card[2].key, card[2].severity, card[2].unit, Number(card[2].value) >= 780]), [[`:hourglass_flowing_sand: *Jobs behind* ${c(type)}: 3 due, oldest 13 min.`, `jobs-behind:${type}`, 'warning', 'seconds', true]]);
+
+      // Campaigns by state (api/tear/campaign-lifecycle): the tick reads the ones that are preparing, sending or paused,
+      // and no draft, scheduled, done, failed or canceled one; a campaign Nightmail paused is an alert, one with
+      // everything released is not behind.
+      const draft = ok(await local('POST', '/v1/campaigns', { name: 'Health states' }), 201), states = ['preparing', 'scheduled', 'sending', 'paused', 'done', 'failed', 'canceled'], review = `${draft.id}_review`;
+      await db.query(`INSERT INTO sending_campaign_reviews(id,workspace_id,campaign_id,revision,draft,content_hash) SELECT $2,workspace_id,id,revision,draft,'fixture' FROM sending_campaigns WHERE id=$1`, [draft.id, review]);
+      // The table's own rules: expanded <= prepared <= total, preparing means not all prepared, done means all released.
+      for (const state of states) await db.query(`INSERT INTO sending_campaigns SELECT (jsonb_populate_record(NULL::sending_campaigns,to_jsonb(c)||jsonb_build_object('id',$2::text,'state',$3::text,'review_id',$4::text,'total',1000,
+        'prepared',CASE WHEN $3='preparing' THEN 400 ELSE 1000 END,'expanded',CASE WHEN $3 IN ('done','sending') THEN 1000 WHEN $3 IN ('preparing','scheduled') THEN 0 ELSE 400 END,
+        'paused_at',CASE WHEN $3='paused' THEN now() END,'pause_reason',CASE WHEN $3='paused' THEN '{"code":"LIST_QUALITY"}'::jsonb END))).* FROM sending_campaigns c WHERE id=$1`, [draft.id, `${draft.id}_${state}`, state, review]);
+      await tick();
+      const measured = ok(await local('GET', path));
+      assert.deepEqual([measured.campaigns.filter((row: Json) => row.id.startsWith(draft.id)).map((row: Json) => [row.id.slice(draft.id.length + 1), row.released, row.waiting, row.behind]).sort(), measured.alerts.filter((a: Json) => a.key.includes(draft.id)).map((a: Json) => [a.key, a.severity, a.value, a.unit])],
+        [[['paused', 400, 'LIST_QUALITY', true], ['preparing', 0, null, false], ['sending', 1000, null, false]], [[`campaign-paused:${draft.id}_paused`, 'warning', 600, 'recipients_left']]]);
+
+      // Hosted: an operator's staff session only (an operator's agent key too: the UI notes test reads it with one).
+      runtime.config.multiTenant = true;
+      await db.query('UPDATE nightmail_sessions SET staff=true WHERE user_id=$1', [manager!.userId]);
+      error(await local('GET', path), 403, 'OPERATOR_REQUIRED');
+      error(await request('GET', path, apiKey.secret), 403, 'OPERATOR_REQUIRED');
+      const { setOperator } = await import('./scripts/set-operator.js');
+      await setOperator(db, [AUTH_SUBJECT, 'operator:read', '--reason', 'Synthetic health reader']);
+      const hosted = ok(await local('GET', path));
+      assert.deepEqual([hosted.delivery, hosted.jobs.find((job: Json) => job.type === type).behind, hosted.alerts.some((a: Json) => a.key === `jobs-behind:${type}`)], ['slack', true, true]);
+      // A hosted tick reads the campaigns' rates from the account and the connection.
+      const last = await tick();
+      assert.deepEqual([last.ran, Array.isArray(ok(await local('GET', path)).campaigns)], [true, true]);
+    });
+  });
+
+  test('MX health: jobs-failed counts the jobs that failed within the hour, by when the runner failed each, never the failed jobs still kept: history opens nothing, three new failures of a code that alerts at its first do, five of any type do, and it clears once the last is an hour old', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const { healthTick } = await import('./src/health.js'), { processJobs, MAX_ATTEMPTS } = await import('./src/jobs.js'), { ApiError } = await import('./src/core.js');
+      const tag = unique('w').slice(-8), staging = 'health.staging.' + tag, other = 'health.other.' + tag, c = (text: string) => '`' + text + '`';
+      // The runner below works on this test's jobs alone.
+      await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
+      runtime.config.operatorSlackWebhookUrl = OPERATOR_HOOK;
+      const posted: Json[] = [], post = async (_url: string, card: Json) => { posted.push(card); };
+      const cards = () => posted.splice(0).map(card => String(card.text).split('\n')[0]!).sort();
+      const tick = () => healthTick(runtime, { queues: [] }, { post, force: true });
+      const open = async () => (await db.query("SELECT key,severity,value,words FROM health_alerts WHERE key LIKE 'jobs-failed:health.%.'||$1 ORDER BY key", [tag])).rows;
+      const row = async (type: string) => { const { type: _, ...rest } = ok(await local('GET', '/v1/operator/health')).jobs.find((job: Json) => job.type === type); return rest; };
+      const enqueue = (type: string, n: number) => db.query("INSERT INTO jobs(id,type,workspace_id,payload) SELECT $1||'-'||g,$2,$3,'{}' FROM generate_series(1,$4::int) g", [unique('job'), type, runtime.config.workspaceId, n]);
+      // What the runner did with them: failed for good, and when (a failed job's available_at).
+      const failedNow = async (type: string) => (await db.query("SELECT last_error,attempts,count(*)::int AS n FROM jobs WHERE type=$1 AND status='failed' AND abs(extract(epoch FROM clock_timestamp()-available_at))<120 GROUP BY 1,2 ORDER BY 1", [type])).rows;
+      const refuse = (code: string) => async () => { throw new ApiError(422, code, 'A refusal that is not retryable fails the job at its first attempt.'); };
+      const run = () => processJobs(runtime, { [staging]: refuse('MAILBOX_STAGING_UNDELIVERED'), [other]: refuse('FIXTURE_FAILED') }, 20, 1);
+
+      // 1. History: 40 jobs that failed between an hour and twelve days ago, and two with a code that alerts at its first
+      // job, two hours ago. Nothing opens and nothing is posted; the Health page says how many are kept.
+      await db.query("INSERT INTO jobs(id,type,workspace_id,payload,status,attempts,last_error,available_at) SELECT $1||'-'||g,$2,$3,'{}','failed',6,CASE WHEN g>40 THEN 'MAILBOX_STAGING_UNDELIVERED' ELSE 'MAILBOX_STAGING_ENVELOPE_UNKNOWN' END," +
+        "now()-CASE WHEN g>40 THEN interval '2 hours' ELSE interval '61 minutes'+(g-1)*interval '7 hours' END FROM generate_series(1,42) g", [unique('job'), staging, runtime.config.workspaceId]);
+      await tick(); await tick();
+      assert.deepEqual([cards(), await open(), await row(staging)], [[], [], { pending: 0, oldestSeconds: 0, failed: 42, failedLastHour: 0, error: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN', behind: false }]);
+
+      // 2. Three more fail now, in the runner, with that code: one critical card, which counts the three and names their error.
+      await enqueue(staging, 3);
+      assert.equal(await run(), 3);
+      assert.deepEqual(await failedNow(staging), [{ last_error: 'MAILBOX_STAGING_UNDELIVERED', attempts: 1, n: 3 }]);
+      await tick(); await tick();
+      const three = c(staging) + ': 3 failed in the last hour, mostly ' + c('MAILBOX_STAGING_UNDELIVERED') + '.';
+      assert.deepEqual([cards(), await open(), await row(staging)], [['Jobs failed: ' + three], [{ key: 'jobs-failed:' + staging, severity: 'critical', value: 3, words: three }],
+        { pending: 0, oldestSeconds: 0, failed: 45, failedLastHour: 3, error: 'MAILBOX_STAGING_UNDELIVERED', behind: true }]);
+
+      // 3. Any other type: four in the hour are not an alert. The fifth, a job whose leases ran out five hours after it
+      // was due, failed now and not five hours ago: five within half an hour is one warning card.
+      await enqueue(other, 4);
+      assert.equal(await run(), 4);
+      await tick(); await tick();
+      assert.deepEqual([cards(), (await open()).length, await failedNow(other)], [[], 1, [{ last_error: 'FIXTURE_FAILED', attempts: 1, n: 4 }]]);
+      await db.query("INSERT INTO jobs(id,type,workspace_id,payload,status,attempts,lease_until,available_at) VALUES($1,$2,$3,'{}','running',$4,now()-interval '1 minute',now()-interval '5 hours')", [unique('job'), other, runtime.config.workspaceId, MAX_ATTEMPTS]);
+      assert.equal(await run(), 0);
+      assert.deepEqual(await failedNow(other), [{ last_error: 'FIXTURE_FAILED', attempts: 1, n: 4 }, { last_error: 'JOB_LEASE_EXHAUSTED', attempts: MAX_ATTEMPTS, n: 1 }]);
+      await tick(); await tick();
+      const five = c(other) + ': 5 failed in the last hour, mostly ' + c('FIXTURE_FAILED') + '.';
+      assert.deepEqual([cards(), (await open()).map(alert => [alert.key, alert.severity, alert.value])], [['Jobs failed: ' + five], [['jobs-failed:' + other, 'warning', 5], ['jobs-failed:' + staging, 'critical', 3]]]);
+
+      // 4. An hour later nothing more has failed: both clear (after the three quiet minutes every alert waits), one
+      // cleared card each, and the Health page still says how many are kept.
+      await db.query("UPDATE jobs SET available_at=available_at-interval '61 minutes' WHERE status='failed'");
+      await tick();
+      assert.deepEqual([cards(), (await open()).length], [[], 2]);
+      await db.query("UPDATE health_alerts SET seen_at=now()-interval '4 minutes' WHERE key LIKE 'jobs-failed:health.%.'||$1", [tag]);
+      await tick(); await tick();
+      const cleared = cards();
+      assert.deepEqual([cleared.map(line => line.slice(0, line.indexOf(', after'))), await open(), await row(staging), await row(other)], [['Cleared: Jobs failed: ' + c(other), 'Cleared: Jobs failed: ' + c(staging)], [],
+        { pending: 0, oldestSeconds: 0, failed: 45, failedLastHour: 0, error: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN', behind: false }, { pending: 0, oldestSeconds: 0, failed: 5, failedLastHour: 0, error: 'FIXTURE_FAILED', behind: false }]);
+    });
+  });
+
+  test('MX health: a locked health table costs a dropped sample within a second or two, never a wait and never a "database refusing" card; a burst posts critical alerts first and one summary for what does not fit; a cleared card Slack refuses is tried again, for a database that refused too', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { healthTick } = await import('./src/health.js'), counters = await import('./src/health-counters.js'), tag = unique('b').slice(-8);
+      runtime.config.operatorSlackWebhookUrl = OPERATOR_HOOK;
+      const posted: Json[] = [];
+      let refuse: (card: Json) => boolean = () => false;
+      const post = async (_url: string, card: Json) => { if (refuse(card)) throw new Error('Slack answered 503'); posted.push(card); };
+      const machine = (card: Json) => Object.fromEntries(String(card.text).split('\n')[1]!.split(' ').map(pair => [pair.slice(0, pair.indexOf('=')), pair.slice(pair.indexOf('=') + 1)]));
+
+      // 1. Another session holds health_minutes and health_state for as long as it likes (a migration, a stuck writer).
+      // The counters' flush gives up after its one-second lock_timeout and drops the sample; the tick cannot claim its
+      // minute and skips it. Neither waits, and a locked health row is not the database refusing.
+      const locker = new pg.Client({ connectionString: FIXTURE_DATABASE_URL });
+      await locker.connect(); cleanup(t, () => locker.end());
+      await locker.query('BEGIN'); await locker.query('LOCK TABLE health_minutes, health_state IN ACCESS EXCLUSIVE MODE');
+      counters.resetCounters();
+      for (let i = 0; i < 30; i++) counters.countRequest({ route: `/v1/locked-${tag}`, method: 'GET', status: 200, durationMs: 4 });
+      const warnings = t.mock.method(console, 'warn', () => {});
+      let started = Date.now();
+      assert.equal(await counters.flushCounters(runtime.db), 0);
+      const flushMs = Date.now() - started;
+      started = Date.now();
+      const skipped = await healthTick(runtime, {}, { post, force: true }), skipMs = Date.now() - started;
+      await locker.query('ROLLBACK');
+      // health_minutes alone: the tick claims its minute, its requests section is unknown, and its rollup write is dropped.
+      await locker.query('BEGIN'); await locker.query('LOCK TABLE health_minutes IN ACCESS EXCLUSIVE MODE');
+      started = Date.now();
+      const dropped = await healthTick(runtime, {}, { post, force: true }), dropMs = Date.now() - started;
+      await locker.query('ROLLBACK');
+      const warned = warnings.mock.calls.map(call => JSON.parse(String(call.arguments[0])).code);
+      warnings.mock.restore();
+      assert.ok(flushMs < 2_500 && skipMs < 2_500 && dropMs < 4_500, `bounded: flush ${flushMs} ms, skipped tick ${skipMs} ms, dropped tick ${dropMs} ms`);
+      assert.deepEqual([skipped.ran, dropped.ran, posted.filter(card => machine(card).key === 'database-refusing'), ['HEALTH_COUNTERS_DROPPED', 'HEALTH_TICK_SKIPPED', 'HEALTH_PROBE_FAILED', 'HEALTH_TICK_FAILED'].filter(code => !warned.includes(code)),
+        (await db.query(`SELECT count(*)::int AS n FROM health_minutes WHERE key LIKE '%'||$1`, [tag])).rows[0].n], [false, true, [], [], 0]);
+
+      // 2. A burst: twelve job types fail at once while the feedback queue is behind. Six cards at most: every critical one
+      // before any warning, then one summary that stands for the rest, and every alert counts as told.
+      await db.query('DELETE FROM health_alerts');
+      const queues = [{ name: 'feedback', depth: 9_000, oldestMs: 400_000 }];
+      await healthTick(runtime, { queues }, { post, force: true });
+      posted.length = 0;
+      for (let n = 1; n <= 12; n++) await db.query(`INSERT INTO jobs(id,type,workspace_id,payload,status,last_error) SELECT $1||'-'||g,$2,$3,'{}','failed','FIXTURE_FAILED' FROM generate_series(1,30) g`, [unique('job'), `health.burst.${tag}.${n}`, runtime.config.workspaceId]);
+      const burst = await healthTick(runtime, { queues }, { post, force: true });
+      const sent = posted.map(machine), severities = sent.map(line => line.severity), last = burst.cards.at(-1)!;
+      assert.ok(sent.length <= 6 && sent.some(line => line.key === 'queue-behind:feedback' && line.severity === 'critical') && severities.lastIndexOf('critical') < (severities.includes('warning') ? severities.indexOf('warning') : Infinity), JSON.stringify(sent.map(line => [line.key, line.severity])));
+      assert.deepEqual([last.key, sent.at(-1)!.key, sent.at(-1)!.state, Number(sent.at(-1)!.count) === last.covers!.length, last.covers!.length >= 8, /^\d+ more alerts: .*\d+ Jobs failed.*\. All of them are on the Health page\.$/.test(String(posted.at(-1)!.text).split('\n')[0]!),
+        (await db.query(`SELECT count(*)::int AS n FROM health_alerts WHERE key LIKE 'jobs-failed:health.burst.'||$1||'.%' AND sent_at IS NOT NULL`, [tag])).rows[0].n], ['summary', 'summary', 'open', true, true, true, 12]);
+      posted.length = 0;
+      await healthTick(runtime, { queues }, { post, force: true });
+      assert.deepEqual(posted.filter(card => String(card.text).includes(tag)), [], 'Nothing is said twice.');
+
+      // 3. Recoveries. Slack refuses the cleared cards on the first tick: the alerts stay held and their cards go out on the
+      // next. The same for a database that refused the tick's write and then answered again while Slack was down.
+      await db.query(`UPDATE jobs SET status='completed' WHERE type LIKE 'health.burst.'||$1||'.%'`, [tag]);
+      await db.query(`UPDATE health_alerts SET seen_at=now()-interval '4 minutes' WHERE key LIKE 'jobs-failed:health.burst.'||$1||'.%'`, [tag]);
+      refuse = card => machine(card).state === 'cleared';
+      await healthTick(runtime, { queues }, { post, force: true });
+      const heldRows = async () => (await db.query(`SELECT count(*)::int AS n FROM health_alerts WHERE key LIKE 'jobs-failed:health.burst.'||$1||'.%'`, [tag])).rows[0].n;
+      assert.deepEqual([posted.filter(card => machine(card).state === 'cleared'), await heldRows()], [[], 12]);
+      refuse = () => false;
+      await healthTick(runtime, { queues }, { post, force: true });
+      const clearedCards = posted.map(machine).filter(line => line.state === 'cleared');
+      assert.ok(clearedCards.length >= 2 && clearedCards.length <= 6 && clearedCards.at(-1)!.key === 'summary' && await heldRows() === 0, JSON.stringify(clearedCards));
+
+      const readOnly = { db: { transaction: async () => { throw Object.assign(new Error('cannot execute UPDATE in a read-only transaction'), { code: '25006' }); } }, config: runtime.config } as never;
+      posted.length = 0;
+      const errors = t.mock.method(console, 'error', () => {});
+      await healthTick(readOnly, {}, { post, force: true }); await healthTick(readOnly, {}, { post, force: true });
+      errors.mock.restore();
+      assert.deepEqual(posted.map(card => [String(card.text).split('\n')[0], machine(card).key, machine(card).state, machine(card).severity]), [['Database refusing: read-only (`25006`): the health tick’s own write was refused.', 'database-refusing', 'open', 'critical']]);
+      refuse = card => machine(card).key === 'database-refusing';
+      posted.length = 0;
+      await healthTick(runtime, { queues }, { post, force: true });
+      assert.deepEqual(posted.filter(card => machine(card).key === 'database-refusing'), []);
+      refuse = () => false;
+      await healthTick(runtime, { queues }, { post, force: true }); await healthTick(runtime, { queues }, { post, force: true });
+      assert.deepEqual(posted.map(machine).filter(line => line.key === 'database-refusing').map(line => [line.state, line.severity, 'value' in line]), [['cleared', 'critical', false]], 'The cleared card is tried again, and goes out once.');
+    });
+  });
+
+  test('MX health: a slow request is always logged whatever the sampling, error lines are counted by code, and the request counters give each route its count, errors and p95 without a log search, by minute and then by hour', async t => {
+    const { log } = await import('./src/log.js'), counters = await import('./src/health-counters.js'), { healthTick } = await import('./src/health.js'), { platformMessage, ApiError } = await import('./src/core.js'), c = (text: string) => '`' + text + '`';
+    // Sampling keeps one success in ten: with the dice against it a quick 200 is dropped, and a slow one is written whole.
+    const lines: Json[] = [];
+    const dice = t.mock.method(Math, 'random', () => 0.99), info = t.mock.method(console, 'info', (line: string) => { lines.push(JSON.parse(line)); });
+    log('info', { event: 'request', route: '/v1/campaigns/:id/send', status: 202, durationMs: 180 });
+    log('info', { event: 'request', route: '/v1/campaigns/:id/send', status: 202, durationMs: 45_210, slow: true });
+    log('info', { operation: 'worker-runtime', status: 202, runtimeMs: 45_300.5 });
+    log('info', { code: 'JOB_COMPLETED', jobMs: 12 }); log('info', { code: 'JOB_COMPLETED', operation: 'campaign.prepare', jobMs: 9_800 });
+    info.mock.restore(); dice.mock.restore();
+    assert.deepEqual(lines.map(line => [line.durationMs ?? line.runtimeMs ?? line.jobMs, line.slow, line.sampleRate]), [[45_210, true, undefined], [45_300.5, undefined, undefined], [9_800, undefined, undefined]]);
+    // Why a platform call failed is logged only when the error is the platform's: never a database error's text, which quotes parameters.
+    assert.deepEqual([platformMessage(new Error('Durable Object storage operation exceeded timeout which caused object to be reset.')), platformMessage(Object.assign(new Error('duplicate key value (reader@example.net)'), { code: '23505' })),
+      platformMessage(new Error('Failed query', { cause: Object.assign(new Error('timeout'), { severity: 'ERROR' }) })), platformMessage(new ApiError(500, 'INTERNAL_ERROR', 'no')), platformMessage('text'),
+      platformMessage(Object.assign(new Error('Email address is not verified: reader@example.net'), { name: 'MessageRejected', $metadata: { httpStatusCode: 400 } }))],
+      ['Durable Object storage operation exceeded timeout which caused object to be reset.', undefined, undefined, undefined, undefined, undefined]);
+
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const tag = unique('r').slice(-8), slowRoute = `GET /v1/fixture-${tag}/:id`, failing = `POST /v1/fixture-${tag}`, workspace = `ws_${tag}`, code = `FIXTURE_${tag.toUpperCase()}_FAILED`;
+      counters.resetCounters();
+      const errorLines = t.mock.method(console, 'error', () => {});
+      const batch = () => {
+        for (let i = 0; i < 38; i++) counters.countRequest({ route: `/v1/fixture-${tag}/:id`, method: 'GET', status: 200, durationMs: 20, workspace });
+        for (let i = 0; i < 2; i++) counters.countRequest({ route: `/v1/fixture-${tag}/:id`, method: 'GET', status: 200, durationMs: 45_000, workspace });
+        for (let i = 0; i < 30; i++) counters.countRequest({ route: `/v1/fixture-${tag}`, method: 'POST', status: 503, durationMs: 3, workspace, code: 'DATABASE_UNAVAILABLE', databaseCode: '25006' });
+        for (let i = 0; i < 3; i++) counters.countRequest({ route: `/v1/fixture-${tag}/:id`, method: 'GET', status: 200, durationMs: 20, workspace: `ws_quiet_${tag}` });
+        // Error lines by code: a job that keeps failing and a dispatcher run that failed. A request's own error line is the 5xx above.
+        for (let i = 0; i < 3; i++) log('error', { code, jobId: 'job_fixture' });
+        log('error', { code: 'DISPATCHER_RUN_FAILED', shard: 'fixture:us-east-2:6/8' }); log('error', { event: 'request', code, status: 500 }); log('warn', { code });
+      };
+      // Two flushes of one minute add up, histogram and all. A workspace under one read a second is not written.
+      batch(); const written = await counters.flushCounters(runtime.db);
+      batch(); assert.equal(await counters.flushCounters(runtime.db), written);
+      errorLines.mock.restore();
+      assert.equal(await counters.flushCounters(runtime.db), 0, 'Nothing counted, nothing written.');
+      const rows = (await db.query(`SELECT kind,key,sum(n)::int AS n,sum(errors)::int AS errors,max(slowest) AS slowest FROM health_minutes WHERE key ILIKE '%'||$1||'%' GROUP BY 1,2 ORDER BY 1,2`, [tag])).rows;
+      assert.deepEqual(rows, [{ kind: 'error', key: code, n: 6, errors: 0, slowest: 0 }, { kind: 'read', key: workspace, n: 80, errors: 0, slowest: 0 },
+        { kind: 'route', key: slowRoute, n: 86, errors: 0, slowest: 45_000 }, { kind: 'route', key: failing, n: 60, errors: 60, slowest: 3 }]);
+      const histOf = async (table: string) => (await db.query(`SELECT (SELECT array_agg(s ORDER BY i) FROM (SELECT i,sum(v)::int AS s FROM ${table} m,unnest(m.hist) WITH ORDINALITY u(v,i) WHERE m.key=$1 GROUP BY i) x) AS hist`, [slowRoute])).rows[0].hist;
+      const hist = await histOf('health_minutes');
+      assert.deepEqual([hist.length, hist[2], hist.at(-1)], [counters.LATENCY_BUCKETS.length + 1, 82, 4]);
+
+      // The tick turns them into the page's routes and error codes, and into cards: the slow route, the database's refusals, the failing job and the dispatcher.
+      runtime.config.operatorSlackWebhookUrl = OPERATOR_HOOK;
+      const posted: string[] = [];
+      for (let i = 0; i < 6 && !(posted.some(text => text.includes('database-errors:25006')) && posted.some(text => text.includes(`errors:${code}`))); i++) await healthTick(runtime, {}, { force: true, post: async (_url, card) => { posted.push(card.text); } });
+      const page = ok(await local('GET', '/v1/operator/health'));
+      assert.deepEqual(page.routes.filter((route: Json) => route.route.includes(tag)), [{ route: slowRoute, count: 86, errors: 0, p50Ms: 25, p95Ms: 25, slowestMs: 45_000, behind: true }, { route: failing, count: 60, errors: 60, p50Ms: 3, p95Ms: 3, slowestMs: 3, behind: false }]);
+      assert.ok(page.errors.some((e: Json) => e.kind === 'sqlstate' && e.code === '25006' && e.count >= 60) && page.errors.some((e: Json) => e.kind === 'error' && e.code === code && e.count === 6) && page.requests.errors >= 60, JSON.stringify(page.errors));
+      const words = posted.map(text => text.split('\n')[0]!), keys = posted.map(text => / ?key=(\S+) state=open /.exec(text.split('\n')[1]!)?.[1]);
+      assert.ok(words.includes(`Slow requests: ${c(slowRoute)}: slowest 45 s, p95 25 ms over 86 in 15 min.`) && keys.includes(`slow-requests:GET:/v1/fixture-${tag}/:id`), posted.join('\n'));
+      assert.ok(words.includes(`Errors: ${c(code)}: 6 in 5 min.`) && words.some(line => /^Database errors: read-only \(`25006`\): \d+ in 5 min\.$/.test(line)) && words.some(line => /^Server errors: \d[\d,]* of \d[\d,]* requests in 5 min \([\d.]+%\), mostly `DATABASE_UNAVAILABLE`\.$/.test(line)), posted.join('\n'));
+
+      // Minutes older than two hours fold into their hour, once, and are gone from the minutes: the p95 outlives the logs.
+      await db.query(`UPDATE health_minutes SET minute=date_trunc('hour',now())-interval '3 hours 20 minutes' WHERE key ILIKE '%'||$1||'%'`, [tag]);
+      await healthTick(runtime, {}, { force: true, post: async () => {} });
+      const folded = (await db.query(`SELECT kind,key,n::int,errors::int,slowest,hour=date_trunc('hour',now())-interval '4 hours' AS hour FROM health_hours WHERE key ILIKE '%'||$1||'%' ORDER BY 1,2`, [tag])).rows;
+      assert.deepEqual([folded, (await db.query(`SELECT count(*)::int AS n FROM health_minutes WHERE key ILIKE '%'||$1||'%'`, [tag])).rows[0].n, (await histOf('health_hours')).at(-1)],
+        [[{ kind: 'error', key: code, n: 6, errors: 0, slowest: 0, hour: true }, { kind: 'route', key: slowRoute, n: 86, errors: 0, slowest: 45_000, hour: true }, { kind: 'route', key: failing, n: 60, errors: 60, slowest: 3, hour: true }], 0, 4]);
+    });
+  });
+
   test('SDK responses preserve acceptance, rejection, throttling and timeout semantics without network', async t => {
     const [{ SESv2Client, SendEmailCommand, GetAccountCommand }, { createSimulatedSesHandler }] = await Promise.all([
       import('@aws-sdk/client-sesv2'), import('./src/adapters/simulated-ses.js'),
@@ -33605,6 +36185,87 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  test('memory budget and fair pools reclaim abandoned holds by deadline without relying on the dead caller',async t=>{
+    const [{MEMORY_LIMITS,memoryInUse,memoryStats,reserveMemory},{READ_POOL_LIMITS,createFairPool}]=await Promise.all([import('./src/isolate-memory.js'),import('./src/read-bounds.js')]);
+    const prevIdle=MEMORY_LIMITS.defaultIdleMs,prevMax=MEMORY_LIMITS.defaultMaxMs,prevConfirm=MEMORY_LIMITS.confirmMs;
+    const prevPoolIdle=READ_POOL_LIMITS.defaultIdleMs,prevPoolMax=READ_POOL_LIMITS.defaultMaxMs;
+    try {
+      // Simulate a holder whose request context was cancelled and never ran finally/cancel/timers.
+      const beforeReclaimed=memoryStats().reclaimedTotal;
+      let reclaimHookCalled=0;
+      const dead=await reserveMemory(64*1024*1024,{route:'attachment.download',workspaceId:'ws_dead',idleMs:60,maxMs:200,onReclaim:()=>{reclaimHookCalled++;}});
+      assert.equal(memoryInUse(),64*1024*1024);
+      // A live waiter from another workspace wakes automatically once the dead hold crosses its idle deadline.
+      const t0=Date.now();
+      const live=await reserveMemory(8*1024*1024,{route:'attachment.download',workspaceId:'ws_live',idleMs:5000,maxMs:10000});
+      assert.ok(Date.now()-t0>=45,'Live waiter waited until the dead hold expired.');
+      assert.equal(dead.released,true);
+      assert.equal(reclaimHookCalled,1);
+      assert.ok(memoryStats().reclaimedTotal>beforeReclaimed);
+      // A late release from the dead holder is a strict no-op and never underflows memoryInUse().
+      dead.release();
+      assert.equal(memoryInUse(),8*1024*1024);
+      // touch() extends the idle deadline up to hardDeadlineAt, but never past hardDeadlineAt.
+      const hardHold=await reserveMemory(56*1024*1024,{route:'template.asset',workspaceId:'ws_hard',idleMs:80,maxMs:150});
+      await new Promise(r=>setTimeout(r,50));
+      hardHold.touch();
+      await new Promise(r=>setTimeout(r,50));
+      assert.equal(hardHold.released,false,'touch() kept hold alive before hard cap.');
+      await new Promise(r=>setTimeout(r,80));
+      assert.equal(memoryInUse(),8*1024*1024,'hardDeadlineAt reclaimed hold despite touch().');
+      assert.equal(hardHold.released,true);
+      hardHold.release();
+      live.release();
+      assert.equal(memoryInUse(),0);
+
+      // Same self-reclamation guarantee on FairPool slots (dead holder never calls release()).
+      const pool=createFairPool({name:'test-reclaim',maxActive:1,maxPerWorkspace:1,maxWaitingPerWorkspace:2,maxWaitingTotal:4});
+      const deadSlot=await pool.acquire('ws_a',undefined,{route:'import.read',idleMs:60,maxMs:200,busyCode:'BUSY',busyMessage:'busy',wsBusyCode:'WS_BUSY',wsBusyMessage:'ws busy'});
+      const liveSlot=await pool.acquire('ws_b',undefined,{route:'import.read',idleMs:5000,maxMs:10000,busyCode:'BUSY',busyMessage:'busy',wsBusyCode:'WS_BUSY',wsBusyMessage:'ws busy'});
+      assert.equal(deadSlot.released,true);
+      assert.equal(pool.stats().active,1);
+      assert.ok(pool.stats().reclaimedTotal>=1);
+      deadSlot.release();
+      assert.equal(pool.stats().active,1,'Late release after reclaim must not decrement active.');
+      liveSlot.release();
+      assert.equal(pool.stats().active,0);
+
+      // Two different workspaces authenticating via inbox keys (mailboxAccess, no actor) must get independent shares,
+      // and a caller with no workspace ID must be refused rather than sharing a fallback bucket.
+      const { withBoundedRead, resolveReadWorkspaceId } = await import('./src/read-bounds.js');
+      const fakeCtx = (vars: Record<string, unknown>) => ({
+        get: (k: string) => vars[k],
+        header: () => {},
+        req: { raw: new Request('http://127.0.0.1/v1/inboxes/inb_1/messages') },
+      }) as unknown as import('./src/core.js').Ctx;
+      assert.throws(() => resolveReadWorkspaceId(fakeCtx({})), (err: any) => err?.status === 401 && err?.code === 'AUTH_REQUIRED');
+      assert.throws(() => resolveReadWorkspaceId(fakeCtx({ actor: { workspaceId: '' } })), (err: any) => err?.status === 401 && err?.code === 'AUTH_REQUIRED');
+      const inbA = fakeCtx({ mailboxAccess: { workspaceId: 'ws_inb_a', keyId: 'k_a', admin: false, mailboxIds: ['inb_a'], permissions: ['read'] } });
+      const inbB = fakeCtx({ mailboxAccess: { workspaceId: 'ws_inb_b', keyId: 'k_b', admin: false, mailboxIds: ['inb_b'], permissions: ['read'] } });
+      assert.equal(resolveReadWorkspaceId(inbA), 'ws_inb_a');
+      assert.equal(resolveReadWorkspaceId(inbB), 'ws_inb_b');
+      const gates: Array<() => void> = [];
+      const holdA = () => withBoundedRead(inbA, () => new Promise<string>(resolve => { gates.push(() => resolve('a')); }), { route: 'inbox.read' });
+      const activeA = [holdA(), holdA()]; // saturates ws_inb_a's 2 active slots
+      await new Promise(r => setTimeout(r, 20));
+      const queuedA = [holdA(), holdA(), holdA(), holdA()]; // saturates ws_inb_a's 4 waiting slots
+      await new Promise(r => setTimeout(r, 20));
+      await assert.rejects(() => holdA(), (err: any) => err?.status === 429 && err?.code === 'READ_CONCURRENCY_LIMIT', '7th inbox-key read from ws_inb_a must get 429.');
+      // Another workspace's inbox-key read must succeed immediately without sharing ws_inb_a's slots.
+      const resB = await withBoundedRead(inbB, async () => 'ok-b', { route: 'inbox.read' });
+      assert.equal(resB, 'ok-b', 'Inbox-key reads from ws_inb_b must not share slots with ws_inb_a.');
+      while (gates.length) {
+        const releaseAll = gates.splice(0);
+        for (const fn of releaseAll) fn();
+        await new Promise(r => setTimeout(r, 10));
+      }
+      await Promise.all([...activeA, ...queuedA]);
+    } finally {
+      MEMORY_LIMITS.defaultIdleMs=prevIdle;MEMORY_LIMITS.defaultMaxMs=prevMax;MEMORY_LIMITS.confirmMs=prevConfirm;
+      READ_POOL_LIMITS.defaultIdleMs=prevPoolIdle;READ_POOL_LIMITS.defaultMaxMs=prevPoolMax;
+    }
+  });
+
   test('missing immutable attachment stops after five preflights without any SES attempt',async t=>{
     await simulatedSesFixture(t,async({runtime,db,local,run})=>{
       runtime.storage={put:async()=>{},get:async()=>null,delete:async()=>{}};
@@ -34141,34 +36802,317 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         return body;
       };
       await run('campaign.run');
-      const first = await view(), cached = nonzero(first.counts);
-      assert.deepEqual(cached, { total: 400, byStatus: { queued: 400 } });
-      assert.deepEqual(cached, nonzero(await truth()));
+      const first = await view();
+      assert.deepEqual(nonzero(first.counts), { total: 400, byStatus: { queued: 400 } });
+      assert.deepEqual(nonzero(first.counts), nonzero(await truth()));
       await run('email.dispatch');
       const dispatched = await view();
+      assert.deepEqual(nonzero(dispatched.counts), nonzero(await truth()), 'Tallies stay exact at read time after dispatch.');
       await run('campaign.run');
       const released = await view(), more = [await view(), await view()];
-      assert.equal(released.delivery.expanded, total, 'Release reached the end while the counts were reused.');
-      for (const body of [dispatched, released, ...more]) {
+      assert.equal(released.delivery.expanded, total);
+      const afterRelease = nonzero(await truth());
+      for (const body of [released, ...more]) {
         assert.equal(body.state, 'sending');
-        assert.deepEqual(nonzero(body.counts), cached, 'Counts are reused within the window.');
+        assert.deepEqual(nonzero(body.counts), afterRelease, 'Every poll reads exact counts from sending_campaign_tallies.');
       }
-      assert.notDeepEqual(nonzero(await truth()), cached);
-      assert.equal(counted(), 1, `${polls} polls inside one ${window} s window count recipients once.`);
-      // Past the window the next read counts again.
-      const real = Date.now.bind(Date), skew = t.mock.method(Date, 'now', () => real() + (window + 1) * 1000);
-      let expired; try { expired = await view(); } finally { skew.mock.restore(); }
-      assert.equal(counted(), 2);
-      assert.equal(expired.state, 'sending');
-      assert.deepEqual(nonzero(expired.counts), nonzero(await truth()));
-      // Drain it: once done the counts are exact at once, inside the window of the entry just cached.
+      assert.equal(counted(), 0, `${polls} polls never scan sending_emails.`);
+      // Drain it: once done the counts stay exact with zero scans of sending_emails.
       for (let i = 0; i < 10 && (await cursors()).state !== 'done'; i++) await run('email.dispatch');
-      const before = counted(), done = await view(), again = await view(), exact = nonzero(await truth());
+      const done = await view(), again = await view(), exact = nonzero(await truth());
       assert.equal(done.state, 'done');
       assert.equal(exact.total, tail);
       assert.deepEqual([nonzero(done.counts), nonzero(again.counts)], [exact, exact], 'A finished campaign reports exact counts immediately.');
-      assert.equal(counted(), before + 2, 'A finished campaign is never served from the cache.');
-      t.diagnostic(`${polls} detail polls, ${counted()} count statements`);
+      assert.equal(counted(), 0, 'A finished campaign reads tallies without scanning sending_emails.');
+      // Unused window variable check preserved for reference: fallback uses CAMPAIGN_PROGRESS_CACHE_SECONDS.
+      assert.ok(window > 0);
+      t.diagnostic(`${polls} detail polls, ${counted()} sending_emails scans`);
+    });
+  });
+
+  test('sending tallies: exact campaign & hourly metrics at read time, bounded fold + alert, daily recount drift detection, one-statement undo fallback and 10s high-volume cache bucket', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, request, run, db }) => {
+      const { foldSendingTallies, recountSendingTallies, talliesEnabled, UNFOLDED_ALERT_THRESHOLD } = await import('./src/sending-tallies.js');
+      const { dashboardRevision, DASHBOARD_ACTIVE_SEND_HOUR_THRESHOLD } = await import('./src/dashboard-cache.js');
+      const wid = runtime.config.workspaceId;
+      const key = ok(await local('POST', '/v1/api-keys', { name: unique('tally-key'), permissions: ['read', 'send', 'manage'] }), 201).secret;
+      assert.equal(await talliesEnabled(runtime.db), true);
+
+      // 1. Seed emails across two non-hour-aligned windows + two streams + campaign + direct, verify /v1/metrics matches
+      // live sending_emails bit-for-bit across day/hour granularities and include=previous,streams.
+      const cid = ok(await local('POST', '/v1/campaigns', { name: 'Tallies' }), 201).id;
+      const rev = unique('rev');
+      await db.query("UPDATE sending_campaigns SET state='sending',review_id=$2,actor_key_id='fixture',total=12,prepared=12,expanded=12 WHERE id=$1", [cid, rev]);
+      const baseMs = Math.floor(Date.now() / 3_600_000) * 3_600_000;
+      const at = (offsetMs: number) => new Date(baseMs + offsetMs).toISOString();
+      // Previous window & edge-hour emails + current window emails (marketing campaign + transactional direct)
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,campaign_id,review_id,review_ordinal,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,created_at)
+        VALUES
+          ('t_m1',$1,$3,'fixture',$2,$4,1,'n@e.com','["a@e.com"]','[]','[]','S','{"kind":"marketing"}',false,'delivered','p1',$5),
+          ('t_m2',$1,$3,'fixture',$2,$4,2,'n@e.com','["b@e.com"]','[]','[]','S','{"kind":"marketing"}',false,'bounced','p2',$6),
+          ('t_m3',$1,$3,'fixture',$2,$4,3,'n@e.com','["c@e.com"]','[]','[]','S','{"kind":"marketing"}',false,'accepted','p3',$7),
+          ('t_m4',$1,$3,'fixture',$2,$4,4,'n@e.com','["d@e.com"]','[]','[]','S','{"kind":"marketing"}',false,'queued',NULL,$8),
+          ('t_tx1',$1,$3,'fixture',NULL,NULL,NULL,'t@e.com','["e@e.com"]','[]','[]','T','{"kind":"transactional"}',false,'delivered','p4',$6),
+          ('t_tx2',$1,$3,'fixture',NULL,NULL,NULL,'t@e.com','["f@e.com"]','[]','[]','T','{"kind":"transactional"}',false,'delivered','p5',$7)`,
+        [wid, cid, REGION, rev, at(-7_200_000 + 1_200_000), at(-3_600_000 + 600_000), at(-3_600_000 + 2_400_000), at(300_000)]);
+      await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated) VALUES
+        ('te_1',$1,'t_m1','open',false), ('te_2',$1,'t_m1','click',false), ('te_3',$1,'t_tx1','open',false)`, [wid]);
+
+      // Mid-hour boundaries exercising both left edge (inside hour -1) and right edge (now, empty tail -> zero raw scan)
+      const qFrom = at(-3_600_000 + 1_800_000), qTo = new Date(Date.now() + 1_000).toISOString();
+      const metricsPath = `/v1/metrics?from=${encodeURIComponent(qFrom)}&to=${encodeURIComponent(qTo)}&granularity=hour&include=previous,streams`;
+      const viaTallies = ok(await request('GET', metricsPath, key));
+      const detailViaTallies = ok(await request('GET', `/v1/campaigns/${cid}`, key));
+      const statsViaTallies = ok(await request('GET', `/v1/campaigns/${cid}/stats`, key));
+
+      // 2. Emergency one-statement undo: disabling triggers immediately falls back to live queries, producing exact same answers!
+      await db.query('ALTER TABLE sending_emails DISABLE TRIGGER sending_tally_insert, DISABLE TRIGGER sending_tally_update, DISABLE TRIGGER sending_tally_delete');
+      assert.equal(await talliesEnabled(runtime.db), false);
+      const viaLive = ok(await request('GET', metricsPath, key));
+      const detailViaLive = ok(await request('GET', `/v1/campaigns/${cid}`, key));
+      const statsViaLive = ok(await request('GET', `/v1/campaigns/${cid}/stats`, key));
+      assert.deepEqual(viaTallies, viaLive, 'Hourly metrics rollup + partial edge split equals live scan.');
+      assert.deepEqual(detailViaTallies.counts, detailViaLive.counts, 'Campaign detail tally equals live scan.');
+      assert.deepEqual({ counts: statsViaTallies.counts, totals: statsViaTallies.totals, rates: statsViaTallies.rates },
+        { counts: statsViaLive.counts, totals: statsViaLive.totals, rates: statsViaLive.rates }, 'Campaign stats tally equals live scan.');
+      await db.query('ALTER TABLE sending_emails ENABLE TRIGGER sending_tally_insert, ENABLE TRIGGER sending_tally_update, ENABLE TRIGGER sending_tally_delete');
+      assert.equal(await talliesEnabled(runtime.db), true);
+
+      // 2b. Record real feedback sequences (bounce without bounceType, validation_suppressed without bounceSubType,
+      // duplicate delivery_delay, and delivery_delay followed by delivery) via recordEmailEvent and verify tallies
+      // match raw sending_email_events semantics (no spurious deliveryDelayed from operation_events's ELSE 129) and
+      // reconcile produces 0 drift.
+      const { recordEmailEvent } = await import('./src/sending.js');
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,campaign_id,review_id,review_ordinal,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,created_at) VALUES
+        ('t_seq_bnc',$1,$3,'fixture',$2,$4,5,'n@e.com','["s1@e.com"]','[]','[]','S','{"kind":"marketing"}',false,'bounced','ps1',$5),
+        ('t_seq_val',$1,$3,'fixture',$2,$4,6,'n@e.com','["s2@e.com"]','[]','[]','S','{"kind":"marketing"}',false,'sent','ps2',$5),
+        ('t_seq_dly',$1,$3,'fixture',$2,$4,7,'n@e.com','["s3@e.com"]','[]','[]','S','{"kind":"marketing"}',false,'accepted','ps3',$5)`,
+        [wid, cid, REGION, rev, at(400_000)]);
+      await recordEmailEvent(runtime, { workspaceId: wid, emailId: 't_seq_bnc', type: 'bounce', externalId: unique('seq'), data: { synthetic: true } });
+      await recordEmailEvent(runtime, { workspaceId: wid, emailId: 't_seq_val', type: 'validation_suppressed', externalId: unique('seq'), data: { synthetic: true } });
+      await recordEmailEvent(runtime, { workspaceId: wid, emailId: 't_seq_dly', type: 'delivery_delay', externalId: unique('seq'), data: { synthetic: true } });
+      await recordEmailEvent(runtime, { workspaceId: wid, emailId: 't_seq_dly', type: 'delivery_delay', externalId: unique('seq'), data: { synthetic: true } });
+      await recordEmailEvent(runtime, { workspaceId: wid, emailId: 't_seq_dly', type: 'delivery', externalId: unique('seq'), data: { synthetic: true } });
+      const seqStats = ok(await request('GET', `/v1/campaigns/${cid}/stats`, key));
+      assert.equal(seqStats.totals.deliveryDelayed, 1, 'Only t_seq_dly counts as deliveryDelayed (once across duplicate delays + delivery); bounce and validation_suppressed never set deliveryDelayed.');
+      assert.equal(seqStats.totals.bounced, 2, 't_m2 and t_seq_bnc bounced; validation_suppressed did not.');
+      assert.equal(seqStats.totals.delivered, 2, 't_m1 and t_seq_dly delivered.');
+      assert.equal((await db.query('SELECT * FROM reconcile_sending_campaign_tallies($1,$2)', [wid, cid])).rowCount, 0, 'Zero tally drift after bounce/validation_suppressed/duplicate-delay/delivery sequence.');
+
+      // 3. Cancel inFlight reads sending_campaign_tallies without scanning sending_emails.
+      const cancelRes = ok(await local('POST', `/v1/campaigns/${cid}/cancel`, {}));
+      assert.equal(cancelRes.inFlight, 3, 't_m1 (delivered), t_m3 (accepted) and t_seq_dly (delivered) are inFlight; t_m4 (queued) canceled.');
+
+      // 4. Bounded folding collapses delta rows and logs SENDING_TALLIES_UNFOLDED_HIGH when above threshold.
+      await db.query(`INSERT INTO sending_campaign_tallies(workspace_id,campaign_id,status,simulated,email_count)
+        SELECT $1,$2,'delivered',false,CASE WHEN n%2=0 THEN 1 ELSE -1 END FROM generate_series(1,10) n`, [wid, cid]);
+      const beforeFold = Number((await db.query('SELECT count(*) AS n FROM sending_campaign_tallies WHERE workspace_id=$1 AND campaign_id=$2', [wid, cid])).rows[0].n);
+      assert.ok(beforeFold > 4);
+      const folded = await foldSendingTallies(runtime);
+      assert.ok(folded.campaignRemoved > 0);
+      const afterFold = Number((await db.query('SELECT count(*) AS n FROM sending_campaign_tallies WHERE workspace_id=$1 AND campaign_id=$2', [wid, cid])).rows[0].n);
+      assert.equal(afterFold, 5, 'Fold collapsed all repeated delta rows to one per (status, simulated): delivered, bounced, accepted, canceled, suppressed.');
+      assert.equal(folded.campaignUnfolded, 0);
+      assert.ok(UNFOLDED_ALERT_THRESHOLD > 0);
+
+      // 5. Daily exact recount detects injected drift, fixes it in one snapshot, and logs *_DRIFT at error level.
+      await db.query(`INSERT INTO sending_campaign_tallies(workspace_id,campaign_id,status,simulated,email_count) VALUES ($1,$2,'delivered',false,7)`, [wid, cid]);
+      await db.query(`INSERT INTO sending_metrics_hourly(workspace_id,region,kind,hour,emails) VALUES ($1,$2,'marketing',date_trunc('hour',now(),'UTC'),5)`, [wid, REGION]);
+      const errors: string[] = [];
+      const errSpy = t.mock.method(console, 'error', (...args: unknown[]) => { errors.push(String(args[0])); });
+      try {
+        await db.query("DELETE FROM job_schedule WHERE workspace_id='maintenance:sending-tallies'");
+        const recounted = await recountSendingTallies(runtime);
+        assert.ok(recounted.campaignsCorrected >= 1);
+        assert.ok(recounted.workspacesCorrected >= 1);
+      } finally { errSpy.mock.restore(); }
+      assert.ok(errors.some(line => line.includes('CAMPAIGN_TALLIES_DRIFT')), 'Logs CAMPAIGN_TALLIES_DRIFT at error level.');
+      assert.ok(errors.some(line => line.includes('METRICS_HOURLY_DRIFT')), 'Logs METRICS_HOURLY_DRIFT at error level.');
+      // Re-running reconcile produces zero diffs now; raw event_outcomes bit check also finds 0 mismatches.
+      assert.equal((await db.query('SELECT * FROM reconcile_sending_campaign_tallies($1,$2)', [wid, cid])).rowCount, 0);
+      assert.equal((await db.query('SELECT * FROM reconcile_sending_metrics_hourly($1)', [wid])).rowCount, 0);
+      assert.equal(Number((await db.query('SELECT emails_with_other_bits FROM check_sending_event_outcome_bits($1)', [wid])).rows[0].emails_with_other_bits), 0);
+      // Plant a mis-stamped event_outcomes bit (as old migration 088 did) and confirm daily recount logs SENDING_EVENT_OUTCOMES_DRIFT loudly!
+      await db.query("UPDATE sending_emails SET event_outcomes = event_outcomes | 128 WHERE workspace_id=$1 AND id='t_seq_bnc'", [wid]);
+      const bitErrors: string[] = [];
+      const bitSpy = t.mock.method(console, 'error', (...args: unknown[]) => { bitErrors.push(String(args[0])); });
+      try {
+        await db.query("DELETE FROM job_schedule WHERE workspace_id='maintenance:sending-tallies'");
+        const res = await recountSendingTallies(runtime);
+        assert.equal(res.outcomeBitsDrifted, 1);
+      } finally { bitSpy.mock.restore(); }
+      assert.ok(bitErrors.some(line => line.includes('SENDING_EVENT_OUTCOMES_DRIFT')), 'Logs SENDING_EVENT_OUTCOMES_DRIFT when event_outcomes disagrees with raw events.');
+
+      // 6. High-volume dashboard cache revision quantizes to 10-second buckets above 500 emails/hour.
+      const quietRev = await dashboardRevision(runtime, wid);
+      assert.ok(!quietRev.startsWith('bucket:'), 'Quiet workspace keeps exact per-email revision.');
+      await db.query(`INSERT INTO sending_metrics_hourly(workspace_id,region,kind,hour,emails) VALUES ($1,$2,'marketing',date_trunc('hour',now(),'UTC'),$3)`, [wid, REGION, DASHBOARD_ACTIVE_SEND_HOUR_THRESHOLD]);
+      const busyRev = await dashboardRevision(runtime, wid);
+      assert.match(busyRev, /^bucket:\d+$/, 'High-volume hour quantizes Overview cache revision to 10-second buckets.');
+    });
+  });
+
+  test('feedback throughput: priority routing, cross-queue duplicates, concurrent out-of-order safety, exact tallies and priority-only lag hold', async t => {
+    const { feedbackSink, isPriorityFeedback, settleFeedbackBatch, feedbackMac, batchFirstDeliveryLag, metricsEffectiveLagMs } = await import('./src/adapters/feedback-queue.js');
+    const { ingestRoutineSesEvents, recordFeedbackLag, FEEDBACK_LAG_HOLD_MS, FEEDBACK_LAG_MIN_DEPTH } = await import('./src/sending.js');
+    // B6: retried messages (attempts > 1) and tiny metric backlogs (< FEEDBACK_LAG_MIN_DEPTH) never trigger lag holds.
+    const t0 = Date.now();
+    assert.equal(batchFirstDeliveryLag([{ attempts: 5, timestamp: new Date(t0 - 450_000) }], t0), null, 'Retry-only batch returns null lag');
+    assert.deepEqual(batchFirstDeliveryLag([{ attempts: 5, timestamp: new Date(t0 - 450_000) }, { attempts: 1, timestamp: new Date(t0 - 2_000) }], t0), { count: 1, oldestMs: 2_000 }, 'First-delivery lag ignores 450s retry');
+    assert.deepEqual(batchFirstDeliveryLag([{ attempts: 1, timestamp: new Date(t0 - 360_000) }], t0), { count: 1, oldestMs: 360_000 }, 'Genuine delayed first delivery reports 360s lag');
+    assert.equal(metricsEffectiveLagMs(FEEDBACK_LAG_MIN_DEPTH - 1, new Date(t0 - 450_000), FEEDBACK_LAG_MIN_DEPTH, t0), 0, 'Metrics depth below floor reports 0 lag');
+    assert.equal(metricsEffectiveLagMs(FEEDBACK_LAG_MIN_DEPTH, new Date(t0 - 450_000), FEEDBACK_LAG_MIN_DEPTH, t0), 450_000, 'Metrics depth at/above floor reports real lag');
+    const secret = '0'.repeat(64);
+    const routineSent: unknown[] = [], prioritySent: unknown[] = [];
+    const mkQ = (out: unknown[]) => ({ sendBatch: async (batch: { body: unknown }[]) => { out.push(...batch.map(b => b.body)); } }) as unknown as Queue<import('./src/core.js').FeedbackItem>;
+    const sampleItems: import('./src/core.js').FeedbackItem[] = [
+      { region: REGION, topicArn: 'urn:t', messageId: 'm1', message: { eventType: 'Delivery' } },
+      { region: REGION, topicArn: 'urn:t', messageId: 'm2', message: { eventType: 'Open' } },
+      { region: REGION, topicArn: 'urn:t', messageId: 'm3', message: { eventType: 'Click' } },
+      { region: REGION, topicArn: 'urn:t', messageId: 'm4', message: { eventType: 'Bounce' } },
+      { region: REGION, topicArn: 'urn:t', messageId: 'm5', message: { eventType: 'Complaint' } },
+      { region: REGION, topicArn: 'urn:t', messageId: 'm6', message: { eventType: 'Reject' } },
+      { region: REGION, topicArn: 'urn:t', messageId: 'm7', message: { eventType: 'RenderingFailure' } },
+      { region: REGION, topicArn: 'urn:t', messageId: 'm8', message: { eventType: 'Subscription' } },
+      { region: REGION, topicArn: 'urn:t', messageId: 'm9', message: { source: 'aws.ses', 'detail-type': 'SES Tenant' } },
+    ];
+    assert.deepEqual(sampleItems.map(isPriorityFeedback), [false, false, false, true, true, true, true, true, true]);
+    await feedbackSink(mkQ(routineSent), secret, mkQ(prioritySent)).enqueue(sampleItems);
+    assert.equal(routineSent.length, 3);
+    assert.equal(prioritySent.length, 6);
+    const fallbackOut: unknown[] = [];
+    await feedbackSink(mkQ(fallbackOut), secret).enqueue(sampleItems);
+    assert.equal(fallbackOut.length, 9);
+    let acked = 0, archived = 0;
+    const goodItem = { ...sampleItems[3]!, mac: feedbackMac(secret, sampleItems[3]!) };
+    const forgedItem = { ...sampleItems[3]!, mac: 'x'.repeat(43) };
+    const settled = await settleFeedbackBatch({
+      secrets: { authSecret: secret }, lane: 'priority', sourceQueue: 'fixture-priority',
+      messages: [
+        { id: '1', attempts: 1, timestamp: new Date(), body: goodItem, ack: () => { acked++; }, retry: () => {} },
+        { id: '2', attempts: 1, timestamp: new Date(), body: forgedItem, ack: () => { acked++; }, retry: () => {} },
+      ],
+      ingest: async items => items.map(() => ({ ok: true })),
+      promoteLegacy: async () => {}, completeLegacy: async () => {},
+      archive: async () => { archived++; },
+    });
+    assert.deepEqual([acked, archived, settled.unauthenticated], [2, 1, 1]);
+
+    await simulatedSesFixture(t, async ({ runtime, local, run, db }) => {
+      const ws = runtime.config.workspaceId;
+      const list = ok(await local('POST', '/v1/lists', { name: unique('fb-prio') }), 201);
+      await db.query(`INSERT INTO audience_contacts (id, workspace_id, email, marketing_consent)
+        SELECT 'con_fb_' || n, $1, 'fb-conc-' || n || '@example.com', 'subscribed' FROM generate_series(1, 80) n`, [ws]);
+      await db.query('INSERT INTO audience_list_members (workspace_id, list_id, contact_id) SELECT workspace_id, $2, id FROM audience_contacts WHERE workspace_id = $1', [ws, list.id]);
+      const camp = ok(await local('POST', '/v1/campaigns', { name: unique('fb-prio'), from: 'sender@example.com', subject: 'FB', html: '<p>Hi</p>', tracking: true, audience: { listId: list.id } }), 201);
+      ok(await local('POST', `/v1/campaigns/${camp.id}/send`, { revision: camp.revision }), 202);
+      await run('campaign.run');
+      await run('email.dispatch');
+      const sentRows = (await db.query('SELECT id, provider_id, to_addresses->>0 AS email FROM sending_emails WHERE workspace_id=$1 AND campaign_id=$2 ORDER BY id', [ws, camp.id])).rows as { id: string; provider_id: string; email: string }[];
+      assert.equal(sentRows.length, 80);
+
+      const topic = `urn:bane:simulated-ses:${REGION}`, nowIso = new Date().toISOString();
+      const events: import('./src/sending.js').RoutineIngress[] = [];
+      for (const [i, r] of sentRows.entries()) {
+        const mk = (kind: string, type: string, data: Record<string, unknown>, effects?: import('./src/sending.js').RoutineIngress['effects']): import('./src/sending.js').RoutineIngress => ({
+          workspaceId: ws, type, providerId: r.provider_id, taggedEmailId: r.id, createdAt: nowIso,
+          externalId: `${topic}:${r.id}:${kind}`, data: { providerId: r.provider_id, ...data }, ...(effects ? { effects } : {}),
+          ingress: { topicArn: topic, messageId: `${r.id}:${kind}`, region: REGION, payload: { message: { eventType: kind, mail: { messageId: r.provider_id } }, topicArn: topic, messageId: `${r.id}:${kind}`, region: REGION }, recoveryType: 'operation.simulatedFeedbackRecovery' },
+        });
+        events.push(mk('Open', 'open', { isBotEvent: false }, { reported: null, suppress: null, observe: 'open', receiptTime: false }));
+        events.push(mk('Open', 'open', { isBotEvent: false }, { reported: null, suppress: null, observe: 'open', receiptTime: false }));
+        events.push(mk('Delivery', 'delivery', {}));
+        events.push(mk('Delivery', 'delivery', {}));
+        if (i % 4 === 0) {
+          events.push(mk('Bounce', 'bounce', { bounceType: 'Permanent', bounceSubType: 'General' }, { reported: [r.email], suppress: 'hard_bounce', observe: null, receiptTime: false }));
+          events.push(mk('Bounce', 'bounce', { bounceType: 'Permanent', bounceSubType: 'General' }, { reported: [r.email], suppress: 'hard_bounce', observe: null, receiptTime: false }));
+        }
+        if (i % 5 === 0) events.push(mk('Click', 'click', { isBotEvent: false, link: 'https://example.com' }, { reported: null, suppress: null, observe: 'click', receiptTime: false }));
+      }
+      const chunks = [0, 1, 2, 3].map(k => events.filter((_, idx) => idx % 4 === k));
+      await Promise.all(chunks.map(chunk => ingestRoutineSesEvents(runtime, chunk)));
+
+      const dupCheck = await db.query('SELECT count(*)::int AS total, count(DISTINCT external_id)::int AS uniq FROM sending_email_events WHERE workspace_id=$1 AND external_id IS NOT NULL', [ws]);
+      assert.equal(dupCheck.rows[0].total, dupCheck.rows[0].uniq, 'Exactly-once event rows despite cross-queue duplicates');
+      assert.equal((await db.query('SELECT * FROM reconcile_sending_campaign_tallies($1, $2)', [ws, camp.id])).rowCount, 0);
+      assert.equal(Number((await db.query('SELECT emails_with_other_bits FROM check_sending_event_outcome_bits($1)', [ws])).rows[0].emails_with_other_bits), 0);
+      const listDrift = await db.query('SELECT * FROM reconcile_audience_list_counts($1, $2)', [ws, list.id]);
+      assert.equal(listDrift.rowCount, 0, 'Audience list counts stay exact after concurrent bounce suppressions');
+      const statusSummary = await db.query("SELECT count(*) FILTER (WHERE status='bounced')::int AS bnc, count(*) FILTER (WHERE (event_outcomes & 16) <> 0)::int AS opened, count(*) FILTER (WHERE (event_outcomes & 32) <> 0)::int AS clicked FROM sending_emails WHERE workspace_id=$1 AND campaign_id=$2", [ws, camp.id]);
+      assert.deepEqual(statusSummary.rows[0], { bnc: 20, opened: 80, clicked: 16 });
+
+      // B3: a later suppression for an already-suppressed contact advances suppressed_at even for the same reason.
+      const bouncedEmail = sentRows[0]!;
+      const laterIso = new Date(Date.now() + 60_000).toISOString();
+      await ingestRoutineSesEvents(runtime, [{
+        workspaceId: ws, type: 'bounce', providerId: bouncedEmail.provider_id, taggedEmailId: bouncedEmail.id, createdAt: laterIso,
+        externalId: `${topic}:${bouncedEmail.id}:BounceLater`, data: { providerId: bouncedEmail.provider_id, bounceType: 'Permanent', bounceSubType: 'General' },
+        effects: { reported: [bouncedEmail.email], suppress: 'hard_bounce', observe: null, receiptTime: false },
+        ingress: { topicArn: topic, messageId: `${bouncedEmail.id}:BounceLater`, region: REGION, payload: { message: { eventType: 'Bounce', mail: { messageId: bouncedEmail.provider_id } }, topicArn: topic, messageId: `${bouncedEmail.id}:BounceLater`, region: REGION }, recoveryType: 'operation.simulatedFeedbackRecovery' },
+      }]);
+      const supAt = (await db.query('SELECT suppressed_at FROM audience_contacts WHERE workspace_id=$1 AND email=$2', [ws, bouncedEmail.email])).rows[0].suppressed_at as Date;
+      assert.ok(supAt.getTime() >= Date.parse(laterIso) - 1000, 'Repeat suppression advances suppressed_at to the latest timestamp');
+
+      // B2: status precedence is order-independent across every cross-lane event pair (including delayed > sent).
+      const pairs: [string, string, string][] = [
+        ['send', 'delivery_delay', 'delayed'],
+        ['send', 'non_permanent_bounce', 'delayed'],
+        ['delivery_delay', 'validation_suppressed', 'suppressed'],
+        ['delivery_delay', 'delivery', 'delivered'],
+        ['validation_suppressed', 'delivery', 'delivered'],
+        ['delivery', 'bounce', 'bounced'],
+        ['bounce', 'complaint', 'complained'],
+      ];
+      for (const [idx, [aType, bType, expected]] of pairs.entries()) {
+        for (const [ord, seq] of ([[aType, bType], [bType, aType]] as [string, string][]).entries()) {
+          const eid = `em_ord_${idx}_${ord}_${Date.now().toString(36)}`;
+          const pid = `sim_ord_${idx}_${ord}_${Date.now().toString(36)}`;
+          await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, status, provider_id, simulated, snapshot)
+            SELECT $1, workspace_id, region, actor_key_id, 'sender@example.com', '["ord@example.com"]'::jsonb, '[]'::jsonb, '[]'::jsonb, 'Order', 'accepted', $2, true, '{}'::jsonb
+            FROM sending_emails WHERE id = $3`, [eid, pid, sentRows[0]!.id]);
+          for (const [step, evType] of seq.entries()) {
+            const evData = evType === 'bounce' ? { bounceType: 'Permanent', bounceSubType: 'General' }
+              : evType === 'non_permanent_bounce' ? { bounceType: 'Transient', bounceSubType: 'General' }
+              : evType === 'validation_suppressed' ? { bounceType: 'Permanent', bounceSubType: 'EmailValidationSuppressed' } : {};
+            await ingestRoutineSesEvents(runtime, [{
+              workspaceId: ws, type: evType, providerId: pid, taggedEmailId: eid, createdAt: nowIso,
+              externalId: `${topic}:${eid}:${step}`, data: { providerId: pid, ...evData },
+              ingress: { topicArn: topic, messageId: `${eid}:${step}`, region: REGION, payload: { message: { eventType: evType, mail: { messageId: pid } }, topicArn: topic, messageId: `${eid}:${step}`, region: REGION }, recoveryType: 'operation.simulatedFeedbackRecovery' },
+            }]);
+          }
+          const finalStatus = (await db.query('SELECT status FROM sending_emails WHERE id=$1', [eid])).rows[0].status;
+          assert.equal(finalStatus, expected, `${seq.join(' -> ')} must end as ${expected}`);
+        }
+      }
+
+      const camp2 = ok(await local('POST', '/v1/campaigns', { name: unique('fb-lag'), from: 'sender@example.com', subject: 'Lag', html: '<p>Hi</p>', audience: { listId: list.id } }), 201);
+      ok(await local('POST', `/v1/campaigns/${camp2.id}/send`, { revision: camp2.revision }), 202);
+      await recordFeedbackLag(runtime.db, 'routine', 150000, 20 * 60_000);
+      const viewRoutine = ok(await local('GET', `/v1/campaigns/${camp2.id}`));
+      assert.deepEqual(viewRoutine.delivery.feedbackLag, { lane: 'routine', oldestMs: 20 * 60_000 });
+      assert.equal('depth' in (viewRoutine.delivery.feedbackLag ?? {}), false, 'Public feedbackLag omits cross-tenant depth');
+      // Priority lag >= 5 min holds an autoPause campaign with waiting.reason='feedback_lag' (never a manual pause),
+      // while display reports the older lane (routine 20m > priority 6m).
+      await recordFeedbackLag(runtime.db, 'priority', 500, FEEDBACK_LAG_HOLD_MS + 60_000);
+      const viewBoth = ok(await local('GET', `/v1/campaigns/${camp2.id}`));
+      assert.deepEqual(viewBoth.delivery.feedbackLag, { lane: 'routine', oldestMs: 20 * 60_000 }, 'Display reports the older lane');
+      try {
+        await run('campaign.run');
+        const held = ok(await local('GET', `/v1/campaigns/${camp2.id}`));
+        assert.deepEqual([held.state, held.delivery.waiting?.reason, held.delivery.expanded], ['sending', 'feedback_lag', 0]);
+        // Stale priority sample (> 5 min old) expires automatically so a broken metrics read never holds forever,
+        // and the 20 min routine lag still does NOT hold releasing when priority queue is bound.
+        await db.query("UPDATE operation_feedback_lag SET updated_at = now() - interval '6 minutes' WHERE lane = 'priority'");
+        const staleView = ok(await local('GET', `/v1/campaigns/${camp2.id}`));
+        assert.deepEqual(staleView.delivery.feedbackLag, { lane: 'routine', oldestMs: 20 * 60_000 });
+        await db.query("UPDATE jobs SET status='pending', available_at=clock_timestamp() WHERE id=$1", ['campaign.run:' + camp2.id]);
+        await run('campaign.run');
+        const released = ok(await local('GET', `/v1/campaigns/${camp2.id}`));
+        assert.equal(released.delivery.expanded, 60, 'Campaign releases all 60 non-suppressed recipients once priority lag expires even with 20m routine lag');
+        assert.deepEqual(released.delivery.feedbackLag, { lane: 'routine', oldestMs: 20 * 60_000 }, 'feedbackLag remains visible once all recipients are released');
+      } finally {
+        await db.query('DELETE FROM operation_feedback_lag');
+      }
     });
   });
 
@@ -34260,6 +37204,136 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal(qView.delivery.pauseReason?.code, 'CAMPAIGN_HASH_FORMAT_UNSUPPORTED');
       assert.equal(qView.counts.byStatus.rejected ?? 0, 0, 'Zero recipients rejected/burned');
       assert.equal(qView.counts.byStatus.queued, 6, 'All 6 recipients remain queued for the matching release');
+    });
+  });
+
+  test('bounded response and load sizes: templates, emails, campaigns, idempotency and MCP', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const ws = runtime.config.workspaceId;
+      const { CAMPAIGN_DEFAULTS_MAX_KEYS, CAMPAIGN_DEFAULTS_MAX_BYTES, EMAIL_LIST_MAX_BYTES } = await import('./src/sending.js');
+      const { MAX_IDEMPOTENT_RESULT_BYTES } = await import('./src/idempotency.js');
+
+      // 1. Template list projects summary columns in SQL without loading draft/published HTML.
+      const tpl = ok(await local('POST', '/v1/templates', { name: 'large-tpl', description: 'desc' }), 201);
+      const bigHtml = '<p>' + 'a'.repeat(500 * 1024) + '</p>';
+      const saved = ok(await local('PATCH', `/v1/templates/${tpl.id}`, { revision: tpl.revision, draft: { ...tpl.draft, subject: 'Subj', html: bigHtml } }));
+      ok(await local('POST', `/v1/templates/${tpl.id}/publish`, { revision: saved.revision }));
+      await db.query(`INSERT INTO campaign_templates(id, workspace_id, revision, draft, published, published_revision)
+        SELECT 'tpl_' || md5(random()::text || g), workspace_id, revision, draft, published, published_revision
+        FROM campaign_templates, generate_series(1, 29) g WHERE workspace_id = $1 AND id = $2`, [ws, tpl.id]);
+      const listTpl = ok(await local('GET', '/v1/templates?limit=100'));
+      assert.equal(listTpl.data.length, 30);
+      assert.equal(listTpl.data[0].published, true);
+      assert.equal('draft' in listTpl.data[0], false);
+
+      // 2. Template asset content streams exact base64 under isolate memory reservation.
+      const storedObjects = new Map<string, { body: Uint8Array; contentType: string }>();
+      let storageGets = 0;
+      t.mock.method(runtime.storage, 'put', async (k: string, body: Uint8Array, contentType: string) => { storedObjects.set(k, { body, contentType }); });
+      t.mock.method(runtime.storage, 'get', async (k: string) => { storageGets++; return storedObjects.get(k) ?? null; });
+      t.mock.method(runtime.storage, 'delete', async (k: string) => { storedObjects.delete(k); });
+      const assetBytes = Buffer.from('hello-template-asset-'.repeat(4000));
+      const uploaded = ok(await local('POST', '/v1/template-assets', { filename: 'banner.png', contentType: 'image/png', disposition: 'inline', contentId: 'banner-cid', content: assetBytes.toString('base64') }), 201);
+      const assetContent = ok(await local('GET', `/v1/template-assets/${uploaded.id}/content`));
+      assert.equal(Buffer.from(assetContent.content, 'base64').toString('utf8'), assetBytes.toString('utf8'));
+
+      // 3. Campaign defaults enforce key count (100) and serialized byte cap (64 KiB) on writes, while legacy rows remain readable.
+      const tooManyKeys = Object.fromEntries(Array.from({ length: CAMPAIGN_DEFAULTS_MAX_KEYS + 1 }, (_, i) => [`k${i}`, 'v']));
+      assert.equal((await local('POST', '/v1/campaigns', { name: 'too-many-defaults', defaults: tooManyKeys })).status, 422);
+      const tooBigDefaults = { a: 'x'.repeat(40_000), b: 'y'.repeat(30_000) };
+      assert.equal((await local('POST', '/v1/campaigns', { name: 'too-big-defaults', defaults: tooBigDefaults })).status, 422);
+      const okCamp = ok(await local('POST', '/v1/campaigns', { name: 'bounded-defaults', defaults: { k1: 'v1' } }), 201);
+      assert.equal((await local('POST', `/v1/campaigns/${okCamp.id}/test`, { to: 'test@example.com', data: tooManyKeys })).status, 422);
+      // Legacy row exceeding the new 64 KiB total cap (while each value fits the existing 65,536-char scalar limit) still reads cleanly via getCampaign.
+      await db.query(`UPDATE sending_campaigns SET draft = jsonb_set(draft, '{defaults}', $2::jsonb) WHERE id = $1`, [okCamp.id, JSON.stringify({ a: 'z'.repeat(40_000), b: 'z'.repeat(40_000) })]);
+      const readLegacy = ok(await local('GET', `/v1/campaigns/${okCamp.id}`));
+      assert.equal(readLegacy.draft.defaults.a.length + readLegacy.draft.defaults.b.length, 80_000);
+      assert.ok(CAMPAIGN_DEFAULTS_MAX_BYTES === 64 * 1024);
+
+      // 4. Idempotent creates cap stored replay payloads at MAX_IDEMPOTENT_RESULT_BYTES (256 KiB).
+      const smallKey = unique('idem-small');
+      const small1 = ok(await local('POST', '/v1/lists', { name: unique('small-list') }, 'live', { 'Idempotency-Key': smallKey }), 201);
+      const small2 = ok(await local('POST', '/v1/lists', { name: small1.name }, 'live', { 'Idempotency-Key': smallKey }), 201);
+      assert.equal(small2.id, small1.id);
+      const bigKey = unique('idem-big');
+      const bigCampBody = { name: unique('big-camp'), html: '<p>' + 'b'.repeat(MAX_IDEMPOTENT_RESULT_BYTES + 20_000) + '</p>' };
+      const big1 = ok(await local('POST', '/v1/campaigns', bigCampBody, 'live', { 'Idempotency-Key': bigKey }), 201);
+      assert.ok(big1.id);
+      const bigReplay = await local('POST', '/v1/campaigns', bigCampBody, 'live', { 'Idempotency-Key': bigKey });
+      assert.equal(bigReplay.status, 409);
+      assert.equal(bigReplay.body.error.code, 'IDEMPOTENT_RESPONSE_TOO_LARGE');
+      assert.deepEqual(bigReplay.body.error.details, [{ id: big1.id }], '409 replay carries original resource id in error.details');
+
+      // Middleware path (idempotentCreates): 5,000-row import preview (> 256 KiB) with Idempotency-Key answers 201
+      // promptly under Node (no stream-cancel deadlock) and replays 409 carrying the created import id in error.details.
+      const impKey = unique('idem-imp-5k');
+      const csv5k = 'email,name\n' + Array.from({ length: 5000 }, (_, i) => `imp5k-${i}@example.com,User ${i}`).join('\n');
+      const imp1 = ok(await local('POST', '/v1/contact-imports', { csv: csv5k, mapping: { email: 'email', name: 'name' } }, 'live', { 'Idempotency-Key': impKey }), 201);
+      assert.equal(imp1.rows.length, 5000);
+      const impReplay = await local('POST', '/v1/contact-imports', { csv: csv5k, mapping: { email: 'email', name: 'name' } }, 'live', { 'Idempotency-Key': impKey });
+      assert.equal(impReplay.status, 409);
+      assert.equal(impReplay.body.error.code, 'IDEMPOTENT_RESPONSE_TOO_LARGE');
+      assert.deepEqual(impReplay.body.error.details, [{ id: imp1.id }]);
+
+      // 5. listEmails pages by bytes as well as rows and walks all matching emails via nextCursor.
+      const baseSend = ok(await local('POST', '/v1/emails/send', mail({ to: 'seed@example.com', subject: 'Seed', html: '<p>' + 'h'.repeat(80_000) + '</p>' })), 202);
+      // Large email content & detail still succeed through withReadMemory.
+      const emContent = ok(await local('GET', `/v1/emails/${baseSend.id}/content`));
+      assert.ok(emContent.html.length > 80_000);
+      const emDetail = ok(await local('GET', `/v1/emails/${baseSend.id}/detail`));
+      assert.ok(emDetail.content.html.length > 80_000);
+      // Seed 45 wide-recipient emails (~15 KB each -> ~675 KB total > 512 KB page budget).
+      const wideTo = JSON.stringify(Array.from({ length: 50 }, (_, i) => `recipient-${i}-${'r'.repeat(220)}@example.com`));
+      const wideSubj = 'S'.repeat(900);
+      await db.query(`INSERT INTO sending_emails(id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, status, simulated, snapshot, created_at, updated_at)
+        SELECT 'email_wide_' || lpad(g::text, 4, '0'), workspace_id, region, actor_key_id, from_address, $2::jsonb, '[]'::jsonb, '[]'::jsonb, $3, 'accepted', true, '{"kind":"transactional"}'::jsonb, now() - make_interval(secs => g), now() - make_interval(secs => g)
+        FROM sending_emails, generate_series(1, 45) g WHERE id = $1`, [baseSend.id, wideTo, wideSubj]);
+      const seenIds = new Set<string>();
+      let cursor: string | null = null, pages = 0;
+      do {
+        const res = ok(await local('GET', `/v1/emails?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`));
+        pages++;
+        assert.ok(Buffer.byteLength(JSON.stringify(res), 'utf8') <= EMAIL_LIST_MAX_BYTES + 1024, 'Email list page stays within byte budget');
+        for (const item of res.data) { assert.equal(seenIds.has(item.id), false, 'No duplicate email across byte-bounded pages'); seenIds.add(item.id); }
+        cursor = res.nextCursor;
+      } while (cursor);
+      assert.ok(pages >= 2, `Expected byte-bounded email list to split into >= 2 pages, got ${pages}`);
+      assert.ok(seenIds.size >= 46, `Expected all 46 emails across pages, got ${seenIds.size}`);
+
+      // 6. MCP tools/call fails early when a single object exceeds the caller byte limit (without loading storage).
+      const bigAssetId = 'tasset_' + 'f'.repeat(32);
+      await db.query(`INSERT INTO template_assets(id, workspace_id, filename, content_type, size, disposition, storage_key, checksum)
+        VALUES ($1, $2, 'huge.png', 'image/png', $3, 'inline', 'missing/should-not-read', 'deadbeef')`, [bigAssetId, ws, 5 * 1024 * 1024]);
+      const manageKey = ok(await local('POST', '/v1/api-keys', { name: 'mcp-bounded', permissions: ['read', 'manage'] }), 201).secret;
+      const getsBeforeMcp = storageGets;
+      const mcpRes = await local('POST', '/mcp?codemode=true', { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'getTemplateAssetContent', arguments: { assetId: bigAssetId } } }, 'live', { authorization: `Bearer ${manageKey}`, accept: 'application/json, text/event-stream' });
+      assert.equal(mcpRes.status, 200);
+      const toolResult = mcpRes.body?.result;
+      assert.equal(toolResult?.isError, true, 'Oversized asset fails early over MCP without touching missing storage');
+      assert.match(JSON.stringify(toolResult), /RESPONSE_TOO_LARGE/, 'MCP returns RESPONSE_TOO_LARGE before storage read');
+      assert.equal(storageGets, getsBeforeMcp, 'Oversized MCP asset call refused before calling storage.get');
+
+      // 7. MCP mutating writes whose response exceeds 4 MiB never apply-then-error: they report success with a bounded summary.
+      const bigCsv = 'email,name\n' + Array.from({ length: 36000 }, (_, i) => `mcpimp-${i}-padded-address-text@example.com,Contact Number ${i} With Long Display Name Text`).join('\n');
+      const mcpPrev = await local('POST', '/mcp?codemode=true', { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'previewContactImport', arguments: { confirm: true, body: { csv: bigCsv, mapping: { email: 'email', name: 'name' } } } } }, 'live', { authorization: `Bearer ${manageKey}`, accept: 'application/json, text/event-stream' });
+      assert.equal(mcpPrev.status, 200);
+      const prevResult = mcpPrev.body?.result;
+      assert.equal(prevResult?.isError, false, 'Oversized MCP write previewContactImport reports success, never isError: ' + JSON.stringify(prevResult).slice(0, 300));
+      assert.equal(prevResult?.structuredContent?.completed, true);
+      assert.equal(prevResult?.structuredContent?.responseTruncated, true);
+      assert.equal(prevResult?.structuredContent?.status, 'preview');
+      const bigImpId = prevResult?.structuredContent?.id as string;
+      assert.match(bigImpId, /^imp_/);
+
+      const mcpCommit = await local('POST', '/mcp?codemode=true', { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'commitContactImport', arguments: { confirm: true, importId: bigImpId, body: {} } } }, 'live', { authorization: `Bearer ${manageKey}`, accept: 'application/json, text/event-stream' });
+      assert.equal(mcpCommit.status, 200);
+      const commitResult = mcpCommit.body?.result;
+      assert.equal(commitResult?.isError, false, 'Oversized MCP commitContactImport reports success, never isError: ' + JSON.stringify(commitResult).slice(0, 300));
+      assert.equal(commitResult?.structuredContent?.completed, true);
+      assert.equal(commitResult?.structuredContent?.responseTruncated, true);
+      assert.equal(commitResult?.structuredContent?.id, bigImpId);
+      assert.equal(commitResult?.structuredContent?.status, 'committed');
+      assert.equal(commitResult?.structuredContent?.imported, 36000);
     });
   });
 
@@ -35654,6 +38728,320 @@ test('Audit trail: sensitive actions each write one redacted row', async t => {
     assert.ok(trail.length >= 18, `${trail.length} rows`);
     for (const value of secrets) assert.ok(trail.every(summary => !summary.includes(value)), `A summary repeats ${value.slice(0, 12)}…`);
   });
+});
+
+test('bounded inbound page sizes: address caps, byte-bounded pagination, routing diff bounds and unrouted claim projection', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, fetch }) => {
+      const { S3Client, GetObjectCommand } = await import('@aws-sdk/client-s3');
+      const { SESv2Client, GetAccountCommand, GetEmailIdentityCommand, SendEmailCommand } = await import('@aws-sdk/client-sesv2');
+      const { credentialFingerprint, discoveryTarget } = await import('./src/ses-region-state.js');
+      const { acceptInboundNotification, mailboxIngestJobs } = await import('./src/mailbox-ingest.js');
+      const scope = runtime.config.workspaceId, topic = 'arn:aws:sns:' + REGION + ':111122223333:bounded-inbound';
+      const domainId = unique('domain'), domain = 'inbox.example.com', publicAddress = 'support@example.com', address = 'support@' + domain, base = '/v1/inbound';
+      runtime.config.aws = { accessKeyId: 'synthetic-fixture', secretAccessKey: 'synthetic-fixture' }; runtime.config.liveEnabled = true;
+      await db.query("INSERT INTO ses_region_discovery(workspace_id,region,report,credentials_fingerprint,public_url,trusted_account_id,trusted_topic_arn) VALUES($1,$2,$3,$4,$5,'111122223333',$6)", [scope, REGION, { provisioned: true, account: { id: '111122223333', sendingEnabled: true }, resources: { topic: { arn: topic }, transactional: { sendingEnabled: true }, marketing: { sendingEnabled: true } } }, await credentialFingerprint(runtime.config), discoveryTarget(runtime.config), topic]);
+      await db.query("INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,'example.com',$3),($4,$2,$5,$3)", [unique('dom'), scope, REGION, domainId, domain]);
+      await db.query("INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,'fixture-inbox',$3)", [scope, REGION, topic]);
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$3,$4,$5,'active','store')", [unique('mdom'), scope, domainId, domain, REGION]);
+      t.mock.method(SESv2Client.prototype, 'send', async (cmd: any) => {
+        if (cmd instanceof GetEmailIdentityCommand) return { IdentityType: 'DOMAIN', VerifiedForSendingStatus: true, VerificationStatus: 'SUCCESS', DkimAttributes: { Status: 'SUCCESS', SigningEnabled: true } };
+        if (cmd instanceof GetAccountCommand) return { SendingEnabled: true, SendQuota: { MaxSendRate: 100, Max24HourSend: 10000, SentLast24Hours: 0 } };
+        assert.ok(cmd instanceof SendEmailCommand); return { MessageId: 'synthetic-' + unique('sent') };
+      });
+      const box = ok(await local('POST', base + '/addresses', { address, publicAddress }, 'live'), 201);
+      const rawObjects = new Map<string, string>();
+      t.mock.method(S3Client.prototype, 'send', async (cmd: any) => {
+        const key = String(cmd.input.Key);
+        if (cmd.constructor.name === 'HeadObjectCommand') return { ContentLength: Buffer.byteLength(rawObjects.get(key)!), ETag: '"fixture"' };
+        if (cmd.constructor.name === 'CopyObjectCommand' || cmd.constructor.name === 'PutObjectCommand') return {};
+        assert.ok(cmd instanceof GetObjectCommand);
+        return { Body: { transformToByteArray: async () => Buffer.from(rawObjects.get(key)!) } };
+      });
+      const receive = async (to: string, mime: string) => {
+        const receipt = unique('receipt'), objectKey = 'raw/' + receipt; rawObjects.set(objectKey, mime);
+        const input = { region: REGION, topicArn: topic, message: { notificationType: 'Received', mail: { messageId: receipt, source: 'sender@example.net' }, receipt: { ...cleanScans, timestamp: new Date().toISOString(), recipients: [to], dmarcVerdict: { status: 'PASS' }, dkimVerdict: { status: 'PASS' }, spfVerdict: { status: 'PASS' }, spamVerdict: { status: 'PASS' }, action: { type: 'S3', bucketName: 'fixture-inbox', objectKey, topicArn: topic } } } };
+        assert.equal(await acceptInboundNotification(runtime, input), 1);
+        await mailboxIngestJobs['mailbox.ingest']!(runtime, { sesMessageId: receipt }, { id: unique('job'), workspaceId: scope, attempts: 1 });
+        await expandFixtureOutbox(runtime, scope);
+      };
+      const rawRequest = (path: string, init: { method?: string; body?: string; headers?: Record<string, string> } = {}) => new Request(PUBLIC_ORIGIN + path, {
+        method: init.method ?? 'GET',
+        headers: { origin: PUBLIC_ORIGIN, cookie: manager!.cookie, 'x-bane-environment': 'live', ...init.headers },
+        ...(init.body !== undefined ? { body: init.body } : {}),
+      });
+      const f = { scope, base, domain, address, publicAddress, id: box.id as string, receive };
+      // 1. Ingest caps To/Cc/Reply-To/References at 100 while preserving exact counts.
+      const toLines: string[] = []; let line = 'To: ' + f.publicAddress;
+      for (let i = 0; i < 8200; i++) { if (line.length + 7 > 900) { toLines.push(line + ','); line = ' a@b.c'; } else line += ', a@b.c'; }
+      toLines.push(line);
+      const ccList = Array.from({ length: 130 }, (_, i) => `c${i}@b.c`).join(', ');
+      const refsList = Array.from({ length: 120 }, (_, i) => `<ref-${i}@example.net>`).join(' ');
+      const raw = (i: number) => [
+        'From: Sender <sender@example.net>', ...toLines, 'Cc: ' + ccList, 'Reply-To: ' + ccList,
+        'Subject: ' + (i ? 'Re: ' : '') + 'Many recipients',
+        'Message-ID: <many-' + i + '@example.net>',
+        ...(i ? ['In-Reply-To: <many-0@example.net>', 'References: <many-0@example.net> ' + refsList] : ['References: ' + refsList]),
+        '', 'hello ' + i,
+      ].join('\r\n');
+      for (let i = 0; i < 5; i++) await f.receive(f.address, raw(i));
+      const stored = (await db.query('SELECT count(*)::int AS n, max(jsonb_array_length("to"))::int AS to_len, max(jsonb_array_length(cc))::int AS cc_len, max(jsonb_array_length(reply_to))::int AS rt_len, max(jsonb_array_length("references"))::int AS ref_len, min(thread_id) AS thread, min(id) AS first_id FROM mail_messages WHERE workspace_id=$1', [f.scope])).rows[0];
+      assert.equal(stored.n, 5);
+      assert.deepEqual([stored.to_len, stored.cc_len, stored.rt_len, stored.ref_len], [100, 100, 100, 100]);
+
+      // Thread page caps address/reference arrays at 20 with exact counts and stays well under 20 KB/message.
+      const threadRes = await fetch(rawRequest(`${f.base}/threads/${stored.thread}?limit=100`));
+      const threadText = await threadRes.text();
+      assert.equal(threadRes.status, 200);
+      const threadBody = JSON.parse(threadText);
+      assert.equal(threadBody.messages.length, 5);
+      assert.ok(threadText.length / threadBody.messages.length < 20 * 1024, `thread page avg ${Math.round(threadText.length / threadBody.messages.length)} B/msg`);
+      for (const m of threadBody.messages) {
+        assert.deepEqual([m.to.length, m.toCount, m.cc.length, m.ccCount, m.replyTo.length, m.replyToCount, m.references.length], [20, 8201, 20, 130, 20, 130, 20]);
+        assert.ok(m.referencesCount >= 120);
+      }
+
+      // Single-message read returns up to 100 stored addresses with exact counts.
+      const detail = ok(await local('GET', `${f.base}/messages/${stored.first_id}?includeDelivery=true`, undefined, 'live'));
+      assert.deepEqual([detail.to.length, detail.toCount, detail.cc.length, detail.ccCount, detail.replyTo.length, detail.replyToCount, detail.references.length], [100, 8201, 100, 130, 100, 130, 100]);
+      assert.equal(detail.verdicts.toCount, undefined, 'internal counts stay out of verdicts');
+
+      // listInboundMessages?includeDelivery=true, listLogs, and listInboxMessages all cap to at 20 with toCount 8201.
+      const msgList = ok(await local('GET', `${f.base}/messages?limit=100&includeDelivery=true`, undefined, 'live'));
+      assert.equal(msgList.data[0].to.length, 20);
+      assert.equal(msgList.data[0].toCount, 8201);
+      const logs = ok(await local('GET', '/v1/logs?direction=received&limit=100', undefined, 'live'));
+      assert.equal(logs.data[0].to.length, 20);
+      assert.equal(logs.data[0].toCount, 8201);
+      const inboxList = ok(await local('GET', `/v1/inboxes/${f.id}/messages?limit=100`, undefined, 'live'));
+      assert.equal(inboxList.data[0].to.length, 20);
+      assert.equal(inboxList.data[0].toCount, 8201);
+      const inboxDetail = ok(await local('GET', `/v1/inboxes/${f.id}/messages/${stored.first_id}`, undefined, 'live'));
+      assert.equal(inboxDetail.to.length, 100);
+      assert.equal(inboxDetail.toCount, 8201);
+
+      // 2. Pre-existing oversized row (500 stored addresses, no verdicts count) is bounded on every read.
+      const legacyTo = Array.from({ length: 500 }, (_, i) => ({ name: null, address: `legacy${i}@example.net` }));
+      await db.query('UPDATE mail_messages SET "to"=$2::jsonb, cc=$2::jsonb, reply_to=$2::jsonb, verdicts=verdicts-\x27toCount\x27-\x27ccCount\x27-\x27replyToCount\x27 WHERE id=$1', [stored.first_id, JSON.stringify(legacyTo)]);
+      const legacyThread = ok(await local('GET', `${f.base}/threads/${stored.thread}?limit=100`, undefined, 'live')).messages.find((m: Json) => m.id === stored.first_id);
+      assert.deepEqual([legacyThread.to.length, legacyThread.toCount, legacyThread.cc.length, legacyThread.ccCount], [20, 500, 20, 500]);
+      const legacyDetail = ok(await local('GET', `${f.base}/messages/${stored.first_id}`, undefined, 'live'));
+      assert.deepEqual([legacyDetail.to.length, legacyDetail.toCount, legacyDetail.cc.length, legacyDetail.ccCount], [100, 500, 100, 500]);
+
+      // 3. Byte-bounded page ends early and advances via cursor without skipping (listInboundAddresses).
+      const bigMeta = { pad: 'x'.repeat(15_000) };
+      for (let i = 0; i < 45; i++) ok(await local('POST', `${f.base}/addresses`, { address: `pad${i}@${f.domain}`, metadata: bigMeta }, 'live'), 201);
+      const seenBoxes = new Set<string>();
+      let addrCursor: string | null = null, addrPages = 0;
+      do {
+        const res = await fetch(rawRequest(`${f.base}/addresses?limit=100${addrCursor ? `&cursor=${encodeURIComponent(addrCursor)}` : ''}`));
+        const txt = await res.text();
+        assert.equal(res.status, 200);
+        assert.ok(Buffer.byteLength(txt) <= 524_288 + 4096, `address page ${Buffer.byteLength(txt)} B`);
+        const body = JSON.parse(txt);
+        for (const item of body.data) seenBoxes.add(item.id);
+        addrCursor = body.nextCursor;
+        addrPages++;
+      } while (addrCursor && addrPages < 10);
+      assert.equal(addrCursor, null);
+      assert.ok(addrPages >= 2, '45 x 15 KB addresses split across multiple byte-bounded pages');
+      assert.ok(seenBoxes.size >= 46);
+
+      // 4. Routing: GET /v1/routing returns the complete config so a round-trip PUT never deletes routes;
+      //    writes past 2 MiB are refused (422 ROUTE_CONFIG_TOO_LARGE); listRoutes paginates; applyRouting bounds large diffs.
+      const bigNote = 'n'.repeat(450);
+      const routeCount = 1300;
+      const version0 = ok(await local('GET', '/v1/routing', undefined, 'live')).version;
+      const bulkRoutes = Array.from({ length: routeCount }, (_, i) => ({ match: `r${String(i).padStart(4, '0')}@${f.domain}`, to: [f.id], note: bigNote }));
+      const applied = await fetch(rawRequest('/v1/routing', { method: 'PUT', headers: { 'if-match': `"${version0}"`, 'content-type': 'application/json' }, body: JSON.stringify({ routes: bulkRoutes }) }));
+      const appliedText = await applied.text();
+      assert.equal(applied.status, 200);
+      assert.ok(Buffer.byteLength(appliedText) <= 524_288 + 4096, `applyRouting response ${Buffer.byteLength(appliedText)} B`);
+      const appliedBody = JSON.parse(appliedText);
+      assert.equal(appliedBody.diffTruncated, true);
+      assert.equal(appliedBody.diffCount, routeCount);
+      assert.ok(appliedBody.diff.length > 0 && appliedBody.diff.length < routeCount);
+
+      // Whole-config round-trip: GET /v1/routing?format=config returns all 1,300 routes; dry-run PUT lists 0 deletions.
+      const fullCfg = ok(await local('GET', '/v1/routing?format=config', undefined, 'live'));
+      assert.equal(fullCfg.routes.length, routeCount);
+      const roundTrip = ok(await local('PUT', '/v1/routing?dryRun=true', fullCfg, 'live', { 'if-match': `"${fullCfg.version}"` }));
+      assert.deepEqual(roundTrip.diff, [], 'round-trip PUT of GET /v1/routing?format=config deletes nothing');
+
+      // Writing past 2 MiB total is refused with 422 ROUTE_CONFIG_TOO_LARGE.
+      const tooBigRoutes = Array.from({ length: 3500 }, (_, i) => ({ match: `big${String(i).padStart(4, '0')}@${f.domain}`, to: [f.id], note: 'z'.repeat(490) }));
+      error(await local('PUT', '/v1/routing?dryRun=true', { routes: tooBigRoutes }, 'live', { 'if-match': `"${fullCfg.version}"` }), 422, 'ROUTE_CONFIG_TOO_LARGE');
+
+      // Paginate GET /v1/routing/routes cleanly (100/page, <= 512 KiB).
+      const seenRoutes = new Set<string>();
+      let rCursor: string | null = null, rPages = 0;
+      do {
+        const res = await fetch(rawRequest(`/v1/routing/routes?limit=100${rCursor ? `&cursor=${encodeURIComponent(rCursor)}` : ''}`));
+        const txt = await res.text();
+        assert.equal(res.status, 200);
+        assert.ok(Buffer.byteLength(txt) <= 524_288 + 4096, `listRoutes page ${Buffer.byteLength(txt)} B`);
+        const body = JSON.parse(txt);
+        for (const r of body.data) seenRoutes.add(r.match);
+        rCursor = body.nextCursor;
+        rPages++;
+      } while (rCursor && rPages < 20);
+      assert.equal(rCursor, null);
+      assert.equal(seenRoutes.size, routeCount);
+      assert.equal(rPages, 13);
+
+      // 5. claimUnrouted projects only scalar columns and claims large-body messages cleanly.
+      const claimTarget = `late-claim@${f.domain}`;
+      const bigBody = 'B'.repeat(400_000);
+      const claimThr = unique('thr');
+      await db.query('INSERT INTO mail_threads(id,workspace_id,subject,message_count,last_message_at) VALUES($1,$2,$3,3,now())', [claimThr, f.scope, 'Large unrouted']);
+      for (let i = 0; i < 3; i++) {
+        const mid = unique('msg');
+        await db.query('INSERT INTO mail_messages(id,workspace_id,direction,thread_id,region,subject,from_address,text,html,size_bytes,received_at) VALUES($1,$2,\x27inbound\x27,$3,$4,$5,\x27ext@example.net\x27,$6,$6,$7,now())', [mid, f.scope, claimThr, REGION, 'Large ' + i, bigBody, bigBody.length]);
+        await db.query('INSERT INTO mail_unrouted(workspace_id,message_id,address) VALUES($1,$2,$3)', [f.scope, mid, claimTarget]);
+      }
+      const claimedBox = ok(await local('POST', `${f.base}/addresses`, { address: claimTarget }, 'live'), 201);
+      const claimedMsgs = ok(await local('GET', `${f.base}/messages?addressId=${claimedBox.id}&limit=10`, undefined, 'live'));
+      assert.equal(claimedMsgs.data.length, 3);
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM mail_unrouted WHERE workspace_id=$1 AND address=$2', [f.scope, claimTarget])).rows[0].n, 0);
+
+      // 6. Inbox-key reads isolate FairPool shares by workspace (mailboxAccess.workspaceId, not shared 'anonymous').
+      const { readPool, READ_MAX_ACTIVE_PER_WORKSPACE, READ_MAX_WAITING_PER_WORKSPACE } = await import('./src/read-bounds.js');
+      const { digest, randomSecret } = await import('./src/core.js');
+      const wsA = f.scope, wsB = unique('ws_inb_b'), hostB = wsB + '.invalid', boxB = unique('mbx'), keyA = randomSecret('bane_mbx_'), keyB = randomSecret('bane_mbx_');
+      await db.query("INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)", [wsB]);
+      await db.query("INSERT INTO operation_settings(workspace_id,name) VALUES($1,$1)", [wsB]);
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')", [unique('mdom'), wsB, hostB, REGION]);
+      await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind) VALUES($1,$2,(SELECT id FROM mailbox_domains WHERE workspace_id=$2 LIMIT 1),$3,'inbox')", [boxB, wsB, 'b@' + hostB]);
+      await db.query("INSERT INTO inbox_state(inbox_id,workspace_id,messages,bytes,unread) VALUES($1,$2,0,0,0)", [boxB, wsB]);
+      await db.query(`INSERT INTO mailbox_keys(id,workspace_id,name,hash,prefix,mailbox_ids,permissions,inbox_id) VALUES($1,$2,'keyA',$3,$4,$5::jsonb,'["read"]'::jsonb,$6),($7,$8,'keyB',$9,$10,$11::jsonb,'["read"]'::jsonb,$12)`,
+        [unique('mbk'), wsA, await digest(keyA), keyA.slice(0, 11), JSON.stringify([f.id]), f.id, unique('mbk'), wsB, await digest(keyB), keyB.slice(0, 11), JSON.stringify([boxB]), boxB]);
+      // Saturate wsA's active + waiting slots in readPool, then verify wsA's inbox key gets 429 while wsB's inbox key still gets 200.
+      const heldA: Array<{ release(): void }> = [];
+      const waitingA: Promise<unknown>[] = [];
+      const acA = new AbortController();
+      try {
+        for (let i = 0; i < READ_MAX_ACTIVE_PER_WORKSPACE; i++) {
+          heldA.push(await readPool.acquire(wsA, undefined, { route: 'test.saturate', busyCode: 'READ_CONCURRENCY_LIMIT', busyMessage: 'busy', wsBusyCode: 'READ_CONCURRENCY_LIMIT', wsBusyMessage: 'busy' }));
+        }
+        for (let i = 0; i < READ_MAX_WAITING_PER_WORKSPACE; i++) {
+          waitingA.push(readPool.acquire(wsA, acA.signal, { route: 'test.saturate', busyCode: 'READ_CONCURRENCY_LIMIT', busyMessage: 'busy', wsBusyCode: 'READ_CONCURRENCY_LIMIT', wsBusyMessage: 'busy' }).then(h => h.release()).catch(() => {}));
+        }
+        const aReq = new Request(PUBLIC_ORIGIN + `/v1/inboxes/${f.id}/messages?limit=5`, { headers: { authorization: 'Bearer ' + keyA } });
+        const bReq = new Request(PUBLIC_ORIGIN + `/v1/inboxes/${boxB}/messages?limit=5`, { headers: { authorization: 'Bearer ' + keyB } });
+        const [aRes, bRes] = await Promise.all([fetch(aReq), fetch(bReq)]);
+        assert.equal(aRes.status, 429, 'saturated workspace A inbox key gets 429');
+        assert.equal(bRes.status, 200, 'separate workspace B inbox key stays unaffected (200)');
+      } finally {
+        acA.abort();
+        for (const h of heldA) h.release();
+        await Promise.all(waitingA);
+      }
+    });
+});
+
+// Database disk alert (src/disk-alert.ts): PlanetScale's cluster.storage webhook posts one card straight to the operators'
+// Slack. It runs in-process here with a fake Slack and a database that fails the test if anything touches it.
+test('Database disk alert: a PlanetScale storage event with the derived Authorization header posts one card without the database, once per threshold; a wrong token, a bad signature or a stale event posts nothing', async t => {
+  const [{ createApp }, { loadConfig }, { diskAlertSetup, diskAlertCard }] = await Promise.all([import('./src/app.js'), import('./src/config.js'), import('./src/disk-alert.js')]);
+  const origin = 'https://disk.example.org', hook = 'https://hooks.slack.com/services/T0FIXTURE/B0FIXTURE/diskalert', secret = 'disk-fixture-'.repeat(4), signing = 'f'.repeat(64);
+  const db = new Proxy({}, { get(_target, prop) { throw new Error('The database disk alert touched Postgres (' + String(prop) + ').'); } }) as import('./src/core.js').Runtime['db'];
+  const storage: import('./src/core.js').Storage = { async put() { throw Error('unused'); }, async delete() { throw Error('unused'); }, async get() { throw Error('unused'); } };
+  const hosted = { PUBLIC_URL: origin, BANE_ROOT_SECRET: secret, MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google', OPERATOR_SLACK_WEBHOOK_URL: hook };
+  const runtime = (env: Record<string, string | undefined> = {}): import('./src/core.js').Runtime => ({ config: loadConfig({ ...hosted, ...env }), db, storage });
+  const app = createApp(), live = runtime(), setup = diskAlertSetup(live.config);
+  assert.deepEqual([setup.url, setup.events], [origin + '/internal/v1/database-disk', ['cluster.storage']]);
+  assert.match(setup.authorization, /^Bearer nmdisk_[A-Za-z0-9_-]{43}$/);
+  assert.ok(!setup.authorization.includes(secret) && setup.authorization !== diskAlertSetup({ ...live.config, authSecret: 'other-fixture-'.repeat(4) }).authorization);
+  const posted: Json[] = [];
+  t.mock.method(globalThis, 'fetch', async (url: RequestInfo | URL, init?: RequestInit) => {
+    assert.deepEqual([String(url), init?.method, init?.redirect], [hook, 'POST', 'manual']);
+    posted.push(JSON.parse(String(init!.body)));
+    return new Response(null);
+  });
+  const now = () => Math.floor(Date.now() / 1000);
+  // PlanetScale's documented cluster.storage body.
+  const storageEvent = (percent: number, extra: Json = {}) => ({ timestamp: now(), event: 'cluster.storage', organization: 'anomalyco', database: 'nightmail',
+    resource: { branch_name: 'production', storage_percentage: percent, storage: [{ bytes_used: 1, bytes_total_capacity: 2, bytes_available: 1, storage_percentage: percent + 0.1 }] }, ...extra });
+  const deliver = async (event: unknown, headers: Record<string, string> = { authorization: setup.authorization }, on = live, method = 'POST') => {
+    const response = await app.fetch(new Request(setup.url, { method, headers: { 'content-type': 'application/json', ...headers }, ...(method === 'POST' ? { body: typeof event === 'string' ? event : JSON.stringify(event) } : {}) }), on);
+    const text = await response.text();
+    return [response.status, text ? (JSON.parse(text) as Json).error.code : null];
+  };
+  const cards = () => posted.map(card => [card.blocks[0].text.text, card.text, card.blocks[0].accessory.url, card.blocks[0].accessory.text.text]);
+
+  // No credential, a wrong one, the bare token, another installation's, a self-hosted installation: the same 404, and
+  // nothing reaches Slack. The route answers POST only.
+  const other = diskAlertSetup({ ...live.config, authSecret: 'other-fixture-'.repeat(4) }).authorization;
+  for (const headers of <Record<string, string>[]>[{}, { authorization: 'Bearer nmdisk_' + 'A'.repeat(43) }, { authorization: setup.authorization.slice('Bearer '.length) }, { authorization: other }, { authorization: 'Bearer ' + secret }, { 'x-planetscale-signature': 'f'.repeat(64) }])
+    assert.deepEqual(await deliver(storageEvent(72), headers), [404, 'NOT_FOUND']);
+  assert.deepEqual(await deliver(storageEvent(72), undefined, runtime({ MULTI_TENANT: 'false', ACCOUNT_REQUIRED_ACR: undefined })), [404, 'NOT_FOUND']);
+  assert.deepEqual(await deliver(null, undefined, live, 'GET'), [404, 'NOT_FOUND']);
+  assert.deepEqual(posted, []);
+
+  // The event posts one card, with no database: its line, the plain-text fallback and a button to PlanetScale.
+  assert.deepEqual(await deliver(storageEvent(72)), [204, null]);
+  assert.deepEqual(cards(), [[':minidisc: *Database disk* production, 72% full.', 'Database disk: production, 72% full.', 'https://app.planetscale.com', 'Open']]);
+  // The same delivery again, and the same threshold a moment later, post nothing more; the next threshold posts at once.
+  assert.deepEqual([await deliver(storageEvent(72)), await deliver(storageEvent(74.9))], [[204, null], [204, null]]);
+  assert.equal(posted.length, 1);
+  // Nothing in an event shapes the button's address: whatever organization, database and branch it names, the button
+  // opens PlanetScale's own origin. The branch is text only, and only as a plain name: any other is left out.
+  assert.deepEqual(await deliver(storageEvent(75, { organization: 'evil-org', database: '../x', html_url: 'https://evil.example', resource: { branch_name: 'dev_2', storage_percentage: 75, html_url: 'https://evil.example' } })), [204, null]);
+  assert.deepEqual(cards()[1], [':minidisc: *Database disk* dev\u02cd2, 75% full.', 'Database disk: dev\u02cd2, 75% full.', 'https://app.planetscale.com', 'Open']);
+  for (const branch of ['<!channel>', 'evil.example', 'a/b', '../production', 'https://evil.example/x', '<https://evil.example|production>', '*bold*', 'prod uction', 'ünïcode', '', 'a'.repeat(64), 7, null, { name: 'production' }]) {
+    const hostile = JSON.stringify(diskAlertCard(storageEvent(61, { organization: branch, database: branch, resource: { branch_name: branch, storage_percentage: 61 } }))!.card);
+    assert.deepEqual([JSON.parse(hostile).blocks[0].text.text, JSON.parse(hostile).text, JSON.parse(hostile).blocks[0].accessory.url], [':minidisc: *Database disk* 61% full.', 'Database disk: 61% full.', 'https://app.planetscale.com'], String(branch));
+    assert.equal(hostile.includes('evil') || hostile.includes('channel'), false);
+  }
+
+  // An old delivery replayed, one dated ahead, and anything that is not the event are refused; other events post nothing.
+  for (const event of [storageEvent(86, { timestamp: now() - 61 * 60 }), storageEvent(86, { timestamp: now() + 61 * 60 })]) assert.deepEqual(await deliver(event), [400, 'EVENT_STALE']);
+  for (const event of [storageEvent(101), storageEvent(-1), storageEvent(86, { resource: { branch_name: 'production', storage_percentage: '86' } }), storageEvent(86, { resource: null }), storageEvent(86, { timestamp: 'now' }), [], 'null'])
+    assert.deepEqual(await deliver(event), [400, 'EVENT_INVALID']);
+  assert.deepEqual(await deliver('{'), [400, 'INVALID_JSON']);
+  assert.deepEqual(await deliver({ timestamp: now(), event: 'branch.ready', organization: 'anomalyco', database: 'nightmail', resource: {} }), [204, null]);
+  assert.equal(posted.length, 2);
+  // PlanetScale's "Test webhook" posts a card too, so the path can be checked without filling a disk.
+  assert.deepEqual(await deliver({ timestamp: now(), event: 'webhook.test', organization: 'anomalyco', database: 'nightmail', resource: { type: 'Database', html_url: 'https://evil.example' } }), [204, null]);
+  assert.deepEqual(cards()[2], [':minidisc: *Database disk* Test from PlanetScale.', 'Database disk: Test from PlanetScale.', 'https://app.planetscale.com', 'Open']);
+
+  // With the webhook's signing secret set, the header alone is not enough: a missing or wrong signature, or a body
+  // changed after signing, gets the same 404. Hosted only, like the Slack webhook.
+  const signedRuntime = runtime({ PLANETSCALE_WEBHOOK_SECRET: signing }), sign256 = (body: string, key = signing) => createHmac('sha256', key).update(body).digest('hex');
+  assert.deepEqual([signedRuntime.config.planetscaleWebhookSecret, loadConfig({ PUBLIC_URL: origin, BANE_ROOT_SECRET: secret, PLANETSCALE_WEBHOOK_SECRET: signing }).planetscaleWebhookSecret], [signing, undefined]);
+  // A secret too short or too long to be PlanetScale's never stops the installation: it is left unused, as if unset,
+  // and said once, without its value.
+  const warned: string[] = [];
+  await t.test('a signing secret of the wrong length is ignored with one warning', st => {
+    st.mock.method(console, 'warn', (line: string) => { warned.push(line); });
+    assert.deepEqual(['too-short-fixture', 'x'.repeat(31), 'y'.repeat(201), 'too-short-fixture'].map(value => runtime({ PLANETSCALE_WEBHOOK_SECRET: value }).config.planetscaleWebhookSecret), [undefined, undefined, undefined, undefined]);
+    assert.equal(loadConfig({ PUBLIC_URL: origin, BANE_ROOT_SECRET: secret, PLANETSCALE_WEBHOOK_SECRET: 'too-short-fixture' }).planetscaleWebhookSecret, undefined, 'Self-hosted, it is never read.');
+  });
+  assert.deepEqual(warned.map(line => (JSON.parse(line) as Json).code), ['PLANETSCALE_WEBHOOK_SECRET_IGNORED']);
+  assert.ok(!warned[0]!.includes('too-short-fixture') && !warned[0]!.includes('x'.repeat(31)));
+  const body = JSON.stringify(storageEvent(86));
+  for (const signature of [undefined, sign256(body, 'e'.repeat(64)), sign256(body.replace('86', '87')), sign256(body).slice(1)])
+    assert.deepEqual(await deliver(body, { authorization: setup.authorization, ...(signature ? { 'x-planetscale-signature': signature } : {}) }, signedRuntime), [404, 'NOT_FOUND']);
+  assert.deepEqual(await deliver(body, { 'x-planetscale-signature': sign256(body) }, signedRuntime), [404, 'NOT_FOUND'], 'A signature never replaces the token.');
+  assert.equal(posted.length, 3);
+  assert.deepEqual(await deliver(body, { authorization: setup.authorization, 'x-planetscale-signature': sign256(body) }, signedRuntime), [204, null]);
+  assert.equal(cards()[3]![0], ':minidisc: *Database disk* production, 86% full.');
+
+  // During a root-secret rotation the previous secret's header still works. Without the Slack webhook nothing is posted
+  // and PlanetScale is told.
+  const rotated = runtime({ BANE_ROOT_SECRET: 'next-fixture-'.repeat(4), PREVIOUS_BANE_ROOT_SECRET: secret });
+  assert.notEqual(diskAlertSetup(rotated.config).authorization, setup.authorization);
+  assert.deepEqual(await deliver(storageEvent(91), undefined, rotated), [204, null]);
+  assert.equal(cards()[4]![0], ':minidisc: *Database disk* production, 91% full.');
+  assert.deepEqual(await deliver(storageEvent(96), undefined, runtime({ OPERATOR_SLACK_WEBHOOK_URL: undefined })), [503, 'OPERATOR_ALERTS_OFF']);
+  // On Workers the DISK_ALERT limiter is asked with the threshold's key, and a card it refuses is not posted; the answer
+  // goes out before the card, which is posted after the response (PlanetScale waits two seconds).
+  const asked: string[] = [], later: ((runtime: import('./src/core.js').Runtime) => Promise<void>)[] = [];
+  assert.deepEqual(await deliver(storageEvent(44), undefined, { ...live, allowDiskAlert: async key => { asked.push(key); return false; } }), [204, null]);
+  const worker = { ...live, allowDiskAlert: async (key: string) => { asked.push(key); return true; }, deferNudge: (work: (typeof later)[number]) => { later.push(work); } };
+  assert.deepEqual(await deliver(storageEvent(96), undefined, worker), [204, null]);
+  assert.deepEqual([asked, later.length, posted.length], [['0', '95'], 1, 5]);
+  await later[0]!(worker);
+  assert.equal(cards()[5]![0], ':minidisc: *Database disk* production, 96% full.');
 });
 
 // Dashboard analytics (src/analytics.ts, docs/analytics.md): the ingest runs in-process here with an in-memory bucket and
