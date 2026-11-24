@@ -10,7 +10,7 @@ import type { DefaultTreeAdapterMap } from 'parse5';
 import { apiKeys } from './db/core.js';
 import { receivingPolicy } from './mailbox-ingest-input.js';
 import { lists, mergeSuppression, segments } from './db/audience.js';
-import { SuppressionReason, EmailEventData, readCursor, nextCursor, budgetedRead, readLimit, readLimitNote } from './core.js';
+import { SuppressionReason, EmailEventData, readCursor, encodeCursor, nextCursor, budgetedRead, readLimit, readLimitNote } from './core.js';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import type { Attachment } from '@aws-sdk/client-sesv2';
 import { actor, actorMailAccess, ApiError, AudienceSpec, denied, unrestrictedRequired, uploadKey, chargeRenderBudget, digest, errors, getSes, isSimulatedSes, id, rowId, IdParams, json, lazyModule, log, ModuleLoadError, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, timed, withoutVerdict, wrapModuleLoad, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Runtime, type Storage } from './core.js';
@@ -38,8 +38,8 @@ import { canonical, idempotencyGate, idempotencyKey, idempotent, IdempotencyHead
 import { PREVIEW_ROUTE_NOTE, previewResponses, refuseHead, registerPreviewImages, renderPreview } from './preview-images.js';
 import { actorJson, admission, admitted, charges, duplicateAttachment, refusal, shadowBilling, type AdmissionMail, type Admitted, type Refused, type Released } from './admission.js';
 import { contentBytes, estimatedMimeBytes, SEND_LIMITS } from './send-limits.js';
-import { reserveMemory, withMemory } from './isolate-memory.js';
-import { streamBase64JsonResponse } from './read-bounds.js';
+import { assertResponseWithinLimit, reserveMemory, responseByteLimit, withMemory } from './isolate-memory.js';
+import { buildBoundedPageJson, PAGE_MAX_BYTES, streamBase64JsonResponse, utf8Bytes, withBoundedRead } from './read-bounds.js';
 import { RATES } from './billing/money.js';
 
 type HtmlParser = typeof import('parse5').parse;
@@ -97,8 +97,16 @@ const Address = mailAddress();
 const Subject = z.string().min(1).max(998).refine(v => !/[\r\n]/.test(v), 'Subject cannot contain line breaks.');
 const FromName = senderDisplayName();
 const PreviewText = z.string().max(200).describe('Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader.');
+export const CAMPAIGN_DEFAULTS_MAX_KEYS = 100;
+export const CAMPAIGN_DEFAULTS_MAX_BYTES = 64 * 1024;
+export const EMAIL_LIST_MAX_BYTES = PAGE_MAX_BYTES;
+const LARGE_READ_RESERVE_THRESHOLD = 64 * 1024;
 const Scalar = z.union([z.string().max(65536), z.number().finite(), z.boolean(), z.null()]);
-const Data = z.record(z.string().max(120), Scalar).default({});
+const DataView = z.record(z.string().max(120), Scalar).default({});
+const Data = DataView
+  .refine(v => Object.keys(v).length <= CAMPAIGN_DEFAULTS_MAX_KEYS, `At most ${CAMPAIGN_DEFAULTS_MAX_KEYS} keys are supported.`)
+  .refine(v => utf8Bytes(JSON.stringify(v)) <= CAMPAIGN_DEFAULTS_MAX_BYTES, 'Defaults must total at most 64 KiB of JSON.')
+  .describe('Up to 100 key/value pairs, at most 64 KiB of JSON total.');
 const StoredTemplateData = z.record(z.string(), z.unknown()).default({}).refine(value => {
   try { return JSON.stringify(value).length <= 262144; } catch { return false; }
 }, 'Template data must be JSON serializable and at most 262,144 serialized characters.').describe('JSON substitution data, including nested objects and arrays, is passed unchanged to SES. SES stored templates do not automatically escape HTML: callers must escape untrusted values for their HTML context. Maximum serialized JSON length: 262,144 characters.');
@@ -143,8 +151,8 @@ const batchContent = (mails: { html?: string; text?: string }[]) => mails.reduce
 /** A batch with more than 2 MiB of content (the limit before 10 MiB) reserves, in the isolate's memory budget
  *  (isolate-memory.ts), what admitting it builds beside the parsed request: the rows' JSON and the statement's buffers,
  *  about three times its content. The largest batches then never peak together in one isolate; smaller ones run at once. */
-const batchMemory = <T>(mails: SendRequest[], work: () => Promise<T>) =>
-  batchContent(mails) > 2 * 1024 * 1024 ? withMemory(3 * mails.reduce((n, m) => n + contentBytes(m), 0), work) : work();
+const batchMemory = <T>(mails: SendRequest[], work: () => Promise<T>, opts?: { workspaceId?: string; signal?: AbortSignal }) =>
+  batchContent(mails) > 2 * 1024 * 1024 ? withMemory(3 * mails.reduce((n, m) => n + contentBytes(m), 0), work, { route: 'email.batch', ...opts }) : work();
 export const Status = z.enum(['queued', 'attempting', 'accepted', 'sent', 'delivered', 'bounced', 'complained', 'rejected', 'rendering_failed', 'delayed', 'suppressed', 'canceled', 'acceptance_unknown', 'simulated']);
 const UntrustedContent = z.boolean().describe('True for replies and older non-campaign mail of unknown origin: the subject or body may contain received content.');
 const Email = z.object({ untrustedContent: UntrustedContent, id: z.string(), region: z.string(), campaignId: z.string().nullable(), from: z.string(), fromName: z.string().nullable(), kind: z.enum(['transactional', 'marketing']), to: z.array(z.string()), cc: z.array(z.string()), bcc: z.array(z.string()), subject: z.string(),
@@ -178,8 +186,8 @@ const CampaignDraftFields = { name: z.string().trim().min(1).max(200), from: z.u
   requiredNotice: z.boolean().optional().describe('A required notice: a message every recipient must get whatever their marketing choice, such as a change to terms, prices or taxes, never a promotion. It goes to everyone in the audience who is not suppressed, people who unsubscribed from marketing included, without an Unsubscribe link or List-Unsubscribe header, and is paced, limited and paused like any campaign. Only where an operator turned required notices on for the workspace (requiredNotices in getWorkspaceSettings); 403 REQUIRED_NOTICES_OFF otherwise. Sending or scheduling one needs confirmRequiredNotice. Turned off later, a launched notice pauses before releasing anyone more (pause reason REQUIRED_NOTICES_OFF) and is resumed or rescheduled only once they are on again. Resumed after a list-probe quarantine, it goes on to everyone captured for it (never deliveredOnly).') };
 const CAMPAIGN_INPUT_NOTES = 'Drafts may omit sender, subject, content and audience until review or send, except that domain-restricted keys must supply a From address on one of their domains. Content is block HTML (see html); the same form is what the dashboard composer reads and writes, so people and agents edit one document. Simple {{name}} personalization works in text and quoted href/alt attributes; values are HTML-escaped and rendered URLs are validated. Durable campaign preparation is bounded and runs in background jobs.';
 const CampaignInput = z.object({ ...CampaignDraftFields, html: BlockHtml.optional() }).strict().describe(CAMPAIGN_INPUT_NOTES).openapi('CampaignDraftInput');
-// Stored drafts predating block HTML remain readable; they are revalidated when saved or reviewed.
-const CampaignDraftView = z.object({ ...CampaignDraftFields, html: z.string().optional() }).strict().describe(CAMPAIGN_INPUT_NOTES).openapi('CampaignDraft');
+// Stored drafts predating block HTML or defaults caps remain readable; they are revalidated when saved or reviewed.
+const CampaignDraftView = z.object({ ...CampaignDraftFields, defaults: DataView, html: z.string().optional() }).strict().describe(CAMPAIGN_INPUT_NOTES).openapi('CampaignDraft');
 const CampaignCreate = z.object({ ...CampaignInput.shape, region: Region.optional().describe('Defaults to the installation region. With regional MX delivery, omitting region follows the From domain.'), tracking: z.boolean().optional(), templateId: z.string().regex(/^tpl_[0-9a-f]{32}$/).optional().describe('Copies the active published revision of this global campaign template into a new independent campaign draft.') }).strict().openapi('CreateCampaignInput');
 const CampaignReady = CampaignInput.extend({ from: Address, subject: Subject, audience: AudienceSpec }).refine(v => !!v.html?.trim(), { message: 'Provide html before reviewing.', path: ['html'] });
 const CampaignStateValue = z.enum(CAMPAIGN_STATES).describe('draft: editable. preparing: the audience is frozen and every message is being validated in the background. scheduled: validated and waiting for scheduledAt. sending: recipients are being released into the dispatch queue. paused: releasing stopped by the user or the health check; queued mail still dispatches. done: every recipient was released and dispatched. failed: preparation or releasing failed (delivery.error); edit or launch again. canceled: terminal.');
@@ -1596,7 +1604,7 @@ export function registerSending(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/emails/batch', operationId: 'sendEmailBatch', description: SCREEN_LIMIT_NOTE, tags: ['Emails'], security, request: { headers: SendIdempotencyHeaders, body: json(BatchInput) }, responses: { 202: response(BatchReceipt), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
     if (batchContent(input.emails) > SEND_LIMITS.batchContentChars) throw new ApiError(413, 'BATCH_CONTENT_TOO_LARGE', `Combined batch body content may not exceed ${SEND_LIMITS.batchContentChars / 1024 / 1024} MiB.`);
-    const result = await batchMemory(input.emails, () => admitEmails(sendCall(c), a, input));
+    const result = await batchMemory(input.emails, () => admitEmails(sendCall(c), a, input), { workspaceId: a.workspaceId, signal: c.req.raw.signal });
     return c.json(BatchReceipt.parse(result), 202);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/emails/preview', operationId: 'previewEmail', tags: ['Emails'], security,
@@ -1620,48 +1628,105 @@ export function registerSending(app: App) {
       throw error;
     }
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/emails', operationId: 'listEmails', description: readLimitNote(READ_LIMIT.emails), tags: ['Emails'], security, request: { query: EmailQuery }, responses: { 200: response(page(Email)), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: '/v1/emails', operationId: 'listEmails', description: `Pages are also bounded by response size and may return fewer than limit emails; follow nextCursor while non-null. ${readLimitNote(READ_LIMIT.emails)}`, tags: ['Emails'], security, request: { query: EmailQuery }, responses: { 200: response(page(Email)), ...errors } }), async c => {
     const a = actor(c), q = c.req.valid('query'), binding = await pageBinding(a, 'emails', q), cursor = readCursor(q.cursor, binding);
     if (q.region) region(c.env, q.region);
     const search = q.search ? literalSearch(q.search) : null;
-    const rows = await budgetedRead(c.env.db, db => db.select(emailColumns).from(emails).where(and(mailWhere(a),
+    const maxBytes = Math.min(EMAIL_LIST_MAX_BYTES, responseByteLimit(c.req.raw) ?? EMAIL_LIST_MAX_BYTES);
+    const where = and(mailWhere(a),
       cursor ? sql`(${emails.createdAt}, ${emails.id}) < (${cursor.at}::timestamptz, ${cursor.id})` : undefined,
       q.campaignId ? eq(emails.campaignId, q.campaignId) : undefined, q.status === 'queued' ? inArray(emails.status, ['queued', 'scheduled']) : q.status ? eq(emails.status, q.status) : undefined,
       q.region ? eq(emails.region, q.region) : undefined, q.kind ? sql`${emails.snapshot}->>'kind' = ${q.kind}` : undefined,
       q.from ? gte(emails.createdAt, q.from) : undefined, q.to ? lt(emails.createdAt, q.to) : undefined,
       search ? sql`sending_log_text(${emails.id},${emails.campaignId},${emails.providerId},${emails.from},${emails.subject},${emails.to} || ${emails.cc} || ${emails.bcc}) ILIKE ${search}` : undefined,
-    )).orderBy(desc(emails.createdAt), desc(emails.id)).limit(q.limit + 1), readLimit(READ_LIMIT.emails));
-    return c.json({ data: rows.slice(0, q.limit).map(row => emailView(listedSubject(a, row))), nextCursor: nextCursor(rows, q.limit, binding) }, 200);
+    );
+    type RawEmailRow = { untrusted_content: boolean; id: string; region: string; campaign_id: string | null; from_address: string; from_name: string | null; kind: 'transactional' | 'marketing'; to_addresses: string[]; cc_addresses: string[]; bcc_addresses: string[]; subject: string; status: EmailStatus; provider_id: string | null; simulated: boolean; attempt_started_at: string | null; error_code: string | null; suppression_reason: string | null; scheduled_at: string | null; created_at: string; updated_at: string; candidate_count: number };
+    const { rows } = await budgetedRead(c.env.db, db => db.execute<RawEmailRow>(sql`
+      WITH candidate AS (
+        SELECT (${sentUntrustedContent}) AS untrusted_content,
+          ${emails.id} AS id, ${emails.region} AS region, ${emails.campaignId} AS campaign_id,
+          ${emails.from} AS from_address,
+          coalesce(${emails.snapshot}->>'fromName', CASE WHEN ${emails.reviewId} IS NOT NULL THEN (SELECT draft->>'fromName' FROM sending_campaign_reviews cr WHERE cr.id = ${emails.reviewId} AND cr.workspace_id = ${emails.workspaceId}) END) AS from_name,
+          ${emails.snapshot}->>'kind' AS kind,
+          ${emails.to} AS to_addresses, ${emails.cc} AS cc_addresses, ${emails.bcc} AS bcc_addresses,
+          ${emails.subject} AS subject, ${emails.status} AS status, ${emails.providerId} AS provider_id,
+          ${emails.simulated} AS simulated, ${emails.attemptStartedAt} AS attempt_started_at,
+          ${emails.errorCode} AS error_code, ${emails.suppressionReason} AS suppression_reason,
+          ${emails.scheduledAt} AS scheduled_at, ${emails.createdAt} AS created_at, ${emails.updatedAt} AS updated_at,
+          (octet_length(${emails.to}::text) + octet_length(${emails.cc}::text) + octet_length(${emails.bcc}::text) + octet_length(${emails.subject}) + 512) AS row_bytes
+        FROM ${emails} WHERE ${where}
+        ORDER BY ${emails.createdAt} DESC, ${emails.id} DESC LIMIT ${q.limit + 1}
+      ), sized AS (
+        SELECT *, row_number() OVER (ORDER BY created_at DESC, id DESC) AS rn,
+          sum(row_bytes) OVER (ORDER BY created_at DESC, id DESC ROWS UNBOUNDED PRECEDING) AS cum_bytes
+        FROM candidate
+      )
+      SELECT untrusted_content, id, region, campaign_id, from_address, from_name, kind,
+        to_addresses, cc_addresses, bcc_addresses, subject, status, provider_id, simulated,
+        attempt_started_at::text, error_code, suppression_reason, scheduled_at::text,
+        created_at::text, updated_at::text,
+        (SELECT count(*)::int FROM candidate) AS candidate_count
+      FROM sized WHERE rn = 1 OR cum_bytes <= ${maxBytes}
+      ORDER BY rn`), readLimit(READ_LIMIT.emails));
+    const candidateCount = rows[0]?.candidate_count ?? 0;
+    const rawPage = rows.slice(0, q.limit);
+    const items = rawPage.map(r => emailView(listedSubject(a, {
+      untrustedContent: r.untrusted_content, id: r.id, region: r.region, campaignId: r.campaign_id,
+      from: r.from_address, fromName: r.from_name, kind: r.kind, to: r.to_addresses, cc: r.cc_addresses,
+      bcc: r.bcc_addresses, subject: r.subject, status: r.status, providerId: r.provider_id,
+      simulated: r.simulated, attemptStartedAt: r.attempt_started_at, errorCode: r.error_code,
+      suppressionReason: r.suppression_reason, scheduledAt: r.scheduled_at, createdAt: r.created_at, updatedAt: r.updated_at,
+    })));
+    const rawById = new Map(rawPage.map(r => [r.id, r.created_at]));
+    const bounded = buildBoundedPageJson(items, candidateCount > items.length, maxBytes);
+    const encodedNext = bounded.nextCursor ? encodeCursor({ id: bounded.nextCursor, createdAt: rawById.get(bounded.nextCursor) ?? items[bounded.count - 1]!.createdAt }, binding) : null;
+    const payload = encodedNext
+      ? bounded.json.slice(0, bounded.json.lastIndexOf(',"nextCursor":')) + ',"nextCursor":' + JSON.stringify(encodedNext) + '}'
+      : bounded.json;
+    return c.body(payload, 200, { 'content-type': 'application/json; charset=UTF-8' }) as never;
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/emails/{id}', operationId: 'getEmail', tags: ['Emails'], security, request: { params: IdParams }, responses: { 200: response(Email), ...errors } }), async c => {
     const a = actor(c), [row] = await c.env.db.select(emailColumns).from(emails).where(mailWhere(a, c.req.valid('param').id)).limit(1);
     return c.json(emailView(listedSubject(a, row ?? notFound('Email'))), 200);
   });
+  const emailSnapshotBytes = async (db: DbExecutor, a: Actor, emailId: string) => {
+    const [probe] = await db.select({ bytes: sql<number>`coalesce(octet_length(${emails.snapshot}::text), 0)::int` }).from(emails).where(mailWhere(a, emailId)).limit(1);
+    if (!probe) notFound('Email');
+    return probe.bytes;
+  };
   app.openapi(createRoute({ method:'get', path:'/v1/emails/{id}/detail', operationId:'getEmailDetail', tags:['Emails'], security,
     description:'One log detail: metadata, visible HTML/text, attachment IDs, the first 100 events, active contact for a single To address, and the conversation the email belongs to. Uses the same content and event redaction as their individual endpoints; no raw MIME. Continue events with listEmailEvents.',
     request:{params:IdParams},responses:{200:response(z.object({email:Email,content:EmailContent.pick({html:true,text:true,attachments:true}),events:page(Event),contact:z.object({id:z.string(),suppressed:z.boolean(),suppressedAt:z.string().nullable().describe('When the address was suppressed (UTC). Null when it is not suppressed, and for a suppression from before these dates were kept.')}).nullable(),
       thread:EmailThread.nullable().describe('The conversation: of a reply from a receiving address or inbox, or of an email whose In-Reply-To named a stored message its sender could read, with the messages around it that you can read. Null for an email in none, when you can read none of the conversation\'s received or stored messages, and for credentials that cannot read received mail.')}).openapi('EmailDetail')),...errors} }),async c=>{
     const a=actor(c), emailId=c.req.valid('param').id, access=actorMailAccess(a);
-    // Single-table select fields render columns unqualified, which would bind to the subquery's own
-    // table (events matching their own id; contacts matching any workspace). Name the outer row.
-    const [detail]=await c.env.db.select({mail:emails,fromName:emailColumns.fromName,untrustedContent:sentUntrustedContent,
-      contact:a.domains.length ? sql<null>`NULL` : sql<{id:string;suppressed:boolean;suppressedAt:string|null}|null>`(SELECT jsonb_build_object('id',c.id,'suppressed',c.suppressed,'suppressedAt',CASE WHEN c.suppressed THEN c.suppressed_at END) FROM audience_contacts c
-        WHERE c.workspace_id=sending_emails.workspace_id AND c.deleted_at IS NULL AND jsonb_array_length(sending_emails.to_addresses)=1 AND c.email=lower(sending_emails.to_addresses->>0))`,
-      timeline:sql<z.input<typeof Event>[]>`(SELECT coalesce(jsonb_agg(t ORDER BY t."createdAt"::timestamptz,t.id),'[]') FROM (
-        SELECT id,email_id AS "emailId",type,provider_id AS "providerId",simulated,created_at::text AS "createdAt",data FROM sending_email_events
-        WHERE workspace_id=sending_emails.workspace_id AND email_id=sending_emails.id ORDER BY created_at,id LIMIT 101) t)`,
-      // Its conversation, in this statement: only for a reader that sees one of the thread's stored messages (thread-view.ts).
-      thread:access ? threadBlock(access,{thread:sentThreadId,focus:sql`sending_emails.id`,sends:true}) : sql<RawThread|null>`NULL`,
-    }).from(emails).where(mailWhere(a,emailId)).limit(1);
-    if(!detail) return notFound('Email');
-    const {mail,contact,timeline,untrustedContent}=detail, {html,text,attachments}=await visibleEmailContent(c.env,a,mail,untrustedContent);
-    const thread=threadView(detail.thread,a.permissions.includes('manage'));
-    const email=emailView({...mail,untrustedContent,subject:a.permissions.includes('manage') ? mail.subject : redactCapabilityText(mail.subject),fromName:detail.fromName,kind:mail.snapshot.kind});
-    return c.json({email,content:{html,text,attachments},contact,thread,events:{data:timeline.slice(0,100).map(r=>visibleEmailEvent(a,r)),nextCursor:nextCursor(timeline as {id:string;createdAt:string}[],100,`email-events:${mail.id}`)}},200);
+    const snapBytes = await emailSnapshotBytes(c.env.db, a, emailId);
+    assertResponseWithinLimit(c.req.raw, snapBytes + 16384);
+    const run = async (): Promise<Response> => {
+      const [detail]=await c.env.db.select({mail:emails,fromName:emailColumns.fromName,untrustedContent:sentUntrustedContent,
+        contact:a.domains.length ? sql<null>`NULL` : sql<{id:string;suppressed:boolean;suppressedAt:string|null}|null>`(SELECT jsonb_build_object('id',c.id,'suppressed',c.suppressed,'suppressedAt',CASE WHEN c.suppressed THEN c.suppressed_at END) FROM audience_contacts c
+          WHERE c.workspace_id=sending_emails.workspace_id AND c.deleted_at IS NULL AND jsonb_array_length(sending_emails.to_addresses)=1 AND c.email=lower(sending_emails.to_addresses->>0))`,
+        timeline:sql<z.input<typeof Event>[]>`(SELECT coalesce(jsonb_agg(t ORDER BY t."createdAt"::timestamptz,t.id),'[]') FROM (
+          SELECT id,email_id AS "emailId",type,provider_id AS "providerId",simulated,created_at::text AS "createdAt",data FROM sending_email_events
+          WHERE workspace_id=sending_emails.workspace_id AND email_id=sending_emails.id ORDER BY created_at,id LIMIT 101) t)`,
+        thread:access ? threadBlock(access,{thread:sentThreadId,focus:sql`sending_emails.id`,sends:true}) : sql<RawThread|null>`NULL`,
+      }).from(emails).where(mailWhere(a,emailId)).limit(1);
+      if(!detail) return notFound('Email');
+      const {mail,contact,timeline,untrustedContent}=detail, {html,text,attachments}=await visibleEmailContent(c.env,a,mail,untrustedContent);
+      const thread=threadView(detail.thread,a.permissions.includes('manage'));
+      const email=emailView({...mail,untrustedContent,subject:a.permissions.includes('manage') ? mail.subject : redactCapabilityText(mail.subject),fromName:detail.fromName,kind:mail.snapshot.kind});
+      return c.json({email,content:{html,text,attachments},contact,thread,events:{data:timeline.slice(0,100).map(r=>visibleEmailEvent(a,r)),nextCursor:nextCursor(timeline as {id:string;createdAt:string}[],100,`email-events:${mail.id}`)}},200);
+    };
+    return (snapBytes > LARGE_READ_RESERVE_THRESHOLD ? await withBoundedRead(c, () => run(), { route: 'email.detail', workspaceId: a.workspaceId }) : await run()) as never;
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/emails/{id}/content', operationId: 'getEmailContent', description: 'Manage keys receive full snapshots. Other readers receive app unsubscribe tokens redacted from subject/HTML/text and raw MIME withheld (null), since MIME encodings can conceal capabilities. Other transactional bearer links are not sanitized; grant content-read access only to trusted integrations.', tags: ['Emails'], security, request: { params: IdParams }, responses: { 200: response(EmailContent), ...errors } }), async c => {
-    const a = actor(c); const row = await findEmail(c.env.db, a, c.req.valid('param').id);
-    return c.json(await visibleEmailContent(c.env,a,row,row.untrustedContent),200);
+    const a = actor(c), emailId = c.req.valid('param').id;
+    const snapBytes = await emailSnapshotBytes(c.env.db, a, emailId);
+    assertResponseWithinLimit(c.req.raw, snapBytes + 4096);
+    const run = async (): Promise<Response> => {
+      const row = await findEmail(c.env.db, a, emailId);
+      return c.json(await visibleEmailContent(c.env, a, row, row.untrustedContent), 200);
+    };
+    return (snapBytes > LARGE_READ_RESERVE_THRESHOLD ? await withBoundedRead(c, () => run(), { route: 'email.content', workspaceId: a.workspaceId }) : await run()) as never;
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/emails/{id}/events', operationId: 'listEmailEvents', tags: ['Emails'], security, request: { params: IdParams, query: PageQuery }, responses: { 200: response(page(Event)), ...errors } }), async c => {
     // Oldest first by creation time: event IDs are random, so ordering by ID shuffled an email's history.
@@ -1733,6 +1798,7 @@ export function registerSending(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/attachments/{id}/content', operationId: 'getAttachmentContent', description: 'Returns the private attachment as canonical base64 JSON, scoped like its metadata. At most 25 MiB decoded; never a public object URL or executable inline response.', tags: ['Attachments'], security, request: { params: IdParams }, responses: { 200: response(AttachmentInfo.extend({ content: z.string().max(Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4) }).openapi('AttachmentContent')), ...errors } }), async c => {
     const a = actor(c);
     const [row] = await attachmentRows(c.env.db, a, [c.req.valid('param').id]);
+    assertResponseWithinLimit(c.req.raw, Math.ceil(row!.size / 3) * 4 + 512);
     // The file counts against the isolate's self-reclaiming budget (isolate-memory.ts) until read, canceled, or past
     // its idle/hard deadline, and streams out base64 a chunk at a time so the file is the only large buffer.
     let lease: import('./isolate-memory.js').MemoryLease;
@@ -1831,10 +1897,17 @@ export function registerSending(app: App) {
     return rooms.connect(room, { kind: 'person', id: key, name: a.name?.trim() || 'A teammate', view: c.req.query('view') === 'review' ? 'review' : 'write', names, until: Date.now() + ADMISSION_MS });
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}', operationId: 'getCampaign', description: `The campaign with its full draft, per-status email counts and delivery progress. ${CAMPAIGN_PROGRESS_NOTE} ${readLimitNote(READ_LIMIT.campaign)}`, tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(Campaign), ...errors } }), async c => {
-    const a = actor(c), row = await timed(c, 'campaign-db', () => findCampaign(c.env.db, a, c.req.valid('param').id));
-    agentVisit(c, a, row);
-    const views = await timed(c, 'campaign-counts-db', () => budgetedRead(c.env.db, db => campaignViews(c.env, a, [row], { origin: new URL(c.req.url).origin, detail: true }, db), readLimit(READ_LIMIT.campaign)));
-    return c.json(Campaign.parse(views[0]!), 200);
+    const a = actor(c), campaignId = c.req.valid('param').id;
+    const [probe] = await c.env.db.select({ bytes: sql<number>`coalesce(octet_length(${campaigns.draft}::text), 0)::int` }).from(campaigns).where(campaignWhere(a, campaignId)).limit(1);
+    if (!probe) notFound('Campaign');
+    assertResponseWithinLimit(c.req.raw, probe.bytes + 4096);
+    const run = async (): Promise<Response> => {
+      const row = await timed(c, 'campaign-db', () => findCampaign(c.env.db, a, campaignId));
+      agentVisit(c, a, row);
+      const views = await timed(c, 'campaign-counts-db', () => budgetedRead(c.env.db, db => campaignViews(c.env, a, [row], { origin: new URL(c.req.url).origin, detail: true }, db), readLimit(READ_LIMIT.campaign)));
+      return c.json(Campaign.parse(views[0]!), 200);
+    };
+    return (probe.bytes > LARGE_READ_RESERVE_THRESHOLD * 2 ? await withBoundedRead(c, () => run(), { route: 'campaign.get', workspaceId: a.workspaceId }) : await run()) as never;
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/stats', operationId: 'getCampaignStats', description: 'Lifetime campaign delivery and unique open/click statistics, progress, tracking setting and rates with numeric numerators/denominators. Counts distinct emails across all stored feedback, not event occurrences. Delivery/bounce/complaint rates use accepted emails; open/click rates use delivered emails. Both rate counts exclude simulated emails. Rates are fractions, null for zero denominators; engagement rates are also null with tracking disabled. Delivered means receiving-server acceptance, not inbox placement. Engagement includes bots/privacy proxies. Done means dispatch finished; asynchronous feedback can still change totals. ' + STATS_NOTE + ' ' + readLimitNote(READ_LIMIT.campaignStats), tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignStats), ...errors } }), async c => {
     const a = actor(c), row = await findCampaign(c.env.db, a, c.req.valid('param').id);
@@ -2747,7 +2820,7 @@ export async function campaignVerdicts(runtime: Runtime, ref: CampaignScreenRef,
         const charged = await runtime.db.execute(sql`UPDATE sending_campaign_reviews SET screen_charged=screen_charged+1
           WHERE workspace_id=${ref.workspaceId} AND id=${ref.reviewId} AND screen_charged<screen_budget`);
         if (!charged.rowCount) throw new ApiError(422, 'CONTENT_SCREEN_BUDGET_EXCEEDED', 'This campaign has used the classifier requests its audience allows; its unscreened copies are not sent.');
-        const result = await screen.screenWindow(runtime, input, row.windows, call);
+        const result = await screen.screenWindow(runtime, input, row.windows, call, key);
         const [moved] = (await runtime.db.execute<Row>(sql`UPDATE sending_campaign_screens SET windows=windows+1,spam=greatest(spam,${result.spam}),model=${result.model},
           judged_at=CASE WHEN windows+1>=requests THEN clock_timestamp() END
           WHERE campaign_id=${ref.campaignId} AND copy_hash=${key} AND windows=${row.windows}

@@ -2,6 +2,8 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { and, sql, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { actor, ApiError, budgetedRead, denied, errors, PageQuery, readLimit, readLimitNote, statementTimedOut, unrestrictedRequired, region, response, security, type Actor, type App, type DbExecutor, type MailboxAccess } from './core.js';
+import { PAGE_MAX_BYTES, withBoundedRead } from './read-bounds.js';
+import { fitPageByBytes, INBOUND_ADDRESS_PAGE_LIMIT, messageFieldCount, sliceAddressStrings, sliceJsonbArray } from './inbound-bounds.js';
 import { emails } from './db/sending.js';
 import { mailMessages as messages } from './db/mailbox.js';
 import { readsDelivery, visibleAddresses } from './inbound-threads.js';
@@ -30,7 +32,8 @@ const LogEntry = z.object({
   at: z.string().describe('When the email was created (sent) or received.'),
   status: z.string().describe('Sent: the email status, or scheduled for a send waiting for its time (getEmail reads it as queued with scheduled true). Received: received, or spam when flagged (spam is shown to administrators only).'),
   from: Address,
-  to: z.array(z.string()).describe('Sent: the To recipients. Received: the addresses in the To header.'),
+  to: z.array(z.string()).describe('Sent: the To recipients (at most 20). Received: the addresses in the To header (at most 20).'),
+  toCount: z.number().int().describe('Total To recipients (may exceed to.length when shortened).'),
   subject: z.string(),
   stream: z.enum(['transactional', 'marketing']).nullable().describe('Sent mail only.'),
   campaignId: z.string().nullable(),
@@ -41,7 +44,8 @@ const LogEntry = z.object({
   threadCount: z.number().int().nullable().describe('Messages in that conversation the caller can read, this one included; null without threadId.'),
   addresses: z.array(z.object({ id: z.string(), address: z.string() })).nullable().describe('Received mail only: the receiving addresses it was delivered to that the caller can read. Empty for unrouted mail.'),
   region: z.string().nullable().describe('Null for received mail unless the caller is an administrator.'),
-  envelopeTo: z.array(z.string()).nullable().describe('Received mail, administrators only: the SMTP envelope recipients.'),
+  envelopeTo: z.array(z.string()).nullable().describe('Received mail, administrators only: the SMTP envelope recipients (at most 20).'),
+  envelopeToCount: z.number().int().nullable().describe('Received mail, administrators only: total SMTP envelope recipients.'),
 }).openapi('LogEntry');
 // counts=true: how many emails match each filter value, the way a list's facets count, over the same dates as the list
 // (from and to). They are exact: the dates bound what they read, so a narrower range costs less.
@@ -88,7 +92,7 @@ function readCursor(value: string | undefined, binding: string) {
   } catch { throw new ApiError(422, 'INVALID_CURSOR', 'Use the returned cursor with the same filters.', 'cursor'); }
 }
 
-type Row = { direction: 'sent' | 'received'; untrusted: boolean; id: string; at: string; status: string; from_address: string; from_name: string | null; to: unknown[]; subject: string; stream: 'transactional' | 'marketing' | null; campaign_id: string | null; scheduled_at: string | null; simulated: boolean; attachment_count: number | null; thread_id: string | null; thread_count: number | null; addresses: { id: string; address: string }[] | null; region: string | null; envelope_to: string[] | null };
+type Row = { direction: 'sent' | 'received'; untrusted: boolean; id: string; at: string; status: string; from_address: string; from_name: string | null; to: unknown[]; to_count: number; subject: string; stream: 'transactional' | 'marketing' | null; campaign_id: string | null; scheduled_at: string | null; simulated: boolean; attachment_count: number | null; thread_id: string | null; thread_count: number | null; addresses: { id: string; address: string }[] | null; region: string | null; envelope_to: string[] | null; envelope_to_count: number | null; candidate_count: number };
 
 export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess | null) {
   app.openapi(createRoute({ method: 'get', path: '/v1/logs', operationId: 'listLogs', tags: ['Emails'], security, summary: 'List sent and received mail together',
@@ -107,9 +111,10 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
     // The dates bound both sides, by when sent mail was created and received mail arrived: the page and its counts alike.
     const dated = (column: AnyPgColumn) => and(q.from ? sql`${column} >= ${q.from}::timestamptz` : undefined, q.to ? sql`${column} < ${q.to}::timestamptz` : undefined);
 
+    const addrCap = INBOUND_ADDRESS_PAGE_LIMIT;
     const sentPage = sent ? sql`(SELECT 'sent'::text AS direction, ${sentUntrustedContent} AS untrusted, ${emails.id} AS id, ${emails.createdAt} AS sort_at, ${precise(emails.createdAt)} AS at, ${emails.status} AS status,
-        ${emails.from} AS from_address, ${emails.snapshot}->>'fromName' AS from_name, ${emails.to} AS "to", ${emails.subject} AS subject, ${emails.snapshot}->>'kind' AS stream,
-        ${emails.campaignId} AS campaign_id, CASE WHEN ${emails.status}='scheduled' THEN ${precise(emails.scheduledAt)} END AS scheduled_at, ${emails.simulated} AS simulated, NULL::int AS attachment_count, ${access ? sentThreadId : sql`NULL::text`} AS thread_id, NULL::jsonb AS addresses, ${emails.region} AS region, NULL::jsonb AS envelope_to
+        ${emails.from} AS from_address, ${emails.snapshot}->>'fromName' AS from_name, ${sliceJsonbArray(emails.to, addrCap)} AS "to", jsonb_array_length(${emails.to})::int AS to_count, ${emails.subject} AS subject, ${emails.snapshot}->>'kind' AS stream,
+        ${emails.campaignId} AS campaign_id, CASE WHEN ${emails.status}='scheduled' THEN ${precise(emails.scheduledAt)} END AS scheduled_at, ${emails.simulated} AS simulated, NULL::int AS attachment_count, ${access ? sentThreadId : sql`NULL::text`} AS thread_id, NULL::jsonb AS addresses, ${emails.region} AS region, NULL::jsonb AS envelope_to, NULL::int AS envelope_to_count
       FROM ${emails} WHERE ${and(mailWhere(a),
         after ? after.direction === 'sent' ? sql`(${emails.createdAt}, ${emails.id}) < (${after.at}::timestamptz, ${after.id})` : sql`${emails.createdAt} < ${after.at}::timestamptz` : undefined,
         q.campaignId ? sql`${emails.campaignId} = ${q.campaignId}` : undefined, q.status && !onlyReceived ? sql`${emails.status} = ${q.status}` : undefined,
@@ -121,9 +126,9 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
     const delivery = !!access && readsDelivery(a, access);
     const receivedPage = received && access ? sql`(SELECT 'received'::text AS direction, true AS untrusted, ${messages.id} AS id, ${messages.receivedAt} AS sort_at, ${precise(messages.receivedAt)} AS at,
         ${delivery ? sql`CASE WHEN ${messages.spam} THEN 'spam' ELSE ${messages.status} END` : messages.status} AS status,
-        ${messages.fromAddress} AS from_address, ${messages.fromName} AS from_name, coalesce((SELECT jsonb_agg(t->>'address') FROM jsonb_array_elements(${messages.to}) t), '[]'::jsonb) AS "to",
+        ${messages.fromAddress} AS from_address, ${messages.fromName} AS from_name, ${sliceAddressStrings(messages.to, addrCap)} AS "to", ${messageFieldCount(messages.to, messages.verdicts, 'toCount')} AS to_count,
         ${messages.subject} AS subject, NULL::text AS stream, NULL::text AS campaign_id, NULL::text AS scheduled_at, false AS simulated, ${messages.attachmentCount} AS attachment_count, ${messages.threadId} AS thread_id,
-        ${visibleAddresses(access)} AS addresses, ${delivery ? messages.region : sql`NULL::text`} AS region, ${delivery ? messages.envelopeTo : sql`NULL::jsonb`} AS envelope_to
+        ${visibleAddresses(access)} AS addresses, ${delivery ? messages.region : sql`NULL::text`} AS region, ${delivery ? sliceJsonbArray(messages.envelopeTo, addrCap) : sql`NULL::jsonb`} AS envelope_to, ${delivery ? sql`jsonb_array_length(${messages.envelopeTo})::int` : sql`NULL::int`} AS envelope_to_count
       FROM ${messages} WHERE ${and(accessibleMessages(access, {}), sql`${messages.direction} = 'inbound'`,
         after ? after.direction === 'received' ? sql`(${messages.receivedAt}, ${messages.id}) < (${after.at}::timestamptz, ${after.id})` : sql`${messages.receivedAt} <= ${after.at}::timestamptz` : undefined,
         q.region ? sql`${messages.region} = ${q.region}` : undefined, dated(messages.receivedAt), q.search ? sql`mail_messages.search @@ websearch_to_tsquery('simple', ${q.search})` : undefined,
@@ -167,21 +172,44 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
       await db.execute(sql.raw(`SET LOCAL statement_timeout = '${COUNTS_READ}s'`));
       try { return await countLogs(db); } catch (error) { throw statementTimedOut(error) ? readLimit(COUNTS_READ).refusal() : error; }
     };
-    // The page, then its counts, on one connection, each statement within its limit.
-    const { rows, counts } = await budgetedRead(c.env.db, async db => ({ rows: (await db.execute<Row>(access ? sql`WITH page AS MATERIALIZED (${merged}),
-        sizes AS (SELECT t.thread_id, ${threadSize(access, true, sql`t.thread_id`)} AS thread_count FROM (SELECT DISTINCT thread_id FROM page WHERE thread_id IS NOT NULL) t)
-      SELECT page.*, sizes.thread_count FROM page LEFT JOIN sizes USING (thread_id) ORDER BY page.sort_at DESC, page.direction DESC, page.id DESC` : merged)).rows,
-      counts: withCounts === 'true' ? await countWithin(db) : undefined }), readLimit(LOGS_READ));
-    const last = rows.length > q.limit ? rows[q.limit - 1] : undefined;
-    return c.json({
-      data: rows.slice(0, q.limit).map(row => ({
-        id: row.id, direction: row.direction, untrustedContent: row.untrusted, at: new Date(row.at).toISOString(), status: row.status, from: { name: row.from_name, address: row.from_address },
-        to: (row.to ?? []).map(String), subject: listedSubject(a, row).subject, stream: row.stream, campaignId: row.campaign_id, scheduledAt: row.scheduled_at && new Date(row.scheduled_at).toISOString(), simulated: row.simulated, attachmentCount: row.attachment_count,
-        threadId: row.thread_count == null ? null : row.thread_id, threadCount: row.thread_count ?? null, addresses: row.addresses, region: row.region, envelopeTo: row.envelope_to,
-      })),
-      nextCursor: last ? Buffer.from(JSON.stringify([last.at, last.direction, last.id, binding])).toString('base64url') : null,
-      received,
-      ...counts && { counts },
-    }, 200);
+    // The page (byte-bounded in SQL), then its counts, on one connection, each statement within its limit.
+    const boundedSql = sql`WITH candidate AS MATERIALIZED (${merged}),
+      sized AS (
+        SELECT *,
+          row_number() OVER (ORDER BY sort_at DESC, direction DESC, id DESC) AS rn,
+          sum(octet_length("to"::text) + coalesce(octet_length(envelope_to::text), 0) + coalesce(octet_length(addresses::text), 0) + octet_length(subject) + octet_length(from_address) + coalesce(octet_length(from_name), 0) + 384)
+            OVER (ORDER BY sort_at DESC, direction DESC, id DESC ROWS UNBOUNDED PRECEDING) AS cum_bytes
+        FROM candidate
+      ),
+      page AS MATERIALIZED (
+        SELECT *, (SELECT count(*)::int FROM candidate) AS candidate_count
+        FROM sized WHERE rn = 1 OR cum_bytes <= ${PAGE_MAX_BYTES}
+      )${access ? sql`,
+      sizes AS (SELECT t.thread_id, ${threadSize(access, true, sql`t.thread_id`)} AS thread_count FROM (SELECT DISTINCT thread_id FROM page WHERE thread_id IS NOT NULL) t)
+      SELECT page.*, sizes.thread_count FROM page LEFT JOIN sizes USING (thread_id) ORDER BY page.rn` : sql`
+      SELECT page.*, NULL::int AS thread_count FROM page ORDER BY page.rn`}`;
+    return await withBoundedRead(c, async () => {
+      const { rows, counts } = await budgetedRead(c.env.db, async db => ({
+        rows: (await db.execute<Row>(boundedSql)).rows,
+        counts: withCounts === 'true' ? await countWithin(db) : undefined,
+      }), readLimit(LOGS_READ));
+      const candidateCount = rows[0]?.candidate_count ?? 0;
+      const mapped = rows.slice(0, q.limit).map(row => ({
+        raw: row,
+        entry: {
+          id: row.id, direction: row.direction, untrustedContent: row.untrusted, at: new Date(row.at).toISOString(), status: row.status, from: { name: row.from_name, address: row.from_address },
+          to: (row.to ?? []).map(String), toCount: Math.max((row.to ?? []).length, row.to_count ?? 0), subject: listedSubject(a, row).subject, stream: row.stream, campaignId: row.campaign_id, scheduledAt: row.scheduled_at && new Date(row.scheduled_at).toISOString(), simulated: row.simulated, attachmentCount: row.attachment_count,
+          threadId: row.thread_count == null ? null : row.thread_id, threadCount: row.thread_count ?? null, addresses: row.addresses, region: row.region, envelopeTo: row.envelope_to, envelopeToCount: row.envelope_to === null ? null : Math.max(row.envelope_to.length, row.envelope_to_count ?? 0),
+        },
+      }));
+      const fitted = fitPageByBytes(mapped, candidateCount > mapped.length, PAGE_MAX_BYTES, 512);
+      const last = fitted.hasMore ? fitted.items[fitted.items.length - 1]?.raw : undefined;
+      return c.json({
+        data: fitted.items.map(x => x.entry),
+        nextCursor: last ? Buffer.from(JSON.stringify([last.at, last.direction, last.id, binding])).toString('base64url') : null,
+        received,
+        ...counts && { counts },
+      }, 200);
+    }, { route: 'logs.list', workspaceId: a.workspaceId }) as never;
   });
 }

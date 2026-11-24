@@ -11,6 +11,7 @@ interface __BaseEnv_Env {
 	LEGACY_FEEDBACK_DLQ: Queue;
 	FEEDBACK_QUEUE: Queue;
 	FEEDBACK_PRIORITY_QUEUE?: Queue;
+	JEVF_QUEUE?: Queue;
 	ADMISSION: RateLimit;
 	SNS_CERT_MISSES: RateLimit;
 	ANALYTICS_INGEST?: RateLimit;
@@ -37,6 +38,7 @@ interface __BaseEnv_Env {
 	API_RATE_LIMIT_PER_MINUTE: "10000";
 	WORK_QUEUE_NAME: "bane-prod-work";
 	WEBHOOK_QUEUE_NAME: "bane-prod-webhooks";
+	JEVF_QUEUE_NAME?: string;
 	FEEDBACK_QUEUE_NAME: "bane-prod-feedback-v2";
 	FEEDBACK_PRIORITY_QUEUE_NAME?: string;
 	FEEDBACK_DLQ_NAME: "bane-prod-feedback-v2-dlq";

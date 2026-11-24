@@ -8,6 +8,7 @@ import { jobs } from './db/core.js';
 import { resolveRegionRuntime } from './ses-region-state.js';
 import { failCampaign, failScheduledRelease } from './states.js';
 import { flushScreenCalls } from './screen-calls.js';
+import { flushShadow } from './screen-shadow.js';
 import { storageBinding, ingestInput,type IngestInput } from './mailbox-ingest-input.js';
 export const MAX_ATTEMPTS = 6;
 export const WEBHOOK_ATTEMPTS = 10;
@@ -425,6 +426,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
     log('info', { code: 'JOB_DRAIN', processed, claims, claimRequests, concurrency: effectiveConcurrency, peakActiveJobs, laneJobs, budgetMs, durationMs: Date.now() - started });
     // Classifier requests the drain's jobs made (a campaign's copies, screened before release) as content_screen_calls rows.
     await flushScreenCalls(runtime.db);
+    flushShadow(runtime); // And to the second classifier, where one is configured (src/screen-shadow.ts): handed over, never waited for.
   }
   if (failures.length) throw failures[0];
   return processed;

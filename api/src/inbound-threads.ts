@@ -5,7 +5,9 @@ import type { S3Client } from '@aws-sdk/client-s3';
 import { readableMailboxKey, mailboxS3 } from './mailbox-setup.js';
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, inArray, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
-import { actorMailAccess, ApiError, budgetedRead, denied, errors, isoTime, json, lazyModule, page, readLimit, readLimitNote, response, security, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
+import { actorMailAccess, ApiError, budgetedRead, denied, errors, isoTime, json, lazyModule, page, readLimit, readLimitNote, response, security, statementTimedOut, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
+import { PAGE_MAX_BYTES, withBoundedRead } from './read-bounds.js';
+import { fitPageByBytes, INBOUND_ADDRESS_PAGE_LIMIT, INBOUND_ADDRESS_STORE_LIMIT, messageFieldCount, sliceJsonbArray } from './inbound-bounds.js';
 import { productName } from './brand.js';
 
 const loadS3Presign = lazyModule(() => Promise.all([import('@aws-sdk/client-s3'), import('@aws-sdk/s3-request-presigner')]));
@@ -32,10 +34,17 @@ const Thread = z.object({
 const Message = z.object({
   simulated:z.boolean().optional(),
   id: z.string(), threadId: z.string(), addressIds: z.array(z.string()), direction: z.enum(['inbound', 'outbound']), status: z.string(),
-  from: Address, to: z.array(Address), cc: z.array(Address), replyTo: z.array(Address), subject: z.string(), snippet: z.string(),
+  from: Address, to: z.array(Address).describe('Addresses in the To header (at most 20 on conversation pages, up to 100 on getInboundMessage).'),
+  toCount: z.number().int().describe('Total addresses in the To header (may exceed to.length when shortened).'),
+  cc: z.array(Address).describe('Addresses in the Cc header (at most 20 on conversation pages, up to 100 on getInboundMessage).'),
+  ccCount: z.number().int().describe('Total addresses in the Cc header (may exceed cc.length when shortened).'),
+  replyTo: z.array(Address).describe('Addresses in the Reply-To header (at most 20 on conversation pages, up to 100 on getInboundMessage).'),
+  replyToCount: z.number().int().describe('Total addresses in the Reply-To header (may exceed replyTo.length when shortened).'),
+  subject: z.string(), snippet: z.string(),
   text: z.string(), replyText: z.string(), receivedAt: z.string(), bodyTruncated: z.boolean(), attachmentCount: z.number().int(), read:z.boolean(), errorCode:z.string().nullable(), suppressionReason:SuppressionReason.nullable().optional(),
   emailId: z.string().nullable(), messageId: z.string().nullable().describe(`RFC Message-ID, not the ${productName} message ID (id).`),
-  inReplyTo: z.string().nullable(), references: z.array(z.string()),
+  inReplyTo: z.string().nullable(), references: z.array(z.string()).describe('Message-IDs in the References header (at most 20 on conversation pages, up to 100 on getInboundMessage).'),
+  referencesCount: z.number().int().describe('Total Message-IDs in the References header (may exceed references.length when shortened).'),
 }).openapi('InboundMessage');
 const Cursor = z.string().min(1).max(300).optional().describe('Opaque cursor from the preceding page, with the same filters.');
 const AddressFilter = z.object({ addressId: InboundAddressId.optional() }).strict();
@@ -200,22 +209,94 @@ const metadataFields = { simulated:sql<boolean>`coalesce((${messages.verdicts}->
 const messageFields = { ...metadataFields, errorCode: messages.errorCode, fromName: messages.fromName, fromAddress: messages.fromAddress,
   to: messages.to, cc: messages.cc, replyTo: messages.replyTo, text: messages.text, html: messages.html, bodyTruncated: messages.bodyTruncated,
   sendingEmailId: messages.sendingEmailId, messageId: messages.messageId, inReplyTo: messages.inReplyTo, references: messages.references };
-function messageView(row: Pick<typeof messages.$inferSelect, Exclude<keyof typeof messageFields,'simulated'>> & {simulated?:boolean;verdicts?:Verdicts}, addressIds: string[], read = true) {
-  const text = row.text ?? (row.html ? htmlToPlain(row.html) : '');
-  return { simulated:row.simulated??row.verdicts?.simulated??false,id: row.id, threadId: row.threadId, addressIds, direction: row.direction, status: row.status, read, errorCode:row.errorCode, suppressionReason:row.suppressionReason,
-    from: { name: row.fromName, address: row.fromAddress }, to: row.to, cc: row.cc, replyTo: row.replyTo, subject: row.subject, snippet: row.snippet,
-    text, replyText: replyText(text), receivedAt: timestamp(row.receivedAt), bodyTruncated: row.bodyTruncated, attachmentCount: row.attachmentCount,
-    emailId: row.sendingEmailId, messageId: row.messageId, inReplyTo: row.inReplyTo, references: row.references };
+type MessageCounts = { toCount?: number; ccCount?: number; replyToCount?: number; referencesCount?: number };
+function publicVerdicts(verdicts: Verdicts): Record<string, string | boolean> {
+  const out: Record<string, string | boolean> = {};
+  for (const [k, v] of Object.entries(verdicts)) if (typeof v === 'string' || typeof v === 'boolean') out[k] = v;
+  return out;
 }
+function messageView(row: Pick<typeof messages.$inferSelect, Exclude<keyof typeof messageFields,'simulated'>> & {simulated?:boolean;verdicts?:Verdicts} & MessageCounts, addressIds: string[], read = true) {
+  const text = row.text ?? (row.html ? htmlToPlain(row.html) : '');
+  const toCount = Math.max(row.to.length, row.toCount ?? row.verdicts?.toCount ?? 0);
+  const ccCount = Math.max(row.cc.length, row.ccCount ?? row.verdicts?.ccCount ?? 0);
+  const replyToCount = Math.max(row.replyTo.length, row.replyToCount ?? row.verdicts?.replyToCount ?? 0);
+  const referencesCount = Math.max(row.references.length, row.referencesCount ?? row.verdicts?.referencesCount ?? 0);
+  return { simulated:row.simulated??row.verdicts?.simulated??false,id: row.id, threadId: row.threadId, addressIds, direction: row.direction, status: row.status, read, errorCode:row.errorCode, suppressionReason:row.suppressionReason,
+    from: { name: row.fromName, address: row.fromAddress }, to: row.to, toCount, cc: row.cc, ccCount, replyTo: row.replyTo, replyToCount, subject: row.subject, snippet: row.snippet,
+    text, replyText: replyText(text), receivedAt: timestamp(row.receivedAt), bodyTruncated: row.bodyTruncated, attachmentCount: row.attachmentCount,
+    emailId: row.sendingEmailId, messageId: row.messageId, inReplyTo: row.inReplyTo, references: row.references, referencesCount };
+}
+type PageMsgRow = {
+  simulated: boolean; id: string; thread_id: string; direction: 'inbound' | 'outbound'; status: string; suppression_reason: typeof messages.$inferSelect.suppressionReason;
+  error_code: string | null; from_name: string | null; from_address: string;
+  to: typeof messages.$inferSelect.to; cc: typeof messages.$inferSelect.cc; reply_to: typeof messages.$inferSelect.replyTo;
+  to_count: number; cc_count: number; reply_to_count: number; references_count: number;
+  subject: string; snippet: string; text: string | null; html: string | null; body_truncated: boolean; received_at: string; attachment_count: number;
+  sending_email_id: string | null; message_id: string | null; in_reply_to: string | null; references: string[];
+  address_ids: string[]; is_read: boolean; at: string; candidate_count: number;
+};
 async function messagePage(db: DbExecutor, value: MailboxAccess, filter: Filter, limit: number, cursor?: string) {
-  const w = messageWindow(db, value, filter, limit + 1, cursor);
-  // The dedicated message read returns the full body. Bound each body on timeline pages so a page fits in a Worker.
-  const cap = 8192;
-  const rows = await db.select({ row: { ...messageFields, text: sql<string | null>`left(${messages.text}, ${cap})`, html: sql<string | null>`CASE WHEN ${messages.text} IS NULL THEN left(${messages.html}, ${cap}) END`,
-    bodyTruncated: sql<boolean>`${messages.bodyTruncated} OR coalesce(length(coalesce(${messages.text}, ${messages.html})) > ${cap},false)` }, addressIds: w.addressIds, read:w.read, at: preciseTime(w.at) })
-    .from(w).innerJoin(messages, eq(messages.id, w.id)).orderBy(desc(w.at), desc(w.id));
-  const last = rows[limit - 1];
-  return { messages: rows.slice(0, limit).reverse().map(item => messageView(item.row, item.addressIds,item.read)), nextCursor: rows.length > limit && last ? encodeCursor(last.at, last.row.id) : null };
+  const after = decodeCursor(cursor);
+  // The dedicated message read returns the full stored body and up to 100 addresses. Bound each body and address list on timeline pages,
+  // and stop the page once cumulative bytes hit PAGE_MAX_BYTES (always returning at least one message).
+  const cap = 8192, addrCap = INBOUND_ADDRESS_PAGE_LIMIT;
+  const { rows } = await db.execute<PageMsgRow>(sql`
+    WITH visible AS (
+      SELECT ${links.messageId} AS id, ${links.receivedAt} AS sort_at, bool_and(${links.read}) AS is_read,
+        array_agg(${links.mailboxId} ORDER BY ${links.mailboxId}) AS address_ids
+      FROM ${links}
+      WHERE ${and(visibleLinks(value, filter), after ? sql`(${links.receivedAt}, ${links.messageId}) < (${after[0]}::timestamptz, ${after[1]})` : undefined)}
+      GROUP BY ${links.receivedAt}, ${links.messageId}
+      ORDER BY ${links.receivedAt} DESC, ${links.messageId} DESC
+      LIMIT ${limit + 1}
+    ), candidate AS (
+      SELECT coalesce((m.verdicts->>'simulated')::boolean, false) AS simulated,
+        m.id, m.thread_id, m.direction, m.status, m.suppression_reason, m.error_code, m.from_name, m.from_address,
+        ${sliceJsonbArray(sql`m."to"`, addrCap)} AS "to", ${messageFieldCount(sql`m."to"`, sql`m.verdicts`, 'toCount')} AS to_count,
+        ${sliceJsonbArray(sql`m.cc`, addrCap)} AS cc, ${messageFieldCount(sql`m.cc`, sql`m.verdicts`, 'ccCount')} AS cc_count,
+        ${sliceJsonbArray(sql`m.reply_to`, addrCap)} AS reply_to, ${messageFieldCount(sql`m.reply_to`, sql`m.verdicts`, 'replyToCount')} AS reply_to_count,
+        ${sliceJsonbArray(sql`m."references"`, addrCap)} AS "references", ${messageFieldCount(sql`m."references"`, sql`m.verdicts`, 'referencesCount')} AS references_count,
+        m.subject, m.snippet,
+        left(m.text, ${cap}) AS text,
+        CASE WHEN m.text IS NULL THEN left(m.html, ${cap}) END AS html,
+        (m.body_truncated OR coalesce(length(coalesce(m.text, m.html)) > ${cap}, false)) AS body_truncated,
+        m.received_at::text AS received_at, m.attachment_count, m.sending_email_id, m.message_id, m.in_reply_to,
+        w.address_ids, w.is_read, w.sort_at, ${preciseTime(sql`w.sort_at`)} AS at
+      FROM visible w JOIN mail_messages m ON m.id = w.id
+    ), sized AS (
+      SELECT *,
+        row_number() OVER (ORDER BY sort_at DESC, id DESC) AS rn,
+        sum(
+          coalesce(octet_length(text), 0) + coalesce(octet_length(html), 0) + octet_length("to"::text) + octet_length(cc::text) +
+          octet_length(reply_to::text) + octet_length("references"::text) + octet_length(subject) + octet_length(snippet) + 512
+        ) OVER (ORDER BY sort_at DESC, id DESC ROWS UNBOUNDED PRECEDING) AS cum_bytes
+      FROM candidate
+    )
+    SELECT simulated, id, thread_id, direction, status, suppression_reason, error_code, from_name, from_address,
+      "to", to_count, cc, cc_count, reply_to, reply_to_count, "references", references_count,
+      subject, snippet, text, html, body_truncated, received_at, attachment_count, sending_email_id, message_id, in_reply_to,
+      address_ids, is_read, at, (SELECT count(*)::int FROM candidate) AS candidate_count
+    FROM sized WHERE rn = 1 OR cum_bytes <= ${PAGE_MAX_BYTES}
+    ORDER BY rn`);
+  const candidateCount = rows[0]?.candidate_count ?? 0;
+  const pageRows = rows.slice(0, limit);
+  const views = pageRows.map(r => ({
+    at: r.at,
+    id: r.id,
+    view: messageView({
+      simulated: r.simulated, id: r.id, threadId: r.thread_id, direction: r.direction, status: r.status, suppressionReason: r.suppression_reason,
+      errorCode: r.error_code, fromName: r.from_name, fromAddress: r.from_address, to: r.to, cc: r.cc, replyTo: r.reply_to,
+      toCount: r.to_count, ccCount: r.cc_count, replyToCount: r.reply_to_count, referencesCount: r.references_count,
+      subject: r.subject, snippet: r.snippet, text: r.text, html: r.html, bodyTruncated: r.body_truncated, receivedAt: r.received_at,
+      attachmentCount: r.attachment_count, sendingEmailId: r.sending_email_id, messageId: r.message_id, inReplyTo: r.in_reply_to, references: r.references,
+    }, r.address_ids, r.is_read),
+  }));
+  const fitted = fitPageByBytes(views, candidateCount > pageRows.length, PAGE_MAX_BYTES, 1024);
+  const last = fitted.items[fitted.items.length - 1];
+  return {
+    messages: fitted.items.map(item => item.view).reverse(),
+    nextCursor: fitted.hasMore && last ? encodeCursor(last.at, last.id) : null,
+  };
 }
 
 export async function signedUrl(runtime: Runtime,wid:string, kind:'raw'|'att', region: string, bucket: string, key: string, filename?: string,pendingArchive?:string,client?:S3Client,inbox?:string) {
@@ -257,17 +338,26 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
     const q = c.req.valid('query'), value = access(c, 'read'); return c.json(await budgetedRead(c.env.db, db => threadPage(db, value, q, q), readLimit(INBOUND_READ)), 200);
   });
   app.openapi(createRoute({ method: 'get', path: `${base}/{threadId}`, operationId: 'getInboundThread', tags, security, summary: 'Read a visible conversation',
-    description: 'Returns the most recent visible messages (default 25, maximum 100), oldest first within the page. Ties use message ID. Pass nextCursor as cursor for the older page. Body previews are capped at 8192 characters; getInboundMessage retrieves stored text and attachment metadata. State and counts are scoped to visible addresses.',
+    description: 'Returns the most recent visible messages (default 25, maximum 100), oldest first within the page. Ties use message ID. Pages are also bounded by response size and may return fewer than limit messages; pass nextCursor as cursor for the older page. Body previews are capped at 8192 characters and address/reference lists at 20 items (with total counts in toCount, ccCount, replyToCount and referencesCount); getInboundMessage retrieves stored text, up to 100 addresses and attachment metadata. State and counts are scoped to visible addresses. ' + readLimitNote(INBOUND_READ),
     request: { params: ThreadParams, query: PageQuery }, responses: { 200: response(Thread.extend({ messages: z.array(Message), addressStates:z.array(AddressState), nextCursor: z.string().nullable() }).openapi('InboundThreadDetail')), ...errors } }), async c => {
     const value = access(c, 'read'), q = c.req.valid('query'), filter = { threadId: c.req.valid('param').threadId, addressId: q.addressId };
-    const result = await c.env.db.transaction(async db => {
-      const [thread] = (await threadPage(db, value, filter, { limit: 1 })).data;
-      if (!thread) throw new ApiError(404, 'NOT_FOUND', 'Thread was not found.');
-      const t=mailboxThreads;
-      const addressStates=await db.select({addressId:t.mailboxId, unreadCount:t.unreadCount, archived:t.archived,starred:t.starred,trashed:sql<boolean>`${t.trashedAt} IS NOT NULL`,spam:t.spam,labels:t.labels}).from(t).where(visibleThreadAddresses(value,filter.threadId,filter.addressId)).orderBy(asc(t.mailboxId));
-      return { ...thread, ...await messagePage(db, value, filter, q.limit, q.cursor), addressStates };
-    }, { isolationLevel: 'repeatable read', accessMode: 'read only' });
-    return c.json(result, 200);
+    return await withBoundedRead(c, async () => {
+      let result;
+      try {
+        result = await c.env.db.transaction(async db => {
+          await db.execute(sql.raw(`SET LOCAL statement_timeout = '${INBOUND_READ}s'`));
+          const [thread] = (await threadPage(db, value, filter, { limit: 1 })).data;
+          if (!thread) throw new ApiError(404, 'NOT_FOUND', 'Thread was not found.');
+          const t=mailboxThreads;
+          const addressStates=await db.select({addressId:t.mailboxId, unreadCount:t.unreadCount, archived:t.archived,starred:t.starred,trashed:sql<boolean>`${t.trashedAt} IS NOT NULL`,spam:t.spam,labels:t.labels}).from(t).where(visibleThreadAddresses(value,filter.threadId,filter.addressId)).orderBy(asc(t.mailboxId));
+          return { ...thread, ...await messagePage(db, value, filter, q.limit, q.cursor), addressStates };
+        }, { isolationLevel: 'repeatable read', accessMode: 'read only' });
+      } catch (error) {
+        if (statementTimedOut(error)) throw readLimit(INBOUND_READ).refusal();
+        throw error;
+      }
+      return c.json(result, 200);
+    }, { route: 'inbound.getThread', workspaceId: value.workspaceId }) as never;
   });
   const addressLinks = (v: MailboxAccess, f: Filter) => sql<string[]>`ARRAY(SELECT ${links.mailboxId} FROM ${links} WHERE ${visibleLinks(v, f)} AND mailbox_messages.message_id=mail_messages.id ORDER BY ${links.mailboxId})`;
   const accessible = accessibleMessages;
@@ -287,19 +377,70 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
   const includeThread = z.enum(['true','false']).default('false').describe('Include the conversation it belongs to (thread): up to 50 messages around it that you can read, oldest first, and their count. A key limited to addresses or an inbox reads only the messages on its addresses.');
   const Authentication = z.object({spf:z.string().nullable(),dkim:z.string().nullable(),dmarc:z.string().nullable().describe('PASS when the From domain is aligned with a passing SPF or DKIM result.')}).openapi('InboundMessageAuthentication');
   const authenticationView = (row:{verdicts:Verdicts|null;automated:boolean}) => ({authentication:{spf:row.verdicts?.spf??null,dkim:row.verdicts?.dkim??null,dmarc:row.verdicts?.dmarc??null},automated:row.automated});
-  const deliverySchema = z.object({addresses:z.array(z.object({id:Id,address:z.string()})),envelopeTo:z.array(z.string()),region:z.string().nullable(),spam:z.boolean(),to:z.array(Address)});
+  const deliverySchema = z.object({addresses:z.array(z.object({id:Id,address:z.string()})),envelopeTo:z.array(z.string()).describe('SMTP envelope recipients (at most 20 on list pages, up to 100 on getInboundMessage).'),envelopeToCount:z.number().int().describe('Total SMTP envelope recipients (may exceed envelopeTo.length when shortened).'),region:z.string().nullable(),spam:z.boolean(),to:z.array(Address).describe('Addresses in the To header (at most 20 on list pages).'),toCount:z.number().int().describe('Total addresses in the To header (may exceed to.length when shortened).')});
   const deliveryAddresses = visibleAddresses;
   const MessageListItem = Message.pick({ id:true, threadId:true, addressIds:true, direction:true, status:true, suppressionReason:true, subject:true, snippet:true, receivedAt:true, attachmentCount:true, from:true }).extend(deliverySchema.partial().shape);
-  app.openapi(createRoute({ method:'get', path:'/v1/inbound/messages', operationId:'listInboundMessages', tags, security, summary:'Search received and sent messages', description:'Newest first; default inbound. Unassigned stored mail is visible only to a workspace administrator without an address filter. '+readLimitNote(INBOUND_READ),
+  app.openapi(createRoute({ method:'get', path:'/v1/inbound/messages', operationId:'listInboundMessages', tags, security, summary:'Search received and sent messages', description:'Newest first; default inbound. Unassigned stored mail is visible only to a workspace administrator without an address filter. Pages are also bounded by response size and may return fewer than limit messages; pass nextCursor as cursor to continue. With includeDelivery=true, to and envelopeTo return at most 20 items with total counts in toCount and envelopeToCount. '+readLimitNote(INBOUND_READ),
     request:{query:PageQuery.extend({ includeDelivery,region:z.string().max(40).optional(),threadId:Id.optional(),direction:z.enum(['inbound','outbound']).default('inbound'),q:z.string().trim().min(1).max(200).optional() })},responses:{200:response(page(MessageListItem).openapi('InboundMessagePage')),...errors} }), async c=>{
     const q=c.req.valid('query'),v=messageScope(c,q.includeDelivery),after=decodeCursor(q.cursor);
-    const rows=await budgetedRead(c.env.db,db=>db.select({ ...metadataFields,...(q.includeDelivery==='true' ? {region:messages.region,spam:messages.spam,to:messages.to,envelopeTo:messages.envelopeTo,addresses:deliveryAddresses(v,q)} : {}),fromAddress:messages.fromAddress,fromName:messages.fromName,addressIds:addressLinks(v,q),at:preciseTime(messages.receivedAt) }).from(messages).where(and(accessible(v,q),eq(messages.direction,q.direction),q.region?eq(messages.region,q.region):undefined,q.threadId?eq(messages.threadId,q.threadId):undefined,
-      q.q?sql`mail_messages.search @@ websearch_to_tsquery('simple',${q.q})`:undefined,after?sql`(${messages.receivedAt}, ${messages.id}) < (${after[0]}::timestamptz,${after[1]})`:undefined)).orderBy(desc(messages.receivedAt),desc(messages.id)).limit(q.limit+1),readLimit(INBOUND_READ));
-    const last=rows[q.limit-1];return c.json({data:rows.slice(0,q.limit).map(({at,fromName,fromAddress,...row})=>({...row,receivedAt:timestamp(at),from:{name:fromName,address:fromAddress}})),nextCursor:rows.length>q.limit&&last?encodeCursor(last.at,last.id):null},200);
+    const withDel = q.includeDelivery === 'true', addrCap = INBOUND_ADDRESS_PAGE_LIMIT;
+    type ListMsgRow = {
+      simulated: boolean; id: string; thread_id: string; direction: 'inbound' | 'outbound'; status: string; suppression_reason: typeof messages.$inferSelect.suppressionReason;
+      subject: string; snippet: string; attachment_count: number; from_address: string; from_name: string | null; address_ids: string[]; at: string;
+      region?: string | null; spam?: boolean; to?: typeof messages.$inferSelect.to; to_count?: number; envelope_to?: string[]; envelope_to_count?: number;
+      addresses?: { id: string; address: string }[]; candidate_count: number;
+    };
+    return await withBoundedRead(c, async () => {
+      const where = and(accessible(v,q),eq(messages.direction,q.direction),q.region?eq(messages.region,q.region):undefined,q.threadId?eq(messages.threadId,q.threadId):undefined,
+        q.q?sql`mail_messages.search @@ websearch_to_tsquery('simple',${q.q})`:undefined,after?sql`(${messages.receivedAt}, ${messages.id}) < (${after[0]}::timestamptz,${after[1]})`:undefined);
+      const rows = await budgetedRead(c.env.db, async db => (await db.execute<ListMsgRow>(sql`
+        WITH candidate AS (
+          SELECT coalesce((${messages.verdicts}->>'simulated')::boolean, false) AS simulated,
+            ${messages.id} AS id, ${messages.threadId} AS thread_id, ${messages.direction} AS direction, ${messages.status} AS status,
+            ${messages.suppressionReason} AS suppression_reason, ${messages.subject} AS subject, ${messages.snippet} AS snippet,
+            ${messages.receivedAt} AS sort_at, ${preciseTime(messages.receivedAt)} AS at, ${messages.attachmentCount} AS attachment_count,
+            ${messages.fromAddress} AS from_address, ${messages.fromName} AS from_name, ${addressLinks(v, q)} AS address_ids
+            ${withDel ? sql`, ${messages.region} AS region, ${messages.spam} AS spam,
+              ${sliceJsonbArray(messages.to, addrCap)} AS "to", ${messageFieldCount(messages.to, messages.verdicts, 'toCount')} AS to_count,
+              ${sliceJsonbArray(messages.envelopeTo, addrCap)} AS envelope_to, jsonb_array_length(${messages.envelopeTo})::int AS envelope_to_count,
+              ${deliveryAddresses(v, q)} AS addresses` : sql``}
+          FROM ${messages}
+          WHERE ${where}
+          ORDER BY ${messages.receivedAt} DESC, ${messages.id} DESC
+          LIMIT ${q.limit + 1}
+        ), sized AS (
+          SELECT *,
+            row_number() OVER (ORDER BY sort_at DESC, id DESC) AS rn,
+            sum(
+              octet_length(subject) + octet_length(snippet) + octet_length(from_address) + coalesce(octet_length(from_name), 0) +
+              ${withDel ? sql`octet_length("to"::text) + octet_length(envelope_to::text) + octet_length(addresses::text) +` : sql``} 384
+            ) OVER (ORDER BY sort_at DESC, id DESC ROWS UNBOUNDED PRECEDING) AS cum_bytes
+          FROM candidate
+        )
+        SELECT simulated, id, thread_id, direction, status, suppression_reason, subject, snippet, at, attachment_count, from_address, from_name, address_ids
+          ${withDel ? sql`, region, spam, "to", to_count, envelope_to, envelope_to_count, addresses` : sql``}
+          , (SELECT count(*)::int FROM candidate) AS candidate_count
+        FROM sized WHERE rn = 1 OR cum_bytes <= ${PAGE_MAX_BYTES}
+        ORDER BY rn`)).rows, readLimit(INBOUND_READ));
+      const candidateCount = rows[0]?.candidate_count ?? 0;
+      const mapped = rows.slice(0, q.limit).map(r => ({
+        at: r.at,
+        item: {
+          simulated: r.simulated, id: r.id, threadId: r.thread_id, direction: r.direction, status: r.status, suppressionReason: r.suppression_reason,
+          subject: r.subject, snippet: r.snippet, receivedAt: timestamp(r.at), attachmentCount: r.attachment_count,
+          from: { name: r.from_name, address: r.from_address }, addressIds: r.address_ids,
+          ...(withDel ? { region: r.region ?? null, spam: r.spam ?? false, to: r.to ?? [], toCount: r.to_count ?? 0, envelopeTo: r.envelope_to ?? [], envelopeToCount: r.envelope_to_count ?? 0, addresses: r.addresses ?? [] } : {}),
+        },
+      }));
+      const fitted = fitPageByBytes(mapped, candidateCount > mapped.length, PAGE_MAX_BYTES, 256);
+      const last = fitted.items[fitted.items.length - 1];
+      return c.json({ data: fitted.items.map(x => x.item), nextCursor: fitted.hasMore && last ? encodeCursor(last.at, last.item.id) : null }, 200);
+    }, { route: 'inbound.listMessages', workspaceId: v.workspaceId }) as never;
   });
   const Attachment = z.object({id:Id,filename:z.string(),contentType:z.string(),size:z.number().int(),disposition:z.string(),contentId:z.string().nullable(),url:z.string().nullable().optional()});
-  const DeliveryDetail = deliverySchema.omit({to:true}).extend({rawUrl:z.string().nullable(),rawExpiresAt:z.string().nullable(),sentAt:z.string().nullable(),sizeBytes:z.number().int().nullable(),headers:z.array(z.object({name:z.string(),value:z.string()})),verdicts:z.record(z.string(),z.union([z.string(),z.boolean()]))}).partial();
+  const DeliveryDetail = deliverySchema.omit({to:true,toCount:true}).extend({rawUrl:z.string().nullable(),rawExpiresAt:z.string().nullable(),sentAt:z.string().nullable(),sizeBytes:z.number().int().nullable(),headers:z.array(z.object({name:z.string(),value:z.string()})),verdicts:z.record(z.string(),z.union([z.string(),z.boolean()]))}).partial();
   app.openapi(createRoute({ method: 'get', path: '/v1/inbound/messages/{messageId}', operationId: 'getInboundMessage', tags, security, summary: 'Read a visible message',
+    description: 'Returns stored text, attachment metadata, and up to 100 stored addresses per field with exact header counts in toCount, ccCount, replyToCount and referencesCount. ' + readLimitNote(INBOUND_READ),
     request: { params: z.object({ messageId: Id }), query: AddressFilter.extend({includeDelivery,includeAuthentication,includeHtml:z.enum(['true','false']).default('false'),includeThread}) }, responses: { 200: response(Message.extend({...DeliveryDetail.shape,thread:EmailThread.nullable().optional().describe('With includeThread=true: its conversation, as getEmailDetail shows it.'),authentication:Authentication.optional().describe('With includeAuthentication=true.'),automated:z.boolean().optional().describe('With includeAuthentication=true: an auto-reply, bounce, delivery report, or bulk or list mail. Never answer it automatically.'),html:z.string().nullable(),htmlTooComplex:z.boolean().describe(`With includeHtml=true: the HTML has more elements or deeper nesting than ${productName} parses (20,000 nodes, 256 levels deep). It is returned as stored; prefer text to rendering it.`),attachments:z.array(Attachment)}).openapi('InboundMessageDetail')), ...errors } }), async c => {
     const q=c.req.valid('query'),v=messageScope(c,q.includeDelivery),id=c.req.valid('param').messageId;
     // The same bounded parse every other reader of stored HTML uses; the body itself is returned as stored.
@@ -310,19 +451,44 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
     const a=c.get('actor') as Actor|undefined;
     const thread=q.includeThread==='true'?threadBlock(v,{thread:sql`mail_messages.thread_id`,focus:sql`mail_messages.id`,addressId:q.addressId,sends:!!a&&!!actorMailAccess(a)&&!q.addressId}):sql<RawThread|null>`NULL`;
     const conversation=(raw:RawThread|null)=>q.includeThread==='true'?{thread:threadView(raw,!!a?.permissions.includes('manage'))}:{};
-    if (q.includeDelivery==='true') {
-      const [result]=await c.env.db.select({row:messages,thread,addresses:deliveryAddresses(v,q),addressIds:addressLinks(v,q),isRead:sql<boolean>`coalesce((SELECT bool_and(${links.read}) FROM ${links} WHERE ${visibleLinks(v,q)} AND mailbox_messages.message_id=mail_messages.id),false)`}).from(messages).where(and(eq(messages.id,id),accessible(v,q)));
-      if (!result) throw new ApiError(404,'NOT_FOUND','Message was not found.');
-      const {row,addresses,addressIds,isRead}=result;
-      const files=await c.env.db.select().from(mailAttachments).where(eq(mailAttachments.messageId,id)).orderBy(asc(mailAttachments.id));
-      const {rawUrl,rawExpiresAt,urls}=await deliveryLinks(c.env,row,files);
-      return c.json({...messageView(row,addressIds,isRead),addresses,envelopeTo:row.envelopeTo,region:row.region,spam:row.spam,headers:row.headers,verdicts:row.verdicts,sentAt:row.sentAt?timestamp(row.sentAt):null,sizeBytes:row.sizeBytes,rawUrl,...body(row.html),...auth(row),...conversation(result.thread),
-        rawExpiresAt,attachments:files.map((f,i)=>({id:f.id,filename:f.filename,contentType:f.contentType,size:f.sizeBytes,disposition:f.disposition,contentId:f.contentId,url:urls[i]!}))},200);
-    }
-    const [row] = await c.env.db.select({...messageFields,thread,verdicts:messages.verdicts,automated:messages.automated,addressIds:addressLinks(v,q),isRead:sql<boolean>`coalesce((SELECT bool_and(${links.read}) FROM ${links} WHERE ${visibleLinks(v,q)} AND mailbox_messages.message_id=mail_messages.id),false)`}).from(messages).where(and(eq(messages.id,id),accessible(v,q)));
-    if (!row) throw new ApiError(404, 'NOT_FOUND', 'Message was not found.');
-    const attachments=await c.env.db.select({id:mailAttachments.id,filename:mailAttachments.filename,contentType:mailAttachments.contentType,size:mailAttachments.sizeBytes,disposition:mailAttachments.disposition,contentId:mailAttachments.contentId}).from(mailAttachments).where(eq(mailAttachments.messageId,id)).orderBy(asc(mailAttachments.id));
-    return c.json({...messageView(row,row.addressIds,row.isRead),...body(row.html),...auth(row),...conversation(row.thread),attachments},200);
+    const storeCap = INBOUND_ADDRESS_STORE_LIMIT;
+    const detailFields = {
+      ...metadataFields, errorCode: messages.errorCode, fromName: messages.fromName, fromAddress: messages.fromAddress,
+      to: sql<typeof messages.$inferSelect.to>`${sliceJsonbArray(messages.to, storeCap)}`, toCount: messageFieldCount(messages.to, messages.verdicts, 'toCount'),
+      cc: sql<typeof messages.$inferSelect.cc>`${sliceJsonbArray(messages.cc, storeCap)}`, ccCount: messageFieldCount(messages.cc, messages.verdicts, 'ccCount'),
+      replyTo: sql<typeof messages.$inferSelect.replyTo>`${sliceJsonbArray(messages.replyTo, storeCap)}`, replyToCount: messageFieldCount(messages.replyTo, messages.verdicts, 'replyToCount'),
+      references: sql<string[]>`${sliceJsonbArray(messages.references, storeCap)}`, referencesCount: messageFieldCount(messages.references, messages.verdicts, 'referencesCount'),
+      text: messages.text,
+      html: q.includeHtml === 'true' ? messages.html : sql<string | null>`CASE WHEN ${messages.text} IS NULL THEN ${messages.html} END`,
+      bodyTruncated: messages.bodyTruncated, sendingEmailId: messages.sendingEmailId, messageId: messages.messageId, inReplyTo: messages.inReplyTo,
+    };
+    return await withBoundedRead(c, async () => {
+      if (q.includeDelivery==='true') {
+        const { result, files } = await budgetedRead(c.env.db, async db => {
+          const [result]=await db.select({
+            ...detailFields, workspaceId: messages.workspaceId, region: messages.region, spam: messages.spam, automated: messages.automated,
+            headers: messages.headers, verdicts: messages.verdicts, sentAt: messages.sentAt, sizeBytes: messages.sizeBytes,
+            rawBucket: messages.rawBucket, rawKey: messages.rawKey, lifecycle: messages.lifecycle, createdAt: messages.createdAt,
+            envelopeTo: sql<string[]>`${sliceJsonbArray(messages.envelopeTo, storeCap)}`, envelopeToCount: sql<number>`jsonb_array_length(${messages.envelopeTo})::int`,
+            thread, addresses: deliveryAddresses(v,q), addressIds: addressLinks(v,q),
+            isRead: sql<boolean>`coalesce((SELECT bool_and(${links.read}) FROM ${links} WHERE ${visibleLinks(v,q)} AND mailbox_messages.message_id=mail_messages.id),false)`,
+          }).from(messages).where(and(eq(messages.id,id),accessible(v,q)));
+          if (!result) throw new ApiError(404,'NOT_FOUND','Message was not found.');
+          const files=await db.select().from(mailAttachments).where(eq(mailAttachments.messageId,id)).orderBy(asc(mailAttachments.id));
+          return { result, files };
+        }, readLimit(INBOUND_READ));
+        const {rawUrl,rawExpiresAt,urls}=await deliveryLinks(c.env,result as unknown as typeof messages.$inferSelect,files);
+        return c.json({...messageView(result,result.addressIds,result.isRead),addresses:result.addresses,envelopeTo:result.envelopeTo,envelopeToCount:result.envelopeToCount,region:result.region,spam:result.spam,headers:result.headers,verdicts:publicVerdicts(result.verdicts),sentAt:result.sentAt?timestamp(result.sentAt):null,sizeBytes:result.sizeBytes,rawUrl,...body(result.html),...auth(result),...conversation(result.thread),
+          rawExpiresAt,attachments:files.map((f,i)=>({id:f.id,filename:f.filename,contentType:f.contentType,size:f.sizeBytes,disposition:f.disposition,contentId:f.contentId,url:urls[i]!}))},200);
+      }
+      const { row, attachments } = await budgetedRead(c.env.db, async db => {
+        const [row] = await db.select({...detailFields,thread,verdicts:messages.verdicts,automated:messages.automated,addressIds:addressLinks(v,q),isRead:sql<boolean>`coalesce((SELECT bool_and(${links.read}) FROM ${links} WHERE ${visibleLinks(v,q)} AND mailbox_messages.message_id=mail_messages.id),false)`}).from(messages).where(and(eq(messages.id,id),accessible(v,q)));
+        if (!row) throw new ApiError(404, 'NOT_FOUND', 'Message was not found.');
+        const attachments=await db.select({id:mailAttachments.id,filename:mailAttachments.filename,contentType:mailAttachments.contentType,size:mailAttachments.sizeBytes,disposition:mailAttachments.disposition,contentId:mailAttachments.contentId}).from(mailAttachments).where(eq(mailAttachments.messageId,id)).orderBy(asc(mailAttachments.id));
+        return { row, attachments };
+      }, readLimit(INBOUND_READ));
+      return c.json({...messageView(row,row.addressIds,row.isRead),...body(row.html),...auth(row),...conversation(row.thread),attachments},200);
+    }, { route: 'inbound.getMessage', workspaceId: v.workspaceId }) as never;
   });
   // rawUrl in webhook payloads is the delivery record (it names every recipient): only delivery-detail readers follow it.
   app.get('/v1/inbound/messages/:messageId/raw',async c=>{
