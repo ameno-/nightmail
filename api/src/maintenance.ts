@@ -344,9 +344,9 @@ async function retentionDrains(runtime: Runtime): Promise<Drain[]> {
     // Backfill import_id on pre-PR audience_consent_audit rows while each committed import's rows JSONB still exists.
     // Indexed through audience_contacts(workspace_id, email) -> audience_consent_page(workspace_id, contact_id, id).
     // Both scrub drains below require consent_linked_at IS NOT NULL, so no import's rows can be emptied before linking.
-    { name: 'audience_import_consent_links', size: 5, oldest: sql`SELECT min(updated_at) FROM audience_imports WHERE status = 'committed' AND consent_linked_at IS NULL AND rows_scrubbed_at IS NULL`, statement: () => sql`WITH due AS (
+    { name: 'audience_import_consent_links', size: 1, oldest: sql`SELECT min(updated_at) FROM audience_imports WHERE status = 'committed' AND consent_linked_at IS NULL AND rows_scrubbed_at IS NULL`, statement: () => sql`WITH due AS (
         SELECT id FROM audience_imports WHERE status = 'committed' AND consent_linked_at IS NULL AND rows_scrubbed_at IS NULL
-        ORDER BY updated_at DESC LIMIT 5 FOR UPDATE SKIP LOCKED
+        ORDER BY updated_at ASC, id ASC LIMIT 1 FOR UPDATE SKIP LOCKED
       ), linked AS (
         UPDATE audience_consent_audit a SET import_id = d.id
         FROM due d
