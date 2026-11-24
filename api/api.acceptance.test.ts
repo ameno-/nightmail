@@ -35190,6 +35190,37 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal(pool.stats().active,1,'Late release after reclaim must not decrement active.');
       liveSlot.release();
       assert.equal(pool.stats().active,0);
+
+      // Two different workspaces authenticating via inbox keys (mailboxAccess, no actor) must get independent shares,
+      // and a caller with no workspace ID must be refused rather than sharing a fallback bucket.
+      const { withBoundedRead, resolveReadWorkspaceId } = await import('./src/read-bounds.js');
+      const fakeCtx = (vars: Record<string, unknown>) => ({
+        get: (k: string) => vars[k],
+        header: () => {},
+        req: { raw: new Request('http://127.0.0.1/v1/inboxes/inb_1/messages') },
+      }) as unknown as import('./src/core.js').Ctx;
+      assert.throws(() => resolveReadWorkspaceId(fakeCtx({})), (err: any) => err?.status === 401 && err?.code === 'AUTH_REQUIRED');
+      assert.throws(() => resolveReadWorkspaceId(fakeCtx({ actor: { workspaceId: '' } })), (err: any) => err?.status === 401 && err?.code === 'AUTH_REQUIRED');
+      const inbA = fakeCtx({ mailboxAccess: { workspaceId: 'ws_inb_a', keyId: 'k_a', admin: false, mailboxIds: ['inb_a'], permissions: ['read'] } });
+      const inbB = fakeCtx({ mailboxAccess: { workspaceId: 'ws_inb_b', keyId: 'k_b', admin: false, mailboxIds: ['inb_b'], permissions: ['read'] } });
+      assert.equal(resolveReadWorkspaceId(inbA), 'ws_inb_a');
+      assert.equal(resolveReadWorkspaceId(inbB), 'ws_inb_b');
+      const gates: Array<() => void> = [];
+      const holdA = () => withBoundedRead(inbA, () => new Promise<string>(resolve => { gates.push(() => resolve('a')); }), { route: 'inbox.read' });
+      const activeA = [holdA(), holdA()]; // saturates ws_inb_a's 2 active slots
+      await new Promise(r => setTimeout(r, 20));
+      const queuedA = [holdA(), holdA(), holdA(), holdA()]; // saturates ws_inb_a's 4 waiting slots
+      await new Promise(r => setTimeout(r, 20));
+      await assert.rejects(() => holdA(), (err: any) => err?.status === 429 && err?.code === 'READ_CONCURRENCY_LIMIT', '7th inbox-key read from ws_inb_a must get 429.');
+      // Another workspace's inbox-key read must succeed immediately without sharing ws_inb_a's slots.
+      const resB = await withBoundedRead(inbB, async () => 'ok-b', { route: 'inbox.read' });
+      assert.equal(resB, 'ok-b', 'Inbox-key reads from ws_inb_b must not share slots with ws_inb_a.');
+      while (gates.length) {
+        const releaseAll = gates.splice(0);
+        for (const fn of releaseAll) fn();
+        await new Promise(r => setTimeout(r, 10));
+      }
+      await Promise.all([...activeA, ...queuedA]);
     } finally {
       MEMORY_LIMITS.defaultIdleMs=prevIdle;MEMORY_LIMITS.defaultMaxMs=prevMax;MEMORY_LIMITS.confirmMs=prevConfirm;
       READ_POOL_LIMITS.defaultIdleMs=prevPoolIdle;READ_POOL_LIMITS.defaultMaxMs=prevPoolMax;

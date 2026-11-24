@@ -393,15 +393,35 @@ export const readPool = new FairPool('read', READ_MAX_ACTIVE, READ_MAX_ACTIVE_PE
 export const boundedReadsActive = () => readPool.stats().active;
 
 /**
+ * Resolves the authenticated workspace ID across all credential types (API keys, dashboard, agent tokens,
+ * inbox/address keys via mailboxAccess, support grants, MCP principals). Never falls back to a shared bucket:
+ * refuses with 401 AUTH_REQUIRED when no workspace ID can be determined.
+ */
+export function resolveReadWorkspaceId(c: Ctx, explicitWorkspaceId?: string): string {
+  const candidates = [
+    explicitWorkspaceId,
+    c.get('actor')?.workspaceId,
+    c.get('mailboxAccess')?.workspaceId,
+    c.get('support')?.contentWorkspaceId ?? undefined,
+    c.get('support')?.conversation.workspaceId ?? undefined,
+    c.get('principal')?.workspace,
+  ];
+  for (const id of candidates) {
+    if (typeof id === 'string' && id.trim().length > 0) return id;
+  }
+  throw new ApiError(401, 'AUTH_REQUIRED', 'An authenticated workspace is required for this read.');
+}
+
+/**
  * Runs a bounded read inside the isolate's fair per-workspace read pool (isolated from attachment/import memory).
  * Sets Retry-After on 429/503 and returns 499 if the client disconnects while queued.
  */
 export async function withBoundedRead<T>(
   c: Ctx,
   work: (hold: PoolHold) => Promise<T>,
-  opts: { route?: string; idleMs?: number; maxMs?: number } = {},
+  opts: { route?: string; workspaceId?: string; idleMs?: number; maxMs?: number } = {},
 ): Promise<T | Response> {
-  const workspaceId = c.get('actor')?.workspaceId ?? 'anonymous';
+  const workspaceId = resolveReadWorkspaceId(c, opts.workspaceId);
   let hold: PoolHold;
   try {
     hold = await readPool.acquire(workspaceId, c.req.raw.signal, {
